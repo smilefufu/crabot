@@ -57,9 +57,10 @@ function buildAdmin(deps: {
   // model_config 解析逻辑需要的辅助 stub
   admin.modelProviderManager = {
     buildConnectionInfo: async () => null,
-    resolveModelConfig: async () => {
-      throw new Error('no global llm')
-    },
+    resolveModelConfig: async () => ({
+      endpoint: 'https://example.test', apikey: 'test-key', model_id: 'test-model',
+      format: 'openai', provider_id: 'test-provider',
+    }),
     // 图像 slot 解析：本测试默认未配置生图模型
     resolveImageConfig: async () => ({ available: false, reason: 'not_configured' }),
     // tmp_page_base_url 注入需读全局设置的 public_base_url（默认未配置）
@@ -78,13 +79,14 @@ function buildAdmin(deps: {
   }
   admin.rpcClient = {
     callModuleManagerSensitive: async () => ({ verified: true }),
+    callModuleManager: async () => ({ module_id: 'crabot-agent', module_type: 'agent', port: 19002 }),
   }
   return admin
 }
 
-async function pullCoreConfig(admin: unknown): Promise<{ config: { mcp_servers: Array<{ name: string }>; skills: Array<{ name: string }> } }> {
+async function pullCoreConfig(admin: unknown): Promise<{ config: { agent_config: { mcp_servers: Array<{ name: string }>; skills: Array<{ name: string }> } } }> {
   return (admin as {
-    handleGetAgentConfig: (p: unknown, context: unknown) => Promise<{ config: { mcp_servers: Array<{ name: string }>; skills: Array<{ name: string }> } }>
+    handleGetAgentConfig: (p: unknown, context: unknown) => Promise<{ config: { agent_config: { mcp_servers: Array<{ name: string }>; skills: Array<{ name: string }> } } }>
   }).handleGetAgentConfig({ instance_id: 'crabot-agent' }, { authorizationBearer: 'runtime' })
 }
 
@@ -101,7 +103,7 @@ describe('handleGetAgentConfig — global enable layer', () => {
 
     const result = await pullCoreConfig(admin)
 
-    const names = result.config.mcp_servers.map((s) => s.name).sort()
+    const names = result.config.agent_config.mcp_servers.map((s) => s.name).sort()
     expect(names).toEqual(['A', 'B'])
   })
 
@@ -116,7 +118,7 @@ describe('handleGetAgentConfig — global enable layer', () => {
 
     const result = await pullCoreConfig(admin)
 
-    const names = result.config.skills.map((s) => s.name)
+    const names = result.config.agent_config.skills.map((s) => s.name)
     expect(names).toEqual(['foo'])
   })
 
@@ -131,7 +133,7 @@ describe('handleGetAgentConfig — global enable layer', () => {
 
     const result = await pullCoreConfig(admin)
 
-    const names = result.config.skills.map((s) => s.name)
+    const names = result.config.agent_config.skills.map((s) => s.name)
     expect(names).toEqual(['good'])
   })
 
@@ -144,7 +146,7 @@ describe('handleGetAgentConfig — global enable layer', () => {
 
     const result = await pullCoreConfig(admin)
 
-    expect(result.config.mcp_servers).toEqual([])
-    expect(result.config.skills).toEqual([])
+    expect(result.config.agent_config.mcp_servers).toEqual([])
+    expect(result.config.agent_config.skills).toEqual([])
   })
 })

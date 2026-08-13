@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { canonicalizeJson } from 'crabot-shared'
+import { durableAtomicWriteFile } from './durable-file.js'
 
 export type LegacyAgentArchiveKind = 'agent_implementation' | 'agent_instance' | 'agent_config' | 'installed_package'
 
@@ -24,16 +25,7 @@ export interface AdminCoreAgentCutoverRecord {
 }
 
 async function atomicWrite(file: string, value: unknown): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
-  const handle = await fs.open(temporary, 'w', 0o600)
-  try {
-    await handle.writeFile(JSON.stringify(value, null, 2))
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-  await fs.rename(temporary, file)
+  await durableAtomicWriteFile(file, JSON.stringify(value, null, 2))
 }
 
 export class CoreAgentCutoverStore {
@@ -54,16 +46,28 @@ export class CoreAgentCutoverStore {
     const byId = new Map(existing.map((record) => [record.archive_id, record]))
     for (const source of sources) {
       const archive_id = `${source.source_kind}:${source.source_id}`
-      if (!byId.has(archive_id)) {
-        byId.set(archive_id, {
-          archive_id,
+      const archived = byId.get(archive_id)
+      if (archived) {
+        const same = canonicalizeJson({
+          source_kind: archived.source_kind,
+          source_id: archived.source_id,
+          raw: archived.raw,
+        }) === canonicalizeJson({
           source_kind: source.source_kind,
           source_id: source.source_id,
-          archived_at: new Date().toISOString(),
-          support_status: 'unsupported_legacy',
           raw: source.raw,
         })
+        if (!same) throw new Error(`Legacy Agent archive conflict: ${archive_id}`)
+        continue
       }
+      byId.set(archive_id, {
+        archive_id,
+        source_kind: source.source_kind,
+        source_id: source.source_id,
+        archived_at: new Date().toISOString(),
+        support_status: 'unsupported_legacy',
+        raw: source.raw,
+      })
     }
     const records = Array.from(byId.values()).sort((left, right) => left.archive_id.localeCompare(right.archive_id))
     await atomicWrite(this.archivePath, records)

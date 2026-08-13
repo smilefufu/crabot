@@ -43,7 +43,7 @@ describe('MCP and SubAgent coordinator mutations', () => {
     })
     mcp.setSemanticSnapshotProvider(() => ({ mcp: mcp.runtimeSemanticEntries(), subagents: agents.runtimeSemanticEntries() }))
     agents.setSemanticSnapshotProvider(() => ({ mcp: mcp.runtimeSemanticEntries(), subagents: agents.runtimeSemanticEntries() }))
-    const runner = async (domains: any, preview: any, apply: any) => coordinator.mutateComputed(domains, preview, apply)
+    const runner = async (domains: any, preview: any, apply: any, allowRuntimeNoop?: boolean) => coordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop)
     mcp.setMutationRunner(runner); agents.setMutationRunner(runner)
     await coordinator.initialize()
     await mcp.registerBuiltins('relative-tools')
@@ -86,6 +86,34 @@ describe('MCP and SubAgent coordinator mutations', () => {
     expect(agents.semanticMigrationState().legacy_rewrite_pending).toBe(false)
   })
 
+  it('serializes concurrent MCP creates before taking the source snapshot', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mcp-concurrent-')); cleanup.push(dir)
+    const mcp = new MCPServerManager(dir); const agents = new SubAgentManager(dir)
+    await mcp.initializeLoadOnly(); await agents.initializeLoadOnly()
+    const coordinator = new CoreAgentConfigMutationCoordinator(dir, {
+      readSemanticSnapshot: () => ({ mcp: mcp.runtimeSemanticEntries(), subagents: agents.runtimeSemanticEntries() }),
+      publishInvalidation: () => {},
+    })
+    mcp.setSemanticSnapshotProvider(() => ({ mcp: mcp.runtimeSemanticEntries(), subagents: agents.runtimeSemanticEntries() }))
+    agents.setSemanticSnapshotProvider(() => ({ mcp: mcp.runtimeSemanticEntries(), subagents: agents.runtimeSemanticEntries() }))
+    const runner = (domains: any, preview: any, apply: any, allowRuntimeNoop?: boolean) => coordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop).then(() => undefined)
+    mcp.setMutationRunner(runner); agents.setMutationRunner(runner)
+    await coordinator.initialize()
+
+    const [first, second] = await Promise.all([
+      mcp.create({ name: 'one', command: 'one' }),
+      mcp.create({ name: 'two', command: 'two' }),
+    ])
+    const [firstAgent, secondAgent] = await Promise.all([
+      agents.create(subagent('one-agent')),
+      agents.create(subagent('two-agent')),
+    ])
+
+    expect(mcp.list().map((entry) => entry.id).sort()).toEqual([first.id, second.id].sort())
+    expect(agents.list().map((entry) => entry.id).sort()).toEqual([firstAgent.id, secondAgent.id].sort())
+    expect((await coordinator.current()).revision).toBe(5)
+  })
+
   it('coordinates runtime CRUD/imports with exact domains and never emits MCP secrets', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mcp-subagent-coordinator-')); cleanup.push(dir)
     const mcp = new MCPServerManager(dir); const agents = new SubAgentManager(dir)
@@ -97,7 +125,7 @@ describe('MCP and SubAgent coordinator mutations', () => {
     })
     mcp.setSemanticSnapshotProvider(() => ({ mcp: mcp.runtimeSemanticEntries(), subagents: agents.runtimeSemanticEntries() }))
     agents.setSemanticSnapshotProvider(() => ({ mcp: mcp.runtimeSemanticEntries(), subagents: agents.runtimeSemanticEntries() }))
-    const runner = async (domains: any, preview: any, apply: any) => coordinator.mutateComputed(domains, preview, apply)
+    const runner = async (domains: any, preview: any, apply: any, allowRuntimeNoop?: boolean) => coordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop)
     mcp.setMutationRunner(runner); agents.setMutationRunner(runner)
     await coordinator.initialize()
 

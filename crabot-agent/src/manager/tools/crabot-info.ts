@@ -21,6 +21,8 @@ import type { ToolDefinition } from '../../engine/index.js'
 export interface CrabotInfoToolsDeps {
   /** 调 admin RPC 的入口(经 RpcClient 调 admin,方法名对应 admin `registerMethod` 注册的方法) */
   readonly callAdmin: <P, R>(method: string, params: P) => Promise<R>
+  /** 返回已通过 authenticated pull 安装的本地 runtime config；不得为摘要再次读取 secret RPC。 */
+  readonly getRuntimeConfigSummary?: () => unknown
 }
 
 // --- 掩码:get_config_summary 的责任,防御性做,不依赖 admin 端已掩码 ---
@@ -287,11 +289,8 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
   })
 
   // --- get_config_summary ---
-  // 直接对应 admin RPC `get_agent_config`(instance_id 缺省用 'crabot-agent'——单实例约束下
-  // 唯一的 agent 实例 id,admin 自己在 pushConfigToAgentModules 里也是这样硬编码的)。
-  // 返回的 model_config 每个 slot 都含解析后的原生连接信息(含 apikey),**本模块必须再掩码一遍**
-  // ——不能依赖 admin 端已掩码。
-  const DEFAULT_INSTANCE_ID = 'crabot-agent'
+  // 只投影 Agent 已通过 authenticated startup/invalidation pull 原子安装的本地 runtime
+  // config。不得用普通 Admin RPC 再调 secret-bearing get_agent_config。
   const getConfigSummary = defineTool({
     name: 'get_config_summary',
     description:
@@ -300,18 +299,13 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
       '用于回答"你现在用的什么模型/配置是什么样"一类问题，不会泄露密钥原文。',
     inputSchema: {
       type: 'object',
-      properties: {
-        instance_id: { type: 'string', description: `要查询的 agent 实例 id，缺省 "${DEFAULT_INSTANCE_ID}"` },
-      },
+      properties: {},
     },
     isReadOnly: true,
-    call: async (input) => {
+    call: async () => {
       try {
-        const instanceId = (input as { instance_id?: string }).instance_id ?? DEFAULT_INSTANCE_ID
-        const result = await callAdmin<{ instance_id: string }, { config: unknown }>('get_agent_config', {
-          instance_id: instanceId,
-        })
-        return ok({ config: maskSensitive(result.config) })
+        if (!deps.getRuntimeConfigSummary) throw new Error('Runtime config summary is unavailable')
+        return ok({ config: maskSensitive(deps.getRuntimeConfigSummary()) })
       } catch (error) {
         return fail(error)
       }

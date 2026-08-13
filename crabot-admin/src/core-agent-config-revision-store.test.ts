@@ -16,7 +16,7 @@ async function fixture(hooks: ConfigMutationHooks = {}) {
   const events: Array<{ config_revision: number; domains: string[] }> = []
   const coordinator = new CoreAgentConfigMutationCoordinator(dir, {
     readSemanticSnapshot: () => ({ provider: state.provider, secret: state.secret }),
-    publishInvalidation: (payload) => { events.push(payload) },
+    publishInvalidation: (payload) => { events.push({ config_revision: payload.config_revision, domains: [...payload.domains] }) },
     hooks,
   })
   await coordinator.initialize()
@@ -160,6 +160,32 @@ describe('CoreAgentConfigMutationCoordinator', () => {
     } finally { await cleanup(f.dir) }
   })
 
+  it('retains the durable outbox when invalidation publication fails and retries it', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-config-coordinator-publish-fail-'))
+    let state = 'before'
+    let fail = true
+    const events: Array<{ config_revision: number; domains: string[] }> = []
+    const coordinator = new CoreAgentConfigMutationCoordinator(dir, {
+      readSemanticSnapshot: () => ({ state }),
+      publishInvalidation: async (payload) => {
+        if (fail) throw new Error('publish unavailable')
+        events.push({ config_revision: payload.config_revision, domains: [...payload.domains] })
+      },
+    })
+    try {
+      await coordinator.initialize()
+      await expect(coordinator.mutate(['models'], { state: 'after' }, async () => { state = 'after' }))
+        .rejects.toThrow('publish unavailable')
+      expect(JSON.parse(await fs.readFile(outbox(dir), 'utf8'))).toMatchObject({
+        state: 'committed', invalidation_pending: true, target_revision: 2,
+      })
+      fail = false
+      await coordinator.drainPendingInvalidation()
+      expect(events).toEqual([{ config_revision: 2, domains: ['models'] }])
+      await expect(fs.access(outbox(dir))).rejects.toThrow()
+    } finally { await cleanup(dir) }
+  })
+
   it('does not overwrite a publish-loss outbox with a later mutation', async () => {
     const f = await fixture({ afterPublish: () => { throw new Error('response lost') } })
     try {
@@ -188,6 +214,21 @@ describe('CoreAgentConfigMutationCoordinator', () => {
         { config_revision: 2, domains: ['mcp'] },
       ])
       await expect(fs.access(outbox(f.dir))).rejects.toThrow()
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('rejects persisted domains outside the closed protocol set', async () => {
+    const f = await fixture({ afterPrepared: () => { throw new Error('stop') } })
+    try {
+      await expect(f.coordinator.mutate(['models'], { provider: 'after', secret: 'initial-secret' }, async () => { f.state.provider = 'after' })).rejects.toThrow('stop')
+      const persisted = JSON.parse(await fs.readFile(outbox(f.dir), 'utf8'))
+      persisted.domains = ['models', 'not-a-domain']
+      await fs.writeFile(outbox(f.dir), JSON.stringify(persisted))
+      const restarted = new CoreAgentConfigMutationCoordinator(f.dir, {
+        readSemanticSnapshot: () => f.state,
+        publishInvalidation: () => {},
+      })
+      await expect(restarted.initialize()).rejects.toThrow('Invalid config mutation domains')
     } finally { await cleanup(f.dir) }
   })
 

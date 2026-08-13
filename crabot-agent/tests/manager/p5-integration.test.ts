@@ -198,7 +198,10 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     return (await handler(params)) as R
   }
 
-  function boot(modelConfig: Record<string, LLMConnectionInfo> = { manager: connInfo('manager-model-x') }): void {
+  function boot(modelConfig: Record<string, LLMConnectionInfo> = {
+    powerful: connInfo('powerful-model-x'),
+    manager: connInfo('manager-model-x'),
+  }): void {
     agent = new UnifiedAgent(makeConfig(modelConfig))
     internals = agent as unknown as AgentInternals
     // 端口解析预置：避免 onStart 里的 detectFeishuChannel 去 resolve 一个不存在的 MM。

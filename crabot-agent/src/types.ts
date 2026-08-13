@@ -111,8 +111,13 @@ export interface SubAgentConfig {
 export interface AgentLayerConfig {
   /** 实例 ID */
   instance_id: string
-  /** 支持的角色 */
-  roles: Array<'front' | 'worker'>
+  /**
+   * Legacy 内部门控字段（多 Agent 时代 front/worker 分离实例的残留），不是协议 wire 字段：
+   * protocol-agent-v2 起实例配置就是 slot 制（model_config），正式协议从未包含 roles。
+   * Admin authenticated pull 不下发该字段；Agent 内部固定填 ['front','worker']，
+   * 测试 fixture 可显式传 []/['worker'] 控制是否起重量级 worker 层。后续可独立重构移除。
+   */
+  roles?: Array<'front' | 'worker'>
   /** 系统提示词 */
   system_prompt: string
   /** 模型配置 */
@@ -149,6 +154,8 @@ export interface UnifiedAgentConfig {
   port: number
   orchestration: OrchestrationConfig
   agent_config?: AgentLayerConfig
+  /** True only for config returned by authenticated Admin pull; direct test/dev fixtures omit it. */
+  runtime_config_authenticated?: boolean
   /** Cold-start image connection; runtime config pull supplies the same fields. */
   image_config?: LLMConnectionInfo
   image_capability?: { available: boolean; reason?: string }

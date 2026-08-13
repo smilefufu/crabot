@@ -40,7 +40,9 @@ describe('AdminChatAssertions', () => {
     for (const token of [
       `${Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')}.${body}.${signature}`,
       `${header}.${Buffer.from(JSON.stringify({ assertion_id: 'x' })).toString('base64url')}.${signature}`,
-      `${header}.${body}.${signature!.slice(0, -1)}${signature!.endsWith('a') ? 'b' : 'a'}`,
+      // 篡改首字符（base64url 首字符编码完整 6 bit，必然改变解码字节；
+      // 末尾字符的低位是填充位，篡改可能不改变解码结果）。
+      `${header}.${body}.${signature!.charAt(0) === 'A' ? 'B' : 'A'}${signature!.slice(1)}`,
     ]) await expect(assertions.consume(token, expected)).rejects.toThrow(/invalid/)
     const concurrent = await Promise.allSettled([assertions.consume(assertion, expected), assertions.consume(assertion, expected)])
     expect(concurrent.filter(result => result.status === 'fulfilled')).toHaveLength(1)

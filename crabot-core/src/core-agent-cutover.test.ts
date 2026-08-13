@@ -6,6 +6,37 @@ import ModuleManager from './index.js'
 import type { ChildProcess } from 'node:child_process'
 
 describe('core Agent cutover gate', () => {
+  function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>((done) => { resolve = done })
+    return { promise, resolve }
+  }
+  it('keeps type-based discovery compatible while returning only the exact core Agent', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-resolve-core-'))
+    const manager = new ModuleManager({
+      port: 0, port_range: { range_start: 19890, range_end: 19910 }, hotplug_allowed_types: ['channel'], modules: [],
+    }, dataDir) as any
+    manager.managementOnly = false
+    manager.modules.set('crabot-agent', {
+      module_id: 'crabot-agent', module_type: 'agent', entry: 'node -e 1', auto_start: false,
+      start_priority: 1, status: 'running', host: 'localhost', port: 19891,
+    })
+    manager.modules.set('legacy-agent', {
+      module_id: 'legacy-agent', module_type: 'agent', entry: 'node -e 1', auto_start: false,
+      start_priority: 1, status: 'stopped', host: 'localhost', port: 19892,
+      legacy_archive: { kind: 'unsupported_non_core_agent', archived_at: new Date().toISOString(), reason: 'cutover' },
+    })
+    try {
+      expect(manager.handleResolve({ module_type: 'agent' }).modules.map((module: { module_id: string }) => module.module_id))
+        .toEqual(['crabot-agent'])
+      expect(() => manager.handleResolve({ module_id: 'legacy-agent' }))
+        .toThrowError(expect.objectContaining({ code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' }))
+    } finally {
+      await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
   it('revokes the exact core bearer before a stop operation is queued', async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-bearer-stop-'))
     const manager = new ModuleManager({
@@ -42,6 +73,11 @@ describe('core Agent cutover gate', () => {
         { expected_module_id: 'crabot-agent' },
         { authorizationBearer: old.token },
       )).toEqual({ verified: true })
+      await expect(manager.handleRegister({
+        module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.1.1',
+        port: 19951, subscriptions: [],
+      })).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+      expect(manager.modules.get('crabot-agent').status).toBe('running')
 
       await manager.handleRestartModule({ module_id: 'crabot-agent', force: true })
       expect(() => manager.handleVerifyCoreAgentRuntime(
@@ -62,6 +98,154 @@ describe('core Agent cutover gate', () => {
       await fs.rm(dataDir, { recursive: true, force: true })
     }
   })
+  it('rejects a concurrent cutover completion with the same bearer', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-cutover-concurrent-'))
+    const manager = new ModuleManager({
+      port: 0, port_range: { range_start: 19972, range_end: 19990 }, hotplug_allowed_types: ['channel'], modules: [],
+    }, dataDir) as any
+    const adminChild = { exitCode: null } as ChildProcess
+    manager.cutoverBearers.set('admin-web', { token: 'cutover-secret', child: adminChild, revoked: false })
+    manager.modules.set('crabot-agent', {
+      module_id: 'crabot-agent', module_type: 'agent', entry: 'node trusted.js', auto_start: false,
+      start_priority: 1, status: 'stopped', port: 19974,
+    })
+    manager.modules.set('legacy-agent', {
+      module_id: 'legacy-agent', module_type: 'agent', entry: 'node -e 1', auto_start: false,
+      start_priority: 1, status: 'running', port: 19973,
+    })
+    const stopStarted = deferred<void>()
+    const releaseStop = deferred<void>()
+    vi.spyOn(manager, 'stopModuleProcess').mockImplementation(async () => {
+      stopStarted.resolve()
+      await releaseStop.promise
+      manager.modules.get('legacy-agent').status = 'stopped'
+      manager.processes.delete('legacy-agent')
+    })
+    try {
+      const first = manager.handleCompleteCoreAgentCutover(
+        { schema_version: 1, admin_archive_fingerprint: 'concurrent', admin_archived_record_count: 1 },
+        { authorizationBearer: 'cutover-secret' },
+      )
+      await stopStarted.promise
+      await expect(manager.handleCompleteCoreAgentCutover(
+        { schema_version: 1, admin_archive_fingerprint: 'concurrent', admin_archived_record_count: 1 },
+        { authorizationBearer: 'cutover-secret' },
+      )).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      releaseStop.resolve()
+      await expect(first).resolves.toMatchObject({ record: { completed: true } })
+      expect(manager.handleGetCoreAgentCutoverRecord()).toMatchObject({ record: { completed: true, admin_archive_fingerprint: 'concurrent' } })
+      manager.cutoverBearers.set('admin-web', { token: 'restart-secret', child: adminChild, revoked: false })
+      await expect(manager.handleCompleteCoreAgentCutover(
+        { schema_version: 1, admin_archive_fingerprint: 'concurrent', admin_archived_record_count: 1 },
+        { authorizationBearer: 'restart-secret' },
+      )).resolves.toMatchObject({ record: { completed: true } })
+    } finally {
+      releaseStop.resolve()
+      await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects mutable core lifecycle inputs, definition mutation, and wrong protocol registration', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-core-immutable-'))
+    const manager = new ModuleManager({
+      port: 0, port_range: { range_start: 19991, range_end: 19999 }, hotplug_allowed_types: ['channel'], modules: [],
+    }, dataDir) as any
+    const child = { exitCode: null } as ChildProcess
+    manager.modules.set('crabot-agent', {
+      module_id: 'crabot-agent', module_type: 'agent', entry: 'node trusted.js', cwd: '/trusted', env: {},
+      auto_start: false, start_priority: 1, status: 'starting', port: 19992,
+    })
+    manager.processes.set('crabot-agent', child)
+    try {
+      const startSpy = vi.spyOn(manager, 'startModuleProcess')
+      await expect(manager.handleStartModule({ module_id: 'crabot-agent', entry_override: 'node attacker.js' }))
+        .rejects.toMatchObject({ code: 'MODULE_MANAGER_CORE_MODULE_IMMUTABLE' })
+      await expect(manager.handleRestartModule({ module_id: 'crabot-agent', env: { ATTACKER: '1' } }))
+        .rejects.toMatchObject({ code: 'MODULE_MANAGER_CORE_MODULE_IMMUTABLE' })
+      expect(() => manager.handleUpdateModuleDefinition({ module_id: 'crabot-agent', updates: { entry: 'node attacker.js' } }))
+        .toThrow(/immutable/)
+      expect(() => manager.handleUnregisterModuleDefinition({ module_id: 'crabot-agent' })).toThrow(/immutable/)
+      await expect(manager.handleRegisterCoreAgent({
+        module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '0.2.0',
+        port: 19992, subscriptions: [],
+      }, { authorizationBearer: 'runtime' })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      manager.runtimeBearers.set('crabot-agent', { token: 'runtime', child, revoked: false })
+      await expect(manager.handleRegisterCoreAgent({
+        module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '0.2.0',
+        port: 19992, subscriptions: [],
+      }, { authorizationBearer: 'runtime' })).rejects.toMatchObject({ code: 'MODULE_MANAGER_PROTOCOL_VERSION_MISMATCH' })
+      await expect(manager.handleRegister({
+        module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.1.1',
+        port: 19992, subscriptions: [],
+      })).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+      expect(manager.modules.get('crabot-agent').entry).toBe('node trusted.js')
+      expect(manager.processes.get('crabot-agent')).toBe(child)
+      expect(startSpy).not.toHaveBeenCalled()
+    } finally {
+      manager.processes.delete('crabot-agent')
+      await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects archived Agent subscriptions after cutover', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-archived-subscribe-'))
+    const manager = new ModuleManager({
+      port: 0, port_range: { range_start: 19770, range_end: 19790 }, hotplug_allowed_types: ['channel'], modules: [],
+    }, dataDir) as any
+    manager.modules.set('legacy-agent', {
+      module_id: 'legacy-agent', module_type: 'agent', entry: 'node old.js', auto_start: false,
+      start_priority: 1, status: 'stopped', port: 19771,
+      legacy_archive: { kind: 'unsupported_non_core_agent', archived_at: new Date().toISOString(), reason: 'retired' },
+    })
+    try {
+      expect(() => manager.handleSubscribe({ subscriber: 'legacy-agent', event_types: ['x'] }))
+        .toThrow(/builtin crabot-agent/)
+      await expect(manager.handleUnregister({ module_id: 'legacy-agent' })).rejects.toMatchObject({ code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
+      expect(manager.subscriptions).toEqual([])
+    } finally {
+      await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects dynamic Agent registration even if runtime configuration is later corrupted', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-agent-runtime-guard-'))
+    const manager = new ModuleManager({
+      port: 0, port_range: { range_start: 19800, range_end: 19820 }, hotplug_allowed_types: ['channel'], modules: [],
+    }, dataDir) as any
+    manager.config.hotplug_allowed_types.push('agent')
+    try {
+      const dynamicDefinition = {
+        module_definition: {
+          module_id: 'dynamic-agent', module_type: 'agent', entry: 'node malicious.js', cwd: '.',
+          auto_start: false, start_priority: 1,
+        },
+      }
+      expect(() => manager.handleRegisterModuleDefinition(dynamicDefinition)).toThrow(/Only builtin crabot-agent/)
+      try {
+        manager.handleRegisterModuleDefinition(dynamicDefinition)
+      } catch (error) {
+        expect(error).toMatchObject({ code: 'MODULE_MANAGER_HOTPLUG_NOT_ALLOWED' })
+      }
+      expect(manager.modules.has('dynamic-agent')).toBe(false)
+    } finally {
+      await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects invalid hotplug configuration containing the reserved Agent type', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-agent-allowlist-'))
+    try {
+      expect(() => new ModuleManager({ hotplug_allowed_types: ['channel', 'agent'] }, dataDir))
+        .toThrow(/must not contain reserved type/)
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
   it('starts only Admin, rejects pre-cutover ingress, then persists completion before starting core modules', async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-cutover-'))
     const manager = new ModuleManager({
@@ -88,9 +272,11 @@ describe('core Agent cutover gate', () => {
       const bearer = (manager as any).cutoverBearers.get('admin-web')
       expect(bearer).toBeDefined()
       const result = await (manager as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'a', admin_archived_record_count: 0 }, { authorizationBearer: bearer.token })
-      expect(result.completed).toBe(true)
-      const replay = await (manager as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'a', admin_archived_record_count: 0 }, { authorizationBearer: bearer.token })
-      expect(replay).toEqual(result)
+      expect(result.record.completed).toBe(true)
+      await expect((manager as any).handleCompleteCoreAgentCutover(
+        { schema_version: 1, admin_archive_fingerprint: 'a', admin_archived_record_count: 0 },
+        { authorizationBearer: bearer.token },
+      )).rejects.toMatchObject({ code: 'FORBIDDEN' })
       expect(JSON.parse(await fs.readFile(path.join(dataDir, 'migrations', 'core-agent-singleton-v1.json'), 'utf8')).completed).toBe(true)
     } finally {
       await manager.stop().catch(() => {})
@@ -153,7 +339,7 @@ describe('core Agent cutover gate', () => {
       ;(manager as any).processes.delete('legacy-agent')
       legacy.status = 'stopped'
       const retry = await (manager as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'fault', admin_archived_record_count: 1 }, { authorizationBearer: bearer.token })
-      expect(retry.completed).toBe(true)
+      expect(retry.record.completed).toBe(true)
       expect((manager as any).managementOnly).toBe(false)
     } finally {
       await manager.stop().catch(() => {})
@@ -175,7 +361,7 @@ describe('core Agent cutover gate', () => {
       await first.start()
       const bearer = (first as any).cutoverBearers.get('admin-web')
       const result = await (first as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'replay', admin_archived_record_count: 0 }, { authorizationBearer: bearer.token })
-      expect(JSON.parse(await fs.readFile(path.join(dataDir, 'migrations', 'core-agent-singleton-v1.json'), 'utf8'))).toMatchObject(result)
+      expect(JSON.parse(await fs.readFile(path.join(dataDir, 'migrations', 'core-agent-singleton-v1.json'), 'utf8'))).toMatchObject(result.record)
     } finally {
       await first.stop().catch(() => {})
     }
@@ -186,7 +372,7 @@ describe('core Agent cutover gate', () => {
       expect((restarted as any).processes.has('crabot-agent')).toBe(false)
       const bearer = (restarted as any).cutoverBearers.get('admin-web')
       const replay = await (restarted as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'replay', admin_archived_record_count: 0 }, { authorizationBearer: bearer.token })
-      expect(replay).toMatchObject({ completed: true, admin_archive_fingerprint: 'replay' })
+      expect(replay).toMatchObject({ record: { completed: true, admin_archive_fingerprint: 'replay' } })
     } finally {
       await restarted.stop().catch(() => {})
       await fs.rm(dataDir, { recursive: true, force: true })

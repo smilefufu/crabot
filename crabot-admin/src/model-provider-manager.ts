@@ -8,6 +8,7 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { generateId, generateTimestamp } from 'crabot-shared'
+import { durableAtomicWriteFile } from './durable-file.js'
 import type {
   ModelProvider,
   ModelInfo,
@@ -32,6 +33,7 @@ export type ProviderConfigMutationRunner = (
   domains: ConfigDomain[],
   prepareAfterSnapshot: () => Promise<unknown>,
   applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void>,
+  allowRuntimeNoop?: boolean,
 ) => Promise<void>
 
 /**
@@ -311,6 +313,7 @@ export class ModelProviderManager {
   private refreshInFlight: Map<string, Promise<import('./oauth/openai-codex-oauth.js').OAuthLoginResult>> = new Map()
   private mutationRunner: ProviderConfigMutationRunner | null = null
   private semanticSnapshotProvider: (() => unknown) | null = null
+  private mutationTail: Promise<void> = Promise.resolve()
 
   constructor(dataDir: string) {
     this.dataDir = dataDir
@@ -329,12 +332,21 @@ export class ModelProviderManager {
     this.mutationRunner = runner
   }
 
+  private async serial<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTail
+    let release!: () => void
+    this.mutationTail = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try { return await operation() } finally { release() }
+  }
+
   private async mutateRuntimeConfig(
     domains: ConfigDomain[],
     preview: () => Promise<unknown>,
     apply: () => Promise<void>,
+    allowRuntimeNoop = false,
   ): Promise<void> {
-    if (this.mutationRunner) return this.mutationRunner(domains, preview, apply)
+    if (this.mutationRunner) return this.mutationRunner(domains, preview, apply, allowRuntimeNoop)
     return apply()
   }
 
@@ -349,6 +361,10 @@ export class ModelProviderManager {
 
 
   async createProvider(params: CreateModelProviderParams): Promise<ModelProvider> {
+    return this.serial(() => this.createProviderUnlocked(params))
+  }
+
+  private async createProviderUnlocked(params: CreateModelProviderParams): Promise<ModelProvider> {
     const now = generateTimestamp()
     const provider: ModelProvider = {
       id: generateId(),
@@ -384,6 +400,10 @@ export class ModelProviderManager {
   }
 
   async updateProvider(id: string, params: UpdateModelProviderParams): Promise<ModelProvider> {
+    return this.serial(() => this.updateProviderUnlocked(id, params))
+  }
+
+  private async updateProviderUnlocked(id: string, params: UpdateModelProviderParams): Promise<ModelProvider> {
     const provider = this.providers.get(id)
     if (!provider) {
       throw new Error('Provider not found')
@@ -396,13 +416,17 @@ export class ModelProviderManager {
     ), async () => {
       this.providers.set(id, updated)
       await this.saveProviders()
-    })
+    }, true)
 
     console.log(`[ModelProviderManager] Updated provider ${id}`)
     return updated
   }
 
   async deleteProvider(id: string): Promise<void> {
+    return this.serial(() => this.deleteProviderUnlocked(id))
+  }
+
+  private async deleteProviderUnlocked(id: string): Promise<void> {
     const provider = this.providers.get(id)
     if (!provider) {
       throw new Error('Provider not found')
@@ -418,6 +442,10 @@ export class ModelProviderManager {
   }
 
   async upsertById(provider: ModelProvider, onConflict: OnConflict): Promise<'imported' | 'overwritten' | 'skipped'> {
+    return this.serial(() => this.upsertByIdUnlocked(provider, onConflict))
+  }
+
+  private async upsertByIdUnlocked(provider: ModelProvider, onConflict: OnConflict): Promise<'imported' | 'overwritten' | 'skipped'> {
     const exists = this.providers.has(provider.id)
     if (exists && onConflict === 'skip') return 'skipped'
     const previous = this.providers.get(provider.id)
@@ -427,7 +455,7 @@ export class ModelProviderManager {
     ), async () => {
       this.providers.set(provider.id, provider)
       await this.saveProviders()
-    })
+    }, exists)
     return exists ? 'overwritten' : 'imported'
   }
 
@@ -1052,17 +1080,32 @@ export class ModelProviderManager {
    * 更新代理配置
    */
   async updateProxyConfig(proxy: ProxyConfig): Promise<void> {
-    this.globalConfig = { ...this.globalConfig, proxy }
-    await this.saveGlobalConfig()
+    await this.serial(async () => {
+      this.globalConfig = { ...this.globalConfig, proxy }
+      await this.saveGlobalConfig()
+    })
   }
 
   async updateGlobalConfig(config: Partial<GlobalModelConfig>): Promise<GlobalModelConfig> {
-    const updated = { ...this.globalConfig, ...config }
-    const publicBaseUrlChanged = Object.prototype.hasOwnProperty.call(config, 'public_base_url') &&
+    return this.serial(async () => {
+      const updated = { ...this.globalConfig, ...config }
+      const publicBaseUrlChanged = Object.prototype.hasOwnProperty.call(config, 'public_base_url') &&
       config.public_base_url !== this.globalConfig.public_base_url
+    const llmChanged = (
+      Object.prototype.hasOwnProperty.call(config, 'default_llm_provider_id') && config.default_llm_provider_id !== this.globalConfig.default_llm_provider_id
+    ) || (
+      Object.prototype.hasOwnProperty.call(config, 'default_llm_model_id') && config.default_llm_model_id !== this.globalConfig.default_llm_model_id
+    )
+    const imageChanged = (
+      Object.prototype.hasOwnProperty.call(config, 'default_image_provider_id') && config.default_image_provider_id !== this.globalConfig.default_image_provider_id
+    ) || (
+      Object.prototype.hasOwnProperty.call(config, 'default_image_model_id') && config.default_image_model_id !== this.globalConfig.default_image_model_id
+    ) || (
+      Object.prototype.hasOwnProperty.call(config, 'image_slot_user_set') && config.image_slot_user_set !== this.globalConfig.image_slot_user_set
+    )
     const domains: ConfigDomain[] = [
-      ...(config.default_llm_provider_id !== undefined || config.default_llm_model_id !== undefined ? ['models' as const] : []),
-      ...(config.default_image_provider_id !== undefined || config.default_image_model_id !== undefined || config.image_slot_user_set !== undefined ? ['image' as const] : []),
+      ...(llmChanged ? ['models' as const] : []),
+      ...(imageChanged ? ['image' as const] : []),
       ...(publicBaseUrlChanged ? ['behavior' as const] : []),
     ]
     if (domains.length === 0) {
@@ -1078,7 +1121,8 @@ export class ModelProviderManager {
       this.globalConfig = updated
       await this.saveGlobalConfig()
     })
-    return updated
+      return updated
+    })
   }
 
   // ============================================================================
@@ -1187,9 +1231,7 @@ export class ModelProviderManager {
    * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   private async saveProviders(): Promise<void> {

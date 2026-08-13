@@ -11,11 +11,22 @@ import { describe, it, expect, vi } from 'vitest'
 import { buildCrabotInfoTools } from '../../src/manager/tools/crabot-info'
 
 function makeCallAdmin(handlers: Record<string, (params: unknown) => unknown>) {
-  return vi.fn(async (method: string, params: unknown) => {
+  const callAdmin = vi.fn(async (method: string, params: unknown) => {
     const handler = handlers[method]
     if (!handler) throw new Error(`unexpected admin RPC call: ${method}`)
     return handler(params)
   })
+  Object.assign(callAdmin, {
+    runtimeConfigSummary: () => {
+      const result = handlers.get_agent_config?.({ instance_id: 'crabot-agent' }) as { config?: unknown } | undefined
+      return result?.config
+    },
+  })
+  return callAdmin
+}
+
+function runtimeConfigSummary(callAdmin: ReturnType<typeof makeCallAdmin>): unknown {
+  return (callAdmin as typeof callAdmin & { runtimeConfigSummary: () => unknown }).runtimeConfigSummary()
 }
 
 describe('buildCrabotInfoTools', () => {
@@ -58,7 +69,7 @@ describe('buildCrabotInfoTools', () => {
           pagination: { page: 1, page_size: 100, total_items: 2, total_pages: 1 },
         }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_system_status')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -72,7 +83,7 @@ describe('buildCrabotInfoTools', () => {
       const callAdmin = vi.fn(async () => {
         throw new Error('admin unreachable')
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_system_status')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(true)
@@ -96,7 +107,7 @@ describe('buildCrabotInfoTools', () => {
           pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
         }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_deployment_info')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -121,7 +132,7 @@ describe('buildCrabotInfoTools', () => {
           }
         },
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'list_schedules')!
       const result = await tool.call({ enabled: true }, {})
       expect(result.isError).toBe(false)
@@ -136,7 +147,7 @@ describe('buildCrabotInfoTools', () => {
           return { items: [], pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } }
         },
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'list_schedules')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -179,7 +190,7 @@ describe('buildCrabotInfoTools', () => {
           }
         },
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_config_summary')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -214,7 +225,7 @@ describe('buildCrabotInfoTools', () => {
           },
         }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_config_summary')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -259,7 +270,7 @@ describe('buildCrabotInfoTools', () => {
           },
         }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_config_summary')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -302,7 +313,7 @@ describe('buildCrabotInfoTools', () => {
           },
         }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_config_summary')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -325,7 +336,7 @@ describe('buildCrabotInfoTools', () => {
           },
         }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_config_summary')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -352,7 +363,7 @@ describe('buildCrabotInfoTools', () => {
           },
         }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_config_summary')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -394,7 +405,7 @@ describe('buildCrabotInfoTools', () => {
           },
         }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_config_summary')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -416,17 +427,15 @@ describe('buildCrabotInfoTools', () => {
       expect(parsed.config.auth_config.timeout).toBe(30000)
     })
 
-    it('支持传入 instance_id 覆盖默认值', async () => {
+    it('ignores legacy instance_id input and never calls the secret-bearing Admin RPC', async () => {
       const callAdmin = makeCallAdmin({
-        get_agent_config: (params) => {
-          expect(params).toEqual({ instance_id: 'other-instance' })
-          return { config: { instance_id: 'other-instance', model_config: {} } }
-        },
+        get_agent_config: () => ({ config: { instance_id: 'crabot-agent', model_config: {} } }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_config_summary')!
       const result = await tool.call({ instance_id: 'other-instance' }, {})
       expect(result.isError).toBe(false)
+      expect(callAdmin).not.toHaveBeenCalled()
     })
   })
 
@@ -446,7 +455,7 @@ describe('buildCrabotInfoTools', () => {
           pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
         }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'list_capabilities')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
@@ -471,7 +480,7 @@ describe('buildCrabotInfoTools', () => {
           }
         },
       })
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_friend_permissions')!
       const result = await tool.call({ friend_id: 'friend-123' }, {})
       expect(result.isError).toBe(false)
@@ -481,7 +490,7 @@ describe('buildCrabotInfoTools', () => {
 
     it('缺少 friend_id 时报错且不调用 admin', async () => {
       const callAdmin = makeCallAdmin({})
-      const tools = buildCrabotInfoTools({ callAdmin })
+      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'get_friend_permissions')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(true)

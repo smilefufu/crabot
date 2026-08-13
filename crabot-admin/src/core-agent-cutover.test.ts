@@ -23,4 +23,19 @@ describe('CoreAgentCutoverStore', () => {
       await fs.rm(dataDir, { recursive: true, force: true })
     }
   })
+
+  it('fails closed when a replayed legacy source diverges from its durable archive', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-cutover-conflict-'))
+    try {
+      const store = new CoreAgentCutoverStore(dataDir)
+      await store.archive([
+        { source_kind: 'agent_instance' as const, source_id: 'legacy', raw: { name: 'before' } },
+      ])
+      await expect(store.archive([
+        { source_kind: 'agent_instance' as const, source_id: 'legacy', raw: { name: 'after' } },
+      ])).rejects.toThrow('archive conflict')
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
 })

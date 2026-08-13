@@ -141,6 +141,7 @@ export interface BootstrapDeps {
    */
   readonly memoryServerFor: (ctx: MemoryTaskContext) => McpServer
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
+  readonly getRuntimeConfigSummary?: () => unknown
   /**
    * 发起人身份的解析原料(admin 权限解析 / session memory_scopes / 场景画像 /
    * crab self handle / master friend id)。本模块据它在**唤醒边界**解析一次并缓存,
@@ -465,6 +466,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         // 并不因此改变——它是会话属性,不是本轮属性。
         memoryServer: deps.memoryServerFor(memoryContextFor(key, principals.get(key))),
         callAdmin: deps.callAdmin,
+        getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
         isSystemThread,
         authorization: () => principals.currentMasterAuthorization(key),
         validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),

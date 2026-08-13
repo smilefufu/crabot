@@ -739,7 +739,15 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const { internals } = boot(makeConfig({ modelConfig: { fast: connInfo('model-A') } }))
     const managerKey = (`test::${'friend-noconf'}` as ManagerKey)
 
+    // Keep this test on the intended factory failure seam instead of the earlier runtime
+    // admission guard; Admin now refuses to publish such a config in production.
+    const admission = internals.managerStack!.harness.deps.assertExecutionAdmission
+    const builtinDefaults = internals.managerStack!.harness.deps.builtinSpawnDefaults
+    internals.managerStack!.harness.deps.assertExecutionAdmission = undefined
+    internals.managerStack!.harness.deps.builtinSpawnDefaults = (ctx: unknown) => internals.buildBuiltinWorkerRuntime(ctx)
     await expect(spawnBuiltin(internals, managerKey)).rejects.toThrow(/powerful/)
+    internals.managerStack!.harness.deps.assertExecutionAdmission = admission
+    internals.managerStack!.harness.deps.builtinSpawnDefaults = builtinDefaults
 
     const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
     expect(w.task.status).toBe('failed')

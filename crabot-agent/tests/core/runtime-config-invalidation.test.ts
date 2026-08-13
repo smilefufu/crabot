@@ -5,7 +5,7 @@ import type { UnifiedAgentConfig } from '../../src/types.js'
 
 function config(): UnifiedAgentConfig {
   return {
-    module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '0.3.0', port: 19999,
+    module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.1.1', port: 19999,
     orchestration: { front_context_recent_messages_window_hours: 1, front_context_recent_messages_max_cap: 1, front_context_short_term_memory_window_hours: 1, front_context_short_term_memory_max_cap: 1, worker_recent_messages_window_hours: 1, worker_recent_messages_max_cap: 1, worker_short_term_memory_window_hours: 1, worker_short_term_memory_max_cap: 1, worker_long_term_memory_limit: 1, front_agent_timeout: 1, session_state_ttl: 1, worker_config_refresh_interval: 1, front_agent_queue_max_length: 1, front_agent_queue_timeout: 1 },
     agent_config: { instance_id: 'crabot-agent', roles: [], system_prompt: 'old', model_config: { powerful: { endpoint: 'https://old.example', apikey: 'old', model_id: 'old', format: 'openai', provider_id: 'old' } } },
   }
@@ -34,6 +34,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
     const agent = new UnifiedAgent(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 2
+    agent.configAuthenticated = true
     agent.configStale = true
     const apply = vi.spyOn(agent, 'applyRuntimeConfigCandidate')
     vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: config(), revision: 2 })
@@ -49,6 +50,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
     const agent = new UnifiedAgent(cold) as any
     agent.adminPort = 19998
     agent.configRevision = 1
+    agent.configAuthenticated = true
     agent.configStale = true
     expect(agent.agentHandler).toBeUndefined()
     const ready = config()
@@ -78,6 +80,7 @@ describe('UnifiedAgent runtime config invalidation', () => {
 
   it('rejects schedule, background maintenance, task execution, and new worker runtime resolution while stale', async () => {
     const agent = new UnifiedAgent(config()) as any
+    agent.configAuthenticated = true
     agent.configStale = true
     const routeSchedule = vi.spyOn(agent.managerStack.registry, 'routeSchedule')
     const ledgerWrite = vi.spyOn(agent.managerStack.ledger, 'upsertWorker')
@@ -95,6 +98,19 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(ledgerWrite).not.toHaveBeenCalled()
     expect(workerSpawn).toHaveBeenCalledOnce()
     expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('rejects media completion Manager wakes while runtime config is stale', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.configAuthenticated = true
+    agent.configStale = true
+    const route = vi.spyOn(agent.managerStack.registry, 'routeMediaNotification')
+    await expect(agent.onEvent({
+      type: 'media.download_completed',
+      timestamp: new Date().toISOString(),
+      payload: { channel_id: 'admin-web', session_id: 'admin-chat', handle: 'fm_1', status: 'ready' },
+    })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    expect(route).not.toHaveBeenCalled()
   })
 
   it('applies cold-start configured and unavailable image capability before first event', () => {
@@ -140,10 +156,11 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(agent.configRevision).toBe(1)
   })
 
-  it('rejects a lower revision and marks failed pull stale without changing running config', async () => {
+  it('rejects a lower revision, marks failed pull stale, and closes stale MCP connections', async () => {
     const agent = new UnifiedAgent(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 3
+    const disconnectAll = vi.spyOn(agent.mcpConnector, 'disconnectAll').mockResolvedValue(undefined)
     vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: config(), revision: 2 })
     await expect(agent.pullRuntimeConfig()).rejects.toThrow('stale config revision')
     expect(agent.agentConfig.system_prompt).toBe('old')
@@ -152,5 +169,6 @@ describe('UnifiedAgent runtime config invalidation', () => {
     await new Promise((resolve) => setTimeout(resolve, 70))
     expect(agent.configStale).toBe(true)
     expect(agent.isConfigured()).toBe(false)
+    expect(disconnectAll).toHaveBeenCalled()
   })
 })

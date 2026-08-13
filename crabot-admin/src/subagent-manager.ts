@@ -22,6 +22,7 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { canonicalizeJson, generateId, generateTimestamp } from 'crabot-shared'
+import { durableAtomicWriteFile } from './durable-file.js'
 import type { SubAgentRegistryEntry, ModelRole } from './types.js'
 import type { RegistryMutationRunner } from './mcp-skill-manager.js'
 import type { OnConflict } from './backup/import/import-types.js'
@@ -127,6 +128,7 @@ export class SubAgentManager {
   private readonly getBuiltinDefaults: () => SubAgentRegistryEntry[]
   private mutationRunner: RegistryMutationRunner | null = null
   private semanticSnapshotProvider: (() => unknown) | null = null
+  private mutationTail: Promise<void> = Promise.resolve()
   private needsLegacyRewrite = false
   private legacyBackupPath: string | null = null
 
@@ -146,6 +148,14 @@ export class SubAgentManager {
   setMutationRunner(runner: RegistryMutationRunner): void { this.mutationRunner = runner }
   setSemanticSnapshotProvider(provider: () => unknown): void { this.semanticSnapshotProvider = provider }
 
+  private async serial<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTail
+    let release!: () => void
+    this.mutationTail = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try { return await operation() } finally { release() }
+  }
+
   private async persistLegacyRewrite(): Promise<boolean> {
     if (!this.needsLegacyRewrite) return false
     if (this.legacyBackupPath) {
@@ -157,7 +167,7 @@ export class SubAgentManager {
     return true
   }
 
-  private async commit(next: Map<string, SubAgentRegistryEntry>): Promise<void> {
+  private async commit(next: Map<string, SubAgentRegistryEntry>, allowRuntimeNoop = false): Promise<void> {
     const previous = this.entries
     const previousRewriteState = this.needsLegacyRewrite
     const apply = async () => {
@@ -172,7 +182,7 @@ export class SubAgentManager {
         this.entries = previous
         this.needsLegacyRewrite = previousRewriteState
       }
-    }, apply)
+    }, apply, allowRuntimeNoop)
   }
 
   runtimeSemanticEntries(): unknown[] {
@@ -258,10 +268,7 @@ export class SubAgentManager {
   }
 
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.mkdir(path.dirname(filePath), { recursive: true })
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   /** 把全量 entry 转成磁盘稀疏格式：builtin 仅保留 state + 与 codeDefault 不同的 override 字段。 */
@@ -320,97 +327,105 @@ export class SubAgentManager {
   }
 
   async upsertById(entry: SubAgentRegistryEntry, onConflict: OnConflict): Promise<'imported' | 'overwritten' | 'skipped'> {
-    const exists = this.entries.has(entry.id)
-    if (exists && onConflict === 'skip') return 'skipped'
-    const next = new Map(this.entries)
-    next.set(entry.id, entry)
-    if (exists && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(runtimeSubAgentEntries(next))) {
-      this.entries = next
-      await this.save()
-      return 'overwritten'
-    }
-    await this.commit(next)
-    return exists ? 'overwritten' : 'imported'
+    return this.serial(async () => {
+      const exists = this.entries.has(entry.id)
+      if (exists && onConflict === 'skip') return 'skipped'
+      const next = new Map(this.entries)
+      next.set(entry.id, entry)
+      if (exists && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(runtimeSubAgentEntries(next))) {
+        await this.commit(next, true)
+        return 'overwritten'
+      }
+      await this.commit(next)
+      return exists ? 'overwritten' : 'imported'
+    })
   }
 
   async create(params: CreateSubAgentParams): Promise<SubAgentRegistryEntry> {
-    if (this.getByName(params.name)) {
-      throw new Error(`SubAgent "${params.name}" 已存在`)
-    }
-    this.validateModelSpec(params)
-    const now = generateTimestamp()
-    const entry: SubAgentRegistryEntry = {
-      ...params,
-      id: generateId(),
-      is_builtin: false,
-      enabled: params.enabled ?? true,
-      created_at: now,
-      updated_at: now,
-    }
-    const next = new Map(this.entries)
-    next.set(entry.id, entry)
-    await this.commit(next)
-    return entry
+    return this.serial(async () => {
+      if (this.getByName(params.name)) {
+        throw new Error(`SubAgent "${params.name}" 已存在`)
+      }
+      this.validateModelSpec(params)
+      const now = generateTimestamp()
+      const entry: SubAgentRegistryEntry = {
+        ...params,
+        id: generateId(),
+        is_builtin: false,
+        enabled: params.enabled ?? true,
+        created_at: now,
+        updated_at: now,
+      }
+      const next = new Map(this.entries)
+      next.set(entry.id, entry)
+      await this.commit(next)
+      return entry
+    })
   }
 
   async update(id: string, params: UpdateSubAgentParams): Promise<SubAgentRegistryEntry> {
-    // 内置项（is_builtin=true）允许 update 修改任意字段。spec §1.1 "内置项可编辑可禁用不可删"。
-    // 与代码默认值相同的字段在落盘时自动剔除（stripBuiltinDefaults），后续代码升级该字段会自动跟随；
-    // 与默认值不同的字段视为 user override，永久保留。无需 is_user_modified 标志位。
-    const existing = this.entries.get(id)
-    if (!existing) throw new Error(`SubAgent not found: ${id}`)
+    return this.serial(async () => {
+      // 内置项（is_builtin=true）允许 update 修改任意字段。spec §1.1 "内置项可编辑可禁用不可删"。
+      // 与代码默认值相同的字段在落盘时自动剔除（stripBuiltinDefaults），后续代码升级该字段会自动跟随；
+      // 与默认值不同的字段视为 user override，永久保留。无需 is_user_modified 标志位。
+      const existing = this.entries.get(id)
+      if (!existing) throw new Error(`SubAgent not found: ${id}`)
 
-    if (params.name && params.name !== existing.name) {
-      const dup = this.getByName(params.name)
-      if (dup && dup.id !== id) throw new Error(`SubAgent "${params.name}" 已存在`)
-    }
+      if (params.name && params.name !== existing.name) {
+        const dup = this.getByName(params.name)
+        if (dup && dup.id !== id) throw new Error(`SubAgent "${params.name}" 已存在`)
+      }
 
-    const next: SubAgentRegistryEntry = {
-      ...existing,
-      ...params,
-      id: existing.id,
-      is_builtin: existing.is_builtin,
-      created_at: existing.created_at,
-      updated_at: generateTimestamp(),
-    }
-    this.validateModelSpec(next)
-    const currentEntries = new Map(this.entries)
-    const nextEntries = new Map(this.entries)
-    nextEntries.set(id, next)
-    if (canonicalizeJson(runtimeSubAgentEntries(currentEntries)) === canonicalizeJson(runtimeSubAgentEntries(nextEntries))) {
-      this.entries = nextEntries
-      await this.save()
+      const next: SubAgentRegistryEntry = {
+        ...existing,
+        ...params,
+        id: existing.id,
+        is_builtin: existing.is_builtin,
+        created_at: existing.created_at,
+        updated_at: generateTimestamp(),
+      }
+      this.validateModelSpec(next)
+      const currentEntries = new Map(this.entries)
+      const nextEntries = new Map(this.entries)
+      nextEntries.set(id, next)
+      if (canonicalizeJson(runtimeSubAgentEntries(currentEntries)) === canonicalizeJson(runtimeSubAgentEntries(nextEntries))) {
+        await this.commit(nextEntries, true)
+        return next
+      }
+      await this.commit(nextEntries)
       return next
-    }
-    await this.commit(nextEntries)
-    return next
+    })
   }
 
   async delete(id: string): Promise<void> {
-    const entry = this.entries.get(id)
-    if (!entry) throw new Error(`SubAgent not found: ${id}`)
-    if (entry.is_builtin) throw new Error(`内置 SubAgent "${entry.name}" 不可删除`)
-    const next = new Map(this.entries)
-    next.delete(id)
-    await this.commit(next)
+    return this.serial(async () => {
+      const entry = this.entries.get(id)
+      if (!entry) throw new Error(`SubAgent not found: ${id}`)
+      if (entry.is_builtin) throw new Error(`内置 SubAgent "${entry.name}" 不可删除`)
+      const next = new Map(this.entries)
+      next.delete(id)
+      await this.commit(next)
+    })
   }
 
   /** 内置项 seed：仅插入不存在的 entry。已存在的 builtin 的内容字段在 load 时由 codeDefault 提供，
    *  override 写在 stripBuiltinDefaults 落盘逻辑里，seed 路径不需要再覆盖。 */
   async seedBuiltin(entries: SubAgentRegistryEntry[]): Promise<void> {
-    let changed = false
-    const next = new Map(this.entries)
-    for (const e of entries) {
-      if (!next.has(e.id)) {
-        next.set(e.id, e)
-        changed = true
+    return this.serial(async () => {
+      let changed = false
+      const next = new Map(this.entries)
+      for (const e of entries) {
+        if (!next.has(e.id)) {
+          next.set(e.id, e)
+          changed = true
+        }
       }
-    }
-    if (changed) {
-      await this.commit(next)
-    } else if (this.needsLegacyRewrite) {
-      await this.commit(next)
-    }
+      if (changed) {
+        await this.commit(next)
+      } else if (this.needsLegacyRewrite) {
+        await this.commit(next)
+      }
+    })
   }
 
   /**

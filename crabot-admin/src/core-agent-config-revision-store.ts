@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { canonicalizeJson } from 'crabot-shared'
+import { durableAtomicWriteFile, durableRemoveFile } from './durable-file.js'
 
 export type ConfigDomain = 'models' | 'image' | 'mcp' | 'skills' | 'subagents' | 'worker_implementations' | 'behavior'
 
@@ -66,17 +67,7 @@ export interface CoreAgentConfigMutationCoordinatorOptions {
 }
 
 async function atomicWriteText(file: string, value: string): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
-  const handle = await fs.open(temporary, 'w', 0o600)
-  try {
-    await handle.writeFile(value)
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-  await fs.rename(temporary, file)
-  await fs.chmod(file, 0o600)
+  await durableAtomicWriteFile(file, value)
 }
 
 async function atomicWrite(file: string, value: unknown): Promise<void> {
@@ -92,8 +83,23 @@ async function readJson<T>(file: string): Promise<T | null> {
   }
 }
 
+const CONFIG_DOMAINS = new Set<ConfigDomain>([
+  'models',
+  'image',
+  'mcp',
+  'skills',
+  'subagents',
+  'worker_implementations',
+  'behavior',
+])
+
 function assertDomains(domains: ConfigDomain[]): void {
-  if (!Array.isArray(domains) || domains.length === 0 || new Set(domains).size !== domains.length) throw new Error('Invalid config mutation domains')
+  if (
+    !Array.isArray(domains)
+    || domains.length === 0
+    || new Set(domains).size !== domains.length
+    || domains.some((domain) => !CONFIG_DOMAINS.has(domain))
+  ) throw new Error('Invalid config mutation domains')
 }
 
 /**
@@ -206,6 +212,7 @@ export class CoreAgentConfigMutationCoordinator {
     domains: ConfigDomain[],
     computeAfterSemanticSnapshot: () => Promise<unknown> | unknown,
     applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void> | void,
+    allowRuntimeNoop = false,
   ): Promise<CoreAgentConfigRevisionRecord> {
     const persistedBeforeInitialize = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
     if (persistedBeforeInitialize) throw new Error('Core Agent config mutation already active')
@@ -225,7 +232,20 @@ export class CoreAgentConfigMutationCoordinator {
         assertDomains(domains)
         const before = await this.fingerprint()
         const after = this.fingerprintSnapshot(await computeAfterSemanticSnapshot())
-        if (this.equal(before, after)) throw new Error('Config mutation did not change semantic snapshot')
+        if (this.equal(before, after)) {
+          if (!allowRuntimeNoop) throw new Error('Config mutation did not change semantic snapshot')
+          if (!this.equal(before, current.semantic_fingerprint_hmac)) throw new Error('Core Agent config semantic fingerprint is stale')
+          await applySourceMutation({
+            mutation_id: crypto.randomUUID(),
+            target_revision: current.revision,
+            bindSourceJournal: async () => { throw new Error('No source journal is allowed for a runtime-noop mutation') },
+            markSourceJournalCleanupCompleted: async () => { throw new Error('No source journal is allowed for a runtime-noop mutation') },
+            clearSourceJournalBinding: async () => { throw new Error('No source journal is allowed for a runtime-noop mutation') },
+          })
+          const observed = await this.fingerprint()
+          if (!this.equal(before, observed)) throw new Error('Runtime-noop config mutation changed semantic snapshot')
+          return current
+        }
         if (!this.equal(before, current.semantic_fingerprint_hmac)) throw new Error('Core Agent config semantic fingerprint is stale')
         const outbox: CoreAgentConfigMutationOutboxRecord = {
           schema_version: 1, mutation_id: crypto.randomUUID(), target_revision: current.revision + 1,
@@ -376,7 +396,7 @@ export class CoreAgentConfigMutationCoordinator {
           }
           await atomicWrite(this.receiptPath, receipt)
         }
-        await fs.rm(this.outboxPath, { force: true })
+        await durableRemoveFile(this.outboxPath)
         return
       }
       if (!isAfter) throw new Error('Ambiguous prepared config mutation recovery')
@@ -416,12 +436,12 @@ export class CoreAgentConfigMutationCoordinator {
       source_cleanup_completed: outbox.source_cleanup_completed,
     }
     await atomicWrite(this.receiptPath, receipt)
-    if (!outbox.invalidation_pending) { await fs.rm(this.outboxPath, { force: true }); return }
+    if (!outbox.invalidation_pending) { await durableRemoveFile(this.outboxPath); return }
     await this.options.publishInvalidation({ config_revision: outbox.target_revision, domains: [...outbox.domains] })
     await this.options.hooks?.afterPublish?.()
     outbox.invalidation_pending = false
     await atomicWrite(this.outboxPath, outbox)
-    await fs.rm(this.outboxPath, { force: true })
+    await durableRemoveFile(this.outboxPath)
   }
 
   private assertRecord(record: CoreAgentConfigRevisionRecord): void {
@@ -443,12 +463,14 @@ export class CoreAgentConfigMutationCoordinator {
 
   private assertReceipt(receipt: CoreAgentConfigMutationReceipt): void {
     this.assertSourceJournalBinding(receipt)
-    if (receipt.schema_version !== 1 || (receipt.outcome !== undefined && !['committed', 'aborted'].includes(receipt.outcome)) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(receipt.mutation_id) || !Number.isSafeInteger(receipt.target_revision) || receipt.target_revision < 2 || !Array.isArray(receipt.domains) || receipt.domains.length === 0 || (receipt.source_journal_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(receipt.source_journal_sha256))) throw new Error('Invalid core Agent config mutation receipt')
+    assertDomains(receipt.domains)
+    if (receipt.schema_version !== 1 || (receipt.outcome !== undefined && !['committed', 'aborted'].includes(receipt.outcome)) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(receipt.mutation_id) || !Number.isSafeInteger(receipt.target_revision) || receipt.target_revision < 2 || (receipt.source_journal_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(receipt.source_journal_sha256))) throw new Error('Invalid core Agent config mutation receipt')
   }
 
   private assertOutbox(outbox: CoreAgentConfigMutationOutboxRecord): void {
     this.assertSourceJournalBinding(outbox)
-    if (outbox.schema_version !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(outbox.mutation_id) || !Number.isSafeInteger(outbox.target_revision) || outbox.target_revision < 2 || !['prepared', 'data_persisted', 'committed'].includes(outbox.state) || !Array.isArray(outbox.domains) || outbox.domains.length === 0 || !/^[a-f0-9]{64}$/.test(outbox.before_fingerprint_hmac) || !/^[a-f0-9]{64}$/.test(outbox.after_fingerprint_hmac) || typeof outbox.invalidation_pending !== 'boolean' || (outbox.source_journal_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(outbox.source_journal_sha256))) throw new Error('Invalid core Agent config mutation outbox')
+    assertDomains(outbox.domains)
+    if (outbox.schema_version !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(outbox.mutation_id) || !Number.isSafeInteger(outbox.target_revision) || outbox.target_revision < 2 || !['prepared', 'data_persisted', 'committed'].includes(outbox.state) || !/^[a-f0-9]{64}$/.test(outbox.before_fingerprint_hmac) || !/^[a-f0-9]{64}$/.test(outbox.after_fingerprint_hmac) || typeof outbox.invalidation_pending !== 'boolean' || (outbox.source_journal_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(outbox.source_journal_sha256))) throw new Error('Invalid core Agent config mutation outbox')
   }
 
   private fingerprintSnapshot(snapshot: unknown): string {

@@ -52,6 +52,9 @@ function buildAgent(managerStack?: unknown): AgentUnderTest {
   const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
   agent.agentConfig = { model_config: { powerful: { apikey: 'test-key', model_id: 'test-model' } } }
   agent.config = { moduleId: 'test-agent' }
+  // 直接 test fixture：构造函数默认 runtime_config_authenticated=true；Object.create 绕过构造函数，这里补齐。
+  agent.configAuthenticated = true
+  agent.configStale = false
   if (managerStack !== undefined) agent.managerStack = managerStack
   return agent as unknown as AgentUnderTest
 }

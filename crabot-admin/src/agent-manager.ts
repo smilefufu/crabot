@@ -7,7 +7,7 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { canonicalizeJson, generateTimestamp, type RpcClient } from 'crabot-shared'
-import type { RuntimeManager } from './runtime-manager.js'
+import { durableAtomicWriteFile } from './durable-file.js'
 import type {
   AgentImplementation,
   AgentInstance,
@@ -214,6 +214,7 @@ export class AgentManager {
   private onConfigChangedCallback: (() => void) | null = null
   private mutationRunner: ConfigMutationRunner | null = null
   private semanticSnapshotProvider: (() => unknown) | null = null
+  private mutationTail: Promise<void> = Promise.resolve()
 
   constructor(dataDir: string) {
     this.dataDir = dataDir
@@ -330,11 +331,19 @@ export class AgentManager {
     return this.instances.get(id)
   }
 
+  /**
+   * Test/import compatibility seam. Production entrypoints never pass true; live dynamic Agent
+   * creation remains rejected before any write. P6-D removes this legacy record constructor.
+   */
   async createInstance(
     params: CreateAgentInstanceParams,
-    rpcClient?: RpcClient,
-    runtimeManager?: RuntimeManager
+    allowLegacyArchiveWrite = false
   ): Promise<AgentInstance> {
+    if (!allowLegacyArchiveWrite) {
+      throw Object.assign(new Error('Dynamic Agent instances are retired; only builtin crabot-agent is supported'), {
+        code: 'ADMIN_HOTPLUG_NOT_ALLOWED',
+      })
+    }
     const impl = this.implementations.get(params.implementation_id)
     if (!impl) {
       throw new Error(`Implementation not found: ${params.implementation_id}`)
@@ -371,68 +380,6 @@ export class AgentManager {
     }
     this.configs.set(instance.id, defaultConfig)
     await this.saveConfig(instance.id)
-
-    // 如果是已安装的实现，注册并启动模块
-    if (impl.type === 'installed' && impl.installed_path && rpcClient && runtimeManager) {
-      try {
-        // 构造启动命令
-        const startCmd = runtimeManager.createStartCommand(
-          {
-            module_id: instance.id,
-            module_type: 'agent',
-            protocol_version: '1.0.0',
-            name: instance.name,
-            version: impl.version ?? '0.1.0',
-            runtime: { type: 'nodejs' }, // 从 impl 获取
-            entry: 'dist/main.js',        // 从 impl 获取
-            env: {},
-          },
-          impl.installed_path
-        )
-
-        // 创建 ModuleDefinition
-        const moduleDefinition = {
-          module_id: instance.id,
-          module_type: 'agent',
-          entry: `${startCmd.command} ${startCmd.args.join(' ')}`,
-          cwd: startCmd.cwd,
-          env: {
-            ...startCmd.env,
-            CRABOT_MM_ENDPOINT: process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000',
-            CRABOT_AGENT_CONFIG_PATH: path.join(
-              this.dataDir,
-              'agent-configs',
-              `${instance.id}.json`
-            ),
-          },
-          auto_start: instance.auto_start,
-          start_priority: instance.start_priority,
-        }
-
-        // 向 Module Manager 注册
-        await rpcClient.registerModuleDefinition(moduleDefinition, 'admin')
-
-        // 更新实例状态
-        instance.module_registered = true
-        this.instances.set(instance.id, instance)
-        await this.saveInstances()
-
-        // 如果 auto_start，立即启动
-        if (instance.auto_start) {
-          await rpcClient.startModule(instance.id, 'admin')
-        }
-
-        console.log(`[AgentManager] Module registered and started: ${instance.id}`)
-      } catch (error) {
-        console.error(`[AgentManager] Failed to register/start module:`, error)
-        // 回滚：删除实例记录
-        this.instances.delete(instance.id)
-        this.configs.delete(instance.id)
-        await this.saveInstances()
-        await this.deleteConfig(instance.id)
-        throw error
-      }
-    }
 
     return instance
   }
@@ -512,6 +459,18 @@ export class AgentManager {
   }
 
   async updateConfig(params: UpdateAgentConfigParams): Promise<AgentInstanceConfig> {
+    const previous = this.mutationTail
+    let release!: () => void
+    this.mutationTail = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try {
+      return await this.updateConfigUnlocked(params)
+    } finally {
+      release()
+    }
+  }
+
+  private async updateConfigUnlocked(params: UpdateAgentConfigParams): Promise<AgentInstanceConfig> {
     const existing = this.configs.get(params.instance_id)
     if (!existing) {
       throw new Error(`Config not found for instance: ${params.instance_id}`)
@@ -772,9 +731,7 @@ export class AgentManager {
    * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   private async saveImplementations(): Promise<void> {

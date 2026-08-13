@@ -430,6 +430,7 @@ export class UnifiedAgent extends ModuleBase {
   private extra: Record<string, unknown>
   private configRevision = ConfigLoader.revision
   private configStale = false
+  private configAuthenticated: boolean
   private configPullTimer?: ReturnType<typeof setTimeout>
 
   // 端口缓存
@@ -529,6 +530,7 @@ export class UnifiedAgent extends ModuleBase {
 
     this.orchestrationConfig = config.orchestration
     this.agentConfig = config.agent_config
+    this.configAuthenticated = config.runtime_config_authenticated ?? true
     this.extra = config.extra ?? {}
     this.imageConnInfo = toImageConnInfo(config)
     this.imageCapability = config.image_capability ?? { available: false }
@@ -605,13 +607,13 @@ export class UnifiedAgent extends ModuleBase {
 
   /** Central admission for every new runtime-config-dependent execution. */
   private assertRuntimeExecutionAdmission(): void {
-    if (this.configStale) throw new Error('AGENT_RUNTIME_CONFIG_STALE')
+    if (!this.configAuthenticated || this.configStale) throw new Error('AGENT_RUNTIME_CONFIG_STALE')
     if (!this.hasRuntimeExecutionConfig()) throw new Error('Agent runtime config is not configured')
   }
 
   private hasRuntimeExecutionConfig(): boolean {
-    const mc = this.agentConfig?.model_config
-    return !!mc && Object.values(mc).some((m) => m && m.apikey && m.model_id)
+    const powerful = this.agentConfig?.model_config?.powerful
+    return !!powerful?.apikey && !!powerful.model_id
   }
 
   /**
@@ -619,8 +621,8 @@ export class UnifiedAgent extends ModuleBase {
    * 初始化智能体层
    */
   private initializeAgentLayer(config: AgentLayerConfig): void {
-    // 设置角色
-    for (const role of config.roles) {
+    // 设置角色（legacy 内部门控；wire 不下发，pull 路径已由 ConfigLoader 补齐）
+    for (const role of config.roles ?? ['front', 'worker']) {
       this.roles.add(role)
     }
 
@@ -741,6 +743,7 @@ export class UnifiedAgent extends ModuleBase {
         ),
       callAdmin: async <P, R>(method: string, params: P): Promise<R> =>
         this.rpcClient.call<P, R>(await this.getAdminPort(), method, params, this.config.moduleId),
+      getRuntimeConfigSummary: () => this.agentConfig,
       // 发起人身份的解析原料：全是**既有**入口，本处只做注入，不新造解析逻辑。
       principalResolver: {
         resolvePermissions: (p) =>
@@ -1226,6 +1229,7 @@ export class UnifiedAgent extends ModuleBase {
       }
 
       case 'media.download_completed': {
+        this.assertRuntimeExecutionAdmission()
         const p = event.payload as { channel_id: string; session_id?: string; handle: string; status: string; error?: string }
         if (!p.session_id) break
         const note = p.status === 'ready'
@@ -1248,7 +1252,6 @@ export class UnifiedAgent extends ModuleBase {
     this.configPullTimer = setTimeout(() => {
       this.configPullTimer = undefined
       void this.pullRuntimeConfig().catch((error) => {
-        this.configStale = true
         console.error(`[${this.config.moduleId}] authenticated runtime config pull failed:`, error instanceof Error ? error.message : String(error))
       })
     }, 50)
@@ -1264,16 +1267,26 @@ export class UnifiedAgent extends ModuleBase {
         // A successful authenticated read proves the current revision remains authoritative.
         // Do not reapply it: a previous transient pull failure must not permanently block ingress.
         this.configStale = false
+        this.configAuthenticated = true
         return
       }
       await this.applyRuntimeConfigCandidate(loaded.config)
       this.configRevision = loaded.revision
       ConfigLoader.acceptRevision(loaded.revision)
       this.configStale = false
+      this.configAuthenticated = true
     } catch (error) {
       this.configStale = true
+      this.configAuthenticated = false
+      this.disconnectRuntimeConfigResources()
       throw error
     }
+  }
+
+  private disconnectRuntimeConfigResources(): void {
+    void this.mcpConnector.disconnectAll().catch((error) => {
+      console.error(`[${this.config.moduleId}] failed to close stale MCP connections:`, error instanceof Error ? error.message : String(error))
+    })
   }
 
   private async applyRuntimeConfigCandidate(next: UnifiedAgentConfig): Promise<void> {
@@ -1385,6 +1398,8 @@ export class UnifiedAgent extends ModuleBase {
    * @see protocol-agent-v2.md §5.1 SwitchMap, §5.2 Attention Scheduler
    */
   private async handleMessageReceived(payload: { message: ChannelMessage; friend: Friend; crab_display_name?: string; crab_self_handle?: string }): Promise<void> {
+    // Runtime admission happens before any message metadata is cached or any downstream
+    // routing/reply side effect is attempted.
     this.assertRuntimeExecutionAdmission()
     const { message, friend, crab_display_name, crab_self_handle } = payload
     const { session } = message
@@ -1398,11 +1413,8 @@ export class UnifiedAgent extends ModuleBase {
       this.crabSelfHandles.set(session.channel_id, crab_self_handle)
     }
 
-    // 0. 检查是否已配置
-    if (!this.isConfigured()) {
-      await this.sendConfigMissingReply(message)
-      return
-    }
+    // 0. Runtime admission above already rejected unconfigured/stale input.
+    if (!this.isConfigured()) return
 
     // 群聊消息走注意力调度（@mention 消息立即触发巡检）
     if (session.type === 'group') {
@@ -2055,7 +2067,7 @@ export class UnifiedAgent extends ModuleBase {
       const modules = await this.rpcClient.resolve({ module_id: 'admin-web' }, this.config.moduleId)
       const adminPort = modules[0]?.port
       if (!adminPort) throw new Error('official Admin module is unavailable')
-      const consumeResult = await this.rpcClient.call<
+      const consumeResult = await this.rpcClient.callSensitive<
         { assertion: string; expected: { manager_key: string; request_id: string; payload_sha256: string } },
         { consumed?: unknown; expires_at?: unknown }
       >(adminPort, 'consume_admin_chat_assertion', {

@@ -47,6 +47,7 @@ import {
   ProxyManager,
   type ProxyConfig,
   type RpcHandlerContext,
+  RpcError,
   CLAIM_COMMANDS,
   CLAIM_PAIR_COMMANDS,
   normalizeSlash,
@@ -109,14 +110,13 @@ import {
   type CreateModelProviderParams,
   type UpdateModelProviderParams,
   type ImportFromVendorParams,
-  type ResolveModelConfigParams,
   type GlobalModelConfig,
-  type ModelConnectionInfo,
   type LLMConnectionInfo,
   type AgentImplementation,
   type AgentInstance,
   type AgentInstanceConfig,
   type ResolvedAgentConfig,
+  type CoreAgentRuntimeConfig,
   type SubAgentConfig,
   type SubAgentRegistryEntry,
   type CreateAgentInstanceParams,
@@ -388,6 +388,24 @@ const ADMIN_CHAT_CHANNEL_ID = 'admin-web'
  * 与既有端点惯用的裸 `parseInt(x ?? '20', 10)` 的差别只在于挡住了 NaN——`/api/agent/workers*`
  * 的 page/page_size/seq 会原样进入 agent 侧的 slice/filter，NaN 会静默返回空结果而不报错。
  */
+function coreAgentOrchestrationConfig(): CoreAgentRuntimeConfig['orchestration'] {
+  return {
+    front_context_recent_messages_window_hours: 6,
+    front_context_recent_messages_max_cap: 50,
+    front_context_short_term_memory_window_hours: 12,
+    front_context_short_term_memory_max_cap: 30,
+    worker_recent_messages_window_hours: 4,
+    worker_recent_messages_max_cap: 50,
+    worker_short_term_memory_window_hours: 12,
+    worker_short_term_memory_max_cap: 10,
+    worker_long_term_memory_limit: 5,
+    front_agent_timeout: 30,
+    session_state_ttl: 3600,
+    worker_config_refresh_interval: 60,
+    front_agent_queue_max_length: 100,
+    front_agent_queue_timeout: 300,
+  }
+}
 function parseIntParam(raw: string | null, fallback: number): number {
   const parsed = Number.parseInt(raw ?? '', 10)
   return Number.isFinite(parsed) ? parsed : fallback
@@ -433,7 +451,8 @@ async function wrapJsonHandler(res: ServerResponse, errorLabel: string, fn: () =
   try {
     sendJson(res, 200, await fn())
   } catch (err) {
-    sendJson(res, 500, { error: err instanceof Error ? err.message : errorLabel })
+    const code = (err as { code?: unknown })?.code
+    sendJson(res, code === 'ADMIN_CORE_AGENT_CUTOVER_INCOMPLETE' ? 503 : 500, { error: err instanceof Error ? err.message : errorLabel })
   }
 }
 
@@ -451,6 +470,9 @@ export class AdminModule extends ModuleBase {
   private readonly managementOnly: boolean
   private readonly cutoverBearer?: string
   private cutoverActivated = false
+  private configInvalidationPublicationEnabled = false
+  private cutoverAttempt: Promise<void> | null = null
+  private cutoverRecoveryReason: string | null = null
   private webServer: http.Server | null = null
   private jwtSecret: string = ''
 
@@ -531,6 +553,7 @@ export class AdminModule extends ModuleBase {
   private static readonly WAITING_HUMAN_SCAN_INTERVAL_MS = 5 * 60 * 1000  // 5min
   private waitingHumanScanTimer?: NodeJS.Timeout
   private stopTraceCleanupCron?: () => void
+  private agentMaintenanceStarted = false
 
   // Task/Trace 状态对账（SSOT 重整 2026-06-09 兜底层）
   private static readonly RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000  // 5min
@@ -560,8 +583,12 @@ export class AdminModule extends ModuleBase {
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
     this.configMutationCoordinator = new CoreAgentConfigMutationCoordinator(this.adminConfig.data_dir, {
       readSemanticSnapshot: () => this.readCoreAgentSemanticSnapshot(),
+      // Initial/upgrade seeding may commit multiple serialized source changes before Admin has
+      // registered. Deferring network publication must not block the next local startup mutation;
+      // the latest revision is published explicitly after activation.
       publishInvalidation: async ({ config_revision, domains }) => {
-        this.publishAdminEvent('admin.agent_config_invalidated', { config_revision, domains })
+        if (!this.configInvalidationPublicationEnabled) return
+        await this.publishAdminEventDurable('admin.agent_config_invalidated', { config_revision, domains })
       },
     })
     this.cutoverStore = new CoreAgentCutoverStore(this.adminConfig.data_dir)
@@ -617,17 +644,17 @@ export class AdminModule extends ModuleBase {
     this.agentManager.setMutationRunner(async (domains, preview, apply) => {
       await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
     })
-    this.modelProviderManager.setMutationRunner(async (domains, preview, apply) => {
-      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
+    this.modelProviderManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop)
     })
     this.mcpServerManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
     this.subAgentManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
     this.skillManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
-    this.mcpServerManager.setMutationRunner(async (domains, preview, apply) => {
-      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
+    this.mcpServerManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop)
     })
-    this.subAgentManager.setMutationRunner(async (domains, preview, apply) => {
-      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
+    this.subAgentManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop)
     })
     this.skillManager.setMutationRunner(async (domains, preview, apply) => {
       await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
@@ -640,7 +667,7 @@ export class AdminModule extends ModuleBase {
     )
 
     // 注册 Admin 协议方法
-      this.registerMethod('list_friends', this.handleListFriends.bind(this))
+    this.registerMethod('list_friends', this.handleListFriends.bind(this))
     this.registerMethod('get_friend', this.handleGetFriend.bind(this))
     this.registerMethod('find_master_friend', async () => {
       const friend = this.findMasterFriend()
@@ -686,7 +713,6 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('trigger_now', this.handleTriggerNow.bind(this))
 
     // Model Provider 管理
-    this.registerMethod('resolve_model_config', this.handleResolveModelConfig.bind(this))
 
     // Agent 实现管理
     this.registerMethod('list_agent_implementations', this.handleListAgentImplementations.bind(this))
@@ -828,6 +854,7 @@ export class AdminModule extends ModuleBase {
     await this.mcpServerManager.initializeLoadOnly()
     await this.subAgentManager.initializeLoadOnly()
     await this.skillManager.initializeLoadOnly()
+    await this.essentialToolsManager.initialize()
 
     // Recover durable revision/outbox against fully loaded source state before any mutation.
     // Verify any Skill source journal binding before coordinator initialization/recovery trusts source projection.
@@ -835,7 +862,19 @@ export class AdminModule extends ModuleBase {
     await this.configMutationCoordinator.initialize()
     await this.skillManager.recoverSourceJournal(this.configMutationCoordinator)
     await this.configMutationCoordinator.verifyCommittedFingerprint()
-    // Initial core config/default/legacy-role writes now use the recovered coordinator.
+    if (!this.managementOnly) {
+      // Normal mode is already eligible to publish; clear a committed startup outbox before
+      // builtin seeding attempts another mutation. Management-only deliberately retains it
+      // until the post-cutover activation phase.
+      this.configInvalidationPublicationEnabled = true
+      await this.configMutationCoordinator.drainPendingInvalidation()
+      // Builtin seeding mutations have no live Agent consumer: the core Agent pulls the
+      // latest revision through its own authenticated startup pull. Keep publication closed
+      // until activation below so startup seeding never depends on MM event fan-out.
+      this.configInvalidationPublicationEnabled = false
+    }
+    // A durable invalidation is replayed only after Admin has registered with MM. Startup source
+    // mutations below remain blocked by an active outbox, so no pending event can be overwritten.
     await this.agentManager.initializeCoreDefaultsAndMigrations()
 
     // 初始化 Channel 管理器
@@ -874,9 +913,6 @@ export class AdminModule extends ModuleBase {
     if (scannedCount > 0) {
       console.log(`[SkillManager] 扫描发现 ${scannedCount} 个新 skill（来自 ${this.workspaceDir}/.agents/skills/）`)
     }
-
-    // 初始化必要工具配置管理器
-    await this.essentialToolsManager.initialize()
 
     // 初始化 SubAgent 管理器
 
@@ -929,7 +965,15 @@ export class AdminModule extends ModuleBase {
       this.scheduleEngine.startAll(allSchedules)
       console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
       this.cutoverActivated = true
-      await this.configMutationCoordinator.drainPendingInvalidation()
+      this.configInvalidationPublicationEnabled = true
+      try {
+        await this.startAgentDependentMaintenance()
+      } catch (error) {
+        this.cutoverActivated = false
+        this.configInvalidationPublicationEnabled = false
+        this.scheduleEngine.stop()
+        throw error
+      }
     }
 
     // 启动 Web 服务器
@@ -941,38 +985,45 @@ export class AdminModule extends ModuleBase {
       console.warn('[Admin] 首次版本检查失败:', err instanceof Error ? err.message : err)
     })
 
-    // 启动 waiting_human 超时扫描器
+    // waiting_human legacy scan is local-only and may run in management-only mode.
     this.waitingHumanScanTimer = setInterval(
       () => { this.runWaitingHumanTimeoutScan().catch((err) => console.error('[Admin] waiting_human scan error:', err)) },
       AdminModule.WAITING_HUMAN_SCAN_INTERVAL_MS,
     )
+  }
 
-    // 启动 task/trace 状态对账（SSOT 重整兜底层 2026-06-09）
-    // 启动后立即跑一次，把历史 phantom 数据（trace 已终态但 task 仍活跃）即时修复；
-    // 然后周期性兜底——任何上游漏 RPC 都会被这层抓住。
-    void this.runReconciliation().catch((err) => console.error('[Admin] reconciliation initial run error:', err))
-    this.reconciliationTimer = setInterval(
-      () => { this.runReconciliation().catch((err) => console.error('[Admin] reconciliation error:', err)) },
-      AdminModule.RECONCILIATION_INTERVAL_MS,
-    )
+  private async startAgentDependentMaintenance(): Promise<void> {
+    if (this.agentMaintenanceStarted) return
+    this.agentMaintenanceStarted = true
+    try {
+      void this.runReconciliation().catch((err) => console.error('[Admin] reconciliation initial run error:', err))
+      this.reconciliationTimer = setInterval(
+        () => { this.runReconciliation().catch((err) => console.error('[Admin] reconciliation error:', err)) },
+        AdminModule.RECONCILIATION_INTERVAL_MS,
+      )
 
-    // 启动 trace 自动清理 cron（每日）
-    const { startTraceCleanupCron } = await import('./trace-cleanup-cron.js')
-    this.stopTraceCleanupCron = startTraceCleanupCron({
-      getGlobalConfig: () => this.modelProviderManager.getGlobalConfig(),
-      callCleanup: async (days: number) => {
-        return this.callAgentRpc<
-          { days: number; dry_run: boolean },
-          { affected_count: number; affected_bytes: number; deleted_trace_ids: string[] }
-        >('cleanup_old_traces', { days, dry_run: false })
-      },
-      // spec 2026-06-09 §4.4: 按 task 个数清理，调 admin 本地 handleCleanupOldTasksByCount
-      // （不再透传 agent traces_by_count）
-      callCleanupByTaskCount: async (maxCount: number) => {
-        return this.handleCleanupOldTasksByCount({ max_count: maxCount, dry_run: false })
-      },
-    })
-    console.log('[Admin] Trace cleanup cron started')
+      const { startTraceCleanupCron } = await import('./trace-cleanup-cron.js')
+      this.stopTraceCleanupCron = startTraceCleanupCron({
+        getGlobalConfig: () => this.modelProviderManager.getGlobalConfig(),
+        callCleanup: async (days: number) => {
+          return this.callAgentRpc<
+            { days: number; dry_run: boolean },
+            { affected_count: number; affected_bytes: number; deleted_trace_ids: string[] }
+          >('cleanup_old_traces', { days, dry_run: false })
+        },
+        callCleanupByTaskCount: async (maxCount: number) => {
+          return this.handleCleanupOldTasksByCount({ max_count: maxCount, dry_run: false })
+        },
+      })
+      console.log('[Admin] Trace cleanup cron started')
+    } catch (error) {
+      if (this.reconciliationTimer) clearInterval(this.reconciliationTimer)
+      this.reconciliationTimer = undefined
+      this.stopTraceCleanupCron?.()
+      this.stopTraceCleanupCron = undefined
+      this.agentMaintenanceStarted = false
+      throw error
+    }
   }
 
   protected override async onStop(): Promise<void> {
@@ -988,6 +1039,7 @@ export class AdminModule extends ModuleBase {
 
     // 停止 trace 自动清理 cron
     this.stopTraceCleanupCron?.()
+    this.agentMaintenanceStarted = false
 
     // 停止调度引擎
     this.scheduleEngine.stop()
@@ -1011,11 +1063,16 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  protected override async getHealthStatus(): Promise<'healthy' | 'degraded' | 'unhealthy'> {
+    if (this.cutoverActivated) return 'healthy'
+    return this.cutoverRecoveryReason ? 'unhealthy' : 'degraded'
+  }
+
   protected override async getHealthDetails(): Promise<Record<string, unknown>> {
     const health: Record<string, unknown> = {
       web_server_running: this.webServer !== null,
       cutover_ready: this.cutoverActivated,
-      ...(this.cutoverActivated ? {} : { recovery_reason: 'waiting for authenticated core Agent startup/configuration' }),
+      ...(this.cutoverActivated ? {} : { recovery_reason: this.cutoverRecoveryReason ?? 'waiting for authenticated core Agent startup/configuration' }),
       friends_count: this.friends.size,
       pending_messages_count: this.pendingMessages.size,
       providers_count: this.modelProviderManager.listProviders().length,
@@ -2405,7 +2462,10 @@ export class AdminModule extends ModuleBase {
       // 必须在通用 memoryV2Router dispatch 之前——该 router 只持有 memory 模块 RPC，
       // 不能创建 admin 侧 task；重建语义是建一条 pending worker 任务。
       if (req.method === 'POST' && pathname === '/api/memory/v2/graph/rebuild') {
-        await wrapJsonHandler(res, 'memory graph rebuild failed', () => this.handleRebuildMemoryGraph())
+        await wrapJsonHandler(res, 'memory graph rebuild failed', async () => {
+          this.assertIngressOpen()
+          return this.handleRebuildMemoryGraph()
+        })
         return
       }
 
@@ -5388,6 +5448,7 @@ export class AdminModule extends ModuleBase {
    * trace_count + worker_trace_id 列表层暂返 0/null 占位（前端展开 task 时 lazy load get_trace_tree）。
    */
   private async handleListConversationUnits(params: ListConversationUnitsParams): Promise<ListConversationUnitsResult> {
+    this.assertIngressOpen()
     // 1. 拉所有满足 filter 的 task（复用 handleListTasks 的过滤逻辑子集）
     let tasks = Array.from(this.tasks.values())
     if (params.filter) {
@@ -5525,6 +5586,7 @@ export class AdminModule extends ModuleBase {
    * 4. 活跃 task 不计入配额、不删
    */
   private async handleCleanupOldTasksByCount(params: CleanupOldTasksByCountParams): Promise<CleanupOldTasksByCountResult> {
+    this.assertIngressOpen()
     const maxCount = params.max_count
     const dryRun = params.dry_run ?? false
     if (!Number.isFinite(maxCount) || maxCount < 1) {
@@ -6090,6 +6152,20 @@ export class AdminModule extends ModuleBase {
   // ============================================================================
   // 事件发布
   // ============================================================================
+
+  private async publishAdminEventDurable<K extends keyof AdminEventPayloads>(
+    type: K,
+    payload: AdminEventPayloads[K]
+  ): Promise<void> {
+    const event = {
+      id: generateId(),
+      type,
+      source: this.config.moduleId,
+      payload,
+      timestamp: generateTimestamp(),
+    }
+    await this.rpcClient.publishEvent(event as Event, this.config.moduleId)
+  }
 
   private publishAdminEvent<K extends keyof AdminEventPayloads>(
     type: K,
@@ -7068,14 +7144,6 @@ export class AdminModule extends ModuleBase {
   }
 
   // ============================================================================
-  // Model Provider 协议方法
-  // ============================================================================
-
-  private async handleResolveModelConfig(params: ResolveModelConfigParams): Promise<ModelConnectionInfo> {
-    return this.modelProviderManager.resolveModelConfig(params)
-  }
-
-  // ============================================================================
   // Agent Implementation 协议方法
   // ============================================================================
 
@@ -7083,12 +7151,17 @@ export class AdminModule extends ModuleBase {
     items: AgentImplementation[]
     pagination: { page: number; page_size: number; total_items: number; total_pages: number }
   }> {
-    return this.agentManager.listImplementations(params)
+    const page = params.page ?? 1
+    const pageSize = params.page_size ?? 20
+    const core = this.agentManager.getImplementation('default')
+    const items = core && (!params.type || core.type === params.type) && (!params.engine || core.engine === params.engine) ? [core] : []
+    return { items: items.slice((page - 1) * pageSize, page * pageSize), pagination: { page, page_size: pageSize, total_items: items.length, total_pages: Math.ceil(items.length / pageSize) } }
   }
 
   private async handleGetAgentImplementation(params: { implementation_id: string }): Promise<{
     implementation: AgentImplementation
   }> {
+    if (params.implementation_id !== 'default') throw new Error(`Implementation not found: ${params.implementation_id}`)
     const impl = this.agentManager.getImplementation(params.implementation_id)
     if (!impl) {
       throw new Error(`Implementation not found: ${params.implementation_id}`)
@@ -7104,12 +7177,17 @@ export class AdminModule extends ModuleBase {
     items: AgentInstance[]
     pagination: { page: number; page_size: number; total_items: number; total_pages: number }
   }> {
-    return this.agentManager.listInstances(params)
+    const page = params.page ?? 1
+    const pageSize = params.page_size ?? 20
+    const core = this.agentManager.getInstance('crabot-agent')
+    const items = core && (!params.implementation_id || core.implementation_id === params.implementation_id) && (params.auto_start === undefined || core.auto_start === params.auto_start) ? [core] : []
+    return { items: items.slice((page - 1) * pageSize, page * pageSize), pagination: { page, page_size: pageSize, total_items: items.length, total_pages: Math.ceil(items.length / pageSize) } }
   }
 
   private async handleGetAgentInstance(params: { instance_id: string }): Promise<{
     instance: AgentInstance
   }> {
+    if (params.instance_id !== 'crabot-agent') throw new Error(`Instance not found: ${params.instance_id}`)
     const instance = this.agentManager.getInstance(params.instance_id)
     if (!instance) {
       throw new Error(`Instance not found: ${params.instance_id}`)
@@ -7117,32 +7195,22 @@ export class AdminModule extends ModuleBase {
     return { instance }
   }
 
-  private async handleCreateAgentInstance(params: CreateAgentInstanceParams): Promise<{
+  private async handleCreateAgentInstance(_params: CreateAgentInstanceParams): Promise<{
     instance: AgentInstance
   }> {
-    const instance = await this.agentManager.createInstance(
-      params,
-      this.rpcClient,
-      this.moduleInstaller.getRuntimeManager()
-    )
-    this.publishAdminEvent('admin.agent_instance_created', { instance })
-    return { instance }
+    throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Dynamic Agent instances are retired; only builtin crabot-agent is supported')
   }
 
-  private async handleUpdateAgentInstance(params: UpdateAgentInstanceParams): Promise<{
+  private async handleUpdateAgentInstance(_params: UpdateAgentInstanceParams): Promise<{
     instance: AgentInstance
   }> {
-    const instance = await this.agentManager.updateInstance(params)
-    this.publishAdminEvent('admin.agent_instance_updated', { instance })
-    return { instance }
+    throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Dynamic Agent instances are retired; legacy Agent records are read-only')
   }
 
-  private async handleDeleteAgentInstance(params: { instance_id: string }): Promise<{
+  private async handleDeleteAgentInstance(_params: { instance_id: string }): Promise<{
     deleted: true
   }> {
-    await this.agentManager.deleteInstance(params.instance_id, this.rpcClient)
-    this.publishAdminEvent('admin.agent_instance_deleted', { instance_id: params.instance_id })
-    return { deleted: true }
+    throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Dynamic Agent instances are retired; legacy Agent records are read-only')
   }
   private async waitForCoreAgentReady(options: { attempts?: number; delayMs?: number } = {}): Promise<void> {
     const attempts = options.attempts ?? 30
@@ -7164,8 +7232,50 @@ export class AdminModule extends ModuleBase {
   }
 
   async completeCoreAgentCutover(): Promise<void> {
-    if (!this.managementOnly || this.cutoverActivated) return
-    if (!this.cutoverBearer) throw new Error('Missing CRABOT_ADMIN_CUTOVER_BEARER')
+    if (this.cutoverActivated || !this.managementOnly) return
+    if (this.cutoverAttempt) return this.cutoverAttempt
+    this.cutoverRecoveryReason = null
+    this.cutoverAttempt = this.completeCoreAgentCutoverAttempt()
+      .catch((error) => {
+        this.configInvalidationPublicationEnabled = false
+        this.cutoverRecoveryReason = this.classifyCutoverRecoveryReason(error)
+        throw error
+      })
+      .finally(() => { this.cutoverAttempt = null })
+    return this.cutoverAttempt
+  }
+
+  private classifyCutoverRecoveryReason(error: unknown): string {
+    const code = (error as { code?: unknown })?.code
+    if (code === 'MODULE_MANAGER_CUTOVER_STOP_FAILED') return 'legacy Agent process tree could not be stopped; retry after recovery'
+    if (code === 'MODULE_MANAGER_CUTOVER_CONFLICT') return 'core Agent cutover inventory conflicts with durable marker'
+    const message = error instanceof Error ? error.message : String(error)
+    if (message.startsWith('Core Agent readiness timed out:')) return 'waiting for core Agent health and authenticated configuration'
+    if (message.includes('archive') || message.includes('cutover marker')) return 'legacy Agent archive or cutover marker requires recovery'
+    return 'core Agent cutover requires operator recovery before retry'
+  }
+
+  private async reconcileCoreAgentCutoverRecord(
+    archive: { fingerprint: string; record_count: number },
+    completionError: unknown,
+  ): Promise<unknown> {
+    let response: { record: unknown }
+    try {
+      response = await this.rpcClient.callModuleManager<Record<string, never>, { record: unknown }>(
+        'get_core_agent_cutover_record', {}, this.config.moduleId,
+      )
+    } catch {
+      throw completionError
+    }
+    const result = response.record as {
+      admin_archive_fingerprint?: unknown
+      admin_archived_record_count?: unknown
+    }
+    if (result?.admin_archive_fingerprint !== archive.fingerprint || result?.admin_archived_record_count !== archive.record_count) throw completionError
+    return result
+  }
+
+  private async completeCoreAgentCutoverAttempt(): Promise<void> {
     const packageEntries = await this.readLegacyAgentPackageEntries()
     const frontWorkerConfigs = await this.readLegacyFrontWorkerConfigSources()
     const sources = [
@@ -7177,22 +7287,45 @@ export class AdminModule extends ModuleBase {
     ]
     const archive = await this.cutoverStore.archive(sources)
     const existing = await this.cutoverStore.loadMarker()
-    const result = await this.rpcClient.callModuleManagerSensitive(
-      'complete_core_agent_cutover',
-      { schema_version: 1, admin_archive_fingerprint: archive.fingerprint, admin_archived_record_count: archive.record_count },
-      this.config.moduleId,
-      { authorizationBearer: this.cutoverBearer },
-    )
-    if (!existing || existing.archive_fingerprint !== archive.fingerprint || existing.archive_record_count !== archive.record_count) {
+    if (existing && (existing.archive_fingerprint !== archive.fingerprint || existing.archive_record_count !== archive.record_count)) {
+      throw new Error('Core Agent cutover marker conflicts with current archive')
+    }
+    if (!this.cutoverBearer) throw new Error('Missing CRABOT_ADMIN_CUTOVER_BEARER')
+    let result: unknown
+    try {
+      result = await this.rpcClient.callModuleManagerSensitive(
+        'complete_core_agent_cutover',
+        { schema_version: 1, admin_archive_fingerprint: archive.fingerprint, admin_archived_record_count: archive.record_count },
+        this.config.moduleId,
+        { authorizationBearer: this.cutoverBearer },
+      )
+      const wrapped = result as { record?: unknown }
+      if (!wrapped || wrapped.record === undefined) throw new Error('Invalid complete_core_agent_cutover response')
+    } catch (error) {
+      result = await this.reconcileCoreAgentCutoverRecord(archive, error)
+    }
+    if (!existing) {
       await this.cutoverStore.saveMarker({ schema_version: 1, completed: true, completed_at: new Date().toISOString(), archive_fingerprint: archive.fingerprint, archive_record_count: archive.record_count, mm_result: result })
     }
+    // The durable marker commits topology cutover. Readiness activation is a separate,
+    // retryable phase: the MM bearer has already been consumed and must never be replayed.
     await this.waitForCoreAgentReady()
+    this.configInvalidationPublicationEnabled = true
     await this.configMutationCoordinator.drainPendingInvalidation()
     await this.channelManager.reRegisterInstances()
     await this.ensureBuiltinSchedules()
-    this.scheduleEngine.startAll(Array.from(this.schedules.values()))
+    await this.publishCurrentAgentConfigInvalidation()
+    try {
+      await this.startAgentDependentMaintenance()
+    } catch (error) {
+      this.configInvalidationPublicationEnabled = false
+      throw error
+    }
+    // Open ingress before arming timers: an already-due one-shot must never fire into
+    // the management-only gate and be lost.
     this.cutoverActivated = true
-    await this.publishAgentConfigInvalidation()
+    this.scheduleEngine.startAll(Array.from(this.schedules.values()))
+    this.cutoverRecoveryReason = null
   }
 
   // ============================================================================
@@ -7201,23 +7334,33 @@ export class AdminModule extends ModuleBase {
 
   private async handleGetAgentConfig(params: { instance_id: string }, context?: RpcHandlerContext, attempt = 0): Promise<{
     config_revision: number
-    config: ResolvedAgentConfig
+    config: CoreAgentRuntimeConfig
   }> {
     if (params.instance_id !== 'crabot-agent') {
       throw new Error('Only exact core Agent may pull runtime config')
     }
     const bearer = context?.authorizationBearer
-    if (!bearer) throw new Error('UNAUTHORIZED')
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
     await this.rpcClient.callModuleManagerSensitive(
       'verify_core_agent_runtime',
       { expected_module_id: 'crabot-agent' },
       this.config.moduleId,
       { authorizationBearer: bearer },
     )
+    const coreRuntime = await this.rpcClient.callModuleManager<
+      { module_id: 'crabot-agent' },
+      { module_id: string; module_type: string; port: number }
+    >('get_module', { module_id: 'crabot-agent' }, this.config.moduleId)
+    if (coreRuntime.module_id !== 'crabot-agent' || coreRuntime.module_type !== 'agent' || !Number.isSafeInteger(coreRuntime.port)) {
+      throw new Error('Invalid core Agent runtime definition')
+    }
     const epochBefore = await this.configMutationCoordinator.readCommittedEpoch()
     if (epochBefore === null) {
-      if (attempt >= 5) throw new Error('Core Agent config mutation is active; retry later')
-      await new Promise((resolve) => setTimeout(resolve, 10))
+      // A durable mutation performs several fsync writes and can hold the outbox for tens to
+      // hundreds of milliseconds; give the coherent read a bounded window that outlasts a
+      // normal mutation before failing closed (the Agent outer pull retries regardless).
+      if (attempt >= 25) throw new Error('Core Agent config mutation is active; retry later')
+      await new Promise((resolve) => setTimeout(resolve, 20))
       return this.handleGetAgentConfig(params, context, attempt + 1)
     }
     const config = this.agentManager.getConfig(params.instance_id)
@@ -7276,6 +7419,10 @@ export class AdminModule extends ModuleBase {
       // fallback === 'none' 且未配置 → 不加入 resolvedModelConfig
     }
 
+    if (!resolvedModelConfig.powerful) {
+      throw new RpcError('ADMIN_CORE_AGENT_MODEL_NOT_CONFIGURED', 'Core Agent powerful model is not configured')
+    }
+
     // 所有 enabled MCP server 都对所有 agent 实例可见——
     // 不再区分 builtin / user-installed，不再读 config.mcp_server_ids（已 @deprecated）
     const enabledMcpServers = this.mcpServerManager.list().filter((s) => s.enabled)
@@ -7311,41 +7458,52 @@ export class AdminModule extends ModuleBase {
 
     const epoch = await this.configMutationCoordinator.readCommittedEpoch()
     if (epoch === null || epoch.revision !== epochBefore.revision || epoch.generation !== epochBefore.generation) {
-      if (attempt >= 5) throw new Error('Core Agent config changed during resolution; retry later')
-      await new Promise((resolve) => setTimeout(resolve, 10))
+      if (attempt >= 25) throw new Error('Core Agent config changed during resolution; retry later')
+      await new Promise((resolve) => setTimeout(resolve, 20))
       return this.handleGetAgentConfig(params, context, attempt + 1)
     }
+    // 实例配置为 slot 制；legacy front/worker roles 不下发，Agent 内部自行补齐。
+    const resolvedAgentConfig: ResolvedAgentConfig = {
+      ...config,
+      model_config: resolvedModelConfig,
+      tmp_page_base_url: tmpPageBaseUrl,
+      mcp_servers: mcpServerConfigs,
+      skills: this.skillManager.list()
+        .filter((s) => {
+          if (!s.enabled) return false
+          if (!s.skill_dir) {
+            console.warn(`[Admin] skill "${s.name}" (${s.id}) skill_dir missing — skipped from agent push`)
+            return false
+          }
+          return true
+        })
+        .map((s) => this.skillManager.toAgentConfig(s)),
+      subagents,
+    }
+    const runtimeConfig: CoreAgentRuntimeConfig = {
+      module_id: 'crabot-agent',
+      module_type: 'agent',
+      version: '0.2.0',
+      protocol_version: '3.1.1',
+      port: coreRuntime.port,
+      orchestration: coreAgentOrchestrationConfig(),
+      agent_config: resolvedAgentConfig,
+      ...imageFields,
+      ...(config.extra ? { extra: config.extra } : {}),
+    }
+    delete runtimeConfig.agent_config.extra
     return {
       config_revision: epoch.revision,
-      config: {
-        ...config,
-        model_config: resolvedModelConfig,
-        ...imageFields,
-        tmp_page_base_url: tmpPageBaseUrl,
-        // 所有 enabled MCP server 自动对所有 agent 可见，
-        // 不再读 config.mcp_server_ids（已 @deprecated）
-        mcp_servers: mcpServerConfigs,
-        // 所有 enabled skill 都对所有 agent 可见，不再读 config.skill_ids（已 @deprecated）
-        // skill_dir 缺失的 entry 过滤掉（历史脏数据防御）：agent 拿到 undefined skill_dir 会在
-        // computeSkillsHash h.update(undefined) 抛 TypeError，整个 update_config 推送失败。
-        skills: this.skillManager.list()
-          .filter((s) => {
-            if (!s.enabled) return false
-            if (!s.skill_dir) {
-              console.warn(`[Admin] skill "${s.name}" (${s.id}) skill_dir missing — skipped from agent push`)
-              return false
-            }
-            return true
-          })
-          .map((s) => this.skillManager.toAgentConfig(s)),
-        subagents,
-      },
+      config: runtimeConfig,
     }
   }
 
   private async handleUpdateAgentConfig(params: UpdateAgentConfigParams): Promise<{
     config: AgentInstanceConfig
   }> {
+    if (params.instance_id !== 'crabot-agent') {
+      throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Legacy Agent configuration is read-only')
+    }
     const config = await this.agentManager.updateConfig(params)
     this.publishAdminEvent('admin.agent_instance_config_updated', {
       instance_id: params.instance_id,
@@ -7931,7 +8089,7 @@ export class AdminModule extends ModuleBase {
     const page = parseInt(url.searchParams.get('page') ?? '1', 10)
     const pageSize = parseInt(url.searchParams.get('page_size') ?? '20', 10)
 
-    const result = this.agentManager.listImplementations({
+    const result = await this.handleListAgentImplementations({
       ...(type ? { type } : {}),
       ...(engine ? { engine } : {}),
       page,
@@ -7947,6 +8105,11 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     id: string
   ): Promise<void> {
+    if (id !== 'default') {
+      res.writeHead(404)
+      res.end(JSON.stringify({ error: 'Implementation not found' }))
+      return
+    }
     const impl = this.agentManager.getImplementation(id)
     if (!impl) {
       res.writeHead(404)
@@ -7971,7 +8134,7 @@ export class AdminModule extends ModuleBase {
     const page = parseInt(url.searchParams.get('page') ?? '1', 10)
     const pageSize = parseInt(url.searchParams.get('page_size') ?? '20', 10)
 
-    const result = this.agentManager.listInstances({
+    const result = await this.handleListAgentInstances({
       ...(implementationId ? { implementation_id: implementationId } : {}),
       ...(autoStartParam !== null ? { auto_start: autoStartParam === 'true' } : {}),
       page,
@@ -7982,25 +8145,9 @@ export class AdminModule extends ModuleBase {
     res.end(JSON.stringify(result))
   }
 
-  private async handleCreateInstanceApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    try {
-      const body = await this.readJsonBody<CreateAgentInstanceParams>(req)
-      const instance = await this.agentManager.createInstance(
-        body,
-        this.rpcClient,
-        this.moduleInstaller.getRuntimeManager()
-      )
-      this.publishAdminEvent('admin.agent_instance_created', { instance })
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ instance }))
-    } catch (error) {
-      if (error instanceof Error) {
-        res.writeHead(400)
-        res.end(JSON.stringify({ error: error.message }))
-        return
-      }
-      throw error
-    }
+  private async handleCreateInstanceApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    res.writeHead(410, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ code: 'ADMIN_HOTPLUG_NOT_ALLOWED', error: 'Dynamic Agent instances are retired; only builtin crabot-agent is supported' }))
   }
 
   private async handleGetInstanceApi(
@@ -8008,6 +8155,11 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     id: string
   ): Promise<void> {
+    if (id !== 'crabot-agent') {
+      res.writeHead(404)
+      res.end(JSON.stringify({ error: 'Instance not found' }))
+      return
+    }
     const instance = this.agentManager.getInstance(id)
     if (!instance) {
       res.writeHead(404)
@@ -8019,44 +8171,19 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleUpdateInstanceApi(
-    req: IncomingMessage,
+    _req: IncomingMessage,
     res: ServerResponse,
-    id: string
+    _id: string
   ): Promise<void> {
-    try {
-      const body = await this.readJsonBody<Omit<UpdateAgentInstanceParams, 'instance_id'>>(req)
-      const instance = await this.agentManager.updateInstance({ ...body, instance_id: id })
-      this.publishAdminEvent('admin.agent_instance_updated', { instance })
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ instance }))
-    } catch (error) {
-      if (error instanceof Error) {
-        res.writeHead(error.message.includes('not found') ? 404 : 400)
-        res.end(JSON.stringify({ error: error.message }))
-        return
-      }
-      throw error
-    }
+    sendJson(res, 410, { code: 'ADMIN_HOTPLUG_NOT_ALLOWED', error: 'Dynamic Agent instances are retired; legacy Agent records are read-only' })
   }
 
   private async handleDeleteInstanceApi(
     _req: IncomingMessage,
     res: ServerResponse,
-    id: string
+    _id: string
   ): Promise<void> {
-    try {
-      await this.agentManager.deleteInstance(id, this.rpcClient)
-      this.publishAdminEvent('admin.agent_instance_deleted', { instance_id: id })
-      res.writeHead(204)
-      res.end()
-    } catch (error) {
-      if (error instanceof Error) {
-        res.writeHead(error.message.includes('not found') ? 404 : 400)
-        res.end(JSON.stringify({ error: error.message }))
-        return
-      }
-      throw error
-    }
+    sendJson(res, 410, { code: 'ADMIN_HOTPLUG_NOT_ALLOWED', error: 'Dynamic Agent instances are retired; legacy Agent records are read-only' })
   }
 
   // ============================================================================
@@ -8068,6 +8195,11 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     id: string
   ): Promise<void> {
+    if (id !== 'crabot-agent') {
+      res.writeHead(404)
+      res.end(JSON.stringify({ error: 'Config not found' }))
+      return
+    }
     const config = this.agentManager.getConfig(id)
     if (!config) {
       res.writeHead(404)
@@ -8083,6 +8215,10 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     id: string
   ): Promise<void> {
+    if (id !== 'crabot-agent') {
+      sendJson(res, 410, { code: 'ADMIN_HOTPLUG_NOT_ALLOWED', error: 'Legacy Agent configuration is read-only' })
+      return
+    }
     try {
       const body = await this.readJsonBody<Omit<UpdateAgentConfigParams, 'instance_id'>>(req)
       const config = await this.agentManager.updateConfig({ ...body, instance_id: id })
@@ -8690,6 +8826,7 @@ export class AdminModule extends ModuleBase {
    * 运行」的模块，两者无缝衔接、消除竞态。端口经 MM resolve 自解析，无运行模块时安全 no-op。
    */
   async reconcileRunningModuleConfigs(): Promise<void> {
+    await this.configMutationCoordinator.drainPendingInvalidation()
     await this.publishAgentConfigInvalidation()
     await this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] 启动对账同步 memory 配置失败:', err.message)
@@ -8738,13 +8875,17 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  private async publishAgentConfigInvalidation(): Promise<boolean> {
-    if (!this.cutoverActivated) return false
+  private async publishCurrentAgentConfigInvalidation(): Promise<void> {
     const revision = (await this.configMutationCoordinator.current()).revision
-    this.publishAdminEvent('admin.agent_config_invalidated', {
+    await this.publishAdminEventDurable('admin.agent_config_invalidated', {
       config_revision: revision,
       domains: ['models', 'image', 'mcp', 'skills', 'subagents', 'behavior'],
     })
+  }
+
+  private async publishAgentConfigInvalidation(): Promise<boolean> {
+    if (!this.cutoverActivated) return false
+    await this.publishCurrentAgentConfigInvalidation()
     return true
   }
 
@@ -8839,6 +8980,10 @@ export class AdminModule extends ModuleBase {
   }
 
   private async resolveModuleStartEnv(moduleId: string): Promise<Record<string, string>> {
+    // Core Agent runtime secrets are available only via authenticated get_agent_config pull.
+    // Never copy provider credentials into an MM lifecycle request or process environment.
+    if (moduleId === 'crabot-agent') return {}
+
     // Channel 模块的配置存在 channel-configs/ 目录，其他模块在 module-configs/。
     const channelInstance = this.channelManager.getInstance(moduleId)
     const config = channelInstance
@@ -8852,7 +8997,9 @@ export class AdminModule extends ModuleBase {
   private async handleStartModuleAdmin(params: {
     module_id: string
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
-    const mergedConfig = await this.resolveModuleStartEnv(params.module_id)
+    const mergedConfig = params.module_id === 'crabot-agent'
+      ? undefined
+      : await this.resolveModuleStartEnv(params.module_id)
 
     // 调用 MM 的 start_module，注入配置为 env
     const mmEndpoint = process.env.CRABT_MM_ENDPOINT || process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
@@ -8863,7 +9010,7 @@ export class AdminModule extends ModuleBase {
         id: generateId(),
         params: {
           module_id: params.module_id,
-          env: mergedConfig,
+          ...(mergedConfig ? { env: mergedConfig } : {}),
         },
       }),
     })
@@ -8903,7 +9050,9 @@ export class AdminModule extends ModuleBase {
     module_id: string
     force?: boolean
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
-    const env = await this.resolveModuleStartEnv(params.module_id)
+    const env = params.module_id === 'crabot-agent'
+      ? undefined
+      : await this.resolveModuleStartEnv(params.module_id)
     const mmEndpoint = process.env.CRABT_MM_ENDPOINT || process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
     const response = await fetch(`${mmEndpoint}/restart_module`, {
       method: 'POST',
@@ -8913,7 +9062,7 @@ export class AdminModule extends ModuleBase {
         params: {
           module_id: params.module_id,
           force: params.force,
-          env,
+          ...(env ? { env } : {}),
         },
       }),
     })
@@ -9570,6 +9719,7 @@ export class AdminModule extends ModuleBase {
    * 调用方应该用这个而不是裸 rpcClient.call(agentPort, ...)。
    */
   private async callAgentRpc<P, R>(method: string, params: P): Promise<R> {
+    this.assertIngressOpen()
     const tryOnce = async (): Promise<R> => {
       const port = await this.ensureAgentPort()
       if (!port) throw new Error('Agent not available')
@@ -9608,6 +9758,10 @@ export class AdminModule extends ModuleBase {
       sendJson(res, 200, result)
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
+      if ((error as { code?: unknown }).code === 'ADMIN_CORE_AGENT_CUTOVER_INCOMPLETE') {
+        sendJson(res, 503, { error: msg })
+        return
+      }
       if (notFoundWhen?.(msg)) {
         sendJson(res, 404, { error: msg })
         return
@@ -9887,8 +10041,8 @@ export class AdminModule extends ModuleBase {
       res.end(JSON.stringify(result))
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: msg }))
+      const status = (err as { code?: unknown }).code === 'ADMIN_CORE_AGENT_CUTOVER_INCOMPLETE' ? 503 : 500
+      sendJson(res, status, { error: msg })
     }
   }
 
@@ -9896,15 +10050,7 @@ export class AdminModule extends ModuleBase {
     _req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
-    try {
-      const result = await this.callAgentRpc<
-        Record<string, never>,
-        { total_bytes: number; trace_count: number; oldest_iso?: string; newest_iso?: string }
-      >('get_trace_disk_usage', {})
-      sendJson(res, 200, result)
-    } catch (err) {
-      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
-    }
+    await this.proxyAgentRpc(res, 'get_trace_disk_usage', {})
   }
 
   private async handleCleanupOldTracesApi(
@@ -9918,15 +10064,7 @@ export class AdminModule extends ModuleBase {
       return
     }
     const { days, dryRun } = parsed
-    try {
-      const result = await this.callAgentRpc<
-        { days: number; dry_run: boolean },
-        { affected_count: number; affected_bytes: number; deleted_trace_ids: string[] }
-      >('cleanup_old_traces', { days, dry_run: dryRun })
-      sendJson(res, 200, result)
-    } catch (err) {
-      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
-    }
+    await this.proxyAgentRpc(res, 'cleanup_old_traces', { days, dry_run: dryRun })
   }
 
   private async handleListModulesApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -9972,24 +10110,7 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     taskId: string
   ): Promise<void> {
-    try {
-      const port = await this.ensureAgentPort()
-      if (!port) {
-        res.writeHead(503, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Agent not available' }))
-        return
-      }
-      const result = await this.rpcClient.call<
-        { task_id: string },
-        unknown
-      >(port, 'get_trace_tree', { task_id: taskId }, this.config.moduleId)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: msg }))
-    }
+    await this.proxyAgentRpc(res, 'get_trace_tree', { task_id: taskId })
   }
 
   // ============================================================================
@@ -10000,24 +10121,7 @@ export class AdminModule extends ModuleBase {
     _req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
-    try {
-      const port = await this.ensureAgentPort()
-      if (!port) {
-        res.writeHead(503, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Agent not available' }))
-        return
-      }
-      const result = await this.rpcClient.call<
-        Record<string, never>,
-        { entities: unknown[] }
-      >(port, 'list_bg_entities', {}, this.config.moduleId)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: msg }))
-    }
+    await this.proxyAgentRpc(res, 'list_bg_entities', {})
   }
 
   private async handleGetBgEntityLogApi(
@@ -10025,32 +10129,15 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     entityId: string
   ): Promise<void> {
-    try {
-      const port = await this.ensureAgentPort()
-      if (!port) {
-        res.writeHead(503, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Agent not available' }))
-        return
-      }
-      const url = new URL(req.url ?? '', 'http://localhost')
-      const fromOffset = parseInt(url.searchParams.get('from_offset') ?? '0', 10)
-      const maxBytes = parseInt(url.searchParams.get('max_bytes') ?? '100000', 10)
-      const result = await this.rpcClient.call<
-        { entity_id: string; from_offset: number; max_bytes: number },
-        { content: string; new_offset: number; status: string; type: string }
-      >(port, 'get_bg_entity_log', { entity_id: entityId, from_offset: fromOffset, max_bytes: maxBytes }, this.config.moduleId)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      if (msg.includes('not found') || msg.includes('Entity not found')) {
-        res.writeHead(404, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: msg }))
-      } else {
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: msg }))
-      }
-    }
+    const url = new URL(req.url ?? '', 'http://localhost')
+    const fromOffset = parseInt(url.searchParams.get('from_offset') ?? '0', 10)
+    const maxBytes = parseInt(url.searchParams.get('max_bytes') ?? '100000', 10)
+    await this.proxyAgentRpc(
+      res,
+      'get_bg_entity_log',
+      { entity_id: entityId, from_offset: fromOffset, max_bytes: maxBytes },
+      (message) => message.includes('not found') || message.includes('Entity not found'),
+    )
   }
 
   private async handleKillBgEntityApi(
@@ -10058,24 +10145,7 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     entityId: string
   ): Promise<void> {
-    try {
-      const port = await this.ensureAgentPort()
-      if (!port) {
-        res.writeHead(503, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Agent not available' }))
-        return
-      }
-      const result = await this.rpcClient.call<
-        { entity_id: string },
-        { ok: boolean; message?: string }
-      >(port, 'kill_bg_entity', { entity_id: entityId }, this.config.moduleId)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: msg }))
-    }
+    await this.proxyAgentRpc(res, 'kill_bg_entity', { entity_id: entityId })
   }
 
   private async handleGetActiveAgentConfigApi(

@@ -107,6 +107,19 @@ describe('ModelProviderManager', () => {
       expect(updated.status).toBe('inactive')
     })
 
+    it('serializes concurrent disjoint patches to one provider', async () => {
+      const created = await manager.createProvider({
+        name: 'Original', type: 'manual', format: 'openai', endpoint: 'https://old.example', api_key: 'key', models: [],
+      })
+      await Promise.all([
+        manager.updateProvider(created.id, { name: 'Renamed' }),
+        manager.updateProvider(created.id, { endpoint: 'https://new.example' }),
+      ])
+      expect(manager.getProvider(created.id)).toMatchObject({
+        name: 'Renamed', endpoint: 'https://new.example',
+      })
+    })
+
     it('should delete a provider', async () => {
       const params: CreateModelProviderParams = {
         name: 'Test Provider',
@@ -145,6 +158,63 @@ describe('ModelProviderManager', () => {
       expect(calls).toEqual([['behavior']])
       expect(manager.getGlobalConfig().public_base_url).toBe('https://public.example.test/')
     })
+    it('coordinates model/image changes and treats identical PATCH submissions as no-ops', async () => {
+      const calls: string[][] = []
+      manager.setSemanticSnapshotProvider(() => ({ global: manager.getGlobalConfig() }))
+      manager.setMutationRunner(async (domains, _preview, apply) => {
+        calls.push([...domains])
+        await apply({} as any)
+      })
+
+      const patch = {
+        default_llm_provider_id: 'provider',
+        default_llm_model_id: 'llm',
+        default_image_provider_id: 'provider',
+        default_image_model_id: 'image',
+        image_slot_user_set: true,
+      }
+      await manager.updateGlobalConfig(patch)
+      await manager.updateGlobalConfig(patch)
+
+      expect(calls).toEqual([['models', 'image']])
+    })
+
+    it('serializes concurrent disjoint global config patches', async () => {
+      await Promise.all([
+        manager.updateGlobalConfig({ default_llm_provider_id: 'provider-a' }),
+        manager.updateGlobalConfig({ public_base_url: 'https://public.example.test' }),
+      ])
+      expect(manager.getGlobalConfig()).toMatchObject({
+        default_llm_provider_id: 'provider-a',
+        public_base_url: 'https://public.example.test',
+      })
+    })
+
+    it('serializes concurrent proxy and model patches', async () => {
+      await Promise.all([
+        manager.updateGlobalConfig({ default_llm_provider_id: 'provider-a' }),
+        manager.updateProxyConfig({ mode: 'custom', custom_url: 'http://proxy.example' }),
+      ])
+      expect(manager.getGlobalConfig()).toMatchObject({
+        default_llm_provider_id: 'provider-a',
+        proxy: { mode: 'custom', custom_url: 'http://proxy.example' },
+      })
+    })
+
+    it('treats an identical provider PATCH as a serialized no-op', async () => {
+      const provider = await manager.createProvider({
+        name: 'Provider', type: 'manual', format: 'openai', endpoint: 'https://provider.example', api_key: 'secret', models: [],
+      })
+      const calls: Array<{ domains: string[]; allowRuntimeNoop?: boolean }> = []
+      manager.setSemanticSnapshotProvider(() => ({ providers: manager.listProviders().map(({ updated_at: _, ...item }) => item) }))
+      manager.setMutationRunner(async (domains, _preview, apply, allowRuntimeNoop) => {
+        calls.push({ domains: [...domains], allowRuntimeNoop })
+        await apply({} as any)
+      })
+      await manager.updateProvider(provider.id, {})
+      expect(calls).toEqual([{ domains: ['models'], allowRuntimeNoop: true }])
+    })
+
     it('should update global config', async () => {
       const params: CreateModelProviderParams = {
         name: 'Test Provider',

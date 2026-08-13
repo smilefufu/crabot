@@ -9,6 +9,7 @@ import path from 'path'
 import { createHash, randomBytes } from 'node:crypto'
 import AdmZip from 'adm-zip'
 import { canonicalizeJson, generateId, generateTimestamp } from 'crabot-shared'
+import { durableAtomicWriteFile, durableRemovePath, durableRename } from './durable-file.js'
 import type { ConfigDomain, CoreAgentConfigMutationContext } from './core-agent-config-revision-store.js'
 import type { OnConflict } from './backup/import/import-types.js'
 
@@ -16,6 +17,7 @@ export type RegistryMutationRunner = (
   domains: ConfigDomain[],
   prepareAfterSnapshot: () => Promise<unknown>,
   applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void>,
+  allowRuntimeNoop?: boolean,
 ) => Promise<void>
 
 function runtimeMcpEntries(entries: Map<string, MCPServerRegistryEntry>): unknown[] {
@@ -178,6 +180,7 @@ export class MCPServerManager {
   private readonly filePath: string
   private mutationRunner: RegistryMutationRunner | null = null
   private semanticSnapshotProvider: (() => unknown) | null = null
+  private mutationTail: Promise<void> = Promise.resolve()
 
   constructor(dataDir: string) {
     this.filePath = path.join(dataDir, 'mcp-servers.json')
@@ -194,14 +197,22 @@ export class MCPServerManager {
   setMutationRunner(runner: RegistryMutationRunner): void { this.mutationRunner = runner }
   setSemanticSnapshotProvider(provider: () => unknown): void { this.semanticSnapshotProvider = provider }
 
-  private async commit(next: Map<string, MCPServerRegistryEntry>): Promise<void> {
+  private async serial<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTail
+    let release!: () => void
+    this.mutationTail = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try { return await operation() } finally { release() }
+  }
+
+  private async commit(next: Map<string, MCPServerRegistryEntry>, allowRuntimeNoop = false): Promise<void> {
     const previous = this.servers
     const apply = async () => { this.servers = next; await this.save() }
     if (!this.mutationRunner) return apply()
     await this.mutationRunner(['mcp'], async () => {
       this.servers = next
       try { return this.semanticSnapshotProvider?.() } finally { this.servers = previous }
-    }, apply)
+    }, apply, allowRuntimeNoop)
   }
 
   runtimeSemanticEntries(): unknown[] {
@@ -225,12 +236,10 @@ export class MCPServerManager {
   }
 
   /**
-   * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
+   * Durable atomic replace for the MCP source participating in the config transaction.
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   private async save(): Promise<void> {
@@ -262,31 +271,33 @@ export class MCPServerManager {
     source_market?: string
     source_package?: string
   }): Promise<MCPServerRegistryEntry> {
-    const now = generateTimestamp()
-    const entry: MCPServerRegistryEntry = {
-      id: generateId(),
-      name: params.name,
-      transport: params.transport ?? 'stdio',
-      command: params.command,
-      args: params.args,
-      env: params.env,
-      url: params.url,
-      headers: params.headers,
-      description: params.description,
-      is_builtin: false,
-      is_essential: false,
-      can_disable: true,
-      install_method: params.install_method,
-      source_market: params.source_market,
-      source_package: params.source_package,
-      enabled: true,
-      created_at: now,
-      updated_at: now,
-    }
-    const next = new Map(this.servers)
-    next.set(entry.id, entry)
-    await this.commit(next)
-    return entry
+    return this.serial(async () => {
+      const now = generateTimestamp()
+      const entry: MCPServerRegistryEntry = {
+        id: generateId(),
+        name: params.name,
+        transport: params.transport ?? 'stdio',
+        command: params.command,
+        args: params.args,
+        env: params.env,
+        url: params.url,
+        headers: params.headers,
+        description: params.description,
+        is_builtin: false,
+        is_essential: false,
+        can_disable: true,
+        install_method: params.install_method,
+        source_market: params.source_market,
+        source_package: params.source_package,
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      }
+      const next = new Map(this.servers)
+      next.set(entry.id, entry)
+      await this.commit(next)
+      return entry
+    })
   }
 
   async update(
@@ -298,49 +309,53 @@ export class MCPServerManager {
       >
     >
   ): Promise<MCPServerRegistryEntry> {
-    const entry = this.servers.get(id)
-    if (!entry) throw new Error(`MCP Server not found: ${id}`)
-    if (!entry.can_disable && params.enabled === false) {
-      throw new Error(`MCP Server "${entry.name}" cannot be disabled`)
-    }
-    const updated: MCPServerRegistryEntry = {
-      ...entry,
-      ...params,
-      updated_at: generateTimestamp(),
-    }
-    const currentRuntime = canonicalizeJson(runtimeMcpEntries(this.servers))
-    const next = new Map(this.servers)
-    next.set(id, updated)
-    if (currentRuntime === canonicalizeJson(runtimeMcpEntries(next))) {
-      this.servers = next
-      await this.save()
+    return this.serial(async () => {
+      const entry = this.servers.get(id)
+      if (!entry) throw new Error(`MCP Server not found: ${id}`)
+      if (!entry.can_disable && params.enabled === false) {
+        throw new Error(`MCP Server "${entry.name}" cannot be disabled`)
+      }
+      const updated: MCPServerRegistryEntry = {
+        ...entry,
+        ...params,
+        updated_at: generateTimestamp(),
+      }
+      const currentRuntime = canonicalizeJson(runtimeMcpEntries(this.servers))
+      const next = new Map(this.servers)
+      next.set(id, updated)
+      if (currentRuntime === canonicalizeJson(runtimeMcpEntries(next))) {
+        await this.commit(next, true)
+        return updated
+      }
+      await this.commit(next)
       return updated
-    }
-    await this.commit(next)
-    return updated
+    })
   }
 
   async delete(id: string): Promise<void> {
-    const entry = this.servers.get(id)
-    if (!entry) throw new Error(`MCP Server not found: ${id}`)
-    if (entry.is_builtin) throw new Error(`Cannot delete built-in MCP Server "${entry.name}"`)
-    const next = new Map(this.servers)
-    next.delete(id)
-    await this.commit(next)
+    return this.serial(async () => {
+      const entry = this.servers.get(id)
+      if (!entry) throw new Error(`MCP Server not found: ${id}`)
+      if (entry.is_builtin) throw new Error(`Cannot delete built-in MCP Server "${entry.name}"`)
+      const next = new Map(this.servers)
+      next.delete(id)
+      await this.commit(next)
+    })
   }
 
   async upsertById(entry: MCPServerRegistryEntry, onConflict: OnConflict): Promise<'imported' | 'overwritten' | 'skipped'> {
-    const exists = this.servers.has(entry.id)
-    if (exists && onConflict === 'skip') return 'skipped'
-    const next = new Map(this.servers)
-    next.set(entry.id, entry)
-    if (exists && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(runtimeMcpEntries(next))) {
-      this.servers = next
-      await this.save()
-      return 'overwritten'
-    }
-    await this.commit(next)
-    return exists ? 'overwritten' : 'imported'
+    return this.serial(async () => {
+      const exists = this.servers.has(entry.id)
+      if (exists && onConflict === 'skip') return 'skipped'
+      const next = new Map(this.servers)
+      next.set(entry.id, entry)
+      if (exists && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(runtimeMcpEntries(next))) {
+        await this.commit(next, true)
+        return 'overwritten'
+      }
+      await this.commit(next)
+      return exists ? 'overwritten' : 'imported'
+    })
   }
 
   /**
@@ -350,57 +365,59 @@ export class MCPServerManager {
    * mcpServers 格式: { "mcpServers": { "name": { "command": ..., "args": ..., "env": ... } } }
    */
   async importFromJson(json: string): Promise<MCPServerRegistryEntry[]> {
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(json)
-    } catch {
-      throw new Error('无效的 JSON 格式')
-    }
-
-    if (typeof parsed !== 'object' || parsed === null) {
-      throw new Error('JSON 必须是对象')
-    }
-
-    const obj = parsed as Record<string, unknown>
-    const now = generateTimestamp()
-    const newEntries: MCPServerRegistryEntry[] = []
-
-    const buildEntry = (name: string, c: Record<string, unknown>): MCPServerRegistryEntry => ({
-      id: generateId(),
-      name,
-      transport: 'stdio',
-      command: c.command as string,
-      args: Array.isArray(c.args) ? c.args.map(String) : undefined,
-      env: typeof c.env === 'object' && c.env !== null
-        ? Object.fromEntries(Object.entries(c.env as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
-        : undefined,
-      is_builtin: false,
-      is_essential: false,
-      can_disable: true,
-      enabled: true,
-      created_at: now,
-      updated_at: now,
-    })
-
-    if ('mcpServers' in obj && typeof obj.mcpServers === 'object' && obj.mcpServers !== null) {
-      for (const [name, cfg] of Object.entries(obj.mcpServers as Record<string, unknown>)) {
-        if (typeof cfg !== 'object' || cfg === null) continue
-        const c = cfg as Record<string, unknown>
-        if (typeof c.command !== 'string') continue
-        newEntries.push(buildEntry(name, c))
+    return this.serial(async () => {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(json)
+      } catch {
+        throw new Error('无效的 JSON 格式')
       }
-    } else if (typeof obj.command === 'string') {
-      const nameParts = obj.command.split(/[\s/\\]/)
-      const name = nameParts[nameParts.length - 1] || 'mcp-server'
-      newEntries.push(buildEntry(name, obj))
-    } else {
-      throw new Error('无法识别的 JSON 格式，请使用 Claude Desktop mcpServers 格式或单 server 格式')
-    }
 
-    const next = new Map(this.servers)
-    for (const entry of newEntries) next.set(entry.id, entry)
-    if (newEntries.length > 0) await this.commit(next)
-    return newEntries
+      if (typeof parsed !== 'object' || parsed === null) {
+        throw new Error('JSON 必须是对象')
+      }
+
+      const obj = parsed as Record<string, unknown>
+      const now = generateTimestamp()
+      const newEntries: MCPServerRegistryEntry[] = []
+
+      const buildEntry = (name: string, c: Record<string, unknown>): MCPServerRegistryEntry => ({
+        id: generateId(),
+        name,
+        transport: 'stdio',
+        command: c.command as string,
+        args: Array.isArray(c.args) ? c.args.map(String) : undefined,
+        env: typeof c.env === 'object' && c.env !== null
+          ? Object.fromEntries(Object.entries(c.env as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+          : undefined,
+        is_builtin: false,
+        is_essential: false,
+        can_disable: true,
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      })
+
+      if ('mcpServers' in obj && typeof obj.mcpServers === 'object' && obj.mcpServers !== null) {
+        for (const [name, cfg] of Object.entries(obj.mcpServers as Record<string, unknown>)) {
+          if (typeof cfg !== 'object' || cfg === null) continue
+          const c = cfg as Record<string, unknown>
+          if (typeof c.command !== 'string') continue
+          newEntries.push(buildEntry(name, c))
+        }
+      } else if (typeof obj.command === 'string') {
+        const nameParts = obj.command.split(/[\s/\\]/)
+        const name = nameParts[nameParts.length - 1] || 'mcp-server'
+        newEntries.push(buildEntry(name, obj))
+      } else {
+        throw new Error('无法识别的 JSON 格式，请使用 Claude Desktop mcpServers 格式或单 server 格式')
+      }
+
+      const next = new Map(this.servers)
+      for (const entry of newEntries) next.set(entry.id, entry)
+      if (newEntries.length > 0) await this.commit(next)
+      return newEntries
+    })
   }
 
   /**
@@ -408,82 +425,84 @@ export class MCPServerManager {
    * 在 Admin 初始化时调用，确保内置工具在首次启动时自动可用
    */
   async registerBuiltins(mcpToolsPath: string): Promise<void> {
-    const existingNames = new Set(this.list().map(s => s.name))
-    const next = new Map(this.servers)
+    return this.serial(async () => {
+      const existingNames = new Set(this.list().map(s => s.name))
+      const next = new Map(this.servers)
 
-    const builtins: Array<{
-      name: string
-      description: string
-      transport: 'stdio'
-      command: string
-      args: string[]
-      enabled?: boolean
-    }> = [
-      {
-        name: 'computer-use',
-        description: 'Computer interaction: screenshot, mouse, keyboard (macOS)',
-        transport: 'stdio',
-        command: 'node',
-        args: [path.join(mcpToolsPath, 'dist/computer-use/main.js')],
-      },
-      {
-        name: 'lsp',
-        description: 'Code intelligence: diagnostics, hover, definition, references, symbols',
-        transport: 'stdio',
-        command: 'node',
-        args: [path.join(mcpToolsPath, 'dist/lsp/main.js')],
-      },
-      {
-        name: 'git',
-        description: 'Git operations: status, diff, log, commit, branch, stash',
-        transport: 'stdio',
-        command: 'node',
-        args: [path.join(mcpToolsPath, 'dist/git/main.js')],
-      },
-      {
-        name: 'scrapling',
-        description: 'Browser Use: web scraping and browser automation via Scrapling',
-        transport: 'stdio',
-        command: 'scrapling',
-        args: ['mcp'],
-        enabled: false,
-      },
-    ]
+      const builtins: Array<{
+        name: string
+        description: string
+        transport: 'stdio'
+        command: string
+        args: string[]
+        enabled?: boolean
+      }> = [
+        {
+          name: 'computer-use',
+          description: 'Computer interaction: screenshot, mouse, keyboard (macOS)',
+          transport: 'stdio',
+          command: 'node',
+          args: [path.join(mcpToolsPath, 'dist/computer-use/main.js')],
+        },
+        {
+          name: 'lsp',
+          description: 'Code intelligence: diagnostics, hover, definition, references, symbols',
+          transport: 'stdio',
+          command: 'node',
+          args: [path.join(mcpToolsPath, 'dist/lsp/main.js')],
+        },
+        {
+          name: 'git',
+          description: 'Git operations: status, diff, log, commit, branch, stash',
+          transport: 'stdio',
+          command: 'node',
+          args: [path.join(mcpToolsPath, 'dist/git/main.js')],
+        },
+        {
+          name: 'scrapling',
+          description: 'Browser Use: web scraping and browser automation via Scrapling',
+          transport: 'stdio',
+          command: 'scrapling',
+          args: ['mcp'],
+          enabled: false,
+        },
+      ]
 
-    let changed = false
-    for (const builtin of builtins) {
-      if (existingNames.has(builtin.name)) {
-        // 已注册：更新路径（项目目录可能变更）
-        for (const [id, existing] of next) {
-          if (existing.name === builtin.name && existing.is_builtin) {
-            const argsChanged = JSON.stringify(existing.args) !== JSON.stringify(builtin.args)
-            if (argsChanged) {
-              next.set(id, { ...existing, args: builtin.args, updated_at: generateTimestamp() })
-              changed = true
+      let changed = false
+      for (const builtin of builtins) {
+        if (existingNames.has(builtin.name)) {
+          // 已注册：更新路径（项目目录可能变更）
+          for (const [id, existing] of next) {
+            if (existing.name === builtin.name && existing.is_builtin) {
+              const argsChanged = JSON.stringify(existing.args) !== JSON.stringify(builtin.args)
+              if (argsChanged) {
+                next.set(id, { ...existing, args: builtin.args, updated_at: generateTimestamp() })
+                changed = true
+              }
+              break
             }
-            break
           }
+          continue
         }
-        continue
+        const now = generateTimestamp()
+        const entry: MCPServerRegistryEntry = {
+          id: generateId(),
+          ...builtin,
+          is_builtin: true,
+          is_essential: false,
+          can_disable: true,
+          enabled: builtin.enabled ?? true,
+          created_at: now,
+          updated_at: now,
+        }
+        next.set(entry.id, entry)
+        changed = true
       }
-      const now = generateTimestamp()
-      const entry: MCPServerRegistryEntry = {
-        id: generateId(),
-        ...builtin,
-        is_builtin: true,
-        is_essential: false,
-        can_disable: true,
-        enabled: builtin.enabled ?? true,
-        created_at: now,
-        updated_at: now,
-      }
-      next.set(entry.id, entry)
-      changed = true
-    }
 
-    if (changed) {
-      await this.commit(next)
-    }
+      if (changed) {
+        await this.commit(next)
+      }
+    })
   }
 
   /** 将注册表条目转换为 Agent 所需的 MCPServerConfig 格式 */
@@ -641,8 +660,8 @@ export class SkillManager {
     else if (digest === journal.after_registry_sha256) await this.rollForwardJournal(journal)
     else throw new Error('Skill source journal registry digest mismatch')
     await coordinator.markSourceJournalCleanupCompleted(journal.mutation_id, journal.target_revision, journalDigest)
-    await fs.rm(this.journalPath, { force: true })
-    await fs.rm(this.resolveTransactionPath(journal.before_registry_rel), { force: true })
+    await durableRemovePath(this.journalPath, { force: true })
+    await durableRemovePath(this.resolveTransactionPath(journal.before_registry_rel), { force: true })
     await coordinator.clearCompletedSourceJournalBinding(journal.mutation_id, journal.target_revision, journalDigest)
     await this.load()
     await this.refreshRuntimeContentHashes()
@@ -717,7 +736,8 @@ export class SkillManager {
         await applyFiles()
         this.skills = next
         this.contentTreeHashes = new Map(Object.entries(afterHashes))
-        await fs.rename(stageRegistry, this.filePath)
+        await this.writePrivate(this.filePath, afterRegistry)
+        await durableRemovePath(stageRegistry, { force: true })
       }
       try {
         if (!this.mutationRunner) await apply()
@@ -733,20 +753,20 @@ export class SkillManager {
           }
         }, apply)
         if (transaction?.moves) await this.cleanupBatchSources(transaction.moves)
-        if (transaction?.obsolete_snapshot_rel) await fs.rm(this.resolveTransactionPath(transaction.obsolete_snapshot_rel), { recursive: true, force: true })
+        if (transaction?.obsolete_snapshot_rel) await durableRemovePath(this.resolveTransactionPath(transaction.obsolete_snapshot_rel), { recursive: true, force: true })
         if (transaction && this.mutationRunner) {
           if (!sourceContext || !journalDigest) throw new Error('Missing completed source journal context')
           await sourceContext.markSourceJournalCleanupCompleted(journalDigest)
-          await fs.rm(this.journalPath, { force: true })
-          await fs.rm(beforeRegistryStage, { force: true })
+          await durableRemovePath(this.journalPath, { force: true })
+          await durableRemovePath(beforeRegistryStage, { force: true })
           await sourceContext.clearSourceJournalBinding(journalDigest)
         } else if (transaction) {
-          await fs.rm(beforeRegistryStage, { force: true })
+          await durableRemovePath(beforeRegistryStage, { force: true })
         }
       } catch (error) {
         if (!transaction) {
-          await fs.rm(stageRegistry, { force: true }).catch(() => {})
-          await fs.rm(beforeRegistryStage, { force: true }).catch(() => {})
+          await durableRemovePath(stageRegistry, { force: true }).catch(() => {})
+          await durableRemovePath(beforeRegistryStage, { force: true }).catch(() => {})
         }
         throw error
       }
@@ -765,10 +785,7 @@ export class SkillManager {
   }
 
   private async writePrivate(file: string, content: Buffer): Promise<void> {
-    const temp = `${file}.${randomBytes(8).toString('hex')}.tmp`
-    const handle = await fs.open(temp, 'w', 0o600)
-    try { await handle.writeFile(content); await handle.sync() } finally { await handle.close() }
-    await fs.rename(temp, file); await fs.chmod(file, 0o600)
+    await durableAtomicWriteFile(file, content)
   }
 
   private relativeTransactionPath(file: string): string {
@@ -961,7 +978,7 @@ export class SkillManager {
     const entries = await fs.readdir(this.transactionRoot).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error))
     await Promise.all(entries
       .filter((name) => /^(?:before-)?registry-[a-f0-9]{24}\.json$/.test(name))
-      .map((name) => fs.rm(path.join(this.transactionRoot, name), { force: true })))
+      .map((name) => durableRemovePath(path.join(this.transactionRoot, name), { force: true })))
   }
 
   private async readLegacyBeforeRegistry(journal: SkillSourceJournal, currentBefore: Buffer | null): Promise<Buffer> {
@@ -1057,7 +1074,7 @@ export class SkillManager {
     for (const move of moves) {
       if (!move.cleanup_rel) continue
       if (move.cleanup_rel !== move.before_rel) throw new Error('Invalid skill source journal')
-      await fs.rm(this.resolveTransactionPath(move.cleanup_rel), { recursive: true, force: true })
+      await durableRemovePath(this.resolveTransactionPath(move.cleanup_rel), { recursive: true, force: true })
     }
   }
 
@@ -1070,16 +1087,16 @@ export class SkillManager {
         const after = this.resolveTransactionPath(move.after_rel)
         const before = move.before_rel ? this.resolveTransactionPath(move.before_rel) : undefined
         if (!move.before_existed) {
-          await fs.rm(after, { recursive: true, force: true })
+          await durableRemovePath(after, { recursive: true, force: true })
         } else if (before && await fs.access(before).then(() => true).catch(() => false)) {
           if (move.before_tree_hash && move.before_tree_hash !== await this.hashContentTree(before)) throw new Error('Skill source journal before tree mismatch')
-          await fs.rm(after, { recursive: true, force: true })
+          await durableRemovePath(after, { recursive: true, force: true })
         } else if (before && await fs.access(after).then(() => true).catch(() => false)) {
           if (move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after tree mismatch')
-          await fs.rename(after, before)
+          await durableRename(after, before)
           if (move.before_tree_hash && move.before_tree_hash !== await this.hashContentTree(before)) throw new Error('Skill source journal before tree mismatch')
         } else throw new Error('Skill source journal rollback is ambiguous')
-        await fs.rm(stage, { recursive: true, force: true })
+        await durableRemovePath(stage, { recursive: true, force: true })
       }
       return
     }
@@ -1096,17 +1113,17 @@ export class SkillManager {
         if (!journal.before_target_tree_hash || journal.before_target_tree_hash !== await this.hashContentTree(beforeTarget)) throw new Error('Skill source journal rollback target mismatch')
       } else if (retained && retainedExists) {
         if (!journal.before_target_tree_hash || journal.before_target_tree_hash !== await this.hashContentTree(retained)) throw new Error('Skill source journal rollback quarantine mismatch')
-        await fs.rename(retained, beforeTarget)
+        await durableRename(retained, beforeTarget)
       } else throw new Error('Skill source journal rollback is ambiguous')
     } else if (restore && await fs.access(restore).then(() => true).catch(() => false)) {
-      await fs.rm(afterTarget, { recursive: true, force: true })
-      await fs.rename(restore, beforeTarget)
+      await durableRemovePath(afterTarget, { recursive: true, force: true })
+      await durableRename(restore, beforeTarget)
     } else if (!journal.before_target_existed) {
-      await fs.rm(afterTarget, { recursive: true, force: true })
+      await durableRemovePath(afterTarget, { recursive: true, force: true })
     } else if (!await fs.access(beforeTarget).then(() => true).catch(() => false)) {
       throw new Error('Skill source journal rollback is ambiguous')
     }
-    await fs.rm(stage, { recursive: true, force: true })
+    await durableRemovePath(stage, { recursive: true, force: true })
   }
 
   private async rollForwardJournal(journal: SkillSourceJournal): Promise<void> {
@@ -1117,11 +1134,11 @@ export class SkillManager {
         if (await fs.access(stage).then(() => true).catch(() => false)) {
           if (await fs.access(after).then(() => true).catch(() => false)) throw new Error('Skill source journal target collision')
           await fs.mkdir(path.dirname(after), { recursive: true })
-          await fs.rename(stage, after)
+          await durableRename(stage, after)
         }
         if (!await fs.access(after).then(() => true).catch(() => false)) throw new Error('Skill source journal after target missing')
         if (move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after tree mismatch')
-        if (move.cleanup_rel) await fs.rm(this.resolveTransactionPath(move.cleanup_rel), { recursive: true, force: true })
+        if (move.cleanup_rel) await durableRemovePath(this.resolveTransactionPath(move.cleanup_rel), { recursive: true, force: true })
       }
       return
     }
@@ -1131,18 +1148,18 @@ export class SkillManager {
     const backup = journal.backup_rel ? this.resolveTransactionPath(journal.backup_rel) : undefined
     const retained = journal.retained_rel ? this.resolveTransactionPath(journal.retained_rel) : undefined
     if (journal.delete_after_commit) {
-      await fs.rm(afterTarget, { recursive: true, force: true })
-      await fs.rm(stage, { recursive: true, force: true })
+      await durableRemovePath(afterTarget, { recursive: true, force: true })
+      await durableRemovePath(stage, { recursive: true, force: true })
       return
     }
     if (await fs.access(stage).then(() => true).catch(() => false)) {
       if (await fs.access(afterTarget).then(() => true).catch(() => false)) throw new Error('Skill source journal target collision')
       if (beforeTarget !== afterTarget && await fs.access(beforeTarget).then(() => true).catch(() => false)) {
-        if (backup) await fs.rename(beforeTarget, backup)
-        else if (retained) await fs.rename(beforeTarget, retained)
+        if (backup) await durableRename(beforeTarget, backup)
+        else if (retained) await durableRename(beforeTarget, retained)
         else throw new Error('Skill source journal missing retention path')
       }
-      await fs.rename(stage, afterTarget)
+      await durableRename(stage, afterTarget)
     }
     if (await fs.access(afterTarget).then(() => true).catch(() => false)) {
       if (journal.after_target_tree_hash && journal.after_target_tree_hash !== await this.hashContentTree(afterTarget)) throw new Error('Skill source journal after target tree mismatch')
@@ -1150,7 +1167,7 @@ export class SkillManager {
       return
     } else throw new Error('Skill source journal after target missing')
     if (journal.obsolete_snapshot_rel) {
-      await fs.rm(this.resolveTransactionPath(journal.obsolete_snapshot_rel), { recursive: true, force: true })
+      await durableRemovePath(this.resolveTransactionPath(journal.obsolete_snapshot_rel), { recursive: true, force: true })
     }
   }
 
@@ -1319,7 +1336,7 @@ export class SkillManager {
         hashes.set(id, stagedTarget ? stagedTarget.after_tree_hash : await this.hashContentTree(target))
       }
       return { next, hashes, moves, backupPath, backupBytes }
-    } catch (error) { await fs.rm(stageRoot, { recursive: true, force: true }).catch(() => {}); throw error }
+    } catch (error) { await durableRemovePath(stageRoot, { recursive: true, force: true }).catch(() => {}); throw error }
   }
 
   private async applyLegacyMigrationPlan(plan: LegacyMigrationPlan): Promise<void> {
@@ -1328,7 +1345,7 @@ export class SkillManager {
       for (const move of plan.moves) {
         const stage = this.resolveTransactionPath(move.stage_rel); const after = this.resolveTransactionPath(move.after_rel)
         if (await fs.access(after).then(() => true).catch(() => false)) throw new Error('Legacy skill target collision')
-        await fs.mkdir(path.dirname(after), { recursive: true }); await fs.rename(stage, after)
+        await fs.mkdir(path.dirname(after), { recursive: true }); await durableRename(stage, after)
       }
       this.legacyMigrationPending = false
     }, plan.hashes, { moves: plan.moves, legacy_backup_rel: path.basename(plan.backupPath), legacy_backup_sha256: sha256(plan.backupBytes) }, true)
@@ -1341,12 +1358,10 @@ export class SkillManager {
   }
 
   /**
-   * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
+   * Durable atomic replace for the Skill registry participating in the config transaction.
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   private async save(): Promise<void> {
@@ -1432,12 +1447,12 @@ export class SkillManager {
     try {
       const hashes = new Map(this.contentTreeHashes)
       hashes.set(entry.id, await this.hashContentTree(stagedDir))
-      await this.commit(next, async () => { await fs.rename(stagedDir, skillDir) }, hashes, {
+      await this.commit(next, async () => { await durableRename(stagedDir, skillDir) }, hashes, {
         before_target_rel: this.relativeTransactionPath(skillDir), after_target_rel: this.relativeTransactionPath(skillDir), before_target_existed: false,
         after_target_tree_hash: hashes.get(entry.id), stage_rel: this.relativeTransactionPath(stagedDir),
       })
     } catch (error) {
-      await fs.rm(stagedDir, { recursive: true, force: true }).catch(() => {})
+      await durableRemovePath(stagedDir, { recursive: true, force: true }).catch(() => {})
       throw error
     }
     return entry
@@ -1495,17 +1510,17 @@ export class SkillManager {
       await this.commit(next, async () => {
         if (!createsSnapshot) return
         await fs.mkdir(path.dirname(snapPath), { recursive: true })
-        await fs.rename(entry.skill_dir, snapPath)
-        try { await fs.rename(staged, skillDir) } catch (error) { await fs.rename(snapPath, entry.skill_dir).catch(() => {}); throw error }
+        await durableRename(entry.skill_dir, snapPath)
+        try { await durableRename(staged, skillDir) } catch (error) { await durableRename(snapPath, entry.skill_dir).catch(() => {}); throw error }
       }, hashes, createsSnapshot ? {
         before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(skillDir), before_target_existed: true,
         before_target_tree_hash: this.contentTreeHashes.get(id), after_target_tree_hash: hashes.get(id), stage_rel: this.relativeTransactionPath(staged),
         backup_rel: this.relativeTransactionPath(snapPath),
       } : undefined)
       if (createsSnapshot && entry.previous_snapshot?.snapshot_dir && entry.previous_snapshot.snapshot_dir !== snapRel) {
-        await fs.rm(this.resolveTransactionPath(entry.previous_snapshot.snapshot_dir), { recursive: true, force: true })
+        await durableRemovePath(this.resolveTransactionPath(entry.previous_snapshot.snapshot_dir), { recursive: true, force: true })
       }
-    } catch (error) { await fs.rm(staged, { recursive: true, force: true }).catch(() => {}); throw error }
+    } catch (error) { await durableRemovePath(staged, { recursive: true, force: true }).catch(() => {}); throw error }
     return updated
   }
 
@@ -1539,14 +1554,14 @@ export class SkillManager {
     try {
       await this.commit(next, async () => {
         await fs.mkdir(path.dirname(retained), { recursive: true })
-        await fs.rename(entry.skill_dir, retained)
-        try { await fs.rename(stage, entry.skill_dir) } catch (error) { await fs.rename(retained, entry.skill_dir).catch(() => {}); throw error }
+        await durableRename(entry.skill_dir, retained)
+        try { await durableRename(stage, entry.skill_dir) } catch (error) { await durableRename(retained, entry.skill_dir).catch(() => {}); throw error }
       }, hashes, {
         before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(entry.skill_dir), before_target_existed: true,
         before_target_tree_hash: this.contentTreeHashes.get(id), stage_rel: this.relativeTransactionPath(stage), retained_rel: retainedRel,
         obsolete_snapshot_rel: entry.previous_snapshot.snapshot_dir, after_target_tree_hash: hashes.get(id),
       })
-    } catch (error) { await fs.rm(stage, { recursive: true, force: true }).catch(() => {}); throw error }
+    } catch (error) { await durableRemovePath(stage, { recursive: true, force: true }).catch(() => {}); throw error }
     return updated
   }
 
@@ -1567,14 +1582,14 @@ export class SkillManager {
     hashes.delete(id)
     await this.commit(next, async () => {
       await fs.mkdir(this.transactionRoot, { recursive: true, mode: 0o700 })
-      await fs.rename(entry.skill_dir, quarantine)
+      await durableRename(entry.skill_dir, quarantine)
     }, hashes, {
       before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(quarantine), before_target_existed: true,
       before_target_tree_hash: this.contentTreeHashes.get(id),
       stage_rel: this.relativeTransactionPath(quarantine), retained_rel: this.relativeTransactionPath(quarantine), delete_after_commit: true,
     })
-    await fs.rm(quarantine, { recursive: true, force: true })
-    if (entry.previous_snapshot?.snapshot_dir) await fs.rm(this.resolveTransactionPath(entry.previous_snapshot.snapshot_dir), { recursive: true, force: true })
+    await durableRemovePath(quarantine, { recursive: true, force: true })
+    if (entry.previous_snapshot?.snapshot_dir) await durableRemovePath(this.resolveTransactionPath(entry.previous_snapshot.snapshot_dir), { recursive: true, force: true })
   }
 
   /**
@@ -1943,15 +1958,15 @@ export class SkillManager {
       const next = new Map(this.skills); next.set(entry.id, entry)
       const hashes = new Map(this.contentTreeHashes); hashes.set(entry.id, await this.hashContentTree(stage))
       await this.commit(next, async () => {
-        if (targetExisted) { await fs.mkdir(path.dirname(snapshot), { recursive: true }); await fs.rename(target, snapshot) }
-        try { await fs.rename(stage, target) } catch (error) { if (targetExisted) await fs.rename(snapshot, target).catch(() => {}); throw error }
+        if (targetExisted) { await fs.mkdir(path.dirname(snapshot), { recursive: true }); await durableRename(target, snapshot) }
+        try { await durableRename(stage, target) } catch (error) { if (targetExisted) await durableRename(snapshot, target).catch(() => {}); throw error }
       }, hashes, {
         before_target_rel: this.relativeTransactionPath(existing?.skill_dir ?? target), after_target_rel: this.relativeTransactionPath(target), before_target_existed: targetExisted,
         before_target_tree_hash: existing ? this.contentTreeHashes.get(existing.id) : undefined, after_target_tree_hash: hashes.get(entry.id), stage_rel: this.relativeTransactionPath(stage),
         ...(targetExisted ? { backup_rel: snapshotRel } : {}),
       })
       return { entry, was_overwrite: !!existing }
-    } catch (error) { await fs.rm(stage, { recursive: true, force: true }).catch(() => {}); throw error }
+    } catch (error) { await durableRemovePath(stage, { recursive: true, force: true }).catch(() => {}); throw error }
   }
 
   /**
@@ -2214,7 +2229,7 @@ export class EssentialToolsManager {
   async initialize(): Promise<void> {
     try {
       const raw = await fs.readFile(this.filePath, 'utf-8')
-      this.config = JSON.parse(raw)
+      this.config = JSON.parse(raw) as EssentialToolsConfig
     } catch {
       this.config = { ...DEFAULT_ESSENTIAL_CONFIG }
     }
@@ -2228,9 +2243,7 @@ export class EssentialToolsManager {
    * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   async update(params: Partial<EssentialToolsConfig>): Promise<EssentialToolsConfig> {
@@ -2329,15 +2342,11 @@ export async function writeSkillDirFiles(
 }
 
 async function atomicWrite(filePath: string, buf: Buffer): Promise<void> {
-  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`
-  await fs.writeFile(tmpPath, buf)
-  await fs.rename(tmpPath, filePath)
+  await durableAtomicWriteFile(filePath, buf)
 }
 
 async function atomicWriteFileBuf(filePath: string, buf: Buffer): Promise<void> {
-  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`
-  await fs.writeFile(tmp, buf)
-  await fs.rename(tmp, filePath)
+  await durableAtomicWriteFile(filePath, buf)
 }
 
 async function cleanupExtraFiles(

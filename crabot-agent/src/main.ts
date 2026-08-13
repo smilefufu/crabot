@@ -17,6 +17,9 @@ import { installStdioErrorGuard } from './core/stdio-guard.js'
 // stdout/stderr 管道断开时都会以 'error' 事件打到零监听器上 → uncaughtException（见该文件头）。
 installStdioErrorGuard()
 
+// The runtime bearer must leave process.env before any diagnostic/helper can spawn a child.
+ConfigLoader.captureRuntimeBearer()
+
 startHeapSampler({ intervalMs: 30_000 })
 
 // macOS：用户若开启 CRABOT_ENABLE_FDA 但未真正授予「完全磁盘访问权限」，
@@ -60,8 +63,7 @@ async function main(): Promise<void> {
   const adminEndpoint = process.env.CRABOT_ADMIN_ENDPOINT
 
   // admin 比 agent 只早 spawn 约 1s，但要跑完整个 onStart() 才 listen —— 首次 pull 必然扑空。
-  // 退避重试等 admin 就绪；耗尽预算仍落 unconfigured 兜底（见 ConfigLoader.loadWithRetry）。
-  ConfigLoader.captureRuntimeBearer()
+  // 退避重试等 admin 就绪；耗尽预算后 fail closed（见 ConfigLoader.loadWithRetry）。
   const config: UnifiedAgentConfig = await ConfigLoader.loadWithRetry(rpcClient, adminEndpoint)
 
   // Module Manager 会通过环境变量分配端口，覆盖配置文件中的端口
@@ -97,14 +99,13 @@ async function main(): Promise<void> {
 
   try {
     await agent.start()
-    await agent.register()
+    await agent.register(ConfigLoader.getRuntimeBearer())
     // 启动对账放在 register 之后发：它的 fs 扫描 + tmux 子进程会占满 libuv 默认 4 线程池，
     // 而 register 的 getaddrinfo 排在同一个池上——并发跑会把注册拖慢。仍然不 await。
     agent.startManagerStackReconciliation()
     console.log('Unified Agent module started successfully')
     console.log(`- Module ID: ${config.module_id}`)
     console.log(`- Port: ${config.port}`)
-    console.log(`- Roles: ${config.agent_config?.roles.join(', ') || 'orchestration only'}`)
     console.log(`- Configured: ${agent.isConfigured()}`)
   } catch (error) {
     console.error('Failed to start Unified Agent module:', error)

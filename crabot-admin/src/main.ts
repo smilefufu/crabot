@@ -65,12 +65,25 @@ async function main(): Promise<void> {
   try {
     await admin.start()
     await admin.register()
-    await admin.completeCoreAgentCutover()
-    // 启动对账：register() 已让事件订阅生效，这里再对「当下已在运行」的 agent / memory 补推一次
-    // 配置，弥补错过 module_started 事件（admin 单独重启 / 启动慢于子模块）的情形。fire-and-forget，
-    // 不阻塞启动；无运行模块时安全 no-op。
-    void admin.reconcileRunningModuleConfigs()
-    console.log('Admin module started successfully')
+    try {
+      await admin.completeCoreAgentCutover()
+      void admin.reconcileRunningModuleConfigs()
+      console.log('Admin module started successfully')
+    } catch (error) {
+      // Keep the registered management/recovery surface alive and retry in this exact runtime.
+      // Ingress remains 503 and health remains unhealthy until one attempt completes readiness.
+      console.error('Core Agent cutover is pending recovery:', error)
+      const retryTimer = setInterval(() => {
+        admin.completeCoreAgentCutover()
+          .then(() => {
+            clearInterval(retryTimer)
+            void admin.reconcileRunningModuleConfigs()
+            console.log('Admin core Agent cutover recovery completed')
+          })
+          .catch((retryError) => console.error('Core Agent cutover retry failed:', retryError))
+      }, 5_000)
+      retryTimer.unref?.()
+    }
   } catch (error) {
     console.error('Failed to start Admin module:', error)
     process.exit(1)
