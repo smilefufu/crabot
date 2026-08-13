@@ -549,21 +549,18 @@ export class ChatManager {
     if (new Set(requestIds).size !== requestIds.length) {
       throw new Error('duplicate request_id in request_ids')
     }
-    for (const requestId of requestIds) {
-      const entry = this.requestIndex.get(requestId)
-      if (!entry || entry.session_id !== 'admin-chat' || entry.status !== 'pending') {
-        throw new Error(`request ${requestId} is not pending in admin-chat`)
-      }
-    }
 
     const content = params.content
-    if (content.type === 'system_event') {
+    if (content.type === 'system_event' && !params.delivery_id) {
+      // 无 delivery_id 的 system_event（system-tasks 等）：直接写（无结算语义）。
       return this.storeAssistantMessage(
         { type: 'text', text: content.text ?? '' },
         params.session_id,
         { requestIds, deliveryId: params.delivery_id },
       )
     }
+    // 带 delivery_id 的 system_event 与其余 delivery 同走 journal 幂等纪律（统一由下方
+    // prepared → commit 事务处理，不另开直写捷径）。
 
     // wire 原始 content 的稳定 hash（§11.7：不含 staging path/UUID/推断字段等服务端值）。
     const payloadHash = createHash('sha256').update(JSON.stringify({
@@ -588,14 +585,21 @@ export class ChatManager {
           ;(error as { code?: string }).code = 'ADMIN_CHAT_DELIVERY_CONFLICT'
           throw error
         }
+        // 已 commit 的 delivery 重试（响应丢失/Agent 重启 reconcile）：幂等返回首次结果——
+        // pending 校验只约束**新** delivery，已 committed 的 replay 天然是 settled 状态。
         if (existing.state === 'committed') {
-          // 幂等返回首次结果，不再读 local file / 重新分配 UUID。
           return { platform_message_id: existing.platform_message_id!, sent_at: existing.sent_at! }
         }
         // prepared/committing：复用首次 journal 的 staging/planned UUID/finalized content 继续。
         return this.commitDelivery(existing, requestIds)
       }
-      // 首次 delivery：stage → prepared journal → commit。
+      // 新 delivery 才做 pending 前置校验：所有 ID 必须存在、pending、同 session。
+      for (const requestId of requestIds) {
+        const entry = this.requestIndex.get(requestId)
+        if (!entry || entry.session_id !== 'admin-chat' || entry.status !== 'pending') {
+          throw new Error(`request ${requestId} is not pending in admin-chat`)
+        }
+      }
       const prepared = await this.prepareDelivery(params, content, requestIds, payloadHash)
       return this.commitDelivery(prepared, requestIds)
     })
@@ -657,7 +661,12 @@ export class ChatManager {
     // 降级结果在 prepare 时定型（retry/restart 不重新决定）。
     const failureNote = failures.length > 0 ? `\n[附件收存失败: ${failures.join(', ')}]` : ''
     const text = `${content.text ?? ''}${failureNote}`.trim()
-    if (!text && mediaItems.length === 0) throw new Error('Empty message content')
+    // system_event 按协议规定的人类可读 fallback 文本落库（无媒体）。
+    if (content.type === 'system_event' && !text) {
+      // system_event 无 text 是异常形态，拒绝落库。
+      throw new Error('Empty message content')
+    }
+    if (content.type !== 'system_event' && !text && mediaItems.length === 0) throw new Error('Empty message content')
     const type = mediaItems.length === 0
       ? ('text' as const)
       : mediaItems.some((m) => m.mime_type.startsWith('image/')) ? ('image' as const) : ('file' as const)
@@ -673,6 +682,8 @@ export class ChatManager {
       session_id: params.session_id,
       planned_media: plannedMedia,
       finalized_content: finalizedContent,
+      // message id 在 prepare 时定型：committing 崩溃恢复/重试复用同一 id，不二次落新消息。
+      planned_message_id: generateId(),
     })
   }
 
@@ -683,33 +694,38 @@ export class ChatManager {
   ): Promise<ChatSendMessageResult> {
     await this.deliveryJournal.transition(journal.delivery_id, 'committing')
     const finalized = journal.finalized_content as MessageContent
-    const promoted: string[] = []
     try {
       // media promotion 按 planned UUID（幂等）。
       for (const planned of journal.planned_media) {
         await this.mediaStore.promoteStaged(planned.staged_path, planned.entry as never)
-        promoted.push(planned.planned_media_id)
       }
+      // message 用 prepare 时定型的 planned_message_id：committing 崩溃恢复/rolled_back 重试
+      // 复用同一 id（幂等覆盖），不会产生第二条消息。
       const result = await this.storeAssistantMessage(finalized, journal.session_id, {
         requestIds,
         deliveryId: journal.delivery_id,
         push: false,
+        messageId: journal.planned_message_id,
       })
-      // request settlement：placeholder 与 message 同生共死。
-      for (const requestId of requestIds) {
-        await this.requestIndex.settle(requestId, result.platform_message_id)
-      }
+      // 先标 committed（durable），再 settle request——崩溃在两者之间时由 startup reconcile
+      // 对 committed 但 request 仍 pending 的 journal 补 settle（见 reconcileDeliveries）。
       await this.deliveryJournal.transition(journal.delivery_id, 'committed', {
         platform_message_id: result.platform_message_id,
         sent_at: result.sent_at,
       })
+      for (const requestId of requestIds) {
+        await this.requestIndex.settle(requestId, result.platform_message_id)
+      }
       await this.deliveryJournal.cleanStaging(journal.delivery_id)
       // commit 后才 chat_push；无 WS 也算成功（refresh 从 history 可见）。
       const message = this.messages.get(result.platform_message_id)
       if (message) this.pushToClient({ type: 'chat_push', message })
       return result
     } catch (error) {
-      // Browser 可见前 rollback：撤掉消息（未 push）；media orphan 留待 GC。
+      // Browser 可见前 rollback：撤掉已落库消息（尚未 push）；media orphan 留待 GC；
+      // request 未 settle（settle 在 committed 之后）无需回滚。
+      this.messages.delete(journal.planned_message_id)
+      await this.saveData()
       await this.deliveryJournal.transition(journal.delivery_id, 'rolled_back')
       throw error
     }
@@ -720,16 +736,32 @@ export class ChatManager {
     const pending = await this.deliveryJournal.pendingJournals()
     for (const journal of pending) {
       try {
-        if (journal.state === 'committing') {
-          await this.commitDelivery(journal, journal.request_ids)
-        } else {
-          // prepared：journal 里的 staging/planned 都还在，按原样重跑 commit
-          await this.commitDelivery(journal, journal.request_ids)
-        }
+        // prepared/committing 都按 journal 确定性重跑 commit（幂等）。
+        await this.commitDelivery(journal, journal.request_ids)
       } catch (error) {
         console.error(`[ChatManager] delivery reconcile failed for ${journal.delivery_id}:`,
           error instanceof Error ? error.message : String(error))
       }
+    }
+    // committed 但 request 未 settle（崩溃在 commit 与 settle 之间）：补结算。
+    let entries: string[]
+    try {
+      entries = await fs.readdir(path.join(this.dataDir, 'chat-delivery-journal'))
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue
+      try {
+        const record = JSON.parse(await fs.readFile(path.join(this.dataDir, 'chat-delivery-journal', entry), 'utf-8')) as ChatDeliveryJournalRecord
+        if (record.state !== 'committed') continue
+        for (const requestId of record.request_ids) {
+          const idx = this.requestIndex.get(requestId)
+          if (idx && idx.status === 'pending') {
+            await this.requestIndex.settle(requestId, record.platform_message_id ?? record.planned_message_id)
+          }
+        }
+      } catch { /* 坏 record 隔离跳过 */ }
     }
   }
 
@@ -740,10 +772,10 @@ export class ChatManager {
   private async storeAssistantMessage(
     content: MessageContent,
     sessionId: string,
-    options: { requestIds?: string[]; deliveryId?: string; push?: boolean } = {},
+    options: { requestIds?: string[]; deliveryId?: string; push?: boolean; messageId?: string } = {},
   ): Promise<ChatSendMessageResult> {
     const message: ChatMessage = {
-      message_id: generateId(),
+      message_id: options.messageId ?? generateId(),
       role: 'assistant',
       content,
       ...(options.requestIds && options.requestIds.length > 0 ? { request_ids: options.requestIds } : {}),

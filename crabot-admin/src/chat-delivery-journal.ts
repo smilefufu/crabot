@@ -36,6 +36,8 @@ export interface ChatDeliveryJournalRecord {
   readonly planned_media: ChatDeliveryPlannedMedia[]
   /** finalized content（降级/失败提示已定型；retry/restart 不得重新决定）。 */
   readonly finalized_content: unknown
+  /** prepare 时即定型的 assistant message id（committing 崩溃恢复/重试复用，不二次落新消息）。 */
+  readonly planned_message_id: string
   platform_message_id?: string
   sent_at?: string
   readonly created_at: string

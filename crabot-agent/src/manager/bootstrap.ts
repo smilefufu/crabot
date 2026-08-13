@@ -177,6 +177,8 @@ export interface BootstrapDeps {
   readonly builtinTraceReader?: import('../workers/builtin/adapter.js').BuiltinTraceReader
   /** P6-A §8.10：化身终态收割钩子（harness fire-and-forget；装配层做最后一次 native read）。 */
   readonly onIncarnationTerminal?: (handle: import('../workers/types.js').IncarnationHandle) => void
+  /** P6-A §3.2：episode 消费后结算未 claim 的 Admin Chat request IDs（写 correlation store）。 */
+  readonly onAdminChatWakeConsumed?: (key: import('../workers/harness/ledger-types.js').ManagerKey, requestIds: string[]) => void
   /**
    * fail-loud 兜底出口:worker 事件唤醒的 manager episode 失败时,直接告诉人类一声。
    * 接线范式与上面的 `publishEvent` 完全一致(可选;不注入则这条路保持"只记日志"的既有行为)。
@@ -401,6 +403,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const sessionStore = new ManagerSessionStore(join(agentDir, 'managers'))
   registry = new ManagerRegistry({
     traceWriter: deps.traceWriter,
+    onAdminChatWakeConsumed: deps.onAdminChatWakeConsumed,
     store: sessionStore,
     policy: DEFAULT_MANAGER_COMPACTION_POLICY,
     estimateTokens: (msgs) => tokenEstimator.estimateTotalTokens(msgs),

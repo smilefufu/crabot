@@ -698,6 +698,8 @@ export class UnifiedAgent extends ModuleBase {
       builtinTraceReader: this.builtinTraceReader(),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
       onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
+      // P6-A §3.2：episode 消费（含沉默终态）即结算未 claim 的 request IDs。
+      onAdminChatWakeConsumed: async (key, ids) => { await this.adminChatCorrelationStore().settleInbound(key, ids) },
       // 人类消息渲染的时区（`formatChannelMessageLine` 的 ts 属性）。与 worker 侧
       // `buildBuiltinWorkerRuntime` 取同一个来源，避免 manager 与 worker 看到的时间对不上。
       timezone: () => resolveTimezone(this.agentConfig?.timezone),
@@ -3192,10 +3194,16 @@ export class UnifiedAgent extends ModuleBase {
     await store.cleanStaging(key, deliveryId)
   }
 
-  /** 发送失败/结果未知：delivery 保持可重试（Agent restart reconcile 复用同一 ID 重放）。 */
-  private async failAdminChatDelivery(deliveryId: string, _error: unknown): Promise<void> {
+  /** 发送失败/结果未知：delivery 保持可重试（Agent restart reconcile 复用同一 ID 重放）。
+   *  永久性拒绝（冲突/参数非法/端点退役）不再可重试——立即清 staging，避免长期积累。 */
+  private async failAdminChatDelivery(deliveryId: string, error: unknown): Promise<void> {
     const key = 'admin-web::admin-chat' as ManagerKey
-    await this.adminChatCorrelationStore().markOutbound(key, deliveryId, 'failed')
+    const store = this.adminChatCorrelationStore()
+    await store.markOutbound(key, deliveryId, 'failed')
+    const message = error instanceof Error ? error.message : String(error)
+    if (/conflict|INVALID_PARAMS|retired|not pending/i.test(message)) {
+      await store.cleanStaging(key, deliveryId)
+    }
   }
 
   /** P6-A §8.10：Agent-owned native copy store（live source 消失后的降级真相）。 */

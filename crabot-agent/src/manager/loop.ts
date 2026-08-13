@@ -209,6 +209,12 @@ export interface ManagerLoopDeps {
    * LLM/tool，原 wake 保持未结算。缺省时整个 trace 面静默关闭（测试/降级）。
    */
   readonly traceWriter?: ManagerTraceWriter
+  /**
+   * P6-A §3.2：episode 被消费（consumedEvents=true）时回调仍未 claim 的 Admin Chat
+   * request IDs——F3 沉默 episode 也是消费的合法终态，不结算会让 wake 在每次重启
+   * 无限重放。已 claim 的 ID 由 delivery confirm 路径结算，不在此列。
+   */
+  readonly onAdminChatWakeConsumed?: (requestIds: string[]) => void
 }
 
 /** 滚动摘要块在 initialMessages 里的前缀标记,避免 LLM 把它误当成用户刚发的话。 */
@@ -408,6 +414,23 @@ export class ManagerLoop {
           },
           ...(this.currentUsage.input_tokens > 0 || this.currentUsage.output_tokens > 0 ? { total_usage: { ...this.currentUsage } } : {}),
         })
+      }
+      // P6-A §3.2：episode 被消费（含 F3 沉默终态）即结算未 claim 的 request IDs——
+      // 否则 wake 永不 settled，每次 Agent 重启都重放历史消息。已 claim 的由 delivery
+      // confirm 结算；失败（consumedEvents=false）的整批重投不结算。
+      if (result.consumedEvents && this.adminChatClaims.size > 0) {
+        const unsettled = Array.from(this.adminChatClaims.entries())
+          .filter(([, state]) => state === 'unclaimed')
+          .map(([id]) => id)
+        if (unsettled.length > 0) {
+          // 结算是 episode 收尾的一部分（await，避免挂起写与进程/测试清理竞争）；
+          // 但结算失败绝不能反过来把已成功的 episode 判失败——本地容错只记日志。
+          try {
+            await this.deps.onAdminChatWakeConsumed?.(unsettled)
+          } catch (error) {
+            console.warn('[ManagerLoop] admin chat wake settle failed:', error instanceof Error ? error.message : String(error))
+          }
+        }
       }
       return result
     } catch (err) {

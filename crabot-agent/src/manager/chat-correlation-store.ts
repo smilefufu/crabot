@@ -69,7 +69,16 @@ async function writeJsonAtomic(path: string, data: unknown): Promise<void> {
 }
 
 export class AdminChatCorrelationStore {
+  /** request index 的 read-modify-write 串行锁（并发入站 dispatch 不得互相覆盖条目）。 */
+  private indexTail: Promise<void> = Promise.resolve()
+
   constructor(private readonly managersRoot: string) {}
+
+  private withIndexLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.indexTail.then(fn)
+    this.indexTail = run.then(() => undefined, () => undefined)
+    return run
+  }
 
   private dirFor(managerKey: ManagerKey): string {
     return join(this.managersRoot, encodeSegment(managerKey))
@@ -116,55 +125,61 @@ export class AdminChatCorrelationStore {
   async admitInbound(
     record: Omit<AdminChatWakeRecord, 'status'>,
   ): Promise<'committed' | 'duplicate'> {
-    const index = await this.readRequestIndex(record.manager_key)
-    const existing = index.get(record.request_id)
-    if (existing) {
-      if (existing.message_sha256 !== record.message_sha256 || existing.manager_key !== record.manager_key) {
-        throw new Error(`admin chat request conflict: ${record.request_id}`)
+    // 判重 + wake journal + index 写是一个 read-modify-write 事务，必须串行
+    // （并发入站各自跑 dispatch loop，无锁会互相覆盖 index 条目）。
+    return this.withIndexLock(async () => {
+      const index = await this.readRequestIndex(record.manager_key)
+      const existing = index.get(record.request_id)
+      if (existing) {
+        if (existing.message_sha256 !== record.message_sha256 || existing.manager_key !== record.manager_key) {
+          throw new Error(`admin chat request conflict: ${record.request_id}`)
+        }
+        return 'duplicate'
       }
-      return 'duplicate'
-    }
-    // 先写 wake journal（完整可重放 envelope），再写 index——崩溃在两者之间时重启靠
-    // journal 重放补 index（见 replayPendingWakes 的 index 自愈）。
-    const wake: AdminChatWakeRecord = { ...record, status: 'pending' }
-    const line = JSON.stringify(wake) + '\n'
-    const wakesPath = this.wakesPath(record.manager_key)
-    await fs.mkdir(dirname(wakesPath), { recursive: true, mode: 0o700 })
-    await fs.appendFile(wakesPath, line, { mode: 0o600 })
-    index.set(record.request_id, {
-      request_id: record.request_id,
-      message_sha256: record.message_sha256,
-      manager_key: record.manager_key,
-      status: 'pending',
-      created_at: record.received_at,
+      // 先写 wake journal（完整可重放 envelope），再写 index——崩溃在两者之间时重启靠
+      // journal 重放补 index（见 replayPendingWakes 的 index 自愈）。
+      const wake: AdminChatWakeRecord = { ...record, status: 'pending' }
+      const line = JSON.stringify(wake) + '\n'
+      const wakesPath = this.wakesPath(record.manager_key)
+      await fs.mkdir(dirname(wakesPath), { recursive: true, mode: 0o700 })
+      await fs.appendFile(wakesPath, line, { mode: 0o600 })
+      index.set(record.request_id, {
+        request_id: record.request_id,
+        message_sha256: record.message_sha256,
+        manager_key: record.manager_key,
+        status: 'pending',
+        created_at: record.received_at,
+      })
+      await this.writeRequestIndex(record.manager_key, index)
+      return 'committed'
     })
-    await this.writeRequestIndex(record.manager_key, index)
-    return 'committed'
   }
 
   /** Admin 确认 outbound delivery 后结算：wake → settled、index → settled。 */
   async settleInbound(managerKey: ManagerKey, requestIds: ReadonlyArray<string>): Promise<void> {
     if (requestIds.length === 0) return
-    const ids = new Set(requestIds)
-    const wakes = await this.readWakes(managerKey)
-    let changed = false
-    for (const wake of wakes) {
-      if (ids.has(wake.request_id) && wake.status === 'pending') {
-        wake.status = 'settled'
-        changed = true
+    return this.withIndexLock(async () => {
+      const ids = new Set(requestIds)
+      const wakes = await this.readWakes(managerKey)
+      let changed = false
+      for (const wake of wakes) {
+        if (ids.has(wake.request_id) && wake.status === 'pending') {
+          wake.status = 'settled'
+          changed = true
+        }
       }
-    }
-    if (changed) await this.rewriteWakes(managerKey, wakes)
-    const index = await this.readRequestIndex(managerKey)
-    let indexChanged = false
-    for (const id of ids) {
-      const entry = index.get(id)
-      if (entry && entry.status === 'pending') {
-        entry.status = 'settled'
-        indexChanged = true
+      if (changed) await this.rewriteWakes(managerKey, wakes)
+      const index = await this.readRequestIndex(managerKey)
+      let indexChanged = false
+      for (const id of ids) {
+        const entry = index.get(id)
+        if (entry && entry.status === 'pending') {
+          entry.status = 'settled'
+          indexChanged = true
+        }
       }
-    }
-    if (indexChanged) await this.writeRequestIndex(managerKey, index)
+      if (indexChanged) await this.writeRequestIndex(managerKey, index)
+    })
   }
 
   async readWakes(managerKey: ManagerKey): Promise<AdminChatWakeRecord[]> {

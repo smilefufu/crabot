@@ -121,16 +121,22 @@ export async function readCompositeWorkerTrace(
     cursorRecord = await deps.cursorStore.resolve(token, params.worker_id, fingerprint)
   }
 
+  // 重放窗口钳制（§8.12）：已有窗口的 token 重放不得越过首次消费捕获的 upper bound，
+  // 否则后续追加的事件会重复进入下一次翻页。
+  const replayBound = cursorRecord.window?.end
+
   // ── harness source（恒定可读；事件按化身过滤，位置=本化身已消费记录序）──
   const allHarnessEvents = (await deps.harness.readWorkerEvents(params.worker_id)).filter(
     (event) => event.seq === incarnation.seq,
   )
+  const harnessLimit = replayBound ? Math.min(replayBound.harness, allHarnessEvents.length) : allHarnessEvents.length
   const harnessEvents: SourcedEvent[] = []
   let harnessEnd = positions.harness
-  for (let index = positions.harness; index < allHarnessEvents.length; index++) {
+  for (let index = positions.harness; index < harnessLimit; index++) {
     harnessEvents.push({ event: normalizeHarnessEvent(allHarnessEvents[index]), source: 'harness', sourceOrdinal: index })
     harnessEnd = index + 1
   }
+  if (replayBound) harnessEnd = replayBound.harness
 
   // ── native / legacy source ──────────────────────────────────────
   const nativeEvents: SourcedEvent[] = []
@@ -141,11 +147,13 @@ export async function readCompositeWorkerTrace(
   if (isLegacyIncarnation(incarnation)) {
     const legacy = await readLegacyTraceEvents(deps.legacyTraceDir, worker.legacy_source?.trace_ids ?? [])
     const entries: LegacyTraceEventEntry[] = legacy.entries
-    for (let index = positions.legacy; index < entries.length; index++) {
+    const legacyLimit = replayBound ? Math.min(replayBound.legacy, entries.length) : entries.length
+    for (let index = positions.legacy; index < legacyLimit; index++) {
       const entry = entries[index]
       nativeEvents.push({ event: { ...entry.event, source: 'legacy' }, source: 'legacy', sourceOrdinal: index })
       legacyEnd = index + 1
     }
+    if (replayBound) legacyEnd = replayBound.legacy
     if (legacy.unavailable_reason) unavailableReason = legacy.unavailable_reason
   } else {
     const adapter = deps.adapters.get(incarnation.impl)
@@ -162,10 +170,11 @@ export async function readCompositeWorkerTrace(
     } else {
       try {
         const native = await adapter.readTrace(handle, { offset: positions.native })
-        native.events.forEach((event, ordinal) => {
+        const nativeLimit = replayBound ? Math.max(0, replayBound.native - positions.native) : native.events.length
+        native.events.slice(0, nativeLimit).forEach((event, ordinal) => {
           nativeEvents.push({ event: { ...event, source: 'native' }, source: 'native', sourceOrdinal: positions.native + ordinal })
         })
-        nativeEnd = native.nextCursor.offset
+        nativeEnd = replayBound ? replayBound.native : native.nextCursor.offset
         // 每次成功 native read 把脱敏、属于本化身的记录增量写 Agent-owned copy（§8.10）。
         await deps.nativeCopy.append(params.worker_id, incarnation.seq, fingerprint, native.events, deps.redact)
       } catch (error) {
@@ -173,10 +182,12 @@ export async function readCompositeWorkerTrace(
         const copied = await deps.nativeCopy.read(params.worker_id, incarnation.seq, fingerprint)
         if (copied !== null) {
           const events = copied.events
-          for (let index = positions.native; index < events.length; index++) {
+          const copyLimit = replayBound ? Math.min(replayBound.native, events.length) : events.length
+          for (let index = positions.native; index < copyLimit; index++) {
             nativeEvents.push({ event: { ...events[index], source: 'native' }, source: 'native', sourceOrdinal: index })
             nativeEnd = index + 1
           }
+          if (replayBound) nativeEnd = replayBound.native
           unavailableReason = `native degraded (served from agent-owned copy): ${message(error)}`
         } else {
           unavailableReason = `native unavailable: ${message(error)}`

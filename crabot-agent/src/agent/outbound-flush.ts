@@ -263,6 +263,21 @@ async function resolvePlatformMentions(
  *
  * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5
  */
+// 同一 tool invocation 的 delivery prepare 只跑一次（entry 对象在重试间共享）。
+const preparedDeliveries = new WeakMap<OutboundBufferEntry, Promise<{ delivery_id: string; request_ids: string[] } | undefined>>()
+
+function prepareDeliveryOnce(
+  entry: OutboundBufferEntry,
+  content: MessageContent,
+  hooks: AdminChatDeliveryHooks,
+): Promise<{ delivery_id: string; request_ids: string[] } | undefined> {
+  const existing = preparedDeliveries.get(entry)
+  if (existing) return existing
+  const prepared = hooks.prepare(entry, content)
+  preparedDeliveries.set(entry, prepared)
+  return prepared
+}
+
 export async function dispatchOutboundMessage(
   entry: OutboundBufferEntry,
   deps: OutboundDispatchDeps,
@@ -281,10 +296,11 @@ export async function dispatchOutboundMessage(
     || entry.quote_message_id !== undefined
 
   // P6-A §11.7：admin-chat 目标先落 prepared delivery（delivery_id + claim 的 request IDs），
-  // 再做首次 RPC；crab-messaging 重试与 Agent restart reconcile 复用同一 ID/payload。
-  // 其它目标不携带 delivery metadata（prepare 返回 undefined 即剥离）。
+  // 再做首次 RPC。crab-messaging 的 withRetry 会整段重跑 dispatch——同一 tool invocation 的
+  // 所有 attempt 共享同一个 dispatchEntry 对象，prepare 因此按 entry 记忆化：重试复用同一
+  // delivery_id/request 集合/payload（§11.7），不会每 attempt 新造 delivery + 空 claim。
   const delivery = entry.channel_id === 'admin-web' && entry.session_id === 'admin-chat' && deps.adminChatDelivery
-    ? await deps.adminChatDelivery.prepare(entry, messageContent)
+    ? await prepareDeliveryOnce(entry, messageContent, deps.adminChatDelivery)
     : undefined
 
   let sendResult: OutboundSendResult

@@ -194,6 +194,8 @@ export interface ManagerRegistryDeps {
   ) => ReadonlyArray<ToolDefinition>
   /** Manager episode trace writer（窄接口；见 ManagerLoopDeps.traceWriter）。 */
   readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
+  /** P6-A §3.2：episode 消费后结算未 claim 的 Admin Chat request IDs。 */
+  readonly onAdminChatWakeConsumed?: (key: ManagerKey, requestIds: string[]) => void
   /** Stable system prompt profile material. */
   readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string }
 }
@@ -265,6 +267,9 @@ export class ManagerRegistry {
       timezone: this.deps.timezone,
       onEpisodeEnd: () => this.lastActiveAtMs.set(key, this.deps.now().getTime()),
       traceWriter: this.deps.traceWriter,
+      onAdminChatWakeConsumed: this.deps.onAdminChatWakeConsumed
+        ? (ids) => this.deps.onAdminChatWakeConsumed!(key, ids)
+        : undefined,
     }
 
     const loop = new ManagerLoop(loopDeps)

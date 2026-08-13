@@ -2360,15 +2360,6 @@ export class AdminModule extends ModuleBase {
         return
       }
 
-      // Agent trace 维护面（P6-A §9.6 后只保留这两个；raw trace 内容 API 全部退役）。
-      if (pathname === '/api/agent/traces/disk-usage' && req.method === 'GET') {
-        await this.handleGetTraceDiskUsageApi(req, res)
-        return
-      }
-      if (pathname === '/api/agent/traces/old' && req.method === 'DELETE') {
-        await this.handleCleanupOldTracesApi(req, res, url)
-        return
-      }
       // Manager 只读代理（protocol-agent-v3 §8.4/§10.3，P6-A）。子路径先于 :managerKey 匹配。
       if (pathname === '/api/agent/managers' && req.method === 'GET') {
         await this.handleListManagersApi(req, res, url)
@@ -2411,15 +2402,6 @@ export class AdminModule extends ModuleBase {
         return
       }
 
-      // Agent trace 维护面（P6-A §9.6 后只保留这两个；raw trace 内容 API 全部退役）。
-      if (pathname === '/api/agent/traces/disk-usage' && req.method === 'GET') {
-        await this.handleGetTraceDiskUsageApi(req, res)
-        return
-      }
-      if (pathname === '/api/agent/traces/old' && req.method === 'DELETE') {
-        await this.handleCleanupOldTracesApi(req, res, url)
-        return
-      }
       // Bg-entity admin REST API（Plan 3 Tasks 2+3）
       if (req.method === 'GET' && pathname === '/api/bg-entities') {
         await this.handleListBgEntitiesApi(req, res)
@@ -9633,8 +9615,8 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     url: URL,
   ): Promise<void> {
-    const page = parseInt(url.searchParams.get('page') ?? '1', 10)
-    const pageSize = parseInt(url.searchParams.get('page_size') ?? '20', 10)
+    const page = parseIntParam(url.searchParams.get('page'), 1)
+    const pageSize = parseIntParam(url.searchParams.get('page_size'), 20)
     await this.proxyAgentRpc(res, 'list_managers_admin', { pagination: { page, page_size: pageSize } })
   }
 
@@ -9652,8 +9634,8 @@ export class AdminModule extends ModuleBase {
       sendJson(res, 400, { error: 'Invalid percent-encoding in manager key' })
       return
     }
-    const page = parseInt(url.searchParams.get('page') ?? '1', 10)
-    const pageSize = parseInt(url.searchParams.get('page_size') ?? '20', 10)
+    const page = parseIntParam(url.searchParams.get('page'), 1)
+    const pageSize = parseIntParam(url.searchParams.get('page_size'), 20)
     await this.proxyAgentRpc(res, 'list_manager_episodes_admin', {
       manager_key: managerKey,
       pagination: { page, page_size: pageSize },
