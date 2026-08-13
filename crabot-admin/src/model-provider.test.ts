@@ -133,6 +133,15 @@ describe('ModelProviderManager', () => {
       await expect(manager.refreshModels(created.id)).resolves.toMatchObject({ added: [], removed: [] })
     })
 
+    it('clears OAuth credential idempotently (logout of a logged-out provider is a noop)', async () => {
+      const created = await manager.createProvider({
+        name: 'OAuth', type: 'manual', format: 'openai', endpoint: 'https://oauth.example', api_key: 'k', models: [],
+      })
+      // 从未登录的 provider 登出：语义投影不变，必须允许 noop 且幂等。
+      await expect(manager.clearOAuthCredential(created.id)).resolves.toBeUndefined()
+      await expect(manager.clearOAuthCredential(created.id)).resolves.toBeUndefined()
+    })
+
     it('ignores non-whitelisted provider PATCH fields (mass assignment guard)', async () => {
       const created = await manager.createProvider({
         name: 'Original', type: 'manual', format: 'openai', endpoint: 'https://old.example', api_key: 'key', models: [],

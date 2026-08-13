@@ -510,13 +510,15 @@ export class ModelProviderManager {
       api_key: '',
       updated_at: generateTimestamp(),
     }
+    // credential 不在语义投影里：对已登出/从未登录的 provider 登出是 noop，
+    // 必须容忍（保持幂等），否则抛 'did not change semantic snapshot'。
     await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
       () => this.providers.set(providerId, updated),
       () => this.providers.set(providerId, provider),
     ), async () => {
       this.providers.set(providerId, updated)
       await this.saveProviders()
-    })
+    }, true)
   }
 
   getOAuthCredential(providerId: string): OAuthCredential | undefined {
