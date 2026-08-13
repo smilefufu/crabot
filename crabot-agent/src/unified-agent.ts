@@ -1444,6 +1444,9 @@ export class UnifiedAgent extends ModuleBase {
     if (this.agentHandler && nextWorkerSdk) {
       this.agentHandler.updateMcpConnector(liveMcp)
       this.agentHandler.updateSdkEnv(nextWorkerSdk, nextDigestSdk)
+      // extra 是原子替换的一部分：必须同步给已运行的 handler（goal_mode_enabled 等开关
+      // 从 handler 快照读取），否则配置已换、在跑 handler 仍按旧值判定。
+      this.agentHandler.setExtra(next.extra ?? {})
       this.agentHandler.updateSystemPrompt(candidate.system_prompt)
       this.agentHandler.updateSkills(candidate.skills ?? [])
       this.agentHandler.updateSubagents(candidate.subagents ?? [])

@@ -1108,6 +1108,11 @@ export class AgentHandler {
     this.extra = { ...this.extra, ...extra }
   }
 
+  /** runtime config 原子替换：整批更新 extra（区别于 updateExtra 的增量合并）。 */
+  setExtra(extra: Record<string, unknown>): void {
+    this.extra = { ...extra }
+  }
+
   async executeTask(
     params: ExecuteTaskParams,
     traceCallback?: TraceCallback,

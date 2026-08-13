@@ -445,7 +445,7 @@ const CAPABILITY_TOOLS: Record<keyof BuiltinCapabilities, string> = {
   shell: 'Bash + Output, Kill, ListEntities',
   task_intel: 'search_traces, get_task_details, search_short_term',
   crab_memory: 'crab-memory MCP 全部工具',
-  crab_messaging: 'crab-messaging MCP 全部工具',
+  crab_messaging: 'crab-messaging MCP 全部工具。v3 协议固定为 off：Worker/subagent 不允许人类出口（见 protocol-admin §3.19 / protocol-agent-v3 §11），此开关只读。',
 }
 
 const CapabilitiesTab: React.FC<{

@@ -747,9 +747,13 @@ export class SkillManager {
         else await this.mutationRunner(['skills'], async () => {
           this.skills = next
           this.legacyMigrationPending = migrationAfter ? false : this.legacyMigrationPending
-          if (previewHashes) this.contentTreeHashes = previewHashes
-          else await this.refreshRuntimeContentHashes()
-          try { return await this.semanticSnapshotProvider?.() } finally {
+          // refreshRuntimeContentHashes 对不可读目录/symlink 会 throw：必须在回滚保护内，
+          // 否则 this.skills 停在未落盘的 next，语义 fingerprint 与 committed record 永久错位。
+          try {
+            if (previewHashes) this.contentTreeHashes = previewHashes
+            else await this.refreshRuntimeContentHashes()
+            return await this.semanticSnapshotProvider?.()
+          } finally {
             this.skills = previous
             this.contentTreeHashes = previousHashes
             this.legacyMigrationPending = migrationAfter ? true : this.legacyMigrationPending

@@ -171,6 +171,28 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(agent.configStale).toBe(false)
   })
 
+  it('propagates extra replacement to the running worker handler on hot apply', async () => {
+    // extra 是原子替换的一部分：运行中 handler 从快照读 goal_mode_enabled 等开关，
+    // 热更必须同步整批 extra，否则配置已换、handler 仍按旧值判定。
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    agent.configAuthenticated = true
+    const setExtra = vi.fn()
+    agent.agentHandler = {
+      setExtra,
+      updateMcpConnector: vi.fn(), updateSdkEnv: vi.fn(), updateSystemPrompt: vi.fn(),
+      updateSkills: vi.fn(), updateSubagents: vi.fn(), updateTmpPageBaseUrl: vi.fn(),
+      updateImageConfig: vi.fn(),
+    }
+    const next = config()
+    next.extra = { goal_mode_enabled: false }
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: next, revision: 2 })
+    await agent.pullRuntimeConfig()
+    expect(setExtra).toHaveBeenCalledWith({ goal_mode_enabled: false })
+    expect(agent.configRevision).toBe(2)
+  })
+
   it('closes candidate MCP connections when post-prepare validation fails (no child process leak)', async () => {
     // prepare 已拉起真实 MCP 子进程；其后校验失败必须关掉候选连接，
     // 否则退避重试每轮泄漏一批子进程。

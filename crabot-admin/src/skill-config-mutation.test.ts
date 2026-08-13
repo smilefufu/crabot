@@ -36,6 +36,30 @@ describe('Skill source mutation journal', () => {
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
+  it('rolls the preview back when content hashing fails, keeping the registry coherent', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-preview-rollback-'))
+    try {
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      const snapshot = () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() })
+      const coordinator = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: snapshot, publishInvalidation: () => {} })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner((domains, preview, apply, allowRuntimeNoop, options) => coordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop, options).then(() => undefined))
+      await coordinator.initialize()
+      await manager.create({ name: 'demo', description: 'd', content: skill('demo') })
+      const entry = manager.list().find((item) => item.name === 'demo')!
+      // 向 skill 目录注入 symlink：refreshRuntimeContentHashes 会 throw。
+      await fs.symlink('/nonexistent-target', path.join(entry.skill_dir, 'evil-link'))
+      await expect(manager.update(entry.id, { enabled: false })).rejects.toThrow('Symlink in imported skill directory')
+      // preview 必须完整回滚：registry 不被停在未落盘的 next，fingerprint 不错位。
+      expect(manager.get(entry.id)?.enabled).toBe(true)
+      expect((await coordinator.current()).revision).toBe(2)
+      // 清掉 symlink 后同一操作立即恢复——没有被永久锁死。
+      await fs.rm(path.join(entry.skill_dir, 'evil-link'))
+      await manager.update(entry.id, { enabled: false })
+      expect(manager.get(entry.id)?.enabled).toBe(false)
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
   it('deletes a disabled skill through the journal-aware noop lifecycle without locking writes', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-disabled-delete-'))
     try {
