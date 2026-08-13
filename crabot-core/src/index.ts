@@ -1072,10 +1072,6 @@ export class ModuleManager {
     // （无人监听）永远失败，只能靠 module_started 推送兜底；一旦错过推送竞态就永久 unconfigured。
     // 这里用 admin 模块真实分配的端口覆盖静态值，让启动 pull 这条主路径可靠工作。
     const adminRpcPort = this.modules.get('admin-web')?.port
-    const adminEndpointOverride =
-      adminRpcPort && moduleId !== 'admin-web'
-        ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` }
-        : {}
 
     const childEnv: Record<string, string> = {
       ...process.env,

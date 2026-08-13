@@ -63,6 +63,8 @@ export interface CoreAgentConfigMutationCoordinatorOptions {
   /** Must return a nonsecret semantic projection. Its values may derive from secrets. */
   readSemanticSnapshot: () => Promise<unknown> | unknown
   publishInvalidation: (payload: { config_revision: number; domains: ConfigDomain[] }) => Promise<void> | void
+  /** 发布失败（outbox 已保留）时通知宿主挂后台 drain 重试，避免运行期无重试入口。 */
+  onInvalidationPublishFailure?: (error: unknown) => void
   hooks?: ConfigMutationHooks
 }
 
@@ -184,7 +186,7 @@ export class CoreAgentConfigMutationCoordinator {
     const outboxBefore = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
     if (outboxBefore) {
       this.assertOutbox(outboxBefore)
-      return null
+      if (this.outboxBlocksCoherentRead(outboxBefore)) return null
     }
     await this.options.hooks?.afterEpochOutboxRead?.()
     const record = await readJson<CoreAgentConfigRevisionRecord>(this.recordPath)
@@ -193,12 +195,24 @@ export class CoreAgentConfigMutationCoordinator {
     const outboxAfter = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
     if (outboxAfter) {
       this.assertOutbox(outboxAfter)
-      return null
+      if (this.outboxBlocksCoherentRead(outboxAfter)) return null
     }
 
     const generationAfter = this.mutationGeneration
     if (generationAfter !== generationBefore || generationAfter % 2 !== 0) return null
     return { revision: record.revision, generation: generationAfter }
+  }
+
+  /**
+   * A retained outbox blocks coherent reads only while source/record may disagree. Once the
+   * mutation is committed and the record matches the outbox target, only the nonsecret hint
+   * publication is pending; reads remain coherent and must not fail closed on it.
+   */
+  private outboxBlocksCoherentRead(outbox: CoreAgentConfigMutationOutboxRecord): boolean {
+    if (outbox.state !== 'committed') return true
+    if (!this.record) return true
+    if (outbox.target_revision !== this.record.revision) return true
+    return !this.equal(outbox.after_fingerprint_hmac, this.record.semantic_fingerprint_hmac)
   }
 
   async mutate(
@@ -437,7 +451,14 @@ export class CoreAgentConfigMutationCoordinator {
     }
     await atomicWrite(this.receiptPath, receipt)
     if (!outbox.invalidation_pending) { await durableRemoveFile(this.outboxPath); return }
-    await this.options.publishInvalidation({ config_revision: outbox.target_revision, domains: [...outbox.domains] })
+    try {
+      await this.options.publishInvalidation({ config_revision: outbox.target_revision, domains: [...outbox.domains] })
+    } catch (error) {
+      // outbox 保留 committed/invalidation_pending；宿主按 hook 挂退避 drain 重试。
+      // 继续向上抛：mutation/startup 调用方维持 fail-loud 语义。
+      this.options.onInvalidationPublishFailure?.(error)
+      throw error
+    }
     await this.options.hooks?.afterPublish?.()
     outbox.invalidation_pending = false
     await atomicWrite(this.outboxPath, outbox)

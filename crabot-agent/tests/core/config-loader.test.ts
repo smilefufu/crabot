@@ -88,23 +88,28 @@ describe('ConfigLoader authenticated runtime wire', () => {
     expect(config.agent_config?.mcp_servers).toHaveLength(1)
   })
 
-  it('admin 始终不可达 → 重试耗尽后 fail closed', async () => {
+  it('admin 始终不可达 → 重试耗尽后降级启动（存活、未认证、无 agent_config）', async () => {
     const { client, calls } = fakeRpcClient(Number.POSITIVE_INFINITY)
-    await expect(ConfigLoader.loadWithRetry(client, 'http://localhost:19002', {
+    const degraded = await ConfigLoader.loadWithRetry(client, 'http://localhost:19002', {
       budgetMs: 40,
       initialDelayMs: 5,
       maxDelayMs: 5,
-    })).rejects.toThrow('Admin config pull failed permanently')
+    })
     expect(calls()).toBeGreaterThan(1)
+    expect(degraded.module_id).toBe('crabot-agent')
+    expect(degraded.agent_config).toBeUndefined()
+    expect(degraded.runtime_config_authenticated).toBe(false)
   })
 
-  it('adminEndpoint 未配置属环境问题 → fail closed，不空转重试', async () => {
+  it('adminEndpoint 未配置属环境问题 → 降级启动，不空转重试', async () => {
     const { client, calls } = fakeRpcClient(0)
-    await expect(ConfigLoader.loadWithRetry(client, undefined, {
+    const degraded = await ConfigLoader.loadWithRetry(client, undefined, {
       budgetMs: 60_000,
       initialDelayMs: 1,
       maxDelayMs: 2,
-    })).rejects.toThrow('Admin config pull failed permanently')
+    })
     expect(calls()).toBe(0)
+    expect(degraded.agent_config).toBeUndefined()
+    expect(degraded.runtime_config_authenticated).toBe(false)
   })
 })

@@ -156,19 +156,64 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(agent.configRevision).toBe(1)
   })
 
-  it('rejects a lower revision, marks failed pull stale, and closes stale MCP connections', async () => {
+  it('degraded startup (unauthenticated config) schedules a backoff pull and self-heals without any event', async () => {
+    const degraded = config()
+    degraded.agent_config = undefined
+    degraded.runtime_config_authenticated = false
+    const agent = new UnifiedAgent(degraded) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    expect(agent.configAuthenticated).toBe(false)
+    expect(agent.isConfigured()).toBe(false)
+    const good = config()
+    good.agent_config!.system_prompt = 'healed'
+    const pull = vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: good, revision: 2 })
+    // stub 掉 onStart 的重量级副作用，只验降级自愈接线。
+    agent.importLegacyV2Tasks = vi.fn().mockResolvedValue(undefined)
+    agent.managerStack.principals.init = vi.fn().mockResolvedValue(undefined)
+    agent.startEventLoopWatchdog = vi.fn()
+    agent.traceStore.startFlushTimer = vi.fn()
+    agent.detectFeishuChannel = vi.fn().mockResolvedValue(undefined)
+    agent.sessionManager.startCleanup = vi.fn()
+    // onStart 给降级 Agent 挂退避 pull；无需任何 invalidation 事件即可自愈。
+    await agent.onStart()
+    await new Promise((resolve) => setTimeout(resolve, 1300))
+    expect(pull).toHaveBeenCalled()
+    expect(agent.configStale).toBe(false)
+    expect(agent.configAuthenticated).toBe(true)
+    expect(agent.agentConfig.system_prompt).toBe('healed')
+  })
+
+  it('treats a crossed older-revision response as a no-op without touching live state', async () => {
     const agent = new UnifiedAgent(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 3
     const disconnectAll = vi.spyOn(agent.mcpConnector, 'disconnectAll').mockResolvedValue(undefined)
     vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: config(), revision: 2 })
-    await expect(agent.pullRuntimeConfig()).rejects.toThrow('stale config revision')
+    await agent.pullRuntimeConfig()
     expect(agent.agentConfig.system_prompt).toBe('old')
-    vi.spyOn(ConfigLoader, 'pull').mockRejectedValue(new Error('admin unavailable'))
-    await agent.onEvent({ type: 'admin.agent_config_invalidated', payload: {}, timestamp: new Date().toISOString() })
+    expect(agent.configRevision).toBe(3)
+    expect(agent.configStale).toBe(false)
+    expect(disconnectAll).not.toHaveBeenCalled()
+  })
+
+  it('marks failed pull stale, closes stale MCP connections, and retries with backoff', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    const disconnectAll = vi.spyOn(agent.mcpConnector, 'disconnectAll').mockResolvedValue(undefined)
+    const pull = vi.spyOn(ConfigLoader, 'pull').mockRejectedValue(new Error('admin unavailable'))
+    await agent.onEvent({ type: 'admin.agent_config_invalidated', payload: { config_revision: 2, domains: ['models'] }, timestamp: new Date().toISOString() })
     await new Promise((resolve) => setTimeout(resolve, 70))
     expect(agent.configStale).toBe(true)
     expect(agent.isConfigured()).toBe(false)
     expect(disconnectAll).toHaveBeenCalled()
+    // 失败后挂退避重试；恢复后的下一次 pull 清除 stale（无需新的 invalidation 事件）。
+    const good = config()
+    good.agent_config!.system_prompt = 'recovered'
+    pull.mockResolvedValue({ config: good, revision: 2 })
+    await new Promise((resolve) => setTimeout(resolve, 1300))
+    expect(agent.configStale).toBe(false)
+    expect(agent.agentConfig.system_prompt).toBe('recovered')
   })
 })

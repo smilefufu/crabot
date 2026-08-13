@@ -107,6 +107,20 @@ describe('ModelProviderManager', () => {
       expect(updated.status).toBe('inactive')
     })
 
+    it('ignores non-whitelisted provider PATCH fields (mass assignment guard)', async () => {
+      const created = await manager.createProvider({
+        name: 'Original', type: 'manual', format: 'openai', endpoint: 'https://old.example', api_key: 'key', models: [],
+      })
+      const updated = await manager.updateProvider(created.id, {
+        name: 'Renamed',
+        format: 'anthropic', id: 'other', type: 'vendor', oauth_credential: { access_token: 'x' },
+      } as unknown as Parameters<typeof manager.updateProvider>[1])
+      expect(updated).toMatchObject({
+        id: created.id, name: 'Renamed', type: 'manual', format: 'openai',
+      })
+      expect((updated as Record<string, unknown>).oauth_credential).toBeUndefined()
+    })
+
     it('serializes concurrent disjoint patches to one provider', async () => {
       const created = await manager.createProvider({
         name: 'Original', type: 'manual', format: 'openai', endpoint: 'https://old.example', api_key: 'key', models: [],

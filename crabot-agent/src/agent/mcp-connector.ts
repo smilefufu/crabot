@@ -134,7 +134,9 @@ export class McpConnector {
         return new StdioClientTransport({
           command: config.command,
           args: config.args ?? [],
-          env: buildChildEnv(config.env ?? {}),
+          // 未配置 env 时保持 SDK 默认白名单（getDefaultEnvironment），不向用户可配的
+          // MCP 命令下发整个 Agent 环境；配置了 env 时叠加并剔除 runtime bearer。
+          env: config.env ? buildChildEnv(config.env) : undefined,
         })
       }
       case 'streamable-http': {

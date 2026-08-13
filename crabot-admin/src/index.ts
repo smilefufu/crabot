@@ -471,6 +471,8 @@ export class AdminModule extends ModuleBase {
   private readonly cutoverBearer?: string
   private cutoverActivated = false
   private configInvalidationPublicationEnabled = false
+  private configDrainRetryTimer?: ReturnType<typeof setTimeout>
+  private configDrainRetryDelayMs = 1_000
   private cutoverAttempt: Promise<void> | null = null
   private cutoverRecoveryReason: string | null = null
   private webServer: http.Server | null = null
@@ -590,6 +592,9 @@ export class AdminModule extends ModuleBase {
         if (!this.configInvalidationPublicationEnabled) return
         await this.publishAdminEventDurable('admin.agent_config_invalidated', { config_revision, domains })
       },
+      // publish 失败后 outbox 保留 committed/invalidation_pending；运行期必须有重试入口，
+      // 否则 readCommittedEpoch/mutate 会被一个卡住的 outbox 永久锁死（只能重启 Admin 解）。
+      onInvalidationPublishFailure: () => this.scheduleConfigDrainRetry(),
     })
     this.cutoverStore = new CoreAgentCutoverStore(this.adminConfig.data_dir)
     this.managementOnly = process.env.CRABOT_ADMIN_STARTUP_MODE === 'core-agent-cutover'
@@ -1027,6 +1032,10 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    if (this.configDrainRetryTimer) {
+      clearTimeout(this.configDrainRetryTimer)
+      this.configDrainRetryTimer = undefined
+    }
     // 停止媒体存储每日清扫定时器
     if (this.mediaSweepTimer) clearInterval(this.mediaSweepTimer)
     if (this.openclawImportSweepTimer) clearInterval(this.openclawImportSweepTimer)
@@ -4113,7 +4122,10 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleChannelMessage(channelId: ModuleId, message: ChannelMessageRef, crabDisplayName?: string, crabSelfHandle?: string): Promise<void> {
-    if (!this.cutoverActivated) return
+    if (!this.cutoverActivated) {
+      console.warn(`[Admin] dropping channel message during management-only cutover: channel=${channelId}, sender=${message.sender.platform_user_id}`)
+      return
+    }
     const { platform_user_id, platform_display_name } = message.sender
     const friend = this.resolveFriendByChannelIdentity(channelId, platform_user_id)
 
@@ -7390,10 +7402,8 @@ export class AdminModule extends ModuleBase {
 
     // 实时解析每个 slot 引用为连接信息，按 model_roles 遍历
     const resolvedModelConfig: Record<string, LLMConnectionInfo> = {}
-    const processedKeys = new Set<string>()
 
     for (const role of modelRoles) {
-      processedKeys.add(role.key)
       const ref = config.model_config[role.key]
       const fallback = role.fallback ?? 'global_default'
 
@@ -8873,6 +8883,27 @@ export class AdminModule extends ModuleBase {
       skills: this.skillManager.runtimeSemanticEntries(),
       skill_storage: this.skillManager.semanticMigrationState(),
     }
+  }
+
+  /**
+   * publish 失败会把 outbox 卡在 committed/invalidation_pending；运行期必须有重试入口，
+   * 否则一致性读与后续 mutation 都会被永久锁死（只能重启 Admin）。退避重试 drain，
+   * 成功后复位退避；MM 短暂不可用（重启窗口/超时）恢复后自愈。
+   */
+  private scheduleConfigDrainRetry(): void {
+    if (this.configDrainRetryTimer) return
+    const delay = this.configDrainRetryDelayMs
+    this.configDrainRetryDelayMs = Math.min(this.configDrainRetryDelayMs * 2, 30_000)
+    this.configDrainRetryTimer = setTimeout(() => {
+      this.configDrainRetryTimer = undefined
+      this.configMutationCoordinator.drainPendingInvalidation()
+        .then(() => { this.configDrainRetryDelayMs = 1_000 })
+        .catch((error) => {
+          console.warn('[Admin] config invalidation drain retry failed:', error instanceof Error ? error.message : String(error))
+          this.scheduleConfigDrainRetry()
+        })
+    }, delay)
+    this.configDrainRetryTimer.unref?.()
   }
 
   private async publishCurrentAgentConfigInvalidation(): Promise<void> {

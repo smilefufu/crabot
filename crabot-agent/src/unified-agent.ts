@@ -432,6 +432,13 @@ export class UnifiedAgent extends ModuleBase {
   private configStale = false
   private configAuthenticated: boolean
   private configPullTimer?: ReturnType<typeof setTimeout>
+  /** Single-flight guard: concurrent invalidations must not run overlapping pulls. */
+  private configPullInFlight?: Promise<void>
+  /** A new invalidation arrived while a pull was in flight; run one more after it settles. */
+  private configPullDirty = false
+  /** Backoff retry after pull failure so a transient error cannot pin the Agent fail-closed. */
+  private configPullRetryTimer?: ReturnType<typeof setTimeout>
+  private configPullRetryDelayMs = 1_000
 
   // 端口缓存
   private adminPort?: number
@@ -1251,18 +1258,57 @@ export class UnifiedAgent extends ModuleBase {
     if (this.configPullTimer) return
     this.configPullTimer = setTimeout(() => {
       this.configPullTimer = undefined
-      void this.pullRuntimeConfig().catch((error) => {
-        console.error(`[${this.config.moduleId}] authenticated runtime config pull failed:`, error instanceof Error ? error.message : String(error))
-      })
+      this.runRuntimeConfigPull()
     }, 50)
     this.configPullTimer.unref?.()
+  }
+
+  /** Single-flight wrapper around pullRuntimeConfig with dirty-coalesce and backoff retry. */
+  private runRuntimeConfigPull(): void {
+    if (this.configPullInFlight) {
+      this.configPullDirty = true
+      return
+    }
+    if (this.configPullRetryTimer) {
+      clearTimeout(this.configPullRetryTimer)
+      this.configPullRetryTimer = undefined
+    }
+    const run = this.pullRuntimeConfig()
+      .then(() => { this.configPullRetryDelayMs = 1_000 })
+      .catch((error) => {
+        console.error(`[${this.config.moduleId}] authenticated runtime config pull failed:`, error instanceof Error ? error.message : String(error))
+        this.scheduleRuntimeConfigPullRetry()
+      })
+      .finally(() => {
+        this.configPullInFlight = undefined
+        if (this.configPullDirty) {
+          this.configPullDirty = false
+          this.runRuntimeConfigPull()
+        }
+      })
+    this.configPullInFlight = run
+  }
+
+  private scheduleRuntimeConfigPullRetry(): void {
+    if (this.configPullRetryTimer || this.configPullTimer) return
+    const delay = this.configPullRetryDelayMs
+    this.configPullRetryDelayMs = Math.min(this.configPullRetryDelayMs * 2, 30_000)
+    this.configPullRetryTimer = setTimeout(() => {
+      this.configPullRetryTimer = undefined
+      this.runRuntimeConfigPull()
+    }, delay)
+    this.configPullRetryTimer.unref?.()
   }
 
   private async pullRuntimeConfig(): Promise<void> {
     try {
       const adminPort = await this.getAdminPort()
       const loaded = await ConfigLoader.pull(this.config.moduleId, this.rpcClient, `http://localhost:${adminPort}`)
-      if (loaded.revision < this.configRevision) throw new Error(`Refusing stale config revision ${loaded.revision}`)
+      if (loaded.revision < this.configRevision) {
+        // Response crossed with a newer commit; the newer invalidation owns recovery.
+        // No state change: neither reapplying an older snapshot nor clearing stale is safe.
+        return
+      }
       if (loaded.revision === this.configRevision) {
         // A successful authenticated read proves the current revision remains authoritative.
         // Do not reapply it: a previous transient pull failure must not permanently block ingress.
@@ -1412,9 +1458,6 @@ export class UnifiedAgent extends ModuleBase {
     if (crab_self_handle && session.channel_id) {
       this.crabSelfHandles.set(session.channel_id, crab_self_handle)
     }
-
-    // 0. Runtime admission above already rejected unconfigured/stale input.
-    if (!this.isConfigured()) return
 
     // 群聊消息走注意力调度（@mention 消息立即触发巡检）
     if (session.type === 'group') {
@@ -3204,6 +3247,11 @@ export class UnifiedAgent extends ModuleBase {
     this.detectFeishuChannel().catch(() => {/* 探测失败不影响启动 */})
     this.sessionManager.startCleanup()
 
+    // 降级启动（startup pull 永久失败，如全新安装未配置 LLM）：进程存活并照常注册，
+    // 所有执行入口由 admission fail closed；挂退避 pull 重试自愈。management-only 阶段
+    // invalidation 事件尚未开放，不能只依赖事件，必须靠自己的轮询等到 Admin 可解析配置。
+    if (!this.configAuthenticated) this.scheduleRuntimeConfigPullRetry()
+
     // Connect to external MCP servers (Admin-configured)
     if (this.agentConfig?.mcp_servers && this.agentConfig.mcp_servers.length > 0) {
       console.log(
@@ -3290,6 +3338,15 @@ export class UnifiedAgent extends ModuleBase {
     this.attentionScheduler.stopAll()
     this.traceStore.stopFlushTimer()
     this.managerStack?.harness.stopLivenessSweep()
+
+    if (this.configPullTimer) {
+      clearTimeout(this.configPullTimer)
+      this.configPullTimer = undefined
+    }
+    if (this.configPullRetryTimer) {
+      clearTimeout(this.configPullRetryTimer)
+      this.configPullRetryTimer = undefined
+    }
 
     if (this.watchdogInterval) {
       clearInterval(this.watchdogInterval)

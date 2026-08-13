@@ -63,7 +63,8 @@ async function main(): Promise<void> {
   const adminEndpoint = process.env.CRABOT_ADMIN_ENDPOINT
 
   // admin 比 agent 只早 spawn 约 1s，但要跑完整个 onStart() 才 listen —— 首次 pull 必然扑空。
-  // 退避重试等 admin 就绪；耗尽预算后 fail closed（见 ConfigLoader.loadWithRetry）。
+  // 退避重试等 admin 就绪；耗尽预算（或全新安装未配置 LLM）后返回降级配置：进程存活、
+  // 照常注册，所有执行入口 fail closed，由 UnifiedAgent 退避 pull 自愈（ConfigLoader.loadWithRetry）。
   const config: UnifiedAgentConfig = await ConfigLoader.loadWithRetry(rpcClient, adminEndpoint)
 
   // Module Manager 会通过环境变量分配端口，覆盖配置文件中的端口

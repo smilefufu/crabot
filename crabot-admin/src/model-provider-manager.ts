@@ -409,7 +409,17 @@ export class ModelProviderManager {
       throw new Error('Provider not found')
     }
 
-    const updated = { ...provider, ...params, updated_at: generateTimestamp() }
+    // 显式字段白名单：REST body 无运行时校验，不得全量 spread（防止改写
+    // format/id/type/oauth_credential 等敏感字段）。
+    const updated: ModelProvider = {
+      ...provider,
+      ...(params.name !== undefined ? { name: params.name } : {}),
+      ...(params.endpoint !== undefined ? { endpoint: params.endpoint } : {}),
+      ...(params.api_key !== undefined ? { api_key: params.api_key } : {}),
+      ...(params.models !== undefined ? { models: params.models } : {}),
+      ...(params.status !== undefined ? { status: params.status } : {}),
+      updated_at: generateTimestamp(),
+    }
     await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
       () => this.providers.set(id, updated),
       () => this.providers.set(id, provider),

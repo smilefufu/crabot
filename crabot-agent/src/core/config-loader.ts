@@ -136,8 +136,41 @@ export class ConfigLoader {
       console.warn('[ConfigLoader] Failed to load config from Admin: Admin endpoint not configured')
     }
 
-    // 配置拉取失败必须 fail closed；不再启动可操作的 unconfigured Agent。
-    throw new Error(`[ConfigLoader] Admin config pull failed permanently: ${lastError || 'unknown error'}`)
+    // 永久拉取失败（全新安装未配置 LLM、Admin 暂不可达等）不让进程退出：
+    // 降级启动后进程存活并照常注册，runtime_config_authenticated=false 使所有执行入口
+    // fail closed，由 UnifiedAgent 的退避 pull 重试等待 admin.agent_config_invalidated 自愈。
+    console.warn('[ConfigLoader] Admin config pull failed permanently; starting in degraded fail-closed mode')
+    return this.createDegradatedConfig(process.env.Crabot_MODULE_ID || 'crabot-agent')
+  }
+
+  /**
+   * 启动 pull 永久失败时的降级配置：只保留 exact 身份与编排默认值，无 agent_config。
+   */
+  static createDegradatedConfig(moduleId: string): UnifiedAgentConfig {
+    return {
+      module_id: moduleId,
+      module_type: 'agent',
+      version: '0.2.0',
+      protocol_version: '3.1.1',
+      port: process.env.Crabot_PORT ? parseInt(process.env.Crabot_PORT, 10) : 19002,
+      orchestration: {
+        front_context_recent_messages_window_hours: 6,
+        front_context_recent_messages_max_cap: 50,
+        front_context_short_term_memory_window_hours: 12,
+        front_context_short_term_memory_max_cap: 30,
+        worker_recent_messages_window_hours: 4,
+        worker_recent_messages_max_cap: 50,
+        worker_short_term_memory_window_hours: 12,
+        worker_short_term_memory_max_cap: 10,
+        worker_long_term_memory_limit: 5,
+        front_agent_timeout: 30,
+        session_state_ttl: 3600,
+        worker_config_refresh_interval: 60,
+        front_agent_queue_max_length: 100,
+        front_agent_queue_timeout: 300,
+      },
+      runtime_config_authenticated: false,
+    }
   }
 
   /**

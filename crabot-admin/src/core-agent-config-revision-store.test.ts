@@ -186,6 +186,30 @@ describe('CoreAgentConfigMutationCoordinator', () => {
     } finally { await cleanup(dir) }
   })
 
+  it('keeps coherent reads open while a committed outbox only awaits hint publication', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-config-coordinator-epoch-'))
+    let state = 'before'
+    let fail = true
+    const coordinator = new CoreAgentConfigMutationCoordinator(dir, {
+      readSemanticSnapshot: () => ({ state }),
+      publishInvalidation: async () => { if (fail) throw new Error('publish unavailable') },
+      onInvalidationPublishFailure: () => {},
+    })
+    try {
+      await coordinator.initialize()
+      await expect(coordinator.mutate(['models'], { state: 'after' }, async () => { state = 'after' })).rejects.toThrow('publish unavailable')
+      // outbox 卡在 committed/invalidation_pending：source 与 record 一致，一致性读必须可用，
+      // 不能把 get_agent_config 永久锁死。
+      const epoch = await coordinator.readCommittedEpoch()
+      expect(epoch).toMatchObject({ revision: 2 })
+      // 后台 drain 重试清掉 outbox 后，mutation 也恢复可用。
+      fail = false
+      await coordinator.drainPendingInvalidation()
+      await coordinator.mutate(['behavior'], { state: 'later' }, async () => { state = 'later' })
+      expect((await coordinator.current()).revision).toBe(3)
+    } finally { await cleanup(dir) }
+  })
+
   it('does not overwrite a publish-loss outbox with a later mutation', async () => {
     const f = await fixture({ afterPublish: () => { throw new Error('response lost') } })
     try {
