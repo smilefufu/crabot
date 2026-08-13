@@ -7,8 +7,8 @@
  *   （planned MediaStore UUID/URL、staging 源身份、finalized content）；
  * - staging：媒体 commit 前的不可见副本。
  *
- * 重启后先 reconcile 两类 journal（committing → 按 journal 确定性 complete；
- * prepared → rollback），再接受新 delivery。
+ * 重启后先 reconcile 两类 journal（prepared/committing → 按 journal 确定性 complete，
+ * rolled_back → 调用方可按同 delivery_id 重试），再接受新 delivery。
  */
 
 import { promises as fs } from 'fs'
@@ -67,11 +67,13 @@ export class ChatDeliveryJournalStore {
   async withMutex<T>(deliveryId: string, fn: () => Promise<T>): Promise<T> {
     const previous = this.mutexes.get(deliveryId) ?? Promise.resolve()
     const run = previous.then(fn)
-    this.mutexes.set(deliveryId, run.catch(() => {}))
+    const tracked = run.then(() => undefined, () => undefined)
+    this.mutexes.set(deliveryId, tracked)
     try {
       return await run
     } finally {
-      this.mutexes.delete(deliveryId)
+      // 只清自己这条链：已有后来者挂在 tracked 上时必须保留，否则第三个并发会旁路串行。
+      if (this.mutexes.get(deliveryId) === tracked) this.mutexes.delete(deliveryId)
     }
   }
 

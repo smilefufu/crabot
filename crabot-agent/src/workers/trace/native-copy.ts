@@ -56,6 +56,14 @@ export class NativeTraceCopyStore {
   ): Promise<void> {
     const filePath = this.fileFor(workerId, seq)
     const existing = await this.readHeader(filePath)
+    if (!replace) {
+      // 按 source_offset 去重：同一化身的重复首读/翻页不得把整段 native 再追加一遍。
+      const maxOffset = await this.readMaxOffset(filePath)
+      if (maxOffset !== null) {
+        events = events.filter((event) => event.source_offset !== undefined && event.source_offset > maxOffset)
+        if (events.length === 0) return
+      }
+    }
     const lines: string[] = []
     if (replace || !existing || existing.incarnation_fingerprint !== fingerprint) {
       // 指纹不一致：整文件替换（旧 copy 属于 seq 碰撞的旧化身，不得混入）。
@@ -97,6 +105,26 @@ export class NativeTraceCopyStore {
   /** 等待挂起的写盘全部落地（测试/停机收口用）。 */
   async flush(): Promise<void> {
     await Promise.all(Array.from(this.writeTails.values()))
+  }
+
+  /** copy 里已写的最大 source_offset（去重依据）；无文件/无事件返回 null。 */
+  private async readMaxOffset(filePath: string): Promise<number | null> {
+    let raw: string
+    try {
+      raw = await fs.readFile(filePath, 'utf-8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+    const lines = raw.split('\n').filter((line) => line.length > 0)
+    let max: number | null = null
+    for (const line of lines.slice(1)) {
+      try {
+        const offset = (JSON.parse(line) as NormalizedTraceEvent).source_offset
+        if (offset !== undefined && (max === null || offset > max)) max = offset
+      } catch { /* skip */ }
+    }
+    return max
   }
 
   /** 读取 copy；不存在或指纹不匹配返回 null（不得混读其它化身的 copy）。 */

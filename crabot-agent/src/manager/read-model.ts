@@ -235,8 +235,10 @@ export interface ManagerSummarySources {
 }
 
 /**
- * `list_managers_admin` 的纯计算：disk session keys ∪ TraceStore keys ∪ 内存 running keys
- * 去重 union，排序 `last_activity_at desc, manager_key asc`，base pagination 1/20/max100。
+ * `list_managers_admin` 的纯计算：disk session keys ∪ TraceStore keys 去重 union
+ * （内存 running 只提供 last_activity 提示——episode 起点已 ensureSession 落盘，
+ * 不存在只在内存的 manager），排序 `last_activity_at desc, manager_key asc`，
+ * base pagination 1/20/max100。
  */
 export function buildManagerAdminSummaries(
   sources: ManagerSummarySources,

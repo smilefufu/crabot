@@ -103,6 +103,8 @@ describe('TraceStore manager episode traces', () => {
     store.appendManagerSpan('ep-5', {
       span_id: 'sp-live', type: 'llm_call', started_at: new Date().toISOString(), status: 'running', details: { n: 1 },
     })
+    // span 增量走 deferred flush（覆盖式 running 文件）；生产由 15s 定时器兜底。
+    ;(store as unknown as { flushInFlightTraces(): void }).flushInFlightTraces()
     const rebuilt = new TraceStore(100, dir, 'traces-running.jsonl', 'traces-v3-')
     rebuilt.reconcileInterruptedManagerEpisodes()
     const episode = rebuilt.getManagerEpisode('ep-5')!

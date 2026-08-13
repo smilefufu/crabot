@@ -3195,16 +3195,33 @@ export class UnifiedAgent extends ModuleBase {
     await store.cleanStaging(key, deliveryId)
   }
 
-  /** 发送失败/结果未知：delivery 保持可重试（Agent restart reconcile 复用同一 ID 重放）。
-   *  永久性拒绝（冲突/参数非法/端点退役）不再可重试——立即清 staging，避免长期积累。 */
+  /**
+   * 发送失败/结果未知的收敛语义（P6-A §11.9）：
+   * - 「not pending」= Admin 侧这些 request 已 settled（先前的 delivery 已 commit）——
+   *   对 Agent 即终态确认：标 confirmed + 结算 wake + 清 staging，不再重放；
+   * - 其它永久性拒绝（payload 冲突/参数非法/端点退役）= 这条 delivery 永远不会被接受：
+   *   标 abandoned + 清 staging、退出重放；wake 保持未结算，由 wake 重放重跑 episode
+   *   生成新 delivery 收敛；
+   * - 传输失败/结果未知 = failed：保持可重试，重启 reconcile 用同一 delivery_id 重放
+   *  （Admin 幂等返回首次结果）。
+   */
   private async failAdminChatDelivery(deliveryId: string, error: unknown): Promise<void> {
     const key = 'admin-web::admin-chat' as ManagerKey
     const store = this.adminChatCorrelationStore()
-    await store.markOutbound(key, deliveryId, 'failed')
     const message = error instanceof Error ? error.message : String(error)
-    if (/conflict|INVALID_PARAMS|retired|not pending/i.test(message)) {
+    if (/not pending/i.test(message)) {
+      await store.markOutbound(key, deliveryId, 'confirmed')
+      const record = await store.readOutbound(key, deliveryId)
+      if (record) await store.settleInbound(key, record.request_ids)
       await store.cleanStaging(key, deliveryId)
+      return
     }
+    if (/conflict|INVALID_PARAMS|retired/i.test(message)) {
+      await store.markOutbound(key, deliveryId, 'abandoned')
+      await store.cleanStaging(key, deliveryId)
+      return
+    }
+    await store.markOutbound(key, deliveryId, 'failed')
   }
 
   /** P6-A §8.10：Agent-owned native copy store（live source 消失后的降级真相）。 */

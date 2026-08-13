@@ -73,14 +73,13 @@ export class ChatRequestIndex {
   async withMutex<T>(requestId: string, fn: () => Promise<T>): Promise<T> {
     const previous = this.mutexes.get(requestId) ?? Promise.resolve()
     const run = previous.then(fn)
-    this.mutexes.set(requestId, run.catch(() => {}))
+    const tracked = run.then(() => undefined, () => undefined)
+    this.mutexes.set(requestId, tracked)
     try {
       return await run
     } finally {
-      if (this.mutexes.get(requestId) !== undefined) {
-        // 只清自己这条链（防止 Map 无限增长；链还在跑时 clear 的是 settled 引用，无副作用）
-        this.mutexes.delete(requestId)
-      }
+      // 只清自己这条链：已有后来者挂在 tracked 上时必须保留，否则第三个并发会旁路串行。
+      if (this.mutexes.get(requestId) === tracked) this.mutexes.delete(requestId)
     }
   }
 
@@ -121,6 +120,14 @@ export class ChatRequestIndex {
     const entry = this.entries.get(requestId)
     if (!entry) return
     entry.user_message_id = userMessageId
+    await this.persist()
+  }
+
+  async expire(requestId: string): Promise<void> {
+    const entry = this.entries.get(requestId)
+    if (!entry) return
+    entry.status = 'expired'
+    entry.settled_at = new Date().toISOString()
     await this.persist()
   }
 

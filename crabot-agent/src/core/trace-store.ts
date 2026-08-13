@@ -370,7 +370,12 @@ export class TraceStore {
         if (record && record.kind === 'manager_episode') {
           // manager episode 以 running 形态载入；收口由 reconcileInterruptedManagerEpisodes
           // 在开放 read model 前统一执行（不在加载路径上直接判 failed）。
-          if (!this.managerEpisodes.has(record.trace.trace_id)) this.loadManagerEpisode(record.trace)
+          // running flush 是 span 增量的最新载体（归档只在 start/finish 落行）：
+          // 归档版仍是 running 且 running 文件版 span 更多时，以后者为准。
+          const existing = this.managerEpisodes.get(record.trace.trace_id)
+          if (!existing || (existing.status === 'running' && record.trace.spans.length >= existing.spans.length)) {
+            this.loadManagerEpisode(record.trace)
+          }
           continue
         }
         if (record && record.kind === 'legacy_agent_trace') {
@@ -1120,8 +1125,19 @@ export class TraceStore {
     this.addToManagerIndex(episode.manager_key, episode.trace_id)
   }
 
-  private persistManagerEpisode(episode: ManagerEpisodeTrace, strict: boolean): void {
+  private persistManagerEpisode(episode: ManagerEpisodeTrace, strict: boolean, deferred = false): void {
     if (!this.persistDir) return
+    // deferred=true（span/worker 增量）：不追加归档（避免按 span 数平方增长的整份重写），
+    // 改写 running flush 文件（覆盖式、有界）兜底崩溃现场；start/finish 各落一行归档。
+    if (deferred) {
+      try {
+        this.flushInFlightTraces()
+      } catch (err) {
+        console.warn(`[TraceStore] deferred manager episode flush failed for ${episode.trace_id}:`,
+          err instanceof Error ? err.message : String(err))
+      }
+      return
+    }
     try {
       const date = episode.started_at.slice(0, 10)
       const file = `${this.archiveFilePrefix}${date}.jsonl`
@@ -1160,7 +1176,9 @@ export class TraceStore {
     const episode = this.managerEpisodes.get(traceId)
     if (!episode) return
     episode.spans.push(span)
-    this.persistManagerEpisode(episode, false)
+    // span 级变更不整份重写归档（否则单 episode 落盘量随 span 数 O(n²)）：
+    // running flush 每 15s 全量覆盖 running 文件兜底崩溃现场；start/finish 各落一行。
+    this.persistManagerEpisode(episode, false, true)
   }
 
   finishManagerSpan(traceId: string, spanId: string, patch: { status: 'completed' | 'failed'; ended_at?: string; details?: unknown }): void {
@@ -1173,7 +1191,7 @@ export class TraceStore {
     span.ended_at = endedAt
     span.duration_ms = new Date(endedAt).getTime() - new Date(span.started_at).getTime()
     if (patch.details !== undefined) span.details = patch.details
-    this.persistManagerEpisode(episode, false)
+    this.persistManagerEpisode(episode, false, true)
   }
 
   addSpawnedWorkerToManagerEpisode(traceId: string, workerId: string): void {
@@ -1181,7 +1199,7 @@ export class TraceStore {
     if (!episode) return
     if (!episode.spawned_worker_ids.includes(workerId)) {
       episode.spawned_worker_ids.push(workerId)
-      this.persistManagerEpisode(episode, false)
+      this.persistManagerEpisode(episode, false, true)
     }
   }
 

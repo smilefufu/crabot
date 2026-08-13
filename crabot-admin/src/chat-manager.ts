@@ -74,7 +74,7 @@ interface InboundDispatchJournalRecord {
   /** 首次生成后固定的完整 Agent ChannelMessage（每次 attempt 原样重放）。 */
   readonly message: AgentBoundChannelMessage
   attempt: number
-  status: 'pending_dispatch' | 'agent_accepted'
+  status: 'pending_dispatch' | 'agent_accepted' | 'expired'
   readonly created_at: string
 }
 
@@ -370,7 +370,12 @@ export class ChatManager {
         console.error(`[ChatManager] dispatch attempt ${record.attempt} failed for ${record.request_id}:`,
           error instanceof Error ? error.message : String(error))
         if (record.attempt >= MAX_ATTEMPTS) {
+          // 放弃即终态：journal 与 request index 都标 expired——重启不再重投，
+          // 用户不会收到对过期问题的迟到回答。
           this.pushToClient({ type: 'chat_error', request_id: record.request_id, error: '系统暂时不可用，请稍后重试' })
+          record.status = 'expired'
+          await this.writeInboundJournal(record)
+          await this.requestIndex.expire(record.request_id)
           return
         }
         await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** record.attempt, 10_000)))
@@ -555,7 +560,6 @@ export class ChatManager {
       // 无 delivery_id 的 system_event（system-tasks 等）：直接写（无结算语义）。
       return this.storeAssistantMessage(
         { type: 'text', text: content.text ?? '' },
-        params.session_id,
         { requestIds, deliveryId: params.delivery_id },
       )
     }
@@ -701,7 +705,7 @@ export class ChatManager {
       }
       // message 用 prepare 时定型的 planned_message_id：committing 崩溃恢复/rolled_back 重试
       // 复用同一 id（幂等覆盖），不会产生第二条消息。
-      const result = await this.storeAssistantMessage(finalized, journal.session_id, {
+      const result = await this.storeAssistantMessage(finalized, {
         requestIds,
         deliveryId: journal.delivery_id,
         push: false,
@@ -774,7 +778,6 @@ export class ChatManager {
    */
   private async storeAssistantMessage(
     content: MessageContent,
-    sessionId: string,
     options: { requestIds?: string[]; deliveryId?: string; push?: boolean; messageId?: string } = {},
   ): Promise<ChatSendMessageResult> {
     const message: ChatMessage = {
@@ -835,7 +838,7 @@ export class ChatManager {
       type,
       ...(text ? { text } : {}),
       ...(media.length > 0 ? { media, media_url: media[0].media_url } : {}),
-    }, sessionId, options)
+    }, options)
   }
 
   /** 任务状态/计划变更推送（index.ts 的状态机钩子调用） */
