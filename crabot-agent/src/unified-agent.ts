@@ -3108,25 +3108,31 @@ export class UnifiedAgent extends ModuleBase {
     const requestIds = stack.registry.claimAdminChatRequestIds(key)
     const deliveryId = generateId()
     const store = this.adminChatCorrelationStore()
-    // local attachment 先复制进 Agent-owned staging 并记 raw-byte digest（§3.5）；
-    // prepared payload 引用稳定 staged 副本，不依赖 restart 后仍存在的源路径。
-    let finalContent = content
-    if (entry.file_path) {
-      finalContent = await this.stageDeliveryAttachment(key, deliveryId, content, entry.file_path)
-    }
-    await store.prepareOutbound({
-      delivery_id: deliveryId,
-      manager_key: key,
-      request_ids: requestIds,
-      target_session: { channel_id: entry.channel_id, session_id: entry.session_id },
-      payload_sha256: dispatchPayloadSha256({
-        session_id: entry.session_id,
-        content: finalContent,
+    try {
+      // local attachment 先复制进 Agent-owned staging 并记 raw-byte digest（§3.5）；
+      // prepared payload 引用稳定 staged 副本，不依赖 restart 后仍存在的源路径。
+      let finalContent = content
+      if (entry.file_path) {
+        finalContent = await this.stageDeliveryAttachment(key, deliveryId, content, entry.file_path)
+      }
+      await store.prepareOutbound({
+        delivery_id: deliveryId,
+        manager_key: key,
         request_ids: requestIds,
-        task_id: null,
-      }),
-      payload: { session_id: entry.session_id, content: finalContent },
-    })
+        target_session: { channel_id: entry.channel_id, session_id: entry.session_id },
+        payload_sha256: dispatchPayloadSha256({
+          session_id: entry.session_id,
+          content: finalContent,
+          request_ids: requestIds,
+          task_id: null,
+        }),
+        payload: { session_id: entry.session_id, content: finalContent },
+      })
+    } catch (error) {
+      // staging/落盘失败：归还 claim（没有任何 delivery record，重试可重新 claim）。
+      if (requestIds.length > 0) stack.registry.unclaimAdminChatRequestIds(key, requestIds)
+      throw error
+    }
     return { delivery_id: deliveryId, request_ids: requestIds }
   }
 

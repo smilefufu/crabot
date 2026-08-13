@@ -283,9 +283,9 @@ export class ChatManager {
   }): Promise<{ kind: 'admitted'; message: ChatMessage } | { kind: 'duplicate' } | { kind: 'conflict' }> {
     return this.requestIndex.withMutex(params.request_id, async () => {
       const fingerprint = computeInboundFingerprintV1({ text: params.text, files: params.files })
-      let admission: Awaited<ReturnType<ChatRequestIndex['admit']>>
+      let verdict: Awaited<ReturnType<ChatRequestIndex['check']>>
       try {
-        admission = await this.requestIndex.admit({
+        verdict = await this.requestIndex.check({
           request_id: params.request_id,
           session_id: 'admin-chat',
           fingerprint,
@@ -293,10 +293,11 @@ export class ChatManager {
       } catch {
         return { kind: 'conflict' }
       }
-      if (admission.kind === 'duplicate') return { kind: 'duplicate' }
+      if (verdict.kind === 'duplicate') return { kind: 'duplicate' }
 
-      // 新请求：媒体先落 store（允许不可见可 GC 的 orphan），然后 user message +
-      // inbound dispatch outbox journal 原子提交——不允许可见 message 没有 outbox。
+      // crash-recoverable 事务顺序（P6-A §11.3）：journal → user message → index。
+      // 崩在 index 之前：journal 自持完整可重放载荷，startup reconcile 重放 dispatch；
+      // 崩在 journal 之前：零副作用，client 重发即新请求。
       const userMessage: ChatMessage = {
         message_id: generateId(),
         role: 'user',
@@ -323,7 +324,12 @@ export class ChatManager {
       await this.writeInboundJournal(journal)
       this.messages.set(userMessage.message_id, userMessage)
       await this.saveData()
-      await this.requestIndex.attachUserMessage(params.request_id, userMessage.message_id)
+      await this.requestIndex.recordAdmission({
+        request_id: params.request_id,
+        session_id: 'admin-chat',
+        fingerprint,
+        user_message_id: userMessage.message_id,
+      })
 
       this.pushToClient({ type: 'chat_status', request_id: params.request_id, status: 'processing' })
       // dispatch loop 后台跑；重启由 reconcileInboundDispatches 兜底。
@@ -425,9 +431,9 @@ export class ChatManager {
     // exact duplicate 返回既有状态（不二次 promote、不新 journal）。
     const admission = await this.requestIndex.withMutex(params.request_id, async () => {
       const fingerprint = computeInboundFingerprintV1({ text, files: params.files })
-      let verdict: Awaited<ReturnType<ChatRequestIndex['admit']>>
+      let verdict: Awaited<ReturnType<ChatRequestIndex['check']>>
       try {
-        verdict = await this.requestIndex.admit({ request_id: params.request_id, session_id: 'admin-chat', fingerprint })
+        verdict = await this.requestIndex.check({ request_id: params.request_id, session_id: 'admin-chat', fingerprint })
       } catch {
         return { kind: 'conflict' as const }
       }
@@ -481,7 +487,12 @@ export class ChatManager {
       await this.writeInboundJournal(journal)
       this.messages.set(userMessage.message_id, userMessage)
       await this.saveData()
-      await this.requestIndex.attachUserMessage(params.request_id, userMessage.message_id)
+      await this.requestIndex.recordAdmission({
+        request_id: params.request_id,
+        session_id: 'admin-chat',
+        fingerprint,
+        user_message_id: userMessage.message_id,
+      })
       this.pushToClient({ type: 'chat_status', request_id: params.request_id, status: 'processing' })
       void this.runInboundDispatch(journal).catch((error) => {
         console.error(`[ChatManager] inbound dispatch loop failed for ${params.request_id}:`,

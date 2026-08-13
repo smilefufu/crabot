@@ -299,6 +299,16 @@ export class ManagerLoop {
     return claimed
   }
 
+  /**
+   * prepare 失败（staging/落盘抛错）时归还 claim：这些 ID 没有任何 delivery record，
+   * 不归还会让 manager 的重发拿到空 claim、回复退化成 proactive、占位气泡永久转圈。
+   */
+  unclaimAdminChatRequestIds(ids: ReadonlyArray<string>): void {
+    for (const id of ids) {
+      if (this.adminChatClaims.get(id) === 'claimed') this.adminChatClaims.set(id, 'unclaimed')
+    }
+  }
+
   constructor(deps: ManagerLoopDeps) {
     this.deps = deps
   }

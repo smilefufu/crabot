@@ -533,6 +533,11 @@ export class ManagerRegistry {
     return this.loops.get(key)?.claimAdminChatRequestIds() ?? []
   }
 
+  /** prepare 失败时归还 claim（见 ManagerLoop.unclaimAdminChatRequestIds）。 */
+  unclaimAdminChatRequestIds(key: ManagerKey, ids: ReadonlyArray<string>): void {
+    this.loops.get(key)?.unclaimAdminChatRequestIds(ids)
+  }
+
   /** 该 key 是否还有至少一个在途 episode(引用计数 > 0)。 */
   private isEpisodeActive(key: ManagerKey): boolean {
     return (this.activeEpisodes.get(key) ?? 0) > 0

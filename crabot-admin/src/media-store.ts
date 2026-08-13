@@ -136,12 +136,22 @@ export class MediaStore {
     return { planned_id: plannedId, staged_path: stagedPath, entry, media_url: this.toItem(entry).media_url }
   }
 
-  /** 把 staged 文件按 planned UUID promote 进 store + index（幂等：已登记直接返回）。 */
+  /**
+   * 把 staged 文件按 planned UUID promote 进 store + index。崩溃窗口幂等：
+   * 「已 rename、index 未落盘」时 staged 文件已不在——只要最终文件存在就只补登记，
+   * 不抛 ENOENT（否则 delivery 永久 commit 不了、request 永远 pending）。
+   */
   async promoteStaged(stagedPath: string, entry: MediaIndexEntry): Promise<MediaItem> {
     const existing = this.index.get(entry.id)
     if (existing) return this.toItem(existing)
     const finalPath = this.filePathOf(entry)
-    await fs.rename(stagedPath, finalPath)
+    const stagedExists = await fs.access(stagedPath).then(() => true).catch(() => false)
+    if (stagedExists) {
+      await fs.rename(stagedPath, finalPath)
+    } else {
+      const finalExists = await fs.access(finalPath).then(() => true).catch(() => false)
+      if (!finalExists) throw new Error(`staged media missing: ${stagedPath}`)
+    }
     this.index.set(entry.id, entry)
     await this.saveIndex()
     return this.toItem(entry)

@@ -883,6 +883,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     handle: IncarnationHandle,
     builtin: NonNullable<SpawnSpec['builtin']>,
   ): Promise<void> {
+    // fork 化身也有自己的结构化 trace（P6-A §8.4）：与主线 burst 同一 admission 纪律。
+    await this.ensureTraceId(instance, `worker ${instance.worker_id}#${instance.seq} (fork)`)
     const tip = instance.tip
     const initialMessages = instance.sessionTree.pathTo(tip)
     const mutex = this.getMutex(instance.worker_id)

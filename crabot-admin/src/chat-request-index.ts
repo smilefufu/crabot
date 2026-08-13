@@ -87,22 +87,33 @@ export class ChatRequestIndex {
    * 入站 CAS：不存在 → admitted（落 pending）；exact duplicate（同 fingerprint+session）→ duplicate；
    * 同 ID 不同 fingerprint/session → 抛 409 冲突（调用方保证零 media/chat/index mutation）。
    */
-  async admit(input: {
+  /**
+   * 入站检查（只读，不写）：duplicate → 既有条目；同 ID 不同 fingerprint/session → 409；
+   * 不存在 → 'new'。落盘由 `recordAdmission` 在调用方的事务顺序里完成（P6-A §11.3：
+   * journal → message → index，崩在 index 之前都能被 dispatch journal 恢复）。
+   */
+  async check(input: { request_id: string; session_id: string; fingerprint: string }): Promise<
+    { kind: 'new' } | { kind: 'duplicate'; entry: ChatRequestIndexEntry }
+  > {
+    await this.load()
+    const existing = this.entries.get(input.request_id)
+    if (!existing) return { kind: 'new' }
+    if (existing.fingerprint !== input.fingerprint || existing.session_id !== input.session_id) {
+      const error = new Error(`chat request conflict: ${input.request_id}`)
+      ;(error as { code?: string }).code = 'ADMIN_CHAT_REQUEST_CONFLICT'
+      throw error
+    }
+    return { kind: 'duplicate', entry: existing }
+  }
+
+  /** 事务末段的 index 落盘（调用方已完成 check + journal + message 写入）。 */
+  async recordAdmission(input: {
     request_id: string
     session_id: string
     fingerprint: string
     user_message_id?: string
-  }): Promise<{ kind: 'admitted'; entry: ChatRequestIndexEntry } | { kind: 'duplicate'; entry: ChatRequestIndexEntry }> {
+  }): Promise<ChatRequestIndexEntry> {
     await this.load()
-    const existing = this.entries.get(input.request_id)
-    if (existing) {
-      if (existing.fingerprint !== input.fingerprint || existing.session_id !== input.session_id) {
-        const error = new Error(`chat request conflict: ${input.request_id}`)
-        ;(error as { code?: string }).code = 'ADMIN_CHAT_REQUEST_CONFLICT'
-        throw error
-      }
-      return { kind: 'duplicate', entry: existing }
-    }
     const entry: ChatRequestIndexEntry = {
       request_id: input.request_id,
       session_id: input.session_id,
@@ -113,14 +124,7 @@ export class ChatRequestIndex {
     }
     this.entries.set(input.request_id, entry)
     await this.persist()
-    return { kind: 'admitted', entry }
-  }
-
-  async attachUserMessage(requestId: string, userMessageId: string): Promise<void> {
-    const entry = this.entries.get(requestId)
-    if (!entry) return
-    entry.user_message_id = userMessageId
-    await this.persist()
+    return entry
   }
 
   async expire(requestId: string): Promise<void> {

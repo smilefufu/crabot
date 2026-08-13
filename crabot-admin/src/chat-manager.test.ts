@@ -370,12 +370,12 @@ describe('tagMessageTask / tagUserMessageByRequestId', () => {
   /** 先注入一条 pending 的入站 request（不经 RPC：直接写 index + message + outbox journal）。 */
   async function seedPendingRequest(mgr: ChatManager, requestId: string): Promise<void> {
     const internal = mgr as unknown as {
-      requestIndex: { admit(input: unknown): Promise<unknown>; attachUserMessage(id: string, mid: string): Promise<void> }
+      requestIndex: { recordAdmission(input: unknown): Promise<unknown> }
       messages: Map<string, unknown>
       saveData(): Promise<void>
     }
     await internal.requestIndex.load()
-    await internal.requestIndex.admit({
+    await internal.requestIndex.recordAdmission({
       request_id: requestId,
       session_id: 'admin-chat',
       fingerprint: `fp-${requestId}`,
