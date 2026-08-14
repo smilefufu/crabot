@@ -5,8 +5,11 @@
 # FINAL=true 时仍无有效 review 则退出非零，把整个 job 置红（fail-closed，merge-gate 不会放行）。
 set -euo pipefail
 
+# --paginate 会逐页执行 --jq；输出匹配 review 的 ID 后统一数行，避免把多页计数（如 "0\n3"）
+# 当成单个整数，误触发 attempt 2/3。
 count=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate --jq \
-  "[.[] | select(.user.login==\"claude[bot]\" and .commit_id==\"${HEAD_SHA}\" and (.state==\"APPROVED\" or ((.body // \"\") | length > 0)))] | length")
+  ".[] | select(.user.login==\"claude[bot]\" and .commit_id==\"${HEAD_SHA}\" and (.state==\"APPROVED\" or ((.body // \"\") | length > 0))) | .id" \
+  | awk 'END { print NR + 0 }')
 
 echo "claude[bot] 对 head ${HEAD_SHA} 的有效 review 数：${count}"
 if [ "${count}" -gt 0 ]; then
