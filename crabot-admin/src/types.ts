@@ -1417,7 +1417,7 @@ export type AgentEngine = 'claude-agent-sdk' | 'pydantic-ai' | 'custom'
 export type AgentRole = 'front' | 'worker'
 
 /** 模型格式 */
-export type ModelFormat = 'openai' | 'anthropic' | 'gemini'
+export type ModelFormat = 'openai' | 'anthropic' | 'gemini' | 'openai-responses'
 
 /** 模型角色定义 */
 export interface ModelRoleDefinition {
@@ -1650,6 +1650,8 @@ export interface CoreAgentRuntimeConfig {
   image_config?: LLMConnectionInfo
   image_capability?: { available: boolean; reason?: string }
   extra?: Record<string, unknown>
+  /** P6-B §6.5：worker implementation desired config + nonsecret connection revisions。 */
+  worker_implementations?: WorkerImplementationRuntimeConfig
 }
 
 // Agent 实现管理 API 参数类型
@@ -2382,4 +2384,35 @@ export interface ClearTaskGoalParams {
 
 export interface ClearTaskGoalResult {
   task: Task
+}
+
+// ============================================================================
+// Worker implementation onboarding（protocol-agent-v3 §6.5 / protocol-admin §3.19.12）
+// 逐字段对齐协议，不得简化/重命名。
+// ============================================================================
+
+export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
+export type CLIWorkerImplId = Exclude<WorkerImplId, 'builtin'>
+
+export type WorkerConnectionConfig =
+  | { mode: 'native_account' }
+  | { mode: 'admin_provider'; provider_id: string; model_id: string }
+  | { mode: 'existing_host' }
+
+export interface WorkerImplementationPolicy {
+  enabled: boolean
+  preference?: string
+  connection?: WorkerConnectionConfig
+}
+
+export interface WorkerImplementationConfig {
+  revision: number
+  default_impl: WorkerImplId
+  implementations: Record<WorkerImplId, WorkerImplementationPolicy>
+}
+
+/** Admin→Agent runtime shape；connection_revisions 是 nonsecret invalidation signal。 */
+export interface WorkerImplementationRuntimeConfig {
+  config: WorkerImplementationConfig
+  connection_revisions: Partial<Record<CLIWorkerImplId, string>>
 }

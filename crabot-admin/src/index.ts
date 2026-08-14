@@ -29,6 +29,9 @@ import { startUpgrade, canUpgrade, isUpgradeInProgress } from './version/upgrade
 import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archive-reader.js'
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
 import { CoreAgentConfigMutationCoordinator } from './core-agent-config-revision-store.js'
+import { WorkerImplementationStore } from './worker-implementation-store.js'
+import type { WorkerImplementationRuntimeConfig, CLIWorkerImplId } from './types.js'
+import { WorkerConnectionRevisionSigner } from './worker-connection-revision.js'
 import { CoreAgentCutoverStore } from './core-agent-cutover.js'
 import { CORE_AGENT_DEFINITION } from './core-agent-definition.js'
 import { BrowserManager } from './browser-manager.js'
@@ -490,6 +493,8 @@ export class AdminModule extends ModuleBase {
   private modelProviderManager: ModelProviderManager
 
   // Agent 管理器
+  private workerImplementationStore!: WorkerImplementationStore
+  private workerConnectionRevisionSigner!: WorkerConnectionRevisionSigner
   private agentManager: AgentManager
 
   // Channel 管理器
@@ -621,6 +626,8 @@ export class AdminModule extends ModuleBase {
     this.skillManager = new SkillManager(this.adminConfig.data_dir)
     this.essentialToolsManager = new EssentialToolsManager(this.adminConfig.data_dir)
     this.subAgentManager = new SubAgentManager(this.adminConfig.data_dir, getBuiltinSubAgents)
+    this.workerImplementationStore = new WorkerImplementationStore(this.adminConfig.data_dir)
+    this.workerConnectionRevisionSigner = new WorkerConnectionRevisionSigner(this.adminConfig.data_dir)
     this.browserManager = new BrowserManager(
       this.adminConfig.data_dir,
       parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
@@ -662,6 +669,13 @@ export class AdminModule extends ModuleBase {
     })
     this.skillManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop, options) => {
       await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop, options)
+    })
+    this.workerImplementationStore.setSemanticSnapshotComputer((candidate) => {
+      const snapshot = this.readCoreAgentSemanticSnapshot() as Record<string, unknown>
+      return { ...snapshot, worker_implementations: candidate }
+    })
+    this.workerImplementationStore.setMutationRunner(async (domains, preview, apply) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
     })
     // AgentManager still emits its legacy local callback for non-core compatibility; core runtime
     // invalidation is committed by the coordinator above, never by pushConfig.
@@ -858,6 +872,9 @@ export class AdminModule extends ModuleBase {
     await this.subAgentManager.initializeLoadOnly()
     await this.skillManager.initializeLoadOnly()
     await this.essentialToolsManager.initialize()
+    // worker_implementations 同属 semantic snapshot 分量：recovery 前必须已 load
+    //（新部署在此原子落 revision 1 安全初始配置）。
+    await this.workerImplementationStore.load()
 
     // Recover durable revision/outbox against fully loaded source state before any mutation.
     // Verify any Skill source journal binding before coordinator initialization/recovery trusts source projection.
@@ -2357,6 +2374,16 @@ export class AdminModule extends ModuleBase {
       const deleteTaskMatch = pathname.match(/^\/api\/admin\/tasks\/([^/]+)$/)
       if (deleteTaskMatch && req.method === 'DELETE') {
         await this.handleDeleteTaskApi(req, res, deleteTaskMatch[1])
+        return
+      }
+
+      // Worker implementation desired config（protocol-admin §3.19.12，P6-B）。
+      if (pathname === '/api/agent/worker-implementations' && req.method === 'GET') {
+        await this.handleGetWorkerImplementationsApi(req, res)
+        return
+      }
+      if (pathname === '/api/agent/worker-implementations' && req.method === 'PUT') {
+        await this.handlePutWorkerImplementationsApi(req, res)
         return
       }
 
@@ -7257,6 +7284,7 @@ export class AdminModule extends ModuleBase {
       agent_config: resolvedAgentConfig,
       ...imageFields,
       ...(config.extra ? { extra: config.extra } : {}),
+      worker_implementations: await this.buildWorkerImplementationRuntimeConfig(),
     }
     delete runtimeConfig.agent_config.extra
     return {
@@ -8639,6 +8667,7 @@ export class AdminModule extends ModuleBase {
       subagent_storage: this.subAgentManager.semanticMigrationState(),
       skills: this.skillManager.runtimeSemanticEntries(),
       skill_storage: this.skillManager.semanticMigrationState(),
+      worker_implementations: this.workerImplementationStore.runtimeSemanticEntries(),
     }
   }
 
@@ -9566,6 +9595,65 @@ export class AdminModule extends ModuleBase {
         msg.includes('connect failed')
       sendJson(res, isUnreachable ? 503 : 500, { error: isUnreachable ? 'Agent not available' : msg })
     }
+  }
+
+  /** GET /api/agent/worker-implementations：desired config（引用形态，无 secret）。 */
+  private async handleGetWorkerImplementationsApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const desired = await this.workerImplementationStore.load()
+    sendJson(res, 200, desired)
+  }
+
+  /**
+   * PUT /api/agent/worker-implementations：CAS 更新（expected_revision 必传）。
+   * body 只接受协议 shape（implementations 引用 provider/model，不含 credential）；
+   * Agent unavailable 时只允许保存全 disabled intent（启用 CLI 需 Agent 在线评估 translator
+   * 兼容——503 由 admission 抛出）。
+   */
+  private async handlePutWorkerImplementationsApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const body = (await this.readJsonBody<{ expected_revision?: unknown; default_impl?: unknown; implementations?: unknown }>(req))
+      if (typeof body.expected_revision !== 'number' || !Number.isInteger(body.expected_revision)) {
+        sendJson(res, 400, { error: 'expected_revision is required' })
+        return
+      }
+      const updated = await this.workerImplementationStore.update(body.expected_revision, (current) => {
+        const candidate = {
+          revision: current.revision, // store 会 +1
+          default_impl: body.default_impl ?? current.default_impl,
+          implementations: body.implementations,
+        }
+        return candidate as never
+      })
+      sendJson(res, 200, updated)
+    } catch (error) {
+      const code = (error as { code?: unknown }).code
+      if (code === 'ADMIN_WORKER_IMPL_REVISION_CONFLICT') {
+        sendJson(res, 409, { error: (error as Error).message })
+        return
+      }
+      console.error('[Admin] worker-implementations PUT failed:', error)
+      sendJson(res, 400, { error: error instanceof Error ? (error.message || String(error)) : String(error) })
+    }
+  }
+
+  /** §6.5：desired config + 当前 admin_provider connection 的 nonsecret opaque revision。 */
+  private async buildWorkerImplementationRuntimeConfig(): Promise<WorkerImplementationRuntimeConfig> {
+    const desired = await this.workerImplementationStore.load()
+    const connectionRevisions: Partial<Record<CLIWorkerImplId, string>> = {}
+    for (const impl of ['claude-code', 'codex'] as const) {
+      const policy = desired.implementations[impl]
+      if (policy.connection?.mode !== 'admin_provider') continue
+      const provider = this.modelProviderManager.getProvider(policy.connection.provider_id)
+      if (!provider) continue // 引用失效由 status/degraded 暴露；revision 缺省即失效信号
+      connectionRevisions[impl] = await this.workerConnectionRevisionSigner.compute({
+        policy_revision: desired.revision,
+        provider_id: provider.id,
+        model_id: policy.connection.model_id,
+        endpoint: provider.endpoint,
+        credential_material: provider.api_key ?? '',
+      })
+    }
+    return { config: desired, connection_revisions: connectionRevisions }
   }
 
   private memoryModules: Array<{ module_id: string; port: number; name: string }> = []

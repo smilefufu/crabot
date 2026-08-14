@@ -1,3 +1,4 @@
+import type { ModelFormat } from 'crabot-shared'
 import type { ToolDefinition, LLMAdapter } from '../engine/index.js'
 import type { Resolvable } from '../engine/types.js'
 // 纯类型引用(两侧都是 `import type`,编译后无运行时依赖,不构成模块环)。
@@ -5,6 +6,67 @@ import type { LedgerWorker } from './harness/ledger-types.js'
 import type { ResolvedPermissions, MCPServerConfig } from '../types.js'
 
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
+export type CLIWorkerImplId = Exclude<WorkerImplId, 'builtin'>
+
+// ── P6-B：worker implementation connection / activation（protocol-agent-v3 §6.5 逐字段对齐）──
+
+export type WorkerConnectionConfig =
+  | { mode: 'native_account' }
+  | { mode: 'admin_provider'; provider_id: string; model_id: string }
+  | { mode: 'existing_host' }
+
+export interface WorkerConnectionCapability {
+  mode: 'native_account' | 'admin_provider' | 'existing_host'
+  translator_id: string
+  translator_version: string
+  cli_version_range: string
+  provider_formats?: ModelFormat[]
+  endpoint_policy?: 'official_only' | 'custom_base_url'
+  credential_transport: 'native_store' | 'process_env' | 'agent_runtime_file'
+  model_selection: 'native_default' | 'explicit_model'
+  credential_scope: 'managed' | 'runtime_user_home' | 'admin_runtime'
+}
+
+export interface WorkerImplementationPolicy {
+  enabled: boolean
+  preference?: string
+  connection?: WorkerConnectionConfig
+}
+
+export interface WorkerImplementationConfig {
+  revision: number
+  default_impl: WorkerImplId
+  implementations: Record<WorkerImplId, WorkerImplementationPolicy>
+}
+
+/** Admin→Agent runtime shape；connection_revisions 是 nonsecret invalidation signal。 */
+export interface WorkerImplementationRuntimeConfig {
+  config: WorkerImplementationConfig
+  connection_revisions: Partial<Record<CLIWorkerImplId, string>>
+}
+
+export type WorkerVerificationState = 'never' | 'running' | 'passed' | 'failed' | 'grandfathered'
+
+export interface WorkerImplementationStatus {
+  impl: WorkerImplId
+  installed: boolean
+  version?: string
+  install_source?: 'managed' | 'system'
+  connection_mode?: WorkerConnectionConfig['mode']
+  credential_scope?: WorkerConnectionCapability['credential_scope']
+  configured: boolean
+  policy_revision: number
+  connection_revision?: string
+  translator?: WorkerConnectionCapability
+  verification: WorkerVerificationState
+  ready: boolean
+  capabilities: AdapterCapabilities
+  connection_capabilities: WorkerConnectionCapability[]
+  observed_at: string
+  last_verified_at?: string
+  /** 必须脱敏；不得包含 endpoint credential、Authorization、assertion、terminal bytes 或本地 secret 路径。 */
+  detail?: string
+}
 export type WorkerContractState = 'running' | 'idle' | 'exited'
 export type CliControlState =
   | { readonly kind: 'running' }

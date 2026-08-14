@@ -13,6 +13,9 @@ import { randomUUID } from 'node:crypto'
 /** 模块实例唯一标识，如 "front-agent"、"channel-feishu" */
 export type ModuleId = string
 
+/** LLM provider wire format（protocols/base-protocol.md §5.12）。 */
+export type ModelFormat = 'openai' | 'anthropic' | 'gemini' | 'openai-responses'
+
 /** 熟人唯一标识，UUID v4 */
 export type FriendId = string
 

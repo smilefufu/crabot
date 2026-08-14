@@ -164,6 +164,8 @@ export interface UnifiedAgentConfig {
    * @see protocol-agent-v2.md §6 extra
    */
   extra?: Record<string, unknown>
+  /** P6-B §6.5：worker implementation desired config + nonsecret connection revisions。 */
+  worker_implementations?: import('./workers/types.js').WorkerImplementationRuntimeConfig
 }
 
 // ============================================================================
