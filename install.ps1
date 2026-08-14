@@ -174,7 +174,8 @@ if ($FromSource) {
     }
     $filename = "crabot-$Version-windows-x64.zip"
     $url = "https://github.com/smilefufu/crabot/releases/download/$Version/$filename"
-    $stageParent = Join-Path $env:TEMP ("crabot-install-{0}-{1}" -f $PID, [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    $stageParent = Join-Path (Split-Path $InstallDir -Parent) (".crabot-i-{0}" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
     $stageRelease = Join-Path $stageParent "crabot-$Version-windows-x64"
     $archivePath = Join-Path $stageParent $filename
 
@@ -221,7 +222,6 @@ if ($FromSource) {
             exit 1
         }
 
-        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
         $retainedEntries = @('PortableGit', 'data', 'instance.json', 'crabot.cmd')
         foreach ($entry in Get-ChildItem -LiteralPath $stageRelease -Force) {
             if ($retainedEntries -contains $entry.Name) {
@@ -242,6 +242,11 @@ if ($FromSource) {
         # 根 package 的 commander、js-yaml、rotating-file-stream 保留发布包自带版本，不能在这里再次解析版本。
         foreach ($mod in $runtimeModules) {
             $moduleDir = Join-Path $InstallDir $mod
+            $nodeModulesDir = Join-Path $moduleDir 'node_modules'
+            if (Test-Path -LiteralPath $nodeModulesDir -PathType Container) {
+                Remove-Item -LiteralPath $nodeModulesDir -Recurse -Force
+            }
+
             Write-Info "Restoring dependencies: $mod"
             Push-Location $moduleDir
             try {
