@@ -114,6 +114,12 @@ export interface SpawnSpec {
   readonly worker_id: string
   readonly prompt: string
   readonly workspace: Workspace
+  /**
+   * P6-B §6.5：operation admission 由 translator 注入的最小连接 env（CLI adapter 透传到
+   * 进程 env；tmux driver 侧仍会过 scrubChildEnv）。不得由 Manager/调用方直接构造——
+   * 只能来自 activation registry admission 的 translator 输出。
+   */
+  readonly connection_env?: Record<string, string>
   readonly goal?: string
   /**
    * 台账 origin(派发来源与权限身份)。builtin adapter 把它与 workspace/goal 一起持久化,
@@ -249,7 +255,7 @@ export interface WorkerAdapter {
   preflightProvision?(ws: Workspace, caps: CapabilityBundle): Promise<void>
   provision(ws: Workspace, caps: CapabilityBundle): Promise<void>
   spawn(spec: SpawnSpec): Promise<IncarnationHandle>
-  resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle>
+  resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle>
   fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle>
   sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void>
   readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }>

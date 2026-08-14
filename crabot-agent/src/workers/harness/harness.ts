@@ -427,6 +427,15 @@ export interface HarnessDeps {
    * 省略 impl 的 spawn 走 defaultImpl（builtin 安全路径）不在此 gate。
    */
   readonly assertWorkerImplReady?: (impl: WorkerImplId) => void
+  /**
+   * P6-B §6.5：operation-time connection admission（registry gate 之后、副作用之前）。
+   * 返回的 env 注入 SpawnSpec.connection_env；dispose 在 spawn 收口后调用。
+   */
+  readonly admitWorkerConnection?: (impl: WorkerImplId) => Promise<{
+    env: Record<string, string>
+    connectionRevision?: string
+    dispose(): Promise<void>
+  }>
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string) => Promise<boolean>
   /** Validates an opaque legacy continuation credential immediately before side effects. */
@@ -625,6 +634,8 @@ export class WorkerHarness {
     const workerId = `w-${randomUUID()}`
     // P6-B：显式 impl 在任何副作用（workspace/台账/provision）前过 registry gate。
     if (p.impl !== undefined) this.deps.assertWorkerImplReady?.(p.impl)
+    // P6-B §6.5：operation admission——当前调用内实时解析连接；revision 在副作用前最终比对。
+    const admission = p.impl !== undefined ? await this.deps.admitWorkerConnection?.(p.impl) : undefined
     const impl = p.impl ?? this.deps.defaultImpl
     const adapter = this.deps.adapters.get(impl)
     if (!adapter) {
@@ -701,6 +712,7 @@ export class WorkerHarness {
           origin: p.origin,
           principal_permissions: context.principal_permissions,
           builtin,
+          ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
         }
         spawnedHandle = await adapter.spawn(spec)
       } catch (err) {
@@ -753,6 +765,9 @@ export class WorkerHarness {
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
 
+      // runtime file（如 codex admin_provider 的 CODEX_HOME）必须活到化身终态——
+      // CLI 运行期持续读它；终态收割时统一清理（含崩溃路径的 fireIncarnationTerminal）。
+      if (admission) this.connectionDisposers.set(`${workerId}:1`, admission.dispose)
       const inbox = this.getInbox(workerId)
       inbox.release()
       if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
@@ -1436,10 +1451,14 @@ export class WorkerHarness {
     this.deps.assertExecutionAdmission?.()
     // P6-B：resume 重验 ready（「已有 running incarnation 不杀，新 resume/handoff 重验」）。
     this.deps.assertWorkerImplReady?.(mainline.impl)
+    // P6-B §6.5：resume 同样 operation-time 解析连接（revision 变化即拒绝）。
+    const admission = await this.deps.admitWorkerConnection?.(mainline.impl)
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
-    const newHandle = await adapter.resume(prevRef, text)
+    const newHandle = await adapter.resume(prevRef, text, admission ? { connection_env: admission.env } : undefined)
+    // 新化身的 runtime 资源活到新化身终态（spawn 路径同纪律）。
+    if (admission) this.connectionDisposers.set(`${worker.worker_id}:${newHandle.seq}`, admission.dispose)
 
     const initialInput = newHandle.initial_input
     const initialState = cliContractState(initialInput?.control_state ?? 'running')
@@ -2710,7 +2729,15 @@ export class WorkerHarness {
   }
 
   /** 化身终态收割钩子（P6-A §8.10）：fire-and-forget，异常只记不打断。 */
+  /** P6-B：化身级 connection runtime 资源清理（workerId:seq → dispose）。 */
+  private readonly connectionDisposers = new Map<string, () => Promise<void>>()
+
   private fireIncarnationTerminal(h: IncarnationHandle): void {
+    const disposer = this.connectionDisposers.get(`${h.worker_id}:${h.seq}`)
+    if (disposer) {
+      this.connectionDisposers.delete(`${h.worker_id}:${h.seq}`)
+      void disposer().catch(() => {})
+    }
     try {
       this.deps.onIncarnationTerminal?.(h)
     } catch (error) {

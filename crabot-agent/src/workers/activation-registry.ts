@@ -22,6 +22,7 @@ import { createHmac, randomBytes } from 'node:crypto'
 import type {
   WorkerAdapter,
   WorkerImplId,
+  WorkerImplementationPolicy,
   CLIWorkerImplId,
   WorkerImplementationRuntimeConfig,
   WorkerImplementationStatus,
@@ -153,6 +154,12 @@ export class ActivationRegistry {
   listStatus(): WorkerImplementationStatus[] {
     if (!this.desired) throw new Error('[ActivationRegistry] not initialized')
     return [...this.snapshots.values()]
+  }
+
+  /** 当前 desired policy（operation admission 用；未 initialized 抛错）。 */
+  getPolicy(impl: WorkerImplId): WorkerImplementationPolicy | undefined {
+    if (!this.desired) throw new Error('[ActivationRegistry] not initialized')
+    return this.desired.config.implementations[impl]
   }
 
   getStatus(impl: WorkerImplId): WorkerImplementationStatus {

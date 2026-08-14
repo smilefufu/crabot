@@ -744,6 +744,7 @@ export class AdminModule extends ModuleBase {
 
     // Agent 配置管理
     this.registerMethod('get_agent_config', this.handleGetAgentConfig.bind(this))
+    this.registerMethod('resolve_worker_connection', this.handleResolveWorkerConnection.bind(this))
     this.registerMethod('update_agent_config', this.handleUpdateAgentConfig.bind(this))
 
     // Memory 配置管理（供 Memory 模块启动时 pull 初始配置）
@@ -9595,6 +9596,56 @@ export class AdminModule extends ModuleBase {
         msg.includes('connect failed')
       sendJson(res, isUnreachable ? 503 : 500, { error: isUnreachable ? 'Agent not available' : msg })
     }
+  }
+
+  /**
+   * §6.5/§3.19.12 resolve_worker_connection：Agent-only、operation-time 实时解析。
+   * - runtime bearer 先经 MM verify_core_agent_runtime 验证 exact core Agent；
+   * - provider/model 引用只从 Admin persisted policy 取，不接受调用方临时引用；
+   * - 每次调用唯一 buildConnectionInfo 实时解析，失败不 fallback snapshot；
+   * - connection_revision 为 opaque HMAC（nonsecret invalidation signal）。
+   */
+  private async handleResolveWorkerConnection(
+    params: { impl?: unknown; expected_policy_revision?: unknown },
+    context?: RpcHandlerContext,
+  ): Promise<{ connection: LLMConnectionInfo; connection_revision: string; policy_revision: number }> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime',
+      { expected_module_id: 'crabot-agent' },
+      this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+    const impl = params.impl
+    if (impl !== 'claude-code' && impl !== 'codex') {
+      throw new RpcError('INVALID_PARAMS', 'impl must be claude-code or codex')
+    }
+    const desired = await this.workerImplementationStore.load()
+    if (typeof params.expected_policy_revision !== 'number' || params.expected_policy_revision !== desired.revision) {
+      throw new RpcError('CONFLICT', `worker implementation policy revision mismatch (current ${desired.revision})`)
+    }
+    const policy = desired.implementations[impl]
+    if (!policy.enabled || policy.connection?.mode !== 'admin_provider') {
+      throw new RpcError('INVALID_PARAMS', `${impl} is not enabled with admin_provider connection`)
+    }
+    // 每次调用实时解析；provider 不存在/解析失败直接 fail loud。
+    const provider = this.modelProviderManager.getProvider(policy.connection.provider_id)
+    if (!provider) {
+      throw new RpcError('NOT_FOUND', `provider not found: ${policy.connection.provider_id}`)
+    }
+    const connection = await this.modelProviderManager.buildConnectionInfo(
+      policy.connection.provider_id,
+      policy.connection.model_id,
+    ) as LLMConnectionInfo
+    const revision = await this.workerConnectionRevisionSigner.compute({
+      policy_revision: desired.revision,
+      provider_id: provider.id,
+      model_id: policy.connection.model_id,
+      endpoint: provider.endpoint,
+      credential_material: provider.api_key ?? '',
+    })
+    return { connection, connection_revision: revision, policy_revision: desired.revision }
   }
 
   /** GET /api/agent/worker-implementations：desired config（引用形态，无 secret）。 */

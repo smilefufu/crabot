@@ -757,7 +757,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 持久痕迹,同 worker_id 可安全重试。CODEX_HOME 经 tmux -e 传给会话进程(execFile 直传
     // argv,不经过 shell 插值,不需要额外转义);PATH 同样经 -e 显式前置 codexBin 所在真实
     // 目录(nvm 部署陷阱,见 buildEnv/resolveBinDir 注释),不依赖 tmux server 自身环境。
-    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile, env: await this.buildEnv({ CODEX_HOME: codexHome }) })
+    await this.tmux.newSession({
+      name: sessionName, cwd: spec.workspace.root, command, outputFile,
+      // connection_env（admin_provider CODEX_HOME/env_key）优先级高于 workspace 默认。
+      env: await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env }),
+    })
 
     // 启动期就绪握手(见 tmux/paste-ready.ts),排在 session 发现**之前**:
     // - 它才是"能不能收输入"的判据。session 发现等的是 rollout 文件出现,那是"会话已建立"
@@ -845,7 +849,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
     validateSessionRef(prev.session_ref)
 
     // 四轮 review 修复(同 cc adapter):prevRuntime 不再要求"常驻本进程"——resume 的合法
@@ -902,7 +906,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
       // PATH 前置同 spawn(nvm 部署陷阱)。
-      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: await this.buildEnv({ CODEX_HOME: prevRuntime.codexHome }) })
+      await this.tmux.newSession({
+        name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile,
+        env: await this.buildEnv({ CODEX_HOME: opts?.connection_env?.CODEX_HOME ?? prevRuntime.codexHome, ...opts?.connection_env }),
+      })
 
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
       runtime = {

@@ -372,7 +372,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return handle
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, _opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
     // 起化身 → 现取运行配置（spec 决策 2）。这条正是"进程重启后 builtin worker 能不能
     // revive"的分水岭：吃 spawn 时的内存快照时，重启后这里必然拿不到配置。
     const builtin = await this.runtimeFor(prev.worker_id, 'resume')

@@ -538,7 +538,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
     // (session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id 可安全重试。
-    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile })
+    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile, env: spec.connection_env })
 
     const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
     const runtime: Runtime = {
@@ -590,7 +590,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
 
@@ -650,7 +650,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
-      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile })
+      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: opts?.connection_env })
 
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
       runtime = {

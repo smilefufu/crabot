@@ -67,6 +67,7 @@ import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-mana
 import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
 import { ActivationRegistry } from './workers/activation-registry.js'
+import { admitWorkerConnection } from './workers/connections/admission.js'
 
 /** 新部署安全初始 worker implementation 配置（与 Admin store revision-1 语义一致）。 */
 const DEFAULT_SAFE_WORKER_IMPLS: import('./workers/types.js').WorkerImplementationRuntimeConfig = {
@@ -711,6 +712,11 @@ export class UnifiedAgent extends ModuleBase {
       builtinTraceHooks: this.builtinTraceHooks(),
       // P6-B §6：显式 impl spawn/resume/handoff 的 registry gate。
       assertWorkerImplReady: (impl) => this.activationRegistry.assertReady(impl),
+      // P6-B §6.5：operation-time connection admission（当前调用内实时解析）。
+      admitWorkerConnection: (impl) => admitWorkerConnection(this.activationRegistry, impl, {
+        resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),
+        runtimeRoot: path.join(getAgentDataDir(), 'worker-impls', 'runtime'),
+      }),
       builtinTraceReader: this.builtinTraceReader(),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
       onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
@@ -2876,6 +2882,29 @@ export class UnifiedAgent extends ModuleBase {
       workerCount: (key) => workerCounts.get(key) ?? 0,
       runningLastActiveAtMs: (key) => running.get(key),
     }, params?.pagination)
+  }
+
+  /**
+   * §6.5：admin_provider operation-time 解析——当前调用内 callSensitive 取连接，
+   * 不带 RpcTraceContext，不缓存给下一操作。
+   */
+  private async resolveWorkerConnectionAdminProvider(
+    impl: import('./workers/types.js').CLIWorkerImplId,
+    expectedPolicyRevision: number,
+  ): Promise<{ connection: import('./workers/connections/types.js').ResolvedWorkerConnection; connection_revision: string }> {
+    const adminPort = this.adminPort
+    if (!adminPort) throw new Error('Admin module is unavailable for resolve_worker_connection')
+    const result = await this.rpcClient.callSensitive<
+      { impl: string; expected_policy_revision: number },
+      { connection: import('./workers/connections/types.js').ResolvedWorkerConnection; connection_revision: string }
+    >(
+      adminPort,
+      'resolve_worker_connection',
+      { impl, expected_policy_revision: expectedPolicyRevision },
+      this.config.moduleId,
+      { authorizationBearer: ConfigLoader.getRuntimeBearer() },
+    )
+    return result
   }
 
   /** §6.5/§8.4：脱敏 WorkerImplementationStatus（activation registry 唯一 read API）。 */
