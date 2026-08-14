@@ -992,6 +992,9 @@ export class AdminModule extends ModuleBase {
     // 若 Admin 单独重启错过事件，由 ensureAgentPort() 惰性兜底。
 
     if (!this.managementOnly) {
+      // §3.19.12 step 4：存量实例（cutover 早已完成）升级 P6-B 时在此补跑 bootstrap；
+      // fresh deploy/已完成/user_superseded 都幂等快进。
+      await this.runWorkerImplementationBootstrap()
       await this.ensureBuiltinSchedules()
       const allSchedules = Array.from(this.schedules.values())
       this.scheduleEngine.startAll(allSchedules)
@@ -7130,6 +7133,10 @@ export class AdminModule extends ModuleBase {
       this.configInvalidationPublicationEnabled = false
       throw error
     }
+    // §3.19.12 step 4：开放 ingress 前完成 worker implementation 初始迁移
+    // （grandfather bootstrap；fresh deploy 只落 completed marker，不 inspect 不付费 verify）。
+    await this.runWorkerImplementationBootstrap()
+
     // Open ingress before arming timers: an already-due one-shot must never fire into
     // the management-only gate and be lost.
     this.cutoverActivated = true
@@ -9784,11 +9791,139 @@ export class AdminModule extends ModuleBase {
         sendJson(res, 200, result)
         return
       }
-      // verify/cancel 的 Agent 端点在后续阶段落地；这里先明确 501 而不是假装受理。
+      if (action === 'verify') {
+        const result = await this.rpcClient.callSensitive<
+          Record<string, unknown>,
+          { operation_id: string; state: string; passed: boolean; detail?: string }
+        >(agentPort, 'verify_worker_implementation', {
+          impl,
+          operation_id: operationId,
+          assertion,
+          expected: { action, operation_id: operationId, impl, mode, policy_revision: desired.revision },
+        }, this.config.moduleId)
+        sendJson(res, 200, result)
+        return
+      }
+      // cancel 的 Agent 端点在后续阶段落地；这里先明确 501 而不是假装受理。
       sendJson(res, 501, { error: `${action} operation is not yet implemented` })
     } catch (error) {
       sendJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
     }
+  }
+
+  /**
+   * §12 grandfather bootstrap（Admin 侧协调，plan §12 顺序）：
+   * fresh deploy → completed marker 即走；pre-P6 升级（有 legacy worker 数据且无 marker）
+   * → pending transaction → Agent inspect → CAS 写 migration config → invalidation →
+   * commit（Agent 核对 observation/policy/binding）→ completed marker。
+   * 用户 PUT 竞态：revision 变化即放弃本事务（store 的 update 天然 CAS 拒绝）。
+   */
+  private async runWorkerImplementationBootstrap(): Promise<void> {
+    const markerPath = path.join(this.adminConfig.data_dir, 'migrations', 'worker-implementation-bootstrap-v1.json')
+    type Marker = { state: 'pending' | 'completed' | 'user_superseded'; transaction_id: string }
+    const readMarker = async (): Promise<Marker | null> => {
+      try {
+        return JSON.parse(await fs.readFile(markerPath, 'utf-8')) as Marker
+      } catch {
+        return null
+      }
+    }
+    const writeMarker = async (marker: Marker): Promise<void> => {
+      await fs.mkdir(path.dirname(markerPath), { recursive: true, mode: 0o700 })
+      const tmp = `${markerPath}.tmp-${process.pid}`
+      await fs.writeFile(tmp, JSON.stringify(marker), { mode: 0o600 })
+      await fs.rename(tmp, markerPath)
+    }
+
+    const existing = await readMarker()
+    if (existing?.state === 'completed' || existing?.state === 'user_superseded') return
+
+    // pre-P6 信号：legacy agent worker 数据存在。
+    const agentDataDir = path.join(path.dirname(this.adminConfig.data_dir), 'agent')
+    const hasLegacyData = await fs.readdir(path.join(agentDataDir, 'workers')).then((entries) => entries.length > 0).catch(() => false)
+    if (!hasLegacyData) {
+      await writeMarker({ state: 'completed', transaction_id: existing?.transaction_id ?? generateId() })
+      return
+    }
+
+    const marker: Marker = existing ?? { state: 'pending', transaction_id: generateId() }
+    if (!existing) await writeMarker(marker)
+
+    const agentPort = await this.ensureAgentPort()
+    if (!agentPort) throw new Error('Agent not available for worker bootstrap')
+
+    // 1. inspect（幂等重放）
+    const inspection = await this.rpcClient.call<
+      { transaction_id: string },
+      { observation: Record<string, { installed: boolean; activated: boolean; version?: string }> }
+    >(agentPort, 'inspect_worker_implementation_bootstrap', { transaction_id: marker.transaction_id }, this.config.moduleId)
+
+    const qualifying = (['claude-code', 'codex'] as const).filter((impl) => {
+      const observed = inspection.observation[impl]
+      return observed?.installed && observed.activated && typeof observed.version === 'string'
+    })
+    if (qualifying.length === 0) {
+      await writeMarker({ state: 'completed', transaction_id: marker.transaction_id })
+      return
+    }
+
+    // 2. CAS 写 migration-owned config：qualifying CLI → existing_host+enabled，builtin default 不变。
+    const desired = await this.workerImplementationStore.load()
+    try {
+      await this.workerImplementationStore.update(desired.revision, (current) => {
+        const next = {
+          revision: current.revision,
+          default_impl: current.default_impl,
+          implementations: {
+            builtin: { ...current.implementations.builtin },
+            'claude-code': { ...current.implementations['claude-code'] },
+            codex: { ...current.implementations.codex },
+          },
+        }
+        for (const impl of qualifying) {
+          // 用户已显式配置（policy 带 connection 或 enabled=true）的不覆盖。
+          const policy = current.implementations[impl]
+          if (policy.enabled || policy.connection) continue
+          next.implementations[impl] = { enabled: true, connection: { mode: 'existing_host' as const } }
+        }
+        return next
+      })
+    } catch (error) {
+      // CAS 失败 = 用户并发 PUT → user_superseded，永不自动重试启用。
+      if ((error as { code?: unknown }).code === 'ADMIN_WORKER_IMPL_REVISION_CONFLICT') {
+        await writeMarker({ state: 'user_superseded', transaction_id: marker.transaction_id })
+        return
+      }
+      throw error
+    }
+
+    // 3. invalidation → Agent pull → commit（revision 核对在 Agent 侧；短暂重试等 pull）。
+    const newRevision = (await this.workerImplementationStore.load()).revision
+    await this.publishCurrentAgentConfigInvalidation()
+    let committed = false
+    let lastError: unknown
+    for (let attempt = 0; attempt < 25 && !committed; attempt++) {
+      try {
+        const result = await this.rpcClient.call<
+          { transaction_id: string; policy_revision: number; grandfather_impls: string[] },
+          { state: string }
+        >(agentPort, 'commit_worker_implementation_bootstrap', {
+          transaction_id: marker.transaction_id,
+          policy_revision: newRevision,
+          grandfather_impls: qualifying,
+        }, this.config.moduleId)
+        committed = result.state === 'committed'
+      } catch (error) {
+        lastError = error
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
+    }
+    if (!committed) {
+      console.error('[Admin] worker bootstrap commit did not converge:', lastError instanceof Error ? lastError.message : String(lastError))
+      return // marker 保持 pending，下次启动重试（inspect/commit 幂等）
+    }
+    await writeMarker({ state: 'completed', transaction_id: marker.transaction_id })
+    console.log(`[Admin] Worker implementation grandfather bootstrap completed: ${qualifying.join(', ')} grandfathered at revision ${newRevision}`)
   }
 
   /** §6.5：desired config + 当前 admin_provider connection 的 nonsecret opaque revision。 */

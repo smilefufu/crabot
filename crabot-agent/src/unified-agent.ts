@@ -70,6 +70,7 @@ import { ActivationRegistry } from './workers/activation-registry.js'
 import { admitWorkerConnection } from './workers/connections/admission.js'
 import { WorkerOperationStore } from './workers/operations/store.js'
 import { ManagedInstaller } from './workers/install/managed-installer.js'
+import { GrandfatherBootstrapStore } from './workers/operations/bootstrap.js'
 
 /** 新部署安全初始 worker implementation 配置（与 Admin store revision-1 语义一致）。 */
 const DEFAULT_SAFE_WORKER_IMPLS: import('./workers/types.js').WorkerImplementationRuntimeConfig = {
@@ -475,6 +476,7 @@ export class UnifiedAgent extends ModuleBase {
   private managerStack?: ManagerStack
   private activationRegistry!: ActivationRegistry
   private workerOperationStore!: WorkerOperationStore
+  private grandfatherBootstrapStore!: GrandfatherBootstrapStore
   private managedInstaller!: ManagedInstaller
   private managerEventPublisher?: AgentEventPublisher
   /** True after startup reconciliation has settled, even when it failed. */
@@ -708,6 +710,7 @@ export class UnifiedAgent extends ModuleBase {
     this.managerEventPublisher = publishEvent
     this.activationRegistry = new ActivationRegistry(getAgentDataDir())
     this.workerOperationStore = new WorkerOperationStore(getAgentDataDir())
+    this.grandfatherBootstrapStore = new GrandfatherBootstrapStore(getAgentDataDir())
     this.managedInstaller = new ManagedInstaller(getAgentDataDir())
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
@@ -1221,6 +1224,9 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
     this.registerMethod('list_worker_implementation_status', this.handleListWorkerImplementationStatus.bind(this))
     this.registerMethod('install_worker_implementation', this.handleInstallWorkerImplementation.bind(this))
+    this.registerMethod('verify_worker_implementation', this.handleVerifyWorkerImplementation.bind(this))
+    this.registerMethod('inspect_worker_implementation_bootstrap', this.handleInspectWorkerBootstrap.bind(this))
+    this.registerMethod('commit_worker_implementation_bootstrap', this.handleCommitWorkerBootstrap.bind(this))
     this.registerMethod('list_manager_episodes_admin', this.handleListManagerEpisodesAdmin.bind(this))
     this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
     this.registerMethod('read_worker_output_admin', this.handleReadWorkerOutputAdmin.bind(this))
@@ -2965,6 +2971,138 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
+  /**
+   * §3.19.12 verify_worker_implementation：assertion 核销 → 隔离临时 workspace 最小真实
+   * turn（不是 --version）。结果写 registry verification binding（passed/failed 都记）。
+   */
+  private async handleVerifyWorkerImplementation(params: {
+    impl?: unknown
+    operation_id?: unknown
+    assertion?: unknown
+    expected?: Record<string, unknown>
+  }): Promise<{ operation_id: string; state: string; passed: boolean; detail?: string }> {
+    const impl = params.impl
+    if (impl !== 'claude-code' && impl !== 'codex') throw new Error('impl must be claude-code or codex')
+    if (typeof params.operation_id !== 'string' || typeof params.assertion !== 'string' || !params.expected) {
+      throw new Error('operation_id, assertion and expected are required')
+    }
+    const adminPort = this.adminPort
+    if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')
+    await this.rpcClient.callSensitive(
+      adminPort,
+      'consume_worker_operation_assertion',
+      { assertion: params.assertion, expected: params.expected },
+      this.config.moduleId,
+      { authorizationBearer: ConfigLoader.getRuntimeBearer() },
+    )
+    if (this.workerOperationStore.hasActiveFor(impl)) {
+      throw new Error(`another mutating operation is active for ${impl}`)
+    }
+    const operationId = params.operation_id
+    await this.workerOperationStore.upsert({
+      operation_id: operationId, kind: 'verify', impl, state: 'running',
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    })
+    const { runWorkerVerification, commitVerification } = await import('./workers/verify/verifier.js')
+    const outcome = await runWorkerVerification(this.activationRegistry, impl, {
+      resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),
+      runtimeRoot: path.join(getAgentDataDir(), 'worker-impls', 'runtime'),
+      managedInstaller: this.managedInstaller,
+    })
+    await commitVerification(this.activationRegistry, impl, outcome)
+    await this.workerOperationStore.upsert({
+      operation_id: operationId, kind: 'verify', impl,
+      state: outcome.passed ? 'completed' : 'failed',
+      detail: outcome.detail.slice(0, 200),
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    })
+    return { operation_id: operationId, state: outcome.passed ? 'completed' : 'failed', passed: outcome.passed, detail: outcome.detail }
+  }
+
+  /** §12 grandfather inspect：只读 detect 两 CLI 并持久 observation（同 transaction 幂等重放）。 */
+  private async handleInspectWorkerBootstrap(params: { transaction_id?: unknown }): Promise<{ observation: Record<string, unknown> }> {
+    if (typeof params.transaction_id !== 'string' || !params.transaction_id) throw new Error('transaction_id is required')
+    const observation: Record<string, { installed: boolean; activated: boolean; version?: string }> = {}
+    for (const impl of ['claude-code', 'codex'] as const) {
+      const adapter = this.managerStack?.adapters.get(impl)
+      if (!adapter) {
+        observation[impl] = { installed: false, activated: false }
+        continue
+      }
+      try {
+        const detected = await adapter.detect()
+        observation[impl] = { installed: detected.installed, activated: detected.activated, version: detected.version }
+      } catch {
+        observation[impl] = { installed: false, activated: false }
+      }
+    }
+    const tx = await this.grandfatherBootstrapStore.recordInspection(params.transaction_id, observation)
+    return { observation: tx.observation as Record<string, unknown> }
+  }
+
+  /**
+   * §12 grandfather commit：observation 未变 + policy revision 匹配 + CLI 确为
+   * existing_host+enabled → 原子 grandfathered binding。响应丢失重放幂等。
+   */
+  private async handleCommitWorkerBootstrap(params: {
+    transaction_id?: unknown
+    policy_revision?: unknown
+    grandfather_impls?: unknown
+  }): Promise<{ state: string }> {
+    if (typeof params.transaction_id !== 'string' || typeof params.policy_revision !== 'number' || !Array.isArray(params.grandfather_impls)) {
+      throw new Error('transaction_id, policy_revision and grandfather_impls are required')
+    }
+    const tx = this.grandfatherBootstrapStore.currentTransaction
+    if (!tx || tx.transaction_id !== params.transaction_id) throw new Error('unknown bootstrap transaction')
+    if (tx.state === 'committed') return { state: 'committed' } // 重放幂等
+    const desired = await this.activationRegistryCurrentRevision()
+    if (desired !== params.policy_revision) {
+      throw new Error(`policy revision mismatch (current ${desired})`)
+    }
+    // observation 变化即拒绝（不部分 grandfather）。
+    const bindings: Array<{ impl: import('./workers/types.js').CLIWorkerImplId; record: import('./workers/activation-registry.js').VerificationRecord }> = []
+    for (const rawImpl of params.grandfather_impls) {
+      if (rawImpl !== 'claude-code' && rawImpl !== 'codex') throw new Error(`invalid grandfather impl: ${String(rawImpl)}`)
+      const impl = rawImpl as import('./workers/types.js').CLIWorkerImplId
+      const observed = tx.observation[impl]
+      if (!observed?.installed || !observed.activated || !observed.version) {
+        throw new Error(`grandfather impl ${impl} did not qualify at inspection`)
+      }
+      const policy = this.activationRegistry.getPolicy(impl)
+      if (!policy?.enabled || policy.connection?.mode !== 'existing_host') {
+        throw new Error(`grandfather requires existing_host+enabled policy for ${impl}`)
+      }
+      // 现 detect 与 observation 全等核对
+      const adapter = this.managerStack?.adapters.get(impl)
+      const now = adapter ? await adapter.detect() : { installed: false, activated: false }
+      if (!now.installed || now.activated !== observed.activated || now.version !== observed.version) {
+        throw new Error(`observation changed for ${impl}; refusing partial grandfather`)
+      }
+      const status = this.activationRegistry.getStatus(impl)
+      bindings.push({
+        impl,
+        record: {
+          result: 'grandfathered',
+          cli_version: observed.version,
+          translator_id: status.translator?.translator_id ?? `${impl}-existing-host-v1`,
+          translator_version: status.translator?.translator_version ?? '1',
+          policy_revision: params.policy_revision,
+          connection_revision: status.connection_revision ?? 'none',
+          at: new Date().toISOString(),
+        },
+      })
+    }
+    await this.grandfatherBootstrapStore.commit(params.transaction_id, this.activationRegistry, bindings, params.policy_revision)
+    return { state: 'committed' }
+  }
+
+  private async activationRegistryCurrentRevision(): Promise<number> {
+    // registry 未初始化（pull 未成功过）时 bootstrap commit 必须 fail closed。
+    const status = this.activationRegistry.isInitialized() ? this.activationRegistry.listStatus() : null
+    if (!status) throw new Error('activation registry not initialized')
+    return status[0]?.policy_revision ?? 0
+  }
+
   /** §6.5/§8.4：脱敏 WorkerImplementationStatus（activation registry 唯一 read API）。 */
   private async handleListWorkerImplementationStatus(): Promise<{ items: import('./workers/types.js').WorkerImplementationStatus[] }> {
     if (!this.activationRegistry.isInitialized()) {
@@ -3508,6 +3646,7 @@ export class UnifiedAgent extends ModuleBase {
     await this.activationRegistry.load()
     // P6-B §8/§9：operation 未终态收口（accepted/running → interrupted）+ staging 清理。
     await this.workerOperationStore.load()
+    await this.grandfatherBootstrapStore.load()
     await this.managedInstaller.reconcileOnStartup()
     // P6-A §11.9 先于 §3.2：先重放 prepared 的 outbound delivery（响应丢失场景），
     // Admin 幂等返回首次结果即 confirm + settle wake——只差 confirm 的崩溃窗口不会
