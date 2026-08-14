@@ -26,7 +26,8 @@ const navSections: NavSection[] = [
     label: '模型与 Agent',
     items: [
       { to: '/providers', label: '模型配置', match: '/providers' },
-      { to: '/agents/config', label: 'Agent 配置', match: '/agents' },
+      { to: '/agents/config', label: 'Agent 配置', match: '/agents/config' },
+      { to: '/agents/workers', label: 'Worker 配置', match: '/agents/workers' },
       { to: '/mcp-servers', label: 'MCP Servers', match: '/mcp-servers' },
       { to: '/skills', label: 'Skills', match: '/skills' },
       { to: '/subagents', label: 'Subagent 管理', match: '/subagents' },

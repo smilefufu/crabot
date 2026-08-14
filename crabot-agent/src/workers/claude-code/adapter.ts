@@ -392,6 +392,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const merged = typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? { ...(entry as Record<string, unknown>) } : {}
       // 只补这两个字段:同一个 path 下可能已有 allowedTools / history 等用户数据,不能覆盖。
       merged.hasTrustDialogAccepted = true
+      // P6-B：onboarding 跳过——admin_provider/managed install 形态下宿主可能从未跑过
+      // 交互式 cc，不预写会卡在首次引导屏（v1 不支持 TUI /login，引导必须离线跳过）。
+      if (config.hasCompletedOnboarding !== true) config.hasCompletedOnboarding = true
+      if (typeof config.lastOnboardingVersion !== 'string') config.lastOnboardingVersion = this.lastDetectedVersion ?? '2.x'
       // 覆盖而非并集:这一条 project entry 描述的是 crabot 刚刚写下的那份 .mcp.json,
       // caps 是本任务的授权边界,残留的旧名字不该继续被授权(与 codex 侧 mcp_servers
       // 整体覆盖宿主配置同一取舍)。没有 MCP server 时落 []——cc 见到空表就不会问。
