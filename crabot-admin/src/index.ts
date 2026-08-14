@@ -9553,6 +9553,13 @@ export class AdminModule extends ModuleBase {
         sendJson(res, 404, { error: msg })
         return
       }
+      // 客户端输入错误（非法 cursor/参数）是 400，不是服务端 500。
+      // code 在 RpcCallError 上（message 只是人读文本），两者都认。
+      const errCode = (error as { code?: unknown }).code
+      if (errCode === 'INVALID_PARAMS' || msg.includes('INVALID_PARAMS')) {
+        sendJson(res, 400, { error: msg })
+        return
+      }
       const isUnreachable =
         msg.includes('Agent not available') ||
         msg.includes('ECONNREFUSED') ||
