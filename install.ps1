@@ -79,7 +79,7 @@ function Ensure-Bash {
     try {
         Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
     } catch {
-        Write-Err "Failed to download PortableGit from ${url}                                                                       : $_"
+        Write-Err "Failed to download PortableGit from ${url}: $_"
         Write-Err "Install Git for Windows manually: https://git-scm.com/downloads/win"
         exit 1
     }
@@ -178,13 +178,50 @@ if ($FromSource) {
     Expand-Archive -Path "$env:TEMP\$filename" -DestinationPath $InstallDir -Force
     Remove-Item "$env:TEMP\$filename"
 
-    Set-Location "$InstallDir\crabot-memory"
-    uv sync
-    Set-Location $InstallDir
+    $crabotDir = Join-Path $InstallDir "crabot-$Version-windows-x64"
+    if (-not (Test-Path (Join-Path $crabotDir "cli.mjs"))) {
+        Write-Err "Extracted release directory not found at $crabotDir"
+        exit 1
+    }
+
+    Ensure-Pnpm
+    foreach ($mod in @('crabot-shared','scripts/lib','crabot-core','crabot-admin','crabot-agent','crabot-channel-dingtalk','crabot-channel-feishu','crabot-channel-telegram','crabot-channel-wechat','crabot-mcp-tools')) {
+        $moduleDir = Join-Path $crabotDir $mod
+        if (-not (Test-Path (Join-Path $moduleDir 'package.json')) -or -not (Test-Path (Join-Path $moduleDir 'pnpm-lock.yaml'))) {
+            Write-Err "Release dependency manifest missing for $mod"
+            exit 1
+        }
+        Write-Info "Restoring dependencies: $mod"
+        Push-Location $moduleDir
+        try {
+            corepack pnpm install --prod --frozen-lockfile
+            if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+            }
+        } finally {
+            Pop-Location
+        }
+    }
+
+    $memoryDir = Join-Path $crabotDir "crabot-memory"
+    if (-not (Test-Path (Join-Path $memoryDir 'pyproject.toml')) -or -not (Test-Path (Join-Path $memoryDir 'uv.lock'))) {
+        Write-Err "Memory dependency manifest missing at $memoryDir"
+        exit 1
+    }
+    Write-Info "Syncing Memory dependencies..."
+    Push-Location $memoryDir
+    try {
+        uv sync --frozen --no-dev
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    } finally {
+        Pop-Location
+    }
 }
 
 # PATH
-$crabotDir = if ($FromSource) { (Get-Location).Path } else { $InstallDir }
+$crabotDir = if ($FromSource) { (Get-Location).Path } elseif (-not $crabotDir) { $InstallDir } else { $crabotDir }
 $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($currentPath -notlike "*$crabotDir*") {
     [Environment]::SetEnvironmentVariable("Path", "$crabotDir;$currentPath", "User")
