@@ -8,6 +8,7 @@ param(
 )
 
 $RequiredNodeVersion = "22.14.0"
+$ErrorActionPreference = 'Stop'
 
 function Write-Info($msg)  { Write-Host "[crabot] $msg" -ForegroundColor Green }
 function Write-Warn($msg)  { Write-Host "[crabot] $msg" -ForegroundColor Yellow }
@@ -181,6 +182,17 @@ if ($FromSource) {
     try {
         Write-Info "Downloading $filename..."
         Invoke-WebRequest -Uri $url -OutFile $archivePath
+
+        $checksumUrl = "$url.sha256"
+        $checksumPath = "$archivePath.sha256"
+        Write-Info "Verifying release checksum..."
+        Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath
+        $expectedHash = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
+        $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+        if ($actualHash -ine $expectedHash) {
+            Write-Err "Release archive checksum verification failed."
+            exit 1
+        }
 
         Write-Info "Extracting..."
         Expand-Archive -Path $archivePath -DestinationPath $stageParent -Force
