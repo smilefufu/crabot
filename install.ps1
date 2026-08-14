@@ -121,6 +121,41 @@ function Ensure-Pnpm {
     Write-Info "pnpm $pnpmVer ready"
 }
 
+function Assert-CrabotStopped($targetInstallDir) {
+    $dataDir = Join-Path $targetInstallDir 'data'
+    $portOffset = 0
+    $instancePath = Join-Path $targetInstallDir 'instance.json'
+    if (Test-Path -LiteralPath $instancePath -PathType Leaf) {
+        $instance = Get-Content -LiteralPath $instancePath -Raw | ConvertFrom-Json
+        if ($instance.data_dir) {
+            $dataDir = $instance.data_dir
+        }
+        if ($null -ne $instance.port_offset) {
+            $portOffset = [int]$instance.port_offset
+        }
+    }
+
+    $pidPath = Join-Path $dataDir 'mm.pid'
+    if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
+        $crabotPid = 0
+        $pidText = (Get-Content -LiteralPath $pidPath -Raw).Trim()
+        if ([int]::TryParse($pidText, [ref]$crabotPid) -and (Get-Process -Id $crabotPid -ErrorAction SilentlyContinue)) {
+            Write-Err "Crabot is running (PID $crabotPid). Run 'crabot stop', then run the installer again."
+            exit 1
+        }
+    }
+
+    try {
+        $health = Invoke-RestMethod -Uri "http://localhost:$((19000 + $portOffset))/health" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 2
+        if ($health.data.status -eq 'healthy') {
+            Write-Err "Crabot is running. Run 'crabot stop', then run the installer again."
+            exit 1
+        }
+    } catch {
+        # The management service is not running or is not a Crabot instance.
+    }
+}
+
 # --- Main ---
 Write-Host "`n== Crabot Installer ==`n" -ForegroundColor Cyan
 
@@ -172,6 +207,8 @@ if ($FromSource) {
         }
         Write-Info "Latest version: $Version"
     }
+    Assert-CrabotStopped $InstallDir
+
     $filename = "crabot-$Version-windows-x64.zip"
     $url = "https://github.com/smilefufu/crabot/releases/download/$Version/$filename"
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -220,6 +257,11 @@ if ($FromSource) {
             -not (Test-Path -LiteralPath (Join-Path $stageMemoryDir 'uv.lock') -PathType Leaf)) {
             Write-Err "Memory dependency manifest missing at $stageMemoryDir"
             exit 1
+        }
+
+        $versionPath = Join-Path $InstallDir 'VERSION'
+        if (Test-Path -LiteralPath $versionPath -PathType Leaf) {
+            Remove-Item -LiteralPath $versionPath -Force
         }
 
         $retainedEntries = @('PortableGit', 'data', 'instance.json', 'crabot.cmd')
