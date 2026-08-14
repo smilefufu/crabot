@@ -152,6 +152,8 @@ function runWithTimeout(
         stdout: String(stdout), stderr: String(stderr), timedOut,
       })
     })
+    // codex exec 在 stdin 未关闭时会等「additional input」直到超时——立即关 stdin。
+    child.stdin?.end()
     child.unref?.()
   })
 }

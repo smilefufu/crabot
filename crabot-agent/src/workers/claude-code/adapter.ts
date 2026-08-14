@@ -39,6 +39,7 @@ import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { buildChildEnv } from '../../core/runtime-env.js'
+import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { WorkerExitedError, CliInputStallError } from '../errors.js'
 import { probeClaudeInput, acceptedClaudeInput, hasClaudeInteraction } from './input-surface.js'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
@@ -217,6 +218,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
        * 且将来接上真实终态信号时只改这里、harness 不用再动。
        */
       readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
+      /** P6-B：managed active binary 解析（detect/spawn 顺序：managed → system）。 */
+      readonly resolveManagedBinary?: () => Promise<string | undefined>
     },
   ) {
     this.tmux = deps.tmux ?? new TmuxDriver()
@@ -224,16 +227,32 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     this.claudeProjectsDir = deps.claudeProjectsDir ?? join(homedir(), '.claude', 'projects')
     this.claudeConfigPath = deps.claudeConfigPath ?? join(homedir(), '.claude.json')
     this.pasteReadyTimeoutMs = deps.pasteReadyTimeoutMs ?? DEFAULT_PASTE_READY_TIMEOUT_MS
+    this.resolveManagedBinary = deps.resolveManagedBinary
+  }
+
+  private readonly resolveManagedBinary?: () => Promise<string | undefined>
+  private lastDetectedVersion?: string
+
+  /** P6-B §6：与最近一次 detect 版本一致的静态 translator 声明。 */
+  connectionCapabilities(): import('../types.js').WorkerConnectionCapability[] {
+    if (!this.lastDetectedVersion) return []
+    return connectionCapabilitiesFor('claude-code', this.lastDetectedVersion)
   }
 
   async detect(): Promise<DetectResult> {
+    // P6-B：managed active binary 优先（找不到再落 system binary）。
+    const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const binary = managed ?? this.claudeBin
     let versionOutput: string
     try {
-      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${this.claudeBin} --version`], { env: buildChildEnv() })
+      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${binary} --version`], { env: buildChildEnv() })
       versionOutput = stdout.trim()
     } catch (err) {
       return { installed: false, activated: false, detail: `claude binary not found or failed to run: ${(err as Error).message}` }
     }
+    // '2.1.227 (Claude Code)' → '2.1.227'
+    const version = /^([0-9]+\.[0-9]+\.[0-9]+)/.exec(versionOutput)?.[1]
+    this.lastDetectedVersion = version
 
     const claudeHomeDir = dirname(this.claudeProjectsDir)
     let activated = false
@@ -244,7 +263,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       activated = false
     }
 
-    return { installed: true, activated, detail: versionOutput }
+    return { installed: true, activated, version, install_source: managed ? 'managed' : 'system', detail: versionOutput }
   }
 
   async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {

@@ -883,6 +883,20 @@ export class AdminModule extends ModuleBase {
     //（新部署在此原子落 revision 1 安全初始配置）。
     await this.workerImplementationStore.load()
 
+    // P6-B：worker_implementations 首次进入 semantic 投影时，存量实例的 committed
+    // fingerprint 与 live 不一致——预埋一次性 rebaseline marker，让 coordinator initialize
+    // 以 revision+1 合法扩展（而不是 fail closed）。fresh deploy 无 committed record，
+    // 不需要 marker（initialize 直接以新投影建 revision 1）。
+    {
+      const recordExists = await fs.access(path.join(this.adminConfig.data_dir, 'config', 'core-agent-config-revision.json')).then(() => true).catch(() => false)
+      if (recordExists) {
+        const markerDir = path.join(this.adminConfig.data_dir, 'migrations')
+        await fs.mkdir(markerDir, { recursive: true, mode: 0o700 })
+        const markerPath = path.join(markerDir, 'core-config-projection-rebaseline.json')
+        await fs.writeFile(markerPath, JSON.stringify({ projection: 'worker_implementations', prepared_at: new Date().toISOString() }), { mode: 0o600 })
+      }
+    }
+
     // Recover durable revision/outbox against fully loaded source state before any mutation.
     // Verify any Skill source journal binding before coordinator initialization/recovery trusts source projection.
     await this.skillManager.verifySourceJournalBinding(this.configMutationCoordinator)

@@ -118,6 +118,7 @@ export class CoreAgentConfigMutationCoordinator {
   private readonly recordPath: string
   private readonly outboxPath: string
   private readonly receiptPath: string
+  private rebaselineMarkerPath: string
   private readonly options: CoreAgentConfigMutationCoordinatorOptions
   private key: Buffer | null = null
   private record: CoreAgentConfigRevisionRecord | null = null
@@ -127,6 +128,7 @@ export class CoreAgentConfigMutationCoordinator {
 
   constructor(dataDir: string, options: CoreAgentConfigMutationCoordinatorOptions) {
     this.configDir = path.join(dataDir, 'config')
+    this.rebaselineMarkerPath = path.join(dataDir, 'migrations', 'core-config-projection-rebaseline.json')
     this.keyPath = path.join(this.configDir, 'core-agent-config-hmac-key')
     this.recordPath = path.join(this.configDir, 'core-agent-config-revision.json')
     this.outboxPath = path.join(this.configDir, 'core-agent-config-mutation-outbox.json')
@@ -164,7 +166,29 @@ export class CoreAgentConfigMutationCoordinator {
       if (outbox) await this.recoverOutbox(outbox, false)
       const liveFingerprint = await this.fingerprint()
       if (!this.equal(liveFingerprint, this.record!.semantic_fingerprint_hmac)) {
-        throw new Error('Core Agent config semantic fingerprint does not match committed revision')
+        // 投影扩展一次性 rebaseline：仅当升级代码显式预埋 marker 且无在途 mutation 时，
+        // 以 live fingerprint 提交 revision+1（语义等价于「runtime config 新增字段」的
+        // 一次合法变更，Agent 会经 invalidation 拉到新字段）。无 marker 维持 fail closed。
+        const rebaselineMarker = await readJson<{ projection: string; prepared_at: string }>(this.rebaselineMarkerPath)
+        if (!rebaselineMarker || typeof rebaselineMarker.projection !== 'string') {
+          throw new Error('Core Agent config semantic fingerprint does not match committed revision')
+        }
+        if (this.recoveredMutation) {
+          throw new Error('Core Agent config projection rebaseline blocked by in-flight mutation')
+        }
+        this.record = {
+          schema_version: 1,
+          revision: this.record!.revision + 1,
+          semantic_fingerprint_hmac: liveFingerprint,
+          updated_at: new Date().toISOString(),
+        }
+        await atomicWrite(this.recordPath, this.record)
+        await fs.rm(this.rebaselineMarkerPath, { force: true })
+        console.warn(`[CoreAgentConfig] projection rebaselined to revision ${this.record.revision} (${rebaselineMarker.projection})`)
+      } else {
+        // fingerprint 一致时 marker 是残留（上次预埋后未发生 mismatch）——立即清掉，
+        // 否则它会纵容未来某次真正的数据漂移被误认为合法 rebaseline。
+        await fs.rm(this.rebaselineMarkerPath, { force: true }).catch(() => {})
       }
       return this.record!
     })

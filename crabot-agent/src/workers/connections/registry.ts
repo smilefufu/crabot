@@ -13,15 +13,17 @@
 import type { ConnectionTranslator, ResolvedWorkerConnection, TranslatorInjection } from './types.js'
 import type { CLIWorkerImplId, WorkerConnectionCapability } from '../types.js'
 
-/** 简单的 major/minor 版本匹配：'2.x' 匹配 2.any；'0.146.x' 匹配 0.146.any。 */
+/** 简单的 major/minor 版本匹配：'2.x' 匹配 2.any；'0.146.x' 匹配 0.146.any；逗号分隔多 range。 */
 export function versionInRange(version: string, range: string): boolean {
-  const v = version.split('.').map((part) => parseInt(part, 10))
-  const r = range.split('.')
-  for (let i = 0; i < r.length; i++) {
-    if (r[i] === 'x') return true
-    if (!Number.isFinite(v[i]) || v[i] !== parseInt(r[i], 10)) return false
-  }
-  return true
+  return range.split(',').some((single) => {
+    const v = version.split('.').map((part) => parseInt(part, 10))
+    const r = single.trim().split('.')
+    for (let i = 0; i < r.length; i++) {
+      if (r[i] === 'x') return true
+      if (!Number.isFinite(v[i]) || v[i] !== parseInt(r[i], 10)) return false
+    }
+    return true
+  })
 }
 
 abstract class BaseTranslator implements ConnectionTranslator {
@@ -129,7 +131,7 @@ class CodexOpenAIResponsesRuntimeV1 extends BaseTranslator {
     mode: 'admin_provider',
     translator_id: 'codex-openai-responses-runtime-v1',
     translator_version: '1',
-    cli_version_range: '0.146.x',
+    cli_version_range: '0.146.x,0.147.x',
     provider_formats: ['openai-responses'],
     endpoint_policy: 'custom_base_url',
     credential_transport: 'agent_runtime_file',
@@ -167,7 +169,7 @@ class CodexExistingHostV1 extends BaseTranslator {
     mode: 'existing_host',
     translator_id: 'codex-existing-host-v1',
     translator_version: '1',
-    cli_version_range: '0.146.x',
+    cli_version_range: '0.146.x,0.147.x',
     credential_transport: 'native_store',
     model_selection: 'native_default',
     credential_scope: 'runtime_user_home',
@@ -185,7 +187,7 @@ class CodexNativeAccountV1 extends BaseTranslator {
     mode: 'native_account',
     translator_id: 'codex-native-account-v1',
     translator_version: '1',
-    cli_version_range: '0.146.x',
+    cli_version_range: '0.146.x,0.147.x',
     credential_transport: 'native_store',
     model_selection: 'native_default',
     credential_scope: 'managed',

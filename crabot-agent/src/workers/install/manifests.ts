@@ -22,6 +22,12 @@ export interface WorkerInstallManifest {
   readonly detectArgs: readonly string[]
   /** setup 命令（native_account login）。 */
   readonly setupArgs: readonly string[]
+  /**
+   * 显式 postinstall（相对 staging 根，经 process.execPath 执行）。
+   * claude-code ≥2.x 的 npm 包 bin 是无 shebang 占位壳，真实 native binary 由官方
+   * install.cjs 下载就位；--ignore-scripts 安装后必须显式跑这一步。
+   */
+  readonly postinstall?: string
 }
 
 const MANIFESTS: Record<CLIWorkerImplId, WorkerInstallManifest> = {
@@ -33,6 +39,7 @@ const MANIFESTS: Record<CLIWorkerImplId, WorkerInstallManifest> = {
     binaryRelativePath: 'node_modules/.bin/claude',
     detectArgs: ['--version'],
     setupArgs: ['setup-token'],
+    postinstall: 'node_modules/@anthropic-ai/claude-code/install.cjs',
   },
   codex: {
     impl: 'codex',

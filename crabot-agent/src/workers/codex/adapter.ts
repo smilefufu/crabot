@@ -24,6 +24,7 @@ import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { buildChildEnv } from '../../core/runtime-env.js'
+import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
@@ -374,6 +375,16 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private readonly sessionDiscoveryTimeoutMs: number
   private readonly pasteReadyTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
+  private get resolveManagedBinary(): (() => Promise<string | undefined>) | undefined {
+    return this.deps.resolveManagedBinary
+  }
+  private lastDetectedVersion?: string
+
+  /** P6-B §6：与最近一次 detect 版本一致的静态 translator 声明。 */
+  connectionCapabilities(): import('../types.js').WorkerConnectionCapability[] {
+    if (!this.lastDetectedVersion) return []
+    return connectionCapabilitiesFor('codex', this.lastDetectedVersion)
+  }
   private readonly mutexes = new Map<string, AsyncMutex>()
   /** resolveBinDir(codexBin) 的缓存 promise——codexBin 构造后不变,没必要每次 detect/spawn/
    * resume 都重新 `command -v` + `realpath` 一遍。五轮 review 修复:只缓存*成功*的解析结果。
@@ -392,6 +403,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
        * workspace 隔离出来的 CODEX_HOME,detect() 的 activated 检查也读这里。测试用可注入
        * fixture 目录,不依赖开发机真实 home。 */
       readonly codexHomeSource?: string
+      /** P6-B：managed active binary 解析（detect 顺序：managed → system）。 */
+      readonly resolveManagedBinary?: () => Promise<string | undefined>
       /** spawn() 发现真实 session id 的轮询上限(ms),默认 3000;测试用可调小避免拖慢用例。 */
       readonly sessionDiscoveryTimeoutMs?: number
       /** 启动期就绪握手的等待上限,默认 DEFAULT_PASTE_READY_TIMEOUT_MS(见该常量注释里的
@@ -434,11 +447,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async detect(): Promise<DetectResult> {
-    const binDir = await this.resolveBinDirCached()
+    // P6-B：managed active binary 优先。
+    const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const binDir = managed ? dirname(managed) : await this.resolveBinDirCached()
+    const effectiveBin = managed ?? this.codexBin
     const versionEnv = buildChildEnv({ PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '') })
     let versionOutput: string
     try {
-      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${this.codexBin} --version`], { env: versionEnv })
+      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${effectiveBin} --version`], { env: versionEnv })
       versionOutput = stdout.trim()
     } catch (err) {
       if (binDir) {
@@ -465,7 +481,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       activated = false
     }
 
-    return { installed: true, activated, detail: versionOutput }
+    // 'codex-cli 0.146.0' → '0.146.0'
+    const version = /([0-9]+\.[0-9]+\.[0-9]+)/.exec(versionOutput)?.[1]
+    this.lastDetectedVersion = version
+    return { installed: true, activated, version, install_source: managed ? 'managed' : 'system', detail: versionOutput }
   }
 
   /**

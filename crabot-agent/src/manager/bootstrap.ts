@@ -176,6 +176,8 @@ export interface BootstrapDeps {
   readonly builtinTraceHooks?: import('../workers/builtin/adapter.js').BuiltinTraceHooks
   /** P6-B §6：activation registry gate（unified-agent 注入）。 */
   readonly assertWorkerImplReady?: (impl: import('../workers/types.js').WorkerImplId) => void
+  /** P6-B：managed active binary 解析（detect/spawn：managed → system）。 */
+  readonly resolveManagedBinary?: (impl: 'claude-code' | 'codex') => Promise<string | undefined>
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */
   readonly admitWorkerConnection?: (impl: import('../workers/types.js').WorkerImplId) => Promise<{
     env: Record<string, string>
@@ -395,11 +397,19 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   )
   adapters.set(
     'claude-code',
-    new ClaudeCodeAdapter({ dataDir: adapterDataDir('claude-code'), onStateChange: harness.handleStateChange }),
+    new ClaudeCodeAdapter({
+      dataDir: adapterDataDir('claude-code'),
+      onStateChange: harness.handleStateChange,
+      ...(deps.resolveManagedBinary ? { resolveManagedBinary: () => deps.resolveManagedBinary!('claude-code') } : {}),
+    }),
   )
   adapters.set(
     'codex',
-    new CodexWorkerAdapter({ dataDir: adapterDataDir('codex'), onStateChange: harness.handleStateChange }),
+    new CodexWorkerAdapter({
+      dataDir: adapterDataDir('codex'),
+      onStateChange: harness.handleStateChange,
+      ...(deps.resolveManagedBinary ? { resolveManagedBinary: () => deps.resolveManagedBinary!('codex') } : {}),
+    }),
   )
 
   // token 估算复用 engine 既有的 `ContextManager.estimateTotalTokens`(chars/4 + 每条消息

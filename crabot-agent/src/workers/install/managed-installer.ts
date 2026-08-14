@@ -83,12 +83,20 @@ export class ManagedInstaller {
     const final = path.join(this.versionsDir(impl), manifest.pinnedVersion)
     await fs.mkdir(staging, { recursive: true, mode: 0o700 })
     try {
-      // 固定命令：npm install --prefix <staging> <package>@<pinned>；scrub env 只留网络/proxy 必要项。
+      // npm 是 node 脚本（nvm 形态 execFile 直跑会 ENOEXEC）——解析真实 cli.js 用当前
+      // node 直跑。env scrub 只留网络/proxy 必要项。
+      const npmCli = await this.resolveNpmCli()
       await execFileAsync(
-        manifest.installer,
-        ['install', '--prefix', staging, '--no-save', '--ignore-scripts', `${manifest.packageId}@${manifest.pinnedVersion}`],
+        process.execPath,
+        [npmCli, 'install', '--prefix', staging, '--no-save', '--ignore-scripts', `${manifest.packageId}@${manifest.pinnedVersion}`],
         { env: buildScrubbedChildEnv(), timeout: 300_000, maxBuffer: 4 * 1024 * 1024 },
       )
+      if (manifest.postinstall) {
+        // 固定 manifest 声明的官方 postinstall（如 claude-code native binary 下载）。
+        await execFileAsync(process.execPath, [path.join(staging, manifest.postinstall)], {
+          env: buildScrubbedChildEnv(), timeout: 300_000, cwd: staging,
+        })
+      }
       const stagedBinary = path.join(staging, manifest.binaryRelativePath)
       await this.verifyBinary(manifest, stagedBinary, staging)
       // staging → final 原子就位（已有同版本先清）
@@ -118,6 +126,15 @@ export class ManagedInstaller {
       timeout: 30_000,
     })
     if (!stdout.trim()) throw new Error(`[ManagedInstaller] detect produced empty version output`)
+  }
+
+  /** npm cli.js 真实路径（command -v npm → realpath）。找不到 fail loud。 */
+  private async resolveNpmCli(): Promise<string> {
+    const { stdout } = await execFileAsync('/bin/sh', ['-c', 'command -v npm'], { env: buildScrubbedChildEnv() })
+    const bin = stdout.trim()
+    if (!bin) throw new Error('[ManagedInstaller] npm not found on PATH')
+    const real = await fs.realpath(bin)
+    return real
   }
 
   /** Agent 重启：清理未终态 staging（不自动切 active）。 */

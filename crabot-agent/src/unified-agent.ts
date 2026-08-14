@@ -721,6 +721,7 @@ export class UnifiedAgent extends ModuleBase {
       builtinTraceHooks: this.builtinTraceHooks(),
       // P6-B §6：显式 impl spawn/resume/handoff 的 registry gate。
       assertWorkerImplReady: (impl) => this.activationRegistry.assertReady(impl),
+      resolveManagedBinary: (impl) => this.managedInstaller.activeBinary(impl),
       // P6-B §6.5：operation-time connection admission（当前调用内实时解析）。
       admitWorkerConnection: (impl) => admitWorkerConnection(this.activationRegistry, impl, {
         resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),
@@ -3644,6 +3645,9 @@ export class UnifiedAgent extends ModuleBase {
     // P6-B §6：activation registry 载入持久 verification 状态；runtime config 已在
     // constructor/pull 路径应用过时 applyRuntimeConfigCandidate 会补 apply（见下）。
     await this.activationRegistry.load()
+    // 启动 pull 的 config 只过了 constructor 的 seedDesired（无 detect）；这里补一次完整
+    // apply——detect 重算 + 与刚 load 的 verification binding 比对，状态面才真正可用。
+    await this.activationRegistry.applyRuntimeConfig(this.initialUnifiedConfig.worker_implementations ?? DEFAULT_SAFE_WORKER_IMPLS)
     // P6-B §8/§9：operation 未终态收口（accepted/running → interrupted）+ staging 清理。
     await this.workerOperationStore.load()
     await this.grandfatherBootstrapStore.load()
