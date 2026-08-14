@@ -66,6 +66,21 @@ import { AGENT_VERSION } from './constants.js'
 import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
+import { ActivationRegistry } from './workers/activation-registry.js'
+
+/** 新部署安全初始 worker implementation 配置（与 Admin store revision-1 语义一致）。 */
+const DEFAULT_SAFE_WORKER_IMPLS: import('./workers/types.js').WorkerImplementationRuntimeConfig = {
+  config: {
+    revision: 1,
+    default_impl: 'builtin',
+    implementations: {
+      builtin: { enabled: true },
+      'claude-code': { enabled: false },
+      codex: { enabled: false },
+    },
+  },
+  connection_revisions: {},
+}
 import { buildManagerAdminSummaries } from './manager/read-model.js'
 import { readCompositeWorkerTrace } from './workers/trace/composite-reader.js'
 import { AdminChatCorrelationStore, dispatchPayloadSha256 } from './manager/chat-correlation-store.js'
@@ -394,6 +409,7 @@ export class UnifiedAgent extends ModuleBase {
   // 配置
   private orchestrationConfig: OrchestrationConfig
   private agentConfig?: AgentLayerConfig
+  private initialUnifiedConfig!: UnifiedAgentConfig
   private extra: Record<string, unknown>
   private configRevision = ConfigLoader.revision
   private configStale = false
@@ -454,6 +470,7 @@ export class UnifiedAgent extends ModuleBase {
    * 未装配时读端点 fail-fast 报错，不返回空结果——空结果会被 admin 误读成"没有 worker"。
    */
   private managerStack?: ManagerStack
+  private activationRegistry!: ActivationRegistry
   private managerEventPublisher?: AgentEventPublisher
   /** True after startup reconciliation has settled, even when it failed. */
   private managerReconciliationSettled = false
@@ -509,6 +526,7 @@ export class UnifiedAgent extends ModuleBase {
     this.promptManager = new PromptManager()
 
     this.orchestrationConfig = config.orchestration
+    this.initialUnifiedConfig = config
     this.agentConfig = config.agent_config
     this.configAuthenticated = config.runtime_config_authenticated ?? true
     this.extra = config.extra ?? {}
@@ -683,6 +701,7 @@ export class UnifiedAgent extends ModuleBase {
       now: () => new Date().toISOString(),
     })
     this.managerEventPublisher = publishEvent
+    this.activationRegistry = new ActivationRegistry(getAgentDataDir())
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
       now: () => new Date().toISOString(),
@@ -690,6 +709,8 @@ export class UnifiedAgent extends ModuleBase {
       traceWriter: this.traceStore.managerTraceWriter((text) => redactSecrets(text, [...this.knownSecrets])),
       // P6-A §8.4：builtin worker 结构化 trace（写钩子 + 读入口，同一脱敏纪律）。
       builtinTraceHooks: this.builtinTraceHooks(),
+      // P6-B §6：显式 impl spawn/resume/handoff 的 registry gate。
+      assertWorkerImplReady: (impl) => this.activationRegistry.assertReady(impl),
       builtinTraceReader: this.builtinTraceReader(),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
       onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
@@ -787,6 +808,12 @@ export class UnifiedAgent extends ModuleBase {
         void this.sendBackgroundFailLoud(report.target, report.subject, report.failure)
       },
     })
+    // P6-B §6：activation registry 与 manager stack 共用同一 adapters Map；
+    // builtin ready 的 model slot 判据 = powerful slot 当前可解析（config 已应用）。
+    this.activationRegistry.setAdapters(this.managerStack.adapters)
+    this.activationRegistry.setModelSlotResolvable(() => Boolean(this.agentConfig?.model_config.powerful?.apikey))
+    // 构造即播种（同步、无 detect）：builtin gate 立即可判；CLI 待 pull/detect 重算。
+    this.activationRegistry.seedDesired(this.initialUnifiedConfig.worker_implementations ?? DEFAULT_SAFE_WORKER_IMPLS)
   }
 
   // ==========================================================================
@@ -1180,6 +1207,7 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
     this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
+    this.registerMethod('list_worker_implementation_status', this.handleListWorkerImplementationStatus.bind(this))
     this.registerMethod('list_manager_episodes_admin', this.handleListManagerEpisodesAdmin.bind(this))
     this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
     this.registerMethod('read_worker_output_admin', this.handleReadWorkerOutputAdmin.bind(this))
@@ -1332,6 +1360,10 @@ export class UnifiedAgent extends ModuleBase {
   private async applyRuntimeConfigCandidate(next: UnifiedAgentConfig): Promise<void> {
     const candidate = next.agent_config
     if (!candidate) throw new Error('Pulled runtime config has no agent config')
+    // worker implementation desired config 原子替换（stale revision 由 registry 拒绝）。
+    // 无该字段（旧 Admin/测试 fixture）时按新部署安全初始配置兜底：builtin enabled、
+    // CLI disabled——与 Admin store 的 revision-1 语义一致，保证 builtin gate 永远可判。
+    await this.activationRegistry.applyRuntimeConfig(next.worker_implementations ?? DEFAULT_SAFE_WORKER_IMPLS)
     // All fallible work happens before the live fields are touched.
     const worker = candidate.model_config.powerful
     const digest = candidate.model_config.cost_effective ?? worker
@@ -2846,6 +2878,14 @@ export class UnifiedAgent extends ModuleBase {
     }, params?.pagination)
   }
 
+  /** §6.5/§8.4：脱敏 WorkerImplementationStatus（activation registry 唯一 read API）。 */
+  private async handleListWorkerImplementationStatus(): Promise<{ items: import('./workers/types.js').WorkerImplementationStatus[] }> {
+    if (!this.activationRegistry.isInitialized()) {
+      throw new Error('Worker implementation status unavailable: runtime config not yet applied')
+    }
+    return { items: this.activationRegistry.listStatus() }
+  }
+
   /** §8.4 list_manager_episodes_admin：按 exact manager key 查 TraceStore episode 列表。 */
   private async handleListManagerEpisodesAdmin(params: { manager_key: ManagerKey; pagination?: import('crabot-shared').PaginationParams }): Promise<import('crabot-shared').PaginatedResult<import('./manager/trace-types.js').ManagerEpisodeTrace>> {
     // manager stack/TraceStore 未 ready 时结构化失败，不返回空列表冒充成功。
@@ -3376,6 +3416,9 @@ export class UnifiedAgent extends ModuleBase {
     await this.managerStack?.principals.init()
     // P6-A §7.7：开放 Manager read model 前先收口遗留 running episode（failed/interrupted）。
     this.traceStore.reconcileInterruptedManagerEpisodes()
+    // P6-B §6：activation registry 载入持久 verification 状态；runtime config 已在
+    // constructor/pull 路径应用过时 applyRuntimeConfigCandidate 会补 apply（见下）。
+    await this.activationRegistry.load()
     // P6-A §11.9 先于 §3.2：先重放 prepared 的 outbound delivery（响应丢失场景），
     // Admin 幂等返回首次结果即 confirm + settle wake——只差 confirm 的崩溃窗口不会
     // 因重启先重跑一遍重复 episode。只有真正未交付的 wake 才进入重放。

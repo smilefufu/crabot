@@ -752,12 +752,18 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     // Keep this test on the intended factory failure seam instead of the earlier runtime
     // admission guard; Admin now refuses to publish such a config in production.
+    // P6-B：registry gate 也要一并旁路——缺 powerful 时 builtin 在 registry 里同样
+    // not ready（模型 slot 不可解析），那是更靠前的同一 fail-loud 语义，但本测试
+    // 的验收点是工厂抛错如实落 failed 尝试。
     const admission = internals.managerStack!.harness.deps.assertExecutionAdmission
+    const implReady = internals.managerStack!.harness.deps.assertWorkerImplReady
     const builtinDefaults = internals.managerStack!.harness.deps.builtinSpawnDefaults
     internals.managerStack!.harness.deps.assertExecutionAdmission = undefined
+    internals.managerStack!.harness.deps.assertWorkerImplReady = undefined
     internals.managerStack!.harness.deps.builtinSpawnDefaults = (ctx: unknown) => internals.buildBuiltinWorkerRuntime(ctx)
     await expect(spawnBuiltin(internals, managerKey)).rejects.toThrow(/powerful/)
     internals.managerStack!.harness.deps.assertExecutionAdmission = admission
+    internals.managerStack!.harness.deps.assertWorkerImplReady = implReady
     internals.managerStack!.harness.deps.builtinSpawnDefaults = builtinDefaults
 
     const [w] = await internals.managerStack!.harness.listWorkers(managerKey)

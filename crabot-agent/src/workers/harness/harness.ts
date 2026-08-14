@@ -421,6 +421,12 @@ export interface HarnessDeps {
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
   /** Rejects new spawn/resume/handoff while runtime config is stale; running incarnations remain untouched. */
   readonly assertExecutionAdmission?: () => void
+  /**
+   * P6-B §6.5：显式/接续目标 impl 的 activation registry gate（唯一 ready 判定点）。
+   * spawn 显式 impl、resume 终态化身、handoff 目标 impl 前必须调用；
+   * 省略 impl 的 spawn 走 defaultImpl（builtin 安全路径）不在此 gate。
+   */
+  readonly assertWorkerImplReady?: (impl: WorkerImplId) => void
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string) => Promise<boolean>
   /** Validates an opaque legacy continuation credential immediately before side effects. */
@@ -617,6 +623,8 @@ export class WorkerHarness {
   async spawnWorker(p: SpawnWorkerParams): Promise<LedgerWorker> {
     this.deps.assertExecutionAdmission?.()
     const workerId = `w-${randomUUID()}`
+    // P6-B：显式 impl 在任何副作用（workspace/台账/provision）前过 registry gate。
+    if (p.impl !== undefined) this.deps.assertWorkerImplReady?.(p.impl)
     const impl = p.impl ?? this.deps.defaultImpl
     const adapter = this.deps.adapters.get(impl)
     if (!adapter) {
@@ -1426,6 +1434,8 @@ export class WorkerHarness {
     sourceEndReason?: IncarnationEndReason,
   ): Promise<ContinuationDelivery> {
     this.deps.assertExecutionAdmission?.()
+    // P6-B：resume 重验 ready（「已有 running incarnation 不杀，新 resume/handoff 重验」）。
+    this.deps.assertWorkerImplReady?.(mainline.impl)
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
@@ -1524,6 +1534,8 @@ export class WorkerHarness {
     // "旧的没了、新的没建成"的死结,且下次投递会重复整套 handoff(重复追加 HANDOFF.md)。
     // 把这两项检查提到最前面、在写 HANDOFF.md 和 kill 旧化身之前做,失败时旧化身与
     // HANDOFF.md 都不动,保持可重试。
+    // P6-B：目标 impl 重验 ready（配置可能在 source 运行期间已失效）。
+    this.deps.assertWorkerImplReady?.(targetImpl)
     const newAdapter = this.deps.adapters.get(targetImpl)
     if (!newAdapter) {
       throw new Error(`WorkerHarness.handoffIncarnation: no adapter registered for impl '${targetImpl}' (handoff target)`)

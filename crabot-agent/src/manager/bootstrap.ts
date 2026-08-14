@@ -174,6 +174,8 @@ export interface BootstrapDeps {
   readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
   /** P6-A §8.4：builtin worker 结构化 trace 写钩子/读入口（TraceStore 窄口）。 */
   readonly builtinTraceHooks?: import('../workers/builtin/adapter.js').BuiltinTraceHooks
+  /** P6-B §6：activation registry gate（unified-agent 注入）。 */
+  readonly assertWorkerImplReady?: (impl: import('../workers/types.js').WorkerImplId) => void
   readonly builtinTraceReader?: import('../workers/builtin/adapter.js').BuiltinTraceReader
   /** P6-A §8.10：化身终态收割钩子（harness fire-and-forget；装配层做最后一次 native read）。 */
   readonly onIncarnationTerminal?: (handle: import('../workers/types.js').IncarnationHandle) => void
@@ -309,6 +311,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const harnessDeps: HarnessDeps = {
     adapters,
     defaultImpl: DEFAULT_WORKER_IMPL,
+    ...(deps.assertWorkerImplReady ? { assertWorkerImplReady: deps.assertWorkerImplReady } : {}),
     ledger,
     workspaces,
     workersDir: join(agentDir, 'workers'),

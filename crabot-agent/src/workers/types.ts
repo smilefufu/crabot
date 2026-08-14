@@ -224,7 +224,14 @@ export interface StateChangeReport {
   readonly notification?: { readonly type: string; readonly message?: string; readonly title?: string }
 }
 
-export interface DetectResult { installed: boolean; activated: boolean; detail?: string }
+export interface DetectResult {
+  installed: boolean
+  activated: boolean
+  /** 当前检测到的 CLI 版本（translator/version range 匹配输入）。 */
+  version?: string
+  install_source?: 'managed' | 'system'
+  detail?: string
+}
 export interface AdapterCapabilities {
   readonly fork: boolean; readonly revive: boolean; readonly goalMode: boolean
   readonly subagent: boolean; readonly structuredTrace: boolean
@@ -233,6 +240,11 @@ export interface AdapterCapabilities {
 export interface WorkerAdapter {
   readonly implId: WorkerImplId
   detect(): Promise<DetectResult>
+  /**
+   * 与当前 detect 版本一致的静态 translator 声明（P6-B §6）；
+   * detect 与声明不一致时 registry 标 degraded/not ready。
+   */
+  connectionCapabilities?(): WorkerConnectionCapability[]
   /** 无副作用的 workspace/capability 前置检查；handoff 在触碰源化身前调用。 */
   preflightProvision?(ws: Workspace, caps: CapabilityBundle): Promise<void>
   provision(ws: Workspace, caps: CapabilityBundle): Promise<void>
