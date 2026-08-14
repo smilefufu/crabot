@@ -927,7 +927,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     let consumed = start
     for (let i = start; i < lines.length; i++) {
       const event = normalizeTraceLine(lines[i])
-      if (event) events.push(event)
+      if (event) events.push({ ...event, source_offset: i })
       consumed = i + 1
     }
     return { events, nextCursor: { offset: consumed } }

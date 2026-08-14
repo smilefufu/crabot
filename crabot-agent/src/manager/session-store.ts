@@ -12,7 +12,7 @@ import { promises as fs } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
 import { AsyncMutex } from '../workers/async-mutex'
-import { encodeSegment } from '../workers/harness/ledger-store'
+import { encodeSegment, decodeSegment } from '../workers/harness/ledger-store'
 import type { ManagerKey, ManagerSessionState } from './types'
 import type { EngineMessage } from '../engine/index.js'
 
@@ -52,6 +52,64 @@ export class ManagerSessionStore {
         `[ManagerSessionStore] state.json 损坏(非法 JSON),拒绝当作空状态处理: ${statePath}: ${(err as Error).message}`
       )
     }
+  }
+
+  /**
+   * 最小 session identity 的原子持久化（P6-A §3.2/§6.2）：
+   * 在为某 Manager 创建首个 episode trace 前调用；已存在时不动历史。
+   * 保证首个 episode 即使后续步骤失败/进程重启，Manager 仍可从磁盘枚举。
+   */
+  async ensureSession(key: ManagerKey): Promise<void> {
+    const mutex = this.getMutex(key)
+    await mutex.run(async () => {
+      const statePath = this.statePathFor(key)
+      try {
+        await fs.access(statePath)
+        return
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      }
+      await fs.mkdir(this.dirFor(key), { recursive: true })
+      const initial: ManagerSessionState = { key, recent: [], foldedCount: 0 }
+      await writeJsonAtomic(statePath, initial)
+    })
+  }
+
+  /**
+   * 扫描磁盘目录恢复 ManagerKey 列表（P6-A §7.1）。目录 key 与 state.json.key 不一致时
+   * fail loud 隔离（跳过并告警），不猜归属。目录存在但 state.json 缺失/损坏的跳过。
+   */
+  async listManagerKeys(): Promise<ManagerKey[]> {
+    let entries: import('fs').Dirent[]
+    try {
+      entries = await fs.readdir(this.rootDir, { withFileTypes: true })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw err
+    }
+    const keys: ManagerKey[] = []
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      let decoded: string
+      try {
+        decoded = decodeSegment(entry.name)
+      } catch (err) {
+        console.warn(`[ManagerSessionStore] 无法解码的 manager 目录已隔离: ${entry.name}: ${(err as Error).message}`)
+        continue
+      }
+      try {
+        const raw = await fs.readFile(join(this.rootDir, entry.name, STATE_FILE), 'utf-8')
+        const parsed = JSON.parse(raw) as ManagerSessionState
+        if (parsed.key !== decoded) {
+          console.warn(`[ManagerSessionStore] manager 目录与 state.json key 不一致已隔离: dir=${entry.name} key=${parsed.key}`)
+          continue
+        }
+        keys.push(parsed.key)
+      } catch (err) {
+        console.warn(`[ManagerSessionStore] manager state 缺失/损坏已隔离: ${entry.name}: ${(err as Error).message}`)
+      }
+    }
+    return keys
   }
 
   /** 原子写(tmp+rename);每 key 一把 AsyncMutex 保并发 save 不丢 */

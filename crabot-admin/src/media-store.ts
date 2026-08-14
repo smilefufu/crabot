@@ -111,6 +111,52 @@ export class MediaStore {
     return { id, abs_path: path.resolve(absPath), item: this.toItem(entry) }
   }
 
+  // ── P6-A §11：无业务语义的 stage/promote/rollback（delivery journal 复用）─────────
+  // stage 只写 staging 文件（不进 index、不可见）；promote 把 planned UUID 的文件落进 store
+  // 并登记 index；rollback 删 staging。planned media_url 在 stage 时即可算出（幂等）。
+
+  /** 预分配 media UUID 并写出 staging 文件；返回 planned entry 与 URL（未进 index，不可见）。 */
+  async stageBuffer(
+    buf: Buffer,
+    opts: { filename: string; mime_type: string },
+    stagingDir: string,
+  ): Promise<{ planned_id: string; staged_path: string; entry: MediaIndexEntry; media_url: string }> {
+    const plannedId = crypto.randomUUID()
+    const entry: MediaIndexEntry = {
+      id: plannedId,
+      ext: extFor(opts.mime_type, opts.filename),
+      filename: opts.filename,
+      mime_type: opts.mime_type,
+      size: buf.length,
+      created_at: new Date().toISOString(),
+    }
+    await fs.mkdir(stagingDir, { recursive: true, mode: 0o700 })
+    const stagedPath = path.join(stagingDir, `${plannedId}${entry.ext}`)
+    await fs.writeFile(stagedPath, buf, { mode: 0o600 })
+    return { planned_id: plannedId, staged_path: stagedPath, entry, media_url: this.toItem(entry).media_url }
+  }
+
+  /**
+   * 把 staged 文件按 planned UUID promote 进 store + index。崩溃窗口幂等：
+   * 「已 rename、index 未落盘」时 staged 文件已不在——只要最终文件存在就只补登记，
+   * 不抛 ENOENT（否则 delivery 永久 commit 不了、request 永远 pending）。
+   */
+  async promoteStaged(stagedPath: string, entry: MediaIndexEntry): Promise<MediaItem> {
+    const existing = this.index.get(entry.id)
+    if (existing) return this.toItem(existing)
+    const finalPath = this.filePathOf(entry)
+    const stagedExists = await fs.access(stagedPath).then(() => true).catch(() => false)
+    if (stagedExists) {
+      await fs.rename(stagedPath, finalPath)
+    } else {
+      const finalExists = await fs.access(finalPath).then(() => true).catch(() => false)
+      if (!finalExists) throw new Error(`staged media missing: ${stagedPath}`)
+    }
+    this.index.set(entry.id, entry)
+    await this.saveIndex()
+    return this.toItem(entry)
+  }
+
   /** 复制外部文件进 store（出站收存：worker 的 file_path / 本地路径形态 media_url） */
   async ingestFile(
     srcAbsPath: string,

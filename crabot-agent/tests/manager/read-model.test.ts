@@ -428,3 +428,33 @@ describe('buildWorkerDetail', () => {
     expect(detail.worker.incarnations[1].forked_from).toBe(1)
   })
 })
+
+describe('buildManagerAdminSummaries（P6-A §7）', () => {
+  it('disk/trace/running 三源去重 union，排序 last_activity_at desc、manager_key asc', async () => {
+    const { buildManagerAdminSummaries } = await import('../../src/manager/read-model.js')
+    const result = buildManagerAdminSummaries({
+      diskSessionKeys: ['wechat::sess-a' as ManagerKey, 'wechat::sess-b' as ManagerKey],
+      traceKeys: ['wechat::sess-b' as ManagerKey, 'wechat::sess-c' as ManagerKey],
+      episodeStats: (key) => key === 'wechat::sess-b'
+        ? { count: 3, latestStartedAt: '2026-08-01T10:00:00.000Z' }
+        : { count: key === 'wechat::sess-c' ? 1 : 0, latestStartedAt: key === 'wechat::sess-c' ? '2026-08-02T10:00:00.000Z' : undefined },
+      workerCount: (key) => (key === 'wechat::sess-b' ? 2 : 0),
+      runningLastActiveAtMs: (key) => (key === 'wechat::sess-a' ? Date.parse('2026-08-03T10:00:00.000Z') : undefined),
+    }, { page: 1, page_size: 20 })
+    expect(result.items.map((item) => item.manager_key)).toEqual(['wechat::sess-a', 'wechat::sess-c', 'wechat::sess-b'])
+    expect(result.items.find((item) => item.manager_key === 'wechat::sess-b')).toMatchObject({ episode_count: 3, worker_count: 2 })
+    expect(result.pagination.total_items).toBe(3)
+  })
+
+  it('空三源 → 空列表；分页夹紧与缺省归一', async () => {
+    const { buildManagerAdminSummaries } = await import('../../src/manager/read-model.js')
+    const empty = buildManagerAdminSummaries({
+      diskSessionKeys: [], traceKeys: [],
+      episodeStats: () => ({ count: 0 }),
+      workerCount: () => 0,
+      runningLastActiveAtMs: () => undefined,
+    }, { page: 0, page_size: 99999 })
+    expect(empty.items).toEqual([])
+    expect(empty.pagination).toMatchObject({ page: 1, page_size: 100, total_items: 0 })
+  })
+})

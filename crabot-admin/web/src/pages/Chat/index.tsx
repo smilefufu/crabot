@@ -463,15 +463,18 @@ export const Chat: React.FC = () => {
       const incoming = message.message
       setMessages((prev) => {
         const next: MessageState = { ...incoming, status: 'completed' as const }
-        const idx = incoming.request_id
-          ? prev.findIndex(
-              (m) => m.request_id === incoming.request_id && m.role === 'assistant' && m.status === 'processing'
-            )
-          : -1
+        // P6-A §11：delivery 携带 request_ids（一条回复可原子结算多条占位）；
+        // request_id（单数）只读历史兼容。
+        const claimIds = incoming.request_ids ?? (incoming.request_id ? [incoming.request_id] : [])
+        if (claimIds.length === 0) return [...prev, next]
+        const isPendingFor = (m: MessageState) =>
+          m.role === 'assistant' && m.status === 'processing' && m.request_id !== undefined && claimIds.includes(m.request_id)
+        const idx = prev.findIndex(isPendingFor)
         if (idx < 0) return [...prev, next]
         const updated = [...prev]
         updated[idx] = next
-        return updated
+        // 同 delivery 结算的其余占位一并收口（它们的正式内容就是这条回复）。
+        return updated.filter((m, i) => i === idx || !isPendingFor(m))
       })
     } else if (message.type === 'chat_task_update') {
       // 任务状态/计划变更：upsert 进 taskStatuses（终态也保留供图标显示 ✓/✗）

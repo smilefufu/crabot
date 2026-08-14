@@ -54,6 +54,7 @@ describe('ChatManager.handleSendMessage', () => {
     const mgr = await makeManager()
     const result = await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-text-1',
       content: { type: 'text', text: '任务完成，结果如下…' },
     })
     expect(result.platform_message_id).toBeTruthy()
@@ -77,6 +78,7 @@ describe('ChatManager.handleSendMessage', () => {
     const mgr = await makeManager()
     await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-sysevent-1',
       content: { type: 'system_event', text: '成员加入：小明' },
     })
     expect(mgr.getMessages(10)[0].content.text).toBe('成员加入：小明')
@@ -90,7 +92,7 @@ describe('ChatManager.handleSendMessage', () => {
     }
     // handleSendMessage（内部 pushToClient）与 pushTaskUpdate 都不应抛错
     await expect(
-      mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: 'ok' } })
+      mgr.handleSendMessage({ session_id: 'admin-chat', delivery_id: 'd-ws-err-1', content: { type: 'text', text: 'ok' } })
     ).resolves.toBeTruthy()
     expect(() =>
       mgr.pushTaskUpdate({ task_id: 't1' as never, status: 'executing' as never, title: 'x' })
@@ -100,7 +102,7 @@ describe('ChatManager.handleSendMessage', () => {
   it('空文本抛错', async () => {
     const mgr = await makeManager()
     await expect(
-      mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '  ' } })
+      mgr.handleSendMessage({ session_id: 'admin-chat', delivery_id: 'd-empty-1', content: { type: 'text', text: '  ' } })
     ).rejects.toThrow(/Empty message content/)
   })
 
@@ -108,6 +110,7 @@ describe('ChatManager.handleSendMessage', () => {
     const mgr = await makeManager()
     await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-persist-1',
       content: { type: 'text', text: 'persisted' },
     })
     const mgr2 = await makeManager()
@@ -138,6 +141,7 @@ describe('ChatMessage content 模型升级', () => {
     const mgr = await makeManager()
     await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-auto-3',
       content: { type: 'text', text: '结构化' },
     })
     expect(mgr.getMessages(10)[0].content.text).toBe('结构化')
@@ -154,6 +158,16 @@ describe('入站带附件消息（handleInboundMessage）', () => {
     )).rejects.toThrow(/JWT authenticated/)
   })
 
+  it('request_id 路径穿越被拒绝（不落地任何 journal）', async () => {
+    const mgr = await makeManager()
+    await expect(mgr.handleInboundMessage(
+      { request_id: '../escape', text: 'hi', files: [] },
+      'test-token',
+    )).rejects.toThrow(/invalid request_id/)
+    const journalDir = path.join(TEST_DATA_DIR, 'chat-inbound-dispatch-journal')
+    await expect(fs.readdir(journalDir)).rejects.toThrow(/ENOENT/)
+  })
+
   beforeEach(async () => {
     await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
     await fs.mkdir(TEST_DATA_DIR, { recursive: true })
@@ -163,7 +177,7 @@ describe('入站带附件消息（handleInboundMessage）', () => {
     await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
   })
 
-  it('process_message RPC 失败：消息仍落库、推 chat_error、不抛回调用方', async () => {
+  it('process_message RPC 失败：消息落库、outbox 保持 pending_dispatch 供重试/重启恢复', async () => {
     const mgr = await makeManagerWithRpc(async () => {
       throw new Error('agent down')
     })
@@ -177,11 +191,15 @@ describe('入站带附件消息（handleInboundMessage）', () => {
       text: '会失败的消息',
       files: [],
     }, 'test-token')
-    // user 消息已落库且正常返回（失败非原子是已登记的设计取舍）
+    // user 消息已落库且正常返回
     expect(result.message.content.text).toBe('会失败的消息')
     expect(mgr.getMessages(10)).toHaveLength(1)
-    // 推送序列：chat_status processing → chat_error
-    expect(pushed.map((p) => p.type)).toEqual(['chat_status', 'chat_error'])
+    // P6-A §11.4：失败不再立即 chat_error——dispatch loop 退避重试（上限后报错），
+    // journal 保持 pending_dispatch；重启由 reconcileInboundDispatches 恢复。
+    expect(pushed.map((p) => p.type)).toEqual(['chat_status'])
+    const journalPath = `${TEST_DATA_DIR}/chat-inbound-dispatch-journal/req-err.json`
+    const journal = JSON.parse(await fs.readFile(journalPath, 'utf-8'))
+    expect(journal.status).toBe('pending_dispatch')
   })
 
   it('文字+附件：附件落 store，落库 content 含 media[]（URL 形态），process_message 收到绝对路径版', async () => {
@@ -203,6 +221,10 @@ describe('入站带附件消息（handleInboundMessage）', () => {
     expect(result.message.content.text).toBe('看下这两张图')
     expect(result.message.content.media).toHaveLength(2)
     expect(result.message.content.media![0].media_url).toMatch(/^\/api\/media\//)
+    // dispatch loop 是异步的：等 process_message 到达
+    for (let i = 0; i < 200 && !calls.some((c) => c.method === 'process_message'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
     // process_message：绝对路径版 + media_url 镜像
     const pm = calls.find((c) => c.method === 'process_message')
     expect(pm).toBeTruthy()
@@ -234,6 +256,7 @@ describe('出站媒体收存（handleSendMessage Phase 2）', () => {
     await fs.writeFile(src, 'png-bytes')
     await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-auto-4',
       content: { type: 'image', file_path: src, filename: 'shot.png', mime_type: 'image/png', text: '截图说明' },
     })
     const [msg] = mgr.getMessages(10)
@@ -248,6 +271,7 @@ describe('出站媒体收存（handleSendMessage Phase 2）', () => {
     await fs.writeFile(src, 'png-bytes')
     await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-auto-5',
       content: { type: 'image', file_path: src, filename: '生成图.png' },
     })
     const [msg] = mgr.getMessages(10)
@@ -259,6 +283,7 @@ describe('出站媒体收存（handleSendMessage Phase 2）', () => {
     const mgr = await makeManager()
     await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-auto-6',
       content: { type: 'image', media_url: 'https://example.com/x.png', mime_type: 'image/png' },
     })
     expect(mgr.getMessages(10)[0].content.media![0].media_url).toBe('https://example.com/x.png')
@@ -268,6 +293,7 @@ describe('出站媒体收存（handleSendMessage Phase 2）', () => {
     const mgr = await makeManager()
     await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-auto-7',
       content: { type: 'file', file_path: '/no/such/file.bin', filename: 'gone.bin', text: '正文' },
     })
     const [msg] = mgr.getMessages(10)
@@ -304,6 +330,7 @@ describe('tagMessageTask / tagUserMessageByRequestId', () => {
     const pushed = attachClientStub(mgr)
     const result = await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-auto-8',
       content: { type: 'text', text: '测试消息' },
     })
     const msgId = result.platform_message_id
@@ -332,6 +359,7 @@ describe('tagMessageTask / tagUserMessageByRequestId', () => {
     const mgr = await makeManager()
     const result = await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-auto-9',
       content: { type: 'text', text: '测试幂等' },
     })
     const msgId = result.platform_message_id
@@ -343,264 +371,134 @@ describe('tagMessageTask / tagUserMessageByRequestId', () => {
     expect(pushed.filter((p) => p.type === 'chat_message_tagged')).toHaveLength(0)
   })
 
-  it('tagUserMessageByRequestId：只命中 user 角色的同 request_id 消息', async () => {
-    const mgr = await makeManager()
-    const pushed = attachClientStub(mgr)
-    // 手动构造两条消息：一条 user、一条 assistant，都带同一 request_id
-    const userResult = await mgr.handleSendMessage({
-      session_id: 'admin-chat',
-      content: { type: 'text', text: 'user-msg' },
-    })
-    const userMsgId = userResult.platform_message_id
-    // 修改这条消息的 role 为 user（handleSendMessage 落的是 assistant，通过内部 messages 修改）
-    // 改为用测试帮助函数直接注入 user 消息
-    // 重新构造：先 loadData 读出，再模拟（由于实现复杂度，用内部 map 直接注入）
-    // 访问私有 messages map 做测试
-    const internalMessages = (mgr as unknown as { messages: Map<string, { message_id: string; role: string; content: unknown; request_id?: string; task_id?: string; timestamp: string }> }).messages
-    // 修改 userResult 的 role 为 user，加 request_id
-    const existing = internalMessages.get(userMsgId)!
-    internalMessages.set(userMsgId, { ...existing, role: 'user', request_id: 'req-xyz' })
-    // 加一条 assistant 消息带同一 request_id
-    internalMessages.set('asst-001', {
-      message_id: 'asst-001',
-      role: 'assistant',
-      content: { type: 'text', text: 'reply' },
-      request_id: 'req-xyz',
-      timestamp: new Date().toISOString(),
-    })
 
-    pushed.length = 0 // 清空
-    await mgr.tagUserMessageByRequestId('req-xyz', 'task-xyz' as never)
-
-    // 仅 user 消息被打标
-    const updatedUser = internalMessages.get(userMsgId)!
-    expect(updatedUser.task_id).toBe('task-xyz')
-    const updatedAsst = internalMessages.get('asst-001')!
-    expect(updatedAsst.task_id).toBeUndefined()
-    // 推送只有一条
-    expect(pushed.filter((p) => p.type === 'chat_message_tagged')).toHaveLength(1)
-  })
-
-  it('handleChatCallback 带 task_id 时：回填同 request_id 的 user 消息', async () => {
-    const mgr = await makeManagerWithRpc(async () => ({}))
-    const pushed = attachClientStub(mgr)
-
-    // 通过 handleInboundMessage 创建 user 消息（会失败 process_message 但消息已落库）
-    const { message: userMsg } = await mgr.handleInboundMessage({
-      request_id: 'req-cb-1',
-      text: '发一条会派 task 的消息',
-      files: [],
-    }, 'test-token')
-    pushed.length = 0 // 清空处理中推送
-
-    // 模拟 chat_callback 回执带 task_id
-    await mgr.handleChatCallback({
-      request_id: 'req-cb-1',
-      reply_type: 'task_created',
-      content: '已创建任务：调查某事',
-      task_id: 'task-cb-1' as never,
-    })
-
-    // user 消息应被打标
-    const msgs = mgr.getMessages(20)
-    const u = msgs.find((m) => m.message_id === userMsg.message_id)
-    expect(u?.task_id).toBe('task-cb-1')
-    // 应有 chat_message_tagged 推送
-    expect(pushed.some((p) => p.type === 'chat_message_tagged' && p.task_id === 'task-cb-1')).toBe(true)
-  })
-})
-
-/**
- * PR J：manager 正常回复走 send_message → chat_push，前端要靠 request_id 才能把
- * 「处理中」占位气泡收口。admin 侧的职责是给落库消息盖上当时 in-flight 的 request_id。
- */
-describe('chat_push 收口占位：storeAssistantMessage 认领 in-flight request_id', () => {
-  beforeEach(async () => {
-    await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
-    await fs.mkdir(TEST_DATA_DIR, { recursive: true })
-  })
 
   afterEach(async () => {
     await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
   })
 
-  function attachClientStub(mgr: ChatManager): Array<{ type: string; [k: string]: unknown }> {
-    const pushed: Array<{ type: string; [k: string]: unknown }> = []
-    ;(mgr as unknown as { activeClient: unknown }).activeClient = {
-      readyState: 1, // WebSocket.OPEN
-      send: (data: string) => { pushed.push(JSON.parse(data)) },
+  /** 先注入一条 pending 的入站 request（不经 RPC：直接写 index + message + outbox journal）。 */
+  async function seedPendingRequest(mgr: ChatManager, requestId: string): Promise<void> {
+    const internal = mgr as unknown as {
+      requestIndex: { recordAdmission(input: unknown): Promise<unknown> }
+      messages: Map<string, unknown>
+      saveData(): Promise<void>
     }
-    return pushed
+    await internal.requestIndex.load()
+    await internal.requestIndex.recordAdmission({
+      request_id: requestId,
+      session_id: 'admin-chat',
+      fingerprint: `fp-${requestId}`,
+    })
   }
 
-  /**
-   * 造出一条 in-flight 请求（pendingRequests 有条目、占位气泡已生出）。
-   *
-   * **`process_message` 停在飞行中不 resolve** —— 生产上就是这个形状：manager 的
-   * `send_message` 发生在 episode 内部，也就是 `process_message` 返回**之前**
-   * （`unified-agent.processAdminChatMessage` 整段 await 了 episode）。in-flight 窗口精确
-   * 等于这次 RPC 的生命周期，测试必须在窗口内发回复，否则测的是一个生产上不存在的时序。
-   * 收尾用 `finish()` 让 RPC 落地（= episode 结束）。
-   */
-  async function makeInFlight(requestId: string): Promise<{
-    mgr: ChatManager
-    pushed: Array<{ type: string; [k: string]: unknown }>
-    finish: () => Promise<void>
-  }> {
-    let release!: () => void
-    const rpcDone = new Promise<void>((resolve) => { release = resolve })
-    const mgr = await makeManagerWithRpc(async () => { await rpcDone; return {} })
-    const pushed = attachClientStub(mgr)
-    const inbound = mgr.handleInboundMessage({ request_id: requestId, text: '帮我看下这个', files: [] }, 'test-token')
-    await vi.waitFor(() => expect(pushed.some((p) => p.type === 'chat_status' && p.request_id === requestId)).toBe(true))
-    pushed.length = 0
-    return {
-      mgr,
-      pushed,
-      finish: async () => { release(); await inbound },
-    }
-  }
-
-  it('正常回复：落库消息与 chat_push 载荷都盖上 in-flight 的 request_id', async () => {
-    const { mgr, pushed, finish } = await makeInFlight('req-inflight-1')
-    await mgr.handleSendMessage({
-      session_id: 'admin-chat',
-      content: { type: 'text', text: '看完了，结论是……' },
-    })
-    const stored = mgr.getMessages(10).find((m) => m.role === 'assistant')
-    expect(stored?.request_id).toBe('req-inflight-1')
-    const push = pushed.find((p) => p.type === 'chat_push')
-    expect(push).toBeTruthy()
-    expect((push as { message: { request_id?: string } }).message.request_id).toBe('req-inflight-1')
-    await finish()
-  })
-
-  it('带 media 的正常回复：chat_push 仍是完整 ChatMessage（media 不丢）且带 request_id', async () => {
-    const { mgr, pushed, finish } = await makeInFlight('req-inflight-media')
-    await mgr.handleSendMessage({
-      session_id: 'admin-chat',
-      content: {
-        type: 'image',
-        text: '图在这',
-        media: [{ media_url: 'https://example.com/a.png', mime_type: 'image/png' }],
-      },
-    })
-    const push = pushed.find((p) => p.type === 'chat_push') as
-      { message: { request_id?: string; content: { media?: unknown[] } } }
-    expect(push.message.request_id).toBe('req-inflight-media')
-    expect(push.message.content.media).toHaveLength(1)
-    await finish()
-  })
-
-  it('无 in-flight（manager 主动推送）：不盖 request_id，前端据此纯追加', async () => {
+  it('admin-chat delivery 必须带 delivery_id；缺省抛错且不落库', async () => {
     const mgr = await makeManager()
-    const pushed = attachClientStub(mgr)
+    await expect(
+      mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: 'no id' } })
+    ).rejects.toThrow(/delivery_id is required/)
+    expect(mgr.getMessages(10)).toHaveLength(0)
+  })
+
+  it('带 request_ids 的 delivery：全部 pending 才 commit，并一次性结算', async () => {
+    const mgr = await makeManager()
+    await seedPendingRequest(mgr, 'req-1')
+    await seedPendingRequest(mgr, 'req-2')
+    const result = await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      delivery_id: 'd-cas-1',
+      request_ids: ['req-1', 'req-2'],
+      content: { type: 'text', text: '一条回复结算两条' },
+    })
+    expect(result.platform_message_id).toBeTruthy()
+    const stored = mgr.getMessages(10)
+    expect(stored[0].request_ids).toEqual(['req-1', 'req-2'])
+    expect(stored[0].delivery_id).toBe('d-cas-1')
+    const index = (mgr as unknown as { requestIndex: { get(id: string): { status: string } | undefined } }).requestIndex
+    expect(index.get('req-1')?.status).toBe('settled')
+    expect(index.get('req-2')?.status).toBe('settled')
+  })
+
+  it('request_ids 含非 pending ID → 整批拒绝（零 mutation）', async () => {
+    const mgr = await makeManager()
+    await seedPendingRequest(mgr, 'req-pending')
+    await expect(
+      mgr.handleSendMessage({
+        session_id: 'admin-chat',
+        delivery_id: 'd-cas-2',
+        request_ids: ['req-pending', 'req-unknown'],
+        content: { type: 'text', text: 'x' },
+      })
+    ).rejects.toThrow(/not pending/)
+    expect(mgr.getMessages(10)).toHaveLength(0)
+  })
+
+  it('request_ids 数组内重复 → 整批拒绝', async () => {
+    const mgr = await makeManager()
+    await seedPendingRequest(mgr, 'req-dup')
+    await expect(
+      mgr.handleSendMessage({
+        session_id: 'admin-chat',
+        delivery_id: 'd-cas-3',
+        request_ids: ['req-dup', 'req-dup'],
+        content: { type: 'text', text: 'x' },
+      })
+    ).rejects.toThrow(/duplicate request_id/)
+  })
+
+  it('同 delivery_id 重放：返回首次结果，不重复落库', async () => {
+    const mgr = await makeManager()
+    const first = await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      delivery_id: 'd-replay-1',
+      content: { type: 'text', text: '首达' },
+    })
+    const second = await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      delivery_id: 'd-replay-1',
+      content: { type: 'text', text: '首达' },
+    })
+    expect(second.platform_message_id).toBe(first.platform_message_id)
+    expect(mgr.getMessages(10)).toHaveLength(1)
+  })
+
+  it('同 delivery_id 不同 payload → 冲突拒绝', async () => {
+    const mgr = await makeManager()
     await mgr.handleSendMessage({
       session_id: 'admin-chat',
-      content: { type: 'text', text: '顺嘴提醒你一句' },
+      delivery_id: 'd-conflict-1',
+      content: { type: 'text', text: '第一版' },
     })
-    expect(mgr.getMessages(10)[0].request_id).toBeUndefined()
-    const push = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
-    expect(push.message.request_id).toBeUndefined()
+    await expect(
+      mgr.handleSendMessage({
+        session_id: 'admin-chat',
+        delivery_id: 'd-conflict-1',
+        content: { type: 'text', text: '改了内容' },
+      })
+    ).rejects.toThrow(/conflicts/)
+    expect(mgr.getMessages(10)).toHaveLength(1)
+    expect(mgr.getMessages(10)[0].content.text).toBe('第一版')
   })
 
-  it('一轮多条回复：认领即消费——只有第一条带 request_id，后续几条不带', async () => {
-    const { mgr, pushed, finish } = await makeInFlight('req-inflight-2')
-    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '收到，我去办' } })
-    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '办好了' } })
-    const pushes = pushed.filter((p) => p.type === 'chat_push') as Array<{ message: { request_id?: string } }>
-    expect(pushes).toHaveLength(2)
-    expect(pushes[0].message.request_id).toBe('req-inflight-2')
-    expect(pushes[1].message.request_id).toBeUndefined()
-    await finish()
-  })
-
-  it('两条 in-flight：按 FIFO 认领（最早那条最先被回答）', async () => {
-    // 两条都停在飞行中（生产上就是两个 episode 同时在跑），回复在窗口内发出
-    let release!: () => void
-    const rpcDone = new Promise<void>((resolve) => { release = resolve })
-    const mgr = await makeManagerWithRpc(async () => { await rpcDone; return {} })
-    const pushed = attachClientStub(mgr)
-    const a = mgr.handleInboundMessage({ request_id: 'req-a', text: '第一问', files: [] }, 'test-token')
-    await vi.waitFor(() => expect(pushed.filter((p) => p.type === 'chat_status')).toHaveLength(1))
-    const b = mgr.handleInboundMessage({ request_id: 'req-b', text: '第二问', files: [] }, 'test-token')
-    await vi.waitFor(() => expect(pushed.filter((p) => p.type === 'chat_status')).toHaveLength(2))
-    pushed.length = 0
-    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '答第一问' } })
-    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '答第二问' } })
-    const pushes = pushed.filter((p) => p.type === 'chat_push') as Array<{ message: { request_id?: string } }>
-    expect(pushes.map((p) => p.message.request_id)).toEqual(['req-a', 'req-b'])
-    release()
-    await Promise.all([a, b])
-  })
-
-  it('session_id=system-tasks：不认领 Master Chat 的 in-flight request', async () => {
-    const { mgr, pushed, finish } = await makeInFlight('req-inflight-3')
-    await mgr.handleSendMessage({ session_id: 'system-tasks', content: { type: 'text', text: '系统线程的消息' } })
-    const push = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
-    expect(push.message.request_id).toBeUndefined()
-    // in-flight 没被吃掉：随后 admin-chat 的回复照样能认领到
-    pushed.length = 0
-    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '给人类的回复' } })
-    const push2 = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
-    expect(push2.message.request_id).toBe('req-inflight-3')
-    await finish()
-  })
-
-  // --- PR #59 review 第二条：F3（episode 跑完但一句话没说）不得留下永久残骸 ---
-
-  it('沉默 episode（F3）之后再发一条：回复认领的是新请求，旧的不残留、不错位', async () => {
-    // 第一问：agent 侧 F3——`process_message` 正常返回，没有 chat_callback、也没有 send_message。
-    const mgr = await makeManagerWithRpc(async () => ({ decision_types: [] }))
-    const pushed = attachClientStub(mgr)
-    await mgr.handleInboundMessage({ request_id: 'req-silent', text: '第一问（会被沉默）', files: [] }, 'test-token')
-
-    // 第二问：这一轮 manager 在 episode 内（= RPC 返回之前）回了话。
-    let release!: () => void
-    const rpcDone = new Promise<void>((resolve) => { release = resolve })
-    ;(mgr as unknown as { rpcClient: { callSensitive: unknown } }).rpcClient = {
-      callSensitive: async () => { await rpcDone; return {} },
-    }
-    const second = mgr.handleInboundMessage({ request_id: 'req-2', text: '第二问', files: [] }, 'test-token')
-    await vi.waitFor(() => expect(pushed.some((p) => p.type === 'chat_status' && p.request_id === 'req-2')).toBe(true))
-    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '答第二问' } })
-    release()
-    await second
-
-    // 认领的是第二问：占位气泡按 req-2 收口。修复前这里会认领早已收口无望的 req-silent，
-    // 于是第一问的占位被换成第二问的答案、第二问的占位永远转圈（且此后整体错位一位）。
-    const push = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
-    expect(push.message.request_id).toBe('req-2')
-    const stored = mgr.getMessages(10).find((m) => m.role === 'assistant')
-    expect(stored?.request_id).toBe('req-2')
-  })
-
-  it('沉默 episode（F3）之后 manager 主动推送：没有可认领的 in-flight，纯追加', async () => {
-    const mgr = await makeManagerWithRpc(async () => ({ decision_types: [] }))
-    await mgr.handleInboundMessage({ request_id: 'req-silent-2', text: '会被沉默的一问', files: [] }, 'test-token')
-    const pushed = attachClientStub(mgr)
-
-    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '顺嘴提醒你一句' } })
-
-    const push = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
-    expect(push.message.request_id).toBeUndefined()
-  })
-
-  it('失败兜底路径不受影响：chat_callback 仍按 request_id 推 chat_reply', async () => {
-    const { mgr, pushed, finish } = await makeInFlight('req-inflight-4')
-    await mgr.handleChatCallback({
-      request_id: 'req-inflight-4',
-      reply_type: 'direct_reply',
-      content: '我这条消息没处理完，暂时回不了你。',
+  it('proactive push（无 request_ids）独立追加，不消费 pending', async () => {
+    const mgr = await makeManager()
+    await seedPendingRequest(mgr, 'req-pending-x')
+    await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      delivery_id: 'd-proactive-1',
+      content: { type: 'text', text: '主动汇报' },
     })
-    const reply = pushed.find((p) => p.type === 'chat_reply')
-    expect(reply).toBeTruthy()
-    expect(reply!.request_id).toBe('req-inflight-4')
-    expect(reply!.status).toBe('completed')
-    // 兜底消息落库也带 request_id（前端 15 秒兜底轮询按它匹配）
-    const stored = mgr.getMessages(10).find((m) => m.role === 'assistant')
-    expect(stored?.request_id).toBe('req-inflight-4')
-    await finish()
+    const index = (mgr as unknown as { requestIndex: { get(id: string): { status: string } | undefined } }).requestIndex
+    expect(index.get('req-pending-x')?.status).toBe('pending')
+    expect(mgr.getMessages(10)[0].request_ids).toBeUndefined()
+  })
+
+  it('chat_callback 已退役：只返回 retired 错误，不写消息', async () => {
+    const mgr = await makeManager()
+    await expect(
+      mgr.handleChatCallback({ request_id: 'r', reply_type: 'direct_reply', content: 'x' } as never)
+    ).rejects.toThrow(/retired/)
+    expect(mgr.getMessages(10)).toHaveLength(0)
   })
 })
 
@@ -629,6 +527,7 @@ describe('deleteMessage', () => {
     const pushed = attachClientStub(mgr)
     const { platform_message_id } = await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-auto-21',
       content: { type: 'text', text: '待删除的消息' },
     })
     pushed.length = 0 // 清空 handleSendMessage 产生的推送
@@ -652,6 +551,7 @@ describe('deleteMessage', () => {
     const mgr = await makeManager()
     const { platform_message_id } = await mgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-auto-22',
       content: { type: 'text', text: '持久化删除测试' },
     })
     await mgr.deleteMessage(platform_message_id)

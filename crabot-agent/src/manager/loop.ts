@@ -32,6 +32,7 @@
  */
 
 import { randomUUID } from 'crypto'
+import type { ManagerEpisodeTrigger, ManagerTraceWriter } from './trace-types.js'
 import {
   runEngine,
   createUserMessage,
@@ -118,12 +119,22 @@ export type WakeEvent =
       readonly principalPermissions?: ResolvedPermissions
     }
 
+/**
+ * P6-A §3.2：不渲染到 LLM 正文的 system-only 关联元数据。
+ * Admin Chat 入站的 request IDs 只经这个通道进 Manager——不进 ChannelMessage 正文、
+ * 不进工具 schema、不伪造 Friend 字段。
+ */
+export interface ManagerWakeCorrelation {
+  readonly admin_chat_request_ids?: ReadonlyArray<string>
+}
+
 export interface TimedWakeEnvelope {
   readonly wake: WakeEvent
   readonly received_at: string
   readonly timezone: string
   readonly occurred_at?: string
   readonly human_occurred_at?: ReadonlyArray<{ readonly message_id?: string; readonly occurred_at?: string }>
+  readonly correlation?: ManagerWakeCorrelation
 }
 
 export interface EpisodeResult {
@@ -192,6 +203,18 @@ export interface ManagerLoopDeps {
    */
   readonly timezone?: () => string
   readonly onEpisodeEnd?: (result: EpisodeResult) => void
+  /**
+   * Manager episode trace writer（P6-A §6）：窄接口，episode 边界调用。
+   * root trace 持久化是 episode admission——startEpisode 抛错时本 loop 不得调用
+   * LLM/tool，原 wake 保持未结算。缺省时整个 trace 面静默关闭（测试/降级）。
+   */
+  readonly traceWriter?: ManagerTraceWriter
+  /**
+   * P6-A §3.2：episode 被消费（consumedEvents=true）时回调仍未 claim 的 Admin Chat
+   * request IDs——F3 沉默 episode 也是消费的合法终态，不结算会让 wake 在每次重启
+   * 无限重放。已 claim 的 ID 由 delivery confirm 路径结算，不在此列。
+   */
+  readonly onAdminChatWakeConsumed?: (requestIds: string[]) => void
 }
 
 /** 滚动摘要块在 initialMessages 里的前缀标记,避免 LLM 把它误当成用户刚发的话。 */
@@ -229,6 +252,62 @@ export class ManagerLoop {
    * 这正是不把它做成 registry 侧 `Map<ManagerKey, …>` 的原因(那样并发唤醒会串身份)。
    */
   private currentWakeEvent: TimedWakeEnvelope | null = null
+  /**
+   * 当前 episode 的 trace id（root 持久化成功后才有值）。worker-tools 经 registry 桥读它
+   * 填 `origin.spawned_by_episode`，spawn 成功后经 `recordSpawnedWorker` 回写 trace。
+   * 与 `currentWakeEvent` 同一生命周期纪律：runEpisode 进入时置、finally 清；同 loop 的
+   * episode 由 mutex 串行，不存在交叠。
+   */
+  private currentTraceId: string | undefined = undefined
+
+  /** 当前 episode 的 trace id（仅 episode 进行中）；registry 桥/worker-tools 读取用。 */
+  get currentEpisodeTraceId(): string | undefined {
+    return this.currentTraceId
+  }
+
+  /**
+   * P6-A §11.4/6：本 episode 关联的 Admin Chat request IDs 及其 claim 状态。
+   * 初始 wake、carried mailbox、mid-episode injection 的 correlation 合并去重；
+   * 只有目标 exact admin-web::admin-chat 的 eligible send 才原子 claim 未 claim 的 ID，
+   * 每个 ID 最多进入一个 logical delivery。
+   */
+  private adminChatClaims: Map<string, 'unclaimed' | 'claimed'> = new Map()
+
+  /** 本 episode 的 token 用量累加器（onTurn 回调写入，finish 时聚合成 total_usage）。 */
+  private currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
+  /** max_tokens 兜底重试与新 episode 的 span 计数区分（engine turnNumber 在重试时会重数）。 */
+  private attemptCounter = 0
+
+  /** spawn_worker 成功回调（registry 桥经 worker-tools 调）：把 worker ID 追加进当前 trace。 */
+  recordSpawnedWorker(workerId: string): void {
+    if (this.currentTraceId) this.deps.traceWriter?.addSpawnedWorker(this.currentTraceId, workerId)
+  }
+
+  /**
+   * P6-A §11.6：原子 claim 本 episode 尚未 claim 的 Admin Chat request IDs。
+   * 每个 ID 最多进入一个 logical delivery；全部被 claim 过后返回空（后续 send 即
+   * 追加/proactive，不再携带 IDs）。
+   */
+  claimAdminChatRequestIds(): string[] {
+    const claimed: string[] = []
+    for (const [id, state] of this.adminChatClaims) {
+      if (state === 'unclaimed') {
+        this.adminChatClaims.set(id, 'claimed')
+        claimed.push(id)
+      }
+    }
+    return claimed
+  }
+
+  /**
+   * prepare 失败（staging/落盘抛错）时归还 claim：这些 ID 没有任何 delivery record，
+   * 不归还会让 manager 的重发拿到空 claim、回复退化成 proactive、占位气泡永久转圈。
+   */
+  unclaimAdminChatRequestIds(ids: ReadonlyArray<string>): void {
+    for (const id of ids) {
+      if (this.adminChatClaims.get(id) === 'claimed') this.adminChatClaims.set(id, 'unclaimed')
+    }
+  }
 
   constructor(deps: ManagerLoopDeps) {
     this.deps = deps
@@ -268,6 +347,9 @@ export class ManagerLoop {
     assertTimedWakeEnvelope(envelope)
     this.mailbox.push(envelope)
     this.currentEpisodeInjected?.push(envelope)
+    for (const id of envelope.correlation?.admin_chat_request_ids ?? []) {
+      if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
+    }
   }
 
   /**
@@ -291,15 +373,90 @@ export class ManagerLoop {
     const eventText = envelope === undefined ? undefined : this.renderEnvelope(envelope)
     this.currentEpisodeInjected = []
     this.currentWakeEvent = envelope ?? null
+    this.adminChatClaims = new Map()
+    for (const item of [...carriedEnvelopes, ...(envelope ? [envelope] : [])]) {
+      for (const id of item.correlation?.admin_chat_request_ids ?? []) {
+        if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
+      }
+    }
+
+    // P6-A §6.2/§6.8：先原子持久最小 session identity，再创建 root trace；
+    // 两者失败都不调用 LLM/tool——原 wake 经下方 catch 保持未结算并重投。
+    // trace start 失败不改变 consumedEvents（此时根本还没跑过任何 turn）。
+    let traceStarted = false
+    try {
+      await this.deps.store.ensureSession(this.deps.key)
+      this.deps.traceWriter?.startEpisode(
+        episodeId,
+        this.deps.managerKey(),
+        managerTriggerFromWake(envelope ?? carriedEnvelopes[0], carriedEnvelopes.length + (envelope ? 1 : 0)),
+      )
+      this.currentTraceId = episodeId
+      traceStarted = true
+      // root agent_loop span 覆盖整个 episode；finishEpisode 会按 episode 状态收口它。
+      this.deps.traceWriter?.appendSpan(episodeId, {
+        span_id: `root-${episodeId}`,
+        type: 'agent_loop',
+        started_at: new Date().toISOString(),
+        status: 'running',
+        details: { merged_envelopes: carriedEnvelopes.length + (envelope ? 1 : 0) },
+      })
+    } catch (traceStartError) {
+      // episode admission 失败：零 LLM/tool，重投后向上抛（与下方失败路径同语义）。
+      this.mailbox.drainEnvelopes()
+      for (const item of carriedEnvelopes) this.mailbox.push(item)
+      if (envelope !== undefined) this.mailbox.push(envelope)
+      this.currentEpisodeInjected = null
+      this.currentWakeEvent = null
+      throw traceStartError
+    }
 
     try {
-      return await this.runEpisodeBody(episodeId, carriedTexts, eventText, carriedEnvelopes, envelope)
+      const result = await this.runEpisodeBody(episodeId, carriedTexts, eventText, carriedEnvelopes, envelope)
+      // completed/max_turns → completed；failed/aborted → failed（plan §5.5）。
+      const failed = result.outcome === 'failed' || result.outcome === 'aborted'
+      if (traceStarted) {
+        this.deps.traceWriter?.finishEpisode(episodeId, {
+          status: failed ? 'failed' : 'completed',
+          outcome: {
+            summary: `outcome=${result.outcome}; turns=${result.turns}; replied=${result.repliedToHuman ? 'yes' : 'no'}`,
+            ...(failed ? { error: `manager episode ${result.outcome}` } : {}),
+          },
+          ...(this.currentUsage.input_tokens > 0 || this.currentUsage.output_tokens > 0 ? { total_usage: { ...this.currentUsage } } : {}),
+        })
+      }
+      // P6-A §3.2：episode 被消费（含 F3 沉默终态）即结算未 claim 的 request IDs——
+      // 否则 wake 永不 settled，每次 Agent 重启都重放历史消息。已 claim 的由 delivery
+      // confirm 结算；失败（consumedEvents=false）的整批重投不结算。
+      if (result.consumedEvents && this.adminChatClaims.size > 0) {
+        const unsettled = Array.from(this.adminChatClaims.entries())
+          .filter(([, state]) => state === 'unclaimed')
+          .map(([id]) => id)
+        if (unsettled.length > 0) {
+          // 结算是 episode 收尾的一部分（await，避免挂起写与进程/测试清理竞争）；
+          // 但结算失败绝不能反过来把已成功的 episode 判失败——本地容错只记日志。
+          try {
+            await this.deps.onAdminChatWakeConsumed?.(unsettled)
+          } catch (error) {
+            console.warn('[ManagerLoop] admin chat wake settle failed:', error instanceof Error ? error.message : String(error))
+          }
+        }
+      }
+      return result
     } catch (err) {
       // runEpisodeBody 内部按 outcome 判定的失败分支(约 L232-249,LLM 报错被 engine 捕获为
       // outcome='failed'/'aborted' 后正常 return 的路径)已经在返回前自行完成了重投——那条路径
       // 不会走到这里。这里的 catch 专门兜"直接 throw、根本没走到 outcome 判定"的路径:
       // applyFold/Store I/O can throw before an EngineResult exists. Requeue the same
       // envelopes in their original order so retry cannot mint a new timestamp.
+      if (traceStarted) {
+        // 直接 throw 的失败路径：trace 收口 failed 后再按现有 mailbox 逻辑重投；
+        // trace 失败本身绝不能改变 consumedEvents（finish 是 best-effort，失败只 warn）。
+        this.deps.traceWriter?.finishEpisode(episodeId, {
+          status: 'failed',
+          outcome: { summary: '[episode threw]', error: err instanceof Error ? err.message : String(err) },
+        })
+      }
       this.mailbox.drainEnvelopes()
       for (const item of carriedEnvelopes) this.mailbox.push(item)
       if (envelope !== undefined) this.mailbox.push(envelope)
@@ -308,6 +465,9 @@ export class ManagerLoop {
     } finally {
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
+      this.currentTraceId = undefined
+      this.currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
+      this.attemptCounter = 0
     }
   }
 
@@ -333,7 +493,7 @@ export class ManagerLoop {
       estimateTokens: this.deps.estimateTokens,
     })
     if (wakeDecision.kind !== 'none') {
-      state = await this.applyFold(state, wakeDecision, adapter, model)
+      state = await this.applyFoldWithSpan(episodeId, state, wakeDecision, adapter, model)
     }
 
     const currentTailMessages: EngineMessage[] = [
@@ -345,7 +505,7 @@ export class ManagerLoop {
       ...currentTailMessages,
     ]
 
-    let attempt = await this.runAttempt(state, tailMessages, adapter, model)
+    let attempt = await this.runAttempt(episodeId, state, tailMessages, adapter, model)
     let totalTurnsUsed = attempt.result.totalTurns
     // 与 totalTurnsUsed 同一套累加纪律:兜底重试会整体丢弃首次尝试的 finalMessages,但首次
     // 尝试里已经发出去的话人类是真的收到了——只看重试那一份会把"说过话"错报成"没说过"。
@@ -366,7 +526,7 @@ export class ManagerLoop {
       // envelopes and mid-episode supplements are a protected tail (§14.4).
       const forceDecision = forceHotFold(state, this.deps.policy, this.deps.estimateTokens, nowMs)
       if (forceDecision.kind !== 'none') {
-        state = await this.applyFold(state, forceDecision, adapter, model)
+        state = await this.applyFoldWithSpan(episodeId, state, forceDecision, adapter, model)
         // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
         this.mailbox.drainEnvelopes()
         const retryTailMessages: EngineMessage[] = [
@@ -374,7 +534,7 @@ export class ManagerLoop {
           ...currentTailMessages,
           ...(this.currentEpisodeInjected?.map((item) => createUserMessage(this.renderEnvelope(item))) ?? []),
         ]
-        const retryAttempt = await this.runAttempt(state, retryTailMessages, adapter, model)
+        const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model)
         totalTurnsUsed += retryAttempt.result.totalTurns
         repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages)
         attempt = retryAttempt
@@ -429,6 +589,107 @@ export class ManagerLoop {
     return result
   }
 
+  /** engine onTurn → llm_call/tool_call span（截断摘要由 writer 侧统一脱敏落盘）。 */
+  private recordTurnSpans(episodeId: string, event: import('../engine/types.js').EngineTurnEvent): void {
+    const writer = this.deps.traceWriter
+    if (!writer || this.currentTraceId !== episodeId) return
+    const usage = event.usage
+    if (usage) {
+      this.currentUsage.input_tokens += usage.inputTokens ?? 0
+      this.currentUsage.output_tokens += usage.outputTokens ?? 0
+      this.currentUsage.cache_creation_tokens += usage.cacheCreationTokens ?? 0
+      this.currentUsage.cache_read_tokens += usage.cacheReadTokens ?? 0
+    }
+    const attemptTag = this.attemptCounter
+    const llmSpanId = `llm-${episodeId}-${attemptTag}-${event.turnNumber}`
+    const llmStarted = event.llmStartedAtMs !== undefined ? new Date(event.llmStartedAtMs).toISOString() : new Date().toISOString()
+    const llmEnded = event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined
+      ? new Date(event.llmStartedAtMs + event.llmCallMs).toISOString()
+      : undefined
+    writer.appendSpan(episodeId, {
+      span_id: llmSpanId,
+      parent_span_id: `root-${episodeId}`,
+      type: 'llm_call',
+      started_at: llmStarted,
+      ended_at: llmEnded,
+      duration_ms: event.llmCallMs,
+      status: 'completed',
+      details: {
+        turn: event.turnNumber,
+        stop_reason: event.stopReason,
+        ...(usage ? { usage } : {}),
+        ...(event.diagnostics ? {
+          retries: event.diagnostics.retries,
+          first_chunk_ms: event.diagnostics.firstChunkMs,
+          chunk_count: event.diagnostics.chunkCount,
+        } : {}),
+      },
+    })
+    for (const toolCall of event.toolCalls) {
+      const toolStarted = toolCall.startedAtMs !== undefined ? new Date(toolCall.startedAtMs).toISOString() : llmStarted
+      writer.appendSpan(episodeId, {
+        span_id: `tool-${episodeId}-${attemptTag}-${event.turnNumber}-${toolCall.id}`,
+        parent_span_id: llmSpanId,
+        type: 'tool_call',
+        started_at: toolStarted,
+        ended_at: toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined
+          ? new Date(toolCall.startedAtMs + toolCall.durationMs).toISOString()
+          : undefined,
+        duration_ms: toolCall.durationMs,
+        status: toolCall.isError ? 'failed' : 'completed',
+        details: {
+          name: toolCall.name,
+          input_summary: truncateForTrace(JSON.stringify(toolCall.input)),
+          output_summary: truncateForTrace(toolCall.output),
+        },
+      })
+    }
+  }
+
+  /** applyFold + context_assembly span：只记录计数/耗时/结果，不存摘要全文（§6.5）。 */
+  private async applyFoldWithSpan(
+    episodeId: string,
+    state: ManagerSessionState,
+    decision: Extract<CompactionDecision, { kind: 'fold_at_wake' | 'force_hot' }>,
+    adapter: LLMAdapter,
+    model: string,
+  ): Promise<ManagerSessionState> {
+    const writer = this.deps.traceWriter
+    const startedAt = new Date().toISOString()
+    try {
+      const next = await this.applyFold(state, decision, adapter, model)
+      if (writer && this.currentTraceId === episodeId) {
+        const endedAt = new Date().toISOString()
+        writer.appendSpan(episodeId, {
+          span_id: `fold-${episodeId}-${this.attemptCounter}-${decision.kind}`,
+          parent_span_id: `root-${episodeId}`,
+          type: 'context_assembly',
+          started_at: startedAt,
+          ended_at: endedAt,
+          duration_ms: new Date(endedAt).getTime() - new Date(startedAt).getTime(),
+          status: 'completed',
+          details: { kind: decision.kind, folded: decision.foldMessages.length, keep: decision.keep.length },
+        })
+      }
+      return next
+    } catch (error) {
+      if (writer && this.currentTraceId === episodeId) {
+        const endedAt = new Date().toISOString()
+        writer.appendSpan(episodeId, {
+          span_id: `fold-${episodeId}-${this.attemptCounter}-${decision.kind}`,
+          parent_span_id: `root-${episodeId}`,
+          type: 'context_assembly',
+          started_at: startedAt,
+          ended_at: endedAt,
+          duration_ms: new Date(endedAt).getTime() - new Date(startedAt).getTime(),
+          status: 'failed',
+          details: { kind: decision.kind, folded: decision.foldMessages.length, keep: decision.keep.length, error: error instanceof Error ? error.message : String(error) },
+        })
+      }
+      throw error
+    }
+  }
+
   /** 按 decision 折叠并立即落盘(唤醒边界折叠 / 强制 force_hot 折叠共用同一落盘逻辑)。
    *  adapter/model 由调用方(runEpisodeBody)按本次 episode 的快照传入,不在此处重新解析。 */
   private async applyFold(
@@ -465,11 +726,13 @@ export class ManagerLoop {
   /** 跑一次 runEngine(可能是首次尝试,也可能是 max_tokens 兜底的重试)。
    *  adapter/model 由调用方(runEpisodeBody)按本次 episode 的快照传入,不在此处重新解析。 */
   private async runAttempt(
+    episodeId: string,
     state: ManagerSessionState,
     tailMessages: ReadonlyArray<EngineMessage>,
     adapter: LLMAdapter,
     model: string,
   ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean }> {
+    this.attemptCounter += 1
     const hasSummaryMarker = state.rollingSummary !== undefined
     const initialMessages: EngineMessage[] = hasSummaryMarker
       ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
@@ -502,6 +765,9 @@ export class ManagerLoop {
       // (纪律写在 manager system prompt 的收尾责任段里),不需要 engine 在运行时替它决定。
       // 静默 end_turn 对 manager 是完全正常的完成态(比如这次唤醒只是派活或只读检查)。
       suppressForcedSummary: () => true,
+      // P6-A §6.4：onTurn 是事后观察钩子，用它生成 llm_call/tool_call span；
+      // 不复制执行语义、不新增第二个 query loop。
+      onTurn: (event) => this.recordTurnSpans(episodeId, event),
     }
 
     const result = await runEngine({
@@ -517,6 +783,37 @@ export class ManagerLoop {
 }
 
 // --- Helpers ---
+
+/** span detail 摘要截断（完整脱敏由 writer 侧 redactSecrets 负责）。 */
+function truncateForTrace(text: string, max = 300): string {
+  return text.length > max ? text.slice(0, max) + '…' : text
+}
+
+/**
+ * 唤醒事件 → trace trigger（脱敏摘要；不复制完整人类正文/terminal output/tool secret）。
+ * `mergedCount` 是本次 episode 合并的 envelope 总数（首个/合并 envelope 触发时传入）。
+ */
+function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, mergedCount: number): ManagerEpisodeTrigger {
+  const mergedNote = mergedCount > 1 ? `（合并 ${mergedCount} 个唤醒）` : ''
+  const wake = envelope?.wake
+  if (!wake) return { type: 'human_message', summary: `mailbox 残留自唤醒${mergedNote}` }
+  switch (wake.kind) {
+    case 'human_messages':
+      return { type: 'human_message', summary: `人类消息 x${wake.messages.length}${mergedNote}`, source: wake.friend ? `friend:${wake.friend.id}` : undefined }
+    case 'attention_flush':
+      return { type: 'attention_flush', summary: `群聊注意力放行 x${wake.messages.length}${mergedNote}` }
+    case 'schedule':
+      return { type: 'schedule', summary: `定时任务:${wake.title}${mergedNote}`, source: `schedule:${wake.scheduleId}` }
+    case 'worker_event':
+      return { type: 'worker_event', summary: `worker 事件:${wake.event.kind} (${wake.event.worker_id})${mergedNote}`, source: `worker:${wake.event.worker_id}` }
+    case 'media_notification':
+      return { type: 'worker_event', summary: `媒体下载完成${mergedNote}` }
+    default: {
+      const exhaustive: never = wake
+      return { type: 'human_message', summary: `未知唤醒 ${String((exhaustive as { kind?: string }).kind)}${mergedNote}` }
+    }
+  }
+}
 
 /**
  * "跟人说话"的工具名集合(`EpisodeResult.repliedToHuman` 的判据)。

@@ -8,6 +8,16 @@ import * as fs from 'fs'
 import * as path from 'path'
 import type { AgentTrace, AgentSpan, AgentSpanType, AgentSpanDetails, TokenUsage } from '../types.js'
 import { aggregateUsage } from './trace-usage.js'
+import {
+  isValidManagerEpisodeTrace,
+  parseTraceRecordLine,
+  wrapManagerEpisodeRecord,
+  type ManagerEpisodeSpan,
+  type ManagerEpisodeTrace,
+  type ManagerEpisodeTrigger,
+  type ManagerEpisodeUsage,
+} from '../manager/trace-types.js'
+import type { ManagerKey } from '../workers/harness/ledger-types.js'
 
 export interface SpanWithMeta {
   span_id: string
@@ -65,6 +75,25 @@ export class TraceStore {
   private persistDir: string | undefined
   private traceIndex: TraceIndexEntry[] = []
   private taskIndex: Map<string, string[]> = new Map()
+
+  // ── Manager episode traces（protocol-agent-v3 §8.4）────────────────
+  // 与 legacy AgentTrace 完全分离：独立 in-memory map + per-manager 索引；
+  // 持久化行带 kind discriminator（无 kind 的历史行仍按 legacy 读取）；
+  // 不进入 legacy taskIndex/TraceTree，legacy search/getFullTrace 不可见。
+  private managerEpisodes: Map<string, ManagerEpisodeTrace> = new Map()
+  /** running episode 集合：15s flush 只扫这里，不再全量遍历历史。 */
+  private runningManagerEpisodeIds: Set<string> = new Set()
+  /** 已收口 episode 的内存驻留顺序（LRU 驱逐依据）。 */
+  private finishedManagerEpisodeOrder: string[] = []
+  /** 全量 episode 的轻量日期索引（trace_id → started 日期）：cleanup 按日期文件删除时
+   *  即使正文已被驱逐出内存也能正确清 index——每条只有几十字节。 */
+  private managerEpisodeDates: Map<string, string> = new Map()
+  /** 内存中保留的已收口 episode 上限：超出后最老的被驱逐（磁盘归档仍在，
+   *  managerIndex/count 不受影响；list 只覆盖驻留窗口——与 legacy 的
+   *  索引/正文分离同思路的简化版）。 */
+  private static readonly MAX_FINISHED_MANAGER_EPISODES = 1000
+  private managerIndex: Map<string, string[]> = new Map()
+  private managerBadRecordCount = 0
 
   // ── In-flight 定时持久化 ────────────────────────────────
   // status='running' 的 trace 只在 endTrace 时才追加到按日期切片的 archive 文件。
@@ -317,6 +346,12 @@ export class TraceStore {
         lines.push(JSON.stringify(trace))
       }
     }
+    for (const id of this.runningManagerEpisodeIds) {
+      const episode = this.managerEpisodes.get(id)
+      if (episode && episode.status === 'running') {
+        lines.push(JSON.stringify(wrapManagerEpisodeRecord(episode)))
+      }
+    }
     const content = lines.length > 0 ? lines.join('\n') + '\n' : ''
     const finalPath = path.join(this.persistDir, this.runningFlushFile)
     const tmpPath = finalPath + '.tmp'
@@ -343,8 +378,21 @@ export class TraceStore {
       const content = fs.readFileSync(filePath, 'utf-8')
       for (const line of content.split('\n')) {
         if (!line.trim()) continue
-        try {
-          const trace = JSON.parse(line) as AgentTrace
+        const record = parseTraceRecordLine(line)
+        if (record && record.kind === 'manager_episode') {
+          // manager episode 以 running 形态载入；收口由 reconcileInterruptedManagerEpisodes
+          // 在开放 read model 前统一执行（不在加载路径上直接判 failed）。
+          // running flush 是 span 增量的最新载体（归档只在 start/finish 落行）：
+          // 归档版仍是 running 且 running 文件版 span 更多时，以后者为准。
+          const existing = this.managerEpisodes.get(record.trace.trace_id)
+          if (!existing || (existing.status === 'running' && record.trace.spans.length >= existing.spans.length)) {
+            this.loadManagerEpisode(record.trace)
+          }
+          continue
+        }
+        if (record && record.kind === 'legacy_agent_trace') {
+          try {
+          const trace = record.trace as AgentTrace
           // 已经 endTrace 过的（rebuildIndex 已读到）跳过
           if (this.traceIndex.some(e => e.trace_id === trace.trace_id)) continue
           // 正在等 resume 裁决的 worker trace 跳过（见上方注释）
@@ -361,7 +409,8 @@ export class TraceStore {
           }
           this.traces.set(trace.trace_id, trace)
           this.persistTrace(trace)
-        } catch { /* skip malformed */ }
+          } catch { /* skip malformed */ }
+        }
       }
       // 清空 running 文件——这些 trace 已落到日期文件
       fs.writeFileSync(filePath, '', 'utf-8')
@@ -387,8 +436,27 @@ export class TraceStore {
         for (const line of content.split('\n')) {
           const lineBytes = Buffer.byteLength(line + '\n', 'utf-8')
           if (!line.trim()) { offset += lineBytes; continue }
+          const record = parseTraceRecordLine(line)
+          if (record === null) {
+            if (line.includes('"kind"')) {
+              // 带 kind 但解析失败：新格式 record 坏行隔离并报告，不拖垮 legacy index。
+              this.managerBadRecordCount += 1
+              if (this.managerBadRecordCount <= 5 || this.managerBadRecordCount % 100 === 0) {
+                console.warn(`[TraceStore] skipped malformed trace record (count=${this.managerBadRecordCount}) in ${file}`)
+              }
+            }
+            offset += lineBytes
+            continue
+          }
+          if (record.kind === 'manager_episode') {
+            this.loadManagerEpisode(record.trace)
+            offset += lineBytes
+            continue
+          }
+          // legacy 行逐条隔离：schema 漂移（如有 trace_id 但缺 trigger 的历史行）
+          // 不得拖垮本文件剩余行与后续归档文件的索引（与 loadRunningTraces 同等级容错）。
           try {
-            const trace = JSON.parse(line) as AgentTrace
+            const trace = record.trace as AgentTrace
             const entry = this.traceToIndexEntry(trace, file, offset)
             // 同一 trace_id 可能多次写入（endTrace + appendTraceOutcome），保留最新 offset
             const existingIdx = this.traceIndex.findIndex(e => e.trace_id === trace.trace_id)
@@ -400,11 +468,20 @@ export class TraceStore {
             if (trace.related_task_id) {
               this.addToTaskIndex(trace.related_task_id, trace.trace_id)
             }
-          } catch { /* skip malformed lines */ }
+          } catch (lineError) {
+            this.managerBadRecordCount += 1
+            if (this.managerBadRecordCount <= 5 || this.managerBadRecordCount % 100 === 0) {
+              console.warn(`[TraceStore] skipped malformed legacy trace (count=${this.managerBadRecordCount}) in ${file}:`,
+                lineError instanceof Error ? lineError.message : String(lineError))
+            }
+          }
           offset += lineBytes
         }
       }
-    } catch { /* persist dir read failure */ }
+    } catch (outerError) {
+      console.warn(`[TraceStore] rebuildIndex aborted:`,
+        outerError instanceof Error ? outerError.message : String(outerError))
+    }
   }
 
   searchTraces(params: {
@@ -911,10 +988,8 @@ export class TraceStore {
         const ids: string[] = []
         for (const line of content.split('\n')) {
           if (!line.trim()) continue
-          try {
-            const trace = JSON.parse(line) as { trace_id?: string }
-            if (trace.trace_id) ids.push(trace.trace_id)
-          } catch { /* skip malformed */ }
+          const record = parseTraceRecordLine(line)
+          if (record && record.trace.trace_id) ids.push(record.trace.trace_id)
         }
         affectedTraces += ids.length
         if (!dryRun) {
@@ -927,6 +1002,7 @@ export class TraceStore {
           try {
             fs.unlinkSync(path.join(this.persistDir, file))
             this.traceIndex = this.traceIndex.filter(e => e.file !== file)
+            this.dropManagerEpisodesForDeletedFile(file)
           } catch (err) {
             console.warn(`[TraceStore] cleanupTracesBeforeDate delete failed for ${file}:`, err instanceof Error ? err.message : err)
           }
@@ -1042,6 +1118,305 @@ export class TraceStore {
       // persist failure must not affect main flow
       const msg = err instanceof Error ? err.message : String(err)
       console.warn(`[TraceStore] persistTrace failed for ${trace.trace_id}: ${msg}`)
+    }
+  }
+
+  // ==========================================================================
+  // Manager episode traces（protocol-agent-v3 §8.4）
+  // ==========================================================================
+
+  private addToManagerIndex(managerKey: string, traceId: string): void {
+    const existing = this.managerIndex.get(managerKey) ?? []
+    if (!existing.includes(traceId)) {
+      this.managerIndex.set(managerKey, [...existing, traceId])
+    }
+  }
+
+  /** 加载/覆盖一条 manager record（rebuildIndex / loadRunningTraces 共用；同 id 后写覆盖先写）。 */
+  private loadManagerEpisode(episode: ManagerEpisodeTrace): void {
+    if (!isValidManagerEpisodeTrace(episode)) {
+      this.managerBadRecordCount += 1
+      console.warn(`[TraceStore] invalid manager episode record dropped (trace_id=${String((episode as { trace_id?: unknown }).trace_id)})`)
+      return
+    }
+    const previous = this.managerEpisodes.get(episode.trace_id)
+    if (previous && previous.manager_key !== episode.manager_key) {
+      // manager_key 不一致：fail loud 隔离，不猜归属（plan §7.1 的 key 不一致语义）。
+      console.warn(`[TraceStore] manager episode ${episode.trace_id} manager_key changed (${previous.manager_key} -> ${episode.manager_key}); record dropped`)
+      this.managerBadRecordCount += 1
+      return
+    }
+    this.managerEpisodes.set(episode.trace_id, episode)
+    this.managerEpisodeDates.set(episode.trace_id, episode.started_at.slice(0, 10))
+    if (episode.status === 'running') {
+      this.runningManagerEpisodeIds.add(episode.trace_id)
+    } else {
+      this.runningManagerEpisodeIds.delete(episode.trace_id)
+      this.trackFinishedManagerEpisode(episode.trace_id)
+    }
+    this.addToManagerIndex(episode.manager_key, episode.trace_id)
+  }
+
+  /** 已收口 episode 进入驻留顺序；超出上限时驱逐最老的（仅内存，磁盘/索引不动）。 */
+  private trackFinishedManagerEpisode(traceId: string): void {
+    const existingIdx = this.finishedManagerEpisodeOrder.indexOf(traceId)
+    if (existingIdx !== -1) this.finishedManagerEpisodeOrder.splice(existingIdx, 1)
+    this.finishedManagerEpisodeOrder.push(traceId)
+    while (this.finishedManagerEpisodeOrder.length > TraceStore.MAX_FINISHED_MANAGER_EPISODES) {
+      const evictId = this.finishedManagerEpisodeOrder.shift()!
+      this.managerEpisodes.delete(evictId)
+    }
+  }
+
+  private persistManagerEpisode(episode: ManagerEpisodeTrace, strict: boolean, deferred = false): void {
+    if (!this.persistDir) return
+    // deferred=true（span/worker 增量）：纯内存更新，不写盘——15s flush 定时器已覆盖
+    // in-flight 快照，归档只在 start/finish 各落一行。每个 span 都同步写盘会把 manager
+    // loop 的热路径压在阻塞 I/O 上，且等于把 O(n²) 搬到另一个文件。
+    if (deferred) return
+    try {
+      const date = episode.started_at.slice(0, 10)
+      const file = `${this.archiveFilePrefix}${date}.jsonl`
+      const filePath = path.join(this.persistDir, file)
+      fs.appendFileSync(filePath, JSON.stringify(wrapManagerEpisodeRecord(episode)) + '\n', 'utf-8')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (strict) throw new Error(`[TraceStore] manager episode persistence failed for ${episode.trace_id}: ${msg}`)
+      console.warn(`[TraceStore] persistManagerEpisode failed for ${episode.trace_id}: ${msg}`)
+    }
+  }
+
+  /**
+   * 创建 running manager episode 并同步持久化。这是 episode admission：
+   * 持久化失败必须 throw——调用方（ManagerLoop）不得继续调用 LLM/tool，
+   * 原 wake 保持未结算走失败重投语义。
+   */
+  startManagerEpisode(traceId: string, managerKey: ManagerKey, trigger: ManagerEpisodeTrigger): void {
+    if (this.managerEpisodes.has(traceId)) throw new Error(`[TraceStore] duplicate manager episode ${traceId}`)
+    const episode: ManagerEpisodeTrace = {
+      trace_id: traceId,
+      manager_key: managerKey,
+      started_at: new Date().toISOString(),
+      status: 'running',
+      trigger,
+      spans: [],
+      spawned_worker_ids: [],
+    }
+    // 先落盘成功才进内存索引（严格路径），保证「disk 可枚举」这一协议不变量。
+    this.persistManagerEpisode(episode, true)
+    this.managerEpisodes.set(traceId, episode)
+    this.managerEpisodeDates.set(traceId, episode.started_at.slice(0, 10))
+    this.runningManagerEpisodeIds.add(traceId)
+    this.addToManagerIndex(managerKey, traceId)
+  }
+
+  appendManagerSpan(traceId: string, span: ManagerEpisodeSpan): void {
+    const episode = this.managerEpisodes.get(traceId)
+    if (!episode) return
+    episode.spans.push(span)
+    // span 级变更不整份重写归档（否则单 episode 落盘量随 span 数 O(n²)）：
+    // running flush 每 15s 全量覆盖 running 文件兜底崩溃现场；start/finish 各落一行。
+    this.persistManagerEpisode(episode, false, true)
+  }
+
+  finishManagerSpan(traceId: string, spanId: string, patch: { status: 'completed' | 'failed'; ended_at?: string; details?: unknown }): void {
+    const episode = this.managerEpisodes.get(traceId)
+    if (!episode) return
+    const span = episode.spans.find((item) => item.span_id === spanId)
+    if (!span || span.status !== 'running') return
+    const endedAt = patch.ended_at ?? new Date().toISOString()
+    span.status = patch.status
+    span.ended_at = endedAt
+    span.duration_ms = new Date(endedAt).getTime() - new Date(span.started_at).getTime()
+    if (patch.details !== undefined) span.details = patch.details
+    this.persistManagerEpisode(episode, false, true)
+  }
+
+  addSpawnedWorkerToManagerEpisode(traceId: string, workerId: string): void {
+    const episode = this.managerEpisodes.get(traceId)
+    if (!episode) return
+    if (!episode.spawned_worker_ids.includes(workerId)) {
+      episode.spawned_worker_ids.push(workerId)
+      this.persistManagerEpisode(episode, false, true)
+    }
+  }
+
+  /**
+   * 原子收口 episode：ended_at/duration/status/outcome/usage/spawned 一次写入。
+   * 同一 trace 只收口一次（重复调用幂等 no-op）。span/finish 写失败不影响业务，
+   * 只记脱敏诊断（persistManagerEpisode strict=false 已 warn）。
+   */
+  finishManagerEpisode(
+    traceId: string,
+    patch: { status: 'completed' | 'failed'; outcome?: { summary: string; error?: string }; total_usage?: ManagerEpisodeUsage },
+  ): void {
+    const episode = this.managerEpisodes.get(traceId)
+    if (!episode || episode.status !== 'running') return
+    const endedAt = new Date().toISOString()
+    episode.status = patch.status
+    episode.ended_at = endedAt
+    episode.duration_ms = new Date(endedAt).getTime() - new Date(episode.started_at).getTime()
+    if (patch.outcome) episode.outcome = patch.outcome
+    if (patch.total_usage) episode.total_usage = patch.total_usage
+    // 收尾时把遗留 running span 一并收口，避免永久 running 的僵尸 span。
+    for (const span of episode.spans) {
+      if (span.status === 'running') {
+        span.status = patch.status
+        span.ended_at = endedAt
+        span.duration_ms = new Date(endedAt).getTime() - new Date(span.started_at).getTime()
+      }
+    }
+    this.persistManagerEpisode(episode, false)
+    this.runningManagerEpisodeIds.delete(traceId)
+    this.trackFinishedManagerEpisode(traceId)
+  }
+
+  getManagerEpisode(traceId: string): ManagerEpisodeTrace | undefined {
+    return this.managerEpisodes.get(traceId)
+  }
+
+  listManagerEpisodes(managerKey: ManagerKey, pagination?: { page?: number; page_size?: number }): {
+    items: ManagerEpisodeTrace[]
+    pagination: { page: number; page_size: number; total_items: number; total_pages: number }
+  } {
+    const ids = this.managerIndex.get(managerKey) ?? []
+    const matched = ids
+      .map((id) => this.managerEpisodes.get(id))
+      .filter((episode): episode is ManagerEpisodeTrace => episode !== undefined)
+      .sort((left, right) => {
+        const byStartedDesc = right.started_at.localeCompare(left.started_at)
+        if (byStartedDesc !== 0) return byStartedDesc
+        return left.trace_id.localeCompare(right.trace_id)
+      })
+    const normalizePositive = (value: number | undefined, fallback: number): number => {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) return fallback
+      return Math.floor(value)
+    }
+    const page = normalizePositive(pagination?.page, 1)
+    const pageSize = Math.min(normalizePositive(pagination?.page_size, 20), 100)
+    const totalItems = matched.length
+    const offset = (page - 1) * pageSize
+    return {
+      items: matched.slice(offset, offset + pageSize),
+      pagination: {
+        page,
+        page_size: pageSize,
+        total_items: totalItems,
+        total_pages: Math.ceil(totalItems / pageSize),
+      },
+    }
+  }
+
+  countManagerEpisodes(managerKey: ManagerKey): number {
+    return this.managerIndex.get(managerKey)?.length ?? 0
+  }
+
+  /** TraceStore 中已验证的 manager keys（与 disk session keys 的 union 由 read model 侧完成）。 */
+  listTraceManagerKeys(): ManagerKey[] {
+    return Array.from(this.managerIndex.keys()) as ManagerKey[]
+  }
+
+  /**
+   * 启动收口：遗留 running episode 标 failed（outcome 写明 interrupted），保留 spans。
+   * 必须在开放 Manager read model 前调用（UnifiedAgent.onStart）。
+   */
+  reconcileInterruptedManagerEpisodes(): void {
+    for (const id of [...this.runningManagerEpisodeIds]) {
+      const episode = this.managerEpisodes.get(id)
+      if (!episode || episode.status !== 'running') {
+        this.runningManagerEpisodeIds.delete(id)
+        continue
+      }
+      const endedAt = new Date().toISOString()
+      episode.status = 'failed'
+      episode.ended_at = endedAt
+      episode.duration_ms = new Date(endedAt).getTime() - new Date(episode.started_at).getTime()
+      episode.outcome = { summary: '[interrupted: agent restarted]' }
+      for (const span of episode.spans) {
+        if (span.status === 'running') {
+          span.status = 'failed'
+          span.ended_at = endedAt
+          span.duration_ms = new Date(endedAt).getTime() - new Date(span.started_at).getTime()
+        }
+      }
+      this.persistManagerEpisode(episode, false)
+      this.runningManagerEpisodeIds.delete(id)
+      this.trackFinishedManagerEpisode(id)
+    }
+  }
+
+  getManagerBadRecordCount(): number {
+    return this.managerBadRecordCount
+  }
+
+  /**
+   * P6-A：窄 trace writer 适配器（ManagerTraceWriter）。所有写盘前的脱敏都在这里收口：
+   * redact 由调用方按 knownSecrets 注入（`redactSecrets(text, [...knownSecrets])`）。
+   */
+  managerTraceWriter(redact: (text: string) => string): import('../manager/trace-types.js').ManagerTraceWriter {
+    const redactDetails = (details: unknown): unknown => {
+      if (details === undefined) return undefined
+      try { return JSON.parse(redact(JSON.stringify(details))) } catch { return '[unserializable details removed]' }
+    }
+    const redactTrigger = (trigger: ManagerEpisodeTrigger): ManagerEpisodeTrigger => ({
+      ...trigger,
+      summary: redact(trigger.summary),
+      ...(trigger.source ? { source: redact(trigger.source) } : {}),
+    })
+    return {
+      startEpisode: (traceId, managerKey, trigger) => this.startManagerEpisode(traceId, managerKey, redactTrigger(trigger)),
+      appendSpan: (traceId, span) => this.appendManagerSpan(traceId, { ...span, details: redactDetails(span.details) }),
+      finishSpan: (traceId, spanId, patch) => this.finishManagerSpan(traceId, spanId, {
+        ...patch,
+        details: patch.details !== undefined ? redactDetails(patch.details) : undefined,
+      }),
+      finishEpisode: (traceId, patch) => this.finishManagerEpisode(traceId, {
+        ...patch,
+        ...(patch.outcome ? {
+          outcome: {
+            summary: redact(patch.outcome.summary),
+            ...(patch.outcome.error ? { error: redact(patch.outcome.error) } : {}),
+          },
+        } : {}),
+      }),
+      addSpawnedWorker: (traceId, workerId) => this.addSpawnedWorkerToManagerEpisode(traceId, workerId),
+    }
+  }
+
+  /** cleanupTracesBeforeDate 删除文件后同步剔除 manager 内存条目。 */
+  private dropManagerEpisodesForDeletedFile(file: string): void {
+    const dateMatch = /(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(file)
+    if (!dateMatch) return
+    const date = dateMatch[1]
+    // 走轻量日期索引而不是内存正文：被驱逐的 episode 也要从 managerIndex 清掉。
+    const dropIds: string[] = []
+    for (const [id, episodeDate] of this.managerEpisodeDates) {
+      if (episodeDate === date) dropIds.push(id)
+    }
+    for (const id of dropIds) {
+      const episode = this.managerEpisodes.get(id)
+      this.managerEpisodeDates.delete(id)
+      this.runningManagerEpisodeIds.delete(id)
+      const finishedIdx = this.finishedManagerEpisodeOrder.indexOf(id)
+      if (finishedIdx !== -1) this.finishedManagerEpisodeOrder.splice(finishedIdx, 1)
+      this.managerEpisodes.delete(id)
+      if (!episode) {
+        // 正文已驱逐：manager_key 只能从 index 反查——遍历清 id。
+        for (const [key, list] of Array.from(this.managerIndex.entries())) {
+          const filtered = list.filter((item) => item !== id)
+          if (filtered.length !== list.length) {
+            if (filtered.length > 0) this.managerIndex.set(key, filtered)
+            else this.managerIndex.delete(key)
+          }
+        }
+        continue
+      }
+      const list = this.managerIndex.get(episode.manager_key)
+      if (list) {
+        const filtered = list.filter((item) => item !== id)
+        if (filtered.length > 0) this.managerIndex.set(episode.manager_key, filtered)
+        else this.managerIndex.delete(episode.manager_key)
+      }
     }
   }
 }

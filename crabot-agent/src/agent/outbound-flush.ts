@@ -110,6 +110,20 @@ export type OnDispatchedHook = (entry: OutboundBufferEntry, sendResult: Outbound
  *
  * sendResult 返回与 channel 'send_message' RPC 返回一致；调用方按需消费。
  */
+/**
+ * P6-A §11.5-9：Admin Chat 出站 delivery 事务钩子。仅当目标是 exact
+ * `admin-web::admin-chat` 时才调用；其它 channel/session 一律不携带 delivery
+ * metadata（crab-messaging 层不注入即剥离）。
+ */
+export interface AdminChatDeliveryHooks {
+  /** 首次 RPC 之前调用：生成 delivery_id + claim 的 request IDs 并把 prepared 记录落盘。 */
+  prepare(entry: OutboundBufferEntry, content: MessageContent): Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined>
+  /** Admin 确认 commit 后：delivery → confirmed、request claim settled、wake 结算、staging 清理。 */
+  confirm(deliveryId: string, result: OutboundSendResult): Promise<void>
+  /** RPC 失败/结果未知：delivery 保持可重试（不标 confirmed）。 */
+  fail(deliveryId: string, error: unknown): Promise<void>
+}
+
 export interface OutboundDispatchDeps {
   readonly rpcClient: RpcClient
   readonly moduleId: string
@@ -117,6 +131,7 @@ export interface OutboundDispatchDeps {
   readonly getAdminPort: () => Promise<number>
   readonly sandboxPathMappingsRef?: { current: PathMapping[] }
   readonly onDispatched?: OnDispatchedHook
+  readonly adminChatDelivery?: AdminChatDeliveryHooks
 }
 
 export interface OutboundSendResult {
@@ -248,6 +263,23 @@ async function resolvePlatformMentions(
  *
  * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5
  */
+// 同一 tool invocation 的 delivery prepare 只跑一次（entry 对象在重试间共享）。
+const preparedDeliveries = new WeakMap<OutboundBufferEntry, Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined>>()
+
+function prepareDeliveryOnce(
+  entry: OutboundBufferEntry,
+  content: MessageContent,
+  hooks: AdminChatDeliveryHooks,
+): Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined> {
+  const existing = preparedDeliveries.get(entry)
+  if (existing) return existing
+  const prepared = hooks.prepare(entry, content)
+  preparedDeliveries.set(entry, prepared)
+  // prepare 失败（如 staging 写盘）时清缓存：让 withRetry 的后续 attempt 真正重试 prepare。
+  prepared.catch(() => { preparedDeliveries.delete(entry) })
+  return prepared
+}
+
 export async function dispatchOutboundMessage(
   entry: OutboundBufferEntry,
   deps: OutboundDispatchDeps,
@@ -265,32 +297,51 @@ export async function dispatchOutboundMessage(
     (platformMentions !== undefined && platformMentions.length > 0)
     || entry.quote_message_id !== undefined
 
-  const sendResult = await deps.rpcClient.call<
-    {
-      session_id: string
-      content: MessageContent
-      features?: {
-        mentions?: PlatformMention[]
-        quote_message_id?: string
-      }
-    },
-    OutboundSendResult
-  >(channelPort, 'send_message', {
-    session_id: entry.session_id,
-    content: messageContent,
-    ...(hasFeatures
-      ? {
-        features: {
-          ...(platformMentions !== undefined && platformMentions.length > 0
-            ? { mentions: platformMentions }
-            : {}),
-          ...(entry.quote_message_id !== undefined
-            ? { quote_message_id: entry.quote_message_id }
-            : {}),
-        },
-      }
-      : {}),
-  }, deps.moduleId)
+  // P6-A §11.7：admin-chat 目标先落 prepared delivery（delivery_id + claim 的 request IDs），
+  // 再做首次 RPC。crab-messaging 的 withRetry 会整段重跑 dispatch——同一 tool invocation 的
+  // 所有 attempt 共享同一个 dispatchEntry 对象，prepare 因此按 entry 记忆化：重试复用同一
+  // delivery_id/request 集合/payload（§11.7），不会每 attempt 新造 delivery + 空 claim。
+  const delivery = entry.channel_id === 'admin-web' && entry.session_id === 'admin-chat' && deps.adminChatDelivery
+    ? await prepareDeliveryOnce(entry, messageContent, deps.adminChatDelivery)
+    : undefined
+
+  let sendResult: OutboundSendResult
+  try {
+    sendResult = await deps.rpcClient.call<
+      {
+        session_id: string
+        content: MessageContent
+        delivery_id?: string
+        request_ids?: string[]
+        features?: {
+          mentions?: PlatformMention[]
+          quote_message_id?: string
+        }
+      },
+      OutboundSendResult
+    >(channelPort, 'send_message', {
+      session_id: entry.session_id,
+      // 与 prepare 落盘的 payload 同源（staged attachment 引用）——payload_sha256 校验依赖。
+      content: delivery ? delivery.content : messageContent,
+      ...(delivery ? { delivery_id: delivery.delivery_id, request_ids: delivery.request_ids } : {}),
+      ...(hasFeatures
+        ? {
+          features: {
+            ...(platformMentions !== undefined && platformMentions.length > 0
+              ? { mentions: platformMentions }
+              : {}),
+            ...(entry.quote_message_id !== undefined
+              ? { quote_message_id: entry.quote_message_id }
+              : {}),
+          },
+        }
+        : {}),
+    }, deps.moduleId)
+  } catch (error) {
+    if (delivery) await deps.adminChatDelivery!.fail(delivery.delivery_id, error)
+    throw error
+  }
+  if (delivery) await deps.adminChatDelivery!.confirm(delivery.delivery_id, sendResult)
 
   // <-- HOOK POINT (spec §4.13.6 Invariant #1: success 路径触发；Invariant #2: 抛错路径上方 await 已throw，不到此处) -->
   // 钩子内任何 throw 都被 catch 后 console.warn，避免污染 dispatch 返回 / 影响 caller。

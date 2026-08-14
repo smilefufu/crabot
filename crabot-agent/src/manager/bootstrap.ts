@@ -94,6 +94,8 @@ export const DEFAULT_MANAGER_COMPACTION_POLICY: CompactionPolicy = {
 
 export interface ManagerStack {
   readonly ledger: LedgerStore
+  /** Manager session 持久化（P6-A 读模型用：disk session keys 枚举）。 */
+  readonly store: ManagerSessionStore
   readonly workspaces: WorkspaceManager
   readonly harness: WorkerHarness
   readonly registry: ManagerRegistry
@@ -168,6 +170,15 @@ export interface BootstrapDeps {
    * 只维护台账、不对外发事件。
    */
   readonly publishEvent?: AgentEventPublisher
+  /** P6-A：Manager episode trace writer（窄接口）；缺省时整个 trace 面静默关闭。 */
+  readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
+  /** P6-A §8.4：builtin worker 结构化 trace 写钩子/读入口（TraceStore 窄口）。 */
+  readonly builtinTraceHooks?: import('../workers/builtin/adapter.js').BuiltinTraceHooks
+  readonly builtinTraceReader?: import('../workers/builtin/adapter.js').BuiltinTraceReader
+  /** P6-A §8.10：化身终态收割钩子（harness fire-and-forget；装配层做最后一次 native read）。 */
+  readonly onIncarnationTerminal?: (handle: import('../workers/types.js').IncarnationHandle) => void
+  /** P6-A §3.2：episode 消费后结算未 claim 的 Admin Chat request IDs（写 correlation store）。 */
+  readonly onAdminChatWakeConsumed?: (key: import('../workers/harness/ledger-types.js').ManagerKey, requestIds: string[]) => void
   /**
    * fail-loud 兜底出口:worker 事件唤醒的 manager episode 失败时,直接告诉人类一声。
    * 接线范式与上面的 `publishEvent` 完全一致(可选;不注入则这条路保持"只记日志"的既有行为)。
@@ -302,6 +313,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     workspaces,
     workersDir: join(agentDir, 'workers'),
     now: deps.now,
+    // P6-A §8.10：化身终态时主动收割一次 native trace（最后一次 read → Agent-owned copy）。
+    onIncarnationTerminal: deps.onIncarnationTerminal,
     // harness 事件 → 该 worker 的监护 manager(§4.4)。过滤复用 P4 的
     // `shouldWakeOnHarnessEvent`(input_sent 不唤醒:manager 发起 send_to_worker 时已在同一次
     // 工具调用里同步拿到结果)。
@@ -366,6 +379,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       dataDir: builtinDataDir,
       onStateChange: harness.handleStateChange,
       resolveRuntime: deps.builtinSpawnDefaults,
+      traceHooks: deps.builtinTraceHooks,
+      traceReader: deps.builtinTraceReader,
     }),
   )
   adapters.set(
@@ -385,8 +400,11 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   // 发起人身份:唤醒边界异步解析一次,三个同步 thunk 读缓存(见 principal.ts 文件头)。
   const principals = new ManagerPrincipalStore(deps.principalResolver, principalBindings, () => new Date(deps.now()))
 
+  const sessionStore = new ManagerSessionStore(join(agentDir, 'managers'))
   registry = new ManagerRegistry({
-    store: new ManagerSessionStore(join(agentDir, 'managers')),
+    traceWriter: deps.traceWriter,
+    onAdminChatWakeConsumed: deps.onAdminChatWakeConsumed,
+    store: sessionStore,
     policy: DEFAULT_MANAGER_COMPACTION_POLICY,
     estimateTokens: (msgs) => tokenEstimator.estimateTotalTokens(msgs),
     harness,
@@ -423,7 +441,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         sessionId,
       )
     },
-    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity, humanPrincipal, principalPermissions) => {
+    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity, humanPrincipal, principalPermissions, traceHooks) => {
       // Capture at tool-face construction. Calling the resulting factory later must not
       // pick up a regrant/new generation from a subsequent wake.
       const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
@@ -431,6 +449,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         harness,
         workerContext: () => ({
           managerKey: key,
+          // P6-A §6.6：当前 episode trace id 由 registry 桥惰性读取（tool call 发生时才取），
+          // spawn 成功后经 onWorkerSpawned 回写同一 trace 的 spawned_worker_ids。
+          episodeId: traceHooks?.currentTraceId(),
+          onWorkerSpawned: traceHooks?.onWorkerSpawned,
           reportTo: channelSessionFromManagerKey(key),
           // 权限身份(§4.4"权限按 Schedule.creator_friend_id 解析(is_builtin 按 master
           // 等价)"):内置 schedule 不以任何 friend 的名义执行,显式留空——空 creator 正是
@@ -482,7 +504,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     },
   })
 
-  return { ledger, workspaces, harness, registry, adapters, principals, principalBindings, builtinDataDir }
+  return { ledger, workspaces, harness, registry, adapters, principals, principalBindings, builtinDataDir, store: sessionStore }
 }
 
 /**

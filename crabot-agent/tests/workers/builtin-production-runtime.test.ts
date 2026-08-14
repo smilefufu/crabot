@@ -763,5 +763,15 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
     expect(w.task.status).toBe('failed')
     expect(w.incarnations[0].ended_reason).toBe('failed')
+    // P6-A：episode admission 会在 wake 起点就建 manager 目录/最小 identity，
+    // 失败路径也有异步 wake 在飞——等它落定，避免与 afterEach 的目录清理竞争。
+    await waitUntil(async () => {
+      const dir = join(process.env.DATA_DIR!, 'agent', 'managers', encodeURIComponent(managerKey))
+      try {
+        return (await fs.readdir(dir)).includes('state.json')
+      } catch {
+        return false
+      }
+    })
   })
 })

@@ -83,9 +83,6 @@ import {
   type GetTaskParams,
   type ListTasksParams,
   // spec 2026-06-09-task-trace-tool-unification.md §4.3 + §4.4
-  type ListConversationUnitsParams,
-  type ListConversationUnitsResult,
-  type ConversationUnit,
   type TraceSummary,
   type CleanupOldTasksByCountParams,
   type CleanupOldTasksByCountResult,
@@ -559,10 +556,7 @@ export class AdminModule extends ModuleBase {
   private agentMaintenanceStarted = false
 
   // Task/Trace 状态对账（SSOT 重整 2026-06-09 兜底层）
-  private static readonly RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000  // 5min
   /** task 距上次更新 < 此阈值 = 跳过对账（防误判刚 spawn 的 task） */
-  private static readonly RECONCILIATION_MIN_STALE_AGE_MS = 60 * 1000  // 60s
-  private reconciliationTimer?: NodeJS.Timeout
 
   // 数据加载完成前 saveData 必须拒绝，否则会用空内存覆盖磁盘真实数据
   private dataLoaded = false
@@ -703,7 +697,6 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('get_task', this.handleGetTask.bind(this))
     this.registerMethod('list_tasks', this.handleListTasks.bind(this))
     // spec 2026-06-09-task-trace-tool-unification.md §4.3 + §4.4
-    this.registerMethod('list_conversation_units', this.handleListConversationUnits.bind(this))
     this.registerMethod('cleanup_old_tasks_by_count', this.handleCleanupOldTasksByCount.bind(this))
     this.registerMethod('update_task_status', this.handleUpdateTaskStatus.bind(this))
     this.registerMethod('update_task_outcome', this.handleUpdateTaskOutcome.bind(this))
@@ -965,6 +958,11 @@ export class AdminModule extends ModuleBase {
       this.mediaStore!,
     )
     await this.chatManager.loadData()
+    // P6-A §11.12：开放 chat ingress（接受新 inbound/outbound delivery）前先 reconcile
+    // 两类 journal——pending_dispatch 的入站 outbox 重放、prepared/committing 的 delivery
+    // journal 按确定性 complete/rollback。
+    await this.chatManager.reconcileInboundDispatches()
+    await this.chatManager.reconcileDeliveries()
 
     // Agent 端口由 module_started 事件驱动写入（见 onEvent），
     // 若 Admin 单独重启错过事件，由 ensureAgentPort() 惰性兜底。
@@ -1006,12 +1004,8 @@ export class AdminModule extends ModuleBase {
     if (this.agentMaintenanceStarted) return
     this.agentMaintenanceStarted = true
     try {
-      void this.runReconciliation().catch((err) => console.error('[Admin] reconciliation initial run error:', err))
-      this.reconciliationTimer = setInterval(
-        () => { this.runReconciliation().catch((err) => console.error('[Admin] reconciliation error:', err)) },
-        AdminModule.RECONCILIATION_INTERVAL_MS,
-      )
-
+      // P6-A §9.7：legacy task-trace reconciliation 已随 get_trace_tree 退役删除；
+      // v3 恢复职责由 agent 侧 reconcileManagerStack 承担，这里不再起 timer/RPC。
       const { startTraceCleanupCron } = await import('./trace-cleanup-cron.js')
       this.stopTraceCleanupCron = startTraceCleanupCron({
         getGlobalConfig: () => this.modelProviderManager.getGlobalConfig(),
@@ -1027,8 +1021,6 @@ export class AdminModule extends ModuleBase {
       })
       console.log('[Admin] Trace cleanup cron started')
     } catch (error) {
-      if (this.reconciliationTimer) clearInterval(this.reconciliationTimer)
-      this.reconciliationTimer = undefined
       this.stopTraceCleanupCron?.()
       this.stopTraceCleanupCron = undefined
       this.agentMaintenanceStarted = false
@@ -1048,8 +1040,6 @@ export class AdminModule extends ModuleBase {
     // 停止 waiting_human 超时扫描器
     if (this.waitingHumanScanTimer) clearInterval(this.waitingHumanScanTimer)
 
-    // 停止 task/trace 状态对账
-    if (this.reconciliationTimer) clearInterval(this.reconciliationTimer)
 
     // 停止 trace 自动清理 cron
     this.stopTraceCleanupCron?.()
@@ -2353,33 +2343,13 @@ export class AdminModule extends ModuleBase {
         return
       }
 
-      // Agent Trace API (simplified - no instanceId)
-      if (pathname === '/api/agent/traces' && req.method === 'GET') {
-        await this.handleGetAgentTracesApi(req, res, url)
-        return
-      }
-      if (pathname === '/api/agent/traces' && req.method === 'DELETE') {
-        await this.handleClearAgentTracesApi(req, res)
-        return
-      }
-
+      // Agent trace 维护面（P6-A §9.6 后只保留这两个；raw trace 内容 API 全部退役）。
       if (pathname === '/api/agent/traces/disk-usage' && req.method === 'GET') {
         await this.handleGetTraceDiskUsageApi(req, res)
         return
       }
       if (pathname === '/api/agent/traces/old' && req.method === 'DELETE') {
         await this.handleCleanupOldTracesApi(req, res, url)
-        return
-      }
-
-      if (pathname === '/api/agent/traces/search' && req.method === 'GET') {
-        await this.handleSearchAgentTracesApi(req, res, url)
-        return
-      }
-
-      // spec 2026-06-09-task-trace-tool-unification.md §4.3: 按 task 维度合并列表
-      if (pathname === '/api/admin/conversation-units' && req.method === 'POST') {
-        await this.handleListConversationUnitsApi(req, res)
         return
       }
 
@@ -2390,15 +2360,14 @@ export class AdminModule extends ModuleBase {
         return
       }
 
-      const traceTreeMatch = pathname.match(/^\/api\/agent\/trace-tree\/([^/]+)$/)
-      if (traceTreeMatch && req.method === 'GET') {
-        await this.handleGetAgentTraceTreeApi(req, res, traceTreeMatch[1])
+      // Manager 只读代理（protocol-agent-v3 §8.4/§10.3，P6-A）。子路径先于 :managerKey 匹配。
+      if (pathname === '/api/agent/managers' && req.method === 'GET') {
+        await this.handleListManagersApi(req, res, url)
         return
       }
-
-      const agentTraceDetailMatch = pathname.match(/^\/api\/agent\/traces\/([^/]+)$/)
-      if (agentTraceDetailMatch && req.method === 'GET') {
-        await this.handleGetAgentTraceApi(req, res, agentTraceDetailMatch[1])
+      const managerEpisodesMatch = pathname.match(/^\/api\/agent\/managers\/([^/]+)\/episodes$/)
+      if (managerEpisodesMatch && req.method === 'GET') {
+        await this.handleListManagerEpisodesApi(req, res, managerEpisodesMatch[1], url)
         return
       }
 
@@ -2430,23 +2399,6 @@ export class AdminModule extends ModuleBase {
       }
       if (pathname === '/api/agent/config' && req.method === 'PATCH') {
         await this.handleUpdateActiveAgentConfigApi(req, res)
-        return
-      }
-
-      // Agent Trace API (legacy, kept for backward compatibility)
-      const traceListMatch = pathname.match(/^\/api\/agents\/([^/]+)\/traces$/)
-      if (traceListMatch && req.method === 'GET') {
-        await this.handleGetAgentTracesApi(req, res, url)
-        return
-      }
-      if (traceListMatch && req.method === 'DELETE') {
-        await this.handleClearAgentTracesApi(req, res)
-        return
-      }
-
-      const traceDetailMatch = pathname.match(/^\/api\/agents\/([^/]+)\/traces\/([^/]+)$/)
-      if (traceDetailMatch && req.method === 'GET') {
-        await this.handleGetAgentTraceApi(req, res, traceDetailMatch[2])
         return
       }
 
@@ -5480,149 +5432,6 @@ export class AdminModule extends ModuleBase {
     return stats
   }
 
-  // ==========================================================================
-  // spec 2026-06-09-task-trace-tool-unification.md §4.3 + §4.4 实施
-  // ==========================================================================
-
-  /**
-   * 列出 conversation units（task + 孤儿 dispatcher trace 按时间合并 + 分页）。
-   *
-   * 后端 union 分页：
-   *  1. 拉所有满足 filter 的 task
-   *  2. 拉所有满足 filter 的 dispatcher trace（按 trace.started_at），通过 agent RPC
-   *  3. union 后按统一时间字段排序
-   *  4. 按 page / page_size 切片
-   *
-   * trace_count + worker_trace_id 列表层暂返 0/null 占位（前端展开 task 时 lazy load get_trace_tree）。
-   */
-  private async handleListConversationUnits(params: ListConversationUnitsParams): Promise<ListConversationUnitsResult> {
-    this.assertIngressOpen()
-    // 1. 拉所有满足 filter 的 task（复用 handleListTasks 的过滤逻辑子集）
-    let tasks = Array.from(this.tasks.values())
-    if (params.filter) {
-      const filter = params.filter
-      if (filter.status) {
-        const statuses = Array.isArray(filter.status) ? filter.status : [filter.status]
-        tasks = tasks.filter((t) => statuses.includes(t.status))
-      }
-      if (filter.source_channel_id) {
-        tasks = tasks.filter((t) => t.source.channel_id === filter.source_channel_id)
-      }
-      if (filter.source_session_id) {
-        tasks = tasks.filter((t) => t.source.session_id === filter.source_session_id)
-      }
-      if (filter.search) {
-        const searchLower = filter.search.toLowerCase()
-        tasks = tasks.filter(
-          (t) =>
-            t.title.toLowerCase().includes(searchLower) ||
-            t.messages.some((m) => m.content.toLowerCase().includes(searchLower))
-        )
-      }
-      if (filter.created_after) {
-        tasks = tasks.filter((t) => t.created_at >= filter.created_after!)
-      }
-      if (filter.created_before) {
-        tasks = tasks.filter((t) => t.created_at <= filter.created_before!)
-      }
-    }
-
-    // 2. 拉 dispatcher trace（trigger_type=all from agent，admin 侧过滤 orphan / related）
-    // trigger_type filter: 'message' = 仅孤儿 dispatcher；'task' = 仅 task；'all' = 全部
-    const triggerType = params.filter?.trigger_type ?? 'all'
-    let orphans: TraceSummary[] = []
-    let relatedDispatchByTask = new Map<string, TraceSummary[]>()
-    if (triggerType === 'all' || triggerType === 'task' || triggerType === 'message') {
-      try {
-        const result = await this.callAgentRpc<
-          { keyword?: string; status?: string; time_range?: { start: string; end: string }; limit: number },
-          { traces: Array<TraceSummary & { related_task_id?: string }>; total: number }
-        >('search_traces', {
-          limit: 1000,
-          ...(params.filter?.search ? { keyword: params.filter.search } : {}),
-          ...(params.filter?.created_after && params.filter?.created_before
-            ? { time_range: { start: params.filter.created_after, end: params.filter.created_before } }
-            : {}),
-        })
-        const keyword = params.filter?.search?.toLowerCase()
-        const matchesKeyword = (t: TraceSummary): boolean =>
-          !keyword ||
-          t.trigger_summary.toLowerCase().includes(keyword) ||
-          (t.outcome_summary?.toLowerCase().includes(keyword) ?? false)
-        orphans = triggerType === 'task'
-          ? []
-          : result.traces.filter((t) => t.trigger_type === 'message' && !t.related_task_id && matchesKeyword(t))
-        relatedDispatchByTask = result.traces
-          .filter((t) => t.trigger_type === 'message' && Boolean(t.related_task_id) && matchesKeyword(t))
-          .reduce((acc, t) => {
-            const taskId = t.related_task_id!
-            const list = acc.get(taskId)
-            if (list) list.push(t)
-            else acc.set(taskId, [t])
-            return acc
-          }, new Map<string, TraceSummary[]>())
-      } catch (err) {
-        console.warn('[Admin] list_conversation_units: agent search_traces failed:', err instanceof Error ? err.message : err)
-      }
-    }
-    if (triggerType === 'message') {
-      tasks = []  // 仅看孤儿
-    }
-
-    // 3. union + 时间排序
-    const taskUnits: ConversationUnit[] = tasks.map((t) => {
-      const relatedDispatches = relatedDispatchByTask.get(t.id) ?? []
-      const latestDispatch = relatedDispatches
-        .slice()
-        .sort((a, b) => b.started_at.localeCompare(a.started_at))[0]
-      const activityAt = [t.updated_at, latestDispatch?.started_at]
-        .filter((x): x is string => Boolean(x))
-        .sort()
-        .at(-1) ?? t.updated_at
-      return {
-        kind: 'task' as const,
-        task: t,
-        activity_at: activityAt,
-        activity_summary: latestDispatch?.trigger_summary ?? t.title,
-        trace_count: 0,  // 列表层占位；前端展开时 lazy load
-        worker_trace_id: null,  // 同上
-      }
-    })
-    const orphanUnits: ConversationUnit[] = orphans.map((t) => ({
-      kind: 'orphan_dispatcher' as const,
-      trace: t,
-    }))
-
-    const timeOf = (u: ConversationUnit): string =>
-      u.kind === 'task' ? u.activity_at : u.trace.started_at
-
-    const all = [...taskUnits, ...orphanUnits]
-    const sortOrder = params.sort?.order ?? 'desc'
-    all.sort((a, b) => {
-      const ta = timeOf(a)
-      const tb = timeOf(b)
-      return sortOrder === 'desc' ? tb.localeCompare(ta) : ta.localeCompare(tb)
-    })
-
-    // 4. 分页
-    const page = params.page ?? 1
-    const pageSize = params.page_size ?? 20
-    const total = all.length
-    const totalPages = Math.max(1, Math.ceil(total / pageSize))
-    const offset = (page - 1) * pageSize
-    const items = all.slice(offset, offset + pageSize)
-
-    return {
-      items,
-      pagination: {
-        page,
-        page_size: pageSize,
-        total_items: total,
-        total_pages: totalPages,
-      },
-    }
-  }
-
   /**
    * spec §4.4: 按 task 个数清理。
    *
@@ -5654,17 +5463,7 @@ export class AdminModule extends ModuleBase {
     const cutoff = boundary.completed_at!
     const tasksToDelete = terminalTasks.filter((t) => (t.completed_at ?? '') < cutoff)
 
-    // 透传 agent cleanup_old_traces_by_count（近似版）
-    let traceResult = { affected_count: 0, affected_bytes: 0, deleted_trace_ids: [] as string[] }
-    try {
-      traceResult = await this.callAgentRpc<
-        { max_count: number; dry_run: boolean },
-        { affected_count: number; affected_bytes: number; deleted_trace_ids: string[] }
-      >('cleanup_old_traces_by_count', { max_count: maxCount * 3, dry_run: dryRun })
-    } catch (err) {
-      console.warn('[Admin] cleanup_old_tasks_by_count: agent RPC failed:', err instanceof Error ? err.message : err)
-    }
-
+    // P6-A §9.6：agent 侧 cleanup_old_traces_by_count 已退役；本方法只做本地 task 持久化清理。
     if (!dryRun) {
       for (const t of tasksToDelete) {
         this.tasks.delete(t.id)
@@ -5673,92 +5472,9 @@ export class AdminModule extends ModuleBase {
     }
 
     return {
-      affected_count: tasksToDelete.length + traceResult.affected_count,
-      affected_bytes: traceResult.affected_bytes,
-      deleted_trace_ids: traceResult.deleted_trace_ids,
-    }
-  }
-
-  /**
-   * Task/Trace 状态对账（SSOT 重整 2026-06-09 兜底层）。
-   *
-   * 周期 + 启动各跑一次。对每条"admin 视角仍活跃但 trace 全终态"的 task 强制切到终态——
-   * 兜底任何上游漏 RPC / 状态机拒绝 / 吞错路径导致的 drift。
-   *
-   * reconciliation 跟普通 transition 的差别：会把 waiting_human 这种"按状态机表 → completed
-   * 非法"的拒绝场景拆成两步走（waiting_human → executing → completed），每步都通过
-   * applyStatusTransition 路径，保留派生字段维护和事件发布。
-   *
-   * 失败容忍：单条 patch apply 失败只 log + 跳过，不影响其他 patch；下轮 reconciliation 继续重试。
-   *
-   * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §7）。这层兜底的存在前提是"admin 的
-   * task 状态与 agent 的 trace 是两份可能 drift 的数据"；v3 把真相源收敛到 agent 台账后该前提
-   * 消失，且它依赖的 `get_trace_tree` 已随 §10.1 退役。替代者：agent 侧的启动对账
-   * `reconcileManagerStack`（台账 vs 实际存活化身）。P5 只加注记、**行为不变**。
-   */
-  async runReconciliation(): Promise<void> {
-    if (!this.dataLoaded) return  // 启动早期 loadData 未完不跑
-
-    const fetchTracesByTaskId = async (taskId: string) => {
-      try {
-        const result = await this.callAgentRpc<
-          { task_id: string },
-          { tree: { workers: Array<{ trace_id: string; status: 'running' | 'completed' | 'failed' }> } }
-        >('get_trace_tree', { task_id: taskId })
-        return result.tree.workers
-      } catch (err) {
-        throw err instanceof Error ? err : new Error(String(err))
-      }
-    }
-
-    let patches: ReadonlyArray<import('./reconcile-tasks-against-traces.js').ReconcilePatch>
-    try {
-      const mod = await import('./reconcile-tasks-against-traces.js')
-      patches = await mod.reconcileTasksAgainstTraces({
-        tasks: Array.from(this.tasks.values()),
-        fetchTracesByTaskId,
-        minStaleAgeMs: AdminModule.RECONCILIATION_MIN_STALE_AGE_MS,
-      })
-    } catch (err) {
-      console.error('[Admin] reconciliation: pure scan failed:', err instanceof Error ? err.message : err)
-      return
-    }
-
-    if (patches.length === 0) return
-
-    console.log(`[Admin] reconciliation: found ${patches.length} drifted task(s) to fix`)
-
-    // Apply 阶段：每条 patch 单独跑，失败不影响其他
-    let applied = 0
-    for (const patch of patches) {
-      const task = this.tasks.get(patch.taskId)
-      if (!task) continue  // race：扫描期间 task 被删了
-
-      try {
-        // Legacy Admin tasks have no v3 worker-id mapping; reconciliation only
-        // repairs Admin's archived state and never controls an Agent worker.
-        // 智能恢复：current=waiting_human/waiting → 终态非法，需中转 executing
-        if (task.status === 'waiting_human' || task.status === 'waiting') {
-          this.applyStatusTransition(task, 'executing')
-        }
-        this.applyStatusTransition(task, patch.newStatus, {
-          error: patch.newStatus === 'failed' ? `reconciliation: ${patch.reason}` : undefined,
-        })
-        applied++
-        console.warn(
-          `[Admin] reconciliation fixed task=${patch.taskId} ${patch.oldStatus} → ${patch.newStatus}` +
-          ` (${patch.reason}; traces: ${patch.traces.map(t => `${t.trace_id.slice(0, 8)}=${t.status}`).join(',')})`
-        )
-      } catch (err) {
-        console.error(
-          `[Admin] reconciliation failed to fix task=${patch.taskId} ${patch.oldStatus} → ${patch.newStatus}: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
-    }
-
-    if (applied > 0) {
-      await this.saveTasks()
-      console.log(`[Admin] reconciliation: applied ${applied}/${patches.length} fix(es)`)
+      affected_count: tasksToDelete.length,
+      affected_bytes: 0,
+      deleted_trace_ids: [],
     }
   }
 
@@ -9814,9 +9530,8 @@ export class AdminModule extends ModuleBase {
    * `/api/agent/*` 转发端点的统一样板：调 agent RPC → 200 回传结果；失败按 agent 可达性
    * 映射 503（agent 不可达，固定文案）/ 500（其余，回传原始 message）。
    *
-   * 抽自 handleGetAgentTracesApi / handleGetAgentTraceApi / handleClearAgentTracesApi /
-   * handleSearchAgentTracesApi 四处**逐字相同**的 catch 块（P5 Task 5，纯重构）。
-   * `notFoundWhen` 只为保留 handleGetAgentTraceApi 独有的 404 分支——不传时行为与抽取前
+   * 抽自（P6-A 已退役的）raw v2 trace 端点**逐字相同**的 catch 块（P5 Task 5，纯重构）。
+   * `notFoundWhen` 保留 detail 类端点的 404 分支——不传时行为与抽取前
    * 完全一致；该分支优先于 503/500 判定，与原实现的判定顺序相同。
    */
   private async proxyAgentRpc<P, R>(
@@ -9836,6 +9551,13 @@ export class AdminModule extends ModuleBase {
       }
       if (notFoundWhen?.(msg)) {
         sendJson(res, 404, { error: msg })
+        return
+      }
+      // 客户端输入错误（非法 cursor/参数）是 400，不是服务端 500。
+      // code 在 RpcCallError 上（message 只是人读文本），两者都认。
+      const errCode = (error as { code?: unknown }).code
+      if (errCode === 'INVALID_PARAMS' || msg.includes('INVALID_PARAMS')) {
+        sendJson(res, 400, { error: msg })
         return
       }
       const isUnreachable =
@@ -9883,85 +9605,6 @@ export class AdminModule extends ModuleBase {
   }
 
   // ============================================================================
-  // Agent Trace API 处理方法
-  // ============================================================================
-
-  private async handleGetAgentTracesApi(
-    _req: IncomingMessage,
-    res: ServerResponse,
-    url: URL
-  ): Promise<void> {
-    const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
-    const offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
-    const status = url.searchParams.get('status') ?? undefined
-    await this.proxyAgentRpc<
-      { limit?: number; offset?: number; status?: string },
-      { traces: unknown[]; total: number }
-    >(res, 'get_traces', { limit, offset, status })
-  }
-
-  private async handleGetAgentTraceApi(
-    _req: IncomingMessage,
-    res: ServerResponse,
-    traceId: string
-  ): Promise<void> {
-    await this.proxyAgentRpc<{ trace_id: string }, { trace: unknown }>(
-      res,
-      'get_trace',
-      { trace_id: traceId },
-      (msg) => msg.includes('not found') || msg.includes('Trace not found'),
-    )
-  }
-
-  private async handleClearAgentTracesApi(
-    req: IncomingMessage,
-    res: ServerResponse
-  ): Promise<void> {
-    let params: { before?: string; trace_ids?: string[] }
-    try {
-      const body = await new Promise<string>((resolve) => {
-        let data = ''
-        req.on('data', (chunk) => { data += chunk })
-        req.on('end', () => resolve(data))
-      })
-      params = body ? (JSON.parse(body) as { before?: string; trace_ids?: string[] }) : {}
-    } catch (error) {
-      // body 不是合法 JSON：抽 proxyAgentRpc 之前 JSON.parse 的异常落在同一个 catch 里，
-      // 走的是"非不可达 → 500 + 原始 message"分支。这里显式保留该分支，避免重构改行为。
-      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
-      return
-    }
-    await this.proxyAgentRpc<
-      { before?: string; trace_ids?: string[] },
-      { cleared_count: number }
-    >(res, 'clear_traces', params)
-  }
-
-  private async handleSearchAgentTracesApi(
-    _req: IncomingMessage,
-    res: ServerResponse,
-    url: URL
-  ): Promise<void> {
-    const params: Record<string, unknown> = {}
-    const taskId = url.searchParams.get('task_id')
-    if (taskId) params.task_id = taskId
-    const keyword = url.searchParams.get('keyword')
-    if (keyword) params.keyword = keyword
-    const status = url.searchParams.get('status')
-    if (status) params.status = status
-    const start = url.searchParams.get('start')
-    const end = url.searchParams.get('end')
-    if (start && end) params.time_range = { start, end }
-    params.limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
-    params.offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
-
-    await this.proxyAgentRpc<
-      Record<string, unknown>,
-      { traces: unknown[]; total: number }
-    >(res, 'search_traces', params)
-  }
-
-  // ============================================================================
   // Worker 只读 REST 代理（protocol-agent-v3 §10.3，转发 §8.3 的读模型 RPC）
   //
   // 纯转发：鉴权由 `/api/*` 的统一中间件负责，错误映射由 proxyAgentRpc 负责，本段只做
@@ -9973,6 +9616,39 @@ export class AdminModule extends ModuleBase {
   // ============================================================================
 
   /** §10.3 `GET /api/agent/workers` → `list_workers_admin`（§8.3）。 */
+  /** §8.4/§10.3：GET /api/agent/managers —— exact Agent `list_managers_admin` 透传。 */
+  private async handleListManagersApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const page = parseIntParam(url.searchParams.get('page'), 1)
+    const pageSize = parseIntParam(url.searchParams.get('page_size'), 20)
+    await this.proxyAgentRpc(res, 'list_managers_admin', { pagination: { page, page_size: pageSize } })
+  }
+
+  /** §8.4/§10.3：GET /api/agent/managers/:managerKey/episodes —— path 参数只 decode 一次。 */
+  private async handleListManagerEpisodesApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    rawManagerKey: string,
+    url: URL,
+  ): Promise<void> {
+    let managerKey: string
+    try {
+      managerKey = decodeURIComponent(rawManagerKey)
+    } catch {
+      sendJson(res, 400, { error: 'Invalid percent-encoding in manager key' })
+      return
+    }
+    const page = parseIntParam(url.searchParams.get('page'), 1)
+    const pageSize = parseIntParam(url.searchParams.get('page_size'), 20)
+    await this.proxyAgentRpc(res, 'list_manager_episodes_admin', {
+      manager_key: managerKey,
+      pagination: { page, page_size: pageSize },
+    })
+  }
+
   private async handleListWorkersApi(
     _req: IncomingMessage,
     res: ServerResponse,
@@ -10092,32 +9768,6 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  /**
-   * REST API for list_conversation_units（spec 2026-06-09 §4.3）。
-   * POST body = ListConversationUnitsParams（JSON）。
-   */
-  private async handleListConversationUnitsApi(
-    req: IncomingMessage,
-    res: ServerResponse,
-  ): Promise<void> {
-    try {
-      const bodyText = await new Promise<string>((resolve, reject) => {
-        let data = ''
-        req.on('data', (chunk) => { data += chunk })
-        req.on('end', () => resolve(data))
-        req.on('error', reject)
-      })
-      const params = bodyText ? (JSON.parse(bodyText) as ListConversationUnitsParams) : { page: 1, page_size: 20 }
-      const result = await this.handleListConversationUnits(params)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      const status = (err as { code?: unknown }).code === 'ADMIN_CORE_AGENT_CUTOVER_INCOMPLETE' ? 503 : 500
-      sendJson(res, status, { error: msg })
-    }
-  }
-
   private async handleGetTraceDiskUsageApi(
     _req: IncomingMessage,
     res: ServerResponse,
@@ -10175,14 +9825,6 @@ export class AdminModule extends ModuleBase {
       res.writeHead(500, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: msg }))
     }
-  }
-
-  private async handleGetAgentTraceTreeApi(
-    _req: IncomingMessage,
-    res: ServerResponse,
-    taskId: string
-  ): Promise<void> {
-    await this.proxyAgentRpc(res, 'get_trace_tree', { task_id: taskId })
   }
 
   // ============================================================================

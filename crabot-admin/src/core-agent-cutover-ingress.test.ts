@@ -113,20 +113,19 @@ describe('management-only Admin ingress gate', () => {
     const { admin, port, token } = await makeAdmin()
     const rpc = vi.spyOn((admin as unknown as { rpcClient: { call: (...args: unknown[]) => Promise<unknown> } }).rpcClient, 'call')
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-    const [rebuild, workers, traceTree, entities, entityLog, killEntity, conversationUnits, diskUsage, cleanup] = await Promise.all([
+    // P6-A：退役的 trace-tree/conversation-units 换成仍存活的 gated managers 路由。
+    const [rebuild, workers, managers, managerEpisodes, entities, entityLog, killEntity, diskUsage, cleanup] = await Promise.all([
       fetch(`http://localhost:${port}/api/memory/v2/graph/rebuild`, { method: 'POST', headers, body: '{}' }),
       fetch(`http://localhost:${port}/api/agent/workers`, { headers }),
-      fetch(`http://localhost:${port}/api/agent/trace-tree/task`, { headers }),
+      fetch(`http://localhost:${port}/api/agent/managers`, { headers }),
+      fetch(`http://localhost:${port}/api/agent/managers/wechat%253A%253Asess-1/episodes`, { headers }),
       fetch(`http://localhost:${port}/api/bg-entities`, { headers }),
       fetch(`http://localhost:${port}/api/bg-entities/entity/log`, { headers }),
       fetch(`http://localhost:${port}/api/bg-entities/entity`, { method: 'DELETE', headers }),
-      fetch(`http://localhost:${port}/api/admin/conversation-units`, {
-        method: 'POST', headers, body: JSON.stringify({ page: 1, page_size: 20 }),
-      }),
       fetch(`http://localhost:${port}/api/agent/traces/disk-usage`, { headers }),
       fetch(`http://localhost:${port}/api/agent/traces/old?days=30`, { method: 'DELETE', headers }),
     ])
-    expect([rebuild, workers, traceTree, entities, entityLog, killEntity, conversationUnits, diskUsage, cleanup].map((response) => response.status))
+    expect([rebuild, workers, managers, managerEpisodes, entities, entityLog, killEntity, diskUsage, cleanup].map((response) => response.status))
       .toEqual([503, 503, 503, 503, 503, 503, 503, 503, 503])
     expect(rpc).not.toHaveBeenCalled()
   })

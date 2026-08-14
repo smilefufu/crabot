@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Modal } from '../../components/Common/Modal'
 import { Button } from '../../components/Common/Button'
-import { traceService } from '../../services/trace'
+import { agentObservabilityService } from '../../services/agent-observability'
 import { providerService } from '../../services/provider'
 import { useToast } from '../../contexts/ToastContext'
 import { formatBytes } from './utils'
@@ -19,7 +19,7 @@ export const ManualCleanupDialog: React.FC<{
   const doPreview = async () => {
     setBusy(true)
     try {
-      const r = await traceService.cleanupOld(days, true)
+      const r = await agentObservabilityService.cleanupOldTraces(days, true)
       setPreview({ count: r.affected_count, bytes: r.affected_bytes })
     } catch (err) {
       toast.error('预览失败：' + (err instanceof Error ? err.message : String(err)))
@@ -31,7 +31,7 @@ export const ManualCleanupDialog: React.FC<{
   const doDelete = async () => {
     setBusy(true)
     try {
-      const r = await traceService.cleanupOld(days, false)
+      const r = await agentObservabilityService.cleanupOldTraces(days, false)
       toast.success(`已删除 ${r.affected_count} 条 trace`)
       onDeleted()
       onClose()

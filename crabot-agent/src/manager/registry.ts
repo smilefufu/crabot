@@ -188,8 +188,14 @@ export interface ManagerRegistryDeps {
     onAsyncError: OnAsyncError,
     scheduleIdentity?: ScheduleIdentity,
     humanPrincipal?: HumanPrincipal,
-    principalPermissions?: ResolvedPermissions
+    principalPermissions?: ResolvedPermissions,
+    /** P6-A §6.6：当前 episode trace 的读取/回写桥（registry 惰性桥接到 loops 实例）。 */
+    traceHooks?: { currentTraceId: () => string | undefined; onWorkerSpawned: (workerId: string) => void },
   ) => ReadonlyArray<ToolDefinition>
+  /** Manager episode trace writer（窄接口；见 ManagerLoopDeps.traceWriter）。 */
+  readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
+  /** P6-A §3.2：episode 消费后结算未 claim 的 Admin Chat request IDs。 */
+  readonly onAdminChatWakeConsumed?: (key: ManagerKey, requestIds: string[]) => void
   /** Stable system prompt profile material. */
   readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string }
 }
@@ -213,6 +219,11 @@ export class ManagerRegistry {
   private readonly lastActiveAtMs = new Map<ManagerKey, number>()
 
   constructor(private readonly deps: ManagerRegistryDeps) {}
+
+  /** 内存 registry 当前 running manager 的只读快照（P6-A §7.3：补充尚未首次 save 的当前 manager）。 */
+  listActiveManagers(): Array<{ key: ManagerKey; lastActiveAtMs?: number }> {
+    return Array.from(this.loops.keys()).map((key) => ({ key, lastActiveAtMs: this.lastActiveAtMs.get(key) }))
+  }
 
   /** 惰性拉起:key 无实例则建;同 key 幂等返回同一实例。实例常驻内存,session 状态在盘上。 */
   getOrCreate(key: ManagerKey): ManagerLoop {
@@ -245,12 +256,20 @@ export class ManagerRegistry {
           scheduleIdentityOf(wakeEvent),
           humanPrincipalOf(wakeEvent),
           principalPermissionsOf(wakeEvent),
+          {
+            currentTraceId: () => this.loops.get(key)?.currentEpisodeTraceId,
+            onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
+          },
         ),
       promptInputs: () => this.deps.promptInputs(key),
       harness: this.deps.harness,
       now: this.deps.now,
       timezone: this.deps.timezone,
       onEpisodeEnd: () => this.lastActiveAtMs.set(key, this.deps.now().getTime()),
+      traceWriter: this.deps.traceWriter,
+      onAdminChatWakeConsumed: this.deps.onAdminChatWakeConsumed
+        ? (ids) => this.deps.onAdminChatWakeConsumed!(key, ids)
+        : undefined,
     }
 
     const loop = new ManagerLoop(loopDeps)
@@ -273,10 +292,12 @@ export class ManagerRegistry {
     channelId: string,
     sessionId: string,
     messages: ReadonlyArray<ChannelMessage>,
-    friend?: Friend
+    friend?: Friend,
+    /** P6-A §3.2：system-only 关联元数据（不渲染进 LLM 正文）。 */
+    correlation?: import('./loop.js').ManagerWakeCorrelation,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend)
+    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation)
   }
 
   /**
@@ -308,7 +329,8 @@ export class ManagerRegistry {
     channelId: string,
     sessionId: string,
     messages: ReadonlyArray<ChannelMessage>,
-    friend?: Friend
+    friend?: Friend,
+    correlation?: import('./loop.js').ManagerWakeCorrelation,
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
     // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
@@ -319,7 +341,7 @@ export class ManagerRegistry {
       ? { kind: 'human_messages', messages, ...(friend ? { friend } : {}) }
       : { kind: 'attention_flush', messages, ...(friend ? { friend } : {}) }
     // Capture before principal lookup so queueing cannot rewrite ingress time.
-    const envelope = this.makeEnvelope(capture, initialWake, undefined, messages)
+    const envelope = this.makeEnvelope(capture, initialWake, undefined, messages, correlation)
     // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
     let principalPermissions: ResolvedPermissions | undefined
     if (this.deps.onHumanWake) {
@@ -488,6 +510,7 @@ export class ManagerRegistry {
     wake: WakeEvent,
     occurredAt?: string,
     humanMessages?: ReadonlyArray<ChannelMessage>,
+    correlation?: import('./loop.js').ManagerWakeCorrelation,
   ): TimedWakeEnvelope {
     const occurred_at = parseOccurredAt(occurredAt, 'source')
     const human_occurred_at = humanMessages?.map((message) => ({
@@ -501,7 +524,18 @@ export class ManagerRegistry {
       timezone: capture.timezone,
       ...(occurred_at ? { occurred_at } : {}),
       ...(human_occurred_at ? { human_occurred_at } : {}),
+      ...(correlation ? { correlation } : {}),
     }
+  }
+
+  /** P6-A §11.6：给 exact admin-chat manager 当前 episode 原子 claim 未 claim 的 request IDs。 */
+  claimAdminChatRequestIds(key: ManagerKey): string[] {
+    return this.loops.get(key)?.claimAdminChatRequestIds() ?? []
+  }
+
+  /** prepare 失败时归还 claim（见 ManagerLoop.unclaimAdminChatRequestIds）。 */
+  unclaimAdminChatRequestIds(key: ManagerKey, ids: ReadonlyArray<string>): void {
+    this.loops.get(key)?.unclaimAdminChatRequestIds(ids)
   }
 
   /** 该 key 是否还有至少一个在途 episode(引用计数 > 0)。 */

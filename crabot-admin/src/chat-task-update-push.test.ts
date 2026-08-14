@@ -115,6 +115,7 @@ describe('chat_task_update push hooks', () => {
     const chatMgr = (admin as any).chatManager
     const sendResult = await chatMgr.handleSendMessage({
       session_id: 'admin-chat',
+      delivery_id: 'd-task-push-1',
       content: { type: 'text', text: 'worker 产出消息' },
     })
     const chatMsgId = sendResult.platform_message_id

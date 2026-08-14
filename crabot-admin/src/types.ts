@@ -1855,7 +1855,12 @@ export interface ChatMessage {
   message_id: string
   role: 'user' | 'assistant'
   content: MessageContent
+  /** 只读历史兼容（P6-A §11.14）；新写使用 request_ids/delivery_id。 */
   request_id?: string
+  /** P6-A §11：本条 assistant 消息结算的入站 request IDs（proactive 为空/缺席）。 */
+  request_ids?: string[]
+  /** P6-A §11：本条 assistant 消息的 delivery 事务 ID。 */
+  delivery_id?: string
   task_id?: TaskId
   timestamp: string
 }
@@ -1872,6 +1877,10 @@ export interface ChatSendMessageParams {
   session_id: string
   content: MessageContent
   features?: Record<string, unknown>
+  /** P6-A §11.6：admin-chat 会话的所有 v3 delivery（含 proactive）必填。 */
+  delivery_id?: string
+  /** P6-A §11.6：本 delivery 结算的入站 request IDs；空/缺席 = proactive 追加。 */
+  request_ids?: string[]
 }
 
 /** send_message RPC 返回 */

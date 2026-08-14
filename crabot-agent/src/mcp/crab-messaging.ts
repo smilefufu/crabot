@@ -33,6 +33,11 @@ export interface CrabMessagingDeps {
   getAdminPort: () => Promise<number>
   resolveChannelPort: (channelId: string) => Promise<number>
   /**
+   * P6-A §11.5-9：Admin Chat 出站 delivery 事务钩子（仅 exact admin-web::admin-chat
+   * 目标生效；其它目标的调用不携带 delivery metadata——不注入即剥离）。
+   */
+  readonly adminChatDelivery?: import('../agent/outbound-flush.js').AdminChatDeliveryHooks
+  /**
    * 可选：返回当前调用 mcp 工具的 task 上下文。
    * Worker 调用路径返回非空（含 taskId + humanQueue 引用），用于 send_message(intent='ask_human')。
    * Front 调用路径返回 null（front 不能调 ask_human，工具内会拒绝）。
@@ -979,6 +984,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           moduleId,
           resolveChannelPort,
           getAdminPort,
+          ...(deps.adminChatDelivery ? { adminChatDelivery: deps.adminChatDelivery } : {}),
           ...(sandboxPathMappingsRef ? { sandboxPathMappingsRef } : {}),
           ...((() => {
             const taskCtx = deps.getTaskContext?.()

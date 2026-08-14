@@ -8,6 +8,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { ModuleBase, generateId, sha256CanonicalJson, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
 import type {
@@ -57,20 +58,19 @@ import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, ge
 import { ConfigLoader } from './core/config-loader.js'
 import { TraceStore } from './core/trace-store.js'
 import { importV2LegacyTasks } from './workers/legacy-importer.js'
-import {
-  compareLegacyTraceEventEntries,
-  readLegacyTraceEvents,
-  type LegacyTraceEventEntry,
-} from './workers/legacy-source-reader.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
 import { redactSecrets } from './engine/redact-secrets.js'
-import { isResumable, redactCheckpoint } from './core/resume-checkpoint.js'
 import { AGENT_VERSION } from './constants.js'
 import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
+import { buildManagerAdminSummaries } from './manager/read-model.js'
+import { readCompositeWorkerTrace } from './workers/trace/composite-reader.js'
+import { AdminChatCorrelationStore, dispatchPayloadSha256 } from './manager/chat-correlation-store.js'
+import { TraceCursorStore, incarnationFingerprint } from './workers/trace/cursor-store.js'
+import { NativeTraceCopyStore } from './workers/trace/native-copy.js'
 import { makeAgentEventPublisher, type AgentEventPublisher } from './manager/events.js'
 import { resolveManagerModelConfig } from './manager/model-slot.js'
 import type { ManagerEpisodeFailure } from './manager/types.js'
@@ -81,7 +81,6 @@ import {
   type BuiltinRuntimeContext,
 } from './workers/builtin/runtime.js'
 import {
-  isLegacyIncarnation,
   type ManagerKey,
   type LedgerWorker,
   type TaskPriority,
@@ -100,10 +99,7 @@ import {
   type GetWorkerTraceResult,
 } from './manager/read-model.js'
 import type { NormalizedTraceEvent, SpawnSpec } from './workers/types.js'
-import type { HarnessEvent } from './workers/harness/worker-events.js'
 import {
-  findIncarnationBySeq,
-  mainlineIncarnation,
   TaskCancelledError,
   WorkerHasNoIncarnationError,
   WorkerNotFoundError,
@@ -280,32 +276,6 @@ function parseAdminChatAssertionId(assertion: string): string {
   }
 }
 
-/** trace summary 的截断长度（§10.2：summary 是"截断摘要"，原始结构留在 detail 里）。 */
-const TRACE_SUMMARY_MAX_CHARS = 200
-
-/**
- * harness 亲历事件（§10.2 第一层）→ `NormalizedTraceEvent`。
- * 生命周期事件没有会话角色，故一律 `kind: 'lifecycle'` 且不填 `role`；`detail` 原样透传。
- */
-function normalizeHarnessEvent(event: HarnessEvent): NormalizedTraceEvent {
-  const detailText = event.detail === undefined ? '' : ` ${JSON.stringify(event.detail)}`
-  const summary = `${event.kind}${detailText}`
-  return {
-    ts: event.ts,
-    kind: 'lifecycle',
-    summary: summary.length > TRACE_SUMMARY_MAX_CHARS ? `${summary.slice(0, TRACE_SUMMARY_MAX_CHARS)}…` : summary,
-    detail: event.detail,
-  }
-}
-
-/**
- * §8.3 `get_worker_trace` 的第二层（adapter `readTrace()` 懒解析，§10.2）在本阶段未接线，
- * 用协议规定的 `unavailable_reason` 明说，而不是静默只给第一层。
- */
-const WORKER_TRACE_LAYER2_UNAVAILABLE =
-  '实现原生 trace（adapter readTrace 懒解析，protocol-agent-v3 §10.2 第二层）尚未接入本端点，' +
-  '当前仅返回 harness 亲历的生命周期事件（第一层）'
-
 /**
  * fail-loud 兜底回复的按 key 冷却窗口。
  *
@@ -442,6 +412,9 @@ export class UnifiedAgent extends ModuleBase {
 
   // 端口缓存
   private adminPort?: number
+  private traceCursorStoreInstance?: TraceCursorStore
+  private nativeTraceCopyStoreInstance?: NativeTraceCopyStore
+  private adminChatCorrelationStoreInstance?: import('./manager/chat-correlation-store.js').AdminChatCorrelationStore
   private memoryPort?: number
   // Session memory_scopes 缓存（TTL 60s，session config 变更不频繁）
   private sessionScopesCache: Map<string, { scopes: string[]; expiresAt: number }> = new Map()
@@ -713,6 +686,15 @@ export class UnifiedAgent extends ModuleBase {
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
       now: () => new Date().toISOString(),
+      // P6-A：Manager episode trace writer（窄接口 + 脱敏收口在 TraceStore.managerTraceWriter）。
+      traceWriter: this.traceStore.managerTraceWriter((text) => redactSecrets(text, [...this.knownSecrets])),
+      // P6-A §8.4：builtin worker 结构化 trace（写钩子 + 读入口，同一脱敏纪律）。
+      builtinTraceHooks: this.builtinTraceHooks(),
+      builtinTraceReader: this.builtinTraceReader(),
+      // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
+      onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
+      // P6-A §3.2：episode 消费（含沉默终态）即结算未 claim 的 request IDs。
+      onAdminChatWakeConsumed: async (key, ids) => { await this.adminChatCorrelationStore().settleInbound(key, ids) },
       // 人类消息渲染的时区（`formatChannelMessageLine` 的 ts 属性）。与 worker 侧
       // `buildBuiltinWorkerRuntime` 取同一个来源，避免 manager 与 worker 看到的时间对不上。
       timezone: () => resolveTimezone(this.agentConfig?.timezone),
@@ -734,6 +716,12 @@ export class UnifiedAgent extends ModuleBase {
         // `onStart()` 里；写成定值就永远快照到探测前的 false。worker 侧没这个问题是因为
         // `createMcpConfigs` 本身是每个 task 现调的工厂。
         get enableFeishuDocTool(): boolean { return self.feishuChannelAvailable },
+        // P6-A §11.5-9：Admin Chat 出站 delivery 事务钩子（只作用于 exact admin-web::admin-chat）。
+        adminChatDelivery: {
+          prepare: (entry, content) => self.prepareAdminChatDelivery(entry, content),
+          confirm: (deliveryId, result) => self.confirmAdminChatDelivery(deliveryId, result),
+          fail: (deliveryId, error) => self.failAdminChatDelivery(deliveryId, error),
+        },
       },
       // crab-memory：档位（visibility / scopes）由 manager 装配层按**发起人身份**算好
       // （`manager/principal.ts` + `memoryContextFor`），这里只负责按算好的档位现建 server。
@@ -1178,14 +1166,10 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('deliver_page_feedback', this.handleDeliverPageFeedback.bind(this))
 
     // Trace 接口
-    this.registerMethod('get_traces', this.handleGetTraces.bind(this))
-    this.registerMethod('get_trace', this.handleGetTrace.bind(this))
-    this.registerMethod('clear_traces', this.handleClearTraces.bind(this))
-    this.registerMethod('search_traces', this.handleSearchTraces.bind(this))
-    this.registerMethod('get_trace_tree', this.handleGetTraceTree.bind(this))
+    // P6-A §9.6：raw v2 trace RPC 退役（get_traces/get_trace/clear_traces/search_traces/
+    // get_trace_tree/cleanup_old_traces_by_count）；保留专用维护面 disk_usage/cleanup_old_traces。
     this.registerMethod('get_trace_disk_usage', this.handleGetTraceDiskUsage.bind(this))
     this.registerMethod('cleanup_old_traces', this.handleCleanupOldTraces.bind(this))
-    this.registerMethod('cleanup_old_traces_by_count', this.handleCleanupOldTracesByCount.bind(this))
 
     // Bg-entity admin 接口（Plan 3 Task 1）
     this.registerMethod('list_bg_entities', this.handleListBgEntities.bind(this))
@@ -1195,6 +1179,8 @@ export class UnifiedAgent extends ModuleBase {
     // Manager/Worker（v3）接口：§8.2 调度触发 + §8.3 task 读模型四件套。
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
+    this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
+    this.registerMethod('list_manager_episodes_admin', this.handleListManagerEpisodesAdmin.bind(this))
     this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
     this.registerMethod('read_worker_output_admin', this.handleReadWorkerOutputAdmin.bind(this))
     this.registerMethod('get_worker_trace', this.handleGetWorkerTrace.bind(this))
@@ -1669,11 +1655,9 @@ export class UnifiedAgent extends ModuleBase {
    * **按 key 冷却**：F1 会把整批输入推回 mailbox 下次重投，同一批消息可能连续失败若干轮；
    * 没有冷却就是刷屏。冷却命中时只记日志，不再发第二条。
    *
-   * **admin chat 走 `chat_callback` 而不是 `send_message`**（传 `adminChatRequestId` 即切换）：
-   * 判据（`ManagerEpisodeFailure`）、文案（`buildFailLoudText`）、冷却表全部共用，**只有出站
-   * 那一跳不同**。admin-web 伪 channel 的 `send_message` 落到 `chat_push`（**追加**一条新消息），
-   * 前端那个转圈的占位气泡靠 `request_id` 匹配 `chat_reply` 才会被替换掉 —— 只有
-   * `chat_callback` 能收口它。兜底文案是纯文本，`chat_reply` 的 string content 装得下，无损。
+   * **admin chat 的兜底直出走带 delivery 事务的 `send_message`**（P6-A §11.11；chat_callback
+   * 已退役）：判据（`ManagerEpisodeFailure`）、文案（`buildFailLoudText`）、冷却表全部共用，
+   * 占位气泡靠 delivery 的 request_ids CAS 结算。
    *
    * **`subject` 切换成"非人类触发"文案**（定时任务 / worker 事件，见
    * `sendBackgroundFailLoud`）：判据、冷却、出站那一跳全部照旧，只有正文换成第三人称的
@@ -1705,12 +1689,8 @@ export class UnifiedAgent extends ModuleBase {
     try {
       const text = subject === undefined ? buildFailLoudText(failure) : buildBackgroundFailLoudText(subject, failure)
       if (adminChatRequestId !== undefined) {
-        await this.rpcClient.call(
-          await this.getAdminPort(),
-          'chat_callback',
-          { request_id: adminChatRequestId, reply_type: 'direct_reply', content: text },
-          this.config.moduleId,
-        )
+        // P6-A §11.11：fail-loud 直回同样走 admin-web send_message 入口（delivery 事务）。
+        await this.deliverDirectAdminChatReply(adminChatRequestId, text)
       } else {
         const channelPort = await this.getChannelPort(channelId)
         await this.rpcClient.call(
@@ -1741,7 +1721,7 @@ export class UnifiedAgent extends ModuleBase {
    *
    * 1. **文案换第三人称并点名 `subject`**：这两条路上没人刚说话，"暂时回不了你"是错的；
    * 2. **admin-web 一律投 `system-tasks` 线程**：admin 的 `storeAssistantMessage` 只在
-   *    `session_id === 'admin-chat'` 时 `claimPendingRequestId()`——把当时在飞的那条人类
+   *    `session_id === 'admin-chat'` 时按 request 认领（P6-A 后由 delivery CAS 结算）——把当时在飞的那条人类
    *    提问的占位气泡**机会主义地**认领掉（chat-manager.ts:454）。故障期人类消息与定时任务
    *    常常一起失败，正是最容易撞上的时刻：撞上就等于"人类的问题被一句『定时任务没跑成』
    *    顶替，自己的气泡永远转圈"。改投 `system-tasks` 后不认领任何 request_id，而两个
@@ -2120,10 +2100,27 @@ export class UnifiedAgent extends ModuleBase {
         !Number.isFinite(Date.parse(consumeResult.expires_at)) || Date.parse(consumeResult.expires_at) <= Date.now()) {
         throw new Error('invalid admin chat assertion consumption result')
       }
-      await this.requireManagerStack().principals.activateAdminChat('admin-web::admin-chat', {
+      // P6-A §11：assertion 核销后先过 durable inbound index——exact 已有幂等 accepted
+      // 不重复 wake；冲突拒绝；缺失才把完整可重放 wake envelope 原子写入 journal
+      // （commit 后才往下走 Manager 唤醒）。assertion consumed 不能代替 wake commit：
+      // 崩溃在两步之间时 Admin pending outbox 会签新 assertion 重放同一 exact message，
+      // 由这里的 index 判定为 duplicate，保证最终只有一条 wake。
+      const stack = this.requireManagerStack()
+      await stack.principals.activateAdminChat('admin-web::admin-chat', {
         assertionId: parseAdminChatAssertionId(admin_chat_assertion),
         expiresAt: consumeResult.expires_at,
       })
+      const admission = await this.adminChatCorrelationStore().admitInbound({
+        kind: 'admin_chat_wake',
+        request_id: callback_info.request_id,
+        manager_key: 'admin-web::admin-chat' as ManagerKey,
+        message_sha256: sha256CanonicalJson(message),
+        message,
+        received_at: new Date().toISOString(),
+      })
+      if (admission === 'duplicate') {
+        return { decision_types: [] }
+      }
       return this.processAdminChatMessage(message, callback_info)
     }
 
@@ -2154,15 +2151,11 @@ export class UnifiedAgent extends ModuleBase {
     const sessionId = 'admin-chat'
 
     if (!this.isConfigured()) {
-      await this.rpcClient.call(
-        await this.getAdminPort(),
-        'chat_callback',
-        {
-          request_id: callbackInfo.request_id,
-          reply_type: 'direct_reply',
-          content: 'Crabot 尚未配置 LLM 模型。请在全局设置中完成配置后重试。',
-        },
-        this.config.moduleId,
+      // P6-A §11.11：未配置直回也走同一个 admin-web send_message 入口（delivery 事务），
+      // chat_callback 不再写消息。
+      await this.deliverDirectAdminChatReply(
+        callbackInfo.request_id,
+        'Crabot 尚未配置 LLM 模型。请在全局设置中完成配置后重试。',
       )
       return { decision_types: [] }
     }
@@ -2180,6 +2173,7 @@ export class UnifiedAgent extends ModuleBase {
         sessionId,
         [message],
         MASTER_FRIEND,
+        { admin_chat_request_ids: [callbackInfo.request_id] },
       )
     } catch (err) {
       // F2：episode 中途抛错。
@@ -2596,47 +2590,6 @@ export class UnifiedAgent extends ModuleBase {
   // Trace RPC 方法
   // ============================================================================
 
-  private handleGetTraces(params: { limit?: number; offset?: number; status?: string }): { traces: import('./types.js').AgentTrace[]; total: number } {
-    return this.traceStore.getTraces(params.limit, params.offset, params.status)
-  }
-
-  private async handleGetTrace(params: { trace_id: string }): Promise<{ trace: import('./types.js').AgentTrace }> {
-    const trace = await this.traceStore.getFullTrace(params.trace_id)
-    if (!trace) {
-      throw new Error(`Trace not found: ${params.trace_id}`)
-    }
-    if (trace.resume_checkpoint) {
-      const secrets = [...this.knownSecrets]
-      return {
-        trace: {
-          ...trace,
-          resume_checkpoint: redactCheckpoint(trace.resume_checkpoint, secrets),
-        },
-      }
-    }
-    return { trace }
-  }
-
-  private handleClearTraces(params: { before?: string; trace_ids?: string[] }): { cleared_count: number } {
-    const count = this.traceStore.clearTraces(params.before, params.trace_ids)
-    return { cleared_count: count }
-  }
-
-  private handleSearchTraces(params: {
-    task_id?: string
-    time_range?: { start: string; end: string }
-    keyword?: string
-    status?: string
-    limit?: number
-    offset?: number
-  }): { traces: import('./core/trace-store.js').TraceIndexEntry[]; total: number } {
-    return this.traceStore.searchTraces(params)
-  }
-
-  private handleGetTraceTree(params: { task_id: string }): import('./core/trace-store.js').TraceTree {
-    return this.traceStore.getTraceTree(params.task_id)
-  }
-
   private handleGetTraceDiskUsage(): {
     total_bytes: number
     trace_count: number
@@ -2652,14 +2605,6 @@ export class UnifiedAgent extends ModuleBase {
     deleted_trace_ids: string[]
   } {
     return this.traceStore.cleanupOldTraces(params.days, params.dry_run)
-  }
-
-  private handleCleanupOldTracesByCount(params: { max_count: number; dry_run: boolean }): {
-    affected_count: number
-    affected_bytes: number
-    deleted_trace_ids: string[]
-  } {
-    return this.traceStore.cleanupOldTracesByCount(params.max_count, params.dry_run)
   }
 
   // ============================================================================
@@ -2880,6 +2825,37 @@ export class UnifiedAgent extends ModuleBase {
     return filterAndPageWorkers(all, params ?? {})
   }
 
+  /** §8.4 list_managers_admin：disk session keys ∪ TraceStore keys ∪ 内存 running keys 的去重 union。 */
+  private async handleListManagersAdmin(params: { pagination?: import('crabot-shared').PaginationParams }): Promise<import('crabot-shared').PaginatedResult<import('./manager/read-model.js').ManagerAdminSummary>> {
+    const stack = this.requireManagerStack()
+    const diskKeys = await stack.store.listManagerKeys()
+    const traceKeys = this.traceStore.listTraceManagerKeys()
+    const workers = await stack.ledger.listAllWorkers()
+    const workerCounts = new Map<string, number>()
+    for (const { managerKey } of workers) workerCounts.set(managerKey, (workerCounts.get(managerKey) ?? 0) + 1)
+    const running = new Map(stack.registry.listActiveManagers().map(({ key, lastActiveAtMs }) => [key, lastActiveAtMs] as const))
+    return buildManagerAdminSummaries({
+      diskSessionKeys: diskKeys,
+      traceKeys,
+      episodeStats: (key) => ({
+        count: this.traceStore.countManagerEpisodes(key),
+        latestStartedAt: this.traceStore.listManagerEpisodes(key, { page: 1, page_size: 1 }).items[0]?.started_at,
+      }),
+      workerCount: (key) => workerCounts.get(key) ?? 0,
+      runningLastActiveAtMs: (key) => running.get(key),
+    }, params?.pagination)
+  }
+
+  /** §8.4 list_manager_episodes_admin：按 exact manager key 查 TraceStore episode 列表。 */
+  private async handleListManagerEpisodesAdmin(params: { manager_key: ManagerKey; pagination?: import('crabot-shared').PaginationParams }): Promise<import('crabot-shared').PaginatedResult<import('./manager/trace-types.js').ManagerEpisodeTrace>> {
+    // manager stack/TraceStore 未 ready 时结构化失败，不返回空列表冒充成功。
+    this.requireManagerStack()
+    if (!params || typeof params.manager_key !== 'string' || params.manager_key.length === 0) {
+      throw new Error('manager_key is required')
+    }
+    return this.traceStore.listManagerEpisodes(params.manager_key, params.pagination)
+  }
+
   /** §8.3 get_worker_detail：单 worker 全量（台账条目 + 化身链）；不存在抛错，不返回空对象。 */
   private async handleGetWorkerDetail(params: GetWorkerDetailParams): Promise<GetWorkerDetailResult> {
     const found = await this.requireManagerStack().ledger.findWorker(params.worker_id)
@@ -2932,49 +2908,340 @@ export class UnifiedAgent extends ModuleBase {
    */
   private async handleGetWorkerTrace(params: GetWorkerTraceParams): Promise<GetWorkerTraceResult> {
     const stack = this.requireManagerStack()
-    // 先确认 worker 存在：否则事件流缺席（目录不存在）会被 readAll 归一成空数组，
-    // 让"worker 不存在"与"这个化身还没产生任何事件"在返回值上无法区分。
-    const found = await stack.ledger.findWorker(params.worker_id)
-    if (!found) {
-      throw new WorkerNotFoundError(params.worker_id)
-    }
-    if (found.worker.incarnations.length === 0) {
-      throw new WorkerHasNoIncarnationError(params.worker_id)
-    }
-    const incarnation =
-      params.seq === undefined ? mainlineIncarnation(found.worker) : findIncarnationBySeq(found.worker, params.seq)
-    if (!incarnation) {
-      throw new Error(`get_worker_trace: no incarnation with seq=${params.seq} found for worker ${params.worker_id}`)
-    }
-    if (isLegacyIncarnation(incarnation)) {
-      const trace = await readLegacyTraceEvents(getAgentTraceDir(), found.worker.legacy_source?.trace_ids ?? [])
-      const harnessEntries: LegacyTraceEventEntry[] = (await stack.harness.readWorkerEvents(params.worker_id))
-        .filter((event) => event.seq === incarnation.seq)
-        .map((event, sourceOrdinal) => ({
-          event: normalizeHarnessEvent(event),
-          ...(Number.isFinite(Date.parse(event.ts)) ? { started_at: event.ts } : {}),
-          trace_id: '',
-          source_ordinal: sourceOrdinal,
-        }))
-      const events = [...trace.entries, ...harnessEntries]
-        .sort(compareLegacyTraceEventEntries)
-        .map((entry) => entry.event)
-      const offset = parseOffsetCursor(params.cursor)
-      return {
-        events: events.slice(offset),
-        next_cursor: String(events.length),
-        ...(trace.unavailable_reason ? { unavailable_reason: trace.unavailable_reason } : {}),
-      }
-    }
-    const ofIncarnation = (await stack.harness.readWorkerEvents(params.worker_id)).filter(
-      (event) => event.seq === incarnation.seq
+    return readCompositeWorkerTrace(
+      {
+        ledger: stack.ledger,
+        harness: stack.harness,
+        adapters: stack.adapters,
+        cursorStore: this.traceCursorStore(),
+        nativeCopy: this.nativeTraceCopyStore(),
+        redact: (text) => redactSecrets(text, [...(this.knownSecrets ?? [])]),
+        legacyTraceDir: getAgentTraceDir(),
+      },
+      params,
     )
-    const offset = parseOffsetCursor(params.cursor)
-    return {
-      events: ofIncarnation.slice(offset).map(normalizeHarnessEvent),
-      next_cursor: String(ofIncarnation.length),
-      unavailable_reason: WORKER_TRACE_LAYER2_UNAVAILABLE,
+  }
+
+  /** P6-A §3.3：Agent-owned opaque cursor window store（惰性建目录）。 */
+  private traceCursorStore(): TraceCursorStore {
+    if (!this.traceCursorStoreInstance) {
+      this.traceCursorStoreInstance = new TraceCursorStore(path.join(getAgentDataDir(), 'trace-cursors'))
     }
+    return this.traceCursorStoreInstance
+  }
+
+  /**
+   * builtin 结构化 trace 钩子（P6-A §8.4）：TraceStore legacy record 承载
+   * （spans 即时间线事件；不写 related_task_id，不进 legacy taskIndex）。
+   * 脱敏在这里收口（与 manager trace writer 同一纪律）。
+   */
+  private builtinTraceHooks(): import('./workers/builtin/adapter.js').BuiltinTraceHooks {
+    const redact = (text: string) => redactSecrets(text, [...this.knownSecrets])
+    return {
+      startIncarnationTrace: ({ worker_id, seq, summary }) => {
+        const trace = this.traceStore.startTrace({
+          module_id: this.config.moduleId,
+          trigger: { type: 'task', summary: redact(summary) },
+        })
+        return trace.trace_id
+      },
+      appendTurn: (traceId, event) => {
+        const llmSpan = this.traceStore.startSpan(traceId, {
+          type: 'llm_call',
+          details: {
+            model: '',
+            stop_reason: event.stopReason,
+            ...(event.usage ? { usage: event.usage } : {}),
+          } as import('./types.js').AgentSpanDetails,
+          started_at_ms: event.llmStartedAtMs,
+        })
+        this.traceStore.endSpan(traceId, llmSpan.span_id, 'completed', undefined,
+          event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined ? event.llmStartedAtMs + event.llmCallMs : undefined)
+        for (const toolCall of event.toolCalls) {
+          const span = this.traceStore.startSpan(traceId, {
+            type: 'tool_call',
+            parent_span_id: llmSpan.span_id,
+            details: {
+              name: toolCall.name,
+              input_summary: redact(JSON.stringify(toolCall.input).slice(0, 300)),
+              output_summary: redact(toolCall.output.slice(0, 300)),
+            } as import('./types.js').AgentSpanDetails,
+            started_at_ms: toolCall.startedAtMs,
+          })
+          this.traceStore.endSpan(traceId, span.span_id, toolCall.isError ? 'failed' : 'completed', undefined,
+            toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined ? toolCall.startedAtMs + toolCall.durationMs : undefined)
+        }
+      },
+      finishIncarnationTrace: (traceId, patch) => {
+        this.traceStore.endTrace(traceId, patch.status, { summary: redact(patch.summary) })
+      },
+    }
+  }
+
+  private builtinTraceReader(): import('./workers/builtin/adapter.js').BuiltinTraceReader {
+    return {
+      readTrace: async (traceId) => this.traceStore.getFullTrace(traceId),
+    }
+  }
+
+  /**
+   * 化身终态收割（P6-A §8.10）：做最后一次 native read，把剩余增量写 Agent-owned copy。
+   * copy 只装本化身、脱敏后的归一化事件（不含 setup terminal / credential / 其它 session）。
+   */
+  private async harvestIncarnationNativeTrace(handle: import('./workers/types.js').IncarnationHandle): Promise<void> {
+    try {
+      const stack = this.managerStack
+      if (!stack) return
+      const found = await stack.ledger.findWorker(handle.worker_id)
+      if (!found) return
+      const incarnation = found.worker.incarnations.find((item) => item.seq === handle.seq && item.impl === handle.impl)
+      if (!incarnation) return
+      const adapter = stack.adapters.get(handle.impl)
+      if (!adapter?.readTrace) return
+      const fingerprint = incarnationFingerprint({
+        impl: handle.impl as import('./workers/types.js').WorkerImplId,
+        seq: handle.seq,
+        started_at: (incarnation as { started_at?: string }).started_at,
+      })
+      // 终态收割是全量快照：copy 的「事件条数」≠ native 的「已消费行数」（坏行/未知行
+      // 也消费行号），拿它当 offset 会漏读+重写。终态时 live source 已完整，从头读并整体
+      // 覆盖 copy（append 的指纹替换语义保证不混入旧内容）。
+      const native = await adapter.readTrace(handle, { offset: 0 })
+      if (native.events.length > 0) {
+        await this.nativeTraceCopyStore().append(
+          handle.worker_id,
+          handle.seq,
+          fingerprint,
+          native.events,
+          (text) => redactSecrets(text, [...this.knownSecrets]),
+          { replace: true },
+        )
+      }
+    } catch (error) {
+      console.warn(`[${this.config.moduleId}] native trace terminal harvest failed for ${handle.worker_id}#${handle.seq}:`,
+        error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** P6-A §11.9：启动重放未确认 outbound——同 ID/payload 重发，Admin 幂等后标 confirmed。 */
+  private async replayPendingAdminChatOutbounds(): Promise<void> {
+    const key = 'admin-web::admin-chat' as ManagerKey
+    const store = this.adminChatCorrelationStore()
+    try {
+      const pending = await store.pendingOutbounds(key)
+      for (const record of pending) {
+        try {
+          const payload = record.payload as { session_id: string; content: unknown }
+          await this.rpcClient.call(
+            await this.getAdminPort(),
+            'send_message',
+            {
+              session_id: payload.session_id,
+              content: payload.content,
+              delivery_id: record.delivery_id,
+              request_ids: record.request_ids,
+            },
+            this.config.moduleId,
+          )
+          await this.confirmAdminChatDelivery(record.delivery_id, undefined)
+        } catch (error) {
+          // 重放失败同样走 fail 分流：永久拒绝标 abandoned 退出后续重放，
+          // 「not pending」按终态结算，传输失败留待下次重启。
+          await this.failAdminChatDelivery(record.delivery_id, error)
+        }
+      }
+    } catch (error) {
+      console.error(`[${this.config.moduleId}] admin chat outbound replay scan failed:`, error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** P6-A §3.2：启动重放未结算 Admin Chat wake——完整可重放 envelope 原样回 Manager。 */
+  private async replayPendingAdminChatWakes(): Promise<void> {
+    const stack = this.managerStack
+    if (!stack) return
+    try {
+      const keys = await this.adminChatCorrelationStore().managersWithPendingWakes()
+      for (const key of keys) {
+        const pending = await this.adminChatCorrelationStore().pendingWakes(key)
+        for (const wake of pending) {
+          try {
+            await stack.registry.routeHumanMessages(
+              'admin-web',
+              'admin-chat',
+              [wake.message],
+              MASTER_FRIEND,
+              { admin_chat_request_ids: [wake.request_id] },
+            )
+          } catch (error) {
+            console.error(`[${this.config.moduleId}] admin chat wake replay failed for ${wake.request_id}:`,
+              error instanceof Error ? error.message : String(error))
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`[${this.config.moduleId}] admin chat wake replay scan failed:`, error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** P6-A §3.2/§3.5：Admin Chat correlation 持久化（inbound wake journal + outbound delivery）。 */
+  private adminChatCorrelationStore(): import('./manager/chat-correlation-store.js').AdminChatCorrelationStore {
+    if (!this.adminChatCorrelationStoreInstance) {
+      this.adminChatCorrelationStoreInstance = new AdminChatCorrelationStore(path.join(getAgentDataDir(), 'managers'))
+    }
+    return this.adminChatCorrelationStoreInstance
+  }
+
+  /** P6-A §11.7：Admin Chat 出站 delivery prepare——claim IDs + staging + prepared 落盘。 */
+  private async prepareAdminChatDelivery(
+    entry: import('./agent/outbound-flush.js').OutboundBufferEntry,
+    content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string },
+  ): Promise<{ delivery_id: string; request_ids: string[]; content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string } } | undefined> {
+    const stack = this.managerStack
+    if (!stack) return undefined
+    const key = 'admin-web::admin-chat' as ManagerKey
+    // 原子 claim 本 episode 尚未 claim 的 ID；全部被 claim 过则本条是追加/proactive（空 IDs）。
+    const requestIds = stack.registry.claimAdminChatRequestIds(key)
+    const deliveryId = generateId()
+    const store = this.adminChatCorrelationStore()
+    // local attachment 先复制进 Agent-owned staging 并记 raw-byte digest（§3.5）；
+    // prepared payload 引用稳定 staged 副本，不依赖 restart 后仍存在的源路径。
+    let finalContent = content
+    try {
+      if (content.file_path) {
+        // 读 buildMessageContent 映射后的 host path（entry.file_path 是 sandbox 视角）。
+        finalContent = await this.stageDeliveryAttachment(key, deliveryId, content, content.file_path)
+      }
+      await store.prepareOutbound({
+        delivery_id: deliveryId,
+        manager_key: key,
+        request_ids: requestIds,
+        target_session: { channel_id: entry.channel_id, session_id: entry.session_id },
+        payload_sha256: dispatchPayloadSha256({
+          session_id: entry.session_id,
+          content: finalContent,
+          request_ids: requestIds,
+          task_id: null,
+        }),
+        payload: { session_id: entry.session_id, content: finalContent },
+      })
+    } catch (error) {
+      // staging/落盘失败：归还 claim（没有任何 delivery record，重试可重新 claim）。
+      if (requestIds.length > 0) stack.registry.unclaimAdminChatRequestIds(key, requestIds)
+      throw error
+    }
+    // 首次 RPC 必须发 finalContent（staged 引用），与落盘的 payload 同源——否则重启重放
+    // 发 staged 版本会被 Admin 的 payload_sha256 校验判成 CONFLICT。
+    return { delivery_id: deliveryId, request_ids: requestIds, content: finalContent }
+  }
+
+  /** local attachment → Agent-owned per-delivery staging（记 raw-byte digest）。 */
+  private async stageDeliveryAttachment(
+    key: ManagerKey,
+    deliveryId: string,
+    content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string },
+    filePath: string,
+  ): Promise<{ type: string; text?: string; media_url?: string; file_path?: string; filename?: string }> {
+    const store = this.adminChatCorrelationStore()
+    const stagingDir = store.stagingDir(key, deliveryId)
+    fs.mkdirSync(stagingDir, { recursive: true, mode: 0o700 })
+    const bytes = fs.readFileSync(filePath)
+    const digest = createHash('sha256').update(bytes).digest('hex')
+    const stagedName = `${path.basename(filePath)}.${digest.slice(0, 12)}`
+    const stagedPath = path.join(stagingDir, stagedName)
+    fs.writeFileSync(stagedPath, bytes, { mode: 0o600 })
+    const clone = JSON.parse(JSON.stringify(content)) as Record<string, unknown>
+    if (clone.file_path === filePath) clone.file_path = stagedPath
+    return clone as unknown as { type: string; text?: string; media_url?: string; file_path?: string; filename?: string }
+  }
+
+  /**
+   * P6-A §11.11：不经 LLM 的 Admin Chat 直回（未配置/fail-loud）——与 manager 回话共用
+   * 同一个 admin-web send_message 入口和 delivery 事务。request 仍 pending 时带上 ID
+   * 一次性结算；已结算则 proactive 追加（不携带 IDs，不碰 pending index）。
+   */
+  private async deliverDirectAdminChatReply(requestId: string, text: string): Promise<void> {
+    const key = 'admin-web::admin-chat' as ManagerKey
+    const store = this.adminChatCorrelationStore()
+    const index = await store.readRequestIndex(key)
+    const requestIds = index.get(requestId)?.status === 'pending' ? [requestId] : []
+    const deliveryId = generateId()
+    const content = { type: 'text', text }
+    await store.prepareOutbound({
+      delivery_id: deliveryId,
+      manager_key: key,
+      request_ids: requestIds,
+      target_session: { channel_id: 'admin-web', session_id: 'admin-chat' },
+      payload_sha256: dispatchPayloadSha256({ session_id: 'admin-chat', content, request_ids: requestIds, task_id: null }),
+      payload: { session_id: 'admin-chat', content },
+    })
+    try {
+      await this.rpcClient.call(
+        await this.getAdminPort(),
+        'send_message',
+        { session_id: 'admin-chat', content, delivery_id: deliveryId, request_ids: requestIds },
+        this.config.moduleId,
+      )
+    } catch (error) {
+      // 统一走 fail 分流（not-pending 结算 / 永久拒绝 abandoned / 其余 failed 可重放），
+      // 不让永久失败每次重启重发一遍。
+      await this.failAdminChatDelivery(deliveryId, error)
+      throw error
+    }
+    await this.confirmAdminChatDelivery(deliveryId, undefined)
+  }
+
+  /** Admin 确认 commit：delivery confirmed + request claim settled + wake 结算 + staging 清理。 */
+  private async confirmAdminChatDelivery(deliveryId: string, _result: unknown): Promise<void> {
+    const key = 'admin-web::admin-chat' as ManagerKey
+    const store = this.adminChatCorrelationStore()
+    const record = await store.readOutbound(key, deliveryId)
+    if (!record) return
+    await store.markOutbound(key, deliveryId, 'confirmed')
+    await store.settleInbound(key, record.request_ids)
+    await store.cleanStaging(key, deliveryId)
+  }
+
+  /**
+   * 发送失败/结果未知的收敛语义（P6-A §11.9）：
+   * - 「not pending」= Admin 侧这些 request 已 settled（先前的 delivery 已 commit）——
+   *   对 Agent 即终态确认：标 confirmed + 结算 wake + 清 staging，不再重放；
+   * - 其它永久性拒绝（payload 冲突/参数非法/端点退役）= 这条 delivery 永远不会被接受：
+   *   标 abandoned + 清 staging、退出重放；wake 保持未结算，由 wake 重放重跑 episode
+   *   生成新 delivery 收敛；
+   * - 传输失败/结果未知 = failed：保持可重试，重启 reconcile 用同一 delivery_id 重放
+   *  （Admin 幂等返回首次结果）。
+   */
+  private async failAdminChatDelivery(deliveryId: string, error: unknown): Promise<void> {
+    const key = 'admin-web::admin-chat' as ManagerKey
+    const store = this.adminChatCorrelationStore()
+    const message = error instanceof Error ? error.message : String(error)
+    const notPending = /request (\S+) is not pending/i.exec(message)
+    if (notPending) {
+      // Admin 整批零 mutation 拒绝，报出的是**第一个**非 pending 的 ID——该 ID 在 Admin
+      // 已是终态（settled/expired）：本地结算它（含其 wake），delivery 标 abandoned
+      // （消息未落，不得标 confirmed）。其余 ID 保持 pending，由 wake 重放重跑 episode
+      // 生成只含现存 pending ID 的新 delivery 收敛。一刀切 confirmed+全量 settle 会把
+      // 混批里正常 pending 的回复静默丢掉（round 4 指出）。
+      const badId = notPending[1]
+      await store.markOutbound(key, deliveryId, 'abandoned')
+      await store.settleInbound(key, [badId])
+      await store.cleanStaging(key, deliveryId)
+      return
+    }
+    if (/conflict|INVALID_PARAMS|retired/i.test(message)) {
+      await store.markOutbound(key, deliveryId, 'abandoned')
+      await store.cleanStaging(key, deliveryId)
+      return
+    }
+    await store.markOutbound(key, deliveryId, 'failed')
+  }
+
+  /** P6-A §8.10：Agent-owned native copy store（live source 消失后的降级真相）。 */
+  private nativeTraceCopyStore(): NativeTraceCopyStore {
+    if (!this.nativeTraceCopyStoreInstance) {
+      this.nativeTraceCopyStoreInstance = new NativeTraceCopyStore(path.join(getAgentDataDir(), 'native-trace-copies'))
+    }
+    return this.nativeTraceCopyStoreInstance
   }
 
   // ============================================================================
@@ -3107,6 +3374,16 @@ export class UnifiedAgent extends ModuleBase {
     // Business ingress is registered only after onStart resolves; initialize durable
     // subject bindings before any Manager tool face can mint a continuation credential.
     await this.managerStack?.principals.init()
+    // P6-A §7.7：开放 Manager read model 前先收口遗留 running episode（failed/interrupted）。
+    this.traceStore.reconcileInterruptedManagerEpisodes()
+    // P6-A §11.9 先于 §3.2：先重放 prepared 的 outbound delivery（响应丢失场景），
+    // Admin 幂等返回首次结果即 confirm + settle wake——只差 confirm 的崩溃窗口不会
+    // 因重启先重跑一遍重复 episode。只有真正未交付的 wake 才进入重放。
+    await this.replayPendingAdminChatOutbounds()
+    // P6-A §3.2：重放未结算的 Admin Chat wake（同一 request ID 只恢复一次）。
+    // 放后台执行：replay 可能触发完整 LLM episode，不能阻塞 onStart（ModuleBase.start
+    // 先 await onStart 再 listen，堵死会让 RPC 端口长时间不可用）。
+    void this.replayPendingAdminChatWakes()
     this.startEventLoopWatchdog()
     // trace 的 in-flight 持久化：每 15s 覆盖写 traces-running-v3.jsonl，让 agent
     // 被 SIGKILL 时主 task trace 仍能保留到最后一次 flush 的状态。

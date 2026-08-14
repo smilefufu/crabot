@@ -165,6 +165,8 @@ interface WorkerInstance {
   tip: string
   /** 最近一次真实 engine 进展;不使用定时心跳,避免把挂死调用伪装为健康。 */
   activityAt: number
+  /** 本化身的 TraceStore trace 引用（P6-A §8.4；meta-<seq>.json 的 trace_id 同源）。 */
+  traceId?: string
   state: WorkerContractState
   ended_reason?: IncarnationEndReason
   outcome?: 'completed' | 'failed'
@@ -205,6 +207,22 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * builtin 结构化 trace 钩子（P6-A §8.4）：由装配层（unified-agent）用 TraceStore + 脱敏实现。
+ * 每个化身一条 trace（`builtin-<worker_id>-<seq>` 语义引用持久化在 meta-<seq>.json 的
+ * `trace_id` 字段——不按 task ID 猜、不靠内存）。
+ */
+export interface BuiltinTraceHooks {
+  startIncarnationTrace(params: { worker_id: string; seq: number; summary: string }): string
+  appendTurn(traceId: string, event: import('../../engine/types.js').EngineTurnEvent): void
+  finishIncarnationTrace(traceId: string, patch: { status: 'completed' | 'failed'; summary: string }): void
+}
+
+export interface BuiltinTraceReader {
+  readTrace(traceId: string): Promise<import('../../types.js').AgentTrace | undefined>
+}
+
+
 export class BuiltinWorkerAdapter implements WorkerAdapter {
   readonly implId = 'builtin' as const
 
@@ -232,6 +250,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   constructor(
     private readonly deps: {
       readonly dataDir: string
+      /** P6-A §8.4：结构化 trace 写钩子；缺省时 trace 面静默关闭。 */
+      readonly traceHooks?: BuiltinTraceHooks
+      /** P6-A §8.4：readTrace 读取入口（TraceStore 窄口）。 */
+      readonly traceReader?: BuiltinTraceReader
       /**
        * `report.lastText`：本次状态转换所在**轮次边界**上，worker 最后说的那段
        * assistant 文字。harness 会把它（截断后）塞进唤醒事件的 detail，manager 因此醒来
@@ -514,6 +536,38 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return meta.state
   }
 
+  /**
+   * builtin 结构化 trace（P6-A §8.4）：从 TraceStore 读本化身的结构化事件，
+   * trace 引用显式来自 meta-<seq>.json 的 trace_id（不按 task ID 猜）。
+   * cursor.offset 是已消费 span 数。
+   */
+  async readTrace(h: IncarnationHandle, cursor?: import('../types.js').TraceCursor): Promise<{ events: import('../types.js').NormalizedTraceEvent[]; nextCursor: import('../types.js').TraceCursor }> {
+    const metaPath = join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)
+    let traceId: string | undefined
+    try {
+      const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as { trace_id?: string }
+      traceId = typeof meta.trace_id === 'string' ? meta.trace_id : undefined
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { events: [], nextCursor: cursor ?? { offset: 0 } }
+      throw error
+    }
+    if (!traceId || !this.deps.traceReader) {
+      // 老 meta（升级前写入）没有 trace_id：退化为空、cursor 原样透传（可续读）。
+      return { events: [], nextCursor: cursor ?? { offset: 0 } }
+    }
+    const trace = await this.deps.traceReader.readTrace(traceId)
+    if (!trace) return { events: [], nextCursor: cursor ?? { offset: 0 } }
+    const start = cursor?.offset ?? 0
+    const events: import('../types.js').NormalizedTraceEvent[] = []
+    let consumed = start
+    for (let i = start; i < trace.spans.length; i++) {
+      const event = normalizeBuiltinSpan(trace.spans[i])
+      if (event) events.push({ ...event, source_offset: i })
+      consumed = i + 1
+    }
+    return { events, nextCursor: { offset: consumed } }
+  }
+
   async kill(h: IncarnationHandle): Promise<void> {
     const mutex = this.getMutex(h.worker_id)
     await mutex.run(async () => {
@@ -628,11 +682,32 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
   // --- Internal: burst execution ---
 
+  /**
+   * 保证本化身的 trace 引用存在（P6-A §8.4）：spawn 时随 meta 持久化；旧 meta 缺
+   * trace_id（升级前写入）时现建并补写 meta。所有 burst 入口共用，失败不阻塞 burst
+   * （trace 是观测面，不是执行面）。
+   */
+  private async ensureTraceId(instance: WorkerInstance, summary: string): Promise<void> {
+    if (instance.traceId || !this.deps.traceHooks) return
+    try {
+      instance.traceId = this.deps.traceHooks.startIncarnationTrace({
+        worker_id: instance.worker_id,
+        seq: instance.seq,
+        summary,
+      })
+      await this.writeMeta(instance)
+    } catch (error) {
+      console.warn(`[BuiltinWorkerAdapter] trace start failed for ${instance.worker_id}#${instance.seq}:`,
+        error instanceof Error ? error.message : String(error))
+    }
+  }
+
   private async runBurst(
     instance: WorkerInstance,
     handle: IncarnationHandle,
     builtin: NonNullable<SpawnSpec['builtin']>,
   ): Promise<void> {
+    await this.ensureTraceId(instance, `worker ${instance.worker_id}#${instance.seq}`)
     const tip = instance.tip
     const initialMessages = instance.sessionTree.pathTo(tip)
     const mutex = this.getMutex(instance.worker_id)
@@ -713,6 +788,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         },
         onTurn: (event) => {
           instance.activityAt = Date.now()
+          if (instance.traceId) this.deps.traceHooks?.appendTurn(instance.traceId, event)
           if (event.assistantText) {
             lastAssistantText = event.assistantText
             pendingWrites.push(
@@ -807,6 +883,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     handle: IncarnationHandle,
     builtin: NonNullable<SpawnSpec['builtin']>,
   ): Promise<void> {
+    // fork 化身也有自己的结构化 trace（P6-A §8.4）：与主线 burst 同一 admission 纪律。
+    await this.ensureTraceId(instance, `worker ${instance.worker_id}#${instance.seq} (fork)`)
     const tip = instance.tip
     const initialMessages = instance.sessionTree.pathTo(tip)
     const mutex = this.getMutex(instance.worker_id)
@@ -863,6 +941,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         },
         onTurn: (event) => {
           instance.activityAt = Date.now()
+          if (instance.traceId) this.deps.traceHooks?.appendTurn(instance.traceId, event)
           if (event.assistantText) {
             pendingWrites.push(
               instance.outputLog.append(event.assistantText + '\n').catch((err) => {
@@ -1204,6 +1283,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${instance.pendingInputs.length} unsent message(s): ${instance.pendingInputs.join(' | ')}\n`
       await instance.outputLog.append(deadLetterMsg)
     }
+    if (instance.traceId) {
+      // 化身终态收口 trace（§8.4）：终态后 live 读取走 TraceStore 持久记录。
+      this.deps.traceHooks?.finishIncarnationTrace(instance.traceId, {
+        status: outcome === 'completed' ? 'completed' : 'failed',
+        summary: summary ?? `[${ended_reason}]`,
+      })
+    }
     await this.writeMeta(instance, { state: 'exited', ended_reason, outcome })
     instance.state = 'exited'
     instance.ended_reason = ended_reason
@@ -1241,6 +1327,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       seq: instance.seq,
       state,
       tip_node_id: instance.tip,
+      ...(instance.traceId !== undefined ? { trace_id: instance.traceId } : {}),
       ...(ended_reason !== undefined ? { ended_reason } : {}),
       ...(outcome !== undefined ? { outcome } : {}),
     }
@@ -1248,5 +1335,30 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const tmpPath = join(instance.dir, `.meta-${instance.seq}.json.tmp-${randomUUID()}`)
     await fs.writeFile(tmpPath, JSON.stringify(meta), 'utf-8')
     await fs.rename(tmpPath, metaPath)
+  }
+}
+
+/** builtin trace span → NormalizedTraceEvent（P6-A §8.4）。 */
+function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import('../types.js').NormalizedTraceEvent | null {
+  const details = (span.details ?? {}) as Record<string, unknown>
+  const base = { ts: span.started_at }
+  switch (span.type) {
+    case 'llm_call':
+      return {
+        ...base,
+        kind: 'message',
+        role: 'assistant',
+        summary: typeof details.stop_reason === 'string' ? `llm ${details.stop_reason}` : 'llm call',
+        detail: details,
+      }
+    case 'tool_call':
+      return {
+        ...base,
+        kind: 'tool_call',
+        summary: typeof details.name === 'string' ? String(details.name) : 'tool call',
+        detail: details,
+      }
+    default:
+      return { ...base, kind: 'lifecycle', summary: span.type, detail: details }
   }
 }
