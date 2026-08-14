@@ -7,6 +7,8 @@
  */
 
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
+import fs from 'node:fs'
+import path from 'node:path'
 import {
   type Request,
   type Response,
@@ -491,8 +493,9 @@ export abstract class ModuleBase {
     this.registerMethod('on_event', this.handleOnEvent.bind(this))
     this.registerMethod('callback', this.handleCallback.bind(this))
 
-    // 启动时默认使用系统代理
-    proxyManager.updateConfig({ mode: 'system' })
+    // 启动时代理：优先恢复 admin 上次推送并持久化的配置（模块启动即要联网的场景——
+    // 如 telegram getMe——等不到注册后的 update_proxy_config 推送）；无记录回退 system。
+    proxyManager.updateConfig(this.loadPersistedProxyConfig())
 
     // 代理配置热更新
     this.registerMethod('update_proxy_config', this.handleUpdateProxyConfig.bind(this))
@@ -825,11 +828,43 @@ export abstract class ModuleBase {
     return { received: true }
   }
 
+  /** 读取本模块持久化的代理配置（损坏/缺失回退 system，不阻塞启动）。 */
+  private loadPersistedProxyConfig(): ProxyConfig {
+    try {
+      const filePath = this.persistedProxyConfigPath()
+      if (!filePath) return { mode: 'system' }
+      const raw = fs.readFileSync(filePath, 'utf-8')
+      const parsed = JSON.parse(raw) as Partial<ProxyConfig>
+      if (parsed && (parsed.mode === 'system' || parsed.mode === 'custom' || parsed.mode === 'none')) {
+        return { mode: parsed.mode, ...(typeof parsed.custom_url === 'string' ? { custom_url: parsed.custom_url } : {}) }
+      }
+    } catch { /* 缺失/损坏回退 system */ }
+    return { mode: 'system' }
+  }
+
+  private persistedProxyConfigPath(): string | null {
+    // 模块数据目录由 MM 经 DATA_DIR 注入（各模块 main.ts 同源）；缺失则跳过持久化。
+    const dir = process.env.DATA_DIR
+    return dir ? path.join(dir, 'proxy-config.json') : null
+  }
+
   /**
    * 代理配置更新处理器
    */
   private handleUpdateProxyConfig(params: { proxy: ProxyConfig }): { success: true } {
     proxyManager.updateConfig(params.proxy)
+    // 持久化到本模块 data_dir：下次启动在注册/推送之前就生效（启动即联网的模块依赖）。
+    // 写失败不阻塞热更新（运行时已生效），只记 warn。
+    try {
+      const filePath = this.persistedProxyConfigPath()
+      if (!filePath) throw new Error('DATA_DIR not set')
+      fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 })
+      const tmpPath = `${filePath}.tmp-${process.pid}`
+      fs.writeFileSync(tmpPath, JSON.stringify(params.proxy), { mode: 0o600 })
+      fs.renameSync(tmpPath, filePath)
+    } catch (error) {
+      console.warn(`[${this.config.moduleId}] persist proxy config failed:`, error instanceof Error ? error.message : String(error))
+    }
     console.log(`[${this.config.moduleId}] Proxy config updated: mode=${params.proxy.mode}`)
     return { success: true }
   }
