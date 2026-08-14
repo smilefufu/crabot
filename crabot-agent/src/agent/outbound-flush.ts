@@ -117,7 +117,7 @@ export type OnDispatchedHook = (entry: OutboundBufferEntry, sendResult: Outbound
  */
 export interface AdminChatDeliveryHooks {
   /** 首次 RPC 之前调用：生成 delivery_id + claim 的 request IDs 并把 prepared 记录落盘。 */
-  prepare(entry: OutboundBufferEntry, content: MessageContent): Promise<{ delivery_id: string; request_ids: string[] } | undefined>
+  prepare(entry: OutboundBufferEntry, content: MessageContent): Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined>
   /** Admin 确认 commit 后：delivery → confirmed、request claim settled、wake 结算、staging 清理。 */
   confirm(deliveryId: string, result: OutboundSendResult): Promise<void>
   /** RPC 失败/结果未知：delivery 保持可重试（不标 confirmed）。 */
@@ -264,13 +264,13 @@ async function resolvePlatformMentions(
  * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5
  */
 // 同一 tool invocation 的 delivery prepare 只跑一次（entry 对象在重试间共享）。
-const preparedDeliveries = new WeakMap<OutboundBufferEntry, Promise<{ delivery_id: string; request_ids: string[] } | undefined>>()
+const preparedDeliveries = new WeakMap<OutboundBufferEntry, Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined>>()
 
 function prepareDeliveryOnce(
   entry: OutboundBufferEntry,
   content: MessageContent,
   hooks: AdminChatDeliveryHooks,
-): Promise<{ delivery_id: string; request_ids: string[] } | undefined> {
+): Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined> {
   const existing = preparedDeliveries.get(entry)
   if (existing) return existing
   const prepared = hooks.prepare(entry, content)
@@ -321,7 +321,8 @@ export async function dispatchOutboundMessage(
       OutboundSendResult
     >(channelPort, 'send_message', {
       session_id: entry.session_id,
-      content: messageContent,
+      // 与 prepare 落盘的 payload 同源（staged attachment 引用）——payload_sha256 校验依赖。
+      content: delivery ? delivery.content : messageContent,
       ...(delivery ? { delivery_id: delivery.delivery_id, request_ids: delivery.request_ids } : {}),
       ...(hasFeatures
         ? {

@@ -55,6 +55,11 @@ export class ChatRequestIndex {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
       throw error
     }
+    // 超龄条目裁剪（30 天）：index 只承担近期请求的幂等/结算，老条目无消费者。
+    const cutoff = Date.now() - 30 * 24 * 3600 * 1000
+    for (const [id, entry] of Array.from(this.entries.entries())) {
+      if (Date.parse(entry.created_at) < cutoff) this.entries.delete(id)
+    }
   }
 
   get(requestId: string): ChatRequestIndexEntry | undefined {
@@ -64,9 +69,11 @@ export class ChatRequestIndex {
   private async persist(): Promise<void> {
     // 写盘失败必须抛给调用方（入站事务/结算路径据此回滚或重试）——静默降级成
     // 「index 无条目」会让后续 delivery 被 pending 校验拒绝、答案彻底丢失且无人重试。
+    // 同时链本身不得被一次失败永久污染：失败只影响本次调用方，writeTail 恢复 resolved。
     const snapshot = Array.from(this.entries.values())
-    this.writeTail = this.writeTail.then(() => writeJsonAtomic(this.filePath, snapshot))
-    await this.writeTail
+    const run = this.writeTail.then(() => writeJsonAtomic(this.filePath, snapshot))
+    this.writeTail = run.catch(() => undefined)
+    await run
   }
 
   /** 同 request_id 的入站串行化（fingerprint CAS 判准在锁内完成）。 */

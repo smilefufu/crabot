@@ -3095,7 +3095,7 @@ export class UnifiedAgent extends ModuleBase {
   private async prepareAdminChatDelivery(
     entry: import('./agent/outbound-flush.js').OutboundBufferEntry,
     content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string },
-  ): Promise<{ delivery_id: string; request_ids: string[] } | undefined> {
+  ): Promise<{ delivery_id: string; request_ids: string[]; content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string } } | undefined> {
     const stack = this.managerStack
     if (!stack) return undefined
     const key = 'admin-web::admin-chat' as ManagerKey
@@ -3103,12 +3103,13 @@ export class UnifiedAgent extends ModuleBase {
     const requestIds = stack.registry.claimAdminChatRequestIds(key)
     const deliveryId = generateId()
     const store = this.adminChatCorrelationStore()
+    // local attachment 先复制进 Agent-owned staging 并记 raw-byte digest（§3.5）；
+    // prepared payload 引用稳定 staged 副本，不依赖 restart 后仍存在的源路径。
+    let finalContent = content
     try {
-      // local attachment 先复制进 Agent-owned staging 并记 raw-byte digest（§3.5）；
-      // prepared payload 引用稳定 staged 副本，不依赖 restart 后仍存在的源路径。
-      let finalContent = content
-      if (entry.file_path) {
-        finalContent = await this.stageDeliveryAttachment(key, deliveryId, content, entry.file_path)
+      if (content.file_path) {
+        // 读 buildMessageContent 映射后的 host path（entry.file_path 是 sandbox 视角）。
+        finalContent = await this.stageDeliveryAttachment(key, deliveryId, content, content.file_path)
       }
       await store.prepareOutbound({
         delivery_id: deliveryId,
@@ -3128,7 +3129,9 @@ export class UnifiedAgent extends ModuleBase {
       if (requestIds.length > 0) stack.registry.unclaimAdminChatRequestIds(key, requestIds)
       throw error
     }
-    return { delivery_id: deliveryId, request_ids: requestIds }
+    // 首次 RPC 必须发 finalContent（staged 引用），与落盘的 payload 同源——否则重启重放
+    // 发 staged 版本会被 Admin 的 payload_sha256 校验判成 CONFLICT。
+    return { delivery_id: deliveryId, request_ids: requestIds, content: finalContent }
   }
 
   /** local attachment → Agent-owned per-delivery staging（记 raw-byte digest）。 */

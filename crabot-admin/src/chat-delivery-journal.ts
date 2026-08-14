@@ -106,6 +106,11 @@ export class ChatDeliveryJournalStore {
 
   /** startup reconcile：prepared/committing 的 journal（committed/rolled_back 不返回）。 */
   async pendingJournals(): Promise<ChatDeliveryJournalRecord[]> {
+    return (await this.listAll()).filter((record) => record.state === 'prepared' || record.state === 'committing')
+  }
+
+  /** 全量 journal（startup reconcile 单趟扫描：pending 补完 / committed 补 settle / 终态 GC）。 */
+  async listAll(): Promise<ChatDeliveryJournalRecord[]> {
     let entries: string[]
     try {
       entries = await fs.readdir(join(this.dataDir, 'chat-delivery-journal'))
@@ -117,11 +122,20 @@ export class ChatDeliveryJournalStore {
     for (const entry of entries) {
       if (!entry.endsWith('.json')) continue
       try {
-        const record = JSON.parse(await fs.readFile(join(this.dataDir, 'chat-delivery-journal', entry), 'utf-8')) as ChatDeliveryJournalRecord
-        if (record.state === 'prepared' || record.state === 'committing') records.push(record)
+        records.push(JSON.parse(await fs.readFile(join(this.dataDir, 'chat-delivery-journal', entry), 'utf-8')) as ChatDeliveryJournalRecord)
       } catch { /* 坏 record 隔离跳过 */ }
     }
     return records
+  }
+
+  /** 终态 journal 超过保留期后删除（Agent 侧 delivery 重放窗口远小于该期）。 */
+  async gcTerminal(maxAgeMs: number): Promise<void> {
+    const now = Date.now()
+    for (const record of await this.listAll()) {
+      if (record.state !== 'committed' && record.state !== 'rolled_back') continue
+      if (now - Date.parse(record.updated_at) <= maxAgeMs) continue
+      await fs.rm(this.journalPath(record.delivery_id), { force: true }).catch(() => {})
+    }
   }
 
   async cleanStaging(deliveryId: string): Promise<void> {

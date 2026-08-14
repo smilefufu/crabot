@@ -73,9 +73,22 @@ interface InboundDispatchJournalRecord {
   readonly request_id: string
   /** 首次生成后固定的完整 Agent ChannelMessage（每次 attempt 原样重放）。 */
   readonly message: AgentBoundChannelMessage
+  /** 入站 fingerprint（§11.3）：reconcile 自愈 index 需要原值重放。 */
+  readonly fingerprint: string
   attempt: number
   status: 'pending_dispatch' | 'agent_accepted' | 'expired'
   readonly created_at: string
+}
+
+/** request_id 是前端可控字符串且用作 journal 文件名——必须是无路径分隔符的安全形态。 */
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+function assertValidRequestId(requestId: string): void {
+  if (!REQUEST_ID_PATTERN.test(requestId)) {
+    const error = new Error(`invalid request_id: ${requestId}`)
+    ;(error as { code?: string }).code = 'ADMIN_CHAT_INVALID_REQUEST_ID'
+    throw error
+  }
 }
 
 export class ChatManager {
@@ -245,6 +258,7 @@ export class ChatManager {
   // ==========================================================================
 
   private inboundJournalPath(requestId: string): string {
+    assertValidRequestId(requestId)
     return path.join(this.dataDir, 'chat-inbound-dispatch-journal', `${requestId}.json`)
   }
 
@@ -281,6 +295,7 @@ export class ChatManager {
     storeContent: MessageContent
     agentContent: MessageContent
   }): Promise<{ kind: 'admitted'; message: ChatMessage } | { kind: 'duplicate' } | { kind: 'conflict' }> {
+    assertValidRequestId(params.request_id)
     return this.requestIndex.withMutex(params.request_id, async () => {
       const fingerprint = computeInboundFingerprintV1({ text: params.text, files: params.files })
       let verdict: Awaited<ReturnType<ChatRequestIndex['check']>>
@@ -317,6 +332,7 @@ export class ChatManager {
         kind: 'admin_chat_inbound_dispatch',
         request_id: params.request_id,
         message: agentMessage,
+        fingerprint,
         attempt: 0,
         status: 'pending_dispatch',
         created_at: userMessage.timestamp,
@@ -371,6 +387,9 @@ export class ChatManager {
         )
         record.status = 'agent_accepted'
         await this.writeInboundJournal(record)
+        // 终态 journal 即删：Agent 侧 wake journal 已接管恢复责任，Admin 无需保留——
+        // 否则 journal 目录随历史消息线性增长。
+        await fs.rm(this.inboundJournalPath(record.request_id), { force: true })
         return
       } catch (error) {
         console.error(`[ChatManager] dispatch attempt ${record.attempt} failed for ${record.request_id}:`,
@@ -382,6 +401,7 @@ export class ChatManager {
           record.status = 'expired'
           await this.writeInboundJournal(record)
           await this.requestIndex.expire(record.request_id)
+          await fs.rm(this.inboundJournalPath(record.request_id), { force: true })
           return
         }
         await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** record.attempt, 10_000)))
@@ -401,10 +421,19 @@ export class ChatManager {
     for (const entry of entries) {
       if (!entry.endsWith('.json')) continue
       try {
-        const record = JSON.parse(
-          await fs.readFile(path.join(this.dataDir, 'chat-inbound-dispatch-journal', entry), 'utf-8'),
-        ) as InboundDispatchJournalRecord
-        if (record.status !== 'pending_dispatch') continue
+        const record = await this.readInboundJournal(entry.slice(0, -'.json'.length))
+        if (!record || record.status !== 'pending_dispatch') continue
+        // 崩在 journal 与 recordAdmission 之间：重放前先把 index 补上（journal 自持
+        // fingerprint），否则 Agent 回答回来会被 pending 前置校验永久拒收。
+        const existing = this.requestIndex.get(record.request_id)
+        if (!existing) {
+          await this.requestIndex.recordAdmission({
+            request_id: record.request_id,
+            session_id: 'admin-chat',
+            fingerprint: record.fingerprint,
+            user_message_id: record.message.platform_message_id,
+          })
+        }
         void this.runInboundDispatch(record).catch((error) => {
           console.error(`[ChatManager] startup dispatch replay failed for ${record.request_id}:`,
             error instanceof Error ? error.message : String(error))
@@ -422,6 +451,7 @@ export class ChatManager {
     if (!jwt || !(await this.verifyJwt(jwt, this.jwtSecret, this.dataDir))) {
       throw new Error('Admin Chat ingress was not JWT authenticated')
     }
+    assertValidRequestId(params.request_id)
     const text = params.text.trim()
     if (!text && params.files.length === 0) {
       throw new Error('Empty message')
@@ -480,6 +510,7 @@ export class ChatManager {
         kind: 'admin_chat_inbound_dispatch',
         request_id: params.request_id,
         message: agentMessage,
+        fingerprint,
         attempt: 0,
         status: 'pending_dispatch',
         created_at: userMessage.timestamp,
@@ -747,38 +778,33 @@ export class ChatManager {
     }
   }
 
-  /** startup：reconcile delivery journal——committing 确定性补完，prepared 回滚重来。 */
+  /** startup：reconcile delivery journal——committing 确定性补完，prepared 回滚重来，
+   *  committed 补 settle，终态超龄 GC。单趟扫描，不再 readdir 两遍。 */
   async reconcileDeliveries(): Promise<void> {
-    const pending = await this.deliveryJournal.pendingJournals()
-    for (const journal of pending) {
-      try {
-        // prepared/committing 都按 journal 确定性重跑 commit（幂等）。
-        await this.commitDelivery(journal, journal.request_ids)
-      } catch (error) {
-        console.error(`[ChatManager] delivery reconcile failed for ${journal.delivery_id}:`,
-          error instanceof Error ? error.message : String(error))
+    const records = await this.deliveryJournal.listAll()
+    for (const journal of records) {
+      if (journal.state === 'prepared' || journal.state === 'committing') {
+        try {
+          // prepared/committing 都按 journal 确定性重跑 commit（幂等）。
+          await this.commitDelivery(journal, journal.request_ids)
+        } catch (error) {
+          console.error(`[ChatManager] delivery reconcile failed for ${journal.delivery_id}:`,
+            error instanceof Error ? error.message : String(error))
+        }
+        continue
       }
-    }
-    // committed 但 request 未 settle（崩溃在 commit 与 settle 之间）：补结算。
-    let entries: string[]
-    try {
-      entries = await fs.readdir(path.join(this.dataDir, 'chat-delivery-journal'))
-    } catch {
-      return
-    }
-    for (const entry of entries) {
-      if (!entry.endsWith('.json')) continue
-      try {
-        const record = JSON.parse(await fs.readFile(path.join(this.dataDir, 'chat-delivery-journal', entry), 'utf-8')) as ChatDeliveryJournalRecord
-        if (record.state !== 'committed') continue
-        for (const requestId of record.request_ids) {
+      if (journal.state === 'committed') {
+        // committed 但 request 未 settle（崩溃在 commit 与 settle 之间）：补结算。
+        for (const requestId of journal.request_ids) {
           const idx = this.requestIndex.get(requestId)
           if (idx && idx.status === 'pending') {
-            await this.requestIndex.settle(requestId, record.platform_message_id ?? record.planned_message_id)
+            await this.requestIndex.settle(requestId, journal.platform_message_id ?? journal.planned_message_id)
           }
         }
-      } catch { /* 坏 record 隔离跳过 */ }
+      }
     }
+    // 终态 journal 超龄 GC（7 天 > Agent 侧任何 delivery 重放窗口）。
+    await this.deliveryJournal.gcTerminal(7 * 24 * 3600 * 1000)
   }
 
   /**

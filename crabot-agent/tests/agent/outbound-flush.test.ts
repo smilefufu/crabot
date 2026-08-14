@@ -69,6 +69,51 @@ describe('dispatchOutboundMessage', () => {
     expect(sendPayload.content.filename).toBe('report.png')
   })
 
+  it('admin-chat delivery：wire payload 与 prepare 落盘的 staged payload 同源（§11.7）', async () => {
+    const captured: Array<{ method: string; payload: unknown }> = []
+    const deps: OutboundDispatchDeps = {
+      rpcClient: {
+        call: vi.fn(async (_port: number, method: string, payload: unknown) => {
+          captured.push({ method, payload })
+          if (method === 'send_message') {
+            return { platform_message_id: 'm1', sent_at: '2026-06-08T00:00:00Z' }
+          }
+          return {}
+        }),
+      } as never,
+      moduleId: 'm',
+      resolveChannelPort: async () => 19009,
+      getAdminPort: async () => 19001,
+      sandboxPathMappingsRef: { current: [] },
+      adminChatDelivery: {
+        // prepare 把 file_path 改写成 staging 路径；wire 必须发改写后的版本，
+        // 否则重启重放（发 staged 版）会被 Admin payload_sha256 校验判成 CONFLICT。
+        prepare: vi.fn(async (_entry, content) => ({
+          delivery_id: 'd1',
+          request_ids: ['r1'],
+          content: { ...content, file_path: '/agent-data/staging/d1/attachment.abc123' },
+        })),
+        confirm: vi.fn(async () => {}),
+        fail: vi.fn(async () => {}),
+      },
+    }
+
+    const entry = makeEntry({
+      channel_id: 'admin-web',
+      session_id: 'admin-chat',
+      file_path: '/host/work/output.png',
+      filename: 'report.png',
+      content_type: 'image',
+    })
+    await dispatchOutboundMessage(entry, deps)
+
+    const sendCall = captured.find((c) => c.method === 'send_message')
+    const sendPayload = sendCall!.payload as { content: { file_path?: string }; delivery_id?: string; request_ids?: string[] }
+    expect(sendPayload.delivery_id).toBe('d1')
+    expect(sendPayload.request_ids).toEqual(['r1'])
+    expect(sendPayload.content.file_path).toBe('/agent-data/staging/d1/attachment.abc123')
+  })
+
   it('file_path 无 mapping 且绝对路径 → 直接用（本地 unified agent 路径）', async () => {
     const captured: Array<{ method: string; payload: unknown }> = []
     const deps: OutboundDispatchDeps = {

@@ -213,10 +213,15 @@ export class AdminChatCorrelationStore {
   }
 
   private async rewriteWakes(managerKey: ManagerKey, wakes: AdminChatWakeRecord[]): Promise<void> {
+    // 压实：pending 全保留，settled 只留最近 100 条（settled 无消费者——重放只看 pending，
+    // admitInbound 自愈也只看 pending；保留少量 settled 仅作近期审计）。
+    const pending = wakes.filter((wake) => wake.status === 'pending')
+    const settled = wakes.filter((wake) => wake.status === 'settled').slice(-100)
+    const compacted = [...pending, ...settled]
     const wakesPath = this.wakesPath(managerKey)
     await fs.mkdir(dirname(wakesPath), { recursive: true, mode: 0o700 })
     const tmpPath = `${wakesPath}.tmp-${randomUUID()}`
-    await fs.writeFile(tmpPath, wakes.map((wake) => JSON.stringify(wake)).join('\n') + '\n', { mode: 0o600 })
+    await fs.writeFile(tmpPath, compacted.map((wake) => JSON.stringify(wake)).join('\n') + '\n', { mode: 0o600 })
     await fs.rename(tmpPath, wakesPath)
   }
 
@@ -294,11 +299,20 @@ export class AdminChatCorrelationStore {
       throw error
     }
     const records: OutboundDeliveryRecord[] = []
+    const now = Date.now()
     for (const entry of entries) {
       if (!entry.endsWith('.json')) continue
       try {
-        const record = JSON.parse(await fs.readFile(join(this.outboundDir(managerKey), entry), 'utf-8')) as OutboundDeliveryRecord
-        if (record.status === 'prepared' || record.status === 'failed') records.push(record)
+        const filePath = join(this.outboundDir(managerKey), entry)
+        const record = JSON.parse(await fs.readFile(filePath, 'utf-8')) as OutboundDeliveryRecord
+        if (record.status === 'prepared' || record.status === 'failed') {
+          records.push(record)
+          continue
+        }
+        // 终态（confirmed/abandoned）超 24h 即删——Admin 侧确认语义已闭环，无消费者。
+        if (now - Date.parse(record.updated_at) > 24 * 3600 * 1000) {
+          await fs.rm(filePath, { force: true }).catch(() => {})
+        }
       } catch { /* 坏 record 隔离跳过 */ }
     }
     return records

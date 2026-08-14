@@ -158,6 +158,16 @@ describe('入站带附件消息（handleInboundMessage）', () => {
     )).rejects.toThrow(/JWT authenticated/)
   })
 
+  it('request_id 路径穿越被拒绝（不落地任何 journal）', async () => {
+    const mgr = await makeManager()
+    await expect(mgr.handleInboundMessage(
+      { request_id: '../escape', text: 'hi', files: [] },
+      'test-token',
+    )).rejects.toThrow(/invalid request_id/)
+    const journalDir = path.join(TEST_DATA_DIR, 'chat-inbound-dispatch-journal')
+    await expect(fs.readdir(journalDir)).rejects.toThrow(/ENOENT/)
+  })
+
   beforeEach(async () => {
     await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
     await fs.mkdir(TEST_DATA_DIR, { recursive: true })
