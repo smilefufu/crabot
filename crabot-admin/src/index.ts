@@ -992,15 +992,18 @@ export class AdminModule extends ModuleBase {
     // 若 Admin 单独重启错过事件，由 ensureAgentPort() 惰性兜底。
 
     if (!this.managementOnly) {
-      // §3.19.12 step 4：存量实例（cutover 早已完成）升级 P6-B 时在此补跑 bootstrap；
+      await this.ensureBuiltinSchedules()
+      // §3.19.12 step 4：bootstrap 的 CAS 提交要发布 invalidation（Agent 收到 hint 才会
+      // pull 新 revision，commit 的 revision 核对才过得去）——所以 publication 必须先开，
+      // 但 ingress（cutoverActivated）仍在 bootstrap 完成后才开。
+      this.configInvalidationPublicationEnabled = true
+      // 存量实例（cutover 早已完成）升级 P6-B 时在此补跑 bootstrap；
       // fresh deploy/已完成/user_superseded 都幂等快进。
       await this.runWorkerImplementationBootstrap()
-      await this.ensureBuiltinSchedules()
       const allSchedules = Array.from(this.schedules.values())
       this.scheduleEngine.startAll(allSchedules)
       console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
       this.cutoverActivated = true
-      this.configInvalidationPublicationEnabled = true
       try {
         await this.startAgentDependentMaintenance()
       } catch (error) {
@@ -2396,6 +2399,12 @@ export class AdminModule extends ModuleBase {
         await this.handlePutWorkerImplementationsApi(req, res)
         return
       }
+      // Worker implementation observed status（P6-B §6：Agent activation registry 透传）。
+      if (pathname === '/api/agent/worker-implementations/status' && req.method === 'GET') {
+        await this.proxyAgentRpc(res, 'list_worker_implementation_status', {})
+        return
+      }
+
       // Worker operation（P6-B §9）：install/verify/setup/cancel 的 Browser 入口。
       const workerOpMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/operations$/)
       if (workerOpMatch && req.method === 'POST') {
