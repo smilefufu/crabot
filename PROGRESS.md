@@ -5,7 +5,7 @@
 
 ## 当前状态
 
-### P6 进行中：Slice 0、P6-A 已合并；下一阶段 P6-B
+### P6 进行中：Slice 0、P6-A 已合并；P6-B 已开 PR #94
 
 - P6 总体设计：`crabot-docs/superpowers/specs/2026-08-11-p6-agent-observability-worker-management-design.md`；五份实施计划在 `crabot-docs/superpowers/plans/2026-08-12-p6-*.md`。顺序固定：**Slice 0 → P6-A → P6-B → P6-C → P6-D**。
 - Slice 0 **已合并**（PR #90 → merge `377200e`，15 轮 review、28 条 finding 全部修复并 resolve）。核心交付：唯一核心 Agent + 动态/legacy Agent 只读归档、runtime bearer identity（per-child 绑定/撤销、启动即从 env 摘除）、authenticated config pull（单飞+退避自愈、降级启动 fail-closed 存活）、management-only cutover（幂等 marker + 宽容握手 + degraded-only health）、durable config revision（outbox 三态 + HMAC fingerprint + journal binding + seqlock 一致性读）、sensitive RPC 独立 transport、legacy get_config/update_config 无认证端点退役、noop-safe 全部配置写入路径、容错 MCP 热更 + 候选连接清理。协议同步：protocol-agent-v3 3.1.1 §8.5/§8.6/§11、protocol-admin §3.18/§3.19/§7.1、protocol-module-manager §3.18.1：
@@ -32,7 +32,7 @@
 
 1. **Slice 0 收口**：已完成并合并（PR #90 → `377200e`）。
 2. **P6-A 可观测性 / Admin Chat correlation**：**已合并**（PR #92 → `4fbbf96`，用户手动合并；8 轮 review、30+ 条 finding 全部修复并 resolve）。交付：Manager episode trace（TraceStore kind 判别 + admission fail-closed + 启动收口 + 内存有界驻留）、`/api/agent/managers*` + episodes RPC、worker composite trace reader（opaque cursor + native copy 终态收割 + builtin 结构化 trace）、v2 raw trace REST/RPC 退役、v3 Managers/Workers UI、Admin Chat delivery 事务（入站 fingerprint CAS + dispatch outbox + delivery journal + wire/staged payload 同源 + 双侧 journal GC + index 自愈），chat_callback 退役、FIFO 认领删除。另带出一个独立修复：模块代理配置持久化（main `43aeb5f`，修 telegram 启动竞态）。生产实测通过（E2E chat 全链路、幂等重放、重启持久化回归）。计划：`2026-08-12-p6-a-observability-admin-chat-correlation-plan.md`。
-3. **P6-B Worker 安装/连接/验证/setup**：`native_account`/`admin_provider`/`existing_host` 连接模式、grandfather bootstrap（存量生产首次 rollout 的硬前提）、Admin intent 持久化 + Agent 侧 activation registry。计划：`2026-08-12-p6-b-worker-onboarding-plan.md`。
+3. **P6-B Worker 安装/连接/验证/setup**：**已开 PR #94**（分支 `feat/p6-b-worker-onboarding`）。交付：desired store+CAS、activation registry（ready 唯一判定）、6 个版本化 translator、managed installer（固定 manifest+原子 active）、operation assertion、真实 verify、grandfather bootstrap 事务、Workers 管理页。**已确认修订**：取消 setup PTY（无 auth.json 上传/订阅迁移/TUI login），配置矩阵 = CC setup-token / CC·codex BASE_URL+KEY / existing_host。生产 E2E 全通（含真实 install/verify/spawn）。计划：`2026-08-12-p6-b-worker-onboarding-plan.md`（含 2026-08-14 修订）。
 4. **P6-C Worker 选择语义**：detect/activation/preference 真实接线，替换 Manager prompt 中的假承诺。计划：`2026-08-12-p6-c-worker-policy-selection-plan.md`。
 5. **P6-D legacy backup/runtime retirement**：native backup preflight/archive-only/zero-partial-write（§3.18.1 完整语义）、legacy Agent metadata 清理、P7 遗留死码删除。计划：`2026-08-12-p6-d-legacy-agent-runtime-retirement-plan.md`。
 
