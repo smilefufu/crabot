@@ -142,3 +142,59 @@ test('concurrent sensitive calls keep transport bearers request-scoped', async (
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }
 })
+
+// ── 代理配置持久化（启动即联网模块等不到注册后的推送）──
+
+test('ModuleBase restores persisted proxy config at construction and persists updates', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { ModuleBase } = await import('./module-base.js')
+  const { proxyManager } = await import('./proxy-manager.js')
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crabot-proxy-persist-'))
+  process.env.DATA_DIR = dir
+
+  class ProbeModule extends ModuleBase {
+    protected async onStart(): Promise<void> {}
+    protected async onStop(): Promise<void> {}
+    exposeHandler(name: string): ((params: unknown) => unknown) | undefined {
+      return this.methodHandlers.get(name) as ((params: unknown) => unknown) | undefined
+    }
+  }
+
+  const baseConfig = {
+    moduleId: 'probe-1',
+    moduleType: 'probe',
+    version: '0.0.1',
+    protocolVersion: '0.0.1',
+    port: 0,
+  }
+
+  // 1) 无持久化记录 → system
+  new ProbeModule(baseConfig)
+  assert.equal((proxyManager as unknown as { config: { mode: string } }).config.mode, 'system')
+
+  // 2) 推送 custom → 立即生效且落盘
+  const mod = new ProbeModule(baseConfig)
+  const handler = mod.exposeHandler('update_proxy_config')!
+  const result = handler({ proxy: { mode: 'custom', custom_url: 'http://127.0.0.1:7890' } }) as { success: true }
+  assert.equal(result.success, true)
+  assert.equal((proxyManager as unknown as { config: { mode: string } }).config.mode, 'custom')
+  const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'proxy-config.json'), 'utf-8'))
+  assert.deepEqual(persisted, { mode: 'custom', custom_url: 'http://127.0.0.1:7890' })
+
+  // 3) 新实例（模拟重启）构造即恢复 custom——不等推送
+  new ProbeModule(baseConfig)
+  const restored = (proxyManager as unknown as { config: { mode: string; custom_url?: string } }).config
+  assert.equal(restored.mode, 'custom')
+  assert.equal(restored.custom_url, 'http://127.0.0.1:7890')
+
+  // 4) 损坏文件回退 system，不阻塞启动
+  fs.writeFileSync(path.join(dir, 'proxy-config.json'), '{broken')
+  new ProbeModule(baseConfig)
+  assert.equal((proxyManager as unknown as { config: { mode: string } }).config.mode, 'system')
+
+  delete process.env.DATA_DIR
+  fs.rmSync(dir, { recursive: true, force: true })
+})
