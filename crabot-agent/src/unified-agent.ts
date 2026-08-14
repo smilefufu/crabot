@@ -68,6 +68,8 @@ import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
 import { ActivationRegistry } from './workers/activation-registry.js'
 import { admitWorkerConnection } from './workers/connections/admission.js'
+import { WorkerOperationStore } from './workers/operations/store.js'
+import { ManagedInstaller } from './workers/install/managed-installer.js'
 
 /** 新部署安全初始 worker implementation 配置（与 Admin store revision-1 语义一致）。 */
 const DEFAULT_SAFE_WORKER_IMPLS: import('./workers/types.js').WorkerImplementationRuntimeConfig = {
@@ -472,6 +474,8 @@ export class UnifiedAgent extends ModuleBase {
    */
   private managerStack?: ManagerStack
   private activationRegistry!: ActivationRegistry
+  private workerOperationStore!: WorkerOperationStore
+  private managedInstaller!: ManagedInstaller
   private managerEventPublisher?: AgentEventPublisher
   /** True after startup reconciliation has settled, even when it failed. */
   private managerReconciliationSettled = false
@@ -703,6 +707,8 @@ export class UnifiedAgent extends ModuleBase {
     })
     this.managerEventPublisher = publishEvent
     this.activationRegistry = new ActivationRegistry(getAgentDataDir())
+    this.workerOperationStore = new WorkerOperationStore(getAgentDataDir())
+    this.managedInstaller = new ManagedInstaller(getAgentDataDir())
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
       now: () => new Date().toISOString(),
@@ -1214,6 +1220,7 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
     this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
     this.registerMethod('list_worker_implementation_status', this.handleListWorkerImplementationStatus.bind(this))
+    this.registerMethod('install_worker_implementation', this.handleInstallWorkerImplementation.bind(this))
     this.registerMethod('list_manager_episodes_admin', this.handleListManagerEpisodesAdmin.bind(this))
     this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
     this.registerMethod('read_worker_output_admin', this.handleReadWorkerOutputAdmin.bind(this))
@@ -2907,6 +2914,57 @@ export class UnifiedAgent extends ModuleBase {
     return result
   }
 
+  /**
+   * §3.19.12 install_worker_implementation：assertion 核销 → 固定 manifest managed install。
+   * Browser/RPC 不提供 package/version/URL/args——全部来自随 release 固定的 manifest。
+   */
+  private async handleInstallWorkerImplementation(params: {
+    impl?: unknown
+    operation_id?: unknown
+    assertion?: unknown
+    expected?: { action?: unknown; operation_id?: unknown; impl?: unknown; mode?: unknown; policy_revision?: unknown }
+  }): Promise<{ operation_id: string; state: string; version?: string }> {
+    const impl = params.impl
+    if (impl !== 'claude-code' && impl !== 'codex') throw new Error('impl must be claude-code or codex')
+    if (typeof params.operation_id !== 'string' || typeof params.assertion !== 'string' || !params.expected) {
+      throw new Error('operation_id, assertion and expected are required')
+    }
+    // 1. assertion 核销（Admin 回调，bearer 认证 + nonce 一次性）。
+    const adminPort = this.adminPort
+    if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')
+    await this.rpcClient.callSensitive(
+      adminPort,
+      'consume_worker_operation_assertion',
+      { assertion: params.assertion, expected: params.expected },
+      this.config.moduleId,
+      { authorizationBearer: ConfigLoader.getRuntimeBearer() },
+    )
+    // 2. 互斥 + operation 落 running 再执行。
+    if (this.workerOperationStore.hasActiveFor(impl)) {
+      throw new Error(`another mutating operation is active for ${impl}`)
+    }
+    const operationId = params.operation_id
+    await this.workerOperationStore.upsert({
+      operation_id: operationId, kind: 'install', impl, state: 'running',
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    })
+    try {
+      const result = await this.managedInstaller.install(impl)
+      await this.workerOperationStore.upsert({
+        operation_id: operationId, kind: 'install', impl, state: 'completed',
+        detail: `installed ${result.version}`, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      })
+      return { operation_id: operationId, state: 'completed', version: result.version }
+    } catch (error) {
+      await this.workerOperationStore.upsert({
+        operation_id: operationId, kind: 'install', impl, state: 'failed',
+        detail: (error instanceof Error ? error.message : String(error)).replace(/\/[^\s]+/g, '<path>').slice(0, 200),
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      })
+      throw error
+    }
+  }
+
   /** §6.5/§8.4：脱敏 WorkerImplementationStatus（activation registry 唯一 read API）。 */
   private async handleListWorkerImplementationStatus(): Promise<{ items: import('./workers/types.js').WorkerImplementationStatus[] }> {
     if (!this.activationRegistry.isInitialized()) {
@@ -3448,6 +3506,9 @@ export class UnifiedAgent extends ModuleBase {
     // P6-B §6：activation registry 载入持久 verification 状态；runtime config 已在
     // constructor/pull 路径应用过时 applyRuntimeConfigCandidate 会补 apply（见下）。
     await this.activationRegistry.load()
+    // P6-B §8/§9：operation 未终态收口（accepted/running → interrupted）+ staging 清理。
+    await this.workerOperationStore.load()
+    await this.managedInstaller.reconcileOnStartup()
     // P6-A §11.9 先于 §3.2：先重放 prepared 的 outbound delivery（响应丢失场景），
     // Admin 幂等返回首次结果即 confirm + settle wake——只差 confirm 的崩溃窗口不会
     // 因重启先重跑一遍重复 episode。只有真正未交付的 wake 才进入重放。

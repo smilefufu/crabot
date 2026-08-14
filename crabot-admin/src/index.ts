@@ -32,6 +32,7 @@ import { CoreAgentConfigMutationCoordinator } from './core-agent-config-revision
 import { WorkerImplementationStore } from './worker-implementation-store.js'
 import type { WorkerImplementationRuntimeConfig, CLIWorkerImplId } from './types.js'
 import { WorkerConnectionRevisionSigner } from './worker-connection-revision.js'
+import { WorkerOperationAssertions } from './worker-operation-assertions.js'
 import { CoreAgentCutoverStore } from './core-agent-cutover.js'
 import { CORE_AGENT_DEFINITION } from './core-agent-definition.js'
 import { BrowserManager } from './browser-manager.js'
@@ -495,6 +496,7 @@ export class AdminModule extends ModuleBase {
   // Agent 管理器
   private workerImplementationStore!: WorkerImplementationStore
   private workerConnectionRevisionSigner!: WorkerConnectionRevisionSigner
+  private workerOperationAssertions!: WorkerOperationAssertions
   private agentManager: AgentManager
 
   // Channel 管理器
@@ -628,6 +630,7 @@ export class AdminModule extends ModuleBase {
     this.subAgentManager = new SubAgentManager(this.adminConfig.data_dir, getBuiltinSubAgents)
     this.workerImplementationStore = new WorkerImplementationStore(this.adminConfig.data_dir)
     this.workerConnectionRevisionSigner = new WorkerConnectionRevisionSigner(this.adminConfig.data_dir)
+
     this.browserManager = new BrowserManager(
       this.adminConfig.data_dir,
       parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
@@ -745,6 +748,7 @@ export class AdminModule extends ModuleBase {
     // Agent 配置管理
     this.registerMethod('get_agent_config', this.handleGetAgentConfig.bind(this))
     this.registerMethod('resolve_worker_connection', this.handleResolveWorkerConnection.bind(this))
+    this.registerMethod('consume_worker_operation_assertion', this.handleConsumeWorkerOperationAssertion.bind(this))
     this.registerMethod('update_agent_config', this.handleUpdateAgentConfig.bind(this))
 
     // Memory 配置管理（供 Memory 模块启动时 pull 初始配置）
@@ -824,6 +828,8 @@ export class AdminModule extends ModuleBase {
       this.jwtSecret = crypto.randomBytes(32).toString('hex')
       console.warn('[Admin] Warning: No JWT secret configured, using random value')
     }
+    // worker operation assertion 签名密钥复用 jwtSecret（与 admin-chat assertion 同纪律）。
+    this.workerOperationAssertions = new WorkerOperationAssertions(this.adminConfig.data_dir, this.jwtSecret)
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
@@ -2385,6 +2391,12 @@ export class AdminModule extends ModuleBase {
       }
       if (pathname === '/api/agent/worker-implementations' && req.method === 'PUT') {
         await this.handlePutWorkerImplementationsApi(req, res)
+        return
+      }
+      // Worker operation（P6-B §9）：install/verify/setup/cancel 的 Browser 入口。
+      const workerOpMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/operations$/)
+      if (workerOpMatch && req.method === 'POST') {
+        await this.handleWorkerOperationApi(req, res, decodeURIComponent(workerOpMatch[1]))
         return
       }
 
@@ -9648,6 +9660,35 @@ export class AdminModule extends ModuleBase {
     return { connection, connection_revision: revision, policy_revision: desired.revision }
   }
 
+  /**
+   * §3.19.12 consume_worker_operation_assertion：Agent 在执行 operation 前核销。
+   * runtime bearer 先经 MM 验证 exact core Agent；nonce 一次性原子持久。
+   */
+  private async handleConsumeWorkerOperationAssertion(
+    params: { assertion?: unknown; expected?: unknown },
+    context?: RpcHandlerContext,
+  ): Promise<{ consumed: true; expires_at: string }> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime',
+      { expected_module_id: 'crabot-agent' },
+      this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+    if (typeof params.assertion !== 'string' || !params.expected || typeof params.expected !== 'object') {
+      throw new RpcError('INVALID_PARAMS', 'assertion and expected are required')
+    }
+    try {
+      return await this.workerOperationAssertions.consume(
+        params.assertion,
+        params.expected as Parameters<WorkerOperationAssertions['consume']>[1],
+      )
+    } catch (error) {
+      throw new RpcError('FORBIDDEN', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   /** GET /api/agent/worker-implementations：desired config（引用形态，无 secret）。 */
   private async handleGetWorkerImplementationsApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     const desired = await this.workerImplementationStore.load()
@@ -9684,6 +9725,69 @@ export class AdminModule extends ModuleBase {
       }
       console.error('[Admin] worker-implementations PUT failed:', error)
       sendJson(res, 400, { error: error instanceof Error ? (error.message || String(error)) : String(error) })
+    }
+  }
+
+  /**
+   * POST /api/agent/worker-implementations/:impl/operations（§3.19.12）。
+   * body 只接受 {action, expected_revision, mode?}；不接受 credential/env/command/args/URL。
+   * Admin 先 CAS/admission，再生成 operation/assertion 经 exact Agent RPC 下发——Browser
+   * 永远拿不到 assertion。
+   */
+  private async handleWorkerOperationApi(req: IncomingMessage, res: ServerResponse, impl: string): Promise<void> {
+    try {
+      if (impl !== 'claude-code' && impl !== 'codex') {
+        sendJson(res, 404, { error: `unknown worker implementation: ${impl}` })
+        return
+      }
+      const body = await this.readJsonBody<{ action?: unknown; expected_revision?: unknown; mode?: unknown }>(req)
+      const action = body.action
+      if (action !== 'install' && action !== 'verify' && action !== 'cancel') {
+        // setup 走独立 ticket/admission 路径（阶段 6），不在此入口。
+        sendJson(res, 400, { error: 'action must be install|verify|cancel' })
+        return
+      }
+      if (typeof body.expected_revision !== 'number') {
+        sendJson(res, 400, { error: 'expected_revision is required' })
+        return
+      }
+      const desired = await this.workerImplementationStore.load()
+      if (desired.revision !== body.expected_revision) {
+        sendJson(res, 409, { error: `worker implementation config revision conflict (current ${desired.revision})` })
+        return
+      }
+      const policy = desired.implementations[impl]
+      if (action !== 'install' && !policy.enabled) {
+        sendJson(res, 409, { error: `${impl} is not enabled` })
+        return
+      }
+      const mode = policy.connection?.mode ?? (typeof body.mode === 'string' ? body.mode : 'native_account')
+      const operationId = generateId()
+      const assertion = this.workerOperationAssertions.issue({
+        action, operation_id: operationId, impl, mode, policy_revision: desired.revision,
+      })
+      const agentPort = await this.ensureAgentPort()
+      if (!agentPort) {
+        sendJson(res, 503, { error: 'Agent not available' })
+        return
+      }
+      if (action === 'install') {
+        const result = await this.rpcClient.callSensitive<
+          Record<string, unknown>,
+          { operation_id: string; state: string; version?: string }
+        >(agentPort, 'install_worker_implementation', {
+          impl,
+          operation_id: operationId,
+          assertion,
+          expected: { action, operation_id: operationId, impl, mode, policy_revision: desired.revision },
+        }, this.config.moduleId)
+        sendJson(res, 200, result)
+        return
+      }
+      // verify/cancel 的 Agent 端点在后续阶段落地；这里先明确 501 而不是假装受理。
+      sendJson(res, 501, { error: `${action} operation is not yet implemented` })
+    } catch (error) {
+      sendJson(res, 502, { error: error instanceof Error ? error.message : String(error) })
     }
   }
 
