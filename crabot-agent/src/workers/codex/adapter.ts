@@ -892,6 +892,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_id: sessionId,
       session_discovery: sessionDiscoveryStatus,
       workspace_root: spec.workspace.root,
+      codex_home: codexHome,
     })
     this.runtimes.set(instanceKey(handle), runtime)
 
@@ -1031,6 +1032,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         session_id: prev.session_ref,
         session_discovery: prevRuntime.sessionDiscoveryStatus,
         workspace_root: prevRuntime.workspaceRoot,
+        codex_home: resumeCodexHome,
       })
       this.runtimes.set(instanceKey(handle), runtime)
       prevRuntime.resumed = true
@@ -1136,8 +1138,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const runtime = this.runtimes.get(instanceKey(h))
     const meta = runtime ? undefined : await this.readMetaFile(dir, h.seq)
     let rolloutPath = runtime?.rolloutPath
-    if (!rolloutPath && meta?.session_discovery === 'discovered' && meta.workspace_root && meta.session_id) {
-      const sessionsDir = join(meta.workspace_root, '.codex', 'sessions')
+    if (!rolloutPath && meta?.session_discovery === 'discovered' && meta.session_id) {
+      const home = meta.codex_home ?? (meta.workspace_root ? join(meta.workspace_root, '.codex') : undefined)
+      if (!home) return undefined
+      const sessionsDir = join(home, 'sessions')
       try {
         rolloutPath = await findRolloutFileBySessionId(sessionsDir, meta.session_id, true)
       } catch (err) {
@@ -1289,7 +1293,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const alive = await this.tmux.isAlive(sessionName)
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
-      const codexHome = workspaceRoot ? join(workspaceRoot, '.codex') : ''
+      // P6-B：admin_provider 的 CODEX_HOME 在 worker 级 runtime 目录（spawn/resume 时落了
+      // meta.codex_home）；老 meta 没有该字段才回退 workspace 推导（existing_host 语义）。
+      const codexHome = meta.codex_home ?? (workspaceRoot ? join(workspaceRoot, '.codex') : '')
       const sessionDiscoveryStatus: 'discovered' | 'placeholder' = meta.session_discovery ?? 'placeholder'
       const rolloutPath =
         sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
@@ -1340,6 +1346,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         workspace_root?: string
         ended_reason?: IncarnationEndReason
         session_discovery?: 'discovered' | 'placeholder'
+        /** P6-B：admin_provider 形态下 CODEX_HOME 是 worker 级 runtime 目录（非 workspace）；
+         *  不落 meta 的话重启重建会错回 workspace，resume/活性/trace 全断（R7）。 */
+        codex_home?: string
         state?: WorkerContractState
         wait_mode?: 'text' | 'action'
         wait_reason?: string
@@ -1394,6 +1403,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_id: runtime.sessionId,
       session_discovery: runtime.sessionDiscoveryStatus,
       workspace_root: runtime.workspaceRoot,
+      codex_home: runtime.codexHome,
       ...(state.kind === 'waiting_text' ? { wait_mode: 'text' as const } : {}),
       ...(state.kind === 'waiting_action' ? { wait_mode: 'action' as const, wait_reason: state.reason } : {}),
     })
@@ -1428,6 +1438,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       ended_reason,
       session_discovery: runtime.sessionDiscoveryStatus,
       workspace_root: runtime.workspaceRoot,
+      codex_home: runtime.codexHome,
     })
     runtime.controlState = { kind: 'exited', reason: ended_reason }
     runtime.ended_reason = ended_reason

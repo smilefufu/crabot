@@ -1,8 +1,10 @@
 import type { PaneSnapshot } from '../tmux/driver.js'
 import type { InputMode, InputProbe } from '../tmux/input-commit.js'
 
-const CODEX_FOOTER = /^\s*(?:Working\b|esc to interrupt|(?:\?\s*)?for shortcuts|\d+% context|context left|.*\s·\s\/)/i
-const CODEX_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|Working\b|esc to interrupt|(?:\?\s*)?for shortcuts|\d+% context|context left|.*\s·\s\/)/i
+// codex 0.146 实测页脚：`gpt-5.6-sol xhigh · ~/.crabot/...`——home 缩写是 `~/` 不是 `/`，
+// 旧正则 `·\s\/` 在它上面失配会让 composer 探测整体失败（输入永远 stalled）。
+const CODEX_FOOTER = /^\s*(?:Working\b|esc to interrupt|(?:\?\s*)?for shortcuts|\d+% context|context left|.*\s·\s[~\/])/i
+const CODEX_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|Working\b|esc to interrupt|(?:\?\s*)?for shortcuts|\d+% context|context left|.*\s·\s[~\/])/i
 const CODEX_PLACEHOLDERS = [
   'Explain this codebase',
   'Summarize recent commits',

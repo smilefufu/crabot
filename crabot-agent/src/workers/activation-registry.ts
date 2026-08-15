@@ -155,6 +155,13 @@ export class ActivationRegistry {
     await this.recompute()
   }
 
+  /** 单 impl 低成本 re-detect 并更新快照（verify/显式操作入口的 operation-time 重校验）。 */
+  async refreshImpl(impl: WorkerImplId): Promise<WorkerImplementationStatus> {
+    const status = await this.computeStatus(impl)
+    this.snapshots.set(impl, status)
+    return status
+  }
+
   /** 当前快照（未 initialized 抛错——调用方据此返回 service unavailable，不假装空）。 */
   listStatus(): WorkerImplementationStatus[] {
     if (!this.desired) throw new Error('[ActivationRegistry] not initialized')
@@ -182,7 +189,7 @@ export class ActivationRegistry {
   async assertReady(impl: WorkerImplId): Promise<void> {
     if (this.desired) {
       try {
-        this.snapshots.set(impl, await this.computeStatus(impl))
+        await this.refreshImpl(impl)
       } catch { /* re-detect 失败用现有快照继续判（detect 错误本身已在 computeStatus 内化） */ }
     }
     const status = this.getStatus(impl)

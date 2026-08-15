@@ -47,7 +47,9 @@ export async function runWorkerVerification(
     now?: () => string
   },
 ): Promise<VerifyOutcome> {
-  const status: WorkerImplementationStatus = registry.getStatus(impl)
+  // §6.5 operation-time 重校验：verify 也用新鲜 detect（宿主刚升级 CLI 时 binding 记
+  // 新 cli_version，不再出现「验证通过却 binding stale」——R7）。
+  const status: WorkerImplementationStatus = await registry.refreshImpl(impl)
   const policy = registry.getPolicy(impl)
   if (!policy?.enabled || !policy.connection) return { passed: false, detail: 'impl not enabled with a connection' }
   if (!status.installed || !status.version) return { passed: false, detail: 'impl not installed' }
