@@ -246,7 +246,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   async detect(): Promise<DetectResult> {
     // P6-B：managed active binary 优先（找不到再落 system binary）。
     const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
-    const binary = managed ?? this.claudeBin
+    const binary = managed ? shQuote(managed) : this.claudeBin
     let versionOutput: string
     try {
       const { stdout } = await execFileAsync('/bin/sh', ['-c', `${binary} --version`], { env: buildChildEnv() })
@@ -580,7 +580,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     const outputFile = join(dir, `output-${seq}.log`)
     // P6-B：managed active binary 优先（与 detect 同顺序）——「install→verify→派活跑的是
     // 不同 binary」的版本错配/command not found 由此杜绝。
-    const spawnBin = (this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined) ?? this.claudeBin
+    const spawnBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const spawnBin = spawnBinManaged ? shQuote(spawnBinManaged) : this.claudeBin
     const command = `${spawnBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode bypassPermissions`
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
@@ -695,7 +696,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // settings,必须与 spawn 对称地每次通过 --settings 注入。session_ref 是 cc 侧的会话 uuid,
       // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
-      const resumeBin = (this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined) ?? this.claudeBin
+      const resumeBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const resumeBin = resumeBinManaged ? shQuote(resumeBinManaged) : this.claudeBin
       const command = `${resumeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
@@ -819,7 +821,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     ]
     // P6-B：fork 与 spawn/resume 同一 binary 解析纪律（managed 优先）——否则 managed install
     // 且宿主无 system claude 时主线正常、侧问 command not found（R8）。
-    const forkBin = (this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined) ?? this.claudeBin
+    const forkBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const forkBin = forkBinManaged ? shQuote(forkBinManaged) : this.claudeBin
     const shellCommand = `${forkBin} ${args.map(shQuote).join(' ')}`
 
     // 事件文件重定向:cc 的 hooks 在 print 模式同样执行,而 Stop hook 配在 **workspace 级**

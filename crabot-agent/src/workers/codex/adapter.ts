@@ -452,7 +452,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // P6-B：managed active binary 优先。
     const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
     const binDir = managed ? dirname(managed) : await this.resolveBinDirCached()
-    const effectiveBin = managed ?? this.codexBin
+    const effectiveBin = managed ? shQuote(managed) : this.codexBin
     const versionEnv = buildChildEnv({ PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '') })
     let versionOutput: string
     try {
@@ -830,7 +830,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。
     // 网络放行见文件头"spawn/resume 启动参数"节。
-    const spawnBin = (this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined) ?? this.codexBin
+    const spawnBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const spawnBin = spawnBinManaged ? shQuote(spawnBinManaged) : this.codexBin
     const command = `${spawnBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
     const spawnStartedAt = Date.now()
 
@@ -984,7 +985,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
       // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
       // `resume` 之前。
-      const resumeBin = (this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined) ?? this.codexBin
+      const resumeBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const resumeBin = resumeBinManaged ? shQuote(resumeBinManaged) : this.codexBin
       const command = `${resumeBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
 
       // P6-B admin_provider resume：上一化身的 runtime CODEX_HOME 已随终态清理，
