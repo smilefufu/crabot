@@ -39,6 +39,7 @@ import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { buildChildEnv } from '../../core/runtime-env.js'
+import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { WorkerExitedError, CliInputStallError } from '../errors.js'
 import { probeClaudeInput, acceptedClaudeInput, hasClaudeInteraction } from './input-surface.js'
@@ -830,10 +831,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 这里给子进程 env 塞一个 fork 化身私有的事件文件路径,cc 拉起 hook 子进程时原样继承
     // 下去,hook 写私有文件(见 CliEventChannel.EVENTS_FILE_ENV)。交互态(tmux pane)不设
     // 这个变量,照旧写共享文件,行为不变。
-    // P6-B：admin_provider 的连接 env 从主线化身继承（fork 是只读侧问，不重新 resolve——
-    // 主线 spawn/resume 已按 operation 注入；fork 回落宿主原生凭证 = 静默绕过，禁止）。
+    // P6-B：fork 与 tmux pane/verify/installer 同源——从 allowlist 重建（buildScrubbedChildEnv
+    // 打底），不是继承整个 process.env；否则宿主 export 的 ANTHROPIC_API_KEY 会随请求发往
+    // 第三方镜像（admin_provider 形态下尤其不能容忍）。连接注入叠在其上。
     const inheritedConnectionEnv = opts?.connection_env ?? prevRuntime.connectionEnv ?? {}
-    const execOpts = { cwd: prevRuntime.workspaceRoot, env: buildChildEnv({ [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv }) }
+    const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...buildScrubbedChildEnv(), [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv } }
 
     let stdout = ''
     let endedReason: IncarnationEndReason
