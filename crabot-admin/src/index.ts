@@ -10072,6 +10072,16 @@ export class AdminModule extends ModuleBase {
       const policy = desired.implementations[impl]
       return policy.enabled && policy.connection?.mode === 'existing_host'
     })
+    // 用户在 pending 期间改过 policy（换 mode/点禁用）时，migration 候选=现状 → CAS 无变化
+    // 抛错。这不是并发覆盖而是「用户已接管」——按 §3.19.12.6 收口 user_superseded（R12）。
+    const userOwns = (['claude-code', 'codex'] as const).some((impl) => {
+      const policy = desired.implementations[impl]
+      return (policy.enabled || policy.connection) && !(policy.enabled && policy.connection?.mode === 'existing_host')
+    })
+    if (!alreadyApplied && userOwns) {
+      await writeMarker({ state: 'user_superseded', transaction_id: marker.transaction_id })
+      return
+    }
     if (!alreadyApplied) try {
       await this.workerImplementationStore.update(desired.revision, (current) => {
         const next = {
@@ -10092,8 +10102,9 @@ export class AdminModule extends ModuleBase {
         return next
       })
     } catch (error) {
-      // CAS 失败 = 用户并发 PUT → user_superseded，永不自动重试启用。
-      if ((error as { code?: unknown }).code === 'ADMIN_WORKER_IMPL_REVISION_CONFLICT') {
+      const msg = error instanceof Error ? error.message : String(error)
+      // CAS 冲突或无变化（用户已接管/已在位）= user_superseded，永不自动重试启用。
+      if ((error as { code?: unknown }).code === 'ADMIN_WORKER_IMPL_REVISION_CONFLICT' || msg.includes('did not change semantic snapshot')) {
         await writeMarker({ state: 'user_superseded', transaction_id: marker.transaction_id })
         return
       }

@@ -112,6 +112,11 @@ export class WorkerImplementationStore {
   private assertPolicyShape(value: unknown, prefix: string): void {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${prefix}: not an object`)
     const policy = value as Record<string, unknown>
+    // 精确 key 集合：任何多余字段（含 credential 形态）拒绝——本文件绝不保存 credential。
+    const allowed = new Set(['enabled', 'preference', 'connection'])
+    for (const key of Object.keys(policy)) {
+      if (!allowed.has(key)) throw new Error(`${prefix}: unexpected field "${key}"`)
+    }
     if (typeof policy.enabled !== 'boolean') throw new Error(`${prefix}: enabled must be boolean`)
     if (policy.preference !== undefined && typeof policy.preference !== 'string') {
       throw new Error(`${prefix}: preference must be a string`)
@@ -132,6 +137,11 @@ export class WorkerImplementationStore {
       }
       if (typeof connection.model_id !== 'string' || connection.model_id.length === 0) {
         throw new Error(`${prefix}: admin_provider requires model_id`)
+      }
+      // 精确 key 集合：endpoint/key/token 等 credential 形态字段一律拒绝。
+      const allowed = new Set(['mode', 'provider_id', 'model_id'])
+      for (const key of Object.keys(connection)) {
+        if (!allowed.has(key)) throw new Error(`${prefix}: unexpected field "${key}"`)
       }
       return
     }

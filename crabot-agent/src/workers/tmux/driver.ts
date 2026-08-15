@@ -60,24 +60,25 @@ export class TmuxDriver {
       ...buildScrubbedChildEnv(),
       ...Object.fromEntries(envEntries),
     }
-    const envArgsInline = Object.entries(merged).map(([key, value]) => `${key}=${shQuote(value)}`).join(' ')
     const wrapperDir = await fs.mkdtemp(join(os.tmpdir(), 'crabot-tmux-env-'))
     await fs.chmod(wrapperDir, 0o700)
     const wrapperPath = join(wrapperDir, 'env.sh')
-    // 自删除：pane 的 shell 起来第一件事是删掉 wrapper 再 exec——tmux 异步起进程，
-    // newSession 返回即删会赶在 exec 之前（session 秒退的竞态实证）。env 值只在
-    // wrapper 文件里（0600），不进 argv；`sh -c` 承载 spec.command 的 shell 语义。
+    // ① `env -i` 在 tmux 命令行（argv 只有 wrapper 路径，无任何值）；② export 行只在
+    // wrapper 文件里（0600），连 env 进程 argv 的瞬时窗口都没有（R12）；③ pane 自删除
+    //（newSession 返回即删会赶在 exec 之前——竞态实证）。
+    const lines = Object.entries(merged).map(([key, value]) => `export ${key}=${shQuote(value)}`)
     await fs.writeFile(
       wrapperPath,
       `#!/bin/sh
 rm -f -- "$0"
 rmdir -- "$(dirname "$0")" 2>/dev/null
-exec env -i ${envArgsInline} sh -c ${shQuote(`exec ${spec.command}`)}
+${lines.join('\n')}
+exec ${spec.command}
 `,
       // 内层 exec：pane 的最终进程是真实命令本身（pane_current_command/liveness 依赖）
       { mode: 0o600 },
     )
-    const command = `sh ${shQuote(wrapperPath)}`
+    const command = `env -i sh ${shQuote(wrapperPath)}`
 
     const envArgs: string[] = ['-e', `${CORE_AGENT_RUNTIME_BEARER_ENV}=`]
     const pipeCmd = `cat >> ${shQuote(spec.outputFile)}`
