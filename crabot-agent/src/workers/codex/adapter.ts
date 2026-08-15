@@ -533,6 +533,32 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
   }
 
+  /**
+   * admin_provider：把 provision 生成的 workspace CODEX_HOME 配置与 translator 的
+   * runtime 配置合并（translator 的 model_provider/model/[model_providers.*] 胜出；
+   * notify/trust/mcp 等能力配置取自 provision 版）。auth.json 不复制（env_key 鉴权）。
+   */
+  private async mergeAdminProviderCodexHome(workspaceRoot: string, workspaceCodexHome: string, runtimeCodexHome: string): Promise<void> {
+    const readToml = async (file: string): Promise<Record<string, unknown>> => {
+      try {
+        return asTable(parseToml(await fs.readFile(file, 'utf-8')))
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {}
+        throw err
+      }
+    }
+    const provisioned = await readToml(join(workspaceCodexHome, 'config.toml'))
+    const translator = await readToml(join(runtimeCodexHome, 'config.toml'))
+    // 根级标量：translator 的 model/model_provider 覆盖；provision 的 notify 等保留。
+    const merged: Record<string, unknown> = { ...provisioned, ...translator }
+    // table 级：model_providers 两边都是表——translator 的 crabot-admin 条目必须保留，
+    // provision 的宿主条目也保留（codex 只按 model_provider 指针选用，不冲突）。
+    if (provisioned.model_providers && translator.model_providers) {
+      merged.model_providers = { ...provisioned.model_providers as object, ...translator.model_providers as object }
+    }
+    await writeSensitiveFileAtomic(join(runtimeCodexHome, 'config.toml'), stringifyToml(asTable(merged)))
+  }
+
   async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
     await assertWorkspaceFilesUntracked(ws.root, CODEX_CREDENTIAL_FILES, 'CodexWorkerAdapter.provision')
   }
@@ -770,7 +796,17 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const dir = join(this.deps.dataDir, spec.worker_id)
     await fs.mkdir(dir, { recursive: true })
 
-    const codexHome = join(spec.workspace.root, '.codex')
+    // P6-B admin_provider：CODEX_HOME 是 admission 产出的 runtime 目录——translator 的
+    // config.toml（model_provider/model/model_providers）必须**合并** provision 写到
+    // workspace 的那份（notify/trust/mcp/skills 都在里面），整体替换会把它们全丢掉。
+    // 且该化身后续的 session/rollout 都落在 runtime CODEX_HOME——runtime.codexHome 必须
+    // 指向它，否则 pollForNewRollout 扑空、resume 抛 has no discovered rollout。
+    let codexHome = join(spec.workspace.root, '.codex')
+    const runtimeCodexHome = spec.connection_env?.CODEX_HOME
+    if (runtimeCodexHome) {
+      await this.mergeAdminProviderCodexHome(spec.workspace.root, codexHome, runtimeCodexHome)
+      codexHome = runtimeCodexHome
+    }
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
     // codex-docs + m2 实测:交互态无 --session-id 等价参数;--ask-for-approval never
@@ -933,11 +969,20 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // `resume` 之前。
       const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
 
+      // P6-B admin_provider resume：上一化身的 runtime CODEX_HOME 已随终态清理，
+      // 本次 admission 产出新目录——同样要合并 provision 配置（translator 配置胜出）。
+      let resumeCodexHome = prevRuntime.codexHome
+      const resumeRuntimeHome = opts?.connection_env?.CODEX_HOME
+      if (resumeRuntimeHome) {
+        await this.mergeAdminProviderCodexHome(prevRuntime.workspaceRoot, join(prevRuntime.workspaceRoot, '.codex'), resumeRuntimeHome)
+        resumeCodexHome = resumeRuntimeHome
+      }
+
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
       // PATH 前置同 spawn(nvm 部署陷阱)。
       await this.tmux.newSession({
         name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile,
-        env: await this.buildEnv({ CODEX_HOME: opts?.connection_env?.CODEX_HOME ?? prevRuntime.codexHome, ...opts?.connection_env }),
+        env: await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome }),
       })
 
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
@@ -946,7 +991,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         seq,
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
-        codexHome: prevRuntime.codexHome,
+        codexHome: resumeCodexHome,
         sessionName,
         sessionId: prev.session_ref,
         // resume 续写的是同一个 rollout 文件(session id 不变),不需要重新发现——直接沿用上一

@@ -228,7 +228,13 @@ export const WorkersPage: React.FC = () => {
         footer={(
           <>
             <Button variant="secondary" onClick={() => setDialog(null)}>取消</Button>
-            <Button disabled={busy} onClick={() => void saveConnection()}>保存</Button>
+            <Button
+              disabled={busy || (dialog !== null && (
+                (dialog.method === 'setup_token' && (!dialog.token.trim() || !dialog.modelId.trim())) ||
+                (dialog.method === 'custom' && (!dialog.endpoint.trim() || !dialog.apiKey.trim() || !dialog.modelId.trim()))
+              ))}
+              onClick={() => void saveConnection()}
+            >保存</Button>
           </>
         )}
       >

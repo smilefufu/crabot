@@ -29,6 +29,8 @@ export async function admitWorkerConnection(
   registry: ActivationRegistry,
   impl: WorkerImplId,
   deps: {
+    /** 化身归属标签（workerId）——runtime 目录名携带，供启动 sweep 识别孤儿。 */
+    operationLabel?: string
     resolveAdminProviderConnection: (impl: CLIWorkerImplId, expectedPolicyRevision: number) => Promise<{
       connection: ResolvedWorkerConnection
       connection_revision: string
@@ -53,7 +55,7 @@ export async function admitWorkerConnection(
     }
     const injection = translator.buildInjection({ cli_version: status.version, connection: resolved.connection })
     if (injection.runtimeFiles && Object.keys(injection.runtimeFiles).length > 0) {
-      const files = await RuntimeFileSet.create(deps.runtimeRoot, injection.runtimeFiles)
+      const files = await RuntimeFileSet.create(deps.runtimeRoot, injection.runtimeFiles, deps.operationLabel)
       return {
         env: { ...injection.env, CODEX_HOME: files.root },
         connectionRevision: resolved.connection_revision,

@@ -14,9 +14,11 @@ import { randomUUID } from 'node:crypto'
 export class RuntimeFileSet implements AsyncDisposable {
   private constructor(private readonly dir: string) {}
 
-  /** 在 agent-owned runtime 根下建一次性目录并写入全部文件（0600/原子）。 */
-  static async create(runtimeRoot: string, files: Record<string, string>): Promise<RuntimeFileSet> {
-    const dir = path.join(runtimeRoot, `op-${randomUUID()}`)
+  /** 在 agent-owned runtime 根下建一次性目录并写入全部文件（0600/原子）。
+   *  label（如 workerId）进目录名：启动 sweep 按 label 判断归属，只清孤儿。 */
+  static async create(runtimeRoot: string, files: Record<string, string>, label?: string): Promise<RuntimeFileSet> {
+    const safeLabel = label ? label.replace(/[^A-Za-z0-9_-]/g, '_') + '-' : ''
+    const dir = path.join(runtimeRoot, `op-${safeLabel}${randomUUID()}`)
     await fs.mkdir(dir, { recursive: true, mode: 0o700 })
     const set = new RuntimeFileSet(dir)
     try {

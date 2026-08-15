@@ -431,7 +431,7 @@ export interface HarnessDeps {
    * P6-B §6.5：operation-time connection admission（registry gate 之后、副作用之前）。
    * 返回的 env 注入 SpawnSpec.connection_env；dispose 在 spawn 收口后调用。
    */
-  readonly admitWorkerConnection?: (impl: WorkerImplId) => Promise<{
+  readonly admitWorkerConnection?: (impl: WorkerImplId, operationLabel?: string) => Promise<{
     env: Record<string, string>
     connectionRevision?: string
     dispose(): Promise<void>
@@ -635,7 +635,7 @@ export class WorkerHarness {
     // P6-B：显式 impl 在任何副作用（workspace/台账/provision）前过 registry gate。
     if (p.impl !== undefined) this.deps.assertWorkerImplReady?.(p.impl)
     // P6-B §6.5：operation admission——当前调用内实时解析连接；revision 在副作用前最终比对。
-    const admission = p.impl !== undefined ? await this.deps.admitWorkerConnection?.(p.impl) : undefined
+    const admission = p.impl !== undefined ? await this.deps.admitWorkerConnection?.(p.impl, workerId) : undefined
     const impl = p.impl ?? this.deps.defaultImpl
     const adapter = this.deps.adapters.get(impl)
     if (!adapter) {
@@ -776,7 +776,11 @@ export class WorkerHarness {
 
       // runtime file（如 codex admin_provider 的 CODEX_HOME）必须活到化身终态——
       // CLI 运行期持续读它；终态收割时统一清理（含崩溃路径的 fireIncarnationTerminal）。
-      if (admission) this.connectionDisposers.set(`${workerId}:1`, admission.dispose)
+      // spawn 返回即终态（启动期握手超时等）时不会有终态钩子再触发——立即 dispose。
+      if (admission) {
+        if (initialState === 'exited') await admission.dispose()
+        else this.connectionDisposers.set(`${workerId}:1`, admission.dispose)
+      }
       const inbox = this.getInbox(workerId)
       inbox.release()
       if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
@@ -1461,7 +1465,7 @@ export class WorkerHarness {
     // P6-B：resume 重验 ready（「已有 running incarnation 不杀，新 resume/handoff 重验」）。
     this.deps.assertWorkerImplReady?.(mainline.impl)
     // P6-B §6.5：resume 同样 operation-time 解析连接（revision 变化即拒绝）。
-    const admission = await this.deps.admitWorkerConnection?.(mainline.impl)
+    const admission = await this.deps.admitWorkerConnection?.(mainline.impl, worker.worker_id)
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
@@ -1572,7 +1576,7 @@ export class WorkerHarness {
     this.deps.assertWorkerImplReady?.(targetImpl)
     // P6-B §6.5：handoff 同样过 connection admission——早于 HANDOFF.md 与 kill source；
     // admin_provider 形态下目标 CLI 不得静默回落宿主原生凭证。
-    const admission = await this.deps.admitWorkerConnection?.(targetImpl)
+    const admission = await this.deps.admitWorkerConnection?.(targetImpl, worker.worker_id)
     const newAdapter = this.deps.adapters.get(targetImpl)
     if (!newAdapter) {
       if (admission) await admission.dispose()

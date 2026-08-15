@@ -1467,13 +1467,6 @@ export class UnifiedAgent extends ModuleBase {
     // （MCP prepare/校验/构造）失败时 registry 不动，避免「policy 已切、配置被拒」的分裂。
     // 无该字段（旧 Admin/测试 fixture）时按新部署安全初始配置兜底：builtin enabled、
     // CLI disabled——与 Admin store 的 revision-1 语义一致，保证 builtin gate 永远可判。
-    // registry apply 若失败（如 stale 防护），候选 MCP 连接必须关掉再抛（同下方 catch 纪律）。
-    try {
-      await this.activationRegistry.applyRuntimeConfig(next.worker_implementations ?? DEFAULT_SAFE_WORKER_IMPLS)
-    } catch (error) {
-      await nextMcp.disconnectAll().catch(() => {})
-      throw error
-    }
     // Install the live connector identity first. AgentHandler captures this object at construction,
     // so replacing the field would leave existing task/tool paths pointed at retired clients.
     const liveMcp = this.mcpConnector
@@ -1506,6 +1499,17 @@ export class UnifiedAgent extends ModuleBase {
       this.agentLoopSubstrate.setWorkerHandler(coldHandler)
       this.scheduledTaskRunner.setWorkerHandler(coldHandler)
       this.contextAssembler.setLiveSnapshotProvider((taskId) => this.agentHandler?.getLiveSnapshot(taskId))
+    }
+
+    // worker implementation desired config 在所有 live 字段（含 agentConfig）就位后应用——
+    // builtin ready 的 model slot 判据读的就是新配置；此前的 fallible work 失败时不会走到
+    // 这里，registry 不切。registry 失败只打错误日志（live 配置已生效，下轮 pull 重试
+    // 收敛；stale 防护在 ConfigLoader.acceptRevision 已先行拦截，这里几近不可达）。
+    try {
+      await this.activationRegistry.applyRuntimeConfig(next.worker_implementations ?? DEFAULT_SAFE_WORKER_IMPLS)
+    } catch (error) {
+      console.error(`[${this.config.moduleId}] activation registry apply failed (will retry on next pull):`,
+        error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -3020,19 +3024,30 @@ export class UnifiedAgent extends ModuleBase {
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     })
     const { runWorkerVerification, commitVerification } = await import('./workers/verify/verifier.js')
-    const outcome = await runWorkerVerification(this.activationRegistry, impl, {
-      resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),
-      runtimeRoot: path.join(getAgentDataDir(), 'worker-impls', 'runtime'),
-      managedInstaller: this.managedInstaller,
-    })
-    await commitVerification(this.activationRegistry, impl, outcome)
-    await this.workerOperationStore.upsert({
-      operation_id: operationId, kind: 'verify', impl,
-      state: outcome.passed ? 'completed' : 'failed',
-      detail: outcome.detail.slice(0, 200),
-      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-    })
-    return { operation_id: operationId, state: outcome.passed ? 'completed' : 'failed', passed: outcome.passed, detail: outcome.detail }
+    try {
+      const outcome = await runWorkerVerification(this.activationRegistry, impl, {
+        resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),
+        runtimeRoot: path.join(getAgentDataDir(), 'worker-impls', 'runtime'),
+        managedInstaller: this.managedInstaller,
+      })
+      await commitVerification(this.activationRegistry, impl, outcome)
+      await this.workerOperationStore.upsert({
+        operation_id: operationId, kind: 'verify', impl,
+        state: outcome.passed ? 'completed' : 'failed',
+        detail: outcome.detail.slice(0, 200),
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      })
+      return { operation_id: operationId, state: outcome.passed ? 'completed' : 'failed', passed: outcome.passed, detail: outcome.detail }
+    } catch (error) {
+      // 抛错必须收口 operation failed——否则卡在 running，互斥门把该 impl 后续
+      // install/verify 永久挡死（只能重启 Agent 恢复）。
+      await this.workerOperationStore.upsert({
+        operation_id: operationId, kind: 'verify', impl, state: 'failed',
+        detail: (error instanceof Error ? error.message : String(error)).replace(/\/[^\s]+/g, '<path>').slice(0, 200),
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      })
+      throw error
+    }
   }
 
   /** §12 grandfather inspect：只读 detect 两 CLI 并持久 observation（同 transaction 幂等重放）。 */
@@ -3117,6 +3132,39 @@ export class UnifiedAgent extends ModuleBase {
     const status = this.activationRegistry.isInitialized() ? this.activationRegistry.listStatus() : null
     if (!status) throw new Error('activation registry not initialized')
     return status[0]?.policy_revision ?? 0
+  }
+
+  /** P6-B §6.5：sweep worker-impls/runtime 下的孤儿 op-* 目录（按 label 中的 workerId 判定）。 */
+  private async sweepOrphanedConnectionRuntimes(): Promise<void> {
+    const runtimeRoot = path.join(getAgentDataDir(), 'worker-impls', 'runtime')
+    let entries: string[]
+    try {
+      entries = await fs.promises.readdir(runtimeRoot)
+    } catch {
+      return
+    }
+    const aliveWorkerIds = new Set<string>()
+    try {
+      const all = await this.managerStack?.harness.listAllWorkers() ?? []
+      for (const { worker } of all) {
+        for (const incarnation of worker.incarnations ?? []) {
+          if (incarnation.state !== 'exited') {
+            aliveWorkerIds.add(worker.worker_id)
+            break
+          }
+        }
+      }
+    } catch {
+      return // 台账不可用时不扫（宁可留孤儿，不误删）
+    }
+    for (const entry of entries) {
+      // op-[w-<workerId>-]<uuid>
+      const match = /^op-(?:w-([A-Za-z0-9-]+)-)?[0-9a-f-]{36}$/.exec(entry)
+      if (!match) continue
+      const workerId = match[1]
+      if (workerId && aliveWorkerIds.has(workerId)) continue
+      await fs.promises.rm(path.join(runtimeRoot, entry), { recursive: true, force: true }).catch(() => {})
+    }
   }
 
   /** §6.5/§8.4：脱敏 WorkerImplementationStatus（activation registry 唯一 read API）。 */
@@ -3667,6 +3715,9 @@ export class UnifiedAgent extends ModuleBase {
     await this.workerOperationStore.load()
     await this.grandfatherBootstrapStore.load()
     await this.managedInstaller.reconcileOnStartup()
+    // P6-B §6.5：connection runtime 目录孤儿 sweep（崩溃丢 disposer 的兜底）——
+    // 只清「所属 worker 已无任何存活化身」的目录；tmux 化身跨重启存活，其 CODEX_HOME 不动。
+    void this.sweepOrphanedConnectionRuntimes()
     // P6-A §11.9 先于 §3.2：先重放 prepared 的 outbound delivery（响应丢失场景），
     // Admin 幂等返回首次结果即 confirm + settle wake——只差 confirm 的崩溃窗口不会
     // 因重启先重跑一遍重复 episode。只有真正未交付的 wake 才进入重放。
