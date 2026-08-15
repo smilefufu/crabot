@@ -3156,6 +3156,23 @@ export class UnifiedAgent extends ModuleBase {
         await fs.promises.rm(path.join(runtimeRoot, entry), { recursive: true, force: true }).catch(() => {})
       } catch { /* 单个失败跳过 */ }
     }
+    // worker 级 home GC：任务终态超 7 天的目录回收（§6.5 协议约定）。
+    const terminalAges = new Map<string, number>() // workerId → terminal 时刻
+    try {
+      const all = await this.managerStack?.harness.listAllWorkers() ?? []
+      const nowMs = Date.now()
+      for (const entry of entries) {
+        if (!entry.startsWith('w-')) continue
+        const workerId = entry
+        const found = all.find(({ worker }) => worker.worker_id === workerId)
+        const task = found?.worker.task
+        const terminalAt = task && (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled')
+          ? Date.parse(found!.worker.updated_at ?? task.created_at ?? '')
+          : NaN
+        if (!Number.isFinite(terminalAt) || nowMs - terminalAt < 7 * 24 * 3600 * 1000) continue
+        await fs.promises.rm(path.join(runtimeRoot, entry), { recursive: true, force: true }).catch(() => {})
+      }
+    } catch { /* 台账不可用时跳过 GC，不动目录 */ }
   }
 
   /** §6.5/§8.4：脱敏 WorkerImplementationStatus（activation registry 唯一 read API）。 */

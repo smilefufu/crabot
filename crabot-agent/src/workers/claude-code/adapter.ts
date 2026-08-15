@@ -260,14 +260,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     try {
       const entries = await fs.readdir(claudeHomeDir)
       activated = entries.includes('settings.json') || entries.includes('.credentials.json')
-      // 非敏感代际：候选 credential 文件的 mtime+size（不读正文）。
+      // 代际只用 settings.json（用户配置：endpoint/model/信任表变更会让 binding 失效）。
+      // .credentials.json 会被例行 token 刷新重写（mtime 骗人），不参与——订阅 OAuth 的
+      // access token 轮换不构成身份变化；macOS 上 credential 在 keychain，本就不存在文件。
       const parts: string[] = []
-      for (const name of ['settings.json', '.credentials.json']) {
-        try {
-          const stat = await fs.stat(join(claudeHomeDir, name))
-          parts.push(`${name}:${stat.mtimeMs}:${stat.size}`)
-        } catch { /* 单个缺失忽略 */ }
-      }
+      try {
+        const stat = await fs.stat(join(claudeHomeDir, 'settings.json'))
+        parts.push(`settings.json:${stat.mtimeMs}:${stat.size}`)
+      } catch { /* 缺失忽略 */ }
       if (parts.length > 0) credentialGeneration = parts.join(',')
     } catch {
       activated = false

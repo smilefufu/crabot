@@ -480,14 +480,27 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // 存在但没登录过也可能出现,所以两者任一存在都算"至少配置过"——与 cc 检查
       // settings.json/.credentials.json 同一思路(宽松判定,不做网络调用)。
       activated = entries.includes('auth.json') || entries.includes('config.toml')
-      // 非敏感代际：auth.json/config.toml 的 mtime+size（不读正文）。
+      // 代际信号要区分「换账号/重登」与「例行 token 刷新」：
+      // - OAuth flavor（tokens.account_id）：刷新会重写文件（mtime 骗人），用 account_id
+      //   这个非敏感身份字段（不是 credential 本体，且本来就出现在请求 header 里）；
+      // - API key flavor（OPENAI_API_KEY 静态）：codex 不会因刷新重写，mtime+size 即可。
+      // config.toml 的 mtime+size 恒参与（endpoint/model 变更必须让 binding 失效）。
       const parts: string[] = []
-      for (const name of ['auth.json', 'config.toml']) {
-        try {
-          const stat = await fs.stat(join(this.codexHomeSource, name))
-          parts.push(`${name}:${stat.mtimeMs}:${stat.size}`)
-        } catch { /* 单个缺失忽略 */ }
-      }
+      try {
+        const authRaw = await fs.readFile(join(this.codexHomeSource, 'auth.json'), 'utf-8')
+        const parsed = JSON.parse(authRaw) as { tokens?: { account_id?: unknown } }
+        const accountId = parsed.tokens?.account_id
+        if (typeof accountId === 'string' && accountId) {
+          parts.push(`account:${accountId}`)
+        } else {
+          const stat = await fs.stat(join(this.codexHomeSource, 'auth.json'))
+          parts.push(`auth.json:${stat.mtimeMs}:${stat.size}`)
+        }
+      } catch { /* auth.json 缺失/损坏：不参与 */ }
+      try {
+        const stat = await fs.stat(join(this.codexHomeSource, 'config.toml'))
+        parts.push(`config.toml:${stat.mtimeMs}:${stat.size}`)
+      } catch { /* 缺失忽略 */ }
       if (parts.length > 0) credentialGeneration = parts.join(',')
     } catch {
       activated = false

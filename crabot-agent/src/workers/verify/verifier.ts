@@ -21,7 +21,6 @@ import { findTranslator } from '../connections/registry.js'
 import { RuntimeFileSet } from '../connections/runtime-file.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import type { ResolvedWorkerConnection } from '../connections/types.js'
-import { manifestFor } from '../install/manifests.js'
 
 const VERIFY_TIMEOUT_MS = 120_000
 const MINIMAL_PROMPT = 'Reply with exactly: OK'
