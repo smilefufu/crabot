@@ -1380,10 +1380,6 @@ export class UnifiedAgent extends ModuleBase {
   private async applyRuntimeConfigCandidate(next: UnifiedAgentConfig): Promise<void> {
     const candidate = next.agent_config
     if (!candidate) throw new Error('Pulled runtime config has no agent config')
-    // worker implementation desired config 原子替换（stale revision 由 registry 拒绝）。
-    // 无该字段（旧 Admin/测试 fixture）时按新部署安全初始配置兜底：builtin enabled、
-    // CLI disabled——与 Admin store 的 revision-1 语义一致，保证 builtin gate 永远可判。
-    await this.activationRegistry.applyRuntimeConfig(next.worker_implementations ?? DEFAULT_SAFE_WORKER_IMPLS)
     // All fallible work happens before the live fields are touched.
     const worker = candidate.model_config.powerful
     const digest = candidate.model_config.cost_effective ?? worker
@@ -1467,6 +1463,17 @@ export class UnifiedAgent extends ModuleBase {
       throw error
     }
 
+    // worker implementation desired config 与 live 字段同段原子切换：此前的 fallible work
+    // （MCP prepare/校验/构造）失败时 registry 不动，避免「policy 已切、配置被拒」的分裂。
+    // 无该字段（旧 Admin/测试 fixture）时按新部署安全初始配置兜底：builtin enabled、
+    // CLI disabled——与 Admin store 的 revision-1 语义一致，保证 builtin gate 永远可判。
+    // registry apply 若失败（如 stale 防护），候选 MCP 连接必须关掉再抛（同下方 catch 纪律）。
+    try {
+      await this.activationRegistry.applyRuntimeConfig(next.worker_implementations ?? DEFAULT_SAFE_WORKER_IMPLS)
+    } catch (error) {
+      await nextMcp.disconnectAll().catch(() => {})
+      throw error
+    }
     // Install the live connector identity first. AgentHandler captures this object at construction,
     // so replacing the field would leave existing task/tool paths pointed at retired clients.
     const liveMcp = this.mcpConnector
@@ -2936,6 +2943,11 @@ export class UnifiedAgent extends ModuleBase {
     if (typeof params.operation_id !== 'string' || typeof params.assertion !== 'string' || !params.expected) {
       throw new Error('operation_id, assertion and expected are required')
     }
+    // 交叉核对：assertion 的 expected 绑定必须与实际执行的 impl/operation/action 全等，
+    // 否则绑定关系被架空（assertion 退化成一次性 nonce）。
+    if (params.expected.action !== 'install' || params.expected.impl !== impl || params.expected.operation_id !== params.operation_id) {
+      throw new Error('assertion binding mismatch with requested operation')
+    }
     // 1. assertion 核销（Admin 回调，bearer 认证 + nonce 一次性）。
     const adminPort = this.adminPort
     if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')
@@ -2986,6 +2998,9 @@ export class UnifiedAgent extends ModuleBase {
     if (impl !== 'claude-code' && impl !== 'codex') throw new Error('impl must be claude-code or codex')
     if (typeof params.operation_id !== 'string' || typeof params.assertion !== 'string' || !params.expected) {
       throw new Error('operation_id, assertion and expected are required')
+    }
+    if (params.expected.action !== 'verify' || params.expected.impl !== impl || params.expected.operation_id !== params.operation_id) {
+      throw new Error('assertion binding mismatch with requested operation')
     }
     const adminPort = this.adminPort
     if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')

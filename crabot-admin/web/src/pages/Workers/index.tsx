@@ -188,7 +188,8 @@ export const WorkersPage: React.FC = () => {
                 {status?.install_source === 'managed' ? '升级/重装（托管）' : '安装（托管）'}
               </Button>
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog({
-                impl, method: 'existing_host', token: '', endpoint: '', apiKey: '', modelId: '',
+                impl, method: 'existing_host', token: '', endpoint: '', apiKey: '',
+                modelId: impl === 'claude-code' ? 'claude-sonnet-4-6' : '',
               })}>
                 配置连接
               </Button>
@@ -196,7 +197,7 @@ export const WorkersPage: React.FC = () => {
                 <Button size="sm" disabled={busy} onClick={() => void runOperation(impl, 'verify')}>验证</Button>
               )}
               {policy.enabled ? (
-                <Button size="sm" variant="danger" disabled={busy} onClick={() => void applyConfig(impl, { enabled: false })}>禁用</Button>
+                <Button size="sm" variant="danger" disabled={busy} onClick={() => void applyConfig(impl, { enabled: false, ...(policy.connection ? { connection: policy.connection } : {}) })}>禁用</Button>
               ) : (
                 <Button size="sm" disabled={busy} onClick={() => void applyConfig(impl, { enabled: true, ...(policy.connection ? { connection: policy.connection } : {}) })}>启用</Button>
               )}
@@ -236,7 +237,11 @@ export const WorkersPage: React.FC = () => {
             <Select
               label="连接方式"
               value={dialog.method}
-              onChange={(e) => setDialog({ ...dialog, method: e.target.value as DialogState['method'] })}
+              onChange={(e) => setDialog({
+                ...dialog,
+                method: e.target.value as DialogState['method'],
+                ...(e.target.value === 'setup_token' && !dialog.modelId ? { modelId: 'claude-sonnet-4-6' } : {}),
+              })}
               options={[
                 { value: 'existing_host', label: '使用宿主机已配置（existing_host）' },
                 ...(dialog.impl === 'claude-code' ? [{ value: 'setup_token', label: '粘贴 setup-token（Claude 订阅签发）' }] : []),
@@ -254,7 +259,7 @@ export const WorkersPage: React.FC = () => {
                 />
                 <Input
                   label="模型 ID"
-                  value={dialog.modelId || 'claude-sonnet-4-6'}
+                  value={dialog.modelId}
                   onChange={(e) => setDialog({ ...dialog, modelId: e.target.value })}
                 />
               </>

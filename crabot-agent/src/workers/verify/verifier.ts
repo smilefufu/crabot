@@ -29,6 +29,8 @@ const MINIMAL_PROMPT = 'Reply with exactly: OK'
 export interface VerifyOutcome {
   passed: boolean
   detail: string
+  /** 本次验证实际使用的 connection revision（实时解析值，不是 registry 快照）。 */
+  connection_revision?: string
 }
 
 export async function runWorkerVerification(
@@ -92,8 +94,8 @@ export async function runWorkerVerification(
     const result = await runWithTimeout(binary, args, { cwd: workspace, env, timeoutMs: VERIFY_TIMEOUT_MS })
     if (result.timedOut) return { passed: false, detail: 'verify timeout' }
     if (result.exitCode !== 0) return { passed: false, detail: `CLI exited ${result.exitCode}: ${redact(result.stderr.slice(0, 300))}` }
-    if (!/OK/.test(result.stdout)) return { passed: false, detail: 'turn completion signal not observed' }
-    return { passed: true, detail: 'minimal real turn completed' }
+    if (!/OK/.test(result.stdout)) return { passed: false, detail: 'turn completion signal not observed', connection_revision: connectionRevision }
+    return { passed: true, detail: 'minimal real turn completed', connection_revision: connectionRevision }
   } finally {
     await runtimeFiles?.dispose()
     await fs.rm(workspace, { recursive: true, force: true }).catch(() => {})
@@ -117,7 +119,9 @@ export async function commitVerification(
     translator_id: translator?.capability.translator_id ?? 'unknown',
     translator_version: translator?.capability.translator_version ?? 'unknown',
     policy_revision: status.policy_revision,
-    connection_revision: status.connection_revision ?? 'none',
+    // 记录被验证的那次连接（operation-time resolve 值），不是 registry 快照——
+    // 两者可能因 pull 间隙而不同（B: review finding）。
+    connection_revision: outcome.connection_revision ?? status.connection_revision ?? 'none',
     at: new Date().toISOString(),
     ...(outcome.passed ? {} : { detail: outcome.detail.slice(0, 200) }),
   }

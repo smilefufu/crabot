@@ -639,12 +639,20 @@ export class WorkerHarness {
     const impl = p.impl ?? this.deps.defaultImpl
     const adapter = this.deps.adapters.get(impl)
     if (!adapter) {
+      // 失败路径必须 dispose：runtime 目录（如 codex CODEX_HOME）不得残留。
+      if (admission) await admission.dispose()
       throw new Error(`WorkerHarness.spawnWorker: no adapter registered for impl '${impl}'`)
     }
 
     // workspace 解析可能失败(InvalidWorkspaceError),放在拿锁/写台账之前——失败时台账
     // 完全不会出现这条 worker,不留半成品。
-    const workspace = await this.deps.workspaces.resolve(workerId, p.workspace)
+    let workspace
+    try {
+      workspace = await this.deps.workspaces.resolve(workerId, p.workspace)
+    } catch (error) {
+      if (admission) await admission.dispose()
+      throw error
+    }
 
     return this.withLock(workerId, async () => {
       const startedAt = this.deps.now()
@@ -716,6 +724,7 @@ export class WorkerHarness {
         }
         spawnedHandle = await adapter.spawn(spec)
       } catch (err) {
+        if (admission) await admission.dispose()
         const now = this.deps.now()
         const failed = await this.deps.ledger.upsertWorker(p.managerKey, workerId, (prev) => {
           if (!prev) return undefined
@@ -1456,7 +1465,13 @@ export class WorkerHarness {
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
-    const newHandle = await adapter.resume(prevRef, text, admission ? { connection_env: admission.env } : undefined)
+    let newHandle
+    try {
+      newHandle = await adapter.resume(prevRef, text, admission ? { connection_env: admission.env } : undefined)
+    } catch (error) {
+      if (admission) await admission.dispose()
+      throw error
+    }
     // 新化身的 runtime 资源活到新化身终态（spawn 路径同纪律）。
     if (admission) this.connectionDisposers.set(`${worker.worker_id}:${newHandle.seq}`, admission.dispose)
 
@@ -1555,8 +1570,12 @@ export class WorkerHarness {
     // HANDOFF.md 都不动,保持可重试。
     // P6-B：目标 impl 重验 ready（配置可能在 source 运行期间已失效）。
     this.deps.assertWorkerImplReady?.(targetImpl)
+    // P6-B §6.5：handoff 同样过 connection admission——早于 HANDOFF.md 与 kill source；
+    // admin_provider 形态下目标 CLI 不得静默回落宿主原生凭证。
+    const admission = await this.deps.admitWorkerConnection?.(targetImpl)
     const newAdapter = this.deps.adapters.get(targetImpl)
     if (!newAdapter) {
+      if (admission) await admission.dispose()
       throw new Error(`WorkerHarness.handoffIncarnation: no adapter registered for impl '${targetImpl}' (handoff target)`)
     }
     const handoffContext = await this.contextStore.read(worker.worker_id)
@@ -1634,17 +1653,27 @@ export class WorkerHarness {
 
     // 3. 同 workspace provision + spawn 新实现,开工输入 = 原任务 + 交接引用 + 本次输入。
     // newAdapter / builtinInjection / workspace / caps 已在上面的 pre-flight 里取好。
-    await newAdapter.provision(workspace, caps)
     const prompt = buildHandoffPrompt(worker.task, input)
-    const newHandle = await newAdapter.spawn({
-      worker_id: worker.worker_id,
-      prompt,
-      workspace,
-      goal: worker.task.goal,
-      origin: worker.origin,
-      principal_permissions: principalPermissions,
-      builtin: builtinInjection,
-    })
+    let newHandle
+    try {
+      await newAdapter.provision(workspace, caps)
+      newHandle = await newAdapter.spawn({
+        worker_id: worker.worker_id,
+        prompt,
+        workspace,
+        goal: worker.task.goal,
+        origin: worker.origin,
+        principal_permissions: principalPermissions,
+        builtin: builtinInjection,
+        ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
+      })
+    } catch (error) {
+      // provision/spawn 失败：dispose admission；source 化身状态保持 step 2 的既有语义。
+      if (admission) await admission.dispose()
+      throw error
+    }
+    // 新化身持有 admission 资源至终态。
+    if (admission) this.connectionDisposers.set(`${worker.worker_id}:${newHandle.seq}`, admission.dispose)
 
     // 4. 化身链 +1,task 重新回到 running(见 reopenTaskForContinuation 注释)。
     const initialInput = newHandle.initial_input

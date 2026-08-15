@@ -236,6 +236,11 @@ export interface DetectResult {
   /** 当前检测到的 CLI 版本（translator/version range 匹配输入）。 */
   version?: string
   install_source?: 'managed' | 'system'
+  /**
+   * 宿主 credential 的非敏感代际信号（文件 mtime+size 的 HMAC 输入，不读正文）——
+   * 宿主换账号/重登会让代际变化，existing_host/native_account binding 随之失效。
+   */
+  credential_generation?: string
   detail?: string
 }
 export interface AdapterCapabilities {

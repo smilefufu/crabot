@@ -256,14 +256,24 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     const claudeHomeDir = dirname(this.claudeProjectsDir)
     let activated = false
+    let credentialGeneration: string | undefined
     try {
       const entries = await fs.readdir(claudeHomeDir)
       activated = entries.includes('settings.json') || entries.includes('.credentials.json')
+      // 非敏感代际：候选 credential 文件的 mtime+size（不读正文）。
+      const parts: string[] = []
+      for (const name of ['settings.json', '.credentials.json']) {
+        try {
+          const stat = await fs.stat(join(claudeHomeDir, name))
+          parts.push(`${name}:${stat.mtimeMs}:${stat.size}`)
+        } catch { /* 单个缺失忽略 */ }
+      }
+      if (parts.length > 0) credentialGeneration = parts.join(',')
     } catch {
       activated = false
     }
 
-    return { installed: true, activated, version, install_source: managed ? 'managed' : 'system', detail: versionOutput }
+    return { installed: true, activated, version, install_source: managed ? 'managed' : 'system', credential_generation: credentialGeneration, detail: versionOutput }
   }
 
   async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {

@@ -1012,8 +1012,13 @@ export class AdminModule extends ModuleBase {
       // 但 ingress（cutoverActivated）仍在 bootstrap 完成后才开。
       this.configInvalidationPublicationEnabled = true
       // 存量实例（cutover 早已完成）升级 P6-B 时在此补跑 bootstrap；
-      // fresh deploy/已完成/user_superseded 都幂等快进。
-      await this.runWorkerImplementationBootstrap()
+      // fresh deploy/已完成/user_superseded 都幂等快进。失败不阻断启动（下次重试）。
+      try {
+        await this.runWorkerImplementationBootstrap()
+      } catch (error) {
+        console.error('[Admin] worker implementation bootstrap failed (will retry on next start):',
+          error instanceof Error ? error.message : String(error))
+      }
       const allSchedules = Array.from(this.schedules.values())
       this.scheduleEngine.startAll(allSchedules)
       console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
@@ -7158,7 +7163,13 @@ export class AdminModule extends ModuleBase {
     }
     // §3.19.12 step 4：开放 ingress 前完成 worker implementation 初始迁移
     // （grandfather bootstrap；fresh deploy 只落 completed marker，不 inspect 不付费 verify）。
-    await this.runWorkerImplementationBootstrap()
+    // 失败不阻断 Admin 启动：marker 保持 pending，下次启动重试（inspect/commit 幂等）。
+    try {
+      await this.runWorkerImplementationBootstrap()
+    } catch (error) {
+      console.error('[Admin] worker implementation bootstrap failed (will retry on next start):',
+        error instanceof Error ? error.message : String(error))
+    }
 
     // Open ingress before arming timers: an already-due one-shot must never fire into
     // the management-only gate and be lost.

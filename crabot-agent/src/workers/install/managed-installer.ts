@@ -99,9 +99,19 @@ export class ManagedInstaller {
       }
       const stagedBinary = path.join(staging, manifest.binaryRelativePath)
       await this.verifyBinary(manifest, stagedBinary, staging)
-      // staging → final 原子就位（已有同版本先清）
-      await fs.rm(final, { recursive: true, force: true })
-      await fs.rename(staging, final)
+      // staging → final 三段式：旧 final 先 rename 到 backup，新目录就位后再删 backup——
+      // 任何一步失败都 rename 回去，不存在「旧 active 已删、新目录没就位」的窗口
+      //（同版本重装时旧 active 可能正在服务 running incarnation）。
+      const backup = `${final}.backup-${process.pid}`
+      const hadFinal = await fs.access(final).then(() => true).catch(() => false)
+      if (hadFinal) await fs.rename(final, backup)
+      try {
+        await fs.rename(staging, final)
+      } catch (error) {
+        if (hadFinal) await fs.rename(backup, final).catch(() => {})
+        throw error
+      }
+      if (hadFinal) await fs.rm(backup, { recursive: true, force: true }).catch(() => {})
       const finalBinary = path.join(final, manifest.binaryRelativePath)
       // active pointer：临时文件 + 原子 rename；失败保留旧 active。
       const pointerPath = this.activePointerPath(impl)
@@ -149,6 +159,18 @@ export class ManagedInstaller {
       for (const entry of entries) {
         if (entry.includes('.staging-')) {
           await fs.rm(path.join(this.versionsDir(impl), entry), { recursive: true, force: true }).catch(() => {})
+        }
+        if (entry.includes('.backup-')) {
+          // 崩在 backup→final 换位窗口：final 缺失则把 backup rename 回去（保旧 active），
+          // final 在则 backup 是换位成功的残留，删除。
+          const backupPath = path.join(this.versionsDir(impl), entry)
+          const finalPath = path.join(this.versionsDir(impl), entry.replace(/\.backup-.*$/, ''))
+          const finalExists = await fs.access(finalPath).then(() => true).catch(() => false)
+          if (finalExists) {
+            await fs.rm(backupPath, { recursive: true, force: true }).catch(() => {})
+          } else {
+            await fs.rename(backupPath, finalPath).catch(() => {})
+          }
         }
       }
     }

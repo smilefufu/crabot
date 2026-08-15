@@ -24,34 +24,21 @@ const SCRUB_PREFIXES = [
   'CRABOT_WORKER_ADMIN_',
 ]
 
-/** PATH/HOME/代理等基础运行所需的最小 allowlist 前缀。 */
-const ALLOW_PREFIXES = [
-  'PATH',
-  'HOME',
-  'USER',
-  'LOGNAME',
-  'SHELL',
-  'LANG',
-  'LC_',
-  'TERM',
-  'TMPDIR',
-  'HTTP_PROXY',
-  'HTTPS_PROXY',
-  'ALL_PROXY',
-  'NO_PROXY',
-  'http_proxy',
-  'https_proxy',
-  'all_proxy',
-  'no_proxy',
+/** 精确名（PATH 精确匹配，不放行 PATHEXT 这类形近变体）。 */
+const ALLOW_EXACT = new Set([
+  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TERM', 'TMPDIR',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+  'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
   'NODE_OPTIONS',
-  'NVM_',
-  'XDG_',
-]
+])
+
+/** 家族前缀（带下划线结尾，不会误伤形近词）。 */
+const ALLOW_PREFIXES = ['LC_', 'NVM_', 'XDG_']
 
 function isAllowed(key: string): boolean {
   if (SCRUB_EXACT.has(key)) return false
   if (SCRUB_PREFIXES.some((prefix) => key.startsWith(prefix))) return false
-  return ALLOW_PREFIXES.some((prefix) => key === prefix || key.startsWith(prefix))
+  return ALLOW_EXACT.has(key) || ALLOW_PREFIXES.some((prefix) => key.startsWith(prefix))
 }
 
 /**

@@ -260,7 +260,7 @@ export class ActivationRegistry {
     // connection revision：admin_provider 由 Admin 下发；native/existing 由 Agent 现算。
     const connectionRevision = policy.connection.mode === 'admin_provider'
       ? desired.connection_revisions[impl]
-      : await this.computeNativeRevision(impl, nativeGenerationMaterial(detect))
+      : await this.computeNativeRevision(impl, nativeGenerationMaterial(detect, policy.connection.mode))
     status.connection_revision = connectionRevision
 
     const verification = this.verifications[impl]
@@ -311,9 +311,11 @@ export class ActivationRegistry {
   }
 }
 
-/** native/existing-host revision 的非敏感 generation 材料：credential 文件存在性+代际（mtime），不读正文。 */
-function nativeGenerationMaterial(detect: { activated: boolean; version?: string }): string {
-  return `activated=${detect.activated};version=${detect.version ?? 'unknown'}`
+/** native/existing-host revision 的非敏感 generation 材料：credential 文件代际（mtime+size），
+ *  不读正文。宿主换账号/重登 → 代际变化 → revision 变化 → 旧 binding 失效。
+ *  无 credential 文件（未配置）时退化为 activated 标志——不虚构代际。 */
+function nativeGenerationMaterial(detect: { activated: boolean; version?: string; credential_generation?: string }, mode: string): string {
+  return `mode=${mode};activated=${detect.activated};gen=${detect.credential_generation ?? 'none'}`
 }
 
 function redactDetail(error: unknown): string {

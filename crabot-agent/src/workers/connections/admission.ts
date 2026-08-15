@@ -46,6 +46,11 @@ export async function admitWorkerConnection(
 
   if (policy.connection.mode === 'admin_provider') {
     const resolved = await deps.resolveAdminProviderConnection(impl, status.policy_revision)
+    // revision 最终比对：pull 与 resolve 之间 Admin 侧发生变化（provider 轮换等）时，
+    // registry 快照 revision ≠ 实时解析 revision → 本次操作拒绝（下轮 pull 收敛）。
+    if (status.connection_revision && status.connection_revision !== resolved.connection_revision) {
+      throw new Error(`worker connection revision changed for ${impl}; retry after next config pull`)
+    }
     const injection = translator.buildInjection({ cli_version: status.version, connection: resolved.connection })
     if (injection.runtimeFiles && Object.keys(injection.runtimeFiles).length > 0) {
       const files = await RuntimeFileSet.create(deps.runtimeRoot, injection.runtimeFiles)

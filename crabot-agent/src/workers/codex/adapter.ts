@@ -471,12 +471,22 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
 
     let activated = false
+    let credentialGeneration: string | undefined
     try {
       const entries = await fs.readdir(this.codexHomeSource)
       // codex-docs: 凭据落在 CODEX_HOME/auth.json(learn.chatgpt.com/docs/auth)。config.toml
       // 存在但没登录过也可能出现,所以两者任一存在都算"至少配置过"——与 cc 检查
       // settings.json/.credentials.json 同一思路(宽松判定,不做网络调用)。
       activated = entries.includes('auth.json') || entries.includes('config.toml')
+      // 非敏感代际：auth.json/config.toml 的 mtime+size（不读正文）。
+      const parts: string[] = []
+      for (const name of ['auth.json', 'config.toml']) {
+        try {
+          const stat = await fs.stat(join(this.codexHomeSource, name))
+          parts.push(`${name}:${stat.mtimeMs}:${stat.size}`)
+        } catch { /* 单个缺失忽略 */ }
+      }
+      if (parts.length > 0) credentialGeneration = parts.join(',')
     } catch {
       activated = false
     }
@@ -484,7 +494,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 'codex-cli 0.146.0' → '0.146.0'
     const version = /([0-9]+\.[0-9]+\.[0-9]+)/.exec(versionOutput)?.[1]
     this.lastDetectedVersion = version
-    return { installed: true, activated, version, install_source: managed ? 'managed' : 'system', detail: versionOutput }
+    return { installed: true, activated, version, install_source: managed ? 'managed' : 'system', credential_generation: credentialGeneration, detail: versionOutput }
   }
 
   /**
