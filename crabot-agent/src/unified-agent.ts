@@ -3199,8 +3199,22 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /** §3.19.12.1：cancel —— 终态幂等返回；running 标 cancelled 并中止在途 install 子进程。 */
-  private async handleCancelWorkerOperation(params: { operation_id?: unknown }): Promise<{ operation: import('./workers/operations/store.js').WorkerOperationRecord | null }> {
+  private async handleCancelWorkerOperation(params: { operation_id?: unknown; assertion?: unknown; expected?: Record<string, unknown> }): Promise<{ operation: import('./workers/operations/store.js').WorkerOperationRecord | null }> {
     if (typeof params.operation_id !== 'string') throw new Error('operation_id is required')
+    // cancel 与 install/verify 同一 assertion 纪律（§3.19.12.1）：先核销再执行。
+    if (typeof params.assertion !== 'string' || !params.expected) throw new Error('assertion and expected are required')
+    if (params.expected.action !== 'cancel' || params.expected.operation_id !== params.operation_id) {
+      throw new Error('assertion binding mismatch with requested operation')
+    }
+    const adminPort = this.adminPort
+    if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')
+    await this.rpcClient.callSensitive(
+      adminPort,
+      'consume_worker_operation_assertion',
+      { assertion: params.assertion, expected: params.expected },
+      this.config.moduleId,
+      { authorizationBearer: ConfigLoader.getRuntimeBearer() },
+    )
     const record = this.workerOperationStore.get(params.operation_id)
     if (!record) return { operation: null }
     if (record.state === 'running' || record.state === 'accepted') {

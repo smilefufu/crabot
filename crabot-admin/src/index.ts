@@ -9884,11 +9884,18 @@ export class AdminModule extends ModuleBase {
 
   /** GET /:impl/operations/:operationId：读 Agent operation store（脱敏 record）。 */
   private async handleGetWorkerOperationApi(_req: IncomingMessage, res: ServerResponse, impl: string, operationId: string): Promise<void> {
-    const admission = await this.admitWorkerOperation(res, impl, 'cancel', 0)
-    if (!admission) return
+    if (impl !== 'claude-code' && impl !== 'codex') {
+      sendJson(res, 400, { error: `unknown worker implementation: ${impl}`, code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return
+    }
+    const agentPort = await this.ensureAgentPort()
+    if (!agentPort) {
+      sendJson(res, 503, { error: 'Agent not available', code: 'ADMIN_CORE_AGENT_UNAVAILABLE' })
+      return
+    }
     try {
       const result = await this.rpcClient.call<Record<string, unknown>, { operation?: unknown }>(
-        admission.agentPort, 'get_worker_implementation_operation', { operation_id: operationId }, this.config.moduleId,
+        agentPort, 'get_worker_implementation_operation', { operation_id: operationId }, this.config.moduleId,
       )
       if (!result.operation) {
         sendJson(res, 404, { error: 'operation not found', code: 'ADMIN_WORKER_OPERATION_NOT_FOUND' })
@@ -9903,11 +9910,37 @@ export class AdminModule extends ModuleBase {
   /** POST /:impl/operations/:operationId/cancel：取消 operation。 */
   private async handleCancelWorkerOperationApi(req: IncomingMessage, res: ServerResponse, impl: string, operationId: string): Promise<void> {
     const body = await this.readJsonBody<{ expected_revision?: unknown }>(req)
-    const admission = await this.admitWorkerOperation(res, impl, 'cancel', body.expected_revision)
-    if (!admission) return
+    if (impl !== 'claude-code' && impl !== 'codex') {
+      sendJson(res, 400, { error: `unknown worker implementation: ${impl}`, code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return
+    }
+    if (typeof body.expected_revision !== 'number') {
+      sendJson(res, 400, { error: 'expected_revision is required', code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return
+    }
+    const desired = await this.workerImplementationStore.load()
+    if (desired.revision !== body.expected_revision) {
+      sendJson(res, 409, { error: `worker implementation config revision conflict (current ${desired.revision})`, code: 'ADMIN_WORKER_POLICY_REVISION_CONFLICT' })
+      return
+    }
+    const agentPort = await this.ensureAgentPort()
+    if (!agentPort) {
+      sendJson(res, 503, { error: 'Agent not available', code: 'ADMIN_CORE_AGENT_UNAVAILABLE' })
+      return
+    }
+    // cancel 同样签发/核销 assertion（§3.19.12.1），绑定的是被操作的既有 operation_id。
+    const policy = desired.implementations[impl]
+    const mode = policy.connection?.mode ?? 'native_account'
+    const assertion = this.workerOperationAssertions.issue({
+      action: 'cancel', operation_id: operationId, impl, mode, policy_revision: desired.revision,
+    })
     try {
-      const result = await this.rpcClient.call<Record<string, unknown>, { operation?: unknown }>(
-        admission.agentPort, 'cancel_worker_implementation_operation', { operation_id: operationId }, this.config.moduleId,
+      const result = await this.rpcClient.callSensitive<Record<string, unknown>, { operation?: unknown }>(
+        agentPort, 'cancel_worker_implementation_operation', {
+          operation_id: operationId,
+          assertion,
+          expected: { action: 'cancel', operation_id: operationId, impl, mode, policy_revision: desired.revision },
+        }, this.config.moduleId,
       )
       if (!result.operation) {
         sendJson(res, 404, { error: 'operation not found', code: 'ADMIN_WORKER_OPERATION_NOT_FOUND' })

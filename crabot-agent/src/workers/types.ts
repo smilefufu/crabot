@@ -261,7 +261,7 @@ export interface WorkerAdapter {
   provision(ws: Workspace, caps: CapabilityBundle): Promise<void>
   spawn(spec: SpawnSpec): Promise<IncarnationHandle>
   resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle>
-  fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle>
+  fork(prev: IncarnationRef, forkInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle>
   sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void>
   readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }>
   state(h: IncarnationHandle): Promise<WorkerContractState>

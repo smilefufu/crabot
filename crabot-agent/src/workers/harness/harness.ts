@@ -1052,8 +1052,13 @@ export class WorkerHarness {
         material.workspaceCandidate,
       )
       const targetImpl = pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
+      // P6-B §6.5：legacy 接续的 spawn 同样过 registry gate + connection admission——
+      // 不得绕过 ready 校验，admin_provider 形态不得回落宿主凭证。
+      await this.deps.assertWorkerImplReady?.(targetImpl)
+      const admission = await this.deps.admitWorkerConnection?.(targetImpl, worker.worker_id)
       const targetAdapter = this.deps.adapters.get(targetImpl)
       if (!targetAdapter) {
+        if (admission) await admission.dispose()
         throw new Error(`WorkerHarness.legacyContinuation: no adapter registered for impl '${targetImpl}'`)
       }
       if (implAlreadyUsed(worker, targetImpl)) {
@@ -1098,17 +1103,28 @@ export class WorkerHarness {
         legacy: true,
       })
 
-      await targetAdapter.provision(workspace, caps)
       const prompt = buildHandoffPrompt(worker.task, item.text)
-      const handle = await targetAdapter.spawn({
-        worker_id: worker.worker_id,
-        prompt,
-        workspace,
-        goal: worker.task.goal,
-        origin: worker.origin,
-        principal_permissions: auth.principal_permissions,
-        builtin,
-      })
+      let handle
+      try {
+        await targetAdapter.provision(workspace, caps)
+        handle = await targetAdapter.spawn({
+          worker_id: worker.worker_id,
+          prompt,
+          workspace,
+          goal: worker.task.goal,
+          origin: worker.origin,
+          principal_permissions: auth.principal_permissions,
+          builtin,
+          ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
+        })
+      } catch (error) {
+        if (admission) await admission.dispose()
+        throw error
+      }
+      if (admission) {
+        if (handle.initial_input?.control_state === 'exited') await admission.dispose()
+        else this.connectionDisposers.set(`${worker.worker_id}:${handle.seq}`, admission.dispose)
+      }
       const initialInput = handle.initial_input
       const initialState = cliContractState(initialInput?.control_state ?? 'running')
       const now = this.deps.now()
@@ -2406,10 +2422,14 @@ export class WorkerHarness {
     })
 
     // 锁外:见方法注释"锁外慢调用段"。
+    // P6-B §6.5：fork（侧问）同样 operation-time admission——进程重启后主线 runtime 的
+    // connectionEnv 已随内存丢失，现解析现注入，不回落宿主原生凭证。
+    const admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
     let forkHandle: IncarnationHandle
     try {
-      forkHandle = await prep.adapter.fork(prep.ref, question)
+      forkHandle = await prep.adapter.fork(prep.ref, question, admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : undefined)
     } catch (err) {
+      if (admission) await admission.dispose()
       await this.appendEvent(workerId, prep.ref.seq, 'query_failed', {
         reason: 'fork_failed',
         message: err instanceof Error ? err.message : String(err),
@@ -2444,6 +2464,7 @@ export class WorkerHarness {
       // runForkBurst 做成 fire-and-forget(未 await 就返回 handle),这里读到的仍是
       // running,后续真正的 onStateChange 回调到时台账里已经有这条化身,能正常找到并
       // 修正,不会重演同一个丢弃。
+      if (admission) await admission.dispose()
       const observedState = await prep.adapter.state(forkHandle)
       const exitedOnCommit = observedState === 'exited'
       await this.deps.ledger.upsertWorker(managerKey, workerId, (prevWorker) => {
