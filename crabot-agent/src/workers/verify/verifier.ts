@@ -23,7 +23,9 @@ import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import type { ResolvedWorkerConnection } from '../connections/types.js'
 
 const VERIFY_TIMEOUT_MS = 120_000
-const MINIMAL_PROMPT = 'Reply with exactly: OK'
+// 判据是 prompt 中不出现的计算结果（codex exec 会把 instructions 段回显到 stdout，
+// 无锚点的 /OK/ 对 prompt 里的 OK 退化成常真——R6）。
+const MINIMAL_PROMPT = 'Compute 17+25. Reply with only the number.'
 
 export interface VerifyOutcome {
   passed: boolean
@@ -93,7 +95,7 @@ export async function runWorkerVerification(
     const result = await runWithTimeout(binary, args, { cwd: workspace, env, timeoutMs: VERIFY_TIMEOUT_MS })
     if (result.timedOut) return { passed: false, detail: 'verify timeout' }
     if (result.exitCode !== 0) return { passed: false, detail: `CLI exited ${result.exitCode}: ${redact(result.stderr.slice(0, 300))}` }
-    if (!/OK/.test(result.stdout)) return { passed: false, detail: 'turn completion signal not observed', connection_revision: connectionRevision }
+    if (!/\b42\b/.test(result.stdout)) return { passed: false, detail: 'turn completion signal not observed', connection_revision: connectionRevision }
     return { passed: true, detail: 'minimal real turn completed', connection_revision: connectionRevision }
   } finally {
     await runtimeFiles?.dispose()

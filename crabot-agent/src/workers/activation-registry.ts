@@ -174,8 +174,17 @@ export class ActivationRegistry {
     return status
   }
 
-  /** 显式 spawn/resume/handoff gate：not ready → 结构化 fail loud。 */
-  assertReady(impl: WorkerImplId): void {
+  /**
+   * 显式 spawn/resume/handoff gate（operation-time）：先对该 impl 做低成本 re-detect
+   * （宿主升级/卸载/登出在两次 pull 之间也可见，§6.5「每次操作重校验」），再按新鲜
+   * 快照判定。not ready → 结构化 fail loud。
+   */
+  async assertReady(impl: WorkerImplId): Promise<void> {
+    if (this.desired) {
+      try {
+        this.snapshots.set(impl, await this.computeStatus(impl))
+      } catch { /* re-detect 失败用现有快照继续判（detect 错误本身已在 computeStatus 内化） */ }
+    }
     const status = this.getStatus(impl)
     if (status.ready) return
     const ready = this.listStatus().filter((s) => s.ready).map((s) => s.impl)

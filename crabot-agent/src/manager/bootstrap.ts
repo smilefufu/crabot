@@ -175,7 +175,7 @@ export interface BootstrapDeps {
   /** P6-A §8.4：builtin worker 结构化 trace 写钩子/读入口（TraceStore 窄口）。 */
   readonly builtinTraceHooks?: import('../workers/builtin/adapter.js').BuiltinTraceHooks
   /** P6-B §6：activation registry gate（unified-agent 注入）。 */
-  readonly assertWorkerImplReady?: (impl: import('../workers/types.js').WorkerImplId) => void
+  readonly assertWorkerImplReady?: (impl: import('../workers/types.js').WorkerImplId) => void | Promise<void>
   /** P6-B：managed active binary 解析（detect/spawn：managed → system）。 */
   readonly resolveManagedBinary?: (impl: 'claude-code' | 'codex') => Promise<string | undefined>
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */

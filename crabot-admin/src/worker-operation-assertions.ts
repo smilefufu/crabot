@@ -122,6 +122,11 @@ export class WorkerOperationAssertions {
       if (claims[key] !== expected[key]) throw new Error(`worker operation assertion claim mismatch: ${key}`)
     }
     await this.loadConsumed()
+    // 每次核销都按 TTL 裁剪（长跑 Admin 不再单调增长）。
+    const now = Date.now()
+    for (const [nonce, expiry] of this.consumed!) {
+      if (Date.parse(expiry) <= now) this.consumed!.delete(nonce)
+    }
     if (this.consumed!.has(claims.nonce)) throw new Error('worker operation assertion already consumed')
     this.consumed!.set(claims.nonce, claims.expires_at)
     await this.persistConsumed()

@@ -426,7 +426,7 @@ export interface HarnessDeps {
    * spawn 显式 impl、resume 终态化身、handoff 目标 impl 前必须调用；
    * 省略 impl 的 spawn 走 defaultImpl（builtin 安全路径）不在此 gate。
    */
-  readonly assertWorkerImplReady?: (impl: WorkerImplId) => void
+  readonly assertWorkerImplReady?: (impl: WorkerImplId) => void | Promise<void>
   /**
    * P6-B §6.5：operation-time connection admission（registry gate 之后、副作用之前）。
    * 返回的 env 注入 SpawnSpec.connection_env；dispose 在 spawn 收口后调用。
@@ -633,7 +633,7 @@ export class WorkerHarness {
     this.deps.assertExecutionAdmission?.()
     const workerId = `w-${randomUUID()}`
     // P6-B：显式 impl 在任何副作用（workspace/台账/provision）前过 registry gate。
-    if (p.impl !== undefined) this.deps.assertWorkerImplReady?.(p.impl)
+    if (p.impl !== undefined) await this.deps.assertWorkerImplReady?.(p.impl)
     // P6-B §6.5：operation admission——当前调用内实时解析连接；revision 在副作用前最终比对。
     const admission = p.impl !== undefined ? await this.deps.admitWorkerConnection?.(p.impl, workerId) : undefined
     const impl = p.impl ?? this.deps.defaultImpl
@@ -1463,7 +1463,7 @@ export class WorkerHarness {
   ): Promise<ContinuationDelivery> {
     this.deps.assertExecutionAdmission?.()
     // P6-B：resume 重验 ready（「已有 running incarnation 不杀，新 resume/handoff 重验」）。
-    this.deps.assertWorkerImplReady?.(mainline.impl)
+    await this.deps.assertWorkerImplReady?.(mainline.impl)
     // P6-B §6.5：resume 同样 operation-time 解析连接（revision 变化即拒绝）。
     const admission = await this.deps.admitWorkerConnection?.(mainline.impl, worker.worker_id)
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
@@ -1578,7 +1578,7 @@ export class WorkerHarness {
     // 把这两项检查提到最前面、在写 HANDOFF.md 和 kill 旧化身之前做,失败时旧化身与
     // HANDOFF.md 都不动,保持可重试。
     // P6-B：目标 impl 重验 ready（配置可能在 source 运行期间已失效）。
-    this.deps.assertWorkerImplReady?.(targetImpl)
+    await this.deps.assertWorkerImplReady?.(targetImpl)
     // P6-B §6.5：handoff 同样过 connection admission——早于 HANDOFF.md 与 kill source；
     // admin_provider 形态下目标 CLI 不得静默回落宿主原生凭证。
     const admission = await this.deps.admitWorkerConnection?.(targetImpl, worker.worker_id)

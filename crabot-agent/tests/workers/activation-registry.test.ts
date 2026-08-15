@@ -98,7 +98,7 @@ describe('ActivationRegistry（P6-B §6）', () => {
     registry.setModelSlotResolvable(() => true)
     await registry.applyRuntimeConfig(runtimeConfig())
     try {
-      registry.assertReady('claude-code')
+      await registry.assertReady('claude-code')
       expect.unreachable()
     } catch (error) {
       const err = error as Error & { code?: string; details?: { ready_impls?: string[] } }

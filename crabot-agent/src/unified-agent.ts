@@ -2953,6 +2953,10 @@ export class UnifiedAgent extends ModuleBase {
     if (params.expected.action !== 'install' || params.expected.impl !== impl || params.expected.operation_id !== params.operation_id) {
       throw new Error('assertion binding mismatch with requested operation')
     }
+    // 互斥检查先于 assertion 核销——并发撞门不该白烧 nonce 让用户重新发起（R5/R6）。
+    if (this.workerOperationStore.hasActiveFor(impl)) {
+      throw new Error(`another mutating operation is active for ${impl}`)
+    }
     // 1. assertion 核销（Admin 回调，bearer 认证 + nonce 一次性）。
     const adminPort = this.adminPort
     if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')
@@ -2964,10 +2968,6 @@ export class UnifiedAgent extends ModuleBase {
       { authorizationBearer: ConfigLoader.getRuntimeBearer() },
     )
     const operationId = params.operation_id
-    // 互斥检查先于 assertion 核销——并发撞门不该白烧 nonce 让用户重新发起（R5）。
-    if (this.workerOperationStore.hasActiveFor(impl)) {
-      throw new Error(`another mutating operation is active for ${impl}`)
-    }
     await this.workerOperationStore.upsert({
       operation_id: operationId, kind: 'install', impl, state: 'running',
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
