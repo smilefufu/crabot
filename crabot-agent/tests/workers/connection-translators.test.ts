@@ -100,3 +100,23 @@ describe('fork connection_env 透传（R10 回归钉死）', () => {
     expect(source).toMatch(/opts\?\.connection_env \?\? prevRuntime\.connectionEnv/)
   })
 })
+
+describe('managed binary 路径含空格（R15 实证）', () => {
+  it('detect/spawn 的命令构造对空格路径加引号，真实可执行', async () => {
+    // 造一个路径含空格的假 managed binary：打印版本号即退出。
+    const spacedDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot space dir '))
+    const bin = path.join(spacedDir, 'fake-cli')
+    await fs.writeFile(bin, '#!/bin/sh\necho "9.9.9 (Fake CLI)"\n', { mode: 0o755 })
+    // claude adapter detect 走 managed 优先 + shQuote
+    const { ClaudeCodeAdapter } = await import('../../src/workers/claude-code/adapter.js')
+    const adapter = new ClaudeCodeAdapter({
+      dataDir: spacedDir,
+      resolveManagedBinary: async () => bin,
+    })
+    const result = await adapter.detect()
+    expect(result.installed).toBe(true)
+    expect(result.version).toBe('9.9.9')
+    expect(result.install_source).toBe('managed')
+    await fs.rm(spacedDir, { recursive: true, force: true })
+  })
+})
