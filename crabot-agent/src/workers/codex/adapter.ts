@@ -439,9 +439,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   /** 传给 tmux newSession 的 env:PATH 前置 codexBin 所在真实目录(解析不出来就用继承的
-   * PATH,不阻塞),外加调用方传入的额外变量(如 CODEX_HOME)。 */
+   * PATH,不阻塞),外加调用方传入的额外变量(如 CODEX_HOME)。
+   * P6-B：有 managed active binary 时 PATH 前置其目录（spawn/resume 跑的是它）。 */
   private async buildEnv(extra: Record<string, string>): Promise<Record<string, string>> {
-    const dir = await this.resolveBinDirCached()
+    const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const dir = managed ? dirname(managed) : await this.resolveBinDirCached()
     const path = dir ? `${dir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '')
     return { PATH: path, ...extra }
   }
@@ -815,7 +817,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。
     // 网络放行见文件头"spawn/resume 启动参数"节。
-    const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
+    const spawnBin = (this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined) ?? this.codexBin
+    const command = `${spawnBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
     const spawnStartedAt = Date.now()
 
     // newSession 成功之后才落 meta(running)+注册 runtime,同 cc 纪律:tmux 失败时不留任何
@@ -967,7 +970,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
       // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
       // `resume` 之前。
-      const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
+      const resumeBin = (this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined) ?? this.codexBin
+      const command = `${resumeBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
 
       // P6-B admin_provider resume：上一化身的 runtime CODEX_HOME 已随终态清理，
       // 本次 admission 产出新目录——同样要合并 provision 配置（translator 配置胜出）。

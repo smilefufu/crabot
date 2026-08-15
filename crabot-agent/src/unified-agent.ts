@@ -723,9 +723,10 @@ export class UnifiedAgent extends ModuleBase {
       assertWorkerImplReady: (impl) => this.activationRegistry.assertReady(impl),
       resolveManagedBinary: (impl) => this.managedInstaller.activeBinary(impl),
       // P6-B §6.5：operation-time connection admission（当前调用内实时解析）。
-      admitWorkerConnection: (impl) => admitWorkerConnection(this.activationRegistry, impl, {
+      admitWorkerConnection: (impl, operationLabel) => admitWorkerConnection(this.activationRegistry, impl, {
         resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),
         runtimeRoot: path.join(getAgentDataDir(), 'worker-impls', 'runtime'),
+        operationLabel,
       }),
       builtinTraceReader: this.builtinTraceReader(),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
@@ -1479,6 +1480,16 @@ export class UnifiedAgent extends ModuleBase {
     this.imageConnInfo = nextImageConn
     this.imageCapability = nextImageCapability
 
+    // worker implementation desired config 在 agentConfig 等 live 字段就位后、任何分支
+    // return 前应用（R3：early-return 分支曾让这里在热路径上永远走不到）。registry 失败
+    // 只记日志等下轮 pull 收敛（stale 防护在 ConfigLoader.acceptRevision 已先行拦截）。
+    try {
+      await this.activationRegistry.applyRuntimeConfig(next.worker_implementations ?? DEFAULT_SAFE_WORKER_IMPLS)
+    } catch (error) {
+      console.error(`[${this.config.moduleId}] activation registry apply failed (will retry on next pull):`,
+        error instanceof Error ? error.message : String(error))
+    }
+
     if (this.agentHandler && nextWorkerSdk) {
       this.agentHandler.updateMcpConnector(liveMcp)
       this.agentHandler.updateSdkEnv(nextWorkerSdk, nextDigestSdk)
@@ -1501,16 +1512,6 @@ export class UnifiedAgent extends ModuleBase {
       this.contextAssembler.setLiveSnapshotProvider((taskId) => this.agentHandler?.getLiveSnapshot(taskId))
     }
 
-    // worker implementation desired config 在所有 live 字段（含 agentConfig）就位后应用——
-    // builtin ready 的 model slot 判据读的就是新配置；此前的 fallible work 失败时不会走到
-    // 这里，registry 不切。registry 失败只打错误日志（live 配置已生效，下轮 pull 重试
-    // 收敛；stale 防护在 ConfigLoader.acceptRevision 已先行拦截，这里几近不可达）。
-    try {
-      await this.activationRegistry.applyRuntimeConfig(next.worker_implementations ?? DEFAULT_SAFE_WORKER_IMPLS)
-    } catch (error) {
-      console.error(`[${this.config.moduleId}] activation registry apply failed (will retry on next pull):`,
-        error instanceof Error ? error.message : String(error))
-    }
   }
 
   /**
@@ -3134,7 +3135,8 @@ export class UnifiedAgent extends ModuleBase {
     return status[0]?.policy_revision ?? 0
   }
 
-  /** P6-B §6.5：sweep worker-impls/runtime 下的孤儿 op-* 目录（按 label 中的 workerId 判定）。 */
+  /** P6-B §6.5：sweep 真一次性 op-* 目录（verify 等）的崩溃孤儿。
+   *  worker 级 CODEX_HOME（runtimeRoot/w-<id>）是 resume 的 session 依赖，永不 sweep。 */
   private async sweepOrphanedConnectionRuntimes(): Promise<void> {
     const runtimeRoot = path.join(getAgentDataDir(), 'worker-impls', 'runtime')
     let entries: string[]
@@ -3143,27 +3145,16 @@ export class UnifiedAgent extends ModuleBase {
     } catch {
       return
     }
-    const aliveWorkerIds = new Set<string>()
-    try {
-      const all = await this.managerStack?.harness.listAllWorkers() ?? []
-      for (const { worker } of all) {
-        for (const incarnation of worker.incarnations ?? []) {
-          if (incarnation.state !== 'exited') {
-            aliveWorkerIds.add(worker.worker_id)
-            break
-          }
-        }
-      }
-    } catch {
-      return // 台账不可用时不扫（宁可留孤儿，不误删）
-    }
+    const bootMs = Date.now()
     for (const entry of entries) {
-      // op-[w-<workerId>-]<uuid>
-      const match = /^op-(?:w-([A-Za-z0-9-]+)-)?[0-9a-f-]{36}$/.exec(entry)
-      if (!match) continue
-      const workerId = match[1]
-      if (workerId && aliveWorkerIds.has(workerId)) continue
-      await fs.promises.rm(path.join(runtimeRoot, entry), { recursive: true, force: true }).catch(() => {})
+      // 只清 op-*（verify/一次性操作）；w-* 的 worker home 是 resume 依赖，不动。
+      if (!entry.startsWith('op-')) continue
+      try {
+        const stat = await fs.promises.stat(path.join(runtimeRoot, entry))
+        // 只清早于本次启动的（启动后新建的属在途操作）。
+        if (stat.mtimeMs >= bootMs) continue
+        await fs.promises.rm(path.join(runtimeRoot, entry), { recursive: true, force: true }).catch(() => {})
+      } catch { /* 单个失败跳过 */ }
     }
   }
 

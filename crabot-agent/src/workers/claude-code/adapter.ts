@@ -567,7 +567,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
-    const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode bypassPermissions`
+    // P6-B：managed active binary 优先（与 detect 同顺序）——「install→verify→派活跑的是
+    // 不同 binary」的版本错配/command not found 由此杜绝。
+    const spawnBin = (this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined) ?? this.claudeBin
+    const command = `${spawnBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode bypassPermissions`
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
     // (session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id 可安全重试。
@@ -680,7 +683,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // settings,必须与 spawn 对称地每次通过 --settings 注入。session_ref 是 cc 侧的会话 uuid,
       // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
-      const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
+      const resumeBin = (this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined) ?? this.claudeBin
+      const command = `${resumeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
       await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: opts?.connection_env })

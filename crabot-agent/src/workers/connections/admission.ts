@@ -9,6 +9,9 @@
  * 产出的 env/runtime file 只在本操作内存活；runtime 目录 finally 清理。
  */
 
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
+import crypto from 'node:crypto'
 import type { ActivationRegistry } from '../activation-registry.js'
 import type { CLIWorkerImplId, WorkerImplId, WorkerImplementationStatus } from '../types.js'
 import { findTranslator } from './registry.js'
@@ -55,7 +58,27 @@ export async function admitWorkerConnection(
     }
     const injection = translator.buildInjection({ cli_version: status.version, connection: resolved.connection })
     if (injection.runtimeFiles && Object.keys(injection.runtimeFiles).length > 0) {
-      const files = await RuntimeFileSet.create(deps.runtimeRoot, injection.runtimeFiles, deps.operationLabel)
+      // agent_runtime_file 的 CODEX_HOME 按 **worker** 持久（config.toml 只含 env_key 引用，
+      // 不含 credential 明文；真正的 key 在进程 env）：rollout/session 跨化身延续，
+      // resume 才找得到 session。每次操作原子覆写内容（连接轮换即更新）。
+      // 无 operationLabel（verify 等真一次性操作）才用 op 目录 + dispose。
+      if (deps.operationLabel) {
+        const home = path.join(deps.runtimeRoot, deps.operationLabel)
+        await fs.mkdir(home, { recursive: true, mode: 0o700 })
+        for (const [relative, content] of Object.entries(injection.runtimeFiles)) {
+          const target = path.resolve(home, relative)
+          if (!target.startsWith(home + path.sep)) throw new Error(`runtime file escapes dir: ${relative}`)
+          const tmp = `${target}.tmp-${crypto.randomUUID()}`
+          await fs.writeFile(tmp, content, { mode: 0o600 })
+          await fs.rename(tmp, target)
+        }
+        return {
+          env: { ...injection.env, CODEX_HOME: home },
+          connectionRevision: resolved.connection_revision,
+          dispose: async () => {}, // worker 级持久，终态不清理（resume 依赖）
+        }
+      }
+      const files = await RuntimeFileSet.create(deps.runtimeRoot, injection.runtimeFiles)
       return {
         env: { ...injection.env, CODEX_HOME: files.root },
         connectionRevision: resolved.connection_revision,

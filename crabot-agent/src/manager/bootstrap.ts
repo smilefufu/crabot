@@ -179,7 +179,7 @@ export interface BootstrapDeps {
   /** P6-B：managed active binary 解析（detect/spawn：managed → system）。 */
   readonly resolveManagedBinary?: (impl: 'claude-code' | 'codex') => Promise<string | undefined>
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */
-  readonly admitWorkerConnection?: (impl: import('../workers/types.js').WorkerImplId) => Promise<{
+  readonly admitWorkerConnection?: (impl: import('../workers/types.js').WorkerImplId, operationLabel?: string) => Promise<{
     env: Record<string, string>
     connectionRevision?: string
     dispose(): Promise<void>
