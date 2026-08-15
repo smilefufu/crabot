@@ -150,6 +150,11 @@ export class ActivationRegistry {
     await this.recompute()
   }
 
+  /** 用当前 desired 原地重算（install/CLI 升级等环境变化后；不换 revision）。 */
+  async refresh(): Promise<void> {
+    await this.recompute()
+  }
+
   /** 当前快照（未 initialized 抛错——调用方据此返回 service unavailable，不假装空）。 */
   listStatus(): WorkerImplementationStatus[] {
     if (!this.desired) throw new Error('[ActivationRegistry] not initialized')

@@ -47,14 +47,23 @@ export class GrandfatherBootstrapStore {
     return this.current
   }
 
-  /** inspect：同 transaction 重放返回既有 observation（幂等）；不同 transaction 在有未终态时拒绝。 */
+  /** inspect：同 transaction 重放返回既有 observation（幂等）——但仍在 inspected 且
+   *  宿主 detect 已变（跨启动升级/重登）时允许重采样更新，否则「重放旧 observation →
+   *  commit 核对不符 → 永久卡死」（R5）；committed 后不可变。不同 transaction 拒绝。 */
   async recordInspection(
     transactionId: string,
     observation: BootstrapTransaction['observation'],
   ): Promise<BootstrapTransaction> {
     await this.load()
     if (this.current) {
-      if (this.current.transaction_id === transactionId) return this.current
+      if (this.current.transaction_id === transactionId) {
+        if (this.current.state === 'inspected' && JSON.stringify(this.current.observation) !== JSON.stringify(observation)) {
+          this.current.observation = observation
+          this.current.updated_at = new Date().toISOString()
+          await this.persist()
+        }
+        return this.current
+      }
       throw new Error(`[GrandfatherBootstrap] another transaction is active: ${this.current.transaction_id}`)
     }
     const now = new Date().toISOString()

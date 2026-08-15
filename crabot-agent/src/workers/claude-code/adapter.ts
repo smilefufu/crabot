@@ -260,10 +260,17 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     try {
       const entries = await fs.readdir(claudeHomeDir)
       activated = entries.includes('settings.json') || entries.includes('.credentials.json')
-      // 代际只用 settings.json（用户配置：endpoint/model/信任表变更会让 binding 失效）。
-      // .credentials.json 会被例行 token 刷新重写（mtime 骗人），不参与——订阅 OAuth 的
-      // access token 轮换不构成身份变化；macOS 上 credential 在 keychain，本就不存在文件。
+      // 代际 = 身份 + 用户配置：
+      // - 身份取 ~/.claude.json 的 oauthAccount.accountUuid（稳定账号标识，非 credential
+      //   本体）——login/logout/换账号会变；订阅 token 的例行刷新不会（R5）。
+      // - settings.json 的 mtime+size 恒参与（endpoint/信任表变更必须让 binding 失效）。
+      // .credentials.json 不参与（会被例行刷新重写，mtime 骗人）。
       const parts: string[] = []
+      try {
+        const claudeJson = JSON.parse(await fs.readFile(this.claudeConfigPath, 'utf-8')) as { oauthAccount?: { accountUuid?: unknown } }
+        const uuid = claudeJson.oauthAccount?.accountUuid
+        if (typeof uuid === 'string' && uuid) parts.push(`account:${uuid}`)
+      } catch { /* 无 ~/.claude.json 或无账号段：不参与 */ }
       try {
         const stat = await fs.stat(join(claudeHomeDir, 'settings.json'))
         parts.push(`settings.json:${stat.mtimeMs}:${stat.size}`)

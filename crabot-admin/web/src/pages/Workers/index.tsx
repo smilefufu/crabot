@@ -99,6 +99,7 @@ export const WorkersPage: React.FC = () => {
       } else {
         setError(`保存失败: ${msg}`)
       }
+      throw err // saveConnection 依赖失败不关对话框/清孤儿 provider
     } finally {
       setBusy(false)
     }
@@ -114,21 +115,29 @@ export const WorkersPage: React.FC = () => {
         await applyConfig(impl, { enabled: true, connection: { mode: 'existing_host' } })
       } else {
         const isToken = method === 'setup_token'
-        const provider = await providerService.createProvider({
-          name: `worker-${impl}-${isToken ? 'setup-token' : 'custom'}-${Date.now() % 100000}`,
-          type: 'custom',
-          format: impl === 'claude-code' ? 'anthropic' : 'openai-responses',
-          endpoint: isToken ? 'https://api.anthropic.com' : endpoint,
-          api_key: isToken ? token : apiKey,
-          models: [{ model_id: modelId, display_name: modelId, type: 'llm' }],
-        } as never)
-        await applyConfig(impl, {
-          enabled: true,
-          connection: { mode: 'admin_provider', provider_id: provider.id, model_id: modelId },
-        })
+        let provider: { id: string } | undefined
+        try {
+          provider = await providerService.createProvider({
+            name: `worker-${impl}-${isToken ? 'setup-token' : 'custom'}-${Date.now() % 100000}`,
+            type: 'custom',
+            format: impl === 'claude-code' ? 'anthropic' : 'openai-responses',
+            endpoint: isToken ? 'https://api.anthropic.com' : endpoint,
+            api_key: isToken ? token : apiKey,
+            models: [{ model_id: modelId, display_name: modelId, type: 'llm' }],
+          } as never)
+          await applyConfig(impl, {
+            enabled: true,
+            connection: { mode: 'admin_provider', provider_id: provider.id, model_id: modelId },
+          })
+        } catch (error) {
+          // PUT 失败时清掉刚建的孤儿 provider（best-effort）。
+          if (provider) await providerService.deleteProvider(provider.id).catch(() => {})
+          throw error
+        }
       }
       setDialog(null)
     } catch (err) {
+      // 失败不关对话框（用户修正后可直接重试）。
       setError(`保存失败: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setBusy(false)

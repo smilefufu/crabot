@@ -2963,17 +2963,24 @@ export class UnifiedAgent extends ModuleBase {
       this.config.moduleId,
       { authorizationBearer: ConfigLoader.getRuntimeBearer() },
     )
-    // 2. 互斥 + operation 落 running 再执行。
+    const operationId = params.operation_id
+    // 互斥检查先于 assertion 核销——并发撞门不该白烧 nonce 让用户重新发起（R5）。
     if (this.workerOperationStore.hasActiveFor(impl)) {
       throw new Error(`another mutating operation is active for ${impl}`)
     }
-    const operationId = params.operation_id
     await this.workerOperationStore.upsert({
       operation_id: operationId, kind: 'install', impl, state: 'running',
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     })
     try {
       const result = await this.managedInstaller.install(impl)
+      // active pointer 切换后必须重算 registry——否则快照停在装之前：「安装→验证」
+      // 序列会用旧 detect 短路/写旧 cli_version 进 binding（R5）。
+      try {
+        if (this.activationRegistry.isInitialized()) await this.activationRegistry.refresh()
+      } catch (error) {
+        console.error(`[${this.config.moduleId}] registry recompute after install failed:`, error instanceof Error ? error.message : String(error))
+      }
       await this.workerOperationStore.upsert({
         operation_id: operationId, kind: 'install', impl, state: 'completed',
         detail: `installed ${result.version}`, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
@@ -3007,6 +3014,9 @@ export class UnifiedAgent extends ModuleBase {
     if (params.expected.action !== 'verify' || params.expected.impl !== impl || params.expected.operation_id !== params.operation_id) {
       throw new Error('assertion binding mismatch with requested operation')
     }
+    if (this.workerOperationStore.hasActiveFor(impl)) {
+      throw new Error(`another mutating operation is active for ${impl}`)
+    }
     const adminPort = this.adminPort
     if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')
     await this.rpcClient.callSensitive(
@@ -3016,9 +3026,6 @@ export class UnifiedAgent extends ModuleBase {
       this.config.moduleId,
       { authorizationBearer: ConfigLoader.getRuntimeBearer() },
     )
-    if (this.workerOperationStore.hasActiveFor(impl)) {
-      throw new Error(`another mutating operation is active for ${impl}`)
-    }
     const operationId = params.operation_id
     await this.workerOperationStore.upsert({
       operation_id: operationId, kind: 'verify', impl, state: 'running',
@@ -3157,19 +3164,22 @@ export class UnifiedAgent extends ModuleBase {
       } catch { /* 单个失败跳过 */ }
     }
     // worker 级 home GC：任务终态超 7 天的目录回收（§6.5 协议约定）。
-    const terminalAges = new Map<string, number>() // workerId → terminal 时刻
+    // 台账里查不到的 home（孤儿）按目录 mtime 超 7 天同样回收。
     try {
       const all = await this.managerStack?.harness.listAllWorkers() ?? []
       const nowMs = Date.now()
       for (const entry of entries) {
         if (!entry.startsWith('w-')) continue
-        const workerId = entry
-        const found = all.find(({ worker }) => worker.worker_id === workerId)
+        const found = all.find(({ worker }) => worker.worker_id === entry)
         const task = found?.worker.task
         const terminalAt = task && (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled')
           ? Date.parse(found!.worker.updated_at ?? task.created_at ?? '')
           : NaN
-        if (!Number.isFinite(terminalAt) || nowMs - terminalAt < 7 * 24 * 3600 * 1000) continue
+        if (!Number.isFinite(terminalAt)) {
+          // 台账未知：目录自身年龄超 7 天才回收（在途 worker 的 home 天天被写，mtime 新）。
+          const stat = await fs.promises.stat(path.join(runtimeRoot, entry)).catch(() => null)
+          if (!stat || nowMs - stat.mtimeMs < 7 * 24 * 3600 * 1000) continue
+        } else if (nowMs - terminalAt < 7 * 24 * 3600 * 1000) continue
         await fs.promises.rm(path.join(runtimeRoot, entry), { recursive: true, force: true }).catch(() => {})
       }
     } catch { /* 台账不可用时跳过 GC，不动目录 */ }

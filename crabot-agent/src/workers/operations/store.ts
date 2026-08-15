@@ -74,8 +74,20 @@ export class WorkerOperationStore {
     return false
   }
 
+  private static readonly MAX_RECORDS = 200
+
   async upsert(record: WorkerOperationRecord): Promise<void> {
     this.records.set(record.operation_id, { ...record, updated_at: new Date().toISOString() })
+    // 有界：超出上限时最老的终态记录先删（accepted/running 永不裁）。
+    if (this.records.size > WorkerOperationStore.MAX_RECORDS) {
+      const terminal = [...this.records.values()]
+        .filter((r) => r.state !== 'accepted' && r.state !== 'running')
+        .sort((a, b) => a.updated_at.localeCompare(b.updated_at))
+      while (this.records.size > WorkerOperationStore.MAX_RECORDS && terminal.length > 0) {
+        const oldest = terminal.shift()!
+        this.records.delete(oldest.operation_id)
+      }
+    }
     await this.persist()
   }
 
