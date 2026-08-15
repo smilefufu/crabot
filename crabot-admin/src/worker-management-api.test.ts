@@ -75,7 +75,28 @@ describe('Worker implementation management API（P6-B §5）', () => {
     expect(bad.status).toBe(400)
   })
 
+  it('PUT 启用 CLI 时 Agent 不可用 → 503（协议 §3.19.12 门禁）', async () => {
+    const res = await put({ expected_revision: 2, config: { implementations: {
+      builtin: { enabled: true },
+      'claude-code': { enabled: false },
+      codex: { enabled: true, connection: { mode: 'existing_host' } },
+    } } })
+    expect(res.status).toBe(503)
+    expect((await res.json() as { code?: string }).code).toBe('ADMIN_CORE_AGENT_UNAVAILABLE')
+  })
+
   it('PUT 成功：enable claude-code existing_host，revision +1', async () => {
+    // §3.19.12 启用门禁要求 Agent status 可用来校验 translator 兼容——stub 一个
+    // 「已装 2.1.232 + existing_host capability」的 Agent 状态响应。
+    ;(admin as unknown as { callAgentRpc: unknown }).callAgentRpc = async (method: string) => {
+      if (method === 'list_worker_implementation_status') {
+        return { items: [{
+          impl: 'claude-code', installed: true, version: '2.1.232',
+          connection_capabilities: [{ mode: 'existing_host', translator_id: 'claude-code-existing-host-v1', translator_version: '1', cli_version_range: '2.x', credential_transport: 'native_store', model_selection: 'native_default', credential_scope: 'runtime_user_home' }],
+        }] }
+      }
+      throw new Error(`unexpected agent RPC in test: ${method}`)
+    }
     const res = await put({ expected_revision: 1, config: { implementations: {
       builtin: { enabled: true },
       'claude-code': { enabled: true, connection: { mode: 'existing_host' } },

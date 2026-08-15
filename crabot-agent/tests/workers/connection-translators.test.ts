@@ -91,3 +91,12 @@ describe('connection translators（P6-B §7）', () => {
     await fs.rm(root, { recursive: true, force: true })
   })
 })
+
+describe('fork connection_env 透传（R10 回归钉死）', () => {
+  it('claude adapter fork 接收并使用 opts.connection_env（不被静默丢弃）', async () => {
+    // 直接读源码断言签名与消费——TS 允许实现少收形参无告警，这条钉死「接口扩了实现没跟上」。
+    const source = await import('node:fs/promises').then((fs) => fs.readFile(new URL('../../src/workers/claude-code/adapter.ts', import.meta.url), 'utf-8'))
+    expect(source).toMatch(/async fork\(prev: IncarnationRef, forkInput: string, opts\?: \{ connection_env\?: Record<string, string> \}\)/)
+    expect(source).toMatch(/opts\?\.connection_env \?\? prevRuntime\.connectionEnv/)
+  })
+})

@@ -9797,6 +9797,62 @@ export class AdminModule extends ModuleBase {
         sendJson(res, 400, { error: 'config is required', code: 'ADMIN_WORKER_IMPL_INVALID' })
         return
       }
+      // §3.19.12：把 CLI 设为 enabled / 变更其 connection 前，必须用当前 Agent status
+      // 校验 mode/provider format 与该 CLI 版本的 translator capability；Agent 不可用 503。
+      const nextImpls = body.config!.implementations as Record<string, { enabled?: boolean; connection?: { mode: string; provider_id?: string } }>
+      const current = await this.workerImplementationStore.load()
+      const transitions: Array<{ impl: 'claude-code' | 'codex'; enabled: boolean; connection?: { mode: string; provider_id?: string; model_id?: string } }> = []
+      for (const impl of ['claude-code', 'codex'] as const) {
+        const next = nextImpls?.[impl]
+        if (!next) continue
+        const prev = current.implementations[impl]
+        const enabling = next.enabled === true && !prev.enabled
+        const connectionChanged = next.enabled === true && JSON.stringify(next.connection ?? null) !== JSON.stringify(prev.connection ?? null)
+        if (enabling || connectionChanged) {
+          transitions.push({ impl, enabled: true, connection: next.connection as never })
+        }
+      }
+      if (transitions.length > 0) {
+        let statuses: Array<{ impl: string; installed: boolean; version?: string; connection_capabilities?: Array<{ mode: string; provider_formats?: string[] }> }>
+        try {
+          const result = await this.callAgentRpc<Record<string, never>, { items: never[] }>('list_worker_implementation_status', {})
+          statuses = result.items
+        } catch (error) {
+          sendJson(res, 503, {
+            error: 'Agent unavailable; cannot validate translator compatibility before enabling a CLI',
+            code: 'ADMIN_CORE_AGENT_UNAVAILABLE',
+          })
+          return
+        }
+        for (const transition of transitions) {
+          const status = statuses.find((st) => st.impl === transition.impl)
+          const mode = transition.connection?.mode
+          if (!mode) continue // 启用但无 connection（legacy 场景）→ 由 ready 判 final closed
+          const caps = status?.connection_capabilities ?? []
+          const cap = caps.find((c) => c.mode === mode)
+          if (!status?.installed || !cap) {
+            sendJson(res, 400, {
+              error: `${transition.impl} has no translator for ${mode} at the current CLI version`,
+              code: 'ADMIN_WORKER_CONNECTION_UNSUPPORTED',
+            })
+            return
+          }
+          if (mode === 'admin_provider' && transition.connection?.provider_id) {
+            const provider = this.modelProviderManager.getProvider(transition.connection.provider_id)
+            if (!provider) {
+              sendJson(res, 400, { error: 'provider not found', code: 'ADMIN_WORKER_CONNECTION_UNSUPPORTED' })
+              return
+            }
+            if (cap.provider_formats && !cap.provider_formats.includes(provider.format)) {
+              sendJson(res, 400, {
+                error: `provider format ${provider.format} is not supported by the ${transition.impl} translator`,
+                code: 'ADMIN_WORKER_CONNECTION_UNSUPPORTED',
+              })
+              return
+            }
+          }
+        }
+      }
       const updated = await this.workerImplementationStore.update(body.expected_revision, (current) => ({
         revision: current.revision, // store 会 +1
         default_impl: body.config!.default_impl ?? current.default_impl,

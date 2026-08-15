@@ -747,7 +747,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
+  async fork(prev: IncarnationRef, forkInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
 
@@ -832,7 +832,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 这个变量,照旧写共享文件,行为不变。
     // P6-B：admin_provider 的连接 env 从主线化身继承（fork 是只读侧问，不重新 resolve——
     // 主线 spawn/resume 已按 operation 注入；fork 回落宿主原生凭证 = 静默绕过，禁止）。
-    const inheritedConnectionEnv = prevRuntime.connectionEnv ?? {}
+    const inheritedConnectionEnv = opts?.connection_env ?? prevRuntime.connectionEnv ?? {}
     const execOpts = { cwd: prevRuntime.workspaceRoot, env: buildChildEnv({ [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv }) }
 
     let stdout = ''
