@@ -57,33 +57,41 @@ export interface WorkerImplementationStatus {
   detail?: string
 }
 
+/** §3.19.12.1 合并 GET 响应。 */
+export interface GetWorkerImplementationsResult {
+  config: WorkerImplementationConfig
+  agent_status: 'available' | 'unavailable'
+  agent_config_revision?: number
+  statuses: WorkerImplementationStatus[]
+  unavailable_reason?: string
+}
+
+export interface WorkerOperationView {
+  operation_id: string
+  state: string
+  passed?: boolean
+  version?: string
+  detail?: string
+}
+
 export const workerManagementService = {
-  async getConfig(): Promise<WorkerImplementationConfig> {
-    return api.get<WorkerImplementationConfig>('/agent/worker-implementations')
+  /** 合并读：config + 实时 status + 不可用原因（Agent 挂了和没配置不再混淆）。 */
+  async getAll(): Promise<GetWorkerImplementationsResult> {
+    return api.get<GetWorkerImplementationsResult>('/agent/worker-implementations')
   },
 
-  async putConfig(expectedRevision: number, implementations: Record<WorkerImplId, WorkerImplementationPolicy>): Promise<WorkerImplementationConfig> {
-    return api.put<WorkerImplementationConfig>('/agent/worker-implementations', {
+  async putConfig(expectedRevision: number, config: { default_impl: WorkerImplId; implementations: Record<WorkerImplId, WorkerImplementationPolicy> }): Promise<WorkerImplementationConfig> {
+    const result = await api.put<{ config: WorkerImplementationConfig }>('/agent/worker-implementations', {
       expected_revision: expectedRevision,
-      implementations,
+      config,
     })
+    return result.config
   },
 
-  async listStatus(): Promise<WorkerImplementationStatus[]> {
-    const result = await api.get<{ items: WorkerImplementationStatus[] }>('/agent/worker-implementations/status')
-    return result.items
-  },
-
-  async startOperation(impl: CLIWorkerImplId, action: 'install' | 'verify', expectedRevision: number): Promise<{
-    operation_id: string
-    state: string
-    passed?: boolean
-    version?: string
-    detail?: string
-  }> {
-    return api.post(`/agent/worker-implementations/${impl}/operations`, {
-      action,
+  async startOperation(impl: CLIWorkerImplId, action: 'install' | 'verify', expectedRevision: number): Promise<WorkerOperationView> {
+    const result = await api.post<{ operation: WorkerOperationView }>(`/agent/worker-implementations/${impl}/${action}`, {
       expected_revision: expectedRevision,
     })
+    return result.operation
   },
 }

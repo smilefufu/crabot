@@ -47,15 +47,19 @@ describe('Worker implementation management API（P6-B §5）', () => {
   const get = () => fetch(`http://localhost:${TEST_WEB_PORT}/api/agent/worker-implementations`, {
     headers: { Authorization: `Bearer ${token}` },
   })
-  const put = (body: unknown) => fetch(`http://localhost:${TEST_WEB_PORT}/api/agent/worker-implementations`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify(body),
-  })
+  const put = (body: { expected_revision: number; config: { default_impl?: string; implementations: unknown } }) =>
+    fetch(`http://localhost:${TEST_WEB_PORT}/api/agent/worker-implementations`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    })
 
-  it('GET 返回 revision 1 安全初始配置（新部署原子落盘）', async () => {
+  it('GET 返回协议合并 shape（config + agent_status + statuses），revision 1 安全初始配置', async () => {
     const res = await get()
     expect(res.status).toBe(200)
-    const config = await res.json() as { revision: number; default_impl: string; implementations: Record<string, { enabled: boolean }> }
+    const result = await res.json() as { config: { revision: number; default_impl: string; implementations: Record<string, { enabled: boolean }> }; agent_status: string; statuses: unknown[] }
+    expect(result.agent_status).toBe('unavailable') // 测试环境无 Agent
+    expect(result.unavailable_reason).toBeTruthy()
+    const config = result.config
     expect(config.revision).toBe(1)
     expect(config.default_impl).toBe('builtin')
     expect(config.implementations.builtin.enabled).toBe(true)
@@ -63,45 +67,45 @@ describe('Worker implementation management API（P6-B §5）', () => {
   })
 
   it('PUT CAS：expected_revision 不符 → 409；缺 expected_revision → 400', async () => {
-    const conflict = await put({ expected_revision: 99, implementations: {
+    const conflict = await put({ expected_revision: 99, config: { implementations: {
       builtin: { enabled: true }, 'claude-code': { enabled: false }, codex: { enabled: false },
-    } })
+    } } })
     expect(conflict.status).toBe(409)
-    const bad = await put({ implementations: {} })
+    const bad = await put({ config: { implementations: {} } } as never)
     expect(bad.status).toBe(400)
   })
 
   it('PUT 成功：enable claude-code existing_host，revision +1', async () => {
-    const res = await put({ expected_revision: 1, implementations: {
+    const res = await put({ expected_revision: 1, config: { implementations: {
       builtin: { enabled: true },
       'claude-code': { enabled: true, connection: { mode: 'existing_host' } },
       codex: { enabled: false },
-    } })
+    } } })
     if (res.status !== 200) console.log('PUT error body:', await res.clone().text())
     expect(res.status).toBe(200)
-    const config = await res.json() as { revision: number; implementations: Record<string, { enabled: boolean; connection?: { mode: string } }> }
-    expect(config.revision).toBe(2)
-    expect(config.implementations['claude-code'].connection?.mode).toBe('existing_host')
+    const body = await res.json() as { config: { revision: number; implementations: Record<string, { enabled: boolean; connection?: { mode: string } }> } }
+    expect(body.config.revision).toBe(2)
+    expect(body.config.implementations['claude-code'].connection?.mode).toBe('existing_host')
     // 持久化幸存
     const fresh = await get()
-    expect((await fresh.json() as { revision: number }).revision).toBe(2)
+    expect(((await fresh.json()) as { config: { revision: number } }).config.revision).toBe(2)
   })
 
   it('PUT 拒绝：default_impl 改走（P6-C 前过渡 gate）', async () => {
-    const res = await put({ expected_revision: 2, default_impl: 'claude-code', implementations: {
+    const res = await put({ expected_revision: 2, config: { default_impl: 'claude-code', implementations: {
       builtin: { enabled: true },
       'claude-code': { enabled: true, connection: { mode: 'existing_host' } },
       codex: { enabled: false },
-    } })
+    } } })
     expect(res.status).toBe(400)
   })
 
   it('PUT 拒绝：builtin 带 connection / credential 字段混入', async () => {
-    const res = await put({ expected_revision: 2, implementations: {
+    const res = await put({ expected_revision: 2, config: { implementations: {
       builtin: { enabled: true, connection: { mode: 'native_account' } },
       'claude-code': { enabled: false },
       codex: { enabled: false },
-    } })
+    } } })
     expect(res.status).toBe(400)
   })
 })

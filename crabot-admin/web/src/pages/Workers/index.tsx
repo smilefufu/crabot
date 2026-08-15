@@ -56,15 +56,18 @@ export const WorkersPage: React.FC = () => {
   const [notice, setNotice] = useState<string | null>(null)
   const [dialog, setDialog] = useState<DialogState | null>(null)
 
+  const [agentStatus, setAgentStatus] = useState<'available' | 'unavailable'>('available')
+
   const refresh = async () => {
     setError(null)
     try {
-      const [cfg, sts] = await Promise.all([
-        workerManagementService.getConfig(),
-        workerManagementService.listStatus().catch(() => [] as WorkerImplementationStatus[]),
-      ])
-      setConfig(cfg)
-      setStatuses(sts)
+      const result = await workerManagementService.getAll()
+      setConfig(result.config)
+      setStatuses(result.statuses)
+      setAgentStatus(result.agent_status)
+      if (result.agent_status === 'unavailable') {
+        setError(`Agent 不可用：${result.unavailable_reason ?? 'unknown'}（显示的是已保存的期望配置，状态未知）`)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -87,7 +90,7 @@ export const WorkersPage: React.FC = () => {
         codex: { ...config.implementations.codex },
       }
       next[impl] = policy
-      const updated = await workerManagementService.putConfig(config.revision, next)
+      const updated = await workerManagementService.putConfig(config.revision, { default_impl: config.default_impl, implementations: next })
       setConfig(updated)
       setNotice('已保存')
       await refresh()
@@ -177,7 +180,7 @@ export const WorkersPage: React.FC = () => {
       <Card
         key={impl}
         title={IMPL_LABEL[impl]}
-        actions={status ? (
+        actions={status && agentStatus === 'available' ? (
           <span className={status.ready ? 'text-success' : 'text-secondary'}>
             {status.ready ? '● ready' : '○ not ready'}
           </span>

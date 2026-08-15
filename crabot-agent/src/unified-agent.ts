@@ -1227,6 +1227,8 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('list_worker_implementation_status', this.handleListWorkerImplementationStatus.bind(this))
     this.registerMethod('install_worker_implementation', this.handleInstallWorkerImplementation.bind(this))
     this.registerMethod('verify_worker_implementation', this.handleVerifyWorkerImplementation.bind(this))
+    this.registerMethod('get_worker_implementation_operation', this.handleGetWorkerOperation.bind(this))
+    this.registerMethod('cancel_worker_implementation_operation', this.handleCancelWorkerOperation.bind(this))
     this.registerMethod('inspect_worker_implementation_bootstrap', this.handleInspectWorkerBootstrap.bind(this))
     this.registerMethod('commit_worker_implementation_bootstrap', this.handleCommitWorkerBootstrap.bind(this))
     this.registerMethod('list_manager_episodes_admin', this.handleListManagerEpisodesAdmin.bind(this))
@@ -3188,6 +3190,24 @@ export class UnifiedAgent extends ModuleBase {
         await fs.promises.rm(path.join(runtimeRoot, entry), { recursive: true, force: true }).catch(() => {})
       }
     } catch { /* 台账不可用时跳过 GC，不动目录 */ }
+  }
+
+  /** §3.19.12.1：读 operation store 的脱敏 record。 */
+  private async handleGetWorkerOperation(params: { operation_id?: unknown }): Promise<{ operation: import('./workers/operations/store.js').WorkerOperationRecord | null }> {
+    if (typeof params.operation_id !== 'string') throw new Error('operation_id is required')
+    return { operation: this.workerOperationStore.get(params.operation_id) ?? null }
+  }
+
+  /** §3.19.12.1：cancel —— 终态幂等返回；running 标 cancelled 并中止在途 install 子进程。 */
+  private async handleCancelWorkerOperation(params: { operation_id?: unknown }): Promise<{ operation: import('./workers/operations/store.js').WorkerOperationRecord | null }> {
+    if (typeof params.operation_id !== 'string') throw new Error('operation_id is required')
+    const record = this.workerOperationStore.get(params.operation_id)
+    if (!record) return { operation: null }
+    if (record.state === 'running' || record.state === 'accepted') {
+      if (record.kind === 'install') this.managedInstaller.cancelInFlight(record.impl)
+      await this.workerOperationStore.upsert({ ...record, state: 'cancelled' })
+    }
+    return { operation: this.workerOperationStore.get(params.operation_id) ?? null }
   }
 
   /** §6.5/§8.4：脱敏 WorkerImplementationStatus（activation registry 唯一 read API）。 */

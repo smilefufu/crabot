@@ -5,9 +5,8 @@ import { workerManagementService } from '../../services/worker-management'
 
 vi.mock('../../services/worker-management', () => ({
   workerManagementService: {
-    getConfig: vi.fn(),
+    getAll: vi.fn(),
     putConfig: vi.fn(),
-    listStatus: vi.fn(),
     startOperation: vi.fn(),
   },
 }))
@@ -16,10 +15,13 @@ vi.mock('../../services/provider', () => ({
 }))
 
 const svc = workerManagementService as unknown as {
-  getConfig: ReturnType<typeof vi.fn>
+  getAll: ReturnType<typeof vi.fn>
   putConfig: ReturnType<typeof vi.fn>
-  listStatus: ReturnType<typeof vi.fn>
   startOperation: ReturnType<typeof vi.fn>
+}
+
+function mergedResult(config: unknown, statuses: unknown[] = []) {
+  return { config, agent_status: 'available' as const, statuses }
 }
 
 const baseConfig = {
@@ -43,8 +45,7 @@ describe('WorkersPage（P6-B §13）', () => {
   beforeEach(() => { vi.clearAllMocks() })
 
   it('渲染三张卡片并展示 registry 状态', async () => {
-    svc.getConfig.mockResolvedValue(baseConfig)
-    svc.listStatus.mockResolvedValue([readyStatus])
+    svc.getAll.mockResolvedValue(mergedResult(baseConfig, [readyStatus]))
     render(<WorkersPage />)
     await waitFor(() => screen.getByText('Claude Code'))
     expect(screen.getByText('Builtin（内置）')).toBeTruthy()
@@ -53,8 +54,7 @@ describe('WorkersPage（P6-B §13）', () => {
   })
 
   it('配置连接对话框：claude-code 有 setup-token 选项，codex 没有', async () => {
-    svc.getConfig.mockResolvedValue(baseConfig)
-    svc.listStatus.mockResolvedValue([])
+    svc.getAll.mockResolvedValue(mergedResult(baseConfig, []))
     render(<WorkersPage />)
     await waitFor(() => screen.getByText('Claude Code'))
     const buttons = screen.getAllByText('配置连接')
@@ -68,8 +68,7 @@ describe('WorkersPage（P6-B §13）', () => {
   })
 
   it('选择 existing_host 保存 → PUT enabled + existing_host connection', async () => {
-    svc.getConfig.mockResolvedValue(baseConfig)
-    svc.listStatus.mockResolvedValue([])
+    svc.getAll.mockResolvedValue(mergedResult(baseConfig, []))
     svc.putConfig.mockResolvedValue({ ...baseConfig, revision: 2 })
     render(<WorkersPage />)
     await waitFor(() => screen.getByText('Codex'))
@@ -77,9 +76,10 @@ describe('WorkersPage（P6-B §13）', () => {
     await waitFor(() => screen.getByText('保存'))
     fireEvent.click(screen.getByText('保存'))
     await waitFor(() => expect(svc.putConfig).toHaveBeenCalled())
-    const [revision, impls] = svc.putConfig.mock.calls[0]
+    const [revision, cfg] = svc.putConfig.mock.calls[0]
     expect(revision).toBe(1)
-    expect(impls.codex).toEqual({ enabled: true, connection: { mode: 'existing_host' } })
+    expect(cfg.implementations.codex).toEqual({ enabled: true, connection: { mode: 'existing_host' } })
+    expect(cfg.default_impl).toBe('builtin')
   })
 
   it('verify 需要确认才发起', async () => {
@@ -90,8 +90,7 @@ describe('WorkersPage（P6-B §13）', () => {
         codex: { enabled: true, connection: { mode: 'existing_host' as const } },
       },
     }
-    svc.getConfig.mockResolvedValue(enabled)
-    svc.listStatus.mockResolvedValue([])
+    svc.getAll.mockResolvedValue(mergedResult(enabled, []))
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     render(<WorkersPage />)
     await waitFor(() => screen.getByText('验证'))
