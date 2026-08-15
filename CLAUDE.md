@@ -119,6 +119,7 @@ PR 范围以本文前面的“任务分级与 Spec 前置门禁”为准，不�
 - **设计型任务**：必须走 PR 流程：开分支 → commit → push → 建 PR。**不要自己 merge PR**。
 - **小改动**：不走 PR；在本地分支上上完成定向验证与 diff review 后直接合并到 main 。push 前先确认本地 `main` 已同步；远端前进导致 push 被拒时，先 rebase `origin/main` 再推。
 - **worktree 优先**：无论是否走PR 流程，考虑到本地有可能多项工作同时开发，尽量都在 worktree 上开发和验证。
+- **未提交工作先落 commit 再切分支**：任何 `git stash` / `git checkout` / `git reset --hard` / cherry-pick 之前，工作区未提交改动必须先以 WIP commit 落到当前分支（可事后 squash）——本仓已两次因 reset/stash 往返抹掉整批修复（含一次页面路由丢失导致生产空白）。
 - 混合任务按最高等级处理；无法确认是否满足“小改动豁免条件”时，不得自行直推，应先让用户确认任务分级。
 - 文案、注释、`README`、`PROGRESS.md`、`AGENTS.md` 等纯文档维护通常属于小改动，可直推 `main`；但代码及其正式协议涉及公共契约、流程治理语义或系统设计决策的修改，仍按设计型任务处理。
 - 不要为了回填“PR 已合并”、merge commit、review actor 等瞬时元信息单独创建后续 PR。此类信息默认在对话中汇报；只有文档存在实质性错误或仍有独立维护价值时才修改，并按上述任务分级处理。
