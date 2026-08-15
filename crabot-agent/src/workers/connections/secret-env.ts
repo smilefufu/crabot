@@ -26,7 +26,7 @@ const SCRUB_PREFIXES = [
 
 /** 精确名（PATH 精确匹配，不放行 PATHEXT 这类形近变体）。 */
 const ALLOW_EXACT = new Set([
-  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TERM', 'TMPDIR',
+  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TERM', 'TMPDIR', 'SSH_AUTH_SOCK',
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
   'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
   'NODE_OPTIONS',

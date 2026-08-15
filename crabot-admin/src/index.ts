@@ -10065,8 +10065,14 @@ export class AdminModule extends ModuleBase {
     }
 
     // 2. CAS 写 migration-owned config：qualifying CLI → existing_host+enabled，builtin default 不变。
+    //    若上次启动已写入（commit 未收敛导致 marker 停在 pending），候选与现状一致——
+    //    CAS 会因「无变化」抛错冒泡，commit 永远走不到（R11）：此时跳过 CAS 直接进 commit。
     const desired = await this.workerImplementationStore.load()
-    try {
+    const alreadyApplied = qualifying.every((impl) => {
+      const policy = desired.implementations[impl]
+      return policy.enabled && policy.connection?.mode === 'existing_host'
+    })
+    if (!alreadyApplied) try {
       await this.workerImplementationStore.update(desired.revision, (current) => {
         const next = {
           revision: current.revision,

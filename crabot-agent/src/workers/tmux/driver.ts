@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { buildChildEnv, CORE_AGENT_RUNTIME_BEARER_ENV, scrubChildEnv } from '../../core/runtime-env.js'
 import os from 'node:os'
 import { join } from 'node:path'
+import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -48,28 +49,35 @@ export class TmuxDriver {
     // pipe-pane 首次落盘前文件应已存在,方便调用方直接 watch;不截断已存在内容。
     await fs.writeFile(spec.outputFile, '', { flag: 'a' })
 
-    // P6-B 安全：连接 env 可能含 credential（ANTHROPIC_AUTH_TOKEN 等）——`-e KEY=VALUE`
-    // 会把值摊进 tmux 进程 argv（同机 ps//proc 可读）。改为生成 0600 wrapper 脚本
-    //（导出后 exec 真实命令），argv 只出现 wrapper 路径；newSession 返回即进程已带
-    // env 启动，wrapper 随即删除。
+    // P6-B 安全（两层）：
+    // ① credential 类值经 `-e` 会摊进 tmux argv（同机 ps 可读）→ 一律走 0600 wrapper；
+    // ② pane 基础环境继承自 tmux server（宿主 shell 的 ANTHROPIC_API_KEY 等会原样进 pane
+    //    并发往第三方 endpoint，§6.5 要求显式 scrub）→ wrapper 用 `env -i` 从 scrub 后的
+    //    allowlist 基础重建（buildScrubbedChildEnv）再叠加本次连接注入。
     const envEntries = Object.entries(scrubChildEnv(spec.env ?? {}))
-    let command = spec.command
-    let wrapperDir: string | undefined
-    if (envEntries.length > 0) {
-      wrapperDir = await fs.mkdtemp(join(os.tmpdir(), 'crabot-tmux-env-'))
-      await fs.chmod(wrapperDir, 0o700)
-      const wrapperPath = join(wrapperDir, 'env.sh')
-      const lines = envEntries.map(([key, value]) => `export ${key}=${shQuote(value)}`)
-      // 自删除：pane 的 shell 起来第一件事是删掉 wrapper 再 exec——tmux 异步起进程，
-      // newSession 返回即删会赶在 exec 之前（session 秒退的竞态实证），进程存活期间
-      // 文件已不在，崩溃残留由 tmp 目录周期清理兜底。
-      await fs.writeFile(
-        wrapperPath,
-        `#!/bin/sh\nrm -f -- "$0"\nrmdir -- "$(dirname "$0")" 2>/dev/null\n${lines.join('\n')}\nexec ${spec.command}\n`,
-        { mode: 0o600 },
-      )
-      command = `sh ${shQuote(wrapperPath)}`
+    const merged: Record<string, string> = {
+      TERM: process.env.TERM ?? 'xterm-256color',
+      ...buildScrubbedChildEnv(),
+      ...Object.fromEntries(envEntries),
     }
+    const envArgsInline = Object.entries(merged).map(([key, value]) => `${key}=${shQuote(value)}`).join(' ')
+    const wrapperDir = await fs.mkdtemp(join(os.tmpdir(), 'crabot-tmux-env-'))
+    await fs.chmod(wrapperDir, 0o700)
+    const wrapperPath = join(wrapperDir, 'env.sh')
+    // 自删除：pane 的 shell 起来第一件事是删掉 wrapper 再 exec——tmux 异步起进程，
+    // newSession 返回即删会赶在 exec 之前（session 秒退的竞态实证）。env 值只在
+    // wrapper 文件里（0600），不进 argv；`sh -c` 承载 spec.command 的 shell 语义。
+    await fs.writeFile(
+      wrapperPath,
+      `#!/bin/sh
+rm -f -- "$0"
+rmdir -- "$(dirname "$0")" 2>/dev/null
+exec env -i ${envArgsInline} sh -c ${shQuote(`exec ${spec.command}`)}
+`,
+      // 内层 exec：pane 的最终进程是真实命令本身（pane_current_command/liveness 依赖）
+      { mode: 0o600 },
+    )
+    const command = `sh ${shQuote(wrapperPath)}`
 
     const envArgs: string[] = ['-e', `${CORE_AGENT_RUNTIME_BEARER_ENV}=`]
     const pipeCmd = `cat >> ${shQuote(spec.outputFile)}`

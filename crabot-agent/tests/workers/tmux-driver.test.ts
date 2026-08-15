@@ -231,7 +231,8 @@ describe.skipIf(!tmuxAvailable)('TmuxDriver', () => {
       outputFile,
     })
 
-    await waitFor(async () => (await driver.paneCommand(sessionName)) !== null)
+    // wrapper（sh）→ exec 链 → sleep 有短暂中间态；等到目标命令本身出现再断言。
+    await waitFor(async () => (await driver.paneCommand(sessionName)) === 'sleep')
     expect(await driver.paneCommand(sessionName)).toBe('sleep')
   })
 })
