@@ -148,6 +148,9 @@ interface Runtime {
   readonly eventChannel: CliEventChannel
   controlState: CliControlState
   ended_reason?: IncarnationEndReason
+  /** P6-B：本化身 spawn/resume 时注入的连接 env（fork 侧问继承；不落 meta——credential
+   *  只在进程内存，重启后的 fork 由主线新化身的 spawn/resume 重新注入）。 */
+  readonly connectionEnv?: Record<string, string>
   /** 自上一次 sendInput(或 spawn)以来"已计入"的 stop 事件数;新 stop 数超过它才判定本轮 idle。 */
   stopBaseline: number
   killed: boolean
@@ -596,6 +599,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       controlState: { kind: 'running' },
       stopBaseline: await this.initialStopBaseline(eventChannel),
       killed: false,
+      connectionEnv: spec.connection_env,
     }
 
     await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root })
@@ -710,6 +714,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         // 复用上一化身的 workspace ⇒ 事件文件里已有它留下的 stop 事件,基线必须现读现算。
         stopBaseline: await this.initialStopBaseline(eventChannel),
         killed: false,
+        connectionEnv: opts?.connection_env,
       }
 
       await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, workspace_root: prevRuntime.workspaceRoot })
@@ -811,7 +816,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       '--mcp-config', MCP_CONFIG_FILE,
       '--strict-mcp-config',
     ]
-    const shellCommand = `${this.claudeBin} ${args.map(shQuote).join(' ')}`
+    // P6-B：fork 与 spawn/resume 同一 binary 解析纪律（managed 优先）——否则 managed install
+    // 且宿主无 system claude 时主线正常、侧问 command not found（R8）。
+    const forkBin = (this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined) ?? this.claudeBin
+    const shellCommand = `${forkBin} ${args.map(shQuote).join(' ')}`
 
     // 事件文件重定向:cc 的 hooks 在 print 模式同样执行,而 Stop hook 配在 **workspace 级**
     // 的 .claude/settings.json 里、写的是 **workspace 级**共享的 events-cli.jsonl——不重定向
@@ -822,7 +830,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 这里给子进程 env 塞一个 fork 化身私有的事件文件路径,cc 拉起 hook 子进程时原样继承
     // 下去,hook 写私有文件(见 CliEventChannel.EVENTS_FILE_ENV)。交互态(tmux pane)不设
     // 这个变量,照旧写共享文件,行为不变。
-    const execOpts = { cwd: prevRuntime.workspaceRoot, env: buildChildEnv({ [EVENTS_FILE_ENV]: forkEventsFile }) }
+    // P6-B：admin_provider 的连接 env 从主线化身继承（fork 是只读侧问，不重新 resolve——
+    // 主线 spawn/resume 已按 operation 注入；fork 回落宿主原生凭证 = 静默绕过，禁止）。
+    const inheritedConnectionEnv = prevRuntime.connectionEnv ?? {}
+    const execOpts = { cwd: prevRuntime.workspaceRoot, env: buildChildEnv({ [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv }) }
 
     let stdout = ''
     let endedReason: IncarnationEndReason

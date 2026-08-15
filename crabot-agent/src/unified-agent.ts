@@ -2987,12 +2987,15 @@ export class UnifiedAgent extends ModuleBase {
       })
       return { operation_id: operationId, state: 'completed', version: result.version }
     } catch (error) {
+      const sanitized = (error instanceof Error ? error.message : String(error)).replace(/\/[^\s]+/g, '<path>').replace(/[A-Za-z0-9_-]{24,}/g, '<redacted>').slice(0, 200)
       await this.workerOperationStore.upsert({
         operation_id: operationId, kind: 'install', impl, state: 'failed',
-        detail: (error instanceof Error ? error.message : String(error)).replace(/\/[^\s]+/g, '<path>').slice(0, 200),
+        detail: sanitized,
         created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
       })
-      throw error
+      // 协议 §3.19.12.1：原始 stderr（含本机路径/registry token）不得抛回调用方——
+      // Admin 会把 message 透给 Browser。只抛脱敏摘要。
+      throw new Error(`install failed: ${sanitized}`)
     }
   }
 
@@ -3049,12 +3052,13 @@ export class UnifiedAgent extends ModuleBase {
     } catch (error) {
       // 抛错必须收口 operation failed——否则卡在 running，互斥门把该 impl 后续
       // install/verify 永久挡死（只能重启 Agent 恢复）。
+      const sanitized = (error instanceof Error ? error.message : String(error)).replace(/\/[^\s]+/g, '<path>').replace(/[A-Za-z0-9_-]{24,}/g, '<redacted>').slice(0, 200)
       await this.workerOperationStore.upsert({
         operation_id: operationId, kind: 'verify', impl, state: 'failed',
-        detail: (error instanceof Error ? error.message : String(error)).replace(/\/[^\s]+/g, '<path>').slice(0, 200),
+        detail: sanitized,
         created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
       })
-      throw error
+      throw new Error(`verify failed: ${sanitized}`)
     }
   }
 
@@ -3171,10 +3175,11 @@ export class UnifiedAgent extends ModuleBase {
       for (const entry of entries) {
         if (!entry.startsWith('w-')) continue
         const found = all.find(({ worker }) => worker.worker_id === entry)
+        if (found && found.worker.task.status !== 'completed' && found.worker.task.status !== 'failed' && found.worker.task.status !== 'cancelled') {
+          continue // 非终态 worker：协议 §6.5 只授权回收任务终态超 7 天的目录（R8）。
+        }
         const task = found?.worker.task
-        const terminalAt = task && (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled')
-          ? Date.parse(found!.worker.updated_at ?? task.created_at ?? '')
-          : NaN
+        const terminalAt = task ? Date.parse(found!.worker.updated_at ?? task.created_at ?? '') : NaN
         if (!Number.isFinite(terminalAt)) {
           // 台账未知：目录自身年龄超 7 天才回收（在途 worker 的 home 天天被写，mtime 新）。
           const stat = await fs.promises.stat(path.join(runtimeRoot, entry)).catch(() => null)
