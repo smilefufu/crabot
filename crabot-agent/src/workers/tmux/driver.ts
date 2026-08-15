@@ -11,6 +11,9 @@ import { promisify } from 'node:util'
 import * as fs from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { buildChildEnv, CORE_AGENT_RUNTIME_BEARER_ENV, scrubChildEnv } from '../../core/runtime-env.js'
+import os from 'node:os'
+import { join } from 'node:path'
+import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -46,28 +49,64 @@ export class TmuxDriver {
     // pipe-pane 首次落盘前文件应已存在,方便调用方直接 watch;不截断已存在内容。
     await fs.writeFile(spec.outputFile, '', { flag: 'a' })
 
-    const envArgs: string[] = ['-e', `${CORE_AGENT_RUNTIME_BEARER_ENV}=`]
-    for (const [key, value] of Object.entries(scrubChildEnv(spec.env ?? {}))) {
-      envArgs.push('-e', `${key}=${value}`)
+    // P6-B 安全（两层）：
+    // ① credential 类值经 `-e` 会摊进 tmux argv（同机 ps 可读）→ 一律走 0600 wrapper；
+    // ② pane 基础环境继承自 tmux server（宿主 shell 的 ANTHROPIC_API_KEY 等会原样进 pane
+    //    并发往第三方 endpoint，§6.5 要求显式 scrub）→ wrapper 用 `env -i` 从 scrub 后的
+    //    allowlist 基础重建（buildScrubbedChildEnv）再叠加本次连接注入。
+    const envEntries = Object.entries(scrubChildEnv(spec.env ?? {}))
+    const merged: Record<string, string> = {
+      TERM: process.env.TERM ?? 'xterm-256color',
+      ...buildScrubbedChildEnv(),
+      ...Object.fromEntries(envEntries),
     }
+    const wrapperDir = await fs.mkdtemp(join(os.tmpdir(), 'crabot-tmux-env-'))
+    await fs.chmod(wrapperDir, 0o700)
+    const wrapperPath = join(wrapperDir, 'env.sh')
+    // ① `env -i` 在 tmux 命令行（argv 只有 wrapper 路径，无任何值）；② export 行只在
+    // wrapper 文件里（0600），连 env 进程 argv 的瞬时窗口都没有（R12）；③ pane 自删除
+    //（newSession 返回即删会赶在 exec 之前——竞态实证）。
+    const lines = Object.entries(merged).map(([key, value]) => `export ${key}=${shQuote(value)}`)
+    await fs.writeFile(
+      wrapperPath,
+      `#!/bin/sh
+rm -f -- "$0"
+rmdir -- "$(dirname "$0")" 2>/dev/null
+${lines.join('\n')}
+exec ${spec.command}
+`,
+      // 内层 exec：pane 的最终进程是真实命令本身（pane_current_command/liveness 依赖）
+      { mode: 0o600 },
+    )
+    const command = `env -i sh ${shQuote(wrapperPath)}`
 
+    const envArgs: string[] = ['-e', `${CORE_AGENT_RUNTIME_BEARER_ENV}=`]
     const pipeCmd = `cat >> ${shQuote(spec.outputFile)}`
-    await this.run([
-      'new-session',
-      '-d',
-      '-s',
-      spec.name,
-      '-c',
-      spec.cwd,
-      ...envArgs,
-      spec.command,
-      ';',
-      'pipe-pane',
-      '-o',
-      '-t',
-      spec.name,
-      pipeCmd,
-    ])
+    let sessionCreated = false
+    try {
+      await this.run([
+        'new-session',
+        '-d',
+        '-s',
+        spec.name,
+        '-c',
+        spec.cwd,
+        ...envArgs,
+        command,
+        ';',
+        'pipe-pane',
+        '-o',
+        '-t',
+        spec.name,
+        pipeCmd,
+      ])
+      sessionCreated = true
+    } finally {
+      // 成功：wrapper 由 pane 自删除（rm -f $0），本进程不动它（newSession 返回时 pane
+      // 可能尚未 exec，提前删目录会让 session 秒退——实测竞态）。
+      // 失败：pane 永远不会起来，清掉孤儿 wrapper 目录。
+      if (wrapperDir && !sessionCreated) await fs.rm(wrapperDir, { recursive: true, force: true }).catch(() => {})
+    }
   }
 
   /**

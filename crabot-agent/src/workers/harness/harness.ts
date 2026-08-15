@@ -421,6 +421,21 @@ export interface HarnessDeps {
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
   /** Rejects new spawn/resume/handoff while runtime config is stale; running incarnations remain untouched. */
   readonly assertExecutionAdmission?: () => void
+  /**
+   * P6-B §6.5：显式/接续目标 impl 的 activation registry gate（唯一 ready 判定点）。
+   * spawn 显式 impl、resume 终态化身、handoff 目标 impl 前必须调用；
+   * 省略 impl 的 spawn 走 defaultImpl（builtin 安全路径）不在此 gate。
+   */
+  readonly assertWorkerImplReady?: (impl: WorkerImplId) => void | Promise<void>
+  /**
+   * P6-B §6.5：operation-time connection admission（registry gate 之后、副作用之前）。
+   * 返回的 env 注入 SpawnSpec.connection_env；dispose 在 spawn 收口后调用。
+   */
+  readonly admitWorkerConnection?: (impl: WorkerImplId, operationLabel?: string) => Promise<{
+    env: Record<string, string>
+    connectionRevision?: string
+    dispose(): Promise<void>
+  }>
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string) => Promise<boolean>
   /** Validates an opaque legacy continuation credential immediately before side effects. */
@@ -617,15 +632,27 @@ export class WorkerHarness {
   async spawnWorker(p: SpawnWorkerParams): Promise<LedgerWorker> {
     this.deps.assertExecutionAdmission?.()
     const workerId = `w-${randomUUID()}`
+    // P6-B：显式 impl 在任何副作用（workspace/台账/provision）前过 registry gate。
+    if (p.impl !== undefined) await this.deps.assertWorkerImplReady?.(p.impl)
+    // P6-B §6.5：operation admission——当前调用内实时解析连接；revision 在副作用前最终比对。
+    const admission = p.impl !== undefined ? await this.deps.admitWorkerConnection?.(p.impl, workerId) : undefined
     const impl = p.impl ?? this.deps.defaultImpl
     const adapter = this.deps.adapters.get(impl)
     if (!adapter) {
+      // 失败路径必须 dispose：runtime 目录（如 codex CODEX_HOME）不得残留。
+      if (admission) await admission.dispose()
       throw new Error(`WorkerHarness.spawnWorker: no adapter registered for impl '${impl}'`)
     }
 
     // workspace 解析可能失败(InvalidWorkspaceError),放在拿锁/写台账之前——失败时台账
     // 完全不会出现这条 worker,不留半成品。
-    const workspace = await this.deps.workspaces.resolve(workerId, p.workspace)
+    let workspace
+    try {
+      workspace = await this.deps.workspaces.resolve(workerId, p.workspace)
+    } catch (error) {
+      if (admission) await admission.dispose()
+      throw error
+    }
 
     return this.withLock(workerId, async () => {
       const startedAt = this.deps.now()
@@ -693,9 +720,11 @@ export class WorkerHarness {
           origin: p.origin,
           principal_permissions: context.principal_permissions,
           builtin,
+          ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
         }
         spawnedHandle = await adapter.spawn(spec)
       } catch (err) {
+        if (admission) await admission.dispose()
         const now = this.deps.now()
         const failed = await this.deps.ledger.upsertWorker(p.managerKey, workerId, (prev) => {
           if (!prev) return undefined
@@ -745,6 +774,13 @@ export class WorkerHarness {
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
 
+      // runtime file（如 codex admin_provider 的 CODEX_HOME）必须活到化身终态——
+      // CLI 运行期持续读它；终态收割时统一清理（含崩溃路径的 fireIncarnationTerminal）。
+      // spawn 返回即终态（启动期握手超时等）时不会有终态钩子再触发——立即 dispose。
+      if (admission) {
+        if (initialState === 'exited') await admission.dispose()
+        else this.connectionDisposers.set(`${workerId}:1`, admission.dispose)
+      }
       const inbox = this.getInbox(workerId)
       inbox.release()
       if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
@@ -1016,8 +1052,13 @@ export class WorkerHarness {
         material.workspaceCandidate,
       )
       const targetImpl = pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
+      // P6-B §6.5：legacy 接续的 spawn 同样过 registry gate + connection admission——
+      // 不得绕过 ready 校验，admin_provider 形态不得回落宿主凭证。
+      await this.deps.assertWorkerImplReady?.(targetImpl)
+      const admission = await this.deps.admitWorkerConnection?.(targetImpl, worker.worker_id)
       const targetAdapter = this.deps.adapters.get(targetImpl)
       if (!targetAdapter) {
+        if (admission) await admission.dispose()
         throw new Error(`WorkerHarness.legacyContinuation: no adapter registered for impl '${targetImpl}'`)
       }
       if (implAlreadyUsed(worker, targetImpl)) {
@@ -1062,17 +1103,28 @@ export class WorkerHarness {
         legacy: true,
       })
 
-      await targetAdapter.provision(workspace, caps)
       const prompt = buildHandoffPrompt(worker.task, item.text)
-      const handle = await targetAdapter.spawn({
-        worker_id: worker.worker_id,
-        prompt,
-        workspace,
-        goal: worker.task.goal,
-        origin: worker.origin,
-        principal_permissions: auth.principal_permissions,
-        builtin,
-      })
+      let handle
+      try {
+        await targetAdapter.provision(workspace, caps)
+        handle = await targetAdapter.spawn({
+          worker_id: worker.worker_id,
+          prompt,
+          workspace,
+          goal: worker.task.goal,
+          origin: worker.origin,
+          principal_permissions: auth.principal_permissions,
+          builtin,
+          ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
+        })
+      } catch (error) {
+        if (admission) await admission.dispose()
+        throw error
+      }
+      if (admission) {
+        if (handle.initial_input?.control_state === 'exited') await admission.dispose()
+        else this.connectionDisposers.set(`${worker.worker_id}:${handle.seq}`, admission.dispose)
+      }
       const initialInput = handle.initial_input
       const initialState = cliContractState(initialInput?.control_state ?? 'running')
       const now = this.deps.now()
@@ -1426,13 +1478,30 @@ export class WorkerHarness {
     sourceEndReason?: IncarnationEndReason,
   ): Promise<ContinuationDelivery> {
     this.deps.assertExecutionAdmission?.()
+    // P6-B：resume 重验 ready（「已有 running incarnation 不杀，新 resume/handoff 重验」）。
+    await this.deps.assertWorkerImplReady?.(mainline.impl)
+    // P6-B §6.5：resume 同样 operation-time 解析连接（revision 变化即拒绝）。
+    const admission = await this.deps.admitWorkerConnection?.(mainline.impl, worker.worker_id)
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
-    const newHandle = await adapter.resume(prevRef, text)
+    let newHandle
+    try {
+      newHandle = await adapter.resume(prevRef, text, admission ? { connection_env: admission.env } : undefined)
+    } catch (error) {
+      if (admission) await admission.dispose()
+      throw error
+    }
+    // 新化身的 runtime 资源活到新化身终态（spawn 路径同纪律）。
+    if (admission) this.connectionDisposers.set(`${worker.worker_id}:${newHandle.seq}`, admission.dispose)
 
     const initialInput = newHandle.initial_input
     const initialState = cliContractState(initialInput?.control_state ?? 'running')
+    // 返回即终态（启动期握手超时等）不会再有终态钩子——立即 dispose，不注册。
+    if (admission && initialState === 'exited') {
+      this.connectionDisposers.delete(`${worker.worker_id}:${newHandle.seq}`)
+      await admission.dispose()
+    }
     const now = this.deps.now()
     const revived = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
@@ -1524,14 +1593,25 @@ export class WorkerHarness {
     // "旧的没了、新的没建成"的死结,且下次投递会重复整套 handoff(重复追加 HANDOFF.md)。
     // 把这两项检查提到最前面、在写 HANDOFF.md 和 kill 旧化身之前做,失败时旧化身与
     // HANDOFF.md 都不动,保持可重试。
+    // P6-B：目标 impl 重验 ready（配置可能在 source 运行期间已失效）。
+    await this.deps.assertWorkerImplReady?.(targetImpl)
+    // P6-B §6.5：handoff 同样过 connection admission——早于 HANDOFF.md 与 kill source；
+    // admin_provider 形态下目标 CLI 不得静默回落宿主原生凭证。
+    const admission = await this.deps.admitWorkerConnection?.(targetImpl, worker.worker_id)
     const newAdapter = this.deps.adapters.get(targetImpl)
     if (!newAdapter) {
+      if (admission) await admission.dispose()
       throw new Error(`WorkerHarness.handoffIncarnation: no adapter registered for impl '${targetImpl}' (handoff target)`)
     }
-    const handoffContext = await this.contextStore.read(worker.worker_id)
-    const principalPermissions = handoffContext?.principal_permissions
+    let handoffContext
+    let principalPermissions
     let builtinInjection: SpawnSpec['builtin']
-    if (targetImpl === 'builtin') {
+    let workspace: Workspace
+    let caps
+    try {
+      handoffContext = await this.contextStore.read(worker.worker_id)
+      principalPermissions = handoffContext?.principal_permissions
+      if (targetImpl === 'builtin') {
       // harness-owned 快照在 HANDOFF.md / kill 之前读取：CLI-first worker 切到 builtin
       // 仍保留原身份；context 损坏则在破坏源化身之前 fail-loud。
       builtinInjection = this.deps.builtinSpawnDefaults?.({
@@ -1549,13 +1629,18 @@ export class WorkerHarness {
       }
     }
 
-    const workspace: Workspace = { root: source.workspace }
-    const caps = this.deps.capabilityBundle
+    workspace = { root: source.workspace }
+    caps = this.deps.capabilityBundle
       ? await this.deps.capabilityBundle({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
       : EMPTY_CAPABILITY_BUNDLE
     // tracked credential target 等确定性检查必须在 HANDOFF.md / kill 之前完成；preflightProvision
     // 不得写 workspace。正式 provision 仍在 source teardown 之后执行并重检，避免 TOCTOU 静默越界。
     await newAdapter.preflightProvision?.(workspace, caps)
+    } catch (error) {
+      // admission 之后、HANDOFF.md/kill 之前的前置失败：dispose admission，source 不动。
+      if (admission) await admission.dispose()
+      throw error
+    }
 
     // 1. 组装交接材料(task.title/goal + 最近输出尾部,上限 4KB + 上一化身 outcome)并写
     // workspace 下的 HANDOFF.md(已存在则追加带时间戳的新段,不覆盖)。
@@ -1571,53 +1656,73 @@ export class WorkerHarness {
     }
     const outcome = worker.task.outcome ?? source.ended_reason ?? 'unknown'
     const handoffTs = this.deps.now()
-    await appendHandoffFile(source.workspace, {
-      ts: handoffTs,
-      title: worker.task.title,
-      goal: worker.task.goal,
-      outcome,
-      tail,
-      input,
-    })
-    await this.appendEvent(worker.worker_id, source.seq, 'handoff_started', { target_impl: targetImpl })
-
-    // 2. 旧化身若仍非终态(如 switchWorkerImpl 打在一个仍存活的化身上,或台账的终态回调
-    // 还没追上 adapter 的真实状态),先 kill 再标 superseded——不覆盖已经真实记录过的
-    // ended_reason(那种情况下旧化身已经是它自己的终局,不是被这次交接顶替的)。
-    if (source.state !== 'exited') {
-      if (sourceAdapter) {
-        await sourceAdapter.kill(sourceHandle)
-      }
-      const killedAt = this.deps.now()
-      await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
-        if (!prev) return undefined
-        const incarnations = patchIncarnationBySeq(prev.incarnations, source.impl, source.seq, {
-          state: 'exited',
-          ended_at: killedAt,
-          ended_reason: 'superseded',
-        })
-        return { ...prev, incarnations, updated_at: killedAt }
+    try {
+      await appendHandoffFile(source.workspace, {
+        ts: handoffTs,
+        title: worker.task.title,
+        goal: worker.task.goal,
+        outcome,
+        tail,
+        input,
       })
-      await this.appendEvent(worker.worker_id, source.seq, 'superseded')
+      await this.appendEvent(worker.worker_id, source.seq, 'handoff_started', { target_impl: targetImpl })
+
+      // 2. 旧化身若仍非终态(如 switchWorkerImpl 打在一个仍存活的化身上,或台账的终态回调
+      // 还没追上 adapter 的真实状态),先 kill 再标 superseded——不覆盖已经真实记录过的
+      // ended_reason(那种情况下旧化身已经是它自己的终局,不是被这次交接顶替的)。
+      if (source.state !== 'exited') {
+        if (sourceAdapter) {
+          await sourceAdapter.kill(sourceHandle)
+        }
+        const killedAt = this.deps.now()
+        await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
+          if (!prev) return undefined
+          const incarnations = patchIncarnationBySeq(prev.incarnations, source.impl, source.seq, {
+            state: 'exited',
+            ended_at: killedAt,
+            ended_reason: 'superseded',
+          })
+          return { ...prev, incarnations, updated_at: killedAt }
+        })
+        await this.appendEvent(worker.worker_id, source.seq, 'superseded')
+      }
+    } catch (error) {
+      // HANDOFF.md/kill 段失败：dispose admission；source/台账的失败语义保持既有。
+      if (admission) await admission.dispose()
+      throw error
     }
 
     // 3. 同 workspace provision + spawn 新实现,开工输入 = 原任务 + 交接引用 + 本次输入。
     // newAdapter / builtinInjection / workspace / caps 已在上面的 pre-flight 里取好。
-    await newAdapter.provision(workspace, caps)
     const prompt = buildHandoffPrompt(worker.task, input)
-    const newHandle = await newAdapter.spawn({
-      worker_id: worker.worker_id,
-      prompt,
-      workspace,
-      goal: worker.task.goal,
-      origin: worker.origin,
-      principal_permissions: principalPermissions,
-      builtin: builtinInjection,
-    })
+    let newHandle
+    try {
+      await newAdapter.provision(workspace, caps)
+      newHandle = await newAdapter.spawn({
+        worker_id: worker.worker_id,
+        prompt,
+        workspace,
+        goal: worker.task.goal,
+        origin: worker.origin,
+        principal_permissions: principalPermissions,
+        builtin: builtinInjection,
+        ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
+      })
+    } catch (error) {
+      // provision/spawn 失败：dispose admission；source 化身状态保持 step 2 的既有语义。
+      if (admission) await admission.dispose()
+      throw error
+    }
+    // 新化身持有 admission 资源至终态。
+    if (admission) this.connectionDisposers.set(`${worker.worker_id}:${newHandle.seq}`, admission.dispose)
 
     // 4. 化身链 +1,task 重新回到 running(见 reopenTaskForContinuation 注释)。
     const initialInput = newHandle.initial_input
     const initialState = cliContractState(initialInput?.control_state ?? 'running')
+    if (admission && initialState === 'exited') {
+      this.connectionDisposers.delete(`${worker.worker_id}:${newHandle.seq}`)
+      await admission.dispose()
+    }
     const now = this.deps.now()
     const handedOff = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
@@ -2317,10 +2422,14 @@ export class WorkerHarness {
     })
 
     // 锁外:见方法注释"锁外慢调用段"。
+    // P6-B §6.5：fork（侧问）同样 operation-time admission——进程重启后主线 runtime 的
+    // connectionEnv 已随内存丢失，现解析现注入，不回落宿主原生凭证。
+    const admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
     let forkHandle: IncarnationHandle
     try {
-      forkHandle = await prep.adapter.fork(prep.ref, question)
+      forkHandle = await prep.adapter.fork(prep.ref, question, admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : undefined)
     } catch (err) {
+      if (admission) await admission.dispose()
       await this.appendEvent(workerId, prep.ref.seq, 'query_failed', {
         reason: 'fork_failed',
         message: err instanceof Error ? err.message : String(err),
@@ -2355,6 +2464,7 @@ export class WorkerHarness {
       // runForkBurst 做成 fire-and-forget(未 await 就返回 handle),这里读到的仍是
       // running,后续真正的 onStateChange 回调到时台账里已经有这条化身,能正常找到并
       // 修正,不会重演同一个丢弃。
+      if (admission) await admission.dispose()
       const observedState = await prep.adapter.state(forkHandle)
       const exitedOnCommit = observedState === 'exited'
       await this.deps.ledger.upsertWorker(managerKey, workerId, (prevWorker) => {
@@ -2698,7 +2808,15 @@ export class WorkerHarness {
   }
 
   /** 化身终态收割钩子（P6-A §8.10）：fire-and-forget，异常只记不打断。 */
+  /** P6-B：化身级 connection runtime 资源清理（workerId:seq → dispose）。 */
+  private readonly connectionDisposers = new Map<string, () => Promise<void>>()
+
   private fireIncarnationTerminal(h: IncarnationHandle): void {
+    const disposer = this.connectionDisposers.get(`${h.worker_id}:${h.seq}`)
+    if (disposer) {
+      this.connectionDisposers.delete(`${h.worker_id}:${h.seq}`)
+      void disposer().catch(() => {})
+    }
     try {
       this.deps.onIncarnationTerminal?.(h)
     } catch (error) {

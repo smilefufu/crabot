@@ -125,13 +125,12 @@ export interface SensitiveRpcTransportOptions {
   authorizationBearer?: string
 }
 
-export type SensitiveRpcMethod = 'get_agent_config' | 'resolve_worker_connection' | 'verify_core_agent_runtime' | 'complete_core_agent_cutover' | 'register_core_agent' | 'consume_admin_chat_assertion' | 'consume_worker_operation_assertion' | 'process_message' | 'install_worker_implementation' | 'start_worker_implementation_setup' | 'verify_worker_implementation' | 'cancel_worker_implementation_operation' | 'attach_worker_implementation_setup_stream'
+export type SensitiveRpcMethod = 'get_agent_config' | 'resolve_worker_connection' | 'verify_core_agent_runtime' | 'complete_core_agent_cutover' | 'register_core_agent' | 'consume_admin_chat_assertion' | 'consume_worker_operation_assertion' | 'process_message' | 'install_worker_implementation' | 'verify_worker_implementation' | 'cancel_worker_implementation_operation'
 
 const SENSITIVE_RPC_METHODS = new Set<SensitiveRpcMethod>([
   'get_agent_config', 'resolve_worker_connection', 'verify_core_agent_runtime', 'complete_core_agent_cutover', 'register_core_agent',
   'consume_admin_chat_assertion', 'consume_worker_operation_assertion', 'install_worker_implementation',
-  'start_worker_implementation_setup', 'verify_worker_implementation', 'cancel_worker_implementation_operation',
-  'attach_worker_implementation_setup_stream',
+  'verify_worker_implementation', 'cancel_worker_implementation_operation',
 ])
 
 export function isSensitiveRpcCall(method: string, params: unknown): boolean {

@@ -1,3 +1,4 @@
+import type { ModelFormat } from 'crabot-shared'
 import type { ToolDefinition, LLMAdapter } from '../engine/index.js'
 import type { Resolvable } from '../engine/types.js'
 // 纯类型引用(两侧都是 `import type`,编译后无运行时依赖,不构成模块环)。
@@ -5,6 +6,67 @@ import type { LedgerWorker } from './harness/ledger-types.js'
 import type { ResolvedPermissions, MCPServerConfig } from '../types.js'
 
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
+export type CLIWorkerImplId = Exclude<WorkerImplId, 'builtin'>
+
+// ── P6-B：worker implementation connection / activation（protocol-agent-v3 §6.5 逐字段对齐）──
+
+export type WorkerConnectionConfig =
+  | { mode: 'native_account' }
+  | { mode: 'admin_provider'; provider_id: string; model_id: string }
+  | { mode: 'existing_host' }
+
+export interface WorkerConnectionCapability {
+  mode: 'native_account' | 'admin_provider' | 'existing_host'
+  translator_id: string
+  translator_version: string
+  cli_version_range: string
+  provider_formats?: ModelFormat[]
+  endpoint_policy?: 'official_only' | 'custom_base_url'
+  credential_transport: 'native_store' | 'process_env' | 'agent_runtime_file'
+  model_selection: 'native_default' | 'explicit_model'
+  credential_scope: 'managed' | 'runtime_user_home' | 'admin_runtime'
+}
+
+export interface WorkerImplementationPolicy {
+  enabled: boolean
+  preference?: string
+  connection?: WorkerConnectionConfig
+}
+
+export interface WorkerImplementationConfig {
+  revision: number
+  default_impl: WorkerImplId
+  implementations: Record<WorkerImplId, WorkerImplementationPolicy>
+}
+
+/** Admin→Agent runtime shape；connection_revisions 是 nonsecret invalidation signal。 */
+export interface WorkerImplementationRuntimeConfig {
+  config: WorkerImplementationConfig
+  connection_revisions: Partial<Record<CLIWorkerImplId, string>>
+}
+
+export type WorkerVerificationState = 'never' | 'running' | 'passed' | 'failed' | 'grandfathered'
+
+export interface WorkerImplementationStatus {
+  impl: WorkerImplId
+  installed: boolean
+  version?: string
+  install_source?: 'managed' | 'system'
+  connection_mode?: WorkerConnectionConfig['mode']
+  credential_scope?: WorkerConnectionCapability['credential_scope']
+  configured: boolean
+  policy_revision: number
+  connection_revision?: string
+  translator?: WorkerConnectionCapability
+  verification: WorkerVerificationState
+  ready: boolean
+  capabilities: AdapterCapabilities
+  connection_capabilities: WorkerConnectionCapability[]
+  observed_at: string
+  last_verified_at?: string
+  /** 必须脱敏；不得包含 endpoint credential、Authorization、assertion、terminal bytes 或本地 secret 路径。 */
+  detail?: string
+}
 export type WorkerContractState = 'running' | 'idle' | 'exited'
 export type CliControlState =
   | { readonly kind: 'running' }
@@ -52,6 +114,12 @@ export interface SpawnSpec {
   readonly worker_id: string
   readonly prompt: string
   readonly workspace: Workspace
+  /**
+   * P6-B §6.5：operation admission 由 translator 注入的最小连接 env（CLI adapter 透传到
+   * 进程 env；tmux driver 侧仍会过 scrubChildEnv）。不得由 Manager/调用方直接构造——
+   * 只能来自 activation registry admission 的 translator 输出。
+   */
+  readonly connection_env?: Record<string, string>
   readonly goal?: string
   /**
    * 台账 origin(派发来源与权限身份)。builtin adapter 把它与 workspace/goal 一起持久化,
@@ -162,7 +230,19 @@ export interface StateChangeReport {
   readonly notification?: { readonly type: string; readonly message?: string; readonly title?: string }
 }
 
-export interface DetectResult { installed: boolean; activated: boolean; detail?: string }
+export interface DetectResult {
+  installed: boolean
+  activated: boolean
+  /** 当前检测到的 CLI 版本（translator/version range 匹配输入）。 */
+  version?: string
+  install_source?: 'managed' | 'system'
+  /**
+   * 宿主 credential 的非敏感代际信号（文件 mtime+size 的 HMAC 输入，不读正文）——
+   * 宿主换账号/重登会让代际变化，existing_host/native_account binding 随之失效。
+   */
+  credential_generation?: string
+  detail?: string
+}
 export interface AdapterCapabilities {
   readonly fork: boolean; readonly revive: boolean; readonly goalMode: boolean
   readonly subagent: boolean; readonly structuredTrace: boolean
@@ -171,12 +251,17 @@ export interface AdapterCapabilities {
 export interface WorkerAdapter {
   readonly implId: WorkerImplId
   detect(): Promise<DetectResult>
+  /**
+   * 与当前 detect 版本一致的静态 translator 声明（P6-B §6）；
+   * detect 与声明不一致时 registry 标 degraded/not ready。
+   */
+  connectionCapabilities?(): WorkerConnectionCapability[]
   /** 无副作用的 workspace/capability 前置检查；handoff 在触碰源化身前调用。 */
   preflightProvision?(ws: Workspace, caps: CapabilityBundle): Promise<void>
   provision(ws: Workspace, caps: CapabilityBundle): Promise<void>
   spawn(spec: SpawnSpec): Promise<IncarnationHandle>
-  resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle>
-  fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle>
+  resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle>
+  fork(prev: IncarnationRef, forkInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle>
   sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void>
   readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }>
   state(h: IncarnationHandle): Promise<WorkerContractState>

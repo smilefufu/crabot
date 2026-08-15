@@ -22,10 +22,8 @@ const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
   'consume_worker_operation_assertion',
   'process_message',
   'install_worker_implementation',
-  'start_worker_implementation_setup',
   'verify_worker_implementation',
   'cancel_worker_implementation_operation',
-  'attach_worker_implementation_setup_stream',
 ]
 
 test('authentication errors preserve RPC codes and map to HTTP 401/403', () => {

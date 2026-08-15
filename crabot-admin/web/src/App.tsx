@@ -10,6 +10,7 @@ import { ProviderManagement } from './pages/Providers/ProviderManagement'
 import { ModuleList } from './pages/Modules/ModuleList'
 import { ModuleDetail } from './pages/Modules/ModuleDetail'
 import { AgentConfig } from './pages/Agents/AgentConfig'
+import { WorkersPage } from './pages/Workers'
 import { ChannelConfig } from './pages/Channels/ChannelConfig'
 import { NewChannel } from './pages/Channels/NewChannel'
 import { NewChannelOnboarding } from './pages/Channels/NewChannelOnboarding'
@@ -91,6 +92,14 @@ const AppRoutes: React.FC = () => {
         element={
           <PrivateRoute>
             <AgentConfig />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/agents/workers"
+        element={
+          <PrivateRoute>
+            <WorkersPage />
           </PrivateRoute>
         }
       />

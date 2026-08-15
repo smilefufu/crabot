@@ -77,6 +77,19 @@ function buildAdmin(deps: {
   admin.configMutationCoordinator = {
     readCommittedEpoch: async () => ({ revision: 1, generation: 0 }),
   }
+  // P6-B：runtime config 现携带 worker_implementations desired config；stub 成安全初始值。
+  admin.workerImplementationStore = {
+    load: async () => ({
+      revision: 1,
+      default_impl: 'builtin',
+      implementations: {
+        builtin: { enabled: true },
+        'claude-code': { enabled: false },
+        codex: { enabled: false },
+      },
+    }),
+  }
+  admin.workerConnectionRevisionSigner = { compute: async () => 'opaque-test-revision' }
   admin.rpcClient = {
     callModuleManagerSensitive: async () => ({ verified: true }),
     callModuleManager: async () => ({ module_id: 'crabot-agent', module_type: 'agent', port: 19002 }),

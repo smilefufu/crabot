@@ -2,6 +2,7 @@
 export {
   // Types
   type ModuleId,
+  type ModelFormat,
   type FriendId,
   type SessionId,
   type TaskId,

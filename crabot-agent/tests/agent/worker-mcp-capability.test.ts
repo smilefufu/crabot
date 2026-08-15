@@ -117,6 +117,9 @@ describe('UnifiedAgent worker capability production wiring', () => {
       internals.managerStack.adapters.set('claude-code', claude)
       internals.managerStack.adapters.set('codex', codex)
       internals.agentConfig = { ...internals.agentConfig!, mcp_servers: servers }
+      // 本用例验收 MCP capability 快照投递，不验收 P6-B activation gate；
+      // gate 覆盖在 activation-registry.test.ts（显式 impl not-ready 拒绝）。
+      ;(internals.managerStack.harness.deps as { assertWorkerImplReady?: unknown }).assertWorkerImplReady = undefined
 
       const common = {
         title: 'MCP production wiring',

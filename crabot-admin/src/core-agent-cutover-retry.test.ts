@@ -45,6 +45,8 @@ function createSubject(options: { completionError?: unknown; existingMarker?: bo
   subject.startAgentDependentMaintenance = vi.fn()
   subject.schedules = new Map()
   subject.publishCurrentAgentConfigInvalidation = vi.fn()
+  // P6-B：cutover 路径现挂 worker bootstrap（本测试不验收它；独立覆盖在 bootstrap 测试）。
+  subject.runWorkerImplementationBootstrap = vi.fn().mockResolvedValue(undefined)
   subject.webServer = null
   subject.friends = new Map()
   subject.pendingMessages = new Map()

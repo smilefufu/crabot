@@ -29,6 +29,10 @@ import { startUpgrade, canUpgrade, isUpgradeInProgress } from './version/upgrade
 import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archive-reader.js'
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
 import { CoreAgentConfigMutationCoordinator } from './core-agent-config-revision-store.js'
+import { WorkerImplementationStore } from './worker-implementation-store.js'
+import type { WorkerImplementationRuntimeConfig, CLIWorkerImplId } from './types.js'
+import { WorkerConnectionRevisionSigner } from './worker-connection-revision.js'
+import { WorkerOperationAssertions } from './worker-operation-assertions.js'
 import { CoreAgentCutoverStore } from './core-agent-cutover.js'
 import { CORE_AGENT_DEFINITION } from './core-agent-definition.js'
 import { BrowserManager } from './browser-manager.js'
@@ -490,6 +494,10 @@ export class AdminModule extends ModuleBase {
   private modelProviderManager: ModelProviderManager
 
   // Agent 管理器
+  private workerImplementationStore!: WorkerImplementationStore
+  private workerConnectionRevisionSigner!: WorkerConnectionRevisionSigner
+  private pendingRebaselineDoneMarker?: string
+  private workerOperationAssertions!: WorkerOperationAssertions
   private agentManager: AgentManager
 
   // Channel 管理器
@@ -621,6 +629,9 @@ export class AdminModule extends ModuleBase {
     this.skillManager = new SkillManager(this.adminConfig.data_dir)
     this.essentialToolsManager = new EssentialToolsManager(this.adminConfig.data_dir)
     this.subAgentManager = new SubAgentManager(this.adminConfig.data_dir, getBuiltinSubAgents)
+    this.workerImplementationStore = new WorkerImplementationStore(this.adminConfig.data_dir)
+    this.workerConnectionRevisionSigner = new WorkerConnectionRevisionSigner(this.adminConfig.data_dir)
+
     this.browserManager = new BrowserManager(
       this.adminConfig.data_dir,
       parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
@@ -662,6 +673,13 @@ export class AdminModule extends ModuleBase {
     })
     this.skillManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop, options) => {
       await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop, options)
+    })
+    this.workerImplementationStore.setSemanticSnapshotComputer((candidate) => {
+      const snapshot = this.readCoreAgentSemanticSnapshot() as Record<string, unknown>
+      return { ...snapshot, worker_implementations: candidate }
+    })
+    this.workerImplementationStore.setMutationRunner(async (domains, preview, apply) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
     })
     // AgentManager still emits its legacy local callback for non-core compatibility; core runtime
     // invalidation is committed by the coordinator above, never by pushConfig.
@@ -730,6 +748,8 @@ export class AdminModule extends ModuleBase {
 
     // Agent 配置管理
     this.registerMethod('get_agent_config', this.handleGetAgentConfig.bind(this))
+    this.registerMethod('resolve_worker_connection', this.handleResolveWorkerConnection.bind(this))
+    this.registerMethod('consume_worker_operation_assertion', this.handleConsumeWorkerOperationAssertion.bind(this))
     this.registerMethod('update_agent_config', this.handleUpdateAgentConfig.bind(this))
 
     // Memory 配置管理（供 Memory 模块启动时 pull 初始配置）
@@ -809,6 +829,8 @@ export class AdminModule extends ModuleBase {
       this.jwtSecret = crypto.randomBytes(32).toString('hex')
       console.warn('[Admin] Warning: No JWT secret configured, using random value')
     }
+    // worker operation assertion 签名密钥复用 jwtSecret（与 admin-chat assertion 同纪律）。
+    this.workerOperationAssertions = new WorkerOperationAssertions(this.adminConfig.data_dir, this.jwtSecret)
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
@@ -858,11 +880,39 @@ export class AdminModule extends ModuleBase {
     await this.subAgentManager.initializeLoadOnly()
     await this.skillManager.initializeLoadOnly()
     await this.essentialToolsManager.initialize()
+    // worker_implementations 同属 semantic snapshot 分量：recovery 前必须已 load
+    //（新部署在此原子落 revision 1 安全初始配置）。
+    await this.workerImplementationStore.load()
+
+    // P6-B：worker_implementations 首次进入 semantic 投影时，存量实例的 committed
+    // fingerprint 与 live 不一致——预埋一次性 rebaseline marker，让 coordinator initialize
+    // 以 revision+1 合法扩展（而不是 fail closed）。fresh deploy 无 committed record，
+    // 不需要 marker（initialize 直接以新投影建 revision 1）。
+    {
+      // 一次性化：done marker 存在（无论当年是否真发生 mismatch）就不再预埋——否则每次
+      // 启动都预埋会让 coordinator 的防漂移 fail-closed 永久失效（review R2）。
+      const markerDir = path.join(this.adminConfig.data_dir, 'migrations')
+      const donePath = path.join(markerDir, 'core-config-projection-rebaseline.done.json')
+      const done = await fs.access(donePath).then(() => true).catch(() => false)
+      const recordExists = await fs.access(path.join(this.adminConfig.data_dir, 'config', 'core-agent-config-revision.json')).then(() => true).catch(() => false)
+      if (recordExists && !done) {
+        await fs.mkdir(markerDir, { recursive: true, mode: 0o700 })
+        const markerPath = path.join(markerDir, 'core-config-projection-rebaseline.json')
+        await fs.writeFile(markerPath, JSON.stringify({ projection: 'worker_implementations', prepared_at: new Date().toISOString() }), { mode: 0o600 })
+        // done marker 在 initialize 消费/清理后由下方补写（本轮启动内即可收口）。
+        this.pendingRebaselineDoneMarker = donePath
+      }
+    }
 
     // Recover durable revision/outbox against fully loaded source state before any mutation.
     // Verify any Skill source journal binding before coordinator initialization/recovery trusts source projection.
     await this.skillManager.verifySourceJournalBinding(this.configMutationCoordinator)
     await this.configMutationCoordinator.initialize()
+    if (this.pendingRebaselineDoneMarker) {
+      // coordinator initialize 已消费/清理预埋 marker；写持久 done，之后启动不再预埋。
+      await fs.writeFile(this.pendingRebaselineDoneMarker, JSON.stringify({ completed_at: new Date().toISOString() }), { mode: 0o600 })
+      this.pendingRebaselineDoneMarker = undefined
+    }
     await this.skillManager.recoverSourceJournal(this.configMutationCoordinator)
     await this.configMutationCoordinator.verifyCommittedFingerprint()
     if (!this.managementOnly) {
@@ -969,11 +1019,22 @@ export class AdminModule extends ModuleBase {
 
     if (!this.managementOnly) {
       await this.ensureBuiltinSchedules()
+      // §3.19.12 step 4：bootstrap 的 CAS 提交要发布 invalidation（Agent 收到 hint 才会
+      // pull 新 revision，commit 的 revision 核对才过得去）——所以 publication 必须先开，
+      // 但 ingress（cutoverActivated）仍在 bootstrap 完成后才开。
+      this.configInvalidationPublicationEnabled = true
+      // 存量实例（cutover 早已完成）升级 P6-B 时在此补跑 bootstrap；
+      // fresh deploy/已完成/user_superseded 都幂等快进。失败不阻断启动（下次重试）。
+      try {
+        await this.runWorkerImplementationBootstrap()
+      } catch (error) {
+        console.error('[Admin] worker implementation bootstrap failed (will retry on next start):',
+          error instanceof Error ? error.message : String(error))
+      }
       const allSchedules = Array.from(this.schedules.values())
       this.scheduleEngine.startAll(allSchedules)
       console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
       this.cutoverActivated = true
-      this.configInvalidationPublicationEnabled = true
       try {
         await this.startAgentDependentMaintenance()
       } catch (error) {
@@ -2357,6 +2418,38 @@ export class AdminModule extends ModuleBase {
       const deleteTaskMatch = pathname.match(/^\/api\/admin\/tasks\/([^/]+)$/)
       if (deleteTaskMatch && req.method === 'DELETE') {
         await this.handleDeleteTaskApi(req, res, deleteTaskMatch[1])
+        return
+      }
+
+      // Worker implementation desired config（protocol-admin §3.19.12，P6-B）。
+      if (pathname === '/api/agent/worker-implementations' && req.method === 'GET') {
+        await this.handleGetWorkerImplementationsApi(req, res)
+        return
+      }
+      if (pathname === '/api/agent/worker-implementations' && req.method === 'PUT') {
+        await this.handlePutWorkerImplementationsApi(req, res)
+        return
+      }
+      // Worker implementation observed status（P6-B §6：Agent activation registry 透传）。
+      if (pathname === '/api/agent/worker-implementations/status' && req.method === 'GET') {
+        await this.proxyAgentRpc(res, 'list_worker_implementation_status', {})
+        return
+      }
+
+      // Worker operation（§3.19.12.1）：per-action 端点。builtin 一律 400。
+      const workerActionMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/(install|verify)$/)
+      if (workerActionMatch && req.method === 'POST') {
+        await this.handleWorkerActionApi(req, res, decodeURIComponent(workerActionMatch[1]), workerActionMatch[2] as 'install' | 'verify')
+        return
+      }
+      const workerOpGetMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/operations\/([^/]+)$/)
+      if (workerOpGetMatch && req.method === 'GET') {
+        await this.handleGetWorkerOperationApi(req, res, decodeURIComponent(workerOpGetMatch[1]), decodeURIComponent(workerOpGetMatch[2]))
+        return
+      }
+      const workerOpCancelMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/operations\/([^/]+)\/cancel$/)
+      if (workerOpCancelMatch && req.method === 'POST') {
+        await this.handleCancelWorkerOperationApi(req, res, decodeURIComponent(workerOpCancelMatch[1]), decodeURIComponent(workerOpCancelMatch[2]))
         return
       }
 
@@ -7090,6 +7183,16 @@ export class AdminModule extends ModuleBase {
       this.configInvalidationPublicationEnabled = false
       throw error
     }
+    // §3.19.12 step 4：开放 ingress 前完成 worker implementation 初始迁移
+    // （grandfather bootstrap；fresh deploy 只落 completed marker，不 inspect 不付费 verify）。
+    // 失败不阻断 Admin 启动：marker 保持 pending，下次启动重试（inspect/commit 幂等）。
+    try {
+      await this.runWorkerImplementationBootstrap()
+    } catch (error) {
+      console.error('[Admin] worker implementation bootstrap failed (will retry on next start):',
+        error instanceof Error ? error.message : String(error))
+    }
+
     // Open ingress before arming timers: an already-due one-shot must never fire into
     // the management-only gate and be lost.
     this.cutoverActivated = true
@@ -7257,6 +7360,7 @@ export class AdminModule extends ModuleBase {
       agent_config: resolvedAgentConfig,
       ...imageFields,
       ...(config.extra ? { extra: config.extra } : {}),
+      worker_implementations: await this.buildWorkerImplementationRuntimeConfig(),
     }
     delete runtimeConfig.agent_config.extra
     return {
@@ -8639,6 +8743,7 @@ export class AdminModule extends ModuleBase {
       subagent_storage: this.subAgentManager.semanticMigrationState(),
       skills: this.skillManager.runtimeSemanticEntries(),
       skill_storage: this.skillManager.semanticMigrationState(),
+      worker_implementations: this.workerImplementationStore.runtimeSemanticEntries(),
     }
   }
 
@@ -9566,6 +9671,493 @@ export class AdminModule extends ModuleBase {
         msg.includes('connect failed')
       sendJson(res, isUnreachable ? 503 : 500, { error: isUnreachable ? 'Agent not available' : msg })
     }
+  }
+
+  /**
+   * §6.5/§3.19.12 resolve_worker_connection：Agent-only、operation-time 实时解析。
+   * - runtime bearer 先经 MM verify_core_agent_runtime 验证 exact core Agent；
+   * - provider/model 引用只从 Admin persisted policy 取，不接受调用方临时引用；
+   * - 每次调用唯一 buildConnectionInfo 实时解析，失败不 fallback snapshot；
+   * - connection_revision 为 opaque HMAC（nonsecret invalidation signal）。
+   */
+  private async handleResolveWorkerConnection(
+    params: { impl?: unknown; expected_policy_revision?: unknown },
+    context?: RpcHandlerContext,
+  ): Promise<{ connection: LLMConnectionInfo; connection_revision: string; policy_revision: number }> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime',
+      { expected_module_id: 'crabot-agent' },
+      this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+    const impl = params.impl
+    if (impl !== 'claude-code' && impl !== 'codex') {
+      throw new RpcError('INVALID_PARAMS', 'impl must be claude-code or codex')
+    }
+    const desired = await this.workerImplementationStore.load()
+    if (typeof params.expected_policy_revision !== 'number' || params.expected_policy_revision !== desired.revision) {
+      throw new RpcError('CONFLICT', `worker implementation policy revision mismatch (current ${desired.revision})`)
+    }
+    const policy = desired.implementations[impl]
+    if (!policy.enabled || policy.connection?.mode !== 'admin_provider') {
+      throw new RpcError('INVALID_PARAMS', `${impl} is not enabled with admin_provider connection`)
+    }
+    // 每次调用实时解析；provider 不存在/解析失败直接 fail loud。
+    const provider = this.modelProviderManager.getProvider(policy.connection.provider_id)
+    if (!provider) {
+      throw new RpcError('NOT_FOUND', `provider not found: ${policy.connection.provider_id}`)
+    }
+    const connection = await this.modelProviderManager.buildConnectionInfo(
+      policy.connection.provider_id,
+      policy.connection.model_id,
+    ) as LLMConnectionInfo
+    const revision = await this.workerConnectionRevisionSigner.compute({
+      policy_revision: desired.revision,
+      provider_id: provider.id,
+      model_id: policy.connection.model_id,
+      endpoint: provider.endpoint,
+      credential_material: provider.api_key ?? '',
+    })
+    return { connection, connection_revision: revision, policy_revision: desired.revision }
+  }
+
+  /**
+   * §3.19.12 consume_worker_operation_assertion：Agent 在执行 operation 前核销。
+   * runtime bearer 先经 MM 验证 exact core Agent；nonce 一次性原子持久。
+   */
+  private async handleConsumeWorkerOperationAssertion(
+    params: { assertion?: unknown; expected?: unknown },
+    context?: RpcHandlerContext,
+  ): Promise<{ consumed: true; expires_at: string }> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime',
+      { expected_module_id: 'crabot-agent' },
+      this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+    if (typeof params.assertion !== 'string' || !params.expected || typeof params.expected !== 'object') {
+      throw new RpcError('INVALID_PARAMS', 'assertion and expected are required')
+    }
+    try {
+      return await this.workerOperationAssertions.consume(
+        params.assertion,
+        params.expected as Parameters<WorkerOperationAssertions['consume']>[1],
+      )
+    } catch (error) {
+      throw new RpcError('FORBIDDEN', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /**
+   * GET /api/agent/worker-implementations（§3.19.12.1）：合并 `GetWorkerImplementationsResult`——
+   * desired config + Agent 实时 status。Agent 不可用时仍返回 config + agent_status='unavailable'
+   * + 脱敏 unavailable_reason（statuses 为空，不伪造 ready）。
+   */
+  private async handleGetWorkerImplementationsApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const desired = await this.workerImplementationStore.load()
+    let agentStatus: 'available' | 'unavailable' = 'unavailable'
+    let statuses: unknown[] = []
+    let unavailableReason: string | undefined
+    try {
+      const result = await this.callAgentRpc<Record<string, never>, { items: unknown[] }>(
+        'list_worker_implementation_status', {},
+      )
+      statuses = result.items
+      agentStatus = 'available'
+    } catch (error) {
+      unavailableReason = (error instanceof Error ? error.message : String(error))
+        .replace(/\/[^\s]+/g, '<path>').replace(/[A-Za-z0-9_-]{24,}/g, '<redacted>').slice(0, 200)
+    }
+    sendJson(res, 200, {
+      config: desired,
+      agent_status: agentStatus,
+      statuses,
+      ...(unavailableReason ? { unavailable_reason: unavailableReason } : {}),
+    })
+  }
+
+  /**
+   * PUT /api/agent/worker-implementations：CAS 更新（expected_revision 必传）。
+   * body 只接受协议 shape（implementations 引用 provider/model，不含 credential）；
+   * Agent unavailable 时只允许保存全 disabled intent（启用 CLI 需 Agent 在线评估 translator
+   * 兼容——503 由 admission 抛出）。
+   */
+  private async handlePutWorkerImplementationsApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const body = (await this.readJsonBody<{ expected_revision?: unknown; config?: { default_impl?: unknown; implementations?: unknown } }>(req))
+      if (typeof body.expected_revision !== 'number' || !Number.isInteger(body.expected_revision)) {
+        sendJson(res, 400, { error: 'expected_revision is required', code: 'ADMIN_WORKER_IMPL_INVALID' })
+        return
+      }
+      if (!body.config || typeof body.config !== 'object') {
+        sendJson(res, 400, { error: 'config is required', code: 'ADMIN_WORKER_IMPL_INVALID' })
+        return
+      }
+      // §3.19.12：把 CLI 设为 enabled / 变更其 connection 前，必须用当前 Agent status
+      // 校验 mode/provider format 与该 CLI 版本的 translator capability；Agent 不可用 503。
+      const nextImpls = body.config!.implementations as Record<string, { enabled?: boolean; connection?: { mode: string; provider_id?: string } }>
+      const current = await this.workerImplementationStore.load()
+      const transitions: Array<{ impl: 'claude-code' | 'codex'; enabled: boolean; connection?: { mode: string; provider_id?: string; model_id?: string } }> = []
+      for (const impl of ['claude-code', 'codex'] as const) {
+        const next = nextImpls?.[impl]
+        if (!next) continue
+        const prev = current.implementations[impl]
+        const enabling = next.enabled === true && !prev.enabled
+        const connectionChanged = next.enabled === true && JSON.stringify(next.connection ?? null) !== JSON.stringify(prev.connection ?? null)
+        if (enabling || connectionChanged) {
+          transitions.push({ impl, enabled: true, connection: next.connection as never })
+        }
+      }
+      if (transitions.length > 0) {
+        let statuses: Array<{ impl: string; installed: boolean; version?: string; connection_capabilities?: Array<{ mode: string; provider_formats?: string[] }> }>
+        try {
+          const result = await this.callAgentRpc<Record<string, never>, { items: never[] }>('list_worker_implementation_status', {})
+          statuses = result.items
+        } catch (error) {
+          sendJson(res, 503, {
+            error: 'Agent unavailable; cannot validate translator compatibility before enabling a CLI',
+            code: 'ADMIN_CORE_AGENT_UNAVAILABLE',
+          })
+          return
+        }
+        for (const transition of transitions) {
+          const status = statuses.find((st) => st.impl === transition.impl)
+          const mode = transition.connection?.mode
+          if (!mode) continue // 启用但无 connection（legacy 场景）→ 由 ready 判 final closed
+          const caps = status?.connection_capabilities ?? []
+          const cap = caps.find((c) => c.mode === mode)
+          if (!status?.installed || !cap) {
+            sendJson(res, 400, {
+              error: `${transition.impl} has no translator for ${mode} at the current CLI version`,
+              code: 'ADMIN_WORKER_CONNECTION_UNSUPPORTED',
+            })
+            return
+          }
+          if (mode === 'admin_provider' && transition.connection?.provider_id) {
+            const provider = this.modelProviderManager.getProvider(transition.connection.provider_id)
+            if (!provider) {
+              sendJson(res, 400, { error: 'provider not found', code: 'ADMIN_WORKER_CONNECTION_UNSUPPORTED' })
+              return
+            }
+            if (cap.provider_formats && !cap.provider_formats.includes(provider.format)) {
+              sendJson(res, 400, {
+                error: `provider format ${provider.format} is not supported by the ${transition.impl} translator`,
+                code: 'ADMIN_WORKER_CONNECTION_UNSUPPORTED',
+              })
+              return
+            }
+          }
+        }
+      }
+      const updated = await this.workerImplementationStore.update(body.expected_revision, (current) => ({
+        revision: current.revision, // store 会 +1
+        default_impl: body.config!.default_impl ?? current.default_impl,
+        implementations: body.config!.implementations,
+      }) as never)
+      sendJson(res, 200, { config: updated })
+    } catch (error) {
+      const code = (error as { code?: unknown }).code
+      if (code === 'ADMIN_WORKER_IMPL_REVISION_CONFLICT') {
+        sendJson(res, 409, { error: (error as Error).message, code: 'ADMIN_WORKER_POLICY_REVISION_CONFLICT' })
+        return
+      }
+      console.error('[Admin] worker-implementations PUT failed:', error)
+      sendJson(res, 400, { error: error instanceof Error ? (error.message || String(error)) : String(error), code: 'ADMIN_WORKER_IMPL_INVALID' })
+    }
+  }
+
+  /** §3.19.12.1 操作端点共用的 admission：impl/JWT/CAS/policy 校验 + operation/assertion 签发。 */
+  private async admitWorkerOperation(
+    res: ServerResponse,
+    impl: string,
+    action: 'install' | 'verify' | 'cancel',
+    expectedRevision: unknown,
+  ): Promise<{ operationId: string; assertion: string; agentPort: number; revision: number; mode: string } | null> {
+    if (impl === 'builtin') {
+      sendJson(res, 400, { error: 'builtin does not take worker operations', code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return null
+    }
+    if (impl !== 'claude-code' && impl !== 'codex') {
+      sendJson(res, 400, { error: `unknown worker implementation: ${impl}`, code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return null
+    }
+    if (typeof expectedRevision !== 'number') {
+      sendJson(res, 400, { error: 'expected_revision is required', code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return null
+    }
+    const desired = await this.workerImplementationStore.load()
+    if (desired.revision !== expectedRevision) {
+      sendJson(res, 409, { error: `worker implementation config revision conflict (current ${desired.revision})`, code: 'ADMIN_WORKER_POLICY_REVISION_CONFLICT' })
+      return null
+    }
+    const policy = desired.implementations[impl]
+    if (action !== 'install' && !policy.enabled) {
+      sendJson(res, 409, { error: `${impl} is not enabled`, code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return null
+    }
+    const agentPort = await this.ensureAgentPort()
+    if (!agentPort) {
+      sendJson(res, 503, { error: 'Agent not available', code: 'ADMIN_CORE_AGENT_UNAVAILABLE' })
+      return null
+    }
+    const mode = policy.connection?.mode ?? 'native_account'
+    const operationId = action === 'cancel' ? '' : generateId()
+    const assertion = action === 'cancel' ? '' : this.workerOperationAssertions.issue({
+      action, operation_id: operationId, impl: impl as 'claude-code' | 'codex', mode, policy_revision: desired.revision,
+    })
+    return { operationId, assertion, agentPort, revision: desired.revision, mode }
+  }
+
+  /** POST /:impl/install|verify（§3.19.12.1）：assertion 不出服务端。 */
+  private async handleWorkerActionApi(req: IncomingMessage, res: ServerResponse, impl: string, action: 'install' | 'verify'): Promise<void> {
+    const body = await this.readJsonBody<{ expected_revision?: unknown }>(req)
+    const admission = await this.admitWorkerOperation(res, impl, action, body.expected_revision)
+    if (!admission) return
+    try {
+      const result = await this.rpcClient.callSensitive<
+        Record<string, unknown>,
+        { operation_id: string; state: string; version?: string; passed?: boolean; detail?: string }
+      >(admission.agentPort, `${action}_worker_implementation`, {
+        impl,
+        operation_id: admission.operationId,
+        assertion: admission.assertion,
+        expected: { action, operation_id: admission.operationId, impl, mode: admission.mode, policy_revision: admission.revision },
+      }, this.config.moduleId)
+      sendJson(res, 200, { operation: result })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      if (msg.includes('assertion')) {
+        sendJson(res, 403, { error: msg, code: 'ADMIN_WORKER_OPERATION_ASSERTION_REJECTED' })
+        return
+      }
+      sendJson(res, 502, { error: msg.replace(/[A-Za-z0-9_-]{24,}/g, '<redacted>').slice(0, 300) })
+    }
+  }
+
+  /** GET /:impl/operations/:operationId：读 Agent operation store（脱敏 record）。 */
+  private async handleGetWorkerOperationApi(_req: IncomingMessage, res: ServerResponse, impl: string, operationId: string): Promise<void> {
+    if (impl !== 'claude-code' && impl !== 'codex') {
+      sendJson(res, 400, { error: `unknown worker implementation: ${impl}`, code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return
+    }
+    const agentPort = await this.ensureAgentPort()
+    if (!agentPort) {
+      sendJson(res, 503, { error: 'Agent not available', code: 'ADMIN_CORE_AGENT_UNAVAILABLE' })
+      return
+    }
+    try {
+      const result = await this.rpcClient.call<Record<string, unknown>, { operation?: unknown }>(
+        agentPort, 'get_worker_implementation_operation', { operation_id: operationId }, this.config.moduleId,
+      )
+      if (!result.operation) {
+        sendJson(res, 404, { error: 'operation not found', code: 'ADMIN_WORKER_OPERATION_NOT_FOUND' })
+        return
+      }
+      sendJson(res, 200, { operation: result.operation })
+    } catch (error) {
+      sendJson(res, 502, { error: (error instanceof Error ? error.message : String(error)).slice(0, 300) })
+    }
+  }
+
+  /** POST /:impl/operations/:operationId/cancel：取消 operation。 */
+  private async handleCancelWorkerOperationApi(req: IncomingMessage, res: ServerResponse, impl: string, operationId: string): Promise<void> {
+    const body = await this.readJsonBody<{ expected_revision?: unknown }>(req)
+    if (impl !== 'claude-code' && impl !== 'codex') {
+      sendJson(res, 400, { error: `unknown worker implementation: ${impl}`, code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return
+    }
+    if (typeof body.expected_revision !== 'number') {
+      sendJson(res, 400, { error: 'expected_revision is required', code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return
+    }
+    const desired = await this.workerImplementationStore.load()
+    if (desired.revision !== body.expected_revision) {
+      sendJson(res, 409, { error: `worker implementation config revision conflict (current ${desired.revision})`, code: 'ADMIN_WORKER_POLICY_REVISION_CONFLICT' })
+      return
+    }
+    const agentPort = await this.ensureAgentPort()
+    if (!agentPort) {
+      sendJson(res, 503, { error: 'Agent not available', code: 'ADMIN_CORE_AGENT_UNAVAILABLE' })
+      return
+    }
+    // cancel 同样签发/核销 assertion（§3.19.12.1），绑定的是被操作的既有 operation_id。
+    const policy = desired.implementations[impl]
+    const mode = policy.connection?.mode ?? 'native_account'
+    const assertion = this.workerOperationAssertions.issue({
+      action: 'cancel', operation_id: operationId, impl, mode, policy_revision: desired.revision,
+    })
+    try {
+      const result = await this.rpcClient.callSensitive<Record<string, unknown>, { operation?: unknown }>(
+        agentPort, 'cancel_worker_implementation_operation', {
+          operation_id: operationId,
+          assertion,
+          expected: { action: 'cancel', operation_id: operationId, impl, mode, policy_revision: desired.revision },
+        }, this.config.moduleId,
+      )
+      if (!result.operation) {
+        sendJson(res, 404, { error: 'operation not found', code: 'ADMIN_WORKER_OPERATION_NOT_FOUND' })
+        return
+      }
+      sendJson(res, 200, { operation: result.operation })
+    } catch (error) {
+      sendJson(res, 502, { error: (error instanceof Error ? error.message : String(error)).slice(0, 300) })
+    }
+  }
+
+  /**
+   * §12 grandfather bootstrap（Admin 侧协调，plan §12 顺序）：
+   * fresh deploy → completed marker 即走；pre-P6 升级（有 legacy worker 数据且无 marker）
+   * → pending transaction → Agent inspect → CAS 写 migration config → invalidation →
+   * commit（Agent 核对 observation/policy/binding）→ completed marker。
+   * 用户 PUT 竞态：revision 变化即放弃本事务（store 的 update 天然 CAS 拒绝）。
+   */
+  private async runWorkerImplementationBootstrap(): Promise<void> {
+    const markerPath = path.join(this.adminConfig.data_dir, 'migrations', 'worker-implementation-bootstrap-v1.json')
+    type Marker = { state: 'pending' | 'completed' | 'user_superseded'; transaction_id: string }
+    const readMarker = async (): Promise<Marker | null> => {
+      try {
+        return JSON.parse(await fs.readFile(markerPath, 'utf-8')) as Marker
+      } catch {
+        return null
+      }
+    }
+    const writeMarker = async (marker: Marker): Promise<void> => {
+      await fs.mkdir(path.dirname(markerPath), { recursive: true, mode: 0o700 })
+      const tmp = `${markerPath}.tmp-${process.pid}`
+      await fs.writeFile(tmp, JSON.stringify(marker), { mode: 0o600 })
+      await fs.rename(tmp, markerPath)
+    }
+
+    const existing = await readMarker()
+    if (existing?.state === 'completed' || existing?.state === 'user_superseded') return
+
+    // pre-P6 信号：legacy agent worker 数据存在。
+    const agentDataDir = path.join(path.dirname(this.adminConfig.data_dir), 'agent')
+    const hasLegacyData = await fs.readdir(path.join(agentDataDir, 'workers')).then((entries) => entries.length > 0).catch(() => false)
+    if (!hasLegacyData) {
+      await writeMarker({ state: 'completed', transaction_id: existing?.transaction_id ?? generateId() })
+      return
+    }
+
+    const marker: Marker = existing ?? { state: 'pending', transaction_id: generateId() }
+    if (!existing) await writeMarker(marker)
+
+    const agentPort = await this.ensureAgentPort()
+    if (!agentPort) throw new Error('Agent not available for worker bootstrap')
+
+    // 1. inspect（幂等重放）
+    const inspection = await this.rpcClient.call<
+      { transaction_id: string },
+      { observation: Record<string, { installed: boolean; activated: boolean; version?: string }> }
+    >(agentPort, 'inspect_worker_implementation_bootstrap', { transaction_id: marker.transaction_id }, this.config.moduleId)
+
+    const qualifying = (['claude-code', 'codex'] as const).filter((impl) => {
+      const observed = inspection.observation[impl]
+      return observed?.installed && observed.activated && typeof observed.version === 'string'
+    })
+    if (qualifying.length === 0) {
+      await writeMarker({ state: 'completed', transaction_id: marker.transaction_id })
+      return
+    }
+
+    // 2. CAS 写 migration-owned config：qualifying CLI → existing_host+enabled，builtin default 不变。
+    //    若上次启动已写入（commit 未收敛导致 marker 停在 pending），候选与现状一致——
+    //    CAS 会因「无变化」抛错冒泡，commit 永远走不到（R11）：此时跳过 CAS 直接进 commit。
+    const desired = await this.workerImplementationStore.load()
+    const alreadyApplied = qualifying.every((impl) => {
+      const policy = desired.implementations[impl]
+      return policy.enabled && policy.connection?.mode === 'existing_host'
+    })
+    // 用户在 pending 期间改过 policy（换 mode/点禁用）时，migration 候选=现状 → CAS 无变化
+    // 抛错。这不是并发覆盖而是「用户已接管」——按 §3.19.12.6 收口 user_superseded（R12）。
+    const userOwns = (['claude-code', 'codex'] as const).some((impl) => {
+      const policy = desired.implementations[impl]
+      return (policy.enabled || policy.connection) && !(policy.enabled && policy.connection?.mode === 'existing_host')
+    })
+    if (!alreadyApplied && userOwns) {
+      await writeMarker({ state: 'user_superseded', transaction_id: marker.transaction_id })
+      return
+    }
+    if (!alreadyApplied) try {
+      await this.workerImplementationStore.update(desired.revision, (current) => {
+        const next = {
+          revision: current.revision,
+          default_impl: current.default_impl,
+          implementations: {
+            builtin: { ...current.implementations.builtin },
+            'claude-code': { ...current.implementations['claude-code'] },
+            codex: { ...current.implementations.codex },
+          },
+        }
+        for (const impl of qualifying) {
+          // 用户已显式配置（policy 带 connection 或 enabled=true）的不覆盖。
+          const policy = current.implementations[impl]
+          if (policy.enabled || policy.connection) continue
+          next.implementations[impl] = { enabled: true, connection: { mode: 'existing_host' as const } }
+        }
+        return next
+      })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      // CAS 冲突或无变化（用户已接管/已在位）= user_superseded，永不自动重试启用。
+      if ((error as { code?: unknown }).code === 'ADMIN_WORKER_IMPL_REVISION_CONFLICT' || msg.includes('did not change semantic snapshot')) {
+        await writeMarker({ state: 'user_superseded', transaction_id: marker.transaction_id })
+        return
+      }
+      throw error
+    }
+
+    // 3. invalidation → Agent pull → commit（revision 核对在 Agent 侧；短暂重试等 pull）。
+    const newRevision = (await this.workerImplementationStore.load()).revision
+    await this.publishCurrentAgentConfigInvalidation()
+    let committed = false
+    let lastError: unknown
+    for (let attempt = 0; attempt < 25 && !committed; attempt++) {
+      try {
+        const result = await this.rpcClient.call<
+          { transaction_id: string; policy_revision: number; grandfather_impls: string[] },
+          { state: string }
+        >(agentPort, 'commit_worker_implementation_bootstrap', {
+          transaction_id: marker.transaction_id,
+          policy_revision: newRevision,
+          grandfather_impls: qualifying,
+        }, this.config.moduleId)
+        committed = result.state === 'committed'
+      } catch (error) {
+        lastError = error
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
+    }
+    if (!committed) {
+      console.error('[Admin] worker bootstrap commit did not converge:', lastError instanceof Error ? lastError.message : String(lastError))
+      return // marker 保持 pending，下次启动重试（inspect/commit 幂等）
+    }
+    await writeMarker({ state: 'completed', transaction_id: marker.transaction_id })
+    console.log(`[Admin] Worker implementation grandfather bootstrap completed: ${qualifying.join(', ')} grandfathered at revision ${newRevision}`)
+  }
+
+  /** §6.5：desired config + 当前 admin_provider connection 的 nonsecret opaque revision。 */
+  private async buildWorkerImplementationRuntimeConfig(): Promise<WorkerImplementationRuntimeConfig> {
+    const desired = await this.workerImplementationStore.load()
+    const connectionRevisions: Partial<Record<CLIWorkerImplId, string>> = {}
+    for (const impl of ['claude-code', 'codex'] as const) {
+      const policy = desired.implementations[impl]
+      if (policy.connection?.mode !== 'admin_provider') continue
+      const provider = this.modelProviderManager.getProvider(policy.connection.provider_id)
+      if (!provider) continue // 引用失效由 status/degraded 暴露；revision 缺省即失效信号
+      connectionRevisions[impl] = await this.workerConnectionRevisionSigner.compute({
+        policy_revision: desired.revision,
+        provider_id: provider.id,
+        model_id: policy.connection.model_id,
+        endpoint: provider.endpoint,
+        credential_material: provider.api_key ?? '',
+      })
+    }
+    return { config: desired, connection_revisions: connectionRevisions }
   }
 
   private memoryModules: Array<{ module_id: string; port: number; name: string }> = []

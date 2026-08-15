@@ -24,7 +24,12 @@ describe('UnifiedAgent runtime config invalidation', () => {
     next.agent_config!.model_config.powerful.model_id = 'new'
     vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: next, revision: 2 })
     await agent.onEvent({ type: 'admin.agent_config_invalidated', payload: { config_revision: 2, domains: ['models'] }, timestamp: new Date().toISOString() })
-    await new Promise((resolve) => setTimeout(resolve, 70))
+    // P6-B：apply 路径多了 activation registry 的 detect 重算（进程探测），且 revision
+    // 在 registry 应用后才 accept——轮询直到两者都落定。
+    const deadline = Date.now() + 10000
+    while ((agent.agentConfig.system_prompt !== 'new' || agent.configRevision !== 2) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
     expect(agent.agentConfig.system_prompt).toBe('new')
     expect(agent.agentConfig.model_config.powerful.model_id).toBe('new')
     expect(agent.configRevision).toBe(2)

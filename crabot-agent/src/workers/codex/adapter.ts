@@ -24,6 +24,7 @@ import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { buildChildEnv } from '../../core/runtime-env.js'
+import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
@@ -374,6 +375,16 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private readonly sessionDiscoveryTimeoutMs: number
   private readonly pasteReadyTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
+  private get resolveManagedBinary(): (() => Promise<string | undefined>) | undefined {
+    return this.deps.resolveManagedBinary
+  }
+  private lastDetectedVersion?: string
+
+  /** P6-B §6：与最近一次 detect 版本一致的静态 translator 声明。 */
+  connectionCapabilities(): import('../types.js').WorkerConnectionCapability[] {
+    if (!this.lastDetectedVersion) return []
+    return connectionCapabilitiesFor('codex', this.lastDetectedVersion)
+  }
   private readonly mutexes = new Map<string, AsyncMutex>()
   /** resolveBinDir(codexBin) 的缓存 promise——codexBin 构造后不变,没必要每次 detect/spawn/
    * resume 都重新 `command -v` + `realpath` 一遍。五轮 review 修复:只缓存*成功*的解析结果。
@@ -392,6 +403,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
        * workspace 隔离出来的 CODEX_HOME,detect() 的 activated 检查也读这里。测试用可注入
        * fixture 目录,不依赖开发机真实 home。 */
       readonly codexHomeSource?: string
+      /** P6-B：managed active binary 解析（detect 顺序：managed → system）。 */
+      readonly resolveManagedBinary?: () => Promise<string | undefined>
       /** spawn() 发现真实 session id 的轮询上限(ms),默认 3000;测试用可调小避免拖慢用例。 */
       readonly sessionDiscoveryTimeoutMs?: number
       /** 启动期就绪握手的等待上限,默认 DEFAULT_PASTE_READY_TIMEOUT_MS(见该常量注释里的
@@ -426,19 +439,24 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   /** 传给 tmux newSession 的 env:PATH 前置 codexBin 所在真实目录(解析不出来就用继承的
-   * PATH,不阻塞),外加调用方传入的额外变量(如 CODEX_HOME)。 */
+   * PATH,不阻塞),外加调用方传入的额外变量(如 CODEX_HOME)。
+   * P6-B：有 managed active binary 时 PATH 前置其目录（spawn/resume 跑的是它）。 */
   private async buildEnv(extra: Record<string, string>): Promise<Record<string, string>> {
-    const dir = await this.resolveBinDirCached()
+    const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const dir = managed ? dirname(managed) : await this.resolveBinDirCached()
     const path = dir ? `${dir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '')
     return { PATH: path, ...extra }
   }
 
   async detect(): Promise<DetectResult> {
-    const binDir = await this.resolveBinDirCached()
+    // P6-B：managed active binary 优先。
+    const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const binDir = managed ? dirname(managed) : await this.resolveBinDirCached()
+    const effectiveBin = managed ? shQuote(managed) : this.codexBin
     const versionEnv = buildChildEnv({ PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '') })
     let versionOutput: string
     try {
-      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${this.codexBin} --version`], { env: versionEnv })
+      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${effectiveBin} --version`], { env: versionEnv })
       versionOutput = stdout.trim()
     } catch (err) {
       if (binDir) {
@@ -455,17 +473,43 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
 
     let activated = false
+    let credentialGeneration: string | undefined
     try {
       const entries = await fs.readdir(this.codexHomeSource)
       // codex-docs: 凭据落在 CODEX_HOME/auth.json(learn.chatgpt.com/docs/auth)。config.toml
       // 存在但没登录过也可能出现,所以两者任一存在都算"至少配置过"——与 cc 检查
       // settings.json/.credentials.json 同一思路(宽松判定,不做网络调用)。
       activated = entries.includes('auth.json') || entries.includes('config.toml')
+      // 代际信号要区分「换账号/重登」与「例行 token 刷新」：
+      // - OAuth flavor（tokens.account_id）：刷新会重写文件（mtime 骗人），用 account_id
+      //   这个非敏感身份字段（不是 credential 本体，且本来就出现在请求 header 里）；
+      // - API key flavor（OPENAI_API_KEY 静态）：codex 不会因刷新重写，mtime+size 即可。
+      // config.toml 的 mtime+size 恒参与（endpoint/model 变更必须让 binding 失效）。
+      const parts: string[] = []
+      try {
+        const authRaw = await fs.readFile(join(this.codexHomeSource, 'auth.json'), 'utf-8')
+        const parsed = JSON.parse(authRaw) as { tokens?: { account_id?: unknown } }
+        const accountId = parsed.tokens?.account_id
+        if (typeof accountId === 'string' && accountId) {
+          parts.push(`account:${accountId}`)
+        } else {
+          const stat = await fs.stat(join(this.codexHomeSource, 'auth.json'))
+          parts.push(`auth.json:${stat.mtimeMs}:${stat.size}`)
+        }
+      } catch { /* auth.json 缺失/损坏：不参与 */ }
+      try {
+        const stat = await fs.stat(join(this.codexHomeSource, 'config.toml'))
+        parts.push(`config.toml:${stat.mtimeMs}:${stat.size}`)
+      } catch { /* 缺失忽略 */ }
+      if (parts.length > 0) credentialGeneration = parts.join(',')
     } catch {
       activated = false
     }
 
-    return { installed: true, activated, detail: versionOutput }
+    // 'codex-cli 0.146.0' → '0.146.0'
+    const version = /([0-9]+\.[0-9]+\.[0-9]+)/.exec(versionOutput)?.[1]
+    this.lastDetectedVersion = version
+    return { installed: true, activated, version, install_source: managed ? 'managed' : 'system', credential_generation: credentialGeneration, detail: versionOutput }
   }
 
   /**
@@ -502,6 +546,32 @@ export class CodexWorkerAdapter implements WorkerAdapter {
           `fall back to codex's built-in defaults, sending requests to the wrong endpoint.`,
       )
     }
+  }
+
+  /**
+   * admin_provider：把 provision 生成的 workspace CODEX_HOME 配置与 translator 的
+   * runtime 配置合并（translator 的 model_provider/model/[model_providers.*] 胜出；
+   * notify/trust/mcp 等能力配置取自 provision 版）。auth.json 不复制（env_key 鉴权）。
+   */
+  private async mergeAdminProviderCodexHome(workspaceRoot: string, workspaceCodexHome: string, runtimeCodexHome: string): Promise<void> {
+    const readToml = async (file: string): Promise<Record<string, unknown>> => {
+      try {
+        return asTable(parseToml(await fs.readFile(file, 'utf-8')))
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {}
+        throw err
+      }
+    }
+    const provisioned = await readToml(join(workspaceCodexHome, 'config.toml'))
+    const translator = await readToml(join(runtimeCodexHome, 'config.toml'))
+    // 根级标量：translator 的 model/model_provider 覆盖；provision 的 notify 等保留。
+    const merged: Record<string, unknown> = { ...provisioned, ...translator }
+    // table 级：model_providers 两边都是表——translator 的 crabot-admin 条目必须保留，
+    // provision 的宿主条目也保留（codex 只按 model_provider 指针选用，不冲突）。
+    if (provisioned.model_providers && translator.model_providers) {
+      merged.model_providers = { ...provisioned.model_providers as object, ...translator.model_providers as object }
+    }
+    await writeSensitiveFileAtomic(join(runtimeCodexHome, 'config.toml'), stringifyToml(asTable(merged)))
   }
 
   async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
@@ -741,7 +811,17 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const dir = join(this.deps.dataDir, spec.worker_id)
     await fs.mkdir(dir, { recursive: true })
 
-    const codexHome = join(spec.workspace.root, '.codex')
+    // P6-B admin_provider：CODEX_HOME 是 admission 产出的 runtime 目录——translator 的
+    // config.toml（model_provider/model/model_providers）必须**合并** provision 写到
+    // workspace 的那份（notify/trust/mcp/skills 都在里面），整体替换会把它们全丢掉。
+    // 且该化身后续的 session/rollout 都落在 runtime CODEX_HOME——runtime.codexHome 必须
+    // 指向它，否则 pollForNewRollout 扑空、resume 抛 has no discovered rollout。
+    let codexHome = join(spec.workspace.root, '.codex')
+    const runtimeCodexHome = spec.connection_env?.CODEX_HOME
+    if (runtimeCodexHome) {
+      await this.mergeAdminProviderCodexHome(spec.workspace.root, codexHome, runtimeCodexHome)
+      codexHome = runtimeCodexHome
+    }
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
     // codex-docs + m2 实测:交互态无 --session-id 等价参数;--ask-for-approval never
@@ -750,14 +830,20 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。
     // 网络放行见文件头"spawn/resume 启动参数"节。
-    const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
+    const spawnBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const spawnBin = spawnBinManaged ? shQuote(spawnBinManaged) : this.codexBin
+    const command = `${spawnBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
     const spawnStartedAt = Date.now()
 
     // newSession 成功之后才落 meta(running)+注册 runtime,同 cc 纪律:tmux 失败时不留任何
     // 持久痕迹,同 worker_id 可安全重试。CODEX_HOME 经 tmux -e 传给会话进程(execFile 直传
     // argv,不经过 shell 插值,不需要额外转义);PATH 同样经 -e 显式前置 codexBin 所在真实
     // 目录(nvm 部署陷阱,见 buildEnv/resolveBinDir 注释),不依赖 tmux server 自身环境。
-    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile, env: await this.buildEnv({ CODEX_HOME: codexHome }) })
+    await this.tmux.newSession({
+      name: sessionName, cwd: spec.workspace.root, command, outputFile,
+      // connection_env（admin_provider CODEX_HOME/env_key）优先级高于 workspace 默认。
+      env: await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env }),
+    })
 
     // 启动期就绪握手(见 tmux/paste-ready.ts),排在 session 发现**之前**:
     // - 它才是"能不能收输入"的判据。session 发现等的是 rollout 文件出现,那是"会话已建立"
@@ -807,6 +893,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_id: sessionId,
       session_discovery: sessionDiscoveryStatus,
       workspace_root: spec.workspace.root,
+      codex_home: codexHome,
     })
     this.runtimes.set(instanceKey(handle), runtime)
 
@@ -845,7 +932,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
     validateSessionRef(prev.session_ref)
 
     // 四轮 review 修复(同 cc adapter):prevRuntime 不再要求"常驻本进程"——resume 的合法
@@ -898,11 +985,25 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
       // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
       // `resume` 之前。
-      const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
+      const resumeBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const resumeBin = resumeBinManaged ? shQuote(resumeBinManaged) : this.codexBin
+      const command = `${resumeBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
+
+      // P6-B admin_provider resume：上一化身的 runtime CODEX_HOME 已随终态清理，
+      // 本次 admission 产出新目录——同样要合并 provision 配置（translator 配置胜出）。
+      let resumeCodexHome = prevRuntime.codexHome
+      const resumeRuntimeHome = opts?.connection_env?.CODEX_HOME
+      if (resumeRuntimeHome) {
+        await this.mergeAdminProviderCodexHome(prevRuntime.workspaceRoot, join(prevRuntime.workspaceRoot, '.codex'), resumeRuntimeHome)
+        resumeCodexHome = resumeRuntimeHome
+      }
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
       // PATH 前置同 spawn(nvm 部署陷阱)。
-      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: await this.buildEnv({ CODEX_HOME: prevRuntime.codexHome }) })
+      await this.tmux.newSession({
+        name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile,
+        env: await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome }),
+      })
 
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
       runtime = {
@@ -910,7 +1011,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         seq,
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
-        codexHome: prevRuntime.codexHome,
+        codexHome: resumeCodexHome,
         sessionName,
         sessionId: prev.session_ref,
         // resume 续写的是同一个 rollout 文件(session id 不变),不需要重新发现——直接沿用上一
@@ -933,6 +1034,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         session_id: prev.session_ref,
         session_discovery: prevRuntime.sessionDiscoveryStatus,
         workspace_root: prevRuntime.workspaceRoot,
+        codex_home: resumeCodexHome,
       })
       this.runtimes.set(instanceKey(handle), runtime)
       prevRuntime.resumed = true
@@ -1038,8 +1140,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const runtime = this.runtimes.get(instanceKey(h))
     const meta = runtime ? undefined : await this.readMetaFile(dir, h.seq)
     let rolloutPath = runtime?.rolloutPath
-    if (!rolloutPath && meta?.session_discovery === 'discovered' && meta.workspace_root && meta.session_id) {
-      const sessionsDir = join(meta.workspace_root, '.codex', 'sessions')
+    if (!rolloutPath && meta?.session_discovery === 'discovered' && meta.session_id) {
+      const home = meta.codex_home ?? (meta.workspace_root ? join(meta.workspace_root, '.codex') : undefined)
+      if (!home) return undefined
+      const sessionsDir = join(home, 'sessions')
       try {
         rolloutPath = await findRolloutFileBySessionId(sessionsDir, meta.session_id, true)
       } catch (err) {
@@ -1191,7 +1295,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const alive = await this.tmux.isAlive(sessionName)
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
-      const codexHome = workspaceRoot ? join(workspaceRoot, '.codex') : ''
+      // P6-B：admin_provider 的 CODEX_HOME 在 worker 级 runtime 目录（spawn/resume 时落了
+      // meta.codex_home）；老 meta 没有该字段才回退 workspace 推导（existing_host 语义）。
+      const codexHome = meta.codex_home ?? (workspaceRoot ? join(workspaceRoot, '.codex') : '')
       const sessionDiscoveryStatus: 'discovered' | 'placeholder' = meta.session_discovery ?? 'placeholder'
       const rolloutPath =
         sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
@@ -1242,6 +1348,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         workspace_root?: string
         ended_reason?: IncarnationEndReason
         session_discovery?: 'discovered' | 'placeholder'
+        /** P6-B：admin_provider 形态下 CODEX_HOME 是 worker 级 runtime 目录（非 workspace）；
+         *  不落 meta 的话重启重建会错回 workspace，resume/活性/trace 全断（R7）。 */
+        codex_home?: string
         state?: WorkerContractState
         wait_mode?: 'text' | 'action'
         wait_reason?: string
@@ -1296,6 +1405,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_id: runtime.sessionId,
       session_discovery: runtime.sessionDiscoveryStatus,
       workspace_root: runtime.workspaceRoot,
+      codex_home: runtime.codexHome,
       ...(state.kind === 'waiting_text' ? { wait_mode: 'text' as const } : {}),
       ...(state.kind === 'waiting_action' ? { wait_mode: 'action' as const, wait_reason: state.reason } : {}),
     })
@@ -1330,6 +1440,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       ended_reason,
       session_discovery: runtime.sessionDiscoveryStatus,
       workspace_root: runtime.workspaceRoot,
+      codex_home: runtime.codexHome,
     })
     runtime.controlState = { kind: 'exited', reason: ended_reason }
     runtime.ended_reason = ended_reason

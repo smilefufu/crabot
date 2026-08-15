@@ -39,6 +39,8 @@ import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { buildChildEnv } from '../../core/runtime-env.js'
+import { buildScrubbedChildEnv } from '../connections/secret-env.js'
+import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { WorkerExitedError, CliInputStallError } from '../errors.js'
 import { probeClaudeInput, acceptedClaudeInput, hasClaudeInteraction } from './input-surface.js'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
@@ -147,6 +149,9 @@ interface Runtime {
   readonly eventChannel: CliEventChannel
   controlState: CliControlState
   ended_reason?: IncarnationEndReason
+  /** P6-B：本化身 spawn/resume 时注入的连接 env（fork 侧问继承；不落 meta——credential
+   *  只在进程内存，重启后的 fork 由主线新化身的 spawn/resume 重新注入）。 */
+  readonly connectionEnv?: Record<string, string>
   /** 自上一次 sendInput(或 spawn)以来"已计入"的 stop 事件数;新 stop 数超过它才判定本轮 idle。 */
   stopBaseline: number
   killed: boolean
@@ -217,6 +222,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
        * 且将来接上真实终态信号时只改这里、harness 不用再动。
        */
       readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
+      /** P6-B：managed active binary 解析（detect/spawn 顺序：managed → system）。 */
+      readonly resolveManagedBinary?: () => Promise<string | undefined>
     },
   ) {
     this.tmux = deps.tmux ?? new TmuxDriver()
@@ -224,27 +231,60 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     this.claudeProjectsDir = deps.claudeProjectsDir ?? join(homedir(), '.claude', 'projects')
     this.claudeConfigPath = deps.claudeConfigPath ?? join(homedir(), '.claude.json')
     this.pasteReadyTimeoutMs = deps.pasteReadyTimeoutMs ?? DEFAULT_PASTE_READY_TIMEOUT_MS
+    this.resolveManagedBinary = deps.resolveManagedBinary
+  }
+
+  private readonly resolveManagedBinary?: () => Promise<string | undefined>
+  private lastDetectedVersion?: string
+
+  /** P6-B §6：与最近一次 detect 版本一致的静态 translator 声明。 */
+  connectionCapabilities(): import('../types.js').WorkerConnectionCapability[] {
+    if (!this.lastDetectedVersion) return []
+    return connectionCapabilitiesFor('claude-code', this.lastDetectedVersion)
   }
 
   async detect(): Promise<DetectResult> {
+    // P6-B：managed active binary 优先（找不到再落 system binary）。
+    const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const binary = managed ? shQuote(managed) : this.claudeBin
     let versionOutput: string
     try {
-      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${this.claudeBin} --version`], { env: buildChildEnv() })
+      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${binary} --version`], { env: buildChildEnv() })
       versionOutput = stdout.trim()
     } catch (err) {
       return { installed: false, activated: false, detail: `claude binary not found or failed to run: ${(err as Error).message}` }
     }
+    // '2.1.227 (Claude Code)' → '2.1.227'
+    const version = /^([0-9]+\.[0-9]+\.[0-9]+)/.exec(versionOutput)?.[1]
+    this.lastDetectedVersion = version
 
     const claudeHomeDir = dirname(this.claudeProjectsDir)
     let activated = false
+    let credentialGeneration: string | undefined
     try {
       const entries = await fs.readdir(claudeHomeDir)
       activated = entries.includes('settings.json') || entries.includes('.credentials.json')
+      // 代际 = 身份 + 用户配置：
+      // - 身份取 ~/.claude.json 的 oauthAccount.accountUuid（稳定账号标识，非 credential
+      //   本体）——login/logout/换账号会变；订阅 token 的例行刷新不会（R5）。
+      // - settings.json 的 mtime+size 恒参与（endpoint/信任表变更必须让 binding 失效）。
+      // .credentials.json 不参与（会被例行刷新重写，mtime 骗人）。
+      const parts: string[] = []
+      try {
+        const claudeJson = JSON.parse(await fs.readFile(this.claudeConfigPath, 'utf-8')) as { oauthAccount?: { accountUuid?: unknown } }
+        const uuid = claudeJson.oauthAccount?.accountUuid
+        if (typeof uuid === 'string' && uuid) parts.push(`account:${uuid}`)
+      } catch { /* 无 ~/.claude.json 或无账号段：不参与 */ }
+      try {
+        const stat = await fs.stat(join(claudeHomeDir, 'settings.json'))
+        parts.push(`settings.json:${stat.mtimeMs}:${stat.size}`)
+      } catch { /* 缺失忽略 */ }
+      if (parts.length > 0) credentialGeneration = parts.join(',')
     } catch {
       activated = false
     }
 
-    return { installed: true, activated, detail: versionOutput }
+    return { installed: true, activated, version, install_source: managed ? 'managed' : 'system', credential_generation: credentialGeneration, detail: versionOutput }
   }
 
   async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
@@ -373,6 +413,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const merged = typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? { ...(entry as Record<string, unknown>) } : {}
       // 只补这两个字段:同一个 path 下可能已有 allowedTools / history 等用户数据,不能覆盖。
       merged.hasTrustDialogAccepted = true
+      // P6-B：onboarding 跳过——admin_provider/managed install 形态下宿主可能从未跑过
+      // 交互式 cc，不预写会卡在首次引导屏（v1 不支持 TUI /login，引导必须离线跳过）。
+      if (config.hasCompletedOnboarding !== true) config.hasCompletedOnboarding = true
+      if (typeof config.lastOnboardingVersion !== 'string') config.lastOnboardingVersion = this.lastDetectedVersion ?? '2.x'
       // 覆盖而非并集:这一条 project entry 描述的是 crabot 刚刚写下的那份 .mcp.json,
       // caps 是本任务的授权边界,残留的旧名字不该继续被授权(与 codex 侧 mcp_servers
       // 整体覆盖宿主配置同一取舍)。没有 MCP server 时落 []——cc 见到空表就不会问。
@@ -534,11 +578,15 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
-    const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode bypassPermissions`
+    // P6-B：managed active binary 优先（与 detect 同顺序）——「install→verify→派活跑的是
+    // 不同 binary」的版本错配/command not found 由此杜绝。
+    const spawnBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const spawnBin = spawnBinManaged ? shQuote(spawnBinManaged) : this.claudeBin
+    const command = `${spawnBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode bypassPermissions`
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
     // (session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id 可安全重试。
-    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile })
+    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile, env: spec.connection_env })
 
     const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
     const runtime: Runtime = {
@@ -553,6 +601,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       controlState: { kind: 'running' },
       stopBaseline: await this.initialStopBaseline(eventChannel),
       killed: false,
+      connectionEnv: spec.connection_env,
     }
 
     await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root })
@@ -590,7 +639,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
 
@@ -647,10 +696,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // settings,必须与 spawn 对称地每次通过 --settings 注入。session_ref 是 cc 侧的会话 uuid,
       // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
-      const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
+      const resumeBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const resumeBin = resumeBinManaged ? shQuote(resumeBinManaged) : this.claudeBin
+      const command = `${resumeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
-      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile })
+      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: opts?.connection_env })
 
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
       runtime = {
@@ -666,6 +717,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         // 复用上一化身的 workspace ⇒ 事件文件里已有它留下的 stop 事件,基线必须现读现算。
         stopBaseline: await this.initialStopBaseline(eventChannel),
         killed: false,
+        connectionEnv: opts?.connection_env,
       }
 
       await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, workspace_root: prevRuntime.workspaceRoot })
@@ -698,7 +750,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
+  async fork(prev: IncarnationRef, forkInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
 
@@ -767,7 +819,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       '--mcp-config', MCP_CONFIG_FILE,
       '--strict-mcp-config',
     ]
-    const shellCommand = `${this.claudeBin} ${args.map(shQuote).join(' ')}`
+    // P6-B：fork 与 spawn/resume 同一 binary 解析纪律（managed 优先）——否则 managed install
+    // 且宿主无 system claude 时主线正常、侧问 command not found（R8）。
+    const forkBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const forkBin = forkBinManaged ? shQuote(forkBinManaged) : this.claudeBin
+    const shellCommand = `${forkBin} ${args.map(shQuote).join(' ')}`
 
     // 事件文件重定向:cc 的 hooks 在 print 模式同样执行,而 Stop hook 配在 **workspace 级**
     // 的 .claude/settings.json 里、写的是 **workspace 级**共享的 events-cli.jsonl——不重定向
@@ -778,7 +834,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 这里给子进程 env 塞一个 fork 化身私有的事件文件路径,cc 拉起 hook 子进程时原样继承
     // 下去,hook 写私有文件(见 CliEventChannel.EVENTS_FILE_ENV)。交互态(tmux pane)不设
     // 这个变量,照旧写共享文件,行为不变。
-    const execOpts = { cwd: prevRuntime.workspaceRoot, env: buildChildEnv({ [EVENTS_FILE_ENV]: forkEventsFile }) }
+    // P6-B：fork 与 tmux pane/verify/installer 同源——从 allowlist 重建（buildScrubbedChildEnv
+    // 打底），不是继承整个 process.env；否则宿主 export 的 ANTHROPIC_API_KEY 会随请求发往
+    // 第三方镜像（admin_provider 形态下尤其不能容忍）。连接注入叠在其上。
+    const inheritedConnectionEnv = opts?.connection_env ?? prevRuntime.connectionEnv ?? {}
+    const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...buildScrubbedChildEnv(), [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv } }
 
     let stdout = ''
     let endedReason: IncarnationEndReason
