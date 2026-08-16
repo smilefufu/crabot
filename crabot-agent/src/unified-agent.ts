@@ -720,6 +720,10 @@ export class UnifiedAgent extends ModuleBase {
       builtinTraceHooks: this.builtinTraceHooks(),
       // P6-B §6：显式 impl spawn/resume/handoff 的 registry gate。
       assertWorkerImplReady: (impl) => this.activationRegistry.assertReady(impl),
+      reportWorkerOutcome: (impl, failure) =>
+        failure === null
+          ? this.activationRegistry.clearDegraded(impl)
+          : this.activationRegistry.markDegraded(impl, failure.replace(/\/[^\s]+/g, '<path>')),
       resolveUserLevelBinary: (impl) => resolveUserLevelBinary(impl === 'claude-code' ? 'claude' : 'codex', getDataRootDir()),
       // P6-B §6.5：operation-time connection admission（当前调用内实时解析）。
       admitWorkerConnection: (impl, operationLabel) => admitWorkerConnection(this.activationRegistry, impl, {

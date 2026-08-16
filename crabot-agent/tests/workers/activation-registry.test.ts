@@ -75,7 +75,7 @@ describe('ActivationRegistry（P6-B §6）', () => {
     const registry = new ActivationRegistry(dir)
     registry.setAdapters(new Map([
       ['builtin', fakeAdapter('builtin', { installed: true, activated: true })],
-      ['claude-code', fakeAdapter('claude-code', { installed: true, activated: true, version: '2.1.227' })],
+      ['claude-code', fakeAdapter('claude-code', { installed: true, activated: true, version: '2.1.227' }, [EXISTING_HOST_TRANSLATOR])],
       ['codex', fakeAdapter('codex', { installed: false, activated: false })],
     ]))
     registry.setModelSlotResolvable(() => true)
@@ -86,9 +86,9 @@ describe('ActivationRegistry（P6-B §6）', () => {
     const builtin = list.find((s) => s.impl === 'builtin')!
     const claude = list.find((s) => s.impl === 'claude-code')!
     expect(builtin.ready).toBe(true)
-    // installed ≠ ready：无有效 verification（never）→ not ready
+    // 失败导向（2026-08-16 修订）：never verified 不再阻断——enabled+installed+connection 即 ready
     expect(claude.installed).toBe(true)
-    expect(claude.ready).toBe(false)
+    expect(claude.ready).toBe(true)
     expect(claude.verification).toBe('never')
   })
 
@@ -156,7 +156,7 @@ describe('ActivationRegistry（P6-B §6）', () => {
     expect(second.listStatus().find((s) => s.impl === 'claude-code')!.ready).toBe(true)
   })
 
-  it('binding 任一分量变化（connection_revision / CLI version）→ verification 失效 → not ready', async () => {
+  it('binding 分量变化 → verification_stale 提示但不阻断（失败导向）', async () => {
     const registry = new ActivationRegistry(dir)
     registry.setAdapters(new Map([
       ['builtin', fakeAdapter('builtin', { installed: true, activated: true })],
@@ -185,6 +185,33 @@ describe('ActivationRegistry（P6-B §6）', () => {
     })
     rotated.connection_revisions = { 'claude-code': 'rev-B' }
     await registry.applyRuntimeConfig(rotated)
-    expect(registry.listStatus().find((s) => s.impl === 'claude-code')!.ready).toBe(false)
+    const stale = registry.listStatus().find((s) => s.impl === 'claude-code')!
+    expect(stale.ready).toBe(true) // 不阻断
+    expect(stale.verification_stale).toBe(true) // 但提示建议重验
+  })
+
+  it('degraded 阻断派活并在成功后清除', async () => {
+    const registry = new ActivationRegistry(dir)
+    registry.setAdapters(new Map([
+      ['builtin', fakeAdapter('builtin', { installed: true, activated: true })],
+      ['claude-code', fakeAdapter('claude-code', { installed: true, activated: true, version: '2.1.227' }, [EXISTING_HOST_TRANSLATOR])],
+    ]))
+    registry.setModelSlotResolvable(() => true)
+    await registry.applyRuntimeConfig(runtimeConfig({
+      'claude-code': { enabled: true, connection: { mode: 'existing_host' } },
+    }))
+    expect(registry.getStatus('claude-code').ready).toBe(true)
+    await registry.markDegraded('claude-code', 'not logged in')
+    const degraded = registry.getStatus('claude-code')
+    expect(degraded.ready).toBe(false)
+    expect(degraded.degraded).toBe('not logged in')
+    // 解封闭环（R96-R1）：passed 的 verify 自动清除 degraded——用户侧的解封入口。
+    const rev = registry.getStatus('claude-code').connection_revision ?? 'x'
+    await registry.recordVerification('claude-code', {
+      result: 'passed', cli_version: '2.1.227', translator_id: 'claude-code-existing-host-v1',
+      translator_version: '1', policy_revision: 1, connection_revision: rev, at: new Date().toISOString(),
+    })
+    expect(registry.getStatus('claude-code').ready).toBe(true)
+    expect(registry.getStatus('claude-code').degraded).toBeUndefined()
   })
 })

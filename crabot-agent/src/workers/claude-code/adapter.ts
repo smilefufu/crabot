@@ -41,7 +41,7 @@ import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.j
 import { buildChildEnv } from '../../core/runtime-env.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
-import { WorkerExitedError, CliInputStallError } from '../errors.js'
+import { WorkerExitedError, CliInputStallError, WorkerImplUnavailableError } from '../errors.js'
 import { probeClaudeInput, acceptedClaudeInput, hasClaudeInteraction } from './input-surface.js'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
@@ -596,7 +596,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // P6-B：managed active binary 优先（与 detect 同顺序）——「install→verify→派活跑的是
     // 不同 binary」的版本错配/command not found 由此杜绝。
     const spawnBin = await this.resolveBinForCommand()
-    if (!spawnBin) throw new Error(`ClaudeCodeAdapter.spawn: no user-level claude installation`)
+    if (!spawnBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.spawn: no user-level claude installation`)
     const command = `${spawnBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode bypassPermissions`
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
@@ -712,7 +712,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
       const resumeBin = await this.resolveBinForCommand()
-      if (!resumeBin) throw new Error(`ClaudeCodeAdapter.resume: no user-level claude installation`)
+      if (!resumeBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.resume: no user-level claude installation`)
       const command = `${resumeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
@@ -837,7 +837,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // P6-B：fork 与 spawn/resume 同一 binary 解析纪律（managed 优先）——否则 managed install
     // 且宿主无 system claude 时主线正常、侧问 command not found（R8）。
     const forkBin = await this.resolveBinForCommand()
-    if (!forkBin) throw new Error(`ClaudeCodeAdapter.fork: no user-level claude installation`)
+    if (!forkBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.fork: no user-level claude installation`)
     const shellCommand = `${forkBin} ${args.map(shQuote).join(' ')}`
 
     // 事件文件重定向:cc 的 hooks 在 print 模式同样执行,而 Stop hook 配在 **workspace 级**

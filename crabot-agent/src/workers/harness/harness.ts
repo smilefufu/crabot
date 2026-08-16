@@ -81,7 +81,7 @@ import type {
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import type { ResolvedPermissions } from '../../types'
-import { CapabilityNotSupportedError, WorkerExitedError, CliInputStallError } from '../errors'
+import { CapabilityNotSupportedError, WorkerExitedError, CliInputStallError, WorkerImplUnavailableError } from '../errors'
 import { AsyncMutex } from '../async-mutex'
 import {
   isExecutableIncarnation,
@@ -427,6 +427,8 @@ export interface HarnessDeps {
    * 省略 impl 的 spawn 走 defaultImpl（builtin 安全路径）不在此 gate。
    */
   readonly assertWorkerImplReady?: (impl: WorkerImplId) => void | Promise<void>
+  /** P6-B 失败导向：adapter 级执行失败/成功上报（degraded 置位/清除）。 */
+  readonly reportWorkerOutcome?: (impl: WorkerImplId, failure: string | null) => void | Promise<void>
   /**
    * P6-B §6.5：operation-time connection admission（registry gate 之后、副作用之前）。
    * 返回的 env 注入 SpawnSpec.connection_env；dispose 在 spawn 收口后调用。
@@ -722,7 +724,17 @@ export class WorkerHarness {
           builtin,
           ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
         }
-        spawnedHandle = await adapter.spawn(spec)
+        // 失败归因只认 WorkerImplUnavailableError（能证明 impl 失效的 adapter 级错误）；
+        // 调用方/状态/数据错误（already spawned、meta 缺失等）与 provision 错误都不置 degraded。
+        try {
+          spawnedHandle = await adapter.spawn(spec)
+        } catch (spawnError) {
+          if (p.impl && spawnError instanceof WorkerImplUnavailableError) {
+            await this.deps.reportWorkerOutcome?.(impl, spawnError.message)
+          }
+          throw spawnError
+        }
+        if (p.impl) await this.deps.reportWorkerOutcome?.(impl, null)
       } catch (err) {
         if (admission) await admission.dispose()
         const now = this.deps.now()
@@ -1488,7 +1500,11 @@ export class WorkerHarness {
     let newHandle
     try {
       newHandle = await adapter.resume(prevRef, text, admission ? { connection_env: admission.env } : undefined)
+      await this.deps.reportWorkerOutcome?.(mainline.impl, null)
     } catch (error) {
+      if (error instanceof WorkerImplUnavailableError) {
+        await this.deps.reportWorkerOutcome?.(mainline.impl, error.message)
+      }
       if (admission) await admission.dispose()
       throw error
     }
@@ -1709,10 +1725,14 @@ export class WorkerHarness {
         ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
       })
     } catch (error) {
-      // provision/spawn 失败：dispose admission；source 化身状态保持 step 2 的既有语义。
+      // provision/spawn 失败：dispose admission；只认 impl 失效证据才置 degraded。
+      if (error instanceof WorkerImplUnavailableError) {
+        await this.deps.reportWorkerOutcome?.(targetImpl, error.message)
+      }
       if (admission) await admission.dispose()
       throw error
     }
+    await this.deps.reportWorkerOutcome?.(targetImpl, null)
     // 新化身持有 admission 资源至终态。
     if (admission) this.connectionDisposers.set(`${worker.worker_id}:${newHandle.seq}`, admission.dispose)
 

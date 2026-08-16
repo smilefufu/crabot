@@ -49,3 +49,16 @@ export class CapabilityNotSupportedError extends Error {
     this.name = 'CapabilityNotSupportedError'
   }
 }
+
+/**
+ * Worker impl 失效证据错误（失败导向 readiness，2026-08-16 修订）。
+ * 只在「能证明 impl 不可用」时抛出：binary 缺失、版本不支持、登录/权限阻塞等。
+ * 纯调用方/状态/数据错误（already spawned、has not exited yet、meta 缺失等）不得用它——
+ * harness 只对这一类置 impl 级 degraded。
+ */
+export class WorkerImplUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'WorkerImplUnavailableError'
+  }
+}
