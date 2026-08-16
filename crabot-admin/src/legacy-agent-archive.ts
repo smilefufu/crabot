@@ -181,6 +181,16 @@ export class LegacyAgentArchiveStore {
     return this.readRecords()
   }
 
+  /**
+   * 用户显式删除过的 archive_id 集合（§3.3 item 4：tombstone 防止下次 inventory
+   * 从残留另一来源重新生成——review 实测：agent-instances.json 等源文件保留在原位，
+   * 启动重扫会把已删 record 复活且 tombstone 短路后续删除）。
+   */
+  async deletedArchiveIds(): Promise<Set<string>> {
+    const tombstones = await this.readTombstones()
+    return new Set(Array.from(tombstones.values()).map((t) => t.archive_id))
+  }
+
   async listSummaries(): Promise<LegacyAgentArchiveSummary[]> {
     const records = await this.readRecords()
     return records.map((record) => {

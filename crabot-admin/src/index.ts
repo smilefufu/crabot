@@ -7158,14 +7158,17 @@ export class AdminModule extends ModuleBase {
   private async completeCoreAgentCutoverAttempt(): Promise<void> {
     const packageEntries = await this.readLegacyAgentPackageEntries()
     const frontWorkerConfigs = await this.readLegacyFrontWorkerConfigSources()
+    const deletedIds = await this.legacyArchiveStore.deletedArchiveIds()
     const sources = [
       // P6-D：cutover inventory 直读 legacy 原始文件（unknown + 最小投影），不经运行时 map。
       ...(await this.readLegacyAgentInventorySources()),
       ...packageEntries.map((entry) => ({ source_kind: 'installed_package' as const, source_id: entry.source_id, raw: entry.raw })),
       ...frontWorkerConfigs.map((entry) => ({ source_kind: 'agent_config' as const, source_id: `legacy-${entry.source_id}`, raw: entry.raw })),
     ]
+    // tombstone 过滤（§3.3 item 4）：用户显式删除过的 archive 不得被残留源文件复活。
+    const filtered = sources.filter((source) => !deletedIds.has(`${source.source_kind}:${source.source_id}`))
     // archive() 合并时对已归档记录的内容变化抛事实冲突（重新进入 gate）；新增条目只扩展只读归档。
-    const archive = await this.cutoverStore.archive(sources)
+    const archive = await this.cutoverStore.archive(filtered)
     const existing = await this.cutoverStore.loadMarker()
     // marker 已提交 cutover 拓扑：提交后的每次重启都必须用已提交的 fingerprint/count 与 MM
     // 握手（MM record 按该值对账）。cutover 之后新增的 legacy 条目可以容忍——与 MM 侧

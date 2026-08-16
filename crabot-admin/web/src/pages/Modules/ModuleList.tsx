@@ -109,6 +109,8 @@ const TYPE_COLORS: Record<ModuleType, string> = {
 }
 
 function getNavigationTarget(item: ModuleItem): string {
+  // P6-D：legacy archive 行进入 archive 详情页（导出/显式卸载 UI 的唯一入口）。
+  if (item.id.startsWith('legacy:')) return `/modules/${item.id}`
   switch (item.module_type) {
     case 'agent':
       return '/agents/config'
@@ -382,7 +384,7 @@ export const ModuleList: React.FC = () => {
                       {TYPE_LABELS[item.module_type]}
                     </span>
                     <span className="badge badge-primary">
-                      {item.install_type === 'builtin' ? '内置' : '已安装'}
+                      {item.id.startsWith('legacy:') ? '不受支持' : (item.install_type === 'builtin' ? '内置' : '已安装')}
                     </span>
                     {item.version !== '-' && (
                       <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
