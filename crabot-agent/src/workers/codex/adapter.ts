@@ -382,6 +382,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private lastDetectedVersion?: string
   private lastGlobalDetected = false
 
+  /** 同 claude adapter：resolver 存在时只认其结论，无用户级绝不回落裸命令。 */
+  private async resolveBinForCommand(): Promise<string | undefined> {
+    if (!this.resolveUserLevelBinary) return this.codexBin
+    const resolved = await this.resolveUserLevelBinary()
+    this.lastGlobalDetected = resolved.global_detected
+    return resolved.binary ? shQuote(resolved.binary) : undefined
+  }
+
   /** P6-B §6：与最近一次 detect 版本一致的静态 translator 声明。 */
   connectionCapabilities(): import('../types.js').WorkerConnectionCapability[] {
     if (!this.lastDetectedVersion) return []
@@ -452,13 +460,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   async detect(): Promise<DetectResult> {
     // 只认用户级安装；全局安装忽略（报 global_detected）。
-    const resolved = this.resolveUserLevelBinary ? await this.resolveUserLevelBinary() : undefined
-    this.lastGlobalDetected = resolved?.global_detected ?? false
-    const userBinary = resolved?.binary
-    const binDir = userBinary ? dirname(userBinary) : await this.resolveBinDirCached()
-    const effectiveBin = userBinary ? shQuote(userBinary) : this.codexBin
+    const effectiveBin = await this.resolveBinForCommand()
+    const binDir = effectiveBin ? dirname(effectiveBin.replace(/^'|'$/g, '')) : undefined
     const versionEnv = buildChildEnv({ PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '') })
     let versionOutput: string
+    if (!effectiveBin) {
+      return { installed: false, activated: false, global_detected: this.lastGlobalDetected, detail: 'codex binary not found at user level' }
+    }
     try {
       const { stdout } = await execFileAsync('/bin/sh', ['-c', `${effectiveBin} --version`], { env: versionEnv })
       versionOutput = stdout.trim()
@@ -998,8 +1006,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
       // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
       // `resume` 之前。
-      const resumeBinManaged = this.resolveUserLevelBinary ? (await this.resolveUserLevelBinary()).binary : undefined
-    const resumeBin = resumeBinManaged ? shQuote(resumeBinManaged) : this.codexBin
+      const resumeBin = await this.resolveBinForCommand()
+      if (!resumeBin) throw new Error('CodexWorkerAdapter.resume: no user-level codex installation')
       const command = `${resumeBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
 
       // P6-B admin_provider resume：上一化身的 runtime CODEX_HOME 已随终态清理，

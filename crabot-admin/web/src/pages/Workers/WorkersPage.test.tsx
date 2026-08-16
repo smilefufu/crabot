@@ -35,7 +35,7 @@ const baseConfig = {
 }
 
 const readyStatus = {
-  impl: 'claude-code', installed: true, version: '2.1.232', install_source: 'managed' as const,
+  impl: 'claude-code', installed: true, version: '2.1.232', install_source: 'user' as const,
   configured: true, policy_revision: 1, verification: 'passed' as const, ready: true,
   capabilities: { fork: true, revive: true, goalMode: false, subagent: false, structuredTrace: false },
   connection_capabilities: [], observed_at: '2026-08-14T00:00:00Z',

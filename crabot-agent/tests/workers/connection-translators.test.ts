@@ -126,3 +126,40 @@ describe('用户级 binary 路径含空格（R15 实证 + 移除 managed 后语�
     expect(result.global_detected).toBe(true)
   })
 })
+
+describe('用户级-only 不变量（PR95 review）', () => {
+  it('resolver 明确返回无用户级时：detect installed=false + global hint；spawn fail-loud 不回落裸命令', async () => {
+    const { ClaudeCodeAdapter } = await import('../../src/workers/claude-code/adapter.js')
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-nobin-'))
+    const adapter = new ClaudeCodeAdapter({
+      dataDir: dir,
+      resolveUserLevelBinary: async () => ({ global_detected: true }),
+    })
+    const detected = await adapter.detect()
+    expect(detected.installed).toBe(false)
+    expect(detected.global_detected).toBe(true)
+    await expect(adapter.spawn({
+      worker_id: 'w-nobin-test', prompt: 'x', workspace: { root: dir },
+    })).rejects.toThrow(/user-level/)
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  it('resolveUserLevelBinary：PATH 前面是全局、后面是用户级时选中用户级', async () => {
+    const home = os.homedir()
+    const userBinDir = path.join(home, '.crabot-test-bin')
+    await fs.mkdir(userBinDir, { recursive: true })
+    const userBin = path.join(userBinDir, 'crabot-fake-cli')
+    await fs.writeFile(userBin, '#!/bin/sh\necho ok\n', { mode: 0o755 })
+    const { resolveUserLevelBinary } = await import('../../src/workers/cli-binary.js')
+    const origPath = process.env.PATH
+    process.env.PATH = `/usr/bin:${userBinDir}:${origPath}`
+    try {
+      const result = await resolveUserLevelBinary('crabot-fake-cli', '/tmp/crabot-data')
+      expect(result.binary).toBe(userBin)
+      expect(result.global_detected).toBe(false)
+    } finally {
+      process.env.PATH = origPath
+      await fs.rm(userBinDir, { recursive: true, force: true })
+    }
+  })
+})

@@ -21,22 +21,28 @@ export interface CliBinaryResolution {
 }
 
 export async function resolveUserLevelBinary(name: string, dataRoot: string): Promise<CliBinaryResolution> {
-  const found = await new Promise<string | undefined>((resolve) => {
-    execFile('/bin/sh', ['-c', `command -v ${name}`], { env: buildScrubbedChildEnv() }, (error, stdout) => {
-      resolve(error ? undefined : stdout.trim() || undefined)
-    })
-  })
-  if (!found) return { global_detected: false }
-  let real: string
-  try {
-    real = await fs.realpath(found)
-  } catch {
-    return { global_detected: false }
-  }
+  // 枚举 PATH 全部候选（command -v 只给首命中——全局排在前面时会把已存在的用户级
+  // 安装整段漏掉并误报 global；必须看全）。
+  const pathEnv = buildScrubbedChildEnv().PATH ?? process.env.PATH ?? ''
   const home = path.resolve(os.homedir())
   const data = path.resolve(dataRoot)
-  if (real.startsWith(home + path.sep) && !real.startsWith(data + path.sep)) {
-    return { binary: real, global_detected: false }
+  let globalFound = false
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue
+    const candidate = path.join(dir, name)
+    let real: string
+    try {
+      const stat = await fs.stat(candidate)
+      if (!stat.isFile()) continue
+      await fs.access(candidate, fs.constants.X_OK)
+      real = await fs.realpath(candidate)
+    } catch {
+      continue
+    }
+    if (real.startsWith(home + path.sep) && !real.startsWith(data + path.sep)) {
+      return { binary: real, global_detected: false }
+    }
+    globalFound = true
   }
-  return { global_detected: true }
+  return { global_detected: globalFound }
 }

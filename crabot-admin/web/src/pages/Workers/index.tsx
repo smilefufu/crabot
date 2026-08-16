@@ -155,7 +155,7 @@ export const WorkersPage: React.FC = () => {
     setBusy(true)
     setError(null)
     try {
-      const result = await workerManagementService.startOperation(impl, action, config.revision)
+      const result = await workerManagementService.startVerify(impl, config.revision)
       if (result.passed) setNotice('验证通过（真实最小 turn）')
       else setError(`验证失败: ${result.detail ?? 'unknown'}`)
       await refresh()
