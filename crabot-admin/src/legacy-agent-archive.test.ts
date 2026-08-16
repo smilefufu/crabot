@@ -159,3 +159,45 @@ describe('LegacyAgentArchiveStore', () => {
       .rejects.toMatchObject({ code: 'ADMIN_LEGACY_AGENT_DELETE_CONFLICT' })
   })
 })
+
+describe('R3: implementation_id 不是身份', () => {
+  it('v2 存量实例（implementation_id=default）可正常删除，不被误判 core-protected', async () => {
+    const dir2 = await fs.mkdtemp(path.join(process.cwd(), 'test-data', 'archive-r3-'))
+    try {
+      await fs.mkdir(path.join(dir2, 'agent-configs'), { recursive: true })
+      await fs.writeFile(path.join(dir2, 'legacy-agent-archive.json'), JSON.stringify([{
+        archive_id: 'agent_instance:worker-general',
+        source_kind: 'agent_instance',
+        source_id: 'worker-general',
+        archived_at: 'x',
+        support_status: 'unsupported_legacy',
+        raw: { id: 'worker-general', name: 'General Worker', implementation_id: 'default' },
+      }], null, 2))
+      await fs.writeFile(path.join(dir2, 'agent-configs', 'worker-general.json'), '{}')
+      const s = new LegacyAgentArchiveStore(dir2)
+      const items = await s.listSummaries()
+      expect(items[0].uninstallable).toBe(true)
+      const result = await s.deleteArchive('agent_instance:worker-general', { confirmation: 'agent_instance:worker-general', delete_package: false, delete_config: true })
+      expect(result.completed).toBe(true)
+      expect(result.archive_removed).toBe(true)
+    } finally {
+      await fs.rm(dir2, { recursive: true, force: true })
+    }
+  })
+
+  it('core 自身记录（archive_id/source_id 为 crabot-agent）仍被保护', async () => {
+    const dir3 = await fs.mkdtemp(path.join(process.cwd(), 'test-data', 'archive-r3b-'))
+    try {
+      await fs.mkdir(path.join(dir3, 'agent-configs'), { recursive: true })
+      await fs.writeFile(path.join(dir3, 'legacy-agent-archive.json'), JSON.stringify([{
+        archive_id: 'agent_config:crabot-agent', source_kind: 'agent_config', source_id: 'crabot-agent',
+        archived_at: 'x', support_status: 'unsupported_legacy', raw: { instance_id: 'crabot-agent' },
+      }], null, 2))
+      const s = new LegacyAgentArchiveStore(dir3)
+      await expect(s.deleteArchive('agent_config:crabot-agent', { confirmation: 'agent_config:crabot-agent', delete_package: false, delete_config: true }))
+        .rejects.toMatchObject({ code: 'ADMIN_LEGACY_AGENT_CORE_PROTECTED', httpStatus: 403 })
+    } finally {
+      await fs.rm(dir3, { recursive: true, force: true })
+    }
+  })
+})

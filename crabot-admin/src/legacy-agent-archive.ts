@@ -93,7 +93,10 @@ function summarize(record: LegacyAgentArchiveRecord, uninstallable: boolean): Le
 
 function isCoreProtected(record: LegacyAgentArchiveRecord): boolean {
   const raw = (record.raw && typeof record.raw === 'object' ? record.raw : {}) as Record<string, unknown>
-  const ids = [record.archive_id, record.source_id, record.module_id, raw.id, raw.instance_id, raw.implementation_id]
+  // implementation_id 是「引用了哪个 implementation」不是身份——v2 存量实例普遍引用
+  // implementation_id='default'（唯一 builtin），把它当身份会让所有 agent_instance 记录
+  // 永久 CORE_PROTECTED 删不掉（review R3 实测）。身份只看自身 id 字段。
+  const ids = [record.archive_id, record.source_id, record.module_id, raw.id, raw.instance_id]
     .filter((v): v is string => typeof v === 'string')
   return ids.some((id) => CORE_IDS.has(id))
 }
