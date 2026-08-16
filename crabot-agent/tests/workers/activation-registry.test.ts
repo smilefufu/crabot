@@ -205,7 +205,13 @@ describe('ActivationRegistry（P6-B §6）', () => {
     const degraded = registry.getStatus('claude-code')
     expect(degraded.ready).toBe(false)
     expect(degraded.degraded).toBe('not logged in')
-    await registry.clearDegraded('claude-code')
+    // 解封闭环（R96-R1）：passed 的 verify 自动清除 degraded——用户侧的解封入口。
+    const rev = registry.getStatus('claude-code').connection_revision ?? 'x'
+    await registry.recordVerification('claude-code', {
+      result: 'passed', cli_version: '2.1.227', translator_id: 'claude-code-existing-host-v1',
+      translator_version: '1', policy_revision: 1, connection_revision: rev, at: new Date().toISOString(),
+    })
     expect(registry.getStatus('claude-code').ready).toBe(true)
+    expect(registry.getStatus('claude-code').degraded).toBeUndefined()
   })
 })

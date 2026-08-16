@@ -50,6 +50,8 @@ export interface WorkerImplementationStatus {
   connection_revision?: string
   translator?: WorkerConnectionCapability
   verification: 'never' | 'running' | 'passed' | 'failed' | 'grandfathered'
+  verification_stale?: boolean
+  degraded?: string
   ready: boolean
   capabilities: { fork: boolean; revive: boolean; goalMode: boolean; subagent: boolean; structuredTrace: boolean }
   connection_capabilities: WorkerConnectionCapability[]

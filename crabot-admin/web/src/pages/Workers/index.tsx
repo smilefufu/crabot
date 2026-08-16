@@ -187,6 +187,8 @@ export const WorkersPage: React.FC = () => {
             安装: {status?.installed ? `${status.version ?? '?'}（用户级）` : status?.global_install_detected ? '仅检测到全局安装（已忽略，请用用户级安装）' : '未安装'}
             {'　'}连接: {policy?.connection?.mode === 'admin_provider' ? '页面配置' : policy?.connection?.mode === 'existing_host' ? '宿主机配置' : '—'}
             {'　'}验证: {VERIFICATION_LABEL[status?.verification ?? ''] ?? '—'}
+            {status?.verification_stale && '（配置已变更，建议重新验证）'}
+            {status?.degraded && <span className="text-danger">（已降级）</span>}
             {'　'}启用: {policy?.enabled ? '是' : '否'}
           </div>
           {status?.detail && <div className="text-secondary" style={{ fontSize: 13 }}>{status.detail}</div>}

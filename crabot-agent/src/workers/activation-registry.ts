@@ -4,9 +4,9 @@
  * 语义边界：
  * - 这是 ready 的唯一计算点：UI status、`list_worker_implementation_status` RPC、
  *   显式 spawn/resume/handoff gate 全部读这里；禁止任何调用方自己拼 ready。
- * - installed/configured ≠ ready。CLI ready 要求：policy enabled + installed +
- *   connection mode 与当前 CLI 版本声明的 translator 匹配 + verification 为当前绑定下
- *   有效的 passed/grandfathered。builtin 独立：enabled + required model slot 可解析。
+ * - ready 判据（2026-08-16 修订，失败导向）：enabled + installed（用户级）+ connection
+ *   配置；builtin 另要 required model slot。verification binding 只作体检提示（stale 不阻断）；
+ *   degraded（adapter 级真实失败）才阻断，passed 的 verify 或成功执行自动清除。
  * - desired config 只经 authenticated pull 原子替换；stale revision 拒绝；
  *   running incarnation 不杀，新 resume/handoff 重验。
  * - verification binding 全等才有效：policy_revision + connection_revision +
@@ -218,9 +218,12 @@ export class ActivationRegistry {
     throw new WorkerImplementationNotReadyError(impl, ready, reasons)
   }
 
-  /** verify runner / grandfather 事务写入 verification 记录（原子落盘）。 */
+  /** verify runner / grandfather 事务写入 verification 记录（原子落盘）。
+   *  passed = 真实最小 turn 跑通——同时清除 degraded（这是用户侧的解封入口：
+   *  「degraded 阻断 → 点验证 → 真跑通 → 自动解封」闭环，协议「成功执行自动清除」）。 */
   async recordVerification(impl: CLIWorkerImplId, record: VerificationRecord): Promise<void> {
     this.verifications[impl] = record
+    if (record.result === 'passed') this.degradedReasons.delete(impl)
     await this.persist()
     await this.recompute()
   }

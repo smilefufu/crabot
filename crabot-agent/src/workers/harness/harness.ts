@@ -724,10 +724,15 @@ export class WorkerHarness {
           builtin,
           ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
         }
-        spawnedHandle = await adapter.spawn(spec)
+        // 失败归因只包 adapter.spawn 自身（provision/context/capability 的错与 CLI 健康无关）。
+        try {
+          spawnedHandle = await adapter.spawn(spec)
+        } catch (spawnError) {
+          if (p.impl) await this.deps.reportWorkerOutcome?.(impl, spawnError instanceof Error ? spawnError.message : String(spawnError))
+          throw spawnError
+        }
         if (p.impl) await this.deps.reportWorkerOutcome?.(impl, null)
       } catch (err) {
-        if (p.impl) await this.deps.reportWorkerOutcome?.(impl, err instanceof Error ? err.message : String(err))
         if (admission) await admission.dispose()
         const now = this.deps.now()
         const failed = await this.deps.ledger.upsertWorker(p.managerKey, workerId, (prev) => {
