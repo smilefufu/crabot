@@ -259,15 +259,15 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   async detect(): Promise<DetectResult> {
     // 只认用户级安装；全局安装忽略（报 global_detected 提示，不静默使用）。
     const binary = await this.resolveBinForCommand()
+    if (!binary) {
+      return { installed: false, activated: false, global_detected: this.lastGlobalDetected, detail: 'claude binary not found at user level' }
+    }
     let versionOutput: string
     try {
       const { stdout } = await execFileAsync('/bin/sh', ['-c', `${binary} --version`], { env: buildChildEnv() })
       versionOutput = stdout.trim()
     } catch (err) {
       return { installed: false, activated: false, global_detected: this.lastGlobalDetected, detail: `claude binary not found or failed to run: ${(err as Error).message}` }
-    }
-    if (!binary) {
-      return { installed: false, activated: false, global_detected: this.lastGlobalDetected, detail: 'claude binary not found at user level' }
     }
     // '2.1.227 (Claude Code)' → '2.1.227'
     const version = /^([0-9]+\.[0-9]+\.[0-9]+)/.exec(versionOutput)?.[1]

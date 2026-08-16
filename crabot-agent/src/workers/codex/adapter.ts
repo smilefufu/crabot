@@ -382,12 +382,15 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private lastDetectedVersion?: string
   private lastGlobalDetected = false
 
-  /** 同 claude adapter：resolver 存在时只认其结论，无用户级绝不回落裸命令。 */
-  private async resolveBinForCommand(): Promise<string | undefined> {
-    if (!this.resolveUserLevelBinary) return this.codexBin
+  /** 同 claude adapter：resolver 存在时只认其结论，无用户级绝不回落裸命令。
+   *  返回 { cmd: shell 引用形态, raw: 原始绝对路径 }（raw 供 PATH 前置等目录推导，
+   *  不用正则反解 quote）。 */
+  private async resolveBinForCommand(): Promise<{ cmd: string; raw?: string } | undefined> {
+    // resolver 未注入（测试 fixture）：codexBin 可为 shell 片段，raw 不可知。
+    if (!this.resolveUserLevelBinary) return { cmd: this.codexBin }
     const resolved = await this.resolveUserLevelBinary()
     this.lastGlobalDetected = resolved.global_detected
-    return resolved.binary ? shQuote(resolved.binary) : undefined
+    return resolved.binary ? { cmd: shQuote(resolved.binary), raw: resolved.binary } : undefined
   }
 
   /** P6-B §6：与最近一次 detect 版本一致的静态 translator 声明。 */
@@ -452,16 +455,23 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * PATH,不阻塞),外加调用方传入的额外变量(如 CODEX_HOME)。
    * P6-B：有 managed active binary 时 PATH 前置其目录（spawn/resume 跑的是它）。 */
   private async buildEnv(extra: Record<string, string>): Promise<Record<string, string>> {
-    const userBinary = this.resolveUserLevelBinary ? (await this.resolveUserLevelBinary()).binary : undefined
-    const dir = userBinary ? dirname(userBinary) : await this.resolveBinDirCached()
+    const binCmd = await this.resolveBinForCommand()
+    // 无用户级安装时不前置任何目录（否则把被忽略的全局目录塞进 PATH）；
+    // resolver 未注入（测试）沿用 resolveBinDirCached 的 PATH 前置语义。
+    const dir = binCmd?.raw ? dirname(binCmd.raw) : (this.resolveUserLevelBinary ? undefined : await this.resolveBinDirCached())
     const path = dir ? `${dir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '')
     return { PATH: path, ...extra }
   }
 
   async detect(): Promise<DetectResult> {
     // 只认用户级安装；全局安装忽略（报 global_detected）。
-    const effectiveBin = await this.resolveBinForCommand()
-    const binDir = effectiveBin ? dirname(effectiveBin.replace(/^'|'$/g, '')) : undefined
+    const resolved = await this.resolveBinForCommand()
+    const effectiveBin = resolved?.cmd
+    // binDir 只从可信来源取：resolver 的 realpath 或 resolveBinDirCached（存在性校验过）；
+    // 不可从 codexBin 反解（测试注入的不存在路径会走错错误分支）。
+    const binDir = resolved?.raw
+      ? dirname(resolved.raw)
+      : (this.resolveUserLevelBinary ? undefined : await this.resolveBinDirCached())
     const versionEnv = buildChildEnv({ PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '') })
     let versionOutput: string
     if (!effectiveBin) {
@@ -481,7 +491,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
           detail: `codex binary found at ${binDir} but failed to execute (its node interpreter may be unresolved, e.g. nvm-style install with a stale PATH): ${(err as Error).message}`,
         }
       }
-      return { installed: false, activated: false, detail: `codex binary not found or failed to run: ${(err as Error).message}` }
+      return { installed: false, activated: false, global_detected: this.lastGlobalDetected, detail: `codex binary not found or failed to run: ${(err as Error).message}` }
     }
 
     let activated = false
@@ -851,8 +861,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。
     // 网络放行见文件头"spawn/resume 启动参数"节。
-    const spawnBinManaged = this.resolveUserLevelBinary ? (await this.resolveUserLevelBinary()).binary : undefined
-    const spawnBin = spawnBinManaged ? shQuote(spawnBinManaged) : this.codexBin
+    const spawnBin = (await this.resolveBinForCommand())?.cmd
+    if (!spawnBin) throw new Error('CodexWorkerAdapter.spawn: no user-level codex installation')
     const command = `${spawnBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
     const spawnStartedAt = Date.now()
 
@@ -1006,7 +1016,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
       // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
       // `resume` 之前。
-      const resumeBin = await this.resolveBinForCommand()
+      const resumeBin = (await this.resolveBinForCommand())?.cmd
       if (!resumeBin) throw new Error('CodexWorkerAdapter.resume: no user-level codex installation')
       const command = `${resumeBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
 
