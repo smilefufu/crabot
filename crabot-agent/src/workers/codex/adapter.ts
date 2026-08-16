@@ -37,6 +37,7 @@ import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.j
 import { WorkerExitedError, CapabilityNotSupportedError, CliInputStallError } from '../errors.js'
 import { probeCodexInput, acceptedCodexInput } from './input-surface.js'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
+import { createHash } from 'node:crypto'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderCodexMcpToml, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
@@ -497,10 +498,19 @@ export class CodexWorkerAdapter implements WorkerAdapter {
           parts.push(`auth.json:${stat.mtimeMs}:${stat.size}`)
         }
       } catch { /* auth.json 缺失/损坏：不参与 */ }
+      // config.toml 用语义摘要而非 mtime：codex 运行时会重写 config.toml（实测 verify 跑一次
+      // mtime 就变），mtime 判据会让「verify 自己」把 binding 弄失效。只摘要决定请求去向的
+      // 三个键（model_provider/model/model_providers），trust/projects 等日常变动不参与。
       try {
-        const stat = await fs.stat(join(this.codexHomeSource, 'config.toml'))
-        parts.push(`config.toml:${stat.mtimeMs}:${stat.size}`)
-      } catch { /* 缺失忽略 */ }
+        const configRaw = await fs.readFile(join(this.codexHomeSource, 'config.toml'), 'utf-8')
+        const parsed = asTable(parseToml(configRaw))
+        const semantic = {
+          model_provider: parsed.model_provider ?? null,
+          model: parsed.model ?? null,
+          model_providers: parsed.model_providers ?? null,
+        }
+        parts.push(`config:${createHash('sha256').update(JSON.stringify(semantic)).digest('hex').slice(0, 16)}`)
+      } catch { /* 缺失/损坏不参与 */ }
       if (parts.length > 0) credentialGeneration = parts.join(',')
     } catch {
       activated = false

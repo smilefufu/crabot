@@ -14,6 +14,7 @@
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { join } from 'node:path'
 import { execFile } from 'node:child_process'
 import type { CLIWorkerImplId, WorkerImplementationStatus } from '../types.js'
 import type { ActivationRegistry, VerificationRecord } from '../activation-registry.js'
@@ -78,14 +79,26 @@ export async function runWorkerVerification(
 
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), `crabot-verify-${impl}-`))
   let runtimeFiles: RuntimeFileSet | undefined
+  let isolatedCodexHome: string | undefined
   try {
     if (injection.runtimeFiles && Object.keys(injection.runtimeFiles).length > 0) {
       runtimeFiles = await RuntimeFileSet.create(deps.runtimeRoot, injection.runtimeFiles)
+    }
+    // existing_host codex：verify 也跑在隔离 CODEX_HOME（拷宿主 auth.json+config.toml）——
+    // 直接用宿主 home 会让 codex 运行时重写 config.toml，宿主状态被 verify 副作用污染。
+    if (impl === 'codex' && policy.connection.mode === 'existing_host') {
+      isolatedCodexHome = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-verify-codex-home-'))
+      for (const name of ['auth.json', 'config.toml']) {
+        try {
+          await fs.copyFile(join(os.homedir(), '.codex', name), join(isolatedCodexHome, name))
+        } catch { /* 单文件缺失跳过 */ }
+      }
     }
     const env: Record<string, string> = {
       ...buildScrubbedChildEnv(),
       ...injection.env,
       ...(runtimeFiles ? { CODEX_HOME: runtimeFiles.root } : {}),
+      ...(isolatedCodexHome ? { CODEX_HOME: isolatedCodexHome } : {}),
     }
     // 固定 binary：managed active 优先，system fallback（与 adapter detect 同一顺序）。
     const binary = (await deps.managedInstaller.activeBinary(impl)) ?? await findSystemBinary(impl)
@@ -101,6 +114,7 @@ export async function runWorkerVerification(
     return { passed: true, detail: 'minimal real turn completed', connection_revision: connectionRevision }
   } finally {
     await runtimeFiles?.dispose()
+    if (isolatedCodexHome) await fs.rm(isolatedCodexHome, { recursive: true, force: true }).catch(() => {})
     await fs.rm(workspace, { recursive: true, force: true }).catch(() => {})
   }
 }
