@@ -328,7 +328,7 @@ export class ActivationRegistry {
       verification.cli_version === detect.version
     if (!bindingMatches) {
       status.verification_stale = true
-      status.detail = '配置/版本已变更，建议重新验证'
+      status.detail = verification?.result === 'failed' ? '上次验证失败' : '配置/版本已变更，建议重新验证'
     }
     const degraded = this.degradedReasons.get(impl)
     if (degraded) {
