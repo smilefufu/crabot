@@ -7,7 +7,7 @@ vi.mock('../../services/worker-management', () => ({
   workerManagementService: {
     getAll: vi.fn(),
     putConfig: vi.fn(),
-    startOperation: vi.fn(),
+    startVerify: vi.fn(),
   },
 }))
 vi.mock('../../services/provider', () => ({
@@ -17,7 +17,7 @@ vi.mock('../../services/provider', () => ({
 const svc = workerManagementService as unknown as {
   getAll: ReturnType<typeof vi.fn>
   putConfig: ReturnType<typeof vi.fn>
-  startOperation: ReturnType<typeof vi.fn>
+  startVerify: ReturnType<typeof vi.fn>
 }
 
 function mergedResult(config: unknown, statuses: unknown[] = []) {
@@ -96,7 +96,7 @@ describe('WorkersPage（P6-B §13）', () => {
     await waitFor(() => screen.getByText('验证'))
     fireEvent.click(screen.getByText('验证'))
     expect(confirmSpy).toHaveBeenCalled()
-    expect(svc.startOperation).not.toHaveBeenCalled()
+    expect(svc.startVerify).not.toHaveBeenCalled()
     confirmSpy.mockRestore()
   })
 })
