@@ -209,7 +209,11 @@ export const WorkersPage: React.FC = () => {
               onBlur={(e) => {
                 const value = e.target.value.trim()
                 if (value !== (policy.preference ?? '')) {
-                  void applyConfig(impl, { ...policy, ...(value ? { preference: value } : {}) })
+                  // 清空也要真实生效：空值时显式移除 preference 字段（不是回写旧值）。
+                  const nextPolicy = { ...policy }
+                  if (value) nextPolicy.preference = value
+                  else delete nextPolicy.preference
+                  void applyConfig(impl, nextPolicy)
                 }
               }}
             />
@@ -238,9 +242,9 @@ export const WorkersPage: React.FC = () => {
                 <Button size="sm" disabled={busy} onClick={() => void runOperation(impl as CLIWorkerImplId, 'verify')}>验证</Button>
               )}
               {policy.enabled ? (
-                <Button size="sm" variant="danger" disabled={busy} onClick={() => void applyConfig(impl, { enabled: false, ...(policy.connection ? { connection: policy.connection } : {}) })}>禁用</Button>
+                <Button size="sm" variant="danger" disabled={busy} onClick={() => void applyConfig(impl, { ...policy, enabled: false })}>禁用</Button>
               ) : (
-                <Button size="sm" disabled={busy} onClick={() => void applyConfig(impl, { enabled: true, ...(policy.connection ? { connection: policy.connection } : {}) })}>启用</Button>
+                <Button size="sm" disabled={busy} onClick={() => void applyConfig(impl, { ...policy, enabled: true })}>启用</Button>
               )}
                 </>
               )}
