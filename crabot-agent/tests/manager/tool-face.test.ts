@@ -36,7 +36,7 @@ const MESSAGING_NORMAL = [
 /** protocol-crab-messaging.md §2.10 的 channel 透传只读三件套（仅当存在飞书 channel 实例）。 */
 const FEISHU_READ_ONLY_TOOLS = ['read_feishu_document', 'feishu_raw_get', 'feishu_download_file']
 
-const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'read_worker_output', 'list_workers', 'get_worker_detail', 'kill_worker']
+const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'read_worker_output', 'list_workers', 'get_worker_detail', 'list_worker_implementations', 'kill_worker']
 
 const CRABOT_INFO_TOOLS = [
   'get_system_status',

@@ -112,17 +112,29 @@ describe('Worker implementation management API（P6-B §5）', () => {
     expect(((await fresh.json()) as { config: { revision: number } }).config.revision).toBe(2)
   })
 
-  it('PUT 拒绝：default_impl 改走（P6-C 前过渡 gate）', async () => {
+  it('PUT default 改走 claude-code 成功（P6-C，C-17 回归）；Agent 校验 translator', async () => {
+    ;(admin as unknown as { callAgentRpc: unknown }).callAgentRpc = async (method: string) => {
+      if (method === 'list_worker_implementation_status') {
+        return { items: [{
+          impl: 'claude-code', installed: true, version: '2.1.232', ready: true,
+          connection_capabilities: [{ mode: 'existing_host', translator_id: 'claude-code-existing-host-v1', translator_version: '1', cli_version_range: '2.x', credential_transport: 'native_store', model_selection: 'native_default', credential_scope: 'runtime_user_home' }],
+        }] }
+      }
+      throw new Error(`unexpected agent RPC in test: ${method}`)
+    }
     const res = await put({ expected_revision: 2, config: { default_impl: 'claude-code', implementations: {
       builtin: { enabled: true },
       'claude-code': { enabled: true, connection: { mode: 'existing_host' } },
       codex: { enabled: false },
     } } })
-    expect(res.status).toBe(400)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { config: { default_impl: string; revision: number } }
+    expect(body.config.default_impl).toBe('claude-code')
+    expect(body.config.revision).toBe(3)
   })
 
   it('PUT 拒绝：builtin 带 connection / credential 字段混入', async () => {
-    const res = await put({ expected_revision: 2, config: { implementations: {
+    const res = await put({ expected_revision: 3, config: { implementations: {
       builtin: { enabled: true, connection: { mode: 'native_account' } },
       'claude-code': { enabled: false },
       codex: { enabled: false },

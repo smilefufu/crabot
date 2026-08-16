@@ -118,8 +118,11 @@ export class WorkerImplementationStore {
       if (!allowed.has(key)) throw new Error(`${prefix}: unexpected field "${key}"`)
     }
     if (typeof policy.enabled !== 'boolean') throw new Error(`${prefix}: enabled must be boolean`)
-    if (policy.preference !== undefined && typeof policy.preference !== 'string') {
-      throw new Error(`${prefix}: preference must be a string`)
+    if (policy.preference !== undefined) {
+      if (typeof policy.preference !== 'string') throw new Error(`${prefix}: preference must be a string`)
+      // P6-C：preference 是自然语言软指导——只做 trim/长度/控制字符校验，不解析语义。
+      if (policy.preference.length > 500) throw new Error(`${prefix}: preference too long (max 500)`)
+      if (/[\u0000-\u001f\u007f]/.test(policy.preference)) throw new Error(`${prefix}: preference must not contain control characters`)
     }
     if (policy.connection !== undefined) this.assertConnectionShape(policy.connection, `${prefix}.connection`)
   }
@@ -159,9 +162,7 @@ export class WorkerImplementationStore {
     if (candidate.implementations.builtin.connection !== undefined) {
       throw new Error('builtin implementation must not have a connection')
     }
-    if (candidate.default_impl !== 'builtin') {
-      throw new Error('default_impl other than builtin is not activated until P6-C selection semantics land')
-    }
+    // P6-C：default 可选任意已 enabled 实现（P6-B 的 builtin-only 过渡 gate 移除）。
   }
 
   /**

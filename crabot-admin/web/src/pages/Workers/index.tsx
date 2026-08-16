@@ -79,7 +79,7 @@ export const WorkersPage: React.FC = () => {
 
   const statusOf = (impl: ImplId) => statuses.find((s) => s.impl === impl)
 
-  const applyConfig = async (impl: CLIWorkerImplId, policy: WorkerImplementationPolicy) => {
+  const applyConfig = async (impl: CLIWorkerImplId, policy: WorkerImplementationPolicy, defaultImpl?: CLIWorkerImplId) => {
     if (!config) return
     setBusy(true)
     setNotice(null)
@@ -90,7 +90,10 @@ export const WorkersPage: React.FC = () => {
         codex: { ...config.implementations.codex },
       }
       next[impl] = policy
-      const updated = await workerManagementService.putConfig(config.revision, { default_impl: config.default_impl, implementations: next })
+      const updated = await workerManagementService.putConfig(config.revision, {
+        default_impl: defaultImpl ?? config.default_impl,
+        implementations: next,
+      })
       setConfig(updated)
       setNotice('已保存')
       await refresh()
@@ -193,7 +196,31 @@ export const WorkersPage: React.FC = () => {
           </div>
           {status?.detail && <div className="text-secondary" style={{ fontSize: 13 }}>{status.detail}</div>}
           {!isBuiltin && config && policy && (
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Input
+              label="偏好（自然语言软指导，仅供 Manager 参考）"
+              defaultValue={policy.preference ?? ''}
+              placeholder="例：优先用它做代码审查类任务"
+              disabled={busy}
+              onBlur={(e) => {
+                const value = e.target.value.trim()
+                if (value !== (policy.preference ?? '')) {
+                  void applyConfig(impl, { ...policy, ...(value ? { preference: value } : {}) })
+                }
+              }}
+            />
+          )}
+          {!isBuiltin && config && policy && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <label style={{ fontSize: 13 }}>
+                <input
+                  type="radio"
+                  name="worker-default"
+                  checked={config.default_impl === impl}
+                  disabled={busy || !policy.enabled}
+                  onChange={() => void applyConfig(impl, { ...policy, enabled: true }, impl)}
+                />
+                {' '}设为默认
+              </label>
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog({
                 impl, method: 'existing_host', token: '', endpoint: '', apiKey: '',
                 modelId: impl === 'claude-code' ? 'claude-sonnet-4-6' : '',

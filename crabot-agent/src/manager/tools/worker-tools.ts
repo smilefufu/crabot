@@ -95,6 +95,24 @@ export interface WorkerToolsContext {
 
 export interface WorkerToolsDeps {
   readonly harness: WorkerHarness
+  /** P6-C §7：registry snapshot 只读 getter（list_worker_implementations 用）。 */
+  readonly workerImplSnapshot?: () => {
+    revision: number
+    default_impl: string
+    preference: Record<string, string>
+    statuses: Array<{
+      impl: string
+      installed: boolean
+      version?: string
+      connection_mode?: string
+      verification: string
+      verification_stale?: boolean
+      degraded?: string
+      ready: boolean
+      detail?: string
+    }>
+    observed_at: string
+  }
   /** 当前 manager 的归属:决定 spawn 的 managerKey / origin / report_to。 */
   readonly context: () => WorkerToolsContext
   /** Opaque authorization is captured by the control plane, never exposed in a tool schema/history. */
@@ -391,6 +409,39 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     },
   })
 
+  const listWorkerImplementations = defineTool({
+    name: 'list_worker_implementations',
+    description:
+      '列出可用的 worker 实现（builtin/claude-code/codex）的当前状态：enabled/ready/' +
+      'capabilities/preference/default 与脱敏原因。需要选择实现或回应用户偏好时先查；' +
+      'preference 只是给你的自然语言软指导，不是硬规则。',
+    inputSchema: { type: 'object', properties: {} },
+    isReadOnly: true,
+    call: async (): Promise<ToolCallResult> => {
+      try {
+        if (!deps.workerImplSnapshot) throw new Error('worker implementation registry not available')
+        const snapshot = deps.workerImplSnapshot()
+        return ok({
+          revision: snapshot.revision,
+          default_impl: snapshot.default_impl,
+          preference: snapshot.preference,
+          observed_at: snapshot.observed_at,
+          implementations: snapshot.statuses.map((st) => ({
+            impl: st.impl,
+            ready: st.ready,
+            installed: st.installed,
+            version: st.version,
+            connection_mode: st.connection_mode,
+            verification: st.verification,
+            ...(st.verification_stale ? { verification_stale: true } : {}),
+            ...(st.degraded ? { degraded: st.degraded } : {}),
+            ...(st.detail ? { detail: st.detail } : {}),
+          })),
+        })
+      } catch (error) { return mapError('list_worker_implementations', error) }
+    },
+  })
+
   const getWorkerDetail = defineTool({
     name: 'get_worker_detail',
     description: '读取一个 worker 的完整详情。当前会话只能读取自己的 worker。',
@@ -461,5 +512,5 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     },
   })
 
-  return [spawnWorker, sendToWorker, queryWorker, readWorkerOutput, listWorkers, getWorkerDetail, ...(listAllWorkers ? [listAllWorkers] : []), killWorker]
+  return [spawnWorker, sendToWorker, queryWorker, readWorkerOutput, listWorkers, getWorkerDetail, listWorkerImplementations, ...(listAllWorkers ? [listAllWorkers] : []), killWorker]
 }

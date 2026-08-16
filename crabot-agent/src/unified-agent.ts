@@ -67,6 +67,7 @@ import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-mana
 import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
 import { ActivationRegistry } from './workers/activation-registry.js'
+import { selectWorkerImplementation } from './workers/implementation-selection.js'
 import { admitWorkerConnection } from './workers/connections/admission.js'
 import { WorkerOperationStore } from './workers/operations/store.js'
 import { resolveUserLevelBinary } from './workers/cli-binary.js'
@@ -720,11 +721,19 @@ export class UnifiedAgent extends ModuleBase {
       builtinTraceHooks: this.builtinTraceHooks(),
       // P6-B §6：显式 impl spawn/resume/handoff 的 registry gate。
       assertWorkerImplReady: (impl) => this.activationRegistry.assertReady(impl),
+      selectWorkerImpl: (requested, excluded) => selectWorkerImplementation({
+        requestedImpl: requested,
+        config: this.activationRegistry.getSnapshot().config,
+        statuses: this.activationRegistry.getSnapshot().statuses,
+        ...(excluded ? { excludedImpls: excluded } : {}),
+      }),
+      acquireWorkerFence: (impl, kind) => this.activationRegistry.acquireFence(impl, kind),
       reportWorkerOutcome: (impl, failure) =>
         failure === null
           ? this.activationRegistry.clearDegraded(impl)
           : this.activationRegistry.markDegraded(impl, failure.replace(/\/[^\s]+/g, '<path>')),
       resolveUserLevelBinary: (impl) => resolveUserLevelBinary(impl === 'claude-code' ? 'claude' : 'codex', getDataRootDir()),
+      workerImplSnapshot: () => this.activationRegistry.getSnapshot(),
       // P6-B §6.5：operation-time connection admission（当前调用内实时解析）。
       admitWorkerConnection: (impl, operationLabel) => admitWorkerConnection(this.activationRegistry, impl, {
         resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),

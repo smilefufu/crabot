@@ -757,13 +757,22 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     // 的验收点是工厂抛错如实落 failed 尝试。
     const admission = internals.managerStack!.harness.deps.assertExecutionAdmission
     const implReady = internals.managerStack!.harness.deps.assertWorkerImplReady
+    // P6-C：纯选择器同样要旁路（缺 powerful 时 builtin 在 registry 里 not ready，
+    // 选择器会先于工厂抛错——本测试验收的是工厂失败缝）。
+    const selector = internals.managerStack!.harness.deps.selectWorkerImpl
     const builtinDefaults = internals.managerStack!.harness.deps.builtinSpawnDefaults
     internals.managerStack!.harness.deps.assertExecutionAdmission = undefined
     internals.managerStack!.harness.deps.assertWorkerImplReady = undefined
+    internals.managerStack!.harness.deps.selectWorkerImpl = undefined
+    // fence 里的 assertReady 同理（缺 powerful 时 builtin not ready）。
+    const fence = internals.managerStack!.harness.deps.acquireWorkerFence
+    internals.managerStack!.harness.deps.acquireWorkerFence = undefined
     internals.managerStack!.harness.deps.builtinSpawnDefaults = (ctx: unknown) => internals.buildBuiltinWorkerRuntime(ctx)
     await expect(spawnBuiltin(internals, managerKey)).rejects.toThrow(/powerful/)
     internals.managerStack!.harness.deps.assertExecutionAdmission = admission
     internals.managerStack!.harness.deps.assertWorkerImplReady = implReady
+    internals.managerStack!.harness.deps.selectWorkerImpl = selector
+    internals.managerStack!.harness.deps.acquireWorkerFence = fence
     internals.managerStack!.harness.deps.builtinSpawnDefaults = builtinDefaults
 
     const [w] = await internals.managerStack!.harness.listWorkers(managerKey)

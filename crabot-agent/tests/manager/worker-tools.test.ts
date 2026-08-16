@@ -185,16 +185,16 @@ afterEach(async () => {
 // ---- 工具面形状 ----
 
 describe('buildWorkerTools — 工具面形状', () => {
-  it('普通 Manager 有七项 worker 工具；只有 read_worker_output/list_workers/get_worker_detail 为只读', async () => {
+  it('普通 Manager 有八项 worker 工具；read_worker_output/list_workers/get_worker_detail/list_worker_implementations 为只读', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
 
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ['get_worker_detail', 'kill_worker', 'list_workers', 'query_worker', 'read_worker_output', 'send_to_worker', 'spawn_worker'].sort()
+      ['get_worker_detail', 'kill_worker', 'list_worker_implementations', 'list_workers', 'query_worker', 'read_worker_output', 'send_to_worker', 'spawn_worker'].sort()
     )
 
     const readOnlyNames = tools.filter((t) => t.isReadOnly).map((t) => t.name).sort()
-    expect(readOnlyNames).toEqual(['get_worker_detail', 'list_workers', 'read_worker_output'])
+    expect(readOnlyNames).toEqual(['get_worker_detail', 'list_worker_implementations', 'list_workers', 'read_worker_output'])
   })
 })
 

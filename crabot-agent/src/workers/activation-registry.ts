@@ -67,6 +67,7 @@ export class ActivationRegistry {
   private verifications: Partial<Record<CLIWorkerImplId, VerificationRecord>> = {}
   private snapshots: Map<WorkerImplId, WorkerImplementationStatus> = new Map()
   private degradedReasons: Map<CLIWorkerImplId, string> = new Map()
+  private fenceCounts: Map<WorkerImplId, number> = new Map()
   private hmacKey: Buffer | null = null
 
   constructor(agentDataDir: string) {
@@ -180,6 +181,56 @@ export class ActivationRegistry {
     const status = this.snapshots.get(impl)
     if (!status) throw new Error(`[ActivationRegistry] unknown impl: ${impl}`)
     return status
+  }
+
+  /**
+   * P6-C §5：不可变 snapshot——单次读取的所有字段来自同一 desired revision。
+   * 读即拷（statuses 数组新建），调用方改不动内部状态。
+   */
+  getSnapshot(): {
+    revision: number
+    config: import('./types.js').WorkerImplementationConfig
+    default_impl: WorkerImplId
+    preference: Partial<Record<WorkerImplId, string>>
+    statuses: WorkerImplementationStatus[]
+    observed_at: string
+  } {
+    const list = this.listStatus() // 未 initialized 抛错
+    const order: Record<WorkerImplId, number> = { builtin: 0, 'claude-code': 1, codex: 2 }
+    const sorted = [...list].sort((a, b) => order[a.impl] - order[b.impl])
+    const desired = this.desired!
+    const preference: Partial<Record<WorkerImplId, string>> = {}
+    for (const impl of ['builtin', 'claude-code', 'codex'] as const) {
+      const pref = desired.config.implementations[impl].preference
+      if (pref) preference[impl] = pref
+    }
+    return {
+      revision: desired.config.revision,
+      config: desired.config,
+      default_impl: desired.config.default_impl,
+      preference,
+      statuses: sorted,
+      observed_at: new Date().toISOString(),
+    }
+  }
+
+  /**
+   * P6-C §5.9：operation-scoped activation fence。取得即完成最终校验（当前 snapshot 下
+   * impl 仍 enabled+ready），绑定本次 operation kind；内存有界（每 impl 一个计数）、
+   * finally release；Agent crash 由 MM 进程树收口。fence 之后的 config pull 不影响
+   * 本操作（线性化点已过），下一操作用新 snapshot。
+   */
+  async acquireFence(impl: WorkerImplId, _kind: 'spawn' | 'resume' | 'handoff'): Promise<{ release(): void }> {
+    await this.assertReady(impl) // 含 operation-time re-detect
+    const count = this.fenceCounts.get(impl) ?? 0
+    this.fenceCounts.set(impl, count + 1)
+    return {
+      release: () => {
+        const current = this.fenceCounts.get(impl) ?? 0
+        if (current <= 1) this.fenceCounts.delete(impl)
+        else this.fenceCounts.set(impl, current - 1)
+      },
+    }
   }
 
   /** 运行时真实失败上报（harness 注入）：标 degraded，后续派活被 gate 阻断并带原因。 */

@@ -84,7 +84,7 @@ describe('WorkerImplementationStore', () => {
     expect(() => store.validateCandidate(good)).not.toThrow()
   })
 
-  it('P6-C 过渡 gate：拒绝 default_impl 从 builtin 改走', async () => {
+  it('P6-C：default_impl 允许指向已 enabled 的 CLI（过渡 gate 已移除）', async () => {
     await store.load()
     const candidate = {
       revision: 2,
@@ -95,6 +95,17 @@ describe('WorkerImplementationStore', () => {
         codex: { enabled: false },
       },
     }
-    expect(() => store.validateCandidate(candidate)).toThrow(/default_impl/)
+    expect(() => store.validateCandidate(candidate)).not.toThrow()
+    // default 必须 enabled 仍校验
+    const bad = {
+      revision: 2,
+      default_impl: 'codex' as const,
+      implementations: {
+        builtin: { enabled: true },
+        'claude-code': { enabled: true, connection: { mode: 'existing_host' as const } },
+        codex: { enabled: false },
+      },
+    }
+    expect(() => store.validateCandidate(bad)).toThrow()
   })
 })
