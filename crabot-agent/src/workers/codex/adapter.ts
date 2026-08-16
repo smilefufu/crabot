@@ -376,10 +376,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private readonly sessionDiscoveryTimeoutMs: number
   private readonly pasteReadyTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
-  private get resolveManagedBinary(): (() => Promise<string | undefined>) | undefined {
-    return this.deps.resolveManagedBinary
+  private get resolveUserLevelBinary(): (() => Promise<{ binary?: string; global_detected: boolean }>) | undefined {
+    return this.deps.resolveUserLevelBinary
   }
   private lastDetectedVersion?: string
+  private lastGlobalDetected = false
 
   /** P6-B §6：与最近一次 detect 版本一致的静态 translator 声明。 */
   connectionCapabilities(): import('../types.js').WorkerConnectionCapability[] {
@@ -404,8 +405,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
        * workspace 隔离出来的 CODEX_HOME,detect() 的 activated 检查也读这里。测试用可注入
        * fixture 目录,不依赖开发机真实 home。 */
       readonly codexHomeSource?: string
-      /** P6-B：managed active binary 解析（detect 顺序：managed → system）。 */
-      readonly resolveManagedBinary?: () => Promise<string | undefined>
+      /** 用户级 CLI binary 解析（v1 无 managed install；全局安装忽略）。 */
+      readonly resolveUserLevelBinary?: () => Promise<{ binary?: string; global_detected: boolean }>
       /** spawn() 发现真实 session id 的轮询上限(ms),默认 3000;测试用可调小避免拖慢用例。 */
       readonly sessionDiscoveryTimeoutMs?: number
       /** 启动期就绪握手的等待上限,默认 DEFAULT_PASTE_READY_TIMEOUT_MS(见该常量注释里的
@@ -443,17 +444,19 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * PATH,不阻塞),外加调用方传入的额外变量(如 CODEX_HOME)。
    * P6-B：有 managed active binary 时 PATH 前置其目录（spawn/resume 跑的是它）。 */
   private async buildEnv(extra: Record<string, string>): Promise<Record<string, string>> {
-    const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
-    const dir = managed ? dirname(managed) : await this.resolveBinDirCached()
+    const userBinary = this.resolveUserLevelBinary ? (await this.resolveUserLevelBinary()).binary : undefined
+    const dir = userBinary ? dirname(userBinary) : await this.resolveBinDirCached()
     const path = dir ? `${dir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '')
     return { PATH: path, ...extra }
   }
 
   async detect(): Promise<DetectResult> {
-    // P6-B：managed active binary 优先。
-    const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
-    const binDir = managed ? dirname(managed) : await this.resolveBinDirCached()
-    const effectiveBin = managed ? shQuote(managed) : this.codexBin
+    // 只认用户级安装；全局安装忽略（报 global_detected）。
+    const resolved = this.resolveUserLevelBinary ? await this.resolveUserLevelBinary() : undefined
+    this.lastGlobalDetected = resolved?.global_detected ?? false
+    const userBinary = resolved?.binary
+    const binDir = userBinary ? dirname(userBinary) : await this.resolveBinDirCached()
+    const effectiveBin = userBinary ? shQuote(userBinary) : this.codexBin
     const versionEnv = buildChildEnv({ PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '') })
     let versionOutput: string
     try {
@@ -519,7 +522,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 'codex-cli 0.146.0' → '0.146.0'
     const version = /([0-9]+\.[0-9]+\.[0-9]+)/.exec(versionOutput)?.[1]
     this.lastDetectedVersion = version
-    return { installed: true, activated, version, install_source: managed ? 'managed' : 'system', credential_generation: credentialGeneration, detail: versionOutput }
+    return { installed: true, activated, version, install_source: 'user', credential_generation: credentialGeneration, global_detected: false, detail: versionOutput }
   }
 
   /**
@@ -840,7 +843,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。
     // 网络放行见文件头"spawn/resume 启动参数"节。
-    const spawnBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+    const spawnBinManaged = this.resolveUserLevelBinary ? (await this.resolveUserLevelBinary()).binary : undefined
     const spawnBin = spawnBinManaged ? shQuote(spawnBinManaged) : this.codexBin
     const command = `${spawnBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
     const spawnStartedAt = Date.now()
@@ -995,7 +998,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
       // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
       // `resume` 之前。
-      const resumeBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
+      const resumeBinManaged = this.resolveUserLevelBinary ? (await this.resolveUserLevelBinary()).binary : undefined
     const resumeBin = resumeBinManaged ? shQuote(resumeBinManaged) : this.codexBin
       const command = `${resumeBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
 

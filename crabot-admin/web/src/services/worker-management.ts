@@ -41,7 +41,8 @@ export interface WorkerImplementationStatus {
   impl: WorkerImplId
   installed: boolean
   version?: string
-  install_source?: 'managed' | 'system'
+  install_source?: 'user'
+  global_install_detected?: boolean
   connection_mode?: WorkerConnectionConfig['mode']
   credential_scope?: WorkerConnectionCapability['credential_scope']
   configured: boolean

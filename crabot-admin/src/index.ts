@@ -2437,9 +2437,9 @@ export class AdminModule extends ModuleBase {
       }
 
       // Worker operation（§3.19.12.1）：per-action 端点。builtin 一律 400。
-      const workerActionMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/(install|verify)$/)
+      const workerActionMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/(verify)$/)
       if (workerActionMatch && req.method === 'POST') {
-        await this.handleWorkerActionApi(req, res, decodeURIComponent(workerActionMatch[1]), workerActionMatch[2] as 'install' | 'verify')
+        await this.handleWorkerActionApi(req, res, decodeURIComponent(workerActionMatch[1]), 'verify')
         return
       }
       const workerOpGetMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/operations\/([^/]+)$/)
@@ -9874,7 +9874,7 @@ export class AdminModule extends ModuleBase {
   private async admitWorkerOperation(
     res: ServerResponse,
     impl: string,
-    action: 'install' | 'verify' | 'cancel',
+    action: 'verify' | 'cancel',
     expectedRevision: unknown,
   ): Promise<{ operationId: string; assertion: string; agentPort: number; revision: number; mode: string } | null> {
     if (impl === 'builtin') {
@@ -9895,7 +9895,7 @@ export class AdminModule extends ModuleBase {
       return null
     }
     const policy = desired.implementations[impl]
-    if (action !== 'install' && !policy.enabled) {
+    if (!policy.enabled) {
       sendJson(res, 409, { error: `${impl} is not enabled`, code: 'ADMIN_WORKER_IMPL_INVALID' })
       return null
     }
@@ -9905,15 +9905,15 @@ export class AdminModule extends ModuleBase {
       return null
     }
     const mode = policy.connection?.mode ?? 'native_account'
-    const operationId = action === 'cancel' ? '' : generateId()
-    const assertion = action === 'cancel' ? '' : this.workerOperationAssertions.issue({
+    const operationId = generateId()
+    const assertion = this.workerOperationAssertions.issue({
       action, operation_id: operationId, impl: impl as 'claude-code' | 'codex', mode, policy_revision: desired.revision,
     })
     return { operationId, assertion, agentPort, revision: desired.revision, mode }
   }
 
   /** POST /:impl/install|verify（§3.19.12.1）：assertion 不出服务端。 */
-  private async handleWorkerActionApi(req: IncomingMessage, res: ServerResponse, impl: string, action: 'install' | 'verify'): Promise<void> {
+  private async handleWorkerActionApi(req: IncomingMessage, res: ServerResponse, impl: string, action: 'verify'): Promise<void> {
     const body = await this.readJsonBody<{ expected_revision?: unknown }>(req)
     const admission = await this.admitWorkerOperation(res, impl, action, body.expected_revision)
     if (!admission) return

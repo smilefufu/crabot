@@ -264,11 +264,18 @@ export class ActivationRegistry {
       installed: detect.installed,
       version: detect.version,
       install_source: detect.install_source,
+      ...(detect.global_detected ? { global_install_detected: true } : {}),
       connection_mode: policy.connection?.mode,
       connection_capabilities: capabilities,
     }
     if (!policy.enabled) return { ...status, detail: 'disabled by policy' }
-    if (!detect.installed) return { ...status, detail: 'not installed' }
+    if (!detect.installed) {
+      return {
+        ...status,
+        ...(detect.global_detected ? { global_install_detected: true } : {}),
+        detail: detect.global_detected ? 'only global install found (ignored); install at user level' : 'not installed',
+      }
+    }
     if (!policy.connection) return { ...status, detail: 'no connection configured' }
 
     const translator = capabilities.find((cap) => cap.mode === policy.connection!.mode)

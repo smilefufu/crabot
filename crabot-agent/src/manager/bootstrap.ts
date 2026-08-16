@@ -176,8 +176,8 @@ export interface BootstrapDeps {
   readonly builtinTraceHooks?: import('../workers/builtin/adapter.js').BuiltinTraceHooks
   /** P6-B §6：activation registry gate（unified-agent 注入）。 */
   readonly assertWorkerImplReady?: (impl: import('../workers/types.js').WorkerImplId) => void | Promise<void>
-  /** P6-B：managed active binary 解析（detect/spawn：managed → system）。 */
-  readonly resolveManagedBinary?: (impl: 'claude-code' | 'codex') => Promise<string | undefined>
+  /** 用户级 CLI binary 解析（v1 无 managed；全局安装忽略并提示）。 */
+  readonly resolveUserLevelBinary?: (impl: 'claude-code' | 'codex') => Promise<{ binary?: string; global_detected: boolean }>
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */
   readonly admitWorkerConnection?: (impl: import('../workers/types.js').WorkerImplId, operationLabel?: string) => Promise<{
     env: Record<string, string>
@@ -400,7 +400,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     new ClaudeCodeAdapter({
       dataDir: adapterDataDir('claude-code'),
       onStateChange: harness.handleStateChange,
-      ...(deps.resolveManagedBinary ? { resolveManagedBinary: () => deps.resolveManagedBinary!('claude-code') } : {}),
+      ...(deps.resolveUserLevelBinary ? { resolveUserLevelBinary: () => deps.resolveUserLevelBinary!('claude-code') } : {}),
     }),
   )
   adapters.set(
@@ -408,7 +408,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     new CodexWorkerAdapter({
       dataDir: adapterDataDir('codex'),
       onStateChange: harness.handleStateChange,
-      ...(deps.resolveManagedBinary ? { resolveManagedBinary: () => deps.resolveManagedBinary!('codex') } : {}),
+      ...(deps.resolveUserLevelBinary ? { resolveUserLevelBinary: () => deps.resolveUserLevelBinary!('codex') } : {}),
     }),
   )
 

@@ -51,7 +51,10 @@ export interface WorkerImplementationStatus {
   impl: WorkerImplId
   installed: boolean
   version?: string
-  install_source?: 'managed' | 'system'
+  /** 只解析用户级安装（v1 无 managed）。 */
+  install_source?: 'user'
+  /** 用户级缺失但检测到全局安装（被忽略；UI 提示「请用用户级安装」）。 */
+  global_install_detected?: boolean
   connection_mode?: WorkerConnectionConfig['mode']
   credential_scope?: WorkerConnectionCapability['credential_scope']
   configured: boolean
@@ -235,7 +238,10 @@ export interface DetectResult {
   activated: boolean
   /** 当前检测到的 CLI 版本（translator/version range 匹配输入）。 */
   version?: string
-  install_source?: 'managed' | 'system'
+  /** 只解析用户级安装（v1 无 managed）。 */
+  install_source?: 'user'
+  /** 用户级缺失但检测到全局安装（被忽略）。 */
+  global_detected?: boolean
   /**
    * 宿主 credential 的非敏感代际信号（文件 mtime+size 的 HMAC 输入，不读正文）——
    * 宿主换账号/重登会让代际变化，existing_host/native_account binding 随之失效。
