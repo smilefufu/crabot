@@ -176,6 +176,7 @@ export interface BootstrapDeps {
   readonly builtinTraceHooks?: import('../workers/builtin/adapter.js').BuiltinTraceHooks
   /** P6-B §6：activation registry gate（unified-agent 注入）。 */
   readonly assertWorkerImplReady?: (impl: import('../workers/types.js').WorkerImplId) => void | Promise<void>
+  readonly reportWorkerOutcome?: (impl: import('../workers/types.js').WorkerImplId, failure: string | null) => void | Promise<void>
   /** 用户级 CLI binary 解析（v1 无 managed；全局安装忽略并提示）。 */
   readonly resolveUserLevelBinary?: (impl: 'claude-code' | 'codex') => Promise<{ binary?: string; global_detected: boolean }>
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */
@@ -320,6 +321,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     adapters,
     defaultImpl: DEFAULT_WORKER_IMPL,
     ...(deps.assertWorkerImplReady ? { assertWorkerImplReady: deps.assertWorkerImplReady } : {}),
+    ...(deps.reportWorkerOutcome ? { reportWorkerOutcome: deps.reportWorkerOutcome } : {}),
     ...(deps.admitWorkerConnection ? { admitWorkerConnection: deps.admitWorkerConnection } : {}),
     ledger,
     workspaces,

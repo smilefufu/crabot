@@ -62,6 +62,10 @@ export interface WorkerImplementationStatus {
   connection_revision?: string
   translator?: WorkerConnectionCapability
   verification: WorkerVerificationState
+  /** binding 分量与当前不一致（提示用，不阻断）。 */
+  verification_stale?: boolean
+  /** 运行时真实失败置位（脱敏原因）；存在时阻断派活，成功执行自动清除。 */
+  degraded?: string
   ready: boolean
   capabilities: AdapterCapabilities
   connection_capabilities: WorkerConnectionCapability[]

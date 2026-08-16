@@ -427,6 +427,8 @@ export interface HarnessDeps {
    * 省略 impl 的 spawn 走 defaultImpl（builtin 安全路径）不在此 gate。
    */
   readonly assertWorkerImplReady?: (impl: WorkerImplId) => void | Promise<void>
+  /** P6-B 失败导向：adapter 级执行失败/成功上报（degraded 置位/清除）。 */
+  readonly reportWorkerOutcome?: (impl: WorkerImplId, failure: string | null) => void | Promise<void>
   /**
    * P6-B §6.5：operation-time connection admission（registry gate 之后、副作用之前）。
    * 返回的 env 注入 SpawnSpec.connection_env；dispose 在 spawn 收口后调用。
@@ -723,7 +725,9 @@ export class WorkerHarness {
           ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
         }
         spawnedHandle = await adapter.spawn(spec)
+        if (p.impl) await this.deps.reportWorkerOutcome?.(impl, null)
       } catch (err) {
+        if (p.impl) await this.deps.reportWorkerOutcome?.(impl, err instanceof Error ? err.message : String(err))
         if (admission) await admission.dispose()
         const now = this.deps.now()
         const failed = await this.deps.ledger.upsertWorker(p.managerKey, workerId, (prev) => {
@@ -1488,7 +1492,9 @@ export class WorkerHarness {
     let newHandle
     try {
       newHandle = await adapter.resume(prevRef, text, admission ? { connection_env: admission.env } : undefined)
+      await this.deps.reportWorkerOutcome?.(mainline.impl, null)
     } catch (error) {
+      await this.deps.reportWorkerOutcome?.(mainline.impl, error instanceof Error ? error.message : String(error))
       if (admission) await admission.dispose()
       throw error
     }
@@ -1710,9 +1716,11 @@ export class WorkerHarness {
       })
     } catch (error) {
       // provision/spawn 失败：dispose admission；source 化身状态保持 step 2 的既有语义。
+      await this.deps.reportWorkerOutcome?.(targetImpl, error instanceof Error ? error.message : String(error))
       if (admission) await admission.dispose()
       throw error
     }
+    await this.deps.reportWorkerOutcome?.(targetImpl, null)
     // 新化身持有 admission 资源至终态。
     if (admission) this.connectionDisposers.set(`${worker.worker_id}:${newHandle.seq}`, admission.dispose)
 

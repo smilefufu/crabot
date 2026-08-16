@@ -66,6 +66,7 @@ export class ActivationRegistry {
   private desired: WorkerImplementationRuntimeConfig | null = null
   private verifications: Partial<Record<CLIWorkerImplId, VerificationRecord>> = {}
   private snapshots: Map<WorkerImplId, WorkerImplementationStatus> = new Map()
+  private degradedReasons: Map<CLIWorkerImplId, string> = new Map()
   private hmacKey: Buffer | null = null
 
   constructor(agentDataDir: string) {
@@ -181,6 +182,23 @@ export class ActivationRegistry {
     return status
   }
 
+  /** 运行时真实失败上报（harness 注入）：标 degraded，后续派活被 gate 阻断并带原因。 */
+  async markDegraded(impl: WorkerImplId, reason: string): Promise<void> {
+    if (impl === 'builtin') return
+    this.degradedReasons.set(impl, reason.slice(0, 200))
+    if (this.desired) {
+      try { await this.refreshImpl(impl) } catch { /* 保持现状 */ }
+    }
+  }
+
+  /** 执行成功后调用：清除 degraded。 */
+  async clearDegraded(impl: WorkerImplId): Promise<void> {
+    if (impl === 'builtin' || !this.degradedReasons.delete(impl as CLIWorkerImplId)) return
+    if (this.desired) {
+      try { await this.refreshImpl(impl) } catch { /* 保持现状 */ }
+    }
+  }
+
   /**
    * 显式 spawn/resume/handoff gate（operation-time）：先对该 impl 做低成本 re-detect
    * （宿主升级/卸载/登出在两次 pull 之间也可见，§6.5「每次操作重校验」），再按新鲜
@@ -291,12 +309,14 @@ export class ActivationRegistry {
       : await this.computeNativeRevision(impl, nativeGenerationMaterial(detect, policy.connection.mode))
     status.connection_revision = connectionRevision
 
+    // 失败导向（2026-08-16 修订）：never verified / binding 不等都不阻断——
+    // verify 是体检报告不是门票；degraded（运行时真实失败）才阻断。
     const verification = this.verifications[impl]
-    if (!verification) return { ...status, detail: 'never verified' }
-    status.verification = verification.result
-    status.last_verified_at = verification.at
-
-    const bindingMatches =
+    if (verification) {
+      status.verification = verification.result
+      status.last_verified_at = verification.at
+    }
+    const bindingMatches = verification !== undefined &&
       verification.result !== 'failed' &&
       verification.policy_revision === desired.config.revision &&
       verification.connection_revision === connectionRevision &&
@@ -304,7 +324,12 @@ export class ActivationRegistry {
       verification.translator_version === translator.translator_version &&
       verification.cli_version === detect.version
     if (!bindingMatches) {
-      return { ...status, detail: 'verification binding stale (revision/translator/CLI changed)' }
+      status.verification_stale = true
+      status.detail = '配置/版本已变更，建议重新验证'
+    }
+    const degraded = this.degradedReasons.get(impl)
+    if (degraded) {
+      return { ...status, degraded, detail: degraded }
     }
     return { ...status, ready: true }
   }
