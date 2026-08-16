@@ -10,7 +10,6 @@
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
 import { buildScrubbedChildEnv } from './connections/secret-env.js'
 
 export interface CliBinaryResolution {
