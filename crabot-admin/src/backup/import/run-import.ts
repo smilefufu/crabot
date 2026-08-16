@@ -5,9 +5,16 @@
  */
 import type { BackupCategory } from '../types.js'
 import type { CrabotImportSummary, ImportItemResult, ImportStatus, OnConflict } from './import-types.js'
-import { readJsonArrayFromArchive } from './read-archive-category.js'
+import { readJsonArrayFromArchive, readArchiveTextFile } from './read-archive-category.js'
 
 type UpsertFn = (record: unknown) => Promise<ImportStatus>
+
+/** P6-D §3.18.1：旧 live Agent payload 整包拒绝（在任何 domain 写入前的 preflight 抛出）。 */
+export class ImportPreflightRejected extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message)
+  }
+}
 
 export type ImportDeps = {
   upsertProvider?: UpsertFn
@@ -19,7 +26,12 @@ export type ImportDeps = {
   upsertSchedule?: UpsertFn
   upsertTask?: UpsertFn
   upsertSessionConfig?: UpsertFn
-  upsertAgentInstance?: UpsertFn
+  /** P6-D：全量校验 agent 相关 payload（纯读+校验，零写入）。 */
+  validateAgentPayload?: (archivePath: string) => Promise<{ coreConfigRaw: Record<string, unknown> | null; archiveRows: unknown[] }>
+  /** P6-D：validate 通过后才允许调用——exact core config 进 CoreAgentConfigStore。 */
+  applyCoreAgentConfig?: (raw: Record<string, unknown>, onConflict: OnConflict) => Promise<ImportItemResult[]>
+  /** P6-D：validate 通过后才允许调用——archive record 恢复（幂等）。 */
+  applyLegacyArchiveRows?: (rows: unknown[], onConflict: OnConflict) => Promise<ImportItemResult[]>
   importSkills?: (archivePath: string, onConflict: OnConflict) => Promise<ImportItemResult[]>
   importMemory?: (archivePath: string, onConflict: OnConflict) => Promise<ImportItemResult[]>
   /** 全部类别处理完后：save + 内存 reload + triggerPushAfter。 */
@@ -34,7 +46,7 @@ const SIMPLE_ARRAY_IMPORT: Array<{
   { category: 'config', file: 'payload/config/subagents.json', depKey: 'upsertSubagent', kind: 'subagent' },
   { category: 'config', file: 'payload/config/templates.json', depKey: 'upsertTemplate', kind: 'template' },
   { category: 'config', file: 'payload/config/session-configs.json', depKey: 'upsertSessionConfig', kind: 'session-config' },
-  { category: 'config', file: 'payload/config/agent-instances.json', depKey: 'upsertAgentInstance', kind: 'agent-instance' },
+  // P6-D：agent-instances.json 不在此表——由 preflight 分类（§3.18.1），live non-core 整包拒绝。
   { category: 'config', file: 'payload/config/mcp-servers.json', depKey: 'upsertMcp', kind: 'mcp' },
   { category: 'channels', file: 'payload/channels/friends.json', depKey: 'upsertFriend', kind: 'friend' },
   { category: 'tasks', file: 'payload/tasks/tasks.json', depKey: 'upsertTask', kind: 'task' },
@@ -54,11 +66,34 @@ export async function runCrabotImport(params: {
 
   // 注：以下导出文件不走本表，由 C1 的 deps 接线特殊处理或刻意不导入：
   //   - global_model_config.json（单对象非数组，C1 特殊落地）
-  //   - agent-configs/<id>.json（随 agent-instance 由 upsertAgentInstance 一并写）
+  //   - agent-configs/crabot-agent.json（P6-D：由 importCoreAgentConfig 单独进 CoreStore）
   //   - channel-configs/<id>.json（随 channel 实例由 upsertChannel 一并写）
   //   - friend-permission-configs.json（按 friend_id 而非 id，留 C1 决定）
   //   - vendor.yaml（system mode 由 root 管，不导入）
   try {
+    // P6-D §3.18.1：全包 preflight 必须先于任何 domain 写入（含 core config）。
+    let agentPayload: { coreConfigRaw: Record<string, unknown> | null; archiveRows: unknown[] } | null = null
+    if (selected.has('config')) {
+      // 存在性检查是 preflight 的一部分：无 agent payload 时不需要校验器。
+      const hasAgentPayload = (await readJsonArrayFromArchive(archivePath, 'payload/config/agent-implementations.json')).length > 0
+        || (await readJsonArrayFromArchive(archivePath, 'payload/config/agent-instances.json')).length > 0
+        || (await readArchiveTextFile(archivePath, 'payload/config/agent-configs/crabot-agent.json')) !== null
+        || (await readArchiveTextFile(archivePath, 'payload/config/legacy-agent-archive.json')) !== null
+      if (hasAgentPayload) {
+        if (!deps.validateAgentPayload) {
+          throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', '缺少 agent payload 校验器')
+        }
+        agentPayload = await deps.validateAgentPayload(archivePath)
+        // 校验通过 → 才允许写入
+        if (agentPayload.coreConfigRaw && deps.applyCoreAgentConfig) {
+          results.push(...(await deps.applyCoreAgentConfig(agentPayload.coreConfigRaw, onConflict)))
+        }
+        if (agentPayload.archiveRows.length > 0 && deps.applyLegacyArchiveRows) {
+          results.push(...(await deps.applyLegacyArchiveRows(agentPayload.archiveRows, onConflict)))
+        }
+      }
+    }
+
     for (const item of SIMPLE_ARRAY_IMPORT) {
       if (!selected.has(item.category)) continue
       const rows = await readJsonArrayFromArchive(archivePath, item.file)

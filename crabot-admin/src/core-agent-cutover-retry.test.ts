@@ -13,11 +13,10 @@ function createSubject(options: { completionError?: unknown; existingMarker?: bo
   subject.cutoverRecoveryReason = null
   subject.cutoverBearer = 'cutover-secret'
   subject.config = { moduleId: 'admin-web' }
-  subject.agentManager = {
-    listImplementations: () => ({ items: [{ id: 'default' }] }),
-    listInstances: () => ({ items: [{ id: 'crabot-agent' }] }),
-    listConfigs: () => [{ instance_id: 'crabot-agent' }],
-  }
+  subject.adminConfig = { data_dir: '/nonexistent-p6d-test' }
+  // P6-D：cutover inventory 改直读原始文件；测试用 spy 替换为固定空源（语义同旧 mock）。
+  subject.readLegacyAgentInventorySources = vi.fn().mockResolvedValue([])
+  subject.legacyArchiveStore = { deletedArchiveIds: vi.fn().mockResolvedValue(new Set()) }
   subject.readLegacyAgentPackageEntries = vi.fn().mockResolvedValue([])
   subject.readLegacyFrontWorkerConfigSources = vi.fn().mockResolvedValue([])
   subject.cutoverStore = {
@@ -147,5 +146,19 @@ describe('core Agent cutover activation retry', () => {
       archive_record_count: 0,
     }))
     expect(subject.cutoverActivated).toBe(true)
+  })
+})
+
+describe('P6-D R2: tombstone 防止 inventory 复活已删 archive', () => {
+  it('deletedArchiveIds 中的来源不进入 archive() 调用', async () => {
+    const subject = createSubject()
+    subject.readLegacyAgentInventorySources = vi.fn().mockResolvedValue([
+      { source_kind: 'agent_instance', source_id: 'front-agent', raw: { id: 'front-agent' } },
+      { source_kind: 'agent_instance', source_id: 'worker-general', raw: { id: 'worker-general' } },
+    ])
+    subject.legacyArchiveStore = { deletedArchiveIds: vi.fn().mockResolvedValue(new Set(['agent_instance:front-agent'])) }
+    await subject.completeCoreAgentCutover()
+    const archived = subject.cutoverStore.archive.mock.calls[0][0] as Array<{ source_kind: string; source_id: string }>
+    expect(archived.map((s) => `${s.source_kind}:${s.source_id}`)).toEqual(['agent_instance:worker-general'])
   })
 })

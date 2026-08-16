@@ -1398,10 +1398,6 @@ export interface ModulePackageInfo {
 }
 
 /** 安装选项 */
-export interface InstallOptions {
-  overwrite?: boolean
-  timeout?: number
-}
 
 // ============================================================================
 // Agent 实现与实例管理
@@ -1688,27 +1684,11 @@ export interface GetAgentInstanceResult {
   instance: AgentInstance
 }
 
-export interface CreateAgentInstanceParams {
-  implementation_id: string
-  name: string
-  specialization: string
-  max_concurrent_tasks?: number
-  auto_start?: boolean
-  start_priority?: number
-}
 
 export interface CreateAgentInstanceResult {
   instance: AgentInstance
 }
 
-export interface UpdateAgentInstanceParams {
-  instance_id: string
-  name?: string
-  specialization?: string
-  max_concurrent_tasks?: number
-  auto_start?: boolean
-  start_priority?: number
-}
 
 export interface UpdateAgentInstanceResult {
   instance: AgentInstance
@@ -1762,10 +1742,6 @@ export interface PreviewModulePackageResult {
   package_info: ModulePackageInfo
 }
 
-export interface InstallModuleParams {
-  source: ModuleSource
-  overwrite?: boolean
-}
 
 export interface InstallModuleResult {
   implementation: AgentImplementation

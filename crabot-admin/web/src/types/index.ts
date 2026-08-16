@@ -135,40 +135,9 @@ export interface AgentLLMRequirementsResponse {
   extra_schema: ExtraConfigSchema[]
 }
 
-export interface AgentImplementation {
-  id: string
-  name: string
-  type: 'builtin' | 'installed'
-  implementation_type: AgentImplementationType
-  engine: AgentEngine
-  supported_roles: Array<'front' | 'worker'>
-  model_format: ModelFormat
-  model_roles: ModelRoleDefinition[]
-  source?: {
-    type: 'local' | 'git'
-    path: string
-    ref?: string
-  }
-  installed_path?: string
-  version?: string
-  installed_at?: string
-  created_at: string
-  updated_at: string
-}
+// P6-D：live AgentImplementation/AgentInstance 类型已退役；core 身份为静态定义，
+// legacy 记录见 services/legacy-archive.ts 的 LegacyAgentArchiveSummary。
 
-export interface AgentInstance {
-  id: string
-  implementation_id: string
-  name: string
-  specialization: string
-  max_concurrent_tasks?: number
-  auto_start: boolean
-  start_priority: number
-  module_registered: boolean
-  module_port?: number
-  created_at: string
-  updated_at: string
-}
 
 export interface MCPServerRegistryEntry {
   id: string

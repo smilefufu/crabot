@@ -379,3 +379,34 @@ describe('core Agent cutover gate', () => {
     }
   })
 })
+
+describe('P6-D final negative: dynamic Agent registration impossible regardless of allowlist', () => {
+  it('无 legacy_archive 标记 + allowlist 错误包含 agent → 注册仍拒绝；同 shape channel 可注册', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-reg-gate-'))
+    // 第一道门：allowlist 包含 agent 时构造直接拒绝。
+    expect(() => new ModuleManager({
+      port: 0, port_range: { range_start: 19850, range_end: 19870 }, hotplug_allowed_types: ['channel', 'agent'], modules: [],
+    }, dataDir)).toThrowError(/must not contain reserved type "agent"/)
+    // 第二道门：正常 allowlist 下，无 legacy_archive 标记的 dynamic agent definition 注册仍拒绝。
+    const manager = new ModuleManager({
+      port: 0, port_range: { range_start: 19850, range_end: 19870 }, hotplug_allowed_types: ['channel'], modules: [],
+    }, dataDir) as any
+    try {
+      expect(() => manager.handleRegisterModuleDefinition({
+        module_definition: {
+          module_id: 'rogue-agent', module_type: 'agent', entry: 'node -e 1', auto_start: false, start_priority: 1,
+        },
+      })).toThrowError(expect.objectContaining({ code: 'MODULE_MANAGER_HOTPLUG_NOT_ALLOWED' }))
+
+      const registered = manager.handleRegisterModuleDefinition({
+        module_definition: {
+          module_id: 'some-channel', module_type: 'channel', entry: 'node -e 1', auto_start: false, start_priority: 1,
+        },
+      })
+      expect(registered.registered).toBe(true)
+    } finally {
+      await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+})

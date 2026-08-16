@@ -169,8 +169,6 @@ async function main() {
 
   // channel configs 待写入（id -> text）
   const pendingChannelConfigs = {}
-  // agent configs 待写入（id -> text）
-  const pendingAgentConfigs = {}
 
   const deps = {
     upsertProvider: makeUpsert('model_providers.json'),
@@ -188,20 +186,74 @@ async function main() {
       return makeUpsert('schedules.json')(sched)
     },
 
-    upsertAgentInstance: async (instance) => {
-      const status = makeUpsert('agent-instances.json')(instance)
-      // 同时尝试从归档读取对应的 agent-config
-      const id = instance.id
-      if (id && (status === 'imported' || status === 'overwritten')) {
-        const configText = await readArchiveTextFile(
-          archivePath,
-          `payload/config/agent-configs/${id}.json`
-        )
-        if (configText) {
-          pendingAgentConfigs[id] = configText
+    // P6-D §3.18.1：validate 纯读+校验（零写入），apply 在 preflight 通过后才执行。
+    validateAgentPayload: async (archive) => {
+      const implsText = await readArchiveTextFile(archive, 'payload/config/agent-implementations.json')
+      const instText = await readArchiveTextFile(archive, 'payload/config/agent-instances.json')
+      const impls = implsText ? JSON.parse(implsText) : []
+      const insts = instText ? JSON.parse(instText) : []
+      const nonCore = (Array.isArray(insts) ? insts : []).filter((i) => i && i.id !== 'crabot-agent')
+      if ((Array.isArray(impls) && impls.length > 0) || nonCore.length > 0) {
+        throw Object.assign(new Error(`旧 live Agent payload 不再支持导入（implementations=${impls.length}, non-core instances=${nonCore.length}）`), { code: 'ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED' })
+      }
+      let coreConfigRaw = null
+      const coreText = await readArchiveTextFile(archive, 'payload/config/agent-configs/crabot-agent.json')
+      if (coreText) {
+        const raw = JSON.parse(coreText)
+        if (raw.instance_id !== 'crabot-agent') {
+          throw Object.assign(new Error('agent-configs/crabot-agent.json 的 instance_id 不是 crabot-agent'), { code: 'ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED' })
+        }
+        const allowed = new Set(['powerful', 'cost_effective', 'vision', 'manager'])
+        const badKey = Object.keys(raw.model_config ?? {}).find((k) => !allowed.has(k))
+        if (badKey) {
+          throw Object.assign(new Error(`core config 含未知 model slot key: ${badKey}`), { code: 'ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED' })
+        }
+        coreConfigRaw = raw
+      }
+      let archiveRows = []
+      const archiveListText = await readArchiveTextFile(archive, 'payload/config/legacy-agent-archive.json')
+      if (archiveListText) {
+        archiveRows = JSON.parse(archiveListText)
+        if (!Array.isArray(archiveRows)) throw Object.assign(new Error('legacy-agent-archive.json 不是数组'), { code: 'ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT' })
+        const file = join(adminDataDir, 'legacy-agent-archive.json')
+        let existing = []
+        try { existing = JSON.parse(readFileSync(file, 'utf8')) } catch {}
+        const byId = new Map(existing.map((r) => [r.archive_id, r]))
+        for (const row of archiveRows) {
+          const old = byId.get(row.archive_id)
+          if (old && JSON.stringify(old.raw ?? null) !== JSON.stringify(row.raw ?? null)) {
+            throw Object.assign(new Error(`archive payload 冲突: ${row.archive_id}`), { code: 'ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT' })
+          }
         }
       }
-      return status
+      return { coreConfigRaw, archiveRows }
+    },
+
+    applyCoreAgentConfig: async (raw, conflict) => {
+      const dest = join(adminDataDir, 'agent-configs')
+      await mkdir(dest, { recursive: true })
+      const file = join(dest, 'crabot-agent.json')
+      const existed = existsSync(file)
+      if (existed && conflict === 'skip') {
+        return [{ kind: 'agent-config', id: 'crabot-agent', status: 'skipped' }]
+      }
+      await writeFile(file, JSON.stringify(raw, null, 2))
+      return [{ kind: 'agent-config', id: 'crabot-agent', status: existed ? 'overwritten' : 'imported' }]
+    },
+
+    applyLegacyArchiveRows: async (rows) => {
+      const file = join(adminDataDir, 'legacy-agent-archive.json')
+      let existing = []
+      try { existing = JSON.parse(readFileSync(file, 'utf8')) } catch {}
+      const byId = new Map(existing.map((r) => [r.archive_id, r]))
+      const results = []
+      for (const row of rows) {
+        if (byId.has(row.archive_id)) { results.push({ kind: 'legacy-agent-archive', id: row.archive_id, status: 'overwritten' }); continue }
+        byId.set(row.archive_id, row)
+        results.push({ kind: 'legacy-agent-archive', id: row.archive_id, status: 'imported' })
+      }
+      await writeFile(file, JSON.stringify([...byId.values()], null, 2))
+      return results
     },
 
     upsertChannel: async (channelInstance) => {
@@ -318,13 +370,6 @@ async function main() {
       // 写 pending channel configs
       for (const [id, text] of Object.entries(pendingChannelConfigs)) {
         const dir = join(adminDataDir, 'channel-configs')
-        mkdirSync(dir, { recursive: true })
-        writeFileSync(join(dir, `${id}.json`), text)
-      }
-
-      // 写 pending agent configs
-      for (const [id, text] of Object.entries(pendingAgentConfigs)) {
-        const dir = join(adminDataDir, 'agent-configs')
         mkdirSync(dir, { recursive: true })
         writeFileSync(join(dir, `${id}.json`), text)
       }

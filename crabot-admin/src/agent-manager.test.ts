@@ -1,61 +1,30 @@
 /**
- * AgentManager 测试
+ * AgentManager（P6-D 收窄为 core Agent 配置存储）测试。
+ *
+ * 动态 AgentImplementation/AgentInstance CRUD 已退役：旧「创建/更新/删除实例」断言
+ * 不是删除覆盖，而是改为「方法不存在/静态身份只读」的早拒绝语义断言。
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'fs/promises'
 import path from 'path'
 import { AgentManager } from './agent-manager.js'
-import type { RpcClient } from 'crabot-shared'
-import type { RuntimeManager } from './runtime-manager.js'
-import type {
-  CreateAgentInstanceParams,
-  UpdateAgentInstanceParams,
-  UpdateAgentConfigParams,
-  AgentImplementation,
-} from './types.js'
+import type { UpdateAgentConfigParams } from './types.js'
 
-describe('AgentManager', () => {
+describe('AgentManager (P6-D core-config-only)', () => {
   let agentManager: AgentManager
   let testDataDir: string
-  let mockRpcClient: RpcClient
-  let mockRuntimeManager: RuntimeManager
 
   beforeEach(async () => {
-    // 创建临时测试目录
-    testDataDir = path.join(process.cwd(), 'test-data', `agent-manager-${Date.now()}`)
+    testDataDir = path.join(process.cwd(), 'test-data', `agent-manager-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
     await fs.mkdir(testDataDir, { recursive: true })
-
     agentManager = new AgentManager(testDataDir)
     await agentManager.initialize()
-    await agentManager.initializeStandaloneDefaults()
-
-    // Mock RpcClient
-    mockRpcClient = {
-      registerModuleDefinition: vi.fn().mockResolvedValue({ module_id: 'test', registered: true }),
-      startModule: vi.fn().mockResolvedValue({ status: 'accepted', tracking_id: 'test-123' }),
-      stopModule: vi.fn().mockResolvedValue({ status: 'accepted', tracking_id: 'test-456' }),
-      unregisterModuleDefinition: vi.fn().mockResolvedValue({ module_id: 'test', unregistered: true }),
-    } as any
-
-    // Mock RuntimeManager
-    mockRuntimeManager = {
-      createStartCommand: vi.fn().mockReturnValue({
-        command: 'node',
-        args: ['dist/main.js'],
-        cwd: '/test/path',
-        env: {},
-      }),
-    } as any
+    await agentManager.initializeCoreDefaultsAndMigrations()
   })
 
   afterEach(async () => {
-    // 清理测试目录
-    try {
-      await fs.rm(testDataDir, { recursive: true, force: true })
-    } catch {
-      // 忽略清理错误
-    }
+    try { await fs.rm(testDataDir, { recursive: true, force: true }) } catch { /* ignore */ }
   })
 
   it('loads persisted core config without default writes and preserves it across restart', async () => {
@@ -76,269 +45,42 @@ describe('AgentManager', () => {
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
-  describe('Implementation CRUD', () => {
-    it('should list default implementation', () => {
-      const result = agentManager.listImplementations()
-      expect(result.items).toHaveLength(1)
-      expect(result.items[0].id).toBe('default')
-      expect(result.items[0].type).toBe('builtin')
-    })
-
-    it('should filter implementations by type', () => {
-      const result = agentManager.listImplementations({ type: 'builtin', page: 1, page_size: 20 })
-      expect(result.items).toHaveLength(1)
-      expect(result.items[0].type).toBe('builtin')
-    })
-
-    it('should filter implementations by engine', () => {
-      const result = agentManager.listImplementations({ engine: 'claude-agent-sdk', page: 1, page_size: 20 })
-      expect(result.items).toHaveLength(1)
-      expect(result.items[0].engine).toBe('claude-agent-sdk')
-    })
-
-    it('should paginate implementations', () => {
-      const result = agentManager.listImplementations({ page: 1, page_size: 1 })
-      expect(result.items).toHaveLength(1)
-      expect(result.pagination.page).toBe(1)
-      expect(result.pagination.page_size).toBe(1)
-      expect(result.pagination.total_items).toBe(1)
-    })
-
-    it('should get implementation by id', () => {
-      const impl = agentManager.getImplementation('default')
-      expect(impl).toBeDefined()
-      expect(impl?.id).toBe('default')
-    })
-
-    it('should return undefined for non-existent implementation', () => {
-      const impl = agentManager.getImplementation('non-existent')
-      expect(impl).toBeUndefined()
-    })
-
-    it('should add new implementation', async () => {
-      const newImpl: AgentImplementation = {
-        id: 'test-impl',
-        name: 'Test Implementation',
-        type: 'installed',
-        implementation_type: 'full_code',
-        engine: 'claude-agent-sdk',
-        supported_roles: ['worker'],
-        model_format: 'anthropic',
-        model_roles: [],
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+  describe('退役语义（替代旧 dynamic CRUD 断言）', () => {
+    it('动态 implementation/instance 写方法不存在', () => {
+      const m = agentManager as unknown as Record<string, unknown>
+      for (const key of ['addImplementation', 'removeImplementation', 'createInstance', 'updateInstance', 'deleteInstance', 'getAutoStartInstances']) {
+        expect(m[key]).toBeUndefined()
       }
-
-      await agentManager.addImplementation(newImpl)
-      const impl = agentManager.getImplementation('test-impl')
-      expect(impl).toBeDefined()
-      expect(impl?.name).toBe('Test Implementation')
     })
 
-    it('should not remove builtin default implementation', async () => {
-      await expect(agentManager.removeImplementation('default')).rejects.toThrow(
-        'Cannot remove builtin default implementation'
-      )
+    it('静态身份只读：getImplementation(default/crabot-agent) 返回静态定义，其它返回 undefined', () => {
+      expect(agentManager.getImplementation('default')?.id).toBe('crabot-agent')
+      expect(agentManager.getImplementation('crabot-agent')?.id).toBe('crabot-agent')
+      expect(agentManager.getImplementation('whatever')).toBeUndefined()
+      expect(agentManager.getInstance('crabot-agent')?.id).toBe('crabot-agent')
+      expect(agentManager.getInstance('other')).toBeUndefined()
     })
 
-    it('should not remove implementation with existing instances', async () => {
-      // 先添加一个实现
-      const newImpl: AgentImplementation = {
-        id: 'test-impl-2',
-        name: 'Test Implementation 2',
-        type: 'installed',
-        implementation_type: 'full_code',
-        engine: 'claude-agent-sdk',
-        supported_roles: ['worker'],
-        model_format: 'anthropic',
-        model_roles: [],
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }
-      await agentManager.addImplementation(newImpl)
-
-      // 创建一个使用该实现的实例
-      const params: CreateAgentInstanceParams = {
-        implementation_id: 'test-impl-2',
-        name: 'Test Instance',
-        specialization: 'Test',
-      }
-      await agentManager.createInstance(params, true)
-
-      // 尝试删除实现应该失败
-      await expect(agentManager.removeImplementation('test-impl-2')).rejects.toThrow(
-        'Cannot remove implementation with existing instances'
-      )
-    })
-  })
-
-  describe('Instance CRUD', () => {
-    it('should list default instance (crabot-agent)', () => {
-      const result = agentManager.listInstances()
-      expect(result.items).toHaveLength(1)
-      expect(result.items[0].id).toBe('crabot-agent')
-      expect(result.items[0].name).toBe('Crabot Agent')
+    it('stale/malformed legacy registry 文件不影响 core config 与静态身份', async () => {
+      await fs.writeFile(path.join(testDataDir, 'agent-implementations.json'), '[{"id":"evil","model_roles":[{"key":"hacked"}]}]')
+      await fs.writeFile(path.join(testDataDir, 'agent-instances.json'), 'not json')
+      await fs.mkdir(path.join(testDataDir, 'agent-configs'), { recursive: true })
+      await fs.writeFile(path.join(testDataDir, 'agent-configs', 'front-agent.json'), JSON.stringify({ instance_id: 'front-agent', system_prompt: 'legacy' }))
+      const manager = new AgentManager(testDataDir)
+      await manager.initialize()
+      await manager.initializeCoreDefaultsAndMigrations()
+      expect(manager.getImplementation('default')?.model_roles.some((r) => r.key === 'powerful')).toBe(true)
+      expect(manager.getConfig('front-agent')).toBeUndefined()
+      expect(manager.getConfig('crabot-agent')).toBeDefined()
     })
 
-    it('should filter instances by implementation_id', () => {
-      const result = agentManager.listInstances({ implementation_id: 'default', page: 1, page_size: 20 })
-      expect(result.items.every(i => i.implementation_id === 'default')).toBe(true)
+    it('空 core config 是合法未配置状态（不自动创建 dynamic instance）', async () => {
+      const fresh = new AgentManager(path.join(testDataDir, 'fresh'))
+      await fresh.initialize()
+      expect(fresh.getConfig('crabot-agent')).toBeUndefined()
+      const m = fresh as unknown as Record<string, unknown>
+      expect(m.createInstance).toBeUndefined()
     })
-
-    it('should filter instances by auto_start', () => {
-      const result = agentManager.listInstances({ auto_start: true, page: 1, page_size: 20 })
-      expect(result.items.every(i => i.auto_start === true)).toBe(true)
-    })
-
-    it('should get instance by id', () => {
-      const instance = agentManager.getInstance('crabot-agent')
-      expect(instance).toBeDefined()
-      expect(instance?.id).toBe('crabot-agent')
-    })
-
-    it('should create new instance', async () => {
-      const params: CreateAgentInstanceParams = {
-        implementation_id: 'default',
-        name: 'Test Worker',
-        specialization: 'Testing',
-        max_concurrent_tasks: 5,
-        auto_start: false,
-        start_priority: 30,
-      }
-
-      const instance = await agentManager.createInstance(params, true)
-      expect(instance.id).toBe('test-worker')
-      expect(instance.name).toBe('Test Worker')
-      expect(instance.max_concurrent_tasks).toBe(5)
-      expect(instance.auto_start).toBe(false)
-      expect(instance.start_priority).toBe(30)
-      expect(instance.module_registered).toBe(false)
-    })
-
-    it('should create instance with default values', async () => {
-      const params: CreateAgentInstanceParams = {
-        implementation_id: 'default',
-        name: 'Test Agent',
-        specialization: 'Testing',
-      }
-
-      const instance = await agentManager.createInstance(params, true)
-      expect(instance.max_concurrent_tasks).toBe(5)
-      expect(instance.auto_start).toBe(true)
-      expect(instance.start_priority).toBe(20)
-    })
-
-    it('should throw error for non-existent implementation', async () => {
-      const params: CreateAgentInstanceParams = {
-        implementation_id: 'non-existent',
-        name: 'Test',
-        specialization: 'Test',
-      }
-
-      await expect(agentManager.createInstance(params, true)).rejects.toThrow(
-        'Implementation not found: non-existent'
-      )
-    })
-
-    it('should throw error for duplicate instance id', async () => {
-      const params: CreateAgentInstanceParams = {
-        implementation_id: 'default',
-        name: 'Crabot Agent', // 会生成 id: crabot-agent
-        specialization: 'Test',
-      }
-
-      await expect(agentManager.createInstance(params, true)).rejects.toThrow(
-        'Instance already exists: crabot-agent'
-      )
-    })
-
-    it('should update instance', async () => {
-      const params: UpdateAgentInstanceParams = {
-        instance_id: 'crabot-agent',
-        name: 'Updated Agent',
-        specialization: 'Updated specialization',
-        max_concurrent_tasks: 10,
-      }
-
-      const updated = await agentManager.updateInstance(params)
-      expect(updated.name).toBe('Updated Agent')
-      expect(updated.specialization).toBe('Updated specialization')
-      expect(updated.max_concurrent_tasks).toBe(10)
-    })
-
-    it('should throw error when updating non-existent instance', async () => {
-      const params: UpdateAgentInstanceParams = {
-        instance_id: 'non-existent',
-        name: 'Test',
-      }
-
-      await expect(agentManager.updateInstance(params)).rejects.toThrow(
-        'Instance not found: non-existent'
-      )
-    })
-
-    it('should delete instance', async () => {
-      // 先创建一个实例
-      const createParams: CreateAgentInstanceParams = {
-        implementation_id: 'default',
-        name: 'To Delete',
-        specialization: 'Test',
-      }
-      await agentManager.createInstance(createParams, true)
-
-      // 删除实例
-      await agentManager.deleteInstance('to-delete')
-
-      // 验证已删除
-      const instance = agentManager.getInstance('to-delete')
-      expect(instance).toBeUndefined()
-    })
-
-    it('should throw error when deleting non-existent instance', async () => {
-      await expect(agentManager.deleteInstance('non-existent')).rejects.toThrow(
-        'Instance not found: non-existent'
-      )
-    })
-  })
-
-  describe('Instance with Module Registration', () => {
-    let installedImpl: AgentImplementation
-
-    beforeEach(async () => {
-      // 创建一个已安装的实现
-      installedImpl = {
-        id: 'installed-test',
-        name: 'Installed Test',
-        type: 'installed',
-        implementation_type: 'full_code',
-        engine: 'claude-agent-sdk',
-        supported_roles: ['worker'],
-        model_format: 'anthropic',
-        model_roles: [],
-        installed_path: '/test/installed/path',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }
-      await agentManager.addImplementation(installedImpl)
-    })
-
-    it('rejects dynamic module registration before runtime, MM, or persistence side effects', async () => {
-      const params: CreateAgentInstanceParams = {
-        implementation_id: 'installed-test',
-        name: 'Test Module Instance',
-        specialization: 'Test',
-        auto_start: true,
-      }
-
-      await expect(agentManager.createInstance(params))
-        .rejects.toMatchObject({ code: 'ADMIN_HOTPLUG_NOT_ALLOWED' })
-
-      expect(mockRuntimeManager.createStartCommand).not.toHaveBeenCalled()
-      expect(mockRpcClient.registerModuleDefinition).not.toHaveBeenCalled()
-      expect(mockRpcClient.startModule).not.toHaveBeenCalled()
-      expect(agentManager.getInstance('test-module-instance')).toBeUndefined()
-    })
-
   })
 
   describe('Config CRUD', () => {
@@ -462,79 +204,4 @@ describe('AgentManager', () => {
     })
   })
 
-  describe('Auto-start instances', () => {
-    it('should get auto-start instances sorted by priority', () => {
-      const instances = agentManager.getAutoStartInstances()
-      expect(instances.length).toBeGreaterThanOrEqual(1)
-      expect(instances.every(i => i.auto_start === true)).toBe(true)
-      expect(instances[0].id).toBe('crabot-agent')
-
-      // 验证排序
-      for (let i = 1; i < instances.length; i++) {
-        expect(instances[i].start_priority).toBeGreaterThanOrEqual(instances[i - 1].start_priority)
-      }
-    })
-  })
-
-  describe('Data persistence', () => {
-    it('should persist implementations', async () => {
-      const newImpl: AgentImplementation = {
-        id: 'persist-test',
-        name: 'Persist Test',
-        type: 'installed',
-        implementation_type: 'full_code',
-        engine: 'claude-agent-sdk',
-        supported_roles: ['worker'],
-        model_format: 'anthropic',
-        model_roles: [],
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }
-
-      await agentManager.addImplementation(newImpl)
-
-      // 创建新的 AgentManager 实例来验证持久化
-      const newManager = new AgentManager(testDataDir)
-      await newManager.initialize()
-
-      const impl = newManager.getImplementation('persist-test')
-      expect(impl).toBeDefined()
-      expect(impl?.name).toBe('Persist Test')
-    })
-
-    it('should persist instances', async () => {
-      const params: CreateAgentInstanceParams = {
-        implementation_id: 'default',
-        name: 'Persist Instance',
-        specialization: 'Test',
-      }
-
-      await agentManager.createInstance(params, true)
-
-      // 创建新的 AgentManager 实例来验证持久化
-      const newManager = new AgentManager(testDataDir)
-      await newManager.initialize()
-
-      const instance = newManager.getInstance('persist-instance')
-      expect(instance).toBeDefined()
-      expect(instance?.name).toBe('Persist Instance')
-    })
-
-    it('should persist configs', async () => {
-      const params: UpdateAgentConfigParams = {
-        instance_id: 'crabot-agent',
-        system_prompt: 'Persisted prompt',
-      }
-
-      await agentManager.updateConfig(params)
-
-      // 创建新的 AgentManager 实例来验证持久化
-      const newManager = new AgentManager(testDataDir)
-      await newManager.initialize()
-
-      const config = newManager.getConfig('crabot-agent')
-      expect(config).toBeDefined()
-      expect(config?.system_prompt).toBe('Persisted prompt')
-    })
-  })
 })

@@ -4,41 +4,13 @@
 
 import { api } from './api'
 import type {
-  AgentInstance,
   AgentInstanceConfig,
-  AgentImplementation,
   AgentLLMRequirementsResponse,
-  PaginatedResponse,
 } from '../types'
 
+// P6-D：动态 AgentImplementation/AgentInstance 的读写服务已退役。
+// 唯一 core Agent 配置走 /agent/config；legacy 记录见 services/legacy-archive.ts。
 export const agentService = {
-  async listInstances(): Promise<PaginatedResponse<AgentInstance>> {
-    return api.get<PaginatedResponse<AgentInstance>>('/agent-instances')
-  },
-
-  async getInstance(id: string): Promise<AgentInstance> {
-    return api.get<AgentInstance>(`/agent-instances/${id}`)
-  },
-
-  async getInstanceConfig(id: string): Promise<AgentInstanceConfig> {
-    const response = await api.get<{ config: AgentInstanceConfig }>(`/agent-instances/${id}/config`)
-    return response.config
-  },
-
-  async updateInstanceConfig(
-    id: string,
-    config: Partial<AgentInstanceConfig>
-  ): Promise<AgentInstanceConfig> {
-    return api.patch<AgentInstanceConfig>(
-      `/agent-instances/${id}/config`,
-      config
-    )
-  },
-
-  async listImplementations(): Promise<PaginatedResponse<AgentImplementation>> {
-    return api.get<PaginatedResponse<AgentImplementation>>('/agent-implementations')
-  },
-
   async getLLMRequirements(): Promise<AgentLLMRequirementsResponse> {
     return api.get<AgentLLMRequirementsResponse>('/agent-llm-requirements')
   },

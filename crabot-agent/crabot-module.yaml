@@ -1,12 +1,16 @@
-# Crabot Unified Agent Module
-# 合并 Flow + Agent 的统一智能体模块
+# Crabot Core Agent Module（P6-D：最小 core build metadata）
+#
+# 本文件只是 core 模块的构建/身份元数据，不是可安装的第三方 Agent 包：
+# - module_type: agent 的 manifest 在 ModuleValidator 处一律拒绝安装（HOTPLUG_NOT_ALLOWED）
+# - 行为 schema / model slots 的唯一权威是 crabot-admin/src/core-agent-definition.ts
+#   （CORE_AGENT_DEFINITION，protocol-admin §3.19.8），此处不再保留历史 model_roles 副本。
 
 module_id: crabot-agent
-name: Crabot Unified Agent
+name: Crabot Core Agent
 version: 0.2.0
 module_type: agent
-description: Unified Agent with orchestration and intelligence capabilities
-protocol_version: "0.2.0"
+description: Core Agent（唯一内置 Agent；Manager/Worker 架构，protocol-agent-v3）
+protocol_version: "3.1.1"
 
 # 运行时配置
 runtime:
@@ -18,7 +22,7 @@ entry: dist/main.js
 install: npm install
 build: npm run build
 
-# 事件订阅 (原 Flow 的订阅)
+# 事件订阅
 subscriptions:
   - channel.message_received
   - admin.task_status_changed
@@ -26,44 +30,9 @@ subscriptions:
   - admin.friend_updated
   - admin.friend_deleted
 
-# Agent 特性 (支持多角色)
-agent:
-  engine: unified
-  supported_roles: [front, worker, both]
-  model_format: anthropic
-  model_roles:
-    - key: default
-      description: 默认执行模型，Front 和 Worker 默认使用
-      required: true
-      used_by: [front, worker]
-      recommended_capabilities: [tool_use, long_context]
-    - key: fast
-      description: 快速响应模型，用于 Front Agent 快速分诊（可选）
-      required: false
-      used_by: [front]
-      recommended_capabilities: [tool_use, fast]
-    - key: smart
-      description: 深度推理模型，用于 Worker Agent 复杂任务（可选）
-      required: false
-      used_by: [worker]
-      recommended_capabilities: [reasoning, long_context]
-
-# 编排特性 (原 Flow)
-orchestration:
-  features:
-    - message_routing
-    - permission_checking
-    - context_assembly
-    - switchmap_merging
-    - worker_selection
-    - decision_dispatching
-
 # 元数据
 author: Crabot Team
 license: MIT
 keywords:
   - crabot
   - agent
-  - orchestration
-  - ai
-  - claude

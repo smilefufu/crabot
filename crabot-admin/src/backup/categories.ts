@@ -12,8 +12,13 @@ export const CATEGORY_PATHS: Record<BackupCategory, CategoryPath[]> = {
   config: [
     { rel: 'global_model_config.json', kind: 'file' },
     { rel: 'model_providers.json', kind: 'file' },
-    { rel: 'agent-instances.json', kind: 'file' },
-    { rel: 'agent-configs', kind: 'dir' },
+    // P6-D §3.18.1：agent-instances.json 不再导出（live 形态退役；core 身份为静态定义）；
+    // agent-configs 只收 exact core 配置——legacy 配置文件已在 legacy-agent-archive.json
+    // 中归档，整目录导出会让「升级后自备份」被 import preflight 整包拒绝。
+    { rel: 'agent-configs/crabot-agent.json', kind: 'file' },
+    // P6-D：legacy archive/tombstone 纳入 authenticated backup/export（§3.18）
+    { rel: 'legacy-agent-archive.json', kind: 'file' },
+    { rel: 'legacy-agent-tombstones.json', kind: 'file' },
     { rel: 'templates.json', kind: 'file' },
     { rel: 'subagents.json', kind: 'file' },
     { rel: 'mcp-servers.json', kind: 'file' },

@@ -1,7 +1,11 @@
 /**
- * Agent 管理器
+ * Core Agent 配置存储（P6-D 收窄）。
  *
- * 负责 Agent 实现（Implementation）、实例（Instance）和配置（Config）的管理
+ * 只负责 exact `crabot-agent` 的行为配置（system prompt / model refs / timezone / extra）
+ * 与旧 model_config key 迁移。动态 AgentImplementation/AgentInstance registry 已退役：
+ * - 静态身份：CORE_AGENT_DEFINITION（core-agent-definition.ts）+ CORE_AGENT_INSTANCE
+ * - 存量记录：legacy-agent-archive.json（CoreAgentCutoverStore/LegacyAgentArchiveStore）
+ * 本文件不再读写 agent-implementations.json / agent-instances.json。
  */
 
 import fs from 'fs/promises'
@@ -12,8 +16,6 @@ import type {
   AgentImplementation,
   AgentInstance,
   AgentInstanceConfig,
-  CreateAgentInstanceParams,
-  UpdateAgentInstanceParams,
   UpdateAgentConfigParams,
   ListAgentImplementationsParams,
   ListAgentInstancesParams,
@@ -22,6 +24,7 @@ import type {
 } from './types.js'
 
 import type { ConfigDomain, CoreAgentConfigMutationContext } from './core-agent-config-revision-store.js'
+import { CORE_AGENT_DEFINITION } from './core-agent-definition.js'
 
 export type ConfigMutationRunner = (
   domains: ConfigDomain[],
@@ -30,163 +33,19 @@ export type ConfigMutationRunner = (
 ) => Promise<void>
 
 
-export const DEFAULT_IMPLEMENTATION: AgentImplementation = {
-  id: 'default',
-  name: 'Crabot Default Agent',
-  type: 'builtin',
-  implementation_type: 'config_only',
-  engine: 'claude-agent-sdk',
-  supported_roles: ['front', 'worker'],
-  model_format: 'anthropic',
-  model_roles: [
-    {
-      key: 'powerful',
-      description: '强力模型，用于主 worker / 复杂推理 / planning',
-      required: true,
-      recommended_capabilities: ['tool_use', 'long_context'],
-      used_by: ['front', 'worker'],
-      fallback: 'global_default',
-    },
-    {
-      key: 'cost_effective',
-      description: '性价比模型，用于简单执行 / 摘要 / 低复杂度调用',
-      required: false,
-      recommended_capabilities: ['fast'],
-      used_by: ['front', 'worker'],
-      fallback: 'global_default',
-    },
-    {
-      key: 'vision',
-      description: '视觉模型，用于截图分析 / UI 识别 / 图片内容理解',
-      required: false,
-      recommended_capabilities: ['vision'],
-      used_by: ['worker'],
-      fallback: 'none',
-    },
-    {
-      // protocol-agent-v3.md §11：manager loop 的对话与工具调用决策用模型。
-      // fallback 特意选 'none'（而不是 'global_default'）：未配置时不由 Admin 自动填全局默认，
-      // 而是把"未配置"这个事实原样透传给 agent 侧——agent 按 model_config.manager ?? model_config.powerful
-      // 解析（见 crabot-agent/src/manager/model-slot.ts），这样当用户已显式给 powerful 配了非默认
-      // provider/model 时，manager 会跟着用 powerful 的实际值，而不是被 Admin 全局默认覆盖掉。
-      key: 'manager',
-      description: 'Manager loop 用模型，负责对话与决策；未配置时回退到 powerful',
-      required: false,
-      recommended_capabilities: ['tool_use', 'long_context'],
-      used_by: ['front'],
-      fallback: 'none',
-    },
-  ],
-  extra_schema: [
-    {
-      key: 'progress_report_master_private',
-      title: 'Master 私聊汇报',
-      description: 'Master 私聊场景下的进度汇报行为',
-      type: 'select',
-      default: 'digest',
-      options: [
-        { value: 'silent', label: '静默' },
-        { value: 'text_forward', label: '文本转发' },
-        { value: 'digest', label: '定期摘要' },
-      ],
-    },
-    {
-      key: 'progress_report_other_private',
-      title: '其他私聊汇报',
-      description: '非 Master 的普通好友私聊场景下的进度汇报行为',
-      type: 'select',
-      default: 'silent',
-      options: [
-        { value: 'silent', label: '静默' },
-        { value: 'text_forward', label: '文本转发' },
-        { value: 'digest', label: '定期摘要' },
-      ],
-    },
-    {
-      key: 'progress_report_group',
-      title: '群聊汇报',
-      description: '群聊场景下的进度汇报行为',
-      type: 'select',
-      default: 'silent',
-      options: [
-        { value: 'silent', label: '静默' },
-        { value: 'text_forward', label: '文本转发' },
-        { value: 'digest', label: '定期摘要' },
-      ],
-    },
-    {
-      key: 'progress_digest_interval_seconds',
-      title: '摘要间隔（秒）',
-      description: '定期摘要模式下的汇报间隔',
-      type: 'number',
-      default: 1800,
-      visible_when: {
-        any_of: [
-          'progress_report_master_private',
-          'progress_report_other_private',
-          'progress_report_group',
-        ],
-        equals: 'digest',
-      },
-    },
-    {
-      key: 'progress_digest_mode',
-      title: '摘要模式',
-      description: 'llm: 用 LLM 生成摘要；extract: 直接提取关键句',
-      type: 'select',
-      default: 'llm',
-      options: [
-        { value: 'llm', label: 'LLM 摘要' },
-        { value: 'extract', label: '提取关键句' },
-      ],
-      visible_when: {
-        any_of: [
-          'progress_report_master_private',
-          'progress_report_other_private',
-          'progress_report_group',
-        ],
-        equals: 'digest',
-      },
-    },
-    {
-      key: 'group_attention_min_ms',
-      title: '群聊最小巡检间隔（ms）',
-      description: 'Agent 刚回复后的最小巡检间隔',
-      type: 'number',
-      default: 120000,
-    },
-    {
-      key: 'group_attention_max_ms',
-      title: '群聊最大巡检间隔（ms）',
-      description: '群聊巡检间隔的上限',
-      type: 'number',
-      default: 1800000,
-    },
-    {
-      key: 'goal_mode_enabled',
-      title: '目标模式',
-      description: '启用后 Worker 可设定任务目标承诺，完成时触发独立审计校验；关闭后直接完成任务无需审计',
-      type: 'boolean',
-      default: true,
-    },
-  ],
-  version: '0.1.0',
-  created_at: '2026-01-01T00:00:00.000Z',
-  updated_at: '2026-01-01T00:00:00.000Z',
-}
-
-const DEFAULT_AGENT_INSTANCE: AgentInstance = {
+/** 唯一 core Agent 实例身份（静态，release-owned；不再是可 CRUD 的 registry record）。 */
+export const CORE_AGENT_INSTANCE: AgentInstance = Object.freeze({
   id: 'crabot-agent',
-  implementation_id: 'default',
+  implementation_id: 'crabot-agent',
   name: 'Crabot Agent',
-  specialization: 'Unified agent with front and worker capabilities',
+  specialization: 'Unified core agent',
   max_concurrent_tasks: 5,
   auto_start: true,
   start_priority: 20,
-  module_registered: false,
+  module_registered: true,
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
-}
+})
 
 const DEFAULT_AGENT_CONFIG: AgentInstanceConfig = {
   instance_id: 'crabot-agent',
@@ -201,15 +60,12 @@ const DEFAULT_AGENT_CONFIG: AgentInstanceConfig = {
 // ============================================================================
 
 export class AgentManager {
-  private implementations: Map<string, AgentImplementation> = new Map()
-  private instances: Map<string, AgentInstance> = new Map()
+  /** 仅 exact core 的行为配置（legacy instance config 只存在于 archive，不再进运行时 map）。 */
   private configs: Map<string, AgentInstanceConfig> = new Map()
   /** Loaded snapshot configs that must only be persisted after coordinator recovery. */
   private readonly pendingSnapshotConfigMigrations = new Set<string>()
 
   private readonly dataDir: string
-  private readonly implementationsFilePath: string
-  private readonly instancesFilePath: string
   private readonly configsDir: string
   private onConfigChangedCallback: (() => void) | null = null
   private mutationRunner: ConfigMutationRunner | null = null
@@ -218,8 +74,6 @@ export class AgentManager {
 
   constructor(dataDir: string) {
     this.dataDir = dataDir
-    this.implementationsFilePath = path.join(dataDir, 'agent-implementations.json')
-    this.instancesFilePath = path.join(dataDir, 'agent-instances.json')
     this.configsDir = path.join(dataDir, 'agent-configs')
   }
 
@@ -229,222 +83,25 @@ export class AgentManager {
     await this.loadData()
   }
 
-  /**
-   * Startup load is deliberately write-free. Admin must attach its coordinator after
-   * all persisted source managers are loaded, then call this method for any migration.
-   */
-  async initializeStandaloneDefaults(): Promise<void> {
-    if (this.mutationRunner) throw new Error('Standalone defaults are not allowed with a coordinator')
-    await this.ensureDefaults()
-  }
-
   async initializeCoreDefaultsAndMigrations(): Promise<void> {
-    await this.ensureDefaults()
+    await this.ensureCoreConfig()
     await this.migrateAllModelConfigs()
   }
 
   // ============================================================================
-  // Implementation CRUD
+  // 静态身份（只读；动态 Implementation/Instance registry 已退役）
   // ============================================================================
 
-  listImplementations(params?: ListAgentImplementationsParams): {
-    items: AgentImplementation[]
-    pagination: { page: number; page_size: number; total_items: number; total_pages: number }
-  } {
-    let items = Array.from(this.implementations.values())
-
-    if (params?.type) {
-      items = items.filter((i) => i.type === params.type)
-    }
-    if (params?.engine) {
-      items = items.filter((i) => i.engine === params.engine)
-    }
-
-    const page = params?.page ?? 1
-    const pageSize = params?.page_size ?? 20
-    const total = items.length
-    const totalPages = Math.ceil(total / pageSize)
-    const offset = (page - 1) * pageSize
-
-    return {
-      items: items.slice(offset, offset + pageSize),
-      pagination: { page, page_size: pageSize, total_items: total, total_pages: totalPages },
-    }
-  }
-
+  /** 唯一可读 implementation 是静态 core 定义（兼容旧 id 'default'）。 */
   getImplementation(id: string): AgentImplementation | undefined {
-    return this.implementations.get(id)
+    return id === 'crabot-agent' || id === 'default' ? CORE_AGENT_DEFINITION : undefined
   }
 
-  async addImplementation(impl: AgentImplementation): Promise<AgentImplementation> {
-    this.implementations.set(impl.id, impl)
-    await this.saveImplementations()
-    return impl
-  }
-
-  async removeImplementation(id: string): Promise<void> {
-    if (id === 'default') {
-      throw new Error('Cannot remove builtin default implementation')
-    }
-
-    const hasInstances = Array.from(this.instances.values()).some(
-      (inst) => inst.implementation_id === id
-    )
-    if (hasInstances) {
-      throw new Error('Cannot remove implementation with existing instances')
-    }
-
-    this.implementations.delete(id)
-    await this.saveImplementations()
-  }
-
-  // ============================================================================
-  // Instance CRUD
-  // ============================================================================
-
-  listInstances(params?: ListAgentInstancesParams): {
-    items: AgentInstance[]
-    pagination: { page: number; page_size: number; total_items: number; total_pages: number }
-  } {
-    let items = Array.from(this.instances.values())
-
-    if (params?.implementation_id) {
-      items = items.filter((i) => i.implementation_id === params.implementation_id)
-    }
-    if (params?.auto_start !== undefined) {
-      items = items.filter((i) => i.auto_start === params.auto_start)
-    }
-
-    const page = params?.page ?? 1
-    const pageSize = params?.page_size ?? 20
-    const total = items.length
-    const totalPages = Math.ceil(total / pageSize)
-    const offset = (page - 1) * pageSize
-
-    return {
-      items: items.slice(offset, offset + pageSize),
-      pagination: { page, page_size: pageSize, total_items: total, total_pages: totalPages },
-    }
-  }
-
+  /** 唯一实例是 exact core 静态身份。 */
   getInstance(id: string): AgentInstance | undefined {
-    return this.instances.get(id)
+    return id === 'crabot-agent' ? CORE_AGENT_INSTANCE : undefined
   }
 
-  /**
-   * Test/import compatibility seam. Production entrypoints never pass true; live dynamic Agent
-   * creation remains rejected before any write. P6-D removes this legacy record constructor.
-   */
-  async createInstance(
-    params: CreateAgentInstanceParams,
-    allowLegacyArchiveWrite = false
-  ): Promise<AgentInstance> {
-    if (!allowLegacyArchiveWrite) {
-      throw Object.assign(new Error('Dynamic Agent instances are retired; only builtin crabot-agent is supported'), {
-        code: 'ADMIN_HOTPLUG_NOT_ALLOWED',
-      })
-    }
-    const impl = this.implementations.get(params.implementation_id)
-    if (!impl) {
-      throw new Error(`Implementation not found: ${params.implementation_id}`)
-    }
-
-    const now = generateTimestamp()
-    const instance: AgentInstance = {
-      id: params.name.toLowerCase().replace(/\s+/g, '-'),
-      implementation_id: params.implementation_id,
-      name: params.name,
-      specialization: params.specialization,
-      max_concurrent_tasks: params.max_concurrent_tasks ?? 5,
-      auto_start: params.auto_start ?? true,
-      start_priority: params.start_priority ?? 20,
-      module_registered: false,
-      created_at: now,
-      updated_at: now,
-    }
-
-    if (this.instances.has(instance.id)) {
-      throw new Error(`Instance already exists: ${instance.id}`)
-    }
-
-    this.instances.set(instance.id, instance)
-    await this.saveInstances()
-
-    // 创建默认配置
-    const defaultConfig: AgentInstanceConfig = {
-      instance_id: instance.id,
-      system_prompt: '',
-      model_config: {},
-      max_iterations: 10,
-      tools_readonly: false,
-    }
-    this.configs.set(instance.id, defaultConfig)
-    await this.saveConfig(instance.id)
-
-    return instance
-  }
-
-  async updateInstance(params: UpdateAgentInstanceParams): Promise<AgentInstance> {
-    const existing = this.instances.get(params.instance_id)
-    if (!existing) {
-      throw new Error(`Instance not found: ${params.instance_id}`)
-    }
-
-    const updated: AgentInstance = {
-      ...existing,
-      ...(params.name !== undefined && { name: params.name }),
-      ...(params.specialization !== undefined && { specialization: params.specialization }),
-      ...(params.max_concurrent_tasks !== undefined && { max_concurrent_tasks: params.max_concurrent_tasks }),
-      ...(params.auto_start !== undefined && { auto_start: params.auto_start }),
-      ...(params.start_priority !== undefined && { start_priority: params.start_priority }),
-      updated_at: generateTimestamp(),
-    }
-
-    this.instances.set(params.instance_id, updated)
-    await this.saveInstances()
-    return updated
-  }
-
-  async deleteInstance(id: string, rpcClient?: RpcClient): Promise<void> {
-    const instance = this.instances.get(id)
-    if (!instance) {
-      throw new Error(`Instance not found: ${id}`)
-    }
-
-    const impl = this.implementations.get(instance.implementation_id)
-
-    // 如果是已安装的实现且已注册，先停止并注销模块
-    if (impl?.type === 'installed' && instance.module_registered && rpcClient) {
-      try {
-        await rpcClient.stopModule(id, 'admin')
-        await rpcClient.unregisterModuleDefinition(id, 'admin')
-        console.log(`[AgentManager] Module stopped and unregistered: ${id}`)
-      } catch (error) {
-        console.warn(`[AgentManager] Failed to cleanup module ${id}:`, error)
-      }
-    }
-
-    this.instances.delete(id)
-    this.configs.delete(id)
-    await this.saveInstances()
-
-    // 删除配置文件
-    const configPath = path.join(this.configsDir, `${id}.json`)
-    try {
-      await fs.unlink(configPath)
-    } catch {
-      // 配置文件可能不存在
-    }
-  }
-
-  private async deleteConfig(instanceId: string): Promise<void> {
-    const configPath = path.join(this.configsDir, `${instanceId}.json`)
-    try {
-      await fs.unlink(configPath)
-    } catch {
-      // 配置文件可能不存在
-    }
-  }
 
   // ============================================================================
   // Config CRUD
@@ -554,20 +211,11 @@ export class AgentManager {
     for (const [instanceId, config] of this.configs.entries()) {
       for (const [roleKey, ref] of Object.entries(config.model_config ?? {})) {
         if (ref.provider_id === providerId) {
-          const instance = this.instances.get(instanceId)
-          const name = instance?.name || instanceId
-          refs.push(`Agent "${name}" 的 ${roleKey} 角色`)
+          refs.push(`Agent "${CORE_AGENT_INSTANCE.name}" 的 ${roleKey} 角色`)
         }
       }
     }
     return refs
-  }
-
-  /** 获取所有自动启动的实例（按 start_priority 排序） */
-  getAutoStartInstances(): AgentInstance[] {
-    return Array.from(this.instances.values())
-      .filter((i) => i.auto_start)
-      .sort((a, b) => a.start_priority - b.start_priority)
   }
 
   // ============================================================================
@@ -575,36 +223,9 @@ export class AgentManager {
   // ============================================================================
 
   private async loadData(): Promise<void> {
-    await this.loadImplementations()
-    await this.loadInstances()
     await this.loadConfigs()
   }
 
-  private async loadImplementations(): Promise<void> {
-    try {
-      const data = await fs.readFile(this.implementationsFilePath, 'utf-8')
-      const items = JSON.parse(data) as AgentImplementation[]
-      for (const item of items) {
-        this.implementations.set(item.id, item)
-      }
-      console.log(`[AgentManager] Loaded ${this.implementations.size} implementations`)
-    } catch {
-      console.log('[AgentManager] No existing implementations data')
-    }
-  }
-
-  private async loadInstances(): Promise<void> {
-    try {
-      const data = await fs.readFile(this.instancesFilePath, 'utf-8')
-      const items = JSON.parse(data) as AgentInstance[]
-      for (const item of items) {
-        this.instances.set(item.id, item)
-      }
-      console.log(`[AgentManager] Loaded ${this.instances.size} instances`)
-    } catch {
-      console.log('[AgentManager] No existing instances data')
-    }
-  }
 
   private async loadConfigs(): Promise<void> {
     try {
@@ -631,6 +252,8 @@ export class AgentManager {
           }
         }
 
+        // P6-D：只有 exact core 配置进入运行时；legacy instance config 属于 archive（§3.18）。
+        if (config.instance_id !== 'crabot-agent') continue
         this.configs.set(config.instance_id, config as AgentInstanceConfig)
       }
       console.log(`[AgentManager] Loaded ${this.configs.size} configs`)
@@ -639,33 +262,8 @@ export class AgentManager {
     }
   }
 
-  private async ensureDefaults(): Promise<void> {
-    // 确保默认实现存在，且内置实现的 model_roles 始终与代码同步
-    const existingImpl = this.implementations.get('default')
-    if (!existingImpl) {
-      this.implementations.set('default', DEFAULT_IMPLEMENTATION)
-      await this.saveImplementations()
-    } else if (existingImpl.type === 'builtin') {
-      // 内置实现的 model_roles/supported_roles/model_format 由代码定义，启动时强制同步
-      const updated = {
-        ...existingImpl,
-        model_roles: DEFAULT_IMPLEMENTATION.model_roles,
-        extra_schema: DEFAULT_IMPLEMENTATION.extra_schema,
-        supported_roles: DEFAULT_IMPLEMENTATION.supported_roles,
-        model_format: DEFAULT_IMPLEMENTATION.model_format,
-        updated_at: new Date().toISOString(),
-      }
-      this.implementations.set('default', updated)
-      await this.saveImplementations()
-    }
-
-    // 确保 crabot-agent 实例存在
-    if (!this.instances.has('crabot-agent')) {
-      this.instances.set('crabot-agent', DEFAULT_AGENT_INSTANCE)
-      await this.saveInstances()
-    }
-
-    // 确保 crabot-agent 配置存在
+  /** 仅保证 exact core 配置容器存在（空 model config 是合法未配置状态，§3.18）。 */
+  private async ensureCoreConfig(): Promise<void> {
     if (!this.configs.has('crabot-agent')) {
       const config = { ...DEFAULT_AGENT_CONFIG }
       const apply = async () => {
@@ -732,16 +330,6 @@ export class AgentManager {
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
     await durableAtomicWriteFile(filePath, content)
-  }
-
-  private async saveImplementations(): Promise<void> {
-    const items = Array.from(this.implementations.values())
-    await this.atomicWriteFile(this.implementationsFilePath, JSON.stringify(items, null, 2))
-  }
-
-  private async saveInstances(): Promise<void> {
-    const items = Array.from(this.instances.values())
-    await this.atomicWriteFile(this.instancesFilePath, JSON.stringify(items, null, 2))
   }
 
   private async saveConfig(instanceId: string): Promise<void> {
