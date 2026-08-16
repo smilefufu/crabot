@@ -120,6 +120,9 @@ describe('UnifiedAgent worker capability production wiring', () => {
       // 本用例验收 MCP capability 快照投递，不验收 P6-B activation gate；
       // gate 覆盖在 activation-registry.test.ts（显式 impl not-ready 拒绝）。
       ;(internals.managerStack.harness.deps as { assertWorkerImplReady?: unknown }).assertWorkerImplReady = undefined
+      // P6-C：选择器同样旁路（ RecordingAdapter 不在 registry 的 ready 集合里）。
+      ;(internals.managerStack.harness.deps as { selectWorkerImpl?: unknown }).selectWorkerImpl = undefined
+      ;(internals.managerStack.harness.deps as { acquireWorkerFence?: unknown }).acquireWorkerFence = undefined
 
       const common = {
         title: 'MCP production wiring',
