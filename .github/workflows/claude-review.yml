@@ -42,11 +42,15 @@ jobs:
         2. 用 `gh api graphql` 查询本 PR 未 resolve 的 review 线程，逐条核对当前代码：
            已修复或不再适用的，回复确认并用 resolveReviewThread mutation resolve；
            仍未解决的保留原样，不要重复评论。
-        3. review 本次改动，只报告有据可依的问题：正确性 bug、安全隐患、明显的性能或逻辑缺陷。
-           风格类小问题最多在总结里一句带过，不单独开线程。
-           每个具体问题用 mcp__github_inline_comment__create_inline_comment 挂到对应代码行。
-        4. 提交结论（必须执行的收尾动作）：仍有未解决问题（本次新发现或历史线程未 resolve）时用 `gh pr review --comment` 给出总结；
-           全部解决且无新问题时用 `gh pr review --approve` 并简述结论。
+        3. review 本次改动，按严重度分级报告（只报有据可依的问题）：
+           - [真实风险]：当前生产条件可达的正确性 bug、安全隐患、协议违规 → 用
+             mcp__github_inline_comment__create_inline_comment 挂到对应代码行开线程。
+           - [理论风险]：需要特定稀有条件才可达 → 只写在总结里并标注「非阻塞」，不开线程。
+           - 风格/口味 → 最多在总结里一句带过，不开线程。
+        4. 提交结论（必须执行的收尾动作）：
+           - 存在【真实风险级】未解决问题（本次新发现或历史线程未 resolve）→ `gh pr review --comment` 给出总结；
+           - 没有真实风险级问题（允许存在非阻塞的理论风险/风格记录）→ `gh pr review --approve`，
+             总结里列明遗留的非阻塞项。
            无论前面做了什么（包括已在线程里回复确认修复），本次任务都必须以提交一条 review 结束，未提交即视为任务未完成。
            你结束后 CI 会机械校验是否存在你对当前 head 提交的 review（approve 或带正文），
            不存在则本次执行整体作废并自动重跑，白白浪费一整轮——务必在结束前完成本步骤。
