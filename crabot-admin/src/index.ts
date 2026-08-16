@@ -9802,6 +9802,12 @@ export class AdminModule extends ModuleBase {
       const nextImpls = body.config!.implementations as Record<string, { enabled?: boolean; connection?: { mode: string; provider_id?: string } }>
       const current = await this.workerImplementationStore.load()
       const transitions: Array<{ impl: 'claude-code' | 'codex'; enabled: boolean; connection?: { mode: string; provider_id?: string; model_id?: string } }> = []
+      // P6-C：把 default 指向非 builtin CLI 同样需要 Agent 校验（ready/translator）。
+      const nextDefault = (body.config!.default_impl ?? current.default_impl) as string
+      if (nextDefault !== 'builtin' && nextDefault !== current.default_impl) {
+        const policy = nextImpls?.[nextDefault]
+        transitions.push({ impl: nextDefault as 'claude-code' | 'codex', enabled: true, connection: policy?.connection as never })
+      }
       for (const impl of ['claude-code', 'codex'] as const) {
         const next = nextImpls?.[impl]
         if (!next) continue

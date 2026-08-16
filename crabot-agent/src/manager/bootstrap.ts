@@ -176,9 +176,13 @@ export interface BootstrapDeps {
   readonly builtinTraceHooks?: import('../workers/builtin/adapter.js').BuiltinTraceHooks
   /** P6-B §6：activation registry gate（unified-agent 注入）。 */
   readonly assertWorkerImplReady?: (impl: import('../workers/types.js').WorkerImplId) => void | Promise<void>
+  readonly selectWorkerImpl?: (requestedImpl: import('../workers/types.js').WorkerImplId | undefined, excludedImpls?: ReadonlySet<import('../workers/types.js').WorkerImplId>) => import('../workers/types.js').WorkerImplId
+  readonly acquireWorkerFence?: (impl: import('../workers/types.js').WorkerImplId, kind: 'spawn' | 'resume' | 'handoff') => Promise<{ release(): void }>
   readonly reportWorkerOutcome?: (impl: import('../workers/types.js').WorkerImplId, failure: string | null) => void | Promise<void>
   /** 用户级 CLI binary 解析（v1 无 managed；全局安装忽略并提示）。 */
   readonly resolveUserLevelBinary?: (impl: 'claude-code' | 'codex') => Promise<{ binary?: string; global_detected: boolean }>
+  /** P6-C §7：list_worker_implementations 的 registry snapshot getter。 */
+  readonly workerImplSnapshot?: import('./tools/worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */
   readonly admitWorkerConnection?: (impl: import('../workers/types.js').WorkerImplId, operationLabel?: string) => Promise<{
     env: Record<string, string>
@@ -321,6 +325,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     adapters,
     defaultImpl: DEFAULT_WORKER_IMPL,
     ...(deps.assertWorkerImplReady ? { assertWorkerImplReady: deps.assertWorkerImplReady } : {}),
+    ...(deps.selectWorkerImpl ? { selectWorkerImpl: deps.selectWorkerImpl } : {}),
+    ...(deps.acquireWorkerFence ? { acquireWorkerFence: deps.acquireWorkerFence } : {}),
     ...(deps.reportWorkerOutcome ? { reportWorkerOutcome: deps.reportWorkerOutcome } : {}),
     ...(deps.admitWorkerConnection ? { admitWorkerConnection: deps.admitWorkerConnection } : {}),
     ledger,
@@ -469,6 +475,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
       return buildManagerToolFace({
         harness,
+        workerImplSnapshot: deps.workerImplSnapshot,
         workerContext: () => ({
           managerKey: key,
           // P6-A §6.6：当前 episode trace id 由 registry 桥惰性读取（tool call 发生时才取），

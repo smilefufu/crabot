@@ -18,6 +18,7 @@ import {
   type WorkerImplementationConfig,
   type WorkerImplementationStatus,
   type CLIWorkerImplId,
+  type WorkerImplId,
   type WorkerImplementationPolicy,
 } from '../../services/worker-management'
 import { providerService } from '../../services/provider'
@@ -79,7 +80,7 @@ export const WorkersPage: React.FC = () => {
 
   const statusOf = (impl: ImplId) => statuses.find((s) => s.impl === impl)
 
-  const applyConfig = async (impl: CLIWorkerImplId, policy: WorkerImplementationPolicy) => {
+  const applyConfig = async (impl: WorkerImplId, policy: WorkerImplementationPolicy, defaultImpl?: WorkerImplId) => {
     if (!config) return
     setBusy(true)
     setNotice(null)
@@ -90,7 +91,14 @@ export const WorkersPage: React.FC = () => {
         codex: { ...config.implementations.codex },
       }
       next[impl] = policy
-      const updated = await workerManagementService.putConfig(config.revision, { default_impl: config.default_impl, implementations: next })
+      // 禁用当前 default 时，同一份 PUT 把 default 切回 builtin（协议：default 必须 enabled）。
+      const effectiveDefault = defaultImpl ?? (
+        (!policy.enabled && config.default_impl === impl) ? 'builtin' : config.default_impl
+      )
+      const updated = await workerManagementService.putConfig(config.revision, {
+        default_impl: effectiveDefault,
+        implementations: next,
+      })
       setConfig(updated)
       setNotice('已保存')
       await refresh()
@@ -193,20 +201,52 @@ export const WorkersPage: React.FC = () => {
           </div>
           {status?.detail && <div className="text-secondary" style={{ fontSize: 13 }}>{status.detail}</div>}
           {!isBuiltin && config && policy && (
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Input
+              label="偏好（自然语言软指导，仅供 Manager 参考）"
+              defaultValue={policy.preference ?? ''}
+              placeholder="例：优先用它做代码审查类任务"
+              disabled={busy}
+              onBlur={(e) => {
+                const value = e.target.value.trim()
+                if (value !== (policy.preference ?? '')) {
+                  // 清空也要真实生效：空值时显式移除 preference 字段（不是回写旧值）。
+                  const nextPolicy = { ...policy }
+                  if (value) nextPolicy.preference = value
+                  else delete nextPolicy.preference
+                  void applyConfig(impl, nextPolicy)
+                }
+              }}
+            />
+          )}
+          {config && policy && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <label style={{ fontSize: 13 }}>
+                <input
+                  type="radio"
+                  name="worker-default"
+                  checked={config.default_impl === impl}
+                  disabled={busy || !policy.enabled}
+                  onChange={() => void applyConfig(impl, { ...policy, enabled: true }, impl)}
+                />
+                {' '}设为默认
+              </label>
+              {!isBuiltin && (
+                <>
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog({
-                impl, method: 'existing_host', token: '', endpoint: '', apiKey: '',
+                impl: impl as CLIWorkerImplId, method: 'existing_host', token: '', endpoint: '', apiKey: '',
                 modelId: impl === 'claude-code' ? 'claude-sonnet-4-6' : '',
               })}>
                 配置连接
               </Button>
               {policy.enabled && (
-                <Button size="sm" disabled={busy} onClick={() => void runOperation(impl, 'verify')}>验证</Button>
+                <Button size="sm" disabled={busy} onClick={() => void runOperation(impl as CLIWorkerImplId, 'verify')}>验证</Button>
               )}
               {policy.enabled ? (
-                <Button size="sm" variant="danger" disabled={busy} onClick={() => void applyConfig(impl, { enabled: false, ...(policy.connection ? { connection: policy.connection } : {}) })}>禁用</Button>
+                <Button size="sm" variant="danger" disabled={busy} onClick={() => void applyConfig(impl, { ...policy, enabled: false })}>禁用</Button>
               ) : (
-                <Button size="sm" disabled={busy} onClick={() => void applyConfig(impl, { enabled: true, ...(policy.connection ? { connection: policy.connection } : {}) })}>启用</Button>
+                <Button size="sm" disabled={busy} onClick={() => void applyConfig(impl, { ...policy, enabled: true })}>启用</Button>
+              )}
+                </>
               )}
             </div>
           )}

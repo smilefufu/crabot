@@ -117,6 +117,7 @@ export class ActivationRegistry {
       const adapter = this.adapters.get(impl)
       const base: WorkerImplementationStatus = {
         impl,
+        enabled: policy.enabled,
         installed: false,
         configured: policy.connection !== undefined || impl === 'builtin',
         policy_revision: config.config.revision,
@@ -180,6 +181,47 @@ export class ActivationRegistry {
     const status = this.snapshots.get(impl)
     if (!status) throw new Error(`[ActivationRegistry] unknown impl: ${impl}`)
     return status
+  }
+
+  /**
+   * P6-C §5：不可变 snapshot——单次读取的所有字段来自同一 desired revision。
+   * 读即拷（statuses 数组新建），调用方改不动内部状态。
+   */
+  getSnapshot(): {
+    revision: number
+    config: import('./types.js').WorkerImplementationConfig
+    default_impl: WorkerImplId
+    preference: Partial<Record<WorkerImplId, string>>
+    statuses: WorkerImplementationStatus[]
+    observed_at: string
+  } {
+    const list = this.listStatus() // 未 initialized 抛错
+    const order: Record<WorkerImplId, number> = { builtin: 0, 'claude-code': 1, codex: 2 }
+    const sorted = [...list].sort((a, b) => order[a.impl] - order[b.impl])
+    const desired = this.desired!
+    const preference: Partial<Record<WorkerImplId, string>> = {}
+    for (const impl of ['builtin', 'claude-code', 'codex'] as const) {
+      const pref = desired.config.implementations[impl].preference
+      if (pref) preference[impl] = pref
+    }
+    return {
+      revision: desired.config.revision,
+      config: desired.config,
+      default_impl: desired.config.default_impl,
+      preference,
+      statuses: sorted,
+      observed_at: new Date().toISOString(),
+    }
+  }
+
+  /**
+   * P6-C §5.9：operation-scoped activation fence。取得即完成最终校验（含 operation-time
+   * re-detect）；fence 之后不再有校验点，操作按已选 impl 走完——线性化语义仅此而已，
+   * 不做 revision 绑定/计数（当前实现的有效内容就是 assertReady）。
+   */
+  async acquireFence(impl: WorkerImplId, _kind: 'spawn' | 'resume' | 'handoff'): Promise<{ release(): void }> {
+    await this.assertReady(impl)
+    return { release: () => {} }
   }
 
   /** 运行时真实失败上报（harness 注入）：标 degraded，后续派活被 gate 阻断并带原因。 */
@@ -250,6 +292,7 @@ export class ActivationRegistry {
     const observedAt = new Date().toISOString()
     const base = {
       impl,
+      enabled: policy.enabled,
       installed: false,
       configured: policy.connection !== undefined || impl === 'builtin',
       policy_revision: desired.config.revision,

@@ -429,6 +429,10 @@ export interface HarnessDeps {
   readonly assertWorkerImplReady?: (impl: WorkerImplId) => void | Promise<void>
   /** P6-B 失败导向：adapter 级执行失败/成功上报（degraded 置位/清除）。 */
   readonly reportWorkerOutcome?: (impl: WorkerImplId, failure: string | null) => void | Promise<void>
+  /** P6-C §2/§5：纯选择器（显式只查自己；省略 default→固定顺序；结构化错误）。 */
+  readonly selectWorkerImpl?: (requestedImpl: WorkerImplId | undefined, excludedImpls?: ReadonlySet<WorkerImplId>) => WorkerImplId
+  /** P6-C §5.9：operation-scoped activation fence（副作用线性化点）。 */
+  readonly acquireWorkerFence?: (impl: WorkerImplId, kind: 'spawn' | 'resume' | 'handoff') => Promise<{ release(): void }>
   /**
    * P6-B §6.5：operation-time connection admission（registry gate 之后、副作用之前）。
    * 返回的 env 注入 SpawnSpec.connection_env；dispose 在 spawn 收口后调用。
@@ -634,14 +638,30 @@ export class WorkerHarness {
   async spawnWorker(p: SpawnWorkerParams): Promise<LedgerWorker> {
     this.deps.assertExecutionAdmission?.()
     const workerId = `w-${randomUUID()}`
-    // P6-B：显式 impl 在任何副作用（workspace/台账/provision）前过 registry gate。
-    if (p.impl !== undefined) await this.deps.assertWorkerImplReady?.(p.impl)
-    // P6-B §6.5：operation admission——当前调用内实时解析连接；revision 在副作用前最终比对。
-    const admission = p.impl !== undefined ? await this.deps.admitWorkerConnection?.(p.impl, workerId) : undefined
-    const impl = p.impl ?? this.deps.defaultImpl
+    // P6-C §2：显式/省略统一走纯选择器（显式只查自己不 fallback；省略 default→固定顺序）。
+    // 选择器抛 WORKER_IMPLEMENTATION_NOT_READY（含 ready list/reasons），无任何副作用。
+    const impl = this.deps.selectWorkerImpl
+      ? this.deps.selectWorkerImpl(p.impl)
+      : (p.impl ?? this.deps.defaultImpl)
+    // 选择器未注入的旧测试路径保留显式 gate。
+    if (!this.deps.selectWorkerImpl && p.impl !== undefined) await this.deps.assertWorkerImplReady?.(p.impl)
+    // P6-B §6.5：operation admission——当前调用内实时解析连接。
+    const admission = await this.deps.admitWorkerConnection?.(impl, workerId)
+    // P6-C §5.9：activation fence——第一项持久副作用（workspace/台账）前的线性化点。
+    // fence 获取失败也要 dispose admission（plan §6.7 finally 清理纪律）。
+    let fence: { release(): void } | undefined
+    try {
+      fence = this.deps.acquireWorkerFence ? await this.deps.acquireWorkerFence(impl, 'spawn') : undefined
+    } catch (error) {
+      if (admission) await admission.dispose()
+      throw error
+    }
+    let fenceReleased = false
+    const releaseFence = () => { if (fence && !fenceReleased) { fenceReleased = true; fence.release() } }
     const adapter = this.deps.adapters.get(impl)
     if (!adapter) {
       // 失败路径必须 dispose：runtime 目录（如 codex CODEX_HOME）不得残留。
+      releaseFence()
       if (admission) await admission.dispose()
       throw new Error(`WorkerHarness.spawnWorker: no adapter registered for impl '${impl}'`)
     }
@@ -652,6 +672,7 @@ export class WorkerHarness {
     try {
       workspace = await this.deps.workspaces.resolve(workerId, p.workspace)
     } catch (error) {
+      releaseFence()
       if (admission) await admission.dispose()
       throw error
     }
@@ -729,13 +750,14 @@ export class WorkerHarness {
         try {
           spawnedHandle = await adapter.spawn(spec)
         } catch (spawnError) {
-          if (p.impl && spawnError instanceof WorkerImplUnavailableError) {
+          if (spawnError instanceof WorkerImplUnavailableError) {
             await this.deps.reportWorkerOutcome?.(impl, spawnError.message)
           }
           throw spawnError
         }
-        if (p.impl) await this.deps.reportWorkerOutcome?.(impl, null)
+        await this.deps.reportWorkerOutcome?.(impl, null)
       } catch (err) {
+        releaseFence()
         if (admission) await admission.dispose()
         const now = this.deps.now()
         const failed = await this.deps.ledger.upsertWorker(p.managerKey, workerId, (prev) => {
@@ -789,6 +811,7 @@ export class WorkerHarness {
       // runtime file（如 codex admin_provider 的 CODEX_HOME）必须活到化身终态——
       // CLI 运行期持续读它；终态收割时统一清理（含崩溃路径的 fireIncarnationTerminal）。
       // spawn 返回即终态（启动期握手超时等）时不会有终态钩子再触发——立即 dispose。
+      releaseFence()
       if (admission) {
         if (initialState === 'exited') await admission.dispose()
         else this.connectionDisposers.set(`${workerId}:1`, admission.dispose)
@@ -1063,7 +1086,12 @@ export class WorkerHarness {
         worker.worker_id,
         material.workspaceCandidate,
       )
-      const targetImpl = pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
+      // P6-C：目标选择来自 registry（排除该 worker 已用过的实现）；无 selector 的旧测试
+      // 路径保留 pickUnusedImpl。
+      const usedImpls = new Set(worker.incarnations.map((inc) => inc.impl).filter((impl): impl is WorkerImplId => impl !== 'legacy'))
+      const targetImpl = this.deps.selectWorkerImpl
+        ? this.deps.selectWorkerImpl(undefined, usedImpls)
+        : pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
       // P6-B §6.5：legacy 接续的 spawn 同样过 registry gate + connection admission——
       // 不得绕过 ready 校验，admin_provider 形态不得回落宿主凭证。
       await this.deps.assertWorkerImplReady?.(targetImpl)
@@ -1442,7 +1470,10 @@ export class WorkerHarness {
           // handoffIncarnation 的 pre-flight 统一抛 ImplAlreadyUsedError,不在这里重复判断。
           // 三个既有实现目前都是 revive:true,这条分支走不到真实 adapter;为将来的不可复活
           // 实现(如 legacy)保留。
-          const targetImpl = pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
+          const usedImpls2 = new Set(worker.incarnations.map((inc) => inc.impl).filter((impl): impl is WorkerImplId => impl !== 'legacy'))
+          const targetImpl = this.deps.selectWorkerImpl
+            ? this.deps.selectWorkerImpl(undefined, usedImpls2)
+            : pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
           const handoff = await this.handoffIncarnation(
             managerKey,
             worker,

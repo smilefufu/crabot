@@ -49,6 +49,8 @@ export type WorkerVerificationState = 'never' | 'running' | 'passed' | 'failed' 
 
 export interface WorkerImplementationStatus {
   impl: WorkerImplId
+  /** policy 的 enabled（Manager 工具按此区分「policy 关掉」与「没装」）。 */
+  enabled: boolean
   installed: boolean
   version?: string
   /** 只解析用户级安装（v1 无 managed）。 */

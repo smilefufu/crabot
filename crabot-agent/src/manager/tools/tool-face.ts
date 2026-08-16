@@ -27,6 +27,8 @@ import type { MasterAuthorization } from '../principal.js'
 
 export interface ToolFaceDeps {
   readonly harness: WorkerHarness
+  /** P6-C §7：list_worker_implementations 的 registry snapshot getter。 */
+  readonly workerImplSnapshot?: import('./worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
   readonly workerContext: Parameters<typeof buildWorkerTools>[0]['context']
   /** 复用现有类型 —— crab-messaging 的依赖注入接口。 */
   readonly messagingDeps: CrabMessagingDeps
@@ -211,6 +213,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     authorization: deps.authorization,
     validateMasterAuthorization: deps.validateMasterAuthorization,
     onAsyncError: deps.onAsyncError,
+    ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
   })
   const infoTools = buildCrabotInfoTools({
     callAdmin: deps.callAdmin,
