@@ -13,11 +13,9 @@ function createSubject(options: { completionError?: unknown; existingMarker?: bo
   subject.cutoverRecoveryReason = null
   subject.cutoverBearer = 'cutover-secret'
   subject.config = { moduleId: 'admin-web' }
-  subject.agentManager = {
-    listImplementations: () => ({ items: [{ id: 'default' }] }),
-    listInstances: () => ({ items: [{ id: 'crabot-agent' }] }),
-    listConfigs: () => [{ instance_id: 'crabot-agent' }],
-  }
+  subject.adminConfig = { data_dir: '/nonexistent-p6d-test' }
+  // P6-D：cutover inventory 改直读原始文件；测试用 spy 替换为固定空源（语义同旧 mock）。
+  subject.readLegacyAgentInventorySources = vi.fn().mockResolvedValue([])
   subject.readLegacyAgentPackageEntries = vi.fn().mockResolvedValue([])
   subject.readLegacyFrontWorkerConfigSources = vi.fn().mockResolvedValue([])
   subject.cutoverStore = {

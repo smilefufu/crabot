@@ -7,15 +7,11 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { spawn } from 'child_process'
-import { generateTimestamp } from 'crabot-shared'
 import { RuntimeManager } from './runtime-manager.js'
 import { ModuleValidator } from './module-validator.js'
-import { AgentManager } from './agent-manager.js'
 import type {
   ModuleSource,
   ModulePackageInfo,
-  AgentImplementation,
-  InstallOptions,
 } from './types.js'
 
 export class ModuleInstaller {
@@ -24,16 +20,13 @@ export class ModuleInstaller {
   private readonly installedDir: string
   private readonly runtimeManager: RuntimeManager
   private readonly validator: ModuleValidator
-  private readonly agentManager: AgentManager
-  private installing = false
 
-  constructor(dataDir: string, agentManager: AgentManager) {
+  constructor(dataDir: string) {
     this.dataDir = dataDir
     this.tempDir = path.join(dataDir, 'temp')
     this.installedDir = path.join(dataDir, 'installed-modules')
     this.runtimeManager = new RuntimeManager(process.cwd())
     this.validator = new ModuleValidator()
-    this.agentManager = agentManager
   }
 
   async initialize(): Promise<void> {
@@ -44,201 +37,11 @@ export class ModuleInstaller {
   /**
    * 预览模块包信息（不安装）
    */
-  async preview(source: ModuleSource): Promise<ModulePackageInfo> {
-    // 创建临时目录
-    const tempPath = await this.createTempDir()
-
-    try {
-      // 准备源代码
-      await this.prepareSource(source, tempPath)
-
-      // 解析和验证
-      const info = await this.validator.validate(tempPath)
-      this.assertHotplugAllowed(info)
-
-      return info
-    } finally {
-      // 清理临时目录
-      await this.cleanup(tempPath)
-    }
-  }
-
-  /**
-   * 安装模块
-   */
-  async install(
-    source: ModuleSource,
-    options: InstallOptions = {}
-  ): Promise<AgentImplementation> {
-    // 并发控制：同一时间只允许一个安装操作
-    if (this.installing) {
-      throw new Error('Another installation is in progress')
-    }
-
-    this.installing = true
-
-    const tempPath = await this.createTempDir()
-
-    try {
-      console.log('[ModuleInstaller] Starting installation...')
-      console.log('[ModuleInstaller] Source:', JSON.stringify(source))
-
-      // 1. 准备源代码
-      console.log('[ModuleInstaller] Step 1: Preparing source...')
-      await this.prepareSource(source, tempPath)
-
-      // 2. 解析和验证
-      console.log('[ModuleInstaller] Step 2: Validating module...')
-      const info = await this.validator.validate(tempPath)
-      this.assertHotplugAllowed(info)
-      console.log('[ModuleInstaller] Module info:', JSON.stringify(info, null, 2))
-
-      // 3. 检查是否已存在
-      const existing = this.agentManager.getImplementation(info.module_id)
-      if (existing && !options.overwrite) {
-        throw new Error(
-          `Module ${info.module_id} already exists. Use overwrite option to replace it.`
-        )
-      }
-
-      // 4. 检查运行时
-      console.log('[ModuleInstaller] Step 3: Checking runtime...')
-      const runtimeOk = await this.runtimeManager.checkRuntime(
-        info.runtime.type,
-        info.runtime.version
-      )
-      if (!runtimeOk) {
-        throw new Error(
-          `Runtime ${info.runtime.type} ${info.runtime.version || ''} not available`
-        )
-      }
-
-      // 5. 安装依赖
-      if (info.install) {
-        console.log('[ModuleInstaller] Step 4: Installing dependencies...')
-        await this.runtimeManager.runInstall(
-          info.install,
-          tempPath,
-          info.runtime.type,
-          options.timeout
-        )
-      }
-
-      // 6. 构建
-      if (info.build) {
-        console.log('[ModuleInstaller] Step 5: Building...')
-        await this.runtimeManager.runBuild(
-          info.build,
-          tempPath,
-          info.runtime.type,
-          options.timeout
-        )
-      }
-
-      // 7. 验证 entry 文件存在
-      console.log('[ModuleInstaller] Step 6: Validating entry file...')
-      const entryExists = await this.validator.validateEntryExists(tempPath, info.entry)
-      if (!entryExists) {
-        throw new Error(`Entry file not found: ${info.entry}`)
-      }
-
-      // 8. 移动到安装目录
-      console.log('[ModuleInstaller] Step 7: Moving to installed directory...')
-      const installedPath = path.join(this.installedDir, info.module_id)
-
-      // 如果已存在，先删除
-      if (existing) {
-        await this.removeDirectory(installedPath)
-      }
-
-      await fs.rename(tempPath, installedPath)
-
-      // 9. 创建 AgentImplementation
-      console.log('[ModuleInstaller] Step 8: Creating implementation record...')
-      const implementation: AgentImplementation = {
-        id: info.module_id,
-        name: info.name,
-        type: 'installed',
-        implementation_type: 'full_code',
-        engine: info.agent!.engine,
-        supported_roles: info.agent!.supported_roles,
-        model_format: info.agent!.model_format,
-        model_roles: info.agent!.model_roles,
-        source: source.type === 'local'
-          ? { type: 'local', path: source.path }
-          : { type: 'git', path: source.url, ref: source.ref },
-        installed_path: installedPath,
-        version: info.version,
-        installed_at: generateTimestamp(),
-        created_at: generateTimestamp(),
-        updated_at: generateTimestamp(),
-      }
-
-      await this.agentManager.addImplementation(implementation)
-
-      console.log('[ModuleInstaller] Installation completed successfully')
-      return implementation
-    } catch (error) {
-      console.error('[ModuleInstaller] Installation failed:', error)
-      // 清理临时目录
-      await this.cleanup(tempPath)
-      throw error
-    } finally {
-      this.installing = false
-    }
-  }
-
-  /**
-   * Validator rejection is the primary gate; keep an independent installer boundary so a
-   * future validator seam cannot reach runtime/install/build or persistent records.
-   */
-  private assertHotplugAllowed(info: ModulePackageInfo): void {
-    if (info.module_type === 'agent') {
-      throw new Error('ADMIN_HOTPLUG_NOT_ALLOWED: only builtin crabot-agent is supported')
-    }
-  }
-
   /**
    * 获取 RuntimeManager 实例
    */
   getRuntimeManager(): RuntimeManager {
     return this.runtimeManager
-  }
-
-  /**
-   * 卸载模块
-   */
-  async uninstall(implementationId: string): Promise<void> {
-    const implementation = this.agentManager.getImplementation(implementationId)
-    if (!implementation) {
-      throw new Error(`Implementation not found: ${implementationId}`)
-    }
-
-    if (implementation.type === 'builtin') {
-      throw new Error('Cannot uninstall builtin implementation')
-    }
-
-    // 检查是否有实例使用此实现
-    const instances = this.agentManager.listInstances({
-      implementation_id: implementationId,
-      page: 1,
-      page_size: 1,
-    })
-    if (instances.items.length > 0) {
-      throw new Error(
-        `Cannot uninstall implementation with ${instances.items.length} active instances`
-      )
-    }
-
-    // 删除安装目录
-    if (implementation.installed_path) {
-      await this.removeDirectory(implementation.installed_path)
-    }
-
-    // 删除实现记录
-    await this.agentManager.removeImplementation(implementationId)
-
-    console.log(`[ModuleInstaller] Uninstalled: ${implementationId}`)
   }
 
   /**

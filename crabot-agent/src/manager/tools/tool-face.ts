@@ -218,6 +218,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const infoTools = buildCrabotInfoTools({
     callAdmin: deps.callAdmin,
     getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
+    ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
   })
 
   const tools = [...messagingTools, ...memoryTools, ...workerTools, ...infoTools]

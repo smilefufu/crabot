@@ -92,14 +92,10 @@ describe('buildCrabotInfoTools', () => {
   })
 
   describe('get_deployment_info', () => {
-    it('组合 list_agent_instances / list_channel_instances 返回拓扑详情', async () => {
+    it('P6-D：agent 实例为静态 core 身份，不再调 list_agent_instances；channel 仍走 admin', async () => {
+      const called: string[] = []
       const callAdmin = makeCallAdmin({
-        list_agent_instances: () => ({
-          items: [
-            { id: 'crabot-agent', name: 'Default Agent', implementation_id: 'builtin', module_registered: true, module_port: 4101 },
-          ],
-          pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
-        }),
+        list_agent_instances: () => { called.push('list_agent_instances'); return { items: [], pagination: { page: 1, page_size: 100, total_items: 0, total_pages: 0 } } },
         list_channel_instances: () => ({
           items: [
             { id: 'wechat-1', name: 'WeChat', platform: 'wechat', module_registered: true },
@@ -113,11 +109,12 @@ describe('buildCrabotInfoTools', () => {
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
       expect(parsed.agent_instances).toEqual([
-        { id: 'crabot-agent', name: 'Default Agent', implementation_id: 'builtin', module_registered: true, module_port: 4101 },
+        { id: 'crabot-agent', name: 'Crabot Agent', implementation_id: 'crabot-agent', module_registered: true },
       ])
       expect(parsed.channel_instances).toEqual([
         { id: 'wechat-1', name: 'WeChat', platform: 'wechat', module_registered: true },
       ])
+      expect(called).not.toContain('list_agent_instances')
     })
   })
 
@@ -440,32 +437,34 @@ describe('buildCrabotInfoTools', () => {
   })
 
   describe('list_capabilities', () => {
-    it('组合 list_agent_implementations / list_channel_implementations', async () => {
+    it('P6-D：core 静态能力 + worker registry + channel；不调 list_agent_implementations', async () => {
+      const called: string[] = []
       const callAdmin = makeCallAdmin({
-        list_agent_implementations: () => ({
-          items: [
-            { id: 'builtin', name: 'Builtin', type: 'builtin', implementation_type: 'in_process', engine: 'claude', supported_roles: ['worker'] },
-          ],
-          pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
-        }),
+        list_agent_implementations: () => { called.push('list_agent_implementations'); return { items: [], pagination: { page: 1, page_size: 100, total_items: 0, total_pages: 0 } } },
         list_channel_implementations: () => ({
-          items: [
-            { id: 'wechat', name: 'WeChat', type: 'builtin', platform: 'wechat', version: '1.0.0' },
-          ],
+          items: [{ id: 'telegram', name: 'Telegram', type: 'builtin', platform: 'telegram', version: '1.0.0' }],
           pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
         }),
       })
-      const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
+      const workerImplSnapshot = () => ({
+        default_impl: 'builtin',
+        statuses: [{ impl: 'claude-code', ready: true, enabled: true, capabilities: { fork: true } }],
+      })
+      const tools = buildCrabotInfoTools({ callAdmin, workerImplSnapshot, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
       const tool = tools.find((t) => t.name === 'list_capabilities')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
       expect(parsed.agent_implementations).toEqual([
-        { id: 'builtin', name: 'Builtin', type: 'builtin', implementation_type: 'in_process', engine: 'claude', supported_roles: ['worker'] },
+        { id: 'crabot-agent', name: 'Crabot Core Agent', type: 'builtin', implementation_type: 'config_only', engine: 'claude-agent-sdk', supported_roles: ['front', 'worker'] },
+      ])
+      expect(parsed.worker_implementations).toEqual([
+        { impl: 'claude-code', ready: true, enabled: true, capabilities: { fork: true } },
       ])
       expect(parsed.channel_implementations).toEqual([
-        { id: 'wechat', name: 'WeChat', type: 'builtin', platform: 'wechat', version: '1.0.0' },
+        { id: 'telegram', name: 'Telegram', type: 'builtin', platform: 'telegram', version: '1.0.0' },
       ])
+      expect(called).not.toContain('list_agent_implementations')
     })
   })
 

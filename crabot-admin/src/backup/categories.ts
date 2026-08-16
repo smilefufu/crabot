@@ -14,6 +14,9 @@ export const CATEGORY_PATHS: Record<BackupCategory, CategoryPath[]> = {
     { rel: 'model_providers.json', kind: 'file' },
     { rel: 'agent-instances.json', kind: 'file' },
     { rel: 'agent-configs', kind: 'dir' },
+    // P6-D：legacy archive/tombstone 纳入 authenticated backup/export（§3.18）
+    { rel: 'legacy-agent-archive.json', kind: 'file' },
+    { rel: 'legacy-agent-tombstones.json', kind: 'file' },
     { rel: 'templates.json', kind: 'file' },
     { rel: 'subagents.json', kind: 'file' },
     { rel: 'mcp-servers.json', kind: 'file' },

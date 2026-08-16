@@ -23,6 +23,11 @@ export interface CrabotInfoToolsDeps {
   readonly callAdmin: <P, R>(method: string, params: P) => Promise<R>
   /** 返回已通过 authenticated pull 安装的本地 runtime config；不得为摘要再次读取 secret RPC。 */
   readonly getRuntimeConfigSummary?: () => unknown
+  /** P6-D：worker implementation registry snapshot（本进程内，与 spawn gate 同一真相）。 */
+  readonly workerImplSnapshot?: () => {
+    default_impl: string
+    statuses: Array<{ impl: string; ready: boolean; enabled: boolean; capabilities?: unknown }>
+  }
 }
 
 // --- 掩码:get_config_summary 的责任,防御性做,不依赖 admin 端已掩码 ---
@@ -213,9 +218,8 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
   })
 
   // --- get_deployment_info ---
-  // 组合来源:admin RPC `list_agent_instances` + `list_channel_instances`(拓扑详情:
-  // 实例 id/name/是否已注册到 Module Manager/端口/平台)。admin 没有现成的 "部署信息" RPC,
-  // 这里给出详细条目;数量级摘要见 get_system_status。
+  // P6-D：Agent 侧唯一是 exact core `crabot-agent`（静态身份，不再调 list_agent_instances）；
+  // channel 实例仍走 admin RPC。数量级摘要见 get_system_status。
   interface AgentInstanceLite {
     readonly id: string
     readonly name: string
@@ -238,12 +242,9 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
     isReadOnly: true,
     call: async () => {
       try {
-        const [agentInstances, channelInstances] = await Promise.all([
-          callAdmin<typeof FULL_PAGE, PaginatedResult<AgentInstanceLite>>('list_agent_instances', FULL_PAGE),
-          callAdmin<typeof FULL_PAGE, PaginatedResult<ChannelInstanceLite>>('list_channel_instances', FULL_PAGE),
-        ])
+        const channelInstances = await callAdmin<typeof FULL_PAGE, PaginatedResult<ChannelInstanceLite>>('list_channel_instances', FULL_PAGE)
         return ok({
-          agent_instances: agentInstances.items,
+          agent_instances: [{ id: 'crabot-agent', name: 'Crabot Agent', implementation_id: 'crabot-agent', module_registered: true }],
           channel_instances: channelInstances.items,
         })
       } catch (error) {
@@ -335,18 +336,17 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
   const listCapabilities = defineTool({
     name: 'list_capabilities',
     description:
-      '列出 crabot 已安装的能力清单:可用的 agent 实现(id/引擎/支持角色)、可用的 channel 平台' +
-      '类型(id/平台/版本)。用于回答"你都会什么/支持接哪些渠道"一类问题。',
+      '列出 crabot 已安装的能力清单:core agent（唯一内置）+ worker implementations(ready/enabled/能力)、可用的 channel 平台类型(id/平台/版本)。legacy archive 不受支持、不在此列。',
     inputSchema: { type: 'object', properties: {} },
     isReadOnly: true,
     call: async () => {
       try {
-        const [agentImpls, channelImpls] = await Promise.all([
-          callAdmin<typeof FULL_PAGE, PaginatedResult<AgentImplementationLite>>('list_agent_implementations', FULL_PAGE),
-          callAdmin<typeof FULL_PAGE, PaginatedResult<ChannelImplementationLite>>('list_channel_implementations', FULL_PAGE),
-        ])
+        const channelImpls = await callAdmin<typeof FULL_PAGE, PaginatedResult<ChannelImplementationLite>>('list_channel_implementations', FULL_PAGE)
+        const workers = deps.workerImplSnapshot?.()
         return ok({
-          agent_implementations: agentImpls.items,
+          // core Agent 固定能力（静态定义）；legacy archive 不作为 capability（§3.18）。
+          agent_implementations: [{ id: 'crabot-agent', name: 'Crabot Core Agent', type: 'builtin', implementation_type: 'config_only', engine: 'claude-agent-sdk', supported_roles: ['front', 'worker'] }],
+          worker_implementations: workers ? workers.statuses : [],
           channel_implementations: channelImpls.items,
         })
       } catch (error) {

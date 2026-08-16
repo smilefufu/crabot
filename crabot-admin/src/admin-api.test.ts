@@ -191,7 +191,8 @@ describe('AdminModule - Model Provider & Agent', () => {
         true
       )
 
-      expect(response.implementation.id).toBe('default')
+      // P6-D：唯一可读 implementation 是静态 core 身份（id 为 exact 'crabot-agent'）。
+      expect(response.implementation.id).toBe('crabot-agent')
     })
   })
 

@@ -21,7 +21,7 @@ import { BACKUP_CATEGORIES, DEFAULT_CATEGORIES } from './backup/categories.js'
 import { exportArchive } from './backup/export-archive.js'
 import type { BackupCategory } from './backup/types.js'
 import { validateBackupManifest } from './backup/manifest.js'
-import { runCrabotImport, type ImportDeps } from './backup/import/run-import.js'
+import { runCrabotImport, ImportPreflightRejected, type ImportDeps } from './backup/import/run-import.js'
 import type { ImportStatus, OnConflict, ImportItemResult } from './backup/import/import-types.js'
 import { shouldDisableOnImport } from './backup/import/schedule-arm.js'
 import { VersionService } from './version/version-service.js'
@@ -33,12 +33,13 @@ import { WorkerImplementationStore } from './worker-implementation-store.js'
 import type { WorkerImplementationRuntimeConfig, CLIWorkerImplId } from './types.js'
 import { WorkerConnectionRevisionSigner } from './worker-connection-revision.js'
 import { WorkerOperationAssertions } from './worker-operation-assertions.js'
+import { LegacyAgentArchiveStore, LegacyAgentArchiveError } from './legacy-agent-archive.js'
 import { CoreAgentCutoverStore } from './core-agent-cutover.js'
 import { CORE_AGENT_DEFINITION } from './core-agent-definition.js'
 import { BrowserManager } from './browser-manager.js'
 import { PermissionTemplateManager } from './permission-template-manager.js'
 import { decodePathSegment, isPathSafeSegment } from './http-path.js'
-import {
+import { canonicalizeJson,
   ModuleBase,
   type ModuleConfig,
   type Event,
@@ -121,8 +122,6 @@ import {
   type CoreAgentRuntimeConfig,
   type SubAgentConfig,
   type SubAgentRegistryEntry,
-  type CreateAgentInstanceParams,
-  type UpdateAgentInstanceParams,
   type UpdateAgentConfigParams,
   type ListAgentImplementationsParams,
   type ListAgentInstancesParams,
@@ -135,8 +134,6 @@ import {
   type ListChannelImplementationsParams,
   type ListChannelInstancesParams,
   type ModuleSource,
-  type PreviewModulePackageParams,
-  type InstallModuleParams,
   type ChatCallbackParams,
   type ChatCallbackResult,
   type GetChatHistoryParams,
@@ -469,6 +466,7 @@ export class AdminModule extends ModuleBase {
   private readonly adminConfig: AdminConfig
   private readonly configMutationCoordinator: CoreAgentConfigMutationCoordinator
   private readonly cutoverStore: CoreAgentCutoverStore
+  private readonly legacyArchiveStore: LegacyAgentArchiveStore
   private readonly managementOnly: boolean
   private readonly cutoverBearer?: string
   private cutoverActivated = false
@@ -604,6 +602,7 @@ export class AdminModule extends ModuleBase {
       abortSourceJournal: () => this.skillManager.recoverSourceJournal(this.configMutationCoordinator),
     })
     this.cutoverStore = new CoreAgentCutoverStore(this.adminConfig.data_dir)
+    this.legacyArchiveStore = new LegacyAgentArchiveStore(this.adminConfig.data_dir)
     this.managementOnly = process.env.CRABOT_ADMIN_STARTUP_MODE === 'core-agent-cutover'
     this.cutoverBearer = process.env.CRABOT_ADMIN_CUTOVER_BEARER
     delete process.env.CRABOT_ADMIN_STARTUP_MODE
@@ -624,7 +623,7 @@ export class AdminModule extends ModuleBase {
     )
     this.agentManager = new AgentManager(this.adminConfig.data_dir)
     this.channelManager = new ChannelManager(this.adminConfig.data_dir, this.rpcClient)
-    this.moduleInstaller = new ModuleInstaller(this.adminConfig.data_dir, this.agentManager)
+    this.moduleInstaller = new ModuleInstaller(this.adminConfig.data_dir)
     this.mcpServerManager = new MCPServerManager(this.adminConfig.data_dir)
     this.skillManager = new SkillManager(this.adminConfig.data_dir)
     this.essentialToolsManager = new EssentialToolsManager(this.adminConfig.data_dir)
@@ -742,9 +741,6 @@ export class AdminModule extends ModuleBase {
     // Agent 实例管理
     this.registerMethod('list_agent_instances', this.handleListAgentInstances.bind(this))
     this.registerMethod('get_agent_instance', this.handleGetAgentInstance.bind(this))
-    this.registerMethod('create_agent_instance', this.handleCreateAgentInstance.bind(this))
-    this.registerMethod('update_agent_instance', this.handleUpdateAgentInstance.bind(this))
-    this.registerMethod('delete_agent_instance', this.handleDeleteAgentInstance.bind(this))
 
     // Agent 配置管理
     this.registerMethod('get_agent_config', this.handleGetAgentConfig.bind(this))
@@ -771,9 +767,6 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('update_channel_config', this.handleUpdateChannelConfig.bind(this))
 
     // 模块安装管理
-    this.registerMethod('preview_module_package', this.handlePreviewModulePackage.bind(this))
-    this.registerMethod('install_module', this.handleInstallModule.bind(this))
-    this.registerMethod('uninstall_module', this.handleUninstallModule.bind(this))
 
     // 模块配置管理
     this.registerMethod('get_module_config', this.handleGetModuleConfig.bind(this))
@@ -1633,21 +1626,36 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      // Legacy Agent archive 路由（protocol-admin §3.18；认证由全局 /api 拦截器保证）
+      if (pathname === '/api/legacy-agent-archive' && req.method === 'GET') {
+        await this.handleListLegacyArchivesApi(req, res)
+        return
+      }
+
+      if (pathname.match(/^\/api\/legacy-agent-archive\/[^/]+\/export$/) && req.method === 'GET') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        await this.handleExportLegacyArchiveApi(req, res, id)
+        return
+      }
+
+      if (pathname.startsWith('/api/legacy-agent-archive/') && req.method === 'GET') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        await this.handleGetLegacyArchiveApi(req, res, id)
+        return
+      }
+
+      if (pathname.startsWith('/api/legacy-agent-archive/') && req.method === 'DELETE') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        await this.handleDeleteLegacyArchiveApi(req, res, id)
+        return
+      }
+
       // Agent Implementation 路由
       if (pathname === '/api/agent-implementations' && req.method === 'GET') {
         await this.handleListImplementationsApi(req, res, url)
         return
       }
 
-      if (pathname === '/api/agent-implementations/preview' && req.method === 'POST') {
-        await this.handlePreviewModuleApi(req, res)
-        return
-      }
-
-      if (pathname === '/api/agent-implementations/install' && req.method === 'POST') {
-        await this.handleInstallModuleApi(req, res)
-        return
-      }
 
       if (pathname.startsWith('/api/agent-implementations/') && req.method === 'GET') {
         const id = pathname.split('/')[3]
@@ -1655,11 +1663,6 @@ export class AdminModule extends ModuleBase {
         return
       }
 
-      if (pathname.startsWith('/api/agent-implementations/') && req.method === 'DELETE') {
-        const id = pathname.split('/')[3]
-        await this.handleUninstallModuleApi(req, res, id)
-        return
-      }
 
       // Agent Instance 路由
       if (pathname === '/api/agent-instances' && req.method === 'GET') {
@@ -4132,6 +4135,42 @@ export class AdminModule extends ModuleBase {
   /**
    * 处理 channel.message_received 事件：鉴权，决定是否发出 channel.message_authorized
    */
+  /**
+   * P6-D：cutover inventory 直读 legacy 原始文件（agent-implementations.json /
+   * agent-instances.json / agent-configs/*.json），unknown + 最小投影，未知字段原样保留。
+   * 只服务 marker 未完成时的 archive 迁移；运行时不再把这些记录装进任何 map。
+   */
+  private async readLegacyAgentInventorySources(): Promise<Array<{ source_kind: 'agent_implementation' | 'agent_instance' | 'agent_config'; source_id: string; raw: unknown }>> {
+    const out: Array<{ source_kind: 'agent_implementation' | 'agent_instance' | 'agent_config'; source_id: string; raw: unknown }> = []
+    const readArray = async (file: string): Promise<Record<string, unknown>[]> => {
+      try {
+        const value = JSON.parse(await fs.readFile(file, 'utf8'))
+        return Array.isArray(value) ? value.filter((v) => v && typeof v === 'object') : []
+      } catch {
+        return []
+      }
+    }
+    for (const item of await readArray(path.join(this.adminConfig.data_dir, 'agent-implementations.json'))) {
+      const id = typeof item.id === 'string' ? item.id : undefined
+      if (id && id !== 'default' && id !== 'crabot-agent') out.push({ source_kind: 'agent_implementation', source_id: id, raw: item })
+    }
+    for (const item of await readArray(path.join(this.adminConfig.data_dir, 'agent-instances.json'))) {
+      const id = typeof item.id === 'string' ? item.id : undefined
+      if (id && id !== 'crabot-agent') out.push({ source_kind: 'agent_instance', source_id: id, raw: item })
+    }
+    try {
+      const dir = path.join(this.adminConfig.data_dir, 'agent-configs')
+      for (const file of (await fs.readdir(dir)).filter((f) => f.endsWith('.json'))) {
+        const value = JSON.parse(await fs.readFile(path.join(dir, file), 'utf8'))
+        if (value && typeof value === 'object' && typeof (value as Record<string, unknown>).instance_id === 'string') {
+          const id = (value as Record<string, unknown>).instance_id as string
+          if (id !== 'crabot-agent') out.push({ source_kind: 'agent_config', source_id: id, raw: value })
+        }
+      }
+    } catch { /* 目录不存在 = 无 legacy config */ }
+    return out
+  }
+
   private async readLegacyAgentPackageEntries(): Promise<Array<{ source_id: string; raw: unknown }>> {
     const directory = path.join(this.adminConfig.data_dir, 'installed-modules')
     try {
@@ -7010,7 +7049,7 @@ export class AdminModule extends ModuleBase {
   }> {
     const page = params.page ?? 1
     const pageSize = params.page_size ?? 20
-    const core = this.agentManager.getImplementation('default')
+    const core = CORE_AGENT_DEFINITION
     const items = core && (!params.type || core.type === params.type) && (!params.engine || core.engine === params.engine) ? [core] : []
     return { items: items.slice((page - 1) * pageSize, page * pageSize), pagination: { page, page_size: pageSize, total_items: items.length, total_pages: Math.ceil(items.length / pageSize) } }
   }
@@ -7052,23 +7091,6 @@ export class AdminModule extends ModuleBase {
     return { instance }
   }
 
-  private async handleCreateAgentInstance(_params: CreateAgentInstanceParams): Promise<{
-    instance: AgentInstance
-  }> {
-    throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Dynamic Agent instances are retired; only builtin crabot-agent is supported')
-  }
-
-  private async handleUpdateAgentInstance(_params: UpdateAgentInstanceParams): Promise<{
-    instance: AgentInstance
-  }> {
-    throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Dynamic Agent instances are retired; legacy Agent records are read-only')
-  }
-
-  private async handleDeleteAgentInstance(_params: { instance_id: string }): Promise<{
-    deleted: true
-  }> {
-    throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Dynamic Agent instances are retired; legacy Agent records are read-only')
-  }
   private async waitForCoreAgentReady(options: { attempts?: number; delayMs?: number } = {}): Promise<void> {
     const attempts = options.attempts ?? 30
     const delayMs = options.delayMs ?? 500
@@ -7136,9 +7158,8 @@ export class AdminModule extends ModuleBase {
     const packageEntries = await this.readLegacyAgentPackageEntries()
     const frontWorkerConfigs = await this.readLegacyFrontWorkerConfigSources()
     const sources = [
-      ...this.agentManager.listImplementations().items.filter((item) => item.id !== 'default').map((item) => ({ source_kind: 'agent_implementation' as const, source_id: item.id, raw: item })),
-      ...this.agentManager.listInstances().items.filter((item) => item.id !== 'crabot-agent').map((item) => ({ source_kind: 'agent_instance' as const, source_id: item.id, raw: item })),
-      ...this.agentManager.listConfigs().filter((item) => item.instance_id !== 'crabot-agent').map((item) => ({ source_kind: 'agent_config' as const, source_id: item.instance_id, raw: item })),
+      // P6-D：cutover inventory 直读 legacy 原始文件（unknown + 最小投影），不经运行时 map。
+      ...(await this.readLegacyAgentInventorySources()),
       ...packageEntries.map((entry) => ({ source_kind: 'installed_package' as const, source_id: entry.source_id, raw: entry.raw })),
       ...frontWorkerConfigs.map((entry) => ({ source_kind: 'agent_config' as const, source_id: `legacy-${entry.source_id}`, raw: entry.raw })),
     ]
@@ -8110,6 +8131,64 @@ export class AdminModule extends ModuleBase {
   }
 
   // ============================================================================
+  // Legacy Agent archive REST API（protocol-admin §3.18）
+  // ============================================================================
+
+  private async handleListLegacyArchivesApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const items = await this.legacyArchiveStore.listSummaries()
+    sendJson(res, 200, { items })
+  }
+
+  private async handleGetLegacyArchiveApi(_req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    try {
+      const record = await this.legacyArchiveStore.getDetail(id)
+      sendJson(res, 200, { record })
+    } catch (error) {
+      this.sendLegacyArchiveError(res, error)
+    }
+  }
+
+  private async handleExportLegacyArchiveApi(_req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    try {
+      const record = await this.legacyArchiveStore.exportRecord(id)
+      sendJson(res, 200, { record })
+    } catch (error) {
+      this.sendLegacyArchiveError(res, error)
+    }
+  }
+
+  private async handleDeleteLegacyArchiveApi(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    try {
+      const body = await this.readJsonBody<{ confirmation?: string; delete_package?: boolean; delete_config?: boolean }>(req)
+      const result = await this.legacyArchiveStore.deleteArchive(id, {
+        confirmation: body.confirmation,
+        delete_package: body.delete_package === true,
+        delete_config: body.delete_config === true,
+      }, {
+        isModuleActive: async (moduleId) => {
+          try {
+            const modules = await this.rpcClient.callModuleManager<Record<string, never>, { modules: Array<{ module_id: string; status: string }> }>('list_modules', {}, this.config.moduleId)
+            return modules.modules.some((m) => m.module_id === moduleId && m.status === 'running')
+          } catch {
+            return true // MM 不可达时保守视为 active，拒绝删除
+          }
+        },
+      })
+      sendJson(res, 200, result)
+    } catch (error) {
+      this.sendLegacyArchiveError(res, error)
+    }
+  }
+
+  private sendLegacyArchiveError(res: ServerResponse, error: unknown): void {
+    if (error instanceof LegacyAgentArchiveError) {
+      sendJson(res, error.httpStatus, { code: error.code, error: error.message })
+      return
+    }
+    throw error
+  }
+
+  // ============================================================================
   // Channel Implementation REST API
   // ============================================================================
 
@@ -8341,93 +8420,10 @@ export class AdminModule extends ModuleBase {
   // 模块安装 RPC 方法
   // ============================================================================
 
-  private async handlePreviewModulePackage(params: PreviewModulePackageParams): Promise<{
-    package_info: any
-  }> {
-    const packageInfo = await this.moduleInstaller.preview(params.source)
-    return { package_info: packageInfo }
-  }
-
-  private async handleInstallModule(params: InstallModuleParams): Promise<{
-    implementation: AgentImplementation
-  }> {
-    const implementation = await this.moduleInstaller.install(params.source, {
-      overwrite: params.overwrite,
-    })
-    this.publishAdminEvent('admin.agent_implementation_installed', { implementation })
-    return { implementation }
-  }
-
-  private async handleUninstallModule(params: { implementation_id: string }): Promise<{
-    deleted: true
-  }> {
-    await this.moduleInstaller.uninstall(params.implementation_id)
-    this.publishAdminEvent('admin.agent_implementation_uninstalled', {
-      implementation_id: params.implementation_id,
-    })
-    return { deleted: true }
-  }
-
   // ============================================================================
   // 模块安装 REST API
   // ============================================================================
 
-  private async handlePreviewModuleApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    try {
-      const body = await this.readJsonBody<{ source: ModuleSource }>(req)
-      const packageInfo = await this.moduleInstaller.preview(body.source)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ package_info: packageInfo }))
-    } catch (error) {
-      if (error instanceof Error) {
-        res.writeHead(400)
-        res.end(JSON.stringify({ error: error.message }))
-        return
-      }
-      throw error
-    }
-  }
-
-  private async handleInstallModuleApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    try {
-      const body = await this.readJsonBody<InstallModuleParams>(req)
-      const implementation = await this.moduleInstaller.install(body.source, {
-        overwrite: body.overwrite,
-      })
-      this.publishAdminEvent('admin.agent_implementation_installed', { implementation })
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ implementation }))
-    } catch (error) {
-      if (error instanceof Error) {
-        res.writeHead(400)
-        res.end(JSON.stringify({ error: error.message }))
-        return
-      }
-      throw error
-    }
-  }
-
-  private async handleUninstallModuleApi(
-    _req: IncomingMessage,
-    res: ServerResponse,
-    id: string
-  ): Promise<void> {
-    try {
-      await this.moduleInstaller.uninstall(id)
-      this.publishAdminEvent('admin.agent_implementation_uninstalled', {
-        implementation_id: id,
-      })
-      res.writeHead(204)
-      res.end()
-    } catch (error) {
-      if (error instanceof Error) {
-        res.writeHead(error.message.includes('not found') ? 404 : 400)
-        res.end(JSON.stringify({ error: error.message }))
-        return
-      }
-      throw error
-    }
-  }
 
   // ============================================================================
   // 模块配置管理
@@ -9518,7 +9514,7 @@ export class AdminModule extends ModuleBase {
     try {
       // 优先从运行中的 agent 模块获取 LLM 需求
       // 如果 agent 模块未运行或没有实现 get_llm_requirements，回退到默认实现
-      const defaultImpl = this.agentManager.getImplementation('default')
+      const defaultImpl = CORE_AGENT_DEFINITION
       if (!defaultImpl) {
         res.writeHead(500)
         res.end(JSON.stringify({ error: 'Default implementation not found' }))
@@ -10830,10 +10826,6 @@ export class AdminModule extends ModuleBase {
    * friend/task/sessionConfig/schedule 直接对 this.<Map> 单条 upsert（finalize 时 saveData 落盘）。
    */
   private buildCrabotImportDeps(archivePath: string, onConflict: OnConflict): ImportDeps {
-    // 标记是否真的导入了 agent-instance：仅在导入时才在 finalize 重载 AgentManager 内存态，
-    // 避免对未涉及 agent 的导入触发不必要的 re-initialize。
-    let agentInstanceTouched = false
-
     return {
       upsertProvider: async (r) => this.modelProviderManager.upsertById(r as ModelProvider, onConflict),
       upsertMcp: async (r) => this.mcpServerManager.upsertById(r as MCPServerRegistryEntry, onConflict),
@@ -10858,12 +10850,8 @@ export class AdminModule extends ModuleBase {
         this.sessionConfigs.set(entry.session_id, entry.config)
         return exists ? 'overwritten' : 'imported'
       },
-      upsertAgentInstance: async (r) => {
-        const inst = r as AgentInstance
-        const status = await this.upsertImportedAgentInstance(inst, archivePath, onConflict)
-        if (status !== 'skipped') agentInstanceTouched = true
-        return status
-      },
+      importCoreAgentConfig: async (archivePath2, oc) => this.importCoreAgentConfigFromArchive(archivePath2, oc),
+      ingestLegacyArchive: async (archivePath2, oc) => this.ingestLegacyArchiveFromArchive(archivePath2, oc),
       upsertSchedule: async (r) => {
         const sched = r as Schedule
         if (shouldDisableOnImport(sched, Date.now())) sched.enabled = false
@@ -10880,13 +10868,75 @@ export class AdminModule extends ModuleBase {
       finalize: async () => {
         await this.saveData()
         await this.saveTasks()
-        if (agentInstanceTouched) {
-          // 文件已直接落盘，重载 AgentManager 内存态使 Admin 列表/解析与磁盘一致。
-          await this.agentManager.initialize()
-        }
         this.triggerPushAfter('crabot import')
       },
     }
+  }
+
+  /**
+   * P6-D §3.18.1(1)：exact core config 只进 CoreAgentConfigStore。
+   * 校验：instance_id === 'crabot-agent' 且 model slot key ⊆ 静态四 slots；否则拒绝。
+   */
+  private async importCoreAgentConfigFromArchive(archivePath: string, onConflict: OnConflict): Promise<ImportItemResult[]> {
+    const text = await readArchiveTextFile(archivePath, 'payload/config/agent-configs/crabot-agent.json')
+    if (!text) return []
+    const raw = JSON.parse(text) as Record<string, unknown>
+    if (raw.instance_id !== 'crabot-agent') {
+      throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', 'agent-configs/crabot-agent.json 的 instance_id 不是 crabot-agent')
+    }
+    const modelConfig = (raw.model_config ?? {}) as Record<string, unknown>
+    const allowed = new Set(['powerful', 'cost_effective', 'vision', 'manager'])
+    const badKey = Object.keys(modelConfig).find((k) => !allowed.has(k))
+    if (badKey) {
+      throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', `core config 含未知 model slot key: ${badKey}`)
+    }
+    const existing = this.agentManager.getConfig('crabot-agent')
+    if (existing && onConflict === 'skip') return [{ kind: 'agent-config', id: 'crabot-agent', status: 'skipped' }]
+    await this.agentManager.updateConfig({
+      instance_id: 'crabot-agent',
+      ...(typeof raw.system_prompt === 'string' ? { system_prompt: raw.system_prompt } : {}),
+      model_config: modelConfig as UpdateAgentConfigParams['model_config'],
+      ...(Array.isArray(raw.mcp_server_ids) ? { mcp_server_ids: raw.mcp_server_ids as string[] } : {}),
+      ...(Array.isArray(raw.skill_ids) ? { skill_ids: raw.skill_ids as string[] } : {}),
+      ...(typeof raw.max_iterations === 'number' ? { max_iterations: raw.max_iterations } : {}),
+      ...(typeof raw.tools_readonly === 'boolean' ? { tools_readonly: raw.tools_readonly } : {}),
+      ...(typeof raw.timezone === 'string' ? { timezone: raw.timezone } : {}),
+      ...(raw.extra && typeof raw.extra === 'object' ? { extra: raw.extra as Record<string, unknown> } : {}),
+    })
+    return [{ kind: 'agent-config', id: 'crabot-agent', status: existing ? 'overwritten' : 'imported' }]
+  }
+
+  /**
+   * P6-D §3.18.1(2)：新格式 LegacyAgentArchiveRecord 恢复到 archive-only store。
+   * 同 archive_id + 同 canonical payload 幂等；payload 不同整包冲突。
+   */
+  private async ingestLegacyArchiveFromArchive(archivePath: string, _onConflict: OnConflict): Promise<ImportItemResult[]> {
+    const text = await readArchiveTextFile(archivePath, 'payload/config/legacy-agent-archive.json')
+    if (!text) return []
+    const rows = JSON.parse(text) as unknown[]
+    if (!Array.isArray(rows)) throw new ImportPreflightRejected('ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT', 'legacy-agent-archive.json 不是数组')
+    const existing = new Map((await this.legacyArchiveStore.listSummaries()).map((s) => [s.archive_id, s]))
+    const valid: Array<{ source_kind: 'agent_implementation' | 'agent_instance' | 'agent_config' | 'installed_package'; source_id: string; raw: unknown; archive_id: string }> = []
+    for (const row of rows) {
+      const r = row as Record<string, unknown>
+      if (typeof r.archive_id !== 'string' || typeof r.source_kind !== 'string' || typeof r.source_id !== 'string') {
+        throw new ImportPreflightRejected('ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT', 'archive record 缺少 archive_id/source_kind/source_id')
+      }
+      valid.push({ archive_id: r.archive_id, source_kind: r.source_kind as 'agent_config', source_id: r.source_id, raw: r.raw })
+    }
+    // 冲突检查先行（canonical payload 不同 → 整包拒绝）
+    const existingRaw = new Map<string, unknown>()
+    for (const record of await this.legacyArchiveStore.readRawRecords()) {
+      existingRaw.set(record.archive_id, record.raw ?? null)
+    }
+    for (const row of valid) {
+      const old = existingRaw.get(row.archive_id)
+      if (old !== undefined && canonicalizeJson(old) !== canonicalizeJson(row.raw ?? null)) {
+        throw new ImportPreflightRejected('ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT', `archive payload 冲突: ${row.archive_id}`)
+      }
+    }
+    await this.cutoverStore.archive(valid.map((row) => ({ source_kind: row.source_kind, source_id: row.source_id, raw: row.raw })))
+    return valid.map((row) => ({ kind: 'legacy-agent-archive', id: row.archive_id, status: existingRaw.has(row.archive_id) ? 'overwritten' : 'imported' }))
   }
 
   /**
@@ -10904,44 +10954,6 @@ export class AdminModule extends ModuleBase {
     return exists ? 'overwritten' : 'imported'
   }
 
-  /**
-   * 导入单个 agent 实例：写 agent-instances.json（按 id 归并）+ agent-configs/<id>.json（随实例）。
-   * AgentManager 内存态在 finalize 里统一 reload，这里只做磁盘归并。
-   */
-  private async upsertImportedAgentInstance(
-    instance: AgentInstance,
-    archivePath: string,
-    onConflict: OnConflict,
-  ): Promise<ImportStatus> {
-    const dataDir = this.adminConfig.data_dir
-    const instancesPath = path.join(dataDir, 'agent-instances.json')
-    let existing: AgentInstance[] = []
-    try {
-      existing = JSON.parse(await fs.readFile(instancesPath, 'utf-8')) as AgentInstance[]
-      if (!Array.isArray(existing)) existing = []
-    } catch {
-      existing = []
-    }
-    const exists = existing.some((i) => i.id === instance.id)
-    if (exists && onConflict === 'skip') return 'skipped'
-
-    const merged = exists
-      ? existing.map((i) => (i.id === instance.id ? instance : i))
-      : [...existing, instance]
-    await this.atomicWriteFile(instancesPath, JSON.stringify(merged, null, 2))
-
-    // 随实例写 agent-configs/<id>.json（归档里可能不存在，缺失则不写）。
-    const cfgText = await readArchiveTextFile(
-      archivePath,
-      `payload/config/agent-configs/${instance.id}.json`,
-    )
-    if (cfgText !== null) {
-      const configsDir = path.join(dataDir, 'agent-configs')
-      await fs.mkdir(configsDir, { recursive: true })
-      await this.atomicWriteFile(path.join(configsDir, `${instance.id}.json`), cfgText)
-    }
-    return exists ? 'overwritten' : 'imported'
-  }
 
   /**
    * 解归档内 payload/skills/skills/<name> 各子目录到临时 dir，逐个 importFromLocalPath。

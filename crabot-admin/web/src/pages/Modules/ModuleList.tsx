@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { agentService } from '../../services/agent'
+import { legacyArchiveService, type LegacyAgentArchiveSummary } from '../../services/legacy-archive'
 import { channelService } from '../../services/channel'
 import { api } from '../../services/api'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
 import { Loading } from '../../components/Common/Loading'
-import type { AgentImplementation, ChannelImplementation } from '../../types'
+import type { ChannelImplementation } from '../../types'
 
 interface RunningModule {
   module_id: string
@@ -48,19 +48,24 @@ interface ChannelDetail {
   module_path?: string
 }
 
-function toModuleItemFromAgent(impl: AgentImplementation): ModuleItem {
+/** P6-D：唯一 live agent 是静态 core；legacy 记录以 unsupported archive 摘要呈现。 */
+const CORE_AGENT_ITEM: ModuleItem = {
+  id: 'crabot-agent',
+  name: 'Crabot Core Agent',
+  module_type: 'agent',
+  install_type: 'builtin',
+  version: '-',
+  detail: { type: 'agent', engine: 'claude-agent-sdk', supported_roles: ['front', 'worker'], model_format: 'anthropic' },
+}
+
+function toModuleItemFromArchive(record: LegacyAgentArchiveSummary): ModuleItem {
   return {
-    id: impl.id,
-    name: impl.name,
+    id: `legacy:${record.archive_id}`,
+    name: `[不受支持的 legacy] ${record.display_name ?? record.archive_id}`,
     module_type: 'agent',
-    install_type: impl.type,
-    version: impl.version ?? '-',
-    detail: {
-      type: 'agent',
-      engine: impl.engine,
-      supported_roles: impl.supported_roles,
-      model_format: impl.model_format,
-    },
+    install_type: 'installed',
+    version: record.version ?? '-',
+    detail: { type: 'agent', engine: 'legacy', supported_roles: [], model_format: '-' },
   }
 }
 
@@ -199,13 +204,14 @@ export const ModuleList: React.FC = () => {
       setLoading(true)
       setError('')
 
-      const [agentResponse, channelResponse] = await Promise.all([
-        agentService.listImplementations().catch(() => ({ items: [] })),
-        channelService.listImplementations().catch(() => ({ items: [] })),
+      const [archiveItems, channelResponse] = await Promise.all([
+        legacyArchiveService.list().catch(() => [] as LegacyAgentArchiveSummary[]),
+        channelService.listImplementations().catch(() => ({ items: [] as ChannelImplementation[] })),
       ])
 
       const allModules: ModuleItem[] = [
-        ...agentResponse.items.map(toModuleItemFromAgent),
+        CORE_AGENT_ITEM,
+        ...archiveItems.map(toModuleItemFromArchive),
         BUILTIN_MEMORY,
         ...channelResponse.items.map(toModuleItemFromChannel),
       ]

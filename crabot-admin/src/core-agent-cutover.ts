@@ -10,6 +10,7 @@ export interface LegacyAgentArchiveRecord {
   archive_id: string
   source_kind: LegacyAgentArchiveKind
   source_id: string
+  module_id?: string
   archived_at: string
   support_status: 'unsupported_legacy'
   raw: unknown

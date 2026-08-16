@@ -100,3 +100,60 @@ describe('runCrabotImport', () => {
     expect(summary.errors.some((e) => e.includes('channel'))).toBe(true)
   })
 })
+
+describe('runCrabotImport P6-D agent 分类（§3.18.1）', () => {
+  it('含旧 live non-core instance → 整包 preflight 拒绝，任何 domain 零写入', async () => {
+    const archive = await makeArchive({
+      config: {
+        'agent-instances.json': [{ id: 'front-agent' }],
+        'model_providers.json': [{ id: 'p1' }],
+      },
+      tasks: { 'tasks.json': [{ id: 't1' }] },
+    })
+    const calls: string[] = []
+    const deps: ImportDeps = {
+      upsertProvider: async () => { calls.push('provider'); return 'imported' },
+      upsertTask: async () => { calls.push('task'); return 'imported' },
+      finalize: async () => { calls.push('finalize') },
+    }
+    await expect(runCrabotImport({ archivePath: archive, categories: ['config', 'tasks'], onConflict: 'skip', deps }))
+      .rejects.toMatchObject({ code: 'ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED' })
+    expect(calls).not.toContain('provider')
+    expect(calls).not.toContain('task')
+  })
+
+  it('含旧 live implementation payload → 整包拒绝', async () => {
+    const archive = await makeArchive({
+      config: { 'agent-implementations.json': [{ id: 'custom-agent' }] },
+    })
+    await expect(runCrabotImport({ archivePath: archive, categories: ['config'], onConflict: 'skip', deps: { finalize: async () => {} } }))
+      .rejects.toMatchObject({ code: 'ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED' })
+  })
+
+  it('只含 exact core instance → 通过 preflight，core config 走 importCoreAgentConfig', async () => {
+    const archive = await makeArchive({
+      config: { 'agent-instances.json': [{ id: 'crabot-agent' }] },
+    })
+    const calls: string[] = []
+    const deps: ImportDeps = {
+      importCoreAgentConfig: async () => { calls.push('core-config'); return [{ kind: 'agent-config', id: 'crabot-agent', status: 'overwritten' }] },
+      finalize: async () => {},
+    }
+    const summary = await runCrabotImport({ archivePath: archive, categories: ['config'], onConflict: 'skip', deps })
+    expect(calls).toEqual(['core-config'])
+    expect(summary.errors).toEqual([])
+  })
+
+  it('新格式 legacy archive 经 ingestLegacyArchive 恢复', async () => {
+    const archive = await makeArchive({
+      config: { 'legacy-agent-archive.json': [{ archive_id: 'agent_config:old', source_kind: 'agent_config', source_id: 'old', archived_at: 'x', support_status: 'unsupported_legacy', raw: {} }] },
+    })
+    const calls: string[] = []
+    const deps: ImportDeps = {
+      ingestLegacyArchive: async () => { calls.push('ingest'); return [{ kind: 'legacy-agent-archive', id: 'agent_config:old', status: 'imported' }] },
+      finalize: async () => {},
+    }
+    await runCrabotImport({ archivePath: archive, categories: ['config'], onConflict: 'skip', deps })
+    expect(calls).toEqual(['ingest'])
+  })
+})
