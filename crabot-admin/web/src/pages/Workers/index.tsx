@@ -18,6 +18,7 @@ import {
   type WorkerImplementationConfig,
   type WorkerImplementationStatus,
   type CLIWorkerImplId,
+  type WorkerImplId,
   type WorkerImplementationPolicy,
 } from '../../services/worker-management'
 import { providerService } from '../../services/provider'
@@ -79,7 +80,7 @@ export const WorkersPage: React.FC = () => {
 
   const statusOf = (impl: ImplId) => statuses.find((s) => s.impl === impl)
 
-  const applyConfig = async (impl: CLIWorkerImplId, policy: WorkerImplementationPolicy, defaultImpl?: CLIWorkerImplId) => {
+  const applyConfig = async (impl: WorkerImplId, policy: WorkerImplementationPolicy, defaultImpl?: WorkerImplId) => {
     if (!config) return
     setBusy(true)
     setNotice(null)
@@ -90,8 +91,12 @@ export const WorkersPage: React.FC = () => {
         codex: { ...config.implementations.codex },
       }
       next[impl] = policy
+      // 禁用当前 default 时，同一份 PUT 把 default 切回 builtin（协议：default 必须 enabled）。
+      const effectiveDefault = defaultImpl ?? (
+        (!policy.enabled && config.default_impl === impl) ? 'builtin' : config.default_impl
+      )
       const updated = await workerManagementService.putConfig(config.revision, {
-        default_impl: defaultImpl ?? config.default_impl,
+        default_impl: effectiveDefault,
         implementations: next,
       })
       setConfig(updated)
@@ -209,7 +214,7 @@ export const WorkersPage: React.FC = () => {
               }}
             />
           )}
-          {!isBuiltin && config && policy && (
+          {config && policy && (
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
               <label style={{ fontSize: 13 }}>
                 <input
@@ -221,19 +226,23 @@ export const WorkersPage: React.FC = () => {
                 />
                 {' '}设为默认
               </label>
+              {!isBuiltin && (
+                <>
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog({
-                impl, method: 'existing_host', token: '', endpoint: '', apiKey: '',
+                impl: impl as CLIWorkerImplId, method: 'existing_host', token: '', endpoint: '', apiKey: '',
                 modelId: impl === 'claude-code' ? 'claude-sonnet-4-6' : '',
               })}>
                 配置连接
               </Button>
               {policy.enabled && (
-                <Button size="sm" disabled={busy} onClick={() => void runOperation(impl, 'verify')}>验证</Button>
+                <Button size="sm" disabled={busy} onClick={() => void runOperation(impl as CLIWorkerImplId, 'verify')}>验证</Button>
               )}
               {policy.enabled ? (
                 <Button size="sm" variant="danger" disabled={busy} onClick={() => void applyConfig(impl, { enabled: false, ...(policy.connection ? { connection: policy.connection } : {}) })}>禁用</Button>
               ) : (
                 <Button size="sm" disabled={busy} onClick={() => void applyConfig(impl, { enabled: true, ...(policy.connection ? { connection: policy.connection } : {}) })}>启用</Button>
+              )}
+                </>
               )}
             </div>
           )}

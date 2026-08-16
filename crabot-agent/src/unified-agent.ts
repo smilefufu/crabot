@@ -721,12 +721,15 @@ export class UnifiedAgent extends ModuleBase {
       builtinTraceHooks: this.builtinTraceHooks(),
       // P6-B §6：显式 impl spawn/resume/handoff 的 registry gate。
       assertWorkerImplReady: (impl) => this.activationRegistry.assertReady(impl),
-      selectWorkerImpl: (requested, excluded) => selectWorkerImplementation({
-        requestedImpl: requested,
-        config: this.activationRegistry.getSnapshot().config,
-        statuses: this.activationRegistry.getSnapshot().statuses,
-        ...(excluded ? { excludedImpls: excluded } : {}),
-      }),
+      selectWorkerImpl: (requested, excluded) => {
+        const snapshot = this.activationRegistry.getSnapshot()
+        return selectWorkerImplementation({
+          requestedImpl: requested,
+          config: snapshot.config,
+          statuses: snapshot.statuses,
+          ...(excluded ? { excludedImpls: excluded } : {}),
+        })
+      },
       acquireWorkerFence: (impl, kind) => this.activationRegistry.acquireFence(impl, kind),
       reportWorkerOutcome: (impl, failure) =>
         failure === null

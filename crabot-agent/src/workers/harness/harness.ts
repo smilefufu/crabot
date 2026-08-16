@@ -648,7 +648,14 @@ export class WorkerHarness {
     // P6-B §6.5：operation admission——当前调用内实时解析连接。
     const admission = await this.deps.admitWorkerConnection?.(impl, workerId)
     // P6-C §5.9：activation fence——第一项持久副作用（workspace/台账）前的线性化点。
-    const fence = this.deps.acquireWorkerFence ? await this.deps.acquireWorkerFence(impl, 'spawn') : undefined
+    // fence 获取失败也要 dispose admission（plan §6.7 finally 清理纪律）。
+    let fence: { release(): void } | undefined
+    try {
+      fence = this.deps.acquireWorkerFence ? await this.deps.acquireWorkerFence(impl, 'spawn') : undefined
+    } catch (error) {
+      if (admission) await admission.dispose()
+      throw error
+    }
     let fenceReleased = false
     const releaseFence = () => { if (fence && !fenceReleased) { fenceReleased = true; fence.release() } }
     const adapter = this.deps.adapters.get(impl)
@@ -743,12 +750,12 @@ export class WorkerHarness {
         try {
           spawnedHandle = await adapter.spawn(spec)
         } catch (spawnError) {
-          if (p.impl && spawnError instanceof WorkerImplUnavailableError) {
+          if (spawnError instanceof WorkerImplUnavailableError) {
             await this.deps.reportWorkerOutcome?.(impl, spawnError.message)
           }
           throw spawnError
         }
-        if (p.impl) await this.deps.reportWorkerOutcome?.(impl, null)
+        await this.deps.reportWorkerOutcome?.(impl, null)
       } catch (err) {
         releaseFence()
         if (admission) await admission.dispose()

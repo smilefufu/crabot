@@ -67,7 +67,6 @@ export class ActivationRegistry {
   private verifications: Partial<Record<CLIWorkerImplId, VerificationRecord>> = {}
   private snapshots: Map<WorkerImplId, WorkerImplementationStatus> = new Map()
   private degradedReasons: Map<CLIWorkerImplId, string> = new Map()
-  private fenceCounts: Map<WorkerImplId, number> = new Map()
   private hmacKey: Buffer | null = null
 
   constructor(agentDataDir: string) {
@@ -118,6 +117,7 @@ export class ActivationRegistry {
       const adapter = this.adapters.get(impl)
       const base: WorkerImplementationStatus = {
         impl,
+        enabled: policy.enabled,
         installed: false,
         configured: policy.connection !== undefined || impl === 'builtin',
         policy_revision: config.config.revision,
@@ -215,22 +215,13 @@ export class ActivationRegistry {
   }
 
   /**
-   * P6-C §5.9：operation-scoped activation fence。取得即完成最终校验（当前 snapshot 下
-   * impl 仍 enabled+ready），绑定本次 operation kind；内存有界（每 impl 一个计数）、
-   * finally release；Agent crash 由 MM 进程树收口。fence 之后的 config pull 不影响
-   * 本操作（线性化点已过），下一操作用新 snapshot。
+   * P6-C §5.9：operation-scoped activation fence。取得即完成最终校验（含 operation-time
+   * re-detect）；fence 之后不再有校验点，操作按已选 impl 走完——线性化语义仅此而已，
+   * 不做 revision 绑定/计数（当前实现的有效内容就是 assertReady）。
    */
   async acquireFence(impl: WorkerImplId, _kind: 'spawn' | 'resume' | 'handoff'): Promise<{ release(): void }> {
-    await this.assertReady(impl) // 含 operation-time re-detect
-    const count = this.fenceCounts.get(impl) ?? 0
-    this.fenceCounts.set(impl, count + 1)
-    return {
-      release: () => {
-        const current = this.fenceCounts.get(impl) ?? 0
-        if (current <= 1) this.fenceCounts.delete(impl)
-        else this.fenceCounts.set(impl, current - 1)
-      },
-    }
+    await this.assertReady(impl)
+    return { release: () => {} }
   }
 
   /** 运行时真实失败上报（harness 注入）：标 degraded，后续派活被 gate 阻断并带原因。 */
@@ -301,6 +292,7 @@ export class ActivationRegistry {
     const observedAt = new Date().toISOString()
     const base = {
       impl,
+      enabled: policy.enabled,
       installed: false,
       configured: policy.connection !== undefined || impl === 'builtin',
       policy_revision: desired.config.revision,

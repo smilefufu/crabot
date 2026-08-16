@@ -102,9 +102,11 @@ export interface WorkerToolsDeps {
     preference: Record<string, string>
     statuses: Array<{
       impl: string
+      enabled: boolean
       installed: boolean
       version?: string
       connection_mode?: string
+      capabilities?: unknown
       verification: string
       verification_stale?: boolean
       degraded?: string
@@ -151,6 +153,14 @@ function invalid(message: string): ToolCallResult {
 function mapError(prefix: string, error: unknown): ToolCallResult {
   const message = error instanceof Error ? error.message : String(error)
   console.error(`[worker-tools] ${prefix} failed:`, error)
+  // P6-C：结构化 NOT_READY 的 ready_impls/reasons 必须到 Manager（C-02/C-05 的观测点）。
+  const details = (error as { code?: string; details?: { ready_impls?: string[]; reasons?: Record<string, string> } })
+  if (details.code === 'WORKER_IMPLEMENTATION_NOT_READY' && details.details) {
+    return {
+      output: `${prefix} 失败: ${message}\nready_impls: ${JSON.stringify(details.details.ready_impls ?? [])}\nreasons: ${JSON.stringify(details.details.reasons ?? {})}`,
+      isError: true,
+    }
+  }
   return { output: `${prefix} 失败: ${message}`, isError: true }
 }
 
@@ -428,10 +438,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
           observed_at: snapshot.observed_at,
           implementations: snapshot.statuses.map((st) => ({
             impl: st.impl,
+            enabled: st.enabled,
             ready: st.ready,
             installed: st.installed,
             version: st.version,
             connection_mode: st.connection_mode,
+            capabilities: st.capabilities,
             verification: st.verification,
             ...(st.verification_stale ? { verification_stale: true } : {}),
             ...(st.degraded ? { degraded: st.degraded } : {}),
