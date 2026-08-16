@@ -69,7 +69,7 @@ import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './m
 import { ActivationRegistry } from './workers/activation-registry.js'
 import { admitWorkerConnection } from './workers/connections/admission.js'
 import { WorkerOperationStore } from './workers/operations/store.js'
-import { ManagedInstaller } from './workers/install/managed-installer.js'
+import { resolveUserLevelBinary } from './workers/cli-binary.js'
 import { GrandfatherBootstrapStore } from './workers/operations/bootstrap.js'
 
 /** 新部署安全初始 worker implementation 配置（与 Admin store revision-1 语义一致）。 */
@@ -477,7 +477,6 @@ export class UnifiedAgent extends ModuleBase {
   private activationRegistry!: ActivationRegistry
   private workerOperationStore!: WorkerOperationStore
   private grandfatherBootstrapStore!: GrandfatherBootstrapStore
-  private managedInstaller!: ManagedInstaller
   private managerEventPublisher?: AgentEventPublisher
   /** True after startup reconciliation has settled, even when it failed. */
   private managerReconciliationSettled = false
@@ -711,7 +710,7 @@ export class UnifiedAgent extends ModuleBase {
     this.activationRegistry = new ActivationRegistry(getAgentDataDir())
     this.workerOperationStore = new WorkerOperationStore(getAgentDataDir())
     this.grandfatherBootstrapStore = new GrandfatherBootstrapStore(getAgentDataDir())
-    this.managedInstaller = new ManagedInstaller(getAgentDataDir())
+
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
       now: () => new Date().toISOString(),
@@ -721,7 +720,7 @@ export class UnifiedAgent extends ModuleBase {
       builtinTraceHooks: this.builtinTraceHooks(),
       // P6-B §6：显式 impl spawn/resume/handoff 的 registry gate。
       assertWorkerImplReady: (impl) => this.activationRegistry.assertReady(impl),
-      resolveManagedBinary: (impl) => this.managedInstaller.activeBinary(impl),
+      resolveUserLevelBinary: (impl) => resolveUserLevelBinary(impl === 'claude-code' ? 'claude' : 'codex', getDataRootDir()),
       // P6-B §6.5：operation-time connection admission（当前调用内实时解析）。
       admitWorkerConnection: (impl, operationLabel) => admitWorkerConnection(this.activationRegistry, impl, {
         resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),
@@ -1225,7 +1224,6 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
     this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
     this.registerMethod('list_worker_implementation_status', this.handleListWorkerImplementationStatus.bind(this))
-    this.registerMethod('install_worker_implementation', this.handleInstallWorkerImplementation.bind(this))
     this.registerMethod('verify_worker_implementation', this.handleVerifyWorkerImplementation.bind(this))
     this.registerMethod('get_worker_implementation_operation', this.handleGetWorkerOperation.bind(this))
     this.registerMethod('cancel_worker_implementation_operation', this.handleCancelWorkerOperation.bind(this))
@@ -2936,72 +2934,6 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * §3.19.12 install_worker_implementation：assertion 核销 → 固定 manifest managed install。
-   * Browser/RPC 不提供 package/version/URL/args——全部来自随 release 固定的 manifest。
-   */
-  private async handleInstallWorkerImplementation(params: {
-    impl?: unknown
-    operation_id?: unknown
-    assertion?: unknown
-    expected?: { action?: unknown; operation_id?: unknown; impl?: unknown; mode?: unknown; policy_revision?: unknown }
-  }): Promise<{ operation_id: string; state: string; version?: string }> {
-    const impl = params.impl
-    if (impl !== 'claude-code' && impl !== 'codex') throw new Error('impl must be claude-code or codex')
-    if (typeof params.operation_id !== 'string' || typeof params.assertion !== 'string' || !params.expected) {
-      throw new Error('operation_id, assertion and expected are required')
-    }
-    // 交叉核对：assertion 的 expected 绑定必须与实际执行的 impl/operation/action 全等，
-    // 否则绑定关系被架空（assertion 退化成一次性 nonce）。
-    if (params.expected.action !== 'install' || params.expected.impl !== impl || params.expected.operation_id !== params.operation_id) {
-      throw new Error('assertion binding mismatch with requested operation')
-    }
-    // 互斥检查先于 assertion 核销——并发撞门不该白烧 nonce 让用户重新发起（R5/R6）。
-    if (this.workerOperationStore.hasActiveFor(impl)) {
-      throw new Error(`another mutating operation is active for ${impl}`)
-    }
-    // 1. assertion 核销（Admin 回调，bearer 认证 + nonce 一次性）。
-    const adminPort = this.adminPort
-    if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')
-    await this.rpcClient.callSensitive(
-      adminPort,
-      'consume_worker_operation_assertion',
-      { assertion: params.assertion, expected: params.expected },
-      this.config.moduleId,
-      { authorizationBearer: ConfigLoader.getRuntimeBearer() },
-    )
-    const operationId = params.operation_id
-    await this.workerOperationStore.upsert({
-      operation_id: operationId, kind: 'install', impl, state: 'running',
-      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-    })
-    try {
-      const result = await this.managedInstaller.install(impl)
-      // active pointer 切换后必须重算 registry——否则快照停在装之前：「安装→验证」
-      // 序列会用旧 detect 短路/写旧 cli_version 进 binding（R5）。
-      try {
-        if (this.activationRegistry.isInitialized()) await this.activationRegistry.refresh()
-      } catch (error) {
-        console.error(`[${this.config.moduleId}] registry recompute after install failed:`, error instanceof Error ? error.message : String(error))
-      }
-      await this.workerOperationStore.upsert({
-        operation_id: operationId, kind: 'install', impl, state: 'completed',
-        detail: `installed ${result.version}`, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-      })
-      return { operation_id: operationId, state: 'completed', version: result.version }
-    } catch (error) {
-      const sanitized = (error instanceof Error ? error.message : String(error)).replace(/\/[^\s]+/g, '<path>').replace(/[A-Za-z0-9_-]{24,}/g, '<redacted>').slice(0, 200)
-      await this.workerOperationStore.upsert({
-        operation_id: operationId, kind: 'install', impl, state: 'failed',
-        detail: sanitized,
-        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-      })
-      // 协议 §3.19.12.1：原始 stderr（含本机路径/registry token）不得抛回调用方——
-      // Admin 会把 message 透给 Browser。只抛脱敏摘要。
-      throw new Error(`install failed: ${sanitized}`)
-    }
-  }
-
-  /**
    * §3.19.12 verify_worker_implementation：assertion 核销 → 隔离临时 workspace 最小真实
    * turn（不是 --version）。结果写 registry verification binding（passed/failed 都记）。
    */
@@ -3041,7 +2973,7 @@ export class UnifiedAgent extends ModuleBase {
       const outcome = await runWorkerVerification(this.activationRegistry, impl, {
         resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),
         runtimeRoot: path.join(getAgentDataDir(), 'worker-impls', 'runtime'),
-        managedInstaller: this.managedInstaller,
+        dataRoot: getDataRootDir(),
       })
       await commitVerification(this.activationRegistry, impl, outcome)
       await this.workerOperationStore.upsert({
@@ -3218,7 +3150,6 @@ export class UnifiedAgent extends ModuleBase {
     const record = this.workerOperationStore.get(params.operation_id)
     if (!record) return { operation: null }
     if (record.state === 'running' || record.state === 'accepted') {
-      if (record.kind === 'install') this.managedInstaller.cancelInFlight(record.impl)
       await this.workerOperationStore.upsert({ ...record, state: 'cancelled' })
     }
     return { operation: this.workerOperationStore.get(params.operation_id) ?? null }
@@ -3771,7 +3702,9 @@ export class UnifiedAgent extends ModuleBase {
     // P6-B §8/§9：operation 未终态收口（accepted/running → interrupted）+ staging 清理。
     await this.workerOperationStore.load()
     await this.grandfatherBootstrapStore.load()
-    await this.managedInstaller.reconcileOnStartup()
+    // v1 移除 managed install：清理遗留的 tools 目录（一次性，幂等）。
+    await fs.promises.rm(path.join(getAgentDataDir(), 'worker-impls', 'claude-code', 'tools'), { recursive: true, force: true }).catch(() => {})
+    await fs.promises.rm(path.join(getAgentDataDir(), 'worker-impls', 'codex', 'tools'), { recursive: true, force: true }).catch(() => {})
     // P6-B §6.5：connection runtime 目录孤儿 sweep（崩溃丢 disposer 的兜底）——
     // 只清「所属 worker 已无任何存活化身」的目录；tmux 化身跨重启存活，其 CODEX_HOME 不动。
     void this.sweepOrphanedConnectionRuntimes()

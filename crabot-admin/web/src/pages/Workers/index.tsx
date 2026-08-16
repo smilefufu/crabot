@@ -147,21 +147,17 @@ export const WorkersPage: React.FC = () => {
     }
   }
 
-  const runOperation = async (impl: CLIWorkerImplId, action: 'install' | 'verify') => {
+  const runOperation = async (impl: CLIWorkerImplId, action: 'verify') => {
     if (!config) return
-    if (action === 'verify' && !window.confirm('verify 会在隔离临时目录用目标 CLI 跑一次最小真实 turn（消耗少量额度/费用）。继续？')) {
+    if (!window.confirm('verify 会在隔离临时目录用目标 CLI 跑一次最小真实 turn（消耗少量额度/费用）。继续？')) {
       return
     }
     setBusy(true)
     setError(null)
     try {
-      const result = await workerManagementService.startOperation(impl, action, config.revision)
-      if (action === 'verify') {
-        if (result.passed) setNotice('验证通过（真实最小 turn）')
-        else setError(`验证失败: ${result.detail ?? 'unknown'}`)
-      } else {
-        setNotice(`安装完成: ${result.version ?? ''}`)
-      }
+      const result = await workerManagementService.startVerify(impl, config.revision)
+      if (result.passed) setNotice('验证通过（真实最小 turn）')
+      else setError(`验证失败: ${result.detail ?? 'unknown'}`)
       await refresh()
     } catch (err) {
       setError(`${action} 失败: ${err instanceof Error ? err.message : String(err)}`)
@@ -188,7 +184,7 @@ export const WorkersPage: React.FC = () => {
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div>
-            安装: {status?.installed ? `${status.version ?? '?'}（${status.install_source === 'managed' ? 'Crabot 托管' : '系统'}）` : '未安装'}
+            安装: {status?.installed ? `${status.version ?? '?'}（用户级）` : status?.global_install_detected ? '仅检测到全局安装（已忽略，请用用户级安装）' : '未安装'}
             {'　'}连接: {policy?.connection?.mode === 'admin_provider' ? '页面配置' : policy?.connection?.mode === 'existing_host' ? '宿主机配置' : '—'}
             {'　'}验证: {VERIFICATION_LABEL[status?.verification ?? ''] ?? '—'}
             {'　'}启用: {policy?.enabled ? '是' : '否'}
@@ -196,9 +192,6 @@ export const WorkersPage: React.FC = () => {
           {status?.detail && <div className="text-secondary" style={{ fontSize: 13 }}>{status.detail}</div>}
           {!isBuiltin && config && policy && (
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <Button size="sm" variant="secondary" disabled={busy} onClick={() => void runOperation(impl, 'install')}>
-                {status?.install_source === 'managed' ? '升级/重装（托管）' : '安装（托管）'}
-              </Button>
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => setDialog({
                 impl, method: 'existing_host', token: '', endpoint: '', apiKey: '',
                 modelId: impl === 'claude-code' ? 'claude-sonnet-4-6' : '',

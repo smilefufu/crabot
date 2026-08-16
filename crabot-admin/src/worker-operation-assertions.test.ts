@@ -13,7 +13,7 @@ beforeEach(async () => {
 })
 afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }) })
 
-const base = { action: 'install' as const, operation_id: 'op-1', impl: 'claude-code' as const, mode: 'native_account', policy_revision: 1 }
+const base = { action: 'verify' as const, operation_id: 'op-1', impl: 'claude-code' as const, mode: 'native_account', policy_revision: 1 }
 
 describe('WorkerOperationAssertions（P6-B §9）', () => {
   it('issue → consume exact 匹配成功；nonce 一次性（重放拒绝）', async () => {
@@ -24,7 +24,7 @@ describe('WorkerOperationAssertions（P6-B §9）', () => {
   })
 
   it('claim 不匹配（action/impl/revision/mode）逐个拒绝', async () => {
-    await expect(assertions.consume(assertions.issue(base), { ...base, action: 'verify' })).rejects.toThrow(/mismatch/)
+    await expect(assertions.consume(assertions.issue(base), { ...base, action: 'cancel' })).rejects.toThrow(/mismatch/)
     await expect(assertions.consume(assertions.issue(base), { ...base, impl: 'codex' })).rejects.toThrow(/mismatch/)
     await expect(assertions.consume(assertions.issue(base), { ...base, policy_revision: 2 })).rejects.toThrow(/mismatch/)
     await expect(assertions.consume(assertions.issue(base), { ...base, operation_id: 'op-2' })).rejects.toThrow(/mismatch/)
@@ -49,6 +49,6 @@ describe('WorkerOperationAssertions（P6-B §9）', () => {
   it('chat assertion 不能跨域核销（purpose/audience/claims 不同）', async () => {
     // admin-chat assertion 的 claims 集合不同（manager_key/request_id），worker validator 拒绝。
     const chatLike = assertions.issue(base)
-    await expect(assertions.consume(chatLike, { ...base, action: 'setup' })).rejects.toThrow(/mismatch/)
+    await expect(assertions.consume(chatLike, { ...base, action: 'cancel' as const })).rejects.toThrow(/mismatch/)
   })
 })

@@ -20,6 +20,7 @@ import type { CLIWorkerImplId, WorkerImplementationStatus } from '../types.js'
 import type { ActivationRegistry, VerificationRecord } from '../activation-registry.js'
 import { findTranslator } from '../connections/registry.js'
 import { RuntimeFileSet } from '../connections/runtime-file.js'
+import { resolveUserLevelBinary } from '../cli-binary.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import type { ResolvedWorkerConnection } from '../connections/types.js'
 
@@ -44,7 +45,7 @@ export async function runWorkerVerification(
       connection_revision: string
     }>
     runtimeRoot: string
-    managedInstaller: { activeBinary(impl: CLIWorkerImplId): Promise<string | undefined> }
+    dataRoot: string
     now?: () => string
   },
 ): Promise<VerifyOutcome> {
@@ -100,9 +101,10 @@ export async function runWorkerVerification(
       ...(runtimeFiles ? { CODEX_HOME: runtimeFiles.root } : {}),
       ...(isolatedCodexHome ? { CODEX_HOME: isolatedCodexHome } : {}),
     }
-    // 固定 binary：managed active 优先，system fallback（与 adapter detect 同一顺序）。
-    const binary = (await deps.managedInstaller.activeBinary(impl)) ?? await findSystemBinary(impl)
-    if (!binary) return { passed: false, detail: 'binary not found' }
+    // 用户级安装 binary（与 adapter detect 同一规则；全局安装忽略）。
+    const resolved = await resolveUserLevelBinary(impl === 'claude-code' ? 'claude' : 'codex', deps.dataRoot)
+    const binary = resolved.binary
+    if (!binary) return { passed: false, detail: resolved.global_detected ? 'only global install found (ignored); install at user level' : 'binary not found' }
 
     const args = impl === 'claude-code'
       ? ['-p', MINIMAL_PROMPT, '--output-format', 'text']
@@ -145,14 +147,7 @@ export async function commitVerification(
   await registry.recordVerification(impl, record)
 }
 
-async function findSystemBinary(impl: CLIWorkerImplId): Promise<string | undefined> {
-  const which = impl === 'claude-code' ? 'claude' : 'codex'
-  return new Promise<string | undefined>((resolve) => {
-    execFile('/bin/sh', ['-c', `command -v ${which}`], (error, stdout) => {
-      resolve(error ? undefined : stdout.trim() || undefined)
-    })
-  })
-}
+
 
 function runWithTimeout(
   binary: string,

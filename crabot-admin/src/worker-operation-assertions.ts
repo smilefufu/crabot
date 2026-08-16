@@ -19,7 +19,7 @@ const ISSUER = 'admin-web'
 const TTL_SECONDS = 120
 const CLAIM_KEYS = ['assertion_id', 'issuer_module_id', 'audience', 'purpose', 'action', 'operation_id', 'impl', 'mode', 'policy_revision', 'nonce', 'issued_at', 'expires_at'] as const
 
-export type WorkerOperationAction = 'install' | 'setup' | 'verify' | 'cancel'
+export type WorkerOperationAction = 'verify' | 'cancel'
 
 export interface WorkerOperationClaims {
   assertion_id: string
@@ -53,7 +53,7 @@ function validClaims(value: unknown): value is WorkerOperationClaims {
   const claims = value as Record<string, unknown>
   return typeof claims.assertion_id === 'string' && claims.assertion_id.length > 0
     && claims.issuer_module_id === ISSUER && claims.audience === AUDIENCE && claims.purpose === PURPOSE
-    && ['install', 'setup', 'verify', 'cancel'].includes(claims.action as string)
+    && ['verify', 'cancel'].includes(claims.action as string)
     && typeof claims.operation_id === 'string' && claims.operation_id.length > 0
     && (claims.impl === 'claude-code' || claims.impl === 'codex')
     && typeof claims.mode === 'string' && claims.mode.length > 0

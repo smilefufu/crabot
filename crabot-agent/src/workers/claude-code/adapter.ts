@@ -222,8 +222,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
        * 且将来接上真实终态信号时只改这里、harness 不用再动。
        */
       readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
-      /** P6-B：managed active binary 解析（detect/spawn 顺序：managed → system）。 */
-      readonly resolveManagedBinary?: () => Promise<string | undefined>
+      /** 用户级 CLI binary 解析（v1 无 managed install；全局安装忽略）。 */
+      readonly resolveUserLevelBinary?: () => Promise<{ binary?: string; global_detected: boolean }>
     },
   ) {
     this.tmux = deps.tmux ?? new TmuxDriver()
@@ -231,11 +231,24 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     this.claudeProjectsDir = deps.claudeProjectsDir ?? join(homedir(), '.claude', 'projects')
     this.claudeConfigPath = deps.claudeConfigPath ?? join(homedir(), '.claude.json')
     this.pasteReadyTimeoutMs = deps.pasteReadyTimeoutMs ?? DEFAULT_PASTE_READY_TIMEOUT_MS
-    this.resolveManagedBinary = deps.resolveManagedBinary
+    this.resolveUserLevelBinary = deps.resolveUserLevelBinary
   }
 
-  private readonly resolveManagedBinary?: () => Promise<string | undefined>
+  private readonly resolveUserLevelBinary?: () => Promise<{ binary?: string; global_detected: boolean }>
   private lastDetectedVersion?: string
+  private lastGlobalDetected = false
+
+  /**
+   * binary 解析：resolver 存在时只认其结论（无用户级 → undefined，绝不回落裸命令——
+   * 裸命令会 PATH 命中全局安装，违反「不得静默使用全局 binary」）。
+   * resolver 未注入仅存在于单元测试 fixture。
+   */
+  private async resolveBinForCommand(): Promise<string | undefined> {
+    if (!this.resolveUserLevelBinary) return this.claudeBin
+    const resolved = await this.resolveUserLevelBinary()
+    this.lastGlobalDetected = resolved.global_detected
+    return resolved.binary ? shQuote(resolved.binary) : undefined
+  }
 
   /** P6-B §6：与最近一次 detect 版本一致的静态 translator 声明。 */
   connectionCapabilities(): import('../types.js').WorkerConnectionCapability[] {
@@ -244,15 +257,17 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async detect(): Promise<DetectResult> {
-    // P6-B：managed active binary 优先（找不到再落 system binary）。
-    const managed = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
-    const binary = managed ? shQuote(managed) : this.claudeBin
+    // 只认用户级安装；全局安装忽略（报 global_detected 提示，不静默使用）。
+    const binary = await this.resolveBinForCommand()
+    if (!binary) {
+      return { installed: false, activated: false, global_detected: this.lastGlobalDetected, detail: 'claude binary not found at user level' }
+    }
     let versionOutput: string
     try {
       const { stdout } = await execFileAsync('/bin/sh', ['-c', `${binary} --version`], { env: buildChildEnv() })
       versionOutput = stdout.trim()
     } catch (err) {
-      return { installed: false, activated: false, detail: `claude binary not found or failed to run: ${(err as Error).message}` }
+      return { installed: false, activated: false, global_detected: this.lastGlobalDetected, detail: `claude binary not found or failed to run: ${(err as Error).message}` }
     }
     // '2.1.227 (Claude Code)' → '2.1.227'
     const version = /^([0-9]+\.[0-9]+\.[0-9]+)/.exec(versionOutput)?.[1]
@@ -284,7 +299,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       activated = false
     }
 
-    return { installed: true, activated, version, install_source: managed ? 'managed' : 'system', credential_generation: credentialGeneration, detail: versionOutput }
+    return { installed: true, activated, version, install_source: 'user', credential_generation: credentialGeneration, global_detected: false, detail: versionOutput }
   }
 
   async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
@@ -580,8 +595,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     const outputFile = join(dir, `output-${seq}.log`)
     // P6-B：managed active binary 优先（与 detect 同顺序）——「install→verify→派活跑的是
     // 不同 binary」的版本错配/command not found 由此杜绝。
-    const spawnBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
-    const spawnBin = spawnBinManaged ? shQuote(spawnBinManaged) : this.claudeBin
+    const spawnBin = await this.resolveBinForCommand()
+    if (!spawnBin) throw new Error(`ClaudeCodeAdapter.spawn: no user-level claude installation`)
     const command = `${spawnBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode bypassPermissions`
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
@@ -696,8 +711,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // settings,必须与 spawn 对称地每次通过 --settings 注入。session_ref 是 cc 侧的会话 uuid,
       // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
-      const resumeBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
-    const resumeBin = resumeBinManaged ? shQuote(resumeBinManaged) : this.claudeBin
+      const resumeBin = await this.resolveBinForCommand()
+      if (!resumeBin) throw new Error(`ClaudeCodeAdapter.resume: no user-level claude installation`)
       const command = `${resumeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
@@ -821,8 +836,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     ]
     // P6-B：fork 与 spawn/resume 同一 binary 解析纪律（managed 优先）——否则 managed install
     // 且宿主无 system claude 时主线正常、侧问 command not found（R8）。
-    const forkBinManaged = this.resolveManagedBinary ? await this.resolveManagedBinary() : undefined
-    const forkBin = forkBinManaged ? shQuote(forkBinManaged) : this.claudeBin
+    const forkBin = await this.resolveBinForCommand()
+    if (!forkBin) throw new Error(`ClaudeCodeAdapter.fork: no user-level claude installation`)
     const shellCommand = `${forkBin} ${args.map(shQuote).join(' ')}`
 
     // 事件文件重定向:cc 的 hooks 在 print 模式同样执行,而 Stop hook 配在 **workspace 级**

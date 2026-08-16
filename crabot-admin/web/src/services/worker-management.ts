@@ -41,7 +41,8 @@ export interface WorkerImplementationStatus {
   impl: WorkerImplId
   installed: boolean
   version?: string
-  install_source?: 'managed' | 'system'
+  install_source?: 'user'
+  global_install_detected?: boolean
   connection_mode?: WorkerConnectionConfig['mode']
   credential_scope?: WorkerConnectionCapability['credential_scope']
   configured: boolean
@@ -88,8 +89,8 @@ export const workerManagementService = {
     return result.config
   },
 
-  async startOperation(impl: CLIWorkerImplId, action: 'install' | 'verify', expectedRevision: number): Promise<WorkerOperationView> {
-    const result = await api.post<{ operation: WorkerOperationView }>(`/agent/worker-implementations/${impl}/${action}`, {
+  async startVerify(impl: CLIWorkerImplId, expectedRevision: number): Promise<WorkerOperationView> {
+    const result = await api.post<{ operation: WorkerOperationView }>(`/agent/worker-implementations/${impl}/verify`, {
       expected_revision: expectedRevision,
     })
     return result.operation
