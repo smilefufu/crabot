@@ -68,9 +68,29 @@ function normalizeHarnessEvent(event: HarnessEvent): NormalizedTraceEvent {
   return {
     ts: event.ts,
     kind: 'lifecycle',
-    summary: `${event.kind}`,
+    summary: harnessSummary(event),
     ...(event.detail ? { detail: event.detail } : {}),
     source: 'harness',
+  }
+}
+
+/** lifecycle 行的 summary 带上关键 detail——裸事件名（如 state_changed 无目标态）是噪音。 */
+function harnessSummary(event: HarnessEvent): string {
+  const detail = (event.detail ?? {}) as Record<string, unknown>
+  switch (event.kind) {
+    case 'state_changed':
+      return detail.to ? `state_changed → ${String(detail.to)}` : 'state_changed'
+    case 'spawned':
+      return detail.impl ? `spawned (${String(detail.impl)})` : 'spawned'
+    case 'input_sent':
+      return 'input_sent'
+    default: {
+      const message = typeof detail.message === 'string' ? detail.message
+        : typeof detail.error === 'string' ? detail.error
+        : typeof detail.reason === 'string' ? detail.reason
+        : undefined
+      return message ? `${event.kind}: ${message.slice(0, 120)}` : `${event.kind}`
+    }
   }
 }
 

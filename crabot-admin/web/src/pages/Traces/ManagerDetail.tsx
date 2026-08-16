@@ -50,7 +50,10 @@ function EpisodeCard({ episode }: { episode: ManagerEpisodeTrace }) {
         </span>
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{episode.trace_id.slice(0, 8)}</span>
         <span>{TRIGGER_LABELS[episode.trigger.type]}</span>
-        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{episode.trigger.summary}</span>
+        {/* summary 与 label 重复时不重复渲染（「人类消息 / 人类消息 x1」→ 只留 label + 后缀差异） */}
+        {episode.trigger.summary && !episode.trigger.summary.startsWith(TRIGGER_LABELS[episode.trigger.type]) && (
+          <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{episode.trigger.summary}</span>
+        )}
         <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 12 }}>
           {new Date(episode.started_at).toLocaleString()}
           {episode.duration_ms !== undefined ? ` · ${episode.duration_ms}ms` : ''}

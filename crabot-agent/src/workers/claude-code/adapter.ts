@@ -1356,7 +1356,11 @@ function normalizeTraceLine(line: string): NormalizedTraceEvent | null {
   const ts = typeof parsed.timestamp === 'string' ? parsed.timestamp : ''
 
   if (parsed.type === 'system') {
-    const summary = typeof parsed.content === 'string' ? truncate(parsed.content, 200) : String(parsed.subtype ?? 'system')
+    let summary = typeof parsed.content === 'string' ? truncate(parsed.content, 200) : String(parsed.subtype ?? 'system')
+    // 裸 subtype 是噪音：turn_duration 这类 system 事件带上关键数值。
+    if (parsed.subtype === 'turn_duration' && typeof parsed.durationMs === 'number') {
+      summary = `turn_duration ${(parsed.durationMs / 1000).toFixed(1)}s`
+    }
     return { ts, kind: 'lifecycle', role: 'system', summary, detail: parsed }
   }
 

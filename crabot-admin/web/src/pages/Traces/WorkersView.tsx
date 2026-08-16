@@ -6,7 +6,7 @@ import { Link } from 'react-router-dom'
 import { Loading } from '../../components/Common/Loading'
 import { agentObservabilityService, type LedgerWorker } from '../../services/agent-observability'
 
-const STATUS_OPTIONS = ['', 'executing', 'waiting_human', 'completed', 'failed', 'cancelled'] as const
+const STATUS_OPTIONS = ['', 'executing', 'waiting_input', 'waiting_human', 'completed', 'failed', 'cancelled'] as const
 
 export const WorkersView: React.FC = () => {
   const [items, setItems] = useState<LedgerWorker[]>([])
@@ -97,7 +97,11 @@ export const WorkersView: React.FC = () => {
                     {worker.manager_key}
                   </Link>
                 </td>
-                <td style={{ padding: '8px 12px' }}>{worker.incarnations[worker.incarnations.length - 1]?.impl ?? '—'}</td>
+                <td style={{ padding: '8px 12px' }}>{
+                  worker.legacy_source
+                    ? <span title="不受支持的 legacy 记录">legacy</span>
+                    : (worker.incarnations[worker.incarnations.length - 1]?.impl ?? <span title="无化身记录（legacy 导入）">legacy</span>)
+                }</td>
                 <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
                   {new Date(worker.updated_at).toLocaleString()}
                 </td>

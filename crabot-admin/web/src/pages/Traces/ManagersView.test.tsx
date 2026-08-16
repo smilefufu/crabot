@@ -95,8 +95,10 @@ describe('ManagerDetail', () => {
     )
     await waitFor(() => expect(screen.getByText('人类消息')).toBeInTheDocument())
     expect(screen.getByText('completed')).toBeInTheDocument()
-    // 展开后 spawned worker 链接出现
-    fireEvent.click(screen.getByText('人类消息 x1'))
+    // P6 fix：summary 与 label 重复时不再重复渲染（「人类消息」+「人类消息 x1」→ 只留 label）
+    expect(screen.queryByText('人类消息 x1')).toBeNull()
+    // 展开后 spawned worker 链接出现（点击 label 展开）
+    fireEvent.click(screen.getByText('人类消息'))
     await waitFor(() => expect(screen.getByText('w-abc1234567')).toBeInTheDocument())
     const workerLink = screen.getByText('w-abc1234567').closest('a')!
     expect(workerLink.getAttribute('href')).toBe(`/traces/workers/${encodeURIComponent('w-abc123456789')}`)

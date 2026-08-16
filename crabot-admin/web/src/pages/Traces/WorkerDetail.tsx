@@ -19,7 +19,8 @@ const SOURCE_LABEL: Record<string, string> = { harness: 'harness', native: 'nati
 function TimelineEvent({ event }: { event: WorkerTraceEvent }) {
   return (
     <div style={{ display: 'flex', gap: 8, fontSize: 12, padding: '3px 0', fontFamily: 'var(--font-mono)' }}>
-      <span style={{ color: 'var(--text-muted)', minWidth: 64 }}>{event.source ? SOURCE_LABEL[event.source] ?? event.source : ''}</span>
+      <span style={{ color: 'var(--text-muted)', minWidth: 64 }}>{event.ts ? new Date(event.ts).toLocaleTimeString('zh-CN', { hour12: false }) : ''}</span>
+      <span style={{ color: 'var(--text-muted)', minWidth: 56 }}>{event.source ? SOURCE_LABEL[event.source] ?? event.source : ''}</span>
       <span style={{ color: 'var(--text-muted)', minWidth: 88 }}>{event.kind}</span>
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{event.summary}</span>
     </div>
