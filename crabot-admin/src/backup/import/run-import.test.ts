@@ -136,11 +136,12 @@ describe('runCrabotImport P6-D agent 分类（§3.18.1）', () => {
     })
     const calls: string[] = []
     const deps: ImportDeps = {
-      importCoreAgentConfig: async () => { calls.push('core-config'); return [{ kind: 'agent-config', id: 'crabot-agent', status: 'overwritten' }] },
+      validateAgentPayload: async () => { calls.push('validate'); return { coreConfigRaw: { instance_id: 'crabot-agent' }, archiveRows: [] } },
+      applyCoreAgentConfig: async () => { calls.push('core-config'); return [{ kind: 'agent-config', id: 'crabot-agent', status: 'overwritten' }] },
       finalize: async () => {},
     }
     const summary = await runCrabotImport({ archivePath: archive, categories: ['config'], onConflict: 'skip', deps })
-    expect(calls).toEqual(['core-config'])
+    expect(calls).toEqual(['validate', 'core-config'])
     expect(summary.errors).toEqual([])
   })
 
@@ -150,7 +151,8 @@ describe('runCrabotImport P6-D agent 分类（§3.18.1）', () => {
     })
     const calls: string[] = []
     const deps: ImportDeps = {
-      ingestLegacyArchive: async () => { calls.push('ingest'); return [{ kind: 'legacy-agent-archive', id: 'agent_config:old', status: 'imported' }] },
+      validateAgentPayload: async () => ({ coreConfigRaw: null, archiveRows: [{ archive_id: 'agent_config:old' }] }),
+      applyLegacyArchiveRows: async () => { calls.push('ingest'); return [{ kind: 'legacy-agent-archive', id: 'agent_config:old', status: 'imported' }] },
       finalize: async () => {},
     }
     await runCrabotImport({ archivePath: archive, categories: ['config'], onConflict: 'skip', deps })

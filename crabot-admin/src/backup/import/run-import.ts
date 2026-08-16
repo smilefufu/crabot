@@ -5,7 +5,7 @@
  */
 import type { BackupCategory } from '../types.js'
 import type { CrabotImportSummary, ImportItemResult, ImportStatus, OnConflict } from './import-types.js'
-import { readJsonArrayFromArchive } from './read-archive-category.js'
+import { readJsonArrayFromArchive, readArchiveTextFile } from './read-archive-category.js'
 
 type UpsertFn = (record: unknown) => Promise<ImportStatus>
 
@@ -26,10 +26,12 @@ export type ImportDeps = {
   upsertSchedule?: UpsertFn
   upsertTask?: UpsertFn
   upsertSessionConfig?: UpsertFn
-  /** P6-D：exact core config 只进 CoreAgentConfigStore（静态 slot 校验）。 */
-  importCoreAgentConfig?: (archivePath: string, onConflict: OnConflict) => Promise<ImportItemResult[]>
-  /** P6-D：新格式 LegacyAgentArchiveRecord 恢复到 archive-only store（幂等/冲突规则见 §3.18.1）。 */
-  ingestLegacyArchive?: (archivePath: string, onConflict: OnConflict) => Promise<ImportItemResult[]>
+  /** P6-D：全量校验 agent 相关 payload（纯读+校验，零写入）。 */
+  validateAgentPayload?: (archivePath: string) => Promise<{ coreConfigRaw: Record<string, unknown> | null; archiveRows: unknown[] }>
+  /** P6-D：validate 通过后才允许调用——exact core config 进 CoreAgentConfigStore。 */
+  applyCoreAgentConfig?: (raw: Record<string, unknown>, onConflict: OnConflict) => Promise<ImportItemResult[]>
+  /** P6-D：validate 通过后才允许调用——archive record 恢复（幂等）。 */
+  applyLegacyArchiveRows?: (rows: unknown[], onConflict: OnConflict) => Promise<ImportItemResult[]>
   importSkills?: (archivePath: string, onConflict: OnConflict) => Promise<ImportItemResult[]>
   importMemory?: (archivePath: string, onConflict: OnConflict) => Promise<ImportItemResult[]>
   /** 全部类别处理完后：save + 内存 reload + triggerPushAfter。 */
@@ -69,22 +71,26 @@ export async function runCrabotImport(params: {
   //   - friend-permission-configs.json（按 friend_id 而非 id，留 C1 决定）
   //   - vendor.yaml（system mode 由 root 管，不导入）
   try {
-    // P6-D §3.18.1：全包 preflight 必须先于任何 domain 写入。
+    // P6-D §3.18.1：全包 preflight 必须先于任何 domain 写入（含 core config）。
+    let agentPayload: { coreConfigRaw: Record<string, unknown> | null; archiveRows: unknown[] } | null = null
     if (selected.has('config')) {
-      const legacyImpls = await readJsonArrayFromArchive(archivePath, 'payload/config/agent-implementations.json')
-      const legacyInstances = await readJsonArrayFromArchive(archivePath, 'payload/config/agent-instances.json')
-      const nonCore = legacyInstances.filter((row) => (row as { id?: string }).id !== 'crabot-agent')
-      if (legacyImpls.length > 0 || nonCore.length > 0) {
-        throw new ImportPreflightRejected(
-          'ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED',
-          `旧 live Agent payload 不再支持导入（implementations=${legacyImpls.length}, non-core instances=${nonCore.length}）；请先在旧版本隔离恢复并运行 startup archive migration，再导出新格式 archive`,
-        )
-      }
-      if (deps.importCoreAgentConfig) {
-        results.push(...(await deps.importCoreAgentConfig(archivePath, onConflict)))
-      }
-      if (deps.ingestLegacyArchive) {
-        results.push(...(await deps.ingestLegacyArchive(archivePath, onConflict)))
+      // 存在性检查是 preflight 的一部分：无 agent payload 时不需要校验器。
+      const hasAgentPayload = (await readJsonArrayFromArchive(archivePath, 'payload/config/agent-implementations.json')).length > 0
+        || (await readJsonArrayFromArchive(archivePath, 'payload/config/agent-instances.json')).length > 0
+        || (await readArchiveTextFile(archivePath, 'payload/config/agent-configs/crabot-agent.json')) !== null
+        || (await readArchiveTextFile(archivePath, 'payload/config/legacy-agent-archive.json')) !== null
+      if (hasAgentPayload) {
+        if (!deps.validateAgentPayload) {
+          throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', '缺少 agent payload 校验器')
+        }
+        agentPayload = await deps.validateAgentPayload(archivePath)
+        // 校验通过 → 才允许写入
+        if (agentPayload.coreConfigRaw && deps.applyCoreAgentConfig) {
+          results.push(...(await deps.applyCoreAgentConfig(agentPayload.coreConfigRaw, onConflict)))
+        }
+        if (agentPayload.archiveRows.length > 0 && deps.applyLegacyArchiveRows) {
+          results.push(...(await deps.applyLegacyArchiveRows(agentPayload.archiveRows, onConflict)))
+        }
       }
     }
 
@@ -140,10 +146,6 @@ export async function runCrabotImport(params: {
         errors.push(`memory 导入失败：${String(err)}`)
       }
     }
-  } catch (err) {
-    // preflight 拒绝：整包零写入，直接抛出（不进 results/errors 的部分导入语义）
-    if (err instanceof ImportPreflightRejected) throw err
-    throw err
   } finally {
     // 无论中途是否抛错，finalize（save + reload + push）都要跑，避免半落盘不刷新
     await deps.finalize()

@@ -5,6 +5,8 @@
  */
 import { readArchiveTextFile } from '../../openclaw-import/archive-reader.js'
 
+export { readArchiveTextFile }
+
 /** 读归档内某 JSON 数组文件；不存在 / 非数组 / 解析失败均返回 []。 */
 export async function readJsonArrayFromArchive(
   archivePath: string,

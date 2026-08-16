@@ -139,23 +139,38 @@ export class LegacyAgentArchiveStore {
     await durableAtomicWriteFile(this.tombstonePath, JSON.stringify(Array.from(map.values()), null, 2))
   }
 
-  /** 资源解析：config → agent-configs/<instance>.json；package → installed_path / installed-modules/<id>。 */
-  private resolveResources(record: LegacyAgentArchiveRecord): { config?: ArchiveResource; pkg?: ArchiveResource } {
+  /**
+   * 资源解析：config → agent-configs/<instance>.json；package → installed_path 或
+   * package_path（cutover inventory 对 installed_package 的生产 raw 形状是
+   * {package_id, package_path, ...}，review 实测）。
+   * 返回 known-but-undeletable 标记：raw 声明了资源但路径越界/无法解析时，该资源
+   * 必须计入 retained（archive_removed 不得谎报 true）。
+   */
+  private resolveResources(record: LegacyAgentArchiveRecord): {
+    config?: ArchiveResource
+    pkg?: ArchiveResource
+    undeletable: string[]
+  } {
     const raw = (record.raw && typeof record.raw === 'object' ? record.raw : {}) as Record<string, unknown>
-    const out: { config?: ArchiveResource; pkg?: ArchiveResource } = {}
+    const out: { config?: ArchiveResource; pkg?: ArchiveResource; undeletable: string[] } = { undeletable: [] }
     const instanceId = typeof raw.instance_id === 'string' ? raw.instance_id : (typeof raw.id === 'string' ? raw.id : undefined)
     if (instanceId && /^[A-Za-z0-9_-]+$/.test(instanceId)) {
       out.config = {
         logical: `agent-configs/${instanceId}.json`,
         absPath: path.join(this.dataDir, 'agent-configs', `${instanceId}.json`),
       }
+    } else if (record.source_kind === 'agent_config') {
+      out.undeletable.push(`agent-configs（无法从 raw 解析 instance_id）`)
     }
-    const installedPath = typeof raw.installed_path === 'string' ? raw.installed_path : undefined
+    const declaredPath = typeof raw.installed_path === 'string' ? raw.installed_path
+      : (typeof raw.package_path === 'string' ? raw.package_path : undefined)
     const installedRoot = path.join(this.dataDir, 'installed-modules')
-    if (installedPath) {
-      const abs = path.resolve(installedPath)
+    if (declaredPath) {
+      const abs = path.resolve(declaredPath)
       if (abs.startsWith(installedRoot + path.sep)) {
         out.pkg = { logical: `installed-modules/${path.basename(abs)}`, absPath: abs }
+      } else {
+        out.undeletable.push(`package（路径越界，拒绝删除）: ${path.basename(abs)}`)
       }
     }
     return out
@@ -287,9 +302,9 @@ export class LegacyAgentArchiveStore {
     journal.phase = 'committed'
     await this.writeJournal(journal)
 
-    // retained：未选中的资源仍在 → summary 保留
+    // retained：未选中的资源仍在 → summary 保留；undeletable 也计入（不得谎报全删）
     const resources = this.resolveResources(record)
-    const retained: string[] = []
+    const retained: string[] = [...resources.undeletable]
     if (!params.delete_config && resources.config) {
       if (await exists(resources.config.absPath)) retained.push(resources.config.logical)
     }

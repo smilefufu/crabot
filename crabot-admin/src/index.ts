@@ -27,6 +27,7 @@ import { shouldDisableOnImport } from './backup/import/schedule-arm.js'
 import { VersionService } from './version/version-service.js'
 import { startUpgrade, canUpgrade, isUpgradeInProgress } from './version/upgrade-runner.js'
 import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archive-reader.js'
+import { readJsonArrayFromArchive } from './backup/import/read-archive-category.js'
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
 import { CoreAgentConfigMutationCoordinator } from './core-agent-config-revision-store.js'
 import { WorkerImplementationStore } from './worker-implementation-store.js'
@@ -7057,7 +7058,7 @@ export class AdminModule extends ModuleBase {
   private async handleGetAgentImplementation(params: { implementation_id: string }): Promise<{
     implementation: AgentImplementation
   }> {
-    if (params.implementation_id !== 'default') throw new Error(`Implementation not found: ${params.implementation_id}`)
+    if (params.implementation_id !== 'default' && params.implementation_id !== 'crabot-agent') throw new Error(`Implementation not found: ${params.implementation_id}`)
     const impl = this.agentManager.getImplementation(params.implementation_id)
     if (!impl) {
       throw new Error(`Implementation not found: ${params.implementation_id}`)
@@ -7997,7 +7998,7 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     id: string
   ): Promise<void> {
-    if (id !== 'default') {
+    if (id !== 'default' && id !== 'crabot-agent') {
       res.writeHead(404)
       res.end(JSON.stringify({ error: 'Implementation not found' }))
       return
@@ -10850,8 +10851,9 @@ export class AdminModule extends ModuleBase {
         this.sessionConfigs.set(entry.session_id, entry.config)
         return exists ? 'overwritten' : 'imported'
       },
-      importCoreAgentConfig: async (archivePath2, oc) => this.importCoreAgentConfigFromArchive(archivePath2, oc),
-      ingestLegacyArchive: async (archivePath2, oc) => this.ingestLegacyArchiveFromArchive(archivePath2, oc),
+      validateAgentPayload: (archivePath2) => this.validateAgentImportPayload(archivePath2),
+      applyCoreAgentConfig: async (raw, oc) => this.applyCoreAgentConfigFromImport(raw, oc),
+      applyLegacyArchiveRows: async (rows, oc) => this.applyLegacyArchiveRowsFromImport(rows, oc),
       upsertSchedule: async (r) => {
         const sched = r as Schedule
         if (shouldDisableOnImport(sched, Date.now())) sched.enabled = false
@@ -10874,28 +10876,67 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * P6-D §3.18.1(1)：exact core config 只进 CoreAgentConfigStore。
-   * 校验：instance_id === 'crabot-agent' 且 model slot key ⊆ 静态四 slots；否则拒绝。
+   * P6-D §3.18.1 全包 preflight（纯读+校验，零写入）：
+   * - 旧 live non-core Agent payload → ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED
+   * - exact core config：instance_id/slot key 校验
+   * - 新格式 archive：同 id 不同 canonical payload → ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT
    */
-  private async importCoreAgentConfigFromArchive(archivePath: string, onConflict: OnConflict): Promise<ImportItemResult[]> {
-    const text = await readArchiveTextFile(archivePath, 'payload/config/agent-configs/crabot-agent.json')
-    if (!text) return []
-    const raw = JSON.parse(text) as Record<string, unknown>
-    if (raw.instance_id !== 'crabot-agent') {
-      throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', 'agent-configs/crabot-agent.json 的 instance_id 不是 crabot-agent')
+  private async validateAgentImportPayload(archivePath: string): Promise<{ coreConfigRaw: Record<string, unknown> | null; archiveRows: unknown[] }> {
+    const legacyImpls = await readJsonArrayFromArchive(archivePath, 'payload/config/agent-implementations.json')
+    const legacyInstances = await readJsonArrayFromArchive(archivePath, 'payload/config/agent-instances.json')
+    const nonCore = legacyInstances.filter((row: unknown) => (row as { id?: string }).id !== 'crabot-agent')
+    if (legacyImpls.length > 0 || nonCore.length > 0) {
+      throw new ImportPreflightRejected(
+        'ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED',
+        `旧 live Agent payload 不再支持导入（implementations=${legacyImpls.length}, non-core instances=${nonCore.length}）；请先在旧版本隔离恢复并运行 startup archive migration，再导出新格式 archive`,
+      )
     }
-    const modelConfig = (raw.model_config ?? {}) as Record<string, unknown>
-    const allowed = new Set(['powerful', 'cost_effective', 'vision', 'manager'])
-    const badKey = Object.keys(modelConfig).find((k) => !allowed.has(k))
-    if (badKey) {
-      throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', `core config 含未知 model slot key: ${badKey}`)
+    let coreConfigRaw: Record<string, unknown> | null = null
+    const coreText = await readArchiveTextFile(archivePath, 'payload/config/agent-configs/crabot-agent.json')
+    if (coreText) {
+      const raw = JSON.parse(coreText) as Record<string, unknown>
+      if (raw.instance_id !== 'crabot-agent') {
+        throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', 'agent-configs/crabot-agent.json 的 instance_id 不是 crabot-agent')
+      }
+      const allowed = new Set(['powerful', 'cost_effective', 'vision', 'manager'])
+      const badKey = Object.keys((raw.model_config ?? {}) as Record<string, unknown>).find((k) => !allowed.has(k))
+      if (badKey) {
+        throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', `core config 含未知 model slot key: ${badKey}`)
+      }
+      coreConfigRaw = raw
     }
+    const archiveText = await readArchiveTextFile(archivePath, 'payload/config/legacy-agent-archive.json')
+    let archiveRows: unknown[] = []
+    if (archiveText) {
+      const rows = JSON.parse(archiveText) as unknown[]
+      if (!Array.isArray(rows)) throw new ImportPreflightRejected('ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT', 'legacy-agent-archive.json 不是数组')
+      const existingRaw = new Map<string, unknown>()
+      for (const record of await this.legacyArchiveStore.readRawRecords()) {
+        existingRaw.set(record.archive_id, record.raw ?? null)
+      }
+      for (const row of rows) {
+        const r = row as Record<string, unknown>
+        if (typeof r.archive_id !== 'string' || typeof r.source_kind !== 'string' || typeof r.source_id !== 'string') {
+          throw new ImportPreflightRejected('ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT', 'archive record 缺少 archive_id/source_kind/source_id')
+        }
+        const old = existingRaw.get(r.archive_id)
+        if (old !== undefined && canonicalizeJson(old) !== canonicalizeJson(r.raw ?? null)) {
+          throw new ImportPreflightRejected('ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT', `archive payload 冲突: ${r.archive_id}`)
+        }
+      }
+      archiveRows = rows
+    }
+    return { coreConfigRaw, archiveRows }
+  }
+
+  /** validate 通过后：exact core config 只进 CoreAgentConfigStore。 */
+  private async applyCoreAgentConfigFromImport(raw: Record<string, unknown>, onConflict: OnConflict): Promise<ImportItemResult[]> {
     const existing = this.agentManager.getConfig('crabot-agent')
     if (existing && onConflict === 'skip') return [{ kind: 'agent-config', id: 'crabot-agent', status: 'skipped' }]
     await this.agentManager.updateConfig({
       instance_id: 'crabot-agent',
       ...(typeof raw.system_prompt === 'string' ? { system_prompt: raw.system_prompt } : {}),
-      model_config: modelConfig as UpdateAgentConfigParams['model_config'],
+      model_config: (raw.model_config ?? {}) as UpdateAgentConfigParams['model_config'],
       ...(Array.isArray(raw.mcp_server_ids) ? { mcp_server_ids: raw.mcp_server_ids as string[] } : {}),
       ...(Array.isArray(raw.skill_ids) ? { skill_ids: raw.skill_ids as string[] } : {}),
       ...(typeof raw.max_iterations === 'number' ? { max_iterations: raw.max_iterations } : {}),
@@ -10906,37 +10947,20 @@ export class AdminModule extends ModuleBase {
     return [{ kind: 'agent-config', id: 'crabot-agent', status: existing ? 'overwritten' : 'imported' }]
   }
 
-  /**
-   * P6-D §3.18.1(2)：新格式 LegacyAgentArchiveRecord 恢复到 archive-only store。
-   * 同 archive_id + 同 canonical payload 幂等；payload 不同整包冲突。
-   */
-  private async ingestLegacyArchiveFromArchive(archivePath: string, _onConflict: OnConflict): Promise<ImportItemResult[]> {
-    const text = await readArchiveTextFile(archivePath, 'payload/config/legacy-agent-archive.json')
-    if (!text) return []
-    const rows = JSON.parse(text) as unknown[]
-    if (!Array.isArray(rows)) throw new ImportPreflightRejected('ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT', 'legacy-agent-archive.json 不是数组')
-    const existing = new Map((await this.legacyArchiveStore.listSummaries()).map((s) => [s.archive_id, s]))
-    const valid: Array<{ source_kind: 'agent_implementation' | 'agent_instance' | 'agent_config' | 'installed_package'; source_id: string; raw: unknown; archive_id: string }> = []
-    for (const row of rows) {
-      const r = row as Record<string, unknown>
-      if (typeof r.archive_id !== 'string' || typeof r.source_kind !== 'string' || typeof r.source_id !== 'string') {
-        throw new ImportPreflightRejected('ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT', 'archive record 缺少 archive_id/source_kind/source_id')
-      }
-      valid.push({ archive_id: r.archive_id, source_kind: r.source_kind as 'agent_config', source_id: r.source_id, raw: r.raw })
-    }
-    // 冲突检查先行（canonical payload 不同 → 整包拒绝）
-    const existingRaw = new Map<string, unknown>()
-    for (const record of await this.legacyArchiveStore.readRawRecords()) {
-      existingRaw.set(record.archive_id, record.raw ?? null)
-    }
-    for (const row of valid) {
-      const old = existingRaw.get(row.archive_id)
-      if (old !== undefined && canonicalizeJson(old) !== canonicalizeJson(row.raw ?? null)) {
-        throw new ImportPreflightRejected('ADMIN_BACKUP_LEGACY_ARCHIVE_CONFLICT', `archive payload 冲突: ${row.archive_id}`)
-      }
-    }
-    await this.cutoverStore.archive(valid.map((row) => ({ source_kind: row.source_kind, source_id: row.source_id, raw: row.raw })))
-    return valid.map((row) => ({ kind: 'legacy-agent-archive', id: row.archive_id, status: existingRaw.has(row.archive_id) ? 'overwritten' : 'imported' }))
+  /** validate 通过后：archive record 幂等恢复到 archive-only store。 */
+  private async applyLegacyArchiveRowsFromImport(rows: unknown[], _onConflict: OnConflict): Promise<ImportItemResult[]> {
+    const existingIds = new Set((await this.legacyArchiveStore.readRawRecords()).map((r) => r.archive_id))
+    const sources = (rows as Array<Record<string, unknown>>).map((r) => ({
+      source_kind: r.source_kind as 'agent_implementation' | 'agent_instance' | 'agent_config' | 'installed_package',
+      source_id: r.source_id as string,
+      raw: r.raw,
+    }))
+    await this.cutoverStore.archive(sources)
+    return (rows as Array<Record<string, unknown>>).map((r) => ({
+      kind: 'legacy-agent-archive',
+      id: r.archive_id as string,
+      status: existingIds.has(r.archive_id as string) ? 'overwritten' : 'imported',
+    }))
   }
 
   /**
