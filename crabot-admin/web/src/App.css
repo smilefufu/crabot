@@ -24,6 +24,12 @@
   --error-glow: rgba(224, 96, 96, 0.12);
   --info: #6aa9e0;
   --info-glow: rgba(106, 169, 224, 0.12);
+
+  /* P6-A 页面使用的语义别名（此前未定义，fallback 是浅色值导致深色主题下白底白字） */
+  --bg-muted: var(--surface-hover);
+  --color-warning: var(--warning);
+  --color-danger: var(--error);
+  --color-success: var(--success);
   --info-bg: rgba(106, 169, 224, 0.08);
 
   /* Backgrounds — obsidian scale */

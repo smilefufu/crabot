@@ -1597,6 +1597,8 @@ function normalizeResponseItem(payload: Record<string, unknown> | undefined, ts:
     const role = payload.role
     const mappedRole = role === 'developer' ? 'system' : role === 'user' || role === 'assistant' || role === 'system' ? role : undefined
     const text = extractFirstContentText(payload.content)
+    // 空内容（纯 reasoning 块等）不产事件——否则时间线出现空 summary 行。
+    if (!text) return null
     return { ts, kind: 'message', role: mappedRole, summary: truncate(text, 200), detail: payload }
   }
 

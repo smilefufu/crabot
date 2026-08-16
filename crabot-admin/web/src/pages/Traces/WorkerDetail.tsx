@@ -197,6 +197,7 @@ const WorkerDetailContent: React.FC = () => {
   }
 
   const mainlineSeq = worker.incarnations[worker.incarnations.length - 1]?.seq
+  const mainline = worker.incarnations[worker.incarnations.length - 1]
 
   return (
     <div>
@@ -212,6 +213,9 @@ const WorkerDetailContent: React.FC = () => {
           <Link to={`/traces/managers/${encodeURIComponent(worker.manager_key)}`} style={{ fontFamily: 'var(--font-mono)' }}>{worker.manager_key}</Link>
         </div>
         <div><strong>回报目标：</strong>{worker.report_to.channel_id} / {worker.report_to.session_id}</div>
+        {mainline?.workspace && (
+          <div><strong>工作区：</strong><span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{mainline.workspace}</span></div>
+        )}
         <div>
           <strong>来源：</strong>
           {worker.origin.trigger_type}

@@ -1385,6 +1385,8 @@ function normalizeTraceLine(line: string): NormalizedTraceEvent | null {
       }
     }
     const text = extractMessageText(content)
+    // 纯 thinking/空内容的 assistant 消息不产事件——否则时间线出现空 summary 行（噪音）。
+    if (!text) return null
     return { ts, kind: 'message', role: 'assistant', summary: truncate(text, 200), detail: message }
   }
 
