@@ -862,7 +862,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // [projects."<realpath>"] trust_level = "trusted" 解决。
     // 网络放行见文件头"spawn/resume 启动参数"节。
     const spawnBin = (await this.resolveBinForCommand())?.cmd
-    if (!spawnBin) throw new Error('CodexWorkerAdapter.spawn: no user-level codex installation')
+    if (!spawnBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.spawn: no user-level codex installation')
     const command = `${spawnBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
     const spawnStartedAt = Date.now()
 
@@ -1017,7 +1017,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
       // `resume` 之前。
       const resumeBin = (await this.resolveBinForCommand())?.cmd
-      if (!resumeBin) throw new Error('CodexWorkerAdapter.resume: no user-level codex installation')
+      if (!resumeBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.resume: no user-level codex installation')
       const command = `${resumeBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
 
       // P6-B admin_provider resume：上一化身的 runtime CODEX_HOME 已随终态清理，
