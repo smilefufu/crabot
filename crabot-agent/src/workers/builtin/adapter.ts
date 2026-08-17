@@ -48,6 +48,7 @@
  * 的磁盘状态。
  */
 import { promises as fs } from 'fs'
+import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { runEngine, defineTool, createUserMessage } from '../../engine/index.js'
@@ -57,7 +58,7 @@ import { SessionTree } from '../session-tree.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { latestModifiedMs } from '../meta-store.js'
-import { WorkerExitedError } from '../errors.js'
+import { WorkerExitedError, ForkEstablishmentError } from '../errors.js'
 import {
   BUILTIN_WORKER_PERMISSIONS,
   FORBIDDEN_WORKER_TOOLS,
@@ -73,10 +74,12 @@ import type {
   DetectResult,
   IncarnationHandle,
   IncarnationRef,
+  ForkOptions,
   IncarnationEndReason,
   StateChangeReport,
   OutputCursor,
   SpawnSpec,
+  SendInputOptions,
   WorkerAdapter,
   WorkerContractState,
   Workspace,
@@ -435,8 +438,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return handle
   }
 
-  async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
+  async fork(prev: IncarnationRef, forkInput: string, opts: ForkOptions): Promise<IncarnationHandle> {
     this.assertActive()
+    const assertEstablishmentActive = () => {
+      if (Date.parse(opts.establishment_deadline_at) <= Date.now()) {
+        throw new ForkEstablishmentError('timeout', 'fork establishment deadline expired', 'not_started')
+      }
+    }
+    assertEstablishmentActive()
     // 同 resume：fork 也是起一个新化身，运行配置现取。
     const builtin = await this.runtimeFor(prev.worker_id, 'fork')
 
@@ -447,6 +456,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 不变量是它们各自场景下的语义，不适用于 fork）。
     const mutex = this.getMutex(prev.worker_id)
     const { instance, handle } = await mutex.run(async () => {
+      assertEstablishmentActive()
       const dir = join(this.deps.dataDir, prev.worker_id)
       let sessionTree = this.findSessionTreeForWorker(prev.worker_id)
       if (!sessionTree) {
@@ -469,7 +479,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         pendingInputs: [],
       }
 
-      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin', session_ref: forkId }
+      const newHandle: IncarnationHandle = {
+        worker_id: prev.worker_id,
+        seq: newSeq,
+        impl: 'builtin',
+        session_ref: forkId,
+        query_id: opts.query_id,
+      }
       // writeMeta 成功之后才注册到 instances，和 resume 保持一致的提交次序：磁盘失败时
       // 不留孤儿实例。
       await this.writeMeta(newInstance)
@@ -483,7 +499,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return handle
   }
 
-  async sendInput(h: IncarnationHandle, text: string, _opts?: { raw?: boolean }): Promise<void> {
+  async sendInput(h: IncarnationHandle, text: string, opts?: SendInputOptions): Promise<void> {
     this.assertActive()
     // 状态检查 + 相应动作（入队 / append+转running）整体在该 worker 的互斥锁内完成，消除
     // "两次背靠背 sendInput 都读到 idle、拿同一 tip"的 check-then-act 竞态（跨 await 边界）。
@@ -498,6 +514,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         // 带上 ended_reason:harness 的透明接续要用它给"台账还没追上"的源化身补终态。
         throw new WorkerExitedError(h.worker_id, h.seq, instance.ended_reason)
       }
+
+      assertInputDeliveryActive(opts, 'not_delivered')
 
       if (instance.state === 'running') {
         instance.pendingInputs.push(text)

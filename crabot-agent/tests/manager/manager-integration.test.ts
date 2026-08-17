@@ -329,7 +329,7 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
     managerKeyFor,
     adapter: () => opts.managerAdapter,
     model: () => 'test-manager-model',
-    toolFace: (key, isSystemThread, onAsyncError) => {
+    toolFace: (key, isSystemThread) => {
       const tools = buildManagerToolFace({
         harness,
         workerContext: () => ({
@@ -341,7 +341,6 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
         memoryServer,
         callAdmin: async () => ({}),
         isSystemThread,
-        onAsyncError,
       })
       // 记录每次真实工具调用(名称+入参),供断言"工具调用序列符合预期" / "send_master_private
       // 是否被调用"——不干预调用本身,只是在真实 call 前后各插一条日志。
@@ -632,19 +631,20 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
     expect(wake2Call.messages.length).toBe(1 + KEEP_RECENT + 1)
   })
 
-  // --- 场景四：onAsyncError 真实装配路径接通（Task 8 复审遗留验证） ---
+  // --- 场景四：query_worker 同步建立失败 + 持久通知责任 ---
 
   it(
-    '场景四：capabilities().fork===false 的 worker（如实实现,非桩造异常）上调 query_worker，' +
-      '失败经真实 harness.queryWorker 的能力校验分支 + 真实 onAsyncError 转发链 → manager 最终被唤醒/事件入队',
+    '场景四：capabilities().fork===false 的 worker 上调 query_worker，' +
+      '同一工具调用返回结构化错误，并留下待通知 query receipt',
     async () => {
       const key = 'wechat::sess-fork' as ManagerKey
       const managerNowMs = Date.parse('2026-01-01T00:00:00.000Z')
 
       let workerId = ''
       let turnIndex = 0
+      let secondTurnMessages = ''
       const adapter: LLMAdapter = {
-        async *stream() {
+        async *stream(params) {
           turnIndex++
           if (turnIndex === 1) {
             yield* chunksFromContent(
@@ -654,13 +654,9 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
             )
             return
           }
-          // turn 2：给 query_worker 的游离 promise 一个宏任务窗口 reject 并触发 onAsyncError——
-          // harness.queryWorker 的 capability_not_supported 拒绝虽是纯逻辑判断（无真实 IO），
-          // 仍经过 AsyncMutex 排队等若干 microtask，这里等一个宏任务窗口，与 registry.test.ts
-          // 现有 e2e 用例同款做法。此刻 episode 仍在跑（activeEpisodes>0），预期走
-          // enqueueDuringEpisode 分支。
-          await new Promise((resolve) => setTimeout(resolve, 20))
-          yield* chunksFromContent([{ type: 'text', text: '已发起侧问，等待结果。' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+          // turn 2：engine 已把同步 tool error 放回上下文；Manager 当轮即可读到稳定原因。
+          secondTurnMessages = JSON.stringify(params.messages)
+          yield* chunksFromContent([{ type: 'text', text: '侧问未能建立。' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
         },
         updateConfig: () => {},
       }
@@ -694,15 +690,23 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
 
       // 真实工具面里确实调用过 query_worker（不是手工伪造的回调）
       expect(assembly.toolCallLog.some((c) => c.name === 'query_worker')).toBe(true)
+      expect(secondTurnMessages).toContain('fork_capability_unavailable')
 
-      // manager 最终被唤醒/事件入队：episode 仍在跑，走 enqueueDuringEpisode 分支
-      expect(enqueueSpy).toHaveBeenCalledTimes(1)
-      expect(JSON.stringify(enqueueSpy.mock.calls[0][0])).toContain('query_failed')
+      // 建立失败不再合成第二条 mid-episode wake；tool result 已在当前 turn 返回。
+      expect(enqueueSpy).not.toHaveBeenCalled()
 
-      // 真实失败留痕：harness.queryWorker 自己也把这次失败 appendEvent('query_failed', ...)
-      const queryFailedEvent = assembly.events.find((e) => e.worker_id === workerId && e.kind === 'query_failed')
+      // 真实失败留痕与通知责任都已持久化；通知器后续按 owning manager 重试。
+      const queryFailedEvent = (await assembly.harness.readWorkerEvents(workerId))
+        .find((e) => e.kind === 'query_failed')
       expect(queryFailedEvent).toBeDefined()
-      expect(queryFailedEvent?.detail?.reason).toBe('capability_not_supported')
+      expect(queryFailedEvent?.detail?.reason_code).toBe('fork_capability_unavailable')
+      const queryReceipts = JSON.parse(
+        await fs.readFile(join(dataDir, 'workers', workerId, 'query-receipts.json'), 'utf8'),
+      ) as { receipts: Array<Record<string, unknown>> }
+      expect(queryReceipts.receipts[0]).toMatchObject({
+        state: 'failed',
+        manager_notification: { status: 'pending' },
+      })
     },
     15000,
   )

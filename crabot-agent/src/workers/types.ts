@@ -90,6 +90,19 @@ export interface Workspace { readonly root: string }
 export interface OutputCursor { readonly offset: number }
 export interface TraceCursor { readonly offset: number }
 
+export interface SendInputOptions {
+  readonly raw?: boolean
+  readonly delivery_id?: string
+  readonly deadline_at?: string
+  readonly signal?: AbortSignal
+}
+
+export interface ForkOptions {
+  readonly query_id: string
+  readonly establishment_deadline_at: string
+  readonly connection_env?: Record<string, string>
+}
+
 export interface NormalizedTraceEvent {
   readonly ts: string
   readonly kind: 'message' | 'tool_call' | 'tool_result' | 'thinking' | 'lifecycle'
@@ -166,6 +179,8 @@ export interface IncarnationHandle {
    * builtin: 本化身当前 tip node_id;CLI: 原生 session id(resume 沿用 prev 不变;fork 化身
    * 填 fork 自己的引用,不是父化身的)。handle 自描述,调用方无需事后反查(protocol-agent-v3 §6.1)。 */
   readonly session_ref: string
+  /** Fork handles carry the stable query operation identity; mainline handles omit it. */
+  readonly query_id?: string
   /** CLI spawn/resume 首投的事实；builtin/fork 省略并按既有行为处理。 */
   readonly initial_input?: InitialInputResult
 }
@@ -273,8 +288,8 @@ export interface WorkerAdapter {
   provision(ws: Workspace, caps: CapabilityBundle): Promise<void>
   spawn(spec: SpawnSpec): Promise<IncarnationHandle>
   resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle>
-  fork(prev: IncarnationRef, forkInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle>
-  sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void>
+  fork(prev: IncarnationRef, forkInput: string, opts: ForkOptions): Promise<IncarnationHandle>
+  sendInput(h: IncarnationHandle, text: string, opts?: SendInputOptions): Promise<void>
   readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }>
   state(h: IncarnationHandle): Promise<WorkerContractState>
   /**

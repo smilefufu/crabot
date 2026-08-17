@@ -78,10 +78,19 @@ import type {
   CapabilityBundle,
   WorkerCapabilityContext,
   Workspace,
+  SendInputOptions,
+  ForkOptions,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import type { ResolvedPermissions } from '../../types'
-import { CapabilityNotSupportedError, WorkerExitedError, CliInputStallError, WorkerImplUnavailableError } from '../errors'
+import {
+  CapabilityNotSupportedError,
+  WorkerExitedError,
+  CliInputStallError,
+  WorkerImplUnavailableError,
+  ForkEstablishmentError,
+  QueryEstablishmentError,
+} from '../errors'
 import { AsyncMutex } from '../async-mutex'
 import {
   isExecutableIncarnation,
@@ -99,6 +108,7 @@ import {
   type InboxItem,
   type InboxDeliveryResult,
   type InboxSettlement,
+  type InboxSettledResult,
 } from './inbox'
 import { WorkerEventLog, type HarnessEvent, type HarnessEventDelivery, type HarnessEventKind } from './worker-events'
 import { WorkerContextStore, type WorkerContext } from './context-store'
@@ -106,6 +116,20 @@ import { readLegacyTraces } from '../legacy-source-reader.js'
 import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
 import { applyStatusTransition, canTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
 import { join, dirname } from 'path'
+import {
+  InputDeliveryStore,
+  type InputDeliveryFailure,
+  type InputDeliveryFailureCode,
+  type SendToWorkerResult,
+  type WorkerInputDeliveryReceipt,
+} from './input-delivery-store'
+import {
+  QueryReceiptStore,
+  type QueryFailure,
+  type QueryFailureCode,
+  type QueryWorkerStartedResult,
+  type WorkerQueryReceipt,
+} from './query-receipt-store'
 
 /** 交接材料里"最近输出尾部"的上限(字符数,近似 4KB,见 protocol-agent-v3 §5.3)。 */
 const HANDOFF_TAIL_MAX_CHARS = 4096
@@ -128,6 +152,104 @@ const HANDOFF_TAIL_MAX_CHARS = 4096
  * 的措辞不同,因为两者读得回来的东西不同,见 processStateChange 里给出提示语的那一处。
  */
 const WAKE_TEXT_MAX_CHARS = 2000
+
+export const INPUT_DELIVERY_TIMEOUT_MS = 5 * 60_000
+export const QUERY_ESTABLISHMENT_TIMEOUT_MS = 30_000
+
+const INPUT_DELIVERY_FAILURE_CODES = new Set<InputDeliveryFailureCode>([
+  'target_unavailable',
+  'task_cancelled',
+  'continuation_failed',
+  'input_surface_timeout',
+  'submission_unconfirmed_timeout',
+  'delivery_attempt_failed',
+  'abandoned_by_control_input',
+  'confirmation_lost_after_restart',
+])
+
+function isInputDeliveryFailureCode(value: string | undefined): value is InputDeliveryFailureCode {
+  return value !== undefined && INPUT_DELIVERY_FAILURE_CODES.has(value as InputDeliveryFailureCode)
+}
+
+function describeInputDeliveryFailure(code: InputDeliveryFailureCode): string {
+  switch (code) {
+    case 'task_cancelled': return 'task was cancelled before this input could be delivered'
+    case 'continuation_failed': return 'worker continuation failed before accepting this input'
+    case 'abandoned_by_control_input': return 'a later control input abandoned the pending composer text'
+    default: return `input delivery failed: ${code}`
+  }
+}
+
+function renderInputDeliveryNotification(receipt: WorkerInputDeliveryReceipt): string {
+  if (receipt.state === 'delivered') {
+    return (
+      `[crabot] 输入 ${receipt.delivery_id} 已确认送达 worker ${receipt.worker_id}。` +
+      `内容预览：${receipt.text_preview || '(空)'}`
+    )
+  }
+  const failure = receipt.failure
+  if (!failure) return `[crabot] 输入 ${receipt.delivery_id} 投递失败，但缺少失败详情。`
+  const guidance = failure.certainty === 'unknown'
+    ? '送达结果未知，禁止盲目重发；请先检查 worker 当前输出和输入框现场。'
+    : '已确认未送达，可以根据任务当前状态决定是否重试。'
+  return (
+    `[crabot] 输入 ${receipt.delivery_id} 投递失败：${failure.reason} ` +
+    `(reason_code=${failure.reason_code}, certainty=${failure.certainty})。${guidance}` +
+    `内容预览：${receipt.text_preview || '(空)'}`
+  )
+}
+
+function renderQueryNotification(receipt: WorkerQueryReceipt): string {
+  if (receipt.state === 'completed') {
+    return (
+      `[crabot] 侧问 ${receipt.query_id} 已完成` +
+      `${receipt.fork_seq === undefined ? '' : `（worker ${receipt.worker_id}#${receipt.fork_seq}）`}。` +
+      `问题预览：${receipt.question_preview || '(空)'}`
+    )
+  }
+  const failure = receipt.failure
+  if (!failure) return `[crabot] 侧问 ${receipt.query_id} 失败，但缺少失败详情。`
+  return (
+    `[crabot] 侧问 ${receipt.query_id} 失败：${failure.reason} ` +
+    `(reason_code=${failure.reason_code}, certainty=${failure.certainty})。` +
+    `${failure.certainty === 'unknown' ? '执行结果未知，禁止自动重跑。' : ''}` +
+    `问题预览：${receipt.question_preview || '(空)'}`
+  )
+}
+
+function queryFailureCode(error: unknown): QueryFailureCode {
+  if (error instanceof ForkEstablishmentError) {
+    if (error.stage === 'query_submit') return 'query_submit_failed'
+    if (error.stage === 'timeout') return 'fork_establishment_timeout'
+  }
+  return 'fork_create_failed'
+}
+
+function queryFailureCertainty(error: unknown): QueryFailure['certainty'] {
+  return error instanceof ForkEstablishmentError ? error.certainty : 'unknown'
+}
+
+function sanitizeOperationFailureReason(
+  error: unknown,
+  redact: ((text: string) => string) | undefined,
+  sensitiveText: string | undefined,
+  fallback: string,
+): string {
+  let message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim()
+  const normalizedSensitive = sensitiveText?.replace(/\s+/g, ' ').trim()
+  if (normalizedSensitive) message = message.split(normalizedSensitive).join('<message>')
+  try {
+    if (redact) message = redact(message)
+  } catch {
+    return fallback
+  }
+  return message
+    .replace(/Bearer\s+\S+/gi, 'Bearer <redacted>')
+    .replace(/(?:[A-Za-z]:\\|\/)[^\s"'`]+/g, '<path>')
+    .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}\b/g, '<redacted>')
+    .replace(/\b[A-Za-z0-9_+/=-]{32,}\b/g, '<redacted>')
+    .slice(0, 1000) || fallback
+}
 
 /**
  * 唤醒事件 `detail.summary` 的上限(字符数)。比 `detail.text` 宽一倍,两条依据:
@@ -403,6 +525,13 @@ export interface HarnessDeps {
    * 在锁内等它就是自锁。返回 `void` 的实现(P3 桩、既有测试)行为逐字不变。
    */
   readonly onEvent?: (e: HarnessEvent) => void | HarnessEventDelivery | Promise<HarnessEventDelivery | void>
+  /** Durable input/query terminal notification routed to the receipt's fixed Manager owner. */
+  readonly onOperationNotification?: (
+    managerKey: ManagerKey,
+    event: HarnessEvent,
+  ) => void | HarnessEventDelivery | Promise<HarnessEventDelivery | void>
+  /** Removes runtime credentials before an operation failure reason is persisted or returned. */
+  readonly redactFailureReason?: (text: string) => string
   /** provision 素材(P3 可返回空集)，必须按 worker 固定的权限快照生成。 */
   readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
   /**
@@ -468,6 +597,15 @@ export interface SpawnWorkerParams {
   readonly builtin?: SpawnSpec['builtin']
 }
 
+export interface HarnessSendToWorkerOptions {
+  readonly raw?: boolean
+  readonly managerKey?: ManagerKey
+  readonly onSettled?: InboxItem['onSettled']
+  readonly dedupeKey?: string
+  readonly onDeduplicated?: () => void
+  readonly legacyContinuationAuth?: LegacyContinuationAuth
+}
+
 /**
  * reconcileOnStartup 的巡检结果(protocol-agent-v3 §12,替代 admin 的一刀切自愈)。三个
  * 桶各装 worker_id,供 P4 manager 决定唤醒哪些 monitor:
@@ -512,7 +650,7 @@ type ContinuationRetry = {
   readonly endedReason?: IncarnationEndReason
 }
 
-type ContinuationDelivery = InboxSettlement | InboxDeliveryResult | ContinuationRetry
+type ContinuationDelivery = InboxSettlement | InboxDeliveryResult | InboxSettledResult | ContinuationRetry
 
 function isContinuationRetry(delivery: ContinuationDelivery): delivery is ContinuationRetry {
   return typeof delivery === 'object' && 'kind' in delivery && delivery.kind === 'retry_continuation'
@@ -557,6 +695,13 @@ function continuationDelivery(
 export class WorkerHarness {
   private readonly pendingBgNotifications = new Map<string, number>()
   private readonly contextStore: WorkerContextStore
+  private readonly inputDeliveryStore: InputDeliveryStore
+  private readonly queryReceiptStore: QueryReceiptStore
+  private readonly inputDeliveryControllers = new Map<string, AbortController>()
+  private readonly pendingQueryStateChanges = new Map<
+    string,
+    { h: IncarnationHandle; state: WorkerContractState; report?: StateChangeReport }
+  >()
 
   /**
    * Marks a shell-exit notification before its async rendering starts.  This
@@ -591,6 +736,8 @@ export class WorkerHarness {
 
   constructor(private readonly deps: HarnessDeps) {
     this.contextStore = new WorkerContextStore(deps.workersDir)
+    this.inputDeliveryStore = new InputDeliveryStore(deps.workersDir)
+    this.queryReceiptStore = new QueryReceiptStore(deps.workersDir)
   }
 
   private inputOwnershipRevision(workerId: string): number {
@@ -836,16 +983,17 @@ export class WorkerHarness {
   async sendToWorker(
     workerId: string,
     text: string,
-    opts?: {
-      raw?: boolean
-      onSettled?: InboxItem['onSettled']
-      dedupeKey?: string
-      onDeduplicated?: () => void
-      legacyContinuationAuth?: LegacyContinuationAuth
-    },
-  ): Promise<void> {
+    opts: HarnessSendToWorkerOptions & { readonly managerKey: ManagerKey },
+  ): Promise<SendToWorkerResult>
+  async sendToWorker(workerId: string, text: string, opts?: HarnessSendToWorkerOptions): Promise<void>
+  async sendToWorker(
+    workerId: string,
+    text: string,
+    opts?: HarnessSendToWorkerOptions,
+  ): Promise<SendToWorkerResult | void> {
     const inbox = this.getInbox(workerId)
     let enqueued = true
+    let receipt: WorkerInputDeliveryReceipt | undefined
 
     // "读台账状态 → 判断 cancelled/化身 → 入信箱"在同一临界区完成,不允许 check-then-act 跨 await。
     await this.withLock(workerId, async () => {
@@ -853,20 +1001,207 @@ export class WorkerHarness {
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
       requireMainlineIncarnation(found.worker)
+
+      if (opts?.managerKey) {
+        const createdAt = this.deps.now()
+        const deliveryId = randomUUID()
+        try {
+          receipt = await this.inputDeliveryStore.create({
+            delivery_id: deliveryId,
+            worker_id: workerId,
+            manager_key: opts.managerKey,
+            raw: opts.raw ?? false,
+            text_preview: text,
+            created_at: createdAt,
+            updated_at: createdAt,
+            deadline_at: new Date(Date.parse(createdAt) + INPUT_DELIVERY_TIMEOUT_MS).toISOString(),
+            state: 'pending',
+            phase: 'queued',
+            manager_notification: { status: 'not_required' },
+          })
+        } catch (error) {
+          throw new Error(`delivery receipt unavailable: ${sanitizeOperationFailureReason(
+            error,
+            this.deps.redactFailureReason,
+            text,
+            'receipt store failed',
+          )}`)
+        }
+        this.inputDeliveryControllers.set(deliveryId, new AbortController())
+      }
+
+      const durableReceipt = receipt
       const item: InboxItem = {
         text,
         raw: opts?.raw ?? false,
         enqueued_at: this.deps.now(),
         allow_terminal_continuation: true,
-        ...(opts?.onSettled ? { onSettled: opts.onSettled } : {}),
+        ...(durableReceipt
+          ? {
+              delivery_id: durableReceipt.delivery_id,
+              onPending: (reason: InboxDeliveryResult['reason']) =>
+                this.inputDeliveryStore.updatePendingPhase(
+                  workerId,
+                  durableReceipt.delivery_id,
+                  reason === 'input_pending' ? 'pending_in_ui' : 'waiting_for_safe_input',
+                  this.deps.now(),
+                ).then(() => undefined),
+              shouldDeliver: async () =>
+                (await this.inputDeliveryStore.get(workerId, durableReceipt.delivery_id))?.state === 'pending',
+              onSettled: async (settlement, detail) => {
+                await this.settleDurableInput(durableReceipt, text, settlement, detail)
+                await opts?.onSettled?.(settlement, detail)
+              },
+            }
+          : opts?.onSettled ? { onSettled: opts.onSettled } : {}),
         ...(opts?.dedupeKey ? { dedupe_key: opts.dedupeKey } : {}),
         ...(opts?.legacyContinuationAuth ? { legacy_continuation_auth: opts.legacyContinuationAuth } : {}),
       }
-      enqueued = opts?.dedupeKey ? inbox.enqueueUnique(item) : (inbox.enqueue(item), true)
+      enqueued = opts?.dedupeKey && !durableReceipt ? inbox.enqueueUnique(item) : (inbox.enqueue(item), true)
     })
 
     if (!enqueued) opts?.onDeduplicated?.()
-    await this.flushInbox(workerId)
+    try {
+      await this.flushInbox(workerId)
+    } catch (error) {
+      if (!receipt) throw error
+      await this.failDurableInputAttempt(receipt, inbox, error, text)
+    }
+
+    if (!receipt) return
+    let current: WorkerInputDeliveryReceipt
+    try {
+      current = await this.inputDeliveryStore.readForToolResult(
+        workerId,
+        receipt.delivery_id,
+        this.deps.now(),
+      )
+    } catch (error) {
+      this.inputDeliveryControllers.get(receipt.delivery_id)?.abort()
+      try {
+        await this.failDurableInputAttempt(receipt, inbox, error, text)
+      } catch (settlementError) {
+        throw new Error(`delivery receipt unavailable after acceptance: ${sanitizeOperationFailureReason(
+          settlementError,
+          this.deps.redactFailureReason,
+          text,
+          'receipt store failed',
+        )}`)
+      }
+      const settled = await this.inputDeliveryStore.get(workerId, receipt.delivery_id)
+      if (!settled) throw error
+      current = settled
+    }
+    return this.toSendToWorkerResult(current)
+  }
+
+  private async settleDurableInput(
+    receipt: WorkerInputDeliveryReceipt,
+    text: string,
+    settlement: InboxSettlement,
+    detail?: { readonly seq?: number; readonly reason?: string; readonly certainty?: 'not_delivered' | 'unknown' },
+  ): Promise<void> {
+    this.inputDeliveryControllers.delete(receipt.delivery_id)
+    if (settlement === 'delivered') {
+      await this.inputDeliveryStore.settleDelivered(receipt.worker_id, receipt.delivery_id, this.deps.now())
+      await this.appendAuditEvent(receipt.worker_id, detail?.seq ?? 0, 'input_sent', {
+        delivery_id: receipt.delivery_id,
+        text_len: text.length,
+      })
+      return
+    }
+
+    const reasonCode = isInputDeliveryFailureCode(detail?.reason)
+      ? detail.reason
+      : 'delivery_attempt_failed'
+    const failure: InputDeliveryFailure = {
+      reason_code: reasonCode,
+      reason: describeInputDeliveryFailure(reasonCode),
+      certainty: detail?.certainty ?? 'unknown',
+    }
+    await this.inputDeliveryStore.settleFailed(receipt.worker_id, receipt.delivery_id, failure, this.deps.now())
+    await this.appendAuditEvent(receipt.worker_id, detail?.seq ?? 0, 'input_delivery_failed', {
+      delivery_id: receipt.delivery_id,
+      ...failure,
+    })
+  }
+
+  private async failDurableInputAttempt(
+    receipt: WorkerInputDeliveryReceipt,
+    inbox: WorkerInbox,
+    error: unknown,
+    text: string,
+  ): Promise<void> {
+    const cancellation = await inbox.cancelDelivery(receipt.delivery_id)
+    const current = await this.inputDeliveryStore.get(receipt.worker_id, receipt.delivery_id)
+    if (!current || current.state !== 'pending') return
+
+    const reasonCode: InputDeliveryFailureCode = current.phase === 'continuing'
+      ? 'continuation_failed'
+      : 'delivery_attempt_failed'
+    const reportedCertainty = (error as { certainty?: unknown })?.certainty
+    let certainty: InputDeliveryFailure['certainty'] = 'unknown'
+    if (reportedCertainty === 'not_delivered' || reportedCertainty === 'unknown') {
+      certainty = reportedCertainty
+    } else if (cancellation === 'cancelled' && current.phase !== 'attempting') {
+      certainty = 'not_delivered'
+    }
+    const failure: InputDeliveryFailure = {
+      reason_code: reasonCode,
+      reason: sanitizeOperationFailureReason(
+        error,
+        this.deps.redactFailureReason,
+        text,
+        'input delivery attempt failed',
+      ),
+      certainty,
+    }
+    this.inputDeliveryControllers.delete(receipt.delivery_id)
+    await this.inputDeliveryStore.settleFailed(receipt.worker_id, receipt.delivery_id, failure, this.deps.now())
+    const found = await this.deps.ledger.findWorker(receipt.worker_id)
+    await this.appendAuditEvent(
+      receipt.worker_id,
+      found ? requireMainlineIncarnation(found.worker).seq : 0,
+      'input_delivery_failed',
+      { delivery_id: receipt.delivery_id, ...failure },
+    )
+  }
+
+  private toSendToWorkerResult(receipt: WorkerInputDeliveryReceipt): SendToWorkerResult {
+    if (receipt.state === 'delivered') {
+      return { status: 'delivered', delivery_id: receipt.delivery_id, worker_id: receipt.worker_id }
+    }
+    if (receipt.state === 'failed') {
+      if (!receipt.failure) throw new Error(`failed delivery ${receipt.delivery_id} has no failure detail`)
+      return {
+        status: 'failed',
+        delivery_id: receipt.delivery_id,
+        worker_id: receipt.worker_id,
+        ...receipt.failure,
+      }
+    }
+    return {
+      status: 'pending',
+      delivery_id: receipt.delivery_id,
+      worker_id: receipt.worker_id,
+      pending_reason: receipt.phase === 'queued' || receipt.phase === 'waiting_for_safe_input'
+        ? 'waiting_for_safe_input'
+        : 'submission_unconfirmed',
+      deadline_at: receipt.deadline_at,
+    }
+  }
+
+  private async inputAttemptOptions(
+    workerId: string,
+    deliveryId: string,
+  ): Promise<Pick<SendInputOptions, 'delivery_id' | 'deadline_at' | 'signal'>> {
+    const receipt = await this.inputDeliveryStore.get(workerId, deliveryId)
+    if (!receipt) throw new Error(`delivery receipt not found: ${deliveryId}`)
+    return {
+      delivery_id: deliveryId,
+      deadline_at: receipt.deadline_at,
+      signal: this.inputDeliveryControllers.get(deliveryId)?.signal,
+    }
   }
 
   /** Queue an untrusted wake only while the task is non-terminal; never revive it later. */
@@ -894,12 +1229,13 @@ export class WorkerHarness {
     handle: IncarnationHandle,
     text: string,
     raw: boolean,
+    delivery?: Pick<SendInputOptions, 'delivery_id' | 'deadline_at' | 'signal'>,
   ): Promise<InputAttempt> {
     const revisionKey = `${handle.worker_id}#${handle.impl}#${handle.seq}`
     const stateChangeRevision = this.stateChangeRevisions.get(revisionKey) ?? 0
     const inputOwnershipRevision = this.inputOwnershipRevision(handle.worker_id)
     try {
-      await adapter.sendInput(handle, text, { raw })
+      await adapter.sendInput(handle, text, { raw, ...delivery })
     } catch (error) {
       if (error instanceof WorkerExitedError) {
         return { kind: 'exited', endedReason: error.ended_reason }
@@ -945,7 +1281,8 @@ export class WorkerHarness {
     text: string,
     raw: boolean,
     attempt: SettledInputAttempt,
-  ): Promise<InboxSettlement | InboxDeliveryResult> {
+    item?: InboxItem,
+  ): Promise<InboxSettlement | InboxDeliveryResult | InboxSettledResult> {
     if (attempt.kind === 'stalled') {
       if (attempt.delivery.isCurrent?.()) {
         await this.recordCliInputResult(
@@ -960,7 +1297,13 @@ export class WorkerHarness {
 
     if (raw) {
       const inbox = this.getInbox(workerId)
-      await inbox.settleConsumed(rawAbandonsComposer(text) ? 'dead_letter' : 'delivered')
+      const abandonsComposer = rawAbandonsComposer(text)
+      await inbox.settleConsumed(
+        abandonsComposer ? 'dead_letter' : 'delivered',
+        abandonsComposer
+          ? { seq: attempt.handle.seq, reason: 'abandoned_by_control_input', certainty: 'not_delivered' }
+          : { seq: attempt.handle.seq },
+      )
       inbox.release('waiting_action')
       inbox.release('input_pending')
     }
@@ -973,6 +1316,9 @@ export class WorkerHarness {
         undefined,
         attempt.expectedStateChangeRevision,
       )
+    }
+    if (item?.delivery_id) {
+      return { action: 'settled', settlement: 'delivered', detail: { seq: attempt.handle.seq } }
     }
     await this.appendEvent(workerId, attempt.handle.seq, 'input_sent', { text_len: text.length })
     return 'delivered'
@@ -992,6 +1338,9 @@ export class WorkerHarness {
 
       if (isLegacyIncarnation(incarnation)) {
         if (item.allow_terminal_continuation === false) return 'delivered'
+        if (item.delivery_id) {
+          await this.inputDeliveryStore.updatePendingPhase(workerId, item.delivery_id, 'continuing', this.deps.now())
+        }
         const delivery = await this.continueLegacyWorker(workerId, item)
         if (isContinuationRetry(delivery)) {
           return this.continueTerminalWorker(
@@ -1001,6 +1350,7 @@ export class WorkerHarness {
             delivery.seq,
             item.raw,
             delivery.endedReason,
+            item,
           )
         }
         return delivery
@@ -1008,7 +1358,10 @@ export class WorkerHarness {
 
       if (incarnation.state === 'exited') {
         if (item.allow_terminal_continuation === false) return 'delivered'
-        return this.continueTerminalWorker(workerId, item.text, incarnation.impl, incarnation.seq, item.raw)
+        if (item.delivery_id) {
+          await this.inputDeliveryStore.updatePendingPhase(workerId, item.delivery_id, 'continuing', this.deps.now())
+        }
+        return this.continueTerminalWorker(workerId, item.text, incarnation.impl, incarnation.seq, item.raw, undefined, item)
       }
 
       const adapter = this.deps.adapters.get(incarnation.impl)
@@ -1021,9 +1374,26 @@ export class WorkerHarness {
         impl: incarnation.impl,
         session_ref: incarnation.session_ref,
       }
-      const attempt = await this.attemptInput(adapter, handle, item.text, item.raw)
+      let deliveryOptions: Pick<SendInputOptions, 'delivery_id' | 'deadline_at' | 'signal'> | undefined
+      if (item.delivery_id) {
+        const current = await this.inputDeliveryStore.updatePendingPhase(
+          workerId,
+          item.delivery_id,
+          'attempting',
+          this.deps.now(),
+        )
+        deliveryOptions = {
+          delivery_id: item.delivery_id,
+          deadline_at: current.deadline_at,
+          signal: this.inputDeliveryControllers.get(item.delivery_id)?.signal,
+        }
+      }
+      const attempt = await this.attemptInput(adapter, handle, item.text, item.raw, deliveryOptions)
       if (attempt.kind === 'exited') {
         if (item.allow_terminal_continuation === false) return 'delivered'
+        if (item.delivery_id) {
+          await this.inputDeliveryStore.updatePendingPhase(workerId, item.delivery_id, 'continuing', this.deps.now())
+        }
         return this.continueTerminalWorker(
           workerId,
           item.text,
@@ -1031,9 +1401,10 @@ export class WorkerHarness {
           incarnation.seq,
           item.raw,
           attempt.endedReason,
+          item,
         )
       }
-      return this.settleInputAttempt(workerId, item.text, item.raw, attempt)
+      return this.settleInputAttempt(workerId, item.text, item.raw, attempt, item)
     })
   }
 
@@ -1051,7 +1422,13 @@ export class WorkerHarness {
           reason: 'task_cancelled',
           text_len: item.text.length,
         })
-        return 'dead_letter'
+        return item.delivery_id
+          ? {
+              action: 'settled',
+              settlement: 'dead_letter',
+              detail: { seq: mainlineIncarnation(worker)?.seq ?? 0, reason: 'task_cancelled', certainty: 'not_delivered' },
+            }
+          : 'dead_letter'
       }
 
       const legacy = requireMainlineIncarnation(worker)
@@ -1076,7 +1453,13 @@ export class WorkerHarness {
           reason: 'legacy_continuation_authorization_invalid',
           text_len: item.text.length,
         })
-        return 'dead_letter'
+        return item.delivery_id
+          ? {
+              action: 'settled',
+              settlement: 'dead_letter',
+              detail: { seq: legacy.seq, reason: 'continuation_failed', certainty: 'not_delivered' },
+            }
+          : 'dead_letter'
       }
 
       // Source material is read-only. No legacy adapter, resume/checkpoint replay, or
@@ -1363,11 +1746,12 @@ export class WorkerHarness {
      * `ended_reason` 真值;调用方是读台账 state==='exited' 走到这里的则不带(那种情形下
      * 台账已经有终态记录,reviveIncarnation 的回填段本就不会触发)。
      */
-    sourceEndReason?: IncarnationEndReason
-  ): Promise<InboxSettlement | InboxDeliveryResult> {
+    sourceEndReason?: IncarnationEndReason,
+    item?: InboxItem,
+  ): Promise<InboxSettlement | InboxDeliveryResult | InboxSettledResult> {
     const result = await this.withLock(
       workerId,
-      async (): Promise<InboxSettlement | InboxDeliveryResult | { attempt: SettledInputAttempt }> => {
+      async (): Promise<InboxSettlement | InboxDeliveryResult | InboxSettledResult | { attempt: SettledInputAttempt }> => {
       let curImpl = sourceImpl
       let curSeq = sourceSeq
       // 与 (curImpl, curSeq) 同步前进:每次改换源化身,这个原因也要跟着换成新源的,
@@ -1393,7 +1777,13 @@ export class WorkerHarness {
             reason: 'task_cancelled',
             text_len: text.length,
           })
-          return 'dead_letter'
+          return item?.delivery_id
+            ? {
+                action: 'settled',
+                settlement: 'dead_letter',
+                detail: { seq: curSeq, reason: 'task_cancelled', certainty: 'not_delivered' },
+              }
+            : 'dead_letter'
         }
 
         const mainline = requireMainlineIncarnation(worker)
@@ -1425,7 +1815,13 @@ export class WorkerHarness {
             impl: mainline.impl,
             session_ref: mainline.session_ref,
           }
-          const attempt = await this.attemptInput(adapter, handle, text, raw)
+          const attempt = await this.attemptInput(
+            adapter,
+            handle,
+            text,
+            raw,
+            item?.delivery_id ? await this.inputAttemptOptions(workerId, item.delivery_id) : undefined,
+          )
           if (attempt.kind === 'exited') {
             // adapter 侧权威判定这个"看起来存活"的新主线其实也已经终态(台账的异步状态
             // 回调还没追上)——同样不出锁,把它当作新的源头回到循环顶部转接续。
@@ -1506,8 +1902,16 @@ export class WorkerHarness {
           `for worker ${workerId}; mainline kept changing/exiting faster than this delivery could settle on a source`
       )
     })
-    if (typeof result === 'string' || !('attempt' in result)) return result
-    return this.settleInputAttempt(workerId, text, raw, result.attempt)
+    if (typeof result === 'object' && 'attempt' in result) {
+      return this.settleInputAttempt(workerId, text, raw, result.attempt, item)
+    }
+    if (!item?.delivery_id || typeof result !== 'string' || result !== 'delivered') return result
+    const found = await this.deps.ledger.findWorker(workerId)
+    return {
+      action: 'settled',
+      settlement: 'delivered',
+      detail: { seq: found ? requireMainlineIncarnation(found.worker).seq : sourceSeq },
+    }
   }
 
   /** capabilities().revive===true 分支:adapter.resume 拉起新化身,session 满保真接续。 */
@@ -1898,6 +2302,270 @@ export class WorkerHarness {
     return this.getEventLog(workerId).readAll()
   }
 
+  /** Restart recovery is fail-closed: pending input is never replayed. */
+  async reconcileInputDeliveriesOnStartup(): Promise<void> {
+    for (const receipt of await this.inputDeliveryStore.listPendingDeliveries()) {
+      this.inputDeliveryControllers.get(receipt.delivery_id)?.abort()
+      this.inputDeliveryControllers.delete(receipt.delivery_id)
+      await this.getInbox(receipt.worker_id).cancelDelivery(receipt.delivery_id)
+      const failure: InputDeliveryFailure = {
+        reason_code: 'confirmation_lost_after_restart',
+        reason: 'Agent restarted before input acceptance could be confirmed',
+        certainty: 'unknown',
+      }
+      await this.settlePendingInputFailure(receipt, failure)
+    }
+    await this.deliverInputOperationNotifications()
+  }
+
+  /** Restart recovery never re-runs a side query; every in-flight receipt becomes explicit unknown. */
+  async reconcileQueryReceiptsOnStartup(): Promise<void> {
+    for (const receipt of await this.queryReceiptStore.listInFlight()) {
+      const found = await this.deps.ledger.findWorker(receipt.worker_id)
+      const incarnation = found?.worker.incarnations.find((item) => item.query_id === receipt.query_id)
+
+      if (incarnation?.state === 'exited' && incarnation.ended_reason === 'completed') {
+        if (receipt.state === 'starting') {
+          await this.queryReceiptStore.markRunning(
+            receipt.worker_id,
+            receipt.query_id,
+            incarnation.seq,
+            this.deps.now(),
+          )
+        }
+        await this.queryReceiptStore.settleCompleted(
+          receipt.worker_id,
+          receipt.query_id,
+          this.deps.now(),
+        )
+        await this.appendAuditEvent(receipt.worker_id, incarnation.seq, 'query_completed', {
+          query_id: receipt.query_id,
+          fork_seq: incarnation.seq,
+        })
+        continue
+      }
+
+      const executionWasEstablished = receipt.state === 'running' || incarnation !== undefined
+      const executionEnded = incarnation?.state === 'exited'
+      let failure: QueryFailure
+      if (executionEnded) {
+        failure = {
+          reason_code: 'query_execution_failed',
+          reason: incarnation.ended_reason
+            ? `query fork exited with reason '${incarnation.ended_reason}'`
+            : 'query fork exited without a completion reason',
+          phase: 'execution',
+          certainty: 'failed',
+        }
+      } else if (executionWasEstablished) {
+        failure = {
+          reason_code: 'query_execution_lost_after_restart',
+          reason: 'Agent restarted before query execution completion could be confirmed',
+          phase: 'execution',
+          certainty: 'unknown',
+        }
+      } else {
+        failure = {
+          reason_code: 'fork_establishment_lost_after_restart',
+          reason: 'Agent restarted before fork establishment could be confirmed',
+          phase: 'establishment',
+          certainty: 'unknown',
+        }
+      }
+      await this.queryReceiptStore.settleFailed(
+        receipt.worker_id,
+        receipt.query_id,
+        failure,
+        this.deps.now(),
+      )
+      await this.appendAuditEvent(
+        receipt.worker_id,
+        incarnation?.seq ?? 0,
+        'query_failed',
+        {
+          query_id: receipt.query_id,
+          ...(incarnation ? { fork_seq: incarnation.seq } : {}),
+          ...failure,
+        },
+      )
+      if (incarnation && incarnation.state !== 'exited' && isExecutableIncarnation(incarnation)) {
+        const adapter = this.deps.adapters.get(incarnation.impl)
+        if (adapter) {
+          try {
+            await adapter.kill({
+              worker_id: receipt.worker_id,
+              seq: incarnation.seq,
+              impl: incarnation.impl,
+              session_ref: incarnation.session_ref,
+              query_id: receipt.query_id,
+            })
+          } catch (error) {
+            console.error(`[WorkerHarness] failed to stop recovered query ${receipt.query_id}:`, error)
+          }
+        }
+      }
+    }
+    await this.deliverQueryOperationNotifications()
+  }
+
+  private async reconcileInputDeliveryOperations(): Promise<void> {
+    const nowMs = Date.parse(this.deps.now())
+    for (const receipt of await this.inputDeliveryStore.listPendingDeliveries()) {
+      if (Date.parse(receipt.deadline_at) > nowMs) continue
+      this.inputDeliveryControllers.get(receipt.delivery_id)?.abort()
+      const cancellation = await this.getInbox(receipt.worker_id).cancelDelivery(receipt.delivery_id)
+      const current = await this.inputDeliveryStore.get(receipt.worker_id, receipt.delivery_id)
+      if (!current || current.state !== 'pending') continue
+
+      const safelyWithdrawn = cancellation === 'cancelled'
+      const failure: InputDeliveryFailure = safelyWithdrawn
+        ? {
+            reason_code: 'input_surface_timeout',
+            reason: 'input did not reach a safe input surface before the 5 minute deadline',
+            certainty: 'not_delivered',
+          }
+        : {
+            reason_code: 'submission_unconfirmed_timeout',
+            reason: 'input acceptance could not be confirmed before the 5 minute deadline',
+            certainty: 'unknown',
+          }
+      this.inputDeliveryControllers.delete(receipt.delivery_id)
+      await this.settlePendingInputFailure(current, failure)
+    }
+    await this.deliverInputOperationNotifications()
+  }
+
+  private async settlePendingInputFailure(
+    receipt: WorkerInputDeliveryReceipt,
+    failure: InputDeliveryFailure,
+  ): Promise<void> {
+    const settled = await this.inputDeliveryStore.settleFailed(
+      receipt.worker_id,
+      receipt.delivery_id,
+      failure,
+      this.deps.now(),
+    )
+    const found = await this.deps.ledger.findWorker(receipt.worker_id)
+    const seq = found ? requireMainlineIncarnation(found.worker).seq : 0
+    await this.appendAuditEvent(receipt.worker_id, seq, 'input_delivery_failed', {
+      delivery_id: receipt.delivery_id,
+      ...settled.failure,
+    })
+  }
+
+  private async deliverInputOperationNotifications(): Promise<void> {
+    if (!this.deps.onOperationNotification) return
+    for (const receipt of await this.inputDeliveryStore.listPendingNotifications()) {
+      const found = await this.deps.ledger.findWorker(receipt.worker_id)
+      const seq = found ? requireMainlineIncarnation(found.worker).seq : 0
+      const event = this.buildEvent(
+        receipt.worker_id,
+        seq,
+        receipt.state === 'delivered' ? 'input_sent' : 'input_delivery_failed',
+        {
+          delivery_id: receipt.delivery_id,
+          text_preview: receipt.text_preview,
+          ...(receipt.failure ?? {}),
+          text: renderInputDeliveryNotification(receipt),
+        },
+      )
+      try {
+        const delivery = await this.deps.onOperationNotification(receipt.manager_key, event)
+        if (delivery?.consumed === true) {
+          await this.inputDeliveryStore.markNotificationConsumed(
+            receipt.worker_id,
+            receipt.delivery_id,
+            this.deps.now(),
+          )
+        }
+      } catch (error) {
+        console.error(
+          `[WorkerHarness] input delivery notification failed for ${receipt.delivery_id}:`,
+          error,
+        )
+      }
+    }
+  }
+
+  private async deliverQueryOperationNotifications(): Promise<void> {
+    if (!this.deps.onOperationNotification) return
+    for (const receipt of await this.queryReceiptStore.listPendingNotifications()) {
+      const event = this.buildEvent(
+        receipt.worker_id,
+        receipt.fork_seq ?? 0,
+        receipt.state === 'completed' ? 'query_completed' : 'query_failed',
+        {
+          query_id: receipt.query_id,
+          ...(receipt.fork_seq === undefined ? {} : { fork_seq: receipt.fork_seq }),
+          question_preview: receipt.question_preview,
+          ...(receipt.failure ?? {}),
+          text: renderQueryNotification(receipt),
+        },
+      )
+      try {
+        const delivery = await this.deps.onOperationNotification(receipt.manager_key, event)
+        if (delivery?.consumed === true) {
+          await this.queryReceiptStore.markNotificationConsumed(
+            receipt.worker_id,
+            receipt.query_id,
+            this.deps.now(),
+          )
+        }
+      } catch (error) {
+        console.error(`[WorkerHarness] query notification failed for ${receipt.query_id}:`, error)
+      }
+    }
+  }
+
+  /** A transient settlement write must not leave a synchronous query receipt starting forever. */
+  private async reconcileQueryEstablishmentOperations(): Promise<void> {
+    const nowMs = Date.parse(this.deps.now())
+    for (const receipt of await this.queryReceiptStore.listInFlight()) {
+      if (receipt.state !== 'starting' || Date.parse(receipt.establishment_deadline_at) > nowMs) continue
+      const failure: QueryFailure = {
+        reason_code: 'fork_establishment_timeout',
+        reason: 'fork establishment could not be committed before the 30 second deadline',
+        phase: 'establishment',
+        certainty: 'unknown',
+      }
+      try {
+        await this.queryReceiptStore.settleFailed(
+          receipt.worker_id,
+          receipt.query_id,
+          failure,
+          this.deps.now(),
+        )
+      } catch (error) {
+        const current = await this.queryReceiptStore.get(receipt.worker_id, receipt.query_id)
+        if (current?.state === 'completed' || current?.state === 'failed') continue
+        throw error
+      }
+      const found = await this.deps.ledger.findWorker(receipt.worker_id)
+      const incarnation = found?.worker.incarnations.find((item) => item.query_id === receipt.query_id)
+      await this.appendAuditEvent(receipt.worker_id, incarnation?.seq ?? 0, 'query_failed', {
+        query_id: receipt.query_id,
+        ...(incarnation ? { fork_seq: incarnation.seq } : {}),
+        ...failure,
+      })
+      if (incarnation && incarnation.state !== 'exited' && isExecutableIncarnation(incarnation)) {
+        const adapter = this.deps.adapters.get(incarnation.impl)
+        if (adapter) {
+          try {
+            await adapter.kill({
+              worker_id: receipt.worker_id,
+              seq: incarnation.seq,
+              impl: incarnation.impl,
+              session_ref: incarnation.session_ref,
+              query_id: receipt.query_id,
+            })
+          } catch (error) {
+            console.error(`[WorkerHarness] failed to stop expired query ${receipt.query_id}:`, error)
+          }
+        }
+      }
+    }
+  }
+
   /**
    * 崩溃恢复对账(protocol-agent-v3 §12,替代 admin 的一刀切自愈)。agent 进程重启后调用
    * 一次:巡检台账里所有非终态 worker 的主线化身,凭 adapter.state() 判定它到底是"进程
@@ -2037,6 +2705,9 @@ export class WorkerHarness {
     if (this.sweepInFlight) return
     this.sweepInFlight = true
     try {
+      await this.reconcileInputDeliveryOperations()
+      await this.reconcileQueryEstablishmentOperations()
+      await this.deliverQueryOperationNotifications()
       const nowMs = Date.parse(this.deps.now())
       const all = await this.deps.ledger.listAllWorkers()
       const reports: Array<Promise<void>> = []
@@ -2377,7 +3048,11 @@ export class WorkerHarness {
           text_len: item.text.length,
         })
         try {
-          await item.onSettled?.('dead_letter')
+          await item.onSettled?.('dead_letter', {
+            seq: incarnation.seq,
+            reason: 'task_cancelled',
+            certainty: 'unknown',
+          })
         } catch (error) {
           console.warn(`[WorkerHarness] dead-letter settlement failed for ${workerId}:`, error)
         }
@@ -2386,177 +3061,307 @@ export class WorkerHarness {
   }
 
   /**
-   * P4 Task 4 收口(review 实证 A):adapter.fork 挪出 per-worker 锁,范式对齐 sendToWorker
-   * 的 adapter.sendInput(见文件头"慢调用是否在锁内")。三段式:
+   * 同步建立侧问：锁内创建 receipt/捕获发起时主线，锁外等待 adapter 建立 fork 与接受首问，
+   * 再锁内按 query_id 提交 fork ledger + running receipt。回答生成不在这次调用里等待。
    *
-   *   1. 锁内"判定段":读台账、定位主线化身、校验 adapter 存在 + capabilities().fork、
-   *      构造 fork 请求所需的 IncarnationRef——不含 adapter.fork 调用,失败(worker 不存在/
-   *      无 adapter/不支持 fork)在这段原地 appendEvent('query_failed') 后 rethrow(见下方
-   *      "失败留痕"一节)。
-   *   2. 锁外"慢调用段":`await adapter.fork(ref, question)`。cc 的 fork() 是
-   *      `execFileAsync` 整个无头 `claude -p` 子进程跑完,几十秒到数分钟——锁外执行意味着
-   *      这段时间内同一 worker 上的 kill_worker/send_to_worker/再次 query_worker 都不会
-   *      被这次侧问卡住。
-   *   3. 重新取锁的"落账段":把 fork 化身追加进台账 + appendEvent('state_changed', {kind:
-   *      'fork'})。
-   *
-   * "锁释放期间世界会变"怎么处理(brief 明确要求的收口点):第 2 步执行期间,这个 worker
-   * 完全有可能被并发的 killWorker/handoff 改变——task 转 cancelled、主线化身换了新的
-   * (impl, seq)。第 3 步重新取锁后不假设世界还是第 1 步看到的样子,只做两件事:
-   *   - `!found`(worker 记录本身从台账消失):理论上不会发生(harness 没有删除 worker
-   *     记录的路径,防御性分支),warn + appendEvent('query_failed', {reason:
-   *     'worker_disappeared'}) + 原样抛 WorkerNotFoundError——fork 已经真实跑过但没有
-   *     台账可挂,只能弃掉,不静默吞掉这次失败(避免"侧问其实成功了但完全查不到"这种比
-   *     "失败"更差的沉默状态)。
-   *   - `found` 存在(worker 还在,不论 task.status 是否已经变成终态,不论主线是否已经
-   *     被 handoff 换成别的 impl/seq):无条件追加 fork 化身。选择"始终追加、不因主线
-   *     终态/切换而放弃"的理由——fork 已经真实执行完并产出了结果(cc 的场景下是一次真实
-   *     的 `claude -p` 调用,有真实输出),协议不变量是"fork 不影响主线"(§5.3),不是
-   *     "主线状态决定 fork 结果是否有效";这两件事本就正交,没有理由因为主线在 fork
-   *     进行期间被 kill/交接就把这个已经跑完、已经产出答案的化身凭空丢弃——那样人类此前
-   *     发起的侧问会人间蒸发,查无此 fork,比"记录一个挂在已终止主线下的侧问"更违反
-   *     "不得既投递又丢失"这条要求。`forked_from` 固定为第 1 步捕获的源 seq(发起侧问那一刻
-   *     的主线),不是落账时重新读到的主线——fork 语义上永远从"发起时刻的那个主线化身"
-   *     分叉,与它之后是否还是主线无关(和 processStateChange/sendToWorker 各处"按
-   *     (impl,seq) 精确定位,不用运行时才知道的最新主线回填"是同一纪律)。
-   *
-   * 失败留痕(review 实证 B):`query_worker` 工具是字面 fire-and-forget(见
-   * manager/tools/worker-tools.ts 文件头),调用方那次 tool_result 里已经拿不到失败原因,
-   * `appendEvent('query_failed', ...)` 是 protocol-agent-v3 §10 要求的可观测性的唯一出口——
-   * 没有它,`debug-agent.mjs trace` 排查不到任何侧问失败的痕迹。四种失败原因(worker 不存在/
-   * 无 adapter/不支持 fork/fork 抛错)detail.reason 分别是 'worker_not_found' /
-   * 'no_adapter' / 'capability_not_supported' / 'fork_failed'(+ 防御性的
-   * 'worker_disappeared',见上)。worker 不存在时没有任何已知 seq 可挂,用 0 作 sentinel——
-   * 全系统真实 seq 从 1 起分配,0 不会和任何真实化身撞号,读者据此就能识别"这条事件不对应
-   * 任何具体化身"。
+   * adapter 慢调用必须留在 worker 锁外，保证并发 kill/send/query 不被整轮回答阻塞；锁释放
+   * 期间主线即使被 kill 或 handoff，已真实建立的 fork 仍按发起时的 source seq 落账。任何
+   * 建立或持久提交失败都在本次调用抛 QueryEstablishmentError，并由 query receipt 保留通知
+   * 责任；不会再合成第二条 fire-and-forget wake。
    */
-  async queryWorker(workerId: string, question: string): Promise<{ forkSeq: number }> {
-    // Admission precedes even read/trace bookkeeping: stale config must not cause an adapter fork,
-    // workspace/ledger/inbox/event side effect through this fire-and-forget entry.
+  async queryWorker(
+    workerId: string,
+    question: string,
+    opts?: { readonly managerKey?: ManagerKey },
+  ): Promise<QueryWorkerStartedResult> {
     this.deps.assertExecutionAdmission?.()
     interface QueryPrep {
       readonly adapter: WorkerAdapter
       readonly implId: WorkerImplId
       readonly ref: IncarnationRef
       readonly workspace: string
+      readonly managerKey: ManagerKey
+      readonly receipt: WorkerQueryReceipt
     }
 
     const prep = await this.withLock(workerId, async (): Promise<QueryPrep> => {
       const found = await this.deps.ledger.findWorker(workerId)
-      if (!found) {
-        await this.appendEvent(workerId, 0, 'query_failed', { reason: 'worker_not_found' })
-        throw new WorkerNotFoundError(workerId)
-      }
-      const { worker } = found
-      // 侧问永远从当前主线化身分叉,不是"数组最后一个"——否则连续两次 query_worker 会让
-      // 第二次 fork 挂在第一次 fork 的分支下面,而不是都从主线分叉(protocol-agent-v3 §5.3)。
-      const incarnation = requireExecutableIncarnation(requireMainlineIncarnation(worker))
-      const implId = incarnation.impl
-      const adapter = this.deps.adapters.get(implId)
-      if (!adapter) {
-        await this.appendEvent(workerId, incarnation.seq, 'query_failed', { reason: 'no_adapter', impl: implId })
-        throw new Error(`WorkerHarness.queryWorker: no adapter registered for impl '${implId}'`)
-      }
-      if (!adapter.capabilities().fork) {
-        await this.appendEvent(workerId, incarnation.seq, 'query_failed', {
-          reason: 'capability_not_supported',
-          impl: implId,
+      if (!found) throw new WorkerNotFoundError(workerId)
+      const incarnation = requireExecutableIncarnation(requireMainlineIncarnation(found.worker))
+      const queryId = randomUUID()
+      const createdAt = this.deps.now()
+      let receipt: WorkerQueryReceipt
+      try {
+        receipt = await this.queryReceiptStore.create({
+          query_id: queryId,
+          worker_id: workerId,
+          manager_key: opts?.managerKey ?? found.managerKey,
+          question_preview: question,
+          created_at: createdAt,
+          updated_at: createdAt,
+          establishment_deadline_at: new Date(
+            Date.parse(createdAt) + QUERY_ESTABLISHMENT_TIMEOUT_MS,
+          ).toISOString(),
+          state: 'starting',
+          manager_notification: { status: 'not_required' },
         })
-        throw new CapabilityNotSupportedError(implId, 'fork')
+      } catch (error) {
+        throw new Error(`query receipt unavailable: ${sanitizeOperationFailureReason(
+          error,
+          this.deps.redactFailureReason,
+          question,
+          'receipt store failed',
+        )}`)
       }
-      const ref: IncarnationRef = {
-        worker_id: workerId,
-        seq: incarnation.seq,
-        session_ref: incarnation.session_ref,
+      const adapter = this.deps.adapters.get(incarnation.impl)
+      if (!adapter || !adapter.capabilities().fork) {
+        await this.failQueryEstablishment(
+          receipt,
+          'fork_capability_unavailable',
+          adapter
+            ? `${incarnation.impl} does not support fork`
+            : `no adapter registered for impl '${incarnation.impl}'`,
+          'not_started',
+        )
       }
-      return { adapter, implId, ref, workspace: incarnation.workspace }
+      return {
+        adapter: adapter!,
+        implId: incarnation.impl,
+        ref: {
+          worker_id: workerId,
+          seq: incarnation.seq,
+          session_ref: incarnation.session_ref,
+        },
+        workspace: incarnation.workspace,
+        managerKey: found.managerKey,
+        receipt,
+      }
     })
 
-    // 锁外:见方法注释"锁外慢调用段"。
-    // P6-B §6.5：fork（侧问）同样 operation-time admission——进程重启后主线 runtime 的
-    // connectionEnv 已随内存丢失，现解析现注入，不回落宿主原生凭证。
-    const admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
-    let forkHandle: IncarnationHandle
+    let admission: Awaited<ReturnType<NonNullable<HarnessDeps['admitWorkerConnection']>>> | undefined
+    let forkHandle: IncarnationHandle | undefined
+    const disposeAdmission = async (): Promise<void> => {
+      const owned = admission
+      admission = undefined
+      if (!owned) return
+      try {
+        await owned.dispose()
+      } catch (error) {
+        console.error(`[WorkerHarness] failed to dispose query admission ${prep.receipt.query_id}:`, error)
+      }
+    }
     try {
-      forkHandle = await prep.adapter.fork(prep.ref, question, admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : undefined)
-    } catch (err) {
-      if (admission) await admission.dispose()
-      await this.appendEvent(workerId, prep.ref.seq, 'query_failed', {
-        reason: 'fork_failed',
-        message: err instanceof Error ? err.message : String(err),
-      })
-      throw err
+      admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
+      const forkOptions: ForkOptions = {
+        query_id: prep.receipt.query_id,
+        establishment_deadline_at: prep.receipt.establishment_deadline_at,
+        ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
+      }
+      const remainingMs = Date.parse(prep.receipt.establishment_deadline_at) - Date.parse(this.deps.now())
+      if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+        throw new ForkEstablishmentError(
+          'timeout',
+          'fork establishment deadline expired before the adapter was started',
+          'not_started',
+        )
+      }
+      forkHandle = await this.awaitForkEstablishment(
+        prep.adapter.fork(prep.ref, question, forkOptions),
+        prep.adapter,
+        remainingMs,
+      )
+      if (forkHandle.query_id !== prep.receipt.query_id) {
+        throw new Error('adapter returned a fork handle with a mismatched query_id')
+      }
+    } catch (error) {
+      if (forkHandle) {
+        try {
+          await prep.adapter.kill(forkHandle)
+        } catch (killError) {
+          console.error(`[WorkerHarness] failed to stop rejected query fork ${prep.receipt.query_id}:`, killError)
+        }
+      }
+      await disposeAdmission()
+      return this.failQueryEstablishment(
+        prep.receipt,
+        queryFailureCode(error),
+        sanitizeOperationFailureReason(
+          error,
+          this.deps.redactFailureReason,
+          question,
+          'query establishment failed',
+        ),
+        queryFailureCertainty(error),
+      )
     }
 
-    // 重新取锁:见方法注释"锁释放期间世界会变"一节。
-    return this.withLock(workerId, async () => {
-      const found = await this.deps.ledger.findWorker(workerId)
-      if (!found) {
-        console.warn(
-          `[WorkerHarness] queryWorker: worker ${workerId} disappeared from ledger while adapter.fork was in ` +
-            `flight; fork result (seq=${forkHandle.seq}) discarded`
+    let forkRecorded = false
+    try {
+      await this.withLock(workerId, async () => {
+        const found = await this.deps.ledger.findWorker(workerId)
+        if (!found) throw new WorkerNotFoundError(workerId)
+        const now = this.deps.now()
+        const committed = await this.deps.ledger.upsertWorker(prep.managerKey, workerId, (prevWorker) => {
+          if (!prevWorker) return undefined
+          const forkIncarnation: Incarnation = {
+            seq: forkHandle!.seq,
+            impl: prep.implId,
+            state: 'running',
+            workspace: prep.workspace,
+            session_ref: forkHandle!.session_ref,
+            started_at: now,
+            forked_from: prep.ref.seq,
+            query_id: prep.receipt.query_id,
+          }
+          return {
+            ...prevWorker,
+            incarnations: [...prevWorker.incarnations, forkIncarnation],
+            updated_at: now,
+          }
+        })
+        if (!committed) throw new WorkerNotFoundError(workerId)
+        forkRecorded = true
+        await this.queryReceiptStore.markRunning(
+          workerId,
+          prep.receipt.query_id,
+          forkHandle!.seq,
+          this.deps.now(),
         )
-        await this.appendEvent(workerId, forkHandle.seq, 'query_failed', { reason: 'worker_disappeared' })
-        throw new WorkerNotFoundError(workerId)
-      }
-      const { managerKey } = found
-
-      const now = this.deps.now()
-      // P4 Task 4 第四轮收口(复审 PoC 实证):不能再硬编码 'running' 落账——
-      // ClaudeCodeAdapter.fork()(adapter.ts:452-460)在 `return handle` 之前就
-      // `await transitionExited(...)`,后者同步调用 `onStateChange` → handleStateChange →
-      // processStateChange → `await withLock(...)`。AsyncMutex.run 的入队在第一个 await 之前
-      // 就同步完成(见 async-mutex.ts),这次入队必然发生在 fork() 返回、这里重新取锁之前,
-      // 所以 processStateChange 100% 先于这段执行——此时台账里还没有这条 fork 化身,
-      // `findIncarnation` 落空,命中 processStateChange 的 `if (!target) return` 被永久
-      // 丢弃(cc 场景下 fork 是同步跑完的一次性 `claude -p` 调用,落地时几乎总已经是
-      // exited)。以 `adapter.state(forkHandle)` 现读现取为准,而不是假设为 running——
-      // cc 这类"fork 返回时已经跑完"的实现落账即是终态;builtin 的 fork() 把
-      // runForkBurst 做成 fire-and-forget(未 await 就返回 handle),这里读到的仍是
-      // running,后续真正的 onStateChange 回调到时台账里已经有这条化身,能正常找到并
-      // 修正,不会重演同一个丢弃。
-      if (admission) await admission.dispose()
-      const observedState = await prep.adapter.state(forkHandle)
-      const exitedOnCommit = observedState === 'exited'
-      await this.deps.ledger.upsertWorker(managerKey, workerId, (prevWorker) => {
-        if (!prevWorker) return undefined
-        // fork 是一次性侧问,不影响主线 task.status(protocol-agent-v3 §5.3:"不影响主线")——
-        // 无条件追加,不因这段时间里主线是否已转终态/被 handoff 换掉而改变这个决定(理由见
-        // 方法注释)。forked_from 固定为发起侧问那一刻捕获的源 seq(prep.ref.seq),不是这里
-        // 重新读到的、可能已经不同的主线;session_ref 取 forkHandle 自己的引用,不是父化身的
-        // (§6.1 IncarnationHandle 自描述,handle.session_ref 就是 fork 化身真值)。
-        const forkIncarnation: Incarnation = {
-          seq: forkHandle.seq,
-          impl: prep.implId,
-          state: observedState,
-          workspace: prep.workspace,
-          session_ref: forkHandle.session_ref,
-          started_at: now,
-          forked_from: prep.ref.seq,
-          // adapter.state() 只回答 running/idle/exited 三态,不携带 endReason;fork 是
-          // 一次性侧问,正常跑完(cc 场景下是 `claude -p` 子进程退出)就是 completed——
-          // 真正的崩溃辨别依赖 adapter 主动上报的回调,但那次回调已经被上面的竞态吞掉、
-          // 不会再发生第二次,这里只能取这个合理缺省。
-          // 注意与 processStateChange 的区别:那条路径已经改成取 adapter 上报的真值,
-          // 这里取不到——`WorkerContractState` 是三态契约、结构上不携带原因,要拿到真值
-          // 得改契约。如实留作已知限制(不影响主线 task.status,fork 只更新自己的化身条目)。
-          ...(exitedOnCommit ? { ended_at: now, ended_reason: 'completed' as IncarnationEndReason } : {}),
+        if (admission) {
+          this.connectionDisposers.set(`${workerId}:${forkHandle!.seq}`, admission.dispose)
+          admission = undefined
         }
-        return { ...prevWorker, incarnations: [...prevWorker.incarnations, forkIncarnation], updated_at: now }
       })
-      // HarnessEventKind 没有专门的"fork/query"档位(worker-events.ts 是既定契约,Task 7
-      // 不新增枚举值),用 state_changed 承载,detail 里标明是 fork 产生的新化身。
-      await this.appendEvent(workerId, forkHandle.seq, 'state_changed', { kind: 'fork', from_seq: prep.ref.seq })
-      if (exitedOnCommit) {
-        // 补发被 processStateChange 丢弃的那次回调本该产生的"侧问已结束"事件——否则
-        // manager 收不到唤醒,query_worker 形同虚设(protocol-agent-v3 §4.1)。用 'exited'
-        // 这个既有 kind(而不是 processStateChange 正常路径用的 'state_changed')区分两条
-        // 路径,天然不会重复:这次回调已经在竞态里被 `!target` 吞掉,不会再触发第二次
-        // 'state_changed' 事件,所以这里补发的 'exited' 永远只会发生一次。
-        await this.appendEvent(workerId, forkHandle.seq, 'exited', { reason: 'completed', kind: 'fork' })
+    } catch (error) {
+      let forkStopped = false
+      try {
+        await prep.adapter.kill(forkHandle)
+        forkStopped = true
+      } catch {
+        // The fork may still be running; the receipt must preserve that uncertainty.
       }
-      return { forkSeq: forkHandle.seq }
+      if (forkRecorded && forkStopped) {
+        try {
+          await this.withLock(workerId, async () => {
+            const found = await this.deps.ledger.findWorker(workerId)
+            if (!found) return
+            const target = found.worker.incarnations.find(
+              (incarnation) => incarnation.query_id === prep.receipt.query_id,
+            )
+            if (!target || target.state === 'exited') return
+            const endedAt = this.deps.now()
+            await this.deps.ledger.upsertWorker(found.managerKey, workerId, (prev) => {
+              if (!prev) return undefined
+              return {
+                ...prev,
+                incarnations: patchIncarnationBySeq(prev.incarnations, target.impl, target.seq, {
+                  state: 'exited',
+                  ended_at: endedAt,
+                  ended_reason: 'killed',
+                }),
+                updated_at: endedAt,
+              }
+            })
+          })
+        } catch (cleanupError) {
+          console.error(`[WorkerHarness] failed to close rejected query fork ${prep.receipt.query_id}:`, cleanupError)
+        }
+      }
+      await disposeAdmission()
+      return this.failQueryEstablishment(
+        prep.receipt,
+        'fork_record_failed',
+        sanitizeOperationFailureReason(
+          error,
+          this.deps.redactFailureReason,
+          question,
+          'query establishment failed',
+        ),
+        'unknown',
+      )
+    }
+
+    await this.appendAuditEvent(workerId, forkHandle.seq, 'state_changed', {
+      kind: 'fork',
+      query_id: prep.receipt.query_id,
+      from_seq: prep.ref.seq,
     })
+
+    const pendingState = this.pendingQueryStateChanges.get(prep.receipt.query_id)
+    if (pendingState) {
+      this.pendingQueryStateChanges.delete(prep.receipt.query_id)
+      await this.processStateChange(pendingState.h, pendingState.state, pendingState.report)
+    }
+
+    return {
+      status: 'started',
+      query_id: prep.receipt.query_id,
+      worker_id: workerId,
+      fork_seq: forkHandle.seq,
+    }
+  }
+
+  private async awaitForkEstablishment(
+    forkPromise: Promise<IncarnationHandle>,
+    adapter: WorkerAdapter,
+    remainingMs: number,
+  ): Promise<IncarnationHandle> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new ForkEstablishmentError(
+          'timeout',
+          'fork establishment exceeded the 30 second deadline',
+          'unknown',
+        ))
+      }, remainingMs)
+      timer.unref?.()
+    })
+    try {
+      return await Promise.race([forkPromise, timeout])
+    } catch (error) {
+      if (error instanceof ForkEstablishmentError && error.stage === 'timeout') {
+        void forkPromise.then((handle) => adapter.kill(handle)).catch((lateError) => {
+          console.error('[WorkerHarness] late query fork cleanup failed:', lateError)
+        })
+      }
+      throw error
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  private async failQueryEstablishment(
+    receipt: WorkerQueryReceipt,
+    reasonCode: QueryFailureCode,
+    reason: string,
+    certainty: QueryFailure['certainty'],
+  ): Promise<never> {
+    this.pendingQueryStateChanges.delete(receipt.query_id)
+    const failure: QueryFailure = {
+      reason_code: reasonCode,
+      reason,
+      phase: 'establishment',
+      certainty,
+    }
+    const current = await this.queryReceiptStore.get(receipt.worker_id, receipt.query_id)
+    if (current && current.state !== 'completed' && current.state !== 'failed') {
+      try {
+        await this.queryReceiptStore.settleFailed(
+          receipt.worker_id,
+          receipt.query_id,
+          failure,
+          this.deps.now(),
+        )
+        await this.appendAuditEvent(receipt.worker_id, 0, 'query_failed', {
+          query_id: receipt.query_id,
+          ...failure,
+        })
+      } catch (error) {
+        console.error(`[WorkerHarness] failed to persist query establishment failure ${receipt.query_id}:`, error)
+      }
+    }
+    throw new QueryEstablishmentError(receipt.query_id, reasonCode, reason, certainty)
   }
 
   // ---- 内部 ----
@@ -2675,7 +3480,15 @@ export class WorkerHarness {
       const { worker, managerKey } = found
 
       const target = findIncarnation(worker, h.impl, h.seq)
-      if (!target) return // 未知化身(理论不该发生),防御性丢弃
+      if (!target) {
+        if (h.query_id) {
+          const receipt = await this.queryReceiptStore.get(h.worker_id, h.query_id)
+          if (receipt?.state === 'starting') {
+            this.pendingQueryStateChanges.set(h.query_id, { h, state, ...(report ? { report } : {}) })
+          }
+        }
+        return
+      }
 
       // endReason 一律取 adapter 上报的真值:三个 adapter 的 transitionExited 形参本就是
       // 必填的 ended_reason,且都在调回调之前已经把它写进自己的 meta,所以常规路径上
@@ -2710,7 +3523,19 @@ export class WorkerHarness {
           )
           return { ...prev, incarnations, updated_at: now }
         })
-        await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state, ...wakeDetail })
+        if (target.query_id) {
+          if (state === 'exited') {
+            await this.settleQueryExecution(target.query_id, h, endReason, wakeDetail)
+          } else {
+            await this.appendAuditEvent(h.worker_id, h.seq, 'state_changed', {
+              to: state,
+              query_id: target.query_id,
+              ...wakeDetail,
+            })
+          }
+        } else {
+          await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state, ...wakeDetail })
+        }
         if (state === 'exited') this.fireIncarnationTerminal(h)
         return
       }
@@ -2781,6 +3606,38 @@ export class WorkerHarness {
       inbox.release('waiting_action')
       await this.flushInbox(h.worker_id)
     }
+  }
+
+  private async settleQueryExecution(
+    queryId: string,
+    h: IncarnationHandle,
+    endReason: IncarnationEndReason | undefined,
+    wakeDetail: Record<string, string>,
+  ): Promise<void> {
+    const receipt = await this.queryReceiptStore.get(h.worker_id, queryId)
+    if (!receipt || receipt.state !== 'running') return
+    if (endReason === 'completed') {
+      await this.queryReceiptStore.settleCompleted(h.worker_id, queryId, this.deps.now())
+      await this.appendAuditEvent(h.worker_id, h.seq, 'query_completed', {
+        query_id: queryId,
+        fork_seq: h.seq,
+        ...wakeDetail,
+      })
+      return
+    }
+    const failure: QueryFailure = {
+      reason_code: 'query_execution_failed',
+      reason: endReason ? `query fork exited with reason '${endReason}'` : 'query fork exited without a completion reason',
+      phase: 'execution',
+      certainty: 'failed',
+    }
+    await this.queryReceiptStore.settleFailed(h.worker_id, queryId, failure, this.deps.now())
+    await this.appendAuditEvent(h.worker_id, h.seq, 'query_failed', {
+      query_id: queryId,
+      fork_seq: h.seq,
+      ...failure,
+      ...wakeDetail,
+    })
   }
 
   private withLock<T>(workerId: string, fn: () => Promise<T>): Promise<T> {
@@ -2856,6 +3713,24 @@ export class WorkerHarness {
     const event = this.buildEvent(workerId, seq, kind, detail)
     await this.getEventLog(workerId).append(event)
     return (await this.deps.onEvent?.(event)) ?? undefined
+  }
+
+  /** Persist operation evidence without using the ordinary Manager route or affecting operation truth. */
+  private async appendAuditEvent(
+    workerId: string,
+    seq: number,
+    kind: HarnessEventKind,
+    detail?: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.getEventLog(workerId).append(this.buildEvent(workerId, seq, kind, detail))
+    } catch (error) {
+      console.error(
+        `[WorkerHarness] failed to append operation audit event ` +
+          `(worker=${workerId}, seq=${seq}, kind=${kind}):`,
+        error,
+      )
+    }
   }
 
   /** 化身终态收割钩子（P6-A §8.10）：fire-and-forget，异常只记不打断。 */

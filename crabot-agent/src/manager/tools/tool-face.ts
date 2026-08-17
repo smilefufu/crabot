@@ -41,13 +41,6 @@ export interface ToolFaceDeps {
   /** Opaque control-plane authorization, never represented in any tool schema. */
   readonly authorization?: () => MasterAuthorization | undefined
   readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
-  /**
-   * query_worker 异步失败出口（Task 4 留口、Task 8 接线）：原样透传给 `buildWorkerTools` 的
-   * `WorkerToolsDeps.onAsyncError`——真正的绑定逻辑（按 key 决定 enqueueDuringEpisode 还是
-   * 重新 wakeUp）在 `ManagerRegistry.handleAsyncToolError`，本层只负责不掉链子地转发。
-   * 缺省不传时行为与之前完全一致（query_worker 失败仅 console.error）。
-   */
-  readonly onAsyncError?: Parameters<typeof buildWorkerTools>[0]['onAsyncError']
 }
 
 // ============================================================================
@@ -212,7 +205,6 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     context: deps.workerContext,
     authorization: deps.authorization,
     validateMasterAuthorization: deps.validateMasterAuthorization,
-    onAsyncError: deps.onAsyncError,
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
   })
   const infoTools = buildCrabotInfoTools({

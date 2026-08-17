@@ -15,6 +15,7 @@ interface IncarnationBase {
   ended_at?: string
   ended_reason?: IncarnationEndReason
   forked_from?: number
+  query_id?: string
 }
 
 export interface ExecutableIncarnation extends IncarnationBase {

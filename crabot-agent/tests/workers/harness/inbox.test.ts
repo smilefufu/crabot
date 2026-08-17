@@ -243,6 +243,93 @@ describe('WorkerInbox', () => {
     expect(inbox.pending).toBe(0)
   })
 
+  it('reports the per-item pending phase without settling the receipt', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const pending = vi.fn()
+    const settled = vi.fn()
+    inbox.enqueue(makeItem('queued input', {
+      delivery_id: 'delivery-1',
+      onPending: pending,
+      onSettled: settled,
+    }))
+
+    await inbox.flush(async () => ({ action: 'hold_requeue', reason: 'waiting_action' }))
+
+    expect(pending).toHaveBeenCalledWith('waiting_action')
+    expect(settled).not.toHaveBeenCalled()
+  })
+
+  it('cancels a queued delivery by ID but reports consumed/in-flight items as unsafe', async () => {
+    const queued = new WorkerInbox('worker-queued')
+    queued.enqueue(makeItem('queued', { delivery_id: 'delivery-queued' }))
+    await expect(queued.cancelDelivery('delivery-queued')).resolves.toBe('cancelled')
+    expect(queued.pending).toBe(0)
+
+    const consumed = new WorkerInbox('worker-consumed')
+    consumed.enqueue(makeItem('consumed', { delivery_id: 'delivery-consumed', onSettled: vi.fn() }))
+    await consumed.flush(async () => ({ action: 'hold_consumed', reason: 'input_pending' }))
+    await expect(consumed.cancelDelivery('delivery-consumed')).resolves.toBe('unsafe')
+  })
+
+  it('reports an in-flight delivery as unsafe without waiting for a blocked adapter', async () => {
+    const inbox = new WorkerInbox('worker-in-flight')
+    inbox.enqueue(makeItem('in flight', { delivery_id: 'delivery-in-flight' }))
+
+    let markEntered!: () => void
+    const entered = new Promise<void>((resolve) => { markEntered = resolve })
+    let releaseDelivery!: () => void
+    const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve })
+    const flush = inbox.flush(async () => {
+      markEntered()
+      await deliveryGate
+    })
+    await entered
+
+    let cancellation: string
+    try {
+      cancellation = await Promise.race([
+        inbox.cancelDelivery('delivery-in-flight'),
+        new Promise<string>((resolve) => setTimeout(() => resolve('timed_out'), 50)),
+      ])
+    } finally {
+      releaseDelivery()
+      await flush
+    }
+
+    expect(cancellation).toBe('unsafe')
+  })
+
+  it('drops an invalidated receipt immediately before delivery without invoking settlement', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const settled = vi.fn()
+    const delivered = vi.fn()
+    inbox.enqueue(makeItem('expired', {
+      delivery_id: 'delivery-expired',
+      shouldDeliver: async () => false,
+      onSettled: settled,
+    }))
+
+    await inbox.flush(delivered)
+
+    expect(delivered).not.toHaveBeenCalled()
+    expect(settled).not.toHaveBeenCalled()
+    expect(inbox.pending).toBe(0)
+  })
+
+  it('passes terminal settlement detail to the producer receipt callback', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const settled = vi.fn()
+    inbox.enqueue(makeItem('delivered', { onSettled: settled }))
+
+    await inbox.flush(async () => ({
+      action: 'settled',
+      settlement: 'delivered',
+      detail: { seq: 3 },
+    }))
+
+    expect(settled).toHaveBeenCalledWith('delivered', { seq: 3 })
+  })
+
   it('handoff replacement preserves the original durable receipt, dedupe key, and raw mode', async () => {
     const inbox = new WorkerInbox('worker-1')
     const settled = vi.fn()

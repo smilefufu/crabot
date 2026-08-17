@@ -16,6 +16,13 @@ import { chunksFromContent } from '../engine/helpers/mock-stream.js'
  *  send_message 工具，这段文案一旦出现在它的上下文里就是 bug。 */
 const FORCED_SUMMARY_MARKER = '你刚才以 end_turn 结束但还没有向人类发送任何内容'
 
+function forkOptions() {
+  return {
+    query_id: randomUUID(),
+    establishment_deadline_at: new Date(Date.now() + 30_000).toISOString(),
+  }
+}
+
 function makeAdapter(
   responses: Array<{
     text?: string
@@ -359,11 +366,11 @@ describe('BuiltinWorkerAdapter', () => {
       await adapter.sendInput(h, '运行中追加的输入')
       expect(await adapter.lastActivityAt(h)).toBe(4_000)
 
-      const fork = await adapter.fork(h, '侧问')
+      const fork = await adapter.fork(h, '侧问', forkOptions())
       await vi.waitFor(() => expect(runEngineSpy).toHaveBeenCalledTimes(2))
       now = 5_000
-      const forkOptions = runEngineSpy.mock.calls[1][0].options
-      forkOptions.onLiveProgress!({ type: 'tools_end', results: [] })
+      const forkEngineOptions = runEngineSpy.mock.calls[1][0].options
+      forkEngineOptions.onLiveProgress!({ type: 'tools_end', results: [] })
       expect(await adapter.lastActivityAt(fork)).toBe(5_000)
 
       now = 6_000
@@ -684,7 +691,7 @@ describe('BuiltinWorkerAdapter', () => {
     expect(mainTip).not.toBeNull()
 
     const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainTip! }
-    const forkHandle = await adapter.fork(prevRef, '侧问问题')
+    const forkHandle = await adapter.fork(prevRef, '侧问问题', forkOptions())
     expect(forkHandle.seq).toBe(2)
 
     // forkHandle.session_ref 是 fork 自己的引用(fork 分支节点自己的 tip node_id)，不是主线
@@ -758,7 +765,7 @@ describe('BuiltinWorkerAdapter', () => {
 
     const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
     const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: tree.latestTip()! }
-    const forkHandle = await workerAdapter.fork(prevRef, '侧问问题')
+    const forkHandle = await workerAdapter.fork(prevRef, '侧问问题', forkOptions())
     await waitState(workerAdapter, forkHandle, 'exited')
 
     const streamMock = llm.stream as unknown as { mock: { calls: Array<[{ messages: unknown }]> } }
@@ -789,7 +796,7 @@ describe('BuiltinWorkerAdapter', () => {
     expect(rootTip).not.toBeNull()
     const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: rootTip! }
 
-    const forkHandle = await adapter.fork(prevRef, '侧问问题')
+    const forkHandle = await adapter.fork(prevRef, '侧问问题', forkOptions())
     expect(forkHandle.seq).toBe(2)
 
     gate.resolve()
@@ -820,7 +827,7 @@ describe('BuiltinWorkerAdapter', () => {
     const tree1 = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
     const mainTip = tree1.latestTip()!
     const forkRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainTip }
-    const forkHandle = await adapter.fork(forkRef, '侧问问题')
+    const forkHandle = await adapter.fork(forkRef, '侧问问题', forkOptions())
     expect(forkHandle.seq).toBe(2)
     await waitState(adapter, forkHandle, 'exited')
 
@@ -863,7 +870,7 @@ describe('BuiltinWorkerAdapter', () => {
     const tree1 = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
     const mainTip = tree1.latestTip()!
     const forkRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainTip }
-    const forkHandle = await adapter.fork(forkRef, '侧问问题')
+    const forkHandle = await adapter.fork(forkRef, '侧问问题', forkOptions())
     expect(forkHandle.seq).toBe(2)
     await waitState(adapter, forkHandle, 'exited')
 
@@ -918,7 +925,7 @@ describe('BuiltinWorkerAdapter', () => {
     const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainTip }
 
     // fork 调用会触发 fork burst，其中会卡在 gate（因为是第二次调用）
-    const forkHandle = await adapter.fork(prevRef, '侧问问题')
+    const forkHandle = await adapter.fork(prevRef, '侧问问题', forkOptions())
     expect(forkHandle.seq).toBe(2)
 
     // 等待足够长的时间让 fork burst 进入卡在 gate 的状态
@@ -1534,7 +1541,7 @@ describe('BuiltinWorkerAdapter', () => {
         { text: '侧问第二轮', stopReason: 'end_turn' },
       ])
 
-      const forkHandle = await adapter.fork(prevRef, '侧问一下')
+      const forkHandle = await adapter.fork(prevRef, '侧问一下', forkOptions())
       const forkInstance = (adapterAny.instances as Map<string, { outputLog: { append: (t: string) => Promise<void> } }>).get(
         `${s.worker_id}#${forkHandle.seq}`,
       )
@@ -1747,14 +1754,14 @@ describe('BuiltinWorkerAdapter', () => {
       return originalWriteMeta(...args)
     })
 
-    await expect(adapter.fork(prevRef, '侧问')).rejects.toThrow(/simulated writeMeta disk error \(fork\)/)
+    await expect(adapter.fork(prevRef, '侧问', forkOptions())).rejects.toThrow(/simulated writeMeta disk error \(fork\)/)
 
     // writeMeta 失败了，instances 里不应该有 seq=2 的孤儿条目。
     const key2 = `${s.worker_id}#2`
     expect((adapterAny.instances as Map<string, unknown>).has(key2)).toBe(false)
 
     // 重试应该能成功（fork 没有像 resume 那样的"重复"标记，重试是无副作用的）。
-    const retryHandle = await adapter.fork(prevRef, '侧问-重试')
+    const retryHandle = await adapter.fork(prevRef, '侧问-重试', forkOptions())
     expect(retryHandle.seq).toBe(2)
     await waitState(adapter, retryHandle, 'exited')
   })
@@ -1827,7 +1834,7 @@ describe('BuiltinWorkerAdapter', () => {
 
     // 从这个未压缩的老节点 fork：能跑通，且 fork burst 自己也开着压缩（否则老链 fork 必撞窗口）。
     const compactionCallsBeforeFork = llm.compactionCalls
-    const forkH = await adapter.fork({ worker_id: s.worker_id, seq: 1, session_ref: oldTip }, '侧问一句')
+    const forkH = await adapter.fork({ worker_id: s.worker_id, seq: 1, session_ref: oldTip }, '侧问一句', forkOptions())
     await waitState(adapter, forkH, 'exited')
     const forkMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')) as {
       ended_reason: string
@@ -1904,7 +1911,7 @@ describe('BuiltinWorkerAdapter', () => {
     const h = await adapter.spawn(s)
     await waitState(adapter, h, 'idle')
     const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
-    const forkH = await adapter.fork({ worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }, '侧问')
+    const forkH = await adapter.fork({ worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }, '侧问', forkOptions())
     await waitState(adapter, forkH, 'exited')
 
     expect(runEngineSpy.mock.calls[0]?.[0]?.options?.disableCompaction).toBe(false)
@@ -1961,7 +1968,7 @@ describe('BuiltinWorkerAdapter', () => {
     await waitState(adapter, h, 'exited')
     const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
 
-    const forkH = await adapter.fork({ worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }, '侧问')
+    const forkH = await adapter.fork({ worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }, '侧问', forkOptions())
     await waitState(adapter, forkH, 'exited')
     const forkMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')) as {
       ended_reason: string

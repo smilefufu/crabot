@@ -198,13 +198,19 @@ export function runContractSuite(name: string, makeFixture: MakeFixture): void {
         const caps = fx.adapter.capabilities()
 
         if (caps.fork) {
-          const forkHandle = await fx.adapter.fork(ref, '侧问问题')
+          const forkHandle = await fx.adapter.fork(ref, '侧问问题', {
+            query_id: randomUUID(),
+            establishment_deadline_at: new Date(Date.now() + 30_000).toISOString(),
+          })
           expect(forkHandle.worker_id).toBe(h.worker_id)
           await waitForState(fx.adapter, forkHandle, 'exited')
           const output = await fx.adapter.readOutput(forkHandle, { offset: 0 })
           expect(typeof output.chunk).toBe('string')
         } else {
-          await expect(fx.adapter.fork(ref, '侧问问题')).rejects.toBeTruthy()
+          await expect(fx.adapter.fork(ref, '侧问问题', {
+            query_id: randomUUID(),
+            establishment_deadline_at: new Date(Date.now() + 30_000).toISOString(),
+          })).rejects.toBeTruthy()
         }
       },
       15000,

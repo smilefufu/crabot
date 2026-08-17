@@ -4,45 +4,25 @@
  * 七个工具全部是 `WorkerHarness`(P3 已合并,本模块只调用、不修改,唯一的 additive 例外见
  * `harness.readWorkerOutput` 的 `opts.seq` 参数)既有方法的薄封装:只负责
  * 1) 组装 harness 方法的入参(`spawn_worker` 据 `deps.context()` 填 `origin`/`report_to`);
- * 2) 把 harness 的返回值/异常转成 engine `ToolCallResult`——除 `query_worker`(见下)外,
- *    异常永不穿透成 engine 层错误,统一转成 `isError: true` 的可读文本,manager 能读到失败
+ * 2) 把 harness 的返回值/异常转成 engine `ToolCallResult`——异常永不穿透成 engine 层错误,
+ *    统一转成 `isError: true` 的可读文本,manager 能读到失败
  *    原因并自行决策(如 worker 不存在就换个 id 或重新 spawn,protocol-agent-v3 §4.3)。
  *
  * ---
  *
  * ## 同步性语义的实现取舍(protocol §4.1"等待 = end_turn")
  *
- * 协议表(§4.3)把 `spawn_worker`/`send_to_worker`/`query_worker` 标"异步",
- * `read_worker_output`/`list_workers`/`kill_worker` 标"同步"。`spawn_worker`/`send_to_worker`
- * 与 `read_worker_output`/`list_workers`/`kill_worker` 这五个工具都完整 `await` 对应的
+ * `spawn_worker`、`send_to_worker` 和 `query_worker` 都完整 `await` 对应的
  * harness 方法——`spawnWorker` 顺序 await workspace 解析、台账初始写入、`adapter.provision`、
  * `adapter.spawn`;`sendToWorker` 顺序 await 入信箱与 `inbox.flush`(经 `adapter.sendInput`,
- * 命中终态化身时还会走一整套 kill+provision+spawn 的透明接续)——这些都是"编排动作完整
- * 落地"才 resolve 的有限时长调用,不会进一步阻塞等待 worker 自己执行任务、产出真正的回复
- * (那部分永远经由 harness 的 `onEvent`/`onStateChange` 异步发生),完整 await 并不违反
- * "manager 的 loop 内不存在阻塞等待原语"这条约束。这五个工具若不 await,会丢失两样东西:
+ * 命中终态化身时还会走一整套 kill+provision+spawn 的透明接续);`queryWorker` 只 await
+ * fork 建立、首问接受与 ledger/receipt 提交，不等待侧问回答生成——这些都是"编排动作完整
+ * 落地"才 resolve 的有限时长调用。Worker 执行、输入异步终态与侧问回答终态仍通过事件
+ * 唤醒 manager，完整 await 不违反"manager 的 loop 内不存在等待 Worker 执行完成的阻塞原语"
+ * 这条约束。若不 await,会丢失两样东西:
  * 1. `spawn_worker` 依赖 harness 内部生成的 `worker_id` 供 LLM 后续引用——不 await 就拿不到;
- * 2. `WorkerNotFoundError`/`TaskCancelledError`/`ImplAlreadyUsedError` 一类的失败原因就没有
+ * 2. `WorkerNotFoundError`/`TaskCancelledError`/`QueryEstablishmentError` 一类的失败原因就没有
  *    办法在这次调用内回传给 LLM,违反"manager 应能读到失败原因并自行决策"这条要求。
- *
- * `query_worker` 是唯一的例外,采用字面意义的 JS fire-and-forget(调用 `harness.queryWorker`
- * 后不 `await`、立即返回,游离 promise 用 `.catch()` 兜住)。原因:`harness.queryWorker` 顺序
- * await `adapter.fork`,而 `claude-code/adapter.ts` 的 `fork()` 实现是
- * `await execFileAsync('/bin/sh', ['-c', shellCommand], ...)`——等的是整个无头 `claude -p`
- * 子进程跑完(一次完整 LLM 调用,几十秒到数分钟),不是"发起"这一有限时长的编排动作。完整
- * await 会把 manager 的这一整个 turn 阻塞住,违反 protocol-agent-v3 §4.1/§4.3"慢工具异步
- * 发起即返回,结果作为事件唤醒"。代价:`forkSeq` 拿不到(它在 `adapter.fork` 落地之后才由
- * harness 生成),`WorkerNotFoundError`/`CapabilityNotSupportedError` 等失败原因也不再能在
- * 这次调用内回传给 LLM,只记诊断日志——不打破"manager 应能读到失败原因"这条要求的字面表述
- * 的场景是:manager 观察不到进展(既无 fork 化身出现,也没有对应事件)时,应主动用
- * `list_workers` 核实,不是假定这条要求覆盖 `query_worker` 这一条异步发起路径(controller
- * 决定,理由见上,记录于 task-4-report.md 追加内容)。
- *
- * 三个"异步"工具的输出因此刻意写得简短(确认式:status + 关键标识符,`query_worker` 甚至
- * 只有 status + worker_id),提示 LLM 后续进展会由事件唤醒。
- *
- * 若未来 harness 提供了"仅等 fork 发起、不等 `claude -p` 子进程落地"的拆分入口,`query_worker`
- * 应优先切换回完整 await 的实现,与其余五个工具的语义保持一致。
  *
  * ## isReadOnly
  *
@@ -61,6 +41,7 @@ import type { MasterAuthorization } from '../principal.js'
 import type { WorkerImplId } from '../../workers/types'
 import type { ResolvedPermissions } from '../../types'
 import type { LegacyContinuationAuth } from '../../workers/harness/legacy-continuation-auth.js'
+import { QueryEstablishmentError } from '../../workers/errors.js'
 
 export interface WorkerToolsContext {
   /** Current manager session: worker owner and list_workers scope. */
@@ -121,16 +102,6 @@ export interface WorkerToolsDeps {
   /** Opaque authorization is captured by the control plane, never exposed in a tool schema/history. */
   readonly authorization?: () => MasterAuthorization | undefined
   readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
-  /**
-   * P4 Task 4 additive 扩展点:`query_worker` 的游离 promise reject 时,除了
-   * `console.error` 诊断日志外还调用这个可选回调。本任务只提供出口、不接线——`harness.
-   * queryWorker` 本身已经把同一失败 appendEvent('query_failed')(见 harness.ts 注释),
-   * 这里的 `onAsyncError` 面向的是"当前这个 manager 实例要不要因为这次失败立刻醒来"这层
-   * 决策,不是失败留痕本身。Task 7/8 的契约:接上后用它"把这条错误接成唤醒本 manager 的
-   * 信号"(如推一条系统消息触发下一轮 loop),不在这里预判具体唤醒机制。缺省不传时行为
-   * 与之前完全一致(仅 console.error)。
-   */
-  readonly onAsyncError?: (info: { tool: string; worker_id: string; error: string }) => void
 }
 
 // --- tool_result 构造辅助 ---
@@ -154,6 +125,17 @@ function invalid(message: string): ToolCallResult {
 function mapError(prefix: string, error: unknown): ToolCallResult {
   const message = error instanceof Error ? error.message : String(error)
   console.error(`[worker-tools] ${prefix} failed:`, error)
+  if (error instanceof QueryEstablishmentError) {
+    return {
+      output: JSON.stringify({
+        query_id: error.query_id,
+        reason_code: error.reason_code,
+        reason: error.reason,
+        certainty: error.certainty,
+      }),
+      isError: true,
+    }
+  }
   // P6-C：结构化 NOT_READY 的 ready_impls/reasons 必须到 Manager（C-02/C-05 的观测点）。
   const details = (error as { code?: string; details?: { ready_impls?: string[]; reasons?: Record<string, string> } })
   if (details.code === 'WORKER_IMPLEMENTATION_NOT_READY' && details.details) {
@@ -195,7 +177,7 @@ function normalizePagination(page: unknown, pageSize: unknown): { page: number; 
 const ACCESS_DENIED = 'worker 不存在或当前会话无权访问'
 
 export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
-  const { harness, context, authorization, validateMasterAuthorization, onAsyncError } = deps
+  const { harness, context, authorization, validateMasterAuthorization } = deps
   // Capture exactly once: a tool definition belongs to one model turn. A later
   // regrant must not make an already-issued privileged closure usable again.
   const capturedAuthorization = authorization?.()
@@ -287,10 +269,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const sendToWorker = defineTool({
     name: 'send_to_worker',
     description:
-      '向指定 worker 的信箱投递一条输入,worker 处于什么状态都能投:在跑/空闲的排进信箱,' +
+      '向指定 worker 投递一条输入。返回 delivered 才表示 worker adapter 已确认接受；pending ' +
+      '表示尚未送达，系统会在 5 分钟内结算并用事件通知你；failed 会给出原因与送达确定性。' +
+      'worker 处于什么状态都能投:在跑/空闲的排进信箱,' +
       '已结束(completed/failed)的会自动复活它原来的会话接着干、上下文完整保留——所以延续、' +
       '补充、返工一个老任务都走这里,不必先判断它死活,也不必为此新开 worker。异步语义:本工具' +
-      '在投递落地(或复活发起)后即返回,不等 worker 处理完这条消息;worker 每跑完一轮或结束时' +
+      '不等 worker 处理完这条消息;worker 每跑完一轮或结束时' +
       '会作为事件唤醒你,事件里带着它这一轮最后说的那段话。命中已 cancelled 的任务会被拒绝。' +
       'raw=true 用于向卡住的交互式界面原样敲键,不是普通对话消息。',
     inputSchema: {
@@ -311,38 +295,26 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       try {
         const worker = await authorizeWorker(worker_id)
         const legacyContinuationAuth = capturedLegacyContinuationAuth?.(worker.manager_key)
-        await harness.sendToWorker(worker_id, text, {
+        const result = await harness.sendToWorker(worker_id, text, {
+          managerKey: context().managerKey,
           ...(raw !== undefined ? { raw } : {}),
           ...(legacyContinuationAuth ? { legacyContinuationAuth } : {}),
         })
-        return ok({ status: 'sent', worker_id })
+        return ok(result)
       } catch (error) {
         return mapError(`send_to_worker(${worker_id})`, error)
       }
     },
   })
 
-  // --- query_worker(字面 fire-and-forget:发起后不 await,立即返回;答案由事件唤醒) ---
-  //
-  // 与其余五个工具不同的实现取舍:cc worker 的 harness.queryWorker → adapter.fork 会 await
-  // 一整个无头 `claude -p` 子进程跑完(一次完整 LLM 调用,几十秒到数分钟)——完整 await 会把
-  // manager 的这一整个 turn 阻塞住,违反 protocol-agent-v3 §4.1/§4.3"慢工具异步发起即返回,
-  // 结果作为事件唤醒"。因此本工具字面意义地不等 harness.queryWorker 落地:调用后立即返回
-  // 简短确认,游离 promise 用 .catch() 兜住(不得产生 unhandledRejection,P1/P3 反复踩过的
-  // 坑),失败只记诊断日志——这意味着 WorkerNotFoundError/CapabilityNotSupportedError 等
-  // 已知错误不再能在这次调用内回传给 LLM(相对其余五个工具"异常永不穿透,统一转 isError"
-  // 这条约定的一处刻意偏离,controller 决定,见 task-4-report.md 追加记录)。forkSeq 同理
-  // 拿不到(它在 adapter.fork 落地之后才由 harness 生成),不写进返回文本。
-  // P4 Task 4 additive:失败除 console.error 外还调 deps.onAsyncError?.(见 WorkerToolsDeps
-  // 注释)——本任务只开这个口子,不接线;harness.queryWorker 自己也会把同一失败
-  // appendEvent('query_failed'),二者互补(留痕 vs. 是否要唤醒当前 manager 两层决策)。
+  // --- query_worker（同步确认 fork + 首问建立；回答继续异步执行） ---
   const queryWorker = defineTool({
     name: 'query_worker',
     description:
-      '对正在跑的 worker 发起一次侧问(fork 语义),不打扰主线执行。fire-and-forget:本工具' +
-      '发起侧问后立即返回,不等侧问化身创建完成,拿不到 fork_seq;答案就绪(或发起失败)只' +
-      '会作为事件唤醒你,届时事件会带上该侧问化身的 seq,用 read_worker_output 传入该 seq ' +
-      '读取答案。目标实现需支持 fork 能力,不支持时的失败不会体现在这次调用的返回里。',
+      '对正在跑的 worker 建立一次独立侧问(fork 语义),不打扰主线执行。只有 fork 已创建、' +
+      '首问已接受且化身已落账后才返回 started + query_id + fork_seq；建立失败会在本次调用' +
+      '直接返回原因。答案生成仍异步，完成或失败后会可靠通知你；用 read_worker_output 传入' +
+      '返回的 fork_seq 可随时读取侧问输出。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -358,16 +330,14 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (!question || typeof question !== 'string') return invalid('query_worker: question 必填且为字符串')
 
       try {
-        // Authorization must settle before this fire-and-forget action is started.
         await authorizeWorker(worker_id)
+        const result = await harness.queryWorker(worker_id, question, {
+          managerKey: context().managerKey,
+        })
+        return ok(result)
       } catch (error) {
         return mapError(`query_worker(${worker_id})`, error)
       }
-      harness.queryWorker(worker_id, question).catch((error) => {
-        console.error(`[worker-tools] query_worker(${worker_id}) 后台发起失败(fire-and-forget):`, error)
-        onAsyncError?.({ tool: 'query_worker', worker_id, error: error instanceof Error ? error.message : String(error) })
-      })
-      return ok({ status: 'queried', worker_id })
     },
   })
 

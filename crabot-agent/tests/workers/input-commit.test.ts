@@ -5,6 +5,46 @@ import type { PaneSnapshot } from '../../src/workers/tmux/driver.js'
 const snapshot = (text: string): PaneSnapshot => ({ text })
 
 describe('commitInput', () => {
+  it('runs the side-effect guard before paste and every Enter attempt', async () => {
+    const phases: string[] = []
+    const frames = [snapshot('empty'), snapshot('pending'), snapshot('pending'), snapshot('pending')]
+    const result = await commitInput(
+      { pasteText: async () => {}, sendEnter: async () => {}, capture: async () => frames.shift()! },
+      frame => frame.text as InputProbe,
+      () => false,
+      'task',
+      { settleTimeoutMs: 0, beforeSideEffect: phase => { phases.push(phase) } },
+    )
+
+    expect(result.disposition).toBe('pending_in_ui')
+    expect(phases).toEqual(['paste', 'enter', 'enter'])
+  })
+
+  it('a guard failure before Enter never performs that Enter', async () => {
+    let pastes = 0
+    let enters = 0
+    const frames = [snapshot('empty'), snapshot('pending')]
+
+    await expect(commitInput(
+      {
+        pasteText: async () => { pastes++ },
+        sendEnter: async () => { enters++ },
+        capture: async () => frames.shift()!,
+      },
+      frame => frame.text as InputProbe,
+      () => false,
+      'task',
+      {
+        settleTimeoutMs: 0,
+        beforeSideEffect: phase => {
+          if (phase === 'enter') throw new Error('delivery expired after paste')
+        },
+      },
+    )).rejects.toThrow('delivery expired after paste')
+    expect(pastes).toBe(1)
+    expect(enters).toBe(0)
+  })
+
   it('pastes once and commits once after empty -> pending', async () => {
     const frames = [snapshot('empty'), snapshot('pending'), snapshot('accepted')]
     let pastes = 0; let enters = 0

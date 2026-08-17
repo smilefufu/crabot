@@ -55,13 +55,20 @@ import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 
 const execAsync = promisify(exec)
 
 const pFlagIndex = process.argv.indexOf('-p')
 if (pFlagIndex !== -1) {
   const forkInput = process.argv[pFlagIndex + 1] ?? ''
-  process.stdout.write(`mock headless reply: ${forkInput}\n`)
+  const reply = `mock headless reply: ${forkInput}`
+  if (process.argv.includes('stream-json')) {
+    process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: randomUUID() }) + '\n')
+    process.stdout.write(JSON.stringify({ type: 'result', result: reply }) + '\n')
+  } else {
+    process.stdout.write(`${reply}\n`)
+  }
   process.exit(0)
 }
 

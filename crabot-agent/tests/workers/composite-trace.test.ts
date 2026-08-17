@@ -33,8 +33,19 @@ function makeWorker(over: Partial<LedgerWorker> = {}): LedgerWorker {
   } as LedgerWorker
 }
 
-function harnessEvent(seq: number, kind: string, ts: string): HarnessEvent {
-  return { ts, kind: kind as HarnessEvent['kind'], worker_id: WORKER_ID, seq }
+function harnessEvent(
+  seq: number,
+  kind: string,
+  ts: string,
+  detail?: Record<string, unknown>,
+): HarnessEvent {
+  return {
+    ts,
+    kind: kind as HarnessEvent['kind'],
+    worker_id: WORKER_ID,
+    seq,
+    ...(detail ? { detail } : {}),
+  }
 }
 
 function nativeEvent(text: string, ts: string): NormalizedTraceEvent {
@@ -103,6 +114,32 @@ describe('readCompositeWorkerTrace', () => {
     const result = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
     expect(result.events.map((event) => event.source)).toEqual(['harness', 'native', 'native', 'harness'])
     expect(result.next_cursor).toBeTruthy()
+  })
+
+  it('可靠操作终态摘要带稳定关联字段和失败原因码', async () => {
+    harnessEvents = [
+      harnessEvent(1, 'input_delivery_failed', '2026-08-01T00:00:01.000Z', {
+        delivery_id: 'delivery-1',
+        reason_code: 'delivery_deadline_exceeded',
+      }),
+      harnessEvent(1, 'query_completed', '2026-08-01T00:00:02.000Z', {
+        query_id: 'query-1',
+        fork_seq: 2,
+      }),
+      harnessEvent(1, 'query_failed', '2026-08-01T00:00:03.000Z', {
+        query_id: 'query-2',
+        fork_seq: 3,
+        reason_code: 'query_execution_failed',
+      }),
+    ]
+
+    const result = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+
+    expect(result.events.map((event) => event.summary)).toEqual([
+      'input_delivery_failed delivery_id=delivery-1 reason_code=delivery_deadline_exceeded',
+      'query_completed query_id=query-1 fork_seq=2',
+      'query_failed query_id=query-2 fork_seq=3 reason_code=query_execution_failed',
+    ])
   })
 
   it('同一 cursor 重放返回同一逻辑窗口，后续追加不影响', async () => {

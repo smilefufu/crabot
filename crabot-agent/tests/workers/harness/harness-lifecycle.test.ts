@@ -7,7 +7,8 @@ import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import { } from '../../../src/workers/harness/ledger-types'
 import { WorkerEventLog, type HarnessEvent } from '../../../src/workers/harness/worker-events'
-import { CapabilityNotSupportedError, CliInputStallError } from '../../../src/workers/errors'
+import { QueryReceiptStore } from '../../../src/workers/harness/query-receipt-store'
+import { CliInputStallError, QueryEstablishmentError } from '../../../src/workers/errors'
 import { describeStartupStall } from '../../../src/workers/tmux/paste-ready'
 import type {
   WorkerAdapter,
@@ -23,6 +24,8 @@ import type {
   CapabilityBundle,
   AdapterCapabilities,
   InitialInputResult,
+  ForkOptions,
+  SendInputOptions,
 } from '../../../src/workers/types'
 
 // ---- FakeAdapter:实现 WorkerAdapter 契约的可编程桩,不碰 tmux/LLM ----
@@ -37,7 +40,7 @@ interface FakeAdapterOpts {
   readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
   readonly spawnShouldFail?: Error
   readonly forkShouldFail?: Error
-  readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: { raw?: boolean }) => Promise<void> | void
+  readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: SendInputOptions) => Promise<void> | void
   readonly sendInputState?: WorkerContractState
   readonly acceptedExitReport?: StateChangeReport
   readonly updatedSessionRef?: string
@@ -52,9 +55,9 @@ class FakeAdapter implements WorkerAdapter {
   readonly implId: WorkerImplId
   readonly provisionCalls: Array<{ ws: Workspace; caps: CapabilityBundle }> = []
   readonly spawnCalls: SpawnSpec[] = []
-  readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: { raw?: boolean } }> = []
+  readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: SendInputOptions }> = []
   readonly killCalls: IncarnationHandle[] = []
-  readonly forkCalls: Array<{ prev: IncarnationRef; forkInput: string }> = []
+  readonly forkCalls: Array<{ prev: IncarnationRef; forkInput: string; opts: ForkOptions }> = []
   readonly readOutputCalls: IncarnationHandle[] = []
   private readonly states = new Map<string, WorkerContractState>()
   private acceptedExitReport?: StateChangeReport
@@ -91,13 +94,19 @@ class FakeAdapter implements WorkerAdapter {
     throw new Error('FakeAdapter.resume: not exercised by Task 7 tests')
   }
 
-  async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
-    this.forkCalls.push({ prev, forkInput })
+  async fork(prev: IncarnationRef, forkInput: string, opts: ForkOptions): Promise<IncarnationHandle> {
+    this.forkCalls.push({ prev, forkInput, opts })
     if (this.opts.forkShouldFail) throw this.opts.forkShouldFail
     const seq = this.nextForkSeq++
     // fork 自己的 session_ref，刻意与 prev.session_ref(父化身/主线的引用)不同，好让
     // 回归测试能验证 harness 没有把父化身的引用错抄给 fork 化身(protocol-agent-v3 §6.1)。
-    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq, impl: this.implId, session_ref: `fork-ref-${prev.worker_id}#${seq}` }
+    const handle: IncarnationHandle = {
+      worker_id: prev.worker_id,
+      seq,
+      impl: this.implId,
+      session_ref: `fork-ref-${prev.worker_id}#${seq}`,
+      query_id: opts.query_id,
+    }
     if (this.opts.forkSyncExitBeforeReturn) {
       // 严格复刻 cc adapter 的 fork():在这个同步语句执行到 `return handle` 之前，就已经
       // 把化身状态转到 exited 并调用 onStateChange——AsyncMutex.run 的入队是同步的
@@ -113,7 +122,7 @@ class FakeAdapter implements WorkerAdapter {
     return handle
   }
 
-  async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
+  async sendInput(h: IncarnationHandle, text: string, opts?: SendInputOptions): Promise<void> {
     this.sendInputCalls.push({ h, text, opts })
     if (this.opts.sendInputBehavior) await this.opts.sendInputBehavior(h, text, opts)
     if (this.opts.updatedSessionRef) this.updatedSessionRef = this.opts.updatedSessionRef
@@ -192,8 +201,17 @@ function now(): string {
 
 async function makeHarness(
   fakeOpts: FakeAdapterOpts = {},
-  depsOverrides: Partial<Pick<HarnessDeps, 'hasRunningBg' | 'capabilityBundle'>> = {},
-): Promise<{ harness: WorkerHarness; fake: FakeAdapter; adaptersMap: Map<WorkerImplId, WorkerAdapter>; workersDir: string }> {
+  depsOverrides: Partial<Pick<
+    HarnessDeps,
+    'hasRunningBg' | 'capabilityBundle' | 'onOperationNotification' | 'admitWorkerConnection' | 'redactFailureReason'
+  >> = {},
+): Promise<{
+  harness: WorkerHarness
+  fake: FakeAdapter
+  adaptersMap: Map<WorkerImplId, WorkerAdapter>
+  ledger: LedgerStore
+  workersDir: string
+}> {
   const ledgersDir = join(dataDir, 'ledgers')
   const workspacesRoot = join(dataDir, 'workspaces')
   const workersDir = join(dataDir, 'workers')
@@ -220,7 +238,7 @@ async function makeHarness(
   const fake = new FakeAdapter({ ...fakeOpts, onStateChange: harness.handleStateChange })
   adaptersMap.set(fake.implId, fake)
 
-  return { harness, fake, adaptersMap, workersDir }
+  return { harness, fake, adaptersMap, ledger, workersDir }
 }
 
 function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerParams {
@@ -880,6 +898,363 @@ describe('WorkerHarness.handleStateChange', () => {
 })
 
 describe('WorkerHarness.sendToWorker', () => {
+  it('Manager 输入先落 receipt，再以同一 delivery_id 结算 delivered 和写事件', async () => {
+    const { harness, fake, workersDir } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const result = await harness.sendToWorker(worker.worker_id, '可靠投递', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+
+    expect(result).toMatchObject({
+      status: 'delivered',
+      worker_id: worker.worker_id,
+    })
+    expect(result.delivery_id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(fake.sendInputCalls[0].opts).toMatchObject({ delivery_id: result.delivery_id })
+
+    const persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, unknown>> }
+    expect(persisted.receipts[0]).toMatchObject({
+      delivery_id: result.delivery_id,
+      manager_key: 'test::friend-1',
+      state: 'delivered',
+    })
+    expect((await harness.readWorkerEvents(worker.worker_id)).filter((event) => event.kind === 'input_sent')).toEqual([
+      expect.objectContaining({
+        worker_id: worker.worker_id,
+        detail: expect.objectContaining({ delivery_id: result.delivery_id }),
+      }),
+    ])
+  })
+
+  it('输入面暂不可用时返回 pending，而不是伪装成 sent', async () => {
+    const { harness, workersDir } = await makeHarness({
+      implId: 'claude-code',
+      sendInputBehavior: () => {
+        throw new CliInputStallError('not_pasted', 'running', { waitReason: 'waiting_action' })
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+
+    const result = await harness.sendToWorker(worker.worker_id, '稍后提交', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+
+    expect(result).toMatchObject({
+      status: 'pending',
+      worker_id: worker.worker_id,
+      pending_reason: 'waiting_for_safe_input',
+    })
+    const persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, unknown>> }
+    expect(persisted.receipts[0]).toMatchObject({
+      delivery_id: result.delivery_id,
+      state: 'pending',
+      phase: 'waiting_for_safe_input',
+      manager_notification: { status: 'pending' },
+    })
+    expect(events.some((event) => event.kind === 'input_sent')).toBe(false)
+  })
+
+  it('adapter 已接手后 phase 写失败时保守返回 submission_unconfirmed', async () => {
+    const { harness } = await makeHarness({
+      implId: 'claude-code',
+      sendInputBehavior: () => {
+        throw new CliInputStallError('pending_in_ui', 'running', { waitReason: 'input_pending' })
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const receiptStore = (harness as unknown as {
+      inputDeliveryStore: {
+        updatePendingPhase(workerId: string, deliveryId: string, phase: string, updatedAt: string): Promise<unknown>
+      }
+    }).inputDeliveryStore
+    const updatePendingPhase = receiptStore.updatePendingPhase.bind(receiptStore)
+    vi.spyOn(receiptStore, 'updatePendingPhase').mockImplementation(
+      (workerId, deliveryId, phase, updatedAt) => phase === 'pending_in_ui'
+        ? Promise.reject(new Error('phase disk unavailable'))
+        : updatePendingPhase(workerId, deliveryId, phase, updatedAt),
+    )
+
+    const result = await harness.sendToWorker(worker.worker_id, '可能已经在输入框', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+
+    expect(result).toMatchObject({
+      status: 'pending',
+      pending_reason: 'submission_unconfirmed',
+    })
+  })
+
+  it('pending 通知责任写失败时中止后续投递并结算 failed', async () => {
+    const { harness, fake } = await makeHarness({
+      implId: 'claude-code',
+      sendInputBehavior: () => {
+        throw new CliInputStallError('not_pasted', 'running', { waitReason: 'waiting_action' })
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const receiptStore = (harness as unknown as {
+      inputDeliveryStore: {
+        readForToolResult(workerId: string, deliveryId: string, updatedAt: string): Promise<unknown>
+      }
+    }).inputDeliveryStore
+    vi.spyOn(receiptStore, 'readForToolResult').mockRejectedValueOnce(new Error('notification arm disk unavailable'))
+
+    const result = await harness.sendToWorker(worker.worker_id, '不能在通知责任丢失后继续', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason_code: 'delivery_attempt_failed',
+      reason: 'notification arm disk unavailable',
+      certainty: 'not_delivered',
+    })
+    expect(fake.sendInputCalls).toHaveLength(1)
+    expect((harness as unknown as { getInbox(id: string): { pending: number } })
+      .getInbox(worker.worker_id).pending).toBe(0)
+  })
+
+  it('adapter 已开始投递后抛普通错误时保守结算 unknown', async () => {
+    const { harness, fake } = await makeHarness({
+      sendInputBehavior: () => {
+        throw new Error('input transport failed')
+      },
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+
+    const result = await harness.sendToWorker(worker.worker_id, '可能已进入输入面', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+
+    expect(fake.sendInputCalls).toHaveLength(1)
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason_code: 'delivery_attempt_failed',
+      reason: 'input transport failed',
+      certainty: 'unknown',
+    })
+  })
+
+  it('持久失败原因会移除正文、凭证和本地路径', async () => {
+    const text = '不要把这段完整正文写进 receipt'
+    const { harness } = await makeHarness(
+      {
+        sendInputBehavior: () => {
+          throw new Error(`transport failed for ${text} with provider-secret at /Users/test/private.sock and sk-testcredential`)
+        },
+      },
+      { redactFailureReason: (value) => value.replace('provider-secret', '[REDACTED]') },
+    )
+    const worker = await harness.spawnWorker(spawnParams())
+
+    const result = await harness.sendToWorker(worker.worker_id, text, {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+
+    expect(result).toMatchObject({ status: 'failed', reason_code: 'delivery_attempt_failed' })
+    if (result.status !== 'failed') throw new Error('expected failed delivery')
+    expect(result.reason).toContain('<message>')
+    expect(result.reason).toContain('[REDACTED]')
+    expect(result.reason).toContain('<path>')
+    expect(result.reason).toContain('<redacted>')
+    expect(result.reason).not.toContain(text)
+    expect(result.reason).not.toContain('/Users/test/private.sock')
+    expect(result.reason).not.toContain('sk-testcredential')
+  })
+
+  it('kill_worker 清空 pending 输入时以 task_cancelled 结算 receipt', async () => {
+    const { harness, workersDir } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const inbox = (harness as unknown as {
+      getInbox(id: string): { hold(reason: string): void }
+    }).getInbox(worker.worker_id)
+    inbox.hold('handoff')
+
+    const result = await harness.sendToWorker(worker.worker_id, '尚未进入输入面', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+    expect(result.status).toBe('pending')
+
+    await harness.killWorker(worker.worker_id, '用户取消')
+
+    const persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, unknown>> }
+    expect(persisted.receipts[0]).toMatchObject({
+      delivery_id: result.delivery_id,
+      state: 'failed',
+      failure: {
+        reason_code: 'task_cancelled',
+        certainty: 'unknown',
+      },
+      manager_notification: { status: 'pending' },
+    })
+  })
+
+  it('receipt 创建失败时不入 inbox，也不调用 adapter', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const receiptStore = (harness as unknown as {
+      inputDeliveryStore: { create(receipt: unknown): Promise<unknown> }
+    }).inputDeliveryStore
+    vi.spyOn(receiptStore, 'create').mockRejectedValueOnce(new Error('receipt disk unavailable'))
+
+    await expect(harness.sendToWorker(worker.worker_id, '不能碰输入面', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })).rejects.toThrow('delivery receipt unavailable')
+
+    expect(fake.sendInputCalls).toHaveLength(0)
+    expect((harness as unknown as { getInbox(id: string): { pending: number } })
+      .getInbox(worker.worker_id).pending).toBe(0)
+  })
+
+  it('pending 超过 5 分钟后结算失败，通知只有 consumed 后才确认', async () => {
+    const deliveries: HarnessEvent[] = []
+    let consumed = false
+    const { harness, fake, workersDir } = await makeHarness(
+      {
+        implId: 'claude-code',
+        sendInputBehavior: () => {
+          throw new CliInputStallError('not_pasted', 'running', { waitReason: 'waiting_action' })
+        },
+      },
+      {
+        onOperationNotification: async (_managerKey, event) => {
+          deliveries.push(event)
+          return { consumed }
+        },
+      },
+    )
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const result = await harness.sendToWorker(worker.worker_id, '会超时的输入', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+    expect(result.status).toBe('pending')
+
+    nowValue += 5 * 60_000
+    await harness.sweepLiveness()
+    let persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, any>> }
+    expect(persisted.receipts[0]).toMatchObject({
+      state: 'failed',
+      failure: { reason_code: 'input_surface_timeout', certainty: 'not_delivered' },
+      manager_notification: { status: 'pending' },
+    })
+    expect(deliveries).toHaveLength(1)
+    expect(deliveries[0].detail?.delivery_id).toBe(result.delivery_id)
+    expect(fake.sendInputCalls).toHaveLength(1)
+
+    consumed = true
+    await harness.sweepLiveness()
+    persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, any>> }
+    expect(persisted.receipts[0].manager_notification.status).toBe('consumed')
+    expect(deliveries).toHaveLength(2)
+
+    await harness.sweepLiveness()
+    expect(deliveries).toHaveLength(2)
+  })
+
+  it('adapter 永久挂起时仍按 deadline 结算并通知 Manager', async () => {
+    const notifications: HarnessEvent[] = []
+    let markAttempting!: () => void
+    const attempting = new Promise<void>((resolve) => { markAttempting = resolve })
+    let releaseAdapter!: () => void
+    const adapterGate = new Promise<void>((resolve) => { releaseAdapter = resolve })
+    const { harness, workersDir } = await makeHarness(
+      {
+        sendInputBehavior: async () => {
+          markAttempting()
+          await adapterGate
+        },
+      },
+      {
+        onOperationNotification: async (_managerKey, event) => {
+          notifications.push(event)
+          return { consumed: true }
+        },
+      },
+    )
+    const worker = await harness.spawnWorker(spawnParams())
+    const send = harness.sendToWorker(worker.worker_id, 'adapter 卡住的输入', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+    await attempting
+
+    nowValue += 5 * 60_000
+    const sweepResult = await Promise.race([
+      harness.sweepLiveness().then(() => 'completed'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('timed_out'), 100)),
+    ])
+    expect(sweepResult).toBe('completed')
+
+    const persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, any>> }
+    expect(persisted.receipts[0]).toMatchObject({
+      state: 'failed',
+      failure: { reason_code: 'submission_unconfirmed_timeout', certainty: 'unknown' },
+      manager_notification: { status: 'consumed' },
+    })
+    expect(notifications).toHaveLength(1)
+    expect(notifications[0]).toMatchObject({
+      kind: 'input_delivery_failed',
+      detail: { reason_code: 'submission_unconfirmed_timeout', certainty: 'unknown' },
+    })
+
+    releaseAdapter()
+    await expect(send).resolves.toMatchObject({
+      status: 'failed',
+      reason_code: 'submission_unconfirmed_timeout',
+      certainty: 'unknown',
+    })
+  })
+
+  it('启动恢复把未结算输入标为 unknown 失败，且不自动重发', async () => {
+    const notifications: HarnessEvent[] = []
+    const { harness, fake, workersDir } = await makeHarness(
+      {
+        implId: 'claude-code',
+        sendInputBehavior: () => {
+          throw new CliInputStallError('pending_in_ui', 'running', { waitReason: 'input_pending' })
+        },
+      },
+      {
+        onOperationNotification: async (_managerKey, event) => {
+          notifications.push(event)
+          return { consumed: true }
+        },
+      },
+    )
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const result = await harness.sendToWorker(worker.worker_id, '可能已经 paste', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+    expect(result.status).toBe('pending')
+    expect(fake.sendInputCalls).toHaveLength(1)
+
+    await harness.reconcileInputDeliveriesOnStartup()
+
+    expect(fake.sendInputCalls).toHaveLength(1)
+    const persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, any>> }
+    expect(persisted.receipts[0]).toMatchObject({
+      state: 'failed',
+      failure: { reason_code: 'confirmation_lost_after_restart', certainty: 'unknown' },
+      manager_notification: { status: 'consumed' },
+    })
+    expect(notifications[0].detail?.text).toMatch(/禁止盲目重发/)
+  })
+
   it('正常投递:running worker 收到输入,adapter.sendInput 被正确调用,事件 input_sent 外发', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
@@ -1030,7 +1405,7 @@ describe('WorkerHarness.sendToWorker', () => {
   })
 
   it('fork或旧化身的exited回调不清除当前pane的transport hold', async () => {
-    const { harness, fake } = await makeHarness({ implId: 'claude-code', caps: { fork: true } })
+    const { harness, fake, workersDir } = await makeHarness({ implId: 'claude-code', caps: { fork: true } })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
     await harness.queryWorker(worker.worker_id, '侧问一下')
     const inbox = (harness as any).getInbox(worker.worker_id)
@@ -1046,6 +1421,8 @@ describe('WorkerHarness.sendToWorker', () => {
       const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return current.incarnations.find((incarnation) => incarnation.seq === 2)?.state === 'exited'
     })
+    await waitUntil(async () => (await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll())
+      .some((event) => event.kind === 'query_completed' && event.seq === 2))
 
     expect(inbox.held).toBe(true)
   })
@@ -1300,63 +1677,114 @@ describe('WorkerHarness.queryWorker', () => {
     expect(await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll()).toEqual(before)
   })
 
-  it('capabilities().fork 为 false → 抛 CapabilityNotSupportedError,不调用 adapter.fork,失败落 query_failed 事件(读 events.jsonl 核实)', async () => {
+  it('capabilities().fork 为 false → 同步返回带 query_id 的建立失败，adapter 零调用', async () => {
     const { harness, fake, workersDir } = await makeHarness({ caps: { fork: false } })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
-    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toThrow(CapabilityNotSupportedError)
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toMatchObject({
+      reason_code: 'fork_capability_unavailable',
+      certainty: 'not_started',
+      query_id: expect.any(String),
+    })
     expect(fake.forkCalls).toHaveLength(0)
 
-    // P4 Task 4:失败路径必须留痕(protocol-agent-v3 §10 可观测性),query_worker 是
-    // fire-and-forget,appendEvent 是排查失败的唯一出口——直接读 events.jsonl(而不只是
-    // 内存里的 onEvent 回调数组)核实真的落了盘。
     const log = new WorkerEventLog(join(workersDir, worker.worker_id))
     const onDisk = await log.readAll()
     const failedOnDisk = onDisk.filter((e) => e.kind === 'query_failed')
     expect(failedOnDisk).toHaveLength(1)
-    expect(failedOnDisk[0]).toMatchObject({ seq: 1, detail: { reason: 'capability_not_supported', impl: 'builtin' } })
+    expect(failedOnDisk[0]).toMatchObject({
+      seq: 0,
+      detail: {
+        query_id: expect.any(String),
+        reason_code: 'fork_capability_unavailable',
+        phase: 'establishment',
+      },
+    })
 
-    const failedEvents = events.filter((e) => e.kind === 'query_failed')
-    expect(failedEvents).toHaveLength(1)
-    expect(failedEvents[0]).toMatchObject({ seq: 1, detail: { reason: 'capability_not_supported', impl: 'builtin' } })
+    expect(events.filter((e) => e.kind === 'query_failed')).toHaveLength(0)
   })
 
-  it('目标 impl 未注册 adapter → 抛错,失败落 query_failed 事件(reason: no_adapter)', async () => {
-    const { harness, fake, adaptersMap } = await makeHarness()
+  it('建立失败通知不走普通事件口，直到 owning Manager consumed 才确认', async () => {
+    const notifications: HarnessEvent[] = []
+    const { harness, workersDir } = await makeHarness(
+      { caps: { fork: false } },
+      {
+        onOperationNotification: async (_managerKey, event) => {
+          notifications.push(event)
+          return { consumed: true }
+        },
+      },
+    )
+    const worker = await harness.spawnWorker(spawnParams())
+
+    await expect(harness.queryWorker(worker.worker_id, '无法建立的侧问', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })).rejects.toBeInstanceOf(QueryEstablishmentError)
+    expect(notifications).toHaveLength(0)
+
+    await harness.sweepLiveness()
+    expect(notifications).toEqual([
+      expect.objectContaining({
+        kind: 'query_failed',
+        worker_id: worker.worker_id,
+        seq: 0,
+        detail: expect.objectContaining({
+          query_id: expect.any(String),
+          reason_code: 'fork_capability_unavailable',
+        }),
+      }),
+    ])
+    expect(notifications[0].detail).not.toHaveProperty('fork_seq')
+
+    const persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'query-receipts.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, unknown>> }
+    expect(persisted.receipts[0]).toMatchObject({
+      state: 'failed',
+      manager_notification: { status: 'consumed' },
+    })
+  })
+
+  it('目标 impl 未注册 adapter → 结算 fork_capability_unavailable', async () => {
+    const { harness, fake, adaptersMap, workersDir } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     adaptersMap.delete(fake.implId)
     events.length = 0
 
-    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toThrow(/no adapter registered/)
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toMatchObject({
+      reason_code: 'fork_capability_unavailable',
+      certainty: 'not_started',
+    })
 
-    const failedEvents = events.filter((e) => e.kind === 'query_failed')
-    expect(failedEvents).toHaveLength(1)
-    expect(failedEvents[0]).toMatchObject({ seq: 1, detail: { reason: 'no_adapter', impl: 'builtin' } })
+    const onDisk = await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll()
+    expect(onDisk.filter((e) => e.kind === 'query_failed')).toHaveLength(1)
   })
 
-  it('worker_id 不存在 → WorkerNotFoundError,失败落 query_failed 事件(没有已知 seq,用 sentinel 0)', async () => {
-    const { harness } = await makeHarness({ caps: { fork: true } })
+  it('worker_id 不存在 → 操作未被接受，不创建 receipt 或 query 事件', async () => {
+    const { harness, workersDir } = await makeHarness({ caps: { fork: true } })
     events.length = 0
 
     await expect(harness.queryWorker('w-does-not-exist', '侧问一下')).rejects.toThrow(WorkerNotFoundError)
 
-    const failedEvents = events.filter((e) => e.kind === 'query_failed')
-    expect(failedEvents).toHaveLength(1)
-    expect(failedEvents[0]).toMatchObject({ seq: 0, worker_id: 'w-does-not-exist', detail: { reason: 'worker_not_found' } })
+    expect(events.filter((e) => e.kind === 'query_failed')).toHaveLength(0)
+    await expect(fs.access(join(workersDir, 'w-does-not-exist', 'query-receipts.json'))).rejects.toThrow()
   })
 
-  it('adapter.fork 抛错 → 原样把错误抛给调用方,且失败落 query_failed 事件(reason: fork_failed,带 message)', async () => {
+  it('adapter.fork 抛错 → 同一次调用返回 fork_create_failed 并持久留痕', async () => {
     const boom = new Error('fork 侧的 claude -p 炸了')
-    const { harness } = await makeHarness({ caps: { fork: true }, forkShouldFail: boom })
+    const { harness, workersDir } = await makeHarness({ caps: { fork: true }, forkShouldFail: boom })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
-    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toThrow('fork 侧的 claude -p 炸了')
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toMatchObject({
+      reason_code: 'fork_create_failed',
+      reason: 'fork 侧的 claude -p 炸了',
+      certainty: 'unknown',
+    })
 
-    const failedEvents = events.filter((e) => e.kind === 'query_failed')
-    expect(failedEvents).toHaveLength(1)
-    expect(failedEvents[0]).toMatchObject({ seq: 1, detail: { reason: 'fork_failed', message: 'fork 侧的 claude -p 炸了' } })
+    const onDisk = await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll()
+    expect(onDisk.filter((e) => e.kind === 'query_failed')).toHaveLength(1)
 
     // 主线台账完全不受 fork 失败影响(fork 从未落账,不该有半成品化身)。
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
@@ -1364,20 +1792,288 @@ describe('WorkerHarness.queryWorker', () => {
     expect(w.task.status).toBe('running')
   })
 
-  it('capabilities().fork 为 true → adapter.fork 被调用,新化身入化身链,事件外发,主线 task.status 不受影响', async () => {
+  it('建立失败 receipt 写暂时失败时仍返回 query_id，并由 deadline 巡检收口', async () => {
+    const { harness, workersDir } = await makeHarness({
+      caps: { fork: true },
+      forkShouldFail: new Error('fork process failed'),
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    const queryStore = (harness as unknown as { queryReceiptStore: QueryReceiptStore }).queryReceiptStore
+    vi.spyOn(queryStore, 'settleFailed').mockRejectedValueOnce(new Error('query receipt disk unavailable'))
+
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toMatchObject({
+      query_id: expect.any(String),
+      reason_code: 'fork_create_failed',
+      reason: 'fork process failed',
+    })
+    expect((await queryStore.list(worker.worker_id))[0]).toMatchObject({ state: 'starting' })
+
+    nowValue += 30_000
+    await harness.sweepLiveness()
+
+    expect((await queryStore.list(worker.worker_id))[0]).toMatchObject({
+      state: 'failed',
+      failure: {
+        reason_code: 'fork_establishment_timeout',
+        certainty: 'unknown',
+      },
+      manager_notification: { status: 'pending' },
+    })
+    expect((await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll())
+      .filter((event) => event.kind === 'query_failed')).toHaveLength(1)
+  })
+
+  it('侧问建立失败原因会移除问题正文、凭证和本地路径', async () => {
+    const question = '这是不能写进失败原因的完整侧问'
+    const failure = new Error(`fork failed for ${question}: provider-secret /Users/test/query.json sk-querycredential`)
+    const { harness } = await makeHarness(
+      { caps: { fork: true }, forkShouldFail: failure },
+      { redactFailureReason: (value) => value.replace('provider-secret', '[REDACTED]') },
+    )
+    const worker = await harness.spawnWorker(spawnParams())
+
+    let caught: QueryEstablishmentError | undefined
+    try {
+      await harness.queryWorker(worker.worker_id, question)
+    } catch (error) {
+      caught = error as QueryEstablishmentError
+    }
+
+    expect(caught).toBeInstanceOf(QueryEstablishmentError)
+    expect(caught?.reason).toContain('<message>')
+    expect(caught?.reason).toContain('[REDACTED]')
+    expect(caught?.reason).toContain('<path>')
+    expect(caught?.reason).toContain('<redacted>')
+    expect(caught?.reason).not.toContain(question)
+    expect(caught?.reason).not.toContain('/Users/test/query.json')
+    expect(caught?.reason).not.toContain('sk-querycredential')
+  })
+
+  it('连接准入耗时计入 30 秒建立期限，harness 只等待 receipt 的剩余时间', async () => {
+    vi.useFakeTimers()
+    let resolveFork!: (handle: IncarnationHandle) => void
+    let queryId = ''
+    let signalForkStarted!: () => void
+    const forkStarted = new Promise<void>((resolve) => { signalForkStarted = resolve })
+    try {
+      const { harness, fake } = await makeHarness(
+        { caps: { fork: true } },
+        {
+          admitWorkerConnection: async () => {
+            nowValue += 28_000
+            return { env: {}, dispose: async () => {} }
+          },
+        },
+      )
+      const worker = await harness.spawnWorker(spawnParams())
+      vi.spyOn(fake, 'fork').mockImplementationOnce((prev, _forkInput, opts) => {
+        queryId = opts.query_id
+        signalForkStarted()
+        return new Promise<IncarnationHandle>((resolve) => {
+          resolveFork = resolve
+        })
+      })
+
+      let rejection: unknown
+      let signalRejected!: () => void
+      const rejected = new Promise<void>((resolve) => { signalRejected = resolve })
+      const query = harness.queryWorker(worker.worker_id, '慢准入后的侧问').catch((error) => {
+        rejection = error
+        signalRejected()
+      })
+      await forkStarted
+      await vi.advanceTimersByTimeAsync(1_100)
+      await rejected
+
+      expect(rejection).toMatchObject({
+        reason_code: 'fork_establishment_timeout',
+        certainty: 'unknown',
+      })
+
+      resolveFork({
+        worker_id: worker.worker_id,
+        seq: 2,
+        impl: 'builtin',
+        session_ref: 'late-fork-after-timeout',
+        query_id: queryId,
+      })
+      await query
+      await vi.waitFor(() => expect(fake.killCalls).toHaveLength(1))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('建立失败后的迟到 fork callback 不会重新暂存或生成完成事件', async () => {
+    const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    let rejectedHandle: IncarnationHandle | undefined
+    vi.spyOn(fake, 'fork').mockImplementationOnce(async (prev, _forkInput, opts) => {
+      rejectedHandle = {
+        worker_id: prev.worker_id,
+        seq: 2,
+        impl: 'builtin',
+        session_ref: 'late-fork-ref',
+        query_id: opts.query_id,
+      }
+      throw new Error('fork failed before ledger commit')
+    })
+
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toMatchObject({
+      reason_code: 'fork_create_failed',
+      query_id: expect.any(String),
+    })
+    expect(rejectedHandle).toBeDefined()
+
+    const queryStore = (harness as unknown as { queryReceiptStore: QueryReceiptStore }).queryReceiptStore
+    const pendingStateChanges = (harness as unknown as {
+      pendingQueryStateChanges: Map<string, unknown>
+    }).pendingQueryStateChanges
+    const getSpy = vi.spyOn(queryStore, 'get')
+    harness.handleStateChange(rejectedHandle!, 'exited', { endReason: 'completed' })
+    await waitUntil(() => getSpy.mock.calls.some(([, queryId]) => queryId === rejectedHandle!.query_id))
+    await Promise.resolve()
+
+    expect(pendingStateChanges.has(rejectedHandle!.query_id!)).toBe(false)
+    const [persisted] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(persisted.incarnations).toHaveLength(1)
+    const onDisk = await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll()
+    expect(onDisk.some((event) =>
+      event.kind === 'query_completed' && event.detail?.query_id === rejectedHandle!.query_id,
+    )).toBe(false)
+  })
+
+  it('fork 失败后的 admission dispose 错误不覆盖原失败或遗失 receipt', async () => {
+    const dispose = vi.fn().mockRejectedValue(new Error('dispose failed'))
+    const { harness, workersDir } = await makeHarness(
+      { caps: { fork: true }, forkShouldFail: new Error('fork failed') },
+      {
+        admitWorkerConnection: async () => ({ env: {}, dispose }),
+      },
+    )
+    const worker = await harness.spawnWorker(spawnParams())
+
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toMatchObject({
+      reason_code: 'fork_create_failed',
+      reason: 'fork failed',
+    })
+    expect(dispose).toHaveBeenCalledTimes(1)
+
+    const persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'query-receipts.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, unknown>> }
+    expect(persisted.receipts[0]).toMatchObject({
+      state: 'failed',
+      failure: { reason_code: 'fork_create_failed' },
+      manager_notification: { status: 'pending' },
+    })
+  })
+
+  it('adapter 返回错误 query_id 时拒绝落账并尽力停止已建立分支', async () => {
     const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    vi.spyOn(fake, 'fork').mockResolvedValueOnce({
+      worker_id: worker.worker_id,
+      seq: 2,
+      impl: 'builtin',
+      session_ref: 'fork-ref-mismatch',
+      query_id: 'wrong-query-id',
+    })
+
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toMatchObject({
+      reason_code: 'fork_create_failed',
+      reason: 'adapter returned a fork handle with a mismatched query_id',
+      certainty: 'unknown',
+    })
+    expect(fake.killCalls).toEqual([
+      expect.objectContaining({ seq: 2, query_id: 'wrong-query-id' }),
+    ])
+    const [persisted] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(persisted.incarnations).toHaveLength(1)
+  })
+
+  it('operation 审计写失败不推翻已经提交的 query started 结果', async () => {
+    const { harness, workersDir } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const eventLog = new WorkerEventLog(join(workersDir, worker.worker_id))
+    ;(harness as unknown as { eventLogs: Map<string, WorkerEventLog> }).eventLogs.set(worker.worker_id, eventLog)
+    vi.spyOn(eventLog, 'append').mockRejectedValueOnce(new Error('audit disk unavailable'))
+
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).resolves.toMatchObject({
+      status: 'started',
+      query_id: expect.any(String),
+      fork_seq: 2,
+    })
+    const [persisted] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(persisted.incarnations).toHaveLength(2)
+    expect(persisted.incarnations[1]).toMatchObject({ state: 'running', forked_from: 1 })
+  })
+
+  it('fork 已建立但 ledger 提交失败时尽力 kill，并以 unknown 返回 fork_record_failed', async () => {
+    const { harness, fake, ledger } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    vi.spyOn(ledger, 'upsertWorker').mockRejectedValueOnce(new Error('ledger unavailable'))
+
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })).rejects.toMatchObject({
+      reason_code: 'fork_record_failed',
+      reason: 'ledger unavailable',
+      certainty: 'unknown',
+    })
+
+    expect(fake.killCalls).toEqual([
+      expect.objectContaining({ worker_id: worker.worker_id, seq: 2 }),
+    ])
+    const [persisted] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(persisted.incarnations).toHaveLength(1)
+    expect(persisted.task.status).toBe('running')
+  })
+
+  it('ledger 已提交但 running receipt 写失败时，kill 并收口半提交 fork 化身', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const queryStore = (harness as unknown as { queryReceiptStore: QueryReceiptStore }).queryReceiptStore
+    vi.spyOn(queryStore, 'markRunning').mockRejectedValueOnce(new Error('query receipt unavailable'))
+
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toMatchObject({
+      reason_code: 'fork_record_failed',
+      reason: 'query receipt unavailable',
+      certainty: 'unknown',
+    })
+
+    expect(fake.killCalls).toEqual([
+      expect.objectContaining({ worker_id: worker.worker_id, seq: 2 }),
+    ])
+    const [persisted] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(persisted.task.status).toBe('running')
+    expect(persisted.incarnations[1]).toMatchObject({
+      seq: 2,
+      query_id: expect.any(String),
+      state: 'exited',
+      ended_reason: 'killed',
+    })
+  })
+
+  it('capabilities().fork 为 true → 返回 started 并以同一 query_id 落 handle/ledger/receipt', async () => {
+    const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
     const result = await harness.queryWorker(worker.worker_id, '侧问一下')
 
-    expect(result.forkSeq).toBe(2)
+    expect(result).toMatchObject({ status: 'started', fork_seq: 2, query_id: expect.any(String) })
     expect(fake.forkCalls).toHaveLength(1)
     expect(fake.forkCalls[0].forkInput).toBe('侧问一下')
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.incarnations).toHaveLength(2)
-    expect(w.incarnations[1]).toMatchObject({ seq: 2, impl: 'builtin', state: 'running' })
+    expect(w.incarnations[1]).toMatchObject({
+      seq: 2,
+      impl: 'builtin',
+      state: 'running',
+      query_id: result.query_id,
+    })
     expect(w.task.status).toBe('running') // fork 不影响主线状态
 
     // forked_from 标记它不在主线化身链上(protocol-agent-v3 §3);session_ref 取
@@ -1385,10 +2081,142 @@ describe('WorkerHarness.queryWorker', () => {
     expect(w.incarnations[1].forked_from).toBe(1)
     expect(w.incarnations[1].session_ref).not.toBe(w.incarnations[0].session_ref)
 
-    const stateEvents = events.filter((e) => e.kind === 'state_changed')
-    expect(stateEvents).toHaveLength(1)
-    expect(stateEvents[0].seq).toBe(2)
-    expect(stateEvents[0].detail).toEqual({ kind: 'fork', from_seq: 1 })
+    const onDisk = await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll()
+    expect(onDisk.filter((e) => e.detail?.query_id === result.query_id)).toHaveLength(1)
+  })
+
+  it('回答终态通知在 deferred/route throw 时保持 pending，只有 consumed 后停止重报', async () => {
+    const notifications: HarnessEvent[] = []
+    let attempt = 0
+    const { harness, fake, workersDir } = await makeHarness(
+      { caps: { fork: true } },
+      {
+        onOperationNotification: async (_managerKey, event) => {
+          notifications.push(event)
+          attempt++
+          if (attempt === 1) return { consumed: false }
+          if (attempt === 2) throw new Error('manager route unavailable')
+          return { consumed: true }
+        },
+      },
+    )
+    const worker = await harness.spawnWorker(spawnParams())
+    const result = await harness.queryWorker(worker.worker_id, '可靠通知侧问', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+    fake.emitStateChange({
+      worker_id: worker.worker_id,
+      seq: result.fork_seq,
+      impl: 'builtin',
+      session_ref: `fork-ref-${worker.worker_id}#${result.fork_seq}`,
+      query_id: result.query_id,
+    }, 'exited', '侧问答案', 'completed')
+
+    const queryStore = (harness as unknown as { queryReceiptStore: QueryReceiptStore }).queryReceiptStore
+    await waitUntil(async () => (await queryStore.get(worker.worker_id, result.query_id))?.state === 'completed')
+
+    await harness.sweepLiveness()
+    expect((await queryStore.get(worker.worker_id, result.query_id))?.manager_notification.status).toBe('pending')
+    await harness.sweepLiveness()
+    expect((await queryStore.get(worker.worker_id, result.query_id))?.manager_notification.status).toBe('pending')
+    await harness.sweepLiveness()
+    expect((await queryStore.get(worker.worker_id, result.query_id))?.manager_notification.status).toBe('consumed')
+    await harness.sweepLiveness()
+
+    expect(notifications).toHaveLength(3)
+    for (const event of notifications) {
+      expect(event).toMatchObject({
+        kind: 'query_completed',
+        worker_id: worker.worker_id,
+        seq: result.fork_seq,
+        detail: {
+          query_id: result.query_id,
+          fork_seq: result.fork_seq,
+        },
+      })
+    }
+    const persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'query-receipts.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, unknown>> }
+    expect(persisted.receipts[0]).toMatchObject({ state: 'completed' })
+  })
+
+  it('重启对账不重跑 running query，结算 unknown 并尽力终止原 fork', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const result = await harness.queryWorker(worker.worker_id, '重启中的侧问', {
+      managerKey: `test::friend-1` as ManagerKey,
+    })
+    expect(fake.forkCalls).toHaveLength(1)
+
+    await harness.reconcileQueryReceiptsOnStartup()
+
+    expect(fake.forkCalls).toHaveLength(1)
+    expect(fake.killCalls).toEqual([
+      expect.objectContaining({
+        worker_id: worker.worker_id,
+        seq: result.fork_seq,
+        query_id: result.query_id,
+      }),
+    ])
+    const queryStore = (harness as unknown as { queryReceiptStore: QueryReceiptStore }).queryReceiptStore
+    expect(await queryStore.get(worker.worker_id, result.query_id)).toMatchObject({
+      state: 'failed',
+      failure: {
+        reason_code: 'query_execution_lost_after_restart',
+        phase: 'execution',
+        certainty: 'unknown',
+      },
+      manager_notification: { status: 'pending' },
+    })
+  })
+
+  it('重启对账遇到 ledger 已明确完成但 receipt 仍 starting 时，据实结算 completed 且不建第二个 fork', async () => {
+    const { harness, fake, ledger } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const queryStore = (harness as unknown as { queryReceiptStore: QueryReceiptStore }).queryReceiptStore
+    const queryId = 'query-crash-window-completed'
+    const createdAt = now()
+    await queryStore.create({
+      query_id: queryId,
+      worker_id: worker.worker_id,
+      manager_key: `test::friend-1` as ManagerKey,
+      question_preview: '已完成但 receipt 尚未提交',
+      created_at: createdAt,
+      updated_at: createdAt,
+      establishment_deadline_at: new Date(Date.parse(createdAt) + 30_000).toISOString(),
+      state: 'starting',
+      manager_notification: { status: 'not_required' },
+    })
+    await ledger.upsertWorker(`test::friend-1` as ManagerKey, worker.worker_id, (prev) => prev && ({
+      ...prev,
+      incarnations: [
+        ...prev.incarnations,
+        {
+          seq: 2,
+          impl: 'builtin',
+          state: 'exited',
+          workspace: prev.incarnations[0].workspace,
+          session_ref: 'fork-ref-completed',
+          started_at: createdAt,
+          ended_at: now(),
+          ended_reason: 'completed',
+          forked_from: 1,
+          query_id: queryId,
+        },
+      ],
+      updated_at: now(),
+    }))
+
+    await harness.reconcileQueryReceiptsOnStartup()
+
+    expect(fake.forkCalls).toHaveLength(0)
+    expect(fake.killCalls).toHaveLength(0)
+    expect(await queryStore.get(worker.worker_id, queryId)).toMatchObject({
+      state: 'completed',
+      fork_seq: 2,
+      manager_notification: { status: 'pending' },
+    })
   })
 
   // ---- P4 Task 4 第四轮:fork 落地即已终态的回调竞态(复审 PoC)----
@@ -1411,7 +2239,7 @@ describe('WorkerHarness.queryWorker', () => {
     events.length = 0
 
     const result = await harness.queryWorker(worker.worker_id, '侧问一下')
-    expect(result.forkSeq).toBe(2)
+    expect(result.fork_seq).toBe(2)
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     const forkEntry = w.incarnations.find((i) => i.seq === 2)!
@@ -1426,12 +2254,7 @@ describe('WorkerHarness.queryWorker', () => {
     const log = new WorkerEventLog(join(workersDir, worker.worker_id))
     const onDisk = await log.readAll()
     const forkSeqEvents = onDisk.filter((e) => e.seq === 2)
-    expect(forkSeqEvents.some((e) => e.kind === 'exited')).toBe(true)
-    // 不能重复:processStateChange 正常路径本该发的是 kind:'state_changed'、detail:{to:'exited'}——
-    // 那次回调已经被 `!target` 吞掉，不会再触发第二次 appendEvent，所以不应该出现这个形状的
-    // 事件(与 lock2 无条件都会发的 `state_changed{kind:'fork', from_seq}` 落账事件是两码事，
-    // 那条不受本次竞态影响，始终存在)。
-    expect(forkSeqEvents.some((e) => e.kind === 'state_changed' && (e.detail as { to?: string } | undefined)?.to === 'exited')).toBe(false)
+    expect(forkSeqEvents.filter((e) => e.kind === 'query_completed')).toHaveLength(1)
 
     // 断言③:主线(seq=1)台账完全不受这条竞态影响。
     const mainEntry = w.incarnations.find((i) => i.seq === 1)!
@@ -1464,16 +2287,16 @@ describe('WorkerHarness.queryWorker — adapter.fork 挪出锁(P4 Task 4 review 
       release = resolve
     })
     const originalFork = fake.fork.bind(fake)
-    fake.fork = async (prev, forkInput) => {
+    fake.fork = async (prev, forkInput, opts) => {
       resolveEntered()
       await forkGate
-      return originalFork(prev, forkInput)
+      return originalFork(prev, forkInput, opts)
     }
     return { forkEnteredPromise, release }
   }
 
   it('adapter.fork 卡住未落地期间,同一 worker 上的 send_to_worker 毫秒级完成,不排队等待 fork', async () => {
-    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
     const { forkEnteredPromise, release } = gateFork(fake)
 
@@ -1513,7 +2336,7 @@ describe('WorkerHarness.queryWorker — adapter.fork 挪出锁(P4 Task 4 review 
   })
 
   it('锁释放期间 worker 被 kill(task 已 cancelled)→ fork 落地后仍记录该 fork 化身(它确实跑过、有输出),但不改主线已终态的记录', async () => {
-    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
     const { forkEnteredPromise, release } = gateFork(fake)
 
@@ -1528,7 +2351,7 @@ describe('WorkerHarness.queryWorker — adapter.fork 挪出锁(P4 Task 4 review 
     // 真实执行完的动作,不因主线在它进行期间被 kill 而凭空丢弃——见 harness.ts queryWorker
     // 方法注释"锁释放期间世界会变"一节)。
     const result = await queryPromise
-    expect(result.forkSeq).toBe(2)
+    expect(result.fork_seq).toBe(2)
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     // 主线(seq=1)保持 killWorker 落定的记录,完全不被这次迟到的 fork 落账污染。
@@ -1543,10 +2366,11 @@ describe('WorkerHarness.queryWorker — adapter.fork 挪出锁(P4 Task 4 review 
     expect(forkEntry.forked_from).toBe(1)
     expect(forkEntry.state).toBe('running')
 
-    const stateEvents = events.filter((e) => e.kind === 'state_changed')
+    const stateEvents = (await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll())
+      .filter((e) => e.kind === 'state_changed' && e.detail?.query_id === result.query_id)
     expect(stateEvents).toHaveLength(1)
     expect(stateEvents[0].seq).toBe(2)
-    expect(stateEvents[0].detail).toEqual({ kind: 'fork', from_seq: 1 })
+    expect(stateEvents[0].detail).toMatchObject({ kind: 'fork', from_seq: 1, query_id: result.query_id })
   })
 })
 
@@ -1603,11 +2427,11 @@ describe('WorkerHarness 锁纪律', () => {
 
 describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)', () => {
   it('queryWorker fork 之后,sendToWorker/readWorkerOutput/killWorker 仍作用于主线化身(seq=1),不被 fork(seq=2)顶替', async () => {
-    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
-    const { forkSeq } = await harness.queryWorker(worker.worker_id, '侧问一下')
+    const { fork_seq: forkSeq } = await harness.queryWorker(worker.worker_id, '侧问一下')
     expect(forkSeq).toBe(2)
 
     // 修复前:lastIncarnation() 取数组最后一个,fork 之后就是 seq=2 的侧问分支——
@@ -1635,7 +2459,7 @@ describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)
   })
 
   it('processStateChange:fork 化身(seq=2)自己的状态变化只更新它自己的化身条目,不推进主线 task.status', async () => {
-    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
     await harness.queryWorker(worker.worker_id, '侧问一下')
     events.length = 0
@@ -1659,9 +2483,11 @@ describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)
     expect(forkEntry.state).toBe('exited')
     expect(forkEntry.ended_reason).toBe('completed')
 
-    const stateEvents = events.filter((e) => e.kind === 'state_changed' && e.seq === 2)
-    expect(stateEvents).toHaveLength(1)
-    expect(stateEvents[0].detail).toEqual({ to: 'exited' })
+    await waitUntil(async () => (await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll())
+      .some((event) => event.kind === 'query_completed' && event.seq === 2))
+    const terminalEvents = (await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll())
+      .filter((event) => event.kind === 'query_completed' && event.seq === 2)
+    expect(terminalEvents).toHaveLength(1)
   })
 })
 
@@ -1695,7 +2521,7 @@ describe('WorkerHarness.readWorkerOutput', () => {
   it('给 opts.seq → 读取该 seq 对应化身(如 fork 分支)的输出,不是主线', async () => {
     const { harness, fake } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
-    const { forkSeq } = await harness.queryWorker(worker.worker_id, '侧问一下')
+    const { fork_seq: forkSeq } = await harness.queryWorker(worker.worker_id, '侧问一下')
 
     const result = await harness.readWorkerOutput(worker.worker_id, { offset: 0 }, { seq: forkSeq })
 
@@ -1843,25 +2669,27 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
   })
 
   it('非迁移点:query_failed 不带 task_status', async () => {
-    const { harness } = await makeHarness({ caps: { fork: false } })
+    const { harness, workersDir } = await makeHarness({ caps: { fork: false } })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
-    await expect(harness.queryWorker(worker.worker_id, '侧问')).rejects.toThrow(CapabilityNotSupportedError)
+    await expect(harness.queryWorker(worker.worker_id, '侧问')).rejects.toThrow(QueryEstablishmentError)
 
-    const queryFailed = events.filter((e) => e.kind === 'query_failed')
+    const queryFailed = (await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll())
+      .filter((e) => e.kind === 'query_failed')
     expect(queryFailed).toHaveLength(1)
     expect(queryFailed[0].task_status).toBeUndefined()
   })
 
   it('非迁移点:fork 化身的落账事件不带 task_status(§5.3 fork 不影响主线)', async () => {
-    const { harness } = await makeHarness({ caps: { fork: true } })
+    const { harness, workersDir } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
     await harness.queryWorker(worker.worker_id, '侧问')
 
-    const forkEvents = events.filter((e) => e.seq === 2)
+    const forkEvents = (await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll())
+      .filter((e) => e.seq === 2)
     expect(forkEvents.length).toBeGreaterThan(0)
     for (const e of forkEvents) expect(e.task_status).toBeUndefined()
     // 台账确实没动主线 task.status——事件不带这个字段与台账事实一致

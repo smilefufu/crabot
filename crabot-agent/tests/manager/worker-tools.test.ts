@@ -21,6 +21,8 @@ import type {
   CapabilityBundle,
   AdapterCapabilities,
   DetectResult,
+  ForkOptions,
+  SendInputOptions,
 } from '../../src/workers/types'
 
 // ---- FakeAdapter：实现 WorkerAdapter 契约的可编程桩，不碰 tmux/LLM（照抄
@@ -34,14 +36,14 @@ interface FakeAdapterOpts {
   readonly implId?: WorkerImplId
   readonly caps?: Partial<AdapterCapabilities>
   readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState) => void
-  readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: { raw?: boolean }) => void
+  readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: SendInputOptions) => void
   readonly outputChunk?: string
 }
 
 class FakeAdapter implements WorkerAdapter {
   readonly implId: WorkerImplId
   readonly spawnCalls: SpawnSpec[] = []
-  readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: { raw?: boolean } }> = []
+  readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: SendInputOptions }> = []
   readonly killCalls: IncarnationHandle[] = []
   readonly readOutputCalls: Array<{ h: IncarnationHandle; cursor: OutputCursor }> = []
   private readonly states = new Map<string, WorkerContractState>()
@@ -68,14 +70,20 @@ class FakeAdapter implements WorkerAdapter {
     throw new Error('FakeAdapter.resume: not exercised by worker-tools tests')
   }
 
-  async fork(prev: IncarnationRef, _forkInput: string): Promise<IncarnationHandle> {
+  async fork(prev: IncarnationRef, _forkInput: string, opts: ForkOptions): Promise<IncarnationHandle> {
     const seq = this.nextForkSeq++
-    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq, impl: this.implId, session_ref: `fork-ref-${prev.worker_id}#${seq}` }
+    const handle: IncarnationHandle = {
+      worker_id: prev.worker_id,
+      seq,
+      impl: this.implId,
+      session_ref: `fork-ref-${prev.worker_id}#${seq}`,
+      query_id: opts.query_id,
+    }
     this.states.set(handleKey(handle), 'running')
     return handle
   }
 
-  async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
+  async sendInput(h: IncarnationHandle, text: string, opts?: SendInputOptions): Promise<void> {
     this.sendInputCalls.push({ h, text, opts })
     if (this.opts.sendInputBehavior) this.opts.sendInputBehavior(h, text, opts)
   }
@@ -260,7 +268,7 @@ describe('spawn_worker', () => {
 // ---- send_to_worker ----
 
 describe('send_to_worker', () => {
-  it('异步返回简短确认，text/raw 原样透传给 adapter.sendInput', async () => {
+  it('返回真实 delivered 回执，text/raw 与 delivery_id 透传给 adapter.sendInput', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(directSpawnParams())
     const tools = buildWorkerTools({ harness, context: () => CTX })
@@ -269,11 +277,12 @@ describe('send_to_worker', () => {
     const result = await sendToWorker.call({ worker_id: worker.worker_id, text: '继续', raw: true }, {})
     expect(result.isError).toBe(false)
     const parsed = parseOutput(result.output)
-    expect(parsed).toEqual({ status: 'sent', worker_id: worker.worker_id })
+    expect(parsed).toMatchObject({ status: 'delivered', worker_id: worker.worker_id })
+    expect(parsed.delivery_id).toMatch(/^[0-9a-f-]{36}$/)
 
     expect(fake.sendInputCalls).toHaveLength(1)
     expect(fake.sendInputCalls[0].text).toBe('继续')
-    expect(fake.sendInputCalls[0].opts).toEqual({ raw: true })
+    expect(fake.sendInputCalls[0].opts).toMatchObject({ raw: true, delivery_id: parsed.delivery_id })
   })
 
   it('worker 不存在 → WorkerNotFoundError 转成可读 tool_result（isError:true，不抛出）', async () => {
@@ -298,7 +307,7 @@ describe('send_to_worker', () => {
     expect(result.output).toMatch(/cancelled/)
   })
 
-  it('自动 handoff 目标全部用过 → ImplAlreadyUsedError 转成可读 tool_result（isError:true，不抛出）', async () => {
+  it('receipt 创建后的自动 handoff 失败 → 返回 failed 回执和明确原因', async () => {
     // 照抄 tests/workers/harness/harness-continuation.test.ts 里触发 ImplAlreadyUsedError 的
     // 最小配方：只注册一个（已被用过的）impl，sendInput 权威判定化身已终态，revive:false
     // 逼 continueTerminalWorker 走自动 handoff，pickUnusedImpl 无处可选，pre-flight 抛错。
@@ -313,23 +322,19 @@ describe('send_to_worker', () => {
     const sendToWorker = tools.find((t) => t.name === 'send_to_worker')!
 
     const result = await sendToWorker.call({ worker_id: worker.worker_id, text: '接着做完' }, {})
-    expect(result.isError).toBe(true)
-    expect(result.output).toMatch(/already has an incarnation/)
+    expect(result.isError).toBe(false)
+    expect(parseOutput(result.output)).toMatchObject({
+      status: 'failed',
+      worker_id: worker.worker_id,
+      reason_code: 'continuation_failed',
+      certainty: 'not_delivered',
+      reason: expect.stringMatching(/already has an incarnation/),
+    })
   })
 })
 
-// ---- query_worker（fire-and-forget：不等 harness.queryWorker 落地，立即返回） ----
-//
-// 与其它五个工具不同：cc worker 的 harness.queryWorker → adapter.fork 会 await 一整个无头
-// `claude -p` 子进程跑完（几十秒到数分钟），完整 await 会把 manager 的整个 turn 阻塞住，
-// 违反 protocol-agent-v3 §4.1/§4.3"慢工具异步发起即返回，结果作为事件唤醒"。因此本工具
-// 改为字面 JS fire-and-forget：调用 harness.queryWorker 后不 await，立即返回简短确认；
-// 游离 promise 用 .catch() 兜住，任何失败（含 WorkerNotFoundError/CapabilityNotSupportedError）
-// 只记诊断日志，不再能在这次调用内回传给 LLM——这是相对其余五个工具的一处刻意语义偏离，
-// 见 controller 决定（task-4-report.md 追加记录）。forkSeq 因此在返回时还不存在，不写进
-// 输出；answer/fork 化身就绪由事件唤醒，届时用 read_worker_output 传 seq 读取。
 describe('query_worker', () => {
-  it('harness.queryWorker 迟迟不 resolve（卡在 adapter.fork）时，工具仍在毫秒级返回，不等它落地', async () => {
+  it('等待 fork 建立后返回 started + query_id + fork_seq，但不等待回答完成', async () => {
     let releaseFork!: () => void
     const forkGate = new Promise<void>((resolve) => {
       releaseFork = resolve
@@ -337,136 +342,77 @@ describe('query_worker', () => {
     const { harness, fake } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(directSpawnParams())
     const originalFork = fake.fork.bind(fake)
-    fake.fork = async (prev, forkInput) => {
+    fake.fork = async (prev, forkInput, opts) => {
       await forkGate
-      return originalFork(prev, forkInput)
+      return originalFork(prev, forkInput, opts)
     }
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
 
-    const start = Date.now()
-    const result = await queryWorker.call({ worker_id: worker.worker_id, question: '现在进展如何？' }, {})
-    const elapsed = Date.now() - start
+    let settled = false
+    const resultPromise = queryWorker.call({ worker_id: worker.worker_id, question: '现在进展如何？' }, {})
+      .then((result) => { settled = true; return result })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(settled).toBe(false)
 
-    // adapter.fork 卡在 forkGate 上，永不在测试超时内自行 resolve；工具在毫秒级返回证明
-    // 它没有 await harness.queryWorker 的落地。
-    expect(elapsed).toBeLessThan(200)
-    expect(result.isError).toBe(false)
-    const parsed = parseOutput(result.output)
-    // 拿不到 fork_seq（它在 adapter.fork 落地之后才由 harness 生成）——只回确认式简短输出。
-    expect(parsed).toEqual({ status: 'queried', worker_id: worker.worker_id })
-
-    // 收尾：放开卡住的 fork，避免遗留 pending promise 影响其它用例。
     releaseFork()
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  })
-
-  it('游离 promise 落地后（fork 能力开启），侧问化身确实在后台异步建成——不是彻底扔掉不管', async () => {
-    const { harness } = await makeHarness({ caps: { fork: true } })
-    const worker = await harness.spawnWorker(directSpawnParams())
-    const tools = buildWorkerTools({ harness, context: () => CTX })
-    const queryWorker = tools.find((t) => t.name === 'query_worker')!
-
-    const result = await queryWorker.call({ worker_id: worker.worker_id, question: '现在进展如何？' }, {})
-    expect(parseOutput(result.output)).toEqual({ status: 'queried', worker_id: worker.worker_id })
-
-    await waitUntil(async () => {
-      const [w] = await harness.listWorkers(CTX.managerKey)
-      return w.incarnations.length === 2
+    const result = await resultPromise
+    expect(result.isError).toBe(false)
+    expect(parseOutput(result.output)).toMatchObject({
+      status: 'started',
+      worker_id: worker.worker_id,
+      fork_seq: 2,
+      query_id: expect.any(String),
     })
     const [w] = await harness.listWorkers(CTX.managerKey)
-    expect(w.incarnations[1]).toMatchObject({ seq: 2, forked_from: 1 })
+    expect(w.incarnations[1]).toMatchObject({
+      seq: 2,
+      forked_from: 1,
+      query_id: expect.any(String),
+      state: 'running',
+    })
   })
 
-  it('unknown worker is rejected synchronously without an action or unhandled rejection', async () => {
+  it('unknown worker is rejected before creating a query receipt', async () => {
     const { harness } = await makeHarness({ caps: { fork: true } })
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
-
-    const unhandled: unknown[] = []
-    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason)
-    process.on('unhandledRejection', onUnhandledRejection)
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-
     try {
       const result = await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
-      // 不再是 isError:true——失败发生在锁外的游离 promise 里，这次调用本身不知道。
       expect(result.isError).toBe(true)
       expect(result.output).toContain('不存在或当前会话无权访问')
-
-      // Authorization happens before fire-and-forget work.
-      await new Promise((resolve) => setTimeout(resolve, 20))
-
-      expect(unhandled).toHaveLength(0)
-      expect(errorSpy).toHaveBeenCalled()
-      const loggedArgs = errorSpy.mock.calls.map((args) => args.join(' ')).join('\n')
-      expect(loggedArgs).toContain('不存在或当前会话无权访问')
+      await expect(fs.access(join(dataDir, 'workers', 'w-nope', 'query-receipts.json'))).rejects.toThrow()
     } finally {
-      process.off('unhandledRejection', onUnhandledRejection)
       errorSpy.mockRestore()
     }
   })
 
-  it('目标实现不支持 fork（CapabilityNotSupportedError）同样只是游离 reject，不产生 unhandledRejection', async () => {
+  it('fork 能力不可用时在同一次调用返回带 query_id 的结构化 tool error', async () => {
     const { harness } = await makeHarness({ caps: { fork: false } })
     const worker = await harness.spawnWorker(directSpawnParams())
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
-
-    const unhandled: unknown[] = []
-    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason)
-    process.on('unhandledRejection', onUnhandledRejection)
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-
     try {
       const result = await queryWorker.call({ worker_id: worker.worker_id, question: '？' }, {})
-      expect(result.isError).toBe(false)
-
-      await new Promise((resolve) => setTimeout(resolve, 20))
-
-      expect(unhandled).toHaveLength(0)
-      expect(errorSpy).toHaveBeenCalled()
-    } finally {
-      process.off('unhandledRejection', onUnhandledRejection)
-      errorSpy.mockRestore()
-    }
-  })
-
-  // ---- P4 Task 4 additive:deps.onAsyncError 扩展点 ----
-  //
-  // query_worker 的失败发生在锁外的游离 promise 里，调用本身早已返回，manager 这次 turn
-  // 已经拿不到失败原因（见上面两个用例）。onAsyncError 是留给 Task 7/8"把这条错误接成唤醒
-  // 本 manager 的信号"的扩展点——本任务只提供出口、验证它确实带着正确的 { tool, worker_id,
-  // error } 被调用，不接线到任何真实唤醒机制。
-  it('authorization rejection does not invoke onAsyncError', async () => {
-    const { harness } = await makeHarness({ caps: { fork: true } })
-    const onAsyncError = vi.fn()
-    const tools = buildWorkerTools({ harness, context: () => CTX, onAsyncError })
-    const queryWorker = tools.find((t) => t.name === 'query_worker')!
-
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    try {
-      await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
-      await new Promise((resolve) => setTimeout(resolve, 20))
-
-      expect(onAsyncError).not.toHaveBeenCalled()
-
-    } finally {
-      errorSpy.mockRestore()
-    }
-  })
-
-  it('unknown worker without onAsyncError returns a synchronous denial', async () => {
-    const { harness } = await makeHarness({ caps: { fork: true } })
-    const tools = buildWorkerTools({ harness, context: () => CTX }) // 不传 onAsyncError
-    const queryWorker = tools.find((t) => t.name === 'query_worker')!
-
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    try {
-      const result = await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
       expect(result.isError).toBe(true)
-      await new Promise((resolve) => setTimeout(resolve, 20))
-      expect(errorSpy).toHaveBeenCalled()
+      expect(parseOutput(result.output)).toMatchObject({
+        query_id: expect.any(String),
+        reason_code: 'fork_capability_unavailable',
+        reason: expect.any(String),
+        certainty: 'not_started',
+      })
+      const receiptFile = JSON.parse(
+        await fs.readFile(join(dataDir, 'workers', worker.worker_id, 'query-receipts.json'), 'utf-8'),
+      ) as { receipts: Array<Record<string, unknown>> }
+      const receipts = receiptFile.receipts
+      expect(receipts).toHaveLength(1)
+      expect(receipts[0]).toMatchObject({
+        query_id: expect.any(String),
+        state: 'failed',
+        manager_notification: { status: 'pending' },
+      })
     } finally {
       errorSpy.mockRestore()
     }

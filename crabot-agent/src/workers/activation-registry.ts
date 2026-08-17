@@ -325,6 +325,7 @@ export class ActivationRegistry {
     const capabilities = adapter.connectionCapabilities?.() ?? []
     const status: WorkerImplementationStatus = {
       ...base,
+      capabilities: adapter.capabilities(),
       installed: detect.installed,
       version: detect.version,
       install_source: detect.install_source,

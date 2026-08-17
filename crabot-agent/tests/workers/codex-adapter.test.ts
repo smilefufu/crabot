@@ -5,7 +5,8 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { parse as parseToml } from 'smol-toml'
-import { CodexWorkerAdapter, eventsFilePath, WorkerExitedError, CapabilityNotSupportedError } from '../../src/workers/codex/adapter.js'
+import { CodexWorkerAdapter, eventsFilePath, WorkerExitedError } from '../../src/workers/codex/adapter.js'
+import { ForkEstablishmentError } from '../../src/workers/errors.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
 import { BRACKETED_PASTE_ENABLE } from '../../src/workers/tmux/paste-ready.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
@@ -41,6 +42,7 @@ async function cleanupTmuxSessions(prefix = 'crabot-w-codextest-'): Promise<void
 
 const MOCK_CLI = path.resolve(__dirname, 'fixtures/mock-cli.mjs')
 const FAKE_CODEX_VERSION = path.resolve(__dirname, 'fixtures/fake-codex-version.mjs')
+const FAKE_CODEX_APP_SERVER = path.resolve(__dirname, 'fixtures/fake-codex-app-server.mjs')
 
 interface MockStep {
   output?: string
@@ -1343,30 +1345,212 @@ describe('CodexWorkerAdapter — session_ref UUID 边界校验(resume)', () => {
   })
 })
 
-describe('CodexWorkerAdapter.fork — capabilities.fork=false', () => {
+describe('CodexWorkerAdapter.fork — app-server', () => {
   let dataDir: string
+  let workspaceRoot: string
+  let codexHome: string
+  let workerId: string
+  let parentSessionId: string
 
   beforeEach(async () => {
     dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-fork-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-fork-ws-'))
+    codexHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-fork-home-'))
+    await fs.writeFile(path.join(codexHome, 'config.toml'), '', 'utf8')
+    workerId = `codextest-${randomUUID().slice(0, 8)}`
+    parentSessionId = randomUUID()
+    const workerDir = path.join(dataDir, workerId)
+    await fs.mkdir(workerDir, { recursive: true })
+    await fs.writeFile(path.join(workerDir, 'meta-1.json'), JSON.stringify({
+      seq: 1,
+      state: 'running',
+      session_id: parentSessionId,
+      session_discovery: 'placeholder',
+      workspace_root: workspaceRoot,
+      codex_home: codexHome,
+    }))
   })
 
   afterEach(async () => {
     await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(codexHome, { recursive: true, force: true }).catch(() => {})
   })
 
-  it('capabilities().fork === false', () => {
-    const adapter = new CodexWorkerAdapter({ dataDir, codexBin: 'unused' })
+  function appServerBin(mode = 'happy', extra = ''): string {
+    return `env FAKE_APP_SERVER_MODE=${mode} ${extra} node ${shQuote(FAKE_CODEX_APP_SERVER)}`
+  }
+
+  function options(timeoutMs = 2000) {
+    return {
+      query_id: randomUUID(),
+      establishment_deadline_at: new Date(Date.now() + timeoutMs).toISOString(),
+      connection_env: { CODEX_HOME: codexHome },
+    }
+  }
+
+  it('detect fail closed；当前 binary 通过方法/字段探测后才声明 fork=true', async () => {
+    const unsupported = new CodexWorkerAdapter({
+      dataDir,
+      codexHomeSource: codexHome,
+      codexBin: appServerBin('unsupported'),
+    })
+    await unsupported.detect()
+    expect(unsupported.capabilities().fork).toBe(false)
+
+    const supported = new CodexWorkerAdapter({
+      dataDir,
+      codexHomeSource: codexHome,
+      codexBin: appServerBin(),
+    })
+    await supported.detect()
+    expect(supported.capabilities().fork).toBe(true)
+  })
+
+  it('detect 切换到同版本的另一 binary 时重新探测 fork capability', async () => {
+    const unsupportedBin = path.join(dataDir, 'codex-unsupported')
+    const supportedBin = path.join(dataDir, 'codex-supported')
+    const wrapper = (mode: string) =>
+      `#!/bin/sh\nexec env FAKE_APP_SERVER_MODE=${mode} node ${shQuote(FAKE_CODEX_APP_SERVER)} "$@"\n`
+    await fs.writeFile(unsupportedBin, wrapper('unsupported'), { mode: 0o755 })
+    await fs.writeFile(supportedBin, wrapper('happy'), { mode: 0o755 })
+    let activeBin = unsupportedBin
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      codexHomeSource: codexHome,
+      resolveUserLevelBinary: async () => ({ binary: activeBin, global_detected: false }),
+    })
+
+    await adapter.detect()
     expect(adapter.capabilities().fork).toBe(false)
+
+    activeBin = supportedBin
+    await adapter.detect()
+    expect(adapter.capabilities().fork).toBe(true)
   })
 
-  it('fork() 始终抛 CapabilityNotSupportedError,不触碰 tmux/子进程', async () => {
-    const adapter = new CodexWorkerAdapter({ dataDir, codexBin: 'unused' })
-    const workerId = `codextest-${randomUUID().slice(0, 8)}`
-    const validUuid = randomUUID()
+  it('turn/start 接受后立即返回真实 fork thread，回答随后异步完成并写 output', async () => {
+    const forkThreadId = randomUUID()
+    const states: Array<{ state: WorkerContractState; endReason?: string }> = []
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      codexHomeSource: codexHome,
+      tmux: new NoopTmux(),
+      codexBin: appServerBin('happy', `FAKE_FORK_THREAD_ID=${forkThreadId} FAKE_COMPLETION_DELAY_MS=200`),
+      onStateChange: (_handle, state, report) => states.push({ state, endReason: report?.endReason }),
+    })
+    await adapter.detect()
 
-    await expect(adapter.fork({ worker_id: workerId, seq: 1, session_ref: validUuid }, '侧问问题')).rejects.toBeInstanceOf(
-      CapabilityNotSupportedError,
+    const handle = await adapter.fork(
+      { worker_id: workerId, seq: 1, session_ref: parentSessionId },
+      '侧问问题',
+      options(),
     )
+
+    expect(handle).toMatchObject({
+      worker_id: workerId,
+      seq: 2,
+      impl: 'codex',
+      session_ref: forkThreadId,
+    })
+    expect(handle.session_ref).not.toBe(parentSessionId)
+    expect(await adapter.state(handle)).toBe('running')
+
+    await waitForState(adapter, handle, 'exited')
+    const { chunk } = await adapter.readOutput(handle, { offset: 0 })
+    expect(chunk).toBe('侧问回答')
+    expect(states).toContainEqual({ state: 'exited', endReason: 'completed' })
+  })
+
+  it('turn/start 明确拒绝时在同一次 fork 调用返回 query_submit 失败并收口进程', async () => {
+    const terminationFile = path.join(dataDir, 'terminated.log')
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      codexHomeSource: codexHome,
+      tmux: new NoopTmux(),
+      codexBin: appServerBin('turn_error', `FAKE_TERMINATION_FILE=${shQuote(terminationFile)}`),
+    })
+    await adapter.detect()
+
+    await expect(adapter.fork(
+      { worker_id: workerId, seq: 1, session_ref: parentSessionId },
+      '侧问问题',
+      options(),
+    )).rejects.toMatchObject({
+      name: 'ForkEstablishmentError',
+      stage: 'query_submit',
+      certainty: 'not_started',
+    } satisfies Partial<ForkEstablishmentError>)
+    expect(await fs.readFile(terminationFile, 'utf8')).toContain('SIGTERM')
+    await expect(fs.access(path.join(dataDir, workerId, 'meta-2.json'))).rejects.toThrow()
+  })
+
+  it('turn/start 返回不兼容 shape 时不能宣称首问确定未开始', async () => {
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      codexHomeSource: codexHome,
+      tmux: new NoopTmux(),
+      codexBin: appServerBin('bad_turn_shape'),
+    })
+    await adapter.detect()
+
+    await expect(adapter.fork(
+      { worker_id: workerId, seq: 1, session_ref: parentSessionId },
+      '侧问问题',
+      options(),
+    )).rejects.toMatchObject({
+      name: 'ForkEstablishmentError',
+      stage: 'query_submit',
+      certainty: 'unknown',
+    } satisfies Partial<ForkEstablishmentError>)
+    await expect(fs.access(path.join(dataDir, workerId, 'meta-2.json'))).rejects.toThrow()
+  })
+
+  it('建立 deadline 到期会失败并终止 app-server，不留下可误认成功的 meta', async () => {
+    const terminationFile = path.join(dataDir, 'timeout-terminated.log')
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      codexHomeSource: codexHome,
+      tmux: new NoopTmux(),
+      codexBin: appServerBin('hang_fork', `FAKE_TERMINATION_FILE=${shQuote(terminationFile)}`),
+    })
+    await adapter.detect()
+
+    await expect(adapter.fork(
+      { worker_id: workerId, seq: 1, session_ref: parentSessionId },
+      '侧问问题',
+      options(100),
+    )).rejects.toMatchObject({ name: 'ForkEstablishmentError', stage: 'timeout', certainty: 'unknown' })
+    expect(await fs.readFile(terminationFile, 'utf8')).toContain('SIGTERM')
+    await expect(fs.access(path.join(dataDir, workerId, 'meta-2.json'))).rejects.toThrow()
+  })
+
+  it('环境组装在 runtime 分配后失败时清理内存化身', async () => {
+    let resolveCalls = 0
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      codexHomeSource: codexHome,
+      tmux: new NoopTmux(),
+      resolveUserLevelBinary: async () => {
+        resolveCalls += 1
+        if (resolveCalls === 1) return { binary: appServerBin(), global_detected: false }
+        throw new Error('connection environment unavailable')
+      },
+    })
+    ;(adapter as unknown as { appServerForkSupported: boolean }).appServerForkSupported = true
+
+    await expect(adapter.fork(
+      { worker_id: workerId, seq: 1, session_ref: parentSessionId },
+      '侧问问题',
+      options(),
+    )).rejects.toMatchObject({
+      name: 'ForkEstablishmentError',
+      stage: 'fork_create',
+      certainty: 'not_started',
+    } satisfies Partial<ForkEstablishmentError>)
+
+    expect((adapter as unknown as { runtimes: Map<string, unknown> }).runtimes.size).toBe(1)
+    await expect(fs.access(path.join(dataDir, workerId, 'meta-2.json'))).rejects.toThrow()
   })
 })
 

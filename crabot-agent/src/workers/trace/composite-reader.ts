@@ -83,7 +83,25 @@ function harnessSummary(event: HarnessEvent): string {
     case 'spawned':
       return detail.impl ? `spawned (${String(detail.impl)})` : 'spawned'
     case 'input_sent':
-      return 'input_sent'
+      return typeof detail.delivery_id === 'string'
+        ? `input_sent delivery_id=${detail.delivery_id}`
+        : 'input_sent'
+    case 'input_delivery_failed': {
+      const deliveryId = typeof detail.delivery_id === 'string' ? ` delivery_id=${detail.delivery_id}` : ''
+      const reasonCode = typeof detail.reason_code === 'string' ? ` reason_code=${detail.reason_code}` : ''
+      return `input_delivery_failed${deliveryId}${reasonCode}`
+    }
+    case 'query_completed': {
+      const queryId = typeof detail.query_id === 'string' ? ` query_id=${detail.query_id}` : ''
+      const forkSeq = typeof detail.fork_seq === 'number' ? ` fork_seq=${detail.fork_seq}` : ''
+      return `query_completed${queryId}${forkSeq}`
+    }
+    case 'query_failed': {
+      const queryId = typeof detail.query_id === 'string' ? ` query_id=${detail.query_id}` : ''
+      const forkSeq = typeof detail.fork_seq === 'number' ? ` fork_seq=${detail.fork_seq}` : ''
+      const reasonCode = typeof detail.reason_code === 'string' ? ` reason_code=${detail.reason_code}` : ''
+      return `query_failed${queryId}${forkSeq}${reasonCode}`
+    }
     default: {
       const message = typeof detail.message === 'string' ? detail.message
         : typeof detail.error === 'string' ? detail.error

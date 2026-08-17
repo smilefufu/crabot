@@ -290,10 +290,10 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
   it('manager 工具面接 enableFeishuDocTool：无飞书实例时三件套不出现，探测到实例后出现，feishu_write 始终不出现', () => {
     boot()
     const registryDeps = (internals.managerStack as unknown as {
-      registry: { deps: { toolFace: (k: ManagerKey, sys: boolean, onErr: () => void) => ReadonlyArray<ToolDefinition> } }
+      registry: { deps: { toolFace: (k: ManagerKey, sys: boolean) => ReadonlyArray<ToolDefinition> } }
     }).registry.deps
     const namesNow = (): string[] =>
-      registryDeps.toolFace('wechat::sess-1' as ManagerKey, false, () => {}).map((t) => t.name)
+      registryDeps.toolFace('wechat::sess-1' as ManagerKey, false).map((t) => t.name)
 
     const feishuReadOnly = ['read_feishu_document', 'feishu_raw_get', 'feishu_download_file']
 

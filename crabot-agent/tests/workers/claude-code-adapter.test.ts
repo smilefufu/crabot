@@ -8,6 +8,7 @@ import { ClaudeCodeAdapter, eventsFilePath, WorkerExitedError } from '../../src/
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
 import { BRACKETED_PASTE_ENABLE } from '../../src/workers/tmux/paste-ready.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
+import type { ForkEstablishmentError } from '../../src/workers/errors.js'
 import type { IncarnationHandle, SpawnSpec, WorkerContractState } from '../../src/workers/types.js'
 
 function detectTmux(): boolean {
@@ -47,6 +48,13 @@ function fakeClaudeConfig(dataDir: string): string {
 const MOCK_CLI = path.resolve(__dirname, 'fixtures/mock-cli.mjs')
 const FAKE_CLAUDE_VERSION = path.resolve(__dirname, 'fixtures/fake-claude-version.mjs')
 const FAKE_CLAUDE_FORK = path.resolve(__dirname, 'fixtures/fake-claude-fork.mjs')
+
+function forkOptions() {
+  return {
+    query_id: randomUUID(),
+    establishment_deadline_at: new Date(Date.now() + 30_000).toISOString(),
+  }
+}
 
 interface MockStep {
   output?: string
@@ -612,7 +620,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:
       const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
 
       // 重启前:fork 侧问 #2(无头一击,落自己的 meta-2.json/output-2.log)。
-      const h2 = await adapterA.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '侧问一下')
+      const h2 = await adapterA.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '侧问一下', forkOptions())
       expect(h2.seq).toBe(2)
       await waitForState(adapterA, h2, 'exited')
       const meta2Before = await fs.readFile(path.join(dataDir, workerId, 'meta-2.json'), 'utf-8')
@@ -1090,7 +1098,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
     const maliciousSessionRef = 'x; touch /tmp/pwned'
 
     await expect(
-      adapter.fork({ worker_id: workerId, seq: 1, session_ref: maliciousSessionRef }, 'payload'),
+      adapter.fork({ worker_id: workerId, seq: 1, session_ref: maliciousSessionRef }, 'payload', forkOptions()),
     ).rejects.toThrow(/invalid.*session_ref|UUID|session reference/i)
 
     // 验证没有副作用文件产生
@@ -1118,7 +1126,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
 
     for (const ref of invalidRefs) {
       await expect(
-        adapter.fork({ worker_id: workerId, seq: 1, session_ref: ref }, 'payload'),
+        adapter.fork({ worker_id: workerId, seq: 1, session_ref: ref }, 'payload', forkOptions()),
       ).rejects.toThrow(/invalid.*session_ref|UUID|session reference/i)
     }
   })
@@ -1140,7 +1148,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
     const validUuid = randomUUID()
 
     // 会因为"不存在该化身"抛错,但不是 session_ref 格式错误
-    await expect(adapter.fork({ worker_id: workerId, seq: 1, session_ref: validUuid }, 'payload')).rejects.toThrow(
+    await expect(adapter.fork({ worker_id: workerId, seq: 1, session_ref: validUuid }, 'payload', forkOptions())).rejects.toThrow(
       /no such incarnation|not resident/i,
     )
   })
@@ -1300,6 +1308,172 @@ class CountingTmux extends TmuxDriver {
   }
 }
 
+class ForkOnlyTmux extends TmuxDriver {
+  async isAlive(_name: string): Promise<boolean> {
+    return false
+  }
+}
+
+describe('ClaudeCodeAdapter.fork — streaming establishment without tmux', () => {
+  let dataDir: string
+  let workspaceRoot: string
+  let workerId: string
+  let parentSessionId: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-stream-fork-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-stream-fork-ws-'))
+    workerId = `cctest-${randomUUID().slice(0, 8)}`
+    parentSessionId = randomUUID()
+    const workerDir = path.join(dataDir, workerId)
+    await fs.mkdir(workerDir, { recursive: true })
+    await fs.writeFile(path.join(workerDir, 'meta-1.json'), JSON.stringify({
+      seq: 1,
+      state: 'running',
+      session_id: parentSessionId,
+      workspace_root: workspaceRoot,
+    }))
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true })
+    await fs.rm(workspaceRoot, { recursive: true, force: true })
+  })
+
+  it('init 后立即返回真实 session，长回答在后台完成且 result 不重复 delta', async () => {
+    const forkSessionId = randomUUID()
+    const states: WorkerContractState[] = []
+    const claudeBin = [
+      `env FAKE_FORK_SESSION_ID=${forkSessionId}`,
+      'FAKE_FORK_STDOUT=streamed-answer',
+      'FAKE_FORK_RESULT=streamed-answer',
+      'FAKE_FORK_DELAY_AFTER_INIT_MS=200',
+      `node ${shQuote(FAKE_CLAUDE_FORK)}`,
+    ].join(' ')
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new ForkOnlyTmux(),
+      claudeBin,
+      onStateChange: (_handle, state) => states.push(state),
+    })
+
+    const handle = await adapter.fork(
+      { worker_id: workerId, seq: 1, session_ref: parentSessionId },
+      '侧问',
+      forkOptions(),
+    )
+
+    expect(handle.session_ref).toBe(forkSessionId)
+    expect(handle.session_ref).not.toBe(parentSessionId)
+    expect(await adapter.state(handle)).toBe('running')
+    await waitForState(adapter, handle, 'exited')
+    const { chunk } = await adapter.readOutput(handle, { offset: 0 })
+    expect(chunk).toBe('streamed-answer')
+    expect(states.filter((state) => state === 'exited')).toHaveLength(1)
+  })
+
+  it('30 秒契约 deadline 到期前无 init 时终止整个 fork 进程组并返回 timeout', async () => {
+    const terminationFile = path.join(dataDir, 'terminated.log')
+    const claudeBin = [
+      'env FAKE_FORK_INIT_DELAY_MS=1000',
+      `FAKE_FORK_TERMINATION_FILE=${shQuote(terminationFile)}`,
+      `node ${shQuote(FAKE_CLAUDE_FORK)}`,
+    ].join(' ')
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new ForkOnlyTmux(),
+      claudeBin,
+    })
+
+    await expect(adapter.fork(
+      { worker_id: workerId, seq: 1, session_ref: parentSessionId },
+      '侧问',
+      {
+        query_id: randomUUID(),
+        establishment_deadline_at: new Date(Date.now() + 100).toISOString(),
+      },
+    )).rejects.toMatchObject({ name: 'ForkEstablishmentError', stage: 'timeout' })
+    expect(await fs.readFile(terminationFile, 'utf8')).toContain('SIGTERM')
+    await expect(fs.access(path.join(dataDir, workerId, 'meta-2.json'))).rejects.toThrow()
+  })
+
+  it('无 init 但子进程已经产出结果时不能宣称首问确定未开始', async () => {
+    const claudeBin = [
+      'env FAKE_FORK_SKIP_INIT=1',
+      'FAKE_FORK_STDOUT=answer-without-init',
+      `node ${shQuote(FAKE_CLAUDE_FORK)}`,
+    ].join(' ')
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new ForkOnlyTmux(),
+      claudeBin,
+    })
+
+    await expect(adapter.fork(
+      { worker_id: workerId, seq: 1, session_ref: parentSessionId },
+      '侧问',
+      forkOptions(),
+    )).rejects.toMatchObject({
+      name: 'ForkEstablishmentError',
+      stage: 'fork_create',
+      certainty: 'unknown',
+    } satisfies Partial<ForkEstablishmentError>)
+    await expect(fs.access(path.join(dataDir, workerId, 'meta-2.json'))).rejects.toThrow()
+  })
+
+  it('binary 解析在 runtime 分配后失败时清理内存化身', async () => {
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new ForkOnlyTmux(),
+      resolveUserLevelBinary: async () => { throw new Error('binary resolver unavailable') },
+    })
+
+    await expect(adapter.fork(
+      { worker_id: workerId, seq: 1, session_ref: parentSessionId },
+      '侧问',
+      forkOptions(),
+    )).rejects.toMatchObject({
+      name: 'ForkEstablishmentError',
+      stage: 'fork_create',
+      certainty: 'not_started',
+    } satisfies Partial<ForkEstablishmentError>)
+
+    expect((adapter as unknown as { runtimes: Map<string, unknown> }).runtimes.size).toBe(1)
+    await expect(fs.access(path.join(dataDir, workerId, 'meta-2.json'))).rejects.toThrow()
+  })
+
+  it('kill 已建立的 fork 时等待 headless 子进程真正退出', async () => {
+    const terminationFile = path.join(dataDir, 'kill-terminated.log')
+    const forkSessionId = randomUUID()
+    const claudeBin = [
+      `env FAKE_FORK_SESSION_ID=${forkSessionId}`,
+      'FAKE_FORK_DELAY_AFTER_INIT_MS=10000',
+      `FAKE_FORK_TERMINATION_FILE=${shQuote(terminationFile)}`,
+      `node ${shQuote(FAKE_CLAUDE_FORK)}`,
+    ].join(' ')
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new ForkOnlyTmux(),
+      claudeBin,
+    })
+    const handle = await adapter.fork(
+      { worker_id: workerId, seq: 1, session_ref: parentSessionId },
+      '侧问',
+      forkOptions(),
+    )
+
+    await adapter.kill(handle)
+
+    expect(await adapter.state(handle)).toBe('exited')
+    expect(await fs.readFile(terminationFile, 'utf8')).toContain('SIGTERM')
+  })
+})
+
 describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
   let dataDir: string
   let workspaceRoot: string
@@ -1339,6 +1513,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       const h2 = await adapter.fork(
         { worker_id: workerId, seq: 1, session_ref: meta1.session_id },
         '这个函数为什么报错?',
+        forkOptions(),
       )
       expect(h2.worker_id).toBe(workerId)
       expect(h2.seq).toBe(2)
@@ -1346,8 +1521,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       // fork 全程没有调用任何 tmux 方法——不进 tmux。
       expect(tmux.calls).toEqual(callsBeforeFork)
 
-      const state2 = await adapter.state(h2)
-      expect(state2).toBe('exited')
+      await waitForState(adapter, h2, 'exited')
 
       const meta2 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-2.json'), 'utf-8')) as {
         state: WorkerContractState
@@ -1371,7 +1545,9 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
         meta1.session_id,
         '--fork-session',
         '--output-format',
-        'text',
+        'stream-json',
+        '--verbose',
+        '--include-partial-messages',
         '--mcp-config',
         '.mcp.json',
         '--strict-mcp-config',
@@ -1395,7 +1571,8 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
       const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
 
-      const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '触发崩溃')
+      const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '触发崩溃', forkOptions())
+      await waitForState(adapter, h2, 'exited')
 
       const meta2 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-2.json'), 'utf-8')) as {
         ended_reason?: string
@@ -1421,14 +1598,16 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
       const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
 
-      const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '第一次侧问')
+      const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '第一次侧问', forkOptions())
       expect(h2.seq).toBe(2)
+      await waitForState(adapter, h2, 'exited')
 
       // 对同一个 prev(h1)再 fork 一次:fork 化身常驻不删,旧实现用固定公式 prev.seq+1 算出
       // seq=2,与 h2 撞号,抛"already exists"。新实现用 nextSeq()(该 worker 现存所有化身
       // max seq + 1)分配到 3。
-      const h3 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '第二次侧问')
+      const h3 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '第二次侧问', forkOptions())
       expect(h3.seq).toBe(3)
+      await waitForState(adapter, h3, 'exited')
 
       const meta3 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-3.json'), 'utf-8')) as { state: WorkerContractState }
       expect(meta3.state).toBe('exited')
@@ -1451,8 +1630,9 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
       const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
 
-      const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '侧问')
+      const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '侧问', forkOptions())
       expect(h2.seq).toBe(2)
+      await waitForState(adapter, h2, 'exited')
 
       // 主线还在跑,先 kill 让它落 exited,满足 resume 的前置条件。
       await adapter.kill(h1)
@@ -2159,7 +2339,8 @@ describe('ClaudeCodeAdapter.fork — 侧问收尾不污染主线 stop 计数', (
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const h1 = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
 
-    const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: h1.session_ref }, '侧问一下')
+    const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: h1.session_ref }, '侧问一下', forkOptions())
+    await waitForState(adapter, h2, 'exited')
 
     // 前提:假二进制确实执行了 provision 写下的那条 Stop hook(否则本组用例是空跑)。
     expect(await stopCountIn(path.join(dataDir, workerId, `fork-events-${h2.seq}.jsonl`))).toBe(1)
@@ -2187,7 +2368,8 @@ describe('ClaudeCodeAdapter.fork — 侧问收尾不污染主线 stop 计数', (
     const h1 = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
 
     // 侧问在主线还在跑的时候发起。
-    await adapter.fork({ worker_id: workerId, seq: 1, session_ref: h1.session_ref }, '侧问一下')
+    const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: h1.session_ref }, '侧问一下', forkOptions())
+    await waitForState(adapter, h2, 'exited')
 
     // ① 侧问收尾之后(留足 watcher 快路径 + 2s 轮询兜底的时间),主线不能被判成 idle。
     await new Promise((r) => setTimeout(r, 2500))

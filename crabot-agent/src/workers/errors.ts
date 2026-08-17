@@ -5,6 +5,7 @@
  */
 
 import type { IncarnationEndReason, InitialInputDisposition, CliControlState, StateChangeReport } from './types'
+import type { QueryFailureCode } from './harness/query-receipt-store'
 
 /** Raised when sendInput is called on an incarnation that has already exited. */
 export class WorkerExitedError extends Error {
@@ -60,5 +61,30 @@ export class WorkerImplUnavailableError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'WorkerImplUnavailableError'
+  }
+}
+
+/** A query receipt exists, but its synchronous fork establishment contract failed. */
+export class QueryEstablishmentError extends Error {
+  constructor(
+    readonly query_id: string,
+    readonly reason_code: QueryFailureCode,
+    readonly reason: string,
+    readonly certainty: 'not_started' | 'failed' | 'unknown',
+  ) {
+    super(reason)
+    this.name = 'QueryEstablishmentError'
+  }
+}
+
+/** Adapter-level classification used by the harness to preserve the failed establishment phase. */
+export class ForkEstablishmentError extends Error {
+  constructor(
+    readonly stage: 'fork_create' | 'query_submit' | 'timeout',
+    message: string,
+    readonly certainty: 'not_started' | 'failed' | 'unknown' = 'unknown',
+  ) {
+    super(message)
+    this.name = 'ForkEstablishmentError'
   }
 }

@@ -176,6 +176,8 @@ export interface BootstrapDeps {
   readonly publishEvent?: AgentEventPublisher
   /** P6-A：Manager episode trace writer（窄接口）；缺省时整个 trace 面静默关闭。 */
   readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
+  /** Redacts runtime credentials before durable Manager/Worker operation failures are recorded. */
+  readonly redactFailureReason?: (text: string) => string
   /** P6-A §8.4：builtin worker 结构化 trace 写钩子/读入口（TraceStore 窄口）。 */
   readonly builtinTraceHooks?: import('../workers/builtin/adapter.js').BuiltinTraceHooks
   /** P6-B §6：activation registry gate（unified-agent 注入）。 */
@@ -387,6 +389,18 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         },
       )
     },
+    onOperationNotification: (managerKey, event) => {
+      if (!registry) return { consumed: false }
+      return registry.routeOperationNotification(managerKey, event).catch((err) => {
+        console.error(
+          `[manager-bootstrap] routeOperationNotification failed ` +
+            `(manager=${managerKey}, worker=${event.worker_id}, kind=${event.kind}):`,
+          err,
+        )
+        return { consumed: false }
+      })
+    },
+    redactFailureReason: deps.redactFailureReason,
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
     assertExecutionAdmission: deps.assertExecutionAdmission,
     capabilityBundle: deps.capabilityBundle,
@@ -475,7 +489,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         sessionId,
       )
     },
-    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity, humanPrincipal, principalPermissions, traceHooks) => {
+    toolFace: (key, isSystemThread, scheduleIdentity, humanPrincipal, principalPermissions, traceHooks) => {
       // Capture at tool-face construction. Calling the resulting factory later must not
       // pick up a regrant/new generation from a subsequent wake.
       const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
@@ -527,7 +541,6 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         isSystemThread,
         authorization: () => principals.currentMasterAuthorization(key),
         validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),
-        onAsyncError,
       })
     },
     // system prompt 的「对话对象档案」段(§4.2 5b/5d):场景画像 + crab 在该渠道的
@@ -572,5 +585,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 export async function reconcileManagerStack(stack: ManagerStack): Promise<ReconcileReport> {
   await stack.principals.init()
   await BuiltinWorkerAdapter.scanOrphans(stack.builtinDataDir)
-  return stack.harness.reconcileOnStartup()
+  const report = await stack.harness.reconcileOnStartup()
+  await stack.harness.reconcileInputDeliveriesOnStartup()
+  await stack.harness.reconcileQueryReceiptsOnStartup()
+  return report
 }
