@@ -8,6 +8,7 @@ param(
 )
 
 $RequiredNodeVersion = "22.14.0"
+$ErrorActionPreference = 'Stop'
 
 function Write-Info($msg)  { Write-Host "[crabot] $msg" -ForegroundColor Green }
 function Write-Warn($msg)  { Write-Host "[crabot] $msg" -ForegroundColor Yellow }
@@ -79,7 +80,7 @@ function Ensure-Bash {
     try {
         Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
     } catch {
-        Write-Err "Failed to download PortableGit from $url: $_"
+        Write-Err "Failed to download PortableGit from ${url}: $_"
         Write-Err "Install Git for Windows manually: https://git-scm.com/downloads/win"
         exit 1
     }
@@ -102,7 +103,7 @@ function Ensure-Bash {
     Write-Info "PortableGit installed. CRABOT_BASH_PATH set to $bashPath"
 }
 
-# --- pnpm（仅源码安装路径需要） ---
+# --- pnpm ---
 function Ensure-Pnpm {
     $corepackCmd = Get-Command corepack -ErrorAction SilentlyContinue
     if (-not $corepackCmd) {
@@ -113,7 +114,46 @@ function Ensure-Pnpm {
     # 系统 shim，非管理员 cmd 必然 EPERM。后续所有 `corepack pnpm ...` 调用会按
     # packageManager 字段按需下载到用户 cache 执行，不需要 enable。
     $pnpmVer = (corepack pnpm --version)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "corepack could not run pnpm. Reinstall Node.js."
+        exit $LASTEXITCODE
+    }
     Write-Info "pnpm $pnpmVer ready"
+}
+
+function Assert-CrabotStopped($targetInstallDir) {
+    $dataDir = Join-Path $targetInstallDir 'data'
+    $portOffset = 0
+    $instancePath = Join-Path $targetInstallDir 'instance.json'
+    if (Test-Path -LiteralPath $instancePath -PathType Leaf) {
+        $instance = Get-Content -LiteralPath $instancePath -Raw | ConvertFrom-Json
+        if ($instance.data_dir) {
+            $dataDir = $instance.data_dir
+        }
+        if ($null -ne $instance.port_offset) {
+            $portOffset = [int]$instance.port_offset
+        }
+    }
+
+    $pidPath = Join-Path $dataDir 'mm.pid'
+    if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
+        $crabotPid = 0
+        $pidText = (Get-Content -LiteralPath $pidPath -Raw).Trim()
+        if ([int]::TryParse($pidText, [ref]$crabotPid) -and (Get-Process -Id $crabotPid -ErrorAction SilentlyContinue)) {
+            Write-Err "Crabot is running (PID $crabotPid). Run 'crabot stop', then run the installer again."
+            exit 1
+        }
+    }
+
+    try {
+        $health = Invoke-RestMethod -Uri "http://localhost:$((19000 + $portOffset))/health" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 2
+        if ($health.data.status -eq 'healthy') {
+            Write-Err "Crabot is running. Run 'crabot stop', then run the installer again."
+            exit 1
+        }
+    } catch {
+        # The management service is not running or is not a Crabot instance.
+    }
 }
 
 # --- Main ---
@@ -122,9 +162,9 @@ Write-Host "`n== Crabot Installer ==`n" -ForegroundColor Cyan
 Ensure-Node
 Ensure-Uv
 Ensure-Bash
+Ensure-Pnpm
 
 if ($FromSource) {
-    Ensure-Pnpm
     Write-Info "Source install..."
     corepack pnpm install
     # shared 必须先编译
@@ -167,40 +207,146 @@ if ($FromSource) {
         }
         Write-Info "Latest version: $Version"
     }
+    Assert-CrabotStopped $InstallDir
+
     $filename = "crabot-$Version-windows-x64.zip"
     $url = "https://github.com/smilefufu/crabot/releases/download/$Version/$filename"
-
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    Write-Info "Downloading $filename..."
-    Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\$filename"
+    $stageParent = Join-Path (Split-Path $InstallDir -Parent) (".crabot-i-{0}" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $stageRelease = Join-Path $stageParent "crabot-$Version-windows-x64"
+    $archivePath = Join-Path $stageParent $filename
 
-    Write-Info "Extracting..."
-    Expand-Archive -Path "$env:TEMP\$filename" -DestinationPath $InstallDir -Force
-    Remove-Item "$env:TEMP\$filename"
+    New-Item -ItemType Directory -Force -Path $stageParent | Out-Null
+    try {
+        Write-Info "Downloading $filename..."
+        Invoke-WebRequest -Uri $url -OutFile $archivePath
 
-    Set-Location "$InstallDir\crabot-memory"
-    uv sync
-    Set-Location $InstallDir
+        $checksumUrl = "$url.sha256"
+        $checksumPath = "$archivePath.sha256"
+        Write-Info "Verifying release checksum..."
+        Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath
+        $expectedHash = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
+        $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+        if ($actualHash -ine $expectedHash) {
+            Write-Err "Release archive checksum verification failed."
+            exit 1
+        }
+
+        Write-Info "Extracting..."
+        Expand-Archive -Path $archivePath -DestinationPath $stageParent -Force
+        if (-not (Test-Path -LiteralPath (Join-Path $stageRelease "cli.mjs") -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $stageRelease "package.json") -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $stageRelease "scripts") -PathType Container) -or
+            -not (Test-Path -LiteralPath (Join-Path $stageRelease "crabot-memory") -PathType Container) -or
+            -not (Test-Path -LiteralPath (Join-Path $stageRelease "dist") -PathType Container)) {
+            Write-Err "Invalid release archive: expected files are missing from $stageRelease"
+            exit 1
+        }
+
+        $runtimeModules = @('crabot-shared','scripts/lib','crabot-core','crabot-admin','crabot-agent','crabot-channel-dingtalk','crabot-channel-feishu','crabot-channel-telegram','crabot-channel-wechat','crabot-mcp-tools')
+        foreach ($mod in $runtimeModules) {
+            $moduleDir = Join-Path $stageRelease $mod
+            if (-not (Test-Path -LiteralPath (Join-Path $moduleDir 'package.json') -PathType Leaf) -or
+                -not (Test-Path -LiteralPath (Join-Path $moduleDir 'pnpm-lock.yaml') -PathType Leaf)) {
+                Write-Err "Release dependency manifest missing for $mod"
+                exit 1
+            }
+        }
+        $stageMemoryDir = Join-Path $stageRelease 'crabot-memory'
+        if (-not (Test-Path -LiteralPath (Join-Path $stageMemoryDir 'pyproject.toml') -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $stageMemoryDir 'uv.lock') -PathType Leaf)) {
+            Write-Err "Memory dependency manifest missing at $stageMemoryDir"
+            exit 1
+        }
+
+        $versionPath = Join-Path $InstallDir 'VERSION'
+        if (Test-Path -LiteralPath $versionPath -PathType Leaf) {
+            Remove-Item -LiteralPath $versionPath -Force
+        }
+
+        $retainedEntries = @('PortableGit', 'data', 'instance.json', 'crabot.cmd')
+        foreach ($entry in Get-ChildItem -LiteralPath $stageRelease -Force) {
+            if ($retainedEntries -contains $entry.Name) {
+                continue
+            }
+            $target = Join-Path $InstallDir $entry.Name
+            if (Test-Path $target) {
+                Remove-Item $target -Recurse -Force
+            }
+            Move-Item -LiteralPath $entry.FullName -Destination $target
+        }
+
+        foreach ($legacyDir in Get-ChildItem -LiteralPath $InstallDir -Directory -Filter 'crabot-*-windows-x64' -ErrorAction SilentlyContinue) {
+            Remove-Item $legacyDir.FullName -Recurse -Force
+        }
+
+        # 根 package 没有随发布包提供 pnpm-lock.yaml，不能用非冻结安装恢复不固定的生产依赖。
+        # 根 package 的 commander、js-yaml、rotating-file-stream 保留发布包自带版本，不能在这里再次解析版本。
+        foreach ($mod in $runtimeModules) {
+            $moduleDir = Join-Path $InstallDir $mod
+            $nodeModulesDir = Join-Path $moduleDir 'node_modules'
+            if (Test-Path -LiteralPath $nodeModulesDir -PathType Container) {
+                Remove-Item -LiteralPath $nodeModulesDir -Recurse -Force
+            }
+
+            Write-Info "Restoring dependencies: $mod"
+            Push-Location $moduleDir
+            try {
+                corepack pnpm install --prod --frozen-lockfile
+                if ($LASTEXITCODE -ne 0) {
+                    exit $LASTEXITCODE
+                }
+            } finally {
+                Pop-Location
+            }
+        }
+
+        $memoryDir = Join-Path $InstallDir "crabot-memory"
+        Write-Info "Syncing Memory dependencies..."
+        Push-Location $memoryDir
+        try {
+            uv sync --frozen --no-dev
+            if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+            }
+        } finally {
+            Pop-Location
+        }
+
+        Set-Content -Path (Join-Path $InstallDir 'VERSION') -Value $Version -Encoding ASCII
+    } finally {
+        Remove-Item $stageParent -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # PATH
 $crabotDir = if ($FromSource) { (Get-Location).Path } else { $InstallDir }
+$legacyReleasePattern = ('^{0}\\crabot-[^\\]+-windows-x64\\?$' -f [regex]::Escape($crabotDir.TrimEnd('\')))
+function Update-CrabotPath($pathValue) {
+    $entries = @($pathValue -split ';' | Where-Object { $_ })
+    $filtered = @($entries | Where-Object {
+        $normalized = $_.Trim().TrimEnd('\')
+        $normalized -notmatch $legacyReleasePattern -and $normalized -ine $crabotDir.TrimEnd('\')
+    })
+    return ((@($crabotDir) + $filtered) -join ';')
+}
+
 $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($currentPath -notlike "*$crabotDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$crabotDir;$currentPath", "User")
-    Write-Info "Added $crabotDir to user PATH"
+$newUserPath = Update-CrabotPath $currentPath
+if ($newUserPath -cne $currentPath) {
+    [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+    Write-Info "Updated user PATH for $crabotDir"
 }
 # 同步更新当前 session 的 $env:Path——SetEnvironmentVariable 只写注册表，
 # 当前进程的 PATH 不会自动刷新。同 session 后续操作（如 crabot start）能立即用。
-if ($env:Path -notlike "*$crabotDir*") {
-    $env:Path = "$crabotDir;$env:Path"
+$newSessionPath = Update-CrabotPath $env:Path
+if ($newSessionPath -cne $env:Path) {
+    $env:Path = $newSessionPath
 }
 
-# 创建 crabot.cmd 如果不存在
+# 创建 crabot.cmd 如果不存在，避免覆盖用户自定义的启动器。
 $cmdPath = Join-Path $crabotDir "crabot.cmd"
-if (-not (Test-Path $cmdPath)) {
-    # 注意：PowerShell 单引号字符串不转义 `n（会写出字面 `n 而非换行），必须用
-    # 数组 + Set-Content 保证 Windows CRLF 行尾正确写两行。
+if (-not (Test-Path -LiteralPath $cmdPath -PathType Leaf)) {
     @('@echo off', 'node "%~dp0cli.mjs" %*') | Set-Content -Path $cmdPath -Encoding ASCII
 }
 
