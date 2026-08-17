@@ -135,4 +135,28 @@ describe('ManagerDetail', () => {
     fireEvent.click(screen.getByText('展开 1 条 worker 进展'))
     expect(screen.getByText(/部署 V6.*等输入/)).toBeInTheDocument()
   })
+
+  it('spawn 父 episode 不在当前分页时，用 causal_parent 仍按因果链展示', async () => {
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [{
+        trace_id: 'ep-progress-only', manager_key: 'wechat::sess-1', started_at: '2026-08-02T10:01:00.000Z', status: 'completed',
+        trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
+        worker_ref: { worker_id: 'w-1', title: '长任务', state_to: 'running' },
+        causal_parent: {
+          trace_id: 'ep-old-parent', started_at: '2026-07-01T10:00:00.000Z',
+          trigger: { type: 'human_message', summary: '人类消息 x1：开始长任务' },
+          actions: [{ kind: 'spawn_worker', label: '派活：长任务', worker_id: 'w-1' }],
+        },
+      }],
+      pagination: { page: 1, page_size: 20, total_items: 21, total_pages: 2 },
+    })
+    render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText('你：「开始长任务」')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('展开 1 条 worker 进展'))
+    expect(screen.getByText(/长任务.*执行中/)).toBeInTheDocument()
+  })
 })

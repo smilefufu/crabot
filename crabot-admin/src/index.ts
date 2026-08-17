@@ -10237,12 +10237,19 @@ export class AdminModule extends ModuleBase {
 
   private async addManagerDisplayNames<T extends { items: Array<{ manager_key: string }>; pagination: unknown }>(result: T): Promise<T & { items: Array<T['items'][number] & { display_name: string }> }> {
     const sessionsByChannel = new Map<string, Map<string, { title: string }>>()
-    const channelIds = new Set(result.items.map((item) => item.manager_key.split('::', 1)[0]))
-    await Promise.all(Array.from(channelIds).map(async (channelId) => {
+    // Agent 分页上限100；每个页面只 exact lookup 页面里需要的 session_id，不扫描 channel 全历史。
+    const pairs = result.items.slice(0, 100).flatMap((item) => {
+      const separator = item.manager_key.indexOf('::')
+      if (separator < 1) return []
+      return [{ channelId: item.manager_key.slice(0, separator), sessionId: item.manager_key.slice(separator + 2) }]
+    })
+    await Promise.all(pairs.map(async ({ channelId, sessionId }) => {
       if (channelId === 'admin-web') return
       try {
-        const sessions = await this.listChannelSessions(channelId as ModuleId)
-        sessionsByChannel.set(channelId, new Map(sessions.map((session) => [session.id, { title: session.title }])))
+        const session = await this.resolveChannelSession(channelId as ModuleId, sessionId)
+        const bySession = sessionsByChannel.get(channelId) ?? new Map<string, { title: string }>()
+        bySession.set(sessionId, { title: session.title })
+        sessionsByChannel.set(channelId, bySession)
       } catch {
         // Channel offline / legacy key：单行回退 manager_key，不影响整个列表。
       }

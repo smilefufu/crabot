@@ -128,22 +128,35 @@ function EpisodeCard({ episode, progress }: { episode: ManagerEpisodeTrace; prog
 
 function groupEpisodes(episodes: ManagerEpisodeTrace[]): Array<{ episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[] }> {
   const ownerByWorker = new Map<string, string>()
-  for (const episode of episodes) {
+  const primaryById = new Map(episodes.filter((episode) => episode.trigger.type !== 'worker_event').map((episode) => [episode.trace_id, episode]))
+  for (const episode of primaryById.values()) {
     for (const action of episode.actions ?? []) {
       if (action.kind === 'spawn_worker' && action.worker_id) ownerByWorker.set(action.worker_id, episode.trace_id)
     }
   }
   const progressByTrace = new Map<string, ManagerEpisodeTrace[]>()
   const orphanProgress: ManagerEpisodeTrace[] = []
-  const primary = episodes.filter((episode) => {
-    if (episode.trigger.type !== 'worker_event') return true
-    const parent = episode.worker_ref ? ownerByWorker.get(episode.worker_ref.worker_id) : undefined
-    if (parent) progressByTrace.set(parent, [...(progressByTrace.get(parent) ?? []), episode])
-    else orphanProgress.push(episode)
-    return false
-  })
-  const grouped = primary.map((episode) => ({ episode, progress: progressByTrace.get(episode.trace_id) ?? [] }))
-  // 当前分页找不到 spawn 父级时不丢数据：各自作为进展卡展示。
+  for (const episode of episodes.filter((item) => item.trigger.type === 'worker_event')) {
+    const currentPageParent = episode.worker_ref ? ownerByWorker.get(episode.worker_ref.worker_id) : undefined
+    const parentId = currentPageParent ?? episode.causal_parent?.trace_id
+    if (!parentId) { orphanProgress.push(episode); continue }
+    if (!primaryById.has(parentId) && episode.causal_parent) {
+      primaryById.set(parentId, {
+        trace_id: episode.causal_parent.trace_id,
+        manager_key: episode.manager_key,
+        started_at: episode.causal_parent.started_at,
+        status: 'completed',
+        trigger: episode.causal_parent.trigger,
+        spans: [],
+        spawned_worker_ids: episode.worker_ref ? [episode.worker_ref.worker_id] : [],
+        ...(episode.causal_parent.reply_excerpt ? { reply_excerpt: episode.causal_parent.reply_excerpt } : {}),
+        ...(episode.causal_parent.actions ? { actions: episode.causal_parent.actions } : {}),
+      })
+    }
+    progressByTrace.set(parentId, [...(progressByTrace.get(parentId) ?? []), episode])
+  }
+  const grouped = Array.from(primaryById.values()).map((episode) => ({ episode, progress: progressByTrace.get(episode.trace_id) ?? [] }))
+  // 无 parent 事实的历史事件不丢数据，各自作为进展卡展示。
   grouped.push(...orphanProgress.map((episode) => ({ episode, progress: [] })))
   return grouped.sort((a, b) => b.episode.started_at.localeCompare(a.episode.started_at))
 }

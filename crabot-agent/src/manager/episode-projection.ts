@@ -17,16 +17,27 @@ export interface WorkerProjectionRef {
   state_to?: string
 }
 
+export interface CausalParentProjection {
+  trace_id: string
+  started_at: string
+  trigger: ManagerEpisodeTrace['trigger']
+  reply_excerpt?: string
+  actions?: EpisodeAction[]
+}
+
 export interface ManagerEpisodeProjection extends ManagerEpisodeTrace {
   reply_excerpt?: string
   actions?: EpisodeAction[]
   worker_ref?: WorkerProjectionRef
+  /** worker_event 的 spawn 父 episode 不在当前分页时，携带最小人话上下文。 */
+  causal_parent?: CausalParentProjection
 }
 
 export interface EpisodeWorkerFact {
   worker_id: string
   title: string
   status: string
+  spawned_by_episode?: string
 }
 
 const REPLY_TOOLS = new Set(['send_message', 'send_private_message', 'send_master_private'])
@@ -89,6 +100,23 @@ export function projectManagerEpisode(
     ...(replyExcerpt ? { reply_excerpt: replyExcerpt } : {}),
     ...(actions.length > 0 ? { actions } : {}),
     ...(workerRef ? { worker_ref: workerRef } : {}),
+  }
+}
+
+export function withCausalParent(
+  episode: ManagerEpisodeProjection,
+  parent: ManagerEpisodeProjection | undefined,
+): ManagerEpisodeProjection {
+  if (!parent || episode.trigger.type !== 'worker_event') return episode
+  return {
+    ...episode,
+    causal_parent: {
+      trace_id: parent.trace_id,
+      started_at: parent.started_at,
+      trigger: parent.trigger,
+      ...(parent.reply_excerpt ? { reply_excerpt: parent.reply_excerpt } : {}),
+      ...(parent.actions ? { actions: parent.actions } : {}),
+    },
   }
 }
 

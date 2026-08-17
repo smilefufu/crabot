@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { extractStringField, managerActivitySummary, projectManagerEpisode, type EpisodeWorkerFact } from '../../src/manager/episode-projection.js'
+import { extractStringField, managerActivitySummary, projectManagerEpisode, withCausalParent, type EpisodeWorkerFact } from '../../src/manager/episode-projection.js'
 import type { ManagerEpisodeTrace, ManagerEpisodeSpan } from '../../src/manager/trace-types.js'
 
 const tool = (name: string, input: string, output = '{}'): ManagerEpisodeSpan => ({
@@ -62,6 +62,23 @@ describe('projectManagerEpisode', () => {
       tool('send_message', truncated),
       { ...tool('spawn_worker', 'not-json', 'not-json'), details: null },
     ] }), facts)).not.toThrow()
+  })
+
+  it('跨页 worker_event 可携带最小 spawn 父 episode', () => {
+    const parent = projectManagerEpisode(trace({
+      trace_id: 'ep-parent',
+      trigger: { type: 'human_message', summary: '人类消息 x1：开始部署' },
+      spans: [tool('spawn_worker', JSON.stringify({ title: '部署 Minecraft' }), JSON.stringify({ worker_id: 'w-1' }))],
+    }), facts)
+    const child = projectManagerEpisode(trace({
+      trace_id: 'ep-child',
+      trigger: { type: 'worker_event', summary: 'state', source: 'worker:w-1' },
+    }), facts)
+    expect(withCausalParent(child, parent).causal_parent).toMatchObject({
+      trace_id: 'ep-parent',
+      trigger: { summary: '人类消息 x1：开始部署' },
+      actions: [{ worker_id: 'w-1' }],
+    })
   })
 
   it('Manager 列表最近活动摘要是人话', () => {

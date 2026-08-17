@@ -146,19 +146,20 @@ describe('filterAndPageWorkers', () => {
       entry(ALICE, 'w-active', { status: 'running', title: '部署 Minecraft', impl: 'codex' }),
       entry(ALICE, 'w-idle', { status: 'waiting_input', title: '等待补充', impl: 'claude-code' }),
       entry(ALICE, 'w-terminal', { status: 'completed', title: '旧部署', impl: 'codex' }),
+      entry(ALICE, 'w-legacy-live', { status: 'running', title: '续办中的 legacy', impl: 'builtin', legacy: true }),
       entry(ALICE, 'w-legacy', { status: 'completed', title: '历史导入', impl: 'legacy', legacy: true }),
     ]
 
     it('默认只返回非终态且排除 legacy，计数保留全局事实', () => {
       const result = filterAndPageWorkers(all, {})
-      expect(result.items.map((w) => w.worker_id)).toEqual(['w-active', 'w-idle'])
-      expect(result).toMatchObject({ total_active: 2, total_terminal: 2, total_legacy: 1 })
+      expect(result.items.map((w) => w.worker_id)).toEqual(['w-active', 'w-idle', 'w-legacy-live'])
+      expect(result).toMatchObject({ total_active: 3, total_terminal: 2, total_legacy: 2 })
     })
 
     it('terminal/legacy 必须分别显式进入', () => {
       expect(filterAndPageWorkers(all, { include_terminal: true }).items.map((w) => w.worker_id))
-        .toEqual(['w-active', 'w-idle', 'w-terminal'])
-      expect(filterAndPageWorkers(all, { include_terminal: true, include_legacy: true }).pagination.total_items).toBe(4)
+        .toEqual(['w-active', 'w-idle', 'w-legacy-live', 'w-terminal'])
+      expect(filterAndPageWorkers(all, { include_terminal: true, include_legacy: true }).pagination.total_items).toBe(5)
     })
 
     it('q 按标题不区分大小写，impl 按主线实现过滤', () => {

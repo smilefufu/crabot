@@ -199,7 +199,9 @@ export function filterAndPageWorkers(
   const matched = scoped.filter((entry) => {
     const worker = entry.worker
     if (!params.include_terminal && !isDecisionVisibleWorker(worker.task.status)) return false
-    if (!params.include_legacy && worker.legacy_source !== undefined) return false
+    // active legacy 已通过 v3 continuation 成为真实可续跑 worker，必须与 Manager 决策视野一致。
+    // include_legacy 只控制终态 legacy 历史。
+    if (!params.include_legacy && worker.legacy_source !== undefined && !isDecisionVisibleWorker(worker.task.status)) return false
     if (statuses && !statuses.includes(worker.task.status)) return false
     return true
   })

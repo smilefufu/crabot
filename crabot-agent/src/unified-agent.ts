@@ -118,7 +118,7 @@ import {
   type GetWorkerTraceParams,
   type GetWorkerTraceResult,
 } from './manager/read-model.js'
-import { managerActivitySummary, projectManagerEpisode, type EpisodeWorkerFact, type ManagerEpisodeProjection } from './manager/episode-projection.js'
+import { managerActivitySummary, projectManagerEpisode, withCausalParent, type EpisodeWorkerFact, type ManagerEpisodeProjection } from './manager/episode-projection.js'
 import type { NormalizedTraceEvent, SpawnSpec } from './workers/types.js'
 import {
   TaskCancelledError,
@@ -3203,9 +3203,23 @@ export class UnifiedAgent extends ModuleBase {
         worker_id: worker.worker_id,
         title: worker.task.title,
         status: worker.task.status,
+        ...(worker.origin.spawned_by_episode ? { spawned_by_episode: worker.origin.spawned_by_episode } : {}),
       })
     }
-    return { ...result, items: result.items.map((trace) => projectManagerEpisode(trace, workerFacts)) }
+    const projected = result.items.map((trace) => projectManagerEpisode(trace, workerFacts))
+    return {
+      ...result,
+      items: projected.map((episode) => {
+        const fact = episode.worker_ref ? workerFacts.get(episode.worker_ref.worker_id) : undefined
+        const parentTrace = fact?.spawned_by_episode
+          ? this.traceStore.getManagerEpisode(fact.spawned_by_episode)
+          : undefined
+        const parent = parentTrace?.manager_key === params.manager_key
+          ? projectManagerEpisode(parentTrace, workerFacts)
+          : undefined
+        return withCausalParent(episode, parent)
+      }),
+    }
   }
 
   /** §8.3 get_worker_detail：单 worker 全量（台账条目 + 化身链）；不存在抛错，不返回空对象。 */

@@ -71,6 +71,13 @@ export interface ManagerEpisodeTrace {
     worker_id?: string
   }>
   worker_ref?: { worker_id: string; title?: string; state_to?: string }
+  causal_parent?: {
+    trace_id: string
+    started_at: string
+    trigger: ManagerEpisodeTrigger
+    reply_excerpt?: string
+    actions?: ManagerEpisodeTrace['actions']
+  }
 }
 
 // ── Worker（§8.3 台账 read model）──────────────────────────────

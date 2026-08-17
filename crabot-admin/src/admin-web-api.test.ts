@@ -1547,9 +1547,9 @@ describe('Admin Web API', () => {
         ],
         pagination: { page: 1, page_size: 20, total_items: 3, total_pages: 1 },
       })
-      vi.spyOn(admin as never as { listChannelSessions(id: string): Promise<unknown[]> }, 'listChannelSessions')
-        .mockImplementation(async (id: string) => id === 'wechat-棉花糖'
-          ? [{ id: 'sess-1', channel_id: id, type: 'private', platform_session_id: 'u-1', title: 'FuFu' }]
+      vi.spyOn(admin as never as { resolveChannelSession(channelId: string, sessionId: string): Promise<unknown> }, 'resolveChannelSession')
+        .mockImplementation(async (id: string, sessionId: string) => id === 'wechat-棉花糖'
+          ? { id: sessionId, channel_id: id, type: 'private', platform_session_id: 'u-1', title: 'FuFu', participants: [] }
           : Promise.reject(new Error('offline')))
       vi.spyOn(admin['channelManager'], 'getInstance').mockReturnValue({
         id: 'wechat-棉花糖', implementation_id: 'wechat', name: '棉花糖', platform: 'wechat',
@@ -1565,6 +1565,31 @@ describe('Admin Web API', () => {
         expect.objectContaining({ manager_key: 'admin-web::system-tasks', display_name: 'Admin Web · 系统任务' }),
         expect.objectContaining({ manager_key: 'offline::unknown', display_name: 'offline::unknown' }),
       ])
+    })
+
+    it('Manager 标题查询只 exact lookup 当前页 session，100 条上限内无全历史扫描', async () => {
+      const token = await loginAndGetToken()
+      admin['agentPort'] = 19005
+      spyAgentRpc().mockResolvedValue({
+        items: Array.from({ length: 100 }, (_, i) => ({ manager_key: `wechat-test::s-${i}`, active_worker_count: 0 })),
+        pagination: { page: 1, page_size: 100, total_items: 100, total_pages: 1 },
+      })
+      const resolveSession = vi.spyOn(
+        admin as never as { resolveChannelSession(channelId: string, sessionId: string): Promise<unknown> },
+        'resolveChannelSession',
+      ).mockImplementation(async (channelId: string, sessionId: string) => ({
+        id: sessionId, channel_id: channelId, type: 'group', platform_session_id: sessionId,
+        title: `群 ${sessionId}`, participants: [],
+      }))
+      vi.spyOn(admin['channelManager'], 'getInstance').mockReturnValue({
+        id: 'wechat-test', implementation_id: 'wechat', name: 'test', platform: 'wechat',
+        auto_start: true, start_priority: 1, module_registered: true, created_at: '', updated_at: '',
+      })
+      const response = await makeWebRequest<{ items: unknown[] }>(TEST_WEB_PORT, '/api/agent/managers?page_size=100', 'GET', null, token)
+      expect(response.statusCode).toBe(200)
+      expect(response.body.items).toHaveLength(100)
+      expect(resolveSession).toHaveBeenCalledTimes(100)
+      expect(resolveSession).toHaveBeenCalledWith('wechat-test', 's-0')
     })
 
     it('GET /api/agent/managers/:key/episodes 转发 list_manager_episodes_admin（path decode 一次）', async () => {
