@@ -16,6 +16,7 @@ import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createStream } from 'rotating-file-stream'
 import { clearPid } from './lib/pid.mjs'
+import { createSupervisorShutdownController } from './lib/supervisor-shutdown.mjs'
 
 const DATA_DIR = process.env.CRABOT_SUPERVISOR_DATA_DIR
 const MM_ENTRY = process.env.CRABOT_SUPERVISOR_MM_ENTRY
@@ -55,26 +56,22 @@ const cleanup = (exitCode) => {
   process.exit(exitCode)
 }
 
+const shutdownController = createSupervisorShutdownController({
+  mm,
+  cleanup,
+  log: message => stdoutStream.write(message),
+})
+
 mm.on('exit', (code, signal) => {
   stdoutStream.write(`[supervisor] MM exited code=${code} signal=${signal}\n`)
-  cleanup(code ?? 0)
+  shutdownController.handleMmExit(code ?? 0)
 })
 
 mm.on('error', (err) => {
   stderrStream.write(`[supervisor] MM spawn error: ${err.message}\n`)
-  cleanup(1)
+  shutdownController.handleMmExit(1)
 })
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => {
-    stdoutStream.write(`[supervisor] received ${sig}, killing MM\n`)
-    if (mm.pid) {
-      try { mm.kill('SIGTERM') } catch { /* ok */ }
-    }
-    // MM 退出会触发 cleanup；最多等 10s 兜底强杀
-    setTimeout(() => {
-      try { mm.kill('SIGKILL') } catch { /* ok */ }
-      cleanup(1)
-    }, 10_000).unref()
-  })
+  process.on(sig, () => shutdownController.handleSignal(sig))
 }

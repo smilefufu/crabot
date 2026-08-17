@@ -100,6 +100,8 @@ export interface ManagerStack {
   readonly harness: WorkerHarness
   readonly registry: ManagerRegistry
   readonly adapters: Map<WorkerImplId, WorkerAdapter>
+  /** Release all adapter-owned resources. Repeated calls share one cleanup. */
+  dispose(): Promise<void>
   /**
    * 人类消息发起人身份的解析缓存(P7 J)。服务于三个**同步** thunk:记忆档位、台账归档键、
    * 对话对象档案(见 `principal.ts` 文件头)。
@@ -160,6 +162,8 @@ export interface BootstrapDeps {
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
   /** Reject new worker incarnations while runtime config is stale. */
   readonly assertExecutionAdmission?: () => void
+  /** Worker event routing must close before adapter disposal begins. */
+  readonly isClosing?: () => boolean
   /** 当前 worker capability；调用方必须按 harness 给出的固定权限快照过滤。 */
   readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
   /** Shared bg registry ownership check for builtin end_turn state mapping. */
@@ -358,6 +362,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       // 的过滤规则上。对外事件自己的去重按 task.status 做,在 events.ts 里。
       publishTaskStatusChanged?.(event)
 
+      if (deps.isClosing?.()) return { consumed: false }
       if (!registry || !shouldWakeOnHarnessEvent(event)) return { consumed: false }
       return registry.routeWorkerEvent(event).then(
         async (result) => {
@@ -440,6 +445,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     adapter: deps.managerAdapter,
     model: deps.managerModel,
     now: () => new Date(deps.now()),
+    isClosing: deps.isClosing,
     timezone: deps.timezone,
     managerKeyFor: (key) => key,
     // 人类消息唤醒边界:这是人类消息链路上**唯一**一次异步解析。返回本批发言者算好的档位,
@@ -533,7 +539,24 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     },
   })
 
-  return { ledger, workspaces, harness, registry, adapters, principals, principalBindings, builtinDataDir, store: sessionStore }
+  let disposePromise: Promise<void> | undefined
+  const dispose = (): Promise<void> => {
+    if (disposePromise) return disposePromise
+    disposePromise = (async () => {
+      const results = await Promise.allSettled(
+        [...adapters.values()].map((adapter) => Promise.resolve().then(() => adapter.dispose())),
+      )
+      const errors = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : [])
+      if (errors.length > 0) {
+        const error = new Error('Failed to dispose one or more worker adapters') as Error & { errors: unknown[] }
+        error.errors = errors
+        throw error
+      }
+    })()
+    return disposePromise
+  }
+
+  return { ledger, workspaces, harness, registry, adapters, principals, principalBindings, builtinDataDir, store: sessionStore, dispose }
 }
 
 /**

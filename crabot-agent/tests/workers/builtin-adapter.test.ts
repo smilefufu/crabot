@@ -1264,6 +1264,30 @@ describe('BuiltinWorkerAdapter', () => {
     expect(meta.ended_reason).toBe('killed')
   })
 
+  it('dispose 中断并等待活跃 burst，完成后拒绝新执行', async () => {
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
+    const gate = deferred<void>()
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeGatedAdapter(gate.promise, [{ text: '不会被看到的回复', stopReason: 'end_turn' }]),
+    })
+
+    const h = await adapter.spawn(s)
+    await vi.waitFor(() => expect(runEngineSpy).toHaveBeenCalledTimes(1))
+
+    let disposed = false
+    const disposePromise = adapter.dispose().then(() => { disposed = true })
+    const abortSignal = runEngineSpy.mock.calls[0]?.[0].options?.abortSignal
+    await vi.waitFor(() => expect(abortSignal?.aborted).toBe(true))
+    await Promise.resolve()
+    expect(disposed).toBe(false)
+
+    gate.resolve()
+    await disposePromise
+    expect(await adapter.state(h)).toBe('exited')
+    await expect(adapter.provision({ root: tmp }, { skills: [], mcp_servers: [] })).rejects.toThrow(/shutting down/)
+  })
+
   it('kill 打在 sendInput(idle→running) 转态后、续 burst 安装新 controller 前的窗口 → 终态 exited(killed)，不起新 burst（P1 全分支终审回归）', async () => {
     const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })

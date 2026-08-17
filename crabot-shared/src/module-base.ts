@@ -481,6 +481,7 @@ export abstract class ModuleBase {
 
   private server: http.Server | null = null
   private isShuttingDown = false
+  private stopPromise: Promise<void> | null = null
 
   constructor(config: ModuleConfig) {
     this.config = config
@@ -531,10 +532,14 @@ export abstract class ModuleBase {
   /**
    * 停止模块
    */
-  async stop(): Promise<void> {
-    if (this.isShuttingDown) return
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise
     this.isShuttingDown = true
+    this.stopPromise = this.performStop()
+    return this.stopPromise
+  }
 
+  private async performStop(): Promise<void> {
     console.log(`[${this.config.moduleId}] Shutting down...`)
 
     await this.onStop()
@@ -789,9 +794,7 @@ export abstract class ModuleBase {
    */
   private async handleShutdown(): Promise<Record<string, never>> {
     // 异步执行停止，不阻塞响应
-    setTimeout(() => {
-      this.stop().catch(console.error)
-    }, 100)
+    void this.stop().catch(console.error)
 
     return {}
   }

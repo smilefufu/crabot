@@ -675,6 +675,28 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(sweep).toHaveBeenCalledOnce()
   })
 
+  it('shutdown 已开始时，迟到的启动对账不再释放 recovered bg exits 或启动巡检', async () => {
+    boot()
+    const stack = internals.managerStack!
+    let finishReconciliation!: () => void
+    const reconciliation = new Promise<void>((resolve) => { finishReconciliation = resolve })
+    vi.spyOn(stack.harness, 'reconcileOnStartup').mockImplementation(async () => {
+      await reconciliation
+      return { revived: [], failed: [], unchanged: [] }
+    })
+    const release = vi.fn().mockResolvedValue(undefined)
+    internals.agentHandler = { releaseRecoveredWorkerShellExits: release } as any
+    const sweep = vi.spyOn(stack.harness, 'startLivenessSweep')
+
+    agent.startManagerStackReconciliation()
+    internals.runtimeClosing = true
+    finishReconciliation()
+    await waitUntil(async () => internals.managerReconciliationSettled === true)
+
+    expect(release).not.toHaveBeenCalled()
+    expect(sweep).not.toHaveBeenCalled()
+  })
+
   it('启动对账已结束后由配置 push 晚建 handler，会立即打开 recovered-exit gate', async () => {
     boot()
     internals.managerReconciliationSettled = true

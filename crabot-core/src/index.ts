@@ -48,6 +48,7 @@ import { scheduleRestart } from './restart-policy.js'
 import { checkDiskLow } from './disk-watcher.js'
 import { resolveExecutable } from './executable-resolver.js'
 import { terminateProcessTree, waitForProcessTreeExit } from './process-tree.js'
+import { ModuleRuntimeRegistry } from './module-runtime-registry.js'
 
 // ============================================================================
 // 类型定义
@@ -66,6 +67,7 @@ interface EventSubscription {
 
 interface ManagedChildState {
   moduleId: ModuleId
+  runtimeId: string
   child: ChildProcess
   rootPid?: number
   rootExited: boolean
@@ -97,6 +99,7 @@ export class ModuleManager {
   private readonly envOverrides: Map<ModuleId, Record<string, string>> = new Map()
   private readonly healthProbes: Set<ModuleId> = new Set()
   private readonly healthRecoveries: Set<ModuleId> = new Set()
+  private readonly runtimeRegistry: ModuleRuntimeRegistry
   private readonly subscriptions: EventSubscription[] = []
   private readonly methodHandlers: Map<string, MethodHandler> = new Map()
   private readonly runtimeBearers = new Map<ModuleId, { token: string; child: ChildProcess; revoked: boolean }>()
@@ -108,6 +111,7 @@ export class ModuleManager {
   private healthCheckTimer: NodeJS.Timeout | null = null
   private diskWatcherTimer: NodeJS.Timeout | null = null
   private isShuttingDown = false
+  private stopPromise: Promise<void> | null = null
   private readonly logsDir: string
   private readonly dataDir: string
 
@@ -117,6 +121,7 @@ export class ModuleManager {
       throw new Error('Invalid Module Manager config: hotplug_allowed_types must not contain reserved type "agent"')
     }
     this.portAllocator = new PortAllocator(this.config.port_range, dataDir)
+    this.runtimeRegistry = new ModuleRuntimeRegistry(dataDir)
     this.logsDir = path.join(dataDir, 'logs')
     fs.mkdirSync(this.logsDir, { recursive: true })
     this.dataDir = dataDir
@@ -172,6 +177,12 @@ export class ModuleManager {
       }
     }
 
+    await this.runtimeRegistry.initialize()
+    await this.runtimeRegistry.recoverOrphans({
+      currentRuntimeIds: this.currentRuntimeIds(),
+      gracefulTimeoutMs: this.config.shutdown_timeout * 1000,
+    })
+
     // Every singleton-topology boot re-enters management-only until Admin re-inventories
     // legacy records and completes the authenticated cutover handshake. A completed marker
     // is an idempotency record, not permission to skip the restart rescan: otherwise a
@@ -222,10 +233,18 @@ export class ModuleManager {
   /**
    * 停止 Module Manager
    */
-  async stop(): Promise<void> {
-    if (this.isShuttingDown) return
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise
     this.isShuttingDown = true
+    this.stopPromise = this.performStop().catch((error) => {
+      this.isShuttingDown = false
+      this.stopPromise = null
+      throw error
+    })
+    return this.stopPromise
+  }
 
+  private async performStop(): Promise<void> {
     console.log('[ModuleManager] Shutting down...')
 
     // 停止健康检查定时器
@@ -250,17 +269,12 @@ export class ModuleManager {
 
     // 清理所有仍受管的进程树（包括 health/error 状态下尚未 finalize 的树）。
     const managedModuleIds = Array.from(this.processes.keys())
-    try {
-      await Promise.all(
-        managedModuleIds.map((moduleId) => this.enqueueLifecycle(
-          moduleId,
-          () => this.stopModuleProcess(moduleId, 'shutdown'),
-        )),
-      )
-    } catch (error) {
-      this.isShuttingDown = false
-      throw error
-    }
+    await Promise.all(
+      managedModuleIds.map((moduleId) => this.enqueueLifecycle(
+        moduleId,
+        () => this.stopModuleProcess(moduleId, 'shutdown'),
+      )),
+    )
 
     // 关闭 HTTP 服务器
     if (this.server) {
@@ -502,8 +516,8 @@ export class ModuleManager {
       if (!this.processes.has('crabot-agent')) {
         throw Object.assign(new Error('Core Agent registration requires the exact spawned child'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
       }
-      if (params.protocol_version !== '3.1.1') {
-        throw Object.assign(new Error('Core Agent protocol version must be 3.1.1'), { code: 'MODULE_MANAGER_PROTOCOL_VERSION_MISMATCH' })
+      if (params.protocol_version !== '3.1.2') {
+        throw Object.assign(new Error('Core Agent protocol version must be 3.1.2'), { code: 'MODULE_MANAGER_PROTOCOL_VERSION_MISMATCH' })
       }
     }
 
@@ -1016,6 +1030,13 @@ export class ModuleManager {
       throw new Error(`Module already running: ${moduleId}`)
     }
 
+    await this.runtimeRegistry.initialize()
+    await this.runtimeRegistry.recoverOrphans({
+      moduleId,
+      currentRuntimeIds: this.currentRuntimeIds(),
+      gracefulTimeoutMs: this.config.shutdown_timeout * 1000,
+    })
+
     // schema 检测（仅当模块声明了 data_dir）
     if (runtime.data_dir) {
       const { checkSchema } = await import('./schema-check.js')
@@ -1072,6 +1093,7 @@ export class ModuleManager {
     // （无人监听）永远失败，只能靠 module_started 推送兜底；一旦错过推送竞态就永久 unconfigured。
     // 这里用 admin 模块真实分配的端口覆盖静态值，让启动 pull 这条主路径可靠工作。
     const adminRpcPort = this.modules.get('admin-web')?.port
+    const runtimeId = this.runtimeRegistry.createRuntimeId()
 
     const childEnv: Record<string, string> = {
       ...process.env,
@@ -1079,6 +1101,8 @@ export class ModuleManager {
       ...envOverride,
       Crabot_MODULE_ID: moduleId,
       Crabot_PORT: String(runtime.port),
+      CRABOT_INSTANCE_ID: this.runtimeRegistry.getInstanceId(),
+      CRABOT_MODULE_RUNTIME_ID: runtimeId,
       CRABOT_MM_PORT: String(this.config.port),
       CRABOT_MM_ENDPOINT: `http://localhost:${this.config.port}`,
       ...(adminRpcPort && moduleId !== 'admin-web' ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` } : {}),
@@ -1094,6 +1118,10 @@ export class ModuleManager {
     } else {
       delete childEnv.CRABOT_CORE_AGENT_RUNTIME_BEARER
     }
+    const clearPendingCredentials = (): void => {
+      delete (runtime as ModuleRuntime & { _pendingBearer?: unknown })._pendingBearer
+      delete (runtime as ModuleRuntime & { _pendingCutover?: unknown })._pendingCutover
+    }
 
     let proc: ChildProcess
     try {
@@ -1104,8 +1132,63 @@ export class ModuleManager {
         detached: process.platform !== 'win32',
       })
     } catch (error) {
-      delete (runtime as ModuleRuntime & { _pendingBearer?: unknown })._pendingBearer
-      delete (runtime as ModuleRuntime & { _pendingCutover?: unknown })._pendingCutover
+      clearPendingCredentials()
+      runtime.status = 'error'
+      logStream.end(`[${generateTimestamp()}] === spawn failed ${moduleId} ===\n`)
+      throw error
+    }
+    let spawnError: Error | undefined
+    const captureSpawnError = (error: Error): void => { spawnError = error }
+    proc.once('error', captureSpawnError)
+    if (!proc.pid && !spawnError) {
+      await new Promise<void>((resolve) => {
+        const settled = (): void => {
+          proc.removeListener('spawn', settled)
+          proc.removeListener('error', settled)
+          resolve()
+        }
+        proc.once('spawn', settled)
+        proc.once('error', settled)
+      })
+    }
+    if (!proc.pid) {
+      proc.removeListener('error', captureSpawnError)
+      clearPendingCredentials()
+      runtime.status = 'error'
+      logStream.end(`[${generateTimestamp()}] === spawn failed ${moduleId} ===\n`)
+      throw spawnError ?? new Error(`Spawn did not return a PID for module ${moduleId}`)
+    }
+
+    try {
+      await this.runtimeRegistry.recordSpawn({
+        runtimeId,
+        moduleId,
+        rootPid: proc.pid,
+        modulePort: runtime.port,
+      })
+    } catch (error) {
+      let cleanupError: unknown
+      try {
+        await terminateProcessTree(proc.pid, {
+          gracefulTimeoutMs: 0,
+          forceImmediately: true,
+          modulePort: runtime.port,
+        })
+      } catch (terminationError) {
+        cleanupError = terminationError
+      }
+      await this.runtimeRegistry.removeRuntime(runtimeId).catch((removeError) => {
+        cleanupError ??= removeError
+      })
+      proc.removeListener('error', captureSpawnError)
+      clearPendingCredentials()
+      runtime.status = 'error'
+      logStream.end(`[${generateTimestamp()}] === runtime registration failed ${moduleId} ===\n`)
+      if (cleanupError) {
+        throw new Error(
+          `Failed to persist runtime ${runtimeId} and clean up PID ${proc.pid}: ${String(cleanupError)}`,
+        )
+      }
       throw error
     }
     const pendingBearer = (runtime as ModuleRuntime & { _pendingBearer?: { token: string; child: ChildProcess; revoked: boolean } })._pendingBearer
@@ -1128,6 +1211,7 @@ export class ModuleManager {
     const finalized = new Promise<void>(resolve => { resolveFinalized = resolve })
     const childState: ManagedChildState = {
       moduleId,
+      runtimeId,
       child: proc,
       rootPid: proc.pid,
       rootExited: false,
@@ -1157,6 +1241,7 @@ export class ModuleManager {
       })
     }
 
+    proc.removeListener('error', captureSpawnError)
     proc.once('exit', (code, signal) => {
       childState.rootExited = true
       finalize(code, signal)
@@ -1167,6 +1252,12 @@ export class ModuleManager {
       }
       finalize(null, null, error)
     })
+
+    if (spawnError || proc.exitCode !== null || proc.signalCode !== null) {
+      childState.rootExited = true
+      await this.beginChildFinalize(childState, proc.exitCode, proc.signalCode, spawnError)
+      throw spawnError ?? new Error(`Module ${moduleId} exited during startup`)
+    }
 
     console.log(`[ModuleManager] Started module: ${moduleId} (PID: ${proc.pid})`)
 
@@ -1251,6 +1342,15 @@ export class ModuleManager {
       if (this.lifecycleQueues.get(moduleId) === settled) this.lifecycleQueues.delete(moduleId)
     })
     return result
+  }
+
+  private currentRuntimeIds(): Set<string> {
+    const runtimeIds = new Set<string>()
+    for (const child of this.processes.values()) {
+      const state = this.childStates.get(child)
+      if (state) runtimeIds.add(state.runtimeId)
+    }
+    return runtimeIds
   }
 
   private cancelAutoRestart(moduleId: ModuleId): void {
@@ -1365,6 +1465,7 @@ export class ModuleManager {
 
     try {
       await this.ensureChildTreeTerminated(state)
+      await this.runtimeRegistry.removeRuntime(state.runtimeId)
       const isCurrent = this.processes.get(state.moduleId) === state.child
       if (!isCurrent || !runtime) return
 

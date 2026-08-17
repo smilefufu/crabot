@@ -196,3 +196,44 @@ test('ModuleBase restores persisted proxy config at construction and persists up
   delete process.env.DATA_DIR
   fs.rmSync(dir, { recursive: true, force: true })
 })
+
+test('shutdown starts cleanup immediately and repeated stop waits for the same cleanup', async () => {
+  const { ModuleBase } = await import('./module-base.js')
+  let startCleanup!: () => void
+  let finishCleanup!: () => void
+  const cleanupStarted = new Promise<void>((resolve) => { startCleanup = resolve })
+  const cleanupFinished = new Promise<void>((resolve) => { finishCleanup = resolve })
+  let onStopCalls = 0
+
+  class ProbeModule extends ModuleBase {
+    protected override async onStop(): Promise<void> {
+      onStopCalls += 1
+      startCleanup()
+      await cleanupFinished
+    }
+    shutdownHandler(): () => Promise<unknown> {
+      return this.methodHandlers.get('shutdown') as () => Promise<unknown>
+    }
+  }
+
+  const mod = new ProbeModule({
+    moduleId: 'shutdown-probe',
+    moduleType: 'probe',
+    version: '0.0.1',
+    protocolVersion: '0.0.1',
+    port: 0,
+  })
+
+  await mod.shutdownHandler()()
+  await cleanupStarted
+  assert.equal(onStopCalls, 1)
+
+  let secondStopResolved = false
+  const secondStop = mod.stop().then(() => { secondStopResolved = true })
+  await Promise.resolve()
+  assert.equal(secondStopResolved, false)
+
+  finishCleanup()
+  await secondStop
+  assert.equal(onStopCalls, 1)
+})
