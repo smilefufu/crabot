@@ -11,17 +11,29 @@ import {
   agentObservabilityService,
   type LedgerWorker,
   type WorkerIncarnation,
+  type WorkerTaskStatus,
   type WorkerTraceEvent,
 } from '../../services/agent-observability'
 
 const SOURCE_LABEL: Record<string, string> = { harness: 'harness', native: 'native', legacy: 'legacy' }
+const KIND_LABEL: Record<WorkerTraceEvent['kind'], string> = {
+  message: '消息', tool_call: '工具调用', tool_result: '结果', thinking: '思考', lifecycle: '生命周期',
+}
+const STATUS_LABEL: Record<WorkerTaskStatus, string> = {
+  queued: '排队', running: '执行中', waiting_input: '等输入',
+  completed: '已完成', failed: '失败', cancelled: '已取消',
+}
+const STATUS_COLOR: Record<WorkerTaskStatus, string> = {
+  queued: 'var(--text-muted)', running: 'var(--info)', waiting_input: 'var(--warning)',
+  completed: 'var(--success)', failed: 'var(--error)', cancelled: 'var(--text-muted)',
+}
 
 function TimelineEvent({ event }: { event: WorkerTraceEvent }) {
   return (
     <div style={{ display: 'flex', gap: 8, fontSize: 12, padding: '3px 0', fontFamily: 'var(--font-mono)' }}>
       <span style={{ color: 'var(--text-muted)', minWidth: 64 }}>{event.ts ? new Date(event.ts).toLocaleTimeString('zh-CN', { hour12: false }) : ''}</span>
       <span style={{ color: 'var(--text-muted)', minWidth: 56 }}>{event.source ? SOURCE_LABEL[event.source] ?? event.source : ''}</span>
-      <span style={{ color: 'var(--text-muted)', minWidth: 88 }}>{event.kind}</span>
+      <span style={{ color: 'var(--text-muted)', minWidth: 88 }}>{KIND_LABEL[event.kind]}</span>
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{event.summary}</span>
     </div>
   )
@@ -157,7 +169,10 @@ function IncarnationRow({ incarnation, current, onSelect, selected }: {
       <td style={{ padding: '6px 12px' }}>#{incarnation.seq}{current ? '（主线）' : ''}{incarnation.forked_from ? ` fork←#${incarnation.forked_from}` : ''}</td>
       <td style={{ padding: '6px 12px' }}>{incarnation.impl}</td>
       <td style={{ padding: '6px 12px' }}>{incarnation.state}{incarnation.ended_reason ? ` · ${incarnation.ended_reason}` : ''}</td>
-      <td style={{ padding: '6px 12px', fontSize: 12, color: 'var(--text-muted)' }}>{new Date(incarnation.started_at).toLocaleString()}</td>
+      <td style={{ padding: '6px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
+        {new Date(incarnation.started_at).toLocaleString()}
+        {incarnation.ended_at ? ` → ${new Date(incarnation.ended_at).toLocaleString()}` : ' → 现在'}
+      </td>
     </tr>
   )
 }
@@ -208,7 +223,7 @@ const WorkerDetailContent: React.FC = () => {
       </div>
       <div style={{ fontSize: 13, marginBottom: 16, display: 'grid', gap: 4 }}>
         <div><strong>标题：</strong>{worker.task.title}</div>
-        <div><strong>状态：</strong>{worker.task.status}{worker.task.outcome ? ` · ${worker.task.outcome}` : ''}</div>
+        <div><strong>状态：</strong><span style={{ color: STATUS_COLOR[worker.task.status] }}>{STATUS_LABEL[worker.task.status]}</span>{worker.task.outcome ? ` · ${worker.task.outcome}` : ''}</div>
         <div>
           <strong>Owner：</strong>
           <Link to={`/traces/managers/${encodeURIComponent(worker.manager_key)}`} style={{ fontFamily: 'var(--font-mono)' }}>{worker.manager_key}</Link>
@@ -230,8 +245,9 @@ const WorkerDetailContent: React.FC = () => {
           ) : null}
         </div>
         {worker.legacy_source && (
-          <div style={{ color: 'var(--text-muted)' }}>
-            legacy 来源：{worker.legacy_source.kind}{worker.legacy_source.trace_ids?.length ? ` · ${worker.legacy_source.trace_ids.length} 条旧 trace` : ''}
+          <div style={{ background: 'var(--warning-bg)', border: '1px solid var(--warning-border)', borderRadius: 6, padding: 10, margin: '8px 0', color: 'var(--warning-text)' }}>
+            这是从旧版运行时导入的 legacy 记录，不代表当前可运行的 Worker 化身。
+            {worker.legacy_source.trace_ids?.length ? ` 保留 ${worker.legacy_source.trace_ids.length} 条旧 trace 引用。` : ''}
           </div>
         )}
       </div>

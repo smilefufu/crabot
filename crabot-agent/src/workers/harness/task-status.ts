@@ -35,6 +35,14 @@ export function isTerminalStatus(status: TaskStatus): boolean {
 }
 
 /**
+ * Manager 默认决策视野（恢复 v2 dispatcher 的 active-only 不变量）。
+ * 工具、Admin summary、Workers 默认列表、retention 保护集必须共用本函数。
+ */
+export function isDecisionVisibleWorker(status: TaskStatus): boolean {
+  return !isTerminalStatus(status)
+}
+
+/**
  * 检查两个状态之间是否允许转换。
  */
 export function canTransition(from: TaskStatus, to: TaskStatus): boolean {

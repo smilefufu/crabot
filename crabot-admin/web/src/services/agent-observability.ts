@@ -22,9 +22,10 @@ export interface PaginatedResult<T> {
 
 export interface ManagerAdminSummary {
   manager_key: string
+  display_name: string
   last_activity_at?: string
-  episode_count: number
-  worker_count: number
+  recent_activity_summary?: string
+  active_worker_count: number
 }
 
 export interface ManagerEpisodeTrigger {
@@ -63,12 +64,19 @@ export interface ManagerEpisodeTrace {
   spawned_worker_ids: string[]
   outcome?: { summary: string; error?: string }
   total_usage?: ManagerEpisodeUsage
+  reply_excerpt?: string
+  actions?: Array<{
+    kind: 'spawn_worker' | 'send_to_worker' | 'cancel_worker' | 'other'
+    label: string
+    worker_id?: string
+  }>
+  worker_ref?: { worker_id: string; title?: string; state_to?: string }
 }
 
 // ── Worker（§8.3 台账 read model）──────────────────────────────
 
 export type WorkerTaskStatus =
-  | 'queued' | 'executing' | 'waiting_human' | 'completed' | 'failed' | 'cancelled' | 'waiting'
+  | 'queued' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled'
 
 export interface WorkerIncarnation {
   seq: number
@@ -107,6 +115,12 @@ export interface LedgerWorker {
   incarnations: WorkerIncarnation[]
   legacy_source?: { kind: string; admin_task_id?: string; trace_ids?: string[]; imported_at?: string }
   updated_at: string
+}
+
+export interface WorkerListResult extends PaginatedResult<LedgerWorker> {
+  total_active: number
+  total_terminal: number
+  total_legacy: number
 }
 
 export interface WorkerTraceEvent {
@@ -164,15 +178,23 @@ export const agentObservabilityService = {
   listWorkers(params: {
     status?: string | string[]
     manager_key?: string
+    impl?: string
+    q?: string
+    include_terminal?: boolean
+    include_legacy?: boolean
     start?: string
     end?: string
     page?: number
     page_size?: number
-  }): Promise<PaginatedResult<LedgerWorker>> {
+  }): Promise<WorkerListResult> {
     const search = new URLSearchParams()
     const statuses = Array.isArray(params.status) ? params.status : params.status ? [params.status] : []
     for (const status of statuses) search.append('status', status)
     if (params.manager_key) search.set('manager_key', params.manager_key)
+    if (params.impl) search.set('impl', params.impl)
+    if (params.q) search.set('q', params.q)
+    if (params.include_terminal) search.set('include_terminal', 'true')
+    if (params.include_legacy) search.set('include_legacy', 'true')
     if (params.start) search.set('start', params.start)
     if (params.end) search.set('end', params.end)
     search.set('page', String(params.page ?? 1))

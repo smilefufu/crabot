@@ -118,13 +118,14 @@ import {
   type GetWorkerTraceParams,
   type GetWorkerTraceResult,
 } from './manager/read-model.js'
+import { managerActivitySummary, projectManagerEpisode, type EpisodeWorkerFact, type ManagerEpisodeProjection } from './manager/episode-projection.js'
 import type { NormalizedTraceEvent, SpawnSpec } from './workers/types.js'
 import {
   TaskCancelledError,
   WorkerHasNoIncarnationError,
   WorkerNotFoundError,
 } from './workers/harness/harness.js'
-import { applyStatusTransition } from './workers/harness/task-status.js'
+import { applyStatusTransition, isDecisionVisibleWorker } from './workers/harness/task-status.js'
 import { SYSTEM_TASKS_MANAGER_KEY } from './manager/registry.js'
 import { splitManagerKey } from './manager/principal.js'
 
@@ -2911,17 +2912,26 @@ export class UnifiedAgent extends ModuleBase {
     const diskKeys = await stack.store.listManagerKeys()
     const traceKeys = this.traceStore.listTraceManagerKeys()
     const workers = await stack.ledger.listAllWorkers()
-    const workerCounts = new Map<string, number>()
-    for (const { managerKey } of workers) workerCounts.set(managerKey, (workerCounts.get(managerKey) ?? 0) + 1)
+    const activeWorkerCounts = new Map<string, number>()
+    const workerFacts = new Map<string, EpisodeWorkerFact>()
+    for (const { managerKey, worker } of workers) {
+      workerFacts.set(worker.worker_id, { worker_id: worker.worker_id, title: worker.task.title, status: worker.task.status })
+      if (!isDecisionVisibleWorker(worker.task.status)) continue
+      activeWorkerCounts.set(managerKey, (activeWorkerCounts.get(managerKey) ?? 0) + 1)
+    }
     const running = new Map(stack.registry.listActiveManagers().map(({ key, lastActiveAtMs }) => [key, lastActiveAtMs] as const))
     return buildManagerAdminSummaries({
       diskSessionKeys: diskKeys,
       traceKeys,
-      episodeStats: (key) => ({
-        count: this.traceStore.countManagerEpisodes(key),
-        latestStartedAt: this.traceStore.listManagerEpisodes(key, { page: 1, page_size: 1 }).items[0]?.started_at,
-      }),
-      workerCount: (key) => workerCounts.get(key) ?? 0,
+      episodeStats: (key) => {
+        const latest = this.traceStore.listManagerEpisodes(key, { page: 1, page_size: 1 }).items[0]
+        const projected = latest ? projectManagerEpisode(latest, workerFacts) : undefined
+        return {
+          latestStartedAt: latest?.started_at,
+          latestSummary: projected ? managerActivitySummary(projected) : undefined,
+        }
+      },
+      activeWorkerCount: (key) => activeWorkerCounts.get(key) ?? 0,
       runningLastActiveAtMs: (key) => running.get(key),
     }, params?.pagination)
   }
@@ -3180,13 +3190,22 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /** §8.4 list_manager_episodes_admin：按 exact manager key 查 TraceStore episode 列表。 */
-  private async handleListManagerEpisodesAdmin(params: { manager_key: ManagerKey; pagination?: import('crabot-shared').PaginationParams }): Promise<import('crabot-shared').PaginatedResult<import('./manager/trace-types.js').ManagerEpisodeTrace>> {
+  private async handleListManagerEpisodesAdmin(params: { manager_key: ManagerKey; pagination?: import('crabot-shared').PaginationParams }): Promise<import('crabot-shared').PaginatedResult<ManagerEpisodeProjection>> {
     // manager stack/TraceStore 未 ready 时结构化失败，不返回空列表冒充成功。
-    this.requireManagerStack()
+    const stack = this.requireManagerStack()
     if (!params || typeof params.manager_key !== 'string' || params.manager_key.length === 0) {
       throw new Error('manager_key is required')
     }
-    return this.traceStore.listManagerEpisodes(params.manager_key, params.pagination)
+    const result = this.traceStore.listManagerEpisodes(params.manager_key, params.pagination)
+    const workerFacts = new Map<string, EpisodeWorkerFact>()
+    for (const worker of await stack.ledger.listWorkers(params.manager_key)) {
+      workerFacts.set(worker.worker_id, {
+        worker_id: worker.worker_id,
+        title: worker.task.title,
+        status: worker.task.status,
+      })
+    }
+    return { ...result, items: result.items.map((trace) => projectManagerEpisode(trace, workerFacts)) }
   }
 
   /** §8.3 get_worker_detail：单 worker 全量（台账条目 + 化身链）；不存在抛错，不返回空对象。 */

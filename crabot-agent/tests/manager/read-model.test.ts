@@ -34,6 +34,9 @@ function mkWorker(
     status?: TaskStatus
     createdAt?: string
     updatedAt?: string
+    title?: string
+    impl?: 'builtin' | 'claude-code' | 'codex' | 'legacy'
+    legacy?: boolean
   } = {}
 ): LedgerWorker {
   return {
@@ -41,7 +44,7 @@ function mkWorker(
     manager_key: managerKey,
     task: {
       id: `task-${workerId}`,
-      title: `title-${workerId}`,
+      title: opts.title ?? `title-${workerId}`,
       status: opts.status ?? 'running',
       created_at: opts.createdAt ?? '2026-07-01T00:00:00.000Z',
     },
@@ -49,7 +52,21 @@ function mkWorker(
       trigger_type: 'message',
     },
     report_to: { channel_id: 'telegram', session_id: 's-1' },
-    incarnations: [],
+    incarnations: opts.impl ? [{
+      seq: 1,
+      impl: opts.impl,
+      state: 'running',
+      workspace: `/tmp/${workerId}`,
+      started_at: opts.createdAt ?? '2026-07-01T00:00:00.000Z',
+    }] : [],
+    ...(opts.legacy ? {
+      legacy_source: {
+        kind: 'v2_admin_task' as const,
+        admin_task_id: `legacy-${workerId}`,
+        trace_ids: [],
+        imported_at: '2026-08-01T00:00:00.000Z',
+      },
+    } : {}),
     updated_at: opts.updatedAt ?? '2026-07-01T00:00:00.000Z',
   }
 }
@@ -108,7 +125,7 @@ describe('filterAndPageWorkers', () => {
     })
 
     it('数组形态', () => {
-      const result = filterAndPageWorkers(all, { status: ['queued', 'failed'] })
+      const result = filterAndPageWorkers(all, { status: ['queued', 'failed'], include_terminal: true })
       expect(result.items.map((w) => w.worker_id).sort()).toEqual(['w-failed', 'w-queued'])
       expect(result.pagination.total_items).toBe(2)
     })
@@ -119,8 +136,45 @@ describe('filterAndPageWorkers', () => {
       expect(result.pagination.total_items).toBe(0)
     })
 
-    it('不传 status 时全量返回', () => {
-      expect(filterAndPageWorkers(all, {}).pagination.total_items).toBe(4)
+    it('不传 status 时默认只返回决策视野（非终态）', () => {
+      expect(filterAndPageWorkers(all, {}).pagination.total_items).toBe(2)
+    })
+  })
+
+  describe('决策视野/历史/legacy/q/impl', () => {
+    const all = [
+      entry(ALICE, 'w-active', { status: 'running', title: '部署 Minecraft', impl: 'codex' }),
+      entry(ALICE, 'w-idle', { status: 'waiting_input', title: '等待补充', impl: 'claude-code' }),
+      entry(ALICE, 'w-terminal', { status: 'completed', title: '旧部署', impl: 'codex' }),
+      entry(ALICE, 'w-legacy', { status: 'completed', title: '历史导入', impl: 'legacy', legacy: true }),
+    ]
+
+    it('默认只返回非终态且排除 legacy，计数保留全局事实', () => {
+      const result = filterAndPageWorkers(all, {})
+      expect(result.items.map((w) => w.worker_id)).toEqual(['w-active', 'w-idle'])
+      expect(result).toMatchObject({ total_active: 2, total_terminal: 2, total_legacy: 1 })
+    })
+
+    it('terminal/legacy 必须分别显式进入', () => {
+      expect(filterAndPageWorkers(all, { include_terminal: true }).items.map((w) => w.worker_id))
+        .toEqual(['w-active', 'w-idle', 'w-terminal'])
+      expect(filterAndPageWorkers(all, { include_terminal: true, include_legacy: true }).pagination.total_items).toBe(4)
+    })
+
+    it('q 按标题不区分大小写，impl 按主线实现过滤', () => {
+      expect(filterAndPageWorkers(all, { q: 'minecraft', impl: 'codex' }).items.map((w) => w.worker_id))
+        .toEqual(['w-active'])
+    })
+
+    it('2400 terminal + 6 active 的默认结果严格有界', () => {
+      const huge = [
+        ...Array.from({ length: 2400 }, (_, i) => entry(ALICE, `w-done-${i}`, { status: 'completed' })),
+        ...Array.from({ length: 6 }, (_, i) => entry(ALICE, `w-live-${i}`, { status: 'running' })),
+      ]
+      const result = filterAndPageWorkers(huge, {})
+      expect(result.pagination.total_items).toBe(6)
+      expect(result.items).toHaveLength(6)
+      expect(JSON.stringify(result).length).toBeLessThan(20_000)
     })
   })
 
@@ -315,6 +369,7 @@ describe('filterAndPageWorkers', () => {
       ]
       const result = filterAndPageWorkers(mixed, {
         status: 'failed',
+        include_terminal: true,
         pagination: { page: 1, page_size: 1 },
       })
       expect(result.pagination.total_items).toBe(2)
@@ -359,6 +414,7 @@ describe('filterAndPageWorkers', () => {
     ]
     const result = filterAndPageWorkers(all, {
       status: ['failed', 'cancelled'],
+      include_terminal: true,
       manager_key: ALICE,
       time_range: { start: '2026-07-01T00:00:00.000Z', end: '2026-07-04T00:00:00.000Z' },
     })
@@ -436,13 +492,18 @@ describe('buildManagerAdminSummaries（P6-A §7）', () => {
       diskSessionKeys: ['wechat::sess-a' as ManagerKey, 'wechat::sess-b' as ManagerKey],
       traceKeys: ['wechat::sess-b' as ManagerKey, 'wechat::sess-c' as ManagerKey],
       episodeStats: (key) => key === 'wechat::sess-b'
-        ? { count: 3, latestStartedAt: '2026-08-01T10:00:00.000Z' }
-        : { count: key === 'wechat::sess-c' ? 1 : 0, latestStartedAt: key === 'wechat::sess-c' ? '2026-08-02T10:00:00.000Z' : undefined },
-      workerCount: (key) => (key === 'wechat::sess-b' ? 2 : 0),
+        ? { latestStartedAt: '2026-08-01T10:00:00.000Z', latestSummary: 'worker 进展：部署中' }
+        : { latestStartedAt: key === 'wechat::sess-c' ? '2026-08-02T10:00:00.000Z' : undefined },
+      activeWorkerCount: (key) => (key === 'wechat::sess-b' ? 2 : 0),
       runningLastActiveAtMs: (key) => (key === 'wechat::sess-a' ? Date.parse('2026-08-03T10:00:00.000Z') : undefined),
     }, { page: 1, page_size: 20 })
     expect(result.items.map((item) => item.manager_key)).toEqual(['wechat::sess-a', 'wechat::sess-c', 'wechat::sess-b'])
-    expect(result.items.find((item) => item.manager_key === 'wechat::sess-b')).toMatchObject({ episode_count: 3, worker_count: 2 })
+    expect(result.items.find((item) => item.manager_key === 'wechat::sess-b')).toMatchObject({
+      active_worker_count: 2,
+      recent_activity_summary: 'worker 进展：部署中',
+    })
+    expect(result.items[0]).not.toHaveProperty('episode_count')
+    expect(result.items[0]).not.toHaveProperty('worker_count')
     expect(result.pagination.total_items).toBe(3)
   })
 
@@ -450,8 +511,8 @@ describe('buildManagerAdminSummaries（P6-A §7）', () => {
     const { buildManagerAdminSummaries } = await import('../../src/manager/read-model.js')
     const empty = buildManagerAdminSummaries({
       diskSessionKeys: [], traceKeys: [],
-      episodeStats: () => ({ count: 0 }),
-      workerCount: () => 0,
+      episodeStats: () => ({}),
+      activeWorkerCount: () => 0,
       runningLastActiveAtMs: () => undefined,
     }, { page: 0, page_size: 99999 })
     expect(empty.items).toEqual([])

@@ -151,7 +151,7 @@ export class ConfigLoader {
       module_id: moduleId,
       module_type: 'agent',
       version: '0.2.0',
-      protocol_version: '3.1.1',
+      protocol_version: '3.2.0',
       port: process.env.Crabot_PORT ? parseInt(process.env.Crabot_PORT, 10) : 19002,
       orchestration: {
         front_context_recent_messages_window_hours: 6,
@@ -226,7 +226,7 @@ export class ConfigLoader {
     if (moduleId !== 'crabot-agent' || config.module_id !== 'crabot-agent' || config.module_type !== 'agent') {
       throw new Error('[ConfigLoader] Invalid core Agent runtime identity')
     }
-    if (config.protocol_version !== '3.1.1') throw new Error('[ConfigLoader] Invalid core Agent protocol version')
+    if (config.protocol_version !== '3.2.0') throw new Error('[ConfigLoader] Invalid core Agent protocol version')
     if (!config.agent_config || config.agent_config.instance_id !== 'crabot-agent') {
       throw new Error('[ConfigLoader] Invalid core Agent layer config')
     }

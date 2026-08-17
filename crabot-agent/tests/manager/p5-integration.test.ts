@@ -391,13 +391,18 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
       makeLedgerWorker({ workerId: 'w-b1', managerKey: bob, status: 'running', updatedAt: '2026-02-01T00:00:00.000Z' }),
     )
 
-    // 全量：updated_at desc
-    const all = await rpc<{ items: Array<{ worker_id: string }>; pagination: { total_items: number } }>(
+    // 默认决策视野：只返回非终态，updated_at desc
+    const current = await rpc<{ items: Array<{ worker_id: string }>; pagination: { total_items: number }; total_terminal: number }>(
       'list_workers_admin',
       {},
     )
+    expect(current.items.map((w) => w.worker_id)).toEqual(['w-a1', 'w-b1'])
+    expect(current.pagination.total_items).toBe(2)
+    expect(current.total_terminal).toBe(1)
+
+    // 历史显式进入
+    const all = await rpc<{ items: Array<{ worker_id: string }> }>('list_workers_admin', { include_terminal: true })
     expect(all.items.map((w) => w.worker_id)).toEqual(['w-a2', 'w-a1', 'w-b1'])
-    expect(all.pagination.total_items).toBe(3)
 
     // 按 manager_key + status 过滤
     const scoped = await rpc<{ items: Array<{ worker_id: string }> }>('list_workers_admin', {

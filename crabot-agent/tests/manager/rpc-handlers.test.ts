@@ -739,9 +739,13 @@ describe('list_workers_admin(§8.3)', () => {
     ]
     const agent = buildAgent({ ledger: { listAllWorkers: async () => entries } })
 
-    const all = await agent.handleListWorkersAdmin({})
+    const current = await agent.handleListWorkersAdmin({})
+    expect(current.items.map((w) => w.worker_id)).toEqual(['w-1', 'w-3'])
+    expect(current.pagination).toEqual({ page: 1, page_size: 20, total_items: 2, total_pages: 1 })
+    expect(current).toMatchObject({ total_active: 2, total_terminal: 1 })
+
+    const all = await agent.handleListWorkersAdmin({ include_terminal: true })
     expect(all.items.map((w) => w.worker_id)).toEqual(['w-1', 'w-2', 'w-3'])
-    expect(all.pagination).toEqual({ page: 1, page_size: 20, total_items: 3, total_pages: 1 })
 
     const running = await agent.handleListWorkersAdmin({ status: 'running' })
     expect(running.items.map((w) => w.worker_id)).toEqual(['w-1', 'w-3'])
@@ -1057,7 +1061,7 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
     traceStore?: Partial<import('../../src/core/trace-store.js').TraceStore>
     stackStoreKeys?: string[]
     running?: Array<{ key: string; lastActiveAtMs?: number }>
-    workers?: Array<{ managerKey: string }>
+    workers?: Array<{ managerKey: string; worker?: ReturnType<typeof makeLedgerWorker> }>
     noStack?: boolean
   }) {
     const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
@@ -1068,7 +1072,12 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
     if (!options.noStack) {
       agent.managerStack = {
         store: { listManagerKeys: async () => options.stackStoreKeys ?? [] },
-        ledger: { listAllWorkers: async () => (options.workers ?? []).map((w) => ({ managerKey: w.managerKey, worker: {} })) },
+        ledger: {
+          listAllWorkers: async () => (options.workers ?? []).map((w) => ({ managerKey: w.managerKey, worker: w.worker ?? makeLedgerWorker({ workerId: 'w-mock' }) })),
+          listWorkers: async (key: string) => (options.workers ?? [])
+            .filter((w) => w.managerKey === key)
+            .map((w) => w.worker ?? makeLedgerWorker({ workerId: 'w-mock' })),
+        },
         registry: { listActiveManagers: () => options.running ?? [] },
       }
     }
@@ -1092,11 +1101,12 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
         listManagerEpisodes: () => ({ items: [{ started_at: '2026-08-01T00:00:00.000Z' }], pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 } }),
       },
       running: [{ key: 'wechat::sess-a', lastActiveAtMs: Date.parse('2026-08-03T00:00:00.000Z') }],
-      workers: [{ managerKey: 'wechat::sess-a' }],
+      workers: [{ managerKey: 'wechat::sess-a', worker: makeLedgerWorker({ workerId: 'w-a', status: 'running' }) }],
     })
-    const result = await agent.handleListManagersAdmin({ pagination: { page: 1, page_size: 20 } }) as { items: Array<{ manager_key: string; episode_count: number; worker_count: number }> }
+    const result = await agent.handleListManagersAdmin({ pagination: { page: 1, page_size: 20 } }) as { items: Array<{ manager_key: string; active_worker_count: number; recent_activity_summary?: string }> }
     expect(result.items.map((item) => item.manager_key)).toEqual(['wechat::sess-a', 'wechat::sess-b'])
-    expect(result.items[1]).toMatchObject({ episode_count: 2, worker_count: 0 })
+    expect(result.items[0]).toMatchObject({ active_worker_count: 1 })
+    expect(result.items[1]).toMatchObject({ active_worker_count: 0 })
   })
 
   it('manager stack 未装配时返回结构化失败而非空列表', async () => {

@@ -1,7 +1,4 @@
-/**
- * P6-A §10.3：Manager 详情 —— episode 列表 + span 展开 + spawned worker 双向链接。
- */
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Loading } from '../../components/Common/Loading'
 import { MainLayout } from '../../components/Layout/MainLayout'
@@ -11,18 +8,8 @@ import {
   type ManagerEpisodeSpan,
 } from '../../services/agent-observability'
 
-const TRIGGER_LABELS: Record<ManagerEpisodeTrace['trigger']['type'], string> = {
-  human_message: '人类消息',
-  worker_event: 'worker 事件',
-  schedule: '定时任务',
-  attention_flush: '注意力放行',
-  sub_agent_call: '子代理调用',
-}
-
 const SPAN_STATUS_COLOR: Record<ManagerEpisodeSpan['status'], string> = {
-  running: 'var(--color-warning, #d97706)',
-  completed: 'var(--color-success, #16a34a)',
-  failed: 'var(--color-danger, #dc2626)',
+  running: 'var(--warning)', completed: 'var(--success)', failed: 'var(--error)',
 }
 
 function SpanRow({ span }: { span: ManagerEpisodeSpan }) {
@@ -30,68 +17,127 @@ function SpanRow({ span }: { span: ManagerEpisodeSpan }) {
     <div style={{ display: 'flex', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 12, padding: '2px 0' }}>
       <span style={{ color: SPAN_STATUS_COLOR[span.status] }}>●</span>
       <span style={{ minWidth: 120 }}>{span.type}</span>
-      <span style={{ color: 'var(--text-muted)' }}>
-        {span.duration_ms !== undefined ? `${span.duration_ms}ms` : '…'}
-      </span>
-      <span style={{ color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 480 }}>
-        {span.details === undefined ? '' : JSON.stringify(span.details).slice(0, 160)}
+      <span style={{ color: 'var(--text-muted)' }}>{span.duration_ms !== undefined ? `${span.duration_ms}ms` : '…'}</span>
+      <span style={{ color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 560 }}>
+        {span.details === undefined ? '' : JSON.stringify(span.details).slice(0, 200)}
       </span>
     </div>
   )
 }
 
-function EpisodeCard({ episode }: { episode: ManagerEpisodeTrace }) {
-  const [expanded, setExpanded] = useState(false)
+function displayTime(iso: string): string {
+  const date = new Date(iso)
+  const today = new Date()
+  return date.toDateString() === today.toDateString()
+    ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+    : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function triggerText(episode: ManagerEpisodeTrace): string {
+  const summary = episode.trigger.summary
+  const excerpt = summary.includes('：') ? summary.slice(summary.indexOf('：') + 1).replace(/（合并 \d+ 个唤醒）$/, '') : ''
+  switch (episode.trigger.type) {
+    case 'human_message': return excerpt ? `你：「${excerpt}」` : '你发来一条消息（历史记录无摘要）'
+    case 'attention_flush': return excerpt ? `群聊消息：「${excerpt}」` : '群聊注意力放行'
+    case 'schedule': return `⏰ ${summary.replace(/^定时任务:/, '')}`
+    case 'worker_event': return episode.worker_ref?.title
+      ? `「${episode.worker_ref.title}」进展${episode.worker_ref.state_to ? `：${episode.worker_ref.state_to}` : ''}`
+      : summary
+    case 'sub_agent_call': return `子代理调用：${summary}`
+  }
+}
+
+function TechnicalDetails({ episode }: { episode: ManagerEpisodeTrace }) {
+  const [open, setOpen] = useState(false)
   return (
-    <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center', cursor: 'pointer' }} onClick={() => setExpanded(!expanded)}>
-        <span style={{ color: episode.status === 'failed' ? 'var(--color-danger, #dc2626)' : episode.status === 'running' ? 'var(--color-warning, #d97706)' : 'var(--color-success, #16a34a)' }}>
-          {episode.status}
-        </span>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{episode.trace_id.slice(0, 8)}</span>
-        <span>{TRIGGER_LABELS[episode.trigger.type]}</span>
-        {/* summary 与 label 重复时不重复渲染（「人类消息 / 人类消息 x1」→ 只留 label + 后缀差异） */}
-        {episode.trigger.summary && !episode.trigger.summary.startsWith(TRIGGER_LABELS[episode.trigger.type]) && (
-          <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{episode.trigger.summary}</span>
-        )}
-        <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 12 }}>
-          {new Date(episode.started_at).toLocaleString()}
-          {episode.duration_ms !== undefined ? ` · ${episode.duration_ms}ms` : ''}
-        </span>
-      </div>
-      {expanded && (
-        <div style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
-          {episode.outcome && (
-            <div style={{ fontSize: 12, marginBottom: 8 }}>
-              <strong>Outcome:</strong> {episode.outcome.summary}
-              {episode.outcome.error && <span style={{ color: 'var(--color-danger, #dc2626)' }}> · {episode.outcome.error}</span>}
-            </div>
-          )}
+    <div style={{ marginTop: 8 }}>
+      <button className="button button--secondary" style={{ fontSize: 11, padding: '3px 8px' }} onClick={() => setOpen(!open)}>
+        {open ? '收起技术详情' : '技术详情'}
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+          <div style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', fontSize: 11, marginBottom: 6 }}>
+            trace {episode.trace_id} · {episode.duration_ms ?? '—'}ms · {episode.status}
+          </div>
+          {episode.outcome && <div style={{ fontSize: 12, marginBottom: 6 }}>Outcome: {episode.outcome.summary}{episode.outcome.error ? ` · ${episode.outcome.error}` : ''}</div>}
           {episode.total_usage && (
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
               tokens: in {episode.total_usage.input_tokens} / out {episode.total_usage.output_tokens}
               {episode.total_usage.cache_read_tokens ? ` / cache-read ${episode.total_usage.cache_read_tokens}` : ''}
             </div>
           )}
-          {episode.spawned_worker_ids.length > 0 && (
-            <div style={{ fontSize: 12, marginBottom: 8 }}>
-              <strong>Spawned workers:</strong>{' '}
-              {episode.spawned_worker_ids.map((workerId) => (
-                <Link key={workerId} to={`/traces/workers/${encodeURIComponent(workerId)}`} style={{ fontFamily: 'var(--font-mono)', marginRight: 8 }}>
-                  {workerId.slice(0, 12)}
-                </Link>
-              ))}
-            </div>
-          )}
-          <div>
-            {episode.spans.map((span) => (
-              <SpanRow key={span.span_id} span={span} />
-            ))}
-          </div>
+          {episode.spans.map((span) => <SpanRow key={span.span_id} span={span} />)}
         </div>
       )}
     </div>
   )
+}
+
+function WorkerProgress({ episode }: { episode: ManagerEpisodeTrace }) {
+  return (
+    <div style={{ padding: '7px 0 7px 28px', display: 'flex', gap: 10, borderTop: '1px solid var(--border)', fontSize: 12 }}>
+      <span style={{ color: 'var(--text-muted)', minWidth: 50 }}>{displayTime(episode.started_at)}</span>
+      <span>⤷ {triggerText(episode)}</span>
+      {episode.status === 'failed' && <strong style={{ color: 'var(--error)' }}>失败</strong>}
+      {episode.worker_ref && (
+        <Link style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11 }} to={`/traces/workers/${encodeURIComponent(episode.worker_ref.worker_id)}`}>
+          查看 worker
+        </Link>
+      )}
+    </div>
+  )
+}
+
+function EpisodeCard({ episode, progress }: { episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[] }) {
+  const [showProgress, setShowProgress] = useState(false)
+  return (
+    <div style={{ border: `1px solid ${episode.status === 'failed' ? 'var(--error)' : 'var(--border)'}`, borderRadius: 8, padding: 12, marginBottom: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '64px minmax(0, 1fr)', gap: 8 }}>
+        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{displayTime(episode.started_at)}</span>
+        <div>
+          <div style={{ fontWeight: 600 }}>{triggerText(episode)}</div>
+          {episode.reply_excerpt && <div style={{ marginTop: 6, color: 'var(--text-secondary)' }}>→ 回复：{episode.reply_excerpt}</div>}
+          {episode.actions?.map((action, index) => (
+            <div key={`${action.kind}-${action.worker_id ?? index}`} style={{ marginTop: 4, color: 'var(--text-secondary)' }}>
+              → {action.worker_id ? <Link to={`/traces/workers/${encodeURIComponent(action.worker_id)}`}>{action.label}</Link> : action.label}
+            </div>
+          ))}
+          {episode.status === 'failed' && <div style={{ color: 'var(--error)', marginTop: 5 }}>失败：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
+        </div>
+      </div>
+      {progress.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <button className="button button--secondary" style={{ fontSize: 11, padding: '3px 8px' }} onClick={() => setShowProgress(!showProgress)}>
+            {showProgress ? '收起' : `展开 ${progress.length} 条 worker 进展`}
+          </button>
+          {showProgress && progress.map((child) => <WorkerProgress key={child.trace_id} episode={child} />)}
+        </div>
+      )}
+      <TechnicalDetails episode={episode} />
+    </div>
+  )
+}
+
+function groupEpisodes(episodes: ManagerEpisodeTrace[]): Array<{ episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[] }> {
+  const ownerByWorker = new Map<string, string>()
+  for (const episode of episodes) {
+    for (const action of episode.actions ?? []) {
+      if (action.kind === 'spawn_worker' && action.worker_id) ownerByWorker.set(action.worker_id, episode.trace_id)
+    }
+  }
+  const progressByTrace = new Map<string, ManagerEpisodeTrace[]>()
+  const orphanProgress: ManagerEpisodeTrace[] = []
+  const primary = episodes.filter((episode) => {
+    if (episode.trigger.type !== 'worker_event') return true
+    const parent = episode.worker_ref ? ownerByWorker.get(episode.worker_ref.worker_id) : undefined
+    if (parent) progressByTrace.set(parent, [...(progressByTrace.get(parent) ?? []), episode])
+    else orphanProgress.push(episode)
+    return false
+  })
+  const grouped = primary.map((episode) => ({ episode, progress: progressByTrace.get(episode.trace_id) ?? [] }))
+  // 当前分页找不到 spawn 父级时不丢数据：各自作为进展卡展示。
+  grouped.push(...orphanProgress.map((episode) => ({ episode, progress: [] })))
+  return grouped.sort((a, b) => b.episode.started_at.localeCompare(a.episode.started_at))
 }
 
 const ManagerDetailContent: React.FC = () => {
@@ -101,13 +147,13 @@ const ManagerDetailContent: React.FC = () => {
   const [totalPages, setTotalPages] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const grouped = useMemo(() => groupEpisodes(episodes), [episodes])
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    agentObservabilityService
-      .listManagerEpisodes(managerKey, page, 20)
+    agentObservabilityService.listManagerEpisodes(managerKey, page, 20)
       .then((result) => {
         if (cancelled) return
         setEpisodes(result.items)
@@ -118,31 +164,23 @@ const ManagerDetailContent: React.FC = () => {
         setError(err instanceof Error ? err.message : String(err))
         setEpisodes([])
       })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [managerKey, page])
 
   return (
     <div>
       <div style={{ marginBottom: 16 }}>
-        <Link to="/traces" style={{ color: 'var(--text-muted)', fontSize: 12 }}>← 返回 Managers</Link>
+        <Link to="/traces" style={{ color: 'var(--text-muted)', fontSize: 12 }}>← 返回会话列表</Link>
         <h2 style={{ fontFamily: 'var(--font-mono)', fontSize: 16, margin: '8px 0' }}>{managerKey}</h2>
       </div>
-      {loading ? (
-        <Loading />
-      ) : error ? (
-        <div style={{ color: 'var(--text-muted)', padding: 24 }}>Episodes 暂不可用：{error}</div>
-      ) : episodes.length === 0 ? (
-        <div style={{ color: 'var(--text-muted)', padding: 24 }}>该 Manager 暂无 episode。</div>
+      {loading ? <Loading /> : error ? (
+        <div style={{ color: 'var(--text-muted)', padding: 24 }}>运行记录暂不可用：{error}</div>
+      ) : grouped.length === 0 ? (
+        <div style={{ color: 'var(--text-muted)', padding: 24 }}>该会话暂无运行记录。</div>
       ) : (
         <>
-          {episodes.map((episode) => (
-            <EpisodeCard key={episode.trace_id} episode={episode} />
-          ))}
+          {grouped.map(({ episode, progress }) => <EpisodeCard key={episode.trace_id} episode={episode} progress={progress} />)}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <button disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button>
             <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{page} / {totalPages}</span>
@@ -154,9 +192,4 @@ const ManagerDetailContent: React.FC = () => {
   )
 }
 
-/** 详情页也包 MainLayout（不丢侧边导航）。 */
-export const ManagerDetail: React.FC = () => (
-  <MainLayout>
-    <ManagerDetailContent />
-  </MainLayout>
-)
+export const ManagerDetail: React.FC = () => <MainLayout><ManagerDetailContent /></MainLayout>

@@ -1524,6 +1524,7 @@ describe('Admin Web API', () => {
 
     it('GET /api/agent/managers 转发 list_managers_admin（分页透传）', async () => {
       const token = await loginAndGetToken()
+      admin['agentPort'] = 19005
       const spy = spyAgentRpc().mockResolvedValue({ items: [], pagination: { page: 2, page_size: 5, total_items: 0, total_pages: 0 } })
       const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/managers?page=2&page_size=5', 'GET', null, token)
       expect(response.statusCode).toBe(200)
@@ -1533,6 +1534,37 @@ describe('Admin Web API', () => {
         { pagination: { page: 2, page_size: 5 } },
         expect.any(String),
       )
+    })
+
+    it('GET /api/agent/managers 用渠道+会话标题做人话 display_name，key 仍保留', async () => {
+      const token = await loginAndGetToken()
+      admin['agentPort'] = 19005
+      spyAgentRpc().mockResolvedValue({
+        items: [
+          { manager_key: 'wechat-棉花糖::sess-1', active_worker_count: 2 },
+          { manager_key: 'admin-web::system-tasks', active_worker_count: 1 },
+          { manager_key: 'offline::unknown', active_worker_count: 0 },
+        ],
+        pagination: { page: 1, page_size: 20, total_items: 3, total_pages: 1 },
+      })
+      vi.spyOn(admin as never as { listChannelSessions(id: string): Promise<unknown[]> }, 'listChannelSessions')
+        .mockImplementation(async (id: string) => id === 'wechat-棉花糖'
+          ? [{ id: 'sess-1', channel_id: id, type: 'private', platform_session_id: 'u-1', title: 'FuFu' }]
+          : Promise.reject(new Error('offline')))
+      vi.spyOn(admin['channelManager'], 'getInstance').mockReturnValue({
+        id: 'wechat-棉花糖', implementation_id: 'wechat', name: '棉花糖', platform: 'wechat',
+        auto_start: true, start_priority: 1, module_registered: true, created_at: '', updated_at: '',
+      })
+
+      const response = await makeWebRequest<{ items: Array<{ manager_key: string; display_name: string }> }>(
+        TEST_WEB_PORT, '/api/agent/managers', 'GET', null, token,
+      )
+      expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+      expect(response.body.items).toEqual([
+        expect.objectContaining({ manager_key: 'wechat-棉花糖::sess-1', display_name: '微信·棉花糖 · FuFu' }),
+        expect.objectContaining({ manager_key: 'admin-web::system-tasks', display_name: 'Admin Web · 系统任务' }),
+        expect.objectContaining({ manager_key: 'offline::unknown', display_name: 'offline::unknown' }),
+      ])
     })
 
     it('GET /api/agent/managers/:key/episodes 转发 list_manager_episodes_admin（path decode 一次）', async () => {
@@ -1611,7 +1643,8 @@ describe('Admin Web API', () => {
 
       await makeWebRequest(
         TEST_WEB_PORT,
-        '/api/agent/workers?status=executing&status=waiting&manager_key=telegram-001%3A%3Aprivate-42'
+        '/api/agent/workers?status=running&status=waiting_input&manager_key=telegram-001%3A%3Aprivate-42'
+          + '&impl=codex&q=Minecraft&include_terminal=true&include_legacy=true'
           + '&start=2026-07-01T00%3A00%3A00.000Z&end=2026-07-31T00%3A00%3A00.000Z&page=2&page_size=5',
         'GET',
         null,
@@ -1619,8 +1652,12 @@ describe('Admin Web API', () => {
       )
 
       expect(spy).toHaveBeenCalledWith('list_workers_admin', {
-        status: ['executing', 'waiting'],
+        status: ['running', 'waiting_input'],
         manager_key: 'telegram-001::private-42',
+        impl: 'codex',
+        q: 'Minecraft',
+        include_terminal: true,
+        include_legacy: true,
         time_range: { start: '2026-07-01T00:00:00.000Z', end: '2026-07-31T00:00:00.000Z' },
         pagination: { page: 2, page_size: 5 },
       })
