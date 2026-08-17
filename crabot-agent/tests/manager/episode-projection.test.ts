@@ -90,6 +90,21 @@ describe('projectManagerEpisode', () => {
     }), facts))).toBe('部署 Minecraft：等输入')
   })
 
+  it('目标 string 自身被 300 字截断时仍返回可读前缀', () => {
+    const full = JSON.stringify({ channel_id: 'admin-web', session_id: 'admin-chat', content: '长回复'.repeat(200) })
+    const truncated = `${full.slice(0, 300)}…`
+    const extracted = extractStringField(truncated, 'content')
+    expect(extracted).toBeDefined()
+    expect(extracted).toMatch(/^长回复长回复/)
+    expect(extracted?.endsWith('…')).toBe(true)
+    const projected = projectManagerEpisode(trace({ spans: [tool('send_message', truncated)] }), facts)
+    expect(projected.reply_excerpt).toMatch(/^长回复/)
+  })
+
+  it('非 string 目标不误取后一个字段', () => {
+    expect(extractStringField('{"content":123,"other":"xyz', 'content')).toBeUndefined()
+  })
+
   it('无投影数据时不添加空字段，保留原 trace', () => {
     const original = trace()
     const result = projectManagerEpisode(original, facts)

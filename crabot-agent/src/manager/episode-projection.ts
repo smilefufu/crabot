@@ -170,24 +170,35 @@ export function extractStringField(summary: string, field: string): string | und
     const parsed = JSON.parse(summary) as Record<string, unknown>
     return typeof parsed[field] === 'string' ? parsed[field] : undefined
   } catch {
-    // JSON.stringify 字符串 token（处理反斜杠转义，不假定后续 JSON 完整）。
+    // JSON.stringify 字符串 token（处理转义；目标值自身被截断时返回可用前缀）。
     const marker = `"${field}"`
     const markerAt = summary.indexOf(marker)
     if (markerAt < 0) return undefined
     const colon = summary.indexOf(':', markerAt + marker.length)
     if (colon < 0) return undefined
-    const quote = summary.indexOf('"', colon + 1)
-    if (quote < 0) return undefined
-    let escaped = false
-    for (let i = quote + 1; i < summary.length; i += 1) {
+    let cursor = colon + 1
+    while (/\s/.test(summary[cursor] ?? '')) cursor += 1
+    // 目标字段不是 string 时不跨字段误取后一个引号。
+    if (summary[cursor] !== '"') return undefined
+
+    let output = ''
+    for (let i = cursor + 1; i < summary.length; i += 1) {
       const char = summary[i]
-      if (escaped) { escaped = false; continue }
-      if (char === '\\') { escaped = true; continue }
-      if (char === '"') {
-        try { return JSON.parse(summary.slice(quote, i + 1)) as string } catch { return undefined }
+      if (char === '"') return output
+      if (char !== '\\') { output += char; continue }
+      const escaped = summary[++i]
+      if (escaped === undefined) break
+      const simple: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' }
+      if (simple[escaped] !== undefined) { output += simple[escaped]; continue }
+      if (escaped === 'u') {
+        const hex = summary.slice(i + 1, i + 5)
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) break
+        output += String.fromCharCode(Number.parseInt(hex, 16))
+        i += 4
       }
     }
-    return undefined
+    const partial = output.endsWith('…') ? output.slice(0, -1) : output
+    return partial ? `${partial}…` : undefined
   }
 }
 

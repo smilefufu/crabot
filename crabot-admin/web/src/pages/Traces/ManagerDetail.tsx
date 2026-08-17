@@ -83,15 +83,24 @@ function TechnicalDetails({ episode }: { episode: ManagerEpisodeTrace }) {
 
 function WorkerProgress({ episode }: { episode: ManagerEpisodeTrace }) {
   return (
-    <div style={{ padding: '7px 0 7px 28px', display: 'flex', gap: 10, borderTop: '1px solid var(--border)', fontSize: 12 }}>
-      <span style={{ color: 'var(--text-muted)', minWidth: 50 }}>{displayTime(episode.started_at)}</span>
-      <span>⤷ {triggerText(episode)}</span>
-      {episode.status === 'failed' && <strong style={{ color: 'var(--error)' }}>失败</strong>}
-      {episode.worker_ref && (
-        <Link style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11 }} to={`/traces/workers/${encodeURIComponent(episode.worker_ref.worker_id)}`}>
-          查看 worker
-        </Link>
-      )}
+    <div style={{ padding: '8px 0 8px 28px', borderTop: '1px solid var(--border)', fontSize: 12 }}>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <span style={{ color: 'var(--text-muted)', minWidth: 50 }}>{displayTime(episode.started_at)}</span>
+        <span>⤷ {triggerText(episode)}</span>
+        {episode.status === 'failed' && <strong style={{ color: 'var(--error)' }}>失败：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</strong>}
+        {episode.worker_ref && (
+          <Link style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11 }} to={`/traces/workers/${encodeURIComponent(episode.worker_ref.worker_id)}`}>
+            查看 worker
+          </Link>
+        )}
+      </div>
+      {episode.reply_excerpt && <div style={{ margin: '5px 0 0 60px', color: 'var(--text-secondary)' }}>→ 回复：{episode.reply_excerpt}</div>}
+      {episode.actions?.map((action, index) => (
+        <div key={`${index}-${action.kind}-${action.worker_id ?? ''}`} style={{ margin: '4px 0 0 60px', color: 'var(--text-secondary)' }}>
+          → {action.worker_id ? <Link to={`/traces/workers/${encodeURIComponent(action.worker_id)}`}>{action.label}</Link> : action.label}
+        </div>
+      ))}
+      <div style={{ marginLeft: 60 }}><TechnicalDetails episode={episode} /></div>
     </div>
   )
 }
@@ -106,7 +115,7 @@ function EpisodeCard({ episode, progress }: { episode: ManagerEpisodeTrace; prog
           <div style={{ fontWeight: 600 }}>{triggerText(episode)}</div>
           {episode.reply_excerpt && <div style={{ marginTop: 6, color: 'var(--text-secondary)' }}>→ 回复：{episode.reply_excerpt}</div>}
           {episode.actions?.map((action, index) => (
-            <div key={`${action.kind}-${action.worker_id ?? index}`} style={{ marginTop: 4, color: 'var(--text-secondary)' }}>
+            <div key={`${index}-${action.kind}-${action.worker_id ?? ''}`} style={{ marginTop: 4, color: 'var(--text-secondary)' }}>
               → {action.worker_id ? <Link to={`/traces/workers/${encodeURIComponent(action.worker_id)}`}>{action.label}</Link> : action.label}
             </div>
           ))}
@@ -115,8 +124,14 @@ function EpisodeCard({ episode, progress }: { episode: ManagerEpisodeTrace; prog
       </div>
       {progress.length > 0 && (
         <div style={{ marginTop: 8 }}>
-          <button className="button button--secondary" style={{ fontSize: 11, padding: '3px 8px' }} onClick={() => setShowProgress(!showProgress)}>
-            {showProgress ? '收起' : `展开 ${progress.length} 条 worker 进展`}
+          <button
+            className="button button--secondary"
+            style={{ fontSize: 11, padding: '3px 8px', color: progress.some((item) => item.status === 'failed') ? 'var(--error)' : undefined }}
+            onClick={() => setShowProgress(!showProgress)}
+          >
+            {showProgress
+              ? '收起'
+              : `展开 ${progress.length} 条 worker 进展${progress.some((item) => item.status === 'failed') ? `（${progress.filter((item) => item.status === 'failed').length} 条失败）` : ''}`}
           </button>
           {showProgress && progress.map((child) => <WorkerProgress key={child.trace_id} episode={child} />)}
         </div>

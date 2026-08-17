@@ -175,6 +175,7 @@ describe('ManagerDetail', () => {
           trace_id: 'ep-middle', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:01:00.000Z', status: 'failed',
           trigger: { type: 'worker_event', summary: 'middle', source: 'worker:w-a' }, spans: [], spawned_worker_ids: ['w-b'],
           worker_ref: { worker_id: 'w-a', title: '任务 A', state_to: 'failed' }, outcome: { summary: 'failed', error: '真实失败' },
+          reply_excerpt: '任务 A 失败，我已派子任务 B 接手。',
           actions: [{ kind: 'spawn_worker', label: '派活：子任务 B', worker_id: 'w-b' }],
           causal_parent: { trace_id: 'ep-root', started_at: '2026-08-01T10:00:00.000Z', status: 'completed', trigger: { type: 'human_message', summary: '人类消息 x1：开始根任务' } },
         },
@@ -193,9 +194,13 @@ describe('ManagerDetail', () => {
     )
     await waitFor(() => expect(screen.getByText('你：「开始根任务」')).toBeInTheDocument())
     expect(screen.getAllByText('技术详情')).toHaveLength(1)
-    fireEvent.click(screen.getByText('展开 2 条 worker 进展'))
-    expect(screen.getByText(/任务 A.*失败/)).toBeInTheDocument()
+    expect(screen.getByText(/展开 2 条 worker 进展（1 条失败）/)).toBeInTheDocument()
+    fireEvent.click(screen.getByText(/展开 2 条 worker 进展/))
+    expect(screen.getAllByText(/任务 A.*失败/).length).toBeGreaterThan(0)
     expect(screen.getByText(/子任务 B.*已完成/)).toBeInTheDocument()
-    expect(screen.getByText('失败')).toBeInTheDocument()
+    expect(screen.getByText(/失败：真实失败/)).toBeInTheDocument()
+    expect(screen.getByText('→ 回复：任务 A 失败，我已派子任务 B 接手。')).toBeInTheDocument()
+    expect(screen.getByText('派活：子任务 B')).toBeInTheDocument()
+    expect(screen.getAllByText('技术详情')).toHaveLength(3)
   })
 })
