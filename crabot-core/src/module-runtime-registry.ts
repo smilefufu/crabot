@@ -237,6 +237,12 @@ export class ModuleRuntimeRegistry {
         continue
       }
       if (currentIdentity !== record.process_start_identity) {
+        if (process.platform !== 'win32') {
+          // Detached POSIX modules use root_pid as PGID; that numeric PID cannot be
+          // reused while any member of the recorded process group still exists.
+          await this.removeRuntime(record.runtime_id)
+          continue
+        }
         throw new Error(
           `Cannot recover orphan ${record.module_id}/${record.runtime_id}: process start identity changed for PID ${record.root_pid}`,
         )

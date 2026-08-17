@@ -612,7 +612,6 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       await Promise.all([...this.instances.values()].map((instance) =>
         this.getMutex(instance.worker_id).run(async () => {
           if (instance.state !== 'running') return
-          instance.killRequested = true
           instance.abortController?.abort()
         }),
       ))
@@ -681,6 +680,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
   private assertActive(): void {
     if (this.closing) throw new Error('BuiltinWorkerAdapter is shutting down')
+  }
+
+  private interruptionEndReason(instance: WorkerInstance): 'killed' | 'crashed' {
+    return instance.killRequested ? 'killed' : 'crashed'
   }
 
   private trackRun(
@@ -756,11 +759,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 安装与 killRequested 核对必须在同一把锁内原子完成，和 kill() 的"置位+abort"共享该锁：
     // 否则会有窗口——kill 已经决定要杀这个（还没起的）新 burst，但读到的 abortController
     // 还是上一个已经跑完的 burst 的，abort 它没有任何效果，新 burst 照样起来（P1 全分支
-    // 终审 Important，见 kill() 顶部注释）。已置位则不装 controller、不起 runEngine，直接
-    // 在锁内落 exited(killed)。
+    // 终审 Important，见 kill() 顶部注释）。kill 或 shutdown 已开始时不装 controller、
+    // 不起 runEngine；显式 kill 落 killed，模块 shutdown 落可恢复的 crashed。
     const abortController = await mutex.run(async () => {
       if (instance.killRequested || this.closing) {
-        await this.transitionExited(instance, handle, 'killed')
+        await this.transitionExited(instance, handle, this.interruptionEndReason(instance))
         return undefined
       }
       const ac = new AbortController()
@@ -856,7 +859,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
-        await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed', undefined, lastAssistantText)
+        const endReason = result.outcome === 'aborted' ? this.interruptionEndReason(instance) : 'crashed'
+        await this.transitionExited(instance, handle, endReason, undefined, lastAssistantText)
         return false
       }
 
@@ -875,9 +879,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // burst 正常收尾（非 aborted/failed/finish_task）但期间 killRequested 已被置位：
       // abort 大概率是打在了这次 burst 身上（下面 outcome==='aborted' 分支已经处理），但也
       // 可能是打晚了——engine 已经决定 end_turn，abort 信号没赶上（P1 全分支终审 Important
-      // 收尾段检查点）。无论如何都不能继续/续 burst，直接落 exited(killed)。
+      // 收尾段检查点）。无论如何都不能继续/续 burst；显式 kill 与 shutdown 保持各自归因。
       if (instance.killRequested || this.closing) {
-        await this.transitionExited(instance, handle, 'killed', undefined, lastAssistantText)
+        await this.transitionExited(instance, handle, this.interruptionEndReason(instance), undefined, lastAssistantText)
         return false
       }
 
@@ -934,7 +938,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // runForkBurst，安装 controller 前先在锁内核对 killRequested。
     const abortController = await mutex.run(async () => {
       if (instance.killRequested || this.closing) {
-        await this.transitionExited(instance, handle, 'killed')
+        await this.transitionExited(instance, handle, this.interruptionEndReason(instance))
         return undefined
       }
       const ac = new AbortController()
@@ -1004,14 +1008,15 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
-        await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed')
+        const endReason = result.outcome === 'aborted' ? this.interruptionEndReason(instance) : 'crashed'
+        await this.transitionExited(instance, handle, endReason)
         return
       }
 
       // outcome 是正常收尾但 killRequested 已置位：abort 打晚了，engine 已经决定收尾，
       // 但用户明确要求过 kill，不该落 completed（P1 全分支终审 Important 收尾段检查点）。
       if (instance.killRequested || this.closing) {
-        await this.transitionExited(instance, handle, 'killed')
+        await this.transitionExited(instance, handle, this.interruptionEndReason(instance))
         return
       }
 

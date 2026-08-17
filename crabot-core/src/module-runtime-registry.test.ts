@@ -156,7 +156,23 @@ describe('ModuleRuntimeRegistry', () => {
     expect(await registry.listRecords()).toEqual([])
   })
 
-  it('does not signal a reused PID and refuses orphan recovery', async () => {
+  it.skipIf(process.platform === 'win32')('removes a stale POSIX runtime record when its root PID has been reused', async () => {
+    const identities = new Map<number, string | null>([[401, 'original-start']])
+    const { registry, terminateTree } = makeRegistry(identities)
+    await record(registry, 'runtime-reused', 'crabot-agent', 401, 19003)
+    identities.set(401, 'replacement-start')
+
+    await registry.recoverOrphans({
+      moduleId: 'crabot-agent',
+      currentRuntimeIds: new Set(),
+      gracefulTimeoutMs: 30_000,
+    })
+
+    expect(terminateTree).not.toHaveBeenCalled()
+    expect(await registry.listRecords()).toEqual([])
+  })
+
+  it.skipIf(process.platform !== 'win32')('does not signal a reused Windows PID and refuses orphan recovery', async () => {
     const identities = new Map<number, string | null>([[401, 'original-start']])
     const { registry, terminateTree } = makeRegistry(identities)
     await record(registry, 'runtime-reused', 'crabot-agent', 401, 19003)

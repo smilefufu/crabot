@@ -1285,6 +1285,8 @@ describe('BuiltinWorkerAdapter', () => {
     gate.resolve()
     await disposePromise
     expect(await adapter.state(h)).toBe('exited')
+    const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8'))
+    expect(meta.ended_reason).toBe('crashed')
     await expect(adapter.provision({ root: tmp }, { skills: [], mcp_servers: [] })).rejects.toThrow(/shutting down/)
   })
 

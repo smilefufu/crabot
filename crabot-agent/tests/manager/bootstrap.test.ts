@@ -304,7 +304,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     await Promise.allSettled(routeSpy.mock.results.map((r) => r.value as Promise<unknown>))
   })
 
-  it('关闭期间 worker 状态仍落账，但不再路由 Manager episode', async () => {
+  it('关闭期间 worker crashed 仍落账为 failed，但不再路由 Manager episode', async () => {
     const stack = buildManagerStack(makeDeps({ isClosing: () => true }))
     const managerKey = 'wechat::sess-closing' as ManagerKey
     await stack.ledger.upsertWorker(managerKey, 'w-closing', () =>
@@ -316,10 +316,10 @@ describe('manager bootstrap（P5 Task 1）', () => {
     onStateChange?.(
       { worker_id: 'w-closing', seq: 1, impl: 'builtin', session_ref: 'w-closing-ref' },
       'exited',
-      { endReason: 'completed' },
+      { endReason: 'crashed' },
     )
 
-    await waitUntil(async () => (await stack.ledger.findWorker('w-closing'))?.worker.task.status === 'completed')
+    await waitUntil(async () => (await stack.ledger.findWorker('w-closing'))?.worker.task.status === 'failed')
     expect(routeSpy).not.toHaveBeenCalled()
   })
 
