@@ -70,7 +70,7 @@ describe('projectManagerEpisode', () => {
     }), facts))).toBe('你：V6 部署好了吗')
     expect(managerActivitySummary(projectManagerEpisode(trace({
       trigger: { type: 'worker_event', summary: 'worker 事件:state_changed (w-1)', source: 'worker:w-1' },
-    }), facts))).toBe('部署 Minecraft：waiting_input')
+    }), facts))).toBe('部署 Minecraft：等输入')
   })
 
   it('无投影数据时不添加空字段，保留原 trace', () => {

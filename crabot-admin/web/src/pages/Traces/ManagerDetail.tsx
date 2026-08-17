@@ -41,10 +41,18 @@ function triggerText(episode: ManagerEpisodeTrace): string {
     case 'attention_flush': return excerpt ? `群聊消息：「${excerpt}」` : '群聊注意力放行'
     case 'schedule': return `⏰ ${summary.replace(/^定时任务:/, '')}`
     case 'worker_event': return episode.worker_ref?.title
-      ? `「${episode.worker_ref.title}」进展${episode.worker_ref.state_to ? `：${episode.worker_ref.state_to}` : ''}`
+      ? `「${episode.worker_ref.title}」进展${episode.worker_ref.state_to ? `：${workerStateLabel(episode.worker_ref.state_to)}` : ''}`
       : summary
     case 'sub_agent_call': return `子代理调用：${summary}`
   }
+}
+
+function workerStateLabel(status: string): string {
+  const labels: Record<string, string> = {
+    queued: '排队', running: '执行中', waiting_input: '等输入',
+    completed: '已完成', failed: '失败', cancelled: '已取消',
+  }
+  return labels[status] ?? status
 }
 
 function TechnicalDetails({ episode }: { episode: ManagerEpisodeTrace }) {

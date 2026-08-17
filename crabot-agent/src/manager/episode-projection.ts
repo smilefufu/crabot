@@ -100,11 +100,20 @@ export function managerActivitySummary(trace: ManagerEpisodeProjection): string 
     case 'attention_flush': return excerpt ? `群聊：${excerpt}` : '群聊注意力放行'
     case 'schedule': return summary.replace(/^定时任务:/, '定时：')
     case 'worker_event': return trace.worker_ref?.title
-      ? `${trace.worker_ref.title}：${trace.worker_ref.state_to ?? '有新进展'}`
+      ? `${trace.worker_ref.title}：${statusLabel(trace.worker_ref.state_to) ?? '有新进展'}`
       : summary
     case 'sub_agent_call': return `子代理：${summary}`
     default: return summary
   }
+}
+
+function statusLabel(status: string | undefined): string | undefined {
+  if (!status) return undefined
+  const labels: Record<string, string> = {
+    queued: '排队', running: '执行中', waiting_input: '等输入',
+    completed: '已完成', failed: '失败', cancelled: '已取消',
+  }
+  return labels[status] ?? status
 }
 
 function toolDetail(span: ManagerEpisodeSpan): {

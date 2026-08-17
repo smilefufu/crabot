@@ -10270,7 +10270,13 @@ export class AdminModule extends ModuleBase {
     const channel = this.channelManager.getInstance(channelId)
     const platformLabels: Record<string, string> = { wechat: '微信', feishu: '飞书', telegram: 'Telegram', web: 'Web' }
     const platform = platformLabels[channel?.platform ?? ''] ?? channel?.platform ?? channelId
-    const channelLabel = channel?.name && channel.name !== platform ? `${platform}·${channel.name}` : platform
+    const rawChannelName = channel?.name ?? channelId
+    const cleanedChannelName = rawChannelName
+      .replace(new RegExp(`^${channel?.platform ?? ''}[-_]?`, 'i'), '')
+      .trim()
+    const channelLabel = cleanedChannelName && cleanedChannelName.toLocaleLowerCase() !== platform.toLocaleLowerCase()
+      ? `${platform}·${cleanedChannelName}`
+      : platform
     return `${channelLabel} · ${session.title}`
   }
 

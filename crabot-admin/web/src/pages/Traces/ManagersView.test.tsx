@@ -131,8 +131,8 @@ describe('ManagerDetail', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('你：「开始部署」')).toBeInTheDocument())
-    expect(screen.queryByText(/部署 V6.*waiting_input/)).toBeNull()
+    expect(screen.queryByText(/部署 V6.*等输入/)).toBeNull()
     fireEvent.click(screen.getByText('展开 1 条 worker 进展'))
-    expect(screen.getByText(/部署 V6.*waiting_input/)).toBeInTheDocument()
+    expect(screen.getByText(/部署 V6.*等输入/)).toBeInTheDocument()
   })
 })
