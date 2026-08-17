@@ -64,6 +64,7 @@ class MemoryShuttingDownError(MemoryServiceUnavailableError):
 
 _MAINTENANCE_ALLOW_LIST = frozenset({
     "health",
+    "get_runtime_identity",
     "shutdown",
     "get_status",
     "update_config",
@@ -196,13 +197,14 @@ class MemoryModule:
 
     async def _dispatch(self, method: str, params: Dict[str, Any]) -> Any:
         """分发请求到对应的处理方法"""
-        if self._shutdown_requested and method not in {"health", "shutdown", "get_status"}:
+        if self._shutdown_requested and method not in {"health", "get_runtime_identity", "shutdown", "get_status"}:
             raise MemoryShuttingDownError()
         if self._maintenance_running and method not in _MAINTENANCE_ALLOW_LIST:
             raise MaintenanceInProgressError()
 
         handlers: Dict[str, Callable] = {
             "health": self._health,
+            "get_runtime_identity": self._get_runtime_identity,
             "shutdown": self._shutdown,
             "get_status": self._get_status,
             "write_short_term": self._write_short_term,
@@ -277,6 +279,19 @@ class MemoryModule:
         return {
             "status": status,
             "details": {"maintenance_running": self._maintenance_running},
+        }
+
+    async def _get_runtime_identity(self, params: Dict[str, Any]) -> Dict[str, str]:
+        instance_id = os.environ.get("CRABOT_INSTANCE_ID")
+        runtime_id = os.environ.get("CRABOT_MODULE_RUNTIME_ID")
+        if not instance_id or not runtime_id:
+            raise MemoryServiceUnavailableError(
+                "Module runtime identity was not injected by Module Manager"
+            )
+        return {
+            "instance_id": instance_id,
+            "module_id": self.config.module_id,
+            "runtime_id": runtime_id,
         }
 
     async def _shutdown(self, params: Dict[str, Any]) -> Dict[str, Any]:

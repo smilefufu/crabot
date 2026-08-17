@@ -35,6 +35,7 @@ test('authentication errors preserve RPC codes and map to HTTP 401/403', () => {
       assert.equal(response.error?.code, code)
       assert.equal(rpcErrorHttpStatus(error), status)
     }
+    assert.equal(rpcErrorHttpStatus(new ErrorType('SERVICE_UNAVAILABLE', 'unavailable')), 503)
   }
   assert.equal(rpcErrorHttpStatus(new Error('ordinary failure')), 500)
 })
@@ -236,4 +237,71 @@ test('shutdown starts cleanup immediately and repeated stop waits for the same c
   finishCleanup()
   await secondStop
   assert.equal(onStopCalls, 1)
+})
+
+test('runtime identity probe returns only the MM-injected runtime identity', async () => {
+  const { ModuleBase } = await import('./module-base.js')
+  const previousInstanceId = process.env.CRABOT_INSTANCE_ID
+  const previousRuntimeId = process.env.CRABOT_MODULE_RUNTIME_ID
+  process.env.CRABOT_INSTANCE_ID = 'instance-test'
+  process.env.CRABOT_MODULE_RUNTIME_ID = 'runtime-test'
+
+  class ProbeModule extends ModuleBase {
+    runtimeIdentityHandler(): () => Promise<unknown> {
+      return this.methodHandlers.get('get_runtime_identity') as () => Promise<unknown>
+    }
+  }
+
+  try {
+    const mod = new ProbeModule({
+      moduleId: 'probe-runtime',
+      moduleType: 'probe',
+      version: '0.0.1',
+      protocolVersion: '0.0.1',
+      port: 0,
+    })
+    assert.deepEqual(await mod.runtimeIdentityHandler()(), {
+      instance_id: 'instance-test',
+      module_id: 'probe-runtime',
+      runtime_id: 'runtime-test',
+    })
+  } finally {
+    if (previousInstanceId === undefined) delete process.env.CRABOT_INSTANCE_ID
+    else process.env.CRABOT_INSTANCE_ID = previousInstanceId
+    if (previousRuntimeId === undefined) delete process.env.CRABOT_MODULE_RUNTIME_ID
+    else process.env.CRABOT_MODULE_RUNTIME_ID = previousRuntimeId
+  }
+})
+
+test('runtime identity probe fails closed when MM identity is missing', async () => {
+  const { ModuleBase } = await import('./module-base.js')
+  const previousInstanceId = process.env.CRABOT_INSTANCE_ID
+  const previousRuntimeId = process.env.CRABOT_MODULE_RUNTIME_ID
+  delete process.env.CRABOT_INSTANCE_ID
+  delete process.env.CRABOT_MODULE_RUNTIME_ID
+
+  class ProbeModule extends ModuleBase {
+    runtimeIdentityHandler(): () => Promise<unknown> {
+      return this.methodHandlers.get('get_runtime_identity') as () => Promise<unknown>
+    }
+  }
+
+  try {
+    const mod = new ProbeModule({
+      moduleId: 'probe-runtime',
+      moduleType: 'probe',
+      version: '0.0.1',
+      protocolVersion: '0.0.1',
+      port: 0,
+    })
+    await assert.rejects(
+      mod.runtimeIdentityHandler()(),
+      (error: unknown) => (error as { code?: string }).code === 'SERVICE_UNAVAILABLE',
+    )
+  } finally {
+    if (previousInstanceId === undefined) delete process.env.CRABOT_INSTANCE_ID
+    else process.env.CRABOT_INSTANCE_ID = previousInstanceId
+    if (previousRuntimeId === undefined) delete process.env.CRABOT_MODULE_RUNTIME_ID
+    else process.env.CRABOT_MODULE_RUNTIME_ID = previousRuntimeId
+  }
 })

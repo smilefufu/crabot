@@ -8,6 +8,7 @@ import fs from 'node:fs'
 import { homedir } from 'node:os'
 import { buildCoreModules } from './core-modules.js'
 import { ensureAgentVenv } from './agent-venv.js'
+import { createOrphanTerminationConfirmer } from './orphan-recovery-prompt.js'
 
 // 获取模块路径
 const CRABOT_ROOT = path.resolve(process.cwd(), '..')
@@ -80,6 +81,8 @@ const ADMIN_ENDPOINT = `http://localhost:${ADMIN_RPC_PORT}`
 const MEMORY_DIR = path.join(CRABOT_ROOT, 'crabot-memory')
 
 const isDev = process.env.CRABOT_DEV === 'true'
+const confirmOrphanTermination = createOrphanTerminationConfirmer()
+delete process.env.CRABOT_ORPHAN_RECOVERY_INTERACTIVE
 
 if (PORT_OFFSET !== 0) {
   console.log(`[ModuleManager] Port offset: ${PORT_OFFSET} (MM=${PORT}, Admin RPC=${ADMIN_RPC_PORT}, Admin Web=${ADMIN_WEB_PORT})`)
@@ -115,7 +118,9 @@ const manager = new ModuleManager({
   shutdown_timeout: 30,
   hotplug_allowed_types: ['channel', 'memory'],
   modules: CORE_MODULES,
-}, DATA_DIR)
+}, DATA_DIR, {
+  confirmOrphanTermination,
+})
 
 // 优雅关闭
 async function shutdown() {

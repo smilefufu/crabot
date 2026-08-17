@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
+import http from 'node:http'
 import path from 'node:path'
-import { ModuleRuntimeRegistry, probeProcessStartIdentity } from './module-runtime-registry.js'
+import {
+  ModuleRuntimeRegistry,
+  probeProcessStartIdentity,
+  probeRuntimeIdentity,
+  type OrphanTerminationCandidate,
+  type RuntimeIdentity,
+  type WindowsPortOwner,
+} from './module-runtime-registry.js'
 
 const cleanupDirs: string[] = []
 let nextId = 0
@@ -9,6 +17,12 @@ let nextId = 0
 function makeRegistry(
   identities: Map<number, string | null>,
   liveTrees: Set<number> = new Set(),
+  options: {
+    platform?: NodeJS.Platform
+    inspectWindowsPortOwners?: (port: number) => Promise<WindowsPortOwner[]>
+    probeRuntimeIdentity?: (port: number) => Promise<RuntimeIdentity | null>
+    confirmOrphanTermination?: (candidate: OrphanTerminationCandidate) => Promise<boolean>
+  } = {},
 ) {
   nextId += 1
   const dataDir = path.resolve(`test-data/module-runtime-registry-${process.pid}-${nextId}`)
@@ -18,6 +32,10 @@ function makeRegistry(
     probeProcessStartIdentity: async pid => identities.get(pid) ?? null,
     isProcessTreeAlive: pid => liveTrees.has(pid),
     terminateProcessTree: terminateTree,
+    platform: options.platform,
+    inspectWindowsPortOwners: options.inspectWindowsPortOwners,
+    probeRuntimeIdentity: options.probeRuntimeIdentity,
+    confirmOrphanTermination: options.confirmOrphanTermination,
     createId: vi.fn()
       .mockReturnValueOnce(`instance-${nextId}`)
       .mockReturnValueOnce(`temp-${nextId}-1`)
@@ -25,7 +43,7 @@ function makeRegistry(
       .mockReturnValueOnce(`temp-${nextId}-3`),
     now: () => '2026-08-17T00:00:00.000Z',
   })
-  return { dataDir, registry, terminateTree }
+  return { dataDir, instanceId: `instance-${nextId}`, registry, terminateTree }
 }
 
 async function record(
@@ -44,6 +62,46 @@ afterEach(async () => {
 })
 
 describe('ModuleRuntimeRegistry', () => {
+  it('probes the standard runtime identity RPC envelope', async () => {
+    let requestBody: Record<string, unknown> | undefined
+    const server = http.createServer((request, response) => {
+      let body = ''
+      request.on('data', chunk => { body += chunk })
+      request.on('end', () => {
+        requestBody = JSON.parse(body) as Record<string, unknown>
+        response.writeHead(200, { 'Content-Type': 'application/json' })
+        response.end(JSON.stringify({
+          id: requestBody.id,
+          success: true,
+          data: {
+            instance_id: 'instance-rpc',
+            module_id: 'crabot-agent',
+            runtime_id: 'runtime-rpc',
+          },
+          timestamp: '2026-08-17T00:00:00.000Z',
+        }))
+      })
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Expected TCP test server')
+
+    try {
+      await expect(probeRuntimeIdentity(address.port)).resolves.toEqual({
+        instance_id: 'instance-rpc',
+        module_id: 'crabot-agent',
+        runtime_id: 'runtime-rpc',
+      })
+      expect(requestBody).toMatchObject({
+        source: 'module-manager',
+        method: 'get_runtime_identity',
+        params: {},
+      })
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+    }
+  })
+
   it('captures a stable identity for the current process', async () => {
     const first = await probeProcessStartIdentity(process.pid)
     const second = await probeProcessStartIdentity(process.pid)
@@ -172,20 +230,255 @@ describe('ModuleRuntimeRegistry', () => {
     expect(await registry.listRecords()).toEqual([])
   })
 
-  it.skipIf(process.platform !== 'win32')('does not signal a reused Windows PID and refuses orphan recovery', async () => {
+  it('removes a stale Windows record when a reused root PID has no listener', async () => {
     const identities = new Map<number, string | null>([[401, 'original-start']])
-    const { registry, terminateTree } = makeRegistry(identities)
+    const inspectWindowsPortOwners = vi.fn(async () => [])
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), {
+      platform: 'win32',
+      inspectWindowsPortOwners,
+    })
+    await record(registry, 'runtime-reused', 'crabot-agent', 401, 19003)
+    identities.set(401, 'replacement-start')
+
+    await registry.recoverOrphans({
+      moduleId: 'crabot-agent',
+      currentRuntimeIds: new Set(),
+      gracefulTimeoutMs: 30_000,
+    })
+
+    expect(inspectWindowsPortOwners).toHaveBeenCalledWith(19003)
+    expect(terminateTree).not.toHaveBeenCalled()
+    expect(await registry.listRecords()).toEqual([])
+  })
+
+  it('terminates an exact recorded Windows root without following later port owners', async () => {
+    const identities = new Map<number, string | null>([[401, 'original-start']])
+    const probeRuntimeIdentity = vi.fn(async () => null)
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), {
+      platform: 'win32',
+      probeRuntimeIdentity,
+    })
+    await record(registry, 'runtime-exact', 'crabot-agent', 401, 19003)
+
+    await registry.recoverOrphans({
+      currentRuntimeIds: new Set(),
+      gracefulTimeoutMs: 30_000,
+    })
+
+    expect(terminateTree).toHaveBeenCalledWith(401, {
+      gracefulTimeoutMs: 30_000,
+      requireOwnedProcess: true,
+    })
+    expect(probeRuntimeIdentity).toHaveBeenCalledWith(19003)
+    expect(await registry.listRecords()).toEqual([])
+  })
+
+  it('keeps the Windows record and blocks startup if the runtime survives root termination', async () => {
+    const identities = new Map<number, string | null>([[401, 'original-start']])
+    const expectedInstanceId = `instance-${nextId + 1}`
+    const { registry } = makeRegistry(identities, new Set(), {
+      platform: 'win32',
+      probeRuntimeIdentity: async () => ({
+        instance_id: expectedInstanceId,
+        module_id: 'crabot-agent',
+        runtime_id: 'runtime-exact',
+      }),
+    })
+    await record(registry, 'runtime-exact', 'crabot-agent', 401, 19003)
+
+    await expect(registry.recoverOrphans({
+      currentRuntimeIds: new Set(),
+      gracefulTimeoutMs: 30_000,
+    })).rejects.toThrow('recorded runtime still responds')
+
+    expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-exact'])
+  })
+
+  it('fails non-interactive Windows startup with actionable details for a confirmed listener', async () => {
+    const identities = new Map<number, string | null>([
+      [401, 'original-start'],
+      [451, 'listener-start'],
+    ])
+    const owner: WindowsPortOwner = {
+      pid: 451,
+      process_name: 'node.exe',
+      command_line: 'node dist/main.js',
+      process_start_identity: 'listener-start',
+    }
+    const expectedInstanceId = `instance-${nextId + 1}`
+    const { dataDir, registry, terminateTree } = makeRegistry(identities, new Set(), {
+      platform: 'win32',
+      inspectWindowsPortOwners: async () => [owner],
+      probeRuntimeIdentity: async () => ({
+        instance_id: expectedInstanceId,
+        module_id: 'crabot-agent',
+        runtime_id: 'runtime-reused',
+      }),
+    })
     await record(registry, 'runtime-reused', 'crabot-agent', 401, 19003)
     identities.set(401, 'replacement-start')
 
     await expect(registry.recoverOrphans({
-      moduleId: 'crabot-agent',
       currentRuntimeIds: new Set(),
       gracefulTimeoutMs: 30_000,
-    })).rejects.toThrow('process start identity changed')
+    })).rejects.toThrow(new RegExp(
+      `crabot-agent[\\s\\S]*19003[\\s\\S]*451[\\s\\S]*node\\.exe[\\s\\S]*${dataDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+    ))
 
     expect(terminateTree).not.toHaveBeenCalled()
     expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-reused'])
+  })
+
+  it('does not prompt or signal when the Windows listener runtime identity does not match', async () => {
+    const identities = new Map<number, string | null>([
+      [401, 'original-start'],
+      [451, 'listener-start'],
+    ])
+    const confirmOrphanTermination = vi.fn(async () => true)
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), {
+      platform: 'win32',
+      inspectWindowsPortOwners: async () => [{
+        pid: 451,
+        process_name: 'other.exe',
+        command_line: 'other.exe --serve',
+        process_start_identity: 'listener-start',
+      }],
+      probeRuntimeIdentity: async () => ({
+        instance_id: 'another-instance',
+        module_id: 'crabot-agent',
+        runtime_id: 'runtime-reused',
+      }),
+      confirmOrphanTermination,
+    })
+    await record(registry, 'runtime-reused', 'crabot-agent', 401, 19003)
+    identities.set(401, 'replacement-start')
+
+    await expect(registry.recoverOrphans({
+      currentRuntimeIds: new Set(),
+      gracefulTimeoutMs: 30_000,
+    })).rejects.toThrow('did not prove the recorded runtime identity')
+
+    expect(confirmOrphanTermination).not.toHaveBeenCalled()
+    expect(terminateTree).not.toHaveBeenCalled()
+    expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-reused'])
+  })
+
+  it('does not terminate a confirmed Windows listener when the human declines', async () => {
+    const identities = new Map<number, string | null>([
+      [401, 'original-start'],
+      [451, 'listener-start'],
+    ])
+    const expectedInstanceId = `instance-${nextId + 1}`
+    const confirmOrphanTermination = vi.fn(async () => false)
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), {
+      platform: 'win32',
+      inspectWindowsPortOwners: async () => [{
+        pid: 451,
+        process_name: 'node.exe',
+        command_line: 'node dist/main.js',
+        process_start_identity: 'listener-start',
+      }],
+      probeRuntimeIdentity: async () => ({
+        instance_id: expectedInstanceId,
+        module_id: 'crabot-agent',
+        runtime_id: 'runtime-reused',
+      }),
+      confirmOrphanTermination,
+    })
+    await record(registry, 'runtime-reused', 'crabot-agent', 401, 19003)
+    identities.set(401, 'replacement-start')
+
+    await expect(registry.recoverOrphans({
+      currentRuntimeIds: new Set(),
+      gracefulTimeoutMs: 30_000,
+    })).rejects.toThrow('termination was not approved')
+
+    expect(confirmOrphanTermination).toHaveBeenCalledOnce()
+    expect(terminateTree).not.toHaveBeenCalled()
+  })
+
+  it('revalidates and terminates only the confirmed Windows listener PID', async () => {
+    const identities = new Map<number, string | null>([
+      [401, 'original-start'],
+      [451, 'listener-start'],
+    ])
+    const owner: WindowsPortOwner = {
+      pid: 451,
+      process_name: 'node.exe',
+      command_line: 'node dist/main.js',
+      process_start_identity: 'listener-start',
+    }
+    const expectedInstanceId = `instance-${nextId + 1}`
+    const inspectWindowsPortOwners = vi.fn(async () => [owner])
+    const probeRuntimeIdentity = vi.fn(async () => ({
+      instance_id: expectedInstanceId,
+      module_id: 'crabot-agent',
+      runtime_id: 'runtime-reused',
+    }))
+    const confirmOrphanTermination = vi.fn(async () => true)
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), {
+      platform: 'win32',
+      inspectWindowsPortOwners,
+      probeRuntimeIdentity,
+      confirmOrphanTermination,
+    })
+    await record(registry, 'runtime-reused', 'crabot-agent', 401, 19003)
+    identities.set(401, 'replacement-start')
+
+    await registry.recoverOrphans({
+      currentRuntimeIds: new Set(),
+      gracefulTimeoutMs: 30_000,
+    })
+
+    expect(inspectWindowsPortOwners).toHaveBeenCalledTimes(2)
+    expect(probeRuntimeIdentity).toHaveBeenCalledTimes(2)
+    expect(confirmOrphanTermination).toHaveBeenCalledOnce()
+    expect(terminateTree).toHaveBeenCalledWith(451, {
+      gracefulTimeoutMs: 30_000,
+      requireOwnedProcess: true,
+    })
+    expect(await registry.listRecords()).toEqual([])
+  })
+
+  it('does not signal when the Windows listener changes during confirmation', async () => {
+    const identities = new Map<number, string | null>([
+      [401, 'original-start'],
+      [451, 'listener-start'],
+      [452, 'new-listener-start'],
+    ])
+    const expectedInstanceId = `instance-${nextId + 1}`
+    const inspectWindowsPortOwners = vi.fn()
+      .mockResolvedValueOnce([{
+        pid: 451,
+        process_name: 'node.exe',
+        command_line: 'node dist/main.js',
+        process_start_identity: 'listener-start',
+      }])
+      .mockResolvedValueOnce([{
+        pid: 452,
+        process_name: 'other.exe',
+        command_line: 'other.exe --serve',
+        process_start_identity: 'new-listener-start',
+      }])
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), {
+      platform: 'win32',
+      inspectWindowsPortOwners,
+      probeRuntimeIdentity: async () => ({
+        instance_id: expectedInstanceId,
+        module_id: 'crabot-agent',
+        runtime_id: 'runtime-reused',
+      }),
+      confirmOrphanTermination: async () => true,
+    })
+    await record(registry, 'runtime-reused', 'crabot-agent', 401, 19003)
+    identities.set(401, 'replacement-start')
+
+    await expect(registry.recoverOrphans({
+      currentRuntimeIds: new Set(),
+      gracefulTimeoutMs: 30_000,
+    })).rejects.toThrow('changed during confirmation')
+
+    expect(terminateTree).not.toHaveBeenCalled()
   })
 
   it('removes only the exact runtime record named by a finalizer', async () => {

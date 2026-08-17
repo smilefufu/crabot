@@ -217,6 +217,13 @@ export interface HealthResult {
   details?: Record<string, unknown>
 }
 
+/** MM 启动恢复使用的本机模块 runtime 身份。 */
+export interface GetRuntimeIdentityResult {
+  instance_id: string
+  module_id: ModuleId
+  runtime_id: string
+}
+
 // ============================================================================
 // 模块定义
 // ============================================================================

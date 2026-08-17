@@ -49,6 +49,7 @@ import { checkDiskLow } from './disk-watcher.js'
 import { resolveExecutable } from './executable-resolver.js'
 import { terminateProcessTree, waitForProcessTreeExit } from './process-tree.js'
 import { ModuleRuntimeRegistry } from './module-runtime-registry.js'
+import type { OrphanTerminationCandidate } from './module-runtime-registry.js'
 
 // ============================================================================
 // 类型定义
@@ -63,6 +64,10 @@ interface MethodHandler<P = unknown, R = unknown> {
 interface EventSubscription {
   subscriber: ModuleId
   eventTypes: string[]
+}
+
+export interface ModuleManagerOptions {
+  confirmOrphanTermination?: (candidate: OrphanTerminationCandidate) => Promise<boolean>
 }
 
 interface ManagedChildState {
@@ -115,13 +120,19 @@ export class ModuleManager {
   private readonly logsDir: string
   private readonly dataDir: string
 
-  constructor(config: Partial<ModuleManagerConfig> = {}, dataDir: string) {
+  constructor(
+    config: Partial<ModuleManagerConfig> = {},
+    dataDir: string,
+    options: ModuleManagerOptions = {},
+  ) {
     this.config = { ...DEFAULT_CONFIG, ...config }
     if (this.config.hotplug_allowed_types.includes('agent')) {
       throw new Error('Invalid Module Manager config: hotplug_allowed_types must not contain reserved type "agent"')
     }
     this.portAllocator = new PortAllocator(this.config.port_range, dataDir)
-    this.runtimeRegistry = new ModuleRuntimeRegistry(dataDir)
+    this.runtimeRegistry = new ModuleRuntimeRegistry(dataDir, {
+      confirmOrphanTermination: options.confirmOrphanTermination,
+    })
     this.logsDir = path.join(dataDir, 'logs')
     fs.mkdirSync(this.logsDir, { recursive: true })
     this.dataDir = dataDir

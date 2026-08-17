@@ -13,6 +13,7 @@ import {
   type Request,
   type Response,
   type HealthResult,
+  type GetRuntimeIdentityResult,
   type Event,
   type ModuleId,
   type ResolvedModule,
@@ -63,6 +64,7 @@ export class RpcCallError extends Error {
 export function rpcErrorHttpStatus(error: unknown): number {
   if ((error instanceof RpcError || error instanceof RpcCallError) && error.code === 'UNAUTHORIZED') return 401
   if ((error instanceof RpcError || error instanceof RpcCallError) && error.code === 'FORBIDDEN') return 403
+  if ((error instanceof RpcError || error instanceof RpcCallError) && error.code === 'SERVICE_UNAVAILABLE') return 503
   return 500
 }
 
@@ -489,6 +491,7 @@ export abstract class ModuleBase {
 
     // 注册必需端点
     this.registerMethod('health', this.handleHealth.bind(this))
+    this.registerMethod('get_runtime_identity', this.handleGetRuntimeIdentity.bind(this))
     this.registerMethod('shutdown', this.handleShutdown.bind(this))
     this.registerMethod('on_event', this.handleOnEvent.bind(this))
     this.registerMethod('callback', this.handleCallback.bind(this))
@@ -786,6 +789,22 @@ export abstract class ModuleBase {
     return {
       status: await this.getHealthStatus(details),
       details,
+    }
+  }
+
+  private async handleGetRuntimeIdentity(): Promise<GetRuntimeIdentityResult> {
+    const instanceId = process.env.CRABOT_INSTANCE_ID
+    const runtimeId = process.env.CRABOT_MODULE_RUNTIME_ID
+    if (!instanceId || !runtimeId) {
+      throw new RpcError(
+        GlobalErrorCode.SERVICE_UNAVAILABLE,
+        'Module runtime identity was not injected by Module Manager',
+      )
+    }
+    return {
+      instance_id: instanceId,
+      module_id: this.config.moduleId,
+      runtime_id: runtimeId,
     }
   }
 

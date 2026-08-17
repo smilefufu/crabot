@@ -22,6 +22,25 @@ export interface ModuleRuntimeRecord {
   created_at: string
 }
 
+export interface RuntimeIdentity {
+  instance_id: string
+  module_id: string
+  runtime_id: string
+}
+
+export interface WindowsPortOwner {
+  pid: number
+  process_name: string
+  command_line?: string
+  process_start_identity: string
+}
+
+export interface OrphanTerminationCandidate {
+  record: ModuleRuntimeRecord
+  record_path: string
+  listener: WindowsPortOwner
+}
+
 interface RecordSpawnInput {
   runtimeId: string
   moduleId: string
@@ -35,10 +54,14 @@ interface RecoverOrphansInput {
   gracefulTimeoutMs: number
 }
 
-interface ModuleRuntimeRegistryOptions {
+export interface ModuleRuntimeRegistryOptions {
   probeProcessStartIdentity?: (pid: number) => Promise<string | null>
   isProcessTreeAlive?: (pid: number, modulePort: number, rootExited: boolean) => boolean | Promise<boolean>
   terminateProcessTree?: (pid: number, options: TerminateProcessTreeOptions) => Promise<void>
+  inspectWindowsPortOwners?: (port: number) => Promise<WindowsPortOwner[]>
+  probeRuntimeIdentity?: (port: number) => Promise<RuntimeIdentity | null>
+  confirmOrphanTermination?: (candidate: OrphanTerminationCandidate) => Promise<boolean>
+  platform?: NodeJS.Platform
   createId?: () => string
   now?: () => string
 }
@@ -105,6 +128,88 @@ export async function probeProcessStartIdentity(pid: number): Promise<string | n
   return probePosixStartIdentity(pid)
 }
 
+export async function inspectWindowsPortOwners(port: number): Promise<WindowsPortOwner[]> {
+  const script = "$ErrorActionPreference='Stop'; "
+    + `$listenerPids = @(Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue `
+    + `| ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique); `
+    + `$owners = @($listenerPids | ForEach-Object { `
+    + `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = $($_)\"; `
+    + `if ($null -ne $p) { [pscustomobject]@{ `
+    + `pid = [int]$p.ProcessId; process_name = [string]$p.Name; `
+    + `command_line = [string]$p.CommandLine; `
+    + `process_start_identity = 'win32:' + $p.CreationDate.ToUniversalTime().ToString('o') } } }); `
+    + `ConvertTo-Json -InputObject @($owners) -Compress -Depth 3`
+  const output = await execFileText('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    script,
+  ])
+  const decoded = JSON.parse(output.trim() || '[]') as unknown
+  if (!Array.isArray(decoded)) throw new Error(`Invalid Windows port owner response for port ${port}`)
+  return decoded.map((item) => {
+    if (!item || typeof item !== 'object') throw new Error(`Invalid Windows port owner for port ${port}`)
+    const owner = item as Partial<WindowsPortOwner>
+    if (!Number.isInteger(owner.pid) || (owner.pid ?? 0) <= 0
+      || typeof owner.process_name !== 'string'
+      || typeof owner.process_start_identity !== 'string') {
+      throw new Error(`Invalid Windows port owner for port ${port}`)
+    }
+    return {
+      pid: owner.pid!,
+      process_name: owner.process_name,
+      ...(owner.command_line ? { command_line: owner.command_line } : {}),
+      process_start_identity: owner.process_start_identity,
+    }
+  })
+}
+
+export async function probeRuntimeIdentity(port: number): Promise<RuntimeIdentity | null> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/get_runtime_identity`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: crypto.randomUUID(),
+        source: 'module-manager',
+        method: 'get_runtime_identity',
+        params: {},
+        timestamp: new Date().toISOString(),
+      }),
+      signal: AbortSignal.timeout(1500),
+    })
+    if (!response.ok) return null
+    const body = await response.json() as { success?: unknown; data?: unknown }
+    if (body.success !== true || !body.data || typeof body.data !== 'object') return null
+    const identity = body.data as Partial<RuntimeIdentity>
+    if (typeof identity.instance_id !== 'string'
+      || typeof identity.module_id !== 'string'
+      || typeof identity.runtime_id !== 'string') return null
+    return {
+      instance_id: identity.instance_id,
+      module_id: identity.module_id,
+      runtime_id: identity.runtime_id,
+    }
+  } catch {
+    return null
+  }
+}
+
+export function formatOrphanTerminationCandidate(candidate: OrphanTerminationCandidate): string {
+  const { record, listener } = candidate
+  return [
+    'A confirmed orphan Crabot module is still listening:',
+    `  module_id: ${record.module_id}`,
+    `  runtime_id: ${record.runtime_id}`,
+    `  port: ${record.module_port}`,
+    `  listener_pid: ${listener.pid}`,
+    `  process_name: ${listener.process_name}`,
+    `  command_line: ${JSON.stringify(listener.command_line ?? '')}`,
+    `  process_start_identity: ${listener.process_start_identity}`,
+    `  runtime_record: ${candidate.record_path}`,
+  ].join('\n')
+}
+
 function isRuntimeRecord(value: unknown): value is ModuleRuntimeRecord {
   if (!value || typeof value !== 'object') return false
   const record = value as Partial<ModuleRuntimeRecord>
@@ -125,6 +230,10 @@ export class ModuleRuntimeRegistry {
   private readonly probeStartIdentity: (pid: number) => Promise<string | null>
   private readonly isTreeAlive: (pid: number, modulePort: number, rootExited: boolean) => boolean | Promise<boolean>
   private readonly terminateTree: (pid: number, options: TerminateProcessTreeOptions) => Promise<void>
+  private readonly inspectPortOwners: (port: number) => Promise<WindowsPortOwner[]>
+  private readonly probeModuleIdentity: (port: number) => Promise<RuntimeIdentity | null>
+  private readonly confirmTermination?: (candidate: OrphanTerminationCandidate) => Promise<boolean>
+  private readonly platform: NodeJS.Platform
   private readonly createId: () => string
   private readonly now: () => string
   private initializePromise?: Promise<void>
@@ -135,11 +244,15 @@ export class ModuleRuntimeRegistry {
     this.recordsDir = path.join(this.registryDir, 'records')
     this.instanceIdPath = path.join(this.registryDir, 'instance-id')
     this.probeStartIdentity = options.probeProcessStartIdentity ?? probeProcessStartIdentity
+    this.platform = options.platform ?? process.platform
     this.isTreeAlive = options.isProcessTreeAlive ?? (async (pid, modulePort, rootExited) => {
-      if (process.platform !== 'win32') return isOwnedProcessTreeAlive(pid)
+      if (this.platform !== 'win32') return isOwnedProcessTreeAlive(pid)
       return !await waitForProcessTreeExit(pid, 0, 100, modulePort, () => rootExited)
     })
     this.terminateTree = options.terminateProcessTree ?? terminateOwnedProcessTree
+    this.inspectPortOwners = options.inspectWindowsPortOwners ?? inspectWindowsPortOwners
+    this.probeModuleIdentity = options.probeRuntimeIdentity ?? probeRuntimeIdentity
+    this.confirmTermination = options.confirmOrphanTermination
     this.createId = options.createId ?? (() => crypto.randomUUID())
     this.now = options.now ?? (() => new Date().toISOString())
   }
@@ -216,17 +329,16 @@ export class ModuleRuntimeRegistry {
       if (input.currentRuntimeIds.has(record.runtime_id)) continue
 
       const currentIdentity = await this.probeStartIdentity(record.root_pid)
+      if (this.platform === 'win32'
+        && currentIdentity !== record.process_start_identity) {
+        await this.recoverDetachedWindowsRuntime(record, input.gracefulTimeoutMs)
+        continue
+      }
       if (!currentIdentity) {
         if (!await this.isTreeAlive(record.root_pid, record.module_port, true)) {
           await this.removeRuntime(record.runtime_id)
           continue
         }
-        if (process.platform === 'win32') {
-          throw new Error(
-            `Cannot recover orphan ${record.module_id}/${record.runtime_id}: root exited and remaining Windows process ownership is ambiguous`,
-          )
-        }
-
         await this.terminateTree(record.root_pid, {
           gracefulTimeoutMs: input.gracefulTimeoutMs,
           modulePort: record.module_port,
@@ -237,24 +349,98 @@ export class ModuleRuntimeRegistry {
         continue
       }
       if (currentIdentity !== record.process_start_identity) {
-        if (process.platform !== 'win32') {
-          // Detached POSIX modules use root_pid as PGID; that numeric PID cannot be
-          // reused while any member of the recorded process group still exists.
-          await this.removeRuntime(record.runtime_id)
-          continue
-        }
-        throw new Error(
-          `Cannot recover orphan ${record.module_id}/${record.runtime_id}: process start identity changed for PID ${record.root_pid}`,
-        )
+        // Detached POSIX modules use root_pid as PGID; that numeric PID cannot be
+        // reused while any member of the recorded process group still exists.
+        await this.removeRuntime(record.runtime_id)
+        continue
       }
 
-      await this.terminateTree(record.root_pid, {
-        gracefulTimeoutMs: input.gracefulTimeoutMs,
-        modulePort: record.module_port,
-        requireOwnedProcess: true,
-      })
+      await this.terminateTree(record.root_pid, this.platform === 'win32'
+        ? {
+            gracefulTimeoutMs: input.gracefulTimeoutMs,
+            requireOwnedProcess: true,
+          }
+        : {
+            gracefulTimeoutMs: input.gracefulTimeoutMs,
+            modulePort: record.module_port,
+            requireOwnedProcess: true,
+          })
+      if (this.platform === 'win32'
+        && this.runtimeIdentityMatches(record, await this.probeModuleIdentity(record.module_port))) {
+        throw new Error(
+          `Cannot recover orphan ${record.module_id}/${record.runtime_id}: recorded runtime still responds after terminating root PID ${record.root_pid}; runtime record: ${this.recordPath(record.runtime_id)}`,
+        )
+      }
       await this.removeRuntime(record.runtime_id)
     }
+  }
+
+  private async recoverDetachedWindowsRuntime(
+    record: ModuleRuntimeRecord,
+    gracefulTimeoutMs: number,
+  ): Promise<void> {
+    const owners = await this.inspectPortOwners(record.module_port)
+    if (owners.length === 0) {
+      await this.removeRuntime(record.runtime_id)
+      return
+    }
+    if (owners.length !== 1) {
+      throw new Error(
+        `Cannot recover orphan ${record.module_id}/${record.runtime_id}: port ${record.module_port} has ambiguous Windows listeners ${owners.map(owner => owner.pid).join(', ')}; runtime record: ${this.recordPath(record.runtime_id)}`,
+      )
+    }
+
+    const listener = owners[0]
+    const listenerIdentity = await this.probeStartIdentity(listener.pid)
+    const runtimeIdentity = await this.probeModuleIdentity(record.module_port)
+    if (listenerIdentity !== listener.process_start_identity
+      || !this.runtimeIdentityMatches(record, runtimeIdentity)) {
+      throw new Error(
+        `Cannot recover orphan ${record.module_id}/${record.runtime_id}: listener on port ${record.module_port} did not prove the recorded runtime identity; listener PID ${listener.pid}; runtime record: ${this.recordPath(record.runtime_id)}`,
+      )
+    }
+
+    const candidate: OrphanTerminationCandidate = {
+      record,
+      record_path: this.recordPath(record.runtime_id),
+      listener,
+    }
+    if (!this.confirmTermination) {
+      throw new Error(
+        `${formatOrphanTerminationCandidate(candidate)}\nRun \`crabot start\` in an interactive terminal to approve termination, or stop this process manually.`,
+      )
+    }
+    if (!await this.confirmTermination(candidate)) {
+      throw new Error(`${formatOrphanTerminationCandidate(candidate)}\nStartup stopped because orphan termination was not approved.`)
+    }
+
+    const ownersAfterConfirmation = await this.inspectPortOwners(record.module_port)
+    const runtimeIdentityAfterConfirmation = await this.probeModuleIdentity(record.module_port)
+    const processIdentityAfterConfirmation = await this.probeStartIdentity(listener.pid)
+    if (ownersAfterConfirmation.length !== 1
+      || ownersAfterConfirmation[0].pid !== listener.pid
+      || ownersAfterConfirmation[0].process_start_identity !== listener.process_start_identity
+      || processIdentityAfterConfirmation !== listener.process_start_identity
+      || !this.runtimeIdentityMatches(record, runtimeIdentityAfterConfirmation)) {
+      throw new Error(
+        `Cannot recover orphan ${record.module_id}/${record.runtime_id}: Windows listener identity changed during confirmation; runtime record: ${this.recordPath(record.runtime_id)}`,
+      )
+    }
+
+    await this.terminateTree(listener.pid, {
+      gracefulTimeoutMs,
+      requireOwnedProcess: true,
+    })
+    await this.removeRuntime(record.runtime_id)
+  }
+
+  private runtimeIdentityMatches(
+    record: ModuleRuntimeRecord,
+    identity: RuntimeIdentity | null,
+  ): boolean {
+    return identity?.instance_id === record.instance_id
+      && identity.module_id === record.module_id
+      && identity.runtime_id === record.runtime_id
   }
 
   private async initializeOnce(): Promise<void> {

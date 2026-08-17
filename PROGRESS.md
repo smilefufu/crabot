@@ -5,11 +5,11 @@
 
 ## 当前状态
 
-### 模块关闭与孤儿模块回收：本地完成，待 PR review
+### 模块关闭与孤儿模块回收：PR #99 review 收口中
 
 - 已确认设计：`crabot-docs/superpowers/specs/2026-08-16-module-shutdown-orphan-fencing-design.md`；实施计划：`crabot-docs/superpowers/plans/2026-08-17-module-shutdown-orphan-fencing.md`。
 - Agent shutdown 已统一释放 builtin/Claude Code/Codex adapter 资源，关闭后不再重建 CLI watcher，也不终止独立 tmux Worker。
-- MM 增加实例级 runtime registry 与 startup/per-spawn orphan recovery；replacement 只在全部已记录历史 runtime 确认退出后启动。
+- MM 增加实例级 runtime registry 与 startup/per-spawn orphan recovery；replacement 只在全部已记录历史 runtime 确认退出后启动。Windows root 已退出或 PID 已复用时，以端口 owner + runtime 身份探针精确确认 orphan：前台启动经人类确认后终止，拒绝、`-d`、无 TTY 或身份不明均在任何受管模块启动前失败退出。
 - supervisor 最终强杀窗口调整为 MM 60 秒关闭窗口加 10 秒余量；Agent exact 协议版本同步至 `3.1.2`。隔离真实生命周期演练已验证：MM 被强杀后遗留的模块树会被 replacement MM 按 registry 全量回收，且记录清零。定向测试、类型检查和最终 diff review 已完成，待 PR review。
 
 ### P6 已完成

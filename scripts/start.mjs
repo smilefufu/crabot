@@ -39,6 +39,11 @@ if (!hasInstance(HOME_CRABOT)) {
 //   - DATA_DIR 走 env > legacy source install > ~/.crabot/data{-OFFSET}（不读 instance.data_dir）
 // "不读 instance.data_dir" 的契约 + 历史教训见 lib/instance.mjs:resolveCliDataDir。
 const DAEMON_MODE = process.argv.includes('-d') || process.argv.includes('--daemon')
+process.env.CRABOT_ORPHAN_RECOVERY_INTERACTIVE = !DAEMON_MODE
+  && process.stdin.isTTY === true
+  && process.stdout.isTTY === true
+  ? '1'
+  : '0'
 
 // ── 环境变量 ──
 
@@ -152,8 +157,9 @@ if (!existingCred) {
 // ── 启动 Module Manager ──
 
 const mmEntry = resolve(ROOT, 'crabot-core/dist/main.js')
-if (!existsSync(mmEntry)) {
-  console.error('[crabot] crabot-core/dist/main.js not found. Run build first.')
+const orphanRecoveryEntry = resolve(ROOT, 'crabot-core/dist/orphan-recovery-preflight.js')
+if (!existsSync(mmEntry) || !existsSync(orphanRecoveryEntry)) {
+  console.error('[crabot] crabot-core build output not found. Run build first.')
   process.exit(1)
 }
 
@@ -175,6 +181,16 @@ async function probePort(port) {
 }
 if (!await probePort(19000 + OFFSET)) {
   console.error(`[crabot] port ${19000 + OFFSET} already in use. Check 'lsof -i :${19000 + OFFSET}'.`)
+  process.exit(1)
+}
+
+const orphanRecovery = spawnSync(process.execPath, [orphanRecoveryEntry], {
+  cwd: resolve(ROOT, 'crabot-core'),
+  stdio: 'inherit',
+  env: { ...process.env },
+})
+if (orphanRecovery.status !== 0) {
+  console.error('[crabot] startup aborted before Module Manager was launched.')
   process.exit(1)
 }
 
