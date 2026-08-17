@@ -127,38 +127,63 @@ function EpisodeCard({ episode, progress }: { episode: ManagerEpisodeTrace; prog
 }
 
 function groupEpisodes(episodes: ManagerEpisodeTrace[]): Array<{ episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[] }> {
+  const nodes = new Map(episodes.map((episode) => [episode.trace_id, episode]))
+
+  // Current page may contain only a late worker event; materialize its minimal parent context.
+  for (const episode of episodes) {
+    const parent = episode.causal_parent
+    if (!parent || nodes.has(parent.trace_id)) continue
+    nodes.set(parent.trace_id, {
+      trace_id: parent.trace_id,
+      manager_key: episode.manager_key,
+      started_at: parent.started_at,
+      status: parent.status,
+      trigger: parent.trigger,
+      spans: [],
+      spawned_worker_ids: episode.worker_ref ? [episode.worker_ref.worker_id] : [],
+      ...(parent.outcome ? { outcome: parent.outcome } : {}),
+      ...(parent.reply_excerpt ? { reply_excerpt: parent.reply_excerpt } : {}),
+      ...(parent.actions ? { actions: parent.actions } : {}),
+    })
+  }
+
+  // Every episode (including worker_event) may spawn another worker. Build the full edge map first.
   const ownerByWorker = new Map<string, string>()
-  const primaryById = new Map(episodes.filter((episode) => episode.trigger.type !== 'worker_event').map((episode) => [episode.trace_id, episode]))
-  for (const episode of primaryById.values()) {
+  for (const episode of nodes.values()) {
     for (const action of episode.actions ?? []) {
       if (action.kind === 'spawn_worker' && action.worker_id) ownerByWorker.set(action.worker_id, episode.trace_id)
     }
   }
-  const progressByTrace = new Map<string, ManagerEpisodeTrace[]>()
-  const orphanProgress: ManagerEpisodeTrace[] = []
-  for (const episode of episodes.filter((item) => item.trigger.type === 'worker_event')) {
-    const currentPageParent = episode.worker_ref ? ownerByWorker.get(episode.worker_ref.worker_id) : undefined
-    const parentId = currentPageParent ?? episode.causal_parent?.trace_id
-    if (!parentId) { orphanProgress.push(episode); continue }
-    if (!primaryById.has(parentId) && episode.causal_parent) {
-      primaryById.set(parentId, {
-        trace_id: episode.causal_parent.trace_id,
-        manager_key: episode.manager_key,
-        started_at: episode.causal_parent.started_at,
-        status: 'completed',
-        trigger: episode.causal_parent.trigger,
-        spans: [],
-        spawned_worker_ids: episode.worker_ref ? [episode.worker_ref.worker_id] : [],
-        ...(episode.causal_parent.reply_excerpt ? { reply_excerpt: episode.causal_parent.reply_excerpt } : {}),
-        ...(episode.causal_parent.actions ? { actions: episode.causal_parent.actions } : {}),
-      })
-    }
-    progressByTrace.set(parentId, [...(progressByTrace.get(parentId) ?? []), episode])
+  const parentOf = new Map<string, string>()
+  for (const episode of nodes.values()) {
+    if (episode.trigger.type !== 'worker_event' || !episode.worker_ref) continue
+    const parentId = ownerByWorker.get(episode.worker_ref.worker_id) ?? episode.causal_parent?.trace_id
+    if (parentId && parentId !== episode.trace_id && nodes.has(parentId)) parentOf.set(episode.trace_id, parentId)
   }
-  const grouped = Array.from(primaryById.values()).map((episode) => ({ episode, progress: progressByTrace.get(episode.trace_id) ?? [] }))
-  // 无 parent 事实的历史事件不丢数据，各自作为进展卡展示。
-  grouped.push(...orphanProgress.map((episode) => ({ episode, progress: [] })))
-  return grouped.sort((a, b) => b.episode.started_at.localeCompare(a.episode.started_at))
+
+  const rootOf = (id: string): string => {
+    const seen = new Set<string>()
+    let current = id
+    while (parentOf.has(current) && !seen.has(current)) {
+      seen.add(current)
+      current = parentOf.get(current)!
+    }
+    return current
+  }
+
+  const progressByRoot = new Map<string, ManagerEpisodeTrace[]>()
+  for (const [id, episode] of nodes) {
+    const root = rootOf(id)
+    if (root === id) continue
+    progressByRoot.set(root, [...(progressByRoot.get(root) ?? []), episode])
+  }
+  return Array.from(nodes.entries())
+    .filter(([id]) => !parentOf.has(id))
+    .map(([id, episode]) => ({
+      episode,
+      progress: (progressByRoot.get(id) ?? []).sort((a, b) => a.started_at.localeCompare(b.started_at)),
+    }))
+    .sort((a, b) => b.episode.started_at.localeCompare(a.episode.started_at))
 }
 
 const ManagerDetailContent: React.FC = () => {

@@ -20,7 +20,9 @@ export interface WorkerProjectionRef {
 export interface CausalParentProjection {
   trace_id: string
   started_at: string
+  status: ManagerEpisodeTrace['status']
   trigger: ManagerEpisodeTrace['trigger']
+  outcome?: ManagerEpisodeTrace['outcome']
   reply_excerpt?: string
   actions?: EpisodeAction[]
 }
@@ -113,7 +115,9 @@ export function withCausalParent(
     causal_parent: {
       trace_id: parent.trace_id,
       started_at: parent.started_at,
+      status: parent.status,
       trigger: parent.trigger,
+      ...(parent.outcome ? { outcome: parent.outcome } : {}),
       ...(parent.reply_excerpt ? { reply_excerpt: parent.reply_excerpt } : {}),
       ...(parent.actions ? { actions: parent.actions } : {}),
     },

@@ -143,8 +143,9 @@ describe('ManagerDetail', () => {
         trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
         worker_ref: { worker_id: 'w-1', title: '长任务', state_to: 'running' },
         causal_parent: {
-          trace_id: 'ep-old-parent', started_at: '2026-07-01T10:00:00.000Z',
+          trace_id: 'ep-old-parent', started_at: '2026-07-01T10:00:00.000Z', status: 'failed',
           trigger: { type: 'human_message', summary: '人类消息 x1：开始长任务' },
+          outcome: { summary: 'failed', error: '真实父失败' },
           actions: [{ kind: 'spawn_worker', label: '派活：长任务', worker_id: 'w-1' }],
         },
       }],
@@ -156,7 +157,45 @@ describe('ManagerDetail', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('你：「开始长任务」')).toBeInTheDocument())
+    expect(screen.getByText('失败：真实父失败')).toBeInTheDocument()
     fireEvent.click(screen.getByText('展开 1 条 worker 进展'))
     expect(screen.getByText(/长任务.*执行中/)).toBeInTheDocument()
+  })
+
+  it('worker_event 自己派新 worker 时归到同一根链，不重复顶层卡且保留失败状态', async () => {
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [
+        {
+          trace_id: 'ep-child', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:02:00.000Z', status: 'completed',
+          trigger: { type: 'worker_event', summary: 'child', source: 'worker:w-b' }, spans: [], spawned_worker_ids: [],
+          worker_ref: { worker_id: 'w-b', title: '子任务 B', state_to: 'completed' },
+          causal_parent: { trace_id: 'ep-middle', started_at: '2026-08-01T10:01:00.000Z', status: 'failed', trigger: { type: 'worker_event', summary: 'middle', source: 'worker:w-a' } },
+        },
+        {
+          trace_id: 'ep-middle', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:01:00.000Z', status: 'failed',
+          trigger: { type: 'worker_event', summary: 'middle', source: 'worker:w-a' }, spans: [], spawned_worker_ids: ['w-b'],
+          worker_ref: { worker_id: 'w-a', title: '任务 A', state_to: 'failed' }, outcome: { summary: 'failed', error: '真实失败' },
+          actions: [{ kind: 'spawn_worker', label: '派活：子任务 B', worker_id: 'w-b' }],
+          causal_parent: { trace_id: 'ep-root', started_at: '2026-08-01T10:00:00.000Z', status: 'completed', trigger: { type: 'human_message', summary: '人类消息 x1：开始根任务' } },
+        },
+        {
+          trace_id: 'ep-root', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:00:00.000Z', status: 'completed',
+          trigger: { type: 'human_message', summary: '人类消息 x1：开始根任务' }, spans: [], spawned_worker_ids: ['w-a'],
+          actions: [{ kind: 'spawn_worker', label: '派活：任务 A', worker_id: 'w-a' }],
+        },
+      ],
+      pagination: { page: 1, page_size: 20, total_items: 3, total_pages: 1 },
+    })
+    render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText('你：「开始根任务」')).toBeInTheDocument())
+    expect(screen.getAllByText('技术详情')).toHaveLength(1)
+    fireEvent.click(screen.getByText('展开 2 条 worker 进展'))
+    expect(screen.getByText(/任务 A.*失败/)).toBeInTheDocument()
+    expect(screen.getByText(/子任务 B.*已完成/)).toBeInTheDocument()
+    expect(screen.getByText('失败')).toBeInTheDocument()
   })
 })

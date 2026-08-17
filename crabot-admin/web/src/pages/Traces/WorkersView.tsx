@@ -46,7 +46,9 @@ export const WorkersView: React.FC = () => {
       ...(status ? { status } : {}),
       ...(managerKey ? { manager_key: managerKey } : {}),
       ...(query.trim() ? { q: query.trim() } : {}),
-      ...(includeTerminal || includeLegacy ? { include_terminal: true } : {}),
+      ...(includeTerminal || includeLegacy || status === 'completed' || status === 'failed' || status === 'cancelled'
+        ? { include_terminal: true }
+        : {}),
       ...(includeLegacy ? { include_legacy: true } : {}),
       page,
       page_size: 20,

@@ -74,7 +74,9 @@ export interface ManagerEpisodeTrace {
   causal_parent?: {
     trace_id: string
     started_at: string
+    status: ManagerEpisodeTrace['status']
     trigger: ManagerEpisodeTrigger
+    outcome?: ManagerEpisodeTrace['outcome']
     reply_excerpt?: string
     actions?: ManagerEpisodeTrace['actions']
   }

@@ -32,7 +32,6 @@
 import type { PaginationParams, PaginatedResult } from 'crabot-shared'
 import type { ManagerKey, LedgerWorker, TaskStatus } from '../workers/harness/ledger-types.js'
 import { isDecisionVisibleWorker } from '../workers/harness/task-status.js'
-import type { ManagerEpisodeTrace } from './trace-types.js'
 import type { NormalizedTraceEvent, WorkerImplId } from '../workers/types.js'
 
 /**

@@ -57,7 +57,7 @@ describe('WorkersView', () => {
     )
     await waitFor(() => expect(screen.getByText('任务标题')).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('状态过滤'), { target: { value: 'failed' } })
-    await waitFor(() => expect(mocked.listWorkers).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'failed', page: 1 })))
+    await waitFor(() => expect(mocked.listWorkers).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'failed', include_terminal: true, page: 1 })))
   })
 
   it('worker 链接到详情，manager 链接到 manager 详情', async () => {
