@@ -84,7 +84,8 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('先复用已有 worker')
     expect(MANAGER_IDENTITY).toContain('list_workers')
     expect(MANAGER_IDENTITY).toContain('自动复活')
-    expect(MANAGER_IDENTITY).toContain('不用管它当前处于什么状态')
+    expect(MANAGER_IDENTITY).toContain('list_workers(include_terminal=true)')
+    expect(MANAGER_IDENTITY).toContain('不能因为默认 active 列表里没有就直接 spawn')
     expect(MANAGER_IDENTITY).toContain('另起炉灶的新任务')
   })
 

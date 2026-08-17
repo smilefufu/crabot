@@ -102,6 +102,7 @@ describe('ManagerLoop episode trace wiring', () => {
     expect(episodes.items[0].trace_id).toBe(result.episodeId)
     expect(episodes.items[0].status).toBe('completed')
     expect(episodes.items[0].trigger.type).toBe('human_message')
+    expect(episodes.items[0].trigger.summary).toBe('人类消息 x1：你好')
     // root span 随 episode 收口
     expect(episodes.items[0].spans.some((span) => span.type === 'agent_loop' && span.status === 'completed')).toBe(true)
     // llm_call span + usage 聚合

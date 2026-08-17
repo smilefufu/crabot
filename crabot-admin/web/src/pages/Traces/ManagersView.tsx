@@ -8,6 +8,16 @@ import { Link } from 'react-router-dom'
 import { Loading } from '../../components/Common/Loading'
 import { agentObservabilityService, type ManagerAdminSummary } from '../../services/agent-observability'
 
+function relativeTime(iso: string): string {
+  const elapsed = Math.max(0, Date.now() - Date.parse(iso))
+  const minute = 60_000
+  if (elapsed < minute) return '刚刚'
+  if (elapsed < 60 * minute) return `${Math.floor(elapsed / minute)} 分钟前`
+  if (elapsed < 24 * 60 * minute) return `${Math.floor(elapsed / (60 * minute))} 小时前`
+  if (elapsed < 7 * 24 * 60 * minute) return `${Math.floor(elapsed / (24 * 60 * minute))} 天前`
+  return new Date(iso).toLocaleDateString()
+}
+
 export const ManagersView: React.FC = () => {
   const [items, setItems] = useState<ManagerAdminSummary[]>([])
   const [page, setPage] = useState(1)
@@ -52,23 +62,34 @@ export const ManagersView: React.FC = () => {
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 12 }}>
-            <th style={{ padding: '8px 12px' }}>Manager</th>
-            <th style={{ padding: '8px 12px' }}>最近活跃</th>
-            <th style={{ padding: '8px 12px' }}>Episodes</th>
-            <th style={{ padding: '8px 12px' }}>Workers</th>
+            <th style={{ padding: '8px 12px' }}>会话</th>
+            <th style={{ padding: '8px 12px', width: 100 }}>进行中</th>
+            <th style={{ padding: '8px 12px' }}>最近活动</th>
           </tr>
         </thead>
         <tbody>
           {items.map((item) => (
             <tr key={item.manager_key} style={{ borderTop: '1px solid var(--border)' }}>
-              <td style={{ padding: '8px 12px' }}>
-                <Link to={`/traces/managers/${encodeURIComponent(item.manager_key)}`} style={{ fontFamily: 'var(--font-mono)' }}>
-                  {item.manager_key}
+              <td style={{ padding: '10px 12px' }}>
+                <Link to={`/traces/managers/${encodeURIComponent(item.manager_key)}`} style={{ fontWeight: 600 }}>
+                  {item.display_name || item.manager_key}
                 </Link>
+                <div style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', fontSize: 11, marginTop: 3 }}>
+                  {item.manager_key}
+                </div>
               </td>
-              <td style={{ padding: '8px 12px' }}>{item.last_activity_at ? new Date(item.last_activity_at).toLocaleString() : '—'}</td>
-              <td style={{ padding: '8px 12px' }}>{item.episode_count}</td>
-              <td style={{ padding: '8px 12px' }}>{item.worker_count}</td>
+              <td style={{ padding: '10px 12px' }}>
+                {item.active_worker_count > 0 ? `${item.active_worker_count} 个` : '—'}
+              </td>
+              <td style={{ padding: '10px 12px' }}>
+                <div>{item.recent_activity_summary || '暂无活动摘要'}</div>
+                <div
+                  title={item.last_activity_at ? new Date(item.last_activity_at).toLocaleString() : undefined}
+                  style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3 }}
+                >
+                  {item.last_activity_at ? relativeTime(item.last_activity_at) : '—'}
+                </div>
+              </td>
             </tr>
           ))}
         </tbody>

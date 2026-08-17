@@ -520,20 +520,38 @@ describe('read_worker_output', () => {
   })
 })
 
-// ---- list_workers（同步，本对话对象全量） ----
+// ---- list_workers（同步，默认只返回决策视野） ----
 
 describe('list_workers', () => {
-  it('同步返回 context().managerKey 名下全部 worker', async () => {
+  it('默认只返回非终态；历史显式 include_terminal + 分页，计数准确', async () => {
     const { harness } = await makeHarness()
-    const w1 = await harness.spawnWorker(directSpawnParams({ title: '任务一' }))
-    const w2 = await harness.spawnWorker(directSpawnParams({ title: '任务二' }))
+    const active = await harness.spawnWorker(directSpawnParams({ title: '活跃任务' }))
+    const terminal = await harness.spawnWorker(directSpawnParams({ title: '历史任务' }))
+    await harness.killWorker(terminal.worker_id, '测试终态')
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const listWorkers = tools.find((t) => t.name === 'list_workers')!
 
-    const result = await listWorkers.call({}, {})
-    expect(result.isError).toBe(false)
-    const parsed = parseOutput(result.output) as { workers: Array<{ worker_id: string }> }
-    expect(parsed.workers.map((w) => w.worker_id).sort()).toEqual([w1.worker_id, w2.worker_id].sort())
+    const current = await listWorkers.call({}, {})
+    expect(current.isError).toBe(false)
+    expect(parseOutput(current.output)).toMatchObject({
+      workers: [{ worker_id: active.worker_id }],
+      total_active: 1,
+      total_terminal: 1,
+      pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+    })
+
+    const history = await listWorkers.call({ include_terminal: true, page: 2, page_size: 1 }, {})
+    expect(history.isError).toBe(false)
+    const parsed = parseOutput(history.output) as {
+      workers: Array<{ worker_id: string }>
+      total_active: number
+      total_terminal: number
+      pagination: { total_items: number; total_pages: number }
+    }
+    expect(parsed.total_active).toBe(1)
+    expect(parsed.total_terminal).toBe(1)
+    expect(parsed.pagination).toMatchObject({ total_items: 2, total_pages: 2 })
+    expect(parsed.workers).toHaveLength(1)
   })
 })
 

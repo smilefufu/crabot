@@ -793,15 +793,26 @@ function truncateForTrace(text: string, max = 300): string {
  * 唤醒事件 → trace trigger（脱敏摘要；不复制完整人类正文/terminal output/tool secret）。
  * `mergedCount` 是本次 episode 合并的 envelope 总数（首个/合并 envelope 触发时传入）。
  */
-function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, mergedCount: number): ManagerEpisodeTrigger {
+export function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, mergedCount: number): ManagerEpisodeTrigger {
   const mergedNote = mergedCount > 1 ? `（合并 ${mergedCount} 个唤醒）` : ''
   const wake = envelope?.wake
   if (!wake) return { type: 'human_message', summary: `mailbox 残留自唤醒${mergedNote}` }
   switch (wake.kind) {
-    case 'human_messages':
-      return { type: 'human_message', summary: `人类消息 x${wake.messages.length}${mergedNote}`, source: wake.friend ? `friend:${wake.friend.id}` : undefined }
-    case 'attention_flush':
-      return { type: 'attention_flush', summary: `群聊注意力放行 x${wake.messages.length}${mergedNote}` }
+    case 'human_messages': {
+      const excerpt = firstMessageExcerpt(wake.messages)
+      return {
+        type: 'human_message',
+        summary: `人类消息 x${wake.messages.length}${excerpt ? `：${excerpt}` : ''}${mergedNote}`,
+        source: wake.friend ? `friend:${wake.friend.id}` : undefined,
+      }
+    }
+    case 'attention_flush': {
+      const excerpt = firstMessageExcerpt(wake.messages)
+      return {
+        type: 'attention_flush',
+        summary: `群聊注意力放行 x${wake.messages.length}${excerpt ? `：${excerpt}` : ''}${mergedNote}`,
+      }
+    }
     case 'schedule':
       return { type: 'schedule', summary: `定时任务:${wake.title}${mergedNote}`, source: `schedule:${wake.scheduleId}` }
     case 'worker_event':
@@ -813,6 +824,11 @@ function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, mergedC
       return { type: 'human_message', summary: `未知唤醒 ${String((exhaustive as { kind?: string }).kind)}${mergedNote}` }
     }
   }
+}
+
+function firstMessageExcerpt(messages: ReadonlyArray<ChannelMessage>): string | undefined {
+  const text = messages.find((message) => message.content.text?.trim())?.content.text
+  return text ? truncateForTrace(text.replace(/\s+/g, ' ').trim(), 80) : undefined
 }
 
 /**
