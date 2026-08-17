@@ -7379,7 +7379,7 @@ export class AdminModule extends ModuleBase {
       module_id: 'crabot-agent',
       module_type: 'agent',
       version: '0.2.0',
-      protocol_version: '3.1.1',
+      protocol_version: '3.2.0',
       port: coreRuntime.port,
       orchestration: coreAgentOrchestrationConfig(),
       agent_config: resolvedAgentConfig,

@@ -1635,7 +1635,7 @@ export interface CoreAgentRuntimeConfig {
   module_id: 'crabot-agent'
   module_type: 'agent'
   version: '0.2.0'
-  protocol_version: '3.1.1'
+  protocol_version: '3.2.0'
   port: number
   orchestration: CoreAgentOrchestrationConfig
   /**
