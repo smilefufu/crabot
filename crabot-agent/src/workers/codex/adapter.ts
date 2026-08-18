@@ -180,7 +180,8 @@ interface Runtime {
    * 落终态时摘掉,语义与 cc adapter 的同名字段完全一致。 */
   /** Set only for the narrow "accepted input then pane exited before return" settlement. */
   acceptedExitReport?: StateChangeReport
-  stopEventWatch?: () => void
+  stopEventWatch?: () => Promise<void>
+  eventWatchDrain?: Promise<void>
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin/cc 同款语义(P2 review #2)。 */
   resumed?: boolean
@@ -376,6 +377,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private readonly sessionDiscoveryTimeoutMs: number
   private readonly pasteReadyTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
+  private closing = false
+  private disposePromise?: Promise<void>
   private get resolveUserLevelBinary(): (() => Promise<{ binary?: string; global_detected: boolean }>) | undefined {
     return this.deps.resolveUserLevelBinary
   }
@@ -606,10 +609,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
+    this.assertActive()
     await assertWorkspaceFilesUntracked(ws.root, CODEX_CREDENTIAL_FILES, 'CodexWorkerAdapter.provision')
   }
 
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
+    this.assertActive()
     const codexDir = join(ws.root, '.codex')
     // 已跟踪的 credential target 必须在任何 provision 写入前拒绝；ignore 必须先于敏感文件落盘。
     await this.preflightProvision(ws, caps)
@@ -834,6 +839,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
+    this.assertActive()
     const seq = 1
     if (this.runtimes.has(instanceKey({ worker_id: spec.worker_id, seq }))) {
       throw new Error(`CodexWorkerAdapter.spawn: worker_id ${spec.worker_id} already spawned in this process`)
@@ -964,6 +970,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
+    this.assertActive()
     validateSessionRef(prev.session_ref)
 
     // 四轮 review 修复(同 cc adapter):prevRuntime 不再要求"常驻本进程"——resume 的合法
@@ -1097,6 +1104,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async fork(_prev: IncarnationRef, _forkInput: string): Promise<IncarnationHandle> {
+    this.assertActive()
     // codex-docs: codex exec 没有 cc `-p ... --fork-session --output-format text` 那种
     // "一条命令完成侧问"的等价物——openai/codex#11750、#17568 两个 open feature request
     // 明确指出 exec CLI 目前不支持 fork,唯一记录在案的变通方案是拉起交互式 TUI 塞进伪终端、
@@ -1107,6 +1115,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
+    this.assertActive()
     const runtime = await this.ensureRuntime(h)
     if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
     const { state: current } = await this.syncState(runtime, h)
@@ -1243,6 +1252,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
+    this.assertActive()
     // Meta reconstruction makes kill work after an agent restart; missing meta and already-exited
     // incarnations are both idempotent no-ops.
     const runtime = await this.ensureRuntime(h)
@@ -1253,6 +1263,15 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       await this.tmux.killSession(runtime.sessionName)
       await this.transitionExited(runtime, h, 'killed')
     })
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise
+    this.closing = true
+    this.disposePromise = (async () => {
+      await Promise.all([...this.runtimes.values()].map((runtime) => this.stopEventWatch(runtime, true)))
+    })()
+    return this.disposePromise
   }
 
   capabilities(): AdapterCapabilities {
@@ -1476,7 +1495,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     runtime.controlState = { kind: 'exited', reason: ended_reason }
     runtime.ended_reason = ended_reason
     // 终态唯一入口:文件监视在这里摘掉,同 cc adapter。
-    this.stopEventWatch(runtime)
+    await this.stopEventWatch(runtime)
     if (!notify) return
     try {
       this.deps.onStateChange?.(h, 'exited', { endReason: ended_reason })
@@ -1493,20 +1512,28 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * 详见 `workers/claude-code/adapter.ts` 的 startEventWatch 注释。
    */
   private startEventWatch(runtime: Runtime, h: IncarnationHandle): void {
+    if (this.closing) return
     if (!runtime.sessionName) return
     if (runtime.controlState.kind === 'exited') return
     if (runtime.stopEventWatch) return // 幂等:同一 runtime 只装一个
-    runtime.stopEventWatch = runtime.eventChannel.watch(() => {
-      this.syncState(runtime, h).catch((err) => {
+    runtime.stopEventWatch = runtime.eventChannel.watch(() =>
+      this.syncState(runtime, h).then(() => {}).catch((err) => {
         console.error(`[CodexWorkerAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
-      })
-    })
+      }),
+    )
   }
 
-  private stopEventWatch(runtime: Runtime): void {
-    if (!runtime.stopEventWatch) return
-    runtime.stopEventWatch()
-    runtime.stopEventWatch = undefined
+  private async stopEventWatch(runtime: Runtime, waitForDrain = false): Promise<void> {
+    if (runtime.stopEventWatch) {
+      const stop = runtime.stopEventWatch
+      runtime.stopEventWatch = undefined
+      runtime.eventWatchDrain = stop()
+    }
+    if (waitForDrain) await runtime.eventWatchDrain
+  }
+
+  private assertActive(): void {
+    if (this.closing) throw new Error('CodexWorkerAdapter is shutting down')
   }
 
   /** 新建 runtime 时的 stop 基线,见 `workers/claude-code/adapter.ts` 同名方法的注释:

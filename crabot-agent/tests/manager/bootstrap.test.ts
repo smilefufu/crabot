@@ -229,6 +229,34 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect((stack.harness as unknown as { deps: HarnessDeps }).deps.capabilityBundle).toBe(capabilityBundle)
   })
 
+  it('dispose 释放三个 adapter，重复调用只执行一次', async () => {
+    const stack = buildManagerStack(makeDeps())
+    const disposers = [...stack.adapters.values()].map((adapter) => {
+      const dispose = vi.fn(async () => {})
+      ;(adapter as WorkerAdapter & { dispose: () => Promise<void> }).dispose = dispose
+      return dispose
+    })
+
+    await Promise.all([stack.dispose(), stack.dispose()])
+
+    for (const dispose of disposers) expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('一个 adapter dispose 同步失败时仍释放其余 adapter', async () => {
+    const stack = buildManagerStack(makeDeps())
+    const disposers = [...stack.adapters.values()].map((adapter, index) => {
+      const dispose = index === 0
+        ? vi.fn(() => { throw new Error('sync dispose failure') })
+        : vi.fn(async () => {})
+      ;(adapter as WorkerAdapter).dispose = dispose
+      return dispose
+    })
+
+    await expect(stack.dispose()).rejects.toThrow('Failed to dispose one or more worker adapters')
+
+    for (const dispose of disposers) expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
   // --- ② 四步接线契约 ---
 
   it('四步接线契约成立：三个 adapter 都拿到同一个 harness.handleStateChange，回调能落账；harness 看得到构造后才 set 进 Map 的 adapter', async () => {
@@ -274,6 +302,25 @@ describe('manager bootstrap（P5 Task 1）', () => {
     await waitUntil(() => routeSpy.mock.calls.length >= 2)
     expect(routeSpy.mock.calls.map(([e]) => e.kind)).toEqual(['state_changed', 'query_failed'])
     await Promise.allSettled(routeSpy.mock.results.map((r) => r.value as Promise<unknown>))
+  })
+
+  it('关闭期间 worker crashed 仍落账为 failed，但不再路由 Manager episode', async () => {
+    const stack = buildManagerStack(makeDeps({ isClosing: () => true }))
+    const managerKey = 'wechat::sess-closing' as ManagerKey
+    await stack.ledger.upsertWorker(managerKey, 'w-closing', () =>
+      makeLedgerWorker({ workerId: 'w-closing', impl: 'builtin', spawnedBySession: managerKey }),
+    )
+    const routeSpy = vi.spyOn(stack.registry, 'routeWorkerEvent')
+    const onStateChange = capturedOnStateChange(stack.adapters.get('builtin'))
+
+    onStateChange?.(
+      { worker_id: 'w-closing', seq: 1, impl: 'builtin', session_ref: 'w-closing-ref' },
+      'exited',
+      { endReason: 'crashed' },
+    )
+
+    await waitUntil(async () => (await stack.ledger.findWorker('w-closing'))?.worker.task.status === 'failed')
+    expect(routeSpy).not.toHaveBeenCalled()
   })
 
   // --- ③ onAsyncError 端到端 ---

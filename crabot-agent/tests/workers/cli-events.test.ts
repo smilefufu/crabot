@@ -160,11 +160,38 @@ describe('CliEventChannel', () => {
     await fs.writeFile(filePath, '{"ts":"2026-01-01T00:00:00Z","kind":"stop","raw":null}\n', 'utf-8')
     await vi.waitFor(() => expect(received).toHaveLength(1), { timeout: 3000, interval: 50 })
 
-    stop()
+    await stop()
 
     await fs.appendFile(filePath, '{"ts":"2026-01-01T00:00:01Z","kind":"notification","raw":null}\n', 'utf-8')
     // 停止后给足够时间(覆盖轮询周期量级),确认没有新回调
     await new Promise((resolve) => setTimeout(resolve, 500))
     expect(received).toHaveLength(1)
+  })
+
+  it('disposer 等待正在执行的异步 callback，返回后不再进入新 callback', async () => {
+    const channel = new CliEventChannel(filePath)
+    const received: string[] = []
+    let releaseCallback!: () => void
+    const callbackReleased = new Promise<void>((resolve) => { releaseCallback = resolve })
+
+    const stop = channel.watch(async (event) => {
+      received.push(event.kind)
+      await callbackReleased
+    })
+
+    await fs.writeFile(filePath, '{"ts":"2026-01-01T00:00:00Z","kind":"stop","raw":null}\n', 'utf-8')
+    await vi.waitFor(() => expect(received).toEqual(['stop']), { timeout: 3000, interval: 50 })
+
+    let disposed = false
+    const disposePromise = stop().then(() => { disposed = true })
+    await Promise.resolve()
+    expect(disposed).toBe(false)
+
+    releaseCallback()
+    await disposePromise
+
+    await fs.appendFile(filePath, '{"ts":"2026-01-01T00:00:01Z","kind":"notification","raw":null}\n', 'utf-8')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    expect(received).toEqual(['stop'])
   })
 })

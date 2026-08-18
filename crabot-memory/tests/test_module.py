@@ -12,7 +12,7 @@ from src.types import (
     SearchShortTermParams,
 )
 from src.config import MemoryConfig, load_config
-from src.module import MemoryModule
+from src.module import MemoryModule, MemoryServiceUnavailableError
 
 
 @pytest.fixture
@@ -97,6 +97,27 @@ async def test_search_short_term(memory_module):
     result = await memory_module._search_short_term(search_params.model_dump())
 
     assert len(result["results"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_identity_probe(memory_module, monkeypatch):
+    monkeypatch.setenv("CRABOT_INSTANCE_ID", "instance-test")
+    monkeypatch.setenv("CRABOT_MODULE_RUNTIME_ID", "runtime-test")
+
+    assert await memory_module._dispatch("get_runtime_identity", {}) == {
+        "instance_id": "instance-test",
+        "module_id": "memory-default",
+        "runtime_id": "runtime-test",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_identity_probe_fails_closed_without_mm_identity(memory_module, monkeypatch):
+    monkeypatch.delenv("CRABOT_INSTANCE_ID", raising=False)
+    monkeypatch.delenv("CRABOT_MODULE_RUNTIME_ID", raising=False)
+
+    with pytest.raises(MemoryServiceUnavailableError):
+        await memory_module._dispatch("get_runtime_identity", {})
 
 
 @pytest.mark.asyncio

@@ -97,52 +97,55 @@ export class CliEventChannel {
    * 损坏的可信 envelope 则保留 ts/kind 并降级为 raw:null。半行(尚无换行符,写入未完成)
    * 留到下次补全读——offset 只推进到最后一个完整换行处。
    */
-  watch(onEvent: (e: CliEvent) => void): () => void {
+  watch(onEvent: (e: CliEvent) => void | Promise<void>): () => Promise<void> {
     let stopped = false
-    let pumping = false
     let offset = 0
     let watcher: FSWatcher | null = null
+    let pumpPromise: Promise<void> | null = null
+    let disposePromise: Promise<void> | null = null
 
     const dir = path.dirname(this.filePath)
     const base = path.basename(this.filePath)
 
-    const pump = async () => {
-      if (stopped || pumping) return
-      pumping = true
+    const runPump = async () => {
+      let stat
       try {
-        let stat
-        try {
-          stat = await fs.stat(this.filePath)
-        } catch {
-          return // 文件尚不存在,等下一次触发
-        }
-        if (stat.size <= offset) return
-
-        const fd = await fs.open(this.filePath, 'r')
-        try {
-          const len = stat.size - offset
-          const buffer = Buffer.alloc(len)
-          await fd.read(buffer, 0, len, offset)
-          const text = buffer.toString('utf-8')
-          const lines = text.split('\n')
-          // 最后一段要么是空串(文本以 \n 结尾),要么是尚未写完的半行——
-          // 两种情况都不当作"完整行"处理,offset 也不为它推进。
-          const completeLines = lines.slice(0, -1)
-
-          let consumedBytes = 0
-          for (const line of completeLines) {
-            consumedBytes += Buffer.byteLength(line, 'utf-8') + 1 // +1 for '\n'
-            if (stopped) break
-            const event = parseLine(line)
-            if (event) onEvent(event)
-          }
-          offset += consumedBytes
-        } finally {
-          await fd.close()
-        }
-      } finally {
-        pumping = false
+        stat = await fs.stat(this.filePath)
+      } catch {
+        return // 文件尚不存在,等下一次触发
       }
+      if (stat.size <= offset) return
+
+      const fd = await fs.open(this.filePath, 'r')
+      let completeLines: string[]
+      try {
+        const len = stat.size - offset
+        const buffer = Buffer.alloc(len)
+        await fd.read(buffer, 0, len, offset)
+        const text = buffer.toString('utf-8')
+        const lines = text.split('\n')
+        // 最后一段要么是空串(文本以 \n 结尾),要么是尚未写完的半行——
+        // 两种情况都不当作"完整行"处理,offset 也不为它推进。
+        completeLines = lines.slice(0, -1)
+      } finally {
+        await fd.close()
+      }
+
+      let consumedBytes = 0
+      for (const line of completeLines) {
+        consumedBytes += Buffer.byteLength(line, 'utf-8') + 1 // +1 for '\n'
+        if (stopped) break
+        const event = parseLine(line)
+        if (event) await onEvent(event)
+      }
+      offset += consumedBytes
+    }
+
+    const pump = (): Promise<void> => {
+      if (stopped) return Promise.resolve()
+      if (pumpPromise) return pumpPromise
+      pumpPromise = runPump().finally(() => { pumpPromise = null })
+      return pumpPromise
     }
 
     const trySetupWatcher = () => {
@@ -172,12 +175,15 @@ export class CliEventChannel {
     }, POLL_INTERVAL_MS)
 
     return () => {
+      if (disposePromise) return disposePromise
       stopped = true
       clearInterval(interval)
       if (watcher) {
         watcher.close()
         watcher = null
       }
+      disposePromise = pumpPromise ?? Promise.resolve()
+      return disposePromise
     }
   }
 }

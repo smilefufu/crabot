@@ -121,6 +121,8 @@ export interface ManagerRegistryDeps {
   readonly maxTurns?: number
   readonly contextWindowTokens?: number
   readonly now: () => Date
+  /** Once true, no new wake may create or enqueue work for a Manager episode. */
+  readonly isClosing?: () => boolean
   /** 人类消息渲染的时区(见 `ManagerLoopDeps.timezone`);不注入则退回 `resolveTimezone(undefined)`。 */
   readonly timezone?: () => string
   /**
@@ -484,6 +486,7 @@ export class ManagerRegistry {
 
   /** query_worker 异步失败 → 唤醒信号(见文件头"onAsyncError 出口"一节)。 */
   private handleAsyncToolError(key: ManagerKey, info: AsyncToolErrorInfo): void {
+    if (this.deps.isClosing?.()) return
     const capture = this.captureIngress()
     const envelope = this.makeEnvelope(
       capture,
@@ -500,6 +503,7 @@ export class ManagerRegistry {
   }
 
   private captureIngress(): IngressCapture {
+    this.assertWakeAdmission()
     const now = this.deps.now()
     const timezone = this.deps.timezone?.() ?? resolveTimezone(undefined)
     return { now, timezone, received_at: formatOffsetIso(now, timezone) }
@@ -549,7 +553,9 @@ export class ManagerRegistry {
    * `ManagerLoop.drainMailbox`);`selfWakeChain` 是当前连锁自唤醒的深度,真实唤醒恒为 0。
    */
   private async runWake(key: ManagerKey, envelope: TimedWakeEnvelope | undefined, selfWakeChain = 0): Promise<EpisodeResult> {
+    this.assertWakeAdmission()
     if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
+    this.assertWakeAdmission()
     const loop = this.getOrCreate(key)
     this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
     let result: EpisodeResult | undefined
@@ -590,6 +596,7 @@ export class ManagerRegistry {
     result: EpisodeResult | undefined,
     selfWakeChain: number
   ): void {
+    if (this.deps.isClosing?.()) return
     if (result?.consumedEvents !== true) return
     if (!loop.hasPendingMailbox) return
     if (this.isEpisodeActive(key)) return
@@ -603,6 +610,10 @@ export class ManagerRegistry {
     void this.runWake(key, undefined, selfWakeChain + 1).catch((err) => {
       console.error(`[ManagerRegistry] manager '${key}' 自唤醒失败:`, err)
     })
+  }
+
+  private assertWakeAdmission(): void {
+    if (this.deps.isClosing?.()) throw new Error('AGENT_SHUTTING_DOWN')
   }
 }
 

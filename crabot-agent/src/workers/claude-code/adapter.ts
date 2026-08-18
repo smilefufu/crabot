@@ -159,7 +159,8 @@ interface Runtime {
   acceptedExitReport?: StateChangeReport
   /** CliEventChannel.watch() 的停止函数(协议 §6.2.3 的文件监视)。tmux 化身在建立
    * runtime 时装上、落终态时摘掉;无头 fork 化身不装(见 startEventWatch)。 */
-  stopEventWatch?: () => void
+  stopEventWatch?: () => Promise<void>
+  eventWatchDrain?: Promise<void>
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin 同款语义(P2 review #2)。fork 不受此限制。 */
   resumed?: boolean
@@ -194,6 +195,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private readonly pasteReadyTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
+  private closing = false
+  private disposePromise?: Promise<void>
 
   constructor(
     private readonly deps: {
@@ -303,10 +306,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
+    this.assertActive()
     await assertWorkspaceFilesUntracked(ws.root, [MCP_CONFIG_FILE], 'ClaudeCodeAdapter.provision')
   }
 
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
+    this.assertActive()
     const claudeDir = join(ws.root, '.claude')
     // 先做无副作用 tracked-target 检查，再确保普通 git add 不会收录凭据。
     await this.preflightProvision(ws, caps)
@@ -581,6 +586,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
+    this.assertActive()
     const seq = 1
     const sessionId = randomUUID()
     const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'claude-code', session_ref: sessionId }
@@ -655,6 +661,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
+    this.assertActive()
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
 
@@ -766,6 +773,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async fork(prev: IncarnationRef, forkInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
+    this.assertActive()
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
 
@@ -877,6 +885,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
+    this.assertActive()
     const runtime = await this.ensureRuntime(h)
     if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
 
@@ -1009,6 +1018,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
+    this.assertActive()
     // Meta reconstruction makes kill work after an agent restart; missing meta and already-exited
     // incarnations are both idempotent no-ops.
     const runtime = await this.ensureRuntime(h)
@@ -1019,6 +1029,15 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       await this.tmux.killSession(runtime.sessionName)
       await this.transitionExited(runtime, h, 'killed')
     })
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise
+    this.closing = true
+    this.disposePromise = (async () => {
+      await Promise.all([...this.runtimes.values()].map((runtime) => this.stopEventWatch(runtime, true)))
+    })()
+    return this.disposePromise
   }
 
   capabilities(): AdapterCapabilities {
@@ -1235,7 +1254,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     runtime.ended_reason = ended_reason
     // 终态唯一入口:文件监视在这里摘掉(kill / 自然结束 / 崩溃都汇到这里),避免已经死掉
     // 的化身继续持有 fs watcher + 轮询定时器,也避免终态之后还往外推状态回调。
-    this.stopEventWatch(runtime)
+    await this.stopEventWatch(runtime)
     if (!notify) return
     try {
       this.deps.onStateChange?.(h, 'exited', { endReason: ended_reason })
@@ -1261,6 +1280,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 再动,这里也就不会被触发——那属协议 §6.3 第 3 档"harness 低频巡扫 tmux pane",另作。
    */
   private startEventWatch(runtime: Runtime, h: IncarnationHandle): void {
+    if (this.closing) return
     if (!runtime.sessionName) return // fork 化身,无 tmux 也无 hook
     if (runtime.controlState.kind === 'exited') return
     if (runtime.stopEventWatch) return
@@ -1269,7 +1289,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         const raw = event.raw as { notification_type?: unknown; message?: unknown; title?: unknown } | null
         const type = typeof raw?.notification_type === 'string' ? raw.notification_type : undefined
         if (!type || !['permission_prompt', 'elicitation_dialog', 'agent_needs_input'].includes(type)) return
-        void this.getMutex(h.worker_id).run(async () => {
+        return this.getMutex(h.worker_id).run(async () => {
           if (runtime.controlState.kind === 'exited') return
           const snapshot = await this.capture(runtime)
           if (!hasClaudeInteraction(snapshot.text)) return
@@ -1284,19 +1304,25 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         }).catch((err) => {
           console.error(`[ClaudeCodeAdapter] notification pane check failed for ${h.worker_id}#${h.seq}:`, err)
         })
-        return
       }
-      if (event.kind !== 'stop') return
-      this.syncState(runtime, h).catch((err) => {
+      if (event.kind !== 'stop') return undefined
+      return this.syncState(runtime, h).then(() => {}).catch((err) => {
         console.error(`[ClaudeCodeAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
       })
     })
   }
 
-  private stopEventWatch(runtime: Runtime): void {
-    if (!runtime.stopEventWatch) return
-    runtime.stopEventWatch()
-    runtime.stopEventWatch = undefined
+  private async stopEventWatch(runtime: Runtime, waitForDrain = false): Promise<void> {
+    if (runtime.stopEventWatch) {
+      const stop = runtime.stopEventWatch
+      runtime.stopEventWatch = undefined
+      runtime.eventWatchDrain = stop()
+    }
+    if (waitForDrain) await runtime.eventWatchDrain
+  }
+
+  private assertActive(): void {
+    if (this.closing) throw new Error('ClaudeCodeAdapter is shutting down')
   }
 
   /**

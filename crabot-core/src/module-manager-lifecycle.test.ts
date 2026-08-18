@@ -126,6 +126,60 @@ afterEach(async () => {
 })
 
 describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecycle', () => {
+  it('completes startup orphan recovery before opening the MM listener', async () => {
+    const { mm } = makeManager()
+    mm.runtimeRegistry = {
+      initialize: vi.fn(async () => undefined),
+      recoverOrphans: vi.fn(async () => { throw new Error('STARTUP_ORPHAN_RECOVERY_BLOCKED') }),
+    }
+
+    await expect(mm.start()).rejects.toThrow('STARTUP_ORPHAN_RECOVERY_BLOCKED')
+
+    expect(mm.server).toBeNull()
+  })
+
+  it('refuses to spawn when the per-module orphan gate cannot complete', async () => {
+    const { mm, runtime } = makeManager()
+    runtime.entry = 'definitely-not-a-real-crabot-command'
+    mm.runtimeRegistry = {
+      initialize: vi.fn(async () => undefined),
+      recoverOrphans: vi.fn(async () => { throw new Error('ORPHAN_RECOVERY_BLOCKED') }),
+    }
+
+    await expect(mm.startModuleProcess(runtime.module_id, undefined, {}))
+      .rejects.toThrow('ORPHAN_RECOVERY_BLOCKED')
+
+    expect(mm.processes.has(runtime.module_id)).toBe(false)
+  })
+
+  it('terminates a spawned tree when its runtime record cannot be persisted', async () => {
+    const { mm, runtime } = makeManager()
+    let spawnedPid: number | undefined
+    mm.runtimeRegistry = {
+      initialize: vi.fn(async () => undefined),
+      getInstanceId: vi.fn(() => 'instance-test'),
+      createRuntimeId: vi.fn(() => 'runtime-write-failure'),
+      recoverOrphans: vi.fn(async () => undefined),
+      recordSpawn: vi.fn(async ({ rootPid }: { rootPid: number }) => {
+        expect(mm.processes.has(runtime.module_id)).toBe(false)
+        spawnedPid = rootPid
+        throw new Error('RUNTIME_RECORD_WRITE_FAILED')
+      }),
+      removeRuntime: vi.fn(async () => undefined),
+    }
+
+    try {
+      await expect(mm.startModuleProcess(runtime.module_id, undefined, {}))
+        .rejects.toThrow('RUNTIME_RECORD_WRITE_FAILED')
+      expect(spawnedPid).toBeDefined()
+      await waitFor(() => spawnedPid && !isProcessTreeAlive(spawnedPid) ? true : undefined)
+      expect(mm.processes.has(runtime.module_id)).toBe(false)
+      expect(runtime.pid).toBeUndefined()
+    } finally {
+      await forceCleanup(mm, runtime)
+    }
+  })
+
   it('serializes one module while allowing different modules to proceed', async () => {
     const { mm } = makeManager()
     const order: string[] = []
@@ -170,6 +224,22 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     await expect(mm.handleStartModule({ module_id: runtime.module_id })).rejects.toThrow('shutting down')
     await expect(mm.handleStopModule({ module_id: runtime.module_id })).rejects.toThrow('shutting down')
     await expect(mm.handleRestartModule({ module_id: runtime.module_id })).rejects.toThrow('shutting down')
+  })
+
+  it('makes repeated stop calls wait for the same active shutdown', async () => {
+    const { mm } = makeManager()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    mm.lifecycleQueues.set('blocked-operation', gate)
+
+    const firstStop = mm.stop()
+    let secondResolved = false
+    const secondStop = mm.stop().then(() => { secondResolved = true })
+    await Promise.resolve()
+
+    expect(secondResolved).toBe(false)
+    release()
+    await Promise.all([firstStop, secondStop])
   })
 
   it('keeps a slow health cleanup and concurrent restart on one child-tree boundary', async () => {
@@ -334,6 +404,9 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     expect(pidAlive(first.info.pid)).toBe(false)
     expect(first.child.pid && isProcessTreeAlive(first.child.pid)).toBe(false)
     expect(replacement.info.marker).toBe('two')
+    const replacementState = mm.childStates.get(replacement.child)
+    expect((await mm.runtimeRegistry.listRecords()).map((record: { runtime_id: string }) => record.runtime_id))
+      .toEqual([replacementState.runtimeId])
     const stoppedBeforeLateError = stoppedEvents(events, runtime.module_id).length
 
     first.child.emit('error', new Error('late old-child error'))
@@ -343,6 +416,8 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     expect(runtime.pid).toBe(replacement.child.pid)
     expect(runtime.status).toBe('running')
     expect(stoppedEvents(events, runtime.module_id)).toHaveLength(stoppedBeforeLateError)
+    expect((await mm.runtimeRegistry.listRecords()).map((record: { runtime_id: string }) => record.runtime_id))
+      .toEqual([replacementState.runtimeId])
     await forceCleanup(mm, runtime)
   })
 

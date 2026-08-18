@@ -246,6 +246,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
    * 的入队被一整次 burst 的执行时长堵死。
    */
   private readonly workerMutexes = new Map<string, AsyncMutex>()
+  private readonly activeRuns = new Set<Promise<void>>()
+  private closing = false
+  private disposePromise?: Promise<void>
 
   constructor(
     private readonly deps: {
@@ -287,10 +290,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   }
 
   async provision(_ws: Workspace, _caps: CapabilityBundle): Promise<void> {
+    this.assertActive()
     // P1 空实现：builtin 走现有下发通道，无需单独 provision。
   }
 
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
+    this.assertActive()
     // per-worker 上下文：spawn 是它唯一的来源，后续所有化身（resume/fork/续 burst，含进程
     // 重启之后）都从这里回喂给运行配置工厂。workspace 就是 worker 的工作目录，落盘之后
     // 不再改变——worker 不可中途切 cwd（spec 决策 3，工具集里也不给 set_cwd，见 guardTools）。
@@ -367,12 +372,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
     // fire-and-forget：burst 在后台跑，spawn 立刻以 running 态返回。留在锁外，不然会把
     // runEngine 的整个执行时长堵在锁里，挡住排队的其他 worker_id 无关操作。
-    this.runBurst(instance, handle, builtin).catch((err) => this.safetyNetExit(instance, handle, err, 'runBurst'))
+    this.trackRun(this.runBurst(instance, handle, builtin), instance, handle, 'runBurst')
 
     return handle
   }
 
   async resume(prev: IncarnationRef, wakeInput: string, _opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
+    this.assertActive()
     // 起化身 → 现取运行配置（spec 决策 2）。这条正是"进程重启后 builtin worker 能不能
     // revive"的分水岭：吃 spawn 时的内存快照时，重启后这里必然拿不到配置。
     const builtin = await this.runtimeFor(prev.worker_id, 'resume')
@@ -424,12 +430,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return { instance: newInstance, handle: newHandle }
     })
 
-    this.runBurst(instance, handle, builtin).catch((err) => this.safetyNetExit(instance, handle, err, 'runBurst (resume)'))
+    this.trackRun(this.runBurst(instance, handle, builtin), instance, handle, 'runBurst (resume)')
 
     return handle
   }
 
   async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
+    this.assertActive()
     // 同 resume：fork 也是起一个新化身，运行配置现取。
     const builtin = await this.runtimeFor(prev.worker_id, 'fork')
 
@@ -471,12 +478,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     })
 
     // fire-and-forget：一次性 burst 在后台跑，fork 立刻以 running 态返回。
-    this.runForkBurst(instance, handle, builtin).catch((err) => this.safetyNetExit(instance, handle, err, 'runForkBurst'))
+    this.trackRun(this.runForkBurst(instance, handle, builtin), instance, handle, 'runForkBurst')
 
     return handle
   }
 
   async sendInput(h: IncarnationHandle, text: string, _opts?: { raw?: boolean }): Promise<void> {
+    this.assertActive()
     // 状态检查 + 相应动作（入队 / append+转running）整体在该 worker 的互斥锁内完成，消除
     // "两次背靠背 sendInput 都读到 idle、拿同一 tip"的 check-then-act 竞态（跨 await 边界）。
     const mutex = this.getMutex(h.worker_id)
@@ -512,7 +520,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // burst 的 runEngine 调用本身在锁外：否则并发 sendInput(running) 的入队会被这次
     // burst 的整个执行时长堵死。
     const instance = this.instances.get(instanceKey(h.worker_id, h.seq))!
-    this.runBurst(instance, h, startBurst).catch((err) => this.safetyNetExit(instance, h, err, 'runBurst (sendInput continuation)'))
+    this.trackRun(this.runBurst(instance, h, startBurst), instance, h, 'runBurst (sendInput continuation)')
   }
 
   async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
@@ -569,6 +577,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
+    this.assertActive()
     const mutex = this.getMutex(h.worker_id)
     await mutex.run(async () => {
       const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
@@ -594,6 +603,21 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       instance.killRequested = true
       instance.abortController?.abort()
     })
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise
+    this.closing = true
+    this.disposePromise = (async () => {
+      await Promise.all([...this.instances.values()].map((instance) =>
+        this.getMutex(instance.worker_id).run(async () => {
+          if (instance.state !== 'running') return
+          instance.abortController?.abort()
+        }),
+      ))
+      await Promise.allSettled([...this.activeRuns])
+    })()
+    return this.disposePromise
   }
 
   /**
@@ -652,6 +676,25 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 硬禁直接矛盾。今天还没有消费方读它，但 protocol-agent-v3 §6.5 的实现选择语义迟早会读，
     // 届时按 true 选型会选出一个根本没有 goal 能力的载体。protocol-agent-v3 §6.4。
     return { fork: true, revive: true, goalMode: false, subagent: true, structuredTrace: true }
+  }
+
+  private assertActive(): void {
+    if (this.closing) throw new Error('BuiltinWorkerAdapter is shutting down')
+  }
+
+  private interruptionEndReason(instance: WorkerInstance): 'killed' | 'crashed' {
+    return instance.killRequested ? 'killed' : 'crashed'
+  }
+
+  private trackRun(
+    run: Promise<void>,
+    instance: WorkerInstance,
+    handle: IncarnationHandle,
+    context: string,
+  ): void {
+    const tracked = run.catch((err) => this.safetyNetExit(instance, handle, err, context))
+    this.activeRuns.add(tracked)
+    void tracked.finally(() => { this.activeRuns.delete(tracked) })
   }
 
   /**
@@ -716,11 +759,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 安装与 killRequested 核对必须在同一把锁内原子完成，和 kill() 的"置位+abort"共享该锁：
     // 否则会有窗口——kill 已经决定要杀这个（还没起的）新 burst，但读到的 abortController
     // 还是上一个已经跑完的 burst 的，abort 它没有任何效果，新 burst 照样起来（P1 全分支
-    // 终审 Important，见 kill() 顶部注释）。已置位则不装 controller、不起 runEngine，直接
-    // 在锁内落 exited(killed)。
+    // 终审 Important，见 kill() 顶部注释）。kill 或 shutdown 已开始时不装 controller、
+    // 不起 runEngine；显式 kill 落 killed，模块 shutdown 落可恢复的 crashed。
     const abortController = await mutex.run(async () => {
-      if (instance.killRequested) {
-        await this.transitionExited(instance, handle, 'killed')
+      if (instance.killRequested || this.closing) {
+        await this.transitionExited(instance, handle, this.interruptionEndReason(instance))
         return undefined
       }
       const ac = new AbortController()
@@ -816,7 +859,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
-        await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed', undefined, lastAssistantText)
+        const endReason = result.outcome === 'aborted' ? this.interruptionEndReason(instance) : 'crashed'
+        await this.transitionExited(instance, handle, endReason, undefined, lastAssistantText)
         return false
       }
 
@@ -835,9 +879,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // burst 正常收尾（非 aborted/failed/finish_task）但期间 killRequested 已被置位：
       // abort 大概率是打在了这次 burst 身上（下面 outcome==='aborted' 分支已经处理），但也
       // 可能是打晚了——engine 已经决定 end_turn，abort 信号没赶上（P1 全分支终审 Important
-      // 收尾段检查点）。无论如何都不能继续/续 burst，直接落 exited(killed)。
-      if (instance.killRequested) {
-        await this.transitionExited(instance, handle, 'killed', undefined, lastAssistantText)
+      // 收尾段检查点）。无论如何都不能继续/续 burst；显式 kill 与 shutdown 保持各自归因。
+      if (instance.killRequested || this.closing) {
+        await this.transitionExited(instance, handle, this.interruptionEndReason(instance), undefined, lastAssistantText)
         return false
       }
 
@@ -893,8 +937,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 一次性 burst 上也存在：fork() 把新化身以 running 态注册、锁外 fire-and-forget 起
     // runForkBurst，安装 controller 前先在锁内核对 killRequested。
     const abortController = await mutex.run(async () => {
-      if (instance.killRequested) {
-        await this.transitionExited(instance, handle, 'killed')
+      if (instance.killRequested || this.closing) {
+        await this.transitionExited(instance, handle, this.interruptionEndReason(instance))
         return undefined
       }
       const ac = new AbortController()
@@ -964,14 +1008,15 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
-        await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed')
+        const endReason = result.outcome === 'aborted' ? this.interruptionEndReason(instance) : 'crashed'
+        await this.transitionExited(instance, handle, endReason)
         return
       }
 
       // outcome 是正常收尾但 killRequested 已置位：abort 打晚了，engine 已经决定收尾，
       // 但用户明确要求过 kill，不该落 completed（P1 全分支终审 Important 收尾段检查点）。
-      if (instance.killRequested) {
-        await this.transitionExited(instance, handle, 'killed')
+      if (instance.killRequested || this.closing) {
+        await this.transitionExited(instance, handle, this.interruptionEndReason(instance))
         return
       }
 

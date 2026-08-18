@@ -1922,6 +1922,34 @@ describe('CodexWorkerAdapter.ensureRuntime — 并发重建不泄漏 watcher', (
     await new Promise((r) => setTimeout(r, 500))
     expect(seen).toEqual(['idle', 'exited'])
   }, 15000)
+
+  it('dispose 释放现有 watcher，之后 runtime 重建也不会重新装 watcher 或杀 tmux', async () => {
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const sessionId = randomUUID()
+    const workerDir = path.join(dataDir, workerId)
+    await fs.mkdir(workerDir, { recursive: true })
+    for (const seq of [1, 2]) {
+      await fs.writeFile(
+        path.join(workerDir, `meta-${seq}.json`),
+        JSON.stringify({ seq, state: 'running', session_id: sessionId, workspace_root: workspaceRoot, session_discovery: 'placeholder' }),
+        'utf-8',
+      )
+    }
+
+    const tmux = new NoopTmux()
+    const stop = vi.fn(async () => {})
+    const watch = vi.spyOn(CliEventChannel.prototype, 'watch').mockReturnValue(stop)
+    const killSession = vi.spyOn(tmux, 'killSession')
+    const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused' })
+
+    await adapter.state({ worker_id: workerId, seq: 1, impl: 'codex', session_ref: sessionId })
+    await Promise.all([adapter.dispose(), adapter.dispose()])
+    await adapter.state({ worker_id: workerId, seq: 2, impl: 'codex', session_ref: sessionId })
+
+    expect(watch).toHaveBeenCalledTimes(1)
+    expect(stop).toHaveBeenCalledTimes(1)
+    expect(killSession).not.toHaveBeenCalled()
+  })
 })
 
 /**

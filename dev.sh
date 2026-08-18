@@ -416,6 +416,14 @@ start() {
     rm -f "$DATA_DIR/mm.pid"
   fi
 
+  # 启动任何受管模块前回收历史 runtime。MM 启动后仍会复验，覆盖预检后的竞态。
+  if [ -t 0 ] && [ -t 1 ]; then
+    CRABOT_ORPHAN_RECOVERY_INTERACTIVE=1 node "$SCRIPT_DIR/crabot-core/dist/orphan-recovery-preflight.js"
+  else
+    CRABOT_ORPHAN_RECOVERY_INTERACTIVE=0 node "$SCRIPT_DIR/crabot-core/dist/orphan-recovery-preflight.js"
+  fi
+  export CRABOT_ORPHAN_RECOVERY_INTERACTIVE=0
+
   # 5. Module Manager（后台 spawn + 捕获 PID + trap 清理；前台 wait 保持 Ctrl-C 体验）
   #
   # stdout/stderr 同时落盘到 module-manager.log —— 包含 MM 自己的 health check

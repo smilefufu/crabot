@@ -13,6 +13,7 @@ import {
   type Request,
   type Response,
   type HealthResult,
+  type GetRuntimeIdentityResult,
   type Event,
   type ModuleId,
   type ResolvedModule,
@@ -63,6 +64,7 @@ export class RpcCallError extends Error {
 export function rpcErrorHttpStatus(error: unknown): number {
   if ((error instanceof RpcError || error instanceof RpcCallError) && error.code === 'UNAUTHORIZED') return 401
   if ((error instanceof RpcError || error instanceof RpcCallError) && error.code === 'FORBIDDEN') return 403
+  if ((error instanceof RpcError || error instanceof RpcCallError) && error.code === 'SERVICE_UNAVAILABLE') return 503
   return 500
 }
 
@@ -481,6 +483,7 @@ export abstract class ModuleBase {
 
   private server: http.Server | null = null
   private isShuttingDown = false
+  private stopPromise: Promise<void> | null = null
 
   constructor(config: ModuleConfig) {
     this.config = config
@@ -488,6 +491,7 @@ export abstract class ModuleBase {
 
     // 注册必需端点
     this.registerMethod('health', this.handleHealth.bind(this))
+    this.registerMethod('get_runtime_identity', this.handleGetRuntimeIdentity.bind(this))
     this.registerMethod('shutdown', this.handleShutdown.bind(this))
     this.registerMethod('on_event', this.handleOnEvent.bind(this))
     this.registerMethod('callback', this.handleCallback.bind(this))
@@ -531,10 +535,14 @@ export abstract class ModuleBase {
   /**
    * 停止模块
    */
-  async stop(): Promise<void> {
-    if (this.isShuttingDown) return
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise
     this.isShuttingDown = true
+    this.stopPromise = this.performStop()
+    return this.stopPromise
+  }
 
+  private async performStop(): Promise<void> {
     console.log(`[${this.config.moduleId}] Shutting down...`)
 
     await this.onStop()
@@ -784,14 +792,28 @@ export abstract class ModuleBase {
     }
   }
 
+  private async handleGetRuntimeIdentity(): Promise<GetRuntimeIdentityResult> {
+    const instanceId = process.env.CRABOT_INSTANCE_ID
+    const runtimeId = process.env.CRABOT_MODULE_RUNTIME_ID
+    if (!instanceId || !runtimeId) {
+      throw new RpcError(
+        GlobalErrorCode.SERVICE_UNAVAILABLE,
+        'Module runtime identity was not injected by Module Manager',
+      )
+    }
+    return {
+      instance_id: instanceId,
+      module_id: this.config.moduleId,
+      runtime_id: runtimeId,
+    }
+  }
+
   /**
    * Shutdown 处理器
    */
   private async handleShutdown(): Promise<Record<string, never>> {
     // 异步执行停止，不阻塞响应
-    setTimeout(() => {
-      this.stop().catch(console.error)
-    }, 100)
+    void this.stop().catch(console.error)
 
     return {}
   }

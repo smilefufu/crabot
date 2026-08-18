@@ -624,6 +624,58 @@ describe('ManagerRegistry', () => {
 
   // --- mailbox 停滞窗口 / 回收丢失窗口（P7 阻塞项 #5） ---
 
+  it('shutdown 在异步唤醒准备期间开始时，不创建新的 Manager episode', async () => {
+    const { adapter, calls } = makeAdapter()
+    const entered = deferred()
+    const release = deferred()
+    let closing = false
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      isClosing: () => closing,
+      onScheduleWake: async () => {
+        entered.resolve()
+        await release.promise
+      },
+    }))
+
+    const wake = registry.routeSchedule({ scheduleId: 'closing', title: 't', description: 'd' })
+    await entered.promise
+    closing = true
+    release.resolve()
+
+    await expect(wake).rejects.toThrow('AGENT_SHUTTING_DOWN')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('shutdown 开始后，episode 收口不再为残留 mailbox 自唤醒', async () => {
+    const key = 'wechat::sess-closing-self-wake' as ManagerKey
+    const { adapter, calls } = makeAdapter()
+    let closing = false
+    let capturedOnAsyncError: OnAsyncError | undefined
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      isClosing: () => closing,
+      toolFace: (_key, _isSystemThread, onAsyncError) => {
+        capturedOnAsyncError = onAsyncError
+        return []
+      },
+    }))
+
+    const origAppend = store.appendEpisodeLog.bind(store)
+    vi.spyOn(store, 'appendEpisodeLog').mockImplementation(async (managerKey, episodeId, messages) => {
+      await origAppend(managerKey, episodeId, messages)
+      capturedOnAsyncError?.({ tool: 'query_worker', worker_id: 'w-closing', error: 'fork failed' })
+      closing = true
+    })
+
+    await registry.routeHumanMessages('wechat', 'sess-closing-self-wake', [makeChannelMessage('开始')])
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(calls).toHaveLength(1)
+    expect(registry.evictIdle(-1, Date.parse('2026-01-01T00:00:00.000Z'))).toBe(0)
+    expect(registry.getOrCreate(key).hasPendingMailbox).toBe(true)
+  })
+
   it('mailbox 停滞：注入落在 engine 最后一次 drain 之后（episode 仍在途）→ episode 收口时必须自唤醒把它处理掉，不得躺在 mailbox 无人问津', async () => {
     const key = 'wechat::sess-stall' as ManagerKey
     const { adapter, queue } = makeAdapter()

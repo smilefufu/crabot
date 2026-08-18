@@ -482,6 +482,7 @@ export class UnifiedAgent extends ModuleBase {
   private managerEventPublisher?: AgentEventPublisher
   /** True after startup reconciliation has settled, even when it failed. */
   private managerReconciliationSettled = false
+  private runtimeClosing = false
 
   // Trace 存储
   private traceStore: TraceStore
@@ -613,6 +614,7 @@ export class UnifiedAgent extends ModuleBase {
 
   /** Central admission for every new runtime-config-dependent execution. */
   private assertRuntimeExecutionAdmission(): void {
+    if (this.runtimeClosing) throw new Error('AGENT_SHUTTING_DOWN')
     if (!this.configAuthenticated || this.configStale) throw new Error('AGENT_RUNTIME_CONFIG_STALE')
     if (!this.hasRuntimeExecutionConfig()) throw new Error('Agent runtime config is not configured')
   }
@@ -819,6 +821,7 @@ export class UnifiedAgent extends ModuleBase {
         return this.buildBuiltinWorkerRuntime(ctx)
       },
       assertExecutionAdmission: () => this.assertRuntimeExecutionAdmission(),
+      isClosing: () => this.runtimeClosing,
       capabilityBundle: async ({ principal_permissions }) => {
         const workerPermissions = narrowWorkerPermissions(
           BUILTIN_WORKER_PERMISSIONS,
@@ -1187,7 +1190,7 @@ export class UnifiedAgent extends ModuleBase {
     // Startup may have completed before a late config push creates the first
     // handler. Open that handler's routing gate immediately instead of waiting
     // for a process restart that may never happen.
-    if (this.managerReconciliationSettled) {
+    if (this.managerReconciliationSettled && !this.runtimeClosing) {
       void handler.releaseRecoveredWorkerShellExits().catch((error) => {
         console.error(`[${this.config.moduleId}] failed to release late worker shell exits:`, error)
       })
@@ -3850,12 +3853,15 @@ export class UnifiedAgent extends ModuleBase {
         // Recovered exits must wait until reconciliation settles, but a failed
         // reconciliation must not keep the routing gate closed for this process.
         this.managerReconciliationSettled = true
+        if (this.runtimeClosing) return
         await this.agentHandler?.releaseRecoveredWorkerShellExits()
         stack.harness.startLivenessSweep()
       })
   }
 
   protected override async onStop(): Promise<void> {
+    this.runtimeClosing = true
+
     // 优雅停机前补一次所有活跃 worker task 的 resume checkpoint flush，
     // 让 crabot stop 场景的停机窗口（最后一 turn 到进程退出之间）也无损。
     this.agentHandler?.flushActiveCheckpoints()
@@ -3864,6 +3870,12 @@ export class UnifiedAgent extends ModuleBase {
     this.attentionScheduler.stopAll()
     this.traceStore.stopFlushTimer()
     this.managerStack?.harness.stopLivenessSweep()
+
+    try {
+      await this.managerStack?.dispose()
+    } catch (error) {
+      console.error(`[${this.config.moduleId}] Failed to dispose worker adapters during shutdown:`, error)
+    }
 
     if (this.configPullTimer) {
       clearTimeout(this.configPullTimer)

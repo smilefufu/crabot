@@ -286,5 +286,7 @@ export interface WorkerAdapter {
   lastActivityAt?(h: IncarnationHandle): Promise<number | undefined>
   readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }>
   kill(h: IncarnationHandle): Promise<void>
+  /** Release adapter-owned runtime resources without terminating independent tmux workers. */
+  dispose(): Promise<void>
   capabilities(): AdapterCapabilities
 }

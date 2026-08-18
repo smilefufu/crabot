@@ -11,6 +11,16 @@ describe('core Agent cutover gate', () => {
     const promise = new Promise<T>((done) => { resolve = done })
     return { promise, resolve }
   }
+
+  async function waitFor<T>(read: () => T | undefined, timeoutMs = 3000): Promise<T> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const value = read()
+      if (value !== undefined) return value
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    throw new Error('timed out waiting for cutover state')
+  }
   it('keeps type-based discovery compatible while returning only the exact core Agent', async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-resolve-core-'))
     const manager = new ModuleManager({
@@ -297,12 +307,11 @@ describe('core Agent cutover gate', () => {
     }, dataDir)
     try {
       await manager.start()
-      await new Promise(resolve => setTimeout(resolve, 30))
+      const bearer = await waitFor(() => (manager as any).cutoverBearers.get('admin-web'))
       const channel = (manager as any).modules.get('channel-positive')
       const registration = { module_id: 'channel-positive', module_type: 'channel', version: '0.1.0', protocol_version: '0.1.0', port: channel.port, subscriptions: [] }
       expect((manager as any).processes.has('channel-positive')).toBe(false)
       await expect((manager as any).handleRegister(registration)).rejects.toMatchObject({ code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
-      const bearer = (manager as any).cutoverBearers.get('admin-web')
       await (manager as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'channel', admin_archived_record_count: 0 }, { authorizationBearer: bearer.token })
       await new Promise(resolve => setTimeout(resolve, 2_200))
       expect((manager as any).processes.has('channel-positive')).toBe(true)
@@ -330,7 +339,7 @@ describe('core Agent cutover gate', () => {
       legacy.status = 'running'
       ;(manager as any).processes.set('legacy-agent', {})
       const stop = vi.spyOn(manager as any, 'stopModuleProcess').mockRejectedValueOnce(new Error('tree survives'))
-      const bearer = (manager as any).cutoverBearers.get('admin-web')
+      const bearer = await waitFor(() => (manager as any).cutoverBearers.get('admin-web'))
       await expect((manager as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'fault', admin_archived_record_count: 1 }, { authorizationBearer: bearer.token })).rejects.toMatchObject({ code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
       expect((manager as any).managementOnly).toBe(true)
       expect((manager as any).processes.has('crabot-agent')).toBe(false)
@@ -359,7 +368,7 @@ describe('core Agent cutover gate', () => {
     const first = new ModuleManager(config, dataDir)
     try {
       await first.start()
-      const bearer = (first as any).cutoverBearers.get('admin-web')
+      const bearer = await waitFor(() => (first as any).cutoverBearers.get('admin-web'))
       const result = await (first as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'replay', admin_archived_record_count: 0 }, { authorizationBearer: bearer.token })
       expect(JSON.parse(await fs.readFile(path.join(dataDir, 'migrations', 'core-agent-singleton-v1.json'), 'utf8'))).toMatchObject(result.record)
     } finally {
@@ -370,7 +379,7 @@ describe('core Agent cutover gate', () => {
       await restarted.start()
       expect((restarted as any).managementOnly).toBe(true)
       expect((restarted as any).processes.has('crabot-agent')).toBe(false)
-      const bearer = (restarted as any).cutoverBearers.get('admin-web')
+      const bearer = await waitFor(() => (restarted as any).cutoverBearers.get('admin-web'))
       const replay = await (restarted as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'replay', admin_archived_record_count: 0 }, { authorizationBearer: bearer.token })
       expect(replay).toMatchObject({ record: { completed: true, admin_archive_fingerprint: 'replay' } })
     } finally {

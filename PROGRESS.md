@@ -7,15 +7,19 @@
 
 ### P6 已完成；Traces 人话视图已合并，统一 retention（PR B）待执行
 
+### 模块关闭与孤儿模块回收：PR #99 已获 approve
+
+- 已确认设计：`crabot-docs/superpowers/specs/2026-08-16-module-shutdown-orphan-fencing-design.md`；实施计划：`crabot-docs/superpowers/plans/2026-08-17-module-shutdown-orphan-fencing.md`。
+- Agent shutdown 统一释放 builtin/Claude Code/Codex adapter 资源，关闭后不重建 CLI watcher，也不终止独立 tmux Worker。
+- MM 通过实例级 runtime registry 在启动和 replacement 前回收已识别的历史模块树；Windows 身份不明、拒绝、`-d` 或无 TTY 均在任何受管模块启动前失败退出。supervisor 为 MM 保留 60 秒关闭窗口加 10 秒余量。
+
 - P6 总体设计：`crabot-docs/superpowers/specs/2026-08-11-p6-agent-observability-worker-management-design.md`；五份实施计划在 `crabot-docs/superpowers/plans/2026-08-12-p6-*.md`。顺序固定：**Slice 0 → P6-A → P6-B → P6-C → P6-D**。
 - Slice 0 **已合并**（PR #90 → merge `377200e`，15 轮 review、28 条 finding 全部修复并 resolve）。核心交付：唯一核心 Agent + 动态/legacy Agent 只读归档、runtime bearer identity（per-child 绑定/撤销、启动即从 env 摘除）、authenticated config pull（单飞+退避自愈、降级启动 fail-closed 存活）、management-only cutover（幂等 marker + 宽容握手 + degraded-only health）、durable config revision（outbox 三态 + HMAC fingerprint + journal binding + seqlock 一致性读）、sensitive RPC 独立 transport、legacy get_config/update_config 无认证端点退役、noop-safe 全部配置写入路径、容错 MCP 热更 + 候选连接清理。协议同步：protocol-agent-v3 3.1.1 §8.5/§8.6/§11、protocol-admin §3.18/§3.19/§7.1、protocol-module-manager §3.18.1：
   - 唯一核心 Agent：动态/legacy Agent 的 create/update/delete/config-write 全部拒绝（`ADMIN_HOTPLUG_NOT_ALLOWED` / HTTP 410），live read surfaces 只暴露 builtin `default` / exact `crabot-agent`；存量记录只读归档（`unsupported_legacy`）。
   - Runtime identity + authenticated config pull：MM 只向 exact `crabot-agent` child 注入一次性 runtime bearer；Agent 启动最早期捕获并从 env 删除；secret-bearing RPC 走 method-closed `callSensitive()`；启动与热更都经 authenticated pull，失败即 fail closed 并断开 stale MCP。pull 有单飞去重 + 旧 revision no-op + 失败退避重试（不会永久 stale）。
-  - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，`protocol_version: '3.1.1'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
+  - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，当前 `protocol_version: '3.2.0'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
   - **降级启动自愈**：全新安装未配置 LLM 时 Agent 不再退出，进程存活照常注册，所有执行入口 fail closed，靠退避 pull 自愈；首次安装补建 worker 层（roles/LSP），无需手动重启。
   - Management-only cutover + durable config revision（seqlock 一致性读、HMAC fingerprint、Skill journal binding、publish 失败退避 drain 自愈）。
-- **部署约束**：pre-P6 存量生产不得部署 Slice 0/A/B 中间态；首次 rollout 至少包含 Slice 0 + P6-B grandfather bootstrap + P6-C 最终选择语义。
-
 ### 最近验证基线（2026-08-13，PR #90 最新 push）
 
 - Shared 107、Core 138、**Admin 1152/1152**、Web build+269（web 此后未再改动）。
@@ -73,6 +77,6 @@
 为避免本文件复制并腐化架构说明，以下内容不再展开：
 
 - 项目开发与流程规则：根目录 `AGENTS.md`。
-- 正式模块契约：`crabot-docs/protocols/`（base/module-manager/admin 0.2.1、agent-v3 3.1.1、crab-messaging 0.3.2、module-spec 0.2.0）。
+- 正式模块契约：`crabot-docs/protocols/`（base/module-manager 0.2.2、admin 0.2.1、agent-v3 3.2.0、crab-messaging 0.3.2、module-spec 0.2.0）。
 - 设计决策与实施计划：`crabot-docs/superpowers/specs/` 与 `plans/`。
 - 开发、部署、调试说明：`AGENTS.md` 与 `crabot-docs/guides/`。
