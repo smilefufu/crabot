@@ -4,7 +4,7 @@ import type { UnifiedAgentConfig } from '../../src/types.js'
 
 function runtimeConfig(): UnifiedAgentConfig {
   return {
-    module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.1.2', port: 19002,
+    module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.2.0', port: 19002,
     orchestration: {
       front_context_recent_messages_window_hours: 6, front_context_recent_messages_max_cap: 50,
       front_context_short_term_memory_window_hours: 12, front_context_short_term_memory_max_cap: 30,

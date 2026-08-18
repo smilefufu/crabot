@@ -10,7 +10,7 @@ name: Crabot Core Agent
 version: 0.2.0
 module_type: agent
 description: Core Agent（唯一内置 Agent；Manager/Worker 架构，protocol-agent-v3）
-protocol_version: "3.1.2"
+protocol_version: "3.2.0"
 
 # 运行时配置
 runtime:

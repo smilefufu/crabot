@@ -47,7 +47,7 @@ describe('buildCoreModules：DATA_DIR 顶层契约', () => {
 
   it('core Agent advertises the exact protocol-agent-v3 document version', () => {
     const agent = buildCoreModules(OPTS).find((module) => module.module_id === 'crabot-agent')
-    expect(agent?.protocol_version).toBe('3.1.2')
+    expect(agent?.protocol_version).toBe('3.2.0')
   })
 
   it('memory：仍走 CRABOT_MEMORY_DATA_DIR，env 里不出现 DATA_DIR', () => {

@@ -31,7 +31,8 @@
 
 import type { PaginationParams, PaginatedResult } from 'crabot-shared'
 import type { ManagerKey, LedgerWorker, TaskStatus } from '../workers/harness/ledger-types.js'
-import type { NormalizedTraceEvent } from '../workers/types.js'
+import { isDecisionVisibleWorker } from '../workers/harness/task-status.js'
+import type { NormalizedTraceEvent, WorkerImplId } from '../workers/types.js'
 
 /**
  * base-protocol §5.7 TimeRange。`crabot-shared` 目前没有导出它(只在协议文档和各 channel
@@ -51,12 +52,23 @@ export interface TimeRange {
 /** §8.3 list_workers_admin:跨对话对象扁平查询 */
 export interface ListWorkersAdminParams {
   status?: TaskStatus | TaskStatus[]
+  impl?: WorkerImplId
   manager_key?: ManagerKey
   time_range?: TimeRange
+  /** 默认 false：只返回 Manager 决策视野（非终态）。 */
+  include_terminal?: boolean
+  /** 默认 false：legacy 导入历史需显式进入。 */
+  include_legacy?: boolean
+  /** title contains，大小写不敏感。 */
+  q?: string
   pagination?: PaginationParams
 }
 
-export interface ListWorkersAdminResult extends PaginatedResult<LedgerWorker> {}
+export interface ListWorkersAdminResult extends PaginatedResult<LedgerWorker> {
+  total_active: number
+  total_terminal: number
+  total_legacy: number
+}
 
 /** §8.3 get_worker_detail:单 worker 全量(台账条目 + 化身链) */
 export interface GetWorkerDetailParams {
@@ -159,18 +171,37 @@ export function filterAndPageWorkers(
         : [params.status]
   const range = params.time_range
   const hasRange = range !== undefined && (range.start !== undefined || range.end !== undefined)
+  const query = params.q?.trim().toLocaleLowerCase()
 
-  // filter 总是产出新数组,后面的 sort 不会污染入参
-  const matched = all.filter((entry) => {
-    if (statuses && !statuses.includes(entry.worker.task.status)) return false
+  // 先应用身份/内容/时间范围，计数与当前查询 scope 对齐；visibility/status 后应用。
+  const scoped = all.filter((entry) => {
+    const worker = entry.worker
     if (params.manager_key && entry.managerKey !== params.manager_key) return false
+    if (params.impl) {
+      const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined).at(-1)
+      if (mainline?.impl !== params.impl) return false
+    }
+    if (query && !worker.task.title.toLocaleLowerCase().includes(query)) return false
     if (hasRange) {
-      // created_at 缺失(脏台账)时无法证明落在窗口内,按不命中处理
-      const createdAt = entry.worker.task.created_at
+      const createdAt = worker.task.created_at
       if (!createdAt) return false
       if (range!.start !== undefined && createdAt < range!.start) return false
       if (range!.end !== undefined && createdAt >= range!.end) return false
     }
+    return true
+  })
+  const totalActive = scoped.filter((entry) => isDecisionVisibleWorker(entry.worker.task.status)).length
+  const totalTerminal = scoped.length - totalActive
+  const totalLegacy = scoped.filter((entry) => entry.worker.legacy_source !== undefined).length
+
+  // filter 总是产出新数组,后面的 sort 不会污染入参
+  const matched = scoped.filter((entry) => {
+    const worker = entry.worker
+    if (!params.include_terminal && !isDecisionVisibleWorker(worker.task.status)) return false
+    // active legacy 已通过 v3 continuation 成为真实可续跑 worker，必须与 Manager 决策视野一致。
+    // include_legacy 只控制终态 legacy 历史。
+    if (!params.include_legacy && worker.legacy_source !== undefined && !isDecisionVisibleWorker(worker.task.status)) return false
+    if (statuses && !statuses.includes(worker.task.status)) return false
     return true
   })
 
@@ -190,6 +221,9 @@ export function filterAndPageWorkers(
 
   return {
     items: matched.slice(offset, offset + pageSize).map((entry) => entry.worker),
+    total_active: totalActive,
+    total_terminal: totalTerminal,
+    total_legacy: totalLegacy,
     pagination: {
       page,
       page_size: pageSize,
@@ -217,8 +251,8 @@ export function buildWorkerDetail(found: LedgerWorkerEntry): GetWorkerDetailResu
 export interface ManagerAdminSummary {
   manager_key: ManagerKey
   last_activity_at?: string
-  episode_count: number
-  worker_count: number
+  recent_activity_summary?: string
+  active_worker_count: number
 }
 
 export interface ManagerSummarySources {
@@ -226,10 +260,10 @@ export interface ManagerSummarySources {
   readonly diskSessionKeys: ReadonlyArray<ManagerKey>
   /** TraceStore 已验证 manager keys。 */
   readonly traceKeys: ReadonlyArray<ManagerKey>
-  /** 每 key 的 episode 数与最近 episode 时间（started_at 倒序后的首个）。 */
-  readonly episodeStats: (key: ManagerKey) => { count: number; latestStartedAt?: string }
-  /** 每 key 的 worker 数（台账 manager_key 聚合）。 */
-  readonly workerCount: (key: ManagerKey) => number
+  /** 每 key 最近 episode 的时间与人话 trigger summary。 */
+  readonly episodeStats: (key: ManagerKey) => { latestStartedAt?: string; latestSummary?: string }
+  /** 与 list_workers 默认视野共用判据后的 active worker 数。 */
+  readonly activeWorkerCount: (key: ManagerKey) => number
   /** 内存 registry 当前 running manager 的最近活跃毫秒（补充尚未首次 save 的当前 manager）。 */
   readonly runningLastActiveAtMs: (key: ManagerKey) => number | undefined
 }
@@ -258,8 +292,8 @@ export function buildManagerAdminSummaries(
     return {
       manager_key: key,
       ...(lastActivity ? { last_activity_at: lastActivity } : {}),
-      episode_count: stats.count,
-      worker_count: sources.workerCount(key),
+      ...(stats.latestSummary ? { recent_activity_summary: stats.latestSummary } : {}),
+      active_worker_count: sources.activeWorkerCount(key),
     }
   })
 

@@ -84,7 +84,7 @@ describe('core Agent cutover gate', () => {
         { authorizationBearer: old.token },
       )).toEqual({ verified: true })
       await expect(manager.handleRegister({
-        module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.1.2',
+        module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.2.0',
         port: 19951, subscriptions: [],
       })).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
       expect(manager.modules.get('crabot-agent').status).toBe('running')
@@ -186,7 +186,7 @@ describe('core Agent cutover gate', () => {
         port: 19992, subscriptions: [],
       }, { authorizationBearer: 'runtime' })).rejects.toMatchObject({ code: 'MODULE_MANAGER_PROTOCOL_VERSION_MISMATCH' })
       await expect(manager.handleRegister({
-        module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.1.2',
+        module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.2.0',
         port: 19992, subscriptions: [],
       })).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
       expect(manager.modules.get('crabot-agent').entry).toBe('node trusted.js')

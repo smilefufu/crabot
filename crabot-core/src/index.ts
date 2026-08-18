@@ -527,8 +527,8 @@ export class ModuleManager {
       if (!this.processes.has('crabot-agent')) {
         throw Object.assign(new Error('Core Agent registration requires the exact spawned child'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
       }
-      if (params.protocol_version !== '3.1.2') {
-        throw Object.assign(new Error('Core Agent protocol version must be 3.1.2'), { code: 'MODULE_MANAGER_PROTOCOL_VERSION_MISMATCH' })
+      if (params.protocol_version !== '3.2.0') {
+        throw Object.assign(new Error('Core Agent protocol version must be 3.2.0'), { code: 'MODULE_MANAGER_PROTOCOL_VERSION_MISMATCH' })
       }
     }
 

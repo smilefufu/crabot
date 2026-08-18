@@ -35,36 +35,41 @@ function workerFixture() {
   }
 }
 
+function listResult() {
+  return {
+    items: [workerFixture()],
+    total_active: 0,
+    total_terminal: 1,
+    total_legacy: 0,
+    pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+  }
+}
+
 describe('WorkersView', () => {
   beforeEach(() => { vi.resetAllMocks() })
 
   it('status 过滤透传 query，翻页重置', async () => {
-    mocked.listWorkers = vi.fn().mockResolvedValue({
-      items: [workerFixture()],
-      pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
-    })
+    mocked.listWorkers = vi.fn().mockResolvedValue(listResult())
     render(
       <MemoryRouter>
         <WorkersView />
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('任务标题')).toBeInTheDocument())
-    fireEvent.change(screen.getByLabelText('status 过滤'), { target: { value: 'failed' } })
-    await waitFor(() => expect(mocked.listWorkers).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'failed', page: 1 })))
+    fireEvent.change(screen.getByLabelText('状态过滤'), { target: { value: 'failed' } })
+    await waitFor(() => expect(mocked.listWorkers).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'failed', include_terminal: true, page: 1 })))
   })
 
   it('worker 链接到详情，manager 链接到 manager 详情', async () => {
-    mocked.listWorkers = vi.fn().mockResolvedValue({
-      items: [workerFixture()],
-      pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
-    })
+    mocked.listWorkers = vi.fn().mockResolvedValue(listResult())
     render(
       <MemoryRouter>
         <WorkersView />
       </MemoryRouter>,
     )
-    await waitFor(() => expect(screen.getByText('w-1234567890')).toBeInTheDocument())
-    expect(screen.getByText('w-1234567890').closest('a')!.getAttribute('href')).toBe(`/traces/workers/${encodeURIComponent('w-1234567890ab')}`)
+    await waitFor(() => expect(screen.getByText('任务标题')).toBeInTheDocument())
+    expect(screen.getByText('任务标题').closest('a')!.getAttribute('href')).toBe(`/traces/workers/${encodeURIComponent('w-1234567890ab')}`)
+    expect(screen.getByText('w-1234567890')).toBeInTheDocument()
     expect(screen.getByText('wechat::sess-1').closest('a')!.getAttribute('href')).toBe(`/traces/managers/${encodeURIComponent('wechat::sess-1')}`)
   })
 })

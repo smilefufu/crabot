@@ -5,20 +5,19 @@
 
 ## 当前状态
 
-### 模块关闭与孤儿模块回收：PR #99 review 收口中
+### P6 已完成；Traces 人话视图已合并，统一 retention（PR B）待执行
+
+### 模块关闭与孤儿模块回收：PR #99 已获 approve
 
 - 已确认设计：`crabot-docs/superpowers/specs/2026-08-16-module-shutdown-orphan-fencing-design.md`；实施计划：`crabot-docs/superpowers/plans/2026-08-17-module-shutdown-orphan-fencing.md`。
-- Agent shutdown 已统一释放 builtin/Claude Code/Codex adapter 资源，关闭后不再重建 CLI watcher，也不终止独立 tmux Worker。
-- MM 增加实例级 runtime registry 与 startup/per-spawn orphan recovery；replacement 只在全部已记录历史 runtime 确认退出后启动。Windows root 已退出或 PID 已复用时，以端口 owner + runtime 身份探针精确确认 orphan：前台启动经人类确认后终止，拒绝、`-d`、无 TTY 或身份不明均在任何受管模块启动前失败退出。
-- supervisor 最终强杀窗口调整为 MM 60 秒关闭窗口加 10 秒余量；Agent exact 协议版本同步至 `3.1.2`。隔离真实生命周期演练已验证：MM 被强杀后遗留的模块树会被 replacement MM 按 registry 全量回收，且记录清零。定向测试、类型检查和最终 diff review 已完成，待 PR review。
-
-### P6 已完成
+- Agent shutdown 统一释放 builtin/Claude Code/Codex adapter 资源，关闭后不重建 CLI watcher，也不终止独立 tmux Worker。
+- MM 通过实例级 runtime registry 在启动和 replacement 前回收已识别的历史模块树；Windows 身份不明、拒绝、`-d` 或无 TTY 均在任何受管模块启动前失败退出。supervisor 为 MM 保留 60 秒关闭窗口加 10 秒余量。
 
 - P6 总体设计：`crabot-docs/superpowers/specs/2026-08-11-p6-agent-observability-worker-management-design.md`；五份实施计划在 `crabot-docs/superpowers/plans/2026-08-12-p6-*.md`。顺序固定：**Slice 0 → P6-A → P6-B → P6-C → P6-D**。
 - Slice 0 **已合并**（PR #90 → merge `377200e`，15 轮 review、28 条 finding 全部修复并 resolve）。核心交付：唯一核心 Agent + 动态/legacy Agent 只读归档、runtime bearer identity（per-child 绑定/撤销、启动即从 env 摘除）、authenticated config pull（单飞+退避自愈、降级启动 fail-closed 存活）、management-only cutover（幂等 marker + 宽容握手 + degraded-only health）、durable config revision（outbox 三态 + HMAC fingerprint + journal binding + seqlock 一致性读）、sensitive RPC 独立 transport、legacy get_config/update_config 无认证端点退役、noop-safe 全部配置写入路径、容错 MCP 热更 + 候选连接清理。协议同步：protocol-agent-v3 3.1.1 §8.5/§8.6/§11、protocol-admin §3.18/§3.19/§7.1、protocol-module-manager §3.18.1：
   - 唯一核心 Agent：动态/legacy Agent 的 create/update/delete/config-write 全部拒绝（`ADMIN_HOTPLUG_NOT_ALLOWED` / HTTP 410），live read surfaces 只暴露 builtin `default` / exact `crabot-agent`；存量记录只读归档（`unsupported_legacy`）。
   - Runtime identity + authenticated config pull：MM 只向 exact `crabot-agent` child 注入一次性 runtime bearer；Agent 启动最早期捕获并从 env 删除；secret-bearing RPC 走 method-closed `callSensitive()`；启动与热更都经 authenticated pull，失败即 fail closed 并断开 stale MCP。pull 有单飞去重 + 旧 revision no-op + 失败退避重试（不会永久 stale）。
-  - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，当前 `protocol_version: '3.1.2'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
+  - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，当前 `protocol_version: '3.2.0'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
   - **降级启动自愈**：全新安装未配置 LLM 时 Agent 不再退出，进程存活照常注册，所有执行入口 fail closed，靠退避 pull 自愈；首次安装补建 worker 层（roles/LSP），无需手动重启。
   - Management-only cutover + durable config revision（seqlock 一致性读、HMAC fingerprint、Skill journal binding、publish 失败退避 drain 自愈）。
 ### 最近验证基线（2026-08-13，PR #90 最新 push）
@@ -32,6 +31,11 @@
 - PR #76～#89 完成 CLI worker 输入/活性/权限/ManagerKey、legacy loop 退役、bg-shell durable notification、worker-scoped MCP、Admin Chat assertion、会话隔离与 v2 只读导入；生产切换见里程碑归档（`git show 49b9cb4:PROGRESS.md` 有完整细节）。
 
 ## 当前 follow-up
+
+### P6 后 Traces / Worker 生命周期（当前主线）
+
+- **Traces 人话视图 + 有界决策视野**：**已合并**（PR #100 → `f7e3aaf`，@claude approve 后自动合并）。Managers 用 `渠道·会话标题`、active worker 数和最近活动替代裸 ManagerKey/Episodes/历史总数；Manager detail 上浮消息摘录/回复/动作并按 worker 因果链折叠；Workers 默认只显示非终态。恢复 v2 dispatcher 不变量：`list_workers` 默认只看 `queued/running/waiting_input`，终态续办需显式分页 `include_terminal=true`；Manager 页面计数与工具视野同源。生产实测 system-tasks 2389 历史→6 active，工具实际 12 active/53 terminal。协议：agent v3.2.0、admin v0.2.2。
+- **统一 observability retention（PR B，已确认 spec/协议/计划，待实施）**：自动回收终态 Worker 的 adapter output/session、events/context、ledger、过期 Manager episode/TraceStore；孤儿 adapter/events 24h grace；output log 10MB cap；删除失真的 Trace 清理 UI/API/cron。**所有 workspace 零自动删除**——`$DATA_DIR/workspaces/<taskId>` 是用户项目/任务产物，不是 cache；当前 nomi-ai-companion 的 1GB Flutter workspace 必须保留。workspace 管理/显式删除以后独立设计。
 
 ### P6 主线（严格串行）
 
@@ -47,7 +51,7 @@
 - 失败 Manager episode 的通用带退避 mailbox retry；跨 session 代发目标 Manager 持久注记（§4.2）；Admin skill → worker capability 接线（skill 仍硬编码 `[]`）；Codex provision `auth.json` 错误吞没；P8 调试工具/内部文档重写。
 - incarnation seq 碰撞（已接受边界，根治需协议变更）；Claude project-scope MCP 文件（已接受边界）；权限 schema 纪律（新增 schema 前先迁移历史 worker context）。
 - Admin source manager 的完整两阶段回滚：当前 mutation 源写入失败且内存态已推进时，靠重启恢复 fail-loud 兜底；各 manager 的事务性回滚（磁盘为准）另行设计。
-- claude-review workflow 的 attempt 步骤缺 `continue-on-error`：claude-code-action 自身崩溃（is_error）时重试阶梯被跳过。注意：workflow 文件不能在待审 PR 内修改（action 的反篡改校验会拒绝运行），需单独路径落地（直接推 main 并知会管理员）。
+- claude-review workflow 已修 retry 阶梯（main `55f9f3a`）：Verify attempt 1/2 加 `continue-on-error`，否则首次未提交 review 直接跳过 attempt 2/3。
 - reviewer bot 的 OAuth token 有 session 配额（约 10 轮高强度 review 后触发 "session limit"，按 UTC 时间窗口重置）；配额耗尽时 review run 会即死，等重置后重触发即可。
 - `handleGetAgentConfig` 的 epoch 有界重试会整体重放 MM verify/get_module 往返（失败模式下最多 ~26 倍验证调用）；后续可把重试收缩到解析段内部。
 - Admin Web SubagentEditor 的 `crab_messaging` 开关置灰（下发时被协议硬置 false，UI 与行为不一致）。
@@ -73,6 +77,6 @@
 为避免本文件复制并腐化架构说明，以下内容不再展开：
 
 - 项目开发与流程规则：根目录 `AGENTS.md`。
-- 正式模块契约：`crabot-docs/protocols/`（base/module-manager 0.2.2、admin 0.2.1、agent-v3 3.1.2、crab-messaging 0.3.2、module-spec 0.2.0）。
+- 正式模块契约：`crabot-docs/protocols/`（base/module-manager 0.2.2、admin 0.2.1、agent-v3 3.2.0、crab-messaging 0.3.2、module-spec 0.2.0）。
 - 设计决策与实施计划：`crabot-docs/superpowers/specs/` 与 `plans/`。
 - 开发、部署、调试说明：`AGENTS.md` 与 `crabot-docs/guides/`。

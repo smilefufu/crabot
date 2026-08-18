@@ -56,6 +56,7 @@ import { defineTool } from '../../engine/index.js'
 import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
 import type { ManagerKey, LedgerWorker, TaskStatus } from '../../workers/harness/ledger-types'
+import { isDecisionVisibleWorker } from '../../workers/harness/task-status.js'
 import type { MasterAuthorization } from '../principal.js'
 import type { WorkerImplId } from '../../workers/types'
 import type { ResolvedPermissions } from '../../types'
@@ -409,12 +410,38 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const listWorkers = defineTool({
     name: 'list_workers',
-    description: '列出当前会话派出的 worker 精简摘要；需要继续、返工或汇报进度时先查询。',
-    inputSchema: { type: 'object', properties: {} },
+    description:
+      '列出当前会话可决策的 worker。默认只返回非终态(queued/running/waiting_input)，' +
+      '需要查历史时显式 include_terminal=true 并分页；需要继续、返工或汇报进度时先查询。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        include_terminal: { type: 'boolean', description: '是否包含已完成/失败/取消的历史；默认 false' },
+        page: { type: 'number', description: '历史分页页码，从1开始；默认1' },
+        page_size: { type: 'number', description: '每页数量，默认20，最大100' },
+      },
+    },
     isReadOnly: true,
-    call: async (): Promise<ToolCallResult> => {
+    call: async (input): Promise<ToolCallResult> => {
       try {
-        return ok({ workers: sortSummaries((await harness.listWorkers(context().managerKey)).map(summarizeWorker)) })
+        const params = input as { include_terminal?: boolean; page?: number; page_size?: number }
+        const all = await harness.listWorkers(context().managerKey)
+        const active = all.filter((worker) => isDecisionVisibleWorker(worker.task.status))
+        const terminal = all.filter((worker) => !isDecisionVisibleWorker(worker.task.status))
+        const selected = params.include_terminal ? [...active, ...terminal] : active
+        const sorted = sortSummaries(selected.map(summarizeWorker))
+        const pagination = normalizePagination(params.page, params.page_size)
+        const offset = (pagination.page - 1) * pagination.page_size
+        return ok({
+          workers: sorted.slice(offset, offset + pagination.page_size),
+          total_active: active.length,
+          total_terminal: terminal.length,
+          pagination: {
+            ...pagination,
+            total_items: sorted.length,
+            total_pages: Math.ceil(sorted.length / pagination.page_size),
+          },
+        })
       } catch (error) { return mapError('list_workers', error) }
     },
   })

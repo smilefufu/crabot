@@ -7379,7 +7379,7 @@ export class AdminModule extends ModuleBase {
       module_id: 'crabot-agent',
       module_type: 'agent',
       version: '0.2.0',
-      protocol_version: '3.1.2',
+      protocol_version: '3.2.0',
       port: coreRuntime.port,
       orchestration: coreAgentOrchestrationConfig(),
       agent_config: resolvedAgentConfig,
@@ -9644,10 +9644,11 @@ export class AdminModule extends ModuleBase {
     method: string,
     params: P,
     notFoundWhen?: (message: string) => boolean,
+    transform?: (result: R) => unknown | Promise<unknown>,
   ): Promise<void> {
     try {
       const result = await this.callAgentRpc<P, R>(method, params)
-      sendJson(res, 200, result)
+      sendJson(res, 200, transform ? await transform(result) : result)
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       if ((error as { code?: unknown }).code === 'ADMIN_CORE_AGENT_CUTOVER_INCOMPLETE') {
@@ -10222,7 +10223,68 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     const page = parseIntParam(url.searchParams.get('page'), 1)
     const pageSize = parseIntParam(url.searchParams.get('page_size'), 20)
-    await this.proxyAgentRpc(res, 'list_managers_admin', { pagination: { page, page_size: pageSize } })
+    await this.proxyAgentRpc<
+      { pagination: { page: number; page_size: number } },
+      { items: Array<{ manager_key: string; [key: string]: unknown }>; pagination: unknown }
+    >(
+      res,
+      'list_managers_admin',
+      { pagination: { page, page_size: pageSize } },
+      undefined,
+      (result) => this.addManagerDisplayNames(result),
+    )
+  }
+
+  private async addManagerDisplayNames<T extends { items: Array<{ manager_key: string }>; pagination: unknown }>(result: T): Promise<T & { items: Array<T['items'][number] & { display_name: string }> }> {
+    const sessionsByChannel = new Map<string, Map<string, { title: string }>>()
+    // Agent 分页上限100；每个页面只 exact lookup 页面里需要的 session_id，不扫描 channel 全历史。
+    const pairs = result.items.slice(0, 100).flatMap((item) => {
+      const separator = item.manager_key.indexOf('::')
+      if (separator < 1) return []
+      return [{ channelId: item.manager_key.slice(0, separator), sessionId: item.manager_key.slice(separator + 2) }]
+    })
+    await Promise.all(pairs.map(async ({ channelId, sessionId }) => {
+      if (channelId === 'admin-web') return
+      try {
+        const session = await this.resolveChannelSession(channelId as ModuleId, sessionId)
+        const bySession = sessionsByChannel.get(channelId) ?? new Map<string, { title: string }>()
+        bySession.set(sessionId, { title: session.title })
+        sessionsByChannel.set(channelId, bySession)
+      } catch {
+        // Channel offline / legacy key：单行回退 manager_key，不影响整个列表。
+      }
+    }))
+    return {
+      ...result,
+      items: result.items.map((item) => ({ ...item, display_name: this.managerDisplayName(item.manager_key, sessionsByChannel) })),
+    }
+  }
+
+  private managerDisplayName(
+    managerKey: string,
+    sessionsByChannel: ReadonlyMap<string, ReadonlyMap<string, { title: string }>>,
+  ): string {
+    const separator = managerKey.indexOf('::')
+    if (separator < 1) return managerKey
+    const channelId = managerKey.slice(0, separator)
+    const sessionId = managerKey.slice(separator + 2)
+    if (channelId === 'admin-web') {
+      if (sessionId === 'admin-chat') return 'Admin Web · 聊天'
+      if (sessionId === 'system-tasks') return 'Admin Web · 系统任务'
+    }
+    const session = sessionsByChannel.get(channelId)?.get(sessionId)
+    if (!session?.title) return managerKey
+    const channel = this.channelManager.getInstance(channelId)
+    const platformLabels: Record<string, string> = { wechat: '微信', feishu: '飞书', telegram: 'Telegram', web: 'Web' }
+    const platform = platformLabels[channel?.platform ?? ''] ?? channel?.platform ?? channelId
+    const rawChannelName = channel?.name ?? channelId
+    const cleanedChannelName = rawChannelName
+      .replace(new RegExp(`^${channel?.platform ?? ''}[-_]?`, 'i'), '')
+      .trim()
+    const channelLabel = cleanedChannelName && cleanedChannelName.toLocaleLowerCase() !== platform.toLocaleLowerCase()
+      ? `${platform}·${cleanedChannelName}`
+      : platform
+    return `${channelLabel} · ${session.title}`
   }
 
   /** §8.4/§10.3：GET /api/agent/managers/:managerKey/episodes —— path 参数只 decode 一次。 */
@@ -10256,6 +10318,10 @@ export class AdminModule extends ModuleBase {
     // 单个即单值（沿用 parseAccessibleScopes 的 getAll 惯例，不另发明逗号分隔语法）。
     const statuses = url.searchParams.getAll('status').filter(Boolean)
     const managerKey = url.searchParams.get('manager_key') || undefined
+    const impl = url.searchParams.get('impl') || undefined
+    const q = url.searchParams.get('q')?.trim() || undefined
+    const includeTerminal = url.searchParams.get('include_terminal') === 'true'
+    const includeLegacy = url.searchParams.get('include_legacy') === 'true'
     // base-protocol §5.7 的 TimeRange 两端各自可选（start 闭、end 开），故任一存在即下发；
     // 这点与 search_traces 端点"start+end 必须同时给"的旧写法不同——那是它自己的历史约定。
     const start = url.searchParams.get('start') || undefined
@@ -10264,7 +10330,11 @@ export class AdminModule extends ModuleBase {
     await this.proxyAgentRpc<
       {
         status?: string | string[]
+        impl?: string
         manager_key?: string
+        q?: string
+        include_terminal?: boolean
+        include_legacy?: boolean
         time_range?: { start?: string; end?: string }
         pagination?: { page: number; page_size: number }
       },
@@ -10273,6 +10343,10 @@ export class AdminModule extends ModuleBase {
       ...(statuses.length === 1 ? { status: statuses[0] } : {}),
       ...(statuses.length > 1 ? { status: statuses } : {}),
       ...(managerKey ? { manager_key: managerKey } : {}),
+      ...(impl ? { impl } : {}),
+      ...(q ? { q } : {}),
+      ...(includeTerminal ? { include_terminal: true } : {}),
+      ...(includeLegacy ? { include_legacy: true } : {}),
       ...(start || end ? { time_range: { ...(start ? { start } : {}), ...(end ? { end } : {}) } } : {}),
       pagination: {
         page: parseIntParam(url.searchParams.get('page'), 1),
