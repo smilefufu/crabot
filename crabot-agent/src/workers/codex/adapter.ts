@@ -750,15 +750,16 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       keysSent = true
       const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
       const primaryProbe = probeCodexInput(snapshot, 'primary', undefined, false)
+      const paneShowsWorking = /Working\b/i.test(snapshot.text)
       if (primaryProbe === 'pending') {
-        const next: CliControlState = runtime.controlState.kind === 'running'
+        const next: CliControlState = runtime.controlState.kind === 'running' || paneShowsWorking
           ? { kind: 'running' }
           : { kind: 'waiting_action', reason: 'input_pending' }
         const report: StateChangeReport = { outputTail: snapshot.text, waitReason: 'input_pending' }
         await this.transitionControlState(runtime, h, next, report, false)
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
-      if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || /Working\b/i.test(snapshot.text))) {
+      if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || paneShowsWorking)) {
         await this.transitionControlState(runtime, h, { kind: 'running' })
         return
       }

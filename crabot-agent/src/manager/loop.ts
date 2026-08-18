@@ -55,6 +55,12 @@ import type { WorkerHarness } from '../workers/harness/harness'
 import type { HarnessEvent } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 
+const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出了一段文字、没有调用 send_message，然后结束了回复。\n'
+  + '请注意：直接输出的文字只留在系统内部，人类看不到；只有 send_message 发送的内容才能送达人类。\n'
+  + '请据此判断刚才那段文字：\n'
+  + '- 如果它是希望让人类看到的新内容，且与你已经发送的内容不重复 → 调用 send_message 发送一次，然后直接结束，不要再输出任何文字；\n'
+  + '- 如果它只是内部总结，或与你已经发送的内容重复 → 不需要任何操作，直接结束即可，不要重复发送。'
+
 // --- Public Interface ---
 
 export type WakeEvent =
@@ -733,6 +739,7 @@ export class ManagerLoop {
     model: string,
   ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean }> {
     this.attemptCounter += 1
+    let assistantTextEndTurnReminderSent = false
     const hasSummaryMarker = state.rollingSummary !== undefined
     const initialMessages: EngineMessage[] = hasSummaryMarker
       ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
@@ -765,6 +772,11 @@ export class ManagerLoop {
       // (纪律写在 manager system prompt 的收尾责任段里),不需要 engine 在运行时替它决定。
       // 静默 end_turn 对 manager 是完全正常的完成态(比如这次唤醒只是派活或只读检查)。
       suppressForcedSummary: () => true,
+      assistantTextEndTurnHandler: async () => {
+        if (assistantTextEndTurnReminderSent) return { kind: 'complete' as const }
+        assistantTextEndTurnReminderSent = true
+        return { kind: 'inject' as const, text: ASSISTANT_TEXT_END_TURN_REMINDER }
+      },
       // P6-A §6.4：onTurn 是事后观察钩子，用它生成 llm_call/tool_call span；
       // 不复制执行语义、不新增第二个 query loop。
       onTurn: (event) => this.recordTurnSpans(episodeId, event),

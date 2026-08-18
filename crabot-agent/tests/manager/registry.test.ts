@@ -35,12 +35,21 @@ interface TurnScript {
   readonly stopReason: 'end_turn' | 'tool_use' | 'max_tokens'
 }
 
+function isAssistantTextEndTurnReminder(params: LLMStreamParams): boolean {
+  const last = params.messages[params.messages.length - 1]
+  return typeof last?.content === 'string' && last.content.startsWith('[系统提醒] 你刚才直接输出了一段文字')
+}
+
 function makeAdapter(): { readonly adapter: LLMAdapter; readonly queue: TurnScript[]; readonly calls: LLMStreamParams[] } {
   const queue: TurnScript[] = []
   const calls: LLMStreamParams[] = []
   const adapter: LLMAdapter = {
     async *stream(params: LLMStreamParams) {
       calls.push({ ...params, messages: [...params.messages] })
+      if (isAssistantTextEndTurnReminder(params)) {
+        yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+        return
+      }
       const r = queue.shift() ?? { text: '(默认回复)', stopReason: 'end_turn' as const }
       const content: unknown[] = r.text ? [{ type: 'text', text: r.text }] : []
       yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
@@ -226,7 +235,7 @@ describe('ManagerRegistry', () => {
     await registry.routeHumanMessages('wechat', 'sess-normal', [makeChannelMessage('hi')])
 
     expect(calls[0].systemPrompt).toContain('系统线程纪律')
-    expect(calls[1].systemPrompt).not.toContain('系统线程纪律')
+    expect(calls[2].systemPrompt).not.toContain('系统线程纪律')
   })
 
   // --- routeHumanMessages ---
@@ -282,7 +291,7 @@ describe('ManagerRegistry', () => {
       await registry.routeHumanMessages('wechat', 'grp-live', [groupMessage('刚说的这句')])
 
       const flushPrompt = JSON.stringify(calls[0].messages)
-      const livePrompt = JSON.stringify(calls[1].messages)
+      const livePrompt = JSON.stringify(calls[2].messages)
 
       expect(flushPrompt).toContain('[补齐:群聊注意力放行期间累积的人类消息]')
       expect(flushPrompt).not.toContain('[人类消息]')
@@ -383,6 +392,10 @@ describe('ManagerRegistry', () => {
     const adapter: LLMAdapter = {
       async *stream(params) {
         calls.push({ ...params, messages: [...params.messages] })
+        if (isAssistantTextEndTurnReminder(params)) {
+          yield* chunksFromContent([], 'end_turn', { inputTokens: 1, outputTokens: 1 })
+          return
+        }
         turn++
         if (turn === 1) {
           entered.resolve()
@@ -410,7 +423,7 @@ describe('ManagerRegistry', () => {
     release.resolve()
     await active
     await expect(registry.routeOperationNotification(key, event)).resolves.toEqual({ consumed: true })
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(4)
   })
 
   // --- routeSchedule ---
@@ -498,7 +511,7 @@ describe('ManagerRegistry', () => {
     nowMs = Date.parse('2026-08-10T01:02:00.000Z')
     workerRelease.resolve()
     await workerWake
-    const workerMessages = JSON.stringify(calls[1].messages)
+    const workerMessages = JSON.stringify(calls[2].messages)
     expect(workerMessages).toContain('received_at=\\"2026-08-10T09:01:00+08:00\\"')
     expect(workerMessages).toContain('occurred_at=\\"2026-08-10T00:59:30.000Z\\"')
 
@@ -507,7 +520,7 @@ describe('ManagerRegistry', () => {
     nowMs = Date.parse('2026-08-10T01:03:00.000Z')
     scheduleRelease.resolve()
     await schedule
-    const scheduleMessages = JSON.stringify(calls[2].messages)
+    const scheduleMessages = JSON.stringify(calls[4].messages)
     expect(scheduleMessages).toContain('received_at=\\"2026-08-10T09:02:00+08:00\\"')
     expect(scheduleMessages).not.toContain('occurred_at=')
   })
@@ -520,6 +533,10 @@ describe('ManagerRegistry', () => {
     const adapter: LLMAdapter = {
       async *stream(params) {
         calls.push({ ...params, messages: [...params.messages] })
+        if (isAssistantTextEndTurnReminder(params)) {
+          yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+          return
+        }
         turn++
         if (turn === 1) {
           firstTurnEntered.resolve()
@@ -545,7 +562,7 @@ describe('ManagerRegistry', () => {
     await Promise.all([first, second])
 
     expect(JSON.stringify(calls[0].messages)).toContain('received_at=\\"2026-08-10T10:00:00+08:00\\"')
-    expect(JSON.stringify(calls[1].messages)).toContain('received_at=\\"2026-08-10T10:00:30+08:00\\"')
+    expect(JSON.stringify(calls[2].messages)).toContain('received_at=\\"2026-08-10T10:00:30+08:00\\"')
   })
 
   // --- evictIdle ---
@@ -614,7 +631,11 @@ describe('ManagerRegistry', () => {
     // mutex 保证严格串行：第一次 adapter.stream 调用必然对应第一个唤醒（A），第二次对应
     // 第二个唤醒（B）——不依赖猜测的微任务计数，只依赖 ManagerLoop 内部 mutex 的既有语义。
     const adapter: LLMAdapter = {
-      async *stream() {
+      async *stream(params) {
+        if (isAssistantTextEndTurnReminder(params)) {
+          yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+          return
+        }
         callCount++
         if (callCount === 1) {
           yield* chunksFromContent([{ type: 'text', text: 'A 完成' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
@@ -707,7 +728,7 @@ describe('ManagerRegistry', () => {
     await registry.routeHumanMessages('wechat', 'sess-closing-self-wake', [makeChannelMessage('开始')])
     await new Promise(resolve => setTimeout(resolve, 50))
 
-    expect(calls).toHaveLength(1)
+    expect(calls).toHaveLength(2)
     expect(registry.evictIdle(-1, Date.parse('2026-01-01T00:00:00.000Z'))).toBe(0)
     expect(registry.getOrCreate(key).hasPendingMailbox).toBe(true)
   })
@@ -841,9 +862,9 @@ describe('ManagerRegistry', () => {
     await registry.routeHumanMessages('wechat', 'sess-chain', [makeChannelMessage('开始')])
 
     // 1 次真实唤醒 + 至多 MAX_SELF_WAKE_CHAIN 次连锁自唤醒，然后必须停下。
-    await vi.waitFor(() => expect(calls.length).toBe(1 + MAX_SELF_WAKE_CHAIN), { timeout: 2000, interval: 10 })
+    await vi.waitFor(() => expect(calls.length).toBe(2 * (1 + MAX_SELF_WAKE_CHAIN)), { timeout: 2000, interval: 10 })
     await new Promise((resolve) => setTimeout(resolve, 80))
-    expect(calls.length).toBe(1 + MAX_SELF_WAKE_CHAIN) // 停住了，没有继续滚
+    expect(calls.length).toBe(2 * (1 + MAX_SELF_WAKE_CHAIN)) // 停住了，没有继续滚
     expect(injections).toBe(1 + MAX_SELF_WAKE_CHAIN)
 
     // 到顶时最后一条注入仍留在 mailbox：不丢、不被回收，由下一次真实唤醒顺带投递。

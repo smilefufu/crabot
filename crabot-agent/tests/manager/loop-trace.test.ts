@@ -24,11 +24,20 @@ const KEY: ManagerKey = 'wechat::sess-trace'
 const FIXED_RECEIVED_AT = '2026-01-01T08:00:00+08:00'
 function timed(wake: WakeEvent): TimedWakeEnvelope { return { wake, received_at: FIXED_RECEIVED_AT, timezone: 'Asia/Shanghai' } }
 
+function isAssistantTextEndTurnReminder(params: LLMStreamParams): boolean {
+  const last = params.messages[params.messages.length - 1]
+  return typeof last?.content === 'string' && last.content.startsWith('[系统提醒] 你刚才直接输出了一段文字')
+}
+
 function makeAdapter(opts: { fail?: boolean } = {}): { adapter: LLMAdapter; calls: LLMStreamParams[] } {
   const calls: LLMStreamParams[] = []
   const adapter: LLMAdapter = {
     async *stream(params: LLMStreamParams) {
       calls.push({ ...params, messages: [...params.messages] })
+      if (isAssistantTextEndTurnReminder(params)) {
+        yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+        return
+      }
       if (opts.fail) throw new Error('llm exploded')
       yield* chunksFromContent([{ type: 'text', text: '好的' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
     },
@@ -107,7 +116,7 @@ describe('ManagerLoop episode trace wiring', () => {
     expect(episodes.items[0].spans.some((span) => span.type === 'agent_loop' && span.status === 'completed')).toBe(true)
     // llm_call span + usage 聚合
     expect(episodes.items[0].spans.some((span) => span.type === 'llm_call')).toBe(true)
-    expect(episodes.items[0].total_usage).toMatchObject({ input_tokens: 10, output_tokens: 5 })
+    expect(episodes.items[0].total_usage).toMatchObject({ input_tokens: 20, output_tokens: 10 })
   })
 
   it('trace start 失败：零 LLM 调用且 wake 未结算（下次唤醒重投）', async () => {

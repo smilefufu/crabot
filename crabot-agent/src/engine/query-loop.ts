@@ -745,7 +745,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           continue
         }
       }
-      if (!isSilentText && options.assistantTextEndTurnHandler) {
+      if (!isSilentText && stopReason === 'end_turn' && options.assistantTextEndTurnHandler) {
         const assistantTextResult = await options.assistantTextEndTurnHandler({
           assistantText: processed.text,
           turnNumber: totalTurns,

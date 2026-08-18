@@ -691,6 +691,7 @@ describe('runEngine max_tokens silent compact retry', () => {
 
   it('returns partial text without retry when max_tokens has non-empty text', async () => {
     let callIndex = 0
+    const handler = vi.fn(async () => ({ kind: 'complete' as const }))
     const adapter: LLMAdapter = {
       async *stream() {
         callIndex++
@@ -704,13 +705,14 @@ describe('runEngine max_tokens silent compact retry', () => {
     const result = await runEngine({
       prompt: 'do work',
       adapter,
-      options: baseOptions(),
+      options: baseOptions({ assistantTextEndTurnHandler: handler }),
     })
 
     expect(result.outcome).toBe('completed')
     expect(result.finalText).toBe('部分汇报但被截断')
     expect(result.totalTurns).toBe(1)
     expect(callIndex).toBe(1)
+    expect(handler).not.toHaveBeenCalled()
   })
 
   it('returns immediately with empty finalText after compact retries exhausted', async () => {

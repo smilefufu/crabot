@@ -1981,6 +1981,40 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     await adapter.kill(h)
   })
 
+  it('旧状态已是idle但pane仍显示Working时，raw提交仍pending不得误标waiting_action', async () => {
+    class PendingWorkingTmux extends NoopTmux {
+      async sendKeys(_name: string, keys: string[]): Promise<void> {
+        if (keys.includes('Enter')) {
+          this.paneText = 'Working (esc to interrupt)\n› 已排队的输入\nqueued message\n? for shortcuts'
+        }
+      }
+    }
+
+    const tmux = new PendingWorkingTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+    })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    tmux.paneText = '› \n? for shortcuts'
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('idle')
+
+    tmux.paneText = 'Working (esc to interrupt)\n› 已排队的输入\n? for shortcuts'
+    await expect(adapter.sendInput(h, 'Enter', { raw: true })).rejects.toMatchObject({
+      name: 'CliInputStallError',
+      disposition: 'pending_in_ui',
+      control_state: 'running',
+    })
+    expect(await adapter.state(h)).toBe('running')
+
+    await adapter.kill(h)
+  })
+
   it('化身落终态后 watcher 停止:kill 之后再追加 stop 事件不再产生任何状态回调', async () => {
     const seen: WorkerContractState[] = []
     const tmux = new NoopTmux()

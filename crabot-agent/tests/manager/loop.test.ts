@@ -25,6 +25,11 @@ const DIALOG_OBJECT_ID = (`test::${'friend-loop'}` as ManagerKey)
  *  还是普通 engine turn 调用",不需要 vi.mock/vi.spyOn 侵入模块内部。 */
 const FOLD_SYSTEM_PROMPT_MARKER = '对话历史压缩助手'
 
+function isAssistantTextEndTurnReminder(params: LLMStreamParams): boolean {
+  const last = params.messages[params.messages.length - 1]
+  return typeof last?.content === 'string' && last.content.startsWith('[系统提醒] 你刚才直接输出了一段文字')
+}
+
 interface TurnScript {
   readonly text?: string
   readonly toolCalls?: ReadonlyArray<{ readonly name: string; readonly id: string; readonly input: Record<string, unknown> }>
@@ -33,7 +38,7 @@ interface TurnScript {
   readonly stopReason: 'end_turn' | 'tool_use' | 'max_tokens'
 }
 
-function makeAdapter(): {
+function makeAdapter(opts: { autoSettleAssistantTextReminder?: boolean } = {}): {
   readonly adapter: LLMAdapter
   readonly calls: LLMStreamParams[]
   readonly foldCalls: LLMStreamParams[]
@@ -55,6 +60,10 @@ function makeAdapter(): {
         foldCalls.push(snapshot)
         const text = foldQueue.shift() ?? '折叠后的摘要'
         yield* chunksFromContent([{ type: 'text', text }], 'end_turn')
+        return
+      }
+      if (opts.autoSettleAssistantTextReminder !== false && isAssistantTextEndTurnReminder(params)) {
+        yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
         return
       }
       const r = queue.shift() ?? { text: '(默认回复)', stopReason: 'end_turn' as const }
@@ -146,11 +155,11 @@ describe('ManagerLoop', () => {
 
     expect(result.outcome).toBe('completed')
     expect(result.consumedEvents).toBe(true)
-    expect(result.turns).toBe(1)
+    expect(result.turns).toBe(2) // 直接文字 end_turn 后会有一次 send_message 纠偏提醒
     expect(typeof result.episodeId).toBe('string')
 
     const state = await store.load(KEY)
-    expect(state.recent.length).toBe(2) // 渲染的事件 user msg + assistant 回复
+    expect(state.recent.length).toBe(4) // 事件 + 直接文字 + 纠偏提醒 + 纠偏后的静默收口
     expect(JSON.stringify(state.recent)).toContain('你好')
     expect(state.lastActiveAt).toBeTruthy()
   })
@@ -187,10 +196,12 @@ describe('ManagerLoop', () => {
 
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('start')] }))
 
-    expect(calls).toHaveLength(2)
-    expect(calls[0].systemPrompt).toBe(calls[1].systemPrompt)
-    expect(calls[0].systemPrompt).not.toContain('before')
-    expect(calls[1].systemPrompt).not.toContain('after')
+    expect(calls).toHaveLength(3)
+    for (const call of calls) {
+      expect(call.systemPrompt).toBe(calls[0].systemPrompt)
+      expect(call.systemPrompt).not.toContain('before')
+      expect(call.systemPrompt).not.toContain('after')
+    }
     expect(listWorkers).not.toHaveBeenCalled()
   })
 
@@ -515,10 +526,10 @@ describe('ManagerLoop', () => {
     const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
 
     expect(result.outcome).toBe('completed')
-    expect(result.turns).toBe(2)
+    expect(result.turns).toBe(3)
 
     const nonFoldCalls = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
-    expect(nonFoldCalls.length).toBe(2)
+    expect(nonFoldCalls.length).toBe(3)
     const turn2Messages = JSON.stringify(nonFoldCalls[1].messages)
     expect(turn2Messages).toContain('sched-1')
     expect(turn2Messages).toContain('期间到达的新事件')
@@ -555,12 +566,12 @@ describe('ManagerLoop', () => {
     expect(foldCalls.length).toBe(1) // 强制折叠恰好发生一次
     expect(JSON.stringify(foldCalls[0].messages)).not.toContain('触发超限的一句话')
     const nonFoldCalls = calls.filter((call) => !call.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
-    expect(nonFoldCalls).toHaveLength(2)
+    expect(nonFoldCalls).toHaveLength(3)
     for (const call of nonFoldCalls) {
       expect(JSON.stringify(call.messages)).toContain('received_at=\\"2026-01-01T08:22:33+08:00\\"')
     }
     expect(result.outcome).toBe('completed')
-    expect(result.turns).toBe(2) // 首次尝试 1 turn + 重试 1 turn
+    expect(result.turns).toBe(3) // 首次尝试 + 重试文字 + 一次纠偏回合
     expect(result.consumedEvents).toBe(true)
 
     const state = await store.load(KEY)
@@ -593,7 +604,7 @@ describe('ManagerLoop', () => {
     const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('会被截断的长问题')] }))
 
     expect(foldCalls.length).toBe(0) // 未触发强制折叠
-    expect(calls.length).toBe(1) // 只跑了一次 runEngine,没有重试
+    expect(calls.length).toBe(1) // max_tokens 的部分文本不是 end_turn，不触发纠偏
     expect(result.outcome).toBe('completed')
     expect(result.turns).toBe(1)
     expect(result.consumedEvents).toBe(true)
@@ -622,7 +633,7 @@ describe('ManagerLoop', () => {
 
     expect(foldCalls.length).toBe(1) // 强制折叠恰好发生一次
     expect(result.outcome).toBe('completed')
-    expect(result.turns).toBe(2) // 首次尝试 1 turn(max_tokens)+ 重试 1 turn
+    expect(result.turns).toBe(3) // 首次尝试 + 重试文字 + 一次纠偏回合
     expect(result.consumedEvents).toBe(true)
   })
 
@@ -634,8 +645,11 @@ describe('ManagerLoop', () => {
     queue.push({ stopReason: 'max_tokens' })
     // 强制折叠后的重试:正常结束
     queue.push({ text: '强制折叠并重试成功', stopReason: 'end_turn' })
+    // 纠偏提醒后确认该文字无需送人，静默收口。
+    queue.push({ stopReason: 'end_turn' })
     // 第二次唤醒:确认 mid-episode 内容不被重复投递
     queue.push({ text: '第二次唤醒回复', stopReason: 'end_turn' })
+    queue.push({ stopReason: 'end_turn' })
 
     let loop!: ManagerLoop
     const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
@@ -670,12 +684,12 @@ describe('ManagerLoop', () => {
     // 首次唤醒:首次尝试 turn1 成功 + turn2 max_tokens → 强制折叠 + 重试成功
     const first = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发 max_tokens 的一句话')] }))
     expect(first.outcome).toBe('completed')
-    expect(first.turns).toBe(3) // turn1 + turn2(max_tokens) + 重试的 turn1
+    expect(first.turns).toBe(4) // turn1 + turn2(max_tokens) + 重试文字 + 一次纠偏回合
     expect(first.consumedEvents).toBe(true)
 
     // 重试(第三次 LLM 调用)的 messages 里应该含有 mid-episode 注入内容
     const nonFoldCalls = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
-    expect(nonFoldCalls.length).toBe(3) // turn1 + turn2(max_tokens) + 重试
+    expect(nonFoldCalls.length).toBe(4) // turn1 + turn2(max_tokens) + 重试文字 + 纠偏回合
     const retryCallMessages = JSON.stringify(nonFoldCalls[2].messages)
     expect(retryCallMessages).toContain('sched-max-tokens')
     expect(retryCallMessages).toContain('首次尝试期间注入')
@@ -695,6 +709,7 @@ describe('ManagerLoop', () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ stopReason: 'max_tokens' }) // 首次尝试:静默 max_tokens
     queue.push({ text: '折叠后重试成功', stopReason: 'end_turn' }) // 强制折叠后的重试
+    queue.push({ stopReason: 'end_turn' }) // 纠偏提醒后静默收口
 
     let loop!: ManagerLoop
     // 在折叠 LLM 调用期间(applyFold → foldIntoSummary 调 adapter.stream 时)注入一条
@@ -727,9 +742,8 @@ describe('ManagerLoop', () => {
 
     expect(result.outcome).toBe('completed')
     expect(result.consumedEvents).toBe(true)
-    // retry 只应该是"折叠后重试成功"这一个 turn——若重复触发了 drain→continue,会多烧一轮
-    // LLM 调用(默认回复)才收尾,turns 会变成 3。
-    expect(result.turns).toBe(2) // 首次尝试 1 turn(max_tokens)+ 重试 1 turn
+    // retry 包含重试文字与一次纠偏回合；若重复触发了 drain→continue,会多烧第四轮。
+    expect(result.turns).toBe(3) // 首次尝试 1 turn(max_tokens)+ 重试 2 turn
 
     const finalState = await store.load(KEY)
     const occurrences = (JSON.stringify(finalState.recent).match(/sched-during-fold/g) ?? []).length
@@ -758,7 +772,7 @@ describe('ManagerLoop', () => {
 
     expect(foldCalls.length).toBe(0) // 没有可折叠内容(splitAt=0),不该调折叠 LLM
     expect(result.outcome).toBe('completed')
-    expect(result.turns).toBe(1) // 未经过任何强制折叠重试
+    expect(result.turns).toBe(2) // 未经过强制折叠重试，第二轮仅为文字纠偏
 
     const state = await store.load(KEY)
     expect(state.rollingSummary).toBeUndefined() // 没发生过折叠
@@ -841,6 +855,62 @@ describe('ManagerLoop', () => {
     // 语义不变量②:静默 end_turn 直接被接受为正常完成态,只跑了一轮 LLM。
     expect(calls).toHaveLength(1)
     expect(result.turns).toBe(1)
+  })
+
+  it('manager 直接输出文字后注入一次提醒，模型可改用 send_message 发送', async () => {
+    const { adapter, calls, queue } = makeAdapter({ autoSettleAssistantTextReminder: false })
+    let sent = 0
+    queue.push({ text: '需要让人类知道的进度', stopReason: 'end_turn' })
+    queue.push({ toolCalls: [{ name: 'send_message', id: 'send-1', input: { content: '需要让人类知道的进度' } }], stopReason: 'tool_use' })
+    queue.push({ stopReason: 'end_turn' })
+
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      toolFace: () => [defineTool({
+        name: 'send_message',
+        description: 'send a human-visible message',
+        inputSchema: { type: 'object', properties: { content: { type: 'string' } } },
+        call: async () => {
+          sent++
+          return { output: 'sent' }
+        },
+      })],
+    }))
+
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('进度怎么样')] }))
+
+    expect(sent).toBe(1)
+    expect(result.repliedToHuman).toBe(true)
+    expect(calls).toHaveLength(3)
+    expect(JSON.stringify(calls[1].messages)).toContain('[系统提醒]')
+    expect(JSON.stringify(calls[1].messages)).toContain('只有 send_message 发送的内容才能送达人类')
+  })
+
+  it('manager 收到提醒后的下一次文字 end_turn 不再重复提醒', async () => {
+    const { adapter, calls, queue } = makeAdapter({ autoSettleAssistantTextReminder: false })
+    queue.push({ text: '第一次走错通道', stopReason: 'end_turn' })
+    queue.push({ text: '第二次仍走错通道', stopReason: 'end_turn' })
+
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('给我一个答复')] }))
+
+    expect(result.outcome).toBe('completed')
+    expect(calls).toHaveLength(2)
+    expect(JSON.stringify(calls).match(/\[系统提醒\]/g)).toHaveLength(1)
+  })
+
+  it('manager 收到提醒后的下一次静默 end_turn 直接收口，不再继续提醒', async () => {
+    const { adapter, calls, queue } = makeAdapter()
+    queue.push({ text: '第一次走错通道', stopReason: 'end_turn' })
+    queue.push({ stopReason: 'end_turn' })
+
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('给我一个答复')] }))
+
+    expect(result.outcome).toBe('completed')
+    expect(calls).toHaveLength(2)
+    expect(JSON.stringify(calls).match(/\[系统提醒\]/g)).toHaveLength(1)
   })
 
   // --- EpisodeResult.repliedToHuman(P7 J Task 3.1:群聊注意力退避的 `replied` 信号) ---

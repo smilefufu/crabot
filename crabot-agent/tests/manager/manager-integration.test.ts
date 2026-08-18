@@ -106,6 +106,11 @@ function makeWorkerLLM(
 
 const FOLD_SYSTEM_PROMPT_MARKER = '对话历史压缩助手'
 
+function isAssistantTextEndTurnReminder(params: LLMStreamParams): boolean {
+  const last = params.messages[params.messages.length - 1]
+  return typeof last?.content === 'string' && last.content.startsWith('[系统提醒] 你刚才直接输出了一段文字')
+}
+
 interface TurnScript {
   readonly text?: string
   readonly toolCalls?: ReadonlyArray<{ readonly name: string; readonly id: string; readonly input: Record<string, unknown> }>
@@ -129,6 +134,10 @@ function makeManagerAdapter(): {
       if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
         foldCalls.push(snapshot)
         yield* chunksFromContent([{ type: 'text', text: '折叠后的摘要' }], 'end_turn')
+        return
+      }
+      if (isAssistantTextEndTurnReminder(params)) {
+        yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
         return
       }
       const r = queue.shift() ?? { text: '(默认回复)', stopReason: 'end_turn' as const }
@@ -624,7 +633,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
     expect(state.rollingSummary).toBeTruthy()
 
     const nonFoldCalls = managerScript.calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
-    const wake2Call = nonFoldCalls[nonFoldCalls.length - 1]
+    const wake2Call = nonFoldCalls[nonFoldCalls.length - 2]
     // 摘要块进入了第二轮的 prompt/messages（第一条消息即摘要标记块）
     expect(JSON.stringify(wake2Call.messages[0])).toContain('滚动摘要')
     // 尾巴保留 K 条：messages = [摘要块(1)] + [尾巴(K 条)] + [本次唤醒事件(1 条)]

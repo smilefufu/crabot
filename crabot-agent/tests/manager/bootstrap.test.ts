@@ -582,11 +582,13 @@ describe('manager bootstrap（P5 Task 1）', () => {
 
     await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('在吗')], FRIEND_A)
 
-    expect(systemPrompts).toHaveLength(1)
+    expect(systemPrompts).toHaveLength(2)
     // 档案段真的进了 prompt —— 不是"某个 thunk 返回了一个字符串"
-    expect(systemPrompts[0]).toContain('## 对话对象档案')
-    expect(systemPrompts[0]).toContain('喜欢简短回答，讨厌寒暄')
-    expect(systemPrompts[0]).toContain('@crabot_wx')
+    for (const systemPrompt of systemPrompts) {
+      expect(systemPrompt).toContain('## 对话对象档案')
+      expect(systemPrompt).toContain('喜欢简短回答，讨厌寒暄')
+      expect(systemPrompt).toContain('@crabot_wx')
+    }
   })
 
   it('reconcileManagerStack 对空台账快速返回空三桶，且不探测任何 adapter', async () => {
