@@ -73,7 +73,13 @@ describe('ManagersView', () => {
 })
 
 describe('ManagerDetail', () => {
-  beforeEach(() => { vi.resetAllMocks() })
+  beforeEach(() => {
+    vi.resetAllMocks()
+    mocked.listManagers = vi.fn().mockResolvedValue({
+      items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 测试会话', active_worker_count: 1 }],
+      pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
+    })
+  })
 
   it('episode 渲染：trigger/状态/时间/spawned worker 链接', async () => {
     mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
@@ -99,17 +105,18 @@ describe('ManagerDetail', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('你：「V6 部署好了吗」')).toBeInTheDocument())
-    expect(screen.getByText('→ 回复：还没有，我已经重新派活。')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '微信 · 测试会话', level: 1 })).toBeInTheDocument()
+    expect(screen.getByText(/还没有，我已经重新派活/)).toBeInTheDocument()
     const workerLink = screen.getByText('派活：部署 V6').closest('a')!
     expect(workerLink.getAttribute('href')).toBe(`/traces/workers/${encodeURIComponent('w-abc123456789')}`)
     // completed/trace id 默认隐藏，技术详情展开后才出现。
     expect(screen.queryByText('completed')).toBeNull()
     expect(screen.queryByText(/ep-12345678-abcd/)).toBeNull()
-    fireEvent.click(screen.getByText('技术详情'))
+    fireEvent.click(screen.getByRole('button', { name: '查看技术详情' }))
     expect(screen.getByText(/ep-12345678-abcd/)).toBeInTheDocument()
   })
 
-  it('worker 进展按 spawn worker_id 折叠到人类消息下，默认不展开', async () => {
+  it('worker 进展按 spawn worker_id 收进人类消息的因果链', async () => {
     mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
       items: [
         {
@@ -131,9 +138,47 @@ describe('ManagerDetail', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('你：「开始部署」')).toBeInTheDocument())
-    expect(screen.queryByText(/部署 V6.*等输入/)).toBeNull()
-    fireEvent.click(screen.getByText('展开 1 条 worker 进展'))
-    expect(screen.getByText(/部署 V6.*等输入/)).toBeInTheDocument()
+    expect(screen.getAllByText('部署 V6').length).toBeGreaterThan(0)
+    expect(screen.getByText('等待输入')).toBeInTheDocument()
+  })
+
+  it('同一执行器的多次进展默认折叠，只展示最后状态', async () => {
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [
+        {
+          trace_id: 'ep-progress-latest', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:03:00.000Z', status: 'completed',
+          trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+        },
+        {
+          trace_id: 'ep-progress-running', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:02:00.000Z', status: 'completed',
+          trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'running' },
+        },
+        {
+          trace_id: 'ep-progress-queued', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:01:00.000Z', status: 'completed',
+          trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'queued' },
+        },
+        {
+          trace_id: 'ep-parent', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:00:00.000Z', status: 'completed',
+          trigger: { type: 'human_message', summary: '人类消息 x1：开始部署' }, spans: [], spawned_worker_ids: ['w-1'],
+          actions: [{ kind: 'spawn_worker', label: '派活：部署 V6', worker_id: 'w-1' }],
+        },
+      ],
+      pagination: { page: 1, page_size: 20, total_items: 4, total_pages: 1 },
+    })
+    render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText('你：「开始部署」')).toBeInTheDocument())
+    expect(screen.getByText('等待输入')).toBeInTheDocument()
+    expect(screen.queryByText('执行中')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '展开 2 次历史进展' }))
+    expect(screen.getByText('执行中')).toBeInTheDocument()
+    expect(screen.getByText('排队')).toBeInTheDocument()
   })
 
   it('spawn 父 episode 不在当前分页时，用 causal_parent 仍按因果链展示', async () => {
@@ -157,9 +202,9 @@ describe('ManagerDetail', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('你：「开始长任务」')).toBeInTheDocument())
-    expect(screen.getByText('失败：真实父失败')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('展开 1 条 worker 进展'))
-    expect(screen.getByText(/长任务.*执行中/)).toBeInTheDocument()
+    expect(screen.getByText(/失败原因：真实父失败/)).toBeInTheDocument()
+    expect(screen.getAllByText('长任务').length).toBeGreaterThan(0)
+    expect(screen.getByText('执行中')).toBeInTheDocument()
   })
 
   it('worker_event 自己派新 worker 时归到同一根链，不重复顶层卡且保留失败状态', async () => {
@@ -193,14 +238,32 @@ describe('ManagerDetail', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('你：「开始根任务」')).toBeInTheDocument())
-    expect(screen.getAllByText('技术详情')).toHaveLength(1)
-    expect(screen.getByText(/展开 2 条 worker 进展（1 条失败）/)).toBeInTheDocument()
-    fireEvent.click(screen.getByText(/展开 2 条 worker 进展/))
-    expect(screen.getAllByText(/任务 A.*失败/).length).toBeGreaterThan(0)
-    expect(screen.getByText(/子任务 B.*已完成/)).toBeInTheDocument()
-    expect(screen.getByText(/失败：真实失败/)).toBeInTheDocument()
-    expect(screen.getByText('→ 回复：任务 A 失败，我已派子任务 B 接手。')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: '查看技术详情' })).toHaveLength(3)
+    expect(screen.getAllByText('任务 A').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('子任务 B').length).toBeGreaterThan(0)
+    expect(screen.getByText('已完成')).toBeInTheDocument()
+    expect(screen.getByText(/失败原因：真实失败/)).toBeInTheDocument()
+    expect(screen.getByText(/任务 A 失败，我已派子任务 B 接手/)).toBeInTheDocument()
     expect(screen.getByText('派活：子任务 B')).toBeInTheDocument()
-    expect(screen.getAllByText('技术详情')).toHaveLength(3)
+  })
+
+  it('在对话与操作和技术事件之间切换，不暴露内部 key 作为标题', async () => {
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [{
+        trace_id: 'ep-technical', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:00:00.000Z', status: 'completed',
+        trigger: { type: 'human_message', summary: '人类消息 x1：查看记录' }, spans: [], spawned_worker_ids: [],
+      }],
+      pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+    })
+    render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByRole('tab', { name: '对话与操作' })).toHaveAttribute('aria-selected', 'true'))
+    expect(screen.queryByRole('heading', { name: 'wechat::sess-1' })).toBeNull()
+    fireEvent.click(screen.getByRole('tab', { name: '技术事件' }))
+    expect(screen.getByRole('tab', { name: '技术事件' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('第 1 / 1 页')).toBeInTheDocument()
   })
 })

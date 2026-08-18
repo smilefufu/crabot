@@ -4,23 +4,33 @@ import { Loading } from '../../components/Common/Loading'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import {
   agentObservabilityService,
-  type ManagerEpisodeTrace,
+  type ManagerAdminSummary,
   type ManagerEpisodeSpan,
+  type ManagerEpisodeTrace,
 } from '../../services/agent-observability'
+import './ManagerDetail.css'
+
+type ViewMode = 'conversation' | 'technical'
 
 const SPAN_STATUS_COLOR: Record<ManagerEpisodeSpan['status'], string> = {
   running: 'var(--warning)', completed: 'var(--success)', failed: 'var(--error)',
 }
 
+const TRIGGER_LABEL: Record<ManagerEpisodeTrace['trigger']['type'], string> = {
+  human_message: '你发来消息',
+  attention_flush: '群聊消息',
+  schedule: '定时触发',
+  worker_event: '执行器进展',
+  sub_agent_call: '子代理调用',
+}
+
 function SpanRow({ span }: { span: ManagerEpisodeSpan }) {
   return (
-    <div style={{ display: 'flex', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 12, padding: '2px 0' }}>
+    <div className="manager-detail__span-row">
       <span style={{ color: SPAN_STATUS_COLOR[span.status] }}>●</span>
-      <span style={{ minWidth: 120 }}>{span.type}</span>
-      <span style={{ color: 'var(--text-muted)' }}>{span.duration_ms !== undefined ? `${span.duration_ms}ms` : '…'}</span>
-      <span style={{ color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 560 }}>
-        {span.details === undefined ? '' : JSON.stringify(span.details).slice(0, 200)}
-      </span>
+      <span>{span.type}</span>
+      <span>{span.duration_ms !== undefined ? `${span.duration_ms} 毫秒` : '进行中'}</span>
+      <span>{span.details === undefined ? '' : JSON.stringify(span.details)}</span>
     </div>
   )
 }
@@ -33,13 +43,24 @@ function displayTime(iso: string): string {
     : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
+function channelLabel(managerKey: string): string {
+  if (managerKey.startsWith('feishu-') || managerKey.startsWith('feishu::')) return '飞书'
+  if (managerKey.startsWith('wechat-') || managerKey.startsWith('wechat::')) return '微信'
+  return '会话'
+}
+
+function managerTitle(managerKey: string, summary?: ManagerAdminSummary): string {
+  const displayName = summary?.display_name?.trim()
+  return displayName && displayName !== managerKey ? displayName : `${channelLabel(managerKey)}会话`
+}
+
 function triggerText(episode: ManagerEpisodeTrace): string {
   const summary = episode.trigger.summary
   const excerpt = summary.includes('：') ? summary.slice(summary.indexOf('：') + 1).replace(/（合并 \d+ 个唤醒）$/, '') : ''
   switch (episode.trigger.type) {
     case 'human_message': return excerpt ? `你：「${excerpt}」` : '你发来一条消息（历史记录无摘要）'
     case 'attention_flush': return excerpt ? `群聊消息：「${excerpt}」` : '群聊注意力放行'
-    case 'schedule': return `⏰ ${summary.replace(/^定时任务:/, '')}`
+    case 'schedule': return `定时任务：${summary.replace(/^定时任务:/, '')}`
     case 'worker_event': return episode.worker_ref?.title
       ? `「${episode.worker_ref.title}」进展${episode.worker_ref.state_to ? `：${workerStateLabel(episode.worker_ref.state_to)}` : ''}`
       : summary
@@ -49,29 +70,33 @@ function triggerText(episode: ManagerEpisodeTrace): string {
 
 function workerStateLabel(status: string): string {
   const labels: Record<string, string> = {
-    queued: '排队', running: '执行中', waiting_input: '等输入',
+    queued: '排队', running: '执行中', waiting_input: '等待输入',
     completed: '已完成', failed: '失败', cancelled: '已取消',
   }
   return labels[status] ?? status
 }
 
+function episodeStatusLabel(status: ManagerEpisodeTrace['status']): string {
+  return status === 'running' ? '执行中' : status === 'failed' ? '失败' : '已完成'
+}
+
 function TechnicalDetails({ episode }: { episode: ManagerEpisodeTrace }) {
   const [open, setOpen] = useState(false)
   return (
-    <div style={{ marginTop: 8 }}>
-      <button className="button button--secondary" style={{ fontSize: 11, padding: '3px 8px' }} onClick={() => setOpen(!open)}>
-        {open ? '收起技术详情' : '技术详情'}
+    <div className="manager-detail__technical-details">
+      <button className="manager-detail__technical-toggle" type="button" onClick={() => setOpen(!open)} aria-expanded={open}>
+        {open ? '收起技术详情' : '查看技术详情'}
       </button>
       {open && (
-        <div style={{ marginTop: 8, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
-          <div style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', fontSize: 11, marginBottom: 6 }}>
-            trace {episode.trace_id} · {episode.duration_ms ?? '—'}ms · {episode.status}
+        <div className="manager-detail__technical-body">
+          <div className="manager-detail__technical-meta">
+            运行标识：{episode.trace_id} · 耗时：{episode.duration_ms === undefined ? '—' : `${episode.duration_ms} 毫秒`} · 状态：{episodeStatusLabel(episode.status)}
           </div>
-          {episode.outcome && <div style={{ fontSize: 12, marginBottom: 6 }}>Outcome: {episode.outcome.summary}{episode.outcome.error ? ` · ${episode.outcome.error}` : ''}</div>}
+          {episode.outcome && <div>处理结果：{episode.outcome.summary}{episode.outcome.error ? ` · ${episode.outcome.error}` : ''}</div>}
           {episode.total_usage && (
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
-              tokens: in {episode.total_usage.input_tokens} / out {episode.total_usage.output_tokens}
-              {episode.total_usage.cache_read_tokens ? ` / cache-read ${episode.total_usage.cache_read_tokens}` : ''}
+            <div>
+              用量：输入 {episode.total_usage.input_tokens} / 输出 {episode.total_usage.output_tokens}
+              {episode.total_usage.cache_read_tokens ? ` / 缓存读取 ${episode.total_usage.cache_read_tokens}` : ''}
             </div>
           )}
           {episode.spans.map((span) => <SpanRow key={span.span_id} span={span} />)}
@@ -81,62 +106,138 @@ function TechnicalDetails({ episode }: { episode: ManagerEpisodeTrace }) {
   )
 }
 
-function WorkerProgress({ episode }: { episode: ManagerEpisodeTrace }) {
+function ActionList({ episode }: { episode: ManagerEpisodeTrace }) {
+  if (!episode.actions?.length) return null
   return (
-    <div style={{ padding: '8px 0 8px 28px', borderTop: '1px solid var(--border)', fontSize: 12 }}>
-      <div style={{ display: 'flex', gap: 10 }}>
-        <span style={{ color: 'var(--text-muted)', minWidth: 50 }}>{displayTime(episode.started_at)}</span>
-        <span>⤷ {triggerText(episode)}</span>
-        {episode.status === 'failed' && <strong style={{ color: 'var(--error)' }}>失败：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</strong>}
-        {episode.worker_ref && (
-          <Link style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11 }} to={`/traces/workers/${encodeURIComponent(episode.worker_ref.worker_id)}`}>
-            查看 worker
-          </Link>
-        )}
-      </div>
-      {episode.reply_excerpt && <div style={{ margin: '5px 0 0 60px', color: 'var(--text-secondary)' }}>→ 回复：{episode.reply_excerpt}</div>}
-      {episode.actions?.map((action, index) => (
-        <div key={`${index}-${action.kind}-${action.worker_id ?? ''}`} style={{ margin: '4px 0 0 60px', color: 'var(--text-secondary)' }}>
-          → {action.worker_id ? <Link to={`/traces/workers/${encodeURIComponent(action.worker_id)}`}>{action.label}</Link> : action.label}
+    <div className="manager-detail__actions">
+      {episode.actions.map((action, index) => (
+        <div key={`${index}-${action.kind}-${action.worker_id ?? ''}`} className="manager-detail__action">
+          {action.worker_id ? <Link to={`/traces/workers/${encodeURIComponent(action.worker_id)}`}>{action.label}</Link> : action.label}
         </div>
       ))}
-      <div style={{ marginLeft: 60 }}><TechnicalDetails episode={episode} /></div>
     </div>
   )
 }
 
-function EpisodeCard({ episode, progress }: { episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[] }) {
-  const [showProgress, setShowProgress] = useState(false)
+interface WorkerProgressGroup {
+  latest: ManagerEpisodeTrace
+  history: ManagerEpisodeTrace[]
+}
+
+function groupWorkerProgress(progress: ManagerEpisodeTrace[]): WorkerProgressGroup[] {
+  const byWorker = new Map<string, WorkerProgressGroup>()
+  for (const episode of progress) {
+    const key = episode.worker_ref?.worker_id ?? episode.trace_id
+    const existing = byWorker.get(key)
+    if (existing) {
+      existing.history.push(existing.latest)
+      existing.latest = episode
+    } else {
+      byWorker.set(key, { latest: episode, history: [] })
+    }
+  }
+  return Array.from(byWorker.values())
+}
+
+function WorkerProgressEntry({ episode }: { episode: ManagerEpisodeTrace }) {
+  const state = episode.worker_ref?.state_to ?? episode.status
+  const title = episode.worker_ref?.title ?? triggerText(episode)
+  const tone = state === 'failed' || episode.status === 'failed' ? ' is-failed' : state === 'cancelled' ? ' is-cancelled' : ''
   return (
-    <div style={{ border: `1px solid ${episode.status === 'failed' ? 'var(--error)' : 'var(--border)'}`, borderRadius: 8, padding: 12, marginBottom: 12 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '64px minmax(0, 1fr)', gap: 8 }}>
-        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{displayTime(episode.started_at)}</span>
-        <div>
-          <div style={{ fontWeight: 600 }}>{triggerText(episode)}</div>
-          {episode.reply_excerpt && <div style={{ marginTop: 6, color: 'var(--text-secondary)' }}>→ 回复：{episode.reply_excerpt}</div>}
-          {episode.actions?.map((action, index) => (
-            <div key={`${index}-${action.kind}-${action.worker_id ?? ''}`} style={{ marginTop: 4, color: 'var(--text-secondary)' }}>
-              → {action.worker_id ? <Link to={`/traces/workers/${encodeURIComponent(action.worker_id)}`}>{action.label}</Link> : action.label}
-            </div>
-          ))}
-          {episode.status === 'failed' && <div style={{ color: 'var(--error)', marginTop: 5 }}>失败：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
-        </div>
+    <div className={`manager-detail__worker-progress${tone}`}>
+      <div className="manager-detail__worker-progress-row">
+        <span className="manager-detail__worker-state">{workerStateLabel(state)}</span>
+        <span className="manager-detail__worker-title">{title}</span>
+        {episode.worker_ref && (
+          <Link to={`/traces/workers/${encodeURIComponent(episode.worker_ref.worker_id)}`}>查看执行器</Link>
+        )}
       </div>
-      {progress.length > 0 && (
-        <div style={{ marginTop: 8 }}>
-          <button
-            className="button button--secondary"
-            style={{ fontSize: 11, padding: '3px 8px', color: progress.some((item) => item.status === 'failed') ? 'var(--error)' : undefined }}
-            onClick={() => setShowProgress(!showProgress)}
-          >
-            {showProgress
-              ? '收起'
-              : `展开 ${progress.length} 条 worker 进展${progress.some((item) => item.status === 'failed') ? `（${progress.filter((item) => item.status === 'failed').length} 条失败）` : ''}`}
-          </button>
-          {showProgress && progress.map((child) => <WorkerProgress key={child.trace_id} episode={child} />)}
-        </div>
-      )}
+      {episode.reply_excerpt && <div className="manager-detail__worker-reply">管理会话回复：{episode.reply_excerpt}</div>}
+      <ActionList episode={episode} />
+      {episode.status === 'failed' && <div className="manager-detail__failure">失败原因：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
       <TechnicalDetails episode={episode} />
+    </div>
+  )
+}
+
+function WorkerProgress({ progress }: { progress: WorkerProgressGroup }) {
+  const [historyOpen, setHistoryOpen] = useState(false)
+  return (
+    <div className="manager-detail__worker-progress-group">
+      <WorkerProgressEntry episode={progress.latest} />
+      {progress.history.length > 0 && (
+        <>
+          <button
+            className="manager-detail__worker-history-toggle"
+            type="button"
+            onClick={() => setHistoryOpen(!historyOpen)}
+            aria-expanded={historyOpen}
+          >
+            {historyOpen ? `收起 ${progress.history.length} 次历史进展` : `展开 ${progress.history.length} 次历史进展`}
+          </button>
+          {historyOpen && (
+            <div className="manager-detail__worker-history">
+              {progress.history.map((history) => (
+                <WorkerProgressEntry key={history.trace_id} episode={history} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+function EpisodeEntry({ episode, progress }: { episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[] }) {
+  const tone = episode.status === 'failed' ? ' is-failed' : episode.trigger.type === 'worker_event' ? ' is-worker' : ''
+  const workerProgress = groupWorkerProgress(progress)
+  return (
+    <article className={`manager-detail__event${tone}`}>
+      <time className="manager-detail__event-time">{displayTime(episode.started_at)}</time>
+      <div className="manager-detail__event-body">
+        <div className="manager-detail__event-header">
+          <span>{TRIGGER_LABEL[episode.trigger.type]}</span>
+          <TechnicalDetails episode={episode} />
+        </div>
+        <div className="manager-detail__event-title">{triggerText(episode)}</div>
+        {episode.reply_excerpt && <div className="manager-detail__reply"><strong>管理会话回复</strong>：{episode.reply_excerpt}</div>}
+        <ActionList episode={episode} />
+        {episode.status === 'failed' && <div className="manager-detail__failure">失败原因：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
+        {workerProgress.length > 0 && (
+          <div className="manager-detail__worker-chain">
+            {workerProgress.map((child) => <WorkerProgress key={child.latest.worker_ref?.worker_id ?? child.latest.trace_id} progress={child} />)}
+          </div>
+        )}
+      </div>
+    </article>
+  )
+}
+
+function TechnicalEventList({ episodes }: { episodes: ManagerEpisodeTrace[] }) {
+  return (
+    <div className="manager-detail__technical-list" role="tabpanel" aria-label="技术事件">
+      {episodes.map((episode) => (
+        <article className="manager-detail__technical-event" key={episode.trace_id}>
+          <time>{displayTime(episode.started_at)}</time>
+          <div>
+            <div className="manager-detail__technical-event-header">
+              <span>{TRIGGER_LABEL[episode.trigger.type]}</span>
+              <span>{episodeStatusLabel(episode.status)}</span>
+            </div>
+            <TechnicalDetails episode={episode} />
+          </div>
+        </article>
+      ))}
+    </div>
+  )
+}
+
+function Pagination({ page, totalPages, onPageChange }: { page: number; totalPages: number; onPageChange: (page: number) => void }) {
+  return (
+    <div className="manager-detail__pagination">
+      <button disabled={page <= 1} onClick={() => onPageChange(page - 1)}>上一页</button>
+      <span>第 {page} / {totalPages} 页</span>
+      <button disabled={page >= totalPages} onClick={() => onPageChange(page + 1)}>下一页</button>
     </div>
   )
 }
@@ -201,14 +302,42 @@ function groupEpisodes(episodes: ManagerEpisodeTrace[]): Array<{ episode: Manage
     .sort((a, b) => b.episode.started_at.localeCompare(a.episode.started_at))
 }
 
+function relatedWorkers(groups: Array<{ episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[] }>) {
+  const workers = new Map<string, string>()
+  for (const { episode, progress } of groups) {
+    for (const item of [episode, ...progress]) {
+      if (item.worker_ref) workers.set(item.worker_ref.worker_id, item.worker_ref.title ?? triggerText(item))
+      for (const action of item.actions ?? []) {
+        if (action.worker_id) workers.set(action.worker_id, action.label.replace(/^[^：]+：/, ''))
+      }
+    }
+  }
+  return Array.from(workers, ([workerId, title]) => ({ workerId, title }))
+}
+
 const ManagerDetailContent: React.FC = () => {
   const { managerKey = '' } = useParams()
   const [episodes, setEpisodes] = useState<ManagerEpisodeTrace[]>([])
+  const [manager, setManager] = useState<ManagerAdminSummary | undefined>()
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [view, setView] = useState<ViewMode>('conversation')
   const grouped = useMemo(() => groupEpisodes(episodes), [episodes])
+  const workers = useMemo(() => relatedWorkers(grouped), [grouped])
+
+  useEffect(() => {
+    let cancelled = false
+    agentObservabilityService.listManagers(1, 100)
+      .then((result) => {
+        if (!cancelled) setManager(result.items.find((item) => item.manager_key === managerKey))
+      })
+      .catch(() => {
+        if (!cancelled) setManager(undefined)
+      })
+    return () => { cancelled = true }
+  }, [managerKey])
 
   useEffect(() => {
     let cancelled = false
@@ -230,23 +359,62 @@ const ManagerDetailContent: React.FC = () => {
   }, [managerKey, page])
 
   return (
-    <div>
-      <div style={{ marginBottom: 16 }}>
-        <Link to="/traces" style={{ color: 'var(--text-muted)', fontSize: 12 }}>← 返回会话列表</Link>
-        <h2 style={{ fontFamily: 'var(--font-mono)', fontSize: 16, margin: '8px 0' }}>{managerKey}</h2>
-      </div>
+    <div className="manager-detail">
+      <header className="manager-detail__heading">
+        <div>
+          <Link to="/traces" className="manager-detail__back">返回会话列表</Link>
+          <h1>{managerTitle(managerKey, manager)}</h1>
+          <div className="manager-detail__session-id">会话标识：{managerKey}</div>
+        </div>
+        {manager?.last_activity_at && <div className="manager-detail__last-activity">最近活动：{displayTime(manager.last_activity_at)}</div>}
+      </header>
       {loading ? <Loading /> : error ? (
-        <div style={{ color: 'var(--text-muted)', padding: 24 }}>运行记录暂不可用：{error}</div>
+        <div className="manager-detail__empty">运行记录暂不可用：{error}</div>
       ) : grouped.length === 0 ? (
-        <div style={{ color: 'var(--text-muted)', padding: 24 }}>该会话暂无运行记录。</div>
+        <div className="manager-detail__empty">该会话暂无运行记录。</div>
       ) : (
         <>
-          {grouped.map(({ episode, progress }) => <EpisodeCard key={episode.trace_id} episode={episode} progress={progress} />)}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <button disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button>
-            <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{page} / {totalPages}</span>
-            <button disabled={page >= totalPages} onClick={() => setPage(page + 1)}>下一页</button>
+          <div className="manager-detail__tabs" role="tablist" aria-label="会话视图">
+            <button className={view === 'conversation' ? 'is-active' : ''} type="button" role="tab" aria-selected={view === 'conversation'} onClick={() => setView('conversation')}>对话与操作</button>
+            <button className={view === 'technical' ? 'is-active' : ''} type="button" role="tab" aria-selected={view === 'technical'} onClick={() => setView('technical')}>技术事件</button>
           </div>
+          {view === 'conversation' ? (
+            <div className="manager-detail__content-grid" role="tabpanel" aria-label="对话与操作">
+              <section>
+                <div className="manager-detail__stream-heading"><strong>活动记录</strong><span>按会话因果关系归并</span></div>
+                <div className="manager-detail__event-list">
+                  {grouped.map(({ episode, progress }) => <EpisodeEntry key={episode.trace_id} episode={episode} progress={progress} />)}
+                </div>
+                <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+              </section>
+              <aside className="manager-detail__summary" aria-label="会话摘要">
+                <section>
+                  <h2>会话</h2>
+                  <div className="manager-detail__summary-name">{managerTitle(managerKey, manager)}</div>
+                  <div>{channelLabel(managerKey)} · 会话记录</div>
+                </section>
+                <section>
+                  <h2>本页记录</h2>
+                  <dl>
+                    <div><dt>运行事件</dt><dd>{episodes.length} 条</dd></div>
+                    <div><dt>当前页</dt><dd>{page} / {totalPages}</dd></div>
+                    {manager && <div><dt>进行中</dt><dd>{manager.active_worker_count > 0 ? `${manager.active_worker_count} 个` : '—'}</dd></div>}
+                  </dl>
+                </section>
+                {workers.length > 0 && (
+                  <section>
+                    <h2>相关执行器</h2>
+                    {workers.map(({ workerId, title }) => <Link key={workerId} to={`/traces/workers/${encodeURIComponent(workerId)}`}>{title}</Link>)}
+                  </section>
+                )}
+              </aside>
+            </div>
+          ) : (
+            <>
+              <TechnicalEventList episodes={episodes} />
+              <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+            </>
+          )}
         </>
       )}
     </div>
