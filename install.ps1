@@ -321,6 +321,7 @@ if ($FromSource) {
 
 # PATH
 $crabotDir = if ($FromSource) { (Get-Location).Path } else { $InstallDir }
+
 $legacyReleasePattern = ('^{0}\\crabot-[^\\]+-windows-x64\\?$' -f [regex]::Escape($crabotDir.TrimEnd('\')))
 function Update-CrabotPath($pathValue) {
     $entries = @($pathValue -split ';' | Where-Object { $_ })

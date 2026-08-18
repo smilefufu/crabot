@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect } from 'vitest'
 import { join } from 'node:path'
 import { buildCoreModules } from './core-modules.js'
 
@@ -22,6 +22,12 @@ const OPTS = {
 function envOf(mods: ReturnType<typeof buildCoreModules>, id: string) {
   return mods.find((m) => m.module_id === id)!.env as Record<string, string>
 }
+
+const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
+
+afterEach(() => {
+  if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform)
+})
 
 describe('buildCoreModules：DATA_DIR 顶层契约', () => {
   it('admin：DATA_DIR=顶层，CRABOT_ADMIN_DATA_DIR=模块级，builtin MCP 路径来自代码根', () => {
@@ -48,6 +54,22 @@ describe('buildCoreModules：DATA_DIR 顶层契约', () => {
   it('core Agent advertises the exact protocol-agent-v3 document version', () => {
     const agent = buildCoreModules(OPTS).find((module) => module.module_id === 'crabot-agent')
     expect(agent?.protocol_version).toBe('3.2.0')
+  })
+
+  it('Windows 下不为 core Agent 启用不支持的 heapsnapshot signal', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+
+    const agent = buildCoreModules(OPTS).find((module) => module.module_id === 'crabot-agent')
+
+    expect(agent?.entry).toBe('node --max-old-space-size=2048 --heapsnapshot-near-heap-limit=3 dist/main.js')
+  })
+
+  it('非 Windows 下保留 core Agent 的 SIGUSR2 heapsnapshot signal', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+
+    const agent = buildCoreModules(OPTS).find((module) => module.module_id === 'crabot-agent')
+
+    expect(agent?.entry).toBe('node --max-old-space-size=2048 --heapsnapshot-near-heap-limit=3 --heapsnapshot-signal=SIGUSR2 dist/main.js')
   })
 
   it('memory：仍走 CRABOT_MEMORY_DATA_DIR，env 里不出现 DATA_DIR', () => {
