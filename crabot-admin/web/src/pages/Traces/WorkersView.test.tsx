@@ -29,7 +29,7 @@ function workerFixture() {
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
     incarnations: [
       { seq: 1, impl: 'builtin' as const, state: 'exited', workspace: '/tmp/ws', started_at: '2026-08-01T00:00:00.000Z', ended_reason: 'completed', session_ref: 'r1' },
-      { seq: 2, impl: 'builtin' as const, state: 'running', workspace: '/tmp/ws', started_at: '2026-08-01T00:05:00.000Z', session_ref: 'r2' },
+      { seq: 2, impl: 'builtin' as const, state: 'running', workspace: '/tmp/ws', started_at: '2026-08-01T00:05:00.000Z', session_ref: 'r2', forked_from: 1 },
     ],
     updated_at: '2026-08-01T00:05:00.000Z',
   }
@@ -102,17 +102,17 @@ describe('WorkerDetail', () => {
     mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
 
     renderDetail()
-    await waitFor(() => expect(screen.getByText('spawned')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('已启动')).toBeInTheDocument())
     // 化身链两行
-    expect(screen.getByText('#1')).toBeInTheDocument()
-    expect(screen.getByText((content) => content.startsWith('#2'))).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /#1.*主线/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /#2.*临时侧问/ })).toBeInTheDocument()
 
     // 加载更多 → cursor 失效 → 显式提示
     fireEvent.click(screen.getByText('加载更多'))
     await waitFor(() => expect(screen.getByText(/游标已失效/)).toBeInTheDocument())
     // 从头重载
     fireEvent.click(screen.getByText('从头重新加载'))
-    await waitFor(() => expect(screen.getAllByText('spawned').length).toBeGreaterThan(0))
+    await waitFor(() => expect(screen.getAllByText('已启动').length).toBeGreaterThan(0))
   })
 
   it('native degraded 时 harness 事件仍显示，且 reason 独立呈现', async () => {
@@ -124,7 +124,87 @@ describe('WorkerDetail', () => {
     })
     mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
     renderDetail()
-    await waitFor(() => expect(screen.getByText('spawned')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('已启动')).toBeInTheDocument())
     expect(screen.getByText(/native unavailable/)).toBeInTheDocument()
+  })
+
+  it('切换临时侧问后，活动流与终端输出同步切换', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({ events: [], next_cursor: 'tok-1' })
+    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    renderDetail()
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /#2.*临时侧问/ })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /#2.*临时侧问/ }))
+    await waitFor(() => expect(mocked.getWorkerTrace).toHaveBeenLastCalledWith('w-1234567890ab', { seq: 2 }))
+    expect(mocked.readWorkerOutput).toHaveBeenLastCalledWith('w-1234567890ab', { seq: 2 })
+  })
+
+  it('投递失败和异常退出保留在默认活动流', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({
+      events: [
+        { ts: '2026-08-01T00:00:01.000Z', kind: 'lifecycle', summary: 'input_delivery_failed reason_code=delivery_deadline_exceeded', source: 'harness', detail: { reason: '投递期限已过' } },
+        { ts: '2026-08-01T00:00:02.000Z', kind: 'lifecycle', summary: 'state_changed -> exited', source: 'harness', detail: { to: 'exited', reason: 'adapter crashed' } },
+      ],
+      next_cursor: 'tok-1',
+    })
+    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    renderDetail()
+
+    await waitFor(() => expect(screen.getByText('投递失败')).toBeInTheDocument())
+    expect(screen.getByText('投递期限已过')).toBeInTheDocument()
+    expect(screen.getByText('Worker 异常退出')).toBeInTheDocument()
+    expect(screen.getByText('已结束：adapter crashed')).toBeInTheDocument()
+  })
+
+  it('Claude Code 的工具参数与结果内容使用已归一化 detail', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({
+      events: [
+        { ts: '2026-08-01T00:00:01.000Z', kind: 'tool_call', role: 'assistant', summary: 'Read(...)', source: 'native', detail: { name: 'Read', input: { file_path: '/tmp/x.ts' } } },
+        { ts: '2026-08-01T00:00:02.000Z', kind: 'tool_result', role: 'user', summary: '文件内容摘要', source: 'native', detail: { content: '文件内容摘要' } },
+      ],
+      next_cursor: 'tok-1',
+    })
+    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    renderDetail()
+
+    await waitFor(() => expect(screen.getByText('Read')).toBeInTheDocument())
+    expect(screen.getByText('{"file_path":"/tmp/x.ts"}')).toBeInTheDocument()
+    expect(screen.getByText('文件内容摘要')).toBeInTheDocument()
+  })
+
+  it('默认选择主线，并把消息、工具与技术事件分开显示', async () => {
+    const instruction = '请先在隔离环境验证坐标与朝向，再比较五个非对称地标。'.repeat(20)
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({
+      events: [
+        { ts: '2026-08-01T00:00:01.000Z', kind: 'lifecycle', role: 'system', summary: 'item_completed', source: 'native' },
+        { ts: '2026-08-01T00:00:02.000Z', kind: 'message', role: 'user', summary: instruction.slice(0, 200), source: 'native', detail: { content: [{ type: 'input_text', text: instruction }] } },
+        { ts: '2026-08-01T00:00:03.000Z', kind: 'tool_call', role: 'assistant', summary: 'shell()', source: 'native', detail: { call_id: 'call-1', name: 'shell', arguments: '读取验证报告' } },
+        { ts: '2026-08-01T00:00:04.000Z', kind: 'tool_result', summary: '完成', source: 'native', detail: { call_id: 'call-1', output: '已完成隔离环境读取' } },
+        { ts: '2026-08-01T00:00:05.000Z', kind: 'message', role: 'assistant', summary: '正在重新验证方向', source: 'native', detail: { content: [{ type: 'output_text', text: '正在重新验证方向，正式端口尚未切换。' }] } },
+      ],
+      next_cursor: 'tok-1',
+    })
+    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+
+    renderDetail()
+
+    await waitFor(() => expect(screen.getByText('Manager 指令')).toBeInTheDocument())
+    expect(screen.getByText('Worker 输出')).toBeInTheDocument()
+    expect(screen.getByText('工具调用')).toBeInTheDocument()
+    expect(screen.getByText('工具结果')).toBeInTheDocument()
+    expect(screen.queryByText('item_completed')).not.toBeInTheDocument()
+    expect(screen.getByText('主线实现：').parentElement).toHaveTextContent('内置')
+    expect(mocked.getWorkerTrace).toHaveBeenCalledWith('w-1234567890ab', { seq: 1 })
+    expect(mocked.readWorkerOutput).toHaveBeenCalledWith('w-1234567890ab', { seq: 1 })
+
+    fireEvent.click(screen.getByRole('button', { name: '展开全文' }))
+    expect(screen.getByRole('button', { name: '收起' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '技术事件 1' }))
+    expect(screen.getByText('item_completed')).toBeInTheDocument()
   })
 })
