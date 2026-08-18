@@ -1491,8 +1491,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 游标会在这些被跳过的行上重复读或漏读(P2 review #4,同 cc adapter 修复)。
     let consumed = start
     for (let i = start; i < lines.length; i++) {
-      const event = normalizeRolloutLine(lines[i])
-      if (event) events.push({ ...event, source_offset: i })
+      const lineEvents = normalizeRolloutLine(lines[i])
+      events.push(...lineEvents.map((event) => ({ ...event, source_offset: i })))
       consumed = i + 1
     }
     return { events, nextCursor: { offset: consumed } }
@@ -1814,8 +1814,10 @@ function truncate(text: string, max: number): string {
  * - `session_meta`:payload 有 `session_id`(权威,比文件名解析出的 uuid 更可靠,见 spawn()
  *   的"session 发现"节)、`cli_version`、`cwd`、`model_provider`、`context_window`、
  *   `originator`——映射为 lifecycle。
- * - `event_msg`:payload 有 `type`(如 `task_started`)、`turn_id`、`started_at`、
- *   `model_context_window`——映射为 lifecycle,摘要取 payload.type。
+ * - `event_msg`:大多数 payload 有 `type`(如 `task_started`)、`turn_id`、`started_at`、
+ *   `model_context_window`——映射为 lifecycle,摘要取 payload.type。codex-cli 0.147 把普通
+ *   命令和文件修改作为 `item_completed` 记录，其中 `CommandExecution`/`FileChange` 分别展开
+ *   为同一 call_id 的工具调用和结果；其余 completed item 仍视为协议噪音。
  * - `response_item`:见 normalizeResponseItem()。
  * - `world_state`:payload 是全量状态快照(`full`/`state`),对"发生了什么"的摘要时间线没有
  *   直接信息量(它是状态,不是事件),跳过——需要全量状态可以直接读原始 rollout 文件
@@ -1824,34 +1826,128 @@ function truncate(text: string, max: number): string {
  * - `turn_context`:payload 是回合配置(`model`/`effort`/`cwd`/`approval_policy`/`summary`
  *   等),同样不是"发生的事",跳过。
  */
-function normalizeRolloutLine(line: string): NormalizedTraceEvent | null {
+function normalizeRolloutLine(line: string): NormalizedTraceEvent[] {
   let parsed: { type?: unknown; timestamp?: unknown; payload?: unknown }
   try {
     parsed = JSON.parse(line)
   } catch {
-    return null
+    return []
   }
-  if (!parsed || typeof parsed !== 'object') return null
+  if (!parsed || typeof parsed !== 'object') return []
   const ts = typeof parsed.timestamp === 'string' ? parsed.timestamp : ''
   const payload = parsed.payload as Record<string, unknown> | undefined
 
   if (parsed.type === 'session_meta') {
     const meta = payload as { session_id?: string; cli_version?: string; cwd?: string } | undefined
     const summary = `session_meta session_id=${meta?.session_id ?? ''} cli_version=${meta?.cli_version ?? ''} cwd=${meta?.cwd ?? ''}`
-    return { ts, kind: 'lifecycle', role: 'system', summary: truncate(summary, 200), detail: payload }
+    return [{ ts, kind: 'lifecycle', role: 'system', summary: truncate(summary, 200), detail: payload }]
   }
 
   if (parsed.type === 'event_msg') {
+    const completed = normalizeCompletedItem(payload, ts)
+    if (completed) return completed
     const eventType = typeof payload?.type === 'string' ? payload.type : 'event_msg'
-    return { ts, kind: 'lifecycle', role: 'system', summary: eventType, detail: payload }
+    return [{ ts, kind: 'lifecycle', role: 'system', summary: eventType, detail: payload }]
   }
 
   if (parsed.type === 'response_item') {
-    return normalizeResponseItem(payload, ts)
+    const event = normalizeResponseItem(payload, ts)
+    return event ? [event] : []
   }
 
   // world_state/turn_context(以及其它未在真机实测里见过的顶层 type)跳过,见函数头注释。
-  return null
+  return []
+}
+
+/**
+ * 从 codex-cli 0.147 的 `event_msg/item_completed` 展开已知工具记录。一个原生行可生成一对
+ * 事件，但二者保留同一 source_offset，cursor 仍只按原生行号推进。
+ */
+function normalizeCompletedItem(payload: Record<string, unknown> | undefined, fallbackTs: string): NormalizedTraceEvent[] | undefined {
+  if (payload?.type !== 'item_completed' || !isRecord(payload.item)) return undefined
+  const item = payload.item
+  const callId = typeof item.id === 'string' ? item.id : undefined
+  if (!callId) return undefined
+
+  if (item.type === 'CommandExecution') {
+    const command = stringArray(item.command)
+    const input = { command }
+    const startedAt = timestampFromEpochMs(payload.started_at_ms, fallbackTs)
+    const completedAt = timestampFromEpochMs(payload.completed_at_ms, fallbackTs)
+    const status = typeof item.status === 'string' ? item.status : 'completed'
+    const exitCode = typeof item.exit_code === 'number' ? item.exit_code : undefined
+    const output = commandOutput(item, status, exitCode)
+    const resultSummary = status === 'completed' && exitCode === 0
+      ? 'command completed'
+      : 'command ' + status + (exitCode === undefined ? '' : ' (exit ' + exitCode + ')')
+    return [
+      {
+        ts: startedAt,
+        kind: 'tool_call',
+        role: 'assistant',
+        summary: truncate('exec_command(' + command.join(' ') + ')', 200),
+        detail: { type: 'command_execution', call_id: callId, name: 'exec_command', input },
+      },
+      {
+        ts: completedAt,
+        kind: 'tool_result',
+        summary: truncate(resultSummary, 200),
+        detail: {
+          type: 'command_execution_result',
+          call_id: callId,
+          output,
+          is_error: status !== 'completed' || (exitCode !== undefined && exitCode !== 0),
+        },
+      },
+    ]
+  }
+
+  if (item.type === 'FileChange') {
+    const paths = isRecord(item.changes) ? Object.keys(item.changes) : []
+    const completedAt = timestampFromEpochMs(payload.completed_at_ms, fallbackTs)
+    const output = paths.length === 0 ? 'file change completed' : 'updated ' + paths.length + ' file' + (paths.length === 1 ? '' : 's')
+    return [
+      {
+        ts: timestampFromEpochMs(payload.started_at_ms, fallbackTs),
+        kind: 'tool_call',
+        role: 'assistant',
+        summary: truncate('apply_patch(' + paths.join(', ') + ')', 200),
+        detail: { type: 'file_change', call_id: callId, name: 'apply_patch', input: { paths } },
+      },
+      {
+        ts: completedAt,
+        kind: 'tool_result',
+        summary: output,
+        detail: { type: 'file_change_result', call_id: callId, output, is_error: false },
+      },
+    ]
+  }
+
+  return undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((part): part is string => typeof part === 'string') : []
+}
+
+function timestampFromEpochMs(value: unknown, fallback: string): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  const timestamp = new Date(value)
+  return Number.isNaN(timestamp.getTime()) ? fallback : timestamp.toISOString()
+}
+
+function commandOutput(item: Record<string, unknown>, status: string, exitCode: number | undefined): string {
+  for (const field of ['aggregated_output', 'stdout', 'stderr']) {
+    const output = item[field]
+    if (typeof output === 'string' && output) return output
+  }
+  return status === 'completed' && exitCode === 0
+    ? 'command completed without output'
+    : 'command ' + status + (exitCode === undefined ? '' : ' with exit code ' + exitCode)
 }
 
 /**
