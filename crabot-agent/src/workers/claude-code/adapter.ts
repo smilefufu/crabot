@@ -32,6 +32,7 @@ import { execFile, spawn, type ChildProcess } from 'child_process'
 import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
+import { parseRawControlKeys } from '../tmux/raw-control.js'
 import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
@@ -513,8 +514,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private async sendRawInput(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
     let keysSent = false
     try {
+      const keys = parseRawControlKeys(text)
       const before = await this.capture(runtime)
-      const keys = text.split(/\s+/).filter((key) => key.length > 0)
       await this.tmux.sendKeys(runtime.sessionName, keys)
       keysSent = true
       const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)

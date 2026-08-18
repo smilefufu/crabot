@@ -113,6 +113,25 @@ describe.skipIf(!tmuxAvailable)('TmuxDriver', () => {
     expect(await fs.readFile(outputFile, 'utf-8')).toContain('VAL=bar123')
   })
 
+  it('newSession replaces a detached TERM=dumb with an interactive terminal type', async () => {
+    const previousTerm = process.env.TERM
+    process.env.TERM = 'dumb'
+    try {
+      await driver.newSession({
+        name: sessionName,
+        cwd: tempDir,
+        command: `bash -c 'printf %s "$TERM"; sleep 5'`,
+        outputFile,
+      })
+
+      await waitFor(async () => (await fs.readFile(outputFile, 'utf-8')).length > 0)
+      expect(await fs.readFile(outputFile, 'utf-8')).toBe('xterm-256color')
+    } finally {
+      if (previousTerm === undefined) delete process.env.TERM
+      else process.env.TERM = previousTerm
+    }
+  })
+
   it('sendText delivers multi-line text to a plain (non-bracketed-paste) consumer and it echoes back through cat', async () => {
     await driver.newSession({
       name: sessionName,

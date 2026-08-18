@@ -17,6 +17,11 @@ import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 
 const execFileAsync = promisify(execFile)
 
+function normalizedPaneTerm(value: string | undefined): string {
+  const term = value?.trim()
+  return term && term.toLowerCase() !== 'dumb' ? term : 'xterm-256color'
+}
+
 export interface TmuxSessionSpec {
   name: string // 约定 crabot-w-<worker_id>-<seq>
   cwd: string
@@ -56,10 +61,12 @@ export class TmuxDriver {
     //    allowlist 基础重建（buildScrubbedChildEnv）再叠加本次连接注入。
     const envEntries = Object.entries(scrubChildEnv(spec.env ?? {}))
     const merged: Record<string, string> = {
-      TERM: process.env.TERM ?? 'xterm-256color',
       ...buildScrubbedChildEnv(),
       ...Object.fromEntries(envEntries),
     }
+    // `env -i` drops tmux's own pane TERM. A detached Module Manager commonly
+    // has TERM=dumb, which makes Codex stop for an interactive confirmation.
+    merged.TERM = normalizedPaneTerm(merged.TERM ?? process.env.TERM)
     const wrapperDir = await fs.mkdtemp(join(os.tmpdir(), 'crabot-tmux-env-'))
     await fs.chmod(wrapperDir, 0o700)
     const wrapperPath = join(wrapperDir, 'env.sh')

@@ -29,6 +29,7 @@ import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
+import { parseRawControlKeys } from '../tmux/raw-control.js'
 import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
@@ -744,22 +745,22 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private async sendRawInput(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
     let keysSent = false
     try {
+      const keys = parseRawControlKeys(text)
       const before = await this.capture(runtime)
-      const keys = text.split(/\s+/).filter((key) => key.length > 0)
       await this.tmux.sendKeys(runtime.sessionName, keys)
       keysSent = true
       const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
       const primaryProbe = probeCodexInput(snapshot, 'primary', undefined, false)
-      const paneShowsWorking = /Working\b/i.test(snapshot.text)
+      const paneShowsWorkingAfterRaw = /Working\b/i.test(snapshot.text)
       if (primaryProbe === 'pending') {
-        const next: CliControlState = runtime.controlState.kind === 'running' || paneShowsWorking
+        const next: CliControlState = runtime.controlState.kind === 'running' || paneShowsWorkingAfterRaw
           ? { kind: 'running' }
           : { kind: 'waiting_action', reason: 'input_pending' }
         const report: StateChangeReport = { outputTail: snapshot.text, waitReason: 'input_pending' }
         await this.transitionControlState(runtime, h, next, report, false)
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
-      if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || paneShowsWorking)) {
+      if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || paneShowsWorkingAfterRaw)) {
         await this.transitionControlState(runtime, h, { kind: 'running' })
         return
       }

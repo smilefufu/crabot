@@ -2474,11 +2474,22 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
       expect(await adapter.state(h)).toBe('idle')
 
-      await expect(adapter.sendInput(h, 'Enter', { raw: true })).resolves.toBeUndefined()
-      expect(await adapter.state(h)).toBe('running')
-      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
-      expect(meta.state).toBe('running')
-      expect(meta.wait_mode).toBeUndefined()
+      const sendKeys = vi.spyOn(tmux, 'sendKeys')
+      try {
+        await expect(adapter.sendInput(h, 'y208地形已完成', { raw: true })).rejects.toMatchObject({
+          name: 'InvalidRawControlInputError',
+          certainty: 'not_delivered',
+        })
+        expect(sendKeys).not.toHaveBeenCalled()
+
+        await expect(adapter.sendInput(h, 'Enter', { raw: true })).resolves.toBeUndefined()
+        expect(await adapter.state(h)).toBe('running')
+        const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+        expect(meta.state).toBe('running')
+        expect(meta.wait_mode).toBeUndefined()
+      } finally {
+        sendKeys.mockRestore()
+      }
     },
     30000,
   )

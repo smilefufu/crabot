@@ -135,8 +135,8 @@ export function describeStartupStall(opts: { impl: string; timeoutMs: number; ta
     `[crabot] ${opts.impl} 启动后 ${Math.round(opts.timeoutMs / 1000)}s 内未就绪` +
     `(TUI 始终没有开启 bracketed paste),开工输入**一个字符都没有投递**——` +
     `否则它会被当成按键打进挡在前面的界面。上面是该化身终端输出的尾部(已解码成可读文本,` +
-    `与 read_worker_output 同一形态),据此判断卡在哪:可用 send_to_worker 的 raw 模式敲键` +
-    `清掉界面,再把任务内容重新投一次。`
+    `与 read_worker_output 同一形态),据此判断卡在哪:如需控制,send_to_worker 的 raw 模式只能敲控制键(如 y Enter),` +
+    `不得附加任务正文;恢复可输入态后再以非 raw 投递任务。`
   return `${opts.tail || '(终端至今没有任何输出)'}\n---\n${note}`
 }
 
