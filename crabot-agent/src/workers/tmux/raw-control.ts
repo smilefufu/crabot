@@ -24,6 +24,7 @@ export class InvalidRawControlInputError extends Error {
  * message into pane text. Raw delivery is only for navigation/selection keys.
  */
 export function parseRawControlKeys(text: string): string[] {
+  if (text === '\r') return ['Enter']
   const keys = text.split(/\s+/).filter((key) => key.length > 0)
   if (keys.length === 0 || keys.some((key) => !isRawControlKey(key))) {
     throw new InvalidRawControlInputError()

@@ -4,6 +4,7 @@ import { InvalidRawControlInputError, parseRawControlKeys } from '../../../src/w
 describe('parseRawControlKeys', () => {
   it('accepts individual tmux control keys', () => {
     expect(parseRawControlKeys('y Enter C-c \u0003')).toEqual(['y', 'Enter', 'C-c', '\u0003'])
+    expect(parseRawControlKeys('\r')).toEqual(['Enter'])
   })
 
   it('rejects conversation text before it can reach a pane', () => {
