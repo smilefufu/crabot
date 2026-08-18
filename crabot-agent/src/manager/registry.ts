@@ -25,27 +25,6 @@
  * 内部按 `key === SYSTEM_TASKS_MANAGER_KEY` 判定 `ManagerLoopDeps.isSystemThread`,不需要
  * 调用方在路由时额外传一个"是不是系统线程"的标志——key 本身就是唯一判据。
  *
- * ## `onAsyncError` 出口(Task 4 遗留接线点)
- *
- * `worker-tools.ts` 的 `query_worker` 是字面 fire-and-forget:发起 `adapter.fork` 后不
- * `await`,失败时唯一的"通知调用方"手段是 `WorkerToolsDeps.onAsyncError` 这个可选回调
- * (Task 4 只留出口、不接线)。`getOrCreate` 为每个 key 构造一个绑定该 key 的
- * `OnAsyncError` 实现并通过 `deps.toolFace(key, isSystemThread, onAsyncError)` 交给调用方
- * ——调用方(真正装配 `buildManagerToolFace`/`buildWorkerTools` 的那一层,不在本任务范围)
- * 负责把它接进 `WorkerToolsDeps.onAsyncError`。本文件只负责这个回调"接住错误之后做什么":
- * 按"当前这个 manager 是否正有 episode 在跑"(`activeEpisodes`)二选一——
- *   - 有 episode 在跑:`enqueueDuringEpisode`,错误作为 mid-episode 注入随下一轮 turn 一起
- *     喂给 LLM,不用等这个 episode 结束再唤醒一次;
- *   - 没有 episode 在跑(该 episode 已经结束/loop 甚至被 evictIdle 回收过):`getOrCreate`
- *     惰性重建后直接 `wakeUp`,开一个新 episode 处理这条错误。
- * 错误信息包成 `WakeEvent`:复用既有 `worker_event` kind(不新增 `WakeEvent` 变体,因为
- * `loop.ts` 是 Task 7 的既有产物,本任务的"零现网影响"约束不允许改动),用既有的
- * `HarnessEventKind.query_failed`(worker-events.ts 已经为 `query_worker` 失败预留了这个
- * kind)承载,`seq` 填 `0` 作 sentinel——真实 seq 从 1 起分配(与 harness.ts `queryWorker`
- * 对"worker 不存在"场景同一套 sentinel 约定),`0` 标记"这不对应任何真实化身事件,只是一次
- * 唤醒信号"(真正的失败留痕已经由 `harness.queryWorker` 自己 `appendEvent('query_failed')`
- * 完成,这里不重复写事件流,只借用同一个 kind 语义)。
- *
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.4
  */
 
@@ -56,7 +35,7 @@ import type { ManagerKey } from './types.js'
 import type { EngineMessage, LLMAdapter, ToolDefinition } from '../engine/index.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { LedgerStore } from '../workers/harness/ledger-store'
-import type { HarnessEvent, HarnessEventKind } from '../workers/harness/worker-events'
+import type { HarnessEvent, HarnessEventDelivery } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { HumanPrincipal } from './principal.js'
 import { resolveTimezone } from '../utils/time.js'
@@ -67,23 +46,13 @@ export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
 /**
  * 连锁自唤醒的上限(见 `ManagerRegistry.maybeSelfWake`)。
  *
- * 自唤醒本身可能再产生新的 mailbox 内容(自唤醒 episode 期间又有注入到达),不设上限就是
- * 一条"episode → 注入 → episode"的无限链:注入源若是稳定复发的故障(如某 worker 上
- * `query_worker` 恒失败,每个 episode 都触发一次 onAsyncError),链条永不收敛,烧的是真钱。
+ * 自唤醒本身可能再产生新的 mailbox 内容(自唤醒 episode 期间又有普通事件到达),不设上限
+ * 就是一条"episode → 注入 → episode"的无限链:注入源若稳定复发,链条永不收敛,烧的是真钱。
  * 取 3:够把"收口瞬间才到达"这类一次性尾巴处理干净,又不至于替一个稳定故障源无限重开
  * episode。到顶后残留**不丢**——它留在 mailbox 里,受 `evictIdle` 的非空保护,由下一次
  * 真实唤醒(人类消息 / worker 事件 / schedule)顺带 drain 走,仍满足 §4.1 至少一次投递。
  */
 export const MAX_SELF_WAKE_CHAIN = 3
-
-/** `query_worker` 异步失败(Task 4 `WorkerToolsDeps.onAsyncError`)的信息形状,逐字对齐该接口。 */
-export interface AsyncToolErrorInfo {
-  readonly tool: string
-  readonly worker_id: string
-  readonly error: string
-}
-
-export type OnAsyncError = (info: AsyncToolErrorInfo) => void
 
 /**
  * scheduled 唤醒随行的**权限身份**(protocol-agent-v3 §8.2 的 `creator_friend_id` /
@@ -168,8 +137,7 @@ export interface ManagerRegistryDeps {
   }) => Promise<ResolvedPermissions | null>
   /**
    * 工具面工厂:调用方据 key/isSystemThread 装配 `buildManagerToolFace` 的完整依赖并返回
-   * 工具面数组;`onAsyncError` 由本 registry 按 key 绑定好传入,调用方负责把它接进
-   * `WorkerToolsDeps.onAsyncError`(见文件头说明)。
+   * 工具面数组。
    *
    * P5 Task 4 additive:第四个参数是**本 episode 若由 scheduled 触发**时随行的权限身份
    * (非 schedule 唤醒为 undefined),调用方据它填 `WorkerToolsContext.creatorFriendId` /
@@ -187,7 +155,6 @@ export interface ManagerRegistryDeps {
   readonly toolFace: (
     key: ManagerKey,
     isSystemThread: boolean,
-    onAsyncError: OnAsyncError,
     scheduleIdentity?: ScheduleIdentity,
     humanPrincipal?: HumanPrincipal,
     principalPermissions?: ResolvedPermissions,
@@ -205,8 +172,8 @@ export interface ManagerRegistryDeps {
 export class ManagerRegistry {
   private readonly loops = new Map<ManagerKey, ManagerLoop>()
   /**
-   * 每个 key 当前"在途" episode 的引用计数——决定 evictIdle 是否可回收、onAsyncError 走
-   * wakeUp 还是 enqueueDuringEpisode。**必须是计数,不能是布尔/Set 的有无标记**:同一 key 可能
+   * 每个 key 当前"在途" episode 的引用计数——决定 evictIdle 是否可回收，以及持久操作通知
+   * 是否需要 deferred。**必须是计数,不能是布尔/Set 的有无标记**:同一 key 可能
    * 有多个并发唤醒同时在途(人类消息与该 session 监护的 worker 事件几乎必然撞上)——第二个
    * 已经进了 `runWake`,可能仍在 `ManagerLoop` 内部 mutex 排队或执行,第一个却先 resolve。
    * 若只用 Set,第一个 resolve 时 `finally` 会直接 `delete(key)`,把仍在途的第二个也一并
@@ -233,7 +200,6 @@ export class ManagerRegistry {
     if (existing) return existing
 
     const isSystemThread = key === SYSTEM_TASKS_MANAGER_KEY
-    const onAsyncError: OnAsyncError = (info) => this.handleAsyncToolError(key, info)
 
     const loopDeps: ManagerLoopDeps = {
       key,
@@ -254,7 +220,6 @@ export class ManagerRegistry {
         this.deps.toolFace(
           key,
           isSystemThread,
-          onAsyncError,
           scheduleIdentityOf(wakeEvent),
           humanPrincipalOf(wakeEvent),
           principalPermissionsOf(wakeEvent),
@@ -377,6 +342,18 @@ export class ManagerRegistry {
     return this.runWake(key, envelope)
   }
 
+  /** Durable operation notifications never join an already-running episode's in-memory mailbox. */
+  async routeOperationNotification(
+    key: ManagerKey,
+    event: HarnessEvent,
+  ): Promise<HarnessEventDelivery> {
+    if (this.isEpisodeActive(key)) return { consumed: false }
+    const capture = this.captureIngress()
+    const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event }, event.ts)
+    const result = await this.runWake(key, envelope)
+    return { consumed: result.consumedEvents === true }
+  }
+
   async routeMediaNotification(p: {
     channelId: string
     sessionId: string
@@ -484,24 +461,6 @@ export class ManagerRegistry {
     return evicted
   }
 
-  /** query_worker 异步失败 → 唤醒信号(见文件头"onAsyncError 出口"一节)。 */
-  private handleAsyncToolError(key: ManagerKey, info: AsyncToolErrorInfo): void {
-    if (this.deps.isClosing?.()) return
-    const capture = this.captureIngress()
-    const envelope = this.makeEnvelope(
-      capture,
-      buildAsyncErrorWakeEvent(info, capture.now),
-      capture.now.toISOString(),
-    )
-    if (this.isEpisodeActive(key)) {
-      this.getOrCreate(key).enqueueDuringEpisode(envelope)
-      return
-    }
-    void this.runWake(key, envelope).catch((err) => {
-      console.error(`[ManagerRegistry] onAsyncError 唤醒 manager '${key}' 失败:`, err)
-    })
-  }
-
   private captureIngress(): IngressCapture {
     this.assertWakeAdmission()
     const now = this.deps.now()
@@ -548,7 +507,7 @@ export class ManagerRegistry {
   }
 
   /**
-   * getOrCreate + 维护 activeEpisodes 引用计数的公共路径,所有 routeXxx / onAsyncError /
+   * getOrCreate + 维护 activeEpisodes 引用计数的公共路径,所有 routeXxx /
    * 自唤醒都走这里。`event === undefined` ⇒ 自唤醒(只处理 mailbox 残留,见
    * `ManagerLoop.drainMailbox`);`selfWakeChain` 是当前连锁自唤醒的深度,真实唤醒恒为 0。
    */
@@ -653,19 +612,6 @@ function principalPermissionsOf(wakeEvent: WakeEvent | undefined): ResolvedPermi
     return undefined
   }
   return wakeEvent.principalPermissions
-}
-
-/** query_worker 异步失败 → 借用既有 `worker_event`/`query_failed` kind 包装成 WakeEvent(见文件头)。 */
-function buildAsyncErrorWakeEvent(info: AsyncToolErrorInfo, now: Date): WakeEvent {
-  const kind: HarnessEventKind = 'query_failed'
-  const event: HarnessEvent = {
-    ts: now.toISOString(),
-    kind,
-    worker_id: info.worker_id,
-    seq: 0, // sentinel:不对应任何真实化身事件,只是一次唤醒信号(见文件头)
-    detail: { tool: info.tool, error: info.error, synthetic: true },
-  }
-  return { kind: 'worker_event', event }
 }
 
 interface IngressCapture {

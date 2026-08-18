@@ -14,6 +14,7 @@ export interface InputCommitDriver {
 export interface InputCommitOptions {
   settleTimeoutMs?: number
   intervalMs?: number
+  beforeSideEffect?: (phase: 'paste' | 'enter') => void
 }
 
 /** Generic guarded paste transaction; implementation-specific UI semantics stay in callbacks. */
@@ -39,6 +40,7 @@ export async function commitInput(
   }
   if (beforePaste !== 'empty') return { disposition: 'not_pasted', snapshot }
 
+  opts.beforeSideEffect?.('paste')
   await driver.pasteText(text)
   snapshot = await waitUntil(driver, timeoutMs, intervalMs, (current) => probe(current, 'after_paste') !== 'empty')
   let currentProbe = probe(snapshot, 'after_paste')
@@ -48,6 +50,7 @@ export async function commitInput(
   if (currentProbe === 'empty') return { disposition: 'not_pasted', snapshot }
   if (currentProbe !== 'pending') return { disposition: 'pending_in_ui', snapshot }
 
+  opts.beforeSideEffect?.('enter')
   await driver.sendEnter()
   snapshot = await waitUntil(
     driver,
@@ -59,6 +62,7 @@ export async function commitInput(
 
   currentProbe = probe(snapshot, 'after_paste')
   if (currentProbe === 'pending') {
+    opts.beforeSideEffect?.('enter')
     await driver.sendEnter()
     snapshot = await waitUntil(
       driver,

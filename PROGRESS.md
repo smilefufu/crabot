@@ -1,13 +1,13 @@
 # Crabot 项目进度
 
-> 最后整理：2026-08-17
+> 最后整理：2026-08-18
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
 
-### P6 已完成；Traces 人话视图已合并，统一 retention（PR B）待执行
+### P6 已完成；Manager -> Worker 输入与侧问可靠交付待 PR review
 
-### 模块关闭与孤儿模块回收：PR #99 已获 approve
+### 模块关闭与孤儿模块回收：已合并（PR #99 → `bf989ec`）
 
 - 已确认设计：`crabot-docs/superpowers/specs/2026-08-16-module-shutdown-orphan-fencing-design.md`；实施计划：`crabot-docs/superpowers/plans/2026-08-17-module-shutdown-orphan-fencing.md`。
 - Agent shutdown 统一释放 builtin/Claude Code/Codex adapter 资源，关闭后不重建 CLI watcher，也不终止独立 tmux Worker。
@@ -20,11 +20,19 @@
   - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，当前 `protocol_version: '3.2.0'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
   - **降级启动自愈**：全新安装未配置 LLM 时 Agent 不再退出，进程存活照常注册，所有执行入口 fail closed，靠退避 pull 自愈；首次安装补建 worker 层（roles/LSP），无需手动重启。
   - Management-only cutover + durable config revision（seqlock 一致性读、HMAC fingerprint、Skill journal binding、publish 失败退避 drain 自愈）。
-### 最近验证基线（2026-08-13，PR #90 最新 push）
+- **部署约束**：pre-P6 存量生产不得部署 Slice 0/A/B 中间态；首次 rollout 至少包含 Slice 0 + P6-B grandfather bootstrap + P6-C 最终选择语义。
 
-- Shared 107、Core 138、**Admin 1152/1152**、Web build+269（web 此后未再改动）。
-- Agent 全量 2683 passed / 4 failed / 2 skipped，4 个失败均为既有 macOS 环境基线（`/var` realpath 3、tmux 探测 1），文件不在分支 diff 内。
-- 顺带修复的既有缺陷：`admin-chat-assertions` 签名篡改用例约 6% no-op flake（base64 末尾填充位）；Admin startup seeding 依赖 MM 事件扇出导致的全量 suite 崩溃；MM cutover 后对已运行 admin-web 重复 auto-start 的日志噪音。
+### Manager -> Worker 输入与侧问可靠交付（实现完成，待 PR review）
+
+- 已确认并发布设计、计划和 `protocol-agent-v3` 3.2.1 契约（crabot-docs `d4b4e50`）：`send_to_worker` 使用持久 receipt 返回 `delivered / pending / failed`，5 分钟内有限收口；失败及 pending 后终态只有被原 Manager episode 以 `consumedEvents=true` 消费后才确认完成，Agent 重启不自动重发输入。
+- `query_worker` 改为同步建立 fork 和提交首问、异步生成回答，不进入主 TUI 排队；builtin、Claude Code、Codex 统一“fork + 首问接受后返回”契约，Codex 使用 app-server `thread/fork + turn/start`。
+- 实现分支 `feat/manager-worker-operation-reliability` 已 rebase 到包含 #99/#100 的主线；adapter 关闭保护与可靠投递契约均保留，待 PR review。
+
+### 最近验证基线（2026-08-18，可靠交付实现分支）
+
+- Agent 可靠交付核心定向测试 17 文件 `468/468`；Manager 定向 `113/113`；Harness 定向 `104/104`；Codex runtime 清理与 Claude streaming fork 精确回归均通过。
+- Agent 全量 `2781 passed / 4 failed / 2 skipped`：其中 3 条是干净 main 同样复现的 macOS `/var` realpath 基线失败，1 条 tmux 探测超时单独重跑通过。
+- Agent TypeScript build 与 `git diff --check` 通过。
 
 ### Manager / Worker v3（已生产运行，背景）
 

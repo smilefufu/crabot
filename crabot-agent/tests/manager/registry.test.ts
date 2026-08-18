@@ -8,7 +8,6 @@ import {
   SYSTEM_TASKS_MANAGER_KEY,
   MAX_SELF_WAKE_CHAIN,
   type ManagerRegistryDeps,
-  type OnAsyncError,
 } from '../../src/manager/registry.js'
 import {
   laneBatchToWakeEvent,
@@ -27,7 +26,7 @@ import type { LLMAdapter, LLMStreamParams, EngineMessage } from '../../src/engin
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
-import { CapabilityNotSupportedError } from '../../src/workers/errors.js'
+import { QueryEstablishmentError } from '../../src/workers/errors.js'
 
 // --- Fixtures / helpers（与 tests/manager/loop.test.ts 同一套约定） ---
 
@@ -304,7 +303,7 @@ describe('ManagerRegistry', () => {
           onHumanWake: async (key, principal) => {
             wakeCalls.push({ key, friendId: principal.friend?.id, sessionType: principal.sessionType })
           },
-          toolFace: (_k, _s, _e, _sched, humanPrincipal) => {
+          toolFace: (_k, _s, _sched, humanPrincipal) => {
             toolFaceCalls.push({ friendId: humanPrincipal?.friend?.id, sessionType: humanPrincipal?.sessionType })
             return []
           },
@@ -333,7 +332,7 @@ describe('ManagerRegistry', () => {
       const registry = new ManagerRegistry(
         baseRegistryDeps({
           adapter,
-          toolFace: (_k, _s, _e, _sched, humanPrincipal) => {
+          toolFace: (_k, _s, _sched, humanPrincipal) => {
             toolFaceCalls.push({ friendId: humanPrincipal?.friend?.id, sessionType: humanPrincipal?.sessionType })
             return []
           },
@@ -374,6 +373,44 @@ describe('ManagerRegistry', () => {
 
     const state = await store.load(SYSTEM_TASKS_MANAGER_KEY)
     expect(state.recent.length).toBeGreaterThan(0)
+  })
+
+  it('operation notification 在 owning Manager 正执行时 deferred，不塞进当前 mailbox', async () => {
+    const calls: LLMStreamParams[] = []
+    const entered = deferred()
+    const release = deferred()
+    let turn = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        turn++
+        if (turn === 1) {
+          entered.resolve()
+          await release.promise
+        }
+        yield* chunksFromContent([{ type: 'text', text: 'ok' }], 'end_turn', { inputTokens: 1, outputTokens: 1 })
+      },
+      updateConfig: () => {},
+    }
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+    const key = 'wechat::operation-owner' as ManagerKey
+    const event: HarnessEvent = {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'input_delivery_failed',
+      worker_id: 'w-operation',
+      seq: 1,
+      detail: { delivery_id: 'delivery-1' },
+    }
+
+    const active = registry.routeHumanMessages('wechat', 'operation-owner', [makeChannelMessage('先处理这条')])
+    await entered.promise
+    await expect(registry.routeOperationNotification(key, event)).resolves.toEqual({ consumed: false })
+    expect(calls).toHaveLength(1)
+
+    release.resolve()
+    await active
+    await expect(registry.routeOperationNotification(key, event)).resolves.toEqual({ consumed: true })
+    expect(calls).toHaveLength(2)
   })
 
   // --- routeSchedule ---
@@ -651,20 +688,19 @@ describe('ManagerRegistry', () => {
     const key = 'wechat::sess-closing-self-wake' as ManagerKey
     const { adapter, calls } = makeAdapter()
     let closing = false
-    let capturedOnAsyncError: OnAsyncError | undefined
     const registry = new ManagerRegistry(baseRegistryDeps({
       adapter,
       isClosing: () => closing,
-      toolFace: (_key, _isSystemThread, onAsyncError) => {
-        capturedOnAsyncError = onAsyncError
-        return []
-      },
     }))
 
     const origAppend = store.appendEpisodeLog.bind(store)
     vi.spyOn(store, 'appendEpisodeLog').mockImplementation(async (managerKey, episodeId, messages) => {
       await origAppend(managerKey, episodeId, messages)
-      capturedOnAsyncError?.({ tool: 'query_worker', worker_id: 'w-closing', error: 'fork failed' })
+      await registry.routeMediaNotification({
+        channelId: 'wechat',
+        sessionId: 'sess-closing-self-wake',
+        text: 'late notification',
+      })
       closing = true
     })
 
@@ -682,30 +718,24 @@ describe('ManagerRegistry', () => {
     queue.push({ text: '第一个 episode 收口', stopReason: 'end_turn' })
     queue.push({ text: '自唤醒 episode 的回复', stopReason: 'end_turn' })
 
-    let capturedOnAsyncError: OnAsyncError | undefined
-    const registry = new ManagerRegistry(
-      baseRegistryDeps({
-        adapter,
-        toolFace: (_key, _isSystemThread, onAsyncError) => {
-          capturedOnAsyncError = onAsyncError
-          return []
-        },
-      })
-    )
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
 
     // 复现窗口：query-loop 在 end_turn 收口前做**最后一次** drainPending（query-loop.ts:551），
     // 此后到达的注入没有任何消费者在等。这里用 store.appendEpisodeLog 作确定性锚点——它在
     // runEngine 已经返回之后、wakeUp 尚未 resolve 之前被调用（loop.ts runEpisodeBody），
-    // 此刻 registry 仍把该 key 计为在途（activeEpisodes > 0），因此走的正是生产路径
-    // handleAsyncToolError 的 enqueueDuringEpisode 分支（真实触发者是 query_worker 那条
-    // 游离 promise 恰好在最后一次 drain 之后才 reject）。不靠定时器猜时间窗口。
+    // 此刻 registry 仍把该 key 计为在途（activeEpisodes > 0），因此普通媒体通知走
+    // enqueueDuringEpisode 分支。不靠定时器猜时间窗口。
     const origAppend = store.appendEpisodeLog.bind(store)
     let injected = false
     vi.spyOn(store, 'appendEpisodeLog').mockImplementation(async (k, episodeId, messages) => {
       await origAppend(k, episodeId, messages)
       if (!injected) {
         injected = true
-        capturedOnAsyncError?.({ tool: 'query_worker', worker_id: 'w-late', error: 'fork failed' })
+        void registry.routeMediaNotification({
+          channelId: 'wechat',
+          sessionId: 'sess-stall',
+          text: 'late notification',
+        })
       }
     })
 
@@ -717,11 +747,11 @@ describe('ManagerRegistry', () => {
     await vi.waitFor(
       async () => {
         const state = await store.load(key)
-        expect(JSON.stringify(state.recent)).toContain('query_failed')
+        expect(JSON.stringify(state.recent)).toContain('late notification')
       },
       { timeout: 2000, interval: 10 }
     )
-    const occurrences = (JSON.stringify((await store.load(key)).recent).match(/query_failed/g) ?? []).length
+    const occurrences = (JSON.stringify((await store.load(key)).recent).match(/late notification/g) ?? []).length
     expect(occurrences).toBe(1)
   })
 
@@ -789,19 +819,10 @@ describe('ManagerRegistry', () => {
     const key = 'wechat::sess-chain' as ManagerKey
     const { adapter, calls } = makeAdapter()
 
-    let capturedOnAsyncError: OnAsyncError | undefined
-    const registry = new ManagerRegistry(
-      baseRegistryDeps({
-        adapter,
-        toolFace: (_key, _isSystemThread, onAsyncError) => {
-          capturedOnAsyncError = onAsyncError
-          return []
-        },
-      })
-    )
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
 
-    // 病态注入源：**每个** episode 收口后都再产生一条注入（模拟某 worker 上 query_worker
-    // 恒失败这类稳定复发故障）。没有上限的话这就是一条无限的 episode 链。
+    // 病态注入源：**每个** episode 收口后都再产生一条普通通知。没有上限的话这就是
+    // 一条无限的 episode 链。
     let keepInjecting = true
     let injections = 0
     const origAppend = store.appendEpisodeLog.bind(store)
@@ -809,7 +830,11 @@ describe('ManagerRegistry', () => {
       await origAppend(k, episodeId, messages)
       if (keepInjecting) {
         injections++
-        capturedOnAsyncError?.({ tool: 'query_worker', worker_id: `w-${injections}`, error: 'fork failed' })
+        void registry.routeMediaNotification({
+          channelId: 'wechat',
+          sessionId: 'sess-chain',
+          text: `notification-${injections}`,
+        })
       }
     })
 
@@ -829,7 +854,7 @@ describe('ManagerRegistry', () => {
     keepInjecting = false
     await registry.routeHumanMessages('wechat', 'sess-chain', [makeChannelMessage('还在吗')])
     const lastCall = calls[calls.length - 1]
-    expect(JSON.stringify(lastCall.messages)).toContain(`w-${1 + MAX_SELF_WAKE_CHAIN}`)
+    expect(JSON.stringify(lastCall.messages)).toContain(`notification-${1 + MAX_SELF_WAKE_CHAIN}`)
   })
 
   // --- media notification: 独立 manager 唤醒，不伪装 schedule/bg ---
@@ -890,97 +915,9 @@ describe('ManagerRegistry', () => {
     expect(wakeUpSpy).toHaveBeenCalledTimes(1)
   })
 
-  // --- onAsyncError 接线（Task 4 遗留出口） ---
+  // --- query_worker 同步建立错误 ---
 
-  it('onAsyncError: episode 运行中收到异步错误 → enqueueDuringEpisode，不额外开新 episode', async () => {
-    const key = 'wechat::sess-async' as ManagerKey
-    let capturedOnAsyncError: OnAsyncError | undefined
-    let triggered = false
-    const adapter: LLMAdapter = {
-      async *stream(params: LLMStreamParams) {
-        // tools() 在 callNonStreaming 之前同步求值（query-loop.ts），此刻 capturedOnAsyncError
-        // 必然已经就绪；只在第一轮 turn 触发一次模拟 query_worker 的异步失败，此时 episode
-        // 仍在跑（registry.runWake 已经把 key 标进 activeEpisodes，wakeUp 尚未 resolve）。
-        // enqueueDuringEpisode 把它推进 mailbox 后，query-loop 在本轮 end_turn 收口前会
-        // drainPending 发现新内容，注入一条 supplement 消息并继续跑下一轮（而不是结束当前
-        // episode）——这正是"mid-episode 注入"要验证的行为，第二轮不再触发，让它正常收口。
-        if (!triggered) {
-          triggered = true
-          capturedOnAsyncError?.({ tool: 'query_worker', worker_id: 'w-1', error: 'fork failed' })
-        }
-        yield* chunksFromContent([{ type: 'text', text: '收到' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
-      },
-      updateConfig: () => {},
-    }
-    const registry = new ManagerRegistry(
-      baseRegistryDeps({
-        adapter,
-        toolFace: (_key, _isSystemThread, onAsyncError) => {
-          capturedOnAsyncError = onAsyncError
-          return []
-        },
-      })
-    )
-    const loop = registry.getOrCreate(key)
-    const enqueueSpy = vi.spyOn(loop, 'enqueueDuringEpisode')
-    const wakeUpSpy = vi.spyOn(loop, 'wakeUp')
-
-    await registry.routeHumanMessages('wechat', 'sess-async', [makeChannelMessage('你好')])
-
-    expect(enqueueSpy).toHaveBeenCalledTimes(1)
-    const syntheticEnvelope = enqueueSpy.mock.calls[0][0]
-    expect(syntheticEnvelope.received_at).toBe('2026-01-01T08:00:00+08:00')
-    expect(syntheticEnvelope.occurred_at).toBe('2026-01-01T00:00:00.000Z')
-    expect(syntheticEnvelope.wake).toMatchObject({
-      kind: 'worker_event',
-      event: { kind: 'query_failed', ts: '2026-01-01T00:00:00.000Z' },
-    })
-    // wakeUp 只被 routeHumanMessages 自己调用了一次；onAsyncError 没有额外触发第二次 wakeUp
-    expect(wakeUpSpy).toHaveBeenCalledTimes(1)
-  })
-
-  it('onAsyncError: 无 episode 在跑时收到异步错误 → wakeUp 开一个新 episode', async () => {
-    const key = 'wechat::sess-async-idle' as ManagerKey
-    let capturedOnAsyncError: OnAsyncError | undefined
-    const { adapter, queue } = makeAdapter()
-    queue.push({ text: '初次回复', stopReason: 'end_turn' })
-    const registry = new ManagerRegistry(
-      baseRegistryDeps({
-        adapter,
-        toolFace: (_key, _isSystemThread, onAsyncError) => {
-          capturedOnAsyncError = onAsyncError
-          return []
-        },
-      })
-    )
-
-    // 先跑一次正常 episode，让 toolFace 工厂被求值一次，拿到 capturedOnAsyncError；
-    // 此时该 episode 已经结束（wakeUp 已 resolve），activeEpisodes 里已经没有这个 key。
-    await registry.routeHumanMessages('wechat', 'sess-async-idle', [makeChannelMessage('你好')])
-    const loop = registry.getOrCreate(key)
-    const enqueueSpy = vi.spyOn(loop, 'enqueueDuringEpisode')
-    const wakeUpSpy = vi.spyOn(loop, 'wakeUp')
-
-    queue.push({ text: '处理异步错误', stopReason: 'end_turn' })
-    capturedOnAsyncError?.({ tool: 'query_worker', worker_id: 'w-2', error: 'fork failed' })
-    // handleAsyncToolError 内部 `void this.runWake(...)` 是字面 fire-and-forget，但
-    // `runWake` 对 `loop.wakeUp(event)` 的调用本身（不是它的 await）在上面这行同步完成——
-    // 拿到 spy 记录的 promise 显式 await 它，而不是猜测需要多少个事件循环 tick。
-    expect(wakeUpSpy).toHaveBeenCalledTimes(1)
-    await wakeUpSpy.mock.results[0].value
-
-    expect(enqueueSpy).not.toHaveBeenCalled()
-    const state = await store.load(key)
-    // 两次唤醒（人类消息 + 异步错误）都在历史里
-    expect(JSON.stringify(state.recent)).toContain('query_failed')
-  })
-
-  it('onAsyncError 全链路打通（不只是类型上通）：经 registry 装配的真实工具面调用 query_worker，fork 恒失败 → onAsyncError 触发 → episode 内 enqueueDuringEpisode', async () => {
-    // 与上面两个用例的关键区别：这里不手工伪造 onAsyncError 回调，而是走
-    // buildManagerToolFace（真实生产代码，装配四个来源的完整工具面）产出的 query_worker
-    // 工具——验证 ToolFaceDeps.onAsyncError → buildWorkerTools 这条转发链真的接上了，不是
-    // 只在类型层面通过。fake harness.queryWorker 恒拒绝，模拟 codex worker 上 fork 恒
-    // CapabilityNotSupportedError 的真机场景（见 codex adapter：fork capability 恒 false）。
+  it('真实工具面调用 query_worker 建立失败时，同一次调用返回结构化错误且不注入 synthetic wake', async () => {
     const key = 'wechat::sess-e2e-toolface' as ManagerKey
     const fakeHarness = {
       listWorkers: async (): Promise<LedgerWorker[]> => [],
@@ -994,11 +931,17 @@ describe('ManagerRegistry', () => {
         },
       }),
       queryWorker: async (): Promise<never> => {
-        throw new CapabilityNotSupportedError('codex', 'fork')
+        throw new QueryEstablishmentError(
+          'query-e2e',
+          'fork_capability_unavailable',
+          'codex does not support fork',
+          'not_started',
+        )
       },
     } as unknown as WorkerHarness
 
     let triggered = false
+    let toolResult: Awaited<ReturnType<ToolDefinition['call']>> | undefined
     const adapter: LLMAdapter = {
       async *stream(params: LLMStreamParams) {
         if (!triggered) {
@@ -1007,12 +950,11 @@ describe('ManagerRegistry', () => {
           // （而不是自己手搓一个），证明调用的是生产链路上真正会喂给 LLM 的那个工具定义。
           const queryWorkerTool = params.tools.find((t) => t.name === 'query_worker')
           expect(queryWorkerTool).toBeDefined()
-          const result = await queryWorkerTool!.call({ worker_id: 'w-codex-1', question: '现在进展如何？' }, {} as never)
-          // query_worker 本身是 fire-and-forget：调用不因后台失败而报错。
-          expect(result.isError).toBe(false)
-          // 给游离 promise 一个宏任务窗口 reject 并被 .catch() 触发 onAsyncError（同一 turn
-          // 内、episode 尚未收口，仍处于 activeEpisodes 计数 > 0 的窗口）。
-          await new Promise((resolve) => setTimeout(resolve, 20))
+          toolResult = await queryWorkerTool!.call(
+            { worker_id: 'w-codex-1', question: '现在进展如何？' },
+            {} as never,
+          )
+          expect(toolResult.isError).toBe(true)
         }
         yield* chunksFromContent([{ type: 'text', text: '收到' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
       },
@@ -1023,7 +965,7 @@ describe('ManagerRegistry', () => {
       baseRegistryDeps({
         adapter,
         harness: fakeHarness,
-        toolFace: (k, isSystemThread, onAsyncError) =>
+        toolFace: (k, isSystemThread) =>
           buildManagerToolFace({
             harness: fakeHarness,
             workerContext: () => ({
@@ -1034,7 +976,6 @@ describe('ManagerRegistry', () => {
             memoryServer: makeMemoryServer(),
             callAdmin: async () => ({}),
             isSystemThread,
-            onAsyncError,
           }),
       })
     )
@@ -1044,11 +985,14 @@ describe('ManagerRegistry', () => {
     const result = await registry.routeHumanMessages('wechat', 'sess-e2e-toolface', [makeChannelMessage('侧问一下 worker')])
 
     expect(result.outcome).toBe('completed')
-    // 链路真的通了：registry 按 key 绑定的 onAsyncError 被触发，且因为此刻 episode 仍在跑
-    // （query_worker.call 是在 adapter.stream 内部同步发起的，尚未收口），走的是
-    // enqueueDuringEpisode 分支，不是额外开一个新 episode。
-    expect(enqueueSpy).toHaveBeenCalledTimes(1)
-    expect(JSON.stringify(enqueueSpy.mock.calls[0][0])).toContain('query_failed')
+    expect(toolResult).toMatchObject({ isError: true })
+    expect(JSON.parse(toolResult!.output)).toEqual({
+      query_id: 'query-e2e',
+      reason_code: 'fork_capability_unavailable',
+      reason: 'codex does not support fork',
+      certainty: 'not_started',
+    })
+    expect(enqueueSpy).not.toHaveBeenCalled()
   })
 })
 

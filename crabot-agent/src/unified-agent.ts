@@ -720,6 +720,7 @@ export class UnifiedAgent extends ModuleBase {
       now: () => new Date().toISOString(),
       // P6-A：Manager episode trace writer（窄接口 + 脱敏收口在 TraceStore.managerTraceWriter）。
       traceWriter: this.traceStore.managerTraceWriter((text) => redactSecrets(text, [...this.knownSecrets])),
+      redactFailureReason: (text) => redactSecrets(text, [...this.knownSecrets]),
       // P6-A §8.4：builtin worker 结构化 trace（写钩子 + 读入口，同一脱敏纪律）。
       builtinTraceHooks: this.builtinTraceHooks(),
       // P6-B §6：显式 impl spawn/resume/handoff 的 registry gate。
@@ -2959,6 +2960,7 @@ export class UnifiedAgent extends ModuleBase {
       this.config.moduleId,
       { authorizationBearer: ConfigLoader.getRuntimeBearer() },
     )
+    if (result.connection.apikey) this.registerSecret(result.connection.apikey)
     return result
   }
 

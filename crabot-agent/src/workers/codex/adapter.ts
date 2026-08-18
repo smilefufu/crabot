@@ -16,12 +16,13 @@
  * reads native rollout metadata; a placeholder session can continue visually but cannot be
  * resumed. Native rollout data is trace/diagnostic evidence and never causes automatic re-paste.
  * Meta persists external state plus wait_mode/wait_reason and supports runtime reconstruction from
- * deterministic tmux names after an agent restart. Codex fork remains unsupported.
+ * deterministic tmux names after an agent restart. Query forks use a separate headless app-server
+ * process and never enter the interactive tmux session.
  */
 import { promises as fs, type Dirent } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
-import { homedir } from 'os'
+import { homedir, tmpdir } from 'os'
 import { execFile } from 'child_process'
 import { buildChildEnv } from '../../core/runtime-env.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
@@ -34,8 +35,17 @@ import { OutputLog } from '../output-log.js'
 import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
-import { WorkerExitedError, CapabilityNotSupportedError, CliInputStallError, WorkerImplUnavailableError } from '../errors.js'
+import { WorkerExitedError, CapabilityNotSupportedError, CliInputStallError, WorkerImplUnavailableError, ForkEstablishmentError } from '../errors.js'
 import { probeCodexInput, acceptedCodexInput } from './input-surface.js'
+import { assertInputDeliveryActive } from '../input-delivery-control.js'
+import { buildScrubbedChildEnv } from '../connections/secret-env.js'
+import {
+  CodexAppServerClient,
+  CodexAppServerDeadlineError,
+  CodexAppServerRpcError,
+  probeCodexAppServerFork,
+  type AppServerNotification,
+} from './app-server-client.js'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { createHash } from 'node:crypto'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderCodexMcpToml, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
@@ -49,9 +59,11 @@ import type {
   StateChangeReport,
   IncarnationHandle,
   IncarnationRef,
+  ForkOptions,
   NormalizedTraceEvent,
   OutputCursor,
   SpawnSpec,
+  SendInputOptions,
   TraceCursor,
   WorkerAdapter,
   WorkerContractState,
@@ -69,6 +81,10 @@ const CODEX_CREDENTIAL_FILES = ['.codex/config.toml', '.codex/auth.json'] as con
 /** POSIX shell 单引号转义,与 cc adapter 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+function safeProcessError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim().slice(0, 1000)
 }
 
 /** 取一个 TOML table 值当普通对象用;不是 table(缺失/标量/数组)就当空表。 */
@@ -185,6 +201,8 @@ interface Runtime {
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin/cc 同款语义(P2 review #2)。 */
   resumed?: boolean
+  /** Present only for a headless query fork; mainline incarnations are owned by tmux. */
+  headlessClient?: CodexAppServerClient
 }
 
 function instanceKey(h: { worker_id: string; seq: number }): string {
@@ -384,6 +402,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
   private lastDetectedVersion?: string
   private lastGlobalDetected = false
+  private appServerForkSupported = false
+  private lastCapabilityProbeKey?: string
 
   /** 同 claude adapter：resolver 存在时只认其结论，无用户级绝不回落裸命令。
    *  返回 { cmd: shell 引用形态, raw: 原始绝对路径 }（raw 供 PATH 前置等目录推导，
@@ -543,6 +563,29 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 'codex-cli 0.146.0' → '0.146.0'
     const version = /([0-9]+\.[0-9]+\.[0-9]+)/.exec(versionOutput)?.[1]
     this.lastDetectedVersion = version
+    if (!version) {
+      this.appServerForkSupported = false
+      this.lastCapabilityProbeKey = undefined
+    } else {
+      const capabilityProbeKey = `${effectiveBin}\n${version}`
+      if (this.lastCapabilityProbeKey !== capabilityProbeKey) {
+        const probeHome = await fs.mkdtemp(join(tmpdir(), 'crabot-codex-app-server-probe-'))
+        try {
+          this.appServerForkSupported = await probeCodexAppServerFork({
+            command: `${effectiveBin} app-server --stdio`,
+            cwd: probeHome,
+            env: {
+              ...buildScrubbedChildEnv(),
+              PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? ''),
+              CODEX_HOME: probeHome,
+            },
+          })
+          this.lastCapabilityProbeKey = capabilityProbeKey
+        } finally {
+          await fs.rm(probeHome, { recursive: true, force: true }).catch(() => {})
+        }
+      }
+    }
     return { installed: true, activated, version, install_source: 'user', credential_generation: credentialGeneration, global_detected: false, detail: versionOutput }
   }
 
@@ -772,6 +815,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     mode: InputMode,
     notify: boolean,
     foldStop: boolean,
+    delivery?: SendInputOptions,
   ): Promise<InitialInputResult> {
     let baseline = ''
     let pasted = false
@@ -790,6 +834,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         (snapshot, phase) => probeCodexInput(snapshot, mode, phase === 'after_paste' ? text : undefined, phase === 'before_paste'),
         (snapshot) => acceptedCodexInput(snapshot, mode, text, baseline),
         text,
+        {
+          beforeSideEffect: (phase) =>
+            assertInputDeliveryActive(delivery, phase === 'paste' ? 'not_delivered' : 'unknown'),
+        },
       )
     } catch (err) {
       if (!(await this.tmux.isAlive(runtime.sessionName))) {
@@ -1103,18 +1151,211 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async fork(_prev: IncarnationRef, _forkInput: string): Promise<IncarnationHandle> {
+  async fork(prev: IncarnationRef, forkInput: string, opts: ForkOptions): Promise<IncarnationHandle> {
     this.assertActive()
-    // codex-docs: codex exec 没有 cc `-p ... --fork-session --output-format text` 那种
-    // "一条命令完成侧问"的等价物——openai/codex#11750、#17568 两个 open feature request
-    // 明确指出 exec CLI 目前不支持 fork,唯一记录在案的变通方案是拉起交互式 TUI 塞进伪终端、
-    // 轮询文件系统等新 rollout 文件出现、杀掉 TUI、再用 `codex exec resume` 接力——这已经不是
-    // "无头一击",是要在这里重新实现一遍 tmux 交互流程,不是本 adapter 想提供的 fork 语义。
-    // capabilities().fork 如实定为 false,这里对应抛出同款语义的能力缺失错误。
-    throw new CapabilityNotSupportedError('codex', 'fork')
+    validateSessionRef(prev.session_ref)
+    if (!this.appServerForkSupported) {
+      throw new ForkEstablishmentError('fork_create', 'Codex app-server fork capability is unavailable', 'not_started')
+    }
+    if (Date.parse(opts.establishment_deadline_at) <= Date.now()) {
+      throw new ForkEstablishmentError('timeout', 'fork establishment deadline already expired', 'not_started')
+    }
+
+    const prevRuntime = await this.ensureRuntime(prev)
+    if (!prevRuntime) {
+      throw new ForkEstablishmentError(
+        'fork_create',
+        `CodexWorkerAdapter.fork: no such incarnation ${prev.worker_id}#${prev.seq}`,
+        'not_started',
+      )
+    }
+    if (!prevRuntime.workspaceRoot || !prevRuntime.codexHome) {
+      throw new ForkEstablishmentError(
+        'fork_create',
+        `CodexWorkerAdapter.fork: cannot rebuild workspace or CODEX_HOME for ${prev.worker_id}#${prev.seq}`,
+        'not_started',
+      )
+    }
+
+    const resolvedBin = await this.resolveBinForCommand()
+    if (!resolvedBin) {
+      throw new ForkEstablishmentError('fork_create', 'CodexWorkerAdapter.fork: no user-level codex installation', 'not_started')
+    }
+
+    const dir = prevRuntime.dir
+    let runtime!: Runtime
+    await this.getMutex(prev.worker_id).run(async () => {
+      const seq = await this.nextSeq(prev.worker_id)
+      runtime = {
+        worker_id: prev.worker_id,
+        seq,
+        dir,
+        workspaceRoot: prevRuntime.workspaceRoot,
+        codexHome: opts.connection_env?.CODEX_HOME ?? prevRuntime.codexHome,
+        sessionName: '',
+        sessionId: '',
+        rolloutPath: undefined,
+        outputLog: new OutputLog(join(dir, `output-${seq}.log`)),
+        eventChannel: new CliEventChannel(join(dir, `fork-events-${seq}.jsonl`)),
+        sessionDiscoveryStatus: 'placeholder',
+        discoveryStartedAt: Date.now(),
+        controlState: { kind: 'running' },
+        stopBaseline: 0,
+        killed: false,
+      }
+      this.runtimes.set(instanceKey(runtime), runtime)
+    })
+
+    let client: CodexAppServerClient
+    try {
+      const env = {
+        ...buildScrubbedChildEnv(),
+        ...(await this.buildEnv({
+          CODEX_HOME: opts.connection_env?.CODEX_HOME ?? prevRuntime.codexHome,
+          ...opts.connection_env,
+        })),
+      }
+      client = new CodexAppServerClient({
+        command: `${resolvedBin.cmd} app-server --stdio`,
+        cwd: prevRuntime.workspaceRoot,
+        env,
+      })
+      runtime.headlessClient = client
+    } catch (error) {
+      this.runtimes.delete(instanceKey(runtime))
+      await fs.rm(join(dir, `meta-${runtime.seq}.json`), { force: true }).catch(() => {})
+      throw new ForkEstablishmentError('fork_create', safeProcessError(error), 'not_started')
+    }
+
+    let forkThreadId: string | undefined
+    let turnId: string | undefined
+    let handle: IncarnationHandle | undefined
+    let established = false
+    let finished = false
+    let processExitBeforeEstablishment: Error | undefined
+    let pendingCompletion: { status: string; error?: unknown } | undefined
+    let outputWrites = Promise.resolve()
+
+    const appendOutput = (text: string) => {
+      if (!text) return
+      outputWrites = outputWrites.then(() => runtime.outputLog.append(text))
+    }
+    const finish = async (reason: IncarnationEndReason, error?: unknown) => {
+      if (finished || !handle) return
+      finished = true
+      if (error !== undefined) appendOutput(`\n[codex query failed: ${safeProcessError(error)}]\n`)
+      await outputWrites.catch((writeError) => {
+        console.error(`[CodexWorkerAdapter] fork output write failed for ${prev.worker_id}#${runtime.seq}:`, writeError)
+      })
+      await this.getMutex(prev.worker_id).run(async () => {
+        if (runtime.controlState.kind !== 'exited') await this.transitionExited(runtime, handle!, reason)
+      })
+      await client.terminate()
+    }
+    const consumeNotification = (notification: AppServerNotification) => {
+      const params = asTable(notification.params)
+      if (notification.method === 'item/agentMessage/delta') {
+        if (typeof params.threadId !== 'string' || params.threadId !== forkThreadId) return
+        if (turnId !== undefined && params.turnId !== turnId) return
+        if (typeof params.delta === 'string') appendOutput(params.delta)
+        return
+      }
+      if (notification.method !== 'turn/completed') return
+      if (typeof params.threadId !== 'string' || params.threadId !== forkThreadId) return
+      const turn = asTable(params.turn)
+      if (typeof turn.id !== 'string' || (turnId !== undefined && turn.id !== turnId)) return
+      const completion = {
+        status: typeof turn.status === 'string' ? turn.status : 'failed',
+        ...('error' in turn ? { error: turn.error } : {}),
+      }
+      if (!established) {
+        pendingCompletion = completion
+        return
+      }
+      void finish(completion.status === 'completed' ? 'completed' : 'failed', completion.error)
+    }
+    client.onNotification(consumeNotification)
+    client.onExit((error) => {
+      if (!established) {
+        processExitBeforeEstablishment = error ?? new Error('codex app-server exited during fork establishment')
+        return
+      }
+      void finish('crashed', error ?? new Error('codex app-server exited before turn/completed'))
+    })
+
+    let stage: 'fork_create' | 'query_submit' = 'fork_create'
+    let turnAccepted = false
+    try {
+      await client.initialize(opts.establishment_deadline_at)
+      const forkResult = asTable(await client.request('thread/fork', {
+        threadId: prev.session_ref,
+        ephemeral: true,
+        excludeTurns: true,
+      }, opts.establishment_deadline_at))
+      const thread = asTable(forkResult.thread)
+      if (typeof thread.id !== 'string') {
+        throw new Error('codex app-server thread/fork returned an incompatible response')
+      }
+      validateSessionRef(thread.id)
+      if (thread.id === prev.session_ref) throw new Error('codex app-server fork reused the parent thread id')
+      forkThreadId = thread.id
+      runtime.sessionId = thread.id
+
+      stage = 'query_submit'
+      const turnResult = asTable(await client.request('turn/start', {
+        threadId: thread.id,
+        input: [{ type: 'text', text: forkInput }],
+      }, opts.establishment_deadline_at))
+      const turn = asTable(turnResult.turn)
+      if (typeof turn.id !== 'string') {
+        throw new Error('codex app-server turn/start returned an incompatible response')
+      }
+      turnId = turn.id
+      turnAccepted = true
+      handle = {
+        worker_id: prev.worker_id,
+        seq: runtime.seq,
+        impl: 'codex',
+        session_ref: thread.id,
+        query_id: opts.query_id,
+      }
+      await writeMetaAtomic(dir, runtime.seq, {
+        seq: runtime.seq,
+        state: 'running',
+        session_id: thread.id,
+        session_discovery: 'placeholder',
+        workspace_root: prevRuntime.workspaceRoot,
+        codex_home: runtime.codexHome,
+      })
+      if (processExitBeforeEstablishment && !pendingCompletion) throw processExitBeforeEstablishment
+      established = true
+      if (pendingCompletion) {
+        void finish(
+          pendingCompletion.status === 'completed' ? 'completed' : 'failed',
+          pendingCompletion.error,
+        )
+      }
+      return handle
+    } catch (error) {
+      const stopped = await client.terminate()
+      this.runtimes.delete(instanceKey(runtime))
+      await fs.rm(join(dir, `meta-${runtime.seq}.json`), { force: true }).catch(() => {})
+      const isTimeout = error instanceof CodexAppServerDeadlineError
+      const rpcRejected = error instanceof CodexAppServerRpcError
+      let certainty: ForkEstablishmentError['certainty']
+      if (isTimeout) certainty = 'unknown'
+      else if (stage === 'fork_create' || rpcRejected) certainty = 'not_started'
+      else if (turnAccepted && stopped) certainty = 'failed'
+      else certainty = 'unknown'
+      throw new ForkEstablishmentError(
+        isTimeout ? 'timeout' : stage,
+        safeProcessError(error),
+        certainty,
+      )
+    }
   }
 
-  async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
+  async sendInput(h: IncarnationHandle, text: string, opts?: SendInputOptions): Promise<void> {
     this.assertActive()
     const runtime = await this.ensureRuntime(h)
     if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
@@ -1124,7 +1365,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return this.getMutex(h.worker_id).run(async () => {
       if (runtime.controlState.kind === 'exited') throw new WorkerExitedError(h.worker_id, h.seq, runtime.ended_reason)
 
-      if (opts?.raw) return this.sendRawInput(runtime, h, text)
+      if (opts?.raw) {
+        assertInputDeliveryActive(opts, 'not_delivered')
+        return this.sendRawInput(runtime, h, text)
+      }
 
       if (runtime.controlState.kind === 'waiting_action') {
         const snapshot = await this.capture(runtime)
@@ -1132,7 +1376,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         throw new CliInputStallError('not_pasted', 'waiting_action', report)
       }
       const mode: InputMode = runtime.controlState.kind === 'running' ? 'steering' : 'primary'
-      const result = await this.commitGuardedInput(runtime, h, text, mode, false, false)
+      const result = await this.commitGuardedInput(runtime, h, text, mode, false, false, opts)
       if (result.disposition !== 'accepted') throw new CliInputStallError(result.disposition, result.control_state, result.report)
       if (!runtime.sessionId) {
         const discoveredHandle = await this.discoverSpawnedSession(runtime, h)
@@ -1203,6 +1447,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
     const runtime = await this.ensureRuntime(h)
     if (!runtime) return 'exited'
+    if (runtime.headlessClient) return contractState(runtime.controlState)
     return (await this.syncState(runtime, h)).state
   }
 
@@ -1260,7 +1505,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.controlState.kind === 'exited') return // 幂等:不覆盖原 ended_reason
       runtime.killed = true
-      await this.tmux.killSession(runtime.sessionName)
+      if (runtime.headlessClient) await runtime.headlessClient.terminate()
+      else await this.tmux.killSession(runtime.sessionName)
       await this.transitionExited(runtime, h, 'killed')
     })
   }
@@ -1275,7 +1521,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   capabilities(): AdapterCapabilities {
-    return { fork: false, revive: true, goalMode: false, subagent: false, structuredTrace: true }
+    return { fork: this.appServerForkSupported, revive: true, goalMode: false, subagent: false, structuredTrace: true }
   }
 
   // --- Internal ---
@@ -1417,9 +1663,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   /**
-   * worker_id 对应下一个可用的化身序号:该 worker 现存所有化身里最大 seq + 1。resume() 在
-   * mutex.run 内调用,保证不与并发的另一次 resume 撞号。与 cc adapter 的同名方法同一思路
-   * (codex 的 fork() 不支持,不参与这个分配)。
+   * worker_id 对应下一个可用的化身序号:该 worker 现存所有化身里最大 seq + 1。resume() 和
+   * fork() 都在 mutex.run 内分配,保证并发操作不会撞号。与 cc adapter 的同名方法同一思路。
    *
    * 五轮 review 修复:磁盘感知,理由与 cc adapter 的同名方法一致——重启后新 adapter 实例
    * 的 runtimes 只含 ensureRuntime 按需重建过的那几条,只扫内存会把磁盘上未被重建的旧化身

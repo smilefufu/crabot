@@ -28,7 +28,7 @@ import { promises as fs } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
-import { execFile } from 'child_process'
+import { execFile, spawn, type ChildProcess } from 'child_process'
 import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
@@ -41,8 +41,9 @@ import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.j
 import { buildChildEnv } from '../../core/runtime-env.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
-import { WorkerExitedError, CliInputStallError, WorkerImplUnavailableError } from '../errors.js'
+import { WorkerExitedError, CliInputStallError, WorkerImplUnavailableError, ForkEstablishmentError } from '../errors.js'
 import { probeClaudeInput, acceptedClaudeInput, hasClaudeInteraction } from './input-surface.js'
+import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
@@ -54,9 +55,11 @@ import type {
   StateChangeReport,
   IncarnationHandle,
   IncarnationRef,
+  ForkOptions,
   NormalizedTraceEvent,
   OutputCursor,
   SpawnSpec,
+  SendInputOptions,
   TraceCursor,
   WorkerAdapter,
   WorkerContractState,
@@ -68,6 +71,49 @@ const execFileAsync = promisify(execFile)
 /** POSIX shell 单引号转义,与 tmux/driver.ts 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+function safeProcessError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim().slice(0, 1000)
+}
+
+function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): boolean {
+  if (child.pid === undefined) return false
+  try {
+    process.kill(-child.pid, signal)
+    return true
+  } catch {
+    try {
+      return child.kill(signal)
+    } catch {
+      return false
+    }
+  }
+}
+
+async function waitForProcessExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true
+  return new Promise((resolve) => {
+    const finish = (exited: boolean) => {
+      clearTimeout(timer)
+      child.off('exit', onExit)
+      child.off('error', onExit)
+      resolve(exited)
+    }
+    const onExit = () => finish(true)
+    const timer = setTimeout(() => finish(false), timeoutMs)
+    timer.unref?.()
+    child.once('exit', onExit)
+    child.once('error', onExit)
+  })
+}
+
+async function terminateProcessTree(child: ChildProcess): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true
+  killProcessTree(child, 'SIGTERM')
+  if (await waitForProcessExit(child, 1000)) return true
+  killProcessTree(child, 'SIGKILL')
+  return waitForProcessExit(child, 1000)
 }
 
 /**
@@ -144,7 +190,7 @@ interface Runtime {
   readonly workspaceRoot: string
   /** tmux 会话名;fork 化身不进 tmux,恒为空串。 */
   readonly sessionName: string
-  readonly sessionId: string
+  sessionId: string
   readonly outputLog: OutputLog
   readonly eventChannel: CliEventChannel
   controlState: CliControlState
@@ -164,6 +210,8 @@ interface Runtime {
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin 同款语义(P2 review #2)。fork 不受此限制。 */
   resumed?: boolean
+  /** Present only for a headless query fork; mainline incarnations are owned by tmux. */
+  headlessChild?: ChildProcess
 }
 
 function instanceKey(h: { worker_id: string; seq: number }): string {
@@ -519,6 +567,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     mode: InputMode,
     notify: boolean,
     foldStop: boolean,
+    delivery?: SendInputOptions,
   ): Promise<InitialInputResult> {
     let baseline = ''
     let pasted = false
@@ -537,6 +586,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         (snapshot, phase) => probeClaudeInput(snapshot, mode, phase === 'after_paste' ? text : undefined, phase === 'before_paste'),
         (snapshot) => acceptedClaudeInput(snapshot, mode, text),
         text,
+        {
+          beforeSideEffect: (phase) =>
+            assertInputDeliveryActive(delivery, phase === 'paste' ? 'not_delivered' : 'unknown'),
+        },
       )
     } catch (err) {
       if (!(await this.tmux.isAlive(runtime.sessionName))) {
@@ -772,46 +825,36 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async fork(prev: IncarnationRef, forkInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
+  async fork(prev: IncarnationRef, forkInput: string, opts: ForkOptions): Promise<IncarnationHandle> {
     this.assertActive()
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
-
-    // fork 不检查 prevRuntime 是否存活(cc 的 --fork-session 无头一击直接靠 --resume 打给
-    // cc 自己的会话文件,不依赖任何 tmux pane 还在跑)——ensureRuntime 因此对 fork 同样适用:
-    // 只要 meta 还在,不管 tmux 会话死活都能重建出这里需要的 dir/workspaceRoot。
+    const remainingMs = Date.parse(opts.establishment_deadline_at) - Date.now()
+    if (remainingMs <= 0) {
+      throw new ForkEstablishmentError('timeout', 'fork establishment deadline already expired', 'not_started')
+    }
     const prevRuntime = await this.ensureRuntime(prev)
     if (!prevRuntime) {
-      throw new Error(`ClaudeCodeAdapter.fork: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
+      throw new ForkEstablishmentError(
+        'fork_create',
+        `ClaudeCodeAdapter.fork: no such incarnation ${prev.worker_id}#${prev.seq}`,
+        'not_started',
+      )
     }
     if (!prevRuntime.workspaceRoot) {
-      // 重建自缺 workspace_root 的老 meta(已知限制,见 ensureRuntime 注释)——fork 的子进程
-      // cwd 依赖它,不能悄悄传空串。
-      throw new Error(
+      throw new ForkEstablishmentError(
+        'fork_create',
         `ClaudeCodeAdapter.fork: cannot rebuild workspace for ${prev.worker_id}#${prev.seq} ` +
           `(meta.json predates workspace_root persistence; this incarnation cannot be forked after an adapter restart)`,
+        'not_started',
       )
     }
 
     const dir = prevRuntime.dir
-    // cc 的 --fork-session 在其内部生成一个新会话 id,--output-format text 的 stdout 不
-    // 携带它,拿不到就拿不到:这里落一个本地占位 uuid,不对应真实 cc 会话文件(已知限制)。
-    const sessionId = randomUUID()
-
-    // seq 分配(nextSeq(),该 worker 现存所有化身 max seq + 1)+ 提交一段 meta(running)+
-    // 注册 runtime 整体在 per-worker 互斥锁内完成——不能再用 prev.seq+1 这种固定公式:fork
-    // 化身常驻 runtimes 不删,对同一个 prev 连续 fork 两次,prev.seq+1 算出来的号位第二次会
-    // 撞上第一次已经占用的那个,而不是真正分配到空位(见文件头注释、P2 review #1)。nextSeq()
-    // 与锁内的注册在同一次 mutex.run 内完成,保证分配即生效,不会被并发的另一次
-    // fork/resume 抢到同一个号位。
-    let handle!: IncarnationHandle
     let runtime!: Runtime
-    // 侧问收尾的 stop 事件必须落到 fork 化身自己的事件文件,不能进 workspace 共享的那份
-    // (见下方 execFileAsync 的 env 注释)。
     let forkEventsFile!: string
     await this.getMutex(prev.worker_id).run(async () => {
       const seq = await this.nextSeq(prev.worker_id)
-      handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: sessionId }
       const outputFile = join(dir, `output-${seq}.log`)
       forkEventsFile = join(dir, `fork-events-${seq}.jsonl`)
       runtime = {
@@ -820,71 +863,171 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
         sessionName: '',
-        sessionId,
+        sessionId: '',
         outputLog: new OutputLog(outputFile),
         eventChannel: new CliEventChannel(forkEventsFile),
         controlState: { kind: 'running' },
         stopBaseline: 0,
         killed: false,
       }
-      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: prevRuntime.workspaceRoot })
-      this.runtimes.set(instanceKey(handle), runtime)
+      this.runtimes.set(instanceKey(runtime), runtime)
     })
 
-    // 无头一击,不进 tmux:子进程在锁外跑(可能耗时较长),不阻塞同 worker_id 上其它操作
-    // (主线不受影响)。claudeBin 与 spawn/resume 同款语义——一段 shell 命令片段,经 sh -c
-    // 跑;forkInput 与其它参数逐个 shQuote 转义,防止内容里的 shell 元字符注入。
-    const args = [
-      '-p', forkInput,
-      '--resume', prev.session_ref,
-      '--fork-session',
-      '--output-format', 'text',
-      '--mcp-config', MCP_CONFIG_FILE,
-      '--strict-mcp-config',
-    ]
-    // P6-B：fork 与 spawn/resume 同一 binary 解析纪律（managed 优先）——否则 managed install
-    // 且宿主无 system claude 时主线正常、侧问 command not found（R8）。
-    const forkBin = await this.resolveBinForCommand()
-    if (!forkBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.fork: no user-level claude installation`)
-    const shellCommand = `${forkBin} ${args.map(shQuote).join(' ')}`
-
-    // 事件文件重定向:cc 的 hooks 在 print 模式同样执行,而 Stop hook 配在 **workspace 级**
-    // 的 .claude/settings.json 里、写的是 **workspace 级**共享的 events-cli.jsonl——不重定向
-    // 的话,侧问收尾会往主线正在用的那份事件文件追加一条 stop,污染主线的 stop 计数:主线
-    // 跑到一半被 watcher 判成 idle 推一条假唤醒,而它真正跑完这一轮时因为"状态没变"不再
-    // 产生迁移,真正的轮次边界唤醒被整条吞掉。侧问按设计就是在主线还在跑的时候发起的
-    // (queryWorker 把 fork 放在锁外、不阻塞主线),这不是罕见时序。
-    // 这里给子进程 env 塞一个 fork 化身私有的事件文件路径,cc 拉起 hook 子进程时原样继承
-    // 下去,hook 写私有文件(见 CliEventChannel.EVENTS_FILE_ENV)。交互态(tmux pane)不设
-    // 这个变量,照旧写共享文件,行为不变。
-    // P6-B：fork 与 tmux pane/verify/installer 同源——从 allowlist 重建（buildScrubbedChildEnv
-    // 打底），不是继承整个 process.env；否则宿主 export 的 ANTHROPIC_API_KEY 会随请求发往
-    // 第三方镜像（admin_provider 形态下尤其不能容忍）。连接注入叠在其上。
-    const inheritedConnectionEnv = opts?.connection_env ?? prevRuntime.connectionEnv ?? {}
-    const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...buildScrubbedChildEnv(), [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv } }
-
-    let stdout = ''
-    let endedReason: IncarnationEndReason
+    let child: ChildProcess
     try {
-      const result = await execFileAsync('/bin/sh', ['-c', shellCommand], execOpts)
-      stdout = result.stdout
-      endedReason = 'completed'
-    } catch (err) {
-      stdout = (err as { stdout?: string }).stdout ?? ''
-      endedReason = 'crashed'
+      const args = [
+        '-p', forkInput,
+        '--resume', prev.session_ref,
+        '--fork-session',
+        '--output-format', 'stream-json',
+        '--verbose',
+        '--include-partial-messages',
+        '--mcp-config', MCP_CONFIG_FILE,
+        '--strict-mcp-config',
+      ]
+      const forkBin = await this.resolveBinForCommand()
+      if (!forkBin) {
+        throw new ForkEstablishmentError(
+          'fork_create',
+          'ClaudeCodeAdapter.fork: no user-level claude installation',
+          'not_started',
+        )
+      }
+      const shellCommand = `${forkBin} ${args.map(shQuote).join(' ')}`
+      const inheritedConnectionEnv = opts.connection_env ?? prevRuntime.connectionEnv ?? {}
+      const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...buildScrubbedChildEnv(), [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv } }
+
+      child = spawn('/bin/sh', ['-c', shellCommand], {
+        ...execOpts,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      runtime.headlessChild = child
+    } catch (error) {
+      this.runtimes.delete(instanceKey(runtime))
+      if (error instanceof ForkEstablishmentError) throw error
+      throw new ForkEstablishmentError('fork_create', safeProcessError(error), 'not_started')
     }
-
-    if (stdout) await runtime.outputLog.append(stdout)
-
-    await this.getMutex(prev.worker_id).run(async () => {
-      if (runtime.controlState.kind === 'exited') return // 幂等兜底
-      await this.transitionExited(runtime, handle, endedReason)
+    let handle: IncarnationHandle | undefined
+    let established = false
+    let establishing: Promise<void> | undefined
+    let stdoutBuffer = ''
+    let stderr = ''
+    let outputWrites = Promise.resolve()
+    let sawTextDelta = false
+    let finished = false
+    let resolveEstablished!: (value: IncarnationHandle) => void
+    let rejectEstablished!: (reason: unknown) => void
+    const establishedPromise = new Promise<IncarnationHandle>((resolve, reject) => {
+      resolveEstablished = resolve
+      rejectEstablished = reject
     })
 
-    return handle
+    const appendOutput = (text: string) => {
+      if (!text) return
+      outputWrites = outputWrites.then(() => runtime.outputLog.append(text))
+    }
+    const establish = (sessionId: string): Promise<void> => {
+      if (establishing) return establishing
+      establishing = (async () => {
+        validateSessionRef(sessionId)
+        if (sessionId === prev.session_ref) {
+          throw new Error('Claude Code fork reused the parent session id')
+        }
+        runtime.sessionId = sessionId
+        handle = {
+          worker_id: prev.worker_id,
+          seq: runtime.seq,
+          impl: 'claude-code',
+          session_ref: sessionId,
+          query_id: opts.query_id,
+        }
+        await writeMetaAtomic(dir, runtime.seq, {
+          seq: runtime.seq,
+          state: 'running',
+          session_id: sessionId,
+          workspace_root: prevRuntime.workspaceRoot,
+        })
+        established = true
+        resolveEstablished(handle)
+      })().catch((error) => {
+        void terminateProcessTree(child)
+        rejectEstablished(new ForkEstablishmentError('fork_create', safeProcessError(error), 'unknown'))
+      })
+      return establishing
+    }
+    const consumeEvent = (line: string) => {
+      if (!line.trim()) return
+      let event: Record<string, unknown>
+      try {
+        event = JSON.parse(line) as Record<string, unknown>
+      } catch {
+        return
+      }
+      if (event.type === 'system' && event.subtype === 'init' && typeof event.session_id === 'string') {
+        void establish(event.session_id)
+        return
+      }
+      if (event.type === 'stream_event') {
+        const streamEvent = event.event as { type?: string; delta?: { type?: string; text?: string } } | undefined
+        if (streamEvent?.type === 'content_block_delta' && streamEvent.delta?.type === 'text_delta') {
+          sawTextDelta = true
+          appendOutput(streamEvent.delta.text ?? '')
+        }
+        return
+      }
+      if (!sawTextDelta && event.type === 'result' && typeof event.result === 'string') appendOutput(event.result)
+    }
+    child.stdout!.on('data', (chunk: Buffer) => {
+      stdoutBuffer += chunk.toString('utf-8')
+      const lines = stdoutBuffer.split('\n')
+      stdoutBuffer = lines.pop() ?? ''
+      for (const line of lines) consumeEvent(line)
+    })
+    child.stderr!.on('data', (chunk: Buffer) => {
+      stderr = `${stderr}${chunk.toString('utf-8')}`.slice(-4000)
+    })
+
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      if (established) return
+      timedOut = true
+      void terminateProcessTree(child)
+    }, Math.max(1, remainingMs))
+    timeout.unref?.()
+
+    const finish = async (code: number | null, error?: Error) => {
+      if (finished) return
+      finished = true
+      clearTimeout(timeout)
+      if (stdoutBuffer) consumeEvent(stdoutBuffer)
+      if (establishing) await establishing.catch(() => undefined)
+      await outputWrites.catch((writeError) => {
+        console.error(`[ClaudeCodeAdapter] fork output write failed for ${prev.worker_id}#${runtime.seq}:`, writeError)
+      })
+      if (!established || !handle) {
+        this.runtimes.delete(instanceKey(runtime))
+        rejectEstablished(new ForkEstablishmentError(
+          timedOut ? 'timeout' : 'fork_create',
+          timedOut
+            ? 'Claude Code fork establishment timed out'
+            : safeProcessError(error ?? new Error(stderr || `Claude Code fork exited before initialization (code=${code})`)),
+          timedOut || error === undefined ? 'unknown' : 'not_started',
+        ))
+        return
+      }
+      await this.getMutex(prev.worker_id).run(async () => {
+        if (runtime.controlState.kind === 'exited') return
+        await this.transitionExited(runtime, handle!, code === 0 ? 'completed' : 'crashed')
+      })
+    }
+    child.once('error', (error) => { void finish(null, error) })
+    child.once('exit', (code) => { void finish(code) })
+
+    return establishedPromise
   }
 
-  async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
+  async sendInput(h: IncarnationHandle, text: string, opts?: SendInputOptions): Promise<void> {
     this.assertActive()
     const runtime = await this.ensureRuntime(h)
     if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
@@ -895,7 +1038,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return this.getMutex(h.worker_id).run(async () => {
       if (runtime.controlState.kind === 'exited') throw new WorkerExitedError(h.worker_id, h.seq, runtime.ended_reason)
 
-      if (opts?.raw) return this.sendRawInput(runtime, h, text)
+      if (opts?.raw) {
+        assertInputDeliveryActive(opts, 'not_delivered')
+        return this.sendRawInput(runtime, h, text)
+      }
 
       if (runtime.controlState.kind === 'waiting_action') {
         const snapshot = await this.capture(runtime)
@@ -904,7 +1050,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       }
 
       const mode: InputMode = runtime.controlState.kind === 'running' ? 'steering' : 'primary'
-      const result = await this.commitGuardedInput(runtime, h, text, mode, false, false)
+      const result = await this.commitGuardedInput(runtime, h, text, mode, false, false, opts)
       if (result.disposition !== 'accepted') {
         throw new CliInputStallError(result.disposition, result.control_state, result.report)
       }
@@ -961,6 +1107,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
     const runtime = await this.ensureRuntime(h)
     if (!runtime) return 'exited'
+    if (runtime.headlessChild) return contractState(runtime.controlState)
     return (await this.syncState(runtime, h)).state
   }
 
@@ -1026,7 +1173,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.controlState.kind === 'exited') return // 幂等:不覆盖原 ended_reason
       runtime.killed = true
-      await this.tmux.killSession(runtime.sessionName)
+      if (runtime.headlessChild) {
+        if (!await terminateProcessTree(runtime.headlessChild)) {
+          throw new Error(`ClaudeCodeAdapter.kill: fork process did not exit for ${h.worker_id}#${h.seq}`)
+        }
+      } else {
+        await this.tmux.killSession(runtime.sessionName)
+      }
       await this.transitionExited(runtime, h, 'killed')
     })
   }

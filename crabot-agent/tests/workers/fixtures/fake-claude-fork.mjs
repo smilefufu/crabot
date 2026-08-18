@@ -14,12 +14,18 @@
 import { appendFileSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 
 const argv = process.argv.slice(2)
 const argvFile = process.env.FAKE_ARGV_FILE
 if (argvFile) appendFileSync(argvFile, JSON.stringify(argv) + '\n')
 
 if (argv.includes('-p')) {
+  const terminationFile = process.env.FAKE_FORK_TERMINATION_FILE
+  process.on('SIGTERM', () => {
+    if (terminationFile) appendFileSync(terminationFile, `${process.pid}:SIGTERM\n`)
+    process.exit(0)
+  })
   if (process.env.FAKE_FORK_RUN_STOP_HOOK === '1') {
     try {
       const settings = JSON.parse(readFileSync(join(process.cwd(), '.claude', 'settings.json'), 'utf-8'))
@@ -30,12 +36,39 @@ if (argv.includes('-p')) {
     }
   }
   const stdout = process.env.FAKE_FORK_STDOUT ?? ''
-  if (stdout) process.stdout.write(stdout)
-  process.exit(Number(process.env.FAKE_FORK_EXIT_CODE ?? '0'))
+  if (argv.includes('stream-json')) {
+    const sessionId = process.env.FAKE_FORK_SESSION_ID ?? randomUUID()
+    if (process.env.FAKE_FORK_SKIP_INIT === '1') {
+      process.stdout.write(JSON.stringify({ type: 'result', result: stdout }) + '\n')
+      process.exit(Number(process.env.FAKE_FORK_EXIT_CODE ?? '0'))
+    }
+    const emitInit = () => {
+      process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId }) + '\n')
+      setTimeout(() => {
+        if (stdout) {
+          process.stdout.write(JSON.stringify({
+            type: 'stream_event',
+            event: { type: 'content_block_delta', delta: { type: 'text_delta', text: stdout } },
+          }) + '\n')
+        }
+        process.stdout.write(JSON.stringify({
+          type: 'result',
+          result: process.env.FAKE_FORK_RESULT ?? stdout,
+        }) + '\n')
+        process.exit(Number(process.env.FAKE_FORK_EXIT_CODE ?? '0'))
+      }, Number(process.env.FAKE_FORK_DELAY_AFTER_INIT_MS ?? '0'))
+    }
+    setTimeout(emitInit, Number(process.env.FAKE_FORK_INIT_DELAY_MS ?? '0'))
+  } else if (stdout) {
+    process.stdout.write(stdout)
+    process.exit(Number(process.env.FAKE_FORK_EXIT_CODE ?? '0'))
+  }
 }
 
-// 交互态:先请求 bracketed paste(真实 cc/codex TUI 启动时都会发这个 DECSET 2004 序列),
-// 再空转等测试结束后由 kill/进程回收清理。adapter 的启动期就绪握手等的正是这个信号——
-// 不发的话每次 spawn 都要白等一次握手超时(见 src/workers/tmux/paste-ready.ts)。
-process.stdout.write('\x1b[?2004h')
-setInterval(() => {}, 1_000_000)
+if (!argv.includes('-p')) {
+  // 交互态:先请求 bracketed paste(真实 cc/codex TUI 启动时都会发这个 DECSET 2004 序列),
+  // 再空转等测试结束后由 kill/进程回收清理。adapter 的启动期就绪握手等的正是这个信号——
+  // 不发的话每次 spawn 都要白等一次握手超时(见 src/workers/tmux/paste-ready.ts)。
+  process.stdout.write('\x1b[?2004h')
+  setInterval(() => {}, 1_000_000)
+}

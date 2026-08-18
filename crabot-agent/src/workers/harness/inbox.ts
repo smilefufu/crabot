@@ -24,14 +24,32 @@ import type { LegacyContinuationAuth } from './legacy-continuation-auth.js'
 
 export type InboxSettlement = 'delivered' | 'dead_letter'
 
+export interface InboxSettlementDetail {
+  readonly seq?: number
+  readonly reason?: string
+  readonly certainty?: 'not_delivered' | 'unknown'
+}
+
+export interface InboxSettledResult {
+  readonly action: 'settled'
+  readonly settlement: InboxSettlement
+  readonly detail?: InboxSettlementDetail
+}
+
 export interface InboxItem {
   readonly text: string
   readonly raw: boolean
   readonly enqueued_at: string
+  /** Stable identity for Manager-originated input. */
+  readonly delivery_id?: string
   /** False for untrusted wakeups that must never revive a terminal task. */
   readonly allow_terminal_continuation?: boolean
   /** Process-local receipt; durable truth remains with the producer. */
-  readonly onSettled?: (settlement: InboxSettlement) => void | Promise<void>
+  readonly onSettled?: (settlement: InboxSettlement, detail?: InboxSettlementDetail) => void | Promise<void>
+  /** Pending is diagnostic only and never settles the producer receipt. */
+  readonly onPending?: (reason: InboxDeliveryResult['reason']) => void | Promise<void>
+  /** Recheck durable receipt state immediately before any adapter side effect. */
+  readonly shouldDeliver?: () => boolean | Promise<boolean>
   /** Prevent a producer retry from enqueueing the same durable item twice in one process. */
   readonly dedupe_key?: string
   /** Opaque, in-process-only authorization for one legacy continuation. */
@@ -58,7 +76,10 @@ export class WorkerInbox {
   private inFlight: InboxItem | null = null
   /** Items pasted into a CLI composer: UI owns the text, but durable receipts still need settlement. */
   private consumedPending: InboxItem[] = []
+  /** Serializes queue state transitions shared by flush and cancellation. */
   private readonly mutex = new AsyncMutex()
+  /** Prevents two flush drivers from delivering concurrently without holding the state mutex across adapter IO. */
+  private readonly flushMutex = new AsyncMutex()
 
   constructor(private readonly workerId: string) {}
 
@@ -111,10 +132,26 @@ export class WorkerInbox {
   }
 
   /** Settle durable receipts whose text was pasted and later submitted/abandoned via raw input. */
-  async settleConsumed(settlement: InboxSettlement): Promise<number> {
+  async settleConsumed(settlement: InboxSettlement, detail?: InboxSettlementDetail): Promise<number> {
     const items = this.consumedPending.splice(0)
-    for (const item of items) await this.settle(item, settlement)
+    for (const item of items) await this.settle(item, settlement, detail)
     return items.length
+  }
+
+  /** Remove a delivery that has not entered the adapter. In-flight/composer-owned input is unsafe. */
+  async cancelDelivery(deliveryId: string): Promise<'cancelled' | 'unsafe' | 'not_found'> {
+    return this.mutex.run(async () => {
+      if (
+        this.inFlight?.delivery_id === deliveryId ||
+        this.consumedPending.some((item) => item.delivery_id === deliveryId)
+      ) {
+        return 'unsafe'
+      }
+      const index = this.queue.findIndex((item) => item.delivery_id === deliveryId)
+      if (index < 0) return 'not_found'
+      this.queue.splice(index, 1)
+      return 'cancelled'
+    })
   }
 
   /** A pane incarnation ended; replay consumed durable items in the next incarnation. */
@@ -139,20 +176,38 @@ export class WorkerInbox {
    * 取出(shift),所以 pending 不计入 in-flight 条目。
    */
   async flush(
-    deliver: (item: InboxItem) => Promise<InboxSettlement | InboxDeliveryResult | void>,
+    deliver: (item: InboxItem) => Promise<InboxSettlement | InboxDeliveryResult | InboxSettledResult | void>,
   ): Promise<number> {
-    return this.mutex.run(async () => {
+    return this.flushMutex.run(async () => {
       let delivered = 0
-      while (this.queue.length > 0) {
-        if (this.held && !this.rawBypassOnly) break
-        const index = this.held ? this.queue.findIndex((candidate) => candidate.raw) : 0
-        if (index < 0) break
-        const [item] = this.queue.splice(index, 1)
-        this.inFlight = item
+      while (true) {
+        const item = await this.mutex.run(async () => {
+          if (this.queue.length === 0 || (this.held && !this.rawBypassOnly)) return undefined
+          const index = this.held ? this.queue.findIndex((candidate) => candidate.raw) : 0
+          if (index < 0) return undefined
+          const [next] = this.queue.splice(index, 1)
+          this.inFlight = next
+          return next
+        })
+        if (!item) break
         try {
+          if (item.shouldDeliver && !await item.shouldDeliver()) {
+            await this.mutex.run(async () => { this.inFlight = null })
+            continue
+          }
           const result = await deliver(item)
-          this.inFlight = null
-          if (typeof result === 'object') {
+          const keepFlushing = await this.mutex.run(async () => {
+            this.inFlight = null
+            if (typeof result !== 'object') {
+              delivered++
+              await this.settle(item, typeof result === 'string' ? result : 'delivered')
+              return true
+            }
+            if (result.action === 'settled') {
+              delivered++
+              await this.settle(item, result.settlement, result.detail)
+              return true
+            }
             const retainedItem = result.replacement
               ? { ...item, text: result.replacement.text, raw: result.replacement.raw }
               : item
@@ -163,7 +218,7 @@ export class WorkerInbox {
               } else {
                 this.queue.unshift(retainedItem)
               }
-              continue
+              return true
             }
             this.hold(result.reason)
             if (result.action === 'hold_requeue') {
@@ -175,13 +230,18 @@ export class WorkerInbox {
               if (retainedItem.onSettled) this.consumedPending.push(retainedItem)
               delivered++
             }
-            break
-          }
-          delivered++
-          await this.settle(item, typeof result === 'string' ? result : 'delivered')
+            await this.markPending(item, result.reason)
+            return false
+          })
+          if (!keepFlushing) break
         } catch (err) {
-          this.inFlight = null
-          if (this.drainedInFlight === item) {
+          const dropAfterDrain = await this.mutex.run(async () => {
+            this.inFlight = null
+            if (this.drainedInFlight !== item) {
+              // post-drain enqueue 的条目或其他情况:走正常语义(放回、抛出)
+              this.queue.unshift(item)
+              return false
+            }
             // 该条正好是 drain 当刻的 in-flight:化身已终结,drain 早已把 queue 清空并
             // 作为 dead-letter 交给调用方。这条已经没有队列可放回、也没有人再等这次
             // flush 的结果——放回会造成"凭空复活"的幽灵条目,原样向上抛则可能砸向已不再
@@ -192,10 +252,9 @@ export class WorkerInbox {
               }`
             )
             await this.settle(item, 'dead_letter')
-            return delivered
-          }
-          // post-drain enqueue 的条目或其他情况:走正常语义(放回、抛出)
-          this.queue.unshift(item)
+            return true
+          })
+          if (dropAfterDrain) return delivered
           throw err
         }
       }
@@ -203,15 +262,25 @@ export class WorkerInbox {
     })
   }
 
-  private async settle(item: InboxItem, settlement: InboxSettlement): Promise<void> {
+  private async settle(item: InboxItem, settlement: InboxSettlement, detail?: InboxSettlementDetail): Promise<void> {
     if (!item.onSettled) return
     try {
-      await item.onSettled(settlement)
+      if (detail) await item.onSettled(settlement, detail)
+      else await item.onSettled(settlement)
     } catch (error) {
       // Delivery already happened (or was durably dead-lettered). Requeueing here
       // would duplicate input; the producer keeps its durable pending receipt and
-      // may replay after restart.
+      // reconciles it without automatically replaying the input.
       console.warn(`[WorkerInbox:${this.workerId}] settlement callback failed:`, error)
+    }
+  }
+
+  private async markPending(item: InboxItem, reason: InboxDeliveryResult['reason']): Promise<void> {
+    if (!item.onPending) return
+    try {
+      await item.onPending(reason)
+    } catch (error) {
+      console.warn(`[WorkerInbox:${this.workerId}] pending callback failed:`, error)
     }
   }
 

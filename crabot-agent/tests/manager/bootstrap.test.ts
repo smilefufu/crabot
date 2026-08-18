@@ -6,7 +6,7 @@
  *    见该用例内的注释;
  * ② harness.ts 文件头的四步接线契约成立(空 Map → harness → adapter 拿 handleStateChange →
  *    set 回同一 Map),且 adapter 的状态回调真的能被 harness 收到并落账;
- * ③ `onAsyncError` 经 registry 的 toolFace 工厂端到端接到 worker-tools 的 `query_worker`;
+ * ③ `query_worker` 在同一次工具调用返回建立错误，不注入额外异步 wake;
  * ④ `reconcileManagerStack` 对空台账快速返回空三桶。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -20,7 +20,7 @@ import { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
 import { ClaudeCodeAdapter } from '../../src/workers/claude-code/adapter.js'
 import { CodexWorkerAdapter } from '../../src/workers/codex/adapter.js'
-import { CapabilityNotSupportedError } from '../../src/workers/errors.js'
+import { QueryEstablishmentError } from '../../src/workers/errors.js'
 import { type ManagerKey, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerAdapter, WorkerImplId, IncarnationHandle, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
@@ -291,16 +291,21 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(after?.worker.incarnations[0].state).toBe('exited')
 
     // step 4 的另一面：harness 按需从同一个底层 Map 取 adapter——codex 是构造 harness 之后才
-    // set 进去的，能命中它自己的 capabilities().fork===false 分支，就证明 Map 引用是共享的
-    // （若没共享，抛的会是 "no adapter registered for impl 'codex'"）。
+    // set 进去的，能命中它自己的 capabilities().fork===false 分支并包装成同步建立错误，
+    // 就证明 Map 引用是共享的（若没共享，错误原因会是 no adapter registered）。
     await stack.ledger.upsertWorker(managerKey, 'w-codex-1', () =>
       makeLedgerWorker({ workerId: 'w-codex-1', impl: 'codex', spawnedBySession: 'wechat::sess-boot' as ManagerKey }),
     )
-    await expect(stack.harness.queryWorker('w-codex-1', '进展如何？')).rejects.toBeInstanceOf(CapabilityNotSupportedError)
+    await expect(stack.harness.queryWorker('w-codex-1', '进展如何？')).rejects.toMatchObject({
+      name: 'QueryEstablishmentError',
+      reason_code: 'fork_capability_unavailable',
+      certainty: 'not_started',
+    } satisfies Partial<QueryEstablishmentError>)
 
-    // onEvent → registry.routeWorkerEvent 确实接上了（state_changed 与 query_failed 各一条）
-    await waitUntil(() => routeSpy.mock.calls.length >= 2)
-    expect(routeSpy.mock.calls.map(([e]) => e.kind)).toEqual(['state_changed', 'query_failed'])
+    // 普通 onEvent → registry.routeWorkerEvent 确实接上了。query_failed 是 operation audit，
+    // 由 receipt 通知器另路可靠投递，不再走普通 fire-and-forget 事件口。
+    await waitUntil(() => routeSpy.mock.calls.length >= 1)
+    expect(routeSpy.mock.calls.map(([e]) => e.kind)).toEqual(['state_changed'])
     await Promise.allSettled(routeSpy.mock.results.map((r) => r.value as Promise<unknown>))
   })
 
@@ -323,9 +328,9 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(routeSpy).not.toHaveBeenCalled()
   })
 
-  // --- ③ onAsyncError 端到端 ---
+  // --- ③ query_worker 建立错误同步返回 ---
 
-  it('known-ID authorization happens before query_worker fire-and-forget: an unknown worker returns an error and no async wake is injected', async () => {
+  it('known-ID authorization happens before query receipt creation: an unknown worker returns an error and no async wake is injected', async () => {
     let triggered = false
     const managerLLM: LLMAdapter = {
       async *stream(params: LLMStreamParams) {
@@ -335,7 +340,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
           const queryWorkerTool = params.tools.find((t) => t.name === 'query_worker')
           expect(queryWorkerTool).toBeDefined()
           const result = await queryWorkerTool!.call({ worker_id: 'w-not-in-ledger', question: '进展如何？' }, {} as never)
-          // Authorization completes before a fire-and-forget fork can begin.
+          // Authorization completes before a query receipt or fork can begin.
           expect(result.isError).toBe(true)
         }
         yield* chunksFromContent([{ type: 'text', text: '收到' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })

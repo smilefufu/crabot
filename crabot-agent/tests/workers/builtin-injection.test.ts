@@ -43,6 +43,13 @@ import type {
 } from '../../src/workers/types'
 import type { LLMAdapter } from '../../src/engine/llm-adapter-types.js'
 import { defineTool } from '../../src/engine/index.js'
+
+function forkOptions() {
+  return {
+    query_id: randomUUID(),
+    establishment_deadline_at: new Date(Date.now() + 30_000).toISOString(),
+  }
+}
 import type { ToolDefinition } from '../../src/engine/index.js'
 import { createBashTool } from '../../src/engine/tools/bash-tool.js'
 import { createSetCwdTool } from '../../src/engine/tools/set-cwd-tool.js'
@@ -378,7 +385,7 @@ describe('builtin worker 运行配置在起化身时现取', () => {
     await waitState(adapter, h, 'idle')
 
     state.model = 'model-B'
-    const forkHandle = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: h.session_ref }, '侧问一句')
+    const forkHandle = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: h.session_ref }, '侧问一句', forkOptions())
     await waitState(adapter, forkHandle, 'exited')
 
     const models = runEngineSpy.mock.calls.map((c) => c[0].options.model)
@@ -598,7 +605,7 @@ describe('builtin worker 的安全项（hookRegistry / 权限档位）', () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir, resolveRuntime: factory })
     const h = await spawnWith(adapter, factory, { worker_id: workerId, prompt: '干活', workspace: { root: dataDir } })
     await waitState(adapter, h, 'idle')
-    const forkHandle = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: h.session_ref }, '侧问')
+    const forkHandle = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: h.session_ref }, '侧问', forkOptions())
     await waitState(adapter, forkHandle, 'exited')
 
     expect(runEngineSpy.mock.calls).toHaveLength(2)
