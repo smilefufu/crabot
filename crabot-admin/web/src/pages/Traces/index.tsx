@@ -4,10 +4,10 @@
  */
 import React, { useState } from 'react'
 import { MainLayout } from '../../components/Layout/MainLayout'
-import { Button } from '../../components/Common/Button'
 import { ManagersView } from './ManagersView'
 import { WorkersView } from './WorkersView'
 import { ManualCleanupDialog } from './CleanupDialogs'
+import './TraceOverview.css'
 
 type Tab = 'managers' | 'workers'
 
@@ -17,20 +17,23 @@ export const Traces: React.FC = () => {
 
   return (
     <MainLayout>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant={tab === 'managers' ? 'primary' : 'secondary'} onClick={() => setTab('managers')}>
-            Managers
-          </Button>
-          <Button variant={tab === 'workers' ? 'primary' : 'secondary'} onClick={() => setTab('workers')}>
-            Workers
-          </Button>
+      <div className="trace-overview">
+        <header className="trace-overview__heading">
+          <h1>运行记录</h1>
+          <button className="trace-overview__cleanup" type="button" onClick={() => setCleanupOpen(true)}>清理记录</button>
+        </header>
+        <div className="trace-overview__tabs" role="tablist" aria-label="运行记录视图">
+          <button className={tab === 'managers' ? 'is-active' : ''} type="button" role="tab" aria-selected={tab === 'managers'} onClick={() => setTab('managers')}>
+            会话
+          </button>
+          <button className={tab === 'workers' ? 'is-active' : ''} type="button" role="tab" aria-selected={tab === 'workers'} onClick={() => setTab('workers')}>
+            执行器
+          </button>
         </div>
-        <Button variant="secondary" onClick={() => setCleanupOpen(true)}>
-          Trace 清理
-        </Button>
+        <div className="trace-overview__content" role="tabpanel" aria-label={tab === 'managers' ? '会话' : '执行器'}>
+          {tab === 'managers' ? <ManagersView /> : <WorkersView />}
+        </div>
       </div>
-      {tab === 'managers' ? <ManagersView /> : <WorkersView />}
       <ManualCleanupDialog open={cleanupOpen} onClose={() => setCleanupOpen(false)} onDeleted={() => setCleanupOpen(false)} />
     </MainLayout>
   )

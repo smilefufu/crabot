@@ -9,11 +9,11 @@ interface MainLayoutProps {
 
 export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   return (
-    <div style={{ display: 'flex' }}>
+    <div className="app-layout">
       <Sidebar />
-      <div style={{ marginLeft: 'var(--sidebar-width)', width: 'calc(100% - var(--sidebar-width))' }}>
+      <div className="app-layout__content">
         <Header />
-        <main style={{ marginTop: 'var(--header-height)', padding: '2rem' }}>
+        <main className="app-layout__main">
           <ConfigStatusBanner />
           {children}
         </main>

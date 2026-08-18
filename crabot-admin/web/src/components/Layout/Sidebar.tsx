@@ -19,7 +19,7 @@ const navSections: NavSection[] = [
     label: 'AI 助手',
     items: [
       { to: '/chat', label: '聊天', match: '/chat' },
-      { to: '/traces', label: 'Traces', match: '/traces' },
+      { to: '/traces', label: '运行记录', match: '/traces' },
     ],
   },
   {

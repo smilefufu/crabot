@@ -139,6 +139,20 @@ code, pre, .mono {
   padding: 2rem;
 }
 
+.app-layout {
+  display: flex;
+}
+
+.app-layout__content {
+  margin-left: var(--sidebar-width);
+  width: calc(100% - var(--sidebar-width));
+}
+
+.app-layout__main {
+  margin-top: var(--header-height);
+  padding: 2rem;
+}
+
 /* ===================================================
    Sidebar
    =================================================== */
@@ -336,6 +350,30 @@ code, pre, .mono {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-secondary);
+}
+
+@media (max-width: 720px) {
+  .sidebar {
+    display: none;
+  }
+
+  .app-layout__content {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .app-layout__main {
+    padding: 1.25rem;
+  }
+
+  .app-header {
+    left: 0;
+    padding: 0 1.25rem;
+  }
+
+  .app-header-page {
+    font-size: 0.7rem;
+  }
 }
 
 /* ===================================================

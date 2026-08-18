@@ -51,54 +51,55 @@ export const ManagersView: React.FC = () => {
 
   if (loading) return <Loading />
   if (error) {
-    return <div style={{ color: 'var(--text-muted)', padding: 24 }}>Manager 列表暂不可用（unknown）：{error}</div>
+    return <div className="trace-list__empty">会话列表暂不可用（unknown）：{error}</div>
   }
   if (items.length === 0) {
-    return <div style={{ color: 'var(--text-muted)', padding: 24 }}>暂无 Manager（尚无唤醒记录）。</div>
+    return <div className="trace-list__empty">暂无会话记录。</div>
   }
 
   return (
-    <div>
-      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-        <thead>
-          <tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 12 }}>
-            <th style={{ padding: '8px 12px' }}>会话</th>
-            <th style={{ padding: '8px 12px', width: 100 }}>进行中</th>
-            <th style={{ padding: '8px 12px' }}>最近活动</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((item) => (
-            <tr key={item.manager_key} style={{ borderTop: '1px solid var(--border)' }}>
-              <td style={{ padding: '10px 12px' }}>
-                <Link to={`/traces/managers/${encodeURIComponent(item.manager_key)}`} style={{ fontWeight: 600 }}>
-                  {item.display_name || item.manager_key}
-                </Link>
-                <div style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', fontSize: 11, marginTop: 3 }}>
-                  {item.manager_key}
-                </div>
-              </td>
-              <td style={{ padding: '10px 12px' }}>
-                {item.active_worker_count > 0 ? `${item.active_worker_count} 个` : '—'}
-              </td>
-              <td style={{ padding: '10px 12px' }}>
-                <div>{item.recent_activity_summary || '暂无活动摘要'}</div>
-                <div
-                  title={item.last_activity_at ? new Date(item.last_activity_at).toLocaleString() : undefined}
-                  style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3 }}
-                >
-                  {item.last_activity_at ? relativeTime(item.last_activity_at) : '—'}
-                </div>
-              </td>
+    <section className="trace-list" aria-label="会话列表">
+      <div className="trace-list__table-wrap">
+        <table className="trace-table trace-table--managers">
+          <thead>
+            <tr>
+              <th>会话</th>
+              <th>在办</th>
+              <th>最近动态</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <tr key={item.manager_key}>
+                <td>
+                  <Link className="trace-table__primary-link" to={`/traces/managers/${encodeURIComponent(item.manager_key)}`}>
+                    {item.display_name || item.manager_key}
+                  </Link>
+                  <div className="trace-table__identifier" title={item.manager_key}>
+                    {item.manager_key}
+                  </div>
+                </td>
+                <td className="trace-table__count">
+                  <span className={item.active_worker_count > 0 ? 'trace-count is-active' : 'trace-count'}>
+                    {item.active_worker_count > 0 ? `${item.active_worker_count} 个` : '—'}
+                  </span>
+                </td>
+                <td className="trace-table__activity-cell">
+                  <div className={item.recent_activity_summary ? 'trace-table__activity' : 'trace-table__activity is-empty'}>{item.recent_activity_summary || '暂无活动摘要'}</div>
+                  <time title={item.last_activity_at ? new Date(item.last_activity_at).toLocaleString() : undefined} className="trace-table__time">
+                    {item.last_activity_at ? relativeTime(item.last_activity_at) : '—'}
+                  </time>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="trace-pagination" aria-label="会话分页">
         <button disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button>
-        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{page} / {totalPages}</span>
+        <span>第 {page} / {totalPages} 页</span>
         <button disabled={page >= totalPages} onClick={() => setPage(page + 1)}>下一页</button>
       </div>
-    </div>
+    </section>
   )
 }
