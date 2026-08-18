@@ -322,20 +322,6 @@ if ($FromSource) {
 # PATH
 $crabotDir = if ($FromSource) { (Get-Location).Path } else { $InstallDir }
 
-# Windows 不支持 SIGUSR2。若该参数位于 Node.js 入口文件之前，Agent 会在
-# 加载 dist/main.js 前以 ERR_UNKNOWN_SIGNAL 退出。
-$coreModulesPath = Join-Path $crabotDir 'crabot-core\dist\core-modules.js'
-if (Test-Path -LiteralPath $coreModulesPath -PathType Leaf) {
-    $coreModulesContent = [System.IO.File]::ReadAllText($coreModulesPath)
-    $unsupportedNodeArg = ' --heapsnapshot-signal=SIGUSR2'
-    if ($coreModulesContent.Contains($unsupportedNodeArg)) {
-        $patchedCoreModulesContent = $coreModulesContent.Replace($unsupportedNodeArg, '')
-        $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText($coreModulesPath, $patchedCoreModulesContent, $utf8WithoutBom)
-        Write-Info 'Removed unsupported Node.js SIGUSR2 option on Windows'
-    }
-}
-
 $legacyReleasePattern = ('^{0}\\crabot-[^\\]+-windows-x64\\?$' -f [regex]::Escape($crabotDir.TrimEnd('\')))
 function Update-CrabotPath($pathValue) {
     $entries = @($pathValue -split ';' | Where-Object { $_ })
