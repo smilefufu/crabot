@@ -110,6 +110,9 @@ function failureReason(detail: DetailRecord | undefined, fallback: string): stri
 function lifecycleActivity(event: WorkerTraceEvent): ActivityEntry | undefined {
   if (event.source !== 'harness') return undefined
   const detail = asRecord(event.detail)
+  if (event.summary.startsWith('legacy_imported')) {
+    return { event, label: '历史记录', tone: 'status', body: '已导入旧版运行记录' }
+  }
   if (event.summary.startsWith('spawned')) {
     const impl = typeof detail?.impl === 'string' ? IMPL_LABEL[detail.impl as WorkerIncarnation['impl']] ?? detail.impl : undefined
     return { event, label: 'Worker 状态', tone: 'status', body: impl ? `已由 ${impl} 启动` : '已启动' }
@@ -153,6 +156,9 @@ function lifecycleActivity(event: WorkerTraceEvent): ActivityEntry | undefined {
 }
 
 function activityFor(event: WorkerTraceEvent): ActivityEntry | undefined {
+  if (event.source === 'legacy') {
+    return { event, label: '历史记录', tone: 'status', body: event.summary }
+  }
   if (event.source === 'native' && event.kind === 'message' && event.role === 'user') {
     return { event, label: 'Manager 指令', tone: 'manager', body: messageText(event) }
   }

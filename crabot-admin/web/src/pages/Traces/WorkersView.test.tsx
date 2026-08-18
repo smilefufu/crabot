@@ -35,6 +35,17 @@ function workerFixture() {
   }
 }
 
+function legacyWorkerFixture() {
+  const worker = workerFixture()
+  return {
+    ...worker,
+    incarnations: [
+      { seq: 1, impl: 'legacy' as const, state: 'exited', started_at: '2026-08-01T00:00:00.000Z', ended_at: '2026-08-01T00:01:00.000Z', ended_reason: 'pre_migration', session_ref: 'legacy-1' },
+    ],
+    legacy_source: { trace_ids: ['legacy-trace-1'] },
+  }
+}
+
 function listResult() {
   return {
     items: [workerFixture()],
@@ -126,6 +137,20 @@ describe('WorkerDetail', () => {
     renderDetail()
     await waitFor(() => expect(screen.getByText('已启动')).toBeInTheDocument())
     expect(screen.getByText(/native unavailable/)).toBeInTheDocument()
+  })
+
+  it('legacy 化身在默认活动流回退到历史摘要', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: legacyWorkerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({
+      events: [{ ts: '2026-08-01T00:00:01.000Z', kind: 'lifecycle', summary: '旧版任务已完成', source: 'legacy' }],
+      next_cursor: 'tok-1',
+    })
+    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    renderDetail()
+
+    await waitFor(() => expect(screen.getByText('历史记录')).toBeInTheDocument())
+    expect(screen.getByText('旧版任务已完成')).toBeInTheDocument()
+    expect(screen.queryByText('该化身暂无可读活动。')).not.toBeInTheDocument()
   })
 
   it('切换临时侧问后，活动流与终端输出同步切换', async () => {
