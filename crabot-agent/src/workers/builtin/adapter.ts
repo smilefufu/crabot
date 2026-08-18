@@ -84,6 +84,8 @@ import type {
   WorkerContractState,
   Workspace,
 } from '../types.js'
+import { classifySupervisionActivity } from '../types.js'
+import type { SupervisionObservation } from '../types.js'
 
 /** fork 是一次性侧问，maxTurns 取小值，避免侧问跑成一次完整任务。 */
 const FORK_MAX_TURNS = 8
@@ -568,21 +570,29 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
    * cursor.offset 是已消费 span 数。
    */
   async readTrace(h: IncarnationHandle, cursor?: import('../types.js').TraceCursor): Promise<{ events: import('../types.js').NormalizedTraceEvent[]; nextCursor: import('../types.js').TraceCursor }> {
+    const { events, nextCursor } = await this.readTraceWindow(h, cursor)
+    return { events, nextCursor }
+  }
+
+  private async readTraceWindow(
+    h: IncarnationHandle,
+    cursor?: import('../types.js').TraceCursor,
+  ): Promise<{ sourceAvailable: boolean; events: import('../types.js').NormalizedTraceEvent[]; nextCursor: import('../types.js').TraceCursor }> {
     const metaPath = join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)
     let traceId: string | undefined
     try {
       const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as { trace_id?: string }
       traceId = typeof meta.trace_id === 'string' ? meta.trace_id : undefined
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { events: [], nextCursor: cursor ?? { offset: 0 } }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
       throw error
     }
     if (!traceId || !this.deps.traceReader) {
       // 老 meta（升级前写入）没有 trace_id：退化为空、cursor 原样透传（可续读）。
-      return { events: [], nextCursor: cursor ?? { offset: 0 } }
+      return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
     }
     const trace = await this.deps.traceReader.readTrace(traceId)
-    if (!trace) return { events: [], nextCursor: cursor ?? { offset: 0 } }
+    if (!trace) return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
     const start = cursor?.offset ?? 0
     const events: import('../types.js').NormalizedTraceEvent[] = []
     let consumed = start
@@ -591,7 +601,20 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       if (event) events.push({ ...event, source_offset: i })
       consumed = i + 1
     }
-    return { events, nextCursor: { offset: consumed } }
+    return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
+  }
+
+  async inspectSupervisionActivity(
+    h: IncarnationHandle,
+    cursor?: { readonly offset: number },
+  ): Promise<SupervisionObservation> {
+    try {
+      const trace = await this.readTraceWindow(h, cursor)
+      if (!trace.sourceAvailable) return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
+      return classifySupervisionActivity(trace.events, trace.nextCursor)
+    } catch {
+      return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
+    }
   }
 
   async kill(h: IncarnationHandle): Promise<void> {

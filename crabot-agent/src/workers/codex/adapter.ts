@@ -70,6 +70,8 @@ import type {
   WorkerContractState,
   Workspace,
 } from '../types.js'
+import { classifySupervisionActivity } from '../types.js'
+import type { SupervisionObservation } from '../types.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -1454,6 +1456,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
+    const { events, nextCursor } = await this.readTraceWindow(h, cursor)
+    return { events, nextCursor }
+  }
+
+  private async readTraceWindow(
+    h: IncarnationHandle,
+    cursor?: TraceCursor,
+  ): Promise<{ sourceAvailable: boolean; events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
     // 四轮 review 修复:以前只能对本进程内常驻的化身调用(rolloutPath 只存在于内存
     // runtime)。ensureRuntime 现在从 meta 的 session_discovery + workspace_root(本轮新增
     // 持久化)重新推导出 rolloutPath(见 findRolloutFileBySessionId),readTrace 因此也能在
@@ -1466,14 +1476,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (!runtime.rolloutPath) {
       // spawn 时没能发现 rollout 文件(占位 session_id,已知限制)——没有路径可读,退化为空
       // 数组,cursor 原样透传。
-      return { events: [], nextCursor: cursor ?? { offset: 0 } }
+      return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
     }
 
     let raw: string
     try {
       raw = await fs.readFile(runtime.rolloutPath, 'utf-8')
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { events: [], nextCursor: cursor ?? { offset: 0 } }
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
       throw err
     }
 
@@ -1495,7 +1505,20 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       if (event) events.push({ ...event, source_offset: i })
       consumed = i + 1
     }
-    return { events, nextCursor: { offset: consumed } }
+    return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
+  }
+
+  async inspectSupervisionActivity(
+    h: IncarnationHandle,
+    cursor?: { readonly offset: number },
+  ): Promise<SupervisionObservation> {
+    try {
+      const trace = await this.readTraceWindow(h, cursor)
+      if (!trace.sourceAvailable) return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
+      return classifySupervisionActivity(trace.events, trace.nextCursor)
+    } catch {
+      return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
+    }
   }
 
   async kill(h: IncarnationHandle): Promise<void> {

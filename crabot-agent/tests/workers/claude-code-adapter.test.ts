@@ -1980,6 +1980,11 @@ describe('ClaudeCodeAdapter.readTrace', () => {
     expect(events2).toEqual([])
     expect(nextCursor2).toEqual({ offset: 3 })
 
+    await expect(adapter.inspectSupervisionActivity(h, { offset: 3 })).resolves.toEqual({
+      kind: 'unknown',
+      next_cursor: { offset: 3 },
+    })
+
     await adapter.kill(h)
   })
 

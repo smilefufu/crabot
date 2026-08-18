@@ -88,6 +88,10 @@ class FakeAdapter implements WorkerAdapter {
     return this.states.get(handleKey(h)) ?? 'exited'
   }
 
+  async inspectSupervisionActivity(_h: IncarnationHandle, cursor?: { offset: number }) {
+    return { kind: 'unknown' as const, next_cursor: cursor ?? { offset: 0 } }
+  }
+
   async kill(_h: IncarnationHandle): Promise<void> {}
 
   capabilities(): AdapterCapabilities {
@@ -230,6 +234,16 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
       origin: {
       trigger_type: 'system' },
       incarnations: [],
+      supervision: {
+        version: 1,
+        mode: 'periodic_report',
+        next_due_at: now(),
+        pending: { due_id: 'due-maintenance', kind: 'periodic_report', due_at: now(), attempts: 0 },
+        periodic_report: {
+          interval_ms: 5 * 60_000,
+          report_to: { channel_id: 'wechat', session_id: 'sess-recovery' },
+        },
+      },
     })
     await seed(ledger, DIALOG, worker)
 
@@ -241,6 +255,7 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(after.task.status).toBe('failed')
     expect(after.task.error).toBe('agent restart: execution context lost for agent-native system task')
     expect(after.incarnations).toEqual([])
+    expect(after.supervision).toEqual({ version: 1, mode: 'default' })
     const taskEvents = events.filter((e) => e.worker_id === 'w-maintenance')
     expect(taskEvents).toHaveLength(1)
     expect(taskEvents[0]).toMatchObject({

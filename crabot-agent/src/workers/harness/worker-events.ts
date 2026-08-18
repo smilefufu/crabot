@@ -32,6 +32,7 @@ export type HarnessEventKind =
    */
   | 'query_failed'
   | 'query_completed'
+  | 'supervision_due'
   /** v2 import history record: persisted only, never bridged to a Manager wake. */
   | 'legacy_imported'
 

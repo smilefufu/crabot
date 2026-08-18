@@ -342,6 +342,16 @@ export class ManagerRegistry {
     return this.runWake(key, envelope)
   }
 
+  /**
+   * A supervision due has a persistent pending identity. Check it immediately before admission so
+   * a rule replaced while the event was queued stays audit-only and never creates a Manager episode.
+   */
+  async routeSupervisionDue(event: HarnessEvent): Promise<EpisodeResult | undefined> {
+    if (event.kind !== 'supervision_due') throw new Error('routeSupervisionDue requires supervision_due')
+    if (!await this.deps.harness.isSupervisionDueCurrent(event)) return undefined
+    return this.routeWorkerEvent(event)
+  }
+
   /** Durable operation notifications never join an already-running episode's in-memory mailbox. */
   async routeOperationNotification(
     key: ManagerKey,
@@ -371,6 +381,7 @@ export class ManagerRegistry {
         turns: 0,
         consumedEvents: true,
         repliedToHuman: false,
+        successfulSendMessageTargets: [],
       }
     }
     return this.runWake(key, envelope)

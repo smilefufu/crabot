@@ -147,6 +147,10 @@ class FakeAdapter implements WorkerAdapter {
     return this.states.get(handleKey(h)) ?? 'exited'
   }
 
+  async inspectSupervisionActivity(_h: IncarnationHandle, cursor?: { offset: number }) {
+    return { kind: 'unknown' as const, next_cursor: cursor ?? { offset: 0 } }
+  }
+
   async kill(h: IncarnationHandle): Promise<void> {
     this.killCalls.push(h)
     this.states.set(handleKey(h), 'exited')

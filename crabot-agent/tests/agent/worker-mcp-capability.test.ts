@@ -71,6 +71,10 @@ class RecordingAdapter implements WorkerAdapter {
     return 'running'
   }
 
+  async inspectSupervisionActivity(_h: IncarnationHandle, cursor?: { offset: number }) {
+    return { kind: 'unknown' as const, next_cursor: cursor ?? { offset: 0 } }
+  }
+
   async kill(_h: IncarnationHandle): Promise<void> {}
 
   capabilities(): AdapterCapabilities {

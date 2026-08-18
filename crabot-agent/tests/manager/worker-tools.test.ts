@@ -98,6 +98,10 @@ class FakeAdapter implements WorkerAdapter {
     return this.states.get(handleKey(h)) ?? 'exited'
   }
 
+  async inspectSupervisionActivity(_h: IncarnationHandle, cursor?: { offset: number }) {
+    return { kind: 'unknown' as const, next_cursor: cursor ?? { offset: 0 } }
+  }
+
   async kill(h: IncarnationHandle): Promise<void> {
     this.killCalls.push(h)
     this.states.set(handleKey(h), 'exited')
@@ -193,12 +197,23 @@ afterEach(async () => {
 // ---- 工具面形状 ----
 
 describe('buildWorkerTools — 工具面形状', () => {
-  it('普通 Manager 有八项 worker 工具；read_worker_output/list_workers/get_worker_detail/list_worker_implementations 为只读', async () => {
+  it('普通 Manager 有十项 worker 工具；read_worker_output/list_workers/get_worker_detail/list_worker_implementations 为只读', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
 
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ['get_worker_detail', 'kill_worker', 'list_worker_implementations', 'list_workers', 'query_worker', 'read_worker_output', 'send_to_worker', 'spawn_worker'].sort()
+      [
+        'clear_worker_periodic_report',
+        'get_worker_detail',
+        'kill_worker',
+        'list_worker_implementations',
+        'list_workers',
+        'query_worker',
+        'read_worker_output',
+        'send_to_worker',
+        'set_worker_periodic_report',
+        'spawn_worker',
+      ].sort()
     )
 
     const readOnlyNames = tools.filter((t) => t.isReadOnly).map((t) => t.name).sort()
@@ -466,6 +481,66 @@ describe('read_worker_output', () => {
   })
 })
 
+// ---- 定期汇报规则（stable worker 属性） ----
+
+describe('worker periodic report tools', () => {
+  it('把规则固定到当前 Manager 会话，覆盖旧状态并在清除后恢复默认巡检', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const tools = buildWorkerTools({ harness, context: () => CTX })
+    const setRule = tools.find((tool) => tool.name === 'set_worker_periodic_report')!
+    const clearRule = tools.find((tool) => tool.name === 'clear_worker_periodic_report')!
+
+    const setResult = await setRule.call({
+      worker_id: worker.worker_id,
+      interval_minutes: 10,
+      expires_at: '2026-01-01T01:00:00.000Z',
+    }, {})
+
+    expect(setResult.isError).toBe(false)
+    expect(parseOutput(setResult.output)).toMatchObject({
+      worker_id: worker.worker_id,
+      mode: 'periodic_report',
+      interval_minutes: 10,
+      expires_at: '2026-01-01T01:00:00.000Z',
+    })
+    expect((await harness.findWorker(worker.worker_id))!.worker.supervision).toMatchObject({
+      mode: 'periodic_report',
+      periodic_report: {
+        interval_ms: 10 * 60_000,
+        expires_at: '2026-01-01T01:00:00.000Z',
+        report_to: CTX.reportTo,
+      },
+    })
+
+    const clearResult = await clearRule.call({ worker_id: worker.worker_id }, {})
+    expect(clearResult.isError).toBe(false)
+    expect(parseOutput(clearResult.output)).toMatchObject({ worker_id: worker.worker_id, mode: 'default', next_due_at: expect.any(String) })
+    expect((await harness.findWorker(worker.worker_id))!.worker.supervision).toMatchObject({
+      mode: 'default',
+      next_due_at: expect.any(String),
+    })
+  })
+
+  it('拒绝非法频率、已到期时间以及其他 Manager 的 worker，且不会写入规则', async () => {
+    const { harness } = await makeHarness()
+    const foreign = await harness.spawnWorker(directSpawnParams({ managerKey: 'feishu::other' as ManagerKey }))
+    const tools = buildWorkerTools({ harness, context: () => CTX })
+    const setRule = tools.find((tool) => tool.name === 'set_worker_periodic_report')!
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      expect((await setRule.call({ worker_id: foreign.worker_id, interval_minutes: 0 }, {})).isError).toBe(true)
+      expect((await setRule.call({ worker_id: foreign.worker_id, interval_minutes: 10, expires_at: 'not-a-date' }, {})).isError).toBe(true)
+      expect((await setRule.call({ worker_id: foreign.worker_id, interval_minutes: 10 }, {})).isError).toBe(true)
+    } finally {
+      errorSpy.mockRestore()
+    }
+    expect((await harness.findWorker(foreign.worker_id))!.worker.supervision).toMatchObject({ mode: 'default' })
+    expect((await harness.findWorker(foreign.worker_id))!.worker.supervision?.periodic_report).toBeUndefined()
+  })
+})
+
 // ---- list_workers（同步，默认只返回决策视野） ----
 
 describe('list_workers', () => {
@@ -480,7 +555,7 @@ describe('list_workers', () => {
     const current = await listWorkers.call({}, {})
     expect(current.isError).toBe(false)
     expect(parseOutput(current.output)).toMatchObject({
-      workers: [{ worker_id: active.worker_id }],
+      workers: [{ worker_id: active.worker_id, supervision_mode: 'default', next_due_at: expect.any(String) }],
       total_active: 1,
       total_terminal: 1,
       pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },

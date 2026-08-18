@@ -21,6 +21,19 @@ const FIXED_RECEIVED_AT = '2026-01-01T08:00:00+08:00'
 function timed(wake: WakeEvent): TimedWakeEnvelope { return { wake, received_at: FIXED_RECEIVED_AT, timezone: 'Asia/Shanghai' } }
 const DIALOG_OBJECT_ID = (`test::${'friend-loop'}` as ManagerKey)
 
+function defaultSupervisionWake(workerId: string, dueId: string): TimedWakeEnvelope {
+  return timed({
+    kind: 'worker_event',
+    event: {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'supervision_due',
+      worker_id: workerId,
+      seq: 1,
+      detail: { mode: 'default', due_id: dueId, mainline_seq: 1, observation: 'text' },
+    },
+  })
+}
+
 /** compaction.ts foldIntoSummary 的 system prompt 常量特征串,用它区分"这是折叠 LLM 调用
  *  还是普通 engine turn 调用",不需要 vi.mock/vi.spyOn 侵入模块内部。 */
 const FOLD_SYSTEM_PROMPT_MARKER = '对话历史压缩助手'
@@ -995,6 +1008,109 @@ describe('ManagerLoop', () => {
       const result = await loop.drainMailbox()
       expect(result.turns).toBe(0)
       expect(result.repliedToHuman).toBe(false)
+    })
+  })
+
+  describe('任务巡检 episode', () => {
+    it('只读的默认巡检会在完整 trace 落账后压缩为本地历史摘要', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push(
+        { toolCalls: [{ name: 'read_worker_output', id: 'read-1', input: { worker_id: 'w-supervised' } }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+      )
+      const loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        toolFace: () => [defineTool({
+          name: 'read_worker_output',
+          description: 'read only',
+          inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } } },
+          isReadOnly: true,
+          call: async () => ({ output: 'worker output', isError: false }),
+        })],
+      }))
+
+      const result = await loop.wakeUp(defaultSupervisionWake('w-supervised', 'due-read-only'))
+
+      expect(result.outcome).toBe('completed')
+      const state = await store.load(KEY)
+      expect(state.recent).toHaveLength(1)
+      expect(JSON.stringify(state.recent)).toContain('[任务巡检摘要] worker_id=w-supervised')
+      expect(JSON.stringify(state.recent)).not.toContain('due-read-only')
+    })
+
+    it('默认巡检一旦发送消息或写记忆，就保留完整 episode 历史', async () => {
+      for (const toolName of ['send_message', 'mcp__crab-memory__store_memory']) {
+        const { adapter, queue } = makeAdapter()
+        queue.push(
+          { toolCalls: [{ name: toolName, id: `call-${toolName}`, input: {} }], stopReason: 'tool_use' },
+          { stopReason: 'end_turn' },
+        )
+        const isolatedStore = new ManagerSessionStore(join(dataDir, `supervision-${toolName}`))
+        const loop = new ManagerLoop(baseDeps({
+          store: isolatedStore,
+          adapter,
+          toolFace: () => [defineTool({
+            name: toolName,
+            description: 'side effect',
+            inputSchema: { type: 'object', properties: {} },
+            call: async () => ({ output: 'ok', isError: false }),
+          })],
+        }))
+
+        await loop.wakeUp(defaultSupervisionWake('w-supervised', `due-${toolName}`))
+
+        const state = await isolatedStore.load(KEY)
+        expect(JSON.stringify(state.recent)).toContain(`due-${toolName}`)
+        expect(JSON.stringify(state.recent)).not.toContain('[任务巡检摘要]')
+      }
+    })
+  })
+
+  describe('EpisodeResult.successfulSendMessageTargets', () => {
+    async function runSendMessageCase(input: Record<string, unknown>, isError = false) {
+      const { adapter, queue } = makeAdapter()
+      queue.push(
+        { toolCalls: [{ name: 'send_message', id: 'send-1', input }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+      )
+      const loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        toolFace: () => [defineTool({
+          name: 'send_message',
+          description: 'deliver',
+          inputSchema: { type: 'object', properties: {} },
+          call: async () => ({ output: 'delivery result', isError }),
+        })],
+      }))
+      return loop.wakeUp(timed({
+        kind: 'worker_event',
+        event: {
+          ts: '2026-01-01T00:00:00.000Z',
+          kind: 'supervision_due',
+          worker_id: 'w-periodic',
+          seq: 1,
+          detail: {
+            mode: 'periodic_report',
+            due_id: 'due-periodic',
+            mainline_seq: 1,
+            observation: 'tool_only',
+            report_to: { channel_id: 'feishu', session_id: 'target-session' },
+          },
+        },
+      }))
+    }
+
+    it('只记录成功 send_message 的精确目标', async () => {
+      const success = await runSendMessageCase({ channel_id: 'feishu', session_id: 'target-session', content: '进度' })
+      expect(success.successfulSendMessageTargets).toEqual([{ channel_id: 'feishu', session_id: 'target-session' }])
+
+      const wrongTarget = await runSendMessageCase({ channel_id: 'feishu', session_id: 'another-session', content: '进度' })
+      expect(wrongTarget.successfulSendMessageTargets).toEqual([{ channel_id: 'feishu', session_id: 'another-session' }])
+
+      const failed = await runSendMessageCase({ channel_id: 'feishu', session_id: 'target-session', content: '进度' }, true)
+      expect(failed.successfulSendMessageTargets).toEqual([])
     })
   })
 
