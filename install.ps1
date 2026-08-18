@@ -122,17 +122,31 @@ function Ensure-Pnpm {
 }
 
 function Assert-CrabotStopped($targetInstallDir) {
-    $dataDir = Join-Path $targetInstallDir 'data'
     $portOffset = 0
-    $instancePath = Join-Path $targetInstallDir 'instance.json'
-    if (Test-Path -LiteralPath $instancePath -PathType Leaf) {
-        $instance = Get-Content -LiteralPath $instancePath -Raw | ConvertFrom-Json
-        if ($instance.data_dir) {
-            $dataDir = $instance.data_dir
+    if ($env:CRABOT_PORT_OFFSET) {
+        $parsedOffset = 0
+        if ([int]::TryParse($env:CRABOT_PORT_OFFSET, [ref]$parsedOffset)) {
+            $portOffset = $parsedOffset
         }
-        if ($null -ne $instance.port_offset) {
-            $portOffset = [int]$instance.port_offset
+    } else {
+        $instancePath = Join-Path $targetInstallDir 'instance.json'
+        if (Test-Path -LiteralPath $instancePath -PathType Leaf) {
+            try {
+                $instance = Get-Content -LiteralPath $instancePath -Raw | ConvertFrom-Json
+                if ($null -ne $instance.port_offset) {
+                    $portOffset = [int]$instance.port_offset
+                }
+            } catch {
+                # 损坏的 instance.json 与 CLI 一样回退到 offset 0。
+            }
         }
+    }
+
+    if ($env:DATA_DIR) {
+        $dataDir = $env:DATA_DIR
+    } else {
+        $dataDirName = if ($portOffset -gt 0) { "data-$portOffset" } else { 'data' }
+        $dataDir = Join-Path (Join-Path $env:USERPROFILE '.crabot') $dataDirName
     }
 
     $pidPath = Join-Path $dataDir 'mm.pid'
@@ -236,6 +250,7 @@ if ($FromSource) {
         Expand-Archive -Path $archivePath -DestinationPath $stageParent -Force
         if (-not (Test-Path -LiteralPath (Join-Path $stageRelease "cli.mjs") -PathType Leaf) -or
             -not (Test-Path -LiteralPath (Join-Path $stageRelease "package.json") -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $stageRelease "pnpm-lock.yaml") -PathType Leaf) -or
             -not (Test-Path -LiteralPath (Join-Path $stageRelease "scripts") -PathType Container) -or
             -not (Test-Path -LiteralPath (Join-Path $stageRelease "crabot-memory") -PathType Container) -or
             -not (Test-Path -LiteralPath (Join-Path $stageRelease "dist") -PathType Container)) {
@@ -280,8 +295,21 @@ if ($FromSource) {
             Remove-Item $legacyDir.FullName -Recurse -Force
         }
 
-        # 根 package 没有随发布包提供 pnpm-lock.yaml，不能用非冻结安装恢复不固定的生产依赖。
-        # 根 package 的 commander、js-yaml、rotating-file-stream 保留发布包自带版本，不能在这里再次解析版本。
+        $rootNodeModulesDir = Join-Path $InstallDir 'node_modules'
+        if (Test-Path -LiteralPath $rootNodeModulesDir -PathType Container) {
+            Remove-Item -LiteralPath $rootNodeModulesDir -Recurse -Force
+        }
+        Write-Info "Restoring root dependencies..."
+        Push-Location $InstallDir
+        try {
+            corepack pnpm install --prod --frozen-lockfile
+            if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+            }
+        } finally {
+            Pop-Location
+        }
+
         foreach ($mod in $runtimeModules) {
             $moduleDir = Join-Path $InstallDir $mod
             $nodeModulesDir = Join-Path $moduleDir 'node_modules'
@@ -321,6 +349,21 @@ if ($FromSource) {
 
 # PATH
 $crabotDir = if ($FromSource) { (Get-Location).Path } else { $InstallDir }
+
+# Windows 不支持 SIGUSR2。该参数位于 Node.js 入口文件之前时会导致 Agent
+# 在加载 dist/main.js 前以 ERR_UNKNOWN_SIGNAL 退出，从而使 Chat RPC 报 Module not found。
+$coreModulesPath = Join-Path $crabotDir 'crabot-core\dist\core-modules.js'
+if (Test-Path -LiteralPath $coreModulesPath -PathType Leaf) {
+    $coreModulesContent = [System.IO.File]::ReadAllText($coreModulesPath)
+    $unsupportedNodeArg = ' --heapsnapshot-signal=SIGUSR2'
+    if ($coreModulesContent.Contains($unsupportedNodeArg)) {
+        $patchedCoreModulesContent = $coreModulesContent.Replace($unsupportedNodeArg, '')
+        $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($coreModulesPath, $patchedCoreModulesContent, $utf8WithoutBom)
+        Write-Info 'Removed unsupported Node.js SIGUSR2 option on Windows'
+    }
+}
+
 $legacyReleasePattern = ('^{0}\\crabot-[^\\]+-windows-x64\\?$' -f [regex]::Escape($crabotDir.TrimEnd('\')))
 function Update-CrabotPath($pathValue) {
     $entries = @($pathValue -split ';' | Where-Object { $_ })
