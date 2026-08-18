@@ -27,6 +27,7 @@
 - 已确认并发布设计、计划和 `protocol-agent-v3` 3.2.1 契约（crabot-docs `d4b4e50`）：`send_to_worker` 使用持久 receipt 返回 `delivered / pending / failed`，5 分钟内有限收口；失败及 pending 后终态只有被原 Manager episode 以 `consumedEvents=true` 消费后才确认完成，Agent 重启不自动重发输入。
 - `query_worker` 改为同步建立 fork 和提交首问、异步生成回答，不进入主 TUI 排队；builtin、Claude Code、Codex 统一“fork + 首问接受后返回”契约，Codex 使用 app-server `thread/fork + turn/start`。
 - 实现分支 `feat/manager-worker-operation-reliability` 已 rebase 到包含 #99/#100 的主线；adapter 关闭保护与可靠投递契约均保留，待 PR review。
+- **2026-08-18 tmux 投递热修已发布**（main `9138713`，本机实例已重启验证健康）：tmux pane 不再继承 `TERM=dumb`；Manager 的 `raw: true` 仅接受 tmux 控制键并在投递前拒绝混入任务正文的 payload，普通任务文本仍走既有 WorkerInbox 生命周期。尚待自然新流量验证实际启动确认与后续正文投递。
 
 ### 最近验证基线（2026-08-18，可靠交付实现分支）
 
