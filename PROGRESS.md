@@ -33,6 +33,7 @@
 
 - 已确认并发布设计和 `protocol-agent-v3` 3.2.2 契约（crabot-docs `bbcea9e`）：默认每 15 分钟例行巡检与人类明确的定期汇报是 stable `worker_id` 上互斥的监督规则；前者可在仅工具活动时由 Harness 静默过滤，后者必须由 Manager 向固定会话成功 `send_message` 才消费。
 - 已合并实现：三种 adapter 以原生结构化 trace 分类 `text / tool_only / none / unknown`；Harness 持久化游标、到期责任与退避；Manager 提供设置/清除定期汇报工具、严格消费条件和默认只读巡检片段压缩。定向 Harness/Manager 295/295、adapter 212/212、TypeScript 检查均通过。
+- **2026-08-19 规模修复已发布**（main `62f2b9e`）：启动恢复、巡检准备与到期投递统一限制为 8 个并发 ledger 读取；终态及无主线/不可执行化身的记录在枚举后直接跳过，避免同一大 ledger 被数千次并发解析而 OOM。
 
 ### 最近验证基线（2026-08-18，可靠交付实现分支）
 
