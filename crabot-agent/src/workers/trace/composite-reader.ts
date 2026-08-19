@@ -216,8 +216,11 @@ export async function readCompositeWorkerTrace(
           nativeEvents.push({ event: { ...event, source: 'native' }, source: 'native', sourceOrdinal: event.source_offset ?? (positions.native + ordinal) })
         })
         nativeEnd = replayBound ? replayBound.native : native.nextCursor.offset
-        // 每次成功 native read 把脱敏、属于本化身的记录增量写 Agent-owned copy（§8.10）。
-        await deps.nativeCopy.append(params.worker_id, incarnation.seq, fingerprint, native.events, deps.redact)
+        // 从头成功读取到的是该化身的完整 native 快照：替换旧 copy，使 adapter 归一化修复
+        // 能回填历史保留副本。增量页仍按 source_offset 追加，不能覆盖完整副本。
+        await deps.nativeCopy.append(params.worker_id, incarnation.seq, fingerprint, native.events, deps.redact, {
+          replace: positions.native === 0 && !replayBound,
+        })
       } catch (error) {
         // live source 不可用时回退 Agent-owned copy（终态收割/上次增量写入的结果）。
         const copied = await deps.nativeCopy.read(params.worker_id, incarnation.seq, fingerprint)

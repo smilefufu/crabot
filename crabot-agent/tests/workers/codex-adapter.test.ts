@@ -1718,6 +1718,38 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
       },
       { type: 'world_state', timestamp: '2026-07-30T01:00:09Z', payload: { full: true, state: {} } },
       { type: 'response_item', timestamp: '2026-07-30T01:00:10Z', payload: { type: 'web_search_call', query: 'typescript typeerror' } },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-30T01:00:12Z',
+        payload: {
+          type: 'item_completed',
+          started_at_ms: Date.parse('2026-07-30T01:00:11Z'),
+          completed_at_ms: Date.parse('2026-07-30T01:00:12Z'),
+          item: {
+            type: 'CommandExecution',
+            id: 'exec-1',
+            command: ['rg', '-n', 'TODO'],
+            status: 'failed',
+            stdout: '',
+            stderr: 'no matches',
+            exit_code: 1,
+          },
+        },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-30T01:00:14Z',
+        payload: {
+          type: 'item_completed',
+          started_at_ms: Date.parse('2026-07-30T01:00:13Z'),
+          completed_at_ms: Date.parse('2026-07-30T01:00:14Z'),
+          item: {
+            type: 'FileChange',
+            id: 'exec-2',
+            changes: { '/tmp/result.txt': { type: 'add' } },
+          },
+        },
+      },
     ]
     return lines.map((l) => JSON.stringify(l)).join('\n') + '\nnot valid json{{{\n'
   }
@@ -1747,11 +1779,9 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
     await fs.writeFile(rolloutFile, sampleRolloutJsonl(rolloutUuid), 'utf-8')
 
     const { events, nextCursor } = await adapter.readTrace(h)
-    // 11 行原始数据(session_meta/turn_context/developer msg/user msg/function_call/
-    // function_call_output/reasoning/assistant msg/event_msg/world_state/web_search_call)
-    // + 1 条坏 JSON = 12 行;turn_context/world_state/web_search_call(未识别子类型)/坏
-    // JSON 四条跳过,产生 8 条事件。
-    expect(events).toHaveLength(8)
+    // 13 行原始数据 + 1 条坏 JSON。两个 item_completed 各展开为同 call_id 的调用/结果，
+    // 但 cursor 仍按原始行推进。
+    expect(events).toHaveLength(12)
     expect(events[0]).toMatchObject({ kind: 'lifecycle', role: 'system', ts: '2026-07-30T01:00:00Z' })
     expect(events[0].summary).toContain(rolloutUuid)
     expect(events[0].summary).toContain('0.144.1')
@@ -1770,14 +1800,15 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
     expect(events[6]).toMatchObject({ kind: 'message', role: 'assistant' })
     expect(events[6].summary).toContain('问题在于第 12 行没有判空。')
     expect(events[7]).toMatchObject({ kind: 'lifecycle', role: 'system', summary: 'turn_complete', ts: '2026-07-30T01:00:08Z' })
-    expect(nextCursor.offset).toBe(12)
+    expect(events[8]).toMatchObject({ kind: 'tool_call', role: 'assistant', ts: '2026-07-30T01:00:11.000Z', detail: { call_id: 'exec-1', name: 'exec_command', input: { command: ['rg', '-n', 'TODO'] } } })
+    expect(events[9]).toMatchObject({ kind: 'tool_result', ts: '2026-07-30T01:00:12.000Z', detail: { call_id: 'exec-1', output: 'no matches', is_error: true } })
+    expect(events[10]).toMatchObject({ kind: 'tool_call', role: 'assistant', ts: '2026-07-30T01:00:13.000Z', detail: { call_id: 'exec-2', name: 'apply_patch', input: { paths: ['/tmp/result.txt'] } } })
+    expect(events[11]).toMatchObject({ kind: 'tool_result', ts: '2026-07-30T01:00:14.000Z', detail: { call_id: 'exec-2', output: 'updated 1 file', is_error: false } })
+    expect(nextCursor.offset).toBe(14)
 
-    const partial = await adapter.readTrace(h, { offset: 6 })
-    expect(partial.events).toHaveLength(3)
-    expect(partial.events[0].kind).toBe('thinking')
-    expect(partial.events[1].kind).toBe('message')
-    expect(partial.events[2].kind).toBe('lifecycle')
-    expect(partial.nextCursor.offset).toBe(12)
+    const partial = await adapter.readTrace(h, { offset: 11 })
+    expect(partial.events.map((event) => event.detail && (event.detail as { call_id?: string }).call_id)).toEqual(['exec-1', 'exec-1', 'exec-2', 'exec-2'])
+    expect(partial.nextCursor.offset).toBe(14)
 
     await adapter.kill(h)
   }, 15000)

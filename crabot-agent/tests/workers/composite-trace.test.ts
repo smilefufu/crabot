@@ -199,6 +199,38 @@ describe('readCompositeWorkerTrace', () => {
     expect(second.unavailable_reason).toContain('copy')
   })
 
+  it('从头重读 live source 会替换旧 copy，回退时保留同一 source_offset 的展开事件', async () => {
+    nativeLines = [nativeEventAt('old lifecycle', '2026-08-01T00:00:02.000Z', 0)]
+    await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+
+    nativeLines = [
+      {
+        ts: '2026-08-01T00:00:02.000Z',
+        kind: 'tool_call',
+        role: 'assistant',
+        summary: 'exec_command(pwd)',
+        detail: { call_id: 'cmd-1', name: 'exec_command' },
+        source_offset: 0,
+      },
+      {
+        ts: '2026-08-01T00:00:03.000Z',
+        kind: 'tool_result',
+        summary: 'command completed',
+        detail: { call_id: 'cmd-1', output: '/tmp' },
+        source_offset: 0,
+      },
+    ]
+    await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+
+    nativeShouldThrow = 'file gone'
+    const fallback = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+    expect(fallback.events.filter((event) => event.source === 'native')).toMatchObject([
+      { kind: 'tool_call', detail: { call_id: 'cmd-1', name: 'exec_command' } },
+      { kind: 'tool_result', detail: { call_id: 'cmd-1', output: '/tmp' } },
+    ])
+    expect(fallback.events.some((event) => event.summary === 'old lifecycle')).toBe(false)
+  })
+
   it('copy 指纹不匹配不混读（seq 碰撞防御）', async () => {
     setNative([nativeEvent('x', '2026-08-01T00:00:02.000Z')])
     await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
