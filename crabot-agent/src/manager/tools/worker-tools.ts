@@ -161,6 +161,8 @@ function summarizeWorker(worker: LedgerWorker) {
     title: worker.task.title,
     task_status: worker.task.status,
     ...(mainline ? { incarnation_state: mainline.state, impl: mainline.impl } : {}),
+    supervision_mode: worker.supervision?.mode ?? 'default',
+    ...(worker.supervision?.next_due_at ? { next_due_at: worker.supervision.next_due_at } : {}),
     updated_at: worker.updated_at,
   }
 }
@@ -464,6 +466,81 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     },
   })
 
+  const setWorkerPeriodicReport = defineTool({
+    name: 'set_worker_periodic_report',
+    description:
+      '为一个仍在进行中的 worker 设置人类明确要求的定期汇报。规则绑定该 worker 的完整主线链，' +
+      '首次从现在起按 interval_minutes 到期；它不是定时任务，也不会创建 Admin Schedule。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        worker_id: { type: 'string', description: '目标 worker id' },
+        interval_minutes: { type: 'number', description: '正整数分钟' },
+        expires_at: { type: 'string', description: '可选的未来绝对到期时间（ISO 8601）' },
+      },
+      required: ['worker_id', 'interval_minutes'],
+    },
+    isReadOnly: false,
+    call: async (input): Promise<ToolCallResult> => {
+      const { worker_id, interval_minutes, expires_at } = input as {
+        worker_id?: string
+        interval_minutes?: number
+        expires_at?: string
+      }
+      if (!worker_id || typeof worker_id !== 'string') return invalid('set_worker_periodic_report: worker_id 必填且为字符串')
+      if (typeof interval_minutes !== 'number' || !Number.isInteger(interval_minutes) || interval_minutes <= 0) {
+        return invalid('set_worker_periodic_report: interval_minutes 必须是正整数')
+      }
+      if (expires_at !== undefined && typeof expires_at !== 'string') {
+        return invalid('set_worker_periodic_report: expires_at 必须是 ISO 8601 字符串')
+      }
+      try {
+        await authorizeWorker(worker_id)
+        const supervision = await harness.setWorkerPeriodicReport(
+          worker_id,
+          context().reportTo,
+          interval_minutes * 60_000,
+          expires_at,
+        )
+        return ok({
+          worker_id,
+          mode: 'periodic_report',
+          interval_minutes,
+          next_due_at: supervision.next_due_at,
+          ...(supervision.periodic_report?.expires_at ? { expires_at: supervision.periodic_report.expires_at } : {}),
+        })
+      } catch (error) {
+        return mapError(`set_worker_periodic_report(${worker_id})`, error)
+      }
+    },
+  })
+
+  const clearWorkerPeriodicReport = defineTool({
+    name: 'clear_worker_periodic_report',
+    description: '取消 worker 的定期汇报，立即恢复默认例行巡检。',
+    inputSchema: {
+      type: 'object',
+      properties: { worker_id: { type: 'string', description: '目标 worker id' } },
+      required: ['worker_id'],
+    },
+    isReadOnly: false,
+    call: async (input): Promise<ToolCallResult> => {
+      const worker_id = (input as { worker_id?: string }).worker_id
+      if (!worker_id || typeof worker_id !== 'string') return invalid('clear_worker_periodic_report: worker_id 必填且为字符串')
+      try {
+        await authorizeWorker(worker_id)
+        const supervision = await harness.clearWorkerPeriodicReport(worker_id)
+        return ok({
+          worker_id,
+          mode: 'default',
+          ...(supervision.next_due_at ? { next_due_at: supervision.next_due_at } : {}),
+        })
+      } catch (error) {
+        return mapError(`clear_worker_periodic_report(${worker_id})`, error)
+      }
+    },
+  })
+
   const listAllWorkers = capturedAuthorization ? defineTool({
     name: 'list_all_workers',
     description: '仅 Master 可用：跨会话列出 worker 精简摘要，支持 manager_key/status/分页过滤。',
@@ -521,5 +598,17 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     },
   })
 
-  return [spawnWorker, sendToWorker, queryWorker, readWorkerOutput, listWorkers, getWorkerDetail, listWorkerImplementations, ...(listAllWorkers ? [listAllWorkers] : []), killWorker]
+  return [
+    spawnWorker,
+    sendToWorker,
+    queryWorker,
+    readWorkerOutput,
+    listWorkers,
+    getWorkerDetail,
+    listWorkerImplementations,
+    setWorkerPeriodicReport,
+    clearWorkerPeriodicReport,
+    ...(listAllWorkers ? [listAllWorkers] : []),
+    killWorker,
+  ]
 }

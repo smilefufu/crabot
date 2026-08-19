@@ -90,6 +90,25 @@ export interface Workspace { readonly root: string }
 export interface OutputCursor { readonly offset: number }
 export interface TraceCursor { readonly offset: number }
 
+export interface SupervisionObservation {
+  readonly kind: 'text' | 'tool_only' | 'none' | 'unknown'
+  readonly next_cursor: { readonly offset: number }
+}
+
+/** Shared classification for each adapter's native structured trace reader. */
+export function classifySupervisionActivity(
+  events: ReadonlyArray<NormalizedTraceEvent>,
+  next_cursor: { readonly offset: number },
+): SupervisionObservation {
+  if (events.some((event) => event.kind === 'message' && event.role === 'assistant' && event.summary.trim())) {
+    return { kind: 'text', next_cursor }
+  }
+  if (events.some((event) => event.kind === 'tool_call' || event.kind === 'tool_result')) {
+    return { kind: 'tool_only', next_cursor }
+  }
+  return { kind: 'none', next_cursor }
+}
+
 export interface SendInputOptions {
   readonly raw?: boolean
   readonly delivery_id?: string
@@ -299,6 +318,10 @@ export interface WorkerAdapter {
    * builtin 以真实 engine 进展更新、无常驻实例时以 meta 兜底。
    */
   lastActivityAt?(h: IncarnationHandle): Promise<number | undefined>
+  inspectSupervisionActivity(
+    h: IncarnationHandle,
+    cursor?: { readonly offset: number },
+  ): Promise<SupervisionObservation>
   readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }>
   kill(h: IncarnationHandle): Promise<void>
   /** Release adapter-owned runtime resources without terminating independent tmux workers. */

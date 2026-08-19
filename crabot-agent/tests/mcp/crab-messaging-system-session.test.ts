@@ -89,4 +89,29 @@ describe('send_message rejects SYSTEM_SESSION sentinel', () => {
 
     expect(callMock).toHaveBeenCalled()
   })
+
+  it('marks a channel delivery failure as a tool error', async () => {
+    const callMock = vi.fn().mockRejectedValue(new Error('channel offline'))
+    const tools = buildWorkerMessagingTools({
+      rpcClient: { call: callMock } as never,
+      moduleId: 'worker-test',
+      getAdminPort: async () => 19001,
+      resolveChannelPort: async () => 19009,
+      getTaskContext: () => ({
+        taskId: 't1',
+        humanQueue: new HumanMessageQueue(),
+        triggerType: 'message' as const,
+        hasGoal: () => false,
+      }),
+    })
+
+    const result = await findTool(tools, 'send_message').handler({
+      channel_id: 'wechat-real',
+      session_id: 'sess-real',
+      content: 'should fail',
+    })
+
+    expect(result.isError).toBe(true)
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ error: '发送失败: channel offline' })
+  })
 })

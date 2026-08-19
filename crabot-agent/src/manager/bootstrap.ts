@@ -235,6 +235,17 @@ function channelSessionFromManagerKey(key: ManagerKey): { channel_id: string; se
   return { channel_id: channelId, session_id: sessionId }
 }
 
+function periodicReportTarget(event: import('../workers/harness/worker-events.js').HarnessEvent):
+  { channel_id: string; session_id: string } | undefined {
+  if (event.kind !== 'supervision_due' || event.detail?.mode !== 'periodic_report') return undefined
+  const target = event.detail.report_to
+  if (!target || typeof target !== 'object') return undefined
+  const { channel_id, session_id } = target as Record<string, unknown>
+  return typeof channel_id === 'string' && typeof session_id === 'string'
+    ? { channel_id, session_id }
+    : undefined
+}
+
 /**
  * 解析出来的身份档位 → crab-memory 的 `MemoryTaskContext`。
  *
@@ -366,8 +377,17 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 
       if (deps.isClosing?.()) return { consumed: false }
       if (!registry || !shouldWakeOnHarnessEvent(event)) return { consumed: false }
-      return registry.routeWorkerEvent(event).then(
+      const routed = event.kind === 'supervision_due'
+        ? registry.routeSupervisionDue(event)
+        : registry.routeWorkerEvent(event)
+      return routed.then(
         async (result) => {
+          // A set/clear/expiry/terminal transition can invalidate a due while it was queued, or
+          // during its Manager episode. It remains in trace/events.jsonl but must not affect the
+          // replacement rule. `undefined` from the narrow route is the before-wake stale case.
+          if (event.kind === 'supervision_due' && (result === undefined || !await harness.isSupervisionDueCurrent(event))) {
+            return { consumed: true }
+          }
           // fail-loud 的判据必须双管:`.catch` 只抓得到 F2(中途抛错),而最常见的 F1(LLM 挂 /
           // key 过期 / 限流耗尽)是**正常 resolve 且 outcome='failed'**——只 catch 等于对它全瞎。
           if (result?.outcome === 'failed' || result?.outcome === 'aborted') {
@@ -380,7 +400,15 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // 巡检拿到"未消费"因而下一轮还能重报(这里)。`ManagerLoop` 只在
           // outcome ∈ {completed, max_turns} 时置 consumedEvents,所以失败分支这一句必然
           // 返回 false,两条语义天然对齐,不需要在这里另判一次。
-          return { consumed: result?.consumedEvents === true }
+          if (event.kind !== 'supervision_due') return { consumed: result?.consumedEvents === true }
+          if (result?.consumedEvents !== true) return { consumed: false }
+          const target = periodicReportTarget(event)
+          if (!target) return { consumed: true }
+          return {
+            consumed: result.successfulSendMessageTargets.some(
+              (sent) => sent.channel_id === target.channel_id && sent.session_id === target.session_id,
+            ),
+          }
         },
         async (err) => {
           console.error(`[manager-bootstrap] routeWorkerEvent 失败 (worker=${event.worker_id}, kind=${event.kind}):`, err)
@@ -405,6 +433,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     assertExecutionAdmission: deps.assertExecutionAdmission,
     capabilityBundle: deps.capabilityBundle,
     hasRunningBg: deps.hasRunningBg,
+    isClosing: deps.isClosing,
     validateLegacyContinuationAuth: (auth) => principals.validateLegacyContinuationAuth(auth),
   }
 
@@ -588,5 +617,6 @@ export async function reconcileManagerStack(stack: ManagerStack): Promise<Reconc
   const report = await stack.harness.reconcileOnStartup()
   await stack.harness.reconcileInputDeliveriesOnStartup()
   await stack.harness.reconcileQueryReceiptsOnStartup()
+  await stack.harness.reconcileSupervisionOnStartup()
   return report
 }

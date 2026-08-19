@@ -79,6 +79,9 @@ class CliLikeAdapter implements WorkerAdapter {
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
     return this.states.get(handleKey(h)) ?? 'exited'
   }
+  async inspectSupervisionActivity(_h: IncarnationHandle, cursor?: { offset: number }) {
+    return { kind: 'unknown' as const, next_cursor: cursor ?? { offset: 0 } }
+  }
   async lastActivityAt(h: IncarnationHandle): Promise<number | undefined> {
     this.lastActivityAtCalls.push(handleKey(h))
     return this.activity.get(handleKey(h))
@@ -334,20 +337,18 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     expect(adapter.readOutputCalls).toHaveLength(1)
   })
 
-  it('⑥ 台账一字不改:巡检前后 task.status 与化身 state 完全一致', async () => {
+  it('⑥ 活性巡检不改变 task.status 或主线化身 state', async () => {
     const { harness, ledger, workerId } = await spawnRunning()
 
     clockMs += STALL_MS + MINUTE
-    const before = JSON.stringify((await ledger.findWorker(workerId))!.worker)
+    const before = (await ledger.findWorker(workerId))!.worker
     await harness.sweepLiveness()
     await harness.sweepLiveness()
-    const after = JSON.stringify((await ledger.findWorker(workerId))!.worker)
+    const after = (await ledger.findWorker(workerId))!.worker
 
     expect(wakeEvents(workerId)).toHaveLength(1) // 确认这一轮真的报了(否则断言是空转)
-    expect(after).toBe(before)
-    const worker = (await ledger.findWorker(workerId))!.worker
-    expect(worker.task.status).toBe('running')
-    expect(worker.incarnations[0].state).toBe('running')
+    expect(after.task).toEqual(before.task)
+    expect(after.incarnations).toEqual(before.incarnations)
   })
 
   it('⑦ 只看主线化身:fork 侧问分支零输出不算停摆', async () => {

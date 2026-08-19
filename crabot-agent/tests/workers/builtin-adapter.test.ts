@@ -337,6 +337,20 @@ describe('BuiltinWorkerAdapter', () => {
     expect(chunk).toContain('A 还是 B')
   })
 
+  it('没有可读结构化 trace 时，巡检保守返回 unknown', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const h = await adapter.spawn(spec({
+      adapter: makeAdapter([{ stopReason: 'end_turn' }]),
+    }))
+
+    await expect(adapter.inspectSupervisionActivity(h, { offset: 3 })).resolves.toEqual({
+      kind: 'unknown',
+      next_cursor: { offset: 3 },
+    })
+
+    await adapter.kill(h)
+  })
+
   it('常驻化身只以真实 engine/input 进展更新时间，主线与 fork 回调均接线', async () => {
     let now = 1_000
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)

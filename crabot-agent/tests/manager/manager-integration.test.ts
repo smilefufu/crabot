@@ -207,6 +207,9 @@ class ForklessStubAdapter implements WorkerAdapter {
   async state(): Promise<WorkerContractState> {
     return 'running'
   }
+  async inspectSupervisionActivity(_h: IncarnationHandle, cursor?: { offset: number }) {
+    return { kind: 'unknown' as const, next_cursor: cursor ?? { offset: 0 } }
+  }
   async kill(): Promise<void> {}
   capabilities(): AdapterCapabilities {
     return { fork: false, revive: false, goalMode: false, subagent: false, structuredTrace: false }

@@ -49,6 +49,27 @@ export interface LegacySourceRef {
   imported_at: string
 }
 
+export interface WorkerSupervision {
+  version: 1
+  mode: 'default' | 'periodic_report'
+  next_due_at?: string
+  last_observed_at?: string
+  last_effective_review_at?: string
+  observation?: { mainline_seq: number; cursor: { offset: number } }
+  pending?: {
+    due_id: string
+    kind: 'default_review' | 'periodic_report'
+    due_at: string
+    attempts: number
+    retry_after_at?: string
+  }
+  periodic_report?: {
+    interval_ms: number
+    expires_at?: string
+    report_to: { channel_id: ModuleId; session_id: SessionId }
+  }
+}
+
 export interface LedgerWorker {
   worker_id: string
   /** Immutable session owner: storage, lookup, routing and read model all use this field. */
@@ -74,6 +95,7 @@ export interface LedgerWorker {
   }
   report_to: { channel_id: ModuleId; session_id: SessionId }
   incarnations: Incarnation[]
+  supervision?: WorkerSupervision
   legacy_source?: LegacySourceRef
   updated_at: string
 }

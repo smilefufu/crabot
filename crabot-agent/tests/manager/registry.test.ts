@@ -384,6 +384,26 @@ describe('ManagerRegistry', () => {
     expect(state.recent.length).toBeGreaterThan(0)
   })
 
+  it('routeSupervisionDue: 已被 clear 或替换的 due 不创建 Manager episode', async () => {
+    const { adapter, calls } = makeAdapter()
+    const isCurrent = vi.fn(async () => false)
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      harness: { ...FAKE_HARNESS, isSupervisionDueCurrent: isCurrent } as unknown as WorkerHarness,
+    }))
+    const event: HarnessEvent = {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'supervision_due',
+      worker_id: 'w-stale',
+      seq: 1,
+      detail: { mode: 'periodic_report', due_id: 'old-due', mainline_seq: 1, observation: 'none' },
+    }
+
+    await expect(registry.routeSupervisionDue(event)).resolves.toBeUndefined()
+    expect(isCurrent).toHaveBeenCalledWith(event)
+    expect(calls).toHaveLength(0)
+  })
+
   it('operation notification 在 owning Manager 正执行时 deferred，不塞进当前 mailbox', async () => {
     const calls: LLMStreamParams[] = []
     const entered = deferred()

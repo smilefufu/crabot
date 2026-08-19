@@ -66,6 +66,8 @@ import type {
   WorkerContractState,
   Workspace,
 } from '../types.js'
+import { classifySupervisionActivity } from '../types.js'
+import type { SupervisionObservation } from '../types.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -1113,6 +1115,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
+    const { events, nextCursor } = await this.readTraceWindow(h, cursor)
+    return { events, nextCursor }
+  }
+
+  private async readTraceWindow(
+    h: IncarnationHandle,
+    cursor?: TraceCursor,
+  ): Promise<{ sourceAvailable: boolean; events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
     // 四轮 review 修复:trace 文件路径依赖 workspace root,以前这个信息只存在于内存 runtime
     // 里(meta.json 不落它),不像 readOutput 那样有约定路径可以脱离内存重建——ensureRuntime
     // 现在从 meta 里的 workspace_root 字段(本轮新增持久化)重建它,readTrace 因此也能在
@@ -1138,7 +1148,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     } catch (err) {
       // 文件缺失(化身还没写过 trace,或 fork 化身的占位 session_id 本就对不上真实文件)
       // 退化为空数组,cursor 原样透传——没有新内容可消费,调用方下次仍从原位置续读。
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { events: [], nextCursor: cursor ?? { offset: 0 } }
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
       throw err
     }
 
@@ -1162,7 +1172,20 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       if (event) events.push({ ...event, source_offset: i })
       consumed = i + 1
     }
-    return { events, nextCursor: { offset: consumed } }
+    return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
+  }
+
+  async inspectSupervisionActivity(
+    h: IncarnationHandle,
+    cursor?: { readonly offset: number },
+  ): Promise<SupervisionObservation> {
+    try {
+      const trace = await this.readTraceWindow(h, cursor)
+      if (!trace.sourceAvailable) return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
+      return classifySupervisionActivity(trace.events, trace.nextCursor)
+    } catch {
+      return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
+    }
   }
 
   async kill(h: IncarnationHandle): Promise<void> {

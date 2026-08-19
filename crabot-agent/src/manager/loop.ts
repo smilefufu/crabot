@@ -161,6 +161,8 @@ export interface EpisodeResult {
    * ——工具执行结果是否 is_error 不参与判定。
    */
   readonly repliedToHuman: boolean
+  /** Successful `send_message` deliveries, paired with their tool results by tool_use_id. */
+  readonly successfulSendMessageTargets: ReadonlyArray<{ readonly channel_id: string; readonly session_id: string }>
 }
 
 export interface ManagerLoopDeps {
@@ -374,7 +376,14 @@ export class ManagerLoop {
     if (envelope === undefined && carriedEnvelopes.length === 0) {
       // 自唤醒但 mailbox 已空(残留被排在前面的另一个 episode 顺带 drain 走了)——
       // 没有任何新内容,直接空转返回,不开 episode(见 drainMailbox 注释)。
-      return { episodeId, outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
+      return {
+        episodeId,
+        outcome: 'completed',
+        turns: 0,
+        consumedEvents: true,
+        repliedToHuman: false,
+        successfulSendMessageTargets: [],
+      }
     }
     const eventText = envelope === undefined ? undefined : this.renderEnvelope(envelope)
     this.currentEpisodeInjected = []
@@ -513,9 +522,13 @@ export class ManagerLoop {
 
     let attempt = await this.runAttempt(episodeId, state, tailMessages, adapter, model)
     let totalTurnsUsed = attempt.result.totalTurns
+    let usedForceHotRetry = false
     // 与 totalTurnsUsed 同一套累加纪律:兜底重试会整体丢弃首次尝试的 finalMessages,但首次
     // 尝试里已经发出去的话人类是真的收到了——只看重试那一份会把"说过话"错报成"没说过"。
     let repliedToHuman = detectRepliedToHuman(attempt.result.finalMessages)
+    let successfulSendMessageTargets = successfulSendMessageTargetsOf(
+      attempt.result.finalMessages.slice(attempt.initialMessageCount),
+    )
 
     // max_tokens 兜底(§4.2):disableCompaction 关掉了 engine 自己的强压重试路径,
     // 这里识别到"上下文超限收场"时强制 force_hot 折叠一次并重试一次,仍失败就放弃。
@@ -532,6 +545,7 @@ export class ManagerLoop {
       // envelopes and mid-episode supplements are a protected tail (§14.4).
       const forceDecision = forceHotFold(state, this.deps.policy, this.deps.estimateTokens, nowMs)
       if (forceDecision.kind !== 'none') {
+        usedForceHotRetry = true
         state = await this.applyFoldWithSpan(episodeId, state, forceDecision, adapter, model)
         // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
         this.mailbox.drainEnvelopes()
@@ -543,6 +557,10 @@ export class ManagerLoop {
         const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model)
         totalTurnsUsed += retryAttempt.result.totalTurns
         repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages)
+        successfulSendMessageTargets = [
+          ...successfulSendMessageTargets,
+          ...successfulSendMessageTargetsOf(retryAttempt.result.finalMessages.slice(retryAttempt.initialMessageCount)),
+        ]
         attempt = retryAttempt
       }
       // forceDecision.kind === 'none':无法进一步压缩,直接接受第一次尝试的结果,不重试
@@ -562,9 +580,29 @@ export class ManagerLoop {
     const consumedEvents = attempt.result.outcome === 'completed' || attempt.result.outcome === 'max_turns'
 
     if (consumedEvents) {
+      const priorRecent = state.recent
       const newRecent = attempt.result.finalMessages.slice(attempt.hasSummaryMarker ? 1 : 0)
       state = { ...state, recent: newRecent, lastActiveAt: this.deps.now().toISOString() }
       await this.deps.store.save(state)
+      const localSupervisionSummary = defaultSupervisionHistorySummary({
+        envelope,
+        carriedEnvelopes,
+        injectedEnvelopes: this.currentEpisodeInjected ?? [],
+        outcome: attempt.result.outcome,
+        usedForceHotRetry,
+        priorRecentCount: priorRecent.length,
+        hasSummaryMarker: attempt.hasSummaryMarker,
+        finalMessages: attempt.result.finalMessages,
+        startedAt: envelope?.received_at,
+        endedAt: this.deps.now().toISOString(),
+      })
+      if (localSupervisionSummary) {
+        state = {
+          ...state,
+          recent: [...priorRecent, createUserMessage(localSupervisionSummary)],
+        }
+        await this.deps.store.save(state)
+      }
     } else {
       // 放弃 episode:已落盘的折叠不回滚(见文件头)——若本次途中发生过 force_hot 折叠
       // (上面 max_tokens 兜底重试路径),carriedTexts/eventText 有可能已经作为
@@ -590,6 +628,7 @@ export class ManagerLoop {
       turns: totalTurnsUsed,
       consumedEvents,
       repliedToHuman,
+      successfulSendMessageTargets,
     }
     this.deps.onEpisodeEnd?.(result)
     return result
@@ -737,7 +776,7 @@ export class ManagerLoop {
     tailMessages: ReadonlyArray<EngineMessage>,
     adapter: LLMAdapter,
     model: string,
-  ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean }> {
+  ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean; readonly initialMessageCount: number }> {
     this.attemptCounter += 1
     let assistantTextEndTurnReminderSent = false
     const hasSummaryMarker = state.rollingSummary !== undefined
@@ -789,7 +828,7 @@ export class ManagerLoop {
       initialMessages,
     })
 
-    return { result, hasSummaryMarker }
+    return { result, hasSummaryMarker, initialMessageCount: initialMessages.length }
   }
 
 }
@@ -874,6 +913,38 @@ function detectRepliedToHuman(finalMessages: ReadonlyArray<EngineMessage>): bool
     }
   }
   return false
+}
+
+/**
+ * `send_message` has delivery semantics that are narrower than the generic "replied" signal.
+ * Pair each assistant tool_use with its following tool result so a failed call, or a successful
+ * call to another session, cannot consume a worker's periodic-report responsibility.
+ */
+function successfulSendMessageTargetsOf(
+  finalMessages: ReadonlyArray<EngineMessage>,
+): Array<{ readonly channel_id: string; readonly session_id: string }> {
+  const pending = new Map<string, { readonly channel_id: string; readonly session_id: string }>()
+  const targets: Array<{ readonly channel_id: string; readonly session_id: string }> = []
+  for (const message of finalMessages) {
+    if (message.role === 'assistant') {
+      for (const block of message.content) {
+        if (block.type !== 'tool_use' || block.name !== 'send_message') continue
+        const channelId = block.input.channel_id
+        const sessionId = block.input.session_id
+        if (typeof channelId === 'string' && typeof sessionId === 'string') {
+          pending.set(block.id, { channel_id: channelId, session_id: sessionId })
+        }
+      }
+      continue
+    }
+    if (!('toolResults' in message)) continue
+    for (const result of message.toolResults) {
+      const target = pending.get(result.tool_use_id)
+      pending.delete(result.tool_use_id)
+      if (target && !result.is_error) targets.push(target)
+    }
+  }
+  return targets
 }
 
 /** Manager-only mailbox: envelopes remain authoritative; the engine receives deterministic text. */
@@ -1003,6 +1074,76 @@ function renderWorkerEvent(event: HarnessEvent): string {
   if (typeof text === 'string' && text.length > 0) parts.push(`worker 最后说:\n${text}`)
   if (typeof summary === 'string' && summary.length > 0) parts.push(`worker 的收尾结论:\n${summary}`)
   return parts.join('\n')
+}
+
+const SUPERVISION_READ_ONLY_TOOL_NAMES = new Set([
+  'read_worker_output',
+  'list_workers',
+  'get_worker_detail',
+  'get_history',
+  'get_message',
+  'lookup_friend',
+  'list_sessions',
+  'list_contacts',
+  'list_groups',
+  'list_group_members',
+  'fetch_media',
+  'read_feishu_document',
+  'feishu_raw_get',
+  'feishu_download_file',
+  'get_system_status',
+  'get_deployment_info',
+  'list_schedules',
+  'get_config_summary',
+  'list_capabilities',
+  'get_friend_permissions',
+  'mcp__crab-memory__search_memory',
+  'mcp__crab-memory__get_memory_detail',
+  'mcp__crab-memory__search_long_term',
+  'mcp__crab-memory__list_recent',
+  'mcp__crab-memory__list_entries',
+  'mcp__crab-memory__get_stats',
+  'mcp__crab-memory__get_evolution_mode',
+  'mcp__crab-memory__get_scene_profile',
+])
+
+function defaultSupervisionHistorySummary(args: {
+  readonly envelope: TimedWakeEnvelope | undefined
+  readonly carriedEnvelopes: ReadonlyArray<TimedWakeEnvelope>
+  readonly injectedEnvelopes: ReadonlyArray<TimedWakeEnvelope>
+  readonly outcome: EpisodeResult['outcome']
+  readonly usedForceHotRetry: boolean
+  readonly priorRecentCount: number
+  readonly hasSummaryMarker: boolean
+  readonly finalMessages: ReadonlyArray<EngineMessage>
+  readonly startedAt: string | undefined
+  readonly endedAt: string
+}): string | undefined {
+  const event = args.envelope?.wake.kind === 'worker_event' ? args.envelope.wake.event : undefined
+  if (
+    event?.kind !== 'supervision_due' ||
+    event.detail?.mode !== 'default' ||
+    args.carriedEnvelopes.length !== 0 ||
+    args.injectedEnvelopes.length !== 0 ||
+    args.outcome !== 'completed' ||
+    args.usedForceHotRetry
+  ) return undefined
+
+  const start = (args.hasSummaryMarker ? 1 : 0) + args.priorRecentCount + 1
+  const episodeMessages = args.finalMessages.slice(start)
+  for (const message of episodeMessages) {
+    if (message.role !== 'assistant') continue
+    for (const block of message.content) {
+      if (block.type === 'tool_use' && !SUPERVISION_READ_ONLY_TOOL_NAMES.has(block.name)) return undefined
+    }
+  }
+
+  const observation = typeof event.detail.observation === 'string' ? event.detail.observation : 'unknown'
+  return (
+    `[任务巡检摘要] worker_id=${event.worker_id}; ` +
+    `时间=${args.startedAt ?? event.ts} 至 ${args.endedAt}; ` +
+    `进展分类=${observation}; 未执行外部动作。`
+  )
 }
 
 /**
