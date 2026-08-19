@@ -77,12 +77,12 @@ import type {
   ForkOptions,
   IncarnationEndReason,
   StateChangeReport,
-  OutputCursor,
   SpawnSpec,
   SendInputOptions,
   WorkerAdapter,
   WorkerContractState,
   Workspace,
+  WorkerTerminalView,
 } from '../types.js'
 import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
@@ -265,7 +265,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       /**
        * `report.lastText`：本次状态转换所在**轮次边界**上，worker 最后说的那段
        * assistant 文字。harness 会把它（截断后）塞进唤醒事件的 detail，manager 因此醒来
-       * 就知道 worker 说了什么，不必先往返一次 `read_worker_output`。
+       * 就知道 worker 说了什么。
        * 只有 builtin 传：它的输出天然只有 assistant text（`partitionResponseContent` 只取
        * `type==='text'`，工具调用/结果一个字节都不进），符合"只要 text 不要 tool use"。
        * cc/codex 刻意不传，理由见各自 adapter 的 transitionState 注释。
@@ -543,10 +543,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     this.trackRun(this.runBurst(instance, h, startBurst), instance, h, 'runBurst (sendInput continuation)')
   }
 
-  async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
+  async readTerminal(h: IncarnationHandle): Promise<WorkerTerminalView> {
     const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
     const outputLog = instance ? instance.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
-    return outputLog.read(cursor)
+    const { chunk } = await outputLog.read({ offset: 0 })
+    return chunk ? { kind: 'headless_text', text: chunk } : { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
   }
 
   async lastActivityAt(h: IncarnationHandle): Promise<number | undefined> {

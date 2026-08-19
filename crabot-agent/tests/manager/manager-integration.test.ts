@@ -44,7 +44,6 @@ import type {
   SpawnSpec,
   DetectResult,
   WorkerContractState,
-  OutputCursor,
   AdapterCapabilities,
 } from '../../src/workers/types'
 
@@ -201,8 +200,8 @@ class ForklessStubAdapter implements WorkerAdapter {
     throw new Error('ForklessStubAdapter.fork: unreachable, capabilities().fork is false')
   }
   async sendInput(): Promise<void> {}
-  async readOutput(): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    return { chunk: '', nextCursor: { offset: 0 } }
+  async readTerminal() {
+    return { kind: 'unavailable' as const, unavailable_reason: 'headless_without_text' }
   }
   async state(): Promise<WorkerContractState> {
     return 'running'
@@ -393,7 +392,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
 
   it(
     '场景一：routeHumanMessages(私聊)→ manager spawn_worker → 真实 builtin worker(mock LLM)finish_task ' +
-      '→ harness 事件经 routeWorkerEvent 唤醒同一 manager → read_worker_output → send_message → end_turn',
+      '→ harness 事件经 routeWorkerEvent 唤醒同一 manager → get_worker_terminal → send_message → end_turn',
     async () => {
       const managerScript = makeManagerAdapter()
       const managerNowMs = Date.parse('2026-01-01T00:00:00.000Z')
@@ -440,9 +439,9 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       const exitedEvent = findWorkerExitedEvent(assembly.events, worker.worker_id)
       expect(exitedEvent).toBeDefined()
 
-      // episode 2：harness 事件经 routeWorkerEvent 唤醒同一 manager → read_worker_output → send_message → end_turn
+      // episode 2：harness 事件经 routeWorkerEvent 唤醒同一 manager → get_worker_terminal → send_message → end_turn
       managerScript.queue.push({
-        toolCalls: [{ name: 'read_worker_output', id: 'call_read', input: { worker_id: worker.worker_id } }],
+        toolCalls: [{ name: 'get_worker_terminal', id: 'call_read', input: { worker_id: worker.worker_id } }],
         stopReason: 'tool_use',
       })
       managerScript.queue.push({
@@ -474,7 +473,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       // 工具调用序列符合预期
       expect(assembly.toolCallLog.filter((c) => c.key === key).map((c) => c.name)).toEqual([
         'spawn_worker',
-        'read_worker_output',
+        'get_worker_terminal',
         'send_message',
       ])
     },
@@ -519,7 +518,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       const exitedEventA = findWorkerExitedEvent(assembly.events, workerA.worker_id)!
 
       managerScript.queue.push({
-        toolCalls: [{ name: 'read_worker_output', id: 'r1', input: { worker_id: workerA.worker_id } }],
+        toolCalls: [{ name: 'get_worker_terminal', id: 'r1', input: { worker_id: workerA.worker_id } }],
         stopReason: 'tool_use',
       })
       managerScript.queue.push({ text: '巡检顺利完成，一切正常，例行事项，无需上报 master。', stopReason: 'end_turn' })
@@ -576,7 +575,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(workersAfterB.find((w) => w.worker_id === workerA.worker_id)!.task.status).toBe('completed')
 
       managerScript.queue.push({
-        toolCalls: [{ name: 'read_worker_output', id: 'r2', input: { worker_id: workerB.worker_id } }],
+        toolCalls: [{ name: 'get_worker_terminal', id: 'r2', input: { worker_id: workerB.worker_id } }],
         stopReason: 'tool_use',
       })
       managerScript.queue.push({
@@ -727,7 +726,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
 
   it(
     '场景五：worker end_turn 转 idle → 唤醒事件的 detail 带上它最后说的那段 text → ' +
-      'manager 醒来不调 read_worker_output 就能据此向人类汇报',
+      'manager 醒来不调 get_worker_terminal 就能据此向人类汇报',
     async () => {
       const managerScript = makeManagerAdapter()
       const managerNowMs = Date.parse('2026-01-01T00:00:00.000Z')
@@ -768,7 +767,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(idleEvent).toBeDefined()
       expect(idleEvent!.detail).toEqual({ to: 'idle', text: WORKER_SAY })
 
-      // 2) manager 被这条事件唤醒后，**不调 read_worker_output** 直接转述给人类
+      // 2) manager 被这条事件唤醒后，**不调 get_worker_terminal** 直接转述给人类
       managerScript.queue.push({
         toolCalls: [
           {
@@ -794,7 +793,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(wakeText).toContain('worker 最后说:')
       expect(wakeText).not.toContain('\\"text\\"')
 
-      // 4) 全程没有 read_worker_output —— 省掉的正是那次往返
+      // 4) 全程没有 get_worker_terminal —— 省掉的正是那次往返
       expect(assembly.toolCallLog.filter((c) => c.key === key).map((c) => c.name)).toEqual(['spawn_worker', 'send_message'])
 
       const sendCall = assembly.rpcCalls.find((c) => c.method === 'send_message')
@@ -881,8 +880,10 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       //    这不是断言实现细节,而是钉住"summary 是这条 worker 唯一的交付物"这个前提;
       //    前提不成立的话,后面的断言就退化成在测一条本来就有别的出口的路。
       expect(calledTools).toEqual(['read_notes'])
-      const output = await assembly.harness.readWorkerOutput(worker.worker_id, { offset: 0 })
-      expect(output.chunk).toBe('')
+      await expect(assembly.harness.getWorkerTerminal(worker.worker_id)).resolves.toEqual({
+        kind: 'unavailable',
+        unavailable_reason: 'headless_without_text',
+      })
 
       const exitedEvent = findExitedEvent()!
       // 1) 任务本身是成功的(finish_task(outcome:'completed') 的结构化确证照常落台账)
@@ -925,7 +926,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(wakeText).toContain('worker 的收尾结论:')
       expect(wakeText).not.toContain('\\"summary\\"')
 
-      // 5) 全程没有 read_worker_output —— 读了也是空的,这条路本来就走不通
+      // 5) 全程没有 get_worker_terminal —— 读了也是空的,这条路本来就走不通
       expect(assembly.toolCallLog.filter((c) => c.key === key).map((c) => c.name)).toEqual(['spawn_worker', 'send_message'])
       const sendCall = assembly.rpcCalls.find((c) => c.method === 'send_message')
       expect(sendCall).toBeDefined()

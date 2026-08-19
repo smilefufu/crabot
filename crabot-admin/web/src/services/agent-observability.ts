@@ -147,12 +147,11 @@ export interface WorkerTraceResult {
   unavailable_reason?: string
 }
 
-export interface WorkerOutputResult {
-  chunk: string
-  next_cursor?: string
-  unavailable_reason?: string
-  eof?: boolean
-}
+export type WorkerTerminalView =
+  | { kind: 'live_terminal'; text: string; captured_at: string }
+  | { kind: 'final_terminal'; text: string; captured_at: string }
+  | { kind: 'headless_text'; text: string; captured_at?: string }
+  | { kind: 'unavailable'; unavailable_reason: string }
 
 // ── 维护面（保留的专用 API）─────────────────────────────────────
 
@@ -224,12 +223,11 @@ export const agentObservabilityService = {
     return api.get(`/agent/workers/${encodeURIComponent(workerId)}/trace${suffix ? `?${suffix}` : ''}`)
   },
 
-  readWorkerOutput(workerId: string, opts: { seq?: number; cursor?: string } = {}): Promise<WorkerOutputResult> {
+  getWorkerTerminal(workerId: string, opts: { seq?: number } = {}): Promise<WorkerTerminalView> {
     const search = new URLSearchParams()
     if (opts.seq !== undefined) search.set('seq', String(opts.seq))
-    if (opts.cursor !== undefined) search.set('cursor', opts.cursor)
     const suffix = search.toString()
-    return api.get(`/agent/workers/${encodeURIComponent(workerId)}/output${suffix ? `?${suffix}` : ''}`)
+    return api.get(`/agent/workers/${encodeURIComponent(workerId)}/terminal${suffix ? `?${suffix}` : ''}`)
   },
 
   // ── 维护面 ──

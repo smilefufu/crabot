@@ -192,17 +192,4 @@ describe('OutputLog', () => {
     expect(next.nextCursor.offset).toBe(5)
   })
 
-  it('decode 在返回路径上生效,且 cap 作用在解码后的文本上', async () => {
-    const log = new OutputLog(logPath)
-
-    // 原文 900 字节里绝大部分是控制序列,解码后只剩 30 字节 —— cap=100 不该再截它
-    const raw = '\x1b[2J'.repeat(200) + 'the only line that matters'
-    await log.append(raw)
-
-    const { chunk } = await log.read({ offset: 0 }, 100, (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, ''))
-
-    expect(chunk).toBe('the only line that matters')
-    // 原始日志一字未动
-    expect(await fs.readFile(logPath, 'utf-8')).toBe(raw)
-  })
 })

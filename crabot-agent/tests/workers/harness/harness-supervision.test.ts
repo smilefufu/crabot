@@ -13,7 +13,6 @@ import type {
   ForkOptions,
   IncarnationHandle,
   IncarnationRef,
-  OutputCursor,
   SpawnSpec,
   SupervisionObservation,
   WorkerAdapter,
@@ -48,8 +47,8 @@ class SupervisionAdapter implements WorkerAdapter {
     throw new Error('not used by supervision')
   }
   async sendInput(): Promise<void> { this.sendInputCalls += 1 }
-  async readOutput(_h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    return { chunk: '', nextCursor: cursor }
+  async readTerminal() {
+    return { kind: 'unavailable' as const, unavailable_reason: 'headless_without_text' }
   }
   async state(): Promise<WorkerContractState> { this.stateCalls += 1; return this.contractState }
   async inspectSupervisionActivity(): Promise<SupervisionObservation> {

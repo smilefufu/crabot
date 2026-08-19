@@ -74,12 +74,12 @@ import type {
   IncarnationEndReason,
   StateChangeReport,
   SpawnSpec,
-  OutputCursor,
   CapabilityBundle,
   WorkerCapabilityContext,
   Workspace,
   SendInputOptions,
   ForkOptions,
+  WorkerTerminalView,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import type { ResolvedPermissions } from '../../types'
@@ -147,10 +147,8 @@ const HANDOFF_TAIL_MAX_CHARS = 4096
  * 3. worker 一轮的收尾发言(结论、进度、提问)绝大多数在几百字符内,2000 已覆盖典型情形。
  *
  * **截断方向按来源分**,不是一刀切(见 truncateWakeText 的 `keep`):`lastText` 是 worker
- * 说的话,开门见山给结论 → 保头;`outputTail` 是 pane 日志的尾巴,值钱的那段(拦住启动的
- * 模态框)就在最末尾 → 保尾。两种情况都附标记:标记本身就是给 manager 的指引——被截掉的
- * 那部分用 `read_worker_output` 按 offset 读(那条路本来就在,且不占常驻上下文)。两句提示
- * 的措辞不同,因为两者读得回来的东西不同,见 processStateChange 里给出提示语的那一处。
+ * 说的话,开门见山给结论 → 保头；`terminal` 是 CLI 的当前终端画面,较新的内容通常在末尾
+ * → 保尾。二者都只作为唤醒事件的有界现场，完整画面仍由 terminal view 读取。
  */
 const WAKE_TEXT_MAX_CHARS = 2000
 
@@ -259,9 +257,8 @@ function sanitizeOperationFailureReason(
  *    出处),不像 `text` 每个轮次边界都要付一遍。量纲对齐 handoff 那份
  *    `HANDOFF_TAIL_MAX_CHARS`(4096)——同样是"每次交接才付一回"。
  * 2. **它常常是唯一的交付物**。一个全程只调工具、最后 `finish_task` 收场的 worker,
- *    `output.log` 与 `text` 双双为空,截狠了就是把交付物截没;而且截掉的部分**无处可补**
- *    ——summary 不进 output,`read_worker_output` 读不到它。这与 `text` 的处境根本不同
- *    (text 截断后还能按 offset 去读全文),所以宁可给宽。
+ *    纯文本 artifact 与 `text` 双双为空,截狠了就是把交付物截没；而且截掉的部分**无处可补**。
+ *    所以 summary 的上限比一般唤醒文本更宽。
  *
  * `finish_task` 要的是"一句话总结",典型几十到几百字符,4096 事实上是个防失控上限,
  * 不是常规裁剪线。
@@ -273,14 +270,12 @@ const WAKE_SUMMARY_MAX_CHARS = 4096
  * WAKE_TEXT_MAX_CHARS / WAKE_SUMMARY_MAX_CHARS);空白/空串一律折成 undefined
  * (不往 detail 里塞空字段)。
  *
- * `overflowHint` 必须如实:它是给 manager 的指引,指向一条读得到全文的路。指向读不到的
- * 地方(比如让它去 `read_worker_output` 找一份根本不进 output 的 summary)只会换来一次
- * 白跑的往返和一个"东西丢了"的错误结论。没有这样的路时就留空。
+ * `overflowHint` 必须如实:它只能指向确实可读到全文的路径；没有这样的路时就留空，不能
+ * 为了显得可恢复而编造读取入口。
  *
  * `keep` 由调用方按该段正文"信息在哪一头"显式给出,**不设默认值**——三段正文的方向不是同
- * 一个:`lastText`/`summary` 是发言,重点在开头,保头;`outputTail` 是日志尾巴,唯一有诊断
- * 价值的那段(把启动卡住的模态框)恰恰在最末尾,保头等于把这条 detail 的全部价值截掉
- * (同 #69 给 `read_worker_output` 改保尾的理由)。截断标记跟着被丢弃的那一侧放。
+ * 一个:`lastText`/`summary` 是发言,重点在开头,保头;CLI `terminal` 是当前画面,较新的
+ * 内容通常在末尾,保尾。截断标记跟着被丢弃的那一侧放。
  */
 function truncateWakeText(
   text: string | undefined,
@@ -324,7 +319,7 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
   if (state === 'exited') {
     return { to: 'exited', kind: 'initial_input_settled', ...(report?.endReason ? { reason: report.endReason } : {}) }
   }
-  const text = report?.outputTail?.trim()
+  const text = report?.terminal?.kind === 'unavailable' ? '' : report?.terminal?.text?.trim()
   if (report?.notification) {
     return {
       to: state,
@@ -390,12 +385,12 @@ const SUPERVISION_RETRY_INTERVAL_MS = 5 * 60_000
 const WORKER_SWEEP_CONCURRENCY = 8
 
 /**
- * 巡检发现停摆时,随唤醒事件交给 manager 的那段正文:pane 输出尾部 + 一句合成指引。
+ * 巡检发现停摆时,随唤醒事件交给 manager 的那段正文:当前终端画面尾部 + 一句合成指引。
  *
  * **指引排在尾部,不排在头部**:这段正文会经 `truncateWakeText(..., 'tail')` 保尾截断,
- * 排在头部会被整句丢掉——这是 #70 review 的教训,与 `describeStartupStall` 同一处理。
+ * 排在头部会被整句丢掉——这是 #70 review 的教训。
  *
- * 指引本身是必须的:manager 光看一屏 TUI 字节看不出"这屏已经这么久没变过了",而"静默多久"
+ * 指引本身是必须的:manager 光看一屏 TUI 画面看不出"这屏已经这么久没变过了",而"静默多久"
  * 恰恰是它做判断(重投 / kill / 换实现)的全部依据。措辞不替 manager 下结论——巡检只负责
  * 让它知道,判断权在 manager(§4.3)。
  */
@@ -403,10 +398,10 @@ function describeLivenessStall(opts: { impl: WorkerImplId; staleMs: number; tail
   const minutes = Math.round(opts.staleMs / 60_000)
   const note =
     `[crabot] 活性巡检:该 ${opts.impl} 化身已经 ${minutes} 分钟没有新的可观察任务活动,` +
-    `但进程/会话仍然活着、台账仍记着 running。上面是它终端输出的尾部(已解码成可读文本,` +
-    `与 read_worker_output 同一形态)。**巡检不替你判断**它是干完了、在等输入,还是卡死了——` +
+    `但进程/会话仍然活着、台账仍记着 running。上面是本次直接捕获的终端当前画面。` +
+    `**巡检不替你判断**它是干完了、在等输入,还是卡死了——` +
     `请据现场决定下一步:仍是模态弹窗时可用 raw 模式敲键;清障后若落在空 composer,不能把弹窗消失当作恢复,` +
-    `应以非 raw 的 send_to_worker 重发完整任务,再用 output/事件确认确实前进;必要时 read_worker_output 诊断或 kill_worker 重来。`
+    `应以非 raw 的 send_to_worker 重发完整任务,再用事件确认确实前进;必要时终止 worker 后重来。`
   return `${opts.tail || '(终端至今没有任何输出)'}\n---\n${note}`
 }
 
@@ -777,7 +772,7 @@ export class WorkerHarness {
    * 这里只说 harness 拿它做什么:
    *
    * - `lastText`:截断后放进 `state_changed` 事件的 detail,让 manager 醒来就看得到 worker
-   *   说了什么,不必先往返一次 `read_worker_output`;
+   *   说了什么；
    * - `endReason`:据此落台账,不再自己猜(修复前这里硬编码 'completed',把 builtin 经
    *   `finish_task(outcome:'failed')` 结构化上报的失败真值整个丢掉,台账/task.status/
    *   对外事件/HANDOFF.md 四处一起记错)。
@@ -2137,11 +2132,12 @@ export class WorkerHarness {
     let tail = ''
     if (sourceAdapter) {
       try {
-        const { chunk } = await sourceAdapter.readOutput(sourceHandle, { offset: 0 })
-        tail = chunk.length > HANDOFF_TAIL_MAX_CHARS ? chunk.slice(chunk.length - HANDOFF_TAIL_MAX_CHARS) : chunk
+        const terminal = await sourceAdapter.readTerminal(sourceHandle)
+        const text = terminal.kind === 'unavailable' ? '' : terminal.text
+        tail = text.length > HANDOFF_TAIL_MAX_CHARS ? text.slice(text.length - HANDOFF_TAIL_MAX_CHARS) : text
       } catch (err) {
         // 读取交接材料失败不阻断交接本身——没有尾部信息的 HANDOFF.md 好过完全不交接。
-        console.error(`[WorkerHarness] handoff: readOutput failed for ${worker.worker_id}#${source.seq}, tail omitted:`, err)
+        console.error(`[WorkerHarness] handoff: readTerminal failed for ${worker.worker_id}#${source.seq}, tail omitted:`, err)
       }
     }
     const outcome = worker.task.outcome ?? source.ended_reason ?? 'unknown'
@@ -2295,11 +2291,7 @@ export class WorkerHarness {
    * "取最后一条匹配"原则,与 findIncarnation/patchIncarnationBySeq 的 (impl,seq) 判定同一
    * 纪律(见该函数注释)。seq 不存在时抛明确错误,不静默返回空 chunk。
    */
-  async readWorkerOutput(
-    workerId: string,
-    cursor: OutputCursor,
-    opts?: { seq?: number }
-  ): Promise<{ chunk: string; nextCursor: OutputCursor; unavailable_reason?: string }> {
+  async getWorkerTerminal(workerId: string, opts?: { seq?: number }): Promise<WorkerTerminalView> {
     const found = await this.deps.ledger.findWorker(workerId)
     if (!found) throw new WorkerNotFoundError(workerId)
     if (found.worker.incarnations.length === 0) throw new WorkerHasNoIncarnationError(workerId)
@@ -2307,26 +2299,23 @@ export class WorkerHarness {
       ? requireMainlineIncarnation(found.worker)
       : findIncarnationBySeq(found.worker, opts.seq)
     if (!incarnation) {
-      throw new Error(`WorkerHarness.readWorkerOutput: no incarnation with seq=${opts?.seq} found for worker ${workerId}`)
+      throw new Error(`WorkerHarness.getWorkerTerminal: no incarnation with seq=${opts?.seq} found for worker ${workerId}`)
     }
     if (isLegacyIncarnation(incarnation)) {
-      return {
-        chunk: '',
-        nextCursor: cursor,
-        unavailable_reason: 'legacy worker has no raw output',
-      }
+      return { kind: 'unavailable', unavailable_reason: 'legacy_without_terminal_snapshot' }
     }
     const adapter = this.deps.adapters.get(incarnation.impl)
     if (!adapter) {
-      throw new Error(`WorkerHarness.readWorkerOutput: no adapter registered for impl '${incarnation.impl}'`)
+      throw new Error(`WorkerHarness.getWorkerTerminal: no adapter registered for impl '${incarnation.impl}'`)
     }
     const handle: IncarnationHandle = {
       worker_id: workerId,
       seq: incarnation.seq,
       impl: incarnation.impl,
       session_ref: incarnation.session_ref,
+      ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
     }
-    return adapter.readOutput(handle, cursor)
+    return adapter.readTerminal(handle)
   }
 
   async hasWorker(workerId: string): Promise<boolean> {
@@ -3135,8 +3124,8 @@ export class WorkerHarness {
    * 而是"这个还在 running 的化身有情况"。不带 `taskStatus` 形参——没有伴随的 task 迁移,
    * 对外事件桥因此在"状态没变"那一步自然被去重掉(见 manager/events.ts)。
    *
-   * `readOutput` 只在首报那一次走(按其本来用途:把输出读给人/manager 看),不是拿它当活性
-   * 信号——活性信号是 `lastActivityAt`,那条路每轮只付一次 `fs.stat`。
+   * terminal capture 只在首报那一次发生，不把 TUI 刷新拿来当活性信号——活性信号是
+   * `lastActivityAt`，那条路每轮只读取原生会话或控制元数据。
    */
   private async reportLivenessStall(
     h: IncarnationHandle,
@@ -3151,15 +3140,16 @@ export class WorkerHarness {
     if (attempts === 0) {
       let tail = ''
       try {
-        tail = (await adapter.readOutput(h, { offset: 0 })).chunk
+        const terminal = await adapter.readTerminal(h)
+        tail = terminal.kind === 'unavailable' ? '' : terminal.text
       } catch (err) {
         // 读不到现场不该让唤醒本身泡汤:manager 至少要知道"这个化身静默了这么久"。
-        console.warn(`[WorkerHarness] sweepLiveness: readOutput failed for ${key}:`, err)
+        console.warn(`[WorkerHarness] sweepLiveness: readTerminal failed for ${key}:`, err)
       }
       text = truncateWakeText(
         describeLivenessStall({ impl: h.impl, staleMs, tail }),
         WAKE_TEXT_MAX_CHARS,
-        ',更早的屏幕内容用 read_worker_output 读',
+        '',
         'tail',
       )
     } else {
@@ -3817,25 +3807,12 @@ export class WorkerHarness {
     report?: StateChangeReport,
   ): Promise<void> {
     let settledCurrentExit = false
-    // 唤醒事件的两段正文:截断在这一处收口,三个 adapter 共用同一上限。text 截断后还能按
-    // offset 去 read_worker_output 读全文,summary 不进 output、没有这条后路,所以提示语
-    // 不同、上限也不同(见两个常量各自的注释)。
-    // `detail.text` 只有一个位置,两个来源按实现天然互斥:builtin 报 `lastText`(它的输出
-    // 天然只含 text,拆得出干净的最后一段发言);cc/codex 只在启动期就绪握手超时那一条
-    // 路径上报 `outputTail`(解码后的 pane 尾部,见 StateChangeReport.outputTail)。真同时
-    // 出现只可能来自未接线的第四个实现,那时以 `lastText` 优先——它是 worker 说的话本身,
-    // 而 `outputTail` 只是屏幕内容。两者的截断方向不同(发言保头 / 日志尾巴保尾,见
-    // truncateWakeText 的 `keep`),所以只能各自截完再取优先,不能先合流再截。
-    //
-    // 两个来源的溢出提示不共用一句(`overflowHint` 必须如实,见 truncateWakeText):
-    // - `lastText` 整段都进 output 日志,截掉的部分按 offset 读得回来 → "全文用 … 读";
-    // - `outputTail` 是"pane 尾部 + 一句合成指引"(见 describeStartupStall),那句指引不在
-    //   output 日志里,读不回来。它被排在正文末尾、保尾截断永远保得住,所以这里被丢掉的
-    //   一定是更早的**屏幕内容**——那部分才是 read_worker_output 读得到的东西。提示语照实
-    //   说成"更早的屏幕内容",不承诺一个读不回来的"全文"(#67 给 summary 去掉这句同源)。
+    // 唤醒事件的两段正文在这里统一截断。`detail.text` 只有一个位置，builtin 报
+    // `lastText`，cc/codex 报当前 terminal view；两者天然互斥。若未来某实现同时上报，
+    // 以 worker 的发言 `lastText` 为准。发言保头，终端画面保尾，必须各自截断后再取优先。
     const wakeText =
-      truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, ',全文用 read_worker_output 读', 'head') ??
-      truncateWakeText(report?.outputTail, WAKE_TEXT_MAX_CHARS, ',更早的屏幕内容用 read_worker_output 读', 'tail')
+      truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, '', 'head') ??
+      truncateWakeText(report?.terminal?.kind === 'unavailable' ? undefined : report?.terminal?.text, WAKE_TEXT_MAX_CHARS, '', 'tail')
     const wakeSummary = truncateWakeText(report?.summary, WAKE_SUMMARY_MAX_CHARS, '', 'head')
     // detail 里两段正文的组装收口在这里,fork 分支与主线分支共用——不在两处各拼一遍。
     const wakeDetail = {
@@ -4150,15 +4127,15 @@ export class WorkerHarness {
 /**
  * 主线化身链上的最新化身:排除所有 forked_from 有值的一次性侧问分支(protocol-agent-v3
  * §3、§5.3)。fork 出的化身会被 push 进同一个 incarnations 数组,若继续取"数组最后一个"
- * 当作当前化身,fork 之后 send_to_worker / kill_worker / read_worker_output / 化身自然结束
+ * 当作当前化身,fork 之后 send_to_worker / kill_worker / get_worker_terminal / 化身自然结束
  * 的状态回调全部会被错误地转发到侧问分支——主线因此失联(实测复现:spawn → queryWorker →
  * sendToWorker/killWorker 都 target 到 fork 的 seq,而不是主线 seq)。
  *
  * 前提:worker.incarnations 非空(每个已注册的 worker 至少有 spawn 落下的 seq=1 主线化身)。
  *
  * P5 review 修复 additive:导出给 `get_worker_trace` 的 handler 复用——§8.3 两个按化身读的
- * 端点(output/trace)在调用方没给 seq 时必须落在**同一个**化身上,而 output 那条路
- * (`readWorkerOutput`)本来就是用本函数取缺省。trace 侧若自己再写一遍"排除 forked_from
+ * 端点(terminal/trace)在调用方没给 seq 时必须落在**同一个**化身上；terminal 读取也使用
+ * 本函数取缺省。trace 侧若自己再写一遍"排除 forked_from
  * 取最后一条",就会让"主线是哪个化身"出现第二处真相。
  */
 export function mainlineIncarnation(worker: LedgerWorker): Incarnation | undefined {
@@ -4297,7 +4274,7 @@ function findIncarnation(worker: LedgerWorker, impl: WorkerImplId, seq: number):
 }
 
 /**
- * `readWorkerOutput(workerId, cursor, { seq })` 专用:按 seq 精确定位一个化身条目(不限
+ * `getWorkerTerminal(workerId, { seq })` 专用:按 seq 精确定位一个化身条目(不限
  * 主线/fork,取最后一条匹配——与 findIncarnation 的 (impl,seq) 判定同一"取最后一条"原则)。
  * 调用方(query_worker 触发的事件只给出 seq,不携带 impl)拿不到 impl 参与判定,因此只按
  * seq 匹配;实践中 fork 化身的 impl 恒等于其父化身(adapter.fork 与父化身共用同一个
@@ -4306,8 +4283,8 @@ function findIncarnation(worker: LedgerWorker, impl: WorkerImplId, seq: number):
  * 情况下"取最后一条"与本文件其它同类查找函数保持一致的降级行为,不单独处理。
  *
  * P5 review 修复(第二轮)additive:导出给 `get_worker_trace` 的 handler 复用——两个按化身读的
- * 端点(output/trace)对"显式给的 seq 存不存在"必须用同一份判定,否则 trace 侧自己写一遍
- * 就会与 readWorkerOutput 的"取最后一条匹配"原则漂移。纯可见性变更,零行为改动。
+ * 端点(terminal/trace)对"显式给的 seq 存不存在"必须用同一份判定,否则 trace 侧自己写一遍
+ * 就会与 getWorkerTerminal 的"取最后一条匹配"原则漂移。纯可见性变更,零行为改动。
  */
 export function findIncarnationBySeq(worker: LedgerWorker, seq: number): Incarnation | undefined {
   let lastMatch: Incarnation | undefined

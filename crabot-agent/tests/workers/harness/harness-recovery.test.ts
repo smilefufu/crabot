@@ -22,7 +22,6 @@ import type {
   IncarnationHandle,
   IncarnationRef,
   SpawnSpec,
-  OutputCursor,
   AdapterCapabilities,
   DetectResult,
 } from '../../../src/workers/types'
@@ -77,8 +76,8 @@ class FakeAdapter implements WorkerAdapter {
     throw new Error('FakeAdapter.sendInput: not exercised by harness-recovery tests')
   }
 
-  async readOutput(_h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    return { chunk: '', nextCursor: cursor }
+  async readTerminal() {
+    return { kind: 'unavailable' as const, unavailable_reason: 'headless_without_text' }
   }
 
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
@@ -350,8 +349,8 @@ describe('WorkerHarness empty-incarnation domain errors', () => {
 
     const operations = [
       () => harness.sendToWorker('w-system-only', 'input'),
-      () => harness.readWorkerOutput('w-system-only', { offset: 0 }),
-      () => harness.readWorkerOutput('w-system-only', { offset: 0 }, { seq: 1 }),
+      () => harness.getWorkerTerminal('w-system-only'),
+      () => harness.getWorkerTerminal('w-system-only', { seq: 1 }),
       () => harness.switchWorkerImpl('w-system-only', 'builtin'),
       () => harness.killWorker('w-system-only'),
       () => harness.queryWorker('w-system-only', 'status?'),

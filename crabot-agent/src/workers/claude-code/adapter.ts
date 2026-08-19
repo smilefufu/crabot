@@ -33,10 +33,11 @@ import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
 import { parseRawControlKeys } from '../tmux/raw-control.js'
-import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
+import { DEFAULT_PASTE_READY_TIMEOUT_MS, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
-import { decodeTerminalOutput } from '../terminal-output.js'
+import type { TmuxControlEndpoint } from '../tmux/control-monitor.js'
+import { readFinalTerminalSnapshot, writeFinalTerminalSnapshot } from '../tmux/terminal-snapshot.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { buildChildEnv } from '../../core/runtime-env.js'
@@ -58,13 +59,13 @@ import type {
   IncarnationRef,
   ForkOptions,
   NormalizedTraceEvent,
-  OutputCursor,
   SpawnSpec,
   SendInputOptions,
   TraceCursor,
   WorkerAdapter,
   WorkerContractState,
   Workspace,
+  WorkerTerminalView,
 } from '../types.js'
 import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
@@ -193,8 +194,10 @@ interface Runtime {
   readonly workspaceRoot: string
   /** tmux 会话名;fork 化身不进 tmux,恒为空串。 */
   readonly sessionName: string
+  readonly controlEndpoint?: TmuxControlEndpoint
   sessionId: string
-  readonly outputLog: OutputLog
+  /** 仅无头 fork 写入纯文本；交互式 tmux 化身不保留原始输出流。 */
+  readonly outputLog?: OutputLog
   readonly eventChannel: CliEventChannel
   controlState: CliControlState
   ended_reason?: IncarnationEndReason
@@ -215,6 +218,14 @@ interface Runtime {
   resumed?: boolean
   /** Present only for a headless query fork; mainline incarnations are owned by tmux. */
   headlessChild?: ChildProcess
+}
+
+type CapturedPane = PaneSnapshot & { captured_at: string }
+
+function controlMeta(runtime: Runtime): Record<string, string> {
+  return runtime.controlEndpoint
+    ? { control_socket: runtime.controlEndpoint.socket_path, control_monitor_id: runtime.controlEndpoint.monitor_id }
+    : {}
 }
 
 function instanceKey(h: { worker_id: string; seq: number }): string {
@@ -508,9 +519,35 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     })
   }
 
-  private async capture(runtime: Runtime): Promise<PaneSnapshot> {
+  private async capture(runtime: Runtime): Promise<CapturedPane> {
     const snapshot = await this.tmux.capturePane(runtime.sessionName)
-    return { ...snapshot, text: decodeTerminalOutput(snapshot.text) }
+    const captured = { text: snapshot.text, captured_at: new Date().toISOString() }
+    if (!snapshot.dead) {
+      await writeFinalTerminalSnapshot(runtime.dir, runtime.seq, captured.text, captured.captured_at).catch((error) => {
+        console.warn(`[ClaudeCodeAdapter] terminal snapshot write failed for ${runtime.worker_id}#${runtime.seq}:`, error)
+      })
+    }
+    return captured
+  }
+
+  private liveTerminal(snapshot: PaneSnapshot): WorkerTerminalView {
+    return { kind: 'live_terminal', text: snapshot.text, captured_at: snapshot.captured_at ?? new Date().toISOString() }
+  }
+
+  private async persistFinalTerminal(runtime: Runtime): Promise<WorkerTerminalView | undefined> {
+    try {
+      await this.capture(runtime)
+      const final = await readFinalTerminalSnapshot(runtime.dir, runtime.seq)
+      return final ? { kind: 'final_terminal', ...final } : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  private async isPasteReady(runtime: Runtime): Promise<boolean> {
+    return runtime.controlEndpoint
+      ? (await this.tmux.getPasteReadiness(runtime.controlEndpoint)).state === 'ready'
+      : false
   }
 
   private async sendRawInput(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
@@ -522,7 +559,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       keysSent = true
       const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
       if (hasClaudeInteraction(snapshot.text)) {
-        const report: StateChangeReport = { outputTail: snapshot.text, waitReason: 'interaction_required' }
+        const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'interaction_required' }
         await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, report, false)
         throw new CliInputStallError('not_pasted', 'waiting_action', report)
       }
@@ -531,7 +568,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         const next: CliControlState = runtime.controlState.kind === 'running'
           ? { kind: 'running' }
           : { kind: 'waiting_action', reason: 'input_pending' }
-        const report: StateChangeReport = { outputTail: snapshot.text, waitReason: 'input_pending' }
+        const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'input_pending' }
         await this.transitionControlState(runtime, h, next, report, false)
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
@@ -546,7 +583,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const reason = runtime.controlState.kind === 'waiting_action'
         ? runtime.controlState.reason
         : 'input_surface_unavailable'
-      const report: StateChangeReport = { outputTail: snapshot.text, waitReason: reason }
+      const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: reason }
       await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason }, report, false)
       throw new CliInputStallError('not_pasted', 'waiting_action', report)
     } catch (error) {
@@ -577,6 +614,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     let result
     try {
       baseline = (await this.capture(runtime)).text
+      if (!(await this.isPasteReady(runtime))) {
+        const snapshot = await this.capture(runtime)
+        const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'input_surface_unavailable' }
+        await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'input_surface_unavailable' }, report, notify)
+        return { control_state: 'waiting_action', disposition: 'not_pasted', report }
+      }
       result = await commitInput(
         {
           pasteText: async (value) => {
@@ -634,7 +677,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     else if (result.disposition === 'pending_in_ui') waitReason = 'input_pending'
     else waitReason = 'input_surface_unavailable'
     const report: StateChangeReport = {
-      outputTail: result.snapshot.text || baseline,
+      terminal: this.liveTerminal(result.snapshot),
       waitReason,
     }
     await this.transitionControlState(runtime, h, next, report, notify)
@@ -654,7 +697,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     await fs.mkdir(dir, { recursive: true })
 
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
-    const outputFile = join(dir, `output-${seq}.log`)
     // P6-B：managed active binary 优先（与 detect 同顺序）——「install→verify→派活跑的是
     // 不同 binary」的版本错配/command not found 由此杜绝。
     const spawnBin = await this.resolveBinForCommand()
@@ -663,7 +705,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
     // (session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id 可安全重试。
-    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile, env: spec.connection_env })
+    const controlEndpoint = await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, env: spec.connection_env })
 
     const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
     const runtime: Runtime = {
@@ -672,8 +714,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       dir,
       workspaceRoot: spec.workspace.root,
       sessionName,
+      controlEndpoint,
       sessionId,
-      outputLog: new OutputLog(outputFile),
       eventChannel,
       controlState: { kind: 'running' },
       stopBaseline: await this.initialStopBaseline(eventChannel),
@@ -681,7 +723,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       connectionEnv: spec.connection_env,
     }
 
-    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root })
+    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root, ...controlMeta(runtime) })
     this.runtimes.set(instanceKey(handle), runtime)
 
     // 启动期就绪握手(见 tmux/paste-ready.ts):等 cc 在 pane 里发出 \e[?2004h 之后再投递,
@@ -691,12 +733,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 等不到就**不投递**(协议 §5.5 的"不安全态暂扣"):prompt 原封不动留在 spec 里没有被
     // 消耗,manager 处理掉障碍后经 send_to_worker 重新投递即可,内容不丢。这里绝不能退化成
     // "超时了也照发"——那正是本次要根治的行为。
-    const pasteReady = await waitForPasteReady(outputFile, {
+    const pasteReady = await waitForPasteReady(() => runtime.controlEndpoint
+      ? this.tmux.getPasteReadiness(runtime.controlEndpoint)
+      : Promise.resolve({ state: 'unknown' }), {
       timeoutMs: this.pasteReadyTimeoutMs,
       isAlive: () => this.tmux.isAlive(sessionName),
     })
     if (!pasteReady) {
-      const initial_input = await this.initialStartupStall(runtime, handle, outputFile)
+      const initial_input = await this.initialStartupStall(runtime, handle)
       this.startEventWatch(runtime, handle)
       return { ...handle, initial_input }
     }
@@ -707,7 +751,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     } catch (err) {
       await this.getMutex(handle.worker_id).run(async () => {
         if (runtime.controlState.kind === 'exited') return
-        await this.tmux.killSession(runtime.sessionName)
         await this.transitionExited(runtime, handle, 'crashed')
       })
       throw err
@@ -760,7 +803,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     //   此之前失败,resumed 仍未被设置,后续重试不会被"已 resume"拒绝(P2 review #2)。
     let handle!: IncarnationHandle
     let runtime!: Runtime
-    let outputFile!: string
     await this.getMutex(prev.worker_id).run(async () => {
       if (prevRuntime.resumed) {
         throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
@@ -768,7 +810,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const seq = await this.nextSeq(prev.worker_id)
       handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
-      outputFile = join(dir, `output-${seq}.log`)
       // 不重复传 --permission-mode:provision 阶段已把 bypassPermissions 写进 settings.json,覆盖
       // 命令行没有重复声明的场景(resume 正是这样的场景)。危险确认开关则不接受 project
       // settings,必须与 spawn 对称地每次通过 --settings 注入。session_ref 是 cc 侧的会话 uuid,
@@ -779,7 +820,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const command = `${resumeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
-      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: opts?.connection_env })
+      const controlEndpoint = await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, env: opts?.connection_env })
 
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
       runtime = {
@@ -788,8 +829,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
         sessionName,
+        controlEndpoint,
         sessionId: prev.session_ref,
-        outputLog: new OutputLog(outputFile),
         eventChannel,
         controlState: { kind: 'running' },
         // 复用上一化身的 workspace ⇒ 事件文件里已有它留下的 stop 事件,基线必须现读现算。
@@ -798,17 +839,19 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         connectionEnv: opts?.connection_env,
       }
 
-      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, workspace_root: prevRuntime.workspaceRoot })
+      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, workspace_root: prevRuntime.workspaceRoot, ...controlMeta(runtime) })
       this.runtimes.set(instanceKey(handle), runtime)
       prevRuntime.resumed = true
     })
 
-    const pasteReady = await waitForPasteReady(outputFile, {
+    const pasteReady = await waitForPasteReady(() => runtime.controlEndpoint
+      ? this.tmux.getPasteReadiness(runtime.controlEndpoint)
+      : Promise.resolve({ state: 'unknown' }), {
       timeoutMs: this.pasteReadyTimeoutMs,
       isAlive: () => this.tmux.isAlive(runtime.sessionName),
     })
     if (!pasteReady) {
-      const initial_input = await this.initialStartupStall(runtime, handle, outputFile)
+      const initial_input = await this.initialStartupStall(runtime, handle)
       this.startEventWatch(runtime, handle)
       return { ...handle, initial_input }
     }
@@ -819,7 +862,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     } catch (err) {
       await this.getMutex(handle.worker_id).run(async () => {
         if (runtime.controlState.kind === 'exited') return
-        await this.tmux.killSession(runtime.sessionName)
         await this.transitionExited(runtime, handle, 'crashed')
       })
       throw err
@@ -928,7 +970,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     const appendOutput = (text: string) => {
       if (!text) return
-      outputWrites = outputWrites.then(() => runtime.outputLog.append(text))
+      outputWrites = outputWrites.then(() => runtime.outputLog!.append(text))
     }
     const establish = (sessionId: string): Promise<void> => {
       if (establishing) return establishing
@@ -1048,7 +1090,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       if (runtime.controlState.kind === 'waiting_action') {
         const snapshot = await this.capture(runtime)
-        const report: StateChangeReport = { outputTail: snapshot.text, waitReason: runtime.controlState.reason }
+        const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: runtime.controlState.reason }
         throw new CliInputStallError('not_pasted', 'waiting_action', report)
       }
 
@@ -1070,14 +1112,35 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return report
   }
 
-  /**
-   * 落盘的是 tmux `pipe-pane` 抓的**输出流**(TUI 逐帧重绘的转义序列增量),不是纯文本。
-   * 解码只发生在这条返回路径上(见 `terminal-output.ts`),磁盘上的原文一字不动。
-   */
-  async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    const runtime = this.runtimes.get(instanceKey(h))
-    const outputLog = runtime ? runtime.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
-    return outputLog.read(cursor, undefined, decodeTerminalOutput)
+  async readTerminal(h: IncarnationHandle): Promise<WorkerTerminalView> {
+    const dir = join(this.deps.dataDir, h.worker_id)
+    if (h.query_id) {
+      const { chunk } = await new OutputLog(join(dir, `output-${h.seq}.log`)).read({ offset: 0 })
+      return chunk ? { kind: 'headless_text', text: chunk } : { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
+    }
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime) {
+      const final = await readFinalTerminalSnapshot(dir, h.seq)
+      return final
+        ? { kind: 'final_terminal', ...final }
+        : { kind: 'unavailable', unavailable_reason: 'legacy_without_terminal_snapshot' }
+    }
+    if (runtime.headlessChild || !runtime.sessionName) {
+      if (!runtime.outputLog) return { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
+      const { chunk } = await runtime.outputLog.read({ offset: 0 })
+      return chunk ? { kind: 'headless_text', text: chunk } : { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
+    }
+    if (await this.tmux.isAlive(runtime.sessionName)) {
+      try {
+        return this.liveTerminal(await this.capture(runtime))
+      } catch {
+        return { kind: 'unavailable', unavailable_reason: 'terminal_capture_failed' }
+      }
+    }
+    const final = await this.persistFinalTerminal(runtime)
+    return final
+      ? final
+      : { kind: 'unavailable', unavailable_reason: runtime.controlState.kind === 'exited' ? 'no_final_terminal_snapshot' : 'terminal_session_missing' }
   }
 
   /**
@@ -1124,8 +1187,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     cursor?: TraceCursor,
   ): Promise<{ sourceAvailable: boolean; events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
     // 四轮 review 修复:trace 文件路径依赖 workspace root,以前这个信息只存在于内存 runtime
-    // 里(meta.json 不落它),不像 readOutput 那样有约定路径可以脱离内存重建——ensureRuntime
-    // 现在从 meta 里的 workspace_root 字段(本轮新增持久化)重建它,readTrace 因此也能在
+    // 里(meta.json 不落它)，进程重启后无法重建路径。现在从 meta 里的 workspace_root 字段
+    // (本轮新增持久化)重建它,readTrace 因此也能在
     // 无常驻 runtime 时工作,不再是"只能对本进程内常驻的化身调用"。
     const runtime = await this.ensureRuntime(h)
     if (!runtime) {
@@ -1201,8 +1264,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         if (!await terminateProcessTree(runtime.headlessChild)) {
           throw new Error(`ClaudeCodeAdapter.kill: fork process did not exit for ${h.worker_id}#${h.seq}`)
         }
-      } else {
-        await this.tmux.killSession(runtime.sessionName)
       }
       await this.transitionExited(runtime, h, 'killed')
     })
@@ -1285,7 +1346,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const alive = await this.tmux.isAlive(sessionName)
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
-      const outputFile = join(dir, `output-${ref.seq}.log`)
       const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
       const eventChannel = new CliEventChannel(eventsPath)
 
@@ -1301,8 +1361,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         dir,
         workspaceRoot,
         sessionName,
+        controlEndpoint: meta.control_socket && meta.control_monitor_id
+          ? { socket_path: meta.control_socket, monitor_id: meta.control_monitor_id }
+          : undefined,
         sessionId,
-        outputLog: new OutputLog(outputFile),
         eventChannel,
         controlState: controlFromMeta(meta, alive),
         ended_reason: alive ? undefined : meta.ended_reason,
@@ -1323,7 +1385,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     dir: string,
     seq: number,
   ): Promise<
-    { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean } | undefined
+    { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean; control_socket?: string; control_monitor_id?: string } | undefined
   > {
     try {
       const raw = await fs.readFile(join(dir, `meta-${seq}.json`), 'utf-8')
@@ -1357,21 +1419,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   /**
-   * `onStateChange` 的 `report.lastText`(轮次边界上 worker 最后说的那段话,harness 会把它
-   * 放进唤醒事件的 detail)在 cc/codex 这边**刻意不传**:
-   *
-   * 这两个实现拉起的是交互式 TUI,输出靠 `tmux pipe-pane -o ... 'cat >> <file>'` 落盘
-   * (见 workers/tmux/driver.ts),拿到的是**终端渲染态原始字节流**——ANSI 控制序列、光标
-   * 移动造成的重复重绘、边框、工具调用面板混在一起。把它塞进唤醒事件等于把这堆字节永久
-   * 写进 manager 的上下文和 episode 日志,污染远大于收益,而且每次转 idle 都要付一遍。
-   *
-   * `terminal-output.ts` 的解码只解决了"读得懂"这一半,另一半——"TUI 里哪一段才算 assistant
-   * 发言"——仍然无解,而那正是 `lastText` 的语义。所以 cc/codex 的唤醒事件只带状态,manager
-   * 需要正文时走 `read_worker_output`——那条路本来就通,行为与本次改动之前逐字一致。
-   *
-   * 唯一的例外是 `report.outputTail`(见 initialStartupStall):启动期就绪握手超时时,manager
-   * 手上没有任何别的线索能判断"卡在哪",而这是**每个化身至多付一次**的一次性成本,与上面
-   * "每轮都付一遍"的量纲完全不同。
+   * cc/codex 不报告 `lastText`：交互式 TUI 没有可靠的 assistant 发言边界。需要诊断现场时，
+   * 状态报告可带一次直接捕获的 terminal view；它是屏幕画面，不能伪装成 worker 的发言。
    */
   private async transitionControlState(
     runtime: Runtime,
@@ -1388,6 +1437,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       state: external,
       session_id: runtime.sessionId,
       workspace_root: runtime.workspaceRoot,
+      ...controlMeta(runtime),
       ...(state.kind === 'waiting_text' ? { wait_mode: 'text' as const } : {}),
       ...(state.kind === 'waiting_action' ? { wait_mode: 'action' as const, wait_reason: state.reason } : {}),
     })
@@ -1400,19 +1450,19 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     }
   }
 
-  private async initialStartupStall(
-    runtime: Runtime,
-    h: IncarnationHandle,
-    outputFile: string,
-  ): Promise<InitialInputResult> {
-    const tail = decodeTerminalOutput(await readOutputTail(outputFile))
+  private async initialStartupStall(runtime: Runtime, h: IncarnationHandle): Promise<InitialInputResult> {
+    const snapshot = await this.capture(runtime).catch(() => undefined)
     if (!(await this.tmux.isAlive(runtime.sessionName))) {
       await this.transitionExited(runtime, h, 'crashed', false)
-      return { control_state: 'exited', disposition: 'not_pasted', report: { endReason: 'crashed', outputTail: tail } }
+      return {
+        control_state: 'exited',
+        disposition: 'not_pasted',
+        report: { endReason: 'crashed', ...(snapshot ? { terminal: { kind: 'final_terminal', text: snapshot.text, captured_at: snapshot.captured_at } } : {}) },
+      }
     }
     const state: CliControlState = { kind: 'waiting_action', reason: 'startup_stall' }
     const report: StateChangeReport = {
-      outputTail: describeStartupStall({ impl: 'claude-code', timeoutMs: this.pasteReadyTimeoutMs, tail }),
+      ...(snapshot ? { terminal: this.liveTerminal(snapshot) } : {}),
       waitReason: 'startup_stall',
     }
     await this.transitionControlState(runtime, h, state, report, false)
@@ -1420,12 +1470,18 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   private async transitionExited(runtime: Runtime, h: IncarnationHandle, ended_reason: IncarnationEndReason, notify = true): Promise<void> {
+    let terminal: WorkerTerminalView | undefined
+    if (!runtime.headlessChild && runtime.sessionName) {
+      terminal = await this.persistFinalTerminal(runtime)
+      await this.tmux.killSession(runtime.sessionName)
+    }
     await writeMetaAtomic(runtime.dir, runtime.seq, {
       seq: runtime.seq,
       state: 'exited',
       session_id: runtime.sessionId,
       ended_reason,
       workspace_root: runtime.workspaceRoot,
+      ...controlMeta(runtime),
     })
     runtime.controlState = { kind: 'exited', reason: ended_reason }
     runtime.ended_reason = ended_reason
@@ -1434,7 +1490,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     await this.stopEventWatch(runtime)
     if (!notify) return
     try {
-      this.deps.onStateChange?.(h, 'exited', { endReason: ended_reason })
+      this.deps.onStateChange?.(h, 'exited', { endReason: ended_reason, ...(terminal ? { terminal } : {}) })
     } catch (err) {
       console.error(`[ClaudeCodeAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }
@@ -1473,7 +1529,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
           const message = typeof raw?.message === 'string' ? raw.message : undefined
           const title = typeof raw?.title === 'string' ? raw.title : undefined
           const report: StateChangeReport = {
-            outputTail: snapshot.text,
+            terminal: this.liveTerminal(snapshot),
             waitReason: 'interaction_required',
             notification: { type, ...(message ? { message } : {}), ...(title ? { title } : {}) },
           }

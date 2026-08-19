@@ -38,7 +38,6 @@ import type {
   CapabilityBundle,
   DetectResult,
   WorkerContractState,
-  OutputCursor,
   AdapterCapabilities,
 } from '../../src/workers/types'
 import type { LLMAdapter } from '../../src/engine/llm-adapter-types.js'
@@ -247,7 +246,7 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
         worker_id: prev.worker_id, seq: 3, impl: 'claude-code', session_ref: 'sess',
       }),
       sendInput: async () => {},
-      readOutput: async (_h: IncarnationHandle, _c: OutputCursor) => ({ chunk: '', nextCursor: { offset: 0 } }),
+      readTerminal: async () => ({ kind: 'unavailable' as const, unavailable_reason: 'headless_without_text' }),
       state: async (): Promise<WorkerContractState> => 'running',
       kill: async () => {},
       capabilities: (): AdapterCapabilities => ({ fork: true, revive: false, goalMode: false, subagent: false, structuredTrace: false }),

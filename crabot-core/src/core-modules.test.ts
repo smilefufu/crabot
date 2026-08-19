@@ -53,7 +53,7 @@ describe('buildCoreModules：DATA_DIR 顶层契约', () => {
 
   it('core Agent advertises the exact protocol-agent-v3 document version', () => {
     const agent = buildCoreModules(OPTS).find((module) => module.module_id === 'crabot-agent')
-    expect(agent?.protocol_version).toBe('3.2.0')
+    expect(agent?.protocol_version).toBe('3.4.0')
   })
 
   it('Windows 下不为 core Agent 启用不支持的 heapsnapshot signal', () => {

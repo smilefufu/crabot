@@ -314,7 +314,7 @@ describe('BuiltinWorkerAdapter', () => {
     await fs.rm(tmp, { recursive: true, force: true })
   })
 
-  it('spawn → burst end_turn → idle，输出可增量读', async () => {
+  it('spawn → burst end_turn → idle，纯文本终端视图可读', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({
       adapter: makeAdapter([{ text: '想了想，先问你：A 还是 B？', stopReason: 'end_turn' }]),
@@ -333,8 +333,10 @@ describe('BuiltinWorkerAdapter', () => {
 
     await waitState(adapter, h, 'idle')
 
-    const { chunk } = await adapter.readOutput(h, { offset: 0 })
-    expect(chunk).toContain('A 还是 B')
+    await expect(adapter.readTerminal(h)).resolves.toMatchObject({
+      kind: 'headless_text',
+      text: expect.stringContaining('A 还是 B'),
+    })
   })
 
   it('没有可读结构化 trace 时，巡检保守返回 unknown', async () => {
@@ -448,8 +450,10 @@ describe('BuiltinWorkerAdapter', () => {
     expect(exited!.report?.endReason).toBe('completed')
     // 前提如实成立:这条 worker 没有任何 assistant text,output 通道整个是空的。
     expect(exited!.report?.lastText ?? '').toBe('')
-    const { chunk } = await adapter.readOutput(h, { offset: 0 })
-    expect(chunk).toBe('')
+    await expect(adapter.readTerminal(h)).resolves.toEqual({
+      kind: 'unavailable',
+      unavailable_reason: 'headless_without_text',
+    })
   })
 
   it('finish_task 的 summary 不是字符串(LLM 乱填)→ 不上报,不把非文本当作 worker 的结论', async () => {
@@ -575,8 +579,10 @@ describe('BuiltinWorkerAdapter', () => {
     expect(serialized).toContain('第一轮回复') // 首轮 assistant 回复仍在上下文里
     expect(serialized).toContain('追加的问题') // 新注入的用户消息
 
-    const { chunk } = await adapter.readOutput(h, { offset: 0 })
-    expect(chunk).toContain('第二轮回复')
+    await expect(adapter.readTerminal(h)).resolves.toMatchObject({
+      kind: 'headless_text',
+      text: expect.stringContaining('第二轮回复'),
+    })
   })
 
   it('sendInput(running) → 进入待注入队列，burst 间隙自动续 burst，消息不丢', async () => {
@@ -741,12 +747,14 @@ describe('BuiltinWorkerAdapter', () => {
     expect(forkMeta.ended_reason).toBe('completed')
     expect(forkMeta.outcome).toBe('completed')
 
-    // fork 输出独立可读，且与主线输出互不串。
-    const forkOutput = await adapter.readOutput(forkHandle, { offset: 0 })
-    expect(forkOutput.chunk).toContain('侧问回复')
-    const mainOutput = await adapter.readOutput(h, { offset: 0 })
-    expect(mainOutput.chunk).toContain('首轮回复')
-    expect(mainOutput.chunk).not.toContain('侧问回复')
+    // fork 文本独立可读，且与主线输出互不串。
+    await expect(adapter.readTerminal(forkHandle)).resolves.toMatchObject({
+      kind: 'headless_text',
+      text: expect.stringContaining('侧问回复'),
+    })
+    const mainOutput = await adapter.readTerminal(h)
+    expect(mainOutput).toMatchObject({ kind: 'headless_text', text: expect.stringContaining('首轮回复') })
+    expect(mainOutput.kind === 'unavailable' ? '' : mainOutput.text).not.toContain('侧问回复')
 
     // fork 看得到主线历史：第二次 runEngine 调用（fork 的 burst）的 initialMessages 里
     // 含首轮 prompt、首轮 assistant 回复、以及 forkInput 本身。
@@ -1065,7 +1073,7 @@ describe('BuiltinWorkerAdapter', () => {
     expect(serialized.some((c) => c.includes('窗口期消息'))).toBe(true)
   })
 
-  it('续 burst 途中崩溃且 pendingInputs 非空 → readOutput 能读到 dead-letter 消息（真实调用链）', async () => {
+  it('续 burst 途中崩溃且 pendingInputs 非空 → 终端视图能读到 dead-letter 消息（真实调用链）', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const gate = deferred<void>()
     const s = spec({
@@ -1091,11 +1099,12 @@ describe('BuiltinWorkerAdapter', () => {
     gate.resolve()
     await waitState(adapter, h, 'exited')
 
-    const { chunk } = await adapter.readOutput(h, { offset: 0 })
-    expect(chunk).toContain('[dead-letter]')
-    expect(chunk).toContain('2 unsent message(s)')
-    expect(chunk).toContain('待处理消息1')
-    expect(chunk).toContain('待处理消息2')
+    const terminal = await adapter.readTerminal(h)
+    const text = terminal.kind === 'unavailable' ? '' : terminal.text
+    expect(text).toContain('[dead-letter]')
+    expect(text).toContain('2 unsent message(s)')
+    expect(text).toContain('待处理消息1')
+    expect(text).toContain('待处理消息2')
   })
 
   it('并发 resume 同一 prev：仅一次成功，无树分叉', async () => {
@@ -1352,8 +1361,8 @@ describe('BuiltinWorkerAdapter', () => {
 
     // 续 burst 没有真正起来：runEngine 调用次数仍停在 spawn 那一次，第二轮回复没被消费。
     expect(runEngineSpy).toHaveBeenCalledTimes(1)
-    const { chunk } = await adapter.readOutput(h, { offset: 0 })
-    expect(chunk).not.toContain('不应该被看到的第二轮回复')
+    const terminal = await adapter.readTerminal(h)
+    expect(terminal.kind === 'unavailable' ? '' : terminal.text).not.toContain('不应该被看到的第二轮回复')
   })
 
   it('kill idle 化身 → 直接 exited(killed)，不经过 burst', async () => {
@@ -1950,9 +1959,11 @@ describe('BuiltinWorkerAdapter', () => {
     expect(meta.ended_reason).toBe('failed')
     expect(meta.outcome).toBe('failed')
 
-    // manager 侧看得见原因：output 里有一条明确的错误信号，不再是"零输出零错误信号"。
-    const { chunk } = await adapter.readOutput(h, { offset: 0 })
-    expect(chunk).toContain('上下文超限')
+    // manager 侧看得见原因：文本视图有一条明确的错误信号，不再是"零输出零错误信号"。
+    await expect(adapter.readTerminal(h)).resolves.toMatchObject({
+      kind: 'headless_text',
+      text: expect.stringContaining('上下文超限'),
+    })
   })
 
   it('静默 max_tokens 命中时不再续 burst：pendingInputs 直接进 dead-letter', async () => {
@@ -1968,9 +1979,10 @@ describe('BuiltinWorkerAdapter', () => {
 
     const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { ended_reason: string }
     expect(meta.ended_reason).toBe('failed')
-    const { chunk } = await adapter.readOutput(h, { offset: 0 })
-    expect(chunk).toContain('[dead-letter]')
-    expect(chunk).toContain('再推一把')
+    const terminal = await adapter.readTerminal(h)
+    const text = terminal.kind === 'unavailable' ? '' : terminal.text
+    expect(text).toContain('[dead-letter]')
+    expect(text).toContain('再推一把')
   })
 
   it('fork burst 静默 max_tokens → exited(failed)，不是 completed', async () => {

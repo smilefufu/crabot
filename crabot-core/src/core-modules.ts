@@ -49,7 +49,7 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
       module_id: 'crabot-agent',
       module_type: 'agent',
       version: '0.2.0',
-      protocol_version: '3.2.0',
+      protocol_version: '3.4.0',
       entry: `node --max-old-space-size=2048 --heapsnapshot-near-heap-limit=3${agentHeapSnapshotSignal} dist/main.js`,
       cwd: o.agentDir,
       auto_start: fs.existsSync(path.join(o.agentDir, 'dist', 'main.js')),

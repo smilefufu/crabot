@@ -17,7 +17,6 @@ import type {
   IncarnationRef,
   SpawnSpec,
   Workspace,
-  OutputCursor,
   CapabilityBundle,
   AdapterCapabilities,
   DetectResult,
@@ -45,7 +44,7 @@ class FakeAdapter implements WorkerAdapter {
   readonly spawnCalls: SpawnSpec[] = []
   readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: SendInputOptions }> = []
   readonly killCalls: IncarnationHandle[] = []
-  readonly readOutputCalls: Array<{ h: IncarnationHandle; cursor: OutputCursor }> = []
+  readonly readTerminalCalls: IncarnationHandle[] = []
   private readonly states = new Map<string, WorkerContractState>()
   private nextForkSeq = 2
 
@@ -88,10 +87,10 @@ class FakeAdapter implements WorkerAdapter {
     if (this.opts.sendInputBehavior) this.opts.sendInputBehavior(h, text, opts)
   }
 
-  async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    this.readOutputCalls.push({ h, cursor })
-    const chunk = this.opts.outputChunk ?? ''
-    return { chunk, nextCursor: { offset: cursor.offset + chunk.length } }
+  async readTerminal(h: IncarnationHandle) {
+    this.readTerminalCalls.push(h)
+    const text = this.opts.outputChunk ?? ''
+    return text ? { kind: 'headless_text' as const, text } : { kind: 'unavailable' as const, unavailable_reason: 'headless_without_text' }
   }
 
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
@@ -197,7 +196,7 @@ afterEach(async () => {
 // ---- 工具面形状 ----
 
 describe('buildWorkerTools — 工具面形状', () => {
-  it('普通 Manager 有十项 worker 工具；read_worker_output/list_workers/get_worker_detail/list_worker_implementations 为只读', async () => {
+  it('普通 Manager 有十项 worker 工具；get_worker_terminal/list_workers/get_worker_detail/list_worker_implementations 为只读', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
 
@@ -209,7 +208,7 @@ describe('buildWorkerTools — 工具面形状', () => {
         'list_worker_implementations',
         'list_workers',
         'query_worker',
-        'read_worker_output',
+        'get_worker_terminal',
         'send_to_worker',
         'set_worker_periodic_report',
         'spawn_worker',
@@ -217,7 +216,7 @@ describe('buildWorkerTools — 工具面形状', () => {
     )
 
     const readOnlyNames = tools.filter((t) => t.isReadOnly).map((t) => t.name).sort()
-    expect(readOnlyNames).toEqual(['get_worker_detail', 'list_worker_implementations', 'list_workers', 'read_worker_output'])
+    expect(readOnlyNames).toEqual(['get_worker_detail', 'get_worker_terminal', 'list_worker_implementations', 'list_workers'])
   })
 })
 
@@ -434,38 +433,37 @@ describe('query_worker', () => {
   })
 })
 
-// ---- read_worker_output（同步，真实数据） ----
+// ---- get_worker_terminal（同步，完整终端视图） ----
 
-describe('read_worker_output', () => {
-  it('同步返回真实 chunk 与 next_offset', async () => {
+describe('get_worker_terminal', () => {
+  it('同步返回完整终端视图', async () => {
     const { harness } = await makeHarness({ outputChunk: '这是输出内容' })
     const worker = await harness.spawnWorker(directSpawnParams())
     const tools = buildWorkerTools({ harness, context: () => CTX })
-    const readWorkerOutput = tools.find((t) => t.name === 'read_worker_output')!
+    const getWorkerTerminal = tools.find((t) => t.name === 'get_worker_terminal')!
 
-    const result = await readWorkerOutput.call({ worker_id: worker.worker_id }, {})
+    const result = await getWorkerTerminal.call({ worker_id: worker.worker_id }, {})
     expect(result.isError).toBe(false)
     const parsed = parseOutput(result.output)
-    expect(parsed.chunk).toBe('这是输出内容')
-    expect(parsed.next_offset).toBe('这是输出内容'.length)
+    expect(parsed).toEqual({ worker_id: worker.worker_id, terminal: { kind: 'headless_text', text: '这是输出内容' } })
   })
 
   it('worker 不存在 → WorkerNotFoundError 转成可读 tool_result', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
-    const readWorkerOutput = tools.find((t) => t.name === 'read_worker_output')!
+    const getWorkerTerminal = tools.find((t) => t.name === 'get_worker_terminal')!
 
-    const result = await readWorkerOutput.call({ worker_id: 'w-nope' }, {})
+    const result = await getWorkerTerminal.call({ worker_id: 'w-nope' }, {})
     expect(result.isError).toBe(true)
     expect(result.output).toContain('不存在或当前会话无权访问')
   })
 
-  it('传 seq → 透传给 harness.readWorkerOutput，读到 query_worker 侧问化身的输出（不是主线）', async () => {
+  it('传 seq → 透传给 harness.getWorkerTerminal，读到 query_worker 侧问化身的输出（不是主线）', async () => {
     const { harness, fake } = await makeHarness({ caps: { fork: true }, outputChunk: '侧问答案' })
     const worker = await harness.spawnWorker(directSpawnParams())
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
-    const readWorkerOutput = tools.find((t) => t.name === 'read_worker_output')!
+    const getWorkerTerminal = tools.find((t) => t.name === 'get_worker_terminal')!
 
     await queryWorker.call({ worker_id: worker.worker_id, question: '现在进展如何？' }, {})
     await waitUntil(async () => {
@@ -473,11 +471,11 @@ describe('read_worker_output', () => {
       return w.incarnations.length === 2
     })
 
-    const result = await readWorkerOutput.call({ worker_id: worker.worker_id, seq: 2 }, {})
+    const result = await getWorkerTerminal.call({ worker_id: worker.worker_id, seq: 2 }, {})
     expect(result.isError).toBe(false)
     const parsed = parseOutput(result.output)
-    expect(parsed.chunk).toBe('侧问答案')
-    expect(fake.readOutputCalls.at(-1)?.h.seq).toBe(2)
+    expect(parsed).toMatchObject({ terminal: { kind: 'headless_text', text: '侧问答案' } })
+    expect(fake.readTerminalCalls.at(-1)?.seq).toBe(2)
   })
 })
 

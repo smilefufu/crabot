@@ -14,6 +14,14 @@ import { buildChildEnv, CORE_AGENT_RUNTIME_BEARER_ENV, scrubChildEnv } from '../
 import os from 'node:os'
 import { join } from 'node:path'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
+import {
+  controlMonitorPipeCommand,
+  createTmuxControlEndpoint,
+  readTmuxControlState,
+  removeTmuxControlEndpoint,
+  type PasteReadiness,
+  type TmuxControlEndpoint,
+} from './control-monitor.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -27,11 +35,13 @@ export interface TmuxSessionSpec {
   cwd: string
   command: string // 在 pane 内执行的命令行
   env?: Record<string, string>
-  outputFile: string // pipe-pane 追加目标
 }
 
 export interface PaneSnapshot {
   text: string
+  /** tmux 已用自己的 dead-pane 提示替换 viewport，text 不再是 worker 画面。 */
+  dead?: boolean
+  captured_at?: string
 }
 
 export class TmuxDriver {
@@ -50,9 +60,8 @@ export class TmuxDriver {
     }
   }
 
-  async newSession(spec: TmuxSessionSpec): Promise<void> {
-    // pipe-pane 首次落盘前文件应已存在,方便调用方直接 watch;不截断已存在内容。
-    await fs.writeFile(spec.outputFile, '', { flag: 'a' })
+  async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+    const controlEndpoint = await createTmuxControlEndpoint()
 
     // P6-B 安全（两层）：
     // ① credential 类值经 `-e` 会摊进 tmux argv（同机 ps 可读）→ 一律走 0600 wrapper；
@@ -88,7 +97,7 @@ exec ${spec.command}
     const command = `env -i sh ${shQuote(wrapperPath)}`
 
     const envArgs: string[] = ['-e', `${CORE_AGENT_RUNTIME_BEARER_ENV}=`]
-    const pipeCmd = `cat >> ${shQuote(spec.outputFile)}`
+    const pipeCmd = controlMonitorPipeCommand(controlEndpoint)
     let sessionCreated = false
     try {
       await this.run([
@@ -101,6 +110,13 @@ exec ${spec.command}
         ...envArgs,
         command,
         ';',
+        'set-option',
+        '-w',
+        '-t',
+        spec.name,
+        'remain-on-exit',
+        'on',
+        ';',
         'pipe-pane',
         '-o',
         '-t',
@@ -108,11 +124,15 @@ exec ${spec.command}
         pipeCmd,
       ])
       sessionCreated = true
+      return controlEndpoint
     } finally {
       // 成功：wrapper 由 pane 自删除（rm -f $0），本进程不动它（newSession 返回时 pane
       // 可能尚未 exec，提前删目录会让 session 秒退——实测竞态）。
       // 失败：pane 永远不会起来，清掉孤儿 wrapper 目录。
-      if (wrapperDir && !sessionCreated) await fs.rm(wrapperDir, { recursive: true, force: true }).catch(() => {})
+      if (wrapperDir && !sessionCreated) {
+        await fs.rm(wrapperDir, { recursive: true, force: true }).catch(() => {})
+        await removeTmuxControlEndpoint(controlEndpoint)
+      }
     }
   }
 
@@ -142,8 +162,9 @@ exec ${spec.command}
 
   /** Capture only the current viewport. */
   async capturePane(name: string): Promise<PaneSnapshot> {
-    const { stdout: text } = await this.run(['capture-pane', '-p', '-e', '-J', '-t', name])
-    return { text }
+    const dead = !(await this.isAlive(name))
+    const { stdout: text } = await this.run(['capture-pane', '-p', '-J', '-t', name])
+    return { text, dead }
   }
 
   async sendKeys(name: string, keys: string[]): Promise<void> {
@@ -152,11 +173,15 @@ exec ${spec.command}
 
   async isAlive(name: string): Promise<boolean> {
     try {
-      await this.run(['has-session', '-t', name])
-      return true
+      const { stdout } = await this.run(['display-message', '-p', '-t', name, '#{pane_dead}'])
+      return stdout.trim() === '0'
     } catch {
       return false
     }
+  }
+
+  async getPasteReadiness(endpoint: TmuxControlEndpoint): Promise<PasteReadiness> {
+    return readTmuxControlState(endpoint)
   }
 
   async paneCommand(name: string): Promise<string | null> {

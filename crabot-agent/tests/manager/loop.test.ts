@@ -1015,14 +1015,14 @@ describe('ManagerLoop', () => {
     it('只读的默认巡检会在完整 trace 落账后压缩为本地历史摘要', async () => {
       const { adapter, queue } = makeAdapter()
       queue.push(
-        { toolCalls: [{ name: 'read_worker_output', id: 'read-1', input: { worker_id: 'w-supervised' } }], stopReason: 'tool_use' },
+        { toolCalls: [{ name: 'get_worker_terminal', id: 'read-1', input: { worker_id: 'w-supervised' } }], stopReason: 'tool_use' },
         { stopReason: 'end_turn' },
       )
       const loop = new ManagerLoop(baseDeps({
         store,
         adapter,
         toolFace: () => [defineTool({
-          name: 'read_worker_output',
+          name: 'get_worker_terminal',
           description: 'read only',
           inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } } },
           isReadOnly: true,

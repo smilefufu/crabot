@@ -8,15 +8,19 @@ import { parse as parseToml } from 'smol-toml'
 import { CodexWorkerAdapter, eventsFilePath, WorkerExitedError } from '../../src/workers/codex/adapter.js'
 import { ForkEstablishmentError } from '../../src/workers/errors.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
-import { BRACKETED_PASTE_ENABLE } from '../../src/workers/tmux/paste-ready.js'
+import type { TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
 import type { IncarnationHandle, SpawnSpec, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 
 function detectTmux(): boolean {
+  const socket = `crabot-vitest-${process.pid}`
   try {
     execFileSync('which', ['tmux'], { stdio: 'ignore' })
+    execFileSync('tmux', ['-L', socket, 'new-session', '-d', '-s', 'probe', 'exit 0'], { stdio: 'ignore' })
+    execFileSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' })
     return true
   } catch {
+    try { execFileSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' }) } catch {}
     return false
   }
 }
@@ -76,11 +80,14 @@ function codexBinFor(script: MockStep[], stopHookCmd: string, opts?: { argvFile?
   return `env MOCK_CLI_SCRIPT=${shQuote(JSON.stringify(script))} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} ${argvEnv}${rolloutEnv}${rolloutTimingEnv}${readyDelayEnv}node ${shQuote(MOCK_CLI)}`
 }
 
-/** 假 TmuxDriver 的 newSession 替身:落一份 output 日志并写入 \e[?2004h。
- * spawn 在投递开工输入之前要等这个信号(启动期就绪握手,见 src/workers/tmux/paste-ready.ts)
- * ——不扮演"TUI 已请求 bracketed paste"的假 driver 会让每个用例白等一次握手超时。 */
-async function fakeReadyNewSession(spec: TmuxSessionSpec): Promise<void> {
-  await fs.writeFile(spec.outputFile, BRACKETED_PASTE_ENABLE, { flag: 'a' })
+/** 假 TmuxDriver 的就绪控制端点；测试不再伪造 pipe-pane 原始输出文件。 */
+const READY_CONTROL_ENDPOINT: TmuxControlEndpoint = {
+  socket_path: '/tmp/crabot-test-ready.sock',
+  monitor_id: 'crabot-test-ready',
+}
+
+async function fakeReadyNewSession(_spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+  return READY_CONTROL_ENDPOINT
 }
 
 /** 扮演"已经就绪的 TUI"的最小 pane 命令:先请求 bracketed paste 再挂住不退。理由同上。 */
@@ -100,6 +107,10 @@ async function waitForState(
     await new Promise((r) => setTimeout(r, 100))
   }
   throw new Error(`waitForState timeout: expected '${target}', last seen '${last}'`)
+}
+
+function terminalText(view: Awaited<ReturnType<CodexWorkerAdapter['readTerminal']>>): string {
+  return view.kind === 'unavailable' ? '' : view.text
 }
 
 describe('CodexWorkerAdapter.provision', () => {
@@ -416,21 +427,20 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   }
 
   it(
-    '① spawn → mock 输出 → notify → state 收敛 idle,readOutput 可读到该输出',
+    '① spawn → mock 输出 → notify → state 收敛 idle,终端画面可读',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
       const h = await adapter.spawn(makeSpec(workerId, '你好'))
 
       await waitForState(adapter, h, 'idle')
 
-      const { chunk } = await adapter.readOutput(h, { offset: 0 })
-      expect(chunk).toContain('第一段输出')
+      expect(terminalText(await adapter.readTerminal(h))).toContain('第一段输出')
     },
     15000,
   )
 
   it(
-    '② sendInput 续答:第二段输出追加而非覆盖,再次收敛 idle',
+    '② sendInput 续答:第二段输出进入当前画面,再次收敛 idle',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([
         { output: '第一段输出', emitStop: true },
@@ -439,15 +449,12 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       const h = await adapter.spawn(makeSpec(workerId, '你好'))
       await waitForState(adapter, h, 'idle')
 
-      const before = await adapter.readOutput(h, { offset: 0 })
-      expect(before.chunk).toContain('第一段输出')
+      expect(terminalText(await adapter.readTerminal(h))).toContain('第一段输出')
 
       await adapter.sendInput(h, '继续')
       await waitForState(adapter, h, 'idle')
 
-      const after = await adapter.readOutput(h, { offset: 0 })
-      expect(after.chunk).toContain('第一段输出')
-      expect(after.chunk).toContain('第二段输出')
+      expect(terminalText(await adapter.readTerminal(h))).toContain('第二段输出')
     },
     15000,
   )
@@ -893,8 +900,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 四轮 review PoC 回归
   async function waitForOutputContains(adapter: CodexWorkerAdapter, h: IncarnationHandle, needle: string, timeoutMs = 8000): Promise<void> {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      const { chunk } = await adapter.readOutput(h, { offset: 0 })
-      if (chunk.includes(needle)) return
+      if (terminalText(await adapter.readTerminal(h)).includes(needle)) return
       await new Promise((r) => setTimeout(r, 100))
     }
     throw new Error(`waitForOutputContains timeout: expected output to contain '${needle}'`)
@@ -1015,7 +1021,7 @@ class SwitchableTmuxDriver extends TmuxDriver {
   async available(): Promise<boolean> {
     return this.current.available()
   }
-  async newSession(spec: TmuxSessionSpec): Promise<void> {
+  async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
     return this.current.newSession(spec)
   }
   async pasteText(name: string, text: string): Promise<void> {
@@ -1032,6 +1038,9 @@ class SwitchableTmuxDriver extends TmuxDriver {
   }
   async isAlive(name: string): Promise<boolean> {
     return this.current.isAlive(name)
+  }
+  async getPasteReadiness(endpoint: TmuxControlEndpoint) {
+    return this.current.getPasteReadiness(endpoint)
   }
   async killSession(name: string): Promise<void> {
     return this.current.killSession(name)
@@ -1088,7 +1097,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
     async () => {
       class NewSessionOkSendTextFailsTmux extends TmuxDriver {
         killed = false
-        async newSession(spec: TmuxSessionSpec): Promise<void> {
+        async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
           return super.newSession(spec)
         }
         async capturePane(_name: string) {
@@ -1124,7 +1133,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
     async () => {
       class RecordingTmuxDriver extends TmuxDriver {
         lastEnv?: Record<string, string>
-        async newSession(spec: TmuxSessionSpec): Promise<void> {
+        async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
           this.lastEnv = spec.env
           return super.newSession(spec)
         }
@@ -1160,7 +1169,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
     async () => {
       class RecordingTmuxDriver extends TmuxDriver {
         envs: Array<Record<string, string> | undefined> = []
-        async newSession(spec: TmuxSessionSpec): Promise<void> {
+        async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
           this.envs.push(spec.env)
           return super.newSession(spec)
         }
@@ -1457,8 +1466,7 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
     expect(await adapter.state(handle)).toBe('running')
 
     await waitForState(adapter, handle, 'exited')
-    const { chunk } = await adapter.readOutput(handle, { offset: 0 })
-    expect(chunk).toBe('侧问回答')
+    await expect(adapter.readTerminal(handle)).resolves.toEqual({ kind: 'headless_text', text: '侧问回答' })
     expect(states).toContainEqual({ state: 'exited', endReason: 'completed' })
   })
 
@@ -1559,8 +1567,8 @@ class NoopTmux extends TmuxDriver {
   paneText = '› \n? for shortcuts'
   alive = true
 
-  async newSession(spec: TmuxSessionSpec): Promise<void> {
-    await fakeReadyNewSession(spec)
+  async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+    return fakeReadyNewSession(spec)
   }
   async pasteText(_name: string, text: string): Promise<void> {
     this.paneText = `› ${text}\n? for shortcuts`
@@ -1575,6 +1583,7 @@ class NoopTmux extends TmuxDriver {
   async isAlive(_name: string): Promise<boolean> {
     return this.alive
   }
+  async getPasteReadiness(): Promise<{ state: 'ready' }> { return { state: 'ready' } }
   async killSession(_name: string): Promise<void> {}
 }
 
@@ -2350,8 +2359,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
         disposition: 'not_pasted',
         report: { waitReason: 'startup_stall' },
       })
-      expect(stalled?.report?.outputTail).toContain(banner)
-      expect(stalled?.report?.outputTail).toContain('一个字符都没有投递')
+      expect(stalled?.report?.terminal).toMatchObject({ kind: 'live_terminal', text: expect.stringContaining(banner) })
       expect(seen).toEqual([])
 
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
@@ -2576,11 +2584,10 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
   )
 
   it(
-    '带给 manager 的 output 尾部是可读文本,不是转义序列——与 read_worker_output 同一形态',
+    '启动暂扣给 manager 的是直接捕获的可读终端画面，不含转义序列',
     async () => {
-      // 与 cc adapter 的同名用例同款:去掉 initialStartupStall 里那次 decodeTerminalOutput,
-      // manager 拿到的就是原样转义字节,而它读同一份日志的另一条路(read_worker_output)
-      // 拿到的是解码后的文本。
+      // 与 cc adapter 的同名用例同款：报告必须来自 capture-pane 的当前画面，而不是原始
+      // TUI 渲染字节。
       const banner = [
         '\u001b[2J\u001b[H',
         '\u001b[3;1H\u001b[1;36mSign in with ChatGPT\u001b[0m',
@@ -2593,10 +2600,11 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
       })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
 
-      const tail = h.initial_input?.report?.outputTail
-      expect(tail).toBeTruthy()
-      expect(tail).not.toContain('\u001b')
-      expect(tail).toMatch(/Sign in with ChatGPT\n\s*1\. Provide your own API key/)
+      const terminal = h.initial_input?.report?.terminal
+      expect(terminal).toMatchObject({ kind: 'live_terminal' })
+      const text = terminal?.kind === 'unavailable' || !terminal ? '' : terminal.text
+      expect(text).not.toContain('\u001b')
+      expect(text).toMatch(/Sign in with ChatGPT\n\s*1\. Provide your own API key/)
     },
     30000,
   )

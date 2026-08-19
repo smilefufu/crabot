@@ -29,14 +29,13 @@ import type {
   StateChangeReport,
   SpawnSpec,
   Workspace,
-  OutputCursor,
   CapabilityBundle,
   AdapterCapabilities,
   DetectResult,
 } from '../../../src/workers/types'
 
 // ---- FakeAdapter：与 Task 7 harness-lifecycle.test.ts 同款可编程桩，本文件独立一份
-// （resume/kill/readOutput 需要按接续场景编程，不复用别的测试文件的实现）。----
+// （resume/kill/readTerminal 需要按接续场景编程，不复用别的测试文件的实现）。----
 
 function handleKey(h: IncarnationHandle): string {
   return `${h.worker_id}#${h.seq}`
@@ -64,7 +63,7 @@ class FakeAdapter implements WorkerAdapter {
   readonly resumeCalls: Array<{ prev: IncarnationRef; wakeInput: string }> = []
   readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: { raw?: boolean } }> = []
   readonly killCalls: IncarnationHandle[] = []
-  readonly readOutputCalls: IncarnationHandle[] = []
+  readonly readTerminalCalls: IncarnationHandle[] = []
   private readonly states = new Map<string, WorkerContractState>()
   private acceptedExitReport?: StateChangeReport
   private updatedSessionRef?: string
@@ -138,9 +137,12 @@ class FakeAdapter implements WorkerAdapter {
     return value
   }
 
-  async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    this.readOutputCalls.push(h)
-    return { chunk: this.opts.outputChunk ?? '', nextCursor: cursor }
+  async readTerminal(h: IncarnationHandle) {
+    this.readTerminalCalls.push(h)
+    const text = this.opts.outputChunk ?? ''
+    return text
+      ? { kind: 'headless_text' as const, text }
+      : { kind: 'unavailable' as const, unavailable_reason: 'headless_without_text' }
   }
 
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
@@ -883,7 +885,7 @@ describe('WorkerHarness.switchWorkerImpl — 跨实现切换', () => {
         if (!opts?.raw && text === 'bg') {
           throw new CliInputStallError('pending_in_ui', 'running', {
             waitReason: 'input_pending',
-            outputTail: '❯ bg',
+            terminal: { kind: 'live_terminal', text: '❯ bg', captured_at: '2026-08-19T00:00:00.000Z' },
           })
         }
       },
@@ -922,7 +924,7 @@ describe('WorkerHarness.switchWorkerImpl — 跨实现切换', () => {
           await gate
           throw new CliInputStallError('pending_in_ui', 'running', {
             waitReason: 'input_pending',
-            outputTail: '❯ bg',
+            terminal: { kind: 'live_terminal', text: '❯ bg', captured_at: '2026-08-19T00:00:00.000Z' },
           })
         }
       },
@@ -1659,7 +1661,7 @@ describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫
       sendInputBehavior: () => {
         throw new CliInputStallError('pending_in_ui', 'running', {
           waitReason: 'input_pending',
-          outputTail: '❯ queued text',
+          terminal: { kind: 'live_terminal', text: '❯ queued text', captured_at: '2026-08-19T00:00:00.000Z' },
         })
       },
     }, '并发补送 stall')
@@ -2190,10 +2192,10 @@ describe('legacy incarnation guardrails', () => {
     } satisfies LedgerWorker)
   }
 
-  it('readWorkerOutput returns an unavailable empty chunk without adapter lookup', async () => {
+  it('getWorkerTerminal returns legacy unavailable without adapter lookup', async () => {
     const { harness, ledger, adaptersMap } = await makeHarness()
     await addLegacy(ledger, 'w-legacy-output')
-    expect(await harness.readWorkerOutput('w-legacy-output', 0)).toEqual({ chunk: '', nextCursor: 0, unavailable_reason: 'legacy worker has no raw output' })
+    expect(await harness.getWorkerTerminal('w-legacy-output')).toEqual({ kind: 'unavailable', unavailable_reason: 'legacy_without_terminal_snapshot' })
     expect(adaptersMap.size).toBe(0)
   })
 

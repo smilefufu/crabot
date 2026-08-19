@@ -26,8 +26,8 @@ import type {
   ListWorkersAdminResult,
   GetWorkerDetailParams,
   GetWorkerDetailResult,
-  ReadWorkerOutputAdminParams,
-  ReadWorkerOutputAdminResult,
+  GetWorkerTerminalParams,
+  GetWorkerTerminalResult,
   GetWorkerTraceParams,
   GetWorkerTraceResult,
 } from '../../src/manager/read-model.js'
@@ -44,7 +44,7 @@ interface AgentUnderTest {
   handleTriggerSchedule(p: TriggerScheduleParams): Promise<TriggerScheduleResult>
   handleListWorkersAdmin(p: ListWorkersAdminParams): Promise<ListWorkersAdminResult>
   handleGetWorkerDetail(p: GetWorkerDetailParams): Promise<GetWorkerDetailResult>
-  handleReadWorkerOutputAdmin(p: ReadWorkerOutputAdminParams): Promise<ReadWorkerOutputAdminResult>
+  handleGetWorkerTerminal(p: GetWorkerTerminalParams): Promise<GetWorkerTerminalResult>
   handleGetWorkerTrace(p: GetWorkerTraceParams): Promise<GetWorkerTraceResult>
 }
 
@@ -777,69 +777,63 @@ describe('get_worker_detail(§8.3)', () => {
   })
 })
 
-describe('read_worker_output_admin(§8.3)', () => {
-  it('cursor 字符串 ↔ harness 的 OutputCursor 互转,seq 原样下传', async () => {
+describe('get_worker_terminal(§8.3)', () => {
+  it('seq 原样下传，返回完整终端视图', async () => {
     const calls: unknown[][] = []
     const agent = buildAgent({
       harness: {
-        readWorkerOutput: async (...args: unknown[]) => {
+        getWorkerTerminal: async (...args: unknown[]) => {
           calls.push(args)
-          return { chunk: 'hello', nextCursor: { offset: 105 } }
+          return { kind: 'live_terminal', text: 'hello', captured_at: '2026-08-19T00:00:00.000Z' }
         },
       },
     })
 
-    const result = await agent.handleReadWorkerOutputAdmin({ worker_id: 'w-1', seq: 2, cursor: '100' })
+    const result = await agent.handleGetWorkerTerminal({ worker_id: 'w-1', seq: 2 })
 
-    expect(calls[0]).toEqual(['w-1', { offset: 100 }, { seq: 2 }])
-    expect(result).toEqual({ chunk: 'hello', next_cursor: '105', eof: false })
+    expect(calls[0]).toEqual(['w-1', { seq: 2 }])
+    expect(result).toEqual({ kind: 'live_terminal', text: 'hello', captured_at: '2026-08-19T00:00:00.000Z' })
   })
 
-  it('无 cursor → 从 0 读起;空 chunk → eof=true(已读到当前末尾)', async () => {
+  it('无 seq 时不下发 opts，保留 agent 侧主线化身选择', async () => {
     const calls: unknown[][] = []
     const agent = buildAgent({
       harness: {
-        readWorkerOutput: async (...args: unknown[]) => {
+        getWorkerTerminal: async (...args: unknown[]) => {
           calls.push(args)
-          return { chunk: '', nextCursor: { offset: 7 } }
+          return { kind: 'unavailable', unavailable_reason: 'legacy_without_terminal_snapshot' }
         },
       },
     })
 
-    const result = await agent.handleReadWorkerOutputAdmin({ worker_id: 'w-1', seq: 1 })
+    const result = await agent.handleGetWorkerTerminal({ worker_id: 'w-1' })
 
-    expect(calls[0]).toEqual(['w-1', { offset: 0 }, { seq: 1 }])
-    expect(result).toEqual({ chunk: '', next_cursor: '7', eof: true })
+    expect(calls[0]).toEqual(['w-1', undefined])
+    expect(result).toEqual({ kind: 'unavailable', unavailable_reason: 'legacy_without_terminal_snapshot' })
   })
 
-  it('legacy unavailable_reason is preserved for Admin callers', async () => {
+  it('unavailable 原因原样保留给 Admin 调用方', async () => {
     const agent = buildAgent({
       harness: {
-        readWorkerOutput: async () => ({
-          chunk: '',
-          nextCursor: { offset: 0 },
-          unavailable_reason: 'legacy worker has no raw output',
-        }),
+        getWorkerTerminal: async () => ({ kind: 'unavailable', unavailable_reason: 'legacy_without_terminal_snapshot' }),
       },
     })
 
-    await expect(agent.handleReadWorkerOutputAdmin({ worker_id: 'w-legacy' })).resolves.toEqual({
-      chunk: '',
-      next_cursor: '0',
-      eof: true,
-      unavailable_reason: 'legacy worker has no raw output',
+    await expect(agent.handleGetWorkerTerminal({ worker_id: 'w-legacy' })).resolves.toEqual({
+      kind: 'unavailable',
+      unavailable_reason: 'legacy_without_terminal_snapshot',
     })
   })
 
   it('harness 抛错(worker/化身不存在)原样冒泡,不吞成空 chunk', async () => {
     const agent = buildAgent({
       harness: {
-        readWorkerOutput: async () => {
+        getWorkerTerminal: async () => {
           throw new Error('no incarnation with seq=9')
         },
       },
     })
-    await expect(agent.handleReadWorkerOutputAdmin({ worker_id: 'w-1', seq: 9 })).rejects.toThrow(/seq=9/)
+    await expect(agent.handleGetWorkerTerminal({ worker_id: 'w-1', seq: 9 })).rejects.toThrow(/seq=9/)
   })
 })
 
@@ -1049,7 +1043,7 @@ describe('读模型 handler 的 manager 栈前置门', () => {
     const agent = buildAgent()
     await expect(agent.handleListWorkersAdmin({})).rejects.toThrow(/Manager stack not initialized/)
     await expect(agent.handleGetWorkerDetail({ worker_id: 'w' })).rejects.toThrow(/Manager stack not initialized/)
-    await expect(agent.handleReadWorkerOutputAdmin({ worker_id: 'w', seq: 1 })).rejects.toThrow(
+    await expect(agent.handleGetWorkerTerminal({ worker_id: 'w', seq: 1 })).rejects.toThrow(
       /Manager stack not initialized/,
     )
     await expect(agent.handleGetWorkerTrace({ worker_id: 'w', seq: 1 })).rejects.toThrow(/Manager stack not initialized/)

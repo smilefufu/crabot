@@ -36,7 +36,7 @@ const MESSAGING_NORMAL = [
 /** protocol-crab-messaging.md §2.10 的 channel 透传只读三件套（仅当存在飞书 channel 实例）。 */
 const FEISHU_READ_ONLY_TOOLS = ['read_feishu_document', 'feishu_raw_get', 'feishu_download_file']
 
-const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'read_worker_output', 'list_workers', 'get_worker_detail', 'list_worker_implementations', 'kill_worker']
+const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'get_worker_terminal', 'list_workers', 'get_worker_detail', 'list_worker_implementations', 'kill_worker', 'set_worker_periodic_report', 'clear_worker_periodic_report']
 
 const CRABOT_INFO_TOOLS = [
   'get_system_status',
@@ -148,12 +148,12 @@ describe('buildManagerToolFace', () => {
     }))
     const byName = new Map(tools.map((t) => [t.name, t]))
 
-    const readOnly = ['get_history', 'get_message', 'lookup_friend', 'list_sessions', 'list_contacts', 'list_groups', 'list_group_members', 'fetch_media', ...FEISHU_READ_ONLY_TOOLS, 'read_worker_output', 'list_workers', ...CRABOT_INFO_TOOLS]
+    const readOnly = ['get_history', 'get_message', 'lookup_friend', 'list_sessions', 'list_contacts', 'list_groups', 'list_group_members', 'fetch_media', ...FEISHU_READ_ONLY_TOOLS, 'get_worker_terminal', 'list_workers', ...CRABOT_INFO_TOOLS]
     for (const name of readOnly) {
       expect(byName.get(name)?.isReadOnly, `${name} 应为 isReadOnly:true`).toBe(true)
     }
 
-    const writeTools = ['send_message', 'send_master_private', 'send_private_message', 'spawn_worker', 'send_to_worker', 'query_worker', 'kill_worker']
+    const writeTools = ['send_message', 'send_master_private', 'send_private_message', 'spawn_worker', 'send_to_worker', 'query_worker', 'kill_worker', 'set_worker_periodic_report', 'clear_worker_periodic_report']
     for (const name of writeTools) {
       expect(byName.get(name)?.isReadOnly, `${name} 应为 isReadOnly:false`).toBe(false)
     }
