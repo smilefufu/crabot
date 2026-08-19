@@ -1079,7 +1079,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
         } catch (err) {
           // send 失败 → state 完全不变（task 仍 executing，无 barrier）
           const msg = err instanceof Error ? err.message : String(err)
-          return wrapText({ error: `发送失败: ${msg}` })
+          return wrapText({ error: `发送失败: ${msg}` }, { isError: true })
         }
 
         // === Step 2 & 3: send 成功后处理 ask_human 后置逻辑 ===
