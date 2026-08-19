@@ -29,10 +29,10 @@
 - 实现分支 `feat/manager-worker-operation-reliability` 已 rebase 到包含 #99/#100 的主线；adapter 关闭保护与可靠投递契约均保留，待 PR review。
 - **2026-08-18 tmux 投递热修已发布**（main `9138713`，本机实例已重启验证健康）：tmux pane 不再继承 `TERM=dumb`；Manager 的 `raw: true` 仅接受 tmux 控制键并在投递前拒绝混入任务正文的 payload，普通任务文本仍走既有 WorkerInbox 生命周期。尚待自然新流量验证实际启动确认与后续正文投递。
 
-### Worker 任务巡检与定期汇报（实现完成，待 PR review）
+### Worker 任务巡检与定期汇报：已合并（PR #106 → `552191d`）
 
 - 已确认并发布设计和 `protocol-agent-v3` 3.2.2 契约（crabot-docs `bbcea9e`）：默认每 15 分钟例行巡检与人类明确的定期汇报是 stable `worker_id` 上互斥的监督规则；前者可在仅工具活动时由 Harness 静默过滤，后者必须由 Manager 向固定会话成功 `send_message` 才消费。
-- 实现分支 `feat/worker-supervision`：三种 adapter 以原生结构化 trace 分类 `text / tool_only / none / unknown`；Harness 持久化游标、到期责任与退避；Manager 提供设置/清除定期汇报工具、严格消费条件和默认只读巡检片段压缩。定向 Harness/Manager 295/295、adapter 212/212、TypeScript 检查均通过，待 PR review。
+- 已合并实现：三种 adapter 以原生结构化 trace 分类 `text / tool_only / none / unknown`；Harness 持久化游标、到期责任与退避；Manager 提供设置/清除定期汇报工具、严格消费条件和默认只读巡检片段压缩。定向 Harness/Manager 295/295、adapter 212/212、TypeScript 检查均通过。
 
 ### 最近验证基线（2026-08-18，可靠交付实现分支）
 
