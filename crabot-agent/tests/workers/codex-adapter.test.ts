@@ -1615,6 +1615,35 @@ describe('CodexWorkerAdapter terminal snapshot after exit', () => {
       await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
     }
   })
+
+  it('pane 在读取竞态中变 dead 时返回已有最终画面', async () => {
+    class DeadPaneTmux extends NoopTmux {
+      dead = false
+
+      async capturePane(name: string) {
+        return this.dead
+          ? { text: 'Pane is dead (status 1, Tue Aug 19 00:00:00 2026)\n', dead: true }
+          : super.capturePane(name)
+      }
+    }
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-dead-pane-terminal-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-dead-pane-terminal-ws-'))
+    const tmux = new DeadPaneTmux()
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: READY_IDLE_BIN, sessionDiscoveryTimeoutMs: 500 })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      expect(await adapter.readTerminal(h)).toMatchObject({ kind: 'live_terminal' })
+
+      tmux.dead = true
+      await expect(adapter.readTerminal(h)).resolves.toMatchObject({ kind: 'final_terminal', text: expect.stringContaining('Working') })
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
 })
 
 describe('CodexWorkerAdapter retain-on-exit failure', () => {

@@ -1714,6 +1714,35 @@ describe('ClaudeCodeAdapter terminal snapshot after exit', () => {
       await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
     }
   })
+
+  it('pane 在读取竞态中变 dead 时返回已有最终画面', async () => {
+    class DeadPaneTmux extends NoopTmux {
+      dead = false
+
+      async capturePane(name: string) {
+        return this.dead
+          ? { text: 'Pane is dead (status 1, Tue Aug 19 00:00:00 2026)\n', dead: true }
+          : super.capturePane(name)
+      }
+    }
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-dead-pane-terminal-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-dead-pane-terminal-ws-'))
+    const tmux = new DeadPaneTmux()
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      expect(await adapter.readTerminal(h)).toMatchObject({ kind: 'live_terminal' })
+
+      tmux.dead = true
+      await expect(adapter.readTerminal(h)).resolves.toMatchObject({ kind: 'final_terminal', text: expect.stringContaining('esc to interrupt') })
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
 })
 
 describe('ClaudeCodeAdapter retain-on-exit failure', () => {

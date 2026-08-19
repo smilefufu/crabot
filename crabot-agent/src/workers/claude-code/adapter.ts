@@ -521,7 +521,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
   private async capture(runtime: Runtime): Promise<CapturedPane> {
     const snapshot = await this.tmux.capturePane(runtime.sessionName)
-    const captured = { text: snapshot.text, captured_at: new Date().toISOString() }
+    const captured = { text: snapshot.text, dead: snapshot.dead, captured_at: new Date().toISOString() }
     if (!snapshot.dead) {
       await writeFinalTerminalSnapshot(runtime.dir, runtime.seq, captured.text, captured.captured_at).catch((error) => {
         console.warn(`[ClaudeCodeAdapter] terminal snapshot write failed for ${runtime.worker_id}#${runtime.seq}:`, error)
@@ -531,6 +531,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   private liveTerminal(snapshot: PaneSnapshot): WorkerTerminalView {
+    if (snapshot.dead) return { kind: 'unavailable', unavailable_reason: 'terminal_session_missing' }
     return { kind: 'live_terminal', text: snapshot.text, captured_at: snapshot.captured_at ?? new Date().toISOString() }
   }
 
@@ -1140,7 +1141,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     }
     if (await this.tmux.isAlive(runtime.sessionName)) {
       try {
-        return this.liveTerminal(await this.capture(runtime))
+        const snapshot = await this.capture(runtime)
+        if (snapshot.dead) {
+          const final = await readFinalTerminalSnapshot(runtime.dir, runtime.seq)
+          return final
+            ? { kind: 'final_terminal', ...final }
+            : { kind: 'unavailable', unavailable_reason: 'terminal_session_missing' }
+        }
+        return this.liveTerminal(snapshot)
       } catch {
         return { kind: 'unavailable', unavailable_reason: 'terminal_capture_failed' }
       }
