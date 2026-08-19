@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -67,6 +67,7 @@ let dataDir: string
 let clockMs: number
 let delivery: HarnessEventDelivery = { consumed: true }
 let events: HarnessEvent[]
+let onEventOverride: HarnessDeps['onEvent'] | undefined
 
 function now(): string {
   return new Date(clockMs).toISOString()
@@ -82,21 +83,36 @@ function params(): SpawnWorkerParams {
   }
 }
 
-async function makeHarness(): Promise<{ harness: WorkerHarness; adapter: SupervisionAdapter }> {
+async function makeHarness(): Promise<{ harness: WorkerHarness; adapter: SupervisionAdapter; ledger: LedgerStore }> {
   const adapter = new SupervisionAdapter()
+  const ledger = new LedgerStore(join(dataDir, 'ledgers'))
   const harness = new WorkerHarness({
     adapters: new Map([[adapter.implId, adapter]]),
     defaultImpl: adapter.implId,
-    ledger: new LedgerStore(join(dataDir, 'ledgers')),
+    ledger,
     workspaces: new WorkspaceManager(join(dataDir, 'workspaces')),
     workersDir: join(dataDir, 'workers'),
     now,
     onEvent: (event) => {
       events.push(event)
-      return delivery
+      return onEventOverride?.(event) ?? delivery
     },
   } satisfies HarnessDeps)
-  return { harness, adapter }
+  return { harness, adapter, ledger }
+}
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for condition')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
 }
 
 async function spawnRunning(harness: WorkerHarness): Promise<string> {
@@ -112,6 +128,7 @@ beforeEach(async () => {
   clockMs = Date.parse('2026-08-19T00:00:00.000Z')
   delivery = { consumed: true }
   events = []
+  onEventOverride = undefined
 })
 
 afterEach(async () => {
@@ -119,6 +136,125 @@ afterEach(async () => {
 })
 
 describe('WorkerHarness task supervision', () => {
+  it('does not re-read terminal or agent-native system tasks during a supervision sweep', async () => {
+    const { harness, ledger } = await makeHarness()
+    const activeWorkerId = await spawnRunning(harness)
+    const terminalWorkerId = await spawnRunning(harness)
+    await harness.killWorker(terminalWorkerId)
+
+    const managerKey = 'admin-web::system-tasks' as ManagerKey
+    for (let index = 0; index < 3; index++) {
+      const taskId = `maintenance-${index}`
+      await ledger.upsertWorker(managerKey, taskId, () => ({
+        worker_id: taskId,
+        manager_key: managerKey,
+        task: { id: taskId, title: '记忆维护', status: 'running', created_at: now() },
+        origin: { trigger_type: 'system' },
+        report_to: { channel_id: 'admin-web', session_id: 'system-tasks' },
+        incarnations: [],
+        updated_at: now(),
+      }))
+    }
+
+    const findWorker = vi.spyOn(ledger, 'findWorker')
+    await harness.reconcileSupervisionOnStartup()
+
+    expect(findWorker).toHaveBeenCalledTimes(1)
+    expect(findWorker).toHaveBeenCalledWith(activeWorkerId)
+  })
+
+  it('bounds concurrent fresh ledger reads while preparing supervision', async () => {
+    const { harness, ledger } = await makeHarness()
+    for (let index = 0; index < 9; index++) await spawnRunning(harness)
+
+    const originalFindWorker = ledger.findWorker.bind(ledger)
+    const gate = deferred<void>()
+    let inFlight = 0
+    let peakInFlight = 0
+    vi.spyOn(ledger, 'findWorker').mockImplementation(async (workerId) => {
+      inFlight += 1
+      peakInFlight = Math.max(peakInFlight, inFlight)
+      try {
+        await gate.promise
+        return await originalFindWorker(workerId)
+      } finally {
+        inFlight -= 1
+      }
+    })
+
+    const sweep = harness.reconcileSupervisionOnStartup()
+    try {
+      await waitUntil(() => inFlight >= 8)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(peakInFlight).toBeLessThanOrEqual(8)
+    } finally {
+      gate.resolve()
+      await sweep
+    }
+  })
+
+  it('bounds concurrent fresh ledger reads during startup reconciliation', async () => {
+    const { harness, ledger } = await makeHarness()
+    for (let index = 0; index < 9; index++) await spawnRunning(harness)
+
+    const originalFindWorker = ledger.findWorker.bind(ledger)
+    const gate = deferred<void>()
+    let inFlight = 0
+    let peakInFlight = 0
+    vi.spyOn(ledger, 'findWorker').mockImplementation(async (workerId) => {
+      inFlight += 1
+      peakInFlight = Math.max(peakInFlight, inFlight)
+      try {
+        await gate.promise
+        return await originalFindWorker(workerId)
+      } finally {
+        inFlight -= 1
+      }
+    })
+
+    const reconciliation = harness.reconcileOnStartup()
+    try {
+      await waitUntil(() => inFlight >= 8)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(peakInFlight).toBeLessThanOrEqual(8)
+    } finally {
+      gate.resolve()
+      await reconciliation
+    }
+  })
+
+  it('bounds concurrent supervision event delivery', async () => {
+    const { harness, adapter } = await makeHarness()
+    for (let index = 0; index < 9; index++) await spawnRunning(harness)
+    adapter.observation = { kind: 'text', next_cursor: { offset: 1 } }
+    clockMs += 15 * MINUTE
+
+    const gate = deferred<void>()
+    let inFlight = 0
+    let peakInFlight = 0
+    onEventOverride = async (event) => {
+      if (event.kind !== 'supervision_due') return delivery
+      inFlight += 1
+      peakInFlight = Math.max(peakInFlight, inFlight)
+      try {
+        await gate.promise
+        return delivery
+      } finally {
+        inFlight -= 1
+      }
+    }
+
+    const sweep = harness.sweepLiveness()
+    try {
+      await waitUntil(() => inFlight >= 8)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(peakInFlight).toBeLessThanOrEqual(8)
+    } finally {
+      gate.resolve()
+      await sweep
+    }
+  })
+
   it('default tool-only activity advances the cursor and next due without waking Manager', async () => {
     const { harness, adapter } = await makeHarness()
     const workerId = await spawnRunning(harness)

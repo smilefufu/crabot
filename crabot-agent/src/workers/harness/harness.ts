@@ -385,6 +385,10 @@ export const LIVENESS_SWEEP_INTERVAL_MS = 5 * 60_000
 export const SUPERVISION_DEFAULT_INTERVAL_MS = 15 * 60_000
 const SUPERVISION_RETRY_INTERVAL_MS = 5 * 60_000
 
+// findWorker() reloads and validates the worker's whole owning ledger. A manager can own thousands
+// of workers, so a harness sweep must not start an unbounded number of those reads at once.
+const WORKER_SWEEP_CONCURRENCY = 8
+
 /**
  * 巡检发现停摆时,随唤醒事件交给 manager 的那段正文:pane 输出尾部 + 一句合成指引。
  *
@@ -2739,9 +2743,13 @@ export class WorkerHarness {
     // worker 从第二次起也是在这一步就被截住,不会再走到 reconcileOneWorker)。
     unchanged.push(...all.filter(({ worker }) => isTerminalStatus(worker.task.status)).map(({ worker }) => worker.worker_id))
 
-    const settled = await Promise.allSettled(
-      targets.map(({ managerKey, worker }) => this.reconcileOneWorker(managerKey, worker.worker_id))
-    )
+    const settled: Array<PromiseSettledResult<'revived' | 'failed' | 'unchanged'>> = []
+    for (let start = 0; start < targets.length; start += WORKER_SWEEP_CONCURRENCY) {
+      const batch = targets.slice(start, start + WORKER_SWEEP_CONCURRENCY)
+      settled.push(...await Promise.allSettled(
+        batch.map(({ managerKey, worker }) => this.reconcileOneWorker(managerKey, worker.worker_id)),
+      ))
+    }
 
     settled.forEach((result, i) => {
       const workerId = targets[i].worker.worker_id
@@ -2909,16 +2917,31 @@ export class WorkerHarness {
   private async sweepSupervision(): Promise<void> {
     if (this.deps.isClosing?.()) return
     const now = this.deps.now()
-    const prepared = await Promise.all((await this.deps.ledger.listAllWorkers()).map(
-      ({ worker }) => this.prepareSupervisionDue(worker.worker_id, now),
-    ))
+    const candidates = (await this.deps.ledger.listAllWorkers()).filter(({ worker }) => {
+      if (isTerminalStatus(worker.task.status)) return false
+      const mainline = mainlineIncarnation(worker)
+      return mainline !== undefined && isExecutableIncarnation(mainline)
+    })
+    const prepared: Array<PreparedSupervisionDue | undefined> = []
+    for (let start = 0; start < candidates.length; start += WORKER_SWEEP_CONCURRENCY) {
+      const batch = candidates.slice(start, start + WORKER_SWEEP_CONCURRENCY)
+      prepared.push(...await Promise.all(
+        batch.map(({ worker }) => this.prepareSupervisionDue(worker.worker_id, now)),
+      ))
+    }
     for (const item of prepared) {
       if (item?.stateToSync) {
         await this.processStateChange(item.handle, item.stateToSync)
       }
     }
     if (this.deps.isClosing?.()) return
-    await Promise.allSettled(prepared.flatMap((item) => item?.event ? [this.deliverSupervisionDue(item.event)] : []))
+    const events = prepared.flatMap((item) => item?.event ? [item.event] : [])
+    for (let start = 0; start < events.length; start += WORKER_SWEEP_CONCURRENCY) {
+      await Promise.allSettled(
+        events.slice(start, start + WORKER_SWEEP_CONCURRENCY)
+          .map((event) => this.deliverSupervisionDue(event)),
+      )
+    }
   }
 
   private async prepareSupervisionDue(
