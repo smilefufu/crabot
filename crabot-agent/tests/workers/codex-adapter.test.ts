@@ -1588,6 +1588,35 @@ class NoopTmux extends TmuxDriver {
   async killSession(_name: string): Promise<void> {}
 }
 
+describe('CodexWorkerAdapter terminal snapshot after exit', () => {
+  it('spawn 后 pane 消失仍读取已有最终画面', async () => {
+    class GonePaneTmux extends NoopTmux {
+      async capturePane(name: string) {
+        if (!this.alive) throw new Error(`tmux session gone: ${name}`)
+        return super.capturePane(name)
+      }
+    }
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-final-terminal-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-final-terminal-ws-'))
+    const tmux = new GonePaneTmux()
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: READY_IDLE_BIN, sessionDiscoveryTimeoutMs: 500 })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      expect(await adapter.readTerminal(h)).toMatchObject({ kind: 'live_terminal' })
+
+      tmux.alive = false
+      expect(await adapter.state(h)).toBe('exited')
+      await expect(adapter.readTerminal(h)).resolves.toMatchObject({ kind: 'final_terminal', text: expect.stringContaining('Working') })
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+})
+
 describe('CodexWorkerAdapter retain-on-exit failure', () => {
   it('持久化 meta 后 retain 失败会收口为 crashed 并清理精确 session', async () => {
     class RetainFailsTmux extends NoopTmux {

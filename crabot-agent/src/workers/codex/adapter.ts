@@ -766,13 +766,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   private async persistFinalTerminal(runtime: Runtime): Promise<WorkerTerminalView | undefined> {
-    try {
-      await this.capture(runtime)
-      const final = await readFinalTerminalSnapshot(runtime.dir, runtime.seq)
-      return final ? { kind: 'final_terminal', ...final } : undefined
-    } catch {
-      return undefined
-    }
+    await this.capture(runtime).catch(() => undefined)
+    const final = await readFinalTerminalSnapshot(runtime.dir, runtime.seq)
+    return final ? { kind: 'final_terminal', ...final } : undefined
   }
 
   private async isPasteReady(runtime: Runtime): Promise<boolean> {
