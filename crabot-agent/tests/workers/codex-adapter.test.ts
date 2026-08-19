@@ -938,25 +938,26 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 四轮 review PoC 回归
   )
 
   it(
-    'PoC②:会话已经死掉(外部 kill,未经 adapter.kill)——新 adapter 实例的 sendInput 应抛 WorkerExitedError,不是通用 Error',
+    'PoC②:自然退出的 dead pane 在 agent 重启后会被精确回收，新 adapter 的 sendInput 仍抛 WorkerExitedError',
     async () => {
-      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
-      const stopHookCmd = channel.hookCommand('stop')
-      const codexBin = codexBinFor([{ output: '第一段输出' }], stopHookCmd)
+      const codexBin = `bash -c 'printf "\\033[?2004h"; sleep 2'`
 
       const adapterA = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
       await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `codextest-${randomUUID().slice(0, 8)}`
       const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      const sessionName = `crabot-w-${workerId}-1`
 
-      await waitForOutputContains(adapterA, h, '第一段输出')
-
-      // 绕开 adapter.kill,直接杀死 tmux 会话,模拟"agent 进程重启前已经先一步真死"。
-      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+      const deadline = Date.now() + 8000
+      while (Date.now() < deadline && await tmux.isAlive(sessionName)) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      expect(await tmux.capturePane(sessionName)).toMatchObject({ dead: true })
 
       const adapterB = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused-not-invoked-by-sendInput' })
 
       await expect(adapterB.sendInput(h, '还有件事')).rejects.toBeInstanceOf(WorkerExitedError)
+      await expect(tmux.capturePane(sessionName)).rejects.toThrow()
       await expect(adapterB.kill(h)).resolves.toBeUndefined()
     },
     15000,
@@ -1586,6 +1587,40 @@ class NoopTmux extends TmuxDriver {
   async getPasteReadiness(): Promise<{ state: 'ready' }> { return { state: 'ready' } }
   async killSession(_name: string): Promise<void> {}
 }
+
+describe('CodexWorkerAdapter retain-on-exit failure', () => {
+  it('持久化 meta 后 retain 失败会收口为 crashed 并清理精确 session', async () => {
+    class RetainFailsTmux extends NoopTmux {
+      readonly killed: string[] = []
+      async newSession(spec: TmuxSessionSpec) {
+        return {
+          ...await super.newSession(spec),
+          enableRemainOnExit: async () => { throw new Error('simulated retain failure') },
+        }
+      }
+      async killSession(name: string): Promise<void> {
+        this.killed.push(name)
+        this.alive = false
+      }
+    }
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-retain-failure-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-retain-failure-ws-'))
+    const tmux = new RetainFailsTmux()
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: READY_IDLE_BIN, sessionDiscoveryTimeoutMs: 500 })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      await expect(adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })).rejects.toThrow('simulated retain failure')
+      expect(tmux.killed).toEqual([`crabot-w-${workerId}-1`])
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta).toMatchObject({ state: 'exited', ended_reason: 'crashed' })
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+})
 
 describe('CodexWorkerAdapter.readTrace', () => {
   let dataDir: string

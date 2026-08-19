@@ -725,6 +725,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root, ...controlMeta(runtime) })
     this.runtimes.set(instanceKey(handle), runtime)
+    try {
+      await controlEndpoint.enableRemainOnExit?.()
+    } catch (error) {
+      await this.transitionExited(runtime, handle, 'crashed')
+      throw error
+    }
 
     // 启动期就绪握手(见 tmux/paste-ready.ts):等 cc 在 pane 里发出 \e[?2004h 之后再投递,
     // 否则 paste-buffer -p 会静默降级成裸文本注入,prompt 里每个换行都变成一次 Enter——
@@ -841,6 +847,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, workspace_root: prevRuntime.workspaceRoot, ...controlMeta(runtime) })
       this.runtimes.set(instanceKey(handle), runtime)
+      try {
+        await controlEndpoint.enableRemainOnExit?.()
+      } catch (error) {
+        await this.transitionExited(runtime, handle, 'crashed')
+        throw error
+      }
       prevRuntime.resumed = true
     })
 
@@ -1344,6 +1356,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
       const alive = await this.tmux.isAlive(sessionName)
+      if (!alive) await this.tmux.killSession(sessionName)
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
       const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)

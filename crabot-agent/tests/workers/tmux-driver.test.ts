@@ -69,12 +69,28 @@ describe.skipIf(!detectTmux())('TmuxDriver', () => {
     expect((await fs.readdir(tempDir)).some((name) => name.includes('output'))).toBe(false)
   })
 
-  it('dead pane is no longer alive and its capture is marked as tmux status, not worker output', async () => {
+  it('only retains a dead pane after its durable owner enables remain-on-exit', async () => {
     await driver.newSession({
       name: sessionName,
       cwd: tempDir,
       command: `bash -c 'printf "final frame"'`,
     })
+
+    await waitFor(async () => {
+      try {
+        await driver.capturePane(sessionName)
+        return false
+      } catch {
+        return true
+      }
+    })
+
+    const session = await driver.newSession({
+      name: sessionName,
+      cwd: tempDir,
+      command: `bash -c 'printf "final frame"'`,
+    })
+    await session.enableRemainOnExit?.()
 
     await waitFor(async () => !(await driver.isAlive(sessionName)))
     await expect(driver.capturePane(sessionName)).resolves.toMatchObject({

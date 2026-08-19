@@ -44,6 +44,11 @@ export interface PaneSnapshot {
   captured_at?: string
 }
 
+export type TmuxSession = TmuxControlEndpoint & {
+  /** 仅在 adapter 已持久化可重建 meta 后调用，避免无主 dead pane。 */
+  enableRemainOnExit?: () => Promise<void>
+}
+
 export class TmuxDriver {
   private readonly tmuxBin: string
 
@@ -60,7 +65,7 @@ export class TmuxDriver {
     }
   }
 
-  async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+  async newSession(spec: TmuxSessionSpec): Promise<TmuxSession> {
     const controlEndpoint = await createTmuxControlEndpoint()
 
     // P6-B 安全（两层）：
@@ -110,13 +115,6 @@ exec ${spec.command}
         ...envArgs,
         command,
         ';',
-        'set-option',
-        '-w',
-        '-t',
-        spec.name,
-        'remain-on-exit',
-        'on',
-        ';',
         'pipe-pane',
         '-o',
         '-t',
@@ -124,7 +122,26 @@ exec ${spec.command}
         pipeCmd,
       ])
       sessionCreated = true
-      return controlEndpoint
+      return {
+        ...controlEndpoint,
+        enableRemainOnExit: async () => {
+          try {
+            await this.run([
+              'set-option',
+              '-w',
+              '-t',
+              spec.name,
+              'remain-on-exit',
+              'on',
+            ])
+          } catch (error) {
+            // meta 已经持久化，但 pane 可能恰好在这一步之前自行退出；目标已消失时让
+            // adapter 接管那份 meta 并按 exited 收口，不能把这条正常竞态当成 spawn 失败。
+            if (!(await this.hasSession(spec.name))) return
+            throw error
+          }
+        },
+      }
     } finally {
       // 成功：wrapper 由 pane 自删除（rm -f $0），本进程不动它（newSession 返回时 pane
       // 可能尚未 exec，提前删目录会让 session 秒退——实测竞态）。
@@ -175,6 +192,15 @@ exec ${spec.command}
     try {
       const { stdout } = await this.run(['display-message', '-p', '-t', name, '#{pane_dead}'])
       return stdout.trim() === '0'
+    } catch {
+      return false
+    }
+  }
+
+  private async hasSession(name: string): Promise<boolean> {
+    try {
+      await this.run(['has-session', '-t', name])
+      return true
     } catch {
       return false
     }

@@ -1687,6 +1687,45 @@ class NoopTmux extends TmuxDriver {
   async killSession(_name: string): Promise<void> {}
 }
 
+describe('ClaudeCodeAdapter retain-on-exit failure', () => {
+  it('持久化 meta 后 retain 失败会收口为 crashed 并清理精确 session', async () => {
+    class RetainFailsTmux extends NoopTmux {
+      readonly killed: string[] = []
+      async newSession(spec: TmuxSessionSpec) {
+        return {
+          ...await super.newSession(spec),
+          enableRemainOnExit: async () => { throw new Error('simulated retain failure') },
+        }
+      }
+      async killSession(name: string): Promise<void> {
+        this.killed.push(name)
+        this.alive = false
+      }
+    }
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-retain-failure-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-retain-failure-ws-'))
+    const tmux = new RetainFailsTmux()
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: READY_IDLE_BIN,
+    })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      await expect(adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })).rejects.toThrow('simulated retain failure')
+      expect(tmux.killed).toEqual([`crabot-w-${workerId}-1`])
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta).toMatchObject({ state: 'exited', ended_reason: 'crashed' })
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+})
+
 class ExitAfterAcceptedTmux extends NoopTmux {
   private submissions = 0
 
@@ -2815,6 +2854,39 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.ended_reason).toBe('crashed')
       expect(seen).toContainEqual({ state: 'exited', endReason: 'crashed' })
+    },
+    30000,
+  )
+
+  it(
+    '自然退出的 dead pane 在 agent 重启后会被精确回收',
+    async () => {
+      const adapterA = new ClaudeCodeAdapter({
+        dataDir,
+        claudeConfigPath: fakeClaudeConfig(dataDir),
+        tmux,
+        claudeBin: `bash -c 'printf "\\033[?2004h"; sleep 2'`,
+        promptDeliveryTimeoutMs: 0,
+      })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+      const h = await adapterA.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const sessionName = `crabot-w-${workerId}-1`
+
+      const deadline = Date.now() + 8000
+      while (Date.now() < deadline && await tmux.isAlive(sessionName)) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      expect(await tmux.capturePane(sessionName)).toMatchObject({ dead: true })
+
+      const restarted = new ClaudeCodeAdapter({
+        dataDir,
+        claudeConfigPath: fakeClaudeConfig(dataDir),
+        tmux,
+        claudeBin: 'never-used-after-restart',
+      })
+      expect(await restarted.state(h)).toBe('exited')
+      await expect(tmux.capturePane(sessionName)).rejects.toThrow()
     },
     30000,
   )

@@ -976,26 +976,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       env: await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env }),
     })
 
-    // 启动期就绪握手(见 tmux/paste-ready.ts),排在 session 发现**之前**:
-    // - 它才是"能不能收输入"的判据。session 发现等的是 rollout 文件出现,那是"会话已建立"
-    //   的信号——启动期被模态框挡住时会话根本不会建立,那个轮询于是空转到超时,然后照样把
-    //   prompt 发出去(这正是本次要根治的"降级继续");
-    // - 顺带让 session 发现更稳:m2 实测 rollout 文件在 tmux 建会话约 3 秒后才落盘,几乎顶满
-    //   原来那个 3s 窗口;就绪握手先吸收掉启动耗时,发现窗口从"已经能收输入"那一刻才开始算。
-    const pasteReady = await waitForPasteReady(() => this.tmux.getPasteReadiness(controlEndpoint), {
-      timeoutMs: this.pasteReadyTimeoutMs,
-      isAlive: () => this.tmux.isAlive(sessionName),
-    })
-
     // Codex 0.146 在首条 prompt 提交前不会创建 rollout。这里先建立空 session_ref 的
     // runtime，待 guarded initial input 被接受后再发现真实 session；启动期未投递则保持空值。
     const sessionId = ''
     const sessionDiscoveryStatus: 'discovered' | 'placeholder' = 'placeholder'
-    if (!pasteReady) {
-      console.warn(
-        `[codex-adapter] startup readiness handshake timed out for ${spec.worker_id}; opening input NOT delivered, session_ref left empty`,
-      )
-    }
 
     let handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'codex', session_ref: sessionId }
 
@@ -1028,6 +1012,28 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       ...controlMeta(runtime),
     })
     this.runtimes.set(instanceKey(handle), runtime)
+    try {
+      await controlEndpoint.enableRemainOnExit?.()
+    } catch (error) {
+      await this.transitionExited(runtime, handle, 'crashed')
+      throw error
+    }
+
+    // 启动期就绪握手(见 tmux/paste-ready.ts),排在 session 发现**之前**:
+    // - 它才是"能不能收输入"的判据。session 发现等的是 rollout 文件出现,那是"会话已建立"
+    //   的信号——启动期被模态框挡住时会话根本不会建立,那个轮询于是空转到超时,然后照样把
+    //   prompt 发出去(这正是本次要根治的"降级继续");
+    // - 顺带让 session 发现更稳:m2 实测 rollout 文件在 tmux 建会话约 3 秒后才落盘,几乎顶满
+    //   原来那个 3s 窗口;就绪握手先吸收掉启动耗时,发现窗口从"已经能收输入"那一刻才开始算。
+    const pasteReady = await waitForPasteReady(() => this.tmux.getPasteReadiness(controlEndpoint), {
+      timeoutMs: this.pasteReadyTimeoutMs,
+      isAlive: () => this.tmux.isAlive(sessionName),
+    })
+    if (!pasteReady) {
+      console.warn(
+        `[codex-adapter] startup readiness handshake timed out for ${spec.worker_id}; opening input NOT delivered, session_ref left empty`,
+      )
+    }
 
     // 等不到就绪就**不投递**(协议 §5.5 的"不安全态暂扣"):prompt 原封不动留在 spec 里没被
     // 消耗,manager 处理掉障碍后经 send_to_worker 重新投递即可。这里绝不能退化成"超时了也
@@ -1168,6 +1174,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         ...controlMeta(runtime),
       })
       this.runtimes.set(instanceKey(handle), runtime)
+      try {
+        await controlEndpoint.enableRemainOnExit?.()
+      } catch (error) {
+        await this.transitionExited(runtime, handle, 'crashed')
+        throw error
+      }
       prevRuntime.resumed = true
     })
 
@@ -1676,6 +1688,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
       const alive = await this.tmux.isAlive(sessionName)
+      if (!alive) await this.tmux.killSession(sessionName)
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
       // P6-B：admin_provider 的 CODEX_HOME 在 worker 级 runtime 目录（spawn/resume 时落了
