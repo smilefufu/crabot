@@ -1666,11 +1666,14 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
 class NoopTmux extends TmuxDriver {
   paneText = '❯ \n? for shortcuts'
   alive = true
+  pasteReadiness: 'ready' | 'not_ready' | 'unknown' = 'ready'
+  pasteCalls = 0
 
   async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
     return fakeReadyNewSession(spec)
   }
   async pasteText(_name: string, text: string): Promise<void> {
+    this.pasteCalls += 1
     this.paneText = `❯ ${text}\n? for shortcuts`
   }
   async sendText(_name: string, _text: string): Promise<void> {}
@@ -1683,7 +1686,7 @@ class NoopTmux extends TmuxDriver {
   async isAlive(_name: string): Promise<boolean> {
     return this.alive
   }
-  async getPasteReadiness(): Promise<{ state: 'ready' }> { return { state: 'ready' } }
+  async getPasteReadiness() { return { state: this.pasteReadiness } }
   async killSession(_name: string): Promise<void> {}
 }
 
@@ -1738,6 +1741,30 @@ describe('ClaudeCodeAdapter terminal snapshot after exit', () => {
 
       tmux.dead = true
       await expect(adapter.readTerminal(h)).resolves.toMatchObject({ kind: 'final_terminal', text: expect.stringContaining('esc to interrupt') })
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+})
+
+describe('ClaudeCodeAdapter paste readiness gate', () => {
+  it('running steering 在 not_ready 时暂扣输入但保持 running', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-paste-ready-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-paste-ready-ws-'))
+    const tmux = new NoopTmux()
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await expect(adapter.state(h)).resolves.toBe('running')
+
+      tmux.pasteReadiness = 'not_ready'
+      const pasteCalls = tmux.pasteCalls
+      await expect(adapter.sendInput(h, '继续')).rejects.toMatchObject({ disposition: 'not_pasted', control_state: 'running' })
+      expect(tmux.pasteCalls).toBe(pasteCalls)
+      await expect(adapter.state(h)).resolves.toBe('running')
     } finally {
       await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
       await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})

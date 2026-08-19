@@ -614,8 +614,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       if (!(await this.isPasteReady(runtime))) {
         const snapshot = await this.capture(runtime)
         const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'input_surface_unavailable' }
-        await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'input_surface_unavailable' }, report, notify)
-        return { control_state: 'waiting_action', disposition: 'not_pasted', report }
+        const next: CliControlState = mode === 'steering' && runtime.controlState.kind === 'running'
+          ? { kind: 'running' }
+          : { kind: 'waiting_action', reason: 'input_surface_unavailable' }
+        await this.transitionControlState(runtime, h, next, report, notify)
+        return { control_state: next.kind, disposition: 'not_pasted', report }
       }
       result = await commitInput(
         {
