@@ -33,12 +33,12 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('worker 与人类之间隔着你')
   })
 
-  it('含管家纪律：何时代答', () => {
-    expect(MANAGER_IDENTITY).toContain('记忆')
-    expect(MANAGER_IDENTITY).toContain('对话历史')
-    expect(MANAGER_IDENTITY).toContain('台账')
-    expect(MANAGER_IDENTITY).toContain('不要为了确认去打扰人类')
-    expect(MANAGER_IDENTITY).toContain('worker 停下来问的问题')
+  it('含管家纪律：按预计工作路径动态决定直接答或确认后继续', () => {
+    expect(MANAGER_IDENTITY).toContain('先判断响应路径')
+    expect(MANAGER_IDENTITY).toContain('不要按“历史问题”“进度问题”“派活”等问题类别套固定流程')
+    expect(MANAGER_IDENTITY).toContain('当前上下文、台账或记忆里已有足够答案')
+    expect(MANAGER_IDENTITY).toContain('直接把结果告诉人类')
+    expect(MANAGER_IDENTITY).toContain('不要为了确认而额外发一条无信息量的消息')
   })
 
   it('含管家纪律：更早的对话用 get_history 拉', () => {
@@ -49,10 +49,13 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('更早')
   })
 
-  it('含管家纪律：要花时间的事先回一句收到（sendImmediateReply 放弃后的替代）', () => {
-    expect(MANAGER_IDENTITY).toContain('先回一句')
-    expect(MANAGER_IDENTITY).toContain('收到')
-    expect(MANAGER_IDENTITY).toContain('再动手')
+  it('含管家纪律：慢路径先给任务相关的确认答复', () => {
+    expect(MANAGER_IDENTITY).toContain('确认后继续')
+    expect(MANAGER_IDENTITY).toContain('与当前任务相关的确认答复')
+    expect(MANAGER_IDENTITY).toContain('不得只写“收到”“我去办”')
+    expect(MANAGER_IDENTITY).toContain('这不是请求人类批准')
+    expect(MANAGER_IDENTITY).toContain('派活前的交代')
+    expect(MANAGER_IDENTITY).toContain('先想清楚该任务的大体执行方向')
   })
 
   it('含管家纪律：何时派活', () => {
