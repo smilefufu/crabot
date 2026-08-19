@@ -179,8 +179,10 @@ exec ${spec.command}
 
   /** Capture only the current viewport. */
   async capturePane(name: string): Promise<PaneSnapshot> {
-    const dead = !(await this.isAlive(name))
     const { stdout: text } = await this.run(['capture-pane', '-p', '-J', '-t', name])
+    // The pane can exit while capture-pane is in flight. Check after capture so
+    // tmux's replacement dead-pane text never masquerades as a live viewport.
+    const dead = !(await this.isAlive(name))
     return { text, dead }
   }
 

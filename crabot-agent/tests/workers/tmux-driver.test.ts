@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
@@ -23,6 +23,22 @@ async function waitFor(check: () => Promise<boolean>, timeoutMs = 5000): Promise
   }
   throw new Error('waitFor timed out')
 }
+
+describe('TmuxDriver.capturePane', () => {
+  it('先抓取再探测 dead，避免 dead-pane 提示被当作 live 画面', async () => {
+    const driver = new TmuxDriver()
+    const run = vi.fn(async () => ({ stdout: 'Pane is dead (status 1, Tue Aug 19 00:00:00 2026)\n', stderr: '' }))
+    ;(driver as unknown as { run: typeof run }).run = run
+    const isAlive = vi.spyOn(driver, 'isAlive').mockResolvedValue(false)
+
+    await expect(driver.capturePane('crabot-w-test-race')).resolves.toEqual({
+      text: 'Pane is dead (status 1, Tue Aug 19 00:00:00 2026)\n',
+      dead: true,
+    })
+    expect(run).toHaveBeenCalledWith(['capture-pane', '-p', '-J', '-t', 'crabot-w-test-race'])
+    expect(run.mock.invocationCallOrder[0]).toBeLessThan(isAlive.mock.invocationCallOrder[0])
+  })
+})
 
 describe.skipIf(!detectTmux())('TmuxDriver', () => {
   const driver = new TmuxDriver()
