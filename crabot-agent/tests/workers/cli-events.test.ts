@@ -123,6 +123,26 @@ describe('CliEventChannel', () => {
     }
   })
 
+  it('watch 可从调用方记录的文件位置接续，不重放历史 hook', async () => {
+    await fs.writeFile(filePath, '{"ts":"2026-01-01T00:00:00Z","kind":"notification","raw":null}\n', 'utf-8')
+    const channel = new CliEventChannel(filePath)
+    const offset = await channel.endOffset()
+    const received: CliEvent[] = []
+    const stop = channel.watch((event) => received.push(event), { offset })
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(received).toEqual([])
+
+      await fs.appendFile(filePath, '{"ts":"2026-01-01T00:00:01Z","kind":"permission_request","raw":null}\n', 'utf-8')
+      await vi.waitFor(() => expect(received.map((event) => event.kind)).toEqual(['permission_request']), {
+        timeout: 3000,
+        interval: 50,
+      })
+    } finally {
+      await stop()
+    }
+  })
+
   it('watch 追加第二行也能收到, 且坏行/半行不打断后续解析', async () => {
     const channel = new CliEventChannel(filePath)
     const received: CliEvent[] = []

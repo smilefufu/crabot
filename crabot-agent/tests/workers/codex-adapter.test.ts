@@ -144,12 +144,20 @@ describe('CodexWorkerAdapter.provision', () => {
     expect((await fs.stat(configPath)).mode & 0o777).toBe(0o600)
     expect(configToml).toContain('notify = ')
     expect(configToml).toContain('events-cli.jsonl')
+    expect(configToml).toContain('permission_request')
     // 序列化交给 smol-toml 之后表头是否给 key 加引号属于格式细节(`[mcp_servers.x]` 与
     // `[mcp_servers."x"]` 语义等价),这里钉语义不钉引号风格。
     expect((parseToml(configToml) as any).mcp_servers).toEqual({
       x: { command: 'node', env: { API_KEY: 'secret' } },
       remote: { url: 'https://example.com/mcp', http_headers: { Authorization: 'Bearer token' } },
     })
+    const hooks = (parseToml(configToml) as any).hooks
+    expect(hooks.PermissionRequest).toHaveLength(1)
+    expect(hooks.PermissionRequest[0].hooks[0]).toMatchObject({
+      type: 'command',
+      timeout: 10,
+    })
+    expect(hooks.PermissionRequest[0].hooks[0].command).toContain('permission_request')
     // TOML 根级 key(notify)必须出现在第一个 table([mcp_servers...])之前。
     expect(configToml.indexOf('notify =')).toBeLessThan(configToml.indexOf('[mcp_servers'))
 
@@ -210,6 +218,19 @@ describe('CodexWorkerAdapter.provision', () => {
     const gitignorePath = path.join(ws, '.codex/.gitignore')
     const content = await fs.readFile(gitignorePath, 'utf-8')
     expect(content).toBe('*\n')
+  })
+
+  it.each(['hooks.json', 'plugins'] as const)('已有 .codex/%s 时拒绝启用自动 hook trust', async (entry) => {
+    const target = path.join(ws, '.codex', entry)
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    if (entry === 'plugins') await fs.mkdir(target)
+    else await fs.writeFile(target, '{}\n', 'utf-8')
+
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+    await expect(adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })).rejects.toThrow(
+      new RegExp(`refusing to enable generated hook trust.*${entry.replace('.', '\\.')}`),
+    )
+    await expect(fs.access(path.join(ws, '.codex', 'config.toml'))).rejects.toThrow()
   })
 
   it('codexHomeSource 下没有 auth.json 时不阻塞 provision', async () => {
@@ -286,6 +307,35 @@ describe('CodexWorkerAdapter.provision', () => {
 
       // mcp_servers 是 crabot 的能力集
       expect(parsed.mcp_servers).toEqual({ crabot: { command: 'node' } })
+    })
+
+    it('宿主 hook、插件与 marketplace 配置不会进入隔离 worker，但生成的 PermissionRequest hook 保留', async () => {
+      const hostWithHookSources = HOST_CONFIG + [
+        'allow_managed_hooks_only = true',
+        '',
+        '[features]',
+        'hooks = false',
+        '',
+        '[hooks.state.host_hook]',
+        'trusted_hash = "sha256:host"',
+        '',
+        '[plugins.host_plugin]',
+        'enabled = true',
+        '',
+        '[marketplaces.host_marketplace]',
+        'source = "https://example.invalid/plugin"',
+        '',
+      ].join('\n')
+
+      const parsed = await provisionWithHost(hostWithHookSources)
+
+      expect(parsed.plugins).toBeUndefined()
+      expect(parsed.marketplaces).toBeUndefined()
+      expect(parsed.allow_managed_hooks_only).toBeUndefined()
+      expect(parsed.features.hooks).toBe(true)
+      expect(parsed.hooks.PermissionRequest).toHaveLength(1)
+      expect(JSON.stringify(parsed.hooks)).toContain('permission_request')
+      expect(JSON.stringify(parsed.hooks)).not.toContain('host_hook')
     })
 
     it('宿主的 [mcp_servers] 不与 crabot 的合并——caps 是任务授权边界,crabot 胜', async () => {
@@ -809,7 +859,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'spawn 命令行不携带 --skip-git-repo-check/--yolo,固定 --ask-for-approval never + --sandbox workspace-write,且带 -c sandbox_workspace_write.network_access=true(否则 worker 外网+本机端口全不可达)',
+    'spawn command uses approve-for-me with network access',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -824,12 +874,10 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
       expect(argv).not.toContain('--skip-git-repo-check')
       expect(argv).not.toContain('--yolo')
-      const approvalIdx = argv.indexOf('--ask-for-approval')
-      expect(approvalIdx).toBeGreaterThan(-1)
-      expect(argv[approvalIdx + 1]).toBe('never')
-      const sandboxIdx = argv.indexOf('--sandbox')
-      expect(sandboxIdx).toBeGreaterThan(-1)
-      expect(argv[sandboxIdx + 1]).toBe('workspace-write')
+      expect(argv).toContain('--approve-for-me')
+      expect(argv).toContain('--dangerously-bypass-hook-trust')
+      expect(argv).not.toContain('--ask-for-approval')
+      expect(argv).not.toContain('--sandbox')
       const configIdx = argv.indexOf('-c')
       expect(configIdx).toBeGreaterThan(-1)
       expect(argv[configIdx + 1]).toBe('sandbox_workspace_write.network_access=true')
@@ -840,7 +888,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'resume 命令行不携带 --skip-git-repo-check/--yolo,固定 never + workspace-write,且审批/沙箱/网络选项放在 resume 子命令之前',
+    'resume command uses approve-for-me before resume with network access',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -864,15 +912,14 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       expect(argv).not.toContain('--yolo')
       const resumeIdx = argv.indexOf('resume')
       expect(resumeIdx).toBeGreaterThan(-1)
-      for (const flag of ['--ask-for-approval', '--sandbox', '-c']) {
+      for (const flag of ['--approve-for-me', '-c', '--dangerously-bypass-hook-trust']) {
         const idx = argv.indexOf(flag)
         expect(idx).toBeGreaterThan(-1)
         expect(idx).toBeLessThan(resumeIdx)
       }
-      const approvalIdx = argv.indexOf('--ask-for-approval')
-      expect(argv[approvalIdx + 1]).toBe('never')
-      const sandboxIdx = argv.indexOf('--sandbox')
-      expect(argv[sandboxIdx + 1]).toBe('workspace-write')
+      expect(argv).toContain('--approve-for-me')
+      expect(argv).not.toContain('--ask-for-approval')
+      expect(argv).not.toContain('--sandbox')
       const configIdx = argv.indexOf('-c')
       expect(argv[configIdx + 1]).toBe('sandbox_workspace_write.network_access=true')
     },
@@ -1792,6 +1839,7 @@ describe('CodexWorkerAdapter.readTrace', () => {
       expect(events).toHaveLength(1)
       expect(events[0]).toMatchObject({ kind: 'lifecycle', role: 'system' })
       expect(events[0].summary).toContain(uuidFromContent)
+      await adapter.dispose()
     },
   )
 })
@@ -2074,6 +2122,47 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     }
     throw new Error('waitFor timeout')
   }
+
+  it('PermissionRequest reports one current Codex approval screen only once', async () => {
+
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const tmux = new NoopTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: 'work', workspace: { root: workspaceRoot } })
+
+    tmux.paneText = 'Allow Codex to modify this workspace?\nYes\nNo'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'permission_request', raw: { hook_event_name: 'PermissionRequest' } }) + '\n',
+      'utf-8',
+    )
+
+    await waitFor(() => seen.length === 1)
+    expect(seen).toEqual([{
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'interaction_required',
+        notification: { type: 'terminal_interaction' },
+      },
+    }])
+
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'permission_request', raw: { hook_event_name: 'PermissionRequest' } }) + '\n',
+      'utf-8',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(seen).toHaveLength(1)
+    await adapter.kill(h)
+  })
 
   it('spawn 之后 notify 往事件文件追加 stop → 无人调用 state()/sendInput() 也能推出 idle 状态回调', async () => {
     const seen: Array<{ seq: number; state: WorkerContractState }> = []

@@ -9,7 +9,7 @@ import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.
 import type { TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
 import type { ForkEstablishmentError } from '../../src/workers/errors.js'
-import type { IncarnationHandle, SpawnSpec, WorkerContractState } from '../../src/workers/types.js'
+import type { IncarnationHandle, SpawnSpec, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 
 function detectTmux(): boolean {
   const socket = `crabot-vitest-${process.pid}`
@@ -156,7 +156,7 @@ describe('ClaudeCodeAdapter.provision', () => {
     const settings = JSON.parse(await fs.readFile(path.join(ws, '.claude/settings.json'), 'utf-8'))
     expect(settings.hooks.Stop[0].hooks[0].command).toContain('events-cli.jsonl')
     expect(settings.hooks.Notification[0].hooks[0].command).toContain('events-cli.jsonl')
-    expect(settings.permissions.defaultMode).toBe('bypassPermissions')
+    expect(settings.permissions.defaultMode).toBe('auto')
 
     const mcpPath = path.join(ws, '.mcp.json')
     const mcpJson = JSON.parse(await fs.readFile(mcpPath, 'utf-8'))
@@ -366,7 +366,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
   }
 
   it(
-    'spawn 命令行显式使用 bypassPermissions 并按当前 cc 字段跳过首次危险确认窗',
+    'spawn command explicitly uses auto without a dangerous-mode bypass setting',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const argvFile = path.join(dataDir, 'spawn-permission-argv.jsonl')
@@ -384,10 +384,8 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
       const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
       const modeIdx = argv.indexOf('--permission-mode')
       expect(modeIdx).toBeGreaterThan(-1)
-      expect(argv[modeIdx + 1]).toBe('bypassPermissions')
-      const settingsIdx = argv.indexOf('--settings')
-      expect(settingsIdx).toBeGreaterThan(-1)
-      expect(JSON.parse(argv[settingsIdx + 1])).toEqual({ skipDangerousModePermissionPrompt: true })
+      expect(argv[modeIdx + 1]).toBe('auto')
+      expect(argv).not.toContain('--settings')
       const mcpConfigIdx = argv.indexOf('--mcp-config')
       expect(mcpConfigIdx).toBeGreaterThan(-1)
       expect(argv[mcpConfigIdx + 1]).toBe('.mcp.json')
@@ -1182,7 +1180,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
   })
 
   it(
-    'resume 后新会话收到 --resume <session_ref> 与跳过 bypass 危险确认的附加 settings;session_ref 不变,新化身 seq+1',
+    'resume keeps the session ref and explicitly restores auto mode',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -1223,9 +1221,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
       const resumeArgv = argvLines[argvLines.length - 1]
       expect(resumeArgv).toContain('--resume')
       expect(resumeArgv[resumeArgv.indexOf('--resume') + 1]).toBe(meta1.session_id)
-      const settingsIdx = resumeArgv.indexOf('--settings')
-      expect(settingsIdx).toBeGreaterThan(-1)
-      expect(JSON.parse(resumeArgv[settingsIdx + 1])).toEqual({ skipDangerousModePermissionPrompt: true })
+      const modeIdx = resumeArgv.indexOf('--permission-mode')
+      expect(modeIdx).toBeGreaterThan(-1)
+      expect(resumeArgv[modeIdx + 1]).toBe('auto')
+      expect(resumeArgv).not.toContain('--settings')
       const mcpConfigIdx = resumeArgv.indexOf('--mcp-config')
       expect(mcpConfigIdx).toBeGreaterThan(-1)
       expect(resumeArgv[mcpConfigIdx + 1]).toBe('.mcp.json')
@@ -2177,7 +2176,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     throw new Error('waitFor timeout')
   }
 
-  it('相关Notification仅在当前pane仍是交互界面时进入waiting_action，并保留payload', async () => {
+  it('相关Notification只作为当前屏幕分类的快速触发，不泄漏原始 hook payload', async () => {
     const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
     const tmux = new NoopTmux()
     const adapter = new ClaudeCodeAdapter({
@@ -2207,9 +2206,17 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       report: {
         terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
         waitReason: 'interaction_required',
-        notification: { type: 'permission_prompt', message: 'Choose', title: 'Question' },
+        notification: { type: 'terminal_interaction' },
       },
     })
+
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'notification', raw: { notification_type: 'permission_prompt' } }) + '\n',
+      'utf-8',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(seen).toHaveLength(1)
 
     tmux.paneText = '❯ \nesc to interrupt'
     await fs.appendFile(
@@ -2220,6 +2227,173 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(seen).toHaveLength(1)
     await adapter.kill(h)
+  })
+
+  it('Notification resolves the current Claude ready-to-code auto confirmation once after proving auto mode', async () => {
+    let sessionFile = ''
+    class PlanTmux extends NoopTmux {
+      readonly keyCalls: string[][] = []
+
+      async sendKeys(_name: string, keys: string[]): Promise<void> {
+        this.keyCalls.push([...keys])
+        if (keys.join(',') !== '1,Enter') {
+          await super.sendKeys(_name, keys)
+          return
+        }
+        this.paneText = '❯ \nesc to interrupt'
+        await fs.writeFile(sessionFile, JSON.stringify({ permissionMode: 'auto' }) + '\n', 'utf-8')
+      }
+    }
+
+    const seen: WorkerContractState[] = []
+    const tmux = new PlanTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+      onStateChange: (_h, state) => seen.push(state),
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: 'work', workspace: { root: workspaceRoot } })
+    const slug = (await fs.realpath(workspaceRoot)).replace(/[/.]/g, '-')
+    const sessionDir = path.join(claudeProjectsDir, slug)
+    await fs.mkdir(sessionDir, { recursive: true })
+    sessionFile = path.join(sessionDir, `${h.session_ref}.jsonl`)
+
+    tmux.paneText = [
+      'Ready to code?',
+      "Here is Claude's plan:",
+      'Plan: Create hello.txt containing hello',
+      'Claude has written up a plan and is ready to execute. Would you like to proceed?',
+      '❯ 1. Yes, and use auto mode',
+      '  2. Yes, manually approve edits',
+      '  3. Tell Claude what to change',
+    ].join('\n')
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'notification', raw: { notification_type: 'permission_prompt' } }) + '\n',
+      'utf-8',
+    )
+
+    await waitFor(() => tmux.keyCalls.some((keys) => keys.join(',') === '1,Enter'))
+    expect(tmux.keyCalls.filter((keys) => keys.join(',') === '1,Enter')).toHaveLength(1)
+    expect(seen).toEqual([])
+    await adapter.kill(h)
+  })
+
+  it('failed Claude exit-plan resolution wakes the manager once and never retries the fixed keys', async () => {
+    class FailingPlanTmux extends NoopTmux {
+      readonly keyCalls: string[][] = []
+
+      async sendKeys(name: string, keys: string[]): Promise<void> {
+        this.keyCalls.push([...keys])
+        if (keys.join(',') === '1,Enter') {
+          this.alive = false
+          return
+        }
+        await super.sendKeys(name, keys)
+      }
+    }
+
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const tmux = new FailingPlanTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: 'work', workspace: { root: workspaceRoot } })
+
+    tmux.paneText = [
+      'Exit plan mode?',
+      'Claude wants to exit plan mode',
+      '1. Yes, and switch to default (ask each time) for this session',
+      '2. No',
+    ].join('\n')
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'notification', raw: { notification_type: 'permission_prompt' } }) + '\n',
+      'utf-8',
+    )
+
+    await waitFor(() => seen.length === 1)
+    expect(tmux.keyCalls.filter((keys) => keys.join(',') === '1,Enter')).toHaveLength(1)
+    expect(seen).toEqual([{
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'interaction_required',
+        notification: { type: 'automatic_interaction_failed' },
+      },
+    }])
+
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'notification', raw: { notification_type: 'permission_prompt' } }) + '\n',
+      'utf-8',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(seen).toHaveLength(1)
+    expect(tmux.keyCalls.filter((keys) => keys.join(',') === '1,Enter')).toHaveLength(1)
+    await adapter.kill(h)
+  })
+
+  it('restart reconstruction inspects an already-visible Claude exit-plan modal', async () => {
+    let sessionFile = ''
+    class PlanTmux extends NoopTmux {
+      readonly keyCalls: string[][] = []
+
+      async sendKeys(name: string, keys: string[]): Promise<void> {
+        this.keyCalls.push([...keys])
+        if (keys.join(',') !== '1,Enter') {
+          await super.sendKeys(name, keys)
+          return
+        }
+        this.paneText = '❯ \nesc to interrupt'
+        await fs.writeFile(sessionFile, JSON.stringify({ permissionMode: 'auto' }) + '\n', 'utf-8')
+      }
+    }
+
+    const tmux = new PlanTmux()
+    const first = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await first.spawn({ worker_id: workerId, prompt: 'work', workspace: { root: workspaceRoot } })
+    const slug = (await fs.realpath(workspaceRoot)).replace(/[/.]/g, '-')
+    const sessionDir = path.join(claudeProjectsDir, slug)
+    await fs.mkdir(sessionDir, { recursive: true })
+    sessionFile = path.join(sessionDir, `${h.session_ref}.jsonl`)
+    await first.dispose()
+
+    tmux.paneText = [
+      'Exit plan mode?',
+      'Claude wants to exit plan mode',
+      '1. Yes, and switch to default (ask each time) for this session',
+      '2. No',
+    ].join('\n')
+    const restarted = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+    })
+
+    expect(await restarted.state(h)).toBe('running')
+    await waitFor(() => tmux.keyCalls.some((keys) => keys.join(',') === '1,Enter'))
+    expect(tmux.keyCalls.filter((keys) => keys.join(',') === '1,Enter')).toHaveLength(1)
+    await restarted.kill(h)
   })
 
   it('spawn 之后 hook 往事件文件追加 stop → 无人调用 state()/sendInput() 也能推出 idle 状态回调', async () => {

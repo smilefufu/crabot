@@ -1,5 +1,6 @@
 import type { PaneSnapshot } from '../tmux/driver.js'
 import type { InputMode, InputProbe } from '../tmux/input-commit.js'
+import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 
 // codex 0.146 实测页脚：`gpt-5.6-sol xhigh · ~/.crabot/...`——home 缩写是 `~/` 不是 `/`，
 // 旧正则 `·\s\/` 在它上面失配会让 composer 探测整体失败（输入永远 stalled）。
@@ -43,9 +44,18 @@ export function acceptedCodexInput(snapshot: PaneSnapshot, mode: InputMode, text
   return snapshot.text !== baseline && /Messages to be submitted after next tool call|queued message|queued/i.test(snapshot.text)
 }
 
-function hasCodexInteraction(pane: string): boolean {
+export function classifyCodexTerminalInteraction(snapshot: PaneSnapshot): TerminalInteraction {
+  if (codexComposerText(snapshot) !== undefined) return { kind: 'none' }
+  const pane = snapshot.text
   const tail = pane.split('\n').slice(-14).join('\n')
-  return /(?:Would you like to|Do you want to|Allow Codex to|approval required)[\s\S]{0,600}(?:\bYes\b[\s\S]{0,120}\bNo\b|\bapprove\b[\s/|]+\bdeny\b)/i.test(tail)
+  if (/(?:Would you like to|Do you want to|Allow Codex to|approval required)[\s\S]{0,600}(?:\bYes\b[\s\S]{0,120}\bNo\b|\bapprove\b[\s/|]+\bdeny\b)/i.test(tail)) {
+    return { kind: 'manager_required', family: 'codex_approval', fingerprint: 'codex_approval:yes-no' }
+  }
+  return { kind: 'none' }
+}
+
+function hasCodexInteraction(pane: string): boolean {
+  return classifyCodexTerminalInteraction({ text: pane }).kind !== 'none'
 }
 
 function codexIsWorking(snapshot: PaneSnapshot): boolean {

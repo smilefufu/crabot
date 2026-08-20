@@ -1,8 +1,9 @@
 import type { PaneSnapshot } from '../tmux/driver.js'
 import type { InputMode, InputProbe } from '../tmux/input-commit.js'
+import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 
-const CLAUDE_FOOTER = /^\s*(?:esc to interrupt|⏵⏵|(?:\?\s*)?for shortcuts|context left|bypass permissions|.*shift\+tab)/i
-const CLAUDE_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|esc to interrupt|⏵⏵|(?:\?\s*)?for shortcuts|context left|bypass permissions)/i
+const CLAUDE_FOOTER = /^\s*(?:esc to interrupt|⏵⏵|(?:\?\s*)?for shortcuts|context left|bypass permissions)|(?:auto|manual|plan) mode on\b/i
+const CLAUDE_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|esc to interrupt|⏵⏵|(?:\?\s*)?for shortcuts|context left|bypass permissions)|(?:auto|manual|plan) mode on\b/i
 
 /**
  * Claude Code viewport recognizer for one guarded input transaction.
@@ -32,19 +33,44 @@ export function acceptedClaudeInput(snapshot: PaneSnapshot, mode: InputMode, tex
   return mode === 'primary' ? composer === '' || /esc to interrupt/i.test(snapshot.text) : /queued|queue/i.test(snapshot.text)
 }
 
-/** Notification must be corroborated by a current interaction surface. */
-export function hasClaudeInteraction(pane: string): boolean {
+export function classifyClaudeTerminalInteraction(snapshot: PaneSnapshot): TerminalInteraction {
+  const pane = snapshot.text
   // A footer-anchored ordinary composer means a previously rendered selector in
   // the transcript is no longer the active surface.
-  if (claudeComposerText({ text: pane }) !== undefined) return false
-  const tailLines = pane.split('\n').slice(-16)
+  if (claudeComposerText(snapshot) !== undefined) return { kind: 'none' }
+  const tailLines = pane.split('\n').slice(-24)
   const tail = tailLines.join('\n')
+  const exitPlan = /Exit plan mode\?/i.test(tail) &&
+    /Claude wants to exit plan mode/i.test(tail) &&
+    /^\s*1[.)]\s+\S/m.test(tail) &&
+    /^\s*2[.)]\s+\S/m.test(tail)
+  if (exitPlan) return { kind: 'automatic', family: 'claude_exit_plan', fingerprint: 'claude_exit_plan:1-2' }
+  const readyToCode = /Ready to code\?/i.test(tail) &&
+    /Claude has written up a plan and is ready to execute\./i.test(tail) &&
+    /Would you like to proceed\?/i.test(tail) &&
+    /^\s*(?:❯\s*)?1[.)]\s+Yes, and use auto mode\b/im.test(tail)
+  if (readyToCode) return { kind: 'automatic', family: 'claude_exit_plan', fingerprint: 'claude_exit_plan:ready-to-code-auto' }
   const hasOption = tailLines.some((line) => /^\s*(?:❯|[○◉☐☑]|\d+[.)])\s+\S/.test(line))
   const hasYes = /(?:^|\n)\s*(?:❯\s*)?(?:\d+[.)]\s*)?Yes\b/i.test(tail)
   const hasNo = /(?:^|\n)\s*(?:❯\s*)?(?:\d+[.)]\s*)?No\b/i.test(tail)
   const permissionPrompt = /(?:Claude needs your permission|permission required|Do you want to proceed)/i.test(tail)
   const selectionFooter = /(?:Enter to (?:select|confirm)|(?:↑|↓|up|down).*to navigate|use arrow keys to navigate)/i.test(tail)
-  return (permissionPrompt && hasYes && hasNo) || (selectionFooter && hasOption)
+  if (permissionPrompt && hasYes && hasNo) {
+    return { kind: 'manager_required', family: 'claude_permission', fingerprint: 'claude_permission:yes-no' }
+  }
+  if (selectionFooter && hasOption) {
+    return { kind: 'manager_required', family: 'claude_selector', fingerprint: 'claude_selector:options' }
+  }
+  return { kind: 'none' }
+}
+
+/** Notification must be corroborated by a current interaction surface. */
+export function hasClaudeInteraction(pane: string): boolean {
+  return classifyClaudeTerminalInteraction({ text: pane }).kind !== 'none'
+}
+
+export function hasClaudeExecutionOrComposer(snapshot: PaneSnapshot): boolean {
+  return claudeComposerText(snapshot) !== undefined || /esc to interrupt/i.test(snapshot.text)
 }
 
 function claudeComposerText(snapshot: PaneSnapshot, preservePlaceholderText = false): string | undefined {

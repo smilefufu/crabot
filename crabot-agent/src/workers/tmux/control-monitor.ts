@@ -114,7 +114,7 @@ function shQuote(value: string): string {
 }
 
 // Kept self-contained because this executes as the pipe-pane consumer after the
-// application TypeScript has been compiled. It exposes only readiness state.
+// application TypeScript has been compiled. It exposes bracketed-paste readiness only.
 const MONITOR_PROGRAM = String.raw`
 import fs from 'node:fs';
 import net from 'node:net';
@@ -151,12 +151,17 @@ function cleanup() {
 }
 const server = net.createServer((socket) => {
   let request = '';
+  let handled = false;
   socket.setEncoding('utf8');
-  socket.on('data', (chunk) => { request += chunk; });
-  socket.on('end', () => {
-    if (request.trim() !== monitorId) return socket.end(JSON.stringify({ error: 'monitor_id_mismatch' }));
+  const handleRequest = () => {
+    if (handled || !request.includes('\n')) return;
+    handled = true;
+    const value = request.slice(0, request.indexOf('\n')).trim();
+    if (value !== monitorId) return socket.end(JSON.stringify({ error: 'monitor_id_mismatch' }));
     socket.end(JSON.stringify({ monitor_id: monitorId, state, ...(observedAt ? { observed_at: observedAt } : {}) }));
-  });
+  };
+  socket.on('data', (chunk) => { request += chunk; handleRequest(); });
+  socket.on('end', handleRequest);
 });
 server.listen(socketPath, () => { try { fs.chmodSync(socketPath, 0o600); } catch {} });
 process.stdin.on('data', consume);

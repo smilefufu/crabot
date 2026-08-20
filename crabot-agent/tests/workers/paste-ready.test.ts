@@ -71,6 +71,7 @@ describe('tmux bracketed-paste monitor', () => {
       await removeTmuxControlEndpoint(endpoint)
     }
   })
+
 })
 
 describe('waitForPasteReady', () => {
