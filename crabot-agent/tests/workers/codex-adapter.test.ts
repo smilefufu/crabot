@@ -276,25 +276,36 @@ describe('CodexWorkerAdapter.provision', () => {
     expect(tmux.newSessionCalls).toBe(0)
   })
 
-  it('provision 后篡改 config.toml 的 hook 表会在 spawn 前被拒绝，不创建 tmux 会话', async () => {
-    class CountingTmux extends TmuxDriver {
+  it('spawn 前会清除 config.toml 中的未知 hook，仅留下生成的 PermissionRequest hook', async () => {
+    class CountingTmux extends NoopTmux {
       newSessionCalls = 0
 
       async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
         this.newSessionCalls += 1
-        return fakeReadyNewSession(spec)
+        return super.newSession(spec)
       }
     }
 
     const tmux = new CountingTmux()
-    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource, tmux, codexBin: 'unused' })
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource, tmux, codexBin: 'unused', sessionDiscoveryTimeoutMs: 50 })
     await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
-    await fs.appendFile(path.join(ws, '.codex', 'config.toml'), '\n[hooks.WorkerAdded]\nmatcher = ""\nhooks = []\n', 'utf-8')
-
-    await expect(adapter.spawn({ worker_id: 'spawn-hook-config-race', prompt: '你好', workspace: { root: ws } })).rejects.toThrow(
-      /CodexWorkerAdapter\.spawn: refusing to enable generated hook trust because .*hook configuration differs/,
+    await fs.appendFile(
+      path.join(ws, '.codex', 'config.toml'),
+      '\n[hooks.WorkerAdded]\nmatcher = ""\nhooks = []\n\n[hooks.state.host_hook]\ntrusted_hash = "sha256:host"\n',
+      'utf-8',
     )
-    expect(tmux.newSessionCalls).toBe(0)
+
+    const h = await adapter.spawn({ worker_id: 'spawn-hook-config-race', prompt: '你好', workspace: { root: ws } })
+    const config = parseToml(await fs.readFile(path.join(ws, '.codex', 'config.toml'), 'utf-8')) as {
+      features: { hooks: unknown }
+      hooks: Record<string, unknown>
+    }
+    expect(config.features.hooks).toBe(true)
+    expect(config.hooks.PermissionRequest).toEqual(expect.any(Array))
+    expect(config.hooks.WorkerAdded).toBeUndefined()
+    expect(config.hooks.state).toBeUndefined()
+    expect(tmux.newSessionCalls).toBe(1)
+    await adapter.kill(h)
   })
 
   it('codexHomeSource 下没有 auth.json 时不阻塞 provision', async () => {
@@ -991,7 +1002,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'resume 前篡改 config.toml 的 hook 表会被拒绝，第二个 Codex 进程不会启动',
+    'resume 前会恢复 config.toml 的生成 hook，清除 Codex 或 worker 留下的 hook 状态',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -1007,14 +1018,21 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
       await fs.appendFile(
         path.join(workspaceRoot, '.codex', 'config.toml'),
-        '\n[hooks.WorkerAdded]\nmatcher = ""\nhooks = []\n',
+        '\n[hooks.WorkerAdded]\nmatcher = ""\nhooks = []\n\n[hooks.state.host_hook]\ntrusted_hash = "sha256:host"\n',
         'utf-8',
       )
 
-      await expect(adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')).rejects.toThrow(
-        /CodexWorkerAdapter\.resume: refusing to enable generated hook trust because .*hook configuration differs/,
-      )
-      expect((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')).toHaveLength(1)
+      const h2 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')
+      const config = parseToml(await fs.readFile(path.join(workspaceRoot, '.codex', 'config.toml'), 'utf-8')) as {
+        features: { hooks: unknown }
+        hooks: Record<string, unknown>
+      }
+      expect(config.features.hooks).toBe(true)
+      expect(config.hooks.PermissionRequest).toEqual(expect.any(Array))
+      expect(config.hooks.WorkerAdded).toBeUndefined()
+      expect(config.hooks.state).toBeUndefined()
+      expect((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')).toHaveLength(2)
+      await adapter.kill(h2)
     },
     15000,
   )

@@ -27,7 +27,7 @@ import { homedir, tmpdir } from 'os'
 import { execFile } from 'child_process'
 import { buildChildEnv } from '../../core/runtime-env.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
-import { isDeepStrictEqual, promisify } from 'util'
+import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
 import { parseRawControlKeys } from '../tmux/raw-control.js'
@@ -139,7 +139,7 @@ function generatedCodexPermissionRequestHooks(command: string): Record<string, u
   }
 }
 
-async function assertGeneratedCodexHookConfiguration(
+async function installGeneratedCodexHookConfiguration(
   codexDir: string,
   channel: CliEventChannel,
   operation: 'spawn' | 'resume',
@@ -148,17 +148,25 @@ async function assertGeneratedCodexHookConfiguration(
   let config: Record<string, unknown>
   try {
     config = asTable(parseToml(await fs.readFile(configPath, 'utf-8')))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      config = {}
+    } else {
+      throw new Error(
+        `CodexWorkerAdapter.${operation}: refusing to enable generated hook trust because ${configPath} is unreadable or invalid`,
+      )
+    }
+  }
+  // CODEX_HOME 是 Harness 管理的隔离目录。每次启动都恢复其 hook 段，既兼容上线前
+  // 没有该段的配置，也不会让 worker 或 Codex 自己留下的 hook state 进入自动信任范围。
+  config.features = { ...asTable(config.features), hooks: true }
+  config.hooks = generatedCodexPermissionRequestHooks(channel.hookCommand('permission_request'))
+  try {
+    await fs.mkdir(codexDir, { recursive: true })
+    await writeSensitiveFileAtomic(configPath, stringifyToml(config))
   } catch {
     throw new Error(
-      `CodexWorkerAdapter.${operation}: refusing to enable generated hook trust because ${configPath} is unreadable or invalid`,
-    )
-  }
-  if (
-    asTable(config.features).hooks !== true
-    || !isDeepStrictEqual(config.hooks, generatedCodexPermissionRequestHooks(channel.hookCommand('permission_request')))
-  ) {
-    throw new Error(
-      `CodexWorkerAdapter.${operation}: refusing to enable generated hook trust because ${configPath} hook configuration differs from Crabot's generated PermissionRequest hook`,
+      `CodexWorkerAdapter.${operation}: refusing to install generated hook trust at ${configPath}`,
     )
   }
 }
@@ -1060,7 +1068,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (!spawnBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.spawn: no user-level codex installation')
     const env = await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env })
     await assertNoCodexHookSources(codexHome, 'spawn')
-    await assertGeneratedCodexHookConfiguration(codexHome, eventChannel, 'spawn')
+    await installGeneratedCodexHookConfiguration(codexHome, eventChannel, 'spawn')
     const command = `${spawnBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT}`
     const spawnStartedAt = Date.now()
     const controlEndpoint = await this.tmux.newSession({
@@ -1232,7 +1240,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       if (!resumeBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.resume: no user-level codex installation')
       const env = await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome })
       await assertNoCodexHookSources(resumeCodexHome, 'resume')
-      await assertGeneratedCodexHookConfiguration(resumeCodexHome, eventChannel, 'resume')
+      await installGeneratedCodexHookConfiguration(resumeCodexHome, eventChannel, 'resume')
       const command = `${resumeBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT} resume ${shQuote(prev.session_ref)}`
       const controlEndpoint = await this.tmux.newSession({
         name: sessionName, cwd: prevRuntime.workspaceRoot, command,
