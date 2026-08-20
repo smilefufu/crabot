@@ -160,6 +160,38 @@ async def test_historical_inbox_migration_preserves_confirmed_rule_evidence(tmp_
     assert index.locate("unrelated-case")["status"] == "trash"
 
 
+@pytest.mark.asyncio
+async def test_historical_inbox_migration_preserves_legacy_terminal_maturity(tmp_path):
+    rpc, store, index = _rpc(tmp_path)
+    for mem_id, type_, maturity in [
+        ("confirmed-fact", "fact", "confirmed"),
+        ("rule-lesson", "lesson", "rule"),
+        ("established-concept", "concept", "established"),
+    ]:
+        _persist(
+            store, index, mem_id, status="inbox", type_=type_, maturity=maturity,
+            ingestion_time="2020-01-01T00:00:00Z",
+        )
+    _persist(
+        store, index, "ordinary-candidate", status="inbox",
+        ingestion_time="2020-01-02T00:00:00Z",
+    )
+
+    preview = await rpc.preview_historical_inbox({"now_iso": "2026-08-20T00:00:00Z"})
+    assert preview["estimated_move_count"] == 1
+    assert preview["by_type"] == {"fact": 1, "lesson": 0, "concept": 0}
+
+    batch = await rpc.migrate_historical_inbox_batch({
+        "confirmed": True,
+        "now_iso": "2026-08-20T03:00:00Z",
+    })
+    assert batch["moved"] == 1
+    assert batch["remaining"] == 0
+    for mem_id in ("confirmed-fact", "rule-lesson", "established-concept"):
+        assert index.locate(mem_id)["status"] == "inbox"
+    assert index.locate("ordinary-candidate")["status"] == "trash"
+
+
 def test_inbox_expiry_skips_historical_inbox_and_uses_new_timestamp(tmp_path):
     _, store, index = _rpc(tmp_path)
     _persist(store, index, "historical", status="inbox", ingestion_time="2020-01-01T00:00:00Z")

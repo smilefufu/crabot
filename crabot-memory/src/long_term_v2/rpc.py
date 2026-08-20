@@ -35,6 +35,8 @@ _UPDATABLE_FIELDS = frozenset({
     "links",
 })
 
+_HISTORICAL_INBOX_TERMINAL_MATURITIES = frozenset({"rule", "confirmed", "established"})
+
 def run_maintenance_sync(store, index, params: dict) -> dict:
     """Run maintenance synchronously with the existing RPC request/report shape."""
     scope = params.get("scope", "all")
@@ -390,10 +392,14 @@ class LongTermV2Rpc:
 
     def _historical_inbox_candidates(self, cutoff: str | None, *, limit: int | None = None) -> list[dict]:
         protected_ids = self._historical_rule_source_case_ids()
-        candidates = [
-            row for row in self.index.list_historical_inbox(cutoff=cutoff, limit=None)
-            if row["id"] not in protected_ids
-        ]
+        candidates = []
+        for row in self.index.list_historical_inbox(cutoff=cutoff, limit=None):
+            if row["id"] in protected_ids:
+                continue
+            entry = self.store.read("inbox", row["type"], row["id"])
+            if entry.frontmatter.maturity in _HISTORICAL_INBOX_TERMINAL_MATURITIES:
+                continue
+            candidates.append(row)
         return candidates if limit is None else candidates[:limit]
 
     async def preview_historical_inbox(self, params: dict) -> dict:
