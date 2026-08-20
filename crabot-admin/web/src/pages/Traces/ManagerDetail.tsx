@@ -121,11 +121,12 @@ function ActionList({ episode }: { episode: ManagerEpisodeTrace }) {
 
 interface WorkerProgressGroup {
   latest: ManagerEpisodeTrace
+  messageHistory: ManagerEpisodeTrace[]
   history: ManagerEpisodeTrace[]
 }
 
 function groupWorkerProgress(progress: ManagerEpisodeTrace[]): WorkerProgressGroup[] {
-  const byWorker = new Map<string, WorkerProgressGroup>()
+  const byWorker = new Map<string, Pick<WorkerProgressGroup, 'latest' | 'history'>>()
   for (const episode of progress) {
     const key = episode.worker_ref?.worker_id ?? episode.trace_id
     const existing = byWorker.get(key)
@@ -136,7 +137,11 @@ function groupWorkerProgress(progress: ManagerEpisodeTrace[]): WorkerProgressGro
       byWorker.set(key, { latest: episode, history: [] })
     }
   }
-  return Array.from(byWorker.values())
+  return Array.from(byWorker.values()).map(({ latest, history }) => ({
+    latest,
+    messageHistory: history.filter((episode) => episode.reply_excerpt),
+    history: history.filter((episode) => !episode.reply_excerpt),
+  }))
 }
 
 function WorkerProgressEntry({ episode }: { episode: ManagerEpisodeTrace }) {
@@ -152,6 +157,12 @@ function WorkerProgressEntry({ episode }: { episode: ManagerEpisodeTrace }) {
           <Link to={`/traces/workers/${encodeURIComponent(episode.worker_ref.worker_id)}`}>查看执行器</Link>
         )}
       </div>
+      {episode.reply_excerpt && (
+        <div className="manager-detail__worker-message-meta">
+          <time dateTime={episode.started_at}>{displayTime(episode.started_at)}</time>
+          <span>已发送消息</span>
+        </div>
+      )}
       {episode.reply_excerpt && <div className="manager-detail__worker-reply">管理会话回复：{episode.reply_excerpt}</div>}
       <ActionList episode={episode} />
       {episode.status === 'failed' && <div className="manager-detail__failure">失败原因：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
@@ -164,6 +175,9 @@ function WorkerProgress({ progress }: { progress: WorkerProgressGroup }) {
   const [historyOpen, setHistoryOpen] = useState(false)
   return (
     <div className="manager-detail__worker-progress-group">
+      {progress.messageHistory.map((message) => (
+        <WorkerProgressEntry key={message.trace_id} episode={message} />
+      ))}
       <WorkerProgressEntry episode={progress.latest} />
       {progress.history.length > 0 && (
         <>
