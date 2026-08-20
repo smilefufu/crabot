@@ -135,6 +135,18 @@ async function writeGeneratedCodexHookConfig(workspaceRoot: string): Promise<voi
   )
 }
 
+async function injectUntrustedCodexConfigSources(configPath: string): Promise<void> {
+  const config = parseToml(await fs.readFile(configPath, 'utf-8')) as Record<string, unknown>
+  config.allow_managed_hooks_only = true
+  config.plugins = { worker_plugin: { enabled: true } }
+  config.marketplaces = { worker_marketplace: { source: 'https://example.invalid/plugin' } }
+  config.hooks = {
+    WorkerAdded: [{ matcher: '', hooks: [] }],
+    state: { host_hook: { trusted_hash: 'sha256:host' } },
+  }
+  await fs.writeFile(configPath, stringifyToml(config), 'utf-8')
+}
+
 describe('CodexWorkerAdapter.provision', () => {
   let ws: string
   let codexHomeSource: string
@@ -276,7 +288,7 @@ describe('CodexWorkerAdapter.provision', () => {
     expect(tmux.newSessionCalls).toBe(0)
   })
 
-  it('spawn 前会清除 config.toml 中的未知 hook，仅留下生成的 PermissionRequest hook', async () => {
+  it('spawn 前会清除 config.toml 中的未知 hook 源，仅留下生成的 PermissionRequest hook', async () => {
     class CountingTmux extends NoopTmux {
       newSessionCalls = 0
 
@@ -289,21 +301,23 @@ describe('CodexWorkerAdapter.provision', () => {
     const tmux = new CountingTmux()
     const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource, tmux, codexBin: 'unused', sessionDiscoveryTimeoutMs: 50 })
     await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
-    await fs.appendFile(
-      path.join(ws, '.codex', 'config.toml'),
-      '\n[hooks.WorkerAdded]\nmatcher = ""\nhooks = []\n\n[hooks.state.host_hook]\ntrusted_hash = "sha256:host"\n',
-      'utf-8',
-    )
+    await injectUntrustedCodexConfigSources(path.join(ws, '.codex', 'config.toml'))
 
     const h = await adapter.spawn({ worker_id: 'spawn-hook-config-race', prompt: '你好', workspace: { root: ws } })
     const config = parseToml(await fs.readFile(path.join(ws, '.codex', 'config.toml'), 'utf-8')) as {
       features: { hooks: unknown }
       hooks: Record<string, unknown>
+      plugins?: unknown
+      marketplaces?: unknown
+      allow_managed_hooks_only?: unknown
     }
     expect(config.features.hooks).toBe(true)
     expect(config.hooks.PermissionRequest).toEqual(expect.any(Array))
     expect(config.hooks.WorkerAdded).toBeUndefined()
     expect(config.hooks.state).toBeUndefined()
+    expect(config.plugins).toBeUndefined()
+    expect(config.marketplaces).toBeUndefined()
+    expect(config.allow_managed_hooks_only).toBeUndefined()
     expect(tmux.newSessionCalls).toBe(1)
     await adapter.kill(h)
   })
@@ -1002,7 +1016,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'resume 前会恢复 config.toml 的生成 hook，清除 Codex 或 worker 留下的 hook 状态',
+    'resume 前会恢复 config.toml 的生成 hook，清除 Codex 或 worker 留下的未知 hook 源',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -1016,21 +1030,23 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       await waitForState(adapter, h1, 'exited')
 
       const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
-      await fs.appendFile(
-        path.join(workspaceRoot, '.codex', 'config.toml'),
-        '\n[hooks.WorkerAdded]\nmatcher = ""\nhooks = []\n\n[hooks.state.host_hook]\ntrusted_hash = "sha256:host"\n',
-        'utf-8',
-      )
+      await injectUntrustedCodexConfigSources(path.join(workspaceRoot, '.codex', 'config.toml'))
 
       const h2 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')
       const config = parseToml(await fs.readFile(path.join(workspaceRoot, '.codex', 'config.toml'), 'utf-8')) as {
         features: { hooks: unknown }
         hooks: Record<string, unknown>
+        plugins?: unknown
+        marketplaces?: unknown
+        allow_managed_hooks_only?: unknown
       }
       expect(config.features.hooks).toBe(true)
       expect(config.hooks.PermissionRequest).toEqual(expect.any(Array))
       expect(config.hooks.WorkerAdded).toBeUndefined()
       expect(config.hooks.state).toBeUndefined()
+      expect(config.plugins).toBeUndefined()
+      expect(config.marketplaces).toBeUndefined()
+      expect(config.allow_managed_hooks_only).toBeUndefined()
       expect((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')).toHaveLength(2)
       await adapter.kill(h2)
     },

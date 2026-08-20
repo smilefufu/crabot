@@ -159,6 +159,7 @@ async function installGeneratedCodexHookConfiguration(
   }
   // CODEX_HOME 是 Harness 管理的隔离目录。每次启动都恢复其 hook 段，既兼容上线前
   // 没有该段的配置，也不会让 worker 或 Codex 自己留下的 hook state 进入自动信任范围。
+  stripUntrustedCodexHookSources(config)
   config.features = { ...asTable(config.features), hooks: true }
   config.hooks = generatedCodexPermissionRequestHooks(channel.hookCommand('permission_request'))
   try {
