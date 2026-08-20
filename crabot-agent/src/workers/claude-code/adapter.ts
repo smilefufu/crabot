@@ -16,9 +16,9 @@
  * re-probes the pane before changing state.
  *
  * provision writes workspace hooks, skills, MCP/context files, and pre-accepts workspace trust.
- * spawn/resume retain bypassPermissions and inject the process-local dangerous-mode warning
- * setting; they do not modify ~/.claude/settings.json. Native session JSONL is used for trace and
- * diagnostics only: missing records never trigger an automatic re-paste.
+ * spawn/resume use auto permission mode and do not modify ~/.claude/settings.json. Native session
+ * JSONL is used for trace and diagnostics only: missing records never trigger an automatic
+ * re-paste.
  *
  * Meta persists the external running/idle/exited state plus wait_mode/wait_reason for idle CLI
  * states. ensureRuntime reconstructs a runtime from meta and deterministic tmux names after an
@@ -38,13 +38,20 @@ import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import type { TmuxControlEndpoint } from '../tmux/control-monitor.js'
 import { readFinalTerminalSnapshot, writeFinalTerminalSnapshot } from '../tmux/terminal-snapshot.js'
+import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { buildChildEnv } from '../../core/runtime-env.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { WorkerExitedError, CliInputStallError, WorkerImplUnavailableError, ForkEstablishmentError } from '../errors.js'
-import { probeClaudeInput, acceptedClaudeInput, hasClaudeInteraction } from './input-surface.js'
+import {
+  probeClaudeInput,
+  acceptedClaudeInput,
+  hasClaudeExecutionOrComposer,
+  hasClaudeInteraction,
+  classifyClaudeTerminalInteraction,
+} from './input-surface.js'
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
@@ -120,14 +127,6 @@ async function terminateProcessTree(child: ChildProcess): Promise<boolean> {
   return waitForProcessExit(child, 1000)
 }
 
-/**
- * Claude Code 2.1.223 的 bypass 一次性危险确认开关。
- *
- * 真实 Admin Chat 验收证明旧的 ~/.claude.json.bypassPermissionsModeAccepted 已无效,project
- * settings 里的新字段也不生效;只有启动级 --settings 能在不永久修改用户级
- * ~/.claude/settings.json 的前提下消掉弹窗。值是 adapter 内部常量,仍经 shQuote 进入 shell。
- */
-const BYPASS_WARNING_SETTINGS_ARG = `--settings ${shQuote(JSON.stringify({ skipDangerousModePermissionPrompt: true }))}`
 const MCP_CONFIG_FILE = '.mcp.json'
 const MCP_CONFIG_IGNORE_ENTRIES = [
   `/${MCP_CONFIG_FILE}`,
@@ -199,6 +198,8 @@ interface Runtime {
   /** 仅无头 fork 写入纯文本；交互式 tmux 化身不保留原始输出流。 */
   readonly outputLog?: OutputLog
   readonly eventChannel: CliEventChannel
+  /** 仅消费本化身启动后新增的 hook；重连由 recovery capture 覆盖已有界面。 */
+  readonly eventWatchOffset: number
   controlState: CliControlState
   ended_reason?: IncarnationEndReason
   /** P6-B：本化身 spawn/resume 时注入的连接 env（fork 侧问继承；不落 meta——credential
@@ -213,6 +214,7 @@ interface Runtime {
    * runtime 时装上、落终态时摘掉;无头 fork 化身不装(见 startEventWatch)。 */
   stopEventWatch?: () => Promise<void>
   eventWatchDrain?: Promise<void>
+  interactionFingerprint?: string
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin 同款语义(P2 review #2)。fork 不受此限制。 */
   resumed?: boolean
@@ -387,11 +389,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         Stop: [{ hooks: [{ type: 'command', command: channel.hookCommand('stop') }] }],
         Notification: [{ hooks: [{ type: 'command', command: channel.hookCommand('notification') }] }],
       },
-      // --permission-mode bypassPermissions 已在 spawn 命令行传了,这里在 settings.json 里重复
-      // 声明一份,让 resume 也选择同一模式。bypassPermissions = 等价
-      // auto-mode/--dangerously-skip-permissions:工具调用零审批弹窗(否则每调一次 Bash/网络
-      // 就要 manager 处理一次)。取舍见 specs/2026-08-06-worker-permission-auto-approve-design.md。
-      permissions: { defaultMode: 'bypassPermissions' },
+      permissions: { defaultMode: 'auto' },
     }
     await fs.writeFile(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2) + '\n', 'utf-8')
 
@@ -417,7 +415,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 1. workspace project entry 已信任;
    * 2. 已授权本项目的 MCP server。
    *
-   * bypassPermissions 的危险确认由 spawn/resume 启动参数处理,不属于本文件的全局预写。
+   * 自动审批基线由 workspace settings 与 spawn/resume 的 --permission-mode auto 共同保证。
    *
    * ## 弹窗②:`New MCP server found in this project: <name>`
    *
@@ -443,8 +441,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * `[projects."<realpath>"] trust_level = "trusted"` 同一策略(见 codex/adapter.ts 的
    * provision),差别只在 cc 这张表是**全局共享单文件**,所以要加锁 + 原子替换 + 只补字段。
    *
-   * 当前方法只消除两类 project 级启动弹窗。bypassPermissions 的危险确认不接受这里的
-   * ~/.claude.json 或 workspace settings,由 spawn/resume 的 --settings 启动参数处理。
+   * 当前方法只消除两类 project 级启动弹窗；不会改写用户级权限模式。
    *
    * 失败一律抛错(fail-loud),不吞:
    * - 吞掉 → worker 重新静默卡回弹窗,而这个故障态在外部看来是"running 但永远没动静",
@@ -570,10 +567,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
       if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || /esc to interrupt/i.test(snapshot.text))) {
+        runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'running' })
         return
       }
       if (primaryProbe === 'empty') {
+        runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
         return
       }
@@ -701,13 +700,15 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 不同 binary」的版本错配/command not found 由此杜绝。
     const spawnBin = await this.resolveBinForCommand()
     if (!spawnBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.spawn: no user-level claude installation`)
-    const command = `${spawnBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode bypassPermissions`
+    const command = `${spawnBin} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode auto`
+    const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
+    const eventWatchOffset = await eventChannel.endOffset()
+    const stopBaseline = await this.initialStopBaseline(eventChannel)
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
     // (session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id 可安全重试。
     const controlEndpoint = await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, env: spec.connection_env })
 
-    const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
     const runtime: Runtime = {
       worker_id: spec.worker_id,
       seq,
@@ -717,8 +718,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       controlEndpoint,
       sessionId,
       eventChannel,
+      eventWatchOffset,
       controlState: { kind: 'running' },
-      stopBaseline: await this.initialStopBaseline(eventChannel),
+      stopBaseline,
       killed: false,
       connectionEnv: spec.connection_env,
     }
@@ -816,19 +818,18 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const seq = await this.nextSeq(prev.worker_id)
       handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
-      // 不重复传 --permission-mode:provision 阶段已把 bypassPermissions 写进 settings.json,覆盖
-      // 命令行没有重复声明的场景(resume 正是这样的场景)。危险确认开关则不接受 project
-      // settings,必须与 spawn 对称地每次通过 --settings 注入。session_ref 是 cc 侧的会话 uuid,
-      // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
+      // resume 显式重复 --permission-mode auto，不能只依赖 workspace settings。session_ref 是 cc
+      // 侧的会话 uuid，沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
       const resumeBin = await this.resolveBinForCommand()
       if (!resumeBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.resume: no user-level claude installation`)
-      const command = `${resumeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
+      const command = `${resumeBin} ${STRICT_MCP_CONFIG_ARGS} --permission-mode auto --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
-      const controlEndpoint = await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, env: opts?.connection_env })
-
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
+      const eventWatchOffset = await eventChannel.endOffset()
+      const stopBaseline = await this.initialStopBaseline(eventChannel)
+      const controlEndpoint = await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, env: opts?.connection_env })
       runtime = {
         worker_id: prev.worker_id,
         seq,
@@ -838,9 +839,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         controlEndpoint,
         sessionId: prev.session_ref,
         eventChannel,
+        eventWatchOffset,
         controlState: { kind: 'running' },
         // 复用上一化身的 workspace ⇒ 事件文件里已有它留下的 stop 事件,基线必须现读现算。
-        stopBaseline: await this.initialStopBaseline(eventChannel),
+        stopBaseline,
         killed: false,
         connectionEnv: opts?.connection_env,
       }
@@ -923,6 +925,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         sessionId: '',
         outputLog: new OutputLog(outputFile),
         eventChannel: new CliEventChannel(forkEventsFile),
+        eventWatchOffset: 0,
         controlState: { kind: 'running' },
         stopBaseline: 0,
         killed: false,
@@ -1330,6 +1333,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         await this.transitionExited(runtime, h, reason)
       } else if (stopCount > runtime.stopBaseline) {
         runtime.stopBaseline = stopCount
+        runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
       }
       return { state: contractState(runtime.controlState), stopCount }
@@ -1368,6 +1372,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
       const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
       const eventChannel = new CliEventChannel(eventsPath)
+      const eventWatchOffset = await eventChannel.endOffset()
 
       let stopBaseline = 0
       if (workspaceRoot) {
@@ -1386,6 +1391,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
           : undefined,
         sessionId,
         eventChannel,
+        eventWatchOffset,
         controlState: controlFromMeta(meta, alive),
         ended_reason: alive ? undefined : meta.ended_reason,
         stopBaseline,
@@ -1395,6 +1401,16 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视,它之后每一轮 hook
       // 都能继续推状态给 harness。已终态的化身 startEventWatch 自己会短路掉。
       this.startEventWatch(runtime, { worker_id: ref.worker_id, seq: ref.seq, impl: 'claude-code', session_ref: sessionId })
+      if (alive) {
+        await this.inspectTerminalInteractionLocked(runtime, {
+          worker_id: ref.worker_id,
+          seq: ref.seq,
+          impl: 'claude-code',
+          session_ref: sessionId,
+        }).catch((error) => {
+          console.error(`[ClaudeCodeAdapter] recovery interaction check failed for ${ref.worker_id}#${ref.seq}:`, error)
+        })
+      }
       return runtime
     })
   }
@@ -1542,36 +1558,160 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         const raw = event.raw as { notification_type?: unknown; message?: unknown; title?: unknown } | null
         const type = typeof raw?.notification_type === 'string' ? raw.notification_type : undefined
         if (!type || !['permission_prompt', 'elicitation_dialog', 'agent_needs_input'].includes(type)) return
-        return this.getMutex(h.worker_id).run(async () => {
-          if (runtime.controlState.kind === 'exited') return
-          const snapshot = await this.capture(runtime)
-          if (!hasClaudeInteraction(snapshot.text)) return
-          const message = typeof raw?.message === 'string' ? raw.message : undefined
-          const title = typeof raw?.title === 'string' ? raw.title : undefined
-          const report: StateChangeReport = {
-            terminal: this.liveTerminal(snapshot),
-            waitReason: 'interaction_required',
-            notification: { type, ...(message ? { message } : {}), ...(title ? { title } : {}) },
-          }
-          await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, report)
-        }).catch((err) => {
-          console.error(`[ClaudeCodeAdapter] notification pane check failed for ${h.worker_id}#${h.seq}:`, err)
+        return this.inspectTerminalInteraction(runtime, h).catch((err) => {
+          console.error(`[ClaudeCodeAdapter] notification interaction check failed for ${h.worker_id}#${h.seq}:`, err)
         })
       }
       if (event.kind !== 'stop') return undefined
       return this.syncState(runtime, h).then(() => {}).catch((err) => {
         console.error(`[ClaudeCodeAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
       })
-    })
+    }, { offset: runtime.eventWatchOffset })
   }
 
   private async stopEventWatch(runtime: Runtime, waitForDrain = false): Promise<void> {
+    runtime.interactionFingerprint = undefined
     if (runtime.stopEventWatch) {
       const stop = runtime.stopEventWatch
       runtime.stopEventWatch = undefined
       runtime.eventWatchDrain = stop()
     }
     if (waitForDrain) await runtime.eventWatchDrain
+  }
+
+  private inspectTerminalInteraction(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+    return this.getMutex(h.worker_id).run(() => this.inspectTerminalInteractionLocked(runtime, h))
+  }
+
+  private async inspectTerminalInteractionLocked(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+    if (this.closing || runtime.controlState.kind === 'exited') return
+    let snapshot: CapturedPane
+    try {
+      snapshot = await this.capture(runtime)
+    } catch {
+      return
+    }
+    await this.handleTerminalInteraction(runtime, h, classifyClaudeTerminalInteraction(snapshot), snapshot)
+  }
+
+  private async handleTerminalInteraction(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    interaction: TerminalInteraction,
+    snapshot: CapturedPane,
+  ): Promise<void> {
+    if (interaction.kind === 'none') {
+      runtime.interactionFingerprint = undefined
+      return
+    }
+    if (runtime.interactionFingerprint === interaction.fingerprint) return
+    runtime.interactionFingerprint = interaction.fingerprint
+
+    if (interaction.kind === 'automatic') {
+      const confirmed = await this.capture(runtime).catch(() => undefined)
+      if (!confirmed) {
+        await this.failAutomaticInteraction(runtime, h, undefined)
+        return
+      }
+      const current = classifyClaudeTerminalInteraction(confirmed)
+      if (current.kind !== 'automatic' || current.fingerprint !== interaction.fingerprint) {
+        runtime.interactionFingerprint = undefined
+        await this.handleTerminalInteraction(runtime, h, current, confirmed)
+        return
+      }
+      const permissionModeBaseline = await this.captureClaudePermissionModeOffsets(runtime)
+      try {
+        await this.tmux.sendKeys(runtime.sessionName, ['1', 'Enter'])
+      } catch {
+        await this.failAutomaticInteraction(runtime, h, confirmed)
+        return
+      }
+      const resolved = await this.waitForClaudeExitPlanResolution(runtime, permissionModeBaseline)
+      if (!resolved) {
+        await this.failAutomaticInteraction(runtime, h, undefined)
+        return
+      }
+      runtime.interactionFingerprint = undefined
+      return
+    }
+
+    await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, {
+      terminal: this.liveTerminal(snapshot),
+      waitReason: 'interaction_required',
+      notification: { type: 'terminal_interaction' },
+    })
+  }
+
+  private async waitForClaudeExitPlanResolution(
+    runtime: Runtime,
+    permissionModeBaseline: ReadonlyMap<string, number>,
+  ): Promise<CapturedPane | undefined> {
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      if (!(await this.tmux.isAlive(runtime.sessionName))) return undefined
+      const snapshot = await this.capture(runtime).catch(() => undefined)
+      if (!snapshot) return undefined
+      if (classifyClaudeTerminalInteraction(snapshot).kind === 'none' && hasClaudeExecutionOrComposer(snapshot)) {
+        const mode = await this.readClaudePermissionModeAfter(runtime, permissionModeBaseline)
+        if (mode === 'auto') return snapshot
+        if (mode !== undefined) return undefined
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    return undefined
+  }
+
+  private async claudeSessionPaths(runtime: Runtime): Promise<string[]> {
+    if (!runtime.workspaceRoot || !runtime.sessionId) return []
+    const roots = [runtime.workspaceRoot]
+    const realRoot = await fs.realpath(runtime.workspaceRoot).catch(() => undefined)
+    if (realRoot && realRoot !== runtime.workspaceRoot) roots.push(realRoot)
+    return roots.map((root) => join(this.claudeProjectsDir, projectSlug(root), `${runtime.sessionId}.jsonl`))
+  }
+
+  private async captureClaudePermissionModeOffsets(runtime: Runtime): Promise<Map<string, number>> {
+    const offsets = new Map<string, number>()
+    for (const path of await this.claudeSessionPaths(runtime)) {
+      const size = await fs.stat(path).then((stat) => stat.size).catch(() => 0)
+      offsets.set(path, size)
+    }
+    return offsets
+  }
+
+  private async readClaudePermissionModeAfter(
+    runtime: Runtime,
+    offsets: ReadonlyMap<string, number>,
+  ): Promise<string | undefined> {
+    for (const path of await this.claudeSessionPaths(runtime)) {
+      const offset = offsets.get(path)
+      if (offset === undefined) continue
+      let raw: Buffer
+      try {
+        raw = await fs.readFile(path)
+      } catch {
+        continue
+      }
+      if (raw.length < offset) continue
+      for (const line of raw.subarray(offset).toString('utf-8').trimEnd().split('\n').reverse()) {
+        try {
+          const value = JSON.parse(line) as { permissionMode?: unknown; message?: { permissionMode?: unknown } }
+          const mode = value.permissionMode ?? value.message?.permissionMode
+          if (typeof mode === 'string') return mode
+        } catch {
+          // A partially appended session record is not proof of auto mode.
+        }
+      }
+    }
+    return undefined
+  }
+
+  private async failAutomaticInteraction(runtime: Runtime, h: IncarnationHandle, snapshot: CapturedPane | undefined): Promise<void> {
+    const current = snapshot ?? await this.capture(runtime).catch(() => undefined)
+    await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, {
+      terminal: current ? this.liveTerminal(current) : { kind: 'unavailable', unavailable_reason: 'terminal_capture_failed' },
+      waitReason: 'interaction_required',
+      notification: { type: 'automatic_interaction_failed' },
+    })
   }
 
   private assertActive(): void {
@@ -1581,10 +1721,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   /**
    * 新建 runtime 时的 stop 基线。事件文件是 **workspace 级**的(`<ws>/.claude/events-cli.jsonl`,
    * 同一 workspace 上的历代化身共写一份),所以新化身必须以"此刻文件里已有的 stop 数"起算,
-   * 不能一律取 0——resume 正是复用上一化身的 workspace,取 0 会让首次 syncState 立刻把刚
-   * 起来的新化身判成 idle。接上文件监视之后这条从"潜伏"变成"必然":watch() 建立时会先读
-   * 一遍历史内容,取 0 就会在 resume 返回前推一个假的"这一轮干完了"去唤醒 manager。
-   * 与 ensureRuntime 重建时的同款处理保持一致(那里本来就是这么算的)。
+   * 不能一律取 0——resume 正是复用上一化身的 workspace,取 0 会让后续 pull reconcile
+   * 把上一化身留下的 stop 当成新完成。事件监听从本化身启动前的位置接续，重连则由恢复
+   * capture 处理现有交互界面；两条路径都不重放历史 hook。
    */
   private async initialStopBaseline(channel: CliEventChannel): Promise<number> {
     const events = await channel.readAll()

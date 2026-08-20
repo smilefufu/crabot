@@ -1,7 +1,8 @@
 /**
  * Codex WorkerAdapter.
  *
- * Interactive incarnations run in tmux with approval_policy=never, workspace-write sandbox, and
+ * Interactive incarnations run in tmux with approve-for-me (which selects the workspace-write
+ * sandbox), and
  * workspace network access. spawn/resume wait for bracketed-paste readiness and submit opening
  * input through the guarded `empty -> one paste -> pending -> Enter` transaction (one Enter retry,
  * never a second paste). `initial_input` on the returned handle gives the harness explicit state
@@ -35,10 +36,11 @@ import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import type { TmuxControlEndpoint } from '../tmux/control-monitor.js'
 import { readFinalTerminalSnapshot, writeFinalTerminalSnapshot } from '../tmux/terminal-snapshot.js'
+import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { WorkerExitedError, CapabilityNotSupportedError, CliInputStallError, WorkerImplUnavailableError, ForkEstablishmentError } from '../errors.js'
-import { probeCodexInput, acceptedCodexInput } from './input-surface.js'
+import { probeCodexInput, acceptedCodexInput, classifyCodexTerminalInteraction } from './input-surface.js'
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import {
@@ -78,8 +80,9 @@ const execFileAsync = promisify(execFile)
 
 /** spawn/resume 都要带的主命令级选项:放行 workspace-write 沙箱的出网。见文件头
  * "spawn/resume 启动参数"节。取值只含 `[A-Za-z_.=]`,不含 shell 元字符,拼进经 `sh -c`
- * 跑的 tmux 命令行时无需额外引号(与相邻的 `--sandbox workspace-write` 写法一致)。 */
+ * 跑的 tmux 命令行时无需额外引号。 */
 const CODEX_NETWORK_ACCESS_OPT = '-c sandbox_workspace_write.network_access=true'
+const CODEX_HOOK_TRUST_OPT = '--dangerously-bypass-hook-trust'
 const CODEX_CREDENTIAL_FILES = ['.codex/config.toml', '.codex/auth.json'] as const
 
 /** POSIX shell 单引号转义,与 cc adapter 的私有 shQuote 同款用法(独立复制一份)。 */
@@ -96,6 +99,77 @@ function asTable(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {}
+}
+
+async function assertNoCodexHookSources(codexDir: string, operation = 'provision'): Promise<void> {
+  for (const entry of ['hooks.json', 'plugins'] as const) {
+    try {
+      await fs.lstat(join(codexDir, entry))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
+    throw new Error(
+      `CodexWorkerAdapter.${operation}: refusing to enable generated hook trust while ${join(codexDir, entry)} exists`,
+    )
+  }
+}
+
+/**
+ * 隔离 CODEX_HOME 可以继承连接设置，却绝不能继承会安装/启用第三方 hook 的配置。否则
+ * --dangerously-bypass-hook-trust 会扩大到 Crabot 未生成、未审计的代码。
+ */
+function stripUntrustedCodexHookSources(config: Record<string, unknown>): void {
+  delete config.hooks
+  delete config.plugins
+  delete config.marketplaces
+  delete config.allow_managed_hooks_only
+}
+
+function generatedCodexPermissionRequestHooks(command: string): Record<string, unknown> {
+  return {
+    PermissionRequest: [{
+      matcher: '',
+      hooks: [{
+        type: 'command',
+        command: `/bin/sh -c ${shQuote(command)}`,
+        timeout: 10,
+      }],
+    }],
+  }
+}
+
+async function installGeneratedCodexHookConfiguration(
+  codexDir: string,
+  channel: CliEventChannel,
+  operation: 'spawn' | 'resume',
+): Promise<void> {
+  const configPath = join(codexDir, 'config.toml')
+  let config: Record<string, unknown>
+  try {
+    config = asTable(parseToml(await fs.readFile(configPath, 'utf-8')))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      config = {}
+    } else {
+      throw new Error(
+        `CodexWorkerAdapter.${operation}: refusing to enable generated hook trust because ${configPath} is unreadable or invalid`,
+      )
+    }
+  }
+  // CODEX_HOME 是 Harness 管理的隔离目录。每次启动都恢复其 hook 段，既兼容上线前
+  // 没有该段的配置，也不会让 worker 或 Codex 自己留下的 hook state 进入自动信任范围。
+  stripUntrustedCodexHookSources(config)
+  config.features = { ...asTable(config.features), hooks: true }
+  config.hooks = generatedCodexPermissionRequestHooks(channel.hookCommand('permission_request'))
+  try {
+    await fs.mkdir(codexDir, { recursive: true })
+    await writeSensitiveFileAtomic(configPath, stringifyToml(config))
+  } catch {
+    throw new Error(
+      `CodexWorkerAdapter.${operation}: refusing to install generated hook trust at ${configPath}`,
+    )
+  }
 }
 
 /** 从 codexBin 配置里摘出"实际会被 exec 的可执行文件"这一个 token。生产配置通常就是单个
@@ -185,6 +259,8 @@ interface Runtime {
   /** 仅无头 fork 写入纯文本；交互式 tmux 化身不保留原始输出流。 */
   readonly outputLog?: OutputLog
   readonly eventChannel: CliEventChannel
+  /** 仅消费本化身启动后新增的 hook；重连由 recovery capture 覆盖已有界面。 */
+  readonly eventWatchOffset: number
   /** spawn 时 session 发现的结果:'discovered' 表示发现了真实 rollout 文件,'placeholder' 表示超时降级。
    * 内部状态机用,会透传到 meta 文件。 */
   sessionDiscoveryStatus: 'discovered' | 'placeholder'
@@ -204,6 +280,7 @@ interface Runtime {
   acceptedExitReport?: StateChangeReport
   stopEventWatch?: () => Promise<void>
   eventWatchDrain?: Promise<void>
+  interactionFingerprint?: string
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin/cc 同款语义(P2 review #2)。 */
   resumed?: boolean
@@ -644,7 +721,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * runtime 配置合并（translator 的 model_provider/model/[model_providers.*] 胜出；
    * notify/trust/mcp 等能力配置取自 provision 版）。auth.json 不复制（env_key 鉴权）。
    */
-  private async mergeAdminProviderCodexHome(workspaceRoot: string, workspaceCodexHome: string, runtimeCodexHome: string): Promise<void> {
+  private async mergeAdminProviderCodexHome(
+    workspaceRoot: string,
+    workspaceCodexHome: string,
+    runtimeCodexHome: string,
+    operation: 'spawn' | 'resume',
+  ): Promise<void> {
     const readToml = async (file: string): Promise<Record<string, unknown>> => {
       try {
         return asTable(parseToml(await fs.readFile(file, 'utf-8')))
@@ -653,8 +735,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         throw err
       }
     }
+    // 此目录会成为交互式 worker 实际使用的 CODEX_HOME；即便它来自 admin runtime，也不能
+    // 让未知 hooks.json/plugins 与自动 trust 同时存在。
+    await assertNoCodexHookSources(runtimeCodexHome, operation)
     const provisioned = await readToml(join(workspaceCodexHome, 'config.toml'))
     const translator = await readToml(join(runtimeCodexHome, 'config.toml'))
+    stripUntrustedCodexHookSources(translator)
     // 根级标量：translator 的 model/model_provider 覆盖；provision 的 notify 等保留。
     const merged: Record<string, unknown> = { ...provisioned, ...translator }
     // table 级：model_providers 两边都是表——translator 的 crabot-admin 条目必须保留，
@@ -676,6 +762,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 已跟踪的 credential target 必须在任何 provision 写入前拒绝；ignore 必须先于敏感文件落盘。
     await this.preflightProvision(ws, caps)
     await fs.mkdir(codexDir, { recursive: true })
+    await assertNoCodexHookSources(codexDir)
     await fs.writeFile(join(codexDir, '.gitignore'), '*\n', 'utf-8')
 
     const channel = new CliEventChannel(eventsFilePath(ws))
@@ -703,6 +790,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const config = await this.readHostConfig()
 
     config.notify = notify
+    // Worker 的隔离 CODEX_HOME 只继承连接相关配置，不能把宿主 hooks 或可安装 hook 的插件
+    // 配置带进来；下方仅装配 Crabot 自己生成的 PermissionRequest hook，再由 spawn/resume
+    // 自动信任这一已知来源。
+    stripUntrustedCodexHookSources(config)
+    // 隔离 home 需要自己的 PermissionRequest hook；不能继承宿主为了交互环境设下的
+    // `[features] hooks = false`，否则本 worker 会静默失去交互唤醒能力。
+    config.features = { ...asTable(config.features), hooks: true }
+    config.hooks = generatedCodexPermissionRequestHooks(channel.hookCommand('permission_request'))
 
     // 宿主已有的 [projects."别的目录"] 一并留着(codex 只按路径匹配,带过来无害),但本
     // workspace 这条必须由 crabot 说了算,不能被宿主的同名表挤掉。
@@ -797,10 +892,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
       if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || paneShowsWorkingAfterRaw)) {
+        runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'running' })
         return
       }
       if (primaryProbe === 'empty') {
+        runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
         return
       }
@@ -951,29 +1048,34 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     let codexHome = join(spec.workspace.root, '.codex')
     const runtimeCodexHome = spec.connection_env?.CODEX_HOME
     if (runtimeCodexHome) {
-      await this.mergeAdminProviderCodexHome(spec.workspace.root, codexHome, runtimeCodexHome)
+      await this.mergeAdminProviderCodexHome(spec.workspace.root, codexHome, runtimeCodexHome, 'spawn')
       codexHome = runtimeCodexHome
     }
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
-    // codex-docs + m2 实测:交互态无 --session-id 等价参数;--ask-for-approval never
-    // --sandbox workspace-write 与 cc 用 --permission-mode bypassPermissions 同样的自动化意图。
+    // codex-docs + m2 实测:交互态无 --session-id 等价参数;--approve-for-me 在
+    // workspace-write 沙箱内把审批交给 Codex 的自动审查，不能用 never/yolo 跳过审批。
     // 不传 --skip-git-repo-check(m2 实测顶层交互式 codex 不支持这个 flag,只有 codex exec
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。
     // 网络放行见文件头"spawn/resume 启动参数"节。
-    const spawnBin = (await this.resolveBinForCommand())?.cmd
-    if (!spawnBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.spawn: no user-level codex installation')
-    const command = `${spawnBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
-    const spawnStartedAt = Date.now()
-
     // newSession 成功之后才落 meta(running)+注册 runtime,同 cc 纪律:tmux 失败时不留任何
     // 持久痕迹,同 worker_id 可安全重试。CODEX_HOME 经 tmux -e 传给会话进程(execFile 直传
     // argv,不经过 shell 插值,不需要额外转义);PATH 同样经 -e 显式前置 codexBin 所在真实
     // 目录(nvm 部署陷阱,见 buildEnv/resolveBinDir 注释),不依赖 tmux server 自身环境。
+    const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
+    const eventWatchOffset = await eventChannel.endOffset()
+    const stopBaseline = await this.initialStopBaseline(eventChannel)
+    const spawnBin = (await this.resolveBinForCommand())?.cmd
+    if (!spawnBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.spawn: no user-level codex installation')
+    const env = await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env })
+    await assertNoCodexHookSources(codexHome, 'spawn')
+    await installGeneratedCodexHookConfiguration(codexHome, eventChannel, 'spawn')
+    const command = `${spawnBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT}`
+    const spawnStartedAt = Date.now()
     const controlEndpoint = await this.tmux.newSession({
       name: sessionName, cwd: spec.workspace.root, command,
       // connection_env（admin_provider CODEX_HOME/env_key）优先级高于 workspace 默认。
-      env: await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env }),
+      env,
     })
 
     // Codex 0.146 在首条 prompt 提交前不会创建 rollout。这里先建立空 session_ref 的
@@ -983,7 +1085,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
     let handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'codex', session_ref: sessionId }
 
-    const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
     const runtime: Runtime = {
       worker_id: spec.worker_id,
       seq,
@@ -995,10 +1096,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       sessionId,
       rolloutPath: undefined,
       eventChannel,
+      eventWatchOffset,
       sessionDiscoveryStatus,
       discoveryStartedAt: spawnStartedAt,
       controlState: { kind: 'running' },
-      stopBaseline: await this.initialStopBaseline(eventChannel),
+      stopBaseline,
       killed: false,
     }
 
@@ -1116,32 +1218,36 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       handle = { worker_id: prev.worker_id, seq, impl: 'codex', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       // codex-docs: `codex resume <SESSION_ID>` 是独立子命令(不是 --resume flag)。
-      // m2 实测:--ask-for-approval/--sandbox 这类主命令级选项必须排在 `resume` 子命令**之前**
+      // m2 实测:--approve-for-me/-c 这类主命令级选项必须排在 `resume` 子命令**之前**
       // ——放在 `resume <id>` 后面 codex 会报 usage 错、exit=2(原实现把它们放在 `resume <id>`
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
       // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
       // `resume` 之前。
-      const resumeBin = (await this.resolveBinForCommand())?.cmd
-      if (!resumeBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.resume: no user-level codex installation')
-      const command = `${resumeBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
-
       // P6-B admin_provider resume：上一化身的 runtime CODEX_HOME 已随终态清理，
       // 本次 admission 产出新目录——同样要合并 provision 配置（translator 配置胜出）。
       let resumeCodexHome = prevRuntime.codexHome
       const resumeRuntimeHome = opts?.connection_env?.CODEX_HOME
       if (resumeRuntimeHome) {
-        await this.mergeAdminProviderCodexHome(prevRuntime.workspaceRoot, join(prevRuntime.workspaceRoot, '.codex'), resumeRuntimeHome)
+        await this.mergeAdminProviderCodexHome(prevRuntime.workspaceRoot, join(prevRuntime.workspaceRoot, '.codex'), resumeRuntimeHome, 'resume')
         resumeCodexHome = resumeRuntimeHome
       }
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
       // PATH 前置同 spawn(nvm 部署陷阱)。
+      const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
+      const eventWatchOffset = await eventChannel.endOffset()
+      const stopBaseline = await this.initialStopBaseline(eventChannel)
+      const resumeBin = (await this.resolveBinForCommand())?.cmd
+      if (!resumeBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.resume: no user-level codex installation')
+      const env = await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome })
+      await assertNoCodexHookSources(resumeCodexHome, 'resume')
+      await installGeneratedCodexHookConfiguration(resumeCodexHome, eventChannel, 'resume')
+      const command = `${resumeBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT} resume ${shQuote(prev.session_ref)}`
       const controlEndpoint = await this.tmux.newSession({
         name: sessionName, cwd: prevRuntime.workspaceRoot, command,
-        env: await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome }),
+        env,
       })
 
-      const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
       runtime = {
         worker_id: prev.worker_id,
         seq,
@@ -1155,12 +1261,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         // 化身已发现的路径;上一化身当时若发现失败(占位 uuid),这里同样拿不到,保持未知。
         rolloutPath: prevRuntime.rolloutPath,
         eventChannel,
+        eventWatchOffset,
         sessionDiscoveryStatus: prevRuntime.sessionDiscoveryStatus,
         discoveryStartedAt: Date.now(),
         controlState: { kind: 'running' },
         // 复用上一化身的 workspace ⇒ 事件文件里已有它留下的通知,基线必须现读现算(见
         // initialStopBaseline 注释)。
-        stopBaseline: await this.initialStopBaseline(eventChannel),
+        stopBaseline,
         killed: false,
       }
 
@@ -1255,6 +1362,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         rolloutPath: undefined,
         outputLog: new OutputLog(join(dir, `output-${seq}.log`)),
         eventChannel: new CliEventChannel(join(dir, `fork-events-${seq}.jsonl`)),
+        eventWatchOffset: 0,
         sessionDiscoveryStatus: 'placeholder',
         discoveryStartedAt: Date.now(),
         controlState: { kind: 'running' },
@@ -1662,6 +1770,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         await this.transitionExited(runtime, currentHandle, reason, notify)
       } else if (stopCount > runtime.stopBaseline) {
         runtime.stopBaseline = stopCount
+        runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, currentHandle, { kind: 'waiting_text' }, undefined, notify)
       }
       return { state: contractState(runtime.controlState), stopCount }
@@ -1706,6 +1815,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
       const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
       const eventChannel = new CliEventChannel(eventsPath)
+      const eventWatchOffset = await eventChannel.endOffset()
 
       let stopBaseline = 0
       if (workspaceRoot) {
@@ -1726,6 +1836,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         sessionId,
         rolloutPath,
         eventChannel,
+        eventWatchOffset,
         sessionDiscoveryStatus,
         discoveryStartedAt: Date.now(),
         controlState: controlFromMeta(meta, alive),
@@ -1737,6 +1848,16 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视。已终态的化身
       // startEventWatch 自己会短路掉。
       this.startEventWatch(runtime, { worker_id: ref.worker_id, seq: ref.seq, impl: 'codex', session_ref: sessionId })
+      if (alive) {
+        await this.inspectTerminalInteractionLocked(runtime, {
+          worker_id: ref.worker_id,
+          seq: ref.seq,
+          impl: 'codex',
+          session_ref: sessionId,
+        }).catch((error) => {
+          console.error(`[CodexWorkerAdapter] recovery interaction check failed for ${ref.worker_id}#${ref.seq}:`, error)
+        })
+      }
       return runtime
     })
   }
@@ -1879,20 +2000,53 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (!runtime.sessionName) return
     if (runtime.controlState.kind === 'exited') return
     if (runtime.stopEventWatch) return // 幂等:同一 runtime 只装一个
-    runtime.stopEventWatch = runtime.eventChannel.watch(() =>
-      this.syncState(runtime, h).then(() => {}).catch((err) => {
+    runtime.stopEventWatch = runtime.eventChannel.watch((event) => {
+      if (event.kind === 'permission_request') {
+        return this.inspectTerminalInteraction(runtime, h).catch((err) => {
+          console.error(`[CodexWorkerAdapter] permission-request interaction check failed for ${h.worker_id}#${h.seq}:`, err)
+        })
+      }
+      if (event.kind !== 'stop') return undefined
+      return this.syncState(runtime, h).then(() => {}).catch((err) => {
         console.error(`[CodexWorkerAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
-      }),
-    )
+      })
+    }, { offset: runtime.eventWatchOffset })
   }
 
   private async stopEventWatch(runtime: Runtime, waitForDrain = false): Promise<void> {
+    runtime.interactionFingerprint = undefined
     if (runtime.stopEventWatch) {
       const stop = runtime.stopEventWatch
       runtime.stopEventWatch = undefined
       runtime.eventWatchDrain = stop()
     }
     if (waitForDrain) await runtime.eventWatchDrain
+  }
+
+  private inspectTerminalInteraction(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+    return this.getMutex(h.worker_id).run(() => this.inspectTerminalInteractionLocked(runtime, h))
+  }
+
+  private async inspectTerminalInteractionLocked(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+    if (this.closing || runtime.controlState.kind === 'exited') return
+    let snapshot: CapturedPane
+    try {
+      snapshot = await this.capture(runtime)
+    } catch {
+      return
+    }
+    const interaction: TerminalInteraction = classifyCodexTerminalInteraction(snapshot)
+    if (interaction.kind === 'none') {
+      runtime.interactionFingerprint = undefined
+      return
+    }
+    if (runtime.interactionFingerprint === interaction.fingerprint) return
+    runtime.interactionFingerprint = interaction.fingerprint
+    await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, {
+      terminal: this.liveTerminal(snapshot),
+      waitReason: 'interaction_required',
+      notification: { type: 'terminal_interaction' },
+    })
   }
 
   private assertActive(): void {

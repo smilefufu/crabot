@@ -47,6 +47,19 @@ export class CliEventChannel {
   constructor(private filePath: string) {}
 
   /**
+   * 返回当前文件末尾。调用方在启动一个新的 CLI 化身前记住该位置，再由 watch() 从这里
+   * 接续，就不会把同 workspace 历史化身留下的 hook 当成本化身的新事件。
+   */
+  async endOffset(): Promise<number> {
+    try {
+      return (await fs.stat(this.filePath)).size
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0
+      throw error
+    }
+  }
+
+  /**
    * 生成供 CLI hook 使用的 shell 片段(POSIX sh,不依赖 node/jq 等非必装工具)。
    * 只用 printf + date -u 拼一行 JSON 并追加到事件文件。
    *
@@ -97,9 +110,12 @@ export class CliEventChannel {
    * 损坏的可信 envelope 则保留 ts/kind 并降级为 raw:null。半行(尚无换行符,写入未完成)
    * 留到下次补全读——offset 只推进到最后一个完整换行处。
    */
-  watch(onEvent: (e: CliEvent) => void | Promise<void>): () => Promise<void> {
+  watch(
+    onEvent: (e: CliEvent) => void | Promise<void>,
+    options: { offset?: number } = {},
+  ): () => Promise<void> {
     let stopped = false
-    let offset = 0
+    let offset = options.offset ?? 0
     let watcher: FSWatcher | null = null
     let pumpPromise: Promise<void> | null = null
     let disposePromise: Promise<void> | null = null

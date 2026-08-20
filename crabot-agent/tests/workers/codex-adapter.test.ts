@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { parse as parseToml } from 'smol-toml'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { CodexWorkerAdapter, eventsFilePath, WorkerExitedError } from '../../src/workers/codex/adapter.js'
 import { ForkEstablishmentError } from '../../src/workers/errors.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
@@ -113,6 +113,40 @@ function terminalText(view: Awaited<ReturnType<CodexWorkerAdapter['readTerminal'
   return view.kind === 'unavailable' ? '' : view.text
 }
 
+async function writeGeneratedCodexHookConfig(workspaceRoot: string): Promise<void> {
+  const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+  await fs.mkdir(path.join(workspaceRoot, '.codex'), { recursive: true })
+  await fs.writeFile(
+    path.join(workspaceRoot, '.codex', 'config.toml'),
+    stringifyToml({
+      features: { hooks: true },
+      hooks: {
+        PermissionRequest: [{
+          matcher: '',
+          hooks: [{
+            type: 'command',
+            command: `/bin/sh -c ${shQuote(channel.hookCommand('permission_request'))}`,
+            timeout: 10,
+          }],
+        }],
+      },
+    }),
+    'utf-8',
+  )
+}
+
+async function injectUntrustedCodexConfigSources(configPath: string): Promise<void> {
+  const config = parseToml(await fs.readFile(configPath, 'utf-8')) as Record<string, unknown>
+  config.allow_managed_hooks_only = true
+  config.plugins = { worker_plugin: { enabled: true } }
+  config.marketplaces = { worker_marketplace: { source: 'https://example.invalid/plugin' } }
+  config.hooks = {
+    WorkerAdded: [{ matcher: '', hooks: [] }],
+    state: { host_hook: { trusted_hash: 'sha256:host' } },
+  }
+  await fs.writeFile(configPath, stringifyToml(config), 'utf-8')
+}
+
 describe('CodexWorkerAdapter.provision', () => {
   let ws: string
   let codexHomeSource: string
@@ -144,12 +178,20 @@ describe('CodexWorkerAdapter.provision', () => {
     expect((await fs.stat(configPath)).mode & 0o777).toBe(0o600)
     expect(configToml).toContain('notify = ')
     expect(configToml).toContain('events-cli.jsonl')
+    expect(configToml).toContain('permission_request')
     // 序列化交给 smol-toml 之后表头是否给 key 加引号属于格式细节(`[mcp_servers.x]` 与
     // `[mcp_servers."x"]` 语义等价),这里钉语义不钉引号风格。
     expect((parseToml(configToml) as any).mcp_servers).toEqual({
       x: { command: 'node', env: { API_KEY: 'secret' } },
       remote: { url: 'https://example.com/mcp', http_headers: { Authorization: 'Bearer token' } },
     })
+    const hooks = (parseToml(configToml) as any).hooks
+    expect(hooks.PermissionRequest).toHaveLength(1)
+    expect(hooks.PermissionRequest[0].hooks[0]).toMatchObject({
+      type: 'command',
+      timeout: 10,
+    })
+    expect(hooks.PermissionRequest[0].hooks[0].command).toContain('permission_request')
     // TOML 根级 key(notify)必须出现在第一个 table([mcp_servers...])之前。
     expect(configToml.indexOf('notify =')).toBeLessThan(configToml.indexOf('[mcp_servers'))
 
@@ -210,6 +252,74 @@ describe('CodexWorkerAdapter.provision', () => {
     const gitignorePath = path.join(ws, '.codex/.gitignore')
     const content = await fs.readFile(gitignorePath, 'utf-8')
     expect(content).toBe('*\n')
+  })
+
+  it.each(['hooks.json', 'plugins'] as const)('已有 .codex/%s 时拒绝启用自动 hook trust', async (entry) => {
+    const target = path.join(ws, '.codex', entry)
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    if (entry === 'plugins') await fs.mkdir(target)
+    else await fs.writeFile(target, '{}\n', 'utf-8')
+
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+    await expect(adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })).rejects.toThrow(
+      new RegExp(`refusing to enable generated hook trust.*${entry.replace('.', '\\.')}`),
+    )
+    await expect(fs.access(path.join(ws, '.codex', 'config.toml'))).rejects.toThrow()
+  })
+
+  it('provision 后新出现的 hook 源会在 spawn 前被拒绝，不创建 tmux 会话', async () => {
+    class CountingTmux extends TmuxDriver {
+      newSessionCalls = 0
+
+      async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+        this.newSessionCalls += 1
+        return fakeReadyNewSession(spec)
+      }
+    }
+
+    const tmux = new CountingTmux()
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource, tmux, codexBin: 'unused' })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
+    await fs.writeFile(path.join(ws, '.codex', 'hooks.json'), '{}\n', 'utf-8')
+
+    await expect(adapter.spawn({ worker_id: 'spawn-hook-race', prompt: '你好', workspace: { root: ws } })).rejects.toThrow(
+      /CodexWorkerAdapter\.spawn: refusing to enable generated hook trust/,
+    )
+    expect(tmux.newSessionCalls).toBe(0)
+  })
+
+  it('spawn 前会清除 config.toml 中的未知 hook 源，仅留下生成的 PermissionRequest hook', async () => {
+    class CountingTmux extends NoopTmux {
+      newSessionCalls = 0
+
+      async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+        this.newSessionCalls += 1
+        return super.newSession(spec)
+      }
+    }
+
+    const tmux = new CountingTmux()
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource, tmux, codexBin: 'unused', sessionDiscoveryTimeoutMs: 50 })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
+    await injectUntrustedCodexConfigSources(path.join(ws, '.codex', 'config.toml'))
+
+    const h = await adapter.spawn({ worker_id: 'spawn-hook-config-race', prompt: '你好', workspace: { root: ws } })
+    const config = parseToml(await fs.readFile(path.join(ws, '.codex', 'config.toml'), 'utf-8')) as {
+      features: { hooks: unknown }
+      hooks: Record<string, unknown>
+      plugins?: unknown
+      marketplaces?: unknown
+      allow_managed_hooks_only?: unknown
+    }
+    expect(config.features.hooks).toBe(true)
+    expect(config.hooks.PermissionRequest).toEqual(expect.any(Array))
+    expect(config.hooks.WorkerAdded).toBeUndefined()
+    expect(config.hooks.state).toBeUndefined()
+    expect(config.plugins).toBeUndefined()
+    expect(config.marketplaces).toBeUndefined()
+    expect(config.allow_managed_hooks_only).toBeUndefined()
+    expect(tmux.newSessionCalls).toBe(1)
+    await adapter.kill(h)
   })
 
   it('codexHomeSource 下没有 auth.json 时不阻塞 provision', async () => {
@@ -286,6 +396,35 @@ describe('CodexWorkerAdapter.provision', () => {
 
       // mcp_servers 是 crabot 的能力集
       expect(parsed.mcp_servers).toEqual({ crabot: { command: 'node' } })
+    })
+
+    it('宿主 hook、插件与 marketplace 配置不会进入隔离 worker，但生成的 PermissionRequest hook 保留', async () => {
+      const hostWithHookSources = HOST_CONFIG + [
+        'allow_managed_hooks_only = true',
+        '',
+        '[features]',
+        'hooks = false',
+        '',
+        '[hooks.state.host_hook]',
+        'trusted_hash = "sha256:host"',
+        '',
+        '[plugins.host_plugin]',
+        'enabled = true',
+        '',
+        '[marketplaces.host_marketplace]',
+        'source = "https://example.invalid/plugin"',
+        '',
+      ].join('\n')
+
+      const parsed = await provisionWithHost(hostWithHookSources)
+
+      expect(parsed.plugins).toBeUndefined()
+      expect(parsed.marketplaces).toBeUndefined()
+      expect(parsed.allow_managed_hooks_only).toBeUndefined()
+      expect(parsed.features.hooks).toBe(true)
+      expect(parsed.hooks.PermissionRequest).toHaveLength(1)
+      expect(JSON.stringify(parsed.hooks)).toContain('permission_request')
+      expect(JSON.stringify(parsed.hooks)).not.toContain('host_hook')
     })
 
     it('宿主的 [mcp_servers] 不与 crabot 的合并——caps 是任务授权边界,crabot 胜', async () => {
@@ -809,7 +948,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'spawn 命令行不携带 --skip-git-repo-check/--yolo,固定 --ask-for-approval never + --sandbox workspace-write,且带 -c sandbox_workspace_write.network_access=true(否则 worker 外网+本机端口全不可达)',
+    'spawn command uses approve-for-me with network access',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -824,12 +963,10 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
       expect(argv).not.toContain('--skip-git-repo-check')
       expect(argv).not.toContain('--yolo')
-      const approvalIdx = argv.indexOf('--ask-for-approval')
-      expect(approvalIdx).toBeGreaterThan(-1)
-      expect(argv[approvalIdx + 1]).toBe('never')
-      const sandboxIdx = argv.indexOf('--sandbox')
-      expect(sandboxIdx).toBeGreaterThan(-1)
-      expect(argv[sandboxIdx + 1]).toBe('workspace-write')
+      expect(argv).toContain('--approve-for-me')
+      expect(argv).toContain('--dangerously-bypass-hook-trust')
+      expect(argv).not.toContain('--ask-for-approval')
+      expect(argv).not.toContain('--sandbox')
       const configIdx = argv.indexOf('-c')
       expect(configIdx).toBeGreaterThan(-1)
       expect(argv[configIdx + 1]).toBe('sandbox_workspace_write.network_access=true')
@@ -840,7 +977,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'resume 命令行不携带 --skip-git-repo-check/--yolo,固定 never + workspace-write,且审批/沙箱/网络选项放在 resume 子命令之前',
+    'resume command uses approve-for-me before resume with network access',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -864,17 +1001,54 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       expect(argv).not.toContain('--yolo')
       const resumeIdx = argv.indexOf('resume')
       expect(resumeIdx).toBeGreaterThan(-1)
-      for (const flag of ['--ask-for-approval', '--sandbox', '-c']) {
+      for (const flag of ['--approve-for-me', '-c', '--dangerously-bypass-hook-trust']) {
         const idx = argv.indexOf(flag)
         expect(idx).toBeGreaterThan(-1)
         expect(idx).toBeLessThan(resumeIdx)
       }
-      const approvalIdx = argv.indexOf('--ask-for-approval')
-      expect(argv[approvalIdx + 1]).toBe('never')
-      const sandboxIdx = argv.indexOf('--sandbox')
-      expect(argv[sandboxIdx + 1]).toBe('workspace-write')
+      expect(argv).toContain('--approve-for-me')
+      expect(argv).not.toContain('--ask-for-approval')
+      expect(argv).not.toContain('--sandbox')
       const configIdx = argv.indexOf('-c')
       expect(argv[configIdx + 1]).toBe('sandbox_workspace_write.network_access=true')
+    },
+    15000,
+  )
+
+  it(
+    'resume 前会恢复 config.toml 的生成 hook，清除 Codex 或 worker 留下的未知 hook 源',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const argvFile = path.join(dataDir, 'resume-hook-race-argv.jsonl')
+      const rolloutFile = path.join(workspaceRoot, '.codex', 'sessions', rolloutFileNameFor(randomUUID()))
+      const codexBin = codexBinFor([{ output: '主线输出', exit: true }], stopHookCmd, { argvFile, rolloutFile })
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await waitForState(adapter, h1, 'exited')
+
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+      await injectUntrustedCodexConfigSources(path.join(workspaceRoot, '.codex', 'config.toml'))
+
+      const h2 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')
+      const config = parseToml(await fs.readFile(path.join(workspaceRoot, '.codex', 'config.toml'), 'utf-8')) as {
+        features: { hooks: unknown }
+        hooks: Record<string, unknown>
+        plugins?: unknown
+        marketplaces?: unknown
+        allow_managed_hooks_only?: unknown
+      }
+      expect(config.features.hooks).toBe(true)
+      expect(config.hooks.PermissionRequest).toEqual(expect.any(Array))
+      expect(config.hooks.WorkerAdded).toBeUndefined()
+      expect(config.hooks.state).toBeUndefined()
+      expect(config.plugins).toBeUndefined()
+      expect(config.marketplaces).toBeUndefined()
+      expect(config.allow_managed_hooks_only).toBeUndefined()
+      expect((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')).toHaveLength(2)
+      await adapter.kill(h2)
     },
     15000,
   )
@@ -1728,6 +1902,7 @@ describe('CodexWorkerAdapter.readTrace', () => {
   it('trace 文件不存在(rolloutPath 未知,占位 session_id)→ 返回空事件数组,不抛错,cursor 原样透传', async () => {
     const tmux = new NoopTmux()
     const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused', sessionDiscoveryTimeoutMs: 50 })
+    await writeGeneratedCodexHookConfig(workspaceRoot)
     const workerId = `codextest-${randomUUID().slice(0, 8)}`
     const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
 
@@ -1792,6 +1967,7 @@ describe('CodexWorkerAdapter.readTrace', () => {
       expect(events).toHaveLength(1)
       expect(events[0]).toMatchObject({ kind: 'lifecycle', role: 'system' })
       expect(events[0].summary).toContain(uuidFromContent)
+      await adapter.dispose()
     },
   )
 })
@@ -2050,7 +2226,7 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
   beforeEach(async () => {
     dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-watch-data-'))
     workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-watch-ws-'))
-    await fs.mkdir(path.join(workspaceRoot, '.codex'), { recursive: true })
+    await writeGeneratedCodexHookConfig(workspaceRoot)
   })
 
   afterEach(async () => {
@@ -2074,6 +2250,58 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     }
     throw new Error('waitFor timeout')
   }
+
+  it('PermissionRequest reports one current Codex approval screen only once', async () => {
+
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const tmux = new NoopTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: 'work', workspace: { root: workspaceRoot } })
+
+    tmux.paneText = 'Allow Codex to modify this workspace?\nYes\nNo'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'permission_request', raw: { hook_event_name: 'PermissionRequest' } }) + '\n',
+      'utf-8',
+    )
+
+    await waitFor(() => seen.length === 1)
+    expect(seen).toEqual([{
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'interaction_required',
+        notification: { type: 'terminal_interaction' },
+      },
+    }])
+
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'permission_request', raw: { hook_event_name: 'PermissionRequest' } }) + '\n',
+      'utf-8',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(seen).toHaveLength(1)
+
+    await adapter.sendInput(h, 'Enter', { raw: true })
+    expect(await adapter.state(h)).toBe('running')
+
+    tmux.paneText = 'Allow Codex to modify this workspace?\nYes\nNo'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'permission_request', raw: { hook_event_name: 'PermissionRequest' } }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 2)
+    await adapter.kill(h)
+  })
 
   it('spawn 之后 notify 往事件文件追加 stop → 无人调用 state()/sendInput() 也能推出 idle 状态回调', async () => {
     const seen: Array<{ seq: number; state: WorkerContractState }> = []
