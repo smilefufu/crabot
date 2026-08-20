@@ -9,7 +9,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 
 import { readCompositeWorkerTrace } from '../../src/workers/trace/composite-reader.js'
-import { TraceCursorStore } from '../../src/workers/trace/cursor-store.js'
+import { TraceCursorStore, incarnationFingerprint } from '../../src/workers/trace/cursor-store.js'
 import { NativeTraceCopyStore } from '../../src/workers/trace/native-copy.js'
 import type { Incarnation, LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { NormalizedTraceEvent, WorkerAdapter } from '../../src/workers/types.js'
@@ -206,27 +206,42 @@ describe('readCompositeWorkerTrace', () => {
     nativeLines = [
       {
         ts: '2026-08-01T00:00:02.000Z',
-        kind: 'tool_call',
+        kind: 'llm_call',
+        summary: 'llm tool_use',
+        detail: { stop_reason: 'tool_use' },
+        source_offset: 0,
+      },
+      {
+        ts: '2026-08-01T00:00:02.000Z',
+        kind: 'message',
         role: 'assistant',
-        summary: 'exec_command(pwd)',
-        detail: { call_id: 'cmd-1', name: 'exec_command' },
+        summary: '先检查当前目录',
+        detail: { content: '先检查当前目录' },
         source_offset: 0,
       },
       {
         ts: '2026-08-01T00:00:03.000Z',
-        kind: 'tool_result',
-        summary: 'command completed',
-        detail: { call_id: 'cmd-1', output: '/tmp' },
-        source_offset: 0,
+        kind: 'tool_call',
+        role: 'assistant',
+        summary: 'exec_command(pwd)',
+        detail: { call_id: 'cmd-1', name: 'exec_command' },
+        source_offset: 1,
       },
     ]
     await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+    const copy = await nativeCopy.read(WORKER_ID, 1, incarnationFingerprint({
+      impl: 'claude-code',
+      seq: 1,
+      started_at: '2026-08-01T00:00:00.000Z',
+    }))
+    expect(copy?.events.map((event) => event.source_offset)).toEqual([0, 0, 1])
 
     nativeShouldThrow = 'file gone'
     const fallback = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
     expect(fallback.events.filter((event) => event.source === 'native')).toMatchObject([
+      { kind: 'llm_call', detail: { stop_reason: 'tool_use' } },
+      { kind: 'message', role: 'assistant', detail: { content: '先检查当前目录' } },
       { kind: 'tool_call', detail: { call_id: 'cmd-1', name: 'exec_command' } },
-      { kind: 'tool_result', detail: { call_id: 'cmd-1', output: '/tmp' } },
     ])
     expect(fallback.events.some((event) => event.summary === 'old lifecycle')).toBe(false)
   })

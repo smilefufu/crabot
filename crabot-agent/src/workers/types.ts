@@ -123,7 +123,7 @@ export interface ForkOptions {
 
 export interface NormalizedTraceEvent {
   readonly ts: string
-  readonly kind: 'message' | 'tool_call' | 'tool_result' | 'thinking' | 'lifecycle'
+  readonly kind: 'message' | 'llm_call' | 'tool_call' | 'tool_result' | 'thinking' | 'lifecycle'
   readonly role?: 'assistant' | 'user' | 'system'
   readonly summary: string
   readonly detail?: unknown

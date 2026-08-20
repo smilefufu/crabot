@@ -9,6 +9,7 @@ import type { SpawnSpec, IncarnationHandle, IncarnationRef, StateChangeReport, W
 import type { LLMAdapter } from '../../src/engine/llm-adapter-types.js'
 import { defineTool } from '../../src/engine/index.js'
 import type { EngineMessage, ToolDefinition } from '../../src/engine/index.js'
+import type { AgentTrace } from '../../src/types.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
@@ -351,6 +352,52 @@ describe('BuiltinWorkerAdapter', () => {
     })
 
     await adapter.kill(h)
+  })
+
+  it('llm span 分开投影模型调用与 assistant 文本，且 cursor 按 span 推进一次', async () => {
+    const trace = {
+      spans: [
+        {
+          type: 'llm_call',
+          started_at: '2026-08-20T01:00:00.000Z',
+          details: { stop_reason: 'tool_use', assistant_text: '先检查当前配置。\n然后读取日志。', usage: { input_tokens: 10, output_tokens: 5 } },
+        },
+        {
+          type: 'tool_call',
+          started_at: '2026-08-20T01:00:01.000Z',
+          details: { name: 'shell', input_summary: 'pwd' },
+        },
+        {
+          type: 'llm_call',
+          started_at: '2026-08-20T01:00:02.000Z',
+          details: { stop_reason: 'tool_use' },
+        },
+      ],
+    } as unknown as AgentTrace
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+      traceReader: { readTrace: async () => trace },
+    })
+    const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+    await waitState(adapter, h, 'idle')
+
+    const first = await adapter.readTrace(h)
+
+    expect(first.events).toMatchObject([
+      { kind: 'llm_call', summary: 'llm tool_use', source_offset: 0, detail: { stop_reason: 'tool_use' } },
+      { kind: 'message', role: 'assistant', summary: '先检查当前配置。 然后读取日志。', source_offset: 0, detail: { content: '先检查当前配置。\n然后读取日志。' } },
+      { kind: 'tool_call', summary: 'shell', source_offset: 1 },
+      { kind: 'llm_call', summary: 'llm tool_use', source_offset: 2 },
+    ])
+    expect(first.events[0].detail).not.toHaveProperty('assistant_text')
+    expect(first.nextCursor).toEqual({ offset: 3 })
+
+    await expect(adapter.readTrace(h, first.nextCursor)).resolves.toEqual({ events: [], nextCursor: { offset: 3 } })
   })
 
   it('常驻化身只以真实 engine/input 进展更新时间，主线与 fork 回调均接线', async () => {

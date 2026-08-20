@@ -598,8 +598,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const events: import('../types.js').NormalizedTraceEvent[] = []
     let consumed = start
     for (let i = start; i < trace.spans.length; i++) {
-      const event = normalizeBuiltinSpan(trace.spans[i])
-      if (event) events.push({ ...event, source_offset: i })
+      const normalizedEvents = normalizeBuiltinSpan(trace.spans[i])
+      events.push(...normalizedEvents.map((event) => ({ ...event, source_offset: i })))
       consumed = i + 1
     }
     return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
@@ -1426,26 +1426,37 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 }
 
 /** builtin trace span → NormalizedTraceEvent（P6-A §8.4）。 */
-function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import('../types.js').NormalizedTraceEvent | null {
+function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import('../types.js').NormalizedTraceEvent[] {
   const details = (span.details ?? {}) as Record<string, unknown>
   const base = { ts: span.started_at }
   switch (span.type) {
-    case 'llm_call':
-      return {
+    case 'llm_call': {
+      const { assistant_text: assistantText, ...technicalDetails } = details
+      const events: import('../types.js').NormalizedTraceEvent[] = [{
         ...base,
-        kind: 'message',
-        role: 'assistant',
+        kind: 'llm_call',
         summary: typeof details.stop_reason === 'string' ? `llm ${details.stop_reason}` : 'llm call',
-        detail: details,
+        detail: technicalDetails,
+      }]
+      if (typeof assistantText === 'string' && assistantText.trim()) {
+        events.push({
+          ...base,
+          kind: 'message',
+          role: 'assistant',
+          summary: assistantText.replace(/\s+/g, ' ').trim().slice(0, 200),
+          detail: { content: assistantText },
+        })
       }
+      return events
+    }
     case 'tool_call':
-      return {
+      return [{
         ...base,
         kind: 'tool_call',
         summary: typeof details.name === 'string' ? String(details.name) : 'tool call',
         detail: details,
-      }
+      }]
     default:
-      return { ...base, kind: 'lifecycle', summary: span.type, detail: details }
+      return [{ ...base, kind: 'lifecycle', summary: span.type, detail: details }]
   }
 }

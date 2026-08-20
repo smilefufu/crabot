@@ -37,7 +37,7 @@ const ORIGIN_LABEL: Record<LedgerWorker['origin']['trigger_type'], string> = {
   message: '消息', scheduled: '定时任务', system: '系统',
 }
 const KIND_LABEL: Record<WorkerTraceEvent['kind'], string> = {
-  message: '消息', tool_call: '工具调用', tool_result: '工具结果', thinking: '思考', lifecycle: '生命周期',
+  message: '消息', llm_call: '模型调用', tool_call: '工具调用', tool_result: '工具结果', thinking: '思考', lifecycle: '生命周期',
 }
 const ACTIVITY_TONE_COLOR: Record<ActivityTone, string> = {
   manager: 'var(--info)', worker: 'var(--success)', tool: 'var(--warning)', status: 'var(--text-muted)', failure: 'var(--error)',
@@ -174,7 +174,7 @@ function activityFor(event: WorkerTraceEvent): ActivityEntry | undefined {
     return { event, label: '管理会话指令', tone: 'manager', body: messageText(event) }
   }
   if (event.source === 'native' && event.kind === 'message' && event.role === 'assistant') {
-    return { event, label: '任务输出', tone: 'worker', body: messageText(event) }
+    return { event, label: 'Worker 文本', tone: 'worker', body: messageText(event) }
   }
   if (event.kind === 'tool_call') {
     return { event, label: '工具调用', tone: 'tool', title: toolName(event), body: toolArguments(event) }

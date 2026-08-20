@@ -3299,11 +3299,13 @@ export class UnifiedAgent extends ModuleBase {
         return trace.trace_id
       },
       appendTurn: (traceId, event) => {
+        const assistantText = redact(event.assistantText)
         const llmSpan = this.traceStore.startSpan(traceId, {
           type: 'llm_call',
           details: {
             model: '',
             stop_reason: event.stopReason,
+            ...(assistantText.trim() ? { assistant_text: assistantText } : {}),
             ...(event.usage ? { usage: event.usage } : {}),
           } as import('./types.js').AgentSpanDetails,
           started_at_ms: event.llmStartedAtMs,
