@@ -181,17 +181,30 @@ describe('trigger_schedule memory_maintenance system task', () => {
     expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
   })
 
-  it('rejects retired memory_curate schedules without rewriting their task semantics', async () => {
+  it('reports retired memory_curate schedules without rewriting their task semantics', async () => {
     const fixture = buildAgent(() => Promise.resolve())
+    const reportFailure = vi.fn().mockResolvedValue(undefined)
+    ;(fixture.agent as AgentUnderTest & { sendBackgroundFailLoud: typeof reportFailure }).sendBackgroundFailLoud = reportFailure
 
-    await expect(fixture.agent.handleTriggerSchedule({
+    const result = await fixture.agent.handleTriggerSchedule({
       schedule_id: 'schedule-user-curate',
       task_type: 'memory_curate',
       title: '用户自建记忆整理',
       description: 'legacy schedule',
       is_builtin: false,
-    })).rejects.toThrow('memory_curate 已退役，请使用每日反思')
+      target_session: { channel_id: 'telegram-default', session_id: 'legacy-session' },
+    })
 
+    expect(result).toEqual({ accepted: true })
+    await waitUntil(() => reportFailure.mock.calls.length === 1)
+    expect(reportFailure).toHaveBeenCalledWith(
+      { channel_id: 'telegram-default', session_id: 'legacy-session' },
+      '定时任务「用户自建记忆整理」',
+      {
+        kind: 'threw',
+        error: expect.objectContaining({ message: 'memory_curate 已退役，请使用每日反思' }),
+      },
+    )
     expect(fixture.routeSchedule).not.toHaveBeenCalled()
     expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
   })

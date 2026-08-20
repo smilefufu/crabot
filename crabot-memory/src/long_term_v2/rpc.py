@@ -171,6 +171,20 @@ class LongTermV2Rpc:
         status, type_, _ = loc
         entry = self.store.read(status, type_, mem_id)
 
+        requested_maturity = patch.get("maturity")
+        if (
+            status == "inbox"
+            and isinstance(requested_maturity, str)
+            and requested_maturity in {"rule", "confirmed", "established"}
+        ):
+            if requested_maturity == "rule":
+                raise ValueError(
+                    "inbox maturity=rule must use promote_to_rule, not update_long_term"
+                )
+            raise ValueError(
+                "inbox maturity=confirmed/established must use promote_inbox_entry first, not update_long_term"
+            )
+
         fm_updates: dict = {}
 
         # ---- 既有字段（Phase 1 逻辑） ----

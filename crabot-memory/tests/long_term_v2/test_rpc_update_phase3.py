@@ -160,42 +160,34 @@ def _seed_inbox(tmp_path, *, type_, maturity):
 
 
 @pytest.mark.asyncio
-async def test_update_maturity_does_not_promote_inbox_entry(tmp_path):
-    """update_long_term 不能替代 promote_inbox_entry 改变状态。"""
-    import os
+async def test_update_rule_maturity_rejects_inbox_entry(tmp_path):
+    """inbox case 不能用 update_long_term 绕过 promote_to_rule。"""
     rpc, store, index = _seed_inbox(tmp_path, type_="lesson", maturity="case")
 
-    out = await rpc.update_long_term({"id": "m1", "patch": {"maturity": "rule"}})
-    assert out["status"] == "ok"
-
-    # index 必须仍为 inbox；正常晋升只能走 promote_inbox_entry。
-    loc = index.locate("m1")
-    assert loc[0] == "inbox", f"expected status=inbox, got {loc[0]}"
-
-    # 文件落 confirmed/lesson/，inbox/lesson/ 应已无
-    confirmed_path = entry_path(store.data_root, "confirmed", "lesson", "m1")
-    inbox_path = entry_path(store.data_root, "inbox", "lesson", "m1")
-    assert not os.path.exists(confirmed_path)
-    assert os.path.exists(inbox_path)
-
-    # 内容里 maturity 也应该是 rule
-    entry = store.read("inbox", "lesson", "m1")
-    assert entry.frontmatter.maturity == "rule"
-
-
-@pytest.mark.asyncio
-async def test_update_maturity_does_not_promote_fact_inbox_entry(tmp_path):
-    """fact 的 maturity patch 也不能隐式改变 inbox 状态。"""
-    import os
-    rpc, store, index = _seed_inbox(tmp_path, type_="fact", maturity="observed")
-
-    out = await rpc.update_long_term({"id": "m1", "patch": {"maturity": "confirmed"}})
-    assert out["status"] == "ok"
+    with pytest.raises(ValueError, match="promote_to_rule"):
+        await rpc.update_long_term({"id": "m1", "patch": {"maturity": "rule"}})
 
     loc = index.locate("m1")
     assert loc[0] == "inbox"
-    assert not os.path.exists(entry_path(store.data_root, "confirmed", "fact", "m1"))
-    assert os.path.exists(entry_path(store.data_root, "inbox", "fact", "m1"))
+    entry = store.read("inbox", "lesson", "m1")
+    assert entry.frontmatter.maturity == "case"
+    assert entry.frontmatter.version == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("maturity", ["confirmed", "established"])
+async def test_update_high_maturity_rejects_inbox_entry(tmp_path, maturity):
+    """inbox 条目必须先经 promote_inbox_entry，不能伪造确认状态。"""
+    rpc, store, index = _seed_inbox(tmp_path, type_="fact", maturity="observed")
+
+    with pytest.raises(ValueError, match="promote_inbox_entry"):
+        await rpc.update_long_term({"id": "m1", "patch": {"maturity": maturity}})
+
+    loc = index.locate("m1")
+    assert loc[0] == "inbox"
+    entry = store.read("inbox", "fact", "m1")
+    assert entry.frontmatter.maturity == "observed"
+    assert entry.frontmatter.version == 1
 
 
 @pytest.mark.asyncio

@@ -870,6 +870,40 @@ describe('AdminModule - Schedule Management', () => {
       expect(response.data!.task_id).toBeUndefined()
     })
 
+    it('forwards retired user memory_curate only for Agent fail-loud handling', async () => {
+      const created = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'create_schedule',
+        {
+          name: 'Legacy memory curate',
+          trigger: { type: 'cron', expression: '0 6 * * *' },
+          task_template: {
+            type: 'memory_curate',
+            title: '旧记忆整理',
+            priority: 'normal',
+            tags: ['user-owned'],
+            input: { scope: 'all' },
+          },
+        },
+      )
+
+      const response = await makeProtocolRequest<{ accepted: true; task_id?: string }>(
+        TEST_PROTOCOL_PORT,
+        'trigger_now',
+        { schedule_id: created.data!.schedule.id },
+      )
+
+      const call = triggerCallSpy.mock.calls.findLast((item) => item[1] === 'trigger_schedule')!
+      expect(call[2]).toMatchObject({
+        schedule_id: created.data!.schedule.id,
+        task_type: 'memory_curate',
+      })
+      expect(call[2]).not.toHaveProperty('priority')
+      expect(call[2]).not.toHaveProperty('input')
+      expect(call[2]).not.toHaveProperty('tags')
+      expect(response.data!.task_id).toBeUndefined()
+    })
+
     it('does not fuzzy-repair stale group target_session without platform_session_id', async () => {
       const schedResult = await makeProtocolRequest<{ schedule: Schedule }>(
         TEST_PROTOCOL_PORT,

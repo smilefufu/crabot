@@ -255,7 +255,7 @@ const SEARCH_LONG_TERM_SCHEMA = {
 const UPDATE_LONG_TERM_SCHEMA = {
   id: z.string().describe('记忆 ID'),
   patch: z.record(z.string(), z.unknown())
-    .describe('字段差量。例如 { content_confidence_increment: 1 }、{ invalidated_by: "<新条 id>" }、{ maturity: "confirmed" }'),
+    .describe('字段差量。例如 { content_confidence_increment: 1 }、{ invalidated_by: "<新条 id>" }。inbox -> confirmed 用 promote_inbox_entry；Case -> Rule 用 promote_to_rule，不能用 maturity patch 伪造晋升。'),
 }
 
 const DELETE_MEMORY_SCHEMA = {
@@ -547,7 +547,7 @@ export function createCrabMemoryServer(
   server.registerTool(
     'update_long_term',
     {
-      description: '更新一条长期记忆的字段。支持的 patch 字段：brief / tags / entities / maturity / importance_factors / invalidated_by / lesson_meta / observation / body / content_confidence_increment / use_count_increment / observation_outcome。',
+      description: '更新一条长期记忆的字段。支持的 patch 字段：brief / tags / entities / maturity / importance_factors / invalidated_by / lesson_meta / observation / body / content_confidence_increment / use_count_increment / observation_outcome。inbox 的确认必须用 promote_inbox_entry；Case -> Rule 必须用 promote_to_rule。',
       inputSchema: UPDATE_LONG_TERM_SCHEMA,
     },
     async (args) => callRpc('update_long_term', args as Record<string, unknown>),

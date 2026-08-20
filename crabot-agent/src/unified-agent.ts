@@ -2845,7 +2845,7 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * §8.2：maintenance 走 Agent-owned system task；其他 schedule 继续唤醒 manager。
+   * §8.2：maintenance 走 Agent-owned system task；退役 memory_curate fail-loud；其他 schedule 继续唤醒 manager。
    *
    * **manager 路由那条分支的 fail-loud（判据双管）**：fire-and-forget 只 `.catch()` 等于漏掉
    * 最常见的那种失败——F1（LLM 挂 / key 过期 / 限流耗尽）不抛错，只在 `EpisodeResult.outcome`
@@ -2862,7 +2862,17 @@ export class UnifiedAgent extends ModuleBase {
   private async handleTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
     this.assertRuntimeExecutionAdmission()
     if (params.task_type === 'memory_curate') {
-      throw new Error('memory_curate 已退役，请使用每日反思')
+      const systemThread = splitManagerKey(SYSTEM_TASKS_MANAGER_KEY)
+      const target = params.target_session ?? {
+        channel_id: systemThread.channelId,
+        session_id: systemThread.sessionId,
+      }
+      const subject = `定时任务「${params.title || params.schedule_id}」`
+      void this.sendBackgroundFailLoud(target, subject, {
+        kind: 'threw',
+        error: new Error('memory_curate 已退役，请使用每日反思'),
+      })
+      return { accepted: true }
     }
     if (params.task_type === 'memory_maintenance' && params.is_builtin === true) {
       return this.createMaintenanceSystemTask(params)
