@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { parse as parseToml } from 'smol-toml'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { CodexWorkerAdapter, eventsFilePath, WorkerExitedError } from '../../src/workers/codex/adapter.js'
 import { ForkEstablishmentError } from '../../src/workers/errors.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
@@ -111,6 +111,28 @@ async function waitForState(
 
 function terminalText(view: Awaited<ReturnType<CodexWorkerAdapter['readTerminal']>>): string {
   return view.kind === 'unavailable' ? '' : view.text
+}
+
+async function writeGeneratedCodexHookConfig(workspaceRoot: string): Promise<void> {
+  const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+  await fs.mkdir(path.join(workspaceRoot, '.codex'), { recursive: true })
+  await fs.writeFile(
+    path.join(workspaceRoot, '.codex', 'config.toml'),
+    stringifyToml({
+      features: { hooks: true },
+      hooks: {
+        PermissionRequest: [{
+          matcher: '',
+          hooks: [{
+            type: 'command',
+            command: `/bin/sh -c ${shQuote(channel.hookCommand('permission_request'))}`,
+            timeout: 10,
+          }],
+        }],
+      },
+    }),
+    'utf-8',
+  )
 }
 
 describe('CodexWorkerAdapter.provision', () => {
@@ -250,6 +272,27 @@ describe('CodexWorkerAdapter.provision', () => {
 
     await expect(adapter.spawn({ worker_id: 'spawn-hook-race', prompt: '你好', workspace: { root: ws } })).rejects.toThrow(
       /CodexWorkerAdapter\.spawn: refusing to enable generated hook trust/,
+    )
+    expect(tmux.newSessionCalls).toBe(0)
+  })
+
+  it('provision 后篡改 config.toml 的 hook 表会在 spawn 前被拒绝，不创建 tmux 会话', async () => {
+    class CountingTmux extends TmuxDriver {
+      newSessionCalls = 0
+
+      async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+        this.newSessionCalls += 1
+        return fakeReadyNewSession(spec)
+      }
+    }
+
+    const tmux = new CountingTmux()
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource, tmux, codexBin: 'unused' })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
+    await fs.appendFile(path.join(ws, '.codex', 'config.toml'), '\n[hooks.WorkerAdded]\nmatcher = ""\nhooks = []\n', 'utf-8')
+
+    await expect(adapter.spawn({ worker_id: 'spawn-hook-config-race', prompt: '你好', workspace: { root: ws } })).rejects.toThrow(
+      /CodexWorkerAdapter\.spawn: refusing to enable generated hook trust because .*hook configuration differs/,
     )
     expect(tmux.newSessionCalls).toBe(0)
   })
@@ -948,7 +991,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'resume 前新出现的 hook 源会被拒绝，第二个 Codex 进程不会启动',
+    'resume 前篡改 config.toml 的 hook 表会被拒绝，第二个 Codex 进程不会启动',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -962,10 +1005,14 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       await waitForState(adapter, h1, 'exited')
 
       const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
-      await fs.writeFile(path.join(workspaceRoot, '.codex', 'hooks.json'), '{}\n', 'utf-8')
+      await fs.appendFile(
+        path.join(workspaceRoot, '.codex', 'config.toml'),
+        '\n[hooks.WorkerAdded]\nmatcher = ""\nhooks = []\n',
+        'utf-8',
+      )
 
       await expect(adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')).rejects.toThrow(
-        /CodexWorkerAdapter\.resume: refusing to enable generated hook trust/,
+        /CodexWorkerAdapter\.resume: refusing to enable generated hook trust because .*hook configuration differs/,
       )
       expect((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')).toHaveLength(1)
     },
@@ -1821,6 +1868,7 @@ describe('CodexWorkerAdapter.readTrace', () => {
   it('trace 文件不存在(rolloutPath 未知,占位 session_id)→ 返回空事件数组,不抛错,cursor 原样透传', async () => {
     const tmux = new NoopTmux()
     const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused', sessionDiscoveryTimeoutMs: 50 })
+    await writeGeneratedCodexHookConfig(workspaceRoot)
     const workerId = `codextest-${randomUUID().slice(0, 8)}`
     const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
 
@@ -2144,7 +2192,7 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
   beforeEach(async () => {
     dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-watch-data-'))
     workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-watch-ws-'))
-    await fs.mkdir(path.join(workspaceRoot, '.codex'), { recursive: true })
+    await writeGeneratedCodexHookConfig(workspaceRoot)
   })
 
   afterEach(async () => {

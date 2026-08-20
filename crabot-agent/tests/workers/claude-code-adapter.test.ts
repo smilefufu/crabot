@@ -2231,8 +2231,10 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     await adapter.kill(h)
   })
 
-  it('Notification resolves the current Claude ready-to-code auto confirmation once after proving auto mode', async () => {
+  it('Notification ignores a pre-action plan record until the new auto record is appended', async () => {
     let sessionFile = ''
+    let recordAuto!: () => void
+    const autoRecorded = new Promise<void>((resolve) => { recordAuto = resolve })
     class PlanTmux extends NoopTmux {
       readonly keyCalls: string[][] = []
 
@@ -2243,7 +2245,9 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
           return
         }
         this.paneText = '❯ \nesc to interrupt'
-        await fs.writeFile(sessionFile, JSON.stringify({ permissionMode: 'auto' }) + '\n', 'utf-8')
+        setTimeout(() => {
+          void fs.appendFile(sessionFile, JSON.stringify({ permissionMode: 'auto' }) + '\n', 'utf-8').then(recordAuto)
+        }, 150)
       }
     }
 
@@ -2263,6 +2267,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     const sessionDir = path.join(claudeProjectsDir, slug)
     await fs.mkdir(sessionDir, { recursive: true })
     sessionFile = path.join(sessionDir, `${h.session_ref}.jsonl`)
+    await fs.writeFile(sessionFile, JSON.stringify({ permissionMode: 'plan' }) + '\n', 'utf-8')
 
     tmux.paneText = [
       'Ready to code?',
@@ -2280,6 +2285,8 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     )
 
     await waitFor(() => tmux.keyCalls.some((keys) => keys.join(',') === '1,Enter'))
+    await autoRecorded
+    await new Promise((resolve) => setTimeout(resolve, 200))
     expect(tmux.keyCalls.filter((keys) => keys.join(',') === '1,Enter')).toHaveLength(1)
     expect(seen).toEqual([])
     await adapter.kill(h)

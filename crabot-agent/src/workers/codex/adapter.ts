@@ -27,7 +27,7 @@ import { homedir, tmpdir } from 'os'
 import { execFile } from 'child_process'
 import { buildChildEnv } from '../../core/runtime-env.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
-import { promisify } from 'util'
+import { isDeepStrictEqual, promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
 import { parseRawControlKeys } from '../tmux/raw-control.js'
@@ -124,6 +124,43 @@ function stripUntrustedCodexHookSources(config: Record<string, unknown>): void {
   delete config.plugins
   delete config.marketplaces
   delete config.allow_managed_hooks_only
+}
+
+function generatedCodexPermissionRequestHooks(command: string): Record<string, unknown> {
+  return {
+    PermissionRequest: [{
+      matcher: '',
+      hooks: [{
+        type: 'command',
+        command: `/bin/sh -c ${shQuote(command)}`,
+        timeout: 10,
+      }],
+    }],
+  }
+}
+
+async function assertGeneratedCodexHookConfiguration(
+  codexDir: string,
+  channel: CliEventChannel,
+  operation: 'spawn' | 'resume',
+): Promise<void> {
+  const configPath = join(codexDir, 'config.toml')
+  let config: Record<string, unknown>
+  try {
+    config = asTable(parseToml(await fs.readFile(configPath, 'utf-8')))
+  } catch {
+    throw new Error(
+      `CodexWorkerAdapter.${operation}: refusing to enable generated hook trust because ${configPath} is unreadable or invalid`,
+    )
+  }
+  if (
+    asTable(config.features).hooks !== true
+    || !isDeepStrictEqual(config.hooks, generatedCodexPermissionRequestHooks(channel.hookCommand('permission_request')))
+  ) {
+    throw new Error(
+      `CodexWorkerAdapter.${operation}: refusing to enable generated hook trust because ${configPath} hook configuration differs from Crabot's generated PermissionRequest hook`,
+    )
+  }
 }
 
 /** 从 codexBin 配置里摘出"实际会被 exec 的可执行文件"这一个 token。生产配置通常就是单个
@@ -751,16 +788,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 隔离 home 需要自己的 PermissionRequest hook；不能继承宿主为了交互环境设下的
     // `[features] hooks = false`，否则本 worker 会静默失去交互唤醒能力。
     config.features = { ...asTable(config.features), hooks: true }
-    config.hooks = {
-      PermissionRequest: [{
-        matcher: '',
-        hooks: [{
-          type: 'command',
-          command: `/bin/sh -c ${shQuote(channel.hookCommand('permission_request'))}`,
-          timeout: 10,
-        }],
-      }],
-    }
+    config.hooks = generatedCodexPermissionRequestHooks(channel.hookCommand('permission_request'))
 
     // 宿主已有的 [projects."别的目录"] 一并留着(codex 只按路径匹配,带过来无害),但本
     // workspace 这条必须由 crabot 说了算,不能被宿主的同名表挤掉。
@@ -1032,6 +1060,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (!spawnBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.spawn: no user-level codex installation')
     const env = await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env })
     await assertNoCodexHookSources(codexHome, 'spawn')
+    await assertGeneratedCodexHookConfiguration(codexHome, eventChannel, 'spawn')
     const command = `${spawnBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT}`
     const spawnStartedAt = Date.now()
     const controlEndpoint = await this.tmux.newSession({
@@ -1203,6 +1232,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       if (!resumeBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.resume: no user-level codex installation')
       const env = await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome })
       await assertNoCodexHookSources(resumeCodexHome, 'resume')
+      await assertGeneratedCodexHookConfiguration(resumeCodexHome, eventChannel, 'resume')
       const command = `${resumeBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT} resume ${shQuote(prev.session_ref)}`
       const controlEndpoint = await this.tmux.newSession({
         name: sessionName, cwd: prevRuntime.workspaceRoot, command,

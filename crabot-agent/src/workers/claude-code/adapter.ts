@@ -1619,13 +1619,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         await this.handleTerminalInteraction(runtime, h, current, confirmed)
         return
       }
+      const permissionModeBaseline = await this.captureClaudePermissionModeOffsets(runtime)
       try {
         await this.tmux.sendKeys(runtime.sessionName, ['1', 'Enter'])
       } catch {
         await this.failAutomaticInteraction(runtime, h, confirmed)
         return
       }
-      const resolved = await this.waitForClaudeExitPlanResolution(runtime)
+      const resolved = await this.waitForClaudeExitPlanResolution(runtime, permissionModeBaseline)
       if (!resolved) {
         await this.failAutomaticInteraction(runtime, h, undefined)
         return
@@ -1641,14 +1642,17 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     })
   }
 
-  private async waitForClaudeExitPlanResolution(runtime: Runtime): Promise<CapturedPane | undefined> {
+  private async waitForClaudeExitPlanResolution(
+    runtime: Runtime,
+    permissionModeBaseline: ReadonlyMap<string, number>,
+  ): Promise<CapturedPane | undefined> {
     const deadline = Date.now() + 10_000
     while (Date.now() < deadline) {
       if (!(await this.tmux.isAlive(runtime.sessionName))) return undefined
       const snapshot = await this.capture(runtime).catch(() => undefined)
       if (!snapshot) return undefined
       if (classifyClaudeTerminalInteraction(snapshot).kind === 'none' && hasClaudeExecutionOrComposer(snapshot)) {
-        const mode = await this.readClaudePermissionMode(runtime)
+        const mode = await this.readClaudePermissionModeAfter(runtime, permissionModeBaseline)
         if (mode === 'auto') return snapshot
         if (mode !== undefined) return undefined
       }
@@ -1657,19 +1661,38 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return undefined
   }
 
-  private async readClaudePermissionMode(runtime: Runtime): Promise<string | undefined> {
-    if (!runtime.workspaceRoot || !runtime.sessionId) return undefined
+  private async claudeSessionPaths(runtime: Runtime): Promise<string[]> {
+    if (!runtime.workspaceRoot || !runtime.sessionId) return []
     const roots = [runtime.workspaceRoot]
     const realRoot = await fs.realpath(runtime.workspaceRoot).catch(() => undefined)
     if (realRoot && realRoot !== runtime.workspaceRoot) roots.push(realRoot)
-    for (const root of roots) {
-      let raw: string
+    return roots.map((root) => join(this.claudeProjectsDir, projectSlug(root), `${runtime.sessionId}.jsonl`))
+  }
+
+  private async captureClaudePermissionModeOffsets(runtime: Runtime): Promise<Map<string, number>> {
+    const offsets = new Map<string, number>()
+    for (const path of await this.claudeSessionPaths(runtime)) {
+      const size = await fs.stat(path).then((stat) => stat.size).catch(() => 0)
+      offsets.set(path, size)
+    }
+    return offsets
+  }
+
+  private async readClaudePermissionModeAfter(
+    runtime: Runtime,
+    offsets: ReadonlyMap<string, number>,
+  ): Promise<string | undefined> {
+    for (const path of await this.claudeSessionPaths(runtime)) {
+      const offset = offsets.get(path)
+      if (offset === undefined) continue
+      let raw: Buffer
       try {
-        raw = await fs.readFile(join(this.claudeProjectsDir, projectSlug(root), `${runtime.sessionId}.jsonl`), 'utf-8')
+        raw = await fs.readFile(path)
       } catch {
         continue
       }
-      for (const line of raw.trimEnd().split('\n').reverse()) {
+      if (raw.length < offset) continue
+      for (const line of raw.subarray(offset).toString('utf-8').trimEnd().split('\n').reverse()) {
         try {
           const value = JSON.parse(line) as { permissionMode?: unknown; message?: { permissionMode?: unknown } }
           const mode = value.permissionMode ?? value.message?.permissionMode
