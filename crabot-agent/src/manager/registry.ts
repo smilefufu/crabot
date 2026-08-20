@@ -262,9 +262,11 @@ export class ManagerRegistry {
     friend?: Friend,
     /** P6-A §3.2：system-only 关联元数据（不渲染进 LLM 正文）。 */
     correlation?: import('./loop.js').ManagerWakeCorrelation,
+    /** wake 已被对应 ManagerLoop 接受并排进串行队列后的非关键通知。 */
+    onAccepted?: () => Promise<void>,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation)
+    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation, onAccepted)
   }
 
   /**
@@ -283,10 +285,12 @@ export class ManagerRegistry {
     channelId: string,
     sessionId: string,
     messages: ReadonlyArray<ChannelMessage>,
-    friend?: Friend
+    friend?: Friend,
+    /** wake 已被对应 ManagerLoop 接受并排进串行队列后的非关键通知。 */
+    onAccepted?: () => Promise<void>,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'attention_flush', channelId, sessionId, messages, friend)
+    return this.routeHumanWake(capture, 'attention_flush', channelId, sessionId, messages, friend, undefined, onAccepted)
   }
 
   /** 两个人类消息入口的公共路径:解析发起人身份(唤醒边界的唯一一次异步)→ 按 kind 造事件唤醒。 */
@@ -298,6 +302,7 @@ export class ManagerRegistry {
     messages: ReadonlyArray<ChannelMessage>,
     friend?: Friend,
     correlation?: import('./loop.js').ManagerWakeCorrelation,
+    onAccepted?: () => Promise<void>,
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
     // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
@@ -326,7 +331,7 @@ export class ManagerRegistry {
       kind === 'human_messages'
         ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
         : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
-    return this.runWake(key, { ...envelope, wake: event })
+    return this.runWake(key, { ...envelope, wake: event }, 0, onAccepted)
   }
 
   /**
@@ -522,7 +527,12 @@ export class ManagerRegistry {
    * 自唤醒都走这里。`event === undefined` ⇒ 自唤醒(只处理 mailbox 残留,见
    * `ManagerLoop.drainMailbox`);`selfWakeChain` 是当前连锁自唤醒的深度,真实唤醒恒为 0。
    */
-  private async runWake(key: ManagerKey, envelope: TimedWakeEnvelope | undefined, selfWakeChain = 0): Promise<EpisodeResult> {
+  private async runWake(
+    key: ManagerKey,
+    envelope: TimedWakeEnvelope | undefined,
+    selfWakeChain = 0,
+    onAccepted?: () => Promise<void>,
+  ): Promise<EpisodeResult> {
     this.assertWakeAdmission()
     if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
     this.assertWakeAdmission()
@@ -530,7 +540,14 @@ export class ManagerRegistry {
     this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
     let result: EpisodeResult | undefined
     try {
-      result = await (envelope === undefined ? loop.drainMailbox() : loop.wakeUp(envelope))
+      // `wakeUp()` 已把 envelope 交给 ManagerLoop 的串行队列；这不是 LLM 已消费的确认。
+      if (envelope === undefined) {
+        result = await loop.drainMailbox()
+      } else if (onAccepted) {
+        result = await loop.wakeUp(envelope, onAccepted)
+      } else {
+        result = await loop.wakeUp(envelope)
+      }
       return result
     } finally {
       const remaining = (this.activeEpisodes.get(key) ?? 1) - 1

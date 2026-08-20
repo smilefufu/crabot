@@ -1587,10 +1587,6 @@ export class UnifiedAgent extends ModuleBase {
     const friend = batch[batch.length - 1].friend
     const session = messages[0].session
 
-    // 「我看到了」的确定性回执：不等任何 LLM，消息一递给 manager 就打（打批内最后一条）。
-    // manager 之后回话还是沉默都不影响——react 表达的是"收到"，不是"我要干活了"。
-    await this.reactToTriggerBatch(session.channel_id, session.session_id, messages)
-
     let result
     try {
       result = await this.requireManagerStack().registry.routeHumanMessages(
@@ -1598,6 +1594,8 @@ export class UnifiedAgent extends ModuleBase {
         session.session_id,
         messages,
         friend,
+        undefined,
+        () => this.reactToTriggerBatch(session.channel_id, session.session_id, messages),
       )
     } catch (err) {
       console.error(
@@ -1650,8 +1648,6 @@ export class UnifiedAgent extends ModuleBase {
     const messages = buffered.map((b) => b.message)
     const session = messages[0].session
 
-    await this.reactToTriggerBatch(session.channel_id, sessionId, messages)
-
     let repliedToHuman = false
     try {
       const result = await this.requireManagerStack().registry.routeAttentionFlush(
@@ -1659,6 +1655,7 @@ export class UnifiedAgent extends ModuleBase {
         sessionId,
         messages,
         lastEntry.friend,
+        () => this.reactToTriggerBatch(session.channel_id, sessionId, messages),
       )
       repliedToHuman = result.repliedToHuman
       if (result.outcome === 'failed' || result.outcome === 'aborted') {

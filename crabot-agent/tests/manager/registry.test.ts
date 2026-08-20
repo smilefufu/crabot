@@ -254,6 +254,45 @@ describe('ManagerRegistry', () => {
     expect(otherState.recent.length).toBe(0)
   })
 
+  it('human wake 入 ManagerLoop 队列后、首轮 LLM 前通知调用方', async () => {
+    const { adapter, calls } = makeAdapter()
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+    let accepted = false
+
+    const routed = registry.routeHumanMessages(
+      'wechat',
+      'sess-accepted',
+      [makeChannelMessage('你好')],
+      undefined,
+      undefined,
+      async () => { accepted = true },
+    )
+
+    expect(accepted).toBe(true)
+    expect(calls).toHaveLength(0)
+    await routed
+  })
+
+  it('human wake 在 Manager 接受前被拒绝时不通知调用方', async () => {
+    const { adapter } = makeAdapter()
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      beforeWake: async () => { throw new Error('agent is closing') },
+    }))
+    let accepted = false
+
+    await expect(registry.routeHumanMessages(
+      'wechat',
+      'sess-rejected',
+      [makeChannelMessage('你好')],
+      undefined,
+      undefined,
+      async () => { accepted = true },
+    )).rejects.toThrow('agent is closing')
+
+    expect(accepted).toBe(false)
+  })
+
   // --- routeAttentionFlush(P7 J Task 3.2:群聊注意力放行的公开入口) ---
 
   describe('routeAttentionFlush', () => {

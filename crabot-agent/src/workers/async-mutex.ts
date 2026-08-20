@@ -6,13 +6,14 @@
 export class AsyncMutex {
   private queue: Promise<void> = Promise.resolve()
 
-  async run<T>(fn: () => Promise<T>): Promise<T> {
+  async run<T>(fn: () => Promise<T>, onQueued?: () => void): Promise<T> {
     let release!: () => void
     const next = new Promise<void>((resolve) => {
       release = resolve
     })
     const previous = this.queue
     this.queue = previous.then(() => next)
+    onQueued?.()
     await previous
     try {
       return await fn()

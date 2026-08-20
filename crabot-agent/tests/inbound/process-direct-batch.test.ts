@@ -300,7 +300,7 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
   })
 
   // ==========================================================================
-  // reaction：打批内最后一条 + 时机提前到"递给 manager 之前"（变异靶 M8 / M2）
+  // reaction：Manager 接收 wake 后打批内最后一条（变异靶 M8 / M2）
   // ==========================================================================
 
   describe('已读回应（变异靶 M8 / M2）', () => {
@@ -323,15 +323,30 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       })
     })
 
-    it('reaction 发生在 manager episode 开始之前（不等任何 LLM）', async () => {
+    it('Manager 接收 wake 后才 reaction，仍不依赖 LLM 决策结果', async () => {
       boot([[sendMessageBlock({ channelId: 'wechat', sessionId: 'sess-1', text: '在的' })]])
 
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
-      // 唤醒边界的第一次异步解析（resolve_permissions）即 episode 起点
-      expect(calls.indexOf('add_reaction')).toBe(0)
-      expect(calls.indexOf('add_reaction')).toBeLessThan(calls.indexOf('resolve_permissions'))
+      // 唤醒边界先完成身份/场景解析，再由 ManagerLoop 接收并入队 wake。
+      expect(calls.indexOf('add_reaction')).toBeGreaterThan(calls.indexOf('resolve_permissions'))
+      expect(calls.indexOf('add_reaction')).toBeGreaterThan(calls.indexOf('resolve_scene_profile'))
       expect(calls.indexOf('add_reaction')).toBeLessThan(calls.indexOf('manager_llm'))
+    })
+
+    it('只有 registry 确认 wake 已被 Manager 接收时才 reaction', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async (...args: unknown[]) => {
+        calls.push('manager_accepted')
+        const onAccepted = args[5] as (() => Promise<void>) | undefined
+        void onAccepted?.()
+        return { episodeId: 'ep-1', outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
+      }
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(calls).toContain('manager_accepted')
+      expect(calls).toContain('add_reaction')
     })
 
     it('manager 决定沉默时 reaction 仍然发过（"我看到了"不依赖决策结果）', async () => {
@@ -466,15 +481,15 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
   // ==========================================================================
 
   describe('顺序与阻塞语义', () => {
-    it('一轮的固定顺序：已读 → 唤醒边界解析身份 → manager LLM → 说话', async () => {
+    it('一轮的固定顺序：唤醒边界解析身份 → 已读 → manager LLM → 说话', async () => {
       boot([[sendMessageBlock({ channelId: 'wechat', sessionId: 'sess-1', text: '收到，我看一下' })]])
 
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
       expect(calls.filter((c) => c !== 'manager_llm' || true)).toEqual([
-        'add_reaction',
         'resolve_permissions',
         'resolve_scene_profile',
+        'add_reaction',
         'manager_llm',
         'send_message',
         'manager_llm',
@@ -515,7 +530,7 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       expect(script.streams.length).toBeGreaterThan(0)
     })
 
-    it('唤醒抛错：lane 不炸（异常不会顺着 lane 冒到 SessionLane 上），且已读已经发出去了', async () => {
+    it('唤醒在 Manager 接收前抛错：lane 不炸，且不发已读回应', async () => {
       boot()
       internals.managerStack.registry.routeHumanMessages = async () => {
         throw new Error('route boom')
@@ -525,7 +540,7 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
         internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })])),
       ).resolves.toBeUndefined()
 
-      expect(rpcCalls.find((c) => c.method === 'add_reaction')).toBeDefined()
+      expect(rpcCalls.find((c) => c.method === 'add_reaction')).toBeUndefined()
     })
 
     /**

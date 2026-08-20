@@ -411,13 +411,28 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       })
     })
 
-    it('reaction 在 manager episode 之前发出；manager 沉默时也照样发过', async () => {
+    it('Manager 接收 wake 后才 reaction；manager 沉默时也照样发过', async () => {
       boot() // 空脚本 = manager 一句话都不说
       await runGroup([gmsg({ id: 'g-1', text: '你们中午吃啥' })])
 
-      expect(calls.indexOf('add_reaction')).toBe(0)
+      expect(calls.indexOf('add_reaction')).toBeGreaterThan(calls.indexOf('resolve_permissions'))
       expect(calls.indexOf('add_reaction')).toBeLessThan(calls.indexOf('manager_llm'))
       expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
+    })
+
+    it('只有 registry 确认 wake 已被 Manager 接收时才 reaction', async () => {
+      boot()
+      internals.managerStack.registry.routeAttentionFlush = async (...args: unknown[]) => {
+        calls.push('manager_accepted')
+        const onAccepted = args[4] as (() => Promise<void>) | undefined
+        void onAccepted?.()
+        return { episodeId: 'ep-g1', outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
+      }
+
+      await runGroup([gmsg({ id: 'g-1', text: '你们中午吃啥' })])
+
+      expect(calls).toContain('manager_accepted')
+      expect(calls).toContain('add_reaction')
     })
   })
 
@@ -688,6 +703,7 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
 
       await expect(deliverMention(gmsg({ id: 'g-1', mention: true }))).resolves.toBeUndefined()
 
+      expect(rpcCalls.find((c) => c.method === 'add_reaction')).toBeUndefined()
       expect((failLoudSent()[0].params.content as { text: string }).text).toContain('store IO boom')
       expect(internals.attentionScheduler.getCurrentIntervalMs(GROUP_SESSION)).toBe(5000)
     })

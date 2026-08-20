@@ -322,9 +322,18 @@ export class ManagerLoop {
   }
 
   /** 唯一入口:被唤醒 → 跑一个 episode → 回睡。同一 loop 串行,不同 loop 互不影响。 */
-  async wakeUp(envelope: TimedWakeEnvelope): Promise<EpisodeResult> {
+  async wakeUp(envelope: TimedWakeEnvelope, onAccepted?: () => Promise<void>): Promise<EpisodeResult> {
     assertTimedWakeEnvelope(envelope)
-    return this.mutex.run(() => this.runEpisode(envelope))
+    return this.mutex.run(() => this.runEpisode(envelope), () => {
+      if (!onAccepted) return
+      try {
+        void onAccepted().catch((err) => {
+          console.warn('[ManagerLoop] wake accepted callback failed (ignored):', err instanceof Error ? err.message : String(err))
+        })
+      } catch (err) {
+        console.warn('[ManagerLoop] wake accepted callback failed (ignored):', err instanceof Error ? err.message : String(err))
+      }
+    })
   }
 
   /**
