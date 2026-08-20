@@ -3,7 +3,7 @@
  *
  * spec: 2026-07-21-agent-token-efficiency-design.md 改动 4（memory 工具按任务用途分组注册）
  * - 普通对话任务 → 仅 A 组 6 个简化工具
- * - daily_reflection / memory_curate / tags 含 memory_rebuild → 全量 18 个（含 B 组 12 个反思级 RPC 工具）
+ * - 仅 tags 含 memory_rebuild 的兼容 Worker → 全量 19 个（含 B 组 13 个管理级 RPC 工具）
  * - memory_maintenance 不经 Worker，不受影响
  */
 import { describe, it, expect, vi } from 'vitest'
@@ -37,6 +37,7 @@ const GROUP_B = [
   'get_stats',
   'get_evolution_mode',
   'set_evolution_mode',
+  'promote_inbox_entry',
   'promote_to_rule',
 ]
 
@@ -56,21 +57,20 @@ function makeMemoryTools(rpcCall = vi.fn().mockResolvedValue({})) {
 }
 
 describe('resolveMemoryToolProfile', () => {
-  it('daily_reflection → 全量 profile（不再要求 triggerType==scheduled）', () => {
+  it('daily_reflection → conversation profile（记忆整理归 Manager）', () => {
     expect(resolveMemoryToolProfile({ taskType: 'daily_reflection' }))
-      .toBe('daily_reflection')
+      .toBe('conversation')
   })
 
-  it('memory_curate（每小时记忆整理）→ 全量 profile', () => {
-    // 整理 SKILL 依赖 list_entries / delete_memory / update_long_term 等 B 组工具
+  it('memory_curate → conversation profile（已退役类型不再获特权）', () => {
     expect(resolveMemoryToolProfile({ taskType: 'memory_curate' }))
-      .toBe('daily_reflection')
+      .toBe('conversation')
   })
 
   it('tags 含 memory_rebuild 的 manual 任务 → 全量 profile', () => {
     // 重建图谱任务 trigger_type=manual、无 task_type，靠 tags 识别
     expect(resolveMemoryToolProfile({ tags: ['memory_rebuild'] }))
-      .toBe('daily_reflection')
+      .toBe('memory_rebuild')
   })
 
   it('tags 不含 memory_rebuild 的普通任务 → conversation profile', () => {
@@ -94,9 +94,9 @@ describe('resolveMemoryToolProfile', () => {
 })
 
 describe('filterMemoryToolsByProfile', () => {
-  it('server 全量注册 18 个工具', () => {
+  it('server 全量注册 19 个工具', () => {
     const tools = makeMemoryTools()
-    expect(tools).toHaveLength(18)
+    expect(tools).toHaveLength(19)
     const names = tools.map((t) => t.name.replace('mcp__crab-memory__', ''))
     for (const n of [...GROUP_A, ...GROUP_B]) {
       expect(names).toContain(n)
@@ -115,9 +115,9 @@ describe('filterMemoryToolsByProfile', () => {
     }
   })
 
-  it('daily_reflection profile → 全量 18 个', () => {
-    const filtered = filterMemoryToolsByProfile(makeMemoryTools(), 'daily_reflection')
-    expect(filtered).toHaveLength(18)
+  it('memory_rebuild profile → 全量 19 个', () => {
+    const filtered = filterMemoryToolsByProfile(makeMemoryTools(), 'memory_rebuild')
+    expect(filtered).toHaveLength(19)
   })
 
   it('A 组常量与 conversation 过滤结果一致', () => {
@@ -127,10 +127,10 @@ describe('filterMemoryToolsByProfile', () => {
   })
 })
 
-describe('daily_reflection 任务中 B 组工具功能正常', () => {
+describe('memory_rebuild 任务中 B 组工具功能正常', () => {
   it('quick_capture 透传 RPC', async () => {
     const rpcCall = vi.fn().mockResolvedValue({ id: 'mem_1', status: 'inbox' })
-    const tools = filterMemoryToolsByProfile(makeMemoryTools(rpcCall), 'daily_reflection')
+    const tools = filterMemoryToolsByProfile(makeMemoryTools(rpcCall), 'memory_rebuild')
     const tool = tools.find((t) => t.name === 'mcp__crab-memory__quick_capture')!
     const result = await tool.call(
       { type: 'lesson', brief: 'b', content: 'c' },
@@ -147,7 +147,7 @@ describe('daily_reflection 任务中 B 组工具功能正常', () => {
 
   it('run_maintenance 透传 RPC', async () => {
     const rpcCall = vi.fn().mockResolvedValue({ ok: true })
-    const tools = filterMemoryToolsByProfile(makeMemoryTools(rpcCall), 'daily_reflection')
+    const tools = filterMemoryToolsByProfile(makeMemoryTools(rpcCall), 'memory_rebuild')
     const tool = tools.find((t) => t.name === 'mcp__crab-memory__run_maintenance')!
     const result = await tool.call({ scope: 'all' }, {} as never)
     expect(result.isError).toBe(false)

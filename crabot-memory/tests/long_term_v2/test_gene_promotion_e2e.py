@@ -23,7 +23,7 @@ def _build(tmp_path):
 
 
 def _seed_case(store, index, mid: str, brief: str, body: str) -> str:
-    """直接写一条 lesson case (status=inbox, maturity=case) 充当原始素材。"""
+    """直接写一条已经确认的 lesson case 充当 rule 的原始素材。"""
     from src.long_term_v2.schema import (
         MemoryEntry, MemoryFrontmatter, SourceRef, ImportanceFactors, LessonMeta,
     )
@@ -42,9 +42,9 @@ def _seed_case(store, index, mid: str, brief: str, body: str) -> str:
         lesson_meta=LessonMeta(scenario="飞书发表情", outcome="success"),
     )
     entry = MemoryEntry(frontmatter=fm, body=body)
-    store.write(entry, status="inbox")
-    index.upsert(entry, path=entry_path(store.data_root, "inbox", "lesson", mid),
-                 status="inbox")
+    store.write(entry, status="confirmed")
+    index.upsert(entry, path=entry_path(store.data_root, "confirmed", "lesson", mid),
+                 status="confirmed")
     return mid
 
 

@@ -56,6 +56,8 @@ export interface MemoryFrontmatter {
   tags: string[]
   event_time: string
   ingestion_time: string
+  inbox_entered_at?: string
+  trashed_at?: string
   invalidated_by?: string
   lesson_meta?: LessonMeta
   observation?: ObservationMeta
@@ -134,6 +136,26 @@ export interface MemoryGraphData {
   stats: { node_count: number; edge_count: number }
 }
 
+export interface HistoricalInboxPreview {
+  selection: { legacy_only: true; cutoff?: string }
+  estimated_move_count: number
+  by_type: Record<MemoryType, number>
+  by_age: {
+    within_30_days: number
+    days_31_to_90: number
+    days_91_to_365: number
+    over_365_days: number
+  }
+}
+
+export interface HistoricalInboxMigrationResult {
+  selection: { legacy_only: true; cutoff?: string }
+  batch_size: 200
+  moved: number
+  remaining: number
+  failed: Array<{ id: string; reason: string }>
+}
+
 function buildQuery(params: Record<string, string | number | string[] | undefined>): string {
   const search = new URLSearchParams()
   Object.entries(params).forEach(([k, v]) => {
@@ -183,6 +205,14 @@ export const memoryV2Service = {
 
   async restoreEntry(id: string): Promise<{ id: string; status: string }> {
     return api.post(`/memory/v2/entries/${encodeURIComponent(id)}/restore`, {})
+  },
+
+  async previewHistoricalInbox(cutoff?: string): Promise<HistoricalInboxPreview> {
+    return api.get(`/memory/v2/historical-inbox/preview${buildQuery({ cutoff })}`)
+  },
+
+  async migrateHistoricalInboxBatch(cutoff?: string): Promise<HistoricalInboxMigrationResult> {
+    return api.post('/memory/v2/historical-inbox/migrate-batch', { confirmed: true, ...(cutoff ? { cutoff } : {}) })
   },
 
   async getEvolutionMode(): Promise<{ mode: EvolutionMode; last_changed_at: string; reason: string }> {

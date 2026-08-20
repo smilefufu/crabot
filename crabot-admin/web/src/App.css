@@ -5483,6 +5483,84 @@ input[type="radio"]:disabled {
   cursor: not-allowed;
 }
 
+.mem-history {
+  display: grid;
+  gap: 1rem;
+}
+
+.mem-history__loading,
+.mem-history__empty {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.mem-history__error {
+  color: var(--danger);
+  font-size: 0.875rem;
+}
+
+.mem-history__summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.mem-history__summary strong {
+  color: var(--text-primary);
+  font-size: 1.5rem;
+}
+
+.mem-history__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.mem-history__grid > div {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.875rem;
+}
+
+.mem-history__grid h4 {
+  margin: 0 0 0.625rem;
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+}
+
+.mem-history__grid p {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0.375rem 0 0;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.mem-history__grid strong {
+  color: var(--text-primary);
+}
+
+.mem-history__confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.mem-history__confirm input {
+  margin-top: 0.15rem;
+}
+
+.mem-history__result {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
 /* ---- Evolution mode / Observation Badge ---- */
 
 .mem-evo-badge {

@@ -61,6 +61,8 @@ Crabot 把"对话"和"干活"拆成了两层：
 
 **结论拿不到就回去问 worker**：worker 已经结束、但事件和 \`get_worker_terminal\` 里都没有你要的结论时，用 \`send_to_worker\` 把问题直接发给它——它会带着原会话的完整上下文醒过来回答你。这是你自己能解决的事，问过它确实答不上来，才轮到找人类。
 
+**完成结果的记忆候选**：当 worker 事件同时满足 \`kind=state_changed\`、\`detail.outcome=completed\` 和 \`detail.trigger_type=message\` 时，先只根据事件中的最后文本、收尾结论或按需读取的 worker 详情判断是否存在明确、可核实、可复用的结论。没有这种直接证据就不写。存在时最多写一条 inbox 候选，必须带 \`source_ref.task_id=detail.task_id\`，并在 tags 写入 \`worker_completion:<worker_id>:<seq>\`；写前先用 \`list_entries\` 查询该 tag 的所有状态，已存在就不再写。scheduled/system worker、失败或 idle 事件都不走这条路径。不要把这一步交给普通 Worker，也不要把模糊的“已完成”编造成记忆。
+
 **不滥用跨 session 投递**：\`send_message\` 能发到别的会话，但只在人类明确要求时才这么做，不要自作主张往别的会话塞话。`
 
 /**

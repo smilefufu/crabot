@@ -1,0 +1,185 @@
+"""Memory v2 lifecycle regression coverage for the 2026-08-20 contract."""
+import pytest
+
+from src.long_term_v2.maintenance import MaintenanceConfig, run_maintenance
+from src.long_term_v2.paths import entry_path
+from src.long_term_v2.recall_pipeline import RecallPipeline
+from src.long_term_v2.reranker import FallbackReranker
+from src.long_term_v2.rpc import LongTermV2Rpc
+from src.long_term_v2.schema import (
+    EntityRef,
+    ImportanceFactors,
+    MemoryEntry,
+    MemoryFrontmatter,
+    SourceRef,
+)
+from src.long_term_v2.sqlite_index import SqliteIndex
+from src.long_term_v2.store import MemoryStore
+
+
+def _rpc(tmp_path):
+    store = MemoryStore(str(tmp_path / "long_term"))
+    index = SqliteIndex(str(tmp_path / "index.db"))
+    return LongTermV2Rpc(store=store, index=index), store, index
+
+
+def _frontmatter(mem_id, *, maturity="observed", ingestion_time="2026-08-20T00:00:00Z", **extra):
+    base = {
+        "id": mem_id,
+        "type": "fact",
+        "maturity": maturity,
+        "brief": mem_id,
+        "author": "test",
+        "source_ref": SourceRef(type="manual"),
+        "source_trust": 3,
+        "content_confidence": 3,
+        "importance_factors": ImportanceFactors(
+            proximity=0.5, surprisal=0.5, entity_priority=0.5, unambiguity=0.5,
+        ),
+        "event_time": ingestion_time,
+        "ingestion_time": ingestion_time,
+    }
+    base.update(extra)
+    return MemoryFrontmatter(**base)
+
+
+def _persist(store, index, mem_id, *, status, body="needle", **extra):
+    entry = MemoryEntry(frontmatter=_frontmatter(mem_id, **extra), body=body)
+    store.write(entry, status=status)
+    index.upsert(entry, entry_path(store.data_root, status, "fact", mem_id), status)
+    return entry
+
+
+@pytest.mark.asyncio
+async def test_promote_inbox_entry_is_the_only_normal_status_transition(tmp_path):
+    rpc, store, index = _rpc(tmp_path)
+    captured = await rpc.quick_capture({"type": "lesson", "brief": "case", "content": "body"})
+    mem_id = captured["id"]
+    inbox_entry = store.read("inbox", "lesson", mem_id)
+    assert inbox_entry.frontmatter.inbox_entered_at is not None
+
+    promoted = await rpc.promote_inbox_entry({"id": mem_id})
+    assert promoted == {"id": mem_id, "status": "ok"}
+    confirmed = store.read("confirmed", "lesson", mem_id)
+    assert confirmed.frontmatter.inbox_entered_at is None
+    assert index.locate(mem_id)["status"] == "confirmed"
+    assert await rpc.promote_inbox_entry({"id": mem_id}) == promoted
+
+    await rpc.delete_memory({"id": mem_id})
+    rejected = await rpc.promote_inbox_entry({"id": mem_id})
+    assert rejected["error"] == "INVALID_STATE"
+
+
+@pytest.mark.asyncio
+async def test_trash_and_restore_reset_lifecycle_timestamps(tmp_path):
+    rpc, store, _ = _rpc(tmp_path)
+    written = await rpc.quick_capture({"type": "fact", "brief": "candidate", "content": "body"})
+    mem_id = written["id"]
+
+    await rpc.delete_memory({"id": mem_id, "now_iso": "2026-08-20T03:00:00Z"})
+    trashed = store.read("trash", "fact", mem_id)
+    assert trashed.frontmatter.trashed_at == "2026-08-20T03:00:00Z"
+    assert trashed.frontmatter.inbox_entered_at is None
+
+    await rpc.restore_memory({"id": mem_id, "now_iso": "2026-08-20T04:00:00Z"})
+    restored = store.read("inbox", "fact", mem_id)
+    assert restored.frontmatter.trashed_at is None
+    assert restored.frontmatter.inbox_entered_at == "2026-08-20T04:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_historical_inbox_preview_and_confirmed_batches_are_bounded_and_resumable(tmp_path):
+    rpc, store, index = _rpc(tmp_path)
+    for n in range(201):
+        _persist(
+            store, index, f"historical-{n:03}", status="inbox",
+            ingestion_time="2020-01-01T00:00:00Z",
+        )
+    _persist(
+        store, index, "new-format", status="inbox",
+        ingestion_time="2026-08-20T00:00:00Z",
+        inbox_entered_at="2026-08-20T00:00:00Z",
+    )
+
+    preview = await rpc.preview_historical_inbox({"now_iso": "2026-08-20T00:00:00Z"})
+    assert preview["estimated_move_count"] == 201
+    assert preview["by_type"] == {"fact": 201, "lesson": 0, "concept": 0}
+    assert preview["by_age"]["over_365_days"] == 201
+
+    unconfirmed = await rpc.migrate_historical_inbox_batch({"now_iso": "2026-08-20T03:00:00Z"})
+    assert unconfirmed == {"error": "CONFIRMATION_REQUIRED"}
+    assert index.locate("historical-000")["status"] == "inbox"
+
+    first = await rpc.migrate_historical_inbox_batch({
+        "confirmed": True,
+        "now_iso": "2026-08-20T03:00:00Z",
+    })
+    assert first["batch_size"] == 200
+    assert first["moved"] == 200
+    assert first["remaining"] == 1
+    assert first["failed"] == []
+    assert store.read("trash", "fact", "historical-000").frontmatter.trashed_at == "2026-08-20T03:00:00Z"
+    assert index.locate("new-format")["status"] == "inbox"
+
+    second = await rpc.migrate_historical_inbox_batch({
+        "confirmed": True,
+        "now_iso": "2026-08-20T04:00:00Z",
+    })
+    assert second["moved"] == 1
+    assert second["remaining"] == 0
+
+
+def test_inbox_expiry_skips_historical_inbox_and_uses_new_timestamp(tmp_path):
+    _, store, index = _rpc(tmp_path)
+    _persist(store, index, "historical", status="inbox", ingestion_time="2020-01-01T00:00:00Z")
+    _persist(
+        store, index, "expired", status="inbox", ingestion_time="2026-08-20T00:00:00Z",
+        inbox_entered_at="2026-08-20T00:00:00Z",
+    )
+
+    report = run_maintenance(
+        store, index, scope="inbox_expiry",
+        config=MaintenanceConfig(now_iso="2026-08-21T07:00:00Z"),
+    )
+    assert report["inbox_expiry"] == {"trashed": 1}
+    assert index.locate("historical")["status"] == "inbox"
+    assert index.locate("expired")["status"] == "trash"
+    assert store.read("trash", "fact", "expired").frontmatter.trashed_at == "2026-08-21T07:00:00Z"
+
+
+def test_trash_cleanup_uses_trashed_at_and_keeps_legacy_fallback(tmp_path):
+    _, store, index = _rpc(tmp_path)
+    _persist(
+        store, index, "recently-trashed", status="trash", ingestion_time="2020-01-01T00:00:00Z",
+        trashed_at="2026-08-20T00:00:00Z",
+    )
+    _persist(store, index, "legacy-trash", status="trash", ingestion_time="2020-01-01T00:00:00Z")
+
+    report = run_maintenance(
+        store, index, scope="trash_cleanup",
+        config=MaintenanceConfig(now_iso="2026-08-21T00:00:00Z"),
+    )
+    assert report["trash_cleanup"] == {"deleted": 1}
+    assert index.locate("recently-trashed") is not None
+    assert index.locate("legacy-trash") is None
+
+
+@pytest.mark.asyncio
+async def test_recall_filters_status_before_each_candidate_path(tmp_path):
+    _, store, index = _rpc(tmp_path)
+    _persist(
+        store, index, "confirmed", status="confirmed", body="unrelated",
+        maturity="confirmed", entities=[EntityRef(type="project", id="p1", name="project")], tags=["topic"],
+    )
+    _persist(
+        store, index, "inbox", status="inbox", body="needle",
+        entities=[EntityRef(type="project", id="p1", name="project")], tags=["topic"],
+        inbox_entered_at="2026-08-20T00:00:00Z",
+    )
+    pipe = RecallPipeline(store=store, index=index, reranker=FallbackReranker())
+
+    default = await pipe.recall("needle", 10, filters={"entities": ["p1"], "tags": ["topic"]})
+    assert [item["id"] for item in default] == ["confirmed"]
+
+    inbox = await pipe.recall("needle", 10, filters={"status": "inbox", "entities": ["p1"], "tags": ["topic"]})
+    assert [item["id"] for item in inbox] == ["inbox"]

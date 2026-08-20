@@ -2861,6 +2861,9 @@ export class UnifiedAgent extends ModuleBase {
    */
   private async handleTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
     this.assertRuntimeExecutionAdmission()
+    if (params.task_type === 'memory_curate') {
+      throw new Error('memory_curate 已退役，请使用每日反思')
+    }
     if (params.task_type === 'memory_maintenance' && params.is_builtin === true) {
       return this.createMaintenanceSystemTask(params)
     }

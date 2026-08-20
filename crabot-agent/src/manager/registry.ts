@@ -341,8 +341,19 @@ export class ManagerRegistry {
    */
   async routeWorkerEvent(event: HarnessEvent): Promise<EpisodeResult | undefined> {
     const capture = this.captureIngress()
-    const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event }, event.ts)
     const found = await this.deps.ledger.findWorker(event.worker_id)
+    const eventWithOrigin: HarnessEvent = found
+      ? {
+          ...event,
+          detail: {
+            ...(event.detail ?? {}),
+            ...(event.task_status ? { outcome: event.task_status } : {}),
+            trigger_type: found.worker.origin.trigger_type,
+            task_id: found.worker.task.id,
+          },
+        }
+      : event
+    const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event: eventWithOrigin }, event.ts)
     const key = found?.worker.manager_key ?? SYSTEM_TASKS_MANAGER_KEY
     return this.runWake(key, envelope)
   }

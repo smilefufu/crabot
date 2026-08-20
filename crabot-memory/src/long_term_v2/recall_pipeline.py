@@ -65,6 +65,7 @@ class RecallPipeline:
         enable_graph_expansion: bool = False,
     ) -> List[Dict[str, Any]]:
         filters = filters or {}
+        status_filter = filters.get("status") or "confirmed"
         timings: Dict[str, float] = {}
         t_start = time.perf_counter()
 
@@ -76,10 +77,15 @@ class RecallPipeline:
 
         # ─── Step 1: 4-pathway recall ───
         t1 = time.perf_counter()
-        sparse_ids = await self._timed("sparse", self._sparse_path(canonical, top=50), timings)
-        bi_temporal_ids = self._bi_temporal_path(pq.time_window, top=30) if pq.time_window else []
-        entity_ids = self._entity_path(filters.get("entities") or [], top=20)
-        tag_ids = self._tag_path(filters.get("tags") or [], top=20)
+        sparse_ids = await self._timed(
+            "sparse", self._sparse_path(canonical, top=50, status=status_filter), timings,
+        )
+        bi_temporal_ids = (
+            self._bi_temporal_path(pq.time_window, top=30, status=status_filter)
+            if pq.time_window else []
+        )
+        entity_ids = self._entity_path(filters.get("entities") or [], top=20, status=status_filter)
+        tag_ids = self._tag_path(filters.get("tags") or [], top=20, status=status_filter)
         timings["step1_total_ms"] = (time.perf_counter() - t1) * 1000
 
         ranked_paths = {
@@ -100,10 +106,14 @@ class RecallPipeline:
 
         # ─── enrich with metadata for boost + rerank ───
         t_enrich = time.perf_counter()
-        candidates = self._enrich(fused, in_time_window_ids=set(bi_temporal_ids))
-        candidates = self._apply_outdated_policy(candidates, include_outdated)
+        candidates = self._enrich(
+            fused, in_time_window_ids=set(bi_temporal_ids), required_status=status_filter,
+        )
+        candidates = self._apply_outdated_policy(
+            candidates, include_outdated, required_status=status_filter,
+        )
         if enable_graph_expansion:
-            candidates = self._expand_graph(candidates)
+            candidates = self._expand_graph(candidates, required_status=status_filter)
         candidates = apply_type_boost(candidates)
         candidates = candidates[:20]  # rerank a bounded slice
         timings["enrich_boost_ms"] = (time.perf_counter() - t_enrich) * 1000
@@ -161,8 +171,8 @@ class RecallPipeline:
             timings[f"{label}_ms"] = (time.perf_counter() - t) * 1000
 
     # ─── path helpers ───
-    async def _sparse_path(self, text: str, top: int) -> List[str]:
-        rows = list(self.index.iter_brief_for_bm25())
+    async def _sparse_path(self, text: str, top: int, status: str) -> List[str]:
+        rows = list(self.index.iter_brief_for_bm25(status=status))
         if not rows:
             return []
         corpus = [_tokenize(r[3] + " " + r[4]) for r in rows]
@@ -175,16 +185,16 @@ class RecallPipeline:
         )[:top]
         return [mid for mid, _ in scored]
 
-    def _bi_temporal_path(self, window, top: int) -> List[str]:
+    def _bi_temporal_path(self, window, top: int, status: str) -> List[str]:
         if not window:
             return []
         start, end = window
-        return self.index.find_by_time_range("event_time", start, end, limit=top)
+        return self.index.find_by_time_range("event_time", start, end, limit=top, status=status)
 
-    def _entity_path(self, entity_ids, top: int) -> List[str]:
+    def _entity_path(self, entity_ids, top: int, status: str) -> List[str]:
         seen, out = set(), []
         for eid in entity_ids:
-            for mid in self.index.find_by_entity(eid):
+            for mid in self.index.find_by_entity(eid, status=status):
                 if mid in seen:
                     continue
                 seen.add(mid)
@@ -193,10 +203,10 @@ class RecallPipeline:
                     return out
         return out
 
-    def _tag_path(self, tags, top: int) -> List[str]:
+    def _tag_path(self, tags, top: int, status: str) -> List[str]:
         seen, out = set(), []
         for t in tags:
-            for mid in self.index.find_by_tag(t):
+            for mid in self.index.find_by_tag(t, status=status):
                 if mid in seen:
                     continue
                 seen.add(mid)
@@ -205,13 +215,15 @@ class RecallPipeline:
                     return out
         return out
 
-    def _enrich(self, fused, in_time_window_ids: set) -> List[Dict[str, Any]]:
+    def _enrich(self, fused, in_time_window_ids: set, required_status: str | None = None) -> List[Dict[str, Any]]:
         out = []
         for mid, fused_score, paths in fused:
             loc = self.index.locate(mid)
             if not loc:
                 continue
             status, type_, _ = loc
+            if required_status is not None and status != required_status:
+                continue
             entry = self.store.read(status, type_, mid)
             out.append(self._enrich_one(
                 mid, status, type_, entry, score=fused_score,
@@ -237,7 +249,7 @@ class RecallPipeline:
             "outcome": (fm.lesson_meta.outcome if fm.lesson_meta else None),
         }
 
-    def _resolve_live(self, mem_id, _depth: int = 0, _seen=None):
+    def _resolve_live(self, mem_id, _depth: int = 0, _seen=None, required_status: str | None = None):
         """沿 invalidated_by 跟随到最新的、非 trash、未被取代的条目。
         返回 (status, type_, entry)；若链断/进 trash/不存在/成环则 None。"""
         _seen = _seen if _seen is not None else set()
@@ -248,17 +260,17 @@ class RecallPipeline:
         if not loc:
             return None
         status, type_, _ = loc
-        if status == "trash":
+        if status == "trash" or (required_status is not None and status != required_status):
             return None
         entry = self.store.read(status, type_, mem_id)
         nxt = entry.frontmatter.invalidated_by
         if nxt:
-            return self._resolve_live(nxt, _depth + 1, _seen)
+            return self._resolve_live(nxt, _depth + 1, _seen, required_status)
         if entry.frontmatter.maturity in _OUTDATED_MATURITY:
             return None
         return (status, type_, entry)
 
-    def _apply_outdated_policy(self, candidates, include_outdated: bool):
+    def _apply_outdated_policy(self, candidates, include_outdated: bool, required_status: str | None = None):
         """剔除 stale/retired；把被 invalidated_by 取代的条目替换为 successor。
         include_outdated=True 时原样返回（反思清理流程用）。"""
         if include_outdated:
@@ -270,7 +282,7 @@ class RecallPipeline:
                 continue
             inv = c.get("invalidated_by")
             if inv:
-                live = self._resolve_live(inv)
+                live = self._resolve_live(inv, required_status=required_status)
                 if live is None:
                     continue  # successor 已消失 → 不泄露被取代条目
                 status, type_, entry = live
@@ -284,7 +296,7 @@ class RecallPipeline:
             out.append(c)
         return out
 
-    def _expand_graph(self, candidates):
+    def _expand_graph(self, candidates, required_status: str | None = None):
         """沿 links 扩展种子的 1 跳邻居，纳入候选池（降权、标 expanded/via_relation）。
         默认仅由 recall(enable_graph_expansion=True) 调用。"""
         present = {c["id"] for c in candidates}
@@ -303,7 +315,7 @@ class RecallPipeline:
                 if not loc:
                     continue
                 status, type_, _ = loc
-                if status == "trash":
+                if status == "trash" or (required_status is not None and status != required_status):
                     continue
                 entry = self.store.read(status, type_, tid)
                 enriched = self._enrich_one(

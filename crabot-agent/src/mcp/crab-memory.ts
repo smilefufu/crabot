@@ -1,14 +1,14 @@
 /**
  * Crab-Memory MCP Server — Agent 长期记忆能力
  *
- * 两组工具（共 18 个，按任务 profile 分组注册，见 resolveMemoryToolProfile）：
+ * 两组工具（共 19 个，按任务 profile 分组注册，见 resolveMemoryToolProfile）：
  * - A 组 6 个（Worker 普通对话可见）：store_memory / search_memory / get_memory_detail /
  *   set_scene_profile / get_scene_profile / delete_scene_profile
  *   importance / brief 等字段自动推断，最少参数即可落盘
- * - B 组 12 个（反思/整理/重建类任务可见）：quick_capture / search_long_term /
+ * - B 组 13 个（Manager 与兼容重建 Worker 可见）：quick_capture / search_long_term /
  *   update_long_term / delete_memory / list_recent / list_entries / set_memory_links /
- *   run_maintenance / get_stats / get_evolution_mode / set_evolution_mode / promote_to_rule
- *   字段精细可控，工具名与 Memory RPC 一一对应，供反思/整理/重建 SKILL 使用
+ *   run_maintenance / get_stats / get_evolution_mode / set_evolution_mode / promote_inbox_entry / promote_to_rule
+ *   字段精细可控，工具名与 Memory RPC 一一对应
  *
  * @see crabot-docs/protocols/protocol-memory.md
  */
@@ -102,12 +102,12 @@ export async function resolveSceneAnchorLabel(params: {
 
 export type MemoryToolProfile =
   | 'conversation'
-  /** 全量 18 个：daily_reflection 反思 / memory_curate 整理 / memory_rebuild 重建任务 */
-  | 'daily_reflection'
+  /** B 组：仅保留给显式兼容 memory_rebuild Worker。 */
+  | 'memory_rebuild'
 
 /**
  * A 组：Worker 普通对话可见的 6 个简化工具（未加 mcp__ 前缀的工具名）。
- * 其余 12 个（B 组）仅在反思/整理/重建类任务中注册。
+ * 其余 13 个（B 组）只给 Manager 和兼容重建 Worker。
  */
 export const CRAB_MEMORY_CONVERSATION_TOOLS: ReadonlySet<string> = new Set([
   'store_memory',
@@ -123,21 +123,15 @@ const CRAB_MEMORY_TOOL_PREFIX = 'mcp__crab-memory__'
 
 /**
  * 按任务用途决定 crab-memory 工具注册范围（不再要求 trigger_type==='scheduled'）：
- * - task_type ∈ {daily_reflection, memory_curate} 或 tags 含 'memory_rebuild' → 全量 18 个
- *   （反思/整理/重建 SKILL 需要 B 组精细工具：list_entries / delete_memory /
- *    update_long_term / set_memory_links 等）
+ * - tags 含 'memory_rebuild' → B 组 13 个（兼容显式重建任务）
  * - 其他所有任务 → 仅 A 组 6 个
  * memory_maintenance 任务不经 Worker（scheduled-task-runner 直接 RPC），不受此影响。
  */
 export function resolveMemoryToolProfile(
   taskCtx: { taskType?: string; tags?: readonly string[] } | null,
 ): MemoryToolProfile {
-  if (
-    taskCtx?.taskType === 'daily_reflection'
-    || taskCtx?.taskType === 'memory_curate'
-    || taskCtx?.tags?.includes('memory_rebuild') === true
-  ) {
-    return 'daily_reflection'
+  if (taskCtx?.tags?.includes('memory_rebuild') === true) {
+    return 'memory_rebuild'
   }
   return 'conversation'
 }
@@ -147,7 +141,7 @@ export function filterMemoryToolsByProfile<T extends { name: string }>(
   tools: ReadonlyArray<T>,
   profile: MemoryToolProfile,
 ): T[] {
-  if (profile === 'daily_reflection') return [...tools]
+  if (profile === 'memory_rebuild') return [...tools]
   return tools.filter((t) =>
     CRAB_MEMORY_CONVERSATION_TOOLS.has(t.name.slice(CRAB_MEMORY_TOOL_PREFIX.length)))
 }
@@ -302,7 +296,7 @@ const SET_MEMORY_LINKS_SCHEMA = {
 }
 
 const RUN_MAINTENANCE_SCHEMA = {
-  scope: z.enum(['all', 'observation_check', 'stale_aging', 'trash_cleanup']).default('all'),
+  scope: z.enum(['all', 'observation_check', 'stale_aging', 'trash_cleanup', 'link_gc', 'inbox_expiry']).default('all'),
   now_iso: z.string().optional().describe('覆盖当前时间（测试用）'),
 }
 
@@ -338,6 +332,10 @@ const PROMOTE_TO_RULE_SCHEMA = {
   source_trust: z.number().int().min(1).max(5).default(4),
   content_confidence: z.number().int().min(1).max(5).default(4),
   observation_window_days: z.number().int().min(1).max(90).default(7),
+}
+
+const PROMOTE_INBOX_ENTRY_SCHEMA = {
+  id: z.string().describe('待确认 inbox 条目的 memory ID'),
 }
 
 // ============================================================================
@@ -477,7 +475,7 @@ export function createCrabMemoryServer(
   // 反思级原生 RPC 工具组
   // ============================================================================
   // 这一组工具直接透传到 Memory 后端 RPC，工具名与 RPC 一一对应，
-  // 供 daily-reflection / memory-curate 等内置 SKILL 在反思 / 整理流程中精细操作。
+  // 供 Manager 的每日反思和兼容重建任务精细操作。
   // 与 A 组 Worker 简化工具的区别：参数完整、字段精细可控、不做隐式推断。
   // 详见 protocol-memory.md。
 
@@ -526,6 +524,15 @@ export function createCrabMemoryServer(
       inputSchema: QUICK_CAPTURE_SCHEMA,
     },
     async (args) => callRpc('quick_capture', args as Record<string, unknown>),
+  )
+
+  server.registerTool(
+    'promote_inbox_entry',
+    {
+      description: '确认一条 inbox 候选并移入 confirmed。普通 inbox -> confirmed 只能用本工具；已 confirmed 幂等成功，trash 会被拒绝。',
+      inputSchema: PROMOTE_INBOX_ENTRY_SCHEMA,
+    },
+    async (args) => callRpc('promote_inbox_entry', args as Record<string, unknown>),
   )
 
   server.registerTool(
@@ -588,7 +595,7 @@ export function createCrabMemoryServer(
   server.registerTool(
     'run_maintenance',
     {
-      description: '触发记忆维护任务。scope=all 会依次跑 observation_check（按 pass/fail 净值判定观察期到期项）/ stale_aging（180 天未访问的 fact 标 stale）/ trash_cleanup（30 天回收站）。每天凌晨 04:00 已有内置 schedule 自动跑一次，此处用于反思末尾兜底或手动触发。',
+      description: '触发记忆维护任务。scope=all 会依次跑 observation_check、stale_aging、trash_cleanup、link_gc 和 inbox_expiry。每天凌晨 04:00 已有内置 schedule 自动跑一次；每日反思不得重复调用 all。',
       inputSchema: RUN_MAINTENANCE_SCHEMA,
     },
     async (args) => callRpc('run_maintenance', args as Record<string, unknown>),

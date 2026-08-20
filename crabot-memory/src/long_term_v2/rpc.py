@@ -23,6 +23,7 @@ from src.long_term_v2.markdown_io import load_entry
 from src.long_term_v2.paths import entry_path
 from src.long_term_v2.recall_pipeline import RecallPipeline
 from src.long_term_v2.agentic_tools import AgenticTools
+from src.long_term_v2.lifecycle import move_entry
 from src.types import ImportLongTermParams
 
 
@@ -34,13 +35,6 @@ _UPDATABLE_FIELDS = frozenset({
     "links",
 })
 
-# 各 type 的 maturity 高熟度终态——patch 改到这些值时 status 必须同步到 confirmed。
-# lesson: rule（已晋升）/ retired 走废弃路径，不在此列
-# fact:   confirmed（已确认）/ stale 是衰退态，不在此列
-# concept: established（已固化）
-_MATURITY_TERMINALS = frozenset({"rule", "confirmed", "established"})
-
-
 def run_maintenance_sync(store, index, params: dict) -> dict:
     """Run maintenance synchronously with the existing RPC request/report shape."""
     scope = params.get("scope", "all")
@@ -49,6 +43,7 @@ def run_maintenance_sync(store, index, params: dict) -> dict:
         now_iso=now_iso,
         stale_idle_days=int(params.get("stale_idle_days", 180)),
         trash_retention_days=int(params.get("trash_retention_days", 30)),
+        inbox_max_age_hours=int(params.get("inbox_max_age_hours", 30)),
     )
     return {"report": _run_maintenance(store, index, scope=scope, config=config)}
 
@@ -64,6 +59,8 @@ class LongTermV2Rpc:
 
     async def write_long_term(self, params: dict) -> dict:
         mem_id = params.get("id") or new_memory_id()
+        status = params.get("status", "inbox")
+        now_iso = utc_now_iso_z()
         entities = [EntityRef(**e) for e in params.get("entities", [])]
         lesson_meta_raw = params.get("lesson_meta")
         lesson_meta = LessonMeta(**lesson_meta_raw) if lesson_meta_raw else None
@@ -80,11 +77,11 @@ class LongTermV2Rpc:
             entities=entities,
             tags=params.get("tags", []),
             event_time=params["event_time"],
-            ingestion_time=utc_now_iso_z(),
+            ingestion_time=now_iso,
+            inbox_entered_at=now_iso if status == "inbox" else None,
             lesson_meta=lesson_meta,
         )
         entry = MemoryEntry(frontmatter=fm, body=params.get("content", ""))
-        status = params.get("status", "inbox")
         self.store.write(entry, status=status)
         path = entry_path(self.store.data_root, status, fm.type, fm.id)
         self.index.upsert(entry, path=path, status=status)
@@ -157,10 +154,12 @@ class LongTermV2Rpc:
             return {"error": "not found"}
         status, type_, _ = loc
         if status != "trash":
-            self.store.delete_to_trash(type_, mem_id, from_status=status)
-            new_path = entry_path(self.store.data_root, "trash", type_, mem_id)
-            entry = self.store.read("trash", type_, mem_id)
-            self.index.upsert(entry, path=new_path, status="trash")
+            entry = self.store.read(status, type_, mem_id)
+            move_entry(
+                self.store, self.index, entry,
+                from_status=status, to_status="trash",
+                now_iso=params.get("now_iso") or utc_now_iso_z(),
+            )
         return {"status": "ok"}
 
     async def update_long_term(self, params: dict) -> dict:
@@ -221,23 +220,9 @@ class LongTermV2Rpc:
         body = patch["body"] if "body" in patch else entry.body
         new_entry = entry.model_copy(update={"frontmatter": new_fm, "body": body})
 
-        # Status auto-sync：patch 把 maturity 升到高熟度终态时，inbox 必须同步迁到 confirmed。
-        # 修历史 bug：反思 LLM 会用 update_long_term({maturity:'rule'}) 直接给 inbox 的 case
-        # 打 rule 标，绕过 promote_to_rule。结果 maturity=rule 卡在 inbox/lesson/，默认
-        # keyword_search/search_long_term 搜不到 → 用户感觉"记了等于没记"。
-        # 这里兜底同步 status，但反思 skill 仍应优先走 promote_to_rule（≥3 source_cases 门槛）。
-        target_status = status
-        if (
-            "maturity" in fm_updates
-            and fm_updates["maturity"] in _MATURITY_TERMINALS
-            and status == "inbox"
-        ):
-            self.store.move(mem_id, type_, from_status="inbox", to_status="confirmed")
-            target_status = "confirmed"
-
-        self.store.write(new_entry, status=target_status)
-        path = entry_path(self.store.data_root, target_status, type_, mem_id)
-        self.index.upsert(new_entry, path=path, status=target_status)
+        self.store.write(new_entry, status=status)
+        path = entry_path(self.store.data_root, status, type_, mem_id)
+        self.index.upsert(new_entry, path=path, status=status)
         return {"id": mem_id, "version": new_fm.version, "status": "ok"}
 
     async def get_entry_version(self, params: dict) -> dict:
@@ -298,7 +283,7 @@ class LongTermV2Rpc:
         只传 type/brief/content/tags 就能落盘。
 
         实体信号默认抬：fact 类型 + 有具名实体信号（entities 非空 OR tags 数量 ≥ 2）
-        → entity_priority 升到 0.7、content_confidence 升到 4，让 memory-curate 的
+        → entity_priority 升到 0.7、content_confidence 升到 4，让每日反思的
         "项目实体单独通道"（entity_priority>=0.7 AND tags>=2 AND confidence>=3）能命中。
 
         boost 的边界：
@@ -345,6 +330,89 @@ class LongTermV2Rpc:
         capture_params["maturity"] = params.get("maturity")  # default_maturity_fresh 兜底
         return await self.write_long_term(capture_params)
 
+    async def promote_inbox_entry(self, params: dict) -> dict:
+        """Perform the only normal inbox -> confirmed lifecycle transition."""
+        mem_id = params["id"]
+        loc = self.index.locate(mem_id)
+        if not loc:
+            return {"error": "not found"}
+        status, type_, _ = loc
+        if status == "confirmed":
+            return {"id": mem_id, "status": "ok"}
+        if status != "inbox":
+            return {"error": "INVALID_STATE"}
+        entry = self.store.read("inbox", type_, mem_id)
+        move_entry(
+            self.store, self.index, entry,
+            from_status="inbox", to_status="confirmed",
+            now_iso=params.get("now_iso") or utc_now_iso_z(),
+        )
+        return {"id": mem_id, "status": "ok"}
+
+    @staticmethod
+    def _historical_inbox_selection(cutoff: str | None) -> dict:
+        return {"legacy_only": True, **({"cutoff": cutoff} if cutoff else {})}
+
+    async def preview_historical_inbox(self, params: dict) -> dict:
+        """Read-only summary for Admin's explicitly confirmed legacy inbox cleanup."""
+        cutoff = params.get("cutoff")
+        now_iso = params.get("now_iso") or utc_now_iso_z()
+        now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+        by_type = {"fact": 0, "lesson": 0, "concept": 0}
+        by_age = {
+            "within_30_days": 0,
+            "days_31_to_90": 0,
+            "days_91_to_365": 0,
+            "over_365_days": 0,
+        }
+        rows = self.index.list_historical_inbox(cutoff=cutoff, limit=None)
+        for row in rows:
+            by_type[row["type"]] += 1
+            try:
+                age_days = (now - datetime.fromisoformat(row["ingestion_time"].replace("Z", "+00:00"))).days
+            except (TypeError, ValueError):
+                age_days = 366
+            if age_days <= 30:
+                by_age["within_30_days"] += 1
+            elif age_days <= 90:
+                by_age["days_31_to_90"] += 1
+            elif age_days <= 365:
+                by_age["days_91_to_365"] += 1
+            else:
+                by_age["over_365_days"] += 1
+        return {
+            "selection": self._historical_inbox_selection(cutoff),
+            "estimated_move_count": len(rows),
+            "by_type": by_type,
+            "by_age": by_age,
+        }
+
+    async def migrate_historical_inbox_batch(self, params: dict) -> dict:
+        """Move at most 200 explicitly confirmed legacy inbox entries into trash."""
+        if params.get("confirmed") is not True:
+            return {"error": "CONFIRMATION_REQUIRED"}
+        cutoff = params.get("cutoff")
+        now_iso = params.get("now_iso") or utc_now_iso_z()
+        failed: list[dict] = []
+        moved = 0
+        for row in self.index.list_historical_inbox(cutoff=cutoff, limit=200):
+            try:
+                entry = self.store.read("inbox", row["type"], row["id"])
+                move_entry(
+                    self.store, self.index, entry,
+                    from_status="inbox", to_status="trash", now_iso=now_iso,
+                )
+                moved += 1
+            except Exception as exc:
+                failed.append({"id": row["id"], "reason": str(exc)})
+        return {
+            "selection": self._historical_inbox_selection(cutoff),
+            "batch_size": 200,
+            "moved": moved,
+            "remaining": self.index.count_historical_inbox(cutoff=cutoff),
+            "failed": failed,
+        }
+
     async def get_memory_graph(self, params: dict) -> dict:
         """聚合长期记忆图：节点（条目 + 实体）+ 边（link/membership/source_case/invalidated/version）。"""
         status = params.get("status", "confirmed")
@@ -385,7 +453,7 @@ class LongTermV2Rpc:
         return run_maintenance_sync(self.store, self.index, params)
 
     async def trigger_consolidation(self, params: dict) -> dict:
-        """兜底接口；正常路径由 Admin schedule 触发反思 skill。"""
+        """兜底接口；正常路径由 Admin schedule 唤醒 Manager 每日反思。"""
         return {"status": "deferred_to_schedule", "mode": params.get("mode", "deep")}
 
     async def get_evolution_mode(self, params: dict) -> dict:
@@ -397,7 +465,7 @@ class LongTermV2Rpc:
     async def promote_to_rule(self, params: dict) -> dict:
         """Case→Rule 自动晋升 RPC（spec §6.4 / §10.1）。
 
-        反思 SKILL 在凑齐 ≥3 条同 scenario case 后调本接口，把 LLM 抽象出的
+        Manager 在凑齐 ≥3 条同 scenario case 后调本接口，把 LLM 抽象出的
         rule 文本直接写入 confirmed/lesson/，maturity=rule，进 7 天观察期。
         无人工 confirm 步骤（v2-ui spec §12.1 修订）。
 
@@ -606,10 +674,12 @@ class LongTermV2Rpc:
         type_ = loc["type"] if hasattr(loc, "keys") else loc[1]
         if status != "trash":
             return {"error": "not in trash"}
-        self.store.restore_from_trash(type_, mem_id)
-        new_path = entry_path(self.store.data_root, "inbox", type_, mem_id)
-        entry = self.store.read("inbox", type_, mem_id)
-        self.index.upsert(entry, path=new_path, status="inbox")
+        entry = self.store.read("trash", type_, mem_id)
+        move_entry(
+            self.store, self.index, entry,
+            from_status="trash", to_status="inbox",
+            now_iso=params.get("now_iso") or utc_now_iso_z(),
+        )
         return {"id": mem_id, "status": "ok"}
 
     async def import_long_term(self, params: dict) -> dict:

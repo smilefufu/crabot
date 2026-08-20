@@ -181,6 +181,21 @@ describe('trigger_schedule memory_maintenance system task', () => {
     expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
   })
 
+  it('rejects retired memory_curate schedules without rewriting their task semantics', async () => {
+    const fixture = buildAgent(() => Promise.resolve())
+
+    await expect(fixture.agent.handleTriggerSchedule({
+      schedule_id: 'schedule-user-curate',
+      task_type: 'memory_curate',
+      title: '用户自建记忆整理',
+      description: 'legacy schedule',
+      is_builtin: false,
+    })).rejects.toThrow('memory_curate 已退役，请使用每日反思')
+
+    expect(fixture.routeSchedule).not.toHaveBeenCalled()
+    expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
+  })
+
   it('keeps ordinary schedules on the fire-and-forget manager route', async () => {
     const fixture = buildAgent(() => Promise.resolve())
     fixture.routeSchedule.mockImplementation(() => new Promise<never>(() => {}))

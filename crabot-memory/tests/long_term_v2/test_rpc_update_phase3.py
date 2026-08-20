@@ -160,36 +160,32 @@ def _seed_inbox(tmp_path, *, type_, maturity):
 
 
 @pytest.mark.asyncio
-async def test_status_auto_sync_lesson_case_to_rule(tmp_path):
-    """patch maturity=rule 应同步把 inbox/lesson/m1 迁到 confirmed/lesson/m1。
-
-    修历史 bug：反思 LLM 用 update_long_term({maturity:'rule'}) 绕过 promote_to_rule，
-    导致 maturity=rule 卡在 inbox（默认 keyword_search 搜不到）。
-    """
+async def test_update_maturity_does_not_promote_inbox_entry(tmp_path):
+    """update_long_term 不能替代 promote_inbox_entry 改变状态。"""
     import os
     rpc, store, index = _seed_inbox(tmp_path, type_="lesson", maturity="case")
 
     out = await rpc.update_long_term({"id": "m1", "patch": {"maturity": "rule"}})
     assert out["status"] == "ok"
 
-    # index 应升到 confirmed
+    # index 必须仍为 inbox；正常晋升只能走 promote_inbox_entry。
     loc = index.locate("m1")
-    assert loc[0] == "confirmed", f"expected status=confirmed, got {loc[0]}"
+    assert loc[0] == "inbox", f"expected status=inbox, got {loc[0]}"
 
     # 文件落 confirmed/lesson/，inbox/lesson/ 应已无
     confirmed_path = entry_path(store.data_root, "confirmed", "lesson", "m1")
     inbox_path = entry_path(store.data_root, "inbox", "lesson", "m1")
-    assert os.path.exists(confirmed_path), "新版本未落到 confirmed/"
-    assert not os.path.exists(inbox_path), "inbox/ 旧文件未被 move 清掉"
+    assert not os.path.exists(confirmed_path)
+    assert os.path.exists(inbox_path)
 
     # 内容里 maturity 也应该是 rule
-    entry = store.read("confirmed", "lesson", "m1")
+    entry = store.read("inbox", "lesson", "m1")
     assert entry.frontmatter.maturity == "rule"
 
 
 @pytest.mark.asyncio
-async def test_status_auto_sync_fact_observed_to_confirmed(tmp_path):
-    """fact: patch maturity=confirmed 时 inbox 同步升 confirmed。"""
+async def test_update_maturity_does_not_promote_fact_inbox_entry(tmp_path):
+    """fact 的 maturity patch 也不能隐式改变 inbox 状态。"""
     import os
     rpc, store, index = _seed_inbox(tmp_path, type_="fact", maturity="observed")
 
@@ -197,9 +193,9 @@ async def test_status_auto_sync_fact_observed_to_confirmed(tmp_path):
     assert out["status"] == "ok"
 
     loc = index.locate("m1")
-    assert loc[0] == "confirmed"
-    assert os.path.exists(entry_path(store.data_root, "confirmed", "fact", "m1"))
-    assert not os.path.exists(entry_path(store.data_root, "inbox", "fact", "m1"))
+    assert loc[0] == "inbox"
+    assert not os.path.exists(entry_path(store.data_root, "confirmed", "fact", "m1"))
+    assert os.path.exists(entry_path(store.data_root, "inbox", "fact", "m1"))
 
 
 @pytest.mark.asyncio

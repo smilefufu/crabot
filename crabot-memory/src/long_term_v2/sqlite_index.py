@@ -49,6 +49,8 @@ CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_id);
 """
 
 _PHASE3_ADDITIVE_COLUMNS = [
+    ("inbox_entered_at", "TEXT"),
+    ("trashed_at", "TEXT"),
     ("observation_started_at", "TEXT"),
     ("observation_window_days", "INTEGER"),
     ("observation_outcome", "TEXT"),
@@ -120,14 +122,14 @@ class SqliteIndex:
         cur.execute(
             """
             INSERT OR REPLACE INTO memories
-              (id, status, type, brief, body, event_time, ingestion_time, path,
+              (id, status, type, brief, body, event_time, ingestion_time, inbox_entered_at, trashed_at, path,
                observation_started_at, observation_window_days, observation_outcome,
                use_count, last_validated_at, stale_check_count, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 fm.id, status, fm.type, fm.brief, entry.body,
-                fm.event_time, fm.ingestion_time, path,
+                fm.event_time, fm.ingestion_time, fm.inbox_entered_at, fm.trashed_at, path,
                 observation_started_at, observation_window_days, observation_outcome,
                 use_count, last_validated_at, stale_check_count, last_seen_at,
             ),
@@ -157,14 +159,30 @@ class SqliteIndex:
         cur.execute("DELETE FROM links WHERE source_id = ? OR target_id = ?", (mem_id, mem_id))
         self.conn.commit()
 
-    def find_by_entity(self, entity_id: str) -> List[str]:
+    def find_by_entity(self, entity_id: str, *, status: str | None = None) -> List[str]:
         cur = self.conn.cursor()
-        cur.execute("SELECT memory_id FROM entity_index WHERE entity_id = ?", (entity_id,))
+        if status is None:
+            cur.execute("SELECT memory_id FROM entity_index WHERE entity_id = ?", (entity_id,))
+        else:
+            cur.execute(
+                "SELECT e.memory_id FROM entity_index e "
+                "JOIN memories m ON m.id = e.memory_id "
+                "WHERE e.entity_id = ? AND m.status = ?",
+                (entity_id, status),
+            )
         return [row[0] for row in cur.fetchall()]
 
-    def find_by_tag(self, tag: str) -> List[str]:
+    def find_by_tag(self, tag: str, *, status: str | None = None) -> List[str]:
         cur = self.conn.cursor()
-        cur.execute("SELECT memory_id FROM tag_index WHERE tag = ?", (tag,))
+        if status is None:
+            cur.execute("SELECT memory_id FROM tag_index WHERE tag = ?", (tag,))
+        else:
+            cur.execute(
+                "SELECT t.memory_id FROM tag_index t "
+                "JOIN memories m ON m.id = t.memory_id "
+                "WHERE t.tag = ? AND m.status = ?",
+                (tag, status),
+            )
         return [row[0] for row in cur.fetchall()]
 
     def find_links_from(self, source_id: str) -> list[dict]:
@@ -209,9 +227,15 @@ class SqliteIndex:
                 "tags": tags_concat.split("\x1f") if tags_concat else [],
             }
 
-    def iter_brief_for_bm25(self) -> Iterator[Tuple[str, str, str, str, str]]:
+    def iter_brief_for_bm25(self, *, status: str | None = None) -> Iterator[Tuple[str, str, str, str, str]]:
         cur = self.conn.cursor()
-        cur.execute("SELECT id, status, type, body, brief FROM memories")
+        if status is None:
+            cur.execute("SELECT id, status, type, body, brief FROM memories")
+        else:
+            cur.execute(
+                "SELECT id, status, type, body, brief FROM memories WHERE status = ?",
+                (status,),
+            )
         for row in cur.fetchall():
             yield row
 
@@ -231,19 +255,25 @@ class SqliteIndex:
         return row if row else None
 
     def find_by_time_range(
-        self, field: str, start: str, end: str, limit: int = 50,
+        self, field: str, start: str, end: str, limit: int = 50, *, status: str | None = None,
     ) -> list[str]:
         """Return memory_ids whose `event_time` or `ingestion_time` ∈ [start, end).
         """
         if field not in {"event_time", "ingestion_time"}:
             raise ValueError(f"invalid field: {field}")
         cur = self.conn.cursor()
+        clauses = [
+            f"iso_to_epoch_us({field}) >= iso_to_epoch_us(?)",
+            f"iso_to_epoch_us({field}) < iso_to_epoch_us(?)",
+        ]
+        params: list = [start, end]
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
         cur.execute(
-            f"SELECT id FROM memories "
-            f"WHERE iso_to_epoch_us({field}) >= iso_to_epoch_us(?) "
-            f"AND iso_to_epoch_us({field}) < iso_to_epoch_us(?) "
+            f"SELECT id FROM memories WHERE {' AND '.join(clauses)} "
             f"ORDER BY iso_to_epoch_us({field}) DESC LIMIT ?",
-            (start, end, int(limit)),
+            (*params, int(limit)),
         )
         return [row[0] for row in cur.fetchall()]
 
@@ -374,9 +404,10 @@ class SqliteIndex:
         return out
 
     def scan_old_trash(self, retention_days: int, now_iso: str) -> list[dict]:
-        """Return trash entries older than retention_days (by ingestion_time)."""
+        """Return expired trash by trashed_at, with ingestion_time only for legacy rows."""
         cur = self.conn.execute(
-            "SELECT id, type, status, brief, path, ingestion_time FROM memories WHERE status = 'trash'"
+            "SELECT id, type, status, brief, path, ingestion_time, trashed_at "
+            "FROM memories WHERE status = 'trash'"
         )
         rows = [dict(r) for r in cur.fetchall()]
         now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
@@ -384,12 +415,59 @@ class SqliteIndex:
         out = []
         for r in rows:
             try:
-                ref_dt = datetime.fromisoformat(r["ingestion_time"].replace("Z", "+00:00"))
+                ref_iso = r["trashed_at"] or r["ingestion_time"]
+                ref_dt = datetime.fromisoformat(ref_iso.replace("Z", "+00:00"))
                 if ref_dt < cutoff:
                     out.append(r)
             except Exception:
                 pass
         return out
+
+    def scan_expired_inbox(self, max_age_hours: int, now_iso: str) -> list[dict]:
+        """Return only new-format inbox rows past their lifecycle deadline."""
+        rows = [dict(r) for r in self.conn.execute(
+            "SELECT id, type, status, inbox_entered_at FROM memories "
+            "WHERE status = 'inbox' AND inbox_entered_at IS NOT NULL"
+        ).fetchall()]
+        now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+        cutoff = now_dt - timedelta(hours=max_age_hours)
+        out = []
+        for row in rows:
+            try:
+                entered = datetime.fromisoformat(row["inbox_entered_at"].replace("Z", "+00:00"))
+                if entered < cutoff:
+                    out.append(row)
+            except Exception:
+                continue
+        return out
+
+    def _historical_inbox_clause(self, cutoff: str | None) -> tuple[list[str], list[object]]:
+        clauses = ["status = 'inbox'", "inbox_entered_at IS NULL"]
+        params: list[object] = []
+        if cutoff:
+            clauses.append("iso_to_epoch_us(ingestion_time) <= iso_to_epoch_us(?)")
+            params.append(cutoff)
+        return clauses, params
+
+    def list_historical_inbox(self, *, cutoff: str | None = None, limit: int | None = 200) -> list[dict]:
+        """Return legacy inbox rows eligible for the one-time Admin migration."""
+        clauses, params = self._historical_inbox_clause(cutoff)
+        limit_sql = "" if limit is None else " LIMIT ?"
+        if limit is not None:
+            params.append(int(limit))
+        cur = self.conn.execute(
+            "SELECT id, type, ingestion_time FROM memories WHERE " + " AND ".join(clauses)
+            + " ORDER BY iso_to_epoch_us(ingestion_time) ASC, id ASC" + limit_sql,
+            params,
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def count_historical_inbox(self, *, cutoff: str | None = None) -> int:
+        clauses, params = self._historical_inbox_clause(cutoff)
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE " + " AND ".join(clauses), params,
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     def get_evolution_mode(self) -> tuple[str, str | None, str | None]:
         cur = self.conn.execute(

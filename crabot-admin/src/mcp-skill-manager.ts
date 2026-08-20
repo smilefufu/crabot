@@ -1627,7 +1627,7 @@ export class SkillManager {
    * 在 Admin 初始化时调用，扫描 builtinsDir 下的子目录，每个子目录应包含 SKILL.md
    *
    * 返回本次扫到的可用 builtin skill 数量。扫不到任何一个是异常状态（历史上
-   * release 包漏打 SKILL.md 导致 memory-curate 等全部缺失且无声无息），必须报错。
+   * release 包漏打 SKILL.md 导致内置能力全部缺失且无声无息），必须报错。
    */
   private async registerBuiltinsUnlocked(builtinsDir: string): Promise<number> {
     let dirEntries: import('fs').Dirent[]

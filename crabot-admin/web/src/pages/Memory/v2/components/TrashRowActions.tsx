@@ -2,7 +2,7 @@ import React from 'react'
 import { Tooltip } from '../../../../components/Common/Tooltip'
 
 export interface TrashRowActionsProps {
-  ingestionTime: string
+  trashedAt: string
   retentionDays?: number
   now?: () => Date
   onRestore: () => void | Promise<void>
@@ -11,17 +11,17 @@ export interface TrashRowActionsProps {
 const DEFAULT_RETENTION_DAYS = 30
 const DAY_MS = 24 * 60 * 60 * 1000
 
-function isExpired(ingestionTime: string, retentionDays: number, now: Date): boolean {
-  const ingestion = new Date(ingestionTime).getTime()
-  if (Number.isNaN(ingestion)) return true
-  const ageMs = now.getTime() - ingestion
+function isExpired(trashedAt: string, retentionDays: number, now: Date): boolean {
+  const trashed = new Date(trashedAt).getTime()
+  if (Number.isNaN(trashed)) return true
+  const ageMs = now.getTime() - trashed
   return ageMs >= retentionDays * DAY_MS
 }
 
 export const TrashRowActions: React.FC<TrashRowActionsProps> = ({
-  ingestionTime, retentionDays = DEFAULT_RETENTION_DAYS, now, onRestore,
+  trashedAt, retentionDays = DEFAULT_RETENTION_DAYS, now, onRestore,
 }) => {
-  const expired = isExpired(ingestionTime, retentionDays, now ? now() : new Date())
+  const expired = isExpired(trashedAt, retentionDays, now ? now() : new Date())
   const tooltip = expired
     ? `已过 ${retentionDays} 天保留期，无法恢复（spec §6.5）`
     : `恢复到 inbox`

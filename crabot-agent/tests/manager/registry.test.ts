@@ -411,6 +411,34 @@ describe('ManagerRegistry', () => {
     expect(state.recent.length).toBeGreaterThan(0)
   })
 
+  it('routeWorkerEvent: 把稳定 task_id 与 trigger_type 写入 Manager 实际收到的事件', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ text: '记录完成事件', stopReason: 'end_turn' })
+    const owningKey = 'wechat::memory-owner' as ManagerKey
+    const baseWorker = makeLedgerWorker('w-memory', owningKey)
+    const worker = { ...baseWorker, task: { ...baseWorker.task, id: 'task-memory' } }
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      ledger: fakeLedger({ 'w-memory': worker }),
+    }))
+
+    await registry.routeWorkerEvent({
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'state_changed',
+      worker_id: 'w-memory',
+      seq: 7,
+      task_status: 'completed',
+      detail: { to: 'exited', summary: '明确结论' },
+    })
+
+    const rendered = calls[0].messages.map((message) =>
+      typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+    ).join('\n')
+    expect(rendered).toContain('"trigger_type":"message"')
+    expect(rendered).toContain('"task_id":"task-memory"')
+    expect(rendered).toContain('"outcome":"completed"')
+  })
+
   it('routeWorkerEvent: 台账查不到该 worker 时落系统线程', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ text: '未知 worker 的事件', stopReason: 'end_turn' })

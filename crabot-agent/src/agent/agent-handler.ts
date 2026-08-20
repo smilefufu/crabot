@@ -1522,8 +1522,7 @@ export class AgentHandler {
             moduleId: this.deps.moduleId,
             getMemoryPort: this.deps.getMemoryPort,
           }, memoryTaskCtx)
-          // 按任务用途分组注册：daily_reflection / memory_curate / tags 含 memory_rebuild
-          // → 全量 18 个；其他任务 → 仅 A 组 6 个（普通对话不需要反思级精细工具）。
+          // 仅显式兼容 memory_rebuild Worker 取得 B 组；每日反思由 Manager 直接写 memory。
           const memoryProfile = resolveMemoryToolProfile({
             taskType: task.task_type,
             tags: task.tags,
@@ -3140,20 +3139,6 @@ export class AgentHandler {
       log(`finalizeMemoryWrite: writeTaskFinished failed: ${err instanceof Error ? err.message : String(err)}`)
     })
 
-    this.memoryWriter.quickCapture({
-      type: 'lesson',
-      brief: `${taskTitle} → ${reflection.outcome_brief}`.slice(0, 80),
-      content: `任务 ${taskId}（${taskTitle}）完成：${reflection.outcome_brief}`,
-      source_ref: { type: 'conversation', task_id: taskId, channel_id: channelId, session_id: sessionId },
-      entities: [],
-      tags: [`task_outcome:${reflection.outcome}`],
-      importance_factors: {
-        proximity: 0.6,
-        surprisal: 0.4,
-        entity_priority: 0.5,
-        unambiguity: 0.6,
-      },
-    }).catch(() => undefined)
   }
 
   /**

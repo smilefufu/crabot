@@ -66,7 +66,7 @@ export const EntryListTable: React.FC<EntryListTableProps> = ({
           <HeaderButton column="confidence" label="置信度" sort={sort} onSortChange={onSortChange} />
         </th>
         <th>
-          <HeaderButton column="ingestion_time" label="入库时间" sort={sort} onSortChange={onSortChange} />
+          <HeaderButton column="ingestion_time" label={trashMode ? '移入回收站' : '入库时间'} sort={sort} onSortChange={onSortChange} />
         </th>
         {trashMode && <th>操作</th>}
       </tr>
@@ -77,7 +77,7 @@ export const EntryListTable: React.FC<EntryListTableProps> = ({
         const author = fm?.author ?? '-'
         const tags = fm?.tags?.join(' ') ?? ''
         const conf = fm ? `${fm.source_trust}/${fm.content_confidence}` : '-'
-        const updated = formatTime(fm?.ingestion_time)
+        const updated = formatTime(trashMode ? fm?.trashed_at ?? fm?.ingestion_time : fm?.ingestion_time)
         return (
           <tr key={entry.id} onClick={() => onRowClick(entry.id)}>
             <td className="mem-table__checkbox" onClick={e => e.stopPropagation()}>
@@ -96,7 +96,7 @@ export const EntryListTable: React.FC<EntryListTableProps> = ({
             {trashMode && (
               <td onClick={e => e.stopPropagation()}>
                 <TrashRowActions
-                  ingestionTime={fm?.ingestion_time ?? new Date().toISOString()}
+                  trashedAt={fm?.trashed_at ?? fm?.ingestion_time ?? new Date().toISOString()}
                   onRestore={() => onTrashRestore?.(entry.id)}
                 />
               </td>
