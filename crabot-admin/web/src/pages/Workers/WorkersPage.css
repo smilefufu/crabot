@@ -1,0 +1,330 @@
+.worker-config {
+  max-width: 1120px;
+}
+
+.worker-config__heading {
+  align-items: flex-end;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+  margin-bottom: 22px;
+}
+
+.worker-config__heading h1 {
+  font-size: 22px;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.worker-config__summary {
+  align-items: stretch;
+  border: 1px solid var(--border-highlight);
+  display: flex;
+  margin: 0;
+}
+
+.worker-config__summary div {
+  min-width: 108px;
+  padding: 7px 11px 8px;
+}
+
+.worker-config__summary div + div {
+  border-left: 1px solid var(--border-highlight);
+}
+
+.worker-config__summary dt,
+.worker-implementation__facts dt {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.worker-config__summary dd,
+.worker-implementation__facts dd {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.worker-config__summary dd {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.worker-config__message {
+  border-left: 2px solid;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 14px;
+  padding: 8px 10px;
+}
+
+.worker-config__message.is-error {
+  background: var(--error-glow);
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.worker-config__message.is-success {
+  background: var(--success-glow);
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.worker-config__list {
+  border-top: 1px solid var(--border-highlight);
+}
+
+.worker-config__columns,
+.worker-implementation {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.35fr) minmax(110px, 0.9fr) minmax(116px, 0.95fr) minmax(92px, 0.72fr) minmax(255px, 1.7fr);
+}
+
+.worker-config__columns {
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 0 12px 8px;
+}
+
+.worker-config__columns span:first-child,
+.worker-implementation__identity {
+  padding-left: 0;
+}
+
+.worker-implementation {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  column-gap: 12px;
+  min-height: 92px;
+  padding: 13px 12px;
+  position: relative;
+  transition: background-color var(--motion-fast);
+}
+
+.worker-implementation:hover {
+  background: var(--primary-subtle);
+}
+
+.worker-implementation.is-default::before {
+  background: var(--primary);
+  bottom: 0;
+  content: '';
+  left: 0;
+  position: absolute;
+  top: 0;
+  width: 2px;
+}
+
+.worker-implementation__identity {
+  min-width: 0;
+}
+
+.worker-implementation__identity h2 {
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 0 0 6px;
+}
+
+.worker-state {
+  align-items: center;
+  display: inline-flex;
+  font-size: 11px;
+  gap: 5px;
+}
+
+.worker-state::before {
+  background: currentColor;
+  border-radius: 50%;
+  content: '';
+  height: 5px;
+  width: 5px;
+}
+
+.worker-state--ready { color: var(--success); }
+.worker-state--attention { color: var(--warning); }
+.worker-state--blocked { color: var(--error); }
+.worker-state--inactive,
+.worker-state--unknown { color: var(--text-muted); }
+
+.worker-implementation__facts {
+  display: grid;
+  gap: 12px;
+  grid-column: 2 / 5;
+  grid-template-columns: minmax(110px, 0.9fr) minmax(116px, 0.95fr) minmax(92px, 0.72fr);
+  margin: 0;
+}
+
+.worker-implementation__facts div {
+  min-width: 0;
+}
+
+.worker-implementation__actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  justify-content: flex-start;
+}
+
+.worker-choice {
+  align-items: center;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  min-height: 28px;
+  white-space: nowrap;
+}
+
+.worker-choice input:disabled + span {
+  opacity: 0.48;
+}
+
+.worker-implementation__notice,
+.worker-implementation__preference {
+  grid-column: 2 / -1;
+}
+
+.worker-implementation__notice {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  margin: -5px 0 2px;
+}
+
+.worker-implementation__notice.is-danger {
+  color: var(--error);
+}
+
+.worker-implementation__preference .form-group {
+  margin: 0;
+}
+
+.worker-implementation__preference-field {
+  align-items: flex-end;
+  display: flex;
+  gap: 8px;
+}
+
+.worker-implementation__preference-field .form-group {
+  flex: 1;
+}
+
+.worker-implementation__preference .form-label {
+  font-size: 10px;
+  margin-bottom: 4px;
+}
+
+.worker-implementation__preference .input {
+  font-size: 12px;
+  padding: 6px 9px;
+}
+
+.worker-config__dialog-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.worker-config__dialog-fields .form-group {
+  margin: 0;
+}
+
+.worker-config__host-note {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.worker-config__verify-note {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .worker-config__columns {
+    display: none;
+  }
+
+  .worker-implementation {
+    align-items: start;
+    grid-template-columns: minmax(0, 1fr) minmax(190px, 1fr);
+    padding: 16px 0;
+  }
+
+  .worker-implementation__facts {
+    gap: 10px 14px;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .worker-implementation__actions {
+    justify-content: flex-end;
+  }
+
+  .worker-implementation__notice,
+  .worker-implementation__preference {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 620px) {
+  .worker-config__heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 13px;
+    margin-bottom: 18px;
+  }
+
+  .worker-config__summary {
+    width: 100%;
+  }
+
+  .worker-config__summary div {
+    flex: 1;
+  }
+
+  .worker-implementation {
+    gap: 14px;
+    grid-template-columns: 1fr;
+  }
+
+  .worker-implementation__actions {
+    grid-row: 2;
+    justify-content: flex-start;
+  }
+
+  .worker-implementation__facts {
+    grid-row: 3;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .worker-implementation__facts div:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .worker-implementation__notice,
+  .worker-implementation__preference {
+    grid-column: 1;
+  }
+
+  .worker-implementation__preference-field {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .worker-implementation__preference-field .btn {
+    align-self: flex-start;
+  }
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { WorkersPage } from './index'
 import { workerManagementService } from '../../services/worker-management'
 
@@ -12,6 +12,9 @@ vi.mock('../../services/worker-management', () => ({
 }))
 vi.mock('../../services/provider', () => ({
   providerService: { createProvider: vi.fn(async () => ({ id: 'prov-1' })) },
+}))
+vi.mock('../../components/Layout/MainLayout', () => ({
+  MainLayout: ({ children }: { children: import('react').ReactNode }) => <>{children}</>,
 }))
 
 const svc = workerManagementService as unknown as {
@@ -44,13 +47,14 @@ const readyStatus = {
 describe('WorkersPage（P6-B §13）', () => {
   beforeEach(() => { vi.clearAllMocks() })
 
-  it('渲染三张卡片并展示 registry 状态', async () => {
+  it('以状态表展示固定实现和 activation registry 状态', async () => {
     svc.getAll.mockResolvedValue(mergedResult(baseConfig, [readyStatus]))
     render(<WorkersPage />)
     await waitFor(() => screen.getByText('Claude Code'))
-    expect(screen.getByText('Builtin（内置）')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Worker 配置', level: 1 })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '内置执行器', level: 2 })).toBeTruthy()
     expect(screen.getByText('Codex')).toBeTruthy()
-    expect(screen.getByText('● ready')).toBeTruthy()
+    expect(screen.getAllByText('已停用')).toHaveLength(2)
   })
 
   it('配置连接对话框：claude-code 有 setup-token 选项，codex 没有', async () => {
@@ -59,12 +63,12 @@ describe('WorkersPage（P6-B §13）', () => {
     await waitFor(() => screen.getByText('Claude Code'))
     const buttons = screen.getAllByText('配置连接')
     fireEvent.click(buttons[0]) // claude-code
-    await waitFor(() => screen.getByText('粘贴 setup-token（Claude 订阅签发）'))
+    await waitFor(() => screen.getByText('粘贴 Setup Token'))
     fireEvent.click(screen.getByText('取消'))
     await waitFor(() => screen.getByText('Codex'))
     fireEvent.click(screen.getAllByText('配置连接')[1]) // codex
-    await waitFor(() => screen.getByText('自定义 BASE_URL + KEY'))
-    expect(screen.queryByText('粘贴 setup-token（Claude 订阅签发）')).toBeNull()
+    await waitFor(() => screen.getByText('自定义服务地址与密钥'))
+    expect(screen.queryByText('粘贴 Setup Token')).toBeNull()
   })
 
   it('选择 existing_host 保存 → PUT enabled + existing_host connection', async () => {
@@ -82,7 +86,7 @@ describe('WorkersPage（P6-B §13）', () => {
     expect(cfg.default_impl).toBe('builtin')
   })
 
-  it('verify 需要确认才发起', async () => {
+  it('已启用实现的验证在站内确认后才发起', async () => {
     const enabled = {
       ...baseConfig,
       implementations: {
@@ -91,12 +95,70 @@ describe('WorkersPage（P6-B §13）', () => {
       },
     }
     svc.getAll.mockResolvedValue(mergedResult(enabled, []))
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    svc.startVerify.mockResolvedValue({ passed: true })
     render(<WorkersPage />)
-    await waitFor(() => screen.getByText('验证'))
-    fireEvent.click(screen.getByText('验证'))
-    expect(confirmSpy).toHaveBeenCalled()
+    await waitFor(() => screen.getByRole('button', { name: '验证' }))
+    fireEvent.click(screen.getByRole('button', { name: '验证' }))
+    expect(screen.getByText(/可能消耗额度或产生费用/)).toBeTruthy()
     expect(svc.startVerify).not.toHaveBeenCalled()
-    confirmSpy.mockRestore()
+    fireEvent.click(screen.getByText('开始验证'))
+    await waitFor(() => expect(svc.startVerify).toHaveBeenCalledWith('codex', 1))
+  })
+
+  it('未验证的 ready 实现仍标记为可派用', async () => {
+    const enabled = {
+      ...baseConfig,
+      implementations: {
+        ...baseConfig.implementations,
+        codex: { enabled: true, connection: { mode: 'existing_host' as const } },
+      },
+    }
+    svc.getAll.mockResolvedValue(mergedResult(enabled, [{
+      ...readyStatus,
+      impl: 'codex',
+      verification: 'never',
+      ready: true,
+    }]))
+    render(<WorkersPage />)
+    await waitFor(() => screen.getByText('Codex'))
+    const codexRow = screen.getByRole('heading', { name: 'Codex', level: 2 }).closest('article')
+    expect(codexRow).not.toBeNull()
+    expect(within(codexRow!).getByText('可派用')).toBeTruthy()
+    expect(within(codexRow!).getByText('未验证')).toBeTruthy()
+  })
+
+  it('派用偏好只在点击保存后提交', async () => {
+    const enabled = {
+      ...baseConfig,
+      implementations: {
+        ...baseConfig.implementations,
+        codex: { enabled: true, connection: { mode: 'existing_host' as const } },
+      },
+    }
+    svc.getAll.mockResolvedValue(mergedResult(enabled, []))
+    svc.putConfig.mockResolvedValue({ ...enabled, revision: 2 })
+    render(<WorkersPage />)
+    await waitFor(() => screen.getByText('Codex'))
+    const preferenceInputs = screen.getAllByLabelText('派用偏好')
+    fireEvent.change(preferenceInputs[1], { target: { value: '优先用于代码审查' } })
+    fireEvent.blur(preferenceInputs[1])
+    expect(svc.putConfig).not.toHaveBeenCalled()
+    fireEvent.click(screen.getAllByRole('button', { name: '保存偏好' })[1])
+    await waitFor(() => expect(svc.putConfig).toHaveBeenCalled())
+    const [, config] = svc.putConfig.mock.calls[0]
+    expect(config.implementations.codex.preference).toBe('优先用于代码审查')
+  })
+
+  it('Agent 不可用时保留期望配置但不伪造状态', async () => {
+    svc.getAll.mockResolvedValue({
+      config: baseConfig,
+      agent_status: 'unavailable' as const,
+      statuses: [],
+      unavailable_reason: 'RPC temporarily unavailable',
+    })
+    render(<WorkersPage />)
+    await waitFor(() => screen.getByRole('alert'))
+    expect(screen.getByRole('alert')).toHaveTextContent('Agent 不可用')
+    expect(screen.getAllByText('状态未知')).toHaveLength(3)
   })
 })

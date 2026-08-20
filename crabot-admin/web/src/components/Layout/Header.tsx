@@ -10,6 +10,7 @@ const PAGE_NAMES: { path: string; name: string }[] = [
   { path: '/modules', name: '模块管理' },
   { path: '/memory', name: '记忆管理' },
   { path: '/dialog-objects', name: '对话对象管理' },
+  { path: '/agents/workers', name: 'Worker 配置' },
   { path: '/agents', name: 'Agent 配置' },
   { path: '/mcp-servers', name: 'MCP Servers' },
   { path: '/skills', name: 'Skills' },
