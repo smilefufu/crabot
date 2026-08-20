@@ -186,11 +186,11 @@ describe('WorkerDetail', () => {
     expect(screen.getByText('已结束：adapter crashed')).toBeInTheDocument()
   })
 
-  it('Claude Code 的工具参数与结果内容使用已归一化 detail', async () => {
+  it('Claude Code 无关联 ID 的工具结果按原生顺序合并到调用', async () => {
     mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
     mocked.getWorkerTrace = vi.fn().mockResolvedValue({
       events: [
-        { ts: '2026-08-01T00:00:01.000Z', kind: 'tool_call', role: 'assistant', summary: 'Read(...)', source: 'native', detail: { name: 'Read', input: { file_path: '/tmp/x.ts' } } },
+        { ts: '2026-08-01T00:00:01.000Z', kind: 'tool_call', role: 'assistant', summary: 'Read(...)', source: 'native', detail: { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: '/tmp/x.ts' } } },
         { ts: '2026-08-01T00:00:02.000Z', kind: 'tool_result', role: 'user', summary: '文件内容摘要', source: 'native', detail: { content: '文件内容摘要' } },
       ],
       next_cursor: 'tok-1',
@@ -199,13 +199,33 @@ describe('WorkerDetail', () => {
     renderDetail()
 
     const toolCall = await screen.findByRole('button', { name: /工具调用：调用 Read.*展开详情/ })
+    expect(toolCall).toHaveAccessibleName(/已返回结果/)
+    expect(screen.queryByRole('button', { name: /工具结果：工具结果/ })).not.toBeInTheDocument()
     fireEvent.click(toolCall)
     expect(screen.getByText('输入 · Read')).toBeInTheDocument()
     expect(screen.getByText(/"file_path": "\/tmp\/x\.ts"/)).toBeInTheDocument()
-    const toolResult = screen.getByRole('button', { name: /工具结果：工具结果.*展开详情/ })
-    fireEvent.click(toolResult)
     expect(screen.getByText('输出')).toBeInTheDocument()
     expect(screen.getByText('文件内容摘要')).toBeInTheDocument()
+  })
+
+  it('指令投递显示 receipt 中已有的受限正文预览', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({
+      events: [{
+        ts: '2026-08-01T00:00:01.000Z',
+        kind: 'lifecycle',
+        summary: 'input_sent delivery_id=delivery-1',
+        source: 'harness',
+        detail: { delivery_id: 'delivery-1', text_preview: '继续核对隔离候选，生产环境保持不动。' },
+      }],
+      next_cursor: 'tok-1',
+    })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
+    renderDetail()
+
+    const delivery = await screen.findByRole('button', { name: /指令投递：继续核对隔离候选，生产环境保持不动。.*展开详情/ })
+    fireEvent.click(delivery)
+    expect(screen.getAllByText('继续核对隔离候选，生产环境保持不动。')).toHaveLength(2)
   })
 
   it('默认选择主线，并把消息、工具与技术事件分开显示', async () => {

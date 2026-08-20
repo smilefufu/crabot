@@ -2418,6 +2418,16 @@ export class WorkerHarness {
     return this.getEventLog(workerId).readAll()
   }
 
+  /**
+   * Trace projection may expose only the receipt's bounded preview, never the
+   * original Manager input retained in the in-memory inbox item.
+   */
+  async getInputDeliveryPreviews(workerId: string): Promise<Map<string, string>> {
+    return new Map(
+      (await this.inputDeliveryStore.list(workerId)).map((receipt) => [receipt.delivery_id, receipt.text_preview]),
+    )
+  }
+
   /** Restart recovery is fail-closed: pending input is never replayed. */
   async reconcileInputDeliveriesOnStartup(): Promise<void> {
     for (const receipt of await this.inputDeliveryStore.listPendingDeliveries()) {

@@ -105,10 +105,14 @@ function callId(event: WorkerTraceEvent): string | undefined {
   const value = detail?.call_id
     ?? detail?.tool_use_id
     ?? detail?.tool_call_id
-    ?? (detail?.type === 'tool_use' ? detail.id : undefined)
+    ?? ((detail?.type === 'tool_use' || detail?.type === 'function_call') ? detail.id : undefined)
   if (typeof value !== 'string' || !value) return undefined
   // Responses API 的内部 tool id 可能编码为 call_id|item_id；结果只带 call_id。
   return value.split('|', 1)[0]
+}
+
+function isUncorrelatedNativeToolCall(event: WorkerTraceEvent): boolean {
+  return event.source === 'native' && asRecord(event.detail)?.type === 'tool_use'
 }
 
 function failureReason(detail: DetailRecord | undefined, fallback: string): string {
@@ -152,7 +156,15 @@ function lifecycleActivity(event: WorkerTraceEvent): ActivityEntry | undefined {
     return { event, label: '任务状态', tone: 'status', body: `已${fromSeq}恢复执行` }
   }
   if (event.summary.startsWith('input_sent')) {
-    return { event, label: '指令投递', tone: 'status', body: '管理会话的补充指令已确认送达' }
+    const preview = typeof detail?.text_preview === 'string' && detail.text_preview.trim()
+      ? detail.text_preview
+      : undefined
+    return {
+      event,
+      label: '指令投递',
+      tone: 'status',
+      body: preview ?? '管理会话的补充指令已确认送达',
+    }
   }
   if (event.summary.startsWith('input_delivery_failed')) {
     return { event, label: '投递失败', tone: 'failure', body: failureReason(detail, event.summary) }
@@ -190,6 +202,7 @@ function projectTimeline(events: WorkerTraceEvent[]): { human: ActivityEntry[]; 
   const human: ActivityEntry[] = []
   const technical: WorkerTraceEvent[] = []
   const calls = new Map<string, ActivityEntry>()
+  const uncorrelatedNativeCalls: ActivityEntry[] = []
 
   for (const event of events) {
     const activity = activityFor(event)
@@ -200,8 +213,16 @@ function projectTimeline(events: WorkerTraceEvent[]): { human: ActivityEntry[]; 
     if (event.kind === 'tool_result') {
       const id = callId(event)
       const pairedCall = id ? calls.get(id) : undefined
-      if (pairedCall) {
-        pairedCall.result = activity.body
+      // Claude Code 的 toolUseResult 不携带 tool_use id。其原生记录严格保持调用/结果顺序，
+      // 因此仅在没有关联 ID 时按未结算的 tool_use FIFO 配对；带 ID 但找不到调用的结果仍单列。
+      const fallbackCall = id === undefined ? uncorrelatedNativeCalls.shift() : undefined
+      const targetCall = pairedCall ?? fallbackCall
+      if (targetCall) {
+        targetCall.result = activity.body
+        if (pairedCall) {
+          const fallbackIndex = uncorrelatedNativeCalls.indexOf(pairedCall)
+          if (fallbackIndex >= 0) uncorrelatedNativeCalls.splice(fallbackIndex, 1)
+        }
         continue
       }
     }
@@ -209,6 +230,7 @@ function projectTimeline(events: WorkerTraceEvent[]): { human: ActivityEntry[]; 
     if (event.kind === 'tool_call') {
       const id = callId(event)
       if (id) calls.set(id, activity)
+      if (isUncorrelatedNativeToolCall(event)) uncorrelatedNativeCalls.push(activity)
     }
   }
   return { human, technical }

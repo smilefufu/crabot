@@ -62,6 +62,8 @@ describe('readCompositeWorkerTrace', () => {
   let cursorStore: TraceCursorStore
   let nativeCopy: NativeTraceCopyStore
   let harnessEvents: HarnessEvent[]
+  let inputDeliveryPreviews: Map<string, string>
+  let inputDeliveryPreviewsShouldThrow: boolean
   let nativeLines: NormalizedTraceEvent[]
   let nativeShouldThrow: string | null
 
@@ -72,7 +74,13 @@ describe('readCompositeWorkerTrace', () => {
   function deps() {
     return {
       ledger: { findWorker: async (id: string) => (id === WORKER_ID ? { managerKey: 'wechat::sess', worker: makeWorker() } : undefined) },
-      harness: { readWorkerEvents: async () => harnessEvents },
+      harness: {
+        readWorkerEvents: async () => harnessEvents,
+        getInputDeliveryPreviews: async () => {
+          if (inputDeliveryPreviewsShouldThrow) throw new Error('receipt file corrupt')
+          return inputDeliveryPreviews
+        },
+      },
       adapters: new Map([
         ['claude-code', {
           readTrace: async (_h: unknown, cursor?: { offset: number }) => {
@@ -94,6 +102,8 @@ describe('readCompositeWorkerTrace', () => {
     cursorStore = new TraceCursorStore(join(dir, 'cursors'))
     nativeCopy = new NativeTraceCopyStore(join(dir, 'copies'))
     harnessEvents = []
+    inputDeliveryPreviews = new Map()
+    inputDeliveryPreviewsShouldThrow = false
     setNative([])
     nativeShouldThrow = null
   })
@@ -140,6 +150,38 @@ describe('readCompositeWorkerTrace', () => {
       'query_completed query_id=query-1 fork_seq=2',
       'query_failed query_id=query-2 fork_seq=3 reason_code=query_execution_failed',
     ])
+  })
+
+  it('input_sent 按 delivery_id 补入受限 receipt 预览', async () => {
+    harnessEvents = [harnessEvent(1, 'input_sent', '2026-08-01T00:00:01.000Z', {
+      delivery_id: 'delivery-1',
+      text_len: 12,
+    })]
+    inputDeliveryPreviews.set('delivery-1', '继续核对候选数据')
+
+    const result = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+
+    expect(result.events).toMatchObject([{
+      kind: 'lifecycle',
+      summary: 'input_sent delivery_id=delivery-1',
+      detail: { delivery_id: 'delivery-1', text_len: 12, text_preview: '继续核对候选数据' },
+    }])
+  })
+
+  it('receipt 预览不可读时仍返回独立的 input_sent 事件', async () => {
+    harnessEvents = [harnessEvent(1, 'input_sent', '2026-08-01T00:00:01.000Z', {
+      delivery_id: 'delivery-1',
+      text_len: 12,
+    })]
+    inputDeliveryPreviewsShouldThrow = true
+
+    const result = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+
+    expect(result.events).toMatchObject([{
+      kind: 'lifecycle',
+      summary: 'input_sent delivery_id=delivery-1',
+      detail: { delivery_id: 'delivery-1', text_len: 12 },
+    }])
   })
 
   it('同一 cursor 重放返回同一逻辑窗口，后续追加不影响', async () => {

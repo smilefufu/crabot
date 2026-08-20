@@ -64,12 +64,20 @@ interface SourcedEvent {
 
 const SOURCE_ORDER: Record<'harness' | 'native' | 'legacy', number> = { harness: 0, native: 1, legacy: 2 }
 
-function normalizeHarnessEvent(event: HarnessEvent): NormalizedTraceEvent {
+function normalizeHarnessEvent(
+  event: HarnessEvent,
+  inputDeliveryPreviews: ReadonlyMap<string, string>,
+): NormalizedTraceEvent {
+  const deliveryId = event.kind === 'input_sent' ? event.detail?.delivery_id : undefined
+  const textPreview = typeof deliveryId === 'string' ? inputDeliveryPreviews.get(deliveryId) : undefined
+  const detail = textPreview === undefined
+    ? event.detail
+    : { ...event.detail, text_preview: textPreview }
   return {
     ts: event.ts,
     kind: 'lifecycle',
     summary: harnessSummary(event),
-    ...(event.detail ? { detail: event.detail } : {}),
+    ...(detail ? { detail } : {}),
     source: 'harness',
   }
 }
@@ -122,6 +130,21 @@ function sortSourcedEvents(events: SourcedEvent[]): SourcedEvent[] {
   })
 }
 
+async function readInputDeliveryPreviews(
+  harness: WorkerHarness,
+  workerId: string,
+  hasInputSent: boolean,
+): Promise<ReadonlyMap<string, string>> {
+  if (!hasInputSent) return new Map()
+  try {
+    return await harness.getInputDeliveryPreviews(workerId)
+  } catch {
+    // Receipt preview is optional trace enrichment. A corrupt receipt file must
+    // not hide the independently readable worker event stream.
+    return new Map()
+  }
+}
+
 /**
  * composite read。化身解析失败抛 WorkerNotFoundError/WorkerHasNoIncarnationError/Error（seq 不存在）；
  * cursor 非法/错化身抛 InvalidTraceCursorError（INVALID_PARAMS，不静默从头）。
@@ -165,11 +188,20 @@ export async function readCompositeWorkerTrace(
   const allHarnessEvents = (await deps.harness.readWorkerEvents(params.worker_id)).filter(
     (event) => event.seq === incarnation.seq,
   )
+  const inputDeliveryPreviews = await readInputDeliveryPreviews(
+    deps.harness,
+    params.worker_id,
+    allHarnessEvents.some((event) => event.kind === 'input_sent'),
+  )
   const harnessLimit = replayBound ? Math.min(replayBound.harness, allHarnessEvents.length) : allHarnessEvents.length
   const harnessEvents: SourcedEvent[] = []
   let harnessEnd = positions.harness
   for (let index = positions.harness; index < harnessLimit; index++) {
-    harnessEvents.push({ event: normalizeHarnessEvent(allHarnessEvents[index]), source: 'harness', sourceOrdinal: index })
+    harnessEvents.push({
+      event: normalizeHarnessEvent(allHarnessEvents[index], inputDeliveryPreviews),
+      source: 'harness',
+      sourceOrdinal: index,
+    })
     harnessEnd = index + 1
   }
   if (replayBound) harnessEnd = replayBound.harness
