@@ -1017,6 +1017,8 @@ export interface LlmCallDetails {
   attempt?: number
   input_summary?: string
   output_summary?: string
+  /** builtin worker 本轮产生的脱敏 assistant text；仅用于 worker trace read model。 */
+  assistant_text?: string
   stop_reason?: string
   tool_calls_count?: number
   full_input?: string

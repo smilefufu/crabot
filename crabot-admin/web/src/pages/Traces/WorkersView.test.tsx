@@ -246,7 +246,7 @@ describe('WorkerDetail', () => {
     renderDetail()
 
     await waitFor(() => expect(screen.getByText('管理会话指令')).toBeInTheDocument())
-    expect(screen.getByText('任务输出')).toBeInTheDocument()
+    expect(screen.getByText('Worker 文本')).toBeInTheDocument()
     const toolRow = screen.getByRole('button', { name: /工具调用：调用 shell · 已返回结果.*展开详情/ })
     expect(toolRow).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText('item_completed')).not.toBeInTheDocument()
@@ -263,6 +263,45 @@ describe('WorkerDetail', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '技术事件 1' }))
     expect(screen.getByText('item_completed')).toBeInTheDocument()
+  })
+
+  it('builtin assistant text 与模型调用分开，纯工具轮不伪造 Worker 文本', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({
+      events: [
+        { ts: '2026-08-01T00:00:01.000Z', kind: 'llm_call', summary: 'llm tool_use', source: 'native', detail: { stop_reason: 'tool_use' } },
+        { ts: '2026-08-01T00:00:02.000Z', kind: 'tool_call', role: 'assistant', summary: 'shell', source: 'native', detail: { name: 'shell', arguments: 'pwd' } },
+      ],
+      next_cursor: 'tok-1',
+    })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
+
+    renderDetail()
+
+    await screen.findByRole('button', { name: /工具调用：调用 shell.*展开详情/ })
+    expect(screen.queryByText('Worker 文本')).not.toBeInTheDocument()
+    expect(screen.queryByText('任务输出')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '技术事件 1' }))
+    expect(await screen.findByRole('button', { name: /原生记录 · 模型调用：llm tool_use/ })).toBeInTheDocument()
+  })
+
+  it('builtin assistant text 在默认活动流中显示为 Worker 文本', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({
+      events: [
+        { ts: '2026-08-01T00:00:01.000Z', kind: 'llm_call', summary: 'llm end_turn', source: 'native', detail: { stop_reason: 'end_turn' } },
+        { ts: '2026-08-01T00:00:01.000Z', kind: 'message', role: 'assistant', summary: '已完成核对', source: 'native', detail: { content: '已完成核对，等待下一步。' } },
+      ],
+      next_cursor: 'tok-1',
+    })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
+
+    renderDetail()
+
+    expect(await screen.findByText('Worker 文本')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Worker 文本：已完成核对，等待下一步。/ })).toBeInTheDocument()
+    expect(screen.queryByText('模型调用')).not.toBeInTheDocument()
   })
 
   it('活动记录分页且切换页面不会保留展开状态', async () => {
