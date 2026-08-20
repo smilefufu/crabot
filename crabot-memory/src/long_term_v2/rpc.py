@@ -367,6 +367,35 @@ class LongTermV2Rpc:
     def _historical_inbox_selection(cutoff: str | None) -> dict:
         return {"legacy_only": True, **({"cutoff": cutoff} if cutoff else {})}
 
+    def _historical_rule_source_case_ids(self) -> set[str]:
+        """Keep legacy inbox cases that remain evidence for confirmed rules."""
+        protected_ids: set[str] = set()
+        offset = 0
+        page_size = 200
+        while True:
+            rows = self.index.list_entries(
+                type_="lesson",
+                status="confirmed",
+                limit=page_size,
+                offset=offset,
+            )
+            for row in rows:
+                entry = self.store.read("confirmed", "lesson", row["id"])
+                frontmatter = entry.frontmatter
+                if frontmatter.maturity == "rule" and frontmatter.lesson_meta:
+                    protected_ids.update(frontmatter.lesson_meta.source_cases)
+            if len(rows) < page_size:
+                return protected_ids
+            offset += len(rows)
+
+    def _historical_inbox_candidates(self, cutoff: str | None, *, limit: int | None = None) -> list[dict]:
+        protected_ids = self._historical_rule_source_case_ids()
+        candidates = [
+            row for row in self.index.list_historical_inbox(cutoff=cutoff, limit=None)
+            if row["id"] not in protected_ids
+        ]
+        return candidates if limit is None else candidates[:limit]
+
     async def preview_historical_inbox(self, params: dict) -> dict:
         """Read-only summary for Admin's explicitly confirmed legacy inbox cleanup."""
         cutoff = params.get("cutoff")
@@ -379,7 +408,7 @@ class LongTermV2Rpc:
             "days_91_to_365": 0,
             "over_365_days": 0,
         }
-        rows = self.index.list_historical_inbox(cutoff=cutoff, limit=None)
+        rows = self._historical_inbox_candidates(cutoff)
         for row in rows:
             by_type[row["type"]] += 1
             try:
@@ -409,7 +438,7 @@ class LongTermV2Rpc:
         now_iso = params.get("now_iso") or utc_now_iso_z()
         failed: list[dict] = []
         moved = 0
-        for row in self.index.list_historical_inbox(cutoff=cutoff, limit=200):
+        for row in self._historical_inbox_candidates(cutoff, limit=200):
             try:
                 entry = self.store.read("inbox", row["type"], row["id"])
                 move_entry(
@@ -423,7 +452,7 @@ class LongTermV2Rpc:
             "selection": self._historical_inbox_selection(cutoff),
             "batch_size": 200,
             "moved": moved,
-            "remaining": self.index.count_historical_inbox(cutoff=cutoff),
+            "remaining": len(self._historical_inbox_candidates(cutoff)),
             "failed": failed,
         }
 

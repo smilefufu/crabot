@@ -9,6 +9,7 @@ from src.long_term_v2.rpc import LongTermV2Rpc
 from src.long_term_v2.schema import (
     EntityRef,
     ImportanceFactors,
+    LessonMeta,
     MemoryEntry,
     MemoryFrontmatter,
     SourceRef,
@@ -23,10 +24,10 @@ def _rpc(tmp_path):
     return LongTermV2Rpc(store=store, index=index), store, index
 
 
-def _frontmatter(mem_id, *, maturity="observed", ingestion_time="2026-08-20T00:00:00Z", **extra):
+def _frontmatter(mem_id, *, type_="fact", maturity="observed", ingestion_time="2026-08-20T00:00:00Z", **extra):
     base = {
         "id": mem_id,
-        "type": "fact",
+        "type": type_,
         "maturity": maturity,
         "brief": mem_id,
         "author": "test",
@@ -43,10 +44,10 @@ def _frontmatter(mem_id, *, maturity="observed", ingestion_time="2026-08-20T00:0
     return MemoryFrontmatter(**base)
 
 
-def _persist(store, index, mem_id, *, status, body="needle", **extra):
-    entry = MemoryEntry(frontmatter=_frontmatter(mem_id, **extra), body=body)
+def _persist(store, index, mem_id, *, status, type_="fact", body="needle", **extra):
+    entry = MemoryEntry(frontmatter=_frontmatter(mem_id, type_=type_, **extra), body=body)
     store.write(entry, status=status)
-    index.upsert(entry, entry_path(store.data_root, status, "fact", mem_id), status)
+    index.upsert(entry, entry_path(store.data_root, status, type_, mem_id), status)
     return entry
 
 
@@ -127,6 +128,36 @@ async def test_historical_inbox_preview_and_confirmed_batches_are_bounded_and_re
     })
     assert second["moved"] == 1
     assert second["remaining"] == 0
+
+
+@pytest.mark.asyncio
+async def test_historical_inbox_migration_preserves_confirmed_rule_evidence(tmp_path):
+    rpc, store, index = _rpc(tmp_path)
+    _persist(
+        store, index, "protected-case", status="inbox",
+        ingestion_time="2020-01-01T00:00:00Z",
+    )
+    _persist(
+        store, index, "unrelated-case", status="inbox",
+        ingestion_time="2020-01-02T00:00:00Z",
+    )
+    _persist(
+        store, index, "rule", status="confirmed", type_="lesson", maturity="rule",
+        lesson_meta=LessonMeta(source_cases=["protected-case"]),
+    )
+
+    preview = await rpc.preview_historical_inbox({"now_iso": "2026-08-20T00:00:00Z"})
+    assert preview["estimated_move_count"] == 1
+    assert preview["by_type"] == {"fact": 1, "lesson": 0, "concept": 0}
+
+    batch = await rpc.migrate_historical_inbox_batch({
+        "confirmed": True,
+        "now_iso": "2026-08-20T03:00:00Z",
+    })
+    assert batch["moved"] == 1
+    assert batch["remaining"] == 0
+    assert index.locate("protected-case")["status"] == "inbox"
+    assert index.locate("unrelated-case")["status"] == "trash"
 
 
 def test_inbox_expiry_skips_historical_inbox_and_uses_new_timestamp(tmp_path):
