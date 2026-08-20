@@ -7,6 +7,10 @@
 
 ### P6 已完成；Manager -> Worker 输入与侧问可靠交付待 PR review
 
+### CLI 第三方 Worker 交互生命周期：已确认，实施中
+
+- 已确认设计与 `protocol-agent-v3` 3.5.0 契约：Claude Code / Codex 的当前交互 TUI 由 Harness 以当前 pane 观察、一次性 fingerprint 分流；Claude 的“退出规划并开始执行”仅在后置状态可证明时直接处理，未知或失败界面一次性唤醒 Manager。启动基线改为 Claude `auto`、Codex `--approve-for-me --sandbox workspace-write`；实现按独立 worktree、定向测试和本地真实 E2E 后走非 Draft PR，不自行合并。
+
 ### 模块关闭与孤儿模块回收：已合并（PR #99 → `bf989ec`）
 
 - 已确认设计：`crabot-docs/superpowers/specs/2026-08-16-module-shutdown-orphan-fencing-design.md`；实施计划：`crabot-docs/superpowers/plans/2026-08-17-module-shutdown-orphan-fencing.md`。
@@ -96,6 +100,6 @@
 为避免本文件复制并腐化架构说明，以下内容不再展开：
 
 - 项目开发与流程规则：根目录 `AGENTS.md`。
-- 正式模块契约：`crabot-docs/protocols/`（base/module-manager 0.2.2、admin 0.2.1、agent-v3 3.4.0、crab-messaging 0.3.2、module-spec 0.2.0）。
+- 正式模块契约：`crabot-docs/protocols/`（base/module-manager 0.2.2、admin 0.2.1、agent-v3 3.5.0、crab-messaging 0.3.2、module-spec 0.2.0）。
 - 设计决策与实施计划：`crabot-docs/superpowers/specs/` 与 `plans/`。
 - 开发、部署、调试说明：`AGENTS.md` 与 `crabot-docs/guides/`。
