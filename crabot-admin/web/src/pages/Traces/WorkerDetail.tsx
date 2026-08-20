@@ -32,13 +32,17 @@ const STATUS_COLOR: Record<WorkerTaskStatus, string> = {
 const INCARNATION_STATE_LABEL: Record<string, string> = {
   running: '执行中', idle: '等输入', exited: '已结束',
 }
-const SOURCE_LABEL: Record<string, string> = { harness: 'harness', native: 'native', legacy: 'legacy' }
+const SOURCE_LABEL: Record<string, string> = { harness: '执行器', native: '原生记录', legacy: '旧版记录' }
+const ORIGIN_LABEL: Record<LedgerWorker['origin']['trigger_type'], string> = {
+  message: '消息', scheduled: '定时任务', system: '系统',
+}
 const KIND_LABEL: Record<WorkerTraceEvent['kind'], string> = {
   message: '消息', tool_call: '工具调用', tool_result: '工具结果', thinking: '思考', lifecycle: '生命周期',
 }
 const ACTIVITY_TONE_COLOR: Record<ActivityTone, string> = {
   manager: 'var(--info)', worker: 'var(--success)', tool: 'var(--warning)', status: 'var(--text-muted)', failure: 'var(--error)',
 }
+const ACTIVITY_PAGE_SIZE = 20
 
 type DetailRecord = Record<string, unknown>
 type ActivityTone = 'manager' | 'worker' | 'tool' | 'status' | 'failure'
@@ -97,8 +101,14 @@ function toolResult(event: WorkerTraceEvent): string {
 }
 
 function callId(event: WorkerTraceEvent): string | undefined {
-  const value = asRecord(event.detail)?.call_id
-  return typeof value === 'string' && value ? value : undefined
+  const detail = asRecord(event.detail)
+  const value = detail?.call_id
+    ?? detail?.tool_use_id
+    ?? detail?.tool_call_id
+    ?? (detail?.type === 'tool_use' ? detail.id : undefined)
+  if (typeof value !== 'string' || !value) return undefined
+  // Responses API 的内部 tool id 可能编码为 call_id|item_id；结果只带 call_id。
+  return value.split('|', 1)[0]
 }
 
 function failureReason(detail: DetailRecord | undefined, fallback: string): string {
@@ -116,33 +126,33 @@ function lifecycleActivity(event: WorkerTraceEvent): ActivityEntry | undefined {
   }
   if (event.summary.startsWith('spawned')) {
     const impl = typeof detail?.impl === 'string' ? IMPL_LABEL[detail.impl as WorkerIncarnation['impl']] ?? detail.impl : undefined
-    return { event, label: 'Worker 状态', tone: 'status', body: impl ? `已由 ${impl} 启动` : '已启动' }
+    return { event, label: '任务状态', tone: 'status', body: impl ? `已由 ${impl} 启动` : '已启动' }
   }
   if (event.summary.startsWith('state_changed')) {
     const state = typeof detail?.to === 'string' ? INCARNATION_STATE_LABEL[detail.to] ?? detail.to : undefined
     const reason = typeof detail?.reason === 'string' ? detail.reason : undefined
     if (detail?.to === 'exited' && reason && reason !== 'completed') {
-      return { event, label: 'Worker 异常退出', tone: 'failure', body: `已结束：${reason}` }
+      return { event, label: '任务异常退出', tone: 'failure', body: `已结束：${reason}` }
     }
-    return { event, label: 'Worker 状态', tone: 'status', body: state ? `状态变为：${state}` : event.summary }
+    return { event, label: '任务状态', tone: 'status', body: state ? `状态变为：${state}` : event.summary }
   }
   if (event.summary.startsWith('exited')) {
     const reason = failureReason(detail, event.summary)
-    return { event, label: 'Worker 异常退出', tone: 'failure', body: `已结束：${reason}` }
+    return { event, label: '任务异常退出', tone: 'failure', body: `已结束：${reason}` }
   }
   if (event.summary.startsWith('killed')) {
     const reason = typeof detail?.reason === 'string' ? `：${detail.reason}` : ''
-    return { event, label: 'Worker 状态', tone: 'status', body: `已停止${reason}` }
+    return { event, label: '任务状态', tone: 'status', body: `已停止${reason}` }
   }
   if (event.summary.startsWith('superseded')) {
-    return { event, label: 'Worker 状态', tone: 'status', body: '已交接到新的化身' }
+    return { event, label: '任务状态', tone: 'status', body: '已交接到新的化身' }
   }
   if (event.summary.startsWith('resumed')) {
     const fromSeq = typeof detail?.from_seq === 'number' ? `从化身 #${detail.from_seq} ` : ''
-    return { event, label: 'Worker 状态', tone: 'status', body: `已${fromSeq}恢复执行` }
+    return { event, label: '任务状态', tone: 'status', body: `已${fromSeq}恢复执行` }
   }
   if (event.summary.startsWith('input_sent')) {
-    return { event, label: '指令投递', tone: 'status', body: 'Manager 的补充指令已确认送达' }
+    return { event, label: '指令投递', tone: 'status', body: '管理会话的补充指令已确认送达' }
   }
   if (event.summary.startsWith('input_delivery_failed')) {
     return { event, label: '投递失败', tone: 'failure', body: failureReason(detail, event.summary) }
@@ -161,10 +171,10 @@ function activityFor(event: WorkerTraceEvent): ActivityEntry | undefined {
     return { event, label: '历史记录', tone: 'status', body: event.summary }
   }
   if (event.source === 'native' && event.kind === 'message' && event.role === 'user') {
-    return { event, label: 'Manager 指令', tone: 'manager', body: messageText(event) }
+    return { event, label: '管理会话指令', tone: 'manager', body: messageText(event) }
   }
   if (event.source === 'native' && event.kind === 'message' && event.role === 'assistant') {
-    return { event, label: 'Worker 输出', tone: 'worker', body: messageText(event) }
+    return { event, label: '任务输出', tone: 'worker', body: messageText(event) }
   }
   if (event.kind === 'tool_call') {
     return { event, label: '工具调用', tone: 'tool', title: toolName(event), body: toolArguments(event) }
@@ -211,63 +221,102 @@ function mainlineIncarnation(incarnations: WorkerIncarnation[]): WorkerIncarnati
   return incarnations[incarnations.length - 1]
 }
 
-function CollapsibleText({ children }: { children: string }) {
-  const [expanded, setExpanded] = useState(false)
-  const canCollapse = children.length > 360
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim() || '（无摘要）'
+}
+
+function formatDetail(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2)
+  } catch {
+    return text
+  }
+}
+
+function activityPreview(entry: ActivityEntry): string {
+  if (entry.event.kind === 'tool_call') {
+    const name = entry.title ? `调用 ${entry.title}` : '工具调用'
+    return entry.result ? `${name} · 已返回结果` : name
+  }
+  if (entry.event.kind === 'tool_result') return '工具结果'
+  return oneLine(entry.body)
+}
+
+function DetailText({ children }: { children: string }) {
   return (
-    <>
-      <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', ...(expanded || !canCollapse ? {} : { maxHeight: 88, overflow: 'hidden' }) }}>
-        {children}
-      </div>
-      {canCollapse && (
-        <button type="button" onClick={() => setExpanded((value) => !value)} style={{ marginTop: 6, fontSize: 12 }}>
-          {expanded ? '收起' : '展开全文'}
-        </button>
+    <pre style={{ margin: 0, padding: '9px 10px', background: 'var(--bg-muted)', borderTop: '1px solid var(--border)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+      {formatDetail(children)}
+    </pre>
+  )
+}
+
+function TimelineEvent({ entry, expanded, onToggle }: { entry: ActivityEntry; expanded: boolean; onToggle: () => void }) {
+  const preview = activityPreview(entry)
+  const action = expanded ? '收起详情' : '展开详情'
+  return (
+    <article style={{ borderBottom: '1px solid var(--border)' }}>
+      <button type="button" aria-expanded={expanded} aria-label={`${entry.label}：${preview}，${action}`} onClick={onToggle} style={{ display: 'grid', gridTemplateColumns: 'minmax(44px, 62px) minmax(76px, 112px) minmax(0, 1fr) auto', gap: 10, alignItems: 'center', width: '100%', padding: '9px 0', border: 0, borderRadius: 0, background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 13, textAlign: 'left', cursor: 'pointer' }}>
+        <time style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+          {entry.event.ts ? new Date(entry.event.ts).toLocaleTimeString('zh-CN', { hour12: false }) : ''}
+        </time>
+        <span style={{ color: ACTIVITY_TONE_COLOR[entry.tone], fontSize: 12, fontWeight: 700 }}>{entry.label}</span>
+        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{preview}</span>
+        <span aria-hidden="true" style={{ color: 'var(--text-muted)', fontSize: 12 }}>{expanded ? '收起' : '展开'}</span>
+      </button>
+      {expanded && (
+        <div style={{ padding: '0 0 12px 72px', minWidth: 0 }}>
+          {entry.event.kind === 'tool_call' ? (
+            <>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>输入{entry.title ? ` · ${entry.title}` : ''}</div>
+              <DetailText>{entry.body}</DetailText>
+              {entry.result && (
+                <>
+                  <div style={{ color: 'var(--text-muted)', fontSize: 12, fontWeight: 600, margin: '10px 0 4px' }}>输出</div>
+                  <DetailText>{entry.result}</DetailText>
+                </>
+              )}
+            </>
+          ) : entry.event.kind === 'tool_result' ? (
+            <>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>输出</div>
+              <DetailText>{entry.body}</DetailText>
+            </>
+          ) : (
+            <DetailText>{entry.body}</DetailText>
+          )}
+        </div>
       )}
-    </>
+    </article>
   )
 }
 
-function TimelineEvent({ entry }: { entry: ActivityEntry }) {
+function TechnicalEvent({ event, expanded, onToggle }: { event: WorkerTraceEvent; expanded: boolean; onToggle: () => void }) {
+  const source = event.source ? SOURCE_LABEL[event.source] ?? event.source : '—'
+  const label = `${source} · ${KIND_LABEL[event.kind]}`
+  const action = expanded ? '收起详情' : '展开详情'
   return (
-    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', padding: '12px 0', borderTop: '1px solid var(--border)' }}>
-      <time style={{ color: 'var(--text-muted)', width: 56, paddingTop: 1, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-        {entry.event.ts ? new Date(entry.event.ts).toLocaleTimeString('zh-CN', { hour12: false }) : ''}
-      </time>
-      <div style={{ color: ACTIVITY_TONE_COLOR[entry.tone], width: 100, paddingTop: 1, fontSize: 12, fontWeight: 600 }}>{entry.label}</div>
-      <div style={{ flex: '1 1 360px', minWidth: 0, fontSize: 13 }}>
-        {entry.title && <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, marginBottom: 4 }}>{entry.title}</div>}
-        <CollapsibleText>{entry.body}</CollapsibleText>
-        {entry.result && (
-          <div style={{ borderLeft: '3px solid var(--warning)', marginTop: 10, paddingLeft: 10 }}>
-            <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 4 }}>工具结果</div>
-            <CollapsibleText>{entry.result}</CollapsibleText>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function TechnicalEvent({ event }: { event: WorkerTraceEvent }) {
-  return (
-    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', padding: '8px 0', borderTop: '1px solid var(--border)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-      <time style={{ width: 56 }}>{event.ts ? new Date(event.ts).toLocaleTimeString('zh-CN', { hour12: false }) : ''}</time>
-      <span style={{ width: 64 }}>{event.source ? SOURCE_LABEL[event.source] ?? event.source : '—'}</span>
-      <span style={{ width: 72 }}>{KIND_LABEL[event.kind]}</span>
-      <span style={{ flex: '1 1 280px', minWidth: 0, overflowWrap: 'anywhere' }}>{event.summary || '（无摘要）'}</span>
-    </div>
+    <article style={{ borderBottom: '1px solid var(--border)', color: 'var(--text-muted)' }}>
+      <button type="button" aria-expanded={expanded} aria-label={`${label}：${oneLine(event.summary)}，${action}`} onClick={onToggle} style={{ display: 'grid', gridTemplateColumns: 'minmax(44px, 62px) minmax(76px, 112px) minmax(0, 1fr) auto', gap: 10, alignItems: 'center', width: '100%', padding: '9px 0', border: 0, borderRadius: 0, background: 'transparent', color: 'inherit', fontFamily: 'var(--font-mono)', fontSize: 12, textAlign: 'left', cursor: 'pointer' }}>
+        <time>{event.ts ? new Date(event.ts).toLocaleTimeString('zh-CN', { hour12: false }) : ''}</time>
+        <span>{label}</span>
+        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{oneLine(event.summary)}</span>
+        <span aria-hidden="true">{expanded ? '收起' : '展开'}</span>
+      </button>
+      {expanded && event.detail !== undefined && <div style={{ padding: '0 0 12px 72px' }}><DetailText>{JSON.stringify(event.detail)}</DetailText></div>}
+    </article>
   )
 }
 
 function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
   const [events, setEvents] = useState<WorkerTraceEvent[]>([])
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
-  const [hasMore, setHasMore] = useState(true)
   const [unavailableReason, setUnavailableReason] = useState<string | undefined>(undefined)
   const [cursorInvalid, setCursorInvalid] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [mode, setMode] = useState<'human' | 'technical'>('human')
+  const [page, setPage] = useState(1)
+  const [expandedEntry, setExpandedEntry] = useState<string | undefined>(undefined)
+  const [refreshing, setRefreshing] = useState(false)
   const projected = useMemo(() => projectTimeline(events), [events])
 
   const load = useCallback(async (cursor?: string) => {
@@ -280,9 +329,6 @@ function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
       if (cursor === undefined) setEvents(result.events)
       else setEvents((previous) => [...previous, ...result.events])
       setNextCursor(result.next_cursor)
-      // 空页=当前追平（不是"没有更多"）——活跃 worker 之后还可能有新事件，
-      // 按钮切换为刷新语义而不是永久消失。
-      setHasMore(result.next_cursor !== undefined)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       if (message.includes('INVALID_PARAMS') || message.includes('cursor')) {
@@ -297,51 +343,81 @@ function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
   useEffect(() => {
     setEvents([])
     setNextCursor(undefined)
-    setHasMore(true)
     setUnavailableReason(undefined)
     setCursorInvalid(false)
     setError(null)
     setMode('human')
+    setPage(1)
+    setExpandedEntry(undefined)
     void load(undefined)
   }, [load])
 
   if (error) return <div style={{ color: 'var(--text-muted)', padding: 12 }}>活动记录暂不可用：{error}</div>
 
   const visibleEvents = mode === 'human' ? projected.human : projected.technical
+  const pageCount = Math.max(1, Math.ceil(visibleEvents.length / ACTIVITY_PAGE_SIZE))
+  const pageStart = (page - 1) * ACTIVITY_PAGE_SIZE
+  const humanPageEvents = projected.human.slice(pageStart, pageStart + ACTIVITY_PAGE_SIZE)
+  const technicalPageEvents = projected.technical.slice(pageStart, pageStart + ACTIVITY_PAGE_SIZE)
+  const checkNewActivity = async () => {
+    if (!nextCursor || refreshing) return
+    setRefreshing(true)
+    await load(nextCursor)
+    setRefreshing(false)
+  }
+  const selectMode = (nextMode: 'human' | 'technical') => {
+    setMode(nextMode)
+    setPage(1)
+    setExpandedEntry(undefined)
+  }
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-        <div style={{ display: 'inline-flex', border: '1px solid var(--border)' }}>
-          <button type="button" aria-pressed={mode === 'human'} onClick={() => setMode('human')} style={{ border: 0, padding: '5px 8px', background: mode === 'human' ? 'var(--bg-muted)' : undefined }}>
+    <section style={{ maxWidth: 930 }} aria-label="任务活动">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 11 }}>
+        <h2 style={{ fontSize: 15, margin: 0 }}>活动记录</h2>
+        <div style={{ display: 'inline-flex', gap: 2, padding: 2, border: '1px solid var(--border-highlight)', borderRadius: 6, background: 'var(--bg-primary)' }}>
+          <button type="button" aria-pressed={mode === 'human'} onClick={() => selectMode('human')} style={{ border: 0, borderRadius: 4, padding: '5px 9px', background: mode === 'human' ? 'var(--primary)' : 'transparent', color: mode === 'human' ? 'var(--text-on-primary)' : 'var(--text-secondary)', fontWeight: mode === 'human' ? 600 : 400, transition: 'background 0.15s ease, color 0.15s ease' }}>
             对话与操作
           </button>
-          <button type="button" aria-pressed={mode === 'technical'} onClick={() => setMode('technical')} style={{ border: 0, borderLeft: '1px solid var(--border)', padding: '5px 8px', background: mode === 'technical' ? 'var(--bg-muted)' : undefined }}>
+          <button type="button" aria-pressed={mode === 'technical'} onClick={() => selectMode('technical')} style={{ border: 0, borderRadius: 4, padding: '5px 9px', background: mode === 'technical' ? 'var(--primary)' : 'transparent', color: mode === 'technical' ? 'var(--text-on-primary)' : 'var(--text-secondary)', fontWeight: mode === 'technical' ? 600 : 400, transition: 'background 0.15s ease, color 0.15s ease' }}>
             技术事件 {projected.technical.length}
           </button>
         </div>
       </div>
-      {unavailableReason && <div style={{ fontSize: 12, color: 'var(--color-warning, #d97706)', padding: '4px 0' }}>{unavailableReason}</div>}
-      {visibleEvents.length === 0 ? (
-        <div style={{ color: 'var(--text-muted)', padding: 12 }}>{mode === 'human' ? '该化身暂无可读活动。' : '该化身暂无技术事件。'}</div>
-      ) : mode === 'human' ? (
-        projected.human.map((entry, index) => <TimelineEvent key={`${entry.event.ts}-${entry.event.kind}-${index}`} entry={entry} />)
-      ) : (
-        projected.technical.map((event, index) => <TechnicalEvent key={`${event.ts}-${event.kind}-${index}`} event={event} />)
-      )}
-      {cursorInvalid && (
-        <div style={{ fontSize: 12, color: 'var(--color-warning, #d97706)', padding: '8px 0' }}>
-          游标已失效。
-          <button type="button" onClick={() => { setCursorInvalid(false); setEvents([]); void load(undefined) }} style={{ marginLeft: 8 }}>
-            从头重新加载
-          </button>
-        </div>
-      )}
-      {!cursorInvalid && hasMore && nextCursor && (
-        <button type="button" onClick={() => void load(nextCursor)} style={{ marginTop: 8 }}>
-          {events.length === 0 ? '刷新/检查新内容' : '加载更多'}
-        </button>
-      )}
-    </div>
+      <div style={{ borderTop: '1px solid var(--border)' }}>
+        {unavailableReason && <div style={{ fontSize: 12, color: 'var(--color-warning, #d97706)', padding: '4px 0' }}>{unavailableReason}</div>}
+        {visibleEvents.length === 0 ? (
+          <div style={{ color: 'var(--text-muted)', padding: 12 }}>{mode === 'human' ? '该化身暂无可读活动。' : '该化身暂无技术事件。'}</div>
+        ) : mode === 'human' ? (
+          humanPageEvents.map((entry, index) => {
+            const entryKey = `activity-${pageStart + index}-${entry.event.ts}-${entry.event.kind}-${callId(entry.event) ?? ''}`
+            return <TimelineEvent key={entryKey} entry={entry} expanded={expandedEntry === entryKey} onToggle={() => setExpandedEntry((current) => current === entryKey ? undefined : entryKey)} />
+          })
+        ) : (
+          technicalPageEvents.map((event, index) => {
+            const entryKey = `technical-${pageStart + index}-${event.ts}-${event.kind}`
+            return <TechnicalEvent key={entryKey} event={event} expanded={expandedEntry === entryKey} onToggle={() => setExpandedEntry((current) => current === entryKey ? undefined : entryKey)} />
+          })
+        )}
+        {cursorInvalid && (
+          <div style={{ fontSize: 12, color: 'var(--color-warning, #d97706)', padding: '8px 0' }}>
+            游标已失效。
+            <button type="button" onClick={() => { setCursorInvalid(false); setEvents([]); setPage(1); setExpandedEntry(undefined); void load(undefined) }} style={{ marginLeft: 8 }}>
+              从头重新加载
+            </button>
+          </div>
+        )}
+        {!cursorInvalid && (visibleEvents.length > 0 || nextCursor) && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', paddingTop: 10 }}>
+            <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>第 {page} / {pageCount} 页</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="button" disabled={page === 1} onClick={() => { setPage((current) => current - 1); setExpandedEntry(undefined) }}>上一页</button>
+              <button type="button" disabled={page === pageCount} onClick={() => { setPage((current) => current + 1); setExpandedEntry(undefined) }}>下一页</button>
+              {nextCursor && <button type="button" disabled={refreshing} onClick={() => void checkNewActivity()}>{refreshing ? '读取中…' : '检查新活动'}</button>}
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
   )
 }
 
@@ -394,27 +470,44 @@ function OutputPanel({ workerId, seq }: { workerId: string; seq?: number }) {
   )
 }
 
+function formatTimestamp(value: string | undefined): string {
+  return value ? new Date(value).toLocaleString('zh-CN') : '—'
+}
+
+function incarnationRole(incarnation: WorkerIncarnation, mainline: boolean): string {
+  if (mainline) return '主线'
+  if (incarnation.forked_from !== undefined) return `临时侧问（来自 #${incarnation.forked_from}）`
+  return '历史化身'
+}
+
+function OverviewFact({ label, children, accent = false, separated = false }: {
+  label: string
+  children: React.ReactNode
+  accent?: boolean
+  separated?: boolean
+}) {
+  return (
+    <div style={{ minWidth: 0, padding: `12px 14px 13px ${separated ? 14 : 0}px`, borderLeft: separated ? '1px solid var(--border)' : undefined }}>
+      <div style={{ color: 'var(--text-muted)', fontSize: 11, marginBottom: 3 }}>{label}</div>
+      <div style={{ overflowWrap: 'anywhere', color: accent ? 'var(--info)' : undefined, fontSize: 13, fontWeight: 600 }}>{children}</div>
+    </div>
+  )
+}
+
 function IncarnationRow({ incarnation, mainline, onSelect, selected }: {
   incarnation: WorkerIncarnation
   mainline: boolean
   selected: boolean
   onSelect: () => void
 }) {
-  const role = mainline ? '主线' : incarnation.forked_from !== undefined ? `临时侧问（来自 #${incarnation.forked_from}）` : '历史化身'
+  const role = incarnationRole(incarnation, mainline)
   return (
-    <tr style={{ borderTop: '1px solid var(--border)', background: selected ? 'var(--bg-muted, #eef2ff)' : undefined }}>
-      <td style={{ padding: '6px 12px' }}>
-        <button type="button" onClick={onSelect} style={{ font: 'inherit', padding: 0, border: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer' }}>
-          #{incarnation.seq} · {role}
-        </button>
-      </td>
-      <td style={{ padding: '6px 12px' }}>{IMPL_LABEL[incarnation.impl]}</td>
-      <td style={{ padding: '6px 12px' }}>{INCARNATION_STATE_LABEL[incarnation.state] ?? incarnation.state}{incarnation.ended_reason ? ` · ${incarnation.ended_reason}` : ''}</td>
-      <td style={{ padding: '6px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
-        {new Date(incarnation.started_at).toLocaleString()}
-        {incarnation.ended_at ? ` → ${new Date(incarnation.ended_at).toLocaleString()}` : ' → 现在'}
-      </td>
-    </tr>
+    <button type="button" onClick={onSelect} aria-pressed={selected} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(118px, 1fr))', gap: 12, width: '100%', padding: '10px 12px', border: 0, borderTop: '1px solid var(--border)', borderRadius: 0, background: selected ? 'var(--bg-muted)' : 'transparent', color: 'inherit', font: 'inherit', fontSize: 12, textAlign: 'left', cursor: 'pointer' }}>
+      <span style={{ fontWeight: 700 }}>#{incarnation.seq} · {role}</span>
+      <span>{IMPL_LABEL[incarnation.impl]}</span>
+      <span style={{ color: 'var(--text-muted)' }}>{INCARNATION_STATE_LABEL[incarnation.state] ?? incarnation.state}{incarnation.ended_reason ? ` · ${incarnation.ended_reason}` : ''}</span>
+      <span style={{ color: 'var(--text-muted)' }}>{formatTimestamp(incarnation.started_at)}{incarnation.ended_at ? ` → ${formatTimestamp(incarnation.ended_at)}` : ' → 现在'}</span>
+    </button>
   )
 }
 
@@ -422,18 +515,27 @@ const WorkerDetailContent: React.FC = () => {
   const { workerId = '' } = useParams()
   const [worker, setWorker] = useState<LedgerWorker | null>(null)
   const [selectedSeq, setSelectedSeq] = useState<number | undefined>(undefined)
+  const [managerDisplayName, setManagerDisplayName] = useState<string | null | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
+    setManagerDisplayName(undefined)
+    const managersRequest = agentObservabilityService.listManagers(1, 100).catch(() => undefined)
     agentObservabilityService
       .getWorkerDetail(workerId)
       .then((result) => {
         if (cancelled) return
         setWorker(result.worker)
         setSelectedSeq(mainlineIncarnation(result.worker.incarnations)?.seq)
+        void managersRequest
+          .then((managerResult) => {
+            if (cancelled) return
+            const displayName = managerResult?.items.find((item) => item.manager_key === result.worker.manager_key)?.display_name
+            setManagerDisplayName(displayName && displayName !== result.worker.manager_key ? displayName : null)
+          })
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err))
@@ -443,55 +545,66 @@ const WorkerDetailContent: React.FC = () => {
   }, [workerId])
 
   if (loading) return <Loading />
-  if (error || !worker) return <div style={{ color: 'var(--text-muted)', padding: 24 }}>Worker 详情暂不可用：{error ?? 'not found'}</div>
+  if (error || !worker) return <div style={{ color: 'var(--text-muted)', padding: 24 }}>任务详情暂不可用：{error ?? '未找到'}</div>
 
   const mainline = mainlineIncarnation(worker.incarnations)
   const mainlineSeq = mainline?.seq
+  const selectedIncarnation = worker.incarnations.find((incarnation) => incarnation.seq === selectedSeq) ?? mainline
   return (
-    <div>
+    <div style={{ maxWidth: 980 }}>
       <div style={{ marginBottom: 18 }}>
-        <Link to="/traces" style={{ color: 'var(--text-muted)', fontSize: 12 }}>← 返回 Workers</Link>
-        <h2 style={{ fontSize: 18, margin: '8px 0 4px' }}>{worker.task.title}</h2>
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>{worker.worker_id}</div>
-      </div>
-      <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', padding: '10px 0', marginBottom: 16, borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)', fontSize: 13 }}>
-        <div><strong>状态：</strong><span style={{ color: STATUS_COLOR[worker.task.status] }}>{STATUS_LABEL[worker.task.status]}</span>{worker.task.outcome ? ` · ${worker.task.outcome}` : ''}</div>
-        <div><strong>主线实现：</strong>{mainline ? IMPL_LABEL[mainline.impl] : '—'}</div>
-        {worker.task.type && <div><strong>任务类型：</strong>{worker.task.type}</div>}
-        <div><strong>回报目标：</strong>{worker.report_to.channel_id} / {worker.report_to.session_id}</div>
-      </div>
-      <div style={{ fontSize: 13, marginBottom: 16, display: 'grid', gap: 4 }}>
-        <div><strong>Owner：</strong><Link to={`/traces/managers/${encodeURIComponent(worker.manager_key)}`} style={{ fontFamily: 'var(--font-mono)' }}>{worker.manager_key}</Link></div>
-        {mainline?.workspace && <div><strong>工作区：</strong><span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{mainline.workspace}</span></div>}
-        <div>
-          <strong>来源：</strong>{worker.origin.trigger_type}
-          {worker.origin.spawned_by_episode && <> · episode <Link to={`/traces/managers/${encodeURIComponent(worker.manager_key)}`} style={{ fontFamily: 'var(--font-mono)' }}>{worker.origin.spawned_by_episode.slice(0, 8)}</Link></>}
-        </div>
-        {worker.legacy_source && (
-          <div style={{ background: 'var(--warning-bg)', border: '1px solid var(--warning-border)', borderRadius: 6, padding: 10, margin: '8px 0', color: 'var(--warning-text)' }}>
-            这是从旧版运行时导入的 legacy 记录，不代表当前可运行的 Worker 化身。
-            {worker.legacy_source.trace_ids?.length ? ` 保留 ${worker.legacy_source.trace_ids.length} 条旧 trace 引用。` : ''}
+        <Link to="/traces" style={{ color: 'var(--text-muted)', fontSize: 12 }}>← 返回任务列表</Link>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginTop: 8, flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 0 }}>
+            <h1 style={{ fontSize: 22, lineHeight: 1.3, margin: 0 }}>{worker.task.title}</h1>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>{worker.worker_id}</div>
           </div>
-        )}
+          <span style={{ flex: '0 0 auto', color: STATUS_COLOR[worker.task.status], border: `1px solid ${STATUS_COLOR[worker.task.status]}`, padding: '4px 8px', fontSize: 12, fontWeight: 700 }}>
+            {STATUS_LABEL[worker.task.status]}
+          </span>
+        </div>
       </div>
 
-      <h3 style={{ fontSize: 14, margin: '12px 0 8px' }}>化身链</h3>
-      <div style={{ overflowX: 'auto', marginBottom: 20 }}>
-        <table style={{ width: '100%', minWidth: 620, borderCollapse: 'collapse' }}>
-          <thead><tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 12 }}><th style={{ padding: '6px 12px' }}>化身</th><th style={{ padding: '6px 12px' }}>实现</th><th style={{ padding: '6px 12px' }}>状态</th><th style={{ padding: '6px 12px' }}>时间</th></tr></thead>
-          <tbody>
-            {worker.incarnations.map((incarnation) => (
-              <IncarnationRow key={incarnation.seq} incarnation={incarnation} mainline={incarnation.seq === mainlineSeq} selected={incarnation.seq === selectedSeq} onSelect={() => setSelectedSeq(incarnation.seq)} />
-            ))}
-          </tbody>
-        </table>
+      <section aria-label="任务概览" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', margin: '22px 0 28px', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}>
+        <OverviewFact label="主线实现" accent>{mainline ? IMPL_LABEL[mainline.impl] : '—'}</OverviewFact>
+        <OverviewFact label="当前化身" separated>{selectedIncarnation ? `#${selectedIncarnation.seq} ${incarnationRole(selectedIncarnation, selectedIncarnation.seq === mainlineSeq)}` : '—'}</OverviewFact>
+        <OverviewFact label="回报目标" separated>{worker.report_to.channel_id} / {worker.report_to.session_id}</OverviewFact>
+        <OverviewFact label="最近活动" separated>{formatTimestamp(worker.updated_at)}</OverviewFact>
+      </section>
+
+      {worker.legacy_source && (
+        <div style={{ background: 'var(--warning-bg)', border: '1px solid var(--warning-border)', borderRadius: 6, padding: 10, margin: '-12px 0 24px', color: 'var(--warning-text)' }}>
+          这是从旧版运行时导入的旧版记录，不代表当前可运行的任务化身。
+          {worker.legacy_source.trace_ids?.length ? ` 保留 ${worker.legacy_source.trace_ids.length} 条旧版追踪记录引用。` : ''}
+        </div>
+      )}
+
+      <section aria-label="化身链" style={{ maxWidth: 930 }}>
+        <h2 style={{ fontSize: 15, margin: '0 0 11px' }}>化身链</h2>
+        <div style={{ borderBottom: '1px solid var(--border)' }}>
+          {worker.incarnations.map((incarnation) => (
+            <IncarnationRow key={incarnation.seq} incarnation={incarnation} mainline={incarnation.seq === mainlineSeq} selected={incarnation.seq === selectedSeq} onSelect={() => setSelectedSeq(incarnation.seq)} />
+          ))}
+        </div>
+      </section>
+
+      <div style={{ marginTop: 30 }}>
+        <Timeline workerId={worker.worker_id} seq={selectedSeq} />
       </div>
 
-      <h3 style={{ fontSize: 14, margin: '12px 0 8px' }}>活动记录（化身 #{selectedSeq ?? '—'}）</h3>
-      <Timeline workerId={worker.worker_id} seq={selectedSeq} />
+      <details style={{ maxWidth: 930, marginTop: 28, padding: '12px 14px', border: '1px solid var(--border)', background: 'var(--bg-muted)' }}>
+        <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>终端画面</summary>
+        <div style={{ marginTop: 12 }}><OutputPanel workerId={worker.worker_id} seq={selectedSeq} /></div>
+      </details>
 
-      <h3 style={{ fontSize: 14, margin: '20px 0 8px' }}>终端画面</h3>
-      <OutputPanel workerId={worker.worker_id} seq={selectedSeq} />
+      <details style={{ maxWidth: 930, marginTop: 14, color: 'var(--text-muted)', fontSize: 12 }}>
+        <summary style={{ cursor: 'pointer' }}>运行上下文</summary>
+        <div style={{ display: 'grid', gap: 4, marginTop: 10 }}>
+          <div>所属会话：<Link to={`/traces/managers/${encodeURIComponent(worker.manager_key)}`}>{managerDisplayName === undefined ? '正在读取名称…' : managerDisplayName ?? '名称暂不可用'}</Link></div>
+          {mainline?.workspace && <div>工作区：<span style={{ fontFamily: 'var(--font-mono)' }}>{mainline.workspace}</span></div>}
+          <div>来源：{ORIGIN_LABEL[worker.origin.trigger_type]}{worker.origin.spawned_by_episode ? ` · 执行轮次 ${worker.origin.spawned_by_episode.slice(0, 8)}` : ''}</div>
+        </div>
+      </details>
     </div>
   )
 }

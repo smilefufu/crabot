@@ -14,6 +14,7 @@ vi.mock('../../components/Layout/MainLayout', () => ({
 }))
 
 const mocked = agentObservabilityService as unknown as {
+  listManagers: ReturnType<typeof vi.fn>
   listWorkers: ReturnType<typeof vi.fn>
   getWorkerDetail: ReturnType<typeof vi.fn>
   getWorkerTrace: ReturnType<typeof vi.fn>
@@ -86,7 +87,13 @@ describe('WorkersView', () => {
 })
 
 describe('WorkerDetail', () => {
-  beforeEach(() => { vi.resetAllMocks() })
+  beforeEach(() => {
+    vi.resetAllMocks()
+    mocked.listManagers = vi.fn().mockResolvedValue({
+      items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 测试账号 · 小付', active_worker_count: 0 }],
+      pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
+    })
+  })
 
   function renderDetail() {
     return render(
@@ -175,7 +182,7 @@ describe('WorkerDetail', () => {
 
     await waitFor(() => expect(screen.getByText('投递失败')).toBeInTheDocument())
     expect(screen.getByText('投递期限已过')).toBeInTheDocument()
-    expect(screen.getByText('Worker 异常退出')).toBeInTheDocument()
+    expect(screen.getByText('任务异常退出')).toBeInTheDocument()
     expect(screen.getByText('已结束：adapter crashed')).toBeInTheDocument()
   })
 
@@ -191,8 +198,13 @@ describe('WorkerDetail', () => {
     mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
     renderDetail()
 
-    await waitFor(() => expect(screen.getByText('Read')).toBeInTheDocument())
-    expect(screen.getByText('{"file_path":"/tmp/x.ts"}')).toBeInTheDocument()
+    const toolCall = await screen.findByRole('button', { name: /工具调用：调用 Read.*展开详情/ })
+    fireEvent.click(toolCall)
+    expect(screen.getByText('输入 · Read')).toBeInTheDocument()
+    expect(screen.getByText(/"file_path": "\/tmp\/x\.ts"/)).toBeInTheDocument()
+    const toolResult = screen.getByRole('button', { name: /工具结果：工具结果.*展开详情/ })
+    fireEvent.click(toolResult)
+    expect(screen.getByText('输出')).toBeInTheDocument()
     expect(screen.getByText('文件内容摘要')).toBeInTheDocument()
   })
 
@@ -203,7 +215,7 @@ describe('WorkerDetail', () => {
       events: [
         { ts: '2026-08-01T00:00:01.000Z', kind: 'lifecycle', role: 'system', summary: 'item_completed', source: 'native' },
         { ts: '2026-08-01T00:00:02.000Z', kind: 'message', role: 'user', summary: instruction.slice(0, 200), source: 'native', detail: { content: [{ type: 'input_text', text: instruction }] } },
-        { ts: '2026-08-01T00:00:03.000Z', kind: 'tool_call', role: 'assistant', summary: 'shell()', source: 'native', detail: { call_id: 'call-1', name: 'shell', arguments: '读取验证报告' } },
+        { ts: '2026-08-01T00:00:03.000Z', kind: 'tool_call', role: 'assistant', summary: 'shell()', source: 'native', detail: { call_id: 'call-1|fc-1', name: 'shell', arguments: '读取验证报告' } },
         { ts: '2026-08-01T00:00:04.000Z', kind: 'tool_result', summary: '完成', source: 'native', detail: { call_id: 'call-1', output: '已完成隔离环境读取' } },
         { ts: '2026-08-01T00:00:05.000Z', kind: 'message', role: 'assistant', summary: '正在重新验证方向', source: 'native', detail: { content: [{ type: 'output_text', text: '正在重新验证方向，正式端口尚未切换。' }] } },
       ],
@@ -213,19 +225,47 @@ describe('WorkerDetail', () => {
 
     renderDetail()
 
-    await waitFor(() => expect(screen.getByText('Manager 指令')).toBeInTheDocument())
-    expect(screen.getByText('Worker 输出')).toBeInTheDocument()
-    expect(screen.getByText('工具调用')).toBeInTheDocument()
-    expect(screen.getByText('工具结果')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('管理会话指令')).toBeInTheDocument())
+    expect(screen.getByText('任务输出')).toBeInTheDocument()
+    const toolRow = screen.getByRole('button', { name: /工具调用：调用 shell · 已返回结果.*展开详情/ })
+    expect(toolRow).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText('item_completed')).not.toBeInTheDocument()
-    expect(screen.getByText('主线实现：').parentElement).toHaveTextContent('内置')
+    expect(screen.getByRole('heading', { name: '任务标题', level: 1 })).toBeInTheDocument()
+    expect(screen.getByLabelText('任务概览')).toHaveTextContent('主线实现内置当前化身#1 主线')
+    expect(screen.getByText('微信 · 测试账号 · 小付').closest('a')).toHaveAttribute('href', `/traces/managers/${encodeURIComponent('wechat::sess-1')}`)
     expect(mocked.getWorkerTrace).toHaveBeenCalledWith('w-1234567890ab', { seq: 1 })
     expect(mocked.getWorkerTerminal).toHaveBeenCalledWith('w-1234567890ab', { seq: 1 })
 
-    fireEvent.click(screen.getByRole('button', { name: '展开全文' }))
-    expect(screen.getByRole('button', { name: '收起' })).toBeInTheDocument()
+    fireEvent.click(toolRow)
+    expect(screen.getByText('输入 · shell')).toBeInTheDocument()
+    expect(screen.getByText('读取验证报告')).toBeInTheDocument()
+    expect(screen.getByText('已完成隔离环境读取')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '技术事件 1' }))
     expect(screen.getByText('item_completed')).toBeInTheDocument()
+  })
+
+  it('活动记录分页且切换页面不会保留展开状态', async () => {
+    const events = Array.from({ length: 21 }, (_, index) => ({
+      ts: `2026-08-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+      kind: 'message' as const,
+      role: 'assistant' as const,
+      summary: `消息 ${index}`,
+      source: 'native' as const,
+      detail: { content: `消息 ${index}` },
+    }))
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({ events, next_cursor: 'tok-1' })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
+
+    renderDetail()
+
+    await waitFor(() => expect(screen.getByText('第 1 / 2 页')).toBeInTheDocument())
+    expect(screen.getByText('消息 0')).toBeInTheDocument()
+    expect(screen.queryByText('消息 20')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
+    expect(screen.getByText('第 2 / 2 页')).toBeInTheDocument()
+    expect(screen.getByText('消息 20')).toBeInTheDocument()
+    expect(screen.queryByText('消息 0')).not.toBeInTheDocument()
   })
 })
