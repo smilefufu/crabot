@@ -2218,14 +2218,16 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(seen).toHaveLength(1)
 
-    tmux.paneText = '❯ \nesc to interrupt'
+    await adapter.sendInput(h, 'Enter', { raw: true })
+    expect(await adapter.state(h)).toBe('running')
+
+    tmux.paneText = 'Claude needs your permission\n1. Yes\n2. No'
     await fs.appendFile(
       eventsFilePath({ root: workspaceRoot }),
       JSON.stringify({ ts: new Date().toISOString(), kind: 'notification', raw: { notification_type: 'permission_prompt' } }) + '\n',
       'utf-8',
     )
-    await new Promise((resolve) => setTimeout(resolve, 300))
-    expect(seen).toHaveLength(1)
+    await waitFor(() => seen.length === 2)
     await adapter.kill(h)
   })
 

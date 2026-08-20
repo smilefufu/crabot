@@ -567,10 +567,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
       if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || /esc to interrupt/i.test(snapshot.text))) {
+        runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'running' })
         return
       }
       if (primaryProbe === 'empty') {
+        runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
         return
       }

@@ -233,6 +233,27 @@ describe('CodexWorkerAdapter.provision', () => {
     await expect(fs.access(path.join(ws, '.codex', 'config.toml'))).rejects.toThrow()
   })
 
+  it('provision 后新出现的 hook 源会在 spawn 前被拒绝，不创建 tmux 会话', async () => {
+    class CountingTmux extends TmuxDriver {
+      newSessionCalls = 0
+
+      async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+        this.newSessionCalls += 1
+        return fakeReadyNewSession(spec)
+      }
+    }
+
+    const tmux = new CountingTmux()
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource, tmux, codexBin: 'unused' })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
+    await fs.writeFile(path.join(ws, '.codex', 'hooks.json'), '{}\n', 'utf-8')
+
+    await expect(adapter.spawn({ worker_id: 'spawn-hook-race', prompt: '你好', workspace: { root: ws } })).rejects.toThrow(
+      /CodexWorkerAdapter\.spawn: refusing to enable generated hook trust/,
+    )
+    expect(tmux.newSessionCalls).toBe(0)
+  })
+
   it('codexHomeSource 下没有 auth.json 时不阻塞 provision', async () => {
     const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
     await expect(adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })).resolves.toBeUndefined()
@@ -922,6 +943,31 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       expect(argv).not.toContain('--sandbox')
       const configIdx = argv.indexOf('-c')
       expect(argv[configIdx + 1]).toBe('sandbox_workspace_write.network_access=true')
+    },
+    15000,
+  )
+
+  it(
+    'resume 前新出现的 hook 源会被拒绝，第二个 Codex 进程不会启动',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const argvFile = path.join(dataDir, 'resume-hook-race-argv.jsonl')
+      const rolloutFile = path.join(workspaceRoot, '.codex', 'sessions', rolloutFileNameFor(randomUUID()))
+      const codexBin = codexBinFor([{ output: '主线输出', exit: true }], stopHookCmd, { argvFile, rolloutFile })
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await waitForState(adapter, h1, 'exited')
+
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+      await fs.writeFile(path.join(workspaceRoot, '.codex', 'hooks.json'), '{}\n', 'utf-8')
+
+      await expect(adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')).rejects.toThrow(
+        /CodexWorkerAdapter\.resume: refusing to enable generated hook trust/,
+      )
+      expect((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')).toHaveLength(1)
     },
     15000,
   )
@@ -2161,6 +2207,17 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     )
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(seen).toHaveLength(1)
+
+    await adapter.sendInput(h, 'Enter', { raw: true })
+    expect(await adapter.state(h)).toBe('running')
+
+    tmux.paneText = 'Allow Codex to modify this workspace?\nYes\nNo'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'permission_request', raw: { hook_event_name: 'PermissionRequest' } }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 2)
     await adapter.kill(h)
   })
 

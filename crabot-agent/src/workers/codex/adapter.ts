@@ -101,7 +101,7 @@ function asTable(value: unknown): Record<string, unknown> {
     : {}
 }
 
-async function assertNoCodexHookSources(codexDir: string): Promise<void> {
+async function assertNoCodexHookSources(codexDir: string, operation = 'provision'): Promise<void> {
   for (const entry of ['hooks.json', 'plugins'] as const) {
     try {
       await fs.lstat(join(codexDir, entry))
@@ -110,7 +110,7 @@ async function assertNoCodexHookSources(codexDir: string): Promise<void> {
       throw error
     }
     throw new Error(
-      `CodexWorkerAdapter.provision: refusing to enable generated hook trust while ${join(codexDir, entry)} exists`,
+      `CodexWorkerAdapter.${operation}: refusing to enable generated hook trust while ${join(codexDir, entry)} exists`,
     )
   }
 }
@@ -675,7 +675,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * runtime 配置合并（translator 的 model_provider/model/[model_providers.*] 胜出；
    * notify/trust/mcp 等能力配置取自 provision 版）。auth.json 不复制（env_key 鉴权）。
    */
-  private async mergeAdminProviderCodexHome(workspaceRoot: string, workspaceCodexHome: string, runtimeCodexHome: string): Promise<void> {
+  private async mergeAdminProviderCodexHome(
+    workspaceRoot: string,
+    workspaceCodexHome: string,
+    runtimeCodexHome: string,
+    operation: 'spawn' | 'resume',
+  ): Promise<void> {
     const readToml = async (file: string): Promise<Record<string, unknown>> => {
       try {
         return asTable(parseToml(await fs.readFile(file, 'utf-8')))
@@ -686,7 +691,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
     // 此目录会成为交互式 worker 实际使用的 CODEX_HOME；即便它来自 admin runtime，也不能
     // 让未知 hooks.json/plugins 与自动 trust 同时存在。
-    await assertNoCodexHookSources(runtimeCodexHome)
+    await assertNoCodexHookSources(runtimeCodexHome, operation)
     const provisioned = await readToml(join(workspaceCodexHome, 'config.toml'))
     const translator = await readToml(join(runtimeCodexHome, 'config.toml'))
     stripUntrustedCodexHookSources(translator)
@@ -850,10 +855,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
       if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || paneShowsWorkingAfterRaw)) {
+        runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'running' })
         return
       }
       if (primaryProbe === 'empty') {
+        runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
         return
       }
@@ -1004,7 +1011,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     let codexHome = join(spec.workspace.root, '.codex')
     const runtimeCodexHome = spec.connection_env?.CODEX_HOME
     if (runtimeCodexHome) {
-      await this.mergeAdminProviderCodexHome(spec.workspace.root, codexHome, runtimeCodexHome)
+      await this.mergeAdminProviderCodexHome(spec.workspace.root, codexHome, runtimeCodexHome, 'spawn')
       codexHome = runtimeCodexHome
     }
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
@@ -1014,11 +1021,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。
     // 网络放行见文件头"spawn/resume 启动参数"节。
-    const spawnBin = (await this.resolveBinForCommand())?.cmd
-    if (!spawnBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.spawn: no user-level codex installation')
-    const command = `${spawnBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT}`
-    const spawnStartedAt = Date.now()
-
     // newSession 成功之后才落 meta(running)+注册 runtime,同 cc 纪律:tmux 失败时不留任何
     // 持久痕迹,同 worker_id 可安全重试。CODEX_HOME 经 tmux -e 传给会话进程(execFile 直传
     // argv,不经过 shell 插值,不需要额外转义);PATH 同样经 -e 显式前置 codexBin 所在真实
@@ -1026,10 +1028,16 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
     const eventWatchOffset = await eventChannel.endOffset()
     const stopBaseline = await this.initialStopBaseline(eventChannel)
+    const spawnBin = (await this.resolveBinForCommand())?.cmd
+    if (!spawnBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.spawn: no user-level codex installation')
+    const env = await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env })
+    await assertNoCodexHookSources(codexHome, 'spawn')
+    const command = `${spawnBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT}`
+    const spawnStartedAt = Date.now()
     const controlEndpoint = await this.tmux.newSession({
       name: sessionName, cwd: spec.workspace.root, command,
       // connection_env（admin_provider CODEX_HOME/env_key）优先级高于 workspace 默认。
-      env: await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env }),
+      env,
     })
 
     // Codex 0.146 在首条 prompt 提交前不会创建 rollout。这里先建立空 session_ref 的
@@ -1177,16 +1185,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
       // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
       // `resume` 之前。
-      const resumeBin = (await this.resolveBinForCommand())?.cmd
-      if (!resumeBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.resume: no user-level codex installation')
-      const command = `${resumeBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT} resume ${shQuote(prev.session_ref)}`
-
       // P6-B admin_provider resume：上一化身的 runtime CODEX_HOME 已随终态清理，
       // 本次 admission 产出新目录——同样要合并 provision 配置（translator 配置胜出）。
       let resumeCodexHome = prevRuntime.codexHome
       const resumeRuntimeHome = opts?.connection_env?.CODEX_HOME
       if (resumeRuntimeHome) {
-        await this.mergeAdminProviderCodexHome(prevRuntime.workspaceRoot, join(prevRuntime.workspaceRoot, '.codex'), resumeRuntimeHome)
+        await this.mergeAdminProviderCodexHome(prevRuntime.workspaceRoot, join(prevRuntime.workspaceRoot, '.codex'), resumeRuntimeHome, 'resume')
         resumeCodexHome = resumeRuntimeHome
       }
 
@@ -1195,9 +1199,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
       const eventWatchOffset = await eventChannel.endOffset()
       const stopBaseline = await this.initialStopBaseline(eventChannel)
+      const resumeBin = (await this.resolveBinForCommand())?.cmd
+      if (!resumeBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.resume: no user-level codex installation')
+      const env = await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome })
+      await assertNoCodexHookSources(resumeCodexHome, 'resume')
+      const command = `${resumeBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT} resume ${shQuote(prev.session_ref)}`
       const controlEndpoint = await this.tmux.newSession({
         name: sessionName, cwd: prevRuntime.workspaceRoot, command,
-        env: await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome }),
+        env,
       })
 
       runtime = {
