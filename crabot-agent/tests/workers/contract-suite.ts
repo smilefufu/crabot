@@ -84,7 +84,7 @@ export function runContractSuite(name: string, makeFixture: MakeFixture): void {
     })
 
     it(
-      '① spawn → burst(idle) → state 收敛 idle，readOutput 含该 step 输出',
+      '① spawn → burst(idle) → state 收敛 idle，终端视图含该 step 输出',
       async () => {
         const spec = fx.makeSpec(freshWorkerId(), [{ output: '第一段输出', then: 'idle' }])
         const h = await fx.adapter.spawn(spec)
@@ -93,30 +93,31 @@ export function runContractSuite(name: string, makeFixture: MakeFixture): void {
         expect(h.session_ref).toBeTruthy()
         await waitForState(fx.adapter, h, 'idle')
 
-        const { chunk } = await fx.adapter.readOutput(h, { offset: 0 })
-        expect(chunk).toContain('第一段输出')
+        const terminal = await fx.adapter.readTerminal(h)
+        expect(terminal.kind).not.toBe('unavailable')
+        if (terminal.kind !== 'unavailable') expect(terminal.text).toContain('第一段输出')
       },
       15000,
     )
 
     it(
-      '② readOutput 游标增量：同一游标二次读为空，不重复吐旧内容',
+      '② 终端读取是完整替换视图，不暴露游标',
       async () => {
         const spec = fx.makeSpec(freshWorkerId(), [{ output: '第一段输出', then: 'idle' }])
         const h = await fx.adapter.spawn(spec)
         await waitForState(fx.adapter, h, 'idle')
 
-        const first = await fx.adapter.readOutput(h, { offset: 0 })
-        expect(first.chunk).toContain('第一段输出')
-
-        const second = await fx.adapter.readOutput(h, first.nextCursor)
-        expect(second.chunk).not.toContain('第一段输出')
+        const first = await fx.adapter.readTerminal(h)
+        const second = await fx.adapter.readTerminal(h)
+        expect(first.kind).not.toBe('unavailable')
+        expect(second.kind).not.toBe('unavailable')
+        if (second.kind !== 'unavailable') expect(second.text).toContain('第一段输出')
       },
       15000,
     )
 
     it(
-      '③ sendInput(idle) → 消费下一个 step，输出追加而非覆盖',
+      '③ sendInput(idle) → 消费下一个 step，终端视图更新',
       async () => {
         const spec = fx.makeSpec(freshWorkerId(), [
           { output: '第一段输出', then: 'idle' },
@@ -125,22 +126,18 @@ export function runContractSuite(name: string, makeFixture: MakeFixture): void {
         const h = await fx.adapter.spawn(spec)
         await waitForState(fx.adapter, h, 'idle')
 
-        const before = await fx.adapter.readOutput(h, { offset: 0 })
-        expect(before.chunk).toContain('第一段输出')
+        const before = await fx.adapter.readTerminal(h)
+        expect(before.kind).not.toBe('unavailable')
 
         await fx.adapter.sendInput(h, '继续')
         await waitForState(fx.adapter, h, 'idle')
 
-        const after = await fx.adapter.readOutput(h, { offset: 0 })
-        expect(after.chunk).toContain('第一段输出')
-        expect(after.chunk).toContain('第二段输出')
-
-        const incremental = await fx.adapter.readOutput(h, before.nextCursor)
-        expect(incremental.chunk).toContain('第二段输出')
-        // CLI TUI may redraw earlier history while editing/submitting; the cursor contract guarantees
-        // byte/log progression, not semantic de-duplication of terminal redraws. Builtin output is
-        // append-only text, so it must retain the stricter incremental-content guarantee.
-        if (name === 'builtin') expect(incremental.chunk).not.toContain('第一段输出')
+        const after = await fx.adapter.readTerminal(h)
+        expect(after.kind).not.toBe('unavailable')
+        if (after.kind !== 'unavailable') {
+          expect(after.text).toContain('第二段输出')
+          if (name === 'builtin') expect(after.text).toContain('第一段输出')
+        }
       },
       15000,
     )
@@ -204,8 +201,8 @@ export function runContractSuite(name: string, makeFixture: MakeFixture): void {
           })
           expect(forkHandle.worker_id).toBe(h.worker_id)
           await waitForState(fx.adapter, forkHandle, 'exited')
-          const output = await fx.adapter.readOutput(forkHandle, { offset: 0 })
-          expect(typeof output.chunk).toBe('string')
+          const terminal = await fx.adapter.readTerminal(forkHandle)
+          expect(terminal.kind === 'unavailable' || typeof terminal.text).toBeTruthy()
         } else {
           await expect(fx.adapter.fork(ref, '侧问问题', {
             query_id: randomUUID(),
@@ -229,10 +226,10 @@ export function runContractSuite(name: string, makeFixture: MakeFixture): void {
           const revivedHandle = await fx.adapter.resume(ref, '唤醒输入')
           expect(revivedHandle.worker_id).toBe(h.worker_id)
           // 不同实现续跑后的落定状态语义可能不同（idle / exited 都合法），只要求最终不再是
-          // 一直卡着——两者之一即可，同时验证输出通路可用。
+          // 一直卡着——两者之一即可，同时验证终端视图通路可用。
           await waitForState(fx.adapter, revivedHandle, ['idle', 'exited'])
-          const output = await fx.adapter.readOutput(revivedHandle, { offset: 0 })
-          expect(typeof output.chunk).toBe('string')
+          const terminal = await fx.adapter.readTerminal(revivedHandle)
+          expect(terminal.kind === 'unavailable' || typeof terminal.text).toBeTruthy()
         } else {
           await expect(fx.adapter.resume(ref, '唤醒输入')).rejects.toBeTruthy()
         }

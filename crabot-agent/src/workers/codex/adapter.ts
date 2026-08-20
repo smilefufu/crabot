@@ -30,10 +30,11 @@ import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
 import { parseRawControlKeys } from '../tmux/raw-control.js'
-import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
+import { DEFAULT_PASTE_READY_TIMEOUT_MS, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
-import { decodeTerminalOutput } from '../terminal-output.js'
+import type { TmuxControlEndpoint } from '../tmux/control-monitor.js'
+import { readFinalTerminalSnapshot, writeFinalTerminalSnapshot } from '../tmux/terminal-snapshot.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { WorkerExitedError, CapabilityNotSupportedError, CliInputStallError, WorkerImplUnavailableError, ForkEstablishmentError } from '../errors.js'
@@ -62,13 +63,13 @@ import type {
   IncarnationRef,
   ForkOptions,
   NormalizedTraceEvent,
-  OutputCursor,
   SpawnSpec,
   SendInputOptions,
   TraceCursor,
   WorkerAdapter,
   WorkerContractState,
   Workspace,
+  WorkerTerminalView,
 } from '../types.js'
 import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
@@ -177,10 +178,12 @@ interface Runtime {
   /** 本 worker 专属的隔离 CODEX_HOME(= `<workspaceRoot>/.codex`),spawn/resume 全程不变。 */
   readonly codexHome: string
   readonly sessionName: string
+  readonly controlEndpoint?: TmuxControlEndpoint
   sessionId: string
   /** 首投接受后发现的 rollout 文件绝对路径；发现失败时为 undefined。 */
   rolloutPath?: string
-  readonly outputLog: OutputLog
+  /** 仅无头 fork 写入纯文本；交互式 tmux 化身不保留原始输出流。 */
+  readonly outputLog?: OutputLog
   readonly eventChannel: CliEventChannel
   /** spawn 时 session 发现的结果:'discovered' 表示发现了真实 rollout 文件,'placeholder' 表示超时降级。
    * 内部状态机用,会透传到 meta 文件。 */
@@ -206,6 +209,14 @@ interface Runtime {
   resumed?: boolean
   /** Present only for a headless query fork; mainline incarnations are owned by tmux. */
   headlessClient?: CodexAppServerClient
+}
+
+type CapturedPane = PaneSnapshot & { captured_at: string }
+
+function controlMeta(runtime: Runtime): Record<string, string> {
+  return runtime.controlEndpoint
+    ? { control_socket: runtime.controlEndpoint.socket_path, control_monitor_id: runtime.controlEndpoint.monitor_id }
+    : {}
 }
 
 function instanceKey(h: { worker_id: string; seq: number }): string {
@@ -739,9 +750,32 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     )
   }
 
-  private async capture(runtime: Runtime): Promise<PaneSnapshot> {
+  private async capture(runtime: Runtime): Promise<CapturedPane> {
     const snapshot = await this.tmux.capturePane(runtime.sessionName)
-    return { ...snapshot, text: decodeTerminalOutput(snapshot.text) }
+    const captured = { text: snapshot.text, dead: snapshot.dead, captured_at: new Date().toISOString() }
+    if (!snapshot.dead) {
+      await writeFinalTerminalSnapshot(runtime.dir, runtime.seq, captured.text, captured.captured_at).catch((error) => {
+        console.warn(`[CodexWorkerAdapter] terminal snapshot write failed for ${runtime.worker_id}#${runtime.seq}:`, error)
+      })
+    }
+    return captured
+  }
+
+  private liveTerminal(snapshot: PaneSnapshot): WorkerTerminalView {
+    if (snapshot.dead) return { kind: 'unavailable', unavailable_reason: 'terminal_session_missing' }
+    return { kind: 'live_terminal', text: snapshot.text, captured_at: snapshot.captured_at ?? new Date().toISOString() }
+  }
+
+  private async persistFinalTerminal(runtime: Runtime): Promise<WorkerTerminalView | undefined> {
+    await this.capture(runtime).catch(() => undefined)
+    const final = await readFinalTerminalSnapshot(runtime.dir, runtime.seq)
+    return final ? { kind: 'final_terminal', ...final } : undefined
+  }
+
+  private async isPasteReady(runtime: Runtime): Promise<boolean> {
+    return runtime.controlEndpoint
+      ? (await this.tmux.getPasteReadiness(runtime.controlEndpoint)).state === 'ready'
+      : false
   }
 
   private async sendRawInput(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
@@ -758,7 +792,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         const next: CliControlState = runtime.controlState.kind === 'running' || paneShowsWorkingAfterRaw
           ? { kind: 'running' }
           : { kind: 'waiting_action', reason: 'input_pending' }
-        const report: StateChangeReport = { outputTail: snapshot.text, waitReason: 'input_pending' }
+        const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'input_pending' }
         await this.transitionControlState(runtime, h, next, report, false)
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
@@ -773,7 +807,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const reason = runtime.controlState.kind === 'waiting_action'
         ? runtime.controlState.reason
         : 'input_surface_unavailable'
-      const report: StateChangeReport = { outputTail: snapshot.text, waitReason: reason }
+      const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: reason }
       await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason }, report, false)
       throw new CliInputStallError('not_pasted', 'waiting_action', report)
     } catch (error) {
@@ -826,6 +860,15 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     let result
     try {
       baseline = (await this.capture(runtime)).text
+      if (!(await this.isPasteReady(runtime))) {
+        const snapshot = await this.capture(runtime)
+        const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'input_surface_unavailable' }
+        const next: CliControlState = mode === 'steering' && runtime.controlState.kind === 'running'
+          ? { kind: 'running' }
+          : { kind: 'waiting_action', reason: 'input_surface_unavailable' }
+        await this.transitionControlState(runtime, h, next, report, notify)
+        return { control_state: next.kind, disposition: 'not_pasted', report }
+      }
       result = await commitInput(
         {
           pasteText: async (value) => {
@@ -883,7 +926,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     else if (result.disposition === 'pending_in_ui') waitReason = 'input_pending'
     else waitReason = 'input_surface_unavailable'
     const report: StateChangeReport = {
-      outputTail: result.snapshot.text || baseline,
+      terminal: this.liveTerminal(result.snapshot),
       waitReason,
     }
     await this.transitionControlState(runtime, h, next, report, notify)
@@ -912,7 +955,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       codexHome = runtimeCodexHome
     }
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
-    const outputFile = join(dir, `output-${seq}.log`)
     // codex-docs + m2 实测:交互态无 --session-id 等价参数;--ask-for-approval never
     // --sandbox workspace-write 与 cc 用 --permission-mode bypassPermissions 同样的自动化意图。
     // 不传 --skip-git-repo-check(m2 实测顶层交互式 codex 不支持这个 flag,只有 codex exec
@@ -928,32 +970,16 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 持久痕迹,同 worker_id 可安全重试。CODEX_HOME 经 tmux -e 传给会话进程(execFile 直传
     // argv,不经过 shell 插值,不需要额外转义);PATH 同样经 -e 显式前置 codexBin 所在真实
     // 目录(nvm 部署陷阱,见 buildEnv/resolveBinDir 注释),不依赖 tmux server 自身环境。
-    await this.tmux.newSession({
-      name: sessionName, cwd: spec.workspace.root, command, outputFile,
+    const controlEndpoint = await this.tmux.newSession({
+      name: sessionName, cwd: spec.workspace.root, command,
       // connection_env（admin_provider CODEX_HOME/env_key）优先级高于 workspace 默认。
       env: await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env }),
-    })
-
-    // 启动期就绪握手(见 tmux/paste-ready.ts),排在 session 发现**之前**:
-    // - 它才是"能不能收输入"的判据。session 发现等的是 rollout 文件出现,那是"会话已建立"
-    //   的信号——启动期被模态框挡住时会话根本不会建立,那个轮询于是空转到超时,然后照样把
-    //   prompt 发出去(这正是本次要根治的"降级继续");
-    // - 顺带让 session 发现更稳:m2 实测 rollout 文件在 tmux 建会话约 3 秒后才落盘,几乎顶满
-    //   原来那个 3s 窗口;就绪握手先吸收掉启动耗时,发现窗口从"已经能收输入"那一刻才开始算。
-    const pasteReady = await waitForPasteReady(outputFile, {
-      timeoutMs: this.pasteReadyTimeoutMs,
-      isAlive: () => this.tmux.isAlive(sessionName),
     })
 
     // Codex 0.146 在首条 prompt 提交前不会创建 rollout。这里先建立空 session_ref 的
     // runtime，待 guarded initial input 被接受后再发现真实 session；启动期未投递则保持空值。
     const sessionId = ''
     const sessionDiscoveryStatus: 'discovered' | 'placeholder' = 'placeholder'
-    if (!pasteReady) {
-      console.warn(
-        `[codex-adapter] startup readiness handshake timed out for ${spec.worker_id}; opening input NOT delivered, session_ref left empty`,
-      )
-    }
 
     let handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'codex', session_ref: sessionId }
 
@@ -965,9 +991,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       workspaceRoot: spec.workspace.root,
       codexHome,
       sessionName,
+      controlEndpoint,
       sessionId,
       rolloutPath: undefined,
-      outputLog: new OutputLog(outputFile),
       eventChannel,
       sessionDiscoveryStatus,
       discoveryStartedAt: spawnStartedAt,
@@ -983,14 +1009,37 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_discovery: sessionDiscoveryStatus,
       workspace_root: spec.workspace.root,
       codex_home: codexHome,
+      ...controlMeta(runtime),
     })
     this.runtimes.set(instanceKey(handle), runtime)
+    try {
+      await controlEndpoint.enableRemainOnExit?.()
+    } catch (error) {
+      await this.transitionExited(runtime, handle, 'crashed')
+      throw error
+    }
+
+    // 启动期就绪握手(见 tmux/paste-ready.ts),排在 session 发现**之前**:
+    // - 它才是"能不能收输入"的判据。session 发现等的是 rollout 文件出现,那是"会话已建立"
+    //   的信号——启动期被模态框挡住时会话根本不会建立,那个轮询于是空转到超时,然后照样把
+    //   prompt 发出去(这正是本次要根治的"降级继续");
+    // - 顺带让 session 发现更稳:m2 实测 rollout 文件在 tmux 建会话约 3 秒后才落盘,几乎顶满
+    //   原来那个 3s 窗口;就绪握手先吸收掉启动耗时,发现窗口从"已经能收输入"那一刻才开始算。
+    const pasteReady = await waitForPasteReady(() => this.tmux.getPasteReadiness(controlEndpoint), {
+      timeoutMs: this.pasteReadyTimeoutMs,
+      isAlive: () => this.tmux.isAlive(sessionName),
+    })
+    if (!pasteReady) {
+      console.warn(
+        `[codex-adapter] startup readiness handshake timed out for ${spec.worker_id}; opening input NOT delivered, session_ref left empty`,
+      )
+    }
 
     // 等不到就绪就**不投递**(协议 §5.5 的"不安全态暂扣"):prompt 原封不动留在 spec 里没被
     // 消耗,manager 处理掉障碍后经 send_to_worker 重新投递即可。这里绝不能退化成"超时了也
     // 照发"——那正是 pollForNewRollout 现在的写法,也正是本次要根治的行为。
     if (!pasteReady) {
-      const initial_input = await this.initialStartupStall(runtime, handle, outputFile)
+      const initial_input = await this.initialStartupStall(runtime, handle)
       this.startEventWatch(runtime, handle)
       return { ...handle, initial_input }
     }
@@ -1001,7 +1050,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     } catch (err) {
       await this.getMutex(handle.worker_id).run(async () => {
         if (runtime.controlState.kind === 'exited') return
-        await this.tmux.killSession(sessionName)
         await this.transitionExited(runtime, handle, 'crashed')
       })
       throw err
@@ -1060,7 +1108,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 在 writeMeta 成功之后才提交,保证失败路径(newSession 抛错)幂等可重试。
     let handle!: IncarnationHandle
     let runtime!: Runtime
-    let outputFile!: string
     await this.getMutex(prev.worker_id).run(async () => {
       if (prevRuntime.resumed) {
         throw new Error(`CodexWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
@@ -1068,7 +1115,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const seq = await this.nextSeq(prev.worker_id)
       handle = { worker_id: prev.worker_id, seq, impl: 'codex', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
-      outputFile = join(dir, `output-${seq}.log`)
       // codex-docs: `codex resume <SESSION_ID>` 是独立子命令(不是 --resume flag)。
       // m2 实测:--ask-for-approval/--sandbox 这类主命令级选项必须排在 `resume` 子命令**之前**
       // ——放在 `resume <id>` 后面 codex 会报 usage 错、exit=2(原实现把它们放在 `resume <id>`
@@ -1090,8 +1136,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
       // PATH 前置同 spawn(nvm 部署陷阱)。
-      await this.tmux.newSession({
-        name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile,
+      const controlEndpoint = await this.tmux.newSession({
+        name: sessionName, cwd: prevRuntime.workspaceRoot, command,
         env: await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome }),
       })
 
@@ -1103,11 +1149,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         workspaceRoot: prevRuntime.workspaceRoot,
         codexHome: resumeCodexHome,
         sessionName,
+        controlEndpoint,
         sessionId: prev.session_ref,
         // resume 续写的是同一个 rollout 文件(session id 不变),不需要重新发现——直接沿用上一
         // 化身已发现的路径;上一化身当时若发现失败(占位 uuid),这里同样拿不到,保持未知。
         rolloutPath: prevRuntime.rolloutPath,
-        outputLog: new OutputLog(outputFile),
         eventChannel,
         sessionDiscoveryStatus: prevRuntime.sessionDiscoveryStatus,
         discoveryStartedAt: Date.now(),
@@ -1125,17 +1171,26 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         session_discovery: prevRuntime.sessionDiscoveryStatus,
         workspace_root: prevRuntime.workspaceRoot,
         codex_home: resumeCodexHome,
+        ...controlMeta(runtime),
       })
       this.runtimes.set(instanceKey(handle), runtime)
+      try {
+        await controlEndpoint.enableRemainOnExit?.()
+      } catch (error) {
+        await this.transitionExited(runtime, handle, 'crashed')
+        throw error
+      }
       prevRuntime.resumed = true
     })
 
-    const pasteReady = await waitForPasteReady(outputFile, {
+    const pasteReady = await waitForPasteReady(() => runtime.controlEndpoint
+      ? this.tmux.getPasteReadiness(runtime.controlEndpoint)
+      : Promise.resolve({ state: 'unknown' }), {
       timeoutMs: this.pasteReadyTimeoutMs,
       isAlive: () => this.tmux.isAlive(runtime.sessionName),
     })
     if (!pasteReady) {
-      const initial_input = await this.initialStartupStall(runtime, handle, outputFile)
+      const initial_input = await this.initialStartupStall(runtime, handle)
       this.startEventWatch(runtime, handle)
       return { ...handle, initial_input }
     }
@@ -1146,7 +1201,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     } catch (err) {
       await this.getMutex(handle.worker_id).run(async () => {
         if (runtime.controlState.kind === 'exited') return
-        await this.tmux.killSession(runtime.sessionName)
         await this.transitionExited(runtime, handle, 'crashed')
       })
       throw err
@@ -1242,7 +1296,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
     const appendOutput = (text: string) => {
       if (!text) return
-      outputWrites = outputWrites.then(() => runtime.outputLog.append(text))
+      outputWrites = outputWrites.then(() => runtime.outputLog!.append(text))
     }
     const finish = async (reason: IncarnationEndReason, error?: unknown) => {
       if (finished || !handle) return
@@ -1376,7 +1430,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       if (runtime.controlState.kind === 'waiting_action') {
         const snapshot = await this.capture(runtime)
-        const report: StateChangeReport = { outputTail: snapshot.text, waitReason: runtime.controlState.reason }
+        const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: runtime.controlState.reason }
         throw new CliInputStallError('not_pasted', 'waiting_action', report)
       }
       const mode: InputMode = runtime.controlState.kind === 'running' ? 'steering' : 'primary'
@@ -1406,14 +1460,42 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return report
   }
 
-  /**
-   * 落盘的是 tmux `pipe-pane` 抓的**输出流**(TUI 逐帧重绘的转义序列增量),不是纯文本。
-   * 解码只发生在这条返回路径上(见 `terminal-output.ts`),磁盘上的原文一字不动。
-   */
-  async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    const runtime = this.runtimes.get(instanceKey(h))
-    const outputLog = runtime ? runtime.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
-    return outputLog.read(cursor, undefined, decodeTerminalOutput)
+  async readTerminal(h: IncarnationHandle): Promise<WorkerTerminalView> {
+    const dir = join(this.deps.dataDir, h.worker_id)
+    if (h.query_id) {
+      const { chunk } = await new OutputLog(join(dir, `output-${h.seq}.log`)).read({ offset: 0 })
+      return chunk ? { kind: 'headless_text', text: chunk } : { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
+    }
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime) {
+      const final = await readFinalTerminalSnapshot(dir, h.seq)
+      return final
+        ? { kind: 'final_terminal', ...final }
+        : { kind: 'unavailable', unavailable_reason: 'legacy_without_terminal_snapshot' }
+    }
+    if (runtime.headlessClient || !runtime.sessionName) {
+      if (!runtime.outputLog) return { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
+      const { chunk } = await runtime.outputLog.read({ offset: 0 })
+      return chunk ? { kind: 'headless_text', text: chunk } : { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
+    }
+    if (await this.tmux.isAlive(runtime.sessionName)) {
+      try {
+        const snapshot = await this.capture(runtime)
+        if (snapshot.dead) {
+          const final = await readFinalTerminalSnapshot(runtime.dir, runtime.seq)
+          return final
+            ? { kind: 'final_terminal', ...final }
+            : { kind: 'unavailable', unavailable_reason: 'terminal_session_missing' }
+        }
+        return this.liveTerminal(snapshot)
+      } catch {
+        return { kind: 'unavailable', unavailable_reason: 'terminal_capture_failed' }
+      }
+    }
+    const final = await this.persistFinalTerminal(runtime)
+    return final
+      ? final
+      : { kind: 'unavailable', unavailable_reason: runtime.controlState.kind === 'exited' ? 'no_final_terminal_snapshot' : 'terminal_session_missing' }
   }
 
   /**
@@ -1531,7 +1613,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       if (runtime.controlState.kind === 'exited') return // 幂等:不覆盖原 ended_reason
       runtime.killed = true
       if (runtime.headlessClient) await runtime.headlessClient.terminate()
-      else await this.tmux.killSession(runtime.sessionName)
       await this.transitionExited(runtime, h, 'killed')
     })
   }
@@ -1614,6 +1695,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
       const alive = await this.tmux.isAlive(sessionName)
+      if (!alive) await this.tmux.killSession(sessionName)
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
       // P6-B：admin_provider 的 CODEX_HOME 在 worker 级 runtime 目录（spawn/resume 时落了
@@ -1622,7 +1704,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const sessionDiscoveryStatus: 'discovered' | 'placeholder' = meta.session_discovery ?? 'placeholder'
       const rolloutPath =
         sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
-      const outputFile = join(dir, `output-${ref.seq}.log`)
       const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
       const eventChannel = new CliEventChannel(eventsPath)
 
@@ -1639,9 +1720,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         workspaceRoot,
         codexHome,
         sessionName,
+        controlEndpoint: meta.control_socket && meta.control_monitor_id
+          ? { socket_path: meta.control_socket, monitor_id: meta.control_monitor_id }
+          : undefined,
         sessionId,
         rolloutPath,
-        outputLog: new OutputLog(outputFile),
         eventChannel,
         sessionDiscoveryStatus,
         discoveryStartedAt: Date.now(),
@@ -1676,6 +1759,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         wait_mode?: 'text' | 'action'
         wait_reason?: string
         startup_stalled?: boolean
+        control_socket?: string
+        control_monitor_id?: string
       }
     | undefined
   > {
@@ -1705,10 +1790,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return max + 1
   }
 
-  /** `onStateChange` 的 `report.lastText` 在 codex 这边同样刻意不传,理由与 cc 完全一致
-   * (输出是 tmux 落的 TUI 字节流,解码后也切不出"哪一段才算 assistant 发言")——见
-   * `workers/claude-code/adapter.ts` 的 transitionState 注释;唯一的例外同样是
-   * `report.outputTail`(启动期就绪握手超时,每个化身至多付一次,见 initialStartupStall)。 */
+  /** Codex 同样不报告 `lastText`；交互式 TUI 无法可靠划分 assistant 发言，详见 cc adapter。 */
   private async transitionControlState(
     runtime: Runtime,
     h: IncarnationHandle,
@@ -1726,6 +1808,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_discovery: runtime.sessionDiscoveryStatus,
       workspace_root: runtime.workspaceRoot,
       codex_home: runtime.codexHome,
+      ...controlMeta(runtime),
       ...(state.kind === 'waiting_text' ? { wait_mode: 'text' as const } : {}),
       ...(state.kind === 'waiting_action' ? { wait_mode: 'action' as const, wait_reason: state.reason } : {}),
     })
@@ -1738,14 +1821,18 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
   }
 
-  private async initialStartupStall(runtime: Runtime, h: IncarnationHandle, outputFile: string): Promise<InitialInputResult> {
-    const tail = decodeTerminalOutput(await readOutputTail(outputFile))
+  private async initialStartupStall(runtime: Runtime, h: IncarnationHandle): Promise<InitialInputResult> {
+    const snapshot = await this.capture(runtime).catch(() => undefined)
     if (!(await this.tmux.isAlive(runtime.sessionName))) {
       await this.transitionExited(runtime, h, 'crashed', false)
-      return { control_state: 'exited', disposition: 'not_pasted', report: { endReason: 'crashed', outputTail: tail } }
+      return {
+        control_state: 'exited',
+        disposition: 'not_pasted',
+        report: { endReason: 'crashed', ...(snapshot ? { terminal: { kind: 'final_terminal', text: snapshot.text, captured_at: snapshot.captured_at } } : {}) },
+      }
     }
     const report: StateChangeReport = {
-      outputTail: describeStartupStall({ impl: 'codex', timeoutMs: this.pasteReadyTimeoutMs, tail }),
+      ...(snapshot ? { terminal: this.liveTerminal(snapshot) } : {}),
       waitReason: 'startup_stall',
     }
     await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'startup_stall' }, report, false)
@@ -1753,6 +1840,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   private async transitionExited(runtime: Runtime, h: IncarnationHandle, ended_reason: IncarnationEndReason, notify = true): Promise<void> {
+    let terminal: WorkerTerminalView | undefined
+    if (!runtime.headlessClient && runtime.sessionName) {
+      terminal = await this.persistFinalTerminal(runtime)
+      await this.tmux.killSession(runtime.sessionName)
+    }
     await writeMetaAtomic(runtime.dir, runtime.seq, {
       seq: runtime.seq,
       state: 'exited',
@@ -1761,6 +1853,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_discovery: runtime.sessionDiscoveryStatus,
       workspace_root: runtime.workspaceRoot,
       codex_home: runtime.codexHome,
+      ...controlMeta(runtime),
     })
     runtime.controlState = { kind: 'exited', reason: ended_reason }
     runtime.ended_reason = ended_reason
@@ -1768,7 +1861,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     await this.stopEventWatch(runtime)
     if (!notify) return
     try {
-      this.deps.onStateChange?.(h, 'exited', { endReason: ended_reason })
+      this.deps.onStateChange?.(h, 'exited', { endReason: ended_reason, ...(terminal ? { terminal } : {}) })
     } catch (err) {
       console.error(`[CodexWorkerAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }

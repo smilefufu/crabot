@@ -9,7 +9,6 @@ import { } from '../../../src/workers/harness/ledger-types'
 import { WorkerEventLog, type HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { QueryReceiptStore } from '../../../src/workers/harness/query-receipt-store'
 import { CliInputStallError, QueryEstablishmentError } from '../../../src/workers/errors'
-import { describeStartupStall } from '../../../src/workers/tmux/paste-ready'
 import type {
   WorkerAdapter,
   WorkerImplId,
@@ -20,7 +19,6 @@ import type {
   StateChangeReport,
   SpawnSpec,
   Workspace,
-  OutputCursor,
   CapabilityBundle,
   AdapterCapabilities,
   InitialInputResult,
@@ -32,6 +30,10 @@ import type {
 
 function handleKey(h: IncarnationHandle): string {
   return `${h.worker_id}#${h.seq}`
+}
+
+function terminal(text: string) {
+  return { kind: 'live_terminal' as const, text, captured_at: '2026-08-19T00:00:00.000Z' }
 }
 
 interface FakeAdapterOpts {
@@ -58,7 +60,7 @@ class FakeAdapter implements WorkerAdapter {
   readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: SendInputOptions }> = []
   readonly killCalls: IncarnationHandle[] = []
   readonly forkCalls: Array<{ prev: IncarnationRef; forkInput: string; opts: ForkOptions }> = []
-  readonly readOutputCalls: IncarnationHandle[] = []
+  readonly readTerminalCalls: IncarnationHandle[] = []
   private readonly states = new Map<string, WorkerContractState>()
   private acceptedExitReport?: StateChangeReport
   private updatedSessionRef?: string
@@ -148,9 +150,9 @@ class FakeAdapter implements WorkerAdapter {
     return report
   }
 
-  async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    this.readOutputCalls.push(h)
-    return { chunk: '', nextCursor: cursor }
+  async readTerminal(h: IncarnationHandle) {
+    this.readTerminalCalls.push(h)
+    return { kind: 'unavailable' as const, unavailable_reason: 'headless_without_text' }
   }
 
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
@@ -385,7 +387,7 @@ describe('WorkerHarness.spawnWorker', () => {
       spawnInitialInput: {
         control_state: 'waiting_action',
         disposition: 'not_pasted',
-        report: { waitReason: 'input_surface_unavailable', outputTail: 'modal' },
+        report: { waitReason: 'input_surface_unavailable', terminal: terminal('modal') },
       },
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code', prompt: 'original' })
@@ -415,7 +417,7 @@ describe('WorkerHarness.spawnWorker', () => {
       spawnInitialInput: {
         control_state: 'waiting_action',
         disposition: 'pending_in_ui',
-        report: { waitReason: 'input_pending', outputTail: '❯ original' },
+        report: { waitReason: 'input_pending', terminal: terminal('❯ original') },
       },
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code', prompt: 'original' })
@@ -436,7 +438,7 @@ describe('WorkerHarness.spawnWorker', () => {
         if (!opts?.raw && text === 'bg') {
           throw new CliInputStallError('pending_in_ui', 'running', {
             waitReason: 'input_pending',
-            outputTail: '❯ bg',
+            terminal: terminal('❯ bg'),
           })
         }
       },
@@ -461,7 +463,7 @@ describe('WorkerHarness.spawnWorker', () => {
         if (!opts?.raw && text === 'bg') {
           throw new CliInputStallError('pending_in_ui', 'running', {
             waitReason: 'input_pending',
-            outputTail: '❯ bg',
+            terminal: terminal('❯ bg'),
           })
         }
       },
@@ -574,7 +576,7 @@ describe('WorkerHarness.handleStateChange', () => {
 
     harness.handleStateChange(h, 'idle', {
       waitReason: 'interaction_required',
-      outputTail: 'AskUserQuestion\n  Yes\n  No',
+      terminal: terminal('AskUserQuestion\n  Yes\n  No'),
       notification: { type: 'permission_prompt', message: 'Choose', title: 'Question' },
     })
     await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
@@ -701,11 +703,11 @@ describe('WorkerHarness.handleStateChange', () => {
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
     const text = (ev.detail as { text: string }).text
-    // 保留头部 2000 字符 + 一段告诉 manager"要全文去 read_worker_output"的标记。
+    // 保留头部 2000 字符；完整文本可由结构化活动流提供，不伪造终端历史入口。
     expect(text.startsWith('啊'.repeat(2000))).toBe(true)
     expect(text).toContain('已截断')
     expect(text).toContain('2600')
-    expect(text).toContain('read_worker_output')
+    expect(text).not.toContain('get_worker_terminal')
     expect(text.length).toBeLessThan(2000 + 100)
   })
 
@@ -732,7 +734,7 @@ describe('WorkerHarness.handleStateChange', () => {
     })
   })
 
-  it('CLI 启动期就绪握手超时上报的 outputTail 进 detail.text —— manager 醒来就拿到现场', async () => {
+  it('CLI 启动期就绪握手超时上报的终端画面进 detail.text —— manager 醒来就拿到现场', async () => {
     // protocol-agent-v3 §5.5「检测到无法识别的交互界面:暂扣 + 唤醒 manager(附界面内容)」。
     // 零协议改动:复用既有的 state_changed + detail.text 这条路,不新增事件类型也不新增状态。
     const { harness } = await makeHarness()
@@ -741,31 +743,31 @@ describe('WorkerHarness.handleStateChange', () => {
 
     const tail = '[crabot] claude-code 启动后 60s 内未就绪\n---\nNew MCP server found in this project: arXivPaper'
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { outputTail: tail })
+    harness.handleStateChange(h, 'idle', { terminal: terminal(tail) })
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
     expect(ev.detail).toEqual({ to: 'idle', text: tail })
   })
 
-  it('outputTail 同样受 text 的上限约束(TUI 字节流可以很长,不能整屏灌进 manager 上下文)', async () => {
+  it('终端画面同样受 text 的上限约束(不能整屏灌进 manager 上下文)', async () => {
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { outputTail: '啊'.repeat(2600) })
+    harness.handleStateChange(h, 'idle', { terminal: terminal('啊'.repeat(2600)) })
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
     const text = (ev.detail as { text: string }).text
-    expect(text).toContain('read_worker_output')
+    expect(text).not.toContain('get_worker_terminal')
     expect(text).toContain('共 2600 字符')
     expect(text.length).toBeLessThan(2600) // 真的截了,不是原样透传
   })
 
-  it('outputTail 超长时保**尾部**——拦住启动的模态框就在日志最末尾,保头等于把这条 detail 唯一的价值截掉', async () => {
-    // 与 #69 给 read_worker_output 改保尾同源:诊断"它现在卡在哪"永远该看最新的那一屏。
+  it('终端画面超长时保**尾部**——拦住启动的模态框在画面末尾', async () => {
+    // 诊断"它现在卡在哪"永远该看最新的那一屏。
     // 把这里改回 trimmed.slice(0, maxChars) 这条用例就挂:开头那 2000 个"啊"会顶掉模态框。
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
@@ -773,43 +775,36 @@ describe('WorkerHarness.handleStateChange', () => {
 
     const modal = '\nNew MCP server found in this project: arXivPaper\n  1. Use this MCP server\n  2. No, exit'
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { outputTail: '啊'.repeat(2600) + modal })
+    harness.handleStateChange(h, 'idle', { terminal: terminal('啊'.repeat(2600) + modal) })
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
     const text = (ev.detail as { text: string }).text
     expect(text.endsWith(modal.trim())).toBe(true) // 尾部(模态框那段)一字不缺
     expect(text.startsWith('啊')).toBe(false) // 开头被截,截断标记顶到最前面
-    expect(text).toContain('read_worker_output')
+    expect(text).not.toContain('get_worker_terminal')
   })
 
-  it('outputTail 超长时,describeStartupStall 那句指引仍然可见——它排在正文末尾,保尾截断天然保得住', async () => {
-    // 六轮 review:上一条用例被截掉的头部全是填充字符,观察不到"指引句被截没了"。这里喂真实
-    // 合成正文(一屏 pane 输出 + 那句指引)——把 describeStartupStall 改回"指引在头部",保尾
-    // 截断会把它连同 `---` 一起丢掉,manager 只剩屏幕字节,这条用例就挂。
+  it('终端画面超长时保留画面末尾的可操作提示', async () => {
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
-    // 2600 字符的屏幕内容:解码后一屏以文本为主的输出超过 2000 字符并不罕见
-    // (STARTUP_STALL_TAIL_BYTES 是 4096)。
-    const outputTail = describeStartupStall({ impl: 'claude-code', timeoutMs: 60_000, tail: '啊'.repeat(2600) })
+    // 2600 字符的终端画面超过 2000 字符并不罕见。
+    const terminalText = '啊'.repeat(2600) + '\nPress Enter to continue'
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { outputTail })
+    harness.handleStateChange(h, 'idle', { terminal: terminal(terminalText) })
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
     const text = (ev.detail as { text: string }).text
-    expect(text.length).toBeLessThan(outputTail.length) // 真的截了
-    expect(text).toContain('一个字符都没有投递') // 决定 manager 行为的那一句
-    expect(text).toContain('send_to_worker 的 raw 模式') // 连同它给的那条出路
-    expect(text).toContain('---') // 分隔符也还在,指引与屏幕内容仍分得开
+    expect(text.length).toBeLessThan(terminalText.length) // 真的截了
+    expect(text).toContain('Press Enter to continue')
     expect(text).toContain('啊') // 屏幕内容保住的是最新的那一段
-    // 被丢掉的是更早的屏幕内容——那部分确实在 output 日志里,提示语指的是一条读得到的路。
-    expect(text).toContain('更早的屏幕内容用 read_worker_output 读')
+    expect(text).not.toContain('get_worker_terminal')
   })
 
-  it('lastText 与 summary 仍然保**头部**——发言开门见山给结论,截断方向不能跟 outputTail 混成一个', async () => {
+  it('lastText 与 summary 仍然保**头部**——发言开门见山给结论,截断方向不能跟终端画面混成一个', async () => {
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
@@ -841,10 +836,9 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(ev.detail).toEqual({ to: 'exited' })
   })
 
-  it('过长的 summary 按更宽的一次性上限截断,且标记不指向 read_worker_output(summary 不进 output,那里读不到)', async () => {
+  it('过长的 summary 按更宽的一次性上限截断，且不指向已移除的输出读取接口', async () => {
     // summary 是一次性成本(只在化身落终态那一次产生一条),上限比每轮都付一遍的 text 宽
-    // 一倍。更要紧的是截断标记:text 截断后还能按 offset 去 read_worker_output 读全文,
-    // summary 没有这条后路——把 manager 指过去只会换来一次白跑的往返。
+    // 一倍。没有可读回全文的终端输出接口，截断标记不能指向不存在的入口。
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
@@ -859,7 +853,7 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(summary.startsWith('啊'.repeat(4096))).toBe(true)
     expect(summary).toContain('已截断')
     expect(summary).toContain('4600')
-    expect(summary).not.toContain('read_worker_output')
+    expect(summary).not.toContain('get_worker_terminal')
     expect(summary.length).toBeLessThan(4096 + 100)
   })
 
@@ -1340,7 +1334,7 @@ describe('WorkerHarness.sendToWorker', () => {
         await gate
         throw new CliInputStallError('pending_in_ui', 'running', {
           waitReason: 'input_pending',
-          outputTail: 'queued text not visibly acknowledged',
+          terminal: terminal('queued text not visibly acknowledged'),
         })
       },
     })
@@ -1460,7 +1454,7 @@ describe('WorkerHarness.sendToWorker', () => {
         await gate
         throw new CliInputStallError('not_pasted', 'running', {
           waitReason: 'input_surface_unavailable',
-          outputTail: 'esc to interrupt',
+          terminal: terminal('esc to interrupt'),
         })
       },
     })
@@ -1562,7 +1556,7 @@ describe('WorkerHarness.sendToWorker', () => {
           stalled = true
           throw new CliInputStallError('pending_in_ui', 'running', {
             waitReason: 'input_pending',
-            outputTail: '❯ held prompt',
+            terminal: terminal('❯ held prompt'),
           })
         }
       },
@@ -1591,7 +1585,7 @@ describe('WorkerHarness.sendToWorker', () => {
           stalled = true
           throw new CliInputStallError('not_pasted', 'running', {
             waitReason: 'input_surface_unavailable',
-            outputTail: 'Working',
+            terminal: terminal('Working'),
           })
         }
       },
@@ -2430,23 +2424,23 @@ describe('WorkerHarness 锁纪律', () => {
 })
 
 describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)', () => {
-  it('queryWorker fork 之后,sendToWorker/readWorkerOutput/killWorker 仍作用于主线化身(seq=1),不被 fork(seq=2)顶替', async () => {
+  it('queryWorker fork 之后,sendToWorker/getWorkerTerminal/killWorker 仍作用于主线化身(seq=1),不被 fork(seq=2)顶替', async () => {
     const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
-    const { fork_seq: forkSeq } = await harness.queryWorker(worker.worker_id, '侧问一下')
+    const { fork_seq: forkSeq, query_id: queryId } = await harness.queryWorker(worker.worker_id, '侧问一下')
     expect(forkSeq).toBe(2)
 
     // 修复前:lastIncarnation() 取数组最后一个,fork 之后就是 seq=2 的侧问分支——
-    // sendToWorker/killWorker/readWorkerOutput 全部会错误地 target 到它,主线失联。
+    // sendToWorker/killWorker/getWorkerTerminal 全部会错误地 target 到它,主线失联。
     await harness.sendToWorker(worker.worker_id, '继续干活')
     expect(fake.sendInputCalls).toHaveLength(1)
     expect(fake.sendInputCalls[0].h.seq).toBe(1)
 
-    await harness.readWorkerOutput(worker.worker_id, { offset: 0 })
-    expect(fake.readOutputCalls).toHaveLength(1)
-    expect(fake.readOutputCalls[0].seq).toBe(1)
+    await harness.getWorkerTerminal(worker.worker_id)
+    expect(fake.readTerminalCalls).toHaveLength(1)
+    expect(fake.readTerminalCalls[0].seq).toBe(1)
 
     await harness.killWorker(worker.worker_id, '测试终止')
     expect(fake.killCalls).toHaveLength(1)
@@ -2495,21 +2489,21 @@ describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)
   })
 })
 
-describe('WorkerHarness.readWorkerOutput', () => {
-  it('正常路径:透传 adapter.readOutput 的结果', async () => {
+describe('WorkerHarness.getWorkerTerminal', () => {
+  it('正常路径:透传 adapter.readTerminal 的结果', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
 
-    const result = await harness.readWorkerOutput(worker.worker_id, { offset: 0 })
+    const result = await harness.getWorkerTerminal(worker.worker_id)
 
-    expect(result).toEqual({ chunk: '', nextCursor: { offset: 0 } })
-    expect(fake.readOutputCalls).toHaveLength(1)
-    expect(fake.readOutputCalls[0]).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
+    expect(result).toEqual({ kind: 'unavailable', unavailable_reason: 'headless_without_text' })
+    expect(fake.readTerminalCalls).toHaveLength(1)
+    expect(fake.readTerminalCalls[0]).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
   })
 
   it('不存在的 worker_id → WorkerNotFoundError', async () => {
     const { harness } = await makeHarness()
-    await expect(harness.readWorkerOutput('w-does-not-exist', { offset: 0 })).rejects.toThrow(WorkerNotFoundError)
+    await expect(harness.getWorkerTerminal('w-does-not-exist')).rejects.toThrow(WorkerNotFoundError)
   })
 
   it('化身实现没有注册对应 adapter → 抛错,不静默返回空结果', async () => {
@@ -2517,7 +2511,7 @@ describe('WorkerHarness.readWorkerOutput', () => {
     const worker = await harness.spawnWorker(spawnParams())
     adaptersMap.delete(fake.implId)
 
-    await expect(harness.readWorkerOutput(worker.worker_id, { offset: 0 })).rejects.toThrow(/no adapter registered/)
+    await expect(harness.getWorkerTerminal(worker.worker_id)).rejects.toThrow(/no adapter registered/)
   })
 
   // ---- P4 Task 4:opts.seq 读指定化身(query_worker fork 分支的答案) ----
@@ -2525,17 +2519,18 @@ describe('WorkerHarness.readWorkerOutput', () => {
   it('给 opts.seq → 读取该 seq 对应化身(如 fork 分支)的输出,不是主线', async () => {
     const { harness, fake } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
-    const { fork_seq: forkSeq } = await harness.queryWorker(worker.worker_id, '侧问一下')
+    const { fork_seq: forkSeq, query_id: queryId } = await harness.queryWorker(worker.worker_id, '侧问一下')
 
-    const result = await harness.readWorkerOutput(worker.worker_id, { offset: 0 }, { seq: forkSeq })
+    const result = await harness.getWorkerTerminal(worker.worker_id, { seq: forkSeq })
 
-    expect(result).toEqual({ chunk: '', nextCursor: { offset: 0 } })
-    expect(fake.readOutputCalls).toHaveLength(1)
-    expect(fake.readOutputCalls[0]).toEqual({
+    expect(result).toEqual({ kind: 'unavailable', unavailable_reason: 'headless_without_text' })
+    expect(fake.readTerminalCalls).toHaveLength(1)
+    expect(fake.readTerminalCalls[0]).toEqual({
       worker_id: worker.worker_id,
       seq: forkSeq,
       impl: 'builtin',
       session_ref: `fork-ref-${worker.worker_id}#${forkSeq}`,
+      query_id: queryId,
     })
   })
 
@@ -2544,17 +2539,17 @@ describe('WorkerHarness.readWorkerOutput', () => {
     const worker = await harness.spawnWorker(spawnParams())
     await harness.queryWorker(worker.worker_id, '侧问一下')
 
-    await harness.readWorkerOutput(worker.worker_id, { offset: 0 })
+    await harness.getWorkerTerminal(worker.worker_id)
 
-    expect(fake.readOutputCalls).toHaveLength(1)
-    expect(fake.readOutputCalls[0].seq).toBe(1)
+    expect(fake.readTerminalCalls).toHaveLength(1)
+    expect(fake.readTerminalCalls[0].seq).toBe(1)
   })
 
   it('opts.seq 在台账中不存在 → 抛出明确错误,不静默返回空 chunk', async () => {
     const { harness } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
 
-    await expect(harness.readWorkerOutput(worker.worker_id, { offset: 0 }, { seq: 99 })).rejects.toThrow(/seq/)
+    await expect(harness.getWorkerTerminal(worker.worker_id, { seq: 99 })).rejects.toThrow(/seq/)
   })
 })
 

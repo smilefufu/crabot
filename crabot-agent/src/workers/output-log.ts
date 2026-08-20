@@ -1,14 +1,15 @@
 import * as fs from 'fs/promises'
 import { AsyncMutex } from './async-mutex'
-import type { OutputCursor } from './types'
+
+/** `OutputLog` 的内部读取位点；不属于 WorkerAdapter 或 RPC 契约。 */
+interface OutputCursor { readonly offset: number }
 
 /** 返回给调用方的默认字符上限(超了只保留尾部)。 */
 const DEFAULT_CAP = 50_000
 
 /**
- * 单次从磁盘读取的原始字节上限。它比 `cap` 大得多,因为 CLI worker 的原文要先解码
- * (`decode`)才是给人/给 manager 看的文本,而 TUI 重绘流的解码压缩比在 15~30 倍;
- * 按 `cap` 去读原始字节,50KB 预算最后只剩 1KB 有效内容。这里只是内存护栏。
+ * 单次从磁盘读取的字节上限。纯文本 artifact 也必须有这个内存护栏，不能因异常长的
+ * builtin 回答或 headless fork 结果撑大一次读取。
  */
 const RAW_WINDOW_MAX = 1_000_000
 
@@ -23,6 +24,12 @@ function skipIncompleteUtf8Head(buffer: Buffer, len: number): number {
   return maxSkip
 }
 
+/**
+ * builtin worker 和 CLI headless fork 的纯文本 artifact。
+ *
+ * 交互式 Claude Code/Codex 主线的 TUI 画面不写这里；调用方必须通过
+ * `WorkerAdapter.readTerminal()` 读取 tmux 当前画面或最终快照，不能从字节流反推渲染态。
+ */
 export class OutputLog {
   private mutex = new AsyncMutex()
 
@@ -53,29 +60,14 @@ export class OutputLog {
   }
 
   /**
-   * 从 `cursor.offset` 读到文件末尾;内容超过 `cap` 时**保留尾部,丢头部**。
+   * 从 `cursor.offset` 读到文件末尾；内容超过 `cap` 时保留尾部。
    *
-   * 方向是这么定的:这个入口的真实用途只有两类,而两类都要最新的那一段——
-   * - manager 的 `read_worker_output` 是在诊断"worker 现在卡在哪",最早的启动噪音对它没有
-   *   价值(现网踩过:172KB 日志里致命的 401 落在 byte 75618,头部 50KB 只有中途的重连症状,
-   *   manager 据此把中途症状写成了 kill reason);
-   * - admin 的 `read_worker_output_admin` 是终端输出的滚动视图,首帧要的也是最新画面。
-   * 交接材料(`harness.handoffIncarnation`)读完还要自己取尾部,同样受益。
-   * 没有"从头顺序读完整份日志"的调用方,所以不加开关,直接改缺省行为。
-   *
-   * 游标语义因此保持自洽:返回的 `nextCursor` 恒为本次读到的位置(即文件末尾),永远不倒退。
-   * 增量轮询完全不受影响——两次轮询之间的新增不超过 `cap` 时,行为与改动前逐字一致;超过
-   * 时保留新增部分的尾部。被跳过的字节数写在截断标记里(前缀,不是后缀:标记说明的是它
-   * **前面**缺了什么)。
-   *
-   * `decode` 是给 CLI worker 用的返回路径转换(见 `terminal-output.ts`):落盘的原文一字不动,
-   * 只有返回给调用方的这一份被解码。`cap` 作用在**解码后**的文本上——manager 的预算该花在
-   * 它真能读懂的内容上,而不是 TUI 转义序列。
+   * 这是内部纯文本 artifact 的读取辅助。没有 RPC 或 Manager 工具暴露这个 cursor；交互式
+   * CLI 的完整终端视图由 tmux capture-pane 单独提供。
    */
   async read(
     cursor: OutputCursor,
     cap: number = DEFAULT_CAP,
-    decode?: (raw: string) => string
   ): Promise<{ chunk: string; nextCursor: OutputCursor }> {
     return this.mutex.run(async () => {
       try {
@@ -103,7 +95,6 @@ export class OutputLog {
 
         const start = skippedBytes > 0 ? skipIncompleteUtf8Head(buffer, bytesRead) : 0
         let text = buffer.toString('utf-8', start, bytesRead)
-        if (decode) text = decode(text)
 
         let trimmedChars = 0
         if (text.length > cap) {

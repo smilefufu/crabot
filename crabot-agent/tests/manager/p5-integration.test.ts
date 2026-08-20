@@ -246,7 +246,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
       'trigger_schedule',
       'list_workers_admin',
       'get_worker_detail',
-      'read_worker_output_admin',
+      'get_worker_terminal',
       'get_worker_trace',
     ]) {
       expect(internals.methodHandlers.has(m), `${m} 应已注册`).toBe(true)
@@ -375,7 +375,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
   // --- ③ 三个读端点对真实台账 ---
 
-  it('list_workers_admin / get_worker_detail / read_worker_output_admin 对真实台账与真实输出日志返回正确数据', async () => {
+  it('list_workers_admin / get_worker_detail / get_worker_terminal 对真实台账与真实文本输出返回正确数据', async () => {
     boot()
     const stack = internals.managerStack!
     const alice = (`test::${'alice'}` as ManagerKey)
@@ -424,24 +424,15 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     await fs.mkdir(outDir, { recursive: true })
     await fs.writeFile(join(outDir, 'output-1.log'), '第一段输出\n第二段输出\n', 'utf-8')
 
-    const head = await rpc<{ chunk: string; next_cursor: string; eof: boolean }>('read_worker_output_admin', {
+    const terminal = await rpc<{ kind: string; text: string }>('get_worker_terminal', {
       worker_id: 'w-a1',
       seq: 1,
     })
-    expect(head.chunk).toBe('第一段输出\n第二段输出\n')
-    expect(head.eof).toBe(false)
-
-    const tail = await rpc<{ chunk: string; eof: boolean }>('read_worker_output_admin', {
-      worker_id: 'w-a1',
-      seq: 1,
-      cursor: head.next_cursor,
-    })
-    expect(tail.chunk).toBe('')
-    expect(tail.eof).toBe(true)
+    expect(terminal).toEqual({ kind: 'headless_text', text: '第一段输出\n第二段输出\n' })
   })
 
   /**
-   * P5 review 修复的端到端回归：admin 的 `/output`、`/trace` 在 `?seq=` 缺省时**不下发 seq**
+   * P5 review 修复的端到端回归：admin 的 `/terminal`、`/trace` 在 `?seq=` 缺省时**不下发 seq**
    * （载荷形状由 crabot-admin `admin-web-api.test.ts` 钉住），本用例把**那个载荷原样**打进真实
    * RPC + 真实台账，验它确实落在主线化身上。
    *
@@ -453,7 +444,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
    * 入主线链（`reviveIncarnation` 不填 forked_from）；期间 query_worker 从主线 fork 出 #3
    * （forked_from=2）。于是三个候选缺省互不相同：主线=#2、"第一个化身"=#1、"数组最后一条"=#3。
    */
-  it('admin 缺 seq 的转发载荷经真实 RPC → output/trace 都落在主线化身（不是 #1、不是 fork）', async () => {
+  it('admin 缺 seq 的转发载荷经真实 RPC → terminal/trace 都落在主线化身（不是 #1、不是 fork）', async () => {
     boot()
     const stack = internals.managerStack!
     // appendEvent 的 onEvent 支路会去唤醒监护 manager（要跑 LLM）并发事件，与本用例无关，挡掉。
@@ -502,18 +493,18 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     await fs.writeFile(join(outDir, 'output-2.log'), '当前主线 #2 的输出\n', 'utf-8')
     await fs.writeFile(join(outDir, 'output-3.log'), '侧问 fork #3 的输出\n', 'utf-8')
 
-    // ① output：不带 seq == 主线 #2
-    const defaultOut = await rpc<{ chunk: string }>('read_worker_output_admin', { worker_id: 'w-main' })
-    expect(defaultOut.chunk).toBe('当前主线 #2 的输出\n')
+    // ① terminal：不带 seq == 主线 #2
+    const defaultOut = await rpc<{ text: string }>('get_worker_terminal', { worker_id: 'w-main' })
+    expect(defaultOut.text).toBe('当前主线 #2 的输出\n')
     // 显式 seq 仍按 seq 走（也证明缺省确实不等于 1、不等于"最后一条"）
-    expect((await rpc<{ chunk: string }>('read_worker_output_admin', { worker_id: 'w-main', seq: 1 })).chunk).toBe(
+    expect((await rpc<{ text: string }>('get_worker_terminal', { worker_id: 'w-main', seq: 1 })).text).toBe(
       '旧主线 #1 的输出\n',
     )
-    expect((await rpc<{ chunk: string }>('read_worker_output_admin', { worker_id: 'w-main', seq: 3 })).chunk).toBe(
+    expect((await rpc<{ text: string }>('get_worker_terminal', { worker_id: 'w-main', seq: 3 })).text).toBe(
       '侧问 fork #3 的输出\n',
     )
     // 修复前 admin 下发的就是 seq=0：台账里恒不存在 → 抛错 → proxyAgentRpc 落 500
-    await expect(rpc('read_worker_output_admin', { worker_id: 'w-main', seq: 0 })).rejects.toThrow(
+    await expect(rpc('get_worker_terminal', { worker_id: 'w-main', seq: 0 })).rejects.toThrow(
       /no incarnation with seq=0/,
     )
 
@@ -543,7 +534,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     // 不是 #1 的那条、也不是 fork #3 的那条
     expect((await rpc<{ events: unknown[] }>('get_worker_trace', { worker_id: 'w-main', seq: 1 })).events).toHaveLength(1)
     // 修复前 admin 下发的 seq=0：静默返回空 events，与"该化身还没有事件"无法区分；
-    // 现在与 output 路径同形状抛错（见下一条用例）。
+    // 现在与 terminal 路径同形状抛错（见下一条用例）。
     await expect(rpc('get_worker_trace', { worker_id: 'w-main', seq: 0 })).rejects.toThrow(
       /no incarnation with seq=0/,
     )
@@ -552,7 +543,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
   /**
    * get_worker_trace 显式给了 seq 时的两种"空"必须可区分（P5 review 修复第二轮）：
    *
-   * - 化身**不存在** → 抛错（文案与 `read_worker_output_admin` 同形状，admin 侧统一映射 500）；
+   * - 化身**不存在** → 抛错（文案与 `get_worker_terminal` 同形状，admin 侧统一映射 500）；
    * - 化身**存在但还没产生事件** → 照常 200 + 空 events，**不能**误判成错误。
    *
    * 前者修复前是静默返回空 events，与后者在返回值上完全一样——正是上一轮已修的

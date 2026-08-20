@@ -430,8 +430,8 @@ function parseOptionalIntParam(raw: string | null): number | undefined {
  *
  * agent 侧同一件事有两处文案，大小写不同：`unified-agent.ts` 的 handler 显式抛
  * `Worker not found: <id>`（detail / trace），`harness.ts` 的 `WorkerNotFoundError` 抛
- * `worker not found: <id>`（output 走 `harness.readWorkerOutput`）。各端点各写各的匹配串时，
- * output 端点对同一个不存在的 id 落 500 而另外两个落 404（P5 review 修复第二轮）。
+ * `worker not found: <id>`（terminal 走 `harness.getWorkerTerminal`）。各端点各写各的匹配串时，
+ * terminal 端点对同一个不存在的 id 落 500 而另外两个落 404（P5 review 修复第二轮）。
  * 抽成一个谓词共用，是为了不让这种不对称再次悄悄漂移出来。
  *
  * 只做大小写归一、不放宽到 `includes('not found')`：agent 侧其它真错（如
@@ -2473,9 +2473,9 @@ export class AdminModule extends ModuleBase {
         await this.handleListWorkersApi(req, res, url)
         return
       }
-      const workerOutputMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/output$/)
-      if (workerOutputMatch && req.method === 'GET') {
-        await this.handleReadWorkerOutputApi(req, res, workerOutputMatch[1], url)
+      const workerTerminalMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/terminal$/)
+      if (workerTerminalMatch && req.method === 'GET') {
+        await this.handleGetWorkerTerminalApi(req, res, workerTerminalMatch[1], url)
         return
       }
       const workerTraceMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/trace$/)
@@ -7379,7 +7379,7 @@ export class AdminModule extends ModuleBase {
       module_id: 'crabot-agent',
       module_type: 'agent',
       version: '0.2.0',
-      protocol_version: '3.2.0',
+      protocol_version: '3.4.0',
       port: coreRuntime.port,
       orchestration: coreAgentOrchestrationConfig(),
       agent_config: resolvedAgentConfig,
@@ -10370,27 +10370,23 @@ export class AdminModule extends ModuleBase {
     )
   }
 
-  /** §10.3 `GET /api/agent/workers/:id/output` → `read_worker_output_admin`（§8.3）。 */
-  private async handleReadWorkerOutputApi(
+  /** §10.3 `GET /api/agent/workers/:id/terminal` → `get_worker_terminal`（§8.3）。 */
+  private async handleGetWorkerTerminalApi(
     _req: IncomingMessage,
     res: ServerResponse,
     workerId: string,
     url: URL,
   ): Promise<void> {
-    const cursor = url.searchParams.get('cursor') || undefined
-    // seq = 化身序号（从 1 起）。没给就**不下发该字段**，由 agent 侧取主线化身
-    // （harness.readWorkerOutput 的既有缺省，见 parseOptionalIntParam 注释）——与 cursor 同一纪律。
     const seq = parseOptionalIntParam(url.searchParams.get('seq'))
     await this.proxyAgentRpc<
-      { worker_id: string; seq?: number; cursor?: string },
-      { chunk: string; next_cursor: string; eof: boolean }
+      { worker_id: string; seq?: number },
+      unknown
     >(
       res,
-      'read_worker_output_admin',
+      'get_worker_terminal',
       {
         worker_id: workerId,
         ...(seq !== undefined ? { seq } : {}),
-        ...(cursor ? { cursor } : {}),
       },
       isWorkerNotFoundError,
     )

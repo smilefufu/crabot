@@ -29,7 +29,8 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('claude code')
     expect(MANAGER_IDENTITY).toContain('codex')
     expect(MANAGER_IDENTITY).toContain('你自己不干活')
-    expect(MANAGER_IDENTITY).toContain('派活、送话、侧问、看输出、终止')
+    expect(MANAGER_IDENTITY).toContain('派活、送话、侧问、看终端、终止')
+    expect(MANAGER_IDENTITY).toContain('get_worker_terminal')
     expect(MANAGER_IDENTITY).toContain('worker 与人类之间隔着你')
   })
 
@@ -97,7 +98,7 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).not.toContain('不需要你主动轮询')
     expect(MANAGER_IDENTITY).toContain('每跑完一轮')
     expect(MANAGER_IDENTITY).toContain('最后说的那段话')
-    expect(MANAGER_IDENTITY).toContain('read_worker_output')
+    expect(MANAGER_IDENTITY).toContain('get_worker_terminal')
   })
 
   it('含管家纪律：结论拿不到先回去问 worker（这是 manager 自己能解决的事）', () => {
@@ -171,7 +172,7 @@ describe('assembleManagerSystemPrompt 稳定装配', () => {
         'spawn_worker',
         'send_to_worker',
         'query_worker',
-        'read_worker_output',
+        'get_worker_terminal',
         'list_workers',
         'kill_worker',
         // crabot-info 工具

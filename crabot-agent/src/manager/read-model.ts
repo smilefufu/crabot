@@ -32,7 +32,7 @@
 import type { PaginationParams, PaginatedResult } from 'crabot-shared'
 import type { ManagerKey, LedgerWorker, TaskStatus } from '../workers/harness/ledger-types.js'
 import { isDecisionVisibleWorker } from '../workers/harness/task-status.js'
-import type { NormalizedTraceEvent, WorkerImplId } from '../workers/types.js'
+import type { NormalizedTraceEvent, WorkerImplId, WorkerTerminalView } from '../workers/types.js'
 
 /**
  * base-protocol §5.7 TimeRange。`crabot-shared` 目前没有导出它(只在协议文档和各 channel
@@ -80,36 +80,25 @@ export interface GetWorkerDetailResult {
 }
 
 /**
- * §8.3 read_worker_output_admin:按化身增量读终端输出。
- *
- * 实现是 harness 直读(`WorkerHarness.readWorkerOutput`),没有可抽出的纯逻辑,所以本文件
- * 只放类型——让 §8.3 四组 Params/Result 集中在一处便于逐字核对协议(P5 Task 3 报告的交接项)。
- * 注意协议这里的 `cursor` / `next_cursor` 是**字符串**,而 harness/adapter 侧是
- * `OutputCursor { offset: number }`,两者的互转在 RPC 壳里(unified-agent.ts)。
+ * §8.3 get_worker_terminal:按化身读取完整终端视图。
  */
-export interface ReadWorkerOutputAdminParams {
+export interface GetWorkerTerminalParams {
   worker_id: string
   /**
    * 化身序号(从 1 起)。**可选**:缺省 = 主线化身(`mainlineIncarnation`,即排除侧问 fork
-   * 之后的最新化身),沿用 `WorkerHarness.readWorkerOutput` 的既有缺省语义。调用方(admin
+   * 之后的最新化身),沿用 `WorkerHarness.getWorkerTerminal` 的既有缺省语义。调用方(admin
    * REST `?seq=` 缺省时)拿不到台账,算不出主线是哪个化身,只有不下发这个字段才落在正确的
    * 化身上——填 0 台账里恒不存在,填 1 则锁死在最早那个化身上。
    */
   seq?: number
-  cursor?: string
 }
 
-export interface ReadWorkerOutputAdminResult {
-  chunk: string
-  next_cursor: string
-  eof: boolean
-  unavailable_reason?: string
-}
+export type GetWorkerTerminalResult = WorkerTerminalView
 
 /** §8.3 get_worker_trace:结构化时间线(两层信息源见 §10.2) */
 export interface GetWorkerTraceParams {
   worker_id: string
-  /** 化身序号(从 1 起)。**可选**:缺省 = 主线化身,与 `ReadWorkerOutputAdminParams.seq` 同一缺省。 */
+  /** 化身序号(从 1 起)。**可选**:缺省 = 主线化身,与 `GetWorkerTerminalParams.seq` 同一缺省。 */
   seq?: number
   cursor?: string
 }

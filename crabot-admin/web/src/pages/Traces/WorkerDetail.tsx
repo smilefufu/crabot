@@ -11,6 +11,7 @@ import {
   type LedgerWorker,
   type WorkerIncarnation,
   type WorkerTaskStatus,
+  type WorkerTerminalView,
   type WorkerTraceEvent,
 } from '../../services/agent-observability'
 
@@ -344,46 +345,51 @@ function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
   )
 }
 
-function OutputPanel({ workerId, seq }: { workerId: string; seq?: number }) {
-  const [chunk, setChunk] = useState('')
-  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
-  const [hasMore, setHasMore] = useState(false)
-  const [cursorInvalid, setCursorInvalid] = useState(false)
+function terminalLabel(view: WorkerTerminalView): string {
+  switch (view.kind) {
+    case 'live_terminal': return '当前终端画面'
+    case 'final_terminal': return '最终终端画面'
+    case 'headless_text': return '无头文本输出'
+    case 'unavailable': return '终端画面不可用'
+  }
+}
 
-  const load = useCallback(async (cursor?: string) => {
+function OutputPanel({ workerId, seq }: { workerId: string; seq?: number }) {
+  const [terminal, setTerminal] = useState<WorkerTerminalView | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
     try {
-      const result = await agentObservabilityService.readWorkerOutput(workerId, {
-        ...(seq !== undefined ? { seq } : {}),
-        ...(cursor !== undefined ? { cursor } : {}),
-      })
-      if (cursor === undefined) setChunk(result.chunk)
-      else setChunk((previous) => previous + result.chunk)
-      setNextCursor(result.next_cursor)
-      setHasMore(result.chunk.length > 0 && result.next_cursor !== undefined)
+      setTerminal(await agentObservabilityService.getWorkerTerminal(workerId, seq === undefined ? {} : { seq }))
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      if (message.includes('INVALID_PARAMS') || message.includes('cursor')) setCursorInvalid(true)
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoading(false)
     }
   }, [workerId, seq])
 
   useEffect(() => {
-    setChunk('')
-    setCursorInvalid(false)
-    void load(undefined)
+    setTerminal(null)
+    void load()
   }, [load])
 
   return (
     <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{terminal ? terminalLabel(terminal) : '读取终端画面'}</span>
+        <button type="button" onClick={() => void load()} disabled={loading}>{loading ? '刷新中' : '刷新画面'}</button>
+      </div>
+      {error && <div style={{ color: 'var(--color-warning, #d97706)', fontSize: 12, marginBottom: 8 }}>终端画面暂不可用：{error}</div>}
+      {terminal?.kind === 'unavailable' ? (
+        <div style={{ color: 'var(--text-muted)', padding: 12 }}>不可用原因：{terminal.unavailable_reason}</div>
+      ) : (
       <pre style={{ background: 'var(--bg-muted, #f6f6f6)', padding: 12, borderRadius: 8, maxHeight: 320, overflow: 'auto', fontSize: 12, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-        {chunk || '（无输出）'}
+        {terminal?.text || '（无内容）'}
       </pre>
-      {cursorInvalid && (
-        <div style={{ fontSize: 12, color: 'var(--color-warning, #d97706)' }}>
-          游标已失效。
-          <button type="button" onClick={() => { setCursorInvalid(false); setChunk(''); void load(undefined) }} style={{ marginLeft: 8 }}>从头重新加载</button>
-        </div>
       )}
-      {!cursorInvalid && hasMore && nextCursor && <button type="button" onClick={() => void load(nextCursor)}>加载更多</button>}
     </div>
   )
 }
@@ -484,7 +490,7 @@ const WorkerDetailContent: React.FC = () => {
       <h3 style={{ fontSize: 14, margin: '12px 0 8px' }}>活动记录（化身 #{selectedSeq ?? '—'}）</h3>
       <Timeline workerId={worker.worker_id} seq={selectedSeq} />
 
-      <h3 style={{ fontSize: 14, margin: '20px 0 8px' }}>终端原始输出</h3>
+      <h3 style={{ fontSize: 14, margin: '20px 0 8px' }}>终端画面</h3>
       <OutputPanel workerId={worker.worker_id} seq={selectedSeq} />
     </div>
   )

@@ -10,7 +10,6 @@ import type {
   DetectResult,
   IncarnationHandle,
   IncarnationRef,
-  OutputCursor,
   SpawnSpec,
   WorkerAdapter,
   WorkerContractState,
@@ -63,8 +62,8 @@ class RecordingAdapter implements WorkerAdapter {
 
   async sendInput(_h: IncarnationHandle, _text: string): Promise<void> {}
 
-  async readOutput(_h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    return { chunk: '', nextCursor: cursor }
+  async readTerminal() {
+    return { kind: 'unavailable' as const, unavailable_reason: 'headless_without_text' }
   }
 
   async state(_h: IncarnationHandle): Promise<WorkerContractState> {

@@ -24,7 +24,6 @@ import type {
   IncarnationRef,
   SpawnSpec,
   Workspace,
-  OutputCursor,
   CapabilityBundle,
   AdapterCapabilities,
   DetectResult,
@@ -40,15 +39,15 @@ function handleKey(h: { worker_id: string; seq: number }): string {
 
 /**
  * CLI 形态的 adapter 桩:实现可选契约方法 `lastActivityAt`(真实实现从 meta 与原生会话
- * 记录建立任务进展基线,这里直接由用例摆布返回值),`readOutput` 返回一段可断言的 pane 尾部。
+ * 记录建立任务进展基线,这里直接由用例摆布返回值),`readTerminal` 返回可断言的 pane 画面。
  */
 class CliLikeAdapter implements WorkerAdapter {
   readonly implId: WorkerImplId
   /** 每个化身"最近一次可观测活动"的 epoch ms;用例直接改这张表模拟停摆/恢复。 */
   readonly activity = new Map<string, number | undefined>()
-  outputTail = '(pane 尾部)'
+  terminalText = '(pane 画面)'
   lastActivityAtCalls: string[] = []
-  readOutputCalls: string[] = []
+  readTerminalCalls: string[] = []
   private readonly states = new Map<string, WorkerContractState>()
 
   constructor(implId: WorkerImplId) {
@@ -71,9 +70,9 @@ class CliLikeAdapter implements WorkerAdapter {
     throw new Error('CliLikeAdapter.fork: 本文件不涉及')
   }
   async sendInput(_h: IncarnationHandle, _text: string): Promise<void> {}
-  async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    this.readOutputCalls.push(handleKey(h))
-    return { chunk: this.outputTail, nextCursor: cursor }
+  async readTerminal(h: IncarnationHandle) {
+    this.readTerminalCalls.push(handleKey(h))
+    return { kind: 'live_terminal' as const, text: this.terminalText, captured_at: '2026-08-19T00:00:00.000Z' }
   }
   /** 真实 adapter 的三源判定在这四例里全部落在 else 兜底 running——桩照此固定。 */
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
@@ -177,7 +176,7 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
 
   it('① 化身存活、state() 报 running、lastActivityAt 长时间不前进 → 发唤醒事件,detail 带 output 尾部', async () => {
     const { harness, adapter, workerId } = await spawnRunning()
-    adapter.outputTail = '⏺ 正在读取文件…'
+    adapter.terminalText = '⏺ 正在读取文件…'
 
     // 阈值之内:一条事件都不该有(改动前的行为)
     clockMs += STALL_MS - MINUTE
@@ -309,7 +308,7 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
 
   it('⑤-③ 重试不带正文:只有首报带 pane 现场,后续重试是一行,mailbox 不会堆同一份现场', async () => {
     const { harness, adapter, workerId } = await spawnRunning()
-    adapter.outputTail = '⏺ 正在读取文件…'
+    adapter.terminalText = '⏺ 正在读取文件…'
     deliverConsumed = false
 
     clockMs += STALL_MS + MINUTE
@@ -333,8 +332,8 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
       expect(text).toContain('重试投递')
       expect(text.length).toBeLessThan(120)
     }
-    // 只在首报那一次读过 pane —— 重试连 readOutput 都不调
-    expect(adapter.readOutputCalls).toHaveLength(1)
+    // 只在首报那一次读过 pane —— 重试连 readTerminal 都不调
+    expect(adapter.readTerminalCalls).toHaveLength(1)
   })
 
   it('⑥ 活性巡检不改变 task.status 或主线化身 state', async () => {

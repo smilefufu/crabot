@@ -8,7 +8,7 @@ function runtimeConfig(): UnifiedAgentConfig {
     module_id: 'crabot-agent',
     module_type: 'agent',
     version: '0.2.0',
-    protocol_version: '3.2.0',
+    protocol_version: '3.4.0',
     port: 19002,
     orchestration: {
       front_context_recent_messages_window_hours: 6,

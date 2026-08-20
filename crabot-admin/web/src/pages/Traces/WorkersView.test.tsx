@@ -1,5 +1,5 @@
 /**
- * P6-A §10 UI 测试：Worker 视图过滤、详情页化身链、cursor 失效恢复与 degraded 显示。
+ * P6-A §10 UI 测试：Worker 视图过滤、详情页化身链、终端画面刷新与 degraded 显示。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
@@ -17,7 +17,7 @@ const mocked = agentObservabilityService as unknown as {
   listWorkers: ReturnType<typeof vi.fn>
   getWorkerDetail: ReturnType<typeof vi.fn>
   getWorkerTrace: ReturnType<typeof vi.fn>
-  readWorkerOutput: ReturnType<typeof vi.fn>
+  getWorkerTerminal: ReturnType<typeof vi.fn>
 }
 
 function workerFixture() {
@@ -98,7 +98,7 @@ describe('WorkerDetail', () => {
     )
   }
 
-  it('化身链 + 时间线增量读取 + cursor 失效显式恢复', async () => {
+  it('化身链 + 时间线增量读取 + 终端画面首次加载', async () => {
     mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
     mocked.getWorkerTrace = vi.fn()
       .mockResolvedValueOnce({
@@ -110,7 +110,7 @@ describe('WorkerDetail', () => {
         events: [{ ts: '2026-08-01T00:00:01.000Z', kind: 'lifecycle', summary: 'spawned', source: 'harness' }],
         next_cursor: 'tok-1',
       })
-    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '当前画面', captured_at: '2026-08-01T00:00:00.000Z' })
 
     renderDetail()
     await waitFor(() => expect(screen.getByText('已启动')).toBeInTheDocument())
@@ -118,12 +118,8 @@ describe('WorkerDetail', () => {
     expect(screen.getByRole('button', { name: /#1.*主线/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /#2.*临时侧问/ })).toBeInTheDocument()
 
-    // 加载更多 → cursor 失效 → 显式提示
-    fireEvent.click(screen.getByText('加载更多'))
-    await waitFor(() => expect(screen.getByText(/游标已失效/)).toBeInTheDocument())
-    // 从头重载
-    fireEvent.click(screen.getByText('从头重新加载'))
-    await waitFor(() => expect(screen.getAllByText('已启动').length).toBeGreaterThan(0))
+    await waitFor(() => expect(screen.getByText('当前画面')).toBeInTheDocument())
+    expect(mocked.getWorkerTerminal).toHaveBeenCalledWith('w-1234567890ab', { seq: 1 })
   })
 
   it('native degraded 时 harness 事件仍显示，且 reason 独立呈现', async () => {
@@ -133,7 +129,7 @@ describe('WorkerDetail', () => {
       next_cursor: 'tok-1',
       unavailable_reason: 'native unavailable: file gone',
     })
-    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'unavailable', unavailable_reason: 'terminal_capture_failed' })
     renderDetail()
     await waitFor(() => expect(screen.getByText('已启动')).toBeInTheDocument())
     expect(screen.getByText(/native unavailable/)).toBeInTheDocument()
@@ -145,7 +141,7 @@ describe('WorkerDetail', () => {
       events: [{ ts: '2026-08-01T00:00:01.000Z', kind: 'lifecycle', summary: '旧版任务已完成', source: 'legacy' }],
       next_cursor: 'tok-1',
     })
-    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'unavailable', unavailable_reason: 'legacy_without_terminal_snapshot' })
     renderDetail()
 
     await waitFor(() => expect(screen.getByText('历史记录')).toBeInTheDocument())
@@ -156,13 +152,13 @@ describe('WorkerDetail', () => {
   it('切换临时侧问后，活动流与终端输出同步切换', async () => {
     mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
     mocked.getWorkerTrace = vi.fn().mockResolvedValue({ events: [], next_cursor: 'tok-1' })
-    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'headless_text', text: '侧问文本' })
     renderDetail()
 
     await waitFor(() => expect(screen.getByRole('button', { name: /#2.*临时侧问/ })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: /#2.*临时侧问/ }))
     await waitFor(() => expect(mocked.getWorkerTrace).toHaveBeenLastCalledWith('w-1234567890ab', { seq: 2 }))
-    expect(mocked.readWorkerOutput).toHaveBeenLastCalledWith('w-1234567890ab', { seq: 2 })
+    expect(mocked.getWorkerTerminal).toHaveBeenLastCalledWith('w-1234567890ab', { seq: 2 })
   })
 
   it('投递失败和异常退出保留在默认活动流', async () => {
@@ -174,7 +170,7 @@ describe('WorkerDetail', () => {
       ],
       next_cursor: 'tok-1',
     })
-    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
     renderDetail()
 
     await waitFor(() => expect(screen.getByText('投递失败')).toBeInTheDocument())
@@ -192,7 +188,7 @@ describe('WorkerDetail', () => {
       ],
       next_cursor: 'tok-1',
     })
-    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
     renderDetail()
 
     await waitFor(() => expect(screen.getByText('Read')).toBeInTheDocument())
@@ -213,7 +209,7 @@ describe('WorkerDetail', () => {
       ],
       next_cursor: 'tok-1',
     })
-    mocked.readWorkerOutput = vi.fn().mockResolvedValue({ chunk: '', next_cursor: '0' })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
 
     renderDetail()
 
@@ -224,7 +220,7 @@ describe('WorkerDetail', () => {
     expect(screen.queryByText('item_completed')).not.toBeInTheDocument()
     expect(screen.getByText('主线实现：').parentElement).toHaveTextContent('内置')
     expect(mocked.getWorkerTrace).toHaveBeenCalledWith('w-1234567890ab', { seq: 1 })
-    expect(mocked.readWorkerOutput).toHaveBeenCalledWith('w-1234567890ab', { seq: 1 })
+    expect(mocked.getWorkerTerminal).toHaveBeenCalledWith('w-1234567890ab', { seq: 1 })
 
     fireEvent.click(screen.getByRole('button', { name: '展开全文' }))
     expect(screen.getByRole('button', { name: '收起' })).toBeInTheDocument()

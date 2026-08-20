@@ -6,7 +6,7 @@
  * capabilities() 判断)是否真的对得上——桩可以被写成"凑巧满足断言"的样子,不代表真实
  * adapter 也这样用。本文件补上这一层:
  *
- * 1. 真实 BuiltinWorkerAdapter(mock LLM,不碰真实网络)跑一遍 spawn → readWorkerOutput →
+ * 1. 真实 BuiltinWorkerAdapter(mock LLM,不碰真实网络)跑一遍 spawn → getWorkerTerminal →
  *    sendToWorker 续跑 → finish_task → 台账终态 → reconcileOnStartup 幂等的全链路。
  * 2. 真实 ClaudeCodeAdapter + mock CLI(tests/workers/fixtures/mock-cli.mjs)+ 真实 tmux
  *    (无 tmux 环境 skip)跑 spawn → sendToWorker → killWorker,断言台账/事件正确。
@@ -94,7 +94,7 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
   })
 
   it(
-    'spawn → readWorkerOutput → sendToWorker 续跑 → finish_task → 台账终态正确,reconcileOnStartup 幂等不误判已终态',
+    'spawn → getWorkerTerminal → sendToWorker 续跑 → finish_task → 台账终态正确,reconcileOnStartup 幂等不误判已终态',
     async () => {
       const ledgersDir = join(dataDir, 'ledgers')
       const workspacesRoot = join(dataDir, 'workspaces')
@@ -149,10 +149,9 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
         return w.task.status === 'waiting_input'
       })
 
-      // 经 harness.readWorkerOutput(不是直接戳 adapter)拿到 builtin 真实写盘的输出——
-      // 证明 harness → adapter.readOutput 这条接线是通的。
-      const { chunk } = await harness.readWorkerOutput(worker.worker_id, { offset: 0 })
-      expect(chunk).toContain('A 还是 B')
+      // 经 harness.getWorkerTerminal(不是直接戳 adapter)拿到 builtin 真实写盘的纯文本。
+      const terminal = await harness.getWorkerTerminal(worker.worker_id)
+      expect(terminal).toMatchObject({ kind: 'headless_text', text: expect.stringContaining('A 还是 B') })
 
       // sendToWorker 续跑:走 harness 的正常投递路径(per-worker 锁 + inbox.flush),命中
       // 真实 adapter.sendInput,不是断言 FakeAdapter 桩记录的 sendInputCalls。
@@ -201,10 +200,14 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
 // ---- Part 2/3: 真实 claude-code adapter + mock CLI + 真实 tmux ----
 
 function detectTmux(): boolean {
+  const socket = `crabot-vitest-${process.pid}`
   try {
     execFileSync('which', ['tmux'], { stdio: 'ignore' })
+    execFileSync('tmux', ['-L', socket, 'new-session', '-d', '-s', 'probe', 'exit 0'], { stdio: 'ignore' })
+    execFileSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' })
     return true
   } catch {
+    try { execFileSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' }) } catch {}
     return false
   }
 }
@@ -331,11 +334,10 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
       expect(settledWorker.incarnations[0].session_ref).toBeTruthy()
       expect(settledWorker.incarnations[0].session_ref).toMatch(/^[0-9a-fA-F-]{36}$/)
 
-      // 经 harness.readWorkerOutput 轮询到 mock CLI 真实写入 pipe-pane 的第一段输出——
-      // 证明 tmux newSession + pipe-pane + OutputLog 这条真实链路是通的。
+      // 经 harness.getWorkerTerminal 轮询到 mock CLI 已渲染的第一段终端画面。
       await waitUntil(async () => {
-        const { chunk } = await harness.readWorkerOutput(worker.worker_id, { offset: 0 })
-        return chunk.includes('第一段输出')
+        const terminal = await harness.getWorkerTerminal(worker.worker_id)
+        return terminal.kind === 'live_terminal' && terminal.text.includes('第一段输出')
       })
 
       // 直接读事件文件确认 Stop hook 真的执行过(证明 CliEventChannel.hookCommand 的产物
@@ -350,8 +352,8 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
       await harness.sendToWorker(worker.worker_id, '继续')
 
       await waitUntil(async () => {
-        const { chunk } = await harness.readWorkerOutput(worker.worker_id, { offset: 0 })
-        return chunk.includes('第二段输出')
+        const terminal = await harness.getWorkerTerminal(worker.worker_id)
+        return terminal.kind === 'live_terminal' && terminal.text.includes('第二段输出')
       })
 
       // 普通投递先由 harness 落 running；随后 Stop callback 单独结算 waiting_text。
@@ -519,8 +521,8 @@ describe.skipIf(!tmuxAvailable)(
 
         // 等 mock CLI 真的处理完首条输入、写完输出,确认会话已经稳定跑起来。
         await waitUntil(async () => {
-          const { chunk } = await adapterA.readOutput(h, { offset: 0 })
-          return chunk.includes('先答一句')
+          const terminal = await adapterA.readTerminal(h)
+          return terminal.kind === 'live_terminal' && terminal.text.includes('先答一句')
         })
 
         // 模拟"重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空,从未见过这个化身。
@@ -577,8 +579,8 @@ describe.skipIf(!tmuxAvailable)(
         sessionsToCleanup.push(`crabot-w-${worker.worker_id}-1`)
 
         await waitUntil(async () => {
-          const { chunk } = await harness1.readWorkerOutput(worker.worker_id, { offset: 0 })
-          return chunk.includes('第一段输出')
+          const terminal = await harness1.getWorkerTerminal(worker.worker_id)
+          return terminal.kind === 'live_terminal' && terminal.text.includes('第一段输出')
         })
 
         // "重启":全新 harness + adapter 实例,指向同一份台账/dataDir,内存 runtimes 为空。
@@ -595,8 +597,8 @@ describe.skipIf(!tmuxAvailable)(
         await expect(harness2.sendToWorker(worker.worker_id, '继续')).resolves.toBeUndefined()
 
         await waitUntil(async () => {
-          const { chunk } = await harness2.readWorkerOutput(worker.worker_id, { offset: 0 })
-          return chunk.includes('第二段输出')
+          const terminal = await harness2.getWorkerTerminal(worker.worker_id)
+          return terminal.kind === 'live_terminal' && terminal.text.includes('第二段输出')
         })
 
         // 修复前:adapterB.kill 对无常驻 runtime 的化身直接抛通用 Error,killWorker 没有
@@ -644,8 +646,8 @@ describe.skipIf(!tmuxAvailable)(
         })
 
         await waitUntil(async () => {
-          const { chunk } = await harness1.readWorkerOutput(worker.worker_id, { offset: 0 })
-          return chunk.includes('第一段输出')
+          const terminal = await harness1.getWorkerTerminal(worker.worker_id)
+          return terminal.kind === 'live_terminal' && terminal.text.includes('第一段输出')
         })
 
         // 绕开 adapter.kill,直接杀死 tmux 会话——模拟"agent 进程重启前,这个 worker 的 tmux
@@ -673,11 +675,11 @@ describe.skipIf(!tmuxAvailable)(
         expect(afterWorker.incarnations[1].state).toBe('running')
         sessionsToCleanup.push(`crabot-w-${worker.worker_id}-${afterWorker.incarnations[1].seq}`)
 
-        // 新化身真的在跑:wakeInput 送达 mock CLI,readWorkerOutput(读主线=新化身)应该
+        // 新化身真的在跑:wakeInput 送达 mock CLI,getWorkerTerminal(读主线=新化身)应该
         // 拿到新会话独立重跑一遍脚本产出的第一段输出。
         await waitUntil(async () => {
-          const { chunk } = await harness2.readWorkerOutput(worker.worker_id, { offset: 0 })
-          return chunk.includes('第一段输出')
+          const terminal = await harness2.getWorkerTerminal(worker.worker_id)
+          return terminal.kind === 'live_terminal' && terminal.text.includes('第一段输出')
         })
       },
       20000,

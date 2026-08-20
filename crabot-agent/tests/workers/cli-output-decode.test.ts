@@ -1,99 +1,70 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import * as fs from 'fs/promises'
-import * as path from 'path'
-import * as os from 'os'
-import { ClaudeCodeAdapter } from '../../src/workers/claude-code/adapter'
-import { CodexWorkerAdapter } from '../../src/workers/codex/adapter'
-import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter'
-import type { IncarnationHandle } from '../../src/workers/types'
+import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { ClaudeCodeAdapter } from '../../src/workers/claude-code/adapter.js'
+import { CodexWorkerAdapter } from '../../src/workers/codex/adapter.js'
+import {
+  readFinalTerminalSnapshot,
+  terminalSnapshotPath,
+  writeFinalTerminalSnapshot,
+} from '../../src/workers/tmux/terminal-snapshot.js'
 
-/**
- * 解 ANSI 是 **CLI 化身特有**的处理:cc/codex 的输出日志是 tmux `pipe-pane` 抓的终端
- * 输出流(TUI 重绘的转义序列增量),builtin 的输出天然是纯文本。这里锁的就是这条边界
- * 落在 adapter 层:两个 CLI adapter 的 readOutput 解码,builtin 的不解。
- *
- * 三个 adapter 的 readOutput 在内存里没有常驻 runtime 时都按约定路径
- * `<dataDir>/<worker_id>/output-<seq>.log` 重建 OutputLog,所以这些用例只需把固件写到
- * 那个路径,不用真的起 tmux / 子进程。
- */
-const RAW_FIXTURE = path.join(__dirname, 'fixtures', 'codex-tui-tail.ansi')
-
-describe('CLI worker 输出解码(adapter 层边界)', () => {
-  let dataDir: string
-  let raw: string
+describe('终端最终画面快照', () => {
+  let dir: string
 
   beforeEach(async () => {
-    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-output-decode-'))
-    raw = await fs.readFile(RAW_FIXTURE, 'utf-8')
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'terminal-snapshot-'))
   })
 
   afterEach(async () => {
-    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
   })
 
-  async function seedOutputLog(workerId: string): Promise<void> {
-    await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
-    await fs.writeFile(path.join(dataDir, workerId, 'output-1.log'), raw, 'utf-8')
-  }
+  it('只保留同一化身最后一次非空画面', async () => {
+    await writeFinalTerminalSnapshot(dir, 1, '第一帧\n\n', '2026-08-19T00:00:00.000Z')
+    await writeFinalTerminalSnapshot(dir, 1, '最终画面\n', '2026-08-19T00:01:00.000Z')
 
-  function handle(workerId: string, impl: IncarnationHandle['impl']): IncarnationHandle {
-    return { worker_id: workerId, seq: 1, impl, session_ref: 'unused' }
-  }
-
-  it('claude-code adapter 的 readOutput 返回解码后的文本,磁盘原文一字不动', async () => {
-    const workerId = 'w-cc-decode'
-    await seedOutputLog(workerId)
-    const adapter = new ClaudeCodeAdapter({ dataDir })
-
-    const { chunk } = await adapter.readOutput(handle(workerId, 'claude-code'), { offset: 0 })
-
-    expect(chunk).toContain('unexpected status 401 Unauthorized')
-    expect(chunk).not.toContain('\x1b')
-    expect(chunk.length).toBeLessThan(raw.length / 5)
-
-    expect(await fs.readFile(path.join(dataDir, workerId, 'output-1.log'), 'utf-8')).toBe(raw)
+    await expect(readFinalTerminalSnapshot(dir, 1)).resolves.toEqual({
+      text: '最终画面',
+      captured_at: '2026-08-19T00:01:00.000Z',
+    })
+    await expect(fs.readdir(dir)).resolves.toEqual(['terminal-final-1.json'])
   })
 
-  it('codex adapter 的 readOutput 返回解码后的文本,磁盘原文一字不动', async () => {
-    const workerId = 'w-codex-decode'
-    await seedOutputLog(workerId)
-    const adapter = new CodexWorkerAdapter({ dataDir })
-
-    const { chunk } = await adapter.readOutput(handle(workerId, 'codex'), { offset: 0 })
-
-    expect(chunk).toContain('unexpected status 401 Unauthorized')
-    expect(chunk).not.toContain('\x1b')
-    expect(chunk.length).toBeLessThan(raw.length / 5)
-
-    expect(await fs.readFile(path.join(dataDir, workerId, 'output-1.log'), 'utf-8')).toBe(raw)
+  it('空画面不会抹掉已有的最终快照', async () => {
+    await writeFinalTerminalSnapshot(dir, 2, '仍应保留', '2026-08-19T00:00:00.000Z')
+    await expect(writeFinalTerminalSnapshot(dir, 2, '   \n\n')).resolves.toBeUndefined()
+    await expect(readFinalTerminalSnapshot(dir, 2)).resolves.toEqual({
+      text: '仍应保留',
+      captured_at: '2026-08-19T00:00:00.000Z',
+    })
   })
 
-  it('复刻现网事故:172KB 量级的日志、致命错误在尾部,manager 这条路读得到它', async () => {
-    // 事故形状:开头是海量启动噪音(那次 manager 只读到 byte 13965 处的"Reconnecting"中途
-    // 症状,把它当成了根因),真正的 401 落在远超 byte-cap 的位置,只有尾部才有。
-    const workerId = 'w-incident-shape'
-    const startupNoise = '\x1b[2J\x1b[H\x1b[38;5;220mReconnecting... 2/5 Connection reset by peer\x1b[0m'
-    const bloated = startupNoise.repeat(3000) + raw
-    expect(bloated.length).toBeGreaterThan(170_000)
-
-    await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
-    await fs.writeFile(path.join(dataDir, workerId, 'output-1.log'), bloated, 'utf-8')
-
-    const adapter = new CodexWorkerAdapter({ dataDir })
-    const { chunk, nextCursor } = await adapter.readOutput(handle(workerId, 'codex'), { offset: 0 })
-
-    expect(chunk).toContain('unexpected status 401 Unauthorized')
-    expect(chunk).toContain('invalid_api_key')
-    expect(nextCursor.offset).toBe(Buffer.byteLength(bloated, 'utf-8'))
+  it('快照是结构化终端画面，不保留 raw pipe-pane 字节流', async () => {
+    await writeFinalTerminalSnapshot(dir, 3, 'Codex 已就绪', '2026-08-19T00:00:00.000Z')
+    const raw = await fs.readFile(terminalSnapshotPath(dir, 3), 'utf-8')
+    expect(raw).toBe('{"text":"Codex 已就绪","captured_at":"2026-08-19T00:00:00.000Z"}\n')
+    expect(raw).not.toContain('\u001b')
   })
 
-  it('builtin adapter 不解码:它的输出本来就是纯文本,不该被这套重放动过', async () => {
-    const workerId = 'w-builtin-nodecode'
-    await seedOutputLog(workerId)
-    const adapter = new BuiltinWorkerAdapter({ dataDir })
+  it('dead pane 的 tmux 状态提示不会覆盖 cc/codex 已有最终画面', async () => {
+    for (const Adapter of [ClaudeCodeAdapter, CodexWorkerAdapter]) {
+      const adapter = Object.create(Adapter.prototype) as {
+        tmux: { capturePane: () => Promise<{ text: string; dead: boolean }> }
+        capture: (runtime: { sessionName: string; dir: string; seq: number; worker_id: string }) => Promise<unknown>
+      }
+      adapter.tmux = {
+        capturePane: async () => ({ text: 'Pane is dead (status 0)', dead: true }),
+      }
+      await writeFinalTerminalSnapshot(dir, 4, '最后有效画面', '2026-08-19T00:00:00.000Z')
 
-    const { chunk } = await adapter.readOutput(handle(workerId, 'builtin'), { offset: 0 })
+      await adapter.capture({ sessionName: 'dead-pane', dir, seq: 4, worker_id: 'w-1' })
 
-    expect(chunk).toBe(raw)
+      await expect(readFinalTerminalSnapshot(dir, 4)).resolves.toEqual({
+        text: '最后有效画面',
+        captured_at: '2026-08-19T00:00:00.000Z',
+      })
+    }
   })
 })

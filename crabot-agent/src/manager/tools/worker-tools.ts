@@ -2,7 +2,7 @@
  * worker 工具集 —— manager 唯一的 worker 编排入口(protocol-agent-v3 §4.1/§4.3/§5.5)。
  *
  * 七个工具全部是 `WorkerHarness`(P3 已合并,本模块只调用、不修改,唯一的 additive 例外见
- * `harness.readWorkerOutput` 的 `opts.seq` 参数)既有方法的薄封装:只负责
+ * `harness.getWorkerTerminal` 的 `opts.seq` 参数)既有方法的薄封装:只负责
  * 1) 组装 harness 方法的入参(`spawn_worker` 据 `deps.context()` 填 `origin`/`report_to`);
  * 2) 把 harness 的返回值/异常转成 engine `ToolCallResult`——异常永不穿透成 engine 层错误,
  *    统一转成 `isError: true` 的可读文本,manager 能读到失败
@@ -26,7 +26,7 @@
  *
  * ## isReadOnly
  *
- * 与 `read_worker_output`/`list_workers`/`get_worker_detail` 标 `isReadOnly: true`(供 engine 并行调度只读工具,
+ * 与 `get_worker_terminal`/`list_workers`/`get_worker_detail` 标 `isReadOnly: true`(供 engine 并行调度只读工具,
  * `partitionToolCalls`)。`kill_worker` 虽然同步返回,但会改变 worker/task 状态,不是只读。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.1、§4.3、§5.5
@@ -315,8 +315,8 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     description:
       '对正在跑的 worker 建立一次独立侧问(fork 语义),不打扰主线执行。只有 fork 已创建、' +
       '首问已接受且化身已落账后才返回 started + query_id + fork_seq；建立失败会在本次调用' +
-      '直接返回原因。答案生成仍异步，完成或失败后会可靠通知你；用 read_worker_output 传入' +
-      '返回的 fork_seq 可随时读取侧问输出。',
+      '直接返回原因。答案生成仍异步，完成或失败后会可靠通知你；用 get_worker_terminal 传入' +
+      '返回的 fork_seq 可随时读取侧问文本。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -343,39 +343,34 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     },
   })
 
-  // --- read_worker_output(同步:真实增量输出) ---
-  const readWorkerOutput = defineTool({
-    name: 'read_worker_output',
+  // --- get_worker_terminal(同步:完整终端视图) ---
+  const getWorkerTerminal = defineTool({
+    name: 'get_worker_terminal',
     description:
-      '同步读取 worker 化身的输出(从 offset 读到当前末尾,全文另落盘留路径)。' +
-      '**超长时保留的是尾部**——你拿到的永远是最新的那一段,诊断"现在卡在哪"直接读即可,' +
-      '不必为了够到最新状态反复续读。首次调用 offset 传 0,之后用上次返回的 next_offset ' +
-      '拿增量。缺省读主线化身;读侧问分支(query_worker 触发)的答案时传 seq——事件里会' +
-      '给出该侧问化身的 seq。',
+      '同步读取 worker 化身当前完整终端画面、最终画面或 headless 纯文本。每次调用都是完整替换，' +
+      '没有 offset/增量；缺省读主线化身，侧问结果传 query_worker 返回的 fork_seq。',
     inputSchema: {
       type: 'object',
       properties: {
         worker_id: { type: 'string', description: '目标 worker id' },
-        offset: { type: 'number', description: '读取起点(上次返回的 next_offset),缺省 0 = 从头(超长则给尾部)' },
         seq: { type: 'number', description: '读侧问分支的答案时传 query 事件里给出的 seq;缺省读主线化身' },
       },
       required: ['worker_id'],
     },
     isReadOnly: true,
     call: async (input): Promise<ToolCallResult> => {
-      const { worker_id, offset, seq } = input as { worker_id?: string; offset?: number; seq?: number }
-      if (!worker_id || typeof worker_id !== 'string') return invalid('read_worker_output: worker_id 必填且为字符串')
+      const { worker_id, seq } = input as { worker_id?: string; seq?: number }
+      if (!worker_id || typeof worker_id !== 'string') return invalid('get_worker_terminal: worker_id 必填且为字符串')
 
       try {
         await authorizeWorker(worker_id)
-        const { chunk, nextCursor, unavailable_reason } = await harness.readWorkerOutput(
+        const terminal = await harness.getWorkerTerminal(
           worker_id,
-          { offset: offset ?? 0 },
           seq !== undefined ? { seq } : undefined
         )
-        return ok({ worker_id, chunk, next_offset: nextCursor.offset, ...(unavailable_reason ? { unavailable_reason } : {}) })
+        return ok({ worker_id, terminal })
       } catch (error) {
-        return mapError(`read_worker_output(${worker_id})`, error)
+        return mapError(`get_worker_terminal(${worker_id})`, error)
       }
     },
   })
@@ -602,7 +597,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     spawnWorker,
     sendToWorker,
     queryWorker,
-    readWorkerOutput,
+    getWorkerTerminal,
     listWorkers,
     getWorkerDetail,
     listWorkerImplementations,

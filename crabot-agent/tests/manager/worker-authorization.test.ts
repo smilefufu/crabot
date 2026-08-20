@@ -12,7 +12,7 @@ function tools(master = false, valid = true) {
   const harness = {
     findWorker: vi.fn(async (id: string) => id === 'a' ? { managerKey: A, worker: a } : id === 'b' ? { managerKey: B, worker: b } : undefined),
     listWorkers: vi.fn(async () => [a]), listAllWorkers: vi.fn(async () => [{ managerKey: A, worker: a }, { managerKey: B, worker: b }]),
-    sendToWorker: vi.fn(), queryWorker: vi.fn(), killWorker: vi.fn(), readWorkerOutput: vi.fn(), spawnWorker: vi.fn(),
+    sendToWorker: vi.fn(), queryWorker: vi.fn(), killWorker: vi.fn(), getWorkerTerminal: vi.fn(), spawnWorker: vi.fn(),
   }
   const auth = master ? { kind: 'friend_master' as const, manager_key: A, friend_id: 'f', generation: 1 } : undefined
   return { harness, list: buildWorkerTools({ harness: harness as never, context: () => ({ managerKey: A, reportTo: { channel_id: 'wechat', session_id: 'a' } }), authorization: () => auth, validateMasterAuthorization: async () => valid }) }
@@ -22,7 +22,7 @@ describe('session worker authorization', () => {
   it('ordinary tool face has no list_all_workers; known external ID is uniformly denied before worker actions', async () => {
     const { harness, list } = tools(false)
     expect(list.map(t => t.name)).not.toContain('list_all_workers')
-    for (const name of ['send_to_worker', 'query_worker', 'kill_worker', 'read_worker_output', 'get_worker_detail']) {
+    for (const name of ['send_to_worker', 'query_worker', 'kill_worker', 'get_worker_terminal', 'get_worker_detail']) {
       const tool = list.find(t => t.name === name)!
       const result = await tool.call(name === 'query_worker' ? { worker_id: 'b', question: 'q' } : name === 'send_to_worker' ? { worker_id: 'b', text: 'x' } : { worker_id: 'b' })
       expect(result.isError).toBe(true)
@@ -50,7 +50,7 @@ describe('session worker authorization', () => {
     const harness = {
       findWorker: vi.fn(async (id: string) => id === 'b' ? { managerKey: B, worker: b } : { managerKey: A, worker: a }),
       listWorkers: vi.fn(async () => [a]), listAllWorkers: vi.fn(async () => [{ managerKey: A, worker: a }, { managerKey: B, worker: b }]),
-      sendToWorker: vi.fn(), queryWorker: vi.fn(), killWorker: vi.fn(), readWorkerOutput: vi.fn(), spawnWorker: vi.fn(),
+      sendToWorker: vi.fn(), queryWorker: vi.fn(), killWorker: vi.fn(), getWorkerTerminal: vi.fn(), spawnWorker: vi.fn(),
     }
     const authorization = () => ({ kind: 'friend_master' as const, manager_key: A, friend_id: 'f', generation })
     const old = buildWorkerTools({ harness: harness as never, context: () => ({ managerKey: A, reportTo: { channel_id: 'wechat', session_id: 'a' } }), authorization, validateMasterAuthorization: async auth => auth.generation === generation })

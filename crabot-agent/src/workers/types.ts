@@ -87,7 +87,6 @@ export type IncarnationEndReason =
   | 'completed' | 'failed' | 'killed' | 'superseded' | 'crashed' | 'pre_migration'
 
 export interface Workspace { readonly root: string }
-export interface OutputCursor { readonly offset: number }
 export interface TraceCursor { readonly offset: number }
 
 export interface SupervisionObservation {
@@ -249,29 +248,22 @@ export interface StateChangeReport {
    *
    * 它与 `lastText` 是**两样东西**,不能相互替代:`lastText` 是 assistant 说的话,一个
    * 全程只调工具、最后用 `finish_task` 收场的 worker(定时反思/早报就是这个形态)从头到
-   * 尾一句 text 都没有,`lastText` 与 `output.log` 双双为空,`summary` 是它唯一的交付物。
+   * 尾一句 text 都没有,`lastText` 与 builtin 的纯文本 artifact 双双为空,`summary` 是它唯一的交付物。
    */
   readonly summary?: string
-  /**
-   * 化身当前 pane 输出的**尾部**,只有 CLI 实现在**启动期就绪握手超时**这一条路径上产出:
-   * 此时开工输入一个字符都没投递,worker 停在一个我们无法识别的界面上(典型是模态弹窗),
-   * manager 需要现场才能决策——protocol-agent-v3 §5.5「检测到无法识别的交互界面:暂扣 +
-   * 唤醒 manager(附界面内容);manager 可用 `raw` 直接敲键」。
-   *
-   * 内容已由 adapter 过一遍 `terminal-output.ts` 的解码,与同一个 adapter `readOutput` 的
-   * 返回形态一致:TUI 逐帧重绘的转义序列直接给 manager 看是乱码,而它同一时刻用
-   * `read_worker_output` 拿到的是解码后的文本——同一份日志不能有两种形态。
-   *
-   * 与 `lastText` 是**两样东西**,不能相互替代:`lastText` 是 worker 说的话(只有 builtin
-   * 拆得出);这里是屏幕这一刻吐出的内容,不代表 worker 表达了什么——它只是给 manager
-   * 判断"卡在哪"的现场素材。
-   */
-  readonly outputTail?: string
+  /** 当前终端画面或明确不可用原因；CLI 的画面直接来自 tmux capture-pane。 */
+  readonly terminal?: WorkerTerminalView
   /** CLI waiting_action / 投递暂扣的诊断原因。 */
   readonly waitReason?: string
   /** cc Notification 的解析载荷；harness 映射为 manager-facing detail。 */
   readonly notification?: { readonly type: string; readonly message?: string; readonly title?: string }
 }
+
+export type WorkerTerminalView =
+  | { kind: 'live_terminal'; text: string; captured_at: string }
+  | { kind: 'final_terminal'; text: string; captured_at: string }
+  | { kind: 'headless_text'; text: string; captured_at?: string }
+  | { kind: 'unavailable'; unavailable_reason: string }
 
 export interface DetectResult {
   installed: boolean
@@ -309,7 +301,7 @@ export interface WorkerAdapter {
   resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle>
   fork(prev: IncarnationRef, forkInput: string, opts: ForkOptions): Promise<IncarnationHandle>
   sendInput(h: IncarnationHandle, text: string, opts?: SendInputOptions): Promise<void>
-  readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }>
+  readTerminal(h: IncarnationHandle): Promise<WorkerTerminalView>
   state(h: IncarnationHandle): Promise<WorkerContractState>
   /**
    * 该化身**最近一次可观察到的任务/执行进展**时刻(epoch ms);全部来源不可用时返回

@@ -113,8 +113,8 @@ import {
   type ListWorkersAdminResult,
   type GetWorkerDetailParams,
   type GetWorkerDetailResult,
-  type ReadWorkerOutputAdminParams,
-  type ReadWorkerOutputAdminResult,
+  type GetWorkerTerminalParams,
+  type GetWorkerTerminalResult,
   type GetWorkerTraceParams,
   type GetWorkerTraceResult,
 } from './manager/read-model.js'
@@ -1252,7 +1252,7 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('commit_worker_implementation_bootstrap', this.handleCommitWorkerBootstrap.bind(this))
     this.registerMethod('list_manager_episodes_admin', this.handleListManagerEpisodesAdmin.bind(this))
     this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
-    this.registerMethod('read_worker_output_admin', this.handleReadWorkerOutputAdmin.bind(this))
+    this.registerMethod('get_worker_terminal', this.handleGetWorkerTerminal.bind(this))
     this.registerMethod('get_worker_trace', this.handleGetWorkerTrace.bind(this))
   }
 
@@ -3236,27 +3236,12 @@ export class UnifiedAgent extends ModuleBase {
     return buildWorkerDetail(found)
   }
 
-  /**
-   * §8.3 read_worker_output_admin：按化身增量读终端输出。
-   *
-   * `eof` 的口径：本次已读到**当前**输出末尾（chunk 为空）。它**不**表示化身已经终结——
-   * worker 仍在跑时会继续追加，调用方据 `next_cursor` 继续轮询即可；要判断"再也不会有
-   * 新输出"应看 `get_worker_detail` 里该化身的 state/ended_reason。
-   */
-  private async handleReadWorkerOutputAdmin(
-    params: ReadWorkerOutputAdminParams
-  ): Promise<ReadWorkerOutputAdminResult> {
-    const { chunk, nextCursor, unavailable_reason } = await this.requireManagerStack().harness.readWorkerOutput(
+  /** §8.3 get_worker_terminal：返回一次完整的 live/final/headless/unavailable 观察。 */
+  private async handleGetWorkerTerminal(params: GetWorkerTerminalParams): Promise<GetWorkerTerminalResult> {
+    return this.requireManagerStack().harness.getWorkerTerminal(
       params.worker_id,
-      { offset: parseOffsetCursor(params.cursor) },
       params.seq === undefined ? undefined : { seq: params.seq },
     )
-    return {
-      chunk,
-      next_cursor: String(nextCursor.offset),
-      eof: chunk.length === 0,
-      ...(unavailable_reason ? { unavailable_reason } : {}),
-    }
   }
 
   /**
@@ -3267,7 +3252,7 @@ export class UnifiedAgent extends ModuleBase {
    * 游标是"该化身已返回的事件条数"：事件流 append-only，条数即稳定位点。
    *
    * `params.seq` 缺省（admin REST 的 `?seq=` 没给）时取**主线化身**——与
-   * `read_worker_output_admin` 走的 `harness.readWorkerOutput` 缺省逐字同源（共用
+   * `get_worker_terminal` 走的 `harness.getWorkerTerminal` 缺省逐字同源（共用
    * `mainlineIncarnation`），保证两个端点在同一次"不带 seq"的调用下描述的是同一个化身。
    * 缺这个分支时 `event.seq === undefined` 恒为 false，会静默返回空 events，与"该化身确实
    * 还没有事件"无法区分（P5 review 修复）。
@@ -3275,7 +3260,7 @@ export class UnifiedAgent extends ModuleBase {
    * 同理，**显式**给的 seq 在化身链里不存在时抛错而非返回空 events（P5 review 修复第二轮）：
    * 化身链的存在性只能问台账，不能问事件流——"这个化身不存在"与"这个化身确实还没产生
    * 事件"在 events.jsonl 上是同一个结果（都是空），只有先查台账才分得开。判定与错误文案
-   * 与 `harness.readWorkerOutput` 同形状（共用 `findIncarnationBySeq`），让 admin 侧统一映射。
+   * 与 `harness.getWorkerTerminal` 同形状（共用 `findIncarnationBySeq`），让 admin 侧统一映射。
    */
   private async handleGetWorkerTrace(params: GetWorkerTraceParams): Promise<GetWorkerTraceResult> {
     const stack = this.requireManagerStack()

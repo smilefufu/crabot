@@ -6,16 +6,20 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { ClaudeCodeAdapter, eventsFilePath, WorkerExitedError } from '../../src/workers/claude-code/adapter.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
-import { BRACKETED_PASTE_ENABLE } from '../../src/workers/tmux/paste-ready.js'
+import type { TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
 import type { ForkEstablishmentError } from '../../src/workers/errors.js'
 import type { IncarnationHandle, SpawnSpec, WorkerContractState } from '../../src/workers/types.js'
 
 function detectTmux(): boolean {
+  const socket = `crabot-vitest-${process.pid}`
   try {
     execFileSync('which', ['tmux'], { stdio: 'ignore' })
+    execFileSync('tmux', ['-L', socket, 'new-session', '-d', '-s', 'probe', 'exit 0'], { stdio: 'ignore' })
+    execFileSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' })
     return true
   } catch {
+    try { execFileSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' }) } catch {}
     return false
   }
 }
@@ -88,11 +92,14 @@ function claudeBinFor(
   return `env MOCK_CLI_SCRIPT=${shQuote(JSON.stringify(script))} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} ${argvEnv}${sessionEnv}node ${shQuote(MOCK_CLI)}`
 }
 
-/** 假 TmuxDriver 的 newSession 替身:落一份 output 日志并写入 \e[?2004h。
- * spawn 在投递开工输入之前要等这个信号(启动期就绪握手,见 src/workers/tmux/paste-ready.ts)
- * ——不扮演"TUI 已请求 bracketed paste"的假 driver 会让每个用例白等一次握手超时。 */
-async function fakeReadyNewSession(spec: TmuxSessionSpec): Promise<void> {
-  await fs.writeFile(spec.outputFile, BRACKETED_PASTE_ENABLE, { flag: 'a' })
+/** 假 TmuxDriver 的就绪控制端点；测试不再伪造 pipe-pane 原始输出文件。 */
+const READY_CONTROL_ENDPOINT: TmuxControlEndpoint = {
+  socket_path: '/tmp/crabot-test-ready.sock',
+  monitor_id: 'crabot-test-ready',
+}
+
+async function fakeReadyNewSession(_spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+  return READY_CONTROL_ENDPOINT
 }
 
 /** 扮演"已经就绪的 TUI"的最小 pane 命令:先请求 bracketed paste 再挂住不退。理由同上。 */
@@ -112,6 +119,10 @@ async function waitForState(
     await new Promise((r) => setTimeout(r, 100))
   }
   throw new Error(`waitForState timeout: expected '${target}', last seen '${last}'`)
+}
+
+function terminalText(view: Awaited<ReturnType<ClaudeCodeAdapter['readTerminal']>>): string {
+  return view.kind === 'unavailable' ? '' : view.text
 }
 
 describe('ClaudeCodeAdapter.provision', () => {
@@ -388,21 +399,20 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    '① spawn → mock 输出 → Stop hook → state 收敛 idle,readOutput 可读到该输出',
+    '① spawn → mock 输出 → Stop hook → state 收敛 idle,终端画面可读',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
       const h = await adapter.spawn(makeSpec(workerId, '你好'))
 
       await waitForState(adapter, h, 'idle')
 
-      const { chunk } = await adapter.readOutput(h, { offset: 0 })
-      expect(chunk).toContain('第一段输出')
+      expect(terminalText(await adapter.readTerminal(h))).toContain('第一段输出')
     },
     15000,
   )
 
   it(
-    '② sendInput 续答:第二段输出追加而非覆盖,再次收敛 idle',
+    '② sendInput 续答:第二段输出进入当前画面,再次收敛 idle',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([
         { output: '第一段输出', emitStop: true },
@@ -411,15 +421,12 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
       const h = await adapter.spawn(makeSpec(workerId, '你好'))
       await waitForState(adapter, h, 'idle')
 
-      const before = await adapter.readOutput(h, { offset: 0 })
-      expect(before.chunk).toContain('第一段输出')
+      expect(terminalText(await adapter.readTerminal(h))).toContain('第一段输出')
 
       await adapter.sendInput(h, '继续')
       await waitForState(adapter, h, 'idle')
 
-      const after = await adapter.readOutput(h, { offset: 0 })
-      expect(after.chunk).toContain('第一段输出')
-      expect(after.chunk).toContain('第二段输出')
+      expect(terminalText(await adapter.readTerminal(h))).toContain('第二段输出')
     },
     15000,
   )
@@ -525,8 +532,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:
   async function waitForOutputContains(adapter: ClaudeCodeAdapter, h: IncarnationHandle, needle: string, timeoutMs = 8000): Promise<void> {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      const { chunk } = await adapter.readOutput(h, { offset: 0 })
-      if (chunk.includes(needle)) return
+      if (terminalText(await adapter.readTerminal(h)).includes(needle)) return
       await new Promise((r) => setTimeout(r, 100))
     }
     throw new Error(`waitForOutputContains timeout: expected output to contain '${needle}'`)
@@ -658,8 +664,8 @@ class RaceTmux extends TmuxDriver {
   get pendingCount(): number {
     return this.pending.length
   }
-  async newSession(spec: TmuxSessionSpec): Promise<void> {
-    await fakeReadyNewSession(spec)
+  async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+    return fakeReadyNewSession(spec)
   }
   async pasteText(_name: string, _text: string): Promise<void> {}
   async sendText(_name: string, _text: string): Promise<void> {}
@@ -672,6 +678,7 @@ class RaceTmux extends TmuxDriver {
       this.pending.push(resolve)
     })
   }
+  async getPasteReadiness(): Promise<{ state: 'ready' }> { return { state: 'ready' } }
   async killSession(_name: string): Promise<void> {}
   /** 放行最早挂起的一次 isAlive() 调用。 */
   releaseOne(value: boolean): void {
@@ -690,7 +697,7 @@ class SwitchableTmuxDriver extends TmuxDriver {
   async available(): Promise<boolean> {
     return this.current.available()
   }
-  async newSession(spec: TmuxSessionSpec): Promise<void> {
+  async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
     return this.current.newSession(spec)
   }
   async pasteText(name: string, text: string): Promise<void> {
@@ -707,6 +714,9 @@ class SwitchableTmuxDriver extends TmuxDriver {
   }
   async isAlive(name: string): Promise<boolean> {
     return this.current.isAlive(name)
+  }
+  async getPasteReadiness(endpoint: TmuxControlEndpoint) {
+    return this.current.getPasteReadiness(endpoint)
   }
   async killSession(name: string): Promise<void> {
     return this.current.killSession(name)
@@ -829,7 +839,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
     async () => {
       class NewSessionOkSendTextFailsTmux extends TmuxDriver {
         killed = false
-        async newSession(spec: TmuxSessionSpec): Promise<void> {
+        async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
           return super.newSession(spec)
         }
         async capturePane(_name: string) {
@@ -969,10 +979,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
   })
 
   it('持续未落 session 时不自动 Escape 或重贴', async () => {
-    const reports: Array<{ state: string; outputTail?: string }> = []
+    const reports: Array<{ state: string; terminal?: StateChangeReport['terminal'] }> = []
     const { adapter, workerId } = await deliveryAdapter([{ output: '永远不会输出' }], {
       dropSubmitCount: 10,
-      onStateChange: (_h, state, report) => void reports.push({ state, outputTail: report?.outputTail }),
+      onStateChange: (_h, state, report) => void reports.push({ state, terminal: report?.terminal }),
     })
     const h = await adapter.spawn({ worker_id: workerId, prompt: '完整任务', workspace: { root: workspaceRoot } })
 
@@ -1283,7 +1293,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
 class CountingTmux extends TmuxDriver {
   calls = { newSession: 0, pasteText: 0, sendText: 0, sendKeys: 0, killSession: 0 }
   private readonly real = new TmuxDriver()
-  async newSession(spec: TmuxSessionSpec): Promise<void> {
+  async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
     this.calls.newSession++
     return this.real.newSession(spec)
   }
@@ -1301,6 +1311,9 @@ class CountingTmux extends TmuxDriver {
   }
   async isAlive(name: string): Promise<boolean> {
     return this.real.isAlive(name)
+  }
+  async getPasteReadiness(endpoint: TmuxControlEndpoint) {
+    return this.real.getPasteReadiness(endpoint)
   }
   async killSession(name: string): Promise<void> {
     this.calls.killSession++
@@ -1368,8 +1381,7 @@ describe('ClaudeCodeAdapter.fork — streaming establishment without tmux', () =
     expect(handle.session_ref).not.toBe(parentSessionId)
     expect(await adapter.state(handle)).toBe('running')
     await waitForState(adapter, handle, 'exited')
-    const { chunk } = await adapter.readOutput(handle, { offset: 0 })
-    expect(chunk).toBe('streamed-answer')
+    await expect(adapter.readTerminal(handle)).resolves.toEqual({ kind: 'headless_text', text: 'streamed-answer' })
     expect(states.filter((state) => state === 'exited')).toHaveLength(1)
   })
 
@@ -1530,8 +1542,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       expect(meta2.state).toBe('exited')
       expect(meta2.ended_reason).toBe('completed')
 
-      const { chunk } = await adapter.readOutput(h2, { offset: 0 })
-      expect(chunk).toContain('侧问回复内容')
+      await expect(adapter.readTerminal(h2)).resolves.toMatchObject({
+        kind: 'headless_text',
+        text: expect.stringContaining('侧问回复内容'),
+      })
 
       const argvLines = (await fs.readFile(argvFile, 'utf-8'))
         .trim()
@@ -1652,11 +1666,14 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
 class NoopTmux extends TmuxDriver {
   paneText = '❯ \n? for shortcuts'
   alive = true
+  pasteReadiness: 'ready' | 'not_ready' | 'unknown' = 'ready'
+  pasteCalls = 0
 
-  async newSession(spec: TmuxSessionSpec): Promise<void> {
-    await fakeReadyNewSession(spec)
+  async newSession(spec: TmuxSessionSpec): Promise<TmuxControlEndpoint> {
+    return fakeReadyNewSession(spec)
   }
   async pasteText(_name: string, text: string): Promise<void> {
+    this.pasteCalls += 1
     this.paneText = `❯ ${text}\n? for shortcuts`
   }
   async sendText(_name: string, _text: string): Promise<void> {}
@@ -1669,8 +1686,130 @@ class NoopTmux extends TmuxDriver {
   async isAlive(_name: string): Promise<boolean> {
     return this.alive
   }
+  async getPasteReadiness() { return { state: this.pasteReadiness } }
   async killSession(_name: string): Promise<void> {}
 }
+
+describe('ClaudeCodeAdapter terminal snapshot after exit', () => {
+  it('spawn 后 pane 消失仍读取已有最终画面', async () => {
+    class GonePaneTmux extends NoopTmux {
+      async capturePane(name: string) {
+        if (!this.alive) throw new Error(`tmux session gone: ${name}`)
+        return super.capturePane(name)
+      }
+    }
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-final-terminal-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-final-terminal-ws-'))
+    const tmux = new GonePaneTmux()
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      expect(await adapter.readTerminal(h)).toMatchObject({ kind: 'live_terminal' })
+
+      tmux.alive = false
+      expect(await adapter.state(h)).toBe('exited')
+      await expect(adapter.readTerminal(h)).resolves.toMatchObject({ kind: 'final_terminal', text: expect.stringContaining('esc to interrupt') })
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
+  it('pane 在读取竞态中变 dead 时返回已有最终画面', async () => {
+    class DeadPaneTmux extends NoopTmux {
+      dead = false
+
+      async capturePane(name: string) {
+        return this.dead
+          ? { text: 'Pane is dead (status 1, Tue Aug 19 00:00:00 2026)\n', dead: true }
+          : super.capturePane(name)
+      }
+    }
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-dead-pane-terminal-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-dead-pane-terminal-ws-'))
+    const tmux = new DeadPaneTmux()
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      expect(await adapter.readTerminal(h)).toMatchObject({ kind: 'live_terminal' })
+
+      tmux.dead = true
+      await expect(adapter.readTerminal(h)).resolves.toMatchObject({ kind: 'final_terminal', text: expect.stringContaining('esc to interrupt') })
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+})
+
+describe('ClaudeCodeAdapter paste readiness gate', () => {
+  it('running steering 在 not_ready 时暂扣输入但保持 running', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-paste-ready-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-paste-ready-ws-'))
+    const tmux = new NoopTmux()
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await expect(adapter.state(h)).resolves.toBe('running')
+
+      tmux.pasteReadiness = 'not_ready'
+      const pasteCalls = tmux.pasteCalls
+      await expect(adapter.sendInput(h, '继续')).rejects.toMatchObject({ disposition: 'not_pasted', control_state: 'running' })
+      expect(tmux.pasteCalls).toBe(pasteCalls)
+      await expect(adapter.state(h)).resolves.toBe('running')
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+})
+
+describe('ClaudeCodeAdapter retain-on-exit failure', () => {
+  it('持久化 meta 后 retain 失败会收口为 crashed 并清理精确 session', async () => {
+    class RetainFailsTmux extends NoopTmux {
+      readonly killed: string[] = []
+      async newSession(spec: TmuxSessionSpec) {
+        return {
+          ...await super.newSession(spec),
+          enableRemainOnExit: async () => { throw new Error('simulated retain failure') },
+        }
+      }
+      async killSession(name: string): Promise<void> {
+        this.killed.push(name)
+        this.alive = false
+      }
+    }
+
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-retain-failure-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-retain-failure-ws-'))
+    const tmux = new RetainFailsTmux()
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: READY_IDLE_BIN,
+    })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      await expect(adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })).rejects.toThrow('simulated retain failure')
+      expect(tmux.killed).toEqual([`crabot-w-${workerId}-1`])
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta).toMatchObject({ state: 'exited', ended_reason: 'crashed' })
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+})
 
 class ExitAfterAcceptedTmux extends NoopTmux {
   private submissions = 0
@@ -2066,7 +2205,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     expect(seen[0]).toEqual({
       state: 'idle',
       report: {
-        outputTail: tmux.paneText,
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
         waitReason: 'interaction_required',
         notification: { type: 'permission_prompt', message: 'Choose', title: 'Question' },
       },
@@ -2571,7 +2710,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
     if (opts.readyDelayMs) envParts.push(`MOCK_CLI_PASTE_READY_DELAY_MS=${opts.readyDelayMs}`)
     if (opts.banner) envParts.push(`MOCK_CLI_BANNER=${shQuote(opts.banner)}`)
 
-    const seen: Array<{ state: WorkerContractState; report?: { outputTail?: string; endReason?: string } }> = []
+    const seen: Array<{ state: WorkerContractState; report?: { terminal?: StateChangeReport['terminal']; endReason?: string } }> = []
     const adapter = new ClaudeCodeAdapter({
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
@@ -2698,8 +2837,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
         disposition: 'not_pasted',
         report: { waitReason: 'startup_stall' },
       })
-      expect(stalled?.report?.outputTail).toContain(banner)
-      expect(stalled?.report?.outputTail).toContain('一个字符都没有投递')
+      expect(stalled?.report?.terminal).toMatchObject({ kind: 'live_terminal', text: expect.stringContaining(banner) })
       expect(seen).toEqual([])
 
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
@@ -2806,6 +2944,39 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
   )
 
   it(
+    '自然退出的 dead pane 在 agent 重启后会被精确回收',
+    async () => {
+      const adapterA = new ClaudeCodeAdapter({
+        dataDir,
+        claudeConfigPath: fakeClaudeConfig(dataDir),
+        tmux,
+        claudeBin: `bash -c 'printf "\\033[?2004h"; sleep 2'`,
+        promptDeliveryTimeoutMs: 0,
+      })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+      const h = await adapterA.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const sessionName = `crabot-w-${workerId}-1`
+
+      const deadline = Date.now() + 8000
+      while (Date.now() < deadline && await tmux.isAlive(sessionName)) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      expect(await tmux.capturePane(sessionName)).toMatchObject({ dead: true })
+
+      const restarted = new ClaudeCodeAdapter({
+        dataDir,
+        claudeConfigPath: fakeClaudeConfig(dataDir),
+        tmux,
+        claudeBin: 'never-used-after-restart',
+      })
+      expect(await restarted.state(h)).toBe('exited')
+      await expect(tmux.capturePane(sessionName)).rejects.toThrow()
+    },
+    30000,
+  )
+
+  it(
     'manager显式raw Enter后出现active证据，随后进程死亡按completed推断',
     async () => {
       const { adapter, seen, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
@@ -2898,11 +3069,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
   )
 
   it(
-    '带给 manager 的 output 尾部是可读文本,不是转义序列——与 read_worker_output 同一形态',
+    '启动暂扣给 manager 的是直接捕获的可读终端画面，不含转义序列',
     async () => {
-      // 真实模态框是 TUI 重绘出来的:清屏、逐行绝对定位、SGR 上色。去掉 initialStartupStall 里
-      // 那次 decodeTerminalOutput,manager 拿到的就是下面这串原样字节——而它同一时刻用
-      // read_worker_output 读同一份日志拿到的是解码后的文本,同一份日志两种形态。
+      // 真实模态框是 TUI 重绘出来的:清屏、逐行绝对定位、SGR 上色。报告必须来自 capture-pane
+      // 的当前画面，而不是把这段渲染字节直接带进 manager 上下文。
       const banner = [
         '\u001b[2J\u001b[H',
         '\u001b[3;1H\u001b[1;33mNew MCP server found in this project: arXivPaper\u001b[0m',
@@ -2916,12 +3086,11 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
 
-      const tail = h.initial_input?.report?.outputTail
-      expect(tail).toBeTruthy()
-      // 一个 ESC 都不该剩:解码器丢掉所有控制序列,只留可见文本。
-      expect(tail).not.toContain('\u001b')
-      expect(tail).toContain('New MCP server found in this project: arXivPaper')
-      // 行结构由光标定位构成,不是 \n:不解码的话这两个选项会粘在同一行上。
+      const terminal = h.initial_input?.report?.terminal
+      expect(terminal).toMatchObject({ kind: 'live_terminal' })
+      const text = terminal?.kind === 'unavailable' || !terminal ? '' : terminal.text
+      expect(text).not.toContain('\u001b')
+      expect(text).toContain('New MCP server found in this project: arXivPaper')
       expect(tail).toMatch(/1\. Use this MCP server\n\s*2\. No, exit/)
     },
     30000,

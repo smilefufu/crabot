@@ -1639,7 +1639,7 @@ describe('Admin Web API', () => {
     it.each([
       '/api/agent/workers',
       '/api/agent/workers/w-1',
-      '/api/agent/workers/w-1/output',
+      '/api/agent/workers/w-1/terminal',
       '/api/agent/workers/w-1/trace',
     ])('%s 未带 token → 401', async (path) => {
       const response = await makeWebRequest(TEST_WEB_PORT, path, 'GET', null, null)
@@ -1762,14 +1762,14 @@ describe('Admin Web API', () => {
      * 区分"worker 不存在"与"agent 侧真错"。
      *
      * agent 侧两条路径的文案大小写**不一致**（下表 message 列逐字取自 agent 源码）：
-     * detail/trace 由 `unified-agent.ts` 的 handler 显式抛（大写 W），output 由
-     * `harness.ts` 的 `WorkerNotFoundError` 抛（小写 w）。修复前 output 端点匹配不上
+     * detail/trace 由 `unified-agent.ts` 的 handler 显式抛（大写 W），terminal 由
+     * `harness.ts` 的 `WorkerNotFoundError` 抛（小写 w）。修复前 terminal 端点匹配不上
      * `'Worker not found'` → 落 500。故三处共用同一个大小写无关的谓词。
      */
     it.each([
       ['/api/agent/workers/w-404', 'Worker not found: w-404'],
       ['/api/agent/workers/w-404/trace', 'Worker not found: w-404'],
-      ['/api/agent/workers/w-404/output', 'worker not found: w-404'],
+      ['/api/agent/workers/w-404/terminal', 'worker not found: w-404'],
     ])('GET %s：worker 不存在 → 404（agent 侧文案 %s）', async (path, agentMessage) => {
       const token = await loginAndGetToken()
       spyAgentRpc().mockRejectedValue(new Error(agentMessage))
@@ -1783,15 +1783,15 @@ describe('Admin Web API', () => {
     /**
      * 谓词只认"worker 不存在"，agent 侧其它真错仍是 500——否则前端会把"这个化身不存在"
      * 或"这个 agent build 还没有这个方法"当成"这个 worker 不存在"。三条 message 都逐字取自
-     * 源码：前两条来自 `harness.readWorkerOutput` / `handleGetWorkerTrace` 的 seq 校验，
+     * 源码：前两条来自 `harness.getWorkerTerminal` / `handleGetWorkerTrace` 的 seq 校验，
      * 第三条来自 crabot-core 的 JSON-RPC 分发（未注册方法，滚动升级期真实可达；由
      * `reject(new Error(response.error.message))` 原样送到这里）。
      * 它们都含 "not found" 却不含 "worker not found"——谓词故意不放宽到前者。
      */
     it.each([
-      ['/api/agent/workers/w-1/output?seq=9', 'WorkerHarness.readWorkerOutput: no incarnation with seq=9 found for worker w-1'],
+      ['/api/agent/workers/w-1/terminal?seq=9', 'WorkerHarness.getWorkerTerminal: no incarnation with seq=9 found for worker w-1'],
       ['/api/agent/workers/w-1/trace?seq=9', 'get_worker_trace: no incarnation with seq=9 found for worker w-1'],
-      ['/api/agent/workers/w-1/output', 'Method "read_worker_output_admin" not found'],
+      ['/api/agent/workers/w-1/terminal', 'Method "get_worker_terminal" not found'],
     ])('GET %s：不是 worker 不存在 → 500', async (path, agentMessage) => {
       const token = await loginAndGetToken()
       spyAgentRpc().mockRejectedValue(new Error(agentMessage))
@@ -1811,29 +1811,29 @@ describe('Admin Web API', () => {
      * 这两条只钉住"admin 转发的载荷长什么样"；"这个载荷打到真实 agent 上确实读到主线化身"
      * 由 crabot-agent `tests/manager/p5-integration.test.ts` 经真实 RPC + 真实台账验证。
      */
-    it('GET /api/agent/workers/:id/output → read_worker_output_admin（seq 缺省不下发，由 agent 取主线化身）', async () => {
+    it('GET /api/agent/workers/:id/terminal → get_worker_terminal（seq 缺省不下发，由 agent 取主线化身）', async () => {
       const token = await loginAndGetToken()
-      const spy = spyAgentRpc().mockResolvedValue({ chunk: 'hello', next_cursor: '133', eof: false })
+      const spy = spyAgentRpc().mockResolvedValue({ kind: 'live_terminal', text: 'hello', captured_at: '2026-08-19T00:00:00.000Z' })
 
       const response = await makeWebRequest(
         TEST_WEB_PORT,
-        '/api/agent/workers/w-1/output?seq=2&cursor=128',
+        '/api/agent/workers/w-1/terminal?seq=2',
         'GET',
         null,
         token,
       )
       expect(response.statusCode).toBe(200)
-      expect(spy).toHaveBeenCalledWith('read_worker_output_admin', { worker_id: 'w-1', seq: 2, cursor: '128' })
+      expect(spy).toHaveBeenCalledWith('get_worker_terminal', { worker_id: 'w-1', seq: 2 })
 
-      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/output', 'GET', null, token)
-      expect(spy).toHaveBeenLastCalledWith('read_worker_output_admin', { worker_id: 'w-1' })
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/terminal', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('get_worker_terminal', { worker_id: 'w-1' })
       // toHaveBeenCalledWith 把 `{ seq: undefined }` 视同缺席，这里显式钉住 key 真的不在载荷里。
       expect('seq' in (spy.mock.lastCall![1] as object)).toBe(false)
 
       // 脏值同样不下发（不回落成某个具体化身），与 list 端点"脏分页 → 回落默认值"的区别在于
       // seq 根本没有安全的默认值可回落。
-      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/output?seq=abc', 'GET', null, token)
-      expect(spy).toHaveBeenLastCalledWith('read_worker_output_admin', { worker_id: 'w-1' })
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/terminal?seq=abc', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('get_worker_terminal', { worker_id: 'w-1' })
     })
 
     it('GET /api/agent/workers/:id/trace → get_worker_trace（seq 缺省不下发，由 agent 取主线化身）', async () => {
