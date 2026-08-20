@@ -578,23 +578,29 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   private async readTraceWindow(
     h: IncarnationHandle,
     cursor?: import('../types.js').TraceCursor,
-  ): Promise<{ sourceAvailable: boolean; events: import('../types.js').NormalizedTraceEvent[]; nextCursor: import('../types.js').TraceCursor }> {
+  ): Promise<{
+    sourceAvailable: boolean
+    spans: ReadonlyArray<import('../../types.js').AgentSpan>
+    events: import('../types.js').NormalizedTraceEvent[]
+    nextCursor: import('../types.js').TraceCursor
+  }> {
     const metaPath = join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)
     let traceId: string | undefined
     try {
       const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as { trace_id?: string }
       traceId = typeof meta.trace_id === 'string' ? meta.trace_id : undefined
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
       throw error
     }
     if (!traceId || !this.deps.traceReader) {
       // 老 meta（升级前写入）没有 trace_id：退化为空、cursor 原样透传（可续读）。
-      return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+      return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
     }
     const trace = await this.deps.traceReader.readTrace(traceId)
-    if (!trace) return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+    if (!trace) return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
     const start = cursor?.offset ?? 0
+    const spans = trace.spans.slice(start)
     const events: import('../types.js').NormalizedTraceEvent[] = []
     let consumed = start
     for (let i = start; i < trace.spans.length; i++) {
@@ -602,7 +608,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       events.push(...normalizedEvents.map((event) => ({ ...event, source_offset: i })))
       consumed = i + 1
     }
-    return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
+    return { sourceAvailable: true, spans, events, nextCursor: { offset: consumed } }
   }
 
   async inspectSupervisionActivity(
@@ -612,6 +618,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     try {
       const trace = await this.readTraceWindow(h, cursor)
       if (!trace.sourceAvailable) return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
+      // 页面 read model 不得改变既有 Manager 巡检语义：任何 LLM turn 都延续为 text。
+      if (trace.spans.some((span) => span.type === 'llm_call')) return { kind: 'text', next_cursor: trace.nextCursor }
       return classifySupervisionActivity(trace.events, trace.nextCursor)
     } catch {
       return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }

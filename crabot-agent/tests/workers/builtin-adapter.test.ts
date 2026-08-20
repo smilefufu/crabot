@@ -398,6 +398,10 @@ describe('BuiltinWorkerAdapter', () => {
     expect(first.nextCursor).toEqual({ offset: 3 })
 
     await expect(adapter.readTrace(h, first.nextCursor)).resolves.toEqual({ events: [], nextCursor: { offset: 3 } })
+    await expect(adapter.inspectSupervisionActivity(h, { offset: 2 })).resolves.toEqual({
+      kind: 'text',
+      next_cursor: { offset: 3 },
+    })
   })
 
   it('常驻化身只以真实 engine/input 进展更新时间，主线与 fork 回调均接线', async () => {
