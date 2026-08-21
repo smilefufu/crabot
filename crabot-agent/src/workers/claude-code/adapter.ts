@@ -737,8 +737,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         const stopCount = events.filter((event) => event.kind === 'stop').length
         if (stopCount > runtime.stopBaseline) {
           runtime.stopBaseline = stopCount
-          await this.transitionControlState(runtime, h, { kind: 'waiting_text' }, { completionSource: 'claude_stop' }, notify)
-          return { control_state: 'waiting_text', disposition: 'accepted' }
+          const report: StateChangeReport = { completionSource: 'claude_stop' }
+          await this.transitionControlState(runtime, h, { kind: 'waiting_text' }, report, notify)
+          return { control_state: 'waiting_text', disposition: 'accepted', report }
         }
       }
       await this.transitionControlState(runtime, h, { kind: 'running' }, undefined, notify)

@@ -342,6 +342,9 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
   if (state === 'exited') {
     return { to: 'exited', kind: 'initial_input_settled', ...(report?.endReason ? { reason: report.endReason } : {}) }
   }
+  if (report?.completionSource) {
+    return { to: state, kind: 'initial_input_settled' }
+  }
   if (report?.notification) {
     return {
       to: state,

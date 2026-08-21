@@ -466,6 +466,27 @@ describe('WorkerHarness.spawnWorker', () => {
     })
   })
 
+  it('CLI首投窗口内完成时创建待交付回合，不误报投递停摆', async () => {
+    const { harness } = await makeHarness({
+      implId: 'claude-code',
+      spawnInitialInput: {
+        control_state: 'waiting_text',
+        disposition: 'accepted',
+        report: { completionSource: 'claude_stop' },
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+
+    expect(worker.task.status).toBe('waiting_input')
+    expect(await harness.getWorkerTurn(worker.worker_id)).toMatchObject({ disposition: { status: 'pending' } })
+    expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
+      to: 'idle',
+      kind: 'initial_input_settled',
+      turn_id: expect.any(String),
+      turn_pending: true,
+    })
+  })
+
   it('CLI首投遇到未知界面时创建短期快照，只允许 Manager 应答一次', async () => {
     const { harness, fake, workersDir } = await makeHarness({
       implId: 'claude-code',
