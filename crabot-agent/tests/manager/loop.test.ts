@@ -279,7 +279,7 @@ describe('ManagerLoop', () => {
     expect(state.rollingSummary).toBeTruthy()
   })
 
-  it('episode 失败(LLM 报错)时 consumedEvents===false,下次唤醒能重投同一事件', async () => {
+  it('episode 失败(LLM 报错)后已提交人类输入留在 history，下一次新 wake 继续会话', async () => {
     const { adapter, queue } = makeAdapter()
     // 第一次唤醒:LLM 直接抛出不可重试错误 → outcome='failed',不消费 queue。
     // 第二次唤醒(thrown 已置位)正常放行到底层 adapter,消费这里排的回复。
@@ -308,20 +308,58 @@ describe('ManagerLoop', () => {
     expect(first.outcome).toBe('failed')
     expect(first.consumedEvents).toBe(false)
 
-    // session 不应该把这次失败的内容当成"已处理"落盘
+    // 人类输入已在 LLM 前提交；失败不能把它退回 mailbox 重投。
     const stateAfterFailure = await store.load(KEY)
-    expect(stateAfterFailure.recent.length).toBe(0)
+    expect(JSON.stringify(stateAfterFailure.recent)).toContain('重要的话只能说一次')
+    expect(loop.hasPendingMailbox).toBe(false)
 
-    // 下次唤醒(不同的新事件),原始失败事件应随邮箱一起重投,被 LLM 看到
+    // 下次新 wake 从 history 看到原输入，并追加本次输入。
     const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
     expect(second.outcome).toBe('completed')
     expect(second.consumedEvents).toBe(true)
 
     const finalState = await store.load(KEY)
     const serialized = JSON.stringify(finalState.recent)
-    expect(serialized).toContain('重要的话只能说一次') // 重投的原始事件
+    expect(serialized).toContain('重要的话只能说一次') // 来自已提交的历史
     expect(serialized).toContain('received_at=\\"2026-01-01T08:12:34+08:00\\"')
     expect(serialized).toContain('新的话') // 本次新事件
+    expect(serialized.match(/重要的话只能说一次/g)).toHaveLength(1)
+  })
+
+  it('重复的已提交 Admin Chat wake 不调 LLM，并结算遗留 correlation', async () => {
+    const message = makeChannelMessage('这条已经进入 history')
+    const envelope: TimedWakeEnvelope = {
+      ...timed({ kind: 'human_messages', messages: [message] }),
+      correlation: { admin_chat_request_ids: ['admin-request-1'] },
+    }
+    const settled: string[][] = []
+    const failingAdapter: LLMAdapter = {
+      async *stream() {
+        throw new Error('provider unavailable')
+      },
+      updateConfig: () => {},
+    }
+    const firstLoop = new ManagerLoop(baseDeps({
+      store,
+      adapter: failingAdapter,
+      onAdminChatWakeConsumed: async (requestIds) => { settled.push([...requestIds]) },
+    }))
+
+    const first = await firstLoop.wakeUp(envelope)
+    expect(first.outcome).toBe('failed')
+    expect(settled).toEqual([])
+
+    const { adapter, calls } = makeAdapter()
+    const duplicateLoop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      onAdminChatWakeConsumed: async (requestIds) => { settled.push([...requestIds]) },
+    }))
+    const duplicate = await duplicateLoop.wakeUp(envelope)
+
+    expect(duplicate.consumedEvents).toBe(true)
+    expect(calls).toHaveLength(0)
+    expect(settled).toEqual([['admin-request-1']])
   })
 
   it('episode 失败:mid-episode 注入且已被 engine drain 消费的内容不丢失,下次唤醒仍被投递', async () => {
@@ -377,9 +415,10 @@ describe('ManagerLoop', () => {
     expect(turn2Messages).toBeDefined()
     expect(JSON.stringify(turn2Messages)).toContain('sched-fail')
 
-    // session 不应该把这次失败的内容当成"已处理"落盘
+    // 初始人类输入已提交；只有失败期间注入的非人类事件仍在 mailbox。
     const stateAfterFailure = await store.load(KEY)
-    expect(stateAfterFailure.recent.length).toBe(0)
+    expect(JSON.stringify(stateAfterFailure.recent)).toContain('开始任务')
+    expect(loop.hasPendingMailbox).toBe(true)
 
     // 下次唤醒(不同的新事件):mid-episode 注入的内容应随邮箱一起重投,被 LLM 看到并落盘
     queue.push({ text: '正常处理', stopReason: 'end_turn' })
@@ -450,9 +489,10 @@ describe('ManagerLoop', () => {
       loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发超限并在折叠时抛错')] }))
     ).rejects.toThrow('boom: fold llm exhausted retries')
 
-    // 落盘不应发生(异常发生在 store.save 之前)
+    // 人类输入在可能抛错的折叠前已落盘；非人类 carried/injected 事件仍留待重投。
     const stateAfterThrow = await store.load(KEY)
-    expect(stateAfterThrow.recent).toEqual(seedMessages)
+    expect(stateAfterThrow.recent).toHaveLength(seedMessages.length + 1)
+    expect(JSON.stringify(stateAfterThrow.recent)).toContain('触发超限并在折叠时抛错')
 
     // 下次唤醒:carriedTexts(唤醒前邮箱里的内容)、eventText(本次唤醒事件)、
     // currentEpisodeInjected(mid-episode 注入)应该都被重投,一个不丢
@@ -1050,6 +1090,58 @@ describe('ManagerLoop', () => {
       expect(JSON.stringify(calls[1].messages)).toContain('[系统复核]')
     })
 
+    it('maxTurns 后复核 continuation 失败时，已提交人类输入不重放', async () => {
+      const calls: LLMStreamParams[] = []
+      let streamCount = 0
+      const adapter: LLMAdapter = {
+        async *stream(params) {
+          calls.push({ ...params, messages: [...params.messages] })
+          streamCount++
+          if (streamCount === 1) {
+            yield* chunksFromContent([
+              { type: 'tool_use', id: 'send-1', name: 'send_message', input: { post_send_action: 'spawn_worker' } },
+            ], 'tool_use')
+            return
+          }
+          if (streamCount === 2) throw new Error('recheck provider unavailable')
+          yield* chunksFromContent([], 'end_turn')
+        },
+        updateConfig: () => {},
+      }
+      let loop!: ManagerLoop
+      loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        maxTurns: 1,
+        toolFace: () => [defineTool({
+          name: 'send_message', description: 'deliver', inputSchema: { type: 'object', properties: {} },
+          call: async () => {
+            loop.recordPostSendAction()
+            return { output: 'sent' }
+          },
+        })],
+      }))
+
+      const failed = await loop.wakeUp(timed({
+        kind: 'human_messages',
+        messages: [makeChannelMessage('已经确认入站的人类输入')],
+      }))
+
+      expect(failed.outcome).toBe('failed')
+      expect(JSON.stringify(calls[1].messages)).toContain('[系统复核]')
+      expect(JSON.stringify((await store.load(KEY)).recent)).toContain('已经确认入站的人类输入')
+      expect(loop.hasPendingMailbox).toBe(false)
+
+      const continued = await loop.wakeUp(timed({
+        kind: 'human_messages',
+        messages: [makeChannelMessage('下一条新消息')],
+      }))
+
+      expect(continued.outcome).toBe('completed')
+      expect(JSON.stringify(calls[2].messages)).not.toContain('[系统复核]')
+      expect(JSON.stringify(calls[2].messages).match(/已经确认入站的人类输入/g)).toHaveLength(1)
+    })
+
     it('失败 episode 不保留标记：记录 unresolved_failed，重试时不再注入复核', async () => {
       const calls: LLMStreamParams[] = []
       let streamCount = 0
@@ -1084,7 +1176,7 @@ describe('ManagerLoop', () => {
       }))
 
       const failed = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('先告知再重建')] }))
-      const retried = await loop.drainMailbox()
+      const retried = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('继续处理')] }))
 
       expect(failed.outcome).toBe('failed')
       expect(failed.consumedEvents).toBe(false)
@@ -1319,7 +1411,8 @@ describe('ManagerLoop', () => {
     async function renderedPrompt(event: WakeEvent): Promise<string> {
       const { adapter, queue, calls } = makeAdapter()
       queue.push({ text: 'ok', stopReason: 'end_turn' })
-      const loop = new ManagerLoop(baseDeps({ store, adapter, timezone: () => 'UTC' }))
+      const isolatedStore = new ManagerSessionStore(join(dataDir, `render-${Math.random().toString(36).slice(2)}`))
+      const loop = new ManagerLoop(baseDeps({ store: isolatedStore, adapter, timezone: () => 'UTC' }))
       await loop.wakeUp({ wake: event, received_at: '2026-01-01T00:00:00+00:00', timezone: 'UTC' })
       return JSON.stringify(calls[0].messages)
     }

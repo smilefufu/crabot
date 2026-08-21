@@ -60,7 +60,7 @@ export function sendMessageBlock(p: {
     type: 'tool_use',
     id: p.id ?? 'tu-send-1',
     name: 'send_message',
-    input: { channel_id: p.channelId, session_id: p.sessionId, content: p.text },
+    input: { channel_id: p.channelId, session_id: p.sessionId, content: p.text, post_send_action: 'none' },
   }
 }
 
