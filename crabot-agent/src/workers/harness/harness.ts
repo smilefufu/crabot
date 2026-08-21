@@ -2835,7 +2835,7 @@ export class WorkerHarness {
     return turn
   }
 
-  private async collectNativeActivity(h: IncarnationHandle): Promise<void> {
+  private async collectNativeActivity(h: IncarnationHandle, baselineUnobserved = false): Promise<void> {
     await this.withLock(h.worker_id, async () => {
       const found = await this.deps.ledger.findWorker(h.worker_id)
       const incarnation = found && findIncarnation(found.worker, h.impl, h.seq)
@@ -2844,18 +2844,30 @@ export class WorkerHarness {
         ...h,
         incarnation_id: incarnation.incarnation_id,
         session_ref: h.session_ref || incarnation.session_ref,
-      }, found.managerKey)
+      }, found.managerKey, baselineUnobserved)
     })
   }
 
-  private async collectNativeActivityLocked(h: IncarnationHandle, managerKey: ManagerKey): Promise<void> {
+  private async collectNativeActivityLocked(
+    h: IncarnationHandle,
+    managerKey: ManagerKey,
+    baselineUnobserved = false,
+  ): Promise<void> {
     if (!h.incarnation_id) return
     const adapter = this.deps.adapters.get(h.impl)
     if (!adapter?.readTrace) return
+    const observed = !baselineUnobserved || await this.nativeActivityStore.hasCursor(h.worker_id, h.incarnation_id)
     const offset = await this.nativeActivityStore.cursor(h.worker_id, h.incarnation_id)
     const trace = await adapter.readTrace(h, { offset })
     if (trace.nextCursor.offset < offset) {
       throw new Error(`native trace cursor moved backwards for ${h.worker_id}#${h.seq}`)
+    }
+    if (baselineUnobserved && !observed) {
+      await this.nativeActivityStore.commitObservation({
+        worker_id: h.worker_id,
+        cursor: { incarnation_id: h.incarnation_id, impl: h.impl, seq: h.seq, offset: trace.nextCursor.offset },
+      })
+      return
     }
     const assistant = projectWorkerActivity(trace.events, 'assistant', {
       worker_id: h.worker_id,
@@ -3140,12 +3152,12 @@ export class WorkerHarness {
     await this.deliverQueryOperationNotifications()
   }
 
-  /** Rebuild native-session high-water marks and replay any unconsumed Manager wake obligations. */
+  /** Replay durable wake obligations and establish a no-notification baseline for unobserved live sessions. */
   async reconcileNativeActivityOnStartup(): Promise<void> {
     const all = await this.deps.ledger.listAllWorkers()
     for (const { worker } of all) {
       for (const incarnation of worker.incarnations) {
-        if (!isExecutableIncarnation(incarnation)) continue
+        if (isTerminalStatus(worker.task.status) || !isExecutableIncarnation(incarnation) || incarnation.state === 'exited') continue
         try {
           await this.collectNativeActivity({
             worker_id: worker.worker_id,
@@ -3154,7 +3166,7 @@ export class WorkerHarness {
             impl: incarnation.impl,
             session_ref: incarnation.session_ref,
             ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
-          })
+          }, true)
         } catch (error) {
           console.error(`[WorkerHarness] native activity reconciliation failed for ${worker.worker_id}#${incarnation.seq}:`, error)
         }

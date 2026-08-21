@@ -908,6 +908,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         terminal: this.liveTerminal(snapshot),
         waitReason: reason,
         ...(interaction.kind === 'manager_required' ? { ui: { fingerprint: interaction.fingerprint, actions: interaction.actions } } : {}),
+        ...(interaction.kind === 'manager_required' ? { notification: { type: 'terminal_interaction' } } : {}),
       }
       await this.transitionControlState(
         runtime,
@@ -946,6 +947,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
           terminal: this.liveTerminal(snapshot),
           waitReason: 'interaction_required',
           ...(interaction.kind === 'manager_required' ? { ui: { fingerprint: interaction.fingerprint, actions: interaction.actions } } : {}),
+          ...(interaction.kind === 'manager_required' ? { notification: { type: 'terminal_interaction' } } : {}),
         }
         await this.transitionControlState(
           runtime,

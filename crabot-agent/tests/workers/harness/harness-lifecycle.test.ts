@@ -887,9 +887,59 @@ describe('WorkerHarness.handleStateChange', () => {
     expect((await harness.getWorkerTurn(worker.worker_id))?.disposition).toEqual({ status: 'pending' })
   })
 
-  it('单个原生会话读取失败不阻断其它 worker 的 activity 对账', async () => {
+  it('启动只为未观察过的活跃会话建立高水位，不把已有文本当作新 activity', async () => {
     const route = vi.fn(async () => ({ consumed: true }))
-    const { harness, fake } = await makeHarness({}, { onOperationNotification: route })
+    const nativeTrace = [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message' as const, role: 'assistant' as const, summary: '升级前的历史文本' }]
+    const { harness, workersDir } = await makeHarness({ nativeTrace }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    await harness.reconcileNativeActivityOnStartup()
+
+    expect(route).not.toHaveBeenCalled()
+    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))).toMatchObject({
+      cursors: [expect.objectContaining({ incarnation_id: incarnation.incarnation_id, offset: 1 })],
+      activities: [],
+      notifications: [],
+    })
+
+    nativeTrace.push({ ts: '2026-08-20T00:00:01.000Z', kind: 'message', role: 'assistant', summary: '重启后的新文本' })
+    harness.handleNativeActivity(handle)
+    await waitUntil(() => route.mock.calls.length === 1)
+    expect(route).toHaveBeenCalledWith(
+      `test::friend-1`,
+      expect.objectContaining({ kind: 'activity_available', detail: expect.objectContaining({ from_cursor: '1', through_cursor: '2' }) }),
+    )
+  })
+
+  it('终态化身不再重读原生会话或制造 activity 通知', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, fake } = await makeHarness({
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '历史结论' }],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(handle, 'exited', undefined, 'completed')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0]?.task.status === 'completed')
+    route.mockClear()
+    const readTrace = vi.spyOn(fake, 'readTrace')
+
+    await harness.reconcileNativeActivityOnStartup()
+
+    expect(readTrace).not.toHaveBeenCalled()
+    expect(route.mock.calls.filter(([, event]) => event.kind === 'activity_available')).toEqual([])
+  })
+
+  it('单个原生会话读取失败不阻断其它 worker 的 activity 基线对账', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, fake, workersDir } = await makeHarness({}, { onOperationNotification: route })
     const unreadable = await harness.spawnWorker(spawnParams({ title: '不可读会话' }))
     const readable = await harness.spawnWorker(spawnParams({ title: '可读会话' }))
     vi.spyOn(fake, 'readTrace').mockImplementation(async (handle) => {
@@ -907,10 +957,9 @@ describe('WorkerHarness.handleStateChange', () => {
       expect.stringContaining(`native activity reconciliation failed for ${unreadable.worker_id}#1`),
       expect.any(Error),
     )
-    expect(route).toHaveBeenCalledWith(
-      `test::friend-1`,
-      expect.objectContaining({ worker_id: readable.worker_id, kind: 'activity_available' }),
-    )
+    const readableState = JSON.parse(await fs.readFile(join(workersDir, readable.worker_id, 'native-activity.json'), 'utf8'))
+    expect(readableState.cursors).toEqual([expect.objectContaining({ incarnation_id: readable.incarnations[0].incarnation_id, offset: 1 })])
+    expect(route).not.toHaveBeenCalled()
   })
 
   it('单个 control operation store 读取失败不阻断其它 worker 的对账', async () => {

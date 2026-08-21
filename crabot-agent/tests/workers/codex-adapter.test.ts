@@ -2310,6 +2310,60 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     await adapter.kill(h)
   })
 
+  it('UI 回应后的后继交互仍用完整 interaction_required 形状唤醒 Manager', async () => {
+    class ChainedPromptTmux extends NoopTmux {
+      chainNextResponse = false
+
+      async sendKeys(name: string, keys: string[]): Promise<void> {
+        if (this.chainNextResponse && keys.join(',') === 'Enter') {
+          this.chainNextResponse = false
+          this.paneText = 'Allow Codex to modify this workspace again?\nYes\nNo'
+          return
+        }
+        await super.sendKeys(name, keys)
+      }
+    }
+
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const tmux = new ChainedPromptTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    const h = await adapter.spawn({ worker_id: `codextest-${randomUUID().slice(0, 8)}`, prompt: 'work', workspace: { root: workspaceRoot } })
+    tmux.paneText = 'Allow Codex to modify this workspace?\nYes\nNo'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'permission_request', raw: { hook_event_name: 'PermissionRequest' } }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 1)
+
+    tmux.chainNextResponse = true
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 2)
+
+    expect(seen[1]).toEqual({
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'interaction_required',
+        ui: {
+          fingerprint: 'codex_approval:yes-no',
+          actions: [
+            { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+            { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+          ],
+        },
+        notification: { type: 'terminal_interaction' },
+      },
+    })
+    await adapter.kill(h)
+  })
+
   it('spawn 之后 notify 往事件文件追加 stop → 无人调用 state()/sendInput() 也能推出 idle 状态回调', async () => {
     const seen: Array<{ seq: number; state: WorkerContractState }> = []
     const tmux = new NoopTmux()

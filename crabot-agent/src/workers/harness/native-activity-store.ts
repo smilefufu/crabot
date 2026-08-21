@@ -78,6 +78,12 @@ export class NativeActivityStore {
     )
   }
 
+  async hasCursor(workerId: string, incarnationId: IncarnationId): Promise<boolean> {
+    return this.mutex(workerId).run(async () =>
+      (await this.read(workerId)).cursors.some((item) => item.incarnation_id === incarnationId),
+    )
+  }
+
   async activities(workerId: string, incarnationId: IncarnationId): Promise<PersistedNativeActivity[]> {
     return this.mutex(workerId).run(async () =>
       (await this.read(workerId)).activities.filter((item) => item.incarnation_id === incarnationId),

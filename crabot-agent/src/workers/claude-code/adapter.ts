@@ -571,10 +571,15 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
       const interaction = classifyClaudeTerminalInteraction(snapshot)
       if (interaction.kind !== 'none') {
+        if (interaction.kind === 'automatic') {
+          await this.handleAutomaticInteractionAfterUiResponse(runtime, h, interaction, snapshot)
+          return
+        }
         const report: StateChangeReport = {
           terminal: this.liveTerminal(snapshot),
           waitReason: 'interaction_required',
-          ...(interaction.kind === 'manager_required' ? { ui: { fingerprint: interaction.fingerprint, actions: interaction.actions } } : {}),
+          ui: { fingerprint: interaction.fingerprint, actions: interaction.actions },
+          notification: { type: 'terminal_interaction' },
         }
         await this.transitionControlState(
           runtime,
@@ -582,7 +587,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
           { kind: 'waiting_action', reason: 'interaction_required' },
           report,
           notify,
-          notify && interaction.kind === 'manager_required',
+          notify,
         )
         throw new CliInputStallError('not_pasted', 'waiting_action', report)
       }
@@ -634,10 +639,15 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
       const interaction = classifyClaudeTerminalInteraction(snapshot)
       if (interaction.kind !== 'none') {
+        if (interaction.kind === 'automatic') {
+          await this.handleAutomaticInteractionAfterUiResponse(runtime, h, interaction, snapshot)
+          return
+        }
         const report: StateChangeReport = {
           terminal: this.liveTerminal(snapshot),
           waitReason: 'interaction_required',
-          ...(interaction.kind === 'manager_required' ? { ui: { fingerprint: interaction.fingerprint, actions: interaction.actions } } : {}),
+          ui: { fingerprint: interaction.fingerprint, actions: interaction.actions },
+          notification: { type: 'terminal_interaction' },
         }
         await this.transitionControlState(
           runtime,
@@ -645,7 +655,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
           { kind: 'waiting_action', reason: 'interaction_required' },
           report,
           notify,
-          notify && interaction.kind === 'manager_required',
+          notify,
         )
         return
       }
@@ -1723,7 +1733,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     runtime: Runtime,
     h: IncarnationHandle,
     interaction: TerminalInteraction,
-    snapshot: CapturedPane,
+    snapshot: PaneSnapshot,
+    forceNotify = false,
   ): Promise<void> {
     if (interaction.kind === 'none') {
       runtime.interactionFingerprint = undefined
@@ -1735,25 +1746,25 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (interaction.kind === 'automatic') {
       const confirmed = await this.capture(runtime).catch(() => undefined)
       if (!confirmed) {
-        await this.failAutomaticInteraction(runtime, h, interaction, snapshot)
+        await this.failAutomaticInteraction(runtime, h, interaction, snapshot, forceNotify)
         return
       }
       const current = classifyClaudeTerminalInteraction(confirmed)
       if (current.kind !== 'automatic' || current.fingerprint !== interaction.fingerprint) {
         runtime.interactionFingerprint = undefined
-        await this.handleTerminalInteraction(runtime, h, current, confirmed)
+        await this.handleTerminalInteraction(runtime, h, current, confirmed, forceNotify)
         return
       }
       const permissionModeBaseline = await this.captureClaudePermissionModeOffsets(runtime)
       try {
         await this.tmux.sendKeys(runtime.sessionName, ['1', 'Enter'])
       } catch {
-        await this.failAutomaticInteraction(runtime, h, interaction, confirmed)
+        await this.failAutomaticInteraction(runtime, h, interaction, confirmed, forceNotify)
         return
       }
       const resolved = await this.waitForClaudeExitPlanResolution(runtime, permissionModeBaseline)
       if (!resolved) {
-        await this.failAutomaticInteraction(runtime, h, interaction, snapshot)
+        await this.failAutomaticInteraction(runtime, h, interaction, snapshot, forceNotify)
         return
       }
       runtime.interactionFingerprint = undefined
@@ -1765,7 +1776,19 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       waitReason: 'interaction_required',
       ui: { fingerprint: interaction.fingerprint, actions: interaction.actions },
       notification: { type: 'terminal_interaction' },
-    })
+    }, true, forceNotify)
+  }
+
+  private async handleAutomaticInteractionAfterUiResponse(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    interaction: Extract<TerminalInteraction, { kind: 'automatic' }>,
+    snapshot: PaneSnapshot,
+  ): Promise<void> {
+    await this.handleTerminalInteraction(runtime, h, interaction, snapshot, true)
+    if (runtime.controlState.kind === 'waiting_action' && runtime.interactionFingerprint === undefined) {
+      await this.transitionControlState(runtime, h, { kind: 'running' })
+    }
   }
 
   private async waitForClaudeExitPlanResolution(
@@ -1835,7 +1858,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     runtime: Runtime,
     h: IncarnationHandle,
     interaction: Extract<TerminalInteraction, { kind: 'automatic' }>,
-    snapshot: CapturedPane,
+    snapshot: PaneSnapshot,
+    forceNotify = false,
   ): Promise<void> {
     const current = await this.capture(runtime).catch(() => undefined)
     await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, {
@@ -1846,7 +1870,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         actions: managerActionsForClaudeAutomaticInteraction(snapshot),
       },
       notification: { type: 'automatic_interaction_failed' },
-    })
+    }, true, forceNotify)
   }
 
   private assertActive(): void {

@@ -615,7 +615,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
  * 显式的启动对账入口(§12),与构造分离——由调用方决定何时调(建议:启动后异步跑一次,
  * 失败仅 warn)。
  *
- * 两步顺序不可换,理由见 `harness.reconcileOnStartup` 的方法注释:`scanOrphans` 修的是
+ * `scanOrphans` 必须先于后续两项,理由见 `harness.reconcileOnStartup` 的方法注释:`scanOrphans` 修的是
  * builtin adapter 自己 dataDir 下 meta 文件那份"进程内存活状态"私有真相(进程重启后
  * state==='running' 的 meta 必是孤儿),必须先把它改写成 exited(crashed);否则
  * `reconcileOnStartup` 调 `builtin.state()` 时会读到过期的 'running',把已经不存在的化身
@@ -624,11 +624,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 export async function reconcileManagerStack(stack: ManagerStack): Promise<ReconcileReport> {
   await stack.principals.init()
   await BuiltinWorkerAdapter.scanOrphans(stack.builtinDataDir)
+  // CLI 重建 runtime 时会立即启动原生活动轮询；先建立缺失的 high-water，才能避免首次轮询把
+  // 升级前会话重放成新 activity。
+  await stack.harness.reconcileNativeActivityOnStartup()
   const report = await stack.harness.reconcileOnStartup()
   await stack.harness.reconcileInputDeliveriesOnStartup()
   await stack.harness.reconcileQueryReceiptsOnStartup()
   await stack.harness.reconcileControlOperationsOnStartup()
-  await stack.harness.reconcileNativeActivityOnStartup()
   await stack.harness.reconcileSupervisionOnStartup()
   return report
 }
