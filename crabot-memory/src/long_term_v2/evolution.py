@@ -26,6 +26,30 @@ VALID_MODES = frozenset({"balanced", "innovate", "harden", "repair-only"})
 MIN_SOURCE_CASES = 3
 
 
+def _load_confirmed_source_cases(store, index: SqliteIndex, source_cases: list[str]):
+    if len(set(source_cases)) != len(source_cases):
+        raise ValueError("case→rule 合成的 source_cases 不得重复。")
+
+    loaded = []
+    for case_id in source_cases:
+        loc = index.locate(case_id)
+        if not loc:
+            raise ValueError(f"source case 不存在: {case_id}")
+        status, type_, _ = loc
+        if status != "confirmed" or type_ != "lesson":
+            raise ValueError(f"source case 必须是 confirmed lesson: {case_id}")
+        entry = store.read(status, type_, case_id)
+        if entry.frontmatter.maturity != "case" or entry.frontmatter.lesson_meta is None:
+            raise ValueError(f"source case 必须是带场景的 active lesson case: {case_id}")
+        loaded.append(entry)
+
+    scenarios = {entry.frontmatter.lesson_meta.scenario for entry in loaded}
+    outcomes = {entry.frontmatter.lesson_meta.outcome for entry in loaded}
+    if len(scenarios) != 1 or len(outcomes) != 1:
+        raise ValueError("case→rule 合成要求所有 source case 的 scenario 和 outcome 一致。")
+    return loaded, scenarios.pop(), outcomes.pop()
+
+
 def get_evolution_mode(index: SqliteIndex) -> dict:
     mode, reason, ts = index.get_evolution_mode()
     return {"mode": mode, "reason": reason, "last_changed_at": ts}
@@ -60,6 +84,9 @@ def synthesize_rule(
             f"实际仅 {len(source_cases)} 条（spec §6.4）。"
         )
 
+    source_entries, source_scenario, source_outcome = _load_confirmed_source_cases(
+        store, index, source_cases,
+    )
     now_iso = utc_now_iso_z()
     rule_id = new_memory_id()
     fm = MemoryFrontmatter(
@@ -77,8 +104,8 @@ def synthesize_rule(
         event_time=now_iso,
         ingestion_time=now_iso,
         lesson_meta=LessonMeta(
-            scenario=scenario if scenario is not None else "",
-            outcome="success",
+            scenario=scenario if scenario is not None else source_scenario,
+            outcome=source_outcome,
             source_cases=list(source_cases),
         ),
         observation=Observation(
@@ -94,4 +121,30 @@ def synthesize_rule(
         path=entry_path(store.data_root, "confirmed", "lesson", rule_id),
         status="confirmed",
     )
+    retired_sources = []
+    try:
+        for source_entry in source_entries:
+            source_fm = source_entry.frontmatter
+            retired = source_entry.model_copy(update={
+                "frontmatter": source_fm.model_copy(update={"maturity": "retired"}),
+            })
+            store.write(retired, status="confirmed")
+            index.upsert(
+                retired,
+                path=entry_path(store.data_root, "confirmed", "lesson", source_fm.id),
+                status="confirmed",
+            )
+            retired_sources.append(source_entry)
+    except Exception:
+        for source_entry in retired_sources:
+            source_fm = source_entry.frontmatter
+            store.write(source_entry, status="confirmed")
+            index.upsert(
+                source_entry,
+                path=entry_path(store.data_root, "confirmed", "lesson", source_fm.id),
+                status="confirmed",
+            )
+        store.purge("confirmed", "lesson", rule_id)
+        index.delete(rule_id)
+        raise
     return rule_id

@@ -647,6 +647,64 @@ describe('skill 目录用 name 不用 UUID（Anthropic 标准）', () => {
   })
 })
 
+describe('SkillManager.registerBuiltins', () => {
+  let tmpRoot: string
+  let dataDir: string
+  let builtinsDir: string
+
+  beforeEach(async () => {
+    tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'builtin-skill-prune-'))
+    dataDir = path.join(tmpRoot, 'data')
+    builtinsDir = path.join(tmpRoot, 'builtins')
+    await fs.mkdir(dataDir, { recursive: true })
+    await fs.mkdir(path.join(builtinsDir, 'active-skill'), { recursive: true })
+    await fs.writeFile(
+      path.join(builtinsDir, 'active-skill', 'SKILL.md'),
+      '---\nname: active-skill\ndescription: active\nversion: 1.0.0\n---\nbody',
+    )
+  })
+
+  afterEach(async () => {
+    await fs.rm(tmpRoot, { recursive: true, force: true })
+  })
+
+  it('upgrades remove obsolete builtin entries from the scanned directory only', async () => {
+    const entry = (id: string, name: string, skillDir: string) => ({
+      id,
+      name,
+      description: name,
+      version: '1.0.0',
+      skill_dir: skillDir,
+      source_type: 'builtin' as const,
+      is_builtin: true,
+      is_essential: false,
+      can_disable: true,
+      enabled: true,
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    })
+    await fs.writeFile(path.join(dataDir, 'skills.json'), JSON.stringify([
+      entry('obsolete-daily', 'daily-reflection', path.join(builtinsDir, 'daily-reflection')),
+      entry('obsolete-curate', 'memory-curate', path.join(builtinsDir, 'memory-curate')),
+      entry('retained-seed', 'writing-plans', path.join(tmpRoot, 'builtin-skills', 'writing-plans')),
+    ]))
+
+    const manager = new SkillManager(dataDir)
+    await manager.initialize()
+    await manager.registerBuiltins(builtinsDir)
+
+    expect(manager.findByName('daily-reflection')).toBeUndefined()
+    expect(manager.findByName('memory-curate')).toBeUndefined()
+    expect(manager.findByName('active-skill')?.is_builtin).toBe(true)
+    expect(manager.get('retained-seed')?.name).toBe('writing-plans')
+
+    const restarted = new SkillManager(dataDir)
+    await restarted.initialize()
+    expect(restarted.findByName('daily-reflection')).toBeUndefined()
+    expect(restarted.findByName('memory-curate')).toBeUndefined()
+  })
+})
+
 describe('MCPServerManager.upsertById', () => {
   let tmpData: string
   let manager: MCPServerManager

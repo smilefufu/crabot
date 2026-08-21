@@ -21,6 +21,7 @@ import { MaintenanceDropdown, type MaintenanceScope } from './components/Mainten
 import { SearchBox, type SearchMode } from './components/SearchBox'
 import { DiffReviewModal } from './components/DiffReviewModal'
 import { MemoryGraphPanel } from './components/MemoryGraphPanel'
+import { HistoricalInboxCleanupDialog } from './components/HistoricalInboxCleanupDialog'
 
 type TopTab = 'all' | 'observation' | 'graph'
 type DrawerState =
@@ -69,6 +70,7 @@ export const MemoryV2Page: React.FC = () => {
 
   const [graphData, setGraphData] = useState<MemoryGraphData | null>(null)
   const [graphLoading, setGraphLoading] = useState(false)
+  const [historicalCleanupOpen, setHistoricalCleanupOpen] = useState(false)
 
   useEffect(() => {
     const p = new URLSearchParams(loc.search)
@@ -153,7 +155,7 @@ export const MemoryV2Page: React.FC = () => {
   async function handleRestore(e: MemoryEntryV2) {
     await memoryV2Service.restoreEntry(e.id)
     setDrawer({ kind: 'closed' })
-    await refreshEntries()
+    setStatus('confirmed')
   }
 
   async function handleBatchDelete() {
@@ -187,6 +189,12 @@ export const MemoryV2Page: React.FC = () => {
     } finally {
       setRebuildingGraph(false)
     }
+  }
+
+  async function handleHistoricalInboxMigrated(result: { moved: number; remaining: number; failed: Array<unknown> }) {
+    await refreshEntries()
+    toast.success?.(`已迁移 ${result.moved} 条历史候选，剩余 ${result.remaining} 条`)
+    if (result.failed.length > 0) toast.error?.(`${result.failed.length} 条未迁移，请稍后重试`)
   }
 
   async function handleCreate(payload: CreateEntryParams) {
@@ -253,6 +261,13 @@ export const MemoryV2Page: React.FC = () => {
           <div className="mem-page__actions">
             <EvolutionModeBadge mode={mode} onClick={() => setModeModalOpen(true)} />
             <MaintenanceDropdown onRun={handleMaintenance} />
+            <button
+              type="button"
+              className="mem-maint__trigger"
+              onClick={() => setHistoricalCleanupOpen(true)}
+            >
+              清理历史 inbox
+            </button>
             <button
               type="button"
               className="mem-maint__trigger"
@@ -325,7 +340,7 @@ export const MemoryV2Page: React.FC = () => {
                       trashMode={status === 'trash'}
                       onTrashRestore={async (id) => {
                         await memoryV2Service.restoreEntry(id)
-                        await refreshEntries()
+                        setStatus('confirmed')
                       }}
                     />}
             </div>
@@ -378,6 +393,12 @@ export const MemoryV2Page: React.FC = () => {
         {modeModalOpen && (
           <EvolutionModeModal open current={mode} onClose={() => setModeModalOpen(false)} onSubmit={handleModeChange} />
         )}
+
+        <HistoricalInboxCleanupDialog
+          open={historicalCleanupOpen}
+          onClose={() => setHistoricalCleanupOpen(false)}
+          onMigrated={handleHistoricalInboxMigrated}
+        />
 
         {compareOld && drawer.kind === 'view' && (() => {
           const currentVersion = drawer.entry.frontmatter?.version

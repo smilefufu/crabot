@@ -108,6 +108,7 @@ async def test_search_long_term_returns_relevant_results(rpc):
             "entity_priority": 0.5, "unambiguity": 0.5,
         },
         "event_time": "2026-04-23T10:00:00Z",
+        "status": "confirmed",
     })
     res = await rpc.search_long_term({"query": "张三 微信", "k": 5})
     assert len(res["results"]) >= 1
@@ -128,6 +129,7 @@ async def test_search_long_term_default_brief_only(rpc):
             "entity_priority": 0.5, "unambiguity": 0.5,
         },
         "event_time": "2026-04-23T10:00:00Z",
+        "status": "confirmed",
     })
     res = await rpc.search_long_term({"query": "test", "k": 1})
     assert res["results"][0].get("body") is None

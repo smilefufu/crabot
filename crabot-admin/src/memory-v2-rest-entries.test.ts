@@ -109,6 +109,41 @@ describe('memory-v2 REST entries', () => {
     expect(body.error).toBe('invalid_type')
     expect(rpc.call).not.toHaveBeenCalled()
   })
+
+  it('GET /api/memory/v2/historical-inbox/preview forwards the optional cutoff', async () => {
+    rpc.call.mockResolvedValue({ estimated_move_count: 5435 })
+    const res = await router.dispatch(
+      'GET', '/api/memory/v2/historical-inbox/preview?cutoff=2026-08-20T00%3A00%3A00Z',
+    )
+    expect(rpc.call).toHaveBeenCalledWith(
+      19999,
+      'preview_historical_inbox',
+      { cutoff: '2026-08-20T00:00:00Z' },
+      moduleId,
+    )
+    expect(res).toMatchObject({ status: 200, body: { estimated_move_count: 5435 } })
+  })
+
+  it('POST historical inbox batch rejects an unconfirmed request before RPC', async () => {
+    const res = await router.dispatch('POST', '/api/memory/v2/historical-inbox/migrate-batch', '{}')
+    expect(res).toEqual({ status: 400, body: { error: 'CONFIRMATION_REQUIRED' } })
+    expect(rpc.call).not.toHaveBeenCalled()
+  })
+
+  it('POST historical inbox batch forwards explicit confirmation', async () => {
+    rpc.call.mockResolvedValue({ batch_size: 200, moved: 200, remaining: 5235, failed: [] })
+    const res = await router.dispatch(
+      'POST', '/api/memory/v2/historical-inbox/migrate-batch',
+      JSON.stringify({ confirmed: true }),
+    )
+    expect(rpc.call).toHaveBeenCalledWith(
+      19999,
+      'migrate_historical_inbox_batch',
+      { confirmed: true },
+      moduleId,
+    )
+    expect(res).toMatchObject({ status: 200, body: { batch_size: 200, moved: 200 } })
+  })
 })
 
 describe('memory-v2 REST mode + maintenance + observation', () => {

@@ -25,6 +25,7 @@ EXPECTED_V2_RPC_METHODS = frozenset({
     "trigger_consolidation",
     "get_evolution_mode",
     "set_evolution_mode",
+    "promote_inbox_entry",
     "promote_to_rule",
     "get_observation_pending",
     "mark_observation_pass",
@@ -43,6 +44,9 @@ EXPECTED_V2_RPC_METHODS = frozenset({
     "get_confirmed_snapshot",
     "get_entry_version",
     "get_memory_graph",
+    # v0.3.3 历史 inbox 受控清理
+    "preview_historical_inbox",
+    "migrate_historical_inbox_batch",
     # 后续独立设计文档新增（已回填 spec §10.1 修订注记）
     "import_long_term",  # 2026-06-19-crabot-backup-import-design.md
 })

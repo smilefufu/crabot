@@ -68,6 +68,7 @@ export const MAX_SELF_WAKE_CHAIN = 3
 export interface ScheduleIdentity {
   readonly creatorFriendId?: string
   readonly isBuiltin?: boolean
+  readonly taskType?: string
 }
 
 export interface ManagerRegistryDeps {
@@ -346,8 +347,19 @@ export class ManagerRegistry {
    */
   async routeWorkerEvent(event: HarnessEvent): Promise<EpisodeResult | undefined> {
     const capture = this.captureIngress()
-    const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event }, event.ts)
     const found = await this.deps.ledger.findWorker(event.worker_id)
+    const eventWithOrigin: HarnessEvent = found
+      ? {
+          ...event,
+          detail: {
+            ...(event.detail ?? {}),
+            ...(event.task_status ? { outcome: event.task_status } : {}),
+            trigger_type: found.worker.origin.trigger_type,
+            task_id: found.worker.task.id,
+          },
+        }
+      : event
+    const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event: eventWithOrigin }, event.ts)
     const key = found?.worker.manager_key ?? SYSTEM_TASKS_MANAGER_KEY
     return this.runWake(key, envelope)
   }
@@ -408,6 +420,7 @@ export class ManagerRegistry {
     scheduleId: string
     title: string
     description: string
+    taskType?: string
     targetSession?: { channel_id: string; session_id: string }
     creatorFriendId?: string
     isBuiltin?: boolean
@@ -421,6 +434,7 @@ export class ManagerRegistry {
       scheduleId: p.scheduleId,
       title: p.title,
       description: p.description,
+      taskType: p.taskType,
       creatorFriendId: p.creatorFriendId,
       isBuiltin: p.isBuiltin,
     })
@@ -612,7 +626,11 @@ export class ManagerRegistry {
 /** 唤醒事件 → 随行的 scheduled 权限身份;非 schedule 唤醒没有身份(undefined)。 */
 function scheduleIdentityOf(wakeEvent: WakeEvent | undefined): ScheduleIdentity | undefined {
   if (wakeEvent?.kind !== 'schedule') return undefined
-  return { creatorFriendId: wakeEvent.creatorFriendId, isBuiltin: wakeEvent.isBuiltin }
+  return {
+    creatorFriendId: wakeEvent.creatorFriendId,
+    isBuiltin: wakeEvent.isBuiltin,
+    taskType: wakeEvent.taskType,
+  }
 }
 
 /**

@@ -683,11 +683,11 @@ describe('AdminModule - Schedule Management', () => {
 
     /**
      * P7/J：调用点切到 `trigger_schedule`（protocol-agent-v3 §8.2）。
-     * §8.2 的入参里没有 `task_type` / `input` / `resolved_permissions`——
+     * 普通 schedule 不下发 `task_type` / `input` / `resolved_permissions`——
      * 模板变量仍在 title/description 上渲染，权限改由 agent 按 `creator_friend_id` 解析，
      * 所以 admin 传的是**事实**（谁建的、是不是内置），不是解析结果。
      */
-    it('切到 trigger_schedule：渲染 title/description，不再下发 task_type/input/resolved_permissions', async () => {
+    it('普通 schedule 切到 trigger_schedule：渲染 title/description，不下发 task_type/input/resolved_permissions', async () => {
       const schedResult = await makeProtocolRequest<{ schedule: Schedule }>(
         TEST_PROTOCOL_PORT,
         'create_schedule',
@@ -836,6 +836,35 @@ describe('AdminModule - Schedule Management', () => {
       }
     })
 
+    it('builtin daily_reflection forwards task_type without maintenance metadata', async () => {
+      const list = await makeProtocolRequest<{ items: Schedule[] }>(
+        TEST_PROTOCOL_PORT,
+        'list_schedules',
+        { page: 1, page_size: 100, filter: {} },
+      )
+      const dailyReflection = list.data!.items.find(
+        (schedule) => schedule.is_builtin && schedule.task_template.type === 'daily_reflection',
+      )!
+
+      const response = await makeProtocolRequest<{
+        accepted: true
+        schedule: Schedule
+        task_id?: string
+      }>(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: dailyReflection.id })
+
+      const call = triggerCallSpy.mock.calls.findLast((item) => item[1] === 'trigger_schedule')!
+      expect(call[2]).toMatchObject({
+        schedule_id: dailyReflection.id,
+        task_type: 'daily_reflection',
+        is_builtin: true,
+      })
+      expect(call[2]).not.toHaveProperty('priority')
+      expect(call[2]).not.toHaveProperty('input')
+      expect(call[2]).not.toHaveProperty('tags')
+      expect(response.data!.task_id).toBeUndefined()
+      expect(response.data!.schedule.last_task_id).toBeUndefined()
+    })
+
     it('user-created memory_maintenance type remains on the ordinary manager route', async () => {
       const created = await makeProtocolRequest<{ schedule: Schedule }>(
         TEST_PROTOCOL_PORT,
@@ -864,6 +893,40 @@ describe('AdminModule - Schedule Management', () => {
         schedule_id: created.data!.schedule.id,
       })
       expect(call[2]).not.toHaveProperty('task_type')
+      expect(call[2]).not.toHaveProperty('priority')
+      expect(call[2]).not.toHaveProperty('input')
+      expect(call[2]).not.toHaveProperty('tags')
+      expect(response.data!.task_id).toBeUndefined()
+    })
+
+    it('forwards retired user memory_curate only for Agent fail-loud handling', async () => {
+      const created = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'create_schedule',
+        {
+          name: 'Legacy memory curate',
+          trigger: { type: 'cron', expression: '0 6 * * *' },
+          task_template: {
+            type: 'memory_curate',
+            title: '旧记忆整理',
+            priority: 'normal',
+            tags: ['user-owned'],
+            input: { scope: 'all' },
+          },
+        },
+      )
+
+      const response = await makeProtocolRequest<{ accepted: true; task_id?: string }>(
+        TEST_PROTOCOL_PORT,
+        'trigger_now',
+        { schedule_id: created.data!.schedule.id },
+      )
+
+      const call = triggerCallSpy.mock.calls.findLast((item) => item[1] === 'trigger_schedule')!
+      expect(call[2]).toMatchObject({
+        schedule_id: created.data!.schedule.id,
+        task_type: 'memory_curate',
+      })
       expect(call[2]).not.toHaveProperty('priority')
       expect(call[2]).not.toHaveProperty('input')
       expect(call[2]).not.toHaveProperty('tags')

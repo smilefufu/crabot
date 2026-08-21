@@ -1,9 +1,8 @@
 /**
  * Admin 模块 - 内置 Schedule 种子测试
  *
- * 验证 ensureBuiltinSchedules 在首次启动时正确创建三个内置调度：
+ * 验证 ensureBuiltinSchedules 在首次启动时正确创建两个内置调度：
  *   - 每日反思 (cron)
- *   - 记忆整理 (interval)
  *   - 记忆维护 (cron)
  */
 
@@ -67,30 +66,10 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
     expect(dailyReflection!.is_builtin).toBe(true)
     expect(dailyReflection!.trigger.type).toBe('cron')
     expect(dailyReflection!.task_template.type).toBe('daily_reflection')
-  })
-
-  it('should seed 记忆整理 (interval, 3600s)', async () => {
-    const result = await (admin as unknown as { handleListSchedules: (params: { page: number; page_size: number; filter: Record<string, unknown> }) => Promise<{ items: Schedule[] }> }).handleListSchedules({ page: 1, page_size: 50, filter: {} })
-    const memoryCurate = result.items.find(s => s.name === '记忆整理')
-    expect(memoryCurate, '记忆整理 should exist').toBeDefined()
-    expect(memoryCurate!.is_builtin).toBe(true)
-    expect(memoryCurate!.trigger.type).toBe('interval')
-    if (memoryCurate!.trigger.type === 'interval') {
-      expect(memoryCurate!.trigger.seconds).toBe(3600)
-    }
-    expect(memoryCurate!.task_template.type).toBe('memory_curate')
-  })
-
-  it('should seed 记忆整理 with explicit watermark input for incremental inbox curation', async () => {
-    const result = await (admin as unknown as { handleListSchedules: (params: { page: number; page_size: number; filter: Record<string, unknown> }) => Promise<{ items: Schedule[] }> }).handleListSchedules({ page: 1, page_size: 50, filter: {} })
-    const memoryCurate = result.items.find(s => s.name === '记忆整理')
-    expect(memoryCurate, '记忆整理 should exist').toBeDefined()
-    expect(memoryCurate!.task_template.description).toContain('{{watermark}}')
-    expect(memoryCurate!.task_template.description).toContain('{{datetime}}')
-    expect(memoryCurate!.task_template.input).toMatchObject({
-      ingestion_time_start: '{{watermark}}',
-      ingestion_time_end: '{{datetime}}',
-    })
+    expect(dailyReflection!.task_template.description).toContain('Manager 直接执行')
+    expect(dailyReflection!.task_template.description).not.toContain('Skill("daily-reflection")')
+    expect(dailyReflection!.task_template.description).toContain('send_daily_reflection_summary')
+    expect(dailyReflection!.task_template.description).not.toContain('send_master_private')
   })
 
   it('should seed 记忆维护 (cron, 0 4 * * *)', async () => {
@@ -105,10 +84,10 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
     expect(memoryMaintenance!.task_template.type).toBe('memory_maintenance')
   })
 
-  it('should have exactly 3 builtin schedules (no duplicates)', async () => {
+  it('should have exactly 2 builtin schedules (no duplicates)', async () => {
     const result = await (admin as unknown as { handleListSchedules: (params: { page: number; page_size: number; filter: Record<string, unknown> }) => Promise<{ items: Schedule[] }> }).handleListSchedules({ page: 1, page_size: 50, filter: {} })
     const builtins = result.items.filter(s => s.is_builtin)
-    expect(builtins).toHaveLength(3)
+    expect(builtins).toHaveLength(2)
   })
 
   it('should not duplicate schedules on repeated ensureBuiltinSchedules calls', async () => {
@@ -117,50 +96,48 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
 
     const result = await (admin as unknown as { handleListSchedules: (params: { page: number; page_size: number; filter: Record<string, unknown> }) => Promise<{ items: Schedule[] }> }).handleListSchedules({ page: 1, page_size: 50, filter: {} })
     const builtins = result.items.filter(s => s.is_builtin)
-    expect(builtins).toHaveLength(3)
+    expect(builtins).toHaveLength(2)
   })
 
-  it('should converge same-name builtin duplicates to one (keep earliest created_at)', async () => {
-    // Simulates the historical bug where multiple same-name builtin schedules
-    // accumulated across migrations / failed loads. ensureBuiltinSchedules
-    // must collapse them, keeping the earliest one.
+  it('removes only builtin memory_curate schedules and preserves user-created lookalikes', async () => {
     const schedulesMap = (admin as unknown as { schedules: Map<string, Schedule> }).schedules
-    const original = Array.from(schedulesMap.values()).find(s => s.is_builtin && s.name === '记忆整理')
-    expect(original, 'pre-existing 记忆整理 seed must exist').toBeDefined()
-
-    const baseTs = Date.parse(original!.created_at)
-    const dupe1: Schedule = {
-      ...original!,
-      id: 'dupe-curate-1',
-      created_at: new Date(baseTs + 60_000).toISOString(),
-      execution_count: 99,
+    const maintenance = Array.from(schedulesMap.values()).find(
+      s => s.is_builtin && s.task_template.type === 'memory_maintenance',
+    )!
+    const builtinCurate: Schedule = {
+      ...maintenance,
+      id: 'legacy-builtin-curate',
+      name: '记忆整理',
+      task_template: { ...maintenance.task_template, type: 'memory_curate' },
     }
-    const dupe2: Schedule = {
-      ...original!,
-      id: 'dupe-curate-2',
-      created_at: new Date(baseTs + 120_000).toISOString(),
-      execution_count: 50,
+    const userCurate: Schedule = {
+      ...builtinCurate,
+      id: 'user-curate',
+      is_builtin: false,
+      enabled: false,
     }
-    schedulesMap.set(dupe1.id, dupe1)
-    schedulesMap.set(dupe2.id, dupe2)
+    schedulesMap.set(builtinCurate.id, builtinCurate)
+    schedulesMap.set(userCurate.id, userCurate)
 
     await (admin as unknown as { ensureBuiltinSchedules: () => Promise<void> }).ensureBuiltinSchedules()
 
-    const curatesAfter = Array.from(schedulesMap.values()).filter(s => s.is_builtin && s.name === '记忆整理')
-    expect(curatesAfter).toHaveLength(1)
-    expect(curatesAfter[0].id).toBe(original!.id)
+    expect(schedulesMap.has(builtinCurate.id)).toBe(false)
+    expect(schedulesMap.get(userCurate.id)).toMatchObject({
+      id: userCurate.id,
+      is_builtin: false,
+      enabled: false,
+      task_template: { type: 'memory_curate' },
+    })
   })
 
-  it('should resync stale memory_curate task_template to current SEED on startup', async () => {
-    // memory_curate remains system-seeded as before; the two managed daily
-    // schedules preserve their other user-editable template fields.
+  it('resyncs the daily Manager-owned workflow while preserving its identity and statistics', async () => {
     const schedulesMap = (admin as unknown as { schedules: Map<string, Schedule> }).schedules
     const dailyReflection = Array.from(schedulesMap.values()).find(
-      s => s.is_builtin && s.name === '记忆整理'
+      s => s.is_builtin && s.task_template.type === 'daily_reflection'
     )
-    expect(dailyReflection, 'pre-existing 记忆整理 seed must exist').toBeDefined()
+    expect(dailyReflection, 'pre-existing 每日反思 seed must exist').toBeDefined()
 
-    const staleDescription = '执行每日反思（旧版文案，缺少 Skill 调用指令）。'
+    const staleDescription = '第一步必须调用 Skill("daily-reflection")。'
     const originalId = dailyReflection!.id
     const originalCreatedAt = dailyReflection!.created_at
 
@@ -175,7 +152,8 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
     const refreshed = schedulesMap.get(originalId)
     expect(refreshed, 'schedule should still exist with same id').toBeDefined()
     expect(refreshed!.task_template.description).not.toBe(staleDescription)
-    expect(refreshed!.task_template.description).toMatch(/第一步必须调用 Skill\("memory-curate"\)/)
+    expect(refreshed!.task_template.description).toContain('Manager 直接执行')
+    expect(refreshed!.task_template.description).not.toContain('Skill("daily-reflection")')
     expect(refreshed!.created_at).toBe(originalCreatedAt) // user-facing fields preserved
     expect(refreshed!.execution_count).toBe(42) // runtime stats preserved
   })

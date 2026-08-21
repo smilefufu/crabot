@@ -101,6 +101,8 @@ async def _capture_case(rpc, brief: str) -> str:
                                "entity_priority": 0.5, "unambiguity": 0.5},
         "lesson_meta": {"scenario": "macos_input", "outcome": "success"},
     })
+    promoted = await rpc.promote_inbox_entry({"id": out["id"]})
+    assert promoted["status"] == "ok"
     return out["id"]
 
 
@@ -131,6 +133,9 @@ async def test_promote_to_rule_writes_confirmed_lesson_with_observation(tmp_path
     assert entry.frontmatter.observation.window_days == 7
     assert entry.frontmatter.observation.outcome == "pending"
     assert entry.frontmatter.lesson_meta.source_cases == source_cases
+    for source_case in source_cases:
+        source = store.read("confirmed", "lesson", source_case)
+        assert source.frontmatter.maturity == "retired"
 
 
 @pytest.mark.asyncio

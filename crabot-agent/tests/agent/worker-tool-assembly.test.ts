@@ -143,7 +143,7 @@ describe('buildToolsDynamic memory 工具分组', () => {
     ])
   })
 
-  it('scheduled + daily_reflection 任务 → 注册全量 18 个 crab-memory 工具', async () => {
+  it('scheduled + daily_reflection 任务 → 仅注册 A 组 6 个 crab-memory 工具', async () => {
     const { tools } = await buildToolsFor(makeHandler(), {
       task: makeTask({
         task_type: 'daily_reflection',
@@ -152,13 +152,13 @@ describe('buildToolsDynamic memory 工具分组', () => {
       context: makeContext(),
     })
     const names = memoryToolNames(tools)
-    expect(names).toHaveLength(18)
-    expect(names).toContain('mcp__crab-memory__quick_capture')
-    expect(names).toContain('mcp__crab-memory__run_maintenance')
-    expect(names).toContain('mcp__crab-memory__promote_to_rule')
+    expect(names).toHaveLength(6)
+    expect(names).not.toContain('mcp__crab-memory__quick_capture')
+    expect(names).not.toContain('mcp__crab-memory__run_maintenance')
+    expect(names).not.toContain('mcp__crab-memory__promote_to_rule')
   })
 
-  it('memory_curate 任务 → 注册全量 18 个（整理 SKILL 依赖 B 组工具）', async () => {
+  it('memory_curate 任务 → 仅注册 A 组 6 个（已退役类型不再获特权）', async () => {
     const { tools } = await buildToolsFor(makeHandler(), {
       task: makeTask({
         task_type: 'memory_curate',
@@ -168,13 +168,13 @@ describe('buildToolsDynamic memory 工具分组', () => {
       context: makeContext(),
     })
     const names = memoryToolNames(tools)
-    expect(names).toHaveLength(18)
-    expect(names).toContain('mcp__crab-memory__list_entries')
-    expect(names).toContain('mcp__crab-memory__delete_memory')
-    expect(names).toContain('mcp__crab-memory__update_long_term')
+    expect(names).toHaveLength(6)
+    expect(names).not.toContain('mcp__crab-memory__list_entries')
+    expect(names).not.toContain('mcp__crab-memory__delete_memory')
+    expect(names).not.toContain('mcp__crab-memory__update_long_term')
   })
 
-  it('tags 含 memory_rebuild 的 manual 任务 → 注册全量 18 个', async () => {
+  it('tags 含 memory_rebuild 的 manual 任务 → 注册全量 19 个', async () => {
     // 重建图谱任务：trigger_type=manual、无 task_type，靠 tags 识别
     const { tools } = await buildToolsFor(makeHandler(), {
       task: makeTask({
@@ -185,7 +185,7 @@ describe('buildToolsDynamic memory 工具分组', () => {
       context: makeContext(),
     })
     const names = memoryToolNames(tools)
-    expect(names).toHaveLength(18)
+    expect(names).toHaveLength(19)
     expect(names).toContain('mcp__crab-memory__list_entries')
     expect(names).toContain('mcp__crab-memory__set_memory_links')
   })
@@ -215,13 +215,13 @@ describe('buildToolsDynamic disabled_tools 扩展到 MCP 工具', () => {
     })
     const { tools } = await buildToolsFor(handler, {
       task: makeTask({
-        task_type: 'daily_reflection',
-        source: { trigger_type: 'scheduled' },
+      tags: ['memory_rebuild'],
+      source: { trigger_type: 'manual' },
       }),
       context: makeContext(),
     })
     const names = memoryToolNames(tools)
-    expect(names).toHaveLength(17)
+    expect(names).toHaveLength(18)
     expect(names).not.toContain('mcp__crab-memory__run_maintenance')
     expect(names).toContain('mcp__crab-memory__quick_capture')
   })

@@ -47,13 +47,13 @@ describe('SkillManager.registerBuiltins', () => {
   })
 
   it('注册所有含 SKILL.md 的子目录并返回数量', async () => {
-    writeSkill(builtinsDir, 'memory-curate')
+    writeSkill(builtinsDir, 'review-skill')
     writeSkill(builtinsDir, 'tmp-page')
 
     const count = await mgr.registerBuiltins(builtinsDir)
 
     expect(count).toBe(2)
-    expect(mgr.list().map((s) => s.name).sort()).toEqual(['memory-curate', 'tmp-page'])
+    expect(mgr.list().map((s) => s.name).sort()).toEqual(['review-skill', 'tmp-page'])
     expect(errSpy).not.toHaveBeenCalled()
   })
 
@@ -66,7 +66,7 @@ describe('SkillManager.registerBuiltins', () => {
   })
 
   it('子目录在但 SKILL.md 被打包剔掉（issue #43 形态）→ 返回 0 且报错', async () => {
-    mkdirSync(join(builtinsDir, 'memory-curate'), { recursive: true })
+    mkdirSync(join(builtinsDir, 'review-skill'), { recursive: true })
     mkdirSync(join(builtinsDir, 'tmp-page', 'scripts'), { recursive: true })
     writeFileSync(join(builtinsDir, 'tmp-page', 'scripts', 'server.cjs'), '// kept', 'utf-8')
 
