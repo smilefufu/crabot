@@ -4861,7 +4861,9 @@ export class WorkerHarness {
         : state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
           ? 'running'
           : taskStatusFromIncarnation(state, endReason, waitingInput)
-      const shouldCreateTurn = report?.completionSource !== undefined && target.state !== state
+      // CLI 从 `waiting_action` 转回 `waiting_text` 时，公开协议层仍是 `idle`。
+      // completionSource 才是回合边界的权威证据，不能因投影状态相同而过滤。
+      const shouldCreateTurn = report?.completionSource !== undefined
       if (shouldCreateTurn) {
         try {
           await this.collectNativeActivityLocked({

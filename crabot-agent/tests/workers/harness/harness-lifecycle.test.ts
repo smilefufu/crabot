@@ -1315,7 +1315,7 @@ describe('WorkerHarness.handleStateChange', () => {
     await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id))?.completion_source === 'builtin_end_turn')
     const idleTurn = await harness.getWorkerTurn(worker.worker_id)
 
-    fake.emitStateChange(handle, 'idle', '重复通知')
+    harness.handleStateChange(handle, 'idle')
     await harness.sendToWorker(worker.worker_id, '作为同锁屏障')
     expect((await harness.getWorkerTurn(worker.worker_id))?.turn_id).toBe(idleTurn?.turn_id)
 
@@ -1332,6 +1332,25 @@ describe('WorkerHarness.handleStateChange', () => {
     })
     await waitUntil(() => events.some((event) => event.worker_id === notificationWorker.worker_id && event.kind === 'state_changed'))
     expect(await harness.getWorkerTurn(notificationWorker.worker_id)).toBeUndefined()
+  })
+
+  it('CLI 从等待交互回到普通输入态时，即使契约态仍为 idle 也创建完成回合', async () => {
+    const { harness, fake } = await makeHarness({ implId: 'claude-code' })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const handle = { worker_id: worker.worker_id, seq: 1, impl: 'claude-code' as const, session_ref: `ref-${worker.worker_id}#1` }
+
+    harness.handleStateChange(handle, 'idle', {
+      waitReason: 'interaction_required',
+      notification: { type: 'permission_prompt', message: '请选择' },
+    })
+    await waitUntil(() => events.some((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed'))
+    expect(await harness.getWorkerTurn(worker.worker_id)).toBeUndefined()
+
+    fake.emitStateChange(handle, 'idle', '交互完成后的本轮结果')
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id))?.completion_source === 'claude_stop')
+
+    const detail = events.filter((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed').at(-1)?.detail
+    expect(detail).toMatchObject({ to: 'idle', turn_id: expect.any(String), turn_pending: true })
   })
 
   // ---- endReason:harness 不再自己猜,一律取 adapter 上报的真值 ----
