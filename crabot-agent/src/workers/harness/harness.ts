@@ -2188,6 +2188,13 @@ export class WorkerHarness {
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, incarnation_id: mainline.incarnation_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
+    let sourceActivityBaseline: number | undefined
+    try {
+      sourceActivityBaseline = await this.establishCliResumeActivityBaseline(worker.worker_id, mainline, adapter)
+    } catch (error) {
+      // 原生 session 不可读时不伪造 activity；接续本身仍可继续，后续读取再按既有降级处理。
+      console.error(`[WorkerHarness] failed to establish native activity baseline for revived worker ${worker.worker_id}#${mainline.seq}:`, error)
+    }
     let newHandle
     try {
       const returnedHandle = await adapter.resume(prevRef, text, {
@@ -2275,7 +2282,7 @@ export class WorkerHarness {
     })
 
     try {
-      await this.inheritCliNativeActivityCursor(mainline, newHandle)
+      await this.inheritCliNativeActivityCursor(mainline, newHandle, sourceActivityBaseline)
     } catch (error) {
       // activity 观测是对已接受接续的补充；缓存暂不可读时仍让新化身继续运行。
       console.error(`[WorkerHarness] failed to inherit native activity cursor for revived worker ${worker.worker_id}#${newHandle.seq}:`, error)
@@ -2853,18 +2860,42 @@ export class WorkerHarness {
   private async inheritCliNativeActivityCursor(
     source: ExecutableIncarnation,
     target: IncarnationHandle,
+    sourceOffset: number | undefined,
   ): Promise<void> {
-    if (!source.incarnation_id || !target.incarnation_id || !reusesCliNativeSession(source, target)) return
-    const offset = await this.nativeActivityStore.cursor(target.worker_id, source.incarnation_id)
+    if (sourceOffset === undefined || !source.incarnation_id || !target.incarnation_id || !reusesCliNativeSession(source, target)) return
     await this.nativeActivityStore.commitObservation({
       worker_id: target.worker_id,
       cursor: {
         incarnation_id: target.incarnation_id,
         impl: target.impl,
         seq: target.seq,
-        offset,
+        offset: sourceOffset,
       },
     })
+  }
+
+  /** 首次升级接续时没有旧 cursor；在 resume 之前把已退出源 session 的末尾立为无通知基线。 */
+  private async establishCliResumeActivityBaseline(
+    workerId: string,
+    source: ExecutableIncarnation,
+    adapter: WorkerAdapter,
+  ): Promise<number | undefined> {
+    if (!source.incarnation_id || (source.impl !== 'claude-code' && source.impl !== 'codex')) return undefined
+    if (await this.nativeActivityStore.hasCursor(workerId, source.incarnation_id)) {
+      return this.nativeActivityStore.cursor(workerId, source.incarnation_id)
+    }
+    if (!adapter.readTrace) return undefined
+    const trace = await adapter.readTrace(handleForIncarnation(workerId, source), { offset: 0 })
+    await this.nativeActivityStore.commitObservation({
+      worker_id: workerId,
+      cursor: {
+        incarnation_id: source.incarnation_id,
+        impl: source.impl,
+        seq: source.seq,
+        offset: trace.nextCursor.offset,
+      },
+    })
+    return trace.nextCursor.offset
   }
 
   /** 接续后第一个 CLI 回合从前一化身共享 session 的高水位之后开始。 */

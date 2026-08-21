@@ -312,7 +312,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     expect(resumedEvents[0].seq).toBe(w.incarnations[1].seq)
   })
 
-  it('CLI复活复用原生会话时不重放旧 activity，首个新回合从旧高水位开始', async () => {
+  it('升级后首次 CLI复活先建立源 session 基线，不重放旧 activity', async () => {
     const nativeTrace: NormalizedTraceEvent[] = [
       { ts: '2026-08-21T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '旧化身的第一段输出' },
       { ts: '2026-08-21T00:01:00.000Z', kind: 'message', role: 'assistant', summary: '旧化身的第二段输出' },
@@ -344,8 +344,6 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
       nativeActivityStore: { cursor(workerId: string, incarnationId: string): Promise<number> }
     }).nativeActivityStore
 
-    harness.handleNativeActivity(sourceHandle)
-    await waitUntil(async () => await activityStore.cursor(worker.worker_id, source.incarnation_id!) === 2)
     fake.emitStateChange(sourceHandle, 'exited')
     await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
 
@@ -359,6 +357,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
       impl: 'claude-code',
       session_ref: target.session_ref,
     }
+    expect(await activityStore.cursor(worker.worker_id, source.incarnation_id!)).toBe(2)
     expect(await activityStore.cursor(worker.worker_id, target.incarnation_id!)).toBe(2)
 
     events.length = 0
