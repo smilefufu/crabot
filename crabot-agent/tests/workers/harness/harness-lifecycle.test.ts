@@ -1120,6 +1120,35 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(detail).not.toHaveProperty('notification')
   })
 
+  it('自动处理失败也把同一受限 UI snapshot 和 actions 直接交给 Manager', async () => {
+    const { harness } = await makeHarness({ implId: 'claude-code' })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    events.length = 0
+    const h: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'claude-code',
+      session_ref: `ref-${worker.worker_id}#1`,
+    }
+
+    harness.handleStateChange(h, 'idle', {
+      waitReason: 'interaction_required',
+      terminal: terminal('Exit plan mode?'),
+      ui: { fingerprint: 'claude_exit_plan:1-2', actions: UI_ACTIONS },
+      notification: { type: 'automatic_interaction_failed' },
+    })
+    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
+
+    expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
+      kind: 'interaction_required',
+      notification_type: 'automatic_interaction_failed',
+      text: 'Exit plan mode?',
+      snapshot_id: expect.any(String),
+      snapshot_expires_at: expect.any(String),
+      actions: UI_ACTIONS,
+    })
+  })
+
   it('主线 idle/exited 各创建一个待处置回合，重复状态和 notification-only 不重复创建', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())

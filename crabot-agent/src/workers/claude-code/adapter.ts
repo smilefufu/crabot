@@ -51,6 +51,7 @@ import {
   hasClaudeExecutionOrComposer,
   hasClaudeInteraction,
   classifyClaudeTerminalInteraction,
+  managerActionsForClaudeAutomaticInteraction,
 } from './input-surface.js'
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
@@ -1734,7 +1735,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (interaction.kind === 'automatic') {
       const confirmed = await this.capture(runtime).catch(() => undefined)
       if (!confirmed) {
-        await this.failAutomaticInteraction(runtime, h, undefined)
+        await this.failAutomaticInteraction(runtime, h, interaction, snapshot)
         return
       }
       const current = classifyClaudeTerminalInteraction(confirmed)
@@ -1747,12 +1748,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       try {
         await this.tmux.sendKeys(runtime.sessionName, ['1', 'Enter'])
       } catch {
-        await this.failAutomaticInteraction(runtime, h, confirmed)
+        await this.failAutomaticInteraction(runtime, h, interaction, confirmed)
         return
       }
       const resolved = await this.waitForClaudeExitPlanResolution(runtime, permissionModeBaseline)
       if (!resolved) {
-        await this.failAutomaticInteraction(runtime, h, undefined)
+        await this.failAutomaticInteraction(runtime, h, interaction, snapshot)
         return
       }
       runtime.interactionFingerprint = undefined
@@ -1830,11 +1831,20 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return undefined
   }
 
-  private async failAutomaticInteraction(runtime: Runtime, h: IncarnationHandle, snapshot: CapturedPane | undefined): Promise<void> {
-    const current = snapshot ?? await this.capture(runtime).catch(() => undefined)
+  private async failAutomaticInteraction(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    interaction: Extract<TerminalInteraction, { kind: 'automatic' }>,
+    snapshot: CapturedPane,
+  ): Promise<void> {
+    const current = await this.capture(runtime).catch(() => undefined)
     await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, {
       terminal: current ? this.liveTerminal(current) : { kind: 'unavailable', unavailable_reason: 'terminal_capture_failed' },
       waitReason: 'interaction_required',
+      ui: {
+        fingerprint: interaction.fingerprint,
+        actions: managerActionsForClaudeAutomaticInteraction(snapshot),
+      },
       notification: { type: 'automatic_interaction_failed' },
     })
   }

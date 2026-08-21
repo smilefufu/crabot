@@ -65,6 +65,15 @@ export function classifyClaudeTerminalInteraction(snapshot: PaneSnapshot): Termi
   return { kind: 'none' }
 }
 
+/**
+ * The two exact exit-plan variants are normally handled by Harness. If that
+ * fixed action cannot be verified, Manager receives the same bounded choices
+ * as a regular selector, never an arbitrary terminal-input escape hatch.
+ */
+export function managerActionsForClaudeAutomaticInteraction(snapshot: PaneSnapshot): readonly WorkerUiActionDescriptor[] {
+  return boundedUiActions(snapshot.text.split('\n').slice(-24))
+}
+
 function managerRequiredInteraction(
   family: string,
   fingerprint: string,

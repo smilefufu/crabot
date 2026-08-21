@@ -2396,6 +2396,15 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       report: {
         terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
         waitReason: 'interaction_required',
+        ui: {
+          fingerprint: 'claude_exit_plan:1-2',
+          actions: [
+            { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+            { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+            { action_id: 'select_1', kind: 'keys', keys: ['1', 'Enter'] },
+            { action_id: 'select_2', kind: 'keys', keys: ['2', 'Enter'] },
+          ],
+        },
         notification: { type: 'automatic_interaction_failed' },
       },
     }])
