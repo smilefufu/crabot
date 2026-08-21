@@ -4,6 +4,7 @@ import { Loading } from '../../components/Common/Loading'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import {
   agentObservabilityService,
+  type LedgerWorker,
   type ManagerAdminSummary,
   type ManagerEpisodeSpan,
   type ManagerEpisodeTrace,
@@ -11,6 +12,11 @@ import {
 import './ManagerDetail.css'
 
 type ViewMode = 'conversation' | 'technical'
+type ManagerAction = NonNullable<ManagerEpisodeTrace['actions']>[number]
+type RunningWorkers =
+  | { status: 'loading' }
+  | { status: 'ready'; items: LedgerWorker[] }
+  | { status: 'unknown' }
 
 const SPAN_STATUS_COLOR: Record<ManagerEpisodeSpan['status'], string> = {
   running: 'var(--warning)', completed: 'var(--success)', failed: 'var(--error)',
@@ -106,13 +112,30 @@ function TechnicalDetails({ episode }: { episode: ManagerEpisodeTrace }) {
   )
 }
 
-function ActionList({ episode }: { episode: ManagerEpisodeTrace }) {
+const ACTION_LABEL: Partial<Record<ManagerAction['kind'], string>> = {
+  spawn_worker: '派给执行器',
+  send_to_worker: '继续交给执行器',
+  cancel_worker: '停止执行器',
+}
+
+function actionWorkerTitle(action: ManagerAction): string {
+  return action.label.replace(/^[^：:]+[：:]\s*/, '').trim() || action.worker_id || action.label
+}
+
+function ActionList({ episode, runningWorkerIds }: { episode: ManagerEpisodeTrace; runningWorkerIds: ReadonlySet<string> }) {
   if (!episode.actions?.length) return null
   return (
     <div className="manager-detail__actions">
       {episode.actions.map((action, index) => (
         <div key={`${index}-${action.kind}-${action.worker_id ?? ''}`} className="manager-detail__action">
-          {action.worker_id ? <Link to={`/traces/workers/${encodeURIComponent(action.worker_id)}`}>{action.label}</Link> : action.label}
+          {action.worker_id ? (
+            <>
+              <span className="manager-detail__action-kind">{ACTION_LABEL[action.kind] ?? action.label}</span>
+              <Link to={`/traces/workers/${encodeURIComponent(action.worker_id)}`}>{actionWorkerTitle(action)}</Link>
+              <Link className="manager-detail__action-worker-id" to={`/traces/workers/${encodeURIComponent(action.worker_id)}`}>{action.worker_id}</Link>
+              {runningWorkerIds.has(action.worker_id) && <span className="manager-detail__action-current">当前：执行中</span>}
+            </>
+          ) : action.label}
         </div>
       ))}
     </div>
@@ -144,7 +167,7 @@ function groupWorkerProgress(progress: ManagerEpisodeTrace[]): WorkerProgressGro
   }))
 }
 
-function WorkerProgressEntry({ episode }: { episode: ManagerEpisodeTrace }) {
+function WorkerProgressEntry({ episode, runningWorkerIds }: { episode: ManagerEpisodeTrace; runningWorkerIds: ReadonlySet<string> }) {
   const state = episode.worker_ref?.state_to ?? episode.status
   const title = episode.worker_ref?.title ?? triggerText(episode)
   const tone = state === 'failed' || episode.status === 'failed' ? ' is-failed' : state === 'cancelled' ? ' is-cancelled' : ''
@@ -164,21 +187,21 @@ function WorkerProgressEntry({ episode }: { episode: ManagerEpisodeTrace }) {
         </div>
       )}
       {episode.reply_excerpt && <div className="manager-detail__worker-reply">管理会话回复：{episode.reply_excerpt}</div>}
-      <ActionList episode={episode} />
+      <ActionList episode={episode} runningWorkerIds={runningWorkerIds} />
       {episode.status === 'failed' && <div className="manager-detail__failure">失败原因：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
       <TechnicalDetails episode={episode} />
     </div>
   )
 }
 
-function WorkerProgress({ progress }: { progress: WorkerProgressGroup }) {
+function WorkerProgress({ progress, runningWorkerIds }: { progress: WorkerProgressGroup; runningWorkerIds: ReadonlySet<string> }) {
   const [historyOpen, setHistoryOpen] = useState(false)
   return (
     <div className="manager-detail__worker-progress-group">
       {progress.messageHistory.map((message) => (
-        <WorkerProgressEntry key={message.trace_id} episode={message} />
+        <WorkerProgressEntry key={message.trace_id} episode={message} runningWorkerIds={runningWorkerIds} />
       ))}
-      <WorkerProgressEntry episode={progress.latest} />
+      <WorkerProgressEntry episode={progress.latest} runningWorkerIds={runningWorkerIds} />
       {progress.history.length > 0 && (
         <>
           <button
@@ -192,7 +215,7 @@ function WorkerProgress({ progress }: { progress: WorkerProgressGroup }) {
           {historyOpen && (
             <div className="manager-detail__worker-history">
               {progress.history.map((history) => (
-                <WorkerProgressEntry key={history.trace_id} episode={history} />
+                <WorkerProgressEntry key={history.trace_id} episode={history} runningWorkerIds={runningWorkerIds} />
               ))}
             </div>
           )}
@@ -202,7 +225,7 @@ function WorkerProgress({ progress }: { progress: WorkerProgressGroup }) {
   )
 }
 
-function EpisodeEntry({ episode, progress }: { episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[] }) {
+function EpisodeEntry({ episode, progress, runningWorkerIds }: { episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[]; runningWorkerIds: ReadonlySet<string> }) {
   const tone = episode.status === 'failed' ? ' is-failed' : episode.trigger.type === 'worker_event' ? ' is-worker' : ''
   const workerProgress = groupWorkerProgress(progress)
   return (
@@ -215,11 +238,11 @@ function EpisodeEntry({ episode, progress }: { episode: ManagerEpisodeTrace; pro
         </div>
         <div className="manager-detail__event-title">{triggerText(episode)}</div>
         {episode.reply_excerpt && <div className="manager-detail__reply"><strong>管理会话回复</strong>：{episode.reply_excerpt}</div>}
-        <ActionList episode={episode} />
+        <ActionList episode={episode} runningWorkerIds={runningWorkerIds} />
         {episode.status === 'failed' && <div className="manager-detail__failure">失败原因：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
         {workerProgress.length > 0 && (
           <div className="manager-detail__worker-chain">
-            {workerProgress.map((child) => <WorkerProgress key={child.latest.worker_ref?.worker_id ?? child.latest.trace_id} progress={child} />)}
+            {workerProgress.map((child) => <WorkerProgress key={child.latest.worker_ref?.worker_id ?? child.latest.trace_id} progress={child} runningWorkerIds={runningWorkerIds} />)}
           </div>
         )}
       </div>
@@ -316,17 +339,21 @@ function groupEpisodes(episodes: ManagerEpisodeTrace[]): Array<{ episode: Manage
     .sort((a, b) => b.episode.started_at.localeCompare(a.episode.started_at))
 }
 
-function relatedWorkers(groups: Array<{ episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[] }>) {
-  const workers = new Map<string, string>()
-  for (const { episode, progress } of groups) {
-    for (const item of [episode, ...progress]) {
-      if (item.worker_ref) workers.set(item.worker_ref.worker_id, item.worker_ref.title ?? triggerText(item))
-      for (const action of item.actions ?? []) {
-        if (action.worker_id) workers.set(action.worker_id, action.label.replace(/^[^：]+：/, ''))
-      }
-    }
+async function listRunningWorkers(managerKey: string): Promise<LedgerWorker[]> {
+  const items: LedgerWorker[] = []
+  let page = 1
+
+  while (true) {
+    const result = await agentObservabilityService.listWorkers({
+      manager_key: managerKey,
+      status: 'running',
+      page,
+      page_size: 100,
+    })
+    items.push(...result.items)
+    if (page >= result.pagination.total_pages) return items
+    page += 1
   }
-  return Array.from(workers, ([workerId, title]) => ({ workerId, title }))
 }
 
 const ManagerDetailContent: React.FC = () => {
@@ -338,8 +365,12 @@ const ManagerDetailContent: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [view, setView] = useState<ViewMode>('conversation')
+  const [runningWorkers, setRunningWorkers] = useState<RunningWorkers>({ status: 'loading' })
   const grouped = useMemo(() => groupEpisodes(episodes), [episodes])
-  const workers = useMemo(() => relatedWorkers(grouped), [grouped])
+  const runningWorkerIds = useMemo(
+    () => new Set(runningWorkers.status === 'ready' ? runningWorkers.items.map((worker) => worker.worker_id) : []),
+    [runningWorkers],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -372,6 +403,19 @@ const ManagerDetailContent: React.FC = () => {
     return () => { cancelled = true }
   }, [managerKey, page])
 
+  useEffect(() => {
+    let cancelled = false
+    setRunningWorkers({ status: 'loading' })
+    listRunningWorkers(managerKey)
+      .then((items) => {
+        if (!cancelled) setRunningWorkers({ status: 'ready', items })
+      })
+      .catch(() => {
+        if (!cancelled) setRunningWorkers({ status: 'unknown' })
+      })
+    return () => { cancelled = true }
+  }, [managerKey])
+
   return (
     <div className="manager-detail">
       <header className="manager-detail__heading">
@@ -397,7 +441,7 @@ const ManagerDetailContent: React.FC = () => {
               <section>
                 <div className="manager-detail__stream-heading"><strong>活动记录</strong><span>按会话因果关系归并</span></div>
                 <div className="manager-detail__event-list">
-                  {grouped.map(({ episode, progress }) => <EpisodeEntry key={episode.trace_id} episode={episode} progress={progress} />)}
+                  {grouped.map(({ episode, progress }) => <EpisodeEntry key={episode.trace_id} episode={episode} progress={progress} runningWorkerIds={runningWorkerIds} />)}
                 </div>
                 <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
               </section>
@@ -408,19 +452,30 @@ const ManagerDetailContent: React.FC = () => {
                   <div>{channelLabel(managerKey)} · 会话记录</div>
                 </section>
                 <section>
-                  <h2>本页记录</h2>
+                  <h2>当前状态</h2>
                   <dl>
-                    <div><dt>运行事件</dt><dd>{episodes.length} 条</dd></div>
+                    {manager && <div><dt>未结束</dt><dd>{manager.active_worker_count > 0 ? `${manager.active_worker_count} 个` : '—'}</dd></div>}
+                    <div><dt>本页记录</dt><dd>{episodes.length} 条</dd></div>
                     <div><dt>当前页</dt><dd>{page} / {totalPages}</dd></div>
-                    {manager && <div><dt>进行中</dt><dd>{manager.active_worker_count > 0 ? `${manager.active_worker_count} 个` : '—'}</dd></div>}
                   </dl>
                 </section>
-                {workers.length > 0 && (
-                  <section>
-                    <h2>相关执行器</h2>
-                    {workers.map(({ workerId, title }) => <Link key={workerId} to={`/traces/workers/${encodeURIComponent(workerId)}`}>{title}</Link>)}
-                  </section>
-                )}
+                <section>
+                  <h2>正在执行</h2>
+                  {runningWorkers.status === 'loading' && <div className="manager-detail__running-state">读取中…</div>}
+                  {runningWorkers.status === 'unknown' && <div className="manager-detail__running-state is-unknown">暂不可用（unknown）</div>}
+                  {runningWorkers.status === 'ready' && (runningWorkers.items.length > 0 ? (
+                    <div className="manager-detail__running-list">
+                      {runningWorkers.items.map((worker) => (
+                        <div key={worker.worker_id} className="manager-detail__running-worker">
+                          <span>执行中</span>
+                          <Link to={`/traces/workers/${encodeURIComponent(worker.worker_id)}`}>{worker.task.title}</Link>
+                          <code>{worker.worker_id}</code>
+                        </div>
+                      ))}
+                    </div>
+                  ) : <div className="manager-detail__running-state">无</div>)}
+                  <div className="manager-detail__running-note">仅展示此刻状态为执行中的执行器；未结束包含排队与等待输入。</div>
+                </section>
               </aside>
             </div>
           ) : (

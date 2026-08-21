@@ -185,14 +185,38 @@
 }
 
 .manager-detail__action {
+  align-items: baseline;
   color: var(--text-secondary);
+  display: flex;
   font-size: 12px;
+  flex-wrap: wrap;
+  gap: 3px 7px;
+  overflow-wrap: anywhere;
 }
 
 .manager-detail__action a,
 .manager-detail__worker-progress-row a,
 .manager-detail__summary a {
   color: var(--primary-light);
+}
+
+.manager-detail__action-kind {
+  color: var(--primary-light);
+  font-weight: 500;
+}
+
+.manager-detail__action a.manager-detail__action-worker-id,
+.manager-detail__running-worker code {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.manager-detail__action-current {
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .manager-detail__failure {
@@ -365,6 +389,45 @@
   line-height: 1.55;
   margin-top: 6px;
   overflow-wrap: anywhere;
+}
+
+.manager-detail__running-list {
+  display: grid;
+  gap: 8px;
+}
+
+.manager-detail__running-worker {
+  background: var(--surface);
+  border-left: 2px solid var(--success);
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+}
+
+.manager-detail__running-worker > span {
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.manager-detail__running-worker a {
+  margin-top: 0;
+}
+
+.manager-detail__running-state {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.manager-detail__running-state.is-unknown {
+  color: var(--error);
+}
+
+.manager-detail__running-note {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+  margin-top: 10px;
 }
 
 .manager-detail__pagination {
