@@ -1031,6 +1031,34 @@ describe('WorkerHarness.handleStateChange', () => {
     expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('running')
   })
 
+  it('同步 stop 退出在核验 unknown 后仍保留 task 状态，重启对账也不改写成 cancelled 或 failed', async () => {
+    const { harness, fake } = await makeHarness({}, { hasRunningBg: async () => true })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    vi.spyOn(fake, 'kill').mockImplementation(async (handle) => {
+      fake.killCalls.push(handle)
+      fake.emitStateChange(handle, 'exited', undefined, 'killed')
+    })
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({
+      status: 'unknown',
+      detail: 'worker-owned background execution remains active',
+    })
+    await waitUntil(async () => {
+      const [stored] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+      return stored.task.status === 'running' && stored.incarnations[0].state === 'exited'
+    })
+
+    await expect(harness.reconcileOnStartup()).resolves.toMatchObject({ unchanged: [worker.worker_id] })
+    const [stored] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(stored.task.status).toBe('running')
+    expect(stored.incarnations[0]).toMatchObject({
+      incarnation_id: incarnation.incarnation_id,
+      state: 'exited',
+      ended_reason: 'killed',
+    })
+  })
+
   it('idle 且名下仍有运行中的 bg shell 时保持 running，而不是 waiting_input', async () => {
     const { harness, fake } = await makeHarness({}, { hasRunningBg: async () => true })
     const worker = await harness.spawnWorker(spawnParams())

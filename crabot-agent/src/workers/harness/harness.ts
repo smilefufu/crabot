@@ -3859,6 +3859,13 @@ export class WorkerHarness {
       }
 
       if (observed === 'exited') {
+        if (mainline.incarnation_id && await this.shouldPreserveTaskForUnverifiedStop(
+          worker.worker_id,
+          mainline.incarnation_id,
+          mainline.ended_reason,
+        )) {
+          return 'unchanged'
+        }
         await this.markCrashed(managerKey, worker, mainline, 'adapter reports incarnation exited while ledger was non-terminal')
         return 'failed'
       }
@@ -3974,6 +3981,15 @@ export class WorkerHarness {
       { to: observed, source: 'reconcile' },
       realigned?.task.status
     )
+  }
+
+  private async shouldPreserveTaskForUnverifiedStop(
+    workerId: string,
+    incarnationId: IncarnationId,
+    endReason: IncarnationEndReason | undefined,
+  ): Promise<boolean> {
+    if (endReason !== undefined && endReason !== 'killed') return false
+    return this.controlOperationStore.hasUnverifiedStop(workerId, incarnationId)
   }
 
   async requestWorkerInterrupt(workerId: string): Promise<WorkerControlOperation> {
@@ -4789,7 +4805,12 @@ export class WorkerHarness {
       const pendingStop = state === 'exited' && (await this.controlOperationStore.active(h.worker_id)).some(
         (operation) => operation.kind === 'stop' && operation.incarnation_id === target.incarnation_id,
       )
-      const nextStatus: TaskStatus = pendingStop
+      const unverifiedStop = state === 'exited' && target.incarnation_id !== undefined &&
+        await this.shouldPreserveTaskForUnverifiedStop(h.worker_id, target.incarnation_id, endReason)
+      const preserveTaskForStop = state === 'exited' && (
+        pendingStop || unverifiedStop
+      )
+      const nextStatus: TaskStatus = preserveTaskForStop
         ? worker.task.status
         : state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
           ? 'running'

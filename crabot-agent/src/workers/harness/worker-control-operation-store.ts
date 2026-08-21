@@ -94,6 +94,16 @@ export class WorkerControlOperationStore {
     )
   }
 
+  async hasUnverifiedStop(workerId: string, incarnationId: IncarnationId): Promise<boolean> {
+    return this.mutex(workerId).run(async () =>
+      (await this.read(workerId)).operations.some((operation) =>
+        operation.kind === 'stop' &&
+        operation.incarnation_id === incarnationId &&
+        (operation.status === 'unknown' || operation.status === 'failed'),
+      ),
+    )
+  }
+
   async pendingNotifications(workerId: string): Promise<PendingControlOperationNotification[]> {
     return this.mutex(workerId).run(async () => {
       const file = await this.read(workerId)
