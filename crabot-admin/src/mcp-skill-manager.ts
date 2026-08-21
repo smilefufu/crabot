@@ -1644,6 +1644,7 @@ export class SkillManager {
     const existingNames = new Set(this.list().map(s => s.name))
     let changed = false
     let found = 0
+    const activeBuiltinNames = new Set<string>()
 
     for (const dirent of dirEntries) {
       if (!dirent.isDirectory()) continue
@@ -1664,6 +1665,7 @@ export class SkillManager {
         continue
       }
       found++
+      activeBuiltinNames.add(parsed.name)
 
       if (existingNames.has(parsed.name)) {
         // 已注册：用 SKILL.md 当前 frontmatter 同步条目
@@ -1712,6 +1714,21 @@ export class SkillManager {
 
     if (found === 0) {
       console.error(`[SkillManager] builtin skills 目录下没扫到任何 SKILL.md，内置 skill 全部缺失: ${builtinsDir}`)
+    } else {
+      const resolvedBuiltinsDir = path.resolve(builtinsDir)
+      for (const [id, entry] of this.skills) {
+        if (!entry.is_builtin || !entry.skill_dir) continue
+        const relativeSkillDir = path.relative(resolvedBuiltinsDir, path.resolve(entry.skill_dir))
+        const belongsToScannedDirectory = relativeSkillDir !== ''
+          && relativeSkillDir !== '..'
+          && !relativeSkillDir.startsWith(`..${path.sep}`)
+          && !path.isAbsolute(relativeSkillDir)
+        if (belongsToScannedDirectory && !activeBuiltinNames.has(entry.name)) {
+          console.warn(`[SkillManager] 删除已废弃的 builtin skill: ${entry.name} (id=${id})`)
+          this.skills.delete(id)
+          changed = true
+        }
+      }
     }
 
     this.skills = previous
