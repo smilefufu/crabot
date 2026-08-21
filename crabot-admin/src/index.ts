@@ -5977,6 +5977,8 @@ export class AdminModule extends ModuleBase {
 
       const directMaintenance = schedule.is_builtin === true
         && schedule.task_template.type === 'memory_maintenance'
+      const builtinDailyReflection = schedule.is_builtin === true
+        && schedule.task_template.type === 'daily_reflection'
       const retiredMemoryCurate = schedule.task_template.type === 'memory_curate'
       const triggerResult = await this.rpcClient.call<
         {
@@ -6003,7 +6005,7 @@ export class AdminModule extends ModuleBase {
           ...(schedule.target_session ? { target_session: schedule.target_session } : {}),
           ...(schedule.creator_friend_id ? { creator_friend_id: schedule.creator_friend_id } : {}),
           ...(schedule.is_builtin ? { is_builtin: schedule.is_builtin } : {}),
-          ...(directMaintenance || retiredMemoryCurate ? {
+          ...(directMaintenance || builtinDailyReflection || retiredMemoryCurate ? {
             task_type: schedule.task_template.type,
           } : {}),
           ...(directMaintenance ? {
