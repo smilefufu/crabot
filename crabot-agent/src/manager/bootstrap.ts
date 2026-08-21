@@ -575,6 +575,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         callAdmin: deps.callAdmin,
         getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
         isSystemThread,
+        isBuiltinDailyReflection:
+          scheduleIdentity?.isBuiltin === true && scheduleIdentity.taskType === 'daily_reflection',
         authorization: () => principals.currentMasterAuthorization(key),
         validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),
         hasSuccessfulSendMessageTo: traceHooks?.hasSuccessfulSendMessageTo,

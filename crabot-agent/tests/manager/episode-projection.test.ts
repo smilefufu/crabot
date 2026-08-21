@@ -43,6 +43,13 @@ describe('projectManagerEpisode', () => {
     ])
   })
 
+  it('每日反思固定摘要也投影为人类回复', () => {
+    const result = projectManagerEpisode(trace({ spans: [
+      tool('send_daily_reflection_summary', JSON.stringify({ content: '今日已完成记忆整理。' })),
+    ] }), facts)
+    expect(result.reply_excerpt).toBe('今日已完成记忆整理。')
+  })
+
   it('worker_event 从 source join 标题和当前状态；缺台账安全降级 id', () => {
     const joined = projectManagerEpisode(trace({
       trigger: { type: 'worker_event', summary: 'worker 事件:state_changed (w-1)', source: 'worker:w-1' },

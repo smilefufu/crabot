@@ -9,6 +9,7 @@ from typing import Literal
 from .store import MemoryStore
 from .sqlite_index import SqliteIndex
 from .paths import entry_path
+from .lifecycle import move_entry
 
 
 @dataclass
@@ -16,9 +17,10 @@ class MaintenanceConfig:
     now_iso: str
     stale_idle_days: int = 180
     trash_retention_days: int = 30
+    inbox_max_age_hours: int = 30
 
 
-Scope = Literal["observation_check", "stale_aging", "trash_cleanup", "link_gc", "all"]
+Scope = Literal["observation_check", "stale_aging", "trash_cleanup", "link_gc", "inbox_expiry", "all"]
 
 
 def _now() -> str:
@@ -40,7 +42,7 @@ def _observation_check(store: MemoryStore, index: SqliteIndex, cfg: MaintenanceC
     schema 约束，也保留了 spec "通过观察期" 的语义。
     """
     expired = index.scan_expired_observation(now_iso=cfg.now_iso)
-    passed = rolled_back = pending = 0
+    passed = trashed = pending = 0
     for r in expired:
         pass_count = int(r.get("observation_pass_count") or 0)
         fail_count = int(r.get("observation_fail_count") or 0)
@@ -64,19 +66,15 @@ def _observation_check(store: MemoryStore, index: SqliteIndex, cfg: MaintenanceC
 
         if net < 0:
             entry = store.read(r["status"], r["type"], r["id"])
-            store.move(r["id"], r["type"], from_status=r["status"], to_status="inbox")
-            new_path = entry_path(store.data_root, "inbox", r["type"], r["id"])
             new_obs = entry.frontmatter.observation.model_copy(
-                update={"outcome": "pending", "started_at": cfg.now_iso}
+                update={"outcome": "fail"}
             ) if entry.frontmatter.observation else None
-            new_fm = entry.frontmatter.model_copy(update={
-                "observation": new_obs,
-                "tags": list(set([*entry.frontmatter.tags, "needs_review"])),
-            })
-            new_entry = entry.model_copy(update={"frontmatter": new_fm})
-            store.write(new_entry, status="inbox")
-            index.upsert(new_entry, path=new_path, status="inbox")
-            rolled_back += 1
+            move_entry(
+                store, index, entry,
+                from_status=r["status"], to_status="trash", now_iso=cfg.now_iso,
+                target_frontmatter_updates={"observation": new_obs},
+            )
+            trashed += 1
             continue
 
         # net == 0 — 延长一个观察周期，stale_check_count + 1
@@ -112,7 +110,13 @@ def _observation_check(store: MemoryStore, index: SqliteIndex, cfg: MaintenanceC
                      status=r["status"])
         pending += 1
 
-    return {"passed": passed, "rolled_back": rolled_back, "pending_extended": pending}
+    return {
+        "passed": passed,
+        # 保留旧字段，避免消费旧 maintenance report 的调用方立刻中断。
+        "rolled_back": trashed,
+        "trashed": trashed,
+        "pending_extended": pending,
+    }
 
 
 def _stale_aging(store: MemoryStore, index: SqliteIndex, cfg: MaintenanceConfig) -> dict:
@@ -140,6 +144,24 @@ def _trash_cleanup(store: MemoryStore, index: SqliteIndex, cfg: MaintenanceConfi
         index.delete(r["id"])
         deleted += 1
     return {"deleted": deleted}
+
+
+def _inbox_expiry(store: MemoryStore, index: SqliteIndex, cfg: MaintenanceConfig) -> dict:
+    trashed = 0
+    for row in index.scan_expired_inbox(
+        max_age_hours=cfg.inbox_max_age_hours,
+        now_iso=cfg.now_iso,
+    ):
+        try:
+            entry = store.read(row["status"], row["type"], row["id"])
+        except FileNotFoundError:
+            continue
+        move_entry(
+            store, index, entry,
+            from_status="inbox", to_status="trash", now_iso=cfg.now_iso,
+        )
+        trashed += 1
+    return {"trashed": trashed}
 
 
 def _link_gc(store: MemoryStore, index: SqliteIndex, cfg: MaintenanceConfig) -> dict:
@@ -206,5 +228,7 @@ def run_maintenance(store: MemoryStore, index: SqliteIndex, scope: Scope, config
         report["trash_cleanup"] = _trash_cleanup(store, index, config)
     if scope in ("link_gc", "all"):
         report["link_gc"] = _link_gc(store, index, config)
+    if scope in ("inbox_expiry", "all"):
+        report["inbox_expiry"] = _inbox_expiry(store, index, config)
     report["completed_at"] = _now()
     return report

@@ -11,7 +11,7 @@ export interface RestResponse {
 
 const VALID_TYPES = new Set(['fact', 'lesson', 'concept'])
 const VALID_STATUSES = new Set(['inbox', 'confirmed', 'trash'])
-const MAINTENANCE_TASKS = ['observation_check', 'stale_aging', 'trash_cleanup'] as const
+const MAINTENANCE_TASKS = ['observation_check', 'stale_aging', 'trash_cleanup', 'link_gc', 'inbox_expiry'] as const
 
 export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
   const { rpcClient, moduleId, getMemoryPort } = deps
@@ -71,6 +71,27 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
       const sort = query.get('sort')
       if (sort) params.sort = sort
       const result = await rpcClient.call(port, 'list_entries', params, moduleId)
+      return { status: 200, body: result }
+    }
+
+    // GET /api/memory/v2/historical-inbox/preview — legacy inbox cleanup preview
+    if (method === 'GET' && pathname === '/api/memory/v2/historical-inbox/preview') {
+      const cutoff = query.get('cutoff') ?? undefined
+      const result = await rpcClient.call(
+        port, 'preview_historical_inbox', cutoff ? { cutoff } : {}, moduleId,
+      )
+      return { status: 200, body: result }
+    }
+
+    // POST /api/memory/v2/historical-inbox/migrate-batch — explicit 200-entry batch
+    if (method === 'POST' && pathname === '/api/memory/v2/historical-inbox/migrate-batch') {
+      const parsed = body ? JSON.parse(body) : {}
+      if (parsed.confirmed !== true) {
+        return { status: 400, body: { error: 'CONFIRMATION_REQUIRED' } }
+      }
+      const params: { confirmed: true; cutoff?: string } = { confirmed: true }
+      if (typeof parsed.cutoff === 'string') params.cutoff = parsed.cutoff
+      const result = await rpcClient.call(port, 'migrate_historical_inbox_batch', params, moduleId)
       return { status: 200, body: result }
     }
 

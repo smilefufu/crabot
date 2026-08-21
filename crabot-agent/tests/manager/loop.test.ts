@@ -157,6 +157,50 @@ describe('ManagerLoop', () => {
     expect(() => loop.enqueueDuringEpisode(bare as never)).toThrow('TimedWakeEnvelope')
   })
 
+  it('daily reflection 重投为 carried wake 时仍使用受限投递面', async () => {
+    const calls: LLMStreamParams[] = []
+    const toolFaceWakes: Array<WakeEvent | undefined> = []
+    let streamCount = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        streamCount += 1
+        if (streamCount === 1) throw new Error('temporary provider failure')
+        yield* chunksFromContent([], 'end_turn')
+      },
+      updateConfig: () => {},
+    }
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      isSystemThread: true,
+      toolFace: (wake) => {
+        toolFaceWakes.push(wake)
+        return []
+      },
+    }))
+    const dailyReflection = timed({
+      kind: 'schedule',
+      scheduleId: 'daily-reflection',
+      title: '每日反思',
+      description: '整理记忆',
+      isBuiltin: true,
+      taskType: 'daily_reflection',
+    })
+
+    const failed = await loop.wakeUp(dailyReflection)
+    expect(failed).toMatchObject({ outcome: 'failed', consumedEvents: false })
+    await loop.wakeUp(defaultSupervisionWake('w-follow-up', 'after-daily-failure'))
+
+    expect(calls.slice(1).every((call) => call.systemPrompt.includes('send_daily_reflection_summary'))).toBe(true)
+    expect(toolFaceWakes.slice(1)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'schedule', taskType: 'daily_reflection' }),
+    ]))
+    expect(toolFaceWakes.slice(1)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'worker_event' }),
+    ]))
+  })
+
   it('唤醒 → 跑一个 turn → 回睡的完整往返', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ text: '收到,已了解情况', stopReason: 'end_turn' })
@@ -1195,7 +1239,7 @@ describe('ManagerLoop', () => {
   describe('EpisodeResult.repliedToHuman', () => {
     /** 让 engine 有真工具可执行,避免 tool_use 落到"工具不存在"的错误分支上。 */
     function replyToolFace(): ReadonlyArray<ToolDefinition> {
-      return ['send_message', 'send_private_message', 'send_master_private', 'spawn_worker', 'get_history'].map((name) =>
+      return ['send_message', 'send_private_message', 'send_master_private', 'send_daily_reflection_summary', 'spawn_worker', 'get_history'].map((name) =>
         defineTool({
           name,
           description: `stub ${name}`,
@@ -1229,8 +1273,8 @@ describe('ManagerLoop', () => {
       expect(result.repliedToHuman).toBe(true)
     })
 
-    it('send_private_message / send_master_private 同样算"跟人说话"(投递到人 = 有人被打扰)', async () => {
-      for (const toolName of ['send_private_message', 'send_master_private']) {
+    it('私聊、reach_master 和每日反思摘要同样算"跟人说话"(投递到人 = 有人被打扰)', async () => {
+      for (const toolName of ['send_private_message', 'send_master_private', 'send_daily_reflection_summary']) {
         const { adapter, queue } = makeAdapter()
         queue.push({ toolCalls: [{ name: toolName, id: 't1', input: {} }], stopReason: 'tool_use' })
         queue.push({ text: '已私下回复', stopReason: 'end_turn' })

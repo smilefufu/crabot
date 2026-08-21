@@ -110,6 +110,9 @@ class MemoryFrontmatter(BaseModel):
     tags: List[str] = Field(default_factory=list)
     event_time: str
     ingestion_time: str
+    # 当前 inbox / trash 生命周期的开始时间。旧数据缺失时保持 None，维护逻辑按协议兼容。
+    inbox_entered_at: Optional[str] = None
+    trashed_at: Optional[str] = None
     invalidated_by: Optional[str] = None
     lesson_meta: Optional[LessonMeta] = None
     observation: Optional[Observation] = None

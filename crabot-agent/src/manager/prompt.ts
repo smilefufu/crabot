@@ -13,6 +13,8 @@ import type { ManagerKey } from './types.js'
 export interface PromptInputs {
   readonly managerKey: ManagerKey
   readonly isSystemThread: boolean
+  /** builtin daily reflection uses a fixed Admin Web delivery action. */
+  readonly isBuiltinDailyReflection?: boolean
   /** 对话对象档案：friend 资料/权限/关系要点（来自 ContextAssembler 的 scene_profile 或 admin） */
   readonly dialogProfile?: string
 }
@@ -63,6 +65,8 @@ Crabot 把"对话"和"干活"拆成了两层：
 
 **结论拿不到就回去问 worker**：worker 已经结束、但原生会话和交付记录里都没有你要的结论时，用 \`send_to_worker\` 把问题直接发给它——它会带着原会话的完整上下文醒过来回答你。这是你自己能解决的事，问过它确实答不上来，才轮到找人类。
 
+**完成结果的记忆候选**：当 worker 事件同时满足 \`kind=state_changed\`、\`detail.outcome=completed\` 和 \`detail.trigger_type=message\` 时，先只根据事件中的最后文本、收尾结论或按需读取的 worker 详情判断是否存在明确、可核实、可复用的结论。没有这种直接证据就不写。存在时最多写一条 inbox 候选，必须带 \`source_ref.task_id=detail.task_id\`，并在 tags 写入 \`worker_completion:<worker_id>:<seq>\`；写前先用 \`list_entries\` 查询该 tag 的所有状态，已存在就不再写。scheduled/system worker、失败或 idle 事件都不走这条路径。不要把这一步交给普通 Worker，也不要把模糊的“已完成”编造成记忆。
+
 **不滥用跨 session 投递**：\`send_message\` 能发到别的会话，但只在人类明确要求时才这么做，不要自作主张往别的会话塞话。`
 
 /**
@@ -76,6 +80,12 @@ const SYSTEM_THREAD_REACH_MASTER = `## 系统线程纪律（reach_master）
 **例行成功留在本线程**：任务正常完成、进度更新、日常结果——直接在本线程记录/回应即可，不用去打扰人类。
 
 **只有需要人类立即注意时才 reach_master**：任务失败卡死、需要人类授权或决策，才用 \`send_master_private\` 把消息投到人类活跃的会话或偏好私聊——这是唯一该主动找人类的场景，不要滥用。`
+
+const DAILY_REFLECTION_DELIVERY_DISCIPLINE = `## 每日反思投递纪律
+
+这是 builtin 每日反思。不要调用或寻找 \`send_message\`、\`send_private_message\`、\`send_master_private\`，也不要查询联系人、会话或群组。
+
+仅在需要向人类报告时调用 \`send_daily_reflection_summary\`；它会把一段人类可读的文本固定投递到 Admin Web 的系统任务线程。直接输出 assistant text 不会送达任何人。`
 
 function buildDialogProfileSection(dialogProfile: string): string {
   return `## 对话对象档案\n\n${dialogProfile}`
@@ -91,7 +101,9 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
 
   const parts: string[] = [identityWithKey]
 
-  if (inputs.isSystemThread) {
+  if (inputs.isBuiltinDailyReflection) {
+    parts.push(DAILY_REFLECTION_DELIVERY_DISCIPLINE)
+  } else if (inputs.isSystemThread) {
     parts.push(SYSTEM_THREAD_REACH_MASTER)
   }
 

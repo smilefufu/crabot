@@ -62,6 +62,11 @@ const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出�
   + '- 如果它是希望让人类看到的新内容，且与你已经发送的内容不重复 → 调用 send_message 发送一次，然后直接结束，不要再输出任何文字；\n'
   + '- 如果它只是内部总结，或与你已经发送的内容重复 → 不需要任何操作，直接结束即可，不要重复发送。'
 
+const DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出了一段文字、没有调用 send_daily_reflection_summary，然后结束了回复。\n'
+  + '请注意：直接输出的文字只留在系统内部，人类看不到；每日反思只有 send_daily_reflection_summary 能把必要摘要送到 Admin Web 系统任务线程。\n'
+  + '请据此判断刚才那段文字：\n'
+  + '- 如果它是需要让人类看到的新摘要，且与你已经发送的内容不重复 → 调用 send_daily_reflection_summary 发送一次，然后直接结束，不要再输出任何文字；\n'
+  + '- 如果它只是内部总结，或与你已经发送的内容重复 → 不需要任何操作，直接结束即可，不要重复发送。'
 const POST_SEND_ACTION_RECHECK_PROMPT = '[系统复核] 你刚才发出的消息标记为“随后新建 Worker”，但系统尚未观察到成功的 spawn_worker。\n'
   + '请根据真实意图重新确认：若仍需新建 Worker，现在调用 spawn_worker；若刚才只是讨论、无需派发，或字段误填，直接结束即可。\n'
   + '不要因为这条系统提示重复向人类发送消息，也不要向人类提及系统复核。'
@@ -99,6 +104,11 @@ export type WakeEvent =
       readonly scheduleId: string
       readonly title: string
       readonly description: string
+      /**
+       * Schedule task subtype. It controls the per-episode tool face but never enters
+       * the rendered schedule prompt.
+       */
+      readonly taskType?: string
       /**
        * P5 Task 4 additive:本次调度触发的**权限身份**(protocol-agent-v3 §8.2
        * `creator_friend_id` / `is_builtin`,§4.4"权限按 Schedule.creator_friend_id 解析")。
@@ -258,13 +268,15 @@ export class ManagerLoop {
    */
   private currentEpisodeInjected: TimedWakeEnvelope[] | null = null
   /**
-   * P5 Task 4 additive:本 episode 的唤醒事件,供 `deps.toolFace(wakeEvent)` 按"这次是被
-   * 什么唤醒的"装配工具面(见 `ManagerLoopDeps.toolFace`)。与 `currentEpisodeInjected`
+   * P5 Task 4 additive:本 episode 的 primary 唤醒事件,供非 daily reflection 的
+   * `deps.toolFace(wakeEvent)` 按"这次是被什么唤醒的"装配工具面。与 `currentEpisodeInjected`
    * 同一套生命周期纪律(runEpisode 进入时置、finally 清),因此天然是**每 episode 精确**的
    * ——同一 loop 的 episode 由 `wakeUp` 的 mutex 串行,不会有两个 episode 的唤醒事件交叠;
    * 这正是不把它做成 registry 侧 `Map<ManagerKey, …>` 的原因(那样并发唤醒会串身份)。
-   */
+  */
   private currentWakeEvent: TimedWakeEnvelope | null = null
+  /** daily reflection 可能在 failed episode 后作为 carried wake 与新 primary 一同消费。 */
+  private currentEpisodeEnvelopes: ReadonlyArray<TimedWakeEnvelope> = []
   /**
    * 当前 episode 的 trace id（root 持久化成功后才有值）。worker-tools 经 registry 桥读它
    * 填 `origin.spawned_by_episode`，spawn 成功后经 `recordSpawnedWorker` 回写 trace。
@@ -425,6 +437,7 @@ export class ManagerLoop {
   ): Promise<EpisodeResult> {
     const episodeId = randomUUID()
     const carriedEnvelopes = this.mailbox.drainEnvelopes()
+    const episodeEnvelopes = [...carriedEnvelopes, ...(envelope ? [envelope] : [])]
     if (envelope === undefined && carriedEnvelopes.length === 0) {
       // 自唤醒但 mailbox 已空(残留被排在前面的另一个 episode 顺带 drain 走了)——
       // 没有任何新内容,直接空转返回,不开 episode(见 drainMailbox 注释)。
@@ -439,6 +452,7 @@ export class ManagerLoop {
     }
     this.currentEpisodeInjected = []
     this.currentWakeEvent = envelope ?? null
+    this.currentEpisodeEnvelopes = episodeEnvelopes
     this.needsSpawnRecheck = false
     this.spawnRecheckInjected = false
     this.spawnRecheckOutcomeRecorded = false
@@ -446,7 +460,7 @@ export class ManagerLoop {
     this.adminChatClaims = new Map()
     this.successfulSendMessageTargetsInCurrentEpisode.clear()
     this.continuedWorkersInCurrentEpisode.clear()
-    for (const item of [...carriedEnvelopes, ...(envelope ? [envelope] : [])]) {
+    for (const item of episodeEnvelopes) {
       for (const id of item.correlation?.admin_chat_request_ids ?? []) {
         if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
       }
@@ -547,10 +561,12 @@ export class ManagerLoop {
       this.requeueUncommittedEnvelopes(this.currentEpisodeInjected ?? [], humanInputsCommitted)
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
+      this.currentEpisodeEnvelopes = []
       throw err
     } finally {
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
+      this.currentEpisodeEnvelopes = []
       this.currentTraceId = undefined
       this.successfulSendMessageTargetsInCurrentEpisode.clear()
       this.continuedWorkersInCurrentEpisode.clear()
@@ -1031,15 +1047,21 @@ export class ManagerLoop {
         ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
         : [...tailMessages]
 
+    const dailyReflectionWake = this.currentEpisodeEnvelopes.find((item) =>
+      isBuiltinDailyReflectionWake(item.wake),
+    )?.wake
+    const effectiveWake = dailyReflectionWake ?? this.currentWakeEvent?.wake
+    const isBuiltinDailyReflection = isBuiltinDailyReflectionWake(effectiveWake)
     const systemPrompt = (): string => {
       const extra = this.deps.promptInputs()
       return assembleManagerSystemPrompt({
         managerKey: this.deps.key,
         isSystemThread: this.deps.isSystemThread,
+        isBuiltinDailyReflection,
         dialogProfile: extra.dialogProfile,
       })
     }
-    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(this.currentWakeEvent?.wake)
+    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(effectiveWake)
 
     const options: EngineOptions = {
       systemPrompt,
@@ -1061,7 +1083,12 @@ export class ManagerLoop {
       assistantTextEndTurnHandler: async () => {
         if (assistantTextEndTurnReminderSent) return { kind: 'complete' as const }
         assistantTextEndTurnReminderSent = true
-        return { kind: 'inject' as const, text: ASSISTANT_TEXT_END_TURN_REMINDER }
+        return {
+          kind: 'inject' as const,
+          text: isBuiltinDailyReflection
+            ? DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER
+            : ASSISTANT_TEXT_END_TURN_REMINDER,
+        }
       },
       endTurnGate: async () => this.takeSpawnRecheckPrompt(),
       // P6-A §6.4：onTurn 是事后观察钩子，用它生成 llm_call/tool_call span；
@@ -1082,6 +1109,12 @@ export class ManagerLoop {
 }
 
 // --- Helpers ---
+
+function isBuiltinDailyReflectionWake(wake: WakeEvent | undefined): boolean {
+  return wake?.kind === 'schedule'
+    && wake.isBuiltin === true
+    && wake.taskType === 'daily_reflection'
+}
 
 /** span detail 摘要截断（完整脱敏由 writer 侧 redactSecrets 负责）。 */
 function truncateForTrace(text: string, max = 300): string {
@@ -1140,6 +1173,7 @@ function firstMessageExcerpt(messages: ReadonlyArray<ChannelMessage>): string | 
  * - `send_private_message` —— 群里被问、转私聊回答是真实模式,只认 `send_message` 会把
  *   它错报成"沉默",退避因此错误地×5;
  * - `send_master_private` —— 系统线程的 reach_master,同样是一句人类会看到的话。
+ * - `send_daily_reflection_summary` —— builtin 每日反思固定投递到 Admin Web 系统任务线程。
  *
  * **不在集合里的**:`get_history` / `get_message` / `lookup_friend` 等只读工具(没人被打扰)、
  * `spawn_worker` / `send_to_worker` 等编排工具(v3 下 worker 不直接跟人类说话,派活本身
@@ -1150,6 +1184,7 @@ export const HUMAN_REPLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'send_message',
   'send_private_message',
   'send_master_private',
+  'send_daily_reflection_summary',
 ])
 
 /** 扫 `finalMessages` 里的 assistant tool_use 块,判断本 episode 有没有跟人说话。 */

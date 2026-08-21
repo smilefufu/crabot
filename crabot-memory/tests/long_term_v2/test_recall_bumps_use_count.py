@@ -27,13 +27,13 @@ _TYPE_DEFAULT_MATURITY = {
 
 _TYPE_DEFAULT_STATUS = {
     "fact": "confirmed",
-    "lesson": "inbox",
+    "lesson": "confirmed",
     "concept": "confirmed",
 }
 
 
 def _write_confirmed(store, index, mem_type: str, brief: str, mem_id: str = None):
-    """Write a memory entry so BM25 can retrieve it (iter_brief_for_bm25 reads all statuses)."""
+    """Write a confirmed memory entry so the default recall path can retrieve it."""
     from src.long_term_v2.schema import new_memory_id
     mid = mem_id or new_memory_id()
     maturity = _TYPE_DEFAULT_MATURITY[mem_type]

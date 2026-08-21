@@ -59,6 +59,20 @@ describe('memoryV2Service', () => {
     expect(api.post).toHaveBeenCalledWith('/memory/v2/entries/mem-l-1/restore', {})
   })
 
+  it('previewHistoricalInbox GETs the optional cutoff', async () => {
+    ;(api.get as any).mockResolvedValue({ estimated_move_count: 0 })
+    await memoryV2Service.previewHistoricalInbox('2026-08-20T00:00:00Z')
+    expect(api.get).toHaveBeenCalledWith('/memory/v2/historical-inbox/preview?cutoff=2026-08-20T00%3A00%3A00Z')
+  })
+
+  it('migrateHistoricalInboxBatch posts explicit confirmation', async () => {
+    ;(api.post as any).mockResolvedValue({ moved: 200, remaining: 0, failed: [] })
+    await memoryV2Service.migrateHistoricalInboxBatch()
+    expect(api.post).toHaveBeenCalledWith(
+      '/memory/v2/historical-inbox/migrate-batch', { confirmed: true },
+    )
+  })
+
   it('getEvolutionMode GETs mode', async () => {
     ;(api.get as any).mockResolvedValue({ mode: 'balanced' })
     await memoryV2Service.getEvolutionMode()

@@ -48,7 +48,7 @@ def test_observation_pass_keeps_confirmed(tmp_path):
     assert loc[0] == "confirmed"
 
 
-def test_observation_fail_rolls_back_to_inbox(tmp_path):
+def test_observation_fail_moves_to_trash(tmp_path):
     store = MemoryStore(str(tmp_path / "long_term"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
     _write(store, index, "f2", "fact", "confirmed", "confirmed",
@@ -60,9 +60,38 @@ def test_observation_fail_rolls_back_to_inbox(tmp_path):
         store, index, scope="observation_check",
         config=MaintenanceConfig(now_iso="2026-04-23T00:00:00Z"),
     )
-    assert report["observation_check"]["rolled_back"] >= 1
+    assert report["observation_check"]["trashed"] >= 1
     loc = index.locate("f2")
-    assert loc[0] == "inbox"
+    assert loc[0] == "trash"
+
+
+def test_observation_fail_is_settled_and_not_rescanned(tmp_path):
+    store = MemoryStore(str(tmp_path / "long_term"))
+    index = SqliteIndex(str(tmp_path / "v2.db"))
+    _write(store, index, "f2-settled", "fact", "confirmed", "confirmed",
+           observation=Observation(started_at="2026-04-01T00:00:00Z", window_days=7,
+                             outcome="pending"))
+    index.bump_observation_counter("f2-settled", column="observation_fail_count", delta=1)
+
+    run_maintenance(
+        store, index, scope="observation_check",
+        config=MaintenanceConfig(now_iso="2026-04-23T00:00:00Z"),
+    )
+
+    entry = store.read("trash", "fact", "f2-settled")
+    assert entry.frontmatter.observation.outcome == "fail"
+    assert index.list_active_observation() == []
+
+    report = run_maintenance(
+        store, index, scope="observation_check",
+        config=MaintenanceConfig(now_iso="2026-05-01T00:00:00Z"),
+    )
+    assert report["observation_check"] == {
+        "passed": 0,
+        "rolled_back": 0,
+        "trashed": 0,
+        "pending_extended": 0,
+    }
 
 
 def test_stale_aging_marks_stale_facts(tmp_path):
@@ -133,8 +162,8 @@ def test_observation_pending_three_cycles_marks_stale(tmp_path):
     assert entry.frontmatter.maturity == "stale"
 
 
-def test_observation_fail_resets_to_pending_with_needs_review_tag(tmp_path):
-    """fail 分支：净值为负 → 回退 inbox 后 observation 重置为 pending，并打 needs_review tag。"""
+def test_observation_fail_preserves_entry_in_trash(tmp_path):
+    """fail 分支：净值为负 → 移入 trash，不回流 inbox。"""
     store = MemoryStore(str(tmp_path / "long_term"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
     _write(store, index, "f5", "fact", "confirmed", "confirmed",
@@ -146,10 +175,8 @@ def test_observation_fail_resets_to_pending_with_needs_review_tag(tmp_path):
         store, index, scope="observation_check",
         config=MaintenanceConfig(now_iso="2026-04-23T00:00:00Z"),
     )
-    entry = store.read("inbox", "fact", "f5")
-    assert "needs_review" in entry.frontmatter.tags
-    assert entry.frontmatter.observation.outcome == "pending"
-    assert entry.frontmatter.observation.started_at == "2026-04-23T00:00:00Z"
+    entry = store.read("trash", "fact", "f5")
+    assert entry.frontmatter.trashed_at == "2026-04-23T00:00:00Z"
 
 
 def test_observation_window_not_expired_yet_skipped(tmp_path):
@@ -169,8 +196,8 @@ def test_observation_window_not_expired_yet_skipped(tmp_path):
     assert report["observation_check"]["pending_extended"] == 0
 
 
-def test_rule_rollback_preserves_source_cases_and_lesson_meta(tmp_path):
-    """spec §6.4：rule 观察期 fail → 回滚到 inbox 时 source_cases / lesson_meta 不应丢失。"""
+def test_rule_observation_fail_preserves_source_cases_and_lesson_meta(tmp_path):
+    """rule 观察期 fail → trash 时 source_cases / lesson_meta 不应丢失。"""
     from src.long_term_v2.schema import LessonMeta
     store = MemoryStore(str(tmp_path / "long_term"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
@@ -187,19 +214,14 @@ def test_rule_rollback_preserves_source_cases_and_lesson_meta(tmp_path):
         store, index, scope="observation_check",
         config=MaintenanceConfig(now_iso="2026-04-23T00:00:00Z"),
     )
-    # 已回滚到 inbox
-    entry = store.read("inbox", "lesson", "g1")
+    entry = store.read("trash", "lesson", "g1")
     fm = entry.frontmatter
     # source_cases + lesson_meta 完整保留
     assert fm.lesson_meta is not None
     assert fm.lesson_meta.source_cases == cap_ids
     assert fm.lesson_meta.scenario == "飞书表情"
     assert fm.lesson_meta.use_count == 2
-    # needs_review tag + observation reset 已由通用测试覆盖；这里再确认一次
-    assert "needs_review" in fm.tags
-    assert fm.observation.outcome == "pending"
-    # 当前实现：maturity 不被强制改回 case（spec 未明文要求）。
-    # 锁定行为：仍是 "rule"，与 status=inbox 组合标识"曾被晋升后回滚"。
+    assert fm.trashed_at == "2026-04-23T00:00:00Z"
     assert fm.maturity == "rule"
 
 
@@ -213,3 +235,4 @@ def test_run_maintenance_all_combines_reports(tmp_path):
     assert "observation_check" in report
     assert "stale_aging" in report
     assert "trash_cleanup" in report
+    assert "inbox_expiry" in report

@@ -5977,6 +5977,9 @@ export class AdminModule extends ModuleBase {
 
       const directMaintenance = schedule.is_builtin === true
         && schedule.task_template.type === 'memory_maintenance'
+      const builtinDailyReflection = schedule.is_builtin === true
+        && schedule.task_template.type === 'daily_reflection'
+      const retiredMemoryCurate = schedule.task_template.type === 'memory_curate'
       const triggerResult = await this.rpcClient.call<
         {
           schedule_id: string
@@ -6002,8 +6005,10 @@ export class AdminModule extends ModuleBase {
           ...(schedule.target_session ? { target_session: schedule.target_session } : {}),
           ...(schedule.creator_friend_id ? { creator_friend_id: schedule.creator_friend_id } : {}),
           ...(schedule.is_builtin ? { is_builtin: schedule.is_builtin } : {}),
-          ...(directMaintenance ? {
+          ...(directMaintenance || builtinDailyReflection || retiredMemoryCurate ? {
             task_type: schedule.task_template.type,
+          } : {}),
+          ...(directMaintenance ? {
             priority: schedule.task_template.priority,
             input: renderTemplateValue(schedule.task_template.input) as Record<string, unknown> | undefined,
             tags: schedule.task_template.tags,
@@ -6130,6 +6135,13 @@ export class AdminModule extends ModuleBase {
 
   /** 确保内置 Schedule 存在。首次启动时创建，后续启动收敛受管字段。 */
   private async ensureBuiltinSchedules(): Promise<void> {
+    let retiredMemoryCurates = 0
+    for (const [id, schedule] of this.schedules) {
+      if (schedule.is_builtin && schedule.task_template.type === 'memory_curate') {
+        this.schedules.delete(id)
+        retiredMemoryCurates += 1
+      }
+    }
     const SEEDS: Array<Pick<Schedule, 'name' | 'description' | 'trigger' | 'task_template'>> = [
       {
         name: '每日反思',
@@ -6138,25 +6150,9 @@ export class AdminModule extends ModuleBase {
         task_template: {
           type: 'daily_reflection',
           title: '每日反思 — {{date}}',
-          description: '第一步必须调用 Skill("daily-reflection")，禁止加载其他 reflection skill。反思时间范围：{{watermark}} 到 {{datetime}}。标准流程：1）获取此时间范围内的任务概览；2）筛选值得深入分析的任务（排除 daily_reflection 类型，优先关注失败、轮数异常、人类情绪明显的）；3）对每个选中任务委派 sub-agent 深入分析（trace span + 对话历史），返回分析结果和经验建议；4）综合所有 sub-agent 结果，跨任务去重，统一写入长期记忆；5）反思全过程是 crabot 内部产物：结构化报告只落 task outcome，永不外发；仅当存在 surprisal≥0.7 的发现且可翻译成一行人话时，调 send_master_private 发出一句人类视角摘要，否则保持沉默。禁止把 trace 数据 / Evolution Mode / 数字明细发出去。',
+          description: '这是 Manager 直接执行的每日反思，不调用 Skill，也不把 memory 写入委派给 Worker。反思时间范围：{{watermark}} 到 {{datetime}}。标准流程：1）读取本周期任务和 trace，筛选失败、异常轮数、负面反馈和可复用成功经验；可委派普通 Worker 分析单条 trace，但它只返回结论；2）用 list_entries(status:"inbox") 按 ingestion_time 最早优先处理候选；3）有价值 fact/concept 先做 PE 比对再 promote_inbox_entry，lesson case 也用 promote_inbox_entry；4）重复、无价值或证据不足候选用 delete_memory 移 trash，不把“留待下次”作为常规结果；5）同 scenario、同 outcome 的至少三条 confirmed lesson case 用 promote_to_rule，source case 保持 confirmed 但 maturity=retired；6）输出结构化 task outcome。不得调用 run_maintenance(all)；机械维护只由凌晨 04:00 的 memory_maintenance 执行。只在有符合既有阈值的人类可读发现时调用 send_daily_reflection_summary 一句摘要；它只投递到 Admin Web 系统任务线程，禁止外发 trace、Evolution Mode 或数字明细。',
           priority: 'low',
           tags: ['daily_reflection', 'builtin'],
-        },
-      },
-      {
-        name: '记忆整理',
-        description: '每小时扫一次 inbox，做去重和多因子打分，高分高置信晋升 confirmed。',
-        trigger: { type: 'interval', seconds: 3600 },
-        task_template: {
-          type: 'memory_curate',
-          title: '记忆整理 — {{datetime}}',
-          description: '第一步必须调用 Skill("memory-curate")，禁止加载其他 reflection skill。整理范围：{{watermark}} 到 {{datetime}}。流程：按 ingestion_time 增量列出此窗口内的 inbox → 去重 → 多因子打分 → 晋升 confirmed / 丢弃 / 留待 daily-reflection。禁止用 search_long_term 拉 inbox 候选。',
-          priority: 'low',
-          input: {
-            ingestion_time_start: '{{watermark}}',
-            ingestion_time_end: '{{datetime}}',
-          },
-          tags: ['memory_curate', 'builtin'],
         },
       },
       {
@@ -6172,22 +6168,6 @@ export class AdminModule extends ModuleBase {
         },
       },
     ]
-
-    const memoryCurateSeed = SEEDS.find(s => s.name === '记忆整理')
-    let migrated = false
-    for (const [id, sched] of this.schedules) {
-      if (sched.is_builtin && sched.name === '周期轻反思' && memoryCurateSeed) {
-        this.schedules.set(id, {
-          ...sched,
-          name: memoryCurateSeed.name,
-          description: memoryCurateSeed.description,
-          trigger: memoryCurateSeed.trigger,
-          task_template: memoryCurateSeed.task_template,
-          updated_at: generateTimestamp(),
-        })
-        migrated = true
-      }
-    }
 
     // 两个受管日任务以 is_builtin + task_template.type 为身份；其余 builtin
     // 延续按名称识别。重复项只保留 created_at 最早的原记录与统计。
@@ -6226,19 +6206,28 @@ export class AdminModule extends ModuleBase {
       if (!current) continue
 
       if (this.isManagedBuiltinSchedule(current)) {
-        // 系统 offset 决定受管 trigger；其他字段和原记录统计保持不变。
-        if (JSON.stringify(current.trigger) !== JSON.stringify(seed.trigger)) {
+        // 系统 offset 决定受管 trigger；每日反思的 workflow 也必须同步为
+        // Manager-owned 指令，其余用户可见字段和运行统计保持原值。
+        const triggerChanged = JSON.stringify(current.trigger) !== JSON.stringify(seed.trigger)
+        const dailyDescriptionChanged = seed.task_template.type === 'daily_reflection'
+          && current.task_template.description !== seed.task_template.description
+        if (triggerChanged || dailyDescriptionChanged) {
           this.schedules.set(current.id, {
             ...current,
-            trigger: seed.trigger,
-            next_trigger_at: this.calculateNextTriggerTime(seed.trigger),
+            ...(triggerChanged ? {
+              trigger: seed.trigger,
+              next_trigger_at: this.calculateNextTriggerTime(seed.trigger),
+            } : {}),
+            ...(dailyDescriptionChanged ? {
+              task_template: { ...current.task_template, description: seed.task_template.description },
+            } : {}),
             updated_at: generateTimestamp(),
           })
         }
         continue
       }
 
-      // memory_curate 等既有 builtin 延续原有 SEED 执行体同步语义。
+      // 非受管 builtin 仍只同步其 seed 执行体。
       if (JSON.stringify(current.task_template) !== JSON.stringify(seed.task_template)) {
         this.schedules.set(current.id, {
           ...current,
@@ -6266,10 +6255,10 @@ export class AdminModule extends ModuleBase {
       this.schedules.set(id, schedule)
     }
     await this.saveData()
-    if (migrated) {
-      console.log('[Admin] Migrated builtin schedule: 周期轻反思 → 记忆整理 (quick_reflection → memory_curate)')
+    if (retiredMemoryCurates > 0) {
+      console.log(`[Admin] Retired ${retiredMemoryCurates} builtin memory_curate schedule(s)`)
     }
-    console.log('[Admin] Builtin schedules ensured: daily-reflection / memory-curate / memory-maintenance')
+    console.log('[Admin] Builtin schedules ensured: daily-reflection / memory-maintenance')
   }
 
   // ============================================================================

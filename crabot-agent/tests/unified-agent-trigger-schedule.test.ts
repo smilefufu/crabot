@@ -181,6 +181,34 @@ describe('trigger_schedule memory_maintenance system task', () => {
     expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
   })
 
+  it('reports retired memory_curate schedules without rewriting their task semantics', async () => {
+    const fixture = buildAgent(() => Promise.resolve())
+    const reportFailure = vi.fn().mockResolvedValue(undefined)
+    ;(fixture.agent as AgentUnderTest & { sendBackgroundFailLoud: typeof reportFailure }).sendBackgroundFailLoud = reportFailure
+
+    const result = await fixture.agent.handleTriggerSchedule({
+      schedule_id: 'schedule-user-curate',
+      task_type: 'memory_curate',
+      title: '用户自建记忆整理',
+      description: 'legacy schedule',
+      is_builtin: false,
+      target_session: { channel_id: 'telegram-default', session_id: 'legacy-session' },
+    })
+
+    expect(result).toEqual({ accepted: true })
+    await waitUntil(() => reportFailure.mock.calls.length === 1)
+    expect(reportFailure).toHaveBeenCalledWith(
+      { channel_id: 'telegram-default', session_id: 'legacy-session' },
+      '定时任务「用户自建记忆整理」',
+      {
+        kind: 'threw',
+        error: expect.objectContaining({ message: 'memory_curate 已退役，请使用每日反思' }),
+      },
+    )
+    expect(fixture.routeSchedule).not.toHaveBeenCalled()
+    expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
+  })
+
   it('keeps ordinary schedules on the fire-and-forget manager route', async () => {
     const fixture = buildAgent(() => Promise.resolve())
     fixture.routeSchedule.mockImplementation(() => new Promise<never>(() => {}))
@@ -198,6 +226,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
       scheduleId: 'schedule-normal',
       title: '每日反思',
       description: 'reflect',
+      taskType: 'daily_reflection',
       targetSession: undefined,
       creatorFriendId: 'friend-1',
       isBuiltin: undefined,

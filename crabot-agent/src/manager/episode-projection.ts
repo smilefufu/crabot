@@ -42,7 +42,12 @@ export interface EpisodeWorkerFact {
   spawned_by_episode?: string
 }
 
-const REPLY_TOOLS = new Set(['send_message', 'send_private_message', 'send_master_private'])
+const REPLY_TOOLS = new Set([
+  'send_message',
+  'send_private_message',
+  'send_master_private',
+  'send_daily_reflection_summary',
+])
 
 export function projectManagerEpisode(
   trace: ManagerEpisodeTrace,

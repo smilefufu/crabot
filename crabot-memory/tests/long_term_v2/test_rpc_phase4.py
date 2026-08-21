@@ -155,9 +155,9 @@ async def test_restore_memory_round_trip(rpc):
     res = await rpc.restore_memory({"id": mem_id})
     assert res["status"] == "ok"
     assert res["id"] == mem_id
-    # Should be in inbox now
+    # Manual restore is explicit confirmation.
     g2 = await rpc.get_memory({"id": mem_id})
-    assert g2["status"] == "inbox"
+    assert g2["status"] == "confirmed"
 
 
 @pytest.mark.asyncio
@@ -170,4 +170,4 @@ async def test_restore_memory_not_found(rpc):
 async def test_restore_memory_not_in_trash(rpc):
     w = await rpc.write_long_term(_write_payload(brief="not-in-trash"))
     res = await rpc.restore_memory({"id": w["id"]})
-    assert res.get("error") == "not in trash"
+    assert res.get("error") == "INVALID_STATE"
