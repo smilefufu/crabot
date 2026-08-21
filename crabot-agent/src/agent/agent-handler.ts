@@ -1110,7 +1110,7 @@ export class AgentHandler {
     // runWorkerLoop 检查 activeTasks.get(task_id)——提前写入即可完成 todoStore/goalRevisionUnlocked 的恢复。
     let currentInitialMessages: ReadonlyArray<EngineMessage> | undefined
     if (params.resumeFrom) {
-      const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd } = params.resumeFrom
+      const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd, humanInputEpoch, lastDeliveredInfoEpoch } = params.resumeFrom
       // §3.4 修复：resume 走 initialMessages 分支，query-loop 会忽略 prompt，导致 runWorkerLoop
       // 里 buildTaskMessage 的 friend 队列 drain 被丢弃（drain-and-discard）。这里在 resume 装配处
       // 主动 drain 一次并注入首轮消息，否则宕机期间到达的 bg-notification（如 re-adopt 的 shell 退出）
@@ -1130,6 +1130,7 @@ export class AgentHandler {
           ? createUserMessage(`${resumeBgNotif}\n\n${wakeup.content}`)
           : wakeup
       currentInitialMessages = [...initialMessages, wakeupMsg]
+      const resumedHumanInputEpoch = (humanInputEpoch ?? 0) + (params.resumeFrom.terminalSupplementText ? 1 : 0)
       // 预建 taskState 让 runWorkerLoop 直接复用（不再用 new TodoStore()）
       if (!this.activeTasks.has(task.task_id)) {
         this.activeTasks.set(task.task_id, {
@@ -1142,6 +1143,8 @@ export class AgentHandler {
           taskOrigin: context.task_origin,
           todoStore: TodoStore.fromItems(todoItems),
           activeAsyncSubagentIds: new Set<string>(),
+          humanInputEpoch: resumedHumanInputEpoch,
+          ...(lastDeliveredInfoEpoch !== undefined ? { lastDeliveredInfoEpoch } : {}),
           ...(goalRevisionUnlocked !== undefined ? { goalRevisionUnlocked } : {}),
           ...(resumedCwd !== undefined ? { cwd: resumedCwd } : {}),
         })
@@ -1292,6 +1295,7 @@ export class AgentHandler {
         taskOrigin: context.task_origin,
         todoStore: new TodoStore(),
         activeAsyncSubagentIds: new Set<string>(),
+        humanInputEpoch: 0,
       }
       this.activeTasks.set(task.task_id, taskState)
     }
@@ -1348,8 +1352,6 @@ export class AgentHandler {
       // 后续 turn 的 todo / send_message 检查 cache 立即生效，免去重复 RPC。
       const goalModeEnabled = this.isGoalModeEnabled(task.source?.trigger_type)
       let goalSetCache = false
-      // 已发送的 info 允许后续 silent end_turn 正常收口。
-      let sentInfoMessage = false
       // 任务触发类型：scheduled 任务始终抑制 forced_summary
       const workerTriggerType: 'scheduled' | 'message' =
         task.source?.trigger_type === 'scheduled' ? 'scheduled' : 'message'
@@ -1475,6 +1477,7 @@ export class AgentHandler {
           onDispatched: (entry, sendResult) => {
             this.markOutboundDelivered(taskState, entry, sendResult)
           },
+          getHumanInputEpoch: () => taskState.humanInputEpoch,
           // send_message 工具自愈相对 file_path 用：当前 task cwd（set_cwd 改的 taskState.cwd）。
           getCwd,
         }) ?? {}
@@ -1867,17 +1870,16 @@ export class AgentHandler {
           getResolvedPermissions: () => taskState.resolvedPermissions,
           contentReviewer: this.buildContentReviewer(),
           sessionType: context.task_origin?.session_type ?? 'private',
-          // 一旦有 info 送达，就允许后续 silent end_turn 作为正常收口：系统无法可靠判断
-          // 某条 info 是过程播报还是真实交付，只能尊重已送达事实。scheduled 任务同样保持静默收口。
+          // 当前人类输入已有 info delivery 时，允许后续 silent end_turn 正常收口。
           // 注意：这只适用于明确 stopReason='end_turn' 的收口；stopReason=null 是 adapter/stream
           // 终态缺失，query-loop 会按失败处理，不能借此完成 task。
-          suppressForcedSummary: () => workerTriggerType === 'scheduled' || sentInfoMessage,
+          suppressForcedSummary: () => workerTriggerType === 'scheduled' || taskState.lastDeliveredInfoEpoch === taskState.humanInputEpoch,
           assistantTextEndTurnHandler: async ({ assistantText }) => {
             if (workerTriggerType === 'scheduled') {
               return { kind: 'complete' as const }
             }
 
-            if (sentInfoMessage) {
+            if (taskState.lastDeliveredInfoEpoch === taskState.humanInputEpoch) {
               if (assistantTextEndTurnReminderSent) {
                 return { kind: 'complete' as const }
               }
@@ -1902,6 +1904,7 @@ export class AgentHandler {
               session_id: taskOrigin.session_id,
               content: assistantText,
               intent: 'info',
+              human_input_epoch: taskState.humanInputEpoch,
               sent_at_attempt_ms: Date.now(),
             }
             const dispatchDeps: OutboundDispatchDeps = {
@@ -2110,17 +2113,6 @@ export class AgentHandler {
               }
             }
 
-            // 记录已送达的 info，允许后续 silent end_turn 正常收口。
-            for (const tc of event.toolCalls) {
-              const bare = tc.name.replace(/^mcp__[^_]+__/, '')
-              if ((bare === 'send_message' || bare === 'send_private_message') && !tc.isError) {
-                const input = tc.input as { intent?: string; content?: string } | undefined
-                const msgContent = input?.content
-                const msgIntent = input?.intent as 'info' | 'ask_human' | undefined
-                if (msgContent !== undefined && msgIntent !== 'ask_human') sentInfoMessage = true
-              }
-            }
-
             // resume checkpoint：每 turn 结束时原子落盘（干净 turn 边界）。
             // traceContext.traceId 是本 worker loop 的 trace id（由 unified-agent 在
             // startTrace 后传入）。仅 worker trace 有 traceContext，front 路径无。
@@ -2132,6 +2124,8 @@ export class AgentHandler {
                 worker_state: {
                   todo_items: [...taskState.todoStore.list()],
                   goal_revision_unlocked: taskState.goalRevisionUnlocked,
+                  human_input_epoch: taskState.humanInputEpoch,
+                  last_delivered_info_epoch: taskState.lastDeliveredInfoEpoch,
                   ...(taskState.cwd !== undefined ? { cwd: taskState.cwd } : {}),
                 },
                 ...(taskState.resumeWorkerContext ? { worker_context: taskState.resumeWorkerContext } : {}),
@@ -2376,6 +2370,7 @@ export class AgentHandler {
       taskOrigin,
       todoStore: new TodoStore(),
       activeAsyncSubagentIds: new Set<string>(),
+      humanInputEpoch: 0,
     })
 
     return { taskId: syntheticTaskId, registered, task, context, taskTitle }
@@ -2981,6 +2976,9 @@ export class AgentHandler {
     entry: OutboundMessage,
     sendResult: OutboundSendResult,
   ): void {
+    if (entry.intent === 'info') {
+      taskState.lastDeliveredInfoEpoch = entry.human_input_epoch ?? taskState.humanInputEpoch
+    }
     this.appendAgentMessageBestEffort(taskState.taskId, entry, sendResult)
   }
 
@@ -3101,6 +3099,7 @@ export class AgentHandler {
       .join('\n')
 
     if (supplement) {
+      taskState.humanInputEpoch++
       const humanQueue = this.humanQueues.get(taskId)
       if (humanQueue) {
         const template = this.isGoalModeEnabled(taskState.triggerType)
@@ -3225,6 +3224,8 @@ export class AgentHandler {
           worker_state: {
             todo_items: [...taskState.todoStore.list()],
             goal_revision_unlocked: taskState.goalRevisionUnlocked,
+            human_input_epoch: taskState.humanInputEpoch,
+            last_delivered_info_epoch: taskState.lastDeliveredInfoEpoch,
             ...(taskState.cwd !== undefined ? { cwd: taskState.cwd } : {}),
           },
           ...(taskState.resumeWorkerContext ? { worker_context: taskState.resumeWorkerContext } : {}),

@@ -567,7 +567,7 @@ describe('AgentHandler', () => {
 
 
 
-    it('assistant text end_turn fallback: 自动用标准 channel dispatch 交付 assistant text', async () => {
+    it('assistant text end_turn fallback: 新的人类补充必须重新获得自动交付', async () => {
       const rpcCall = vi.fn().mockImplementation(async (_port: number, method: string, params?: any) => {
         if (method === 'send_message') return { platform_message_id: 'mid-auto', sent_at: '2026-07-06T12:00:00Z' }
         if (method === 'append_message') return { ok: true }
@@ -575,11 +575,23 @@ describe('AgentHandler', () => {
       })
       const handler = makeMessagingHandler(rpcCall)
       mockRunEngine.mockImplementation(async (params: any) => {
+        const taskState = (handler as any).activeTasks.get('task_1')
+        taskState.lastDeliveredInfoEpoch = taskState.humanInputEpoch
+        handler.deliverHumanResponse('task_1', [{
+          platform_message_id: 'msg-supplement',
+          session: { session_id: 'session_1', channel_id: 'channel_1', type: 'private' },
+          sender: { friend_id: 'friend_1', platform_user_id: 'user_1', platform_display_name: 'Test User' },
+          content: { type: 'text', text: '那 X 呢？' },
+          features: { is_mention_crab: false },
+          platform_timestamp: '2026-07-06T12:00:00Z',
+        }])
+        expect(taskState.humanInputEpoch).toBe(1)
         const result = await params.options.assistantTextEndTurnHandler({
           assistantText: '实现进度如下：MVP 已经跑起来了',
           turnNumber: 7,
         })
         expect(result).toEqual({ kind: 'complete' })
+        expect(taskState.lastDeliveredInfoEpoch).toBe(taskState.humanInputEpoch)
         return makeEngineResult({ finalText: '实现进度如下：MVP 已经跑起来了' })
       })
 
@@ -605,6 +617,75 @@ describe('AgentHandler', () => {
         },
       })
       expect(rpcCall.mock.calls.some(call => call[1] === 'append_message' && call[2].agent_intent === 'info')).toBe(true)
+      handler.dispose()
+    })
+
+    it('assistant text end_turn fallback: 当前 epoch 已交付时只提醒一次，不自动重复交付', async () => {
+      const rpcCall = vi.fn().mockResolvedValue({ task: { id: 'task_1' } })
+      const handler = makeMessagingHandler(rpcCall)
+      mockRunEngine.mockImplementation(async (params: any) => {
+        const taskState = (handler as any).activeTasks.get('task_1')
+        taskState.lastDeliveredInfoEpoch = taskState.humanInputEpoch
+
+        const first = await params.options.assistantTextEndTurnHandler({
+          assistantText: '已经交付后的内部总结',
+          turnNumber: 3,
+        })
+        const second = await params.options.assistantTextEndTurnHandler({
+          assistantText: '重复的内部总结',
+          turnNumber: 4,
+        })
+
+        expect(first.kind).toBe('inject')
+        expect(second).toEqual({ kind: 'complete' })
+        return makeEngineResult()
+      })
+
+      await handler.executeTask({
+        task: makeTask({ source: { trigger_type: 'message' } }),
+        context: {
+          ...makeContext(),
+          task_origin: {
+            channel_id: 'channel_1',
+            session_id: 'session_1',
+            session_type: 'private',
+            friend_id: 'friend_1',
+          },
+        },
+      })
+
+      expect(rpcCall.mock.calls.some(call => call[1] === 'send_message')).toBe(false)
+      handler.dispose()
+    })
+
+    it('resume 恢复 epoch；terminal supplement 进入新 epoch，旧 checkpoint 缺字段不算已交付', async () => {
+      const handler = makeHandler()
+      const resumeFrom = (overrides: Partial<NonNullable<ExecuteTaskParams['resumeFrom']>> = {}) => ({
+        initialMessages: [{ id: 'm1', role: 'user' as const, content: 'resume me', timestamp: 1 }],
+        todoItems: [],
+        ...overrides,
+      })
+
+      await handler.executeTask({
+        task: makeTask(),
+        context: makeContext(),
+        resumeFrom: resumeFrom({ humanInputEpoch: 2, lastDeliveredInfoEpoch: 2 }),
+      })
+      expect(mockRunEngine.mock.calls[0][0].options.suppressForcedSummary()).toBe(true)
+
+      await handler.executeTask({
+        task: makeTask(),
+        context: makeContext(),
+        resumeFrom: resumeFrom({
+          humanInputEpoch: 2,
+          lastDeliveredInfoEpoch: 2,
+          terminalSupplementText: '新的用户补充',
+        }),
+      })
+      expect(mockRunEngine.mock.calls[1][0].options.suppressForcedSummary()).toBe(false)
+
+      await handler.executeTask({ task: makeTask(), context: makeContext(), resumeFrom: resumeFrom() })
+      expect(mockRunEngine.mock.calls[2][0].options.suppressForcedSummary()).toBe(false)
       handler.dispose()
     })
 

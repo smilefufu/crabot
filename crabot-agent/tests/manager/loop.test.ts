@@ -1092,6 +1092,7 @@ describe('ManagerLoop', () => {
 
     it('maxTurns 后复核 continuation 失败时，已提交人类输入不重放', async () => {
       const calls: LLMStreamParams[] = []
+      const { states, traceWriter } = traceRecorder()
       let streamCount = 0
       const adapter: LLMAdapter = {
         async *stream(params) {
@@ -1113,6 +1114,7 @@ describe('ManagerLoop', () => {
         store,
         adapter,
         maxTurns: 1,
+        traceWriter,
         toolFace: () => [defineTool({
           name: 'send_message', description: 'deliver', inputSchema: { type: 'object', properties: {} },
           call: async () => {
@@ -1127,8 +1129,10 @@ describe('ManagerLoop', () => {
         messages: [makeChannelMessage('已经确认入站的人类输入')],
       }))
 
-      expect(failed.outcome).toBe('failed')
+      expect(failed.outcome).toBe('max_turns')
+      expect(failed.consumedEvents).toBe(true)
       expect(JSON.stringify(calls[1].messages)).toContain('[系统复核]')
+      expect(states).toEqual(['marked', 'recheck_injected', 'recheck_failed_open', 'unresolved_accepted'])
       expect(JSON.stringify((await store.load(KEY)).recent)).toContain('已经确认入站的人类输入')
       expect(loop.hasPendingMailbox).toBe(false)
 

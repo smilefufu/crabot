@@ -63,6 +63,8 @@ export interface TaskContext {
   abortIfTaskTerminal?: () => Promise<void>
   /** 成功投递后调用，用于记录 task.messages；前端调用不注入。 */
   onDispatched?: import('../agent/outbound-dispatch.js').OnDispatchedHook
+  /** 当前人类输入 epoch；出站消息在调用时绑定，用于成功投递后的交付确认。 */
+  getHumanInputEpoch?: () => number
   /** 当前 task 的工作目录（set_cwd 改的 taskState.cwd，缺省落到 workspace）。 */
   getCwd?: () => string
 }
@@ -960,6 +962,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
         }
 
         // === Step 1: 先 send（高失败率操作先做；失败 → state 完全不变）===
+        const currentTaskCtx = deps.getTaskContext?.()
         const dispatchEntry: OutboundMessage = {
           channel_id,
           session_id,
@@ -972,6 +975,9 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           ...(filename !== undefined ? { filename } : {}),
           ...(mentions !== undefined ? { mentions } : {}),
           ...(quote_message_id !== undefined ? { quote_message_id } : {}),
+          ...(currentTaskCtx?.getHumanInputEpoch !== undefined
+            ? { human_input_epoch: currentTaskCtx.getHumanInputEpoch() }
+            : {}),
           sent_at_attempt_ms: Date.now(),
         }
         let sendResult: { platform_message_id: string; sent_at: string }

@@ -659,12 +659,18 @@ export class ManagerLoop {
         { initialMessages: continuationInitial },
       )
       totalTurnsUsed += continuation.result.totalTurns
-      repliedToHuman = repliedToHuman || detectRepliedToHuman(continuation.result.finalMessages)
-      successfulSendMessageTargets = [
-        ...successfulSendMessageTargets,
-        ...successfulSendMessageTargetsOf(continuation.result.finalMessages.slice(continuation.initialMessageCount)),
-      ]
-      attempt = continuation
+      if (continuation.result.outcome === 'completed' || continuation.result.outcome === 'max_turns') {
+        repliedToHuman = repliedToHuman || detectRepliedToHuman(continuation.result.finalMessages)
+        successfulSendMessageTargets = [
+          ...successfulSendMessageTargets,
+          ...successfulSendMessageTargetsOf(continuation.result.finalMessages.slice(continuation.initialMessageCount)),
+        ]
+        attempt = continuation
+      } else {
+        // The recheck is advisory. Its own failure must not replay an already
+        // consumable episode.
+        this.recordPostSendDecision('recheck_failed_open')
+      }
     }
 
     if (this.needsSpawnRecheck) {
@@ -823,7 +829,7 @@ export class ManagerLoop {
   }
 
   private recordPostSendDecision(
-    state: 'marked' | 'cleared' | 'recheck_injected' | 'unresolved_accepted' | 'unresolved_failed',
+    state: 'marked' | 'cleared' | 'recheck_injected' | 'recheck_failed_open' | 'unresolved_accepted' | 'unresolved_failed',
   ): void {
     if (state === 'unresolved_accepted' || state === 'unresolved_failed') {
       if (this.spawnRecheckOutcomeRecorded) return
@@ -839,7 +845,7 @@ export class ManagerLoop {
       started_at: now,
       ended_at: now,
       duration_ms: 0,
-      status: state === 'unresolved_failed' ? 'failed' : 'completed',
+      status: state === 'unresolved_failed' || state === 'recheck_failed_open' ? 'failed' : 'completed',
       details: { kind: 'post_send_action', state },
     })
   }

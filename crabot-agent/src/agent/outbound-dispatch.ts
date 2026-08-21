@@ -47,6 +47,8 @@ export interface OutboundMessage {
     readonly at_name?: string
   }>
   readonly quote_message_id?: string
+  /** The human-input epoch current when this delivery was initiated. */
+  readonly human_input_epoch?: number
   readonly sent_at_attempt_ms: number
 }
 

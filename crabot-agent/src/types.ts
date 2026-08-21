@@ -796,6 +796,8 @@ export interface ExecuteTaskParams {
     resumeTraceId?: string
     /** Task-scoped cwd（set_cwd 设置）；从 checkpoint worker_state.cwd 恢复，缺失则回退 home。 */
     cwd?: string
+    humanInputEpoch?: number
+    lastDeliveredInfoEpoch?: number
     terminalSupplementText?: string
   }
 }
@@ -862,6 +864,10 @@ export interface WorkerTaskState {
    * set_task_goal 重设已有 goal 时消费它——没券不许 worker 自改目标（反 specification-gaming）。
    */
   goalRevisionUnlocked?: boolean
+  /** 当前 worker 正在处理的人类输入 epoch。 */
+  humanInputEpoch: number
+  /** 最近一次成功 info delivery 所属的人类输入 epoch。 */
+  lastDeliveredInfoEpoch?: number
   /**
    * 当前 task 的 async subagent ids。runWorkerLoop 跨 iteration 持久（Task 3 reviewer follow-up）。
    * delegate_task 异步路径返回 launched 时加入；end_turn 跟全局 agentAbortControllers 取交集
@@ -1116,6 +1122,8 @@ export interface WorkerStateSnapshot {
    * 持久——否则跨重启 resume 后 cwd 回退到 home，相对路径解析错位、后续上下文出问题。
    */
   cwd?: string
+  human_input_epoch?: number
+  last_delivered_info_epoch?: number
 }
 
 /**
