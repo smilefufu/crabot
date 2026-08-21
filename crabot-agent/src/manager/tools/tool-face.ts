@@ -40,6 +40,8 @@ export interface ToolFaceDeps {
   readonly getRuntimeConfigSummary?: () => unknown
   /** 该 manager 是否为保留的"系统任务"线程（决定 send_master_private / send_private_message 可见性）。 */
   readonly isSystemThread: boolean
+  /** 成功投递且声明随后派发时，标记当前 Manager episode 做一次终止复核。 */
+  readonly onPostSendAction?: (action: 'spawn_worker') => void
   /** Opaque control-plane authorization, never represented in any tool schema. */
   readonly authorization?: () => MasterAuthorization | undefined
   readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
@@ -133,15 +135,22 @@ const MESSAGING_READ_ONLY = new Set([
  * `intent ?? 'info'` 的默认分支，等价于显式传 'info'，比伪造一个固定值更贴近"没有这个
  * 参数"的语义。
  */
-function messagingToolToDefinition(
-  tool: MessagingTool,
-  onSuccessfulSendMessage?: (target: { channel_id: string; session_id: string }) => void,
-): ToolDefinition {
-  const isSendMessage = tool.name === 'send_message'
+const HUMAN_DELIVERY_TOOL_NAMES = new Set([
+  'send_message',
+  'send_private_message',
+  'send_master_private',
+])
 
-  const shape = isSendMessage
+function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): ToolDefinition {
+  const isSendMessage = tool.name === 'send_message'
+  const isHumanDelivery = HUMAN_DELIVERY_TOOL_NAMES.has(tool.name)
+
+  const baseShape = isSendMessage
     ? Object.fromEntries(Object.entries(tool.schema).filter(([key]) => key !== 'intent'))
     : tool.schema
+  const shape = isHumanDelivery
+    ? { ...baseShape, post_send_action: z.enum(['none', 'spawn_worker']).describe('本条消息发出后是否预计新建 Worker；仅供系统在本轮结束时做一次内部复核，不会自动派发或重复发送消息') }
+    : baseShape
 
   let inputSchema: Record<string, unknown> = { type: 'object', properties: {} }
   try {
@@ -156,17 +165,20 @@ function messagingToolToDefinition(
     inputSchema,
     isReadOnly: MESSAGING_READ_ONLY.has(tool.name),
     call: async (input): Promise<ToolCallResult> => {
-      const args = isSendMessage
-        ? Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'intent'))
-        : input
+      const postSendAction = input.post_send_action
+      if (isHumanDelivery && postSendAction !== 'none' && postSendAction !== 'spawn_worker') {
+        return { output: 'post_send_action 必须是 none 或 spawn_worker', isError: true }
+      }
+      const args = Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'intent' && key !== 'post_send_action'))
       try {
         const result = await tool.handler(args)
+        if (!result.isError && postSendAction === 'spawn_worker') deps.onPostSendAction?.('spawn_worker')
         const text = result.content.map((block) => block.text).join('\n')
         if (isSendMessage && !result.isError) {
           const channelId = args.channel_id
           const sessionId = args.session_id
           if (typeof channelId === 'string' && typeof sessionId === 'string') {
-            onSuccessfulSendMessage?.({ channel_id: channelId, session_id: sessionId })
+            deps.onSuccessfulSendMessage?.({ channel_id: channelId, session_id: sessionId })
           }
         }
         return { output: text, isError: !!result.isError }
@@ -180,9 +192,7 @@ function messagingToolToDefinition(
 
 function buildMessagingFace(deps: ToolFaceDeps): ToolDefinition[] {
   const toolSet = managerMessagingToolSet(deps.isSystemThread)
-  return buildMessagingTools(deps.messagingDeps, () => toolSet).map((tool) =>
-    messagingToolToDefinition(tool, deps.onSuccessfulSendMessage),
-  )
+  return buildMessagingTools(deps.messagingDeps, () => toolSet).map((tool) => messagingToolToDefinition(tool, deps))
 }
 
 // ============================================================================

@@ -567,6 +567,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           triggerType: scheduleIdentity ? 'scheduled' : isSystemThread ? 'system' : 'message',
         }),
         messagingDeps: deps.messagingDeps,
+        onPostSendAction: traceHooks?.onPostSendAction,
         // 记忆档位按**这个会话最近一次解析出来的发起人身份**现建。这里刻意不用
         // `humanPrincipal`:worker 事件唤醒的 episode 里没人说话,但该会话的记忆可见范围
         // 并不因此改变——它是会话属性,不是本轮属性。

@@ -181,6 +181,45 @@ describe('ManagerDetail', () => {
     expect(screen.getByText('排队')).toBeInTheDocument()
   })
 
+  it('同一执行器的历史外发消息不折叠，并显示发送时间', async () => {
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [
+        {
+          trace_id: 'ep-progress-latest', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:03:00.000Z', status: 'completed',
+          trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+        },
+        {
+          trace_id: 'ep-progress-message', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:02:00.000Z', status: 'completed',
+          trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'running' },
+          reply_excerpt: '21:26 更新：已完成 44 批。',
+        },
+        {
+          trace_id: 'ep-progress-queued', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:01:00.000Z', status: 'completed',
+          trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'queued' },
+        },
+        {
+          trace_id: 'ep-parent', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:00:00.000Z', status: 'completed',
+          trigger: { type: 'human_message', summary: '人类消息 x1：开始部署' }, spans: [], spawned_worker_ids: ['w-1'],
+          actions: [{ kind: 'spawn_worker', label: '派活：部署 V6', worker_id: 'w-1' }],
+        },
+      ],
+      pagination: { page: 1, page_size: 20, total_items: 4, total_pages: 1 },
+    })
+    render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText('管理会话回复：', { exact: false })).toHaveTextContent('21:26 更新：已完成 44 批。'))
+    expect(screen.getByText('已发送消息')).toBeInTheDocument()
+    expect(document.querySelector('time[datetime="2026-08-01T10:02:00.000Z"]')).not.toBeNull()
+    expect(screen.getByRole('button', { name: '展开 1 次历史进展' })).toBeInTheDocument()
+    expect(screen.queryByText('排队')).toBeNull()
+  })
+
   it('spawn 父 episode 不在当前分页时，用 causal_parent 仍按因果链展示', async () => {
     mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
       items: [{

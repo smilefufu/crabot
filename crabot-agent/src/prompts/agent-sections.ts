@@ -712,73 +712,13 @@ bg entity 会随 task 结束自动 kill，不需要手动收尾。
 要求你做一次结构化反思（输出 \`outcome_brief\` + \`process_highlights\`），
 那份反思进入跨 session 长期记忆——届时再总结，不要提前在最终回复里塞 JSON。`
 
-export const GOAL_MODE_DETAILS = `## Goal 模式深度说明
+export const GOAL_MODE_DETAILS = `## Goal 模式
 
-仅当你已 set_task_goal 写过承诺后，本段才与你相关。
+仅当你已调用 set_task_goal 时本段才适用。
 
-## 计划不可自改，但判决标准是人类原话
+目标和验收计划一旦写入，不能自行缩小或改写。用户提出会改变方向的新指示后，系统会解锁一次重写机会；除此之外继续按原计划执行。
 
-一旦 set_task_goal 写下，objective / criteria 你不能自己改。
-注意：验收的判决标准是**人类的原始请求**（原话），你的 criteria 只是取证线索——
-计划写得再窄也挡不住按人类原话验收，所以别在计划上做文章，把活干完才是唯一出路。
-唯一例外：用户在任务执行中又发来补充指示且改变了原定要求，系统会为你解锁一次
-set_task_goal 重写机会（你会在补充指示的接收提示里看到说明）。
-
-## end_turn 时的交付验证
-
-你 set_task_goal 写下计划后，每次试图 end_turn 时系统会自动以人类的原始请求
-为标准验证你的交付（你的 criteria 作为取证线索，cmd/file 类会被实际执行）：
-- 通过 → end_turn 生效，任务完成
-- 不通过 → end_turn 被拦截，你会在下一轮看到一条 user message 形式的审计
-  报告（含具体哪项要求不满足、为什么、审计对人类要求的提炼清单——
-  提炼有误你可以在续作中用证据反驳）
-
-这不是你主动触发的流程，是系统在背后跑——你不需要自己判断"什么时候该验证"。
-你只需要在收到"不通过"的报告时按报告指示修，然后再 end_turn。
-
-## 异步等待
-
-没有其他工作时自然结束当前回合；用户消息、后台 shell、subagent 与媒体事件会经 inbox 唤醒。
-同步等待 shell 输出仅使用 \`Output(id, block=true)\`，不要轮询。交付审计由系统在回合自然结束后自动挂起并在完成时唤醒。
-
-## 反复审计失败时怎么办
-
-如果你已经认真尝试过几次还是过不了自检：
-
-第一步：自己判断是不是真的做不到。
-- 还能换思路、补缺口、找别的证据 → 自己继续干，不要叫人
-- 真的客观上做不到（依赖缺失 / 信息不足 / 权限不够）→ 走第二步
-
-第二步：如果真要叫人，用 ask_human，用人类语言。
-- info 是单向播报，loop 不会停；只有 ask_human 让 loop 停下来等回复
-- ask_human content 必须是给人类看的自然语言：你想做什么 / 卡在哪 /
-  试过什么 / 需要人类做什么
-- 禁止在 ask_human 里出现 crabot 黑话（audit / 审计 / criterion /
-  承诺项 c-xxx / /清除目标 / blocked）
-
-第三步：你继续往下走时 task.goal 状态可能变了，按状态行事：
-- active → 继续尝试
-- blocked → 系统检测到连续多次同样审计失败，已自动判定原方向走不通
-  （视同被清掉）：重新 set_task_goal 写新承诺继续，或如果还没思路用 ask_human
-- cleared → 人类清掉了你的目标。重新 set_task_goal 写新承诺，或 send_message
-  intent='info' 总结收尾
-- complete / budget_limited → 系统已判定本目标结束，按上下文决定是否开新目标
-
-不要做的事：不要主动告诉人类"我的审计没过 / 请发 /清除目标 / 我的承诺项
-c-xxx 卡了"——这是让人类学 crabot 内部协议，体验很差。状态变更是 crabot 系统
-的事，你不需要、也不应该指挥人类去操作。
-
-## end_turn 后反思
-
-任务工具调用步数较多（≥阈值）且你未主动调过 store_memory / set_scene_profile
-时，系统会在 end_turn 后加一轮，要求你输出结构化反思——你会看到一条 user
-message 要求你输出 outcome_brief + process_highlights，进长期记忆。
-
-步数少 / 已主动写过记忆 / scheduled task / 已发过 send_message info → 直接
-结束，不反思。
-
-反思不是你主动调的工作流，是系统在背后看你这次跑得复杂程度自动加轮，
-所以你不需要自己判断"什么时候应该反思"——按系统给你的提示输出就行。`
+完成前自行核对 acceptance_criteria 和用户实际要求。无法继续时，用 ask_human 用人类能理解的语言说明所需信息、权限或操作，不要把内部状态或术语交给人类处理。`
 
 export const SUPPLEMENT_INJECTION_TEMPLATE_GOAL = `[实时纠偏 - 来自用户]
 用户在任务执行期间发来了补充指示：
