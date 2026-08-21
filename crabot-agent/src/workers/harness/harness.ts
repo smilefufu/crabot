@@ -72,6 +72,7 @@ import type {
   IncarnationHandle,
   IncarnationRef,
   IncarnationEndReason,
+  InitialInputResult,
   StateChangeReport,
   SpawnSpec,
   WorkerUiActionDescriptor,
@@ -1088,9 +1089,7 @@ export class WorkerHarness {
 
       await this.appendEvent(workerId, 1, 'spawned', { impl }, spawned?.task.status)
       const uiSnapshot = await this.prepareUiSnapshot(spawnedHandle, p.managerKey, initialInput?.report, now)
-      const turn = initialInput
-        ? await this.createPendingTurn(p.managerKey, spawnedHandle, initialInput.report, now)
-        : undefined
+      const turn = await this.createInitialInputTurn(p.managerKey, spawnedHandle, initialInput, now)
       if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
         await this.appendEvent(workerId, 1, 'state_changed', {
           ...cliReportDetail(initialState, initialInput.report),
@@ -1752,9 +1751,7 @@ export class WorkerHarness {
         updated?.task.status,
       )
       const uiSnapshot = await this.prepareUiSnapshot(handle, managerKey, initialInput?.report, now)
-      const turn = initialInput
-        ? await this.createPendingTurn(managerKey, handle, initialInput.report, now)
-        : undefined
+      const turn = await this.createInitialInputTurn(managerKey, handle, initialInput, now)
       if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
         await this.appendEvent(
           worker.worker_id,
@@ -2283,9 +2280,7 @@ export class WorkerHarness {
     const replayedConsumed = inbox.requeueConsumed()
     await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq }, revived?.task.status)
     const uiSnapshot = await this.prepareUiSnapshot(newHandle, managerKey, initialInput?.report, now)
-    const turn = initialInput
-      ? await this.createPendingTurn(managerKey, newHandle, initialInput.report, now)
-      : undefined
+    const turn = await this.createInitialInputTurn(managerKey, newHandle, initialInput, now)
     if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
       await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', {
         ...cliReportDetail(initialState, initialInput.report),
@@ -2548,9 +2543,7 @@ export class WorkerHarness {
       handedOff?.task.status
     )
     const uiSnapshot = await this.prepareUiSnapshot(newHandle, managerKey, initialInput?.report, now)
-    const turn = initialInput
-      ? await this.createPendingTurn(managerKey, newHandle, initialInput.report, now)
-      : undefined
+    const turn = await this.createInitialInputTurn(managerKey, newHandle, initialInput, now)
     if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
       await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', {
         ...cliReportDetail(initialState, initialInput.report),
@@ -2836,6 +2829,23 @@ export class WorkerHarness {
       console.error(`[WorkerHarness] failed to persist completed-turn notification ${turn.turn_id}:`, error)
     }
     return turn
+  }
+
+  /** All four CLI initial-input paths already hold the worker lock. */
+  private async createInitialInputTurn(
+    managerKey: ManagerKey,
+    handle: IncarnationHandle,
+    initialInput: InitialInputResult | undefined,
+    completedAt: string,
+  ): Promise<WorkerTurn | undefined> {
+    if (!initialInput?.report?.completionSource) return undefined
+    try {
+      await this.collectNativeActivityLocked(handle, managerKey)
+    } catch (error) {
+      // The adapter's completion result is authoritative. Activity collection is supplementary.
+      console.error(`[WorkerHarness] native activity collection failed at initial turn boundary for ${handle.worker_id}#${handle.seq}:`, error)
+    }
+    return this.createPendingTurn(managerKey, handle, initialInput.report, completedAt)
   }
 
   private async collectNativeActivity(h: IncarnationHandle, baselineUnobserved = false): Promise<void> {

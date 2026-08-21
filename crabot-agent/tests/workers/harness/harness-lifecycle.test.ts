@@ -469,6 +469,7 @@ describe('WorkerHarness.spawnWorker', () => {
   it('CLI首投窗口内完成时创建待交付回合，不误报投递停摆', async () => {
     const { harness } = await makeHarness({
       implId: 'claude-code',
+      nativeTrace: [{ ts: '2026-08-21T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '首轮已经完成' }],
       spawnInitialInput: {
         control_state: 'waiting_text',
         disposition: 'accepted',
@@ -478,7 +479,16 @@ describe('WorkerHarness.spawnWorker', () => {
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
 
     expect(worker.task.status).toBe('waiting_input')
-    expect(await harness.getWorkerTurn(worker.worker_id)).toMatchObject({ disposition: { status: 'pending' } })
+    const turn = await harness.getWorkerTurn(worker.worker_id)
+    expect(turn).toMatchObject({
+      disposition: { status: 'pending' },
+      activity_from: '0',
+      activity_through: '1',
+    })
+    if (!turn) throw new Error('expected initial completed turn')
+    await expect(harness.getWorkerTurnActivities(turn)).resolves.toEqual({
+      events: [expect.objectContaining({ role: 'assistant', summary: '首轮已经完成', source_offset: 0 })],
+    })
     expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
       to: 'idle',
       kind: 'initial_input_settled',
