@@ -1065,6 +1065,37 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(await harness.getWorkerControlOperations(worker.worker_id)).toEqual([])
   })
 
+  it('已停止主线后的 fork stop 抛错由核验收口，不把整次 stop 判为 failed', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    await harness.queryWorker(worker.worker_id, '侧问一下')
+    const originalState = fake.state.bind(fake)
+    const logWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    vi.spyOn(fake, 'stop').mockImplementation(async (handle) => {
+      if (handle.seq === 2) throw new Error('fork is no longer resident')
+      await fake.kill(handle)
+    })
+    vi.spyOn(fake, 'state').mockImplementation(async (handle) => {
+      // The adapter's process-local fork is gone, while its durable native state confirms exit.
+      if (handle.seq === 2) return 'exited'
+      return originalState(handle)
+    })
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({ status: 'succeeded' })
+
+    const [stored] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(stored.task.status).toBe('cancelled')
+    expect(stored.incarnations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ seq: 1, state: 'exited', ended_reason: 'killed' }),
+      expect.objectContaining({ seq: 2, state: 'exited', ended_reason: 'killed' }),
+    ]))
+    expect(logWarn).toHaveBeenCalledWith(
+      expect.stringContaining(`failed to stop registered fork ${worker.worker_id}#2`),
+      expect.any(Error),
+    )
+  })
+
   it('停止核验的 bg 查询异常结算 unknown，不遗留 verifying operation', async () => {
     const { harness } = await makeHarness({}, {
       hasRunningBg: async () => { throw new Error('bg registry unavailable') },

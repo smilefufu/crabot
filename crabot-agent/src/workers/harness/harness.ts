@@ -4080,7 +4080,14 @@ export class WorkerHarness {
           const forkAdapter = this.deps.adapters.get(fork.impl)
           if (!forkAdapter) throw new Error(`fork adapter unavailable: ${fork.impl}`)
           const stopFork = forkAdapter.stop?.bind(forkAdapter) ?? forkAdapter.kill.bind(forkAdapter)
-          await stopFork(handleForIncarnation(worker.worker_id, fork))
+          try {
+            await stopFork(handleForIncarnation(worker.worker_id, fork))
+          } catch (error) {
+            // A recovered one-shot fork can be absent from an adapter's resident process while
+            // still being marked running in the ledger. The verification pass below decides
+            // whether that fork is actually gone; it must not erase a completed mainline stop.
+            console.warn(`[WorkerHarness] failed to stop registered fork ${worker.worker_id}#${fork.seq}:`, error)
+          }
         }
       }
       await this.controlOperationStore.transition(worker.worker_id, executing.operation_id, 'verifying', this.deps.now())
