@@ -2312,12 +2312,17 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
 
   it('UI 回应后的后继交互仍用完整 interaction_required 形状唤醒 Manager', async () => {
     class ChainedPromptTmux extends NoopTmux {
-      chainNextResponse = false
+      nextResponse: 'manager_prompt' | 'repainting' | 'pending_input' | undefined
 
       async sendKeys(name: string, keys: string[]): Promise<void> {
-        if (this.chainNextResponse && keys.join(',') === 'Enter') {
-          this.chainNextResponse = false
-          this.paneText = 'Allow Codex to modify this workspace again?\nYes\nNo'
+        if (keys.join(',') === 'Enter' && this.nextResponse) {
+          const next = this.nextResponse
+          this.nextResponse = undefined
+          this.paneText = next === 'manager_prompt'
+            ? 'Allow Codex to modify this workspace again?\nYes\nNo'
+            : next === 'pending_input'
+              ? '› retained input\n? for shortcuts'
+              : 'terminal is repainting'
           return
         }
         await super.sendKeys(name, keys)
@@ -2342,7 +2347,7 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     )
     await waitFor(() => seen.length === 1)
 
-    tmux.chainNextResponse = true
+    tmux.nextResponse = 'manager_prompt'
     await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
     await waitFor(() => seen.length === 2)
 
@@ -2359,6 +2364,37 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
           ],
         },
         notification: { type: 'terminal_interaction' },
+      },
+    })
+
+    tmux.nextResponse = 'repainting'
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 3)
+    expect(seen[2]).toEqual({
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'interaction_required',
+      },
+    })
+
+    tmux.paneText = 'Allow Codex to modify this workspace again?\nYes\nNo'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'permission_request', raw: { hook_event_name: 'PermissionRequest' } }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 4)
+    expect(seen[3].report?.notification).toEqual({ type: 'terminal_interaction' })
+
+    tmux.nextResponse = 'pending_input'
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 5)
+    expect(seen[4]).toEqual({
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'input_pending',
       },
     })
     await adapter.kill(h)

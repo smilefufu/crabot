@@ -884,11 +884,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const primaryProbe = probeCodexInput(snapshot, 'primary', undefined, false)
       const paneShowsWorkingAfterRaw = /Working\b/i.test(snapshot.text)
       if (primaryProbe === 'pending') {
+        runtime.interactionFingerprint = undefined
         const next: CliControlState = runtime.controlState.kind === 'running' || paneShowsWorkingAfterRaw
           ? { kind: 'running' }
           : { kind: 'waiting_action', reason: 'input_pending' }
         const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'input_pending' }
-        await this.transitionControlState(runtime, h, next, report, false)
+        await this.transitionControlState(runtime, h, next, report, notify, notify)
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
       if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || paneShowsWorkingAfterRaw)) {
@@ -904,6 +905,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const reason = runtime.controlState.kind === 'waiting_action'
         ? runtime.controlState.reason
         : 'input_surface_unavailable'
+      if (interaction.kind === 'none') runtime.interactionFingerprint = undefined
       const report: StateChangeReport = {
         terminal: this.liveTerminal(snapshot),
         waitReason: reason,
@@ -916,7 +918,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         { kind: 'waiting_action', reason },
         report,
         notify,
-        notify && interaction.kind === 'manager_required',
+        notify,
       )
       throw new CliInputStallError('not_pasted', 'waiting_action', report)
     } catch (error) {
@@ -943,6 +945,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const primaryProbe = probeCodexInput(snapshot, 'primary', undefined, false)
       if (primaryProbe !== 'empty') {
         const interaction = classifyCodexTerminalInteraction(snapshot)
+        if (interaction.kind === 'none') runtime.interactionFingerprint = undefined
         const report: StateChangeReport = {
           terminal: this.liveTerminal(snapshot),
           waitReason: 'interaction_required',
@@ -955,7 +958,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
           { kind: 'waiting_action', reason: 'interaction_required' },
           report,
           notify,
-          notify && interaction.kind === 'manager_required',
+          notify,
         )
         return
       }
@@ -2154,7 +2157,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       waitReason: 'interaction_required',
       ui: { fingerprint: interaction.fingerprint, actions: interaction.actions },
       notification: { type: 'terminal_interaction' },
-    })
+    }, true, true)
   }
 
   private assertActive(): void {

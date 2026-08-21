@@ -593,11 +593,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       }
       const primaryProbe = probeClaudeInput(snapshot, 'primary', undefined, false)
       if (primaryProbe === 'pending') {
+        runtime.interactionFingerprint = undefined
         const next: CliControlState = runtime.controlState.kind === 'running'
           ? { kind: 'running' }
           : { kind: 'waiting_action', reason: 'input_pending' }
         const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'input_pending' }
-        await this.transitionControlState(runtime, h, next, report, false)
+        await this.transitionControlState(runtime, h, next, report, notify, notify)
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
       if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || /esc to interrupt/i.test(snapshot.text))) {
@@ -613,8 +614,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const reason = runtime.controlState.kind === 'waiting_action'
         ? runtime.controlState.reason
         : 'input_surface_unavailable'
+      runtime.interactionFingerprint = undefined
       const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: reason }
-      await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason }, report, false)
+      await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason }, report, notify, notify)
       throw new CliInputStallError('not_pasted', 'waiting_action', report)
     } catch (error) {
       if (!(await this.tmux.isAlive(runtime.sessionName))) {
@@ -1776,7 +1778,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       waitReason: 'interaction_required',
       ui: { fingerprint: interaction.fingerprint, actions: interaction.actions },
       notification: { type: 'terminal_interaction' },
-    }, true, forceNotify)
+    }, true, true)
   }
 
   private async handleAutomaticInteractionAfterUiResponse(
@@ -1785,6 +1787,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     interaction: Extract<TerminalInteraction, { kind: 'automatic' }>,
     snapshot: PaneSnapshot,
   ): Promise<void> {
+    if (runtime.interactionFingerprint === interaction.fingerprint) {
+      await this.failAutomaticInteraction(runtime, h, interaction, snapshot, true)
+      return
+    }
     await this.handleTerminalInteraction(runtime, h, interaction, snapshot, true)
     if (runtime.controlState.kind === 'waiting_action' && runtime.interactionFingerprint === undefined) {
       await this.transitionControlState(runtime, h, { kind: 'running' })
