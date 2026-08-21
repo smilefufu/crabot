@@ -1042,6 +1042,52 @@ describe('WorkerHarness.handleStateChange', () => {
     )
   })
 
+  it('Manager 路由下的游离通知失败只记录，不形成未处理拒绝', async () => {
+    const { harness, fake } = await makeHarness({}, { onOperationNotification: async () => ({ consumed: false }) })
+    const worker = await harness.spawnWorker(spawnParams())
+    const internals = harness as unknown as {
+      createPendingTurn(
+        managerKey: ManagerKey,
+        handle: IncarnationHandle,
+        report: StateChangeReport,
+        completedAt: string,
+      ): Promise<unknown>
+      deliverNativeActivityNotifications(workerId: string): Promise<void>
+      deliverControlOperationNotifications(workerId: string): Promise<void>
+    }
+    const activityError = new Error('native activity store unavailable')
+    const controlError = new Error('control operation store unavailable')
+    const activityDelivery = vi.spyOn(internals, 'deliverNativeActivityNotifications').mockRejectedValueOnce(activityError)
+    const controlDelivery = vi.spyOn(internals, 'deliverControlOperationNotifications').mockRejectedValueOnce(controlError)
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    const incarnation = worker.incarnations[0]
+    await internals.createPendingTurn(
+      `test::friend-1` as ManagerKey,
+      {
+        worker_id: worker.worker_id,
+        incarnation_id: incarnation.incarnation_id,
+        seq: incarnation.seq,
+        impl: 'builtin',
+        session_ref: incarnation.session_ref,
+      },
+      { completionSource: 'builtin_end_turn' },
+      '2026-01-01T00:00:00.000Z',
+    )
+    await waitUntil(async () => activityDelivery.mock.calls.length === 1)
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({ status: 'succeeded' })
+    await waitUntil(async () => controlDelivery.mock.calls.length === 1)
+
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining(`native activity notification delivery failed for ${worker.worker_id}`),
+      activityError,
+    )
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining(`control operation notification delivery failed for ${worker.worker_id}`),
+      controlError,
+    )
+  })
+
   it('状态回调驱动台账 task.status 与化身 state,并经 onEvent 外发', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())

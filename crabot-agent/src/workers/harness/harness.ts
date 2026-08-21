@@ -2822,7 +2822,9 @@ export class WorkerHarness {
     })
     try {
       await this.persistTurnNotification(turn)
-      void this.deliverNativeActivityNotifications(turn.worker_id)
+      void this.deliverNativeActivityNotifications(turn.worker_id).catch((error) => {
+        console.error(`[WorkerHarness] native activity notification delivery failed for ${turn.worker_id}:`, error)
+      })
     } catch (error) {
       // processStateChange emits a durable state_changed event carrying turn_id below. Keep that
       // path live even when the supplementary turn_completed notification cannot be recorded.
@@ -4281,7 +4283,11 @@ export class WorkerHarness {
     const delivery = this.deliverControlOperationNotifications(settled.worker_id)
     // Without a Manager operation router this is only the durable audit append. Finish it before
     // returning the control result; otherwise a short-lived harness can lose the audit record.
-    if (this.deps.onOperationNotification) void delivery
+    if (this.deps.onOperationNotification) {
+      void delivery.catch((error) => {
+        console.error(`[WorkerHarness] control operation notification delivery failed for ${settled.worker_id}:`, error)
+      })
+    }
     else await delivery
     return settled
   }
