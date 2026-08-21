@@ -382,7 +382,10 @@ class LongTermV2Rpc:
                 offset=offset,
             )
             for row in rows:
-                entry = self.store.read("confirmed", "lesson", row["id"])
+                try:
+                    entry = self.store.read("confirmed", "lesson", row["id"])
+                except FileNotFoundError:
+                    continue
                 frontmatter = entry.frontmatter
                 if frontmatter.maturity == "rule" and frontmatter.lesson_meta:
                     protected_ids.update(frontmatter.lesson_meta.source_cases)
@@ -390,17 +393,26 @@ class LongTermV2Rpc:
                 return protected_ids
             offset += len(rows)
 
-    def _historical_inbox_candidates(self, cutoff: str | None, *, limit: int | None = None) -> list[dict]:
+    def _historical_inbox_candidates(
+        self, cutoff: str | None, *, limit: int | None = None,
+    ) -> tuple[list[dict], list[dict]]:
         protected_ids = self._historical_rule_source_case_ids()
-        candidates = []
+        candidates: list[dict] = []
+        failed: list[dict] = []
         for row in self.index.list_historical_inbox(cutoff=cutoff, limit=None):
             if row["id"] in protected_ids:
                 continue
-            entry = self.store.read("inbox", row["type"], row["id"])
+            try:
+                entry = self.store.read("inbox", row["type"], row["id"])
+            except FileNotFoundError as exc:
+                failed.append({"id": row["id"], "reason": str(exc)})
+                continue
             if entry.frontmatter.maturity in _HISTORICAL_INBOX_TERMINAL_MATURITIES:
                 continue
             candidates.append(row)
-        return candidates if limit is None else candidates[:limit]
+            if limit is not None and len(candidates) >= limit:
+                break
+        return candidates, failed
 
     async def preview_historical_inbox(self, params: dict) -> dict:
         """Read-only summary for Admin's explicitly confirmed legacy inbox cleanup."""
@@ -414,7 +426,7 @@ class LongTermV2Rpc:
             "days_91_to_365": 0,
             "over_365_days": 0,
         }
-        rows = self._historical_inbox_candidates(cutoff)
+        rows, _ = self._historical_inbox_candidates(cutoff)
         for row in rows:
             by_type[row["type"]] += 1
             try:
@@ -442,9 +454,9 @@ class LongTermV2Rpc:
             return {"error": "CONFIRMATION_REQUIRED"}
         cutoff = params.get("cutoff")
         now_iso = params.get("now_iso") or utc_now_iso_z()
-        failed: list[dict] = []
+        rows, failed = self._historical_inbox_candidates(cutoff, limit=200)
         moved = 0
-        for row in self._historical_inbox_candidates(cutoff, limit=200):
+        for row in rows:
             try:
                 entry = self.store.read("inbox", row["type"], row["id"])
                 move_entry(
@@ -454,11 +466,12 @@ class LongTermV2Rpc:
                 moved += 1
             except Exception as exc:
                 failed.append({"id": row["id"], "reason": str(exc)})
+        remaining, _ = self._historical_inbox_candidates(cutoff)
         return {
             "selection": self._historical_inbox_selection(cutoff),
             "batch_size": 200,
             "moved": moved,
-            "remaining": len(self._historical_inbox_candidates(cutoff)),
+            "remaining": len(remaining),
             "failed": failed,
         }
 

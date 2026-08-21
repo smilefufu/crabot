@@ -166,6 +166,53 @@ async def test_historical_inbox_preview_and_confirmed_batches_are_bounded_and_re
 
 
 @pytest.mark.asyncio
+async def test_historical_inbox_batch_skips_missing_files_and_reports_them(tmp_path):
+    rpc, store, index = _rpc(tmp_path)
+    _persist(
+        store, index, "readable", status="inbox",
+        ingestion_time="2020-01-01T00:00:00Z",
+    )
+    missing = MemoryEntry(
+        frontmatter=_frontmatter("missing-file", ingestion_time="2020-01-02T00:00:00Z"),
+        body="missing",
+    )
+    index.upsert(
+        missing,
+        entry_path(store.data_root, "inbox", "fact", "missing-file"),
+        "inbox",
+    )
+    missing_rule = MemoryEntry(
+        frontmatter=_frontmatter(
+            "missing-rule", type_="lesson", maturity="rule",
+            lesson_meta=LessonMeta(source_cases=["unreadable-evidence"]),
+        ),
+        body="missing rule",
+    )
+    index.upsert(
+        missing_rule,
+        entry_path(store.data_root, "confirmed", "lesson", "missing-rule"),
+        "confirmed",
+    )
+
+    preview = await rpc.preview_historical_inbox({"now_iso": "2026-08-20T00:00:00Z"})
+    assert preview["estimated_move_count"] == 1
+
+    batch = await rpc.migrate_historical_inbox_batch({
+        "confirmed": True,
+        "now_iso": "2026-08-20T03:00:00Z",
+    })
+    assert batch["moved"] == 1
+    assert batch["remaining"] == 0
+    assert [failure["id"] for failure in batch["failed"]] == ["missing-file"]
+    assert index.locate("readable")["status"] == "trash"
+
+    retry = await rpc.migrate_historical_inbox_batch({"confirmed": True})
+    assert retry["moved"] == 0
+    assert retry["remaining"] == 0
+    assert [failure["id"] for failure in retry["failed"]] == ["missing-file"]
+
+
+@pytest.mark.asyncio
 async def test_historical_inbox_migration_preserves_confirmed_rule_evidence(tmp_path):
     rpc, store, index = _rpc(tmp_path)
     _persist(
