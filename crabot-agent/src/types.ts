@@ -796,10 +796,6 @@ export interface ExecuteTaskParams {
     resumeTraceId?: string
     /** Task-scoped cwd（set_cwd 设置）；从 checkpoint worker_state.cwd 恢复，缺失则回退 home。 */
     cwd?: string
-    /** checkpoint 恢复用：当前 worker 对话里的真实人类输入轮次。 */
-    humanInputEpoch?: number
-    /** checkpoint 恢复用：最近一次成功 info/default send_message 送达对应的人类输入轮次。 */
-    lastDeliveredInfoEpoch?: number
     terminalSupplementText?: string
   }
 }
@@ -867,67 +863,11 @@ export interface WorkerTaskState {
    */
   goalRevisionUnlocked?: boolean
   /**
-   * Goal mode 工作态下"待审最终交付候选"的缓冲槽。
-   *
-   * **语义（spec §4.1 Revision 2026-06-09 第 1 段）**：永远 ≤ 1 条。
-   * - 数组形态保留是实现选择（共享引用、跨模块改动小），但**业务语义就是单值**
-   * - send_message handler 缓冲分支 push 新条前若数组已有旧条 → 先 sync flush 旧条（"新顶旧"）
-   * - audit pass 后引擎 flush 这一条；audit fail / 改 goal abort 时整体丢弃
-   * - 维护者千万不要把它当通用 array 用、push 多条
-   *
-   * Entry shape 用 OutboundBufferEntry（与 TaskContext.outboundBuffer / 测试 mock 共享同一类型，
-   * 由 ./agent/outbound-flush 导出）。
-   * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.1（含 Revision 2026-06-09 第 1 段）
-   */
-  readonly outboundBuffer: Array<import('./agent/outbound-flush.js').OutboundBufferEntry>
-  /** Active audit subagent id；设置后表示 task 处于"等审态"。undefined = 工作态。 */
-  activeAuditId?: string
-  /**
    * 当前 task 的 async subagent ids。runWorkerLoop 跨 iteration 持久（Task 3 reviewer follow-up）。
    * delegate_task 异步路径返回 launched 时加入；end_turn 跟全局 agentAbortControllers 取交集
    * 判断是否还有 active subagent。spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 5
    */
   readonly activeAsyncSubagentIds: Set<string>
-  /**
-   * Task 生命周期内是否至少一次 send_message 真正 flush 到 channel 成功返回过。
-   * 一旦置 true 不再清零（task 即使续作 audit fail，"过去发过"是事实）。
-   *
-   * 由 dispatchOutboundMessage 钩子点统一设值（spec §4.13.6 Invariant #1+#2）：
-   * - success 路径触发钩子 → 置 true
-   * - 抛错路径不触发 → 状态不变
-   *
-   * endTurnGate 用此字段在 "buffer 空 + has goal" 路径区分讨论型放行 vs 从未交付拦截。
-   * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.13.3
-   */
-  everSentMessage: boolean
-  /**
-   * 当前 worker 对话里的真实人类输入轮次。
-   *
-   * 初始触发消息是 epoch 0；每次 live supplement 或 terminal-supplement resume 注入
-   * 新的人类补充时递增。send_message 工具调用创建 entry 时绑定当前 epoch；
-   * 成功送达后把 lastDeliveredInfoEpoch 写成该 entry 的调用 epoch。
-   * 这样 end_turn 收口判定看的是"最后一次人类输入之后是否已汇报"，而不是 task 历史上
-   * 是否曾经发过消息。
-   */
-  humanInputEpoch: number
-  /** 最近一次成功送达 info/默认 send_message 时对应的 humanInputEpoch。 */
-  lastDeliveredInfoEpoch?: number
-  /**
-   * Task 生命周期内是否至少一次 send_message(intent='info') 进过 outboundBuffer
-   * （即"worker 交付过但可能被 audit 拦下/丢弃"）。一旦置 true 不再清零。
-   *
-   * endTurnGate 用它区分 NO_DELIVERY 提示的两种情形：从未调过 send_message（保持
-   * 原文案）vs 调过但被 audit 拦下（换文案——否则 worker 看到"你从未交付"会
-   * 原样重发同一条消息，trace e1c9663f 死循环成因之三）。
-   * spec: 2026-06-10-audit-anchor-human-request §3.5
-   */
-  everBufferedMessage: boolean
-  /**
-   * endTurnGate "buffer 空 + has goal + 当前 humanInputEpoch 未送达" 路径已塞提醒次数。
-   * 累计 3 次仍 silent end_turn → 第 4 次直接 failed，不再派空 buffer audit。
-   * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.13.3 / §4.13.4
-   */
-  silentNoDeliveryRetries: number
   /**
    * Task-scoped 工作根目录（spec 2026-06-08-task-scoped-cwd-design §3.1）。
    * set_cwd 工具改它、Grep/Glob/Read/Write/Bash 默认以它为根。挂在 taskState 上
@@ -1176,10 +1116,6 @@ export interface WorkerStateSnapshot {
    * 持久——否则跨重启 resume 后 cwd 回退到 home，相对路径解析错位、后续上下文出问题。
    */
   cwd?: string
-  /** 当前 worker 对话里的真实人类输入轮次。 */
-  human_input_epoch?: number
-  /** 最近一次成功 info/default send_message 送达对应的人类输入轮次。 */
-  last_delivered_info_epoch?: number
 }
 
 /**

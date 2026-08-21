@@ -926,6 +926,174 @@ describe('ManagerLoop', () => {
     expect(JSON.stringify(calls).match(/\[系统提醒\]/g)).toHaveLength(1)
   })
 
+  describe('发送后 Worker 复核', () => {
+    function traceRecorder() {
+      const states: string[] = []
+      return {
+        states,
+        traceWriter: {
+          startEpisode: vi.fn(),
+          appendSpan: vi.fn((_traceId, span) => {
+            const details = span.details as { kind?: string; state?: string }
+            if (details.kind === 'post_send_action' && details.state) states.push(details.state)
+          }),
+          finishSpan: vi.fn(),
+          finishEpisode: vi.fn(),
+          addSpawnedWorker: vi.fn(),
+        },
+      }
+    }
+
+    it('send -> end_turn -> recheck -> spawn_worker -> end_turn：仅复核一次，成功派发后清除标记', async () => {
+      const { adapter, calls, queue } = makeAdapter()
+      const { states, traceWriter } = traceRecorder()
+      let loop!: ManagerLoop
+      let spawned = 0
+      queue.push(
+        { toolCalls: [{ name: 'send_message', id: 'send-1', input: { post_send_action: 'spawn_worker' } }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+        { toolCalls: [{ name: 'spawn_worker', id: 'spawn-1', input: {} }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+      )
+      const toolFace = (): ReadonlyArray<ToolDefinition> => [
+        defineTool({
+          name: 'send_message', description: 'deliver', inputSchema: { type: 'object', properties: {} },
+          call: async () => {
+            loop.recordPostSendAction()
+            return { output: 'sent' }
+          },
+        }),
+        defineTool({
+          name: 'spawn_worker', description: 'spawn', inputSchema: { type: 'object', properties: {} },
+          call: async () => {
+            spawned++
+            loop.recordSpawnedWorker('worker-1')
+            return { output: 'spawned' }
+          },
+        }),
+      ]
+      loop = new ManagerLoop(baseDeps({ store, adapter, toolFace, traceWriter }))
+
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始重建')] }))
+
+      expect(result.outcome).toBe('completed')
+      expect(spawned).toBe(1)
+      expect(calls).toHaveLength(4)
+      expect(JSON.stringify(calls[2].messages)).toContain('[系统复核]')
+      expect(calls.filter((call) => JSON.stringify(call.messages.at(-1)).includes('[系统复核]'))).toHaveLength(1)
+      expect(states).toEqual(['marked', 'recheck_injected', 'cleared'])
+    })
+
+    it('send -> end_turn -> recheck -> end_turn：第二次正常终止放行，不重复复核', async () => {
+      const { adapter, calls, queue } = makeAdapter()
+      const { states, traceWriter } = traceRecorder()
+      let loop!: ManagerLoop
+      queue.push(
+        { toolCalls: [{ name: 'send_message', id: 'send-1', input: { post_send_action: 'spawn_worker' } }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+        { stopReason: 'end_turn' },
+      )
+      loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        traceWriter,
+        toolFace: () => [defineTool({
+          name: 'send_message', description: 'deliver', inputSchema: { type: 'object', properties: {} },
+          call: async () => {
+            loop.recordPostSendAction()
+            return { output: 'sent' }
+          },
+        })],
+      }))
+
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('告诉我进度')] }))
+
+      expect(result.outcome).toBe('completed')
+      expect(calls).toHaveLength(3)
+      expect(JSON.stringify(calls).match(/\[系统复核\]/g)).toHaveLength(1)
+      expect(states).toEqual(['marked', 'recheck_injected', 'unresolved_accepted'])
+    })
+
+    it('maxTurns=1 时仍以带复核提示的 continuation 再调用一次模型', async () => {
+      const { adapter, calls, queue } = makeAdapter()
+      let loop!: ManagerLoop
+      queue.push(
+        { toolCalls: [{ name: 'send_message', id: 'send-1', input: { post_send_action: 'spawn_worker' } }], stopReason: 'tool_use' },
+        { toolCalls: [{ name: 'spawn_worker', id: 'spawn-1', input: {} }], stopReason: 'tool_use' },
+      )
+      loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        maxTurns: 1,
+        toolFace: () => [
+          defineTool({
+            name: 'send_message', description: 'deliver', inputSchema: { type: 'object', properties: {} },
+            call: async () => {
+              loop.recordPostSendAction()
+              return { output: 'sent' }
+            },
+          }),
+          defineTool({
+            name: 'spawn_worker', description: 'spawn', inputSchema: { type: 'object', properties: {} },
+            call: async () => {
+              loop.recordSpawnedWorker('worker-1')
+              return { output: 'spawned' }
+            },
+          }),
+        ],
+      }))
+
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('请重建')] }))
+
+      expect(result.outcome).toBe('max_turns')
+      expect(calls).toHaveLength(2)
+      expect(JSON.stringify(calls[1].messages)).toContain('[系统复核]')
+    })
+
+    it('失败 episode 不保留标记：记录 unresolved_failed，重试时不再注入复核', async () => {
+      const calls: LLMStreamParams[] = []
+      let streamCount = 0
+      const adapter: LLMAdapter = {
+        async *stream(params) {
+          calls.push({ ...params, messages: [...params.messages] })
+          streamCount++
+          if (streamCount === 1) {
+            yield* chunksFromContent([
+              { type: 'tool_use', id: 'send-1', name: 'send_message', input: { post_send_action: 'spawn_worker' } },
+            ], 'tool_use')
+            return
+          }
+          if (streamCount === 2) throw new Error('provider unavailable')
+          yield* chunksFromContent([], 'end_turn')
+        },
+        updateConfig: () => {},
+      }
+      const { states, traceWriter } = traceRecorder()
+      let loop!: ManagerLoop
+      loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        traceWriter,
+        toolFace: () => [defineTool({
+          name: 'send_message', description: 'deliver', inputSchema: { type: 'object', properties: {} },
+          call: async () => {
+            loop.recordPostSendAction()
+            return { output: 'sent' }
+          },
+        })],
+      }))
+
+      const failed = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('先告知再重建')] }))
+      const retried = await loop.drainMailbox()
+
+      expect(failed.outcome).toBe('failed')
+      expect(failed.consumedEvents).toBe(false)
+      expect(states).toContain('unresolved_failed')
+      expect(retried.outcome).toBe('completed')
+      expect(JSON.stringify(calls[2].messages)).not.toContain('[系统复核]')
+    })
+  })
+
   // --- EpisodeResult.repliedToHuman(P7 J Task 3.1:群聊注意力退避的 `replied` 信号) ---
 
   describe('EpisodeResult.repliedToHuman', () => {

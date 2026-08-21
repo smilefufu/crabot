@@ -1,15 +1,4 @@
-/**
- * Outbound dispatch helper（send_message handler immediate-send 路径与 goal-mode flush 路径共享逻辑）
- *
- * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5
- *
- * 背景：Task 8 加 outboundBuffer flush 钩子时把实现 inline 在 agent-handler.ts，但缺少 sandbox path
- * mapping 和 admin RPC 通路，导致 flush 出去的 entry 会 silent drop file_path 和 friend_id-only mentions。
- * 这违反 audit gate 核心语义——"未审消息不到达用户"——会让 agent 自以为已发的文件实际丢失。
- *
- * 解法：把 send 核心逻辑（path mapping + mention resolve + channel sendMessage）抽到此处，
- * 让 immediate-send / flush 两条路径调同一个 dispatchOutboundMessage helper，行为完全一致。
- */
+/** Shared outbound channel dispatch for messaging tools and assistant-text fallback. */
 
 import * as path from 'path'
 import type { RpcClient } from 'crabot-shared'
@@ -23,7 +12,7 @@ import type { Friend } from '../types.js'
  * 沙盒路径 ↔ 主机路径映射。Worker 执行时 unified-agent 在 sandboxPathMappingsRef 上设置。
  * file_path 类型消息需要先转主机路径再交给 channel 真正读文件。
  *
- * 此前定义在 crab-messaging.ts，因 flush 路径也需要而抽到此处，crab-messaging.ts 重导出。
+ * crab-messaging.ts 重导出这个类型，供外部调用方使用。
  */
 export interface PathMapping {
   sandbox_path: string
@@ -35,11 +24,8 @@ export interface PathMapping {
 // 共享类型
 // ============================================================================
 
-/**
- * outboundBuffer 单条 entry shape，与 WorkerTaskState.outboundBuffer / TaskContext.outboundBuffer
- * 严格对齐。所有字段 readonly——entry 进 buffer 后任何路径都不应改 shape，splice 出来直接 dispatch。
- */
-export interface OutboundBufferEntry {
+/** A message ready for immediate channel dispatch. */
+export interface OutboundMessage {
   readonly channel_id: string
   readonly session_id: string
   readonly content: string
@@ -48,12 +34,7 @@ export interface OutboundBufferEntry {
    * - 'info': 进度告知 / 最终交付（默认，单向，不等回复）
    * - 'ask_human': 阻塞等人类同步回复
    *
-   * 钩子点（spec §4.13.6 / §4.13.7）会把 entry 透传给 onDispatched callback，
-   * PR-2 用此字段把 task.messages 的 agent_intent 字段写真值（不再固定 'info'）。
-   *
-   * 注意 goal mode 缓冲分支只缓冲 intent='info' 的条目（ask_human 走 immediate-send
-   * 不进 buffer），但 immediate-send 路径仍构造 OutboundBufferEntry 喂给 dispatchOutboundMessage，
-   * 所以 entry 类型必须能表达 'ask_human'。
+   * Dispatch completion hooks use this value when recording the task message.
    */
   readonly intent: 'info' | 'ask_human'
   readonly content_type?: 'text' | 'image' | 'file'
@@ -66,36 +47,11 @@ export interface OutboundBufferEntry {
     readonly at_name?: string
   }>
   readonly quote_message_id?: string
-  /** send_message 工具调用发生时所属的人类输入轮次。 */
-  readonly human_input_epoch?: number
   readonly sent_at_attempt_ms: number
 }
 
-/**
- * dispatch 钩子点 — `dispatchOutboundMessage` success 路径触发一次。
- *
- * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.13.6 Invariants
- *
- * Invariant #1 — anchor 钉在 `dispatchOutboundMessage` success 返回之后：
- *   immediate-send / 缓冲分支新顶旧 sync flush / post-tool flush / audit pass flush
- *   四个入口的所有 caller 共享同一钩子，自动统一。
- *
- * Invariant #2 — `dispatchOutboundMessage` 抛错时不触发钩子：
- *   everSentMessage 不置 true、task.messages 不追加；"未送达 = 未发过" 跨边界对称。
- *
- * Invariant #3 — 钩子点是叠加点：
- *   PR-1（本 spec §4.13）加 `taskState.everSentMessage = true`
- *   PR-2（spec B §4.2）在同函数体追加 `task.messages.push(...)`，agent_intent 取 entry.intent，
- *     source.platform_message_id 取 sendResult.platform_message_id
- *   未来扩展可继续叠加，conflict 严格限定在 callback 函数体内。
- *
- * 签名（spec §4.13.7 Revision 2026-06-09 第 2 段）：(entry, sendResult) => void
- *   entry: dispatch 的 buffer entry（含真实 intent、content、media 字段等）
- *   sendResult: channel send_message RPC 返回（含 platform_message_id / sent_at）
- *
- * 钩子内任何抛错都被 dispatch 内 catch + warn，不污染 dispatch 返回。
- */
-export type OnDispatchedHook = (entry: OutboundBufferEntry, sendResult: OutboundSendResult) => void
+/** Called after a channel message is successfully delivered. */
+export type OnDispatchedHook = (entry: OutboundMessage, sendResult: OutboundSendResult) => void
 
 /**
  * dispatchOutboundMessage 所需依赖。
@@ -105,8 +61,7 @@ export type OnDispatchedHook = (entry: OutboundBufferEntry, sendResult: Outbound
  * - getAdminPort: 解析 friend_id 时调 admin
  * - sandboxPathMappingsRef: file_path → host_path 转换；本地 unified agent 路径下 mappings 可能为空,
  *   此时 dispatchOutboundMessage 会按"无映射且 file_path 是绝对路径"直接放行（与 immediate-send 一致）。
- * - onDispatched: 真正 flush 到 channel success 返回后调用一次的钩子（spec §4.13.6 / §4.13.7）。
- *   异常路径不触发；caller 不传时无副作用。
+ * - onDispatched: invoked after a successful channel send; caller omits it when no bookkeeping is needed.
  *
  * sendResult 返回与 channel 'send_message' RPC 返回一致；调用方按需消费。
  */
@@ -117,7 +72,7 @@ export type OnDispatchedHook = (entry: OutboundBufferEntry, sendResult: Outbound
  */
 export interface AdminChatDeliveryHooks {
   /** 首次 RPC 之前调用：生成 delivery_id + claim 的 request IDs 并把 prepared 记录落盘。 */
-  prepare(entry: OutboundBufferEntry, content: MessageContent): Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined>
+  prepare(entry: OutboundMessage, content: MessageContent): Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined>
   /** Admin 确认 commit 后：delivery → confirmed、request claim settled、wake 结算、staging 清理。 */
   confirm(deliveryId: string, result: OutboundSendResult): Promise<void>
   /** RPC 失败/结果未知：delivery 保持可重试（不标 confirmed）。 */
@@ -176,7 +131,7 @@ type PlatformMention = {
 
 /** 按优先级（media_url > file_path > text）构造 channel 期望的 content payload */
 function buildMessageContent(
-  entry: OutboundBufferEntry,
+  entry: OutboundMessage,
   sandboxMappings: ReadonlyArray<PathMapping>,
 ): MessageContent {
   if (entry.media_url) {
@@ -217,7 +172,7 @@ function buildMessageContent(
  * 返回 undefined 表示无 mentions（避免在 features 里塞空数组）。
  */
 async function resolvePlatformMentions(
-  entry: OutboundBufferEntry,
+  entry: OutboundMessage,
   deps: OutboundDispatchDeps,
 ): Promise<PlatformMention[] | undefined> {
   if (!entry.mentions || entry.mentions.length === 0) return undefined
@@ -255,19 +210,14 @@ async function resolvePlatformMentions(
 // ============================================================================
 
 /**
- * 把一条 outboundBuffer entry 真正派发到 channel——含 sandbox path mapping + friend_id resolve。
- * 跟 send_message handler immediate-send 路径功能等价（同样的 path mapping + mention resolve + features 结构）。
- *
- * 失败抛 throw（不在此处吞错；flush 路径调用方在 createOutboundFlush 内做 continue-on-error，
- * 立即发路径让 send_message handler 自己 catch 转用户可见 error）。
- *
- * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5
+ * Dispatch a message to its channel with sandbox path mapping and friend mention resolution.
+ * Failures propagate to the caller.
  */
 // 同一 tool invocation 的 delivery prepare 只跑一次（entry 对象在重试间共享）。
-const preparedDeliveries = new WeakMap<OutboundBufferEntry, Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined>>()
+const preparedDeliveries = new WeakMap<OutboundMessage, Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined>>()
 
 function prepareDeliveryOnce(
-  entry: OutboundBufferEntry,
+  entry: OutboundMessage,
   content: MessageContent,
   hooks: AdminChatDeliveryHooks,
 ): Promise<{ delivery_id: string; request_ids: string[]; content: MessageContent } | undefined> {
@@ -281,7 +231,7 @@ function prepareDeliveryOnce(
 }
 
 export async function dispatchOutboundMessage(
-  entry: OutboundBufferEntry,
+  entry: OutboundMessage,
   deps: OutboundDispatchDeps,
 ): Promise<OutboundSendResult> {
   const channelPort = await deps.resolveChannelPort(entry.channel_id)
@@ -343,9 +293,7 @@ export async function dispatchOutboundMessage(
   }
   if (delivery) await deps.adminChatDelivery!.confirm(delivery.delivery_id, sendResult)
 
-  // <-- HOOK POINT (spec §4.13.6 Invariant #1: success 路径触发；Invariant #2: 抛错路径上方 await 已throw，不到此处) -->
-  // 钩子内任何 throw 都被 catch 后 console.warn，避免污染 dispatch 返回 / 影响 caller。
-  // sendResult 一并透传，PR-2 等叠加 effect 需要 platform_message_id / sent_at 时直接取。
+  // Completion hooks are best effort and never alter delivery success.
   if (deps.onDispatched) {
     try {
       deps.onDispatched(entry, sendResult)
@@ -358,65 +306,4 @@ export async function dispatchOutboundMessage(
   }
 
   return sendResult
-}
-
-/** flush 时单条消息发送失败的回传项——engine 据此注入给 worker，避免失败被静默吞掉。 */
-export interface OutboundFlushFailure {
-  /** 失败消息的内容摘要，让 worker 认出是哪条。 */
-  readonly summary: string
-  /** 失败原因（dispatch 抛出的错误信息）。 */
-  readonly error: string
-}
-
-/** flush 结果：sentCount=本次真正送达的条数（engine 据此清除 pending-delivery 追踪），failures=失败明细。 */
-export interface OutboundFlushResult {
-  readonly sentCount: number
-  readonly failures: OutboundFlushFailure[]
-}
-
-/** 把 buffer entry 压成一句话摘要，供失败回传时让 worker 辨认。 */
-function summarizeEntry(entry: OutboundBufferEntry): string {
-  const text = (entry.content ?? '').trim()
-  const attachment = entry.file_path
-    ? `[文件: ${entry.filename ?? entry.file_path}]`
-    : entry.media_url
-      ? `[媒体: ${entry.filename ?? entry.media_url}]`
-      : ''
-  const base = [text, attachment].filter(Boolean).join(' ').trim() || '(空消息)'
-  return base.length > 60 ? `${base.slice(0, 60)}…` : base
-}
-
-/**
- * 工厂返回 flush 函数：splice buffer + 逐 entry dispatch + continue on error。
- *
- * - splice(0) 一次性取出所有缓冲项，失败的不放回；buffer 永远不被反复 flush
- * - 单条 entry dispatch 抛异常时不阻塞后续 entry，但把"摘要+原因"收进返回的 failures：
- *   engine 据此把发送失败注入给 worker（旧版只 warn 一行就吞掉，让 worker 误以为已送达——
- *   trace a72623ec 成因之二）。
- * - 返回 sentCount：engine 用它区分"真送出去了"和"空 buffer no-op"——只有真送出至少一条
- *   才允许清除 pending-delivery 追踪；否则 worker 续轮不重发直接 end_turn 会被空 flush 骗过。
- *
- * spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 8
- */
-export function createOutboundFlush(
-  outboundBuffer: Array<OutboundBufferEntry>,
-  deps: OutboundDispatchDeps,
-): () => Promise<OutboundFlushResult> {
-  return async () => {
-    if (outboundBuffer.length === 0) return { sentCount: 0, failures: [] }
-    const entries = outboundBuffer.splice(0)
-    const failures: OutboundFlushFailure[] = []
-    let sentCount = 0
-    for (const entry of entries) {
-      try {
-        await dispatchOutboundMessage(entry, deps)
-        sentCount++
-      } catch (err) {
-        const error = err instanceof Error ? err.message : String(err)
-        console.warn('[outbound flush] entry failed:', error)
-        failures.push({ summary: summarizeEntry(entry), error })
-      }
-    }
-    return { sentCount, failures }
-  }
 }

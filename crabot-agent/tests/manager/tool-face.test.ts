@@ -7,7 +7,7 @@
  * - 飞书 channel 存在时多出 §2.10 的只读三件套，且**任何情况下都不含 feishu_write**
  * - 运行时护栏对注入的违规工具（通用文件系统工具 / 外装 mcp__ 工具）抛错，crab-memory 前缀放行
  * - isReadOnly 标记正确（messaging 只读子集 / worker 六件套 / crabot-info 六件套）
- * - send_message 暴露给 LLM 的 inputSchema 不含 intent，调用底层 handler 时也不透传 intent
+ * - 三个投递工具要求声明 post_send_action，调用底层 handler 时不透传该字段
  * - 可见性门与运行时门同源：可见的 send_private_message 真调一次不被 requireDeclaredShortcut 拦
  */
 import { describe, it, expect, vi } from 'vitest'
@@ -159,12 +159,32 @@ describe('buildManagerToolFace', () => {
     }
   })
 
-  it('send_message 的 inputSchema 不含 intent，调用时也不透传 intent', async () => {
-    const capturedArgsByHandler: Record<string, unknown> = {}
+  it('三个投递工具的 inputSchema 都要求声明 post_send_action', () => {
+    const tools = buildManagerToolFace(makeDeps({ isSystemThread: true }))
+
+    for (const name of ['send_message', 'send_private_message', 'send_master_private']) {
+      const schema = tools.find((tool) => tool.name === name)?.inputSchema as {
+        properties?: Record<string, unknown>
+        required?: string[]
+      }
+      expect(schema.properties?.post_send_action, `${name} 应暴露 post_send_action`).toBeDefined()
+      expect(schema.required, `${name} 应要求声明 post_send_action`).toContain('post_send_action')
+    }
+  })
+
+  it('send_message 的 inputSchema 不含 intent，成功 spawn_worker 声明触发回调且不透传字段', async () => {
+    const onPostSendAction = vi.fn()
+    const rpcCall = vi.fn(async (_port: number, method: string) => {
+      if (method === 'send_message') {
+        return { platform_message_id: 'm1', sent_at: '2026-08-01T00:00:00.000Z' }
+      }
+      throw new Error(`未预期的 RPC: ${method}`)
+    })
     const deps = makeDeps({
+      onPostSendAction,
       messagingDeps: {
         rpcClient: {
-          call: vi.fn(async () => ({ status: 'sent', message_id: 'm1' })),
+          call: rpcCall,
         } as never,
         moduleId: 'manager-test',
         getAdminPort: async () => 19001,
@@ -177,15 +197,37 @@ describe('buildManagerToolFace', () => {
     const schema = sendMessage.inputSchema as { properties?: Record<string, unknown> }
     expect(schema.properties).toBeDefined()
     expect(Object.keys(schema.properties!)).not.toContain('intent')
+    expect(Object.keys(schema.properties!)).toContain('post_send_action')
 
     const result = await sendMessage.call(
-      { channel_id: 'ch-1', session_id: 'sess-1', content: 'hi', intent: 'ask_human' },
+      { channel_id: 'ch-1', session_id: 'sess-1', content: 'hi', intent: 'ask_human', post_send_action: 'spawn_worker' },
       {} as never,
     )
-    // 不应因 intent='ask_human' 而走 ask_human 分支（那个分支需要 taskCtx 存在才会成功，
-    // manager 没有 task 上下文；若 intent 被透传，这里会因缺 taskCtx 而报错/行为异常）
     expect(result.isError).toBe(false)
-    void capturedArgsByHandler
+    expect(onPostSendAction).toHaveBeenCalledTimes(1)
+    expect(onPostSendAction).toHaveBeenLastCalledWith('spawn_worker')
+    expect(rpcCall).toHaveBeenCalledWith(
+      19009,
+      'send_message',
+      expect.not.objectContaining({ post_send_action: expect.anything(), intent: expect.anything() }),
+      'manager-test',
+    )
+  })
+
+  it('投递失败时不触发 post_send_action 回调', async () => {
+    const onPostSendAction = vi.fn()
+    const tools = buildManagerToolFace(makeDeps({
+      onPostSendAction,
+      messagingDeps: makeMessagingDeps({ resolveChannelPort: async () => undefined }),
+    }))
+
+    const result = await tools.find((tool) => tool.name === 'send_message')!.call(
+      { channel_id: 'ch-1', session_id: 'sess-1', content: 'hi', post_send_action: 'spawn_worker' },
+      {} as never,
+    )
+
+    expect(result.isError).toBe(true)
+    expect(onPostSendAction).not.toHaveBeenCalled()
   })
 
   it('普通 manager 真调一次 send_private_message：不被 requireDeclaredShortcut 拦，RPC 真的打出去', async () => {
@@ -207,7 +249,7 @@ describe('buildManagerToolFace', () => {
     }))
     const sendPrivate = tools.find((t) => t.name === 'send_private_message')!
 
-    const result = await sendPrivate.call({ friend_id: 'f-1', content: 'hi' }, {} as never)
+    const result = await sendPrivate.call({ friend_id: 'f-1', content: 'hi', post_send_action: 'none' }, {} as never)
 
     // 运行时门若拒绝，会返回 isError + SCHEDULED_ONLY_TOOL 且**零 RPC**——这两条一起钉住
     // 「可见性门与运行时门同源」，而不只是「工具出现在列表里」。

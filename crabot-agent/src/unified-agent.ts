@@ -3448,7 +3448,7 @@ export class UnifiedAgent extends ModuleBase {
 
   /** P6-A §11.7：Admin Chat 出站 delivery prepare——claim IDs + staging + prepared 落盘。 */
   private async prepareAdminChatDelivery(
-    entry: import('./agent/outbound-flush.js').OutboundBufferEntry,
+    entry: import('./agent/outbound-dispatch.js').OutboundMessage,
     content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string },
   ): Promise<{ delivery_id: string; request_ids: string[]; content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string } } | undefined> {
     const stack = this.managerStack

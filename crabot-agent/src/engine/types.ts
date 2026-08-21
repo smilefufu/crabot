@@ -268,11 +268,9 @@ export type LiveProgressEvent =
 
 /**
  * endTurnGate 的决策结果（见 EngineOptions.endTurnGate 注释）。
- * spec: 2026-06-10-audit-anchor-human-request-design.md §4.7
  */
 export type EndTurnGateResult =
   | string
-  | { readonly kind: 'wait' }
   | { readonly kind: 'fail'; readonly reason: string }
   | null
 
@@ -363,61 +361,11 @@ export interface EngineOptions {
    * end_turn 前的异步决策钩子。engine 在自然退出前调用（suppressForcedSummary=true 的 silent
    * end_turn 路径，以及有文字/forced_summary 耗尽的路径）。
    * - 返回 string → 注入为 user message 继续 loop（NO_DELIVERY 提示等）
-   * - 返回 { kind: 'wait' } → audit 已异步派出；engine 直接挂起等 humanQueue push
-   *   （audit 结果 / 用户 supplement），不注入文本、不烧 LLM 轮次。
-   *   spec 2026-06-10-audit-anchor-human-request §4.7
    * - 返回 { kind: 'fail' } → gate 判定无法安全收口，engine 以 failed 结束
    * - 返回 null → 正常退出
    * 不传时直接退出。
    */
   readonly endTurnGate?: () => Promise<EndTurnGateResult>
-  /**
-   * Goal mode 缓冲消息 flush 钩子。Engine 在以下时机调：
-   * - stop_reason='tool_use' 续 turn 之前（agent 还在干活，上一轮缓冲的 info 是"过程信息"）
-   * - endTurnGate 返回 null 后 buildResult 之前（audit pass / 无 audit / 同步路径完成）
-   * - drain 路径识别到 audit_result.pass=true 时（异步 audit pass 路径）
-   * 实现：caller 遍历 taskState.outboundBuffer 调 channel.sendMessage，清空 buffer。
-   * 非 goal mode / 空 buffer 场景为 no-op；不传时 engine 跳过 flush。
-   * 返回 { sentCount, failures }：sentCount=真正送达条数（engine 据此清除 pending-delivery 追踪），
-   * failures=失败明细（engine 据此注入给 worker、收尾时不静默标完成）。
-   * spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 8 / §4.5
-   */
-  readonly flushOutboundBuffer?: () => Promise<{
-    readonly sentCount: number
-    readonly failures: ReadonlyArray<{ readonly summary: string; readonly error: string }>
-  }>
-  /**
-   * 丢弃 outboundBuffer 中尚未发出的消息。drain 路径识别到 audit_result.pass=false
-   * 或 audit_aborted marker 时调——audit 不通过 / 被废，缓冲的"完工汇报"不应该再发。
-   * 实现通常是 `taskState.outboundBuffer.length = 0`。
-   * 不传时 engine 跳过丢弃（caller 自己处理 buffer 生命周期）。
-   * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5 / §4.7
-   */
-  readonly dropOutboundBuffer?: () => void
-  /**
-   * 清 taskState.activeAuditId。drain 路径处理完 audit_result / audit_aborted marker 之后调，
-   * 让 task 回到 "无活跃 audit" 态——后续 end_turn 调用不再因 hasActiveAudit 而通过预检。
-   * 不传时 engine 跳过（caller 自己管 activeAuditId 生命周期）。
-   * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5 / §4.7
-   */
-  readonly clearActiveAuditId?: () => void
-  /**
-   * 检查当前是否有 active audit subagent 在跑。
-   * 用于 audit 跑中 LLM 直接 end_turn 路径：drain 处理完 marker 后，若仍有活跃 audit
-   * + LLM 想 end_turn，engine 直接挂起等 audit 结果（复用 gate 'wait' 路径，
-   * 零文案注入、幂等可重入）。不传时 engine 跳过（caller 自己负责 audit 生命周期）。
-   * spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
-   */
-  readonly hasActiveAudit?: () => boolean
-  /**
-   * abort active audit。audit 等待兜底超时（AUDIT_WAIT_FALLBACK_TIMEOUT_MS）触发时调，
-   * 把卡死的 audit 标废 + push audit_aborted marker——唤醒挂起的 loop 并经 drain 清状态，
-   * 保证前进性（audit onExit push 失败 / adapter 悬挂时 activeAuditId 永不清除的兜底）。
-   * 注：set_task_goal 改 goal 触发的 abort 走 agent-handler 内 abortAudit closure 直接调，不走此回调。
-   * 不传时 engine 退化为 24h 通用兜底（fail-open）。
-   * spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
-   */
-  readonly abortActiveAudit?: (reason: string) => void
   /**
    * 上下文压缩开始时触发（trace 可见性钩子）。
    * compaction 内部跑一次 LLM call 做摘要，可能耗时几秒——不接 trace 就是黑洞。
@@ -461,8 +409,7 @@ export interface HumanMessageQueueLike {
   readonly drainPending: () => Array<string | ContentBlock[]>
   readonly hasPending: boolean
   readonly hasBarrier: boolean
-  /** endTurnGate 'wait' 路径用：engine 自行布防 barrier 再 waitBarrier（spec 2026-06-10 §4.7）。
-   *  onTimeout 仅真超时触发（push/clearBarrier 提前唤醒不触发）——audit 等待兜底 abort 用。 */
+  /** 工具可在执行期间布防，等待人类补充或超时。 */
   readonly setBarrier: (timeoutMs: number, onTimeout?: () => void) => void
   readonly waitBarrier: (signal?: AbortSignal) => Promise<void>
   readonly clearBarrier: () => void

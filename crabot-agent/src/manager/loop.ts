@@ -61,6 +61,10 @@ const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出�
   + '- 如果它是希望让人类看到的新内容，且与你已经发送的内容不重复 → 调用 send_message 发送一次，然后直接结束，不要再输出任何文字；\n'
   + '- 如果它只是内部总结，或与你已经发送的内容重复 → 不需要任何操作，直接结束即可，不要重复发送。'
 
+const POST_SEND_ACTION_RECHECK_PROMPT = '[系统复核] 你刚才发出的消息标记为“随后新建 Worker”，但系统尚未观察到成功的 spawn_worker。\n'
+  + '请根据真实意图重新确认：若仍需新建 Worker，现在调用 spawn_worker；若刚才只是讨论、无需派发，或字段误填，直接结束即可。\n'
+  + '不要因为这条系统提示重复向人类发送消息，也不要向人类提及系统复核。'
+
 // --- Public Interface ---
 
 export type WakeEvent =
@@ -267,6 +271,11 @@ export class ManagerLoop {
    * episode 由 mutex 串行，不存在交叠。
    */
   private currentTraceId: string | undefined = undefined
+  /** 当前 episode 的一次性发送后动作复核状态；不进入 session/ledger。 */
+  private needsSpawnRecheck = false
+  private spawnRecheckInjected = false
+  private spawnRecheckOutcomeRecorded = false
+  private postSendRecheckSequence = 0
 
   /** 当前 episode 的 trace id（仅 episode 进行中）；registry 桥/worker-tools 读取用。 */
   get currentEpisodeTraceId(): string | undefined {
@@ -289,6 +298,18 @@ export class ManagerLoop {
   /** spawn_worker 成功回调（registry 桥经 worker-tools 调）：把 worker ID 追加进当前 trace。 */
   recordSpawnedWorker(workerId: string): void {
     if (this.currentTraceId) this.deps.traceWriter?.addSpawnedWorker(this.currentTraceId, workerId)
+    if (!this.needsSpawnRecheck) return
+    this.needsSpawnRecheck = false
+    this.spawnRecheckInjected = false
+    this.recordPostSendDecision('cleared')
+  }
+
+  /** Manager 人类投递成功且声明随后派发 Worker 时，由 tool-face 调用。 */
+  recordPostSendAction(): void {
+    this.needsSpawnRecheck = true
+    this.spawnRecheckInjected = false
+    this.spawnRecheckOutcomeRecorded = false
+    this.recordPostSendDecision('marked')
   }
 
   /**
@@ -397,6 +418,10 @@ export class ManagerLoop {
     const eventText = envelope === undefined ? undefined : this.renderEnvelope(envelope)
     this.currentEpisodeInjected = []
     this.currentWakeEvent = envelope ?? null
+    this.needsSpawnRecheck = false
+    this.spawnRecheckInjected = false
+    this.spawnRecheckOutcomeRecorded = false
+    this.postSendRecheckSequence = 0
     this.adminChatClaims = new Map()
     for (const item of [...carriedEnvelopes, ...(envelope ? [envelope] : [])]) {
       for (const id of item.correlation?.admin_chat_request_ids ?? []) {
@@ -490,6 +515,10 @@ export class ManagerLoop {
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
       this.currentTraceId = undefined
+      this.needsSpawnRecheck = false
+      this.spawnRecheckInjected = false
+      this.spawnRecheckOutcomeRecorded = false
+      this.postSendRecheckSequence = 0
       this.currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
       this.attemptCounter = 0
     }
@@ -582,6 +611,45 @@ export class ManagerLoop {
       // 覆盖两类触发场景,不需要额外判断。
     }
 
+    // end_turn / stop_sequence 会在 runEngine 内经 endTurnGate 得到复核；max_turns 及
+    // disableCompaction 下归并的 max_tokens 则会直接返回这里。后者只补一次受原有
+    // maxTurns 限制的 continuation，不能用上限绕过复核，也绝不形成循环。
+    if (
+      this.needsSpawnRecheck
+      && !this.spawnRecheckInjected
+      && (attempt.result.outcome === 'completed' || attempt.result.outcome === 'max_turns')
+    ) {
+      this.spawnRecheckInjected = true
+      this.recordPostSendDecision('recheck_injected')
+      const continuationInitial = [
+        ...attempt.result.finalMessages,
+        createUserMessage(POST_SEND_ACTION_RECHECK_PROMPT),
+      ]
+      const continuation = await this.runAttempt(
+        episodeId,
+        state,
+        [],
+        adapter,
+        model,
+        { initialMessages: continuationInitial },
+      )
+      totalTurnsUsed += continuation.result.totalTurns
+      repliedToHuman = repliedToHuman || detectRepliedToHuman(continuation.result.finalMessages)
+      successfulSendMessageTargets = [
+        ...successfulSendMessageTargets,
+        ...successfulSendMessageTargetsOf(continuation.result.finalMessages.slice(continuation.initialMessageCount)),
+      ]
+      attempt = continuation
+    }
+
+    if (this.needsSpawnRecheck) {
+      this.recordPostSendDecision(
+        attempt.result.outcome === 'failed' || attempt.result.outcome === 'aborted'
+          ? 'unresolved_failed'
+          : 'unresolved_accepted',
+      )
+    }
+
     await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, attempt.result.finalMessages)
 
     // 只有真正跑完 turn(completed / max_turns)才算"处理过"这批事件;
@@ -641,6 +709,35 @@ export class ManagerLoop {
     }
     this.deps.onEpisodeEnd?.(result)
     return result
+  }
+
+  private takeSpawnRecheckPrompt(): string | null {
+    if (!this.needsSpawnRecheck || this.spawnRecheckInjected) return null
+    this.spawnRecheckInjected = true
+    this.recordPostSendDecision('recheck_injected')
+    return POST_SEND_ACTION_RECHECK_PROMPT
+  }
+
+  private recordPostSendDecision(
+    state: 'marked' | 'cleared' | 'recheck_injected' | 'unresolved_accepted' | 'unresolved_failed',
+  ): void {
+    if (state === 'unresolved_accepted' || state === 'unresolved_failed') {
+      if (this.spawnRecheckOutcomeRecorded) return
+      this.spawnRecheckOutcomeRecorded = true
+    }
+    const traceId = this.currentTraceId
+    if (!traceId) return
+    const now = new Date().toISOString()
+    this.deps.traceWriter?.appendSpan(traceId, {
+      span_id: `post-send-action-${traceId}-${++this.postSendRecheckSequence}`,
+      parent_span_id: `root-${traceId}`,
+      type: 'decision',
+      started_at: now,
+      ended_at: now,
+      duration_ms: 0,
+      status: state === 'unresolved_failed' ? 'failed' : 'completed',
+      details: { kind: 'post_send_action', state },
+    })
   }
 
   /** engine onTurn → llm_call/tool_call span（截断摘要由 writer 侧统一脱敏落盘）。 */
@@ -785,13 +882,16 @@ export class ManagerLoop {
     tailMessages: ReadonlyArray<EngineMessage>,
     adapter: LLMAdapter,
     model: string,
+    overrides?: { readonly initialMessages?: ReadonlyArray<EngineMessage> },
   ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean; readonly initialMessageCount: number }> {
     this.attemptCounter += 1
     let assistantTextEndTurnReminderSent = false
     const hasSummaryMarker = state.rollingSummary !== undefined
-    const initialMessages: EngineMessage[] = hasSummaryMarker
-      ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
-      : [...tailMessages]
+    const initialMessages: EngineMessage[] = overrides?.initialMessages
+      ? [...overrides.initialMessages]
+      : hasSummaryMarker
+        ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
+        : [...tailMessages]
 
     const systemPrompt = (): string => {
       const extra = this.deps.promptInputs()
@@ -825,6 +925,7 @@ export class ManagerLoop {
         assistantTextEndTurnReminderSent = true
         return { kind: 'inject' as const, text: ASSISTANT_TEXT_END_TURN_REMINDER }
       },
+      endTurnGate: async () => this.takeSpawnRecheckPrompt(),
       // P6-A §6.4：onTurn 是事后观察钩子，用它生成 llm_call/tool_call span；
       // 不复制执行语义、不新增第二个 query loop。
       onTurn: (event) => this.recordTurnSpans(episodeId, event),

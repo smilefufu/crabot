@@ -26,7 +26,7 @@ import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType, BgShe
 import type { BashBgContext } from '../engine/tools/index.js'
 import type { BgToolDeps } from '../engine/tools/index.js'
 import type { TaskContext } from '../mcp/crab-messaging.js'
-import { createOutboundFlush, dispatchOutboundMessage, type PathMapping, type OutboundDispatchDeps, type OutboundBufferEntry, type OutboundSendResult } from './outbound-flush.js'
+import { dispatchOutboundMessage, type PathMapping, type OutboundDispatchDeps, type OutboundMessage, type OutboundSendResult } from './outbound-dispatch.js'
 import type { BgEntityTraceContext } from '../engine/bg-entities/trace.js'
 import type {
   ToolDefinition,
@@ -104,25 +104,9 @@ import { TodoStore } from './worker-todo-store.js'
 import { createTodoTool } from './worker-todo-tool.js'
 import { createSetTaskGoalTool } from './goal-tools.js'
 import {
-  buildAuditPrompt,
-  buildAuditVerdictSummary,
-  buildHumanQueueReport,
-  buildBlockedGuidance,
-  resolveAuditJudgment,
-  shouldArmGoalGate,
-  type AuditResult,
-  type ConversationEntry,
-  type GoalAuditTaskGoal,
-  type GoalStatus,
-  type ParsedAuditReport,
-} from './goal-audit.js'
-import { createSubmitAuditResultTool } from './goal-auditor-tools.js'
-import {
   formatStillRunningSnapshot,
   type RunningWaitTarget,
 } from '../mcp/running-entities.js'
-import { createAsyncAuditEndTurnGate } from './end-turn-gate.js'
-import { buildAuditAbortedMarker } from './audit-result-marker.js'
 import {
   buildResumeWakeupMessage,
   buildRestartCompletedWakeupMessage,
@@ -980,7 +964,6 @@ export class AgentHandler {
 
   /**
    * 唤醒消息的"仍在运行"快照行——push 时刻现查现写，无新状态（spec 2026-07-16 §6）。
-   * 在跑的 goal-audit subagent 一并排除：它对 worker 必须不可见（B 修复的语义边界）。
    * 查询失败降级为空串（快照是增强信息，绝不阻塞通知投递）。
    */
   private async buildStillRunningLine(taskId: string, excludeEntityId?: string): Promise<string> {
@@ -988,8 +971,6 @@ export class AgentHandler {
       const running = await this.bgRegistry.list({ status: ['running'] })
       const exclude: string[] = []
       if (excludeEntityId) exclude.push(excludeEntityId)
-      const activeAuditId = this.activeTasks.get(taskId)?.activeAuditId
-      if (activeAuditId) exclude.push(activeAuditId)
       return formatStillRunningSnapshot(summarizeRunningEntities(running, taskId, exclude))
     } catch {
       return ''
@@ -1129,7 +1110,7 @@ export class AgentHandler {
     // runWorkerLoop 检查 activeTasks.get(task_id)——提前写入即可完成 todoStore/goalRevisionUnlocked 的恢复。
     let currentInitialMessages: ReadonlyArray<EngineMessage> | undefined
     if (params.resumeFrom) {
-      const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd, humanInputEpoch, lastDeliveredInfoEpoch } = params.resumeFrom
+      const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd } = params.resumeFrom
       // §3.4 修复：resume 走 initialMessages 分支，query-loop 会忽略 prompt，导致 runWorkerLoop
       // 里 buildTaskMessage 的 friend 队列 drain 被丢弃（drain-and-discard）。这里在 resume 装配处
       // 主动 drain 一次并注入首轮消息，否则宕机期间到达的 bg-notification（如 re-adopt 的 shell 退出）
@@ -1149,7 +1130,6 @@ export class AgentHandler {
           ? createUserMessage(`${resumeBgNotif}\n\n${wakeup.content}`)
           : wakeup
       currentInitialMessages = [...initialMessages, wakeupMsg]
-      const resumedHumanInputEpoch = (humanInputEpoch ?? 0) + (params.resumeFrom.terminalSupplementText ? 1 : 0)
       // 预建 taskState 让 runWorkerLoop 直接复用（不再用 new TodoStore()）
       if (!this.activeTasks.has(task.task_id)) {
         this.activeTasks.set(task.task_id, {
@@ -1161,14 +1141,7 @@ export class AgentHandler {
           pendingHumanMessages: [],
           taskOrigin: context.task_origin,
           todoStore: TodoStore.fromItems(todoItems),
-          outboundBuffer: [],
-          activeAuditId: undefined,
           activeAsyncSubagentIds: new Set<string>(),
-          everSentMessage: false,
-          humanInputEpoch: resumedHumanInputEpoch,
-          ...(lastDeliveredInfoEpoch !== undefined ? { lastDeliveredInfoEpoch } : {}),
-          everBufferedMessage: false,
-          silentNoDeliveryRetries: 0,
           ...(goalRevisionUnlocked !== undefined ? { goalRevisionUnlocked } : {}),
           ...(resumedCwd !== undefined ? { cwd: resumedCwd } : {}),
         })
@@ -1318,13 +1291,7 @@ export class AgentHandler {
         pendingHumanMessages: [],
         taskOrigin: context.task_origin,
         todoStore: new TodoStore(),
-        outboundBuffer: [],
-        activeAuditId: undefined,
         activeAsyncSubagentIds: new Set<string>(),
-        everSentMessage: false,
-        humanInputEpoch: 0,
-        everBufferedMessage: false,
-        silentNoDeliveryRetries: 0,
       }
       this.activeTasks.set(task.task_id, taskState)
     }
@@ -1347,36 +1314,7 @@ export class AgentHandler {
     const humanQueue = opts?.providedHumanQueue ?? new HumanMessageQueue()
     this.humanQueues.set(task.task_id, humanQueue)
 
-    // abortAudit helper：worker 通过 set_task_goal 改 goal 成功后调用，把当前 audit 标废。
-    // 步骤（spec 2026-06-07-goal-audit-async-buffered-info-design.md §4.7）：
-    //   1. abort audit subagent 进程（agentAbortControllers.get(id)?.abort()）
-    //   2. 立即清 outboundBuffer + activeAuditId（不等 drain 路径，避免 spawn 阶段 marker 尚未 push 时漏清）
-    //   3. push <audit_aborted> marker 到 humanQueue —— 唤醒等审中的 main loop（end_turn）+
-    //      让 Task 11 drain 路径走 aborted 分支注入"audit 已废"提示
-    //
-    // idempotent：clearActiveAuditId 与本处都置 undefined，drain 路径与 abort 路径任意先后均无害。
-    // fail-soft：controller 缺失 / marker push 失败都不抛，仅 console.warn。
-    const abortAudit = (reason: string): void => {
-      const id = taskState.activeAuditId
-      if (!id) return  // 无 active audit，no-op
-      // 1. abort audit subagent process（可能已 finally 清掉了 controller，no-op 即可）
-      const controller = this.agentAbortControllers.get(id)
-      if (controller) {
-        try { controller.abort() } catch (err) {
-          console.warn('[abortAudit] controller.abort failed:', err instanceof Error ? err.message : String(err))
-        }
-      }
-      // 2. 立即清状态（drain 路径再清也无害）
-      taskState.outboundBuffer.length = 0
-      taskState.activeAuditId = undefined
-      // 3. push audit_aborted marker —— 唤醒 end_turn + 走 drain 注入提示
-      try {
-        humanQueue.push(buildAuditAbortedMarker({ auditId: id, reason }))
-      } catch (err) {
-        console.warn('[abortAudit] push marker failed:', err instanceof Error ? err.message : String(err))
-      }
-    }
-
+    // ProgressDigest 与 Worker loop 同生命周期；静默 / text_forward 模式保持 undefined。
     let digest: ProgressDigest | undefined
     let loopSpanId: string | undefined
 
@@ -1410,14 +1348,7 @@ export class AgentHandler {
       // 后续 turn 的 todo / send_message 检查 cache 立即生效，免去重复 RPC。
       const goalModeEnabled = this.isGoalModeEnabled(task.source?.trigger_type)
       let goalSetCache = false
-      // conversationLog：audit 输入——seed 人类原始请求（trigger 原文），后续追加双向往来。
-      // audit 判决锚点 = 人类原话（trigger + supplements），曾因空数组起步让 auditor
-      // 看不到原始需求。spec 2026-06-10-audit-anchor-human-request §3.1
-      const conversationLog: ConversationEntry[] = (context.trigger_messages ?? []).map(
-        (m) => ({ role: 'human' as const, content: formatMessageContent(m) }),
-      )
-      // sentInfoMessage：send_message(intent='info') 成功至少一次。明确 end_turn 场景下，
-      // 任意已送达 info 都允许作为"已有交付"收口；无法可靠判断某条 info 是过程播报还是真交付。
+      // 已发送的 info 允许后续 silent end_turn 正常收口。
       let sentInfoMessage = false
       // 任务触发类型：scheduled 任务始终抑制 forced_summary
       const workerTriggerType: 'scheduled' | 'message' =
@@ -1430,11 +1361,10 @@ export class AgentHandler {
             { task_id: string },
             { task: { goal?: unknown } }
           >(adminPort, 'get_task', { task_id: task.task_id }, this.deps.moduleId)
-          // 终态 goal（complete/cleared/…）不武装 gate——承诺已兑现的任务被追问 re-pull 时
-          // 不再产生幽灵 audit（spec 2026-07-16 §2.2-1）。active goal 跨 epoch 继续生效不变。
-          goalSetCache = shouldArmGoalGate(resp.task.goal)
+          const goal = resp.task.goal as { status?: string } | undefined
+          goalSetCache = goal !== undefined && !['complete', 'blocked', 'budget_limited', 'cleared'].includes(goal.status ?? 'active')
         } catch {
-          // admin 不可用：保持 backward-compat，等同 no goal（audit gate 透明放行）
+          // admin 不可用：保持 backward-compat，等同未设 goal。
         }
       }
 
@@ -1467,13 +1397,6 @@ export class AgentHandler {
       const bgTraceCtx: BgEntityTraceContext | undefined = traceContext
         ? { traceStore: traceContext.traceStore, traceId: traceContext.traceId }
         : undefined
-
-      // baseTools / baseToolsPermissionConfig 是 buildToolsDynamic 内构造的；这里用 outer let
-      // 提前声明，让 endTurnGate 和 mcpConfigFactory 通过 getter 拿到 audit 用的 worker baseTools +
-      // permissionConfig（auditor 调 dangerous 工具如 Bash 时 runtime permission check 才能放行）。
-      // spec: 2026-05-23-goal-mode-design.md §6 / §7.2（auditor 工具来源）
-      let auditBaseTools: ReadonlyArray<ToolDefinition> = []
-      let auditPermissionConfig: ToolPermissionConfig | undefined
 
       // task-scoped cwd state（spec 2026-06-08-task-scoped-cwd-design §3.1）。
       // 存在 taskState 上（不是局部变量），两条原因：
@@ -1546,34 +1469,14 @@ export class AgentHandler {
           humanQueue,
           triggerType: task.source?.trigger_type === 'scheduled' ? 'scheduled' : 'message',
           taskType: task.task_type,
-          // 用 getter 形式封装本地 cache，worker 中途 set_task_goal 后下一轮工具调用立即生效。
-          hasGoal: () => goalSetCache,
           // ask_human barrier 超时自醒时的本地兜底：复查 Admin task 状态，
           // 这里查一次 task 状态，已终态就静默 abort，不让 worker 带着死任务继续跑。
           abortIfTaskTerminal: () => this.abortWorkerIfTaskTerminal(task.task_id),
-          // Goal mode 缓冲：send_message handler 在工作态（无 activeAudit）把 info 消息推入 outboundBuffer；
-          // 等审态（hasActiveAudit=true）下立即 flush。引用 taskState 持久数组，跨 iteration 一致。
-          // spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 6
-          outboundBuffer: taskState.outboundBuffer,
-          hasActiveAudit: () => taskState.activeAuditId !== undefined,
-          // Dispatch 钩子点（spec §4.13.6 Invariant #1+#2 / §4.13.7）。dispatchOutboundMessage success
-          // 路径触发；抛错路径不触发。
-          // PR-1 effect：置 everSentMessage=true（永不清零）。
-          // PR-2 effect：追加 task.messages（role='agent'）—— spec 2026-06-09 §4.2 invariant #3 叠加。
           onDispatched: (entry, sendResult) => {
             this.markOutboundDelivered(taskState, entry, sendResult)
           },
-          // 进 buffer ≠ 送达：audit fail 会整体丢弃 buffer。endTurnGate 用此标志
-          // 把"交付被拦"与"从未交付"区分开（spec 2026-06-10 §3.5）。
-          onBuffered: () => {
-            taskState.everBufferedMessage = true
-          },
-          getHumanInputEpoch: () => taskState.humanInputEpoch,
           // send_message 工具自愈相对 file_path 用：当前 task cwd（set_cwd 改的 taskState.cwd）。
           getCwd,
-          // 透传 sub-agent trace 上下文：让 audit gate 触发的 audit subagent
-          // 产生的 sub_agent_call span 挂到主 worker trace 下，admin UI 能渲染。
-          // spec: 2026-05-23-goal-mode-design.md §4.2
         }) ?? {}
         for (const [serverName, server] of Object.entries(externalMcpServers)) {
           tools.push(...mcpServerToToolDefinitions(server, serverName))
@@ -1646,9 +1549,7 @@ export class AgentHandler {
         // 3f. delegate_task 工具（单一入口；sub-agent 按 subagent_type 路由）
         // baseToolsPermissionConfig 仅基于 base 工具集，给 sub-agent 用：
         //   sub-agent 内部只能见 baseTools，所以它的 permissionConfig 也只需覆盖 base 工具命名。
-        // disabled_tools 的 MCP 过滤同样作用于 baseToolsRaw——baseToolsRaw 喂给 subagent
-        // parentTools 与 auditBaseTools，不在这里过滤会让被禁 MCP 工具从这两条路径漏出
-        //（main worker 路径在组装末尾统一过滤）。
+        // disabled_tools 的 MCP 过滤同样作用于 baseToolsRaw；它会作为 parentTools 传给 subagent。
         const baseToolsRaw = filterMcpToolsByConfig([...tools], this.builtinToolConfig)
         // Read dedup：仅 main worker 启用（subagent 用 baseToolsRaw 里的普通 Read，
         // 避免 stub 指向不在自己上下文里的旧读）。baseToolsRaw 已在上一行 capture（普通 Read），
@@ -1667,12 +1568,7 @@ export class AgentHandler {
         tools.push(createSetCwdTool({ getCwd, setCwd }))
         const baseToolsPermissionConfig: ToolPermissionConfig =
           this.deps?.getPermissionConfig?.(baseToolsRaw, taskState.resolvedPermissions) ?? { mode: 'bypass' }
-        // baseTools 构造后立刻把 outer auditBaseTools 接上，给 audit gate 的 getter 用。
-        // 见 mcpConfigFactory 上方的 outer let 声明。
         const baseTools = filterToolsByPermission(baseToolsRaw, baseToolsPermissionConfig)
-        // 把 baseTools 接到 outer，audit gate getter 用。
-        auditBaseTools = baseTools
-        auditPermissionConfig = baseToolsPermissionConfig
 
         if (subAgentsSnapshot.length > 0) {
           const baseRunSubAgent = this.makeRunSubAgent({
@@ -1720,8 +1616,8 @@ export class AgentHandler {
         // spec: 2026-06-05-goal-soft-control-workflow-redesign-design.md §1
         tools.push(createTodoTool(taskState.todoStore))
 
-        // 3j2. set_task_goal tool — worker 写下完成承诺，触发 audit gate + todo 门控解锁
-        // goal mode 关闭时不注入，agent 无法设定目标，audit gate 透明放行
+        // 3j2. set_task_goal tool — worker 写下完成承诺。
+        // goal mode 关闭时不注入，agent 无法设定目标。
         // spec: 2026-05-23-goal-mode-design.md §7.3
         if (goalModeEnabled && this.deps?.getAdminPort && this.deps.rpcClient) {
           const adminDeps = this.deps
@@ -1731,7 +1627,7 @@ export class AgentHandler {
               const adminPort = await adminDeps.getAdminPort!()
               const result = await adminDeps.rpcClient.call<unknown, T>(adminPort, method, params, adminDeps.moduleId)
               if (method === 'set_task_goal') {
-                // RPC 成功 → 同步更新本地 cache，让后续 todo 写模式 / audit gate 立即解锁
+                // RPC 成功 → 同步更新本地 cache。
                 goalSetCache = true
               }
               return result
@@ -1741,10 +1637,6 @@ export class AgentHandler {
             hasExistingGoal: () => goalSetCache,
             hasRevisionToken: () => taskState.goalRevisionUnlocked === true,
             consumeRevisionToken: () => { taskState.goalRevisionUnlocked = false },
-            // 改 goal 成功后 abort 当前 audit（针对旧 goal 跑的）+ 清 outboundBuffer + 推 aborted marker。
-            // 首次设 goal 时也调，因 activeAuditId 为 undefined 故 no-op。
-            // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.7
-            abortAudit,
           }))
         }
 
@@ -1981,13 +1873,11 @@ export class AgentHandler {
           // 终态缺失，query-loop 会按失败处理，不能借此完成 task。
           suppressForcedSummary: () => workerTriggerType === 'scheduled' || sentInfoMessage,
           assistantTextEndTurnHandler: async ({ assistantText }) => {
-            const currentEpochDelivered = taskState.lastDeliveredInfoEpoch === taskState.humanInputEpoch
-
-            if (workerTriggerType === 'scheduled' || taskState.activeAuditId !== undefined || taskState.outboundBuffer.length > 0) {
+            if (workerTriggerType === 'scheduled') {
               return { kind: 'complete' as const }
             }
 
-            if (currentEpochDelivered) {
+            if (sentInfoMessage) {
               if (assistantTextEndTurnReminderSent) {
                 return { kind: 'complete' as const }
               }
@@ -2007,12 +1897,11 @@ export class AgentHandler {
               return { kind: 'complete' as const }
             }
 
-            const entry: OutboundBufferEntry = {
+            const entry: OutboundMessage = {
               channel_id: taskOrigin.channel_id,
               session_id: taskOrigin.session_id,
               content: assistantText,
               intent: 'info',
-              human_input_epoch: taskState.humanInputEpoch,
               sent_at_attempt_ms: Date.now(),
             }
             const dispatchDeps: OutboundDispatchDeps = {
@@ -2063,74 +1952,6 @@ export class AgentHandler {
             }
             return { kind: 'complete' as const }
           },
-          // Goal mode 缓冲消息 flush 钩子：engine 在 stop_reason='tool_use' 续 turn 之前
-          // 和 endTurnGate 返回 null 后调用。把 taskState.outboundBuffer 里截留的 info
-          // 消息真正发到 channel 并清空 buffer。失败 entry 不阻塞后续 entry（continue on error）。
-          //
-          // 通过 createOutboundFlush + dispatchOutboundMessage 跟 send_message handler immediate-send
-          // 路径共用同一份 dispatch 逻辑——支持 file_path + sandbox path mapping、friend_id-only mention
-          // 反查 admin get_friend、features 组装，行为完全等价。
-          //
-          // spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 8 + §4.5
-          flushOutboundBuffer: (() => {
-            if (!this.deps?.rpcClient || !this.deps?.resolveChannelPort) return undefined
-            const adminPortGetter = this.deps.getAdminPort
-            if (!adminPortGetter) return undefined
-            const dispatchDeps: OutboundDispatchDeps = {
-              rpcClient: this.deps.rpcClient,
-              moduleId: this.deps.moduleId,
-              resolveChannelPort: this.deps.resolveChannelPort,
-              getAdminPort: adminPortGetter,
-              ...(this.deps.sandboxPathMappingsRef
-                ? { sandboxPathMappingsRef: this.deps.sandboxPathMappingsRef }
-                : {}),
-              // spec §4.13.6 钩子点：同 mcpConfigFactory 注入 TaskContext 时一致的 effect。
-              // post-tool flushOutboundBuffer / audit pass flush 路径触发。
-              // PR-1 effect：everSentMessage=true。
-              // PR-2 effect：append task.messages（role='agent'）— spec 2026-06-09 §4.2 invariant #3。
-              onDispatched: (entry, sendResult) => {
-                this.markOutboundDelivered(taskState, entry, sendResult)
-              },
-            }
-            return createOutboundFlush(taskState.outboundBuffer, dispatchDeps)
-          })(),
-          // engine drain 路径识别到 audit_result.pass=false / audit_aborted 时调，丢弃缓冲的"完工汇报"。
-          // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5 / §4.7
-          dropOutboundBuffer: () => {
-            taskState.outboundBuffer.length = 0
-          },
-          // engine drain 路径处理完 audit_result / audit_aborted marker 之后调，让 task 回到"无活跃 audit"态。
-          // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5 / §4.7
-          clearActiveAuditId: () => {
-            taskState.activeAuditId = undefined
-          },
-          // audit 跑中 LLM 直接 end_turn 时 engine 判定是否仍有活跃 audit → 直接挂起等结果。
-          // taskState.activeAuditId 非空表示 audit 子进程还没完成。
-          // spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
-          hasActiveAudit: () => taskState.activeAuditId !== undefined,
-          // audit 等待兜底超时触发时 abort 卡死的 audit（复用 set_task_goal 路径同款 closure：
-          // controller.abort + push audit_aborted marker + 清 outboundBuffer + activeAuditId）。
-          abortActiveAudit: (reason: string) => abortAudit(reason),
-          endTurnGate: this.buildAsyncAuditEndTurnGate({
-            goalModeEnabled,
-            goalSetCacheGetter: () => goalSetCache,
-            taskId: task.task_id,
-            taskState,
-            subAgents: subAgentsSnapshot,
-            // 闭包延迟读 auditBaseTools —— 由 buildToolsDynamic 写入，engine 第一次跑前
-            // 已被 callback 调用过；endTurnGate 触发时一定有值。
-            getAuditBaseTools: () => auditBaseTools,
-            getAuditPermissionConfig: () => auditPermissionConfig,
-            ...(subAgentTraceConfig ? { traceConfig: subAgentTraceConfig } : {}),
-            humanQueue,
-            cwd: getWorkspaceDir(),
-            owner: {
-              friend_id: context.sender_friend?.id ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`,
-              session_id: context.task_origin?.session_id,
-              channel_id: context.task_origin?.channel_id,
-            },
-            getConversationLog: () => [...conversationLog],
-          }),
           onSystemInjection: (event) => {
             // 系统注入（supplement / overdue / forced_summary / stop_hook）作为 trace 上的 tool-call 风格 span 暴露
             const label = `__system_${event.type}__`
@@ -2138,10 +1959,6 @@ export class AgentHandler {
             const spanId = traceCallback?.onToolCallStart(label, inputSummary, event.injectedAtMs)
             if (spanId) {
               traceCallback?.onToolCallEnd(spanId, '(engine injected user message)', undefined, event.injectedAtMs)
-            }
-            // 追踪 human supplement 到 conversationLog
-            if (event.type === 'supplement') {
-              conversationLog.push({ role: 'human', content: event.text })
             }
           },
           onCompactionStart: () => {
@@ -2293,22 +2110,14 @@ export class AgentHandler {
               }
             }
 
-            // 追踪 agent 发出的消息到 conversationLog（send_message / send_private_message）
+            // 记录已送达的 info，允许后续 silent end_turn 正常收口。
             for (const tc of event.toolCalls) {
               const bare = tc.name.replace(/^mcp__[^_]+__/, '')
               if ((bare === 'send_message' || bare === 'send_private_message') && !tc.isError) {
                 const input = tc.input as { intent?: string; content?: string } | undefined
                 const msgContent = input?.content
                 const msgIntent = input?.intent as 'info' | 'ask_human' | undefined
-                if (msgContent !== undefined) {
-                  if (msgIntent === 'ask_human') {
-                    conversationLog.push({ role: 'agent', intent: 'ask_human', content: msgContent })
-                  } else {
-                    // intent='info' 或默认（无 intent）均视为 info
-                    sentInfoMessage = true
-                    conversationLog.push({ role: 'agent', intent: 'info', content: msgContent })
-                  }
-                }
+                if (msgContent !== undefined && msgIntent !== 'ask_human') sentInfoMessage = true
               }
             }
 
@@ -2323,8 +2132,6 @@ export class AgentHandler {
                 worker_state: {
                   todo_items: [...taskState.todoStore.list()],
                   goal_revision_unlocked: taskState.goalRevisionUnlocked,
-                  human_input_epoch: taskState.humanInputEpoch,
-                  last_delivered_info_epoch: taskState.lastDeliveredInfoEpoch,
                   ...(taskState.cwd !== undefined ? { cwd: taskState.cwd } : {}),
                 },
                 ...(taskState.resumeWorkerContext ? { worker_context: taskState.resumeWorkerContext } : {}),
@@ -2568,13 +2375,7 @@ export class AgentHandler {
       pendingHumanMessages: [],
       taskOrigin,
       todoStore: new TodoStore(),
-      outboundBuffer: [],
-      activeAuditId: undefined,
       activeAsyncSubagentIds: new Set<string>(),
-      everSentMessage: false,
-      humanInputEpoch: 0,
-      everBufferedMessage: false,
-      silentNoDeliveryRetries: 0,
     })
 
     return { taskId: syntheticTaskId, registered, task, context, taskTitle }
@@ -3177,13 +2978,9 @@ export class AgentHandler {
 
   private markOutboundDelivered(
     taskState: WorkerTaskState,
-    entry: OutboundBufferEntry,
+    entry: OutboundMessage,
     sendResult: OutboundSendResult,
   ): void {
-    taskState.everSentMessage = true
-    if (entry.intent === 'info') {
-      taskState.lastDeliveredInfoEpoch = entry.human_input_epoch ?? taskState.humanInputEpoch
-    }
     this.appendAgentMessageBestEffort(taskState.taskId, entry, sendResult)
   }
 
@@ -3212,7 +3009,7 @@ export class AgentHandler {
    */
   private appendAgentMessageBestEffort(
     taskId: string,
-    entry: OutboundBufferEntry,
+    entry: OutboundMessage,
     sendResult: OutboundSendResult,
   ): void {
     if (!this.deps?.getAdminPort || !this.deps.rpcClient) return
@@ -3304,7 +3101,6 @@ export class AgentHandler {
       .join('\n')
 
     if (supplement) {
-      taskState.humanInputEpoch++
       const humanQueue = this.humanQueues.get(taskId)
       if (humanQueue) {
         const template = this.isGoalModeEnabled(taskState.triggerType)
@@ -3429,8 +3225,6 @@ export class AgentHandler {
           worker_state: {
             todo_items: [...taskState.todoStore.list()],
             goal_revision_unlocked: taskState.goalRevisionUnlocked,
-            human_input_epoch: taskState.humanInputEpoch,
-            last_delivered_info_epoch: taskState.lastDeliveredInfoEpoch,
             ...(taskState.cwd !== undefined ? { cwd: taskState.cwd } : {}),
           },
           ...(taskState.resumeWorkerContext ? { worker_context: taskState.resumeWorkerContext } : {}),
@@ -3842,305 +3636,6 @@ export class AgentHandler {
         isError: true,
         ...(subTrace ? { traceId: subTrace.trace_id } : {}),
       }
-    }
-  }
-
-  /**
-   * Goal audit 入口：engine endTurnGate 在 worker end_turn 时调用。
-   *
-   * 流程：
-   *  1. 拿 admin task → 验证 task.goal 存在
-   *  2. 查 goal_auditor builtin from this.subAgents snapshot
-   *  3. 用 buildAuditPrompt 拼输入（worker 不参与）
-   *  4. 调 runSubAgentDirect 跑 auditor（独立 trace, task_type='goal_audit'）
-   *  5. parseAuditReport 解析输出
-   *  6. admin RPC append_task_goal_audit_entry 写历史
-   *  7. pass → admin RPC complete_task_goal 同步标 complete
-   *  8. 返回 AuditResult
-   *
-   * 注意：parentTools 传空 array——auditor 不继承 worker 工具集，
-   * filterToolsForSubAgent 走 auditor 自己的 capability 过滤。
-   * 没传 humanQueue / permissionConfig：auditor 是只读，不通讯。
-   *
-   * traceConfig 可选：caller（Task 8 crab-messaging）能拿到自己的 traceContext 时透传，
-   * 让 audit subtree 挂到 worker 主 trace 下；缺省则跑无父 trace 的 standalone subagent，
-   * auditTraceId 为空串。
-   *
-   * spec: 2026-05-23-goal-mode-design.md §7.2
-   */
-  async runGoalAudit(params: {
-    readonly taskId: string
-    readonly conversationLog: ReadonlyArray<ConversationEntry>
-    readonly traceConfig?: SubAgentTraceConfig
-    readonly abortSignal?: AbortSignal
-    /** worker baseTools；auditor 的 capability filter（file_system+shell）在其上筛子集。
-     *  缺省/空数组 = auditor 没有 Bash/Read/Grep 等工具，实测会回"环境没有工具"导致永远 fail。 */
-    readonly parentTools?: ReadonlyArray<import('../engine/types.js').ToolDefinition>
-    /** worker permissionConfig；缺省时 auditor 调 dangerous 工具（如 Bash）会被拒。 */
-    readonly permissionConfig?: import('../engine/types.js').ToolPermissionConfig
-  }): Promise<AuditResult> {
-    if (!this.deps?.getAdminPort || !this.deps.rpcClient) {
-      throw new Error('runGoalAudit: getAdminPort/rpcClient deps 缺失')
-    }
-    const adminPort = await this.deps.getAdminPort()
-    const moduleId = this.deps.moduleId
-
-    // 1. 拿 task + goal（用现有 RPC pattern）
-    const taskResp = await this.deps.rpcClient.call<
-      { task_id: string },
-      { task: { id: string; goal?: GoalAuditTaskGoal } }
-    >(adminPort, 'get_task', { task_id: params.taskId }, moduleId)
-    const task = taskResp.task
-    if (!task.goal) {
-      throw new Error(
-        `runGoalAudit: task ${params.taskId} has no goal; audit should not be triggered`,
-      )
-    }
-    const goal = task.goal
-
-    // 2. 拿 auditor 配置（snapshot 风格的 in-flight 不变 reference）
-    const auditor = this.subAgents.find((s) => s.id === 'builtin-goal-auditor')
-    if (!auditor) {
-      throw new Error('runGoalAudit: goal_auditor subagent not configured')
-    }
-
-    // 3. 装输入（系统拼，worker 不插手）
-    const promptText = buildAuditPrompt({
-      goal,
-      conversationLog: params.conversationLog,
-      cwd: getWorkspaceDir(),
-    })
-
-    // 4. 跑 subagent（独立 trace, task_type='goal_audit'），注入 submit_audit_result 工具。
-    const result = await this.runSubAgentDirect(
-      auditor,
-      {
-        subagent_type: 'goal_auditor',
-        task: promptText,
-      },
-      { ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}) },
-      {
-        // parentTools: 来自 worker baseTools（capability filter 会在其上筛 file_system+shell）；
-        // 缺省 [] 是历史 bug，会让 auditor 没工具可用、根本无法验证任何 criterion。
-        parentTools: params.parentTools ?? [],
-        parentTaskId: params.taskId,
-        callerLabel: 'goal_audit',
-        // permissionConfig: 同样必须透传，否则 runtime check 用 dangerous 工具默认拒绝逻辑，
-        // auditor 调 Bash 等会被拦回"Permission denied"。
-        ...(params.permissionConfig ? { permissionConfig: params.permissionConfig } : {}),
-        ...(params.traceConfig ? { traceConfig: params.traceConfig } : {}),
-        traceSummaryPrefix: '[goal_audit]',
-        traceTaskType: 'goal_audit',
-        // submit_audit_result 是 audit 专属 exitsLoop 工具，capability filter 之后注入。
-        // auditor 调它即结束，input 直接是 schema-enforced {pass, failed_criteria, evidence}。
-        extraTools: [createSubmitAuditResultTool()],
-      },
-    )
-
-    // 5. 解析判决（优先 tool call → max_turns/failed/aborted 直接 sentinel → fallback parseAuditReport → fallback sentinel）
-    const parsed = resolveAuditJudgment(result)
-
-    // 5b. 把 verdict 回写到 audit trace 顶层 summary，让 admin UI 直接可见
-    //     (spec 2026-05-26-goal-audit-loop-completion §2.1.2)
-    const auditTraceId = result.traceId ?? ''
-    if (auditTraceId && params.traceConfig?.traceStore) {
-      const verdictSummary = buildAuditVerdictSummary(parsed, goal)
-      params.traceConfig.traceStore.appendTraceOutcome(auditTraceId, verdictSummary)
-    }
-
-    // 6. 写 audit_history —— admin 侧连续 N 次同 fail 会把 goal 自动切 blocked，读回状态。
-    const appendResp = await this.deps.rpcClient.call<unknown, { task?: { goal?: { status?: GoalStatus } } }>(
-      adminPort,
-      'append_task_goal_audit_entry',
-      {
-        task_id: params.taskId,
-        entry: {
-          at: new Date().toISOString(),
-          pass: parsed.pass,
-          failed_criteria: [...parsed.failedCriteria],
-          audit_trace_id: auditTraceId,
-        },
-      },
-      moduleId,
-    )
-    const goalStatus = appendResp?.task?.goal?.status
-
-    // 7. pass 路径同步把 goal 切 complete
-    if (parsed.pass) {
-      await this.deps.rpcClient.call<unknown, unknown>(
-        adminPort,
-        'complete_task_goal',
-        { task_id: params.taskId },
-        moduleId,
-      )
-    }
-
-    return {
-      pass: parsed.pass,
-      failedCriteria: parsed.failedCriteria,
-      detailedReport: buildHumanQueueReport(parsed, goal),
-      auditTraceId,
-      ...(goalStatus ? { goalStatus } : {}),
-      ...(goalStatus === 'blocked'
-        ? { blockedGuidance: buildBlockedGuidance(goal, parsed.failedCriteria) }
-        : {}),
-    }
-  }
-
-  /**
-   * 构造 engine endTurnGate 闭包（异步派 audit 路径）。
-   *
-   * goalModeEnabled=false → 不注入 endTurnGate（透明 end_turn）。
-   * goalModeEnabled=true 时返回的闭包行为：
-   *  - goalSetCache=false（worker 尚未 set_task_goal）→ null（透明放行）
-   *  - outboundBuffer 空 → null（无 final 待审）
-   *  - 否则 spawnAuditSubagent → 设 activeAuditId → 返回 [audit_pending] marker
-   *
-   * runGoalAudit（同步阻塞版本）保留不动，作为未来 sync fallback 可选路径。
-   *
-   * spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 10
-   */
-  private buildAsyncAuditEndTurnGate(opts: {
-    readonly goalModeEnabled: boolean
-    readonly goalSetCacheGetter: () => boolean
-    readonly taskId: string
-    readonly taskState: WorkerTaskState
-    readonly subAgents: ReadonlyArray<SubAgentConfig>
-    readonly getAuditBaseTools: () => ReadonlyArray<ToolDefinition>
-    /** worker 同款权限配置——auditor 跑 dangerous 工具（Bash 验 cmd criterion）必需。 */
-    readonly getAuditPermissionConfig: () => ToolPermissionConfig | undefined
-    readonly traceConfig?: SubAgentTraceConfig
-    readonly humanQueue: HumanMessageQueue
-    readonly cwd: string
-    readonly owner: BgEntityOwner
-    readonly getConversationLog: () => ReadonlyArray<ConversationEntry>
-  }): (() => Promise<import('../engine/types.js').EndTurnGateResult>) | undefined {
-    if (!opts.goalModeEnabled) return undefined
-    if (!this.deps?.rpcClient || !this.deps.getAdminPort) {
-      // 没 admin 通信能力 → audit gate 无法解析 goal，透明放行。
-      return undefined
-    }
-    const adminDeps = this.deps
-    const adminGetPort = this.deps.getAdminPort
-    const handler = this
-    return createAsyncAuditEndTurnGate({
-      taskId: opts.taskId,
-      taskState: opts.taskState,
-      goalSetCacheGetter: opts.goalSetCacheGetter,
-      rpcClient: adminDeps.rpcClient,
-      moduleId: adminDeps.moduleId,
-      getAdminPort: adminGetPort,
-      buildSpawnDeps: (goal) => {
-        // auditor 配置不存在 → spawn 抛错 → caller fail-open（console.warn）。
-        // 用 throw 把"找不到 auditor"统一走 spawn 异常分支，避免在多处分散判断。
-        const auditorSnapshot = opts.subAgents.find((s) => s.id === 'builtin-goal-auditor')
-        if (!auditorSnapshot) {
-          throw new Error('builtin-goal-auditor subagent not configured')
-        }
-        // 每次 spawn audit 时从 live this.subAgents 重解析 model —— 与 delegate_task 一致，
-        // model_config 热更新对 audit 派发 in-flight 生效（spec 2026-07-19）。
-        const auditor = handler.resolveLiveSubAgent(auditorSnapshot)
-        const auditAdapter = adapterFromModel(auditor.model)
-        const auditPermission = opts.getAuditPermissionConfig()
-        return {
-          goal,
-          conversationLog: opts.getConversationLog(),
-          cwd: opts.cwd,
-          parentTaskId: opts.taskId,
-          auditor,
-          parentTools: opts.getAuditBaseTools(),
-          ...(auditPermission ? { permissionConfig: auditPermission } : {}),
-          adapter: auditAdapter,
-          owner: opts.owner,
-          registry: handler.bgRegistry,
-          abortControllers: handler.agentAbortControllers,
-          ...(opts.traceConfig
-            ? { traceContext: { traceStore: opts.traceConfig.traceStore, traceId: opts.traceConfig.parentTraceId } }
-            : {}),
-          humanQueue: opts.humanQueue,
-          onAuditResult: ({ auditId, parsed, verdictSummary }) => {
-            void handler.persistAsyncAuditResult({
-              taskId: opts.taskId,
-              auditId,
-              parsed,
-              verdictSummary,
-              ...(opts.traceConfig ? { traceStore: opts.traceConfig.traceStore } : {}),
-            })
-          },
-        }
-      },
-    })
-  }
-
-  private async persistAsyncAuditResult(params: {
-    readonly taskId: string
-    readonly auditId: string
-    readonly parsed: ParsedAuditReport
-    readonly verdictSummary: { readonly summary: string; readonly error?: string }
-    readonly traceStore?: SubAgentTraceConfig['traceStore']
-  }): Promise<void> {
-    if (!this.deps?.getAdminPort || !this.deps.rpcClient) {
-      console.error('[goal-audit] persistAsyncAuditResult skipped: getAdminPort/rpcClient deps 缺失')
-      return
-    }
-
-    // append 与 complete 拆独立 try：append 失败（如 goal 已终态的竞态）不应连带跳过
-    // complete 调用（spec 2026-07-16 §2.2-3）。
-    let adminPort: number
-    try {
-      adminPort = await this.deps.getAdminPort()
-    } catch (err) {
-      console.error(
-        `[goal-audit] persistAsyncAuditResult getAdminPort failed for ${params.taskId}/${params.auditId}:`,
-        err instanceof Error ? err.message : String(err),
-      )
-      return
-    }
-    try {
-      await this.deps.rpcClient.call<unknown, { task?: { goal?: { status?: GoalStatus } } }>(
-        adminPort,
-        'append_task_goal_audit_entry',
-        {
-          task_id: params.taskId,
-          entry: {
-            at: new Date().toISOString(),
-            pass: params.parsed.pass,
-            failed_criteria: [...params.parsed.failedCriteria],
-            audit_trace_id: params.auditId,
-          },
-        },
-        this.deps.moduleId,
-      )
-    } catch (err) {
-      console.warn(
-        `[goal-audit] persistAsyncAuditResult append failed for ${params.taskId}/${params.auditId}:`,
-        err instanceof Error ? err.message : String(err),
-      )
-    }
-
-    if (params.parsed.pass) {
-      try {
-        await this.deps.rpcClient.call<unknown, unknown>(
-          adminPort,
-          'complete_task_goal',
-          { task_id: params.taskId },
-          this.deps.moduleId,
-        )
-      } catch (err) {
-        console.error(
-          `[goal-audit] persistAsyncAuditResult complete failed for ${params.taskId}/${params.auditId}:`,
-          err instanceof Error ? err.message : String(err),
-        )
-      }
-    }
-
-    try {
-      params.traceStore?.appendTraceOutcome(params.auditId, params.verdictSummary)
-    } catch (err) {
-      console.error(
-        `[goal-audit] append audit trace outcome failed for ${params.auditId}:`,
-        err instanceof Error ? err.message : String(err),
-      )
     }
   }
 

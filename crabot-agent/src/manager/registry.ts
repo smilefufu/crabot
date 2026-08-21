@@ -159,7 +159,11 @@ export interface ManagerRegistryDeps {
     humanPrincipal?: HumanPrincipal,
     principalPermissions?: ResolvedPermissions,
     /** P6-A §6.6：当前 episode trace 的读取/回写桥（registry 惰性桥接到 loops 实例）。 */
-    traceHooks?: { currentTraceId: () => string | undefined; onWorkerSpawned: (workerId: string) => void },
+    traceHooks?: {
+      currentTraceId: () => string | undefined
+      onWorkerSpawned: (workerId: string) => void
+      onPostSendAction: () => void
+    },
   ) => ReadonlyArray<ToolDefinition>
   /** Manager episode trace writer（窄接口；见 ManagerLoopDeps.traceWriter）。 */
   readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
@@ -226,6 +230,7 @@ export class ManagerRegistry {
           {
             currentTraceId: () => this.loops.get(key)?.currentEpisodeTraceId,
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
+            onPostSendAction: () => this.loops.get(key)?.recordPostSendAction(),
           },
         ),
       promptInputs: () => this.deps.promptInputs(key),

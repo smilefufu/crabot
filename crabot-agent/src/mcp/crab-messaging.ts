@@ -16,13 +16,13 @@ import { annotatePagination } from './pagination-annotator.js'
 import { translateChannelError } from './error-translator.js'
 import {
   dispatchOutboundMessage,
-  type OutboundBufferEntry,
+  type OutboundMessage,
   type OutboundDispatchDeps,
   type PathMapping,
-} from '../agent/outbound-flush.js'
+} from '../agent/outbound-dispatch.js'
 
-// 历史兼容重导出：外部仍按 './mcp/crab-messaging' 导入 PathMapping / OutboundBufferEntry
-export type { OutboundBufferEntry, PathMapping }
+// 兼容重导出：外部可从 './mcp/crab-messaging' 导入 PathMapping / OutboundMessage。
+export type { OutboundMessage, PathMapping }
 // ============================================================================
 // 依赖注入接口
 // ============================================================================
@@ -36,7 +36,7 @@ export interface CrabMessagingDeps {
    * P6-A §11.5-9：Admin Chat 出站 delivery 事务钩子（仅 exact admin-web::admin-chat
    * 目标生效；其它目标的调用不携带 delivery metadata——不注入即剥离）。
    */
-  readonly adminChatDelivery?: import('../agent/outbound-flush.js').AdminChatDeliveryHooks
+  readonly adminChatDelivery?: import('../agent/outbound-dispatch.js').AdminChatDeliveryHooks
   /**
    * 可选：返回当前调用 mcp 工具的 task 上下文。
    * Worker 调用路径返回非空（含 taskId + humanQueue 引用），用于 send_message(intent='ask_human')。
@@ -58,43 +58,12 @@ export interface TaskContext {
    *  集合卡死到 send_master_private + 只读工具，避免反思内容被发到任意群/私聊。
    *  其他 scheduled 任务（用户自建的推送 / 巡检 / 数据采集）不受白名单影响。 */
   taskType?: string
-  /** 当前 task 是否挂了 goal；agent-handler 在装 deps 时由 admin task 查询结果维护 cache，
-   *  此处用 getter 形式以便 worker 中途 set_task_goal 后下一次工具调用立即生效。
-   *  spec: 2026-05-23-goal-mode-design.md §4.2 */
-  hasGoal: () => boolean
-  /** Audit 等待态下被截留的 send_message intent='info' 缓冲区（同 WorkerTaskState.outboundBuffer 引用）。
-   *  goal mode + 工作态时 handler 把 info 消息推入此处不真发；engine 在 audit pass / tool_use 等时机 flush。
-   *  shape 与 WorkerTaskState.outboundBuffer 完全对齐（同一 OutboundBufferEntry 类型）。
-   *
-   *  **语义（spec §4.1 Revision 2026-06-09 第 1 段）**：永远 ≤ 1 条。
-   *  push 新条前若已有旧条 → 先 sync flush 旧条（"新顶旧"），再 push 新条。
-   *
-   *  spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.1 + Revision 第 1 段 */
-  outboundBuffer?: Array<OutboundBufferEntry>
   /** ask_human barrier 超时自醒时的本地兜底钩子：查一次 task 状态，已终态则 abort worker。
    *  admin 不可达时 fail-open（继续跑）。 */
   abortIfTaskTerminal?: () => Promise<void>
-  /** 当前 task 是否处于"等审态"（activeAuditId 非空）。同步 getter，工具内每次调用现读。
-   *  工作态（false）= 缓冲；等审态（true）= 立即 flush 给用户（过程响应）。
-   *  spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 6 */
-  hasActiveAudit?: () => boolean
-  /** Dispatch 钩子点 callback（spec §4.13.6 Invariant #1+#2 / §4.13.7）。
-   *  dispatchOutboundMessage 真 flush 成功后触发；抛错路径不触发。
-   *  worker setup 时由 agent-handler 注入，回调内置 `taskState.everSentMessage = true`（PR-1 effect）。
-   *  PR-2 落地时在同 callback 函数体追加 task.messages.push(...)。
-   *  Front 调用路径无 task 上下文时不注入。
-   *  spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.13.6 / §4.13.7 */
-  onDispatched?: import('../agent/outbound-flush.js').OnDispatchedHook
-  /** 消息进入 outboundBuffer 时触发（worker 交付了但被缓冲，可能被 audit 拦下丢弃）。
-   *  agent-handler 注入回调置 taskState.everBufferedMessage=true——endTurnGate 据此
-   *  区分"从未交付"和"交付被拦"两种 NO_DELIVERY 文案。
-   *  spec: 2026-06-10-audit-anchor-human-request §3.5 */
-  onBuffered?: () => void
-  /** 当前真实人类输入轮次；send_message entry 创建时绑定，用于后续送达确认。 */
-  getHumanInputEpoch?: () => number
-  /** 当前 task 的工作目录（set_cwd 改的 taskState.cwd，缺省落到 workspace）。
-   *  send_message 收到相对 file_path 时用它就地解析成绝对路径——相对路径若拖到延迟 flush
-   *  阶段才在 dispatch 里抛错，那时已无法把失败回传给 worker（trace a72623ec 成因）。 */
+  /** 成功投递后调用，用于记录 task.messages；前端调用不注入。 */
+  onDispatched?: import('../agent/outbound-dispatch.js').OnDispatchedHook
+  /** 当前 task 的工作目录（set_cwd 改的 taskState.cwd，缺省落到 workspace）。 */
   getCwd?: () => string
 }
 
@@ -142,7 +111,7 @@ export interface MessagingToolSet {
 export type MessagingToolSetProvider = () => MessagingToolSet
 
 // ============================================================================
-// 路径映射类型（实现已抽到 ../agent/outbound-flush.ts 与 flush 路径共享，本文件仅重导出）
+// 路径映射类型实现位于 ../agent/outbound-dispatch.ts，本文件仅重导出。
 // ============================================================================
 
 // ============================================================================
@@ -976,9 +945,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           }
         }
 
-        // 统一构造 dispatchDeps（含 §4.13 钩子点 onDispatched）—— 缓冲分支 "新顶旧" sync flush 与
-        // immediate-send 都用同一份，保证 dispatch success 路径触发钩子的语义统一。
-        // taskCtx 为空时（front 调用）onDispatched 缺省，钩子不触发，行为不变。
+        // 统一构造即时 dispatch 依赖；taskCtx 为空（front 调用）时不附带发送回调。
         const dispatchDeps: OutboundDispatchDeps = {
           rpcClient,
           moduleId,
@@ -992,74 +959,12 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           })()),
         }
 
-        // === Goal mode 缓冲分支：goal mode + 工作态（无 active audit）时 intent='info' 进 outboundBuffer 不真发 ===
-        // 等审态（audit 在跑）→ 立即 flush（过程响应/进度告知，不进新缓冲）
-        // ask_human → 走下面的 send + barrier 路径
-        // 非 goal mode → 立即发（现行行为）
-        //
-        // **新顶旧（spec §4.1 Revision 第 1 段）**：buffer 已有旧条时先 sync flush 旧条再 push 新条。
-        // buffer 永远 ≤ 1 条，"send_message + 立即 end_turn" 组合才是触发 audit 的唯一路径。
-        // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.1 + §4.6
-        if (intent !== 'ask_human') {
-          const taskCtx = deps.getTaskContext?.()
-          if (
-            taskCtx
-            && taskCtx.hasGoal()
-            && taskCtx.outboundBuffer
-            && taskCtx.hasActiveAudit
-            && !taskCtx.hasActiveAudit()
-          ) {
-            // 新顶旧：buffer 已有上一条 → 先 sync flush 出去（触发 onDispatched 钩子置 everSentMessage）
-            // 失败不阻塞新条入 buffer（与 createOutboundFlush 的 continue-on-error 一致）
-            if (taskCtx.outboundBuffer.length > 0) {
-              const oldEntries = taskCtx.outboundBuffer.splice(0)
-              for (const oldEntry of oldEntries) {
-                try {
-                  await dispatchOutboundMessage(oldEntry, dispatchDeps)
-                } catch (err) {
-                  console.warn(
-                    '[send_message] 新顶旧 flush 旧条失败:',
-                    err instanceof Error ? err.message : String(err),
-                  )
-                }
-              }
-            }
-            taskCtx.outboundBuffer.push({
-              channel_id,
-              session_id,
-              content,
-              // 缓冲分支只在 intent='info' 命中（goal mode + 工作态 + !ask_human + 非 immediate）。
-              // ask_human 永远走下方 immediate-send 路径，不进 buffer。
-              intent: 'info',
-              ...(content_type !== undefined ? { content_type } : {}),
-              ...(media_url !== undefined ? { media_url } : {}),
-              ...(file_path !== undefined ? { file_path } : {}),
-              ...(filename !== undefined ? { filename } : {}),
-              ...(mentions !== undefined ? { mentions } : {}),
-              ...(quote_message_id !== undefined ? { quote_message_id } : {}),
-              ...(taskCtx.getHumanInputEpoch !== undefined ? { human_input_epoch: taskCtx.getHumanInputEpoch() } : {}),
-              sent_at_attempt_ms: Date.now(),
-            })
-            taskCtx.onBuffered?.()
-            return wrapText({
-              buffered: true,
-              sent_at: null,
-              note: '消息已待发；将在 audit 通过后真正发给用户',
-            })
-          }
-        }
-
         // === Step 1: 先 send（高失败率操作先做；失败 → state 完全不变）===
-        // 路径选择 + mention 解析 + channel sendMessage 共用 dispatchOutboundMessage，保证 immediate-send
-        // 与 flush 路径（createOutboundFlush）功能等价（同样的 path mapping + friend_id resolve + §4.13 钩子）。
-        const currentTaskCtx = deps.getTaskContext?.()
-        const dispatchEntry: OutboundBufferEntry = {
+        const dispatchEntry: OutboundMessage = {
           channel_id,
           session_id,
           content,
-          // 真实 intent —— immediate-send 路径覆盖了 ask_human + 非 goal mode info + 等审态 info 等。
-          // PR-2 onDispatched callback 用 entry.intent 写 task.messages.agent_intent 真值。
-          // intent 缺省（front 路径不带）时回退 'info'。spec §4.13.7 Revision 2026-06-09 第 2 段。
+          // intent 缺省（front 路径不带）时回退 'info'。
           intent: intent ?? 'info',
           ...(content_type !== undefined ? { content_type } : {}),
           ...(media_url !== undefined ? { media_url } : {}),
@@ -1067,9 +972,6 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           ...(filename !== undefined ? { filename } : {}),
           ...(mentions !== undefined ? { mentions } : {}),
           ...(quote_message_id !== undefined ? { quote_message_id } : {}),
-          ...(currentTaskCtx?.getHumanInputEpoch !== undefined
-            ? { human_input_epoch: currentTaskCtx.getHumanInputEpoch() }
-            : {}),
           sent_at_attempt_ms: Date.now(),
         }
         let sendResult: { platform_message_id: string; sent_at: string }
