@@ -268,13 +268,15 @@ export class ManagerLoop {
    */
   private currentEpisodeInjected: TimedWakeEnvelope[] | null = null
   /**
-   * P5 Task 4 additive:本 episode 的唤醒事件,供 `deps.toolFace(wakeEvent)` 按"这次是被
-   * 什么唤醒的"装配工具面(见 `ManagerLoopDeps.toolFace`)。与 `currentEpisodeInjected`
+   * P5 Task 4 additive:本 episode 的 primary 唤醒事件,供非 daily reflection 的
+   * `deps.toolFace(wakeEvent)` 按"这次是被什么唤醒的"装配工具面。与 `currentEpisodeInjected`
    * 同一套生命周期纪律(runEpisode 进入时置、finally 清),因此天然是**每 episode 精确**的
    * ——同一 loop 的 episode 由 `wakeUp` 的 mutex 串行,不会有两个 episode 的唤醒事件交叠;
    * 这正是不把它做成 registry 侧 `Map<ManagerKey, …>` 的原因(那样并发唤醒会串身份)。
-   */
+  */
   private currentWakeEvent: TimedWakeEnvelope | null = null
+  /** daily reflection 可能在 failed episode 后作为 carried wake 与新 primary 一同消费。 */
+  private currentEpisodeEnvelopes: ReadonlyArray<TimedWakeEnvelope> = []
   /**
    * 当前 episode 的 trace id（root 持久化成功后才有值）。worker-tools 经 registry 桥读它
    * 填 `origin.spawned_by_episode`，spawn 成功后经 `recordSpawnedWorker` 回写 trace。
@@ -413,6 +415,7 @@ export class ManagerLoop {
   ): Promise<EpisodeResult> {
     const episodeId = randomUUID()
     const carriedEnvelopes = this.mailbox.drainEnvelopes()
+    const episodeEnvelopes = [...carriedEnvelopes, ...(envelope ? [envelope] : [])]
     if (envelope === undefined && carriedEnvelopes.length === 0) {
       // 自唤醒但 mailbox 已空(残留被排在前面的另一个 episode 顺带 drain 走了)——
       // 没有任何新内容,直接空转返回,不开 episode(见 drainMailbox 注释)。
@@ -427,12 +430,13 @@ export class ManagerLoop {
     }
     this.currentEpisodeInjected = []
     this.currentWakeEvent = envelope ?? null
+    this.currentEpisodeEnvelopes = episodeEnvelopes
     this.needsSpawnRecheck = false
     this.spawnRecheckInjected = false
     this.spawnRecheckOutcomeRecorded = false
     this.postSendRecheckSequence = 0
     this.adminChatClaims = new Map()
-    for (const item of [...carriedEnvelopes, ...(envelope ? [envelope] : [])]) {
+    for (const item of episodeEnvelopes) {
       for (const id of item.correlation?.admin_chat_request_ids ?? []) {
         if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
       }
@@ -533,10 +537,12 @@ export class ManagerLoop {
       this.requeueUncommittedEnvelopes(this.currentEpisodeInjected ?? [], humanInputsCommitted)
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
+      this.currentEpisodeEnvelopes = []
       throw err
     } finally {
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
+      this.currentEpisodeEnvelopes = []
       this.currentTraceId = undefined
       this.needsSpawnRecheck = false
       this.spawnRecheckInjected = false
@@ -1015,20 +1021,21 @@ export class ManagerLoop {
         ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
         : [...tailMessages]
 
+    const dailyReflectionWake = this.currentEpisodeEnvelopes.find((item) =>
+      isBuiltinDailyReflectionWake(item.wake),
+    )?.wake
+    const effectiveWake = dailyReflectionWake ?? this.currentWakeEvent?.wake
+    const isBuiltinDailyReflection = isBuiltinDailyReflectionWake(effectiveWake)
     const systemPrompt = (): string => {
       const extra = this.deps.promptInputs()
-      const wake = this.currentWakeEvent?.wake
       return assembleManagerSystemPrompt({
         managerKey: this.deps.key,
         isSystemThread: this.deps.isSystemThread,
-        isBuiltinDailyReflection:
-          wake?.kind === 'schedule'
-          && wake.isBuiltin === true
-          && wake.taskType === 'daily_reflection',
+        isBuiltinDailyReflection,
         dialogProfile: extra.dialogProfile,
       })
     }
-    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(this.currentWakeEvent?.wake)
+    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(effectiveWake)
 
     const options: EngineOptions = {
       systemPrompt,
@@ -1050,13 +1057,9 @@ export class ManagerLoop {
       assistantTextEndTurnHandler: async () => {
         if (assistantTextEndTurnReminderSent) return { kind: 'complete' as const }
         assistantTextEndTurnReminderSent = true
-        const wake = this.currentWakeEvent?.wake
-        const isDailyReflection = wake?.kind === 'schedule'
-          && wake.isBuiltin === true
-          && wake.taskType === 'daily_reflection'
         return {
           kind: 'inject' as const,
-          text: isDailyReflection
+          text: isBuiltinDailyReflection
             ? DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER
             : ASSISTANT_TEXT_END_TURN_REMINDER,
         }
@@ -1080,6 +1083,12 @@ export class ManagerLoop {
 }
 
 // --- Helpers ---
+
+function isBuiltinDailyReflectionWake(wake: WakeEvent | undefined): boolean {
+  return wake?.kind === 'schedule'
+    && wake.isBuiltin === true
+    && wake.taskType === 'daily_reflection'
+}
 
 /** span detail 摘要截断（完整脱敏由 writer 侧 redactSecrets 负责）。 */
 function truncateForTrace(text: string, max = 300): string {

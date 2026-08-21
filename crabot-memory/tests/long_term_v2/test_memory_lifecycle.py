@@ -292,6 +292,28 @@ def test_inbox_expiry_skips_historical_inbox_and_uses_new_timestamp(tmp_path):
     assert store.read("trash", "fact", "expired").frontmatter.trashed_at == "2026-08-21T07:00:00Z"
 
 
+def test_inbox_expiry_skips_missing_files_and_continues(tmp_path):
+    _, store, index = _rpc(tmp_path)
+    _persist(
+        store, index, "expired-readable", status="inbox",
+        inbox_entered_at="2026-08-20T00:00:00Z",
+    )
+    _persist(
+        store, index, "expired-missing", status="inbox",
+        inbox_entered_at="2026-08-20T00:00:00Z",
+    )
+    store.purge("inbox", "fact", "expired-missing")
+
+    report = run_maintenance(
+        store, index, scope="inbox_expiry",
+        config=MaintenanceConfig(now_iso="2026-08-21T07:00:00Z"),
+    )
+
+    assert report["inbox_expiry"] == {"trashed": 1}
+    assert index.locate("expired-readable")["status"] == "trash"
+    assert index.locate("expired-missing")["status"] == "inbox"
+
+
 def test_trash_cleanup_uses_trashed_at_and_keeps_legacy_fallback(tmp_path):
     _, store, index = _rpc(tmp_path)
     _persist(

@@ -157,6 +157,50 @@ describe('ManagerLoop', () => {
     expect(() => loop.enqueueDuringEpisode(bare as never)).toThrow('TimedWakeEnvelope')
   })
 
+  it('daily reflection 重投为 carried wake 时仍使用受限投递面', async () => {
+    const calls: LLMStreamParams[] = []
+    const toolFaceWakes: Array<WakeEvent | undefined> = []
+    let streamCount = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        streamCount += 1
+        if (streamCount === 1) throw new Error('temporary provider failure')
+        yield* chunksFromContent([], 'end_turn')
+      },
+      updateConfig: () => {},
+    }
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      isSystemThread: true,
+      toolFace: (wake) => {
+        toolFaceWakes.push(wake)
+        return []
+      },
+    }))
+    const dailyReflection = timed({
+      kind: 'schedule',
+      scheduleId: 'daily-reflection',
+      title: '每日反思',
+      description: '整理记忆',
+      isBuiltin: true,
+      taskType: 'daily_reflection',
+    })
+
+    const failed = await loop.wakeUp(dailyReflection)
+    expect(failed).toMatchObject({ outcome: 'failed', consumedEvents: false })
+    await loop.wakeUp(defaultSupervisionWake('w-follow-up', 'after-daily-failure'))
+
+    expect(calls.slice(1).every((call) => call.systemPrompt.includes('send_daily_reflection_summary'))).toBe(true)
+    expect(toolFaceWakes.slice(1)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'schedule', taskType: 'daily_reflection' }),
+    ]))
+    expect(toolFaceWakes.slice(1)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'worker_event' }),
+    ]))
+  })
+
   it('唤醒 → 跑一个 turn → 回睡的完整往返', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ text: '收到,已了解情况', stopReason: 'end_turn' })

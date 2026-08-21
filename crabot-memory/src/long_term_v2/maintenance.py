@@ -152,7 +152,10 @@ def _inbox_expiry(store: MemoryStore, index: SqliteIndex, cfg: MaintenanceConfig
         max_age_hours=cfg.inbox_max_age_hours,
         now_iso=cfg.now_iso,
     ):
-        entry = store.read(row["status"], row["type"], row["id"])
+        try:
+            entry = store.read(row["status"], row["type"], row["id"])
+        except FileNotFoundError:
+            continue
         move_entry(
             store, index, entry,
             from_status="inbox", to_status="trash", now_iso=cfg.now_iso,
