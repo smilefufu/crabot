@@ -199,34 +199,41 @@ const ACCESS_DENIED = 'worker 不存在或当前会话无权访问'
 
 async function workerState(harness: WorkerHarness, worker: LedgerWorker) {
   const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined).at(-1)
-  const latestTurn = await harness.getWorkerTurn(worker.worker_id)
-  const activeOperations = await harness.getWorkerControlOperations(worker.worker_id)
+  const [latestTurn, latestActivity, activeOperations] = await Promise.all([
+    harness.getWorkerTurn(worker.worker_id),
+    mainline?.incarnation_id
+      ? harness.getLatestWorkerActivity(worker.worker_id, mainline.incarnation_id)
+      : undefined,
+    harness.getWorkerControlOperations(worker.worker_id),
+  ])
   return {
     worker_id: worker.worker_id,
-    task_status: worker.task.status,
-    updated_at: worker.updated_at,
-    ...(mainline
+    ...(mainline?.incarnation_id
       ? {
-          incarnation: {
-            ...(mainline.incarnation_id ? { incarnation_id: mainline.incarnation_id } : {}),
+          mainline: {
+            incarnation_id: mainline.incarnation_id,
             impl: mainline.impl,
-            seq: mainline.seq,
             state: mainline.state,
-            ...(mainline.ended_reason ? { ended_reason: mainline.ended_reason } : {}),
           },
         }
       : {}),
     forks: worker.incarnations
-      .filter((inc) => inc.forked_from !== undefined)
+      .filter((inc) => inc.forked_from !== undefined && inc.incarnation_id !== undefined && inc.query_id !== undefined)
       .map((inc) => ({
-        ...(inc.incarnation_id ? { incarnation_id: inc.incarnation_id } : {}),
-        impl: inc.impl,
-        seq: inc.seq,
+        incarnation_id: inc.incarnation_id!,
+        query_id: inc.query_id!,
         state: inc.state,
-        ...(inc.query_id ? { query_id: inc.query_id } : {}),
-        ...(inc.ended_reason ? { ended_reason: inc.ended_reason } : {}),
       })),
-    ...(latestTurn ? { latest_turn: latestTurn } : {}),
+    ...(latestActivity
+      ? {
+          latest_activity: {
+            activity_id: latestActivity.activity_id,
+            kind: latestActivity.kind,
+            occurred_at: latestActivity.occurred_at,
+          },
+        }
+      : {}),
+    ...(latestTurn ? { latest_turn: { turn_id: latestTurn.turn_id, disposition: latestTurn.disposition } } : {}),
     active_operations: activeOperations,
   }
 }

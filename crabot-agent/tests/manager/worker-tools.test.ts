@@ -6,6 +6,7 @@ import { buildWorkerTools, type WorkerToolsContext } from '../../src/manager/too
 import { WorkerHarness, type HarnessDeps, type SpawnWorkerParams } from '../../src/workers/harness/harness'
 import { LedgerStore } from '../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager'
+import { NativeActivityStore } from '../../src/workers/harness/native-activity-store'
 import type { ManagerKey } from '../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../src/workers/harness/worker-events'
 import { WorkerExitedError } from '../../src/workers/errors'
@@ -269,6 +270,75 @@ describe('worker observation and turn closure', () => {
     const all = await getWorkerActivity.call({ worker_id: worker.worker_id, incarnation_id: incarnationId, after: 'opaque-cursor', view: 'all' }, {})
     expect(all.isError).toBe(false)
     expect(readWorkerActivity).toHaveBeenLastCalledWith({ worker_id: worker.worker_id, incarnation_id: incarnationId, after: 'opaque-cursor', view: 'all' })
+  })
+
+  it('get_worker_state 严格投影协议定义的主线、最新活动和回合字段', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const incarnation = worker.incarnations[0]
+    const activityStore = (harness as unknown as { nativeActivityStore: NativeActivityStore }).nativeActivityStore
+    await activityStore.commitObservation({
+      worker_id: worker.worker_id,
+      cursor: { incarnation_id: incarnation.incarnation_id, impl: incarnation.impl, seq: incarnation.seq, offset: 1 },
+      activity: [{
+        ts: '2026-01-01T00:01:00.000Z',
+        kind: 'message',
+        role: 'assistant',
+        summary: '已完成分析',
+        source_offset: 0,
+      }],
+    })
+    harness.handleStateChange({
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: incarnation.impl,
+      session_ref: incarnation.session_ref,
+    }, 'idle', { completionSource: 'builtin_end_turn' })
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id)) !== undefined)
+
+    const getWorkerState = buildWorkerTools({ harness, context: () => CTX })
+      .find((tool) => tool.name === 'get_worker_state')!
+    const result = await getWorkerState.call({ worker_id: worker.worker_id }, {})
+
+    expect(result.isError).toBe(false)
+    const state = parseOutput(result.output)
+    expect(state).toMatchObject({
+      worker_id: worker.worker_id,
+      mainline: { incarnation_id: incarnation.incarnation_id, impl: 'builtin', state: 'idle' },
+      forks: [],
+      latest_activity: {
+        activity_id: expect.any(String),
+        kind: 'assistant_text',
+        occurred_at: '2026-01-01T00:01:00.000Z',
+      },
+      latest_turn: { turn_id: expect.any(String), disposition: { status: 'pending' } },
+      active_operations: [],
+    })
+    expect(state).not.toHaveProperty('incarnation')
+    expect(state).not.toHaveProperty('task_status')
+    expect(state).not.toHaveProperty('updated_at')
+    expect(state.latest_turn).toEqual({
+      turn_id: expect.any(String),
+      disposition: { status: 'pending' },
+    })
+  })
+
+  it('get_worker_state 的 fork 只暴露协议定义的字段', async () => {
+    const { harness } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const fork = await harness.queryWorker(worker.worker_id, '检查侧问状态')
+    const getWorkerState = buildWorkerTools({ harness, context: () => CTX })
+      .find((tool) => tool.name === 'get_worker_state')!
+
+    const result = await getWorkerState.call({ worker_id: worker.worker_id }, {})
+
+    expect(result.isError).toBe(false)
+    expect(parseOutput(result.output).forks).toEqual([{
+      incarnation_id: expect.any(String),
+      query_id: fork.query_id,
+      state: 'running',
+    }])
   })
 
   it('idle/exited 回合必须在当前 manager episode 成功 send_message 后才能标记已交付', async () => {
@@ -695,7 +765,7 @@ describe('worker control operations', () => {
     const state = await getWorkerState.call({ worker_id: worker.worker_id }, {})
     expect(state.isError).toBe(false)
     expect(parseOutput(state.output)).toMatchObject({
-      task_status: 'running',
+      mainline: { state: 'running' },
       active_operations: [{ kind: 'stop', status: 'executing' }],
     })
 

@@ -83,6 +83,8 @@ import type {
   ForkOptions,
   WorkerTerminalView,
   NormalizedTraceEvent,
+  WorkerActivity,
+  IncarnationId,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import type { ResolvedPermissions } from '../../types'
@@ -2599,6 +2601,11 @@ export class WorkerHarness {
 
   async getWorkerTurn(workerId: string, turnId?: string): Promise<WorkerTurn | undefined> {
     return this.turnStore.get(workerId, turnId)
+  }
+
+  async getLatestWorkerActivity(workerId: string, incarnationId: IncarnationId): Promise<WorkerActivity | undefined> {
+    const latest = (await this.nativeActivityStore.activities(workerId, incarnationId)).at(-1)
+    return latest && projectWorkerActivity([latest], 'all', { worker_id: workerId, incarnation_id: incarnationId })[0]
   }
 
   async getWorkerControlOperations(workerId: string): Promise<WorkerControlOperation[]> {
