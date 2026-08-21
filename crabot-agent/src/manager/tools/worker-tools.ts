@@ -552,7 +552,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       properties: {
         worker_id: { type: 'string', description: '目标 worker id' },
         snapshot_id: { type: 'string', description: 'interaction_required 事件返回的快照 id' },
-        action_id: { type: 'string', description: 'interaction_required 的 available_actions 中一个 action_id' },
+        action_id: { type: 'string', description: 'interaction_required 的 actions 中一个 action_id' },
         text: { type: 'string', description: '仅 text action 需要的明确文本回答' },
       },
       required: ['worker_id', 'snapshot_id', 'action_id'],

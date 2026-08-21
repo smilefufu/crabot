@@ -488,9 +488,9 @@ describe('WorkerHarness.spawnWorker', () => {
       kind: 'interaction_required',
       snapshot_id: expect.any(String),
       snapshot_expires_at: expect.any(String),
-      available_actions: UI_ACTIONS,
+      actions: UI_ACTIONS,
+      text: 'Choose a login method',
     })
-    expect(JSON.stringify(detail)).not.toContain('Choose a login method')
 
     await expect(harness.respondToWorkerUi(worker.worker_id, snapshotId as string, 'unknown')).rejects.toThrow(
       'worker UI action is not available for this snapshot',
@@ -1116,7 +1116,7 @@ describe('WorkerHarness.handleStateChange', () => {
       message: 'Choose',
       title: 'Question',
     })
-    expect(detail).toMatchObject({ snapshot_id: expect.any(String), available_actions: UI_ACTIONS })
+    expect(detail).toMatchObject({ snapshot_id: expect.any(String), actions: UI_ACTIONS })
     expect(detail).not.toHaveProperty('notification')
   })
 

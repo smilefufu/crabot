@@ -351,6 +351,7 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
       notification_type: report.notification.type,
       ...(report.notification.message ? { message: report.notification.message } : {}),
       ...(report.notification.title ? { title: report.notification.title } : {}),
+      text: interactionTerminalText(report.terminal),
     }
   }
   return {
@@ -366,8 +367,15 @@ function uiSnapshotDetail(snapshot: WorkerUiSnapshot | undefined): Record<string
   return {
     snapshot_id: snapshot.snapshot_id,
     snapshot_expires_at: snapshot.expires_at,
-    available_actions: snapshot.actions,
+    actions: snapshot.actions,
   }
+}
+
+function interactionTerminalText(terminal: WorkerTerminalView | undefined): string {
+  if (!terminal) return 'terminal unavailable: no capture was reported'
+  return terminal.kind === 'unavailable'
+    ? `terminal unavailable: ${terminal.unavailable_reason}`
+    : terminal.text
 }
 
 /** Raw keys that explicitly discard the current composer instead of submitting it. */

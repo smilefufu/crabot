@@ -353,7 +353,7 @@ export interface StateChangeReport {
    * 尾一句 text 都没有,`lastText` 与 builtin 的纯文本 artifact 双双为空,`summary` 是它唯一的交付物。
    */
   readonly summary?: string
-  /** 当前终端画面或明确不可用原因；只供显式诊断读取，不进入常规 manager 状态事件。 */
+  /** 当前终端画面或明确不可用原因；仅 `interaction_required` 状态事件可携带这次一次性 capture。 */
   readonly terminal?: WorkerTerminalView
   /** CLI waiting_action / 投递暂扣的诊断原因。 */
   readonly waitReason?: string
