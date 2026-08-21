@@ -609,6 +609,11 @@ export interface HarnessDeps {
   readonly isClosing?: () => boolean
 }
 
+interface WorkerTurnActivityRead {
+  readonly events: NormalizedTraceEvent[]
+  readonly unavailableReason?: string
+}
+
 export interface SpawnWorkerParams {
   readonly managerKey: ManagerKey
   readonly title: string
@@ -2726,23 +2731,52 @@ export class WorkerHarness {
     return { kind: 'text', text }
   }
 
-  async getWorkerTurnActivities(turn: WorkerTurn): Promise<NormalizedTraceEvent[]> {
+  async getWorkerTurnActivities(turn: WorkerTurn): Promise<WorkerTurnActivityRead> {
     const found = await this.deps.ledger.findWorker(turn.worker_id)
-    const incarnation = found && findIncarnation(found.worker, turn.impl, turn.seq)
-    if (!incarnation || !isExecutableIncarnation(incarnation)) return []
-    const adapter = this.deps.adapters.get(turn.impl)
-    if (!adapter?.readTrace) return []
+    const incarnation = found?.worker.incarnations.find(
+      (candidate): candidate is ExecutableIncarnation =>
+        isExecutableIncarnation(candidate) && candidate.incarnation_id === turn.incarnation_id,
+    )
+    if (!incarnation) return { events: [], unavailableReason: 'turn incarnation is unavailable' }
     const from = Number.parseInt(turn.activity_from, 10)
     const through = Number.parseInt(turn.activity_through, 10)
-    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(through) || from < 0 || through < from) return []
-    const trace = await adapter.readTrace({
-      worker_id: turn.worker_id,
-      incarnation_id: turn.incarnation_id,
-      seq: turn.seq,
-      impl: turn.impl,
-      session_ref: incarnation.session_ref,
-    }, { offset: from })
-    return trace.events.filter((event) => event.source_offset === undefined || event.source_offset < through)
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(through) || from < 0 || through < from) {
+      return { events: [], unavailableReason: 'turn activity range is unavailable' }
+    }
+
+    const persistedFallback = async (reason: string): Promise<WorkerTurnActivityRead> => {
+      try {
+        const events = (await this.nativeActivityStore.activities(turn.worker_id, turn.incarnation_id))
+          .filter((activity) => activity.source_offset !== undefined && activity.source_offset >= from && activity.source_offset < through)
+          .map((activity) => ({
+            ts: activity.ts,
+            kind: activity.kind,
+            ...(activity.role ? { role: activity.role } : {}),
+            summary: activity.summary,
+            source: 'native' as const,
+            source_offset: activity.source_offset,
+          }))
+        return events.length > 0 ? { events } : { events: [], unavailableReason: reason }
+      } catch {
+        return { events: [], unavailableReason: `${reason}; persisted activity is unavailable` }
+      }
+    }
+
+    const adapter = this.deps.adapters.get(incarnation.impl)
+    if (!adapter?.readTrace) return persistedFallback('worker adapter does not support structured trace reads')
+    try {
+      const trace = await adapter.readTrace({
+        worker_id: turn.worker_id,
+        incarnation_id: turn.incarnation_id,
+        seq: incarnation.seq,
+        impl: incarnation.impl,
+        session_ref: incarnation.session_ref,
+      }, { offset: from })
+      if (trace.nextCursor.offset < through) return persistedFallback('native turn activity is unavailable')
+      return { events: trace.events.filter((event) => event.source_offset === undefined || event.source_offset < through) }
+    } catch {
+      return persistedFallback('native turn activity is unavailable')
+    }
   }
 
   async resolveWorkerTurn(

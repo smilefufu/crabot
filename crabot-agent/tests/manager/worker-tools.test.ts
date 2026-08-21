@@ -341,6 +341,77 @@ describe('worker observation and turn closure', () => {
     }])
   })
 
+  it('get_worker_turn 在原生 trace 空读时回落到本化身已持久化的活动', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const incarnation = worker.incarnations[0]
+    const activityStore = (harness as unknown as { nativeActivityStore: NativeActivityStore }).nativeActivityStore
+    await activityStore.commitObservation({
+      worker_id: worker.worker_id,
+      cursor: { incarnation_id: incarnation.incarnation_id, impl: incarnation.impl, seq: incarnation.seq, offset: 1 },
+      activity: [{
+        ts: '2026-01-01T00:01:00.000Z',
+        kind: 'message',
+        role: 'assistant',
+        summary: '已持久化的回合结果',
+        source_offset: 0,
+      }],
+    })
+    harness.handleStateChange({
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: incarnation.impl,
+      session_ref: incarnation.session_ref,
+    }, 'idle', { completionSource: 'builtin_end_turn' })
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id)) !== undefined)
+    Object.assign(fake, {
+      readTrace: async () => ({ events: [], nextCursor: { offset: 0 } }),
+    })
+
+    const getWorkerTurn = buildWorkerTools({ harness, context: () => CTX })
+      .find((tool) => tool.name === 'get_worker_turn')!
+    const result = await getWorkerTurn.call({ worker_id: worker.worker_id }, {})
+
+    expect(result.isError).toBe(false)
+    expect(parseOutput(result.output)).toMatchObject({
+      activities: [{
+        kind: 'assistant_text',
+        text: '已持久化的回合结果',
+      }],
+    })
+    expect(parseOutput(result.output)).not.toHaveProperty('unavailable_reason')
+  })
+
+  it('get_worker_turn 无法取得原生或持久活动时显式标记 unavailable', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const incarnation = worker.incarnations[0]
+    const activityStore = (harness as unknown as { nativeActivityStore: NativeActivityStore }).nativeActivityStore
+    await activityStore.commitObservation({
+      worker_id: worker.worker_id,
+      cursor: { incarnation_id: incarnation.incarnation_id, impl: incarnation.impl, seq: incarnation.seq, offset: 1 },
+    })
+    harness.handleStateChange({
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: incarnation.impl,
+      session_ref: incarnation.session_ref,
+    }, 'idle', { completionSource: 'builtin_end_turn' })
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id)) !== undefined)
+
+    const getWorkerTurn = buildWorkerTools({ harness, context: () => CTX })
+      .find((tool) => tool.name === 'get_worker_turn')!
+    const result = await getWorkerTurn.call({ worker_id: worker.worker_id }, {})
+
+    expect(result.isError).toBe(false)
+    expect(parseOutput(result.output)).toMatchObject({
+      activities: [],
+      unavailable_reason: 'worker adapter does not support structured trace reads',
+    })
+  })
+
   it('idle/exited 回合必须在当前 manager episode 成功 send_message 后才能标记已交付', async () => {
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(directSpawnParams())

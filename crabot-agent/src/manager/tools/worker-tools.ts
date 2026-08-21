@@ -484,15 +484,17 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       try {
         await authorizeWorker(worker_id)
         const turn = await harness.getWorkerTurn(worker_id, turn_id)
+        const activity = turn ? await harness.getWorkerTurnActivities(turn) : undefined
         return ok({
           worker_id,
           turn: turn ?? null,
-          activities: turn
-            ? projectWorkerActivity(await harness.getWorkerTurnActivities(turn), 'all', {
+          activities: turn && activity
+            ? projectWorkerActivity(activity.events, 'all', {
                 worker_id,
                 incarnation_id: turn.incarnation_id,
               })
             : [],
+          ...(activity?.unavailableReason ? { unavailable_reason: activity.unavailableReason } : {}),
         })
       } catch (error) {
         return mapError(`get_worker_turn(${worker_id})`, error)
