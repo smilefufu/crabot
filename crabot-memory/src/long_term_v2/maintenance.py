@@ -66,9 +66,13 @@ def _observation_check(store: MemoryStore, index: SqliteIndex, cfg: MaintenanceC
 
         if net < 0:
             entry = store.read(r["status"], r["type"], r["id"])
+            new_obs = entry.frontmatter.observation.model_copy(
+                update={"outcome": "fail"}
+            ) if entry.frontmatter.observation else None
             move_entry(
                 store, index, entry,
                 from_status=r["status"], to_status="trash", now_iso=cfg.now_iso,
+                target_frontmatter_updates={"observation": new_obs},
             )
             trashed += 1
             continue

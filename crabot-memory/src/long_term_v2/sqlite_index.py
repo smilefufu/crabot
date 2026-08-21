@@ -343,14 +343,16 @@ class SqliteIndex:
         self.conn.commit()
 
     def scan_expired_observation(self, now_iso: str) -> list[dict]:
-        """Return entries whose observation window has expired (any outcome).
+        """Return confirmed entries whose pending observation window has expired.
 
         Used by maintenance.observation_check to settle expired entries.
         """
         cur = self.conn.execute(
             "SELECT id, type, status, brief, path, observation_started_at, observation_window_days, "
             "observation_outcome, observation_pass_count, observation_fail_count "
-            "FROM memories WHERE observation_started_at IS NOT NULL"
+            "FROM memories WHERE status = 'confirmed' "
+            "AND observation_started_at IS NOT NULL "
+            "AND (observation_outcome IS NULL OR observation_outcome = 'pending')"
         )
         rows = [dict(r) for r in cur.fetchall()]
         out = []

@@ -28,13 +28,9 @@ async def test_full_self_learning_flow_skeleton(tmp_path):
         # _dispatch returns the inner result dict directly (no data wrapper)
         captured_ids.append(out["id"])
 
-    # 2. 用 update_memory (v2 路由到 update_long_term) 把第一条人工晋升 confirmed maturity
-    #    注意: update_long_term 只更新 frontmatter 字段，不移动 status 目录;
-    #    "update_long_term" 在 dispatch 中注册为 "update_memory"。
-    await mod._dispatch("update_memory", {
-        "id": captured_ids[0],
-        "patch": {"maturity": "confirmed"},
-    })
+    # 2. 用受控状态迁移确认第一条候选。
+    promoted = await mod._dispatch("promote_inbox_entry", {"id": captured_ids[0]})
+    assert promoted == {"id": captured_ids[0], "status": "ok"}
 
     # 3. 写入一条直接进入 confirmed 状态的 fact（bypassing inbox），
     #    使 get_confirmed_snapshot 能找到它。

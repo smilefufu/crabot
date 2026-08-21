@@ -2,11 +2,22 @@
 from .paths import entry_path
 
 
-def move_entry(store, index, entry, *, from_status: str, to_status: str, now_iso: str):
+def move_entry(
+    store,
+    index,
+    entry,
+    *,
+    from_status: str,
+    to_status: str,
+    now_iso: str,
+    target_frontmatter_updates: dict | None = None,
+):
     """Move an entry and keep frontmatter plus SQLite aligned.
 
     File storage and SQLite cannot share a transaction. If indexing fails after the
     move, compensate by restoring the original file and index row before raising.
+    ``target_frontmatter_updates`` is written only at the destination, so that
+    compensation always restores the unmodified source entry.
     """
     if from_status == to_status:
         return entry
@@ -17,6 +28,8 @@ def move_entry(store, index, entry, *, from_status: str, to_status: str, now_iso
         updates = {"inbox_entered_at": None, "trashed_at": now_iso}
     else:
         updates = {"inbox_entered_at": None, "trashed_at": None}
+    if target_frontmatter_updates:
+        updates.update(target_frontmatter_updates)
 
     new_entry = entry.model_copy(update={
         "frontmatter": entry.frontmatter.model_copy(update=updates),

@@ -2,6 +2,7 @@
 import pytest
 
 from src.long_term_v2.maintenance import MaintenanceConfig, run_maintenance
+from src.long_term_v2.lifecycle import move_entry
 from src.long_term_v2.paths import entry_path
 from src.long_term_v2.recall_pipeline import RecallPipeline
 from src.long_term_v2.reranker import FallbackReranker
@@ -12,6 +13,7 @@ from src.long_term_v2.schema import (
     LessonMeta,
     MemoryEntry,
     MemoryFrontmatter,
+    Observation,
     SourceRef,
 )
 from src.long_term_v2.sqlite_index import SqliteIndex
@@ -86,6 +88,39 @@ async def test_trash_and_restore_reset_lifecycle_timestamps(tmp_path):
     restored = store.read("confirmed", "fact", mem_id)
     assert restored.frontmatter.trashed_at is None
     assert restored.frontmatter.inbox_entered_at is None
+
+
+def test_move_entry_restores_source_when_target_update_cannot_be_indexed(tmp_path, monkeypatch):
+    _, store, index = _rpc(tmp_path)
+    entry = _persist(
+        store, index, "restore-original", status="confirmed",
+        observation=Observation(started_at="2026-08-20T00:00:00Z", outcome="pending"),
+    )
+    original_upsert = index.upsert
+
+    def fail_trash_upsert(entry, path, status):
+        if status == "trash":
+            raise RuntimeError("index unavailable")
+        original_upsert(entry, path, status)
+
+    monkeypatch.setattr(index, "upsert", fail_trash_upsert)
+    failed_observation = entry.frontmatter.observation.model_copy(
+        update={"outcome": "fail"}
+    )
+    with pytest.raises(RuntimeError, match="index unavailable"):
+        move_entry(
+            store,
+            index,
+            entry,
+            from_status="confirmed",
+            to_status="trash",
+            now_iso="2026-08-21T00:00:00Z",
+            target_frontmatter_updates={"observation": failed_observation},
+        )
+
+    restored = store.read("confirmed", "fact", "restore-original")
+    assert restored.frontmatter.observation.outcome == "pending"
+    assert index.locate("restore-original")["status"] == "confirmed"
 
 
 @pytest.mark.asyncio

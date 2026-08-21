@@ -65,6 +65,35 @@ def test_observation_fail_moves_to_trash(tmp_path):
     assert loc[0] == "trash"
 
 
+def test_observation_fail_is_settled_and_not_rescanned(tmp_path):
+    store = MemoryStore(str(tmp_path / "long_term"))
+    index = SqliteIndex(str(tmp_path / "v2.db"))
+    _write(store, index, "f2-settled", "fact", "confirmed", "confirmed",
+           observation=Observation(started_at="2026-04-01T00:00:00Z", window_days=7,
+                             outcome="pending"))
+    index.bump_observation_counter("f2-settled", column="observation_fail_count", delta=1)
+
+    run_maintenance(
+        store, index, scope="observation_check",
+        config=MaintenanceConfig(now_iso="2026-04-23T00:00:00Z"),
+    )
+
+    entry = store.read("trash", "fact", "f2-settled")
+    assert entry.frontmatter.observation.outcome == "fail"
+    assert index.list_active_observation() == []
+
+    report = run_maintenance(
+        store, index, scope="observation_check",
+        config=MaintenanceConfig(now_iso="2026-05-01T00:00:00Z"),
+    )
+    assert report["observation_check"] == {
+        "passed": 0,
+        "rolled_back": 0,
+        "trashed": 0,
+        "pending_extended": 0,
+    }
+
+
 def test_stale_aging_marks_stale_facts(tmp_path):
     store = MemoryStore(str(tmp_path / "long_term"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
