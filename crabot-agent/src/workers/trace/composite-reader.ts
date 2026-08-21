@@ -217,7 +217,10 @@ export async function readCompositeWorkerTrace(
   let unavailableReason: string | undefined
 
   if (isLegacyIncarnation(incarnation)) {
-    const legacy = await readLegacyTraceEvents(deps.legacyTraceDir, worker.legacy_source?.trace_ids ?? [])
+    const traceIds = worker.legacy_source?.kind === 'v2_admin_task'
+      ? worker.legacy_source.trace_ids
+      : []
+    const legacy = await readLegacyTraceEvents(deps.legacyTraceDir, traceIds)
     const entries: LegacyTraceEventEntry[] = legacy.entries
     const legacyLimit = replayBound ? Math.min(replayBound.legacy, entries.length) : entries.length
     for (let index = positions.legacy; index < legacyLimit; index++) {

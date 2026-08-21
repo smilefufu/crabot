@@ -448,8 +448,11 @@ async function appendImportEventOnce(
   traceCount: number,
   importedAt: string,
 ): Promise<void> {
+  if (worker.legacy_source?.kind !== 'v2_admin_task') {
+    throw new Error(`[legacy-import] worker ${worker.worker_id} is not a v2 legacy import`)
+  }
   const expected = {
-    admin_task_id: worker.legacy_source!.admin_task_id,
+    admin_task_id: worker.legacy_source.admin_task_id,
     trace_count: traceCount,
     imported_at: importedAt,
   }

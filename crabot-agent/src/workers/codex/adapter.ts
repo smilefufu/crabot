@@ -33,6 +33,7 @@ import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-co
 import { parseRawControlKeys } from '../tmux/raw-control.js'
 import { DEFAULT_PASTE_READY_TIMEOUT_MS, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel } from '../cli-events.js'
+import { watchNativeSessionFile } from '../native-session-watch.js'
 import { OutputLog } from '../output-log.js'
 import type { TmuxControlEndpoint } from '../tmux/control-monitor.js'
 import { readFinalTerminalSnapshot, writeFinalTerminalSnapshot } from '../tmux/terminal-snapshot.js'
@@ -283,7 +284,7 @@ interface Runtime {
   acceptedExitReport?: StateChangeReport
   stopEventWatch?: () => Promise<void>
   eventWatchDrain?: Promise<void>
-  tracePoll?: ReturnType<typeof setInterval>
+  stopTraceWatch?: () => void
   interactionFingerprint?: string
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin/cc 同款语义(P2 review #2)。 */
@@ -994,6 +995,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     } else {
       await this.transitionControlState(runtime, discoveredHandle, runtime.controlState, undefined, false)
     }
+    this.startNativeTraceWatch(runtime, discoveredHandle)
     return discoveredHandle
   }
 
@@ -2101,30 +2103,28 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         console.error(`[CodexWorkerAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
       })
     }, { offset: runtime.eventWatchOffset })
-    this.startNativeTracePoll(runtime, h)
+    this.startNativeTraceWatch(runtime, h)
   }
 
-  private startNativeTracePoll(runtime: Runtime, h: IncarnationHandle): void {
-    if (runtime.tracePoll || !this.deps.onNativeActivity) return
-    const poll = () => {
-      if (this.closing || runtime.controlState.kind === 'exited') return
-      try {
-        this.deps.onNativeActivity?.({ ...h, session_ref: runtime.sessionId })
-      } catch (error) {
-        console.error(`[CodexWorkerAdapter] native trace activity callback failed for ${h.worker_id}#${h.seq}:`, error)
-      }
-    }
-    poll()
-    runtime.tracePoll = setInterval(poll, 2_000)
-    runtime.tracePoll.unref?.()
+  private startNativeTraceWatch(runtime: Runtime, h: IncarnationHandle): void {
+    if (runtime.stopTraceWatch || !this.deps.onNativeActivity || !runtime.rolloutPath) return
+    runtime.stopTraceWatch = watchNativeSessionFile(
+      () => runtime.rolloutPath,
+      () => {
+        if (this.closing || runtime.controlState.kind === 'exited') return
+        try {
+          this.deps.onNativeActivity?.({ ...h, session_ref: runtime.sessionId })
+        } catch (error) {
+          console.error(`[CodexWorkerAdapter] native trace activity callback failed for ${h.worker_id}#${h.seq}:`, error)
+        }
+      },
+    )
   }
 
   private async stopEventWatch(runtime: Runtime, waitForDrain = false): Promise<void> {
     runtime.interactionFingerprint = undefined
-    if (runtime.tracePoll) {
-      clearInterval(runtime.tracePoll)
-      runtime.tracePoll = undefined
-    }
+    runtime.stopTraceWatch?.()
+    runtime.stopTraceWatch = undefined
     if (runtime.stopEventWatch) {
       const stop = runtime.stopEventWatch
       runtime.stopEventWatch = undefined

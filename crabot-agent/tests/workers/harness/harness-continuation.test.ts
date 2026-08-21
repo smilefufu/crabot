@@ -10,7 +10,7 @@ import {
   type HarnessDeps,
   type SpawnWorkerParams,
 } from '../../../src/workers/harness/harness'
-import { LedgerStore } from '../../../src/workers/harness/ledger-store'
+import { LedgerStore, managerKeyToFilename } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import type { LedgerWorker, ManagerKey } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
@@ -255,7 +255,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  await fs.rm(dataDir, { recursive: true, force: true })
+  await fs.rm(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 })
 })
 
 async function waitUntil(cond: () => Promise<boolean>, timeoutMs = 2000, intervalMs = 10): Promise<void> {
@@ -1413,6 +1413,12 @@ describe('BuiltinWorkerAdapter → WorkerHarness — session_ref 时效性修复
     const [afterSecondBurst] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(afterFirstBurstRef)
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(spawnTimeSessionRef)
+    await waitUntil(async () => events.filter((event) =>
+      event.worker_id === worker.worker_id &&
+      event.kind === 'state_changed' &&
+      event.detail?.to === 'idle',
+    ).length === 2)
+    await builtinAdapter.dispose()
   })
 })
 
@@ -2435,6 +2441,55 @@ describe('legacy incarnation guardrails', () => {
     expect(JSON.stringify(handoff)).not.toContain('resume_checkpoint')
     await expect(fs.stat(join(dataDir, 'workspace', 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(events.some((event) => event.kind === 'handoff_started')).toBe(true)
+  })
+
+  it('歧义 v3 历史先归档，再只用归档台账和持久 activity 生成 handoff', async () => {
+    const { harness, ledger, adaptersMap, workersDir } = await makeHarness({
+      validateLegacyContinuationAuth: async () => true,
+    })
+    const workerId = 'w-ambiguous-v3-legacy'
+    const workspace = join(dataDir, 'workspace')
+    const at = now()
+    const originalIncarnations = [
+      { impl: 'builtin', seq: 1, state: 'exited', workspace, started_at: at, ended_at: at, ended_reason: 'completed', session_ref: 'builtin-1' },
+      { impl: 'claude-code', seq: 1, state: 'exited', workspace, started_at: at, ended_at: at, ended_reason: 'completed', session_ref: 'claude-1' },
+      { impl: 'claude-code', seq: 2, state: 'running', workspace, started_at: at, session_ref: 'claude-2', forked_from: 1 },
+    ]
+    await fs.mkdir(join(dataDir, 'ledgers'), { recursive: true })
+    await fs.mkdir(workspace, { recursive: true })
+    await fs.writeFile(join(dataDir, 'ledgers', managerKeyToFilename(managerKey)), JSON.stringify({
+      manager_key: managerKey,
+      workers: [{
+        worker_id: workerId,
+        manager_key: managerKey,
+        task: { id: workerId, title: 'ambiguous history', status: 'running', created_at: at },
+        origin: { trigger_type: 'system' },
+        report_to: { channel_id: 'test', session_id: 'legacy-session' },
+        incarnations: originalIncarnations,
+        updated_at: at,
+      }],
+    }))
+    const archived = (await ledger.findWorker(workerId))!.worker
+    const legacy = archived.incarnations[0]
+    expect(archived.legacy_source).toMatchObject({ kind: 'ambiguous_v3_ledger', original_incarnations: originalIncarnations })
+    const internals = harness as unknown as { nativeActivityStore: { commitObservation(params: unknown): Promise<void> } }
+    await internals.nativeActivityStore.commitObservation({
+      worker_id: workerId,
+      cursor: { incarnation_id: legacy.incarnation_id, impl: 'legacy', seq: 1, offset: 1 },
+      activity: [{ ts: at, kind: 'message', role: 'assistant', summary: 'persisted activity survives the archived source' }],
+    })
+    const target = new FakeAdapter({ implId: 'builtin', onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', target)
+    const adapterGet = vi.spyOn(adaptersMap, 'get')
+
+    await harness.sendToWorker(workerId, 'continue from archive', { legacyContinuationAuth: continuationAuth() })
+
+    expect(target.spawnCalls).toHaveLength(1)
+    expect(adapterGet.mock.calls.some(([impl]) => String(impl) === 'legacy')).toBe(false)
+    const handoff = await readHandoffPackage(workersDir, workerId, target.spawnCalls[0].prompt)
+    expect(handoff.sources).toEqual(expect.arrayContaining(['ledger', 'persisted_activity']))
+    expect(JSON.stringify(handoff)).toContain('Archived source: claude-code#2 running forked_from=1')
+    expect(JSON.stringify(handoff)).toContain('persisted activity survives the archived source')
   })
 
   it('invalid auth settles and does not block a later valid continuation', async () => {

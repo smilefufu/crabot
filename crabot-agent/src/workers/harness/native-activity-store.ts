@@ -25,6 +25,10 @@ export interface PendingActivityNotification {
   readonly preview: string
   readonly event: HarnessEvent
   readonly event_written: boolean
+  /** Number of attempts that did not produce a durable Manager consumption acknowledgement. */
+  readonly attempts: number
+  /** The earliest next attempt after an unconsumed delivery. Omitted means first delivery is due. */
+  readonly retry_after_at?: string
   readonly consumed_at?: string
 }
 
@@ -90,13 +94,14 @@ export class NativeActivityStore {
     )
   }
 
-  async record(params: Omit<PendingActivityNotification, 'notification_id' | 'event_written' | 'consumed_at'>): Promise<PendingActivityNotification> {
+  async record(params: Omit<PendingActivityNotification, 'notification_id' | 'event_written' | 'attempts' | 'retry_after_at' | 'consumed_at'>): Promise<PendingActivityNotification> {
     return this.mutex(params.worker_id).run(async () => {
       const state = await this.read(params.worker_id)
       const notification: PendingActivityNotification = {
         ...params,
         notification_id: randomUUID(),
         event_written: false,
+        attempts: 0,
       }
       await this.write(params.worker_id, {
         ...state,
@@ -110,7 +115,7 @@ export class NativeActivityStore {
     readonly worker_id: string
     readonly cursor: NativeActivityCursor
     readonly activity?: ReadonlyArray<NormalizedTraceEvent>
-    readonly notification?: Omit<PendingActivityNotification, 'notification_id' | 'event_written' | 'consumed_at'>
+    readonly notification?: Omit<PendingActivityNotification, 'notification_id' | 'event_written' | 'attempts' | 'retry_after_at' | 'consumed_at'>
   }): Promise<PendingActivityNotification | undefined> {
     return this.mutex(params.worker_id).run(async () => {
       const state = await this.read(params.worker_id)
@@ -152,6 +157,7 @@ export class NativeActivityStore {
         ...incoming,
         notification_id: randomUUID(),
         event_written: false,
+        attempts: 0,
       }
       await this.write(params.worker_id, {
         ...state,
@@ -169,12 +175,48 @@ export class NativeActivityStore {
     )
   }
 
+  async due(workerId: string, now: string): Promise<PendingActivityNotification[]> {
+    const nowMs = Date.parse(now)
+    return this.mutex(workerId).run(async () =>
+      (await this.read(workerId)).notifications.filter((item) =>
+        item.consumed_at === undefined &&
+        (item.retry_after_at === undefined || !Number.isFinite(Date.parse(item.retry_after_at)) || Date.parse(item.retry_after_at) <= nowMs),
+      ),
+    )
+  }
+
   async markEventWritten(workerId: string, notificationId: string): Promise<void> {
     await this.patchNotification(workerId, notificationId, (item) => ({ ...item, event_written: true }))
   }
 
-  async markConsumed(workerId: string, notificationId: string, consumedAt: string): Promise<void> {
-    await this.patchNotification(workerId, notificationId, (item) => ({ ...item, consumed_at: consumedAt }))
+  /** Do not let an acknowledgement for an older activity range consume a merged newer range. */
+  async markConsumedIfUnchanged(
+    workerId: string,
+    notificationId: string,
+    activityThrough: string,
+    consumedAt: string,
+  ): Promise<boolean> {
+    return this.mutex(workerId).run(async () => {
+      const state = await this.read(workerId)
+      const index = state.notifications.findIndex((item) => item.notification_id === notificationId)
+      const notification = index < 0 ? undefined : state.notifications[index]
+      if (!notification || notification.consumed_at !== undefined || notification.activity_through !== activityThrough) return false
+      const notifications = [...state.notifications]
+      notifications[index] = { ...notification, consumed_at: consumedAt }
+      await this.write(workerId, { ...state, notifications })
+      return true
+    })
+  }
+
+  async markDeliveryAttempt(workerId: string, notificationId: string, attemptedAt: string): Promise<void> {
+    await this.patchNotification(workerId, notificationId, (item) => {
+      const attempts = (item.attempts ?? 0) + 1
+      return {
+        ...item,
+        attempts,
+        retry_after_at: new Date(Date.parse(attemptedAt) + retryDelayMs(attempts)).toISOString(),
+      }
+    })
   }
 
   private async patchNotification(
@@ -252,6 +294,11 @@ function mergeActivities(
     next.push(item)
   }
   return next
+}
+
+function retryDelayMs(attempts: number): number {
+  const schedule = [30_000, 60_000, 120_000, 300_000]
+  return schedule[Math.min(Math.max(attempts - 1, 0), schedule.length - 1)]
 }
 
 function activityKey(item: PersistedNativeActivity): string {

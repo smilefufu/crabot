@@ -1653,6 +1653,9 @@ export class WorkerHarness {
           })
         : undefined
       const legacyIncarnationId = requireStableIncarnationId(legacy, worker.worker_id)
+      const persistedActivity = worker.legacy_source?.kind === 'ambiguous_v3_ledger'
+        ? await this.nativeActivityStore.activities(worker.worker_id, legacyIncarnationId)
+        : material.events
       const handoff = await writeHandoffPackage({
         workersDir: this.deps.workersDir,
         workerId: worker.worker_id,
@@ -1661,7 +1664,7 @@ export class WorkerHarness {
         createdAt: handoffAt,
         evidence: [
           ...ledgerHandoffEvidence(worker, legacy),
-          ...traceHandoffEvidence('persisted_activity', legacyIncarnationId, material.events),
+          ...traceHandoffEvidence('persisted_activity', legacyIncarnationId, persistedActivity),
         ],
       })
       await this.contextStore.write(worker.worker_id, {
@@ -1782,6 +1785,9 @@ export class WorkerHarness {
     readonly events: ReadonlyArray<NormalizedTraceEvent>
     readonly workspaceCandidate: string
   }> {
+    if (worker.legacy_source?.kind === 'ambiguous_v3_ledger') {
+      return { events: [], workspaceCandidate: fallbackWorkspace }
+    }
     const snapshotPath = join(this.deps.workersDir, worker.worker_id, 'legacy-task.json')
     let snapshot: Record<string, unknown> | undefined
     try {
@@ -2934,7 +2940,8 @@ export class WorkerHarness {
     await this.withLock(h.worker_id, async () => {
       const found = await this.deps.ledger.findWorker(h.worker_id)
       const incarnation = found && findIncarnation(found.worker, h.impl, h.seq)
-      if (!found || !incarnation || !isExecutableIncarnation(incarnation)) return
+      if (!found || isTerminalStatus(found.worker.task.status) || !incarnation ||
+        !isExecutableIncarnation(incarnation) || incarnation.state === 'exited') return
       await this.collectNativeActivityLocked({
         ...h,
         incarnation_id: incarnation.incarnation_id,
@@ -2964,6 +2971,7 @@ export class WorkerHarness {
       })
       return
     }
+    if (trace.nextCursor.offset === offset) return
     const assistant = projectWorkerActivity(trace.events, 'assistant', {
       worker_id: h.worker_id,
       incarnation_id: h.incarnation_id,
@@ -3022,7 +3030,7 @@ export class WorkerHarness {
     const mutex = this.nativeActivityNotificationMutexes.get(workerId) ?? new AsyncMutex()
     this.nativeActivityNotificationMutexes.set(workerId, mutex)
     await mutex.run(async () => {
-      for (const notification of await this.nativeActivityStore.pending(workerId)) {
+      for (const notification of await this.nativeActivityStore.due(workerId, this.deps.now())) {
         try {
           if (!notification.event_written) {
             await this.getEventLog(workerId).append(notification.event)
@@ -3030,9 +3038,21 @@ export class WorkerHarness {
           }
           const delivery = await notify(notification.manager_key, notification.event)
           if (delivery?.consumed) {
-            await this.nativeActivityStore.markConsumed(workerId, notification.notification_id, this.deps.now())
+            await this.nativeActivityStore.markConsumedIfUnchanged(
+              workerId,
+              notification.notification_id,
+              notification.activity_through,
+              this.deps.now(),
+            )
+          } else {
+            await this.nativeActivityStore.markDeliveryAttempt(workerId, notification.notification_id, this.deps.now())
           }
         } catch (error) {
+          try {
+            await this.nativeActivityStore.markDeliveryAttempt(workerId, notification.notification_id, this.deps.now())
+          } catch (markError) {
+            console.error(`[WorkerHarness] native activity retry scheduling failed for ${notification.notification_id}:`, markError)
+          }
           console.error(`[WorkerHarness] native activity notification failed for ${notification.notification_id}:`, error)
         }
       }
@@ -3601,7 +3621,20 @@ export class WorkerHarness {
       await this.reconcileQueryEstablishmentOperations()
       await this.deliverQueryOperationNotifications()
       await this.reconcileControlOperationsOnStartup()
-      for (const { worker } of await this.deps.ledger.listAllWorkers()) {
+      const allWorkers = await this.deps.ledger.listAllWorkers()
+      for (const { worker } of allWorkers) {
+        if (isTerminalStatus(worker.task.status)) continue
+        for (const incarnation of worker.incarnations) {
+          if (!isExecutableIncarnation(incarnation) || incarnation.state === 'exited') continue
+          if (incarnation.impl !== 'claude-code' && incarnation.impl !== 'codex') continue
+          try {
+            await this.collectNativeActivity(handleForIncarnation(worker.worker_id, incarnation))
+          } catch (error) {
+            console.error(`[WorkerHarness] native activity sweep reconciliation failed for ${worker.worker_id}#${incarnation.seq}:`, error)
+          }
+        }
+      }
+      for (const { worker } of allWorkers) {
         await this.deliverNativeActivityNotifications(worker.worker_id)
       }
       await this.sweepSupervision()
@@ -5300,6 +5333,14 @@ function ledgerHandoffEvidence(worker: LedgerWorker, source: Incarnation): Hando
       reference: `incarnation:${sourceId}:outcome`,
       summary: `Source outcome: ${worker.task.outcome ?? source.ended_reason ?? 'unknown'}`,
     },
+    ...(worker.legacy_source?.kind === 'ambiguous_v3_ledger'
+      ? worker.legacy_source.original_incarnations.map((incarnation, index) => ({
+          source: 'ledger' as const,
+          reference: `archive:${sourceId}:incarnation:${index + 1}`,
+          summary: `Archived source: ${incarnation.impl}#${incarnation.seq} ${incarnation.state}` +
+            (incarnation.forked_from === undefined ? '' : ` forked_from=${incarnation.forked_from}`),
+        }))
+      : []),
   ]
 }
 

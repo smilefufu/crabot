@@ -47,12 +47,38 @@ export function isExecutableIncarnation(incarnation: Incarnation): incarnation i
   return incarnation.impl !== 'legacy'
 }
 
-export interface LegacySourceRef {
+export interface V2LegacySourceRef {
   kind: 'v2_admin_task'
   admin_task_id: TaskId
   trace_ids: string[]
   imported_at: string
 }
+
+/** Old physical ledger data retained only as audit/handoff evidence. */
+export interface LegacyArchivedIncarnation {
+  incarnation_id?: IncarnationId
+  seq: number
+  impl: WorkerImplId
+  state: WorkerContractState
+  workspace: string
+  workspace_instructions?: WorkspaceInstructionSnapshot
+  started_at: string
+  ended_at?: string
+  ended_reason?: IncarnationEndReason
+  forked_from?: number | IncarnationId
+  query_id?: string
+  session_ref: string
+  tmux_session?: string
+}
+
+export interface AmbiguousV3LedgerArchiveSource {
+  kind: 'ambiguous_v3_ledger'
+  archived_at: string
+  reason: 'ambiguous_numeric_forked_from'
+  original_incarnations: LegacyArchivedIncarnation[]
+}
+
+export type LegacySourceRef = V2LegacySourceRef | AmbiguousV3LedgerArchiveSource
 
 export interface WorkerSupervision {
   version: 1

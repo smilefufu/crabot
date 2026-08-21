@@ -627,8 +627,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 export async function reconcileManagerStack(stack: ManagerStack): Promise<ReconcileReport> {
   await stack.principals.init()
   await BuiltinWorkerAdapter.scanOrphans(stack.builtinDataDir)
-  // CLI 重建 runtime 时会立即启动原生活动轮询；先建立缺失的 high-water，才能避免首次轮询把
-  // 升级前会话重放成新 activity。
+  // CLI 重建 runtime 时会重新安装原生 session 的追加监听；先建立缺失的 high-water，才能避免
+  // 第一次追加回调把升级前会话重放成新 activity。
   await stack.harness.reconcileNativeActivityOnStartup()
   const report = await stack.harness.reconcileOnStartup()
   await stack.harness.reconcileInputDeliveriesOnStartup()

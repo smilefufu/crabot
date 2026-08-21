@@ -156,6 +156,46 @@ describe('LedgerStore', () => {
     await expect(corrupt.getLedger(key)).rejects.toThrow('invalid legacy worker')
   })
 
+  it('同 seq 的 numeric fork 歧义会原子归档 worker，不让整份台账不可读', async () => {
+    const key = 'test::ambiguous-v3' as ManagerKey
+    const at = '2026-08-20T00:00:00.000Z'
+    const originalIncarnations = [
+      { impl: 'builtin', seq: 1, state: 'exited', workspace: '/first', started_at: at, ended_at: at, ended_reason: 'completed', session_ref: 'builtin-1' },
+      { impl: 'claude-code', seq: 1, state: 'exited', workspace: '/latest', started_at: at, ended_at: at, ended_reason: 'completed', session_ref: 'claude-1' },
+      { impl: 'claude-code', seq: 2, state: 'running', workspace: '/latest', started_at: at, session_ref: 'claude-2', forked_from: 1 },
+    ]
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(join(dir, managerKeyToFilename(key)), JSON.stringify({
+      manager_key: key,
+      workers: [makeWorker('w-ambiguous-v3', {
+        manager_key: key,
+        task: { id: 'w-ambiguous-v3' as never, title: 'old', status: 'running', created_at: at },
+        incarnations: originalIncarnations,
+      })],
+    }))
+
+    const ledger = await store.getLedger(key)
+    const archived = ledger.workers[0]
+    expect(archived.task.status).toBe('failed')
+    expect(archived.incarnations).toEqual([expect.objectContaining({
+      impl: 'legacy',
+      state: 'exited',
+      ended_reason: 'pre_migration',
+      workspace: '/latest',
+    })])
+    expect(archived.legacy_source).toMatchObject({
+      kind: 'ambiguous_v3_ledger',
+      original_incarnations: originalIncarnations,
+    })
+
+    const persisted = JSON.parse(await fs.readFile(join(dir, managerKeyToFilename(key)), 'utf8'))
+    expect(persisted.workers[0]).toMatchObject({
+      task: { status: 'failed' },
+      legacy_source: { kind: 'ambiguous_v3_ledger', original_incarnations: originalIncarnations },
+    })
+    await expect(new LedgerStore(dir).getLedger(key)).resolves.toEqual(ledger)
+  })
+
   it('init 扫描遇到坏 JSON 文件时 fail loud，不继续建立不完整索引', async () => {
     const badId = `test::friend-good` as ManagerKey
     await fs.writeFile(join(dir, managerKeyToFilename(badId)), 'not json', 'utf-8')
