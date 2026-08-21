@@ -714,7 +714,7 @@ class LongTermV2Rpc:
         return {"items": items}
 
     async def restore_memory(self, params: dict) -> dict:
-        """从 trash 恢复到 inbox。"""
+        """Admin 明确恢复：从 trash 直接确认到 confirmed。"""
         mem_id = params["id"]
         loc = self.index.locate(mem_id)
         if not loc:
@@ -722,11 +722,11 @@ class LongTermV2Rpc:
         status = loc["status"] if hasattr(loc, "keys") else loc[0]
         type_ = loc["type"] if hasattr(loc, "keys") else loc[1]
         if status != "trash":
-            return {"error": "not in trash"}
+            return {"error": "INVALID_STATE"}
         entry = self.store.read("trash", type_, mem_id)
         move_entry(
             self.store, self.index, entry,
-            from_status="trash", to_status="inbox",
+            from_status="trash", to_status="confirmed",
             now_iso=params.get("now_iso") or utc_now_iso_z(),
         )
         return {"id": mem_id, "status": "ok"}

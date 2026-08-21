@@ -6148,7 +6148,7 @@ export class AdminModule extends ModuleBase {
         task_template: {
           type: 'daily_reflection',
           title: '每日反思 — {{date}}',
-          description: '这是 Manager 直接执行的每日反思，不调用 Skill，也不把 memory 写入委派给 Worker。反思时间范围：{{watermark}} 到 {{datetime}}。标准流程：1）读取本周期任务和 trace，筛选失败、异常轮数、负面反馈和可复用成功经验；可委派普通 Worker 分析单条 trace，但它只返回结论；2）用 list_entries(status:"inbox") 按 ingestion_time 最早优先处理候选；3）有价值 fact/concept 先做 PE 比对再 promote_inbox_entry，lesson case 也用 promote_inbox_entry；4）重复、无价值或证据不足候选用 delete_memory 移 trash，不把“留待下次”作为常规结果；5）同 scenario、同 outcome 的至少三条 confirmed lesson case 用 promote_to_rule，source case 保持 confirmed 但 maturity=retired；6）输出结构化 task outcome。不得调用 run_maintenance(all)；机械维护只由凌晨 04:00 的 memory_maintenance 执行。只在有符合既有阈值的人类可读发现时 send_master_private 一句摘要，禁止外发 trace、Evolution Mode 或数字明细。',
+          description: '这是 Manager 直接执行的每日反思，不调用 Skill，也不把 memory 写入委派给 Worker。反思时间范围：{{watermark}} 到 {{datetime}}。标准流程：1）读取本周期任务和 trace，筛选失败、异常轮数、负面反馈和可复用成功经验；可委派普通 Worker 分析单条 trace，但它只返回结论；2）用 list_entries(status:"inbox") 按 ingestion_time 最早优先处理候选；3）有价值 fact/concept 先做 PE 比对再 promote_inbox_entry，lesson case 也用 promote_inbox_entry；4）重复、无价值或证据不足候选用 delete_memory 移 trash，不把“留待下次”作为常规结果；5）同 scenario、同 outcome 的至少三条 confirmed lesson case 用 promote_to_rule，source case 保持 confirmed 但 maturity=retired；6）输出结构化 task outcome。不得调用 run_maintenance(all)；机械维护只由凌晨 04:00 的 memory_maintenance 执行。只在有符合既有阈值的人类可读发现时调用 send_daily_reflection_summary 一句摘要；它只投递到 Admin Web 系统任务线程，禁止外发 trace、Evolution Mode 或数字明细。',
           priority: 'low',
           tags: ['daily_reflection', 'builtin'],
         },

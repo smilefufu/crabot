@@ -68,6 +68,8 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
     expect(dailyReflection!.task_template.type).toBe('daily_reflection')
     expect(dailyReflection!.task_template.description).toContain('Manager 直接执行')
     expect(dailyReflection!.task_template.description).not.toContain('Skill("daily-reflection")')
+    expect(dailyReflection!.task_template.description).toContain('send_daily_reflection_summary')
+    expect(dailyReflection!.task_template.description).not.toContain('send_master_private')
   })
 
   it('should seed 记忆维护 (cron, 0 4 * * *)', async () => {

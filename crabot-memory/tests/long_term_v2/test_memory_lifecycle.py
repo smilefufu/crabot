@@ -83,9 +83,9 @@ async def test_trash_and_restore_reset_lifecycle_timestamps(tmp_path):
     assert trashed.frontmatter.inbox_entered_at is None
 
     await rpc.restore_memory({"id": mem_id, "now_iso": "2026-08-20T04:00:00Z"})
-    restored = store.read("inbox", "fact", mem_id)
+    restored = store.read("confirmed", "fact", mem_id)
     assert restored.frontmatter.trashed_at is None
-    assert restored.frontmatter.inbox_entered_at == "2026-08-20T04:00:00Z"
+    assert restored.frontmatter.inbox_entered_at is None
 
 
 @pytest.mark.asyncio

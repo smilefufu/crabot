@@ -118,6 +118,46 @@ describe('buildManagerToolFace', () => {
     expect(systemNames).toEqual([...normalNames, 'send_master_private'].sort())
   })
 
+  it('builtin daily reflection 只暴露固定 Admin Web 摘要动作', async () => {
+    const call = vi.fn(async () => ({
+      platform_message_id: 'pm-daily',
+      sent_at: '2026-08-21T02:00:00.000Z',
+    }))
+    const tools = buildManagerToolFace(makeDeps({
+      isSystemThread: true,
+      isBuiltinDailyReflection: true,
+      messagingDeps: makeMessagingDeps({
+        rpcClient: { call } as never,
+        resolveChannelPort: async (channelId: string) => channelId === 'admin-web' ? 19001 : 19009,
+      }),
+    }))
+    const names = tools.map((tool) => tool.name)
+
+    expect(names).toContain('send_daily_reflection_summary')
+    for (const forbidden of [
+      'send_message', 'send_private_message', 'send_master_private', 'lookup_friend',
+      'list_sessions', 'list_contacts', 'list_groups', 'list_group_members', 'fetch_media',
+    ]) {
+      expect(names).not.toContain(forbidden)
+    }
+
+    const summary = tools.find((tool) => tool.name === 'send_daily_reflection_summary')!
+    const schema = summary.inputSchema as { properties?: Record<string, unknown> }
+    expect(Object.keys(schema.properties ?? {})).toEqual(['content'])
+
+    const result = await summary.call({ content: '今日无重大变化。' }, {} as never)
+    expect(result.isError).toBe(false)
+    expect(call).toHaveBeenCalledWith(
+      19001,
+      'send_message',
+      {
+        session_id: 'system-tasks',
+        content: { type: 'text', text: '今日无重大变化。' },
+      },
+      'manager-test',
+    )
+  })
+
   it('存在飞书 channel 实例时：两类 manager 都多出 §2.10 只读三件套，都不含 feishu_write', () => {
     for (const isSystemThread of [false, true]) {
       const tools = buildManagerToolFace(makeDeps({

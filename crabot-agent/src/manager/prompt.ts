@@ -13,6 +13,8 @@ import type { ManagerKey } from './types.js'
 export interface PromptInputs {
   readonly managerKey: ManagerKey
   readonly isSystemThread: boolean
+  /** builtin daily reflection uses a fixed Admin Web delivery action. */
+  readonly isBuiltinDailyReflection?: boolean
   /** 对话对象档案：friend 资料/权限/关系要点（来自 ContextAssembler 的 scene_profile 或 admin） */
   readonly dialogProfile?: string
 }
@@ -77,6 +79,12 @@ const SYSTEM_THREAD_REACH_MASTER = `## 系统线程纪律（reach_master）
 
 **只有需要人类立即注意时才 reach_master**：任务失败卡死、需要人类授权或决策，才用 \`send_master_private\` 把消息投到人类活跃的会话或偏好私聊——这是唯一该主动找人类的场景，不要滥用。`
 
+const DAILY_REFLECTION_DELIVERY_DISCIPLINE = `## 每日反思投递纪律
+
+这是 builtin 每日反思。不要调用或寻找 \`send_message\`、\`send_private_message\`、\`send_master_private\`，也不要查询联系人、会话或群组。
+
+仅在需要向人类报告时调用 \`send_daily_reflection_summary\`；它会把一段人类可读的文本固定投递到 Admin Web 的系统任务线程。直接输出 assistant text 不会送达任何人。`
+
 function buildDialogProfileSection(dialogProfile: string): string {
   return `## 对话对象档案\n\n${dialogProfile}`
 }
@@ -91,7 +99,9 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
 
   const parts: string[] = [identityWithKey]
 
-  if (inputs.isSystemThread) {
+  if (inputs.isBuiltinDailyReflection) {
+    parts.push(DAILY_REFLECTION_DELIVERY_DISCIPLINE)
+  } else if (inputs.isSystemThread) {
     parts.push(SYSTEM_THREAD_REACH_MASTER)
   }
 

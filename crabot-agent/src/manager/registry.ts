@@ -68,6 +68,7 @@ export const MAX_SELF_WAKE_CHAIN = 3
 export interface ScheduleIdentity {
   readonly creatorFriendId?: string
   readonly isBuiltin?: boolean
+  readonly taskType?: string
 }
 
 export interface ManagerRegistryDeps {
@@ -414,6 +415,7 @@ export class ManagerRegistry {
     scheduleId: string
     title: string
     description: string
+    taskType?: string
     targetSession?: { channel_id: string; session_id: string }
     creatorFriendId?: string
     isBuiltin?: boolean
@@ -427,6 +429,7 @@ export class ManagerRegistry {
       scheduleId: p.scheduleId,
       title: p.title,
       description: p.description,
+      taskType: p.taskType,
       creatorFriendId: p.creatorFriendId,
       isBuiltin: p.isBuiltin,
     })
@@ -618,7 +621,11 @@ export class ManagerRegistry {
 /** 唤醒事件 → 随行的 scheduled 权限身份;非 schedule 唤醒没有身份(undefined)。 */
 function scheduleIdentityOf(wakeEvent: WakeEvent | undefined): ScheduleIdentity | undefined {
   if (wakeEvent?.kind !== 'schedule') return undefined
-  return { creatorFriendId: wakeEvent.creatorFriendId, isBuiltin: wakeEvent.isBuiltin }
+  return {
+    creatorFriendId: wakeEvent.creatorFriendId,
+    isBuiltin: wakeEvent.isBuiltin,
+    taskType: wakeEvent.taskType,
+  }
 }
 
 /**

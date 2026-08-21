@@ -226,6 +226,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
       scheduleId: 'schedule-normal',
       title: '每日反思',
       description: 'reflect',
+      taskType: 'daily_reflection',
       targetSession: undefined,
       creatorFriendId: 'friend-1',
       isBuiltin: undefined,

@@ -544,6 +544,32 @@ describe('ManagerRegistry', () => {
     expect(state.recent.length).toBeGreaterThan(0)
   })
 
+  it('routeSchedule 将 taskType 作为未渲染 metadata 传给本次工具面', async () => {
+    const { adapter, queue } = makeAdapter()
+    queue.push({ text: '已处理', stopReason: 'end_turn' })
+    const identities: Array<{ taskType?: string; isBuiltin?: boolean } | undefined> = []
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      toolFace: (_key, _isSystemThread, scheduleIdentity) => {
+        identities.push(scheduleIdentity)
+        return []
+      },
+    }))
+
+    await registry.routeSchedule({
+      scheduleId: 'daily',
+      title: '每日反思',
+      description: 'reflect',
+      taskType: 'daily_reflection',
+      isBuiltin: true,
+    })
+
+    expect(identities.length).toBeGreaterThan(0)
+    for (const identity of identities) {
+      expect(identity).toMatchObject({ taskType: 'daily_reflection', isBuiltin: true })
+    }
+  })
+
   it('异步身份、worker 查找和 schedule 解析等待期间不改写入口时间', async () => {
     const { adapter, queue, calls } = makeAdapter()
     queue.push(

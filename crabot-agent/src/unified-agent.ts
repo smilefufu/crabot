@@ -2890,6 +2890,7 @@ export class UnifiedAgent extends ModuleBase {
         scheduleId: params.schedule_id,
         title: params.title,
         description: params.description ?? '',
+        taskType: params.task_type,
         targetSession: params.target_session,
         creatorFriendId: params.creator_friend_id,
         isBuiltin: params.is_builtin,

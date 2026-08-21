@@ -24,7 +24,7 @@ export const TrashRowActions: React.FC<TrashRowActionsProps> = ({
   const expired = isExpired(trashedAt, retentionDays, now ? now() : new Date())
   const tooltip = expired
     ? `已过 ${retentionDays} 天保留期，无法恢复（spec §6.5）`
-    : `恢复到 inbox`
+    : `恢复并确认`
 
   return (
     <Tooltip content={tooltip}>

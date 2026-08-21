@@ -145,6 +145,15 @@ describe('assembleManagerSystemPrompt 稳定装配', () => {
     expect(output.indexOf('张三，master，偏好简短回复')).toBeGreaterThan(output.indexOf('send_master_private'))
   })
 
+  it('builtin daily reflection 用固定 Admin Web 摘要纪律替代 reach_master', () => {
+    const output = assembleManagerSystemPrompt(baseInputs({
+      isSystemThread: true,
+      isBuiltinDailyReflection: true,
+    }))
+    expect(output).toContain('send_daily_reflection_summary')
+    expect(output).not.toContain('只有需要人类立即注意时才 reach_master')
+  })
+
   it('改变曾经的动态输入不影响 system prompt 字节', () => {
     const first = assembleManagerSystemPrompt(baseInputs())
     const second = assembleManagerSystemPrompt(baseInputs())

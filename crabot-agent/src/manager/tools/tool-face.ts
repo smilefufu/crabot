@@ -38,6 +38,8 @@ export interface ToolFaceDeps {
   readonly getRuntimeConfigSummary?: () => unknown
   /** 该 manager 是否为保留的"系统任务"线程（决定 send_master_private / send_private_message 可见性）。 */
   readonly isSystemThread: boolean
+  /** builtin daily reflection uses a fixed Admin Web delivery action instead of generic messaging. */
+  readonly isBuiltinDailyReflection?: boolean
   /** Opaque control-plane authorization, never represented in any tool schema. */
   readonly authorization?: () => MasterAuthorization | undefined
   readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
@@ -95,6 +97,17 @@ function managerMessagingToolSet(isSystemThread: boolean): MessagingToolSet {
     allowAskHuman: false,
   }
 }
+
+const DAILY_REFLECTION_MESSAGING_TOOL_SET: MessagingToolSet = {
+  // The generic handler is reused internally, but never exposed under this name.
+  tools: new Set(['send_message']),
+  allowAskHuman: false,
+}
+
+const DAILY_REFLECTION_SUMMARY_TARGET = {
+  channel_id: 'admin-web',
+  session_id: 'system-tasks',
+} as const
 
 /** 白名单内只读的子集（其余——发送类——一律 isReadOnly:false）。 */
 const MESSAGING_READ_ONLY = new Set([
@@ -162,8 +175,41 @@ function messagingToolToDefinition(tool: MessagingTool): ToolDefinition {
 }
 
 function buildMessagingFace(deps: ToolFaceDeps): ToolDefinition[] {
+  if (deps.isBuiltinDailyReflection) return buildDailyReflectionMessagingFace(deps)
   const toolSet = managerMessagingToolSet(deps.isSystemThread)
   return buildMessagingTools(deps.messagingDeps, () => toolSet).map(messagingToolToDefinition)
+}
+
+function buildDailyReflectionMessagingFace(deps: ToolFaceDeps): ToolDefinition[] {
+  const sendMessage = buildMessagingTools(
+    deps.messagingDeps,
+    () => DAILY_REFLECTION_MESSAGING_TOOL_SET,
+  ).find((tool) => tool.name === 'send_message')
+  if (!sendMessage) throw new Error('daily reflection summary requires send_message')
+
+  return [defineTool({
+    name: 'send_daily_reflection_summary',
+    description: '将每日反思的必要摘要发送到 Admin Web 系统任务线程。仅接收人类可读文本，投递目标固定且不可修改。',
+    inputSchema: z.toJSONSchema(z.object({
+      content: z.string().describe('给人类看的自然语言摘要'),
+    })) as Record<string, unknown>,
+    isReadOnly: false,
+    call: async (input): Promise<ToolCallResult> => {
+      try {
+        const result = await sendMessage.handler({
+          ...DAILY_REFLECTION_SUMMARY_TARGET,
+          content: input.content as string,
+        })
+        return {
+          output: result.content.map((block) => block.text).join('\n'),
+          isError: !!result.isError,
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return { output: message, isError: true }
+      }
+    },
+  })]
 }
 
 // ============================================================================

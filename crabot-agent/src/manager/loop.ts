@@ -61,6 +61,12 @@ const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出�
   + '- 如果它是希望让人类看到的新内容，且与你已经发送的内容不重复 → 调用 send_message 发送一次，然后直接结束，不要再输出任何文字；\n'
   + '- 如果它只是内部总结，或与你已经发送的内容重复 → 不需要任何操作，直接结束即可，不要重复发送。'
 
+const DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出了一段文字、没有调用 send_daily_reflection_summary，然后结束了回复。\n'
+  + '请注意：直接输出的文字只留在系统内部，人类看不到；每日反思只有 send_daily_reflection_summary 能把必要摘要送到 Admin Web 系统任务线程。\n'
+  + '请据此判断刚才那段文字：\n'
+  + '- 如果它是需要让人类看到的新摘要，且与你已经发送的内容不重复 → 调用 send_daily_reflection_summary 发送一次，然后直接结束，不要再输出任何文字；\n'
+  + '- 如果它只是内部总结，或与你已经发送的内容重复 → 不需要任何操作，直接结束即可，不要重复发送。'
+
 // --- Public Interface ---
 
 export type WakeEvent =
@@ -94,6 +100,11 @@ export type WakeEvent =
       readonly scheduleId: string
       readonly title: string
       readonly description: string
+      /**
+       * Schedule task subtype. It controls the per-episode tool face but never enters
+       * the rendered schedule prompt.
+       */
+      readonly taskType?: string
       /**
        * P5 Task 4 additive:本次调度触发的**权限身份**(protocol-agent-v3 §8.2
        * `creator_friend_id` / `is_builtin`,§4.4"权限按 Schedule.creator_friend_id 解析")。
@@ -795,9 +806,14 @@ export class ManagerLoop {
 
     const systemPrompt = (): string => {
       const extra = this.deps.promptInputs()
+      const wake = this.currentWakeEvent?.wake
       return assembleManagerSystemPrompt({
         managerKey: this.deps.key,
         isSystemThread: this.deps.isSystemThread,
+        isBuiltinDailyReflection:
+          wake?.kind === 'schedule'
+          && wake.isBuiltin === true
+          && wake.taskType === 'daily_reflection',
         dialogProfile: extra.dialogProfile,
       })
     }
@@ -823,7 +839,16 @@ export class ManagerLoop {
       assistantTextEndTurnHandler: async () => {
         if (assistantTextEndTurnReminderSent) return { kind: 'complete' as const }
         assistantTextEndTurnReminderSent = true
-        return { kind: 'inject' as const, text: ASSISTANT_TEXT_END_TURN_REMINDER }
+        const wake = this.currentWakeEvent?.wake
+        const isDailyReflection = wake?.kind === 'schedule'
+          && wake.isBuiltin === true
+          && wake.taskType === 'daily_reflection'
+        return {
+          kind: 'inject' as const,
+          text: isDailyReflection
+            ? DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER
+            : ASSISTANT_TEXT_END_TURN_REMINDER,
+        }
       },
       // P6-A §6.4：onTurn 是事后观察钩子，用它生成 llm_call/tool_call span；
       // 不复制执行语义、不新增第二个 query loop。
@@ -901,6 +926,7 @@ function firstMessageExcerpt(messages: ReadonlyArray<ChannelMessage>): string | 
  * - `send_private_message` —— 群里被问、转私聊回答是真实模式,只认 `send_message` 会把
  *   它错报成"沉默",退避因此错误地×5;
  * - `send_master_private` —— 系统线程的 reach_master,同样是一句人类会看到的话。
+ * - `send_daily_reflection_summary` —— builtin 每日反思固定投递到 Admin Web 系统任务线程。
  *
  * **不在集合里的**:`get_history` / `get_message` / `lookup_friend` 等只读工具(没人被打扰)、
  * `spawn_worker` / `send_to_worker` 等编排工具(v3 下 worker 不直接跟人类说话,派活本身
@@ -911,6 +937,7 @@ export const HUMAN_REPLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'send_message',
   'send_private_message',
   'send_master_private',
+  'send_daily_reflection_summary',
 ])
 
 /** 扫 `finalMessages` 里的 assistant tool_use 块,判断本 episode 有没有跟人说话。 */

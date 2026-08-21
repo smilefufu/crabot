@@ -11,7 +11,7 @@ describe('TrashRowActions — 30-day restore window (spec §6.5)', () => {
     const btn = screen.getByRole('button', { name: /restore/i }) as HTMLButtonElement
     expect(btn.disabled).toBe(false)
     expect(btn.dataset.expired).toBe('false')
-    expect(btn.title).toMatch(/恢复到 inbox/)
+    expect(btn.title).toMatch(/恢复并确认/)
   })
 
   it('renders disabled button when entry is exactly 30 days old (boundary)', () => {

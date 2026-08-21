@@ -155,7 +155,7 @@ export const MemoryV2Page: React.FC = () => {
   async function handleRestore(e: MemoryEntryV2) {
     await memoryV2Service.restoreEntry(e.id)
     setDrawer({ kind: 'closed' })
-    await refreshEntries()
+    setStatus('confirmed')
   }
 
   async function handleBatchDelete() {
@@ -340,7 +340,7 @@ export const MemoryV2Page: React.FC = () => {
                       trashMode={status === 'trash'}
                       onTrashRestore={async (id) => {
                         await memoryV2Service.restoreEntry(id)
-                        await refreshEntries()
+                        setStatus('confirmed')
                       }}
                     />}
             </div>

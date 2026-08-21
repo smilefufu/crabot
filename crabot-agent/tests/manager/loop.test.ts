@@ -931,7 +931,7 @@ describe('ManagerLoop', () => {
   describe('EpisodeResult.repliedToHuman', () => {
     /** 让 engine 有真工具可执行,避免 tool_use 落到"工具不存在"的错误分支上。 */
     function replyToolFace(): ReadonlyArray<ToolDefinition> {
-      return ['send_message', 'send_private_message', 'send_master_private', 'spawn_worker', 'get_history'].map((name) =>
+      return ['send_message', 'send_private_message', 'send_master_private', 'send_daily_reflection_summary', 'spawn_worker', 'get_history'].map((name) =>
         defineTool({
           name,
           description: `stub ${name}`,
@@ -965,8 +965,8 @@ describe('ManagerLoop', () => {
       expect(result.repliedToHuman).toBe(true)
     })
 
-    it('send_private_message / send_master_private 同样算"跟人说话"(投递到人 = 有人被打扰)', async () => {
-      for (const toolName of ['send_private_message', 'send_master_private']) {
+    it('私聊、reach_master 和每日反思摘要同样算"跟人说话"(投递到人 = 有人被打扰)', async () => {
+      for (const toolName of ['send_private_message', 'send_master_private', 'send_daily_reflection_summary']) {
         const { adapter, queue } = makeAdapter()
         queue.push({ toolCalls: [{ name: toolName, id: 't1', input: {} }], stopReason: 'tool_use' })
         queue.push({ text: '已私下回复', stopReason: 'end_turn' })
