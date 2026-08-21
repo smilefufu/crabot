@@ -2,8 +2,7 @@
  * set_task_goal 工具：worker 在动手前调，把"完成承诺"写到 task.goal。
  *
  * - 一旦写入不可由 agent 自改（admin 端 RPC handler 拒绝二次 set）
- * - 调 todo 工具前必须先调本工具（todo 工具入口加了 hasGoal 门控，Task 9 落地）
- * - end_turn 时引擎自动触发独立 audit subagent 对照 acceptance_criteria 验证
+ * - acceptance_criteria 用于约束自己的执行和验收计划
  *
  * spec: 2026-05-23-goal-mode-design.md §7.3
  */
@@ -24,32 +23,24 @@ export interface SetTaskGoalDeps {
   readonly hasRevisionToken?: () => boolean
   /** 消费一张"改目标券"。仅在重设成功后调用。 */
   readonly consumeRevisionToken?: () => void
-  /**
-   * 重设 goal 成功后调用：abort 当前 audit subagent + 清 outboundBuffer + 推 audit_aborted marker。
-   * 缺省 → 不门控（向后兼容 / 无 audit 上下文的测试）。
-   * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.7
-   */
-  readonly abortAudit?: (reason: string) => void
 }
 
 const TOOL_DESCRIPTION = `在动手前写下本任务的工作计划与自验承诺。**复杂任务（≥2 个独立动作 / 跨多 turn / 用户明确说"确保 X""完成 Y 后通知我"）必须先调本工具。**
 
-acceptance_criteria 是**你的自验计划**——你打算用什么方式证明自己做完了。注意：交付的判决标准是**人类的原始请求**（原话），不是你写的 criteria——计划写得再窄也挡不住审计按人类原话验收，所以照实写、写全。
+acceptance_criteria 是你的自验计划：写清你打算如何证明已经完成，覆盖用户的实际要求。
 
 调用本工具后：
 - 你的计划锁定到 task.goal，不可由你自己修改
-- 之后可以调 todo 工具拆步骤（todo 工具被门控：没目标拒绝调用）
-- send_message(intent='info') 完成交付后 end_turn，系统会自动跑独立审计员：以人类原始请求为标准验收，你的 criteria 作为取证线索（cmd/file 类会被实际执行）
-- 审计未通过 → 下一轮你会拿到详细缺口报告
+- 之后可按计划拆步骤、执行和自行验证
 
-简单任务（直接问答 / 一次工具调用即可）**不必**调本工具，直接 send_message(intent='info') 后 end_turn 即可，无 goal 不触发审计。
+简单任务（直接问答 / 一次工具调用即可）不必调用本工具。
 
 acceptance_criteria 至少 1 条，每条结构：
-- id: 短 id（如 c-typecheck），audit 报告里用来定位
+- id: 短 id（如 c-typecheck）
 - kind: cmd | file | semantic
 - spec: kind=cmd 时是命令（写成可直接执行的）；kind=file 时是路径；kind=semantic 时是自然语言验证标准
 - expect?: { exit_code?, stdout_contains?, stdout_matches? }（cmd/file 用）
-- rationale?: 给 auditor 看的解释`
+- rationale?: 验收理由`
 
 export function createSetTaskGoalTool(deps: SetTaskGoalDeps): ToolDefinition {
   return {
@@ -61,7 +52,7 @@ export function createSetTaskGoalTool(deps: SetTaskGoalDeps): ToolDefinition {
       properties: {
         objective: {
           type: 'string',
-          description: '自然语言目标描述。喂给你（worker prompt）也喂给 auditor。',
+          description: '自然语言目标描述。',
         },
         acceptance_criteria: {
           type: 'array',
@@ -122,14 +113,6 @@ export function createSetTaskGoalTool(deps: SetTaskGoalDeps): ToolDefinition {
         })
         // 重设成功才消费券（admin RPC 抛错则券留待重试）。
         if (isReset) deps.consumeRevisionToken?.()
-        // 改 goal 成功 → abort 当前 audit（针对的是旧 goal，已无意义）+ 清 outboundBuffer。
-        // 首次设 goal 时也调，no-op（无 activeAuditId）。abort 失败不阻塞工具返回。
-        // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.7
-        try {
-          deps.abortAudit?.('goal_revised')
-        } catch (err) {
-          console.warn('[set_task_goal] abortAudit failed:', err instanceof Error ? err.message : String(err))
-        }
         return {
           output: 'set_task_goal: ok。你的承诺已写入 task.goal。现在可以调 todo 拆步骤或直接干活。',
           isError: false,

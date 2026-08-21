@@ -160,7 +160,11 @@ export interface ManagerRegistryDeps {
     humanPrincipal?: HumanPrincipal,
     principalPermissions?: ResolvedPermissions,
     /** P6-A §6.6：当前 episode trace 的读取/回写桥（registry 惰性桥接到 loops 实例）。 */
-    traceHooks?: { currentTraceId: () => string | undefined; onWorkerSpawned: (workerId: string) => void },
+    traceHooks?: {
+      currentTraceId: () => string | undefined
+      onWorkerSpawned: (workerId: string) => void
+      onPostSendAction: () => void
+    },
   ) => ReadonlyArray<ToolDefinition>
   /** Manager episode trace writer（窄接口；见 ManagerLoopDeps.traceWriter）。 */
   readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
@@ -227,6 +231,7 @@ export class ManagerRegistry {
           {
             currentTraceId: () => this.loops.get(key)?.currentEpisodeTraceId,
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
+            onPostSendAction: () => this.loops.get(key)?.recordPostSendAction(),
           },
         ),
       promptInputs: () => this.deps.promptInputs(key),
@@ -263,11 +268,11 @@ export class ManagerRegistry {
     friend?: Friend,
     /** P6-A §3.2：system-only 关联元数据（不渲染进 LLM 正文）。 */
     correlation?: import('./loop.js').ManagerWakeCorrelation,
-    /** wake 已被对应 ManagerLoop 接受并排进串行队列后的非关键通知。 */
-    onAccepted?: () => Promise<void>,
+    /** 人类输入已持久化进对应 Manager 会话后的非关键通知。 */
+    onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation, onAccepted)
+    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation, onHumanInputCommitted)
   }
 
   /**
@@ -287,11 +292,11 @@ export class ManagerRegistry {
     sessionId: string,
     messages: ReadonlyArray<ChannelMessage>,
     friend?: Friend,
-    /** wake 已被对应 ManagerLoop 接受并排进串行队列后的非关键通知。 */
-    onAccepted?: () => Promise<void>,
+    /** 人类输入已持久化进对应 Manager 会话后的非关键通知。 */
+    onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'attention_flush', channelId, sessionId, messages, friend, undefined, onAccepted)
+    return this.routeHumanWake(capture, 'attention_flush', channelId, sessionId, messages, friend, undefined, onHumanInputCommitted)
   }
 
   /** 两个人类消息入口的公共路径:解析发起人身份(唤醒边界的唯一一次异步)→ 按 kind 造事件唤醒。 */
@@ -303,7 +308,7 @@ export class ManagerRegistry {
     messages: ReadonlyArray<ChannelMessage>,
     friend?: Friend,
     correlation?: import('./loop.js').ManagerWakeCorrelation,
-    onAccepted?: () => Promise<void>,
+    onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
     // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
@@ -332,7 +337,7 @@ export class ManagerRegistry {
       kind === 'human_messages'
         ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
         : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
-    return this.runWake(key, { ...envelope, wake: event }, 0, onAccepted)
+    return this.runWake(key, { ...envelope, wake: event }, 0, onHumanInputCommitted)
   }
 
   /**
@@ -545,7 +550,7 @@ export class ManagerRegistry {
     key: ManagerKey,
     envelope: TimedWakeEnvelope | undefined,
     selfWakeChain = 0,
-    onAccepted?: () => Promise<void>,
+    onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
   ): Promise<EpisodeResult> {
     this.assertWakeAdmission()
     if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
@@ -554,11 +559,11 @@ export class ManagerRegistry {
     this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
     let result: EpisodeResult | undefined
     try {
-      // `wakeUp()` 已把 envelope 交给 ManagerLoop 的串行队列；这不是 LLM 已消费的确认。
+      // `wakeUp()` 会在输入持久化后才触发非关键通知；这不是 LLM 已完成的确认。
       if (envelope === undefined) {
         result = await loop.drainMailbox()
-      } else if (onAccepted) {
-        result = await loop.wakeUp(envelope, onAccepted)
+      } else if (onHumanInputCommitted) {
+        result = await loop.wakeUp(envelope, onHumanInputCommitted)
       } else {
         result = await loop.wakeUp(envelope)
       }
@@ -577,8 +582,8 @@ export class ManagerRegistry {
   /**
    * episode 收口后的 mailbox 兜底(P7 阻塞项 #5):engine 在 end_turn 收口前做最后一次
    * `drainPending`,落在那之后的 `enqueueDuringEpisode` 内容没有任何消费者在等,不自唤醒
-   * 就会一直停滞在内存 mailbox 里(cutover 后这条路径上会跑人类消息 → 表现为"机器人收到了
-   * 但永远不回")。这里在 episode 刚收口、引用计数刚归零的同步窗口里补一次自唤醒。
+   * 就会一直停滞在内存 mailbox 里。人类输入由 `wakeUp()` 串行提交，不走这条内存补充路径；
+   * 这里在 episode 刚收口、引用计数刚归零的同步窗口里补一次自唤醒。
    *
    * 四道门,缺一不可:
    * 1. `result?.consumedEvents === true` —— **只在成功收口后自唤醒**。episode 失败

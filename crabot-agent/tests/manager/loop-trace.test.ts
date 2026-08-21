@@ -119,7 +119,7 @@ describe('ManagerLoop episode trace wiring', () => {
     expect(episodes.items[0].total_usage).toMatchObject({ input_tokens: 20, output_tokens: 10 })
   })
 
-  it('trace start 失败：零 LLM 调用且 wake 未结算（下次唤醒重投）', async () => {
+  it('trace start 失败：零 LLM 调用，但人类输入已提交且不重投', async () => {
     const failingWriter: ManagerTraceWriter = {
       ...traceWriter,
       startEpisode: () => { throw new Error('disk full') },
@@ -128,13 +128,13 @@ describe('ManagerLoop episode trace wiring', () => {
     const loop = new ManagerLoop(deps(adapter, failingWriter))
     await expect(loop.wakeUp(timed({ kind: 'human_messages', messages: [makeMessage('hello')] }))).rejects.toThrow('disk full')
     expect(calls).toHaveLength(0)
-    expect(loop.hasPendingMailbox).toBe(true)
+    expect(JSON.stringify((await store.load(KEY)).recent)).toContain('hello')
+    expect(loop.hasPendingMailbox).toBe(false)
 
-    // 修好 writer 后重投成功，同一内容只跑一个 episode
+    // 修好 writer 后由新 wake 继续；原消息只从 history 出现，不作为新 wake 重放。
     const { adapter: adapter2, calls: calls2 } = makeAdapter()
     const loop2 = new ManagerLoop(deps(adapter2, traceWriter))
-    loop2.enqueueDuringEpisode(timed({ kind: 'human_messages', messages: [makeMessage('ignored-for-this')] }))
-    const result = await loop2.drainMailbox()
+    const result = await loop2.wakeUp(timed({ kind: 'human_messages', messages: [makeMessage('new message')] }))
     expect(calls2.length).toBeGreaterThan(0)
     expect(result.consumedEvents).toBe(true)
   })
@@ -158,15 +158,15 @@ describe('ManagerLoop episode trace wiring', () => {
     expect(episodes.items.map((item) => item.trigger.type).sort()).toEqual(['attention_flush', 'schedule', 'worker_event'])
   })
 
-  it('episode 失败：trace 收口 failed，wake 重投且事件时间不变', async () => {
+  it('episode 失败：trace 收口 failed，但已提交人类输入不重投', async () => {
     const { adapter } = makeAdapter({ fail: true })
     const loop = new ManagerLoop(deps(adapter, traceWriter))
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeMessage('hi')] }))
     const episode = traceStore.listManagerEpisodes(KEY, {}).items[0]
     expect(episode.status).toBe('failed')
     expect(episode.outcome?.error).toBeDefined()
-    // mailbox 未消费：失败重投语义不变
-    expect(loop.hasPendingMailbox).toBe(true)
+    expect(JSON.stringify((await store.load(KEY)).recent)).toContain('hi')
+    expect(loop.hasPendingMailbox).toBe(false)
   })
 
   it('重启后遗留 running episode 被收口 failed/interrupted 且 spans 保留', async () => {

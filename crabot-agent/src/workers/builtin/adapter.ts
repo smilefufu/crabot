@@ -578,31 +578,37 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   private async readTraceWindow(
     h: IncarnationHandle,
     cursor?: import('../types.js').TraceCursor,
-  ): Promise<{ sourceAvailable: boolean; events: import('../types.js').NormalizedTraceEvent[]; nextCursor: import('../types.js').TraceCursor }> {
+  ): Promise<{
+    sourceAvailable: boolean
+    spans: ReadonlyArray<import('../../types.js').AgentSpan>
+    events: import('../types.js').NormalizedTraceEvent[]
+    nextCursor: import('../types.js').TraceCursor
+  }> {
     const metaPath = join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)
     let traceId: string | undefined
     try {
       const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as { trace_id?: string }
       traceId = typeof meta.trace_id === 'string' ? meta.trace_id : undefined
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
       throw error
     }
     if (!traceId || !this.deps.traceReader) {
       // 老 meta（升级前写入）没有 trace_id：退化为空、cursor 原样透传（可续读）。
-      return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+      return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
     }
     const trace = await this.deps.traceReader.readTrace(traceId)
-    if (!trace) return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+    if (!trace) return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
     const start = cursor?.offset ?? 0
+    const spans = trace.spans.slice(start)
     const events: import('../types.js').NormalizedTraceEvent[] = []
     let consumed = start
     for (let i = start; i < trace.spans.length; i++) {
-      const event = normalizeBuiltinSpan(trace.spans[i])
-      if (event) events.push({ ...event, source_offset: i })
+      const normalizedEvents = normalizeBuiltinSpan(trace.spans[i])
+      events.push(...normalizedEvents.map((event) => ({ ...event, source_offset: i })))
       consumed = i + 1
     }
-    return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
+    return { sourceAvailable: true, spans, events, nextCursor: { offset: consumed } }
   }
 
   async inspectSupervisionActivity(
@@ -612,6 +618,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     try {
       const trace = await this.readTraceWindow(h, cursor)
       if (!trace.sourceAvailable) return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
+      // 页面 read model 不得改变既有 Manager 巡检语义：任何 LLM turn 都延续为 text。
+      if (trace.spans.some((span) => span.type === 'llm_call')) return { kind: 'text', next_cursor: trace.nextCursor }
       return classifySupervisionActivity(trace.events, trace.nextCursor)
     } catch {
       return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
@@ -1426,26 +1434,37 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 }
 
 /** builtin trace span → NormalizedTraceEvent（P6-A §8.4）。 */
-function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import('../types.js').NormalizedTraceEvent | null {
+function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import('../types.js').NormalizedTraceEvent[] {
   const details = (span.details ?? {}) as Record<string, unknown>
   const base = { ts: span.started_at }
   switch (span.type) {
-    case 'llm_call':
-      return {
+    case 'llm_call': {
+      const { assistant_text: assistantText, ...technicalDetails } = details
+      const events: import('../types.js').NormalizedTraceEvent[] = [{
         ...base,
-        kind: 'message',
-        role: 'assistant',
+        kind: 'llm_call',
         summary: typeof details.stop_reason === 'string' ? `llm ${details.stop_reason}` : 'llm call',
-        detail: details,
+        detail: technicalDetails,
+      }]
+      if (typeof assistantText === 'string' && assistantText.trim()) {
+        events.push({
+          ...base,
+          kind: 'message',
+          role: 'assistant',
+          summary: assistantText.replace(/\s+/g, ' ').trim().slice(0, 200),
+          detail: { content: assistantText },
+        })
       }
+      return events
+    }
     case 'tool_call':
-      return {
+      return [{
         ...base,
         kind: 'tool_call',
         summary: typeof details.name === 'string' ? String(details.name) : 'tool call',
         detail: details,
-      }
+      }]
     default:
-      return { ...base, kind: 'lifecycle', summary: span.type, detail: details }
+      return [{ ...base, kind: 'lifecycle', summary: span.type, detail: details }]
   }
 }

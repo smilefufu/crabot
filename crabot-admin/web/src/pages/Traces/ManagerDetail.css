@@ -170,6 +170,14 @@
   font-weight: 500;
 }
 
+.manager-detail__worker-message-meta {
+  color: var(--text-muted);
+  display: flex;
+  font-size: 11px;
+  gap: 8px;
+  margin-top: 6px;
+}
+
 .manager-detail__actions {
   display: grid;
   gap: 4px;

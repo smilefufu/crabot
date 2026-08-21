@@ -1,11 +1,24 @@
 # Crabot 项目进度
 
-> 最后整理：2026-08-19
+> 最后整理：2026-08-20
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
 
 ### P6 已完成；Manager -> Worker 输入与侧问可靠交付待 PR review
+
+### 统一 Worker Runtime：设计、协议与实施计划已确认，待设计型 PR 实施
+
+- 已确认 `crabot-docs/superpowers/specs/2026-08-20-unified-worker-runtime-design.md`，并同步
+  `protocol-agent-v3` 3.6.0 与实施计划。Manager 是统筹/交付主体，Worker 是执行体；Harness 统一
+  builtin、Claude Code、Codex 的化身、原生会话 activity、交互和控制事实。
+- Manager 将被动接收 assistant activity、完成回合、未知 UI 和 control settlement，并可主动读取
+  `assistant | all` 的原生会话投影；hook 只触发会话收集，不代表任务成功或人类已收到交付。正常
+  路径不再用 terminal capture 读结果。
+- 新契约包含 Harness-owned `incarnation_id`、turn disposition、UI snapshot response、可核验
+  interrupt/stop、`AGENTS.md` 的人类/Worker 所有权和 Harness generated `HandoffPackage`。`raw`、
+  立即 `kill_worker → cancelled` 与 Worker 写/读取 `HANDOFF.md` 均退役。代码尚未开始，必须在独立
+  worktree 走设计型 PR。
 
 ### CLI 第三方 Worker 交互生命周期：已确认，实施中
 
@@ -21,7 +34,7 @@
 - Slice 0 **已合并**（PR #90 → merge `377200e`，15 轮 review、28 条 finding 全部修复并 resolve）。核心交付：唯一核心 Agent + 动态/legacy Agent 只读归档、runtime bearer identity（per-child 绑定/撤销、启动即从 env 摘除）、authenticated config pull（单飞+退避自愈、降级启动 fail-closed 存活）、management-only cutover（幂等 marker + 宽容握手 + degraded-only health）、durable config revision（outbox 三态 + HMAC fingerprint + journal binding + seqlock 一致性读）、sensitive RPC 独立 transport、legacy get_config/update_config 无认证端点退役、noop-safe 全部配置写入路径、容错 MCP 热更 + 候选连接清理。协议同步：protocol-agent-v3 3.1.1 §8.5/§8.6/§11、protocol-admin §3.18/§3.19/§7.1、protocol-module-manager §3.18.1：
   - 唯一核心 Agent：动态/legacy Agent 的 create/update/delete/config-write 全部拒绝（`ADMIN_HOTPLUG_NOT_ALLOWED` / HTTP 410），live read surfaces 只暴露 builtin `default` / exact `crabot-agent`；存量记录只读归档（`unsupported_legacy`）。
   - Runtime identity + authenticated config pull：MM 只向 exact `crabot-agent` child 注入一次性 runtime bearer；Agent 启动最早期捕获并从 env 删除；secret-bearing RPC 走 method-closed `callSensitive()`；启动与热更都经 authenticated pull，失败即 fail closed 并断开 stale MCP。pull 有单飞去重 + 旧 revision no-op + 失败退避重试（不会永久 stale）。
-  - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，当前 `protocol_version: '3.4.0'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
+  - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（当时 `protocol_version: '3.4.0'`，后续版本见 Agent 协议）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
   - **降级启动自愈**：全新安装未配置 LLM 时 Agent 不再退出，进程存活照常注册，所有执行入口 fail closed，靠退避 pull 自愈；首次安装补建 worker 层（roles/LSP），无需手动重启。
   - Management-only cutover + durable config revision（seqlock 一致性读、HMAC fingerprint、Skill journal binding、publish 失败退避 drain 自愈）。
 - **部署约束**：pre-P6 存量生产不得部署 Slice 0/A/B 中间态；首次 rollout 至少包含 Slice 0 + P6-B grandfather bootstrap + P6-C 最终选择语义。
@@ -73,7 +86,7 @@
 - **移除 Agent 内部 legacy `roles` seam**：`AgentLayerConfig.roles` 是 v2 前多 Agent 时代残留（正式协议从未包含），现仅作内部测试 seam/恒真分支；应替换为显式的 worker-layer 开关后删除。
 - **普通 Channel 未消费人类 wake 的跨重启恢复**：2026-08-19 实测，飞书私聊消息已落 Channel journal、reaction 已发且同 session Manager episode 已创建，但 Agent 在首次 LLM 调用前 OOM 重启；启动恢复只将遗留 episode 标为 `interrupted`，未将该 wake 重放，后续 worker 事件遂基于旧上下文回复。需独立设计普通 Channel 的持久化入站 wake、成功消费后结算、重启按原始顺序幂等重放；不得用扩大 Manager recent、滚动摘要或 prompt 约束替代。
 - 失败 Manager episode 的通用带退避 mailbox retry；跨 session 代发目标 Manager 持久注记（§4.2）；Admin skill → worker capability 接线（skill 仍硬编码 `[]`）；Codex provision `auth.json` 错误吞没；P8 调试工具/内部文档重写。
-- incarnation seq 碰撞（已接受边界，根治需协议变更）；Claude project-scope MCP 文件（已接受边界）；权限 schema 纪律（新增 schema 前先迁移历史 worker context）。
+- Claude project-scope MCP 文件（已接受边界）；权限 schema 纪律（新增 schema 前先迁移历史 worker context）。
 - Admin source manager 的完整两阶段回滚：当前 mutation 源写入失败且内存态已推进时，靠重启恢复 fail-loud 兜底；各 manager 的事务性回滚（磁盘为准）另行设计。
 - claude-review workflow 已修 retry 阶梯（main `55f9f3a`）：Verify attempt 1/2 加 `continue-on-error`，否则首次未提交 review 直接跳过 attempt 2/3。
 - reviewer bot 的 OAuth token 有 session 配额（约 10 轮高强度 review 后触发 "session limit"，按 UTC 时间窗口重置）；配额耗尽时 review run 会即死，等重置后重触发即可。
@@ -101,6 +114,6 @@
 为避免本文件复制并腐化架构说明，以下内容不再展开：
 
 - 项目开发与流程规则：根目录 `AGENTS.md`。
-- 正式模块契约：`crabot-docs/protocols/`（base/module-manager 0.2.2、admin 0.2.1、agent-v3 3.5.0、crab-messaging 0.3.2、module-spec 0.2.0）。
+- 正式模块契约：`crabot-docs/protocols/`（base 0.2.2、module-manager 0.2.3、admin 0.2.3、agent-v3 3.6.0、crab-messaging 0.3.2、module-spec 0.2.0）。
 - 设计决策与实施计划：`crabot-docs/superpowers/specs/` 与 `plans/`。
 - 开发、部署、调试说明：`AGENTS.md` 与 `crabot-docs/guides/`。

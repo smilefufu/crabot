@@ -1595,7 +1595,11 @@ export class UnifiedAgent extends ModuleBase {
         messages,
         friend,
         undefined,
-        () => this.reactToTriggerBatch(session.channel_id, session.session_id, messages),
+        (lastCommittedMessageId) => this.reactToCommittedHumanMessage(
+          session.channel_id,
+          session.session_id,
+          lastCommittedMessageId,
+        ),
       )
     } catch (err) {
       console.error(
@@ -1655,7 +1659,11 @@ export class UnifiedAgent extends ModuleBase {
         sessionId,
         messages,
         lastEntry.friend,
-        () => this.reactToTriggerBatch(session.channel_id, sessionId, messages),
+        (lastCommittedMessageId) => this.reactToCommittedHumanMessage(
+          session.channel_id,
+          sessionId,
+          lastCommittedMessageId,
+        ),
       )
       repliedToHuman = result.repliedToHuman
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
@@ -1681,7 +1689,7 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 给批内**最后一条**消息打「已接收」表情（沿用现网语义）。
+   * 人类输入已持久化进 Manager 会话后，给本批最后一个**新提交**的消息打「已接收」表情。
    *
    * 落在接线层而不是 manager 工具面：`add_reaction` 不是 crab-messaging 工具，它是编排层的
    * 机械动作，不该破坏 `assertClosedToolFace` 的封闭不变量。
@@ -1691,15 +1699,13 @@ export class UnifiedAgent extends ModuleBase {
    *
    * Spec: 2026-06-04-channel-task-pickup-reaction-design.md §4
    */
-  private async reactToTriggerBatch(
+  private async reactToCommittedHumanMessage(
     channelId: string,
     sessionId: string,
-    messages: ReadonlyArray<ChannelMessage>,
+    platformMessageId: string,
   ): Promise<void> {
-    const last = messages[messages.length - 1]
-    if (!last) return
     try {
-      await this.reactToTriggerMessage(channelId, sessionId, last.platform_message_id)
+      await this.reactToTriggerMessage(channelId, sessionId, platformMessageId)
     } catch (err) {
       console.warn(
         `[${this.config.moduleId}] add_reaction failed (ignored):`,
@@ -3313,11 +3319,13 @@ export class UnifiedAgent extends ModuleBase {
         return trace.trace_id
       },
       appendTurn: (traceId, event) => {
+        const assistantText = redact(event.assistantText)
         const llmSpan = this.traceStore.startSpan(traceId, {
           type: 'llm_call',
           details: {
             model: '',
             stop_reason: event.stopReason,
+            ...(assistantText.trim() ? { assistant_text: assistantText } : {}),
             ...(event.usage ? { usage: event.usage } : {}),
           } as import('./types.js').AgentSpanDetails,
           started_at_ms: event.llmStartedAtMs,
@@ -3460,7 +3468,7 @@ export class UnifiedAgent extends ModuleBase {
 
   /** P6-A §11.7：Admin Chat 出站 delivery prepare——claim IDs + staging + prepared 落盘。 */
   private async prepareAdminChatDelivery(
-    entry: import('./agent/outbound-flush.js').OutboundBufferEntry,
+    entry: import('./agent/outbound-dispatch.js').OutboundMessage,
     content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string },
   ): Promise<{ delivery_id: string; request_ids: string[]; content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string } } | undefined> {
     const stack = this.managerStack

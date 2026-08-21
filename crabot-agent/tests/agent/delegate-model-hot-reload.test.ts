@@ -9,7 +9,6 @@
  * 2. delegate_task 的 enum（subagent 列表）仍是 loop 启动时快照 —— 列表一致性不受热更影响。
  * 3. loop 运行期间 subagent 被从 live 列表删除 → 派发回退用快照，不报错。
  * 4. 异步派发（spawnPersistentAgent）同样取 live model。
- * 5. goal_audit 的 buildSpawnDeps 每次 spawn 时取 live auditor model。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { AgentHandler } from '../../src/agent/agent-handler.js'
@@ -31,20 +30,14 @@ vi.mock('../../src/engine/bg-entities/bg-agent.js', async (importOriginal) => {
   return { ...actual, spawnPersistentAgent: vi.fn() }
 })
 
-vi.mock('../../src/agent/end-turn-gate.js', async (importOriginal) => {
-  const actual = await importOriginal() as Record<string, unknown>
-  return { ...actual, createAsyncAuditEndTurnGate: vi.fn() }
-})
 
 import { runEngine } from '../../src/engine/index.js'
 import { forkEngine } from '../../src/engine/sub-agent.js'
 import { spawnPersistentAgent } from '../../src/engine/bg-entities/bg-agent.js'
-import { createAsyncAuditEndTurnGate } from '../../src/agent/end-turn-gate.js'
 
 const mockRunEngine = vi.mocked(runEngine)
 const mockForkEngine = vi.mocked(forkEngine)
 const mockSpawnPersistentAgent = vi.mocked(spawnPersistentAgent)
-const mockCreateGate = vi.mocked(createAsyncAuditEndTurnGate)
 
 function makeSdkEnv() {
   return {
@@ -238,51 +231,4 @@ describe('subagent model 热生效（delegate 时实时解析）', () => {
     expect((spawnOpts.adapter as any).config.apikey).toBe('new-key')
   })
 
-  it('goal_audit buildSpawnDeps 每次 spawn 时取 live auditor model', async () => {
-    const auditorOld = { ...makeSubAgent('goal_auditor', 'old'), id: 'builtin-goal-auditor', system_only: true }
-    const auditorNew = { ...makeSubAgent('goal_auditor', 'new'), id: 'builtin-goal-auditor', system_only: true }
-
-    const handler = new AgentHandler(makeSdkEnv(), { systemPrompt: 'sys' }, {
-      subAgents: [auditorOld],
-      deps: {
-        rpcClient: {} as never,
-        moduleId: 'agent',
-        resolveChannelPort: async () => 1,
-        getMemoryPort: async () => 2,
-        getAdminPort: async () => 1,
-      },
-    })
-
-    let capturedDeps: any
-    mockCreateGate.mockImplementation(((deps: any) => {
-      capturedDeps = deps
-      return async () => null
-    }) as never)
-
-    ;(handler as any).buildAsyncAuditEndTurnGate({
-      goalModeEnabled: true,
-      goalSetCacheGetter: () => true,
-      taskId: 't1',
-      taskState: {} as never,
-      subAgents: [auditorOld], // loop 启动时快照
-      getAuditBaseTools: () => [],
-      getAuditPermissionConfig: () => undefined,
-      humanQueue: new HumanMessageQueue(),
-      cwd: '/tmp',
-      owner: { friend_id: 'f1', session_id: 's1' },
-      getConversationLog: () => [],
-    })
-
-    const goal = { objective: 'obj', acceptance_criteria: [] }
-
-    const firstSpawn = capturedDeps.buildSpawnDeps(goal)
-    expect((firstSpawn.adapter as any).config.endpoint).toBe('https://old.example.com')
-
-    // admin push 热更 auditor model 后再 spawn audit → 用新配置
-    handler.updateSubagents([auditorNew])
-    const secondSpawn = capturedDeps.buildSpawnDeps(goal)
-    expect((secondSpawn.adapter as any).config.endpoint).toBe('https://new.example.com')
-    expect((secondSpawn.adapter as any).config.apikey).toBe('new-key')
-    expect(secondSpawn.auditor.model.model_id).toBe('new-model')
-  })
 })

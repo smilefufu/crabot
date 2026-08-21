@@ -449,7 +449,12 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
           {
             name: 'send_message',
             id: 'call_send',
-            input: { channel_id: 'wechat', session_id: 'sess-1', content: '调研结论：X 方案可行，建议采用。' },
+            input: {
+              channel_id: 'wechat',
+              session_id: 'sess-1',
+              content: '调研结论：X 方案可行，建议采用。',
+              post_send_action: 'none',
+            },
           },
         ],
         stopReason: 'tool_use',
@@ -579,7 +584,11 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
         stopReason: 'tool_use',
       })
       managerScript.queue.push({
-        toolCalls: [{ name: 'send_master_private', id: 'm1', input: { content: '巡检任务失败，需要人工介入排查。' } }],
+        toolCalls: [{
+          name: 'send_master_private',
+          id: 'm1',
+          input: { content: '巡检任务失败，需要人工介入排查。', post_send_action: 'none' },
+        }],
         stopReason: 'tool_use',
       })
       managerScript.queue.push({ text: '已上报 master。', stopReason: 'end_turn' })
@@ -773,7 +782,12 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
           {
             name: 'send_message',
             id: 'call_send',
-            input: { channel_id: 'wechat', session_id: 'sess-say', content: 'worker 说 B 方案最稳，要我让它继续做详细设计吗？' },
+            input: {
+              channel_id: 'wechat',
+              session_id: 'sess-say',
+              content: 'worker 说 B 方案最稳，要我让它继续做详细设计吗？',
+              post_send_action: 'none',
+            },
           },
         ],
         stopReason: 'tool_use',
@@ -904,6 +918,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
               channel_id: 'wechat',
               session_id: 'sess-reflect',
               content: '今天的反思出来了:三次任务都按时交付,但都拖到截止前一天才开工,建议把开工日也排进日程。',
+              post_send_action: 'none',
             },
           },
         ],

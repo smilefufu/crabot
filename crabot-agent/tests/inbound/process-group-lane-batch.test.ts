@@ -345,7 +345,6 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
         attentionBatch([gmsg({ id: 'g-2', text: '第二批甲' }), gmsg({ id: 'g-3', text: '第二批乙' })], friend),
       ])
 
-      expect(script.streams).toHaveLength(1)
       const rendered = String(script.streams[0].messages[0].content)
       for (const id of ['g-1', 'g-2', 'g-3']) expect(rendered).toContain(`id="${id}"`)
     })
@@ -411,21 +410,20 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       })
     })
 
-    it('Manager 接收 wake 后才 reaction；manager 沉默时也照样发过', async () => {
+    it('Manager 提交消息后才 reaction；manager 沉默时也照样发过', async () => {
       boot() // 空脚本 = manager 一句话都不说
       await runGroup([gmsg({ id: 'g-1', text: '你们中午吃啥' })])
 
       expect(calls.indexOf('add_reaction')).toBeGreaterThan(calls.indexOf('resolve_permissions'))
-      expect(calls.indexOf('add_reaction')).toBeLessThan(calls.indexOf('manager_llm'))
       expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
     })
 
-    it('只有 registry 确认 wake 已被 Manager 接收时才 reaction', async () => {
+    it('只有 registry 确认消息已提交时才 reaction', async () => {
       boot()
       internals.managerStack.registry.routeAttentionFlush = async (...args: unknown[]) => {
         calls.push('manager_accepted')
-        const onAccepted = args[4] as (() => Promise<void>) | undefined
-        void onAccepted?.()
+        const onHumanInputCommitted = args[4] as ((messageId: string) => Promise<void>) | undefined
+        void onHumanInputCommitted?.('g-1')
         return { episodeId: 'ep-g1', outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
       }
 

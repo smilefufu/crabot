@@ -254,23 +254,33 @@ describe('ManagerRegistry', () => {
     expect(otherState.recent.length).toBe(0)
   })
 
-  it('human wake 入 ManagerLoop 队列后、首轮 LLM 前通知调用方', async () => {
+  it('human wake 持久化进 Manager history 后通知调用方', async () => {
     const { adapter, calls } = makeAdapter()
     const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
-    let accepted = false
+    const message = makeChannelMessage('你好')
+    let committedId: string | undefined
+    let committedState = ''
+    let resolveCommitted!: () => void
+    const committed = new Promise<void>((resolve) => { resolveCommitted = resolve })
 
     const routed = registry.routeHumanMessages(
       'wechat',
       'sess-accepted',
-      [makeChannelMessage('你好')],
+      [message],
       undefined,
       undefined,
-      async () => { accepted = true },
+      async (lastCommittedMessageId) => {
+        committedId = lastCommittedMessageId
+        committedState = JSON.stringify(await store.load('wechat::sess-accepted' as ManagerKey))
+        resolveCommitted()
+      },
     )
 
-    expect(accepted).toBe(true)
-    expect(calls).toHaveLength(0)
+    await committed
+    expect(committedId).toBe(message.platform_message_id)
+    expect(committedState).toContain('你好')
     await routed
+    expect(calls.length).toBeGreaterThan(0)
   })
 
   it('human wake 在 Manager 接受前被拒绝时不通知调用方', async () => {
@@ -889,7 +899,7 @@ describe('ManagerRegistry', () => {
     expect(occurrences).toBe(1)
   })
 
-  it('回收丢失：episode 失败把人类消息推回 mailbox 后，evictIdle 不得回收该实例——回收即永久丢失（§4.1 至少一次投递）', async () => {
+  it('episode 失败后，已提交人类输入可随空 mailbox 一起回收，下一次从 history 继续', async () => {
     const key = 'wechat::sess-evict-loss' as ManagerKey
     let failNext = true
     const adapter: LLMAdapter = {
@@ -902,18 +912,16 @@ describe('ManagerRegistry', () => {
     let nowMs = Date.parse('2026-01-01T00:00:00.000Z')
     const registry = new ManagerRegistry(baseRegistryDeps({ adapter, now: () => new Date(nowMs) }))
 
-    // episode 失败 → consumedEvents=false → 这条人类消息被推回 mailbox 等下次唤醒重投。
+    // episode 失败后，原输入已经在 durable history，不再依赖 ManagerLoop mailbox。
     const first = await registry.routeHumanMessages('wechat', 'sess-evict-loss', [makeChannelMessage('救命，这条不能丢')])
     expect(first.consumedEvents).toBe(false)
     const loopBefore = registry.getOrCreate(key)
 
-    // 此时实例空闲（无 episode 在跑）且已超过 idleMs：旧实现会连同 mailbox 一起丢掉，
-    // 而 mailbox 是这条人类消息**唯一**的存放处（盘上 state 没有它——正因为没消费）。
+    // 此时实例空闲且已超过 idleMs，可以安全回收。
     nowMs += 10 * 60 * 1000
     const evicted = registry.evictIdle(5 * 60 * 1000, nowMs)
 
-    // 先断"内容还在"这条语义不变量（而不是先断计数）：修复被移除时最先挂的是这一条，
-    // 它证明的是**人类消息永久丢失**，而不只是"回收计数不对"。
+    // 下次新 wake 从磁盘 history 同时看到旧输入与新输入。
     failNext = false
     const second = await registry.routeHumanMessages('wechat', 'sess-evict-loss', [makeChannelMessage('还在吗')])
     expect(second.consumedEvents).toBe(true)
@@ -921,12 +929,11 @@ describe('ManagerRegistry', () => {
     expect(serialized).toContain('救命，这条不能丢')
     expect(serialized).toContain('还在吗')
 
-    // 机制层面：没被回收，仍是同一个实例（mailbox 就在它身上）。
-    expect(evicted).toBe(0)
-    expect(registry.getOrCreate(key)).toBe(loopBefore)
+    expect(evicted).toBe(1)
+    expect(registry.getOrCreate(key)).not.toBe(loopBefore)
   })
 
-  it('自唤醒不覆盖失败路径：episode 失败把内容推回 mailbox 后不得立即重开 episode（否则 LLM 持续故障时变成热循环重试）', async () => {
+  it('自唤醒不覆盖失败路径：已提交人类输入失败后不得立即重开 episode', async () => {
     let streamCalls = 0
     const adapter: LLMAdapter = {
       async *stream() {
@@ -945,8 +952,7 @@ describe('ManagerRegistry', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(streamCalls).toBe(1) // 只有那一次失败的 episode，没有自动重试
 
-    // 内容仍在 mailbox 里等下次唤醒重投（§4.1），因此实例也不允许被回收。
-    expect(registry.evictIdle(-1, Date.parse('2026-01-01T00:00:00.000Z'))).toBe(0)
+    expect(registry.evictIdle(-1, Date.parse('2026-01-01T00:00:00.000Z'))).toBe(1)
   })
 
   it('自唤醒有上限：每个 episode 都产生新残留时，连锁自唤醒最多 MAX_SELF_WAKE_CHAIN 次；到顶后残留不丢（不被回收 + 下次真实唤醒投递）', async () => {
