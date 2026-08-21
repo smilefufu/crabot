@@ -686,6 +686,65 @@ describe('WorkerHarness.handleStateChange', () => {
     })
   })
 
+  it('并发投递同一 activity 通知只追加一次审计事件', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, workersDir } = await makeHarness({
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '完成了当前步骤' }],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+    const internals = harness as unknown as {
+      collectNativeActivity(handle: IncarnationHandle): Promise<void>
+      deliverNativeActivityNotifications(workerId: string): Promise<void>
+      getEventLog(workerId: string): WorkerEventLog
+      nativeActivityStore: NativeActivityStore
+    }
+    await internals.collectNativeActivity(handle)
+    const notification = (await internals.nativeActivityStore.pending(worker.worker_id))[0]
+    if (!notification) throw new Error('expected pending native activity notification')
+
+    let releaseFirstAppend!: () => void
+    const firstAppend = new Promise<void>((resolve) => { releaseFirstAppend = resolve })
+    let enteredFirstAppend!: () => void
+    const appendStarted = new Promise<void>((resolve) => { enteredFirstAppend = resolve })
+    const eventLog = internals.getEventLog(worker.worker_id)
+    const append = eventLog.append.bind(eventLog)
+    let holdFirstAppend = true
+    vi.spyOn(eventLog, 'append').mockImplementation(async (event) => {
+      if (holdFirstAppend && event.kind === 'activity_available') {
+        holdFirstAppend = false
+        enteredFirstAppend()
+        await firstAppend
+      }
+      await append(event)
+    })
+    const pending = vi.spyOn(internals.nativeActivityStore, 'pending').mockResolvedValue([notification])
+
+    const firstDelivery = internals.deliverNativeActivityNotifications(worker.worker_id)
+    await appendStarted
+    const secondDelivery = internals.deliverNativeActivityNotifications(worker.worker_id)
+    const pendingCallsWhileFirstAppendWaits = pending.mock.calls.length
+    releaseFirstAppend()
+    pending.mockRestore()
+    await Promise.all([firstDelivery, secondDelivery])
+
+    const storedEvents = (await fs.readFile(join(workersDir, worker.worker_id, 'events.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as HarnessEvent)
+      .filter((event) => event.kind === 'activity_available')
+    expect(pendingCallsWhileFirstAppendWaits).toBe(1)
+    expect(storedEvents).toHaveLength(1)
+    expect(route).toHaveBeenCalledTimes(1)
+  })
+
   it('连续 assistant activity 在 Manager 未消费时合并为一个 high-water notification', async () => {
     const nativeTrace: NormalizedTraceEvent[] = [
       { ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '先完成第一步' },

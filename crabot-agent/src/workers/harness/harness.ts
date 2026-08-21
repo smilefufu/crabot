@@ -731,6 +731,7 @@ export class WorkerHarness {
   private readonly nativeActivityStore: NativeActivityStore
   private readonly controlOperationStore: WorkerControlOperationStore
   private readonly uiSnapshotStore: WorkerUiSnapshotStore
+  private readonly nativeActivityNotificationMutexes = new Map<string, AsyncMutex>()
   private readonly controlNotificationMutexes = new Map<string, AsyncMutex>()
   private readonly inputDeliveryControllers = new Map<string, AbortController>()
   private readonly pendingQueryStateChanges = new Map<
@@ -2856,21 +2857,26 @@ export class WorkerHarness {
   }
 
   private async deliverNativeActivityNotifications(workerId: string): Promise<void> {
-    if (!this.deps.onOperationNotification) return
-    for (const notification of await this.nativeActivityStore.pending(workerId)) {
-      try {
-        if (!notification.event_written) {
-          await this.getEventLog(workerId).append(notification.event)
-          await this.nativeActivityStore.markEventWritten(workerId, notification.notification_id)
+    const notify = this.deps.onOperationNotification
+    if (!notify) return
+    const mutex = this.nativeActivityNotificationMutexes.get(workerId) ?? new AsyncMutex()
+    this.nativeActivityNotificationMutexes.set(workerId, mutex)
+    await mutex.run(async () => {
+      for (const notification of await this.nativeActivityStore.pending(workerId)) {
+        try {
+          if (!notification.event_written) {
+            await this.getEventLog(workerId).append(notification.event)
+            await this.nativeActivityStore.markEventWritten(workerId, notification.notification_id)
+          }
+          const delivery = await notify(notification.manager_key, notification.event)
+          if (delivery?.consumed) {
+            await this.nativeActivityStore.markConsumed(workerId, notification.notification_id, this.deps.now())
+          }
+        } catch (error) {
+          console.error(`[WorkerHarness] native activity notification failed for ${notification.notification_id}:`, error)
         }
-        const delivery = await this.deps.onOperationNotification(notification.manager_key, notification.event)
-        if (delivery?.consumed) {
-          await this.nativeActivityStore.markConsumed(workerId, notification.notification_id, this.deps.now())
-        }
-      } catch (error) {
-        console.error(`[WorkerHarness] native activity notification failed for ${notification.notification_id}:`, error)
       }
-    }
+    })
   }
 
   async setWorkerPeriodicReport(
