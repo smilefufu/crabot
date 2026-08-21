@@ -2274,6 +2274,13 @@ export class WorkerHarness {
       }
     })
 
+    try {
+      await this.inheritCliNativeActivityCursor(mainline, newHandle)
+    } catch (error) {
+      // activity 观测是对已接受接续的补充；缓存暂不可读时仍让新化身继续运行。
+      console.error(`[WorkerHarness] failed to inherit native activity cursor for revived worker ${worker.worker_id}#${newHandle.seq}:`, error)
+    }
+
     this.bumpInputOwnershipRevision(worker.worker_id)
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
@@ -2800,6 +2807,15 @@ export class WorkerHarness {
   ): Promise<WorkerTurn | undefined> {
     if (!handle.incarnation_id || !report?.completionSource) return undefined
     const prior = await this.turnStore.latestForIncarnation(handle.worker_id, handle.incarnation_id)
+    let activityFrom = prior?.activity_through ?? '0'
+    if (!prior) {
+      try {
+        activityFrom = await this.inheritedCliActivityStart(handle)
+      } catch (error) {
+        // 补充 cursor 查找失败不能抹掉已经确认的回合边界。
+        console.error(`[WorkerHarness] failed to read inherited activity cursor for completed turn ${handle.worker_id}#${handle.seq}:`, error)
+      }
+    }
     let activityThrough = prior?.activity_through ?? '0'
     try {
       activityThrough = String(await this.nativeActivityStore.cursor(handle.worker_id, handle.incarnation_id))
@@ -2815,7 +2831,7 @@ export class WorkerHarness {
       impl: handle.impl,
       seq: handle.seq,
       session_ref: handle.session_ref,
-      activity_from: prior?.activity_through ?? '0',
+      activity_from: activityFrom,
       activity_through: activityThrough,
       completed_at: completedAt,
       completion_source: report.completionSource,
@@ -2831,6 +2847,39 @@ export class WorkerHarness {
       console.error(`[WorkerHarness] failed to persist completed-turn notification ${turn.turn_id}:`, error)
     }
     return turn
+  }
+
+  /** Claude/Codex resume 复用同一原生 session 文件，offset 不会随化身重置。 */
+  private async inheritCliNativeActivityCursor(
+    source: ExecutableIncarnation,
+    target: IncarnationHandle,
+  ): Promise<void> {
+    if (!source.incarnation_id || !target.incarnation_id || !reusesCliNativeSession(source, target)) return
+    const offset = await this.nativeActivityStore.cursor(target.worker_id, source.incarnation_id)
+    await this.nativeActivityStore.commitObservation({
+      worker_id: target.worker_id,
+      cursor: {
+        incarnation_id: target.incarnation_id,
+        impl: target.impl,
+        seq: target.seq,
+        offset,
+      },
+    })
+  }
+
+  /** 接续后第一个 CLI 回合从前一化身共享 session 的高水位之后开始。 */
+  private async inheritedCliActivityStart(handle: IncarnationHandle): Promise<string> {
+    if (!handle.incarnation_id) return '0'
+    const found = await this.deps.ledger.findWorker(handle.worker_id)
+    if (!found) return '0'
+    const index = found.worker.incarnations.findIndex((incarnation) => incarnation.incarnation_id === handle.incarnation_id)
+    if (index < 1) return '0'
+    for (let priorIndex = index - 1; priorIndex >= 0; priorIndex -= 1) {
+      const prior = found.worker.incarnations[priorIndex]
+      if (!isExecutableIncarnation(prior) || !reusesCliNativeSession(prior, handle) || !prior.incarnation_id) continue
+      return String(await this.nativeActivityStore.cursor(handle.worker_id, prior.incarnation_id))
+    }
+    return '0'
   }
 
   /** All four CLI initial-input paths already hold the worker lock. */
@@ -5313,6 +5362,12 @@ function findIncarnation(worker: LedgerWorker, impl: WorkerImplId, seq: number):
     if (inc.impl === impl && inc.seq === seq) lastMatch = inc
   }
   return lastMatch
+}
+
+function reusesCliNativeSession(source: ExecutableIncarnation, target: IncarnationHandle): boolean {
+  return (source.impl === 'claude-code' || source.impl === 'codex') &&
+    target.impl === source.impl &&
+    target.session_ref === source.session_ref
 }
 
 /**

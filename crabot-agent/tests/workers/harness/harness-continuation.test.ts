@@ -54,6 +54,7 @@ interface FakeAdapterOpts {
   readonly outputChunk?: string
   readonly acceptedExitReport?: StateChangeReport
   readonly updatedSessionRef?: string
+  readonly nativeTrace?: NormalizedTraceEvent[]
 }
 
 class FakeAdapter implements WorkerAdapter {
@@ -65,6 +66,7 @@ class FakeAdapter implements WorkerAdapter {
   readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: { raw?: boolean } }> = []
   readonly killCalls: IncarnationHandle[] = []
   readonly readTerminalCalls: IncarnationHandle[] = []
+  readonly readTrace?: WorkerAdapter['readTrace']
   private readonly states = new Map<string, WorkerContractState>()
   private acceptedExitReport?: StateChangeReport
   private updatedSessionRef?: string
@@ -72,6 +74,15 @@ class FakeAdapter implements WorkerAdapter {
 
   constructor(private readonly opts: FakeAdapterOpts = {}) {
     this.implId = opts.implId ?? 'builtin'
+    if (opts.nativeTrace) {
+      this.readTrace = async (_h, cursor) => {
+        const start = cursor?.offset ?? 0
+        return {
+          events: opts.nativeTrace!.slice(start).map((event, index) => ({ ...event, source_offset: start + index })),
+          nextCursor: { offset: opts.nativeTrace!.length },
+        }
+      }
+    }
   }
 
   async detect(): Promise<DetectResult> {
@@ -299,6 +310,78 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     const resumedEvents = events.filter((e) => e.kind === 'resumed')
     expect(resumedEvents).toHaveLength(1)
     expect(resumedEvents[0].seq).toBe(w.incarnations[1].seq)
+  })
+
+  it('CLI复活复用原生会话时不重放旧 activity，首个新回合从旧高水位开始', async () => {
+    const nativeTrace: NormalizedTraceEvent[] = [
+      { ts: '2026-08-21T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '旧化身的第一段输出' },
+      { ts: '2026-08-21T00:01:00.000Z', kind: 'message', role: 'assistant', summary: '旧化身的第二段输出' },
+    ]
+    const { harness, adaptersMap, workersDir } = await makeHarness()
+    const fake = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      nativeTrace,
+      onStateChange: harness.handleStateChange,
+      resumeBehavior: (prev) => ({
+        worker_id: prev.worker_id,
+        seq: prev.seq + 1,
+        impl: 'claude-code',
+        session_ref: prev.session_ref,
+      }),
+    })
+    adaptersMap.set('claude-code', fake)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const source = worker.incarnations[0]
+    const sourceHandle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      incarnation_id: source.incarnation_id,
+      seq: source.seq,
+      impl: 'claude-code',
+      session_ref: source.session_ref,
+    }
+    const activityStore = (harness as unknown as {
+      nativeActivityStore: { cursor(workerId: string, incarnationId: string): Promise<number> }
+    }).nativeActivityStore
+
+    harness.handleNativeActivity(sourceHandle)
+    await waitUntil(async () => await activityStore.cursor(worker.worker_id, source.incarnation_id!) === 2)
+    fake.emitStateChange(sourceHandle, 'exited')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
+
+    await harness.sendToWorker(worker.worker_id, '继续执行')
+    const [revived] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
+    const target = revived.incarnations[1]
+    const targetHandle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      incarnation_id: target.incarnation_id,
+      seq: target.seq,
+      impl: 'claude-code',
+      session_ref: target.session_ref,
+    }
+    expect(await activityStore.cursor(worker.worker_id, target.incarnation_id!)).toBe(2)
+
+    events.length = 0
+    harness.handleNativeActivity(targetHandle)
+    await harness.sendToWorker(worker.worker_id, '同锁屏障')
+    expect(events.some((event) => event.kind === 'activity_available')).toBe(false)
+
+    nativeTrace.push({ ts: '2026-08-21T00:02:00.000Z', kind: 'message', role: 'assistant', summary: '复活后的新输出' })
+    harness.handleStateChange(targetHandle, 'idle', { completionSource: 'claude_stop' })
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id))?.incarnation_id === target.incarnation_id)
+
+    const turn = await harness.getWorkerTurn(worker.worker_id)
+    expect(turn).toMatchObject({ activity_from: '2', activity_through: '3' })
+    if (!turn) throw new Error('expected resumed worker turn')
+    await expect(harness.getWorkerTurnActivities(turn)).resolves.toEqual({
+      events: [expect.objectContaining({ summary: '复活后的新输出', source_offset: 2 })],
+    })
+    const activityState = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')) as {
+      activities: Array<{ incarnation_id: string; summary: string; source_offset?: number }>
+    }
+    expect(activityState.activities.filter((activity) => activity.incarnation_id === target.incarnation_id)).toEqual([
+      expect.objectContaining({ summary: '复活后的新输出', source_offset: 2 }),
+    ])
   })
 
   it('resume首投accepted后同步completed：新化身与task按endReason落completed', async () => {
