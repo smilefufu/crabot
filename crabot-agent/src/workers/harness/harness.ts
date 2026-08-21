@@ -2611,7 +2611,11 @@ export class WorkerHarness {
     report: StateChangeReport | undefined,
     now: string,
   ): Promise<WorkerUiSnapshot | undefined> {
-    if (!h.incarnation_id || h.query_id || report?.waitReason !== 'interaction_required' || !report.ui) return undefined
+    if (!h.incarnation_id || h.query_id) return undefined
+    if (report?.waitReason !== 'interaction_required' || !report.ui) {
+      await this.uiSnapshotStore.staleActive(h.worker_id)
+      return undefined
+    }
     return this.uiSnapshotStore.prepare({
       worker_id: h.worker_id,
       manager_key: managerKey,
@@ -4649,9 +4653,6 @@ export class WorkerHarness {
       // 防守分支(exited + 无原因 ⇒ failed)兜住,宁可记成失败也不谎报成功。
       const endReason: IncarnationEndReason | undefined = state === 'exited' ? report?.endReason : undefined
       const now = this.deps.now()
-      const uiSnapshot = target.forked_from === undefined
-        ? await this.prepareUiSnapshot({ ...h, incarnation_id: target.incarnation_id }, managerKey, report, now)
-        : undefined
 
       if (target.forked_from !== undefined) {
         // fork 化身(一次性侧问分支)自己的生命周期只更新它自己的化身条目,不影响主线
@@ -4704,6 +4705,12 @@ export class WorkerHarness {
       if (mainline.seq !== h.seq || mainline.impl !== h.impl) return // 非当前主线化身的迟到回调,忽略
       if (target.state === 'exited') return // 目标化身已终态,迟到回调忽略(与上面 fork 分支的短路对称,避免对已终态化身再次施加迁移)
       if (isTerminalStatus(worker.task.status)) return // 已是终态(如已被 killWorker 落定),回调迟到,忽略
+      const uiSnapshot = await this.prepareUiSnapshot(
+        { ...h, incarnation_id: target.incarnation_id },
+        managerKey,
+        report,
+        now,
+      )
 
       // An idle builtin incarnation with an owned shell is still executing work:
       // end_turn is its wait primitive, not task completion.

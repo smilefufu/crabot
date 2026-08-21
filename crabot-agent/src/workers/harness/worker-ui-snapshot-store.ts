@@ -59,7 +59,7 @@ export class WorkerUiSnapshotStore {
         snapshot.incarnation_id === params.incarnation_id &&
         !isExpired(snapshot, now),
       )
-      if (interactionRequired && active) return active
+      if (interactionRequired && active?.fingerprint === params.fingerprint) return active
       const snapshots = file.snapshots.map((snapshot) =>
         snapshot.status === 'active' ? { ...snapshot, status: 'stale' as const } : snapshot,
       )
@@ -103,6 +103,19 @@ export class WorkerUiSnapshotStore {
     return this.mutex(workerId).run(async () => {
       const file = await this.read(workerId)
       return file.snapshots.find((snapshot) => snapshot.snapshot_id === snapshotId)
+    })
+  }
+
+  async staleActive(workerId: string): Promise<void> {
+    await this.mutex(workerId).run(async () => {
+      const file = await this.read(workerId)
+      if (!file.snapshots.some((snapshot) => snapshot.status === 'active')) return
+      await this.write(workerId, {
+        version: 1,
+        snapshots: file.snapshots.map((snapshot) =>
+          snapshot.status === 'active' ? { ...snapshot, status: 'stale' as const } : snapshot,
+        ),
+      })
     })
   }
 

@@ -535,6 +535,58 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(fake.uiResponses).toEqual([])
   })
 
+  it('UI fingerprint 改变或普通生命周期恢复时使旧 snapshot 失效', async () => {
+    const initialActions = [{ action_id: 'confirm', kind: 'keys' as const, keys: ['Enter'] as const }]
+    const nextActions = [{ action_id: 'cancel', kind: 'keys' as const, keys: ['Escape'] as const }]
+    const { harness, fake, workersDir } = await makeHarness({
+      implId: 'claude-code',
+      spawnInitialInput: {
+        control_state: 'waiting_action',
+        disposition: 'not_pasted',
+        report: {
+          waitReason: 'interaction_required',
+          ui: { fingerprint: 'dialog:one', actions: initialActions },
+          notification: { type: 'terminal_interaction' },
+        },
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const incarnation = worker.incarnations[0]
+    const firstSnapshotId = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')
+      ?.detail?.snapshot_id as string
+    const handle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'claude-code',
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleStateChange(handle, 'idle', {
+      waitReason: 'interaction_required',
+      ui: { fingerprint: 'dialog:two', actions: nextActions },
+      notification: { type: 'terminal_interaction' },
+    })
+    await waitUntil(async () => {
+      const snapshots = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'ui-snapshots.json'), 'utf8')).snapshots
+      return snapshots.some((snapshot: { fingerprint: string; status: string }) => snapshot.fingerprint === 'dialog:two' && snapshot.status === 'active')
+    })
+
+    let snapshots = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'ui-snapshots.json'), 'utf8')).snapshots
+    const secondSnapshot = snapshots.find((snapshot: { fingerprint: string }) => snapshot.fingerprint === 'dialog:two')
+    expect(snapshots.find((snapshot: { snapshot_id: string }) => snapshot.snapshot_id === firstSnapshotId)).toMatchObject({ status: 'stale' })
+    await expect(harness.respondToWorkerUi(worker.worker_id, firstSnapshotId, 'confirm')).rejects.toThrow('worker UI snapshot is stale')
+    expect(fake.uiResponses).toEqual([])
+
+    harness.handleStateChange(handle, 'idle', { waitReason: 'input_surface_unavailable' })
+    await waitUntil(async () => {
+      const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'ui-snapshots.json'), 'utf8'))
+      return state.snapshots.find((snapshot: { snapshot_id: string }) => snapshot.snapshot_id === secondSnapshot.snapshot_id)?.status === 'stale'
+    })
+    snapshots = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'ui-snapshots.json'), 'utf8')).snapshots
+    expect(snapshots.find((snapshot: { snapshot_id: string }) => snapshot.snapshot_id === secondSnapshot.snapshot_id)).toMatchObject({ status: 'stale' })
+  })
+
   it('CLI首投not_pasted先落waiting_action，再由raw解除hold并按FIFO只补投一次原prompt', async () => {
     const { harness, fake } = await makeHarness({
       implId: 'claude-code',
