@@ -20,8 +20,9 @@
  *
  * ## episode 失败语义(protocol §4.1)
  *
- * LLM 重试耗尽 → 放弃 episode:邮箱事件不消费(`consumedEvents: false`),原样推回内部邮箱,
- * 下次唤醒重投(至少一次投递);已经落盘的东西(如折叠产生的新摘要)不回滚。
+ * LLM 重试耗尽 → 放弃 episode:未提交的人类输入和非人类邮箱事件不消费(`consumedEvents: false`),
+ * 下次唤醒重投(至少一次投递);已提交人类输入留在会话历史，已经落盘的东西(如折叠产生的新摘要)
+ * 也不回滚。
  *
  * ## 摘要块在 initialMessages 里的表达形式
  *
@@ -60,6 +61,10 @@ const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出�
   + '请据此判断刚才那段文字：\n'
   + '- 如果它是希望让人类看到的新内容，且与你已经发送的内容不重复 → 调用 send_message 发送一次，然后直接结束，不要再输出任何文字；\n'
   + '- 如果它只是内部总结，或与你已经发送的内容重复 → 不需要任何操作，直接结束即可，不要重复发送。'
+
+const POST_SEND_ACTION_RECHECK_PROMPT = '[系统复核] 你刚才发出的消息标记为“随后新建 Worker”，但系统尚未观察到成功的 spawn_worker。\n'
+  + '请根据真实意图重新确认：若仍需新建 Worker，现在调用 spawn_worker；若刚才只是讨论、无需派发，或字段误填，直接结束即可。\n'
+  + '不要因为这条系统提示重复向人类发送消息，也不要向人类提及系统复核。'
 
 // --- Public Interface ---
 
@@ -218,9 +223,9 @@ export interface ManagerLoopDeps {
    */
   readonly traceWriter?: ManagerTraceWriter
   /**
-   * P6-A §3.2：episode 被消费（consumedEvents=true）时回调仍未 claim 的 Admin Chat
-   * request IDs——F3 沉默 episode 也是消费的合法终态，不结算会让 wake 在每次重启
-   * 无限重放。已 claim 的 ID 由 delivery confirm 路径结算，不在此列。
+   * P6-A §3.2：episode 被消费或已提交来源被识别为重复时，回调仍未 claim 的 Admin Chat
+   * request IDs。F3 沉默与重复来源都是合法终态，不结算会让 wake 在每次重启无限重放；
+   * 已 claim 的 ID 由 delivery confirm 路径结算，不在此列。
    */
   readonly onAdminChatWakeConsumed?: (requestIds: string[]) => void
 }
@@ -267,6 +272,11 @@ export class ManagerLoop {
    * episode 由 mutex 串行，不存在交叠。
    */
   private currentTraceId: string | undefined = undefined
+  /** 当前 episode 的一次性发送后动作复核状态；不进入 session/ledger。 */
+  private needsSpawnRecheck = false
+  private spawnRecheckInjected = false
+  private spawnRecheckOutcomeRecorded = false
+  private postSendRecheckSequence = 0
 
   /** 当前 episode 的 trace id（仅 episode 进行中）；registry 桥/worker-tools 读取用。 */
   get currentEpisodeTraceId(): string | undefined {
@@ -289,6 +299,18 @@ export class ManagerLoop {
   /** spawn_worker 成功回调（registry 桥经 worker-tools 调）：把 worker ID 追加进当前 trace。 */
   recordSpawnedWorker(workerId: string): void {
     if (this.currentTraceId) this.deps.traceWriter?.addSpawnedWorker(this.currentTraceId, workerId)
+    if (!this.needsSpawnRecheck) return
+    this.needsSpawnRecheck = false
+    this.spawnRecheckInjected = false
+    this.recordPostSendDecision('cleared')
+  }
+
+  /** Manager 人类投递成功且声明随后派发 Worker 时，由 tool-face 调用。 */
+  recordPostSendAction(): void {
+    this.needsSpawnRecheck = true
+    this.spawnRecheckInjected = false
+    this.spawnRecheckOutcomeRecorded = false
+    this.recordPostSendDecision('marked')
   }
 
   /**
@@ -322,18 +344,12 @@ export class ManagerLoop {
   }
 
   /** 唯一入口:被唤醒 → 跑一个 episode → 回睡。同一 loop 串行,不同 loop 互不影响。 */
-  async wakeUp(envelope: TimedWakeEnvelope, onAccepted?: () => Promise<void>): Promise<EpisodeResult> {
+  async wakeUp(
+    envelope: TimedWakeEnvelope,
+    onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+  ): Promise<EpisodeResult> {
     assertTimedWakeEnvelope(envelope)
-    return this.mutex.run(() => this.runEpisode(envelope), () => {
-      if (!onAccepted) return
-      try {
-        void onAccepted().catch((err) => {
-          console.warn('[ManagerLoop] wake accepted callback failed (ignored):', err instanceof Error ? err.message : String(err))
-        })
-      } catch (err) {
-        console.warn('[ManagerLoop] wake accepted callback failed (ignored):', err instanceof Error ? err.message : String(err))
-      }
-    })
+    return this.mutex.run(() => this.runEpisode(envelope, onHumanInputCommitted))
   }
 
   /**
@@ -351,8 +367,8 @@ export class ManagerLoop {
 
   /**
    * mailbox 里是否还有尚未投递给 LLM 的内容。`ManagerRegistry` 用它做两件事:
-   * ① episode 收口后判断要不要自唤醒;② `evictIdle` 判断该实例能不能回收——mailbox 是这些
-   * 内容**唯一**的存放处(盘上 state 没有它们,正因为还没被消费),回收即永久丢失。
+   * ① episode 收口后判断要不要自唤醒;② `evictIdle` 判断该实例能不能回收。这里仅保存非人类
+   * 事件或尚未提交的人类输入；已提交人类输入已在 state，不能再依赖 mailbox。
    */
   get hasPendingMailbox(): boolean {
     return this.mailbox.hasPending
@@ -362,6 +378,9 @@ export class ManagerLoop {
    *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。 */
   enqueueDuringEpisode(envelope: TimedWakeEnvelope): void {
     assertTimedWakeEnvelope(envelope)
+    if (isHumanWake(envelope.wake)) {
+      throw new Error('human messages must be committed through wakeUp, not queued during an episode')
+    }
     this.mailbox.push(envelope)
     this.currentEpisodeInjected?.push(envelope)
     for (const id of envelope.correlation?.admin_chat_request_ids ?? []) {
@@ -378,10 +397,12 @@ export class ManagerLoop {
   }
 
   /** `event === undefined` ⇒ 自唤醒(见 `drainMailbox`):只处理 mailbox 残留,不渲染唤醒事件。 */
-  private async runEpisode(envelope: TimedWakeEnvelope | undefined): Promise<EpisodeResult> {
+  private async runEpisode(
+    envelope: TimedWakeEnvelope | undefined,
+    onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+  ): Promise<EpisodeResult> {
     const episodeId = randomUUID()
     const carriedEnvelopes = this.mailbox.drainEnvelopes()
-    const carriedTexts = carriedEnvelopes.map((item) => this.renderEnvelope(item))
     if (envelope === undefined && carriedEnvelopes.length === 0) {
       // 自唤醒但 mailbox 已空(残留被排在前面的另一个 episode 顺带 drain 走了)——
       // 没有任何新内容,直接空转返回,不开 episode(见 drainMailbox 注释)。
@@ -394,9 +415,12 @@ export class ManagerLoop {
         successfulSendMessageTargets: [],
       }
     }
-    const eventText = envelope === undefined ? undefined : this.renderEnvelope(envelope)
     this.currentEpisodeInjected = []
     this.currentWakeEvent = envelope ?? null
+    this.needsSpawnRecheck = false
+    this.spawnRecheckInjected = false
+    this.spawnRecheckOutcomeRecorded = false
+    this.postSendRecheckSequence = 0
     this.adminChatClaims = new Map()
     for (const item of [...carriedEnvelopes, ...(envelope ? [envelope] : [])]) {
       for (const id of item.correlation?.admin_chat_request_ids ?? []) {
@@ -404,12 +428,45 @@ export class ManagerLoop {
       }
     }
 
-    // P6-A §6.2/§6.8：先原子持久最小 session identity，再创建 root trace；
-    // 两者失败都不调用 LLM/tool——原 wake 经下方 catch 保持未结算并重投。
-    // trace start 失败不改变 consumedEvents（此时根本还没跑过任何 turn）。
+    // 人类输入先进入会话历史，才允许 LLM/工具/trace admission 继续。失败重投只适用于
+    // 还没完成此提交的输入；提交后的模型或 trace 失败不能把原文当成新 wake 重放。
+    let humanInputsCommitted = false
+    let state: ManagerSessionState
+    let committedHumanMessages = 0
     let traceStarted = false
     try {
       await this.deps.store.ensureSession(this.deps.key)
+      const committed = await this.commitHumanInputs(
+        await this.deps.store.load(this.deps.key),
+        [...carriedEnvelopes, ...(envelope ? [envelope] : [])],
+        envelope,
+      )
+      state = committed.state
+      committedHumanMessages = committed.messageCount
+      humanInputsCommitted = true
+      if (committed.lastCurrentWakeCommittedMessageId) {
+        this.notifyHumanInputCommitted(onHumanInputCommitted, committed.lastCurrentWakeCommittedMessageId)
+      }
+
+      const carriedTexts = carriedEnvelopes
+        .filter((item) => !isHumanWake(item.wake) || isEmptyHumanWake(item.wake))
+        .map((item) => this.renderEnvelope(item))
+      const eventText = envelope && (!isHumanWake(envelope.wake) || isEmptyHumanWake(envelope.wake))
+        ? this.renderEnvelope(envelope)
+        : undefined
+      if (committedHumanMessages === 0 && carriedTexts.length === 0 && eventText === undefined) {
+        await this.settleUnclaimedAdminChatWakes()
+        return {
+          episodeId,
+          outcome: 'completed',
+          turns: 0,
+          consumedEvents: true,
+          repliedToHuman: false,
+          successfulSendMessageTargets: [],
+        }
+      }
+
+      // 人类提交成功后，trace admission 的失败也不得倒回已提交输入。
       this.deps.traceWriter?.startEpisode(
         episodeId,
         this.deps.managerKey(),
@@ -425,18 +482,15 @@ export class ManagerLoop {
         status: 'running',
         details: { merged_envelopes: carriedEnvelopes.length + (envelope ? 1 : 0) },
       })
-    } catch (traceStartError) {
-      // episode admission 失败：零 LLM/tool，重投后向上抛（与下方失败路径同语义）。
-      this.mailbox.drainEnvelopes()
-      for (const item of carriedEnvelopes) this.mailbox.push(item)
-      if (envelope !== undefined) this.mailbox.push(envelope)
-      this.currentEpisodeInjected = null
-      this.currentWakeEvent = null
-      throw traceStartError
-    }
-
-    try {
-      const result = await this.runEpisodeBody(episodeId, carriedTexts, eventText, carriedEnvelopes, envelope)
+      const result = await this.runEpisodeBody(
+        episodeId,
+        state,
+        committed.humanMessages,
+        carriedTexts,
+        eventText,
+        carriedEnvelopes,
+        envelope,
+      )
       // completed/max_turns → completed；failed/aborted → failed（plan §5.5）。
       const failed = result.outcome === 'failed' || result.outcome === 'aborted'
       if (traceStarted) {
@@ -452,44 +506,32 @@ export class ManagerLoop {
       // P6-A §3.2：episode 被消费（含 F3 沉默终态）即结算未 claim 的 request IDs——
       // 否则 wake 永不 settled，每次 Agent 重启都重放历史消息。已 claim 的由 delivery
       // confirm 结算；失败（consumedEvents=false）的整批重投不结算。
-      if (result.consumedEvents && this.adminChatClaims.size > 0) {
-        const unsettled = Array.from(this.adminChatClaims.entries())
-          .filter(([, state]) => state === 'unclaimed')
-          .map(([id]) => id)
-        if (unsettled.length > 0) {
-          // 结算是 episode 收尾的一部分（await，避免挂起写与进程/测试清理竞争）；
-          // 但结算失败绝不能反过来把已成功的 episode 判失败——本地容错只记日志。
-          try {
-            await this.deps.onAdminChatWakeConsumed?.(unsettled)
-          } catch (error) {
-            console.warn('[ManagerLoop] admin chat wake settle failed:', error instanceof Error ? error.message : String(error))
-          }
-        }
-      }
+      if (result.consumedEvents) await this.settleUnclaimedAdminChatWakes()
       return result
     } catch (err) {
-      // runEpisodeBody 内部按 outcome 判定的失败分支(约 L232-249,LLM 报错被 engine 捕获为
-      // outcome='failed'/'aborted' 后正常 return 的路径)已经在返回前自行完成了重投——那条路径
-      // 不会走到这里。这里的 catch 专门兜"直接 throw、根本没走到 outcome 判定"的路径:
-      // applyFold/Store I/O can throw before an EngineResult exists. Requeue the same
-      // envelopes in their original order so retry cannot mint a new timestamp.
+      // admission 与直接 throw 都在这里收口。人类提交一旦完成，仅重投非人类事件；否则保留
+      // 原输入，下一次 wake 再试提交。
       if (traceStarted) {
-        // 直接 throw 的失败路径：trace 收口 failed 后再按现有 mailbox 逻辑重投；
-        // trace 失败本身绝不能改变 consumedEvents（finish 是 best-effort，失败只 warn）。
         this.deps.traceWriter?.finishEpisode(episodeId, {
           status: 'failed',
           outcome: { summary: '[episode threw]', error: err instanceof Error ? err.message : String(err) },
         })
       }
       this.mailbox.drainEnvelopes()
-      for (const item of carriedEnvelopes) this.mailbox.push(item)
-      if (envelope !== undefined) this.mailbox.push(envelope)
-      for (const item of this.currentEpisodeInjected ?? []) this.mailbox.push(item)
+      this.requeueUncommittedEnvelopes(carriedEnvelopes, humanInputsCommitted)
+      if (envelope !== undefined && (!humanInputsCommitted || !isHumanWake(envelope.wake))) this.mailbox.push(envelope)
+      this.requeueUncommittedEnvelopes(this.currentEpisodeInjected ?? [], humanInputsCommitted)
+      this.currentEpisodeInjected = null
+      this.currentWakeEvent = null
       throw err
     } finally {
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
       this.currentTraceId = undefined
+      this.needsSpawnRecheck = false
+      this.spawnRecheckInjected = false
+      this.spawnRecheckOutcomeRecorded = false
+      this.postSendRecheckSequence = 0
       this.currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
       this.attemptCounter = 0
     }
@@ -497,6 +539,8 @@ export class ManagerLoop {
 
   private async runEpisodeBody(
     episodeId: string,
+    initialState: ManagerSessionState,
+    committedHumanMessages: ReadonlyArray<EngineMessage>,
     carriedTexts: ReadonlyArray<string>,
     eventText: string | undefined,
     carriedEnvelopes: ReadonlyArray<TimedWakeEnvelope>,
@@ -507,17 +551,19 @@ export class ManagerLoop {
     const adapter = this.deps.adapter()
     const model = this.deps.model()
 
-    let state = await this.deps.store.load(this.deps.key)
+    let state = initialState
+    let historyState = withoutProtectedTail(state, committedHumanMessages.length)
     const nowMs = this.deps.now().getTime()
 
     const wakeDecision = decideCompaction({
-      state,
+      state: historyState,
       nowMs,
       policy: this.deps.policy,
       estimateTokens: this.deps.estimateTokens,
     })
     if (wakeDecision.kind !== 'none') {
-      state = await this.applyFoldWithSpan(episodeId, state, wakeDecision, adapter, model)
+      state = await this.applyFoldWithSpan(episodeId, historyState, wakeDecision, adapter, model, committedHumanMessages)
+      historyState = withoutProtectedTail(state, committedHumanMessages.length)
     }
 
     const currentTailMessages: EngineMessage[] = [
@@ -552,10 +598,18 @@ export class ManagerLoop {
     if (isContextOverflow(attempt.result)) {
       // Only pre-existing history may be folded. The current initial wake, carried
       // envelopes and mid-episode supplements are a protected tail (§14.4).
-      const forceDecision = forceHotFold(state, this.deps.policy, this.deps.estimateTokens, nowMs)
+      const forceDecision = forceHotFold(historyState, this.deps.policy, this.deps.estimateTokens, nowMs)
       if (forceDecision.kind !== 'none') {
         usedForceHotRetry = true
-        state = await this.applyFoldWithSpan(episodeId, state, forceDecision, adapter, model)
+        state = await this.applyFoldWithSpan(
+          episodeId,
+          historyState,
+          forceDecision,
+          adapter,
+          model,
+          committedHumanMessages,
+        )
+        historyState = withoutProtectedTail(state, committedHumanMessages.length)
         // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
         this.mailbox.drainEnvelopes()
         const retryTailMessages: EngineMessage[] = [
@@ -580,6 +634,51 @@ export class ManagerLoop {
       // 榨不出任何进展,再重试一次只会拿同样大小的上下文重新问一遍 LLM,注定再次超限,纯烧钱,
       // 因此这里不为它们单独加重试:维持"forceDecision.kind==='none' 就不重试"这一既有分支
       // 覆盖两类触发场景,不需要额外判断。
+    }
+
+    // end_turn / stop_sequence 会在 runEngine 内经 endTurnGate 得到复核；max_turns 及
+    // disableCompaction 下归并的 max_tokens 则会直接返回这里。后者只补一次受原有
+    // maxTurns 限制的 continuation，不能用上限绕过复核，也绝不形成循环。
+    if (
+      this.needsSpawnRecheck
+      && !this.spawnRecheckInjected
+      && (attempt.result.outcome === 'completed' || attempt.result.outcome === 'max_turns')
+    ) {
+      this.spawnRecheckInjected = true
+      this.recordPostSendDecision('recheck_injected')
+      const continuationInitial = [
+        ...attempt.result.finalMessages,
+        createUserMessage(POST_SEND_ACTION_RECHECK_PROMPT),
+      ]
+      const continuation = await this.runAttempt(
+        episodeId,
+        state,
+        [],
+        adapter,
+        model,
+        { initialMessages: continuationInitial },
+      )
+      totalTurnsUsed += continuation.result.totalTurns
+      if (continuation.result.outcome === 'completed' || continuation.result.outcome === 'max_turns') {
+        repliedToHuman = repliedToHuman || detectRepliedToHuman(continuation.result.finalMessages)
+        successfulSendMessageTargets = [
+          ...successfulSendMessageTargets,
+          ...successfulSendMessageTargetsOf(continuation.result.finalMessages.slice(continuation.initialMessageCount)),
+        ]
+        attempt = continuation
+      } else {
+        // The recheck is advisory. Its own failure must not replay an already
+        // consumable episode.
+        this.recordPostSendDecision('recheck_failed_open')
+      }
+    }
+
+    if (this.needsSpawnRecheck) {
+      this.recordPostSendDecision(
+        attempt.result.outcome === 'failed' || attempt.result.outcome === 'aborted'
+          ? 'unresolved_failed'
+          : 'unresolved_accepted',
+      )
     }
 
     await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, attempt.result.finalMessages)
@@ -618,7 +717,8 @@ export class ManagerLoop {
       // tailMessages 的一部分被折进了 rollingSummary(见 forceHotFold),这里仍会原样
       // 重投它们,导致同一份内容同时以"摘要"与"原始文本"两种形式留存——已知取舍,不在此修复。
       //
-      // 把"这次没处理完的输入"按原始到达顺序整体推回邮箱:carriedTexts → eventText →
+      // 把尚未提交的人类输入和非人类输入按原始到达顺序推回邮箱。已提交人类输入已在
+      // `state.recent`，不能再以 wake 形式重放。
       // episode 期间经 enqueueDuringEpisode 注入的内容(currentEpisodeInjected,顺序即
       // 到达顺序)。后者无论当时是否已被 engine drainPending() 消费——消费掉的已经进了
       // 随失败一起丢弃的 finalMessages,不消费的还原样躺在 mailbox.pending 里——
@@ -626,9 +726,9 @@ export class ManagerLoop {
       // 清空 mailbox 里可能残留的"尚未被消费"那一段(它是 currentEpisodeInjected 的后缀,
       // 不清空会和下面的整体重投重复),再按到达顺序整体重投,保证至少一次投递、不丢失、不重复。
       this.mailbox.drainEnvelopes()
-      for (const item of carriedEnvelopes) this.mailbox.push(item)
-      if (envelope !== undefined) this.mailbox.push(envelope)
-      for (const item of this.currentEpisodeInjected ?? []) this.mailbox.push(item)
+      this.requeueUncommittedEnvelopes(carriedEnvelopes, true)
+      if (envelope !== undefined && !isHumanWake(envelope.wake)) this.mailbox.push(envelope)
+      this.requeueUncommittedEnvelopes(this.currentEpisodeInjected ?? [], true)
     }
 
     const result: EpisodeResult = {
@@ -641,6 +741,113 @@ export class ManagerLoop {
     }
     this.deps.onEpisodeEnd?.(result)
     return result
+  }
+
+  private async commitHumanInputs(
+    state: ManagerSessionState,
+    envelopes: ReadonlyArray<TimedWakeEnvelope>,
+    currentEnvelope: TimedWakeEnvelope | undefined,
+  ): Promise<{
+    readonly state: ManagerSessionState
+    readonly humanMessages: ReadonlyArray<EngineMessage>
+    readonly messageCount: number
+    readonly lastCurrentWakeCommittedMessageId?: string
+  }> {
+    const committedIds = new Set(state.committedHumanMessageIds ?? [])
+    const committedMessages: EngineMessage[] = []
+    let lastCurrentWakeCommittedMessageId: string | undefined
+
+    for (const envelope of envelopes) {
+      if (!isHumanWake(envelope.wake)) continue
+      const newEntries = envelope.wake.messages
+        .map((message, index) => ({ message, index }))
+        .filter(({ message }) => !committedIds.has(message.platform_message_id))
+      if (newEntries.length === 0) continue
+
+      for (const { message } of newEntries) committedIds.add(message.platform_message_id)
+      committedMessages.push(createUserMessage(this.renderEnvelope(projectHumanEnvelope(envelope, newEntries))))
+      if (envelope === currentEnvelope) {
+        lastCurrentWakeCommittedMessageId = newEntries[newEntries.length - 1].message.platform_message_id
+      }
+    }
+
+    if (committedMessages.length === 0) {
+      return { state, humanMessages: [], messageCount: 0 }
+    }
+
+    const next: ManagerSessionState = {
+      ...state,
+      recent: [...state.recent, ...committedMessages],
+      committedHumanMessageIds: Array.from(committedIds),
+    }
+    await this.deps.store.save(next)
+    return { state: next, humanMessages: committedMessages, messageCount: committedMessages.length, lastCurrentWakeCommittedMessageId }
+  }
+
+  private notifyHumanInputCommitted(
+    callback: ((lastCommittedMessageId: string) => Promise<void>) | undefined,
+    lastCommittedMessageId: string,
+  ): void {
+    if (!callback) return
+    try {
+      void callback(lastCommittedMessageId).catch((err) => {
+        console.warn('[ManagerLoop] human input committed callback failed (ignored):', err instanceof Error ? err.message : String(err))
+      })
+    } catch (err) {
+      console.warn('[ManagerLoop] human input committed callback failed (ignored):', err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  private requeueUncommittedEnvelopes(
+    envelopes: ReadonlyArray<TimedWakeEnvelope>,
+    humanInputsCommitted: boolean,
+  ): void {
+    for (const envelope of envelopes) {
+      if (humanInputsCommitted && isHumanWake(envelope.wake)) continue
+      this.mailbox.push(envelope)
+    }
+  }
+
+  private async settleUnclaimedAdminChatWakes(): Promise<void> {
+    if (this.adminChatClaims.size === 0) return
+    const unsettled = Array.from(this.adminChatClaims.entries())
+      .filter(([, state]) => state === 'unclaimed')
+      .map(([id]) => id)
+    if (unsettled.length === 0) return
+    try {
+      await this.deps.onAdminChatWakeConsumed?.(unsettled)
+    } catch (error) {
+      console.warn('[ManagerLoop] admin chat wake settle failed:', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  private takeSpawnRecheckPrompt(): string | null {
+    if (!this.needsSpawnRecheck || this.spawnRecheckInjected) return null
+    this.spawnRecheckInjected = true
+    this.recordPostSendDecision('recheck_injected')
+    return POST_SEND_ACTION_RECHECK_PROMPT
+  }
+
+  private recordPostSendDecision(
+    state: 'marked' | 'cleared' | 'recheck_injected' | 'recheck_failed_open' | 'unresolved_accepted' | 'unresolved_failed',
+  ): void {
+    if (state === 'unresolved_accepted' || state === 'unresolved_failed') {
+      if (this.spawnRecheckOutcomeRecorded) return
+      this.spawnRecheckOutcomeRecorded = true
+    }
+    const traceId = this.currentTraceId
+    if (!traceId) return
+    const now = new Date().toISOString()
+    this.deps.traceWriter?.appendSpan(traceId, {
+      span_id: `post-send-action-${traceId}-${++this.postSendRecheckSequence}`,
+      parent_span_id: `root-${traceId}`,
+      type: 'decision',
+      started_at: now,
+      ended_at: now,
+      duration_ms: 0,
+      status: state === 'unresolved_failed' || state === 'recheck_failed_open' ? 'failed' : 'completed',
+      details: { kind: 'post_send_action', state },
+    })
   }
 
   /** engine onTurn → llm_call/tool_call span（截断摘要由 writer 侧统一脱敏落盘）。 */
@@ -707,11 +914,12 @@ export class ManagerLoop {
     decision: Extract<CompactionDecision, { kind: 'fold_at_wake' | 'force_hot' }>,
     adapter: LLMAdapter,
     model: string,
+    protectedTail: ReadonlyArray<EngineMessage> = [],
   ): Promise<ManagerSessionState> {
     const writer = this.deps.traceWriter
     const startedAt = new Date().toISOString()
     try {
-      const next = await this.applyFold(state, decision, adapter, model)
+      const next = await this.applyFold(state, decision, adapter, model, protectedTail)
       if (writer && this.currentTraceId === episodeId) {
         const endedAt = new Date().toISOString()
         writer.appendSpan(episodeId, {
@@ -751,6 +959,7 @@ export class ManagerLoop {
     decision: Extract<CompactionDecision, { kind: 'fold_at_wake' | 'force_hot' }>,
     adapter: LLMAdapter,
     model: string,
+    protectedTail: ReadonlyArray<EngineMessage> = [],
   ): Promise<ManagerSessionState> {
     const newSummary = await foldIntoSummary({
       adapter,
@@ -770,7 +979,7 @@ export class ManagerLoop {
     const next: ManagerSessionState = {
       ...state,
       rollingSummary: newSummary,
-      recent: decision.keep,
+      recent: [...decision.keep, ...protectedTail],
       foldedCount: state.foldedCount + decision.foldMessages.length,
     }
     await this.deps.store.save(next)
@@ -785,13 +994,16 @@ export class ManagerLoop {
     tailMessages: ReadonlyArray<EngineMessage>,
     adapter: LLMAdapter,
     model: string,
+    overrides?: { readonly initialMessages?: ReadonlyArray<EngineMessage> },
   ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean; readonly initialMessageCount: number }> {
     this.attemptCounter += 1
     let assistantTextEndTurnReminderSent = false
     const hasSummaryMarker = state.rollingSummary !== undefined
-    const initialMessages: EngineMessage[] = hasSummaryMarker
-      ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
-      : [...tailMessages]
+    const initialMessages: EngineMessage[] = overrides?.initialMessages
+      ? [...overrides.initialMessages]
+      : hasSummaryMarker
+        ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
+        : [...tailMessages]
 
     const systemPrompt = (): string => {
       const extra = this.deps.promptInputs()
@@ -825,6 +1037,7 @@ export class ManagerLoop {
         assistantTextEndTurnReminderSent = true
         return { kind: 'inject' as const, text: ASSISTANT_TEXT_END_TURN_REMINDER }
       },
+      endTurnGate: async () => this.takeSpawnRecheckPrompt(),
       // P6-A §6.4：onTurn 是事后观察钩子，用它生成 llm_call/tool_call span；
       // 不复制执行语义、不新增第二个 query loop。
       onTurn: (event) => this.recordTurnSpans(episodeId, event),
@@ -1034,6 +1247,36 @@ export function renderTimedWakeEnvelope(envelope: TimedWakeEnvelope): string {
   const header = `[event received_at="${envelope.received_at}" timezone="${envelope.timezone}"]`
   const occurred = envelope.occurred_at ? `\n[event occurred_at="${envelope.occurred_at}"]` : ''
   return `${header}${occurred}\n${renderWakeEvent(envelope.wake, envelope)}`
+}
+
+type HumanWake = Extract<WakeEvent, { readonly kind: 'human_messages' | 'attention_flush' }>
+
+function isHumanWake(wake: WakeEvent): wake is HumanWake {
+  return wake.kind === 'human_messages' || wake.kind === 'attention_flush'
+}
+
+function isEmptyHumanWake(wake: HumanWake): boolean {
+  return wake.messages.length === 0
+}
+
+function projectHumanEnvelope(
+  envelope: TimedWakeEnvelope,
+  entries: ReadonlyArray<{ readonly message: ChannelMessage; readonly index: number }>,
+): TimedWakeEnvelope {
+  if (!isHumanWake(envelope.wake)) throw new Error('projectHumanEnvelope requires a human wake')
+  const humanOccurredAt = envelope.human_occurred_at
+    ? entries.map(({ message, index }) => envelope.human_occurred_at?.[index] ?? { message_id: message.platform_message_id })
+    : undefined
+  return {
+    ...envelope,
+    wake: { ...envelope.wake, messages: entries.map(({ message }) => message) },
+    ...(humanOccurredAt ? { human_occurred_at: humanOccurredAt } : {}),
+  }
+}
+
+function withoutProtectedTail(state: ManagerSessionState, protectedTailLength: number): ManagerSessionState {
+  if (protectedTailLength === 0) return state
+  return { ...state, recent: state.recent.slice(0, -protectedTailLength) }
 }
 
 function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope): string {

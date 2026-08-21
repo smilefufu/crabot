@@ -1,25 +1,20 @@
 /**
- * outbound-flush helper 单测
+ * outbound-dispatch helper 单测。
  *
- * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5
- *
- * 覆盖 dispatchOutboundMessage 与 createOutboundFlush 的核心契约：
+ * 覆盖 dispatchOutboundMessage 的核心契约：
  * - file_path + sandbox path mapping 走主机路径转换（不再 silent drop）
  * - friend_id-only mention 走 admin get_friend 反查（不再 silent drop）
- * - flush 路径多 entry 之一失败时后续 entry 仍发（reviewer Important #2）
- * - flush 完后 buffer 已被 splice 清空
  */
 import { describe, it, expect, vi } from 'vitest'
 import {
-  createOutboundFlush,
   dispatchOutboundMessage,
-  type OutboundBufferEntry,
+  type OutboundMessage,
   type OutboundDispatchDeps,
   type OutboundSendResult,
   type PathMapping,
-} from '../../src/agent/outbound-flush.js'
+} from '../../src/agent/outbound-dispatch.js'
 
-function makeEntry(overrides: Partial<OutboundBufferEntry> = {}): OutboundBufferEntry {
+function makeEntry(overrides: Partial<OutboundMessage> = {}): OutboundMessage {
   return {
     channel_id: 'wechat:bot:abc',
     session_id: 'session_a',
@@ -269,99 +264,13 @@ describe('dispatchOutboundMessage', () => {
   })
 })
 
-describe('createOutboundFlush', () => {
-  it('多 entry 之一失败时后续 entry 仍发（reviewer Important #2）', async () => {
-    const sentSessions: string[] = []
-    let callIndex = 0
-    const deps: OutboundDispatchDeps = {
-      rpcClient: {
-        call: vi.fn(async (_port: number, method: string, payload: unknown) => {
-          if (method === 'send_message') {
-            callIndex++
-            const p = payload as { session_id: string }
-            if (callIndex === 1) {
-              throw new Error('first entry boom')
-            }
-            sentSessions.push(p.session_id)
-            return { platform_message_id: `m-${callIndex}`, sent_at: '' }
-          }
-          return {}
-        }),
-      } as never,
-      moduleId: 'm',
-      resolveChannelPort: async () => 19009,
-      getAdminPort: async () => 19001,
-    }
-
-    const buffer: OutboundBufferEntry[] = [
-      makeEntry({ session_id: 'sess1', content: 'first' }),
-      makeEntry({ session_id: 'sess2', content: 'second' }),
-      makeEntry({ session_id: 'sess3', content: 'third' }),
-    ]
-
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-
-    const flush = createOutboundFlush(buffer, deps)
-    const { sentCount, failures } = await flush()
-
-    // 后续 2 个 entry 应该都已发出
-    expect(sentSessions).toEqual(['sess2', 'sess3'])
-    expect(sentCount).toBe(2)
-    // buffer 已清空（splice 一次取完，失败的不放回）
-    expect(buffer.length).toBe(0)
-    // 错误已被 log
-    expect(warnSpy).toHaveBeenCalled()
-    const warnArgs = warnSpy.mock.calls.flat().map(String).join(' ')
-    expect(warnArgs).toContain('first entry boom')
-    // 失败 entry 的摘要+原因回传给 caller（不再静默吞掉）——engine 据此注入给 worker
-    expect(failures).toHaveLength(1)
-    expect(failures[0]!.error).toContain('first entry boom')
-    expect(failures[0]!.summary).toContain('first')
-
-    warnSpy.mockRestore()
-  })
-
-  it('空 buffer → 不调 rpc / 不报错', async () => {
-    const callSpy = vi.fn()
-    const deps: OutboundDispatchDeps = {
-      rpcClient: { call: callSpy } as never,
-      moduleId: 'm',
-      resolveChannelPort: async () => 19009,
-      getAdminPort: async () => 19001,
-    }
-    const flush = createOutboundFlush([], deps)
-    await flush()
-    expect(callSpy).not.toHaveBeenCalled()
-  })
-
-  it('所有 entry 成功 → buffer 清空', async () => {
-    const deps: OutboundDispatchDeps = {
-      rpcClient: {
-        call: vi.fn(async (_port: number, method: string) => {
-          if (method === 'send_message') return { platform_message_id: 'm', sent_at: '' }
-          return {}
-        }),
-      } as never,
-      moduleId: 'm',
-      resolveChannelPort: async () => 19009,
-      getAdminPort: async () => 19001,
-    }
-    const buffer: OutboundBufferEntry[] = [makeEntry(), makeEntry({ session_id: 'sess2' })]
-    const flush = createOutboundFlush(buffer, deps)
-    const { sentCount, failures } = await flush()
-    expect(buffer.length).toBe(0)
-    // 全部成功 → 无失败回传
-    expect(failures).toEqual([])
-    expect(sentCount).toBe(2)
-  })
-})
 
 // ============================================================================
-// §4.13.6 dispatch 钩子点 invariant 测试
+// dispatch completion hook tests
 // ============================================================================
 
-describe('dispatchOutboundMessage onDispatched 钩子（§4.13.6 Invariant #1 + #2）', () => {
-  function successDeps(onDispatched?: (e: OutboundBufferEntry, r: OutboundSendResult) => void): OutboundDispatchDeps {
+describe('dispatchOutboundMessage onDispatched hook', () => {
+  function successDeps(onDispatched?: (e: OutboundMessage, r: OutboundSendResult) => void): OutboundDispatchDeps {
     return {
       rpcClient: {
         call: vi.fn(async (_port: number, method: string) => {
@@ -376,7 +285,7 @@ describe('dispatchOutboundMessage onDispatched 钩子（§4.13.6 Invariant #1 + 
     }
   }
 
-  it('Invariant #1: success 路径触发 onDispatched 恰好 1 次，entry + sendResult 作为参数', async () => {
+  it('success 路径触发 onDispatched 恰好 1 次，entry + sendResult 作为参数', async () => {
     const hook = vi.fn()
     const deps = successDeps(hook)
     const entry = makeEntry({ content: 'hello' })
@@ -384,11 +293,10 @@ describe('dispatchOutboundMessage onDispatched 钩子（§4.13.6 Invariant #1 + 
     await dispatchOutboundMessage(entry, deps)
 
     expect(hook).toHaveBeenCalledOnce()
-    // spec A §4.13.7 Revision (3): 钩子签名 (entry, sendResult)；sendResult 含 platform_message_id / sent_at
     expect(hook).toHaveBeenCalledWith(entry, { platform_message_id: 'mid', sent_at: 'now' })
   })
 
-  it('Invariant #2: dispatch 抛错（channel rpc 抛错）不触发钩子', async () => {
+  it('dispatch 抛错（channel rpc 抛错）不触发钩子', async () => {
     const hook = vi.fn()
     const deps: OutboundDispatchDeps = {
       rpcClient: {
@@ -407,7 +315,7 @@ describe('dispatchOutboundMessage onDispatched 钩子（§4.13.6 Invariant #1 + 
     expect(hook).not.toHaveBeenCalled()
   })
 
-  it('Invariant #2: resolveChannelPort 抛错也不触发钩子', async () => {
+  it('resolveChannelPort 抛错也不触发钩子', async () => {
     const hook = vi.fn()
     const deps: OutboundDispatchDeps = {
       rpcClient: { call: vi.fn() } as never,
@@ -442,40 +350,4 @@ describe('dispatchOutboundMessage onDispatched 钩子（§4.13.6 Invariant #1 + 
     warnSpy.mockRestore()
   })
 
-  it('createOutboundFlush 多 entry：每条 success entry 都触发钩子；失败 entry 不触发但不阻塞后续', async () => {
-    const hook = vi.fn()
-    let callCount = 0
-    const deps: OutboundDispatchDeps = {
-      rpcClient: {
-        call: vi.fn(async (_port: number, method: string) => {
-          if (method === 'send_message') {
-            callCount++
-            if (callCount === 2) throw new Error('mid failure')
-            return { platform_message_id: `m${callCount}`, sent_at: '' }
-          }
-          return {}
-        }),
-      } as never,
-      moduleId: 'm',
-      resolveChannelPort: async () => 19009,
-      getAdminPort: async () => 19001,
-      onDispatched: hook,
-    }
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-
-    const buffer: OutboundBufferEntry[] = [
-      makeEntry({ content: 'a' }),
-      makeEntry({ content: 'b' }),  // 第 2 条 dispatch 抛错
-      makeEntry({ content: 'c' }),
-    ]
-    await createOutboundFlush(buffer, deps)()
-
-    // 钩子触发 2 次（第 1 / 第 3 entry success），第 2 entry 因抛错不触发
-    expect(hook).toHaveBeenCalledTimes(2)
-    expect(hook.mock.calls[0][0].content).toBe('a')
-    expect(hook.mock.calls[1][0].content).toBe('c')
-    expect(buffer.length).toBe(0) // splice 已清空
-
-    warnSpy.mockRestore()
-  })
 })
