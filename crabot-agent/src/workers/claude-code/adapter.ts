@@ -65,6 +65,7 @@ import type {
   IncarnationHandle,
   IncarnationRef,
   ForkOptions,
+  ResumeOptions,
   NormalizedTraceEvent,
   SpawnSpec,
   SendInputOptions,
@@ -83,6 +84,22 @@ const execFileAsync = promisify(execFile)
 /** POSIX shell 单引号转义,与 tmux/driver.ts 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+function workspaceInstructionPrompt(spec?: import('../types.js').WorkspaceInstructionPayload): string | undefined {
+  if (spec?.snapshot.source !== 'agents_md' || spec.text === undefined) return undefined
+  return [
+    'The following is an immutable, read-only snapshot of the workspace AGENTS.md for this incarnation.',
+    'Follow it together with any user-maintained CLAUDE.md. Do not modify the snapshot itself.',
+    '<workspace-agents-md>',
+    spec.text,
+    '</workspace-agents-md>',
+  ].join('\n')
+}
+
+function appendWorkspaceInstructionPrompt(spec?: import('../types.js').WorkspaceInstructionPayload): string {
+  const prompt = workspaceInstructionPrompt(spec)
+  return prompt ? ` --append-system-prompt ${shQuote(prompt)}` : ''
 }
 
 function safeProcessError(error: unknown): string {
@@ -707,7 +724,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         const stopCount = events.filter((event) => event.kind === 'stop').length
         if (stopCount > runtime.stopBaseline) {
           runtime.stopBaseline = stopCount
-          await this.transitionControlState(runtime, h, { kind: 'waiting_text' }, undefined, notify)
+          await this.transitionControlState(runtime, h, { kind: 'waiting_text' }, { completionSource: 'claude_stop' }, notify)
           return { control_state: 'waiting_text', disposition: 'accepted' }
         }
       }
@@ -748,7 +765,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 不同 binary」的版本错配/command not found 由此杜绝。
     const spawnBin = await this.resolveBinForCommand()
     if (!spawnBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.spawn: no user-level claude installation`)
-    const command = `${spawnBin} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode auto`
+    const command = `${spawnBin} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode auto${appendWorkspaceInstructionPrompt(spec.workspace_instructions)}`
     const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
     const eventWatchOffset = await eventChannel.endOffset()
     const stopBaseline = await this.initialStopBaseline(eventChannel)
@@ -816,7 +833,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string>; incarnation_id?: string }): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: ResumeOptions): Promise<IncarnationHandle> {
     this.assertActive()
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
@@ -872,7 +889,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
       const resumeBin = await this.resolveBinForCommand()
       if (!resumeBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.resume: no user-level claude installation`)
-      const command = `${resumeBin} ${STRICT_MCP_CONFIG_ARGS} --permission-mode auto --resume ${shQuote(prev.session_ref)}`
+      const command = `${resumeBin} ${STRICT_MCP_CONFIG_ARGS} --permission-mode auto --resume ${shQuote(prev.session_ref)}${appendWorkspaceInstructionPrompt(opts?.workspace_instructions)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
@@ -986,6 +1003,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     let child: ChildProcess
     try {
+      const instructionPrompt = workspaceInstructionPrompt(opts.workspace_instructions)
       const args = [
         '-p', forkInput,
         '--resume', prev.session_ref,
@@ -995,6 +1013,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         '--include-partial-messages',
         '--mcp-config', MCP_CONFIG_FILE,
         '--strict-mcp-config',
+        ...(instructionPrompt !== undefined
+          ? ['--append-system-prompt', instructionPrompt]
+          : []),
       ]
       const forkBin = await this.resolveBinForCommand()
       if (!forkBin) {
@@ -1414,7 +1435,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       } else if (stopCount > runtime.stopBaseline) {
         runtime.stopBaseline = stopCount
         runtime.interactionFingerprint = undefined
-        await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
+        await this.transitionControlState(runtime, h, { kind: 'waiting_text' }, { completionSource: 'claude_stop' })
       }
       return { state: contractState(runtime.controlState), stopCount }
     })

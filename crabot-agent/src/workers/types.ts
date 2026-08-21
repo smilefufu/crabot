@@ -16,6 +16,12 @@ export interface WorkspaceInstructionSnapshot {
   readonly artifact_id?: string
 }
 
+/** Harness-private, immutable AGENTS.md capture delivered to an adapter at incarnation launch. */
+export interface WorkspaceInstructionPayload {
+  readonly snapshot: WorkspaceInstructionSnapshot
+  readonly text?: string
+}
+
 // ── P6-B：worker implementation connection / activation（protocol-agent-v3 §6.5 逐字段对齐）──
 
 export type WorkerConnectionConfig =
@@ -174,6 +180,8 @@ export interface ForkOptions {
   readonly incarnation_id?: IncarnationId
   readonly establishment_deadline_at: string
   readonly connection_env?: Record<string, string>
+  /** Present only when this adapter needs Harness to inject the AGENTS.md capture at launch. */
+  readonly workspace_instructions?: WorkspaceInstructionPayload
 }
 
 export interface NormalizedTraceEvent {
@@ -230,6 +238,8 @@ export interface SpawnSpec {
   readonly incarnation_id?: IncarnationId
   readonly prompt: string
   readonly workspace: Workspace
+  /** Present only when this adapter needs Harness to inject the AGENTS.md capture at launch. */
+  readonly workspace_instructions?: WorkspaceInstructionPayload
   /**
    * P6-B §6.5：operation admission 由 translator 注入的最小连接 env（CLI adapter 透传到
    * 进程 env；tmux driver 侧仍会过 scrubChildEnv）。不得由 Manager/调用方直接构造——
@@ -263,6 +273,13 @@ export interface SpawnSpec {
     /** IANA 时区名,用于 tool_result 时间戳渲染 */
     readonly timezone?: string
   }
+}
+
+export interface ResumeOptions {
+  readonly connection_env?: Record<string, string>
+  readonly incarnation_id?: IncarnationId
+  /** Present only when this adapter needs Harness to inject the AGENTS.md capture at launch. */
+  readonly workspace_instructions?: WorkspaceInstructionPayload
 }
 
 export interface IncarnationHandle {
@@ -391,7 +408,7 @@ export interface WorkerAdapter {
   preflightProvision?(ws: Workspace, caps: CapabilityBundle): Promise<void>
   provision(ws: Workspace, caps: CapabilityBundle): Promise<void>
   spawn(spec: SpawnSpec): Promise<IncarnationHandle>
-  resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string>; incarnation_id?: IncarnationId }): Promise<IncarnationHandle>
+  resume(prev: IncarnationRef, wakeInput: string, opts?: ResumeOptions): Promise<IncarnationHandle>
   fork(prev: IncarnationRef, forkInput: string, opts: ForkOptions): Promise<IncarnationHandle>
   sendInput(h: IncarnationHandle, text: string, opts?: SendInputOptions): Promise<void>
   readTerminal(h: IncarnationHandle): Promise<WorkerTerminalView>

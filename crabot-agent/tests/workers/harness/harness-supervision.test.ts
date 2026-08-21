@@ -286,8 +286,13 @@ describe('WorkerHarness task supervision', () => {
     await harness.sweepLiveness()
 
     const event = supervisionEvents(workerId).at(-1)!
-    expect(event.detail).toMatchObject({ mode: 'default', observation: 'text', mainline_seq: 1 })
     const worker = (await harness.findWorker(workerId))!.worker
+    expect(event.detail).toMatchObject({
+      mode: 'default',
+      observation: 'text',
+      mainline_seq: 1,
+      mainline_incarnation_id: worker.incarnations[0].incarnation_id,
+    })
     expect(worker.supervision).toMatchObject({
       mode: 'default',
       last_effective_review_at: now(),

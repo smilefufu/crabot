@@ -397,6 +397,40 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
   )
 
   it(
+    '用户自有 CLAUDE.md 时可把 AGENTS.md 快照追加到启动上下文',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const argvFile = path.join(dataDir, 'spawn-workspace-instructions-argv.jsonl')
+      const adapter = new ClaudeCodeAdapter({
+        dataDir,
+        claudeConfigPath: fakeClaudeConfig(dataDir),
+        tmux,
+        claudeBin: claudeBinFor([], channel.hookCommand('stop'), argvFile),
+        promptDeliveryTimeoutMs: 0,
+      })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+      const agents = '# Workspace rules\nRead the task status first.\n'
+      const h = await adapter.spawn({
+        ...makeSpec(workerId, '你好'),
+        workspace_instructions: {
+          snapshot: { source: 'agents_md', captured_at: '2026-08-21T00:00:00.000Z', digest: 'test-digest' },
+          text: agents,
+        },
+      })
+
+      const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
+      const promptIndex = argv.indexOf('--append-system-prompt')
+      expect(promptIndex).toBeGreaterThan(-1)
+      expect(argv[promptIndex + 1]).toContain(agents)
+      expect(argv[promptIndex + 1]).toContain('read-only snapshot')
+
+      await adapter.kill(h)
+    },
+    15000,
+  )
+
+  it(
     '① spawn → mock 输出 → Stop hook → state 收敛 idle,终端画面可读',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
@@ -951,6 +985,21 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     const sessionFile = path.join(claudeProjectsDir, await wsSlug(), `${h.session_ref}.jsonl`)
     const raw = await fs.readFile(sessionFile, 'utf-8')
     expect(raw).toContain('"type":"user"')
+
+    await adapter.kill(h)
+  })
+
+  it('真实 Stop hook 报告 claude_stop completion hint', async () => {
+    const reports: StateChangeReport[] = []
+    const { adapter, workerId } = await deliveryAdapter([{ output: '任务输出', emitStop: true }], {
+      onStateChange: (_h, state, report) => {
+        if (state === 'idle' && report) reports.push(report)
+      },
+    })
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+
+    await waitForIdle(adapter, h)
+    expect(reports).toContainEqual(expect.objectContaining({ completionSource: 'claude_stop' }))
 
     await adapter.kill(h)
   })

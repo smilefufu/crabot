@@ -710,18 +710,28 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
   // --- systemPrompt：v3 worker 契约尾巴 ---
 
-  it('systemPrompt = 现网 agent prompt（goal 模式关闭）+ v3 worker 契约尾巴', () => {
+  it('systemPrompt = 现网 agent prompt（goal 模式关闭）+ AGENTS.md 快照 + v3 worker 契约尾巴', () => {
     const { internals } = boot(makeConfig({ systemPrompt: '你是测试人格', skills: [
       { name: 'demo-skill', description: '演示技能', skill_dir: '/tmp/skills/demo' },
     ] }))
     const workspaceRoot = join(tmpRoot, 'ws-prompt')
-    const builtin = internals.buildBuiltinWorkerRuntime({ worker_id: 'w-prompt', workspace: { root: workspaceRoot } })!
+    const agents = '# Workspace rules\nInspect the current implementation before editing.\n'
+    const builtin = internals.buildBuiltinWorkerRuntime({
+      worker_id: 'w-prompt',
+      workspace: { root: workspaceRoot },
+      workspace_instructions: {
+        snapshot: { source: 'agents_md', captured_at: '2026-08-21T00:00:00.000Z', digest: 'test-digest' },
+        text: agents,
+      },
+    })!
     const prompt = resolvePrompt(builtin)
 
     // 复用现网装配：admin 人格 + skill 清单都在。
     expect(prompt).toContain('你是测试人格')
     expect(prompt).toContain('<available_skills>')
     expect(prompt).toContain('demo-skill')
+    expect(prompt).toContain(agents)
+    expect(prompt).toContain('<workspace-agents-md>')
     // 决策 4：goal 模式关闭（GOAL_MODE_DETAILS 段不注入）。
     expect(prompt).not.toContain('## 目标模式详解')
 

@@ -951,6 +951,7 @@ export class WorkerHarness {
                 origin: p.origin,
                 goal: p.goal,
                 principal_permissions: context.principal_permissions,
+                workspace_instructions: instructions,
               })
             : undefined)
         const spec: SpawnSpec = {
@@ -958,6 +959,9 @@ export class WorkerHarness {
           incarnation_id: incarnationId,
           prompt: p.prompt,
           workspace,
+          ...(impl === 'builtin' || claudeBridge?.kind === 'user_owned_claude_md'
+            ? { workspace_instructions: instructions }
+            : {}),
           goal: p.goal,
           origin: p.origin,
           principal_permissions: context.principal_permissions,
@@ -1593,16 +1597,7 @@ export class WorkerHarness {
             principal_permissions: auth.principal_permissions,
           })
         : EMPTY_CAPABILITY_BUNDLE
-      const builtin = targetImpl === 'builtin'
-        ? this.deps.builtinSpawnDefaults?.({
-            worker_id: worker.worker_id,
-            workspace,
-            origin: worker.origin,
-            goal: worker.task.goal,
-            principal_permissions: auth.principal_permissions,
-          })
-        : undefined
-      if (targetImpl === 'builtin' && !builtin) {
+      if (targetImpl === 'builtin' && !this.deps.builtinSpawnDefaults) {
         throw new Error('WorkerHarness.legacyContinuation: builtin target requires builtinSpawnDefaults')
       }
       // No context, HANDOFF, ledger, provision or spawn side effect precedes target preflight.
@@ -1617,6 +1612,19 @@ export class WorkerHarness {
         workspaceRoot: workspace.root,
         capturedAt: handoffAt,
       })
+      const builtin = targetImpl === 'builtin'
+        ? this.deps.builtinSpawnDefaults?.({
+            worker_id: worker.worker_id,
+            workspace,
+            origin: worker.origin,
+            goal: worker.task.goal,
+            principal_permissions: auth.principal_permissions,
+            workspace_instructions: instructions,
+          })
+        : undefined
+      if (targetImpl === 'builtin' && !builtin) {
+        throw new Error('WorkerHarness.legacyContinuation: builtinSpawnDefaults returned no runtime config')
+      }
       const claudeBridge = targetImpl === 'claude-code'
         ? await prepareClaudeWorkspaceBridge({
             workersDir: this.deps.workersDir,
@@ -1624,7 +1632,7 @@ export class WorkerHarness {
             incarnationId,
             workspaceRoot: workspace.root,
             instructions,
-        })
+          })
         : undefined
       const legacyIncarnationId = requireStableIncarnationId(legacy, worker.worker_id)
       const handoff = await writeHandoffPackage({
@@ -1656,6 +1664,9 @@ export class WorkerHarness {
           incarnation_id: incarnationId,
           prompt,
           workspace,
+          ...(targetImpl === 'builtin' || claudeBridge?.kind === 'user_owned_claude_md'
+            ? { workspace_instructions: instructions }
+            : {}),
           goal: worker.task.goal,
           origin: worker.origin,
           principal_permissions: auth.principal_permissions,
@@ -2147,15 +2158,15 @@ export class WorkerHarness {
       workspaceRoot: mainline.workspace,
       capturedAt: this.deps.now(),
     })
-    if (mainline.impl === 'claude-code') {
-      await prepareClaudeWorkspaceBridge({
+    const claudeBridge = mainline.impl === 'claude-code'
+      ? await prepareClaudeWorkspaceBridge({
         workersDir: this.deps.workersDir,
         workerId: worker.worker_id,
         incarnationId,
         workspaceRoot: mainline.workspace,
         instructions,
       })
-    }
+      : undefined
     // P6-B §6.5：resume 同样 operation-time 解析连接（revision 变化即拒绝）。
     const admission = await this.deps.admitWorkerConnection?.(mainline.impl, worker.worker_id)
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, incarnation_id: mainline.incarnation_id, seq: mainline.seq, session_ref: mainline.session_ref }
@@ -2166,6 +2177,9 @@ export class WorkerHarness {
       const returnedHandle = await adapter.resume(prevRef, text, {
         ...(admission ? { connection_env: admission.env } : {}),
         incarnation_id: incarnationId,
+        ...(mainline.impl === 'builtin' || claudeBridge?.kind === 'user_owned_claude_md'
+          ? { workspace_instructions: instructions }
+          : {}),
       })
       if (returnedHandle.incarnation_id !== undefined && returnedHandle.incarnation_id !== incarnationId) {
         throw new Error(`WorkerHarness.reviveIncarnation: adapter returned mismatched incarnation_id for ${worker.worker_id}`)
@@ -2299,7 +2313,7 @@ export class WorkerHarness {
     }
 
     // 0b. Pre-flight(裁决 B 修复):目标 adapter 必须存在;若目标是 'builtin',调用方必须
-    // 通过 HarnessDeps.builtinSpawnDefaults 提供了 LLM 注入,否则 step 3 的 newAdapter.spawn
+    // 通过 HarnessDeps.builtinSpawnDefaults 提供 LLM 注入,否则 step 3 的 newAdapter.spawn
     // 必然因 spec.builtin 缺失而抛错(BuiltinWorkerAdapter.spawn 本就 fail-loud)。修复前这
     // 个抛错发生在 step 3——此时旧化身已经在 step 2 被停止并标 superseded,worker 卡进
     // "旧的没了、新的没建成"的死结,且下次投递会重复整套 handoff（重复生成 package）。
@@ -2327,53 +2341,58 @@ export class WorkerHarness {
     try {
       handoffContext = await this.contextStore.read(worker.worker_id)
       principalPermissions = handoffContext?.principal_permissions
-      if (targetImpl === 'builtin') {
-      // harness-owned 快照在 package / kill 之前读取：CLI-first worker 切到 builtin
-      // 仍保留原身份；context 损坏则在破坏源化身之前 fail-loud。
-      builtinInjection = this.deps.builtinSpawnDefaults?.({
-        worker_id: worker.worker_id,
-        workspace: { root: source.workspace },
-        origin: worker.origin,
-        goal: worker.task.goal,
-        principal_permissions: principalPermissions,
-      })
-      if (!builtinInjection) {
+      if (targetImpl === 'builtin' && !this.deps.builtinSpawnDefaults) {
         throw new Error(
           `WorkerHarness.handoffIncarnation: handoff target impl is 'builtin' but no builtinSpawnDefaults ` +
             `configured on HarnessDeps; refusing before touching the source incarnation (worker ${worker.worker_id}#${source.seq})`
         )
       }
-    }
 
-    workspace = { root: source.workspace }
-    caps = this.deps.capabilityBundle
-      ? await this.deps.capabilityBundle({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
-      : EMPTY_CAPABILITY_BUNDLE
-    // tracked credential target 等确定性检查必须在 package / source stop 之前完成；preflightProvision
-    // 不得写 workspace。正式 provision 仍在 source teardown 之后执行并重检，避免 TOCTOU 静默越界。
-    await newAdapter.preflightProvision?.(workspace, caps)
+      workspace = { root: source.workspace }
+      caps = this.deps.capabilityBundle
+        ? await this.deps.capabilityBundle({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
+        : EMPTY_CAPABILITY_BUNDLE
+      // tracked credential target 等确定性检查必须在 package / source stop 之前完成；preflightProvision
+      // 不得写 workspace。正式 provision 仍在 source teardown 之后执行并重检，避免 TOCTOU 静默越界。
+      await newAdapter.preflightProvision?.(workspace, caps)
 
-    // The target identity, workspace rules snapshot and the private handoff package all exist
-    // before we stop the source. Any failure here leaves the source untouched and retryable.
-    targetIncarnationId = randomUUID()
-    const capturedAt = this.deps.now()
-    targetInstructions = await captureWorkspaceInstructions({
-      workersDir: this.deps.workersDir,
-      workerId: worker.worker_id,
-      incarnationId: targetIncarnationId,
-      workspaceRoot: workspace.root,
-      capturedAt,
-    })
-    targetClaudeBridge = targetImpl === 'claude-code'
-      ? await prepareClaudeWorkspaceBridge({
-          workersDir: this.deps.workersDir,
-          workerId: worker.worker_id,
-          incarnationId: targetIncarnationId,
-          workspaceRoot: workspace.root,
-          instructions: targetInstructions,
+      // The target identity, workspace rules snapshot and the private handoff package all exist
+      // before we stop the source. Any failure here leaves the source untouched and retryable.
+      targetIncarnationId = randomUUID()
+      const capturedAt = this.deps.now()
+      targetInstructions = await captureWorkspaceInstructions({
+        workersDir: this.deps.workersDir,
+        workerId: worker.worker_id,
+        incarnationId: targetIncarnationId,
+        workspaceRoot: workspace.root,
+        capturedAt,
+      })
+      if (targetImpl === 'builtin') {
+        builtinInjection = this.deps.builtinSpawnDefaults?.({
+          worker_id: worker.worker_id,
+          workspace,
+          origin: worker.origin,
+          goal: worker.task.goal,
+          principal_permissions: principalPermissions,
+          workspace_instructions: targetInstructions,
         })
-      : undefined
-    handoff = await this.captureHandoffPackage(worker, source, sourceAdapter, sourceHandle, capturedAt)
+        if (!builtinInjection) {
+          throw new Error(
+            `WorkerHarness.handoffIncarnation: builtinSpawnDefaults returned no runtime config ` +
+              `(worker ${worker.worker_id}#${source.seq})`,
+          )
+        }
+      }
+      targetClaudeBridge = targetImpl === 'claude-code'
+        ? await prepareClaudeWorkspaceBridge({
+            workersDir: this.deps.workersDir,
+            workerId: worker.worker_id,
+            incarnationId: targetIncarnationId,
+            workspaceRoot: workspace.root,
+            instructions: targetInstructions,
+          })
+        : undefined
+      handoff = await this.captureHandoffPackage(worker, source, sourceAdapter, sourceHandle, capturedAt)
     } catch (error) {
       // admission 之后、package/kill 之前的前置失败：dispose admission，source 不动。
       if (admission) await admission.dispose()
@@ -2414,6 +2433,9 @@ export class WorkerHarness {
         incarnation_id: targetIncarnationId,
         prompt,
         workspace,
+        ...(targetImpl === 'builtin' || targetClaudeBridge?.kind === 'user_owned_claude_md'
+          ? { workspace_instructions: targetInstructions }
+          : {}),
         goal: worker.task.goal,
         origin: worker.origin,
         principal_permissions: principalPermissions,
@@ -3648,6 +3670,7 @@ export class WorkerHarness {
     return this.buildEvent(worker.worker_id, handle.seq, 'supervision_due', {
       mode: supervision.mode,
       due_id: dueId,
+      mainline_incarnation_id: handle.incarnation_id,
       mainline_seq: handle.seq,
       observation,
       ...(probe ? { probe } : {}),
@@ -4256,15 +4279,15 @@ export class WorkerHarness {
       workspaceRoot: prep.workspace,
       capturedAt: this.deps.now(),
     })
-    if (prep.implId === 'claude-code') {
-      await prepareClaudeWorkspaceBridge({
+    const forkClaudeBridge = prep.implId === 'claude-code'
+      ? await prepareClaudeWorkspaceBridge({
         workersDir: this.deps.workersDir,
         workerId,
         incarnationId: forkIncarnationId,
         workspaceRoot: prep.workspace,
         instructions: forkInstructions,
       })
-    }
+      : undefined
     const disposeAdmission = async (): Promise<void> => {
       const owned = admission
       admission = undefined
@@ -4281,6 +4304,9 @@ export class WorkerHarness {
         query_id: prep.receipt.query_id,
         incarnation_id: forkIncarnationId,
         establishment_deadline_at: prep.receipt.establishment_deadline_at,
+        ...(prep.implId === 'builtin' || forkClaudeBridge?.kind === 'user_owned_claude_md'
+          ? { workspace_instructions: forkInstructions }
+          : {}),
         ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
       }
       const remainingMs = Date.parse(prep.receipt.establishment_deadline_at) - Date.parse(this.deps.now())

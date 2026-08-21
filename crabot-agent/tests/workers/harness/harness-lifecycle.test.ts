@@ -355,6 +355,34 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(await fs.readFile(join(workspace, 'AGENTS.md'), 'utf-8')).toBe(agents)
   })
 
+  it('把同一 AGENTS.md 快照交给 builtin 和有用户自有 CLAUDE.md 的 Claude worker', async () => {
+    const agents = '# Workspace rules\nDo not create HANDOFF.md.\n'
+    const builtinWorkspace = join(dataDir, 'builtin-workspace')
+    await fs.mkdir(builtinWorkspace, { recursive: true })
+    await fs.writeFile(join(builtinWorkspace, 'AGENTS.md'), agents)
+    const { harness: builtinHarness, fake: builtin } = await makeHarness({ implId: 'builtin' })
+
+    await builtinHarness.spawnWorker(spawnParams({ workspace: builtinWorkspace }))
+    expect(builtin.spawnCalls[0].workspace_instructions).toMatchObject({
+      snapshot: { source: 'agents_md' },
+      text: agents,
+    })
+
+    const claudeWorkspace = join(dataDir, 'claude-user-owned-workspace')
+    const userClaude = '# User maintained Claude instructions\n'
+    await fs.mkdir(claudeWorkspace, { recursive: true })
+    await fs.writeFile(join(claudeWorkspace, 'AGENTS.md'), agents)
+    await fs.writeFile(join(claudeWorkspace, 'CLAUDE.md'), userClaude)
+    const { harness: claudeHarness, fake: claude } = await makeHarness({ implId: 'claude-code' })
+
+    await claudeHarness.spawnWorker(spawnParams({ impl: 'claude-code', workspace: claudeWorkspace }))
+    expect(claude.spawnCalls[0].workspace_instructions).toMatchObject({
+      snapshot: { source: 'agents_md' },
+      text: agents,
+    })
+    expect(await fs.readFile(join(claudeWorkspace, 'CLAUDE.md'), 'utf-8')).toBe(userClaude)
+  })
+
   it('首次 provision 前落 harness context，并把同一固定权限快照交给 capability provider', async () => {
     const principalPermissions = {
       tool_access: { memory: true, messaging: false, task: false, mcp_skill: false, file_io: true, browser: true, shell: true, remote_exec: false, desktop: false },

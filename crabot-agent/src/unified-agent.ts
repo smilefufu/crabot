@@ -1118,7 +1118,19 @@ export class UnifiedAgent extends ModuleBase {
       imageCapability: { available: this.imageCapability.available },
       // availableSubAgents 不传：worker 不装 delegate_task。
     })
-    return `${base}\n\n${buildBuiltinWorkerContractPrompt(ctx.workspace.root)}`
+    const workspaceInstructions = ctx.workspace_instructions?.snapshot.source === 'agents_md'
+      && ctx.workspace_instructions.text !== undefined
+      ? [
+          'The following is an immutable, read-only snapshot of the workspace AGENTS.md for this incarnation.',
+          'Follow it for this workspace. Do not modify the snapshot itself.',
+          '<workspace-agents-md>',
+          ctx.workspace_instructions.text,
+          '</workspace-agents-md>',
+        ].join('\n')
+      : undefined
+    return [base, buildBuiltinWorkerContractPrompt(ctx.workspace.root), workspaceInstructions]
+      .filter((part): part is string => part !== undefined)
+      .join('\n\n')
   }
 
   /**
@@ -3389,6 +3401,7 @@ export class UnifiedAgent extends ModuleBase {
       const adapter = stack.adapters.get(handle.impl)
       if (!adapter?.readTrace) return
       const fingerprint = incarnationFingerprint({
+        incarnation_id: incarnation.incarnation_id,
         impl: handle.impl as import('./workers/types.js').WorkerImplId,
         seq: handle.seq,
         started_at: (incarnation as { started_at?: string }).started_at,

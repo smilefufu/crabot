@@ -76,12 +76,14 @@ import type {
   IncarnationRef,
   ForkOptions,
   IncarnationEndReason,
+  ResumeOptions,
   StateChangeReport,
   SpawnSpec,
   SendInputOptions,
   WorkerAdapter,
   WorkerContractState,
   Workspace,
+  WorkspaceInstructionPayload,
   WorkerTerminalView,
 } from '../types.js'
 import { classifySupervisionActivity } from '../types.js'
@@ -178,6 +180,8 @@ interface WorkerInstance {
   outcome?: 'completed' | 'failed'
   /** running 态下经 sendInput 排队、等下一次 burst 间隙统一 append 的用户消息（P1：内存，不跨重启持久）。 */
   pendingInputs: string[]
+  /** Immutable instruction capture for this incarnation; reused by every later burst. */
+  workspaceInstructions?: WorkspaceInstructionPayload
   /** 是否已经被 resume 过一次。用于在 resume() 里检测"对同一 prev 的重复 resume"（先到先得，后来者报错）。 */
   resumed?: boolean
   /**
@@ -312,6 +316,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const context: BuiltinRuntimeContext = {
       worker_id: spec.worker_id,
       workspace: spec.workspace,
+      ...(spec.workspace_instructions !== undefined ? { workspace_instructions: spec.workspace_instructions } : {}),
       ...(spec.origin !== undefined ? { origin: spec.origin } : {}),
       ...(spec.goal !== undefined ? { goal: spec.goal } : {}),
       // 权限档位跟着一起落盘:它是这个 worker 的身份属性,spawn 时定死。后续所有化身
@@ -363,6 +368,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
+        ...(spec.workspace_instructions !== undefined ? { workspaceInstructions: spec.workspace_instructions } : {}),
       }
 
       const newHandle: IncarnationHandle = { worker_id: spec.worker_id, incarnation_id: spec.incarnation_id, seq, impl: 'builtin', session_ref: rootId }
@@ -388,11 +394,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return handle
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string>; incarnation_id?: string }): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: ResumeOptions): Promise<IncarnationHandle> {
     this.assertActive()
     // 起化身 → 现取运行配置（spec 决策 2）。这条正是"进程重启后 builtin worker 能不能
     // revive"的分水岭：吃 spawn 时的内存快照时，重启后这里必然拿不到配置。
-    const builtin = await this.runtimeFor(prev.worker_id, 'resume')
+    const builtin = await this.runtimeFor(prev.worker_id, 'resume', opts?.workspace_instructions)
 
     // assertExited + 重复 resume 检测 + newSeq 计算 + append + 实例注册整体在锁内原子完成：
     // 两次并发 resume 同一 prev 若不串行化，会各自往 prev.session_ref 上挂一个孩子——树分叉。
@@ -432,6 +438,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
+        ...(opts?.workspace_instructions !== undefined ? { workspaceInstructions: opts.workspace_instructions } : {}),
       }
 
       const newHandle: IncarnationHandle = { worker_id: prev.worker_id, incarnation_id: opts?.incarnation_id, seq: newSeq, impl: 'builtin', session_ref: wakeId }
@@ -456,7 +463,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     }
     assertEstablishmentActive()
     // 同 resume：fork 也是起一个新化身，运行配置现取。
-    const builtin = await this.runtimeFor(prev.worker_id, 'fork')
+    const builtin = await this.runtimeFor(prev.worker_id, 'fork', opts.workspace_instructions)
 
     // fork 不要求 prev 处于任何特定状态——这就是侧问的意义：主线跑着的时候也能问。不像
     // resume 那样校验 assertExited。newSeq 用 nextSeq()，与 resume 共用同一分配逻辑、
@@ -487,6 +494,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
+        ...(opts.workspace_instructions !== undefined ? { workspaceInstructions: opts.workspace_instructions } : {}),
       }
 
       const newHandle: IncarnationHandle = {
@@ -537,7 +545,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // idle → 追加新一轮用户消息，转 running。起 burst 留到锁外（见下）。
       // 运行配置现取：idle 态下没有 burst 在跑，重新解析一次不会干扰任何正在执行的东西，
       // 语义与"起化身现取"一致（正在跑的 burst 用旧配置，见 runBurst 续 burst 路径）。
-      const builtin = await this.runtimeFor(h.worker_id, 'sendInput')
+      const builtin = await this.runtimeFor(h.worker_id, 'sendInput', instance.workspaceInstructions)
       instance.tip = await instance.sessionTree.append(instance.tip, createUserMessage(text))
       await this.transitionState(instance, h, 'running')
       instance.activityAt = Date.now()
@@ -1322,7 +1330,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
    * context.json 读回，因此进程重启后仍然可用（这是 builtin worker 能 revive 的前提）。
    * 没配工厂时退化为 P1 的内存快照，仅供契约套件与单测。
    */
-  private async runtimeFor(worker_id: string, op: string): Promise<NonNullable<SpawnSpec['builtin']>> {
+  private async runtimeFor(
+    worker_id: string,
+    op: string,
+    workspaceInstructions?: WorkspaceInstructionPayload,
+  ): Promise<NonNullable<SpawnSpec['builtin']>> {
     if (this.deps.resolveRuntime) {
       const context = await this.loadContext(worker_id)
       if (!context) {
@@ -1331,7 +1343,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           `(${CONTEXT_FILE} missing — worker was never spawned through this adapter?)`,
         )
       }
-      const builtin = this.deps.resolveRuntime(context)
+      const builtin = this.deps.resolveRuntime({
+        ...context,
+        ...(workspaceInstructions !== undefined ? { workspace_instructions: workspaceInstructions } : {}),
+      })
       if (!builtin) {
         throw new Error(`BuiltinWorkerAdapter.${op}: resolveRuntime returned no runtime config for worker ${worker_id}`)
       }

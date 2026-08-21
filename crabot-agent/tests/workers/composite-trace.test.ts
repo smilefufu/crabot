@@ -16,9 +16,11 @@ import type { NormalizedTraceEvent, WorkerAdapter } from '../../src/workers/type
 import type { HarnessEvent } from '../../src/workers/harness/worker-events.js'
 
 const WORKER_ID = 'w-comp-1'
+const INCARNATION_ID = '0198fed8-9c4a-7000-8000-000000000001'
 
 function makeWorker(over: Partial<LedgerWorker> = {}): LedgerWorker {
   const mainline: Incarnation = {
+    incarnation_id: INCARNATION_ID,
     seq: 1, impl: 'claude-code', state: 'running',
     session_ref: 'sess-1', started_at: '2026-08-01T00:00:00.000Z',
   } as unknown as Incarnation
@@ -272,6 +274,7 @@ describe('readCompositeWorkerTrace', () => {
     ]
     await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
     const copy = await nativeCopy.read(WORKER_ID, 1, incarnationFingerprint({
+      incarnation_id: INCARNATION_ID,
       impl: 'claude-code',
       seq: 1,
       started_at: '2026-08-01T00:00:00.000Z',
@@ -297,7 +300,7 @@ describe('readCompositeWorkerTrace', () => {
       ledger: {
         findWorker: async () => ({
           managerKey: 'k',
-          worker: makeWorker({ incarnations: [{ seq: 1, impl: 'claude-code', state: 'running', session_ref: 'sess-OTHER', started_at: '2026-08-02T00:00:00.000Z' } as unknown as Incarnation] }),
+          worker: makeWorker({ incarnations: [{ incarnation_id: '0198fed8-9c4a-7000-8000-000000000002', seq: 1, impl: 'claude-code', state: 'running', session_ref: 'sess-OTHER', started_at: '2026-08-02T00:00:00.000Z' } as unknown as Incarnation] }),
         }),
       },
     } as never

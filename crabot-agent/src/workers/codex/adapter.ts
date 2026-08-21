@@ -64,6 +64,7 @@ import type {
   IncarnationHandle,
   IncarnationRef,
   ForkOptions,
+  ResumeOptions,
   NormalizedTraceEvent,
   SpawnSpec,
   SendInputOptions,
@@ -1220,7 +1221,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string>; incarnation_id?: string }): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: ResumeOptions): Promise<IncarnationHandle> {
     this.assertActive()
     validateSessionRef(prev.session_ref)
 
