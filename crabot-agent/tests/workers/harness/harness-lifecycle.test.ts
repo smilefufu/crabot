@@ -887,6 +887,54 @@ describe('WorkerHarness.handleStateChange', () => {
     expect((await harness.getWorkerTurn(worker.worker_id))?.disposition).toEqual({ status: 'pending' })
   })
 
+  it('单个原生会话读取失败不阻断其它 worker 的 activity 对账', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, fake } = await makeHarness({}, { onOperationNotification: route })
+    const unreadable = await harness.spawnWorker(spawnParams({ title: '不可读会话' }))
+    const readable = await harness.spawnWorker(spawnParams({ title: '可读会话' }))
+    vi.spyOn(fake, 'readTrace').mockImplementation(async (handle) => {
+      if (handle.worker_id === unreadable.worker_id) throw new Error('session unavailable')
+      return {
+        events: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '后续 worker 的进展' }],
+        nextCursor: { offset: 1 },
+      }
+    })
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await expect(harness.reconcileNativeActivityOnStartup()).resolves.toBeUndefined()
+
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining(`native activity reconciliation failed for ${unreadable.worker_id}#1`),
+      expect.any(Error),
+    )
+    expect(route).toHaveBeenCalledWith(
+      `test::friend-1`,
+      expect.objectContaining({ worker_id: readable.worker_id, kind: 'activity_available' }),
+    )
+  })
+
+  it('单个 control operation store 读取失败不阻断其它 worker 的对账', async () => {
+    const { harness } = await makeHarness()
+    const unavailable = await harness.spawnWorker(spawnParams({ title: '不可读 control store' }))
+    const later = await harness.spawnWorker(spawnParams({ title: '后续 control store' }))
+    const controlOperationStore = (harness as unknown as {
+      controlOperationStore: { active(workerId: string): Promise<unknown[]> }
+    }).controlOperationStore
+    const active = vi.spyOn(controlOperationStore, 'active').mockImplementation(async (workerId) => {
+      if (workerId === unavailable.worker_id) throw new Error('control store unavailable')
+      return []
+    })
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await expect(harness.reconcileControlOperationsOnStartup()).resolves.toBeUndefined()
+
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining(`control operation reconciliation failed for ${unavailable.worker_id}`),
+      expect.any(Error),
+    )
+    expect(active).toHaveBeenCalledWith(later.worker_id)
+  })
+
   it('activity 通知落盘失败不阻断已确认的回合和状态事件', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
@@ -966,6 +1014,21 @@ describe('WorkerHarness.handleStateChange', () => {
     fake.emitStateChange(handle, 'exited', undefined, 'killed')
     await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'cancelled')
     expect(await harness.getWorkerControlOperations(worker.worker_id)).toEqual([])
+  })
+
+  it('停止核验的 bg 查询异常结算 unknown，不遗留 verifying operation', async () => {
+    const { harness } = await makeHarness({}, {
+      hasRunningBg: async () => { throw new Error('bg registry unavailable') },
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({
+      status: 'unknown',
+      detail: 'bg registry unavailable',
+    })
+
+    expect(await harness.getWorkerControlOperations(worker.worker_id)).toEqual([])
+    expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('running')
   })
 
   it('idle 且名下仍有运行中的 bg shell 时保持 running，而不是 waiting_input', async () => {

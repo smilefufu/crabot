@@ -3097,26 +3097,46 @@ export class WorkerHarness {
     for (const { worker } of all) {
       for (const incarnation of worker.incarnations) {
         if (!isExecutableIncarnation(incarnation)) continue
-        await this.collectNativeActivity({
-          worker_id: worker.worker_id,
-          incarnation_id: incarnation.incarnation_id,
-          seq: incarnation.seq,
-          impl: incarnation.impl,
-          session_ref: incarnation.session_ref,
-          ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
-        })
+        try {
+          await this.collectNativeActivity({
+            worker_id: worker.worker_id,
+            incarnation_id: incarnation.incarnation_id,
+            seq: incarnation.seq,
+            impl: incarnation.impl,
+            session_ref: incarnation.session_ref,
+            ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
+          })
+        } catch (error) {
+          console.error(`[WorkerHarness] native activity reconciliation failed for ${worker.worker_id}#${incarnation.seq}:`, error)
+        }
       }
-      await this.deliverNativeActivityNotifications(worker.worker_id)
+      try {
+        await this.deliverNativeActivityNotifications(worker.worker_id)
+      } catch (error) {
+        console.error(`[WorkerHarness] native activity notification reconciliation failed for ${worker.worker_id}:`, error)
+      }
     }
   }
 
   /** A crash after operation admission cannot be retried blindly; reconcile rechecks active operations. */
   async reconcileControlOperationsOnStartup(): Promise<void> {
     for (const { worker } of await this.deps.ledger.listAllWorkers()) {
-      for (const operation of await this.controlOperationStore.active(worker.worker_id)) {
-        await this.verifyControlOperation(operation)
+      try {
+        for (const operation of await this.controlOperationStore.active(worker.worker_id)) {
+          try {
+            await this.verifyControlOperation(operation)
+          } catch (error) {
+            console.error(`[WorkerHarness] control operation reconciliation failed for ${operation.operation_id}:`, error)
+          }
+        }
+      } catch (error) {
+        console.error(`[WorkerHarness] control operation reconciliation failed for ${worker.worker_id}:`, error)
       }
-      await this.deliverControlOperationNotifications(worker.worker_id)
+      try {
+        await this.deliverControlOperationNotifications(worker.worker_id)
+      } catch (error) {
+        console.error(`[WorkerHarness] control operation notification reconciliation failed for ${worker.worker_id}:`, error)
+      }
     }
   }
 
@@ -4013,9 +4033,15 @@ export class WorkerHarness {
   private async verifyControlOperationLocked(operation: WorkerControlOperation): Promise<WorkerControlOperation> {
     const current = await this.controlOperationStore.get(operation.worker_id, operation.operation_id)
     if (!current || current.status === 'succeeded' || current.status === 'failed' || current.status === 'unknown') return current ?? operation
-    const found = await this.deps.ledger.findWorker(operation.worker_id)
-    const handoffSupersede = operation.kind === 'stop' &&
-      await this.controlOperationStore.isHandoffSupersede(operation.worker_id, operation.operation_id)
+    let found: Awaited<ReturnType<LedgerStore['findWorker']>>
+    let handoffSupersede: boolean
+    try {
+      found = await this.deps.ledger.findWorker(operation.worker_id)
+      handoffSupersede = operation.kind === 'stop' &&
+        await this.controlOperationStore.isHandoffSupersede(operation.worker_id, operation.operation_id)
+    } catch (error) {
+      return this.settleControlOperation(current, 'unknown', error instanceof Error ? error.message : String(error))
+    }
     // `cancelAfterVerifiedStop` / `supersedeAfterVerifiedStop` writes ledger truth before the
     // operation becomes succeeded, so restart reconciliation can complete either boundary.
     if (operation.kind === 'stop' && !handoffSupersede && found?.worker.task.status === 'cancelled') {
@@ -4037,39 +4063,43 @@ export class WorkerHarness {
     } catch (error) {
       return this.settleControlOperation(current, 'unknown', error instanceof Error ? error.message : String(error))
     }
-    if (operation.kind === 'interrupt') {
-      return observed === 'running'
-        ? current
-        : this.settleControlOperation(current, 'succeeded', `native state=${observed}`)
+    try {
+      if (operation.kind === 'interrupt') {
+        return observed === 'running'
+          ? current
+          : this.settleControlOperation(current, 'succeeded', `native state=${observed}`)
+      }
+      if (operation.kind === 'ui_response') {
+        return this.settleControlOperation(current, 'unknown', 'UI response requires adapter submission settlement')
+      }
+      if (observed !== 'exited') {
+        return current
+      }
+      for (const fork of found.worker.incarnations) {
+        if (fork.forked_from === undefined || !isExecutableIncarnation(fork) || fork.state === 'exited') continue
+        const forkAdapter = this.deps.adapters.get(fork.impl)
+        if (!forkAdapter) return this.settleControlOperation(current, 'unknown', `fork adapter unavailable: ${fork.impl}`)
+        const forkState = await forkAdapter.state(handleForIncarnation(operation.worker_id, fork))
+        if (forkState !== 'exited') return this.settleControlOperation(current, 'unknown', `registered fork ${fork.incarnation_id} remains ${forkState}`)
+      }
+      if (await this.deps.hasRunningBg?.(operation.worker_id)) {
+        return this.settleControlOperation(current, 'unknown', 'worker-owned background execution remains active')
+      }
+      if (handoffSupersede) {
+        await this.supersedeAfterVerifiedStop(found.managerKey, found.worker, incarnation)
+        return this.settleControlOperation(current, 'succeeded', 'source and registered fork stop requests verified for handoff')
+      }
+      await this.cancelAfterVerifiedStop(found.managerKey, found.worker, incarnation)
+      // A persisted successful stop must never precede the corresponding cancelled task. If the
+      // process exits after cancellation, startup reconciliation completes the verifying op.
+      return this.settleControlOperation(
+        current,
+        'succeeded',
+        'mainline and registered fork stop requests verified',
+      )
+    } catch (error) {
+      return this.settleControlOperation(current, 'unknown', error instanceof Error ? error.message : String(error))
     }
-    if (operation.kind === 'ui_response') {
-      return this.settleControlOperation(current, 'unknown', 'UI response requires adapter submission settlement')
-    }
-    if (observed !== 'exited') {
-      return current
-    }
-    for (const fork of found.worker.incarnations) {
-      if (fork.forked_from === undefined || !isExecutableIncarnation(fork) || fork.state === 'exited') continue
-      const forkAdapter = this.deps.adapters.get(fork.impl)
-      if (!forkAdapter) return this.settleControlOperation(current, 'unknown', `fork adapter unavailable: ${fork.impl}`)
-      const forkState = await forkAdapter.state(handleForIncarnation(operation.worker_id, fork))
-      if (forkState !== 'exited') return this.settleControlOperation(current, 'unknown', `registered fork ${fork.incarnation_id} remains ${forkState}`)
-    }
-    if (await this.deps.hasRunningBg?.(operation.worker_id)) {
-      return this.settleControlOperation(current, 'unknown', 'worker-owned background execution remains active')
-    }
-    if (handoffSupersede) {
-      await this.supersedeAfterVerifiedStop(found.managerKey, found.worker, incarnation)
-      return this.settleControlOperation(current, 'succeeded', 'source and registered fork stop requests verified for handoff')
-    }
-    await this.cancelAfterVerifiedStop(found.managerKey, found.worker, incarnation)
-    // A persisted successful stop must never precede the corresponding cancelled task. If the
-    // process exits after cancellation, startup reconciliation completes the verifying op.
-    return this.settleControlOperation(
-      current,
-      'succeeded',
-      'mainline and registered fork stop requests verified',
-    )
   }
 
   private async cancelAfterVerifiedStop(
