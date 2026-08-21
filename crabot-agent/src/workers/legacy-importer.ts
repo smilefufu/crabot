@@ -192,10 +192,17 @@ async function makeWorker(
     },
     report_to: target.reportTo,
     incarnations: [{
+      // Imported records are written through the current ledger schema. Keep the identity
+      // deterministic so a crash after import compares equal on the next migration pass.
+      incarnation_id: `legacy:${encodeURIComponent(workerId)}:1`,
       impl: 'legacy',
       seq: 1,
       state: 'exited',
       workspace,
+      workspace_instructions: {
+        source: 'absent',
+        captured_at: startedAt,
+      },
       started_at: startedAt,
       ended_at: endedAt,
       ended_reason: mapped.endedReason,

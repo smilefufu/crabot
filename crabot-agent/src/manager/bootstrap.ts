@@ -189,6 +189,8 @@ export interface BootstrapDeps {
   readonly resolveUserLevelBinary?: (impl: 'claude-code' | 'codex') => Promise<{ binary?: string; global_detected: boolean }>
   /** P6-C §7：list_worker_implementations 的 registry snapshot getter。 */
   readonly workerImplSnapshot?: import('./tools/worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
+  /** Agent-owned structured session projection used by get_worker_activity. */
+  readonly readWorkerActivity?: import('./tools/worker-tools.js').WorkerToolsDeps['readWorkerActivity']
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */
   readonly admitWorkerConnection?: (impl: import('../workers/types.js').WorkerImplId, operationLabel?: string) => Promise<{
     env: Record<string, string>
@@ -446,6 +448,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     new BuiltinWorkerAdapter({
       dataDir: builtinDataDir,
       onStateChange: harness.handleStateChange,
+      onNativeActivity: harness.handleNativeActivity,
       resolveRuntime: deps.builtinSpawnDefaults,
       traceHooks: deps.builtinTraceHooks,
       traceReader: deps.builtinTraceReader,
@@ -456,6 +459,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     new ClaudeCodeAdapter({
       dataDir: adapterDataDir('claude-code'),
       onStateChange: harness.handleStateChange,
+      onNativeActivity: harness.handleNativeActivity,
       ...(deps.resolveUserLevelBinary ? { resolveUserLevelBinary: () => deps.resolveUserLevelBinary!('claude-code') } : {}),
     }),
   )
@@ -464,6 +468,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     new CodexWorkerAdapter({
       dataDir: adapterDataDir('codex'),
       onStateChange: harness.handleStateChange,
+      onNativeActivity: harness.handleNativeActivity,
       ...(deps.resolveUserLevelBinary ? { resolveUserLevelBinary: () => deps.resolveUserLevelBinary!('codex') } : {}),
     }),
   )
@@ -525,6 +530,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       return buildManagerToolFace({
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
+        readWorkerActivity: deps.readWorkerActivity,
         workerContext: () => ({
           managerKey: key,
           // P6-A §6.6：当前 episode trace id 由 registry 桥惰性读取（tool call 发生时才取），
@@ -570,6 +576,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         isSystemThread,
         authorization: () => principals.currentMasterAuthorization(key),
         validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),
+        hasSuccessfulSendMessageTo: traceHooks?.hasSuccessfulSendMessageTo,
+        onSuccessfulSendMessage: traceHooks?.onSuccessfulSendMessage,
+        hasContinuedWorker: traceHooks?.hasContinuedWorker,
+        onWorkerContinuation: traceHooks?.onWorkerContinuation,
       })
     },
     // system prompt 的「对话对象档案」段(§4.2 5b/5d):场景画像 + crab 在该渠道的
@@ -617,6 +627,8 @@ export async function reconcileManagerStack(stack: ManagerStack): Promise<Reconc
   const report = await stack.harness.reconcileOnStartup()
   await stack.harness.reconcileInputDeliveriesOnStartup()
   await stack.harness.reconcileQueryReceiptsOnStartup()
+  await stack.harness.reconcileControlOperationsOnStartup()
+  await stack.harness.reconcileNativeActivityOnStartup()
   await stack.harness.reconcileSupervisionOnStartup()
   return report
 }

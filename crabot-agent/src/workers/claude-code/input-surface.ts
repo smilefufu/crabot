@@ -1,6 +1,7 @@
 import type { PaneSnapshot } from '../tmux/driver.js'
 import type { InputMode, InputProbe } from '../tmux/input-commit.js'
 import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
+import type { WorkerUiActionDescriptor, WorkerUiControlKey } from '../types.js'
 
 const CLAUDE_FOOTER = /^\s*(?:esc to interrupt|⏵⏵|(?:\?\s*)?for shortcuts|context left|bypass permissions)|(?:auto|manual|plan) mode on\b/i
 const CLAUDE_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|esc to interrupt|⏵⏵|(?:\?\s*)?for shortcuts|context left|bypass permissions)|(?:auto|manual|plan) mode on\b/i
@@ -56,12 +57,36 @@ export function classifyClaudeTerminalInteraction(snapshot: PaneSnapshot): Termi
   const permissionPrompt = /(?:Claude needs your permission|permission required|Do you want to proceed)/i.test(tail)
   const selectionFooter = /(?:Enter to (?:select|confirm)|(?:↑|↓|up|down).*to navigate|use arrow keys to navigate)/i.test(tail)
   if (permissionPrompt && hasYes && hasNo) {
-    return { kind: 'manager_required', family: 'claude_permission', fingerprint: 'claude_permission:yes-no' }
+    return managerRequiredInteraction('claude_permission', 'claude_permission:yes-no', tailLines)
   }
   if (selectionFooter && hasOption) {
-    return { kind: 'manager_required', family: 'claude_selector', fingerprint: 'claude_selector:options' }
+    return managerRequiredInteraction('claude_selector', 'claude_selector:options', tailLines)
   }
   return { kind: 'none' }
+}
+
+function managerRequiredInteraction(
+  family: string,
+  fingerprint: string,
+  lines: readonly string[],
+): TerminalInteraction {
+  return { kind: 'manager_required', family, fingerprint, actions: boundedUiActions(lines) }
+}
+
+function boundedUiActions(lines: readonly string[]): WorkerUiActionDescriptor[] {
+  const actions: WorkerUiActionDescriptor[] = [
+    { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+    { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+  ]
+  const optionNumbers = new Set<string>()
+  for (const line of lines) {
+    const option = line.match(/^\s*(?:❯\s*)?([1-9])[.)]\s+\S/)
+    if (option) optionNumbers.add(option[1])
+  }
+  for (const option of optionNumbers) {
+    actions.push({ action_id: `select_${option}`, kind: 'keys', keys: [option as WorkerUiControlKey, 'Enter'] })
+  }
+  return actions
 }
 
 /** Notification must be corroborated by a current interaction surface. */

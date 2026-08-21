@@ -56,6 +56,7 @@ const MAX_CURSOR_RECORDS = 512
  *  session_ref 对 cc/codex 是运行中延后确定的、对 builtin 每轮 burst 前进——把它绑进
  *  指纹会让同一化身在正常运行中换指纹，合法翻页 cursor 被误判成别的化身。 */
 export function incarnationFingerprint(input: {
+  incarnation_id?: string
   impl: WorkerImplId
   seq: number
   session_ref?: string
@@ -63,6 +64,7 @@ export function incarnationFingerprint(input: {
 }): string {
   return createHash('sha256')
     .update(JSON.stringify({
+      incarnation_id: input.incarnation_id ?? '',
       impl: input.impl,
       seq: input.seq,
       started_at: input.started_at ?? '',

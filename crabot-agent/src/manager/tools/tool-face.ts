@@ -7,7 +7,7 @@
  * 四个来源：
  * 1. crab-messaging（`buildMessagingTools`）—— 按白名单裁剪，`send_message` 额外做"去 intent"包装；
  * 2. crab-memory（`deps.memoryServer`，经 `mcpServerToToolDefinitions` 转换）—— 原样全给，不裁；
- * 3. worker 六件套（Task 4 `buildWorkerTools`）—— 原样加入；
+ * 3. worker 编排、观察与回合处置工具（`buildWorkerTools`）—— 原样加入；
  * 4. crabot-info 六件套（Task 3 `buildCrabotInfoTools`）—— 原样加入。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.3
@@ -29,6 +29,8 @@ export interface ToolFaceDeps {
   readonly harness: WorkerHarness
   /** P6-C §7：list_worker_implementations 的 registry snapshot getter。 */
   readonly workerImplSnapshot?: import('./worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
+  /** Agent-owned structured session projection for manager worker activity reads. */
+  readonly readWorkerActivity?: import('./worker-tools.js').WorkerToolsDeps['readWorkerActivity']
   readonly workerContext: Parameters<typeof buildWorkerTools>[0]['context']
   /** 复用现有类型 —— crab-messaging 的依赖注入接口。 */
   readonly messagingDeps: CrabMessagingDeps
@@ -41,6 +43,11 @@ export interface ToolFaceDeps {
   /** Opaque control-plane authorization, never represented in any tool schema. */
   readonly authorization?: () => MasterAuthorization | undefined
   readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
+  /** Episode-local delivery/control evidence used to close a Worker turn. */
+  readonly hasSuccessfulSendMessageTo?: (target: { channel_id: string; session_id: string }) => boolean
+  readonly onSuccessfulSendMessage?: (target: { channel_id: string; session_id: string }) => void
+  readonly hasContinuedWorker?: (workerId: string) => boolean
+  readonly onWorkerContinuation?: (workerId: string) => void
 }
 
 // ============================================================================
@@ -126,7 +133,10 @@ const MESSAGING_READ_ONLY = new Set([
  * `intent ?? 'info'` 的默认分支，等价于显式传 'info'，比伪造一个固定值更贴近"没有这个
  * 参数"的语义。
  */
-function messagingToolToDefinition(tool: MessagingTool): ToolDefinition {
+function messagingToolToDefinition(
+  tool: MessagingTool,
+  onSuccessfulSendMessage?: (target: { channel_id: string; session_id: string }) => void,
+): ToolDefinition {
   const isSendMessage = tool.name === 'send_message'
 
   const shape = isSendMessage
@@ -152,6 +162,13 @@ function messagingToolToDefinition(tool: MessagingTool): ToolDefinition {
       try {
         const result = await tool.handler(args)
         const text = result.content.map((block) => block.text).join('\n')
+        if (isSendMessage && !result.isError) {
+          const channelId = args.channel_id
+          const sessionId = args.session_id
+          if (typeof channelId === 'string' && typeof sessionId === 'string') {
+            onSuccessfulSendMessage?.({ channel_id: channelId, session_id: sessionId })
+          }
+        }
         return { output: text, isError: !!result.isError }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
@@ -163,7 +180,9 @@ function messagingToolToDefinition(tool: MessagingTool): ToolDefinition {
 
 function buildMessagingFace(deps: ToolFaceDeps): ToolDefinition[] {
   const toolSet = managerMessagingToolSet(deps.isSystemThread)
-  return buildMessagingTools(deps.messagingDeps, () => toolSet).map(messagingToolToDefinition)
+  return buildMessagingTools(deps.messagingDeps, () => toolSet).map((tool) =>
+    messagingToolToDefinition(tool, deps.onSuccessfulSendMessage),
+  )
 }
 
 // ============================================================================
@@ -206,6 +225,10 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     authorization: deps.authorization,
     validateMasterAuthorization: deps.validateMasterAuthorization,
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
+    ...(deps.readWorkerActivity ? { readWorkerActivity: deps.readWorkerActivity } : {}),
+    ...(deps.hasSuccessfulSendMessageTo ? { hasSuccessfulSendMessageTo: deps.hasSuccessfulSendMessageTo } : {}),
+    ...(deps.hasContinuedWorker ? { hasContinuedWorker: deps.hasContinuedWorker } : {}),
+    ...(deps.onWorkerContinuation ? { onWorkerContinuation: deps.onWorkerContinuation } : {}),
   })
   const infoTools = buildCrabotInfoTools({
     callAdmin: deps.callAdmin,

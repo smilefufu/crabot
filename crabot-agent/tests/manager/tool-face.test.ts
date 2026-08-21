@@ -6,7 +6,7 @@
  * - 系统线程（isSystemThread）多出 send_master_private，其余不变
  * - 飞书 channel 存在时多出 §2.10 的只读三件套，且**任何情况下都不含 feishu_write**
  * - 运行时护栏对注入的违规工具（通用文件系统工具 / 外装 mcp__ 工具）抛错，crab-memory 前缀放行
- * - isReadOnly 标记正确（messaging 只读子集 / worker 六件套 / crabot-info 六件套）
+ * - isReadOnly 标记正确（messaging 只读子集 / worker 观察工具 / crabot-info 六件套）
  * - send_message 暴露给 LLM 的 inputSchema 不含 intent，调用底层 handler 时也不透传 intent
  * - 可见性门与运行时门同源：可见的 send_private_message 真调一次不被 requireDeclaredShortcut 拦
  */
@@ -36,7 +36,7 @@ const MESSAGING_NORMAL = [
 /** protocol-crab-messaging.md §2.10 的 channel 透传只读三件套（仅当存在飞书 channel 实例）。 */
 const FEISHU_READ_ONLY_TOOLS = ['read_feishu_document', 'feishu_raw_get', 'feishu_download_file']
 
-const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'get_worker_terminal', 'list_workers', 'get_worker_detail', 'list_worker_implementations', 'kill_worker', 'set_worker_periodic_report', 'clear_worker_periodic_report']
+const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'get_worker_state', 'get_worker_activity', 'get_worker_turn', 'resolve_worker_turn', 'get_worker_terminal', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'list_workers', 'get_worker_detail', 'list_worker_implementations', 'set_worker_periodic_report', 'clear_worker_periodic_report']
 
 const CRABOT_INFO_TOOLS = [
   'get_system_status',
@@ -148,12 +148,12 @@ describe('buildManagerToolFace', () => {
     }))
     const byName = new Map(tools.map((t) => [t.name, t]))
 
-    const readOnly = ['get_history', 'get_message', 'lookup_friend', 'list_sessions', 'list_contacts', 'list_groups', 'list_group_members', 'fetch_media', ...FEISHU_READ_ONLY_TOOLS, 'get_worker_terminal', 'list_workers', ...CRABOT_INFO_TOOLS]
+    const readOnly = ['get_history', 'get_message', 'lookup_friend', 'list_sessions', 'list_contacts', 'list_groups', 'list_group_members', 'fetch_media', ...FEISHU_READ_ONLY_TOOLS, 'get_worker_state', 'get_worker_activity', 'get_worker_turn', 'get_worker_terminal', 'list_workers', ...CRABOT_INFO_TOOLS]
     for (const name of readOnly) {
       expect(byName.get(name)?.isReadOnly, `${name} 应为 isReadOnly:true`).toBe(true)
     }
 
-    const writeTools = ['send_message', 'send_master_private', 'send_private_message', 'spawn_worker', 'send_to_worker', 'query_worker', 'kill_worker', 'set_worker_periodic_report', 'clear_worker_periodic_report']
+    const writeTools = ['send_message', 'send_master_private', 'send_private_message', 'spawn_worker', 'send_to_worker', 'query_worker', 'resolve_worker_turn', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'set_worker_periodic_report', 'clear_worker_periodic_report']
     for (const name of writeTools) {
       expect(byName.get(name)?.isReadOnly, `${name} 应为 isReadOnly:false`).toBe(false)
     }
@@ -161,7 +161,9 @@ describe('buildManagerToolFace', () => {
 
   it('send_message 的 inputSchema 不含 intent，调用时也不透传 intent', async () => {
     const capturedArgsByHandler: Record<string, unknown> = {}
+    const onSuccessfulSendMessage = vi.fn()
     const deps = makeDeps({
+      onSuccessfulSendMessage,
       messagingDeps: {
         rpcClient: {
           call: vi.fn(async () => ({ status: 'sent', message_id: 'm1' })),
@@ -185,6 +187,7 @@ describe('buildManagerToolFace', () => {
     // 不应因 intent='ask_human' 而走 ask_human 分支（那个分支需要 taskCtx 存在才会成功，
     // manager 没有 task 上下文；若 intent 被透传，这里会因缺 taskCtx 而报错/行为异常）
     expect(result.isError).toBe(false)
+    expect(onSuccessfulSendMessage).toHaveBeenCalledTimes(1)
     void capturedArgsByHandler
   })
 

@@ -167,19 +167,3 @@ export async function writeSensitiveFileAtomic(filePath: string, content: string
     throw err
   }
 }
-
-/** CLAUDE.md/AGENTS.md 正文:worker 身份声明 + 中间产物落盘纪律 + HANDOFF.md 交接约定。 */
-export function renderContextMd(sa: ProvisionSources['selfAwareness']): string {
-  return `# ${sa.taskTitle}
-
-你是 crabot 的 worker(worker_id: ${sa.workerId}),当前工作区只服务于这一个任务。
-
-## 中间产物落盘纪律
-
-${sa.disciplines}
-
-## 交接约定
-
-任务中断或需要交接时,把当前进度、已完成的步骤、下一步计划写入工作区根目录的 \`HANDOFF.md\`,供恢复后的自己或接手的其他 worker 继续。
-`
-}

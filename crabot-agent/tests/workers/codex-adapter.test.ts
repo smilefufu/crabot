@@ -161,7 +161,7 @@ describe('CodexWorkerAdapter.provision', () => {
     await fs.rm(codexHomeSource, { recursive: true, force: true }).catch(() => {})
   })
 
-  it('写出 .codex/config.toml(notify 段在 mcp_servers 表头之前)、AGENTS.md', async () => {
+  it('写出 .codex/config.toml(notify 段在 mcp_servers 表头之前)，不改写 workspace 规则文件', async () => {
     execFileSync('git', ['init', '-q'], { cwd: ws })
     await fs.writeFile(path.join(codexHomeSource, 'auth.json'), '{"token":"secret-auth"}', 'utf-8')
     const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
@@ -203,8 +203,8 @@ describe('CodexWorkerAdapter.provision', () => {
       expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', relativePath], { cwd: ws, stdio: 'ignore' })).toThrow()
     }
 
-    const agentsMd = await fs.readFile(path.join(ws, 'AGENTS.md'), 'utf-8')
-    expect(agentsMd).toContain('你是 crabot 的 worker')
+    await expect(fs.access(path.join(ws, 'AGENTS.md'))).rejects.toThrow()
+    await expect(fs.access(path.join(ws, 'CLAUDE.md'))).rejects.toThrow()
   })
 
   it.each(['config.toml', 'auth.json'])('拒绝覆盖 Git 已跟踪的 .codex/%s，且在其他 provision 写入前失败', async (fileName) => {
@@ -2278,6 +2278,13 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
       report: {
         terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
         waitReason: 'interaction_required',
+        ui: {
+          fingerprint: 'codex_approval:yes-no',
+          actions: [
+            { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+            { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+          ],
+        },
         notification: { type: 'terminal_interaction' },
       },
     }])
@@ -2290,7 +2297,7 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(seen).toHaveLength(1)
 
-    await adapter.sendInput(h, 'Enter', { raw: true })
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
     expect(await adapter.state(h)).toBe('running')
 
     tmux.paneText = 'Allow Codex to modify this workspace?\nYes\nNo'

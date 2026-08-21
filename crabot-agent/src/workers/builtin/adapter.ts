@@ -156,6 +156,7 @@ const FINISH_TASK_TOOL: ToolDefinition = {
 
 interface WorkerInstance {
   readonly worker_id: string
+  readonly incarnation_id?: string
   readonly seq: number
   readonly dir: string
   readonly sessionTree: SessionTree
@@ -192,6 +193,8 @@ interface WorkerInstance {
    * （见 kill() 顶部注释）。
    */
   killRequested?: boolean
+  /** A current-turn interrupt returns the main worker to idle; it must not cancel the task. */
+  interruptRequested?: boolean
 }
 
 function instanceKey(worker_id: string, seq: number): string {
@@ -276,6 +279,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
        * 这一跳被丢掉，harness 只能猜（协议 §6.3）。非 exited 转换不报。
        */
       readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
+      /** Signals that the native structured trace advanced; Harness owns collection and routing. */
+      readonly onNativeActivity?: (h: IncarnationHandle) => void
       /**
        * 运行配置工厂：**每次起化身现取一次**（spec 决策 2）。spawn 的那次由调用方
        * （harness.spawnWorker / handoffIncarnation）调同一个工厂后放进 `spec.builtin`；
@@ -349,6 +354,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       const newInstance: WorkerInstance = {
         worker_id: spec.worker_id,
+        incarnation_id: spec.incarnation_id,
         seq,
         dir,
         sessionTree,
@@ -359,7 +365,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         pendingInputs: [],
       }
 
-      const newHandle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'builtin', session_ref: rootId }
+      const newHandle: IncarnationHandle = { worker_id: spec.worker_id, incarnation_id: spec.incarnation_id, seq, impl: 'builtin', session_ref: rootId }
       // writeMeta 成功之后才注册到 instances/builtinConfigs，跟 resume 保持一致的提交次序：
       // 磁盘失败时不留孤儿实例。注意此时上面的"已 spawn"三重守卫（builtinConfigs 命中 /
       // instances 命中 / 磁盘 meta-${seq}.json 存在）全部落空——writeMeta 还没成功过，没有
@@ -382,7 +388,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return handle
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string, _opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string>; incarnation_id?: string }): Promise<IncarnationHandle> {
     this.assertActive()
     // 起化身 → 现取运行配置（spec 决策 2）。这条正是"进程重启后 builtin worker 能不能
     // revive"的分水岭：吃 spawn 时的内存快照时，重启后这里必然拿不到配置。
@@ -417,6 +423,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       const newInstance: WorkerInstance = {
         worker_id: prev.worker_id,
+        incarnation_id: opts?.incarnation_id,
         seq: newSeq,
         dir,
         sessionTree,
@@ -427,7 +434,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         pendingInputs: [],
       }
 
-      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin', session_ref: wakeId }
+      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, incarnation_id: opts?.incarnation_id, seq: newSeq, impl: 'builtin', session_ref: wakeId }
       // writeMeta 成功之后才注册到 instances 并标记 resumed，确保磁盘失败时不留孤儿实例。
       await this.writeMeta(newInstance)
       this.instances.set(instanceKey(prev.worker_id, newSeq), newInstance)
@@ -471,6 +478,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       const newInstance: WorkerInstance = {
         worker_id: prev.worker_id,
+        incarnation_id: opts.incarnation_id,
         seq: newSeq,
         dir,
         sessionTree,
@@ -483,6 +491,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       const newHandle: IncarnationHandle = {
         worker_id: prev.worker_id,
+        incarnation_id: opts.incarnation_id,
         seq: newSeq,
         impl: 'builtin',
         session_ref: forkId,
@@ -653,6 +662,21 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       instance.killRequested = true
       instance.abortController?.abort()
     })
+  }
+
+  async interrupt(h: IncarnationHandle): Promise<void> {
+    this.assertActive()
+    await this.getMutex(h.worker_id).run(async () => {
+      const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
+      if (!instance) throw new Error(`BuiltinWorkerAdapter.interrupt: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+      if (instance.state !== 'running') return
+      instance.interruptRequested = true
+      instance.abortController?.abort()
+    })
+  }
+
+  async stop(h: IncarnationHandle): Promise<void> {
+    await this.kill(h)
   }
 
   dispose(): Promise<void> {
@@ -882,6 +906,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         onTurn: (event) => {
           instance.activityAt = Date.now()
           if (instance.traceId) this.deps.traceHooks?.appendTurn(instance.traceId, event)
+          this.deps.onNativeActivity?.({ ...handle, session_ref: instance.tip })
           if (event.assistantText) {
             lastAssistantText = event.assistantText
             pendingWrites.push(
@@ -908,6 +933,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const continueBurst = await mutex.run(async () => {
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
 
+      if (result.outcome === 'aborted' && instance.interruptRequested && !instance.killRequested) {
+        instance.interruptRequested = false
+        await this.transitionState(instance, handle, 'idle', lastAssistantText, false)
+        return false
+      }
+
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         const endReason = result.outcome === 'aborted' ? this.interruptionEndReason(instance) : 'crashed'
         await this.transitionExited(instance, handle, endReason, undefined, lastAssistantText)
@@ -930,6 +961,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // abort 大概率是打在了这次 burst 身上（下面 outcome==='aborted' 分支已经处理），但也
       // 可能是打晚了——engine 已经决定 end_turn，abort 信号没赶上（P1 全分支终审 Important
       // 收尾段检查点）。无论如何都不能继续/续 burst；显式 kill 与 shutdown 保持各自归因。
+      if (instance.interruptRequested && !instance.killRequested) {
+        instance.interruptRequested = false
+        await this.transitionState(instance, handle, 'idle', lastAssistantText, false)
+        return false
+      }
+
       if (instance.killRequested || this.closing) {
         await this.transitionExited(instance, handle, this.interruptionEndReason(instance), undefined, lastAssistantText)
         return false
@@ -1036,6 +1073,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         onTurn: (event) => {
           instance.activityAt = Date.now()
           if (instance.traceId) this.deps.traceHooks?.appendTurn(instance.traceId, event)
+          this.deps.onNativeActivity?.({ ...handle, session_ref: instance.tip })
           if (event.assistantText) {
             pendingWrites.push(
               instance.outputLog.append(event.assistantText + '\n').catch((err) => {
@@ -1345,6 +1383,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     handle: IncarnationHandle,
     state: WorkerContractState,
     lastText?: string,
+    completionHint = true,
   ): Promise<void> {
     await this.writeMeta(instance, { state })
     instance.state = state
@@ -1355,7 +1394,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 刷新到"最近一次完成的状态转换点"，否则活跃化身上的 fork/resume 会从旧节点分叉、
     // 丢中间上下文（cc/codex 的 session id 整个化身稳定，不受这个问题影响）。
     try {
-      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, state, { ...(lastText !== undefined ? { lastText } : {}) })
+      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, state, {
+        ...(lastText !== undefined ? { lastText } : {}),
+        ...(state === 'idle' && completionHint ? { completionSource: 'builtin_end_turn' as const } : {}),
+      })
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
     }
@@ -1404,6 +1446,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, 'exited', {
         ...(lastText !== undefined ? { lastText } : {}),
         endReason: ended_reason,
+        ...(summary !== undefined ? { completionSource: 'builtin_end_turn' as const } : {}),
         ...(summary !== undefined ? { summary } : {}),
       })
     } catch (err) {

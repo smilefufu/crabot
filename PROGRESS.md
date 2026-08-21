@@ -7,22 +7,18 @@
 
 ### P6 已完成；Manager -> Worker 输入与侧问可靠交付待 PR review
 
-### 统一 Worker Runtime：设计、协议与实施计划已确认，待设计型 PR 实施
+### 统一 Worker Runtime（v3.6.0）：实现完成，待设计型 PR review
 
 - 已确认 `crabot-docs/superpowers/specs/2026-08-20-unified-worker-runtime-design.md`，并同步
-  `protocol-agent-v3` 3.6.0 与实施计划。Manager 是统筹/交付主体，Worker 是执行体；Harness 统一
-  builtin、Claude Code、Codex 的化身、原生会话 activity、交互和控制事实。
-- Manager 将被动接收 assistant activity、完成回合、未知 UI 和 control settlement，并可主动读取
-  `assistant | all` 的原生会话投影；hook 只触发会话收集，不代表任务成功或人类已收到交付。正常
-  路径不再用 terminal capture 读结果。
-- 新契约包含 Harness-owned `incarnation_id`、turn disposition、UI snapshot response、可核验
-  interrupt/stop、`AGENTS.md` 的人类/Worker 所有权和 Harness generated `HandoffPackage`。`raw`、
-  立即 `kill_worker → cancelled` 与 Worker 写/读取 `HANDOFF.md` 均退役。代码尚未开始，必须在独立
-  worktree 走设计型 PR。
-
-### CLI 第三方 Worker 交互生命周期：已确认，实施中
-
-- 已确认设计与 `protocol-agent-v3` 3.5.0 契约：Claude Code / Codex 的当前交互 TUI 由 Harness 以当前 pane 观察、一次性 fingerprint 分流；Claude 的“退出规划并开始执行”仅在后置状态可证明时直接处理，未知或失败界面一次性唤醒 Manager。启动基线改为 Claude `auto`、Codex `--approve-for-me --sandbox workspace-write`；实现按独立 worktree、定向测试和本地真实 E2E 后走非 Draft PR，不自行合并。
+  `protocol-agent-v3` 3.6.0。Harness 统一 builtin、Claude Code、Codex 的化身、workspace 指令快照、
+  原生会话 activity、UI 与 control operation；`AGENTS.md` 仍由人类/Worker 管理。
+- Manager 被动接收 assistant activity、完成回合、未知 UI 和 control settlement，并可主动读
+  `assistant | all` 原生会话投影；hook 只触发会话收集，不代表任务成功或已经向人类交付。terminal
+  capture 只供 Manager 主动诊断，巡检不再后台 capture。
+- `incarnation_id`、turn disposition、snapshot 绑定的 UI action descriptor、可核验 interrupt/stop 与
+  Harness 生成的私有 `HandoffPackage` 已落地。`kill_worker → cancelled`、Manager 可自由 raw 按键和
+  Worker 写/读取 workspace `HANDOFF.md` 均已退役；`request_worker_stop` 已公开给 Manager，只有完整
+  核验成功才取消 task。分支 `feat/unified-worker-runtime` 已完成定向验证，待创建非 Draft PR，不自行合并。
 
 ### 模块关闭与孤儿模块回收：已合并（PR #99 → `bf989ec`）
 
@@ -67,8 +63,7 @@
 ### P6 后 Traces / Worker 生命周期（当前主线）
 
 - **Traces 人话视图 + 有界决策视野**：**已合并**（PR #100 → `f7e3aaf`，@claude approve 后自动合并）。Managers 用 `渠道·会话标题`、active worker 数和最近活动替代裸 ManagerKey/Episodes/历史总数；Manager detail 上浮消息摘录/回复/动作并按 worker 因果链折叠；Workers 默认只显示非终态。恢复 v2 dispatcher 不变量：`list_workers` 默认只看 `queued/running/waiting_input`，终态续办需显式分页 `include_terminal=true`；Manager 页面计数与工具视野同源。生产实测 system-tasks 2389 历史→6 active，工具实际 12 active/53 terminal。协议：agent v3.2.0、admin v0.2.2。
-- **CLI Worker 可读终端画面（v3.4.0，实施完成，待 PR review）**：cc/codex 的 `pipe-pane` 原始字节只驱动 bracketed-paste 状态机，不再落盘或解码；存活主线化身通过 `tmux capture-pane -p -J` 返回当前画面，终态只覆盖保存最后一个非空快照。`get_worker_terminal` / Admin `/terminal` 统一区分 live、final、headless 纯文本与明确 unavailable；headless fork 维持自身纯文本 artifact。已确认 spec：`crabot-docs/superpowers/specs/2026-08-19-cli-worker-readable-terminal-design.md`。
-- **CLI 第三方 Worker 交互生命周期（v3.5.0，实施完成，待 PR review）**：只由 Claude `Notification`、Codex `PermissionRequest` 或 Agent 重连存活 pane 触发一次按需 capture；无输出观察器或后台 capture。Claude 固定 `auto`，计划完成的两种已验收界面由 Harness 固定 `1 Enter` 并校验仍为 auto；Codex 保持“帮我批准”隐含的 `workspace-write`，仅自动信任隔离 `CODEX_HOME` 内由 Harness 生成的 PermissionRequest hook。Codex 0.147 的 argv 为 `--approve-for-me -c sandbox_workspace_write.network_access=true --dangerously-bypass-hook-trust`（显式 `--sandbox workspace-write` 与前者互斥）。真实 adapter E2E 已验证 opening input accepted、隔离 config/auth 均为 `0600`、一次权限请求与一次 `stop`，且没有 Manager interaction_required。未知界面一次性唤醒 Manager。
+- **统一 Worker Runtime（v3.6.0，待 PR review）**：本次统一替代原 v3.4/v3.5 的分离待审状态；CLI 的 pane 只用于 bracketed-paste 控制和 Manager 按需诊断，不再作为正常进度或 handoff 来源。Claude `Notification`、Codex `PermissionRequest` 与重连检查识别到的未知 UI 以一次性 snapshot + adapter 固定 action descriptor 交给 Manager，不能形成自由 tmux 按键入口；原生 session activity、完成回合、可核验 stop 与私有 handoff package 同属该 PR。
 - **统一 observability retention（PR B，已确认 spec/协议/计划，待实施）**：自动回收终态 Worker 的 adapter output/session、events/context、ledger、过期 Manager episode/TraceStore；孤儿 adapter/events 24h grace；output log 10MB cap；删除失真的 Trace 清理 UI/API/cron。**所有 workspace 零自动删除**——`$DATA_DIR/workspaces/<taskId>` 是用户项目/任务产物，不是 cache；当前 nomi-ai-companion 的 1GB Flutter workspace 必须保留。workspace 管理/显式删除以后独立设计。
 
 ### P6 主线（严格串行）

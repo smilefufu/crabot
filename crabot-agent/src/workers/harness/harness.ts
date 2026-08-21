@@ -74,12 +74,15 @@ import type {
   IncarnationEndReason,
   StateChangeReport,
   SpawnSpec,
+  WorkerUiActionDescriptor,
+  WorkerUiResponse,
   CapabilityBundle,
   WorkerCapabilityContext,
   Workspace,
   SendInputOptions,
   ForkOptions,
   WorkerTerminalView,
+  NormalizedTraceEvent,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import type { ResolvedPermissions } from '../../types'
@@ -113,6 +116,27 @@ import {
 } from './inbox'
 import { WorkerEventLog, type HarnessEvent, type HarnessEventDelivery, type HarnessEventKind } from './worker-events'
 import { WorkerContextStore, type WorkerContext } from './context-store'
+import {
+  captureWorkspaceInstructions,
+  cleanupClaudeWorkspaceBridge,
+  prepareClaudeWorkspaceBridge,
+} from './workspace-instructions'
+import {
+  renderHandoffPrompt,
+  writeHandoffPackage,
+  type HandoffEvidenceInput,
+  type HandoffPackage,
+} from './handoff-package'
+import { WorkerTurnStore, type WorkerTurn, type WorkerTurnResolution } from './worker-turn-store'
+import { NativeActivityStore } from './native-activity-store'
+import {
+  WorkerControlOperationStore,
+  type WorkerControlOperation,
+  type WorkerControlOperationKind,
+  type WorkerControlOperationStatus,
+} from './worker-control-operation-store'
+import { WorkerUiSnapshotStore, type WorkerUiActionId, type WorkerUiSnapshot } from './worker-ui-snapshot-store'
+import { projectWorkerActivity } from '../trace/activity-projection'
 import { readLegacyTraces } from '../legacy-source-reader.js'
 import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
 import { applyStatusTransition, canTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
@@ -131,9 +155,6 @@ import {
   type QueryWorkerStartedResult,
   type WorkerQueryReceipt,
 } from './query-receipt-store'
-
-/** 交接材料里"最近输出尾部"的上限(字符数,近似 4KB,见 protocol-agent-v3 §5.3)。 */
-const HANDOFF_TAIL_MAX_CHARS = 4096
 
 /**
  * 唤醒事件 `detail.text` 的上限(字符数)。
@@ -319,7 +340,6 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
   if (state === 'exited') {
     return { to: 'exited', kind: 'initial_input_settled', ...(report?.endReason ? { reason: report.endReason } : {}) }
   }
-  const text = report?.terminal?.kind === 'unavailable' ? '' : report?.terminal?.text?.trim()
   if (report?.notification) {
     return {
       to: state,
@@ -329,7 +349,6 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
       notification_type: report.notification.type,
       ...(report.notification.message ? { message: report.notification.message } : {}),
       ...(report.notification.title ? { title: report.notification.title } : {}),
-      text: text ?? '',
     }
   }
   return {
@@ -337,7 +356,15 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
     kind: report?.waitReason === 'input_pending' ? 'input_pending' : 'input_delivery_stalled',
     ...(state === 'idle' ? { wait_mode: 'action' } : {}),
     ...(report?.waitReason ? { wait_reason: report.waitReason } : {}),
-    ...(text ? { text } : {}),
+  }
+}
+
+function uiSnapshotDetail(snapshot: WorkerUiSnapshot | undefined): Record<string, unknown> {
+  if (!snapshot) return {}
+  return {
+    snapshot_id: snapshot.snapshot_id,
+    snapshot_expires_at: snapshot.expires_at,
+    available_actions: snapshot.actions,
   }
 }
 
@@ -385,33 +412,24 @@ const SUPERVISION_RETRY_INTERVAL_MS = 5 * 60_000
 const WORKER_SWEEP_CONCURRENCY = 8
 
 /**
- * 巡检发现停摆时,随唤醒事件交给 manager 的那段正文:当前终端画面尾部 + 一句合成指引。
- *
- * **指引排在尾部,不排在头部**:这段正文会经 `truncateWakeText(..., 'tail')` 保尾截断,
- * 排在头部会被整句丢掉——这是 #70 review 的教训。
- *
- * 指引本身是必须的:manager 光看一屏 TUI 画面看不出"这屏已经这么久没变过了",而"静默多久"
- * 恰恰是它做判断(重投 / kill / 换实现)的全部依据。措辞不替 manager 下结论——巡检只负责
- * 让它知道,判断权在 manager(§4.3)。
+ * 巡检发现停摆时,随唤醒事件交给 manager 的结构化事实。终端是 caller-driven 的诊断视图，
+ * 不能因一次后台巡检自动 capture 并混入 Manager 上下文。
  */
-function describeLivenessStall(opts: { impl: WorkerImplId; staleMs: number; tail: string }): string {
+function describeLivenessStall(opts: { impl: WorkerImplId; staleMs: number }): string {
   const minutes = Math.round(opts.staleMs / 60_000)
-  const note =
+  return (
     `[crabot] 活性巡检:该 ${opts.impl} 化身已经 ${minutes} 分钟没有新的可观察任务活动,` +
-    `但进程/会话仍然活着、台账仍记着 running。上面是本次直接捕获的终端当前画面。` +
+    `但进程/会话仍然活着、台账仍记着 running。` +
     `**巡检不替你判断**它是干完了、在等输入,还是卡死了——` +
-    `请据现场决定下一步:仍是模态弹窗时可用 raw 模式敲键;清障后若落在空 composer,不能把弹窗消失当作恢复,` +
-    `应以非 raw 的 send_to_worker 重发完整任务,再用事件确认确实前进;必要时终止 worker 后重来。`
-  return `${opts.tail || '(终端至今没有任何输出)'}\n---\n${note}`
+    `请先读取状态和原生会话活动；只有需要诊断未知界面时才读取终端，再决定继续、回应界面或请求停止。`
+  )
 }
 
 /**
  * 停摆**重试**投递时的正文:一行,不带现场。
  *
- * 首报已经把解码后的 pane 尾部交出去了,而 episode 失败时 `ManagerLoop` 会把那份正文
- * **整体推回 mailbox**(`loop.ts` 的 `carriedTexts`/`eventText` 重投),所以现场一直在,
- * manager 恢复后照样看得到。重试再带一份只会让 mailbox 里堆同样的东西 —— 8 小时按 5 分钟
- * 节奏能堆到 96 份 ~2000 字符,恢复后的第一个 episode 一次吃下(PR #75 review)。
+ * 首报已经把停摆事实交出；episode 失败时 `ManagerLoop` 会把那份正文整体推回 mailbox。
+ * 重试不重复同一份事实，避免 manager 恢复后一次收到堆积的重复告警。
  *
  * 重试的价值**不是再送一份正文,而是它本身就是一次 drain 触发器**:mailbox 只是被动缓冲,
  * 全仓没有任何周期性投递者(`maybeSelfWake` 只在成功后自唤醒,`evictIdle` 是回收器且无调用
@@ -420,7 +438,7 @@ function describeLivenessStall(opts: { impl: WorkerImplId; staleMs: number; tail
 function describeLivenessRetry(opts: { impl: WorkerImplId; staleMs: number }): string {
   return (
     `[crabot] 活性巡检:该 ${opts.impl} 化身仍然没有新的可观察任务活动(已静默 ${Math.round(opts.staleMs / 60_000)} 分钟)。` +
-    `现场在前一条唤醒里,这条只是重试投递,不再重复正文。`
+    `这条只是重试投递,不再重复首报。`
   )
 }
 
@@ -494,7 +512,7 @@ export class WorkerHasNoIncarnationError extends Error {
  * spawn,即使旧化身已经被 kill(kill 不清除这个守卫记忆:cc/codex 的内存 runtimes 表不删除
  * 条目,builtin 的 builtinConfigs + 磁盘 meta-1.json 更是连跨进程都拦)。若不在
  * handoffIncarnation 的 pre-flight 拦下,step 3 的 newAdapter.spawn 必然抛错,而此时旧
- * 化身已在 step 1/2 被写过 HANDOFF.md、kill 并标 superseded——重蹈 pre-flight 本该防住的
+ * 化身已在 step 1/2 被生成私有 handoff package、经核验停止并标 superseded——重蹈 pre-flight 本该防住的
  * "旧的没了、新的没建成"死结。根治需要 harness 自己分配 seq(不依赖各 adapter 内部
  * nextSeq/硬编码 1),这是协议级改动,留待后续(protocol-agent-v3 §6.1 已知限制);这里先
  * fail-fast,把死结换成一个清晰、可重试、可诊断的错误。
@@ -709,6 +727,11 @@ export class WorkerHarness {
   private readonly contextStore: WorkerContextStore
   private readonly inputDeliveryStore: InputDeliveryStore
   private readonly queryReceiptStore: QueryReceiptStore
+  private readonly turnStore: WorkerTurnStore
+  private readonly nativeActivityStore: NativeActivityStore
+  private readonly controlOperationStore: WorkerControlOperationStore
+  private readonly uiSnapshotStore: WorkerUiSnapshotStore
+  private readonly controlNotificationMutexes = new Map<string, AsyncMutex>()
   private readonly inputDeliveryControllers = new Map<string, AbortController>()
   private readonly pendingQueryStateChanges = new Map<
     string,
@@ -750,6 +773,10 @@ export class WorkerHarness {
     this.contextStore = new WorkerContextStore(deps.workersDir)
     this.inputDeliveryStore = new InputDeliveryStore(deps.workersDir)
     this.queryReceiptStore = new QueryReceiptStore(deps.workersDir)
+    this.turnStore = new WorkerTurnStore(deps.workersDir)
+    this.nativeActivityStore = new NativeActivityStore(deps.workersDir)
+    this.controlOperationStore = new WorkerControlOperationStore(deps.workersDir)
+    this.uiSnapshotStore = new WorkerUiSnapshotStore(deps.workersDir)
   }
 
   private inputOwnershipRevision(workerId: string): number {
@@ -775,7 +802,7 @@ export class WorkerHarness {
    *   说了什么；
    * - `endReason`:据此落台账,不再自己猜(修复前这里硬编码 'completed',把 builtin 经
    *   `finish_task(outcome:'failed')` 结构化上报的失败真值整个丢掉,台账/task.status/
-   *   对外事件/HANDOFF.md 四处一起记错)。
+   *   对外事件/私有 handoff package 一起记错)。
    */
   readonly handleStateChange = (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport): void => {
     // 契约断言(同步抛,不进 fire-and-forget):endReason 只在 exited 时有意义。running/idle
@@ -794,9 +821,21 @@ export class WorkerHarness {
     })
   }
 
+  /**
+   * Adapter-native trace append signal. It deliberately carries no terminal text: the Harness
+   * reads the structured session incrementally and persists its own high-water mark before a
+   * Manager can be woken.
+   */
+  readonly handleNativeActivity = (h: IncarnationHandle): void => {
+    this.collectNativeActivity(h)
+      .then(() => this.deliverNativeActivityNotifications(h.worker_id))
+      .catch((error) => console.error(`[WorkerHarness] native activity collection failed for ${h.worker_id}#${h.seq}:`, error))
+  }
+
   async spawnWorker(p: SpawnWorkerParams): Promise<LedgerWorker> {
     this.deps.assertExecutionAdmission?.()
     const workerId = `w-${randomUUID()}`
+    const incarnationId = randomUUID()
     // P6-C §2：显式/省略统一走纯选择器（显式只查自己不 fallback；省略 default→固定顺序）。
     // 选择器抛 WORKER_IMPLEMENTATION_NOT_READY（含 ready list/reasons），无任何副作用。
     const impl = this.deps.selectWorkerImpl
@@ -838,6 +877,22 @@ export class WorkerHarness {
 
     return this.withLock(workerId, async () => {
       const startedAt = this.deps.now()
+      const instructions = await captureWorkspaceInstructions({
+        workersDir: this.deps.workersDir,
+        workerId,
+        incarnationId,
+        workspaceRoot: workspace.root,
+        capturedAt: startedAt,
+      })
+      const claudeBridge = impl === 'claude-code'
+        ? await prepareClaudeWorkspaceBridge({
+            workersDir: this.deps.workersDir,
+            workerId,
+            incarnationId,
+            workspaceRoot: workspace.root,
+            instructions,
+          })
+        : undefined
       const initial: LedgerWorker = {
         worker_id: workerId,
         manager_key: p.managerKey,
@@ -852,10 +907,12 @@ export class WorkerHarness {
         report_to: p.report_to,
         incarnations: [
           {
+            incarnation_id: incarnationId,
             seq: 1,
             impl,
             state: 'running',
             workspace: workspace.root,
+            workspace_instructions: instructions.snapshot,
             // adapter.spawn 尚未调用,真实 session_ref 此刻还不存在,先占位;spawn 成功后
             // 下面会用 adapter.spawn 返回的 IncarnationHandle.session_ref(protocol-agent-v3
             // §6.1,handle 自描述真值)原子补写,不依赖任何"从 handle 反查"的额外方法。
@@ -896,6 +953,7 @@ export class WorkerHarness {
             : undefined)
         const spec: SpawnSpec = {
           worker_id: workerId,
+          incarnation_id: incarnationId,
           prompt: p.prompt,
           workspace,
           goal: p.goal,
@@ -907,7 +965,11 @@ export class WorkerHarness {
         // 失败归因只认 WorkerImplUnavailableError（能证明 impl 失效的 adapter 级错误）；
         // 调用方/状态/数据错误（already spawned、meta 缺失等）与 provision 错误都不置 degraded。
         try {
-          spawnedHandle = await adapter.spawn(spec)
+          const returnedHandle = await adapter.spawn(spec)
+          if (returnedHandle.incarnation_id !== undefined && returnedHandle.incarnation_id !== incarnationId) {
+            throw new Error(`WorkerHarness.spawnWorker: adapter returned mismatched incarnation_id for ${workerId}`)
+          }
+          spawnedHandle = { ...returnedHandle, incarnation_id: incarnationId }
         } catch (spawnError) {
           if (spawnError instanceof WorkerImplUnavailableError) {
             await this.deps.reportWorkerOutcome?.(impl, spawnError.message)
@@ -916,6 +978,13 @@ export class WorkerHarness {
         }
         await this.deps.reportWorkerOutcome?.(impl, null)
       } catch (err) {
+        // This bridge is a Harness-owned workspace artifact. A failed spawn leaves no active
+        // Claude incarnation to use it, so remove it only when this invocation created it.
+        if (claudeBridge?.managed) {
+          const { cleanupClaudeWorkspaceBridge } = await import('./workspace-instructions')
+          await cleanupClaudeWorkspaceBridge({ workersDir: this.deps.workersDir, workerId, incarnationId, workspaceRoot: workspace.root })
+            .catch((cleanupError) => console.warn(`[WorkerHarness] failed to clean Claude workspace bridge for ${workerId}:`, cleanupError))
+        }
         releaseFence()
         if (admission) await admission.dispose()
         const now = this.deps.now()
@@ -993,8 +1062,16 @@ export class WorkerHarness {
       }
 
       await this.appendEvent(workerId, 1, 'spawned', { impl }, spawned?.task.status)
-      if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
-        await this.appendEvent(workerId, 1, 'state_changed', cliReportDetail(initialState, initialInput.report), spawned?.task.status)
+      const uiSnapshot = await this.prepareUiSnapshot(spawnedHandle, p.managerKey, initialInput?.report, now)
+      const turn = initialInput
+        ? await this.createPendingTurn(p.managerKey, spawnedHandle, initialInput.report, now)
+        : undefined
+      if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
+        await this.appendEvent(workerId, 1, 'state_changed', {
+          ...cliReportDetail(initialState, initialInput.report),
+          ...uiSnapshotDetail(uiSnapshot),
+          ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+        }, spawned?.task.status)
       }
       return spawned as LedgerWorker
     })
@@ -1529,29 +1606,52 @@ export class WorkerHarness {
       // No context, HANDOFF, ledger, provision or spawn side effect precedes target preflight.
       await targetAdapter.preflightProvision?.(workspace, caps)
 
+      const handoffAt = this.deps.now()
+      const incarnationId = randomUUID()
+      const instructions = await captureWorkspaceInstructions({
+        workersDir: this.deps.workersDir,
+        workerId: worker.worker_id,
+        incarnationId,
+        workspaceRoot: workspace.root,
+        capturedAt: handoffAt,
+      })
+      const claudeBridge = targetImpl === 'claude-code'
+        ? await prepareClaudeWorkspaceBridge({
+            workersDir: this.deps.workersDir,
+            workerId: worker.worker_id,
+            incarnationId,
+            workspaceRoot: workspace.root,
+            instructions,
+        })
+        : undefined
+      const legacyIncarnationId = requireStableIncarnationId(legacy, worker.worker_id)
+      const handoff = await writeHandoffPackage({
+        workersDir: this.deps.workersDir,
+        workerId: worker.worker_id,
+        sourceIncarnationId: legacyIncarnationId,
+        workspace: workspace.root,
+        createdAt: handoffAt,
+        evidence: [
+          ...ledgerHandoffEvidence(worker, legacy),
+          ...traceHandoffEvidence('persisted_activity', legacyIncarnationId, material.events),
+        ],
+      })
       await this.contextStore.write(worker.worker_id, {
         principal_permissions: auth.principal_permissions,
-      })
-      const handoffAt = this.deps.now()
-      await appendHandoffFile(workspace.root, {
-        ts: handoffAt,
-        title: worker.task.title,
-        goal: worker.task.goal,
-        outcome: worker.task.outcome ?? legacy.ended_reason,
-        tail: material.tail,
-        input: item.text,
       })
       await this.appendEvent(worker.worker_id, legacy.seq, 'handoff_started', {
         target_impl: targetImpl,
         legacy: true,
+        handoff_id: handoff.package_id,
       })
 
-      const prompt = buildHandoffPrompt(worker.task, item.text)
+      const prompt = renderHandoffPrompt(handoff, item.text)
       let handle
       try {
         await targetAdapter.provision(workspace, caps)
         handle = await targetAdapter.spawn({
           worker_id: worker.worker_id,
+          incarnation_id: incarnationId,
           prompt,
           workspace,
           goal: worker.task.goal,
@@ -1561,9 +1661,21 @@ export class WorkerHarness {
           ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
         })
       } catch (error) {
+        if (claudeBridge?.managed) {
+          await cleanupClaudeWorkspaceBridge({
+            workersDir: this.deps.workersDir,
+            workerId: worker.worker_id,
+            incarnationId,
+            workspaceRoot: workspace.root,
+          }).catch((cleanupError) => console.warn(`[WorkerHarness] failed to clean Claude workspace bridge for ${worker.worker_id}:`, cleanupError))
+        }
         if (admission) await admission.dispose()
         throw error
       }
+      if (handle.incarnation_id !== undefined && handle.incarnation_id !== incarnationId) {
+        throw new Error(`WorkerHarness.legacyContinuation: adapter returned mismatched incarnation_id for ${worker.worker_id}`)
+      }
+      handle = { ...handle, incarnation_id: incarnationId }
       if (admission) {
         if (handle.initial_input?.control_state === 'exited') await admission.dispose()
         else this.connectionDisposers.set(`${worker.worker_id}:${handle.seq}`, admission.dispose)
@@ -1574,10 +1686,12 @@ export class WorkerHarness {
       const updated = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (previous) => {
         if (!previous) return undefined
         const incarnation: Incarnation = {
+          incarnation_id: incarnationId,
           seq: handle.seq,
           impl: targetImpl,
           state: initialState,
           workspace: workspace.root,
+          workspace_instructions: instructions.snapshot,
           session_ref: handle.session_ref,
           started_at: now,
           ...(initialState === 'exited'
@@ -1605,12 +1719,20 @@ export class WorkerHarness {
         { impl: targetImpl, from_seq: legacy.seq, legacy: true },
         updated?.task.status,
       )
-      if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
+      const uiSnapshot = await this.prepareUiSnapshot(handle, managerKey, initialInput?.report, now)
+      const turn = initialInput
+        ? await this.createPendingTurn(managerKey, handle, initialInput.report, now)
+        : undefined
+      if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
         await this.appendEvent(
           worker.worker_id,
           handle.seq,
           'state_changed',
-          cliReportDetail(initialState, initialInput.report),
+          {
+            ...cliReportDetail(initialState, initialInput.report),
+            ...uiSnapshotDetail(uiSnapshot),
+            ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+          },
           updated?.task.status,
         )
       }
@@ -1628,7 +1750,7 @@ export class WorkerHarness {
     worker: LedgerWorker,
     fallbackWorkspace: string,
   ): Promise<{
-    readonly tail: string
+    readonly events: ReadonlyArray<NormalizedTraceEvent>
     readonly workspaceCandidate: string
   }> {
     const snapshotPath = join(this.deps.workersDir, worker.worker_id, 'legacy-task.json')
@@ -1659,8 +1781,8 @@ export class WorkerHarness {
       .find((trace) => typeof trace.resume_checkpoint?.worker_state?.cwd === 'string')
       ?.resume_checkpoint?.worker_state?.cwd
 
-    // Never replay checkpoint messages/permissions into the new engine. Only bounded
-    // task snapshot text and trace lifecycle/outcome metadata become handoff material.
+    // Never replay checkpoint messages/permissions into the new engine. Only the immutable
+    // imported task snapshot and trace lifecycle/outcome metadata become a private package.
     const traceSummary = selected.map((trace) => ({
       trace_id: trace.trace_id,
       started_at: trace.started_at,
@@ -1668,23 +1790,91 @@ export class WorkerHarness {
       outcome: trace.outcome,
     }))
     const raw = JSON.stringify({ task: snapshot, traces: traceSummary })
-    const tail = raw.length > HANDOFF_TAIL_MAX_CHARS
-      ? raw.slice(-HANDOFF_TAIL_MAX_CHARS)
-      : raw
-    return { tail, workspaceCandidate: candidate ?? fallbackWorkspace }
+    return {
+      events: [{
+        ts: this.deps.now(),
+        kind: 'lifecycle',
+        summary: raw,
+      }],
+      workspaceCandidate: candidate ?? fallbackWorkspace,
+    }
+  }
+
+  /**
+   * Handoff is derived from the native session parser while the source is still available.
+   * A parser failure is non-fatal: the durable Harness event history still lets the next
+   * incarnation see lifecycle facts, without reintroducing terminal capture as a data path.
+   */
+  private async captureHandoffPackage(
+    worker: LedgerWorker,
+    source: ExecutableIncarnation,
+    adapter: WorkerAdapter | undefined,
+    handle: IncarnationHandle,
+    createdAt: string,
+  ): Promise<HandoffPackage> {
+    const sourceIncarnationId = requireStableIncarnationId(source, worker.worker_id)
+    const evidence: HandoffEvidenceInput[] = ledgerHandoffEvidence(worker, source)
+    const unavailable: string[] = []
+    let activityCaptured = false
+    if (adapter?.readTrace) {
+      try {
+        const trace = await adapter.readTrace(handle, { offset: 0 })
+        if (trace.events.length > 0) {
+          evidence.push(...traceHandoffEvidence('native_session', sourceIncarnationId, trace.events))
+          activityCaptured = true
+        } else {
+          unavailable.push('native_session: no structured activity was available')
+        }
+      } catch (error) {
+        unavailable.push('native_session: unreadable')
+        console.warn(`[WorkerHarness] handoff native trace unavailable for ${worker.worker_id}#${source.seq}:`, error)
+      }
+    } else {
+      unavailable.push('native_session: adapter has no structured trace reader')
+    }
+
+    if (!activityCaptured) {
+      const persisted = await this.nativeActivityStore.activities(worker.worker_id, sourceIncarnationId)
+      if (persisted.length > 0) {
+        evidence.push(...traceHandoffEvidence('persisted_activity', sourceIncarnationId, persisted))
+        activityCaptured = true
+      } else {
+        unavailable.push('persisted_activity: no recorded activity was available')
+      }
+    }
+
+    if (!activityCaptured) {
+      const ledgerEvents = (await this.readWorkerEvents(worker.worker_id))
+        .filter((event) => event.seq === source.seq)
+      if (ledgerEvents.length > 0) {
+        evidence.push(...ledgerEventHandoffEvidence(worker.worker_id, source, ledgerEvents))
+      } else {
+        unavailable.push('ledger: no source lifecycle evidence was available')
+      }
+    }
+
+    return writeHandoffPackage({
+      workersDir: this.deps.workersDir,
+      workerId: worker.worker_id,
+      sourceIncarnationId,
+      workspace: source.workspace,
+      createdAt,
+      evidence,
+      unavailable,
+    })
   }
 
   /**
    * 跨实现切换(manager 主导,protocol-agent-v3 §5.3"跨实现切换")。走与透明接续完全
    * 相同的交接路径(见 handoffIncarnation),区别只是:目标实现由调用方显式指定(不做
    * "原 impl 若仍可用则沿用"的自动选择),且源化身可能仍然存活(由 handoffIncarnation
-   * 内部负责在这种情况下先 kill 再标 superseded)。
+   * 内部负责在这种情况下经 stop operation 核验后标 superseded)。
    *
    * 已知约束(三轮 review 修复,见 ImplAlreadyUsedError 类注释):不支持"切到该 worker
    * 曾经用过的实现"——含切回原实现(如 cc → codex → cc)、含切到当前正在用的同一实现。
    * 三个 adapter 的 spawn 都硬编码 seq=1 且带"already spawned"守卫,kill 不清除这道守卫
    * 记忆,对同一 worker_id 二次 spawn 必然失败。handoffIncarnation 的 pre-flight 会在写
-   * HANDOFF.md、kill 源化身之前用 (worker.incarnations 是否已有 impl 匹配的记录) 判定并
+   * 私有 handoff package、kill 源化身之前用 (worker.incarnations 是否已有 impl 匹配的记录) 判定并
    * fail-fast 抛 ImplAlreadyUsedError,不留半成品。根治需要 harness 自己分配 seq,是协议
    * 级改动,留待后续(protocol-agent-v3 §6.1 已知限制)。
    */
@@ -1947,14 +2137,38 @@ export class WorkerHarness {
     this.deps.assertExecutionAdmission?.()
     // P6-B：resume 重验 ready（「已有 running incarnation 不杀，新 resume/handoff 重验」）。
     await this.deps.assertWorkerImplReady?.(mainline.impl)
+    const incarnationId = randomUUID()
+    const instructions = await captureWorkspaceInstructions({
+      workersDir: this.deps.workersDir,
+      workerId: worker.worker_id,
+      incarnationId,
+      workspaceRoot: mainline.workspace,
+      capturedAt: this.deps.now(),
+    })
+    if (mainline.impl === 'claude-code') {
+      await prepareClaudeWorkspaceBridge({
+        workersDir: this.deps.workersDir,
+        workerId: worker.worker_id,
+        incarnationId,
+        workspaceRoot: mainline.workspace,
+        instructions,
+      })
+    }
     // P6-B §6.5：resume 同样 operation-time 解析连接（revision 变化即拒绝）。
     const admission = await this.deps.admitWorkerConnection?.(mainline.impl, worker.worker_id)
-    const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
+    const prevRef: IncarnationRef = { worker_id: worker.worker_id, incarnation_id: mainline.incarnation_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
     let newHandle
     try {
-      newHandle = await adapter.resume(prevRef, text, admission ? { connection_env: admission.env } : undefined)
+      const returnedHandle = await adapter.resume(prevRef, text, {
+        ...(admission ? { connection_env: admission.env } : {}),
+        incarnation_id: incarnationId,
+      })
+      if (returnedHandle.incarnation_id !== undefined && returnedHandle.incarnation_id !== incarnationId) {
+        throw new Error(`WorkerHarness.reviveIncarnation: adapter returned mismatched incarnation_id for ${worker.worker_id}`)
+      }
+      newHandle = { ...returnedHandle, incarnation_id: incarnationId }
       await this.deps.reportWorkerOutcome?.(mainline.impl, null)
     } catch (error) {
       if (error instanceof WorkerImplUnavailableError) {
@@ -1977,12 +2191,14 @@ export class WorkerHarness {
     const revived = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const newIncarnation: Incarnation = {
+        incarnation_id: incarnationId,
         seq: newHandle.seq,
         impl: newHandle.impl,
         state: initialState,
         workspace: mainline.workspace,
         session_ref: newHandle.session_ref,
         started_at: now,
+        workspace_instructions: instructions.snapshot,
         ...(initialState === 'exited'
           ? { ended_at: now, ended_reason: initialInput?.report?.endReason ?? 'crashed' }
           : {}),
@@ -2031,8 +2247,16 @@ export class WorkerHarness {
     inbox.release()
     const replayedConsumed = inbox.requeueConsumed()
     await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq }, revived?.task.status)
-    if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
-      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', cliReportDetail(initialState, initialInput.report), revived?.task.status)
+    const uiSnapshot = await this.prepareUiSnapshot(newHandle, managerKey, initialInput?.report, now)
+    const turn = initialInput
+      ? await this.createPendingTurn(managerKey, newHandle, initialInput.report, now)
+      : undefined
+    if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
+      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', {
+        ...cliReportDetail(initialState, initialInput.report),
+        ...uiSnapshotDetail(uiSnapshot),
+        ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+      }, revived?.task.status)
     }
     return continuationDelivery(initialInput, initialState, newHandle, replayedConsumed)
   }
@@ -2040,7 +2264,7 @@ export class WorkerHarness {
   /**
    * capabilities().revive===false 分支(交接续办),以及 switchWorkerImpl 复用的公共路径。
    * 顺序对齐 protocol-agent-v3 §5.3"跨实现切换":目标实现先完成无副作用 provision pre-flight
-   * → 旧化身写交接文档收尾 → (若仍存活)kill 标 superseded → 同 workspace provision+spawn 新实现 → 化身链 +1。
+   * → Harness 持久化交接包 → (若仍存活)stop 核验并标 superseded → 同 workspace provision+spawn 新实现 → 化身链 +1。
    */
   private async handoffIncarnation(
     managerKey: ManagerKey,
@@ -2055,6 +2279,7 @@ export class WorkerHarness {
     const sourceAdapter = this.deps.adapters.get(source.impl)
     const sourceHandle: IncarnationHandle = {
       worker_id: worker.worker_id,
+      ...(source.incarnation_id ? { incarnation_id: source.incarnation_id } : {}),
       seq: source.seq,
       impl: source.impl,
       session_ref: source.session_ref,
@@ -2074,13 +2299,13 @@ export class WorkerHarness {
     // 0b. Pre-flight(裁决 B 修复):目标 adapter 必须存在;若目标是 'builtin',调用方必须
     // 通过 HarnessDeps.builtinSpawnDefaults 提供了 LLM 注入,否则 step 3 的 newAdapter.spawn
     // 必然因 spec.builtin 缺失而抛错(BuiltinWorkerAdapter.spawn 本就 fail-loud)。修复前这
-    // 个抛错发生在 step 3——此时旧化身已经在 step 2 被 kill 并标 superseded,worker 卡进
-    // "旧的没了、新的没建成"的死结,且下次投递会重复整套 handoff(重复追加 HANDOFF.md)。
-    // 把这两项检查提到最前面、在写 HANDOFF.md 和 kill 旧化身之前做,失败时旧化身与
-    // HANDOFF.md 都不动,保持可重试。
+    // 个抛错发生在 step 3——此时旧化身已经在 step 2 被停止并标 superseded,worker 卡进
+    // "旧的没了、新的没建成"的死结,且下次投递会重复整套 handoff（重复生成 package）。
+    // 把这两项检查提到最前面、在生成 package 和停止旧化身之前做,失败时旧化身不动,
+    // 保持可重试。
     // P6-B：目标 impl 重验 ready（配置可能在 source 运行期间已失效）。
     await this.deps.assertWorkerImplReady?.(targetImpl)
-    // P6-B §6.5：handoff 同样过 connection admission——早于 HANDOFF.md 与 kill source；
+    // P6-B §6.5：handoff 同样过 connection admission——早于 package 生成与 source stop；
     // admin_provider 形态下目标 CLI 不得静默回落宿主原生凭证。
     const admission = await this.deps.admitWorkerConnection?.(targetImpl, worker.worker_id)
     const newAdapter = this.deps.adapters.get(targetImpl)
@@ -2093,11 +2318,15 @@ export class WorkerHarness {
     let builtinInjection: SpawnSpec['builtin']
     let workspace: Workspace
     let caps
+    let targetIncarnationId: string
+    let targetInstructions: Awaited<ReturnType<typeof captureWorkspaceInstructions>>
+    let targetClaudeBridge: Awaited<ReturnType<typeof prepareClaudeWorkspaceBridge>> | undefined
+    let handoff: HandoffPackage
     try {
       handoffContext = await this.contextStore.read(worker.worker_id)
       principalPermissions = handoffContext?.principal_permissions
       if (targetImpl === 'builtin') {
-      // harness-owned 快照在 HANDOFF.md / kill 之前读取：CLI-first worker 切到 builtin
+      // harness-owned 快照在 package / kill 之前读取：CLI-first worker 切到 builtin
       // 仍保留原身份；context 损坏则在破坏源化身之前 fail-loud。
       builtinInjection = this.deps.builtinSpawnDefaults?.({
         worker_id: worker.worker_id,
@@ -2118,74 +2347,69 @@ export class WorkerHarness {
     caps = this.deps.capabilityBundle
       ? await this.deps.capabilityBundle({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
       : EMPTY_CAPABILITY_BUNDLE
-    // tracked credential target 等确定性检查必须在 HANDOFF.md / kill 之前完成；preflightProvision
+    // tracked credential target 等确定性检查必须在 package / source stop 之前完成；preflightProvision
     // 不得写 workspace。正式 provision 仍在 source teardown 之后执行并重检，避免 TOCTOU 静默越界。
     await newAdapter.preflightProvision?.(workspace, caps)
-    } catch (error) {
-      // admission 之后、HANDOFF.md/kill 之前的前置失败：dispose admission，source 不动。
-      if (admission) await admission.dispose()
-      throw error
-    }
 
-    // 1. 组装交接材料(task.title/goal + 最近输出尾部,上限 4KB + 上一化身 outcome)并写
-    // workspace 下的 HANDOFF.md(已存在则追加带时间戳的新段,不覆盖)。
-    let tail = ''
-    if (sourceAdapter) {
-      try {
-        const terminal = await sourceAdapter.readTerminal(sourceHandle)
-        const text = terminal.kind === 'unavailable' ? '' : terminal.text
-        tail = text.length > HANDOFF_TAIL_MAX_CHARS ? text.slice(text.length - HANDOFF_TAIL_MAX_CHARS) : text
-      } catch (err) {
-        // 读取交接材料失败不阻断交接本身——没有尾部信息的 HANDOFF.md 好过完全不交接。
-        console.error(`[WorkerHarness] handoff: readTerminal failed for ${worker.worker_id}#${source.seq}, tail omitted:`, err)
-      }
-    }
-    const outcome = worker.task.outcome ?? source.ended_reason ?? 'unknown'
-    const handoffTs = this.deps.now()
-    try {
-      await appendHandoffFile(source.workspace, {
-        ts: handoffTs,
-        title: worker.task.title,
-        goal: worker.task.goal,
-        outcome,
-        tail,
-        input,
-      })
-      await this.appendEvent(worker.worker_id, source.seq, 'handoff_started', { target_impl: targetImpl })
-
-      // 2. 旧化身若仍非终态(如 switchWorkerImpl 打在一个仍存活的化身上,或台账的终态回调
-      // 还没追上 adapter 的真实状态),先 kill 再标 superseded——不覆盖已经真实记录过的
-      // ended_reason(那种情况下旧化身已经是它自己的终局,不是被这次交接顶替的)。
-      if (source.state !== 'exited') {
-        if (sourceAdapter) {
-          await sourceAdapter.kill(sourceHandle)
-        }
-        const killedAt = this.deps.now()
-        await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
-          if (!prev) return undefined
-          const incarnations = patchIncarnationBySeq(prev.incarnations, source.impl, source.seq, {
-            state: 'exited',
-            ended_at: killedAt,
-            ended_reason: 'superseded',
-          })
-          return { ...prev, incarnations, updated_at: killedAt }
+    // The target identity, workspace rules snapshot and the private handoff package all exist
+    // before we stop the source. Any failure here leaves the source untouched and retryable.
+    targetIncarnationId = randomUUID()
+    const capturedAt = this.deps.now()
+    targetInstructions = await captureWorkspaceInstructions({
+      workersDir: this.deps.workersDir,
+      workerId: worker.worker_id,
+      incarnationId: targetIncarnationId,
+      workspaceRoot: workspace.root,
+      capturedAt,
+    })
+    targetClaudeBridge = targetImpl === 'claude-code'
+      ? await prepareClaudeWorkspaceBridge({
+          workersDir: this.deps.workersDir,
+          workerId: worker.worker_id,
+          incarnationId: targetIncarnationId,
+          workspaceRoot: workspace.root,
+          instructions: targetInstructions,
         })
-        await this.appendEvent(worker.worker_id, source.seq, 'superseded')
-      }
+      : undefined
+    handoff = await this.captureHandoffPackage(worker, source, sourceAdapter, sourceHandle, capturedAt)
     } catch (error) {
-      // HANDOFF.md/kill 段失败：dispose admission；source/台账的失败语义保持既有。
+      // admission 之后、package/kill 之前的前置失败：dispose admission，source 不动。
       if (admission) await admission.dispose()
       throw error
     }
 
-    // 3. 同 workspace provision + spawn 新实现,开工输入 = 原任务 + 交接引用 + 本次输入。
+    // 1. Persist the package before source teardown. Terminal capture is deliberately absent:
+    // it is a caller-driven diagnostic viewport, not a handoff or result data source.
+    try {
+      await this.appendEvent(worker.worker_id, source.seq, 'handoff_started', {
+        target_impl: targetImpl,
+        handoff_id: handoff.package_id,
+      })
+
+      // 2. A live source crosses the same durable stop-and-verify boundary as the Manager tool.
+      // An unknown or failed stop never starts a target, avoiding two simultaneous mainlines.
+      if (source.state !== 'exited') {
+        const stop = await this.stopSourceForHandoffLocked(managerKey, worker, source)
+        if (stop.status !== 'succeeded') {
+          throw new Error(`WorkerHarness.handoffIncarnation: source stop did not verify (${stop.status})`)
+        }
+      }
+    } catch (error) {
+      // Source teardown failure leaves the private package as evidence, but does not create a target.
+      if (admission) await admission.dispose()
+      throw error
+    }
+
+    // 3. Same workspace, new implementation. Its opening input embeds a bounded projection of
+    // the package, so workers never need to read a workspace handoff file.
     // newAdapter / builtinInjection / workspace / caps 已在上面的 pre-flight 里取好。
-    const prompt = buildHandoffPrompt(worker.task, input)
+    const prompt = renderHandoffPrompt(handoff, input)
     let newHandle
     try {
       await newAdapter.provision(workspace, caps)
       newHandle = await newAdapter.spawn({
         worker_id: worker.worker_id,
+        incarnation_id: targetIncarnationId,
         prompt,
         workspace,
         goal: worker.task.goal,
@@ -2195,6 +2419,14 @@ export class WorkerHarness {
         ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
       })
     } catch (error) {
+      if (targetClaudeBridge?.managed) {
+        await cleanupClaudeWorkspaceBridge({
+          workersDir: this.deps.workersDir,
+          workerId: worker.worker_id,
+          incarnationId: targetIncarnationId,
+          workspaceRoot: workspace.root,
+        }).catch((cleanupError) => console.warn(`[WorkerHarness] failed to clean Claude workspace bridge for ${worker.worker_id}:`, cleanupError))
+      }
       // provision/spawn 失败：dispose admission；只认 impl 失效证据才置 degraded。
       if (error instanceof WorkerImplUnavailableError) {
         await this.deps.reportWorkerOutcome?.(targetImpl, error.message)
@@ -2202,6 +2434,10 @@ export class WorkerHarness {
       if (admission) await admission.dispose()
       throw error
     }
+    if (newHandle.incarnation_id !== undefined && newHandle.incarnation_id !== targetIncarnationId) {
+      throw new Error(`WorkerHarness.handoffIncarnation: adapter returned mismatched incarnation_id for ${worker.worker_id}`)
+    }
+    newHandle = { ...newHandle, incarnation_id: targetIncarnationId }
     await this.deps.reportWorkerOutcome?.(targetImpl, null)
     // 新化身持有 admission 资源至终态。
     if (admission) this.connectionDisposers.set(`${worker.worker_id}:${newHandle.seq}`, admission.dispose)
@@ -2217,10 +2453,12 @@ export class WorkerHarness {
     const handedOff = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const newIncarnation: Incarnation = {
+        incarnation_id: targetIncarnationId,
         seq: newHandle.seq,
         impl: targetImpl,
         state: initialState,
         workspace: source.workspace,
+        workspace_instructions: targetInstructions.snapshot,
         session_ref: newHandle.session_ref,
         started_at: now,
         ...(initialState === 'exited'
@@ -2263,11 +2501,19 @@ export class WorkerHarness {
       worker.worker_id,
       newHandle.seq,
       'spawned',
-      { impl: targetImpl, from_seq: source.seq },
+      { impl: targetImpl, from_seq: source.seq, handoff_id: handoff.package_id },
       handedOff?.task.status
     )
-    if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
-      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', cliReportDetail(initialState, initialInput.report), handedOff?.task.status)
+    const uiSnapshot = await this.prepareUiSnapshot(newHandle, managerKey, initialInput?.report, now)
+    const turn = initialInput
+      ? await this.createPendingTurn(managerKey, newHandle, initialInput.report, now)
+      : undefined
+    if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
+      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', {
+        ...cliReportDetail(initialState, initialInput.report),
+        ...uiSnapshotDetail(uiSnapshot),
+        ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+      }, handedOff?.task.status)
     }
     return {
       restoredDurableReceipt,
@@ -2324,6 +2570,283 @@ export class WorkerHarness {
 
   async findWorker(workerId: string): Promise<{ managerKey: ManagerKey; worker: LedgerWorker } | undefined> {
     return this.deps.ledger.findWorker(workerId)
+  }
+
+  async getWorkerTurn(workerId: string, turnId?: string): Promise<WorkerTurn | undefined> {
+    return this.turnStore.get(workerId, turnId)
+  }
+
+  async getWorkerControlOperations(workerId: string): Promise<WorkerControlOperation[]> {
+    return this.controlOperationStore.active(workerId)
+  }
+
+  private async prepareUiSnapshot(
+    h: IncarnationHandle,
+    managerKey: ManagerKey,
+    report: StateChangeReport | undefined,
+    now: string,
+  ): Promise<WorkerUiSnapshot | undefined> {
+    if (!h.incarnation_id || h.query_id || report?.waitReason !== 'interaction_required' || !report.ui) return undefined
+    return this.uiSnapshotStore.prepare({
+      worker_id: h.worker_id,
+      manager_key: managerKey,
+      incarnation_id: h.incarnation_id,
+      impl: h.impl,
+      seq: h.seq,
+      fingerprint: report.ui.fingerprint,
+      actions: report.ui.actions,
+      created_at: now,
+    }, true, now)
+  }
+
+  async respondToWorkerUi(
+    workerId: string,
+    snapshotId: string,
+    actionId: WorkerUiActionId,
+    text?: string,
+  ): Promise<{
+    worker_id: string
+    snapshot_id: string
+    action_id: WorkerUiActionId
+    status: 'submitted'
+    operation: WorkerControlOperation
+  }> {
+    return this.withLock(workerId, async () => {
+      const snapshot = await this.getActiveUiSnapshot(workerId, snapshotId)
+      const action = snapshot.actions.find((candidate) => candidate.action_id === actionId)
+      if (!action) throw new Error('worker UI action is not available for this snapshot')
+      const response = this.materializeUiResponse(action, text)
+      const found = await this.deps.ledger.findWorker(workerId)
+      const mainline = found && mainlineIncarnation(found.worker)
+      if (!found || !mainline || !isExecutableIncarnation(mainline) || mainline.incarnation_id !== snapshot.incarnation_id) {
+        throw new Error('worker UI snapshot is stale for the current mainline incarnation')
+      }
+      const adapter = this.deps.adapters.get(mainline.impl)
+      if (!adapter?.respondToUi) throw new Error(`worker impl '${mainline.impl}' does not support UI responses`)
+      const acceptedAt = this.deps.now()
+      const operation = await this.controlOperationStore.create({
+        worker_id: workerId,
+        manager_key: found.managerKey,
+        incarnation_id: snapshot.incarnation_id,
+        impl: mainline.impl,
+        seq: mainline.seq,
+        kind: 'ui_response',
+        created_at: acceptedAt,
+      })
+      const executing = await this.controlOperationStore.transition(
+        workerId,
+        operation.operation_id,
+        'executing',
+        acceptedAt,
+      )
+      try {
+        // A response is single-use once admitted. A native adapter error can mean that a key was
+        // already accepted, so keep the snapshot consumed and settle unknown rather than retrying.
+        await this.uiSnapshotStore.consume(workerId, snapshotId, acceptedAt)
+        await adapter.respondToUi(handleForIncarnation(workerId, mainline), response)
+      } catch (error) {
+        await this.settleControlOperation(
+          executing,
+          'unknown',
+          error instanceof Error ? error.message : String(error),
+        )
+        throw error
+      }
+      const settled = await this.settleControlOperation(executing, 'succeeded', 'UI response submitted to adapter')
+      await this.appendAuditEvent(workerId, mainline.seq, 'state_changed', {
+        kind: 'ui_response_submitted',
+        snapshot_id: snapshotId,
+        action_id: actionId,
+        operation_id: settled.operation_id,
+      })
+      return {
+        worker_id: workerId,
+        snapshot_id: snapshotId,
+        action_id: actionId,
+        status: 'submitted',
+        operation: settled,
+      }
+    })
+  }
+
+  private async getActiveUiSnapshot(workerId: string, snapshotId: string): Promise<WorkerUiSnapshot> {
+    // `consume` is the durable, expiry-checked transition. This preflight only lets an invalid
+    // action fail without burning the one-time snapshot.
+    const snapshot = await this.uiSnapshotStore.get(workerId, snapshotId)
+    if (!snapshot) throw new Error('worker UI snapshot not found')
+    if (snapshot.status !== 'active') throw new Error(`worker UI snapshot is ${snapshot.status}`)
+    return snapshot
+  }
+
+  private materializeUiResponse(action: WorkerUiActionDescriptor, text: string | undefined): WorkerUiResponse {
+    if (action.kind === 'keys') {
+      if (text !== undefined) throw new Error('worker UI key action does not accept text')
+      return { kind: 'keys', keys: action.keys }
+    }
+    if (typeof text !== 'string') throw new Error('worker UI text action requires text')
+    if (text.length < (action.min_length ?? 0) || text.length > action.max_length) {
+      throw new Error(`worker UI text must contain ${action.min_length ?? 0}-${action.max_length} characters`)
+    }
+    return { kind: 'text', text }
+  }
+
+  async getWorkerTurnActivities(turn: WorkerTurn): Promise<NormalizedTraceEvent[]> {
+    const found = await this.deps.ledger.findWorker(turn.worker_id)
+    const incarnation = found && findIncarnation(found.worker, turn.impl, turn.seq)
+    if (!incarnation || !isExecutableIncarnation(incarnation)) return []
+    const adapter = this.deps.adapters.get(turn.impl)
+    if (!adapter?.readTrace) return []
+    const from = Number.parseInt(turn.activity_from, 10)
+    const through = Number.parseInt(turn.activity_through, 10)
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(through) || from < 0 || through < from) return []
+    const trace = await adapter.readTrace({
+      worker_id: turn.worker_id,
+      incarnation_id: turn.incarnation_id,
+      seq: turn.seq,
+      impl: turn.impl,
+      session_ref: incarnation.session_ref,
+    }, { offset: from })
+    return trace.events.filter((event) => event.source_offset === undefined || event.source_offset < through)
+  }
+
+  async resolveWorkerTurn(
+    workerId: string,
+    turnId: string,
+    resolution: WorkerTurnResolution,
+    reason?: string,
+  ): Promise<WorkerTurn> {
+    return this.turnStore.resolve(workerId, turnId, resolution, this.deps.now(), reason)
+  }
+
+  private async createPendingTurn(
+    managerKey: ManagerKey,
+    handle: IncarnationHandle,
+    report: StateChangeReport | undefined,
+    completedAt: string,
+  ): Promise<WorkerTurn | undefined> {
+    if (!handle.incarnation_id || !report?.completionSource) return undefined
+    const prior = await this.turnStore.latestForIncarnation(handle.worker_id, handle.incarnation_id)
+    let activityThrough = prior?.activity_through ?? '0'
+    try {
+      activityThrough = String(await this.nativeActivityStore.cursor(handle.worker_id, handle.incarnation_id))
+    } catch (error) {
+      // The turn and its state event remain the delivery boundary. A degraded activity cache must
+      // not erase a completed worker turn from the Manager's view.
+      console.error(`[WorkerHarness] failed to read activity cursor for completed turn ${handle.worker_id}#${handle.seq}:`, error)
+    }
+    const turn = await this.turnStore.create({
+      worker_id: handle.worker_id,
+      manager_key: managerKey,
+      incarnation_id: handle.incarnation_id,
+      impl: handle.impl,
+      seq: handle.seq,
+      session_ref: handle.session_ref,
+      activity_from: prior?.activity_through ?? '0',
+      activity_through: activityThrough,
+      completed_at: completedAt,
+      completion_source: report.completionSource,
+    })
+    try {
+      await this.persistTurnNotification(turn)
+      void this.deliverNativeActivityNotifications(turn.worker_id)
+    } catch (error) {
+      // processStateChange emits a durable state_changed event carrying turn_id below. Keep that
+      // path live even when the supplementary turn_completed notification cannot be recorded.
+      console.error(`[WorkerHarness] failed to persist completed-turn notification ${turn.turn_id}:`, error)
+    }
+    return turn
+  }
+
+  private async collectNativeActivity(h: IncarnationHandle): Promise<void> {
+    await this.withLock(h.worker_id, async () => {
+      const found = await this.deps.ledger.findWorker(h.worker_id)
+      const incarnation = found && findIncarnation(found.worker, h.impl, h.seq)
+      if (!found || !incarnation || !isExecutableIncarnation(incarnation)) return
+      await this.collectNativeActivityLocked({
+        ...h,
+        incarnation_id: incarnation.incarnation_id,
+        session_ref: h.session_ref || incarnation.session_ref,
+      }, found.managerKey)
+    })
+  }
+
+  private async collectNativeActivityLocked(h: IncarnationHandle, managerKey: ManagerKey): Promise<void> {
+    if (!h.incarnation_id) return
+    const adapter = this.deps.adapters.get(h.impl)
+    if (!adapter?.readTrace) return
+    const offset = await this.nativeActivityStore.cursor(h.worker_id, h.incarnation_id)
+    const trace = await adapter.readTrace(h, { offset })
+    if (trace.nextCursor.offset < offset) {
+      throw new Error(`native trace cursor moved backwards for ${h.worker_id}#${h.seq}`)
+    }
+    const assistant = projectWorkerActivity(trace.events, 'assistant', {
+      worker_id: h.worker_id,
+      incarnation_id: h.incarnation_id,
+    })
+    const notification = assistant.length === 0
+      ? undefined
+      : {
+          worker_id: h.worker_id,
+          manager_key: managerKey,
+          incarnation_id: h.incarnation_id,
+          impl: h.impl,
+          seq: h.seq,
+          activity_from: String(offset),
+          activity_through: String(trace.nextCursor.offset),
+          preview: truncateWakeText(assistant.map((event) => event.summary).join('\n'), 240, '', 'head') ?? 'assistant activity',
+          event: this.buildEvent(h.worker_id, h.seq, 'activity_available', {
+            incarnation_id: h.incarnation_id,
+            from_cursor: String(offset),
+            through_cursor: String(trace.nextCursor.offset),
+            preview: truncateWakeText(assistant.map((event) => event.summary).join('\n'), 240, '', 'head') ?? 'assistant activity',
+          }),
+        }
+    await this.nativeActivityStore.commitObservation({
+      worker_id: h.worker_id,
+      cursor: { incarnation_id: h.incarnation_id, impl: h.impl, seq: h.seq, offset: trace.nextCursor.offset },
+      activity: trace.events,
+      ...(notification ? { notification } : {}),
+    })
+  }
+
+  private async persistTurnNotification(turn: WorkerTurn): Promise<void> {
+    const event = this.buildEvent(turn.worker_id, turn.seq, 'turn_completed', {
+      turn_id: turn.turn_id,
+      incarnation_id: turn.incarnation_id,
+      activity_from: turn.activity_from,
+      activity_through: turn.activity_through,
+      completion_source: turn.completion_source,
+      turn_pending: true,
+    })
+    await this.nativeActivityStore.record({
+      worker_id: turn.worker_id,
+      manager_key: turn.manager_key,
+      incarnation_id: turn.incarnation_id,
+      impl: turn.impl,
+      seq: turn.seq,
+      activity_from: turn.activity_from,
+      activity_through: turn.activity_through,
+      preview: 'worker turn completed',
+      event,
+    })
+  }
+
+  private async deliverNativeActivityNotifications(workerId: string): Promise<void> {
+    if (!this.deps.onOperationNotification) return
+    for (const notification of await this.nativeActivityStore.pending(workerId)) {
+      try {
+        if (!notification.event_written) {
+          await this.getEventLog(workerId).append(notification.event)
+          await this.nativeActivityStore.markEventWritten(workerId, notification.notification_id)
+        }
+        const delivery = await this.deps.onOperationNotification(notification.manager_key, notification.event)
+        if (delivery?.consumed) {
+          await this.nativeActivityStore.markConsumed(workerId, notification.notification_id, this.deps.now())
+        }
+      } catch (error) {
+        console.error(`[WorkerHarness] native activity notification failed for ${notification.notification_id}:`, error)
+      }
+    }
   }
 
   async setWorkerPeriodicReport(
@@ -2532,6 +3055,35 @@ export class WorkerHarness {
       }
     }
     await this.deliverQueryOperationNotifications()
+  }
+
+  /** Rebuild native-session high-water marks and replay any unconsumed Manager wake obligations. */
+  async reconcileNativeActivityOnStartup(): Promise<void> {
+    const all = await this.deps.ledger.listAllWorkers()
+    for (const { worker } of all) {
+      for (const incarnation of worker.incarnations) {
+        if (!isExecutableIncarnation(incarnation)) continue
+        await this.collectNativeActivity({
+          worker_id: worker.worker_id,
+          incarnation_id: incarnation.incarnation_id,
+          seq: incarnation.seq,
+          impl: incarnation.impl,
+          session_ref: incarnation.session_ref,
+          ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
+        })
+      }
+      await this.deliverNativeActivityNotifications(worker.worker_id)
+    }
+  }
+
+  /** A crash after operation admission cannot be retried blindly; reconcile records a verified result or unknown. */
+  async reconcileControlOperationsOnStartup(): Promise<void> {
+    for (const { worker } of await this.deps.ledger.listAllWorkers()) {
+      for (const operation of await this.controlOperationStore.active(worker.worker_id)) {
+        await this.verifyControlOperation(operation)
+      }
+      await this.deliverControlOperationNotifications(worker.worker_id)
+    }
   }
 
   private async reconcileInputDeliveryOperations(): Promise<void> {
@@ -2816,14 +3368,14 @@ export class WorkerHarness {
    *    都已提供信号,未来实现若无法建立可靠进展基线才可选择不实现。
    * 3. **只看主线化身**(`forked_from` 为空,与 §5.3 判定主线化身的规则同源)。cc 的 fork
    *    是无头 `claude -p` 侧问,整个执行期可能零输出,拿它当停摆就是纯误报;
-   * 4. **同一次停摆只发一份现场**,之后的重试是**带退避的、不带正文的再投递**。展开说:
+   * 4. **同一次停摆只发一份首报**,之后的重试是**带退避的、不重复首报**。展开说:
    *    - 成功被消费 ⇒ 不再打扰;`lastActivityAt` 前进 ⇒ 清标记,下次停摆算新的一次;
    *    - 上一次唤醒没被 manager 消费(episode 失败,`consumedEvents !== true`)⇒ 允许重试。
    *      **重试是必须的**:episode 失败时 `ManagerLoop` 把正文整体推回 mailbox,而 mailbox
    *      只是**被动缓冲**——全仓没有任何周期性投递者(`maybeSelfWake` 只在成功后自唤醒,
    *      `evictIdle` 是回收器且无调用方),停摆 worker 按定义又不再产生事件、带不来下一次
    *      唤醒。**重试的价值不在于再送一份正文,而在于它本身就是那个 drain 触发器。**
-   *    - 因此重试**不带现场**(见 `describeLivenessRetry`):现场已在 mailbox 里,再送只会
+   *    - 因此重试**不重复首报**(见 `describeLivenessRetry`):首报已在 mailbox 里,再送只会
    *      让它堆叠;并且**按 `retryDelayMs` 退避**(1×T → 2×T → 4×T 封顶),避免把
    *      `maybeSelfWake` 明确拒绝过的"失败→立刻重试"热循环换个地方重演。
    *    这三条都是 PR #75 review 的修正,推翻过程见 spec 决策 4。
@@ -2838,6 +3390,10 @@ export class WorkerHarness {
       await this.reconcileInputDeliveryOperations()
       await this.reconcileQueryEstablishmentOperations()
       await this.deliverQueryOperationNotifications()
+      await this.reconcileControlOperationsOnStartup()
+      for (const { worker } of await this.deps.ledger.listAllWorkers()) {
+        await this.deliverNativeActivityNotifications(worker.worker_id)
+      }
       await this.sweepSupervision()
       const nowMs = Date.parse(this.deps.now())
       const all = await this.deps.ledger.listAllWorkers()
@@ -2894,7 +3450,7 @@ export class WorkerHarness {
         }
         const attempts = sameStall ? prev.attempts : 0
         this.stallReports.set(key, { activityAt: lastAt, delivery: 'pending', attempts, retryAfterMs: 0 })
-        reports.push(this.reportLivenessStall(h, adapter, key, lastAt, staleMs, attempts, nowMs))
+        reports.push(this.reportLivenessStall(h, key, lastAt, staleMs, attempts, nowMs))
       }
 
       // 已经不在候选集里的化身(终态 / 已换主线 / 换了实现)不再需要标记,顺手回收。
@@ -3123,23 +3679,20 @@ export class WorkerHarness {
   }
 
   /**
-   * 上报一次停摆,走 `state_changed` + `detail.text` 这条既有的唤醒形状(#70 同款,零新事件
-   * kind、零新状态),并按投递结局更新已报标记(含退避)。
+   * 上报一次停摆,走 `state_changed` + `detail.text` 这条既有的唤醒形状,并按投递结局更新
+   * 已报标记(含退避)。
    *
-   * **首报带现场、重试不带**(`attempts`):首报的正文是解码后的 pane 尾部 + 合成指引;
-   * 之后每一次重试只发一行(见 `describeLivenessRetry`)——那份现场在 episode 失败时被
-   * `ManagerLoop` 整体推回了 mailbox,一直都在,重试只是**再触发一次投递**。
+   * **首报带停摆事实、重试不重复**(`attempts`):Harness 不主动读取终端；Manager 若需要
+   * 诊断画面，显式调用 `get_worker_terminal`。重试只是**再触发一次投递**。
    *
    * `to` 取化身**当前**的状态 `'running'`:这条事件描述的不是一次状态迁移(巡检不改状态),
    * 而是"这个还在 running 的化身有情况"。不带 `taskStatus` 形参——没有伴随的 task 迁移,
    * 对外事件桥因此在"状态没变"那一步自然被去重掉(见 manager/events.ts)。
    *
-   * terminal capture 只在首报那一次发生，不把 TUI 刷新拿来当活性信号——活性信号是
-   * `lastActivityAt`，那条路每轮只读取原生会话或控制元数据。
+   * 活性信号是 `lastActivityAt`，每轮只读取原生会话或控制元数据，不读取 TUI pane。
    */
   private async reportLivenessStall(
     h: IncarnationHandle,
-    adapter: WorkerAdapter,
     key: string,
     activityAt: number,
     staleMs: number,
@@ -3148,20 +3701,7 @@ export class WorkerHarness {
   ): Promise<void> {
     let text: string | undefined
     if (attempts === 0) {
-      let tail = ''
-      try {
-        const terminal = await adapter.readTerminal(h)
-        tail = terminal.kind === 'unavailable' ? '' : terminal.text
-      } catch (err) {
-        // 读不到现场不该让唤醒本身泡汤:manager 至少要知道"这个化身静默了这么久"。
-        console.warn(`[WorkerHarness] sweepLiveness: readTerminal failed for ${key}:`, err)
-      }
-      text = truncateWakeText(
-        describeLivenessStall({ impl: h.impl, staleMs, tail }),
-        WAKE_TEXT_MAX_CHARS,
-        '',
-        'tail',
-      )
+      text = describeLivenessStall({ impl: h.impl, staleMs })
     } else {
       text = describeLivenessRetry({ impl: h.impl, staleMs })
     }
@@ -3355,77 +3895,282 @@ export class WorkerHarness {
     )
   }
 
-  async killWorker(workerId: string, reason?: string): Promise<void> {
-    await this.withLock(workerId, async () => {
+  async requestWorkerInterrupt(workerId: string): Promise<WorkerControlOperation> {
+    return this.requestWorkerControlOperation(workerId, 'interrupt')
+  }
+
+  async requestWorkerStop(workerId: string): Promise<WorkerControlOperation> {
+    return this.requestWorkerControlOperation(workerId, 'stop')
+  }
+
+  private async requestWorkerControlOperation(
+    workerId: string,
+    kind: WorkerControlOperationKind,
+  ): Promise<WorkerControlOperation> {
+    return this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
-      const { worker, managerKey } = found
+      const incarnation = requireMainlineIncarnation(found.worker)
+      if (!isExecutableIncarnation(incarnation)) throw new Error(`worker ${workerId} has no controllable incarnation`)
+      if (!incarnation.incarnation_id) throw new Error(`worker ${workerId} incarnation has no stable identity`)
+      return this.executeControlOperationLocked(found.managerKey, found.worker, incarnation, kind)
+    })
+  }
 
-      // 幂等:已是终态(含此前已经 kill 过)直接返回,不重复调 adapter.kill、不重复写台账/事件。
-      if (isTerminalStatus(worker.task.status)) return
+  private async stopSourceForHandoffLocked(
+    managerKey: ManagerKey,
+    worker: LedgerWorker,
+    source: ExecutableIncarnation,
+  ): Promise<WorkerControlOperation> {
+    return this.executeControlOperationLocked(managerKey, worker, source, 'stop', { handoffSupersede: true })
+  }
 
-      // 主线化身——kill 必须打在主线上,不能被 fork 出的侧问分支顶替(protocol-agent-v3 §5.3)。
-      const incarnation = requireMainlineIncarnation(worker)
-      if (isExecutableIncarnation(incarnation)) {
-        const adapter = this.deps.adapters.get(incarnation.impl)
-        if (adapter) {
-          const handle: IncarnationHandle = {
-            worker_id: workerId,
-            seq: incarnation.seq,
-            impl: incarnation.impl,
-            session_ref: incarnation.session_ref,
-          }
-          await adapter.kill(handle)
+  private async executeControlOperationLocked(
+    managerKey: ManagerKey,
+    worker: LedgerWorker,
+    incarnation: ExecutableIncarnation,
+    kind: WorkerControlOperationKind,
+    options?: { readonly handoffSupersede?: boolean },
+  ): Promise<WorkerControlOperation> {
+    if (!incarnation.incarnation_id) throw new Error(`worker ${worker.worker_id} incarnation has no stable identity`)
+    const adapter = this.deps.adapters.get(incarnation.impl)
+    if (!adapter) throw new Error(`worker adapter unavailable: ${incarnation.impl}`)
+    const operation = await this.controlOperationStore.create({
+      worker_id: worker.worker_id,
+      manager_key: managerKey,
+      incarnation_id: incarnation.incarnation_id,
+      impl: incarnation.impl,
+      seq: incarnation.seq,
+      kind,
+      created_at: this.deps.now(),
+    }, options)
+    const executing = await this.controlOperationStore.transition(
+      worker.worker_id,
+      operation.operation_id,
+      'executing',
+      this.deps.now(),
+    )
+    try {
+      const handle = handleForIncarnation(worker.worker_id, incarnation)
+      if (kind === 'interrupt') {
+        if (!adapter.interrupt) throw new Error(`worker impl '${incarnation.impl}' does not support interrupt`)
+        await adapter.interrupt(handle)
+      } else {
+        const stop = adapter.stop?.bind(adapter) ?? adapter.kill.bind(adapter)
+        await stop(handle)
+        for (const fork of worker.incarnations) {
+          if (fork.forked_from === undefined || !isExecutableIncarnation(fork) || fork.state === 'exited') continue
+          const forkAdapter = this.deps.adapters.get(fork.impl)
+          if (!forkAdapter) throw new Error(`fork adapter unavailable: ${fork.impl}`)
+          const stopFork = forkAdapter.stop?.bind(forkAdapter) ?? forkAdapter.kill.bind(forkAdapter)
+          await stopFork(handleForIncarnation(worker.worker_id, fork))
         }
       }
+      await this.controlOperationStore.transition(worker.worker_id, executing.operation_id, 'verifying', this.deps.now())
+    } catch (error) {
+      return this.settleControlOperation(
+        executing,
+        'failed',
+        error instanceof Error ? error.message : String(error),
+      )
+    }
+    return this.verifyControlOperationLocked(executing)
+  }
 
-      const now = this.deps.now()
-      const cancelled = await this.deps.ledger.upsertWorker(managerKey, workerId, (prev) => {
-        if (!prev) return undefined
-        const nextTask = applyStatusTransition(prev.task, 'cancelled', { now })
-        // 按 (impl, seq) 精确定位主线化身条目,不假设它是数组最后一个(fork 之后数组末尾是
-        // fork 化身;跨实例撞号时同 seq 可能有多条记录,见 patchIncarnationBySeq 注释)。
-        const incarnations = patchIncarnationBySeq(prev.incarnations, incarnation.impl, incarnation.seq, {
-          state: 'exited',
-          ended_at: now,
-          ended_reason: 'killed',
-        })
-        const supervision = supervisionAfterMainlineTransition(
-          prev.supervision,
-          nextTask.status,
-          'exited',
-          incarnation.seq,
-          now,
-        )
-        return { ...prev, task: nextTask, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
+  private async verifyControlOperation(operation: WorkerControlOperation): Promise<WorkerControlOperation> {
+    return this.withLock(operation.worker_id, () => this.verifyControlOperationLocked(operation))
+  }
+
+  private async verifyControlOperationLocked(operation: WorkerControlOperation): Promise<WorkerControlOperation> {
+    const current = await this.controlOperationStore.get(operation.worker_id, operation.operation_id)
+    if (!current || current.status === 'succeeded' || current.status === 'failed' || current.status === 'unknown') return current ?? operation
+    const found = await this.deps.ledger.findWorker(operation.worker_id)
+    const handoffSupersede = operation.kind === 'stop' &&
+      await this.controlOperationStore.isHandoffSupersede(operation.worker_id, operation.operation_id)
+    // `cancelAfterVerifiedStop` / `supersedeAfterVerifiedStop` writes ledger truth before the
+    // operation becomes succeeded, so restart reconciliation can complete either boundary.
+    if (operation.kind === 'stop' && !handoffSupersede && found?.worker.task.status === 'cancelled') {
+      return this.settleControlOperation(current, 'succeeded', 'task was already cancelled after verified stop')
+    }
+    const incarnation = found?.worker.incarnations.find((item) => item.incarnation_id === operation.incarnation_id)
+    if (operation.kind === 'stop' && handoffSupersede && incarnation?.ended_reason === 'superseded') {
+      return this.settleControlOperation(current, 'succeeded', 'source was already superseded after verified stop')
+    }
+    if (!found || !incarnation || !isExecutableIncarnation(incarnation)) {
+      return this.settleControlOperation(current, 'unknown', 'target incarnation is no longer available for verification')
+    }
+    const adapter = this.deps.adapters.get(incarnation.impl)
+    if (!adapter) return this.settleControlOperation(current, 'unknown', `worker adapter unavailable: ${incarnation.impl}`)
+
+    let observed: WorkerContractState
+    try {
+      observed = await adapter.state(handleForIncarnation(operation.worker_id, incarnation))
+    } catch (error) {
+      return this.settleControlOperation(current, 'unknown', error instanceof Error ? error.message : String(error))
+    }
+    if (operation.kind === 'interrupt') {
+      return this.settleControlOperation(
+        current,
+        observed === 'running' ? 'unknown' : 'succeeded',
+        observed === 'running' ? 'interrupt accepted but native state has not reached a boundary' : `native state=${observed}`,
+      )
+    }
+    if (operation.kind === 'ui_response') {
+      return this.settleControlOperation(current, 'unknown', 'UI response requires adapter submission settlement')
+    }
+    if (observed !== 'exited') {
+      return this.settleControlOperation(current, 'unknown', `stop accepted but native state=${observed}`)
+    }
+    for (const fork of found.worker.incarnations) {
+      if (fork.forked_from === undefined || !isExecutableIncarnation(fork) || fork.state === 'exited') continue
+      const forkAdapter = this.deps.adapters.get(fork.impl)
+      if (!forkAdapter) return this.settleControlOperation(current, 'unknown', `fork adapter unavailable: ${fork.impl}`)
+      const forkState = await forkAdapter.state(handleForIncarnation(operation.worker_id, fork))
+      if (forkState !== 'exited') return this.settleControlOperation(current, 'unknown', `registered fork ${fork.incarnation_id} remains ${forkState}`)
+    }
+    if (await this.deps.hasRunningBg?.(operation.worker_id)) {
+      return this.settleControlOperation(current, 'unknown', 'worker-owned background execution remains active')
+    }
+    if (handoffSupersede) {
+      await this.supersedeAfterVerifiedStop(found.managerKey, found.worker, incarnation)
+      return this.settleControlOperation(current, 'succeeded', 'source and registered fork stop requests verified for handoff')
+    }
+    await this.cancelAfterVerifiedStop(found.managerKey, found.worker, incarnation)
+    // A persisted successful stop must never precede the corresponding cancelled task. If the
+    // process exits after cancellation, startup reconciliation completes the verifying op.
+    return this.settleControlOperation(
+      current,
+      'succeeded',
+      'mainline and registered fork stop requests verified',
+    )
+  }
+
+  private async cancelAfterVerifiedStop(
+    managerKey: ManagerKey,
+    worker: LedgerWorker,
+    incarnation: ExecutableIncarnation,
+  ): Promise<void> {
+    if (isTerminalStatus(worker.task.status)) return
+    const now = this.deps.now()
+    const cancelled = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (previous) => {
+      if (!previous || isTerminalStatus(previous.task.status)) return previous
+      const mainline = mainlineIncarnation(previous)
+      if (!mainline || mainline.incarnation_id !== incarnation.incarnation_id) return previous
+      const task = applyStatusTransition(previous.task, 'cancelled', { now })
+      const incarnations = previous.incarnations.map((item) => {
+        if (item.forked_from !== undefined && isExecutableIncarnation(item) && item.state !== 'exited') {
+          return { ...item, state: 'exited' as const, ended_at: now, ended_reason: 'killed' as const }
+        }
+        return item.incarnation_id === incarnation.incarnation_id
+          ? { ...item, state: 'exited' as const, ended_at: now, ended_reason: 'killed' as const }
+          : item
       })
-      await this.appendEvent(workerId, incarnation.seq, 'killed', reason ? { reason } : undefined, cancelled?.task.status)
+      const supervision = supervisionAfterMainlineTransition(previous.supervision, task.status, 'exited', incarnation.seq, now)
+      return { ...previous, task, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
+    })
+    await this.appendEvent(worker.worker_id, incarnation.seq, 'state_changed', { to: 'exited', reason: 'stop_verified' }, cancelled?.task.status)
+    for (const item of this.getInbox(worker.worker_id).drain()) {
+      await this.appendEvent(worker.worker_id, incarnation.seq, 'state_changed', {
+        kind: 'dead_letter',
+        reason: 'task_cancelled',
+        text_len: item.text.length,
+      })
+      await item.onSettled?.('dead_letter', {
+        seq: incarnation.seq,
+        reason: 'task_cancelled',
+        certainty: 'unknown',
+      })
+    }
+  }
 
-      // 清空信箱残留:此刻队列里的条目是 kill 之前已入队、deliver 还没轮到的消息(kill 之后
-      // 的 sendToWorker 会命中上面已落定的 cancelled 直接拒绝,不会再有新条目挤进来——入队
-      // 段与这里同在这把 per-worker 锁的临界区内,互斥)。不清空的话,这些条目会在之后被
-      // inbox.flush 摸到、读到台账已 exited,落进 continueTerminalWorker 的接续分支(即使
-      // 加了上面的 cancelled 短路,也是"先接住再丢弃"而不是干脆不投递)。drain() 不等锁,
-      // 不会因为同一信箱另有 flush 卡在 deliver 而卡住这里;逐条记 dead-letter 事件,保证
-      // "消息不静默消失"的调用方契约。
-      const drained = this.getInbox(workerId).drain()
-      for (const item of drained) {
-        await this.appendEvent(workerId, incarnation.seq, 'state_changed', {
-          kind: 'dead_letter',
-          reason: 'killed',
-          text_len: item.text.length,
+  private async supersedeAfterVerifiedStop(
+    managerKey: ManagerKey,
+    worker: LedgerWorker,
+    incarnation: ExecutableIncarnation,
+  ): Promise<void> {
+    const now = this.deps.now()
+    await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (previous) => {
+      if (!previous) return undefined
+      const source = previous.incarnations.find((item) => item.incarnation_id === incarnation.incarnation_id)
+      if (!source || !isExecutableIncarnation(source)) return previous
+      const incarnations = previous.incarnations.map((item) => {
+        if (item.incarnation_id === incarnation.incarnation_id) {
+          return { ...item, state: 'exited' as const, ended_at: now, ended_reason: 'superseded' as const }
+        }
+        if (item.forked_from !== undefined && isExecutableIncarnation(item) && item.state !== 'exited') {
+          return { ...item, state: 'exited' as const, ended_at: now, ended_reason: 'killed' as const }
+        }
+        return item
+      })
+      return { ...previous, incarnations, updated_at: now }
+    })
+    await this.appendEvent(
+      worker.worker_id,
+      incarnation.seq,
+      'superseded',
+      { reason: 'handoff_stop_verified' },
+    )
+  }
+
+  private async settleControlOperation(
+    operation: WorkerControlOperation,
+    status: Extract<WorkerControlOperationStatus, 'succeeded' | 'failed' | 'unknown'>,
+    detail: string,
+  ): Promise<WorkerControlOperation> {
+    const settled = await this.controlOperationStore.transition(
+      operation.worker_id,
+      operation.operation_id,
+      status,
+      this.deps.now(),
+      detail,
+    )
+    const delivery = this.deliverControlOperationNotifications(settled.worker_id)
+    // Without a Manager operation router this is only the durable audit append. Finish it before
+    // returning the control result; otherwise a short-lived harness can lose the audit record.
+    if (this.deps.onOperationNotification) void delivery
+    else await delivery
+    return settled
+  }
+
+  private async deliverControlOperationNotifications(workerId: string): Promise<void> {
+    const mutex = this.controlNotificationMutexes.get(workerId) ?? new AsyncMutex()
+    this.controlNotificationMutexes.set(workerId, mutex)
+    await mutex.run(async () => {
+      for (const notification of await this.controlOperationStore.pendingNotifications(workerId)) {
+        const { operation } = notification
+        const event = this.buildEvent(workerId, operation.seq, 'operation_settled', {
+          operation_id: operation.operation_id,
+          incarnation_id: operation.incarnation_id,
+          kind: operation.kind,
+          status: operation.status,
+          detail: operation.detail ?? '',
         })
         try {
-          await item.onSettled?.('dead_letter', {
-            seq: incarnation.seq,
-            reason: 'task_cancelled',
-            certainty: 'unknown',
-          })
+          if (!notification.event_written) {
+            await this.getEventLog(workerId).append(event)
+            await this.controlOperationStore.markEventWritten(workerId, operation.operation_id)
+          }
+          if (!this.deps.onOperationNotification) continue
+          const delivery = await this.deps.onOperationNotification(operation.manager_key, event)
+          if (delivery?.consumed) {
+            await this.controlOperationStore.markNotificationConsumed(workerId, operation.operation_id, this.deps.now())
+          }
         } catch (error) {
-          console.warn(`[WorkerHarness] dead-letter settlement failed for ${workerId}:`, error)
+          console.error(`[WorkerHarness] control operation notification failed for ${operation.operation_id}:`, error)
         }
       }
     })
+  }
+
+  async killWorker(workerId: string, reason?: string): Promise<void> {
+    // Compatibility only: callers outside the Manager tool face still get the verified stop
+    // semantics. The historical reason had no protocol meaning and is retained for signature
+    // compatibility only.
+    void reason
+    const found = await this.deps.ledger.findWorker(workerId)
+    if (!found) throw new WorkerNotFoundError(workerId)
+    if (isTerminalStatus(found.worker.task.status)) return
+    await this.requestWorkerStop(workerId)
   }
 
   /**
@@ -3497,6 +4242,7 @@ export class WorkerHarness {
         implId: incarnation.impl,
         ref: {
           worker_id: workerId,
+          incarnation_id: incarnation.incarnation_id,
           seq: incarnation.seq,
           session_ref: incarnation.session_ref,
         },
@@ -3508,6 +4254,23 @@ export class WorkerHarness {
 
     let admission: Awaited<ReturnType<NonNullable<HarnessDeps['admitWorkerConnection']>>> | undefined
     let forkHandle: IncarnationHandle | undefined
+    const forkIncarnationId = randomUUID()
+    const forkInstructions = await captureWorkspaceInstructions({
+      workersDir: this.deps.workersDir,
+      workerId,
+      incarnationId: forkIncarnationId,
+      workspaceRoot: prep.workspace,
+      capturedAt: this.deps.now(),
+    })
+    if (prep.implId === 'claude-code') {
+      await prepareClaudeWorkspaceBridge({
+        workersDir: this.deps.workersDir,
+        workerId,
+        incarnationId: forkIncarnationId,
+        workspaceRoot: prep.workspace,
+        instructions: forkInstructions,
+      })
+    }
     const disposeAdmission = async (): Promise<void> => {
       const owned = admission
       admission = undefined
@@ -3522,6 +4285,7 @@ export class WorkerHarness {
       admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
       const forkOptions: ForkOptions = {
         query_id: prep.receipt.query_id,
+        incarnation_id: forkIncarnationId,
         establishment_deadline_at: prep.receipt.establishment_deadline_at,
         ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
       }
@@ -3538,6 +4302,10 @@ export class WorkerHarness {
         prep.adapter,
         remainingMs,
       )
+      if (forkHandle.incarnation_id !== undefined && forkHandle.incarnation_id !== forkIncarnationId) {
+        throw new Error('adapter returned a fork handle with a mismatched incarnation_id')
+      }
+      forkHandle = { ...forkHandle, incarnation_id: forkIncarnationId }
       if (forkHandle.query_id !== prep.receipt.query_id) {
         throw new Error('adapter returned a fork handle with a mismatched query_id')
       }
@@ -3572,13 +4340,15 @@ export class WorkerHarness {
         const committed = await this.deps.ledger.upsertWorker(prep.managerKey, workerId, (prevWorker) => {
           if (!prevWorker) return undefined
           const forkIncarnation: Incarnation = {
+            incarnation_id: forkIncarnationId,
             seq: forkHandle!.seq,
             impl: prep.implId,
             state: 'running',
             workspace: prep.workspace,
             session_ref: forkHandle!.session_ref,
             started_at: now,
-            forked_from: prep.ref.seq,
+            workspace_instructions: forkInstructions.snapshot,
+            forked_from: prep.ref.incarnation_id ?? prep.ref.seq,
             query_id: prep.receipt.query_id,
           }
           return {
@@ -3817,17 +4587,15 @@ export class WorkerHarness {
     report?: StateChangeReport,
   ): Promise<void> {
     let settledCurrentExit = false
-    // 唤醒事件的两段正文在这里统一截断。`detail.text` 只有一个位置，builtin 报
-    // `lastText`，cc/codex 报当前 terminal view；两者天然互斥。若未来某实现同时上报，
-    // 以 worker 的发言 `lastText` 为准。发言保头，终端画面保尾，必须各自截断后再取优先。
-    const wakeText =
-      truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, '', 'head') ??
-      truncateWakeText(report?.terminal?.kind === 'unavailable' ? undefined : report?.terminal?.text, WAKE_TEXT_MAX_CHARS, '', 'tail')
+    // 被动唤醒只携带 adapter 已经结构化识别出的 assistant text。tmux capture 是调用方
+    // 显式请求的诊断视图，不能因一次状态回调被常规塞进 manager 上下文。
+    const wakeText = truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, '', 'head')
     const wakeSummary = truncateWakeText(report?.summary, WAKE_SUMMARY_MAX_CHARS, '', 'head')
     // detail 里两段正文的组装收口在这里,fork 分支与主线分支共用——不在两处各拼一遍。
     const wakeDetail = {
       ...(wakeText ? { text: wakeText } : {}),
       ...(wakeSummary ? { summary: wakeSummary } : {}),
+      ...(report?.waitReason ? { wait_reason: report.waitReason } : {}),
     }
     await this.withLock(h.worker_id, async () => {
       const found = await this.deps.ledger.findWorker(h.worker_id)
@@ -3855,6 +4623,9 @@ export class WorkerHarness {
       // 防守分支(exited + 无原因 ⇒ failed)兜住,宁可记成失败也不谎报成功。
       const endReason: IncarnationEndReason | undefined = state === 'exited' ? report?.endReason : undefined
       const now = this.deps.now()
+      const uiSnapshot = target.forked_from === undefined
+        ? await this.prepareUiSnapshot({ ...h, incarnation_id: target.incarnation_id }, managerKey, report, now)
+        : undefined
 
       if (target.forked_from !== undefined) {
         // fork 化身(一次性侧问分支)自己的生命周期只更新它自己的化身条目,不影响主线
@@ -3911,10 +4682,28 @@ export class WorkerHarness {
       // An idle builtin incarnation with an owned shell is still executing work:
       // end_turn is its wait primitive, not task completion.
       const waitingInput = state === 'idle' ? true : undefined
-      const nextStatus: TaskStatus =
-        state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
+      const pendingStop = state === 'exited' && (await this.controlOperationStore.active(h.worker_id)).some(
+        (operation) => operation.kind === 'stop' && operation.incarnation_id === target.incarnation_id,
+      )
+      const nextStatus: TaskStatus = pendingStop
+        ? worker.task.status
+        : state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
           ? 'running'
           : taskStatusFromIncarnation(state, endReason, waitingInput)
+      const shouldCreateTurn = report?.completionSource !== undefined && target.state !== state
+      if (shouldCreateTurn) {
+        try {
+          await this.collectNativeActivityLocked({
+            ...h,
+            ...(target.incarnation_id ? { incarnation_id: target.incarnation_id } : {}),
+            session_ref: h.session_ref || target.session_ref,
+          }, managerKey)
+        } catch (error) {
+          // Native activity is preferred evidence, but the adapter has already authoritatively
+          // reported this state transition. Do not lose the transition if the source is unreadable.
+          console.error(`[WorkerHarness] native activity collection failed at turn boundary for ${h.worker_id}#${h.seq}:`, error)
+        }
+      }
 
       const committed = await this.deps.ledger.upsertWorker(managerKey, h.worker_id, (prev) => {
         if (!prev) return undefined
@@ -3944,6 +4733,13 @@ export class WorkerHarness {
         return { ...prev, task: nextTask, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
       })
       settledCurrentExit = state === 'exited' && committed !== undefined
+      const turn = shouldCreateTurn && committed
+        ? await this.createPendingTurn(managerKey, {
+            ...h,
+            ...(target.incarnation_id ? { incarnation_id: target.incarnation_id } : {}),
+            session_ref: h.session_ref || target.session_ref,
+          }, report, now)
+        : undefined
       // 主线分支是 task 状态机的主要推进点——事件必须自带落账后的状态,否则订阅方现读台账
       // 时若已经有下一次落账(如 §5.3 透明接续把终态拉回 running),这次迁移(含 completed
       // 这类终态)会被整条吞掉。见 worker-events.ts `HarnessEvent.task_status`。
@@ -3951,10 +4747,15 @@ export class WorkerHarness {
         h.worker_id,
         h.seq,
         'state_changed',
-        report?.notification ? cliReportDetail(state, report) : { to: state, ...wakeDetail },
+          {
+            ...(report?.notification ? cliReportDetail(state, report) : { to: state, ...wakeDetail }),
+            ...uiSnapshotDetail(uiSnapshot),
+            ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+        },
         committed?.task.status
       )
     })
+    await this.deliverNativeActivityNotifications(h.worker_id)
     if (state === 'exited') this.fireIncarnationTerminal(h)
 
     if (!report?.notification && settledCurrentExit) {
@@ -4221,6 +5022,64 @@ function supervisionAfterMainlineTransition(
   }
 }
 
+function requireStableIncarnationId(incarnation: Incarnation, workerId: string) {
+  if (!incarnation.incarnation_id) {
+    throw new Error(`WorkerHarness: worker ${workerId} incarnation ${incarnation.impl}#${incarnation.seq} has no stable identity`)
+  }
+  return incarnation.incarnation_id
+}
+
+function ledgerHandoffEvidence(worker: LedgerWorker, source: Incarnation): HandoffEvidenceInput[] {
+  const sourceId = requireStableIncarnationId(source, worker.worker_id)
+  return [
+    {
+      source: 'ledger',
+      reference: `task:${worker.task.id}`,
+      summary: `Task: ${worker.task.title}`,
+    },
+    ...(worker.task.goal ? [{
+      source: 'ledger' as const,
+      reference: `task:${worker.task.id}:goal`,
+      summary: `Goal: ${worker.task.goal}`,
+    }] : []),
+    {
+      source: 'ledger',
+      reference: `incarnation:${sourceId}:outcome`,
+      summary: `Source outcome: ${worker.task.outcome ?? source.ended_reason ?? 'unknown'}`,
+    },
+  ]
+}
+
+function traceHandoffEvidence(
+  source: 'native_session' | 'persisted_activity',
+  incarnationId: string,
+  events: ReadonlyArray<Pick<NormalizedTraceEvent, 'ts' | 'kind' | 'role' | 'summary' | 'source_offset'>>,
+): HandoffEvidenceInput[] {
+  return events.flatMap((event, index) => {
+    const summary = event.summary.trim()
+    if (!summary) return []
+    const role = event.role ? ` ${event.role}` : ''
+    return [{
+      source,
+      reference: `incarnation:${incarnationId}:${event.source_offset ?? index}`,
+      summary: `[${event.kind}${role}] ${summary}`,
+    }]
+  })
+}
+
+function ledgerEventHandoffEvidence(
+  workerId: string,
+  source: Incarnation,
+  events: ReadonlyArray<HarnessEvent>,
+): HandoffEvidenceInput[] {
+  const sourceId = requireStableIncarnationId(source, workerId)
+  return events.map((event, index) => ({
+    source: 'ledger' as const,
+    reference: `event:${sourceId}:${index}`,
+    summary: `Harness lifecycle: ${event.kind}`,
+  }))
+}
+
 function requireMainlineIncarnation(worker: LedgerWorker): Incarnation {
   const mainline = mainlineIncarnation(worker)
   if (!mainline) throw new WorkerHasNoIncarnationError(worker.worker_id)
@@ -4304,6 +5163,17 @@ export function findIncarnationBySeq(worker: LedgerWorker, seq: number): Incarna
   return lastMatch
 }
 
+function handleForIncarnation(workerId: string, incarnation: ExecutableIncarnation): IncarnationHandle {
+  return {
+    worker_id: workerId,
+    incarnation_id: incarnation.incarnation_id,
+    seq: incarnation.seq,
+    impl: incarnation.impl,
+    session_ref: incarnation.session_ref,
+    ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
+  }
+}
+
 /**
  * 按 (impl, seq) 精确定位并 patch 一个化身条目,不假设它是数组的最后一个——fork 之后数组
  * 末尾是 fork 化身,继续用"改最后一个"的旧写法会把主线的落定动作(如 kill 后的 exited)
@@ -4371,54 +5241,6 @@ function transitionTaskTo(
   }
   const hopped = applyStatusTransition(task, 'running', { now: opts.now })
   return applyStatusTransition(hopped, to, opts)
-}
-
-/** 交接续办产出的新化身 prompt:原任务描述 + 交接引用(指向 HANDOFF.md)+ 本次输入。 */
-function buildHandoffPrompt(task: LedgerWorker['task'], input: string): string {
-  const goalLine = task.goal ? `\n目标:${task.goal}` : ''
-  const inputBlock = input ? `\n\n${input}` : ''
-  return `${task.title}${goalLine}\n\n(交接续办:详见 workspace 下的 HANDOFF.md,记录了前一化身的执行现场与交接说明)${inputBlock}`
-}
-
-interface HandoffSection {
-  readonly ts: string
-  readonly title: string
-  readonly goal?: string
-  readonly outcome: string
-  readonly tail: string
-  readonly input: string
-}
-
-function renderHandoffSection(s: HandoffSection): string {
-  const lines = [
-    `## Handoff ${s.ts}`,
-    '',
-    `Task: ${s.title}`,
-    ...(s.goal ? [`Goal: ${s.goal}`] : []),
-    `Previous outcome: ${s.outcome}`,
-    ...(s.input ? [`This round input: ${s.input}`] : []),
-    '',
-    '### Recent output (tail)',
-    '```',
-    s.tail || '(no output)',
-    '```',
-  ]
-  return lines.join('\n') + '\n'
-}
-
-/** 写 workspace 下的 HANDOFF.md;已存在则追加带时间戳的新段,不覆盖(protocol-agent-v3 §5.3)。 */
-async function appendHandoffFile(workspaceRoot: string, section: HandoffSection): Promise<void> {
-  const filePath = join(workspaceRoot, 'HANDOFF.md')
-  const block = renderHandoffSection(section)
-  let existing = ''
-  try {
-    existing = await fs.readFile(filePath, 'utf-8')
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
-  }
-  const next = existing ? `${existing.replace(/\n+$/, '')}\n\n${block}` : block
-  await fs.mkdir(workspaceRoot, { recursive: true })
-  await fs.writeFile(filePath, next, 'utf-8')
 }
 
 // re-export for callers that only import from harness.ts

@@ -1,7 +1,7 @@
 /**
  * worker 工具集 —— manager 唯一的 worker 编排入口(protocol-agent-v3 §4.1/§4.3/§5.5)。
  *
- * 七个工具全部是 `WorkerHarness`(P3 已合并,本模块只调用、不修改,唯一的 additive 例外见
+ * worker 编排/观察工具全部是 `WorkerHarness`(P3 已合并,本模块只调用、不修改,唯一的 additive 例外见
  * `harness.getWorkerTerminal` 的 `opts.seq` 参数)既有方法的薄封装:只负责
  * 1) 组装 harness 方法的入参(`spawn_worker` 据 `deps.context()` 填 `origin`/`report_to`);
  * 2) 把 harness 的返回值/异常转成 engine `ToolCallResult`——异常永不穿透成 engine 层错误,
@@ -26,8 +26,8 @@
  *
  * ## isReadOnly
  *
- * 与 `get_worker_terminal`/`list_workers`/`get_worker_detail` 标 `isReadOnly: true`(供 engine 并行调度只读工具,
- * `partitionToolCalls`)。`kill_worker` 虽然同步返回,但会改变 worker/task 状态,不是只读。
+ * 与 `get_worker_state`/`get_worker_activity`/`get_worker_turn`/`get_worker_terminal`/`list_workers`/`get_worker_detail` 标 `isReadOnly: true`(供 engine 并行调度只读工具,
+ * `partitionToolCalls`)。worker control 与 UI response 会改变执行状态，不是只读。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.1、§4.3、§5.5
  */
@@ -38,7 +38,9 @@ import type { WorkerHarness } from '../../workers/harness/harness'
 import type { ManagerKey, LedgerWorker, TaskStatus } from '../../workers/harness/ledger-types'
 import { isDecisionVisibleWorker } from '../../workers/harness/task-status.js'
 import type { MasterAuthorization } from '../principal.js'
-import type { WorkerImplId } from '../../workers/types'
+import type { WorkerActivity, WorkerImplId } from '../../workers/types'
+import type { WorkerTurnResolution } from '../../workers/harness/worker-turn-store.js'
+import { projectWorkerActivity } from '../../workers/trace/activity-projection.js'
 import type { ResolvedPermissions } from '../../types'
 import type { LegacyContinuationAuth } from '../../workers/harness/legacy-continuation-auth.js'
 import { QueryEstablishmentError } from '../../workers/errors.js'
@@ -77,6 +79,23 @@ export interface WorkerToolsContext {
 
 export interface WorkerToolsDeps {
   readonly harness: WorkerHarness
+  /** Agent-owned structured session projection; manager never receives a native session path. */
+  readonly readWorkerActivity?: (params: {
+    worker_id: string
+    incarnation_id?: string
+    after?: string
+    view: 'assistant' | 'all'
+  }) => Promise<{
+    incarnation_id: string
+    activities: WorkerActivity[]
+    next_cursor?: string
+    unavailable_reason?: string
+  }>
+  /** Exact report target must have accepted a send_message in this Manager episode. */
+  readonly hasSuccessfulSendMessageTo?: (target: { channel_id: string; session_id: string }) => boolean
+  /** A continued turn needs an actual same-episode input/continuation action. */
+  readonly hasContinuedWorker?: (workerId: string) => boolean
+  readonly onWorkerContinuation?: (workerId: string) => void
   /** P6-C §7：registry snapshot 只读 getter（list_worker_implementations 用）。 */
   readonly workerImplSnapshot?: () => {
     revision: number
@@ -178,6 +197,40 @@ function normalizePagination(page: unknown, pageSize: unknown): { page: number; 
 
 const ACCESS_DENIED = 'worker 不存在或当前会话无权访问'
 
+async function workerState(harness: WorkerHarness, worker: LedgerWorker) {
+  const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined).at(-1)
+  const latestTurn = await harness.getWorkerTurn(worker.worker_id)
+  const activeOperations = await harness.getWorkerControlOperations(worker.worker_id)
+  return {
+    worker_id: worker.worker_id,
+    task_status: worker.task.status,
+    updated_at: worker.updated_at,
+    ...(mainline
+      ? {
+          incarnation: {
+            ...(mainline.incarnation_id ? { incarnation_id: mainline.incarnation_id } : {}),
+            impl: mainline.impl,
+            seq: mainline.seq,
+            state: mainline.state,
+            ...(mainline.ended_reason ? { ended_reason: mainline.ended_reason } : {}),
+          },
+        }
+      : {}),
+    forks: worker.incarnations
+      .filter((inc) => inc.forked_from !== undefined)
+      .map((inc) => ({
+        ...(inc.incarnation_id ? { incarnation_id: inc.incarnation_id } : {}),
+        impl: inc.impl,
+        seq: inc.seq,
+        state: inc.state,
+        ...(inc.query_id ? { query_id: inc.query_id } : {}),
+        ...(inc.ended_reason ? { ended_reason: inc.ended_reason } : {}),
+      })),
+    ...(latestTurn ? { latest_turn: latestTurn } : {}),
+    active_operations: activeOperations,
+  }
+}
+
 export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const { harness, context, authorization, validateMasterAuthorization } = deps
   // Capture exactly once: a tool definition belongs to one model turn. A later
@@ -211,7 +264,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       '补充/返工时改用 send_to_worker 投给原 worker(它会自动复活已结束的会话),新 worker ' +
       '拿不到旧 worker 积累的上下文。异步语义:本工具在 worker 化身创建完成后即返回' +
       '(不等 worker 把任务做完),返回 worker_id;worker 每跑完一轮(转 idle)或结束时会作为' +
-      '事件唤醒你,事件里带着它这一轮最后说的那段话。impl 缺省按部署偏好选择;workspace 缺省新建。',
+      '事件唤醒你,事件带状态和待处置回合；用 get_worker_activity 读取原生会话。impl 缺省按部署偏好选择;workspace 缺省新建。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -277,20 +330,19 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       '已结束(completed/failed)的会自动复活它原来的会话接着干、上下文完整保留——所以延续、' +
       '补充、返工一个老任务都走这里,不必先判断它死活,也不必为此新开 worker。异步语义:本工具' +
       '不等 worker 处理完这条消息;worker 每跑完一轮或结束时' +
-      '会作为事件唤醒你,事件里带着它这一轮最后说的那段话。命中已 cancelled 的任务会被拒绝。' +
-      'raw=true 用于向卡住的交互式界面原样敲键,不是普通对话消息。',
+      '会作为事件唤醒你,事件带状态和待处置回合；用 get_worker_activity 读取原生会话。命中已 cancelled 的任务会被拒绝。' +
+      '未知交互界面必须使用 respond_to_worker_ui，普通输入不提供 raw 终端旁路。',
     inputSchema: {
       type: 'object',
       properties: {
         worker_id: { type: 'string', description: '目标 worker id' },
         text: { type: 'string', description: '要投递的文本' },
-        raw: { type: 'boolean', description: '原样敲键(驱动卡住的交互界面专用),缺省 false' },
       },
       required: ['worker_id', 'text'],
     },
     isReadOnly: false,
     call: async (input): Promise<ToolCallResult> => {
-      const { worker_id, text, raw } = input as { worker_id?: string; text?: string; raw?: boolean }
+      const { worker_id, text } = input as { worker_id?: string; text?: string }
       if (!worker_id || typeof worker_id !== 'string') return invalid('send_to_worker: worker_id 必填且为字符串')
       if (typeof text !== 'string' || text.length === 0) return invalid('send_to_worker: text 必填且为非空字符串')
 
@@ -299,9 +351,9 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
         const legacyContinuationAuth = capturedLegacyContinuationAuth?.(worker.manager_key)
         const result = await harness.sendToWorker(worker_id, text, {
           managerKey: context().managerKey,
-          ...(raw !== undefined ? { raw } : {}),
           ...(legacyContinuationAuth ? { legacyContinuationAuth } : {}),
         })
+        if (result.status === 'delivered' || result.status === 'pending') deps.onWorkerContinuation?.(worker_id)
         return ok(result)
       } catch (error) {
         return mapError(`send_to_worker(${worker_id})`, error)
@@ -339,6 +391,222 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
         return ok(result)
       } catch (error) {
         return mapError(`query_worker(${worker_id})`, error)
+      }
+    },
+  })
+
+  const getWorkerState = defineTool({
+    name: 'get_worker_state',
+    description: '读取 worker 当前任务状态和主线化身状态。用于判断是否在运行、等待输入或已经结束，不读取终端。',
+    inputSchema: {
+      type: 'object',
+      properties: { worker_id: { type: 'string', description: '目标 worker id' } },
+      required: ['worker_id'],
+    },
+    isReadOnly: true,
+    call: async (input): Promise<ToolCallResult> => {
+      const workerId = (input as { worker_id?: string }).worker_id
+      if (!workerId || typeof workerId !== 'string') return invalid('get_worker_state: worker_id 必填且为字符串')
+      try {
+        return ok(await workerState(harness, await authorizeWorker(workerId)))
+      } catch (error) {
+        return mapError(`get_worker_state(${workerId})`, error)
+      }
+    },
+  })
+
+  const getWorkerActivity = defineTool({
+    name: 'get_worker_activity',
+    description:
+      '读取 worker 原生会话解析出的增量活动。缺省 view=assistant，只返回 assistant text；' +
+      '仅在诊断执行细节时传 view=all 以同时查看 tool call/result。after 是上次返回的 opaque cursor；切换 view 时不传旧 after。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        worker_id: { type: 'string', description: '目标 worker id' },
+        incarnation_id: { type: 'string', description: '可选的稳定化身 id，缺省主线化身' },
+        after: { type: 'string', description: '上次返回的 opaque cursor' },
+        view: { type: 'string', enum: ['assistant', 'all'], description: 'assistant 为默认，all 含工具活动' },
+      },
+      required: ['worker_id'],
+    },
+    isReadOnly: true,
+    call: async (input): Promise<ToolCallResult> => {
+      const { worker_id, incarnation_id, after, view } = input as {
+        worker_id?: string
+        incarnation_id?: string
+        after?: string
+        view?: 'assistant' | 'all'
+      }
+      if (!worker_id || typeof worker_id !== 'string') return invalid('get_worker_activity: worker_id 必填且为字符串')
+      if (incarnation_id !== undefined && typeof incarnation_id !== 'string') return invalid('get_worker_activity: incarnation_id 必须是字符串')
+      if (after !== undefined && typeof after !== 'string') return invalid('get_worker_activity: after 必须是字符串')
+      if (view !== undefined && view !== 'assistant' && view !== 'all') return invalid('get_worker_activity: view 只能是 assistant 或 all')
+      try {
+        await authorizeWorker(worker_id)
+        if (!deps.readWorkerActivity) throw new Error('worker activity reader is unavailable')
+        const result = await deps.readWorkerActivity({
+          worker_id,
+          ...(incarnation_id !== undefined ? { incarnation_id } : {}),
+          ...(after !== undefined ? { after } : {}),
+          view: view ?? 'assistant',
+        })
+        return ok({ worker_id, view: view ?? 'assistant', ...result })
+      } catch (error) {
+        return mapError(`get_worker_activity(${worker_id})`, error)
+      }
+    },
+  })
+
+  const getWorkerTurn = defineTool({
+    name: 'get_worker_turn',
+    description: '读取 worker 最近一个待处置回合，或按 turn_id 精确读取。回合只表示 worker 已停在一个可处理边界，不等于已经向人类交付。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        worker_id: { type: 'string', description: '目标 worker id' },
+        turn_id: { type: 'string', description: '可选的具体回合 id' },
+      },
+      required: ['worker_id'],
+    },
+    isReadOnly: true,
+    call: async (input): Promise<ToolCallResult> => {
+      const { worker_id, turn_id } = input as { worker_id?: string; turn_id?: string }
+      if (!worker_id || typeof worker_id !== 'string') return invalid('get_worker_turn: worker_id 必填且为字符串')
+      if (turn_id !== undefined && typeof turn_id !== 'string') return invalid('get_worker_turn: turn_id 必须是字符串')
+      try {
+        await authorizeWorker(worker_id)
+        const turn = await harness.getWorkerTurn(worker_id, turn_id)
+        return ok({
+          worker_id,
+          turn: turn ?? null,
+          activities: turn
+            ? projectWorkerActivity(await harness.getWorkerTurnActivities(turn), 'all', {
+                worker_id,
+                incarnation_id: turn.incarnation_id,
+              })
+            : [],
+        })
+      } catch (error) {
+        return mapError(`get_worker_turn(${worker_id})`, error)
+      }
+    },
+  })
+
+  const requestWorkerInterrupt = defineTool({
+    name: 'request_worker_interrupt',
+    description: '请求中断 worker 当前主线回合。返回持久化 control operation；请求被接受不等于已经中断，需以 operation status 和后续事件为准。',
+    inputSchema: {
+      type: 'object',
+      properties: { worker_id: { type: 'string', description: '目标 worker id' } },
+      required: ['worker_id'],
+    },
+    isReadOnly: false,
+    call: async (input): Promise<ToolCallResult> => {
+      const workerId = (input as { worker_id?: string }).worker_id
+      if (!workerId || typeof workerId !== 'string') return invalid('request_worker_interrupt: worker_id 必填且为字符串')
+      try {
+        await authorizeWorker(workerId)
+        return ok({ operation: await harness.requestWorkerInterrupt(workerId) })
+      } catch (error) {
+        return mapError(`request_worker_interrupt(${workerId})`, error)
+      }
+    },
+  })
+
+  const requestWorkerStop = defineTool({
+    name: 'request_worker_stop',
+    description: '请求停止 worker 主线、已登记 fork 与 Harness 可核验的 worker-owned 执行。返回持久化 control operation；只有核验成功后任务才会转为 cancelled，无法证明完整停止时状态为 unknown。',
+    inputSchema: {
+      type: 'object',
+      properties: { worker_id: { type: 'string', description: '目标 worker id' } },
+      required: ['worker_id'],
+    },
+    isReadOnly: false,
+    call: async (input): Promise<ToolCallResult> => {
+      const workerId = (input as { worker_id?: string }).worker_id
+      if (!workerId || typeof workerId !== 'string') return invalid('request_worker_stop: worker_id 必填且为字符串')
+      try {
+        await authorizeWorker(workerId)
+        return ok({ operation: await harness.requestWorkerStop(workerId) })
+      } catch (error) {
+        return mapError(`request_worker_stop(${workerId})`, error)
+      }
+    },
+  })
+
+  const respondToWorkerUi = defineTool({
+    name: 'respond_to_worker_ui',
+    description: '对未知 worker UI 的一次性快照作答。结合状态和原生会话判断；只有需要诊断未知界面时才读取终端。只能选择 interaction_required 事件中给出的 action_id；文本 action 才传 text。snapshot_id 过期、已使用或化身变化都会被拒绝。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        worker_id: { type: 'string', description: '目标 worker id' },
+        snapshot_id: { type: 'string', description: 'interaction_required 事件返回的快照 id' },
+        action_id: { type: 'string', description: 'interaction_required 的 available_actions 中一个 action_id' },
+        text: { type: 'string', description: '仅 text action 需要的明确文本回答' },
+      },
+      required: ['worker_id', 'snapshot_id', 'action_id'],
+    },
+    isReadOnly: false,
+    call: async (input): Promise<ToolCallResult> => {
+      const { worker_id, snapshot_id, action_id, text } = input as { worker_id?: string; snapshot_id?: string; action_id?: string; text?: string }
+      if (!worker_id || typeof worker_id !== 'string') return invalid('respond_to_worker_ui: worker_id 必填且为字符串')
+      if (!snapshot_id || typeof snapshot_id !== 'string') return invalid('respond_to_worker_ui: snapshot_id 必填且为字符串')
+      if (!action_id || typeof action_id !== 'string') return invalid('respond_to_worker_ui: action_id 必填且为字符串')
+      if (text !== undefined && typeof text !== 'string') return invalid('respond_to_worker_ui: text 必须是字符串')
+      try {
+        await authorizeWorker(worker_id)
+        return ok(await harness.respondToWorkerUi(worker_id, snapshot_id, action_id, text))
+      } catch (error) {
+        return mapError(`respond_to_worker_ui(${worker_id})`, error)
+      }
+    },
+  })
+
+  const resolveWorkerTurn = defineTool({
+    name: 'resolve_worker_turn',
+    description:
+      '标记一个已检查的 worker 回合如何处置。reported 或 asked_human 必须已向该 worker 的 report_to 成功发送；' +
+      'continued 必须已实际续办；suppressed 必须写明原因。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        worker_id: { type: 'string', description: '目标 worker id' },
+        turn_id: { type: 'string', description: 'get_worker_turn 返回的回合 id' },
+        resolution: { type: 'string', enum: ['continued', 'reported', 'asked_human', 'suppressed'], description: '本回合的处置结果' },
+        reason: { type: 'string', description: 'suppressed 时必填的审计原因' },
+      },
+      required: ['worker_id', 'turn_id', 'resolution'],
+    },
+    isReadOnly: false,
+    call: async (input): Promise<ToolCallResult> => {
+      const { worker_id, turn_id, resolution, reason } = input as {
+        worker_id?: string
+        turn_id?: string
+        resolution?: WorkerTurnResolution
+        reason?: string
+      }
+      if (!worker_id || typeof worker_id !== 'string') return invalid('resolve_worker_turn: worker_id 必填且为字符串')
+      if (!turn_id || typeof turn_id !== 'string') return invalid('resolve_worker_turn: turn_id 必填且为字符串')
+      if (resolution !== 'continued' && resolution !== 'reported' && resolution !== 'asked_human' && resolution !== 'suppressed') {
+        return invalid('resolve_worker_turn: resolution 只能是 continued、reported、asked_human 或 suppressed')
+      }
+      if (reason !== undefined && typeof reason !== 'string') return invalid('resolve_worker_turn: reason 必须是字符串')
+      try {
+        const worker = await authorizeWorker(worker_id)
+        if ((resolution === 'reported' || resolution === 'asked_human') && !deps.hasSuccessfulSendMessageTo?.(worker.report_to)) {
+          throw new Error('本 Manager 回合尚未向该 worker 的 report_to 成功调用 send_message，不能把 worker turn 标记为已交付')
+        }
+        if (resolution === 'continued' && !deps.hasContinuedWorker?.(worker_id)) {
+          throw new Error('本 Manager 回合尚未对该 worker 执行实际续办动作，不能标记为 continued')
+        }
+        if (resolution === 'suppressed' && !reason?.trim()) {
+          throw new Error('suppressed 必须提供非空 reason')
+        }
+        return ok({ worker_id, turn: await harness.resolveWorkerTurn(worker_id, turn_id, resolution, reason?.trim()) })
+      } catch (error) {
+        return mapError(`resolve_worker_turn(${worker_id})`, error)
       }
     },
   })
@@ -564,39 +832,17 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     },
   }) : undefined
 
-  // --- kill_worker(同步:终止当前化身,幂等) ---
-  const killWorker = defineTool({
-    name: 'kill_worker',
-    description:
-      '终止 worker 当前主线化身,task 状态转为 cancelled。对已是终态的 worker 幂等(不重复' +
-      '操作、不报错)。reason 可选,会记入事件留痕。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        worker_id: { type: 'string', description: '目标 worker id' },
-        reason: { type: 'string', description: '终止原因,可选' },
-      },
-      required: ['worker_id'],
-    },
-    isReadOnly: false,
-    call: async (input): Promise<ToolCallResult> => {
-      const { worker_id, reason } = input as { worker_id?: string; reason?: string }
-      if (!worker_id || typeof worker_id !== 'string') return invalid('kill_worker: worker_id 必填且为字符串')
-
-      try {
-        await authorizeWorker(worker_id)
-        await harness.killWorker(worker_id, reason)
-        return ok({ status: 'killed', worker_id })
-      } catch (error) {
-        return mapError(`kill_worker(${worker_id})`, error)
-      }
-    },
-  })
-
   return [
     spawnWorker,
     sendToWorker,
     queryWorker,
+    getWorkerState,
+    getWorkerActivity,
+    getWorkerTurn,
+    requestWorkerInterrupt,
+    requestWorkerStop,
+    respondToWorkerUi,
+    resolveWorkerTurn,
     getWorkerTerminal,
     listWorkers,
     getWorkerDetail,
@@ -604,6 +850,5 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     setWorkerPeriodicReport,
     clearWorkerPeriodicReport,
     ...(listAllWorkers ? [listAllWorkers] : []),
-    killWorker,
   ]
 }

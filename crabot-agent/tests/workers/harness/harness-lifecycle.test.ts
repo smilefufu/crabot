@@ -5,6 +5,7 @@ import { join } from 'path'
 import { WorkerHarness, WorkerNotFoundError, TaskCancelledError, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
+import { NativeActivityStore } from '../../../src/workers/harness/native-activity-store'
 import { } from '../../../src/workers/harness/ledger-types'
 import { WorkerEventLog, type HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { QueryReceiptStore } from '../../../src/workers/harness/query-receipt-store'
@@ -23,7 +24,9 @@ import type {
   AdapterCapabilities,
   InitialInputResult,
   ForkOptions,
+  NormalizedTraceEvent,
   SendInputOptions,
+  WorkerUiResponse,
 } from '../../../src/workers/types'
 
 // ---- FakeAdapter:实现 WorkerAdapter 契约的可编程桩,不碰 tmux/LLM ----
@@ -36,6 +39,11 @@ function terminal(text: string) {
   return { kind: 'live_terminal' as const, text, captured_at: '2026-08-19T00:00:00.000Z' }
 }
 
+const UI_ACTIONS = [
+  { action_id: 'confirm', kind: 'keys' as const, keys: ['Enter'] as const },
+  { action_id: 'cancel', kind: 'keys' as const, keys: ['Escape'] as const },
+]
+
 interface FakeAdapterOpts {
   readonly implId?: WorkerImplId
   readonly caps?: Partial<AdapterCapabilities>
@@ -47,6 +55,7 @@ interface FakeAdapterOpts {
   readonly acceptedExitReport?: StateChangeReport
   readonly updatedSessionRef?: string
   readonly spawnInitialInput?: InitialInputResult
+  readonly nativeTrace?: ReadonlyArray<NormalizedTraceEvent>
   /** P4 Task 4 第四轮:严格复刻 ClaudeCodeAdapter.fork()(adapter.ts:452-460)的调用顺序——
    * 在 `return handle` 之前就把化身转到 exited 并**同步**调用 onStateChange。用于回归
    * "fork 落地即已终态"这条竞态(见下面 describe 块)。 */
@@ -59,8 +68,10 @@ class FakeAdapter implements WorkerAdapter {
   readonly spawnCalls: SpawnSpec[] = []
   readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: SendInputOptions }> = []
   readonly killCalls: IncarnationHandle[] = []
+  readonly interruptCalls: IncarnationHandle[] = []
   readonly forkCalls: Array<{ prev: IncarnationRef; forkInput: string; opts: ForkOptions }> = []
   readonly readTerminalCalls: IncarnationHandle[] = []
+  readonly uiResponses: Array<{ h: IncarnationHandle; response: WorkerUiResponse }> = []
   private readonly states = new Map<string, WorkerContractState>()
   private acceptedExitReport?: StateChangeReport
   private updatedSessionRef?: string
@@ -138,6 +149,10 @@ class FakeAdapter implements WorkerAdapter {
     }
   }
 
+  async respondToUi(h: IncarnationHandle, response: WorkerUiResponse): Promise<void> {
+    this.uiResponses.push({ h, response })
+  }
+
   takeUpdatedSessionRef(): string | undefined {
     const sessionRef = this.updatedSessionRef
     this.updatedSessionRef = undefined
@@ -163,9 +178,27 @@ class FakeAdapter implements WorkerAdapter {
     return { kind: 'unknown' as const, next_cursor: cursor ?? { offset: 0 } }
   }
 
+  async readTrace(_h: IncarnationHandle, cursor?: { offset: number }) {
+    const start = cursor?.offset ?? 0
+    const trace = this.opts.nativeTrace ?? []
+    return {
+      events: trace.slice(start).map((event, index) => ({ ...event, source_offset: start + index })),
+      nextCursor: { offset: trace.length },
+    }
+  }
+
   async kill(h: IncarnationHandle): Promise<void> {
     this.killCalls.push(h)
     this.states.set(handleKey(h), 'exited')
+  }
+
+  async interrupt(h: IncarnationHandle): Promise<void> {
+    this.interruptCalls.push(h)
+    this.states.set(handleKey(h), 'idle')
+  }
+
+  async stop(h: IncarnationHandle): Promise<void> {
+    await this.kill(h)
   }
 
   capabilities(): AdapterCapabilities {
@@ -190,6 +223,11 @@ class FakeAdapter implements WorkerAdapter {
     this.opts.onStateChange?.(h, state, {
       ...(lastText !== undefined ? { lastText } : {}),
       ...(state === 'exited' ? { endReason: endReason ?? 'completed' } : {}),
+      ...(state === 'idle'
+        ? { completionSource: this.implId === 'claude-code' ? 'claude_stop' as const : this.implId === 'codex' ? 'codex_turn_complete' as const : 'builtin_end_turn' as const }
+        : state === 'exited' && (endReason ?? 'completed') === 'completed'
+          ? { completionSource: this.implId === 'claude-code' ? 'claude_stop' as const : this.implId === 'codex' ? 'codex_turn_complete' as const : 'builtin_end_turn' as const }
+          : {}),
     })
   }
 }
@@ -298,6 +336,25 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(listed.map((w) => w.worker_id)).toContain(worker.worker_id)
   })
 
+  it('为新化身分配 Harness-owned identity，并只读快照 workspace 的 AGENTS.md', async () => {
+    const workspace = join(dataDir, 'user-workspace')
+    const agents = '# Workspace rules\nDo not create HANDOFF.md.\n'
+    await fs.mkdir(workspace, { recursive: true })
+    await fs.writeFile(join(workspace, 'AGENTS.md'), agents)
+    const { harness, workersDir } = await makeHarness()
+
+    const worker = await harness.spawnWorker(spawnParams({ workspace }))
+    const incarnation = worker.incarnations[0]
+
+    expect(incarnation.incarnation_id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(incarnation.workspace_instructions).toMatchObject({
+      source: 'agents_md',
+      artifact_id: `workspace-instructions/${worker.worker_id}/${incarnation.incarnation_id}`,
+    })
+    expect(await fs.readFile(join(workersDir, worker.worker_id, 'workspace-instructions', `${incarnation.incarnation_id}.md`), 'utf-8')).toBe(agents)
+    expect(await fs.readFile(join(workspace, 'AGENTS.md'), 'utf-8')).toBe(agents)
+  })
+
   it('首次 provision 前落 harness context，并把同一固定权限快照交给 capability provider', async () => {
     const principalPermissions = {
       tool_access: { memory: true, messaging: false, task: false, mcp_skill: false, file_io: true, browser: true, shell: true, remote_exec: false, desktop: false },
@@ -379,6 +436,75 @@ describe('WorkerHarness.spawnWorker', () => {
       kind: 'initial_input_settled',
       reason: 'completed',
     })
+  })
+
+  it('CLI首投遇到未知界面时创建短期快照，只允许 Manager 应答一次', async () => {
+    const { harness, fake, workersDir } = await makeHarness({
+      implId: 'claude-code',
+      spawnInitialInput: {
+        control_state: 'waiting_action',
+        disposition: 'not_pasted',
+        report: {
+          waitReason: 'interaction_required',
+          terminal: terminal('Choose a login method'),
+          ui: { fingerprint: 'login-method:1', actions: UI_ACTIONS },
+          notification: { type: 'terminal_interaction', title: 'Login required' },
+        },
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')?.detail
+    const snapshotId = detail?.snapshot_id
+
+    expect(detail).toMatchObject({
+      kind: 'interaction_required',
+      snapshot_id: expect.any(String),
+      snapshot_expires_at: expect.any(String),
+      available_actions: UI_ACTIONS,
+    })
+    expect(JSON.stringify(detail)).not.toContain('Choose a login method')
+
+    await expect(harness.respondToWorkerUi(worker.worker_id, snapshotId as string, 'unknown')).rejects.toThrow(
+      'worker UI action is not available for this snapshot',
+    )
+    await expect(harness.respondToWorkerUi(worker.worker_id, snapshotId as string, 'confirm')).resolves.toMatchObject({
+      status: 'submitted',
+      snapshot_id: snapshotId,
+      operation: { kind: 'ui_response', status: 'succeeded' },
+    })
+    expect(fake.uiResponses).toEqual([{
+      h: expect.objectContaining({ worker_id: worker.worker_id, impl: 'claude-code' }),
+      response: { kind: 'keys', keys: ['Enter'] },
+    }])
+    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'control-operations.json'), 'utf8'))).toMatchObject({
+      operations: [expect.objectContaining({ kind: 'ui_response', status: 'succeeded' })],
+    })
+    await expect(harness.respondToWorkerUi(worker.worker_id, snapshotId as string, 'confirm')).rejects.toThrow(
+      'worker UI snapshot is consumed',
+    )
+  })
+
+  it('过期 UI 快照被拒绝，且不会发送任何按键', async () => {
+    const { harness, fake } = await makeHarness({
+      implId: 'claude-code',
+      spawnInitialInput: {
+        control_state: 'waiting_action',
+        disposition: 'not_pasted',
+        report: {
+          waitReason: 'interaction_required',
+          ui: { fingerprint: 'expired:1', actions: UI_ACTIONS },
+          notification: { type: 'terminal_interaction' },
+        },
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')?.detail
+
+    nowValue += 11 * 60_000
+    await expect(harness.respondToWorkerUi(worker.worker_id, detail?.snapshot_id as string, 'confirm')).rejects.toThrow(
+      'worker UI snapshot is stale',
+    )
+    expect(fake.uiResponses).toEqual([])
   })
 
   it('CLI首投not_pasted先落waiting_action，再由raw解除hold并按FIFO只补投一次原prompt', async () => {
@@ -501,6 +627,120 @@ describe('WorkerHarness.spawnWorker', () => {
 })
 
 describe('WorkerHarness.handleStateChange', () => {
+  it('assistant 原生 trace 只创建一条可重放 activity_available', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, workersDir } = await makeHarness({
+      nativeTrace: [
+        { ts: '2026-08-20T00:00:00.000Z', kind: 'tool_call', role: 'assistant', summary: 'read file' },
+        { ts: '2026-08-20T00:00:01.000Z', kind: 'message', role: 'assistant', summary: '已读取配置' },
+      ],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => route.mock.calls.length === 1)
+    harness.handleNativeActivity(handle)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+
+    expect(route).toHaveBeenCalledTimes(1)
+    expect(route.mock.calls[0][1]).toMatchObject({ kind: 'activity_available', detail: { from_cursor: '0', through_cursor: '2' } })
+    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))).toMatchObject({
+      cursors: [{ incarnation_id: incarnation.incarnation_id, offset: 2 }],
+      notifications: [{ consumed_at: expect.any(String) }],
+    })
+  })
+
+  it('tool-only 原生 trace 只推进 high-water，不唤醒 Manager', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, workersDir } = await makeHarness({
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'tool_call', role: 'assistant', summary: 'read file' }],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+
+    harness.handleNativeActivity({
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin',
+      session_ref: incarnation.session_ref,
+    })
+    await waitUntil(async () => {
+      try {
+        const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+        return state.cursors[0]?.offset === 1
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+        throw error
+      }
+    })
+
+    expect(route).not.toHaveBeenCalled()
+  })
+
+  it('未消费的 activity 和 completed turn 通知会从持久记录重放', async () => {
+    let consume = false
+    const route = vi.fn(async () => ({ consumed: consume }))
+    const { harness } = await makeHarness({
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '待交付' }],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => route.mock.calls.length === 1)
+    harness.handleStateChange(handle, 'idle', { completionSource: 'builtin_end_turn' })
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id)) !== undefined)
+    consume = true
+    await harness.reconcileNativeActivityOnStartup()
+
+    expect(route.mock.calls.map((call) => call[1].kind)).toContain('activity_available')
+    expect(route.mock.calls.map((call) => call[1].kind)).toContain('turn_completed')
+    expect((await harness.getWorkerTurn(worker.worker_id))?.disposition).toEqual({ status: 'pending' })
+  })
+
+  it('activity 通知落盘失败不阻断已确认的回合和状态事件', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const activityStore = (harness as unknown as { nativeActivityStore: NativeActivityStore }).nativeActivityStore
+    const persistError = vi.spyOn(activityStore, 'record').mockRejectedValueOnce(new Error('activity disk unavailable'))
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    events.length = 0
+
+    fake.emitStateChange(
+      { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` },
+      'idle',
+    )
+    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
+
+    expect((await harness.getWorkerTurn(worker.worker_id))?.disposition).toEqual({ status: 'pending' })
+    expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
+      to: 'idle',
+      turn_id: expect.any(String),
+      turn_pending: true,
+    })
+    expect(persistError).toHaveBeenCalledOnce()
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining('failed to persist completed-turn notification'),
+      expect.any(Error),
+    )
+  })
+
   it('状态回调驱动台账 task.status 与化身 state,并经 onEvent 外发', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
@@ -511,10 +751,7 @@ describe('WorkerHarness.handleStateChange', () => {
     // handleStateChange 签名对齐 adapter 的同步回调(h, state) => void,内部是 fire-and-forget
     // 的异步台账更新——用轮询等待收敛(与 tests/workers/contract-suite.ts 的 waitForState
     // 同一套路,不是"睡一下猜时序",是"有界轮询直到可观察结果达到预期,超时即失败")。
-    await waitUntil(async () => {
-      const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-      return w.task.status === 'waiting_input'
-    })
+    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('waiting_input')
@@ -522,7 +759,7 @@ describe('WorkerHarness.handleStateChange', () => {
 
     const stateEvents = events.filter((e) => e.kind === 'state_changed')
     expect(stateEvents).toHaveLength(1)
-    expect(stateEvents[0].detail).toEqual({ to: 'idle' })
+    expect(stateEvents[0].detail).toMatchObject({ to: 'idle', turn_pending: true, turn_id: expect.any(String) })
 
     // 化身自然结束(非 kill)→ completed
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
@@ -577,12 +814,13 @@ describe('WorkerHarness.handleStateChange', () => {
     harness.handleStateChange(h, 'idle', {
       waitReason: 'interaction_required',
       terminal: terminal('AskUserQuestion\n  Yes\n  No'),
+      ui: { fingerprint: 'question:yes-no', actions: UI_ACTIONS },
       notification: { type: 'permission_prompt', message: 'Choose', title: 'Question' },
     })
     await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
 
     const detail = events.find((event) => event.kind === 'state_changed')?.detail
-    expect(detail).toEqual({
+    expect(detail).toMatchObject({
       to: 'idle',
       kind: 'interaction_required',
       wait_mode: 'action',
@@ -590,9 +828,37 @@ describe('WorkerHarness.handleStateChange', () => {
       notification_type: 'permission_prompt',
       message: 'Choose',
       title: 'Question',
-      text: 'AskUserQuestion\n  Yes\n  No',
     })
+    expect(detail).toMatchObject({ snapshot_id: expect.any(String), available_actions: UI_ACTIONS })
     expect(detail).not.toHaveProperty('notification')
+  })
+
+  it('主线 idle/exited 各创建一个待处置回合，重复状态和 notification-only 不重复创建', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+
+    fake.emitStateChange(handle, 'idle', '第一轮结束')
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id))?.completion_source === 'builtin_end_turn')
+    const idleTurn = await harness.getWorkerTurn(worker.worker_id)
+
+    fake.emitStateChange(handle, 'idle', '重复通知')
+    await harness.sendToWorker(worker.worker_id, '作为同锁屏障')
+    expect((await harness.getWorkerTurn(worker.worker_id))?.turn_id).toBe(idleTurn?.turn_id)
+
+    fake.emitStateChange(handle, 'exited', undefined, 'completed')
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id))?.turn_id !== idleTurn?.turn_id)
+    const exitedTurn = await harness.getWorkerTurn(worker.worker_id)
+    expect(exitedTurn?.turn_id).not.toBe(idleTurn?.turn_id)
+
+    const notificationWorker = await harness.spawnWorker(spawnParams())
+    const notificationHandle = { worker_id: notificationWorker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${notificationWorker.worker_id}#1` }
+    harness.handleStateChange(notificationHandle, 'idle', {
+      waitReason: 'interaction_required',
+      notification: { type: 'permission_prompt', message: '请选择' },
+    })
+    await waitUntil(() => events.some((event) => event.worker_id === notificationWorker.worker_id && event.kind === 'state_changed'))
+    expect(await harness.getWorkerTurn(notificationWorker.worker_id)).toBeUndefined()
   })
 
   // ---- endReason:harness 不再自己猜,一律取 adapter 上报的真值 ----
@@ -688,7 +954,12 @@ describe('WorkerHarness.handleStateChange', () => {
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
-    expect(ev.detail).toEqual({ to: 'idle', text: '调研完成,结论是 X 方案可行。' })
+    expect(ev.detail).toMatchObject({
+      to: 'idle',
+      text: '调研完成,结论是 X 方案可行。',
+      turn_id: expect.any(String),
+      turn_pending: true,
+    })
   })
 
   it('过长的 text 被截断并附标记(周期性进 manager 上下文,必须有上限)', async () => {
@@ -721,87 +992,36 @@ describe('WorkerHarness.handleStateChange', () => {
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
     harness.handleStateChange(h, 'exited', {
       endReason: 'completed',
+      completionSource: 'builtin_end_turn',
       lastText: '  已经全部跑完了。  ',
       summary: '  盘点完成:三处配置漂移已修正,另有一处需人工确认。  ',
     })
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
-    expect(ev.detail).toEqual({
+    expect(ev.detail).toMatchObject({
       to: 'exited',
       text: '已经全部跑完了。',
       summary: '盘点完成:三处配置漂移已修正,另有一处需人工确认。',
+      turn_id: expect.any(String),
+      turn_pending: true,
     })
   })
 
-  it('CLI 启动期就绪握手超时上报的终端画面进 detail.text —— manager 醒来就拿到现场', async () => {
-    // protocol-agent-v3 §5.5「检测到无法识别的交互界面:暂扣 + 唤醒 manager(附界面内容)」。
-    // 零协议改动:复用既有的 state_changed + detail.text 这条路,不新增事件类型也不新增状态。
+  it('CLI 终端画面不随状态事件自动转发，manager 需要时再显式读取', async () => {
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
-    const tail = '[crabot] claude-code 启动后 60s 内未就绪\n---\nNew MCP server found in this project: arXivPaper'
+    const terminalText = '[crabot] claude-code 启动后 60s 内未就绪\n---\nNew MCP server found in this project: arXivPaper'
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { terminal: terminal(tail) })
+    harness.handleStateChange(h, 'idle', { terminal: terminal(terminalText), waitReason: 'interaction_required' })
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
-    expect(ev.detail).toEqual({ to: 'idle', text: tail })
-  })
-
-  it('终端画面同样受 text 的上限约束(不能整屏灌进 manager 上下文)', async () => {
-    const { harness } = await makeHarness()
-    const worker = await harness.spawnWorker(spawnParams())
-    events.length = 0
-
-    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { terminal: terminal('啊'.repeat(2600)) })
-
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
-    const text = (ev.detail as { text: string }).text
-    expect(text).not.toContain('get_worker_terminal')
-    expect(text).toContain('共 2600 字符')
-    expect(text.length).toBeLessThan(2600) // 真的截了,不是原样透传
-  })
-
-  it('终端画面超长时保**尾部**——拦住启动的模态框在画面末尾', async () => {
-    // 诊断"它现在卡在哪"永远该看最新的那一屏。
-    // 把这里改回 trimmed.slice(0, maxChars) 这条用例就挂:开头那 2000 个"啊"会顶掉模态框。
-    const { harness } = await makeHarness()
-    const worker = await harness.spawnWorker(spawnParams())
-    events.length = 0
-
-    const modal = '\nNew MCP server found in this project: arXivPaper\n  1. Use this MCP server\n  2. No, exit'
-    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { terminal: terminal('啊'.repeat(2600) + modal) })
-
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
-    const text = (ev.detail as { text: string }).text
-    expect(text.endsWith(modal.trim())).toBe(true) // 尾部(模态框那段)一字不缺
-    expect(text.startsWith('啊')).toBe(false) // 开头被截,截断标记顶到最前面
-    expect(text).not.toContain('get_worker_terminal')
-  })
-
-  it('终端画面超长时保留画面末尾的可操作提示', async () => {
-    const { harness } = await makeHarness()
-    const worker = await harness.spawnWorker(spawnParams())
-    events.length = 0
-
-    // 2600 字符的终端画面超过 2000 字符并不罕见。
-    const terminalText = '啊'.repeat(2600) + '\nPress Enter to continue'
-    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { terminal: terminal(terminalText) })
-
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
-    const text = (ev.detail as { text: string }).text
-    expect(text.length).toBeLessThan(terminalText.length) // 真的截了
-    expect(text).toContain('Press Enter to continue')
-    expect(text).toContain('啊') // 屏幕内容保住的是最新的那一段
-    expect(text).not.toContain('get_worker_terminal')
+    expect(ev.detail).toMatchObject({ to: 'idle', wait_reason: 'interaction_required' })
+    expect(ev.detail).not.toHaveProperty('text')
+    expect(JSON.stringify(ev.detail)).not.toContain(terminalText)
   })
 
   it('lastText 与 summary 仍然保**头部**——发言开门见山给结论,截断方向不能跟终端画面混成一个', async () => {
@@ -833,7 +1053,7 @@ describe('WorkerHarness.handleStateChange', () => {
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
-    expect(ev.detail).toEqual({ to: 'exited' })
+    expect(ev.detail).toMatchObject({ to: 'exited' })
   })
 
   it('过长的 summary 按更宽的一次性上限截断，且不指向已移除的输出读取接口', async () => {
@@ -865,7 +1085,7 @@ describe('WorkerHarness.handleStateChange', () => {
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(h, 'idle')
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    expect(events.filter((e) => e.kind === 'state_changed')[0].detail).toEqual({ to: 'idle' })
+    expect(events.filter((e) => e.kind === 'state_changed')[0].detail).toMatchObject({ to: 'idle', turn_pending: true })
 
     // 纯空白同样折成"没有正文",不塞空字段。
     events.length = 0
@@ -1632,16 +1852,16 @@ describe('WorkerHarness.killWorker', () => {
     await harness.killWorker(worker.worker_id, '用户要求终止')
 
     expect(fake.killCalls).toHaveLength(1)
-    expect(fake.killCalls[0]).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
+    expect(fake.killCalls[0]).toMatchObject({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1`, incarnation_id: expect.any(String) })
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('cancelled')
     expect(w.incarnations[0].state).toBe('exited')
     expect(w.incarnations[0].ended_reason).toBe('killed')
 
-    const killedEvents = events.filter((e) => e.kind === 'killed')
-    expect(killedEvents).toHaveLength(1)
-    expect(killedEvents[0].detail).toEqual({ reason: '用户要求终止' })
+    const stopped = events.filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
+    expect(stopped).toHaveLength(1)
+    expect(stopped[0].task_status).toBe('cancelled')
   })
 
   it('幂等:对已 cancelled 的 worker 再次 kill 不报错、不重复调用 adapter.kill、不重复发事件', async () => {
@@ -1858,7 +2078,7 @@ describe('WorkerHarness.queryWorker', () => {
         { caps: { fork: true } },
         {
           admitWorkerConnection: async () => {
-            nowValue += 28_000
+            nowValue += 27_000
             return { env: {}, dispose: async () => {} }
           },
         },
@@ -1880,7 +2100,7 @@ describe('WorkerHarness.queryWorker', () => {
         signalRejected()
       })
       await forkStarted
-      await vi.advanceTimersByTimeAsync(1_100)
+      await vi.advanceTimersByTimeAsync(2_100)
       await rejected
 
       expect(rejection).toMatchObject({
@@ -2004,7 +2224,7 @@ describe('WorkerHarness.queryWorker', () => {
     })
     const [persisted] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(persisted.incarnations).toHaveLength(2)
-    expect(persisted.incarnations[1]).toMatchObject({ state: 'running', forked_from: 1 })
+    expect(persisted.incarnations[1]).toMatchObject({ state: 'running', forked_from: persisted.incarnations[0].incarnation_id })
   })
 
   it('fork 已建立但 ledger 提交失败时尽力 kill，并以 unknown 返回 fork_record_failed', async () => {
@@ -2076,7 +2296,7 @@ describe('WorkerHarness.queryWorker', () => {
 
     // forked_from 标记它不在主线化身链上(protocol-agent-v3 §3);session_ref 取
     // adapter.fork 返回的 handle 自己的引用,不是从主线(seq=1)照抄的(§6.1)。
-    expect(w.incarnations[1].forked_from).toBe(1)
+    expect(w.incarnations[1].forked_from).toBe(w.incarnations[0].incarnation_id)
     expect(w.incarnations[1].session_ref).not.toBe(w.incarnations[0].session_ref)
 
     const onDisk = await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll()
@@ -2361,7 +2581,7 @@ describe('WorkerHarness.queryWorker — adapter.fork 挪出锁(P4 Task 4 review 
     // fork 化身仍然被追加进化身链,forked_from 指向发起侧问那一刻的源 seq(1),不受主线
     // 后续变化影响。
     const forkEntry = w.incarnations.find((i) => i.seq === 2)!
-    expect(forkEntry.forked_from).toBe(1)
+    expect(forkEntry.forked_from).toBe(mainEntry.incarnation_id)
     expect(forkEntry.state).toBe('running')
 
     const stateEvents = (await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll())
@@ -2443,17 +2663,17 @@ describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)
     expect(fake.readTerminalCalls[0].seq).toBe(1)
 
     await harness.killWorker(worker.worker_id, '测试终止')
-    expect(fake.killCalls).toHaveLength(1)
-    expect(fake.killCalls[0].seq).toBe(1)
+    expect(fake.killCalls).toHaveLength(2)
+    expect(fake.killCalls.map((call) => call.seq).sort()).toEqual([1, 2])
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('cancelled') // 主线被正确终结,不是台账显示 fork 被 kill 而主线孤儿
     const mainEntry = w.incarnations.find((i) => i.seq === 1)!
     expect(mainEntry.state).toBe('exited')
     expect(mainEntry.ended_reason).toBe('killed')
-    // fork 化身条目不受主线 kill 动作影响(kill 只调用了 adapter.kill 一次,且 target 是 seq=1)。
+    // stop 也会停掉登记的 fork，避免留下与已取消主任务脱节的执行分支。
     const forkEntry = w.incarnations.find((i) => i.seq === 2)!
-    expect(forkEntry.state).toBe('running')
+    expect(forkEntry.state).toBe('exited')
   })
 
   it('processStateChange:fork 化身(seq=2)自己的状态变化只更新它自己的化身条目,不推进主线 task.status', async () => {
@@ -2622,16 +2842,16 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     expect(events.filter((e) => e.kind === 'state_changed')[1].task_status).toBe('completed')
   })
 
-  it('迁移点:killWorker → killed 带 cancelled', async () => {
+  it('迁移点:verified stop → state_changed 带 cancelled', async () => {
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
     await harness.killWorker(worker.worker_id, '用户要求终止')
 
-    const killed = events.filter((e) => e.kind === 'killed')
-    expect(killed).toHaveLength(1)
-    expect(killed[0].task_status).toBe('cancelled')
+    const stopped = events.filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
+    expect(stopped).toHaveLength(1)
+    expect(stopped[0].task_status).toBe('cancelled')
   })
 
   it('非迁移点:input_sent 不带 task_status(投递不动 task 状态)', async () => {
@@ -2646,7 +2866,7 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     expect(inputSent[0].task_status).toBeUndefined()
   })
 
-  it('非迁移点:kill 后 drain 出的 dead_letter 不带 task_status(kill 的迁移由 killed 事件承载)', async () => {
+  it('非迁移点:stop 后 drain 出的 dead_letter 不带 task_status(迁移由 stop_verified 事件承载)', async () => {
     const { harness } = await makeHarness({
       // 让第一条卡在投递里,第二条就会留在队列上等 killWorker 去 drain
       sendInputBehavior: () => new Promise((resolve) => setTimeout(resolve, 30)),
@@ -2663,8 +2883,8 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     const deadLetters = events.filter((e) => e.kind === 'state_changed' && e.detail?.kind === 'dead_letter')
     expect(deadLetters.length).toBeGreaterThan(0)
     for (const e of deadLetters) expect(e.task_status).toBeUndefined()
-    // 同一次 kill 落的 killed 事件才是那次迁移的载体
-    expect(events.filter((e) => e.kind === 'killed')[0].task_status).toBe('cancelled')
+    // 同一次 verified stop 的 state_changed 事件才是那次迁移的载体
+    expect(events.find((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')?.task_status).toBe('cancelled')
   })
 
   it('非迁移点:query_failed 不带 task_status', async () => {

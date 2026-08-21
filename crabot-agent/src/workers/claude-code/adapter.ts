@@ -53,7 +53,7 @@ import {
   classifyClaudeTerminalInteraction,
 } from './input-surface.js'
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
-import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
+import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -73,6 +73,7 @@ import type {
   WorkerContractState,
   Workspace,
   WorkerTerminalView,
+  WorkerUiResponse,
 } from '../types.js'
 import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
@@ -188,6 +189,7 @@ export function eventsFilePath(ws: Workspace): string {
 
 interface Runtime {
   readonly worker_id: string
+  readonly incarnation_id?: string
   readonly seq: number
   readonly dir: string
   readonly workspaceRoot: string
@@ -214,6 +216,7 @@ interface Runtime {
    * runtime 时装上、落终态时摘掉;无头 fork 化身不装(见 startEventWatch)。 */
   stopEventWatch?: () => Promise<void>
   eventWatchDrain?: Promise<void>
+  tracePoll?: ReturnType<typeof setInterval>
   interactionFingerprint?: string
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin 同款语义(P2 review #2)。fork 不受此限制。 */
@@ -289,6 +292,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
        * 且将来接上真实终态信号时只改这里、harness 不用再动。
        */
       readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
+      /** Signals an opportunity to incrementally read native JSONL; never carries terminal output. */
+      readonly onNativeActivity?: (h: IncarnationHandle) => void
       /** 用户级 CLI binary 解析（v1 无 managed install；全局安装忽略）。 */
       readonly resolveUserLevelBinary?: () => Promise<{ binary?: string; global_detected: boolean }>
     },
@@ -400,15 +405,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     await writeSensitiveFileAtomic(join(ws.root, MCP_CONFIG_FILE), renderMcpJson(mcpServers))
 
-    await fs.writeFile(
-      join(ws.root, 'CLAUDE.md'),
-      renderContextMd({
-        workerId: workerIdLabelFromWorkspace(ws),
-        taskTitle: 'Crabot Worker Task',
-        disciplines: '中间产物统一写入工作区内,不要写到工作区之外的路径。',
-      }),
-      'utf-8',
-    )
   }
 
   /** 在全局 ~/.claude.json 预置两类 project 级启动授权:
@@ -545,16 +541,31 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   private async sendRawInput(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
+    return this.sendControlKeys(runtime, h, parseRawControlKeys(text))
+  }
+
+  private async sendControlKeys(runtime: Runtime, h: IncarnationHandle, keys: readonly string[], notify = false): Promise<void> {
     let keysSent = false
     try {
-      const keys = parseRawControlKeys(text)
       const before = await this.capture(runtime)
-      await this.tmux.sendKeys(runtime.sessionName, keys)
+      await this.tmux.sendKeys(runtime.sessionName, [...keys])
       keysSent = true
       const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
-      if (hasClaudeInteraction(snapshot.text)) {
-        const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'interaction_required' }
-        await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, report, false)
+      const interaction = classifyClaudeTerminalInteraction(snapshot)
+      if (interaction.kind !== 'none') {
+        const report: StateChangeReport = {
+          terminal: this.liveTerminal(snapshot),
+          waitReason: 'interaction_required',
+          ...(interaction.kind === 'manager_required' ? { ui: { fingerprint: interaction.fingerprint, actions: interaction.actions } } : {}),
+        }
+        await this.transitionControlState(
+          runtime,
+          h,
+          { kind: 'waiting_action', reason: 'interaction_required' },
+          report,
+          notify,
+          notify && interaction.kind === 'manager_required',
+        )
         throw new CliInputStallError('not_pasted', 'waiting_action', report)
       }
       const primaryProbe = probeClaudeInput(snapshot, 'primary', undefined, false)
@@ -573,7 +584,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       }
       if (primaryProbe === 'empty') {
         runtime.interactionFingerprint = undefined
-        await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
+        await this.transitionControlState(runtime, h, { kind: 'waiting_text' }, { completionSource: 'claude_stop' })
         return
       }
       const reason = runtime.controlState.kind === 'waiting_action'
@@ -590,6 +601,43 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
           runtime.acceptedExitReport = { endReason: reason }
           return
         }
+        throw new WorkerExitedError(h.worker_id, h.seq, reason)
+      }
+      throw error
+    }
+  }
+
+  private async sendUiText(runtime: Runtime, h: IncarnationHandle, text: string, notify = false): Promise<void> {
+    let submitted = false
+    try {
+      const before = await this.capture(runtime)
+      await this.tmux.sendText(runtime.sessionName, text)
+      submitted = true
+      const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
+      const interaction = classifyClaudeTerminalInteraction(snapshot)
+      if (interaction.kind !== 'none') {
+        const report: StateChangeReport = {
+          terminal: this.liveTerminal(snapshot),
+          waitReason: 'interaction_required',
+          ...(interaction.kind === 'manager_required' ? { ui: { fingerprint: interaction.fingerprint, actions: interaction.actions } } : {}),
+        }
+        await this.transitionControlState(
+          runtime,
+          h,
+          { kind: 'waiting_action', reason: 'interaction_required' },
+          report,
+          notify,
+          notify && interaction.kind === 'manager_required',
+        )
+        return
+      }
+      runtime.interactionFingerprint = undefined
+      await this.transitionControlState(runtime, h, { kind: 'running' })
+    } catch (error) {
+      if (!(await this.tmux.isAlive(runtime.sessionName))) {
+        const reason: IncarnationEndReason = submitted ? 'completed' : 'crashed'
+        await this.transitionExited(runtime, h, reason, false)
+        if (submitted) return
         throw new WorkerExitedError(h.worker_id, h.seq, reason)
       }
       throw error
@@ -687,7 +735,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     this.assertActive()
     const seq = 1
     const sessionId = randomUUID()
-    const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'claude-code', session_ref: sessionId }
+    const handle: IncarnationHandle = { worker_id: spec.worker_id, incarnation_id: spec.incarnation_id, seq, impl: 'claude-code', session_ref: sessionId }
     if (this.runtimes.has(instanceKey(handle))) {
       throw new Error(`ClaudeCodeAdapter.spawn: worker_id ${spec.worker_id} already spawned in this process`)
     }
@@ -711,6 +759,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     const runtime: Runtime = {
       worker_id: spec.worker_id,
+      incarnation_id: spec.incarnation_id,
       seq,
       dir,
       workspaceRoot: spec.workspace.root,
@@ -767,7 +816,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string>; incarnation_id?: string }): Promise<IncarnationHandle> {
     this.assertActive()
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
@@ -779,7 +828,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (!prevRuntime) {
       throw new Error(`ClaudeCodeAdapter.resume: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
     }
-    const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: prev.seq, impl: 'claude-code', session_ref: prev.session_ref }
+    const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, incarnation_id: prev.incarnation_id, seq: prev.seq, impl: 'claude-code', session_ref: prev.session_ref }
     const { state: prevState } = await this.syncState(prevRuntime, prevHandle)
     if (prevState !== 'exited') {
       throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} has not exited yet (state=${prevState})`)
@@ -816,7 +865,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
       }
       const seq = await this.nextSeq(prev.worker_id)
-      handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: prev.session_ref }
+      handle = { worker_id: prev.worker_id, incarnation_id: opts?.incarnation_id, seq, impl: 'claude-code', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       // resume 显式重复 --permission-mode auto，不能只依赖 workspace settings。session_ref 是 cc
       // 侧的会话 uuid，沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
@@ -832,6 +881,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const controlEndpoint = await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, env: opts?.connection_env })
       runtime = {
         worker_id: prev.worker_id,
+        incarnation_id: opts?.incarnation_id,
         seq,
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
@@ -918,6 +968,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       forkEventsFile = join(dir, `fork-events-${seq}.jsonl`)
       runtime = {
         worker_id: prev.worker_id,
+        incarnation_id: opts.incarnation_id,
         seq,
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
@@ -997,6 +1048,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         runtime.sessionId = sessionId
         handle = {
           worker_id: prev.worker_id,
+          incarnation_id: opts.incarnation_id,
           seq: runtime.seq,
           impl: 'claude-code',
           session_ref: sessionId,
@@ -1116,6 +1168,23 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       }
       if (result.control_state === 'exited') {
         runtime.acceptedExitReport = result.report ?? { endReason: runtime.ended_reason ?? 'completed' }
+      }
+    })
+  }
+
+  async respondToUi(h: IncarnationHandle, response: WorkerUiResponse): Promise<void> {
+    this.assertActive()
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
+    await this.syncState(runtime, h)
+    await this.getMutex(h.worker_id).run(async () => {
+      if (runtime.controlState.kind !== 'waiting_action') throw new Error('Claude Code UI is no longer waiting for a manager response')
+      try {
+        if (response.kind === 'keys') await this.sendControlKeys(runtime, h, response.keys, true)
+        else await this.sendUiText(runtime, h, response.text, true)
+      } catch (error) {
+        if (error instanceof CliInputStallError) return
+        throw error
       }
     })
   }
@@ -1291,6 +1360,17 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     })
   }
 
+  async interrupt(h: IncarnationHandle): Promise<void> {
+    this.assertActive()
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime || runtime.controlState.kind === 'exited') return
+    await this.tmux.sendKeys(runtime.sessionName, ['C-c'])
+  }
+
+  async stop(h: IncarnationHandle): Promise<void> {
+    await this.kill(h)
+  }
+
   dispose(): Promise<void> {
     if (this.disposePromise) return this.disposePromise
     this.closing = true
@@ -1351,7 +1431,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
   /** Rebuild a CLI runtime from meta plus the deterministic tmux name. The per-worker lock and
    * lock-local map recheck prevent duplicate runtimes/watchers during concurrent first access. */
-  private async ensureRuntime(ref: { worker_id: string; seq: number; session_ref?: string }): Promise<Runtime | undefined> {
+  private async ensureRuntime(ref: { worker_id: string; incarnation_id?: string; seq: number; session_ref?: string }): Promise<Runtime | undefined> {
     const key = instanceKey(ref)
     const existing = this.runtimes.get(key)
     if (existing) return existing
@@ -1382,6 +1462,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       const runtime: Runtime = {
         worker_id: ref.worker_id,
+        incarnation_id: ref.incarnation_id,
         seq: ref.seq,
         dir,
         workspaceRoot,
@@ -1400,10 +1481,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       this.runtimes.set(key, runtime)
       // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视,它之后每一轮 hook
       // 都能继续推状态给 harness。已终态的化身 startEventWatch 自己会短路掉。
-      this.startEventWatch(runtime, { worker_id: ref.worker_id, seq: ref.seq, impl: 'claude-code', session_ref: sessionId })
+      this.startEventWatch(runtime, { worker_id: ref.worker_id, incarnation_id: ref.incarnation_id, seq: ref.seq, impl: 'claude-code', session_ref: sessionId })
       if (alive) {
         await this.inspectTerminalInteractionLocked(runtime, {
           worker_id: ref.worker_id,
+          incarnation_id: ref.incarnation_id,
           seq: ref.seq,
           impl: 'claude-code',
           session_ref: sessionId,
@@ -1464,6 +1546,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     state: CliControlState,
     report?: StateChangeReport,
     notify = true,
+    forceNotify = false,
   ): Promise<void> {
     const external = contractState(state)
     const changed = runtime.controlState.kind !== state.kind ||
@@ -1478,7 +1561,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       ...(state.kind === 'waiting_action' ? { wait_mode: 'action' as const, wait_reason: state.reason } : {}),
     })
     runtime.controlState = state
-    if (!notify || !changed) return
+    if (!notify || (!changed && !forceNotify)) return
     try {
       this.deps.onStateChange?.(h, external, report)
     } catch (err) {
@@ -1567,10 +1650,30 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         console.error(`[ClaudeCodeAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
       })
     }, { offset: runtime.eventWatchOffset })
+    this.startNativeTracePoll(runtime, h)
+  }
+
+  private startNativeTracePoll(runtime: Runtime, h: IncarnationHandle): void {
+    if (runtime.tracePoll || !this.deps.onNativeActivity) return
+    const poll = () => {
+      if (this.closing || runtime.controlState.kind === 'exited') return
+      try {
+        this.deps.onNativeActivity?.({ ...h, session_ref: runtime.sessionId })
+      } catch (error) {
+        console.error(`[ClaudeCodeAdapter] native trace activity callback failed for ${h.worker_id}#${h.seq}:`, error)
+      }
+    }
+    poll()
+    runtime.tracePoll = setInterval(poll, 2_000)
+    runtime.tracePoll.unref?.()
   }
 
   private async stopEventWatch(runtime: Runtime, waitForDrain = false): Promise<void> {
     runtime.interactionFingerprint = undefined
+    if (runtime.tracePoll) {
+      clearInterval(runtime.tracePoll)
+      runtime.tracePoll = undefined
+    }
     if (runtime.stopEventWatch) {
       const stop = runtime.stopEventWatch
       runtime.stopEventWatch = undefined
@@ -1638,6 +1741,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, {
       terminal: this.liveTerminal(snapshot),
       waitReason: 'interaction_required',
+      ui: { fingerprint: interaction.fingerprint, actions: interaction.actions },
       notification: { type: 'terminal_interaction' },
     })
   }
@@ -1729,13 +1833,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     const events = await channel.readAll()
     return events.filter((e) => e.kind === 'stop').length
   }
-}
-
-/** CLAUDE.md 里标注的 worker 标签:provision(ws, caps) 拿不到 worker_id,退而取 workspace 目录名兜底。 */
-function workerIdLabelFromWorkspace(ws: Workspace): string {
-  const trimmed = ws.root.replace(/\/+$/, '')
-  const idx = trimmed.lastIndexOf('/')
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
 }
 
 /** cc 的 project 目录 slug 规则:cwd 路径里的 `/` 与 `.` 都替换成 `-`(已用真实 ~/.claude/projects/ 核实)。 */

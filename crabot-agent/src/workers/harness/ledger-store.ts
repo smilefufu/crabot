@@ -3,7 +3,7 @@ import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
 import { canonicalizeJson } from 'crabot-shared'
 import { AsyncMutex } from '../async-mutex'
-import type { ManagerKey, LedgerWorker, WorkerLedger } from './ledger-types'
+import type { Incarnation, LedgerWorker, ManagerKey, WorkerLedger } from './ledger-types'
 
 const FILE_SUFFIX = '.json'
 const ATOMIC_TEMP_FILE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i
@@ -195,11 +195,12 @@ export class LedgerStore {
     if (!ledger || ledger.manager_key !== key || !Array.isArray(ledger.workers)) {
       throw new Error(`[LedgerStore] manager_key mismatch or invalid ledger for ${key}`)
     }
-    for (const worker of ledger.workers) {
+    const workers = ledger.workers.map((worker) => materializeLegacyIncarnations(worker))
+    for (const worker of workers) {
       this.assertWorkerOwner(key, worker)
       assertWorkerLegacyShape(worker)
     }
-    return ledger
+    return { ...ledger, workers }
   }
 
   private async readLedgerFileStrict(key: ManagerKey): Promise<WorkerLedger> {
@@ -238,6 +239,56 @@ export class LedgerStore {
     }
     this.workerIndex = index
   }
+}
+
+function legacyIncarnationId(workerId: string, index: number): string {
+  return `legacy:${encodeURIComponent(workerId)}:${index + 1}`
+}
+
+/**
+ * Historical ledgers stored only adapter-local seq. Materialize IDs from immutable physical order
+ * and reject ambiguous numeric fork references instead of guessing which incarnation they meant.
+ */
+function materializeLegacyIncarnations(worker: LedgerWorker): LedgerWorker {
+  const bySeq = new Map<number, Incarnation[]>()
+  const ids = new Set<string>()
+  const incarnations = worker.incarnations.map((incarnation, index) => {
+    const incarnationId = incarnation.incarnation_id ?? legacyIncarnationId(worker.worker_id, index)
+    if (ids.has(incarnationId)) {
+      throw new Error(`[LedgerStore] duplicate incarnation_id '${incarnationId}' for ${worker.worker_id}`)
+    }
+    ids.add(incarnationId)
+    const normalized: Incarnation = {
+      ...incarnation,
+      incarnation_id: incarnationId,
+      workspace_instructions: incarnation.workspace_instructions ?? {
+        source: 'absent',
+        captured_at: incarnation.started_at,
+      },
+    }
+    const sameSeq = bySeq.get(normalized.seq) ?? []
+    sameSeq.push(normalized)
+    bySeq.set(normalized.seq, sameSeq)
+    return normalized
+  })
+
+  const normalizedForks = incarnations.map((incarnation) => {
+    if (typeof incarnation.forked_from !== 'number') return incarnation
+    const candidates = bySeq.get(incarnation.forked_from) ?? []
+    if (candidates.length !== 1 || !candidates[0].incarnation_id) {
+      throw new Error(
+        `[LedgerStore] ambiguous legacy forked_from=${incarnation.forked_from} for ${worker.worker_id}; migration requires one physical source incarnation`,
+      )
+    }
+    return { ...incarnation, forked_from: candidates[0].incarnation_id } as Incarnation
+  })
+
+  for (const incarnation of normalizedForks) {
+    if (typeof incarnation.forked_from === 'string' && !ids.has(incarnation.forked_from)) {
+      throw new Error(`[LedgerStore] forked_from '${incarnation.forked_from}' does not belong to ${worker.worker_id}`)
+    }
+  }
+  return { ...worker, incarnations: normalizedForks }
 }
 
 function assertWorkerLegacyShape(worker: LedgerWorker): void {

@@ -88,6 +88,7 @@ const DEFAULT_SAFE_WORKER_IMPLS: import('./workers/types.js').WorkerImplementati
 }
 import { buildManagerAdminSummaries } from './manager/read-model.js'
 import { readCompositeWorkerTrace } from './workers/trace/composite-reader.js'
+import { projectWorkerActivity } from './workers/trace/activity-projection.js'
 import { AdminChatCorrelationStore, dispatchPayloadSha256 } from './manager/chat-correlation-store.js'
 import { TraceCursorStore, incarnationFingerprint } from './workers/trace/cursor-store.js'
 import { NativeTraceCopyStore } from './workers/trace/native-copy.js'
@@ -748,6 +749,7 @@ export class UnifiedAgent extends ModuleBase {
         operationLabel,
       }),
       builtinTraceReader: this.builtinTraceReader(),
+      readWorkerActivity: (params) => this.readWorkerActivity(params),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
       onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
       // P6-A §3.2：episode 消费（含沉默终态）即结算未 claim 的 request IDs。
@@ -3273,6 +3275,39 @@ export class UnifiedAgent extends ModuleBase {
       },
       params,
     )
+  }
+
+  /**
+   * Manager 的常规 worker 观察面只投射原生会话内容；Harness 生命周期事件保留给被动唤醒，
+   * 不与 worker 的 assistant 正文混在一起。cursor 仍由 composite reader 统一维护；调用方
+   * 切换 view 时应从头读取，避免先前被过滤掉的工具事件被误认为已经在新视图中消费。
+   */
+  private async readWorkerActivity(params: {
+    worker_id: string
+    incarnation_id?: string
+    after?: string
+    view: 'assistant' | 'all'
+  }) {
+    const trace = await this.handleGetWorkerTrace({
+      worker_id: params.worker_id,
+      ...(params.incarnation_id !== undefined ? { incarnation_id: params.incarnation_id } : {}),
+      ...(params.after !== undefined ? { cursor: params.after } : {}),
+    })
+    const stack = this.requireManagerStack()
+    const worker = (await stack.ledger.findWorker(params.worker_id))?.worker
+    const incarnation = params.incarnation_id === undefined
+      ? worker?.incarnations.filter((candidate) => candidate.forked_from === undefined).at(-1)
+      : worker?.incarnations.find((candidate) => candidate.incarnation_id === params.incarnation_id)
+    if (!incarnation?.incarnation_id) throw new Error(`worker activity incarnation unavailable: ${params.worker_id}`)
+    const { events: _events, ...meta } = trace
+    return {
+      ...meta,
+      incarnation_id: incarnation.incarnation_id,
+      activities: projectWorkerActivity(trace.events, params.view, {
+        worker_id: params.worker_id,
+        incarnation_id: incarnation.incarnation_id,
+      }),
+    }
   }
 
   /** P6-A §3.3：Agent-owned opaque cursor window store（惰性建目录）。 */

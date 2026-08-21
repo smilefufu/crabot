@@ -22,13 +22,23 @@ describe('session worker authorization', () => {
   it('ordinary tool face has no list_all_workers; known external ID is uniformly denied before worker actions', async () => {
     const { harness, list } = tools(false)
     expect(list.map(t => t.name)).not.toContain('list_all_workers')
-    for (const name of ['send_to_worker', 'query_worker', 'kill_worker', 'get_worker_terminal', 'get_worker_detail']) {
+    for (const name of ['send_to_worker', 'query_worker', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'get_worker_state', 'get_worker_activity', 'get_worker_turn', 'resolve_worker_turn', 'get_worker_terminal', 'get_worker_detail']) {
       const tool = list.find(t => t.name === name)!
-      const result = await tool.call(name === 'query_worker' ? { worker_id: 'b', question: 'q' } : name === 'send_to_worker' ? { worker_id: 'b', text: 'x' } : { worker_id: 'b' })
+      const result = await tool.call(
+        name === 'query_worker'
+          ? { worker_id: 'b', question: 'q' }
+          : name === 'send_to_worker'
+            ? { worker_id: 'b', text: 'x' }
+            : name === 'resolve_worker_turn'
+              ? { worker_id: 'b', turn_id: 'turn-1', resolution: 'suppressed', reason: 'not needed' }
+              : name === 'respond_to_worker_ui'
+                ? { worker_id: 'b', snapshot_id: 'snapshot-1', action_id: 'keys', text: 'Enter' }
+              : { worker_id: 'b' },
+      )
       expect(result.isError).toBe(true)
       expect(result.output).toContain('不存在或当前会话无权访问')
     }
-    expect(harness.sendToWorker).not.toHaveBeenCalled(); expect(harness.queryWorker).not.toHaveBeenCalled(); expect(harness.killWorker).not.toHaveBeenCalled()
+    expect(harness.sendToWorker).not.toHaveBeenCalled(); expect(harness.queryWorker).not.toHaveBeenCalled()
   })
 
   it('Master gets explicit global list with stable pagination and execution-time revocation rejects cross-session detail', async () => {

@@ -268,9 +268,31 @@ export class ManagerLoop {
    */
   private currentTraceId: string | undefined = undefined
 
+  /** Delivery/continuation evidence belongs to one Manager episode and is never inferred from history. */
+  private readonly successfulSendMessageTargetsInCurrentEpisode = new Set<string>()
+  private readonly continuedWorkersInCurrentEpisode = new Set<string>()
+
   /** 当前 episode 的 trace id（仅 episode 进行中）；registry 桥/worker-tools 读取用。 */
   get currentEpisodeTraceId(): string | undefined {
     return this.currentTraceId
+  }
+
+  hasSuccessfulSendMessageTo(target: { channel_id: string; session_id: string }): boolean {
+    return this.successfulSendMessageTargetsInCurrentEpisode.has(`${target.channel_id}\u0000${target.session_id}`)
+  }
+
+  recordSuccessfulSendMessage(target: { channel_id: string; session_id: string }): void {
+    if (this.currentTraceId !== undefined) {
+      this.successfulSendMessageTargetsInCurrentEpisode.add(`${target.channel_id}\u0000${target.session_id}`)
+    }
+  }
+
+  hasContinuedWorker(workerId: string): boolean {
+    return this.continuedWorkersInCurrentEpisode.has(workerId)
+  }
+
+  recordWorkerContinuation(workerId: string): void {
+    if (this.currentTraceId !== undefined) this.continuedWorkersInCurrentEpisode.add(workerId)
   }
 
   /**
@@ -398,6 +420,8 @@ export class ManagerLoop {
     this.currentEpisodeInjected = []
     this.currentWakeEvent = envelope ?? null
     this.adminChatClaims = new Map()
+    this.successfulSendMessageTargetsInCurrentEpisode.clear()
+    this.continuedWorkersInCurrentEpisode.clear()
     for (const item of [...carriedEnvelopes, ...(envelope ? [envelope] : [])]) {
       for (const id of item.correlation?.admin_chat_request_ids ?? []) {
         if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
@@ -490,6 +514,8 @@ export class ManagerLoop {
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
       this.currentTraceId = undefined
+      this.successfulSendMessageTargetsInCurrentEpisode.clear()
+      this.continuedWorkersInCurrentEpisode.clear()
       this.currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
       this.attemptCounter = 0
     }

@@ -140,7 +140,7 @@ describe('ClaudeCodeAdapter.provision', () => {
     await fs.rm(ws, { recursive: true, force: true }).catch(() => {})
   })
 
-  it('写出 .claude/settings.json(含 Stop/Notification hook 与 permissions)、.mcp.json、CLAUDE.md', async () => {
+  it('写出 .claude/settings.json(含 Stop/Notification hook 与 permissions) 和 .mcp.json，不改写 workspace 规则文件', async () => {
     execFileSync('git', ['init', '-q'], { cwd: ws })
     await fs.writeFile(path.join(ws, '.gitignore'), 'existing-rule')
     const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
@@ -179,8 +179,8 @@ describe('ClaudeCodeAdapter.provision', () => {
     expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', '.mcp.json'], { cwd: ws, stdio: 'ignore' })).toThrow()
     expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', path.basename(crashTemp)], { cwd: ws, stdio: 'ignore' })).toThrow()
 
-    const claudeMd = await fs.readFile(path.join(ws, 'CLAUDE.md'), 'utf-8')
-    expect(claudeMd).toContain('你是 crabot 的 worker')
+    await expect(fs.access(path.join(ws, 'CLAUDE.md'))).rejects.toThrow()
+    await expect(fs.access(path.join(ws, 'AGENTS.md'))).rejects.toThrow()
   })
 
   it('拒绝覆盖 Git 已跟踪的 .mcp.json，避免 ignore 对 tracked file 无效时泄漏凭据', async () => {
@@ -2206,6 +2206,15 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       report: {
         terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
         waitReason: 'interaction_required',
+        ui: {
+          fingerprint: 'claude_permission:yes-no',
+          actions: [
+            { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+            { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+            { action_id: 'select_1', kind: 'keys', keys: ['1', 'Enter'] },
+            { action_id: 'select_2', kind: 'keys', keys: ['2', 'Enter'] },
+          ],
+        },
         notification: { type: 'terminal_interaction' },
       },
     })
@@ -2218,7 +2227,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(seen).toHaveLength(1)
 
-    await adapter.sendInput(h, 'Enter', { raw: true })
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
     expect(await adapter.state(h)).toBe('running')
 
     tmux.paneText = 'Claude needs your permission\n1. Yes\n2. No'

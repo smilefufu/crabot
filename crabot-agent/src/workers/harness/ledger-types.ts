@@ -1,5 +1,5 @@
 import type { ModuleId, FriendId, SessionId, TaskId } from '../../types'
-import type { WorkerImplId, WorkerContractState, IncarnationEndReason } from '../types'
+import type { IncarnationEndReason, IncarnationId, WorkerContractState, WorkerImplId, WorkspaceInstructionSnapshot } from '../types'
 
 export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent'
 export type TaskStatus = 'queued' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled'
@@ -8,13 +8,18 @@ export type TaskStatus = 'queued' | 'running' | 'waiting_input' | 'completed' | 
 export type ManagerKey = `${ModuleId}::${SessionId}`
 
 interface IncarnationBase {
+  /** Harness-owned stable identity. Missing values are deterministically materialized on legacy read. */
+  incarnation_id?: IncarnationId
   seq: number
   state: WorkerContractState
   workspace: string
+  /** The source body is held in a Harness-private artifact, never in the workspace ledger. */
+  workspace_instructions?: WorkspaceInstructionSnapshot
   started_at: string
   ended_at?: string
   ended_reason?: IncarnationEndReason
-  forked_from?: number
+  /** Legacy ledgers use numeric seq; new writes always use incarnation_id. */
+  forked_from?: number | IncarnationId
   query_id?: string
 }
 

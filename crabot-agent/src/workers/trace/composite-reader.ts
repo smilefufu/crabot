@@ -45,6 +45,7 @@ export interface CompositeTraceDeps {
 
 export interface CompositeTraceParams {
   readonly worker_id: string
+  readonly incarnation_id?: string
   readonly seq?: number
   readonly cursor?: string
 }
@@ -157,13 +158,16 @@ export async function readCompositeWorkerTrace(
   if (!found) throw new WorkerNotFoundError(params.worker_id)
   const worker = found.worker
   if (worker.incarnations.length === 0) throw new WorkerHasNoIncarnationError(params.worker_id)
-  const incarnation =
-    params.seq === undefined ? mainlineIncarnation(worker) : findIncarnationBySeq(worker, params.seq)
+  const incarnation = params.incarnation_id === undefined
+    ? (params.seq === undefined ? mainlineIncarnation(worker) : findIncarnationBySeq(worker, params.seq))
+    : worker.incarnations.find((candidate) => candidate.incarnation_id === params.incarnation_id)
   if (!incarnation) {
-    throw new Error(`get_worker_trace: no incarnation with seq=${params.seq} found for worker ${params.worker_id}`)
+    const identity = params.incarnation_id === undefined ? `seq=${params.seq}` : `incarnation_id=${params.incarnation_id}`
+    throw new Error(`get_worker_trace: no incarnation with ${identity} found for worker ${params.worker_id}`)
   }
 
   const fingerprint = incarnationFingerprint({
+    incarnation_id: incarnation.incarnation_id,
     impl: incarnation.impl as WorkerImplId,
     seq: incarnation.seq,
     started_at: incarnationStartedAt(incarnation),

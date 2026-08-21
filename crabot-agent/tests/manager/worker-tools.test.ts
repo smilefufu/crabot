@@ -44,6 +44,7 @@ class FakeAdapter implements WorkerAdapter {
   readonly spawnCalls: SpawnSpec[] = []
   readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: SendInputOptions }> = []
   readonly killCalls: IncarnationHandle[] = []
+  readonly interruptCalls: IncarnationHandle[] = []
   readonly readTerminalCalls: IncarnationHandle[] = []
   private readonly states = new Map<string, WorkerContractState>()
   private nextForkSeq = 2
@@ -104,6 +105,11 @@ class FakeAdapter implements WorkerAdapter {
   async kill(h: IncarnationHandle): Promise<void> {
     this.killCalls.push(h)
     this.states.set(handleKey(h), 'exited')
+  }
+
+  async interrupt(h: IncarnationHandle): Promise<void> {
+    this.interruptCalls.push(h)
+    this.states.set(handleKey(h), 'idle')
   }
 
   capabilities(): AdapterCapabilities {
@@ -196,15 +202,17 @@ afterEach(async () => {
 // ---- 工具面形状 ----
 
 describe('buildWorkerTools — 工具面形状', () => {
-  it('普通 Manager 有十项 worker 工具；get_worker_terminal/list_workers/get_worker_detail/list_worker_implementations 为只读', async () => {
+  it('普通 Manager 有十六项 worker 工具；状态、活动与回合查询均为只读', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
 
     expect(tools.map((t) => t.name).sort()).toEqual(
       [
         'clear_worker_periodic_report',
+        'get_worker_activity',
         'get_worker_detail',
-        'kill_worker',
+        'get_worker_state',
+        'get_worker_turn',
         'list_worker_implementations',
         'list_workers',
         'query_worker',
@@ -212,11 +220,91 @@ describe('buildWorkerTools — 工具面形状', () => {
         'send_to_worker',
         'set_worker_periodic_report',
         'spawn_worker',
+        'resolve_worker_turn',
+        'request_worker_interrupt',
+        'request_worker_stop',
+        'respond_to_worker_ui',
       ].sort()
     )
 
     const readOnlyNames = tools.filter((t) => t.isReadOnly).map((t) => t.name).sort()
-    expect(readOnlyNames).toEqual(['get_worker_detail', 'get_worker_terminal', 'list_worker_implementations', 'list_workers'])
+    expect(readOnlyNames).toEqual([
+      'get_worker_activity',
+      'get_worker_detail',
+      'get_worker_state',
+      'get_worker_terminal',
+      'get_worker_turn',
+      'list_worker_implementations',
+      'list_workers',
+    ])
+  })
+})
+
+describe('worker observation and turn closure', () => {
+  it('活动读取缺省只请求 assistant view，显式 all 才请求工具活动', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const incarnationId = worker.incarnations[0].incarnation_id
+    const readWorkerActivity = vi.fn(async () => ({
+      incarnation_id: incarnationId,
+      activities: [{
+        activity_id: 'activity-1',
+        worker_id: worker.worker_id,
+        incarnation_id: incarnationId,
+        kind: 'assistant_text' as const,
+        occurred_at: '2026-01-01T00:00:00.000Z',
+        summary: '已完成分析',
+        text: '已完成分析',
+      }],
+      next_cursor: 'opaque-cursor',
+    }))
+    const tools = buildWorkerTools({ harness, context: () => CTX, readWorkerActivity })
+    const getWorkerActivity = tools.find((tool) => tool.name === 'get_worker_activity')!
+
+    const assistant = await getWorkerActivity.call({ worker_id: worker.worker_id }, {})
+    expect(assistant.isError).toBe(false)
+    expect(readWorkerActivity).toHaveBeenLastCalledWith({ worker_id: worker.worker_id, view: 'assistant' })
+    expect(parseOutput(assistant.output)).toMatchObject({ worker_id: worker.worker_id, view: 'assistant', next_cursor: 'opaque-cursor' })
+
+    const all = await getWorkerActivity.call({ worker_id: worker.worker_id, incarnation_id: incarnationId, after: 'opaque-cursor', view: 'all' }, {})
+    expect(all.isError).toBe(false)
+    expect(readWorkerActivity).toHaveBeenLastCalledWith({ worker_id: worker.worker_id, incarnation_id: incarnationId, after: 'opaque-cursor', view: 'all' })
+  })
+
+  it('idle/exited 回合必须在当前 manager episode 成功 send_message 后才能标记已交付', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(handle, 'idle', { lastText: '本轮完成', completionSource: 'builtin_end_turn' })
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id)) !== undefined)
+
+    const turn = await harness.getWorkerTurn(worker.worker_id)
+    expect(turn).toMatchObject({ worker_id: worker.worker_id, completion_source: 'builtin_end_turn', disposition: { status: 'pending' } })
+
+    let sent = false
+    const tools = buildWorkerTools({
+      harness,
+      context: () => CTX,
+      hasSuccessfulSendMessageTo: (target) => sent && target.channel_id === 'wechat' && target.session_id === 'sess-1',
+    })
+    const getWorkerTurn = tools.find((tool) => tool.name === 'get_worker_turn')!
+    const resolveWorkerTurn = tools.find((tool) => tool.name === 'resolve_worker_turn')!
+
+    const read = await getWorkerTurn.call({ worker_id: worker.worker_id, turn_id: turn!.turn_id }, {})
+    expect(read.isError).toBe(false)
+    expect(parseOutput(read.output)).toMatchObject({ worker_id: worker.worker_id, turn: { turn_id: turn!.turn_id } })
+
+    const blocked = await resolveWorkerTurn.call({ worker_id: worker.worker_id, turn_id: turn!.turn_id, resolution: 'reported' }, {})
+    expect(blocked.isError).toBe(true)
+    expect(blocked.output).toContain('尚未向该 worker 的 report_to 成功调用 send_message')
+
+    sent = true
+    const resolved = await resolveWorkerTurn.call({ worker_id: worker.worker_id, turn_id: turn!.turn_id, resolution: 'reported' }, {})
+    expect(resolved.isError).toBe(false)
+    expect(parseOutput(resolved.output)).toMatchObject({
+      worker_id: worker.worker_id,
+      turn: { disposition: { resolution: 'reported', resolved_at: expect.any(String) } },
+    })
   })
 })
 
@@ -282,13 +370,22 @@ describe('spawn_worker', () => {
 // ---- send_to_worker ----
 
 describe('send_to_worker', () => {
-  it('返回真实 delivered 回执，text/raw 与 delivery_id 透传给 adapter.sendInput', async () => {
+  it('普通文本入口不暴露 raw 终端旁路', async () => {
+    const { harness } = await makeHarness()
+    const sendToWorker = buildWorkerTools({ harness, context: () => CTX }).find((tool) => tool.name === 'send_to_worker')!
+    const schema = sendToWorker.inputSchema as { properties?: Record<string, unknown> }
+
+    expect(schema.properties).toBeDefined()
+    expect(schema.properties).not.toHaveProperty('raw')
+  })
+
+  it('返回真实 delivered 回执，普通文本与 delivery_id 透传给 adapter.sendInput', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(directSpawnParams())
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const sendToWorker = tools.find((t) => t.name === 'send_to_worker')!
 
-    const result = await sendToWorker.call({ worker_id: worker.worker_id, text: '继续', raw: true }, {})
+    const result = await sendToWorker.call({ worker_id: worker.worker_id, text: '继续' }, {})
     expect(result.isError).toBe(false)
     const parsed = parseOutput(result.output)
     expect(parsed).toMatchObject({ status: 'delivered', worker_id: worker.worker_id })
@@ -296,7 +393,7 @@ describe('send_to_worker', () => {
 
     expect(fake.sendInputCalls).toHaveLength(1)
     expect(fake.sendInputCalls[0].text).toBe('继续')
-    expect(fake.sendInputCalls[0].opts).toMatchObject({ raw: true, delivery_id: parsed.delivery_id })
+    expect(fake.sendInputCalls[0].opts).toMatchObject({ raw: false, delivery_id: parsed.delivery_id })
   })
 
   it('worker 不存在 → WorkerNotFoundError 转成可读 tool_result（isError:true，不抛出）', async () => {
@@ -381,7 +478,7 @@ describe('query_worker', () => {
     const [w] = await harness.listWorkers(CTX.managerKey)
     expect(w.incarnations[1]).toMatchObject({
       seq: 2,
-      forked_from: 1,
+      forked_from: w.incarnations[0].incarnation_id,
       query_id: expect.any(String),
       state: 'running',
     })
@@ -574,35 +671,85 @@ describe('list_workers', () => {
   })
 })
 
-// ---- kill_worker（同步，幂等） ----
+// ---- request_worker_interrupt / request_worker_stop ----
 
-describe('kill_worker', () => {
-  it('终止主线化身，task 转 cancelled，重复调用幂等', async () => {
+describe('worker control operations', () => {
+  it('stop 进入 native 调用时，get_worker_state 暴露持久的 executing operation', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    let entered!: () => void
+    const enteredStop = new Promise<void>((resolve) => { entered = resolve })
+    let release!: () => void
+    const releaseStop = new Promise<void>((resolve) => { release = resolve })
+    const originalKill = fake.kill.bind(fake)
+    vi.spyOn(fake, 'kill').mockImplementation(async (handle) => {
+      entered()
+      await releaseStop
+      await originalKill(handle)
+    })
+    const tools = buildWorkerTools({ harness, context: () => CTX })
+    const getWorkerState = tools.find((tool) => tool.name === 'get_worker_state')!
+
+    const stop = harness.requestWorkerStop(worker.worker_id)
+    await enteredStop
+    const state = await getWorkerState.call({ worker_id: worker.worker_id }, {})
+    expect(state.isError).toBe(false)
+    expect(parseOutput(state.output)).toMatchObject({
+      task_status: 'running',
+      active_operations: [{ kind: 'stop', status: 'executing' }],
+    })
+
+    release()
+    await expect(stop).resolves.toMatchObject({ kind: 'stop', status: 'succeeded' })
+  })
+
+  it('native stop 后仍在运行时结算 unknown，任务不能伪装为 cancelled', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    vi.spyOn(fake, 'kill').mockImplementation(async (handle) => {
+      fake.killCalls.push(handle)
+    })
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({
+      kind: 'stop',
+      status: 'unknown',
+      detail: expect.stringContaining('native state=running'),
+    })
+    expect(fake.killCalls).toHaveLength(1)
+    const current = await harness.findWorker(worker.worker_id)
+    expect(current?.worker.task.status).toBe('running')
+  })
+
+  it('stop 经持久 operation 核验后才把 task 转 cancelled', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(directSpawnParams())
     const tools = buildWorkerTools({ harness, context: () => CTX })
-    const killWorker = tools.find((t) => t.name === 'kill_worker')!
+    const stopWorker = tools.find((t) => t.name === 'request_worker_stop')!
+    const interruptWorker = tools.find((t) => t.name === 'request_worker_interrupt')!
 
-    const first = await killWorker.call({ worker_id: worker.worker_id, reason: '不需要了' }, {})
+    const interrupted = await interruptWorker.call({ worker_id: worker.worker_id }, {})
+    expect(interrupted.isError).toBe(false)
+    expect(parseOutput(interrupted.output)).toMatchObject({ operation: { worker_id: worker.worker_id, kind: 'interrupt', status: 'succeeded' } })
+    expect(fake.interruptCalls).toHaveLength(1)
+    const [afterInterrupt] = await harness.listWorkers(CTX.managerKey)
+    expect(afterInterrupt.task.status).not.toBe('cancelled')
+
+    const first = await stopWorker.call({ worker_id: worker.worker_id }, {})
     expect(first.isError).toBe(false)
-    expect(parseOutput(first.output)).toEqual({ status: 'killed', worker_id: worker.worker_id })
+    expect(parseOutput(first.output)).toMatchObject({ operation: { worker_id: worker.worker_id, kind: 'stop', status: 'succeeded' } })
     expect(fake.killCalls).toHaveLength(1)
 
     const [afterFirst] = await harness.listWorkers(CTX.managerKey)
     expect(afterFirst.task.status).toBe('cancelled')
 
-    // 幂等：再调一次不重复 adapter.kill、不报错。
-    const second = await killWorker.call({ worker_id: worker.worker_id }, {})
-    expect(second.isError).toBe(false)
-    expect(fake.killCalls).toHaveLength(1)
   })
 
   it('worker 不存在 → WorkerNotFoundError 转成可读 tool_result', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
-    const killWorker = tools.find((t) => t.name === 'kill_worker')!
+    const stopWorker = tools.find((t) => t.name === 'request_worker_stop')!
 
-    const result = await killWorker.call({ worker_id: 'w-nope' }, {})
+    const result = await stopWorker.call({ worker_id: 'w-nope' }, {})
     expect(result.isError).toBe(true)
     expect(result.output).toContain('不存在或当前会话无权访问')
   })
