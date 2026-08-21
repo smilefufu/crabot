@@ -703,7 +703,7 @@ describe('worker control operations', () => {
     await expect(stop).resolves.toMatchObject({ kind: 'stop', status: 'succeeded' })
   })
 
-  it('native stop 后仍在运行时结算 unknown，任务不能伪装为 cancelled', async () => {
+  it('native stop 后仍在运行时保持 verifying，直到后续状态回调完成核验', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(directSpawnParams())
     vi.spyOn(fake, 'kill').mockImplementation(async (handle) => {
@@ -712,8 +712,7 @@ describe('worker control operations', () => {
 
     await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({
       kind: 'stop',
-      status: 'unknown',
-      detail: expect.stringContaining('native state=running'),
+      status: 'verifying',
     })
     expect(fake.killCalls).toHaveLength(1)
     const current = await harness.findWorker(worker.worker_id)

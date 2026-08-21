@@ -729,7 +729,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(source.readTerminalCalls).toHaveLength(0)
   })
 
-  it('活跃源停止核验为 unknown 时不启动目标化身，也不标记 superseded', async () => {
+  it('活跃源停止仍在 verifying 时不启动目标化身，也不标记 superseded', async () => {
     const { harness, adaptersMap, workersDir } = await makeHarness()
     const source = new FakeAdapter({ implId: 'builtin', onStateChange: harness.handleStateChange })
     const target = new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange })
@@ -742,7 +742,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     })
 
     await expect(harness.switchWorkerImpl(worker.worker_id, 'claude-code', '切换实现')).rejects.toThrow(
-      'source stop did not verify (unknown)',
+      'source stop did not verify (verifying)',
     )
 
     expect(target.spawnCalls).toHaveLength(0)
@@ -753,7 +753,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(current.incarnations[0]).not.toHaveProperty('ended_reason')
     const operations = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'control-operations.json'), 'utf8'))
     expect(operations.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'stop', status: 'unknown' }),
+      expect.objectContaining({ kind: 'stop', status: 'verifying' }),
     ]))
   })
 

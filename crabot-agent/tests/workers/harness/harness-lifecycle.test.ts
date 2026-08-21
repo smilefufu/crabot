@@ -658,6 +658,40 @@ describe('WorkerHarness.handleStateChange', () => {
     })
   })
 
+  it('连续 assistant activity 在 Manager 未消费时合并为一个 high-water notification', async () => {
+    const nativeTrace: NormalizedTraceEvent[] = [
+      { ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '先完成第一步' },
+    ]
+    const route = vi.fn(async () => ({ consumed: false }))
+    const { harness, workersDir } = await makeHarness({ nativeTrace }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => route.mock.calls.length === 1)
+    nativeTrace.push({ ts: '2026-08-20T00:00:01.000Z', kind: 'message', role: 'assistant', summary: '再完成第二步' })
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => {
+      const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+      return state.cursors[0]?.offset === 2
+    })
+
+    const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+    expect(state.notifications).toHaveLength(1)
+    expect(state.notifications[0]).toMatchObject({
+      activity_from: '0',
+      activity_through: '2',
+      event: { kind: 'activity_available', detail: { from_cursor: '0', through_cursor: '2', preview: '再完成第二步' } },
+    })
+  })
+
   it('tool-only 原生 trace 只推进 high-water，不唤醒 Manager', async () => {
     const route = vi.fn(async () => ({ consumed: true }))
     const { harness, workersDir } = await makeHarness({
@@ -770,6 +804,29 @@ describe('WorkerHarness.handleStateChange', () => {
     const [w2] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w2.task.status).toBe('completed')
     expect(w2.incarnations[0].ended_reason).toBe('completed')
+  })
+
+  it('异步 stop 在 exited 状态回调后才结算并取消任务', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin',
+      session_ref: incarnation.session_ref,
+    }
+    vi.spyOn(fake, 'kill').mockImplementation(async (h) => {
+      fake.killCalls.push(h)
+    })
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({ status: 'verifying' })
+    expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('running')
+
+    fake.emitStateChange(handle, 'exited', undefined, 'killed')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'cancelled')
+    expect(await harness.getWorkerControlOperations(worker.worker_id)).toEqual([])
   })
 
   it('idle 且名下仍有运行中的 bg shell 时保持 running，而不是 waiting_input', async () => {

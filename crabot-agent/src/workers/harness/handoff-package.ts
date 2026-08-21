@@ -4,6 +4,8 @@ import { dirname, join } from 'path'
 import type { IncarnationId } from '../types.js'
 
 const HANDOFF_SUMMARY_MAX_CHARS = 8_000
+const HANDOFF_TASK_CONTEXT_MAX_CHARS = 2_000
+const HANDOFF_EVIDENCE_TRUNCATED = 'evidence: truncated to retain the most recent structured activity'
 
 export type HandoffEvidenceSource = 'native_session' | 'persisted_activity' | 'ledger'
 
@@ -56,7 +58,7 @@ export async function writeHandoffPackage(params: {
   readonly unavailable?: ReadonlyArray<string>
 }): Promise<HandoffPackage> {
   const packageId = randomUUID()
-  const retained = boundedEvidence(params.evidence)
+  const { retained, truncated } = boundedEvidence(params.evidence)
   const handoff: HandoffPackage = {
     package_id: packageId,
     worker_id: params.workerId,
@@ -65,7 +67,10 @@ export async function writeHandoffPackage(params: {
     created_at: params.createdAt,
     sources: [...new Set(retained.map((item) => item.source))],
     evidence: retained.map(({ source, reference }) => ({ source, reference })),
-    unavailable: [...new Set(params.unavailable ?? [])],
+    unavailable: [...new Set([
+      ...(params.unavailable ?? []),
+      ...(truncated ? [HANDOFF_EVIDENCE_TRUNCATED] : []),
+    ])],
     summary: retained.length > 0
       ? retained.map(({ source, reference, summary }) => `[${source}:${reference}] ${summary}`).join('\n')
       : 'No structured source evidence was available.',
@@ -88,16 +93,69 @@ export function renderHandoffPrompt(handoff: HandoffPackage, continuationInput: 
   ].join('\n')
 }
 
-function boundedEvidence(evidence: ReadonlyArray<HandoffEvidenceInput>): HandoffEvidenceInput[] {
+function boundedEvidence(evidence: ReadonlyArray<HandoffEvidenceInput>): {
+  retained: HandoffEvidenceInput[]
+  truncated: boolean
+} {
+  const candidates = evidence.flatMap((item) => {
+    const summary = item.summary.trim()
+    return summary && item.reference ? [{ ...item, summary }] : []
+  })
+  const taskContext = candidates.filter((item) =>
+    item.source === 'ledger' && (item.reference.startsWith('task:') || item.reference.endsWith(':outcome')),
+  )
+  const activity = candidates.filter((item) => !taskContext.includes(item))
   const retained: HandoffEvidenceInput[] = []
   let used = 0
-  for (const item of evidence) {
-    const summary = item.summary.trim()
-    if (!summary || !item.reference) continue
-    const cost = summary.length + item.source.length + item.reference.length + 8
-    if (retained.length > 0 && used + cost > HANDOFF_SUMMARY_MAX_CHARS) break
-    retained.push({ ...item, summary })
-    used += cost
+  let truncated = false
+
+  const taskContextBudget = Math.min(HANDOFF_TASK_CONTEXT_MAX_CHARS, HANDOFF_SUMMARY_MAX_CHARS)
+  for (let index = 0; index < taskContext.length; index += 1) {
+    const item = taskContext[index]
+    const budget = Math.floor((taskContextBudget - used) / (taskContext.length - index))
+    const fitted = fitEvidence(item, budget, 'head')
+    if (!fitted) {
+      truncated = true
+      continue
+    }
+    retained.push(fitted.item)
+    used += fitted.cost
+    truncated ||= fitted.truncated
   }
-  return retained
+
+  const recent: HandoffEvidenceInput[] = []
+  for (let index = activity.length - 1; index >= 0; index -= 1) {
+    const fitted = fitEvidence(activity[index], HANDOFF_SUMMARY_MAX_CHARS - used, 'tail')
+    if (!fitted) {
+      truncated = true
+      break
+    }
+    recent.unshift(fitted.item)
+    used += fitted.cost
+    if (fitted.truncated) {
+      truncated = true
+      break
+    }
+  }
+  if (recent.length < activity.length) truncated = true
+  return { retained: [...retained, ...recent], truncated }
+}
+
+function fitEvidence(
+  item: HandoffEvidenceInput,
+  budget: number,
+  direction: 'head' | 'tail',
+): { item: HandoffEvidenceInput; cost: number; truncated: boolean } | undefined {
+  const overhead = item.source.length + item.reference.length + 8
+  const summaryBudget = budget - overhead
+  if (summaryBudget <= 0) return undefined
+  const truncated = item.summary.length > summaryBudget
+  const summary = truncated
+    ? direction === 'head' ? item.summary.slice(0, summaryBudget) : item.summary.slice(-summaryBudget)
+    : item.summary
+  return {
+    item: { ...item, summary },
+    cost: summary.length + overhead,
+    truncated,
+  }
 }

@@ -111,12 +111,39 @@ export class NativeActivityStore {
       const cursors = state.cursors.filter((item) => item.incarnation_id !== params.cursor.incarnation_id)
       cursors.push(params.cursor)
       const activities = mergeActivities(state.activities, params.cursor, params.activity ?? [])
-      if (!params.notification) {
+      const incoming = params.notification
+      if (!incoming) {
         await this.write(params.worker_id, { ...state, cursors, activities })
         return undefined
       }
+      const existingIndex = state.notifications.findIndex((item) =>
+        item.consumed_at === undefined &&
+        item.incarnation_id === incoming.incarnation_id &&
+        item.event.kind === 'activity_available',
+      )
+      if (existingIndex >= 0) {
+        const existing = state.notifications[existingIndex]
+        const notification: PendingActivityNotification = {
+          ...existing,
+          activity_through: incoming.activity_through,
+          preview: incoming.preview,
+          event: {
+            ...existing.event,
+            detail: {
+              ...existing.event.detail,
+              from_cursor: existing.activity_from,
+              through_cursor: incoming.activity_through,
+              preview: incoming.preview,
+            },
+          },
+        }
+        const notifications = [...state.notifications]
+        notifications[existingIndex] = notification
+        await this.write(params.worker_id, { ...state, cursors, activities, notifications })
+        return notification
+      }
       const notification: PendingActivityNotification = {
-        ...params.notification,
+        ...incoming,
         notification_id: randomUUID(),
         event_written: false,
       }

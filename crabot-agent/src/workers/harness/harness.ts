@@ -816,9 +816,11 @@ export class WorkerHarness {
     }
     const revisionKey = `${h.worker_id}#${h.impl}#${h.seq}`
     this.stateChangeRevisions.set(revisionKey, (this.stateChangeRevisions.get(revisionKey) ?? 0) + 1)
-    this.processStateChange(h, state, report).catch((err) => {
-      console.error(`[WorkerHarness] handleStateChange failed for ${h.worker_id}#${h.seq}:`, err)
-    })
+    this.processStateChange(h, state, report)
+      .then(() => this.verifyControlOperationsForStateChange(h))
+      .catch((err) => {
+        console.error(`[WorkerHarness] handleStateChange failed for ${h.worker_id}#${h.seq}:`, err)
+      })
   }
 
   /**
@@ -3076,7 +3078,7 @@ export class WorkerHarness {
     }
   }
 
-  /** A crash after operation admission cannot be retried blindly; reconcile records a verified result or unknown. */
+  /** A crash after operation admission cannot be retried blindly; reconcile rechecks active operations. */
   async reconcileControlOperationsOnStartup(): Promise<void> {
     for (const { worker } of await this.deps.ledger.listAllWorkers()) {
       for (const operation of await this.controlOperationStore.active(worker.worker_id)) {
@@ -3981,6 +3983,15 @@ export class WorkerHarness {
     return this.withLock(operation.worker_id, () => this.verifyControlOperationLocked(operation))
   }
 
+  /** A control signal is only accepted synchronously; mainline and registered-fork callbacks provide its later proof. */
+  private async verifyControlOperationsForStateChange(h: IncarnationHandle): Promise<void> {
+    if (!h.incarnation_id) return
+    for (const operation of await this.controlOperationStore.active(h.worker_id)) {
+      if (operation.kind !== 'stop' && operation.incarnation_id !== h.incarnation_id) continue
+      await this.verifyControlOperation(operation)
+    }
+  }
+
   private async verifyControlOperationLocked(operation: WorkerControlOperation): Promise<WorkerControlOperation> {
     const current = await this.controlOperationStore.get(operation.worker_id, operation.operation_id)
     if (!current || current.status === 'succeeded' || current.status === 'failed' || current.status === 'unknown') return current ?? operation
@@ -4009,17 +4020,15 @@ export class WorkerHarness {
       return this.settleControlOperation(current, 'unknown', error instanceof Error ? error.message : String(error))
     }
     if (operation.kind === 'interrupt') {
-      return this.settleControlOperation(
-        current,
-        observed === 'running' ? 'unknown' : 'succeeded',
-        observed === 'running' ? 'interrupt accepted but native state has not reached a boundary' : `native state=${observed}`,
-      )
+      return observed === 'running'
+        ? current
+        : this.settleControlOperation(current, 'succeeded', `native state=${observed}`)
     }
     if (operation.kind === 'ui_response') {
       return this.settleControlOperation(current, 'unknown', 'UI response requires adapter submission settlement')
     }
     if (observed !== 'exited') {
-      return this.settleControlOperation(current, 'unknown', `stop accepted but native state=${observed}`)
+      return current
     }
     for (const fork of found.worker.incarnations) {
       if (fork.forked_from === undefined || !isExecutableIncarnation(fork) || fork.state === 'exited') continue
