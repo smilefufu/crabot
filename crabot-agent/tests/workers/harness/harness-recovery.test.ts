@@ -218,6 +218,36 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(events.filter((e) => e.worker_id === 'w-running')).toHaveLength(0)
   })
 
+  it('启动重建从台账传递稳定 incarnation_id，供 CLI runtime watcher 后续回调核验 control operation', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter('claude-code')
+    adaptersMap.set('claude-code', fake)
+    const worker = makeWorker('w-stable-recovery', {
+      incarnations: [{
+        incarnation_id: 'incarnation-stable-recovery',
+        seq: 1,
+        impl: 'claude-code',
+        state: 'running',
+        workspace: '/tmp/ws',
+        session_ref: 'ref-w-stable-recovery#1',
+        started_at: now(),
+      }],
+    })
+    await seed(ledger, DIALOG, worker)
+    fake.setState({ worker_id: worker.worker_id, seq: 1 }, 'running')
+
+    await expect(harness.reconcileOnStartup()).resolves.toMatchObject({ revived: [worker.worker_id] })
+
+    expect(fake.stateCalls).toEqual([
+      expect.objectContaining({
+        worker_id: worker.worker_id,
+        incarnation_id: 'incarnation-stable-recovery',
+        seq: 1,
+        impl: 'claude-code',
+      }),
+    ])
+  })
+
   it('无化身的 agent 自执行 system task → 不调用 adapter，重启后标 failed 并发事件', async () => {
     const { harness, ledger, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter('builtin')

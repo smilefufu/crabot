@@ -3416,12 +3416,7 @@ export class WorkerHarness {
 
         const key = `${worker.worker_id}#${impl}#${mainline.seq}`
         liveKeys.add(key)
-        const h: IncarnationHandle = {
-          worker_id: worker.worker_id,
-          seq: mainline.seq,
-          impl,
-          session_ref: mainline.session_ref,
-        }
+        const h = handleForIncarnation(worker.worker_id, mainline)
 
         let lastAt: number | undefined
         try {
@@ -3511,12 +3506,7 @@ export class WorkerHarness {
       const worker = found.worker
       const mainline = mainlineIncarnation(worker)
       if (!mainline || !isExecutableIncarnation(mainline)) return undefined
-      const handle: IncarnationHandle = {
-        worker_id: worker.worker_id,
-        seq: mainline.seq,
-        impl: mainline.impl,
-        session_ref: mainline.session_ref,
-      }
+      const handle = handleForIncarnation(worker.worker_id, mainline)
       const adapter = this.deps.adapters.get(mainline.impl)
       let supervision = worker.supervision
       if (!supervision) {
@@ -3759,12 +3749,7 @@ export class WorkerHarness {
         return 'failed'
       }
 
-      const handle: IncarnationHandle = {
-        worker_id: worker.worker_id,
-        seq: mainline.seq,
-        impl: mainline.impl,
-        session_ref: mainline.session_ref,
-      }
+      const handle = handleForIncarnation(worker.worker_id, mainline)
 
       let observed: WorkerContractState
       try {

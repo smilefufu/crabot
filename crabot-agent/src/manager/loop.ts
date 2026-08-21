@@ -1113,6 +1113,9 @@ function renderWorkerEvent(event: HarnessEvent): string {
 
 const SUPERVISION_READ_ONLY_TOOL_NAMES = new Set([
   'get_worker_terminal',
+  'get_worker_state',
+  'get_worker_activity',
+  'get_worker_turn',
   'list_workers',
   'get_worker_detail',
   'get_history',

@@ -1039,6 +1039,34 @@ describe('ManagerLoop', () => {
       expect(JSON.stringify(state.recent)).not.toContain('due-read-only')
     })
 
+    it('原生 worker 查询工具同样保留默认巡检的本地历史压缩', async () => {
+      for (const toolName of ['get_worker_state', 'get_worker_activity', 'get_worker_turn']) {
+        const { adapter, queue } = makeAdapter()
+        queue.push(
+          { toolCalls: [{ name: toolName, id: `read-${toolName}`, input: { worker_id: 'w-supervised' } }], stopReason: 'tool_use' },
+          { stopReason: 'end_turn' },
+        )
+        const isolatedStore = new ManagerSessionStore(join(dataDir, `supervision-${toolName}`))
+        const loop = new ManagerLoop(baseDeps({
+          store: isolatedStore,
+          adapter,
+          toolFace: () => [defineTool({
+            name: toolName,
+            description: 'read only',
+            inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } } },
+            isReadOnly: true,
+            call: async () => ({ output: 'worker state', isError: false }),
+          })],
+        }))
+
+        await loop.wakeUp(defaultSupervisionWake('w-supervised', `due-${toolName}`))
+
+        const state = await isolatedStore.load(KEY)
+        expect(state.recent).toHaveLength(1)
+        expect(JSON.stringify(state.recent)).toContain('[任务巡检摘要] worker_id=w-supervised')
+      }
+    })
+
     it('默认巡检一旦发送消息或写记忆，就保留完整 episode 历史', async () => {
       for (const toolName of ['send_message', 'mcp__crab-memory__store_memory']) {
         const { adapter, queue } = makeAdapter()
