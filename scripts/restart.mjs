@@ -12,7 +12,7 @@ import { resolveCliDataDir } from './lib/instance.mjs'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const CRABOT_HOME = resolve(__dirname, '..')
 const CLI = join(CRABOT_HOME, 'cli.mjs')
-const DATA_DIR = resolveCliDataDir({ homeDir: resolve(homedir(), '.crabot'), repoRoot: CRABOT_HOME })
+const DATA_DIR = resolveCliDataDir({ homeDir: resolve(homedir(), '.crabot') })
 const STATUS_DIR = join(DATA_DIR, 'admin')
 const STATUS_FILE = join(STATUS_DIR, 'restart-status.json')
 

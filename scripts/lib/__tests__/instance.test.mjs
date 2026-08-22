@@ -64,21 +64,18 @@ describe('resolveCliDataDir', () => {
     expect(resolveCliDataDir({ homeDir, repoRoot, env })).toBe('/explicit/dir')
   })
 
-  // 回归测试：2026-06-07 17:59~23:12 窗口里 auto-init 写出来的 stale instance.json
-  // （data_dir 死写成 ~/.crabot/data）不能绕过 legacy source install 检测。
-  // resolveCliDataDir 的契约就是不读 instance.data_dir。
-  it('stale instance.json + legacy source data 同时存在 → 走 $REPO/data', () => {
+  it('instance.json 与仓库 data/admin 都不改变默认用户目录', () => {
     writeInstance(homeDir, {
       mode: 'user', port_offset: 0,
-      data_dir: resolve(homedir(), '.crabot/data'),  // stale: 默认 fallback 路径
+      data_dir: '/instance/written/path',
       crabot_home: repoRoot,
     })
     mkdirSync(join(repoRoot, 'data', 'admin'), { recursive: true })
     expect(resolveCliDataDir({ homeDir, repoRoot, env: {} }))
-      .toBe(join(repoRoot, 'data'))
+      .toBe(resolve(homedir(), '.crabot/data'))
   })
 
-  it('无 instance.json + 无 legacy data → 默认 ~/.crabot/data', () => {
+  it('无 instance.json 时默认 ~/.crabot/data', () => {
     expect(resolveCliDataDir({ homeDir, repoRoot, env: {} }))
       .toBe(resolve(homedir(), '.crabot/data'))
   })
@@ -89,8 +86,6 @@ describe('resolveCliDataDir', () => {
       data_dir: '/some/legacy/wrong/path',
       crabot_home: repoRoot,
     })
-    // 即使 $REPO/data/admin 存在，offset>0 也不走 legacy 分支
-    mkdirSync(join(repoRoot, 'data', 'admin'), { recursive: true })
     const env = {}
     expect(resolveCliDataDir({ homeDir, repoRoot, env }))
       .toBe(resolve(homedir(), '.crabot/data-42'))

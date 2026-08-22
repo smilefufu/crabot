@@ -36,7 +36,7 @@ if (!hasInstance(HOME_CRABOT)) {
 
 // OFFSET 和 DATA_DIR 都收敛到 resolveCliDataDir：
 //   - OFFSET 仍走 env > instance.json > 0（resolveOffset 内部）
-//   - DATA_DIR 走 env > legacy source install > ~/.crabot/data{-OFFSET}（不读 instance.data_dir）
+//   - DATA_DIR 走 env > ~/.crabot/data{-OFFSET}（不读 instance.data_dir）
 // "不读 instance.data_dir" 的契约 + 历史教训见 lib/instance.mjs:resolveCliDataDir。
 const DAEMON_MODE = process.argv.includes('-d') || process.argv.includes('--daemon')
 process.env.CRABOT_ORPHAN_RECOVERY_INTERACTIVE = !DAEMON_MODE
@@ -62,22 +62,9 @@ function loadEnvFile(filePath) {
   }
 }
 
-// legacy source install 提示要在 process.env.DATA_DIR 被覆盖前判断
-const HAD_EXPLICIT_DATA_DIR = !!process.env.DATA_DIR
-const DATA_DIR = resolveCliDataDir({ homeDir: HOME_CRABOT, repoRoot: ROOT })
+const DATA_DIR = resolveCliDataDir({ homeDir: HOME_CRABOT })
 const OFFSET = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
 process.env.DATA_DIR = DATA_DIR
-
-// 一次性提示：走了 legacy source install 兼容分支
-// 条件：未显式设 DATA_DIR + offset=0 + 落到了 $REPO/data 而不是 ~/.crabot/data
-if (!process.env.DATA_DIR_NOTICE_SHOWN && !HAD_EXPLICIT_DATA_DIR && OFFSET === 0) {
-  const repoData = resolve(ROOT, 'data')
-  if (DATA_DIR === repoData) {
-    console.warn(`[crabot] using legacy source install data at ${repoData}`)
-    console.warn(`[crabot]   (set DATA_DIR=~/.crabot/data to switch to user-mode default)`)
-    process.env.DATA_DIR_NOTICE_SHOWN = '1'
-  }
-}
 
 // admin/.env 已废弃（密码改存 credentials.json）；保留 ROOT/.env 兜底
 loadEnvFile(resolve(ROOT, '.env'))

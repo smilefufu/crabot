@@ -36,7 +36,7 @@ describe('resolveDataDir', () => {
       .toBe(resolve(homedir(), '.crabot/data-200'))
   })
 
-  describe('legacy source install 兼容', () => {
+  describe('仓库目录不参与默认解析', () => {
     let repoRoot
 
     beforeEach(() => {
@@ -46,31 +46,9 @@ describe('resolveDataDir', () => {
       rmSync(repoRoot, { recursive: true, force: true })
     })
 
-    it('repoRoot + offset=0 + $REPO/data/admin 存在 → 用 $REPO/data', () => {
+    it('repoRoot + offset=0 + $REPO/data/admin 存在 → 仍用 ~/.crabot/data', () => {
       mkdirSync(join(repoRoot, 'data', 'admin'), { recursive: true })
       expect(resolveDataDir({ envValue: undefined, offset: 0, repoRoot }))
-        .toBe(join(repoRoot, 'data'))
-    })
-
-    it('$REPO/data 存在但 admin/ 不存在（半新不旧）→ 回退默认 ~/.crabot/data', () => {
-      mkdirSync(join(repoRoot, 'data'), { recursive: true })
-      expect(resolveDataDir({ envValue: undefined, offset: 0, repoRoot }))
-        .toBe(resolve(homedir(), '.crabot/data'))
-    })
-
-    it('repoRoot 给了但 $REPO/data 整个不存在 → 默认 ~/.crabot/data', () => {
-      expect(resolveDataDir({ envValue: undefined, offset: 0, repoRoot }))
-        .toBe(resolve(homedir(), '.crabot/data'))
-    })
-
-    it('offset>0 时不触发兼容分支（system mode 永远走 ~/.crabot/data-<OFF>）', () => {
-      mkdirSync(join(repoRoot, 'data', 'admin'), { recursive: true })
-      expect(resolveDataDir({ envValue: undefined, offset: 100, repoRoot }))
-        .toBe(resolve(homedir(), '.crabot/data-100'))
-    })
-
-    it('不传 repoRoot 时不触发兼容分支（向后兼容旧 caller）', () => {
-      expect(resolveDataDir({ envValue: undefined, offset: 0 }))
         .toBe(resolve(homedir(), '.crabot/data'))
     })
   })

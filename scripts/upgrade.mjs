@@ -27,9 +27,9 @@ const CRABOT_HOME = resolve(__dirname, '..')
 const args = process.argv.slice(2)
 const ASSUME_YES = args.includes('-y') || args.includes('--yes')
 
-// 同 status.mjs / start.mjs：DATA_DIR 走 env > legacy source install > 默认。
+// 同 status.mjs / start.mjs：DATA_DIR 走 env > 默认。
 // 契约说明见 lib/instance.mjs:resolveCliDataDir。
-const DATA_DIR = resolveCliDataDir({ homeDir: resolve(homedir(), '.crabot'), repoRoot: CRABOT_HOME })
+const DATA_DIR = resolveCliDataDir({ homeDir: resolve(homedir(), '.crabot') })
 
 const logger = {
   info: (m) => console.log(m),

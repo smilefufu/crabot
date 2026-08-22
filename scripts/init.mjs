@@ -32,15 +32,7 @@ if (hasInstance(HOME_DIR)) {
 
 if (mode === 'user') {
   // user mode 简单写一份 instance.json
-  //
-  // data_dir 解析：默认 ~/.crabot/data，但对 install-from-source 历史用户做
-  // 向后兼容——$REPO/data/admin 存在就用 $REPO/data。理由见
-  // scripts/lib/data-dir.mjs 的 resolveDataDir 注释（system mode 多用户部署 merge
-  // 之前的历史路径）。这里跟 resolveDataDir 用同样的检测，保持单点真相。
-  const userModeDataDir = resolveDataDir({ envValue: undefined, offset: 0, repoRoot: CRABOT_HOME })
-  if (userModeDataDir === resolve(CRABOT_HOME, 'data')) {
-    console.log(`[init] 检测到 legacy source install 历史数据 ${userModeDataDir}，使用它`)
-  }
+  const userModeDataDir = resolveDataDir({ offset: 0 })
   const manifest = {
     mode: 'user',
     port_offset: 0,

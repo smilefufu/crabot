@@ -65,7 +65,7 @@ async function main() {
     process.exit(1)
   }
 
-  const DATA_DIR = resolveCliDataDir({ homeDir: HOME_DIR, repoRoot: ROOT })
+  const DATA_DIR = resolveCliDataDir({ homeDir: HOME_DIR })
 
   if (!existsSync(DATA_DIR)) {
     console.error(`[crabot] 数据目录不存在：${DATA_DIR}`)

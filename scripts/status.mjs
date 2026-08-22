@@ -13,7 +13,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 const HOME_DIR = resolve(homedir(), '.crabot')
 // OFFSET 和 DATA_DIR 都走 resolveCliDataDir 入口，保证 status 显示与 start/stop 一致
-const DATA_DIR = resolveCliDataDir({ homeDir: HOME_DIR, repoRoot: ROOT })
+const DATA_DIR = resolveCliDataDir({ homeDir: HOME_DIR })
 const OFFSET = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
 const ARGS = process.argv.slice(2)
 const JSON_OUT = ARGS.includes('--json')

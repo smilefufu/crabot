@@ -5,8 +5,7 @@
 import './_preflight.mjs'
 
 import { readFileSync, existsSync, unlinkSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { execSync } from 'node:child_process'
 import http from 'node:http'
@@ -14,12 +13,10 @@ import { readPid, clearPid, isPidAlive } from './lib/pid.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 
 // OFFSET / DATA_DIR 收敛到 resolveCliDataDir（OFFSET 走 env > instance.json > 0；
-// DATA_DIR 走 env > legacy source install > 默认，不读 instance.data_dir）。
+// DATA_DIR 走 env > 默认，不读 instance.data_dir）。
 // 契约说明见 lib/instance.mjs:resolveCliDataDir。
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const ROOT = resolve(__dirname, '..')
 const HOME_DIR = resolve(homedir(), '.crabot')
-const DATA_DIR = resolveCliDataDir({ homeDir: HOME_DIR, repoRoot: ROOT })
+const DATA_DIR = resolveCliDataDir({ homeDir: HOME_DIR })
 const OFFSET = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
 const MM_PORT = 19000 + OFFSET
 const ADMIN_RPC_PORT = 19001 + OFFSET

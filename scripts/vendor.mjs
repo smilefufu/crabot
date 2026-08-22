@@ -3,8 +3,7 @@
 import './_preflight.mjs'
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { resolve, dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { resolve, join } from 'node:path'
 import { homedir } from 'node:os'
 import { createInterface } from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
@@ -13,8 +12,6 @@ import { detectMode } from './lib/mode.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { addVendor, removeVendor, setMode, validateEntry } from './lib/vendor-doc.mjs'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const ROOT = resolve(__dirname, '..')
 const ETC_DIR = '/etc/crabot'
 const HOME_DIR = resolve(homedir(), '.crabot')
 // 四种格式都可配；ChatGPT 订阅那种 auth_type=oauth 的固定流程不在此（向导只产 apikey vendor）。
@@ -25,7 +22,7 @@ function resolveTarget() {
   if (detectMode(ETC_DIR) === 'system') {
     return { mode: 'system', file: join(ETC_DIR, 'defaults', 'vendor.yaml') }
   }
-  const dataDir = resolveCliDataDir({ homeDir: HOME_DIR, repoRoot: ROOT })
+  const dataDir = resolveCliDataDir({ homeDir: HOME_DIR })
   return { mode: 'user', file: resolve(dataDir, 'admin', 'vendor.yaml') }
 }
 
