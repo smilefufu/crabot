@@ -3,8 +3,8 @@ import type { InputMode, InputProbe } from '../tmux/input-commit.js'
 import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 import type { WorkerUiActionDescriptor, WorkerUiControlKey } from '../types.js'
 
-const CLAUDE_FOOTER = /^\s*(?:esc to interrupt|⏵⏵|(?:\?\s*)?for shortcuts|context left|bypass permissions)|(?:auto|manual|plan) mode on\b/i
-const CLAUDE_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|esc to interrupt|⏵⏵|(?:\?\s*)?for shortcuts|context left|bypass permissions)|(?:auto|manual|plan) mode on\b/i
+const CLAUDE_FOOTER = /^\s*(?:esc to interrupt|⏵⏵|(?:\?\s*)?for shortcuts|context left|bypass permissions|paste again to expand)|(?:auto|manual|plan) mode on\b/i
+const CLAUDE_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|esc to interrupt|⏵⏵|(?:\?\s*)?for shortcuts|context left|bypass permissions|paste again to expand)|(?:auto|manual|plan) mode on\b/i
 
 /**
  * Claude Code viewport recognizer for one guarded input transaction.

@@ -8,6 +8,7 @@ import type { WorkerUiActionDescriptor } from '../types.js'
 const CODEX_FOOTER = /^\s*(?:Working\b|esc to interrupt|(?:\?\s*)?for shortcuts|\d+% context|context left|.*\s·\s[~\/])/i
 const CODEX_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|Working\b|esc to interrupt|(?:\?\s*)?for shortcuts|\d+% context|context left|.*\s·\s[~\/])/i
 const CODEX_PLACEHOLDERS = [
+  'Ask Codex to do anything',
   'Explain this codebase',
   'Summarize recent commits',
   'Implement {feature}',

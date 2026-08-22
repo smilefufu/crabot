@@ -42,7 +42,9 @@ export async function commitInput(
 
   opts.beforeSideEffect?.('paste')
   await driver.pasteText(text)
-  snapshot = await waitUntil(driver, timeoutMs, intervalMs, (current) => probe(current, 'after_paste') !== 'empty')
+  // Terminal renderers can expose a partial composer before the complete pasted text
+  // is visible. Wait for the implementation to confirm ownership before Enter.
+  snapshot = await waitUntil(driver, timeoutMs, intervalMs, (current) => probe(current, 'after_paste') === 'pending')
   let currentProbe = probe(snapshot, 'after_paste')
   // Confirmed contract: a still-empty, footer-anchored composer means the target UI never exposed
   // ownership of this text. A successful tmux paste command alone is not receipt evidence; do not
