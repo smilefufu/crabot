@@ -11,6 +11,7 @@ import crypto from 'node:crypto'
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
+import type { Socket } from 'node:net'
 import {
   type Request,
   type Response,
@@ -208,6 +209,19 @@ export class ModuleManager {
         res.end(JSON.stringify({ error: 'Internal server error' }))
       })
     })
+    this.server.on('clientError', (error, socket) => {
+      const client = socket as Socket
+      const peer = `${client.remoteAddress ?? 'unknown'}:${client.remotePort ?? 'unknown'}`
+      console.error(`[ModuleManager] HTTP client error from ${peer}: ${error.message}`)
+      if (!socket.writable) {
+        socket.destroy()
+        return
+      }
+      const response = (error as NodeJS.ErrnoException).code === 'HPE_HEADER_OVERFLOW'
+        ? 'HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n'
+        : 'HTTP/1.1 400 Bad Request\r\n\r\n'
+      socket.end(response)
+    })
 
     return new Promise((resolve, reject) => {
       this.server!.listen(this.config.port, () => {
@@ -303,6 +317,30 @@ export class ModuleManager {
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const method = req.url?.slice(1) ?? ''
+    const isRegisterRequest = method === 'register'
+    const peer = `${req.socket.remoteAddress ?? 'unknown'}:${req.socket.remotePort ?? 'unknown'}`
+    let registerRequestId = 'unknown'
+    let registerModuleId = 'unknown'
+    let registerResponseFinished = false
+
+    if (isRegisterRequest) {
+      const details = () => `request_id=${registerRequestId} module_id=${registerModuleId} peer=${peer}`
+      req.once('aborted', () => {
+        console.warn(`[ModuleManager] Register request aborted before response: ${details()}`)
+      })
+      res.once('finish', () => {
+        registerResponseFinished = true
+        console.log(`[ModuleManager] Register response completed: ${details()}`)
+      })
+      res.once('close', () => {
+        if (!registerResponseFinished) {
+          console.warn(`[ModuleManager] Register response closed before completion: ${details()}`)
+        }
+      })
+      res.once('error', (error) => {
+        console.warn(`[ModuleManager] Register response error: ${details()} error=${error.message}`)
+      })
+    }
 
     if (req.method !== 'POST') {
       res.writeHead(405)
@@ -316,6 +354,13 @@ export class ModuleManager {
       request = JSON.parse(body) as Request
     } catch {
       // 忽略解析错误
+    }
+
+    if (isRegisterRequest) {
+      registerRequestId = request?.id ?? 'unknown'
+      const params = request?.params as Partial<RegisterParams> | undefined
+      registerModuleId = typeof params?.module_id === 'string' ? params.module_id : 'unknown'
+      console.log(`[ModuleManager] Register request received: request_id=${registerRequestId} module_id=${registerModuleId} peer=${peer}`)
     }
 
     const handler = this.methodHandlers.get(method)
@@ -344,6 +389,9 @@ export class ModuleManager {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       const errorCode = (error as { code?: string }).code ?? GlobalErrorCode.INTERNAL_ERROR
+      if (isRegisterRequest) {
+        console.warn(`[ModuleManager] Register handler failed: request_id=${registerRequestId} module_id=${registerModuleId} code=${errorCode} error=${errorMessage}`)
+      }
       const errorResponse = createErrorResponse(
         request?.id ?? generateId(),
         errorCode,
@@ -556,6 +604,7 @@ export class ModuleManager {
       const state = this.childStates.get(child)
       if (state) state.reachedRunning = true
     }
+    console.log(`[ModuleManager] Register state accepted: module_id=${params.module_id}`)
 
     // 模块重启时订阅会重复注册，必须先清掉同 subscriber 的旧记录再写入，
     // 否则 publish_event 会把同一事件投递给同一模块多次。
@@ -571,8 +620,9 @@ export class ModuleManager {
         )
       }
     }
+    console.log(`[ModuleManager] Register subscriptions recorded: module_id=${params.module_id}`)
 
-    // 发布事件
+    console.log(`[ModuleManager] Register event delivery started: module_id=${params.module_id}`)
     await this.publishEvent(
       createModuleStartedEvent('module-manager', {
         module_id: params.module_id,
@@ -581,6 +631,7 @@ export class ModuleManager {
         restart_count: runtime.restart_history?.attempts.length ?? 0,
       })
     )
+    console.log(`[ModuleManager] Register event delivery completed: module_id=${params.module_id}`)
 
     console.log(`[ModuleManager] Module registered: ${params.module_id}`)
     return { registered: true }
