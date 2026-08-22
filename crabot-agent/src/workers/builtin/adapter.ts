@@ -615,7 +615,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return undefined
     }
 
-    const sessionTree = await SessionTree.load(join(dir, 'session.jsonl'))
+    const sessionTree = this.findSessionTreeForWorker(h.worker_id) ??
+      await SessionTree.load(join(dir, 'session.jsonl'))
     // Validate the persisted tip before registering any resident state. A corrupted tree must be
     // reported through the normal input receipt, not rewritten into a fabricated crash.
     sessionTree.pathTo(meta.tip_node_id)

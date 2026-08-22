@@ -669,6 +669,45 @@ describe('BuiltinWorkerAdapter', () => {
     expect(JSON.stringify(tree.pathTo(meta.tip_node_id))).toContain('重建后的回复')
   })
 
+  it('重启后先 fork 再重建 idle 主线时复用已驻留的 session tree', async () => {
+    const workerId = randomUUID()
+    const adapter1 = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const h = await adapter1.spawn(spec({
+      worker_id: workerId,
+      adapter: makeAdapter([{ text: '第一轮回复', stopReason: 'end_turn' }]),
+    }))
+    await waitState(adapter1, h, 'idle')
+    const initialMeta = JSON.parse(await fs.readFile(join(tmp, workerId, 'meta-1.json'), 'utf-8'))
+
+    const adapter2 = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      resolveRuntime: () => ({
+        adapter: makeAdapter([{ text: '重建后的回复', stopReason: 'end_turn' }]),
+        model: 'test',
+        systemPrompt: '',
+        tools: [],
+      }),
+    })
+    const firstFork = await adapter2.fork({
+      worker_id: workerId,
+      seq: 1,
+      session_ref: initialMeta.tip_node_id,
+    }, '重启后先侧问', forkOptions())
+    await waitState(adapter2, firstFork, 'exited')
+
+    await adapter2.sendInput(h, '重启后继续')
+    await waitState(adapter2, h, 'idle')
+    const continuedMeta = JSON.parse(await fs.readFile(join(tmp, workerId, 'meta-1.json'), 'utf-8'))
+
+    const secondFork = await adapter2.fork({
+      worker_id: workerId,
+      seq: 1,
+      session_ref: continuedMeta.tip_node_id,
+    }, '从继续后的主线侧问', forkOptions())
+    expect(secondFork.seq).toBe(3)
+    await waitState(adapter2, secondFork, 'exited')
+  })
+
   it('scanOrphans 已标 crashed 的 running 化身不能被 idle 重建路径复活', async () => {
     const workerId = randomUUID()
     const gate = deferred<void>()
