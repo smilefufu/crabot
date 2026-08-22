@@ -390,11 +390,15 @@ describe('SubagentDetail', () => {
   }
 
   it('显示 child 自身信息，分页查看 trace，并能返回所属 Worker', async () => {
-    const events = Array.from({ length: 21 }, (_, index) => ({
+    const events = [{
+      ts: '2026-08-01T00:00:00.000Z', kind: 'message' as const,
+      role: 'user' as const, summary: '核对原生 child trace', source: 'native' as const,
+      detail: { content: '核对原生 child trace' },
+    }, ...Array.from({ length: 21 }, (_, index) => ({
       ts: `2026-08-01T00:00:${String(index).padStart(2, '0')}.000Z`, kind: 'message' as const,
       role: 'assistant' as const, summary: `子 Agent 记录 ${index}`, source: 'harness' as const,
       detail: { content: `子 Agent 记录 ${index}` },
-    }))
+    }))]
     mocked.getWorkerSubagentDetail = vi.fn().mockResolvedValue({
       subagent: {
         subagent_id: 'agent-child-1', worker_id: 'w-1234567890ab', executor_impl: 'codex', type: 'research',
@@ -410,6 +414,8 @@ describe('SubagentDetail', () => {
     expect(screen.getByText('research')).toBeInTheDocument()
     expect(screen.getByText('整理原生记录')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '子 Agent Trace', level: 2 })).toBeInTheDocument()
+    expect(screen.getByText('子 Agent 指令')).toBeInTheDocument()
+    expect(screen.queryByText('管理会话指令')).not.toBeInTheDocument()
     expect(await screen.findAllByText('子 Agent 文本')).not.toHaveLength(0)
     expect(screen.getByText('第 1 / 2 页')).toBeInTheDocument()
     expect(screen.getByText('子 Agent 记录 0')).toBeInTheDocument()

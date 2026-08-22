@@ -186,12 +186,12 @@ function lifecycleActivity(event: WorkerTraceEvent): ActivityEntry | undefined {
   return undefined
 }
 
-function activityFor(event: WorkerTraceEvent, actorLabel: string): ActivityEntry | undefined {
+function activityFor(event: WorkerTraceEvent, actorLabel: string, isSubagentTrace: boolean): ActivityEntry | undefined {
   if (event.source === 'legacy') {
     return { event, label: '历史记录', tone: 'status', body: event.summary }
   }
   if (event.kind === 'message' && event.role === 'user') {
-    return { event, label: event.source === 'native' ? '管理会话指令' : `${actorLabel} 指令`, tone: 'manager', body: messageText(event) }
+    return { event, label: !isSubagentTrace && event.source === 'native' ? '管理会话指令' : `${actorLabel} 指令`, tone: 'manager', body: messageText(event) }
   }
   if (event.kind === 'message' && event.role === 'assistant') {
     return { event, label: `${actorLabel} 文本`, tone: 'worker', body: messageText(event) }
@@ -206,14 +206,14 @@ function activityFor(event: WorkerTraceEvent, actorLabel: string): ActivityEntry
   return undefined
 }
 
-function projectTimeline(events: WorkerTraceEvent[], actorLabel: string): { human: ActivityEntry[]; technical: WorkerTraceEvent[] } {
+function projectTimeline(events: WorkerTraceEvent[], actorLabel: string, isSubagentTrace: boolean): { human: ActivityEntry[]; technical: WorkerTraceEvent[] } {
   const human: ActivityEntry[] = []
   const technical: WorkerTraceEvent[] = []
   const calls = new Map<string, ActivityEntry>()
   const uncorrelatedNativeCalls: ActivityEntry[] = []
 
   for (const event of events) {
-    const activity = activityFor(event, actorLabel)
+    const activity = activityFor(event, actorLabel, isSubagentTrace)
     if (!activity) {
       technical.push(event)
       continue
@@ -359,12 +359,14 @@ export function Timeline({
   seq,
   heading = '活动记录',
   actorLabel = 'Worker',
+  isSubagentTrace = false,
   loadTrace,
 }: {
   workerId: string
   seq?: number
   heading?: string
   actorLabel?: string
+  isSubagentTrace?: boolean
   loadTrace?: (cursor?: string) => Promise<{ events: WorkerTraceEvent[]; next_cursor?: string; unavailable_reason?: string }>
 }) {
   const [events, setEvents] = useState<WorkerTraceEvent[]>([])
@@ -376,7 +378,7 @@ export function Timeline({
   const [page, setPage] = useState(1)
   const [expandedEntry, setExpandedEntry] = useState<string | undefined>(undefined)
   const [refreshing, setRefreshing] = useState(false)
-  const projected = useMemo(() => projectTimeline(events, actorLabel), [events, actorLabel])
+  const projected = useMemo(() => projectTimeline(events, actorLabel, isSubagentTrace), [events, actorLabel, isSubagentTrace])
 
   const load = useCallback(async (cursor?: string) => {
     try {
