@@ -342,6 +342,59 @@ function isTerminalTaskStatus(status: LedgerWorker['task']['status']): boolean {
 function assertWorkerLegacyShape(worker: LedgerWorker): void {
   const hasLegacyIncarnation = worker.incarnations.some((incarnation) => incarnation.impl === 'legacy')
   if (worker.legacy_source || hasLegacyIncarnation) assertLegacyWorker(worker)
+  assertRecoveryNotices(worker)
+}
+
+function assertRecoveryNotices(worker: LedgerWorker): void {
+  const notices = worker.recovery_notices
+  if (notices === undefined) return
+  if (!Array.isArray(notices)) {
+    throw new Error(`[LedgerStore] recovery_notices must be an array for ${worker.worker_id}`)
+  }
+
+  const mainlineIds = new Set(
+    worker.incarnations
+      .filter((incarnation) => incarnation.impl !== 'legacy' && incarnation.forked_from === undefined)
+      .map((incarnation) => incarnation.incarnation_id)
+      .filter((incarnationId): incarnationId is string => typeof incarnationId === 'string' && incarnationId.length > 0),
+  )
+  const noticeIds = new Set<string>()
+  const incarnationIds = new Set<string>()
+  for (const notice of notices) {
+    if (!notice || typeof notice.notice_id !== 'string' || notice.notice_id.length === 0) {
+      throw new Error(`[LedgerStore] recovery notice has invalid notice_id for ${worker.worker_id}`)
+    }
+    if (!noticeIds.add(notice.notice_id)) {
+      throw new Error(`[LedgerStore] duplicate recovery notice_id '${notice.notice_id}' for ${worker.worker_id}`)
+    }
+    if (typeof notice.incarnation_id !== 'string' || notice.incarnation_id.length === 0) {
+      throw new Error(`[LedgerStore] recovery notice has invalid incarnation_id for ${worker.worker_id}`)
+    }
+    if (!incarnationIds.add(notice.incarnation_id)) {
+      throw new Error(`[LedgerStore] duplicate recovery notice incarnation_id '${notice.incarnation_id}' for ${worker.worker_id}`)
+    }
+    if (!mainlineIds.has(notice.incarnation_id)) {
+      throw new Error(`[LedgerStore] recovery notice must reference an executable mainline incarnation for ${worker.worker_id}`)
+    }
+    if (notice.status !== 'pending' && notice.status !== 'consumed') {
+      throw new Error(`[LedgerStore] recovery notice has invalid status for ${worker.worker_id}`)
+    }
+    if (typeof notice.created_at !== 'string' || !Number.isFinite(Date.parse(notice.created_at)) ||
+      !Number.isInteger(notice.attempts) || notice.attempts < 0) {
+      throw new Error(`[LedgerStore] recovery notice has invalid metadata for ${worker.worker_id}`)
+    }
+    if (notice.retry_after_at !== undefined &&
+      (typeof notice.retry_after_at !== 'string' || !Number.isFinite(Date.parse(notice.retry_after_at)))) {
+      throw new Error(`[LedgerStore] recovery notice has invalid retry_after_at for ${worker.worker_id}`)
+    }
+    if (notice.status === 'consumed' &&
+      (typeof notice.consumed_at !== 'string' || !Number.isFinite(Date.parse(notice.consumed_at)))) {
+      throw new Error(`[LedgerStore] consumed recovery notice has no consumed_at for ${worker.worker_id}`)
+    }
+    if (notice.status === 'pending' && notice.consumed_at !== undefined) {
+      throw new Error(`[LedgerStore] pending recovery notice has consumed_at for ${worker.worker_id}`)
+    }
+  }
 }
 
 function assertLegacyWorker(worker: LedgerWorker, initialImport = false): void {

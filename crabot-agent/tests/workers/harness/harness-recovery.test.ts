@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -109,7 +109,9 @@ function now(): string {
   return new Date(nowValue).toISOString()
 }
 
-async function makeHarness(): Promise<{ harness: WorkerHarness; ledger: LedgerStore; adaptersMap: Map<WorkerImplId, WorkerAdapter> }> {
+async function makeHarness(
+  overrides: Pick<HarnessDeps, 'onOperationNotification' | 'now' | 'isClosing'> = {},
+): Promise<{ harness: WorkerHarness; ledger: LedgerStore; adaptersMap: Map<WorkerImplId, WorkerAdapter> }> {
   const ledgersDir = join(dataDir, 'ledgers')
   const workspacesRoot = join(dataDir, 'workspaces')
   const workersDir = join(dataDir, 'workers')
@@ -124,8 +126,9 @@ async function makeHarness(): Promise<{ harness: WorkerHarness; ledger: LedgerSt
     ledger,
     workspaces,
     workersDir,
-    now,
+    now: overrides.now ?? now,
     onEvent: (e) => events.push(e),
+    ...overrides,
   }
   const harness = new WorkerHarness(deps)
   return { harness, ledger, adaptersMap }
@@ -476,6 +479,143 @@ describe('WorkerHarness.reconcileOnStartup — 幂等', () => {
     expect(events.filter((e) => e.worker_id === 'w-repeat')).toHaveLength(1)
     const afterSecond = await getWorker(ledger, 'w-repeat')
     expect(afterSecond).toEqual(afterFirst) // 台账没有被第二次改写
+  })
+})
+
+describe('WorkerHarness restart recovery notices', () => {
+  it('首次主线 crash 原子落 pending notice；未消费按退避重试，消费后停止', async () => {
+    let shouldConsume = false
+    let instant = Date.parse('2026-02-01T00:00:00.000Z')
+    const delivered: HarnessEvent[] = []
+    const { harness, ledger, adaptersMap } = await makeHarness({
+      now: () => new Date(instant).toISOString(),
+      onOperationNotification: async (_managerKey, event) => {
+        delivered.push(event)
+        return { consumed: shouldConsume }
+      },
+    })
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    await seed(ledger, DIALOG, makeWorker('w-recovery-notice'))
+    fake.setState({ worker_id: 'w-recovery-notice', seq: 1 }, 'exited')
+
+    await harness.reconcileOnStartup()
+    const crashed = await getWorker(ledger, 'w-recovery-notice')
+    expect(crashed.task.status).toBe('failed')
+    expect(crashed.recovery_notices).toEqual([expect.objectContaining({
+      incarnation_id: crashed.incarnations[0].incarnation_id,
+      status: 'pending',
+      attempts: 0,
+    })])
+
+    await harness.reconcileOnStartup()
+    expect((await getWorker(ledger, 'w-recovery-notice')).recovery_notices).toHaveLength(1)
+
+    for (const [index, delay] of [30_000, 60_000, 120_000, 300_000, 300_000].entries()) {
+      await harness.reconcileRecoveryNoticesOnStartup()
+      expect(delivered).toHaveLength(index + 1)
+      expect(delivered[index]).toMatchObject({
+        kind: 'worker_recovery_required',
+        worker_id: 'w-recovery-notice',
+        detail: expect.objectContaining({ notice_id: crashed.recovery_notices?.[0].notice_id }),
+      })
+      const pending = (await getWorker(ledger, 'w-recovery-notice')).recovery_notices?.[0]
+      expect(pending).toMatchObject({ status: 'pending', attempts: index + 1 })
+      expect(pending?.retry_after_at).toBe(new Date(instant + delay).toISOString())
+      instant = Date.parse(pending!.retry_after_at!)
+    }
+
+    instant -= 1
+    await harness.reconcileRecoveryNoticesOnStartup()
+    expect(delivered).toHaveLength(5)
+
+    shouldConsume = true
+    instant += 1
+    await harness.reconcileRecoveryNoticesOnStartup()
+    expect(delivered).toHaveLength(6)
+    expect((await getWorker(ledger, 'w-recovery-notice')).recovery_notices?.[0]).toMatchObject({
+      status: 'consumed',
+      consumed_at: expect.any(String),
+    })
+  })
+
+  it('没有 recovery_notices 的历史 crashed worker 不会被扫描或唤醒', async () => {
+    const delivered: HarnessEvent[] = []
+    const { harness, ledger } = await makeHarness({
+      onOperationNotification: async (_managerKey, event) => {
+        delivered.push(event)
+        return { consumed: true }
+      },
+    })
+    await seed(ledger, DIALOG, makeWorker('w-historical-crash', {
+      task: { id: 'task-w-historical-crash', title: '历史失败', status: 'failed', created_at: now(), completed_at: now() },
+      incarnations: [{
+        seq: 1,
+        impl: 'builtin',
+        state: 'exited',
+        workspace: '/tmp/ws',
+        session_ref: 'historic-session',
+        started_at: now(),
+        ended_at: now(),
+        ended_reason: 'crashed',
+      }],
+    }))
+
+    await harness.reconcileRecoveryNoticesOnStartup()
+    expect(delivered).toEqual([])
+  })
+
+  it('通知 route 与 shutdown 交叠时不确认消费，留给下次启动重投', async () => {
+    let closing = false
+    let releaseRoute!: () => void
+    const routeGate = new Promise<void>((resolve) => { releaseRoute = resolve })
+    const route = vi.fn(async () => {
+      await routeGate
+      return { consumed: true }
+    })
+    const { harness, ledger, adaptersMap } = await makeHarness({
+      isClosing: () => closing,
+      onOperationNotification: route,
+    })
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    await seed(ledger, DIALOG, makeWorker('w-notice-shutdown-race'))
+    fake.setState({ worker_id: 'w-notice-shutdown-race', seq: 1 }, 'exited')
+    await harness.reconcileOnStartup()
+
+    const delivery = harness.reconcileRecoveryNoticesOnStartup()
+    await vi.waitFor(() => expect(route).toHaveBeenCalledOnce())
+    closing = true
+    releaseRoute()
+    await delivery
+
+    expect((await getWorker(ledger, 'w-notice-shutdown-race')).recovery_notices?.[0]).toMatchObject({
+      status: 'pending',
+      attempts: 0,
+    })
+  })
+
+  it('运行期主线回调以 crashed 结束时同样创建 recovery notice', async () => {
+    const { harness, ledger } = await makeHarness()
+    await seed(ledger, DIALOG, makeWorker('w-runtime-crash'))
+    const worker = await getWorker(ledger, 'w-runtime-crash')
+    const incarnation = worker.incarnations[0]
+
+    harness.handleStateChange({
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin',
+      session_ref: incarnation.session_ref,
+    }, 'exited', { endReason: 'crashed' })
+
+    await vi.waitFor(async () => {
+      expect((await getWorker(ledger, worker.worker_id)).recovery_notices).toHaveLength(1)
+    })
+    expect((await getWorker(ledger, worker.worker_id)).recovery_notices?.[0]).toMatchObject({
+      incarnation_id: incarnation.incarnation_id,
+      status: 'pending',
+    })
   })
 })
 

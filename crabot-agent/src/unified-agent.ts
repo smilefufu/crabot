@@ -3909,6 +3909,8 @@ export class UnifiedAgent extends ModuleBase {
         this.managerReconciliationSettled = true
         if (this.runtimeClosing) return
         await this.agentHandler?.releaseRecoveredWorkerShellExits()
+        await stack.harness.reconcileRecoveryNoticesOnStartup()
+        if (this.runtimeClosing) return
         stack.harness.startLivenessSweep()
       })
   }
@@ -3924,6 +3926,7 @@ export class UnifiedAgent extends ModuleBase {
     this.attentionScheduler.stopAll()
     this.traceStore.stopFlushTimer()
     this.managerStack?.harness.stopLivenessSweep()
+    this.managerStack?.harness.stopRecoveryNoticeDelivery()
 
     try {
       await this.managerStack?.dispose()

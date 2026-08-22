@@ -639,6 +639,64 @@ describe('BuiltinWorkerAdapter', () => {
     })
   })
 
+  it('进程重启后的 idle 化身按下一条普通输入重建同一 session，并起新的 burst', async () => {
+    const workerId = randomUUID()
+    const adapter1 = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const h = await adapter1.spawn(spec({
+      worker_id: workerId,
+      adapter: makeAdapter([{ text: '第一轮回复', stopReason: 'end_turn' }]),
+    }))
+    await waitState(adapter1, h, 'idle')
+
+    const adapter2 = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      resolveRuntime: () => ({
+        adapter: makeAdapter([{ text: '重建后的回复', stopReason: 'end_turn' }]),
+        model: 'test',
+        systemPrompt: '',
+        tools: [],
+      }),
+    })
+
+    await adapter2.sendInput(h, '重启后继续')
+    await waitState(adapter2, h, 'idle')
+
+    const meta = JSON.parse(await fs.readFile(join(tmp, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.state).toBe('idle')
+    const tree = await SessionTree.load(join(tmp, workerId, 'session.jsonl'))
+    expect(JSON.stringify(tree.pathTo(meta.tip_node_id))).toContain('第一轮回复')
+    expect(JSON.stringify(tree.pathTo(meta.tip_node_id))).toContain('重启后继续')
+    expect(JSON.stringify(tree.pathTo(meta.tip_node_id))).toContain('重建后的回复')
+  })
+
+  it('scanOrphans 已标 crashed 的 running 化身不能被 idle 重建路径复活', async () => {
+    const workerId = randomUUID()
+    const gate = deferred<void>()
+    const adapter1 = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const h = await adapter1.spawn(spec({
+      worker_id: workerId,
+      adapter: makeGatedAdapter(gate.promise, [{ text: '不会完成', stopReason: 'end_turn' }]),
+    }))
+    expect(await adapter1.state(h)).toBe('running')
+    await BuiltinWorkerAdapter.scanOrphans(tmp)
+
+    const adapter2 = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      resolveRuntime: () => ({
+        adapter: makeAdapter([{ text: '不应执行', stopReason: 'end_turn' }]),
+        model: 'test',
+        systemPrompt: '',
+        tools: [],
+      }),
+    })
+    await expect(adapter2.sendInput(h, '不应被接收')).rejects.toThrow(/no such incarnation/)
+    expect(JSON.parse(await fs.readFile(join(tmp, workerId, 'meta-1.json'), 'utf-8'))).toMatchObject({
+      state: 'exited',
+      ended_reason: 'crashed',
+    })
+    gate.resolve()
+  })
+
   it('sendInput(running) → 进入待注入队列，burst 间隙自动续 burst，消息不丢', async () => {
     const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
     const gate = deferred<void>()

@@ -137,6 +137,54 @@ describe('LedgerStore', () => {
     expect(ledger.workers).toHaveLength(0)
   })
 
+  it('recovery notice 只能关联唯一的可执行主线化身', async () => {
+    const id = `test::recovery-notice` as ManagerKey
+    const now = new Date().toISOString()
+    const worker = makeWorker('worker-recovery-notice', {
+      manager_key: id,
+      incarnations: [{
+        incarnation_id: 'inc-mainline',
+        seq: 1,
+        impl: 'builtin',
+        state: 'exited',
+        workspace: '/tmp/ws',
+        session_ref: 'session-mainline',
+        started_at: now,
+        ended_at: now,
+        ended_reason: 'crashed',
+      }],
+      recovery_notices: [{
+        notice_id: 'notice-mainline',
+        incarnation_id: 'inc-mainline',
+        status: 'pending',
+        created_at: now,
+        attempts: 0,
+      }],
+    })
+
+    await expect(store.upsertWorker(id, worker.worker_id, () => worker)).resolves.toMatchObject({
+      recovery_notices: [{ notice_id: 'notice-mainline', incarnation_id: 'inc-mainline' }],
+    })
+
+    const forkOnly = {
+      ...worker,
+      worker_id: 'worker-recovery-fork',
+      incarnations: [{
+        ...worker.incarnations[0],
+        incarnation_id: 'inc-fork',
+        forked_from: 'inc-parent',
+      }],
+      recovery_notices: [{
+        notice_id: 'notice-fork',
+        incarnation_id: 'inc-fork',
+        status: 'pending' as const,
+        created_at: now,
+        attempts: 0,
+      }],
+    }
+    await expect(store.upsertWorker(id, forkOnly.worker_id, () => forkOnly)).rejects.toThrow(/recovery notice.*mainline/i)
+  })
+
   it('legacy source and first incarnation are immutable while ordinary upserts may append v3 incarnations', async () => {
     const key = 'test::legacy' as ManagerKey
     const now = new Date().toISOString()

@@ -671,6 +671,24 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(sweep).toHaveBeenCalledOnce()
   })
 
+  it('启动对账收尾按 bg-shell 结算、恢复提醒、活性巡检的顺序释放 Manager 路由', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const order: string[] = []
+    internals.agentHandler = {
+      releaseRecoveredWorkerShellExits: vi.fn(async () => { order.push('bg-shell') }),
+    } as any
+    vi.spyOn(stack.harness, 'reconcileRecoveryNoticesOnStartup').mockImplementation(async () => {
+      order.push('recovery-notices')
+    })
+    vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => { order.push('liveness') })
+
+    agent.startManagerStackReconciliation()
+    await waitUntil(() => order.length === 3)
+
+    expect(order).toEqual(['bg-shell', 'recovery-notices', 'liveness'])
+  })
+
   it('shutdown 已开始时，迟到的启动对账不再释放 recovered bg exits 或启动巡检', async () => {
     boot()
     const stack = internals.managerStack!

@@ -36,6 +36,8 @@ export type HarnessEventKind =
   | 'query_failed'
   | 'query_completed'
   | 'supervision_due'
+  /** Durable wake for a mainline execution carrier that was confirmed crashed after restart. */
+  | 'worker_recovery_required'
   /** v2 import history record: persisted only, never bridged to a Manager wake. */
   | 'legacy_imported'
 

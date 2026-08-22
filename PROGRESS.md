@@ -64,6 +64,7 @@
 
 - **Traces 人话视图 + 有界决策视野**：**已合并**（PR #100 → `f7e3aaf`，@claude approve 后自动合并）。Managers 用 `渠道·会话标题`、active worker 数和最近活动替代裸 ManagerKey/Episodes/历史总数；Manager detail 上浮消息摘录/回复/动作并按 worker 因果链折叠；Workers 默认只显示非终态。恢复 v2 dispatcher 不变量：`list_workers` 默认只看 `queued/running/waiting_input`，终态续办需显式分页 `include_terminal=true`；Manager 页面计数与工具视野同源。生产实测 system-tasks 2389 历史→6 active，工具实际 12 active/53 terminal。协议：agent v3.2.0、admin v0.2.2。
 - **统一 Worker Runtime（v3.6.0，待 PR review）**：本次统一替代原 v3.4/v3.5 的分离待审状态；CLI 的 pane 只用于 bracketed-paste 控制和 Manager 按需诊断，不再作为正常进度或 handoff 来源。Claude `Notification`、Codex `PermissionRequest` 与重连检查识别到的未知 UI 以一次性 snapshot + adapter 固定 action descriptor 交给 Manager，不能形成自由 tmux 按键入口；原生 session activity、完成回合、可核验 stop 与私有 handoff package 同属该 PR。
+- **Worker 重启恢复通知（已实现，待 PR review）**：主线执行载体确认消失时，Harness 与 `crashed` 原子写入持久 `recovery_notices`，在既有对账完成后只唤醒 owning Manager；首次立即尝试、未消费按 `30 秒 -> 1 分钟 -> 2 分钟 -> 5 分钟` 持久退避。仅重启 Agent 而 tmux 仍存活时重连；builtin `idle` 在下一条输入按同一会话按需重建。Harness 不自动续跑、重启、handoff 或向人类汇报。
 - **统一 observability retention（PR B，已确认 spec/协议/计划，待实施）**：自动回收终态 Worker 的 adapter output/session、events/context、ledger、过期 Manager episode/TraceStore；孤儿 adapter/events 24h grace；output log 10MB cap；删除失真的 Trace 清理 UI/API/cron。**所有 workspace 零自动删除**——`$DATA_DIR/workspaces/<taskId>` 是用户项目/任务产物，不是 cache；当前 nomi-ai-companion 的 1GB Flutter workspace 必须保留。workspace 管理/显式删除以后独立设计。
 
 ### P6 主线（严格串行）
@@ -76,7 +77,6 @@
 
 ### 技术债与既有 follow-up（P6 后或并行确认）
 
-- **关闭窗口终态事件补投**：Worker 的终态事件已落盘但 Manager 正在关闭窗口时，现有启动对账会跳过终态记录，Manager 可能不知道 Worker 已异常结束。需独立设计持久化待消费终态事件的恢复与去重；任务巡检不替代此修复。
 - **Worker 巡检调度收口**：启动对账与周期巡检应共享 due 投递排他；避免单个 Worker 的长锁阻塞全局活性巡检；默认巡检在全局 LLM 故障时需要有界的失败告警去重/退避。三项均需独立设计，不纳入当前任务巡检 PR。
 - **移除 Agent 内部 legacy `roles` seam**：`AgentLayerConfig.roles` 是 v2 前多 Agent 时代残留（正式协议从未包含），现仅作内部测试 seam/恒真分支；应替换为显式的 worker-layer 开关后删除。
 - **普通 Channel 未消费人类 wake 的跨重启恢复**：2026-08-19 实测，飞书私聊消息已落 Channel journal、reaction 已发且同 session Manager episode 已创建，但 Agent 在首次 LLM 调用前 OOM 重启；启动恢复只将遗留 episode 标为 `interrupted`，未将该 wake 重放，后续 worker 事件遂基于旧上下文回复。需独立设计普通 Channel 的持久化入站 wake、成功消费后结算、重启按原始顺序幂等重放；不得用扩大 Manager recent、滚动摘要或 prompt 约束替代。
