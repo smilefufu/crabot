@@ -1328,6 +1328,57 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
       await fs.rm(root, { recursive: true, force: true })
     }
   })
+
+  it('启动恢复中一个 Worker 的 child 列表读取失败，不阻断后续 Worker 的补齐', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'restart-child-copy-isolation-'))
+    const cliChild = { ...child, worker_id: 'w-2', executor_impl: 'codex' as const }
+    const firstIncarnation = {
+      incarnation_id: 'inc-1', seq: 1, impl: 'codex' as const, state: 'running' as const,
+      workspace: root, session_ref: 'first-thread', started_at: '2026-08-22T00:00:00.000Z',
+    }
+    const secondIncarnation = {
+      incarnation_id: 'inc-2', seq: 1, impl: 'codex' as const, state: 'running' as const,
+      workspace: root, session_ref: 'second-thread', started_at: '2026-08-22T00:00:00.000Z',
+    }
+    const adapter = {
+      listSubagents: async (handle: { worker_id: string }) => {
+        if (handle.worker_id === 'w-1') throw new Error('app-server unavailable')
+        return [cliChild]
+      },
+      readSubagentTrace: async () => ({
+        events: [{ ts: '2026-08-22T00:00:01.000Z', kind: 'message' as const, role: 'assistant' as const, summary: 'finished', source_offset: 0 }],
+        nextCursor: { offset: 1 },
+      }),
+    }
+    const agent = buildAgent({
+      ledger: {
+        listAllWorkers: async () => [
+          { managerKey: 'test::f1' as ManagerKey, worker: { ...makeLedgerWorker({ workerId: 'w-1', status: 'running' }), incarnations: [firstIncarnation] } },
+          { managerKey: 'test::f2' as ManagerKey, worker: { ...makeLedgerWorker({ workerId: 'w-2', status: 'running' }), incarnations: [secondIncarnation] } },
+        ],
+      },
+      adapters: new Map([['codex', adapter]]),
+    }) as unknown as Record<string, unknown>
+    const { NativeTraceCopyStore } = await import('../../src/workers/trace/native-copy.js')
+    const copyStore = new NativeTraceCopyStore(join(root, 'copies'))
+    agent.nativeTraceCopyStoreInstance = copyStore
+    agent.knownSecrets = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      await (agent as unknown as { recoverTerminalCliSubagentTraces(): Promise<void> }).recoverTerminalCliSubagentTraces()
+      await expect(copyStore.readSubagent('w-2', cliChild.subagent_id, subagentFingerprint(cliChild))).resolves.toMatchObject({
+        capture_status: 'complete', events: [{ summary: 'finished' }],
+      })
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('terminal CLI child trace recovery failed for w-1#1'),
+        'app-server unavailable',
+      )
+    } finally {
+      warn.mockRestore()
+      await copyStore.flush()
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('读模型 handler 的 manager 栈前置门', () => {

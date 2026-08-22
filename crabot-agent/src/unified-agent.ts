@@ -3792,14 +3792,21 @@ export class UnifiedAgent extends ModuleBase {
         ) continue
         const adapter = stack.adapters.get(incarnation.impl)
         if (!adapter) continue
-        await this.harvestTerminalCliSubagentTraces({
-          worker_id: worker.worker_id,
-          incarnation_id: incarnation.incarnation_id,
-          seq: incarnation.seq,
-          impl: incarnation.impl,
-          session_ref: incarnation.session_ref,
-          ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
-        }, adapter)
+        try {
+          await this.harvestTerminalCliSubagentTraces({
+            worker_id: worker.worker_id,
+            incarnation_id: incarnation.incarnation_id,
+            seq: incarnation.seq,
+            impl: incarnation.impl,
+            session_ref: incarnation.session_ref,
+            ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
+          }, adapter)
+        } catch (error) {
+          console.warn(
+            `[${this.config.moduleId}] terminal CLI child trace recovery failed for ${worker.worker_id}#${incarnation.seq}:`,
+            errorMessage(error),
+          )
+        }
       }
     }
   }
