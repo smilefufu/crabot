@@ -3,7 +3,7 @@ import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
 import { canonicalizeJson } from 'crabot-shared'
 import { AsyncMutex } from '../async-mutex'
-import type { ManagerKey, LedgerWorker, WorkerLedger } from './ledger-types'
+import type { Incarnation, LedgerWorker, LegacyArchivedIncarnation, ManagerKey, WorkerLedger } from './ledger-types'
 
 const FILE_SUFFIX = '.json'
 const ATOMIC_TEMP_FILE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i
@@ -62,7 +62,7 @@ export class LedgerStore {
 
   async getLedger(key: ManagerKey): Promise<WorkerLedger> {
     await this.init()
-    return this.readLedgerFileStrict(key)
+    return this.getMutex(key).run(() => this.readLedgerFileStrict(key))
   }
 
   async listWorkers(key: ManagerKey): Promise<LedgerWorker[]> {
@@ -84,7 +84,7 @@ export class LedgerStore {
     await this.init()
     const key = this.workerIndex.get(workerId)
     if (!key) return undefined
-    const ledger = await this.readLedgerFileStrict(key)
+    const ledger = await this.getMutex(key).run(() => this.readLedgerFileStrict(key))
     const worker = ledger.workers.find(w => w.worker_id === workerId)
     if (!worker) throw new Error(`[LedgerStore] worker index inconsistent for ${workerId}`)
     return { managerKey: key, worker }
@@ -157,7 +157,7 @@ export class LedgerStore {
     const keys = new Set(this.workerIndex.values())
     const result: Array<{ managerKey: ManagerKey; worker: LedgerWorker }> = []
     for (const key of keys) {
-      const ledger = await this.readLedgerFileStrict(key)
+      const ledger = await this.getMutex(key).run(() => this.readLedgerFileStrict(key))
       for (const worker of ledger.workers) result.push({ managerKey: key, worker })
     }
     return result
@@ -191,15 +191,21 @@ export class LedgerStore {
     }
   }
 
-  private assertLedger(key: ManagerKey, ledger: WorkerLedger): WorkerLedger {
+  private assertLedger(key: ManagerKey, ledger: WorkerLedger): { ledger: WorkerLedger; archivedAmbiguousLegacy: boolean } {
     if (!ledger || ledger.manager_key !== key || !Array.isArray(ledger.workers)) {
       throw new Error(`[LedgerStore] manager_key mismatch or invalid ledger for ${key}`)
     }
-    for (const worker of ledger.workers) {
+    let archivedAmbiguousLegacy = false
+    const workers = ledger.workers.map((worker) => {
+      const materialized = materializeLegacyIncarnations(worker)
+      archivedAmbiguousLegacy ||= materialized.archived
+      return materialized.worker
+    })
+    for (const worker of workers) {
       this.assertWorkerOwner(key, worker)
       assertWorkerLegacyShape(worker)
     }
-    return ledger
+    return { ledger: { ...ledger, workers }, archivedAmbiguousLegacy }
   }
 
   private async readLedgerFileStrict(key: ManagerKey): Promise<WorkerLedger> {
@@ -210,7 +216,11 @@ export class LedgerStore {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { manager_key: key, workers: [] }
       throw err
     }
-    try { return this.assertLedger(key, JSON.parse(raw) as WorkerLedger) }
+    try {
+      const normalized = this.assertLedger(key, JSON.parse(raw) as WorkerLedger)
+      if (normalized.archivedAmbiguousLegacy) await writeJsonAtomic(filePath, normalized.ledger)
+      return normalized.ledger
+    }
     catch (err) {
       throw new Error(`[LedgerStore] invalid ledger ${filePath}: ${(err as Error).message}`)
     }
@@ -240,6 +250,95 @@ export class LedgerStore {
   }
 }
 
+function legacyIncarnationId(workerId: string, index: number): string {
+  return `legacy:${encodeURIComponent(workerId)}:${index + 1}`
+}
+
+/**
+ * Historical ledgers stored only adapter-local seq. Materialize IDs from immutable physical order.
+ * If a numeric fork has multiple candidates, archive the complete worker rather than guessing a
+ * mainline or making every worker under the Manager unreadable.
+ */
+function materializeLegacyIncarnations(worker: LedgerWorker): { worker: LedgerWorker; archived: boolean } {
+  const bySeq = new Map<number, Incarnation[]>()
+  const ids = new Set<string>()
+  const incarnations = worker.incarnations.map((incarnation, index) => {
+    const incarnationId = incarnation.incarnation_id ?? legacyIncarnationId(worker.worker_id, index)
+    if (ids.has(incarnationId)) {
+      throw new Error(`[LedgerStore] duplicate incarnation_id '${incarnationId}' for ${worker.worker_id}`)
+    }
+    ids.add(incarnationId)
+    const normalized: Incarnation = {
+      ...incarnation,
+      incarnation_id: incarnationId,
+      workspace_instructions: incarnation.workspace_instructions ?? {
+        source: 'absent',
+        captured_at: incarnation.started_at,
+      },
+    }
+    const sameSeq = bySeq.get(normalized.seq) ?? []
+    sameSeq.push(normalized)
+    bySeq.set(normalized.seq, sameSeq)
+    return normalized
+  })
+
+  let ambiguousFork = false
+  const normalizedForks = incarnations.map((incarnation) => {
+    if (typeof incarnation.forked_from !== 'number') return incarnation
+    const candidates = bySeq.get(incarnation.forked_from) ?? []
+    if (candidates.length !== 1 || !candidates[0].incarnation_id) {
+      ambiguousFork = true
+      return incarnation
+    }
+    return { ...incarnation, forked_from: candidates[0].incarnation_id } as Incarnation
+  })
+
+  if (ambiguousFork) {
+    const archivedAt = new Date().toISOString()
+    const last = incarnations[incarnations.length - 1]
+    if (!last) throw new Error(`[LedgerStore] cannot archive empty incarnation history for ${worker.worker_id}`)
+    const archiveId = `legacy:${encodeURIComponent(worker.worker_id)}:ambiguous-v3`
+    return {
+      worker: {
+        ...worker,
+        task: isTerminalTaskStatus(worker.task.status)
+          ? worker.task
+          : { ...worker.task, status: 'failed', completed_at: worker.task.completed_at ?? archivedAt },
+        incarnations: [{
+          incarnation_id: archiveId,
+          seq: 1,
+          impl: 'legacy',
+          state: 'exited',
+          workspace: last.workspace,
+          workspace_instructions: last.workspace_instructions ?? { source: 'absent', captured_at: archivedAt },
+          started_at: last.started_at,
+          ended_at: archivedAt,
+          ended_reason: 'pre_migration',
+        }],
+        legacy_source: {
+          kind: 'ambiguous_v3_ledger',
+          archived_at: archivedAt,
+          reason: 'ambiguous_numeric_forked_from',
+          original_incarnations: worker.incarnations as LegacyArchivedIncarnation[],
+        },
+        updated_at: archivedAt,
+      },
+      archived: true,
+    }
+  }
+
+  for (const incarnation of normalizedForks) {
+    if (typeof incarnation.forked_from === 'string' && !ids.has(incarnation.forked_from)) {
+      throw new Error(`[LedgerStore] forked_from '${incarnation.forked_from}' does not belong to ${worker.worker_id}`)
+    }
+  }
+  return { worker: { ...worker, incarnations: normalizedForks }, archived: false }
+}
+
+function isTerminalTaskStatus(status: LedgerWorker['task']['status']): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled'
+}
+
 function assertWorkerLegacyShape(worker: LedgerWorker): void {
   const hasLegacyIncarnation = worker.incarnations.some((incarnation) => incarnation.impl === 'legacy')
   if (worker.legacy_source || hasLegacyIncarnation) assertLegacyWorker(worker)
@@ -248,18 +347,23 @@ function assertWorkerLegacyShape(worker: LedgerWorker): void {
 function assertLegacyWorker(worker: LedgerWorker, initialImport = false): void {
   const source = worker.legacy_source
   const first = worker.incarnations[0]
-  const traceIds = source?.trace_ids
-  const validSource = source?.kind === 'v2_admin_task' &&
-    typeof source.admin_task_id === 'string' && source.admin_task_id.length > 0 &&
-    typeof source.imported_at === 'string' && source.imported_at.length > 0 &&
-    Array.isArray(traceIds) && traceIds.every((traceId) => typeof traceId === 'string' && traceId.length > 0) &&
-    new Set(traceIds).size === traceIds.length
+  const validSource = source?.kind === 'v2_admin_task'
+    ? typeof source.admin_task_id === 'string' && source.admin_task_id.length > 0 &&
+      typeof source.imported_at === 'string' && source.imported_at.length > 0 &&
+      Array.isArray(source.trace_ids) && source.trace_ids.every((traceId) => typeof traceId === 'string' && traceId.length > 0) &&
+      new Set(source.trace_ids).size === source.trace_ids.length
+    : source?.kind === 'ambiguous_v3_ledger'
+      ? typeof source.archived_at === 'string' && source.archived_at.length > 0 &&
+        source.reason === 'ambiguous_numeric_forked_from' &&
+        Array.isArray(source.original_incarnations) && source.original_incarnations.length > 0
+      : false
   const validFirst = first?.impl === 'legacy' &&
     first.seq === 1 && first.state === 'exited' &&
     typeof first.ended_at === 'string' &&
     first.session_ref === undefined
   const laterLegacy = worker.incarnations.slice(1).some((incarnation) => incarnation.impl === 'legacy')
-  if (!validSource || !validFirst || laterLegacy || (initialImport && worker.incarnations.length !== 1)) {
+  if (!validSource || !validFirst || laterLegacy ||
+    (initialImport && (source?.kind !== 'v2_admin_task' || worker.incarnations.length !== 1))) {
     throw new Error(
       '[LedgerStore] invalid legacy worker: immutable source and one first legacy incarnation are required',
     )

@@ -140,7 +140,7 @@ describe('ClaudeCodeAdapter.provision', () => {
     await fs.rm(ws, { recursive: true, force: true }).catch(() => {})
   })
 
-  it('写出 .claude/settings.json(含 Stop/Notification hook 与 permissions)、.mcp.json、CLAUDE.md', async () => {
+  it('写出 .claude/settings.json(含 Stop/Notification hook 与 permissions) 和 .mcp.json，不改写 workspace 规则文件', async () => {
     execFileSync('git', ['init', '-q'], { cwd: ws })
     await fs.writeFile(path.join(ws, '.gitignore'), 'existing-rule')
     const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
@@ -179,8 +179,8 @@ describe('ClaudeCodeAdapter.provision', () => {
     expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', '.mcp.json'], { cwd: ws, stdio: 'ignore' })).toThrow()
     expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', path.basename(crashTemp)], { cwd: ws, stdio: 'ignore' })).toThrow()
 
-    const claudeMd = await fs.readFile(path.join(ws, 'CLAUDE.md'), 'utf-8')
-    expect(claudeMd).toContain('你是 crabot 的 worker')
+    await expect(fs.access(path.join(ws, 'CLAUDE.md'))).rejects.toThrow()
+    await expect(fs.access(path.join(ws, 'AGENTS.md'))).rejects.toThrow()
   })
 
   it('拒绝覆盖 Git 已跟踪的 .mcp.json，避免 ignore 对 tracked file 无效时泄漏凭据', async () => {
@@ -390,6 +390,40 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
       expect(mcpConfigIdx).toBeGreaterThan(-1)
       expect(argv[mcpConfigIdx + 1]).toBe('.mcp.json')
       expect(argv).toContain('--strict-mcp-config')
+
+      await adapter.kill(h)
+    },
+    15000,
+  )
+
+  it(
+    '用户自有 CLAUDE.md 时可把 AGENTS.md 快照追加到启动上下文',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const argvFile = path.join(dataDir, 'spawn-workspace-instructions-argv.jsonl')
+      const adapter = new ClaudeCodeAdapter({
+        dataDir,
+        claudeConfigPath: fakeClaudeConfig(dataDir),
+        tmux,
+        claudeBin: claudeBinFor([], channel.hookCommand('stop'), argvFile),
+        promptDeliveryTimeoutMs: 0,
+      })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+      const agents = '# Workspace rules\nRead the task status first.\n'
+      const h = await adapter.spawn({
+        ...makeSpec(workerId, '你好'),
+        workspace_instructions: {
+          snapshot: { source: 'agents_md', captured_at: '2026-08-21T00:00:00.000Z', digest: 'test-digest' },
+          text: agents,
+        },
+      })
+
+      const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
+      const promptIndex = argv.indexOf('--append-system-prompt')
+      expect(promptIndex).toBeGreaterThan(-1)
+      expect(argv[promptIndex + 1]).toContain(agents)
+      expect(argv[promptIndex + 1]).toContain('read-only snapshot')
 
       await adapter.kill(h)
     },
@@ -951,6 +985,21 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     const sessionFile = path.join(claudeProjectsDir, await wsSlug(), `${h.session_ref}.jsonl`)
     const raw = await fs.readFile(sessionFile, 'utf-8')
     expect(raw).toContain('"type":"user"')
+
+    await adapter.kill(h)
+  })
+
+  it('真实 Stop hook 报告 claude_stop completion hint', async () => {
+    const reports: StateChangeReport[] = []
+    const { adapter, workerId } = await deliveryAdapter([{ output: '任务输出', emitStop: true }], {
+      onStateChange: (_h, state, report) => {
+        if (state === 'idle' && report) reports.push(report)
+      },
+    })
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+
+    await waitForIdle(adapter, h)
+    expect(reports).toContainEqual(expect.objectContaining({ completionSource: 'claude_stop' }))
 
     await adapter.kill(h)
   })
@@ -2206,6 +2255,15 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       report: {
         terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
         waitReason: 'interaction_required',
+        ui: {
+          fingerprint: 'claude_permission:yes-no',
+          actions: [
+            { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+            { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+            { action_id: 'select_1', kind: 'keys', keys: ['1', 'Enter'] },
+            { action_id: 'select_2', kind: 'keys', keys: ['2', 'Enter'] },
+          ],
+        },
         notification: { type: 'terminal_interaction' },
       },
     })
@@ -2218,7 +2276,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(seen).toHaveLength(1)
 
-    await adapter.sendInput(h, 'Enter', { raw: true })
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
     expect(await adapter.state(h)).toBe('running')
 
     tmux.paneText = 'Claude needs your permission\n1. Yes\n2. No'
@@ -2228,6 +2286,205 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       'utf-8',
     )
     await waitFor(() => seen.length === 2)
+    await adapter.kill(h)
+  })
+
+  it('UI 回应后的后继交互仍用完整 interaction_required 形状唤醒 Manager', async () => {
+    class ChainedPromptTmux extends NoopTmux {
+      nextResponse: 'manager_prompt' | 'repainting' | 'pending_input' | undefined
+
+      async sendKeys(name: string, keys: string[]): Promise<void> {
+        if (keys.join(',') === 'Enter' && this.nextResponse) {
+          const next = this.nextResponse
+          this.nextResponse = undefined
+          this.paneText = next === 'manager_prompt'
+            ? 'Claude needs your permission again\n1. Yes\n2. No'
+            : next === 'pending_input'
+              ? '❯ retained input\n? for shortcuts'
+              : 'terminal is repainting'
+          return
+        }
+        await super.sendKeys(name, keys)
+      }
+    }
+
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const tmux = new ChainedPromptTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    const h = await adapter.spawn({ worker_id: `cctest-${randomUUID().slice(0, 8)}`, prompt: 'work', workspace: { root: workspaceRoot } })
+    tmux.paneText = 'Claude needs your permission\n1. Yes\n2. No'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'notification', raw: { notification_type: 'permission_prompt' } }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 1)
+
+    tmux.nextResponse = 'manager_prompt'
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 2)
+
+    expect(seen[1]).toEqual({
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'interaction_required',
+        ui: {
+          fingerprint: 'claude_permission:yes-no',
+          actions: [
+            { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+            { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+            { action_id: 'select_1', kind: 'keys', keys: ['1', 'Enter'] },
+            { action_id: 'select_2', kind: 'keys', keys: ['2', 'Enter'] },
+          ],
+        },
+        notification: { type: 'terminal_interaction' },
+      },
+    })
+
+    tmux.nextResponse = 'repainting'
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 3)
+    expect(seen[2]).toEqual({
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'interaction_required',
+      },
+    })
+
+    tmux.paneText = 'Claude needs your permission again\n1. Yes\n2. No'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'notification', raw: { notification_type: 'permission_prompt' } }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 4)
+    expect(seen[3].report?.notification).toEqual({ type: 'terminal_interaction' })
+
+    tmux.nextResponse = 'pending_input'
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 5)
+    expect(seen[4]).toEqual({
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'input_pending',
+      },
+    })
+    await adapter.kill(h)
+  })
+
+  it('UI 回应后的固定自动操作失败会补发可回应的 interaction_required', async () => {
+    class ChainedPlanTmux extends NoopTmux {
+      chainPlanAfterManagerResponse = false
+
+      async sendKeys(name: string, keys: string[]): Promise<void> {
+        if (this.chainPlanAfterManagerResponse && keys.join(',') === 'Enter') {
+          this.chainPlanAfterManagerResponse = false
+          this.paneText = [
+            'Exit plan mode?',
+            'Claude wants to exit plan mode',
+            '1. Yes, and switch to default (ask each time) for this session',
+            '2. No',
+          ].join('\n')
+          return
+        }
+        if (keys.join(',') === '1,Enter') {
+          this.alive = false
+          return
+        }
+        await super.sendKeys(name, keys)
+      }
+    }
+
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const tmux = new ChainedPlanTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    const h = await adapter.spawn({ worker_id: `cctest-${randomUUID().slice(0, 8)}`, prompt: 'work', workspace: { root: workspaceRoot } })
+    tmux.paneText = 'Claude needs your permission\n1. Yes\n2. No'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'notification', raw: { notification_type: 'permission_prompt' } }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 1)
+
+    tmux.chainPlanAfterManagerResponse = true
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 2)
+
+    expect(seen[1]).toMatchObject({
+      state: 'idle',
+      report: {
+        waitReason: 'interaction_required',
+        ui: {
+          fingerprint: 'claude_exit_plan:1-2',
+          actions: expect.arrayContaining([
+            { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+            { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+          ]),
+        },
+        notification: { type: 'automatic_interaction_failed' },
+      },
+    })
+    await adapter.kill(h)
+  })
+
+  it('UI 回应后同一固定屏幕仍在时会重新交给 Manager', async () => {
+    class StickyPlanTmux extends NoopTmux {
+      async sendKeys(name: string, keys: string[]): Promise<void> {
+        if (keys.join(',') === '1,Enter') throw new Error('automatic plan action failed')
+        if (keys.join(',') === 'Enter') return
+        await super.sendKeys(name, keys)
+      }
+    }
+
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const tmux = new StickyPlanTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    const h = await adapter.spawn({ worker_id: `cctest-${randomUUID().slice(0, 8)}`, prompt: 'work', workspace: { root: workspaceRoot } })
+    tmux.paneText = [
+      'Exit plan mode?',
+      'Claude wants to exit plan mode',
+      '1. Yes, and switch to default (ask each time) for this session',
+      '2. No',
+    ].join('\n')
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'notification', raw: { notification_type: 'permission_prompt' } }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 1)
+
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 2)
+
+    expect(seen.map(({ state, report }) => ({ state, notification: report?.notification?.type, fingerprint: report?.ui?.fingerprint }))).toEqual([
+      { state: 'idle', notification: 'automatic_interaction_failed', fingerprint: 'claude_exit_plan:1-2' },
+      { state: 'idle', notification: 'automatic_interaction_failed', fingerprint: 'claude_exit_plan:1-2' },
+    ])
     await adapter.kill(h)
   })
 
@@ -2338,6 +2595,15 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       report: {
         terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
         waitReason: 'interaction_required',
+        ui: {
+          fingerprint: 'claude_exit_plan:1-2',
+          actions: [
+            { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+            { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+            { action_id: 'select_1', kind: 'keys', keys: ['1', 'Enter'] },
+            { action_id: 'select_2', kind: 'keys', keys: ['2', 'Enter'] },
+          ],
+        },
         notification: { type: 'automatic_interaction_failed' },
       },
     }])

@@ -29,7 +29,7 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('claude code')
     expect(MANAGER_IDENTITY).toContain('codex')
     expect(MANAGER_IDENTITY).toContain('你自己不干活')
-    expect(MANAGER_IDENTITY).toContain('派活、送话、侧问、看终端、终止')
+    expect(MANAGER_IDENTITY).toContain('派活、送话、侧问、查状态/原生会话、看终端、回应未知界面、请求中断或停止')
     expect(MANAGER_IDENTITY).toContain('get_worker_terminal')
     expect(MANAGER_IDENTITY).toContain('worker 与人类之间隔着你')
   })
@@ -97,7 +97,7 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     // 旧措辞是一句假承诺：turn 内的输出不产生任何事件，LLM 信了就会一直等一个不会来的唤醒。
     expect(MANAGER_IDENTITY).not.toContain('不需要你主动轮询')
     expect(MANAGER_IDENTITY).toContain('每跑完一轮')
-    expect(MANAGER_IDENTITY).toContain('最后说的那段话')
+    expect(MANAGER_IDENTITY).toContain('get_worker_activity')
     expect(MANAGER_IDENTITY).toContain('get_worker_terminal')
   })
 
@@ -182,8 +182,10 @@ describe('assembleManagerSystemPrompt 稳定装配', () => {
         'send_to_worker',
         'query_worker',
         'get_worker_terminal',
+        'respond_to_worker_ui',
         'list_workers',
-        'kill_worker',
+        'request_worker_interrupt',
+        'request_worker_stop',
         // crabot-info 工具
         'get_system_status',
         'get_deployment_info',

@@ -36,6 +36,7 @@ function permissions(overrides: Partial<ResolvedPermissions['tool_access']>): Re
 class RecordingAdapter implements WorkerAdapter {
   readonly provisionCalls: Array<{ ws: Workspace; caps: CapabilityBundle }> = []
   readonly spawnCalls: SpawnSpec[] = []
+  private readonly stoppedWorkers = new Set<string>()
 
   constructor(readonly implId: WorkerImplId) {}
 
@@ -66,15 +67,17 @@ class RecordingAdapter implements WorkerAdapter {
     return { kind: 'unavailable' as const, unavailable_reason: 'headless_without_text' }
   }
 
-  async state(_h: IncarnationHandle): Promise<WorkerContractState> {
-    return 'running'
+  async state(h: IncarnationHandle): Promise<WorkerContractState> {
+    return this.stoppedWorkers.has(h.worker_id) ? 'exited' : 'running'
   }
 
   async inspectSupervisionActivity(_h: IncarnationHandle, cursor?: { offset: number }) {
     return { kind: 'unknown' as const, next_cursor: cursor ?? { offset: 0 } }
   }
 
-  async kill(_h: IncarnationHandle): Promise<void> {}
+  async kill(h: IncarnationHandle): Promise<void> {
+    this.stoppedWorkers.add(h.worker_id)
+  }
 
   capabilities(): AdapterCapabilities {
     return { fork: false, revive: true, goalMode: false, subagent: false, structuredTrace: false }

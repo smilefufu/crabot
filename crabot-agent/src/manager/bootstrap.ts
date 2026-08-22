@@ -189,6 +189,8 @@ export interface BootstrapDeps {
   readonly resolveUserLevelBinary?: (impl: 'claude-code' | 'codex') => Promise<{ binary?: string; global_detected: boolean }>
   /** P6-C §7：list_worker_implementations 的 registry snapshot getter。 */
   readonly workerImplSnapshot?: import('./tools/worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
+  /** Agent-owned structured session projection used by get_worker_activity. */
+  readonly readWorkerActivity?: import('./tools/worker-tools.js').WorkerToolsDeps['readWorkerActivity']
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */
   readonly admitWorkerConnection?: (impl: import('../workers/types.js').WorkerImplId, operationLabel?: string) => Promise<{
     env: Record<string, string>
@@ -446,6 +448,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     new BuiltinWorkerAdapter({
       dataDir: builtinDataDir,
       onStateChange: harness.handleStateChange,
+      onNativeActivity: harness.handleNativeActivity,
       resolveRuntime: deps.builtinSpawnDefaults,
       traceHooks: deps.builtinTraceHooks,
       traceReader: deps.builtinTraceReader,
@@ -456,6 +459,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     new ClaudeCodeAdapter({
       dataDir: adapterDataDir('claude-code'),
       onStateChange: harness.handleStateChange,
+      onNativeActivity: harness.handleNativeActivity,
       ...(deps.resolveUserLevelBinary ? { resolveUserLevelBinary: () => deps.resolveUserLevelBinary!('claude-code') } : {}),
     }),
   )
@@ -464,6 +468,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     new CodexWorkerAdapter({
       dataDir: adapterDataDir('codex'),
       onStateChange: harness.handleStateChange,
+      onNativeActivity: harness.handleNativeActivity,
       ...(deps.resolveUserLevelBinary ? { resolveUserLevelBinary: () => deps.resolveUserLevelBinary!('codex') } : {}),
     }),
   )
@@ -525,6 +530,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       return buildManagerToolFace({
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
+        readWorkerActivity: deps.readWorkerActivity,
         workerContext: () => ({
           managerKey: key,
           // P6-A §6.6：当前 episode trace id 由 registry 桥惰性读取（tool call 发生时才取），
@@ -573,6 +579,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           scheduleIdentity?.isBuiltin === true && scheduleIdentity.taskType === 'daily_reflection',
         authorization: () => principals.currentMasterAuthorization(key),
         validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),
+        hasSuccessfulSendMessageTo: traceHooks?.hasSuccessfulSendMessageTo,
+        onSuccessfulSendMessage: traceHooks?.onSuccessfulSendMessage,
+        hasContinuedWorker: traceHooks?.hasContinuedWorker,
+        onWorkerContinuation: traceHooks?.onWorkerContinuation,
       })
     },
     // system prompt 的「对话对象档案」段(§4.2 5b/5d):场景画像 + crab 在该渠道的
@@ -608,7 +618,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
  * 显式的启动对账入口(§12),与构造分离——由调用方决定何时调(建议:启动后异步跑一次,
  * 失败仅 warn)。
  *
- * 两步顺序不可换,理由见 `harness.reconcileOnStartup` 的方法注释:`scanOrphans` 修的是
+ * `scanOrphans` 必须先于后续两项,理由见 `harness.reconcileOnStartup` 的方法注释:`scanOrphans` 修的是
  * builtin adapter 自己 dataDir 下 meta 文件那份"进程内存活状态"私有真相(进程重启后
  * state==='running' 的 meta 必是孤儿),必须先把它改写成 exited(crashed);否则
  * `reconcileOnStartup` 调 `builtin.state()` 时会读到过期的 'running',把已经不存在的化身
@@ -617,9 +627,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 export async function reconcileManagerStack(stack: ManagerStack): Promise<ReconcileReport> {
   await stack.principals.init()
   await BuiltinWorkerAdapter.scanOrphans(stack.builtinDataDir)
+  // CLI 重建 runtime 时会重新安装原生 session 的追加监听；先建立缺失的 high-water，才能避免
+  // 第一次追加回调把升级前会话重放成新 activity。
+  await stack.harness.reconcileNativeActivityOnStartup()
   const report = await stack.harness.reconcileOnStartup()
   await stack.harness.reconcileInputDeliveriesOnStartup()
   await stack.harness.reconcileQueryReceiptsOnStartup()
+  await stack.harness.reconcileControlOperationsOnStartup()
   await stack.harness.reconcileSupervisionOnStartup()
   return report
 }

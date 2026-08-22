@@ -6,7 +6,6 @@ import {
   materializeSkills,
   renderMcpJson,
   renderCodexMcpToml,
-  renderContextMd,
   writeSensitiveFileAtomic,
   type ProvisionSources,
 } from '../../src/workers/provision/materialize.js'
@@ -271,23 +270,5 @@ command = "C:\\\\bin\\\\\\"crabot\\".exe"
 
   it('空 server 列表渲染为空字符串', () => {
     expect(renderCodexMcpToml([])).toBe('')
-  })
-})
-
-describe('renderContextMd', () => {
-  it('正文包含 workerId、身份声明、原文嵌入的落盘纪律与 HANDOFF 交接约定', () => {
-    const sa: ProvisionSources['selfAwareness'] = {
-      workerId: 'w-123',
-      taskTitle: '修复登录超时问题',
-      disciplines: '中间产物必须写入 workspace/scratch/,不得写入系统 /tmp。',
-    }
-
-    const md = renderContextMd(sa)
-
-    expect(md).toContain('w-123')
-    expect(md).toContain('修复登录超时问题')
-    expect(md).toContain('你是 crabot 的 worker')
-    expect(md).toContain(sa.disciplines)
-    expect(md).toContain('HANDOFF.md')
   })
 })

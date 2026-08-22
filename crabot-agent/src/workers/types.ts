@@ -7,6 +7,20 @@ import type { ResolvedPermissions, MCPServerConfig } from '../types.js'
 
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
 export type CLIWorkerImplId = Exclude<WorkerImplId, 'builtin'>
+export type IncarnationId = string
+
+export interface WorkspaceInstructionSnapshot {
+  readonly source: 'agents_md' | 'absent'
+  readonly captured_at: string
+  readonly digest?: string
+  readonly artifact_id?: string
+}
+
+/** Harness-private, immutable AGENTS.md capture delivered to an adapter at incarnation launch. */
+export interface WorkspaceInstructionPayload {
+  readonly snapshot: WorkspaceInstructionSnapshot
+  readonly text?: string
+}
 
 // ── P6-B：worker implementation connection / activation（protocol-agent-v3 §6.5 逐字段对齐）──
 
@@ -115,10 +129,59 @@ export interface SendInputOptions {
   readonly signal?: AbortSignal
 }
 
+/** The only fixed TUI keys an adapter may expose through a UI snapshot. */
+export const WORKER_UI_CONTROL_KEYS = [
+  'Enter',
+  'Escape',
+  'Up',
+  'Down',
+  'Left',
+  'Right',
+  'Tab',
+  'Space',
+  '0',
+  '1',
+  '2',
+  '3',
+  '4',
+  '5',
+  '6',
+  '7',
+  '8',
+  '9',
+] as const
+
+export type WorkerUiControlKey = (typeof WORKER_UI_CONTROL_KEYS)[number]
+
+/**
+ * Adapter-declared actions are persisted with the UI snapshot. A key action is an exact,
+ * finite sequence; a text action may only carry ordinary text within its declared limit.
+ */
+export type WorkerUiActionDescriptor =
+  | {
+      readonly action_id: string
+      readonly kind: 'keys'
+      readonly keys: readonly WorkerUiControlKey[]
+    }
+  | {
+      readonly action_id: string
+      readonly kind: 'text'
+      readonly min_length?: number
+      readonly max_length: number
+    }
+
+export type WorkerUiResponse =
+  | { readonly kind: 'keys'; readonly keys: readonly WorkerUiControlKey[] }
+  | { readonly kind: 'text'; readonly text: string }
+
 export interface ForkOptions {
   readonly query_id: string
+  /** Allocated by Harness before adapter.fork; direct adapter callers may omit it. */
+  readonly incarnation_id?: IncarnationId
   readonly establishment_deadline_at: string
   readonly connection_env?: Record<string, string>
+  /** Present only when this adapter needs Harness to inject the AGENTS.md capture at launch. */
+  readonly workspace_instructions?: WorkspaceInstructionPayload
 }
 
 export interface NormalizedTraceEvent {
@@ -139,6 +202,25 @@ export interface NormalizedTraceEvent {
   readonly source_offset?: number
 }
 
+export type WorkerActivityKind = 'assistant_text' | 'tool_call' | 'tool_result'
+export type WorkerActivityView = 'assistant' | 'all'
+export type WorkerActivityCursor = string
+
+/**
+ * A Manager-safe projection of a Worker native session record. Native paths, raw JSON and
+ * adapter cursor details remain inside the Harness/adapter boundary.
+ */
+export interface WorkerActivity {
+  readonly activity_id: string
+  readonly worker_id: string
+  readonly incarnation_id: IncarnationId
+  readonly kind: WorkerActivityKind
+  readonly occurred_at: string
+  readonly summary: string
+  readonly text?: string
+  readonly detail?: unknown
+}
+
 export interface CapabilityBundle {
   readonly skills: ReadonlyArray<{ id: string; name: string; skill_dir: string }>
   readonly mcp_servers: ReadonlyArray<MCPServerConfig>
@@ -152,8 +234,12 @@ export interface WorkerCapabilityContext {
 
 export interface SpawnSpec {
   readonly worker_id: string
+  /** Harness-owned identity. Direct adapter tests may omit it, production Harness never does. */
+  readonly incarnation_id?: IncarnationId
   readonly prompt: string
   readonly workspace: Workspace
+  /** Present only when this adapter needs Harness to inject the AGENTS.md capture at launch. */
+  readonly workspace_instructions?: WorkspaceInstructionPayload
   /**
    * P6-B §6.5：operation admission 由 translator 注入的最小连接 env（CLI adapter 透传到
    * 进程 env；tmux driver 侧仍会过 scrubChildEnv）。不得由 Manager/调用方直接构造——
@@ -189,8 +275,17 @@ export interface SpawnSpec {
   }
 }
 
+export interface ResumeOptions {
+  readonly connection_env?: Record<string, string>
+  readonly incarnation_id?: IncarnationId
+  /** Present only when this adapter needs Harness to inject the AGENTS.md capture at launch. */
+  readonly workspace_instructions?: WorkspaceInstructionPayload
+}
+
 export interface IncarnationHandle {
   readonly worker_id: string
+  /** Present for every Harness-created incarnation; legacy adapters may omit it during migration. */
+  readonly incarnation_id?: IncarnationId
   readonly seq: number
   readonly impl: WorkerImplId
   /** 本化身自己的会话引用,创建时(spawn/resume/fork 返回前)即由 adapter 填入真值——
@@ -204,6 +299,7 @@ export interface IncarnationHandle {
 }
 export interface IncarnationRef {
   readonly worker_id: string
+  readonly incarnation_id?: IncarnationId
   readonly seq: number
   /** builtin: session 树 node_id;CLI: 原生 session id */
   readonly session_ref: string
@@ -242,6 +338,12 @@ export interface StateChangeReport {
    */
   readonly endReason?: IncarnationEndReason
   /**
+   * Adapter observed a native turn boundary. This is deliberately distinct from
+   * a lifecycle state: an exit caused by a crash or a harness stop is not a
+   * worker result that the Manager may mark delivered.
+   */
+  readonly completionSource?: 'builtin_end_turn' | 'claude_stop' | 'codex_turn_complete'
+  /**
    * worker 自己写的收尾结论,来自 builtin 的 `finish_task(summary)`,因此只可能在
    * `state==='exited'` 时出现,且只有那一条终止路径有——crashed/killed/上下文超限
    * 收场时 worker 根本没机会写。cc/codex 没有对应的结构化终态上报,不产。
@@ -251,10 +353,18 @@ export interface StateChangeReport {
    * 尾一句 text 都没有,`lastText` 与 builtin 的纯文本 artifact 双双为空,`summary` 是它唯一的交付物。
    */
   readonly summary?: string
-  /** 当前终端画面或明确不可用原因；CLI 的画面直接来自 tmux capture-pane。 */
+  /** 当前终端画面或明确不可用原因；仅 `interaction_required` 状态事件可携带这次一次性 capture。 */
   readonly terminal?: WorkerTerminalView
   /** CLI waiting_action / 投递暂扣的诊断原因。 */
   readonly waitReason?: string
+  /**
+   * An adapter's identity and bounded actions for a currently visible manager-required UI.
+   * The terminal itself stays behind explicit `get_worker_terminal` reads.
+   */
+  readonly ui?: {
+    readonly fingerprint: string
+    readonly actions: readonly WorkerUiActionDescriptor[]
+  }
   /** cc Notification 的解析载荷；harness 映射为 manager-facing detail。 */
   readonly notification?: { readonly type: string; readonly message?: string; readonly title?: string }
 }
@@ -298,7 +408,7 @@ export interface WorkerAdapter {
   preflightProvision?(ws: Workspace, caps: CapabilityBundle): Promise<void>
   provision(ws: Workspace, caps: CapabilityBundle): Promise<void>
   spawn(spec: SpawnSpec): Promise<IncarnationHandle>
-  resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle>
+  resume(prev: IncarnationRef, wakeInput: string, opts?: ResumeOptions): Promise<IncarnationHandle>
   fork(prev: IncarnationRef, forkInput: string, opts: ForkOptions): Promise<IncarnationHandle>
   sendInput(h: IncarnationHandle, text: string, opts?: SendInputOptions): Promise<void>
   readTerminal(h: IncarnationHandle): Promise<WorkerTerminalView>
@@ -315,6 +425,13 @@ export interface WorkerAdapter {
     cursor?: { readonly offset: number },
   ): Promise<SupervisionObservation>
   readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }>
+  /** Request only the active turn to stop. Completion is verified by Harness control operations. */
+  interrupt?(h: IncarnationHandle): Promise<void>
+  /** Stop the adapter-owned execution. Completion is verified by Harness control operations. */
+  stop?(h: IncarnationHandle): Promise<void>
+  /** Reply to an unknown UI after Harness has verified a one-time snapshot. */
+  respondToUi?(h: IncarnationHandle, response: WorkerUiResponse): Promise<void>
+  /** @deprecated Compatibility primitive. New control requests use stop(). */
   kill(h: IncarnationHandle): Promise<void>
   /** Release adapter-owned runtime resources without terminating independent tmux workers. */
   dispose(): Promise<void>

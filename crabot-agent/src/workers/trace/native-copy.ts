@@ -94,6 +94,10 @@ export class NativeTraceCopyStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw error
     }
+    return this.parseHeader(raw)
+  }
+
+  private parseHeader(raw: string): CopyHeader | null {
     const firstLine = raw.split('\n', 1)[0]
     if (!firstLine) return null
     try {
@@ -102,6 +106,16 @@ export class NativeTraceCopyStore {
     } catch {
       return null
     }
+  }
+
+  private eventsFromRaw(raw: string): NormalizedTraceEvent[] {
+    const events: NormalizedTraceEvent[] = []
+    for (const line of raw.split('\n').filter((line) => line.length > 0).slice(1)) {
+      try {
+        events.push(JSON.parse(line) as NormalizedTraceEvent)
+      } catch { /* 坏行跳过（copy 只用于降级展示） */ }
+    }
+    return events
   }
 
   /** 等待挂起的写盘全部落地（测试/停机收口用）。 */
@@ -143,16 +157,59 @@ export class NativeTraceCopyStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw error
     }
-    const lines = raw.split('\n').filter((line) => line.length > 0)
-    if (lines.length === 0) return null
-    const header = await this.readHeader(filePath)
+    const header = this.parseHeader(raw)
     if (!header || header.incarnation_fingerprint !== fingerprint) return null
-    const events: NormalizedTraceEvent[] = []
-    for (const line of lines.slice(1)) {
+    return { events: this.eventsFromRaw(raw) }
+  }
+
+  /**
+   * 只在 live native source 已不可读时接受 pre-incarnation copy，并把 header 原子升级。
+   * 旧摘要必须逐字匹配当时的绑定算法；新摘要不匹配仍绝不混读。
+   */
+  async readLegacyAndUpgrade(
+    workerId: string,
+    seq: number,
+    legacyFingerprint: string,
+    fingerprint: string,
+  ): Promise<{ events: NormalizedTraceEvent[] } | null> {
+    const key = `${workerId}#${seq}`
+    const tail = this.writeTails.get(key) ?? Promise.resolve()
+    const next = tail.then(async () => {
+      const filePath = this.fileFor(workerId, seq)
+      let raw: string
       try {
-        events.push(JSON.parse(line) as NormalizedTraceEvent)
-      } catch { /* 坏行跳过（copy 只用于降级展示） */ }
-    }
-    return { events }
+        raw = await fs.readFile(filePath, 'utf-8')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+        throw error
+      }
+      const header = this.parseHeader(raw)
+      if (header?.incarnation_fingerprint === fingerprint) {
+        return { events: this.eventsFromRaw(raw) }
+      }
+      if (
+        !header
+        || header.worker_id !== workerId
+        || header.seq !== seq
+        || header.incarnation_fingerprint !== legacyFingerprint
+      ) return null
+
+      const lineEnd = raw.indexOf('\n')
+      const body = lineEnd === -1 ? '' : raw.slice(lineEnd + 1)
+      const replacement: CopyHeader = {
+        kind: 'native-trace-copy-header',
+        worker_id: workerId,
+        seq,
+        incarnation_fingerprint: fingerprint,
+      }
+      const tmpPath = `${filePath}.tmp-${randomBytes(6).toString('hex')}`
+      // 只替换 header；已经脱敏的原始 event 行按字节保留，不再经过第二次 redaction。
+      await fs.writeFile(tmpPath, `${JSON.stringify(replacement)}\n${body}`, { mode: 0o600 })
+      await fs.rename(tmpPath, filePath)
+      return { events: this.eventsFromRaw(raw) }
+    })
+    // 后续 append 必须排在 header 升级之后，避免将旧副本误判为另一化身而覆盖。
+    this.writeTails.set(key, next.then(() => undefined, () => undefined))
+    return next
   }
 }

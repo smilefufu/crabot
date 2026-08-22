@@ -161,7 +161,7 @@ describe('CodexWorkerAdapter.provision', () => {
     await fs.rm(codexHomeSource, { recursive: true, force: true }).catch(() => {})
   })
 
-  it('写出 .codex/config.toml(notify 段在 mcp_servers 表头之前)、AGENTS.md', async () => {
+  it('写出 .codex/config.toml(notify 段在 mcp_servers 表头之前)，不改写 workspace 规则文件', async () => {
     execFileSync('git', ['init', '-q'], { cwd: ws })
     await fs.writeFile(path.join(codexHomeSource, 'auth.json'), '{"token":"secret-auth"}', 'utf-8')
     const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
@@ -203,8 +203,8 @@ describe('CodexWorkerAdapter.provision', () => {
       expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', relativePath], { cwd: ws, stdio: 'ignore' })).toThrow()
     }
 
-    const agentsMd = await fs.readFile(path.join(ws, 'AGENTS.md'), 'utf-8')
-    expect(agentsMd).toContain('你是 crabot 的 worker')
+    await expect(fs.access(path.join(ws, 'AGENTS.md'))).rejects.toThrow()
+    await expect(fs.access(path.join(ws, 'CLAUDE.md'))).rejects.toThrow()
   })
 
   it.each(['config.toml', 'auth.json'])('拒绝覆盖 Git 已跟踪的 .codex/%s，且在其他 provision 写入前失败', async (fileName) => {
@@ -2278,6 +2278,13 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
       report: {
         terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
         waitReason: 'interaction_required',
+        ui: {
+          fingerprint: 'codex_approval:yes-no',
+          actions: [
+            { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+            { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+          ],
+        },
         notification: { type: 'terminal_interaction' },
       },
     }])
@@ -2290,7 +2297,7 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(seen).toHaveLength(1)
 
-    await adapter.sendInput(h, 'Enter', { raw: true })
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
     expect(await adapter.state(h)).toBe('running')
 
     tmux.paneText = 'Allow Codex to modify this workspace?\nYes\nNo'
@@ -2300,6 +2307,96 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
       'utf-8',
     )
     await waitFor(() => seen.length === 2)
+    await adapter.kill(h)
+  })
+
+  it('UI 回应后的后继交互仍用完整 interaction_required 形状唤醒 Manager', async () => {
+    class ChainedPromptTmux extends NoopTmux {
+      nextResponse: 'manager_prompt' | 'repainting' | 'pending_input' | undefined
+
+      async sendKeys(name: string, keys: string[]): Promise<void> {
+        if (keys.join(',') === 'Enter' && this.nextResponse) {
+          const next = this.nextResponse
+          this.nextResponse = undefined
+          this.paneText = next === 'manager_prompt'
+            ? 'Allow Codex to modify this workspace again?\nYes\nNo'
+            : next === 'pending_input'
+              ? '› retained input\n? for shortcuts'
+              : 'terminal is repainting'
+          return
+        }
+        await super.sendKeys(name, keys)
+      }
+    }
+
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const tmux = new ChainedPromptTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    const h = await adapter.spawn({ worker_id: `codextest-${randomUUID().slice(0, 8)}`, prompt: 'work', workspace: { root: workspaceRoot } })
+    tmux.paneText = 'Allow Codex to modify this workspace?\nYes\nNo'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'permission_request', raw: { hook_event_name: 'PermissionRequest' } }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 1)
+
+    tmux.nextResponse = 'manager_prompt'
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 2)
+
+    expect(seen[1]).toEqual({
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'interaction_required',
+        ui: {
+          fingerprint: 'codex_approval:yes-no',
+          actions: [
+            { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+            { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+          ],
+        },
+        notification: { type: 'terminal_interaction' },
+      },
+    })
+
+    tmux.nextResponse = 'repainting'
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 3)
+    expect(seen[2]).toEqual({
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'interaction_required',
+      },
+    })
+
+    tmux.paneText = 'Allow Codex to modify this workspace again?\nYes\nNo'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'permission_request', raw: { hook_event_name: 'PermissionRequest' } }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 4)
+    expect(seen[3].report?.notification).toEqual({ type: 'terminal_interaction' })
+
+    tmux.nextResponse = 'pending_input'
+    await adapter.respondToUi(h, { kind: 'keys', keys: ['Enter'] })
+    await waitFor(() => seen.length === 5)
+    expect(seen[4]).toEqual({
+      state: 'idle',
+      report: {
+        terminal: { kind: 'live_terminal', text: tmux.paneText, captured_at: expect.any(String) },
+        waitReason: 'input_pending',
+      },
+    })
     await adapter.kill(h)
   })
 

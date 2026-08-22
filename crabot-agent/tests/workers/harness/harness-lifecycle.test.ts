@@ -5,6 +5,7 @@ import { join } from 'path'
 import { WorkerHarness, WorkerNotFoundError, TaskCancelledError, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
+import { NativeActivityStore } from '../../../src/workers/harness/native-activity-store'
 import { } from '../../../src/workers/harness/ledger-types'
 import { WorkerEventLog, type HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { QueryReceiptStore } from '../../../src/workers/harness/query-receipt-store'
@@ -23,7 +24,9 @@ import type {
   AdapterCapabilities,
   InitialInputResult,
   ForkOptions,
+  NormalizedTraceEvent,
   SendInputOptions,
+  WorkerUiResponse,
 } from '../../../src/workers/types'
 
 // ---- FakeAdapter:实现 WorkerAdapter 契约的可编程桩,不碰 tmux/LLM ----
@@ -36,6 +39,11 @@ function terminal(text: string) {
   return { kind: 'live_terminal' as const, text, captured_at: '2026-08-19T00:00:00.000Z' }
 }
 
+const UI_ACTIONS = [
+  { action_id: 'confirm', kind: 'keys' as const, keys: ['Enter'] as const },
+  { action_id: 'cancel', kind: 'keys' as const, keys: ['Escape'] as const },
+]
+
 interface FakeAdapterOpts {
   readonly implId?: WorkerImplId
   readonly caps?: Partial<AdapterCapabilities>
@@ -47,6 +55,7 @@ interface FakeAdapterOpts {
   readonly acceptedExitReport?: StateChangeReport
   readonly updatedSessionRef?: string
   readonly spawnInitialInput?: InitialInputResult
+  readonly nativeTrace?: ReadonlyArray<NormalizedTraceEvent>
   /** P4 Task 4 第四轮:严格复刻 ClaudeCodeAdapter.fork()(adapter.ts:452-460)的调用顺序——
    * 在 `return handle` 之前就把化身转到 exited 并**同步**调用 onStateChange。用于回归
    * "fork 落地即已终态"这条竞态(见下面 describe 块)。 */
@@ -59,8 +68,10 @@ class FakeAdapter implements WorkerAdapter {
   readonly spawnCalls: SpawnSpec[] = []
   readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: SendInputOptions }> = []
   readonly killCalls: IncarnationHandle[] = []
+  readonly interruptCalls: IncarnationHandle[] = []
   readonly forkCalls: Array<{ prev: IncarnationRef; forkInput: string; opts: ForkOptions }> = []
   readonly readTerminalCalls: IncarnationHandle[] = []
+  readonly uiResponses: Array<{ h: IncarnationHandle; response: WorkerUiResponse }> = []
   private readonly states = new Map<string, WorkerContractState>()
   private acceptedExitReport?: StateChangeReport
   private updatedSessionRef?: string
@@ -138,6 +149,10 @@ class FakeAdapter implements WorkerAdapter {
     }
   }
 
+  async respondToUi(h: IncarnationHandle, response: WorkerUiResponse): Promise<void> {
+    this.uiResponses.push({ h, response })
+  }
+
   takeUpdatedSessionRef(): string | undefined {
     const sessionRef = this.updatedSessionRef
     this.updatedSessionRef = undefined
@@ -163,9 +178,27 @@ class FakeAdapter implements WorkerAdapter {
     return { kind: 'unknown' as const, next_cursor: cursor ?? { offset: 0 } }
   }
 
+  async readTrace(_h: IncarnationHandle, cursor?: { offset: number }) {
+    const start = cursor?.offset ?? 0
+    const trace = this.opts.nativeTrace ?? []
+    return {
+      events: trace.slice(start).map((event, index) => ({ ...event, source_offset: start + index })),
+      nextCursor: { offset: trace.length },
+    }
+  }
+
   async kill(h: IncarnationHandle): Promise<void> {
     this.killCalls.push(h)
     this.states.set(handleKey(h), 'exited')
+  }
+
+  async interrupt(h: IncarnationHandle): Promise<void> {
+    this.interruptCalls.push(h)
+    this.states.set(handleKey(h), 'idle')
+  }
+
+  async stop(h: IncarnationHandle): Promise<void> {
+    await this.kill(h)
   }
 
   capabilities(): AdapterCapabilities {
@@ -190,6 +223,11 @@ class FakeAdapter implements WorkerAdapter {
     this.opts.onStateChange?.(h, state, {
       ...(lastText !== undefined ? { lastText } : {}),
       ...(state === 'exited' ? { endReason: endReason ?? 'completed' } : {}),
+      ...(state === 'idle'
+        ? { completionSource: this.implId === 'claude-code' ? 'claude_stop' as const : this.implId === 'codex' ? 'codex_turn_complete' as const : 'builtin_end_turn' as const }
+        : state === 'exited' && (endReason ?? 'completed') === 'completed'
+          ? { completionSource: this.implId === 'claude-code' ? 'claude_stop' as const : this.implId === 'codex' ? 'codex_turn_complete' as const : 'builtin_end_turn' as const }
+          : {}),
     })
   }
 }
@@ -266,7 +304,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  await fs.rm(dataDir, { recursive: true, force: true })
+  await fs.rm(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 })
 })
 
 describe('WorkerHarness.spawnWorker', () => {
@@ -296,6 +334,53 @@ describe('WorkerHarness.spawnWorker', () => {
     // 台账已落盘且可查
     const listed = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(listed.map((w) => w.worker_id)).toContain(worker.worker_id)
+  })
+
+  it('为新化身分配 Harness-owned identity，并只读快照 workspace 的 AGENTS.md', async () => {
+    const workspace = join(dataDir, 'user-workspace')
+    const agents = '# Workspace rules\nDo not create HANDOFF.md.\n'
+    await fs.mkdir(workspace, { recursive: true })
+    await fs.writeFile(join(workspace, 'AGENTS.md'), agents)
+    const { harness, workersDir } = await makeHarness()
+
+    const worker = await harness.spawnWorker(spawnParams({ workspace }))
+    const incarnation = worker.incarnations[0]
+
+    expect(incarnation.incarnation_id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(incarnation.workspace_instructions).toMatchObject({
+      source: 'agents_md',
+      artifact_id: `workspace-instructions/${worker.worker_id}/${incarnation.incarnation_id}`,
+    })
+    expect(await fs.readFile(join(workersDir, worker.worker_id, 'workspace-instructions', `${incarnation.incarnation_id}.md`), 'utf-8')).toBe(agents)
+    expect(await fs.readFile(join(workspace, 'AGENTS.md'), 'utf-8')).toBe(agents)
+  })
+
+  it('把同一 AGENTS.md 快照交给 builtin 和有用户自有 CLAUDE.md 的 Claude worker', async () => {
+    const agents = '# Workspace rules\nDo not create HANDOFF.md.\n'
+    const builtinWorkspace = join(dataDir, 'builtin-workspace')
+    await fs.mkdir(builtinWorkspace, { recursive: true })
+    await fs.writeFile(join(builtinWorkspace, 'AGENTS.md'), agents)
+    const { harness: builtinHarness, fake: builtin } = await makeHarness({ implId: 'builtin' })
+
+    await builtinHarness.spawnWorker(spawnParams({ workspace: builtinWorkspace }))
+    expect(builtin.spawnCalls[0].workspace_instructions).toMatchObject({
+      snapshot: { source: 'agents_md' },
+      text: agents,
+    })
+
+    const claudeWorkspace = join(dataDir, 'claude-user-owned-workspace')
+    const userClaude = '# User maintained Claude instructions\n'
+    await fs.mkdir(claudeWorkspace, { recursive: true })
+    await fs.writeFile(join(claudeWorkspace, 'AGENTS.md'), agents)
+    await fs.writeFile(join(claudeWorkspace, 'CLAUDE.md'), userClaude)
+    const { harness: claudeHarness, fake: claude } = await makeHarness({ implId: 'claude-code' })
+
+    await claudeHarness.spawnWorker(spawnParams({ impl: 'claude-code', workspace: claudeWorkspace }))
+    expect(claude.spawnCalls[0].workspace_instructions).toMatchObject({
+      snapshot: { source: 'agents_md' },
+      text: agents,
+    })
+    expect(await fs.readFile(join(claudeWorkspace, 'CLAUDE.md'), 'utf-8')).toBe(userClaude)
   })
 
   it('首次 provision 前落 harness context，并把同一固定权限快照交给 capability provider', async () => {
@@ -379,6 +464,158 @@ describe('WorkerHarness.spawnWorker', () => {
       kind: 'initial_input_settled',
       reason: 'completed',
     })
+  })
+
+  it('CLI首投窗口内完成时创建待交付回合，不误报投递停摆', async () => {
+    const { harness } = await makeHarness({
+      implId: 'claude-code',
+      nativeTrace: [{ ts: '2026-08-21T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '首轮已经完成' }],
+      spawnInitialInput: {
+        control_state: 'waiting_text',
+        disposition: 'accepted',
+        report: { completionSource: 'claude_stop' },
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+
+    expect(worker.task.status).toBe('waiting_input')
+    const turn = await harness.getWorkerTurn(worker.worker_id)
+    expect(turn).toMatchObject({
+      disposition: { status: 'pending' },
+      activity_from: '0',
+      activity_through: '1',
+    })
+    if (!turn) throw new Error('expected initial completed turn')
+    await expect(harness.getWorkerTurnActivities(turn)).resolves.toEqual({
+      events: [expect.objectContaining({ role: 'assistant', summary: '首轮已经完成', source_offset: 0 })],
+    })
+    expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
+      to: 'idle',
+      kind: 'initial_input_settled',
+      turn_id: expect.any(String),
+      turn_pending: true,
+    })
+  })
+
+  it('CLI首投遇到未知界面时创建短期快照，只允许 Manager 应答一次', async () => {
+    const { harness, fake, workersDir } = await makeHarness({
+      implId: 'claude-code',
+      spawnInitialInput: {
+        control_state: 'waiting_action',
+        disposition: 'not_pasted',
+        report: {
+          waitReason: 'interaction_required',
+          terminal: terminal('Choose a login method'),
+          ui: { fingerprint: 'login-method:1', actions: UI_ACTIONS },
+          notification: { type: 'terminal_interaction', title: 'Login required' },
+        },
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')?.detail
+    const snapshotId = detail?.snapshot_id
+
+    expect(detail).toMatchObject({
+      kind: 'interaction_required',
+      snapshot_id: expect.any(String),
+      snapshot_expires_at: expect.any(String),
+      actions: UI_ACTIONS,
+      text: 'Choose a login method',
+    })
+
+    await expect(harness.respondToWorkerUi(worker.worker_id, snapshotId as string, 'unknown')).rejects.toThrow(
+      'worker UI action is not available for this snapshot',
+    )
+    await expect(harness.respondToWorkerUi(worker.worker_id, snapshotId as string, 'confirm')).resolves.toMatchObject({
+      status: 'submitted',
+      snapshot_id: snapshotId,
+      operation: { kind: 'ui_response', status: 'succeeded' },
+    })
+    expect(fake.uiResponses).toEqual([{
+      h: expect.objectContaining({ worker_id: worker.worker_id, impl: 'claude-code' }),
+      response: { kind: 'keys', keys: ['Enter'] },
+    }])
+    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'control-operations.json'), 'utf8'))).toMatchObject({
+      operations: [expect.objectContaining({ kind: 'ui_response', status: 'succeeded' })],
+    })
+    await expect(harness.respondToWorkerUi(worker.worker_id, snapshotId as string, 'confirm')).rejects.toThrow(
+      'worker UI snapshot is consumed',
+    )
+  })
+
+  it('过期 UI 快照被拒绝，且不会发送任何按键', async () => {
+    const { harness, fake, workersDir } = await makeHarness({
+      implId: 'claude-code',
+      spawnInitialInput: {
+        control_state: 'waiting_action',
+        disposition: 'not_pasted',
+        report: {
+          waitReason: 'interaction_required',
+          ui: { fingerprint: 'expired:1', actions: UI_ACTIONS },
+          notification: { type: 'terminal_interaction' },
+        },
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')?.detail
+
+    nowValue += 11 * 60_000
+    await expect(harness.respondToWorkerUi(worker.worker_id, detail?.snapshot_id as string, 'confirm')).rejects.toThrow(
+      'worker UI snapshot is stale',
+    )
+    expect(fake.uiResponses).toEqual([])
+  })
+
+  it('UI fingerprint 改变或普通生命周期恢复时使旧 snapshot 失效', async () => {
+    const initialActions = [{ action_id: 'confirm', kind: 'keys' as const, keys: ['Enter'] as const }]
+    const nextActions = [{ action_id: 'cancel', kind: 'keys' as const, keys: ['Escape'] as const }]
+    const { harness, fake, workersDir } = await makeHarness({
+      implId: 'claude-code',
+      spawnInitialInput: {
+        control_state: 'waiting_action',
+        disposition: 'not_pasted',
+        report: {
+          waitReason: 'interaction_required',
+          ui: { fingerprint: 'dialog:one', actions: initialActions },
+          notification: { type: 'terminal_interaction' },
+        },
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const incarnation = worker.incarnations[0]
+    const firstSnapshotId = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')
+      ?.detail?.snapshot_id as string
+    const handle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'claude-code',
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleStateChange(handle, 'idle', {
+      waitReason: 'interaction_required',
+      ui: { fingerprint: 'dialog:two', actions: nextActions },
+      notification: { type: 'terminal_interaction' },
+    })
+    await waitUntil(async () => {
+      const snapshots = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'ui-snapshots.json'), 'utf8')).snapshots
+      return snapshots.some((snapshot: { fingerprint: string; status: string }) => snapshot.fingerprint === 'dialog:two' && snapshot.status === 'active')
+    })
+
+    let snapshots = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'ui-snapshots.json'), 'utf8')).snapshots
+    const secondSnapshot = snapshots.find((snapshot: { fingerprint: string }) => snapshot.fingerprint === 'dialog:two')
+    expect(snapshots.find((snapshot: { snapshot_id: string }) => snapshot.snapshot_id === firstSnapshotId)).toMatchObject({ status: 'stale' })
+    await expect(harness.respondToWorkerUi(worker.worker_id, firstSnapshotId, 'confirm')).rejects.toThrow('worker UI snapshot is stale')
+    expect(fake.uiResponses).toEqual([])
+
+    harness.handleStateChange(handle, 'idle', { waitReason: 'input_surface_unavailable' })
+    await waitUntil(async () => {
+      const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'ui-snapshots.json'), 'utf8'))
+      return state.snapshots.find((snapshot: { snapshot_id: string }) => snapshot.snapshot_id === secondSnapshot.snapshot_id)?.status === 'stale'
+    })
+    snapshots = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'ui-snapshots.json'), 'utf8')).snapshots
+    expect(snapshots.find((snapshot: { snapshot_id: string }) => snapshot.snapshot_id === secondSnapshot.snapshot_id)).toMatchObject({ status: 'stale' })
   })
 
   it('CLI首投not_pasted先落waiting_action，再由raw解除hold并按FIFO只补投一次原prompt', async () => {
@@ -501,6 +738,457 @@ describe('WorkerHarness.spawnWorker', () => {
 })
 
 describe('WorkerHarness.handleStateChange', () => {
+  it('assistant 原生 trace 只创建一条可重放 activity_available', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, workersDir } = await makeHarness({
+      nativeTrace: [
+        { ts: '2026-08-20T00:00:00.000Z', kind: 'tool_call', role: 'assistant', summary: 'read file' },
+        { ts: '2026-08-20T00:00:01.000Z', kind: 'message', role: 'assistant', summary: '已读取配置' },
+      ],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => route.mock.calls.length === 1)
+    harness.handleNativeActivity(handle)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+
+    expect(route).toHaveBeenCalledTimes(1)
+    expect(route.mock.calls[0][1]).toMatchObject({ kind: 'activity_available', detail: { from_cursor: '0', through_cursor: '2' } })
+    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))).toMatchObject({
+      cursors: [{ incarnation_id: incarnation.incarnation_id, offset: 2 }],
+      notifications: [{ consumed_at: expect.any(String) }],
+    })
+  })
+
+  it('并发投递同一 activity 通知只追加一次审计事件', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, workersDir } = await makeHarness({
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '完成了当前步骤' }],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+    const internals = harness as unknown as {
+      collectNativeActivity(handle: IncarnationHandle): Promise<void>
+      deliverNativeActivityNotifications(workerId: string): Promise<void>
+      getEventLog(workerId: string): WorkerEventLog
+      nativeActivityStore: NativeActivityStore
+    }
+    await internals.collectNativeActivity(handle)
+    const notification = (await internals.nativeActivityStore.pending(worker.worker_id))[0]
+    if (!notification) throw new Error('expected pending native activity notification')
+
+    let releaseFirstAppend!: () => void
+    const firstAppend = new Promise<void>((resolve) => { releaseFirstAppend = resolve })
+    let enteredFirstAppend!: () => void
+    const appendStarted = new Promise<void>((resolve) => { enteredFirstAppend = resolve })
+    const eventLog = internals.getEventLog(worker.worker_id)
+    const append = eventLog.append.bind(eventLog)
+    let holdFirstAppend = true
+    vi.spyOn(eventLog, 'append').mockImplementation(async (event) => {
+      if (holdFirstAppend && event.kind === 'activity_available') {
+        holdFirstAppend = false
+        enteredFirstAppend()
+        await firstAppend
+      }
+      await append(event)
+    })
+    const due = vi.spyOn(internals.nativeActivityStore, 'due')
+
+    const firstDelivery = internals.deliverNativeActivityNotifications(worker.worker_id)
+    await appendStarted
+    const secondDelivery = internals.deliverNativeActivityNotifications(worker.worker_id)
+    const dueCallsWhileFirstAppendWaits = due.mock.calls.length
+    releaseFirstAppend()
+    await Promise.all([firstDelivery, secondDelivery])
+
+    const storedEvents = (await fs.readFile(join(workersDir, worker.worker_id, 'events.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as HarnessEvent)
+      .filter((event) => event.kind === 'activity_available')
+    expect(dueCallsWhileFirstAppendWaits).toBe(1)
+    expect(storedEvents).toHaveLength(1)
+    expect(route).toHaveBeenCalledTimes(1)
+  })
+
+  it('连续 assistant activity 在 Manager 未消费时合并为一个 high-water notification', async () => {
+    const nativeTrace: NormalizedTraceEvent[] = [
+      { ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '先完成第一步' },
+    ]
+    const route = vi.fn(async () => ({ consumed: false }))
+    const { harness, workersDir } = await makeHarness({ nativeTrace }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => route.mock.calls.length === 1)
+    nativeTrace.push({ ts: '2026-08-20T00:00:01.000Z', kind: 'message', role: 'assistant', summary: '再完成第二步' })
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => {
+      const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+      return state.cursors[0]?.offset === 2
+    })
+
+    const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+    expect(state.notifications).toHaveLength(1)
+    expect(state.notifications[0]).toMatchObject({
+      activity_from: '0',
+      activity_through: '2',
+      attempts: 1,
+      event: { kind: 'activity_available', detail: { from_cursor: '0', through_cursor: '2', preview: '再完成第二步' } },
+    })
+  })
+
+  it('投递旧 activity 时出现新片段，会继续投递新的 high-water 而不错误消费', async () => {
+    const nativeTrace: NormalizedTraceEvent[] = [
+      { ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: 'first activity' },
+    ]
+    let releaseFirst!: () => void
+    const firstDelivery = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const route = vi.fn(async () => {
+      if (route.mock.calls.length === 1) await firstDelivery
+      return { consumed: true }
+    })
+    const { harness, workersDir } = await makeHarness({ nativeTrace }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleNativeActivity(handle)
+    await waitUntil(() => route.mock.calls.length === 1)
+    nativeTrace.push({ ts: '2026-08-20T00:00:01.000Z', kind: 'message', role: 'assistant', summary: 'second activity' })
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')).cursors[0]?.offset === 2)
+    releaseFirst()
+    await waitUntil(() => route.mock.calls.length === 2)
+
+    expect(route.mock.calls[1][1]).toMatchObject({ detail: { from_cursor: '0', through_cursor: '2' } })
+    const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+    expect(state.notifications[0]).toMatchObject({ activity_through: '2', consumed_at: expect.any(String) })
+  })
+
+  it('未消费通知按持久指数退避重投，合并 activity 不重置其节奏', async () => {
+    const nativeTrace: NormalizedTraceEvent[] = [
+      { ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: 'first activity' },
+    ]
+    const route = vi.fn(async () => ({ consumed: false }))
+    const { harness, workersDir } = await makeHarness({ nativeTrace }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+    const internals = harness as unknown as {
+      deliverNativeActivityNotifications(workerId: string): Promise<void>
+    }
+
+    harness.handleNativeActivity(handle)
+    await waitUntil(() => route.mock.calls.length === 1)
+    let state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+    expect(state.notifications[0]).toMatchObject({ attempts: 1, retry_after_at: expect.any(String) })
+    const firstRetryAt = state.notifications[0].retry_after_at
+    expect(Date.parse(firstRetryAt) - nowValue).toBe(30_000)
+
+    nativeTrace.push({ ts: '2026-08-20T00:00:01.000Z', kind: 'message', role: 'assistant', summary: 'merged activity' })
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')).cursors[0]?.offset === 2)
+    state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+    expect(route).toHaveBeenCalledTimes(1)
+    expect(state.notifications[0]).toMatchObject({ attempts: 1, retry_after_at: firstRetryAt, activity_through: '2' })
+
+    const delays = [60_000, 120_000, 300_000, 300_000]
+    for (let attempt = 2; attempt <= 5; attempt++) {
+      const previousRetryAt = Date.parse(state.notifications[0].retry_after_at)
+      nowValue = previousRetryAt - 1_000
+      await internals.deliverNativeActivityNotifications(worker.worker_id)
+      state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+      expect(state.notifications[0].attempts).toBe(attempt)
+      expect(Date.parse(state.notifications[0].retry_after_at) - previousRetryAt).toBe(delays[attempt - 2] + 1_000)
+    }
+    expect(route).toHaveBeenCalledTimes(5)
+  })
+
+  it('tool-only 原生 trace 只推进 high-water，不唤醒 Manager', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, workersDir } = await makeHarness({
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'tool_call', role: 'assistant', summary: 'read file' }],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+
+    harness.handleNativeActivity({
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin',
+      session_ref: incarnation.session_ref,
+    })
+    await waitUntil(async () => {
+      try {
+        const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+        return state.cursors[0]?.offset === 1
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+        throw error
+      }
+    })
+
+    expect(route).not.toHaveBeenCalled()
+  })
+
+  it('五分钟活性巡检会无 TUI 对账 CLI 原生 session，作为文件监听的漏事件兜底', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, fake } = await makeHarness({
+      implId: 'claude-code',
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: 'missed file watch activity' }],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+
+    await harness.sweepLiveness()
+
+    expect(route).toHaveBeenCalledWith(
+      `test::friend-1`,
+      expect.objectContaining({ worker_id: worker.worker_id, kind: 'activity_available' }),
+    )
+    expect(fake.readTerminalCalls).toEqual([])
+  })
+
+  it('未消费的 activity 和 completed turn 通知会从持久记录重放', async () => {
+    let consume = false
+    const route = vi.fn(async () => ({ consumed: consume }))
+    const { harness } = await makeHarness({
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '待交付' }],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => route.mock.calls.length === 1)
+    harness.handleStateChange(handle, 'idle', { completionSource: 'builtin_end_turn' })
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id)) !== undefined)
+    consume = true
+    nowValue += 5 * 60_000
+    await harness.reconcileNativeActivityOnStartup()
+
+    expect(route.mock.calls.map((call) => call[1].kind)).toContain('activity_available')
+    expect(route.mock.calls.map((call) => call[1].kind)).toContain('turn_completed')
+    expect((await harness.getWorkerTurn(worker.worker_id))?.disposition).toEqual({ status: 'pending' })
+  })
+
+  it('启动只为未观察过的活跃会话建立高水位，不把已有文本当作新 activity', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const nativeTrace = [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message' as const, role: 'assistant' as const, summary: '升级前的历史文本' }]
+    const { harness, workersDir } = await makeHarness({ nativeTrace }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    await harness.reconcileNativeActivityOnStartup()
+
+    expect(route).not.toHaveBeenCalled()
+    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))).toMatchObject({
+      cursors: [expect.objectContaining({ incarnation_id: incarnation.incarnation_id, offset: 1 })],
+      activities: [],
+      notifications: [],
+    })
+
+    nativeTrace.push({ ts: '2026-08-20T00:00:01.000Z', kind: 'message', role: 'assistant', summary: '重启后的新文本' })
+    harness.handleNativeActivity(handle)
+    await waitUntil(() => route.mock.calls.length === 1)
+    expect(route).toHaveBeenCalledWith(
+      `test::friend-1`,
+      expect.objectContaining({ kind: 'activity_available', detail: expect.objectContaining({ from_cursor: '1', through_cursor: '2' }) }),
+    )
+  })
+
+  it('终态化身不再重读原生会话或制造 activity 通知', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, fake, workersDir } = await makeHarness({
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '历史结论' }],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(handle, 'exited', undefined, 'completed')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0]?.task.status === 'completed')
+    await waitUntil(async () => JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')).cursors[0]?.offset === 1)
+    await waitUntil(() => route.mock.calls.some(([, event]) => event.kind === 'activity_available'))
+    route.mockClear()
+    const readTrace = vi.spyOn(fake, 'readTrace')
+    const internals = harness as unknown as { collectNativeActivity(handle: typeof handle): Promise<void> }
+
+    await internals.collectNativeActivity(handle)
+    await harness.reconcileNativeActivityOnStartup()
+
+    expect(readTrace).not.toHaveBeenCalled()
+    expect(route.mock.calls.filter(([, event]) => event.kind === 'activity_available')).toEqual([])
+  })
+
+  it('单个原生会话读取失败不阻断其它 worker 的 activity 基线对账', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, fake, workersDir } = await makeHarness({}, { onOperationNotification: route })
+    const unreadable = await harness.spawnWorker(spawnParams({ title: '不可读会话' }))
+    const readable = await harness.spawnWorker(spawnParams({ title: '可读会话' }))
+    vi.spyOn(fake, 'readTrace').mockImplementation(async (handle) => {
+      if (handle.worker_id === unreadable.worker_id) throw new Error('session unavailable')
+      return {
+        events: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '后续 worker 的进展' }],
+        nextCursor: { offset: 1 },
+      }
+    })
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await expect(harness.reconcileNativeActivityOnStartup()).resolves.toBeUndefined()
+
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining(`native activity reconciliation failed for ${unreadable.worker_id}#1`),
+      expect.any(Error),
+    )
+    const readableState = JSON.parse(await fs.readFile(join(workersDir, readable.worker_id, 'native-activity.json'), 'utf8'))
+    expect(readableState.cursors).toEqual([expect.objectContaining({ incarnation_id: readable.incarnations[0].incarnation_id, offset: 1 })])
+    expect(route).not.toHaveBeenCalled()
+  })
+
+  it('单个 control operation store 读取失败不阻断其它 worker 的对账', async () => {
+    const { harness } = await makeHarness()
+    const unavailable = await harness.spawnWorker(spawnParams({ title: '不可读 control store' }))
+    const later = await harness.spawnWorker(spawnParams({ title: '后续 control store' }))
+    const controlOperationStore = (harness as unknown as {
+      controlOperationStore: { active(workerId: string): Promise<unknown[]> }
+    }).controlOperationStore
+    const active = vi.spyOn(controlOperationStore, 'active').mockImplementation(async (workerId) => {
+      if (workerId === unavailable.worker_id) throw new Error('control store unavailable')
+      return []
+    })
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await expect(harness.reconcileControlOperationsOnStartup()).resolves.toBeUndefined()
+
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining(`control operation reconciliation failed for ${unavailable.worker_id}`),
+      expect.any(Error),
+    )
+    expect(active).toHaveBeenCalledWith(later.worker_id)
+  })
+
+  it('activity 通知落盘失败不阻断已确认的回合和状态事件', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const activityStore = (harness as unknown as { nativeActivityStore: NativeActivityStore }).nativeActivityStore
+    const persistError = vi.spyOn(activityStore, 'record').mockRejectedValueOnce(new Error('activity disk unavailable'))
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    events.length = 0
+
+    fake.emitStateChange(
+      { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` },
+      'idle',
+    )
+    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
+
+    expect((await harness.getWorkerTurn(worker.worker_id))?.disposition).toEqual({ status: 'pending' })
+    expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
+      to: 'idle',
+      turn_id: expect.any(String),
+      turn_pending: true,
+    })
+    expect(persistError).toHaveBeenCalledOnce()
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining('failed to persist completed-turn notification'),
+      expect.any(Error),
+    )
+  })
+
+  it('Manager 路由下的游离通知失败只记录，不形成未处理拒绝', async () => {
+    const { harness, fake } = await makeHarness({}, { onOperationNotification: async () => ({ consumed: false }) })
+    const worker = await harness.spawnWorker(spawnParams())
+    const internals = harness as unknown as {
+      createPendingTurn(
+        managerKey: ManagerKey,
+        handle: IncarnationHandle,
+        report: StateChangeReport,
+        completedAt: string,
+      ): Promise<unknown>
+      deliverNativeActivityNotifications(workerId: string): Promise<void>
+      deliverControlOperationNotifications(workerId: string): Promise<void>
+    }
+    const activityError = new Error('native activity store unavailable')
+    const controlError = new Error('control operation store unavailable')
+    const activityDelivery = vi.spyOn(internals, 'deliverNativeActivityNotifications').mockRejectedValueOnce(activityError)
+    const controlDelivery = vi.spyOn(internals, 'deliverControlOperationNotifications').mockRejectedValueOnce(controlError)
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    const incarnation = worker.incarnations[0]
+    await internals.createPendingTurn(
+      `test::friend-1` as ManagerKey,
+      {
+        worker_id: worker.worker_id,
+        incarnation_id: incarnation.incarnation_id,
+        seq: incarnation.seq,
+        impl: 'builtin',
+        session_ref: incarnation.session_ref,
+      },
+      { completionSource: 'builtin_end_turn' },
+      '2026-01-01T00:00:00.000Z',
+    )
+    await waitUntil(async () => activityDelivery.mock.calls.length === 1)
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({ status: 'succeeded' })
+    await waitUntil(async () => controlDelivery.mock.calls.length === 1)
+
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining(`native activity notification delivery failed for ${worker.worker_id}`),
+      activityError,
+    )
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining(`control operation notification delivery failed for ${worker.worker_id}`),
+      controlError,
+    )
+  })
+
   it('状态回调驱动台账 task.status 与化身 state,并经 onEvent 外发', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
@@ -511,10 +1199,7 @@ describe('WorkerHarness.handleStateChange', () => {
     // handleStateChange 签名对齐 adapter 的同步回调(h, state) => void,内部是 fire-and-forget
     // 的异步台账更新——用轮询等待收敛(与 tests/workers/contract-suite.ts 的 waitForState
     // 同一套路,不是"睡一下猜时序",是"有界轮询直到可观察结果达到预期,超时即失败")。
-    await waitUntil(async () => {
-      const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-      return w.task.status === 'waiting_input'
-    })
+    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('waiting_input')
@@ -522,7 +1207,7 @@ describe('WorkerHarness.handleStateChange', () => {
 
     const stateEvents = events.filter((e) => e.kind === 'state_changed')
     expect(stateEvents).toHaveLength(1)
-    expect(stateEvents[0].detail).toEqual({ to: 'idle' })
+    expect(stateEvents[0].detail).toMatchObject({ to: 'idle', turn_pending: true, turn_id: expect.any(String) })
 
     // 化身自然结束(非 kill)→ completed
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
@@ -533,6 +1218,103 @@ describe('WorkerHarness.handleStateChange', () => {
     const [w2] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w2.task.status).toBe('completed')
     expect(w2.incarnations[0].ended_reason).toBe('completed')
+  })
+
+  it('异步 stop 在 exited 状态回调后才结算并取消任务', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin',
+      session_ref: incarnation.session_ref,
+    }
+    vi.spyOn(fake, 'kill').mockImplementation(async (h) => {
+      fake.killCalls.push(h)
+    })
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({ status: 'verifying' })
+    expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('running')
+
+    fake.emitStateChange(handle, 'exited', undefined, 'killed')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'cancelled')
+    expect(await harness.getWorkerControlOperations(worker.worker_id)).toEqual([])
+  })
+
+  it('已停止主线后的 fork stop 抛错由核验收口，不把整次 stop 判为 failed', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    await harness.queryWorker(worker.worker_id, '侧问一下')
+    const originalState = fake.state.bind(fake)
+    const logWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    vi.spyOn(fake, 'stop').mockImplementation(async (handle) => {
+      if (handle.seq === 2) throw new Error('fork is no longer resident')
+      await fake.kill(handle)
+    })
+    vi.spyOn(fake, 'state').mockImplementation(async (handle) => {
+      // The adapter's process-local fork is gone, while its durable native state confirms exit.
+      if (handle.seq === 2) return 'exited'
+      return originalState(handle)
+    })
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({ status: 'succeeded' })
+
+    const [stored] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(stored.task.status).toBe('cancelled')
+    expect(stored.incarnations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ seq: 1, state: 'exited', ended_reason: 'killed' }),
+      expect.objectContaining({ seq: 2, state: 'exited', ended_reason: 'killed' }),
+    ]))
+    expect(logWarn).toHaveBeenCalledWith(
+      expect.stringContaining(`failed to stop registered fork ${worker.worker_id}#2`),
+      expect.any(Error),
+    )
+  })
+
+  it('停止核验的 bg 查询异常结算 unknown，不遗留 verifying operation', async () => {
+    const { harness } = await makeHarness({}, {
+      hasRunningBg: async () => { throw new Error('bg registry unavailable') },
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({
+      status: 'unknown',
+      detail: 'bg registry unavailable',
+    })
+
+    expect(await harness.getWorkerControlOperations(worker.worker_id)).toEqual([])
+    expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('running')
+  })
+
+  it('同步 stop 退出在核验 unknown 后仍保留 task 状态，重启对账也不改写成 cancelled 或 failed', async () => {
+    const { harness, fake } = await makeHarness({}, { hasRunningBg: async () => true })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    vi.spyOn(fake, 'kill').mockImplementation(async (handle) => {
+      fake.killCalls.push(handle)
+      fake.emitStateChange(handle, 'exited', undefined, 'killed')
+    })
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({
+      status: 'unknown',
+      detail: 'worker-owned background execution remains active',
+    })
+    await waitUntil(async () => {
+      const [stored] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+      return stored.task.status === 'running' && stored.incarnations[0].state === 'exited'
+    })
+
+    await expect(harness.reconcileOnStartup()).resolves.toMatchObject({ unchanged: [worker.worker_id] })
+    const [stored] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(stored.task.status).toBe('running')
+    expect(stored.incarnations[0]).toMatchObject({
+      incarnation_id: incarnation.incarnation_id,
+      state: 'exited',
+      ended_reason: 'killed',
+    })
   })
 
   it('idle 且名下仍有运行中的 bg shell 时保持 running，而不是 waiting_input', async () => {
@@ -577,12 +1359,13 @@ describe('WorkerHarness.handleStateChange', () => {
     harness.handleStateChange(h, 'idle', {
       waitReason: 'interaction_required',
       terminal: terminal('AskUserQuestion\n  Yes\n  No'),
+      ui: { fingerprint: 'question:yes-no', actions: UI_ACTIONS },
       notification: { type: 'permission_prompt', message: 'Choose', title: 'Question' },
     })
     await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
 
     const detail = events.find((event) => event.kind === 'state_changed')?.detail
-    expect(detail).toEqual({
+    expect(detail).toMatchObject({
       to: 'idle',
       kind: 'interaction_required',
       wait_mode: 'action',
@@ -590,9 +1373,90 @@ describe('WorkerHarness.handleStateChange', () => {
       notification_type: 'permission_prompt',
       message: 'Choose',
       title: 'Question',
-      text: 'AskUserQuestion\n  Yes\n  No',
     })
+    expect(detail).toMatchObject({ snapshot_id: expect.any(String), actions: UI_ACTIONS })
     expect(detail).not.toHaveProperty('notification')
+  })
+
+  it('自动处理失败也把同一受限 UI snapshot 和 actions 直接交给 Manager', async () => {
+    const { harness } = await makeHarness({ implId: 'claude-code' })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    events.length = 0
+    const h: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'claude-code',
+      session_ref: `ref-${worker.worker_id}#1`,
+    }
+
+    harness.handleStateChange(h, 'idle', {
+      waitReason: 'interaction_required',
+      terminal: terminal('Exit plan mode?'),
+      ui: { fingerprint: 'claude_exit_plan:1-2', actions: UI_ACTIONS },
+      notification: { type: 'automatic_interaction_failed' },
+    })
+    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
+
+    expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
+      kind: 'interaction_required',
+      notification_type: 'automatic_interaction_failed',
+      text: 'Exit plan mode?',
+      snapshot_id: expect.any(String),
+      snapshot_expires_at: expect.any(String),
+      actions: UI_ACTIONS,
+    })
+  })
+
+  it('主线 idle/exited 各创建一个待处置回合，重复状态和 notification-only 不重复创建', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+
+    fake.emitStateChange(handle, 'idle', '第一轮结束')
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id))?.completion_source === 'builtin_end_turn')
+    const idleTurn = await harness.getWorkerTurn(worker.worker_id)
+
+    harness.handleStateChange(handle, 'idle')
+    await harness.sendToWorker(worker.worker_id, '作为同锁屏障')
+    expect((await harness.getWorkerTurn(worker.worker_id))?.turn_id).toBe(idleTurn?.turn_id)
+
+    fake.emitStateChange(handle, 'exited', undefined, 'completed')
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id))?.turn_id !== idleTurn?.turn_id)
+    const exitedTurn = await harness.getWorkerTurn(worker.worker_id)
+    expect(exitedTurn?.turn_id).not.toBe(idleTurn?.turn_id)
+
+    const notificationWorker = await harness.spawnWorker(spawnParams())
+    const notificationHandle = { worker_id: notificationWorker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${notificationWorker.worker_id}#1` }
+    harness.handleStateChange(notificationHandle, 'idle', {
+      waitReason: 'interaction_required',
+      notification: { type: 'permission_prompt', message: '请选择' },
+    })
+    await waitUntil(() => events.some((event) => event.worker_id === notificationWorker.worker_id && event.kind === 'state_changed'))
+    expect(await harness.getWorkerTurn(notificationWorker.worker_id)).toBeUndefined()
+  })
+
+  it('CLI 从等待交互回到普通输入态时，即使契约态仍为 idle 也创建完成回合', async () => {
+    const { harness, fake } = await makeHarness({ implId: 'claude-code' })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const handle = { worker_id: worker.worker_id, seq: 1, impl: 'claude-code' as const, session_ref: `ref-${worker.worker_id}#1` }
+
+    harness.handleStateChange(handle, 'idle', {
+      waitReason: 'interaction_required',
+      notification: { type: 'permission_prompt', message: '请选择' },
+    })
+    await waitUntil(() => events.some((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed'))
+    expect(await harness.getWorkerTurn(worker.worker_id)).toBeUndefined()
+
+    fake.emitStateChange(handle, 'idle', '交互完成后的本轮结果')
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id))?.completion_source === 'claude_stop')
+    await waitUntil(() => events.some((event) =>
+      event.worker_id === worker.worker_id &&
+      event.kind === 'state_changed' &&
+      typeof event.detail?.turn_id === 'string',
+    ))
+
+    const detail = events.filter((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed').at(-1)?.detail
+    expect(detail).toMatchObject({ to: 'idle', turn_id: expect.any(String), turn_pending: true })
   })
 
   // ---- endReason:harness 不再自己猜,一律取 adapter 上报的真值 ----
@@ -688,7 +1552,12 @@ describe('WorkerHarness.handleStateChange', () => {
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
-    expect(ev.detail).toEqual({ to: 'idle', text: '调研完成,结论是 X 方案可行。' })
+    expect(ev.detail).toMatchObject({
+      to: 'idle',
+      text: '调研完成,结论是 X 方案可行。',
+      turn_id: expect.any(String),
+      turn_pending: true,
+    })
   })
 
   it('过长的 text 被截断并附标记(周期性进 manager 上下文,必须有上限)', async () => {
@@ -721,87 +1590,36 @@ describe('WorkerHarness.handleStateChange', () => {
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
     harness.handleStateChange(h, 'exited', {
       endReason: 'completed',
+      completionSource: 'builtin_end_turn',
       lastText: '  已经全部跑完了。  ',
       summary: '  盘点完成:三处配置漂移已修正,另有一处需人工确认。  ',
     })
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
-    expect(ev.detail).toEqual({
+    expect(ev.detail).toMatchObject({
       to: 'exited',
       text: '已经全部跑完了。',
       summary: '盘点完成:三处配置漂移已修正,另有一处需人工确认。',
+      turn_id: expect.any(String),
+      turn_pending: true,
     })
   })
 
-  it('CLI 启动期就绪握手超时上报的终端画面进 detail.text —— manager 醒来就拿到现场', async () => {
-    // protocol-agent-v3 §5.5「检测到无法识别的交互界面:暂扣 + 唤醒 manager(附界面内容)」。
-    // 零协议改动:复用既有的 state_changed + detail.text 这条路,不新增事件类型也不新增状态。
+  it('CLI 终端画面不随状态事件自动转发，manager 需要时再显式读取', async () => {
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
-    const tail = '[crabot] claude-code 启动后 60s 内未就绪\n---\nNew MCP server found in this project: arXivPaper'
+    const terminalText = '[crabot] claude-code 启动后 60s 内未就绪\n---\nNew MCP server found in this project: arXivPaper'
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { terminal: terminal(tail) })
+    harness.handleStateChange(h, 'idle', { terminal: terminal(terminalText), waitReason: 'interaction_required' })
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
-    expect(ev.detail).toEqual({ to: 'idle', text: tail })
-  })
-
-  it('终端画面同样受 text 的上限约束(不能整屏灌进 manager 上下文)', async () => {
-    const { harness } = await makeHarness()
-    const worker = await harness.spawnWorker(spawnParams())
-    events.length = 0
-
-    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { terminal: terminal('啊'.repeat(2600)) })
-
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
-    const text = (ev.detail as { text: string }).text
-    expect(text).not.toContain('get_worker_terminal')
-    expect(text).toContain('共 2600 字符')
-    expect(text.length).toBeLessThan(2600) // 真的截了,不是原样透传
-  })
-
-  it('终端画面超长时保**尾部**——拦住启动的模态框在画面末尾', async () => {
-    // 诊断"它现在卡在哪"永远该看最新的那一屏。
-    // 把这里改回 trimmed.slice(0, maxChars) 这条用例就挂:开头那 2000 个"啊"会顶掉模态框。
-    const { harness } = await makeHarness()
-    const worker = await harness.spawnWorker(spawnParams())
-    events.length = 0
-
-    const modal = '\nNew MCP server found in this project: arXivPaper\n  1. Use this MCP server\n  2. No, exit'
-    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { terminal: terminal('啊'.repeat(2600) + modal) })
-
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
-    const text = (ev.detail as { text: string }).text
-    expect(text.endsWith(modal.trim())).toBe(true) // 尾部(模态框那段)一字不缺
-    expect(text.startsWith('啊')).toBe(false) // 开头被截,截断标记顶到最前面
-    expect(text).not.toContain('get_worker_terminal')
-  })
-
-  it('终端画面超长时保留画面末尾的可操作提示', async () => {
-    const { harness } = await makeHarness()
-    const worker = await harness.spawnWorker(spawnParams())
-    events.length = 0
-
-    // 2600 字符的终端画面超过 2000 字符并不罕见。
-    const terminalText = '啊'.repeat(2600) + '\nPress Enter to continue'
-    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
-    harness.handleStateChange(h, 'idle', { terminal: terminal(terminalText) })
-
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
-    const text = (ev.detail as { text: string }).text
-    expect(text.length).toBeLessThan(terminalText.length) // 真的截了
-    expect(text).toContain('Press Enter to continue')
-    expect(text).toContain('啊') // 屏幕内容保住的是最新的那一段
-    expect(text).not.toContain('get_worker_terminal')
+    expect(ev.detail).toMatchObject({ to: 'idle', wait_reason: 'interaction_required' })
+    expect(ev.detail).not.toHaveProperty('text')
+    expect(JSON.stringify(ev.detail)).not.toContain(terminalText)
   })
 
   it('lastText 与 summary 仍然保**头部**——发言开门见山给结论,截断方向不能跟终端画面混成一个', async () => {
@@ -833,7 +1651,7 @@ describe('WorkerHarness.handleStateChange', () => {
 
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
-    expect(ev.detail).toEqual({ to: 'exited' })
+    expect(ev.detail).toMatchObject({ to: 'exited' })
   })
 
   it('过长的 summary 按更宽的一次性上限截断，且不指向已移除的输出读取接口', async () => {
@@ -865,7 +1683,7 @@ describe('WorkerHarness.handleStateChange', () => {
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(h, 'idle')
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    expect(events.filter((e) => e.kind === 'state_changed')[0].detail).toEqual({ to: 'idle' })
+    expect(events.filter((e) => e.kind === 'state_changed')[0].detail).toMatchObject({ to: 'idle', turn_pending: true })
 
     // 纯空白同样折成"没有正文",不塞空字段。
     events.length = 0
@@ -1632,16 +2450,16 @@ describe('WorkerHarness.killWorker', () => {
     await harness.killWorker(worker.worker_id, '用户要求终止')
 
     expect(fake.killCalls).toHaveLength(1)
-    expect(fake.killCalls[0]).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
+    expect(fake.killCalls[0]).toMatchObject({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1`, incarnation_id: expect.any(String) })
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('cancelled')
     expect(w.incarnations[0].state).toBe('exited')
     expect(w.incarnations[0].ended_reason).toBe('killed')
 
-    const killedEvents = events.filter((e) => e.kind === 'killed')
-    expect(killedEvents).toHaveLength(1)
-    expect(killedEvents[0].detail).toEqual({ reason: '用户要求终止' })
+    const stopped = events.filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
+    expect(stopped).toHaveLength(1)
+    expect(stopped[0].task_status).toBe('cancelled')
   })
 
   it('幂等:对已 cancelled 的 worker 再次 kill 不报错、不重复调用 adapter.kill、不重复发事件', async () => {
@@ -1858,7 +2676,7 @@ describe('WorkerHarness.queryWorker', () => {
         { caps: { fork: true } },
         {
           admitWorkerConnection: async () => {
-            nowValue += 28_000
+            nowValue += 27_000
             return { env: {}, dispose: async () => {} }
           },
         },
@@ -1880,7 +2698,7 @@ describe('WorkerHarness.queryWorker', () => {
         signalRejected()
       })
       await forkStarted
-      await vi.advanceTimersByTimeAsync(1_100)
+      await vi.advanceTimersByTimeAsync(2_100)
       await rejected
 
       expect(rejection).toMatchObject({
@@ -2004,7 +2822,7 @@ describe('WorkerHarness.queryWorker', () => {
     })
     const [persisted] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(persisted.incarnations).toHaveLength(2)
-    expect(persisted.incarnations[1]).toMatchObject({ state: 'running', forked_from: 1 })
+    expect(persisted.incarnations[1]).toMatchObject({ state: 'running', forked_from: persisted.incarnations[0].incarnation_id })
   })
 
   it('fork 已建立但 ledger 提交失败时尽力 kill，并以 unknown 返回 fork_record_failed', async () => {
@@ -2076,7 +2894,7 @@ describe('WorkerHarness.queryWorker', () => {
 
     // forked_from 标记它不在主线化身链上(protocol-agent-v3 §3);session_ref 取
     // adapter.fork 返回的 handle 自己的引用,不是从主线(seq=1)照抄的(§6.1)。
-    expect(w.incarnations[1].forked_from).toBe(1)
+    expect(w.incarnations[1].forked_from).toBe(w.incarnations[0].incarnation_id)
     expect(w.incarnations[1].session_ref).not.toBe(w.incarnations[0].session_ref)
 
     const onDisk = await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll()
@@ -2361,7 +3179,7 @@ describe('WorkerHarness.queryWorker — adapter.fork 挪出锁(P4 Task 4 review 
     // fork 化身仍然被追加进化身链,forked_from 指向发起侧问那一刻的源 seq(1),不受主线
     // 后续变化影响。
     const forkEntry = w.incarnations.find((i) => i.seq === 2)!
-    expect(forkEntry.forked_from).toBe(1)
+    expect(forkEntry.forked_from).toBe(mainEntry.incarnation_id)
     expect(forkEntry.state).toBe('running')
 
     const stateEvents = (await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll())
@@ -2443,17 +3261,17 @@ describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)
     expect(fake.readTerminalCalls[0].seq).toBe(1)
 
     await harness.killWorker(worker.worker_id, '测试终止')
-    expect(fake.killCalls).toHaveLength(1)
-    expect(fake.killCalls[0].seq).toBe(1)
+    expect(fake.killCalls).toHaveLength(2)
+    expect(fake.killCalls.map((call) => call.seq).sort()).toEqual([1, 2])
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('cancelled') // 主线被正确终结,不是台账显示 fork 被 kill 而主线孤儿
     const mainEntry = w.incarnations.find((i) => i.seq === 1)!
     expect(mainEntry.state).toBe('exited')
     expect(mainEntry.ended_reason).toBe('killed')
-    // fork 化身条目不受主线 kill 动作影响(kill 只调用了 adapter.kill 一次,且 target 是 seq=1)。
+    // stop 也会停掉登记的 fork，避免留下与已取消主任务脱节的执行分支。
     const forkEntry = w.incarnations.find((i) => i.seq === 2)!
-    expect(forkEntry.state).toBe('running')
+    expect(forkEntry.state).toBe('exited')
   })
 
   it('processStateChange:fork 化身(seq=2)自己的状态变化只更新它自己的化身条目,不推进主线 task.status', async () => {
@@ -2622,16 +3440,16 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     expect(events.filter((e) => e.kind === 'state_changed')[1].task_status).toBe('completed')
   })
 
-  it('迁移点:killWorker → killed 带 cancelled', async () => {
+  it('迁移点:verified stop → state_changed 带 cancelled', async () => {
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
     await harness.killWorker(worker.worker_id, '用户要求终止')
 
-    const killed = events.filter((e) => e.kind === 'killed')
-    expect(killed).toHaveLength(1)
-    expect(killed[0].task_status).toBe('cancelled')
+    const stopped = events.filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
+    expect(stopped).toHaveLength(1)
+    expect(stopped[0].task_status).toBe('cancelled')
   })
 
   it('非迁移点:input_sent 不带 task_status(投递不动 task 状态)', async () => {
@@ -2646,7 +3464,7 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     expect(inputSent[0].task_status).toBeUndefined()
   })
 
-  it('非迁移点:kill 后 drain 出的 dead_letter 不带 task_status(kill 的迁移由 killed 事件承载)', async () => {
+  it('非迁移点:stop 后 drain 出的 dead_letter 不带 task_status(迁移由 stop_verified 事件承载)', async () => {
     const { harness } = await makeHarness({
       // 让第一条卡在投递里,第二条就会留在队列上等 killWorker 去 drain
       sendInputBehavior: () => new Promise((resolve) => setTimeout(resolve, 30)),
@@ -2663,8 +3481,8 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     const deadLetters = events.filter((e) => e.kind === 'state_changed' && e.detail?.kind === 'dead_letter')
     expect(deadLetters.length).toBeGreaterThan(0)
     for (const e of deadLetters) expect(e.task_status).toBeUndefined()
-    // 同一次 kill 落的 killed 事件才是那次迁移的载体
-    expect(events.filter((e) => e.kind === 'killed')[0].task_status).toBe('cancelled')
+    // 同一次 verified stop 的 state_changed 事件才是那次迁移的载体
+    expect(events.find((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')?.task_status).toBe('cancelled')
   })
 
   it('非迁移点:query_failed 不带 task_status', async () => {

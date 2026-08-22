@@ -33,6 +33,7 @@ import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-co
 import { parseRawControlKeys } from '../tmux/raw-control.js'
 import { DEFAULT_PASTE_READY_TIMEOUT_MS, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel } from '../cli-events.js'
+import { watchNativeSessionFile } from '../native-session-watch.js'
 import { OutputLog } from '../output-log.js'
 import type { TmuxControlEndpoint } from '../tmux/control-monitor.js'
 import { readFinalTerminalSnapshot, writeFinalTerminalSnapshot } from '../tmux/terminal-snapshot.js'
@@ -52,7 +53,7 @@ import {
 } from './app-server-client.js'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { createHash } from 'node:crypto'
-import { assertWorkspaceFilesUntracked, materializeSkills, renderCodexMcpToml, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
+import { assertWorkspaceFilesUntracked, materializeSkills, renderCodexMcpToml, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -64,6 +65,7 @@ import type {
   IncarnationHandle,
   IncarnationRef,
   ForkOptions,
+  ResumeOptions,
   NormalizedTraceEvent,
   SpawnSpec,
   SendInputOptions,
@@ -72,6 +74,7 @@ import type {
   WorkerContractState,
   Workspace,
   WorkerTerminalView,
+  WorkerUiResponse,
 } from '../types.js'
 import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
@@ -246,6 +249,7 @@ export function eventsFilePath(ws: Workspace): string {
 
 interface Runtime {
   readonly worker_id: string
+  readonly incarnation_id?: string
   readonly seq: number
   readonly dir: string
   readonly workspaceRoot: string
@@ -280,6 +284,7 @@ interface Runtime {
   acceptedExitReport?: StateChangeReport
   stopEventWatch?: () => Promise<void>
   eventWatchDrain?: Promise<void>
+  stopTraceWatch?: () => void
   interactionFingerprint?: string
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin/cc 同款语义(P2 review #2)。 */
@@ -542,6 +547,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
        * (协议 §6.3):退出判定只认 `tmux.isAlive`,非 kill 一律记 `completed`,是**推断**
        * 不是确证。详见 cc adapter 同名 deps 的注释。 */
       readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
+      /** Signals an opportunity to incrementally read native rollout JSONL; never carries terminal output. */
+      readonly onNativeActivity?: (h: IncarnationHandle) => void
     },
   ) {
     this.tmux = deps.tmux ?? new TmuxDriver()
@@ -833,16 +840,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // .codex/ 本身就是 CODEX_HOME,两个语义重合到同一目录。
     await materializeSkills(ws.root, caps.skills, '.codex/skills')
 
-    // codex-docs: AGENTS.md 从项目根往下逐级查找,落在 workspace 根,与 cc 的 CLAUDE.md 同构。
-    await fs.writeFile(
-      join(ws.root, 'AGENTS.md'),
-      renderContextMd({
-        workerId: workerIdLabelFromWorkspace(ws),
-        taskTitle: 'Crabot Worker Task',
-        disciplines: '中间产物统一写入工作区内,不要写到工作区之外的路径。',
-      }),
-      'utf-8',
-    )
   }
 
   private async capture(runtime: Runtime): Promise<CapturedPane> {
@@ -874,21 +871,26 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   private async sendRawInput(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
+    return this.sendControlKeys(runtime, h, parseRawControlKeys(text))
+  }
+
+  private async sendControlKeys(runtime: Runtime, h: IncarnationHandle, keys: readonly string[], notify = false): Promise<void> {
     let keysSent = false
     try {
-      const keys = parseRawControlKeys(text)
       const before = await this.capture(runtime)
-      await this.tmux.sendKeys(runtime.sessionName, keys)
+      await this.tmux.sendKeys(runtime.sessionName, [...keys])
       keysSent = true
       const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
+      const interaction = classifyCodexTerminalInteraction(snapshot)
       const primaryProbe = probeCodexInput(snapshot, 'primary', undefined, false)
       const paneShowsWorkingAfterRaw = /Working\b/i.test(snapshot.text)
       if (primaryProbe === 'pending') {
+        runtime.interactionFingerprint = undefined
         const next: CliControlState = runtime.controlState.kind === 'running' || paneShowsWorkingAfterRaw
           ? { kind: 'running' }
           : { kind: 'waiting_action', reason: 'input_pending' }
         const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'input_pending' }
-        await this.transitionControlState(runtime, h, next, report, false)
+        await this.transitionControlState(runtime, h, next, report, notify, notify)
         throw new CliInputStallError('pending_in_ui', next.kind, report)
       }
       if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || paneShowsWorkingAfterRaw)) {
@@ -904,8 +906,21 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const reason = runtime.controlState.kind === 'waiting_action'
         ? runtime.controlState.reason
         : 'input_surface_unavailable'
-      const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: reason }
-      await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason }, report, false)
+      if (interaction.kind === 'none') runtime.interactionFingerprint = undefined
+      const report: StateChangeReport = {
+        terminal: this.liveTerminal(snapshot),
+        waitReason: reason,
+        ...(interaction.kind === 'manager_required' ? { ui: { fingerprint: interaction.fingerprint, actions: interaction.actions } } : {}),
+        ...(interaction.kind === 'manager_required' ? { notification: { type: 'terminal_interaction' } } : {}),
+      }
+      await this.transitionControlState(
+        runtime,
+        h,
+        { kind: 'waiting_action', reason },
+        report,
+        notify,
+        notify,
+      )
       throw new CliInputStallError('not_pasted', 'waiting_action', report)
     } catch (error) {
       if (!(await this.tmux.isAlive(runtime.sessionName))) {
@@ -915,6 +930,46 @@ export class CodexWorkerAdapter implements WorkerAdapter {
           runtime.acceptedExitReport = { endReason: reason }
           return
         }
+        throw new WorkerExitedError(h.worker_id, h.seq, reason)
+      }
+      throw error
+    }
+  }
+
+  private async sendUiText(runtime: Runtime, h: IncarnationHandle, text: string, notify = false): Promise<void> {
+    let submitted = false
+    try {
+      const before = await this.capture(runtime)
+      await this.tmux.sendText(runtime.sessionName, text)
+      submitted = true
+      const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
+      const primaryProbe = probeCodexInput(snapshot, 'primary', undefined, false)
+      if (primaryProbe !== 'empty') {
+        const interaction = classifyCodexTerminalInteraction(snapshot)
+        if (interaction.kind === 'none') runtime.interactionFingerprint = undefined
+        const report: StateChangeReport = {
+          terminal: this.liveTerminal(snapshot),
+          waitReason: 'interaction_required',
+          ...(interaction.kind === 'manager_required' ? { ui: { fingerprint: interaction.fingerprint, actions: interaction.actions } } : {}),
+          ...(interaction.kind === 'manager_required' ? { notification: { type: 'terminal_interaction' } } : {}),
+        }
+        await this.transitionControlState(
+          runtime,
+          h,
+          { kind: 'waiting_action', reason: 'interaction_required' },
+          report,
+          notify,
+          notify,
+        )
+        return
+      }
+      runtime.interactionFingerprint = undefined
+      await this.transitionControlState(runtime, h, { kind: 'running' })
+    } catch (error) {
+      if (!(await this.tmux.isAlive(runtime.sessionName))) {
+        const reason: IncarnationEndReason = submitted ? 'completed' : 'crashed'
+        await this.transitionExited(runtime, h, reason, false)
+        if (submitted) return
         throw new WorkerExitedError(h.worker_id, h.seq, reason)
       }
       throw error
@@ -940,6 +995,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     } else {
       await this.transitionControlState(runtime, discoveredHandle, runtime.controlState, undefined, false)
     }
+    this.startNativeTraceWatch(runtime, discoveredHandle)
     return discoveredHandle
   }
 
@@ -1006,8 +1062,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         const stopCount = events.filter((event) => event.kind === 'stop').length
         if (stopCount > runtime.stopBaseline) {
           runtime.stopBaseline = stopCount
-          await this.transitionControlState(runtime, h, { kind: 'waiting_text' }, undefined, notify)
-          return { control_state: 'waiting_text', disposition: 'accepted' }
+          const report: StateChangeReport = { completionSource: 'codex_turn_complete' }
+          await this.transitionControlState(runtime, h, { kind: 'waiting_text' }, report, notify)
+          return { control_state: 'waiting_text', disposition: 'accepted', report }
         }
       }
       await this.transitionControlState(runtime, h, { kind: 'running' }, undefined, notify)
@@ -1083,10 +1140,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const sessionId = ''
     const sessionDiscoveryStatus: 'discovered' | 'placeholder' = 'placeholder'
 
-    let handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'codex', session_ref: sessionId }
+    let handle: IncarnationHandle = { worker_id: spec.worker_id, incarnation_id: spec.incarnation_id, seq, impl: 'codex', session_ref: sessionId }
 
     const runtime: Runtime = {
       worker_id: spec.worker_id,
+      incarnation_id: spec.incarnation_id,
       seq,
       dir,
       workspaceRoot: spec.workspace.root,
@@ -1171,7 +1229,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { ...handle, initial_input }
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string, opts?: { connection_env?: Record<string, string> }): Promise<IncarnationHandle> {
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: ResumeOptions): Promise<IncarnationHandle> {
     this.assertActive()
     validateSessionRef(prev.session_ref)
 
@@ -1182,7 +1240,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (!prevRuntime) {
       throw new Error(`CodexWorkerAdapter.resume: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
     }
-    const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: prev.seq, impl: 'codex', session_ref: prev.session_ref }
+    const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, incarnation_id: prev.incarnation_id, seq: prev.seq, impl: 'codex', session_ref: prev.session_ref }
     const { state: prevState } = await this.syncState(prevRuntime, prevHandle)
     if (prevState !== 'exited') {
       throw new Error(`CodexWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} has not exited yet (state=${prevState})`)
@@ -1215,7 +1273,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         throw new Error(`CodexWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
       }
       const seq = await this.nextSeq(prev.worker_id)
-      handle = { worker_id: prev.worker_id, seq, impl: 'codex', session_ref: prev.session_ref }
+      handle = { worker_id: prev.worker_id, incarnation_id: opts?.incarnation_id, seq, impl: 'codex', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       // codex-docs: `codex resume <SESSION_ID>` 是独立子命令(不是 --resume flag)。
       // m2 实测:--approve-for-me/-c 这类主命令级选项必须排在 `resume` 子命令**之前**
@@ -1250,6 +1308,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       runtime = {
         worker_id: prev.worker_id,
+        incarnation_id: opts?.incarnation_id,
         seq,
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
@@ -1353,6 +1412,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const seq = await this.nextSeq(prev.worker_id)
       runtime = {
         worker_id: prev.worker_id,
+        incarnation_id: opts.incarnation_id,
         seq,
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
@@ -1480,6 +1540,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       turnAccepted = true
       handle = {
         worker_id: prev.worker_id,
+        incarnation_id: opts.incarnation_id,
         seq: runtime.seq,
         impl: 'codex',
         session_ref: thread.id,
@@ -1550,6 +1611,23 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       }
       if (result.control_state === 'exited') {
         runtime.acceptedExitReport = result.report ?? { endReason: runtime.ended_reason ?? 'completed' }
+      }
+    })
+  }
+
+  async respondToUi(h: IncarnationHandle, response: WorkerUiResponse): Promise<void> {
+    this.assertActive()
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
+    await this.syncState(runtime, h)
+    await this.getMutex(h.worker_id).run(async () => {
+      if (runtime.controlState.kind !== 'waiting_action') throw new Error('Codex UI is no longer waiting for a manager response')
+      try {
+        if (response.kind === 'keys') await this.sendControlKeys(runtime, h, response.keys, true)
+        else await this.sendUiText(runtime, h, response.text, true)
+      } catch (error) {
+        if (error instanceof CliInputStallError) return
+        throw error
       }
     })
   }
@@ -1725,6 +1803,17 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     })
   }
 
+  async interrupt(h: IncarnationHandle): Promise<void> {
+    this.assertActive()
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime || runtime.controlState.kind === 'exited') return
+    await this.tmux.sendKeys(runtime.sessionName, ['C-c'])
+  }
+
+  async stop(h: IncarnationHandle): Promise<void> {
+    await this.kill(h)
+  }
+
   dispose(): Promise<void> {
     if (this.disposePromise) return this.disposePromise
     this.closing = true
@@ -1771,7 +1860,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       } else if (stopCount > runtime.stopBaseline) {
         runtime.stopBaseline = stopCount
         runtime.interactionFingerprint = undefined
-        await this.transitionControlState(runtime, currentHandle, { kind: 'waiting_text' }, undefined, notify)
+        await this.transitionControlState(runtime, currentHandle, { kind: 'waiting_text' }, { completionSource: 'codex_turn_complete' }, notify)
       }
       return { state: contractState(runtime.controlState), stopCount }
     })
@@ -1788,7 +1877,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   /** Rebuild a CLI runtime from meta plus the deterministic tmux name and rollout metadata. The
    * per-worker lock and lock-local map recheck prevent duplicate runtimes/watchers. */
-  private async ensureRuntime(ref: { worker_id: string; seq: number; session_ref?: string }): Promise<Runtime | undefined> {
+  private async ensureRuntime(ref: { worker_id: string; incarnation_id?: string; seq: number; session_ref?: string }): Promise<Runtime | undefined> {
     const key = instanceKey(ref)
     const existing = this.runtimes.get(key)
     if (existing) return existing
@@ -1825,6 +1914,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       const runtime: Runtime = {
         worker_id: ref.worker_id,
+        incarnation_id: ref.incarnation_id,
         seq: ref.seq,
         dir,
         workspaceRoot,
@@ -1847,10 +1937,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       this.runtimes.set(key, runtime)
       // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视。已终态的化身
       // startEventWatch 自己会短路掉。
-      this.startEventWatch(runtime, { worker_id: ref.worker_id, seq: ref.seq, impl: 'codex', session_ref: sessionId })
+      this.startEventWatch(runtime, { worker_id: ref.worker_id, incarnation_id: ref.incarnation_id, seq: ref.seq, impl: 'codex', session_ref: sessionId })
       if (alive) {
         await this.inspectTerminalInteractionLocked(runtime, {
           worker_id: ref.worker_id,
+          incarnation_id: ref.incarnation_id,
           seq: ref.seq,
           impl: 'codex',
           session_ref: sessionId,
@@ -1918,6 +2009,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     state: CliControlState,
     report?: StateChangeReport,
     notify = true,
+    forceNotify = false,
   ): Promise<void> {
     const external = contractState(state)
     const changed = runtime.controlState.kind !== state.kind ||
@@ -1934,7 +2026,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       ...(state.kind === 'waiting_action' ? { wait_mode: 'action' as const, wait_reason: state.reason } : {}),
     })
     runtime.controlState = state
-    if (!notify || !changed) return
+    if (!notify || (!changed && !forceNotify)) return
     try {
       this.deps.onStateChange?.(h, external, report)
     } catch (err) {
@@ -2011,10 +2103,28 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         console.error(`[CodexWorkerAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
       })
     }, { offset: runtime.eventWatchOffset })
+    this.startNativeTraceWatch(runtime, h)
+  }
+
+  private startNativeTraceWatch(runtime: Runtime, h: IncarnationHandle): void {
+    if (runtime.stopTraceWatch || !this.deps.onNativeActivity || !runtime.rolloutPath) return
+    runtime.stopTraceWatch = watchNativeSessionFile(
+      () => runtime.rolloutPath,
+      () => {
+        if (this.closing || runtime.controlState.kind === 'exited') return
+        try {
+          this.deps.onNativeActivity?.({ ...h, session_ref: runtime.sessionId })
+        } catch (error) {
+          console.error(`[CodexWorkerAdapter] native trace activity callback failed for ${h.worker_id}#${h.seq}:`, error)
+        }
+      },
+    )
   }
 
   private async stopEventWatch(runtime: Runtime, waitForDrain = false): Promise<void> {
     runtime.interactionFingerprint = undefined
+    runtime.stopTraceWatch?.()
+    runtime.stopTraceWatch = undefined
     if (runtime.stopEventWatch) {
       const stop = runtime.stopEventWatch
       runtime.stopEventWatch = undefined
@@ -2040,13 +2150,15 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       runtime.interactionFingerprint = undefined
       return
     }
+    if (interaction.kind !== 'manager_required') return
     if (runtime.interactionFingerprint === interaction.fingerprint) return
     runtime.interactionFingerprint = interaction.fingerprint
     await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, {
       terminal: this.liveTerminal(snapshot),
       waitReason: 'interaction_required',
+      ui: { fingerprint: interaction.fingerprint, actions: interaction.actions },
       notification: { type: 'terminal_interaction' },
-    })
+    }, true, true)
   }
 
   private assertActive(): void {
@@ -2059,14 +2171,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const events = await channel.readAll()
     return events.filter((e) => e.kind === 'stop').length
   }
-}
-
-/** AGENTS.md 里标注的 worker 标签:provision(ws, caps) 拿不到 worker_id,退而取 workspace
- * 目录名兜底。与 cc adapter 同款独立实现。 */
-function workerIdLabelFromWorkspace(ws: Workspace): string {
-  const trimmed = ws.root.replace(/\/+$/, '')
-  const idx = trimmed.lastIndexOf('/')
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
 }
 
 function truncate(text: string, max: number): string {

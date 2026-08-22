@@ -290,9 +290,31 @@ export class ManagerLoop {
   private spawnRecheckOutcomeRecorded = false
   private postSendRecheckSequence = 0
 
+  /** Delivery/continuation evidence belongs to one Manager episode and is never inferred from history. */
+  private readonly successfulSendMessageTargetsInCurrentEpisode = new Set<string>()
+  private readonly continuedWorkersInCurrentEpisode = new Set<string>()
+
   /** 当前 episode 的 trace id（仅 episode 进行中）；registry 桥/worker-tools 读取用。 */
   get currentEpisodeTraceId(): string | undefined {
     return this.currentTraceId
+  }
+
+  hasSuccessfulSendMessageTo(target: { channel_id: string; session_id: string }): boolean {
+    return this.successfulSendMessageTargetsInCurrentEpisode.has(`${target.channel_id}\u0000${target.session_id}`)
+  }
+
+  recordSuccessfulSendMessage(target: { channel_id: string; session_id: string }): void {
+    if (this.currentTraceId !== undefined) {
+      this.successfulSendMessageTargetsInCurrentEpisode.add(`${target.channel_id}\u0000${target.session_id}`)
+    }
+  }
+
+  hasContinuedWorker(workerId: string): boolean {
+    return this.continuedWorkersInCurrentEpisode.has(workerId)
+  }
+
+  recordWorkerContinuation(workerId: string): void {
+    if (this.currentTraceId !== undefined) this.continuedWorkersInCurrentEpisode.add(workerId)
   }
 
   /**
@@ -436,6 +458,8 @@ export class ManagerLoop {
     this.spawnRecheckOutcomeRecorded = false
     this.postSendRecheckSequence = 0
     this.adminChatClaims = new Map()
+    this.successfulSendMessageTargetsInCurrentEpisode.clear()
+    this.continuedWorkersInCurrentEpisode.clear()
     for (const item of episodeEnvelopes) {
       for (const id of item.correlation?.admin_chat_request_ids ?? []) {
         if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
@@ -544,6 +568,8 @@ export class ManagerLoop {
       this.currentWakeEvent = null
       this.currentEpisodeEnvelopes = []
       this.currentTraceId = undefined
+      this.successfulSendMessageTargetsInCurrentEpisode.clear()
+      this.continuedWorkersInCurrentEpisode.clear()
       this.needsSpawnRecheck = false
       this.spawnRecheckInjected = false
       this.spawnRecheckOutcomeRecorded = false
@@ -1365,6 +1391,9 @@ function renderWorkerEvent(event: HarnessEvent): string {
 
 const SUPERVISION_READ_ONLY_TOOL_NAMES = new Set([
   'get_worker_terminal',
+  'get_worker_state',
+  'get_worker_activity',
+  'get_worker_turn',
   'list_workers',
   'get_worker_detail',
   'get_history',

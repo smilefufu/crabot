@@ -39,7 +39,8 @@ function handleKey(h: { worker_id: string; seq: number }): string {
 
 /**
  * CLI 形态的 adapter 桩:实现可选契约方法 `lastActivityAt`(真实实现从 meta 与原生会话
- * 记录建立任务进展基线,这里直接由用例摆布返回值),`readTerminal` 返回可断言的 pane 画面。
+ * 记录建立任务进展基线,这里直接由用例摆布返回值)。终端只能由 Manager 主动诊断读取，巡检
+ * 不得调用 `readTerminal`。
  */
 class CliLikeAdapter implements WorkerAdapter {
   readonly implId: WorkerImplId
@@ -174,9 +175,8 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     return { harness, ledger, adapter, workerId: worker.worker_id }
   }
 
-  it('① 化身存活、state() 报 running、lastActivityAt 长时间不前进 → 发唤醒事件,detail 带 output 尾部', async () => {
+  it('① 化身存活、state() 报 running、lastActivityAt 长时间不前进 → 发结构化停摆唤醒，不读取终端', async () => {
     const { harness, adapter, workerId } = await spawnRunning()
-    adapter.terminalText = '⏺ 正在读取文件…'
 
     // 阈值之内:一条事件都不该有(改动前的行为)
     clockMs += STALL_MS - MINUTE
@@ -192,13 +192,11 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     expect(woke[0].seq).toBe(1)
     expect(woke[0].detail?.to).toBe('running')
     const text = woke[0].detail?.text as string
-    expect(text).toContain('⏺ 正在读取文件…')
     expect(text).toContain('活性巡检')
     expect(text).toContain('没有新的可观察任务活动')
-    expect(text).toContain('非 raw 的 send_to_worker')
-    expect(text).toContain('空 composer')
-    // 合成指引排在 output 尾部**之后**——否则会被 truncateWakeText 的保尾截断吃掉(#70 教训)
-    expect(text.indexOf('⏺ 正在读取文件…')).toBeLessThan(text.indexOf('活性巡检'))
+    expect(text).toContain('读取状态和原生会话活动')
+    expect(text).not.toContain('⏺ 正在读取文件…')
+    expect(adapter.readTerminalCalls).toHaveLength(0)
     // 零新事件 kind、零新状态
     expect(woke[0].kind).toBe('state_changed')
   })
@@ -306,9 +304,8 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     expect(wakeEvents(workerId)).toHaveLength(5)
   })
 
-  it('⑤-③ 重试不带正文:只有首报带 pane 现场,后续重试是一行,mailbox 不会堆同一份现场', async () => {
+  it('⑤-③ 重试不重复首报:不 capture pane,mailbox 不会堆同一份停摆事实', async () => {
     const { harness, adapter, workerId } = await spawnRunning()
-    adapter.terminalText = '⏺ 正在读取文件…'
     deliverConsumed = false
 
     clockMs += STALL_MS + MINUTE
@@ -323,17 +320,17 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     expect(woke).toHaveLength(4)
 
     const first = woke[0].detail?.text as string
-    expect(first).toContain('⏺ 正在读取文件…') // 首报:现场在
+    expect(first).toContain('活性巡检')
+    expect(first).not.toContain('⏺ 正在读取文件…')
 
     for (const e of woke.slice(1)) {
       const text = e.detail?.text as string
-      // 重试:不再重复现场(现场已压在 manager 的 mailbox 里),只有一行
+      // 重试:不重复首报，只有一行。
       expect(text).not.toContain('⏺ 正在读取文件…')
       expect(text).toContain('重试投递')
       expect(text.length).toBeLessThan(120)
     }
-    // 只在首报那一次读过 pane —— 重试连 readTerminal 都不调
-    expect(adapter.readTerminalCalls).toHaveLength(1)
+    expect(adapter.readTerminalCalls).toHaveLength(0)
   })
 
   it('⑥ 活性巡检不改变 task.status 或主线化身 state', async () => {
@@ -358,7 +355,13 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
       ...prev!,
       incarnations: [
         ...prev!.incarnations,
-        { ...prev!.incarnations[0], seq: 2, session_ref: `fork-ref-${workerId}#2`, forked_from: 1 },
+        {
+          ...prev!.incarnations[0],
+          incarnation_id: `fork-${workerId}`,
+          seq: 2,
+          session_ref: `fork-ref-${workerId}#2`,
+          forked_from: prev!.incarnations[0].incarnation_id,
+        },
       ],
     }))
     adapter.activity.set(`${workerId}#2`, clockMs) // fork 自己也很久没动(下面时钟一推就超阈值)

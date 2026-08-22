@@ -10,7 +10,7 @@ import {
   type HarnessDeps,
   type SpawnWorkerParams,
 } from '../../../src/workers/harness/harness'
-import { LedgerStore } from '../../../src/workers/harness/ledger-store'
+import { LedgerStore, managerKeyToFilename } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import type { LedgerWorker, ManagerKey } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
@@ -32,6 +32,7 @@ import type {
   CapabilityBundle,
   AdapterCapabilities,
   DetectResult,
+  NormalizedTraceEvent,
 } from '../../../src/workers/types'
 
 // ---- FakeAdapter：与 Task 7 harness-lifecycle.test.ts 同款可编程桩，本文件独立一份
@@ -53,6 +54,7 @@ interface FakeAdapterOpts {
   readonly outputChunk?: string
   readonly acceptedExitReport?: StateChangeReport
   readonly updatedSessionRef?: string
+  readonly nativeTrace?: NormalizedTraceEvent[]
 }
 
 class FakeAdapter implements WorkerAdapter {
@@ -64,6 +66,7 @@ class FakeAdapter implements WorkerAdapter {
   readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: { raw?: boolean } }> = []
   readonly killCalls: IncarnationHandle[] = []
   readonly readTerminalCalls: IncarnationHandle[] = []
+  readonly readTrace?: WorkerAdapter['readTrace']
   private readonly states = new Map<string, WorkerContractState>()
   private acceptedExitReport?: StateChangeReport
   private updatedSessionRef?: string
@@ -71,6 +74,15 @@ class FakeAdapter implements WorkerAdapter {
 
   constructor(private readonly opts: FakeAdapterOpts = {}) {
     this.implId = opts.implId ?? 'builtin'
+    if (opts.nativeTrace) {
+      this.readTrace = async (_h, cursor) => {
+        const start = cursor?.offset ?? 0
+        return {
+          events: opts.nativeTrace!.slice(start).map((event, index) => ({ ...event, source_offset: start + index })),
+          nextCursor: { offset: opts.nativeTrace!.length },
+        }
+      }
+    }
   }
 
   async detect(): Promise<DetectResult> {
@@ -243,7 +255,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  await fs.rm(dataDir, { recursive: true, force: true })
+  await fs.rm(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 })
 })
 
 async function waitUntil(cond: () => Promise<boolean>, timeoutMs = 2000, intervalMs = 10): Promise<void> {
@@ -253,6 +265,12 @@ async function waitUntil(cond: () => Promise<boolean>, timeoutMs = 2000, interva
     await new Promise((resolve) => setTimeout(resolve, intervalMs))
   }
   throw new Error('waitUntil timed out')
+}
+
+async function readHandoffPackage(workersDir: string, workerId: string, prompt: string): Promise<Record<string, unknown>> {
+  const handoffId = /^Handoff package: ([0-9a-f-]{36})$/m.exec(prompt)?.[1]
+  if (!handoffId) throw new Error('spawn prompt did not include a Harness handoff package id')
+  return JSON.parse(await fs.readFile(join(workersDir, workerId, 'handoffs', `${handoffId}.json`), 'utf8')) as Record<string, unknown>
 }
 
 describe('WorkerHarness — 透明接续：revive (capabilities().revive === true)', () => {
@@ -279,7 +297,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
 
     expect(fake.sendInputCalls).toHaveLength(0)
     expect(fake.resumeCalls).toHaveLength(1)
-    expect(fake.resumeCalls[0].prev).toEqual({ worker_id: worker.worker_id, seq: 1, session_ref: mainlineHandle.session_ref })
+    expect(fake.resumeCalls[0].prev).toMatchObject({ worker_id: worker.worker_id, seq: 1, session_ref: mainlineHandle.session_ref })
     expect(fake.resumeCalls[0].wakeInput).toBe('还有件事要办')
 
     const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
@@ -292,6 +310,77 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     const resumedEvents = events.filter((e) => e.kind === 'resumed')
     expect(resumedEvents).toHaveLength(1)
     expect(resumedEvents[0].seq).toBe(w.incarnations[1].seq)
+  })
+
+  it('升级后首次 CLI复活先建立源 session 基线，不重放旧 activity', async () => {
+    const nativeTrace: NormalizedTraceEvent[] = [
+      { ts: '2026-08-21T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '旧化身的第一段输出' },
+      { ts: '2026-08-21T00:01:00.000Z', kind: 'message', role: 'assistant', summary: '旧化身的第二段输出' },
+    ]
+    const { harness, adaptersMap, workersDir } = await makeHarness()
+    const fake = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      nativeTrace,
+      onStateChange: harness.handleStateChange,
+      resumeBehavior: (prev) => ({
+        worker_id: prev.worker_id,
+        seq: prev.seq + 1,
+        impl: 'claude-code',
+        session_ref: prev.session_ref,
+      }),
+    })
+    adaptersMap.set('claude-code', fake)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const source = worker.incarnations[0]
+    const sourceHandle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      incarnation_id: source.incarnation_id,
+      seq: source.seq,
+      impl: 'claude-code',
+      session_ref: source.session_ref,
+    }
+    const activityStore = (harness as unknown as {
+      nativeActivityStore: { cursor(workerId: string, incarnationId: string): Promise<number> }
+    }).nativeActivityStore
+
+    fake.emitStateChange(sourceHandle, 'exited')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
+
+    await harness.sendToWorker(worker.worker_id, '继续执行')
+    const [revived] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
+    const target = revived.incarnations[1]
+    const targetHandle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      incarnation_id: target.incarnation_id,
+      seq: target.seq,
+      impl: 'claude-code',
+      session_ref: target.session_ref,
+    }
+    expect(await activityStore.cursor(worker.worker_id, source.incarnation_id!)).toBe(2)
+    expect(await activityStore.cursor(worker.worker_id, target.incarnation_id!)).toBe(2)
+
+    events.length = 0
+    harness.handleNativeActivity(targetHandle)
+    await harness.sendToWorker(worker.worker_id, '同锁屏障')
+    expect(events.some((event) => event.kind === 'activity_available')).toBe(false)
+
+    nativeTrace.push({ ts: '2026-08-21T00:02:00.000Z', kind: 'message', role: 'assistant', summary: '复活后的新输出' })
+    harness.handleStateChange(targetHandle, 'idle', { completionSource: 'claude_stop' })
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id))?.incarnation_id === target.incarnation_id)
+
+    const turn = await harness.getWorkerTurn(worker.worker_id)
+    expect(turn).toMatchObject({ activity_from: '2', activity_through: '3' })
+    if (!turn) throw new Error('expected resumed worker turn')
+    await expect(harness.getWorkerTurnActivities(turn)).resolves.toEqual({
+      events: [expect.objectContaining({ summary: '复活后的新输出', source_offset: 2 })],
+    })
+    const activityState = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')) as {
+      activities: Array<{ incarnation_id: string; summary: string; source_offset?: number }>
+    }
+    expect(activityState.activities.filter((activity) => activity.incarnation_id === target.incarnation_id)).toEqual([
+      expect.objectContaining({ summary: '复活后的新输出', source_offset: 2 }),
+    ])
   })
 
   it('resume首投accepted后同步completed：新化身与task按endReason落completed', async () => {
@@ -568,12 +657,11 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
 })
 
 describe('WorkerHarness — 透明接续：handoff (capabilities().revive === false)', () => {
-  it('HANDOFF.md 含标题/输出尾/上次 outcome，新化身 prompt 含交接引用与本次输入，旧化身标 superseded，事件 handoff_started', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+  it('私有 package 含任务/来源会话事实，新化身获得受限摘要且不读写 HANDOFF.md，旧化身标 superseded', async () => {
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     const fake = new FakeAdapter({
       caps: { revive: false },
       onStateChange: harness.handleStateChange,
-      outputChunk: '这是执行到一半的输出\n还差一步',
       sendInputBehavior: (h) => {
         throw new WorkerExitedError(h.worker_id, h.seq)
       },
@@ -582,8 +670,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     // 三轮 review 修复后，revive:false 的自动 handoff 不再"原 impl 沿用"（mainline.impl 在
     // worker.incarnations 里必然已经用过，沿用会被 ImplAlreadyUsedError pre-flight 拒绝），
     // 而是改选一个该 worker 尚未用过的实现（pickUnusedImpl）——必须再注册一个未用过的
-    // adapter，否则 handoff 会因为"全都用过"而抛 ImplAlreadyUsedError，无法测到 handoff 本体
-    // 逻辑（HANDOFF.md 内容/superseded/spawned 事件）。
+    // adapter，否则 handoff 会因为"全都用过"而抛 ImplAlreadyUsedError，无法测到 handoff 本体。
     const target = new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange })
     adaptersMap.set('claude-code', target)
 
@@ -599,15 +686,28 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(target.resumeCalls).toHaveLength(0)
     expect(target.spawnCalls).toHaveLength(1)
     const handoffSpawn = target.spawnCalls[0]
-    expect(handoffSpawn.prompt).toContain('HANDOFF.md')
+    expect(handoffSpawn.prompt).toContain('Handoff package:')
+    expect(handoffSpawn.prompt).not.toContain('HANDOFF.md')
     expect(handoffSpawn.prompt).toContain('接着把剩下的做完')
 
-    // HANDOFF.md 写入 workspace，含标题、输出尾、上次 outcome 标签。
-    const handoffPath = join(workspaceRoot, 'HANDOFF.md')
-    const handoffContent = await fs.readFile(handoffPath, 'utf-8')
-    expect(handoffContent).toContain('测试任务') // task.title
-    expect(handoffContent).toContain('这是执行到一半的输出') // 输出尾
-    expect(handoffContent).toMatch(/Previous outcome:/)
+    const handoff = await readHandoffPackage(workersDir, worker.worker_id, handoffSpawn.prompt)
+    expect(handoff).toMatchObject({
+      worker_id: worker.worker_id,
+      package_id: expect.any(String),
+      source_incarnation_id: worker.incarnations[0].incarnation_id,
+      workspace: workspaceRoot,
+      sources: ['ledger'],
+      evidence: expect.arrayContaining([
+        expect.objectContaining({ source: 'ledger', reference: expect.stringContaining('task:') }),
+      ]),
+      unavailable: expect.arrayContaining(['native_session: adapter has no structured trace reader']),
+      summary: expect.stringContaining('Task: 测试任务'),
+    })
+    expect(Object.keys(handoff).sort()).toEqual([
+      'created_at', 'evidence', 'package_id', 'source_incarnation_id', 'sources', 'summary', 'unavailable', 'worker_id', 'workspace',
+    ])
+    expect(fake.readTerminalCalls).toHaveLength(0)
+    await expect(fs.stat(join(workspaceRoot, 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
 
     // 旧化身（seq=1，impl='builtin'）标 superseded：源化身在台账里还非终态时，先 kill 再落
     // exited(superseded)。
@@ -668,6 +768,77 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     })
   })
 
+  it('源原生 session 不可读时使用已持久化 activity，而不是 terminal tail', async () => {
+    const { harness, adaptersMap, workersDir } = await makeHarness()
+    const source = new FakeAdapter({ implId: 'builtin', caps: { revive: false }, onStateChange: harness.handleStateChange })
+    const target = new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', source)
+    adaptersMap.set('claude-code', target)
+    const worker = await harness.spawnWorker(spawnParams())
+    const sourceIncarnation = worker.incarnations[0]
+    const nativeActivityStore = (harness as unknown as {
+      nativeActivityStore: {
+        commitObservation(params: {
+          worker_id: string
+          cursor: { incarnation_id: string; impl: WorkerImplId; seq: number; offset: number }
+          activity: NormalizedTraceEvent[]
+        }): Promise<void>
+      }
+    }).nativeActivityStore
+    await nativeActivityStore.commitObservation({
+      worker_id: worker.worker_id,
+      cursor: {
+        incarnation_id: sourceIncarnation.incarnation_id!,
+        impl: 'builtin',
+        seq: sourceIncarnation.seq,
+        offset: 1,
+      },
+      activity: [{
+        ts: '2026-08-20T00:00:00.000Z',
+        kind: 'message',
+        role: 'assistant',
+        summary: '已完成配置检查，正在等待下一步。',
+        source_offset: 0,
+      }],
+    })
+
+    await harness.switchWorkerImpl(worker.worker_id, 'claude-code', '继续处理')
+
+    const handoff = await readHandoffPackage(workersDir, worker.worker_id, target.spawnCalls[0].prompt)
+    expect(handoff.sources).toEqual(expect.arrayContaining(['ledger', 'persisted_activity']))
+    expect(handoff.summary).toContain('已完成配置检查')
+    expect(handoff.unavailable).toContain('native_session: adapter has no structured trace reader')
+    expect(source.readTerminalCalls).toHaveLength(0)
+  })
+
+  it('活跃源停止仍在 verifying 时不启动目标化身，也不标记 superseded', async () => {
+    const { harness, adaptersMap, workersDir } = await makeHarness()
+    const source = new FakeAdapter({ implId: 'builtin', onStateChange: harness.handleStateChange })
+    const target = new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', source)
+    adaptersMap.set('claude-code', target)
+    const worker = await harness.spawnWorker(spawnParams())
+    vi.spyOn(source, 'kill').mockImplementation(async (handle) => {
+      source.killCalls.push(handle)
+      // Native stop accepted, but state() still proves the source is running.
+    })
+
+    await expect(harness.switchWorkerImpl(worker.worker_id, 'claude-code', '切换实现')).rejects.toThrow(
+      'source stop did not verify (verifying)',
+    )
+
+    expect(target.spawnCalls).toHaveLength(0)
+    const current = (await harness.findWorker(worker.worker_id))!.worker
+    expect(current.task.status).toBe('running')
+    expect(current.incarnations).toHaveLength(1)
+    expect(current.incarnations[0].state).toBe('running')
+    expect(current.incarnations[0]).not.toHaveProperty('ended_reason')
+    const operations = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'control-operations.json'), 'utf8'))
+    expect(operations.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'stop', status: 'verifying' }),
+    ]))
+  })
+
   it('handoff首投not_pasted保留原durable receipt和完整handoff prompt', async () => {
     const { harness, adaptersMap } = await makeHarness()
     const source = new FakeAdapter({
@@ -701,18 +872,14 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     })
     expect(settlements).toEqual([])
     expect(target.spawnCalls[0].prompt).toContain('durable handoff')
-    expect(target.spawnCalls[0].prompt).toContain('交接续办')
+    expect(target.spawnCalls[0].prompt).toContain('Harness-generated, read-only handoff')
 
     await harness.killWorker(worker.worker_id, 'test')
     expect(settlements).toEqual(['dead_letter'])
   })
 
-  it('源化身台账已记 failed 时，HANDOFF.md 的 Previous outcome 写 failed —— 接手化身不会以为上一棒干成了', async () => {
-    // 第四个消费方（台账 / task.status / 对外事件之外）：HANDOFF.md 的 `Previous outcome:` 取
-    // `worker.task.outcome ?? source.ended_reason ?? 'unknown'`，而 task.outcome 在生产链路上
-    // 恒 undefined，所以实际总是取 ended_reason。它被硬编码成 completed 时，跨实现交接的新
-    // 化身会读到"上一化身 outcome: completed"，据此认为任务已经完成。
-    const { harness, adaptersMap } = await makeHarness()
+  it('源化身台账已记 failed 时，私有 package 摘要保留 failed outcome', async () => {
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     const fake = new FakeAdapter({
       caps: { revive: false },
       onStateChange: harness.handleStateChange,
@@ -723,7 +890,6 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     adaptersMap.set('claude-code', target)
 
     const worker = await harness.spawnWorker(spawnParams())
-    const workspaceRoot = worker.incarnations[0].workspace
 
     // 状态回调已经追上：台账里源化身就是 exited/failed（builtin 的 finish_task(outcome:'failed')）。
     const h: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }
@@ -735,12 +901,13 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
 
     await expect(harness.sendToWorker(worker.worker_id, '接着把剩下的做完')).resolves.toBeUndefined()
 
-    const handoffContent = await fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')
-    expect(handoffContent).toContain('Previous outcome: failed')
-    expect(handoffContent).not.toContain('Previous outcome: completed')
+    const handoff = await readHandoffPackage(workersDir, worker.worker_id, target.spawnCalls[0].prompt)
+    expect(handoff.summary).toContain('Source outcome: failed')
+    expect(target.spawnCalls[0].prompt).toContain('Source outcome: failed')
+    expect(target.spawnCalls[0].prompt).not.toContain('Source outcome: completed')
   })
 
-  it('HANDOFF.md 已存在时追加带时间戳的新段，旧内容仍在（不覆盖）', async () => {
+  it('用户已有的 HANDOFF.md 不被 Harness 覆盖或追加', async () => {
     const { harness, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter({
       caps: { revive: false },
@@ -763,10 +930,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     await harness.sendToWorker(worker.worker_id, '第二次交接')
 
     const content = await fs.readFile(handoffPath, 'utf-8')
-    expect(content).toContain('# 手工写入的既有交接记录')
-    expect(content).toContain('旧内容不能丢')
-    expect(content).toMatch(/## Handoff \d{4}-\d{2}-\d{2}T/) // 新段带时间戳标题
-    expect(content).toContain('第二次交接')
+    expect(content).toBe('# 手工写入的既有交接记录\n旧内容不能丢\n')
   })
 })
 
@@ -1249,6 +1413,12 @@ describe('BuiltinWorkerAdapter → WorkerHarness — session_ref 时效性修复
     const [afterSecondBurst] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(afterFirstBurstRef)
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(spawnTimeSessionRef)
+    await waitUntil(async () => events.filter((event) =>
+      event.worker_id === worker.worker_id &&
+      event.kind === 'state_changed' &&
+      event.detail?.to === 'idle',
+    ).length === 2)
+    await builtinAdapter.dispose()
   })
 })
 
@@ -1365,7 +1535,7 @@ describe('WorkerHarness.processStateChange — 化身查找: 同 (impl, seq) 撞
 
     let current = (await harness.listWorkers(dialogId))[0]
     expect(current.incarnations).toHaveLength(2)
-    expect(current.incarnations[1].forked_from).toBe(1)
+    expect(current.incarnations[1].forked_from).toBe(current.incarnations[0].incarnation_id)
     expect(current.task.status).toBe('running')
 
     // 3. fork 化身终态（旧的记录）
@@ -1413,7 +1583,7 @@ describe('WorkerHarness.processStateChange — 化身查找: 同 (impl, seq) 撞
     current = (await harness.listWorkers(dialogId))[0]
     expect(current.incarnations[2].state).toBe('exited') // 新的 fork 被更新
     expect(current.incarnations[2].ended_reason).toBe('completed')
-    expect(current.incarnations[2].forked_from).toBe(1) // 仍然是 fork
+    expect(current.incarnations[2].forked_from).toBe(current.incarnations[0].incarnation_id) // 仍然是 fork
     expect(current.task.status).toBe('running') // mainline task 不受影响
   })
 })
@@ -1765,7 +1935,7 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     expect(target.sendInputCalls).toHaveLength(0)
     // 而是被当作接续的新源头，走 revive。
     expect(target.resumeCalls).toHaveLength(1)
-    expect(target.resumeCalls[0].prev).toEqual({
+    expect(target.resumeCalls[0].prev).toMatchObject({
       worker_id: worker.worker_id,
       seq: 1,
       session_ref: newMainline.session_ref,
@@ -1836,7 +2006,7 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     expect(target.sendInputCalls).toHaveLength(1)
     // 随后转入接续，以这个新主线为源头 revive。
     expect(target.resumeCalls).toHaveLength(1)
-    expect(target.resumeCalls[0].prev).toEqual({
+    expect(target.resumeCalls[0].prev).toMatchObject({
       worker_id: worker.worker_id,
       seq: 1,
       session_ref: newMainline.session_ref,
@@ -1922,8 +2092,8 @@ function guardedSpawnBehavior(implLabel: string, spawnedOnce: Set<string>, impl:
 }
 
 describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 worker 已用过的 impl（含切回原实现、同实现切换）', () => {
-  it('switchWorkerImpl 切回曾经用过的实现（cc → codex → cc）→ 抛 ImplAlreadyUsedError；源化身（当前主线 codex#1）状态未变、HANDOFF.md 未被再次追加、目标（cc）adapter 无新增 provision/spawn 调用', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+  it('switchWorkerImpl 切回曾经用过的实现（cc → codex → cc）→ 抛 ImplAlreadyUsedError；源化身状态未变，且不会创建第二个私有 package', async () => {
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     const spawnedOnce = new Set<string>()
     const cc = new FakeAdapter({
       implId: 'claude-code',
@@ -1948,7 +2118,9 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
     expect(codex.spawnCalls).toHaveLength(1)
     expect(cc.spawnCalls).toHaveLength(1) // 只有最初 spawnWorker 那一次
 
-    const handoffBefore = await fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')
+    await expect(fs.stat(join(workspaceRoot, 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const handoffDir = join(workersDir, worker.worker_id, 'handoffs')
+    const handoffBefore = await fs.readdir(handoffDir)
     events.length = 0
 
     // 第二次切换：切回 claude-code（曾经用过的实现）。修复前会走到 handoffIncarnation
@@ -1974,11 +2146,10 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
     expect(mainlineAfter.ended_reason).toBeUndefined()
     expect(after.incarnations).toHaveLength(2) // 没有多出第三条化身
 
-    // HANDOFF.md 未被再次追加。
-    const handoffAfter = await fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')
-    expect(handoffAfter).toBe(handoffBefore)
+    // The rejected preflight does not create a second package.
+    expect(await fs.readdir(handoffDir)).toEqual(handoffBefore)
 
-    // 没有产生新的 handoff_started / superseded 事件——pre-flight 在写 HANDOFF.md 和 kill
+    // 没有产生新的 handoff_started / superseded 事件——pre-flight 在构造 package 和 kill
     // 源化身之前就已经拒绝。
     expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
     expect(events.filter((e) => e.kind === 'superseded')).toHaveLength(0)
@@ -2264,10 +2435,61 @@ describe('legacy incarnation guardrails', () => {
     expect(JSON.parse(await fs.readFile(join(workersDir, 'w-legacy-success', 'context.json'), 'utf8'))).toEqual({
       principal_permissions: permissions,
     })
-    const handoff = await fs.readFile(join(dataDir, 'workspace', 'HANDOFF.md'), 'utf8')
-    expect(handoff).toContain('old-task')
-    expect(handoff).not.toContain('resume_checkpoint')
+    const handoff = await readHandoffPackage(workersDir, 'w-legacy-success', target.spawnCalls[0].prompt)
+    expect(handoff.sources).toContain('persisted_activity')
+    expect(JSON.stringify(handoff)).toContain('old-task')
+    expect(JSON.stringify(handoff)).not.toContain('resume_checkpoint')
+    await expect(fs.stat(join(dataDir, 'workspace', 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(events.some((event) => event.kind === 'handoff_started')).toBe(true)
+  })
+
+  it('歧义 v3 历史先归档，再只用归档台账和持久 activity 生成 handoff', async () => {
+    const { harness, ledger, adaptersMap, workersDir } = await makeHarness({
+      validateLegacyContinuationAuth: async () => true,
+    })
+    const workerId = 'w-ambiguous-v3-legacy'
+    const workspace = join(dataDir, 'workspace')
+    const at = now()
+    const originalIncarnations = [
+      { impl: 'builtin', seq: 1, state: 'exited', workspace, started_at: at, ended_at: at, ended_reason: 'completed', session_ref: 'builtin-1' },
+      { impl: 'claude-code', seq: 1, state: 'exited', workspace, started_at: at, ended_at: at, ended_reason: 'completed', session_ref: 'claude-1' },
+      { impl: 'claude-code', seq: 2, state: 'running', workspace, started_at: at, session_ref: 'claude-2', forked_from: 1 },
+    ]
+    await fs.mkdir(join(dataDir, 'ledgers'), { recursive: true })
+    await fs.mkdir(workspace, { recursive: true })
+    await fs.writeFile(join(dataDir, 'ledgers', managerKeyToFilename(managerKey)), JSON.stringify({
+      manager_key: managerKey,
+      workers: [{
+        worker_id: workerId,
+        manager_key: managerKey,
+        task: { id: workerId, title: 'ambiguous history', status: 'running', created_at: at },
+        origin: { trigger_type: 'system' },
+        report_to: { channel_id: 'test', session_id: 'legacy-session' },
+        incarnations: originalIncarnations,
+        updated_at: at,
+      }],
+    }))
+    const archived = (await ledger.findWorker(workerId))!.worker
+    const legacy = archived.incarnations[0]
+    expect(archived.legacy_source).toMatchObject({ kind: 'ambiguous_v3_ledger', original_incarnations: originalIncarnations })
+    const internals = harness as unknown as { nativeActivityStore: { commitObservation(params: unknown): Promise<void> } }
+    await internals.nativeActivityStore.commitObservation({
+      worker_id: workerId,
+      cursor: { incarnation_id: legacy.incarnation_id, impl: 'legacy', seq: 1, offset: 1 },
+      activity: [{ ts: at, kind: 'message', role: 'assistant', summary: 'persisted activity survives the archived source' }],
+    })
+    const target = new FakeAdapter({ implId: 'builtin', onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', target)
+    const adapterGet = vi.spyOn(adaptersMap, 'get')
+
+    await harness.sendToWorker(workerId, 'continue from archive', { legacyContinuationAuth: continuationAuth() })
+
+    expect(target.spawnCalls).toHaveLength(1)
+    expect(adapterGet.mock.calls.some(([impl]) => String(impl) === 'legacy')).toBe(false)
+    const handoff = await readHandoffPackage(workersDir, workerId, target.spawnCalls[0].prompt)
+    expect(handoff.sources).toEqual(expect.arrayContaining(['ledger', 'persisted_activity']))
+    expect(JSON.stringify(handoff)).toContain('Archived source: claude-code#2 running forked_from=1')
+    expect(JSON.stringify(handoff)).toContain('persisted activity survives the archived source')
   })
 
   it('invalid auth settles and does not block a later valid continuation', async () => {
@@ -2330,7 +2552,7 @@ describe('legacy incarnation guardrails', () => {
     expect(target.spawnCalls).toHaveLength(0)
   })
 
-  it('preflight failure leaves context, HANDOFF and ledger untouched', async () => {
+  it('preflight failure leaves context, private handoff storage and ledger untouched', async () => {
     const { harness, ledger, adaptersMap, workersDir } = await makeHarness({
       validateLegacyContinuationAuth: async () => true,
     })
@@ -2348,7 +2570,7 @@ describe('legacy incarnation guardrails', () => {
     expect(target.provisionCalls).toHaveLength(0)
     expect(target.spawnCalls).toHaveLength(0)
     await expect(fs.stat(join(workersDir, 'w-legacy-preflight', 'context.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(fs.stat(join(dataDir, 'workspace', 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.stat(join(workersDir, 'w-legacy-preflight', 'handoffs'))).rejects.toMatchObject({ code: 'ENOENT' })
     const worker = (await ledger.findWorker('w-legacy-preflight'))!.worker
     expect(worker.task.status).toBe('completed')
     expect(worker.incarnations).toHaveLength(1)

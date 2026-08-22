@@ -16,6 +16,9 @@ import type { TaskStatus } from './ledger-types'
 
 export type HarnessEventKind =
   | 'spawned'
+  | 'activity_available'
+  | 'turn_completed'
+  | 'operation_settled'
   | 'input_sent'
   | 'input_held'
   | 'state_changed'

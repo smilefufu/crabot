@@ -98,6 +98,8 @@ export type GetWorkerTerminalResult = WorkerTerminalView
 /** §8.3 get_worker_trace:结构化时间线(两层信息源见 §10.2) */
 export interface GetWorkerTraceParams {
   worker_id: string
+  /** Stable Harness identity. Preferred by Manager activity reads; seq remains legacy diagnostics. */
+  incarnation_id?: string
   /** 化身序号(从 1 起)。**可选**:缺省 = 主线化身,与 `GetWorkerTerminalParams.seq` 同一缺省。 */
   seq?: number
   cursor?: string

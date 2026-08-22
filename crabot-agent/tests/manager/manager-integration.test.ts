@@ -731,11 +731,11 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
     15000,
   )
 
-  // --- 场景五：唤醒事件自带 worker 的收尾发言 ---
+  // --- 场景五：完成回合事件自带结构化收尾线索 ---
 
   it(
-    '场景五：worker end_turn 转 idle → 唤醒事件的 detail 带上它最后说的那段 text → ' +
-      'manager 醒来不调 get_worker_terminal 就能据此向人类汇报',
+    '场景五：worker end_turn 转 idle → 事件标记 pending turn 并保留结构化最后发言 → ' +
+      'manager 醒来不调 get_worker_terminal 也能据此向人类汇报',
     async () => {
       const managerScript = makeManagerAdapter()
       const managerNowMs = Date.parse('2026-01-01T00:00:00.000Z')
@@ -774,7 +774,12 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       // 1) harness 事件本身带上了正文（不是只有一个 {to:'idle'}）
       const idleEvent = findIdleEvent()
       expect(idleEvent).toBeDefined()
-      expect(idleEvent!.detail).toEqual({ to: 'idle', text: WORKER_SAY })
+      expect(idleEvent!.detail).toMatchObject({
+        to: 'idle',
+        text: WORKER_SAY,
+        turn_id: expect.any(String),
+        turn_pending: true,
+      })
 
       // 2) manager 被这条事件唤醒后，**不调 get_worker_terminal** 直接转述给人类
       managerScript.queue.push({

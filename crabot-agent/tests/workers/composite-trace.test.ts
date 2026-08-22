@@ -9,16 +9,18 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 
 import { readCompositeWorkerTrace } from '../../src/workers/trace/composite-reader.js'
-import { TraceCursorStore, incarnationFingerprint } from '../../src/workers/trace/cursor-store.js'
+import { TraceCursorStore, incarnationFingerprint, legacyIncarnationFingerprint } from '../../src/workers/trace/cursor-store.js'
 import { NativeTraceCopyStore } from '../../src/workers/trace/native-copy.js'
 import type { Incarnation, LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { NormalizedTraceEvent, WorkerAdapter } from '../../src/workers/types.js'
 import type { HarnessEvent } from '../../src/workers/harness/worker-events.js'
 
 const WORKER_ID = 'w-comp-1'
+const INCARNATION_ID = '0198fed8-9c4a-7000-8000-000000000001'
 
 function makeWorker(over: Partial<LedgerWorker> = {}): LedgerWorker {
   const mainline: Incarnation = {
+    incarnation_id: INCARNATION_ID,
     seq: 1, impl: 'claude-code', state: 'running',
     session_ref: 'sess-1', started_at: '2026-08-01T00:00:00.000Z',
   } as unknown as Incarnation
@@ -241,6 +243,68 @@ describe('readCompositeWorkerTrace', () => {
     expect(second.unavailable_reason).toContain('copy')
   })
 
+  it('原生 source 消失时升级 pre-incarnation copy 的 header 并保留历史事件', async () => {
+    const copyDir = join(dir, 'copies', encodeURIComponent(WORKER_ID))
+    const copyPath = join(copyDir, 'seq-1.jsonl')
+    const event = nativeEventAt('persisted before incarnation id', '2026-08-01T00:00:02.000Z', 0)
+    const legacyFingerprint = legacyIncarnationFingerprint({
+      impl: 'claude-code', seq: 1, started_at: '2026-08-01T00:00:00.000Z',
+    })
+    await fs.mkdir(copyDir, { recursive: true })
+    await fs.writeFile(copyPath, [
+      JSON.stringify({ kind: 'native-trace-copy-header', worker_id: WORKER_ID, seq: 1, incarnation_fingerprint: legacyFingerprint }),
+      JSON.stringify(event),
+      '',
+    ].join('\n'))
+    nativeShouldThrow = 'live source gone'
+
+    const result = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+
+    expect(result.events).toMatchObject([{ source: 'native', summary: 'persisted before incarnation id' }])
+    const currentFingerprint = incarnationFingerprint({
+      incarnation_id: INCARNATION_ID,
+      impl: 'claude-code', seq: 1, started_at: '2026-08-01T00:00:00.000Z',
+    })
+    expect((await nativeCopy.read(WORKER_ID, 1, currentFingerprint))?.events).toEqual([event])
+    expect(JSON.parse((await fs.readFile(copyPath, 'utf-8')).split('\n', 1)[0])).toMatchObject({
+      incarnation_fingerprint: currentFingerprint,
+    })
+  })
+
+  it('pre-incarnation copy 不匹配当前化身的旧摘要时不读入', async () => {
+    const copyDir = join(dir, 'copies', encodeURIComponent(WORKER_ID))
+    await fs.mkdir(copyDir, { recursive: true })
+    await fs.writeFile(join(copyDir, 'seq-1.jsonl'), [
+      JSON.stringify({
+        kind: 'native-trace-copy-header', worker_id: WORKER_ID, seq: 1,
+        incarnation_fingerprint: legacyIncarnationFingerprint({
+          impl: 'claude-code', seq: 1, started_at: '2026-08-01T00:00:00.000Z',
+        }),
+      }),
+      JSON.stringify(nativeEventAt('must stay isolated', '2026-08-01T00:00:02.000Z', 0)),
+      '',
+    ].join('\n'))
+    const changed = {
+      ...deps(),
+      ledger: {
+        findWorker: async () => ({
+          managerKey: 'k',
+          worker: makeWorker({ incarnations: [{
+            incarnation_id: '0198fed8-9c4a-7000-8000-000000000002',
+            seq: 1, impl: 'claude-code', state: 'running', session_ref: 'sess-OTHER',
+            started_at: '2026-08-02T00:00:00.000Z',
+          } as unknown as Incarnation] }),
+        }),
+      },
+    } as never
+    nativeShouldThrow = 'live source gone'
+
+    const result = await readCompositeWorkerTrace(changed, { worker_id: WORKER_ID })
+
+    expect(result.events.filter((event) => event.source === 'native')).toHaveLength(0)
+    expect(result.unavailable_reason).toContain('native unavailable')
+  })
+
   it('从头重读 live source 会替换旧 copy，回退时保留同一 source_offset 的展开事件', async () => {
     nativeLines = [nativeEventAt('old lifecycle', '2026-08-01T00:00:02.000Z', 0)]
     await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
@@ -272,6 +336,7 @@ describe('readCompositeWorkerTrace', () => {
     ]
     await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
     const copy = await nativeCopy.read(WORKER_ID, 1, incarnationFingerprint({
+      incarnation_id: INCARNATION_ID,
       impl: 'claude-code',
       seq: 1,
       started_at: '2026-08-01T00:00:00.000Z',
@@ -297,7 +362,7 @@ describe('readCompositeWorkerTrace', () => {
       ledger: {
         findWorker: async () => ({
           managerKey: 'k',
-          worker: makeWorker({ incarnations: [{ seq: 1, impl: 'claude-code', state: 'running', session_ref: 'sess-OTHER', started_at: '2026-08-02T00:00:00.000Z' } as unknown as Incarnation] }),
+          worker: makeWorker({ incarnations: [{ incarnation_id: '0198fed8-9c4a-7000-8000-000000000002', seq: 1, impl: 'claude-code', state: 'running', session_ref: 'sess-OTHER', started_at: '2026-08-02T00:00:00.000Z' } as unknown as Incarnation] }),
         }),
       },
     } as never

@@ -16,7 +16,7 @@ import {
   createSkillDirFenceHook,
   createGitWriteFenceHook,
 } from '../../hooks/defaults.js'
-import type { SpawnSpec, Workspace } from '../types.js'
+import type { SpawnSpec, Workspace, WorkspaceInstructionPayload } from '../types.js'
 import type { LedgerWorker } from '../harness/ledger-types.js'
 
 /**
@@ -31,6 +31,8 @@ import type { LedgerWorker } from '../harness/ledger-types.js'
 export interface BuiltinRuntimeContext {
   readonly worker_id: string
   readonly workspace: Workspace
+  /** Immutable AGENTS.md capture for the incarnation currently being configured. */
+  readonly workspace_instructions?: WorkspaceInstructionPayload
   readonly origin?: LedgerWorker['origin']
   readonly goal?: string
   /**

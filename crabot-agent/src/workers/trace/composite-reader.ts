@@ -25,6 +25,7 @@ import type { HarnessEvent } from '../harness/worker-events.js'
 import { readLegacyTraceEvents, type LegacyTraceEventEntry } from '../legacy-source-reader.js'
 import {
   incarnationFingerprint,
+  legacyIncarnationFingerprint,
   InvalidTraceCursorError,
   type TraceCursorStore,
   type TraceSourcePositions,
@@ -45,6 +46,7 @@ export interface CompositeTraceDeps {
 
 export interface CompositeTraceParams {
   readonly worker_id: string
+  readonly incarnation_id?: string
   readonly seq?: number
   readonly cursor?: string
 }
@@ -157,13 +159,16 @@ export async function readCompositeWorkerTrace(
   if (!found) throw new WorkerNotFoundError(params.worker_id)
   const worker = found.worker
   if (worker.incarnations.length === 0) throw new WorkerHasNoIncarnationError(params.worker_id)
-  const incarnation =
-    params.seq === undefined ? mainlineIncarnation(worker) : findIncarnationBySeq(worker, params.seq)
+  const incarnation = params.incarnation_id === undefined
+    ? (params.seq === undefined ? mainlineIncarnation(worker) : findIncarnationBySeq(worker, params.seq))
+    : worker.incarnations.find((candidate) => candidate.incarnation_id === params.incarnation_id)
   if (!incarnation) {
-    throw new Error(`get_worker_trace: no incarnation with seq=${params.seq} found for worker ${params.worker_id}`)
+    const identity = params.incarnation_id === undefined ? `seq=${params.seq}` : `incarnation_id=${params.incarnation_id}`
+    throw new Error(`get_worker_trace: no incarnation with ${identity} found for worker ${params.worker_id}`)
   }
 
   const fingerprint = incarnationFingerprint({
+    incarnation_id: incarnation.incarnation_id,
     impl: incarnation.impl as WorkerImplId,
     seq: incarnation.seq,
     started_at: incarnationStartedAt(incarnation),
@@ -213,7 +218,10 @@ export async function readCompositeWorkerTrace(
   let unavailableReason: string | undefined
 
   if (isLegacyIncarnation(incarnation)) {
-    const legacy = await readLegacyTraceEvents(deps.legacyTraceDir, worker.legacy_source?.trace_ids ?? [])
+    const traceIds = worker.legacy_source?.kind === 'v2_admin_task'
+      ? worker.legacy_source.trace_ids
+      : []
+    const legacy = await readLegacyTraceEvents(deps.legacyTraceDir, traceIds)
     const entries: LegacyTraceEventEntry[] = legacy.entries
     const legacyLimit = replayBound ? Math.min(replayBound.legacy, entries.length) : entries.length
     for (let index = positions.legacy; index < legacyLimit; index++) {
@@ -255,7 +263,19 @@ export async function readCompositeWorkerTrace(
         })
       } catch (error) {
         // live source 不可用时回退 Agent-owned copy（终态收割/上次增量写入的结果）。
-        const copied = await deps.nativeCopy.read(params.worker_id, incarnation.seq, fingerprint)
+        let copied = await deps.nativeCopy.read(params.worker_id, incarnation.seq, fingerprint)
+        if (copied === null) {
+          copied = await deps.nativeCopy.readLegacyAndUpgrade(
+            params.worker_id,
+            incarnation.seq,
+            legacyIncarnationFingerprint({
+              impl: incarnation.impl as WorkerImplId,
+              seq: incarnation.seq,
+              started_at: incarnationStartedAt(incarnation),
+            }),
+            fingerprint,
+          )
+        }
         if (copied !== null) {
           // copy 事件带原生行号（source_offset）：按行号区间取，而不是事件下标。
           const upper = replayBound ? replayBound.native : Number.POSITIVE_INFINITY

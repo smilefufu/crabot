@@ -60,7 +60,7 @@ export type CompactionDecision =
  *
  * foldMessages/keep 的切分点不是裸下标 history.length - keepRecent,而是走
  * findSafeSplitIndex(见下方定义)避开 tool_use/tool_result 配对中间——history 里大量
- * assistant(tool_use) → toolResults 相邻对(worker 六件套/messaging 全是工具调用),裸切分
+ * assistant(tool_use) → toolResults 相邻对(worker 工具/messaging 全是工具调用),裸切分
  * 会把孤儿 toolResults 消息留在 keep 头部,发给 LLM 时其 tool_use_id 找不到匹配的前置
  * tool_use,触发 API 400 且无自愈路径(永久卡死,详见 findSafeSplitIndex 注释)。
  */

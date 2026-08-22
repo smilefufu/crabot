@@ -192,10 +192,17 @@ async function makeWorker(
     },
     report_to: target.reportTo,
     incarnations: [{
+      // Imported records are written through the current ledger schema. Keep the identity
+      // deterministic so a crash after import compares equal on the next migration pass.
+      incarnation_id: `legacy:${encodeURIComponent(workerId)}:1`,
       impl: 'legacy',
       seq: 1,
       state: 'exited',
       workspace,
+      workspace_instructions: {
+        source: 'absent',
+        captured_at: startedAt,
+      },
       started_at: startedAt,
       ended_at: endedAt,
       ended_reason: mapped.endedReason,
@@ -441,8 +448,11 @@ async function appendImportEventOnce(
   traceCount: number,
   importedAt: string,
 ): Promise<void> {
+  if (worker.legacy_source?.kind !== 'v2_admin_task') {
+    throw new Error(`[legacy-import] worker ${worker.worker_id} is not a v2 legacy import`)
+  }
   const expected = {
-    admin_task_id: worker.legacy_source!.admin_task_id,
+    admin_task_id: worker.legacy_source.admin_task_id,
     trace_count: traceCount,
     imported_at: importedAt,
   }

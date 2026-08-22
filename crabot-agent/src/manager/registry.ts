@@ -159,11 +159,15 @@ export interface ManagerRegistryDeps {
     scheduleIdentity?: ScheduleIdentity,
     humanPrincipal?: HumanPrincipal,
     principalPermissions?: ResolvedPermissions,
-    /** P6-A §6.6：当前 episode trace 的读取/回写桥（registry 惰性桥接到 loops 实例）。 */
+    /** 当前 episode 的 trace、发送后复核与交付证据桥（registry 惰性桥接到 loops 实例）。 */
     traceHooks?: {
       currentTraceId: () => string | undefined
       onWorkerSpawned: (workerId: string) => void
       onPostSendAction: () => void
+      hasSuccessfulSendMessageTo: (target: { channel_id: string; session_id: string }) => boolean
+      onSuccessfulSendMessage: (target: { channel_id: string; session_id: string }) => void
+      hasContinuedWorker: (workerId: string) => boolean
+      onWorkerContinuation: (workerId: string) => void
     },
   ) => ReadonlyArray<ToolDefinition>
   /** Manager episode trace writer（窄接口；见 ManagerLoopDeps.traceWriter）。 */
@@ -232,6 +236,10 @@ export class ManagerRegistry {
             currentTraceId: () => this.loops.get(key)?.currentEpisodeTraceId,
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
             onPostSendAction: () => this.loops.get(key)?.recordPostSendAction(),
+            hasSuccessfulSendMessageTo: (target) => this.loops.get(key)?.hasSuccessfulSendMessageTo(target) ?? false,
+            onSuccessfulSendMessage: (target) => this.loops.get(key)?.recordSuccessfulSendMessage(target),
+            hasContinuedWorker: (workerId) => this.loops.get(key)?.hasContinuedWorker(workerId) ?? false,
+            onWorkerContinuation: (workerId) => this.loops.get(key)?.recordWorkerContinuation(workerId),
           },
         ),
       promptInputs: () => this.deps.promptInputs(key),
@@ -359,7 +367,11 @@ export class ManagerRegistry {
           },
         }
       : event
-    const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event: eventWithOrigin }, event.ts)
+    const envelope = this.makeEnvelope(
+      capture,
+      { kind: 'worker_event', event: eventWithOrigin },
+      typeof event.ts === 'string' ? event.ts : undefined,
+    )
     const key = found?.worker.manager_key ?? SYSTEM_TASKS_MANAGER_KEY
     return this.runWake(key, envelope)
   }

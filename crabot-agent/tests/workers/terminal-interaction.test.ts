@@ -61,7 +61,17 @@ describe('current terminal interaction classification', () => {
         '1. Yes',
         '2. No',
       ].join('\n'),
-    })).toEqual({ kind: 'manager_required', family: 'claude_permission', fingerprint: 'claude_permission:yes-no' })
+    })).toEqual({
+      kind: 'manager_required',
+      family: 'claude_permission',
+      fingerprint: 'claude_permission:yes-no',
+      actions: [
+        { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+        { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+        { action_id: 'select_1', kind: 'keys', keys: ['1', 'Enter'] },
+        { action_id: 'select_2', kind: 'keys', keys: ['2', 'Enter'] },
+      ],
+    })
   })
 
   it('does not treat a historical Codex approval above the current composer as active', () => {
@@ -84,6 +94,14 @@ describe('current terminal interaction classification', () => {
         'Yes',
         'No',
       ].join('\n'),
-    })).toEqual({ kind: 'manager_required', family: 'codex_approval', fingerprint: 'codex_approval:yes-no' })
+    })).toEqual({
+      kind: 'manager_required',
+      family: 'codex_approval',
+      fingerprint: 'codex_approval:yes-no',
+      actions: [
+        { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+        { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+      ],
+    })
   })
 })
