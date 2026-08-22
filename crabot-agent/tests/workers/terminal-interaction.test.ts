@@ -55,6 +55,15 @@ describe('current terminal interaction classification', () => {
     }, 'primary')).toBe('empty')
   })
 
+  it('keeps an ordinary numbered Claude message usable as a composer', () => {
+    expect(probeClaudeInput({
+      text: [
+        '❯ 1. fix the bug, then add a regression test',
+        '? for shortcuts',
+      ].join('\n'),
+    }, 'primary', '1. fix the bug, then add a regression test')).toBe('pending')
+  })
+
   it('classifies the visible Claude plan confirmation when its heading is above the viewport', () => {
     expect(classifyClaudeTerminalInteraction({
       text: [
