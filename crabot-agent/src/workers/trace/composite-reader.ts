@@ -25,6 +25,7 @@ import type { HarnessEvent } from '../harness/worker-events.js'
 import { readLegacyTraceEvents, type LegacyTraceEventEntry } from '../legacy-source-reader.js'
 import {
   incarnationFingerprint,
+  legacyIncarnationFingerprint,
   InvalidTraceCursorError,
   type TraceCursorStore,
   type TraceSourcePositions,
@@ -262,7 +263,19 @@ export async function readCompositeWorkerTrace(
         })
       } catch (error) {
         // live source 不可用时回退 Agent-owned copy（终态收割/上次增量写入的结果）。
-        const copied = await deps.nativeCopy.read(params.worker_id, incarnation.seq, fingerprint)
+        let copied = await deps.nativeCopy.read(params.worker_id, incarnation.seq, fingerprint)
+        if (copied === null) {
+          copied = await deps.nativeCopy.readLegacyAndUpgrade(
+            params.worker_id,
+            incarnation.seq,
+            legacyIncarnationFingerprint({
+              impl: incarnation.impl as WorkerImplId,
+              seq: incarnation.seq,
+              started_at: incarnationStartedAt(incarnation),
+            }),
+            fingerprint,
+          )
+        }
         if (copied !== null) {
           // copy 事件带原生行号（source_offset）：按行号区间取，而不是事件下标。
           const upper = replayBound ? replayBound.native : Number.POSITIVE_INFINITY
