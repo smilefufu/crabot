@@ -1173,6 +1173,44 @@ describe('ClaudeCodeAdapter subagent observability', () => {
       nextCursor: { offset: 2 },
     })
   })
+
+  it('原生 child 仍在 tool_use 时不写 ended_at', async () => {
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const sessionId = randomUUID()
+    const childId = 'agent-running'
+    const slug = workspaceRoot.replace(/[/.]/g, '-')
+    const childDir = path.join(projectsDir, slug, sessionId, 'subagents')
+    await fs.mkdir(childDir, { recursive: true })
+    await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
+    await fs.writeFile(path.join(dataDir, workerId, 'meta-1.json'), JSON.stringify({
+      seq: 1, state: 'idle', session_id: sessionId, workspace_root: workspaceRoot,
+    }))
+    await fs.writeFile(path.join(childDir, `${childId}.jsonl`), [
+      JSON.stringify({ agentId: childId, agentType: 'Explore', timestamp: '2026-08-22T00:00:00.000Z', type: 'user', message: { content: '继续检查' } }),
+      JSON.stringify({ agentId: childId, timestamp: '2026-08-22T00:00:03.000Z', type: 'assistant', message: { content: '正在调用工具', stop_reason: 'tool_use' } }),
+      '',
+    ].join('\n'), 'utf8')
+
+    class OfflineTmux extends TmuxDriver {
+      override async isAlive(): Promise<boolean> { return false }
+      override async killSession(): Promise<void> {}
+    }
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      claudeProjectsDir: projectsDir,
+      claudeBin: 'unused',
+      tmux: new OfflineTmux(),
+    })
+    const parent = { worker_id: workerId, seq: 1, impl: 'claude-code' as const, session_ref: sessionId }
+
+    await expect(adapter.listSubagents(parent)).resolves.toMatchObject([{
+      subagent_id: childId,
+      status: 'running',
+    }])
+    const [subagent] = await adapter.listSubagents(parent)
+    expect(subagent).not.toHaveProperty('ended_at')
+  })
 })
 
 describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {

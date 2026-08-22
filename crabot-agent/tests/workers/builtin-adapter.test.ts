@@ -407,6 +407,40 @@ describe('BuiltinWorkerAdapter', () => {
     })
   })
 
+  it('delegate_task 的完整 child id 落在 span 后，截断输出仍可跳转 child', async () => {
+    const trace = {
+      spans: [{
+        span_id: 'delegate-1',
+        type: 'tool_call',
+        started_at: '2026-08-22T00:00:00.000Z',
+        details: {
+          name: 'delegate_task',
+          input_summary: '{"task":"实现"}',
+          output_summary: `{"agent_id":"agent-child","output":"${'x'.repeat(500)}`,
+          subagent_id: 'agent-child',
+        },
+      }],
+    } as unknown as AgentTrace
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+      traceReader: { readTrace: async () => trace },
+    })
+    const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+    await waitState(adapter, h, 'idle')
+
+    await expect(adapter.readTrace(h)).resolves.toMatchObject({
+      events: [
+        { kind: 'tool_call', subagent_id: 'agent-child' },
+        { kind: 'tool_result', subagent_id: 'agent-child' },
+      ],
+    })
+  })
+
   it('子 Agent read model 只委托给 Worker 所属的 trace reader', async () => {
     const child = {
       subagent_id: 'agent-child', worker_id: 'worker-parent', executor_impl: 'builtin' as const,
@@ -480,6 +514,49 @@ describe('BuiltinWorkerAdapter', () => {
       runEngineSpy.mockRestore()
       nowSpy.mockRestore()
     }
+  })
+
+  it('fork 不装 delegate_task，且收尾不停止主线的 child', async () => {
+    const stopWorkerSubagents = vi.fn()
+    const delegateTask = defineTool({
+      name: 'delegate_task',
+      description: '派发子 Agent',
+      inputSchema: { type: 'object', properties: {} },
+      call: async () => ({ isError: false, output: 'launched' }),
+    })
+    const llm = makeAdapter([
+      { text: '主线待命', stopReason: 'end_turn' },
+      { text: '侧问结果', stopReason: 'end_turn' },
+      { toolCalls: [{ name: 'finish_task', id: 'finish-main', input: { outcome: 'completed', summary: '主线完成' } }], stopReason: 'tool_use' },
+    ])
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+        stopWorkerSubagents,
+      },
+    })
+    const s = spec({ adapter: llm, tools: [delegateTask] })
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const forkHandle = await adapter.fork(
+      { worker_id: s.worker_id, seq: h.seq, session_ref: tree.latestTip()! },
+      '侧问',
+      forkOptions(),
+    )
+    await waitState(adapter, forkHandle, 'exited')
+
+    const forkCall = (llm.stream as unknown as { mock: { calls: Array<[{ tools: ReadonlyArray<ToolDefinition> }]> } }).mock.calls[1][0]
+    expect(forkCall.tools.map((tool) => tool.name)).not.toContain('delegate_task')
+    expect(stopWorkerSubagents).not.toHaveBeenCalled()
+
+    await adapter.sendInput(h, '结束主线')
+    await waitState(adapter, h, 'exited')
+    expect(stopWorkerSubagents).toHaveBeenCalledWith(s.worker_id)
   })
 
   it('finish_task → exited(completed)', async () => {

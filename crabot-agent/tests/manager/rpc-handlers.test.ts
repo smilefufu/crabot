@@ -1115,6 +1115,8 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
     try {
       const first = await agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1' })
       expect(first.events.map((event) => event.summary)).toEqual(['第一条记录'])
+      expect(first.events[0]).not.toHaveProperty('source_offset')
+      expect(first.events[0]?.source).toBe('native')
 
       traceEvents.push({ ts: '2026-08-22T00:00:02.000Z', kind: 'message', role: 'assistant', summary: '第二条记录', source_offset: 1 })
       const second = await agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1', cursor: first.next_cursor })

@@ -456,6 +456,8 @@ export interface AgentHandlerOptions {
   imageConnInfo?: ImageConnInfo
   /** 生图能力可用性，驱动 self-aware 提示词 */
   imageCapability?: { available: boolean; reason?: string }
+  /** UnifiedAgent 共享的 Worker background entity registry。 */
+  bgRegistry?: BgEntityRegistry
 }
 
 export interface ExecuteTriggerMessageParams {
@@ -552,12 +554,9 @@ export class AgentHandler {
   /** 对外 base URL（临时页面链接拼接用），注入 worker system prompt；未配置时为 undefined（不注入） */
   private tmpPageBaseUrl?: string
   /** Worker-singleton bg entity registry (persistent, disk-backed) */
-  private readonly bgRegistry = new BgEntityRegistry()
+  private readonly bgRegistry: BgEntityRegistry
   /** 监视跨重启认领回来、仍存活的 shell；退出时通知（唤醒 resumed worker + 持久通知）。 */
-  private readonly readoptReaper = new ReadoptReaper(
-    this.bgRegistry,
-    (info) => { void this.routeShellExit(info).catch((error) => console.error('[AgentHandler] readopt shell notification failed:', error)) },
-  )
+  private readonly readoptReaper: ReadoptReaper
   /** Per-task output cursor map: key = `${taskId}:${entityId}` → byte offset */
   private readonly bgCursorMap = new Map<string, number>()
   /** AbortControllers for running bg sub-agents (key=entity_id); shared with BgToolDeps */
@@ -601,6 +600,11 @@ export class AgentHandler {
     config: AgentHandlerConfig,
     options?: AgentHandlerOptions,
   ) {
+    this.bgRegistry = options?.bgRegistry ?? new BgEntityRegistry()
+    this.readoptReaper = new ReadoptReaper(
+      this.bgRegistry,
+      (info) => { void this.routeShellExit(info).catch((error) => console.error('[AgentHandler] readopt shell notification failed:', error)) },
+    )
     this.sdkEnv = sdkEnv
     this.mcpConfigFactory = options?.mcpConfigFactory
     this.deps = options?.deps
@@ -873,6 +877,10 @@ export class AgentHandler {
    * Supplies the shared persistent registry to a builtin worker. The legacy
    * handler remains its owner; a second registry would split shell ownership.
    */
+  getBuiltinBgEntityRegistry(): BgEntityRegistry {
+    return this.bgRegistry
+  }
+
   createBuiltinBgToolOptions(workerId: string): { bgEntityCtx: BashBgContext; bgToolDeps: BgToolDeps } {
     const owner: BgEntityOwner = { friend_id: `__system_${workerId}`, worker_id: workerId }
     const onShellExit: BashBgContext['onShellExit'] = (info) => {

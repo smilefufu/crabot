@@ -60,6 +60,7 @@ import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, ge
 import { ConfigLoader } from './core/config-loader.js'
 import { TraceStore } from './core/trace-store.js'
 import { BuiltinSubagentRunner } from './workers/builtin/subagent-runner.js'
+import { BgEntityRegistry } from './engine/bg-entities/registry.js'
 import { importV2LegacyTasks } from './workers/legacy-importer.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
@@ -150,6 +151,17 @@ function subagentTraceFingerprint(subagent: WorkerSubagentSummary): string {
     }))
     .digest('hex')
     .slice(0, 32)
+}
+
+function subagentIdFromDelegateTaskOutput(output: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(output)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const agentId = (parsed as Record<string, unknown>).agent_id
+    return typeof agentId === 'string' && agentId ? agentId : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function redactTraceDetail(detail: unknown, redact: (text: string) => string): unknown {
@@ -492,6 +504,8 @@ export class UnifiedAgent extends ModuleBase {
 
   /** Per-worker serialization preserves background-shell exit order across async log rendering. */
   private readonly builtinBgDeliveryTails = new Map<string, Promise<void>>()
+  /** One registry instance serializes Worker shells and builtin children across startup recovery. */
+  private readonly builtinBgRegistry = new BgEntityRegistry()
 
   /** fail-loud 兜底回复的按 key 冷却台账：`channel::session` → 上一条兜底回复发出的时刻。 */
   private readonly failLoudSentAt: Map<string, number> = new Map()
@@ -567,6 +581,7 @@ export class UnifiedAgent extends ModuleBase {
       async (workerId, text) => {
         await this.requireManagerStack().harness.sendToWorker(workerId, text)
       },
+      this.builtinBgRegistry,
     )
 
     this.promptManager = new PromptManager()
@@ -1111,6 +1126,7 @@ export class UnifiedAgent extends ModuleBase {
     const permitted = filterToolsByPermission(configFiltered, this.getToolPermissionConfig(configFiltered, workerPerms))
     const subagents = this.agentConfig?.subagents ?? []
     if (subagents.length === 0) return permitted
+    const childPermissionConfig = this.getToolPermissionConfig(permitted, workerPerms)
     return [...permitted, createDelegateTaskTool({
       subAgents: subagents,
       runSubAgent: (subagent, input, toolContext) => this.builtinSubagentRunner.run(
@@ -1118,6 +1134,7 @@ export class UnifiedAgent extends ModuleBase {
         input,
         toolContext,
         permitted,
+        { permissionConfig: childPermissionConfig, resolvedPermissions: workerPerms },
       ),
     })]
   }
@@ -1247,7 +1264,9 @@ export class UnifiedAgent extends ModuleBase {
       promptManager: this.promptManager,
       ...(imageConnInfo ? { imageConnInfo } : {}),
       imageCapability,
+      bgRegistry: this.builtinBgRegistry,
     })
+    this.builtinSubagentRunner.setRegistry(handler.getBuiltinBgEntityRegistry())
     this.attachBuiltinShellExitDispatcher(handler)
     return handler
   }
@@ -3422,8 +3441,8 @@ export class UnifiedAgent extends ModuleBase {
       })
     }
     return {
-      events: events.map((event) => {
-        const source = event.source ?? (subagent.executor_impl === 'builtin' ? 'harness' : 'native')
+      events: events.map(({ source_offset: _dropped, ...event }) => {
+        const source = event.source ?? 'native'
         return {
           ...event,
           source,
@@ -3507,6 +3526,9 @@ export class UnifiedAgent extends ModuleBase {
         this.traceStore.endSpan(traceId, llmSpan.span_id, 'completed', undefined,
           event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined ? event.llmStartedAtMs + event.llmCallMs : undefined)
         for (const toolCall of event.toolCalls) {
+          const subagentId = toolCall.name === 'delegate_task'
+            ? subagentIdFromDelegateTaskOutput(toolCall.output)
+            : undefined
           const span = this.traceStore.startSpan(traceId, {
             type: 'tool_call',
             parent_span_id: llmSpan.span_id,
@@ -3514,6 +3536,7 @@ export class UnifiedAgent extends ModuleBase {
               name: toolCall.name,
               input_summary: redact(JSON.stringify(toolCall.input).slice(0, 300)),
               output_summary: redact(toolCall.output.slice(0, 300)),
+              ...(subagentId ? { subagent_id: subagentId } : {}),
             } as import('./types.js').AgentSpanDetails,
             started_at_ms: toolCall.startedAtMs,
           })

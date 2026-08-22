@@ -1145,9 +1145,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       initialMessages,
       options: {
         systemPrompt: builtin.systemPrompt,
-        // fork 不加 finish_task（一次性侧问），但工具集守卫与安全项与主线完全一致——
-        // 侧问同样是一次真实的 LLM + 工具执行，没有理由少一道闸。
-        tools: this.guardTools(builtin.tools),
+        // fork 是一次性侧问，不能派发异步 child；它和主线共享 worker_id，侧问收尾
+        // 不能拥有或停止主线 child。
+        tools: this.forkTools(builtin.tools),
         model: builtin.model,
         maxTurns: FORK_MAX_TURNS,
         ...this.safetyOptions(builtin),
@@ -1352,6 +1352,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     ]
   }
 
+  private forkTools(tools: Resolvable<ReadonlyArray<ToolDefinition>>): Resolvable<ReadonlyArray<ToolDefinition>> {
+    const guarded = this.guardTools(tools)
+    return () => resolve(guarded).filter((tool) => tool.name !== 'delegate_task')
+  }
+
   /**
    * 工具集守卫（spec 决策 3 / 决策 4）：`set_cwd` / `set_task_goal` 绝不许出现在 builtin
    * worker 的工具集里。放在 resolve 路径上而不是 spawn 一次性检查——`tools` 是 Resolvable，
@@ -1536,7 +1541,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
      */
     summary?: string,
   ): Promise<void> {
-    this.deps.traceHooks?.stopWorkerSubagents?.(instance.worker_id)
+    if (handle.query_id === undefined) this.deps.traceHooks?.stopWorkerSubagents?.(instance.worker_id)
     if (instance.pendingInputs.length > 0) {
       const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${instance.pendingInputs.length} unsent message(s): ${instance.pendingInputs.join(' | ')}\n`
       await instance.outputLog.append(deadLetterMsg)
@@ -1630,7 +1635,8 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
       const input = typeof details.input_summary === 'string' ? details.input_summary : undefined
       const output = typeof details.output_summary === 'string' ? details.output_summary : undefined
       const error = typeof details.error === 'string' ? details.error : undefined
-      const subagentId = name === 'delegate_task' ? subagentIdFromOutput(output ?? error) : undefined
+      const recordedSubagentId = typeof details.subagent_id === 'string' ? details.subagent_id : undefined
+      const subagentId = recordedSubagentId ?? (name === 'delegate_task' ? subagentIdFromOutput(output ?? error) : undefined)
       const callId = span.span_id
       const call = {
         ...base,
@@ -1643,6 +1649,7 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
           ...(input !== undefined ? { input } : {}),
           ...(subagentId ? { subagent_id: subagentId } : {}),
         },
+        ...(subagentId ? { subagent_id: subagentId } : {}),
       } as const
       const result = output ?? error
       if (!result) return [call]

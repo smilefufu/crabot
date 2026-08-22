@@ -48,6 +48,13 @@ export interface SpawnPersistentAgentOpts {
    * （2026-06-10 goal audit 死循环事故，spec 2026-06-10-audit-anchor-human-request §4.6）。
    */
   readonly permissionConfig?: ToolPermissionConfig
+  /** Worker execution hooks inherited by the child. */
+  readonly hookRegistry?: import('../../hooks/hook-registry.js').HookRegistry
+  readonly lspManager?: import('../../hooks/types.js').LspManagerLike
+  /** The child has no human identity of its own. */
+  readonly senderIsMaster?: boolean
+  /** Permission snapshot used by hooks such as the CLI permission gate. */
+  readonly resolvedPermissions?: import('../../types.js').ResolvedPermissions
   readonly owner: BgEntityOwner
   readonly spawned_by_task_id: string
   /** Actual configured child type, when the caller has one. */
@@ -177,6 +184,10 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
           model: opts.model,
           ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
           ...(opts.permissionConfig ? { permissionConfig: opts.permissionConfig } : {}),
+          hookRegistry: opts.hookRegistry,
+          lspManager: opts.lspManager,
+          senderIsMaster: opts.senderIsMaster,
+          resolvedPermissions: opts.resolvedPermissions,
           abortSignal: abortController.signal,
           // 同 forkEngine：bg-agent 也是 subagent 派发路径，禁用 compaction。
           // 详见 EngineOptions.disableCompaction 注释。

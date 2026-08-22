@@ -5,18 +5,24 @@ import { createAdapter } from '../../engine/llm-adapter.js'
 import { forkEngine } from '../../engine/sub-agent.js'
 import { recordSubAgentTurn } from '../../engine/sub-agent-trace.js'
 import { spawnPersistentAgent } from '../../engine/bg-entities/bg-agent.js'
-import { BgEntityRegistry } from '../../engine/bg-entities/registry.js'
+import type { BgEntityRegistry } from '../../engine/bg-entities/registry.js'
 import type { BgAgentRegistryRecord } from '../../engine/bg-entities/types.js'
-import { createSubAgentHookRegistry } from '../../hooks/defaults.js'
+import { createLspDiagnosticsHook } from '../../hooks/defaults.js'
 import { getBgEntitiesLogsDir } from '../../core/data-paths.js'
 import type { TraceStore } from '../../core/trace-store.js'
-import type { SubAgentConfig } from '../../types.js'
-import type { ToolCallContext, ToolCallResult, ToolDefinition } from '../../engine/types.js'
+import type { ResolvedPermissions, SubAgentConfig } from '../../types.js'
+import type { ToolCallContext, ToolCallResult, ToolDefinition, ToolPermissionConfig } from '../../engine/types.js'
 import type { NormalizedTraceEvent, TraceCursor, WorkerSubagentStatus, WorkerSubagentSummary } from '../types.js'
 import { filterToolsForSubAgent } from '../../agent/subagent-tool-filter.js'
 import { assembleSubAgentPrompt } from '../../agent/subagent-prompt-assembler.js'
+import { createBuiltinWorkerHookRegistry } from './runtime.js'
 
 const WORKER_OWNER = '__builtin_worker__'
+
+export interface BuiltinSubagentExecutionContext {
+  readonly permissionConfig: ToolPermissionConfig
+  readonly resolvedPermissions: ResolvedPermissions
+}
 
 function statusOf(status: BgAgentRegistryRecord['status']): WorkerSubagentStatus {
   switch (status) {
@@ -49,26 +55,34 @@ function summaryOf(workerId: string, record: BgAgentRegistryRecord): WorkerSubag
  */
 export class BuiltinSubagentRunner {
   private readonly abortControllers = new Map<string, AbortController>()
+  private registry?: BgEntityRegistry
 
   constructor(
     private readonly traceStore: TraceStore,
     private readonly lspManager: import('../../lsp/lsp-manager.js').LSPManager,
     private readonly deliverCompletion?: (workerId: string, text: string) => Promise<void>,
-    private readonly registry = new BgEntityRegistry(),
-  ) {}
+    registry?: BgEntityRegistry,
+  ) {
+    this.registry = registry
+  }
+
+  setRegistry(registry: BgEntityRegistry): void {
+    this.registry = registry
+  }
 
   /**
    * A builtin child runs in this process, so it cannot survive an Agent restart.
    * Mark only Worker-owned records as interrupted before the Admin read model opens.
    */
   async recoverAfterRestart(): Promise<number> {
-    const records = await this.registry.list({
+    const registry = this.requireRegistry()
+    const records = await registry.list({
       owner_friend_id: WORKER_OWNER,
       type: 'agent',
       status: ['running'],
     })
     const endedAt = new Date().toISOString()
-    await Promise.all(records.map((record) => this.registry.update(record.entity_id, {
+    await Promise.all(records.map((record) => registry.update(record.entity_id, {
       status: 'stalled',
       ended_at: endedAt,
     })))
@@ -80,12 +94,14 @@ export class BuiltinSubagentRunner {
     input: { task: string; context?: string; sync?: boolean },
     context: ToolCallContext,
     parentTools: ReadonlyArray<ToolDefinition>,
+    execution: BuiltinSubagentExecutionContext,
   ): Promise<ToolCallResult> {
+    const registry = this.requireRegistry()
     const worker = context.worker_subagent
     if (!worker?.parent_trace_id) {
       return { isError: true, output: 'builtin worker subagent trace is unavailable for this incarnation' }
     }
-    if (input.sync) return this.runSynchronously(subagent, input, context, parentTools, worker)
+    if (input.sync) return this.runSynchronously(subagent, input, context, parentTools, worker, execution)
 
     const entityId = await spawnPersistentAgent({
       prompt: input.task,
@@ -103,22 +119,27 @@ export class BuiltinSubagentRunner {
       }),
       owner: { friend_id: WORKER_OWNER, worker_id: worker.worker_id },
       spawned_by_task_id: worker.worker_id,
-      registry: this.registry,
+      registry,
       abortControllers: this.abortControllers,
+      permissionConfig: execution.permissionConfig,
+      resolvedPermissions: execution.resolvedPermissions,
+      senderIsMaster: false,
+      hookRegistry: this.childHookRegistry(subagent),
+      ...(subagent.hook_preset === 'lsp_diagnostics' ? { lspManager: this.lspManager } : {}),
       subTrace: {
         traceStore: this.traceStore,
         parentTraceId: worker.parent_trace_id,
         summaryPrefix: `[${subagent.name}]`,
       },
       onExit: async (info) => {
-        const current = await this.registry.get(info.entity_id)
+        const current = await registry.get(info.entity_id)
         if (current?.status === 'killed') return
         const outcome = info.status === 'completed' ? '已完成' : '失败'
         const detail = info.finalText || info.error || '无可读结果'
         await this.deliverCompletion?.(worker.worker_id, `<sub_agent_notification>\n${subagent.name} ${outcome}：${detail}\n</sub_agent_notification>`)
       },
     })
-    const record = await this.registry.get(entityId)
+    const record = await registry.get(entityId)
     return {
       isError: false,
       output: JSON.stringify({
@@ -130,7 +151,7 @@ export class BuiltinSubagentRunner {
   }
 
   async list(workerId: string): Promise<WorkerSubagentSummary[]> {
-    const records = await this.registry.list({ type: 'agent', spawned_by_task_id: workerId })
+    const records = await this.requireRegistry().list({ type: 'agent', spawned_by_task_id: workerId })
     return records
       .filter((record): record is BgAgentRegistryRecord => record.type === 'agent' && record.owner.worker_id === workerId)
       .map((record) => summaryOf(workerId, record))
@@ -138,7 +159,7 @@ export class BuiltinSubagentRunner {
   }
 
   async get(workerId: string, subagentId: string): Promise<WorkerSubagentSummary | undefined> {
-    const record = await this.registry.get(subagentId)
+    const record = await this.requireRegistry().get(subagentId)
     if (record?.type !== 'agent' || record.owner.worker_id !== workerId || record.spawned_by_task_id !== workerId) return undefined
     return summaryOf(workerId, record)
   }
@@ -148,7 +169,7 @@ export class BuiltinSubagentRunner {
     nextCursor: TraceCursor
     unavailableReason?: string
   }> {
-    const record = await this.registry.get(subagentId)
+    const record = await this.requireRegistry().get(subagentId)
     if (record?.type !== 'agent' || record.owner.worker_id !== workerId || record.spawned_by_task_id !== workerId) {
       throw new Error(`worker subagent not found: ${subagentId}`)
     }
@@ -166,12 +187,13 @@ export class BuiltinSubagentRunner {
   }
 
   async stopWorker(workerId: string): Promise<void> {
-    const records = await this.registry.list({ type: 'agent', spawned_by_task_id: workerId })
+    const registry = this.requireRegistry()
+    const records = await registry.list({ type: 'agent', spawned_by_task_id: workerId })
     await Promise.all(records
       .filter((record): record is BgAgentRegistryRecord => record.type === 'agent' && record.owner.worker_id === workerId && record.status === 'running')
       .map(async (record) => {
         this.abortControllers.get(record.entity_id)?.abort()
-        await this.registry.update(record.entity_id, { status: 'killed', ended_at: new Date().toISOString() })
+        await registry.update(record.entity_id, { status: 'killed', ended_at: new Date().toISOString() })
       }))
   }
 
@@ -181,7 +203,9 @@ export class BuiltinSubagentRunner {
     context: ToolCallContext,
     parentTools: ReadonlyArray<ToolDefinition>,
     worker: NonNullable<ToolCallContext['worker_subagent']>,
+    execution: BuiltinSubagentExecutionContext,
   ): Promise<ToolCallResult> {
+    const registry = this.requireRegistry()
     const entityId = `agent_${randomBytes(6).toString('hex')}`
     const now = new Date().toISOString()
     const trace = this.traceStore.startTrace({
@@ -191,7 +215,7 @@ export class BuiltinSubagentRunner {
     })
     const logsDir = getBgEntitiesLogsDir()
     await fs.mkdir(logsDir, { recursive: true })
-    await this.registry.register({
+    await registry.register({
       entity_id: entityId,
       type: 'agent',
       subagent_type: subagent.name,
@@ -230,10 +254,10 @@ export class BuiltinSubagentRunner {
         onTurn: (event) => recordSubAgentTurn(this.traceStore, trace.trace_id, event),
         supportsVision: subagent.model.supports_vision,
         ...(subagent.model.context_window !== undefined ? { contextWindowTokens: subagent.model.context_window } : {}),
-        hookRegistry: createSubAgentHookRegistry({
-          lspDiagnostics: subagent.hook_preset === 'lsp_diagnostics',
-          gitWriteFence: subagent.allowed_mcp_server_ids.includes('git'),
-        }),
+        permissionConfig: execution.permissionConfig,
+        resolvedPermissions: execution.resolvedPermissions,
+        senderIsMaster: false,
+        hookRegistry: this.childHookRegistry(subagent),
         lspManager: subagent.hook_preset === 'lsp_diagnostics' ? this.lspManager : undefined,
       })
       const completed = result.outcome === 'completed'
@@ -241,7 +265,7 @@ export class BuiltinSubagentRunner {
         summary: (result.output || result.error || '').slice(0, 200),
         ...(!completed && result.error ? { error: result.error.slice(0, 200) } : {}),
       })
-      await this.registry.update(entityId, {
+      await registry.update(entityId, {
         status: completed ? 'completed' : 'failed',
         result_file: null,
         exit_code: completed ? 0 : 1,
@@ -259,12 +283,25 @@ export class BuiltinSubagentRunner {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.traceStore.endTrace(trace.trace_id, 'failed', { summary: message.slice(0, 200), error: message.slice(0, 200) })
-      await this.registry.update(entityId, { status: 'failed', error: message, exit_code: 1, ended_at: new Date().toISOString() })
+      await registry.update(entityId, { status: 'failed', error: message, exit_code: 1, ended_at: new Date().toISOString() })
       return { isError: true, output: JSON.stringify({ agent_id: entityId, status: 'failed', child_trace_id: trace.trace_id, error: message }) }
     } finally {
       context.abortSignal?.removeEventListener('abort', abortParent)
       this.abortControllers.delete(entityId)
     }
+  }
+
+  private requireRegistry(): BgEntityRegistry {
+    if (!this.registry) {
+      throw new Error('builtin subagent registry is unavailable before AgentHandler initialization')
+    }
+    return this.registry
+  }
+
+  private childHookRegistry(subagent: SubAgentConfig) {
+    const registry = createBuiltinWorkerHookRegistry()
+    if (subagent.hook_preset === 'lsp_diagnostics') registry.register(createLspDiagnosticsHook())
+    return registry
   }
 }
 

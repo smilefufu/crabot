@@ -1495,7 +1495,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     const terminal = nativeSubagentTerminal(records)
     const startedAt = typeof first.timestamp === 'string' ? first.timestamp : undefined
     const last = records.at(-1)
-    const endedAt = terminal !== undefined && typeof last?.timestamp === 'string' ? last.timestamp : undefined
+    const endedAt = (terminal === 'completed' || terminal === 'failed') && typeof last?.timestamp === 'string'
+      ? last.timestamp
+      : undefined
     return {
       filePath,
       summary: {
