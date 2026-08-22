@@ -50,6 +50,8 @@ export interface SpawnPersistentAgentOpts {
   readonly permissionConfig?: ToolPermissionConfig
   readonly owner: BgEntityOwner
   readonly spawned_by_task_id: string
+  /** Actual configured child type, when the caller has one. */
+  readonly subagent_type?: string
   readonly registry: BgEntityRegistry
   /** Worker-maintained abort-controller map: written on spawn, deleted on finish/kill. */
   readonly abortControllers: Map<string, AbortController>
@@ -123,23 +125,6 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
   const abortController = new AbortController()
   opts.abortControllers.set(entity_id, abortController)
 
-  const now = new Date().toISOString()
-  const record: BgAgentRegistryRecord = {
-    entity_id,
-    type: 'agent',
-    status: 'running',
-    task_description: opts.task_description,
-    messages_log_file: messagesLog,
-    result_file: null,
-    owner: opts.owner,
-    spawned_by_task_id: opts.spawned_by_task_id,
-    spawned_at: now,
-    exit_code: null,
-    ended_at: null,
-    last_activity_at: now,
-  }
-  await opts.registry.register(record)
-
   // 子 trace 在 fire-and-forget 外同步起，保证 spawn 返回时 Admin Traces 立刻可见。
   const subTrace = opts.subTrace
     ? opts.subTrace.traceStore.startTrace({
@@ -158,6 +143,25 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
       })
     : undefined
   const subTraceStore = opts.subTrace?.traceStore
+
+  const now = new Date().toISOString()
+  const record: BgAgentRegistryRecord = {
+    entity_id,
+    type: 'agent',
+    ...(opts.subagent_type ? { subagent_type: opts.subagent_type } : {}),
+    ...(subTrace ? { trace_id: subTrace.trace_id } : {}),
+    status: 'running',
+    task_description: opts.task_description,
+    messages_log_file: messagesLog,
+    result_file: null,
+    owner: opts.owner,
+    spawned_by_task_id: opts.spawned_by_task_id,
+    spawned_at: now,
+    exit_code: null,
+    ended_at: null,
+    last_activity_at: now,
+  }
+  await opts.registry.register(record)
 
   const agentSpawnedAtMs = Date.now()
 

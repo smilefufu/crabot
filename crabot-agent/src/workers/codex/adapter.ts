@@ -49,6 +49,7 @@ import {
   CodexAppServerDeadlineError,
   CodexAppServerRpcError,
   probeCodexAppServerFork,
+  probeCodexAppServerSubagents,
   type AppServerNotification,
 } from './app-server-client.js'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
@@ -72,6 +73,7 @@ import type {
   TraceCursor,
   WorkerAdapter,
   WorkerContractState,
+  WorkerSubagentSummary,
   Workspace,
   WorkerTerminalView,
   WorkerUiResponse,
@@ -499,6 +501,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private lastDetectedVersion?: string
   private lastGlobalDetected = false
   private appServerForkSupported = false
+  private appServerSubagentSupported = false
   private lastCapabilityProbeKey?: string
 
   /** 同 claude adapter：resolver 存在时只认其结论，无用户级绝不回落裸命令。
@@ -670,6 +673,15 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         const probeHome = await fs.mkdtemp(join(tmpdir(), 'crabot-codex-app-server-probe-'))
         try {
           this.appServerForkSupported = await probeCodexAppServerFork({
+            command: `${effectiveBin} app-server --stdio`,
+            cwd: probeHome,
+            env: {
+              ...buildScrubbedChildEnv(),
+              PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? ''),
+              CODEX_HOME: probeHome,
+            },
+          })
+          this.appServerSubagentSupported = await probeCodexAppServerSubagents({
             command: `${effectiveBin} app-server --stdio`,
             cwd: probeHome,
             env: {
@@ -1728,6 +1740,37 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { events, nextCursor }
   }
 
+  async listSubagents(h: IncarnationHandle): Promise<WorkerSubagentSummary[]> {
+    if (!this.appServerSubagentSupported) return []
+    const threads = await this.readChildThreads(h)
+    return threads.map((thread) => codexSubagentSummary(h.worker_id, thread))
+  }
+
+  async getSubagent(h: IncarnationHandle, subagentId: string): Promise<WorkerSubagentSummary | undefined> {
+    return (await this.listSubagents(h)).find((summary) => summary.subagent_id === subagentId)
+  }
+
+  async readSubagentTrace(
+    h: IncarnationHandle,
+    subagentId: string,
+    cursor?: TraceCursor,
+  ): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor; unavailableReason?: string }> {
+    if (!this.appServerSubagentSupported) {
+      return { events: [], nextCursor: cursor ?? { offset: 0 }, unavailableReason: 'Codex app-server child reads are unavailable' }
+    }
+    const child = (await this.readChildThreads(h)).find((thread) => thread.id === subagentId)
+    if (!child) throw new Error(`CodexWorkerAdapter: subagent not found: ${subagentId}`)
+    const items = await this.readAllThreadItems(h, child.id)
+    const start = cursor?.offset ?? 0
+    return {
+      events: items.slice(start).flatMap((entry, index) => {
+        const event = normalizeCodexThreadItem(entry.item)
+        return event ? [{ ...event, source_offset: start + index }] : []
+      }),
+      nextCursor: { offset: items.length },
+    }
+  }
+
   private async readTraceWindow(
     h: IncarnationHandle,
     cursor?: TraceCursor,
@@ -1824,7 +1867,59 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   capabilities(): AdapterCapabilities {
-    return { fork: this.appServerForkSupported, revive: true, goalMode: false, subagent: false, structuredTrace: true }
+    return { fork: this.appServerForkSupported, revive: true, goalMode: false, subagent: this.appServerSubagentSupported, structuredTrace: true }
+  }
+
+  private async readChildThreads(h: IncarnationHandle): Promise<ReadonlyArray<import('./app-server-client.js').CodexAppServerThread>> {
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime?.sessionId || !runtime.workspaceRoot) return []
+    const resolved = await this.resolveBinForCommand()
+    if (!resolved) return []
+    const client = new CodexAppServerClient({
+      command: `${resolved.cmd} app-server --stdio`,
+      cwd: runtime.workspaceRoot,
+      env: await this.buildEnv({ CODEX_HOME: runtime.codexHome }),
+    })
+    const deadlineAt = new Date(Date.now() + 10_000).toISOString()
+    try {
+      await client.initialize(deadlineAt)
+      const children: import('./app-server-client.js').CodexAppServerThread[] = []
+      let cursor: string | undefined
+      do {
+        const page = await client.listThreads({ parentThreadId: runtime.sessionId, ...(cursor ? { cursor } : {}), limit: 100 }, deadlineAt)
+        children.push(...page.data.filter((thread) => thread.parentThreadId === runtime.sessionId))
+        cursor = page.nextCursor ?? undefined
+      } while (cursor)
+      return children
+    } finally {
+      await client.terminate()
+    }
+  }
+
+  private async readAllThreadItems(h: IncarnationHandle, threadId: string): Promise<ReadonlyArray<import('./app-server-client.js').CodexAppServerThreadItem>> {
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime?.workspaceRoot) return []
+    const resolved = await this.resolveBinForCommand()
+    if (!resolved) return []
+    const client = new CodexAppServerClient({
+      command: `${resolved.cmd} app-server --stdio`,
+      cwd: runtime.workspaceRoot,
+      env: await this.buildEnv({ CODEX_HOME: runtime.codexHome }),
+    })
+    const deadlineAt = new Date(Date.now() + 10_000).toISOString()
+    try {
+      await client.initialize(deadlineAt)
+      const items: import('./app-server-client.js').CodexAppServerThreadItem[] = []
+      let cursor: string | undefined
+      do {
+        const page = await client.listThreadItems({ threadId, ...(cursor ? { cursor } : {}), limit: 100 }, deadlineAt)
+        items.push(...page.data)
+        cursor = page.nextCursor ?? undefined
+      } while (cursor)
+      return items
+    } finally {
+      await client.terminate()
+    }
   }
 
   // --- Internal ---
@@ -2322,6 +2417,60 @@ function commandOutput(item: Record<string, unknown>, status: string, exitCode: 
   return status === 'completed' && exitCode === 0
     ? 'command completed without output'
     : 'command ' + status + (exitCode === undefined ? '' : ' with exit code ' + exitCode)
+}
+
+function codexSubagentSummary(
+  workerId: string,
+  thread: import('./app-server-client.js').CodexAppServerThread,
+): WorkerSubagentSummary {
+  const status = thread.status.type === 'active'
+    ? 'running'
+    : thread.status.type === 'idle' ? 'completed' : 'unknown'
+  return {
+    subagent_id: thread.id,
+    worker_id: workerId,
+    executor_impl: 'codex',
+    ...(thread.agentRole ? { type: thread.agentRole } : {}),
+    name: thread.agentNickname ?? thread.agentRole ?? thread.id,
+    ...(thread.preview ? { task: truncate(thread.preview, 500) } : {}),
+    status,
+    ...(thread.createdAt ? { started_at: new Date(thread.createdAt * 1000).toISOString() } : {}),
+    ...(status !== 'running' && thread.updatedAt ? { ended_at: new Date(thread.updatedAt * 1000).toISOString() } : {}),
+  }
+}
+
+function normalizeCodexThreadItem(item: Record<string, unknown>): NormalizedTraceEvent | undefined {
+  const ts = new Date().toISOString()
+  switch (item.type) {
+    case 'userMessage': {
+      const content = Array.isArray(item.content)
+        ? item.content.map((part) => isRecord(part) && typeof part.text === 'string' ? part.text : '').filter(Boolean).join('\n')
+        : ''
+      return content ? { ts, kind: 'message', role: 'user', summary: truncate(content, 200), detail: item } : undefined
+    }
+    case 'agentMessage':
+      return typeof item.text === 'string' && item.text
+        ? { ts, kind: 'message', role: 'assistant', summary: truncate(item.text, 200), detail: item }
+        : undefined
+    case 'reasoning': {
+      const summary = Array.isArray(item.summary) ? item.summary.filter((part): part is string => typeof part === 'string').join('\n') : ''
+      return summary ? { ts, kind: 'thinking', role: 'assistant', summary: truncate(summary, 200), detail: item } : undefined
+    }
+    case 'commandExecution': {
+      const command = typeof item.command === 'string' ? item.command : 'command'
+      return { ts, kind: 'tool_call', role: 'assistant', summary: truncate(`exec_command(${command})`, 200), detail: item }
+    }
+    case 'fileChange':
+      return { ts, kind: 'tool_call', role: 'assistant', summary: 'apply_patch', detail: item }
+    case 'mcpToolCall':
+    case 'dynamicToolCall':
+    case 'collabAgentToolCall':
+      return { ts, kind: 'tool_call', role: 'assistant', summary: truncate(String(item.type), 200), detail: item }
+    case 'subAgentActivity':
+      return { ts, kind: 'lifecycle', role: 'system', summary: 'subagent activity', detail: item }
+    default:
+      return undefined
+  }
 }
 
 /**

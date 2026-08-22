@@ -49,6 +49,10 @@ export interface BgShellRegistryRecord extends BgEntityBase {
 
 export interface BgAgentRegistryRecord extends BgEntityBase {
   readonly type: 'agent'
+  /** Present when this persistent agent was started through delegate_task. */
+  readonly subagent_type?: string
+  /** Its independent TraceStore trace, when the caller enabled tracing. */
+  readonly trace_id?: string
   readonly task_description: string
   readonly messages_log_file: string
   result_file: string | null

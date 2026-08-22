@@ -27,6 +27,7 @@ import { SubagentList } from './pages/Subagents/SubagentList'
 import { Traces } from './pages/Traces'
 import { ManagerDetail } from './pages/Traces/ManagerDetail'
 import { WorkerDetail } from './pages/Traces/WorkerDetail'
+import { SubagentDetail } from './pages/Traces/SubagentDetail'
 import { ScheduleList } from './pages/Schedules/ScheduleList'
 import { OpenClawImportWizard } from './pages/OpenClawImport/OpenClawImportWizard'
 import { BackupExportPage } from './pages/Backup/BackupExportPage'
@@ -240,6 +241,14 @@ const AppRoutes: React.FC = () => {
         element={
           <PrivateRoute>
             <ManagerDetail />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/traces/workers/:workerId/subagents/:subagentId"
+        element={
+          <PrivateRoute>
+            <SubagentDetail />
           </PrivateRoute>
         }
       />

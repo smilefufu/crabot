@@ -1589,6 +1589,31 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
     })
     await supported.detect()
     expect(supported.capabilities().fork).toBe(true)
+    expect(supported.capabilities().subagent).toBe(true)
+  })
+
+  it('读取 app-server 标记为 parentThreadId 的原生 child thread 与其独立 items', async () => {
+    const childThreadId = randomUUID()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      codexHomeSource: codexHome,
+      tmux: new NoopTmux(),
+      codexBin: appServerBin('children', `FAKE_CHILD_THREAD_ID=${childThreadId}`),
+    })
+    await adapter.detect()
+    const parent = { worker_id: workerId, seq: 1, impl: 'codex' as const, session_ref: parentSessionId }
+
+    await expect(adapter.listSubagents(parent)).resolves.toMatchObject([{
+      subagent_id: childThreadId, executor_impl: 'codex', type: 'research', name: '研究助手', task: '原生子 Agent 任务', status: 'completed',
+    }])
+    await expect(adapter.readSubagentTrace(parent, childThreadId)).resolves.toMatchObject({
+      events: [
+        { kind: 'message', role: 'user', summary: '检查原生记录', source_offset: 0 },
+        { kind: 'tool_call', summary: 'exec_command(pwd)', source_offset: 1 },
+        { kind: 'message', role: 'assistant', summary: '原生子 Agent 已完成', source_offset: 2 },
+      ],
+      nextCursor: { offset: 3 },
+    })
   })
 
   it('detect 切换到同版本的另一 binary 时重新探测 fork capability', async () => {

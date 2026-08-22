@@ -72,6 +72,8 @@ import type {
   SpawnSpec,
   SendInputOptions,
   TraceCursor,
+  WorkerSubagentStatus,
+  WorkerSubagentSummary,
   WorkerAdapter,
   WorkerContractState,
   Workspace,
@@ -245,6 +247,52 @@ interface Runtime {
 }
 
 type CapturedPane = PaneSnapshot & { captured_at: string }
+
+interface ClaudeTraceRecord {
+  readonly agentId?: unknown
+  readonly agentType?: unknown
+  readonly agent_type?: unknown
+  readonly type?: unknown
+  readonly timestamp?: unknown
+  readonly message?: unknown
+  readonly content?: unknown
+  readonly stop_reason?: unknown
+  readonly toolUseResult?: unknown
+  readonly isSidechain?: unknown
+}
+
+interface ClaudeSubagentRecord {
+  readonly filePath: string
+  readonly summary: WorkerSubagentSummary
+}
+
+function isTraceRecord(value: unknown): value is ClaudeTraceRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function completeJsonlLines(raw: string): string[] {
+  const lines = raw.split('\n')
+  // Claude appends JSONL records with a newline. An unterminated final line is
+  // still being written and must be retried on the next read.
+  if (lines.length > 0) lines.pop()
+  return lines.filter((line) => line.length > 0)
+}
+
+function nativeSubagentType(record: ClaudeTraceRecord): string | undefined {
+  const candidates = [record.agentType, record.agent_type,
+    isTraceRecord(record.message) ? record.message.agentType : undefined,
+    isTraceRecord(record.message) ? record.message.agent_type : undefined]
+  return candidates.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim()
+}
+
+function nativeSubagentTerminal(records: ReadonlyArray<ClaudeTraceRecord>): WorkerSubagentStatus | undefined {
+  const assistant = [...records].reverse().find((record) => record.type === 'assistant' && isTraceRecord(record.message))
+  if (!assistant || !isTraceRecord(assistant.message)) return undefined
+  const stopReason = assistant.message.stop_reason
+  if (stopReason === 'end_turn') return 'completed'
+  if (stopReason === 'error' || stopReason === 'abort') return 'failed'
+  return 'running'
+}
 
 function controlMeta(runtime: Runtime): Record<string, string> {
   return runtime.controlEndpoint
@@ -1309,6 +1357,48 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return { events, nextCursor }
   }
 
+  async listSubagents(h: IncarnationHandle): Promise<WorkerSubagentSummary[]> {
+    return (await this.readSubagentRecords(h))
+      .map(({ summary }) => summary)
+      .sort((left, right) => (right.started_at ?? '').localeCompare(left.started_at ?? ''))
+  }
+
+  async getSubagent(h: IncarnationHandle, subagentId: string): Promise<WorkerSubagentSummary | undefined> {
+    return (await this.readSubagentRecords(h)).find(({ summary }) => summary.subagent_id === subagentId)?.summary
+  }
+
+  async readSubagentTrace(
+    h: IncarnationHandle,
+    subagentId: string,
+    cursor?: TraceCursor,
+  ): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor; unavailableReason?: string }> {
+    const child = (await this.readSubagentRecords(h)).find(({ summary }) => summary.subagent_id === subagentId)
+    if (!child) throw new Error(`ClaudeCodeAdapter: subagent not found: ${subagentId}`)
+    let raw: string
+    try {
+      raw = await fs.readFile(child.filePath, 'utf-8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return {
+          events: [],
+          nextCursor: cursor ?? { offset: 0 },
+          unavailableReason: 'Claude Code child record is no longer available',
+        }
+      }
+      throw error
+    }
+    const lines = completeJsonlLines(raw)
+    const start = cursor?.offset ?? 0
+    const events: NormalizedTraceEvent[] = []
+    let consumed = start
+    for (let index = start; index < lines.length; index += 1) {
+      const event = normalizeTraceLine(lines[index])
+      if (event) events.push({ ...event, source_offset: index })
+      consumed = index + 1
+    }
+    return { events, nextCursor: { offset: consumed } }
+  }
+
   private async readTraceWindow(
     h: IncarnationHandle,
     cursor?: TraceCursor,
@@ -1346,9 +1436,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 读到写入中途是常态。split 末尾要么是空串(文本以 \n 结尾)要么是尚未写完的半行,两种
     // 情况都不能当"已消费的完整行"处理——统一 pop 掉,不产事件也不推进 nextCursor,保证
     // 下次连同补全后的内容重新完整读取该行,不会永久丢事件。
-    const rawLines = raw.split('\n')
-    rawLines.pop()
-    const lines = rawLines.filter((line) => line.length > 0)
+    const lines = completeJsonlLines(raw)
     const start = cursor?.offset ?? 0
     const events: NormalizedTraceEvent[] = []
     // nextCursor.offset 是"实际消费到的行号",不是 start + events.length——归一化失败/不认识
@@ -1363,6 +1451,65 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       consumed = i + 1
     }
     return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
+  }
+
+  private async readSubagentRecords(h: IncarnationHandle): Promise<ReadonlyArray<ClaudeSubagentRecord>> {
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime?.workspaceRoot || !runtime.sessionId) return []
+    const childrenDir = join(this.claudeProjectsDir, projectSlug(runtime.workspaceRoot), runtime.sessionId, 'subagents')
+    let entries: import('node:fs').Dirent[]
+    try {
+      entries = await fs.readdir(childrenDir, { withFileTypes: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+    const children = await Promise.all(entries
+      .filter((entry) => entry.isFile() && /^agent-[a-zA-Z0-9]+\.jsonl$/.test(entry.name))
+      .map(async (entry) => this.readSubagentRecord(h.worker_id, join(childrenDir, entry.name))))
+    return children.filter((child): child is ClaudeSubagentRecord => child !== undefined)
+  }
+
+  private async readSubagentRecord(workerId: string, filePath: string): Promise<ClaudeSubagentRecord | undefined> {
+    let raw: string
+    try {
+      raw = await fs.readFile(filePath, 'utf-8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
+    const records = completeJsonlLines(raw).flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line)
+        return isTraceRecord(parsed) ? [parsed] : []
+      } catch {
+        return []
+      }
+    })
+    const first = records[0]
+    if (!first || typeof first.agentId !== 'string' || !first.agentId) return undefined
+    const type = nativeSubagentType(first)
+    const task = first.message && isTraceRecord(first.message)
+      ? extractMessageText(first.message.content)
+      : ''
+    const terminal = nativeSubagentTerminal(records)
+    const startedAt = typeof first.timestamp === 'string' ? first.timestamp : undefined
+    const last = records.at(-1)
+    const endedAt = terminal !== undefined && typeof last?.timestamp === 'string' ? last.timestamp : undefined
+    return {
+      filePath,
+      summary: {
+        subagent_id: first.agentId,
+        worker_id: workerId,
+        executor_impl: 'claude-code',
+        ...(type ? { type } : {}),
+        name: type ?? first.agentId,
+        ...(task ? { task: truncate(task, 500) } : {}),
+        status: terminal ?? 'unknown',
+        ...(startedAt ? { started_at: startedAt } : {}),
+        ...(endedAt ? { ended_at: endedAt } : {}),
+      },
+    }
   }
 
   async inspectSupervisionActivity(
@@ -1417,7 +1564,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   capabilities(): AdapterCapabilities {
-    return { fork: true, revive: true, goalMode: false, subagent: false, structuredTrace: true }
+    return { fork: true, revive: true, goalMode: false, subagent: true, structuredTrace: true }
   }
 
   // --- Internal ---

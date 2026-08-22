@@ -30,6 +30,12 @@ import type {
   GetWorkerTerminalResult,
   GetWorkerTraceParams,
   GetWorkerTraceResult,
+  ListWorkerSubagentsParams,
+  ListWorkerSubagentsResult,
+  GetWorkerSubagentDetailParams,
+  GetWorkerSubagentDetailResult,
+  GetWorkerSubagentTraceParams,
+  GetWorkerSubagentTraceResult,
 } from '../../src/manager/read-model.js'
 import type { TriggerScheduleParams, TriggerScheduleResult } from '../../src/unified-agent.js'
 
@@ -46,12 +52,16 @@ interface AgentUnderTest {
   handleGetWorkerDetail(p: GetWorkerDetailParams): Promise<GetWorkerDetailResult>
   handleGetWorkerTerminal(p: GetWorkerTerminalParams): Promise<GetWorkerTerminalResult>
   handleGetWorkerTrace(p: GetWorkerTraceParams): Promise<GetWorkerTraceResult>
+  handleListWorkerSubagents(p: ListWorkerSubagentsParams): Promise<ListWorkerSubagentsResult>
+  handleGetWorkerSubagentDetail(p: GetWorkerSubagentDetailParams): Promise<GetWorkerSubagentDetailResult>
+  handleGetWorkerSubagentTrace(p: GetWorkerSubagentTraceParams): Promise<GetWorkerSubagentTraceResult>
 }
 
 function buildAgent(managerStack?: unknown): AgentUnderTest {
   const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
   agent.agentConfig = { model_config: { powerful: { apikey: 'test-key', model_id: 'test-model' } } }
   agent.config = { moduleId: 'test-agent' }
+  agent.knownSecrets = []
   // 直接 test fixture：构造函数默认 runtime_config_authenticated=true；Object.create 绕过构造函数，这里补齐。
   agent.configAuthenticated = true
   agent.configStale = false
@@ -1040,6 +1050,87 @@ describe('get_worker_trace(§8.3 + §10.2，P6-A composite)', () => {
   })
 })
 
+describe('worker 直接 subagent 读模型（§10.3）', () => {
+  const child = {
+    subagent_id: 'child-1',
+    worker_id: 'w-1',
+    executor_impl: 'builtin' as const,
+    type: 'code_writer',
+    name: '代码助手',
+    task: '实现观察接口',
+    status: 'completed' as const,
+    started_at: '2026-08-22T00:00:00.000Z',
+    ended_at: '2026-08-22T00:01:00.000Z',
+  }
+
+  async function agentWithChild() {
+    const root = await fs.mkdtemp(join(tmpdir(), 'rpc-subagent-'))
+    const traceEvents = [
+      { ts: '2026-08-22T00:00:01.000Z', kind: 'message' as const, role: 'assistant' as const, summary: '第一条记录', source_offset: 0 },
+    ]
+    const traceCalls: Array<{ workerId: string; subagentId: string; offset: number }> = []
+    const agent = buildAgent({
+      harness: {
+        listWorkerSubagents: async (workerId: string) => workerId === 'w-1' ? [child] : [],
+        getWorkerSubagent: async (workerId: string, subagentId: string) => workerId === 'w-1' && subagentId === child.subagent_id ? child : undefined,
+        getWorkerSubagentTrace: async (workerId: string, subagentId: string, cursor?: { offset: number }) => {
+          traceCalls.push({ workerId, subagentId, offset: cursor?.offset ?? 0 })
+          const start = cursor?.offset ?? 0
+          return { events: traceEvents.slice(start), nextCursor: { offset: traceEvents.length } }
+        },
+      },
+    }) as unknown as Record<string, unknown>
+    const { TraceCursorStore } = await import('../../src/workers/trace/cursor-store.js')
+    const cursorStore = new TraceCursorStore(join(root, 'cursors'))
+    agent.traceCursorStoreInstance = cursorStore
+    return {
+      agent: agent as unknown as AgentUnderTest,
+      traceEvents,
+      traceCalls,
+      cleanup: async () => {
+        await cursorStore.flush()
+        await fs.rm(root, { recursive: true, force: true })
+      },
+    }
+  }
+
+  it('列出、读取详情，并拒绝把别的 Worker 的 child 当作自己的 child', async () => {
+    const { agent, cleanup } = await agentWithChild()
+    try {
+      await expect(agent.handleListWorkerSubagents({ worker_id: 'w-1' })).resolves.toEqual({ subagents: [child] })
+      await expect(agent.handleGetWorkerSubagentDetail({ worker_id: 'w-1', subagent_id: 'child-1' })).resolves.toEqual({ subagent: child })
+      await expect(agent.handleGetWorkerSubagentDetail({ worker_id: 'w-other', subagent_id: 'child-1' })).rejects.toThrow(
+        'Worker subagent not found: child-1',
+      )
+      await expect(agent.handleGetWorkerSubagentTrace({ worker_id: 'w-other', subagent_id: 'child-1' })).rejects.toThrow(
+        'Worker subagent not found: child-1',
+      )
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('opaque cursor 重放固定同一 child trace 窗口，后续追加不混进旧页', async () => {
+    const { agent, traceEvents, traceCalls, cleanup } = await agentWithChild()
+    try {
+      const first = await agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1' })
+      expect(first.events.map((event) => event.summary)).toEqual(['第一条记录'])
+
+      traceEvents.push({ ts: '2026-08-22T00:00:02.000Z', kind: 'message', role: 'assistant', summary: '第二条记录', source_offset: 1 })
+      const second = await agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1', cursor: first.next_cursor })
+      expect(second.events.map((event) => event.summary)).toEqual(['第二条记录'])
+
+      traceEvents.push({ ts: '2026-08-22T00:00:03.000Z', kind: 'message', role: 'assistant', summary: '第三条记录', source_offset: 2 })
+      const replay = await agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1', cursor: first.next_cursor })
+      expect(replay.events.map((event) => event.summary)).toEqual(['第二条记录'])
+      expect(replay.next_cursor).toBe(second.next_cursor)
+      expect(traceCalls.map((call) => call.offset)).toEqual([0, 1, 1])
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
 describe('读模型 handler 的 manager 栈前置门', () => {
   it('未装配 manager 栈时四个读端点都抛明确错误', async () => {
     const agent = buildAgent()
@@ -1049,6 +1140,9 @@ describe('读模型 handler 的 manager 栈前置门', () => {
       /Manager stack not initialized/,
     )
     await expect(agent.handleGetWorkerTrace({ worker_id: 'w', seq: 1 })).rejects.toThrow(/Manager stack not initialized/)
+    await expect(agent.handleListWorkerSubagents({ worker_id: 'w' })).rejects.toThrow(/Manager stack not initialized/)
+    await expect(agent.handleGetWorkerSubagentDetail({ worker_id: 'w', subagent_id: 'child' })).rejects.toThrow(/Manager stack not initialized/)
+    await expect(agent.handleGetWorkerSubagentTrace({ worker_id: 'w', subagent_id: 'child' })).rejects.toThrow(/Manager stack not initialized/)
   })
 })
 

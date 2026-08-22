@@ -407,6 +407,36 @@ describe('BuiltinWorkerAdapter', () => {
     })
   })
 
+  it('子 Agent read model 只委托给 Worker 所属的 trace reader', async () => {
+    const child = {
+      subagent_id: 'agent-child', worker_id: 'worker-parent', executor_impl: 'builtin' as const,
+      type: 'code_writer', name: 'code_writer', task: '实现变更', status: 'running' as const,
+      started_at: '2026-08-22T00:00:00.000Z',
+    }
+    const readSubagentTrace = vi.fn(async () => ({
+      events: [{ ts: '2026-08-22T00:00:01.000Z', kind: 'message' as const, role: 'assistant' as const, summary: '正在实现' }],
+      nextCursor: { offset: 1 },
+    }))
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceReader: {
+        readTrace: async () => undefined,
+        listSubagents: async (workerId) => workerId === 'worker-parent' ? [child] : [],
+        getSubagent: async (workerId, subagentId) => workerId === 'worker-parent' && subagentId === child.subagent_id ? child : undefined,
+        readSubagentTrace,
+      },
+    })
+    const h = await adapter.spawn(spec({ worker_id: 'worker-parent', adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+    await waitState(adapter, h, 'idle')
+
+    await expect(adapter.listSubagents(h)).resolves.toEqual([child])
+    await expect(adapter.getSubagent(h, child.subagent_id)).resolves.toEqual(child)
+    await expect(adapter.readSubagentTrace(h, child.subagent_id, { offset: 0 })).resolves.toMatchObject({
+      events: [{ summary: '正在实现' }], nextCursor: { offset: 1 },
+    })
+    expect(readSubagentTrace).toHaveBeenCalledWith('worker-parent', child.subagent_id, { offset: 0 })
+  })
+
   it('常驻化身只以真实 engine/input 进展更新时间，主线与 fork 回调均接线', async () => {
     let now = 1_000
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)

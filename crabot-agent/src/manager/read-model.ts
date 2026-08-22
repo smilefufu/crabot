@@ -32,7 +32,7 @@
 import type { PaginationParams, PaginatedResult } from 'crabot-shared'
 import type { ManagerKey, LedgerWorker, TaskStatus } from '../workers/harness/ledger-types.js'
 import { isDecisionVisibleWorker } from '../workers/harness/task-status.js'
-import type { NormalizedTraceEvent, WorkerImplId, WorkerTerminalView } from '../workers/types.js'
+import type { NormalizedTraceEvent, WorkerImplId, WorkerTerminalView, IncarnationId, WorkerSubagentSummary } from '../workers/types.js'
 
 /**
  * base-protocol §5.7 TimeRange。`crabot-shared` 目前没有导出它(只在协议文档和各 channel
@@ -108,6 +108,36 @@ export interface GetWorkerTraceParams {
 export interface GetWorkerTraceResult {
   events: NormalizedTraceEvent[]
   next_cursor?: string
+  unavailable_reason?: string
+}
+
+export interface ListWorkerSubagentsParams {
+  worker_id: string
+  incarnation_id?: IncarnationId
+}
+
+export interface ListWorkerSubagentsResult {
+  subagents: WorkerSubagentSummary[]
+}
+
+export interface GetWorkerSubagentDetailParams {
+  worker_id: string
+  subagent_id: string
+}
+
+export interface GetWorkerSubagentDetailResult {
+  subagent: WorkerSubagentSummary
+}
+
+export interface GetWorkerSubagentTraceParams {
+  worker_id: string
+  subagent_id: string
+  cursor?: string
+}
+
+export interface GetWorkerSubagentTraceResult {
+  events: NormalizedTraceEvent[]
+  next_cursor: string
   unavailable_reason?: string
 }
 

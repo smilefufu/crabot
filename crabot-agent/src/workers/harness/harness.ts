@@ -86,6 +86,8 @@ import type {
   NormalizedTraceEvent,
   WorkerActivity,
   IncarnationId,
+  TraceCursor,
+  WorkerSubagentSummary,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import type { ResolvedPermissions } from '../../types'
@@ -2663,6 +2665,59 @@ export class WorkerHarness {
       ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
     }
     return adapter.readTerminal(handle)
+  }
+
+  /** Read the direct children reported by the selected Worker incarnation(s). */
+  async listWorkerSubagents(workerId: string, incarnationId?: IncarnationId): Promise<WorkerSubagentSummary[]> {
+    const found = await this.deps.ledger.findWorker(workerId)
+    if (!found) throw new WorkerNotFoundError(workerId)
+    const incarnations = incarnationId === undefined
+      ? found.worker.incarnations
+      : [found.worker.incarnations.find((candidate) => candidate.incarnation_id === incarnationId)].filter(Boolean)
+    if (incarnationId !== undefined && incarnations.length === 0) {
+      throw new Error(`WorkerHarness.listWorkerSubagents: no incarnation with incarnation_id=${incarnationId} found for worker ${workerId}`)
+    }
+    const summaries = new Map<string, WorkerSubagentSummary>()
+    for (const incarnation of incarnations) {
+      if (!incarnation || isLegacyIncarnation(incarnation)) continue
+      const adapter = this.deps.adapters.get(incarnation.impl)
+      if (!adapter?.listSubagents) continue
+      const children = await adapter.listSubagents(handleForIncarnation(workerId, incarnation))
+      for (const child of children) summaries.set(child.subagent_id, child)
+    }
+    return [...summaries.values()].sort((left, right) => (right.started_at ?? '').localeCompare(left.started_at ?? ''))
+  }
+
+  async getWorkerSubagent(workerId: string, subagentId: string): Promise<WorkerSubagentSummary | undefined> {
+    const found = await this.deps.ledger.findWorker(workerId)
+    if (!found) throw new WorkerNotFoundError(workerId)
+    for (const incarnation of found.worker.incarnations) {
+      if (isLegacyIncarnation(incarnation)) continue
+      const adapter = this.deps.adapters.get(incarnation.impl)
+      if (!adapter?.getSubagent) continue
+      const summary = await adapter.getSubagent(handleForIncarnation(workerId, incarnation), subagentId)
+      if (summary) return summary
+    }
+    return undefined
+  }
+
+  async getWorkerSubagentTrace(
+    workerId: string,
+    subagentId: string,
+    cursor?: TraceCursor,
+  ): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor; unavailableReason?: string }> {
+    const found = await this.deps.ledger.findWorker(workerId)
+    if (!found) throw new WorkerNotFoundError(workerId)
+    for (const incarnation of found.worker.incarnations) {
+      if (isLegacyIncarnation(incarnation)) continue
+      const adapter = this.deps.adapters.get(incarnation.impl)
+      if (!adapter?.getSubagent || !adapter.readSubagentTrace) continue
+      const handle = handleForIncarnation(workerId, incarnation)
+      if (await adapter.getSubagent(handle, subagentId)) {
+        return adapter.readSubagentTrace(handle, subagentId, cursor)
+      }
+    }
+    throw new Error(`worker subagent not found: ${subagentId}`)
   }
 
   async hasWorker(workerId: string): Promise<boolean> {

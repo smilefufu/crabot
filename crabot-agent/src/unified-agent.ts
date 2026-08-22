@@ -34,6 +34,7 @@ import type {
   SkillConfig,
   TaskOrigin,
   WorkerAgentContext,
+  SubAgentConfig,
 } from './types.js'
 import { SessionManager } from './orchestration/session-manager.js'
 import { PermissionChecker } from './orchestration/permission-checker.js'
@@ -52,11 +53,13 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpConnector, filterMcpServersForWorker } from './agent/mcp-connector.js'
 import { mcpServerToToolDefinitions } from './agent/mcp-tool-bridge.js'
 import { createTmpPageTools } from './agent/tmp-page-tools.js'
+import { createDelegateTaskTool } from './agent/delegate-task-tool.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
 import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
 import { ConfigLoader } from './core/config-loader.js'
 import { TraceStore } from './core/trace-store.js'
+import { BuiltinSubagentRunner } from './workers/builtin/subagent-runner.js'
 import { importV2LegacyTasks } from './workers/legacy-importer.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
@@ -118,9 +121,15 @@ import {
   type GetWorkerTerminalResult,
   type GetWorkerTraceParams,
   type GetWorkerTraceResult,
+  type ListWorkerSubagentsParams,
+  type ListWorkerSubagentsResult,
+  type GetWorkerSubagentDetailParams,
+  type GetWorkerSubagentDetailResult,
+  type GetWorkerSubagentTraceParams,
+  type GetWorkerSubagentTraceResult,
 } from './manager/read-model.js'
 import { managerActivitySummary, projectManagerEpisode, withCausalParent, type EpisodeWorkerFact, type ManagerEpisodeProjection } from './manager/episode-projection.js'
-import type { NormalizedTraceEvent, SpawnSpec } from './workers/types.js'
+import type { NormalizedTraceEvent, SpawnSpec, WorkerSubagentSummary } from './workers/types.js'
 import {
   TaskCancelledError,
   WorkerHasNoIncarnationError,
@@ -131,6 +140,25 @@ import { SYSTEM_TASKS_MANAGER_KEY } from './manager/registry.js'
 import { splitManagerKey } from './manager/principal.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
+
+function subagentTraceFingerprint(subagent: WorkerSubagentSummary): string {
+  return createHash('sha256')
+    .update(JSON.stringify({
+      executor_impl: subagent.executor_impl,
+      subagent_id: subagent.subagent_id,
+      started_at: subagent.started_at ?? '',
+    }))
+    .digest('hex')
+    .slice(0, 32)
+}
+
+function redactTraceDetail(detail: unknown, redact: (text: string) => string): unknown {
+  try {
+    return JSON.parse(redact(JSON.stringify(detail)))
+  } catch {
+    return '[unserializable detail removed]'
+  }
+}
 
 /**
  * fail-closed 兜底：权限解析失败时用最小权限（仅 messaging），避免未绑定模板或 Admin 不可用时放开全部工具。
@@ -488,6 +516,7 @@ export class UnifiedAgent extends ModuleBase {
   // Trace 存储
   private traceStore: TraceStore
   private lspManager: LSPManager
+  private builtinSubagentRunner: BuiltinSubagentRunner
   private traceCleanupInterval?: ReturnType<typeof setInterval>
   private promptManager: PromptManager
 
@@ -532,6 +561,13 @@ export class UnifiedAgent extends ModuleBase {
       ['traces-', 'traces-v3-'],
     )
     this.lspManager = createLSPManager()
+    this.builtinSubagentRunner = new BuiltinSubagentRunner(
+      this.traceStore,
+      this.lspManager,
+      async (workerId, text) => {
+        await this.requireManagerStack().harness.sendToWorker(workerId, text)
+      },
+    )
 
     this.promptManager = new PromptManager()
 
@@ -1002,7 +1038,7 @@ export class UnifiedAgent extends ModuleBase {
    *
    * **装**：内置文件/shell 工具 + skills、crab-memory、外部 MCP、tmp-page / 生图。
    * **不装**：全部 messaging（v3 语义：worker 不直接跟人类说话）、`set_cwd`、goal 相关、
-   * `delegate_task`、`todo`、`find_task` / `get_task_progress`、
+   * `todo`、`find_task` / `get_task_progress`、
    * subagent coordinator / `request_restart`。它们不是被过滤掉的，而是根本不组装进来。
    */
   private buildBuiltinWorkerTools(ctx: BuiltinRuntimeContext): ReadonlyArray<EngineToolDefinition> {
@@ -1072,7 +1108,18 @@ export class UnifiedAgent extends ModuleBase {
     // 权限档位过滤：adapter 的 `checkPermission` 是执行期的闸，这里守的是
     // "没权限的工具不进 prompt"——外部 MCP 里可能混进 `desktop` 类工具（computer-use）。
     // 档位 = worker 固定档位 ∩ 派活人档位（见 `narrowWorkerPermissions`）。
-    return filterToolsByPermission(configFiltered, this.getToolPermissionConfig(configFiltered, workerPerms))
+    const permitted = filterToolsByPermission(configFiltered, this.getToolPermissionConfig(configFiltered, workerPerms))
+    const subagents = this.agentConfig?.subagents ?? []
+    if (subagents.length === 0) return permitted
+    return [...permitted, createDelegateTaskTool({
+      subAgents: subagents,
+      runSubAgent: (subagent, input, toolContext) => this.builtinSubagentRunner.run(
+        subagent,
+        input,
+        toolContext,
+        permitted,
+      ),
+    })]
   }
 
   /**
@@ -1116,7 +1163,14 @@ export class UnifiedAgent extends ModuleBase {
       ...(this.agentConfig?.system_prompt ? { adminPersonality: this.agentConfig.system_prompt } : {}),
       ...(skillListing ? { skillListing } : {}),
       imageCapability: { available: this.imageCapability.available },
-      // availableSubAgents 不传：worker 不装 delegate_task。
+      ...(this.agentConfig?.subagents?.length
+        ? {
+            availableSubAgents: this.agentConfig.subagents.map((subagent) => ({
+              toolName: subagent.name,
+              workerHint: subagent.when_to_use.split('\n')[0] || subagent.description || subagent.name,
+            })),
+          }
+        : {}),
     })
     const workspaceInstructions = ctx.workspace_instructions?.snapshot.source === 'agents_md'
       && ctx.workspace_instructions.text !== undefined
@@ -1268,6 +1322,9 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
     this.registerMethod('get_worker_terminal', this.handleGetWorkerTerminal.bind(this))
     this.registerMethod('get_worker_trace', this.handleGetWorkerTrace.bind(this))
+    this.registerMethod('list_worker_subagents', this.handleListWorkerSubagents.bind(this))
+    this.registerMethod('get_worker_subagent_detail', this.handleGetWorkerSubagentDetail.bind(this))
+    this.registerMethod('get_worker_subagent_trace', this.handleGetWorkerSubagentTrace.bind(this))
   }
 
   // ============================================================================
@@ -3309,6 +3366,76 @@ export class UnifiedAgent extends ModuleBase {
     )
   }
 
+  private async handleListWorkerSubagents(params: ListWorkerSubagentsParams): Promise<ListWorkerSubagentsResult> {
+    if (!params || typeof params.worker_id !== 'string' || params.worker_id.length === 0) {
+      throw new Error('worker_id is required')
+    }
+    return {
+      subagents: await this.requireManagerStack().harness.listWorkerSubagents(params.worker_id, params.incarnation_id),
+    }
+  }
+
+  private async handleGetWorkerSubagentDetail(params: GetWorkerSubagentDetailParams): Promise<GetWorkerSubagentDetailResult> {
+    if (!params || typeof params.worker_id !== 'string' || typeof params.subagent_id !== 'string' || !params.worker_id || !params.subagent_id) {
+      throw new Error('worker_id and subagent_id are required')
+    }
+    const subagent = await this.requireManagerStack().harness.getWorkerSubagent(params.worker_id, params.subagent_id)
+    if (!subagent) throw new Error(`Worker subagent not found: ${params.subagent_id}`)
+    return { subagent }
+  }
+
+  private async handleGetWorkerSubagentTrace(params: GetWorkerSubagentTraceParams): Promise<GetWorkerSubagentTraceResult> {
+    if (!params || typeof params.worker_id !== 'string' || typeof params.subagent_id !== 'string' || !params.worker_id || !params.subagent_id) {
+      throw new Error('worker_id and subagent_id are required')
+    }
+    const stack = this.requireManagerStack()
+    const subagent = await stack.harness.getWorkerSubagent(params.worker_id, params.subagent_id)
+    if (!subagent) throw new Error(`Worker subagent not found: ${params.subagent_id}`)
+
+    const cursorWorkerId = `subagent:${params.worker_id}:${params.subagent_id}`
+    const fingerprint = subagentTraceFingerprint(subagent)
+    let cursorRecord: import('./workers/trace/cursor-store.js').TraceCursorRecord
+    if (params.cursor !== undefined) {
+      cursorRecord = await this.traceCursorStore().resolve(params.cursor, cursorWorkerId, fingerprint)
+    } else {
+      const token = await this.traceCursorStore().mint(cursorWorkerId, fingerprint, { harness: 0, native: 0, legacy: 0 })
+      cursorRecord = await this.traceCursorStore().resolve(token, cursorWorkerId, fingerprint)
+    }
+
+    const trace = await stack.harness.getWorkerSubagentTrace(
+      params.worker_id,
+      params.subagent_id,
+      { offset: cursorRecord.positions.native },
+    )
+    const replayBound = cursorRecord.window?.end.native
+    const events = trace.events.filter((event) => event.source_offset === undefined || replayBound === undefined || event.source_offset < replayBound)
+    const nativeEnd = replayBound ?? trace.nextCursor.offset
+    const cursorStore = this.traceCursorStore()
+    let nextToken: string
+    if (cursorRecord.window) {
+      nextToken = cursorRecord.window.nextToken
+    } else {
+      nextToken = await cursorStore.mint(cursorWorkerId, fingerprint, { harness: 0, native: nativeEnd, legacy: 0 })
+      await cursorStore.captureWindow(cursorRecord.token, {
+        end: { harness: 0, native: nativeEnd, legacy: 0 },
+        nextToken,
+      })
+    }
+    return {
+      events: events.map((event) => {
+        const source = event.source ?? (subagent.executor_impl === 'builtin' ? 'harness' : 'native')
+        return {
+          ...event,
+          source,
+          summary: redactSecrets(event.summary, [...this.knownSecrets]),
+          ...(event.detail === undefined ? {} : { detail: redactTraceDetail(event.detail, (text) => redactSecrets(text, [...this.knownSecrets])) }),
+        }
+      }),
+      next_cursor: nextToken,
+      ...(trace.unavailableReason ? { unavailable_reason: trace.unavailableReason } : {}),
+    }
+  }
+
   /**
    * Manager 的常规 worker 观察面只投射原生会话内容；Harness 生命周期事件保留给被动唤醒，
    * 不与 worker 的 assistant 正文混在一起。cursor 仍由 composite reader 统一维护；调用方
@@ -3397,12 +3524,20 @@ export class UnifiedAgent extends ModuleBase {
       finishIncarnationTrace: (traceId, patch) => {
         this.traceStore.endTrace(traceId, patch.status, { summary: redact(patch.summary) })
       },
+      stopWorkerSubagents: (workerId) => {
+        void this.builtinSubagentRunner.stopWorker(workerId).catch((error) => {
+          console.warn(`[${this.config.moduleId}] builtin subagent stop failed for ${workerId}:`, error)
+        })
+      },
     }
   }
 
   private builtinTraceReader(): import('./workers/builtin/adapter.js').BuiltinTraceReader {
     return {
       readTrace: async (traceId) => this.traceStore.getFullTrace(traceId),
+      listSubagents: (workerId) => this.builtinSubagentRunner.list(workerId),
+      getSubagent: (workerId, subagentId) => this.builtinSubagentRunner.get(workerId, subagentId),
+      readSubagentTrace: (workerId, subagentId, cursor) => this.builtinSubagentRunner.readTrace(workerId, subagentId, cursor),
     }
   }
 
@@ -3793,6 +3928,11 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   protected override async onStart(): Promise<void> {
+    try {
+      await this.builtinSubagentRunner.recoverAfterRestart()
+    } catch (error) {
+      console.warn(`[${this.config.moduleId}] builtin subagent restart reconciliation failed:`, error)
+    }
     await this.importLegacyV2Tasks()
     // Business ingress is registered only after onStart resolves; initialize durable
     // subject bindings before any Manager tool face can mint a continuation credential.

@@ -7,6 +7,7 @@ import {
   CodexAppServerClient,
   CodexAppServerRpcError,
   probeCodexAppServerFork,
+  probeCodexAppServerSubagents,
 } from '../../src/workers/codex/app-server-client.js'
 
 const FIXTURE = resolve(__dirname, 'fixtures/fake-codex-app-server.mjs')
@@ -67,6 +68,20 @@ describe('CodexAppServerClient', () => {
     })).resolves.toBe(true)
 
     await expect(probeCodexAppServerFork({
+      command: `env FAKE_APP_SERVER_MODE=unsupported node ${quote(FIXTURE)} app-server --stdio`,
+      cwd: dir,
+      env: { PATH: process.env.PATH ?? '', CODEX_HOME: dir },
+    })).resolves.toBe(false)
+  })
+
+  it('subagent capability probe requires native child thread listing support', async () => {
+    await expect(probeCodexAppServerSubagents({
+      command: `node ${quote(FIXTURE)} app-server --stdio`,
+      cwd: dir,
+      env: { PATH: process.env.PATH ?? '', CODEX_HOME: dir },
+    })).resolves.toBe(true)
+
+    await expect(probeCodexAppServerSubagents({
       command: `env FAKE_APP_SERVER_MODE=unsupported node ${quote(FIXTURE)} app-server --stdio`,
       cwd: dir,
       env: { PATH: process.env.PATH ?? '', CODEX_HOME: dir },

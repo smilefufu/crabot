@@ -52,6 +52,49 @@ rl.on('line', (line) => {
     send({ method: 'unrelated/notification', params: { ignored: true } })
     return
   }
+  if (message.method === 'thread/list') {
+    if (mode === 'unsupported') {
+      error(message.id, 'method not found', -32601)
+      return
+    }
+    const parentThreadId = message.params?.parentThreadId
+    send({
+      id: message.id,
+      result: {
+        data: mode === 'children' && typeof parentThreadId === 'string' ? [{
+          id: process.env.FAKE_CHILD_THREAD_ID ?? '019d0000-0000-7000-8000-000000000003',
+          parentThreadId,
+          preview: '原生子 Agent 任务',
+          status: { type: 'idle' },
+          agentNickname: '研究助手',
+          agentRole: 'research',
+          createdAt: 1_770_000_000,
+          updatedAt: 1_770_000_060,
+        }] : [],
+        nextCursor: null,
+      },
+    })
+    return
+  }
+  if (message.method === 'thread/items/list') {
+    if (mode === 'unsupported') {
+      error(message.id, 'method not found', -32601)
+      return
+    }
+    const childThreadId = process.env.FAKE_CHILD_THREAD_ID ?? '019d0000-0000-7000-8000-000000000003'
+    send({
+      id: message.id,
+      result: {
+        data: mode === 'children' && message.params?.threadId === childThreadId ? [
+          { turnId: 'turn-child', item: { type: 'userMessage', content: [{ text: '检查原生记录' }] } },
+          { turnId: 'turn-child', item: { type: 'commandExecution', command: 'pwd' } },
+          { turnId: 'turn-child', item: { type: 'agentMessage', text: '原生子 Agent 已完成' } },
+        ] : [],
+        nextCursor: null,
+      },
+    })
+    return
+  }
   if (message.method === 'thread/fork') {
     if (mode === 'unsupported') {
       error(message.id, 'method not found', -32601)

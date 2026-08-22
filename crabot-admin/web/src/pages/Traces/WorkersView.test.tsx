@@ -6,6 +6,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { WorkersView } from './WorkersView'
 import { WorkerDetail } from './WorkerDetail'
+import { SubagentDetail } from './SubagentDetail'
 import { agentObservabilityService } from '../../services/agent-observability'
 
 vi.mock('../../services/agent-observability')
@@ -19,6 +20,9 @@ const mocked = agentObservabilityService as unknown as {
   getWorkerDetail: ReturnType<typeof vi.fn>
   getWorkerTrace: ReturnType<typeof vi.fn>
   getWorkerTerminal: ReturnType<typeof vi.fn>
+  listWorkerSubagents: ReturnType<typeof vi.fn>
+  getWorkerSubagentDetail: ReturnType<typeof vi.fn>
+  getWorkerSubagentTrace: ReturnType<typeof vi.fn>
 }
 
 function workerFixture() {
@@ -93,6 +97,7 @@ describe('WorkerDetail', () => {
       items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 测试账号 · 小付', active_worker_count: 0 }],
       pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
     })
+    mocked.listWorkerSubagents = vi.fn().mockResolvedValue({ subagents: [] })
   })
 
   function renderDetail() {
@@ -206,6 +211,48 @@ describe('WorkerDetail', () => {
     expect(screen.getByText(/"file_path": "\/tmp\/x\.ts"/)).toBeInTheDocument()
     expect(screen.getByText('输出')).toBeInTheDocument()
     expect(screen.getByText('文件内容摘要')).toBeInTheDocument()
+  })
+
+  it('已确认子 Agent 身份的 Worker Trace 可直接打开该子 Agent 详情', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({
+      events: [
+        { ts: '2026-08-01T00:00:01.000Z', kind: 'tool_call', summary: 'delegate_task', source: 'native', detail: { call_id: 'delegate-1', name: 'delegate_task', input: { task: '核对数据' } } },
+        { ts: '2026-08-01T00:00:02.000Z', kind: 'tool_result', summary: '子 Agent 已启动', source: 'native', subagent_id: 'agent-child-1', detail: { call_id: 'delegate-1', output: '子 Agent 已启动' } },
+      ],
+      next_cursor: 'tok-1',
+    })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
+    renderDetail()
+
+    const toolRow = await screen.findByRole('button', { name: /工具调用：调用 delegate_task · 已返回结果.*展开详情/ })
+    fireEvent.click(toolRow)
+    expect(screen.getByRole('link', { name: '查看子 Agent' })).toHaveAttribute(
+      'href',
+      `/traces/workers/${encodeURIComponent('w-1234567890ab')}/subagents/${encodeURIComponent('agent-child-1')}`,
+    )
+  })
+
+  it('直接启动的子 Agent 显示任务、状态、时间和详情链接', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({ events: [], next_cursor: 'tok-1' })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
+    mocked.listWorkerSubagents = vi.fn().mockResolvedValue({
+      subagents: [{
+        subagent_id: 'agent-child-1', worker_id: 'w-1234567890ab', executor_impl: 'builtin', type: 'code_writer',
+        name: '代码助手', task: '核对接口契约', status: 'completed',
+        started_at: '2026-08-01T00:00:00.000Z', ended_at: '2026-08-01T00:02:00.000Z',
+      }],
+    })
+    renderDetail()
+
+    await screen.findByText('代码助手')
+    expect(screen.getByText('核对接口契约')).toBeInTheDocument()
+    expect(screen.getAllByText('已完成')).toHaveLength(2)
+    expect(screen.getByRole('link', { name: /代码助手.*核对接口契约.*用时 2 分钟.*已完成/ })).toHaveAttribute(
+      'href',
+      `/traces/workers/${encodeURIComponent('w-1234567890ab')}/subagents/${encodeURIComponent('agent-child-1')}`,
+    )
   })
 
   it('指令投递显示 receipt 中已有的受限正文预览', async () => {
@@ -326,5 +373,53 @@ describe('WorkerDetail', () => {
     expect(screen.getByText('第 2 / 2 页')).toBeInTheDocument()
     expect(screen.getByText('消息 20')).toBeInTheDocument()
     expect(screen.queryByText('消息 0')).not.toBeInTheDocument()
+  })
+})
+
+describe('SubagentDetail', () => {
+  beforeEach(() => { vi.resetAllMocks() })
+
+  function renderSubagentDetail() {
+    return render(
+      <MemoryRouter initialEntries={[`/traces/workers/${encodeURIComponent('w-1234567890ab')}/subagents/agent-child-1`]}>
+        <Routes>
+          <Route path="/traces/workers/:workerId/subagents/:subagentId" element={<SubagentDetail />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+  }
+
+  it('显示 child 自身信息，分页查看 trace，并能返回所属 Worker', async () => {
+    const events = Array.from({ length: 21 }, (_, index) => ({
+      ts: `2026-08-01T00:00:${String(index).padStart(2, '0')}.000Z`, kind: 'message' as const,
+      role: 'assistant' as const, summary: `子 Agent 记录 ${index}`, source: 'harness' as const,
+      detail: { content: `子 Agent 记录 ${index}` },
+    }))
+    mocked.getWorkerSubagentDetail = vi.fn().mockResolvedValue({
+      subagent: {
+        subagent_id: 'agent-child-1', worker_id: 'w-1234567890ab', executor_impl: 'codex', type: 'research',
+        name: '研究助手', task: '整理原生记录', status: 'completed',
+        started_at: '2026-08-01T00:00:00.000Z', ended_at: '2026-08-01T00:02:00.000Z',
+      },
+    })
+    mocked.getWorkerSubagentTrace = vi.fn().mockResolvedValue({ events, next_cursor: 'tok-1' })
+    renderSubagentDetail()
+
+    await screen.findByRole('heading', { name: '研究助手', level: 1 })
+    expect(screen.getByText('Codex')).toBeInTheDocument()
+    expect(screen.getByText('research')).toBeInTheDocument()
+    expect(screen.getByText('整理原生记录')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '子 Agent Trace', level: 2 })).toBeInTheDocument()
+    expect(await screen.findAllByText('子 Agent 文本')).not.toHaveLength(0)
+    expect(screen.getByText('第 1 / 2 页')).toBeInTheDocument()
+    expect(screen.getByText('子 Agent 记录 0')).toBeInTheDocument()
+    expect(screen.queryByText('子 Agent 记录 20')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
+    expect(screen.getByText('第 2 / 2 页')).toBeInTheDocument()
+    expect(screen.getByText('子 Agent 记录 20')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '← 返回 Worker 详情' })).toHaveAttribute(
+      'href',
+      `/traces/workers/${encodeURIComponent('w-1234567890ab')}`,
+    )
   })
 })

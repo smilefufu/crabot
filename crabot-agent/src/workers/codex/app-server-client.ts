@@ -10,6 +10,32 @@ interface PendingRequest {
   readonly timer: ReturnType<typeof setTimeout>
 }
 
+export interface CodexAppServerThread {
+  readonly id: string
+  readonly parentThreadId: string | null
+  readonly preview: string
+  readonly status: { readonly type: string }
+  readonly agentNickname: string | null
+  readonly agentRole: string | null
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+export interface CodexAppServerThreadPage {
+  readonly data: ReadonlyArray<CodexAppServerThread>
+  readonly nextCursor: string | null
+}
+
+export interface CodexAppServerThreadItem {
+  readonly turnId: string
+  readonly item: Record<string, unknown>
+}
+
+export interface CodexAppServerThreadItemPage {
+  readonly data: ReadonlyArray<CodexAppServerThreadItem>
+  readonly nextCursor: string | null
+}
+
 export interface AppServerNotification {
   readonly method: string
   readonly params?: unknown
@@ -155,6 +181,40 @@ export class CodexAppServerClient {
     })
   }
 
+  async listThreads(
+    params: { readonly parentThreadId?: string; readonly cursor?: string; readonly limit?: number },
+    deadlineAt: string,
+  ): Promise<CodexAppServerThreadPage> {
+    const result = await this.request('thread/list', params, deadlineAt)
+    return parseThreadPage(result, 'thread/list')
+  }
+
+  async readThread(threadId: string, deadlineAt: string): Promise<CodexAppServerThread> {
+    const result = await this.request('thread/read', { threadId }, deadlineAt)
+    if (!isObject(result) || !isObject(result.thread)) {
+      throw new Error('codex app-server thread/read returned an incompatible response')
+    }
+    return parseThread(result.thread, 'thread/read')
+  }
+
+  async listThreadItems(
+    params: { readonly threadId: string; readonly cursor?: string; readonly limit?: number },
+    deadlineAt: string,
+  ): Promise<CodexAppServerThreadItemPage> {
+    const result = await this.request('thread/items/list', params, deadlineAt)
+    if (!isObject(result) || !Array.isArray(result.data) || !('nextCursor' in result)) {
+      throw new Error('codex app-server thread/items/list returned an incompatible response')
+    }
+    const data: CodexAppServerThreadItem[] = []
+    for (const entry of result.data) {
+      if (!isObject(entry) || typeof entry.turnId !== 'string' || !isObject(entry.item)) {
+        throw new Error('codex app-server thread/items/list returned an invalid item')
+      }
+      data.push({ turnId: entry.turnId, item: entry.item })
+    }
+    return { data, nextCursor: typeof result.nextCursor === 'string' ? result.nextCursor : null }
+  }
+
   notify(method: string, params: JsonObject): void {
     this.write({ method, params })
   }
@@ -262,6 +322,32 @@ function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function parseThreadPage(value: unknown, method: string): CodexAppServerThreadPage {
+  if (!isObject(value) || !Array.isArray(value.data) || !('nextCursor' in value)) {
+    throw new Error(`codex app-server ${method} returned an incompatible response`)
+  }
+  return {
+    data: value.data.map((thread) => parseThread(thread, method)),
+    nextCursor: typeof value.nextCursor === 'string' ? value.nextCursor : null,
+  }
+}
+
+function parseThread(value: unknown, method: string): CodexAppServerThread {
+  if (!isObject(value) || typeof value.id !== 'string' || typeof value.preview !== 'string' || !isObject(value.status)) {
+    throw new Error(`codex app-server ${method} returned an invalid thread`)
+  }
+  return {
+    id: value.id,
+    parentThreadId: typeof value.parentThreadId === 'string' ? value.parentThreadId : null,
+    preview: value.preview,
+    status: { type: typeof value.status.type === 'string' ? value.status.type : 'notLoaded' },
+    agentNickname: typeof value.agentNickname === 'string' ? value.agentNickname : null,
+    agentRole: typeof value.agentRole === 'string' ? value.agentRole : null,
+    createdAt: typeof value.createdAt === 'number' ? value.createdAt : 0,
+    updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : 0,
+  }
+}
+
 function provesThreadLookup(error: unknown): boolean {
   return error instanceof CodexAppServerRpcError &&
     error.code !== -32601 &&
@@ -292,6 +378,25 @@ export async function probeCodexAppServerFork(opts: {
     ])
     return fork.status === 'rejected' && provesThreadLookup(fork.reason) &&
       turn.status === 'rejected' && provesThreadLookup(turn.reason)
+  } catch {
+    return false
+  } finally {
+    await client.terminate()
+  }
+}
+
+export async function probeCodexAppServerSubagents(opts: {
+  readonly command: string
+  readonly cwd: string
+  readonly env: Record<string, string>
+  readonly timeoutMs?: number
+}): Promise<boolean> {
+  const deadlineAt = new Date(Date.now() + (opts.timeoutMs ?? 3000)).toISOString()
+  const client = new CodexAppServerClient(opts)
+  try {
+    await client.initialize(deadlineAt)
+    await client.listThreads({ parentThreadId: '00000000-0000-0000-0000-000000000001', limit: 1 }, deadlineAt)
+    return true
   } catch {
     return false
   } finally {

@@ -426,7 +426,7 @@ function parseOptionalIntParam(raw: string | null): number | undefined {
 }
 
 /**
- * `/api/agent/workers*` 三个按 worker_id 读的端点统一的"worker 不存在 → 404"判定。
+ * `/api/agent/workers*` 按 Worker 或 child 读的端点统一的“不存在 → 404”判定。
  *
  * agent 侧同一件事有两处文案，大小写不同：`unified-agent.ts` 的 handler 显式抛
  * `Worker not found: <id>`（detail / trace），`harness.ts` 的 `WorkerNotFoundError` 抛
@@ -439,7 +439,8 @@ function parseOptionalIntParam(raw: string | null): number | undefined {
  * 继续落 500，否则前端分不清"这个 worker 没了"和"这个化身没了"。
  */
 function isWorkerNotFoundError(message: string): boolean {
-  return message.toLowerCase().includes('worker not found')
+  const normalized = message.toLowerCase()
+  return normalized.includes('worker not found') || normalized.includes('worker subagent not found')
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -2481,6 +2482,21 @@ export class AdminModule extends ModuleBase {
       const workerTraceMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/trace$/)
       if (workerTraceMatch && req.method === 'GET') {
         await this.handleGetWorkerTraceApi(req, res, workerTraceMatch[1], url)
+        return
+      }
+      const workerSubagentTraceMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/subagents\/([^/]+)\/trace$/)
+      if (workerSubagentTraceMatch && req.method === 'GET') {
+        await this.handleGetWorkerSubagentTraceApi(req, res, workerSubagentTraceMatch[1], workerSubagentTraceMatch[2], url)
+        return
+      }
+      const workerSubagentDetailMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/subagents\/([^/]+)$/)
+      if (workerSubagentDetailMatch && req.method === 'GET') {
+        await this.handleGetWorkerSubagentDetailApi(req, res, workerSubagentDetailMatch[1], workerSubagentDetailMatch[2])
+        return
+      }
+      const workerSubagentsMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/subagents$/)
+      if (workerSubagentsMatch && req.method === 'GET') {
+        await this.handleListWorkerSubagentsApi(req, res, workerSubagentsMatch[1], url)
         return
       }
       const workerDetailMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)$/)
@@ -10400,6 +10416,58 @@ export class AdminModule extends ModuleBase {
       {
         worker_id: workerId,
         ...(seq !== undefined ? { seq } : {}),
+        ...(cursor ? { cursor } : {}),
+      },
+      isWorkerNotFoundError,
+    )
+  }
+
+  private async handleListWorkerSubagentsApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    workerId: string,
+    url: URL,
+  ): Promise<void> {
+    const incarnationId = url.searchParams.get('incarnation_id') || undefined
+    await this.proxyAgentRpc<{ worker_id: string; incarnation_id?: string }, { subagents: unknown[] }>(
+      res,
+      'list_worker_subagents',
+      { worker_id: decodeURIComponent(workerId), ...(incarnationId ? { incarnation_id: incarnationId } : {}) },
+      isWorkerNotFoundError,
+    )
+  }
+
+  private async handleGetWorkerSubagentDetailApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    workerId: string,
+    subagentId: string,
+  ): Promise<void> {
+    await this.proxyAgentRpc<{ worker_id: string; subagent_id: string }, { subagent: unknown }>(
+      res,
+      'get_worker_subagent_detail',
+      { worker_id: decodeURIComponent(workerId), subagent_id: decodeURIComponent(subagentId) },
+      isWorkerNotFoundError,
+    )
+  }
+
+  private async handleGetWorkerSubagentTraceApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    workerId: string,
+    subagentId: string,
+    url: URL,
+  ): Promise<void> {
+    const cursor = url.searchParams.get('cursor') || undefined
+    await this.proxyAgentRpc<
+      { worker_id: string; subagent_id: string; cursor?: string },
+      { events: unknown[]; next_cursor: string; unavailable_reason?: string }
+    >(
+      res,
+      'get_worker_subagent_trace',
+      {
+        worker_id: decodeURIComponent(workerId),
+        subagent_id: decodeURIComponent(subagentId),
         ...(cursor ? { cursor } : {}),
       },
       isWorkerNotFoundError,

@@ -1115,6 +1115,66 @@ describe('ClaudeCodeAdapter.detect', () => {
   })
 })
 
+describe('ClaudeCodeAdapter subagent observability', () => {
+  let dataDir: string
+  let workspaceRoot: string
+  let projectsDir: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-subagent-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-subagent-workspace-'))
+    projectsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-subagent-projects-'))
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(projectsDir, { recursive: true, force: true }).catch(() => {})
+  })
+
+  it('只从已完成的原生 child JSONL 行读取 child 与独立 trace', async () => {
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const sessionId = randomUUID()
+    const childId = 'agent-childabc'
+    const slug = workspaceRoot.replace(/[/.]/g, '-')
+    const childDir = path.join(projectsDir, slug, sessionId, 'subagents')
+    await fs.mkdir(childDir, { recursive: true })
+    await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
+    await fs.writeFile(path.join(dataDir, workerId, 'meta-1.json'), JSON.stringify({
+      seq: 1, state: 'idle', session_id: sessionId, workspace_root: workspaceRoot,
+    }))
+    await fs.writeFile(path.join(childDir, `${childId}.jsonl`), [
+      JSON.stringify({ agentId: childId, agentType: 'Explore', timestamp: '2026-08-22T00:00:00.000Z', type: 'user', message: { content: '检查原生记录' } }),
+      JSON.stringify({ agentId: childId, timestamp: '2026-08-22T00:00:03.000Z', type: 'assistant', message: { content: '已经完成', stop_reason: 'end_turn' } }),
+      '{"agentId":"agent-childabc"',
+    ].join('\n'), 'utf8')
+
+    class OfflineTmux extends TmuxDriver {
+      override async isAlive(): Promise<boolean> { return false }
+      override async killSession(): Promise<void> {}
+    }
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      claudeProjectsDir: projectsDir,
+      claudeBin: 'unused',
+      tmux: new OfflineTmux(),
+    })
+    const parent = { worker_id: workerId, seq: 1, impl: 'claude-code' as const, session_ref: sessionId }
+
+    await expect(adapter.listSubagents(parent)).resolves.toMatchObject([{
+      subagent_id: childId, executor_impl: 'claude-code', type: 'Explore', name: 'Explore', task: '检查原生记录', status: 'completed',
+    }])
+    await expect(adapter.readSubagentTrace(parent, childId)).resolves.toMatchObject({
+      events: [
+        { kind: 'message', role: 'user', summary: '检查原生记录', source_offset: 0 },
+        { kind: 'message', role: 'assistant', summary: '已经完成', source_offset: 1 },
+      ],
+      nextCursor: { offset: 2 },
+    })
+  })
+})
+
 describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
   let dataDir: string
   let workspaceRoot: string
