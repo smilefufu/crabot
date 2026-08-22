@@ -1760,11 +1760,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
     const child = (await this.readChildThreads(h)).find((thread) => thread.id === subagentId)
     if (!child) throw new Error(`CodexWorkerAdapter: subagent not found: ${subagentId}`)
-    const items = await this.readAllThreadItems(h, child.id)
+    const { items, startedAtByTurnId } = await this.readAllThreadItems(h, child.id)
     const start = cursor?.offset ?? 0
+    const fallbackTs = timestampFromEpochSeconds(child.createdAt, '1970-01-01T00:00:00.000Z')
     return {
       events: items.slice(start).flatMap((entry, index) => {
-        const event = normalizeCodexThreadItem(entry.item)
+        const event = normalizeCodexThreadItem(entry.item, startedAtByTurnId.get(entry.turnId) ?? fallbackTs)
         return event ? [{ ...event, source_offset: start + index }] : []
       }),
       nextCursor: { offset: items.length },
@@ -1896,11 +1897,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
   }
 
-  private async readAllThreadItems(h: IncarnationHandle, threadId: string): Promise<ReadonlyArray<import('./app-server-client.js').CodexAppServerThreadItem>> {
+  private async readAllThreadItems(h: IncarnationHandle, threadId: string): Promise<{
+    items: ReadonlyArray<import('./app-server-client.js').CodexAppServerThreadItem>
+    startedAtByTurnId: ReadonlyMap<string, string>
+  }> {
     const runtime = await this.ensureRuntime(h)
-    if (!runtime?.workspaceRoot) return []
+    if (!runtime?.workspaceRoot) return { items: [], startedAtByTurnId: new Map() }
     const resolved = await this.resolveBinForCommand()
-    if (!resolved) return []
+    if (!resolved) return { items: [], startedAtByTurnId: new Map() }
     const client = new CodexAppServerClient({
       command: `${resolved.cmd} app-server --stdio`,
       cwd: runtime.workspaceRoot,
@@ -1916,7 +1920,19 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         items.push(...page.data)
         cursor = page.nextCursor ?? undefined
       } while (cursor)
-      return items
+      // Thread items do not carry individual timestamps. Their turn does, so use the
+      // source-native turn start as a stable timeline anchor for every item in that turn.
+      const startedAtByTurnId = new Map<string, string>()
+      try {
+        const thread = await client.readThread(threadId, deadlineAt, true)
+        for (const turn of thread.turns) {
+          if (turn.startedAt !== null) startedAtByTurnId.set(turn.id, timestampFromEpochSeconds(turn.startedAt, '1970-01-01T00:00:00.000Z'))
+        }
+      } catch {
+        // Older app-server versions may not support includeTurns. The caller uses the
+        // child thread creation time as a stable fallback without losing its trace.
+      }
+      return { items, startedAtByTurnId }
     } finally {
       await client.terminate()
     }
@@ -2409,6 +2425,11 @@ function timestampFromEpochMs(value: unknown, fallback: string): string {
   return Number.isNaN(timestamp.getTime()) ? fallback : timestamp.toISOString()
 }
 
+function timestampFromEpochSeconds(value: unknown, fallback: string): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return timestampFromEpochMs(value * 1000, fallback)
+}
+
 function commandOutput(item: Record<string, unknown>, status: string, exitCode: number | undefined): string {
   for (const field of ['aggregated_output', 'stdout', 'stderr']) {
     const output = item[field]
@@ -2439,8 +2460,7 @@ function codexSubagentSummary(
   }
 }
 
-function normalizeCodexThreadItem(item: Record<string, unknown>): NormalizedTraceEvent | undefined {
-  const ts = new Date().toISOString()
+function normalizeCodexThreadItem(item: Record<string, unknown>, ts: string): NormalizedTraceEvent | undefined {
   switch (item.type) {
     case 'userMessage': {
       const content = Array.isArray(item.content)

@@ -37,6 +37,8 @@ export interface AssembleAgentPromptOptions {
     readonly toolName: string
     readonly workerHint: string
   }>
+  /** Worker only has delegate_task, not AgentHandler's subagent coordinator tools. */
+  readonly subagentGuidance?: 'agent' | 'builtin_worker'
   readonly imageCapability?: { readonly available: boolean }
 }
 
@@ -91,7 +93,7 @@ export function assembleAgentPrompt(opts: AssembleAgentPromptOptions): string {
       `1. 你的能力不足以完成某个子任务（如你没有视觉能力但需要分析图片）\n` +
       `2. 子任务的中间过程你不关心，只需要最终结果（避免污染你的上下文）`,
     )
-    parts.push(ASYNC_SUBAGENT_GUIDANCE)
+    parts.push(opts.subagentGuidance === 'builtin_worker' ? BUILTIN_WORKER_SUBAGENT_GUIDANCE : ASYNC_SUBAGENT_GUIDANCE)
   }
 
   return parts.join('\n\n')
@@ -123,3 +125,13 @@ subagent 完成时，系统自动推送 \`<sub_agent_notification>\` 到你的�
 **禁止的反模式：**
 - ❌ 用 \`get_subagent_output\` 轮询进度（等通知，不要主动查）
 - ❌ 用 \`list_active_subagents\` 反复轮询状态（只在用户问进度时才调）`
+
+const BUILTIN_WORKER_SUBAGENT_GUIDANCE = `## 子 Agent 委派
+
+调 \`delegate_task\` 默认异步：工具立即返回 \`{agent_id, status:"launched"}\`；可用时还会带 \`child_trace_id\`。
+
+子 Agent 完成或失败后，系统会在后续 turn 注入 \`<sub_agent_notification>…</sub_agent_notification>\`，其中包含子 Agent 名称、状态和最终结果或错误。收到通知后，基于结果继续当前 Worker 的任务。
+
+只有必须在同一 turn 取得结果后才能继续决策时，才使用 \`sync: true\`；此时结果直接在 \`delegate_task\` 返回值中。
+
+不要调用未提供的子 Agent 查询或管理工具。`

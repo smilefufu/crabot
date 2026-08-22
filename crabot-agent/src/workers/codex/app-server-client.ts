@@ -19,6 +19,14 @@ export interface CodexAppServerThread {
   readonly agentRole: string | null
   readonly createdAt: number
   readonly updatedAt: number
+  /** Present only from thread/read(includeTurns=true). */
+  readonly turns: ReadonlyArray<CodexAppServerTurn>
+}
+
+export interface CodexAppServerTurn {
+  readonly id: string
+  readonly startedAt: number | null
+  readonly completedAt: number | null
 }
 
 export interface CodexAppServerThreadPage {
@@ -189,8 +197,8 @@ export class CodexAppServerClient {
     return parseThreadPage(result, 'thread/list')
   }
 
-  async readThread(threadId: string, deadlineAt: string): Promise<CodexAppServerThread> {
-    const result = await this.request('thread/read', { threadId }, deadlineAt)
+  async readThread(threadId: string, deadlineAt: string, includeTurns = false): Promise<CodexAppServerThread> {
+    const result = await this.request('thread/read', { threadId, ...(includeTurns ? { includeTurns: true } : {}) }, deadlineAt)
     if (!isObject(result) || !isObject(result.thread)) {
       throw new Error('codex app-server thread/read returned an incompatible response')
     }
@@ -345,6 +353,16 @@ function parseThread(value: unknown, method: string): CodexAppServerThread {
     agentRole: typeof value.agentRole === 'string' ? value.agentRole : null,
     createdAt: typeof value.createdAt === 'number' ? value.createdAt : 0,
     updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : 0,
+    turns: Array.isArray(value.turns)
+      ? value.turns.flatMap((turn) => {
+        if (!isObject(turn) || typeof turn.id !== 'string') return []
+        return [{
+          id: turn.id,
+          startedAt: typeof turn.startedAt === 'number' ? turn.startedAt : null,
+          completedAt: typeof turn.completedAt === 'number' ? turn.completedAt : null,
+        }]
+      })
+      : [],
   }
 }
 

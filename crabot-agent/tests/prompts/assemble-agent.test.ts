@@ -88,6 +88,21 @@ describe('assembleAgentPrompt 可选段渲染', () => {
     expect(prompt).toContain('Sub-agent')
     expect(prompt).toContain('reviewer')
   })
+
+  it('builtin worker 使用与 delegate_task 实际能力一致的委派说明', () => {
+    const prompt = assembleAgentPrompt({
+      goalModeEnabled: false,
+      availableSubAgents: [{ toolName: 'reviewer', workerHint: '代码评审' }],
+      subagentGuidance: 'builtin_worker',
+    })
+
+    const guidance = prompt.slice(prompt.indexOf('## 子 Agent 委派'))
+    expect(guidance).toContain('<sub_agent_notification>')
+    expect(guidance).toContain('child_trace_id')
+    expect(guidance).not.toContain('get_subagent_output')
+    expect(guidance).not.toContain('list_active_subagents')
+    expect(guidance).not.toContain('send_message')
+  })
 })
 
 describe('assembleAgentPrompt goalModeEnabled 分支', () => {

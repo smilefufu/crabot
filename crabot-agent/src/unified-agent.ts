@@ -1186,6 +1186,7 @@ export class UnifiedAgent extends ModuleBase {
               toolName: subagent.name,
               workerHint: subagent.when_to_use.split('\n')[0] || subagent.description || subagent.name,
             })),
+            subagentGuidance: 'builtin_worker' as const,
           }
         : {}),
     })

@@ -1592,7 +1592,7 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
     expect(supported.capabilities().subagent).toBe(true)
   })
 
-  it('读取 app-server 标记为 parentThreadId 的原生 child thread 与其独立 items', async () => {
+  it('读取 app-server 标记为 parentThreadId 的原生 child thread 与其独立 items，时间戳稳定', async () => {
     const childThreadId = randomUUID()
     const adapter = new CodexWorkerAdapter({
       dataDir,
@@ -1606,14 +1606,17 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
     await expect(adapter.listSubagents(parent)).resolves.toMatchObject([{
       subagent_id: childThreadId, executor_impl: 'codex', type: 'research', name: '研究助手', task: '原生子 Agent 任务', status: 'completed',
     }])
-    await expect(adapter.readSubagentTrace(parent, childThreadId)).resolves.toMatchObject({
+    const first = await adapter.readSubagentTrace(parent, childThreadId)
+    const replay = await adapter.readSubagentTrace(parent, childThreadId)
+    expect(first).toMatchObject({
       events: [
-        { kind: 'message', role: 'user', summary: '检查原生记录', source_offset: 0 },
-        { kind: 'tool_call', summary: 'exec_command(pwd)', source_offset: 1 },
-        { kind: 'message', role: 'assistant', summary: '原生子 Agent 已完成', source_offset: 2 },
+        { ts: '2026-02-02T02:40:10.000Z', kind: 'message', role: 'user', summary: '检查原生记录', source_offset: 0 },
+        { ts: '2026-02-02T02:40:10.000Z', kind: 'tool_call', summary: 'exec_command(pwd)', source_offset: 1 },
+        { ts: '2026-02-02T02:40:10.000Z', kind: 'message', role: 'assistant', summary: '原生子 Agent 已完成', source_offset: 2 },
       ],
       nextCursor: { offset: 3 },
     })
+    expect(replay).toEqual(first)
   })
 
   it('detect 切换到同版本的另一 binary 时重新探测 fork capability', async () => {
