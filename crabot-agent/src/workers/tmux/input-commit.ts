@@ -7,7 +7,10 @@ export type InputProbePhase = 'before_paste' | 'after_paste'
 
 export interface InputCommitDriver {
   pasteText(text: string): Promise<void>
-  sendEnter(): Promise<void>
+  /** Adapter-owned submission action for the currently probed input surface. */
+  submit?(): Promise<void>
+  /** @deprecated Test-only compatibility for the old fixed-Enter transaction. */
+  sendEnter?(): Promise<void>
   capture(): Promise<PaneSnapshot>
 }
 
@@ -53,7 +56,7 @@ export async function commitInput(
   if (currentProbe !== 'pending') return { disposition: 'pending_in_ui', snapshot }
 
   opts.beforeSideEffect?.('enter')
-  await driver.sendEnter()
+  await submit(driver)
   snapshot = await waitUntil(
     driver,
     timeoutMs,
@@ -65,7 +68,7 @@ export async function commitInput(
   currentProbe = probe(snapshot, 'after_paste')
   if (currentProbe === 'pending') {
     opts.beforeSideEffect?.('enter')
-    await driver.sendEnter()
+    await submit(driver)
     snapshot = await waitUntil(
       driver,
       timeoutMs,
@@ -75,6 +78,12 @@ export async function commitInput(
     if (accepted(snapshot)) return { disposition: 'accepted', snapshot }
   }
   return { disposition: 'pending_in_ui', snapshot }
+}
+
+async function submit(driver: InputCommitDriver): Promise<void> {
+  const action = driver.submit ?? driver.sendEnter
+  if (!action) throw new Error('input commit driver has no submission action')
+  await action()
 }
 
 export async function waitForPaneChange(

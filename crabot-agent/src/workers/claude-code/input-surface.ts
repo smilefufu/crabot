@@ -39,16 +39,17 @@ export function classifyClaudeTerminalInteraction(snapshot: PaneSnapshot): Termi
   // A footer-anchored ordinary composer means a previously rendered selector in
   // the transcript is no longer the active surface.
   if (claudeComposerText(snapshot) !== undefined) return { kind: 'none' }
-  const tailLines = pane.split('\n').slice(-24)
+  // capture-pane returns only the current viewport. A real plan approval can
+  // wrap its body far enough that the heading is near the viewport's top.
+  const tailLines = pane.split('\n')
   const tail = tailLines.join('\n')
   const exitPlan = /Exit plan mode\?/i.test(tail) &&
     /Claude wants to exit plan mode/i.test(tail) &&
     /^\s*1[.)]\s+\S/m.test(tail) &&
     /^\s*2[.)]\s+\S/m.test(tail)
   if (exitPlan) return { kind: 'automatic', family: 'claude_exit_plan', fingerprint: 'claude_exit_plan:1-2' }
-  const readyToCode = /Ready to code\?/i.test(tail) &&
-    /Claude has written up a plan and is ready to execute\./i.test(tail) &&
-    /Would you like to proceed\?/i.test(tail) &&
+  const readyToCode = /Claude has written up a plan and is ready to execute\./i.test(tail) &&
+    /Would you like to\s+proceed\?/i.test(tail) &&
     /^\s*(?:❯\s*)?1[.)]\s+Yes, and use auto mode\b/im.test(tail)
   if (readyToCode) return { kind: 'automatic', family: 'claude_exit_plan', fingerprint: 'claude_exit_plan:ready-to-code-auto' }
   const hasOption = tailLines.some((line) => /^\s*(?:❯|[○◉☐☑]|\d+[.)])\s+\S/.test(line))
@@ -107,11 +108,20 @@ export function hasClaudeExecutionOrComposer(snapshot: PaneSnapshot): boolean {
   return claudeComposerText(snapshot) !== undefined || /esc to interrupt/i.test(snapshot.text)
 }
 
+/** Only explicit interrupt confirmation may use this visual state transition. */
+export function claudePrimaryComposerText(snapshot: PaneSnapshot): string | undefined {
+  if (/esc to interrupt/i.test(snapshot.text)) return undefined
+  return claudeComposerText(snapshot)
+}
+
 function claudeComposerText(snapshot: PaneSnapshot, preservePlaceholderText = false): string | undefined {
   const lines = snapshot.text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
     const match = lines[i].match(/^\s*❯(?:\s?(.*))?$/)
     if (!match) continue
+    // Claude uses the same marker to highlight a numbered selector option;
+    // that is an interaction surface, never the primary composer.
+    if (/^[1-9][.)]\s+/.test(match[1] ?? '')) continue
     const anchored = lines.slice(i + 1).some((line) => CLAUDE_FOOTER.test(line))
     if (!anchored) return undefined
     const content = [match[1] ?? '']

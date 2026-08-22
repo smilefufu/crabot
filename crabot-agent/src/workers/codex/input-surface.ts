@@ -5,8 +5,8 @@ import type { WorkerUiActionDescriptor } from '../types.js'
 
 // codex 0.146 实测页脚：`gpt-5.6-sol xhigh · ~/.crabot/...`——home 缩写是 `~/` 不是 `/`，
 // 旧正则 `·\s\/` 在它上面失配会让 composer 探测整体失败（输入永远 stalled）。
-const CODEX_FOOTER = /^\s*(?:Working\b|esc to interrupt|(?:\?\s*)?for shortcuts|\d+% context|context left|.*\s·\s[~\/])/i
-const CODEX_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|Working\b|esc to interrupt|(?:\?\s*)?for shortcuts|\d+% context|context left|.*\s·\s[~\/])/i
+const CODEX_FOOTER = /^\s*(?:Working\b|esc to interrupt|tab to queue message|(?:\?\s*)?for shortcuts|\d+% context|context left|.*\s·\s[~\/])/i
+const CODEX_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|Working\b|esc to interrupt|tab to queue message|(?:\?\s*)?for shortcuts|\d+% context|context left|.*\s·\s[~\/])/i
 const CODEX_PLACEHOLDERS = [
   'Ask Codex to do anything',
   'Explain this codebase',
@@ -49,8 +49,12 @@ export function acceptedCodexInput(snapshot: PaneSnapshot, mode: InputMode, text
 export function classifyCodexTerminalInteraction(snapshot: PaneSnapshot): TerminalInteraction {
   if (codexComposerText(snapshot) !== undefined) return { kind: 'none' }
   const pane = snapshot.text
-  const tail = pane.split('\n').slice(-14).join('\n')
-  if (/(?:Would you like to|Do you want to|Allow Codex to|approval required)[\s\S]{0,600}(?:\bYes\b[\s\S]{0,120}\bNo\b|\bapprove\b[\s/|]+\bdeny\b)/i.test(tail)) {
+  // Real Codex command approvals can wrap an option across several lines and
+  // leave a trailing blank line; retain the prompt heading as well as footer.
+  const tail = pane.split('\n').slice(-24).join('\n')
+  const yesNoApproval = /(?:Would you like to|Do you want to|Allow Codex to|approval required)[\s\S]{0,600}(?:\bYes\b[\s\S]{0,120}\bNo\b|\bapprove\b[\s/|]+\bdeny\b)/i.test(tail)
+  const commandApproval = /Would you like to run the following command\?[\s\S]{0,600}Press enter to confirm or esc to cancel/i.test(tail)
+  if (yesNoApproval || commandApproval) {
     return {
       kind: 'manager_required',
       family: 'codex_approval',
@@ -70,6 +74,12 @@ function boundedUiActions(): WorkerUiActionDescriptor[] {
 
 function hasCodexInteraction(pane: string): boolean {
   return classifyCodexTerminalInteraction({ text: pane }).kind !== 'none'
+}
+
+/** Only explicit interrupt confirmation may use this visual state transition. */
+export function codexPrimaryComposerText(snapshot: PaneSnapshot): string | undefined {
+  if (codexIsWorking(snapshot)) return undefined
+  return codexComposerText(snapshot)
 }
 
 function codexIsWorking(snapshot: PaneSnapshot): boolean {

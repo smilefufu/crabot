@@ -4,8 +4,8 @@
  * Interactive incarnations run in tmux with approve-for-me (which selects the workspace-write
  * sandbox), and
  * workspace network access. spawn/resume wait for bracketed-paste readiness and submit opening
- * input through the guarded `empty -> one paste -> pending -> Enter` transaction (one Enter retry,
- * never a second paste). `initial_input` on the returned handle gives the harness explicit state
+ * input through the guarded `empty -> one paste -> pending -> submit` transaction (the adapter
+ * repeats the same native submission key once, never a second paste). `initial_input` on the returned handle gives the harness explicit state
  * and text ownership for accepted, not_pasted, and pending_in_ui outcomes.
  *
  * Runtime truth is one `CliControlState`: running, waiting_text, waiting_action, or exited.
@@ -41,7 +41,8 @@ import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { WorkerExitedError, CapabilityNotSupportedError, CliInputStallError, WorkerImplUnavailableError, ForkEstablishmentError } from '../errors.js'
-import { probeCodexInput, acceptedCodexInput, classifyCodexTerminalInteraction } from './input-surface.js'
+import { probeCodexInput, acceptedCodexInput, classifyCodexTerminalInteraction, codexPrimaryComposerText } from './input-surface.js'
+
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import {
@@ -80,6 +81,7 @@ import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
 
 const execFileAsync = promisify(execFile)
+const INTERACTION_PROBE_DELAYS_MS = [100, 200, 400, 800, 1600] as const
 
 /** spawn/resume 都要带的主命令级选项:放行 workspace-write 沙箱的出网。见文件头
  * "spawn/resume 启动参数"节。取值只含 `[A-Za-z_.=]`,不含 shell 元字符,拼进经 `sh -c`
@@ -286,6 +288,7 @@ interface Runtime {
   eventWatchDrain?: Promise<void>
   stopTraceWatch?: () => void
   interactionFingerprint?: string
+  interactionProbe?: Promise<void>
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin/cc 同款语义(P2 review #2)。 */
   resumed?: boolean
@@ -1028,7 +1031,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
             await this.tmux.pasteText(runtime.sessionName, value)
             pasted = true
           },
-          sendEnter: () => this.tmux.sendKeys(runtime.sessionName, ['Enter']),
+          submit: () => this.tmux.sendKeys(runtime.sessionName, [mode === 'steering' ? 'Tab' : 'Enter']),
           capture: () => this.capture(runtime),
         },
         (snapshot, phase) => probeCodexInput(snapshot, mode, phase === 'after_paste' ? text : undefined, phase === 'before_paste'),
@@ -1807,7 +1810,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     this.assertActive()
     const runtime = await this.ensureRuntime(h)
     if (!runtime || runtime.controlState.kind === 'exited') return
-    await this.tmux.sendKeys(runtime.sessionName, ['C-c'])
+    await this.getMutex(h.worker_id).run(async () => {
+      if (runtime.controlState.kind === 'exited') return
+      await this.tmux.sendKeys(runtime.sessionName, ['C-c'])
+      await this.confirmInterrupt(runtime, h)
+    })
   }
 
   async stop(h: IncarnationHandle): Promise<void> {
@@ -2094,7 +2101,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (runtime.stopEventWatch) return // 幂等:同一 runtime 只装一个
     runtime.stopEventWatch = runtime.eventChannel.watch((event) => {
       if (event.kind === 'permission_request') {
-        return this.inspectTerminalInteraction(runtime, h).catch((err) => {
+        return this.inspectTerminalInteractionAfterHook(runtime, h).catch((err) => {
           console.error(`[CodexWorkerAdapter] permission-request interaction check failed for ${h.worker_id}#${h.seq}:`, err)
         })
       }
@@ -2137,28 +2144,65 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return this.getMutex(h.worker_id).run(() => this.inspectTerminalInteractionLocked(runtime, h))
   }
 
-  private async inspectTerminalInteractionLocked(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+  private inspectTerminalInteractionAfterHook(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+    if (runtime.interactionProbe) return runtime.interactionProbe
+    const probe = this.getMutex(h.worker_id).run(() => this.inspectTerminalInteractionLocked(runtime, h, true))
+    runtime.interactionProbe = probe
+    void probe.then(
+      () => { if (runtime.interactionProbe === probe) runtime.interactionProbe = undefined },
+      () => { if (runtime.interactionProbe === probe) runtime.interactionProbe = undefined },
+    )
+    return probe
+  }
+
+  private async inspectTerminalInteractionLocked(runtime: Runtime, h: IncarnationHandle, retryUnknown = false): Promise<void> {
     if (this.closing || runtime.controlState.kind === 'exited') return
-    let snapshot: CapturedPane
-    try {
-      snapshot = await this.capture(runtime)
-    } catch {
+    for (let attempt = 0; ; attempt++) {
+      if (attempt > 0) {
+        if (runtime.controlState.kind !== 'running') return
+        await new Promise((resolve) => setTimeout(resolve, INTERACTION_PROBE_DELAYS_MS[attempt - 1]))
+        if (this.closing || runtime.controlState.kind !== 'running' || !(await this.tmux.isAlive(runtime.sessionName))) return
+      }
+      let snapshot: CapturedPane
+      try {
+        snapshot = await this.capture(runtime)
+      } catch {
+        return
+      }
+      const interaction: TerminalInteraction = classifyCodexTerminalInteraction(snapshot)
+      if (interaction.kind === 'none') {
+        runtime.interactionFingerprint = undefined
+        if (!retryUnknown || attempt === INTERACTION_PROBE_DELAYS_MS.length) return
+        continue
+      }
+      if (interaction.kind !== 'manager_required') return
+      if (runtime.interactionFingerprint === interaction.fingerprint) return
+      runtime.interactionFingerprint = interaction.fingerprint
+      await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, {
+        terminal: this.liveTerminal(snapshot),
+        waitReason: 'interaction_required',
+        ui: { fingerprint: interaction.fingerprint, actions: interaction.actions },
+        notification: { type: 'terminal_interaction' },
+      }, true, true)
       return
     }
-    const interaction: TerminalInteraction = classifyCodexTerminalInteraction(snapshot)
-    if (interaction.kind === 'none') {
-      runtime.interactionFingerprint = undefined
-      return
+  }
+
+  private async confirmInterrupt(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      if (!(await this.tmux.isAlive(runtime.sessionName))) return
+      const snapshot = await this.capture(runtime).catch(() => undefined)
+      if (!snapshot) return
+      const composer = codexPrimaryComposerText(snapshot)
+      if (composer !== undefined && composer.length === 0) {
+        runtime.interactionFingerprint = undefined
+        await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
+        return
+      }
+      if (attempt === INTERACTION_PROBE_DELAYS_MS.length) return
+      await new Promise((resolve) => setTimeout(resolve, INTERACTION_PROBE_DELAYS_MS[attempt]))
+      if (this.closing || runtime.controlState.kind === 'exited') return
     }
-    if (interaction.kind !== 'manager_required') return
-    if (runtime.interactionFingerprint === interaction.fingerprint) return
-    runtime.interactionFingerprint = interaction.fingerprint
-    await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, {
-      terminal: this.liveTerminal(snapshot),
-      waitReason: 'interaction_required',
-      ui: { fingerprint: interaction.fingerprint, actions: interaction.actions },
-      notification: { type: 'terminal_interaction' },
-    }, true, true)
   }
 
   private assertActive(): void {
