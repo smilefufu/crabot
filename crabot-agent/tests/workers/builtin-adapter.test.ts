@@ -363,9 +363,11 @@ describe('BuiltinWorkerAdapter', () => {
           details: { stop_reason: 'tool_use', assistant_text: '先检查当前配置。\n然后读取日志。', usage: { input_tokens: 10, output_tokens: 5 } },
         },
         {
+          span_id: 'tool-1',
           type: 'tool_call',
           started_at: '2026-08-20T01:00:01.000Z',
-          details: { name: 'shell', input_summary: 'pwd' },
+          ended_at: '2026-08-20T01:00:01.200Z',
+          details: { name: 'shell', input_summary: 'pwd', output_summary: '/workspace' },
         },
         {
           type: 'llm_call',
@@ -391,7 +393,8 @@ describe('BuiltinWorkerAdapter', () => {
     expect(first.events).toMatchObject([
       { kind: 'llm_call', summary: 'llm tool_use', source_offset: 0, detail: { stop_reason: 'tool_use' } },
       { kind: 'message', role: 'assistant', summary: '先检查当前配置。 然后读取日志。', source_offset: 0, detail: { content: '先检查当前配置。\n然后读取日志。' } },
-      { kind: 'tool_call', summary: 'shell', source_offset: 1 },
+      { kind: 'tool_call', summary: 'shell', source_offset: 1, detail: { call_id: 'tool-1', name: 'shell', input: 'pwd' } },
+      { kind: 'tool_result', source_offset: 1, detail: { call_id: 'tool-1', output: '/workspace' } },
       { kind: 'llm_call', summary: 'llm tool_use', source_offset: 2 },
     ])
     expect(first.events[0].detail).not.toHaveProperty('assistant_text')

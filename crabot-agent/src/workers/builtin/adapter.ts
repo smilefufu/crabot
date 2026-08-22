@@ -1515,13 +1515,43 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
       }
       return events
     }
-    case 'tool_call':
-      return [{
+    case 'tool_call': {
+      const name = typeof details.name === 'string'
+        ? details.name
+        : typeof details.tool_name === 'string'
+          ? details.tool_name
+          : 'tool call'
+      const input = typeof details.input_summary === 'string' ? details.input_summary : undefined
+      const output = typeof details.output_summary === 'string' ? details.output_summary : undefined
+      const error = typeof details.error === 'string' ? details.error : undefined
+      const callId = span.span_id
+      const call = {
         ...base,
         kind: 'tool_call',
-        summary: typeof details.name === 'string' ? String(details.name) : 'tool call',
-        detail: details,
-      }]
+        summary: name,
+        detail: {
+          ...details,
+          call_id: callId,
+          name,
+          ...(input !== undefined ? { input } : {}),
+        },
+      } as const
+      const result = output ?? error
+      if (!result) return [call]
+      return [
+        call,
+        {
+          ts: span.ended_at ?? span.started_at,
+          kind: 'tool_result' as const,
+          summary: result,
+          detail: {
+            call_id: callId,
+            output: result,
+            ...(span.status === 'failed' ? { is_error: true } : {}),
+          },
+        },
+      ]
+    }
     default:
       return [{ ...base, kind: 'lifecycle', summary: span.type, detail: details }]
   }

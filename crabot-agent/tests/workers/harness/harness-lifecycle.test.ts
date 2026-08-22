@@ -1718,8 +1718,10 @@ describe('WorkerHarness.sendToWorker', () => {
     const { harness, fake, workersDir } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
+    const input = '  可靠\n投递  '.repeat(50)
+    const preview = input.replace(/\s+/g, ' ').trim().slice(0, 200)
 
-    const result = await harness.sendToWorker(worker.worker_id, '可靠投递', {
+    const result = await harness.sendToWorker(worker.worker_id, input, {
       managerKey: `test::friend-1` as ManagerKey,
     })
 
@@ -1741,7 +1743,7 @@ describe('WorkerHarness.sendToWorker', () => {
     expect((await harness.readWorkerEvents(worker.worker_id)).filter((event) => event.kind === 'input_sent')).toEqual([
       expect.objectContaining({
         worker_id: worker.worker_id,
-        detail: expect.objectContaining({ delivery_id: result.delivery_id }),
+        detail: expect.objectContaining({ delivery_id: result.delivery_id, text_preview: preview }),
       }),
     ])
   })

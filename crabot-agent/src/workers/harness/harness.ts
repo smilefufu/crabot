@@ -1224,9 +1224,10 @@ export class WorkerHarness {
   ): Promise<void> {
     this.inputDeliveryControllers.delete(receipt.delivery_id)
     if (settlement === 'delivered') {
-      await this.inputDeliveryStore.settleDelivered(receipt.worker_id, receipt.delivery_id, this.deps.now())
+      const settled = await this.inputDeliveryStore.settleDelivered(receipt.worker_id, receipt.delivery_id, this.deps.now())
       await this.appendAuditEvent(receipt.worker_id, detail?.seq ?? 0, 'input_sent', {
         delivery_id: receipt.delivery_id,
+        text_preview: settled.text_preview,
         text_len: text.length,
       })
       return
