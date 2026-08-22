@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { createHash } from 'crypto'
 
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import type { PrincipalResolverDeps } from '../../src/manager/principal.js'
@@ -1063,17 +1064,28 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
     ended_at: '2026-08-22T00:01:00.000Z',
   }
 
-  async function agentWithChild() {
+  const subagentFingerprint = (subagent: { executor_impl: string; subagent_id: string; started_at?: string }): string => createHash('sha256')
+    .update(JSON.stringify({
+      executor_impl: subagent.executor_impl,
+      subagent_id: subagent.subagent_id,
+      started_at: subagent.started_at ?? '',
+    }))
+    .digest('hex')
+    .slice(0, 32)
+
+  async function agentWithChild(childSummary = child) {
     const root = await fs.mkdtemp(join(tmpdir(), 'rpc-subagent-'))
     const traceEvents = [
       { ts: '2026-08-22T00:00:01.000Z', kind: 'message' as const, role: 'assistant' as const, summary: '第一条记录', source_offset: 0 },
     ]
     const traceCalls: Array<{ workerId: string; subagentId: string; offset: number }> = []
+    let liveAvailable = true
     const agent = buildAgent({
       harness: {
-        listWorkerSubagents: async (workerId: string) => workerId === 'w-1' ? [child] : [],
-        getWorkerSubagent: async (workerId: string, subagentId: string) => workerId === 'w-1' && subagentId === child.subagent_id ? child : undefined,
+        listWorkerSubagents: async (workerId: string) => workerId === 'w-1' && liveAvailable ? [childSummary] : [],
+        getWorkerSubagent: async (workerId: string, subagentId: string) => workerId === 'w-1' && liveAvailable && subagentId === childSummary.subagent_id ? childSummary : undefined,
         getWorkerSubagentTrace: async (workerId: string, subagentId: string, cursor?: { offset: number }) => {
+          if (!liveAvailable) throw new Error('CLI child source gone')
           traceCalls.push({ workerId, subagentId, offset: cursor?.offset ?? 0 })
           const start = cursor?.offset ?? 0
           return { events: traceEvents.slice(start), nextCursor: { offset: traceEvents.length } }
@@ -1081,14 +1093,20 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
       },
     }) as unknown as Record<string, unknown>
     const { TraceCursorStore } = await import('../../src/workers/trace/cursor-store.js')
+    const { NativeTraceCopyStore } = await import('../../src/workers/trace/native-copy.js')
     const cursorStore = new TraceCursorStore(join(root, 'cursors'))
+    const copyStore = new NativeTraceCopyStore(join(root, 'copies'))
     agent.traceCursorStoreInstance = cursorStore
+    agent.nativeTraceCopyStoreInstance = copyStore
     return {
       agent: agent as unknown as AgentUnderTest,
       traceEvents,
       traceCalls,
+      copyStore,
+      setLiveAvailable: (value: boolean) => { liveAvailable = value },
       cleanup: async () => {
         await cursorStore.flush()
+        await copyStore.flush()
         await fs.rm(root, { recursive: true, force: true })
       },
     }
@@ -1129,6 +1147,185 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
       expect(traceCalls.map((call) => call.offset)).toEqual([0, 1, 1])
     } finally {
       await cleanup()
+    }
+  })
+
+  it('CLI 原生记录轮转后，仍从同一 Worker 的脱敏副本列出 child、读取详情和分页 trace', async () => {
+    const { agent, copyStore, setLiveAvailable, cleanup } = await agentWithChild()
+    try {
+      const fingerprint = subagentFingerprint(child)
+      await copyStore.completeSubagentCapture(
+        'w-1',
+        'inc-1',
+        child,
+        fingerprint,
+        [{
+          ts: '2026-08-22T00:00:01.000Z', kind: 'message', role: 'assistant',
+          summary: 'secret-result', detail: { content: 'secret-result' }, source_offset: 0,
+        }],
+        1,
+        (text) => text.replaceAll('secret', '[redacted]'),
+      )
+      setLiveAvailable(false)
+
+      await expect(agent.handleListWorkerSubagents({ worker_id: 'w-1' })).resolves.toEqual({ subagents: [child] })
+      await expect(agent.handleGetWorkerSubagentDetail({ worker_id: 'w-1', subagent_id: 'child-1' })).resolves.toEqual({ subagent: child })
+      const trace = await agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1' })
+      expect(trace.events).toMatchObject([{ summary: '[redacted]-result', detail: { content: '[redacted]-result' }, source: 'native' }])
+      expect(trace.events[0]).not.toHaveProperty('source_offset')
+      expect(trace.unavailable_reason).toContain('agent-owned child copy')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('终态 child 的副本尚未完成时保留详情，并如实报告 trace 不可用', async () => {
+    const { agent, copyStore, setLiveAvailable, cleanup } = await agentWithChild()
+    try {
+      await copyStore.beginSubagentCapture('w-1', 'inc-1', child, subagentFingerprint(child), (text) => text)
+      setLiveAvailable(false)
+
+      await expect(agent.handleGetWorkerSubagentDetail({ worker_id: 'w-1', subagent_id: 'child-1' })).resolves.toEqual({ subagent: child })
+      await expect(agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1' })).resolves.toMatchObject({
+        events: [], unavailable_reason: expect.stringContaining('before terminal child trace capture'),
+      })
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('读取到已恢复的 CLI 原生记录时补齐 pending child 副本，之后可从副本回退', async () => {
+    const cliChild = { ...child, executor_impl: 'codex' as const }
+    const { agent, copyStore, setLiveAvailable, cleanup } = await agentWithChild(cliChild)
+    try {
+      const fingerprint = subagentFingerprint(cliChild)
+      await copyStore.beginSubagentCapture('w-1', 'inc-1', cliChild, fingerprint, (text) => text)
+
+      await expect(agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1' })).resolves.toMatchObject({
+        events: [{ summary: '第一条记录' }],
+      })
+      await expect(copyStore.readSubagent('w-1', 'child-1', fingerprint)).resolves.toMatchObject({
+        parent_incarnation_id: 'inc-1', capture_status: 'complete', events: [{ summary: '第一条记录' }],
+      })
+
+      setLiveAvailable(false)
+      await expect(agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1' })).resolves.toMatchObject({
+        events: [{ summary: '第一条记录', source: 'native' }],
+        unavailable_reason: expect.stringContaining('agent-owned child copy'),
+      })
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('child 副本读取失败不影响实时 CLI trace', async () => {
+    const cliChild = { ...child, executor_impl: 'claude-code' as const }
+    const { agent, copyStore, cleanup } = await agentWithChild(cliChild)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      vi.spyOn(copyStore, 'readSubagent').mockRejectedValueOnce(new Error('copy directory unavailable'))
+
+      await expect(agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1' })).resolves.toMatchObject({
+        events: [{ summary: '第一条记录', source: 'native' }],
+      })
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('child native trace read retry failed'), 'copy directory unavailable')
+    } finally {
+      warn.mockRestore()
+      await cleanup()
+    }
+  })
+
+  it('原生和 child 副本均不可读时只返回脱敏的不可用原因', async () => {
+    const cliChild = { ...child, executor_impl: 'claude-code' as const }
+    const { agent, copyStore, setLiveAvailable, cleanup } = await agentWithChild(cliChild)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      await copyStore.completeSubagentCapture('w-1', 'inc-1', cliChild, subagentFingerprint(cliChild), [], 0, (text) => text)
+      setLiveAvailable(false)
+      vi.spyOn(copyStore, 'readSubagent').mockRejectedValueOnce(new Error('/private/host/secret child source failure'))
+
+      await expect(agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1' })).resolves.toMatchObject({
+        events: [], unavailable_reason: 'native unavailable; retained child trace copy is unavailable',
+      })
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('child native trace read failed'), 'CLI child source gone')
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('child trace copy read failed'), '/private/host/secret child source failure')
+    } finally {
+      warn.mockRestore()
+      await cleanup()
+    }
+  })
+
+  it('父化身终态时保存 CLI child 的脱敏副本', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'terminal-child-copy-'))
+    const cliChild = { ...child, executor_impl: 'claude-code' as const, task: 'secret-task' }
+    const incarnation = {
+      incarnation_id: 'inc-1', seq: 1, impl: 'claude-code' as const, state: 'exited' as const,
+      workspace: root, session_ref: 'parent-session', started_at: '2026-08-22T00:00:00.000Z',
+    }
+    const adapter = {
+      listSubagents: async () => [cliChild],
+      readSubagentTrace: async () => ({
+        events: [{
+          ts: '2026-08-22T00:00:01.000Z', kind: 'message' as const, role: 'assistant' as const,
+          summary: 'secret-result', detail: { content: 'secret-result' }, source_offset: 0,
+        }],
+        nextCursor: { offset: 2 },
+      }),
+    }
+    const agent = buildAgent({
+      ledger: { findWorker: async () => ({ managerKey: 'test::f1' as ManagerKey, worker: { ...makeLedgerWorker({ workerId: 'w-1' }), incarnations: [incarnation] } }) },
+      adapters: new Map([['claude-code', adapter]]),
+    }) as unknown as Record<string, unknown>
+    const { NativeTraceCopyStore } = await import('../../src/workers/trace/native-copy.js')
+    const copyStore = new NativeTraceCopyStore(join(root, 'copies'))
+    agent.nativeTraceCopyStoreInstance = copyStore
+    agent.knownSecrets = ['secret']
+    try {
+      await (agent as unknown as { harvestIncarnationNativeTrace(handle: unknown): Promise<void> }).harvestIncarnationNativeTrace({
+        worker_id: 'w-1', incarnation_id: 'inc-1', seq: 1, impl: 'claude-code', session_ref: 'parent-session',
+      })
+      const stored = await copyStore.readSubagent('w-1', cliChild.subagent_id, subagentFingerprint(cliChild))
+      expect(stored).toMatchObject({ capture_status: 'complete', next_cursor_offset: 2 })
+      expect(JSON.stringify(stored)).not.toContain('secret')
+      expect(stored?.events).toMatchObject([{ source_offset: 0 }])
+    } finally {
+      await copyStore.flush()
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('启动恢复会补齐仍在运行的父 Worker 下、已留 pending 标记的终态 CLI child 副本', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'restart-child-copy-'))
+    const cliChild = { ...child, executor_impl: 'codex' as const }
+    const incarnation = {
+      incarnation_id: 'inc-1', seq: 1, impl: 'codex' as const, state: 'running' as const,
+      workspace: root, session_ref: 'parent-thread', started_at: '2026-08-22T00:00:00.000Z',
+    }
+    const adapter = {
+      listSubagents: async () => [cliChild],
+      readSubagentTrace: async () => ({
+        events: [{ ts: '2026-08-22T00:00:01.000Z', kind: 'message' as const, role: 'assistant' as const, summary: 'finished', source_offset: 0 }],
+        nextCursor: { offset: 1 },
+      }),
+    }
+    const worker = { ...makeLedgerWorker({ workerId: 'w-1', status: 'running' }), incarnations: [incarnation] }
+    const agent = buildAgent({
+      ledger: { listAllWorkers: async () => [{ managerKey: 'test::f1' as ManagerKey, worker }] },
+      adapters: new Map([['codex', adapter]]),
+    }) as unknown as Record<string, unknown>
+    const { NativeTraceCopyStore } = await import('../../src/workers/trace/native-copy.js')
+    const copyStore = new NativeTraceCopyStore(join(root, 'copies'))
+    agent.nativeTraceCopyStoreInstance = copyStore
+    agent.knownSecrets = []
+    try {
+      await copyStore.beginSubagentCapture('w-1', 'inc-1', cliChild, subagentFingerprint(cliChild), (text) => text)
+      await (agent as unknown as { recoverTerminalCliSubagentTraces(): Promise<void> }).recoverTerminalCliSubagentTraces()
+      await expect(copyStore.readSubagent('w-1', cliChild.subagent_id, subagentFingerprint(cliChild))).resolves.toMatchObject({
+        capture_status: 'complete', events: [{ summary: 'finished' }],
+      })
+    } finally {
+      await copyStore.flush()
+      await fs.rm(root, { recursive: true, force: true })
     }
   })
 })

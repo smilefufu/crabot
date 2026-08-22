@@ -247,7 +247,7 @@ async function makeHarness(
   fakeOpts: FakeAdapterOpts = {},
   depsOverrides: Partial<Pick<
     HarnessDeps,
-    'hasRunningBg' | 'capabilityBundle' | 'onOperationNotification' | 'admitWorkerConnection' | 'redactFailureReason'
+    'hasRunningBg' | 'capabilityBundle' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason'
   >> = {},
 ): Promise<{
   harness: WorkerHarness
@@ -738,6 +738,38 @@ describe('WorkerHarness.spawnWorker', () => {
 })
 
 describe('WorkerHarness.handleStateChange', () => {
+  it('原生 activity 落盘后才通知 child trace 收割回调', async () => {
+    let workersDir!: string
+    let observed: Promise<unknown> | undefined
+    const onNativeActivityCollected = vi.fn((handle: IncarnationHandle) => {
+      observed = fs.readFile(join(workersDir, handle.worker_id, 'native-activity.json'), 'utf8')
+        .then((raw) => JSON.parse(raw))
+    })
+    const assembled = await makeHarness({
+      nativeTrace: [
+        { ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '已完成子步骤' },
+      ],
+    }, { onNativeActivityCollected })
+    const { harness, workersDir: actualWorkersDir } = assembled
+    workersDir = actualWorkersDir
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleNativeActivity(handle)
+    await waitUntil(() => onNativeActivityCollected.mock.calls.length === 1)
+
+    await expect(observed).resolves.toMatchObject({
+      cursors: [{ incarnation_id: incarnation.incarnation_id, offset: 1 }],
+    })
+  })
+
   it('assistant 原生 trace 只创建一条可重放 activity_available', async () => {
     const route = vi.fn(async () => ({ consumed: true }))
     const { harness, workersDir } = await makeHarness({

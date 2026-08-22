@@ -7,15 +7,38 @@
  */
 
 import { promises as fs } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { randomBytes } from 'crypto'
-import type { NormalizedTraceEvent } from '../types.js'
+import type { NormalizedTraceEvent, WorkerSubagentSummary } from '../types.js'
 
 interface CopyHeader {
   readonly kind: 'native-trace-copy-header'
   readonly worker_id: string
   readonly seq: number
   readonly incarnation_fingerprint: string
+}
+
+interface SubagentCopyHeader {
+  readonly kind: 'native-subagent-trace-copy-header'
+  readonly worker_id: string
+  readonly parent_incarnation_id?: string
+  readonly subagent_id: string
+  readonly subagent_fingerprint: string
+  readonly summary: WorkerSubagentSummary
+  /** `pending` means the child identity is durable, but its terminal source was not copied yet. */
+  readonly capture_status: 'pending' | 'complete'
+  /** Native cursor after the full terminal read; preserves skipped raw records on fallback. */
+  readonly next_cursor_offset?: number
+  readonly unavailable_reason?: string
+}
+
+export interface StoredSubagentTrace {
+  readonly summary: WorkerSubagentSummary
+  readonly parent_incarnation_id?: string
+  readonly capture_status: 'pending' | 'complete'
+  readonly next_cursor_offset?: number
+  readonly unavailable_reason?: string
+  readonly events: NormalizedTraceEvent[]
 }
 
 export class NativeTraceCopyStore {
@@ -25,6 +48,10 @@ export class NativeTraceCopyStore {
 
   private fileFor(workerId: string, seq: number): string {
     return join(this.rootDir, encodeURIComponent(workerId), `seq-${seq}.jsonl`)
+  }
+
+  private subagentFileFor(workerId: string, subagentId: string): string {
+    return join(this.rootDir, encodeURIComponent(workerId), 'subagents', `${encodeURIComponent(subagentId)}.jsonl`)
   }
 
   /** 追加本化身的脱敏 native 事件；header 指纹不一致时整文件替换（旧 copy 属于死化身）。 */
@@ -211,5 +238,223 @@ export class NativeTraceCopyStore {
     // 后续 append 必须排在 header 升级之后，避免将旧副本误判为另一化身而覆盖。
     this.writeTails.set(key, next.then(() => undefined, () => undefined))
     return next
+  }
+
+  /**
+   * First durable step for a terminal CLI child. Keeping this marker before the
+   * native read means a failed final write remains discoverable and can be
+   * retried at the next terminal/startup harvest.
+   */
+  async beginSubagentCapture(
+    workerId: string,
+    parentIncarnationId: string | undefined,
+    summary: WorkerSubagentSummary,
+    fingerprint: string,
+    redact: (text: string) => string,
+  ): Promise<void> {
+    this.assertSubagentOwner(workerId, summary)
+    const key = `subagent:${workerId}:${summary.subagent_id}`
+    await this.enqueue(key, async () => {
+      const filePath = this.subagentFileFor(workerId, summary.subagent_id)
+      const existing = await this.readSubagentHeader(filePath)
+      if (
+        existing?.worker_id === workerId
+        && existing.subagent_id === summary.subagent_id
+        && existing.subagent_fingerprint === fingerprint
+        && existing.capture_status === 'complete'
+      ) return
+      await this.writeSubagentFile(filePath, {
+        kind: 'native-subagent-trace-copy-header',
+        worker_id: workerId,
+        ...(parentIncarnationId === undefined ? {} : { parent_incarnation_id: parentIncarnationId }),
+        subagent_id: summary.subagent_id,
+        subagent_fingerprint: fingerprint,
+        summary,
+        capture_status: 'pending',
+      }, [], redact)
+    })
+  }
+
+  /** Persist a complete, redacted terminal child trace after its native source was read. */
+  async completeSubagentCapture(
+    workerId: string,
+    parentIncarnationId: string | undefined,
+    summary: WorkerSubagentSummary,
+    fingerprint: string,
+    events: ReadonlyArray<NormalizedTraceEvent>,
+    nextCursorOffset: number,
+    redact: (text: string) => string,
+  ): Promise<void> {
+    this.assertSubagentOwner(workerId, summary)
+    const key = `subagent:${workerId}:${summary.subagent_id}`
+    await this.enqueue(key, async () => {
+      await this.writeSubagentFile(this.subagentFileFor(workerId, summary.subagent_id), {
+        kind: 'native-subagent-trace-copy-header',
+        worker_id: workerId,
+        ...(parentIncarnationId === undefined ? {} : { parent_incarnation_id: parentIncarnationId }),
+        subagent_id: summary.subagent_id,
+        subagent_fingerprint: fingerprint,
+        summary,
+        capture_status: 'complete',
+        next_cursor_offset: nextCursorOffset,
+      }, events, redact)
+    })
+  }
+
+  /** Keep the child identity visible when the source disappears before a final copy can be made. */
+  async markSubagentCaptureUnavailable(
+    workerId: string,
+    parentIncarnationId: string | undefined,
+    summary: WorkerSubagentSummary,
+    fingerprint: string,
+    unavailableReason: string,
+    redact: (text: string) => string,
+  ): Promise<void> {
+    this.assertSubagentOwner(workerId, summary)
+    const key = `subagent:${workerId}:${summary.subagent_id}`
+    await this.enqueue(key, async () => {
+      const filePath = this.subagentFileFor(workerId, summary.subagent_id)
+      const existing = await this.readSubagentHeader(filePath)
+      if (
+        existing?.worker_id === workerId
+        && existing.subagent_id === summary.subagent_id
+        && existing.subagent_fingerprint === fingerprint
+        && existing.capture_status === 'complete'
+      ) return
+      await this.writeSubagentFile(filePath, {
+        kind: 'native-subagent-trace-copy-header',
+        worker_id: workerId,
+        ...(parentIncarnationId === undefined ? {} : { parent_incarnation_id: parentIncarnationId }),
+        subagent_id: summary.subagent_id,
+        subagent_fingerprint: fingerprint,
+        summary,
+        capture_status: 'pending',
+        unavailable_reason: unavailableReason,
+      }, [], redact)
+    })
+  }
+
+  /** Read one retained child; mismatched identity is never allowed to cross a Worker boundary. */
+  async readSubagent(
+    workerId: string,
+    subagentId: string,
+    fingerprint: string,
+  ): Promise<StoredSubagentTrace | null> {
+    const filePath = this.subagentFileFor(workerId, subagentId)
+    let raw: string
+    try {
+      raw = await fs.readFile(filePath, 'utf-8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+    const header = this.parseSubagentHeader(raw)
+    if (
+      !header
+      || header.worker_id !== workerId
+      || header.subagent_id !== subagentId
+      || header.subagent_fingerprint !== fingerprint
+    ) return null
+    return {
+      summary: header.summary,
+      ...(header.parent_incarnation_id === undefined ? {} : { parent_incarnation_id: header.parent_incarnation_id }),
+      capture_status: header.capture_status,
+      ...(header.next_cursor_offset === undefined ? {} : { next_cursor_offset: header.next_cursor_offset }),
+      ...(header.unavailable_reason === undefined ? {} : { unavailable_reason: header.unavailable_reason }),
+      events: this.eventsFromRaw(raw),
+    }
+  }
+
+  /** Retained child summaries are the fallback only; live adapter records always take precedence. */
+  async listSubagents(workerId: string, parentIncarnationId?: string): Promise<WorkerSubagentSummary[]> {
+    const dir = join(this.rootDir, encodeURIComponent(workerId), 'subagents')
+    let entries: string[]
+    try {
+      entries = await fs.readdir(dir)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+    const summaries: WorkerSubagentSummary[] = []
+    for (const entry of entries) {
+      if (!entry.endsWith('.jsonl')) continue
+      const header = await this.readSubagentHeader(join(dir, entry))
+      if (
+        header?.worker_id === workerId
+        && header.summary.worker_id === workerId
+        && (parentIncarnationId === undefined || header.parent_incarnation_id === parentIncarnationId)
+      ) {
+        summaries.push(header.summary)
+      }
+    }
+    return summaries.sort((left, right) => (right.started_at ?? '').localeCompare(left.started_at ?? ''))
+  }
+
+  /** PR B's Worker-retention transaction removes this whole Worker-owned directory. */
+  async removeWorker(workerId: string): Promise<void> {
+    const prefix = `${workerId}#`
+    const childPrefix = `subagent:${workerId}:`
+    await Promise.all(Array.from(this.writeTails.entries())
+      .filter(([key]) => key.startsWith(prefix) || key.startsWith(childPrefix))
+      .map(([, tail]) => tail))
+    await fs.rm(join(this.rootDir, encodeURIComponent(workerId)), { recursive: true, force: true })
+  }
+
+  private assertSubagentOwner(workerId: string, summary: WorkerSubagentSummary): void {
+    if (summary.worker_id !== workerId) {
+      throw new Error(`subagent ${summary.subagent_id} does not belong to worker ${workerId}`)
+    }
+  }
+
+  private enqueue<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const tail = this.writeTails.get(key) ?? Promise.resolve()
+    const next = tail.then(operation)
+    this.writeTails.set(key, next.then(() => undefined, () => undefined))
+    return next
+  }
+
+  private async writeSubagentFile(
+    filePath: string,
+    header: SubagentCopyHeader,
+    events: ReadonlyArray<NormalizedTraceEvent>,
+    redact: (text: string) => string,
+  ): Promise<void> {
+    const lines = [
+      redact(JSON.stringify(header)),
+      ...events.map((event) => redact(JSON.stringify(event))),
+    ]
+    await fs.mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
+    const tmpPath = `${filePath}.tmp-${randomBytes(6).toString('hex')}`
+    await fs.writeFile(tmpPath, `${lines.join('\n')}\n`, { mode: 0o600 })
+    await fs.rename(tmpPath, filePath)
+  }
+
+  private async readSubagentHeader(filePath: string): Promise<SubagentCopyHeader | null> {
+    let raw: string
+    try {
+      raw = await fs.readFile(filePath, 'utf-8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+    return this.parseSubagentHeader(raw)
+  }
+
+  private parseSubagentHeader(raw: string): SubagentCopyHeader | null {
+    const firstLine = raw.split('\n', 1)[0]
+    if (!firstLine) return null
+    try {
+      const parsed = JSON.parse(firstLine) as Partial<SubagentCopyHeader>
+      return parsed.kind === 'native-subagent-trace-copy-header'
+        && typeof parsed.worker_id === 'string'
+        && typeof parsed.subagent_id === 'string'
+        && typeof parsed.subagent_fingerprint === 'string'
+        && parsed.summary !== undefined
+        && (parsed.capture_status === 'pending' || parsed.capture_status === 'complete')
+        ? parsed as SubagentCopyHeader
+        : null
+    } catch {
+      return null
+    }
   }
 }

@@ -588,6 +588,11 @@ export interface HarnessDeps {
    * 状态机推进（调用点已 catch）。
    */
   readonly onIncarnationTerminal?: (handle: IncarnationHandle) => void
+  /**
+   * A CLI parent native trace has been durably observed. The callback receives no raw content;
+   * assembly may use the opportunity to capture independently terminal child records.
+   */
+  readonly onNativeActivityCollected?: (handle: IncarnationHandle) => void
   /** 已 detect 过的可用实现。见文件头"onStateChange 接线契约"——底层 Map 引用可在构造后继续填充。 */
   readonly adapters: ReadonlyMap<WorkerImplId, WorkerAdapter>
   readonly defaultImpl: WorkerImplId
@@ -893,7 +898,14 @@ export class WorkerHarness {
    */
   readonly handleNativeActivity = (h: IncarnationHandle): void => {
     this.collectNativeActivity(h)
-      .then(() => this.deliverNativeActivityNotifications(h.worker_id))
+      .then(() => {
+        try {
+          this.deps.onNativeActivityCollected?.(h)
+        } catch (error) {
+          console.error(`[WorkerHarness] native activity collected callback failed for ${h.worker_id}#${h.seq}:`, error)
+        }
+        return this.deliverNativeActivityNotifications(h.worker_id)
+      })
       .catch((error) => console.error(`[WorkerHarness] native activity collection failed for ${h.worker_id}#${h.seq}:`, error))
   }
 

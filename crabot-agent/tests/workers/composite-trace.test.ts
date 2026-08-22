@@ -371,4 +371,30 @@ describe('readCompositeWorkerTrace', () => {
     expect(result.events.filter((event) => event.source === 'native')).toHaveLength(0)
     expect(result.unavailable_reason).toContain('native unavailable')
   })
+
+  it('删除 Worker 的副本时同时删除其 child trace，且不影响其他 Worker', async () => {
+    const fingerprint = incarnationFingerprint({
+      incarnation_id: INCARNATION_ID,
+      impl: 'claude-code',
+      seq: 1,
+      started_at: '2026-08-01T00:00:00.000Z',
+    })
+    const child = {
+      subagent_id: 'child-1', worker_id: WORKER_ID, executor_impl: 'claude-code' as const,
+      name: 'Child', status: 'completed' as const, started_at: '2026-08-01T00:00:00.000Z',
+    }
+    await nativeCopy.append(WORKER_ID, 1, fingerprint, [nativeEventAt('parent', '2026-08-01T00:00:01.000Z', 0)], (text) => text)
+    await nativeCopy.completeSubagentCapture(WORKER_ID, INCARNATION_ID, child, 'child-fingerprint', [
+      nativeEventAt('child', '2026-08-01T00:00:01.000Z', 0),
+    ], 1, (text) => text)
+    await nativeCopy.append('w-comp-other', 1, 'other-fingerprint', [nativeEventAt('other', '2026-08-01T00:00:01.000Z', 0)], (text) => text)
+
+    await nativeCopy.removeWorker(WORKER_ID)
+
+    await expect(nativeCopy.read(WORKER_ID, 1, fingerprint)).resolves.toBeNull()
+    await expect(nativeCopy.readSubagent(WORKER_ID, 'child-1', 'child-fingerprint')).resolves.toBeNull()
+    await expect(nativeCopy.read('w-comp-other', 1, 'other-fingerprint')).resolves.toMatchObject({
+      events: [{ summary: 'other' }],
+    })
+  })
 })
