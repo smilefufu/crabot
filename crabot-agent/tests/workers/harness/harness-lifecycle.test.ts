@@ -2087,6 +2087,7 @@ describe('WorkerHarness.sendToWorker', () => {
     const inputEvents = events.filter((e) => e.kind === 'input_sent')
     expect(inputEvents).toHaveLength(1)
     expect(inputEvents[0].detail?.text_len).toBe('继续干活'.length)
+    expect(inputEvents[0].detail?.text_preview).toBe('继续干活')
   })
 
   it('raw 选项透传给 adapter.sendInput', async () => {

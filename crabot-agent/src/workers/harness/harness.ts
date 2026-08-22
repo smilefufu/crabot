@@ -151,6 +151,7 @@ import {
   type SendToWorkerResult,
   type WorkerInputDeliveryReceipt,
 } from './input-delivery-store'
+import { normalizeReceiptPreview } from './receipt-store-io'
 import {
   QueryReceiptStore,
   type QueryFailure,
@@ -1442,7 +1443,10 @@ export class WorkerHarness {
     if (item?.delivery_id) {
       return { action: 'settled', settlement: 'delivered', detail: { seq: attempt.handle.seq } }
     }
-    await this.appendEvent(workerId, attempt.handle.seq, 'input_sent', { text_len: text.length })
+    await this.appendEvent(workerId, attempt.handle.seq, 'input_sent', {
+      text_len: text.length,
+      text_preview: normalizeReceiptPreview(text),
+    })
     return 'delivered'
   }
 
