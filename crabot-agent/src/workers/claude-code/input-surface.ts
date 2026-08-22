@@ -36,21 +36,25 @@ export function acceptedClaudeInput(snapshot: PaneSnapshot, mode: InputMode, tex
 
 export function classifyClaudeTerminalInteraction(snapshot: PaneSnapshot): TerminalInteraction {
   const pane = snapshot.text
+  // A real ready-to-code confirmation can render its highlighted option with
+  // the composer marker. Recognize the complete approval shape before the
+  // generic composer parser, without changing ordinary numbered input text.
+  const tailLines = pane.split('\n')
+  const tail = tailLines.join('\n')
+  const readyToCode = /Claude has written up a plan and is ready to execute\./i.test(tail) &&
+    /Would you like to\s+proceed\?/i.test(tail) &&
+    /^\s*(?:❯\s*)?1[.)]\s+Yes, and use auto mode\b/im.test(tail)
+  if (readyToCode) return { kind: 'automatic', family: 'claude_exit_plan', fingerprint: 'claude_exit_plan:ready-to-code-auto' }
   // A footer-anchored ordinary composer means a previously rendered selector in
   // the transcript is no longer the active surface.
   if (claudeComposerText(snapshot) !== undefined) return { kind: 'none' }
-  const tailLines = pane.split('\n').slice(-24)
-  const tail = tailLines.join('\n')
+  // capture-pane returns only the current viewport. A real plan approval can
+  // wrap its body far enough that the heading is near the viewport's top.
   const exitPlan = /Exit plan mode\?/i.test(tail) &&
     /Claude wants to exit plan mode/i.test(tail) &&
     /^\s*1[.)]\s+\S/m.test(tail) &&
     /^\s*2[.)]\s+\S/m.test(tail)
   if (exitPlan) return { kind: 'automatic', family: 'claude_exit_plan', fingerprint: 'claude_exit_plan:1-2' }
-  const readyToCode = /Ready to code\?/i.test(tail) &&
-    /Claude has written up a plan and is ready to execute\./i.test(tail) &&
-    /Would you like to proceed\?/i.test(tail) &&
-    /^\s*(?:❯\s*)?1[.)]\s+Yes, and use auto mode\b/im.test(tail)
-  if (readyToCode) return { kind: 'automatic', family: 'claude_exit_plan', fingerprint: 'claude_exit_plan:ready-to-code-auto' }
   const hasOption = tailLines.some((line) => /^\s*(?:❯|[○◉☐☑]|\d+[.)])\s+\S/.test(line))
   const hasYes = /(?:^|\n)\s*(?:❯\s*)?(?:\d+[.)]\s*)?Yes\b/i.test(tail)
   const hasNo = /(?:^|\n)\s*(?:❯\s*)?(?:\d+[.)]\s*)?No\b/i.test(tail)
@@ -105,6 +109,12 @@ export function hasClaudeInteraction(pane: string): boolean {
 
 export function hasClaudeExecutionOrComposer(snapshot: PaneSnapshot): boolean {
   return claudeComposerText(snapshot) !== undefined || /esc to interrupt/i.test(snapshot.text)
+}
+
+/** Only explicit interrupt confirmation may use this visual state transition. */
+export function claudePrimaryComposerText(snapshot: PaneSnapshot): string | undefined {
+  if (/esc to interrupt/i.test(snapshot.text)) return undefined
+  return claudeComposerText(snapshot)
 }
 
 function claudeComposerText(snapshot: PaneSnapshot, preservePlaceholderText = false): string | undefined {

@@ -50,10 +50,12 @@ import {
   probeClaudeInput,
   acceptedClaudeInput,
   hasClaudeExecutionOrComposer,
+  claudePrimaryComposerText,
   hasClaudeInteraction,
   classifyClaudeTerminalInteraction,
   managerActionsForClaudeAutomaticInteraction,
 } from './input-surface.js'
+
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
@@ -82,6 +84,7 @@ import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
 
 const execFileAsync = promisify(execFile)
+const INTERACTION_PROBE_DELAYS_MS = [100, 200, 400, 800, 1600] as const
 
 /** POSIX shell 单引号转义,与 tmux/driver.ts 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
@@ -237,6 +240,7 @@ interface Runtime {
   eventWatchDrain?: Promise<void>
   stopTraceWatch?: () => void
   interactionFingerprint?: string
+  interactionProbe?: Promise<void>
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin 同款语义(P2 review #2)。fork 不受此限制。 */
   resumed?: boolean
@@ -704,7 +708,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
             await this.tmux.pasteText(runtime.sessionName, value)
             pasted = true
           },
-          sendEnter: () => this.tmux.sendKeys(runtime.sessionName, ['Enter']),
+          submit: () => this.tmux.sendKeys(runtime.sessionName, ['Enter']),
           capture: () => this.capture(runtime),
         },
         (snapshot, phase) => probeClaudeInput(snapshot, mode, phase === 'after_paste' ? text : undefined, phase === 'before_paste'),
@@ -1400,7 +1404,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     this.assertActive()
     const runtime = await this.ensureRuntime(h)
     if (!runtime || runtime.controlState.kind === 'exited') return
-    await this.tmux.sendKeys(runtime.sessionName, ['C-c'])
+    await this.getMutex(h.worker_id).run(async () => {
+      if (runtime.controlState.kind === 'exited') return
+      await this.tmux.sendKeys(runtime.sessionName, ['C-c'])
+      await this.confirmInterrupt(runtime, h)
+    })
   }
 
   async stop(h: IncarnationHandle): Promise<void> {
@@ -1677,7 +1685,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         const raw = event.raw as { notification_type?: unknown; message?: unknown; title?: unknown } | null
         const type = typeof raw?.notification_type === 'string' ? raw.notification_type : undefined
         if (!type || !['permission_prompt', 'elicitation_dialog', 'agent_needs_input'].includes(type)) return
-        return this.inspectTerminalInteraction(runtime, h).catch((err) => {
+        return this.inspectTerminalInteractionAfterHook(runtime, h).catch((err) => {
           console.error(`[ClaudeCodeAdapter] notification interaction check failed for ${h.worker_id}#${h.seq}:`, err)
         })
       }
@@ -1722,15 +1730,63 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return this.getMutex(h.worker_id).run(() => this.inspectTerminalInteractionLocked(runtime, h))
   }
 
-  private async inspectTerminalInteractionLocked(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+  private inspectTerminalInteractionAfterHook(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+    if (runtime.interactionProbe) return runtime.interactionProbe
+    const probe = this.getMutex(h.worker_id).run(() => this.inspectTerminalInteractionLocked(runtime, h, true))
+    runtime.interactionProbe = probe
+    void probe.then(
+      () => { if (runtime.interactionProbe === probe) runtime.interactionProbe = undefined },
+      () => { if (runtime.interactionProbe === probe) runtime.interactionProbe = undefined },
+    )
+    return probe
+  }
+
+  private async inspectTerminalInteractionLocked(runtime: Runtime, h: IncarnationHandle, retryUnknown = false): Promise<void> {
     if (this.closing || runtime.controlState.kind === 'exited') return
-    let snapshot: CapturedPane
-    try {
-      snapshot = await this.capture(runtime)
-    } catch {
-      return
+    for (let attempt = 0; ; attempt++) {
+      if (attempt > 0) {
+        if (runtime.controlState.kind !== 'running') return
+        await new Promise((resolve) => setTimeout(resolve, INTERACTION_PROBE_DELAYS_MS[attempt - 1]))
+        if (this.closing || runtime.controlState.kind !== 'running' || !(await this.tmux.isAlive(runtime.sessionName))) return
+      }
+      let snapshot: CapturedPane
+      try {
+        snapshot = await this.capture(runtime)
+      } catch {
+        return
+      }
+      const interaction = classifyClaudeTerminalInteraction(snapshot)
+      if (interaction.kind !== 'none') {
+        await this.handleTerminalInteraction(runtime, h, interaction, snapshot)
+        return
+      }
+      runtime.interactionFingerprint = undefined
+      if (!retryUnknown || attempt === INTERACTION_PROBE_DELAYS_MS.length) return
     }
-    await this.handleTerminalInteraction(runtime, h, classifyClaudeTerminalInteraction(snapshot), snapshot)
+  }
+
+  private async confirmInterrupt(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+    let clearRequested = false
+    for (let attempt = 0; ; attempt++) {
+      if (!(await this.tmux.isAlive(runtime.sessionName))) return
+      const snapshot = await this.capture(runtime).catch(() => undefined)
+      if (!snapshot) return
+      const composer = claudePrimaryComposerText(snapshot)
+      if (composer !== undefined && composer.length === 0) {
+        runtime.interactionFingerprint = undefined
+        await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
+        return
+      }
+      if (composer !== undefined && !clearRequested) {
+        // Claude retains the interrupted request in the primary composer. A
+        // second Ctrl-C clears that known residual without changing unknown UI.
+        await this.tmux.sendKeys(runtime.sessionName, ['C-c'])
+        clearRequested = true
+      }
+      if (attempt === INTERACTION_PROBE_DELAYS_MS.length) return
+      await new Promise((resolve) => setTimeout(resolve, INTERACTION_PROBE_DELAYS_MS[attempt]))
+      if (this.closing || runtime.controlState.kind === 'exited') return
+    }
   }
 
   private async handleTerminalInteraction(

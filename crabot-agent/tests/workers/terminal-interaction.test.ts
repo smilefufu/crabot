@@ -25,6 +25,7 @@ describe('current terminal interaction classification', () => {
       '  2. Yes, manually approve edits',
       '  3. Tell Claude what to change',
       '    shift+tab to approve with this feedback',
+      '⏸ plan mode on (shift+tab to cycle)',
       'ctrl+g to edit in Vim',
       '~/.claude/plans/create-a-minimal-plan.md',
     ].join('\n'),
@@ -52,6 +53,30 @@ describe('current terminal interaction classification', () => {
         '⏸ manual mode on (shift+tab to cycle)',
       ].join('\n'),
     }, 'primary')).toBe('empty')
+  })
+
+  it('keeps an ordinary numbered Claude message usable as a composer', () => {
+    expect(probeClaudeInput({
+      text: [
+        '❯ 1. fix the bug, then add a regression test',
+        '? for shortcuts',
+      ].join('\n'),
+    }, 'primary', '1. fix the bug, then add a regression test')).toBe('pending')
+  })
+
+  it('classifies the visible Claude plan confirmation when its heading is above the viewport', () => {
+    expect(classifyClaudeTerminalInteraction({
+      text: [
+        'Claude has written up a plan and is ready to execute. Would you like to',
+        'proceed?',
+        '❯ 1. Yes, and use auto mode',
+        '  2. Yes, manually approve edits',
+        '  3. Tell Claude what to change',
+        '    shift+tab to approve with this feedback',
+        'ctrl+g to edit in Vim ·',
+        '~/.claude/plans/create-a-plan.md',
+      ].join('\n'),
+    })).toEqual({ kind: 'automatic', family: 'claude_exit_plan', fingerprint: 'claude_exit_plan:ready-to-code-auto' })
   })
 
   it('keeps a current Claude permission dialog manager-owned', () => {
