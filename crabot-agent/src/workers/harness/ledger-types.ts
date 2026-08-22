@@ -101,6 +101,17 @@ export interface WorkerSupervision {
   }
 }
 
+/** Durable responsibility to wake the owning Manager after a mainline execution carrier crashed. */
+export interface WorkerRecoveryNotice {
+  notice_id: string
+  incarnation_id: IncarnationId
+  status: 'pending' | 'consumed'
+  created_at: string
+  attempts: number
+  retry_after_at?: string
+  consumed_at?: string
+}
+
 export interface LedgerWorker {
   worker_id: string
   /** Immutable session owner: storage, lookup, routing and read model all use this field. */
@@ -127,6 +138,8 @@ export interface LedgerWorker {
   report_to: { channel_id: ModuleId; session_id: SessionId }
   incarnations: Incarnation[]
   supervision?: WorkerSupervision
+  /** Missing on historical ledgers means no recovery work is inferred. */
+  recovery_notices?: WorkerRecoveryNotice[]
   legacy_source?: LegacySourceRef
   updated_at: string
 }

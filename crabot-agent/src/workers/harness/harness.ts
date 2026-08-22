@@ -106,6 +106,7 @@ import {
   type LedgerWorker,
   type ManagerKey,
   type TaskStatus,
+  type WorkerRecoveryNotice,
   type WorkerSupervision,
 } from './ledger-types'
 import type { LedgerStore } from './ledger-store'
@@ -421,6 +422,7 @@ export const LIVENESS_STALL_MS = 30 * 60_000
 export const LIVENESS_SWEEP_INTERVAL_MS = 5 * 60_000
 export const SUPERVISION_DEFAULT_INTERVAL_MS = 15 * 60_000
 const SUPERVISION_RETRY_INTERVAL_MS = 5 * 60_000
+const RECOVERY_NOTICE_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000] as const
 
 // findWorker() reloads and validates the worker's whole owning ledger. A manager can own thousands
 // of workers, so a harness sweep must not start an unbounded number of those reads at once.
@@ -471,6 +473,40 @@ function describeLivenessRetry(opts: { impl: WorkerImplId; staleMs: number }): s
  */
 function retryDelayMs(attempts: number): number {
   return LIVENESS_STALL_MS * 2 ** Math.min(Math.max(attempts - 1, 0), 2)
+}
+
+function recoveryNoticeRetryDelayMs(attempts: number): number {
+  return RECOVERY_NOTICE_RETRY_DELAYS_MS[
+    Math.min(Math.max(attempts - 1, 0), RECOVERY_NOTICE_RETRY_DELAYS_MS.length - 1)
+  ]
+}
+
+function recoveryNoticeDue(notice: WorkerRecoveryNotice, now: string): boolean {
+  return notice.retry_after_at === undefined || Date.parse(notice.retry_after_at) <= Date.parse(now)
+}
+
+function appendRecoveryNotice(
+  notices: readonly WorkerRecoveryNotice[] | undefined,
+  incarnationId: IncarnationId,
+  now: string,
+): { notices: WorkerRecoveryNotice[]; created: boolean } {
+  const current = notices ?? []
+  if (current.some((notice) => notice.incarnation_id === incarnationId)) {
+    return { notices: [...current], created: false }
+  }
+  return {
+    notices: [
+      ...current,
+      {
+        notice_id: randomUUID(),
+        incarnation_id: incarnationId,
+        status: 'pending',
+        created_at: now,
+        attempts: 0,
+      },
+    ],
+    created: true,
+  }
 }
 
 /**
@@ -753,6 +789,7 @@ export class WorkerHarness {
   private readonly uiSnapshotStore: WorkerUiSnapshotStore
   private readonly nativeActivityNotificationMutexes = new Map<string, AsyncMutex>()
   private readonly controlNotificationMutexes = new Map<string, AsyncMutex>()
+  private readonly recoveryNoticeNotificationMutexes = new Map<string, AsyncMutex>()
   private readonly inputDeliveryControllers = new Map<string, AbortController>()
   private readonly pendingQueryStateChanges = new Map<
     string,
@@ -789,6 +826,9 @@ export class WorkerHarness {
   private sweepTimer?: ReturnType<typeof setInterval>
   /** `stopLivenessSweep` 置位后不再接受 `startLivenessSweep`(见该方法注释的停机竞态)。 */
   private sweepStopped = false
+  private recoveryNoticeDrainInFlight = false
+  private recoveryNoticeTimer?: ReturnType<typeof setTimeout>
+  private recoveryNoticeDeliveryStopped = false
 
   constructor(private readonly deps: HarnessDeps) {
     this.contextStore = new WorkerContextStore(deps.workersDir)
@@ -3554,6 +3594,127 @@ export class WorkerHarness {
   }
 
   /**
+   * Startup calls this only after the existing carrier/input/query/control/bg-shell reconciliation
+   * has opened the Manager route. Historical crashed workers without a persisted notice are never
+   * inferred here.
+   */
+  async reconcileRecoveryNoticesOnStartup(): Promise<void> {
+    await this.deliverRecoveryNotices()
+  }
+
+  /** Stops scheduled recovery routes while retaining pending ledger facts for the next process. */
+  stopRecoveryNoticeDelivery(): void {
+    this.recoveryNoticeDeliveryStopped = true
+    if (this.recoveryNoticeTimer) {
+      clearTimeout(this.recoveryNoticeTimer)
+      this.recoveryNoticeTimer = undefined
+    }
+  }
+
+  private async deliverRecoveryNotices(): Promise<void> {
+    if (this.recoveryNoticeDeliveryStopped || this.deps.isClosing?.() || !this.deps.onOperationNotification) return
+    if (this.recoveryNoticeDrainInFlight) return
+    this.recoveryNoticeDrainInFlight = true
+    try {
+      const now = this.deps.now()
+      const nowMs = Date.parse(now)
+      const due = (await this.deps.ledger.listAllWorkers()).flatMap(({ worker }) =>
+        (worker.recovery_notices ?? [])
+          .filter((notice) => notice.status === 'pending' &&
+            (notice.retry_after_at === undefined || Date.parse(notice.retry_after_at) <= nowMs))
+          .map((notice) => ({ worker_id: worker.worker_id, notice_id: notice.notice_id })),
+      )
+      for (const item of due) {
+        try {
+          await this.deliverRecoveryNotice(item.worker_id, item.notice_id)
+        } catch (error) {
+          console.error(`[WorkerHarness] recovery notice settlement failed for ${item.worker_id}/${item.notice_id}:`, error)
+        }
+      }
+    } finally {
+      this.recoveryNoticeDrainInFlight = false
+      await this.armRecoveryNoticeTimer()
+    }
+  }
+
+  private async deliverRecoveryNotice(workerId: string, noticeId: string): Promise<void> {
+    const mutex = this.recoveryNoticeNotificationMutexes.get(workerId) ?? new AsyncMutex()
+    this.recoveryNoticeNotificationMutexes.set(workerId, mutex)
+    await mutex.run(async () => {
+      const prepared = await this.withLock(workerId, async () => {
+        const found = await this.deps.ledger.findWorker(workerId)
+        const notice = found?.worker.recovery_notices?.find((item) => item.notice_id === noticeId)
+        if (!found || !notice || notice.status !== 'pending' || !recoveryNoticeDue(notice, this.deps.now())) return undefined
+        const incarnation = found.worker.incarnations.find((item) => item.incarnation_id === notice.incarnation_id)
+        if (!incarnation || !isExecutableIncarnation(incarnation)) return undefined
+        return {
+          managerKey: found.managerKey,
+          event: this.buildEvent(workerId, incarnation.seq, 'worker_recovery_required', {
+            notice_id: notice.notice_id,
+            incarnation_id: notice.incarnation_id,
+            text: '[crabot] worker 的执行载体在重启后确认已中断。请先读取 worker 状态和必要的原生会话活动，再决定继续、交接、汇报或停止。',
+          }),
+        }
+      })
+      if (!prepared) return
+      if (this.recoveryNoticeDeliveryStopped || this.deps.isClosing?.()) return
+
+      let consumed = false
+      try {
+        consumed = (await this.deps.onOperationNotification?.(prepared.managerKey, prepared.event))?.consumed === true
+      } catch (error) {
+        console.error(`[WorkerHarness] recovery notice delivery failed for ${workerId}/${noticeId}:`, error)
+      }
+
+      await this.withLock(workerId, async () => {
+        // A route that overlapped shutdown has no durable consumption confirmation. Keep the
+        // notice untouched so the next process can route it again after its gate opens.
+        if (this.recoveryNoticeDeliveryStopped || this.deps.isClosing?.()) return
+        const now = this.deps.now()
+        await this.deps.ledger.upsertWorker(prepared.managerKey, workerId, (prev) => {
+          if (!prev) return undefined
+          const notices = prev.recovery_notices ?? []
+          const index = notices.findIndex((item) => item.notice_id === noticeId)
+          const current = index < 0 ? undefined : notices[index]
+          if (!current || current.status !== 'pending') return prev
+          const next = [...notices]
+          next[index] = consumed
+            ? { ...current, status: 'consumed', consumed_at: now, retry_after_at: undefined }
+            : {
+                ...current,
+                attempts: current.attempts + 1,
+                retry_after_at: plusMs(now, recoveryNoticeRetryDelayMs(current.attempts + 1)),
+              }
+          return { ...prev, recovery_notices: next, updated_at: now }
+        })
+      })
+    })
+  }
+
+  private async armRecoveryNoticeTimer(): Promise<void> {
+    if (this.recoveryNoticeDeliveryStopped || this.deps.isClosing?.() || !this.deps.onOperationNotification) return
+    let earliest: number | undefined
+    const now = Date.parse(this.deps.now())
+    for (const { worker } of await this.deps.ledger.listAllWorkers()) {
+      for (const notice of worker.recovery_notices ?? []) {
+        if (notice.status !== 'pending') continue
+        const dueAt = notice.retry_after_at === undefined ? now : Date.parse(notice.retry_after_at)
+        if (!Number.isFinite(dueAt)) continue
+        earliest = earliest === undefined ? dueAt : Math.min(earliest, dueAt)
+      }
+    }
+    if (earliest === undefined) return
+    if (this.recoveryNoticeTimer) clearTimeout(this.recoveryNoticeTimer)
+    this.recoveryNoticeTimer = setTimeout(() => {
+      this.recoveryNoticeTimer = undefined
+      void this.deliverRecoveryNotices().catch((error) => {
+        console.error('[WorkerHarness] recovery notice delivery sweep failed:', error)
+      })
+    }, Math.max(0, earliest - now))
+    this.recoveryNoticeTimer.unref?.()
+  }
+
+  /**
    * 启动 / 停止周期性的活性巡检(protocol-agent-v3 §6.3 第 3 条的兜底)。
    *
    * 装配层(`unified-agent.ts`)在启动对账之后开、停机时关。`unref()`:巡检是后台兜底,
@@ -4063,6 +4224,7 @@ export class WorkerHarness {
     const now = this.deps.now()
     const crashed = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
+      const current = findIncarnation(prev, mainline.impl, mainline.seq)
       const nextTask = transitionTaskTo(prev.task, 'failed', { error: detailReason, now })
       const incarnations = patchIncarnationBySeq(prev.incarnations, mainline.impl, mainline.seq, {
         state: 'exited',
@@ -4076,7 +4238,17 @@ export class WorkerHarness {
         mainline.seq,
         now,
       )
-      return { ...prev, task: nextTask, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
+      const recovery = current?.forked_from === undefined && current?.state !== 'exited' && current?.incarnation_id
+        ? appendRecoveryNotice(prev.recovery_notices, current.incarnation_id, now)
+        : undefined
+      return {
+        ...prev,
+        task: nextTask,
+        incarnations,
+        ...(supervision ? { supervision } : {}),
+        ...(recovery ? { recovery_notices: recovery.notices } : {}),
+        updated_at: now,
+      }
     })
     await this.appendEvent(
       worker.worker_id,
@@ -4868,6 +5040,7 @@ export class WorkerHarness {
     report?: StateChangeReport,
   ): Promise<void> {
     let settledCurrentExit = false
+    let recoveryNoticeCreated = false
     // 被动唤醒只携带 adapter 已经结构化识别出的 assistant text。tmux capture 是调用方
     // 显式请求的诊断视图，不能因一次状态回调被常规塞进 manager 上下文。
     const wakeText = truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, '', 'head')
@@ -5021,7 +5194,19 @@ export class WorkerHarness {
           h.seq,
           now,
         )
-        return { ...prev, task: nextTask, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
+        const recovery = state === 'exited' && endReason === 'crashed' && !preserveTaskForStop &&
+          current?.forked_from === undefined && current?.state !== 'exited' && current?.incarnation_id
+          ? appendRecoveryNotice(prev.recovery_notices, current.incarnation_id, now)
+          : undefined
+        recoveryNoticeCreated ||= recovery?.created === true
+        return {
+          ...prev,
+          task: nextTask,
+          incarnations,
+          ...(supervision ? { supervision } : {}),
+          ...(recovery ? { recovery_notices: recovery.notices } : {}),
+          updated_at: now,
+        }
       })
       settledCurrentExit = state === 'exited' && committed !== undefined
       const turn = shouldCreateTurn && committed
@@ -5047,6 +5232,11 @@ export class WorkerHarness {
       )
     })
     await this.deliverNativeActivityNotifications(h.worker_id)
+    if (recoveryNoticeCreated) {
+      void this.deliverRecoveryNotices().catch((error) => {
+        console.error(`[WorkerHarness] recovery notice delivery failed after crash of ${h.worker_id}#${h.seq}:`, error)
+      })
+    }
     if (state === 'exited') this.fireIncarnationTerminal(h)
 
     if (!report?.notification && settledCurrentExit) {

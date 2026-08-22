@@ -671,6 +671,49 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(sweep).toHaveBeenCalledOnce()
   })
 
+  it('启动对账收尾在 bg-shell 结算后后台投递恢复提醒，不阻塞活性巡检', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const order: string[] = []
+    let releaseRecovery!: () => void
+    let recoveryFinished = false
+    const recoveryGate = new Promise<void>((resolve) => { releaseRecovery = resolve })
+    internals.agentHandler = {
+      releaseRecoveredWorkerShellExits: vi.fn(async () => { order.push('bg-shell') }),
+    } as any
+    vi.spyOn(stack.harness, 'reconcileRecoveryNoticesOnStartup').mockImplementation(async () => {
+      order.push('recovery-notices')
+      await recoveryGate
+      recoveryFinished = true
+    })
+    vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => { order.push('liveness') })
+
+    agent.startManagerStackReconciliation()
+    await waitUntil(() => order.length === 3)
+
+    expect(order).toEqual(['bg-shell', 'recovery-notices', 'liveness'])
+    releaseRecovery()
+    await waitUntil(() => recoveryFinished)
+  })
+
+  it('恢复提醒后台投递失败只告警，不会阻塞巡检或形成未处理拒绝', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const failure = new Error('recovery notice ledger unavailable')
+    vi.spyOn(stack.harness, 'reconcileRecoveryNoticesOnStartup').mockRejectedValue(failure)
+    const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    agent.startManagerStackReconciliation()
+    await waitUntil(() => sweep.mock.calls.length === 1)
+    await waitUntil(() => warn.mock.calls.some((args) => String(args[0]).includes('worker recovery notice delivery startup failed')))
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('worker recovery notice delivery startup failed'),
+      failure.message,
+    )
+  })
+
   it('shutdown 已开始时，迟到的启动对账不再释放 recovered bg exits 或启动巡检', async () => {
     boot()
     const stack = internals.managerStack!

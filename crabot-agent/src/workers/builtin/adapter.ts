@@ -524,9 +524,15 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // "两次背靠背 sendInput 都读到 idle、拿同一 tip"的 check-then-act 竞态（跨 await 边界）。
     const mutex = this.getMutex(h.worker_id)
     const startBurst = await mutex.run(async () => {
-      const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
+      let instance = this.instances.get(instanceKey(h.worker_id, h.seq))
+      let rehydratedRuntime: NonNullable<SpawnSpec['builtin']> | undefined
       if (!instance) {
-        throw new Error(`BuiltinWorkerAdapter.sendInput: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+        const rehydrated = await this.rehydrateIdleInstance(h)
+        if (!rehydrated) {
+          throw new Error(`BuiltinWorkerAdapter.sendInput: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+        }
+        instance = rehydrated.instance
+        rehydratedRuntime = rehydrated.runtime
       }
 
       if (instance.state === 'exited') {
@@ -545,7 +551,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // idle → 追加新一轮用户消息，转 running。起 burst 留到锁外（见下）。
       // 运行配置现取：idle 态下没有 burst 在跑，重新解析一次不会干扰任何正在执行的东西，
       // 语义与"起化身现取"一致（正在跑的 burst 用旧配置，见 runBurst 续 burst 路径）。
-      const builtin = await this.runtimeFor(h.worker_id, 'sendInput', instance.workspaceInstructions)
+      const builtin = rehydratedRuntime ?? await this.runtimeFor(h.worker_id, 'sendInput', instance.workspaceInstructions)
       instance.tip = await instance.sessionTree.append(instance.tip, createUserMessage(text))
       await this.transitionState(instance, h, 'running')
       instance.activityAt = Date.now()
@@ -580,6 +586,58 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const raw = await fs.readFile(metaPath, 'utf-8')
     const meta = JSON.parse(raw) as { state: WorkerContractState }
     return meta.state
+  }
+
+  /**
+   * A persisted idle meta means no engine was running when the process stopped. Rebuild only that
+   * exact incarnation under the caller's worker mutex; a running/exited meta deliberately remains
+   * outside this path so scanOrphans and normal terminal handling keep their crash semantics.
+   */
+  private async rehydrateIdleInstance(
+    h: IncarnationHandle,
+  ): Promise<{ instance: WorkerInstance; runtime: NonNullable<SpawnSpec['builtin']> } | undefined> {
+    const dir = join(this.deps.dataDir, h.worker_id)
+    const metaPath = join(dir, `meta-${h.seq}.json`)
+    let raw: string
+    try {
+      raw = await fs.readFile(metaPath, 'utf-8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
+    const meta = JSON.parse(raw) as {
+      seq?: number
+      state?: WorkerContractState
+      tip_node_id?: string
+      trace_id?: string
+    }
+    if (meta.seq !== h.seq || meta.state !== 'idle' || typeof meta.tip_node_id !== 'string' || !meta.tip_node_id) {
+      return undefined
+    }
+
+    const sessionTree = this.findSessionTreeForWorker(h.worker_id) ??
+      await SessionTree.load(join(dir, 'session.jsonl'))
+    // Validate the persisted tip before registering any resident state. A corrupted tree must be
+    // reported through the normal input receipt, not rewritten into a fabricated crash.
+    sessionTree.pathTo(meta.tip_node_id)
+    const context = await this.loadContext(h.worker_id)
+    const runtime = await this.runtimeFor(h.worker_id, 'sendInput', context?.workspace_instructions)
+    const instance: WorkerInstance = {
+      worker_id: h.worker_id,
+      incarnation_id: h.incarnation_id,
+      seq: h.seq,
+      dir,
+      sessionTree,
+      outputLog: new OutputLog(join(dir, `output-${h.seq}.log`)),
+      tip: meta.tip_node_id,
+      activityAt: Date.now(),
+      ...(typeof meta.trace_id === 'string' ? { traceId: meta.trace_id } : {}),
+      state: 'idle',
+      pendingInputs: [],
+      ...(context?.workspace_instructions !== undefined ? { workspaceInstructions: context.workspace_instructions } : {}),
+    }
+    this.instances.set(instanceKey(h.worker_id, h.seq), instance)
+    return { instance, runtime }
   }
 
   /**

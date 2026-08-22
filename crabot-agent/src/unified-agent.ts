@@ -3909,6 +3909,13 @@ export class UnifiedAgent extends ModuleBase {
         this.managerReconciliationSettled = true
         if (this.runtimeClosing) return
         await this.agentHandler?.releaseRecoveredWorkerShellExits()
+        // Notice routing may run a whole Manager episode. It starts only after all existing
+        // recovery work above, but must not hold startup's liveness drain or escape this chain.
+        void stack.harness.reconcileRecoveryNoticesOnStartup().catch((error) => {
+          const message = error instanceof Error ? error.message : String(error)
+          console.warn(`[${this.config.moduleId}] worker recovery notice delivery startup failed（不影响启动）:`, message)
+        })
+        if (this.runtimeClosing) return
         stack.harness.startLivenessSweep()
       })
   }
@@ -3924,6 +3931,7 @@ export class UnifiedAgent extends ModuleBase {
     this.attentionScheduler.stopAll()
     this.traceStore.stopFlushTimer()
     this.managerStack?.harness.stopLivenessSweep()
+    this.managerStack?.harness.stopRecoveryNoticeDelivery()
 
     try {
       await this.managerStack?.dispose()
