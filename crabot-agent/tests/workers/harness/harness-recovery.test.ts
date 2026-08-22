@@ -110,7 +110,7 @@ function now(): string {
 }
 
 async function makeHarness(
-  overrides: Pick<HarnessDeps, 'onOperationNotification' | 'now' | 'isClosing'> = {},
+  overrides: Pick<HarnessDeps, 'onOperationNotification' | 'onIncarnationTerminal' | 'now' | 'isClosing'> = {},
 ): Promise<{ harness: WorkerHarness; ledger: LedgerStore; adaptersMap: Map<WorkerImplId, WorkerAdapter> }> {
   const ledgersDir = join(dataDir, 'ledgers')
   const workspacesRoot = join(dataDir, 'workspaces')
@@ -615,6 +615,53 @@ describe('WorkerHarness restart recovery notices', () => {
     expect((await getWorker(ledger, worker.worker_id)).recovery_notices?.[0]).toMatchObject({
       incarnation_id: incarnation.incarnation_id,
       status: 'pending',
+    })
+  })
+
+  it('运行期 crash 不等待其他 worker 卡住的恢复通知投递，仍立即收割本化身', async () => {
+    let releaseRoute!: () => void
+    const routeGate = new Promise<void>((resolve) => { releaseRoute = resolve })
+    const terminals: IncarnationHandle[] = []
+    const route = vi.fn(async (_managerKey: ManagerKey, event: HarnessEvent) => {
+      if (event.worker_id === 'w-blocking-notice') await routeGate
+      return { consumed: true }
+    })
+    const { harness, ledger, adaptersMap } = await makeHarness({
+      onOperationNotification: route,
+      onIncarnationTerminal: (handle) => terminals.push(handle),
+    })
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    await seed(ledger, DIALOG, makeWorker('w-blocking-notice'))
+    fake.setState({ worker_id: 'w-blocking-notice', seq: 1 }, 'exited')
+    await harness.reconcileOnStartup()
+
+    await seed(ledger, DIALOG, makeWorker('w-runtime-crash-blocked'))
+    const crashed = await getWorker(ledger, 'w-runtime-crash-blocked')
+    const incarnation = crashed.incarnations[0]
+    harness.handleStateChange({
+      worker_id: crashed.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: incarnation.impl,
+      session_ref: incarnation.session_ref,
+    }, 'exited', { endReason: 'crashed' })
+
+    try {
+      await vi.waitFor(() => expect(route).toHaveBeenCalledWith(
+        DIALOG,
+        expect.objectContaining({ worker_id: 'w-blocking-notice', kind: 'worker_recovery_required' }),
+      ))
+      await vi.waitFor(() => expect(terminals).toContainEqual(expect.objectContaining({
+        worker_id: crashed.worker_id,
+        incarnation_id: incarnation.incarnation_id,
+      })))
+    } finally {
+      releaseRoute()
+    }
+    await vi.waitFor(async () => {
+      expect((await getWorker(ledger, 'w-blocking-notice')).recovery_notices?.[0]?.status).toBe('consumed')
+      expect((await getWorker(ledger, crashed.worker_id)).recovery_notices?.[0]?.status).toBe('consumed')
     })
   })
 })

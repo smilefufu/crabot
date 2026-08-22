@@ -5232,7 +5232,11 @@ export class WorkerHarness {
       )
     })
     await this.deliverNativeActivityNotifications(h.worker_id)
-    if (recoveryNoticeCreated) await this.deliverRecoveryNotices()
+    if (recoveryNoticeCreated) {
+      void this.deliverRecoveryNotices().catch((error) => {
+        console.error(`[WorkerHarness] recovery notice delivery failed after crash of ${h.worker_id}#${h.seq}:`, error)
+      })
+    }
     if (state === 'exited') this.fireIncarnationTerminal(h)
 
     if (!report?.notification && settledCurrentExit) {
