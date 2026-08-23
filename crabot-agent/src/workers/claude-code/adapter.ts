@@ -53,6 +53,7 @@ import {
   claudePrimaryComposerText,
   hasClaudeInteraction,
   classifyClaudeTerminalInteraction,
+  isClaudeMcpSelectorSettling,
   managerActionsForClaudeAutomaticInteraction,
 } from './input-surface.js'
 
@@ -87,6 +88,8 @@ import type { SupervisionObservation } from '../types.js'
 
 const execFileAsync = promisify(execFile)
 const INTERACTION_PROBE_DELAYS_MS = [100, 200, 400, 800, 1600] as const
+const UI_ACTION_SETTLE_TIMEOUT_MS = 1_000
+const UI_ACTION_SETTLE_INTERVAL_MS = 25
 
 /** POSIX shell 单引号转义,与 tmux/driver.ts 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
@@ -598,6 +601,18 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return captured
   }
 
+  private async waitForMcpSelectorSettlement(runtime: Runtime, initial: PaneSnapshot): Promise<PaneSnapshot> {
+    let snapshot = initial
+    const deadline = Date.now() + UI_ACTION_SETTLE_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      const interaction = classifyClaudeTerminalInteraction(snapshot)
+      if (interaction.kind !== 'none' || hasClaudeExecutionOrComposer(snapshot)) return snapshot
+      await new Promise((resolve) => setTimeout(resolve, UI_ACTION_SETTLE_INTERVAL_MS))
+      snapshot = await this.capture(runtime)
+    }
+    return snapshot
+  }
+
   private liveTerminal(snapshot: PaneSnapshot): WorkerTerminalView {
     if (snapshot.dead) return { kind: 'unavailable', unavailable_reason: 'terminal_session_missing' }
     return { kind: 'live_terminal', text: snapshot.text, captured_at: snapshot.captured_at ?? new Date().toISOString() }
@@ -625,7 +640,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const before = await this.capture(runtime)
       await this.tmux.sendKeys(runtime.sessionName, [...keys])
       keysSent = true
-      const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
+      let snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
+      // The checked MCP selector is a classifier-recognized render transition,
+      // not a second Manager action. Read its successor before deciding the
+      // control state; no further key is sent here.
+      if (isClaudeMcpSelectorSettling(snapshot)) {
+        snapshot = await this.waitForMcpSelectorSettlement(runtime, snapshot)
+      }
       const interaction = classifyClaudeTerminalInteraction(snapshot)
       if (interaction.kind !== 'none') {
         if (interaction.kind === 'automatic') {

@@ -63,10 +63,23 @@ export function classifyClaudeTerminalInteraction(snapshot: PaneSnapshot): Termi
   if (permissionPrompt && hasYes && hasNo) {
     return managerRequiredInteraction('claude_permission', 'claude_permission:yes-no', tailLines)
   }
-  if (selectionFooter && hasOption) {
+  if (selectionFooter && hasOption && !isClaudeMcpSelectorSettling(snapshot)) {
     return managerRequiredInteraction('claude_selector', 'claude_selector:options', tailLines)
   }
   return { kind: 'none' }
+}
+
+/**
+ * After confirming a project MCP choice, Claude briefly keeps the selector in
+ * the viewport and marks the accepted option with a check. It is no longer a
+ * manager-action surface: another response would write into the composer once
+ * the repaint completes.
+ */
+export function isClaudeMcpSelectorSettling(snapshot: PaneSnapshot): boolean {
+  const pane = snapshot.text
+  return /New MCP server found in this project:/i.test(pane) &&
+    /Enter to confirm/i.test(pane) &&
+    /^\s*(?:❯\s*)?\d+[.)]\s+.+\s✔\s*$/m.test(pane)
 }
 
 /**
