@@ -74,14 +74,21 @@ describe.skipIf(!detectTmux())('TmuxDriver', () => {
   })
 
   it('pipe-pane 原始字节只驱动就绪状态，不创建 output 日志', async () => {
+    const controlLogPath = path.join(tempDir, 'control-monitor.jsonl')
     const endpoint = await driver.newSession({
       name: sessionName,
       cwd: tempDir,
       command: `bash -c 'printf "\\033[?2004h"; sleep 30'`,
+      control_log_path: controlLogPath,
     })
 
     await waitFor(async () => (await driver.getPasteReadiness(endpoint)).state === 'ready')
     expect(await driver.getPasteReadiness(endpoint)).toMatchObject({ state: 'ready' })
+    expect(await driver.panePipe(sessionName)).toMatch(/^\d+$/)
+    await waitFor(async () => {
+      const log = await fs.readFile(controlLogPath, 'utf-8').catch(() => '')
+      return log.includes('"event":"server_listening"') && log.includes('"event":"readiness_changed"') && log.includes('"event":"pipe_attached"')
+    })
     expect((await fs.readdir(tempDir)).some((name) => name.includes('output'))).toBe(false)
   })
 

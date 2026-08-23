@@ -16,6 +16,31 @@ export interface TmuxControlEndpoint {
   monitor_id: string
 }
 
+export type TmuxControlDiagnosticEvent =
+  | 'monitor_started'
+  | 'server_listening'
+  | 'readiness_changed'
+  | 'stdin_end'
+  | 'signal'
+  | 'server_error'
+  | 'uncaught_exception'
+  | 'unhandled_rejection'
+  | 'cleanup'
+  | 'process_exit'
+  | 'pipe_attached'
+  | 'input_surface_unavailable'
+
+/** Append a small, durable lifecycle record without capturing raw terminal output. */
+export async function appendTmuxControlDiagnostic(
+  logPath: string | undefined,
+  event: TmuxControlDiagnosticEvent,
+  details: Record<string, unknown> = {},
+): Promise<void> {
+  if (!logPath) return
+  const record = { at: new Date().toISOString(), event, ...details }
+  await fs.appendFile(logPath, `${JSON.stringify(record)}\n`, { encoding: 'utf-8', mode: 0o600 }).catch(() => {})
+}
+
 const ENABLE = Buffer.from('\u001b[?2004h', 'ascii')
 const DISABLE = Buffer.from('\u001b[?2004l', 'ascii')
 const SUFFIX_BYTES = Math.max(ENABLE.length, DISABLE.length) - 1
@@ -65,9 +90,9 @@ export async function removeTmuxControlEndpoint(endpoint: TmuxControlEndpoint): 
   await fs.rm(dirname(endpoint.socket_path), { recursive: true, force: true }).catch(() => {})
 }
 
-/** The pipe-pane command deliberately has no durable raw-output destination. */
-export function controlMonitorPipeCommand(endpoint: TmuxControlEndpoint): string {
-  return `env -i ${shQuote(process.execPath)} --input-type=module --eval ${shQuote(MONITOR_PROGRAM)} ${shQuote(endpoint.socket_path)} ${shQuote(endpoint.monitor_id)}`
+/** The pipe-pane command never persists raw output; it may persist lifecycle diagnostics. */
+export function controlMonitorPipeCommand(endpoint: TmuxControlEndpoint, diagnosticLogPath?: string): string {
+  return `env -i ${shQuote(process.execPath)} --input-type=module --eval ${shQuote(MONITOR_PROGRAM)} ${shQuote(endpoint.socket_path)} ${shQuote(endpoint.monitor_id)} ${shQuote(diagnosticLogPath ?? '')}`
 }
 
 /** Endpoint failures are intentionally represented as unknown, never as stale ready. */
@@ -119,7 +144,7 @@ const MONITOR_PROGRAM = String.raw`
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
-const [socketPath, monitorId] = process.argv.slice(-2);
+const [socketPath, monitorId, diagnosticLogPath = ''] = process.argv.slice(-3);
 const enable = Buffer.from('\x1b[?2004h', 'ascii');
 const disable = Buffer.from('\x1b[?2004l', 'ascii');
 const suffixBytes = Math.max(enable.length, disable.length) - 1;
@@ -127,6 +152,13 @@ let state = 'unknown';
 let observedAt;
 let suffix = Buffer.alloc(0);
 let closed = false;
+function diagnostic(event, details = {}) {
+  if (!diagnosticLogPath) return;
+  try {
+    fs.appendFileSync(diagnosticLogPath, JSON.stringify({ at: new Date().toISOString(), event, ...details }) + '\n', { encoding: 'utf8', mode: 0o600 });
+  } catch {}
+}
+diagnostic('monitor_started', { pid: process.pid, monitor_id: monitorId, socket_path: socketPath });
 function consume(chunk) {
   const input = suffix.length ? Buffer.concat([suffix, chunk]) : chunk;
   let offset = 0;
@@ -140,12 +172,14 @@ function consume(chunk) {
       state = 'not_ready'; offset = disabledAt + disable.length;
     }
     observedAt = new Date().toISOString();
+    diagnostic('readiness_changed', { state, observed_at: observedAt });
   }
   suffix = Buffer.from(input.subarray(Math.max(0, input.length - suffixBytes)));
 }
-function cleanup() {
+function cleanup(reason = 'unknown') {
   if (closed) return;
   closed = true;
+  diagnostic('cleanup', { reason, state, observed_at: observedAt });
   server.close();
   try { fs.rmSync(path.dirname(socketPath), { recursive: true, force: true }); } catch {}
 }
@@ -163,9 +197,20 @@ const server = net.createServer((socket) => {
   socket.on('data', (chunk) => { request += chunk; handleRequest(); });
   socket.on('end', handleRequest);
 });
-server.listen(socketPath, () => { try { fs.chmodSync(socketPath, 0o600); } catch {} });
+server.once('error', (error) => {
+  diagnostic('server_error', { error: String(error && error.message ? error.message : error) });
+  cleanup('server_error');
+  process.exitCode = 1;
+});
+server.listen(socketPath, () => {
+  try { fs.chmodSync(socketPath, 0o600); } catch {}
+  diagnostic('server_listening', { pid: process.pid, socket_path: socketPath });
+});
 process.stdin.on('data', consume);
-process.stdin.once('end', cleanup);
-process.once('SIGTERM', cleanup);
-process.once('SIGINT', cleanup);
+process.stdin.once('end', () => { diagnostic('stdin_end'); cleanup('stdin_end'); });
+process.once('SIGTERM', () => { diagnostic('signal', { signal: 'SIGTERM' }); cleanup('SIGTERM'); });
+process.once('SIGINT', () => { diagnostic('signal', { signal: 'SIGINT' }); cleanup('SIGINT'); });
+process.once('uncaughtException', (error) => { diagnostic('uncaught_exception', { error: String(error && error.stack ? error.stack : error) }); cleanup('uncaught_exception'); process.exitCode = 1; });
+process.once('unhandledRejection', (reason) => { diagnostic('unhandled_rejection', { error: String(reason) }); cleanup('unhandled_rejection'); process.exitCode = 1; });
+process.once('exit', (code) => diagnostic('process_exit', { code, state, observed_at: observedAt }));
 `

@@ -35,7 +35,7 @@ import { DEFAULT_PASTE_READY_TIMEOUT_MS, waitForPasteReady } from '../tmux/paste
 import { CliEventChannel } from '../cli-events.js'
 import { watchNativeSessionFile } from '../native-session-watch.js'
 import { OutputLog } from '../output-log.js'
-import type { TmuxControlEndpoint } from '../tmux/control-monitor.js'
+import { appendTmuxControlDiagnostic, type PasteReadiness, type TmuxControlEndpoint } from '../tmux/control-monitor.js'
 import { readFinalTerminalSnapshot, writeFinalTerminalSnapshot } from '../tmux/terminal-snapshot.js'
 import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 import { AsyncMutex } from '../async-mutex.js'
@@ -304,6 +304,10 @@ function controlMeta(runtime: Runtime): Record<string, string> {
   return runtime.controlEndpoint
     ? { control_socket: runtime.controlEndpoint.socket_path, control_monitor_id: runtime.controlEndpoint.monitor_id }
     : {}
+}
+
+function controlDiagnosticPath(runtime: Pick<Runtime, 'dir' | 'seq'>): string {
+  return join(runtime.dir, `control-monitor-${runtime.seq}.jsonl`)
 }
 
 function instanceKey(h: { worker_id: string; seq: number }): string {
@@ -879,10 +883,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return final ? { kind: 'final_terminal', ...final } : undefined
   }
 
-  private async isPasteReady(runtime: Runtime): Promise<boolean> {
+  private async readPasteReadiness(runtime: Runtime): Promise<PasteReadiness> {
     return runtime.controlEndpoint
-      ? (await this.tmux.getPasteReadiness(runtime.controlEndpoint)).state === 'ready'
-      : false
+      ? this.tmux.getPasteReadiness(runtime.controlEndpoint)
+      : { state: 'unknown' }
   }
 
   private async sendRawInput(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
@@ -1028,8 +1032,22 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     let result
     try {
       baseline = (await this.capture(runtime)).text
-      if (!(await this.isPasteReady(runtime))) {
-        const snapshot = await this.capture(runtime)
+      const readiness = await this.readPasteReadiness(runtime)
+      if (readiness.state !== 'ready') {
+        const [snapshot, paneAlive, panePipe] = await Promise.all([
+          this.capture(runtime),
+          this.tmux.isAlive(runtime.sessionName),
+          this.tmux.panePipe(runtime.sessionName),
+        ])
+        await appendTmuxControlDiagnostic(controlDiagnosticPath(runtime), 'input_surface_unavailable', {
+          worker_id: runtime.worker_id,
+          seq: runtime.seq,
+          session_name: runtime.sessionName,
+          readiness_state: readiness.state,
+          ...(readiness.observed_at ? { readiness_observed_at: readiness.observed_at } : {}),
+          pane_alive: paneAlive,
+          pane_pipe: panePipe,
+        })
         const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'input_surface_unavailable' }
         const next: CliControlState = mode === 'steering' && runtime.controlState.kind === 'running'
           ? { kind: 'running' }
@@ -1148,6 +1166,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       name: sessionName, cwd: spec.workspace.root, command,
       // connection_env（admin_provider CODEX_HOME/env_key）优先级高于 workspace 默认。
       env,
+      control_log_path: controlDiagnosticPath({ dir, seq }),
     })
 
     // Codex 0.146 在首条 prompt 提交前不会创建 rollout。这里先建立空 session_ref 的
@@ -1319,6 +1338,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const controlEndpoint = await this.tmux.newSession({
         name: sessionName, cwd: prevRuntime.workspaceRoot, command,
         env,
+        control_log_path: controlDiagnosticPath({ dir, seq }),
       })
 
       runtime = {

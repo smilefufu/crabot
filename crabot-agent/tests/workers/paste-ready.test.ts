@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { execFileSync, spawn } from 'node:child_process'
+import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import {
   advancePasteReadiness,
   controlMonitorPipeCommand,
@@ -61,14 +64,21 @@ describe('tmux bracketed-paste monitor', () => {
 
   it.skipIf(!canUseTmux())('pipe-pane 消费端识别真实 bracketed-paste 控制字节', async () => {
     const endpoint = await createTmuxControlEndpoint()
-    const child = spawn(controlMonitorPipeCommand(endpoint), { shell: true, stdio: ['pipe', 'ignore', 'ignore'] })
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'paste-ready-monitor-test-'))
+    const logPath = path.join(tempDir, 'control-monitor.jsonl')
+    const child = spawn(controlMonitorPipeCommand(endpoint, logPath), { shell: true, stdio: ['pipe', 'ignore', 'ignore'] })
     try {
       child.stdin?.write(Buffer.from('\u001b[?2004h', 'ascii'))
       await waitForReady(endpoint)
+      const log = await fs.readFile(logPath, 'utf-8')
+      expect(log).toContain('"event":"monitor_started"')
+      expect(log).toContain('"event":"server_listening"')
+      expect(log).toContain('"event":"readiness_changed"')
     } finally {
       child.stdin?.end()
       child.kill()
       await removeTmuxControlEndpoint(endpoint)
+      await fs.rm(tempDir, { recursive: true, force: true })
     }
   })
 

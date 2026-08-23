@@ -15,6 +15,7 @@ import os from 'node:os'
 import { join } from 'node:path'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import {
+  appendTmuxControlDiagnostic,
   controlMonitorPipeCommand,
   createTmuxControlEndpoint,
   readTmuxControlState,
@@ -35,6 +36,8 @@ export interface TmuxSessionSpec {
   cwd: string
   command: string // 在 pane 内执行的命令行
   env?: Record<string, string>
+  /** Durable lifecycle log for the control monitor; raw pane output is never persisted here. */
+  control_log_path?: string
 }
 
 export interface PaneSnapshot {
@@ -102,7 +105,7 @@ exec ${spec.command}
     const command = `env -i sh ${shQuote(wrapperPath)}`
 
     const envArgs: string[] = ['-e', `${CORE_AGENT_RUNTIME_BEARER_ENV}=`]
-    const pipeCmd = controlMonitorPipeCommand(controlEndpoint)
+    const pipeCmd = controlMonitorPipeCommand(controlEndpoint, spec.control_log_path)
     let sessionCreated = false
     try {
       await this.run([
@@ -122,6 +125,10 @@ exec ${spec.command}
         pipeCmd,
       ])
       sessionCreated = true
+      await appendTmuxControlDiagnostic(spec.control_log_path, 'pipe_attached', {
+        session_name: spec.name,
+        pane_pipe: await this.panePipe(spec.name),
+      })
       return {
         ...controlEndpoint,
         enableRemainOnExit: async () => {
@@ -217,6 +224,16 @@ exec ${spec.command}
       // tmux 对不存在的 target 也会以 exit 0 返回空输出(不抛错),所以用是否有内容来判定,
       // 而不是依赖 catch。
       const { stdout } = await this.run(['display-message', '-p', '-t', name, '#{pane_current_command}'])
+      const trimmed = stdout.trim()
+      return trimmed.length > 0 ? trimmed : null
+    } catch {
+      return null
+    }
+  }
+
+  async panePipe(name: string): Promise<string | null> {
+    try {
+      const { stdout } = await this.run(['display-message', '-p', '-t', name, '#{pane_pipe}'])
       const trimmed = stdout.trim()
       return trimmed.length > 0 ? trimmed : null
     } catch {

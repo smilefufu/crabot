@@ -37,7 +37,7 @@ import { DEFAULT_PASTE_READY_TIMEOUT_MS, waitForPasteReady } from '../tmux/paste
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { watchNativeSessionFile } from '../native-session-watch.js'
 import { OutputLog } from '../output-log.js'
-import type { TmuxControlEndpoint } from '../tmux/control-monitor.js'
+import { appendTmuxControlDiagnostic, type PasteReadiness, type TmuxControlEndpoint } from '../tmux/control-monitor.js'
 import { readFinalTerminalSnapshot, writeFinalTerminalSnapshot } from '../tmux/terminal-snapshot.js'
 import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 import { AsyncMutex } from '../async-mutex.js'
@@ -302,6 +302,10 @@ function controlMeta(runtime: Runtime): Record<string, string> {
   return runtime.controlEndpoint
     ? { control_socket: runtime.controlEndpoint.socket_path, control_monitor_id: runtime.controlEndpoint.monitor_id }
     : {}
+}
+
+function controlDiagnosticPath(runtime: Pick<Runtime, 'dir' | 'seq'>): string {
+  return join(runtime.dir, `control-monitor-${runtime.seq}.jsonl`)
 }
 
 function instanceKey(h: { worker_id: string; seq: number }): string {
@@ -605,10 +609,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return final ? { kind: 'final_terminal', ...final } : undefined
   }
 
-  private async isPasteReady(runtime: Runtime): Promise<boolean> {
+  private async readPasteReadiness(runtime: Runtime): Promise<PasteReadiness> {
     return runtime.controlEndpoint
-      ? (await this.tmux.getPasteReadiness(runtime.controlEndpoint)).state === 'ready'
-      : false
+      ? this.tmux.getPasteReadiness(runtime.controlEndpoint)
+      : { state: 'unknown' }
   }
 
   private async sendRawInput(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
@@ -741,8 +745,22 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     let result
     try {
       baseline = (await this.capture(runtime)).text
-      if (!(await this.isPasteReady(runtime))) {
-        const snapshot = await this.capture(runtime)
+      const readiness = await this.readPasteReadiness(runtime)
+      if (readiness.state !== 'ready') {
+        const [snapshot, paneAlive, panePipe] = await Promise.all([
+          this.capture(runtime),
+          this.tmux.isAlive(runtime.sessionName),
+          this.tmux.panePipe(runtime.sessionName),
+        ])
+        await appendTmuxControlDiagnostic(controlDiagnosticPath(runtime), 'input_surface_unavailable', {
+          worker_id: runtime.worker_id,
+          seq: runtime.seq,
+          session_name: runtime.sessionName,
+          readiness_state: readiness.state,
+          ...(readiness.observed_at ? { readiness_observed_at: readiness.observed_at } : {}),
+          pane_alive: paneAlive,
+          pane_pipe: panePipe,
+        })
         const report: StateChangeReport = { terminal: this.liveTerminal(snapshot), waitReason: 'input_surface_unavailable' }
         const next: CliControlState = mode === 'steering' && runtime.controlState.kind === 'running'
           ? { kind: 'running' }
@@ -839,7 +857,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
     // (session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id 可安全重试。
-    const controlEndpoint = await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, env: spec.connection_env })
+    const controlEndpoint = await this.tmux.newSession({
+      name: sessionName,
+      cwd: spec.workspace.root,
+      command,
+      env: spec.connection_env,
+      control_log_path: controlDiagnosticPath({ dir, seq }),
+    })
 
     const runtime: Runtime = {
       worker_id: spec.worker_id,
@@ -962,7 +986,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
       const eventWatchOffset = await eventChannel.endOffset()
       const stopBaseline = await this.initialStopBaseline(eventChannel)
-      const controlEndpoint = await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, env: opts?.connection_env })
+      const controlEndpoint = await this.tmux.newSession({
+        name: sessionName,
+        cwd: prevRuntime.workspaceRoot,
+        command,
+        env: opts?.connection_env,
+        control_log_path: controlDiagnosticPath({ dir, seq }),
+      })
       runtime = {
         worker_id: prev.worker_id,
         incarnation_id: opts?.incarnation_id,
