@@ -1916,6 +1916,51 @@ describe('ClaudeCodeAdapter paste readiness gate', () => {
       await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
     }
   })
+
+  it('输入面被 MCP 选择器占用时通知 Manager 且保持 prompt 未投递', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-selector-input-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-selector-input-ws-'))
+    const tmux = new NoopTmux()
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN })
+    try {
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await expect(adapter.state(h)).resolves.toBe('running')
+
+      tmux.paneText = [
+        'New MCP server found in this project: arXivPaper',
+        '❯ 1. Use this MCP server',
+        '  2. Use this and all future MCP servers in this project',
+        '  3. Continue without using this MCP server',
+        'Enter to confirm · Esc to cancel',
+      ].join('\n')
+      const pasteCalls = tmux.pasteCalls
+      await expect(adapter.sendInput(h, '继续')).rejects.toMatchObject({
+        disposition: 'not_pasted',
+        control_state: 'waiting_action',
+        report: {
+          waitReason: 'interaction_required',
+          notification: { type: 'terminal_interaction' },
+          ui: {
+            fingerprint: 'claude_selector:options',
+            actions: expect.arrayContaining([
+              { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+              { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+              { action_id: 'select_1', kind: 'keys', keys: ['1', 'Enter'] },
+              { action_id: 'select_2', kind: 'keys', keys: ['2', 'Enter'] },
+              { action_id: 'select_3', kind: 'keys', keys: ['3', 'Enter'] },
+            ]),
+          },
+        },
+      })
+      expect(tmux.pasteCalls).toBe(pasteCalls)
+      await expect(adapter.state(h)).resolves.toBe('idle')
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
 })
 
 describe('ClaudeCodeAdapter retain-on-exit failure', () => {
@@ -3363,6 +3408,50 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       expect(tmux.pasteTextCalls).toEqual([])
       expect(await submissions()).toEqual([])
       expect(h.session_ref).toMatch(/^[0-9a-f-]{36}$/) // cc 的 session id 是自己定的,不受影响
+    },
+    30000,
+  )
+
+  it(
+    '启动投递遇到真实 MCP 选择器 → 保留 prompt 未投递并把操作交给 Manager',
+    async () => {
+      const banner = [
+        'New MCP server found in this project: arXivPaper',
+        '',
+        'MCP servers may execute code or access system resources. All tool calls',
+        'require approval. Learn more in the MCP documentation.',
+        '',
+        '❯ 1. Use this MCP server',
+        '  2. Use this and all future MCP servers in this project',
+        '  3. Continue without using this MCP server',
+        '',
+        'Enter to confirm · Esc to cancel',
+      ].join('\n')
+      const { adapter, workerId } = await makeAdapter({ banner })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      expect(tmux.pasteTextCalls).toEqual([])
+      expect(await submissions()).toEqual([])
+      expect(h.initial_input).toMatchObject({
+        control_state: 'waiting_action',
+        disposition: 'not_pasted',
+        report: {
+          waitReason: 'interaction_required',
+          notification: { type: 'terminal_interaction' },
+          ui: {
+            fingerprint: 'claude_selector:options',
+            actions: [
+              { action_id: 'confirm', kind: 'keys', keys: ['Enter'] },
+              { action_id: 'cancel', kind: 'keys', keys: ['Escape'] },
+              { action_id: 'select_1', kind: 'keys', keys: ['1', 'Enter'] },
+              { action_id: 'select_2', kind: 'keys', keys: ['2', 'Enter'] },
+              { action_id: 'select_3', kind: 'keys', keys: ['3', 'Enter'] },
+            ],
+          },
+          terminal: { kind: 'live_terminal', text: expect.stringContaining('Enter to confirm') },
+        },
+      })
+      expect(await adapter.state(h)).toBe('idle')
     },
     30000,
   )

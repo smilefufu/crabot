@@ -867,6 +867,22 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       return { control_state: 'running', disposition: 'accepted' }
     }
 
+    // Input probing deliberately refuses to write through an active TUI selector. If the
+    // selector is manager-owned, preserve the not-pasted delivery and expose its bounded
+    // actions instead of collapsing the failure into generic input_surface_unavailable.
+    const interaction = classifyClaudeTerminalInteraction(result.snapshot)
+    if (interaction.kind === 'manager_required') {
+      const report: StateChangeReport = {
+        terminal: this.liveTerminal(result.snapshot),
+        waitReason: 'interaction_required',
+        ui: { fingerprint: interaction.fingerprint, actions: interaction.actions },
+        notification: { type: 'terminal_interaction' },
+      }
+      const next: CliControlState = { kind: 'waiting_action', reason: 'interaction_required' }
+      await this.transitionControlState(runtime, h, next, report, notify)
+      return { control_state: next.kind, disposition: pasted ? 'pending_in_ui' : 'not_pasted', report }
+    }
+
     const next: CliControlState =
       mode === 'steering' && runtime.controlState.kind === 'running'
         ? { kind: 'running' }
