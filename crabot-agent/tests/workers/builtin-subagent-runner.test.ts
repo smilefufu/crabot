@@ -1,0 +1,143 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { promises as fs } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { BuiltinSubagentRunner } from '../../src/workers/builtin/subagent-runner.js'
+import { BgEntityRegistry } from '../../src/engine/bg-entities/registry.js'
+import type { TraceStore } from '../../src/core/trace-store.js'
+import type { LSPManager } from '../../src/lsp/lsp-manager.js'
+import type { SubAgentConfig } from '../../src/types.js'
+import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
+
+const { createAdapter, forkEngine, spawnPersistentAgent } = vi.hoisted(() => ({
+  createAdapter: vi.fn(),
+  forkEngine: vi.fn(),
+  spawnPersistentAgent: vi.fn(),
+}))
+
+vi.mock('../../src/engine/llm-adapter.js', () => ({ createAdapter }))
+vi.mock('../../src/engine/sub-agent.js', () => ({ forkEngine }))
+vi.mock('../../src/engine/bg-entities/bg-agent.js', () => ({ spawnPersistentAgent }))
+
+function testSubagent(): SubAgentConfig {
+  return {
+    id: 'code-writer',
+    name: 'code_writer',
+    description: '编写代码',
+    when_to_use: '需要实现时使用',
+    model: { endpoint: 'https://example.test', apikey: 'test', model_id: 'test-model', format: 'openai' },
+    max_turns: 3,
+    builtin_capabilities: { file_system: true, shell: true, task_intel: false, crab_memory: false, crab_messaging: false },
+    allowed_mcp_server_ids: [],
+    allowed_skill_ids: [],
+    hook_preset: 'lsp_diagnostics',
+  } as SubAgentConfig
+}
+
+function executionContext() {
+  return {
+    permissionConfig: { mode: 'bypass' as const },
+    resolvedPermissions: BUILTIN_WORKER_PERMISSIONS,
+  }
+}
+
+describe('BuiltinSubagentRunner execution boundary', () => {
+  let dir: string
+  let registry: BgEntityRegistry
+  const lspManager = {} as LSPManager
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    dir = await fs.mkdtemp(join(tmpdir(), 'builtin-subagent-runner-'))
+    process.env.DATA_DIR = dir
+    registry = new BgEntityRegistry(join(dir, 'registry.json'))
+    createAdapter.mockReturnValue({})
+  })
+
+  afterEach(async () => {
+    delete process.env.DATA_DIR
+    await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  it('拒绝在 AgentHandler 注入共享 registry 前运行', async () => {
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager)
+    await expect(runner.recoverAfterRestart()).rejects.toThrow('registry is unavailable')
+  })
+
+  it('异步 child 继承 Worker 权限和完整执行 hooks', async () => {
+    spawnPersistentAgent.mockResolvedValue('agent-child')
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+
+    await runner.run(
+      testSubagent(),
+      { task: '运行测试' },
+      { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } },
+      [],
+      executionContext(),
+    )
+
+    const options = spawnPersistentAgent.mock.calls[0][0]
+    expect(options.permissionConfig).toEqual(executionContext().permissionConfig)
+    expect(options.resolvedPermissions).toEqual(BUILTIN_WORKER_PERMISSIONS)
+    expect(options.senderIsMaster).toBe(false)
+    expect(options.lspManager).toBe(lspManager)
+    expect(options.hookRegistry.getMatching('PreToolUse', { toolName: 'Bash', toolInput: { command: 'crabot config get' } })).toHaveLength(1)
+    expect(options.hookRegistry.getMatching('PreToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
+    expect(options.hookRegistry.getMatching('PostToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
+  })
+
+  it('同步 child 同样继承 Worker 权限和完整执行 hooks', async () => {
+    forkEngine.mockResolvedValue({ outcome: 'completed', output: '完成', usage: { inputTokens: 1, outputTokens: 1 }, totalTurns: 1 })
+    const traceStore = {
+      startTrace: vi.fn(() => ({ trace_id: 'trace-child' })),
+      endTrace: vi.fn(),
+    } as unknown as TraceStore
+    const runner = new BuiltinSubagentRunner(traceStore, lspManager, undefined, registry)
+
+    await runner.run(
+      testSubagent(),
+      { task: '运行测试', sync: true },
+      { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } },
+      [],
+      executionContext(),
+    )
+
+    const options = forkEngine.mock.calls[0][0]
+    expect(options.permissionConfig).toEqual(executionContext().permissionConfig)
+    expect(options.resolvedPermissions).toEqual(BUILTIN_WORKER_PERMISSIONS)
+    expect(options.senderIsMaster).toBe(false)
+    expect(options.lspManager).toBe(lspManager)
+    expect(options.hookRegistry.getMatching('PreToolUse', { toolName: 'Bash', toolInput: { command: 'crabot config get' } })).toHaveLength(1)
+    expect(options.hookRegistry.getMatching('PreToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
+    expect(options.hookRegistry.getMatching('PostToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
+  })
+})
+
+describe('BuiltinSubagentRunner restart recovery', () => {
+  it('marks only Worker-owned running children as interrupted after an Agent restart', async () => {
+    const dir = await fs.mkdtemp(join(tmpdir(), 'builtin-subagent-recovery-'))
+    try {
+      const registry = new BgEntityRegistry(join(dir, 'registry.json'))
+      await registry.register({
+        entity_id: 'agent-worker-child', type: 'agent', status: 'running',
+        subagent_type: 'code_writer', trace_id: 'trace-child', task_description: '实现变更',
+        messages_log_file: join(dir, 'child.jsonl'), result_file: null,
+        owner: { friend_id: '__builtin_worker__', worker_id: 'worker-1' }, spawned_by_task_id: 'worker-1',
+        spawned_at: '2026-08-22T00:00:00.000Z', exit_code: null, ended_at: null, last_activity_at: '2026-08-22T00:00:00.000Z',
+      })
+      await registry.register({
+        entity_id: 'agent-other-owner', type: 'agent', status: 'running',
+        task_description: '不属于 Worker', messages_log_file: join(dir, 'other.jsonl'), result_file: null,
+        owner: { friend_id: 'friend-1' }, spawned_by_task_id: 'task-1',
+        spawned_at: '2026-08-22T00:00:00.000Z', exit_code: null, ended_at: null, last_activity_at: '2026-08-22T00:00:00.000Z',
+      })
+      const runner = new BuiltinSubagentRunner({} as TraceStore, {} as LSPManager, undefined, registry)
+
+      await expect(runner.recoverAfterRestart()).resolves.toBe(1)
+      await expect(runner.list('worker-1')).resolves.toMatchObject([{ subagent_id: 'agent-worker-child', status: 'interrupted' }])
+      await expect(registry.get('agent-other-owner')).resolves.toMatchObject({ status: 'running' })
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+})

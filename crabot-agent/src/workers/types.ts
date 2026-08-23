@@ -200,6 +200,30 @@ export interface NormalizedTraceEvent {
    * 归一化跳过的行也消费行号，composite 钳制与 copy 回退必须按它而不是事件条数。
    */
   readonly source_offset?: number
+  /** Parent Worker trace entry may identify one directly-started child. */
+  readonly subagent_id?: string
+}
+
+export type WorkerSubagentStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'stopped'
+  | 'interrupted'
+  | 'unknown'
+
+/** A directly-started child reported by a Worker implementation. */
+export interface WorkerSubagentSummary {
+  readonly subagent_id: string
+  readonly worker_id: string
+  readonly executor_impl: WorkerImplId
+  readonly type?: string
+  readonly name: string
+  readonly task?: string
+  readonly status: WorkerSubagentStatus
+  readonly started_at?: string
+  readonly ended_at?: string
+  readonly unavailable_reason?: string
 }
 
 export type WorkerActivityKind = 'assistant_text' | 'tool_call' | 'tool_result'
@@ -425,6 +449,14 @@ export interface WorkerAdapter {
     cursor?: { readonly offset: number },
   ): Promise<SupervisionObservation>
   readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }>
+  /** Direct native child sessions only. Implementations must not infer children from parent tool text. */
+  listSubagents?(h: IncarnationHandle): Promise<WorkerSubagentSummary[]>
+  getSubagent?(h: IncarnationHandle, subagentId: string): Promise<WorkerSubagentSummary | undefined>
+  readSubagentTrace?(h: IncarnationHandle, subagentId: string, cursor?: TraceCursor): Promise<{
+    events: NormalizedTraceEvent[]
+    nextCursor: TraceCursor
+    unavailableReason?: string
+  }>
   /** Request only the active turn to stop. Completion is verified by Harness control operations. */
   interrupt?(h: IncarnationHandle): Promise<void>
   /** Stop the adapter-owned execution. Completion is verified by Harness control operations. */

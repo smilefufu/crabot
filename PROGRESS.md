@@ -62,6 +62,14 @@
 
 ### P6 后 Traces / Worker 生命周期（当前主线）
 
+- **Worker 直接 subagent 可观测性（v3.6.7，`feat/worker-subagent-observability`）**：按已确认的
+  `crabot-docs` 设计与协议增补，builtin Worker 恢复 configured `delegate_task`；builtin、Claude Code、
+  Codex 统一列出 Worker 直接启动的 child，Worker 详情读取分页 trace，child 详情读取自己的分页 trace。
+  Admin 不按执行器拆 tab；CLI child trace 运行时优先读取原生 child 会话/记录，终态 child 保存 Agent-owned 脱敏副本，后续统一 Worker retention（PR B）按同一 Worker 清理单元删除；副本待补齐或原生先丢失时保留详情并显示脱敏原因。
+  定向测试、页面验收和构建已通过，待非 Draft PR review。
+- **CLI child Trace 收割节奏（已确认并实现）**：按 `crabot-docs/superpowers/specs/2026-08-23-cli-subagent-trace-harvest-scheduling-design.md`，activity 触发采用按 Worker 固定 30 秒合并窗口，同一 Worker 收割不并发；父 Worker 终态立即收割；启动恢复只读取已持久标记为 pending 的 child，并按 Worker 隔离失败。收割只影响显示副本，不持续捕获运行中 child 输出。
+- **builtin 子 Agent 身份留存（已确认并实现）**：按 `crabot-docs/superpowers/specs/2026-08-23-builtin-subagent-record-retention-design.md`，Worker `delegate_task` 创建的 builtin child 身份记录不参与普通后台实体 7 天 GC，跟随所属 Worker retention 事务清理；普通后台 Agent、未归属 Worker 的 Agent 和 shell 保持原有规则。
+
 - **Traces 人话视图 + 有界决策视野**：**已合并**（PR #100 → `f7e3aaf`，@claude approve 后自动合并）。Managers 用 `渠道·会话标题`、active worker 数和最近活动替代裸 ManagerKey/Episodes/历史总数；Manager detail 上浮消息摘录/回复/动作并按 worker 因果链折叠；Workers 默认只显示非终态。恢复 v2 dispatcher 不变量：`list_workers` 默认只看 `queued/running/waiting_input`，终态续办需显式分页 `include_terminal=true`；Manager 页面计数与工具视野同源。生产实测 system-tasks 2389 历史→6 active，工具实际 12 active/53 terminal。协议：agent v3.2.0、admin v0.2.2。
 - **统一 Worker Runtime（v3.6.0，待 PR review）**：本次统一替代原 v3.4/v3.5 的分离待审状态；CLI 的 pane 只用于 bracketed-paste 控制和 Manager 按需诊断，不再作为正常进度或 handoff 来源。Claude `Notification`、Codex `PermissionRequest` 与重连检查识别到的未知 UI 以一次性 snapshot + adapter 固定 action descriptor 交给 Manager，不能形成自由 tmux 按键入口；原生 session activity、完成回合、可核验 stop 与私有 handoff package 同属该 PR。
 - **Worker 重启恢复通知（已实现，待 PR review）**：主线执行载体确认消失时，Harness 与 `crashed` 原子写入持久 `recovery_notices`，在既有对账完成后只唤醒 owning Manager；首次立即尝试、未消费按 `30 秒 -> 1 分钟 -> 2 分钟 -> 5 分钟` 持久退避。仅重启 Agent 而 tmux 仍存活时重连；builtin `idle` 在下一条输入按同一会话按需重建。Harness 不自动续跑、重启、handoff 或向人类汇报。

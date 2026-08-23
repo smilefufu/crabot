@@ -88,6 +88,7 @@ export type WorkerTaskStatus =
   | 'queued' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled'
 
 export interface WorkerIncarnation {
+  incarnation_id?: string
   seq: number
   impl: 'builtin' | 'claude-code' | 'codex' | 'legacy'
   state: string
@@ -96,7 +97,7 @@ export interface WorkerIncarnation {
   ended_at?: string
   ended_reason?: string
   session_ref?: string
-  forked_from?: number
+  forked_from?: number | string
 }
 
 export interface LedgerWorker {
@@ -137,6 +138,7 @@ export interface WorkerTraceEvent {
   kind: 'message' | 'llm_call' | 'tool_call' | 'tool_result' | 'thinking' | 'lifecycle'
   role?: 'assistant' | 'user' | 'system'
   summary: string
+  subagent_id?: string
   detail?: unknown
   source?: 'harness' | 'native' | 'legacy'
 }
@@ -144,6 +146,27 @@ export interface WorkerTraceEvent {
 export interface WorkerTraceResult {
   events: WorkerTraceEvent[]
   next_cursor?: string
+  unavailable_reason?: string
+}
+
+export type WorkerSubagentStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'interrupted' | 'unknown'
+
+export interface WorkerSubagentSummary {
+  subagent_id: string
+  worker_id: string
+  executor_impl: 'builtin' | 'claude-code' | 'codex'
+  type?: string
+  name: string
+  task?: string
+  status: WorkerSubagentStatus
+  started_at?: string
+  ended_at?: string
+  unavailable_reason?: string
+}
+
+export interface WorkerSubagentTraceResult {
+  events: WorkerTraceEvent[]
+  next_cursor: string
   unavailable_reason?: string
 }
 
@@ -228,6 +251,24 @@ export const agentObservabilityService = {
     if (opts.seq !== undefined) search.set('seq', String(opts.seq))
     const suffix = search.toString()
     return api.get(`/agent/workers/${encodeURIComponent(workerId)}/terminal${suffix ? `?${suffix}` : ''}`)
+  },
+
+  listWorkerSubagents(workerId: string, incarnationId?: string): Promise<{ subagents: WorkerSubagentSummary[] }> {
+    const search = new URLSearchParams()
+    if (incarnationId) search.set('incarnation_id', incarnationId)
+    const suffix = search.toString()
+    return api.get(`/agent/workers/${encodeURIComponent(workerId)}/subagents${suffix ? `?${suffix}` : ''}`)
+  },
+
+  getWorkerSubagentDetail(workerId: string, subagentId: string): Promise<{ subagent: WorkerSubagentSummary }> {
+    return api.get(`/agent/workers/${encodeURIComponent(workerId)}/subagents/${encodeURIComponent(subagentId)}`)
+  },
+
+  getWorkerSubagentTrace(workerId: string, subagentId: string, cursor?: string): Promise<WorkerSubagentTraceResult> {
+    const search = new URLSearchParams()
+    if (cursor) search.set('cursor', cursor)
+    const suffix = search.toString()
+    return api.get(`/agent/workers/${encodeURIComponent(workerId)}/subagents/${encodeURIComponent(subagentId)}/trace${suffix ? `?${suffix}` : ''}`)
   },
 
   // ── 维护面 ──

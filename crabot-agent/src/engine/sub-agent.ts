@@ -1,5 +1,6 @@
 import type { LLMAdapter } from './llm-adapter'
 import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock, HumanMessageQueueLike, ToolPermissionConfig } from './types'
+import type { ResolvedPermissions } from '../types'
 import type { TraceStore } from '../core/trace-store'
 import { runEngine } from './query-loop'
 
@@ -35,6 +36,10 @@ export interface ForkEngineParams {
   readonly lspManager?: import('../hooks/types').LspManagerLike
   /** 继承自父（Worker）的 permissionConfig；sub-agent 使用的工具子集仍需遵循相同权限策略 */
   readonly permissionConfig?: ToolPermissionConfig
+  /** 继承自父 Worker 的权限快照，供 CLI permission gate 使用。 */
+  readonly resolvedPermissions?: ResolvedPermissions
+  /** 子 Agent 没有可验证的发起人身份，不能绕过 CLI permission gate。 */
+  readonly senderIsMaster?: boolean
 }
 
 export interface ForkEngineResult {
@@ -92,6 +97,8 @@ export async function forkEngine(params: ForkEngineParams): Promise<ForkEngineRe
       hookRegistry: params.hookRegistry,
       lspManager: params.lspManager,
       permissionConfig: params.permissionConfig,
+      resolvedPermissions: params.resolvedPermissions,
+      senderIsMaster: params.senderIsMaster,
       // subagent 内禁用 compaction：靠 maxTurns 控规模，避免父侧无感知的隐式压缩 +
       // 嵌套 LLM call。详见 EngineOptions.disableCompaction 注释。
       disableCompaction: true,

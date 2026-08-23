@@ -55,6 +55,13 @@ function hasPendingExitNotification(record: BgEntityRecord): boolean {
   return record.type === 'shell' && record.exit_notification?.status === 'pending'
 }
 
+/** Worker delegate_task identities belong to Worker observability retention, not the 7d entity GC. */
+function isWorkerOwnedBuiltinAgent(record: BgEntityRecord): boolean {
+  return record.type === 'agent'
+    && record.owner.worker_id !== undefined
+    && record.spawned_by_task_id === record.owner.worker_id
+}
+
 // ---------------------------------------------------------------------------
 // PID starttime helper：复用 bg-shell 的健壮版（带 ps-parse 失败兜底），避免重复实现，
 // 也避免本文件旧拷贝在某些 locale 下 `new Date(...).toISOString()` 在 execFile 回调里
@@ -275,6 +282,9 @@ export class BgEntityRegistry {
     const cutoffMs = now.getTime() - BG_ENTITY_GC_AFTER_DAYS * 24 * 60 * 60 * 1000
     const removed = await this.deleteEntriesWhere((rec) => {
       if (rec.status === 'running' || hasPendingExitNotification(rec)) return false
+      // Worker-owned builtin child identities remain addressable while their Worker is retained;
+      // the unified Worker retention transaction removes them with that Worker later.
+      if (isWorkerOwnedBuiltinAgent(rec)) return false
       const lastActivityMs = new Date(rec.last_activity_at).getTime()
       const endedMs = rec.ended_at ? new Date(rec.ended_at).getTime() : 0
       return Math.max(lastActivityMs, endedMs) < cutoffMs

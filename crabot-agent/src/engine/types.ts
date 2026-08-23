@@ -126,6 +126,11 @@ export interface ToolCallContext {
   readonly onProgress?: (message: string) => void
   /** IANA 时区名（如 "Asia/Shanghai"），用于 tool_result 时间戳渲染 */
   readonly timezone?: string
+  /** Injected only while a builtin Worker invokes delegate_task. */
+  readonly worker_subagent?: {
+    readonly worker_id: string
+    readonly parent_trace_id?: string
+  }
 }
 
 export interface ToolCallResult {

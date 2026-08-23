@@ -371,4 +371,55 @@ describe('readCompositeWorkerTrace', () => {
     expect(result.events.filter((event) => event.source === 'native')).toHaveLength(0)
     expect(result.unavailable_reason).toContain('native unavailable')
   })
+
+  it('删除 Worker 的副本时同时删除其 child trace，且不影响其他 Worker', async () => {
+    const fingerprint = incarnationFingerprint({
+      incarnation_id: INCARNATION_ID,
+      impl: 'claude-code',
+      seq: 1,
+      started_at: '2026-08-01T00:00:00.000Z',
+    })
+    const child = {
+      subagent_id: 'child-1', worker_id: WORKER_ID, executor_impl: 'claude-code' as const,
+      name: 'Child', status: 'completed' as const, started_at: '2026-08-01T00:00:00.000Z',
+    }
+    await nativeCopy.append(WORKER_ID, 1, fingerprint, [nativeEventAt('parent', '2026-08-01T00:00:01.000Z', 0)], (text) => text)
+    await nativeCopy.completeSubagentCapture(WORKER_ID, INCARNATION_ID, child, 'child-fingerprint', [
+      nativeEventAt('child', '2026-08-01T00:00:01.000Z', 0),
+    ], 1, (text) => text)
+    await nativeCopy.append('w-comp-other', 1, 'other-fingerprint', [nativeEventAt('other', '2026-08-01T00:00:01.000Z', 0)], (text) => text)
+
+    await nativeCopy.removeWorker(WORKER_ID)
+
+    await expect(nativeCopy.read(WORKER_ID, 1, fingerprint)).resolves.toBeNull()
+    await expect(nativeCopy.readSubagent(WORKER_ID, 'child-1', 'child-fingerprint')).resolves.toBeNull()
+    await expect(nativeCopy.read('w-comp-other', 1, 'other-fingerprint')).resolves.toMatchObject({
+      events: [{ summary: 'other' }],
+    })
+  })
+
+  it('只枚举待补齐的 child，并保留父化身归属', async () => {
+    const pendingChild = {
+      subagent_id: 'child-pending', worker_id: WORKER_ID, executor_impl: 'codex' as const,
+      name: 'Pending child', status: 'completed' as const,
+      started_at: '2026-08-01T00:00:00.000Z', ended_at: '2026-08-01T00:01:00.000Z',
+    }
+    const completeChild = {
+      ...pendingChild, subagent_id: 'child-complete',
+    }
+    await nativeCopy.beginSubagentCapture(
+      WORKER_ID, INCARNATION_ID, pendingChild, 'pending-fingerprint', (text) => text,
+    )
+    await nativeCopy.completeSubagentCapture(
+      WORKER_ID, INCARNATION_ID, completeChild, 'complete-fingerprint', [], 0, (text) => text,
+    )
+
+    await expect(nativeCopy.listPendingSubagentCaptures()).resolves.toEqual([{
+      worker_id: WORKER_ID,
+      parent_incarnation_id: INCARNATION_ID,
+      subagent_id: 'child-pending',
+      subagent_fingerprint: 'pending-fingerprint',
+      summary: pendingChild,
+    }])
+  })
 })

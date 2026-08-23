@@ -34,6 +34,7 @@ import type {
   SkillConfig,
   TaskOrigin,
   WorkerAgentContext,
+  SubAgentConfig,
 } from './types.js'
 import { SessionManager } from './orchestration/session-manager.js'
 import { PermissionChecker } from './orchestration/permission-checker.js'
@@ -52,11 +53,14 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpConnector, filterMcpServersForWorker } from './agent/mcp-connector.js'
 import { mcpServerToToolDefinitions } from './agent/mcp-tool-bridge.js'
 import { createTmpPageTools } from './agent/tmp-page-tools.js'
+import { createDelegateTaskTool } from './agent/delegate-task-tool.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
 import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
 import { ConfigLoader } from './core/config-loader.js'
 import { TraceStore } from './core/trace-store.js'
+import { BuiltinSubagentRunner } from './workers/builtin/subagent-runner.js'
+import { BgEntityRegistry } from './engine/bg-entities/registry.js'
 import { importV2LegacyTasks } from './workers/legacy-importer.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
@@ -118,9 +122,15 @@ import {
   type GetWorkerTerminalResult,
   type GetWorkerTraceParams,
   type GetWorkerTraceResult,
+  type ListWorkerSubagentsParams,
+  type ListWorkerSubagentsResult,
+  type GetWorkerSubagentDetailParams,
+  type GetWorkerSubagentDetailResult,
+  type GetWorkerSubagentTraceParams,
+  type GetWorkerSubagentTraceResult,
 } from './manager/read-model.js'
 import { managerActivitySummary, projectManagerEpisode, withCausalParent, type EpisodeWorkerFact, type ManagerEpisodeProjection } from './manager/episode-projection.js'
-import type { NormalizedTraceEvent, SpawnSpec } from './workers/types.js'
+import type { IncarnationHandle, NormalizedTraceEvent, SpawnSpec, WorkerAdapter, WorkerSubagentSummary } from './workers/types.js'
 import {
   TaskCancelledError,
   WorkerHasNoIncarnationError,
@@ -131,6 +141,66 @@ import { SYSTEM_TASKS_MANAGER_KEY } from './manager/registry.js'
 import { splitManagerKey } from './manager/principal.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
+const CLI_SUBAGENT_HARVEST_DELAY_MS = 30_000
+
+interface CliSubagentHarvestWaiter {
+  readonly resolve: () => void
+  readonly reject: (error: unknown) => void
+}
+
+interface CliSubagentHarvestEntry {
+  readonly handle: IncarnationHandle
+  readonly adapter: WorkerAdapter
+  immediate: boolean
+  readonly waiters: CliSubagentHarvestWaiter[]
+}
+
+interface CliSubagentHarvestSchedule {
+  readonly pending: Map<string, CliSubagentHarvestEntry>
+  timer?: ReturnType<typeof setTimeout>
+  inFlight?: Promise<void>
+}
+
+function subagentTraceFingerprint(subagent: WorkerSubagentSummary): string {
+  return createHash('sha256')
+    .update(JSON.stringify({
+      executor_impl: subagent.executor_impl,
+      subagent_id: subagent.subagent_id,
+      started_at: subagent.started_at ?? '',
+    }))
+    .digest('hex')
+    .slice(0, 32)
+}
+
+function isTerminalSubagent(subagent: WorkerSubagentSummary): boolean {
+  return subagent.status === 'completed'
+    || subagent.status === 'failed'
+    || subagent.status === 'stopped'
+    || subagent.status === 'interrupted'
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function subagentIdFromDelegateTaskOutput(output: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(output)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const agentId = (parsed as Record<string, unknown>).agent_id
+    return typeof agentId === 'string' && agentId ? agentId : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function redactTraceDetail(detail: unknown, redact: (text: string) => string): unknown {
+  try {
+    return JSON.parse(redact(JSON.stringify(detail)))
+  } catch {
+    return '[unserializable detail removed]'
+  }
+}
 
 /**
  * fail-closed 兜底：权限解析失败时用最小权限（仅 messaging），避免未绑定模板或 Admin 不可用时放开全部工具。
@@ -437,6 +507,8 @@ export class UnifiedAgent extends ModuleBase {
   private adminPort?: number
   private traceCursorStoreInstance?: TraceCursorStore
   private nativeTraceCopyStoreInstance?: NativeTraceCopyStore
+  /** CLI child trace reads are best-effort and must never fan out with native activity frequency. */
+  private readonly cliSubagentHarvestSchedules = new Map<string, CliSubagentHarvestSchedule>()
   private adminChatCorrelationStoreInstance?: import('./manager/chat-correlation-store.js').AdminChatCorrelationStore
   private memoryPort?: number
   // Session memory_scopes 缓存（TTL 60s，session config 变更不频繁）
@@ -464,6 +536,8 @@ export class UnifiedAgent extends ModuleBase {
 
   /** Per-worker serialization preserves background-shell exit order across async log rendering. */
   private readonly builtinBgDeliveryTails = new Map<string, Promise<void>>()
+  /** One registry instance serializes Worker shells and builtin children across startup recovery. */
+  private readonly builtinBgRegistry = new BgEntityRegistry()
 
   /** fail-loud 兜底回复的按 key 冷却台账：`channel::session` → 上一条兜底回复发出的时刻。 */
   private readonly failLoudSentAt: Map<string, number> = new Map()
@@ -488,6 +562,7 @@ export class UnifiedAgent extends ModuleBase {
   // Trace 存储
   private traceStore: TraceStore
   private lspManager: LSPManager
+  private builtinSubagentRunner: BuiltinSubagentRunner
   private traceCleanupInterval?: ReturnType<typeof setInterval>
   private promptManager: PromptManager
 
@@ -532,6 +607,14 @@ export class UnifiedAgent extends ModuleBase {
       ['traces-', 'traces-v3-'],
     )
     this.lspManager = createLSPManager()
+    this.builtinSubagentRunner = new BuiltinSubagentRunner(
+      this.traceStore,
+      this.lspManager,
+      async (workerId, text) => {
+        await this.requireManagerStack().harness.sendToWorker(workerId, text)
+      },
+      this.builtinBgRegistry,
+    )
 
     this.promptManager = new PromptManager()
 
@@ -752,6 +835,12 @@ export class UnifiedAgent extends ModuleBase {
       readWorkerActivity: (params) => this.readWorkerActivity(params),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
       onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
+      // Parent native activity is already persisted by Harness. Only terminal direct CLI children
+      // are read here; running child output is never continuously captured.
+      onNativeActivityCollected: (handle) => {
+        const adapter = this.managerStack?.adapters.get(handle.impl)
+        if (adapter) void this.requestCliSubagentHarvest(handle, adapter)
+      },
       // P6-A §3.2：episode 消费（含沉默终态）即结算未 claim 的 request IDs。
       onAdminChatWakeConsumed: async (key, ids) => { await this.adminChatCorrelationStore().settleInbound(key, ids) },
       // 人类消息渲染的时区（`formatChannelMessageLine` 的 ts 属性）。与 worker 侧
@@ -1002,7 +1091,7 @@ export class UnifiedAgent extends ModuleBase {
    *
    * **装**：内置文件/shell 工具 + skills、crab-memory、外部 MCP、tmp-page / 生图。
    * **不装**：全部 messaging（v3 语义：worker 不直接跟人类说话）、`set_cwd`、goal 相关、
-   * `delegate_task`、`todo`、`find_task` / `get_task_progress`、
+   * `todo`、`find_task` / `get_task_progress`、
    * subagent coordinator / `request_restart`。它们不是被过滤掉的，而是根本不组装进来。
    */
   private buildBuiltinWorkerTools(ctx: BuiltinRuntimeContext): ReadonlyArray<EngineToolDefinition> {
@@ -1072,7 +1161,20 @@ export class UnifiedAgent extends ModuleBase {
     // 权限档位过滤：adapter 的 `checkPermission` 是执行期的闸，这里守的是
     // "没权限的工具不进 prompt"——外部 MCP 里可能混进 `desktop` 类工具（computer-use）。
     // 档位 = worker 固定档位 ∩ 派活人档位（见 `narrowWorkerPermissions`）。
-    return filterToolsByPermission(configFiltered, this.getToolPermissionConfig(configFiltered, workerPerms))
+    const permitted = filterToolsByPermission(configFiltered, this.getToolPermissionConfig(configFiltered, workerPerms))
+    const subagents = this.agentConfig?.subagents ?? []
+    if (subagents.length === 0) return permitted
+    const childPermissionConfig = this.getToolPermissionConfig(permitted, workerPerms)
+    return [...permitted, createDelegateTaskTool({
+      subAgents: subagents,
+      runSubAgent: (subagent, input, toolContext) => this.builtinSubagentRunner.run(
+        subagent,
+        input,
+        toolContext,
+        permitted,
+        { permissionConfig: childPermissionConfig, resolvedPermissions: workerPerms },
+      ),
+    })]
   }
 
   /**
@@ -1116,7 +1218,15 @@ export class UnifiedAgent extends ModuleBase {
       ...(this.agentConfig?.system_prompt ? { adminPersonality: this.agentConfig.system_prompt } : {}),
       ...(skillListing ? { skillListing } : {}),
       imageCapability: { available: this.imageCapability.available },
-      // availableSubAgents 不传：worker 不装 delegate_task。
+      ...(this.agentConfig?.subagents?.length
+        ? {
+            availableSubAgents: this.agentConfig.subagents.map((subagent) => ({
+              toolName: subagent.name,
+              workerHint: subagent.when_to_use.split('\n')[0] || subagent.description || subagent.name,
+            })),
+            subagentGuidance: 'builtin_worker' as const,
+          }
+        : {}),
     })
     const workspaceInstructions = ctx.workspace_instructions?.snapshot.source === 'agents_md'
       && ctx.workspace_instructions.text !== undefined
@@ -1193,7 +1303,9 @@ export class UnifiedAgent extends ModuleBase {
       promptManager: this.promptManager,
       ...(imageConnInfo ? { imageConnInfo } : {}),
       imageCapability,
+      bgRegistry: this.builtinBgRegistry,
     })
+    this.builtinSubagentRunner.setRegistry(handler.getBuiltinBgEntityRegistry())
     this.attachBuiltinShellExitDispatcher(handler)
     return handler
   }
@@ -1268,6 +1380,9 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
     this.registerMethod('get_worker_terminal', this.handleGetWorkerTerminal.bind(this))
     this.registerMethod('get_worker_trace', this.handleGetWorkerTrace.bind(this))
+    this.registerMethod('list_worker_subagents', this.handleListWorkerSubagents.bind(this))
+    this.registerMethod('get_worker_subagent_detail', this.handleGetWorkerSubagentDetail.bind(this))
+    this.registerMethod('get_worker_subagent_trace', this.handleGetWorkerSubagentTrace.bind(this))
   }
 
   // ============================================================================
@@ -3309,6 +3424,180 @@ export class UnifiedAgent extends ModuleBase {
     )
   }
 
+  private async handleListWorkerSubagents(params: ListWorkerSubagentsParams): Promise<ListWorkerSubagentsResult> {
+    if (!params || typeof params.worker_id !== 'string' || params.worker_id.length === 0) {
+      throw new Error('worker_id is required')
+    }
+    const stack = this.requireManagerStack()
+    return { subagents: await this.listWorkerSubagentSummaries(stack, params.worker_id, params.incarnation_id) }
+  }
+
+  private async handleGetWorkerSubagentDetail(params: GetWorkerSubagentDetailParams): Promise<GetWorkerSubagentDetailResult> {
+    if (!params || typeof params.worker_id !== 'string' || typeof params.subagent_id !== 'string' || !params.worker_id || !params.subagent_id) {
+      throw new Error('worker_id and subagent_id are required')
+    }
+    const subagent = await this.findWorkerSubagent(this.requireManagerStack(), params.worker_id, params.subagent_id)
+    if (!subagent) throw new Error(`Worker subagent not found: ${params.subagent_id}`)
+    return { subagent }
+  }
+
+  private async handleGetWorkerSubagentTrace(params: GetWorkerSubagentTraceParams): Promise<GetWorkerSubagentTraceResult> {
+    if (!params || typeof params.worker_id !== 'string' || typeof params.subagent_id !== 'string' || !params.worker_id || !params.subagent_id) {
+      throw new Error('worker_id and subagent_id are required')
+    }
+    const stack = this.requireManagerStack()
+    const subagent = await this.findWorkerSubagent(stack, params.worker_id, params.subagent_id)
+    if (!subagent) throw new Error(`Worker subagent not found: ${params.subagent_id}`)
+
+    const cursorWorkerId = `subagent:${params.worker_id}:${params.subagent_id}`
+    const fingerprint = subagentTraceFingerprint(subagent)
+    let cursorRecord: import('./workers/trace/cursor-store.js').TraceCursorRecord
+    if (params.cursor !== undefined) {
+      cursorRecord = await this.traceCursorStore().resolve(params.cursor, cursorWorkerId, fingerprint)
+    } else {
+      const token = await this.traceCursorStore().mint(cursorWorkerId, fingerprint, { harness: 0, native: 0, legacy: 0 })
+      cursorRecord = await this.traceCursorStore().resolve(token, cursorWorkerId, fingerprint)
+    }
+
+    const trace = await this.readWorkerSubagentTrace(
+      stack,
+      params.worker_id,
+      subagent,
+      { offset: cursorRecord.positions.native },
+    )
+    const replayBound = cursorRecord.window?.end.native
+    const events = trace.events.filter((event) => event.source_offset === undefined || replayBound === undefined || event.source_offset < replayBound)
+    const nativeEnd = replayBound ?? trace.nextCursor.offset
+    const cursorStore = this.traceCursorStore()
+    let nextToken: string
+    if (cursorRecord.window) {
+      nextToken = cursorRecord.window.nextToken
+    } else {
+      nextToken = await cursorStore.mint(cursorWorkerId, fingerprint, { harness: 0, native: nativeEnd, legacy: 0 })
+      await cursorStore.captureWindow(cursorRecord.token, {
+        end: { harness: 0, native: nativeEnd, legacy: 0 },
+        nextToken,
+      })
+    }
+    return {
+      events: events.map(({ source_offset: _dropped, ...event }) => {
+        const source = event.source ?? 'native'
+        return {
+          ...event,
+          source,
+          summary: redactSecrets(event.summary, [...this.knownSecrets]),
+          ...(event.detail === undefined ? {} : { detail: redactTraceDetail(event.detail, (text) => redactSecrets(text, [...this.knownSecrets])) }),
+        }
+      }),
+      next_cursor: nextToken,
+      ...(trace.unavailableReason ? { unavailable_reason: trace.unavailableReason } : {}),
+    }
+  }
+
+  /** Native records are primary. Retained CLI child summaries only fill holes after host rotation. */
+  private async listWorkerSubagentSummaries(
+    stack: ManagerStack,
+    workerId: string,
+    incarnationId?: string,
+  ): Promise<WorkerSubagentSummary[]> {
+    const live = await stack.harness.listWorkerSubagents(workerId, incarnationId)
+    const retained = await this.nativeTraceCopyStore().listSubagents(workerId, incarnationId)
+    const byId = new Map<string, WorkerSubagentSummary>()
+    for (const subagent of retained) byId.set(subagent.subagent_id, subagent)
+    for (const subagent of live) byId.set(subagent.subagent_id, subagent)
+    return [...byId.values()].sort((left, right) => (right.started_at ?? '').localeCompare(left.started_at ?? ''))
+  }
+
+  private async findWorkerSubagent(
+    stack: ManagerStack,
+    workerId: string,
+    subagentId: string,
+  ): Promise<WorkerSubagentSummary | undefined> {
+    const live = await stack.harness.getWorkerSubagent(workerId, subagentId)
+    if (live) return live
+    return (await this.nativeTraceCopyStore().listSubagents(workerId)).find((subagent) => subagent.subagent_id === subagentId)
+  }
+
+  private async readWorkerSubagentTrace(
+    stack: ManagerStack,
+    workerId: string,
+    subagent: WorkerSubagentSummary,
+    cursor: { offset: number },
+  ): Promise<{ events: NormalizedTraceEvent[]; nextCursor: { offset: number }; unavailableReason?: string }> {
+    let live: { events: NormalizedTraceEvent[]; nextCursor: { offset: number }; unavailableReason?: string } | undefined
+    let liveError: string | undefined
+    try {
+      live = await stack.harness.getWorkerSubagentTrace(workerId, subagent.subagent_id, cursor)
+      if (!live.unavailableReason) {
+        await this.completePendingCliSubagentCaptureFromRead(stack, workerId, subagent)
+        return live
+      }
+    } catch (error) {
+      console.warn(`[${this.config.moduleId}] child native trace read failed for ${workerId}/${subagent.subagent_id}:`, errorMessage(error))
+      liveError = 'CLI child source is unavailable'
+    }
+
+    let copied: import('./workers/trace/native-copy.js').StoredSubagentTrace | null
+    try {
+      copied = await this.nativeTraceCopyStore().readSubagent(
+        workerId,
+        subagent.subagent_id,
+        subagentTraceFingerprint(subagent),
+      )
+    } catch (error) {
+      console.warn(`[${this.config.moduleId}] child trace copy read failed for ${workerId}/${subagent.subagent_id}:`, errorMessage(error))
+      return {
+        events: [],
+        nextCursor: cursor,
+        unavailableReason: 'native unavailable; retained child trace copy is unavailable',
+      }
+    }
+    if (copied?.capture_status === 'complete') {
+      return {
+        events: copied.events.filter((event) => event.source_offset === undefined || event.source_offset >= cursor.offset),
+        nextCursor: { offset: copied.next_cursor_offset ?? cursor.offset },
+        unavailableReason: `native degraded (served from agent-owned child copy): ${live?.unavailableReason ?? liveError ?? 'source unavailable'}`,
+      }
+    }
+
+    const unavailableReason = live?.unavailableReason ?? liveError ?? 'CLI child record is no longer available'
+    return {
+      events: [],
+      nextCursor: cursor,
+      unavailableReason: copied?.capture_status === 'pending'
+        ? `native unavailable before terminal child trace capture: ${copied.unavailable_reason ?? unavailableReason}`
+        : `native unavailable: ${unavailableReason}`,
+    }
+  }
+
+  /** A successful detail read is another bounded chance to finish an interrupted terminal snapshot. */
+  private async completePendingCliSubagentCaptureFromRead(
+    stack: ManagerStack,
+    workerId: string,
+    subagent: WorkerSubagentSummary,
+  ): Promise<void> {
+    if (!isTerminalSubagent(subagent) || (subagent.executor_impl !== 'claude-code' && subagent.executor_impl !== 'codex')) return
+    const fingerprint = subagentTraceFingerprint(subagent)
+    const copyStore = this.nativeTraceCopyStore()
+    try {
+      const existing = await copyStore.readSubagent(workerId, subagent.subagent_id, fingerprint)
+      if (existing?.capture_status !== 'pending') return
+      const trace = await stack.harness.getWorkerSubagentTrace(workerId, subagent.subagent_id, { offset: 0 })
+      if (trace.unavailableReason) return
+      await copyStore.completeSubagentCapture(
+        workerId,
+        existing.parent_incarnation_id,
+        subagent,
+        fingerprint,
+        trace.events,
+        trace.nextCursor.offset,
+        (text) => redactSecrets(text, [...this.knownSecrets]),
+      )
+    } catch (error) {
+      console.warn(`[${this.config.moduleId}] child native trace read retry failed for ${workerId}/${subagent.subagent_id}:`, errorMessage(error))
+    }
+  }
+
   /**
    * Manager 的常规 worker 观察面只投射原生会话内容；Harness 生命周期事件保留给被动唤醒，
    * 不与 worker 的 assistant 正文混在一起。cursor 仍由 composite reader 统一维护；调用方
@@ -3380,6 +3669,9 @@ export class UnifiedAgent extends ModuleBase {
         this.traceStore.endSpan(traceId, llmSpan.span_id, 'completed', undefined,
           event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined ? event.llmStartedAtMs + event.llmCallMs : undefined)
         for (const toolCall of event.toolCalls) {
+          const subagentId = toolCall.name === 'delegate_task'
+            ? subagentIdFromDelegateTaskOutput(toolCall.output)
+            : undefined
           const span = this.traceStore.startSpan(traceId, {
             type: 'tool_call',
             parent_span_id: llmSpan.span_id,
@@ -3387,6 +3679,7 @@ export class UnifiedAgent extends ModuleBase {
               name: toolCall.name,
               input_summary: redact(JSON.stringify(toolCall.input).slice(0, 300)),
               output_summary: redact(toolCall.output.slice(0, 300)),
+              ...(subagentId ? { subagent_id: subagentId } : {}),
             } as import('./types.js').AgentSpanDetails,
             started_at_ms: toolCall.startedAtMs,
           })
@@ -3397,18 +3690,26 @@ export class UnifiedAgent extends ModuleBase {
       finishIncarnationTrace: (traceId, patch) => {
         this.traceStore.endTrace(traceId, patch.status, { summary: redact(patch.summary) })
       },
+      stopWorkerSubagents: (workerId) => {
+        void this.builtinSubagentRunner.stopWorker(workerId).catch((error) => {
+          console.warn(`[${this.config.moduleId}] builtin subagent stop failed for ${workerId}:`, error)
+        })
+      },
     }
   }
 
   private builtinTraceReader(): import('./workers/builtin/adapter.js').BuiltinTraceReader {
     return {
       readTrace: async (traceId) => this.traceStore.getFullTrace(traceId),
+      listSubagents: (workerId) => this.builtinSubagentRunner.list(workerId),
+      getSubagent: (workerId, subagentId) => this.builtinSubagentRunner.get(workerId, subagentId),
+      readSubagentTrace: (workerId, subagentId, cursor) => this.builtinSubagentRunner.readTrace(workerId, subagentId, cursor),
     }
   }
 
   /**
-   * 化身终态收割（P6-A §8.10）：做最后一次 native read，把剩余增量写 Agent-owned copy。
-   * copy 只装本化身、脱敏后的归一化事件（不含 setup terminal / credential / 其它 session）。
+   * 化身终态收割（P6-A §8.10 / §10.3）：保留父化身和已确认终态 CLI child 的独立原生 trace。
+   * copy 只装本化身/child、脱敏后的归一化事件（不含 setup terminal / credential / 其它 session）。
    */
   private async harvestIncarnationNativeTrace(handle: import('./workers/types.js').IncarnationHandle): Promise<void> {
     try {
@@ -3419,30 +3720,226 @@ export class UnifiedAgent extends ModuleBase {
       const incarnation = found.worker.incarnations.find((item) => item.seq === handle.seq && item.impl === handle.impl)
       if (!incarnation) return
       const adapter = stack.adapters.get(handle.impl)
-      if (!adapter?.readTrace) return
-      const fingerprint = incarnationFingerprint({
-        incarnation_id: incarnation.incarnation_id,
-        impl: handle.impl as import('./workers/types.js').WorkerImplId,
-        seq: handle.seq,
-        started_at: (incarnation as { started_at?: string }).started_at,
-      })
-      // 终态收割是全量快照：copy 的「事件条数」≠ native 的「已消费行数」（坏行/未知行
-      // 也消费行号），拿它当 offset 会漏读+重写。终态时 live source 已完整，从头读并整体
-      // 覆盖 copy（append 的指纹替换语义保证不混入旧内容）。
-      const native = await adapter.readTrace(handle, { offset: 0 })
-      if (native.events.length > 0) {
-        await this.nativeTraceCopyStore().append(
-          handle.worker_id,
-          handle.seq,
-          fingerprint,
-          native.events,
-          (text) => redactSecrets(text, [...this.knownSecrets]),
-          { replace: true },
-        )
+      if (!adapter) return
+      if (adapter.readTrace) {
+        try {
+          const fingerprint = incarnationFingerprint({
+            incarnation_id: incarnation.incarnation_id,
+            impl: handle.impl as import('./workers/types.js').WorkerImplId,
+            seq: handle.seq,
+            started_at: (incarnation as { started_at?: string }).started_at,
+          })
+          // 终态收割是全量快照：copy 的「事件条数」≠ native 的「已消费行数」（坏行/未知行
+          // 也消费行号），拿它当 offset 会漏读+重写。终态时 live source 已完整，从头读并整体
+          // 覆盖 copy（append 的指纹替换语义保证不混入旧内容）。
+          const native = await adapter.readTrace(handle, { offset: 0 })
+          if (native.events.length > 0) {
+            await this.nativeTraceCopyStore().append(
+              handle.worker_id,
+              handle.seq,
+              fingerprint,
+              native.events,
+              (text) => redactSecrets(text, [...this.knownSecrets]),
+              { replace: true },
+            )
+          }
+        } catch (error) {
+          console.warn(`[${this.config.moduleId}] parent native trace terminal harvest failed for ${handle.worker_id}#${handle.seq}:`, errorMessage(error))
+        }
       }
+      await this.requestCliSubagentHarvest(handle, adapter, true)
     } catch (error) {
       console.warn(`[${this.config.moduleId}] native trace terminal harvest failed for ${handle.worker_id}#${handle.seq}:`,
-        error instanceof Error ? error.message : String(error))
+        errorMessage(error))
+    }
+  }
+
+  /**
+   * Coalesce activity-triggered child reads. The worker-level queue is deliberately separate
+   * from the adapter state machine: a slow app-server probe can delay observability only, while
+   * never creating a second probe for the same Worker at the same time.
+   */
+  private requestCliSubagentHarvest(
+    handle: IncarnationHandle,
+    adapter: WorkerAdapter,
+    immediate = false,
+  ): Promise<void> {
+    if (this.runtimeClosing && !immediate) return Promise.resolve()
+    const workerId = handle.worker_id
+    let schedule = this.cliSubagentHarvestSchedules.get(workerId)
+    if (!schedule) {
+      schedule = { pending: new Map() }
+      this.cliSubagentHarvestSchedules.set(workerId, schedule)
+    }
+    const requestKey = `${handle.impl}#${handle.seq}#${handle.incarnation_id ?? handle.session_ref}`
+    let resolveWaiter: (() => void) | undefined
+    let rejectWaiter: ((error: unknown) => void) | undefined
+    const result = immediate
+      ? new Promise<void>((resolve, reject) => {
+        resolveWaiter = resolve
+        rejectWaiter = reject
+      })
+      : Promise.resolve()
+    let entry = schedule.pending.get(requestKey)
+    if (!entry) {
+      entry = { handle, adapter, immediate, waiters: [] }
+      schedule.pending.set(requestKey, entry)
+    } else if (immediate) {
+      entry.immediate = true
+    }
+    if (resolveWaiter && rejectWaiter) entry.waiters.push({ resolve: resolveWaiter, reject: rejectWaiter })
+
+    if (schedule.inFlight) return result
+    if (immediate) {
+      if (schedule.timer) {
+        clearTimeout(schedule.timer)
+        schedule.timer = undefined
+      }
+      void this.drainCliSubagentHarvest(workerId, schedule)
+    } else if (!schedule.timer) {
+      schedule.timer = setTimeout(() => {
+        schedule!.timer = undefined
+        void this.drainCliSubagentHarvest(workerId, schedule!)
+      }, CLI_SUBAGENT_HARVEST_DELAY_MS)
+      schedule.timer.unref?.()
+    }
+    return result
+  }
+
+  private async drainCliSubagentHarvest(workerId: string, schedule: CliSubagentHarvestSchedule): Promise<void> {
+    if (schedule.inFlight) return
+    const batch = Array.from(schedule.pending.values())
+    schedule.pending.clear()
+    if (batch.length === 0) {
+      if (this.cliSubagentHarvestSchedules.get(workerId) === schedule) this.cliSubagentHarvestSchedules.delete(workerId)
+      return
+    }
+
+    const inFlight = (async () => {
+      for (const entry of batch) {
+        try {
+          await this.harvestTerminalCliSubagentTraces(entry.handle, entry.adapter)
+          for (const waiter of entry.waiters) waiter.resolve()
+        } catch (error) {
+          console.warn(
+            `[${this.config.moduleId}] CLI child trace harvest failed for ${entry.handle.worker_id}#${entry.handle.seq}:`,
+            errorMessage(error),
+          )
+          for (const waiter of entry.waiters) waiter.reject(error)
+        }
+      }
+    })()
+    schedule.inFlight = inFlight
+    try {
+      await inFlight
+    } finally {
+      if (schedule.inFlight === inFlight) schedule.inFlight = undefined
+      if (schedule.pending.size > 0) {
+        const immediate = Array.from(schedule.pending.values()).some((entry) => entry.immediate)
+        if (immediate) {
+          void this.drainCliSubagentHarvest(workerId, schedule)
+        } else if (!schedule.timer) {
+          schedule.timer = setTimeout(() => {
+            schedule.timer = undefined
+            void this.drainCliSubagentHarvest(workerId, schedule)
+          }, CLI_SUBAGENT_HARVEST_DELAY_MS)
+          schedule.timer.unref?.()
+        }
+      } else if (this.cliSubagentHarvestSchedules.get(workerId) === schedule) {
+        this.cliSubagentHarvestSchedules.delete(workerId)
+      }
+    }
+  }
+
+  private stopCliSubagentHarvestScheduler(): void {
+    const error = new Error('CLI child trace harvest scheduler stopped')
+    for (const [workerId, schedule] of this.cliSubagentHarvestSchedules) {
+      if (schedule.timer) clearTimeout(schedule.timer)
+      schedule.timer = undefined
+      for (const entry of schedule.pending.values()) {
+        for (const waiter of entry.waiters) waiter.reject(error)
+      }
+      schedule.pending.clear()
+      if (!schedule.inFlight) this.cliSubagentHarvestSchedules.delete(workerId)
+    }
+  }
+
+  /** A CLI child becomes retainable only after its own native summary is terminal. */
+  private async harvestTerminalCliSubagentTraces(
+    handle: import('./workers/types.js').IncarnationHandle,
+    adapter: import('./workers/types.js').WorkerAdapter,
+  ): Promise<void> {
+    if ((handle.impl !== 'claude-code' && handle.impl !== 'codex') || !adapter.listSubagents || !adapter.readSubagentTrace) return
+    const redact = (text: string) => redactSecrets(text, [...this.knownSecrets])
+    const children = await adapter.listSubagents(handle)
+    for (const child of children) {
+      if (child.executor_impl !== handle.impl || !isTerminalSubagent(child)) continue
+      const fingerprint = subagentTraceFingerprint(child)
+      try {
+        const copyStore = this.nativeTraceCopyStore()
+        const existing = await copyStore.readSubagent(handle.worker_id, child.subagent_id, fingerprint)
+        if (existing?.capture_status === 'complete') continue
+        await copyStore.beginSubagentCapture(handle.worker_id, handle.incarnation_id, child, fingerprint, redact)
+        const trace = await adapter.readSubagentTrace(handle, child.subagent_id, { offset: 0 })
+        if (trace.unavailableReason) {
+          await copyStore.markSubagentCaptureUnavailable(
+            handle.worker_id,
+            handle.incarnation_id,
+            child,
+            fingerprint,
+            trace.unavailableReason,
+            redact,
+          )
+          continue
+        }
+        await copyStore.completeSubagentCapture(
+          handle.worker_id,
+          handle.incarnation_id,
+          child,
+          fingerprint,
+          trace.events,
+          trace.nextCursor.offset,
+          redact,
+        )
+      } catch (error) {
+        console.warn(`[${this.config.moduleId}] child native trace terminal harvest failed for ${handle.worker_id}/${child.subagent_id}:`, errorMessage(error))
+      }
+    }
+  }
+
+  /** Restart recovery retries pending child snapshots without treating a missing source as a fabricated trace. */
+  private async recoverTerminalCliSubagentTraces(): Promise<void> {
+    const stack = this.managerStack
+    if (!stack) return
+    const pending = await this.nativeTraceCopyStore().listPendingSubagentCaptures()
+    const parentKeys = new Set<string>()
+    for (const capture of pending) {
+      if (capture.parent_incarnation_id) parentKeys.add(`${capture.worker_id}#${capture.parent_incarnation_id}`)
+    }
+    for (const parentKey of parentKeys) {
+      const separator = parentKey.indexOf('#')
+      const workerId = parentKey.slice(0, separator)
+      const incarnationId = parentKey.slice(separator + 1)
+      const found = await stack.ledger.findWorker(workerId)
+      const incarnation = found?.worker.incarnations.find((item) => item.incarnation_id === incarnationId)
+      if (!incarnation || (incarnation.impl !== 'claude-code' && incarnation.impl !== 'codex')) continue
+      const adapter = stack.adapters.get(incarnation.impl)
+      if (!adapter) continue
+      try {
+        await this.requestCliSubagentHarvest({
+          worker_id: workerId,
+          incarnation_id: incarnation.incarnation_id,
+          seq: incarnation.seq,
+          impl: incarnation.impl,
+          session_ref: incarnation.session_ref,
+          ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
+        }, adapter, true)
+      } catch (error) {
+        console.warn(
+          `[${this.config.moduleId}] terminal CLI child trace recovery failed for ${workerId}#${incarnation.seq}:`,
+          errorMessage(error),
+        )
+      }
     }
   }
 
@@ -3793,6 +4290,11 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   protected override async onStart(): Promise<void> {
+    try {
+      await this.builtinSubagentRunner.recoverAfterRestart()
+    } catch (error) {
+      console.warn(`[${this.config.moduleId}] builtin subagent restart reconciliation failed:`, error)
+    }
     await this.importLegacyV2Tasks()
     // Business ingress is registered only after onStart resolves; initialize durable
     // subject bindings before any Manager tool face can mint a continuation credential.
@@ -3909,6 +4411,11 @@ export class UnifiedAgent extends ModuleBase {
         this.managerReconciliationSettled = true
         if (this.runtimeClosing) return
         await this.agentHandler?.releaseRecoveredWorkerShellExits()
+        // CLI child copy is a terminal artifact: retry only after the startup state reconciliation
+        // has decided which parent incarnations are actually terminal.
+        void this.recoverTerminalCliSubagentTraces().catch((error) => {
+          console.warn(`[${this.config.moduleId}] terminal CLI child trace recovery failed（不影响启动）:`, errorMessage(error))
+        })
         // Notice routing may run a whole Manager episode. It starts only after all existing
         // recovery work above, but must not hold startup's liveness drain or escape this chain.
         void stack.harness.reconcileRecoveryNoticesOnStartup().catch((error) => {
@@ -3922,6 +4429,7 @@ export class UnifiedAgent extends ModuleBase {
 
   protected override async onStop(): Promise<void> {
     this.runtimeClosing = true
+    this.stopCliSubagentHarvestScheduler()
 
     // 优雅停机前补一次所有活跃 worker task 的 resume checkpoint flush，
     // 让 crabot stop 场景的停机窗口（最后一 turn 到进程退出之间）也无损。

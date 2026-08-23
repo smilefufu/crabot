@@ -1641,6 +1641,9 @@ describe('Admin Web API', () => {
       '/api/agent/workers/w-1',
       '/api/agent/workers/w-1/terminal',
       '/api/agent/workers/w-1/trace',
+      '/api/agent/workers/w-1/subagents',
+      '/api/agent/workers/w-1/subagents/child-1',
+      '/api/agent/workers/w-1/subagents/child-1/trace',
     ])('%s 未带 token → 401', async (path) => {
       const response = await makeWebRequest(TEST_WEB_PORT, path, 'GET', null, null)
       expect(response.statusCode).toBe(401)
@@ -1853,6 +1856,26 @@ describe('Admin Web API', () => {
       await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/trace', 'GET', null, token)
       expect(spy).toHaveBeenLastCalledWith('get_worker_trace', { worker_id: 'w-1' })
       expect('seq' in (spy.mock.lastCall![1] as object)).toBe(false)
+    })
+
+    it('subagent 路径转发 child 归属与 opaque cursor，并把跨 Worker child 查询视为 404', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc()
+        .mockResolvedValueOnce({ subagents: [{ subagent_id: 'child-1' }] })
+        .mockResolvedValueOnce({ subagent: { subagent_id: 'child-1' } })
+        .mockResolvedValueOnce({ events: [], next_cursor: 'opaque-next' })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/subagents?incarnation_id=inc-1', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('list_worker_subagents', { worker_id: 'w-1', incarnation_id: 'inc-1' })
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/subagents/child-1', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('get_worker_subagent_detail', { worker_id: 'w-1', subagent_id: 'child-1' })
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/subagents/child-1/trace?cursor=opaque-in', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('get_worker_subagent_trace', { worker_id: 'w-1', subagent_id: 'child-1', cursor: 'opaque-in' })
+
+      spy.mockRejectedValueOnce(new Error('Worker subagent not found: child-1'))
+      const denied = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/workers/w-other/subagents/child-1', 'GET', null, token)
+      expect(denied.statusCode).toBe(404)
+      expect(denied.body.error).toBe('Worker subagent not found: child-1')
     })
   })
 })

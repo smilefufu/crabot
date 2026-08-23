@@ -85,6 +85,9 @@ import type {
   Workspace,
   WorkspaceInstructionPayload,
   WorkerTerminalView,
+  WorkerSubagentSummary,
+  NormalizedTraceEvent,
+  TraceCursor,
 } from '../types.js'
 import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
@@ -228,10 +231,18 @@ export interface BuiltinTraceHooks {
   startIncarnationTrace(params: { worker_id: string; seq: number; summary: string }): string
   appendTurn(traceId: string, event: import('../../engine/types.js').EngineTurnEvent): void
   finishIncarnationTrace(traceId: string, patch: { status: 'completed' | 'failed'; summary: string }): void
+  stopWorkerSubagents?(workerId: string): void
 }
 
 export interface BuiltinTraceReader {
   readTrace(traceId: string): Promise<import('../../types.js').AgentTrace | undefined>
+  listSubagents?(workerId: string): Promise<WorkerSubagentSummary[]>
+  getSubagent?(workerId: string, subagentId: string): Promise<WorkerSubagentSummary | undefined>
+  readSubagentTrace?(workerId: string, subagentId: string, cursor?: TraceCursor): Promise<{
+    events: NormalizedTraceEvent[]
+    nextCursor: TraceCursor
+    unavailableReason?: string
+  }>
 }
 
 
@@ -650,6 +661,25 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return { events, nextCursor }
   }
 
+  async listSubagents(h: IncarnationHandle): Promise<WorkerSubagentSummary[]> {
+    return this.deps.traceReader?.listSubagents?.(h.worker_id) ?? []
+  }
+
+  async getSubagent(h: IncarnationHandle, subagentId: string): Promise<WorkerSubagentSummary | undefined> {
+    return this.deps.traceReader?.getSubagent?.(h.worker_id, subagentId)
+  }
+
+  async readSubagentTrace(h: IncarnationHandle, subagentId: string, cursor?: TraceCursor): Promise<{
+    events: NormalizedTraceEvent[]
+    nextCursor: TraceCursor
+    unavailableReason?: string
+  }> {
+    if (!this.deps.traceReader?.readSubagentTrace) {
+      return { events: [], nextCursor: cursor ?? { offset: 0 }, unavailableReason: 'builtin subagent trace unavailable' }
+    }
+    return this.deps.traceReader.readSubagentTrace(h.worker_id, subagentId, cursor)
+  }
+
   private async readTraceWindow(
     h: IncarnationHandle,
     cursor?: import('../types.js').TraceCursor,
@@ -944,7 +974,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       initialMessages,
       options: {
         systemPrompt: builtin.systemPrompt,
-        tools: this.combineTools(builtin.tools),
+        tools: this.combineTools(builtin.tools, instance),
         model: builtin.model,
         ...(builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
         ...this.safetyOptions(builtin),
@@ -1115,9 +1145,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       initialMessages,
       options: {
         systemPrompt: builtin.systemPrompt,
-        // fork 不加 finish_task（一次性侧问），但工具集守卫与安全项与主线完全一致——
-        // 侧问同样是一次真实的 LLM + 工具执行，没有理由少一道闸。
-        tools: this.guardTools(builtin.tools),
+        // fork 是一次性侧问，不能派发异步 child；它和主线共享 worker_id，侧问收尾
+        // 不能拥有或停止主线 child。
+        tools: this.forkTools(builtin.tools),
         model: builtin.model,
         maxTurns: FORK_MAX_TURNS,
         ...this.safetyOptions(builtin),
@@ -1300,9 +1330,31 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     }
   }
 
-  private combineTools(tools: Resolvable<ReadonlyArray<ToolDefinition>>): Resolvable<ReadonlyArray<ToolDefinition>> {
+  private combineTools(
+    tools: Resolvable<ReadonlyArray<ToolDefinition>>,
+    instance?: WorkerInstance,
+  ): Resolvable<ReadonlyArray<ToolDefinition>> {
     const guarded = this.guardTools(tools)
-    return () => [...resolve(guarded), FINISH_TASK_TOOL]
+    return () => [
+      ...resolve(guarded).map((tool) => tool.name !== 'delegate_task' || !instance
+        ? tool
+        : {
+            ...tool,
+            call: (input: Record<string, unknown>, context: import('../../engine/types.js').ToolCallContext) => tool.call(input, {
+              ...context,
+              worker_subagent: {
+                worker_id: instance.worker_id,
+                ...(instance.traceId ? { parent_trace_id: instance.traceId } : {}),
+              },
+            }),
+          }),
+      FINISH_TASK_TOOL,
+    ]
+  }
+
+  private forkTools(tools: Resolvable<ReadonlyArray<ToolDefinition>>): Resolvable<ReadonlyArray<ToolDefinition>> {
+    const guarded = this.guardTools(tools)
+    return () => resolve(guarded).filter((tool) => tool.name !== 'delegate_task')
   }
 
   /**
@@ -1489,6 +1541,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
      */
     summary?: string,
   ): Promise<void> {
+    if (handle.query_id === undefined) this.deps.traceHooks?.stopWorkerSubagents?.(instance.worker_id)
     if (instance.pendingInputs.length > 0) {
       const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${instance.pendingInputs.length} unsent message(s): ${instance.pendingInputs.join(' | ')}\n`
       await instance.outputLog.append(deadLetterMsg)
@@ -1582,6 +1635,8 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
       const input = typeof details.input_summary === 'string' ? details.input_summary : undefined
       const output = typeof details.output_summary === 'string' ? details.output_summary : undefined
       const error = typeof details.error === 'string' ? details.error : undefined
+      const recordedSubagentId = typeof details.subagent_id === 'string' ? details.subagent_id : undefined
+      const subagentId = recordedSubagentId ?? (name === 'delegate_task' ? subagentIdFromOutput(output ?? error) : undefined)
       const callId = span.span_id
       const call = {
         ...base,
@@ -1592,7 +1647,9 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
           call_id: callId,
           name,
           ...(input !== undefined ? { input } : {}),
+          ...(subagentId ? { subagent_id: subagentId } : {}),
         },
+        ...(subagentId ? { subagent_id: subagentId } : {}),
       } as const
       const result = output ?? error
       if (!result) return [call]
@@ -1607,10 +1664,21 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
             output: result,
             ...(span.status === 'failed' ? { is_error: true } : {}),
           },
+          ...(subagentId ? { subagent_id: subagentId } : {}),
         },
       ]
     }
     default:
       return [{ ...base, kind: 'lifecycle', summary: span.type, detail: details }]
+  }
+}
+
+function subagentIdFromOutput(output: string | undefined): string | undefined {
+  if (!output) return undefined
+  try {
+    const parsed = JSON.parse(output) as { agent_id?: unknown }
+    return typeof parsed.agent_id === 'string' ? parsed.agent_id : undefined
+  } catch {
+    return undefined
   }
 }

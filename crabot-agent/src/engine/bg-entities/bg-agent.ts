@@ -48,8 +48,17 @@ export interface SpawnPersistentAgentOpts {
    * （2026-06-10 goal audit 死循环事故，spec 2026-06-10-audit-anchor-human-request §4.6）。
    */
   readonly permissionConfig?: ToolPermissionConfig
+  /** Worker execution hooks inherited by the child. */
+  readonly hookRegistry?: import('../../hooks/hook-registry.js').HookRegistry
+  readonly lspManager?: import('../../hooks/types.js').LspManagerLike
+  /** The child has no human identity of its own. */
+  readonly senderIsMaster?: boolean
+  /** Permission snapshot used by hooks such as the CLI permission gate. */
+  readonly resolvedPermissions?: import('../../types.js').ResolvedPermissions
   readonly owner: BgEntityOwner
   readonly spawned_by_task_id: string
+  /** Actual configured child type, when the caller has one. */
+  readonly subagent_type?: string
   readonly registry: BgEntityRegistry
   /** Worker-maintained abort-controller map: written on spawn, deleted on finish/kill. */
   readonly abortControllers: Map<string, AbortController>
@@ -123,23 +132,6 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
   const abortController = new AbortController()
   opts.abortControllers.set(entity_id, abortController)
 
-  const now = new Date().toISOString()
-  const record: BgAgentRegistryRecord = {
-    entity_id,
-    type: 'agent',
-    status: 'running',
-    task_description: opts.task_description,
-    messages_log_file: messagesLog,
-    result_file: null,
-    owner: opts.owner,
-    spawned_by_task_id: opts.spawned_by_task_id,
-    spawned_at: now,
-    exit_code: null,
-    ended_at: null,
-    last_activity_at: now,
-  }
-  await opts.registry.register(record)
-
   // 子 trace 在 fire-and-forget 外同步起，保证 spawn 返回时 Admin Traces 立刻可见。
   const subTrace = opts.subTrace
     ? opts.subTrace.traceStore.startTrace({
@@ -159,6 +151,25 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
     : undefined
   const subTraceStore = opts.subTrace?.traceStore
 
+  const now = new Date().toISOString()
+  const record: BgAgentRegistryRecord = {
+    entity_id,
+    type: 'agent',
+    ...(opts.subagent_type ? { subagent_type: opts.subagent_type } : {}),
+    ...(subTrace ? { trace_id: subTrace.trace_id } : {}),
+    status: 'running',
+    task_description: opts.task_description,
+    messages_log_file: messagesLog,
+    result_file: null,
+    owner: opts.owner,
+    spawned_by_task_id: opts.spawned_by_task_id,
+    spawned_at: now,
+    exit_code: null,
+    ended_at: null,
+    last_activity_at: now,
+  }
+  await opts.registry.register(record)
+
   const agentSpawnedAtMs = Date.now()
 
   // fire-and-forget — intentionally not awaited by caller
@@ -173,6 +184,10 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
           model: opts.model,
           ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
           ...(opts.permissionConfig ? { permissionConfig: opts.permissionConfig } : {}),
+          hookRegistry: opts.hookRegistry,
+          lspManager: opts.lspManager,
+          senderIsMaster: opts.senderIsMaster,
+          resolvedPermissions: opts.resolvedPermissions,
           abortSignal: abortController.signal,
           // 同 forkEngine：bg-agent 也是 subagent 派发路径，禁用 compaction。
           // 详见 EngineOptions.disableCompaction 注释。

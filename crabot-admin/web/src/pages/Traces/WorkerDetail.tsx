@@ -13,6 +13,7 @@ import {
   type WorkerTaskStatus,
   type WorkerTerminalView,
   type WorkerTraceEvent,
+  type WorkerSubagentSummary,
 } from '../../services/agent-observability'
 
 const IMPL_LABEL: Record<WorkerIncarnation['impl'], string> = {
@@ -54,6 +55,7 @@ interface ActivityEntry {
   body: string
   title?: string
   result?: string
+  subagentId?: string
 }
 
 function asRecord(value: unknown): DetailRecord | undefined {
@@ -109,6 +111,12 @@ function callId(event: WorkerTraceEvent): string | undefined {
   if (typeof value !== 'string' || !value) return undefined
   // Responses API 的内部 tool id 可能编码为 call_id|item_id；结果只带 call_id。
   return value.split('|', 1)[0]
+}
+
+function subagentId(event: WorkerTraceEvent): string | undefined {
+  if (typeof event.subagent_id === 'string' && event.subagent_id) return event.subagent_id
+  const value = asRecord(event.detail)?.subagent_id
+  return typeof value === 'string' && value ? value : undefined
 }
 
 function isUncorrelatedNativeToolCall(event: WorkerTraceEvent): boolean {
@@ -178,15 +186,15 @@ function lifecycleActivity(event: WorkerTraceEvent): ActivityEntry | undefined {
   return undefined
 }
 
-function activityFor(event: WorkerTraceEvent): ActivityEntry | undefined {
+function activityFor(event: WorkerTraceEvent, actorLabel: string, isSubagentTrace: boolean): ActivityEntry | undefined {
   if (event.source === 'legacy') {
     return { event, label: '历史记录', tone: 'status', body: event.summary }
   }
-  if (event.source === 'native' && event.kind === 'message' && event.role === 'user') {
-    return { event, label: '管理会话指令', tone: 'manager', body: messageText(event) }
+  if (event.kind === 'message' && event.role === 'user') {
+    return { event, label: !isSubagentTrace && event.source === 'native' ? '管理会话指令' : `${actorLabel} 指令`, tone: 'manager', body: messageText(event) }
   }
-  if (event.source === 'native' && event.kind === 'message' && event.role === 'assistant') {
-    return { event, label: 'Worker 文本', tone: 'worker', body: messageText(event) }
+  if (event.kind === 'message' && event.role === 'assistant') {
+    return { event, label: `${actorLabel} 文本`, tone: 'worker', body: messageText(event) }
   }
   if (event.kind === 'tool_call') {
     return { event, label: '工具调用', tone: 'tool', title: toolName(event), body: toolArguments(event) }
@@ -198,14 +206,14 @@ function activityFor(event: WorkerTraceEvent): ActivityEntry | undefined {
   return undefined
 }
 
-function projectTimeline(events: WorkerTraceEvent[]): { human: ActivityEntry[]; technical: WorkerTraceEvent[] } {
+function projectTimeline(events: WorkerTraceEvent[], actorLabel: string, isSubagentTrace: boolean): { human: ActivityEntry[]; technical: WorkerTraceEvent[] } {
   const human: ActivityEntry[] = []
   const technical: WorkerTraceEvent[] = []
   const calls = new Map<string, ActivityEntry>()
   const uncorrelatedNativeCalls: ActivityEntry[] = []
 
   for (const event of events) {
-    const activity = activityFor(event)
+    const activity = activityFor(event, actorLabel, isSubagentTrace)
     if (!activity) {
       technical.push(event)
       continue
@@ -219,6 +227,7 @@ function projectTimeline(events: WorkerTraceEvent[]): { human: ActivityEntry[]; 
       const targetCall = pairedCall ?? fallbackCall
       if (targetCall) {
         targetCall.result = activity.body
+        targetCall.subagentId ??= subagentId(event)
         if (pairedCall) {
           const fallbackIndex = uncorrelatedNativeCalls.indexOf(pairedCall)
           if (fallbackIndex >= 0) uncorrelatedNativeCalls.splice(fallbackIndex, 1)
@@ -226,6 +235,7 @@ function projectTimeline(events: WorkerTraceEvent[]): { human: ActivityEntry[]; 
         continue
       }
     }
+    activity.subagentId = subagentId(event)
     human.push(activity)
     if (event.kind === 'tool_call') {
       const id = callId(event)
@@ -272,7 +282,7 @@ function DetailText({ children }: { children: string }) {
   )
 }
 
-function TimelineEvent({ entry, expanded, onToggle }: { entry: ActivityEntry; expanded: boolean; onToggle: () => void }) {
+function TimelineEvent({ entry, expanded, onToggle, workerId }: { entry: ActivityEntry; expanded: boolean; onToggle: () => void; workerId: string }) {
   const preview = activityPreview(entry)
   const action = expanded ? '收起详情' : '展开详情'
   return (
@@ -306,16 +316,22 @@ function TimelineEvent({ entry, expanded, onToggle }: { entry: ActivityEntry; ex
           ) : (
             <DetailText>{entry.body}</DetailText>
           )}
+          {entry.subagentId && (
+            <Link to={`/traces/workers/${encodeURIComponent(workerId)}/subagents/${encodeURIComponent(entry.subagentId)}`} style={{ display: 'inline-block', marginTop: 10, color: 'var(--primary)', fontSize: 12 }}>
+              查看子 Agent
+            </Link>
+          )}
         </div>
       )}
     </article>
   )
 }
 
-function TechnicalEvent({ event, expanded, onToggle }: { event: WorkerTraceEvent; expanded: boolean; onToggle: () => void }) {
+function TechnicalEvent({ event, expanded, onToggle, workerId }: { event: WorkerTraceEvent; expanded: boolean; onToggle: () => void; workerId: string }) {
   const source = event.source ? SOURCE_LABEL[event.source] ?? event.source : '—'
   const label = `${source} · ${KIND_LABEL[event.kind]}`
   const action = expanded ? '收起详情' : '展开详情'
+  const childId = subagentId(event)
   return (
     <article style={{ borderBottom: '1px solid var(--border)', color: 'var(--text-muted)' }}>
       <button type="button" aria-expanded={expanded} aria-label={`${label}：${oneLine(event.summary)}，${action}`} onClick={onToggle} style={{ display: 'grid', gridTemplateColumns: 'minmax(44px, 62px) minmax(76px, 112px) minmax(0, 1fr) auto', gap: 10, alignItems: 'center', width: '100%', padding: '9px 0', border: 0, borderRadius: 0, background: 'transparent', color: 'inherit', fontFamily: 'var(--font-mono)', fontSize: 12, textAlign: 'left', cursor: 'pointer' }}>
@@ -324,12 +340,35 @@ function TechnicalEvent({ event, expanded, onToggle }: { event: WorkerTraceEvent
         <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{oneLine(event.summary)}</span>
         <span aria-hidden="true">{expanded ? '收起' : '展开'}</span>
       </button>
-      {expanded && event.detail !== undefined && <div style={{ padding: '0 0 12px 72px' }}><DetailText>{JSON.stringify(event.detail)}</DetailText></div>}
+      {expanded && (
+        <div style={{ padding: '0 0 12px 72px' }}>
+          {event.detail !== undefined && <DetailText>{JSON.stringify(event.detail)}</DetailText>}
+          {childId && (
+            <Link to={`/traces/workers/${encodeURIComponent(workerId)}/subagents/${encodeURIComponent(childId)}`} style={{ display: 'inline-block', marginTop: 10, color: 'var(--primary)', fontSize: 12 }}>
+              查看子 Agent
+            </Link>
+          )}
+        </div>
+      )}
     </article>
   )
 }
 
-function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
+export function Timeline({
+  workerId,
+  seq,
+  heading = '活动记录',
+  actorLabel = 'Worker',
+  isSubagentTrace = false,
+  loadTrace,
+}: {
+  workerId: string
+  seq?: number
+  heading?: string
+  actorLabel?: string
+  isSubagentTrace?: boolean
+  loadTrace?: (cursor?: string) => Promise<{ events: WorkerTraceEvent[]; next_cursor?: string; unavailable_reason?: string }>
+}) {
   const [events, setEvents] = useState<WorkerTraceEvent[]>([])
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
   const [unavailableReason, setUnavailableReason] = useState<string | undefined>(undefined)
@@ -339,14 +378,16 @@ function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
   const [page, setPage] = useState(1)
   const [expandedEntry, setExpandedEntry] = useState<string | undefined>(undefined)
   const [refreshing, setRefreshing] = useState(false)
-  const projected = useMemo(() => projectTimeline(events), [events])
+  const projected = useMemo(() => projectTimeline(events, actorLabel, isSubagentTrace), [events, actorLabel, isSubagentTrace])
 
   const load = useCallback(async (cursor?: string) => {
     try {
-      const result = await agentObservabilityService.getWorkerTrace(workerId, {
-        ...(seq !== undefined ? { seq } : {}),
-        ...(cursor !== undefined ? { cursor } : {}),
-      })
+      const result = loadTrace
+        ? await loadTrace(cursor)
+        : await agentObservabilityService.getWorkerTrace(workerId, {
+          ...(seq !== undefined ? { seq } : {}),
+          ...(cursor !== undefined ? { cursor } : {}),
+        })
       setUnavailableReason(result.unavailable_reason)
       if (cursor === undefined) setEvents(result.events)
       else setEvents((previous) => [...previous, ...result.events])
@@ -360,7 +401,7 @@ function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
         setError(message)
       }
     }
-  }, [workerId, seq])
+  }, [workerId, seq, loadTrace])
 
   useEffect(() => {
     setEvents([])
@@ -395,7 +436,7 @@ function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
   return (
     <section style={{ maxWidth: 930 }} aria-label="任务活动">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 11 }}>
-        <h2 style={{ fontSize: 15, margin: 0 }}>活动记录</h2>
+        <h2 style={{ fontSize: 15, margin: 0 }}>{heading}</h2>
         <div style={{ display: 'inline-flex', gap: 2, padding: 2, border: '1px solid var(--border-highlight)', borderRadius: 6, background: 'var(--bg-primary)' }}>
           <button type="button" aria-pressed={mode === 'human'} onClick={() => selectMode('human')} style={{ border: 0, borderRadius: 4, padding: '5px 9px', background: mode === 'human' ? 'var(--primary)' : 'transparent', color: mode === 'human' ? 'var(--text-on-primary)' : 'var(--text-secondary)', fontWeight: mode === 'human' ? 600 : 400, transition: 'background 0.15s ease, color 0.15s ease' }}>
             对话与操作
@@ -412,12 +453,12 @@ function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
         ) : mode === 'human' ? (
           humanPageEvents.map((entry, index) => {
             const entryKey = `activity-${pageStart + index}-${entry.event.ts}-${entry.event.kind}-${callId(entry.event) ?? ''}`
-            return <TimelineEvent key={entryKey} entry={entry} expanded={expandedEntry === entryKey} onToggle={() => setExpandedEntry((current) => current === entryKey ? undefined : entryKey)} />
+            return <TimelineEvent key={entryKey} entry={entry} workerId={workerId} expanded={expandedEntry === entryKey} onToggle={() => setExpandedEntry((current) => current === entryKey ? undefined : entryKey)} />
           })
         ) : (
           technicalPageEvents.map((event, index) => {
             const entryKey = `technical-${pageStart + index}-${event.ts}-${event.kind}`
-            return <TechnicalEvent key={entryKey} event={event} expanded={expandedEntry === entryKey} onToggle={() => setExpandedEntry((current) => current === entryKey ? undefined : entryKey)} />
+            return <TechnicalEvent key={entryKey} event={event} workerId={workerId} expanded={expandedEntry === entryKey} onToggle={() => setExpandedEntry((current) => current === entryKey ? undefined : entryKey)} />
           })
         )}
         {cursorInvalid && (
@@ -439,6 +480,84 @@ function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
           </div>
         )}
       </div>
+    </section>
+  )
+}
+
+const SUBAGENT_STATUS_LABEL: Record<WorkerSubagentSummary['status'], string> = {
+  running: '执行中', completed: '已完成', failed: '失败', stopped: '已停止', interrupted: '已中断', unknown: '状态未知',
+}
+
+function formatSubagentStartedAt(value: string | undefined): string {
+  if (!value) return '开始时间未知'
+  return new Date(value).toLocaleString('zh-CN', {
+    month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  })
+}
+
+function formatSubagentDuration(subagent: WorkerSubagentSummary): string | undefined {
+  if (!subagent.started_at) return undefined
+  const start = Date.parse(subagent.started_at)
+  const end = Date.parse(subagent.ended_at ?? new Date().toISOString())
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return undefined
+  const minutes = Math.floor((end - start) / 60_000)
+  if (minutes < 1) return subagent.status === 'running' ? '已运行不足 1 分钟' : '用时不足 1 分钟'
+  const hours = Math.floor(minutes / 60)
+  const label = subagent.status === 'running' ? '已运行' : '用时'
+  return hours > 0 ? `${label} ${hours} 小时 ${minutes % 60} 分钟` : `${label} ${minutes} 分钟`
+}
+
+function WorkerSubagentsPanel({ workerId }: { workerId: string }) {
+  const [subagents, setSubagents] = useState<WorkerSubagentSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      setSubagents((await agentObservabilityService.listWorkerSubagents(workerId)).subagents)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [workerId])
+
+  useEffect(() => { void load() }, [load])
+
+  return (
+    <section aria-label="子 Agent" style={{ maxWidth: 930, marginTop: 30 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+        <div>
+          <h2 style={{ fontSize: 15, margin: 0 }}>子 Agent</h2>
+          <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 3 }}>该 Worker 直接启动的子 Agent</div>
+        </div>
+        <button type="button" onClick={() => void load()} disabled={loading}>{loading ? '读取中…' : '刷新'}</button>
+      </div>
+      {error && <div style={{ color: 'var(--color-warning, #d97706)', fontSize: 12, padding: '8px 0' }}>子 Agent 暂不可用：{error}</div>}
+      {!error && !loading && subagents.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '12px 0', borderTop: '1px solid var(--border)' }}>该 Worker 尚未启动子 Agent。</div>}
+      {subagents.length > 0 && (
+        <div style={{ borderTop: '1px solid var(--border)' }}>
+          {subagents.map((subagent) => {
+            const duration = formatSubagentDuration(subagent)
+            return (
+              <Link key={subagent.subagent_id} to={`/traces/workers/${encodeURIComponent(workerId)}/subagents/${encodeURIComponent(subagent.subagent_id)}`} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(126px, .55fr) minmax(70px, auto) auto', gap: 12, alignItems: 'center', padding: '12px 0', borderBottom: '1px solid var(--border)', color: 'inherit', textDecoration: 'none' }}>
+                <span style={{ minWidth: 0 }}>
+                  <strong style={{ display: 'block', overflowWrap: 'anywhere' }}>{subagent.name}</strong>
+                  <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{subagent.task ?? subagent.subagent_id}</span>
+                </span>
+                <span style={{ minWidth: 0, color: 'var(--text-muted)', fontSize: 12 }}>
+                  <span style={{ display: 'block', whiteSpace: 'nowrap' }}>{formatSubagentStartedAt(subagent.started_at)}</span>
+                  {duration && <span style={{ display: 'block', marginTop: 3 }}>{duration}</span>}
+                </span>
+                <span style={{ fontSize: 12 }}>{SUBAGENT_STATUS_LABEL[subagent.status]}</span>
+                <span aria-hidden="true" style={{ color: 'var(--text-muted)' }}>查看 →</span>
+              </Link>
+            )
+          })}
+        </div>
+      )}
     </section>
   )
 }
@@ -613,6 +732,8 @@ const WorkerDetailContent: React.FC = () => {
       <div style={{ marginTop: 30 }}>
         <Timeline workerId={worker.worker_id} seq={selectedSeq} />
       </div>
+
+      <WorkerSubagentsPanel workerId={worker.worker_id} />
 
       <details style={{ maxWidth: 930, marginTop: 28, padding: '12px 14px', border: '1px solid var(--border)', background: 'var(--bg-muted)' }}>
         <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>终端画面</summary>
