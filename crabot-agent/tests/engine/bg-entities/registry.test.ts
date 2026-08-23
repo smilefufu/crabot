@@ -402,6 +402,42 @@ describe('BgEntityRegistry', () => {
     expect(existsSync(stderrFifo)).toBe(false)
   })
 
+  it('gcDeadEntities: retains Worker-owned builtin child identities for Worker retention', async () => {
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString()
+    await registry.register(makeAgentRecord({
+      entity_id: 'old-worker-child',
+      status: 'completed',
+      owner: { friend_id: '__builtin_worker__', worker_id: 'worker-1' },
+      spawned_by_task_id: 'worker-1',
+      spawned_at: eightDaysAgo,
+      ended_at: eightDaysAgo,
+      last_activity_at: eightDaysAgo,
+    }))
+    await registry.register(makeAgentRecord({
+      entity_id: 'old-friend-agent',
+      status: 'completed',
+      spawned_by_task_id: 'task-friend-agent',
+      spawned_at: eightDaysAgo,
+      ended_at: eightDaysAgo,
+      last_activity_at: eightDaysAgo,
+    }))
+    await registry.register(makeAgentRecord({
+      entity_id: 'old-incomplete-worker-agent',
+      status: 'completed',
+      owner: { friend_id: '__builtin_worker__' },
+      spawned_by_task_id: 'task-not-worker-id',
+      spawned_at: eightDaysAgo,
+      ended_at: eightDaysAgo,
+      last_activity_at: eightDaysAgo,
+    }))
+
+    const { removed } = await registry.gcDeadEntities(new Date())
+
+    expect(removed).toEqual(expect.arrayContaining(['old-friend-agent', 'old-incomplete-worker-agent']))
+    expect(removed).not.toContain('old-worker-child')
+    await expect(registry.get('old-worker-child')).resolves.toMatchObject({ status: 'completed' })
+  })
+
   it('gcDeadEntities: keeps entities ended less than 7 days ago', async () => {
     const sixDaysAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString()
     const recentRec = makeShellRecord({
