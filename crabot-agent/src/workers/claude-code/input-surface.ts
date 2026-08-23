@@ -143,5 +143,9 @@ function composerMatchesExpected(composer: string, text: string): boolean {
   if (current.includes(expected)) return true
   if (/\[Pasted text #\d+(?:[^\]]*)\]/i.test(current)) return true
   if (expected.length < 24) return false
-  return current.includes(expected.slice(0, 24)) || current.includes(expected.slice(-24))
+  if (current.includes(expected.slice(0, 24)) || current.includes(expected.slice(-24))) return true
+  // capture-pane may insert padding spaces where a long pasted line wrapped.
+  const compactCurrent = current.replace(/\s/g, '')
+  const compactExpected = expected.replace(/\s/g, '')
+  return compactCurrent.includes(compactExpected.slice(0, 24)) || compactCurrent.includes(compactExpected.slice(-24))
 }

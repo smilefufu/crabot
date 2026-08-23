@@ -54,6 +54,24 @@ describe('CLI input surfaces', () => {
     expect(probeClaudeInput(pane('❯ ending-abcdefghijklmnopqrstuvwx\n? for shortcuts'), 'primary', `beginning-${'x'.repeat(200)}ending-abcdefghijklmnopqrstuvwx`)).toBe('pending')
   })
 
+  it('recognizes a real long Claude paste when the viewport clips its beginning and inserts wrap padding', () => {
+    const prompt = '在当前 Minecraft 工作区和服务器环境中完成用户要求：安装 JEI 到 Java 26.2 + Fabric 生产服。先核对工作区/生产服结构、当前 Minecraft 版本、Fabric Loader/API 与 JEI 的兼容版本及依赖；确认 JEI 应安装客户端、服务端还是两端，并避免把不兼容的 NeoForge/Forge 文件放入 Fabric。执行前做好必要的停服一致备份或可回滚措施；严格保护权威世界 java/data，不重建世界，不执行无关迁移修复。若必须重启，先安全停服、安装、启动并检查日志/进程/端口/健康状态；如下载、版本或权限无法确认，安全阻断并报告原因，不绕过门禁。最终报告实际文件名、版本、依赖、安装路径、备份/回滚信息、服务状态和客户端还需做什么。不要只给建议，要实际操作；但任何不确定或可能破坏生产的步骤先停下并汇报。'
+    const viewport = pane([
+      ' ▐▛███▛█   Claude Code v2.1.241',
+      '  ▝▝ ▝▝    ~/codes/playground/minecraft',
+      '❯\u00a0应安装客户端、服务端还是两端，并避免把不兼容的 NeoForge/Forge 文件放入',
+      '  Fabric。执行前做好必要的停服一致备份或可回滚措施；严格保护权威世界',
+      '  java/data，不重建世界，不执行无关迁移修复。若必须重启，先安全停服、安装、启',
+      '  动并检查日志/进程/端口/健康状态；如下载、版本或权限无法确认，安全阻断并报告',
+      '  原因，不绕过门禁。最终报告实际文件名、版本、依赖、安装路径、备份/回滚信息、 ',
+      '  服务状态和客户端还需做什么。不要只给建议，要实际操作；但任何不确定或可能破坏  ',
+      '  生产的步骤先停下并汇报。 ',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '  ⏵⏵ auto mode on (shift+tab to cycle)',
+    ].join('\n'))
+    expect(probeClaudeInput(viewport, 'primary', prompt)).toBe('pending')
+  })
+
   it('keeps Codex Working composer in steering mode', () => {
     const working = pane('› \nWorking (esc to interrupt)')
     expect(probeCodexInput(working, 'primary')).toBe('unavailable')
