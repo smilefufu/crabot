@@ -29,7 +29,7 @@ import { buildChildEnv } from '../../core/runtime-env.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
-import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
+import { commitInput, waitForPaneChange, type InputCommitDiagnostic, type InputMode } from '../tmux/input-commit.js'
 import { parseRawControlKeys } from '../tmux/raw-control.js'
 import { DEFAULT_PASTE_READY_TIMEOUT_MS, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel } from '../cli-events.js'
@@ -1058,10 +1058,56 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       result = await commitInput(
         {
           pasteText: async (value) => {
-            await this.tmux.pasteText(runtime.sessionName, value)
-            pasted = true
+            await appendTmuxControlDiagnostic(controlDiagnosticPath(runtime), 'paste_invoked', {
+              worker_id: runtime.worker_id,
+              seq: runtime.seq,
+              input_text_length: value.length,
+            })
+            try {
+              await this.tmux.pasteText(runtime.sessionName, value)
+              pasted = true
+              await appendTmuxControlDiagnostic(controlDiagnosticPath(runtime), 'paste_returned', {
+                worker_id: runtime.worker_id,
+                seq: runtime.seq,
+                input_text_length: value.length,
+              })
+            } catch (error) {
+              await appendTmuxControlDiagnostic(controlDiagnosticPath(runtime), 'paste_error', {
+                worker_id: runtime.worker_id,
+                seq: runtime.seq,
+                input_text_length: value.length,
+                error: error instanceof Error ? error.message : String(error),
+              })
+              throw error
+            }
           },
-          submit: () => this.tmux.sendKeys(runtime.sessionName, [mode === 'steering' ? 'Tab' : 'Enter']),
+          submit: async (attempt = 1) => {
+            const key = mode === 'steering' ? 'Tab' : 'Enter'
+            await appendTmuxControlDiagnostic(controlDiagnosticPath(runtime), 'submit_invoked', {
+              worker_id: runtime.worker_id,
+              seq: runtime.seq,
+              attempt,
+              key,
+            })
+            try {
+              await this.tmux.sendKeys(runtime.sessionName, [key])
+              await appendTmuxControlDiagnostic(controlDiagnosticPath(runtime), 'submit_returned', {
+                worker_id: runtime.worker_id,
+                seq: runtime.seq,
+                attempt,
+                key,
+              })
+            } catch (error) {
+              await appendTmuxControlDiagnostic(controlDiagnosticPath(runtime), 'submit_error', {
+                worker_id: runtime.worker_id,
+                seq: runtime.seq,
+                attempt,
+                key,
+                error: error instanceof Error ? error.message : String(error),
+              })
+              throw error
+            }
+          },
           capture: () => this.capture(runtime),
         },
         (snapshot, phase) => probeCodexInput(snapshot, mode, phase === 'after_paste' ? text : undefined, phase === 'before_paste'),
@@ -1070,6 +1116,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         {
           beforeSideEffect: (phase) =>
             assertInputDeliveryActive(delivery, phase === 'paste' ? 'not_delivered' : 'unknown'),
+          onDiagnostic: (entry: InputCommitDiagnostic) => appendTmuxControlDiagnostic(
+            controlDiagnosticPath(runtime),
+            'input_commit_capture',
+            { worker_id: runtime.worker_id, seq: runtime.seq, ...entry },
+          ),
         },
       )
     } catch (err) {

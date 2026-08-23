@@ -29,8 +29,15 @@ export type TmuxControlDiagnosticEvent =
   | 'process_exit'
   | 'pipe_attached'
   | 'input_surface_unavailable'
+  | 'paste_invoked'
+  | 'paste_returned'
+  | 'paste_error'
+  | 'submit_invoked'
+  | 'submit_returned'
+  | 'submit_error'
+  | 'input_commit_capture'
 
-/** Append a small, durable lifecycle record without capturing raw terminal output. */
+/** Append a small, durable control diagnostic without capturing raw terminal output. */
 export async function appendTmuxControlDiagnostic(
   logPath: string | undefined,
   event: TmuxControlDiagnosticEvent,

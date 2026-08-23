@@ -20,6 +20,34 @@ describe('commitInput', () => {
     expect(phases).toEqual(['paste', 'enter', 'enter'])
   })
 
+  it('records the settled pane after paste and each submission attempt', async () => {
+    const frames = [snapshot('empty'), snapshot('pending'), snapshot('pending'), snapshot('accepted')]
+    const diagnostics: Array<{ stage: string; attempt?: number; probe: string; accepted: boolean }> = []
+    const result = await commitInput(
+      { pasteText: async () => {}, sendEnter: async () => {}, capture: async () => frames.shift()! },
+      frame => frame.text as InputProbe,
+      frame => frame.text === 'accepted',
+      'task',
+      {
+        settleTimeoutMs: 0,
+        onDiagnostic: entry => diagnostics.push({
+          stage: entry.stage,
+          ...(entry.attempt === undefined ? {} : { attempt: entry.attempt }),
+          probe: entry.probe,
+          accepted: entry.accepted,
+        }),
+      },
+    )
+
+    expect(result.disposition).toBe('accepted')
+    expect(diagnostics).toEqual([
+      { stage: 'before_paste', probe: 'empty', accepted: false },
+      { stage: 'after_paste', probe: 'pending', accepted: false },
+      { stage: 'after_enter', attempt: 1, probe: 'pending', accepted: false },
+      { stage: 'after_enter', attempt: 2, probe: 'accepted', accepted: true },
+    ])
+  })
+
   it('a guard failure before Enter never performs that Enter', async () => {
     let pastes = 0
     let enters = 0
