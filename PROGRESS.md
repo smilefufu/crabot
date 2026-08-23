@@ -67,7 +67,7 @@
   Codex 统一列出 Worker 直接启动的 child，Worker 详情读取分页 trace，child 详情读取自己的分页 trace。
   Admin 不按执行器拆 tab；CLI child trace 运行时优先读取原生 child 会话/记录，终态 child 保存 Agent-owned 脱敏副本，后续统一 Worker retention（PR B）按同一 Worker 清理单元删除；副本待补齐或原生先丢失时保留详情并显示脱敏原因。
   定向测试、页面验收和构建已通过，待非 Draft PR review。
-- **CLI child Trace 收割节奏（待确认）**：本轮 review 发现原生记录高频变化会重复触发 CLI child 收割，且启动补齐扫描范围过宽。最小设计补充已写入 `crabot-docs/superpowers/specs/2026-08-23-cli-subagent-trace-harvest-scheduling-design.md`；在确认前不改变收割时机或恢复范围。单个 Worker 读取失败不再阻断后续 Worker 的既有补齐。
+- **CLI child Trace 收割节奏（已确认并实现）**：按 `crabot-docs/superpowers/specs/2026-08-23-cli-subagent-trace-harvest-scheduling-design.md`，activity 触发采用按 Worker 固定 30 秒合并窗口，同一 Worker 收割不并发；父 Worker 终态立即收割；启动恢复只读取已持久标记为 pending 的 child，并按 Worker 隔离失败。收割只影响显示副本，不持续捕获运行中 child 输出。
 - **builtin 子 Agent 身份留存（待确认）**：本轮 review 发现其身份记录会在通用 7 天 GC 后早于 Worker/Trace 消失，造成列表缺失和父 Trace 入口 404。最小设计补充已写入 `crabot-docs/superpowers/specs/2026-08-23-builtin-subagent-record-retention-design.md`；在确认前不改变后台实体的清理归属。
 
 - **Traces 人话视图 + 有界决策视野**：**已合并**（PR #100 → `f7e3aaf`，@claude approve 后自动合并）。Managers 用 `渠道·会话标题`、active worker 数和最近活动替代裸 ManagerKey/Episodes/历史总数；Manager detail 上浮消息摘录/回复/动作并按 worker 因果链折叠；Workers 默认只显示非终态。恢复 v2 dispatcher 不变量：`list_workers` 默认只看 `queued/running/waiting_input`，终态续办需显式分页 `include_terminal=true`；Manager 页面计数与工具视野同源。生产实测 system-tasks 2389 历史→6 active，工具实际 12 active/53 terminal。协议：agent v3.2.0、admin v0.2.2。

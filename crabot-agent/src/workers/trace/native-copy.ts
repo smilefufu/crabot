@@ -41,6 +41,14 @@ export interface StoredSubagentTrace {
   readonly events: NormalizedTraceEvent[]
 }
 
+export interface PendingSubagentCapture {
+  readonly worker_id: string
+  readonly parent_incarnation_id?: string
+  readonly subagent_id: string
+  readonly subagent_fingerprint: string
+  readonly summary: WorkerSubagentSummary
+}
+
 export class NativeTraceCopyStore {
   private readonly writeTails = new Map<string, Promise<void>>()
 
@@ -363,6 +371,42 @@ export class NativeTraceCopyStore {
       ...(header.unavailable_reason === undefined ? {} : { unavailable_reason: header.unavailable_reason }),
       events: this.eventsFromRaw(raw),
     }
+  }
+
+  /** Enumerate only durable child captures that still need a terminal source read. */
+  async listPendingSubagentCaptures(): Promise<PendingSubagentCapture[]> {
+    let workerEntries: string[]
+    try {
+      workerEntries = await fs.readdir(this.rootDir)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+
+    const pending: PendingSubagentCapture[] = []
+    for (const workerEntry of workerEntries) {
+      const subagentsDir = join(this.rootDir, workerEntry, 'subagents')
+      let childEntries: string[]
+      try {
+        childEntries = await fs.readdir(subagentsDir)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      for (const childEntry of childEntries) {
+        if (!childEntry.endsWith('.jsonl')) continue
+        const header = await this.readSubagentHeader(join(subagentsDir, childEntry))
+        if (!header || header.capture_status !== 'pending') continue
+        pending.push({
+          worker_id: header.worker_id,
+          ...(header.parent_incarnation_id === undefined ? {} : { parent_incarnation_id: header.parent_incarnation_id }),
+          subagent_id: header.subagent_id,
+          subagent_fingerprint: header.subagent_fingerprint,
+          summary: header.summary,
+        })
+      }
+    }
+    return pending
   }
 
   /** Retained child summaries are the fallback only; live adapter records always take precedence. */

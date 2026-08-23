@@ -66,6 +66,8 @@ function buildAgent(managerStack?: unknown): AgentUnderTest {
   // 直接 test fixture：构造函数默认 runtime_config_authenticated=true；Object.create 绕过构造函数，这里补齐。
   agent.configAuthenticated = true
   agent.configStale = false
+  agent.runtimeClosing = false
+  agent.cliSubagentHarvestSchedules = new Map()
   if (managerStack !== undefined) {
     // composite reader 需要 adapters Map；mock 栈缺省时补空表（native 走 source-scoped reason）。
     if (typeof managerStack === 'object' && managerStack !== null && !('adapters' in managerStack)) {
@@ -1310,7 +1312,12 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
     }
     const worker = { ...makeLedgerWorker({ workerId: 'w-1', status: 'running' }), incarnations: [incarnation] }
     const agent = buildAgent({
-      ledger: { listAllWorkers: async () => [{ managerKey: 'test::f1' as ManagerKey, worker }] },
+      ledger: {
+        listAllWorkers: async () => { throw new Error('historical worker scan must not run') },
+        findWorker: async (workerId: string) => workerId === 'w-1'
+          ? { managerKey: 'test::f1' as ManagerKey, worker }
+          : undefined,
+      },
       adapters: new Map([['codex', adapter]]),
     }) as unknown as Record<string, unknown>
     const { NativeTraceCopyStore } = await import('../../src/workers/trace/native-copy.js')
@@ -1329,9 +1336,32 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
     }
   })
 
+  it('启动恢复不会查询没有 pending child 的历史 Worker', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'restart-child-copy-no-pending-'))
+    const findWorker = vi.fn(async () => undefined)
+    const agent = buildAgent({
+      ledger: {
+        listAllWorkers: async () => { throw new Error('historical worker scan must not run') },
+        findWorker,
+      },
+      adapters: new Map(),
+    }) as unknown as Record<string, unknown>
+    const { NativeTraceCopyStore } = await import('../../src/workers/trace/native-copy.js')
+    const copyStore = new NativeTraceCopyStore(join(root, 'copies'))
+    agent.nativeTraceCopyStoreInstance = copyStore
+    try {
+      await (agent as unknown as { recoverTerminalCliSubagentTraces(): Promise<void> }).recoverTerminalCliSubagentTraces()
+      expect(findWorker).not.toHaveBeenCalled()
+    } finally {
+      await copyStore.flush()
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('启动恢复中一个 Worker 的 child 列表读取失败，不阻断后续 Worker 的补齐', async () => {
     const root = await fs.mkdtemp(join(tmpdir(), 'restart-child-copy-isolation-'))
     const cliChild = { ...child, worker_id: 'w-2', executor_impl: 'codex' as const }
+    const firstChild = { ...child, executor_impl: 'codex' as const }
     const firstIncarnation = {
       incarnation_id: 'inc-1', seq: 1, impl: 'codex' as const, state: 'running' as const,
       workspace: root, session_ref: 'first-thread', started_at: '2026-08-22T00:00:00.000Z',
@@ -1352,10 +1382,12 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
     }
     const agent = buildAgent({
       ledger: {
-        listAllWorkers: async () => [
-          { managerKey: 'test::f1' as ManagerKey, worker: { ...makeLedgerWorker({ workerId: 'w-1', status: 'running' }), incarnations: [firstIncarnation] } },
-          { managerKey: 'test::f2' as ManagerKey, worker: { ...makeLedgerWorker({ workerId: 'w-2', status: 'running' }), incarnations: [secondIncarnation] } },
-        ],
+        listAllWorkers: async () => { throw new Error('historical worker scan must not run') },
+        findWorker: async (workerId: string) => workerId === 'w-1'
+          ? { managerKey: 'test::f1' as ManagerKey, worker: { ...makeLedgerWorker({ workerId: 'w-1', status: 'running' }), incarnations: [firstIncarnation] } }
+          : workerId === 'w-2'
+            ? { managerKey: 'test::f2' as ManagerKey, worker: { ...makeLedgerWorker({ workerId: 'w-2', status: 'running' }), incarnations: [secondIncarnation] } }
+            : undefined,
       },
       adapters: new Map([['codex', adapter]]),
     }) as unknown as Record<string, unknown>
@@ -1365,6 +1397,8 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
     agent.knownSecrets = []
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
+      await copyStore.beginSubagentCapture('w-1', 'inc-1', firstChild, subagentFingerprint(firstChild), (text) => text)
+      await copyStore.beginSubagentCapture('w-2', 'inc-2', cliChild, subagentFingerprint(cliChild), (text) => text)
       await (agent as unknown as { recoverTerminalCliSubagentTraces(): Promise<void> }).recoverTerminalCliSubagentTraces()
       await expect(copyStore.readSubagent('w-2', cliChild.subagent_id, subagentFingerprint(cliChild))).resolves.toMatchObject({
         capture_status: 'complete', events: [{ summary: 'finished' }],
@@ -1377,6 +1411,62 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
       warn.mockRestore()
       await copyStore.flush()
       await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('CLI child trace 收割调度', () => {
+  const handle = {
+    worker_id: 'w-harvest', incarnation_id: 'inc-harvest', seq: 1,
+    impl: 'codex' as const, session_ref: 'session-harvest',
+  }
+
+  async function flushMicrotasks(): Promise<void> {
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+  }
+
+  it('activity 合并为 30 秒窗口，terminal 在 in-flight 后立即触发下一批', async () => {
+    vi.useFakeTimers()
+    const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
+    agent.config = { moduleId: 'test-agent' }
+    agent.runtimeClosing = false
+    agent.cliSubagentHarvestSchedules = new Map()
+
+    let releaseFirst: (() => void) | undefined
+    const firstHarvest = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const harvest = vi.fn()
+      .mockReturnValueOnce(firstHarvest)
+      .mockResolvedValue(undefined)
+    agent.harvestTerminalCliSubagentTraces = harvest
+    const request = (immediate = false): Promise<void> => (
+      agent as unknown as {
+        requestCliSubagentHarvest(handle: typeof handle, adapter: unknown, immediate?: boolean): Promise<void>
+      }
+    ).requestCliSubagentHarvest(handle, {}, immediate)
+
+    try {
+      request()
+      request()
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(harvest).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1)
+      await flushMicrotasks()
+      expect(harvest).toHaveBeenCalledTimes(1)
+
+      request()
+      const terminal = request(true)
+      let terminalSettled = false
+      void terminal.then(() => { terminalSettled = true })
+      releaseFirst?.()
+      await flushMicrotasks()
+
+      expect(harvest).toHaveBeenCalledTimes(2)
+      await terminal
+      expect(terminalSettled).toBe(true)
+    } finally {
+      ;(agent as unknown as { stopCliSubagentHarvestScheduler(): void }).stopCliSubagentHarvestScheduler()
+      vi.useRealTimers()
     }
   })
 })

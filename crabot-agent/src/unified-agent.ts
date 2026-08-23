@@ -130,7 +130,7 @@ import {
   type GetWorkerSubagentTraceResult,
 } from './manager/read-model.js'
 import { managerActivitySummary, projectManagerEpisode, withCausalParent, type EpisodeWorkerFact, type ManagerEpisodeProjection } from './manager/episode-projection.js'
-import type { NormalizedTraceEvent, SpawnSpec, WorkerSubagentSummary } from './workers/types.js'
+import type { IncarnationHandle, NormalizedTraceEvent, SpawnSpec, WorkerAdapter, WorkerSubagentSummary } from './workers/types.js'
 import {
   TaskCancelledError,
   WorkerHasNoIncarnationError,
@@ -141,6 +141,25 @@ import { SYSTEM_TASKS_MANAGER_KEY } from './manager/registry.js'
 import { splitManagerKey } from './manager/principal.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
+const CLI_SUBAGENT_HARVEST_DELAY_MS = 30_000
+
+interface CliSubagentHarvestWaiter {
+  readonly resolve: () => void
+  readonly reject: (error: unknown) => void
+}
+
+interface CliSubagentHarvestEntry {
+  readonly handle: IncarnationHandle
+  readonly adapter: WorkerAdapter
+  immediate: boolean
+  readonly waiters: CliSubagentHarvestWaiter[]
+}
+
+interface CliSubagentHarvestSchedule {
+  readonly pending: Map<string, CliSubagentHarvestEntry>
+  timer?: ReturnType<typeof setTimeout>
+  inFlight?: Promise<void>
+}
 
 function subagentTraceFingerprint(subagent: WorkerSubagentSummary): string {
   return createHash('sha256')
@@ -488,6 +507,8 @@ export class UnifiedAgent extends ModuleBase {
   private adminPort?: number
   private traceCursorStoreInstance?: TraceCursorStore
   private nativeTraceCopyStoreInstance?: NativeTraceCopyStore
+  /** CLI child trace reads are best-effort and must never fan out with native activity frequency. */
+  private readonly cliSubagentHarvestSchedules = new Map<string, CliSubagentHarvestSchedule>()
   private adminChatCorrelationStoreInstance?: import('./manager/chat-correlation-store.js').AdminChatCorrelationStore
   private memoryPort?: number
   // Session memory_scopes 缓存（TTL 60s，session config 变更不频繁）
@@ -818,11 +839,7 @@ export class UnifiedAgent extends ModuleBase {
       // are read here; running child output is never continuously captured.
       onNativeActivityCollected: (handle) => {
         const adapter = this.managerStack?.adapters.get(handle.impl)
-        if (adapter) {
-          void this.harvestTerminalCliSubagentTraces(handle, adapter).catch((error) => {
-            console.warn(`[${this.config.moduleId}] observed CLI child trace harvest failed:`, errorMessage(error))
-          })
-        }
+        if (adapter) void this.requestCliSubagentHarvest(handle, adapter)
       },
       // P6-A §3.2：episode 消费（含沉默终态）即结算未 claim 的 request IDs。
       onAdminChatWakeConsumed: async (key, ids) => { await this.adminChatCorrelationStore().settleInbound(key, ids) },
@@ -3730,10 +3747,120 @@ export class UnifiedAgent extends ModuleBase {
           console.warn(`[${this.config.moduleId}] parent native trace terminal harvest failed for ${handle.worker_id}#${handle.seq}:`, errorMessage(error))
         }
       }
-      await this.harvestTerminalCliSubagentTraces(handle, adapter)
+      await this.requestCliSubagentHarvest(handle, adapter, true)
     } catch (error) {
       console.warn(`[${this.config.moduleId}] native trace terminal harvest failed for ${handle.worker_id}#${handle.seq}:`,
         errorMessage(error))
+    }
+  }
+
+  /**
+   * Coalesce activity-triggered child reads. The worker-level queue is deliberately separate
+   * from the adapter state machine: a slow app-server probe can delay observability only, while
+   * never creating a second probe for the same Worker at the same time.
+   */
+  private requestCliSubagentHarvest(
+    handle: IncarnationHandle,
+    adapter: WorkerAdapter,
+    immediate = false,
+  ): Promise<void> {
+    if (this.runtimeClosing && !immediate) return Promise.resolve()
+    const workerId = handle.worker_id
+    let schedule = this.cliSubagentHarvestSchedules.get(workerId)
+    if (!schedule) {
+      schedule = { pending: new Map() }
+      this.cliSubagentHarvestSchedules.set(workerId, schedule)
+    }
+    const requestKey = `${handle.impl}#${handle.seq}#${handle.incarnation_id ?? handle.session_ref}`
+    let resolveWaiter: (() => void) | undefined
+    let rejectWaiter: ((error: unknown) => void) | undefined
+    const result = immediate
+      ? new Promise<void>((resolve, reject) => {
+        resolveWaiter = resolve
+        rejectWaiter = reject
+      })
+      : Promise.resolve()
+    let entry = schedule.pending.get(requestKey)
+    if (!entry) {
+      entry = { handle, adapter, immediate, waiters: [] }
+      schedule.pending.set(requestKey, entry)
+    } else if (immediate) {
+      entry.immediate = true
+    }
+    if (resolveWaiter && rejectWaiter) entry.waiters.push({ resolve: resolveWaiter, reject: rejectWaiter })
+
+    if (schedule.inFlight) return result
+    if (immediate) {
+      if (schedule.timer) {
+        clearTimeout(schedule.timer)
+        schedule.timer = undefined
+      }
+      void this.drainCliSubagentHarvest(workerId, schedule)
+    } else if (!schedule.timer) {
+      schedule.timer = setTimeout(() => {
+        schedule!.timer = undefined
+        void this.drainCliSubagentHarvest(workerId, schedule!)
+      }, CLI_SUBAGENT_HARVEST_DELAY_MS)
+      schedule.timer.unref?.()
+    }
+    return result
+  }
+
+  private async drainCliSubagentHarvest(workerId: string, schedule: CliSubagentHarvestSchedule): Promise<void> {
+    if (schedule.inFlight) return
+    const batch = Array.from(schedule.pending.values())
+    schedule.pending.clear()
+    if (batch.length === 0) {
+      if (this.cliSubagentHarvestSchedules.get(workerId) === schedule) this.cliSubagentHarvestSchedules.delete(workerId)
+      return
+    }
+
+    const inFlight = (async () => {
+      for (const entry of batch) {
+        try {
+          await this.harvestTerminalCliSubagentTraces(entry.handle, entry.adapter)
+          for (const waiter of entry.waiters) waiter.resolve()
+        } catch (error) {
+          console.warn(
+            `[${this.config.moduleId}] CLI child trace harvest failed for ${entry.handle.worker_id}#${entry.handle.seq}:`,
+            errorMessage(error),
+          )
+          for (const waiter of entry.waiters) waiter.reject(error)
+        }
+      }
+    })()
+    schedule.inFlight = inFlight
+    try {
+      await inFlight
+    } finally {
+      if (schedule.inFlight === inFlight) schedule.inFlight = undefined
+      if (schedule.pending.size > 0) {
+        const immediate = Array.from(schedule.pending.values()).some((entry) => entry.immediate)
+        if (immediate) {
+          void this.drainCliSubagentHarvest(workerId, schedule)
+        } else if (!schedule.timer) {
+          schedule.timer = setTimeout(() => {
+            schedule.timer = undefined
+            void this.drainCliSubagentHarvest(workerId, schedule)
+          }, CLI_SUBAGENT_HARVEST_DELAY_MS)
+          schedule.timer.unref?.()
+        }
+      } else if (this.cliSubagentHarvestSchedules.get(workerId) === schedule) {
+        this.cliSubagentHarvestSchedules.delete(workerId)
+      }
+    }
+  }
+
+  private stopCliSubagentHarvestScheduler(): void {
+    const error = new Error('CLI child trace harvest scheduler stopped')
+    for (const [workerId, schedule] of this.cliSubagentHarvestSchedules) {
+      if (schedule.timer) clearTimeout(schedule.timer)
+      schedule.timer = undefined
+      for (const entry of schedule.pending.values()) {
+        for (const waiter of entry.waiters) waiter.reject(error)
+      }
+      schedule.pending.clear()
+      if (!schedule.inFlight) this.cliSubagentHarvestSchedules.delete(workerId)
     }
   }
 
@@ -3784,29 +3911,34 @@ export class UnifiedAgent extends ModuleBase {
   private async recoverTerminalCliSubagentTraces(): Promise<void> {
     const stack = this.managerStack
     if (!stack) return
-    const workers = await stack.ledger.listAllWorkers()
-    for (const { worker } of workers) {
-      for (const incarnation of worker.incarnations) {
-        if (
-          (incarnation.impl !== 'claude-code' && incarnation.impl !== 'codex')
-        ) continue
-        const adapter = stack.adapters.get(incarnation.impl)
-        if (!adapter) continue
-        try {
-          await this.harvestTerminalCliSubagentTraces({
-            worker_id: worker.worker_id,
-            incarnation_id: incarnation.incarnation_id,
-            seq: incarnation.seq,
-            impl: incarnation.impl,
-            session_ref: incarnation.session_ref,
-            ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
-          }, adapter)
-        } catch (error) {
-          console.warn(
-            `[${this.config.moduleId}] terminal CLI child trace recovery failed for ${worker.worker_id}#${incarnation.seq}:`,
-            errorMessage(error),
-          )
-        }
+    const pending = await this.nativeTraceCopyStore().listPendingSubagentCaptures()
+    const parentKeys = new Set<string>()
+    for (const capture of pending) {
+      if (capture.parent_incarnation_id) parentKeys.add(`${capture.worker_id}#${capture.parent_incarnation_id}`)
+    }
+    for (const parentKey of parentKeys) {
+      const separator = parentKey.indexOf('#')
+      const workerId = parentKey.slice(0, separator)
+      const incarnationId = parentKey.slice(separator + 1)
+      const found = await stack.ledger.findWorker(workerId)
+      const incarnation = found?.worker.incarnations.find((item) => item.incarnation_id === incarnationId)
+      if (!incarnation || (incarnation.impl !== 'claude-code' && incarnation.impl !== 'codex')) continue
+      const adapter = stack.adapters.get(incarnation.impl)
+      if (!adapter) continue
+      try {
+        await this.requestCliSubagentHarvest({
+          worker_id: workerId,
+          incarnation_id: incarnation.incarnation_id,
+          seq: incarnation.seq,
+          impl: incarnation.impl,
+          session_ref: incarnation.session_ref,
+          ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
+        }, adapter, true)
+      } catch (error) {
+        console.warn(
+          `[${this.config.moduleId}] terminal CLI child trace recovery failed for ${workerId}#${incarnation.seq}:`,
+          errorMessage(error),
+        )
       }
     }
   }
@@ -4297,6 +4429,7 @@ export class UnifiedAgent extends ModuleBase {
 
   protected override async onStop(): Promise<void> {
     this.runtimeClosing = true
+    this.stopCliSubagentHarvestScheduler()
 
     // 优雅停机前补一次所有活跃 worker task 的 resume checkpoint flush，
     // 让 crabot stop 场景的停机窗口（最后一 turn 到进程退出之间）也无损。

@@ -397,4 +397,29 @@ describe('readCompositeWorkerTrace', () => {
       events: [{ summary: 'other' }],
     })
   })
+
+  it('只枚举待补齐的 child，并保留父化身归属', async () => {
+    const pendingChild = {
+      subagent_id: 'child-pending', worker_id: WORKER_ID, executor_impl: 'codex' as const,
+      name: 'Pending child', status: 'completed' as const,
+      started_at: '2026-08-01T00:00:00.000Z', ended_at: '2026-08-01T00:01:00.000Z',
+    }
+    const completeChild = {
+      ...pendingChild, subagent_id: 'child-complete',
+    }
+    await nativeCopy.beginSubagentCapture(
+      WORKER_ID, INCARNATION_ID, pendingChild, 'pending-fingerprint', (text) => text,
+    )
+    await nativeCopy.completeSubagentCapture(
+      WORKER_ID, INCARNATION_ID, completeChild, 'complete-fingerprint', [], 0, (text) => text,
+    )
+
+    await expect(nativeCopy.listPendingSubagentCaptures()).resolves.toEqual([{
+      worker_id: WORKER_ID,
+      parent_incarnation_id: INCARNATION_ID,
+      subagent_id: 'child-pending',
+      subagent_fingerprint: 'pending-fingerprint',
+      summary: pendingChild,
+    }])
+  })
 })
