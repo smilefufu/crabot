@@ -355,12 +355,13 @@ describe('BuiltinWorkerAdapter', () => {
   })
 
   it('llm span 分开投影模型调用与 assistant 文本，且 cursor 按 span 推进一次', async () => {
+    const longAssistantText = `先检查当前配置。\n${'这是完整的子 Agent 输出。'.repeat(40)}`
     const trace = {
       spans: [
         {
           type: 'llm_call',
           started_at: '2026-08-20T01:00:00.000Z',
-          details: { stop_reason: 'tool_use', assistant_text: '先检查当前配置。\n然后读取日志。', usage: { input_tokens: 10, output_tokens: 5 } },
+          details: { stop_reason: 'tool_use', assistant_text: longAssistantText, usage: { input_tokens: 10, output_tokens: 5 } },
         },
         {
           span_id: 'tool-1',
@@ -392,7 +393,7 @@ describe('BuiltinWorkerAdapter', () => {
 
     expect(first.events).toMatchObject([
       { kind: 'llm_call', summary: 'llm tool_use', source_offset: 0, detail: { stop_reason: 'tool_use' } },
-      { kind: 'message', role: 'assistant', summary: '先检查当前配置。 然后读取日志。', source_offset: 0, detail: { content: '先检查当前配置。\n然后读取日志。' } },
+      { kind: 'message', role: 'assistant', summary: longAssistantText.replace(/\s+/g, ' ').trim().slice(0, 200), source_offset: 0, detail: { content: longAssistantText } },
       { kind: 'tool_call', summary: 'shell', source_offset: 1, detail: { call_id: 'tool-1', name: 'shell', input: 'pwd' } },
       { kind: 'tool_result', source_offset: 1, detail: { call_id: 'tool-1', output: '/workspace' } },
       { kind: 'llm_call', summary: 'llm tool_use', source_offset: 2 },

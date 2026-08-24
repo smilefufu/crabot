@@ -614,6 +614,7 @@ export class UnifiedAgent extends ModuleBase {
         await this.requireManagerStack().harness.sendToWorker(workerId, text)
       },
       this.builtinBgRegistry,
+      (text) => redactSecrets(text, [...this.knownSecrets]),
     )
 
     this.promptManager = new PromptManager()
