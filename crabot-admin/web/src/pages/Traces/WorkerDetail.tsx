@@ -526,6 +526,8 @@ function WorkerSubagentsPanel({ workerId }: { workerId: string }) {
 
   useEffect(() => { void load() }, [load])
 
+  if (!error && subagents.length === 0) return null
+
   return (
     <section aria-label="子 Agent" style={{ maxWidth: 930, marginTop: 30 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
@@ -536,7 +538,6 @@ function WorkerSubagentsPanel({ workerId }: { workerId: string }) {
         <button type="button" onClick={() => void load()} disabled={loading}>{loading ? '读取中…' : '刷新'}</button>
       </div>
       {error && <div style={{ color: 'var(--color-warning, #d97706)', fontSize: 12, padding: '8px 0' }}>子 Agent 暂不可用：{error}</div>}
-      {!error && !loading && subagents.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '12px 0', borderTop: '1px solid var(--border)' }}>该 Worker 尚未启动子 Agent。</div>}
       {subagents.length > 0 && (
         <div style={{ borderTop: '1px solid var(--border)' }}>
           {subagents.map((subagent) => {

@@ -233,6 +233,17 @@ describe('WorkerDetail', () => {
     )
   })
 
+  it('未发现子 Agent 时不显示子 Agent 区块', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({ events: [], next_cursor: 'tok-1' })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
+    renderDetail()
+
+    await waitFor(() => expect(mocked.listWorkerSubagents).toHaveBeenCalledWith('w-1234567890ab'))
+    expect(screen.queryByRole('heading', { name: '子 Agent' })).not.toBeInTheDocument()
+    expect(screen.queryByText('该 Worker 尚未启动子 Agent。')).not.toBeInTheDocument()
+  })
+
   it('直接启动的子 Agent 显示任务、状态、时间和详情链接', async () => {
     mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
     mocked.getWorkerTrace = vi.fn().mockResolvedValue({ events: [], next_cursor: 'tok-1' })
