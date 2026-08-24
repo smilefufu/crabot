@@ -82,6 +82,8 @@ export interface SpawnPersistentAgentOpts {
     readonly taskType?: string
     /** summary 前缀，如 '[goal_audit]'。缺省直接用 task_description。 */
     readonly summaryPrefix?: string
+    /** 在 TraceStore 写入前脱敏子 Agent 的 assistant text。 */
+    readonly redactText?: (text: string) => string
   }
   /**
    * Async exit hook —— sub-agent loop 自然结束 / 失败时调用（killed 由 Kill 工具发出，不走这里）。
@@ -195,7 +197,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
           ...(subTrace && subTraceStore
             ? {
                 onTurn: (event) =>
-                  recordSubAgentTurn(subTraceStore, subTrace.trace_id, event),
+                  recordSubAgentTurn(subTraceStore, subTrace.trace_id, event, opts.subTrace?.redactText),
               }
             : {}),
           onLiveProgress: (event) => {

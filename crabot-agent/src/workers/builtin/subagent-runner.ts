@@ -56,14 +56,17 @@ function summaryOf(workerId: string, record: BgAgentRegistryRecord): WorkerSubag
 export class BuiltinSubagentRunner {
   private readonly abortControllers = new Map<string, AbortController>()
   private registry?: BgEntityRegistry
+  private readonly redactText: (text: string) => string
 
   constructor(
     private readonly traceStore: TraceStore,
     private readonly lspManager: import('../../lsp/lsp-manager.js').LSPManager,
     private readonly deliverCompletion?: (workerId: string, text: string) => Promise<void>,
     registry?: BgEntityRegistry,
+    redactText: (text: string) => string = (text) => text,
   ) {
     this.registry = registry
+    this.redactText = redactText
   }
 
   setRegistry(registry: BgEntityRegistry): void {
@@ -130,6 +133,7 @@ export class BuiltinSubagentRunner {
         traceStore: this.traceStore,
         parentTraceId: worker.parent_trace_id,
         summaryPrefix: `[${subagent.name}]`,
+        redactText: this.redactText,
       },
       onExit: async (info) => {
         const current = await registry.get(info.entity_id)
@@ -251,7 +255,7 @@ export class BuiltinSubagentRunner {
         ...(subagent.model.max_tokens !== undefined ? { maxTokens: subagent.model.max_tokens } : {}),
         ...(input.context ? { parentContext: input.context } : {}),
         abortSignal: controller.signal,
-        onTurn: (event) => recordSubAgentTurn(this.traceStore, trace.trace_id, event),
+        onTurn: (event) => recordSubAgentTurn(this.traceStore, trace.trace_id, event, this.redactText),
         supportsVision: subagent.model.supports_vision,
         ...(subagent.model.context_window !== undefined ? { contextWindowTokens: subagent.model.context_window } : {}),
         permissionConfig: execution.permissionConfig,
@@ -308,8 +312,11 @@ export class BuiltinSubagentRunner {
 function normalizeTraceSpan(span: import('../../types.js').AgentSpan): NormalizedTraceEvent[] {
   const details = (span.details ?? {}) as Record<string, unknown>
   if (span.type === 'llm_call') {
-    const assistantText = typeof details.output_summary === 'string' ? details.output_summary : undefined
-    return [{ ts: span.started_at, kind: 'llm_call', summary: typeof details.stop_reason === 'string' ? `llm ${details.stop_reason}` : 'llm call', detail: details }, ...(assistantText ? [{ ts: span.started_at, kind: 'message' as const, role: 'assistant' as const, summary: assistantText.slice(0, 200), detail: { content: assistantText } }] : [])]
+    const { assistant_text: recordedAssistantText, ...technicalDetails } = details
+    const assistantText = typeof recordedAssistantText === 'string'
+      ? recordedAssistantText
+      : typeof details.output_summary === 'string' ? details.output_summary : undefined
+    return [{ ts: span.started_at, kind: 'llm_call', summary: typeof details.stop_reason === 'string' ? `llm ${details.stop_reason}` : 'llm call', detail: technicalDetails }, ...(assistantText ? [{ ts: span.started_at, kind: 'message' as const, role: 'assistant' as const, summary: assistantText.replace(/\s+/g, ' ').trim().slice(0, 200), detail: { content: assistantText } }] : [])]
   }
   if (span.type === 'tool_call') {
     const name = typeof details.tool_name === 'string' ? details.tool_name : 'tool call'

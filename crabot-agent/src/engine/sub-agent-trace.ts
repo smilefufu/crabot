@@ -12,11 +12,15 @@
 import type { TraceStore } from '../core/trace-store.js'
 import type { EngineTurnEvent } from './types.js'
 
+export type TraceTextRedactor = (text: string) => string
+
 export function recordSubAgentTurn(
   traceStore: TraceStore,
   traceId: string,
   event: EngineTurnEvent,
+  redact: TraceTextRedactor = (text) => text,
 ): void {
+  const assistantText = redact(event.assistantText)
   const llmEndedAtMs =
     event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined
       ? event.llmStartedAtMs + event.llmCallMs
@@ -64,7 +68,7 @@ export function recordSubAgentTurn(
     'completed',
     {
       stop_reason: event.stopReason ?? undefined,
-      output_summary: event.assistantText.slice(0, 200) || undefined,
+      ...(assistantText.trim() ? { assistant_text: assistantText } : {}),
       tool_calls_count: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
     },
     llmEndedAtMs,
