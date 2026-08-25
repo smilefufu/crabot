@@ -7,6 +7,7 @@ import { api } from './api'
 
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
 export type CLIWorkerImplId = Exclude<WorkerImplId, 'builtin'>
+export type WorkerInstallProfile = 'latest' | 'fallback'
 
 export type WorkerConnectionConfig =
   | { mode: 'native_account' }
@@ -29,7 +30,6 @@ export interface WorkerConnectionCapability {
   mode: 'native_account' | 'admin_provider' | 'existing_host'
   translator_id: string
   translator_version: string
-  cli_version_range: string
   provider_formats?: string[]
   endpoint_policy?: 'official_only' | 'custom_base_url'
   credential_transport: 'native_store' | 'process_env' | 'agent_runtime_file'
@@ -98,9 +98,10 @@ export const workerManagementService = {
     return result.operation
   },
 
-  async startInstall(impl: CLIWorkerImplId, expectedRevision: number): Promise<WorkerOperationView> {
+  async startInstall(impl: CLIWorkerImplId, expectedRevision: number, installProfile: WorkerInstallProfile): Promise<WorkerOperationView> {
     const result = await api.post<{ operation: WorkerOperationView }>(`/agent/worker-implementations/${impl}/install`, {
       expected_revision: expectedRevision,
+      install_profile: installProfile,
     })
     return result.operation
   },

@@ -14,12 +14,13 @@ function config(): UnifiedAgentConfig {
   }
 }
 
-function installParams(operationId = 'op-install') {
+function installParams(operationId = 'op-install', installProfile: 'latest' | 'fallback' = 'latest') {
   return {
     impl: 'codex' as const,
     operation_id: operationId,
     assertion: 'one-time-assertion',
-    expected: { action: 'install', operation_id: operationId, impl: 'codex', mode: 'install', policy_revision: 1 },
+    install_profile: installProfile,
+    expected: { action: 'install', operation_id: operationId, impl: 'codex', mode: 'install', policy_revision: 1, install_profile: installProfile },
   }
 }
 
@@ -62,33 +63,44 @@ describe('UnifiedAgent install_worker_implementation', () => {
       'worker-install-test-agent',
       expect.any(Object),
     )
-    expect(agent.userLevelInstaller.install).toHaveBeenCalledWith('codex')
+    expect(agent.userLevelInstaller.install).toHaveBeenCalledWith('codex', 'latest')
     expect(agent.activationRegistry.refresh).toHaveBeenCalledOnce()
-    expect(operations.get('op-install')).toMatchObject({ kind: 'install', state: 'completed', impl: 'codex' })
+    expect(operations.get('op-install')).toMatchObject({ kind: 'install', state: 'completed', impl: 'codex', install_profile: 'latest' })
   })
 
-  it('在核销前拒绝 action、mode 或 revision 绑定错误', async () => {
+  it('在核销前拒绝 action、mode、revision 或 profile 绑定错误', async () => {
     const params = installParams()
     params.expected.mode = 'existing_host'
     await expect(agent.handleInstallWorkerImplementation(params)).rejects.toThrow(/assertion binding mismatch/)
+    const profileMismatch = installParams()
+    profileMismatch.install_profile = 'fallback'
+    await expect(agent.handleInstallWorkerImplementation(profileMismatch)).rejects.toThrow(/assertion binding mismatch/)
     expect(agent.rpcClient.callSensitive).not.toHaveBeenCalled()
     expect(operations.get('op-install')).toBeUndefined()
   })
 
-  it('在首次异步探测期间保留同 implementation 的互斥', async () => {
-    let releaseProbe!: (value: { installed: boolean }) => void
-    const probeStarted = new Promise<void>((resolve) => {
-      agent.activationRegistry.refreshImpl.mockImplementationOnce(() => {
+  it('在安装器运行期间保留同 implementation 的互斥', async () => {
+    let releaseInstall!: () => void
+    const installStarted = new Promise<void>((resolve) => {
+      agent.userLevelInstaller.install.mockImplementationOnce(() => {
         resolve()
-        return new Promise((done) => { releaseProbe = done })
+        return new Promise((done) => { releaseInstall = () => done({ impl: 'codex', version: '0.1.2', binaryPath: '/home/test/.local/bin/codex' }) })
       })
     })
 
     const first = agent.handleInstallWorkerImplementation(installParams('op-first'))
-    await probeStarted
+    await installStarted
     await expect(agent.handleInstallWorkerImplementation(installParams('op-second'))).rejects.toThrow(/another mutating operation/)
-    releaseProbe({ installed: false })
+    releaseInstall()
     await expect(first).resolves.toMatchObject({ operation_id: 'op-first', state: 'completed' })
+  })
+
+  it('允许已安装 CLI 显式切换到 fallback', async () => {
+    await expect(agent.handleInstallWorkerImplementation(installParams('op-fallback', 'fallback'))).resolves.toMatchObject({
+      operation_id: 'op-fallback', state: 'completed', version: '0.1.2',
+    })
+    expect(agent.userLevelInstaller.install).toHaveBeenCalledWith('codex', 'fallback')
+    expect(operations.get('op-fallback')).toMatchObject({ install_profile: 'fallback' })
   })
 
   it('取消在途安装后保持 cancelled，不被安装器失败改写', async () => {

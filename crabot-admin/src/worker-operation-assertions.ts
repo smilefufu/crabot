@@ -4,7 +4,7 @@
  * 从 AdminChatAssertions 抽出的无业务语义小组件同形实现：canonical sign/verify +
  * consumed store。chat 与 worker 用不同 purpose/audience/claim validator，assertion
  * 不可跨域复用。worker assertion 精确绑定 action、operation ID、impl、mode、
- * policy revision、nonce、issued/expiry。consumed nonce 在返回成功前原子持久，
+ * policy revision、install profile（仅 install）、nonce、issued/expiry。consumed nonce 在返回成功前原子持久，
  * 保留到 expiry，重启仍拒绝。
  */
 
@@ -18,8 +18,10 @@ const PURPOSE = 'worker_operation'
 const ISSUER = 'admin-web'
 const TTL_SECONDS = 120
 const CLAIM_KEYS = ['assertion_id', 'issuer_module_id', 'audience', 'purpose', 'action', 'operation_id', 'impl', 'mode', 'policy_revision', 'nonce', 'issued_at', 'expires_at'] as const
+const INSTALL_CLAIM_KEYS = [...CLAIM_KEYS, 'install_profile'] as const
 
 export type WorkerOperationAction = 'install' | 'verify' | 'cancel'
+export type WorkerInstallProfile = 'latest' | 'fallback'
 
 export interface WorkerOperationClaims {
   assertion_id: string
@@ -31,12 +33,13 @@ export interface WorkerOperationClaims {
   impl: 'claude-code' | 'codex'
   mode: string
   policy_revision: number
+  install_profile?: WorkerInstallProfile
   nonce: string
   issued_at: string
   expires_at: string
 }
 
-export type ExpectedWorkerOperation = Pick<WorkerOperationClaims, 'action' | 'operation_id' | 'impl' | 'mode' | 'policy_revision'>
+export type ExpectedWorkerOperation = Pick<WorkerOperationClaims, 'action' | 'operation_id' | 'impl' | 'mode' | 'policy_revision' | 'install_profile'>
 
 function base64Url(value: string | Buffer): string {
   return Buffer.from(value).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
@@ -49,8 +52,12 @@ function exactKeys(value: unknown, keys: readonly string[]): value is Record<str
     && Object.keys(value).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(value, key))
 }
 function validClaims(value: unknown): value is WorkerOperationClaims {
-  if (!exactKeys(value, CLAIM_KEYS)) return false
   const claims = value as Record<string, unknown>
+  if (claims?.action === 'install') {
+    if (!exactKeys(value, INSTALL_CLAIM_KEYS) || (claims.install_profile !== 'latest' && claims.install_profile !== 'fallback')) return false
+  } else if (!exactKeys(value, CLAIM_KEYS)) {
+    return false
+  }
   return typeof claims.assertion_id === 'string' && claims.assertion_id.length > 0
     && claims.issuer_module_id === ISSUER && claims.audience === AUDIENCE && claims.purpose === PURPOSE
     && ['install', 'verify', 'cancel'].includes(claims.action as string)
@@ -92,7 +99,12 @@ export class WorkerOperationAssertions {
     this.consumedPath = path.join(dataDir, 'worker-operation-assertions.json')
   }
 
-  issue(input: { action: WorkerOperationAction; operation_id: string; impl: 'claude-code' | 'codex'; mode: string; policy_revision: number }): string {
+  issue(input: ExpectedWorkerOperation): string {
+    if (input.action === 'install') {
+      if (input.install_profile !== 'latest' && input.install_profile !== 'fallback') throw new Error('install assertions require an install profile')
+    } else if (input.install_profile !== undefined) {
+      throw new Error('only install assertions may include an install profile')
+    }
     const now = Date.now()
     return sign({
       assertion_id: generateId(),
@@ -104,6 +116,7 @@ export class WorkerOperationAssertions {
       impl: input.impl,
       mode: input.mode,
       policy_revision: input.policy_revision,
+      ...(input.action === 'install' ? { install_profile: input.install_profile } : {}),
       nonce: crypto.randomBytes(24).toString('base64url'),
       issued_at: new Date(now).toISOString(),
       expires_at: new Date(now + TTL_SECONDS * 1000).toISOString(),
@@ -118,6 +131,12 @@ export class WorkerOperationAssertions {
     const claims = verifyToken(token, this.secret)
     if (!claims) throw new Error('invalid worker operation assertion')
     if (Date.parse(claims.expires_at) <= Date.now()) throw new Error('worker operation assertion expired')
+    if (claims.action === 'install' && expected.install_profile !== claims.install_profile) {
+      throw new Error('worker operation assertion claim mismatch: install_profile')
+    }
+    if (claims.action !== 'install' && expected.install_profile !== undefined) {
+      throw new Error('worker operation assertion claim mismatch: install_profile')
+    }
     for (const key of Object.keys(expected) as Array<keyof ExpectedWorkerOperation>) {
       if (claims[key] !== expected[key]) throw new Error(`worker operation assertion claim mismatch: ${key}`)
     }

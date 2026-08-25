@@ -2,24 +2,20 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { findTranslator, connectionCapabilitiesFor, versionInRange } from '../../src/workers/connections/registry.js'
+import { findTranslator, connectionCapabilitiesFor } from '../../src/workers/connections/registry.js'
 import { buildScrubbedChildEnv } from '../../src/workers/connections/secret-env.js'
 import { RuntimeFileSet } from '../../src/workers/connections/runtime-file.js'
 
 describe('connection translators（P6-B §7）', () => {
-  it('版本 range 匹配：2.x / 0.146.x / 超 range 拒绝', () => {
-    expect(versionInRange('2.1.227', '2.x')).toBe(true)
-    expect(versionInRange('3.0.0', '2.x')).toBe(false)
-    expect(versionInRange('0.146.0', '0.146.x')).toBe(true)
-    expect(versionInRange('0.147.0', '0.146.x')).toBe(false)
-    expect(versionInRange('garbage', '2.x')).toBe(false)
+  it('translator 不以 CLI 版本筛选 connection mode', () => {
+    expect(findTranslator('codex', 'existing_host')).toBeDefined()
+    expect(connectionCapabilitiesFor('codex').map((cap) => cap.mode).sort()).toEqual(['admin_provider', 'existing_host', 'native_account'])
   })
 
   it('claude admin_provider：endpoint/key/model 落到 ANTHROPIC_* env；非 anthropic format 拒绝', () => {
-    const translator = findTranslator('claude-code', 'admin_provider', '2.1.227')!
+    const translator = findTranslator('claude-code', 'admin_provider')!
     expect(translator.capability.translator_id).toBe('claude-code-anthropic-runtime-v1')
     const injection = translator.buildInjection({
-      cli_version: '2.1.227',
       connection: { endpoint: 'https://api.example', apikey: 'sk-test', model_id: 'claude-x', format: 'anthropic' },
     })
     expect(injection.env).toEqual({
@@ -28,15 +24,13 @@ describe('connection translators（P6-B §7）', () => {
       ANTHROPIC_MODEL: 'claude-x',
     })
     expect(() => translator.buildInjection({
-      cli_version: '2.1.227',
       connection: { endpoint: 'https://api.example', apikey: 'sk', model_id: 'm', format: 'openai' },
     })).toThrow(/format/)
   })
 
   it('codex admin_provider：config.toml wire_api=responses + env_key 引用，credential 不落正文', () => {
-    const translator = findTranslator('codex', 'admin_provider', '0.146.0')!
+    const translator = findTranslator('codex', 'admin_provider')!
     const injection = translator.buildInjection({
-      cli_version: '0.146.0',
       connection: { endpoint: 'https://api.example', apikey: 'sk-secret', model_id: 'gpt-x', format: 'openai-responses' },
     })
     expect(injection.runtimeFiles?.['config.toml']).toContain('wire_api = "responses"')
@@ -45,19 +39,15 @@ describe('connection translators（P6-B §7）', () => {
     expect(injection.env['CRABOT_WORKER_ADMIN_PROVIDER_KEY']).toBe('sk-secret')
     // 普通 openai format 不因名字相近自动兼容
     expect(() => translator.buildInjection({
-      cli_version: '0.146.0',
       connection: { endpoint: 'https://e', apikey: 'k', model_id: 'm', format: 'openai' },
     })).toThrow(/format/)
   })
 
-  it('native/existing_host translator：零注入；超 range CLI 找不到 translator', () => {
-    expect(findTranslator('claude-code', 'existing_host', '2.1.227')!.buildInjection({ cli_version: '2.1.227' }).env).toEqual({})
-    expect(findTranslator('codex', 'native_account', '0.146.0')).toBeDefined()
-    expect(findTranslator('codex', 'native_account', '0.100.0')).toBeUndefined()
-    // capabilities 列表按版本过滤
-    const caps = connectionCapabilitiesFor('claude-code', '2.1.227')
+  it('native/existing_host translator：零注入，capabilities 不按版本过滤', () => {
+    expect(findTranslator('claude-code', 'existing_host')!.buildInjection({}).env).toEqual({})
+    expect(findTranslator('codex', 'native_account')).toBeDefined()
+    const caps = connectionCapabilitiesFor('claude-code')
     expect(caps.map((c) => c.mode).sort()).toEqual(['admin_provider', 'existing_host', 'native_account'])
-    expect(connectionCapabilitiesFor('claude-code', '9.9.9')).toEqual([])
   })
 
   it('child env scrub：bearer/provider/CLI credential 一律不继承，proxy/PATH 保留', () => {

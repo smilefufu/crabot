@@ -7,6 +7,7 @@ import type { ResolvedPermissions, MCPServerConfig } from '../types.js'
 
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
 export type CLIWorkerImplId = Exclude<WorkerImplId, 'builtin'>
+export type WorkerInstallProfile = 'latest' | 'fallback'
 export type IncarnationId = string
 
 export interface WorkspaceInstructionSnapshot {
@@ -33,7 +34,6 @@ export interface WorkerConnectionCapability {
   mode: 'native_account' | 'admin_provider' | 'existing_host'
   translator_id: string
   translator_version: string
-  cli_version_range: string
   provider_formats?: ModelFormat[]
   endpoint_policy?: 'official_only' | 'custom_base_url'
   credential_transport: 'native_store' | 'process_env' | 'agent_runtime_file'
@@ -402,7 +402,7 @@ export type WorkerTerminalView =
 export interface DetectResult {
   installed: boolean
   activated: boolean
-  /** 当前检测到的 CLI 版本（translator/version range 匹配输入）。 */
+  /** 当前检测到的 CLI 版本（展示与 verification binding 使用）。 */
   version?: string
   /** 只解析用户级安装（v1 无 managed）。 */
   install_source?: 'user'
@@ -424,8 +424,7 @@ export interface WorkerAdapter {
   readonly implId: WorkerImplId
   detect(): Promise<DetectResult>
   /**
-   * 与当前 detect 版本一致的静态 translator 声明（P6-B §6）；
-   * detect 与声明不一致时 registry 标 degraded/not ready。
+   * 当前静态 translator 声明（P6-B §6）；不按 CLI 版本筛选。
    */
   connectionCapabilities?(): WorkerConnectionCapability[]
   /** 无副作用的 workspace/capability 前置检查；handoff 在触碰源化身前调用。 */

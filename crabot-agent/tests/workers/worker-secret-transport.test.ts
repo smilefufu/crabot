@@ -19,7 +19,6 @@ function fakeAdapter(version: string): WorkerAdapter {
       mode: 'admin_provider',
       translator_id: 'codex-openai-responses-runtime-v1',
       translator_version: '1',
-      cli_version_range: '0.146.x,0.147.x',
       provider_formats: ['openai-responses'],
       credential_transport: 'agent_runtime_file',
       model_selection: 'explicit_model',

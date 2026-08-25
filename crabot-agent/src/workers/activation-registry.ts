@@ -9,8 +9,8 @@
  *   degraded（adapter 级真实失败）才阻断，passed 的 verify 或成功执行自动清除。
  * - desired config 只经 authenticated pull 原子替换；stale revision 拒绝；
  *   running incarnation 不杀，新 resume/handoff 重验。
- * - verification binding 全等才有效：policy_revision + connection_revision +
- *   translator_id/translator_version + cli_version。任一变化即降级 not ready。
+ * - verification binding 全等时显示为当前；策略、连接、translator 或 CLI version 变化时仅提示重验，
+ *   不阻断 ready。真实执行失败产生 degraded，passed verify 或成功执行自动清除。
  *
  * 持久化（plan §3.3）：只保存脱敏 verification binding/状态，不保存 Provider
  * connection、setup transcript 或任何 credential。
@@ -345,7 +345,7 @@ export class ActivationRegistry {
 
     const translator = capabilities.find((cap) => cap.mode === policy.connection!.mode)
     if (!translator) {
-      return { ...status, detail: `no translator for connection mode ${policy.connection.mode} at CLI ${detect.version ?? 'unknown'}` }
+      return { ...status, detail: `no translator for connection mode ${policy.connection.mode}` }
     }
     status.translator = translator
     status.credential_scope = translator.credential_scope

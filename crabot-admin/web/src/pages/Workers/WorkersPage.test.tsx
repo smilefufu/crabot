@@ -107,7 +107,7 @@ describe('WorkersPage（P6-B §13）', () => {
     await waitFor(() => expect(svc.startVerify).toHaveBeenCalledWith('codex', 1))
   })
 
-  it('用户级 CLI 缺失时 Claude Code 与 Codex 都在确认后发起安装', async () => {
+  it('用户级 CLI 缺失时 Claude Code 与 Codex 都在确认后发起 latest 安装', async () => {
     const missing = {
       ...readyStatus,
       installed: false,
@@ -120,12 +120,26 @@ describe('WorkersPage（P6-B §13）', () => {
     ]))
     svc.startInstall.mockResolvedValue({ state: 'completed', version: '0.1.2' })
     render(<WorkersPage />)
-    await waitFor(() => screen.getByRole('button', { name: '安装 Claude Code' }))
-    expect(screen.getByRole('button', { name: '安装 Codex' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '安装 Codex' }))
+    await waitFor(() => expect(screen.getAllByRole('button', { name: '安装最新版本' })).toHaveLength(2))
+    const codexCard = screen.getByRole('heading', { name: 'Codex', level: 2 }).closest('article')
+    expect(codexCard).not.toBeNull()
+    fireEvent.click(within(codexCard!).getByRole('button', { name: '安装最新版本' }))
     expect(svc.startInstall).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: '开始安装' }))
-    await waitFor(() => expect(svc.startInstall).toHaveBeenCalledWith('codex', 1))
+    await waitFor(() => expect(svc.startInstall).toHaveBeenCalledWith('codex', 1, 'latest'))
+  })
+
+  it('已安装的 CLI 可显式重装 latest 或切换固定 fallback', async () => {
+    const installed = { ...readyStatus, impl: 'codex', verification: 'never', ready: false }
+    svc.getAll.mockResolvedValue(mergedResult(baseConfig, [installed]))
+    svc.startInstall.mockResolvedValue({ state: 'completed', version: '0.146.0' })
+    render(<WorkersPage />)
+    await waitFor(() => screen.getByRole('button', { name: '重装最新版本' }))
+    expect(screen.getByRole('button', { name: '切换到已验证回退版本' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '切换到已验证回退版本' }))
+    expect(screen.getByText(/不会修改宿主登录或配置/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '开始安装' }))
+    await waitFor(() => expect(svc.startInstall).toHaveBeenCalledWith('codex', 1, 'fallback'))
   })
 
   it('安装失败后保留脱敏错误与重试入口', async () => {
@@ -133,11 +147,30 @@ describe('WorkersPage（P6-B §13）', () => {
     svc.getAll.mockResolvedValue(mergedResult(baseConfig, [missing]))
     svc.startInstall.mockRejectedValue(new Error('registry unavailable'))
     render(<WorkersPage />)
-    await waitFor(() => screen.getByRole('button', { name: '安装 Codex' }))
-    fireEvent.click(screen.getByRole('button', { name: '安装 Codex' }))
+    await waitFor(() => screen.getByRole('button', { name: '安装最新版本' }))
+    fireEvent.click(screen.getByRole('button', { name: '安装最新版本' }))
     fireEvent.click(screen.getByRole('button', { name: '开始安装' }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('安装失败: registry unavailable'))
-    expect(screen.getByRole('button', { name: '安装 Codex' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '安装最新版本' })).toBeTruthy()
+  })
+
+  it('验证失败后 refresh 不清除失败原因，且保留恢复安装入口', async () => {
+    const enabled = {
+      ...baseConfig,
+      implementations: {
+        ...baseConfig.implementations,
+        codex: { enabled: true, connection: { mode: 'existing_host' as const } },
+      },
+    }
+    svc.getAll.mockResolvedValue(mergedResult(enabled, [{ ...readyStatus, impl: 'codex', verification: 'never' }]))
+    svc.startVerify.mockResolvedValue({ passed: false, detail: 'authentication rejected' })
+    render(<WorkersPage />)
+    await waitFor(() => screen.getByRole('button', { name: '验证' }))
+    fireEvent.click(screen.getByRole('button', { name: '验证' }))
+    fireEvent.click(screen.getByRole('button', { name: '开始验证' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('验证失败: authentication rejected'))
+    expect(screen.getByRole('button', { name: '重装最新版本' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '切换到已验证回退版本' })).toBeTruthy()
   })
 
   it('未验证的 ready 实现仍标记为可派用', async () => {

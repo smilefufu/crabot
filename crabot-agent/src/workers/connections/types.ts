@@ -2,12 +2,12 @@
  * Worker connection translator（P6-B plan §7；protocol-agent-v3 §6.5）。
  *
  * 语义边界：
- * - translator 是「连接模式 × CLI 版本范围」的唯一注入点：只产出声明的最小 env 增量 /
+ * - translator 是「连接模式」的唯一注入点：只产出声明的最小 env 增量 /
  *   runtime file / model override；不接受任意 key map，不写 task workspace/普通 config/
  *   ledger/trace。
- * - 每个 translator 在代码中固定：CLI version range、provider formats、endpoint policy、
- *   credential transport、model selection、credential scope。CLI 超出 range 立即
- *   unsupported/not ready，不得宽松继续。
+ * - 每个 translator 在代码中固定：provider formats、endpoint policy、credential transport、
+ *   model selection、credential scope。CLI 版本不作为 translator/activation gate；真实
+ *   不兼容由显式 verify 或 worker 执行报告。
  * - operation-time resolve：输入的 connection 只在当前调用内存存活；runtime file 由
  *   调用方写 0600 临时文件并在 finally 删除。
  */
@@ -36,13 +36,11 @@ export interface TranslatorInjection {
 export interface ConnectionTranslator {
   readonly capability: WorkerConnectionCapability & { mode: NonNullable<WorkerConnectionCapability['mode']> }
   readonly impl: CLIWorkerImplId
-  /** CLI 版本是否在支持范围内（semver major/minor 前缀匹配，见实现）。 */
-  supportsCliVersion(version: string): boolean
   /**
    * 构造本次操作的最小注入。admin_provider 必须传 connection；
    * native_account/existing_host 不传（credential 走 CLI 原生 store/宿主 home）。
    * format 不在 provider_formats 内必须抛错（相同 format 不足以证明兼容的反向：
    * 不支持的 format 连试都不试）。
    */
-  buildInjection(input: { cli_version: string; connection?: ResolvedWorkerConnection }): TranslatorInjection
+  buildInjection(input: { connection?: ResolvedWorkerConnection }): TranslatorInjection
 }

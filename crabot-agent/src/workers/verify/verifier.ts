@@ -55,8 +55,8 @@ export async function runWorkerVerification(
   const policy = registry.getPolicy(impl)
   if (!policy?.enabled || !policy.connection) return { passed: false, detail: 'impl not enabled with a connection' }
   if (!status.installed || !status.version) return { passed: false, detail: 'impl not installed' }
-  const translator = findTranslator(impl, policy.connection.mode, status.version)
-  if (!translator) return { passed: false, detail: `no translator for ${policy.connection.mode} @ ${status.version}` }
+  const translator = findTranslator(impl, policy.connection.mode)
+  if (!translator) return { passed: false, detail: `no translator for ${policy.connection.mode}` }
 
   // 本次实时 resolve（admin_provider 才走 Admin；native/existing 零注入）。
   let connection: ResolvedWorkerConnection | undefined
@@ -73,7 +73,7 @@ export async function runWorkerVerification(
 
   let injection
   try {
-    injection = translator.buildInjection({ cli_version: status.version, connection })
+    injection = translator.buildInjection({ connection })
   } catch (error) {
     return { passed: false, detail: `translator rejected: ${redact(error)}` }
   }
@@ -129,8 +129,8 @@ export async function commitVerification(
 ): Promise<void> {
   const status = registry.getStatus(impl)
   const policy = registry.getPolicy(impl)
-  const translator = policy?.connection && status.version
-    ? findTranslator(impl, policy.connection.mode, status.version)
+  const translator = policy?.connection
+    ? findTranslator(impl, policy.connection.mode)
     : undefined
   const record: VerificationRecord = {
     result: outcome.passed ? 'passed' : 'failed',

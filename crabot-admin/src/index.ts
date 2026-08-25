@@ -9804,7 +9804,7 @@ export class AdminModule extends ModuleBase {
         return
       }
       // §3.19.12：把 CLI 设为 enabled / 变更其 connection 前，必须用当前 Agent status
-      // 校验 mode/provider format 与该 CLI 版本的 translator capability；Agent 不可用 503。
+      // 校验 mode/provider format 与当前发布的 translator capability；Agent 不可用 503。
       const nextImpls = body.config!.implementations as Record<string, { enabled?: boolean; connection?: { mode: string; provider_id?: string } }>
       const current = await this.workerImplementationStore.load()
       const transitions: Array<{ impl: 'claude-code' | 'codex'; enabled: boolean; connection?: { mode: string; provider_id?: string; model_id?: string } }> = []
@@ -9844,7 +9844,7 @@ export class AdminModule extends ModuleBase {
           const cap = caps.find((c) => c.mode === mode)
           if (!status?.installed || !cap) {
             sendJson(res, 400, {
-              error: `${transition.impl} has no translator for ${mode} at the current CLI version`,
+              error: `${transition.impl} has no translator for ${mode}`,
               code: 'ADMIN_WORKER_CONNECTION_UNSUPPORTED',
             })
             return
@@ -9888,7 +9888,8 @@ export class AdminModule extends ModuleBase {
     impl: string,
     action: 'install' | 'verify',
     expectedRevision: unknown,
-  ): Promise<{ operationId: string; assertion: string; agentPort: number; revision: number; mode: string } | null> {
+    installProfile?: import('./worker-operation-assertions.js').WorkerInstallProfile,
+  ): Promise<{ operationId: string; assertion: string; agentPort: number; revision: number; mode: string; installProfile?: import('./worker-operation-assertions.js').WorkerInstallProfile } | null> {
     if (impl === 'builtin') {
       sendJson(res, 400, { error: 'builtin does not take worker operations', code: 'ADMIN_WORKER_IMPL_INVALID' })
       return null
@@ -9920,19 +9921,26 @@ export class AdminModule extends ModuleBase {
     const operationId = generateId()
     const assertion = this.workerOperationAssertions.issue({
       action, operation_id: operationId, impl: impl as 'claude-code' | 'codex', mode, policy_revision: desired.revision,
+      ...(action === 'install' ? { install_profile: installProfile! } : {}),
     })
-    return { operationId, assertion, agentPort, revision: desired.revision, mode }
+    return { operationId, assertion, agentPort, revision: desired.revision, mode, ...(action === 'install' ? { installProfile } : {}) }
   }
 
   /** POST /:impl/install|verify（§3.19.12.1）：assertion 不出服务端。 */
   private async handleWorkerActionApi(req: IncomingMessage, res: ServerResponse, impl: string, action: 'install' | 'verify'): Promise<void> {
     const body = await this.readJsonBody<unknown>(req)
-    if (!body || Array.isArray(body) || typeof body !== 'object' || Object.keys(body).some((key) => key !== 'expected_revision')) {
-      sendJson(res, 400, { error: 'only expected_revision is accepted', code: 'ADMIN_WORKER_IMPL_INVALID' })
+    const allowedKeys = action === 'install' ? ['expected_revision', 'install_profile'] : ['expected_revision']
+    if (!body || Array.isArray(body) || typeof body !== 'object' || Object.keys(body).some((key) => !allowedKeys.includes(key))) {
+      sendJson(res, 400, { error: action === 'install' ? 'only expected_revision and install_profile are accepted' : 'only expected_revision is accepted', code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return
+    }
+    const installProfile = action === 'install' ? (body as { install_profile?: unknown }).install_profile ?? 'latest' : undefined
+    if (installProfile !== undefined && installProfile !== 'latest' && installProfile !== 'fallback') {
+      sendJson(res, 400, { error: 'install_profile must be latest or fallback', code: 'ADMIN_WORKER_IMPL_INVALID' })
       return
     }
     const expectedRevision = (body as { expected_revision?: unknown }).expected_revision
-    const admission = await this.admitWorkerOperation(res, impl, action, expectedRevision)
+    const admission = await this.admitWorkerOperation(res, impl, action, expectedRevision, installProfile)
     if (!admission) return
     try {
       const result = await this.rpcClient.callSensitive<
@@ -9942,7 +9950,11 @@ export class AdminModule extends ModuleBase {
         impl,
         operation_id: admission.operationId,
         assertion: admission.assertion,
-        expected: { action, operation_id: admission.operationId, impl, mode: admission.mode, policy_revision: admission.revision },
+        expected: {
+          action, operation_id: admission.operationId, impl, mode: admission.mode, policy_revision: admission.revision,
+          ...(action === 'install' ? { install_profile: admission.installProfile } : {}),
+        },
+        ...(action === 'install' ? { install_profile: admission.installProfile } : {}),
       }, this.config.moduleId)
       sendJson(res, 200, { operation: result })
     } catch (error) {

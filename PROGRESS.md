@@ -62,6 +62,11 @@
 
 ### P6 后 Traces / Worker 生命周期（当前主线）
 
+- **Worker 用户级 CLI 安装闭环（已确认，待 PR review）**：默认由 Admin 显式安装官方 npm `latest`；
+  Claude Code 与 Codex 均可在页面重装 latest 或切换固定已验证 fallback。CLI 版本号不再是
+  translator、配置、verify、ready 或派发的本地门禁；真实上游不兼容由 verify/执行的失败导向状态报告。
+  安装仍只写当前用户标准目录，不创建 Crabot 私有 CLI runtime，也不改写 `~/.claude`/`~/.codex` 登录配置。
+
 - **Worker 直接 subagent 可观测性（v3.6.7，`feat/worker-subagent-observability`）**：按已确认的
   `crabot-docs` 设计与协议增补，builtin Worker 恢复 configured `delegate_task`；builtin、Claude Code、
   Codex 统一列出 Worker 直接启动的 child，Worker 详情读取分页 trace，child 详情读取自己的分页 trace。
