@@ -50,7 +50,7 @@ function buildBaseTools(
     createGrepTool(getCwd),
   ]
   if (availableSkills && availableSkills.length > 0) {
-    tools.push(createSkillTool({ availableSkills }))
+    tools.push(createSkillTool({ availableSkills, getCwd }))
   }
   if (bgToolDeps) {
     tools.push(createOutputTool(bgToolDeps))

@@ -176,6 +176,35 @@ describe('createReadTool', () => {
     expect(result.output).toContain(`sed -n '1p' '${filePath}'`)
   })
 
+  it('为探测窗口内的超长单行报告精确长度', async () => {
+    const filePath = path.join(tmpDir, 'probed-longline.log')
+    const bigLine = 'c'.repeat(192 * 1024)
+    await fs.writeFile(filePath, bigLine + '\nnext line\n')
+
+    const result = await tool.call({ file_path: filePath }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('196608-byte line')
+    expect(result.output).not.toContain('at least')
+  })
+
+  it('对 128 MiB 无换行文件只做有界长度探测', async () => {
+    const filePath = path.join(tmpDir, 'single-128m-line.log')
+    const handle = await fs.open(filePath, 'w')
+    try {
+      const chunk = Buffer.alloc(1024 * 1024, 'x')
+      for (let index = 0; index < 128; index++) await handle.write(chunk)
+    } finally {
+      await handle.close()
+    }
+
+    const result = await tool.call({ file_path: filePath }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('at least 313344 bytes of the line before its end')
+    expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThanOrEqual(52 * 1024)
+  })
+
   it('streams >10MB files line-by-line and can reach the tail via offset', async () => {
     const filePath = path.join(tmpDir, 'huge.txt')
     // 150000 行 × ~90B ≈ 13MB，走流式按行定位路径

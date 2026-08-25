@@ -7,6 +7,18 @@
 
 ### P6 已完成；Manager -> Worker 输入与侧问可靠交付待 PR review
 
+### 本地宿主工具大文件安全与进程隔离：实施完成，待非 Draft PR review
+
+- 已确认设计与计划：`crabot-docs/superpowers/specs/2026-08-25-tool-process-isolation-design.md`、
+  `crabot-docs/superpowers/plans/2026-08-25-local-tool-execution-safety.md`。`Read`、`Write`、`Edit`、
+  `Glob`、`Grep`、`Skill` 均改为一调用一 Node helper；Bash 保持现有后台实体所有权，但统一受控启动、
+  有界输出、取消/超时和进程树回收。
+- `Read` 对超长单行只保留前缀并做固定上限的行长探测；`Edit` 为两遍流式匹配和同目录原子替换，保留
+  现有文件 mode 与最终 symlink 语义；`Write` 同样原子替换。父 Agent 仍独占权限、hooks、trace、cwd、
+  read dedup 与 BgEntity 台账，写入 helper 失联后统一报告“执行结果未知”。
+- 分支 `feat/local-tool-process-isolation` 已完成真实 Node helper / shell / `rg` 回归；实机 1.65 GiB
+  单行文件读取返回 51 KB 有界结果（helper 91 ms，无 `RangeError`），待创建非 Draft PR，不自行合并。
+
 ### 统一 Worker Runtime（v3.6.0）：实现完成，待设计型 PR review
 
 - 已确认 `crabot-docs/superpowers/specs/2026-08-20-unified-worker-runtime-design.md`，并同步

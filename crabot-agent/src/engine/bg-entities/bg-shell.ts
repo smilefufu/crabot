@@ -5,7 +5,7 @@
  * Plan: crabot-docs/superpowers/plans/2026-05-01-long-running-agent-plan-2.md  Task 4
  */
 
-import { spawn, execFile, type SpawnOptions, type ChildProcess } from 'node:child_process'
+import { execFile, type SpawnOptions, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
@@ -16,6 +16,7 @@ import { resolveBashPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bas
 import type { BgEntityOwner, BgShellRegistryRecord } from './types.js'
 import type { BgEntityRegistry } from './registry.js'
 import { emitInstantSpan, type BgEntityTraceContext } from './trace.js'
+import { launchHostProcess, terminateHostProcessTree } from '../host-process.js'
 
 const execFileAsync = promisify(execFile)
 const INLINE_TEE_DRAIN_TIMEOUT_SECONDS = 0.5
@@ -34,10 +35,12 @@ function spawnBash(command: string, extraOpts: SpawnOptions = {}): ChildProcess 
   if (bashPath === null) {
     throw new Error(BASH_NOT_FOUND_MESSAGE)
   }
-  return spawn(bashPath, ['-c', command], {
-    detached: process.platform !== 'win32',
-    env: buildChildEnv(),
-    ...extraOpts,
+  return launchHostProcess({
+    argv: [bashPath, '-c', command],
+    ...(typeof extraOpts.cwd === 'string' ? { cwd: extraOpts.cwd } : {}),
+    ...(extraOpts.stdio ? { stdio: extraOpts.stdio } : {}),
+    env: buildChildEnv(extraOpts.env as Record<string, string | undefined> | undefined),
+    detached: extraOpts.detached ?? process.platform !== 'win32',
   })
 }
 
@@ -625,23 +628,5 @@ export async function readProcStartTime(pid: number): Promise<string> {
  * Both forms swallow "already dead" errors silently.
  */
 export function killShellTree(pid: number): void {
-  if (process.platform === 'win32') {
-    execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv() }, () => {
-      // Errors (process already exited, access denied for system-level pids)
-      // are non-actionable here — the registry update already marks status=killed.
-    })
-    return
-  }
-  try {
-    process.kill(-pid, 'SIGTERM')
-  } catch {
-    /* already dead */
-  }
-  setTimeout(() => {
-    try {
-      process.kill(-pid, 'SIGKILL')
-    } catch {
-      /* already dead */
-    }
-  }, 3000).unref()
+  terminateHostProcessTree(pid, 3000)
 }
