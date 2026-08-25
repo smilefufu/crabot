@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   UserLevelInstaller,
+  packageForInstallProfile,
   userLevelInstallManifestFor,
   userLevelNpmPrefix,
   type InstallCommandRunner,
@@ -11,13 +12,16 @@ import {
 import { resolveUserLevelBinary } from '../../src/workers/cli-binary.js'
 
 describe('UserLevelInstaller', () => {
-  it('Claude Code 与 Codex 都使用固定官方 package', () => {
+  it('Claude Code 与 Codex 都声明官方 latest 与固定 fallback', () => {
     expect(userLevelInstallManifestFor('claude-code')).toMatchObject({
-      packageId: '@anthropic-ai/claude-code', binaryName: 'claude',
+      packageId: '@anthropic-ai/claude-code', binaryName: 'claude', fallbackVersion: '2.1.227',
     })
     expect(userLevelInstallManifestFor('codex')).toMatchObject({
-      packageId: '@openai/codex', binaryName: 'codex',
+      packageId: '@openai/codex', binaryName: 'codex', fallbackVersion: '0.146.0',
     })
+    expect(packageForInstallProfile(userLevelInstallManifestFor('codex'), 'latest')).toBe('@openai/codex')
+    expect(packageForInstallProfile(userLevelInstallManifestFor('codex'), 'fallback')).toBe('@openai/codex@0.146.0')
+    expect(() => packageForInstallProfile(userLevelInstallManifestFor('codex'), 'other' as never)).toThrow(/latest or fallback/)
   })
 
   it('只向固定用户级 prefix 安装，并以 resolver + --version 收口', async () => {
@@ -35,7 +39,7 @@ describe('UserLevelInstaller', () => {
       runCommand: runner,
     })
 
-    await expect(installer.install('codex')).resolves.toEqual({
+    await expect(installer.install('codex', 'latest')).resolves.toEqual({
       impl: 'codex', version: '0.1.2', binaryPath: path.join(homeDir, '.local', 'bin', 'codex'),
     })
     expect(calls).toEqual([
@@ -50,6 +54,23 @@ describe('UserLevelInstaller', () => {
     ])
   })
 
+  it('fallback profile 使用 manifest 固定版本，不向调用方开放任意 package', async () => {
+    const calls: Array<{ file: string; args: readonly string[] }> = []
+    const installer = new UserLevelInstaller({
+      dataRoot: '/tmp/crabot-data',
+      homeDir: '/tmp/crabot-user-install-home',
+      resolveNpmCli: async () => '/fixed/npm-cli.js',
+      resolveBinary: async () => ({ binary: '/tmp/crabot-user-install-home/.local/bin/codex', global_detected: false }),
+      runCommand: async (file, args) => {
+        calls.push({ file, args })
+        return { stdout: args[0] === '--version' ? 'codex-cli 0.146.0\n' : '', stderr: '' }
+      },
+    })
+
+    await installer.install('codex', 'fallback')
+    expect(calls[0].args.at(-1)).toBe('@openai/codex@0.146.0')
+  })
+
   it('resolver 或 version probe 未通过时不报告安装成功', async () => {
     const installer = new UserLevelInstaller({
       dataRoot: '/tmp/crabot-data',
@@ -59,7 +80,7 @@ describe('UserLevelInstaller', () => {
       runCommand: async () => ({ stdout: '', stderr: '' }),
     })
 
-    await expect(installer.install('claude-code')).rejects.toThrow(/no user-level binary/)
+    await expect(installer.install('claude-code', 'latest')).rejects.toThrow(/no user-level binary/)
   })
 
   it('同 implementation 的安装互斥，并可取消在途命令', async () => {
@@ -79,9 +100,9 @@ describe('UserLevelInstaller', () => {
       runCommand: runner,
     })
 
-    const first = installer.install('codex')
+    const first = installer.install('codex', 'latest')
     await commandStarted
-    await expect(installer.install('codex')).rejects.toThrow(/in flight/)
+    await expect(installer.install('codex', 'latest')).rejects.toThrow(/in flight/)
     installer.cancelInFlight('codex')
     await expect(first).rejects.toThrow('cancelled')
   })

@@ -505,7 +505,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private get resolveUserLevelBinary(): (() => Promise<{ binary?: string; global_detected: boolean }>) | undefined {
     return this.deps.resolveUserLevelBinary
   }
-  private lastDetectedVersion?: string
   private lastGlobalDetected = false
   private appServerForkSupported = false
   private appServerSubagentSupported = false
@@ -522,10 +521,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return resolved.binary ? { cmd: shQuote(resolved.binary), raw: resolved.binary } : undefined
   }
 
-  /** P6-B §6：与最近一次 detect 版本一致的静态 translator 声明。 */
+  /** P6-B §6：静态 translator 声明，不按 detect 版本筛选。 */
   connectionCapabilities(): import('../types.js').WorkerConnectionCapability[] {
-    if (!this.lastDetectedVersion) return []
-    return connectionCapabilitiesFor('codex', this.lastDetectedVersion)
+    return connectionCapabilitiesFor('codex')
   }
   private readonly mutexes = new Map<string, AsyncMutex>()
   /** resolveBinDir(codexBin) 的缓存 promise——codexBin 构造后不变,没必要每次 detect/spawn/
@@ -670,7 +668,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
     // 'codex-cli 0.146.0' → '0.146.0'
     const version = /([0-9]+\.[0-9]+\.[0-9]+)/.exec(versionOutput)?.[1]
-    this.lastDetectedVersion = version
     if (!version) {
       this.appServerForkSupported = false
       this.lastCapabilityProbeKey = undefined

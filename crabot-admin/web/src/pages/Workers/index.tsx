@@ -18,6 +18,7 @@ import {
   type WorkerImplementationStatus,
   type CLIWorkerImplId,
   type WorkerImplId,
+  type WorkerInstallProfile,
   type WorkerImplementationPolicy,
 } from '../../services/worker-management'
 import { providerService } from '../../services/provider'
@@ -103,6 +104,11 @@ interface DialogState {
   modelId: string
 }
 
+interface InstallRequest {
+  impl: CLIWorkerImplId
+  profile: WorkerInstallProfile
+}
+
 function preferenceDraftsFor(config: WorkerImplementationConfig): Record<CLIWorkerImplId, string> {
   return {
     'claude-code': config.implementations['claude-code'].preference ?? '',
@@ -118,7 +124,7 @@ export const WorkersPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [dialog, setDialog] = useState<DialogState | null>(null)
-  const [installImpl, setInstallImpl] = useState<CLIWorkerImplId | null>(null)
+  const [installRequest, setInstallRequest] = useState<InstallRequest | null>(null)
   const [verifyImpl, setVerifyImpl] = useState<CLIWorkerImplId | null>(null)
   const [preferenceDrafts, setPreferenceDrafts] = useState<Record<CLIWorkerImplId, string>>({
     'claude-code': '',
@@ -128,7 +134,6 @@ export const WorkersPage: React.FC = () => {
   const [agentStatus, setAgentStatus] = useState<'available' | 'unavailable'>('available')
 
   const refresh = async () => {
-    setError(null)
     try {
       const result = await workerManagementService.getAll()
       setConfig(result.config)
@@ -240,12 +245,12 @@ export const WorkersPage: React.FC = () => {
     }
   }
 
-  const runInstallation = async (impl: CLIWorkerImplId) => {
+  const runInstallation = async (impl: CLIWorkerImplId, profile: WorkerInstallProfile) => {
     if (!config) return
     setBusy(true)
     setError(null)
     try {
-      const result = await workerManagementService.startInstall(impl, config.revision)
+      const result = await workerManagementService.startInstall(impl, config.revision, profile)
       if (result.state === 'completed') setNotice(`已安装 ${IMPL_LABEL[impl]}${result.version ? ` · ${result.version}` : ''}`)
       else setError(`安装未完成: ${result.detail ?? '未返回原因'}`)
       await refresh()
@@ -253,7 +258,7 @@ export const WorkersPage: React.FC = () => {
       setError(`安装失败: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setBusy(false)
-      setInstallImpl(null)
+      setInstallRequest(null)
     }
   }
 
@@ -275,7 +280,7 @@ export const WorkersPage: React.FC = () => {
     const status = statusOf(impl)
     const policy = config?.implementations[impl]
     const isBuiltin = impl === 'builtin'
-    const installable = !isBuiltin && agentStatus === 'available' && !!status && !status.installed
+    const installable = !isBuiltin && agentStatus === 'available' && !!status
     const readiness = readinessView(policy, status, agentStatus)
     const verification = verificationLabel(status)
     return (
@@ -331,9 +336,20 @@ export const WorkersPage: React.FC = () => {
                   配置连接
                 </Button>
                 {installable && (
-                  <Button size="sm" disabled={busy} onClick={() => setInstallImpl(impl as CLIWorkerImplId)}>
-                    {busy && installImpl === impl ? '安装中...' : `安装 ${IMPL_LABEL[impl]}`}
-                  </Button>
+                  status.installed ? (
+                    <>
+                      <Button size="sm" disabled={busy} onClick={() => setInstallRequest({ impl: impl as CLIWorkerImplId, profile: 'latest' })}>
+                        {busy && installRequest?.impl === impl ? '安装中...' : '重装最新版本'}
+                      </Button>
+                      <Button size="sm" variant="secondary" disabled={busy} onClick={() => setInstallRequest({ impl: impl as CLIWorkerImplId, profile: 'fallback' })}>
+                        {busy && installRequest?.impl === impl ? '安装中...' : '切换到已验证回退版本'}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button size="sm" disabled={busy} onClick={() => setInstallRequest({ impl: impl as CLIWorkerImplId, profile: 'latest' })}>
+                      {busy && installRequest?.impl === impl ? '安装中...' : '安装最新版本'}
+                    </Button>
+                  )
                 )}
                 {policy.enabled && (
                   <Button size="sm" disabled={busy} onClick={() => setVerifyImpl(impl as CLIWorkerImplId)}>验证</Button>
@@ -395,20 +411,23 @@ export const WorkersPage: React.FC = () => {
         </section>
 
         <Modal
-          open={installImpl !== null}
-          onClose={() => { if (!busy) setInstallImpl(null) }}
-          title={installImpl ? `安装 ${IMPL_LABEL[installImpl]}` : ''}
+          open={installRequest !== null}
+          onClose={() => { if (!busy) setInstallRequest(null) }}
+          title={installRequest ? `${installRequest.profile === 'latest' ? '安装最新版本' : '切换到已验证回退版本'}：${IMPL_LABEL[installRequest.impl]}` : ''}
           footer={(
             <>
-              <Button variant="secondary" disabled={busy} onClick={() => setInstallImpl(null)}>取消</Button>
+              <Button variant="secondary" disabled={busy} onClick={() => setInstallRequest(null)}>取消</Button>
               <Button
-                disabled={busy || installImpl === null}
-                onClick={() => { if (installImpl) void runInstallation(installImpl) }}
+                disabled={busy || installRequest === null}
+                onClick={() => { if (installRequest) void runInstallation(installRequest.impl, installRequest.profile) }}
               >{busy ? '安装中...' : '开始安装'}</Button>
             </>
           )}
         >
-          <p>将为当前用户安装官方 {installImpl ? IMPL_LABEL[installImpl] : 'CLI'}。</p>
+          <p>{installRequest?.profile === 'fallback'
+            ? `将把当前用户的 ${installRequest ? IMPL_LABEL[installRequest.impl] : 'CLI'} 切换到已验证回退版本，不会修改宿主登录或配置。`
+            : `将为当前用户安装官方最新 ${installRequest ? IMPL_LABEL[installRequest.impl] : 'CLI'}。`}
+          </p>
         </Modal>
         <Modal
           open={dialog !== null}

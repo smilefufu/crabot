@@ -24,11 +24,20 @@ describe('WorkerOperationAssertions（P6-B §9）', () => {
   })
 
   it('install assertion 固定绑定 install mode，不能换成 verify', async () => {
-    const install = { action: 'install' as const, operation_id: 'op-install', impl: 'codex' as const, mode: 'install', policy_revision: 3 }
+    const install = { action: 'install' as const, operation_id: 'op-install', impl: 'codex' as const, mode: 'install', policy_revision: 3, install_profile: 'latest' as const }
     const token = assertions.issue(install)
     await expect(assertions.consume(token, { ...install, action: 'verify' })).rejects.toThrow(/mismatch/)
     await expect(assertions.consume(token, { ...install, mode: 'existing_host' })).rejects.toThrow(/mismatch/)
     await expect(assertions.consume(token, install)).resolves.toMatchObject({ consumed: true })
+  })
+
+  it('install assertion 必须绑定 profile，并拒绝 profile 篡改', async () => {
+    const install = { action: 'install' as const, operation_id: 'op-install', impl: 'codex' as const, mode: 'install', policy_revision: 3, install_profile: 'fallback' as const }
+    const token = assertions.issue(install)
+    await expect(assertions.consume(token, { ...install, install_profile: 'latest' })).rejects.toThrow(/install_profile/)
+    await expect(assertions.consume(token, install)).resolves.toMatchObject({ consumed: true })
+    await expect(() => assertions.issue({ ...install, install_profile: undefined })).toThrow(/install profile/)
+    await expect(() => assertions.issue({ ...base, install_profile: 'latest' })).toThrow(/only install/)
   })
 
   it('claim 不匹配（action/impl/revision/mode）逐个拒绝', async () => {

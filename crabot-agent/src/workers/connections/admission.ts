@@ -44,9 +44,9 @@ export async function admitWorkerConnection(
   if (impl === 'builtin') return NOOP_ADMISSION
   const status: WorkerImplementationStatus = registry.getStatus(impl) // not ready 在 spawn gate 已拦
   const policy = registry.getPolicy(impl)
-  if (!policy?.connection || !status.version) return NOOP_ADMISSION
+  if (!policy?.connection) return NOOP_ADMISSION
 
-  const translator = findTranslator(impl, policy.connection.mode, status.version)
+  const translator = findTranslator(impl, policy.connection.mode)
   if (!translator) return NOOP_ADMISSION // 状态面已标 not ready；防御性放行为零注入
 
   if (policy.connection.mode === 'admin_provider') {
@@ -56,7 +56,7 @@ export async function admitWorkerConnection(
     if (status.connection_revision && status.connection_revision !== resolved.connection_revision) {
       throw new Error(`worker connection revision changed for ${impl}; retry after next config pull`)
     }
-    const injection = translator.buildInjection({ cli_version: status.version, connection: resolved.connection })
+    const injection = translator.buildInjection({ connection: resolved.connection })
     if (injection.runtimeFiles && Object.keys(injection.runtimeFiles).length > 0) {
       // agent_runtime_file 的 CODEX_HOME 按 **worker** 持久（config.toml 只含 env_key 引用，
       // 不含 credential 明文；真正的 key 在进程 env）：rollout/session 跨化身延续，
@@ -89,6 +89,6 @@ export async function admitWorkerConnection(
   }
 
   // native_account / existing_host：零注入，revision 由 registry 状态面给出
-  const injection = translator.buildInjection({ cli_version: status.version })
+  const injection = translator.buildInjection({})
   return { env: injection.env, connectionRevision: status.connection_revision, dispose: async () => {} }
 }

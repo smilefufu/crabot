@@ -400,10 +400,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return resolved.binary ? shQuote(resolved.binary) : undefined
   }
 
-  /** P6-B §6：与最近一次 detect 版本一致的静态 translator 声明。 */
+  /** P6-B §6：静态 translator 声明，不按 detect 版本筛选。 */
   connectionCapabilities(): import('../types.js').WorkerConnectionCapability[] {
-    if (!this.lastDetectedVersion) return []
-    return connectionCapabilitiesFor('claude-code', this.lastDetectedVersion)
+    return connectionCapabilitiesFor('claude-code')
   }
 
   async detect(): Promise<DetectResult> {

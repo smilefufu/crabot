@@ -8,7 +8,7 @@
 
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { CLIWorkerImplId } from '../types.js'
+import type { CLIWorkerImplId, WorkerInstallProfile } from '../types.js'
 
 export type WorkerOperationKind = 'install' | 'setup' | 'verify' | 'cancel'
 export type WorkerOperationState = 'accepted' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
@@ -17,6 +17,8 @@ export interface WorkerOperationRecord {
   operation_id: string
   kind: WorkerOperationKind
   impl: CLIWorkerImplId
+  /** install operation 的 requested profile；其它 kind 省略。 */
+  install_profile?: WorkerInstallProfile
   state: WorkerOperationState
   /** 脱敏 detail（不得含 credential/endpoint/terminal bytes）。 */
   detail?: string

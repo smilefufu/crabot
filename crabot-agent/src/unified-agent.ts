@@ -3141,32 +3141,34 @@ export class UnifiedAgent extends ModuleBase {
     operation_id?: unknown
     assertion?: unknown
     expected?: Record<string, unknown>
+    install_profile?: unknown
   }): Promise<{ operation_id: string; state: string; version?: string; detail?: string }> {
     const impl = params.impl
     if (impl !== 'claude-code' && impl !== 'codex') throw new Error('impl must be claude-code or codex')
     if (typeof params.operation_id !== 'string' || typeof params.assertion !== 'string' || !params.expected) {
       throw new Error('operation_id, assertion and expected are required')
     }
+    const installProfile = params.install_profile
+    if (installProfile !== 'latest' && installProfile !== 'fallback') throw new Error('install_profile must be latest or fallback')
     if (
       params.expected.action !== 'install'
       || params.expected.impl !== impl
       || params.expected.operation_id !== params.operation_id
       || params.expected.mode !== 'install'
       || typeof params.expected.policy_revision !== 'number'
+      || params.expected.install_profile !== installProfile
     ) {
       throw new Error('assertion binding mismatch with requested operation')
     }
     this.reserveWorkerOperation(impl)
     const operationId = params.operation_id
     const operation: import('./workers/operations/store.js').WorkerOperationRecord = {
-      operation_id: operationId, kind: 'install' as const, impl, state: 'accepted' as const,
+      operation_id: operationId, kind: 'install' as const, impl, install_profile: installProfile, state: 'accepted' as const,
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     }
     try {
       // 先持久 reservation，取消可以在探测、assertion 核销或 npm 启动前稳定地找到 operation。
       await this.workerOperationStore.upsert(operation)
-      const status = await this.activationRegistry.refreshImpl(impl)
-      if (status.installed) throw new Error(`${impl} already has a working user-level installation`)
       if (this.workerOperationStore.get(operationId)?.state === 'cancelled') {
         return { operation_id: operationId, state: 'cancelled', detail: 'installation cancelled' }
       }
@@ -3183,7 +3185,7 @@ export class UnifiedAgent extends ModuleBase {
         return { operation_id: operationId, state: 'cancelled', detail: 'installation cancelled' }
       }
       await this.workerOperationStore.upsert({ ...operation, state: 'running' })
-      const result = await this.userLevelInstaller.install(impl)
+      const result = await this.userLevelInstaller.install(impl, installProfile)
       await this.activationRegistry.refresh()
       if (this.workerOperationStore.get(operationId)?.state === 'cancelled') {
         return { operation_id: operationId, state: 'cancelled', detail: 'installation cancelled' }

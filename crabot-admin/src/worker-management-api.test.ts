@@ -97,7 +97,7 @@ describe('Worker implementation management API（P6-B §5）', () => {
       if (method === 'list_worker_implementation_status') {
         return { items: [{
           impl: 'claude-code', installed: true, version: '2.1.232',
-          connection_capabilities: [{ mode: 'existing_host', translator_id: 'claude-code-existing-host-v1', translator_version: '1', cli_version_range: '2.x', credential_transport: 'native_store', model_selection: 'native_default', credential_scope: 'runtime_user_home' }],
+          connection_capabilities: [{ mode: 'existing_host', translator_id: 'claude-code-existing-host-v1', translator_version: '1', credential_transport: 'native_store', model_selection: 'native_default', credential_scope: 'runtime_user_home' }],
         }] }
       }
       throw new Error(`unexpected agent RPC in test: ${method}`)
@@ -122,7 +122,7 @@ describe('Worker implementation management API（P6-B §5）', () => {
       if (method === 'list_worker_implementation_status') {
         return { items: [{
           impl: 'claude-code', installed: true, version: '2.1.232', ready: true,
-          connection_capabilities: [{ mode: 'existing_host', translator_id: 'claude-code-existing-host-v1', translator_version: '1', cli_version_range: '2.x', credential_transport: 'native_store', model_selection: 'native_default', credential_scope: 'runtime_user_home' }],
+          connection_capabilities: [{ mode: 'existing_host', translator_id: 'claude-code-existing-host-v1', translator_version: '1', credential_transport: 'native_store', model_selection: 'native_default', credential_scope: 'runtime_user_home' }],
         }] }
       }
       throw new Error(`unexpected agent RPC in test: ${method}`)
@@ -147,14 +147,14 @@ describe('Worker implementation management API（P6-B §5）', () => {
     expect(res.status).toBe(400)
   })
 
-  it('disabled 且未配置的 CLI 也可安装，拒绝浏览器额外字段', async () => {
+  it('disabled 且未配置的 CLI 也可安装：缺省 latest，允许 fallback，拒绝任意版本与额外字段', async () => {
     const current = await get()
     const revision = ((await current.json()) as { config: { revision: number } }).config.revision
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
     ;(admin as unknown as { ensureAgentPort: () => Promise<number> }).ensureAgentPort = async () => 19999
     ;(admin as unknown as { rpcClient: { callSensitive: (port: number, method: string, params: Record<string, unknown>) => Promise<unknown> } }).rpcClient.callSensitive = async (_port, method, params) => {
       calls.push({ method, params })
-      const expected = params.expected as { action: 'install'; operation_id: string; impl: 'codex'; mode: 'install'; policy_revision: number }
+      const expected = params.expected as { action: 'install'; operation_id: string; impl: 'codex'; mode: 'install'; policy_revision: number; install_profile: 'latest' | 'fallback' }
       await (admin as unknown as { workerOperationAssertions: { consume: (assertion: string, claims: typeof expected) => Promise<unknown> } })
         .workerOperationAssertions.consume(params.assertion as string, expected)
       return { operation_id: params.operation_id, state: 'completed', version: '0.1.2' }
@@ -168,6 +168,13 @@ describe('Worker implementation management API（P6-B §5）', () => {
     expect(invalid.status).toBe(400)
     expect(calls).toHaveLength(0)
 
+    const invalidProfile = await startOperation('codex', 'install', {
+      expected_revision: revision,
+      install_profile: '0.146.0',
+    })
+    expect(invalidProfile.status).toBe(400)
+    expect(calls).toHaveLength(0)
+
     const res = await startOperation('codex', 'install', { expected_revision: revision })
 
     expect(res.status).toBe(200)
@@ -177,7 +184,18 @@ describe('Worker implementation management API（P6-B §5）', () => {
       method: 'install_worker_implementation',
       params: {
         impl: 'codex',
-        expected: { action: 'install', impl: 'codex', mode: 'install', policy_revision: revision },
+        install_profile: 'latest',
+        expected: { action: 'install', impl: 'codex', mode: 'install', policy_revision: revision, install_profile: 'latest' },
+      },
+    })
+
+    const fallback = await startOperation('codex', 'install', { expected_revision: revision, install_profile: 'fallback' })
+    expect(fallback.status).toBe(200)
+    expect(calls[1]).toMatchObject({
+      params: {
+        impl: 'codex',
+        install_profile: 'fallback',
+        expected: { action: 'install', impl: 'codex', mode: 'install', policy_revision: revision, install_profile: 'fallback' },
       },
     })
   })

@@ -11,12 +11,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import { resolveUserLevelBinary, type CliBinaryResolution } from '../cli-binary.js'
-import type { CLIWorkerImplId } from '../types.js'
+import type { CLIWorkerImplId, WorkerInstallProfile } from '../types.js'
 
 export interface UserLevelInstallManifest {
   readonly impl: CLIWorkerImplId
   readonly packageId: string
   readonly binaryName: string
+  readonly fallbackVersion: string
 }
 
 const MANIFESTS: Record<CLIWorkerImplId, UserLevelInstallManifest> = {
@@ -24,16 +25,24 @@ const MANIFESTS: Record<CLIWorkerImplId, UserLevelInstallManifest> = {
     impl: 'claude-code',
     packageId: '@anthropic-ai/claude-code',
     binaryName: 'claude',
+    fallbackVersion: '2.1.227',
   },
   codex: {
     impl: 'codex',
     packageId: '@openai/codex',
     binaryName: 'codex',
+    fallbackVersion: '0.146.0',
   },
 }
 
 export function userLevelInstallManifestFor(impl: CLIWorkerImplId): UserLevelInstallManifest {
   return MANIFESTS[impl]
+}
+
+export function packageForInstallProfile(manifest: UserLevelInstallManifest, profile: WorkerInstallProfile): string {
+  if (profile === 'latest') return manifest.packageId
+  if (profile === 'fallback') return `${manifest.packageId}@${manifest.fallbackVersion}`
+  throw new Error('install profile must be latest or fallback')
 }
 
 export function userLevelNpmPrefix(homeDir = os.homedir()): string {
@@ -85,7 +94,7 @@ export class UserLevelInstaller {
     this.runCommand = deps.runCommand ?? runCommand
   }
 
-  async install(impl: CLIWorkerImplId): Promise<UserLevelInstallResult> {
+  async install(impl: CLIWorkerImplId, profile: WorkerInstallProfile): Promise<UserLevelInstallResult> {
     if (this.inFlight.has(impl)) {
       const error = new Error(`install already in flight for ${impl}`)
       ;(error as Error & { code?: string }).code = 'WORKER_OPERATION_CONFLICT'
@@ -94,7 +103,7 @@ export class UserLevelInstaller {
     const controller = new AbortController()
     this.inFlight.set(impl, controller)
     try {
-      return await this.installInternal(impl, controller.signal)
+      return await this.installInternal(impl, profile, controller.signal)
     } finally {
       this.inFlight.delete(impl)
     }
@@ -104,7 +113,7 @@ export class UserLevelInstaller {
     this.inFlight.get(impl)?.abort()
   }
 
-  private async installInternal(impl: CLIWorkerImplId, signal: AbortSignal): Promise<UserLevelInstallResult> {
+  private async installInternal(impl: CLIWorkerImplId, profile: WorkerInstallProfile, signal: AbortSignal): Promise<UserLevelInstallResult> {
     const manifest = userLevelInstallManifestFor(impl)
     const env = buildScrubbedChildEnv()
     const npmCli = await this.resolveNpmCli(env)
@@ -115,7 +124,7 @@ export class UserLevelInstaller {
       '--global',
       '--prefix', prefix,
       '--registry', NPM_REGISTRY,
-      manifest.packageId,
+      packageForInstallProfile(manifest, profile),
     ], { env, signal, timeout: INSTALL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 })
 
     const resolved = await this.resolveBinary(manifest.binaryName, this.deps.dataRoot, { homeDir: this.homeDir })
