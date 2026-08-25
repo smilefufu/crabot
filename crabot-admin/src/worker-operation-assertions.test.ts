@@ -23,6 +23,14 @@ describe('WorkerOperationAssertions（P6-B §9）', () => {
     await expect(assertions.consume(token, base)).rejects.toThrow(/already consumed/)
   })
 
+  it('install assertion 固定绑定 install mode，不能换成 verify', async () => {
+    const install = { action: 'install' as const, operation_id: 'op-install', impl: 'codex' as const, mode: 'install', policy_revision: 3 }
+    const token = assertions.issue(install)
+    await expect(assertions.consume(token, { ...install, action: 'verify' })).rejects.toThrow(/mismatch/)
+    await expect(assertions.consume(token, { ...install, mode: 'existing_host' })).rejects.toThrow(/mismatch/)
+    await expect(assertions.consume(token, install)).resolves.toMatchObject({ consumed: true })
+  })
+
   it('claim 不匹配（action/impl/revision/mode）逐个拒绝', async () => {
     await expect(assertions.consume(assertions.issue(base), { ...base, action: 'cancel' })).rejects.toThrow(/mismatch/)
     await expect(assertions.consume(assertions.issue(base), { ...base, impl: 'codex' })).rejects.toThrow(/mismatch/)

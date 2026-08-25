@@ -118,6 +118,7 @@ export const WorkersPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [dialog, setDialog] = useState<DialogState | null>(null)
+  const [installImpl, setInstallImpl] = useState<CLIWorkerImplId | null>(null)
   const [verifyImpl, setVerifyImpl] = useState<CLIWorkerImplId | null>(null)
   const [preferenceDrafts, setPreferenceDrafts] = useState<Record<CLIWorkerImplId, string>>({
     'claude-code': '',
@@ -239,6 +240,23 @@ export const WorkersPage: React.FC = () => {
     }
   }
 
+  const runInstallation = async (impl: CLIWorkerImplId) => {
+    if (!config) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await workerManagementService.startInstall(impl, config.revision)
+      if (result.state === 'completed') setNotice(`已安装 ${IMPL_LABEL[impl]}${result.version ? ` · ${result.version}` : ''}`)
+      else setError(`安装未完成: ${result.detail ?? '未返回原因'}`)
+      await refresh()
+    } catch (err) {
+      setError(`安装失败: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setBusy(false)
+      setInstallImpl(null)
+    }
+  }
+
   const savePreference = async (impl: CLIWorkerImplId, policy: WorkerImplementationPolicy) => {
     const value = preferenceDrafts[impl].trim()
     if (value === (policy.preference ?? '')) {
@@ -257,6 +275,7 @@ export const WorkersPage: React.FC = () => {
     const status = statusOf(impl)
     const policy = config?.implementations[impl]
     const isBuiltin = impl === 'builtin'
+    const installable = !isBuiltin && agentStatus === 'available' && !!status && !status.installed
     const readiness = readinessView(policy, status, agentStatus)
     const verification = verificationLabel(status)
     return (
@@ -311,6 +330,11 @@ export const WorkersPage: React.FC = () => {
                 })}>
                   配置连接
                 </Button>
+                {installable && (
+                  <Button size="sm" disabled={busy} onClick={() => setInstallImpl(impl as CLIWorkerImplId)}>
+                    {busy && installImpl === impl ? '安装中...' : `安装 ${IMPL_LABEL[impl]}`}
+                  </Button>
+                )}
                 {policy.enabled && (
                   <Button size="sm" disabled={busy} onClick={() => setVerifyImpl(impl as CLIWorkerImplId)}>验证</Button>
                 )}
@@ -370,6 +394,22 @@ export const WorkersPage: React.FC = () => {
           {IMPLEMENTATIONS.map(renderCard)}
         </section>
 
+        <Modal
+          open={installImpl !== null}
+          onClose={() => { if (!busy) setInstallImpl(null) }}
+          title={installImpl ? `安装 ${IMPL_LABEL[installImpl]}` : ''}
+          footer={(
+            <>
+              <Button variant="secondary" disabled={busy} onClick={() => setInstallImpl(null)}>取消</Button>
+              <Button
+                disabled={busy || installImpl === null}
+                onClick={() => { if (installImpl) void runInstallation(installImpl) }}
+              >{busy ? '安装中...' : '开始安装'}</Button>
+            </>
+          )}
+        >
+          <p>将为当前用户安装官方 {installImpl ? IMPL_LABEL[installImpl] : 'CLI'}。</p>
+        </Modal>
         <Modal
           open={dialog !== null}
           onClose={() => setDialog(null)}

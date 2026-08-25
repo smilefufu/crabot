@@ -2442,9 +2442,9 @@ export class AdminModule extends ModuleBase {
       }
 
       // Worker operation（§3.19.12.1）：per-action 端点。builtin 一律 400。
-      const workerActionMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/(verify)$/)
+      const workerActionMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/(install|verify)$/)
       if (workerActionMatch && req.method === 'POST') {
-        await this.handleWorkerActionApi(req, res, decodeURIComponent(workerActionMatch[1]), 'verify')
+        await this.handleWorkerActionApi(req, res, decodeURIComponent(workerActionMatch[1]), workerActionMatch[2] as 'install' | 'verify')
         return
       }
       const workerOpGetMatch = pathname.match(/^\/api\/agent\/worker-implementations\/([^/]+)\/operations\/([^/]+)$/)
@@ -9886,7 +9886,7 @@ export class AdminModule extends ModuleBase {
   private async admitWorkerOperation(
     res: ServerResponse,
     impl: string,
-    action: 'verify' | 'cancel',
+    action: 'install' | 'verify',
     expectedRevision: unknown,
   ): Promise<{ operationId: string; assertion: string; agentPort: number; revision: number; mode: string } | null> {
     if (impl === 'builtin') {
@@ -9907,7 +9907,7 @@ export class AdminModule extends ModuleBase {
       return null
     }
     const policy = desired.implementations[impl]
-    if (!policy.enabled) {
+    if (action !== 'install' && !policy.enabled) {
       sendJson(res, 409, { error: `${impl} is not enabled`, code: 'ADMIN_WORKER_IMPL_INVALID' })
       return null
     }
@@ -9916,7 +9916,7 @@ export class AdminModule extends ModuleBase {
       sendJson(res, 503, { error: 'Agent not available', code: 'ADMIN_CORE_AGENT_UNAVAILABLE' })
       return null
     }
-    const mode = policy.connection?.mode ?? 'native_account'
+    const mode = action === 'install' ? 'install' : (policy.connection?.mode ?? 'native_account')
     const operationId = generateId()
     const assertion = this.workerOperationAssertions.issue({
       action, operation_id: operationId, impl: impl as 'claude-code' | 'codex', mode, policy_revision: desired.revision,
@@ -9925,9 +9925,14 @@ export class AdminModule extends ModuleBase {
   }
 
   /** POST /:impl/install|verify（§3.19.12.1）：assertion 不出服务端。 */
-  private async handleWorkerActionApi(req: IncomingMessage, res: ServerResponse, impl: string, action: 'verify'): Promise<void> {
-    const body = await this.readJsonBody<{ expected_revision?: unknown }>(req)
-    const admission = await this.admitWorkerOperation(res, impl, action, body.expected_revision)
+  private async handleWorkerActionApi(req: IncomingMessage, res: ServerResponse, impl: string, action: 'install' | 'verify'): Promise<void> {
+    const body = await this.readJsonBody<unknown>(req)
+    if (!body || Array.isArray(body) || typeof body !== 'object' || Object.keys(body).some((key) => key !== 'expected_revision')) {
+      sendJson(res, 400, { error: 'only expected_revision is accepted', code: 'ADMIN_WORKER_IMPL_INVALID' })
+      return
+    }
+    const expectedRevision = (body as { expected_revision?: unknown }).expected_revision
+    const admission = await this.admitWorkerOperation(res, impl, action, expectedRevision)
     if (!admission) return
     try {
       const result = await this.rpcClient.callSensitive<
@@ -9998,7 +10003,20 @@ export class AdminModule extends ModuleBase {
     }
     // cancel 同样签发/核销 assertion（§3.19.12.1），绑定的是被操作的既有 operation_id。
     const policy = desired.implementations[impl]
-    const mode = policy.connection?.mode ?? 'native_account'
+    let mode: string = policy.connection?.mode ?? 'native_account'
+    try {
+      const target = await this.rpcClient.call<Record<string, unknown>, { operation?: { kind?: unknown } }>(
+        agentPort, 'get_worker_implementation_operation', { operation_id: operationId }, this.config.moduleId,
+      )
+      if (!target.operation) {
+        sendJson(res, 404, { error: 'operation not found', code: 'ADMIN_WORKER_OPERATION_NOT_FOUND' })
+        return
+      }
+      if (target.operation.kind === 'install') mode = 'install'
+    } catch (error) {
+      sendJson(res, 502, { error: (error instanceof Error ? error.message : String(error)).slice(0, 300) })
+      return
+    }
     const assertion = this.workerOperationAssertions.issue({
       action: 'cancel', operation_id: operationId, impl, mode, policy_revision: desired.revision,
     })

@@ -52,6 +52,11 @@ describe('Worker implementation management API（P6-B §5）', () => {
       method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(body),
     })
+  const startOperation = (impl: string, action: 'install' | 'verify', body: Record<string, unknown>) =>
+    fetch(`http://localhost:${TEST_WEB_PORT}/api/agent/worker-implementations/${impl}/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    })
 
   it('GET 返回协议合并 shape（config + agent_status + statuses），revision 1 安全初始配置', async () => {
     const res = await get()
@@ -140,5 +145,40 @@ describe('Worker implementation management API（P6-B §5）', () => {
       codex: { enabled: false },
     } } })
     expect(res.status).toBe(400)
+  })
+
+  it('disabled 且未配置的 CLI 也可安装，拒绝浏览器额外字段', async () => {
+    const current = await get()
+    const revision = ((await current.json()) as { config: { revision: number } }).config.revision
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    ;(admin as unknown as { ensureAgentPort: () => Promise<number> }).ensureAgentPort = async () => 19999
+    ;(admin as unknown as { rpcClient: { callSensitive: (port: number, method: string, params: Record<string, unknown>) => Promise<unknown> } }).rpcClient.callSensitive = async (_port, method, params) => {
+      calls.push({ method, params })
+      const expected = params.expected as { action: 'install'; operation_id: string; impl: 'codex'; mode: 'install'; policy_revision: number }
+      await (admin as unknown as { workerOperationAssertions: { consume: (assertion: string, claims: typeof expected) => Promise<unknown> } })
+        .workerOperationAssertions.consume(params.assertion as string, expected)
+      return { operation_id: params.operation_id, state: 'completed', version: '0.1.2' }
+    }
+
+    const invalid = await startOperation('codex', 'install', {
+      expected_revision: revision,
+      package: 'attacker-controlled-package',
+      args: ['--unsafe'],
+    })
+    expect(invalid.status).toBe(400)
+    expect(calls).toHaveLength(0)
+
+    const res = await startOperation('codex', 'install', { expected_revision: revision })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ operation: expect.objectContaining({ state: 'completed', version: '0.1.2' }) })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({
+      method: 'install_worker_implementation',
+      params: {
+        impl: 'codex',
+        expected: { action: 'install', impl: 'codex', mode: 'install', policy_revision: revision },
+      },
+    })
   })
 })
