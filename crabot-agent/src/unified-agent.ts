@@ -75,7 +75,15 @@ import { selectWorkerImplementation } from './workers/implementation-selection.j
 import { admitWorkerConnection } from './workers/connections/admission.js'
 import { WorkerOperationStore } from './workers/operations/store.js'
 import { resolveUserLevelBinary } from './workers/cli-binary.js'
+import { UserLevelInstaller } from './workers/install/user-level-installer.js'
 import { GrandfatherBootstrapStore } from './workers/operations/bootstrap.js'
+
+function sanitizeWorkerOperationError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/\/[^\s]+/g, '<path>')
+    .replace(/[A-Za-z0-9_-]{24,}/g, '<redacted>')
+    .slice(0, 200)
+}
 
 /** 新部署安全初始 worker implementation 配置（与 Admin store revision-1 语义一致）。 */
 const DEFAULT_SAFE_WORKER_IMPLS: import('./workers/types.js').WorkerImplementationRuntimeConfig = {
@@ -553,11 +561,25 @@ export class UnifiedAgent extends ModuleBase {
   private managerStack?: ManagerStack
   private activationRegistry!: ActivationRegistry
   private workerOperationStore!: WorkerOperationStore
+  private userLevelInstaller!: UserLevelInstaller
+  /** 覆盖 assertion 核销前的异步窗口；持久 store 负责跨重启的 active state。 */
+  private readonly workerOperationReservations = new Set<import('./workers/types.js').CLIWorkerImplId>()
   private grandfatherBootstrapStore!: GrandfatherBootstrapStore
   private managerEventPublisher?: AgentEventPublisher
   /** True after startup reconciliation has settled, even when it failed. */
   private managerReconciliationSettled = false
   private runtimeClosing = false
+
+  private reserveWorkerOperation(impl: import('./workers/types.js').CLIWorkerImplId): void {
+    if (this.workerOperationReservations.has(impl) || this.workerOperationStore.hasActiveFor(impl)) {
+      throw new Error(`another mutating operation is active for ${impl}`)
+    }
+    this.workerOperationReservations.add(impl)
+  }
+
+  private releaseWorkerOperation(impl: import('./workers/types.js').CLIWorkerImplId): void {
+    this.workerOperationReservations.delete(impl)
+  }
 
   // Trace 存储
   private traceStore: TraceStore
@@ -798,6 +820,7 @@ export class UnifiedAgent extends ModuleBase {
     this.managerEventPublisher = publishEvent
     this.activationRegistry = new ActivationRegistry(getAgentDataDir())
     this.workerOperationStore = new WorkerOperationStore(getAgentDataDir())
+    this.userLevelInstaller = new UserLevelInstaller({ dataRoot: getDataRootDir() })
     this.grandfatherBootstrapStore = new GrandfatherBootstrapStore(getAgentDataDir())
 
     this.managerStack = buildManagerStack({
@@ -1372,6 +1395,7 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
     this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
     this.registerMethod('list_worker_implementation_status', this.handleListWorkerImplementationStatus.bind(this))
+    this.registerMethod('install_worker_implementation', this.handleInstallWorkerImplementation.bind(this))
     this.registerMethod('verify_worker_implementation', this.handleVerifyWorkerImplementation.bind(this))
     this.registerMethod('get_worker_implementation_operation', this.handleGetWorkerOperation.bind(this))
     this.registerMethod('cancel_worker_implementation_operation', this.handleCancelWorkerOperation.bind(this))
@@ -3111,6 +3135,79 @@ export class UnifiedAgent extends ModuleBase {
     return result
   }
 
+  /** §3.19.12 install_worker_implementation：用户显式授权的固定用户级 CLI 安装。 */
+  private async handleInstallWorkerImplementation(params: {
+    impl?: unknown
+    operation_id?: unknown
+    assertion?: unknown
+    expected?: Record<string, unknown>
+  }): Promise<{ operation_id: string; state: string; version?: string; detail?: string }> {
+    const impl = params.impl
+    if (impl !== 'claude-code' && impl !== 'codex') throw new Error('impl must be claude-code or codex')
+    if (typeof params.operation_id !== 'string' || typeof params.assertion !== 'string' || !params.expected) {
+      throw new Error('operation_id, assertion and expected are required')
+    }
+    if (
+      params.expected.action !== 'install'
+      || params.expected.impl !== impl
+      || params.expected.operation_id !== params.operation_id
+      || params.expected.mode !== 'install'
+      || typeof params.expected.policy_revision !== 'number'
+    ) {
+      throw new Error('assertion binding mismatch with requested operation')
+    }
+    this.reserveWorkerOperation(impl)
+    const operationId = params.operation_id
+    const operation: import('./workers/operations/store.js').WorkerOperationRecord = {
+      operation_id: operationId, kind: 'install' as const, impl, state: 'accepted' as const,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }
+    try {
+      // 先持久 reservation，取消可以在探测、assertion 核销或 npm 启动前稳定地找到 operation。
+      await this.workerOperationStore.upsert(operation)
+      const status = await this.activationRegistry.refreshImpl(impl)
+      if (status.installed) throw new Error(`${impl} already has a working user-level installation`)
+      if (this.workerOperationStore.get(operationId)?.state === 'cancelled') {
+        return { operation_id: operationId, state: 'cancelled', detail: 'installation cancelled' }
+      }
+      const adminPort = this.adminPort
+      if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')
+      await this.rpcClient.callSensitive(
+        adminPort,
+        'consume_worker_operation_assertion',
+        { assertion: params.assertion, expected: params.expected },
+        this.config.moduleId,
+        { authorizationBearer: ConfigLoader.getRuntimeBearer() },
+      )
+      if (this.workerOperationStore.get(operationId)?.state === 'cancelled') {
+        return { operation_id: operationId, state: 'cancelled', detail: 'installation cancelled' }
+      }
+      await this.workerOperationStore.upsert({ ...operation, state: 'running' })
+      const result = await this.userLevelInstaller.install(impl)
+      await this.activationRegistry.refresh()
+      if (this.workerOperationStore.get(operationId)?.state === 'cancelled') {
+        return { operation_id: operationId, state: 'cancelled', detail: 'installation cancelled' }
+      }
+      await this.workerOperationStore.upsert({
+        ...operation, state: 'completed', detail: `installed ${result.version}`.slice(0, 200),
+      })
+      return { operation_id: operationId, state: 'completed', version: result.version }
+    } catch (error) {
+      const existing = this.workerOperationStore.get(operationId)
+      if (existing?.state === 'cancelled') {
+        return { operation_id: operationId, state: 'cancelled', detail: 'installation cancelled' }
+      }
+      const sanitized = sanitizeWorkerOperationError(error)
+      await this.workerOperationStore.upsert({
+        ...operation, state: 'failed',
+        detail: sanitized,
+      })
+      throw new Error(`install failed: ${sanitized}`)
+    } finally {
+      this.releaseWorkerOperation(impl)
+    }
+  }
+
   /**
    * §3.19.12 verify_worker_implementation：assertion 核销 → 隔离临时 workspace 最小真实
    * turn（不是 --version）。结果写 registry verification binding（passed/failed 都记）。
@@ -3129,48 +3226,50 @@ export class UnifiedAgent extends ModuleBase {
     if (params.expected.action !== 'verify' || params.expected.impl !== impl || params.expected.operation_id !== params.operation_id) {
       throw new Error('assertion binding mismatch with requested operation')
     }
-    if (this.workerOperationStore.hasActiveFor(impl)) {
-      throw new Error(`another mutating operation is active for ${impl}`)
-    }
-    const adminPort = this.adminPort
-    if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')
-    await this.rpcClient.callSensitive(
-      adminPort,
-      'consume_worker_operation_assertion',
-      { assertion: params.assertion, expected: params.expected },
-      this.config.moduleId,
-      { authorizationBearer: ConfigLoader.getRuntimeBearer() },
-    )
-    const operationId = params.operation_id
-    await this.workerOperationStore.upsert({
-      operation_id: operationId, kind: 'verify', impl, state: 'running',
-      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-    })
-    const { runWorkerVerification, commitVerification } = await import('./workers/verify/verifier.js')
+    this.reserveWorkerOperation(impl)
     try {
-      const outcome = await runWorkerVerification(this.activationRegistry, impl, {
-        resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),
-        runtimeRoot: path.join(getAgentDataDir(), 'worker-impls', 'runtime'),
-        dataRoot: getDataRootDir(),
-      })
-      await commitVerification(this.activationRegistry, impl, outcome)
+      const adminPort = this.adminPort
+      if (!adminPort) throw new Error('Admin module is unavailable for assertion consumption')
+      await this.rpcClient.callSensitive(
+        adminPort,
+        'consume_worker_operation_assertion',
+        { assertion: params.assertion, expected: params.expected },
+        this.config.moduleId,
+        { authorizationBearer: ConfigLoader.getRuntimeBearer() },
+      )
+      const operationId = params.operation_id
       await this.workerOperationStore.upsert({
-        operation_id: operationId, kind: 'verify', impl,
-        state: outcome.passed ? 'completed' : 'failed',
-        detail: outcome.detail.slice(0, 200),
+        operation_id: operationId, kind: 'verify', impl, state: 'running',
         created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
       })
-      return { operation_id: operationId, state: outcome.passed ? 'completed' : 'failed', passed: outcome.passed, detail: outcome.detail }
-    } catch (error) {
-      // 抛错必须收口 operation failed——否则卡在 running，互斥门把该 impl 后续
-      // install/verify 永久挡死（只能重启 Agent 恢复）。
-      const sanitized = (error instanceof Error ? error.message : String(error)).replace(/\/[^\s]+/g, '<path>').replace(/[A-Za-z0-9_-]{24,}/g, '<redacted>').slice(0, 200)
-      await this.workerOperationStore.upsert({
-        operation_id: operationId, kind: 'verify', impl, state: 'failed',
-        detail: sanitized,
-        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-      })
-      throw new Error(`verify failed: ${sanitized}`)
+      const { runWorkerVerification, commitVerification } = await import('./workers/verify/verifier.js')
+      try {
+        const outcome = await runWorkerVerification(this.activationRegistry, impl, {
+          resolveAdminProviderConnection: (cliImpl, rev) => this.resolveWorkerConnectionAdminProvider(cliImpl, rev),
+          runtimeRoot: path.join(getAgentDataDir(), 'worker-impls', 'runtime'),
+          dataRoot: getDataRootDir(),
+        })
+        await commitVerification(this.activationRegistry, impl, outcome)
+        await this.workerOperationStore.upsert({
+          operation_id: operationId, kind: 'verify', impl,
+          state: outcome.passed ? 'completed' : 'failed',
+          detail: outcome.detail.slice(0, 200),
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        })
+        return { operation_id: operationId, state: outcome.passed ? 'completed' : 'failed', passed: outcome.passed, detail: outcome.detail }
+      } catch (error) {
+        // 抛错必须收口 operation failed——否则卡在 running，互斥门把该 impl 后续
+        // install/verify 永久挡死（只能重启 Agent 恢复）。
+        const sanitized = sanitizeWorkerOperationError(error)
+        await this.workerOperationStore.upsert({
+          operation_id: operationId, kind: 'verify', impl, state: 'failed',
+          detail: sanitized,
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        })
+        throw new Error(`verify failed: ${sanitized}`)
+      }
+    } finally {
+      this.releaseWorkerOperation(impl)
     }
   }
 
@@ -3328,6 +3427,7 @@ export class UnifiedAgent extends ModuleBase {
     const record = this.workerOperationStore.get(params.operation_id)
     if (!record) return { operation: null }
     if (record.state === 'running' || record.state === 'accepted') {
+      if (record.kind === 'install') this.userLevelInstaller.cancelInFlight(record.impl)
       await this.workerOperationStore.upsert({ ...record, state: 'cancelled' })
     }
     return { operation: this.workerOperationStore.get(params.operation_id) ?? null }

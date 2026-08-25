@@ -97,4 +97,11 @@ export const workerManagementService = {
     })
     return result.operation
   },
+
+  async startInstall(impl: CLIWorkerImplId, expectedRevision: number): Promise<WorkerOperationView> {
+    const result = await api.post<{ operation: WorkerOperationView }>(`/agent/worker-implementations/${impl}/install`, {
+      expected_revision: expectedRevision,
+    })
+    return result.operation
+  },
 }

@@ -7,6 +7,7 @@ vi.mock('../../services/worker-management', () => ({
   workerManagementService: {
     getAll: vi.fn(),
     putConfig: vi.fn(),
+    startInstall: vi.fn(),
     startVerify: vi.fn(),
   },
 }))
@@ -20,6 +21,7 @@ vi.mock('../../components/Layout/MainLayout', () => ({
 const svc = workerManagementService as unknown as {
   getAll: ReturnType<typeof vi.fn>
   putConfig: ReturnType<typeof vi.fn>
+  startInstall: ReturnType<typeof vi.fn>
   startVerify: ReturnType<typeof vi.fn>
 }
 
@@ -103,6 +105,39 @@ describe('WorkersPage（P6-B §13）', () => {
     expect(svc.startVerify).not.toHaveBeenCalled()
     fireEvent.click(screen.getByText('开始验证'))
     await waitFor(() => expect(svc.startVerify).toHaveBeenCalledWith('codex', 1))
+  })
+
+  it('用户级 CLI 缺失时 Claude Code 与 Codex 都在确认后发起安装', async () => {
+    const missing = {
+      ...readyStatus,
+      installed: false,
+      ready: false,
+      verification: 'never',
+    }
+    svc.getAll.mockResolvedValue(mergedResult(baseConfig, [
+      { ...missing, impl: 'claude-code' },
+      { ...missing, impl: 'codex' },
+    ]))
+    svc.startInstall.mockResolvedValue({ state: 'completed', version: '0.1.2' })
+    render(<WorkersPage />)
+    await waitFor(() => screen.getByRole('button', { name: '安装 Claude Code' }))
+    expect(screen.getByRole('button', { name: '安装 Codex' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '安装 Codex' }))
+    expect(svc.startInstall).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '开始安装' }))
+    await waitFor(() => expect(svc.startInstall).toHaveBeenCalledWith('codex', 1))
+  })
+
+  it('安装失败后保留脱敏错误与重试入口', async () => {
+    const missing = { ...readyStatus, impl: 'codex', installed: false, ready: false, verification: 'never' }
+    svc.getAll.mockResolvedValue(mergedResult(baseConfig, [missing]))
+    svc.startInstall.mockRejectedValue(new Error('registry unavailable'))
+    render(<WorkersPage />)
+    await waitFor(() => screen.getByRole('button', { name: '安装 Codex' }))
+    fireEvent.click(screen.getByRole('button', { name: '安装 Codex' }))
+    fireEvent.click(screen.getByRole('button', { name: '开始安装' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('安装失败: registry unavailable'))
+    expect(screen.getByRole('button', { name: '安装 Codex' })).toBeTruthy()
   })
 
   it('未验证的 ready 实现仍标记为可派用', async () => {

@@ -19,15 +19,37 @@ export interface CliBinaryResolution {
   global_detected: boolean
 }
 
-export async function resolveUserLevelBinary(name: string, dataRoot: string): Promise<CliBinaryResolution> {
+export interface ResolveUserLevelBinaryOptions {
+  /** 测试可注入；生产始终使用当前运行用户 home。 */
+  homeDir?: string
+  /** 测试可注入；生产从 scrubbed child env 读取。 */
+  pathEnv?: string
+}
+
+export async function resolveUserLevelBinary(
+  name: string,
+  dataRoot: string,
+  options: ResolveUserLevelBinaryOptions = {},
+): Promise<CliBinaryResolution> {
   // 枚举 PATH 全部候选（command -v 只给首命中——全局排在前面时会把已存在的用户级
   // 安装整段漏掉并误报 global；必须看全）。
-  const pathEnv = buildScrubbedChildEnv().PATH ?? process.env.PATH ?? ''
-  const home = path.resolve(os.homedir())
-  const data = path.resolve(dataRoot)
+  const pathEnv = options.pathEnv ?? buildScrubbedChildEnv().PATH ?? process.env.PATH ?? ''
+  const resolvedHome = path.resolve(options.homeDir ?? os.homedir())
+  const resolvedData = path.resolve(dataRoot)
+  // macOS 的 /var -> /private/var alias 会让 realpath(candidate) 与 path.resolve($HOME)
+  // 前缀不同；比较时两端都尽量 realpath，缺失 data root 则保留解析后的目标。
+  const home = await fs.realpath(resolvedHome).catch(() => resolvedHome)
+  const data = await fs.realpath(resolvedData).catch(() => resolvedData)
   let globalFound = false
-  for (const dir of pathEnv.split(path.delimiter)) {
+  // Crabot 页面安装固定使用 npm 的标准用户级 prefix，但不得持久修改 PATH；把该 bin
+  // 目录作为显式候选，保证安装后 Worker 能解析到同一 binary。
+  const directories = [path.join(home, '.local', 'bin'), ...pathEnv.split(path.delimiter)]
+  const visited = new Set<string>()
+  for (const dir of directories) {
     if (!dir) continue
+    const normalizedDir = path.resolve(dir)
+    if (visited.has(normalizedDir)) continue
+    visited.add(normalizedDir)
     const candidate = path.join(dir, name)
     let real: string
     try {
