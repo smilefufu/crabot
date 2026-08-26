@@ -234,7 +234,9 @@ async function readTextWindow(filePath: string, offset: number, limit: number): 
         }
       }
       if (!truncated && oversizedLineBytes !== undefined) {
-        lines.push(oversizedLine(current, lineIndex + 1, String(lineIndex + 2).length, filePath, { bytes: oversizedLineBytes, exact: true }))
+        if (lines.length === 0) {
+          lines.push(oversizedLine(current, lineIndex + 1, String(lineIndex + 2).length, filePath, { bytes: oversizedLineBytes, exact: true }))
+        }
         truncated = true
       }
       if (!truncated && current.length > 0 && lineIndex >= offset && lines.length < limit) consumeLine()
