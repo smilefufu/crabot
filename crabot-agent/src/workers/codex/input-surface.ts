@@ -2,6 +2,7 @@ import type { PaneSnapshot } from '../tmux/driver.js'
 import type { InputMode, InputProbe } from '../tmux/input-commit.js'
 import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 import type { WorkerUiActionDescriptor } from '../types.js'
+import { hasDimComposerEvidence } from '../tmux/ansi.js'
 
 // codex 0.146 实测页脚：`gpt-5.6-sol xhigh · ~/.crabot/...`——home 缩写是 `~/` 不是 `/`，
 // 旧正则 `·\s\/` 在它上面失配会让 composer 探测整体失败（输入永远 stalled）。
@@ -103,7 +104,9 @@ function codexComposerText(snapshot: PaneSnapshot, preservePlaceholderText = fal
       content.push(lines[j])
     }
     const value = content.join('\n').trim()
-    return !preservePlaceholderText && isCodexPlaceholder(value) ? '' : value
+    return !preservePlaceholderText && (
+      isCodexPlaceholder(value) || hasDimComposerEvidence(snapshot, '›', value)
+    ) ? '' : value
   }
   return undefined
 }

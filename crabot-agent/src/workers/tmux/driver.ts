@@ -42,6 +42,10 @@ export interface TmuxSessionSpec {
 
 export interface PaneSnapshot {
   text: string
+  /** Raw viewport with terminal styling, used only for local TUI classification. */
+  styled_text?: string
+  /** Current tmux cursor location, zero-based display columns/rows. */
+  cursor?: { readonly x: number; readonly y: number }
   /** tmux 已用自己的 dead-pane 提示替换 viewport，text 不再是 worker 画面。 */
   dead?: boolean
   captured_at?: string
@@ -186,11 +190,21 @@ exec ${spec.command}
 
   /** Capture only the current viewport. */
   async capturePane(name: string): Promise<PaneSnapshot> {
-    const { stdout: text } = await this.run(['capture-pane', '-p', '-J', '-t', name])
+    const [plain, styled, cursor] = await Promise.all([
+      this.run(['capture-pane', '-p', '-J', '-t', name]),
+      this.run(['capture-pane', '-p', '-e', '-t', name]).catch(() => undefined),
+      this.run(['display-message', '-p', '-t', name, '#{cursor_x},#{cursor_y}']).catch(() => undefined),
+    ])
     // The pane can exit while capture-pane is in flight. Check after capture so
     // tmux's replacement dead-pane text never masquerades as a live viewport.
     const dead = !(await this.isAlive(name))
-    return { text, dead }
+    const coordinates = cursor?.stdout.trim().match(/^(\d+),(\d+)$/)
+    return {
+      text: plain.stdout,
+      ...(styled ? { styled_text: styled.stdout } : {}),
+      ...(coordinates ? { cursor: { x: Number(coordinates[1]), y: Number(coordinates[2]) } } : {}),
+      dead,
+    }
   }
 
   async sendKeys(name: string, keys: string[]): Promise<void> {

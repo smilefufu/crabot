@@ -54,6 +54,15 @@ describe('CLI input surfaces', () => {
     expect(probeClaudeInput(pane('❯ ending-abcdefghijklmnopqrstuvwx\n? for shortcuts'), 'primary', `beginning-${'x'.repeat(200)}ending-abcdefghijklmnopqrstuvwx`)).toBe('pending')
   })
 
+  it('treats an unknown dim Claude composer as a placeholder', () => {
+    const value = '继续执行当前步骤'
+    const snapshot = {
+      text: `❯ ${value}\n? for shortcuts`,
+      styled_text: `❯ \u001b[2m${value}\u001b[0m\n? for shortcuts`,
+    }
+    expect(probeClaudeInput(snapshot, 'primary')).toBe('empty')
+  })
+
   it('recognizes a real long Claude paste when the viewport clips its beginning and inserts wrap padding', () => {
     const prompt = '在当前 Minecraft 工作区和服务器环境中完成用户要求：安装 JEI 到 Java 26.2 + Fabric 生产服。先核对工作区/生产服结构、当前 Minecraft 版本、Fabric Loader/API 与 JEI 的兼容版本及依赖；确认 JEI 应安装客户端、服务端还是两端，并避免把不兼容的 NeoForge/Forge 文件放入 Fabric。执行前做好必要的停服一致备份或可回滚措施；严格保护权威世界 java/data，不重建世界，不执行无关迁移修复。若必须重启，先安全停服、安装、启动并检查日志/进程/端口/健康状态；如下载、版本或权限无法确认，安全阻断并报告原因，不绕过门禁。最终报告实际文件名、版本、依赖、安装路径、备份/回滚信息、服务状态和客户端还需做什么。不要只给建议，要实际操作；但任何不确定或可能破坏生产的步骤先停下并汇报。'
     const viewport = pane([
@@ -114,6 +123,27 @@ describe('CLI input surfaces', () => {
     const multiline = pane(`history\n› first line\nsecond line\n? for shortcuts`)
     expect(probeCodexInput(multiline, 'primary', 'first line\nsecond line')).toBe('pending')
     expect(probeCodexInput(pane('› [Pasted Content: 2048 chars]\n? for shortcuts'), 'primary', 'long codex prompt\n'.repeat(80))).toBe('pending')
+  })
+
+  it('treats a dim Codex composer as a placeholder by content or cursor evidence', () => {
+    const value = 'Describe the next deployment step'
+    expect(probeCodexInput({
+      text: `› ${value}\n  gpt-5.6-sol xhigh · /private/tmp/workspace`,
+      styled_text: `› \u001b[2m${value}\u001b[0m\n  gpt-5.6-sol xhigh · /private/tmp/workspace`,
+    }, 'primary')).toBe('empty')
+
+    const cursorValue = 'Continue with the deployment'
+    expect(probeCodexInput({
+      text: `› ${cursorValue}\n  gpt-5.6-sol xhigh · /private/tmp/workspace`,
+      styled_text: `› \u001b[2mC\u001b[0m${cursorValue.slice(1)}\n  gpt-5.6-sol xhigh · /private/tmp/workspace`,
+      cursor: { x: 2, y: 0 },
+    }, 'primary')).toBe('empty')
+
+    const emojiValue = '🙂 continue with the deployment'
+    expect(probeCodexInput({
+      text: `› ${emojiValue}\n  gpt-5.6-sol xhigh · /private/tmp/workspace`,
+      styled_text: `› \u001b[2m${emojiValue}\u001b[0m\n  gpt-5.6-sol xhigh · /private/tmp/workspace`,
+    }, 'primary')).toBe('empty')
   })
 
   it('does not accept an old Codex queued region as this delivery', () => {

@@ -33,9 +33,11 @@ describe('TmuxDriver.capturePane', () => {
 
     await expect(driver.capturePane('crabot-w-test-race')).resolves.toEqual({
       text: 'Pane is dead (status 1, Tue Aug 19 00:00:00 2026)\n',
+      styled_text: 'Pane is dead (status 1, Tue Aug 19 00:00:00 2026)\n',
       dead: true,
     })
     expect(run).toHaveBeenCalledWith(['capture-pane', '-p', '-J', '-t', 'crabot-w-test-race'])
+    expect(run).toHaveBeenCalledWith(['capture-pane', '-p', '-e', '-t', 'crabot-w-test-race'])
     expect(run.mock.invocationCallOrder[0]).toBeLessThan(isAlive.mock.invocationCallOrder[0])
   })
 })
@@ -71,6 +73,8 @@ describe.skipIf(!detectTmux())('TmuxDriver', () => {
     const pane = await driver.capturePane(sessionName)
     expect(pane.text).toContain('red text')
     expect(pane.text).not.toContain('\u001b')
+    expect(pane.styled_text).toContain('\u001b[')
+    expect(pane.cursor).toEqual({ x: expect.any(Number), y: expect.any(Number) })
   })
 
   it('pipe-pane 原始字节只驱动就绪状态，不创建 output 日志', async () => {
