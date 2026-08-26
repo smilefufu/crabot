@@ -1,19 +1,7 @@
-import { readFileSync, writeFileSync } from 'fs'
 import { defineTool } from '../tool-framework'
+import { localHostToolExecutor } from '../local-host-tool-executor'
 import type { ToolDefinition } from '../types'
 import { resolvePath } from './utils'
-
-function findOccurrenceLines(content: string, search: string): ReadonlyArray<number> {
-  const collect = (from: number, acc: ReadonlyArray<number>): ReadonlyArray<number> => {
-    const index = content.indexOf(search, from)
-    if (index === -1) {
-      return acc
-    }
-    const lineNumber = content.substring(0, index).split('\n').length
-    return collect(index + search.length, [...acc, lineNumber])
-  }
-  return collect(0, [])
-}
 
 export function createEditTool(getCwd: () => string): ToolDefinition {
   return defineTool({
@@ -33,56 +21,13 @@ export function createEditTool(getCwd: () => string): ToolDefinition {
     },
     isReadOnly: false,
     permissionLevel: 'normal',
-    call: async (input) => {
-      const rawPath = input.file_path as string
-      const oldString = input.old_string as string
-      const newString = input.new_string as string
-      const replaceAll = input.replace_all === true
-
-      if (oldString === newString) {
-        return { output: 'old_string must differ from new_string', isError: true }
-      }
-
-      const filePath = resolvePath(getCwd(), rawPath)
-
-      let content: string
-      try {
-        content = readFileSync(filePath, 'utf-8')
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return { output: `Failed to read file: ${message}`, isError: true }
-      }
-
-      const occurrenceLines = findOccurrenceLines(content, oldString)
-      const count = occurrenceLines.length
-
-      if (count === 0) {
-        return { output: 'old_string not found in file', isError: true }
-      }
-
-      if (count > 1 && !replaceAll) {
-        return {
-          output: `old_string found ${count} times, use replace_all or provide more context`,
-          isError: true,
-        }
-      }
-
-      const modified = replaceAll
-        ? content.split(oldString).join(newString)
-        : content.replace(oldString, newString)
-
-      try {
-        writeFileSync(filePath, modified, 'utf-8')
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return { output: `Failed to write file: ${message}`, isError: true }
-      }
-
-      const lineList = occurrenceLines.join(', ')
-      return {
-        output: `Edited ${filePath}: replaced ${count} occurrence(s) at line(s) ${lineList}`,
-        isError: false,
-      }
+    async call(input, context) {
+      return (await localHostToolExecutor.execute('edit', {
+        file_path: resolvePath(getCwd(), input.file_path as string),
+        old_string: input.old_string,
+        new_string: input.new_string,
+        replace_all: input.replace_all === true,
+      }, getCwd(), context)).result
     },
   })
 }

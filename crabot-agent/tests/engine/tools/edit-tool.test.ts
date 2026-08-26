@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, statSync, lstatSync, symlinkSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createEditTool } from '../../../src/engine/tools/edit-tool'
@@ -123,6 +123,53 @@ describe('createEditTool', () => {
 
     expect(result.isError).toBe(false)
     expect(result.output).toContain('line(s) 3, 6')
+  })
+
+  it('replaces a unique string that spans real stream chunks', async () => {
+    const filePath = writeTestFile('cross-chunk.txt', `${'x'.repeat(64 * 1024 - 3)}TARGET\n`)
+    const tool = createEditTool(() => tempDir)
+
+    const result = await tool.call(
+      { file_path: filePath, old_string: 'TARGET', new_string: 'REPLACED' },
+      context,
+    )
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('1 occurrence')
+    expect(readFileSync(filePath, 'utf-8')).toBe(`${'x'.repeat(64 * 1024 - 3)}REPLACED\n`)
+  })
+
+  it('rejects overlapping matches that cross a stream boundary without writing', async () => {
+    const original = `${'x'.repeat(64 * 1024 - 4)}aaaaaa`
+    const filePath = writeTestFile('overlapping-cross-chunk.txt', original)
+    const tool = createEditTool(() => tempDir)
+
+    const result = await tool.call(
+      { file_path: filePath, old_string: 'aaa', new_string: 'replaced' },
+      context,
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('2 times')
+    expect(readFileSync(filePath, 'utf-8')).toBe(original)
+  })
+
+  it('preserves the existing file mode after atomic replacement', async () => {
+    const targetPath = writeTestFile('executable.txt', 'replace me\n')
+    const linkPath = join(tempDir, 'executable-link.txt')
+    chmodSync(targetPath, 0o755)
+    symlinkSync(targetPath, linkPath)
+    const tool = createEditTool(() => tempDir)
+
+    const result = await tool.call(
+      { file_path: linkPath, old_string: 'replace me', new_string: 'replaced' },
+      context,
+    )
+
+    expect(result.isError).toBe(false)
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(true)
+    expect(readFileSync(targetPath, 'utf-8')).toBe('replaced\n')
+    expect(statSync(targetPath).mode & 0o777).toBe(0o755)
   })
 
   it('resolves relative file paths against cwd', async () => {

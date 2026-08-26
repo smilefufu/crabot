@@ -19,7 +19,7 @@ import { accessSync, constants } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
-import { buildChildEnv } from '../../core/runtime-env.js'
+import { buildChildEnv } from '../../core/runtime-env'
 
 /** 直达「完全磁盘访问权限」面板的深链（macOS 13+ System Settings 同样支持）。 */
 const FDA_SETTINGS_URL =

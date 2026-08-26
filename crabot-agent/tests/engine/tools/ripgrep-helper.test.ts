@@ -48,7 +48,7 @@ describe('runRipgrep', () => {
     expect(r.exitCode).toBe(2)
   })
 
-  it('caps stdout by maxBytes and kills the rg process', async () => {
+  it('caps stdout by maxBytes, retaining the first matches, and kills the rg process', async () => {
     // 写一个会产生大量 stdout 的场景：1000 行匹配，每行 ~50 字节，~50KB 总输出
     const big = Array.from({ length: 1000 }, (_, i) => `line-${i}: MATCH_ME some content here`).join('\n')
     writeFileSync(join(tmp, 'big.txt'), big)
@@ -59,9 +59,11 @@ describe('runRipgrep', () => {
     )
 
     expect(r.truncated).toBe(true)
-    // 截断时 stdout 应该接近但不超过 maxBytes
+    // Grep 的契约是前 N 个匹配；截断时必须保留 stdout 头部，而不是滑动窗口的尾部。
     expect(r.stdout.length).toBeLessThanOrEqual(4096)
     expect(r.stdout.length).toBeGreaterThan(0)
+    expect(r.stdout).toContain('line-0: MATCH_ME')
+    expect(r.stdout).not.toContain('line-999: MATCH_ME')
   })
 
   it('respects AbortSignal pre-aborted state', async () => {

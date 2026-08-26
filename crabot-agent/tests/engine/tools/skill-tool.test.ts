@@ -115,6 +115,26 @@ describe('createSkillTool', () => {
     expect(result.output).toContain('</skill_resources>')
   })
 
+  it('skips hidden resources without stopping sibling resource enumeration', async () => {
+    const dir = writeSkillWithResources(
+      'hidden-resource',
+      '# Skill',
+      {
+        '.DS_Store': 'ignored',
+        'references/guide.md': '# Guide',
+        'scripts/run.py': 'print("hello")',
+      },
+    )
+    const tool = createSkillTool({ availableSkills: [makeSkillConfig('hidden-resource', dir)] })
+
+    const result = await tool.call({ skill: 'hidden-resource' }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).not.toContain('.DS_Store')
+    expect(result.output).toContain('<file>references/guide.md</file>')
+    expect(result.output).toContain('<file>scripts/run.py</file>')
+  })
+
   it('omits <skill_resources> when no resources exist', async () => {
     const dir = writeSkill('no-resources', '---\nname: no-resources\ndescription: test\n---\n# Skill')
     const tool = createSkillTool({ availableSkills: [makeSkillConfig('no-resources', dir)] })

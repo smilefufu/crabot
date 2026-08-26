@@ -9,15 +9,14 @@
  * 二进制由 @vscode/ripgrep 提供，npm install 时自动下载平台对应的 rg。
  */
 
-import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { relative, isAbsolute } from 'node:path'
 import { rgPath } from '@vscode/ripgrep'
 import { shouldScanProtectedDirs } from './fda-check'
-import { buildChildEnv } from '../../core/runtime-env.js'
+import { runHostProcess } from '../host-process'
 
 export interface RipgrepResult {
-  /** rg 进程的 stdout 全文（已按 maxBytes 截断）。 */
+  /** rg 进程 stdout 的前缀（已按 maxBytes 截断）。 */
   stdout: string
   /** rg 进程的 stderr 全文。 */
   stderr: string
@@ -30,11 +29,26 @@ export interface RipgrepResult {
 }
 
 const DEFAULT_MAX_BYTES = 16 * 1024 * 1024 // 16MB stdout 上限——再多上层也消化不了
-const KILL_GRACE_MS = 500
 // 墙钟超时上限。rg 卡在巨型目录遍历（网络盘 / FUSE / 海量缓存）或 macOS TCC 权限
 // 弹窗时会无限挂起，把 agent 主循环一起拖死（实测挂过 144 分钟）。源码工程的合理
 // glob/grep 远用不到 60s，超出即 kill 返回 partial，让上层提示缩小范围。
 const DEFAULT_TIMEOUT_MS = 60_000
+
+function createStdoutPrefixCollector(maxBytes: number): { push(chunk: Buffer): void; finish(): string } {
+  const chunks: Buffer[] = []
+  let retained = 0
+  return {
+    push(chunk): void {
+      if (retained >= maxBytes) return
+      const allowed = Math.min(chunk.length, maxBytes - retained)
+      chunks.push(chunk.subarray(0, allowed))
+      retained += allowed
+    },
+    finish(): string {
+      return Buffer.concat(chunks, retained).toString('utf8')
+    },
+  }
+}
 
 /**
  * 强制注入到每次 rg 调用的硬限制。这些 flag 不可让上层覆盖：
@@ -75,89 +89,32 @@ export function runRipgrep(
     maxBytes?: number
     timeoutMs?: number
     signal?: AbortSignal
+    /** A helper-owned rg must stay in the helper group so outer termination reaps both. */
+    detached?: boolean
   } = {},
 ): Promise<RipgrepResult> {
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const stdoutPrefix = createStdoutPrefixCollector(maxBytes)
 
-  return new Promise((resolve, reject) => {
-    const proc = spawn(rgPath, [...FORCED_LIMITS, ...args], {
-      cwd: opts.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: buildChildEnv(),
-    })
-
-    let stdout = ''
-    let stderr = ''
-    let stdoutBytes = 0
-    let truncated = false
-    let timedOut = false
-    let killed = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-
-    const killProc = () => {
-      if (killed) return
-      killed = true
-      try {
-        proc.kill('SIGTERM')
-        setTimeout(() => {
-          if (proc.exitCode === null && proc.signalCode === null) {
-            try { proc.kill('SIGKILL') } catch { /* already dead */ }
-          }
-        }, KILL_GRACE_MS).unref()
-      } catch { /* already dead */ }
+  return runHostProcess({
+    argv: [rgPath, ...FORCED_LIMITS, ...args],
+    ...(opts.cwd ? { cwd: opts.cwd } : {}),
+    ...(opts.signal ? { abortSignal: opts.signal } : {}),
+    ...(opts.detached === false ? { detached: false } : {}),
+    captureStdout: false,
+    onStdoutChunk: (chunk) => stdoutPrefix.push(chunk),
+    limits: { timeoutMs, stdoutBytes: maxBytes, stderrBytes: 64 * 1024 },
+  }).then((outcome) => {
+    if (outcome.kind === 'spawn_error') throw new Error(`ripgrep spawn failed: ${outcome.message ?? 'unknown error'}`)
+    const signalCode = outcome.signal ? 128 + (signalNumber(outcome.signal) ?? 0) : 0
+    return {
+      stdout: stdoutPrefix.finish(),
+      stderr: outcome.stderr,
+      truncated: outcome.kind === 'output_limit' || outcome.kind === 'aborted' || outcome.kind === 'timed_out',
+      timedOut: outcome.kind === 'timed_out',
+      exitCode: outcome.exitCode ?? (outcome.kind === 'aborted' ? 130 : signalCode),
     }
-
-    const onAbort = () => {
-      truncated = true
-      killProc()
-    }
-    if (opts.signal) {
-      if (opts.signal.aborted) {
-        onAbort()
-        return resolve({ stdout: '', stderr: '', truncated: true, timedOut: false, exitCode: 130 })
-      }
-      opts.signal.addEventListener('abort', onAbort, { once: true })
-    }
-
-    // 墙钟超时：到点 kill rg 并标 timedOut，已收到的 stdout 作为 partial 返回。
-    timer = setTimeout(() => {
-      timedOut = true
-      truncated = true
-      killProc()
-    }, timeoutMs)
-    timer.unref()
-
-    proc.stdout.on('data', (chunk: Buffer) => {
-      if (truncated) return
-      stdoutBytes += chunk.length
-      if (stdoutBytes > maxBytes) {
-        // 超额：取到上限为止，丢弃 stream 后续，kill 进程。
-        const allowed = maxBytes - (stdoutBytes - chunk.length)
-        if (allowed > 0) stdout += chunk.subarray(0, allowed).toString('utf-8')
-        truncated = true
-        killProc()
-        return
-      }
-      stdout += chunk.toString('utf-8')
-    })
-
-    proc.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf-8')
-    })
-
-    proc.on('error', (err) => {
-      if (timer) clearTimeout(timer)
-      if (opts.signal) opts.signal.removeEventListener('abort', onAbort)
-      reject(new Error(`ripgrep spawn failed: ${err.message}`))
-    })
-
-    proc.on('close', (code, signal) => {
-      if (timer) clearTimeout(timer)
-      if (opts.signal) opts.signal.removeEventListener('abort', onAbort)
-      const exitCode = code ?? (signal ? 128 + (signalNumber(signal) ?? 0) : 0)
-      resolve({ stdout, stderr, truncated, timedOut, exitCode })
-    })
   })
 }
 

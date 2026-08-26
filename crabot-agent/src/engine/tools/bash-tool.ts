@@ -1,4 +1,3 @@
-import { execFile } from 'child_process'
 import { randomUUID } from 'crypto'
 import * as fsp from 'fs/promises'
 import * as path from 'path'
@@ -10,8 +9,8 @@ import type { BgEntityTraceContext } from '../bg-entities/trace.js'
 import { runShellWithGrace } from '../bg-entities/bg-shell.js'
 import { resolveBashPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bash-path.js'
 import { getAgentDataDir } from '../../core/data-paths.js'
-import { buildChildEnv } from '../../core/runtime-env.js'
 import { byteLength, truncateUtf8Tail } from '../byte-cap.js'
+import { runHostProcess } from '../host-process.js'
 
 /** 截断阈值（UTF-8 字节）：自截产物恒 < 编排层 100KB 兜底，尾部 hint 不会被再截掉。 */
 const MAX_OUTPUT_BYTES = 50000
@@ -156,11 +155,7 @@ async function formatBashToolExecutionError(
   return `${header}\n${truncated}`.trim()
 }
 
-function extractExitCode(error: { code?: string | number | null }): number | null {
-  return typeof error.code === 'number' ? error.code : null
-}
-
-function execCommand(
+async function execCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
@@ -168,74 +163,32 @@ function execCommand(
 ): Promise<ToolCallResult> {
   const bashPath = resolveBashPath()
   if (bashPath === null) {
-    return Promise.resolve({ output: BASH_NOT_FOUND_MESSAGE, isError: true })
+    return { output: BASH_NOT_FOUND_MESSAGE, isError: true }
   }
-  return new Promise((resolve) => {
-    const child = execFile(
-      bashPath,
-      ['-c', command],
-      {
-        cwd,
-        timeout: timeoutMs,
-        signal,
-        maxBuffer: 10 * 1024 * 1024,
-        // 显式透传父进程 env，确保 CRABOT_TOKEN / DATA_DIR 等环境变量进入子 shell。
-        // execFile 默认 inherit 但显式传更稳定。
-        env: buildChildEnv(),
-      },
-      (error, stdout, stderr) => {
-        void (async () => {
-          const stdoutText = stdout ?? ''
-          const stderrText = stderr ?? ''
-
-          if (error !== null) {
-            // Timeout
-            if (error.killed && (error as NodeJS.ErrnoException).code === undefined) {
-              resolve({
-                output: `Command timed out after ${timeoutMs}ms`,
-                isError: true,
-              })
-              return
-            }
-
-            // Abort
-            if (error.name === 'AbortError' || signal?.aborted === true) {
-              resolve({
-                output: 'Command aborted',
-                isError: true,
-              })
-              return
-            }
-
-            const exitCode = extractExitCode(error)
-            if (exitCode === null) {
-              resolve({
-                output: await formatBashToolExecutionError(error.message, stdoutText, stderrText),
-                isError: true,
-              })
-              return
-            }
-
-            resolve({
-              output: await formatBashToolOutput(exitCode, stdoutText, stderrText),
-              isError: false,
-            })
-            return
-          }
-
-          resolve({
-            output: await formatBashToolOutput(0, stdoutText, stderrText),
-            isError: false,
-          })
-        })()
-      },
-    )
-
-    // If signal is already aborted, kill the child
-    if (signal?.aborted === true) {
-      child.kill()
-    }
+  const outcome = await runHostProcess({
+    argv: [bashPath, '-c', command],
+    cwd,
+    ...(signal ? { abortSignal: signal } : {}),
+    limits: { timeoutMs, stdoutBytes: 1024 * 1024, stderrBytes: 1024 * 1024 },
   })
+  if (outcome.kind === 'timed_out') return { output: `Command execution result is unknown: timed out after ${timeoutMs}ms`, isError: true }
+  if (outcome.kind === 'aborted') return { output: 'Command execution result is unknown: command aborted', isError: true }
+  if (outcome.kind === 'output_limit') {
+    return {
+      output: await formatBashToolExecutionError('command execution result is unknown: output exceeded the 1 MiB limit', outcome.stdout, outcome.stderr),
+      isError: true,
+    }
+  }
+  if (outcome.kind === 'spawn_error') {
+    return { output: await formatBashToolExecutionError(outcome.message ?? 'spawn failed', outcome.stdout, outcome.stderr), isError: true }
+  }
+  if (outcome.exitCode === null) {
+    return {
+      output: await formatBashToolExecutionError(`command execution result is unknown: terminated by ${outcome.signal ?? 'signal'}`, outcome.stdout, outcome.stderr),
+      isError: true,
+    }
+  }
+  return { output: await formatBashToolOutput(outcome.exitCode, outcome.stdout, outcome.stderr), isError: false }
 }
 
 /**
@@ -266,7 +219,7 @@ async function runForegroundWithGrace(
 
   switch (result.kind) {
     case 'aborted':
-      return { output: 'Command aborted', isError: true }
+      return { output: 'Command execution result is unknown: command aborted', isError: true }
     case 'spawn_error':
       return { output: result.message, isError: true }
     case 'background': {

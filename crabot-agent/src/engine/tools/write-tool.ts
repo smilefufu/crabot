@@ -1,6 +1,5 @@
-import * as fs from 'fs/promises'
-import * as path from 'path'
 import { defineTool } from '../tool-framework'
+import { localHostToolExecutor } from '../local-host-tool-executor'
 import type { ToolDefinition } from '../types'
 import { resolvePath } from './utils'
 
@@ -19,28 +18,11 @@ export function createWriteTool(getCwd: () => string): ToolDefinition {
     },
     isReadOnly: false,
     permissionLevel: 'normal',
-    call: async (input) => {
-      const filePath = input.file_path as string
-      const content = input.content as string
-
-      const resolvedPath = resolvePath(getCwd(), filePath)
-
-      try {
-        await fs.mkdir(path.dirname(resolvedPath), { recursive: true })
-        await fs.writeFile(resolvedPath, content, 'utf-8')
-
-        const byteCount = Buffer.byteLength(content, 'utf-8')
-        return {
-          output: `Successfully wrote ${byteCount} bytes to ${resolvedPath}`,
-          isError: false,
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return {
-          output: `Failed to write file: ${message}`,
-          isError: true,
-        }
-      }
+    async call(input, context) {
+      return (await localHostToolExecutor.execute('write', {
+        file_path: resolvePath(getCwd(), input.file_path as string),
+        content: input.content,
+      }, getCwd(), context)).result
     },
   })
 }

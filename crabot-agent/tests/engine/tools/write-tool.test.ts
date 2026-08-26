@@ -62,6 +62,22 @@ describe('createWriteTool', () => {
     expect(written).toBe('new content')
   })
 
+  it('preserves the existing file mode and follows its final symlink', async () => {
+    const targetPath = path.join(tmpDir, 'target.txt')
+    const linkPath = path.join(tmpDir, 'link.txt')
+    await fs.writeFile(targetPath, 'old content', 'utf-8')
+    await fs.chmod(targetPath, 0o755)
+    await fs.symlink(targetPath, linkPath)
+
+    const tool = createWriteTool(() => tmpDir)
+    const result = await tool.call({ file_path: linkPath, content: 'new content' }, {})
+
+    expect(result.isError).toBe(false)
+    expect((await fs.lstat(linkPath)).isSymbolicLink()).toBe(true)
+    expect(await fs.readFile(targetPath, 'utf8')).toBe('new content')
+    expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755)
+  })
+
   it('creates parent directories automatically', async () => {
     const tool = createWriteTool(() => tmpDir)
     const filePath = path.join(tmpDir, 'a', 'b', 'c', 'deep.txt')

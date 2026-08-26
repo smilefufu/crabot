@@ -133,6 +133,36 @@ describe('createReadTool', () => {
     expect(result.output).toContain('offset')
   })
 
+  it('keeps the 50KB budget when an oversized line follows normal output', async () => {
+    const filePath = path.join(tmpDir, 'normal-then-oversized.txt')
+    const prefix = Array.from({ length: 350 }, (_, index) => `row-${index}-${'x'.repeat(120)}`)
+    const oversized = 'y'.repeat(60 * 1024)
+    await fs.writeFile(filePath, [...prefix, oversized, 'afterwards'].join('\n'))
+
+    const result = await tool.call({ file_path: filePath }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('1\trow-0-')
+    expect(result.output).not.toContain('y'.repeat(100))
+    expect(result.output).toContain('[...truncated')
+    expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThanOrEqual(52 * 1024)
+  })
+
+  it('keeps the 50KB budget when the final oversized line has no newline', async () => {
+    const filePath = path.join(tmpDir, 'normal-then-eof-oversized.txt')
+    const prefix = Array.from({ length: 5 }, (_, index) => `row-${index}-${'x'.repeat(10_000)}`)
+    const oversized = 'y'.repeat(60 * 1024)
+    await fs.writeFile(filePath, `${prefix.join('\n')}\n${oversized}`)
+
+    const result = await tool.call({ file_path: filePath }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('1\trow-0-')
+    expect(result.output).not.toContain('y'.repeat(100))
+    expect(result.output).toContain('[...truncated')
+    expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThanOrEqual(52 * 1024)
+  })
+
   it('reads the tail of a >500KB file via offset (no more 500KB hard cap)', async () => {
     const filePath = path.join(tmpDir, 'paged.txt')
     // 8000 行 × ~90B ≈ 700KB，超过旧的 500KB 硬上限
@@ -174,6 +204,35 @@ describe('createReadTool', () => {
     expect(result.output).toContain('b'.repeat(100))
     expect(result.output).toContain('[...line truncated')
     expect(result.output).toContain(`sed -n '1p' '${filePath}'`)
+  })
+
+  it('为探测窗口内的超长单行报告精确长度', async () => {
+    const filePath = path.join(tmpDir, 'probed-longline.log')
+    const bigLine = 'c'.repeat(192 * 1024)
+    await fs.writeFile(filePath, bigLine + '\nnext line\n')
+
+    const result = await tool.call({ file_path: filePath }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('196608-byte line')
+    expect(result.output).not.toContain('at least')
+  })
+
+  it('对 128 MiB 无换行文件只做有界长度探测', async () => {
+    const filePath = path.join(tmpDir, 'single-128m-line.log')
+    const handle = await fs.open(filePath, 'w')
+    try {
+      const chunk = Buffer.alloc(1024 * 1024, 'x')
+      for (let index = 0; index < 128; index++) await handle.write(chunk)
+    } finally {
+      await handle.close()
+    }
+
+    const result = await tool.call({ file_path: filePath }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('at least 313344 bytes of the line before its end')
+    expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThanOrEqual(52 * 1024)
   })
 
   it('streams >10MB files line-by-line and can reach the tail via offset', async () => {
