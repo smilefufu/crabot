@@ -5,6 +5,8 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 
+const itPosix = process.platform === 'win32' ? it.skip : it
+
 describe('createGrepTool', () => {
   let tmpDir: string
   let tool: ToolDefinition
@@ -181,6 +183,21 @@ describe('createGrepTool', () => {
     expect(result.isError).toBe(false)
     expect(result.output).toContain('greeting')
     expect(result.output).toContain('hello.ts')
+  })
+
+  itPosix('returns a partial result when ripgrep diagnostics reach the helper stderr limit', async () => {
+    for (let index = 0; index < 1200; index++) {
+      const filePath = path.join(tmpDir, `denied-${index}.txt`)
+      fs.writeFileSync(filePath, 'no match\n')
+      fs.chmodSync(filePath, 0)
+    }
+    const matchPath = path.join(tmpDir, 'match.txt')
+    fs.writeFileSync(matchPath, 'MATCH\n')
+
+    const result = await tool.call({ pattern: 'MATCH', path: tmpDir }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('[truncated: hit')
   })
 
   it('returns error for invalid regex pattern', async () => {

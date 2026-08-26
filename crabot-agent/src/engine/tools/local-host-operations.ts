@@ -23,6 +23,7 @@ const MAX_SKILL_DEPTH = 8
 const MAX_GLOB_RESULTS = 200
 const MAX_GREP_OUTPUT_BYTES = 95_000
 const MAX_GREP_COLUMNS = 500
+const MAX_GREP_DIAGNOSTIC_BYTES = 8 * 1024
 
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp'])
 const inFlightTemporaryFiles = new Set<string>()
@@ -387,8 +388,10 @@ async function scanOccurrences(filePath: string, oldString: string, stopAfterTwo
           if (lines.length < 200) lines.push(lineBase + countNewlines(content.slice(0, found)))
           nextAllowed = absolute + oldString.length
           if (stopAfterTwo && count > 1) return
+          index = found + Math.max(1, oldString.length)
+        } else {
+          index = Math.max(found + 1, nextAllowed - globalBase)
         }
-        index = found + Math.max(1, oldString.length)
       }
     }
     lineBase += countNewlines(content.slice(0, advance))
@@ -556,6 +559,15 @@ function grepTruncationHint(): string {
   return `\n[truncated: hit ${MAX_GREP_OUTPUT_BYTES} byte cap. 用 glob 收窄文件类型 / 用 path 缩小搜索目录 / 降低 head_limit / 改用 count 模式。]`
 }
 
+function logGrepStderr(stderr: string, exitCode: number, pattern: string, searchRoot: string): void {
+  const message = `[Grep] ripgrep stderr (exit=${exitCode}) pattern=${JSON.stringify(pattern)} path=${searchRoot}:\n${stderr}`
+  const marker = '\n[...diagnostic truncated]'
+  const output = byteLength(message) > MAX_GREP_DIAGNOSTIC_BYTES
+    ? `${truncateUtf8(message, MAX_GREP_DIAGNOSTIC_BYTES - byteLength(marker))}${marker}`
+    : message
+  console.error(output)
+}
+
 function formatGrepOutput(stdout: string, headLimit: number): string {
   const lines = stdout.split('\n').filter(Boolean)
   const selected: string[] = []
@@ -612,7 +624,7 @@ async function grepOperation(input: Record<string, unknown>): Promise<LocalOpera
     return { result: { output: `Grep error: ${error instanceof Error ? error.message : String(error)}`, isError: true } }
   }
   const stderr = result.stderr.trim()
-  if (stderr) console.error(`[Grep] ripgrep stderr (exit=${result.exitCode}) pattern=${JSON.stringify(pattern)} path=${searchRoot}:\n${stderr}`)
+  if (stderr) logGrepStderr(stderr, result.exitCode, pattern, searchRoot)
   if (result.exitCode === 2 && !result.stdout) {
     return { result: { output: `Grep error: ${stderr || 'ripgrep exited with code 2'}`, isError: true } }
   }

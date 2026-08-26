@@ -139,6 +139,21 @@ describe('createEditTool', () => {
     expect(readFileSync(filePath, 'utf-8')).toBe(`${'x'.repeat(64 * 1024 - 3)}REPLACED\n`)
   })
 
+  it('rejects overlapping matches that cross a stream boundary without writing', async () => {
+    const original = `${'x'.repeat(64 * 1024 - 4)}aaaaaa`
+    const filePath = writeTestFile('overlapping-cross-chunk.txt', original)
+    const tool = createEditTool(() => tempDir)
+
+    const result = await tool.call(
+      { file_path: filePath, old_string: 'aaa', new_string: 'replaced' },
+      context,
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('2 times')
+    expect(readFileSync(filePath, 'utf-8')).toBe(original)
+  })
+
   it('preserves the existing file mode after atomic replacement', async () => {
     const targetPath = writeTestFile('executable.txt', 'replace me\n')
     const linkPath = join(tempDir, 'executable-link.txt')
