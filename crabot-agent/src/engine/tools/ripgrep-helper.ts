@@ -16,7 +16,7 @@ import { shouldScanProtectedDirs } from './fda-check'
 import { runHostProcess } from '../host-process'
 
 export interface RipgrepResult {
-  /** rg 进程的 stdout 全文（已按 maxBytes 截断）。 */
+  /** rg 进程 stdout 的前缀（已按 maxBytes 截断）。 */
   stdout: string
   /** rg 进程的 stderr 全文。 */
   stderr: string
@@ -33,6 +33,22 @@ const DEFAULT_MAX_BYTES = 16 * 1024 * 1024 // 16MB stdout 上限——再多上�
 // 弹窗时会无限挂起，把 agent 主循环一起拖死（实测挂过 144 分钟）。源码工程的合理
 // glob/grep 远用不到 60s，超出即 kill 返回 partial，让上层提示缩小范围。
 const DEFAULT_TIMEOUT_MS = 60_000
+
+function createStdoutPrefixCollector(maxBytes: number): { push(chunk: Buffer): void; finish(): string } {
+  const chunks: Buffer[] = []
+  let retained = 0
+  return {
+    push(chunk): void {
+      if (retained >= maxBytes) return
+      const allowed = Math.min(chunk.length, maxBytes - retained)
+      chunks.push(chunk.subarray(0, allowed))
+      retained += allowed
+    },
+    finish(): string {
+      return Buffer.concat(chunks, retained).toString('utf8')
+    },
+  }
+}
 
 /**
  * 强制注入到每次 rg 调用的硬限制。这些 flag 不可让上层覆盖：
@@ -79,18 +95,21 @@ export function runRipgrep(
 ): Promise<RipgrepResult> {
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const stdoutPrefix = createStdoutPrefixCollector(maxBytes)
 
   return runHostProcess({
     argv: [rgPath, ...FORCED_LIMITS, ...args],
     ...(opts.cwd ? { cwd: opts.cwd } : {}),
     ...(opts.signal ? { abortSignal: opts.signal } : {}),
     ...(opts.detached === false ? { detached: false } : {}),
+    captureStdout: false,
+    onStdoutChunk: (chunk) => stdoutPrefix.push(chunk),
     limits: { timeoutMs, stdoutBytes: maxBytes, stderrBytes: 64 * 1024 },
   }).then((outcome) => {
     if (outcome.kind === 'spawn_error') throw new Error(`ripgrep spawn failed: ${outcome.message ?? 'unknown error'}`)
     const signalCode = outcome.signal ? 128 + (signalNumber(outcome.signal) ?? 0) : 0
     return {
-      stdout: outcome.stdout,
+      stdout: stdoutPrefix.finish(),
       stderr: outcome.stderr,
       truncated: outcome.kind === 'output_limit' || outcome.kind === 'aborted' || outcome.kind === 'timed_out',
       timedOut: outcome.kind === 'timed_out',

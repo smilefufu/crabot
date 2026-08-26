@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { LocalHostToolExecutor } from '../../src/engine/local-host-tool-executor'
+
+const execFileAsync = promisify(execFile)
+const itPosix = process.platform === 'win32' ? it.skip : it
 
 describe('LocalHostToolExecutor', () => {
   let tempDir: string
@@ -64,4 +69,31 @@ describe('LocalHostToolExecutor', () => {
     expect(execution.result.output).toContain(`Local tool execution result is unknown (${operation})`)
     expect(await fs.readFile(filePath, 'utf8')).toBe('committed')
   })
+
+  itPosix('cleans the actual helper temporary file when an Edit is aborted', async () => {
+    const pipePath = path.join(tempDir, 'blocked-input')
+    await execFileAsync('mkfifo', [pipePath])
+    const controller = new AbortController()
+    const execution = new LocalHostToolExecutor().execute('edit', {
+      file_path: pipePath,
+      old_string: 'old',
+      new_string: 'new',
+    }, tempDir, { abortSignal: controller.signal })
+
+    // The first pass consumes this writer. The helper then opens the FIFO for its second pass,
+    // after its same-directory temporary file exists, and blocks waiting for another writer.
+    await fs.writeFile(pipePath, 'old')
+    const temporaryPrefix = `.${path.basename(pipePath)}.`
+    const deadline = Date.now() + 5_000
+    while (!(await fs.readdir(tempDir)).some((name) => name.startsWith(temporaryPrefix) && name.endsWith('.tmp'))) {
+      if (Date.now() >= deadline) throw new Error('helper did not create its temporary file')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+
+    controller.abort()
+    const result = await execution
+
+    expect(result.result.output).toContain('Local tool execution result is unknown (edit)')
+    expect((await fs.readdir(tempDir)).some((name) => name.startsWith(temporaryPrefix) && name.endsWith('.tmp'))).toBe(false)
+  }, 10_000)
 })

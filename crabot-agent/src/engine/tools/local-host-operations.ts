@@ -1,4 +1,4 @@
-import { createReadStream, existsSync } from 'node:fs'
+import { createReadStream, existsSync, unlinkSync } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -25,6 +25,27 @@ const MAX_GREP_OUTPUT_BYTES = 95_000
 const MAX_GREP_COLUMNS = 500
 
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp'])
+const inFlightTemporaryFiles = new Set<string>()
+
+/** The helper calls this synchronously before exiting from SIGTERM/SIGINT. */
+export function cleanUpInFlightTemporaryFiles(): void {
+  for (const filePath of inFlightTemporaryFiles) {
+    try {
+      unlinkSync(filePath)
+    } catch {
+      // The temporary file may not have been created yet or was already renamed.
+    }
+  }
+  inFlightTemporaryFiles.clear()
+}
+
+function trackTemporaryFile(filePath: string): void {
+  inFlightTemporaryFiles.add(filePath)
+}
+
+function releaseTemporaryFile(filePath: string): void {
+  inFlightTemporaryFiles.delete(filePath)
+}
 
 export interface LocalOperationResult {
   readonly result: ToolCallResult
@@ -294,6 +315,7 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
       throw error
     })
   const tempPath = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.${randomUUID()}.tmp`)
+  trackTemporaryFile(tempPath)
   try {
     const handle = await fs.open(tempPath, 'wx')
     try {
@@ -307,6 +329,8 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
   } catch (error) {
     await fs.unlink(tempPath).catch(() => undefined)
     throw error
+  } finally {
+    releaseTemporaryFile(tempPath)
   }
 }
 
@@ -389,6 +413,7 @@ async function transformFile(filePath: string, oldString: string, newString: str
   const decoder = new StringDecoder('utf8')
   let carry = ''
   const carryLength = Math.max(0, oldString.length - 1)
+  trackTemporaryFile(tempPath)
   try {
     const handle = await fs.open(tempPath, 'wx')
     try {
@@ -422,6 +447,7 @@ async function transformFile(filePath: string, oldString: string, newString: str
     await fs.unlink(tempPath).catch(() => undefined)
     throw error
   } finally {
+    releaseTemporaryFile(tempPath)
     stream.destroy()
   }
 }
@@ -631,7 +657,8 @@ async function enumerateResources(skillDir: string): Promise<ReadonlyArray<strin
     try {
       const dir = await fs.opendir(directory)
       for await (const entry of dir) {
-        if (result.length >= MAX_SKILL_RESOURCES || entry.name.startsWith('.')) break
+        if (result.length >= MAX_SKILL_RESOURCES) break
+        if (entry.name.startsWith('.')) continue
         const fullPath = path.join(directory, entry.name)
         if (entry.isDirectory()) await walk(fullPath, depth + 1)
         else if (entry.name !== 'SKILL.md' && entry.name !== 'skill.md') result.push(relative(skillDir, fullPath))

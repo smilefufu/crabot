@@ -1,10 +1,18 @@
 import { createInterface } from 'node:readline'
-import { executeLocalHostOperation } from './local-host-operations'
+import { cleanUpInFlightTemporaryFiles, executeLocalHostOperation } from './local-host-operations'
 import { LOCAL_HOST_PROTOCOL_VERSION, isLocalHostOperation, type LocalHostRequest, type LocalHostResponse } from './local-host-protocol'
 
 function writeResponse(response: LocalHostResponse): void {
   process.stdout.write(`${JSON.stringify(response)}\n`)
 }
+
+function exitAfterCleaningTemporaryFiles(exitCode: number): void {
+  cleanUpInFlightTemporaryFiles()
+  process.exit(exitCode)
+}
+
+process.once('SIGTERM', () => exitAfterCleaningTemporaryFiles(143))
+process.once('SIGINT', () => exitAfterCleaningTemporaryFiles(130))
 
 async function main(): Promise<void> {
   const lines: string[] = []
