@@ -100,6 +100,32 @@ describe('commitInput', () => {
     expect(result.disposition).toBe('not_pasted'); expect(pastes).toBe(0); expect(enters).toBe(0)
   })
 
+  it('records a pre-paste rejection without sending keys', async () => {
+    for (const probe of ['pending', 'unavailable'] as const) {
+      const diagnostics: Array<{ stage: string; probe: string; accepted: boolean }> = []
+      let pastes = 0
+      let enters = 0
+      const result = await commitInput(
+        {
+          pasteText: async () => { pastes++ },
+          sendEnter: async () => { enters++ },
+          capture: async () => snapshot(probe),
+        },
+        () => probe,
+        () => false,
+        'task',
+        {
+          settleTimeoutMs: 0,
+          onDiagnostic: entry => diagnostics.push({ stage: entry.stage, probe: entry.probe, accepted: entry.accepted }),
+        },
+      )
+      expect(result.disposition).toBe('not_pasted')
+      expect(pastes).toBe(0)
+      expect(enters).toBe(0)
+      expect(diagnostics).toEqual([{ stage: 'before_paste', probe, accepted: false }])
+    }
+  })
+
   it('retries Enter once without re-pasting', async () => {
     const frames = [snapshot('empty'), snapshot('pending'), snapshot('pending'), snapshot('accepted')]
     let pastes = 0; let enters = 0

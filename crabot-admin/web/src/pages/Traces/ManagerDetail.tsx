@@ -284,6 +284,7 @@ function groupEpisodes(episodes: ManagerEpisodeTrace[]): Array<{ episode: Manage
 
   // Current page may contain only a late worker event; materialize its minimal parent context.
   for (const episode of episodes) {
+    if (keepsOwnTimelinePosition(episode)) continue
     const parent = episode.causal_parent
     if (!parent || nodes.has(parent.trace_id)) continue
     nodes.set(parent.trace_id, {
@@ -310,6 +311,7 @@ function groupEpisodes(episodes: ManagerEpisodeTrace[]): Array<{ episode: Manage
   const parentOf = new Map<string, string>()
   for (const episode of nodes.values()) {
     if (episode.trigger.type !== 'worker_event' || !episode.worker_ref) continue
+    if (keepsOwnTimelinePosition(episode)) continue
     const parentId = ownerByWorker.get(episode.worker_ref.worker_id) ?? episode.causal_parent?.trace_id
     if (parentId && parentId !== episode.trace_id && nodes.has(parentId)) parentOf.set(episode.trace_id, parentId)
   }
@@ -337,6 +339,10 @@ function groupEpisodes(episodes: ManagerEpisodeTrace[]): Array<{ episode: Manage
       progress: (progressByRoot.get(id) ?? []).sort((a, b) => a.started_at.localeCompare(b.started_at)),
     }))
     .sort((a, b) => b.episode.started_at.localeCompare(a.episode.started_at))
+}
+
+function keepsOwnTimelinePosition(episode: ManagerEpisodeTrace): boolean {
+  return episode.trigger.type === 'worker_event' && (Boolean(episode.reply_excerpt) || Boolean(episode.actions?.length))
 }
 
 async function listRunningWorkers(managerKey: string): Promise<LedgerWorker[]> {

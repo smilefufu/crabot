@@ -89,6 +89,14 @@ export function projectManagerEpisode(
         label: `取消：${title ?? workerId ?? 'worker'}`,
         ...(workerId ? { worker_id: workerId } : {}),
       })
+    } else if (name === 'request_worker_interrupt') {
+      const workerId = extractStringField(inputSummary, 'worker_id')
+      const title = workerId ? workerFacts.get(workerId)?.title : undefined
+      actions.push({
+        kind: 'other',
+        label: `请求中断：${title ?? workerId ?? 'worker'}`,
+        ...(workerId ? { worker_id: workerId } : {}),
+      })
     }
   }
 

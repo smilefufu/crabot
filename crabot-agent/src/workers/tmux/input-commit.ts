@@ -54,7 +54,6 @@ export async function commitInput(
     )
     beforePaste = probe(snapshot, 'before_paste')
   }
-  if (beforePaste !== 'empty') return { disposition: 'not_pasted', snapshot }
 
   await emitDiagnostic(opts, {
     stage: 'before_paste',
@@ -62,6 +61,7 @@ export async function commitInput(
     accepted: false,
     snapshot,
   })
+  if (beforePaste !== 'empty') return { disposition: 'not_pasted', snapshot }
 
   opts.beforeSideEffect?.('paste')
   await driver.pasteText(text)

@@ -158,6 +158,42 @@ describe('ManagerDetail', () => {
     expect(screen.getByText('等待输入')).toBeInTheDocument()
   })
 
+  it('带回复或操作的 worker_event 保持自己的时间线位置', async () => {
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [
+        {
+          trace_id: 'ep-late-reply', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:10:00.000Z', status: 'completed',
+          trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+          reply_excerpt: '该执行器当前无法投递，已请求中断。',
+          actions: [{ kind: 'other', label: '请求中断：部署 V6', worker_id: 'w-1' }],
+          causal_parent: {
+            trace_id: 'ep-old-parent', started_at: '2026-08-01T10:00:00.000Z', status: 'completed',
+            trigger: { type: 'human_message', summary: '人类消息 x1：开始部署' },
+            actions: [{ kind: 'spawn_worker', label: '派活：部署 V6', worker_id: 'w-1' }],
+          },
+        },
+        {
+          trace_id: 'ep-old-parent', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:00:00.000Z', status: 'completed',
+          trigger: { type: 'human_message', summary: '人类消息 x1：开始部署' }, spans: [], spawned_worker_ids: ['w-1'],
+          actions: [{ kind: 'spawn_worker', label: '派活：部署 V6', worker_id: 'w-1' }],
+        },
+      ],
+      pagination: { page: 1, page_size: 20, total_items: 2, total_pages: 1 },
+    })
+    render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(document.querySelector('.manager-detail__reply')).toHaveTextContent('该执行器当前无法投递，已请求中断。'))
+    const replyCard = document.querySelector('.manager-detail__reply')?.closest('article.manager-detail__event')
+    expect(replyCard).not.toBeNull()
+    expect(replyCard).toHaveTextContent('请求中断：部署 V6')
+    expect(replyCard?.querySelector('a[href="/traces/workers/w-1"]')).not.toBeNull()
+    expect(document.querySelectorAll('article.manager-detail__event')).toHaveLength(2)
+  })
+
   it('同一执行器的多次进展默认折叠，只展示最后状态', async () => {
     mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
       items: [
@@ -197,7 +233,7 @@ describe('ManagerDetail', () => {
     expect(screen.getByText('排队')).toBeInTheDocument()
   })
 
-  it('同一执行器的历史外发消息不折叠，并显示发送时间', async () => {
+  it('同一执行器的回复事件不折叠，并按自己的时间显示', async () => {
     mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
       items: [
         {
@@ -229,9 +265,11 @@ describe('ManagerDetail', () => {
         <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
       </MemoryRouter>,
     )
-    await waitFor(() => expect(screen.getByText('管理会话回复：', { exact: false })).toHaveTextContent('21:26 更新：已完成 44 批。'))
-    expect(screen.getByText('已发送消息')).toBeInTheDocument()
-    expect(document.querySelector('time[datetime="2026-08-01T10:02:00.000Z"]')).not.toBeNull()
+    await waitFor(() => expect(document.querySelector('.manager-detail__reply')).toHaveTextContent('21:26 更新：已完成 44 批。'))
+    const replyCard = document.querySelector('.manager-detail__reply')?.closest('article.manager-detail__event')
+    expect(replyCard).not.toBeNull()
+    expect(replyCard?.querySelector('.manager-detail__event-time')).not.toBeNull()
+    expect(screen.queryByText('已发送消息')).toBeNull()
     expect(screen.getByRole('button', { name: '展开 1 次历史进展' })).toBeInTheDocument()
     expect(screen.queryByText('排队')).toBeNull()
   })

@@ -28,18 +28,20 @@ const facts = new Map<string, EpisodeWorkerFact>([
 ])
 
 describe('projectManagerEpisode', () => {
-  it('提取回复、派活/跟进/取消，并 join worker 标题', () => {
+  it('提取回复、派活/跟进/取消/请求中断，并 join worker 标题', () => {
     const result = projectManagerEpisode(trace({ spans: [
       tool('send_message', JSON.stringify({ content: '已经开始部署，会在完成后汇报。' })),
       tool('spawn_worker', JSON.stringify({ title: '部署 Minecraft', prompt: '很长任务' }), JSON.stringify({ worker_id: 'w-1' })),
       tool('send_to_worker', JSON.stringify({ worker_id: 'w-1', text: '继续' })),
       tool('kill_worker', JSON.stringify({ worker_id: 'w-1' })),
+      tool('request_worker_interrupt', JSON.stringify({ worker_id: 'w-1' })),
     ] }), facts)
     expect(result.reply_excerpt).toBe('已经开始部署，会在完成后汇报。')
     expect(result.actions).toEqual([
       { kind: 'spawn_worker', label: '派活：部署 Minecraft', worker_id: 'w-1' },
       { kind: 'send_to_worker', label: '跟进：部署 Minecraft', worker_id: 'w-1' },
       { kind: 'cancel_worker', label: '取消：部署 Minecraft', worker_id: 'w-1' },
+      { kind: 'other', label: '请求中断：部署 Minecraft', worker_id: 'w-1' },
     ])
   })
 
