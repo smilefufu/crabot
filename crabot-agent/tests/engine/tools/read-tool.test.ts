@@ -133,6 +133,21 @@ describe('createReadTool', () => {
     expect(result.output).toContain('offset')
   })
 
+  it('keeps the 50KB budget when an oversized line follows normal output', async () => {
+    const filePath = path.join(tmpDir, 'normal-then-oversized.txt')
+    const prefix = Array.from({ length: 350 }, (_, index) => `row-${index}-${'x'.repeat(120)}`)
+    const oversized = 'y'.repeat(60 * 1024)
+    await fs.writeFile(filePath, [...prefix, oversized, 'afterwards'].join('\n'))
+
+    const result = await tool.call({ file_path: filePath }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('1\trow-0-')
+    expect(result.output).not.toContain('y'.repeat(100))
+    expect(result.output).toContain('[...truncated')
+    expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThanOrEqual(52 * 1024)
+  })
+
   it('reads the tail of a >500KB file via offset (no more 500KB hard cap)', async () => {
     const filePath = path.join(tmpDir, 'paged.txt')
     // 8000 行 × ~90B ≈ 700KB，超过旧的 500KB 硬上限

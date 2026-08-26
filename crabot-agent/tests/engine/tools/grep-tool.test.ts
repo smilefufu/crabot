@@ -170,6 +170,19 @@ describe('createGrepTool', () => {
     expect(result.output).toContain('data.txt')
   })
 
+  it('searches a single file supplied as path', async () => {
+    const filePath = path.join(tmpDir, 'src', 'hello.ts')
+
+    const result = await tool.call(
+      { pattern: 'greeting', path: filePath, output_mode: 'content' },
+      {},
+    )
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('greeting')
+    expect(result.output).toContain('hello.ts')
+  })
+
   it('returns error for invalid regex pattern', async () => {
     const result = await tool.call({ pattern: '[invalid' }, {})
 

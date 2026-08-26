@@ -134,6 +134,13 @@ async function readTextWindow(filePath: string, offset: number, limit: number): 
     reachedEof = false
     stream.destroy()
   }
+  const stopAtOversizedLine = (lineLength: LineLength): void => {
+    if (lines.length === 0) {
+      lines.push(oversizedLine(current, lineIndex + 1, String(lineIndex + 2).length, filePath, lineLength))
+    }
+    truncated = true
+    stop()
+  }
   const consumeLine = (): void => {
     if (lineIndex >= offset && lines.length < limit) {
       const normalized = current.endsWith('\r') ? current.slice(0, -1) : current
@@ -171,12 +178,10 @@ async function readTextWindow(filePath: string, offset: number, limit: number): 
             const nextLineBytes = oversizedLineBytes + partBytes
             const probeLimit = MAX_READ_OUTPUT_BYTES + MAX_LINE_LENGTH_PROBE_BYTES
             if ((newline !== -1 && nextLineBytes <= probeLimit) || nextLineBytes >= probeLimit) {
-              lines.push(oversizedLine(current, lineIndex + 1, String(lineIndex + 2).length, filePath, {
+              stopAtOversizedLine({
                 bytes: newline !== -1 && nextLineBytes <= probeLimit ? nextLineBytes : probeLimit,
                 exact: newline !== -1 && nextLineBytes <= probeLimit,
-              }))
-              truncated = true
-              stop()
+              })
               break
             }
             oversizedLineBytes = nextLineBytes
@@ -186,12 +191,10 @@ async function readTextWindow(filePath: string, offset: number, limit: number): 
             const observedLineBytes = currentBytes + partBytes
             const probeLimit = MAX_READ_OUTPUT_BYTES + MAX_LINE_LENGTH_PROBE_BYTES
             if (newline !== -1 || observedLineBytes >= probeLimit) {
-              lines.push(oversizedLine(current, lineIndex + 1, String(lineIndex + 2).length, filePath, {
+              stopAtOversizedLine({
                 bytes: newline !== -1 ? observedLineBytes : probeLimit,
                 exact: newline !== -1,
-              }))
-              truncated = true
-              stop()
+              })
               break
             }
             oversizedLineBytes = observedLineBytes
@@ -213,19 +216,17 @@ async function readTextWindow(filePath: string, offset: number, limit: number): 
           if (oversizedLineBytes !== undefined) {
             const probeLimit = MAX_READ_OUTPUT_BYTES + MAX_LINE_LENGTH_PROBE_BYTES
             const exactLineBytes = oversizedLineBytes + tailBytes
-            lines.push(oversizedLine(current, lineIndex + 1, String(lineIndex + 2).length, filePath, {
+            stopAtOversizedLine({
               bytes: Math.min(exactLineBytes, probeLimit),
               exact: exactLineBytes <= probeLimit,
-            }))
-            truncated = true
+            })
           } else if (currentBytes + tailBytes > MAX_READ_OUTPUT_BYTES) {
             const remaining = Math.max(0, MAX_READ_OUTPUT_BYTES - currentBytes)
             if (remaining > 0) current += truncateUtf8(tail, remaining)
-            lines.push(oversizedLine(current, lineIndex + 1, String(lineIndex + 2).length, filePath, {
+            stopAtOversizedLine({
               bytes: currentBytes + tailBytes,
               exact: true,
-            }))
-            truncated = true
+            })
           } else {
             current += tail
             currentBytes += tailBytes
@@ -524,7 +525,6 @@ async function globOperation(input: Record<string, unknown>): Promise<LocalOpera
   }
   const outcome = await runHostProcess({
     argv: [rgPath, '--max-filesize=10M', '--threads=1', ...args],
-    cwd: searchRoot,
     // The outer helper owns the process group and must reap rg if it times out or dies.
     detached: false,
     captureStdout: false,
@@ -605,7 +605,7 @@ async function grepOperation(input: Record<string, unknown>): Promise<LocalOpera
   args.push('-e', pattern, searchRoot)
   let result
   try {
-    result = await runRipgrep(args, { cwd: searchRoot, maxBytes: 2 * 1024 * 1024, timeoutMs: 60_000, detached: false })
+    result = await runRipgrep(args, { maxBytes: 2 * 1024 * 1024, timeoutMs: 60_000, detached: false })
   } catch (error) {
     return { result: { output: `Grep error: ${error instanceof Error ? error.message : String(error)}`, isError: true } }
   }
