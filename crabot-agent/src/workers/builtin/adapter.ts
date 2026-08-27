@@ -27,9 +27,9 @@
  *
  * fork：侧问分支。不要求 prev 处于任何特定状态——主线 running/idle/exited 都能 fork。
  * 从 prev.session_ref 节点 append forkInput 为分支（不动主线 tip，树因此分叉，这是
- * fork 的合法用法）。新化身独立 meta/output，跑一次性 burst（不含 finish_task 工具，
- * 结束即 exited，没有 idle 态）。newSeq 与 resume 共用 nextSeq()，在同一把互斥锁内
- * 计算，避免二者撞号。
+ * fork 的合法用法）。新化身独立 meta/output，保留主线的运行配置并追加一次性侧问指令，
+ * 跑一次性 burst（结束即 exited，没有 idle 态）。newSeq 与 resume 共用 nextSeq()，在同一把
+ * 互斥锁内计算，避免二者撞号。
  *
  * kill：每化身持有一个 AbortController，burst 启动时创建、其 signal 传给 runEngine。
  * running 态 kill 在互斥锁内先置 instance.killRequested = true，再 abort() 当前 burst——
@@ -51,8 +51,9 @@ import { promises as fs } from 'fs'
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { runEngine, defineTool, createUserMessage } from '../../engine/index.js'
-import type { EngineMessage, EngineResult, ToolDefinition } from '../../engine/index.js'
+import type { EngineMessage, EngineMessagesRef, EngineResult, ToolDefinition } from '../../engine/index.js'
 import type { Resolvable } from '../../engine/types.js'
 import { SessionTree } from '../session-tree.js'
 import { OutputLog } from '../output-log.js'
@@ -92,8 +93,25 @@ import type {
 import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
 
-/** fork 是一次性侧问，maxTurns 取小值，避免侧问跑成一次完整任务。 */
+/** fork 是一次性侧问；保留历史实现的 8 轮上限，避免把“回答”误做成硬编码单轮。 */
 const FORK_MAX_TURNS = 8
+
+const FORK_QUERY_INSTRUCTION = [
+  '## 临时侧问模式（最高优先级）',
+  '停止当前一切工作，然后回答下面问题。这个问题来自 Manager，你现在只回答它。',
+  '本段覆盖上文关于任务执行、事实核验、Execution Bias、Skill 加载以及 send_message 的指令。',
+  '不要继续主任务，不修改文件或系统，不派生子任务，不发送消息，不加载或使用任何 Skill（包括 crabot-cli），也不调用任何工具。',
+  '直接在 assistant 文本中回答 Manager 的问题，优先依据继承的主线完整 history/context。',
+].join('\n')
+
+function forkSystemPrompt(systemPrompt: Resolvable<string>): Resolvable<string> {
+  return () => {
+    const resolved = resolve(systemPrompt)
+    return resolved.trim().length > 0
+      ? `${resolved}\n\n${FORK_QUERY_INSTRUCTION}`
+      : FORK_QUERY_INSTRUCTION
+  }
+}
 
 /** spawn 时落盘的 per-worker 上下文文件名（见 persistContext）。 */
 const CONTEXT_FILE = 'context.json'
@@ -174,10 +192,25 @@ interface WorkerInstance {
    * 分支下面。每个化身必须维护自己的 tip，只在自己 append 时更新。
    */
   tip: string
+  /**
+   * 最近一个完整 engine turn 的内存消息快照。主线 LLM 调用尚未结束时，最新消息还没
+   * 写入 SessionTree；fork 必须从这里取，而不是只读持久化树里的旧 tip。
+   */
+  readonly engineMessagesRef: EngineMessagesRef
+  /** `engineMessagesRef.current` 对应的 SessionTree tip。 */
+  engineMessagesTip: string
+  /** fork 建立时冻结的父历史 + Manager 问题；fork burst 不再从旧树重新取。 */
+  readonly forkInitialMessages?: ReadonlyArray<EngineMessage>
+  /** fork 建立时父主线最近一次实际使用的 system prompt/tools。 */
+  readonly forkSystemPrompt?: string
+  /** 当前 burst 最后一段 assistant 文本，供意外异常的安全网继续回传给 Manager。 */
+  lastBurstAssistantText?: string
   /** 最近一次真实 engine 进展;不使用定时心跳,避免把挂死调用伪装为健康。 */
   activityAt: number
   /** 本化身的 TraceStore trace 引用（P6-A §8.4；meta-<seq>.json 的 trace_id 同源）。 */
   traceId?: string
+  /** fork 的 Manager 原始问题，仅用于在该化身 trace 中还原 user message。 */
+  initialTraceInput?: string
   state: WorkerContractState
   ended_reason?: IncarnationEndReason
   outcome?: 'completed' | 'failed'
@@ -214,6 +247,24 @@ function resolve<T>(value: Resolvable<T>): T {
   return typeof value === 'function' ? (value as () => T)() : value
 }
 
+interface EngineContextSnapshot {
+  readonly messages: EngineMessage[]
+  readonly systemPrompt?: string
+  readonly tools?: ReadonlyArray<ToolDefinition>
+}
+
+function createEngineMessagesRef(
+  messages: ReadonlyArray<EngineMessage>,
+  systemPrompt?: string,
+  tools?: ReadonlyArray<ToolDefinition>,
+): EngineMessagesRef {
+  return {
+    current: [...messages],
+    ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+    ...(tools !== undefined ? { tools: [...tools] } : {}),
+  }
+}
+
 async function fileExists(path: string): Promise<boolean> {
   try {
     await fs.access(path)
@@ -230,7 +281,12 @@ async function fileExists(path: string): Promise<boolean> {
  * `trace_id` 字段——不按 task ID 猜、不靠内存）。
  */
 export interface BuiltinTraceHooks {
-  startIncarnationTrace(params: { worker_id: string; seq: number; summary: string }): string
+  startIncarnationTrace(params: {
+    worker_id: string
+    seq: number
+    summary: string
+    initial_input?: string
+  }): string
   appendTurn(traceId: string, event: import('../../engine/types.js').EngineTurnEvent): void
   finishIncarnationTrace(traceId: string, patch: { status: 'completed' | 'failed'; summary: string }): void
   stopWorkerSubagents?(workerId: string): void
@@ -368,7 +424,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       const sessionTree = new SessionTree(join(dir, 'session.jsonl'))
       const outputLog = new OutputLog(join(dir, `output-${seq}.log`))
-      const rootId = await sessionTree.append(null, createUserMessage(spec.prompt))
+      const rootMessage = createUserMessage(spec.prompt)
+      const rootId = await sessionTree.append(null, rootMessage)
 
       const newInstance: WorkerInstance = {
         worker_id: spec.worker_id,
@@ -378,6 +435,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         sessionTree,
         outputLog,
         tip: rootId,
+        engineMessagesRef: createEngineMessagesRef([rootMessage]),
+        engineMessagesTip: rootId,
         activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
@@ -439,7 +498,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         sessionTree = await SessionTree.load(join(dir, 'session.jsonl'))
       }
       const outputLog = new OutputLog(join(dir, `output-${newSeq}.log`))
-      const wakeId = await sessionTree.append(prev.session_ref, createUserMessage(wakeInput))
+      const parentMessages = this.captureEngineSnapshot(prev, sessionTree).messages
+      const wakeMessage = createUserMessage(wakeInput)
+      const wakeId = await sessionTree.append(prev.session_ref, wakeMessage)
+      const initialMessages = [...parentMessages, wakeMessage]
 
       const newInstance: WorkerInstance = {
         worker_id: prev.worker_id,
@@ -449,6 +511,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         sessionTree,
         outputLog,
         tip: wakeId,
+        engineMessagesRef: createEngineMessagesRef(initialMessages),
+        engineMessagesTip: wakeId,
         activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
@@ -494,9 +558,20 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         sessionTree = await SessionTree.load(join(dir, 'session.jsonl'))
       }
 
+      // query_worker 从台账读取的 session_ref 可能落后于正在运行的主线：状态回调是异步
+      // 入账的，而 engine 的最近完整 turn 已经在内存快照里。侧问要回答“现在进展如何”，
+      // 运行中的化身因此优先取当前快照；idle/exited 仍严格尊重调用方给出的历史节点。
+      const parentSnapshot = this.captureEngineSnapshot(prev, sessionTree, true)
       const newSeq = await this.nextSeq(prev.worker_id)
       const outputLog = new OutputLog(join(dir, `output-${newSeq}.log`))
-      const forkId = await sessionTree.append(prev.session_ref, createUserMessage(forkInput))
+      const forkParentId = await this.materializeForkParentHistory(
+        sessionTree,
+        prev.session_ref,
+        parentSnapshot.messages,
+      )
+      const forkMessage = createUserMessage(forkInput)
+      const forkId = await sessionTree.append(forkParentId, forkMessage)
+      const forkInitialMessages = [...parentSnapshot.messages, forkMessage]
 
       const newInstance: WorkerInstance = {
         worker_id: prev.worker_id,
@@ -506,7 +581,16 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         sessionTree,
         outputLog,
         tip: forkId,
+        engineMessagesRef: createEngineMessagesRef(
+          forkInitialMessages,
+          parentSnapshot.systemPrompt,
+          [],
+        ),
+        engineMessagesTip: forkId,
+        forkInitialMessages,
+        ...(parentSnapshot.systemPrompt !== undefined ? { forkSystemPrompt: parentSnapshot.systemPrompt } : {}),
         activityAt: Date.now(),
+        initialTraceInput: forkInput,
         state: 'running',
         pendingInputs: [],
         pendingImmediateInputs: [],
@@ -569,7 +653,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // 运行配置现取：idle 态下没有 burst 在跑，重新解析一次不会干扰任何正在执行的东西，
       // 语义与"起化身现取"一致（正在跑的 burst 用旧配置，见 runBurst 续 burst 路径）。
       const builtin = rehydratedRuntime ?? await this.runtimeFor(h.worker_id, 'sendInput', instance.workspaceInstructions)
-      instance.tip = await instance.sessionTree.append(instance.tip, createUserMessage(text))
+      const currentMessages = this.messagesAtTip(instance, instance.tip)
+      const inputMessage = createUserMessage(text)
+      instance.tip = await instance.sessionTree.append(instance.tip, inputMessage)
+      this.setEngineMessagesSnapshot(instance, [...currentMessages, inputMessage], instance.tip)
       await this.transitionState(instance, h, 'running')
       instance.activityAt = Date.now()
       return builtin
@@ -647,6 +734,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       sessionTree,
       outputLog: new OutputLog(join(dir, `output-${h.seq}.log`)),
       tip: meta.tip_node_id,
+      engineMessagesRef: createEngineMessagesRef(sessionTree.pathTo(meta.tip_node_id)),
+      engineMessagesTip: meta.tip_node_id,
       activityAt: Date.now(),
       ...(typeof meta.trace_id === 'string' ? { traceId: meta.trace_id } : {}),
       state: 'idle',
@@ -889,7 +978,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     console.error(`[builtin-adapter] ${context} threw unexpectedly:`, err)
     try {
       await this.getMutex(instance.worker_id).run(async () => {
-        await this.transitionExited(instance, handle, 'crashed')
+        await this.transitionExited(instance, handle, 'crashed', undefined, instance.lastBurstAssistantText)
       })
     } catch (innerErr) {
       console.error(
@@ -914,6 +1003,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         worker_id: instance.worker_id,
         seq: instance.seq,
         summary,
+        ...(instance.initialTraceInput !== undefined ? { initial_input: instance.initialTraceInput } : {}),
       })
       await this.writeMeta(instance)
     } catch (error) {
@@ -929,7 +1019,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   ): Promise<void> {
     await this.ensureTraceId(instance, `worker ${instance.worker_id}#${instance.seq}`)
     const tip = instance.tip
-    const initialMessages = instance.sessionTree.pathTo(tip)
+    const initialMessages = this.messagesAtTip(instance, tip)
     const mutex = this.getMutex(instance.worker_id)
 
     // 每次进入 runBurst（含续 burst 的递归调用）都换一个新 AbortController，供 kill() abort。
@@ -1003,6 +1093,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           if (info.failedReason === undefined) compactedThisBurst = true
         },
         abortSignal: abortController.signal,
+        messagesRef: instance.engineMessagesRef,
         onLiveProgress: () => {
           instance.activityAt = Date.now()
         },
@@ -1091,11 +1182,15 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           ...instance.pendingImmediateInputs.splice(0, instance.pendingImmediateInputs.length),
           ...instance.pendingInputs.splice(0, instance.pendingInputs.length),
         ]
+        const queuedMessages = this.messagesAtTip(instance, instance.tip)
         let queueParent = instance.tip
         for (const text of queued) {
-          queueParent = await instance.sessionTree.append(queueParent, createUserMessage(text))
+          const queuedMessage = createUserMessage(text)
+          queueParent = await instance.sessionTree.append(queueParent, queuedMessage)
+          queuedMessages.push(queuedMessage)
         }
         instance.tip = queueParent
+        this.setEngineMessagesSnapshot(instance, queuedMessages, queueParent)
         return true
       }
 
@@ -1109,11 +1204,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   }
 
   /**
-   * fork 专用的一次性 burst：不含 finish_task 工具（工具表用 spec 注入的原样），没有
-   * "提前退出"这回事——end_turn 或 maxTurns 耗尽都视为侧问正常收尾，直接 exited(completed)，
-   * 不经过 idle、不支持续 burst（没有 pendingInputs 排队逻辑）。engine 抛错/aborted 才是
-   * exited(crashed)。收尾在该 worker 的互斥锁内完成，append 只作用于 fork 自己的分支链路，
-   * 不触碰主线 tip。
+   * fork 专用的一次性 burst：保留主线历史和 Manager 侧问作为上下文，在主线 system prompt
+   * 后追加侧问指令，并沿用主线工具守卫。没有"提前退出"这回事——end_turn 或 maxTurns 收场都视为侧问正常收尾，直接
+   * exited(completed)，不经过 idle、不支持续 burst（没有 pendingInputs 排队逻辑）。engine
+   * 抛错/aborted 仍按对应的中断/崩溃语义收尾。收尾在该 worker 的互斥锁内完成，append 只作用
+   * 于 fork 自己的分支链路，不触碰主线 tip。
    */
   private async runForkBurst(
     instance: WorkerInstance,
@@ -1123,8 +1218,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // fork 化身也有自己的结构化 trace（P6-A §8.4）：与主线 burst 同一 admission 纪律。
     await this.ensureTraceId(instance, `worker ${instance.worker_id}#${instance.seq} (fork)`)
     const tip = instance.tip
-    const initialMessages = instance.sessionTree.pathTo(tip)
+    const initialMessages = instance.forkInitialMessages
+      ? [...instance.forkInitialMessages]
+      : this.messagesAtTip(instance, tip)
     const mutex = this.getMutex(instance.worker_id)
+    const forkSystemPromptValue = instance.forkSystemPrompt ?? builtin.systemPrompt
+    instance.lastBurstAssistantText = ''
 
     // fork 化身同样支持被 kill() abort——见 runBurst 里对应注释，同样的窗口①在 fork 的
     // 一次性 burst 上也存在：fork() 把新化身以 running 态注册、锁外 fire-and-forget 起
@@ -1154,30 +1253,31 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       adapter: builtin.adapter,
       initialMessages,
       options: {
-        systemPrompt: builtin.systemPrompt,
-        // fork 是一次性侧问，不能派发异步 child；它和主线共享 worker_id，侧问收尾
-        // 不能拥有或停止主线 child。
-        tools: this.forkTools(builtin.tools),
+        systemPrompt: forkSystemPrompt(forkSystemPromptValue),
+        // 侧问只是回答 Manager 的只读查询，不暴露主线的任何可执行工具。
+        tools: [],
         model: builtin.model,
         maxTurns: FORK_MAX_TURNS,
-        ...this.safetyOptions(builtin),
+        ...this.safetyOptions(builtin, []),
         // fork 也必须开：从压缩点**之前**的老节点 fork 时，pathTo 回溯拿到的是完整未压缩
         // 历史，本身就可能超窗口。不开压缩，老链 fork 必撞窗口。代价是轻量侧问也可能付一次
         // 摘要成本——可接受（只在真的超阈值时才付）。
         disableCompaction: false,
-        // 同 runBurst：v2 的 forced_summary 兜底对 v3 worker 不适用。fork 更甚——它连
-        // finish_task 都没有，end_turn 就是侧问的正常收尾信号，静默收尾（比如答案已经
-        // 通过工具写出去了）不该被追着要"发给人类"。
+        // 同 runBurst：v2 的 forced_summary 兜底对 v3 worker 不适用。fork 更甚——它是
+        // 只读的一次性问答，没有 finish_task 或消息投递工具；是否成功由 assistant text
+        // 决定，不能再注入“发给人类”的第二条任务指令。
         suppressForcedSummary: () => true,
         onCompactionEnd: (info) => {
           if (info.failedReason === undefined) compactedThisBurst = true
         },
         abortSignal: abortController.signal,
+        messagesRef: instance.engineMessagesRef,
         onLiveProgress: () => {
           instance.activityAt = Date.now()
         },
         onTurn: (event) => {
           instance.activityAt = Date.now()
+          if (event.assistantText) instance.lastBurstAssistantText = event.assistantText
           if (instance.traceId) this.deps.traceHooks?.appendTurn(instance.traceId, event)
           this.deps.onNativeActivity?.({ ...handle, session_ref: instance.tip })
           if (event.assistantText) {
@@ -1203,26 +1303,31 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         const endReason = result.outcome === 'aborted' ? this.interruptionEndReason(instance) : 'crashed'
-        await this.transitionExited(instance, handle, endReason)
+        await this.transitionExited(instance, handle, endReason, undefined, instance.lastBurstAssistantText)
         return
       }
 
       // outcome 是正常收尾但 killRequested 已置位：abort 打晚了，engine 已经决定收尾，
       // 但用户明确要求过 kill，不该落 completed（P1 全分支终审 Important 收尾段检查点）。
       if (instance.killRequested || this.closing) {
-        await this.transitionExited(instance, handle, this.interruptionEndReason(instance))
+        await this.transitionExited(
+          instance,
+          handle,
+          this.interruptionEndReason(instance),
+          undefined,
+          instance.lastBurstAssistantText,
+        )
         return
       }
 
       // 侧问同样不能因为"上下文满了"就静默报 completed（见 isSilentContextOverflow）。
       if (isSilentContextOverflow(result)) {
         await instance.outputLog.append(CONTEXT_OVERFLOW_NOTICE)
-        await this.transitionExited(instance, handle, 'failed', 'failed')
+        await this.transitionExited(instance, handle, 'failed', 'failed', instance.lastBurstAssistantText)
         return
       }
 
-      // 'completed'（end_turn）与 'max_turns' 都视为一次性侧问正常收尾。
-      await this.transitionExited(instance, handle, 'completed', 'completed')
+      await this.transitionExited(instance, handle, 'completed', 'completed', instance.lastBurstAssistantText)
     })
   }
 
@@ -1259,6 +1364,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       }
       // finalMessages 理论上不会为空（至少含被钉住的首条），空则保持 tip 不动。
       if (parent !== null) instance.tip = parent
+      this.setEngineMessagesSnapshot(instance, result.finalMessages, instance.tip)
       return
     }
     const newMessages = result.finalMessages.slice(initialCount)
@@ -1267,6 +1373,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       parent = await instance.sessionTree.append(parent, msg)
     }
     instance.tip = parent
+    this.setEngineMessagesSnapshot(instance, result.finalMessages, instance.tip)
   }
 
   /** worker_id 对应的互斥锁，惰性创建（见 workerMutexes 字段注释）。 */
@@ -1284,6 +1391,77 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       if (instance.worker_id === worker_id) return instance.sessionTree
     }
     return undefined
+  }
+
+  /**
+   * 取某个 session_ref 对应的可喂给 engine 的上下文。主线正在跑时，最近完整 turn
+   * 可能只存在 engine 的内存里；只有快照 tip 与调用方 ref 相等时才复用它。否则必须
+   * 回到树上读取，尊重调用方明确指定的历史节点。
+   */
+  private captureEngineSnapshot(
+    ref: IncarnationRef,
+    sessionTree: SessionTree,
+    preferCurrentRunningSnapshot = false,
+  ): EngineContextSnapshot {
+    const instance = this.instances.get(instanceKey(ref.worker_id, ref.seq))
+    const useCurrentSnapshot = instance !== undefined && (
+      instance.engineMessagesTip === ref.session_ref ||
+      (preferCurrentRunningSnapshot && instance.state === 'running')
+    )
+    if (!useCurrentSnapshot) {
+      return { messages: sessionTree.pathTo(ref.session_ref) }
+    }
+    return {
+      messages: [...instance.engineMessagesRef.current],
+      ...(instance.engineMessagesRef.systemPrompt !== undefined
+        ? { systemPrompt: instance.engineMessagesRef.systemPrompt }
+        : {}),
+      ...(instance.engineMessagesRef.tools !== undefined
+        ? { tools: [...instance.engineMessagesRef.tools] }
+        : {}),
+    }
+  }
+
+  /**
+   * 将 fork 建立时的内存 history 物化到共享 SessionTree。运行中的主线可能已经完成
+   * 一轮，但状态回调尚未把它写入树；直接把 fork 问题挂在旧 ref 下会让这段上下文只
+   * 在本次 LLM 调用中存在，之后从 fork 的 session_ref 恢复时丢失。
+   *
+   * 只有当 ref 的持久化路径确实是快照的前缀时才沿该路径补后缀；路径不一致时另起
+   * 一条完整根链，避免把不匹配的消息或孤立 tool_result 拼进旧链。
+   */
+  private async materializeForkParentHistory(
+    sessionTree: SessionTree,
+    ref: string,
+    snapshot: ReadonlyArray<EngineMessage>,
+  ): Promise<string | null> {
+    const persisted = sessionTree.pathTo(ref)
+    const isPrefix = persisted.length <= snapshot.length && persisted.every((message, index) =>
+      isDeepStrictEqual(message, snapshot[index]),
+    )
+    let parent: string | null = isPrefix ? ref : null
+    const missing = isPrefix ? snapshot.slice(persisted.length) : snapshot
+    for (const message of missing) {
+      parent = await sessionTree.append(parent, message)
+    }
+    return parent
+  }
+
+  /** Return the current instance snapshot, repairing it from the tree if its tip drifted. */
+  private messagesAtTip(instance: WorkerInstance, tip: string): EngineMessage[] {
+    if (instance.engineMessagesTip === tip) return [...instance.engineMessagesRef.current]
+    const messages = instance.sessionTree.pathTo(tip)
+    this.setEngineMessagesSnapshot(instance, messages, tip)
+    return messages
+  }
+
+  private setEngineMessagesSnapshot(
+    instance: WorkerInstance,
+    messages: ReadonlyArray<EngineMessage>,
+    tip: string,
+  ): void {
+    instance.engineMessagesRef.current = [...messages]
+    instance.engineMessagesTip = tip
   }
 
   /**
@@ -1362,11 +1540,6 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     ]
   }
 
-  private forkTools(tools: Resolvable<ReadonlyArray<ToolDefinition>>): Resolvable<ReadonlyArray<ToolDefinition>> {
-    const guarded = this.guardTools(tools)
-    return () => resolve(guarded).filter((tool) => tool.name !== 'delegate_task')
-  }
-
   /**
    * 工具集守卫（spec 决策 3 / 决策 4）：`set_cwd` / `set_task_goal` 绝不许出现在 builtin
    * worker 的工具集里。放在 resolve 路径上而不是 spawn 一次性检查——`tools` 是 Resolvable，
@@ -1399,7 +1572,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
    * timezone / supportsVision / maxTokens / contextWindowTokens 随 model 由注入工厂给出，
    * adapter 自己无从知道；缺省则不传，由 engine 用它自己的默认值。
    */
-  private safetyOptions(builtin: NonNullable<SpawnSpec['builtin']>): {
+  private safetyOptions(
+    builtin: NonNullable<SpawnSpec['builtin']>,
+    permissionTools: Resolvable<ReadonlyArray<ToolDefinition>> = builtin.tools,
+  ): {
     permissionConfig: ToolPermissionConfig
     hookRegistry: HookRegistry
     resolvedPermissions: typeof BUILTIN_WORKER_PERMISSIONS
@@ -1410,7 +1586,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     timezone?: string
   } {
     return {
-      permissionConfig: this.workerPermissionConfig(builtin.tools),
+      permissionConfig: this.workerPermissionConfig(permissionTools),
       hookRegistry: this.hookRegistry,
       resolvedPermissions: BUILTIN_WORKER_PERMISSIONS,
       // worker 不是任何人：F 阶段没有可信发起人身份（origin.creator_friend_id 现网恒空），
@@ -1618,6 +1794,27 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
   const details = (span.details ?? {}) as Record<string, unknown>
   const base = { ts: span.started_at }
   switch (span.type) {
+    case 'context_assembly': {
+      const messageBatch = details.message_batch
+      if (!Array.isArray(messageBatch)) return [{ ...base, kind: 'lifecycle', summary: span.type, detail: details }]
+      // 只有 builtin fork 明确写入的 Manager 批次才是可展示的 user 输入。其它
+      // context_assembly 可能只是折叠/拼装元数据，不能凭 message_batch 存在就冒充用户消息。
+      const isManagerMessage = (item: unknown): item is { sender: 'manager'; text: string } =>
+        item !== null && typeof item === 'object' &&
+        (item as { sender?: unknown }).sender === 'manager' &&
+        typeof (item as { text?: unknown }).text === 'string'
+      if (details.context_type !== 'worker' || messageBatch.length === 0 || !messageBatch.every(isManagerMessage)) {
+        return [{ ...base, kind: 'lifecycle', summary: span.type, detail: details }]
+      }
+      const messages = messageBatch.map((item) => item.text)
+      return messages.map((text) => ({
+        ...base,
+        kind: 'message' as const,
+        role: 'user' as const,
+        summary: text.replace(/\s+/g, ' ').trim().slice(0, 200),
+        detail: { content: text },
+      }))
+    }
     case 'llm_call': {
       const { assistant_text: assistantText, ...technicalDetails } = details
       const events: import('../types.js').NormalizedTraceEvent[] = [{

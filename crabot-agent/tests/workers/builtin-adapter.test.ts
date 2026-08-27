@@ -6,7 +6,7 @@ import { randomUUID } from 'crypto'
 import { BuiltinWorkerAdapter, WorkerExitedError } from '../../src/workers/builtin/adapter.js'
 import { SessionTree } from '../../src/workers/session-tree.js'
 import type { SpawnSpec, IncarnationHandle, IncarnationRef, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
-import type { LLMAdapter } from '../../src/engine/llm-adapter-types.js'
+import type { LLMAdapter, LLMStreamParams } from '../../src/engine/llm-adapter-types.js'
 import { defineTool } from '../../src/engine/index.js'
 import type { EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import type { AgentTrace } from '../../src/types.js'
@@ -150,6 +150,68 @@ function makeAdapterGatedFromSecondCall(
   } as unknown as LLMAdapter
 }
 
+/** 主线第一轮完成工具后，第二轮 LLM 调用挂起；第三次调用留给 fork 立即回答。 */
+function makeAdapterWithInFlightMainTurn(gate: Promise<void>): LLMAdapter & {
+  stream: ReturnType<typeof vi.fn>
+  messageSnapshots: LLMStreamParams[]
+} {
+  let callNumber = 0
+  const messageSnapshots: LLMStreamParams[] = []
+  const stream = vi.fn((_params: LLMStreamParams) => {
+    messageSnapshots.push({
+      ..._params,
+      messages: [..._params.messages],
+      tools: [..._params.tools],
+    })
+    const currentCall = callNumber++
+    return (async function* () {
+      if (currentCall === 1) await gate
+      const response = currentCall === 0
+        ? {
+            toolCalls: [{ name: 'echo', id: 'main-tool', input: { s: 'main' } }],
+            stopReason: 'tool_use' as const,
+          }
+        : currentCall === 1
+          ? { text: '主线完成', stopReason: 'end_turn' as const }
+          : { text: '侧问回答', stopReason: 'end_turn' as const }
+      const content: unknown[] = []
+      if ('text' in response && response.text) content.push({ type: 'text', text: response.text })
+      for (const tc of 'toolCalls' in response ? response.toolCalls : []) {
+        content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+      }
+      yield* chunksFromContent(content, response.stopReason, { inputTokens: 100, outputTokens: 50 })
+    })()
+  })
+  return {
+    stream,
+    messageSnapshots,
+    updateConfig: () => {},
+  } as unknown as LLMAdapter & { stream: ReturnType<typeof vi.fn>; messageSnapshots: LLMStreamParams[] }
+}
+
+/** 首轮已经落盘并进入 idle，第二轮因 gate 挂起；后续调用留给 fork。 */
+function makeAdapterWithStaleHandleMainTurn(gate: Promise<void>): LLMAdapter {
+  let callNumber = 0
+  return {
+    stream: vi.fn((_params: LLMStreamParams) => {
+      const currentCall = callNumber++
+      return (async function* () {
+        if (currentCall === 1) await gate
+        const text = currentCall === 0
+          ? '首轮已完成'
+          : currentCall === 1
+            ? '第二轮主线回复'
+            : '侧问回答'
+        yield* chunksFromContent([{ type: 'text' as const, text }], 'end_turn', {
+          inputTokens: 100,
+          outputTokens: 50,
+        })
+      })()
+    }),
+    updateConfig: () => {},
+  } as unknown as LLMAdapter
+}
+
 /** 一个无副作用的工具，用来在测试里造出 assistant(tool_use) + toolResults 的成对消息。 */
 const ECHO_TOOL: ToolDefinition = defineTool({
   name: 'echo',
@@ -175,7 +237,7 @@ interface TurnScript {
  * 摘要调用不消费 turn 脚本。
  */
 function isCompactionCall(params: { systemPrompt?: string }): boolean {
-  return (params.systemPrompt ?? '').length > 0
+  return (params.systemPrompt ?? '').includes('你正在为一个长任务压缩上下文')
 }
 
 function makeCompactionAwareAdapter(turns: TurnScript[]): LLMAdapter & { compactionCalls: number } {
@@ -274,6 +336,7 @@ function spec(opts: {
   worker_id?: string
   tools?: ReadonlyArray<ToolDefinition>
   contextWindowTokens?: number
+  systemPrompt?: string
 }): SpawnSpec {
   return {
     worker_id: opts.worker_id ?? randomUUID(),
@@ -282,7 +345,7 @@ function spec(opts: {
     builtin: {
       adapter: opts.adapter,
       model: 'test',
-      systemPrompt: '',
+      systemPrompt: opts.systemPrompt ?? '',
       tools: opts.tools ?? [],
       ...(opts.contextWindowTokens !== undefined ? { contextWindowTokens: opts.contextWindowTokens } : {}),
     },
@@ -408,6 +471,70 @@ describe('BuiltinWorkerAdapter', () => {
     })
   })
 
+  it('context_assembly 的 message_batch 投影为 Manager user message', async () => {
+    const trace = {
+      spans: [{
+        type: 'context_assembly',
+        started_at: '2026-08-20T01:00:00.000Z',
+        details: {
+          context_type: 'worker',
+          message_batch: [{ sender: 'manager', text: '侧问问题', is_mention_crab: false }],
+        },
+      }],
+    } as unknown as AgentTrace
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+      traceReader: { readTrace: async () => trace },
+    })
+    const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+    await waitState(adapter, h, 'idle')
+
+    await expect(adapter.readTrace(h)).resolves.toMatchObject({
+      events: [{
+        kind: 'message',
+        role: 'user',
+        summary: '侧问问题',
+        detail: { content: '侧问问题' },
+        source_offset: 0,
+      }],
+      nextCursor: { offset: 1 },
+    })
+  })
+
+  it('普通 context_assembly 不把非 Manager 消息批次投影为 user message', async () => {
+    const trace = {
+      spans: [{
+        type: 'context_assembly',
+        started_at: '2026-08-20T01:00:00.000Z',
+        details: {
+          context_type: 'worker',
+          message_batch: [{ sender: 'system', text: '普通上下文', is_mention_crab: false }],
+        },
+      }],
+    } as unknown as AgentTrace
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+      traceReader: { readTrace: async () => trace },
+    })
+    const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+    await waitState(adapter, h, 'idle')
+
+    await expect(adapter.readTrace(h)).resolves.toMatchObject({
+      events: [{ kind: 'lifecycle', summary: 'context_assembly' }],
+      nextCursor: { offset: 1 },
+    })
+  })
+
   it('delegate_task 的完整 child id 落在 span 后，截断输出仍可跳转 child', async () => {
     const trace = {
       spans: [{
@@ -505,6 +632,7 @@ describe('BuiltinWorkerAdapter', () => {
       await vi.waitFor(() => expect(runEngineSpy).toHaveBeenCalledTimes(2))
       now = 5_000
       const forkEngineOptions = runEngineSpy.mock.calls[1][0].options
+      expect(forkEngineOptions.maxTurns).toBe(8)
       forkEngineOptions.onLiveProgress!({ type: 'tools_end', results: [] })
       expect(await adapter.lastActivityAt(fork)).toBe(5_000)
 
@@ -517,29 +645,40 @@ describe('BuiltinWorkerAdapter', () => {
     }
   })
 
-  it('fork 不装 delegate_task，且收尾不停止主线的 child', async () => {
+  it('fork 不暴露主线工具并追加侧问指令，且收尾不停止主线的 child', async () => {
     const stopWorkerSubagents = vi.fn()
+    const startIncarnationTrace = vi.fn(() => 'trace-1')
+    const forkReports: StateChangeReport[] = []
     const delegateTask = defineTool({
       name: 'delegate_task',
       description: '派发子 Agent',
       inputSchema: { type: 'object', properties: {} },
       call: async () => ({ isError: false, output: 'launched' }),
     })
+    const echoCall = vi.fn(async () => ({ isError: false, output: 'ok' }))
+    const echoTool = defineTool({
+      ...ECHO_TOOL,
+      call: echoCall,
+    })
     const llm = makeAdapter([
       { text: '主线待命', stopReason: 'end_turn' },
+      { toolCalls: [{ name: 'echo', id: 'fork-tool', input: { s: 'forbidden' } }], stopReason: 'tool_use' },
       { text: '侧问结果', stopReason: 'end_turn' },
       { toolCalls: [{ name: 'finish_task', id: 'finish-main', input: { outcome: 'completed', summary: '主线完成' } }], stopReason: 'tool_use' },
     ])
     const adapter = new BuiltinWorkerAdapter({
       dataDir: tmp,
+      onStateChange: (handle, state, report) => {
+        if (handle.seq === 2 && state === 'exited' && report) forkReports.push(report)
+      },
       traceHooks: {
-        startIncarnationTrace: () => 'trace-1',
+        startIncarnationTrace,
         appendTurn: () => {},
         finishIncarnationTrace: () => {},
         stopWorkerSubagents,
       },
     })
-    const s = spec({ adapter: llm, tools: [delegateTask] })
+    const s = spec({ adapter: llm, tools: [delegateTask, echoTool] })
     const h = await adapter.spawn(s)
     await waitState(adapter, h, 'idle')
 
@@ -551,13 +690,119 @@ describe('BuiltinWorkerAdapter', () => {
     )
     await waitState(adapter, forkHandle, 'exited')
 
-    const forkCall = (llm.stream as unknown as { mock: { calls: Array<[{ tools: ReadonlyArray<ToolDefinition> }]> } }).mock.calls[1][0]
-    expect(forkCall.tools.map((tool) => tool.name)).not.toContain('delegate_task')
+    const forkCall = (llm.stream as unknown as { mock: { calls: Array<[{ tools: ReadonlyArray<ToolDefinition>; systemPrompt?: string }]> } }).mock.calls[1][0]
+    expect(forkCall.tools).toEqual([])
+    expect(echoCall).not.toHaveBeenCalled()
+    expect(forkCall.systemPrompt).toContain('停止当前一切工作，然后回答下面问题。')
+    expect(forkCall.systemPrompt).toContain('不加载或使用任何 Skill（包括 crabot-cli）')
+    expect(forkCall.systemPrompt).toContain('也不调用任何工具')
+    expect(forkCall.systemPrompt).not.toContain('只有问题明确询问 Crabot 系统自身的实时运行事实')
+    expect(forkReports.at(-1)?.lastText).toBe('侧问结果')
     expect(stopWorkerSubagents).not.toHaveBeenCalled()
+    expect(startIncarnationTrace).toHaveBeenCalledWith(expect.objectContaining({
+      seq: forkHandle.seq,
+      initial_input: '侧问',
+    }))
 
     await adapter.sendInput(h, '结束主线')
     await waitState(adapter, h, 'exited')
     expect(stopWorkerSubagents).toHaveBeenCalledWith(s.worker_id)
+  })
+
+  it('主线第二次 LLM 调用进行中时，fork 继承最近完整 turn 的 tool-result 并让主线继续', async () => {
+    const mainGate = deferred<void>()
+    const llm = makeAdapterWithInFlightMainTurn(mainGate.promise)
+    const forkReports: StateChangeReport[] = []
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      onStateChange: (handle, state, report) => {
+        if (handle.seq === 2 && state === 'exited' && report) forkReports.push(report)
+      },
+    })
+    const s = spec({ adapter: llm, tools: [ECHO_TOOL] })
+    const h = await adapter.spawn(s)
+
+    // 第二次 stream 已经开始且被 gate 挂住，说明第一轮的 assistant(tool_use) 和 tool_result
+    // 已经完成；此时持久化 SessionTree 仍只有 spawn 的根节点。
+    await vi.waitFor(() => expect(llm.stream).toHaveBeenCalledTimes(2))
+    const forkHandle = await adapter.fork(
+      { worker_id: s.worker_id, seq: h.seq, session_ref: h.session_ref },
+      '当前进展？',
+      forkOptions(),
+    )
+    await waitState(adapter, forkHandle, 'exited')
+
+    const forkCall = llm.messageSnapshots[2]
+    expect(forkCall).toBeDefined()
+    const forkMessages = forkCall.messages
+    expect(forkMessages.map((message) => message.role)).toEqual(['user', 'assistant', 'user', 'user'])
+    expect(forkMessages[0]).toMatchObject({ role: 'user', content: '测试任务' })
+    expect(forkMessages[1]).toMatchObject({
+      role: 'assistant',
+      content: expect.arrayContaining([
+        expect.objectContaining({ type: 'tool_use', id: 'main-tool', name: 'echo' }),
+      ]),
+    })
+    expect(forkMessages[2]).toMatchObject({
+      role: 'user',
+      toolResults: [expect.objectContaining({
+        tool_use_id: 'main-tool',
+        content: expect.stringContaining('ok'),
+        is_error: false,
+      })],
+    })
+    expect(forkMessages[3]).toMatchObject({ role: 'user', content: '当前进展？' })
+    expect(forkReports.at(-1)?.lastText).toBe('侧问回答')
+
+    // fork 的 session_ref 必须能在重载后的 SessionTree 中恢复完整父 history；不能只
+    // 依赖本次 runEngine 调用时的内存快照。主线仍停在旧 tip，fork 的补链也不能改它。
+    const forkMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')) as { tip_node_id: string }
+    const persistedTree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const persistedForkPath = persistedTree.pathTo(forkMeta.tip_node_id)
+    expect(persistedForkPath.map((message) => message.role)).toEqual(['user', 'assistant', 'user', 'user', 'assistant'])
+    expect(orphanToolResultIds(persistedForkPath)).toEqual([])
+    const mainMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
+    expect(mainMeta.tip_node_id).toBe(h.session_ref)
+
+    // 侧问完成不应取消或替换主线正在等待的第二轮；放行后主线仍能正常收口。
+    mainGate.resolve()
+    await waitState(adapter, h, 'idle')
+    expect(llm.stream).toHaveBeenCalledTimes(3)
+    await expect(adapter.readTerminal(h)).resolves.toMatchObject({
+      kind: 'headless_text',
+      text: expect.stringContaining('主线完成'),
+    })
+  })
+
+  it('调用方持有旧 session_ref 时，运行中的 fork 仍继承主线最新内存 history', async () => {
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
+    const mainGate = deferred<void>()
+    const llm = makeAdapterWithStaleHandleMainTurn(mainGate.promise)
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({ adapter: llm })
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    // h.session_ref 是 spawn 时的 root；首轮完成后，主线的持久化 tip 已经前进。
+    await adapter.sendInput(h, '第二轮主线输入')
+    await vi.waitFor(() => expect(runEngineSpy).toHaveBeenCalledTimes(2))
+
+    // query_worker 读取台账时可能仍拿到 h.session_ref 这个旧 root。
+    const fork = await adapter.fork(
+      { worker_id: s.worker_id, seq: h.seq, session_ref: h.session_ref },
+      '当前进展？',
+      forkOptions(),
+    )
+    await vi.waitFor(() => expect(runEngineSpy).toHaveBeenCalledTimes(3))
+
+    const forkMessages = runEngineSpy.mock.calls[2][0].initialMessages as EngineMessage[]
+    expect(forkMessages.some((message) => JSON.stringify(message).includes('首轮已完成'))).toBe(true)
+    expect(forkMessages.some((message) => JSON.stringify(message).includes('第二轮主线输入'))).toBe(true)
+    expect(forkMessages.at(-1)).toMatchObject({ role: 'user', content: '当前进展？' })
+
+    mainGate.resolve()
+    await waitState(adapter, h, 'idle')
+    await waitState(adapter, fork, 'exited')
   })
 
   it('finish_task → exited(completed)', async () => {
@@ -960,6 +1205,8 @@ describe('BuiltinWorkerAdapter', () => {
         { text: '首轮回复', stopReason: 'end_turn' },
         { text: '侧问回复', stopReason: 'end_turn' },
       ]),
+      systemPrompt: '主线任务 prompt <available_skills> crabot-cli',
+      tools: [ECHO_TOOL],
     })
 
     const h = await adapter.spawn(s)
@@ -1019,6 +1266,22 @@ describe('BuiltinWorkerAdapter', () => {
     // 含首轮 prompt、首轮 assistant 回复、以及 forkInput 本身。
     expect(runEngineSpy).toHaveBeenCalledTimes(2)
     const forkCallArgs = runEngineSpy.mock.calls[1]?.[0]
+    const forkMessages = forkCallArgs?.initialMessages as EngineMessage[]
+    expect(forkMessages.at(-1)).toMatchObject({ role: 'user', content: '侧问问题' })
+    expect(forkMessages.some((message) => message.role === 'user' && message.content === '测试任务')).toBe(true)
+    expect(forkMessages.some((message) => message.role === 'assistant' && JSON.stringify(message).includes('首轮回复'))).toBe(true)
+    const forkSystemPrompt = typeof forkCallArgs?.options.systemPrompt === 'function'
+      ? forkCallArgs.options.systemPrompt()
+      : forkCallArgs?.options.systemPrompt
+    expect(forkSystemPrompt).toContain('主线任务 prompt <available_skills> crabot-cli')
+    expect(forkSystemPrompt).toContain('停止当前一切工作，然后回答下面问题。')
+    expect(forkSystemPrompt).toContain('不加载或使用任何 Skill（包括 crabot-cli）')
+    expect(forkSystemPrompt).toContain('也不调用任何工具')
+    expect(forkSystemPrompt).not.toContain('只有问题明确询问 Crabot 系统自身的实时运行事实')
+    const forkTools = typeof forkCallArgs?.options.tools === 'function'
+      ? forkCallArgs.options.tools()
+      : forkCallArgs?.options.tools
+    expect(forkTools).toEqual([])
     const serialized = JSON.stringify(forkCallArgs?.initialMessages ?? [])
     expect(serialized).toContain('测试任务')
     expect(serialized).toContain('首轮回复')
@@ -1032,9 +1295,12 @@ describe('BuiltinWorkerAdapter', () => {
       .map((l) => JSON.parse(l) as { node_id: string; parent_id: string | null })
     const childrenOfMainTip = rawNodes.filter((n) => n.parent_id === mainTip)
     expect(childrenOfMainTip.length).toBe(1)
+
+    const forkPath = (await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))).pathTo(forkMeta.tip_node_id)
+    expect(orphanToolResultIds(forkPath)).toEqual([])
   })
 
-  it('runForkBurst 静默 end_turn 同样不触发 forced_summary 追问,也不多烧 LLM 轮次', async () => {
+  it('runForkBurst 没有 assistant text 时仍正常收尾，不触发 forced_summary 追问，也不多烧 LLM 轮次', async () => {
     const llm = makeAdapter([
       { text: '首轮回复', stopReason: 'end_turn' }, // 主线 burst
       { stopReason: 'end_turn' }, // fork 的 burst:静默 end_turn(此后重复该条)
@@ -1056,6 +1322,7 @@ describe('BuiltinWorkerAdapter', () => {
 
     const forkMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8'))
     expect(forkMeta.ended_reason).toBe('completed')
+    expect(forkMeta.outcome).toBe('completed')
   })
 
   it('fork 不要求 prev 处于任何特定状态：主线仍 running 时也能 fork', async () => {

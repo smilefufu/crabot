@@ -3750,11 +3750,25 @@ export class UnifiedAgent extends ModuleBase {
   private builtinTraceHooks(): import('./workers/builtin/adapter.js').BuiltinTraceHooks {
     const redact = (text: string) => redactSecrets(text, [...this.knownSecrets])
     return {
-      startIncarnationTrace: ({ worker_id, seq, summary }) => {
+      startIncarnationTrace: ({ worker_id, seq, summary, initial_input }) => {
         const trace = this.traceStore.startTrace({
           module_id: this.config.moduleId,
           trigger: { type: 'task', summary: redact(summary) },
         })
+        if (initial_input !== undefined) {
+          const inputSpan = this.traceStore.startSpan(trace.trace_id, {
+            type: 'context_assembly',
+            details: {
+              context_type: 'worker',
+              message_batch: [{
+                sender: 'manager',
+                text: redact(initial_input),
+                is_mention_crab: false,
+              }],
+            },
+          })
+          this.traceStore.endSpan(trace.trace_id, inputSpan.span_id, 'completed')
+        }
         return trace.trace_id
       },
       appendTurn: (traceId, event) => {

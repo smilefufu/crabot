@@ -805,6 +805,7 @@ export class WorkerHarness {
   private readonly uiSnapshotStore: WorkerUiSnapshotStore
   private readonly nativeActivityNotificationMutexes = new Map<string, AsyncMutex>()
   private readonly controlNotificationMutexes = new Map<string, AsyncMutex>()
+  private readonly queryNotificationMutexes = new Map<string, AsyncMutex>()
   private readonly recoveryNoticeNotificationMutexes = new Map<string, AsyncMutex>()
   private readonly inputDeliveryControllers = new Map<string, AbortController>()
   private readonly pendingQueryStateChanges = new Map<
@@ -3705,32 +3706,53 @@ export class WorkerHarness {
 
   private async deliverQueryOperationNotifications(): Promise<void> {
     if (!this.deps.onOperationNotification) return
-    for (const receipt of await this.queryReceiptStore.listPendingNotifications()) {
-      const event = this.buildEvent(
-        receipt.worker_id,
-        receipt.fork_seq ?? 0,
-        receipt.state === 'completed' ? 'query_completed' : 'query_failed',
-        {
-          query_id: receipt.query_id,
-          ...(receipt.fork_seq === undefined ? {} : { fork_seq: receipt.fork_seq }),
-          question_preview: receipt.question_preview,
-          ...(receipt.failure ?? {}),
-          text: renderQueryNotification(receipt),
-        },
-      )
-      try {
-        const delivery = await this.deps.onOperationNotification(receipt.manager_key, event)
-        if (delivery?.consumed === true) {
-          await this.queryReceiptStore.markNotificationConsumed(
-            receipt.worker_id,
-            receipt.query_id,
-            this.deps.now(),
-          )
+    const pending = await this.queryReceiptStore.listPendingNotifications()
+    const workerIds = [...new Set(pending.map((receipt) => receipt.worker_id))]
+    await Promise.all(workerIds.map((workerId) => this.deliverQueryOperationNotificationForWorker(workerId)))
+  }
+
+  private async deliverQueryOperationNotificationForWorker(workerId: string): Promise<void> {
+    if (!this.deps.onOperationNotification) return
+    const mutex = this.queryNotificationMutexes.get(workerId) ?? new AsyncMutex()
+    this.queryNotificationMutexes.set(workerId, mutex)
+    await mutex.run(async () => {
+      // A sweep and the immediate terminal path can observe the same pending snapshot. Re-read
+      // under the per-worker notification mutex so a consumed receipt is never routed twice.
+      const candidates = (await this.queryReceiptStore.list(workerId)).filter((receipt) =>
+        (receipt.state === 'completed' || receipt.state === 'failed') &&
+        receipt.manager_notification.status === 'pending')
+      for (const candidate of candidates) {
+        const receipt = await this.queryReceiptStore.get(candidate.worker_id, candidate.query_id)
+        if (!receipt ||
+          (receipt.state !== 'completed' && receipt.state !== 'failed') ||
+          receipt.manager_notification.status !== 'pending') continue
+
+        const event = this.buildEvent(
+          receipt.worker_id,
+          receipt.fork_seq ?? 0,
+          receipt.state === 'completed' ? 'query_completed' : 'query_failed',
+          {
+            query_id: receipt.query_id,
+            ...(receipt.fork_seq === undefined ? {} : { fork_seq: receipt.fork_seq }),
+            question_preview: receipt.question_preview,
+            ...(receipt.failure ?? {}),
+            text: renderQueryNotification(receipt),
+          },
+        )
+        try {
+          const delivery = await this.deps.onOperationNotification(receipt.manager_key, event)
+          if (delivery?.consumed === true) {
+            await this.queryReceiptStore.markNotificationConsumed(
+              receipt.worker_id,
+              receipt.query_id,
+              this.deps.now(),
+            )
+          }
+        } catch (error) {
+          console.error(`[WorkerHarness] query notification failed for ${receipt.query_id}:`, error)
         }
-      } catch (error) {
-        console.error(`[WorkerHarness] query notification failed for ${receipt.query_id}:`, error)
       }
-    }
+    })
   }
 
   /** A transient settlement write must not leave a synchronous query receipt starting forever. */
@@ -5334,6 +5356,7 @@ export class WorkerHarness {
     report?: StateChangeReport,
   ): Promise<void> {
     let settledCurrentExit = false
+    let queryNotificationReady = false
     let recoveryNoticeCreated = false
     // 被动唤醒只携带 adapter 已经结构化识别出的 assistant text。tmux capture 是调用方
     // 显式请求的诊断视图，不能因一次状态回调被常规塞进 manager 上下文。
@@ -5350,16 +5373,19 @@ export class WorkerHarness {
       if (!found) return // 未知 worker,理论不该发生;防御性丢弃,不抛给 adapter 的回调
       const { worker, managerKey } = found
 
-      const target = findIncarnation(worker, h.impl, h.seq)
-      if (!target) {
-        if (h.query_id) {
-          const receipt = await this.queryReceiptStore.get(h.worker_id, h.query_id)
-          if (receipt?.state === 'starting') {
-            this.pendingQueryStateChanges.set(h.query_id, { h, state, ...(report ? { report } : {}) })
-          }
+      // The adapter can report a fork state after its ledger incarnation is written but before
+      // queryWorker commits the receipt from starting to running. Defer every such callback by
+      // query_id; checking only the missing-target case loses this exact interleaving.
+      if (h.query_id) {
+        const receipt = await this.queryReceiptStore.get(h.worker_id, h.query_id)
+        if (receipt?.state === 'starting') {
+          this.pendingQueryStateChanges.set(h.query_id, { h, state, ...(report ? { report } : {}) })
+          return
         }
-        return
       }
+
+      const target = findIncarnation(worker, h.impl, h.seq)
+      if (!target) return
 
       // endReason 一律取 adapter 上报的真值:三个 adapter 的 transitionExited 形参本就是
       // 必填的 ended_reason,且都在调回调之前已经把它写进自己的 meta,所以常规路径上
@@ -5396,7 +5422,7 @@ export class WorkerHarness {
         })
         if (target.query_id) {
           if (state === 'exited') {
-            await this.settleQueryExecution(target.query_id, h, endReason, wakeDetail)
+            queryNotificationReady ||= await this.settleQueryExecution(target.query_id, h, endReason, wakeDetail)
           } else {
             await this.appendAuditEvent(h.worker_id, h.seq, 'state_changed', {
               to: state,
@@ -5532,6 +5558,11 @@ export class WorkerHarness {
       })
     }
     if (state === 'exited') this.fireIncarnationTerminal(h)
+    if (queryNotificationReady) {
+      // Manager routing can read the worker ledger and may therefore need the same worker lock.
+      // Keep it outside the critical section to avoid a self-deadlock.
+      await this.deliverQueryOperationNotificationForWorker(h.worker_id)
+    }
 
     if (!report?.notification && settledCurrentExit) {
       this.bumpInputOwnershipRevision(h.worker_id)
@@ -5551,9 +5582,9 @@ export class WorkerHarness {
     h: IncarnationHandle,
     endReason: IncarnationEndReason | undefined,
     wakeDetail: Record<string, string>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const receipt = await this.queryReceiptStore.get(h.worker_id, queryId)
-    if (!receipt || receipt.state !== 'running') return
+    if (!receipt || receipt.state !== 'running') return false
     if (endReason === 'completed') {
       await this.queryReceiptStore.settleCompleted(h.worker_id, queryId, this.deps.now())
       await this.appendAuditEvent(h.worker_id, h.seq, 'query_completed', {
@@ -5561,7 +5592,7 @@ export class WorkerHarness {
         fork_seq: h.seq,
         ...wakeDetail,
       })
-      return
+      return true
     }
     const failure: QueryFailure = {
       reason_code: 'query_execution_failed',
@@ -5576,6 +5607,7 @@ export class WorkerHarness {
       ...failure,
       ...wakeDetail,
     })
+    return true
   }
 
   private withLock<T>(workerId: string, fn: () => Promise<T>): Promise<T> {

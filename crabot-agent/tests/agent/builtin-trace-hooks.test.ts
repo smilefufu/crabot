@@ -8,6 +8,39 @@ type BuiltinTraceHookFactory = {
 }
 
 describe('UnifiedAgent builtin trace hooks', () => {
+  it('记录 fork 的 Manager 输入为脱敏后的 user message', () => {
+    const traceStore = {
+      startTrace: vi.fn(() => ({ trace_id: 'trace-fork' })),
+      startSpan: vi.fn(() => ({ span_id: 'input-span' })),
+      endSpan: vi.fn(),
+    }
+    const hooks = (UnifiedAgent.prototype as unknown as BuiltinTraceHookFactory).builtinTraceHooks.call({
+      traceStore,
+      knownSecrets: new Set(['secret-value']),
+      config: { moduleId: 'agent-test' },
+    })
+
+    expect(hooks.startIncarnationTrace({
+      worker_id: 'worker-1',
+      seq: 2,
+      summary: 'worker-1#2 (fork)',
+      initial_input: '当前进度如何？secret-value',
+    })).toBe('trace-fork')
+
+    expect(traceStore.startSpan).toHaveBeenCalledWith('trace-fork', expect.objectContaining({
+      type: 'context_assembly',
+      details: {
+        context_type: 'worker',
+        message_batch: [{
+          sender: 'manager',
+          text: '当前进度如何？[REDACTED]',
+          is_mention_crab: false,
+        }],
+      },
+    }))
+    expect(traceStore.endSpan).toHaveBeenCalledWith('trace-fork', 'input-span', 'completed')
+  })
+
   it('持久化脱敏后的非空 assistant text，空文本不写字段', () => {
     const traceStore = {
       startSpan: vi.fn(() => ({ span_id: 'span-1' })),
