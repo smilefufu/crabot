@@ -32,17 +32,20 @@ export const ProviderDrawerEdit: React.FC<ProviderDrawerEditProps> = ({
 
     const updateData: Record<string, unknown> = { name, endpoint, api_key: apiKey }
 
-    if (provider.type === 'manual') {
-      const parseLine = (text: string) =>
-        text.split('\n').map(l => l.trim()).filter(Boolean)
+    const parseLine = (text: string) =>
+      text.split('\n').map(l => l.trim()).filter(Boolean)
 
-      const models: ModelInfo[] = parseLine(llmText).map(id => ({
+    const models: ModelInfo[] = parseLine(llmText).map(id =>
+      provider.models.find(model => model.type === 'llm' && model.model_id === id) ?? {
         model_id: id,
         display_name: id,
         type: 'llm' as const,
-      }))
-      updateData.models = models
-    }
+      }
+    )
+    updateData.models = [
+      ...models,
+      ...provider.models.filter(model => model.type !== 'llm'),
+    ]
 
     try {
       setSaving(true)
@@ -113,24 +116,17 @@ export const ProviderDrawerEdit: React.FC<ProviderDrawerEditProps> = ({
           </div>
         </div>
 
-        {provider.type === 'manual' && (
-          <div className="form-group">
-            <label className="form-label">LLM 模型（每行一个）</label>
-            <textarea
-              className="textarea"
-              value={llmText}
-              onChange={e => setLlmText(e.target.value)}
-              rows={4}
-              placeholder="gpt-4o&#10;gpt-4o-mini"
-            />
-          </div>
-        )}
-
-        {provider.type === 'preset' && (
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: '1rem 0' }}>
-            预置厂商的模型列表不可手动编辑，请使用"同步模型"按钮刷新。
-          </p>
-        )}
+        <div className="form-group">
+          <label className="form-label">LLM 模型（每行一个）</label>
+          <textarea
+            className="textarea"
+            aria-label="LLM 模型（每行一个）"
+            value={llmText}
+            onChange={e => setLlmText(e.target.value)}
+            rows={4}
+            placeholder="gpt-4o&#10;gpt-4o-mini"
+          />
+        </div>
 
         <Button type="submit" variant="primary" disabled={saving || !name || !endpoint || !apiKey}
           style={{ width: '100%', marginTop: '0.5rem' }}>
