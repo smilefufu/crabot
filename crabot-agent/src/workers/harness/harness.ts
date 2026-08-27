@@ -180,7 +180,7 @@ import {
  */
 const WAKE_TEXT_MAX_CHARS = 2000
 
-export const INPUT_DELIVERY_TIMEOUT_MS = 5 * 60_000
+export const INPUT_DELIVERY_TIMEOUT_MS = 120_000
 export const QUERY_ESTABLISHMENT_TIMEOUT_MS = 30_000
 
 const INPUT_DELIVERY_FAILURE_CODES = new Set<InputDeliveryFailureCode>([
@@ -193,6 +193,13 @@ const INPUT_DELIVERY_FAILURE_CODES = new Set<InputDeliveryFailureCode>([
   'abandoned_by_control_input',
   'confirmation_lost_after_restart',
 ])
+
+class InputDeliveryDeadlineError extends Error {
+  constructor(readonly delivery_id: string) {
+    super(`input delivery ${delivery_id} exceeded the synchronous attempt deadline`)
+    this.name = 'InputDeliveryDeadlineError'
+  }
+}
 
 function isInputDeliveryFailureCode(value: string | undefined): value is InputDeliveryFailureCode {
   return value !== undefined && INPUT_DELIVERY_FAILURE_CODES.has(value as InputDeliveryFailureCode)
@@ -829,6 +836,12 @@ export class WorkerHarness {
   private readonly stallReports = new Map<string, StallReportMark>()
   /** Adapter state callbacks observed per incarnation; used to order harness-owned CLI input settlement. */
   private readonly stateChangeRevisions = new Map<string, number>()
+  /** Serializes state callbacks and lets synchronous input wait for its hook publication. */
+  private readonly stateChangeTails = new Map<string, Promise<void>>()
+  /** Manager-originated deliveries are allowed to await active-episode mailbox publication. */
+  private readonly synchronousDeliveryWorkers = new Map<string, number>()
+  /** Retains the adapter disposition when a phase update itself cannot be persisted. */
+  private readonly deliveryStallDispositions = new Map<string, 'not_pasted' | 'pending_in_ui'>()
   /** Synchronous generation of the pane that currently owns input for each logical worker. */
   private readonly inputOwnershipRevisions = new Map<string, number>()
   private sweepInFlight = false
@@ -886,11 +899,26 @@ export class WorkerHarness {
     }
     const revisionKey = `${h.worker_id}#${h.impl}#${h.seq}`
     this.stateChangeRevisions.set(revisionKey, (this.stateChangeRevisions.get(revisionKey) ?? 0) + 1)
-    this.processStateChange(h, state, report)
+    const prior = this.stateChangeTails.get(revisionKey)
+    const processing = prior
+      ? prior.then(() => this.processStateChange(h, state, report))
+      : this.processStateChange(h, state, report)
+    const tail = processing
       .then(() => this.verifyControlOperationsForStateChange(h))
       .catch((err) => {
         console.error(`[WorkerHarness] handleStateChange failed for ${h.worker_id}#${h.seq}:`, err)
       })
+    this.stateChangeTails.set(revisionKey, tail)
+  }
+
+  private async waitForStateChanges(workerId: string, before: ReadonlyMap<string, number>): Promise<void> {
+    const pending: Promise<void>[] = []
+    for (const [key, tail] of this.stateChangeTails) {
+      if (!key.startsWith(`${workerId}#`)) continue
+      const current = this.stateChangeRevisions.get(key) ?? 0
+      if (current > (before.get(key) ?? 0)) pending.push(tail)
+    }
+    await Promise.all(pending)
   }
 
   /**
@@ -1175,6 +1203,7 @@ export class WorkerHarness {
     let redirectTarget: ExecutableIncarnation | undefined
     let redirectHeld = false
     let redirectItem: InboxItem | undefined
+    let synchronousDeadlineAt: number | undefined
 
     // "读台账状态 → 判断 cancelled/化身 → 入信箱"在同一临界区完成,不允许 check-then-act 跨 await。
     try {
@@ -1221,6 +1250,7 @@ export class WorkerHarness {
           )}`)
         }
         this.inputDeliveryControllers.set(deliveryId, new AbortController())
+        synchronousDeadlineAt = Date.now() + INPUT_DELIVERY_TIMEOUT_MS
       }
 
       const durableReceipt = receipt
@@ -1233,13 +1263,16 @@ export class WorkerHarness {
         ...(durableReceipt
           ? {
               delivery_id: durableReceipt.delivery_id,
-              onPending: (reason: InboxDeliveryResult['reason']) =>
-                this.inputDeliveryStore.updatePendingPhase(
+              onPending: (reason: InboxDeliveryResult['reason']) => {
+                const disposition = reason === 'input_pending' ? 'pending_in_ui' : 'not_pasted'
+                this.deliveryStallDispositions.set(durableReceipt.delivery_id, disposition)
+                return this.inputDeliveryStore.updatePendingPhase(
                   workerId,
                   durableReceipt.delivery_id,
-                  reason === 'input_pending' ? 'pending_in_ui' : 'waiting_for_safe_input',
+                  disposition === 'pending_in_ui' ? 'pending_in_ui' : 'waiting_for_safe_input',
                   this.deps.now(),
-                ).then(() => undefined),
+                ).then(() => undefined)
+              },
               shouldDeliver: async () =>
                 (await this.inputDeliveryStore.get(workerId, durableReceipt.delivery_id))?.state === 'pending',
               onSettled: async (settlement, detail) => {
@@ -1266,53 +1299,169 @@ export class WorkerHarness {
     }
 
     if (!enqueued) opts?.onDeduplicated?.()
+    const stateChangesBefore = new Map(
+      [...this.stateChangeRevisions.entries()].filter(([key]) => key.startsWith(`${workerId}#`)),
+    )
+    if (receipt) {
+      this.synchronousDeliveryWorkers.set(
+        workerId,
+        (this.synchronousDeliveryWorkers.get(workerId) ?? 0) + 1,
+      )
+    }
     let redirectError: unknown
     if (redirectTarget) {
       try {
-        await this.interruptForImmediateRedirect(workerId, redirectTarget)
+        const operation = this.interruptForImmediateRedirect(workerId, redirectTarget)
+        if (receipt && synchronousDeadlineAt !== undefined) {
+          await this.awaitWithinDeadline(operation, synchronousDeadlineAt, receipt.delivery_id)
+        } else {
+          await operation
+        }
       } catch (error) {
         redirectError = error
-        if (receipt) await this.failDurableInputAttempt(receipt, inbox, error, text)
+        if (receipt) {
+          if (error instanceof InputDeliveryDeadlineError) await this.settleTimedOutInput(receipt, inbox)
+          else await this.failDurableInputAttempt(receipt, inbox, error, text)
+        }
         else if (redirectItem) await inbox.cancelItem(redirectItem)
         else throw error
       } finally {
         inbox.release('immediate_redirect')
       }
     }
-    if (!redirectError) {
-      try {
-        await this.flushInbox(workerId)
-      } catch (error) {
-        if (!receipt) throw error
-        await this.failDurableInputAttempt(receipt, inbox, error, text)
-      }
-    }
-
-    if (!receipt) return
-    let current: WorkerInputDeliveryReceipt
     try {
-      current = await this.inputDeliveryStore.readForToolResult(
-        workerId,
-        receipt.delivery_id,
-        this.deps.now(),
-      )
-    } catch (error) {
-      this.inputDeliveryControllers.get(receipt.delivery_id)?.abort()
-      try {
-        await this.failDurableInputAttempt(receipt, inbox, error, text)
-      } catch (settlementError) {
-        throw new Error(`delivery receipt unavailable after acceptance: ${sanitizeOperationFailureReason(
-          settlementError,
-          this.deps.redactFailureReason,
-          text,
-          'receipt store failed',
-        )}`)
+      if (!redirectError) {
+        try {
+          if (receipt && synchronousDeadlineAt !== undefined) {
+            await this.flushInboxWithDeadline(workerId, receipt, synchronousDeadlineAt)
+          }
+          else await this.flushInbox(workerId)
+        } catch (error) {
+          if (!receipt) throw error
+          if (error instanceof InputDeliveryDeadlineError) {
+            await this.settleTimedOutInput(receipt, inbox)
+          } else {
+            await this.failDurableInputAttempt(receipt, inbox, error, text)
+          }
+        }
       }
-      const settled = await this.inputDeliveryStore.get(workerId, receipt.delivery_id)
-      if (!settled) throw error
-      current = settled
+
+      if (receipt) {
+        await this.waitForStateChanges(workerId, stateChangesBefore)
+      }
+
+      if (!receipt) return
+      let current: WorkerInputDeliveryReceipt
+      try {
+        current = await this.inputDeliveryStore.readForToolResult(
+          workerId,
+          receipt.delivery_id,
+          this.deps.now(),
+        )
+      } catch (error) {
+        this.inputDeliveryControllers.get(receipt.delivery_id)?.abort()
+        try {
+          await this.failDurableInputAttempt(receipt, inbox, error, text)
+        } catch (settlementError) {
+          throw new Error(`delivery receipt unavailable after acceptance: ${sanitizeOperationFailureReason(
+            settlementError,
+            this.deps.redactFailureReason,
+            text,
+            'receipt store failed',
+          )}`)
+        }
+        const settled = await this.inputDeliveryStore.get(workerId, receipt.delivery_id)
+        if (!settled) throw error
+        current = settled
+      }
+      if (current.state === 'pending') {
+        const cancellation = await inbox.cancelDelivery(receipt.delivery_id)
+        const disposition = this.deliveryStallDispositions.get(receipt.delivery_id)
+        let failed: InputDeliveryFailure
+        if (disposition === 'pending_in_ui' || current.phase === 'pending_in_ui' || cancellation === 'unsafe') {
+          failed = {
+            reason_code: 'submission_unconfirmed_timeout',
+            reason: 'input was placed in the CLI composer but acceptance could not be confirmed',
+            certainty: 'unknown',
+          }
+        } else if (current.phase === 'waiting_for_safe_input' || current.phase === 'queued') {
+          failed = {
+            reason_code: 'input_surface_timeout',
+            reason: 'CLI input surface was unavailable for this delivery attempt',
+            certainty: 'not_delivered',
+          }
+        } else {
+          failed = {
+            reason_code: 'delivery_attempt_failed',
+            reason: 'input delivery did not settle during the synchronous attempt',
+            certainty: 'unknown',
+          }
+        }
+        await this.settlePendingInputFailure(current, failed, true)
+        const settled = await this.inputDeliveryStore.get(workerId, receipt.delivery_id)
+        if (!settled) throw new Error(`delivery receipt disappeared: ${receipt.delivery_id}`)
+        current = settled
+      }
+      return this.toSendToWorkerResult(current)
+    } finally {
+      if (receipt) {
+        const active = (this.synchronousDeliveryWorkers.get(workerId) ?? 1) - 1
+        if (active > 0) this.synchronousDeliveryWorkers.set(workerId, active)
+        else this.synchronousDeliveryWorkers.delete(workerId)
+        this.deliveryStallDispositions.delete(receipt.delivery_id)
+      }
     }
-    return this.toSendToWorkerResult(current)
+  }
+
+  private async flushInboxWithDeadline(
+    workerId: string,
+    receipt: WorkerInputDeliveryReceipt,
+    deadlineAt: number,
+  ): Promise<void> {
+    const operation = this.flushInbox(workerId)
+    await this.awaitWithinDeadline(operation, deadlineAt, receipt.delivery_id)
+  }
+
+  private async awaitWithinDeadline<T>(
+    operation: Promise<T>,
+    deadlineAt: number,
+    deliveryId: string,
+  ): Promise<T> {
+    const remainingMs = deadlineAt - Date.now()
+    if (remainingMs <= 0) throw new InputDeliveryDeadlineError(deliveryId)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new InputDeliveryDeadlineError(deliveryId)), remainingMs)
+      timer.unref?.()
+    })
+    try {
+      return await Promise.race([operation, timeout])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  private async settleTimedOutInput(
+    receipt: WorkerInputDeliveryReceipt,
+    inbox: WorkerInbox,
+  ): Promise<void> {
+    this.inputDeliveryControllers.get(receipt.delivery_id)?.abort()
+    const cancellation = await inbox.cancelDelivery(receipt.delivery_id)
+    const current = await this.inputDeliveryStore.get(receipt.worker_id, receipt.delivery_id)
+    if (!current || current.state !== 'pending') return
+    const failure: InputDeliveryFailure = cancellation === 'cancelled'
+      ? {
+          reason_code: 'input_surface_timeout',
+          reason: 'CLI input surface was unavailable before the synchronous delivery deadline',
+          certainty: 'not_delivered',
+        }
+      : {
+          reason_code: 'submission_unconfirmed_timeout',
+          reason: 'input acceptance could not be confirmed before the synchronous delivery deadline',
+          certainty: 'unknown',
+    }
+    await this.settlePendingInputFailure(current, failure, true)
+    this.inputDeliveryControllers.delete(receipt.delivery_id)
   }
 
   private async settleDurableInput(
@@ -1378,14 +1527,9 @@ export class WorkerHarness {
       certainty,
     }
     this.inputDeliveryControllers.delete(receipt.delivery_id)
-    await this.inputDeliveryStore.settleFailed(receipt.worker_id, receipt.delivery_id, failure, this.deps.now())
-    const found = await this.deps.ledger.findWorker(receipt.worker_id)
-    await this.appendAuditEvent(
-      receipt.worker_id,
-      found ? requireMainlineIncarnation(found.worker).seq : 0,
-      'input_delivery_failed',
-      { delivery_id: receipt.delivery_id, ...failure },
-    )
+    // The synchronous tool is about to return this failure in the Manager context;
+    // do not leave the same terminal result queued for a duplicate wake.
+    await this.settlePendingInputFailure(receipt, failure, true)
   }
 
   private toSendToWorkerResult(receipt: WorkerInputDeliveryReceipt): SendToWorkerResult {
@@ -1401,15 +1545,7 @@ export class WorkerHarness {
         ...receipt.failure,
       }
     }
-    return {
-      status: 'pending',
-      delivery_id: receipt.delivery_id,
-      worker_id: receipt.worker_id,
-      pending_reason: receipt.phase === 'queued' || receipt.phase === 'waiting_for_safe_input'
-        ? 'waiting_for_safe_input'
-        : 'submission_unconfirmed',
-      deadline_at: receipt.deadline_at,
-    }
+    throw new Error(`delivery ${receipt.delivery_id} remained pending after synchronous attempt`)
   }
 
   private async inputAttemptOptions(
@@ -3493,12 +3629,12 @@ export class WorkerHarness {
       const failure: InputDeliveryFailure = safelyWithdrawn
         ? {
             reason_code: 'input_surface_timeout',
-            reason: 'input did not reach a safe input surface before the 5 minute deadline',
+            reason: 'input did not reach a safe input surface before the 120 second deadline',
             certainty: 'not_delivered',
           }
         : {
             reason_code: 'submission_unconfirmed_timeout',
-            reason: 'input acceptance could not be confirmed before the 5 minute deadline',
+            reason: 'input acceptance could not be confirmed before the 120 second deadline',
             certainty: 'unknown',
           }
       this.inputDeliveryControllers.delete(receipt.delivery_id)
@@ -3510,6 +3646,7 @@ export class WorkerHarness {
   private async settlePendingInputFailure(
     receipt: WorkerInputDeliveryReceipt,
     failure: InputDeliveryFailure,
+    managerContextDelivered = false,
   ): Promise<void> {
     const settled = await this.inputDeliveryStore.settleFailed(
       receipt.worker_id,
@@ -3517,6 +3654,13 @@ export class WorkerHarness {
       failure,
       this.deps.now(),
     )
+    if (managerContextDelivered && settled.manager_notification.status === 'pending') {
+      await this.inputDeliveryStore.markNotificationConsumed(
+        receipt.worker_id,
+        receipt.delivery_id,
+        this.deps.now(),
+      )
+    }
     const found = await this.deps.ledger.findWorker(receipt.worker_id)
     const seq = found ? requireMainlineIncarnation(found.worker).seq : 0
     await this.appendAuditEvent(receipt.worker_id, seq, 'input_delivery_failed', {
@@ -5486,9 +5630,9 @@ export class WorkerHarness {
   ): Promise<void> {
     const event = this.buildEvent(workerId, seq, kind, detail, taskStatus)
     await this.getEventLog(workerId).append(event)
-    // fire-and-forget:本方法的调用点几乎都在 per-worker 锁内,而一次唤醒是一整个 manager
-    // episode(见 HarnessDeps.onEvent)。返回值只有活性巡检看,走下面那条专用出口。
-    void this.deps.onEvent?.(event)
+    const delivery = this.deps.onEvent?.(event)
+    if ((this.synchronousDeliveryWorkers.get(workerId) ?? 0) > 0) await delivery
+    else void delivery
   }
 
   /**

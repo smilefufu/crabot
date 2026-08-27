@@ -26,6 +26,9 @@ import {
 
 const execFileAsync = promisify(execFile)
 
+/** tmux client commands must never hold a Manager tool open indefinitely. */
+export const DEFAULT_TMUX_COMMAND_TIMEOUT_MS = 15_000
+
 function normalizedPaneTerm(value: string | undefined): string {
   const term = value?.trim()
   return term && term.toLowerCase() !== 'dumb' ? term : 'xterm-256color'
@@ -58,14 +61,23 @@ export type TmuxSession = TmuxControlEndpoint & {
 
 export class TmuxDriver {
   private readonly tmuxBin: string
+  private readonly commandTimeoutMs: number
 
-  constructor(opts?: { tmuxBin?: string }) {
+  constructor(opts?: { tmuxBin?: string; commandTimeoutMs?: number }) {
     this.tmuxBin = opts?.tmuxBin ?? 'tmux'
+    this.commandTimeoutMs = opts?.commandTimeoutMs ?? DEFAULT_TMUX_COMMAND_TIMEOUT_MS
+    if (!Number.isFinite(this.commandTimeoutMs) || this.commandTimeoutMs <= 0) {
+      throw new Error('TmuxDriver commandTimeoutMs must be a positive finite number')
+    }
   }
 
   async available(): Promise<boolean> {
     try {
-      await execFileAsync(this.tmuxBin, ['-V'], { env: buildChildEnv() })
+      await execFileAsync(this.tmuxBin, ['-V'], {
+        env: buildChildEnv(),
+        timeout: this.commandTimeoutMs,
+        killSignal: 'SIGKILL',
+      })
       return true
     } catch {
       return false
@@ -264,7 +276,11 @@ exec ${spec.command}
   }
 
   private run(args: string[]): Promise<{ stdout: string; stderr: string }> {
-    return execFileAsync(this.tmuxBin, args, { env: buildChildEnv() })
+    return execFileAsync(this.tmuxBin, args, {
+      env: buildChildEnv(),
+      timeout: this.commandTimeoutMs,
+      killSignal: 'SIGKILL',
+    })
   }
 
   /** `tmux load-buffer -b <name> -` 从 stdin 灌入内容,不把文本经过 shell 参数或临时文件。 */
@@ -272,16 +288,34 @@ exec ${spec.command}
     return new Promise((resolve, reject) => {
       const child = spawn(this.tmuxBin, ['load-buffer', '-b', bufferName, '-'], { env: buildChildEnv() })
       let stderr = ''
+      let settled = false
+      let timer: ReturnType<typeof setTimeout>
+      const finish = (error?: Error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (error) reject(error)
+        else resolve()
+      }
+      timer = setTimeout(() => {
+        child.kill('SIGKILL')
+        finish(new Error(`tmux load-buffer timed out after ${this.commandTimeoutMs}ms`))
+      }, this.commandTimeoutMs)
+      timer.unref?.()
       child.stderr.on('data', (chunk: Buffer) => {
         stderr += chunk.toString('utf-8')
       })
-      child.on('error', reject)
+      child.on('error', (error) => finish(error))
       child.on('close', (code) => {
-        if (code === 0) resolve()
-        else reject(new Error(`tmux load-buffer exited with code ${code}: ${stderr}`))
+        if (code === 0) finish()
+        else finish(new Error(`tmux load-buffer exited with code ${code}: ${stderr}`))
       })
-      child.stdin.write(content)
-      child.stdin.end()
+      try {
+        child.stdin.write(content)
+        child.stdin.end()
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)))
+      }
     })
   }
 }

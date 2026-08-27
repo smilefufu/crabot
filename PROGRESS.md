@@ -5,7 +5,14 @@
 
 ## 当前状态
 
-### P6 已完成；Manager -> Worker 输入与侧问可靠交付待 PR review
+### P6 已完成；Manager -> Worker 同步输入投递待 PR review
+
+### Manager -> Worker 同步输入投递：实现完成
+
+- `send_to_worker` 在一次有界同步尝试内只返回 `delivered | failed`，不再把 `pending` 暴露给 Manager；输入面不安全、提交确认不确定和超时分别返回稳定原因码与确定性。
+- Manager 活跃 episode 期间到达的 Worker hook/状态通知直接进入当前 mailbox，下一次 LLM 调用批量读取；同一 Worker 的同步投递计数按引用计数维护，避免并发调用提前关闭通知等待。
+- 投递 deadline 收紧为 120 秒；Harness 增加 wall-clock 兜底并隔离迟到 adapter 结果，tmux `execFile`、`load-buffer` 与版本探测均有 15 秒命令上限。
+- 相关协议与设计记录已同步到 `crabot-docs`，待文档仓直推和主仓非 Draft PR review。
 
 ### 运行态立即改向：实现完成
 
@@ -53,7 +60,7 @@
   - Management-only cutover + durable config revision（seqlock 一致性读、HMAC fingerprint、Skill journal binding、publish 失败退避 drain 自愈）。
 - **部署约束**：pre-P6 存量生产不得部署 Slice 0/A/B 中间态；首次 rollout 至少包含 Slice 0 + P6-B grandfather bootstrap + P6-C 最终选择语义。
 
-### Manager -> Worker 输入与侧问可靠交付（实现完成，待 PR review）
+### Manager -> Worker 输入与侧问可靠交付（历史基线）
 
 - 已确认并发布设计、计划和 `protocol-agent-v3` 3.2.1 契约（crabot-docs `d4b4e50`）：`send_to_worker` 使用持久 receipt 返回 `delivered / pending / failed`，5 分钟内有限收口；失败及 pending 后终态只有被原 Manager episode 以 `consumedEvents=true` 消费后才确认完成，Agent 重启不自动重发输入。
 - `query_worker` 改为同步建立 fork 和提交首问、异步生成回答，不进入主 TUI 排队；builtin、Claude Code、Codex 统一“fork + 首问接受后返回”契约，Codex 使用 app-server `thread/fork + turn/start`。

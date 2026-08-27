@@ -373,6 +373,21 @@ export class ManagerRegistry {
       typeof event.ts === 'string' ? event.ts : undefined,
     )
     const key = found?.worker.manager_key ?? SYSTEM_TASKS_MANAGER_KEY
+    const loop = this.getOrCreate(key)
+    if (this.isEpisodeActive(key)) {
+      // A hook raised while a Manager tool is running belongs to the current episode.
+      // Enqueue synchronously so the next engine turn sees the whole mailbox batch; never
+      // wait for (or recursively start) another Manager episode here.
+      loop.enqueueDuringEpisode(envelope)
+      return {
+        episodeId: '',
+        outcome: 'completed',
+        turns: 0,
+        consumedEvents: true,
+        repliedToHuman: false,
+        successfulSendMessageTargets: [],
+      }
+    }
     return this.runWake(key, envelope)
   }
 
@@ -386,14 +401,18 @@ export class ManagerRegistry {
     return this.routeWorkerEvent(event)
   }
 
-  /** Durable operation notifications never join an already-running episode's in-memory mailbox. */
+  /** Operation notifications join an active episode mailbox; idle Managers get a fresh wake. */
   async routeOperationNotification(
     key: ManagerKey,
     event: HarnessEvent,
   ): Promise<HarnessEventDelivery> {
-    if (this.isEpisodeActive(key)) return { consumed: false }
     const capture = this.captureIngress()
     const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event }, event.ts)
+    const loop = this.getOrCreate(key)
+    if (this.isEpisodeActive(key)) {
+      loop.enqueueDuringEpisode(envelope)
+      return { consumed: true }
+    }
     const result = await this.runWake(key, envelope)
     return { consumed: result.consumedEvents === true }
   }

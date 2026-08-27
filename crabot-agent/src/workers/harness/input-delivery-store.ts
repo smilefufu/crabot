@@ -40,13 +40,6 @@ export interface WorkerInputDeliveryReceipt {
 export type SendToWorkerResult =
   | { status: 'delivered'; delivery_id: string; worker_id: string }
   | {
-      status: 'pending'
-      delivery_id: string
-      worker_id: string
-      pending_reason: 'waiting_for_safe_input' | 'submission_unconfirmed'
-      deadline_at: string
-    }
-  | {
       status: 'failed'
       delivery_id: string
       worker_id: string

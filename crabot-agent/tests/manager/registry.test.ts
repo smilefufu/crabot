@@ -481,7 +481,7 @@ describe('ManagerRegistry', () => {
     expect(calls).toHaveLength(0)
   })
 
-  it('operation notification 在 owning Manager 正执行时 deferred，不塞进当前 mailbox', async () => {
+  it('operation notification 在 owning Manager 正执行时进入当前 mailbox，下一轮 LLM 批量读取', async () => {
     const calls: LLMStreamParams[] = []
     const entered = deferred()
     const release = deferred()
@@ -511,16 +511,22 @@ describe('ManagerRegistry', () => {
       seq: 1,
       detail: { delivery_id: 'delivery-1' },
     }
+    const secondEvent: HarnessEvent = {
+      ...event,
+      detail: { delivery_id: 'delivery-2', reason_code: 'input_surface_timeout' },
+    }
 
     const active = registry.routeHumanMessages('wechat', 'operation-owner', [makeChannelMessage('先处理这条')])
     await entered.promise
-    await expect(registry.routeOperationNotification(key, event)).resolves.toEqual({ consumed: false })
+    await expect(registry.routeOperationNotification(key, event)).resolves.toEqual({ consumed: true })
+    await expect(registry.routeOperationNotification(key, secondEvent)).resolves.toEqual({ consumed: true })
     expect(calls).toHaveLength(1)
 
     release.resolve()
     await active
-    await expect(registry.routeOperationNotification(key, event)).resolves.toEqual({ consumed: true })
-    expect(calls).toHaveLength(4)
+    expect(calls.length).toBeGreaterThan(1)
+    expect(JSON.stringify(calls[1].messages)).toContain('delivery-1')
+    expect(JSON.stringify(calls[1].messages)).toContain('delivery-2')
   })
 
   // --- routeSchedule ---

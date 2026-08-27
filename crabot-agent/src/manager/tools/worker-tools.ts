@@ -327,15 +327,14 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     },
   })
 
-  // --- send_to_worker(异步:投递即返回,worker 的回应由事件唤醒) ---
+  // --- send_to_worker(同步完成一次投递尝试,worker 的回应仍由事件唤醒) ---
   const sendToWorker = defineTool({
     name: 'send_to_worker',
     description:
-      '向指定 worker 投递一条输入。返回 delivered 才表示 worker adapter 已确认接受；pending ' +
-      '表示尚未送达，系统会在 5 分钟内结算并用事件通知你；failed 会给出原因与送达确定性。' +
+      '向指定 worker 投递一条输入。返回 delivered 才表示 worker adapter 已确认接受；failed 会立即给出简要原因与送达确定性。' +
       'worker 处于什么状态都能投:在跑/空闲的排进信箱,' +
       '已结束(completed/failed)的会自动复活它原来的会话接着干、上下文完整保留——所以延续、' +
-      '补充、返工一个老任务都走这里,不必先判断它死活,也不必为此新开 worker。异步语义:本工具' +
+      '补充、返工一个老任务都走这里,不必先判断它死活,也不必为此新开 worker。同步投递只等待一次有界尝试，' +
       '不等 worker 处理完这条消息;worker 每跑完一轮或结束时' +
       '会作为事件唤醒你,事件带状态和待处置回合；用 get_worker_activity 读取原生会话。命中已 cancelled 的任务会被拒绝。' +
       '未知交互界面必须使用 respond_to_worker_ui，普通输入不提供 raw 终端旁路。' +
@@ -374,7 +373,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
           ...(immediate_redirect !== undefined ? { immediate_redirect } : {}),
           ...(legacyContinuationAuth ? { legacyContinuationAuth } : {}),
         })
-        if (result.status === 'delivered' || result.status === 'pending') deps.onWorkerContinuation?.(worker_id)
+        if (result.status === 'delivered') deps.onWorkerContinuation?.(worker_id)
         return ok(result)
       } catch (error) {
         return mapError(`send_to_worker(${worker_id})`, error)
