@@ -50,6 +50,7 @@ import { formatChannelMessageLine } from '../prompt-manager.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { decideCompaction, foldIntoSummary, type CompactionPolicy, type CompactionDecision } from './compaction.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
+import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
 import type { ManagerSessionState, ManagerKey } from './types.js'
 import type { WorkerHarness } from '../workers/harness/harness'
@@ -1038,8 +1039,8 @@ export class ManagerLoop {
         status: toolCall.isError ? 'failed' : 'completed',
         details: {
           name: toolCall.name,
-          input_summary: truncateForTrace(JSON.stringify(toolCall.input)),
-          output_summary: truncateForTrace(toolCall.output),
+          input_summary: summarizeSpanInput(toolCall.input),
+          output_summary: summarizeSpanOutput(toolCall.output),
         },
       })
     }
@@ -1230,7 +1231,7 @@ function isBuiltinDailyReflectionWake(wake: WakeEvent | undefined): boolean {
     && wake.taskType === 'daily_reflection'
 }
 
-/** span detail 摘要截断（完整脱敏由 writer 侧 redactSecrets 负责）。 */
+/** trigger 摘要截断（span 摘要见 span-summary.ts；完整脱敏由 writer 侧 redactSecrets 负责）。 */
 function truncateForTrace(text: string, max = 300): string {
   return text.length > max ? text.slice(0, max) + '…' : text
 }

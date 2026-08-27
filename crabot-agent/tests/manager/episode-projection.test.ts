@@ -114,6 +114,49 @@ describe('projectManagerEpisode', () => {
     expect(extractStringField('{"content":123,"other":"xyz', 'content')).toBeUndefined()
   })
 
+  // 存量数据形态：input_summary 被 300 字符硬截，worker_id 前缀残缺以…结尾；
+  // 同一 span 的 output 回执携带完整真 ID（生产 trace feece070 实测）。
+  const truncatedWorkerInput = `{"text":"${'继续截图分析任务，请直接只读打开截图完成分析并汇报。'.repeat(8)}","worker_id":"w-d876c9fe-c44a-4…`
+  const receiptWithFullId = `[18:30:54]\n${JSON.stringify({ status: 'delivered', delivery_id: 'd-1', worker_id: 'w-full' })}`
+  const factsWithFull = new Map<string, EpisodeWorkerFact>([
+    ...facts,
+    ['w-full', { worker_id: 'w-full', title: '截图分析', status: 'running' }],
+  ])
+
+  it('存量截断 input 的前缀 ID 不可信：优先从 output 回执恢复完整 worker_id', () => {
+    const result = projectManagerEpisode(trace({ spans: [
+      tool('send_to_worker', truncatedWorkerInput, receiptWithFullId),
+    ] }), factsWithFull)
+    expect(result.actions).toEqual([
+      { kind: 'send_to_worker', label: '跟进：截图分析', worker_id: 'w-full' },
+    ])
+  })
+
+  it('input 与 output 都取不到有效 ID 时不设置 worker_id 字段（不产生死链）', () => {
+    const result = projectManagerEpisode(trace({ spans: [
+      tool('send_to_worker', truncatedWorkerInput, '[18:30:54]\n{"status":"failed","error":"boom"}'),
+    ] }), factsWithFull)
+    expect(result.actions).toEqual([{ kind: 'send_to_worker', label: '跟进：worker' }])
+  })
+
+  it('spawn_worker 回执被截断时不产出假 worker_id', () => {
+    const result = projectManagerEpisode(trace({ spans: [
+      tool('spawn_worker', '{"title":"部署 Minecraft","prompt":"很长任务"}', '[17:52:49]\n{"status":"spawned","worker_id":"w-trunc…'),
+    ] }), facts)
+    expect(result.actions).toEqual([{ kind: 'spawn_worker', label: '派活：部署 Minecraft' }])
+  })
+
+  it('kill_worker / request_worker_interrupt 的截断 ID 同样丢弃并从 output 兜底', () => {
+    const result = projectManagerEpisode(trace({ spans: [
+      tool('kill_worker', '{"worker_id":"w-d876c9fe-c44a-4…', '[17:31:00]\n{"status":"accepted","worker_id":"w-full"}'),
+      tool('request_worker_interrupt', '{"worker_id":"w-d876c9fe-c44a-4…', '[17:32:03]\n{"operation":{"worker_id":"w-full","kind":"interrupt"}}'),
+    ] }), factsWithFull)
+    expect(result.actions).toEqual([
+      { kind: 'cancel_worker', label: '取消：截图分析', worker_id: 'w-full' },
+      { kind: 'other', label: '请求中断：截图分析', worker_id: 'w-full' },
+    ])
+  })
+
   it('无投影数据时不添加空字段，保留原 trace', () => {
     const original = trace()
     const result = projectManagerEpisode(original, facts)
