@@ -41,7 +41,7 @@ import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { WorkerExitedError, CapabilityNotSupportedError, CliInputStallError, WorkerImplUnavailableError, ForkEstablishmentError } from '../errors.js'
-import { probeCodexInput, acceptedCodexInput, classifyCodexTerminalInteraction, codexPrimaryComposerText } from './input-surface.js'
+import { probeCodexInput, acceptedCodexInput, classifyCodexTerminalInteraction, codexIsWorking, codexPrimaryComposerText } from './input-surface.js'
 
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'

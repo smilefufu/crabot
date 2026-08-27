@@ -83,7 +83,7 @@ export function codexPrimaryComposerText(snapshot: PaneSnapshot): string | undef
   return codexComposerText(snapshot)
 }
 
-function codexIsWorking(snapshot: PaneSnapshot): boolean {
+export function codexIsWorking(snapshot: PaneSnapshot): boolean {
   const lines = snapshot.text.split('\n')
   const composerIndex = findLastComposerIndex(lines)
   if (composerIndex < 0) return false
