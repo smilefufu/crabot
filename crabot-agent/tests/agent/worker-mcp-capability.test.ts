@@ -17,10 +17,21 @@ import type {
   Workspace,
 } from '../../src/workers/types.js'
 import { makeAgentConfig, useTmpDataDir } from '../inbound/harness.js'
+import { TMP_PAGE_BRIDGE_ENV, TMP_PAGE_MCP_SERVER_NAME } from '../../src/workers/capability-policy.js'
 
 const servers: MCPServerConfig[] = [
   { name: 'git', command: 'git-mcp', env: { GIT_MCP_TOKEN: 'secret' } },
   { name: 'computer-use', command: 'computer-use-mcp' },
+]
+
+const mainlineSkills = [
+  { id: 'tmp-page', name: 'tmp-page', description: 'tmp page', skill_dir: '/tmp/skills/tmp-page' },
+  {
+    id: 'workspace-context-maintenance',
+    name: 'workspace-context-maintenance',
+    description: 'workspace context',
+    skill_dir: '/tmp/skills/workspace-context-maintenance',
+  },
 ]
 
 function permissions(overrides: Partial<ResolvedPermissions['tool_access']>): ResolvedPermissions {
@@ -122,7 +133,12 @@ describe('UnifiedAgent worker capability production wiring', () => {
       internals.managerStack.adapters.set('builtin', builtin)
       internals.managerStack.adapters.set('claude-code', claude)
       internals.managerStack.adapters.set('codex', codex)
-      internals.agentConfig = { ...internals.agentConfig!, mcp_servers: servers }
+      internals.agentConfig = {
+        ...internals.agentConfig!,
+        mcp_servers: servers,
+        skills: mainlineSkills,
+        tmp_page_base_url: 'https://crabot.example',
+      }
       // 本用例验收 MCP capability 快照投递，不验收 P6-B activation gate；
       // gate 覆盖在 activation-registry.test.ts（显式 impl not-ready 拒绝）。
       ;(internals.managerStack.harness.deps as { assertWorkerImplReady?: unknown }).assertWorkerImplReady = undefined
@@ -144,7 +160,17 @@ describe('UnifiedAgent worker capability production wiring', () => {
         impl: 'claude-code',
         principal_permissions: lowPrincipal,
       })
-      expect(claude.provisionCalls[0].caps).toEqual({ skills: [], mcp_servers: [] })
+      expect(claude.provisionCalls[0].caps.skills).toEqual(mainlineSkills)
+      expect(claude.provisionCalls[0].caps.mcp_servers).toEqual([
+        expect.objectContaining({
+          name: TMP_PAGE_MCP_SERVER_NAME,
+          transport: 'stdio',
+          env: expect.objectContaining({
+            [TMP_PAGE_BRIDGE_ENV.workerId]: expect.any(String),
+            [TMP_PAGE_BRIDGE_ENV.baseUrl]: 'https://crabot.example',
+          }),
+        }),
+      ])
 
       const allowedPrincipal = permissions({ mcp_skill: true, desktop: true })
       const builtinWorker = await internals.managerStack.harness.spawnWorker({
@@ -153,13 +179,17 @@ describe('UnifiedAgent worker capability production wiring', () => {
         impl: 'builtin',
         principal_permissions: allowedPrincipal,
       })
-      expect(builtin.provisionCalls[0].caps).toEqual({ skills: [], mcp_servers: [servers[0]] })
+      expect(builtin.provisionCalls[0].caps).toEqual({ skills: mainlineSkills, mcp_servers: [servers[0]] })
 
       const refreshedGit: MCPServerConfig = { name: 'git-v2', command: 'git-mcp-v2' }
       internals.agentConfig = { ...internals.agentConfig!, mcp_servers: [refreshedGit, servers[1]] }
       await internals.managerStack.harness.switchWorkerImpl(builtinWorker.worker_id, 'codex', 'switch to codex')
 
-      expect(codex.provisionCalls[0].caps).toEqual({ skills: [], mcp_servers: [refreshedGit] })
+      expect(codex.provisionCalls[0].caps.skills).toEqual(mainlineSkills)
+      expect(codex.provisionCalls[0].caps.mcp_servers).toEqual([
+        refreshedGit,
+        expect.objectContaining({ name: TMP_PAGE_MCP_SERVER_NAME, transport: 'stdio' }),
+      ])
       expect(codex.spawnCalls[0].principal_permissions).toEqual(allowedPrincipal)
     } finally {
       internals.attentionScheduler.stopAll()

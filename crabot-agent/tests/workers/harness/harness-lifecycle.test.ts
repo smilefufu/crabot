@@ -408,7 +408,11 @@ describe('WorkerHarness.spawnWorker', () => {
 
     const worker = await harness.spawnWorker(spawnParams({ principal_permissions: principalPermissions }))
 
-    expect(capabilityBundle).toHaveBeenCalledWith({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
+    expect(capabilityBundle).toHaveBeenCalledWith({
+      worker_id: worker.worker_id,
+      impl: 'builtin',
+      principal_permissions: principalPermissions,
+    })
     expect(fake.provisionCalls).toHaveLength(1)
     expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf-8'))).toEqual({
       principal_permissions: principalPermissions,

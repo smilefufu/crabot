@@ -35,6 +35,7 @@ import type {
   SkillConfig,
   Friend,
   ResolvedPermissions,
+  BuiltinToolConfig,
 } from '../../src/types.js'
 import { BUILTIN_WORKER_PERMISSIONS, type BuiltinRuntimeContext } from '../../src/workers/builtin/runtime.js'
 import { CLI_DOMAINS } from '../../src/types.js'
@@ -63,6 +64,16 @@ const ORCHESTRATION: OrchestrationConfig = {
   front_agent_queue_timeout: 60,
 }
 
+const REQUIRED_MAINLINE_SKILLS: SkillConfig[] = [
+  { id: 'tmp-page', name: 'tmp-page', description: '临时页面', skill_dir: '/tmp/skills/tmp-page' },
+  {
+    id: 'workspace-context-maintenance',
+    name: 'workspace-context-maintenance',
+    description: '工作区上下文维护',
+    skill_dir: '/tmp/skills/workspace-context-maintenance',
+  },
+]
+
 /** 生产权威配置变更路径：invalidation 后的 authenticated pull（update_config 已退役）。 */
 async function applyConfigViaPull(internals: any, modelConfig: Record<string, LLMConnectionInfo>): Promise<void> {
   const nextUnified = {
@@ -88,6 +99,8 @@ function makeConfig(p: {
   systemPrompt?: string
   skills?: SkillConfig[]
   tmpPageBaseUrl?: string
+  imageConfig?: LLMConnectionInfo
+  builtinToolConfig?: BuiltinToolConfig
 }): UnifiedAgentConfig {
   return {
     module_id: 'p7f-runtime-agent' as ModuleId,
@@ -101,9 +114,11 @@ function makeConfig(p: {
       roles: ['worker'],
       system_prompt: p.systemPrompt ?? '你是测试用 Crabot',
       model_config: p.modelConfig ?? { powerful: connInfo('model-A') },
-      ...(p.skills ? { skills: p.skills } : {}),
+      skills: p.skills ?? REQUIRED_MAINLINE_SKILLS,
       ...(p.tmpPageBaseUrl ? { tmp_page_base_url: p.tmpPageBaseUrl } : {}),
+      ...(p.builtinToolConfig ? { builtin_tool_config: p.builtinToolConfig } : {}),
     },
+    ...(p.imageConfig ? { image_config: p.imageConfig } : {}),
   }
 }
 
@@ -201,9 +216,11 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   let prevDataDir: string | undefined
   let prevAgentDataDir: string | undefined
   let llm: ReturnType<typeof makeScriptedLLM>
+  let agents: UnifiedAgent[]
 
   function boot(config: UnifiedAgentConfig = makeConfig({})): { agent: UnifiedAgent; internals: AgentInternals } {
     const agent = new UnifiedAgent(config)
+    agents.push(agent)
     const internals = agent as unknown as AgentInternals
     internals.adminPort = 1
     return { agent, internals }
@@ -216,18 +233,20 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     delete process.env.CRABOT_AGENT_DATA_DIR
     process.env.DATA_DIR = join(tmpRoot, 'data')
     llm = makeScriptedLLM()
+    agents = []
     // 生产链路上唯一被替换的件：`adapterFromSdkEnv` 是 unified-agent 把 model slot 变成
     // 真会发 HTTP 的 adapter 的唯一出口（manager 与 builtin worker 共用它）。
     vi.spyOn(agentHandlerModule, 'adapterFromSdkEnv').mockReturnValue(llm.adapter as never)
   })
 
   afterEach(async () => {
+    for (const agent of agents.reverse()) await agent.stop()
     vi.restoreAllMocks()
     if (prevDataDir === undefined) delete process.env.DATA_DIR
     else process.env.DATA_DIR = prevDataDir
     if (prevAgentDataDir === undefined) delete process.env.CRABOT_AGENT_DATA_DIR
     else process.env.CRABOT_AGENT_DATA_DIR = prevAgentDataDir
-    await fs.rm(tmpRoot, { recursive: true, force: true })
+    await fs.rm(tmpRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 })
   })
 
   async function spawnBuiltin(
@@ -555,7 +574,10 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   // --- 验收 4 + 5：工具集逐项断言 ---
 
   describe('验收 4/5：worker 的工具集', () => {
-    const skills: SkillConfig[] = [{ name: 'demo-skill', description: '演示技能', skill_dir: '/tmp/skills/demo' }]
+    const skills: SkillConfig[] = [
+      ...REQUIRED_MAINLINE_SKILLS,
+      { id: 'demo-skill', name: 'demo-skill', description: '演示技能', skill_dir: '/tmp/skills/demo' },
+    ]
 
     function toolNames(internals: AgentInternals, workspaceRoot: string): string[] {
       const builtin = internals.buildBuiltinWorkerRuntime({
@@ -566,16 +588,64 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       return resolveTools(builtin).map((t) => t.name)
     }
 
-    it('装了干活必需的四类：文件/shell + skills、crab-memory、tmp-page（外部 MCP 未连接时为空）', () => {
+    it('装了文件/shell、主线 Skill 和 tmp-page，且没有任何 crab-memory 工具', () => {
       const { internals } = boot(makeConfig({ skills, tmpPageBaseUrl: 'https://example.test' }))
       const names = toolNames(internals, tmpRoot)
 
       for (const n of ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Skill']) {
         expect(names, `应装 ${n}`).toContain(n)
       }
-      const storeMemoryToolName = ['mcp__crab-memory', 'store_memory'].join('__')
-      expect(names).toContain(storeMemoryToolName)
-      expect(names).toContain('mcp__crab-memory__search_memory')
+      expect(names).toContain('tmp_page_create')
+      expect(names.filter((name) => name.startsWith('mcp__crab-memory__'))).toEqual([])
+    })
+
+    it('mcp_skill 关闭只移除第三方 MCP/Skill，不移除 builtin 固定产品能力', () => {
+      const { internals } = boot(makeConfig({
+        skills,
+        tmpPageBaseUrl: 'https://example.test',
+        imageConfig: connInfo('image-model'),
+      }))
+      const principalPermissions: ResolvedPermissions = {
+        ...BUILTIN_WORKER_PERMISSIONS,
+        tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, mcp_skill: false },
+      }
+      const builtin = internals.buildBuiltinWorkerRuntime({
+        worker_id: 'w-product-tools',
+        workspace: { root: tmpRoot },
+        principal_permissions: principalPermissions,
+      })!
+      const names = resolveTools(builtin).map((tool) => tool.name)
+
+      expect(names).toContain('Skill')
+      expect(names.filter((name) => name.startsWith('tmp_page_'))).toEqual([
+        'tmp_page_create',
+        'tmp_page_update',
+        'tmp_page_read_events',
+        'tmp_page_delete',
+        'tmp_page_list',
+      ])
+      expect(names).toContain('mcp__crab-image__generate_image')
+    })
+
+    it('不会恢复 builtin_tool_config 已明确禁用的生图工具', () => {
+      const { internals } = boot(makeConfig({
+        skills,
+        tmpPageBaseUrl: 'https://example.test',
+        imageConfig: connInfo('image-model'),
+        builtinToolConfig: { disabled_tools: ['mcp__crab-image__generate_image'] },
+      }))
+      const principalPermissions: ResolvedPermissions = {
+        ...BUILTIN_WORKER_PERMISSIONS,
+        tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, mcp_skill: false },
+      }
+      const builtin = internals.buildBuiltinWorkerRuntime({
+        worker_id: 'w-image-disabled',
+        workspace: { root: tmpRoot },
+        principal_permissions: principalPermissions,
+      })!
+      const names = resolveTools(builtin).map((tool) => tool.name)
+
+      expect(names).not.toContain('mcp__crab-image__generate_image')
       expect(names).toContain('tmp_page_create')
     })
 
@@ -712,7 +782,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
   it('systemPrompt = 现网 agent prompt（goal 模式关闭）+ AGENTS.md 快照 + v3 worker 契约尾巴', () => {
     const { internals } = boot(makeConfig({ systemPrompt: '你是测试人格', skills: [
-      { name: 'demo-skill', description: '演示技能', skill_dir: '/tmp/skills/demo' },
+      ...REQUIRED_MAINLINE_SKILLS,
+      { id: 'demo-skill', name: 'demo-skill', description: '演示技能', skill_dir: '/tmp/skills/demo' },
     ] }))
     const workspaceRoot = join(tmpRoot, 'ws-prompt')
     const agents = '# Workspace rules\nInspect the current implementation before editing.\n'
@@ -732,6 +803,11 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).toContain('demo-skill')
     expect(prompt).toContain(agents)
     expect(prompt).toContain('<workspace-agents-md>')
+    expect(prompt).not.toContain('crabot-cli')
+    expect(prompt).not.toContain('crabot mcp add')
+    expect(prompt).not.toContain('## 记忆存储指引')
+    expect(prompt).not.toContain('store_memory')
+    expect(prompt).not.toContain('search_memory')
     // 决策 4：goal 模式关闭（GOAL_MODE_DETAILS 段不注入）。
     expect(prompt).not.toContain('## 目标模式详解')
 

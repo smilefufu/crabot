@@ -1059,7 +1059,11 @@ export class WorkerHarness {
           : { principal_permissions: p.principal_permissions }
         const context = await this.contextStore.write(workerId, requestedContext)
         const caps = this.deps.capabilityBundle
-          ? await this.deps.capabilityBundle({ worker_id: workerId, principal_permissions: context.principal_permissions })
+          ? await this.deps.capabilityBundle({
+              worker_id: workerId,
+              impl,
+              principal_permissions: context.principal_permissions,
+            })
           : EMPTY_CAPABILITY_BUNDLE
         await adapter.provision(workspace, caps)
         // builtin 注入:调用方显式传了就用它;没传(manager 的 spawn_worker 工具就不可能传——
@@ -2100,6 +2104,7 @@ export class WorkerHarness {
       const caps = this.deps.capabilityBundle
         ? await this.deps.capabilityBundle({
             worker_id: worker.worker_id,
+            impl: targetImpl,
             principal_permissions: auth.principal_permissions,
           })
         : EMPTY_CAPABILITY_BUNDLE
@@ -3013,7 +3018,11 @@ export class WorkerHarness {
 
       workspace = { root: source.workspace }
       caps = this.deps.capabilityBundle
-        ? await this.deps.capabilityBundle({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
+        ? await this.deps.capabilityBundle({
+            worker_id: worker.worker_id,
+            impl: targetImpl,
+            principal_permissions: principalPermissions,
+          })
         : EMPTY_CAPABILITY_BUNDLE
       const expiredAfterCapabilities = this.expiredInboxDelivery(deadlineItem, source.seq)
       if (expiredAfterCapabilities) {

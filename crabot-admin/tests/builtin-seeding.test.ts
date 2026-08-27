@@ -86,6 +86,25 @@ describe('getBuiltinSkills', () => {
       expect(s.enabled).toBe(true)
     }
   })
+
+  it('全部 builtin direct child 的 crab_memory 固定为 false', () => {
+    for (const subagent of getBuiltinSubAgents()) {
+      expect(subagent.builtin_capabilities.crab_memory, subagent.name).toBe(false)
+    }
+  })
+
+  it('七个 builtin direct child 的 Skill 白名单精确匹配能力矩阵', () => {
+    const byName = new Map(getBuiltinSubAgents().map((subagent) => [subagent.name, subagent.allowed_skill_ids]))
+    expect(Object.fromEntries(byName)).toEqual({
+      code_planner: [BUILTIN_SKILL_IDS.writingPlans],
+      code_writer: [BUILTIN_SKILL_IDS.systematicDebugging, BUILTIN_SKILL_IDS.verificationBeforeCompletion],
+      research_collector: [],
+      goal_auditor: [BUILTIN_SKILL_IDS.verificationBeforeCompletion],
+      task_reviewer: [],
+      spec_reviewer: [],
+      code_quality_reviewer: [],
+    })
+  })
 })
 
 describe('getBuiltinSubAgents', () => {
@@ -191,13 +210,14 @@ describe('getBuiltinSubAgents', () => {
     expect(quality.workflow).not.toContain('spec_reviewer 已 APPROVED')
   })
 
-  it('research_collector 使用 vision role + 通用调查员 capabilities 全开', () => {
-    // memory: feedback_research_collector_is_general — 2026-05-21 把 capabilities 全开恢复
-    // 原意（通用调查员，不是 web 专科），断言同步跟上代码 entry。
+  it('research_collector 使用 vision role，保留调查能力但不持有 Memory', () => {
     const r = getBuiltinSubAgents().find((s) => s.name === 'research_collector')!
     expect(r.model_role).toBe('vision')
     expect(r.builtin_capabilities.file_system).toBe(true)
-    expect(r.builtin_capabilities.crab_memory).toBe(true)
+    expect(r.builtin_capabilities.crab_memory).toBe(false)
+    const prompt = [r.when_to_use, r.role, r.workflow, r.deliverables, r.verification].join('\n')
+    expect(prompt).not.toContain('crab-memory')
+    expect(prompt).not.toContain('search_memory')
     // scrapling 是调研用的 web mcp（workflow 明列要用），此前白名单为空导致调研根本调不到，已修。
     expect(r.allowed_mcp_server_ids).toContain('scrapling')
   })

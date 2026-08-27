@@ -73,9 +73,9 @@ export interface BuiltinCapabilities {
   shell: boolean
   /** find_task / get_task_progress — 任务情报查询 */
   task_intel: boolean
-  /** crab-memory MCP 全部工具 — 长期记忆读写 */
+  /** 兼容旧配置；v3.6.13 起 direct child 运行时固定 false。 */
   crab_memory: boolean
-  /** crab-messaging MCP 全部工具 — channel 消息发送 */
+  /** 兼容旧配置；v3 Worker/direct child 运行时固定 false。 */
   crab_messaging: boolean
 }
 
@@ -774,7 +774,7 @@ export interface ExecuteTaskParams {
     priority: string
     plan?: string
     task_type?: string
-    /** 任务标签（如 memory_rebuild）；agent 侧按 tags 做工具分组等任务用途判定。 */
+    /** 任务标签；只携带任务语义，不得提升 Worker 的工具权限。 */
     tags?: string[]
     /** 任务来源信息。Schedule 路径由 ScheduledTaskRunner 填入 trigger_type='scheduled'；
      *  trigger 路径合成 task 可能显式填入 trigger_type='message'；旧调用不填时也视为 'message'。 */

@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync, existsSync 
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { SkillManager } from '../src/mcp-skill-manager.js'
+import { getBuiltinSkills } from '../src/builtin-skills.js'
 
 const REPO_BUILTINS_DIR = join(__dirname, '..', 'builtins', 'skills')
 
@@ -94,6 +95,19 @@ describe('仓库 builtins/skills 载荷', () => {
       await mgr.initialize()
       const count = await mgr.registerBuiltins(REPO_BUILTINS_DIR)
       expect(count).toBe(dirs.length)
+      expect([
+        ...getBuiltinSkills().map((skill) => skill.name),
+        ...mgr.list().map((skill) => skill.name),
+      ].sort()).toEqual([
+        'tmp-page',
+        'scrapling-official',
+        'workspace-context-maintenance',
+        'writing-plans',
+        'systematic-debugging',
+        'verification-before-completion',
+        'memory-graph-linking',
+        'crabot-cli',
+      ].sort())
     } finally {
       rmSync(dataDir, { recursive: true, force: true })
     }

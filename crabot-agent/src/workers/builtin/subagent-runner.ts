@@ -10,10 +10,13 @@ import type { BgAgentRegistryRecord } from '../../engine/bg-entities/types.js'
 import { createLspDiagnosticsHook } from '../../hooks/defaults.js'
 import { getBgEntitiesLogsDir } from '../../core/data-paths.js'
 import type { TraceStore } from '../../core/trace-store.js'
-import type { ResolvedPermissions, SubAgentConfig } from '../../types.js'
+import type { ResolvedPermissions, SkillConfig, SubAgentConfig } from '../../types.js'
 import type { ToolCallContext, ToolCallResult, ToolDefinition, ToolPermissionConfig } from '../../engine/types.js'
 import type { NormalizedTraceEvent, TraceCursor, WorkerSubagentStatus, WorkerSubagentSummary } from '../types.js'
-import { filterToolsForSubAgent } from '../../agent/subagent-tool-filter.js'
+import {
+  buildCapabilitiesForSubAgent,
+  permissionConfigForSubAgent,
+} from '../../agent/subagent-tool-filter.js'
 import { assembleSubAgentPrompt } from '../../agent/subagent-prompt-assembler.js'
 import { createBuiltinWorkerHookRegistry } from './runtime.js'
 
@@ -22,6 +25,8 @@ const WORKER_OWNER = '__builtin_worker__'
 export interface BuiltinSubagentExecutionContext {
   readonly permissionConfig: ToolPermissionConfig
   readonly resolvedPermissions: ResolvedPermissions
+  readonly availableSkills: ReadonlyArray<SkillConfig>
+  readonly getCwd: () => string
 }
 
 function statusOf(status: BgAgentRegistryRecord['status']): WorkerSubagentStatus {
@@ -104,14 +109,37 @@ export class BuiltinSubagentRunner {
     if (!worker?.parent_trace_id) {
       return { isError: true, output: 'builtin worker subagent trace is unavailable for this incarnation' }
     }
-    if (input.sync) return this.runSynchronously(subagent, input, context, parentTools, worker, execution)
+    const childCapabilities = this.capabilitiesFor(subagent, parentTools, execution)
+    const childExecution = {
+      ...execution,
+      permissionConfig: permissionConfigForSubAgent(
+        execution.permissionConfig,
+        childCapabilities.skills,
+      ) ?? execution.permissionConfig,
+    }
+    const childPrompt = assembleSubAgentPrompt(subagent, {
+      parentTaskId: worker.worker_id,
+      callerLabel: input.sync ? 'builtin worker' : 'builtin worker (async)',
+      availableSkills: childCapabilities.skills,
+    })
+    if (input.sync) {
+      return this.runSynchronously(
+        subagent,
+        input,
+        context,
+        childCapabilities.tools,
+        childPrompt,
+        worker,
+        childExecution,
+      )
+    }
 
     const entityId = await spawnPersistentAgent({
       prompt: input.task,
       task_description: input.task,
       subagent_type: subagent.name,
-      tools: filterToolsForSubAgent(parentTools, subagent.builtin_capabilities, subagent.allowed_mcp_server_ids, subagent.allowed_skill_ids),
-      systemPrompt: assembleSubAgentPrompt(subagent, { parentTaskId: worker.worker_id, callerLabel: 'builtin worker (async)' }),
+      tools: childCapabilities.tools,
+      systemPrompt: childPrompt,
       model: subagent.model.model_id,
       ...(subagent.model.max_tokens !== undefined ? { maxTokens: subagent.model.max_tokens } : {}),
       adapter: createAdapter({
@@ -124,8 +152,8 @@ export class BuiltinSubagentRunner {
       spawned_by_task_id: worker.worker_id,
       registry,
       abortControllers: this.abortControllers,
-      permissionConfig: execution.permissionConfig,
-      resolvedPermissions: execution.resolvedPermissions,
+      permissionConfig: childExecution.permissionConfig,
+      resolvedPermissions: childExecution.resolvedPermissions,
       senderIsMaster: false,
       hookRegistry: this.childHookRegistry(subagent),
       ...(subagent.hook_preset === 'lsp_diagnostics' ? { lspManager: this.lspManager } : {}),
@@ -205,7 +233,8 @@ export class BuiltinSubagentRunner {
     subagent: SubAgentConfig,
     input: { task: string; context?: string },
     context: ToolCallContext,
-    parentTools: ReadonlyArray<ToolDefinition>,
+    childTools: ReadonlyArray<ToolDefinition>,
+    childPrompt: string,
     worker: NonNullable<ToolCallContext['worker_subagent']>,
     execution: BuiltinSubagentExecutionContext,
   ): Promise<ToolCallResult> {
@@ -249,8 +278,8 @@ export class BuiltinSubagentRunner {
           ...(subagent.model.account_id ? { accountId: subagent.model.account_id } : {}),
         }),
         model: subagent.model.model_id,
-        systemPrompt: assembleSubAgentPrompt(subagent, { parentTaskId: worker.worker_id, callerLabel: 'builtin worker' }),
-        tools: filterToolsForSubAgent(parentTools, subagent.builtin_capabilities, subagent.allowed_mcp_server_ids, subagent.allowed_skill_ids),
+        systemPrompt: childPrompt,
+        tools: childTools,
         maxTurns: subagent.max_turns,
         ...(subagent.model.max_tokens !== undefined ? { maxTokens: subagent.model.max_tokens } : {}),
         ...(input.context ? { parentContext: input.context } : {}),
@@ -293,6 +322,22 @@ export class BuiltinSubagentRunner {
       context.abortSignal?.removeEventListener('abort', abortParent)
       this.abortControllers.delete(entityId)
     }
+  }
+
+  private capabilitiesFor(
+    subagent: SubAgentConfig,
+    parentTools: ReadonlyArray<ToolDefinition>,
+    execution: BuiltinSubagentExecutionContext,
+  ) {
+    return buildCapabilitiesForSubAgent({
+      parentTools,
+      capabilities: subagent.builtin_capabilities,
+      allowedMcpServerIds: subagent.allowed_mcp_server_ids,
+      allowedSkillIds: subagent.allowed_skill_ids,
+      availableSkills: execution.availableSkills,
+      getCwd: execution.getCwd,
+      allowPermissionGatedSkills: execution.resolvedPermissions.tool_access.mcp_skill,
+    })
   }
 
   private requireRegistry(): BgEntityRegistry {

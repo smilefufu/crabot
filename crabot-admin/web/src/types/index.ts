@@ -669,7 +669,9 @@ export interface BuiltinCapabilities {
   file_system: boolean
   shell: boolean
   task_intel: boolean
+  /** Legacy storage field; runtime and editor keep it false. */
   crab_memory: boolean
+  /** Legacy storage field; runtime and editor keep it false. */
   crab_messaging: boolean
 }
 

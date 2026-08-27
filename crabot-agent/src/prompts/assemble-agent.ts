@@ -19,6 +19,7 @@ import {
   END_TURN_SELF_CHECK,
   TIME_AWARENESS,
   INFO_QUERY_GUIDE,
+  WORKER_INFO_QUERY_GUIDE,
   TOOL_USAGE,
   TASK_HARD_CONSTRAINTS,
   GOAL_MODE_DETAILS,
@@ -40,6 +41,8 @@ export interface AssembleAgentPromptOptions {
   /** Worker only has delegate_task, not AgentHandler's subagent coordinator tools. */
   readonly subagentGuidance?: 'agent' | 'builtin_worker'
   readonly imageCapability?: { readonly available: boolean }
+  /** false 时不注入任何 Memory LLM 工具指引；v3 Worker 固定为 false。 */
+  readonly memoryToolsAvailable?: boolean
 }
 
 function escapeSceneProfileContent(content: string): string {
@@ -67,7 +70,7 @@ export function assembleAgentPrompt(opts: AssembleAgentPromptOptions): string {
   parts.push(SEND_MESSAGE_SPEC)
   parts.push(END_TURN_SELF_CHECK)
   parts.push(TIME_AWARENESS)
-  parts.push(INFO_QUERY_GUIDE)
+  parts.push(opts.memoryToolsAvailable === false ? WORKER_INFO_QUERY_GUIDE : INFO_QUERY_GUIDE)
   parts.push(TOOL_USAGE)
   parts.push(buildImageCapability(opts.imageCapability?.available ?? false))
   parts.push(TASK_HARD_CONSTRAINTS)
@@ -75,7 +78,7 @@ export function assembleAgentPrompt(opts: AssembleAgentPromptOptions): string {
     parts.push(GOAL_MODE_DETAILS)
   }
   parts.push(SLASH_AWARENESS_GUIDANCE)
-  parts.push(MEMORY_STORE_GUIDE)
+  if (opts.memoryToolsAvailable !== false) parts.push(MEMORY_STORE_GUIDE)
   parts.push(CLOSURE_DUTIES)
 
   if (opts.skillListing) {

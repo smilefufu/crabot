@@ -91,7 +91,7 @@ function runtimeSubAgentEntries(entries: Map<string, SubAgentRegistryEntry>): un
     role: entry.role, workflow: entry.workflow, deliverables: entry.deliverables,
     verification: entry.verification,
     provider_id: entry.provider_id, model_id: entry.model_id, model_role: entry.model_role,
-    builtin_capabilities: { ...entry.builtin_capabilities, crab_messaging: false },
+    builtin_capabilities: { ...entry.builtin_capabilities, crab_memory: false, crab_messaging: false },
     allowed_mcp_server_ids: entry.allowed_mcp_server_ids,
     allowed_skill_ids: entry.allowed_skill_ids, max_turns: entry.max_turns, hook_preset: entry.hook_preset,
     system_only: entry.system_only,

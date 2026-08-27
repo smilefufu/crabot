@@ -73,4 +73,21 @@ describe('assembleSubAgentPrompt', () => {
     expect(out).toContain('不要轮询')
     expect(out).toContain('不要持久化')
   })
+
+  it('只列出调用方已过滤的 direct child Skill，并要求先加载', () => {
+    const out = assembleSubAgentPrompt(baseEntry, {
+      parentTaskId: 't',
+      callerLabel: 'x',
+      availableSkills: [{
+        id: 'verification',
+        name: 'verification-before-completion',
+        description: '完成前验证',
+        skill_dir: '/skills/verification-before-completion',
+      }],
+    })
+
+    expect(out).toContain('<available_skills>')
+    expect(out).toContain('<name>verification-before-completion</name>')
+    expect(out).toContain('必须先调用 Skill 工具')
+  })
 })

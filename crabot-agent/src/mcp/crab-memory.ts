@@ -1,14 +1,8 @@
 /**
- * Crab-Memory MCP Server — Agent 长期记忆能力
+ * Crab-Memory MCP Server — Manager Agent 长期记忆能力
  *
- * 两组工具（共 19 个，按任务 profile 分组注册，见 resolveMemoryToolProfile）：
- * - A 组 6 个（Worker 普通对话可见）：store_memory / search_memory / get_memory_detail /
- *   set_scene_profile / get_scene_profile / delete_scene_profile
- *   importance / brief 等字段自动推断，最少参数即可落盘
- * - B 组 13 个（Manager 与兼容重建 Worker 可见）：quick_capture / search_long_term /
- *   update_long_term / delete_memory / list_recent / list_entries / set_memory_links /
- *   run_maintenance / get_stats / get_evolution_mode / set_evolution_mode / promote_inbox_entry / promote_to_rule
- *   字段精细可控，工具名与 Memory RPC 一一对应
+ * 固定注册 protocol-memory.md §3.30 的 18 项 LLM 工具。所有 Worker 均不调用本工厂；
+ * `run_maintenance` 只保留 Memory RPC 和 Agent 内部非 LLM 调用路径。
  *
  * @see crabot-docs/protocols/protocol-memory.md
  */
@@ -29,7 +23,7 @@ export interface CrabMemoryDeps {
 
 /** 每次任务创建时传入的上下文，用于自动填充 source/visibility/scopes */
 export interface MemoryTaskContext {
-  /** Worker 调用时必传；Front 调用时可省（Front 不是 task 上下文） */
+  /** Manager workflow 有关联 task 时传入；普通对话可省。 */
   taskId?: string
   channelId?: string
   sessionId?: string
@@ -96,61 +90,32 @@ export async function resolveSceneAnchorLabel(params: {
   return existingLabel || defaultSceneProfileLabel(params.scene)
 }
 
-// ============================================================================
-// 工具分组 profile（同构于 crab-messaging.ts 的 resolveMessagingToolProfile）
-// ============================================================================
-
-export type MemoryToolProfile =
-  | 'conversation'
-  /** B 组：仅保留给显式兼容 memory_rebuild Worker。 */
-  | 'memory_rebuild'
-
-/**
- * A 组：Worker 普通对话可见的 6 个简化工具（未加 mcp__ 前缀的工具名）。
- * 其余 13 个（B 组）只给 Manager 和兼容重建 Worker。
- */
-export const CRAB_MEMORY_CONVERSATION_TOOLS: ReadonlySet<string> = new Set([
+export const CRAB_MEMORY_MANAGER_TOOL_NAMES = [
   'store_memory',
   'search_memory',
   'get_memory_detail',
   'set_scene_profile',
   'get_scene_profile',
   'delete_scene_profile',
-])
-
-/** buildToolsDynamic 转换后的工具名前缀（mcp__<server>__<tool>） */
-const CRAB_MEMORY_TOOL_PREFIX = 'mcp__crab-memory__'
-
-/**
- * 按任务用途决定 crab-memory 工具注册范围（不再要求 trigger_type==='scheduled'）：
- * - tags 含 'memory_rebuild' → B 组 13 个（兼容显式重建任务）
- * - 其他所有任务 → 仅 A 组 6 个
- * memory_maintenance 任务不经 Worker（scheduled-task-runner 直接 RPC），不受此影响。
- */
-export function resolveMemoryToolProfile(
-  taskCtx: { taskType?: string; tags?: readonly string[] } | null,
-): MemoryToolProfile {
-  if (taskCtx?.tags?.includes('memory_rebuild') === true) {
-    return 'memory_rebuild'
-  }
-  return 'conversation'
-}
-
-/** 按 profile 过滤已转换的 crab-memory 工具列表（conversation → 仅 A 组） */
-export function filterMemoryToolsByProfile<T extends { name: string }>(
-  tools: ReadonlyArray<T>,
-  profile: MemoryToolProfile,
-): T[] {
-  if (profile === 'memory_rebuild') return [...tools]
-  return tools.filter((t) =>
-    CRAB_MEMORY_CONVERSATION_TOOLS.has(t.name.slice(CRAB_MEMORY_TOOL_PREFIX.length)))
-}
+  'quick_capture',
+  'search_long_term',
+  'update_long_term',
+  'delete_memory',
+  'list_recent',
+  'list_entries',
+  'set_memory_links',
+  'get_stats',
+  'get_evolution_mode',
+  'set_evolution_mode',
+  'promote_inbox_entry',
+  'promote_to_rule',
+] as const
 
 // ============================================================================
 // 工具 inputSchema（必须是模块级常量，只构建一次）
 //
-// 为什么不能放进 createCrabMemoryServer：worker 每轮 LLM turn 都会通过
-// buildToolsDynamic 重建本 server；zod v4 的 .describe() 会把 schema clone
+// 为什么不能放进 createCrabMemoryServer：Manager tool-face 会重复构建本 server；
+// zod v4 的 .describe() 会把 schema clone
 // 写入 globalRegistry（强引用 Map，永不清除）。inline 构建 = 每轮净增整棵
 // schema 树 → 2026-06-11 OOM 事故根因。回归测试：tests/mcp/zod-registry-leak.test.ts
 // ============================================================================
@@ -293,11 +258,6 @@ const SET_MEMORY_LINKS_SCHEMA = {
     relation: z.enum(['related', 'refines', 'depends_on', 'part_of'])
       .describe('关联关系：related=相关 / refines=细化 / depends_on=依赖 / part_of=从属'),
   })).describe('关联链接列表（覆盖式写入 links 字段）'),
-}
-
-const RUN_MAINTENANCE_SCHEMA = {
-  scope: z.enum(['all', 'observation_check', 'stale_aging', 'trash_cleanup', 'link_gc', 'inbox_expiry']).default('all'),
-  now_iso: z.string().optional().describe('覆盖当前时间（测试用）'),
 }
 
 const SET_EVOLUTION_MODE_SCHEMA = {
@@ -472,11 +432,10 @@ export function createCrabMemoryServer(
   )
 
   // ============================================================================
-  // 反思级原生 RPC 工具组
+  // Manager workflow 原生 RPC 工具组
   // ============================================================================
   // 这一组工具直接透传到 Memory 后端 RPC，工具名与 RPC 一一对应，
-  // 供 Manager 的每日反思和兼容重建任务精细操作。
-  // 与 A 组 Worker 简化工具的区别：参数完整、字段精细可控、不做隐式推断。
+  // 供 Manager 的每日反思和记忆图谱重建精细操作。
   // 详见 protocol-memory.md。
 
   // 透传 helper：统一错误返回格式
@@ -590,15 +549,6 @@ export function createCrabMemoryServer(
       id: (args as { id: string }).id,
       patch: { links: (args as { links: unknown }).links },
     }),
-  )
-
-  server.registerTool(
-    'run_maintenance',
-    {
-      description: '触发记忆维护任务。scope=all 会依次跑 observation_check、stale_aging、trash_cleanup、link_gc 和 inbox_expiry。每天凌晨 04:00 已有内置 schedule 自动跑一次；每日反思不得重复调用 all。',
-      inputSchema: RUN_MAINTENANCE_SCHEMA,
-    },
-    async (args) => callRpc('run_maintenance', args as Record<string, unknown>),
   )
 
   server.registerTool(
