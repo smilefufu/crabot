@@ -42,6 +42,25 @@ describe('TmuxDriver.capturePane', () => {
   })
 })
 
+describe('TmuxDriver command deadlines', () => {
+  it('bounds both execFile tmux commands and load-buffer stdin processes', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tmux-driver-timeout-'))
+    const hangingBin = path.join(tempDir, 'tmux-hanging.sh')
+    await fs.writeFile(hangingBin, '#!/bin/sh\nsleep 5\n', { mode: 0o700 })
+    const driver = new TmuxDriver({ tmuxBin: hangingBin, commandTimeoutMs: 25 })
+
+    const commandStartedAt = Date.now()
+    await expect(driver.sendKeys('crabot-w-timeout', ['Enter'])).rejects.toBeTruthy()
+    expect(Date.now() - commandStartedAt).toBeLessThan(1000)
+
+    const bufferStartedAt = Date.now()
+    await expect(driver.pasteText('crabot-w-timeout', 'input')).rejects.toThrow(/timed out|exited|SIGKILL/i)
+    expect(Date.now() - bufferStartedAt).toBeLessThan(1000)
+
+    await fs.rm(tempDir, { recursive: true, force: true })
+  })
+})
+
 describe.skipIf(!detectTmux())('TmuxDriver', () => {
   const driver = new TmuxDriver()
   let tempDir: string

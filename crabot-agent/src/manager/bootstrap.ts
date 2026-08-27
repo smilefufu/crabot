@@ -390,7 +390,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // A set/clear/expiry/terminal transition can invalidate a due while it was queued, or
           // during its Manager episode. It remains in trace/events.jsonl but must not affect the
           // replacement rule. `undefined` from the narrow route is the before-wake stale case.
-          if (event.kind === 'supervision_due' && (result === undefined || !await harness.isSupervisionDueCurrent(event))) {
+          if (event.kind === 'supervision_due' && result === undefined) {
+            // `undefined` is either a stale due (safe to consume) or an active Manager
+            // defer (keep the durable due for retry). The current-state check distinguishes
+            // those two cases without inventing a completed EpisodeResult.
+            return { consumed: !await harness.isSupervisionDueCurrent(event) }
+          }
+          if (event.kind === 'supervision_due' && !await harness.isSupervisionDueCurrent(event)) {
             return { consumed: true }
           }
           // fail-loud 的判据必须双管:`.catch` 只抓得到 F2(中途抛错),而最常见的 F1(LLM 挂 /

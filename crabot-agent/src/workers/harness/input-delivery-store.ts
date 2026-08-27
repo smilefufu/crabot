@@ -40,13 +40,6 @@ export interface WorkerInputDeliveryReceipt {
 export type SendToWorkerResult =
   | { status: 'delivered'; delivery_id: string; worker_id: string }
   | {
-      status: 'pending'
-      delivery_id: string
-      worker_id: string
-      pending_reason: 'waiting_for_safe_input' | 'submission_unconfirmed'
-      deadline_at: string
-    }
-  | {
       status: 'failed'
       delivery_id: string
       worker_id: string
@@ -54,6 +47,12 @@ export type SendToWorkerResult =
       reason: string
       certainty: 'not_delivered' | 'unknown'
     }
+
+export interface InputDeliverySettlement {
+  readonly receipt: WorkerInputDeliveryReceipt
+  /** Whether this call changed a pending receipt into a terminal receipt. */
+  readonly transitioned: boolean
+}
 
 const FILENAME = 'input-deliveries.json'
 
@@ -73,6 +72,25 @@ export class InputDeliveryStore {
     return this.mutate(receipt.worker_id, (receipts) => {
       if (receipts.some((item) => item.delivery_id === receipt.delivery_id)) {
         throw new Error(`duplicate delivery_id: ${receipt.delivery_id}`)
+      }
+      const nowMs = Date.now()
+      if (Date.parse(normalized.deadline_at) <= nowMs) {
+        const now = new Date(nowMs).toISOString()
+        const expired: WorkerInputDeliveryReceipt = {
+          ...normalized,
+          updated_at: now,
+          state: 'failed',
+          failure: {
+            reason_code: 'input_surface_timeout',
+            reason: 'input delivery setup exceeded the synchronous delivery deadline',
+            certainty: 'not_delivered',
+          },
+          // The synchronous caller has already received this timeout result. A late
+          // receipt write must not manufacture a second Manager notification.
+          manager_notification: { status: 'consumed', consumed_at: now },
+        }
+        receipts.push(expired)
+        return expired
       }
       receipts.push(normalized)
       return normalized
@@ -125,11 +143,11 @@ export class InputDeliveryStore {
       const index = receipts.findIndex((receipt) => receipt.delivery_id === deliveryId)
       if (index < 0) throw new Error(`delivery receipt not found: ${deliveryId}`)
       const receipt = receipts[index]
-      if (receipt.state !== 'pending' || receipt.manager_notification.status !== 'not_required') return receipt
+      if (receipt.state === 'pending' || receipt.manager_notification.status !== 'pending') return receipt
       const next: WorkerInputDeliveryReceipt = {
         ...receipt,
         updated_at: updatedAt,
-        manager_notification: { status: 'pending' },
+        manager_notification: { status: 'consumed', consumed_at: updatedAt },
       }
       receipts[index] = next
       await writeReceiptFile(this.path(workerId), receipts)
@@ -137,10 +155,22 @@ export class InputDeliveryStore {
     })
   }
 
-  async settleDelivered(workerId: string, deliveryId: string, updatedAt: string): Promise<WorkerInputDeliveryReceipt> {
-    return this.mutateReceipt(workerId, deliveryId, (receipt) => {
-      this.assertPending(receipt)
-      return { ...receipt, state: 'delivered', updated_at: updatedAt }
+  async settleDelivered(workerId: string, deliveryId: string, updatedAt: string): Promise<InputDeliverySettlement> {
+    return this.settleIfPending(workerId, deliveryId, (receipt) => {
+      if (Date.parse(receipt.deadline_at) > Date.now()) {
+        return { ...receipt, state: 'delivered', updated_at: updatedAt }
+      }
+      return {
+        ...receipt,
+        state: 'failed',
+        failure: {
+          reason_code: 'submission_unconfirmed_timeout',
+          reason: 'input acceptance could not be confirmed before the synchronous delivery deadline',
+          certainty: 'unknown',
+        },
+        updated_at: updatedAt,
+        manager_notification: { status: 'pending' },
+      }
     })
   }
 
@@ -149,9 +179,8 @@ export class InputDeliveryStore {
     deliveryId: string,
     failure: InputDeliveryFailure,
     updatedAt: string,
-  ): Promise<WorkerInputDeliveryReceipt> {
-    return this.mutateReceipt(workerId, deliveryId, (receipt) => {
-      this.assertPending(receipt)
+  ): Promise<InputDeliverySettlement> {
+    return this.settleIfPending(workerId, deliveryId, (receipt) => {
       return {
         ...receipt,
         state: 'failed',
@@ -168,21 +197,16 @@ export class InputDeliveryStore {
     consumedAt: string,
   ): Promise<WorkerInputDeliveryReceipt> {
     return this.mutateReceipt(workerId, deliveryId, (receipt) => {
-      if (receipt.state === 'pending' || receipt.manager_notification.status !== 'pending') {
+      if (receipt.state === 'pending') {
         throw new Error(`delivery ${deliveryId} has no pending terminal notification`)
       }
+      if (receipt.manager_notification.status !== 'pending') return receipt
       return {
         ...receipt,
         updated_at: consumedAt,
         manager_notification: { status: 'consumed', consumed_at: consumedAt },
       }
     })
-  }
-
-  private assertPending(receipt: WorkerInputDeliveryReceipt): void {
-    if (receipt.state !== 'pending') {
-      throw new Error(`delivery ${receipt.delivery_id} is already terminal (${receipt.state})`)
-    }
   }
 
   private async mutateReceipt(
@@ -196,6 +220,23 @@ export class InputDeliveryStore {
       const next = mutator(receipts[index])
       receipts[index] = next
       return next
+    })
+  }
+
+  private async settleIfPending(
+    workerId: string,
+    deliveryId: string,
+    mutator: (receipt: WorkerInputDeliveryReceipt) => WorkerInputDeliveryReceipt,
+  ): Promise<InputDeliverySettlement> {
+    return this.mutate(workerId, (receipts) => {
+      const index = receipts.findIndex((receipt) => receipt.delivery_id === deliveryId)
+      if (index < 0) throw new Error(`delivery receipt not found: ${deliveryId}`)
+      if (receipts[index].state !== 'pending') {
+        return { receipt: receipts[index], transitioned: false }
+      }
+      const next = mutator(receipts[index])
+      receipts[index] = next
+      return { receipt: next, transitioned: true }
     })
   }
 

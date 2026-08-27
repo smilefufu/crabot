@@ -1,9 +1,9 @@
 /**
  * WorkerInbox —— 每 worker 一个信箱(protocol-agent-v3 §5.5)。
  *
- * 语义:`send_to_worker` 投递永不因状态失败(唯一硬拒绝是 task 已 cancelled,由调用方在
- * 投递前把关,不属于本类职责);安全态(running / idle)即投,不安全态(provision 中、
- * 模态弹窗、化身交接间隙、僵尸态)暂扣,恢复后按序补投。
+ * 语义:安全态(running / idle)即投;不安全态(provision 中、模态弹窗、化身交接间隙、僵尸态)
+ * 可暂扣并按序恢复,但 Manager-originated 的调用会在本次同步尝试内把这类 hold 结算为
+ * failed,不会在工具返回后继续隐藏等待。内部非 Manager 输入仍可使用 hold/requeue。
  *
  * hold 使用理由集合：`waiting_action` / `input_pending` 只允许显式 raw 控制键旁路；
  * provision / handoff 等其它理由属于 exclusive hold，连 raw 也阻断。理由可独立置位和释放，
@@ -44,6 +44,8 @@ export interface InboxItem {
   readonly enqueued_at: string
   /** Stable identity for Manager-originated input. */
   readonly delivery_id?: string
+  /** Absolute synchronous deadline carried with a Manager-originated receipt. */
+  readonly deadline_at?: string
   /** False for untrusted wakeups that must never revive a terminal task. */
   readonly allow_terminal_continuation?: boolean
   /** Process-local receipt; durable truth remains with the producer. */
@@ -78,6 +80,8 @@ export class WorkerInbox {
   private inFlight: InboxItem | null = null
   /** Items pasted into a CLI composer: UI owns the text, but durable receipts still need settlement. */
   private consumedPending: InboxItem[] = []
+  /** A receipt callback is settling after adapter acceptance; timeout cannot claim it was safely withdrawn. */
+  private readonly settlingDeliveries = new Set<string>()
   /** Serializes queue state transitions shared by flush and cancellation. */
   private readonly mutex = new AsyncMutex()
   /** Prevents two flush drivers from delivering concurrently without holding the state mutex across adapter IO. */
@@ -153,6 +157,7 @@ export class WorkerInbox {
     return this.mutex.run(async () => {
       if (
         this.inFlight?.delivery_id === deliveryId ||
+        this.settlingDeliveries.has(deliveryId) ||
         this.consumedPending.some((item) => item.delivery_id === deliveryId)
       ) {
         return 'unsafe'
@@ -162,6 +167,25 @@ export class WorkerInbox {
       this.queue.splice(index, 1)
       return 'cancelled'
     })
+  }
+
+  /**
+   * Deadline cleanup cannot wait behind an adapter settlement that is itself blocked on I/O.
+   * JavaScript executes these ownership checks and queue removal atomically; an in-flight or
+   * settling item is conservatively unsafe rather than being claimed as withdrawn.
+   */
+  cancelDeliveryImmediately(deliveryId: string): 'cancelled' | 'unsafe' | 'not_found' {
+    if (
+      this.inFlight?.delivery_id === deliveryId ||
+      this.settlingDeliveries.has(deliveryId) ||
+      this.consumedPending.some((item) => item.delivery_id === deliveryId)
+    ) {
+      return 'unsafe'
+    }
+    const index = this.queue.findIndex((item) => item.delivery_id === deliveryId)
+    if (index < 0) return 'not_found'
+    this.queue.splice(index, 1)
+    return 'cancelled'
   }
 
   /** Remove an undelivered non-durable item by identity (used by control preflight failure). */
@@ -193,7 +217,7 @@ export class WorkerInbox {
    * 视为"确定未投递"的快照,不会把正在投递、随后可能投递成功的条目也一并当作
    * dead-letter 带走,避免同一条目既真正投递、又混进 dead-letter 批次重复投递。
    *
-   * pending:返回队列中的待投条数。注意:在 await deliver() 期间,该条已从 queue
+   * `pending` 仅是内部队列/诊断计数,不是 `send_to_worker` 的公开状态。注意:在 await deliver() 期间,该条已从 queue
    * 取出(shift),所以 pending 不计入 in-flight 条目。
    */
   async flush(
@@ -285,6 +309,7 @@ export class WorkerInbox {
 
   private async settle(item: InboxItem, settlement: InboxSettlement, detail?: InboxSettlementDetail): Promise<void> {
     if (!item.onSettled) return
+    if (item.delivery_id) this.settlingDeliveries.add(item.delivery_id)
     try {
       if (detail) await item.onSettled(settlement, detail)
       else await item.onSettled(settlement)
@@ -293,6 +318,8 @@ export class WorkerInbox {
       // would duplicate input; the producer keeps its durable pending receipt and
       // reconciles it without automatically replaying the input.
       console.warn(`[WorkerInbox:${this.workerId}] settlement callback failed:`, error)
+    } finally {
+      if (item.delivery_id) this.settlingDeliveries.delete(item.delivery_id)
     }
   }
 

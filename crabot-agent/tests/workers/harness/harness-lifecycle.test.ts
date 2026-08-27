@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { WorkerHarness, WorkerNotFoundError, TaskCancelledError, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
+import { INPUT_DELIVERY_TIMEOUT_MS, WorkerHarness, WorkerNotFoundError, TaskCancelledError, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import { NativeActivityStore } from '../../../src/workers/harness/native-activity-store'
@@ -245,11 +245,17 @@ function now(): string {
   return new Date(nowValue).toISOString()
 }
 
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 async function makeHarness(
   fakeOpts: FakeAdapterOpts = {},
   depsOverrides: Partial<Pick<
     HarnessDeps,
-    'hasRunningBg' | 'capabilityBundle' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason'
+    'hasRunningBg' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason'
   >> = {},
 ): Promise<{
   harness: WorkerHarness
@@ -621,7 +627,7 @@ describe('WorkerHarness.spawnWorker', () => {
   })
 
   it('CLI首投not_pasted先落waiting_action，再由raw解除hold并按FIFO只补投一次原prompt', async () => {
-    const { harness, fake } = await makeHarness({
+    const { harness, fake, workersDir } = await makeHarness({
       implId: 'claude-code',
       spawnInitialInput: {
         control_state: 'waiting_action',
@@ -1782,7 +1788,7 @@ describe('WorkerHarness.sendToWorker', () => {
     ])
   })
 
-  it('输入面暂不可用时返回 pending，而不是伪装成 sent', async () => {
+  it('输入面暂不可用时同步返回 failed，而不是留下 pending', async () => {
     const { harness, workersDir } = await makeHarness({
       implId: 'claude-code',
       sendInputBehavior: () => {
@@ -1796,23 +1802,24 @@ describe('WorkerHarness.sendToWorker', () => {
     })
 
     expect(result).toMatchObject({
-      status: 'pending',
+      status: 'failed',
       worker_id: worker.worker_id,
-      pending_reason: 'waiting_for_safe_input',
+      reason_code: 'input_surface_timeout',
+      certainty: 'not_delivered',
     })
     const persisted = JSON.parse(
       await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
     ) as { receipts: Array<Record<string, unknown>> }
     expect(persisted.receipts[0]).toMatchObject({
       delivery_id: result.delivery_id,
-      state: 'pending',
+      state: 'failed',
       phase: 'waiting_for_safe_input',
-      manager_notification: { status: 'pending' },
+      manager_notification: { status: 'consumed' },
     })
     expect(events.some((event) => event.kind === 'input_sent')).toBe(false)
   })
 
-  it('adapter 已接手后 phase 写失败时保守返回 submission_unconfirmed', async () => {
+  it('adapter 已接手后 phase 写失败时仍同步返回 submission_unconfirmed', async () => {
     const { harness } = await makeHarness({
       implId: 'claude-code',
       sendInputBehavior: () => {
@@ -1837,8 +1844,9 @@ describe('WorkerHarness.sendToWorker', () => {
     })
 
     expect(result).toMatchObject({
-      status: 'pending',
-      pending_reason: 'submission_unconfirmed',
+      status: 'failed',
+      reason_code: 'submission_unconfirmed_timeout',
+      certainty: 'unknown',
     })
   })
 
@@ -1873,7 +1881,7 @@ describe('WorkerHarness.sendToWorker', () => {
   })
 
   it('adapter 已开始投递后抛普通错误时保守结算 unknown', async () => {
-    const { harness, fake } = await makeHarness({
+    const { harness, fake, workersDir } = await makeHarness({
       sendInputBehavior: () => {
         throw new Error('input transport failed')
       },
@@ -1890,6 +1898,13 @@ describe('WorkerHarness.sendToWorker', () => {
       reason_code: 'delivery_attempt_failed',
       reason: 'input transport failed',
       certainty: 'unknown',
+    })
+    const persisted = JSON.parse(
+      await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
+    ) as { receipts: Array<Record<string, unknown>> }
+    expect(persisted.receipts[0]).toMatchObject({
+      state: 'failed',
+      manager_notification: { status: 'consumed' },
     })
   })
 
@@ -1920,7 +1935,7 @@ describe('WorkerHarness.sendToWorker', () => {
     expect(result.reason).not.toContain('sk-testcredential')
   })
 
-  it('kill_worker 清空 pending 输入时以 task_cancelled 结算 receipt', async () => {
+  it('不安全的 held inbox 输入在本次调用内失败，不等待 kill_worker 清理', async () => {
     const { harness, workersDir } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     const inbox = (harness as unknown as {
@@ -1931,7 +1946,11 @@ describe('WorkerHarness.sendToWorker', () => {
     const result = await harness.sendToWorker(worker.worker_id, '尚未进入输入面', {
       managerKey: `test::friend-1` as ManagerKey,
     })
-    expect(result.status).toBe('pending')
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason_code: 'input_surface_timeout',
+      certainty: 'not_delivered',
+    })
 
     await harness.killWorker(worker.worker_id, '用户取消')
 
@@ -1942,10 +1961,10 @@ describe('WorkerHarness.sendToWorker', () => {
       delivery_id: result.delivery_id,
       state: 'failed',
       failure: {
-        reason_code: 'task_cancelled',
-        certainty: 'unknown',
+        reason_code: 'input_surface_timeout',
+        certainty: 'not_delivered',
       },
-      manager_notification: { status: 'pending' },
+      manager_notification: { status: 'consumed' },
     })
   })
 
@@ -1966,9 +1985,8 @@ describe('WorkerHarness.sendToWorker', () => {
       .getInbox(worker.worker_id).pending).toBe(0)
   })
 
-  it('pending 超过 5 分钟后结算失败，通知只有 consumed 后才确认', async () => {
+  it('输入面 stall 在同步调用内结算失败，不依赖后续 sweep 通知', async () => {
     const deliveries: HarnessEvent[] = []
-    let consumed = false
     const { harness, fake, workersDir } = await makeHarness(
       {
         implId: 'claude-code',
@@ -1979,7 +1997,7 @@ describe('WorkerHarness.sendToWorker', () => {
       {
         onOperationNotification: async (_managerKey, event) => {
           deliveries.push(event)
-          return { consumed }
+          return { consumed: true }
         },
       },
     )
@@ -1987,32 +2005,22 @@ describe('WorkerHarness.sendToWorker', () => {
     const result = await harness.sendToWorker(worker.worker_id, '会超时的输入', {
       managerKey: `test::friend-1` as ManagerKey,
     })
-    expect(result.status).toBe('pending')
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason_code: 'input_surface_timeout',
+      certainty: 'not_delivered',
+    })
 
-    nowValue += 5 * 60_000
-    await harness.sweepLiveness()
-    let persisted = JSON.parse(
+    const persisted = JSON.parse(
       await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
     ) as { receipts: Array<Record<string, any>> }
     expect(persisted.receipts[0]).toMatchObject({
       state: 'failed',
       failure: { reason_code: 'input_surface_timeout', certainty: 'not_delivered' },
-      manager_notification: { status: 'pending' },
+      manager_notification: { status: 'consumed' },
     })
-    expect(deliveries).toHaveLength(1)
-    expect(deliveries[0].detail?.delivery_id).toBe(result.delivery_id)
+    expect(deliveries).toHaveLength(0)
     expect(fake.sendInputCalls).toHaveLength(1)
-
-    consumed = true
-    await harness.sweepLiveness()
-    persisted = JSON.parse(
-      await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
-    ) as { receipts: Array<Record<string, any>> }
-    expect(persisted.receipts[0].manager_notification.status).toBe('consumed')
-    expect(deliveries).toHaveLength(2)
-
-    await harness.sweepLiveness()
-    expect(deliveries).toHaveLength(2)
   })
 
   it('adapter 永久挂起时仍按 deadline 结算并通知 Manager', async () => {
@@ -2021,56 +2029,70 @@ describe('WorkerHarness.sendToWorker', () => {
     const attempting = new Promise<void>((resolve) => { markAttempting = resolve })
     let releaseAdapter!: () => void
     const adapterGate = new Promise<void>((resolve) => { releaseAdapter = resolve })
-    const { harness, workersDir } = await makeHarness(
-      {
-        sendInputBehavior: async () => {
-          markAttempting()
-          await adapterGate
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowValue)
+    try {
+      const { harness, workersDir } = await makeHarness(
+        {
+          sendInputBehavior: async () => {
+            markAttempting()
+            await adapterGate
+          },
         },
-      },
-      {
-        onOperationNotification: async (_managerKey, event) => {
-          notifications.push(event)
-          return { consumed: true }
+        {
+          onOperationNotification: async (_managerKey, event) => {
+            notifications.push(event)
+            return { consumed: true }
+          },
         },
-      },
-    )
-    const worker = await harness.spawnWorker(spawnParams())
-    const send = harness.sendToWorker(worker.worker_id, 'adapter 卡住的输入', {
-      managerKey: `test::friend-1` as ManagerKey,
-    })
-    await attempting
+      )
+      const worker = await harness.spawnWorker(spawnParams())
+      const send = harness.sendToWorker(worker.worker_id, 'adapter 卡住的输入', {
+        managerKey: `test::friend-1` as ManagerKey,
+      })
+      await attempting
 
-    nowValue += 5 * 60_000
-    const sweepResult = await Promise.race([
-      harness.sweepLiveness().then(() => 'completed'),
-      new Promise<string>((resolve) => setTimeout(() => resolve('timed_out'), 100)),
-    ])
-    expect(sweepResult).toBe('completed')
+      nowValue += 5 * 60_000
+      const sweepResult = await Promise.race([
+        harness.sweepLiveness().then(() => 'completed'),
+        new Promise<string>((resolve) => setTimeout(() => resolve('timed_out'), 100)),
+      ])
+      expect(sweepResult).toBe('completed')
 
-    const persisted = JSON.parse(
-      await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
-    ) as { receipts: Array<Record<string, any>> }
-    expect(persisted.receipts[0]).toMatchObject({
-      state: 'failed',
-      failure: { reason_code: 'submission_unconfirmed_timeout', certainty: 'unknown' },
-      manager_notification: { status: 'consumed' },
-    })
-    expect(notifications).toHaveLength(1)
-    expect(notifications[0]).toMatchObject({
-      kind: 'input_delivery_failed',
-      detail: { reason_code: 'submission_unconfirmed_timeout', certainty: 'unknown' },
-    })
+      const persisted = JSON.parse(
+        await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
+      ) as { receipts: Array<Record<string, any>> }
+      expect(persisted.receipts[0]).toMatchObject({
+        state: 'failed',
+        failure: { reason_code: 'submission_unconfirmed_timeout', certainty: 'unknown' },
+        manager_notification: { status: 'consumed' },
+      })
+      expect(notifications).toHaveLength(1)
+      expect(notifications[0]).toMatchObject({
+        kind: 'input_delivery_failed',
+        detail: { reason_code: 'submission_unconfirmed_timeout', certainty: 'unknown' },
+      })
 
-    releaseAdapter()
-    await expect(send).resolves.toMatchObject({
-      status: 'failed',
-      reason_code: 'submission_unconfirmed_timeout',
-      certainty: 'unknown',
-    })
+      releaseAdapter()
+      await expect(send).resolves.toMatchObject({
+        status: 'failed',
+        reason_code: 'submission_unconfirmed_timeout',
+        certainty: 'unknown',
+      })
+      expect((await harness.readWorkerEvents(worker.worker_id)).filter((event) => event.kind === 'input_sent')).toEqual([])
+      expect(JSON.parse(
+        await fs.readFile(join(workersDir, worker.worker_id, 'input-deliveries.json'), 'utf8'),
+      )).toMatchObject({
+        receipts: [expect.objectContaining({
+          state: 'failed',
+          failure: expect.objectContaining({ reason_code: 'submission_unconfirmed_timeout' }),
+        })],
+      })
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 
-  it('启动恢复把未结算输入标为 unknown 失败，且不自动重发', async () => {
+  it('同步投递确认不确定时立即返回 unknown，且不自动重发', async () => {
     const notifications: HarnessEvent[] = []
     const { harness, fake, workersDir } = await makeHarness(
       {
@@ -2090,7 +2112,11 @@ describe('WorkerHarness.sendToWorker', () => {
     const result = await harness.sendToWorker(worker.worker_id, '可能已经 paste', {
       managerKey: `test::friend-1` as ManagerKey,
     })
-    expect(result.status).toBe('pending')
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason_code: 'submission_unconfirmed_timeout',
+      certainty: 'unknown',
+    })
     expect(fake.sendInputCalls).toHaveLength(1)
 
     await harness.reconcileInputDeliveriesOnStartup()
@@ -2101,10 +2127,254 @@ describe('WorkerHarness.sendToWorker', () => {
     ) as { receipts: Array<Record<string, any>> }
     expect(persisted.receipts[0]).toMatchObject({
       state: 'failed',
-      failure: { reason_code: 'confirmation_lost_after_restart', certainty: 'unknown' },
+      failure: { reason_code: 'submission_unconfirmed_timeout', certainty: 'unknown' },
       manager_notification: { status: 'consumed' },
     })
-    expect(notifications[0].detail?.text).toMatch(/禁止盲目重发/)
+    expect(notifications).toHaveLength(0)
+  })
+
+  it('adapter 不响应取消时，Harness wall-clock deadline 仍结算同步投递', async () => {
+    try {
+      const { harness } = await makeHarness()
+      const worker = await harness.spawnWorker(spawnParams())
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const flush = vi.spyOn(harness as unknown as { flushInbox: () => Promise<void> }, 'flushInbox')
+        .mockImplementation(() => new Promise<void>(() => {}))
+      const send = harness.sendToWorker(worker.worker_id, '永不返回的输入', {
+        managerKey: `test::friend-1` as ManagerKey,
+      })
+      await new Promise<void>((resolve) => {
+        const check = () => flush.mock.calls.length > 0 ? resolve() : setImmediate(check)
+        check()
+      })
+      await vi.advanceTimersByTimeAsync(INPUT_DELIVERY_TIMEOUT_MS)
+
+      await expect(send).resolves.toMatchObject({
+        status: 'failed',
+        reason_code: 'input_surface_timeout',
+        certainty: 'not_delivered',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('receipt 结果读取永久挂起时仍受同一同步 deadline 约束', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const receiptStore = (harness as unknown as {
+      inputDeliveryStore: {
+        readForToolResult(workerId: string, deliveryId: string, updatedAt: string): Promise<unknown>
+      }
+    }).inputDeliveryStore
+    const readEntered = deferred()
+    const readForToolResult = vi.spyOn(receiptStore, 'readForToolResult')
+      .mockImplementation(() => {
+        readEntered.resolve()
+        return new Promise<never>(() => {})
+      })
+
+    const send = harness.sendToWorker(worker.worker_id, '结果读取卡住的输入', {
+      managerKey: `test::friend-1` as ManagerKey,
+      deadline_at: new Date(Date.now() + 1_000).toISOString(),
+    })
+    await readEntered.promise
+    expect(readForToolResult).toHaveBeenCalledTimes(1)
+
+    await expect(send).resolves.toMatchObject({
+      status: 'failed',
+      reason_code: 'submission_unconfirmed_timeout',
+      certainty: 'unknown',
+    })
+  })
+
+  it('state hook 持有 worker 锁时，waitForStateChanges 仍受同一同步 deadline 约束', async () => {
+    const stateEventEntered = deferred()
+    const releaseStateEvent = deferred()
+    const onEvent = vi.fn((event: HarnessEvent) => {
+      events.push(event)
+      if (event.kind !== 'state_changed') return undefined
+      stateEventEntered.resolve()
+      return releaseStateEvent.promise
+    })
+    const { harness, fake } = await makeHarness({}, { onEvent })
+    const worker = await harness.spawnWorker(spawnParams())
+    onEvent.mockClear()
+    vi.spyOn(fake, 'sendInput').mockImplementation(async (handle) => {
+      harness.handleStateChange(handle, 'idle')
+    })
+
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      vi.setSystemTime(new Date(nowValue))
+      const send = harness.sendToWorker(worker.worker_id, 'state hook 卡住的输入', {
+        managerKey: `test::friend-1` as ManagerKey,
+      })
+      await stateEventEntered.promise
+
+      await vi.advanceTimersByTimeAsync(INPUT_DELIVERY_TIMEOUT_MS)
+      await expect(send).resolves.toMatchObject({
+        status: 'failed',
+        reason_code: 'submission_unconfirmed_timeout',
+        certainty: 'unknown',
+      })
+    } finally {
+      releaseStateEvent.resolve()
+      for (let step = 0; step < 5; step++) await Promise.resolve()
+      vi.useRealTimers()
+    }
+  })
+
+  it('跨 Manager 投递不等待永不返回的状态事件路由', async () => {
+    const stateEventEntered = deferred()
+    const releaseStateEvent = deferred()
+    const onEvent = vi.fn((event: HarnessEvent) => {
+      if (event.kind !== 'state_changed') return undefined
+      stateEventEntered.resolve()
+      return releaseStateEvent.promise
+    })
+    const { harness, fake } = await makeHarness({}, { onEvent })
+    const worker = await harness.spawnWorker(spawnParams())
+    onEvent.mockClear()
+    vi.spyOn(fake, 'sendInput').mockImplementation(async (handle) => {
+      harness.handleStateChange(handle, 'idle')
+    })
+
+    try {
+      const send = harness.sendToWorker(worker.worker_id, '跨 manager 的输入', {
+        managerKey: `test::friend-2` as ManagerKey,
+      })
+      await stateEventEntered.promise
+      await expect(send).resolves.toMatchObject({ status: 'delivered' })
+
+      expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'state_changed' }))
+    } finally {
+      releaseStateEvent.resolve()
+    }
+  })
+
+  it('terminal revive 准备跨 deadline 后不再调用 adapter.resume', async () => {
+    const { harness, fake } = await makeHarness({ caps: { revive: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'builtin',
+      session_ref: `ref-${worker.worker_id}#1`,
+    }, 'exited', undefined, 'completed')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'completed')
+    const reviveHarness = harness as unknown as {
+      establishCliResumeActivityBaseline(workerId: string, source: unknown, adapter: unknown): Promise<number | undefined>
+      settlePendingInputFailure(...args: unknown[]): Promise<unknown>
+    }
+    const baselineEntered = deferred()
+    const releaseBaseline = deferred()
+    const timeoutSettlementDone = deferred()
+    vi.spyOn(reviveHarness, 'establishCliResumeActivityBaseline').mockImplementation(async () => {
+      baselineEntered.resolve()
+      await releaseBaseline.promise
+      return undefined
+    })
+    const settlePendingInputFailure = reviveHarness.settlePendingInputFailure.bind(reviveHarness)
+    vi.spyOn(reviveHarness, 'settlePendingInputFailure').mockImplementation(async (...args) => {
+      const settled = await settlePendingInputFailure(...args)
+      timeoutSettlementDone.resolve()
+      return settled
+    })
+    const resume = vi.spyOn(fake, 'resume').mockImplementation(() => new Promise<never>(() => {}))
+
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      vi.setSystemTime(new Date(nowValue))
+      const send = harness.sendToWorker(worker.worker_id, '终态后继续，但不能晚到 revive', {
+        managerKey: `test::friend-1` as ManagerKey,
+      })
+      await baselineEntered.promise
+
+      await vi.advanceTimersByTimeAsync(INPUT_DELIVERY_TIMEOUT_MS)
+      const result = await send
+      expect(result).toMatchObject({
+        status: 'failed',
+        reason_code: 'submission_unconfirmed_timeout',
+        certainty: 'unknown',
+      })
+      await timeoutSettlementDone.promise
+
+      releaseBaseline.resolve()
+      for (let step = 0; step < 5; step++) await Promise.resolve()
+      expect(resume).not.toHaveBeenCalled()
+    } finally {
+      releaseBaseline.resolve()
+      vi.useRealTimers()
+    }
+  })
+
+  it('terminal handoff 准备跨 deadline 后不写 handoff_started 或启动目标 adapter', async () => {
+    const { harness, fake, adaptersMap } = await makeHarness({ caps: { revive: false } })
+    const target = new FakeAdapter({
+      implId: 'claude-code',
+      onStateChange: harness.handleStateChange,
+    })
+    adaptersMap.set(target.implId, target)
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'builtin',
+      session_ref: `ref-${worker.worker_id}#1`,
+    }, 'exited', undefined, 'completed')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'completed')
+
+    const handoffHarness = harness as unknown as {
+      captureHandoffPackage(...args: unknown[]): Promise<unknown>
+      settlePendingInputFailure(...args: unknown[]): Promise<unknown>
+    }
+    const captureEntered = deferred()
+    const releaseCapture = deferred()
+    const captureFinished = deferred()
+    const timeoutSettlementDone = deferred()
+    const captureHandoffPackage = handoffHarness.captureHandoffPackage.bind(handoffHarness)
+    vi.spyOn(handoffHarness, 'captureHandoffPackage').mockImplementation(async (...args) => {
+      captureEntered.resolve()
+      await releaseCapture.promise
+      const handoff = await captureHandoffPackage(...args)
+      captureFinished.resolve()
+      return handoff
+    })
+    const settlePendingInputFailure = handoffHarness.settlePendingInputFailure.bind(handoffHarness)
+    vi.spyOn(handoffHarness, 'settlePendingInputFailure').mockImplementation(async (...args) => {
+      const settled = await settlePendingInputFailure(...args)
+      timeoutSettlementDone.resolve()
+      return settled
+    })
+
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      vi.setSystemTime(new Date(nowValue))
+      const send = harness.sendToWorker(worker.worker_id, '终态后继续，但不能晚到 handoff', {
+        managerKey: `test::friend-1` as ManagerKey,
+      })
+      await captureEntered.promise
+
+      await vi.advanceTimersByTimeAsync(INPUT_DELIVERY_TIMEOUT_MS)
+      await expect(send).resolves.toMatchObject({
+        status: 'failed',
+        reason_code: 'submission_unconfirmed_timeout',
+        certainty: 'unknown',
+      })
+      await timeoutSettlementDone.promise
+
+      releaseCapture.resolve()
+      await captureFinished.promise
+      for (let step = 0; step < 5; step++) await Promise.resolve()
+
+      expect((await harness.readWorkerEvents(worker.worker_id))
+        .filter((event) => event.kind === 'handoff_started')).toEqual([])
+      expect(target.spawnCalls).toEqual([])
+    } finally {
+      releaseCapture.resolve()
+      vi.useRealTimers()
+    }
   })
 
   it('正常投递:running worker 收到输入,adapter.sendInput 被正确调用,事件 input_sent 外发', async () => {
@@ -2145,6 +2415,60 @@ describe('WorkerHarness.sendToWorker', () => {
     expect(fake.interruptCalls).toHaveLength(1)
     expect(fake.sendInputCalls).toHaveLength(1)
     expect(fake.sendInputCalls[0].opts).toMatchObject({ immediate_redirect: true })
+  })
+
+  it('immediate_redirect 等待 worker 锁越过 deadline 时不补发 interrupt', async () => {
+    const { harness, fake } = await makeHarness({ implId: 'claude-code' })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const receiptStore = (harness as unknown as {
+      inputDeliveryStore: { create(receipt: unknown): Promise<unknown> }
+    }).inputDeliveryStore
+    const createReceipt = receiptStore.create.bind(receiptStore)
+    const createEntered = deferred()
+    const releaseCreate = deferred()
+    vi.spyOn(receiptStore, 'create').mockImplementation(async (receipt) => {
+      createEntered.resolve()
+      await releaseCreate.promise
+      return createReceipt(receipt)
+    })
+    const blockerEntered = deferred()
+    const releaseBlocker = deferred()
+    const lockedHarness = harness as unknown as {
+      withLock<T>(workerId: string, fn: () => Promise<T>): Promise<T>
+    }
+
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      vi.setSystemTime(new Date(nowValue))
+      const send = harness.sendToWorker(worker.worker_id, 'deadline 后不可打断旧任务', {
+        managerKey: `test::friend-1` as ManagerKey,
+        immediate_redirect: true,
+      })
+      await createEntered.promise
+      const blocker = lockedHarness.withLock(worker.worker_id, async () => {
+        blockerEntered.resolve()
+        await releaseBlocker.promise
+      })
+      releaseCreate.resolve()
+      await blockerEntered.promise
+
+      await vi.advanceTimersByTimeAsync(INPUT_DELIVERY_TIMEOUT_MS)
+      await expect(send).resolves.toMatchObject({
+        status: 'failed',
+        reason_code: 'input_surface_timeout',
+        certainty: 'not_delivered',
+      })
+      expect(fake.interruptCalls).toEqual([])
+
+      releaseBlocker.resolve()
+      await blocker
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(fake.interruptCalls).toEqual([])
+    } finally {
+      releaseCreate.resolve()
+      releaseBlocker.resolve()
+      vi.useRealTimers()
+    }
   })
 
   it('builtin immediate_redirect 不调用 interrupt', async () => {
