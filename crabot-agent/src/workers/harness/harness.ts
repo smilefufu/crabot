@@ -3712,7 +3712,8 @@ export class WorkerHarness {
   }
 
   private async deliverQueryOperationNotificationForWorker(workerId: string): Promise<void> {
-    if (!this.deps.onOperationNotification) return
+    const notify = this.deps.onOperationNotification
+    if (!notify) return
     const mutex = this.queryNotificationMutexes.get(workerId) ?? new AsyncMutex()
     this.queryNotificationMutexes.set(workerId, mutex)
     await mutex.run(async () => {
@@ -3740,7 +3741,7 @@ export class WorkerHarness {
           },
         )
         try {
-          const delivery = await this.deps.onOperationNotification(receipt.manager_key, event)
+          const delivery = await notify(receipt.manager_key, event)
           if (delivery?.consumed === true) {
             await this.queryReceiptStore.markNotificationConsumed(
               receipt.worker_id,

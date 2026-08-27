@@ -201,9 +201,11 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   let prevDataDir: string | undefined
   let prevAgentDataDir: string | undefined
   let llm: ReturnType<typeof makeScriptedLLM>
+  const agents = new Set<UnifiedAgent>()
 
   function boot(config: UnifiedAgentConfig = makeConfig({})): { agent: UnifiedAgent; internals: AgentInternals } {
     const agent = new UnifiedAgent(config)
+    agents.add(agent)
     const internals = agent as unknown as AgentInternals
     internals.adminPort = 1
     return { agent, internals }
@@ -222,6 +224,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   })
 
   afterEach(async () => {
+    await Promise.all([...agents].map((agent) => agent.stop().catch(() => undefined)))
+    agents.clear()
     vi.restoreAllMocks()
     if (prevDataDir === undefined) delete process.env.DATA_DIR
     else process.env.DATA_DIR = prevDataDir

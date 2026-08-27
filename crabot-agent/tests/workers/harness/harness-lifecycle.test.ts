@@ -3014,7 +3014,7 @@ describe('WorkerHarness.queryWorker', () => {
     expect(onDisk.filter((e) => e.detail?.query_id === result.query_id)).toHaveLength(1)
   })
 
-  it('回答终态通知在 deferred/route throw 时保持 pending，只有 consumed 后停止重报', async () => {
+  it('回答终态通知可在终态回调后立即投递，deferred/route throw 时保持 pending，consumed 后停止重报', async () => {
     const notifications: HarnessEvent[] = []
     let attempt = 0
     const { harness, fake, workersDir } = await makeHarness(
@@ -3044,8 +3044,6 @@ describe('WorkerHarness.queryWorker', () => {
     const queryStore = (harness as unknown as { queryReceiptStore: QueryReceiptStore }).queryReceiptStore
     await waitUntil(async () => (await queryStore.get(worker.worker_id, result.query_id))?.state === 'completed')
 
-    await harness.sweepLiveness()
-    expect((await queryStore.get(worker.worker_id, result.query_id))?.manager_notification.status).toBe('pending')
     await harness.sweepLiveness()
     expect((await queryStore.get(worker.worker_id, result.query_id))?.manager_notification.status).toBe('pending')
     await harness.sweepLiveness()
