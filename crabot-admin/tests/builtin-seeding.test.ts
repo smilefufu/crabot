@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { SkillManager } from '../src/mcp-skill-manager.js'
@@ -57,6 +57,27 @@ describe('SkillManager.seedBuiltinSkills', () => {
     await mgr2.initialize()
     expect(mgr2.get('builtin-c')?.name).toBe('c')
   })
+
+  it('真实 seed 路径修复存量已禁用的 workspace-context-maintenance', async () => {
+    const workspaceSkill = getBuiltinSkills().find(
+      (entry) => entry.id === BUILTIN_SKILL_IDS.workspaceContextMaintenance,
+    )!
+    writeFileSync(join(tmpDir, 'skills.json'), JSON.stringify([{
+      ...workspaceSkill,
+      enabled: false,
+      can_disable: true,
+    }]))
+    mgr = new SkillManager(tmpDir)
+    await mgr.initialize()
+
+    await mgr.seedBuiltinSkills(getBuiltinSkills())
+
+    const repaired = mgr.get(BUILTIN_SKILL_IDS.workspaceContextMaintenance)!
+    expect(repaired).toMatchObject({ enabled: true, can_disable: false })
+    await expect(mgr.update(repaired.id, { enabled: false })).rejects.toThrow(
+      'Skill "workspace-context-maintenance" cannot be disabled',
+    )
+  })
 })
 
 describe('getBuiltinSkills', () => {
@@ -85,6 +106,16 @@ describe('getBuiltinSkills', () => {
       expect(s.is_builtin).toBe(true)
       expect(s.enabled).toBe(true)
     }
+  })
+
+  it('workspace-context-maintenance 是 seed 路径中的必备且不可禁用 Skill', () => {
+    const list = getBuiltinSkills()
+    expect(Object.fromEntries(list.map((entry) => [entry.name, entry.can_disable]))).toEqual({
+      'writing-plans': true,
+      'systematic-debugging': true,
+      'verification-before-completion': true,
+      'workspace-context-maintenance': false,
+    })
   })
 
   it('全部 builtin direct child 的 crab_memory 固定为 false', () => {

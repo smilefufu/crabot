@@ -1612,15 +1612,25 @@ export class SkillManager {
     let changed = false
     const next = new Map(this.skills)
     for (const e of entries) {
+      const isNonDisableable = NON_DISABLEABLE_BUILTIN_SKILL_NAMES.has(e.name)
       const existing = next.get(e.id)
       if (!existing) {
-        next.set(e.id, e)
+        next.set(e.id, isNonDisableable ? { ...e, enabled: true, can_disable: false } : e)
         changed = true
         continue
       }
-      if (!existing.skill_dir && e.skill_dir) {
-        next.set(e.id, { ...existing, skill_dir: e.skill_dir, updated_at: new Date().toISOString() })
-        console.warn(`[SkillManager] Repaired builtin skill "${e.name}" (${e.id}): missing skill_dir → ${e.skill_dir}`)
+      const repairSkillDir = !existing.skill_dir && !!e.skill_dir
+      const repairRequiredState = isNonDisableable && (!existing.enabled || existing.can_disable)
+      if (repairSkillDir || repairRequiredState) {
+        next.set(e.id, {
+          ...existing,
+          ...(repairSkillDir ? { skill_dir: e.skill_dir } : {}),
+          ...(repairRequiredState ? { enabled: true, can_disable: false } : {}),
+          updated_at: new Date().toISOString(),
+        })
+        if (repairSkillDir) {
+          console.warn(`[SkillManager] Repaired builtin skill "${e.name}" (${e.id}): missing skill_dir → ${e.skill_dir}`)
+        }
         changed = true
       }
     }
