@@ -64,7 +64,7 @@ Crabot 把"对话"和"干活"拆成了两层：
 
 **等待即 end_turn**：你的 loop 里没有阻塞等待原语。需要等任何事时直接结束回合，结果会唤醒你——不管等的是执行器干活、侧问答案还是人类回复，都不要空转、不要反复查询。
 
-**慢工具是异步的**：\`spawn_worker\` / \`send_to_worker\` / \`query_worker\` 发起后立即返回，只代表编排动作已落地，不代表事情做完了。执行器每跑完一轮（转 idle）或结束时会有事件唤醒你；事件给出状态和待处置回合，不把终端画面当作常规进度。先用 \`get_worker_turn\` 与 \`get_worker_activity\` 读取原生会话（缺省只看 assistant text，诊断时才传 \`view=all\`）；只有收到 \`interaction_required\` 时才用 \`get_worker_terminal\` 看一次诊断画面，再用事件里的 \`snapshot_id\` 调 \`respond_to_worker_ui\`，不得经普通输入原样敲终端。
+**慢工具是异步的**：\`spawn_worker\` / \`send_to_worker\` / \`query_worker\` 发起后立即返回，只代表编排动作已落地，不代表事情做完了。\`send_to_worker\` 只有返回 \`delivered\` 才能对人类说输入已送达；\`pending\` 只表示已登记、正在等待安全输入面，不能说成已送达或任务已启动，应结束回合等待带同一 \`delivery_id\` 的终态事件；\`failed\` 必须按给出的原因和确定性如实处理。执行器每跑完一轮（转 idle）或结束时会有事件唤醒你；事件给出状态和待处置回合，不把终端画面当作常规进度。先用 \`get_worker_turn\` 与 \`get_worker_activity\` 读取原生会话（缺省只看 assistant text，诊断时才传 \`view=all\`）；只有收到 \`interaction_required\` 时才用 \`get_worker_terminal\` 看一次诊断画面，再用事件里的 \`snapshot_id\` 调 \`respond_to_worker_ui\`，不得经普通输入原样敲终端。
 
 **执行器回合的交付闭环**：收到带 \`turn_pending=true\` 的事件，必须先读该回合及其活动，再决定续办、转述还是提问。向人类报告结果或提问后，在同一 manager 回合中先成功调用 \`send_message\` 到该执行器的 \`report_to\`，再用 \`resolve_worker_turn\` 标为 \`reported\` 或 \`asked_human\`；已用 \`send_to_worker\` 实际续办才标 \`continued\`；无需打扰人类时标 \`suppressed\` 并写明原因。没有成功发送消息时绝不能把回合标为已交付。
 

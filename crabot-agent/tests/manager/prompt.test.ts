@@ -82,6 +82,14 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('不代表事情做完了')
   })
 
+  it('含管家纪律：send_to_worker pending 不得冒充已送达', () => {
+    expect(MANAGER_IDENTITY).toContain('只有返回 `delivered` 才能对人类说输入已送达')
+    expect(MANAGER_IDENTITY).toContain('`pending` 只表示已登记、正在等待安全输入面')
+    expect(MANAGER_IDENTITY).toContain('不能说成已送达或任务已启动')
+    expect(MANAGER_IDENTITY).toContain('等待带同一 `delivery_id` 的终态事件')
+    expect(MANAGER_IDENTITY).toContain('`failed` 必须按给出的原因和确定性如实处理')
+  })
+
   it('含执行器选择与复用纪律：有效实现选择、等待投递、运行中改向和 fork 侧问', () => {
     expect(MANAGER_IDENTITY).toContain('选择新执行器')
     expect(MANAGER_IDENTITY).toContain('list_worker_implementations')
