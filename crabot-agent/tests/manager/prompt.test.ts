@@ -18,20 +18,20 @@ function baseInputs(overrides: Partial<PromptInputs> = {}): PromptInputs {
 }
 
 describe('MANAGER_IDENTITY 静态段内容', () => {
-  it('含身份自述：你是 Crabot 的 manager，负责会话的对话与 worker 管理', () => {
+  it('含身份自述：你是 Crabot 的 manager，负责会话的对话与执行器管理', () => {
     expect(MANAGER_IDENTITY).toContain('你是 Crabot 的 manager')
-    expect(MANAGER_IDENTITY).toContain('对话与 worker 管理')
+    expect(MANAGER_IDENTITY).toContain('对话与执行器管理')
   })
 
-  it('含 crabot 架构自述：manager/worker 拆分、worker 多种实现、manager 自己不干活', () => {
-    expect(MANAGER_IDENTITY).toContain('worker 有多种实现')
+  it('含 crabot 架构自述：manager/执行器拆分、执行器多种实现、manager 自己不干活', () => {
+    expect(MANAGER_IDENTITY).toContain('执行器有多种实现')
     expect(MANAGER_IDENTITY).toContain('内置 loop')
     expect(MANAGER_IDENTITY).toContain('claude code')
     expect(MANAGER_IDENTITY).toContain('codex')
     expect(MANAGER_IDENTITY).toContain('你自己不干活')
     expect(MANAGER_IDENTITY).toContain('派活、送话、侧问、查状态/原生会话、看终端、回应未知界面、请求中断或停止')
     expect(MANAGER_IDENTITY).toContain('get_worker_terminal')
-    expect(MANAGER_IDENTITY).toContain('worker 与人类之间隔着你')
+    expect(MANAGER_IDENTITY).toContain('执行器与人类之间隔着你')
   })
 
   it('含管家纪律：按预计工作路径动态决定直接答或确认后继续', () => {
@@ -82,15 +82,20 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('不代表事情做完了')
   })
 
-  it('含管家纪律：先复用已有 worker（send_to_worker 对终态自动复活，spawn_worker 留给新任务）', () => {
-    // 机制侧 harness.sendToWorker 早已透明分流（补送 / 复活），但 LLM 只能从 prompt 得知；
-    // 缺这一段，manager 面对延续性请求会一律 spawn_worker 开新的、丢掉旧上下文。
-    expect(MANAGER_IDENTITY).toContain('先复用已有 worker')
+  it('含执行器选择与复用纪律：有效实现选择、等待投递、运行中改向和 fork 侧问', () => {
+    expect(MANAGER_IDENTITY).toContain('选择新执行器')
+    expect(MANAGER_IDENTITY).toContain('list_worker_implementations')
+    expect(MANAGER_IDENTITY).toContain('enabled=true')
+    expect(MANAGER_IDENTITY).toContain('ready=true')
+    expect(MANAGER_IDENTITY).toContain('短平快的小操作在 builtin 也有效时优先 builtin')
+    expect(MANAGER_IDENTITY).toContain('复用已有执行器与投递')
     expect(MANAGER_IDENTITY).toContain('list_workers')
     expect(MANAGER_IDENTITY).toContain('自动复活')
     expect(MANAGER_IDENTITY).toContain('list_workers(include_terminal=true)')
-    expect(MANAGER_IDENTITY).toContain('不能因为默认 active 列表里没有就直接 spawn')
-    expect(MANAGER_IDENTITY).toContain('另起炉灶的新任务')
+    expect(MANAGER_IDENTITY).toContain('不设置 `immediate_redirect`')
+    expect(MANAGER_IDENTITY).toContain('immediate_redirect=true')
+    expect(MANAGER_IDENTITY).toContain('query_worker')
+    expect(MANAGER_IDENTITY).toContain('fork')
   })
 
   it('慢工具纪律不再承诺"进展会唤醒你、不需要主动轮询"，而是如实说明唤醒粒度是轮次边界', () => {
@@ -101,12 +106,12 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('get_worker_terminal')
   })
 
-  it('含管家纪律：结论拿不到先回去问 worker（这是 manager 自己能解决的事）', () => {
+  it('含管家纪律：结论拿不到先回去问执行器（这是 manager 自己能解决的事）', () => {
     // 生产故障：每日反思 worker 全程只调工具、finish_task 收场，manager 手里拿不到交付物，
     // 直接跟人类说"请检查执行实例的输出链路"。机制侧 send_to_worker 对终态 worker 会透明
     // 复活、上下文完整保留 —— 缺的不是能力，是 prompt 里"先复用已有 worker"那段讲的是
     // **新请求进来**该怎么办，"任务完成了但交付物拿不到"是另一个场景，一个字没提。
-    expect(MANAGER_IDENTITY).toContain('结论拿不到就回去问 worker')
+    expect(MANAGER_IDENTITY).toContain('结论拿不到就回去问执行器')
     expect(MANAGER_IDENTITY).toContain('send_to_worker')
     expect(MANAGER_IDENTITY).toContain('完整上下文')
     expect(MANAGER_IDENTITY).toContain('才轮到找人类')
@@ -186,6 +191,7 @@ describe('assembleManagerSystemPrompt 稳定装配', () => {
         'list_workers',
         'request_worker_interrupt',
         'request_worker_stop',
+        'list_worker_implementations',
         // crabot-info 工具
         'get_system_status',
         'get_deployment_info',

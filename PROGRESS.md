@@ -7,11 +7,11 @@
 
 ### P6 已完成；Manager -> Worker 输入与侧问可靠交付待 PR review
 
-### 运行态立即改向：实现完成，待 prompt 确认
+### 运行态立即改向：实现完成
 
 - `send_to_worker` 已增加可选 `immediate_redirect`。非 builtin 由 Harness 先执行并核验既有 interrupt operation，再投递改向文本；builtin 不 abort，下一轮 LLM 调用前优先消费该输入；普通排队文本不得越过 redirect。
 - Claude/Codex interrupt 使用 Escape；每次按键后等待并 capture，只有画面仍明确显示执行态且发生可观察变化才允许再按，禁止 100ms 连按或预排队。相关协议/已有设计文档已同步，临时 spec 已删除。
-- Manager prompt 尚未修改，待确认改前/改后 diff 后再决定是否写入。
+- Manager prompt 已统一使用“执行器”表述：新任务按有效实现、部署偏好与短任务 builtin 偏好选择；复用旧上下文时按等待投递、运行中补充/纠偏或 fork 侧问分流。
 
 ### 本地宿主工具大文件安全与进程隔离：实施完成，待非 Draft PR review
 
