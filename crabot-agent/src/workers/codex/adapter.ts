@@ -84,6 +84,9 @@ import type { SupervisionObservation } from '../types.js'
 
 const execFileAsync = promisify(execFile)
 const INTERACTION_PROBE_DELAYS_MS = [100, 200, 400, 800, 1600] as const
+// Escape must be separated by a visible TUI update; rapid repeats can open
+// Codex history/revert UI instead of interrupting the active turn.
+const INTERRUPT_PROBE_DELAYS_MS = [300, 600, 1200, 2400] as const
 
 /** spawn/resume 都要带的主命令级选项:放行 workspace-write 沙箱的出网。见文件头
  * "spawn/resume 启动参数"节。取值只含 `[A-Za-z_.=]`,不含 shell 元字符,拼进经 `sh -c`
@@ -1924,8 +1927,20 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (!runtime || runtime.controlState.kind === 'exited') return
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.controlState.kind === 'exited') return
-      await this.tmux.sendKeys(runtime.sessionName, ['C-c'])
-      await this.confirmInterrupt(runtime, h)
+      if (runtime.controlState.kind === 'waiting_text') return
+      const before = await this.capture(runtime).catch(() => undefined)
+      if (!before) return
+      // Never press Escape against an idle primary composer: it is a history
+      // action there, not an interrupt.
+      if (runtime.controlState.kind === 'running' && !codexIsWorking(before)) {
+        if (codexPrimaryComposerText(before) !== undefined) {
+          runtime.interactionFingerprint = undefined
+          await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
+        }
+        return
+      }
+      await this.tmux.sendKeys(runtime.sessionName, ['Escape'])
+      await this.confirmInterrupt(runtime, h, before.text)
     })
   }
 
@@ -2367,19 +2382,27 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
   }
 
-  private async confirmInterrupt(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+  private async confirmInterrupt(runtime: Runtime, h: IncarnationHandle, previousText: string): Promise<void> {
     for (let attempt = 0; ; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, INTERRUPT_PROBE_DELAYS_MS[Math.min(attempt, INTERRUPT_PROBE_DELAYS_MS.length - 1)]))
       if (!(await this.tmux.isAlive(runtime.sessionName))) return
       const snapshot = await this.capture(runtime).catch(() => undefined)
       if (!snapshot) return
       const composer = codexPrimaryComposerText(snapshot)
-      if (composer !== undefined && composer.length === 0) {
+      if (composer !== undefined) {
         runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
         return
       }
-      if (attempt === INTERACTION_PROBE_DELAYS_MS.length) return
-      await new Promise((resolve) => setTimeout(resolve, INTERACTION_PROBE_DELAYS_MS[attempt]))
+      // Send the next Escape only after this capture still proves that Codex is
+      // working. No pre-queued or timer-driven key sequence is allowed.
+      if (
+        snapshot.text === previousText ||
+        !codexIsWorking(snapshot) ||
+        attempt >= INTERRUPT_PROBE_DELAYS_MS.length - 1
+      ) return
+      previousText = snapshot.text
+      await this.tmux.sendKeys(runtime.sessionName, ['Escape'])
       if (this.closing || runtime.controlState.kind === 'exited') return
     }
   }

@@ -39,6 +39,8 @@ export interface InboxSettledResult {
 export interface InboxItem {
   readonly text: string
   readonly raw: boolean
+  /** Prioritize this item ahead of ordinary queued text without reordering redirects. */
+  readonly immediate_redirect?: boolean
   readonly enqueued_at: string
   /** Stable identity for Manager-originated input. */
   readonly delivery_id?: string
@@ -86,6 +88,14 @@ export class WorkerInbox {
   /** 入队;返回本次入队后的待投条数 */
   enqueue(item: InboxItem): number {
     this.queue.push(item)
+    return this.queue.length
+  }
+
+  /** Insert a redirect after existing redirects and before ordinary queued text. */
+  enqueuePriority(item: InboxItem): number {
+    const index = this.queue.findIndex((candidate) => candidate.immediate_redirect !== true)
+    if (index < 0) this.queue.push(item)
+    else this.queue.splice(index, 0, item)
     return this.queue.length
   }
 
@@ -148,6 +158,17 @@ export class WorkerInbox {
         return 'unsafe'
       }
       const index = this.queue.findIndex((item) => item.delivery_id === deliveryId)
+      if (index < 0) return 'not_found'
+      this.queue.splice(index, 1)
+      return 'cancelled'
+    })
+  }
+
+  /** Remove an undelivered non-durable item by identity (used by control preflight failure). */
+  async cancelItem(item: InboxItem): Promise<'cancelled' | 'unsafe' | 'not_found'> {
+    return this.mutex.run(async () => {
+      if (this.inFlight === item || this.consumedPending.includes(item)) return 'unsafe'
+      const index = this.queue.indexOf(item)
       if (index < 0) return 'not_found'
       this.queue.splice(index, 1)
       return 'cancelled'

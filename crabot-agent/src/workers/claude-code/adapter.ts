@@ -88,6 +88,9 @@ import type { SupervisionObservation } from '../types.js'
 
 const execFileAsync = promisify(execFile)
 const INTERACTION_PROBE_DELAYS_MS = [100, 200, 400, 800, 1600] as const
+// Escape must be separated by a visible TUI update. A 100ms repeat can enter
+// Claude's revert-history UI instead of interrupting the active turn.
+const INTERRUPT_PROBE_DELAYS_MS = [300, 600, 1200, 2400] as const
 const UI_ACTION_SETTLE_TIMEOUT_MS = 1_000
 const UI_ACTION_SETTLE_INTERVAL_MS = 25
 
@@ -1671,8 +1674,20 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (!runtime || runtime.controlState.kind === 'exited') return
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.controlState.kind === 'exited') return
-      await this.tmux.sendKeys(runtime.sessionName, ['C-c'])
-      await this.confirmInterrupt(runtime, h)
+      if (runtime.controlState.kind === 'waiting_text') return
+      const before = await this.capture(runtime).catch(() => undefined)
+      if (!before) return
+      // Never press Escape against an idle primary composer: in that surface it
+      // opens history/revert UI rather than interrupting work.
+      if (runtime.controlState.kind === 'running' && !/esc to interrupt/i.test(before.text)) {
+        if (claudePrimaryComposerText(before) !== undefined) {
+          runtime.interactionFingerprint = undefined
+          await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
+        }
+        return
+      }
+      await this.tmux.sendKeys(runtime.sessionName, ['Escape'])
+      await this.confirmInterrupt(runtime, h, before.text)
     })
   }
 
@@ -2030,26 +2045,27 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     }
   }
 
-  private async confirmInterrupt(runtime: Runtime, h: IncarnationHandle): Promise<void> {
-    let clearRequested = false
+  private async confirmInterrupt(runtime: Runtime, h: IncarnationHandle, previousText: string): Promise<void> {
     for (let attempt = 0; ; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, INTERRUPT_PROBE_DELAYS_MS[Math.min(attempt, INTERRUPT_PROBE_DELAYS_MS.length - 1)]))
       if (!(await this.tmux.isAlive(runtime.sessionName))) return
       const snapshot = await this.capture(runtime).catch(() => undefined)
       if (!snapshot) return
       const composer = claudePrimaryComposerText(snapshot)
-      if (composer !== undefined && composer.length === 0) {
+      if (composer !== undefined) {
         runtime.interactionFingerprint = undefined
         await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
         return
       }
-      if (composer !== undefined && !clearRequested) {
-        // Claude retains the interrupted request in the primary composer. A
-        // second Ctrl-C clears that known residual without changing unknown UI.
-        await this.tmux.sendKeys(runtime.sessionName, ['C-c'])
-        clearRequested = true
-      }
-      if (attempt === INTERACTION_PROBE_DELAYS_MS.length) return
-      await new Promise((resolve) => setTimeout(resolve, INTERACTION_PROBE_DELAYS_MS[attempt]))
+      // Only send another Escape after this capture still proves that the turn
+      // is running. Never pre-schedule or batch Escape presses.
+      if (
+        snapshot.text === previousText ||
+        !/esc to interrupt/i.test(snapshot.text) ||
+        attempt >= INTERRUPT_PROBE_DELAYS_MS.length - 1
+      ) return
+      previousText = snapshot.text
+      await this.tmux.sendKeys(runtime.sessionName, ['Escape'])
       if (this.closing || runtime.controlState.kind === 'exited') return
     }
   }

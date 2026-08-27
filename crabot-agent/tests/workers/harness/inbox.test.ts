@@ -13,6 +13,19 @@ describe('WorkerInbox', () => {
     expect(inbox.pending).toBe(2)
   })
 
+  it('immediate redirect 按 FIFO 保持 redirect 顺序并排在普通输入前', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    inbox.enqueue(makeItem('ordinary-1'))
+    inbox.enqueuePriority(makeItem('redirect-1', { immediate_redirect: true }))
+    inbox.enqueuePriority(makeItem('redirect-2', { immediate_redirect: true }))
+    inbox.enqueue(makeItem('ordinary-2'))
+
+    const delivered: string[] = []
+    await inbox.flush(async (item) => { delivered.push(item.text) })
+
+    expect(delivered).toEqual(['redirect-1', 'redirect-2', 'ordinary-1', 'ordinary-2'])
+  })
+
   it('deduplicates a durable item while it is queued or in flight', async () => {
     const inbox = new WorkerInbox('worker-1')
     const first = makeItem('first', { dedupe_key: 'bg-shell:1' })

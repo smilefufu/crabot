@@ -124,6 +124,8 @@ export function classifySupervisionActivity(
 
 export interface SendInputOptions {
   readonly raw?: boolean
+  /** Manager-requested direction change; Harness interrupts CLI workers before delivery. */
+  readonly immediate_redirect?: boolean
   readonly delivery_id?: string
   readonly deadline_at?: string
   readonly signal?: AbortSignal

@@ -537,6 +537,19 @@ describe('send_to_worker', () => {
     expect(fake.sendInputCalls[0].opts).toMatchObject({ raw: false, delivery_id: parsed.delivery_id })
   })
 
+  it('immediate_redirect 出现在 schema 且透传到 Harness', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const sendToWorker = buildWorkerTools({ harness, context: () => CTX }).find((tool) => tool.name === 'send_to_worker')!
+    const schema = sendToWorker.inputSchema as { properties?: Record<string, unknown> }
+
+    expect(schema.properties?.immediate_redirect).toMatchObject({ type: 'boolean' })
+    const result = await sendToWorker.call({ worker_id: worker.worker_id, text: '立即转向', immediate_redirect: true }, {})
+
+    expect(result.isError).toBe(false)
+    expect(fake.sendInputCalls[0].opts).toMatchObject({ immediate_redirect: true })
+  })
+
   it('worker 不存在 → WorkerNotFoundError 转成可读 tool_result（isError:true，不抛出）', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })

@@ -50,6 +50,7 @@ interface FakeAdapterOpts {
   readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
   readonly spawnShouldFail?: Error
   readonly forkShouldFail?: Error
+  readonly interruptShouldFail?: Error
   readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: SendInputOptions) => Promise<void> | void
   readonly sendInputState?: WorkerContractState
   readonly acceptedExitReport?: StateChangeReport
@@ -194,6 +195,7 @@ class FakeAdapter implements WorkerAdapter {
 
   async interrupt(h: IncarnationHandle): Promise<void> {
     this.interruptCalls.push(h)
+    if (this.opts.interruptShouldFail) throw this.opts.interruptShouldFail
     this.states.set(handleKey(h), 'idle')
   }
 
@@ -2129,6 +2131,50 @@ describe('WorkerHarness.sendToWorker', () => {
     await harness.sendToWorker(worker.worker_id, '/exit', { raw: true })
 
     expect(fake.sendInputCalls[0].opts).toEqual({ raw: true })
+  })
+
+  it('immediate_redirect 对非 builtin 先 interrupt 再投递，并透传标志', async () => {
+    const { harness, fake } = await makeHarness({ implId: 'claude-code' })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+
+    await harness.sendToWorker(worker.worker_id, '立即改做这件事', {
+      managerKey: `test::friend-1` as ManagerKey,
+      immediate_redirect: true,
+    })
+
+    expect(fake.interruptCalls).toHaveLength(1)
+    expect(fake.sendInputCalls).toHaveLength(1)
+    expect(fake.sendInputCalls[0].opts).toMatchObject({ immediate_redirect: true })
+  })
+
+  it('builtin immediate_redirect 不调用 interrupt', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+
+    await harness.sendToWorker(worker.worker_id, '下一轮优先改向', {
+      managerKey: `test::friend-1` as ManagerKey,
+      immediate_redirect: true,
+    })
+
+    expect(fake.interruptCalls).toHaveLength(0)
+    expect(fake.sendInputCalls[0].opts).toMatchObject({ immediate_redirect: true })
+  })
+
+  it('immediate_redirect 中断失败时不投递新文本', async () => {
+    const { harness, fake } = await makeHarness({
+      implId: 'claude-code',
+      interruptShouldFail: new Error('interrupt not accepted'),
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+
+    const result = await harness.sendToWorker(worker.worker_id, '不能越过旧任务发送', {
+      managerKey: `test::friend-1` as ManagerKey,
+      immediate_redirect: true,
+    })
+
+    expect(result).toMatchObject({ status: 'failed', certainty: 'not_delivered' })
+    expect(fake.sendInputCalls).toHaveLength(0)
+    expect((harness as any).getInbox(worker.worker_id).pending).toBe(0)
   })
 
   it('sendToActiveWorker 不复活 terminal task', async () => {

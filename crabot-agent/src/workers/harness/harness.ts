@@ -692,6 +692,8 @@ export interface SpawnWorkerParams {
 
 export interface HarnessSendToWorkerOptions {
   readonly raw?: boolean
+  /** Interrupt a non-builtin mainline before delivering this direction change. */
+  readonly immediate_redirect?: boolean
   readonly managerKey?: ManagerKey
   readonly onSettled?: InboxItem['onSettled']
   readonly dedupeKey?: string
@@ -1170,13 +1172,28 @@ export class WorkerHarness {
     const inbox = this.getInbox(workerId)
     let enqueued = true
     let receipt: WorkerInputDeliveryReceipt | undefined
+    let redirectTarget: ExecutableIncarnation | undefined
+    let redirectHeld = false
+    let redirectItem: InboxItem | undefined
 
     // "读台账状态 → 判断 cancelled/化身 → 入信箱"在同一临界区完成,不允许 check-then-act 跨 await。
-    await this.withLock(workerId, async () => {
+    try {
+      await this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
-      requireMainlineIncarnation(found.worker)
+      const mainline = requireMainlineIncarnation(found.worker)
+      if (
+        opts?.immediate_redirect === true &&
+        isExecutableIncarnation(mainline) &&
+        mainline.impl !== 'builtin' &&
+        mainline.state === 'running'
+      ) {
+        redirectTarget = mainline
+        // Keep ordinary queued text behind the redirect while the interrupt operation runs.
+        inbox.hold('immediate_redirect')
+        redirectHeld = true
+      }
 
       if (opts?.managerKey) {
         const createdAt = this.deps.now()
@@ -1212,6 +1229,7 @@ export class WorkerHarness {
         raw: opts?.raw ?? false,
         enqueued_at: this.deps.now(),
         allow_terminal_continuation: true,
+        ...(opts?.immediate_redirect === true ? { immediate_redirect: true } : {}),
         ...(durableReceipt
           ? {
               delivery_id: durableReceipt.delivery_id,
@@ -1233,15 +1251,41 @@ export class WorkerHarness {
         ...(opts?.dedupeKey ? { dedupe_key: opts.dedupeKey } : {}),
         ...(opts?.legacyContinuationAuth ? { legacy_continuation_auth: opts.legacyContinuationAuth } : {}),
       }
-      enqueued = opts?.dedupeKey && !durableReceipt ? inbox.enqueueUnique(item) : (inbox.enqueue(item), true)
-    })
+      if (redirectTarget) redirectItem = item
+      if (opts?.dedupeKey && !durableReceipt) {
+        enqueued = inbox.enqueueUnique(item)
+      } else {
+        if (opts?.immediate_redirect === true) inbox.enqueuePriority(item)
+        else inbox.enqueue(item)
+        enqueued = true
+      }
+      })
+    } catch (error) {
+      if (redirectHeld) inbox.release('immediate_redirect')
+      throw error
+    }
 
     if (!enqueued) opts?.onDeduplicated?.()
-    try {
-      await this.flushInbox(workerId)
-    } catch (error) {
-      if (!receipt) throw error
-      await this.failDurableInputAttempt(receipt, inbox, error, text)
+    let redirectError: unknown
+    if (redirectTarget) {
+      try {
+        await this.interruptForImmediateRedirect(workerId, redirectTarget)
+      } catch (error) {
+        redirectError = error
+        if (receipt) await this.failDurableInputAttempt(receipt, inbox, error, text)
+        else if (redirectItem) await inbox.cancelItem(redirectItem)
+        else throw error
+      } finally {
+        inbox.release('immediate_redirect')
+      }
+    }
+    if (!redirectError) {
+      try {
+        await this.flushInbox(workerId)
+      } catch (error) {
+        if (!receipt) throw error
+        await this.failDurableInputAttempt(receipt, inbox, error, text)
+      }
     }
 
     if (!receipt) return
@@ -1406,7 +1450,7 @@ export class WorkerHarness {
     handle: IncarnationHandle,
     text: string,
     raw: boolean,
-    delivery?: Pick<SendInputOptions, 'delivery_id' | 'deadline_at' | 'signal'>,
+    delivery?: Pick<SendInputOptions, 'immediate_redirect' | 'delivery_id' | 'deadline_at' | 'signal'>,
   ): Promise<InputAttempt> {
     const revisionKey = `${handle.worker_id}#${handle.impl}#${handle.seq}`
     const stateChangeRevision = this.stateChangeRevisions.get(revisionKey) ?? 0
@@ -1568,7 +1612,10 @@ export class WorkerHarness {
           signal: this.inputDeliveryControllers.get(item.delivery_id)?.signal,
         }
       }
-      const attempt = await this.attemptInput(adapter, handle, item.text, item.raw, deliveryOptions)
+      const attempt = await this.attemptInput(adapter, handle, item.text, item.raw, {
+        ...deliveryOptions,
+        ...(item.immediate_redirect ? { immediate_redirect: true } : {}),
+      })
       if (attempt.kind === 'exited') {
         if (item.allow_terminal_continuation === false) return 'delivered'
         if (item.delivery_id) {
@@ -2124,7 +2171,12 @@ export class WorkerHarness {
             handle,
             text,
             raw,
-            item?.delivery_id ? await this.inputAttemptOptions(workerId, item.delivery_id) : undefined,
+            item?.delivery_id
+              ? {
+                  ...(await this.inputAttemptOptions(workerId, item.delivery_id)),
+                  ...(item.immediate_redirect ? { immediate_redirect: true } : {}),
+                }
+              : item?.immediate_redirect ? { immediate_redirect: true } : undefined,
           )
           if (attempt.kind === 'exited') {
             // adapter 侧权威判定这个"看起来存活"的新主线其实也已经终态(台账的异步状态
@@ -4471,6 +4523,37 @@ export class WorkerHarness {
       )
     }
     return this.verifyControlOperationLocked(executing)
+  }
+
+  /**
+   * Interrupt the exact mainline captured when an immediate redirect was queued.
+   * A redirect must never be sent to a replacement incarnation or after an
+   * interrupt whose native completion is still unknown.
+   */
+  private async interruptForImmediateRedirect(
+    workerId: string,
+    target: ExecutableIncarnation,
+  ): Promise<void> {
+    const operation = await this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) throw new WorkerNotFoundError(workerId)
+      if (found.worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
+      const current = requireMainlineIncarnation(found.worker)
+      if (
+        !isExecutableIncarnation(current) ||
+        current.impl !== target.impl ||
+        current.seq !== target.seq ||
+        current.incarnation_id !== target.incarnation_id
+      ) {
+        throw new Error(`worker ${workerId} mainline changed before immediate redirect interrupt`)
+      }
+      return this.executeControlOperationLocked(found.managerKey, found.worker, current, 'interrupt')
+    })
+    if (operation.status !== 'succeeded') {
+      throw new Error(
+        `worker ${workerId} immediate redirect interrupt ${operation.status}: ${operation.detail ?? 'completion not verified'}`,
+      )
+    }
   }
 
   private async verifyControlOperation(operation: WorkerControlOperation): Promise<WorkerControlOperation> {

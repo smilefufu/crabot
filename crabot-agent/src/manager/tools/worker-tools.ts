@@ -338,26 +338,40 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       '补充、返工一个老任务都走这里,不必先判断它死活,也不必为此新开 worker。异步语义:本工具' +
       '不等 worker 处理完这条消息;worker 每跑完一轮或结束时' +
       '会作为事件唤醒你,事件带状态和待处置回合；用 get_worker_activity 读取原生会话。命中已 cancelled 的任务会被拒绝。' +
-      '未知交互界面必须使用 respond_to_worker_ui，普通输入不提供 raw 终端旁路。',
+      '未知交互界面必须使用 respond_to_worker_ui，普通输入不提供 raw 终端旁路。' +
+      '如果这条消息代表立即改变当前任务方向，设置 immediate_redirect=true；非 builtin worker 会先由 Harness 中断当前回合，' +
+      '确认中断完成后再投递，builtin worker 不 abort 而是在下一轮 LLM 调用前优先消费。',
     inputSchema: {
       type: 'object',
       properties: {
         worker_id: { type: 'string', description: '目标 worker id' },
         text: { type: 'string', description: '要投递的文本' },
+        immediate_redirect: {
+          type: 'boolean',
+          description: '是否立即改变当前任务方向；CLI worker 先中断并确认完成，再投递文本。',
+        },
       },
       required: ['worker_id', 'text'],
     },
     isReadOnly: false,
     call: async (input): Promise<ToolCallResult> => {
-      const { worker_id, text } = input as { worker_id?: string; text?: string }
+      const { worker_id, text, immediate_redirect } = input as {
+        worker_id?: string
+        text?: string
+        immediate_redirect?: unknown
+      }
       if (!worker_id || typeof worker_id !== 'string') return invalid('send_to_worker: worker_id 必填且为字符串')
       if (typeof text !== 'string' || text.length === 0) return invalid('send_to_worker: text 必填且为非空字符串')
+      if (immediate_redirect !== undefined && typeof immediate_redirect !== 'boolean') {
+        return invalid('send_to_worker: immediate_redirect 必须为布尔值')
+      }
 
       try {
         const worker = await authorizeWorker(worker_id)
         const legacyContinuationAuth = capturedLegacyContinuationAuth?.(worker.manager_key)
         const result = await harness.sendToWorker(worker_id, text, {
           managerKey: context().managerKey,
+          ...(immediate_redirect !== undefined ? { immediate_redirect } : {}),
           ...(legacyContinuationAuth ? { legacyContinuationAuth } : {}),
         })
         if (result.status === 'delivered' || result.status === 'pending') deps.onWorkerContinuation?.(worker_id)

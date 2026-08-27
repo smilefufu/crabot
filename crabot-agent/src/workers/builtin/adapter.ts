@@ -183,6 +183,8 @@ interface WorkerInstance {
   outcome?: 'completed' | 'failed'
   /** running 态下经 sendInput 排队、等下一次 burst 间隙统一 append 的用户消息（P1：内存，不跨重启持久）。 */
   pendingInputs: string[]
+  /** immediate_redirect 管理输入；当前 burst 自然结束后先于普通 pendingInputs 消费。 */
+  pendingImmediateInputs: string[]
   /** Immutable instruction capture for this incarnation; reused by every later burst. */
   workspaceInstructions?: WorkspaceInstructionPayload
   /** 是否已经被 resume 过一次。用于在 resume() 里检测"对同一 prev 的重复 resume"（先到先得，后来者报错）。 */
@@ -379,6 +381,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
+        pendingImmediateInputs: [],
         ...(spec.workspace_instructions !== undefined ? { workspaceInstructions: spec.workspace_instructions } : {}),
       }
 
@@ -449,6 +452,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
+        pendingImmediateInputs: [],
         ...(opts?.workspace_instructions !== undefined ? { workspaceInstructions: opts.workspace_instructions } : {}),
       }
 
@@ -505,6 +509,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
+        pendingImmediateInputs: [],
         ...(opts.workspace_instructions !== undefined ? { workspaceInstructions: opts.workspace_instructions } : {}),
       }
 
@@ -554,7 +559,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       assertInputDeliveryActive(opts, 'not_delivered')
 
       if (instance.state === 'running') {
-        instance.pendingInputs.push(text)
+        if (opts?.immediate_redirect) instance.pendingImmediateInputs.push(text)
+        else instance.pendingInputs.push(text)
         instance.activityAt = Date.now()
         return undefined
       }
@@ -645,6 +651,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       ...(typeof meta.trace_id === 'string' ? { traceId: meta.trace_id } : {}),
       state: 'idle',
       pendingInputs: [],
+      pendingImmediateInputs: [],
       ...(context?.workspace_instructions !== undefined ? { workspaceInstructions: context.workspace_instructions } : {}),
     }
     this.instances.set(instanceKey(h.worker_id, h.seq), instance)
@@ -1079,8 +1086,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       // end_turn（或 max_turns 耗尽）→ 若 sendInput 排了队，逐条 append 后原地续 burst
       // （不经过可见的 idle 态）；否则转 idle，等待下一次 resume/sendInput 唤醒。
-      if (instance.pendingInputs.length > 0) {
-        const queued = instance.pendingInputs.splice(0, instance.pendingInputs.length)
+      if (instance.pendingImmediateInputs.length > 0 || instance.pendingInputs.length > 0) {
+        const queued = [
+          ...instance.pendingImmediateInputs.splice(0, instance.pendingImmediateInputs.length),
+          ...instance.pendingInputs.splice(0, instance.pendingInputs.length),
+        ]
         let queueParent = instance.tip
         for (const text of queued) {
           queueParent = await instance.sessionTree.append(queueParent, createUserMessage(text))
@@ -1542,8 +1552,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     summary?: string,
   ): Promise<void> {
     if (handle.query_id === undefined) this.deps.traceHooks?.stopWorkerSubagents?.(instance.worker_id)
-    if (instance.pendingInputs.length > 0) {
-      const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${instance.pendingInputs.length} unsent message(s): ${instance.pendingInputs.join(' | ')}\n`
+    const pending = [...instance.pendingImmediateInputs, ...instance.pendingInputs]
+    if (pending.length > 0) {
+      const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${pending.length} unsent message(s): ${pending.join(' | ')}\n`
       await instance.outputLog.append(deadLetterMsg)
     }
     if (instance.traceId) {
