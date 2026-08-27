@@ -122,6 +122,7 @@
 
 ### 技术债与既有 follow-up（P6 后或并行确认）
 
+- **Worker/subagent trace 写点的同类硬截断**：`agent-handler.ts`（`.slice(0, 200/500)`）与 `unified-agent.ts`（`.slice(0, 300)`）对工具 span 摘要仍用整段硬截，与已修复的 manager episode span 同模式；目前无消费方受害（episode 投影不读这些 trace），若未来对其启用结构化提取应先改造为 `span-summary.ts` 的字段级截断（2026-08-27，`7cd86abf`）。
 - **Worker 巡检调度收口**：启动对账与周期巡检应共享 due 投递排他；避免单个 Worker 的长锁阻塞全局活性巡检；默认巡检在全局 LLM 故障时需要有界的失败告警去重/退避。三项均需独立设计，不纳入当前任务巡检 PR。
 - **移除 Agent 内部 legacy `roles` seam**：`AgentLayerConfig.roles` 是 v2 前多 Agent 时代残留（正式协议从未包含），现仅作内部测试 seam/恒真分支；应替换为显式的 worker-layer 开关后删除。
 - **普通 Channel 未消费人类 wake 的跨重启恢复**：2026-08-19 实测，飞书私聊消息已落 Channel journal、reaction 已发且同 session Manager episode 已创建，但 Agent 在首次 LLM 调用前 OOM 重启；启动恢复只将遗留 episode 标为 `interrupted`，未将该 wake 重放，后续 worker 事件遂基于旧上下文回复。需独立设计普通 Channel 的持久化入站 wake、成功消费后结算、重启按原始顺序幂等重放；不得用扩大 Manager recent、滚动摘要或 prompt 约束替代。
