@@ -79,8 +79,18 @@ export interface HarnessEvent {
  * 其余事件点一律 fire-and-forget,不看这个返回值。
  */
 export interface HarnessEventDelivery {
-  /** manager 是否真的消费了这次唤醒(episode 成功收口)。 */
+  /** manager 是否真的消费了这次唤醒。activity 以 LLM 输入准入为消费点。 */
   readonly consumed: boolean
+  /** activity receipt 已注册到 owning Manager；后续由 receipt 回调结算。 */
+  readonly registered?: boolean
+}
+
+/** 仅存在于进程内，不写入事件、prompt 或持久协议对象。 */
+export interface ActivityContextAdmissionReceipt {
+  readonly notification_id: string
+  readonly activity_through: string
+  readonly admit: () => Promise<void>
+  readonly reject: () => Promise<void>
 }
 
 function parseLine(line: string): HarnessEvent | null {

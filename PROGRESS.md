@@ -14,6 +14,13 @@
 - 投递 deadline 收紧为 120 秒；Harness 增加 wall-clock 兜底并隔离迟到 adapter 结果，tmux `execFile`、`load-buffer` 与版本探测均有 15 秒命令上限。
 - 相关协议与设计记录已同步到 `crabot-docs`（main `12f52b6`）；待主仓非 Draft PR review。
 
+### Worker activity 错误证据及时投递：实现完成，待非 Draft PR review
+
+- 已确认并发布 `crabot-docs/superpowers/specs/2026-08-27-worker-activity-notification-delivery-design.md`、实施计划和 `protocol-agent-v3` 3.6.12：Claude Code/Codex 的已确认原生错误进入既有 activity 证据流，不新增 Worker/task 错误状态，也不新增 activity resolve 操作。
+- `activity_available` 只有实际进入 Manager 的 LLM 输入后才确认投递；准入前失败继续保留，准入后 Provider 失败不重复注入。Manager 收到 `has_error=true` 时必须读取对应 cursor 范围的完整 activity，不能用 `idle` 否定错误证据。
+- 最终定向回归覆盖 adapter、activity projection、composite reader、Harness、Manager、query loop 与人类消息 reaction 时序：12 个测试文件 `552 passed / 84 skipped`；`tsc --noEmit` 与 `git diff --check` 通过。
+- Agent 全量测试在非沙箱环境为 `2812 passed / 18 failed`，剩余文件单线程复跑收敛为 9 个失败；其中 5 个已在 `origin/main` 基线复现（runtime-config 重试时序 1、陈旧 Goal prompt 断言 1、macOS `/var` 路径断言 3）。真实 tmux 组因基线当轮探测失败而跳过，无法做严格同条件对照，保留为 PR 残余验证说明。
+
 ### 运行态立即改向：实现完成
 
 - `send_to_worker` 已增加可选 `immediate_redirect`。非 builtin 由 Harness 先执行并核验既有 interrupt operation，再投递改向文本；builtin 不 abort，下一轮 LLM 调用前优先消费该输入；普通排队文本不得越过 redirect。
@@ -147,6 +154,6 @@
 为避免本文件复制并腐化架构说明，以下内容不再展开：
 
 - 项目开发与流程规则：根目录 `AGENTS.md`。
-- 正式模块契约：`crabot-docs/protocols/`（base 0.2.2、module-manager 0.2.3、admin 0.2.3、agent-v3 3.6.0、crab-messaging 0.3.2、module-spec 0.2.0）。
+- 正式模块契约：`crabot-docs/protocols/`（base 0.2.2、module-manager 0.2.3、admin 0.2.3、agent-v3 3.6.12、crab-messaging 0.3.2、module-spec 0.2.0）。
 - 设计决策与实施计划：`crabot-docs/superpowers/specs/` 与 `plans/`。
 - 开发、部署、调试说明：`AGENTS.md` 与 `crabot-docs/guides/`。

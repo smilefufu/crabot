@@ -466,14 +466,14 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     name: 'get_worker_activity',
     description:
       '读取 worker 原生会话解析出的增量活动。缺省 view=assistant，只返回 assistant text；' +
-      '仅在诊断执行细节时传 view=all 以同时查看 tool call/result。after 是上次返回的 opaque cursor；切换 view 时不传旧 after。',
+      'view=all 同时返回 tool call/result 与脱敏 error evidence。after 是上次返回的 opaque cursor；切换 view 时不传旧 after。',
     inputSchema: {
       type: 'object',
       properties: {
         worker_id: { type: 'string', description: '目标 worker id' },
         incarnation_id: { type: 'string', description: '可选的稳定化身 id，缺省主线化身' },
         after: { type: 'string', description: '上次返回的 opaque cursor' },
-        view: { type: 'string', enum: ['assistant', 'all'], description: 'assistant 为默认，all 含工具活动' },
+        view: { type: 'string', enum: ['assistant', 'all'], description: 'assistant 为默认，all 含工具活动与错误证据' },
       },
       required: ['worker_id'],
     },

@@ -7,7 +7,11 @@ import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import { NativeActivityStore } from '../../../src/workers/harness/native-activity-store'
 import { } from '../../../src/workers/harness/ledger-types'
-import { WorkerEventLog, type HarnessEvent } from '../../../src/workers/harness/worker-events'
+import {
+  WorkerEventLog,
+  type ActivityContextAdmissionReceipt,
+  type HarnessEvent,
+} from '../../../src/workers/harness/worker-events'
 import { QueryReceiptStore } from '../../../src/workers/harness/query-receipt-store'
 import { CliInputStallError, QueryEstablishmentError } from '../../../src/workers/errors'
 import type {
@@ -255,7 +259,7 @@ async function makeHarness(
   fakeOpts: FakeAdapterOpts = {},
   depsOverrides: Partial<Pick<
     HarnessDeps,
-    'hasRunningBg' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason'
+    'hasRunningBg' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
   >> = {},
 ): Promise<{
   harness: WorkerHarness
@@ -284,6 +288,7 @@ async function makeHarness(
     workersDir,
     now,
     onEvent: (e) => events.push(e),
+    mintActivityCursor: async ({ offset }) => `opaque-activity-${['start', 'one', 'two', 'three'][offset] ?? 'later'}`,
     ...depsOverrides,
   }
   const harness = new WorkerHarness(deps)
@@ -802,11 +807,54 @@ describe('WorkerHarness.handleStateChange', () => {
     await new Promise((resolve) => setTimeout(resolve, 25))
 
     expect(route).toHaveBeenCalledTimes(1)
-    expect(route.mock.calls[0][1]).toMatchObject({ kind: 'activity_available', detail: { from_cursor: '0', through_cursor: '2' } })
+    expect(route.mock.calls[0][1]).toMatchObject({
+      kind: 'activity_available',
+      detail: { from_cursor: 'opaque-activity-start', through_cursor: 'opaque-activity-two', has_error: false },
+    })
+    expect(route.mock.calls[0][1].detail?.from_cursor).not.toBe('0')
+    expect(route.mock.calls[0][1].detail?.through_cursor).not.toBe('2')
     expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))).toMatchObject({
       cursors: [{ incarnation_id: incarnation.incarnation_id, offset: 2 }],
       notifications: [{ consumed_at: expect.any(String) }],
     })
+  })
+
+  it('activity receipt 注册后保持 pending 且进程内去重，admit 回调才结算', async () => {
+    let receipt: ActivityContextAdmissionReceipt | undefined
+    const route = vi.fn(async (_managerKey, _event, incomingReceipt?: ActivityContextAdmissionReceipt) => {
+      receipt = incomingReceipt
+      return { consumed: false, registered: true }
+    })
+    const { harness, workersDir } = await makeHarness({
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'error', summary: 'automatic compaction failed' }],
+    }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+    const internals = harness as unknown as {
+      deliverNativeActivityNotifications(workerId: string): Promise<void>
+    }
+
+    harness.handleNativeActivity(handle)
+    await waitUntil(() => route.mock.calls.length === 1)
+    await internals.deliverNativeActivityNotifications(worker.worker_id)
+
+    expect(route).toHaveBeenCalledTimes(1)
+    expect(receipt).toBeDefined()
+    let state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+    expect(state.notifications[0]).toMatchObject({ attempts: 0, has_error: true })
+    expect(state.notifications[0]).not.toHaveProperty('consumed_at')
+
+    await receipt!.admit()
+
+    state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+    expect(state.notifications[0]).toMatchObject({ consumed_at: expect.any(String) })
   })
 
   it('并发投递同一 activity 通知只追加一次审计事件', async () => {
@@ -895,10 +943,101 @@ describe('WorkerHarness.handleStateChange', () => {
     const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
     expect(state.notifications).toHaveLength(1)
     expect(state.notifications[0]).toMatchObject({
-      activity_from: '0',
-      activity_through: '2',
+      activity_from: 'opaque-activity-start',
+      activity_through: 'opaque-activity-two',
       attempts: 1,
-      event: { kind: 'activity_available', detail: { from_cursor: '0', through_cursor: '2', preview: '再完成第二步' } },
+      event: {
+        kind: 'activity_available',
+        detail: {
+          from_cursor: 'opaque-activity-start',
+          through_cursor: 'opaque-activity-two',
+          preview: '再完成第二步',
+          has_error: false,
+        },
+      },
+    })
+  })
+
+  it('assistant/error 无论到达顺序如何，合并通知都保留 error 标记和最早起点', async () => {
+    const orders: NormalizedTraceEvent[][] = [
+      [
+        { ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: '先有普通进展' },
+        { ts: '2026-08-20T00:00:01.000Z', kind: 'error', summary: '随后失败' },
+      ],
+      [
+        { ts: '2026-08-20T00:00:00.000Z', kind: 'error', summary: '先发生失败' },
+        { ts: '2026-08-20T00:00:01.000Z', kind: 'message', role: 'assistant', summary: '随后补充说明' },
+      ],
+    ]
+
+    for (const order of orders) {
+      const nativeTrace = [order[0]]
+      const route = vi.fn(async () => ({ consumed: false }))
+      const { harness, workersDir } = await makeHarness({ nativeTrace }, { onOperationNotification: route })
+      const worker = await harness.spawnWorker(spawnParams())
+      const incarnation = worker.incarnations[0]
+      const handle = {
+        worker_id: worker.worker_id,
+        incarnation_id: incarnation.incarnation_id,
+        seq: incarnation.seq,
+        impl: 'builtin' as const,
+        session_ref: incarnation.session_ref,
+      }
+
+      harness.handleNativeActivity(handle)
+      await waitUntil(() => route.mock.calls.length === 1)
+      nativeTrace.push(order[1])
+      harness.handleNativeActivity(handle)
+      await waitUntil(async () => {
+        const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+        return state.cursors[0]?.offset === 2
+      })
+
+      const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+      expect(state.notifications).toHaveLength(1)
+      expect(state.notifications[0]).toMatchObject({
+        activity_from: 'opaque-activity-start',
+        activity_through: 'opaque-activity-two',
+        has_error: true,
+        event: { kind: 'activity_available', detail: { has_error: true } },
+      })
+    }
+  })
+
+  it('error activity 在持久化和通知预览前使用既有脱敏器', async () => {
+    const route = vi.fn(async () => ({ consumed: false }))
+    const { harness, workersDir } = await makeHarness({
+      nativeTrace: [{
+        ts: '2026-08-20T00:00:00.000Z',
+        kind: 'error',
+        summary: 'upstream rejected secret-marker',
+        detail: { message: 'upstream rejected secret-marker' },
+      }],
+    }, {
+      onOperationNotification: route,
+      redactFailureReason: (text) => text.replaceAll('secret-marker', '[redacted]'),
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+
+    harness.handleNativeActivity({
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin',
+      session_ref: incarnation.session_ref,
+    })
+    await waitUntil(() => route.mock.calls.length === 1)
+
+    const raw = await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')
+    expect(raw).not.toContain('secret-marker')
+    expect(JSON.parse(raw)).toMatchObject({
+      activities: [{ kind: 'error', summary: 'upstream rejected [redacted]' }],
+      notifications: [{
+        has_error: true,
+        preview: 'upstream rejected [redacted]',
+        event: { detail: { has_error: true, preview: 'upstream rejected [redacted]' } },
+      }],
     })
   })
 
@@ -930,10 +1069,16 @@ describe('WorkerHarness.handleStateChange', () => {
     await waitUntil(async () => JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')).cursors[0]?.offset === 2)
     releaseFirst()
     await waitUntil(() => route.mock.calls.length === 2)
+    await waitUntil(async () => {
+      const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+      return typeof state.notifications[0]?.consumed_at === 'string'
+    })
 
-    expect(route.mock.calls[1][1]).toMatchObject({ detail: { from_cursor: '0', through_cursor: '2' } })
+    expect(route.mock.calls[1][1]).toMatchObject({
+      detail: { from_cursor: 'opaque-activity-start', through_cursor: 'opaque-activity-two' },
+    })
     const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
-    expect(state.notifications[0]).toMatchObject({ activity_through: '2', consumed_at: expect.any(String) })
+    expect(state.notifications[0]).toMatchObject({ activity_through: 'opaque-activity-two', consumed_at: expect.any(String) })
   })
 
   it('未消费通知按持久指数退避重投，合并 activity 不重置其节奏', async () => {
@@ -957,6 +1102,10 @@ describe('WorkerHarness.handleStateChange', () => {
 
     harness.handleNativeActivity(handle)
     await waitUntil(() => route.mock.calls.length === 1)
+    await waitUntil(async () => {
+      const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+      return state.notifications[0]?.attempts === 1
+    })
     let state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
     expect(state.notifications[0]).toMatchObject({ attempts: 1, retry_after_at: expect.any(String) })
     const firstRetryAt = state.notifications[0].retry_after_at
@@ -967,7 +1116,11 @@ describe('WorkerHarness.handleStateChange', () => {
     await waitUntil(async () => JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')).cursors[0]?.offset === 2)
     state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
     expect(route).toHaveBeenCalledTimes(1)
-    expect(state.notifications[0]).toMatchObject({ attempts: 1, retry_after_at: firstRetryAt, activity_through: '2' })
+    expect(state.notifications[0]).toMatchObject({
+      attempts: 1,
+      retry_after_at: firstRetryAt,
+      activity_through: 'opaque-activity-two',
+    })
 
     const delays = [60_000, 120_000, 300_000, 300_000]
     for (let attempt = 2; attempt <= 5; attempt++) {
@@ -1022,6 +1175,7 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(route).toHaveBeenCalledWith(
       `test::friend-1`,
       expect.objectContaining({ worker_id: worker.worker_id, kind: 'activity_available' }),
+      expect.objectContaining({ notification_id: expect.any(String), activity_through: 'opaque-activity-one' }),
     )
     expect(fake.readTerminalCalls).toEqual([])
   })
@@ -1055,6 +1209,115 @@ describe('WorkerHarness.handleStateChange', () => {
     expect((await harness.getWorkerTurn(worker.worker_id))?.disposition).toEqual({ status: 'pending' })
   })
 
+  it('启动重放旧版数字 offset activity 前原子升级为 durable opaque cursor', async () => {
+    const route = vi.fn(async (
+      _managerKey: ManagerKey,
+      _event: HarnessEvent,
+      receipt?: ActivityContextAdmissionReceipt,
+    ) => {
+      await receipt?.admit()
+      return { consumed: false, registered: true }
+    })
+    const { harness, workersDir } = await makeHarness({}, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const activityStore = new NativeActivityStore(workersDir)
+    await activityStore.record({
+      worker_id: worker.worker_id,
+      manager_key: `test::friend-1` as ManagerKey,
+      incarnation_id: incarnation.incarnation_id,
+      impl: incarnation.impl,
+      seq: incarnation.seq,
+      activity_from: '0',
+      activity_through: '1',
+      preview: 'legacy pending activity',
+      has_error: true,
+      event: {
+        ts: '2026-08-20T00:00:00.000Z',
+        kind: 'activity_available',
+        worker_id: worker.worker_id,
+        seq: incarnation.seq,
+        detail: {
+          incarnation_id: incarnation.incarnation_id,
+          from_cursor: '0',
+          through_cursor: '1',
+          preview: 'legacy pending activity',
+          has_error: true,
+        },
+      },
+    })
+
+    await harness.reconcileNativeActivityOnStartup()
+
+    expect(route).toHaveBeenCalledWith(
+      `test::friend-1`,
+      expect.objectContaining({
+        kind: 'activity_available',
+        detail: expect.objectContaining({
+          from_cursor: 'opaque-activity-start',
+          through_cursor: 'opaque-activity-one',
+        }),
+      }),
+      expect.objectContaining({ activity_through: 'opaque-activity-one' }),
+    )
+    const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+    expect(state.notifications[0]).toMatchObject({
+      activity_from: 'opaque-activity-start',
+      activity_through: 'opaque-activity-one',
+      consumed_at: expect.any(String),
+      event: {
+        detail: {
+          from_cursor: 'opaque-activity-start',
+          through_cursor: 'opaque-activity-one',
+        },
+      },
+    })
+  })
+
+  it('旧版 activity cursor 升级失败时保留通知并按既有退避记账', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, workersDir } = await makeHarness({}, {
+      onOperationNotification: route,
+      mintActivityCursor: async () => { throw new Error('cursor store unavailable') },
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const activityStore = new NativeActivityStore(workersDir)
+    await activityStore.record({
+      worker_id: worker.worker_id,
+      manager_key: `test::friend-1` as ManagerKey,
+      incarnation_id: incarnation.incarnation_id,
+      impl: incarnation.impl,
+      seq: incarnation.seq,
+      activity_from: '0',
+      activity_through: '1',
+      preview: 'legacy pending activity',
+      event: {
+        ts: '2026-08-20T00:00:00.000Z',
+        kind: 'activity_available',
+        worker_id: worker.worker_id,
+        seq: incarnation.seq,
+        detail: { from_cursor: '0', through_cursor: '1', preview: 'legacy pending activity' },
+      },
+    })
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await harness.reconcileNativeActivityOnStartup()
+
+    expect(route).not.toHaveBeenCalled()
+    const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
+    expect(state.notifications[0]).toMatchObject({
+      activity_from: '0',
+      activity_through: '1',
+      attempts: 1,
+      retry_after_at: expect.any(String),
+    })
+    expect(logError).toHaveBeenCalledWith(
+      expect.stringContaining('native activity notification failed'),
+      expect.any(Error),
+    )
+  })
+
   it('启动只为未观察过的活跃会话建立高水位，不把已有文本当作新 activity', async () => {
     const route = vi.fn(async () => ({ consumed: true }))
     const nativeTrace = [{ ts: '2026-08-20T00:00:00.000Z', kind: 'message' as const, role: 'assistant' as const, summary: '升级前的历史文本' }]
@@ -1083,7 +1346,11 @@ describe('WorkerHarness.handleStateChange', () => {
     await waitUntil(() => route.mock.calls.length === 1)
     expect(route).toHaveBeenCalledWith(
       `test::friend-1`,
-      expect.objectContaining({ kind: 'activity_available', detail: expect.objectContaining({ from_cursor: '1', through_cursor: '2' }) }),
+      expect.objectContaining({
+        kind: 'activity_available',
+        detail: expect.objectContaining({ from_cursor: 'opaque-activity-one', through_cursor: 'opaque-activity-two' }),
+      }),
+      expect.objectContaining({ notification_id: expect.any(String), activity_through: 'opaque-activity-two' }),
     )
   })
 

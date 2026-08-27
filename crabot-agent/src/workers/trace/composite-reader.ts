@@ -232,6 +232,7 @@ export async function readCompositeWorkerTrace(
     if (replayBound) legacyEnd = replayBound.legacy
     if (legacy.unavailable_reason) unavailableReason = legacy.unavailable_reason
   } else {
+    const incarnationId = incarnation.incarnation_id
     const adapter = deps.adapters.get(incarnation.impl)
     const handle: IncarnationHandle = {
       worker_id: params.worker_id,
@@ -239,29 +240,12 @@ export async function readCompositeWorkerTrace(
       impl: incarnation.impl,
       session_ref: incarnationSessionRef(incarnation) ?? '',
     }
-    if (!adapter) {
-      unavailableReason = `native unavailable: no adapter registered for impl ${incarnation.impl}`
-    } else if (!adapter.readTrace) {
-      unavailableReason = `native unavailable: impl ${incarnation.impl} has no structured trace`
-    } else {
+    const readNativeFallback = async (nativeFailure: string): Promise<void> => {
+      let copyFailure: string | undefined
+      let copyServed = false
+      const fallbackEventKeys = new Set<string>()
+      const upper = replayBound ? replayBound.native : Number.POSITIVE_INFINITY
       try {
-        const native = await adapter.readTrace(handle, { offset: positions.native })
-        // 按行号位置过滤（归一化跳过的行也消费行号，不能用事件条数当行号钳制）。
-        const upper = replayBound ? replayBound.native : Number.POSITIVE_INFINITY
-        const inWindow = native.events.filter((event) => {
-          const offset = event.source_offset
-          return offset === undefined || (offset >= positions.native && offset < upper)
-        })
-        inWindow.forEach((event, ordinal) => {
-          nativeEvents.push({ event: { ...event, source: 'native' }, source: 'native', sourceOrdinal: event.source_offset ?? (positions.native + ordinal) })
-        })
-        nativeEnd = replayBound ? replayBound.native : native.nextCursor.offset
-        // 从头成功读取到的是该化身的完整 native 快照：替换旧 copy，使 adapter 归一化修复
-        // 能回填历史保留副本。增量页仍按 source_offset 追加，不能覆盖完整副本。
-        await deps.nativeCopy.append(params.worker_id, incarnation.seq, fingerprint, native.events, deps.redact, {
-          replace: positions.native === 0 && !replayBound,
-        })
-      } catch (error) {
         // live source 不可用时回退 Agent-owned copy（终态收割/上次增量写入的结果）。
         let copied = await deps.nativeCopy.read(params.worker_id, incarnation.seq, fingerprint)
         if (copied === null) {
@@ -278,21 +262,97 @@ export async function readCompositeWorkerTrace(
         }
         if (copied !== null) {
           // copy 事件带原生行号（source_offset）：按行号区间取，而不是事件下标。
-          const upper = replayBound ? replayBound.native : Number.POSITIVE_INFINITY
           const events = copied.events.filter((event) => {
             const offset = event.source_offset
             return offset !== undefined && offset >= positions.native && offset < upper
           })
+          if (replayBound !== undefined && replayBound.native === positions.native) {
+            nativeEnd = replayBound.native
+            unavailableReason = `native degraded (served from agent-owned copy): ${nativeFailure}`
+            return
+          }
           events.forEach((event, ordinal) => {
+            fallbackEventKeys.add(fallbackEventKey(event))
             nativeEvents.push({ event: { ...event, source: 'native' }, source: 'native', sourceOrdinal: event.source_offset ?? ordinal })
           })
-          nativeEnd = replayBound
-            ? replayBound.native
-            : (events.length > 0 ? Math.max(...events.map((event) => event.source_offset ?? 0)) + 1 : positions.native)
-          unavailableReason = `native degraded (served from agent-owned copy): ${message(error)}`
-        } else {
-          unavailableReason = `native unavailable: ${message(error)}`
+          if (events.length > 0) {
+            copyServed = true
+            nativeEnd = Math.max(...events.map((event) => event.source_offset ?? 0)) + 1
+          }
         }
+      } catch (error) {
+        copyFailure = message(error)
+      }
+
+      const fallbackReason = copyFailure
+        ? `${nativeFailure}; agent-owned copy unavailable: ${copyFailure}`
+        : nativeFailure
+      if (!incarnationId) {
+        unavailableReason = copyServed
+          ? `native degraded (served from agent-owned copy): ${fallbackReason}; persisted activity unavailable: incarnation identity is unavailable`
+          : `native unavailable: ${fallbackReason}; persisted activity unavailable: incarnation identity is unavailable`
+        return
+      }
+      try {
+        const persisted = await deps.harness.getPersistedNativeActivityTrace(
+          params.worker_id,
+          incarnationId,
+          { offset: positions.native },
+        )
+        const events = persisted.events.filter((event) => {
+          const offset = event.source_offset
+          return offset !== undefined && offset >= positions.native && offset < upper
+        })
+        let persistedAdded = 0
+        events.forEach((event, ordinal) => {
+          const key = fallbackEventKey(event)
+          if (fallbackEventKeys.has(key)) return
+          fallbackEventKeys.add(key)
+          persistedAdded += 1
+          nativeEvents.push({
+            event: { ...event, source: 'native' },
+            source: 'native',
+            sourceOrdinal: event.source_offset ?? ordinal,
+          })
+        })
+        nativeEnd = replayBound ? replayBound.native : Math.max(nativeEnd, persisted.nextCursor.offset)
+        unavailableReason = persistedAdded > 0
+          ? `native degraded (served from ${copyServed ? 'agent-owned copy + ' : ''}harness persisted activity): ${fallbackReason}`
+          : copyServed
+            ? `native degraded (served from agent-owned copy): ${fallbackReason}`
+            : `native unavailable: ${fallbackReason}`
+      } catch (fallbackError) {
+        unavailableReason = copyServed
+          ? `native degraded (served from agent-owned copy): ${fallbackReason}; persisted activity unavailable: ${message(fallbackError)}`
+          : `native unavailable: ${fallbackReason}; persisted activity unavailable: ${message(fallbackError)}`
+      }
+    }
+
+    if (!adapter?.readTrace) {
+      await readNativeFallback(adapter
+        ? `impl ${incarnation.impl} has no structured trace`
+        : `no adapter registered for impl ${incarnation.impl}`)
+    } else {
+      try {
+        const native = await adapter.readTrace(handle, { offset: positions.native })
+        if (native.unavailableReason) throw new Error(native.unavailableReason)
+        // 按行号位置过滤（归一化跳过的行也消费行号，不能用事件条数当行号钳制）。
+        const upper = replayBound ? replayBound.native : Number.POSITIVE_INFINITY
+        const inWindow = native.events.filter((event) => {
+          const offset = event.source_offset
+          return offset === undefined || (offset >= positions.native && offset < upper)
+        })
+        inWindow.forEach((event, ordinal) => {
+          nativeEvents.push({ event: { ...event, source: 'native' }, source: 'native', sourceOrdinal: event.source_offset ?? (positions.native + ordinal) })
+        })
+        nativeEnd = replayBound ? replayBound.native : native.nextCursor.offset
+        // 从头成功读取到的是该化身的完整 native 快照：替换旧 copy，使 adapter 归一化修复
+        // 能回填历史保留副本。增量页仍按 source_offset 追加，不能覆盖完整副本。
+        await deps.nativeCopy.append(params.worker_id, incarnation.seq, fingerprint, native.events, deps.redact, {
+          replace: positions.native === 0 && !replayBound,
+        })
+      } catch (error) {
+        await readNativeFallback(message(error))
       }
     }
   }
@@ -338,6 +398,10 @@ function incarnationStartedAt(incarnation: Incarnation): string | undefined {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function fallbackEventKey(event: NormalizedTraceEvent): string {
+  return JSON.stringify([event.source_offset, event.kind, event.role, event.summary])
 }
 
 function redactDetail(detail: unknown, redact: (text: string) => string): unknown {
