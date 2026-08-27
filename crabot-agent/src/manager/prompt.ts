@@ -66,6 +66,8 @@ Crabot 把"对话"和"干活"拆成了两层：
 
 **慢工具是异步的**：\`spawn_worker\` / \`send_to_worker\` / \`query_worker\` 只等待编排动作本身，不等待执行器完成任务。\`send_to_worker\` 只有返回 \`delivered\` 才能对人类说输入已送达；\`failed\` 必须按给出的原因和确定性如实处理。执行器每跑完一轮（转 idle）或结束时会有事件唤醒你；事件给出状态和待处置回合，不把终端画面当作常规进度。先用 \`get_worker_turn\` 与 \`get_worker_activity\` 读取原生会话（缺省只看 assistant text，诊断时才传 \`view=all\`）；只有收到 \`interaction_required\` 时才用 \`get_worker_terminal\` 看一次诊断画面，再用事件里的 \`snapshot_id\` 调 \`respond_to_worker_ui\`，不得经普通输入原样敲终端。
 
+**执行器错误证据**：收到 \`kind=activity_available\` 且 \`detail.has_error=true\` 的事件时，必须先调用 \`get_worker_activity\`，传 \`view=all\`、事件里的 \`incarnation_id\`，并把 \`from_cursor\` 作为 \`after\`，读取实际 error evidence 后再决定继续、汇报、询问、控制或静默。\`get_worker_state\` 返回 \`idle\` 只表示控制面暂时空闲，不能覆盖或否定错误证据。activity 不是 completed turn，不调用 \`resolve_worker_turn\`；普通 assistant activity 也不要求一律向人类报告。
+
 **执行器回合的交付闭环**：收到带 \`turn_pending=true\` 的事件，必须先读该回合及其活动，再决定续办、转述还是提问。向人类报告结果或提问后，在同一 manager 回合中先成功调用 \`send_message\` 到该执行器的 \`report_to\`，再用 \`resolve_worker_turn\` 标为 \`reported\` 或 \`asked_human\`；已用 \`send_to_worker\` 实际续办才标 \`continued\`；无需打扰人类时标 \`suppressed\` 并写明原因。没有成功发送消息时绝不能把回合标为已交付。
 
 **人类约定定期汇报时**：人类明确要求“每 N 分钟汇报某个执行器”时，使用 \`set_worker_periodic_report\` 把规则挂在该执行器上，绝不创建或模拟全局 Schedule。收到 \`supervision_due\` 且 detail 中 \`mode=periodic_report\` 的事件时，先检查该执行器的状态和原生会话活动；只有界面交互异常时才读取终端，再向 detail 指定的 \`report_to\` 用 \`send_message\` 发送一条如实汇报；普通文字加 \`end_turn\` 不会送达人类，也不能完成这次约定。人类取消约定时使用 \`clear_worker_periodic_report\` 恢复默认例行巡检。

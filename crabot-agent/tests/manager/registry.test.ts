@@ -21,7 +21,11 @@ import type { ChannelMessage, Friend } from '../../src/types.js'
 import type { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
-import type { HarnessEvent, HarnessEventKind } from '../../src/workers/harness/worker-events.js'
+import type {
+  ActivityContextAdmissionReceipt,
+  HarnessEvent,
+  HarnessEventKind,
+} from '../../src/workers/harness/worker-events.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
@@ -647,6 +651,116 @@ describe('ManagerRegistry', () => {
     expect(calls.length).toBeGreaterThan(1)
     expect(JSON.stringify(calls[1].messages)).toContain('delivery-1')
     expect(JSON.stringify(calls[1].messages)).toContain('delivery-2')
+  })
+
+  it('activity notification 在活跃 episode 中只注册 receipt，下一次 LLM 输入才确认', async () => {
+    const calls: LLMStreamParams[] = []
+    const entered = deferred()
+    const release = deferred()
+    let turn = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        turn += 1
+        if (turn === 1) {
+          entered.resolve()
+          await release.promise
+        }
+        yield* chunksFromContent([], 'end_turn', { inputTokens: 1, outputTokens: 1 })
+      },
+      updateConfig: () => {},
+    }
+    const admit = vi.fn(async () => undefined)
+    const reject = vi.fn(async () => undefined)
+    const receipt: ActivityContextAdmissionReceipt = {
+      notification_id: 'activity-notification-1',
+      activity_through: 'opaque-through',
+      admit,
+      reject,
+    }
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+    const key = 'wechat::activity-owner' as ManagerKey
+    const event: HarnessEvent = {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'activity_available',
+      worker_id: 'w-activity',
+      seq: 1,
+      detail: {
+        from_cursor: 'opaque-from',
+        through_cursor: 'opaque-through',
+        preview: 'automatic compaction failed',
+        has_error: true,
+      },
+    }
+
+    const active = registry.routeHumanMessages('wechat', 'activity-owner', [makeChannelMessage('先处理这条')])
+    await entered.promise
+    await expect(registry.routeOperationNotification(key, event, receipt)).resolves.toEqual({
+      consumed: false,
+      registered: true,
+    })
+    expect(admit).not.toHaveBeenCalled()
+    expect(reject).not.toHaveBeenCalled()
+
+    release.resolve()
+    await active
+
+    expect(admit).toHaveBeenCalledOnce()
+    expect(reject).not.toHaveBeenCalled()
+    expect(calls.some((call) => JSON.stringify(call.messages).includes('activity_available'))).toBe(true)
+  })
+
+  it('failed episode 收口期间到达的 activity 会在最后一个活跃 episode 退出时 reject', async () => {
+    const firstRejectEntered = deferred()
+    const releaseFirstReject = deferred()
+    const firstReject = vi.fn(async () => {
+      firstRejectEntered.resolve()
+      await releaseFirstReject.promise
+    })
+    const secondReject = vi.fn(async () => undefined)
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter: () => { throw new Error('manager model unavailable') },
+    }))
+    const key = 'wechat::activity-failure-race' as ManagerKey
+    const event = (workerId: string, through: string): HarnessEvent => ({
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'activity_available',
+      worker_id: workerId,
+      seq: 1,
+      detail: {
+        incarnation_id: `inc-${workerId}`,
+        from_cursor: `from-${through}`,
+        through_cursor: through,
+        preview: 'worker error',
+        has_error: true,
+      },
+    })
+    const receipt = (
+      notificationId: string,
+      through: string,
+      reject: () => Promise<void>,
+    ): ActivityContextAdmissionReceipt => ({
+      notification_id: notificationId,
+      activity_through: through,
+      admit: vi.fn(async () => undefined),
+      reject,
+    })
+
+    await expect(registry.routeOperationNotification(
+      key,
+      event('w-first', 'through-first'),
+      receipt('notification-first', 'through-first', firstReject),
+    )).resolves.toEqual({ consumed: false, registered: true })
+    await firstRejectEntered.promise
+
+    await expect(registry.routeOperationNotification(
+      key,
+      event('w-second', 'through-second'),
+      receipt('notification-second', 'through-second', secondReject),
+    )).resolves.toEqual({ consumed: false, registered: true })
+    releaseFirstReject.resolve()
+
+    await vi.waitFor(() => expect(secondReject).toHaveBeenCalledOnce())
   })
 
   // --- routeSchedule ---

@@ -1475,9 +1475,17 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return (await this.syncState(runtime, h)).state
   }
 
-  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
-    const { events, nextCursor } = await this.readTraceWindow(h, cursor)
-    return { events, nextCursor }
+  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{
+    events: NormalizedTraceEvent[]
+    nextCursor: TraceCursor
+    unavailableReason?: string
+  }> {
+    const { sourceAvailable, events, nextCursor } = await this.readTraceWindow(h, cursor)
+    return {
+      events,
+      nextCursor,
+      ...(sourceAvailable ? {} : { unavailableReason: 'Claude Code native session is unavailable' }),
+    }
   }
 
   async listSubagents(h: IncarnationHandle): Promise<WorkerSubagentSummary[]> {
@@ -2291,6 +2299,10 @@ function normalizeTraceLine(line: string): NormalizedTraceEvent | null {
   }
 
   if (parsed.type === 'assistant') {
+    if (parsed.isApiErrorMessage === true && typeof parsed.error === 'string' && parsed.error.trim()) {
+      const error = parsed.error.trim()
+      return { ts, kind: 'error', summary: truncate(error, 200), detail: { message: error } }
+    }
     const message = parsed.message as { content?: unknown } | undefined
     const content = message?.content
     if (Array.isArray(content)) {

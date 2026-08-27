@@ -68,6 +68,8 @@ describe('readCompositeWorkerTrace', () => {
   let inputDeliveryPreviewsShouldThrow: boolean
   let nativeLines: NormalizedTraceEvent[]
   let nativeShouldThrow: string | null
+  let persistedNativeLines: NormalizedTraceEvent[]
+  let persistedReadCalls: number
 
   function setNative(events: NormalizedTraceEvent[]): void {
     nativeLines = events.map((event, index) => ({ ...event, source_offset: index }))
@@ -81,6 +83,21 @@ describe('readCompositeWorkerTrace', () => {
         getInputDeliveryPreviews: async () => {
           if (inputDeliveryPreviewsShouldThrow) throw new Error('receipt file corrupt')
           return inputDeliveryPreviews
+        },
+        getPersistedNativeActivityTrace: async (
+          _workerId: string,
+          _incarnationId: string,
+          cursor: { offset: number },
+        ) => {
+          persistedReadCalls += 1
+          return {
+            events: persistedNativeLines.filter((event) => (event.source_offset ?? 0) >= cursor.offset),
+            nextCursor: {
+              offset: persistedNativeLines.length === 0
+                ? cursor.offset
+                : Math.max(...persistedNativeLines.map((event) => event.source_offset ?? 0)) + 1,
+            },
+          }
         },
       },
       adapters: new Map([
@@ -108,6 +125,8 @@ describe('readCompositeWorkerTrace', () => {
     inputDeliveryPreviewsShouldThrow = false
     setNative([])
     nativeShouldThrow = null
+    persistedNativeLines = []
+    persistedReadCalls = 0
   })
 
   afterEach(async () => {
@@ -241,6 +260,139 @@ describe('readCompositeWorkerTrace', () => {
     const second = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
     expect(second.events.some((event) => event.summary === 'persisted' && event.source === 'native')).toBe(true)
     expect(second.unavailable_reason).toContain('copy')
+  })
+
+  it('copy 只覆盖当前窗口前半段时，用 Harness 持久化 evidence 补齐后续 error', async () => {
+    const fingerprint = incarnationFingerprint({
+      incarnation_id: INCARNATION_ID,
+      impl: 'claude-code',
+      seq: 1,
+      started_at: '2026-08-01T00:00:00.000Z',
+    })
+    const copied = nativeEventAt('copied activity', '2026-08-01T00:00:02.000Z', 0)
+    await nativeCopy.append(WORKER_ID, 1, fingerprint, [copied], (text) => text)
+    await nativeCopy.flush()
+    nativeShouldThrow = 'rollout missing'
+    persistedNativeLines = [
+      copied,
+      {
+        ts: '2026-08-01T00:00:03.000Z',
+        kind: 'error',
+        summary: 'persisted error after partial copy',
+        source_offset: 1,
+      },
+    ]
+
+    const result = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+
+    expect(result.events.map((event) => event.summary)).toEqual([
+      'copied activity',
+      'persisted error after partial copy',
+    ])
+    expect(result.unavailable_reason).toContain('harness persisted activity')
+    expect(persistedReadCalls).toBe(1)
+  })
+
+  it('copy 存在但不覆盖当前增量窗口时继续回退 Harness 持久化 evidence', async () => {
+    setNative([nativeEvent('copied before current window', '2026-08-01T00:00:02.000Z')])
+    const first = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+    nativeShouldThrow = 'rollout missing'
+    persistedNativeLines = [{
+      ts: '2026-08-01T00:00:03.000Z',
+      kind: 'error',
+      summary: 'persisted error after copy',
+      source_offset: 1,
+    }]
+
+    const result = await readCompositeWorkerTrace(deps(), {
+      worker_id: WORKER_ID,
+      cursor: first.next_cursor,
+    })
+
+    expect(result.events).toMatchObject([{
+      source: 'native',
+      kind: 'error',
+      summary: 'persisted error after copy',
+    }])
+    expect(result.unavailable_reason).toContain('harness persisted activity')
+    expect(persistedReadCalls).toBe(1)
+  })
+
+  it('live native 与 Agent-owned copy 都不可用时回退 Harness 持久化 error evidence', async () => {
+    nativeShouldThrow = 'rollout missing'
+    persistedNativeLines = [{
+      ts: '2026-08-01T00:00:02.000Z',
+      kind: 'error',
+      summary: '[redacted] automatic compaction failed',
+      source_offset: 0,
+    }]
+
+    const result = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+
+    expect(result.events).toMatchObject([{
+      source: 'native',
+      kind: 'error',
+      summary: '[redacted] automatic compaction failed',
+    }])
+    expect(result.unavailable_reason).toContain('harness persisted activity')
+    expect(persistedReadCalls).toBe(1)
+  })
+
+  it('adapter 未注册或没有 readTrace 时仍按 copy → persisted 顺序回退', async () => {
+    persistedNativeLines = [{
+      ts: '2026-08-01T00:00:02.000Z',
+      kind: 'error',
+      summary: 'persisted error evidence',
+      source_offset: 0,
+    }]
+    const adapterVariants = [
+      new Map(),
+      new Map([['claude-code', {} as WorkerAdapter]]),
+    ]
+
+    for (const adapters of adapterVariants) {
+      const result = await readCompositeWorkerTrace({ ...deps(), adapters } as never, { worker_id: WORKER_ID })
+      expect(result.events).toMatchObject([{
+        source: 'native',
+        kind: 'error',
+        summary: 'persisted error evidence',
+      }])
+      expect(result.unavailable_reason).toContain('harness persisted activity')
+    }
+    expect(persistedReadCalls).toBe(2)
+  })
+
+  it('live native 可用时不读取 Harness 持久化 fallback', async () => {
+    setNative([nativeEvent('live', '2026-08-01T00:00:02.000Z')])
+    persistedNativeLines = [{
+      ts: '2026-08-01T00:00:03.000Z',
+      kind: 'error',
+      summary: 'must not duplicate',
+      source_offset: 1,
+    }]
+
+    const result = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
+
+    expect(result.events.map((event) => event.summary)).toContain('live')
+    expect(result.events.map((event) => event.summary)).not.toContain('must not duplicate')
+    expect(persistedReadCalls).toBe(0)
+  })
+
+  it('durable opaque cursor 返回前已经完成落盘', async () => {
+    const durableDir = join(dir, 'durable-cursors')
+    const store = new TraceCursorStore(durableDir)
+    const token = await store.mintDurable(
+      WORKER_ID,
+      incarnationFingerprint({
+        incarnation_id: INCARNATION_ID,
+        impl: 'claude-code',
+        seq: 1,
+        started_at: '2026-08-01T00:00:00.000Z',
+      }),
+      { harness: 0, native: 7, legacy: 0 },
+    )
+
+    await expect(fs.readFile(join(durableDir, `${token}.json`), 'utf8')).resolves.toContain(token)
   })
 
   it('原生 source 消失时升级 pre-incarnation copy 的 header 并保留历史事件', async () => {

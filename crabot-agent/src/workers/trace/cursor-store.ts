@@ -120,20 +120,36 @@ export class TraceCursorStore {
     }
   }
 
-  private persist(record: TraceCursorRecord): void {
-    this.writeTail = this.writeTail.then(async () => {
+  private persist(record: TraceCursorRecord): Promise<void> {
+    const write = this.writeTail.then(async () => {
       await fs.mkdir(this.dir, { recursive: true, mode: 0o700 })
       const finalPath = join(this.dir, `${record.token}.json`)
       const tmpPath = `${finalPath}.tmp-${randomBytes(6).toString('hex')}`
       await fs.writeFile(tmpPath, JSON.stringify(record), { mode: 0o600 })
       await fs.rename(tmpPath, finalPath)
-    }).catch((error) => {
+    })
+    this.writeTail = write.catch((error) => {
       console.warn('[TraceCursorStore] persist failed:', error instanceof Error ? error.message : String(error))
     })
+    return write
   }
 
   /** 新 token：只记录 positions，窗口等首次消费时捕获。 */
   async mint(workerId: string, fingerprint: string, positions: TraceSourcePositions): Promise<string> {
+    return this.mintWithPersistence(workerId, fingerprint, positions, false)
+  }
+
+  /** Durable producers await the cursor record before publishing a reference to its token. */
+  async mintDurable(workerId: string, fingerprint: string, positions: TraceSourcePositions): Promise<string> {
+    return this.mintWithPersistence(workerId, fingerprint, positions, true)
+  }
+
+  private async mintWithPersistence(
+    workerId: string,
+    fingerprint: string,
+    positions: TraceSourcePositions,
+    durable: boolean,
+  ): Promise<string> {
     await this.ensureLoaded()
     const token = randomBytes(24).toString('base64url')
     const now = new Date().toISOString()
@@ -147,7 +163,15 @@ export class TraceCursorStore {
       last_access_at: now,
     }
     this.records.set(token, record)
-    this.persist(record)
+    const write = this.persist(record)
+    if (durable) {
+      try {
+        await write
+      } catch (error) {
+        this.records.delete(token)
+        throw error
+      }
+    }
     this.gc()
     return token
   }

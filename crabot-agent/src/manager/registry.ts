@@ -35,7 +35,11 @@ import type { ManagerKey } from './types.js'
 import type { EngineMessage, LLMAdapter, ToolDefinition } from '../engine/index.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { LedgerStore } from '../workers/harness/ledger-store'
-import type { HarnessEvent, HarnessEventDelivery } from '../workers/harness/worker-events'
+import type {
+  ActivityContextAdmissionReceipt,
+  HarnessEvent,
+  HarnessEventDelivery,
+} from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { HumanPrincipal } from './principal.js'
 import { resolveTimezone } from '../utils/time.js'
@@ -401,7 +405,32 @@ export class ManagerRegistry {
   async routeOperationNotification(
     key: ManagerKey,
     event: HarnessEvent,
+    activityReceipt?: ActivityContextAdmissionReceipt,
   ): Promise<HarnessEventDelivery> {
+    if (event.kind === 'activity_available' && activityReceipt) {
+      const capture = this.captureIngress()
+      const envelope = this.makeEnvelope(
+        capture,
+        { kind: 'worker_event', event },
+        event.ts,
+        undefined,
+        undefined,
+        activityReceipt,
+      )
+      if (this.isEpisodeActive(key)) {
+        this.getOrCreate(key).enqueueDuringEpisode(envelope)
+      } else {
+        void this.runWake(key, envelope).catch(async (error) => {
+          try {
+            await activityReceipt.reject()
+          } catch (rejectError) {
+            console.error(`[ManagerRegistry] activity receipt rejection failed for ${activityReceipt.notification_id}:`, rejectError)
+          }
+          console.error(`[ManagerRegistry] activity notification episode failed for ${activityReceipt.notification_id}:`, error)
+        })
+      }
+      return { consumed: false, registered: true }
+    }
     const capture = this.captureIngress()
     const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event }, event.ts)
     const loop = this.getOrCreate(key)
@@ -563,6 +592,7 @@ export class ManagerRegistry {
     occurredAt?: string,
     humanMessages?: ReadonlyArray<ChannelMessage>,
     correlation?: import('./loop.js').ManagerWakeCorrelation,
+    activityReceipt?: ActivityContextAdmissionReceipt,
   ): TimedWakeEnvelope {
     const occurred_at = parseOccurredAt(occurredAt, 'source')
     const human_occurred_at = humanMessages?.map((message) => ({
@@ -577,6 +607,7 @@ export class ManagerRegistry {
       ...(occurred_at ? { occurred_at } : {}),
       ...(human_occurred_at ? { human_occurred_at } : {}),
       ...(correlation ? { correlation } : {}),
+      ...(activityReceipt ? { activity_context_receipt: activityReceipt } : {}),
     }
   }
 
@@ -641,6 +672,9 @@ export class ManagerRegistry {
       const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
       if (remaining <= 0) this.activeEpisodes.delete(key)
       else this.activeEpisodes.set(key, remaining)
+      if (remaining <= 0 && result?.consumedEvents !== true) {
+        loop.rejectPendingActivityMailbox()
+      }
       // 必须与上面的引用计数递减处在**同一个同步块**里(中间不 await):否则会出现
       // "计数已归零、自唤醒尚未登记"的窗口,`evictIdle` 恰在此时跑就会把实例连同 mailbox
       // 一起回收掉。`maybeSelfWake` 内部的 `runWake` 在第一个 await 之前就完成了 +1。

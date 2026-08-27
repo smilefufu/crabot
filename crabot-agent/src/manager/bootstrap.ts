@@ -191,6 +191,8 @@ export interface BootstrapDeps {
   readonly workerImplSnapshot?: import('./tools/worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
   /** Agent-owned structured session projection used by get_worker_activity. */
   readonly readWorkerActivity?: import('./tools/worker-tools.js').WorkerToolsDeps['readWorkerActivity']
+  /** Mints opaque activity cursors from Harness-internal native positions. */
+  readonly mintActivityCursor?: HarnessDeps['mintActivityCursor']
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */
   readonly admitWorkerConnection?: (impl: import('../workers/types.js').WorkerImplId, operationLabel?: string) => Promise<{
     env: Record<string, string>
@@ -354,6 +356,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     workspaces,
     workersDir: join(agentDir, 'workers'),
     now: deps.now,
+    mintActivityCursor: deps.mintActivityCursor,
     // P6-A §8.10：化身终态时主动收割一次 native trace（最后一次 read → Agent-owned copy）。
     onIncarnationTerminal: deps.onIncarnationTerminal,
     onNativeActivityCollected: deps.onNativeActivityCollected,
@@ -428,9 +431,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         },
       )
     },
-    onOperationNotification: (managerKey, event) => {
+    onOperationNotification: (managerKey, event, activityReceipt) => {
       if (!registry) return { consumed: false }
-      return registry.routeOperationNotification(managerKey, event).catch((err) => {
+      return registry.routeOperationNotification(managerKey, event, activityReceipt).catch((err) => {
         console.error(
           `[manager-bootstrap] routeOperationNotification failed ` +
             `(manager=${managerKey}, worker=${event.worker_id}, kind=${event.kind}):`,

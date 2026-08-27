@@ -188,7 +188,7 @@ export interface ForkOptions {
 
 export interface NormalizedTraceEvent {
   readonly ts: string
-  readonly kind: 'message' | 'llm_call' | 'tool_call' | 'tool_result' | 'thinking' | 'lifecycle'
+  readonly kind: 'message' | 'llm_call' | 'tool_call' | 'tool_result' | 'thinking' | 'lifecycle' | 'error'
   readonly role?: 'assistant' | 'user' | 'system'
   readonly summary: string
   readonly detail?: unknown
@@ -228,7 +228,7 @@ export interface WorkerSubagentSummary {
   readonly unavailable_reason?: string
 }
 
-export type WorkerActivityKind = 'assistant_text' | 'tool_call' | 'tool_result'
+export type WorkerActivityKind = 'assistant_text' | 'tool_call' | 'tool_result' | 'error'
 export type WorkerActivityView = 'assistant' | 'all'
 export type WorkerActivityCursor = string
 
@@ -449,7 +449,11 @@ export interface WorkerAdapter {
     h: IncarnationHandle,
     cursor?: { readonly offset: number },
   ): Promise<SupervisionObservation>
-  readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }>
+  readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<{
+    events: NormalizedTraceEvent[]
+    nextCursor: TraceCursor
+    unavailableReason?: string
+  }>
   /** Direct native child sessions only. Implementations must not infer children from parent tool text. */
   listSubagents?(h: IncarnationHandle): Promise<WorkerSubagentSummary[]>
   getSubagent?(h: IncarnationHandle, subagentId: string): Promise<WorkerSubagentSummary | undefined>

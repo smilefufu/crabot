@@ -120,7 +120,13 @@ import {
   type InboxSettlement,
   type InboxSettledResult,
 } from './inbox'
-import { WorkerEventLog, type HarnessEvent, type HarnessEventDelivery, type HarnessEventKind } from './worker-events'
+import {
+  WorkerEventLog,
+  type ActivityContextAdmissionReceipt,
+  type HarnessEvent,
+  type HarnessEventDelivery,
+  type HarnessEventKind,
+} from './worker-events'
 import { WorkerContextStore, type WorkerContext } from './context-store'
 import {
   captureWorkspaceInstructions,
@@ -134,7 +140,7 @@ import {
   type HandoffPackage,
 } from './handoff-package'
 import { WorkerTurnStore, type WorkerTurn, type WorkerTurnResolution } from './worker-turn-store'
-import { NativeActivityStore } from './native-activity-store'
+import { NativeActivityStore, type PendingActivityNotification } from './native-activity-store'
 import {
   WorkerControlOperationStore,
   type WorkerControlOperation,
@@ -622,7 +628,16 @@ export interface HarnessDeps {
   readonly onOperationNotification?: (
     managerKey: ManagerKey,
     event: HarnessEvent,
+    activityReceipt?: ActivityContextAdmissionReceipt,
   ) => void | HarnessEventDelivery | Promise<HarnessEventDelivery | void>
+  /** Mints an Agent-owned cursor for one internal native trace position. */
+  readonly mintActivityCursor?: (position: {
+    readonly worker_id: string
+    readonly incarnation_id: IncarnationId
+    readonly impl: WorkerImplId
+    readonly seq: number
+    readonly offset: number
+  }) => Promise<string>
   /** Removes runtime credentials before an operation failure reason is persisted or returned. */
   readonly redactFailureReason?: (text: string) => string
   /** provision 素材(P3 可返回空集)，必须按 worker 固定的权限快照生成。 */
@@ -806,6 +821,7 @@ export class WorkerHarness {
   private readonly controlOperationStore: WorkerControlOperationStore
   private readonly uiSnapshotStore: WorkerUiSnapshotStore
   private readonly nativeActivityNotificationMutexes = new Map<string, AsyncMutex>()
+  private readonly nativeActivityNotificationsInFlight = new Map<string, 'registered' | 'settling'>()
   private readonly controlNotificationMutexes = new Map<string, AsyncMutex>()
   private readonly recoveryNoticeNotificationMutexes = new Map<string, AsyncMutex>()
   private readonly inputDeliveryControllers = new Map<string, AbortController>()
@@ -3391,6 +3407,14 @@ export class WorkerHarness {
     return latest && projectWorkerActivity([latest], 'all', { worker_id: workerId, incarnation_id: incarnationId })[0]
   }
 
+  async getPersistedNativeActivityTrace(
+    workerId: string,
+    incarnationId: IncarnationId,
+    cursor: TraceCursor,
+  ): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
+    return this.nativeActivityStore.trace(workerId, incarnationId, cursor.offset)
+  }
+
   async getWorkerControlOperations(workerId: string): Promise<WorkerControlOperation[]> {
     return this.controlOperationStore.active(workerId)
   }
@@ -3726,11 +3750,31 @@ export class WorkerHarness {
       return
     }
     if (trace.nextCursor.offset === offset) return
-    const assistant = projectWorkerActivity(trace.events, 'assistant', {
+    const projected = projectWorkerActivity(trace.events, 'all', {
       worker_id: h.worker_id,
       incarnation_id: h.incarnation_id,
     })
-    const notification = assistant.length === 0
+    const notifying = projected.filter((activity) => activity.kind === 'assistant_text' || activity.kind === 'error')
+    const hasError = notifying.some((activity) => activity.kind === 'error')
+    const redact = this.deps.redactFailureReason ?? ((text: string) => text)
+    const persistedEvents = trace.events.map((event) => ({ ...event, summary: redact(event.summary) }))
+    const preview = truncateWakeText(
+      notifying.map((activity) => redact(activity.summary)).join('\n'),
+      240,
+      '',
+      'head',
+    ) ?? (hasError ? 'worker error activity' : 'assistant activity')
+    const mintCursor = this.deps.mintActivityCursor
+    if (notifying.length > 0 && !mintCursor) {
+      throw new Error('Agent-owned activity cursor minting is unavailable')
+    }
+    const fromCursor = notifying.length > 0
+      ? await mintCursor?.({ worker_id: h.worker_id, incarnation_id: h.incarnation_id, impl: h.impl, seq: h.seq, offset })
+      : undefined
+    const throughCursor = notifying.length > 0
+      ? await mintCursor?.({ worker_id: h.worker_id, incarnation_id: h.incarnation_id, impl: h.impl, seq: h.seq, offset: trace.nextCursor.offset })
+      : undefined
+    const notification = notifying.length === 0
       ? undefined
       : {
           worker_id: h.worker_id,
@@ -3738,20 +3782,22 @@ export class WorkerHarness {
           incarnation_id: h.incarnation_id,
           impl: h.impl,
           seq: h.seq,
-          activity_from: String(offset),
-          activity_through: String(trace.nextCursor.offset),
-          preview: truncateWakeText(assistant.map((event) => event.summary).join('\n'), 240, '', 'head') ?? 'assistant activity',
+          activity_from: fromCursor!,
+          activity_through: throughCursor!,
+          preview,
+          has_error: hasError,
           event: this.buildEvent(h.worker_id, h.seq, 'activity_available', {
             incarnation_id: h.incarnation_id,
-            from_cursor: String(offset),
-            through_cursor: String(trace.nextCursor.offset),
-            preview: truncateWakeText(assistant.map((event) => event.summary).join('\n'), 240, '', 'head') ?? 'assistant activity',
+            from_cursor: fromCursor!,
+            through_cursor: throughCursor!,
+            preview,
+            has_error: hasError,
           }),
         }
     await this.nativeActivityStore.commitObservation({
       worker_id: h.worker_id,
       cursor: { incarnation_id: h.incarnation_id, impl: h.impl, seq: h.seq, offset: trace.nextCursor.offset },
-      activity: trace.events,
+      activity: persistedEvents,
       ...(notification ? { notification } : {}),
     })
   }
@@ -3784,33 +3830,154 @@ export class WorkerHarness {
     const mutex = this.nativeActivityNotificationMutexes.get(workerId) ?? new AsyncMutex()
     this.nativeActivityNotificationMutexes.set(workerId, mutex)
     await mutex.run(async () => {
-      for (const notification of await this.nativeActivityStore.due(workerId, this.deps.now())) {
+      for (const dueNotification of await this.nativeActivityStore.due(workerId, this.deps.now())) {
+        let notification = dueNotification
+        let activityReceiptRegistered = false
+        if (notification.event.kind === 'activity_available' && this.nativeActivityNotificationsInFlight.has(notification.notification_id)) {
+          continue
+        }
         try {
+          if (notification.event.kind === 'activity_available') {
+            const upgraded = await this.ensureOpaqueActivityNotificationCursors(notification)
+            if (!upgraded) continue
+            notification = upgraded
+          }
           if (!notification.event_written) {
             await this.getEventLog(workerId).append(notification.event)
             await this.nativeActivityStore.markEventWritten(workerId, notification.notification_id)
           }
-          const delivery = await notify(notification.manager_key, notification.event)
-          if (delivery?.consumed) {
-            await this.nativeActivityStore.markConsumedIfUnchanged(
-              workerId,
-              notification.notification_id,
-              notification.activity_through,
-              this.deps.now(),
-            )
+          if (notification.event.kind === 'activity_available') {
+            this.nativeActivityNotificationsInFlight.set(notification.notification_id, 'registered')
+            activityReceiptRegistered = true
+            const activityReceipt = this.buildActivityContextAdmissionReceipt(notification)
+            const delivery = await notify(notification.manager_key, notification.event, activityReceipt)
+            if (delivery?.registered === true) continue
+            if (delivery?.consumed === true) await activityReceipt.admit()
+            else await activityReceipt.reject()
           } else {
-            await this.nativeActivityStore.markDeliveryAttempt(workerId, notification.notification_id, this.deps.now())
+            const delivery = await notify(notification.manager_key, notification.event)
+            if (delivery?.consumed) {
+              await this.nativeActivityStore.markConsumedIfUnchanged(
+                workerId,
+                notification.notification_id,
+                notification.activity_through,
+                this.deps.now(),
+              )
+            } else {
+              await this.nativeActivityStore.markDeliveryAttempt(workerId, notification.notification_id, this.deps.now())
+            }
           }
         } catch (error) {
-          try {
-            await this.nativeActivityStore.markDeliveryAttempt(workerId, notification.notification_id, this.deps.now())
-          } catch (markError) {
-            console.error(`[WorkerHarness] native activity retry scheduling failed for ${notification.notification_id}:`, markError)
+          if (notification.event.kind === 'activity_available') {
+            try {
+              if (activityReceiptRegistered) {
+                await this.buildActivityContextAdmissionReceipt(notification).reject()
+              } else {
+                await this.nativeActivityStore.markDeliveryAttempt(
+                  workerId,
+                  notification.notification_id,
+                  this.deps.now(),
+                )
+              }
+            } catch (markError) {
+              console.error(`[WorkerHarness] native activity retry scheduling failed for ${notification.notification_id}:`, markError)
+            }
+          } else {
+            try {
+              await this.nativeActivityStore.markDeliveryAttempt(workerId, notification.notification_id, this.deps.now())
+            } catch (markError) {
+              console.error(`[WorkerHarness] native activity retry scheduling failed for ${notification.notification_id}:`, markError)
+            }
           }
           console.error(`[WorkerHarness] native activity notification failed for ${notification.notification_id}:`, error)
         }
       }
     })
+  }
+
+  private async ensureOpaqueActivityNotificationCursors(
+    notification: PendingActivityNotification,
+  ): Promise<PendingActivityNotification | undefined> {
+    const fromOffset = legacyNativeOffset(notification.activity_from)
+    const throughOffset = legacyNativeOffset(notification.activity_through)
+    if (fromOffset === undefined && throughOffset === undefined) return notification
+    const mintCursor = this.deps.mintActivityCursor
+    if (!mintCursor) throw new Error('Agent-owned activity cursor minting is unavailable')
+    const mint = (offset: number) => mintCursor({
+      worker_id: notification.worker_id,
+      incarnation_id: notification.incarnation_id,
+      impl: notification.impl,
+      seq: notification.seq,
+      offset,
+    })
+    const replacement = {
+      activity_from: fromOffset === undefined ? notification.activity_from : await mint(fromOffset),
+      activity_through: throughOffset === undefined ? notification.activity_through : await mint(throughOffset),
+    }
+    return this.nativeActivityStore.replaceActivityCursorsIfUnchanged(
+      notification.worker_id,
+      notification.notification_id,
+      {
+        activity_from: notification.activity_from,
+        activity_through: notification.activity_through,
+      },
+      replacement,
+    )
+  }
+
+  private buildActivityContextAdmissionReceipt(
+    notification: PendingActivityNotification,
+  ): ActivityContextAdmissionReceipt {
+    const beginSettlement = (): boolean => {
+      if (this.nativeActivityNotificationsInFlight.get(notification.notification_id) !== 'registered') return false
+      this.nativeActivityNotificationsInFlight.set(notification.notification_id, 'settling')
+      return true
+    }
+    const finishSettlement = (): void => {
+      this.nativeActivityNotificationsInFlight.delete(notification.notification_id)
+    }
+    return {
+      notification_id: notification.notification_id,
+      activity_through: notification.activity_through,
+      admit: async () => {
+        if (!beginSettlement()) return
+        let staleRange = false
+        try {
+          staleRange = !await this.nativeActivityStore.markConsumedIfUnchanged(
+            notification.worker_id,
+            notification.notification_id,
+            notification.activity_through,
+            this.deps.now(),
+          )
+        } catch (error) {
+          await this.nativeActivityStore.markDeliveryAttempt(
+            notification.worker_id,
+            notification.notification_id,
+            this.deps.now(),
+          ).catch(() => undefined)
+          throw error
+        } finally {
+          finishSettlement()
+        }
+        if (staleRange) {
+          void this.deliverNativeActivityNotifications(notification.worker_id).catch((error) => {
+            console.error(`[WorkerHarness] merged native activity redelivery failed for ${notification.notification_id}:`, error)
+          })
+        }
+      },
+      reject: async () => {
+        if (!beginSettlement()) return
+        try {
+          await this.nativeActivityStore.markDeliveryAttempt(
+            notification.worker_id,
+            notification.notification_id,
+            this.deps.now(),
+          )
+        } finally {
+          finishSettlement()
+        }
+      },
+    }
   }
 
   async setWorkerPeriodicReport(
@@ -6407,6 +6574,12 @@ function findIncarnation(worker: LedgerWorker, impl: WorkerImplId, seq: number):
     if (inc.impl === impl && inc.seq === seq) lastMatch = inc
   }
   return lastMatch
+}
+
+function legacyNativeOffset(value: string): number | undefined {
+  if (!/^(0|[1-9]\d{0,15})$/.test(value)) return undefined
+  const offset = Number(value)
+  return Number.isSafeInteger(offset) ? offset : undefined
 }
 
 function reusesCliNativeSession(source: ExecutableIncarnation, target: IncarnationHandle): boolean {

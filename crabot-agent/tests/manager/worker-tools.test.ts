@@ -261,6 +261,8 @@ describe('worker observation and turn closure', () => {
     }))
     const tools = buildWorkerTools({ harness, context: () => CTX, readWorkerActivity })
     const getWorkerActivity = tools.find((tool) => tool.name === 'get_worker_activity')!
+    expect(getWorkerActivity.description).toContain('脱敏 error evidence')
+    expect(getWorkerActivity.inputSchema.properties?.view.description).toContain('错误证据')
 
     const assistant = await getWorkerActivity.call({ worker_id: worker.worker_id }, {})
     expect(assistant.isError).toBe(false)

@@ -1809,9 +1809,17 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return (await this.syncState(runtime, h)).state
   }
 
-  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
-    const { events, nextCursor } = await this.readTraceWindow(h, cursor)
-    return { events, nextCursor }
+  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{
+    events: NormalizedTraceEvent[]
+    nextCursor: TraceCursor
+    unavailableReason?: string
+  }> {
+    const { sourceAvailable, events, nextCursor } = await this.readTraceWindow(h, cursor)
+    return {
+      events,
+      nextCursor,
+      ...(sourceAvailable ? {} : { unavailableReason: 'Codex native rollout is unavailable' }),
+    }
   }
 
   async listSubagents(h: IncarnationHandle): Promise<WorkerSubagentSummary[]> {
@@ -2464,6 +2472,15 @@ function normalizeRolloutLine(line: string): NormalizedTraceEvent[] {
   }
 
   if (parsed.type === 'event_msg') {
+    if (
+      payload?.type === 'task_complete' &&
+      isRecord(payload.error) &&
+      typeof payload.error.message === 'string' &&
+      payload.error.message.trim()
+    ) {
+      const message = payload.error.message.trim()
+      return [{ ts, kind: 'error', summary: truncate(message, 200), detail: { message } }]
+    }
     const completed = normalizeCompletedItem(payload, ts)
     if (completed) return completed
     const eventType = typeof payload?.type === 'string' ? payload.type : 'event_msg'

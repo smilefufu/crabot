@@ -857,6 +857,7 @@ export class UnifiedAgent extends ModuleBase {
       }),
       builtinTraceReader: this.builtinTraceReader(),
       readWorkerActivity: (params) => this.readWorkerActivity(params),
+      mintActivityCursor: (position) => this.mintWorkerActivityCursor(position),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
       onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
       // Parent native activity is already persisted by Harness. Only terminal direct CLI children
@@ -3732,6 +3733,34 @@ export class UnifiedAgent extends ModuleBase {
         incarnation_id: incarnation.incarnation_id,
       }),
     }
+  }
+
+  private async mintWorkerActivityCursor(position: {
+    worker_id: string
+    incarnation_id: string
+    impl: import('./workers/types.js').WorkerImplId
+    seq: number
+    offset: number
+  }): Promise<string> {
+    const found = await this.requireManagerStack().ledger.findWorker(position.worker_id)
+    const incarnation = found?.worker.incarnations.find(
+      (candidate) => candidate.incarnation_id === position.incarnation_id,
+    )
+    if (!incarnation || incarnation.impl !== position.impl || incarnation.seq !== position.seq) {
+      throw new Error(`worker activity incarnation unavailable: ${position.worker_id}`)
+    }
+    const startedAt = (incarnation as { started_at?: unknown }).started_at
+    const fingerprint = incarnationFingerprint({
+      incarnation_id: position.incarnation_id,
+      impl: position.impl,
+      seq: position.seq,
+      ...(typeof startedAt === 'string' ? { started_at: startedAt } : {}),
+    })
+    return this.traceCursorStore().mintDurable(position.worker_id, fingerprint, {
+      harness: 0,
+      native: position.offset,
+      legacy: 0,
+    })
   }
 
   /** P6-A §3.3：Agent-owned opaque cursor window store（惰性建目录）。 */

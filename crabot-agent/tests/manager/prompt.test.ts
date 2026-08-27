@@ -89,6 +89,18 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).not.toContain('`pending` 只表示已登记、正在等待安全输入面')
   })
 
+  it('含 activity error evidence 纪律：先读 all，idle 不覆盖，且不 resolve turn', () => {
+    expect(MANAGER_IDENTITY).toContain('`detail.has_error=true`')
+    expect(MANAGER_IDENTITY).toContain('传 `view=all`')
+    expect(MANAGER_IDENTITY).toContain('`from_cursor` 作为 `after`')
+    expect(MANAGER_IDENTITY).toContain('事件里的 `incarnation_id`')
+    expect(MANAGER_IDENTITY).toContain('`idle` 只表示控制面暂时空闲')
+    expect(MANAGER_IDENTITY).toContain('不能覆盖或否定错误证据')
+    expect(MANAGER_IDENTITY).toContain('activity 不是 completed turn')
+    expect(MANAGER_IDENTITY).toContain('不调用 `resolve_worker_turn`')
+    expect(MANAGER_IDENTITY).toContain('普通 assistant activity 也不要求一律向人类报告')
+  })
+
   it('含执行器选择与复用纪律：有效实现选择、等待投递、运行中改向和 fork 侧问', () => {
     expect(MANAGER_IDENTITY).toContain('选择新执行器')
     expect(MANAGER_IDENTITY).toContain('list_worker_implementations')

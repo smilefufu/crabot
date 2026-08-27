@@ -2172,6 +2172,61 @@ describe('ClaudeCodeAdapter.readTrace', () => {
     await adapter.kill(h)
   })
 
+  it('把真实结构脱敏 fixture 中的 API/压缩失败投影为 error，而不是 assistant message', async () => {
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new NoopTmux(),
+      claudeBin: 'unused',
+      promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const { h, sessionId } = await spawnedHandle(adapter, workerId)
+    const slugDir = path.join(claudeProjectsDir, projectSlug(workspaceRoot))
+    await fs.mkdir(slugDir, { recursive: true })
+    const fixture = await fs.readFile(path.resolve(__dirname, 'fixtures/claude-api-error.jsonl'), 'utf-8')
+    await fs.writeFile(path.join(slugDir, `${sessionId}.jsonl`), fixture, 'utf-8')
+
+    const trace = await adapter.readTrace(h)
+    expect(trace.events).toEqual([expect.objectContaining({
+      kind: 'error',
+      summary: '[redacted] automatic compaction failed',
+      detail: { message: '[redacted] automatic compaction failed' },
+      source_offset: 0,
+    })])
+    expect(trace.nextCursor.offset).toBe(1)
+
+    await adapter.kill(h)
+  })
+
+  it('不把未确认结构的 error-like assistant record 猜成 error', async () => {
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new NoopTmux(),
+      claudeBin: 'unused',
+      promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const { h, sessionId } = await spawnedHandle(adapter, workerId)
+    const slugDir = path.join(claudeProjectsDir, projectSlug(workspaceRoot))
+    await fs.mkdir(slugDir, { recursive: true })
+    await fs.writeFile(path.join(slugDir, `${sessionId}.jsonl`), JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-27T00:00:00.000Z',
+      isApiErrorMessage: false,
+      error: 'tool-shaped failure text',
+      message: { role: 'assistant', content: [{ type: 'text', text: '普通回答' }] },
+    }) + '\n', 'utf-8')
+
+    const trace = await adapter.readTrace(h)
+    expect(trace.events).toEqual([expect.objectContaining({ kind: 'message', role: 'assistant', summary: '普通回答' })])
+
+    await adapter.kill(h)
+  })
+
   it('cursor.offset 按行号跳过已读部分', async () => {
     const tmux = new NoopTmux()
     const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', promptDeliveryTimeoutMs: 0, claudeProjectsDir })
