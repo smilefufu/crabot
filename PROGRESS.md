@@ -12,7 +12,7 @@
 - `send_to_worker` 在一次有界同步尝试内只返回 `delivered | failed`，不再把 `pending` 暴露给 Manager；输入面不安全、提交确认不确定和超时分别返回稳定原因码与确定性。
 - Manager 活跃 episode 期间到达的 Worker hook/状态通知直接进入当前 mailbox，下一次 LLM 调用批量读取；同一 Worker 的同步投递计数按引用计数维护，避免并发调用提前关闭通知等待。
 - 投递 deadline 收紧为 120 秒；Harness 增加 wall-clock 兜底并隔离迟到 adapter 结果，tmux `execFile`、`load-buffer` 与版本探测均有 15 秒命令上限。
-- 相关协议与设计记录已同步到 `crabot-docs`，待文档仓直推和主仓非 Draft PR review。
+- 相关协议与设计记录已同步到 `crabot-docs`（main `12f52b6`）；待主仓非 Draft PR review。
 
 ### 运行态立即改向：实现完成
 

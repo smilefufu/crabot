@@ -34,7 +34,7 @@
 
 import { defineTool } from '../../engine/index.js'
 import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
-import type { WorkerHarness } from '../../workers/harness/harness'
+import { INPUT_DELIVERY_TIMEOUT_MS, type WorkerHarness } from '../../workers/harness/harness'
 import type { ManagerKey, LedgerWorker, TaskStatus } from '../../workers/harness/ledger-types'
 import { isDecisionVisibleWorker } from '../../workers/harness/task-status.js'
 import type { MasterAuthorization } from '../principal.js'
@@ -196,6 +196,31 @@ function normalizePagination(page: unknown, pageSize: unknown): { page: number; 
 }
 
 const ACCESS_DENIED = 'worker 不存在或当前会话无权访问'
+
+class SendToWorkerDeadlineError extends Error {
+  constructor() {
+    super('input delivery setup exceeded the 120 second synchronous deadline')
+    this.name = 'SendToWorkerDeadlineError'
+  }
+}
+
+async function awaitWithinSendToWorkerDeadline<T>(
+  deadlineAt: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const remainingMs = deadlineAt - Date.now()
+  if (remainingMs <= 0) throw new SendToWorkerDeadlineError()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SendToWorkerDeadlineError()), remainingMs)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([Promise.resolve().then(operation), timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
 
 async function workerState(harness: WorkerHarness, worker: LedgerWorker) {
   const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined).at(-1)
@@ -365,11 +390,13 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
         return invalid('send_to_worker: immediate_redirect 必须为布尔值')
       }
 
+      const deadlineAt = Date.now() + INPUT_DELIVERY_TIMEOUT_MS
       try {
-        const worker = await authorizeWorker(worker_id)
+        const worker = await awaitWithinSendToWorkerDeadline(deadlineAt, () => authorizeWorker(worker_id))
         const legacyContinuationAuth = capturedLegacyContinuationAuth?.(worker.manager_key)
         const result = await harness.sendToWorker(worker_id, text, {
           managerKey: context().managerKey,
+          deadline_at: new Date(deadlineAt).toISOString(),
           ...(immediate_redirect !== undefined ? { immediate_redirect } : {}),
           ...(legacyContinuationAuth ? { legacyContinuationAuth } : {}),
         })

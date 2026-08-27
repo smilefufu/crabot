@@ -3,7 +3,7 @@ import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { buildWorkerTools, type WorkerToolsContext } from '../../src/manager/tools/worker-tools'
-import { WorkerHarness, type HarnessDeps, type SpawnWorkerParams } from '../../src/workers/harness/harness'
+import { INPUT_DELIVERY_TIMEOUT_MS, WorkerHarness, type HarnessDeps, type SpawnWorkerParams } from '../../src/workers/harness/harness'
 import { LedgerStore } from '../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager'
 import { NativeActivityStore } from '../../src/workers/harness/native-activity-store'
@@ -558,6 +558,28 @@ describe('send_to_worker', () => {
     const result = await sendToWorker.call({ worker_id: 'w-does-not-exist', text: '你好' }, {})
     expect(result.isError).toBe(true)
     expect(result.output).toContain('不存在或当前会话无权访问')
+  })
+
+  it('授权查询永久挂起时仍在同步 deadline 内返回简要失败', async () => {
+    const { harness } = await makeHarness()
+    const findWorker = vi.spyOn(harness, 'findWorker').mockImplementation(() => new Promise<never>(() => {}))
+    const sendWorker = vi.spyOn(harness, 'sendToWorker')
+    const sendToWorker = buildWorkerTools({ harness, context: () => CTX }).find((t) => t.name === 'send_to_worker')!
+
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      const resultPromise = sendToWorker.call({ worker_id: 'w-authorization-stall', text: '继续' }, {})
+      await Promise.resolve()
+      expect(findWorker).toHaveBeenCalledWith('w-authorization-stall')
+
+      await vi.advanceTimersByTimeAsync(INPUT_DELIVERY_TIMEOUT_MS)
+      const result = await resultPromise
+      expect(result).toMatchObject({ isError: true })
+      expect(result.output).toContain('input delivery setup exceeded the 120 second synchronous deadline')
+      expect(sendWorker).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('task 已 cancelled → TaskCancelledError 转成可读 tool_result（isError:true，不抛出）', async () => {

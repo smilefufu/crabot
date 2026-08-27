@@ -702,6 +702,8 @@ export interface HarnessSendToWorkerOptions {
   /** Interrupt a non-builtin mainline before delivering this direction change. */
   readonly immediate_redirect?: boolean
   readonly managerKey?: ManagerKey
+  /** Absolute deadline created by the Manager tool before authorization starts. */
+  readonly deadline_at?: string
   readonly onSettled?: InboxItem['onSettled']
   readonly dedupeKey?: string
   readonly onDeduplicated?: () => void
@@ -842,6 +844,8 @@ export class WorkerHarness {
   private readonly synchronousDeliveryWorkers = new Map<string, number>()
   /** Retains the adapter disposition when a phase update itself cannot be persisted. */
   private readonly deliveryStallDispositions = new Map<string, 'not_pasted' | 'pending_in_ui'>()
+  /** Preserves one conservative timeout outcome while its nonblocking receipt cleanup runs. */
+  private readonly inputTimeoutFailures = new Map<string, InputDeliveryFailure>()
   /** Synchronous generation of the pane that currently owns input for each logical worker. */
   private readonly inputOwnershipRevisions = new Map<string, number>()
   private sweepInFlight = false
@@ -1203,12 +1207,21 @@ export class WorkerHarness {
     let redirectTarget: ExecutableIncarnation | undefined
     let redirectHeld = false
     let redirectItem: InboxItem | undefined
-    let synchronousDeadlineAt: number | undefined
+    let inputEnqueued = false
+    const deliveryId = opts?.managerKey ? randomUUID() : undefined
+    const synchronousDeadlineAt = opts?.managerKey
+      ? this.resolveSynchronousInputDeadline(opts.deadline_at)
+      : undefined
+    let awaitOwnerStateHooks = false
 
     // "读台账状态 → 判断 cancelled/化身 → 入信箱"在同一临界区完成,不允许 check-then-act 跨 await。
     try {
-      await this.withLock(workerId, async () => {
+      const prepare = () => this.withLock(workerId, async () => {
+      this.assertSynchronousInputDeadline(synchronousDeadlineAt, deliveryId)
       const found = await this.deps.ledger.findWorker(workerId)
+      // A queued worker lock or ledger read may have crossed the caller's deadline. Do not
+      // create a redirect hold, receipt, or inbox item after the tool has timed out.
+      this.assertSynchronousInputDeadline(synchronousDeadlineAt, deliveryId)
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
       const mainline = requireMainlineIncarnation(found.worker)
@@ -1226,17 +1239,16 @@ export class WorkerHarness {
 
       if (opts?.managerKey) {
         const createdAt = this.deps.now()
-        const deliveryId = randomUUID()
         try {
           receipt = await this.inputDeliveryStore.create({
-            delivery_id: deliveryId,
+            delivery_id: deliveryId!,
             worker_id: workerId,
             manager_key: opts.managerKey,
             raw: opts.raw ?? false,
             text_preview: text,
             created_at: createdAt,
             updated_at: createdAt,
-            deadline_at: new Date(Date.parse(createdAt) + INPUT_DELIVERY_TIMEOUT_MS).toISOString(),
+            deadline_at: new Date(synchronousDeadlineAt!).toISOString(),
             state: 'pending',
             phase: 'queued',
             manager_notification: { status: 'not_required' },
@@ -1249,8 +1261,16 @@ export class WorkerHarness {
             'receipt store failed',
           )}`)
         }
-        this.inputDeliveryControllers.set(deliveryId, new AbortController())
-        synchronousDeadlineAt = Date.now() + INPUT_DELIVERY_TIMEOUT_MS
+        if (receipt.state !== 'pending') {
+          this.recordExpiredReceiptFailure(receipt, requireMainlineIncarnation(found.worker).seq)
+          return
+        }
+        if (this.isSynchronousInputDeadlineExpired(synchronousDeadlineAt)) {
+          this.scheduleTimedOutInputSettlement(receipt, inbox, 'cancelled')
+          throw new InputDeliveryDeadlineError(deliveryId!)
+        }
+        this.inputDeliveryControllers.set(deliveryId!, new AbortController())
+        awaitOwnerStateHooks = opts.managerKey === found.managerKey
       }
 
       const durableReceipt = receipt
@@ -1263,6 +1283,7 @@ export class WorkerHarness {
         ...(durableReceipt
           ? {
               delivery_id: durableReceipt.delivery_id,
+              deadline_at: durableReceipt.deadline_at,
               onPending: (reason: InboxDeliveryResult['reason']) => {
                 const disposition = reason === 'input_pending' ? 'pending_in_ui' : 'not_pasted'
                 this.deliveryStallDispositions.set(durableReceipt.delivery_id, disposition)
@@ -1274,6 +1295,7 @@ export class WorkerHarness {
                 ).then(() => undefined)
               },
               shouldDeliver: async () =>
+                !this.isSynchronousInputDeadlineExpired(Date.parse(durableReceipt.deadline_at)) &&
                 (await this.inputDeliveryStore.get(workerId, durableReceipt.delivery_id))?.state === 'pending',
               onSettled: async (settlement, detail) => {
                 await this.settleDurableInput(durableReceipt, text, settlement, detail)
@@ -1284,6 +1306,7 @@ export class WorkerHarness {
         ...(opts?.dedupeKey ? { dedupe_key: opts.dedupeKey } : {}),
         ...(opts?.legacyContinuationAuth ? { legacy_continuation_auth: opts.legacyContinuationAuth } : {}),
       }
+      this.assertSynchronousInputDeadline(synchronousDeadlineAt, deliveryId)
       if (redirectTarget) redirectItem = item
       if (opts?.dedupeKey && !durableReceipt) {
         enqueued = inbox.enqueueUnique(item)
@@ -1291,45 +1314,94 @@ export class WorkerHarness {
         if (opts?.immediate_redirect === true) inbox.enqueuePriority(item)
         else inbox.enqueue(item)
         enqueued = true
+        inputEnqueued = durableReceipt !== undefined
       }
       })
+      if (synchronousDeadlineAt !== undefined && deliveryId !== undefined) {
+        await this.awaitWithinDeadline(prepare, synchronousDeadlineAt, deliveryId)
+      } else {
+        await prepare()
+      }
     } catch (error) {
       if (redirectHeld) inbox.release('immediate_redirect')
+      if (error instanceof InputDeliveryDeadlineError && deliveryId !== undefined) {
+        return this.finishSynchronousInputDeadline(
+          workerId,
+          deliveryId,
+          receipt,
+          inbox,
+          receipt && !inputEnqueued ? 'cancelled' : undefined,
+        )
+      }
       throw error
+    }
+
+    if (receipt && receipt.state !== 'pending') {
+      if (redirectHeld) inbox.release('immediate_redirect')
+      return this.toSendToWorkerResult(receipt)
     }
 
     if (!enqueued) opts?.onDeduplicated?.()
     const stateChangesBefore = new Map(
       [...this.stateChangeRevisions.entries()].filter(([key]) => key.startsWith(`${workerId}#`)),
     )
-    if (receipt) {
+    if (receipt && awaitOwnerStateHooks) {
       this.synchronousDeliveryWorkers.set(
         workerId,
         (this.synchronousDeliveryWorkers.get(workerId) ?? 0) + 1,
       )
     }
-    let redirectError: unknown
-    if (redirectTarget) {
-      try {
-        const operation = this.interruptForImmediateRedirect(workerId, redirectTarget)
-        if (receipt && synchronousDeadlineAt !== undefined) {
-          await this.awaitWithinDeadline(operation, synchronousDeadlineAt, receipt.delivery_id)
-        } else {
-          await operation
-        }
-      } catch (error) {
-        redirectError = error
-        if (receipt) {
-          if (error instanceof InputDeliveryDeadlineError) await this.settleTimedOutInput(receipt, inbox)
-          else await this.failDurableInputAttempt(receipt, inbox, error, text)
-        }
-        else if (redirectItem) await inbox.cancelItem(redirectItem)
-        else throw error
-      } finally {
-        inbox.release('immediate_redirect')
-      }
-    }
     try {
+      let redirectError: unknown
+      if (redirectTarget) {
+        try {
+          if (receipt && synchronousDeadlineAt !== undefined) {
+            const activeReceipt = receipt
+            await this.awaitWithinDeadline(
+              () => this.interruptForImmediateRedirect(
+                workerId,
+                redirectTarget!,
+                synchronousDeadlineAt,
+                activeReceipt.delivery_id,
+              ),
+              synchronousDeadlineAt,
+              activeReceipt.delivery_id,
+            )
+          } else {
+            await this.interruptForImmediateRedirect(workerId, redirectTarget)
+          }
+        } catch (error) {
+          redirectError = error
+          if (receipt) {
+            if (error instanceof InputDeliveryDeadlineError) {
+              return this.finishSynchronousInputDeadline(workerId, receipt.delivery_id, receipt, inbox)
+            }
+            try {
+              const settled = await this.awaitWithinDeadline(
+                () => this.failDurableInputAttempt(receipt!, inbox, error, text),
+                synchronousDeadlineAt!,
+                receipt.delivery_id,
+              )
+              return this.toSendToWorkerResult(settled)
+            } catch (settlementError) {
+              if (settlementError instanceof InputDeliveryDeadlineError) {
+                return this.finishSynchronousInputDeadline(workerId, receipt.delivery_id, receipt, inbox)
+              }
+              throw new Error(`delivery receipt unavailable after redirect failure: ${sanitizeOperationFailureReason(
+                settlementError,
+                this.deps.redactFailureReason,
+                text,
+                'receipt store failed',
+              )}`)
+            }
+          }
+          else if (redirectItem) await inbox.cancelItem(redirectItem)
+          else throw error
+        } finally {
+          inbox.release('immediate_redirect')
+        }
+      }
+
       if (!redirectError) {
         try {
           if (receipt && synchronousDeadlineAt !== undefined) {
@@ -1339,30 +1411,70 @@ export class WorkerHarness {
         } catch (error) {
           if (!receipt) throw error
           if (error instanceof InputDeliveryDeadlineError) {
-            await this.settleTimedOutInput(receipt, inbox)
-          } else {
-            await this.failDurableInputAttempt(receipt, inbox, error, text)
+            return this.finishSynchronousInputDeadline(workerId, receipt.delivery_id, receipt, inbox)
+          }
+          try {
+            const settled = await this.awaitWithinDeadline(
+              () => this.failDurableInputAttempt(receipt!, inbox, error, text),
+              synchronousDeadlineAt!,
+              receipt.delivery_id,
+            )
+            return this.toSendToWorkerResult(settled)
+          } catch (settlementError) {
+            if (settlementError instanceof InputDeliveryDeadlineError) {
+              return this.finishSynchronousInputDeadline(workerId, receipt.delivery_id, receipt, inbox)
+            }
+            throw new Error(`delivery receipt unavailable after input failure: ${sanitizeOperationFailureReason(
+              settlementError,
+              this.deps.redactFailureReason,
+              text,
+              'receipt store failed',
+            )}`)
           }
         }
       }
 
-      if (receipt) {
-        await this.waitForStateChanges(workerId, stateChangesBefore)
+      if (receipt && awaitOwnerStateHooks && synchronousDeadlineAt !== undefined) {
+        try {
+          await this.awaitWithinDeadline(
+            () => this.waitForStateChanges(workerId, stateChangesBefore),
+            synchronousDeadlineAt,
+            receipt.delivery_id,
+          )
+        } catch (error) {
+          if (!(error instanceof InputDeliveryDeadlineError)) throw error
+          return this.finishSynchronousInputDeadline(workerId, receipt.delivery_id, receipt, inbox)
+        }
       }
 
       if (!receipt) return
       let current: WorkerInputDeliveryReceipt
       try {
-        current = await this.inputDeliveryStore.readForToolResult(
-          workerId,
+        current = await this.awaitWithinDeadline(
+          () => this.inputDeliveryStore.readForToolResult(
+            workerId,
+            receipt!.delivery_id,
+            this.deps.now(),
+          ),
+          synchronousDeadlineAt!,
           receipt.delivery_id,
-          this.deps.now(),
         )
       } catch (error) {
+        if (error instanceof InputDeliveryDeadlineError) {
+          return this.finishSynchronousInputDeadline(workerId, receipt.delivery_id, receipt, inbox)
+        }
         this.inputDeliveryControllers.get(receipt.delivery_id)?.abort()
         try {
-          await this.failDurableInputAttempt(receipt, inbox, error, text)
+          const settled = await this.awaitWithinDeadline(
+            () => this.failDurableInputAttempt(receipt!, inbox, error, text),
+            synchronousDeadlineAt!,
+            receipt.delivery_id,
+          )
+          return this.toSendToWorkerResult(settled)
         } catch (settlementError) {
+          if (settlementError instanceof InputDeliveryDeadlineError) {
+            return this.finishSynchronousInputDeadline(workerId, receipt.delivery_id, receipt, inbox)
+          }
           throw new Error(`delivery receipt unavailable after acceptance: ${sanitizeOperationFailureReason(
             settlementError,
             this.deps.redactFailureReason,
@@ -1370,15 +1482,16 @@ export class WorkerHarness {
             'receipt store failed',
           )}`)
         }
-        const settled = await this.inputDeliveryStore.get(workerId, receipt.delivery_id)
-        if (!settled) throw error
-        current = settled
       }
       if (current.state === 'pending') {
-        const cancellation = await inbox.cancelDelivery(receipt.delivery_id)
+        const cancellation = inbox.cancelDeliveryImmediately(receipt.delivery_id)
         const disposition = this.deliveryStallDispositions.get(receipt.delivery_id)
         let failed: InputDeliveryFailure
-        if (disposition === 'pending_in_ui' || current.phase === 'pending_in_ui' || cancellation === 'unsafe') {
+        if (
+          disposition === 'pending_in_ui' ||
+          current.phase === 'pending_in_ui' ||
+          cancellation !== 'cancelled'
+        ) {
           failed = {
             reason_code: 'submission_unconfirmed_timeout',
             reason: 'input was placed in the CLI composer but acceptance could not be confirmed',
@@ -1397,14 +1510,22 @@ export class WorkerHarness {
             certainty: 'unknown',
           }
         }
-        await this.settlePendingInputFailure(current, failed, true)
-        const settled = await this.inputDeliveryStore.get(workerId, receipt.delivery_id)
-        if (!settled) throw new Error(`delivery receipt disappeared: ${receipt.delivery_id}`)
-        current = settled
+        try {
+          current = await this.awaitWithinDeadline(
+            () => this.settlePendingInputFailure(current, failed, true),
+            synchronousDeadlineAt!,
+            receipt.delivery_id,
+          )
+        } catch (error) {
+          if (error instanceof InputDeliveryDeadlineError) {
+            return this.finishSynchronousInputDeadline(workerId, receipt.delivery_id, receipt, inbox, cancellation)
+          }
+          throw error
+        }
       }
       return this.toSendToWorkerResult(current)
     } finally {
-      if (receipt) {
+      if (receipt && awaitOwnerStateHooks) {
         const active = (this.synchronousDeliveryWorkers.get(workerId) ?? 1) - 1
         if (active > 0) this.synchronousDeliveryWorkers.set(workerId, active)
         else this.synchronousDeliveryWorkers.delete(workerId)
@@ -1418,12 +1539,11 @@ export class WorkerHarness {
     receipt: WorkerInputDeliveryReceipt,
     deadlineAt: number,
   ): Promise<void> {
-    const operation = this.flushInbox(workerId)
-    await this.awaitWithinDeadline(operation, deadlineAt, receipt.delivery_id)
+    await this.awaitWithinDeadline(() => this.flushInbox(workerId), deadlineAt, receipt.delivery_id)
   }
 
   private async awaitWithinDeadline<T>(
-    operation: Promise<T>,
+    operation: () => Promise<T>,
     deadlineAt: number,
     deliveryId: string,
   ): Promise<T> {
@@ -1435,21 +1555,41 @@ export class WorkerHarness {
       timer.unref?.()
     })
     try {
-      return await Promise.race([operation, timeout])
+      return await Promise.race([Promise.resolve().then(operation), timeout])
     } finally {
       if (timer) clearTimeout(timer)
     }
   }
 
-  private async settleTimedOutInput(
-    receipt: WorkerInputDeliveryReceipt,
-    inbox: WorkerInbox,
-  ): Promise<void> {
-    this.inputDeliveryControllers.get(receipt.delivery_id)?.abort()
-    const cancellation = await inbox.cancelDelivery(receipt.delivery_id)
-    const current = await this.inputDeliveryStore.get(receipt.worker_id, receipt.delivery_id)
-    if (!current || current.state !== 'pending') return
-    const failure: InputDeliveryFailure = cancellation === 'cancelled'
+  private assertSynchronousInputDeadline(deadlineAt: number | undefined, deliveryId: string | undefined): void {
+    if (deliveryId !== undefined && this.isSynchronousInputDeadlineExpired(deadlineAt)) {
+      throw new InputDeliveryDeadlineError(deliveryId)
+    }
+  }
+
+  private isSynchronousInputDeadlineExpired(deadlineAt: number | undefined): boolean {
+    return deadlineAt !== undefined && deadlineAt <= Date.now()
+  }
+
+  private expiredInboxDelivery(item: InboxItem | undefined, seq: number): InboxSettledResult | undefined {
+    if (!item?.delivery_id || !item.deadline_at || !this.isSynchronousInputDeadlineExpired(Date.parse(item.deadline_at))) {
+      return undefined
+    }
+    return {
+      action: 'settled',
+      settlement: 'dead_letter',
+      detail: {
+        seq,
+        reason: 'input_surface_timeout',
+        certainty: 'not_delivered',
+      },
+    }
+  }
+
+  private timeoutFailureFor(
+    cancellation: ReturnType<WorkerInbox['cancelDeliveryImmediately']>,
+  ): InputDeliveryFailure {
+    return cancellation === 'cancelled'
       ? {
           reason_code: 'input_surface_timeout',
           reason: 'CLI input surface was unavailable before the synchronous delivery deadline',
@@ -1459,9 +1599,75 @@ export class WorkerHarness {
           reason_code: 'submission_unconfirmed_timeout',
           reason: 'input acceptance could not be confirmed before the synchronous delivery deadline',
           certainty: 'unknown',
+        }
+  }
+
+  /**
+   * Never await persistence from the deadline path. A queued item can be removed synchronously;
+   * anything in flight, settling, or absent is conservatively unknown and reconciled later.
+   */
+  private finishSynchronousInputDeadline(
+    workerId: string,
+    deliveryId: string,
+    receipt: WorkerInputDeliveryReceipt | undefined,
+    inbox: WorkerInbox,
+    knownCancellation?: ReturnType<WorkerInbox['cancelDeliveryImmediately']>,
+  ): SendToWorkerResult {
+    if (!receipt) {
+      return {
+        status: 'failed',
+        delivery_id: deliveryId,
+        worker_id: workerId,
+        reason_code: 'input_surface_timeout',
+        reason: 'input delivery setup exceeded the synchronous delivery deadline',
+        certainty: 'not_delivered',
+      }
     }
-    await this.settlePendingInputFailure(current, failure, true)
-    this.inputDeliveryControllers.delete(receipt.delivery_id)
+    const cancellation = knownCancellation ?? inbox.cancelDeliveryImmediately(receipt.delivery_id)
+    const failure = this.timeoutFailureFor(cancellation)
+    this.scheduleTimedOutInputSettlement(receipt, inbox, cancellation)
+    return {
+      status: 'failed',
+      delivery_id: receipt.delivery_id,
+      worker_id: receipt.worker_id,
+      ...failure,
+    }
+  }
+
+  private scheduleTimedOutInputSettlement(
+    receipt: WorkerInputDeliveryReceipt,
+    inbox: WorkerInbox,
+    cancellation = inbox.cancelDeliveryImmediately(receipt.delivery_id),
+  ): void {
+    this.inputDeliveryControllers.get(receipt.delivery_id)?.abort()
+    const failure = this.inputTimeoutFailures.get(receipt.delivery_id) ?? this.timeoutFailureFor(cancellation)
+    if (this.inputTimeoutFailures.has(receipt.delivery_id)) return
+    this.inputTimeoutFailures.set(receipt.delivery_id, failure)
+    void this.settlePendingInputFailure(receipt, failure, true)
+      .catch((error) => {
+        console.error(`[WorkerHarness] timed out input settlement failed for ${receipt.delivery_id}:`, error)
+      })
+      .finally(() => {
+        this.inputTimeoutFailures.delete(receipt.delivery_id)
+        this.inputDeliveryControllers.delete(receipt.delivery_id)
+      })
+  }
+
+  private recordExpiredReceiptFailure(receipt: WorkerInputDeliveryReceipt, seq: number): void {
+    if (receipt.state !== 'failed' || !receipt.failure) return
+    void this.appendAuditEvent(receipt.worker_id, seq, 'input_delivery_failed', {
+      delivery_id: receipt.delivery_id,
+      ...receipt.failure,
+    }).catch((error) => {
+      console.error(`[WorkerHarness] failed to record expired input receipt ${receipt.delivery_id}:`, error)
+    })
+  }
+
+  private resolveSynchronousInputDeadline(deadlineAt: string | undefined): number {
+    if (deadlineAt === undefined) return Date.now() + INPUT_DELIVERY_TIMEOUT_MS
+    const parsed = Date.parse(deadlineAt)
+    if (!Number.isFinite(parsed)) throw new Error(`invalid input delivery deadline: ${deadlineAt}`)
+    return parsed
   }
 
   private async settleDurableInput(
@@ -1472,11 +1678,21 @@ export class WorkerHarness {
   ): Promise<void> {
     this.inputDeliveryControllers.delete(receipt.delivery_id)
     if (settlement === 'delivered') {
-      const settled = await this.inputDeliveryStore.settleDelivered(receipt.worker_id, receipt.delivery_id, this.deps.now())
-      await this.appendAuditEvent(receipt.worker_id, detail?.seq ?? 0, 'input_sent', {
+      const result = await this.inputDeliveryStore.settleDelivered(receipt.worker_id, receipt.delivery_id, this.deps.now())
+      if (!result.transitioned) return
+      const settled = result.receipt
+      if (settled.state === 'delivered') {
+        await this.appendAuditEvent(receipt.worker_id, detail?.seq ?? 0, 'input_sent', {
+          delivery_id: receipt.delivery_id,
+          text_preview: settled.text_preview,
+          text_len: text.length,
+        })
+        return
+      }
+      if (!settled.failure) throw new Error(`failed delivery ${receipt.delivery_id} has no failure detail`)
+      await this.appendAuditEvent(receipt.worker_id, detail?.seq ?? 0, 'input_delivery_failed', {
         delivery_id: receipt.delivery_id,
-        text_preview: settled.text_preview,
-        text_len: text.length,
+        ...settled.failure,
       })
       return
     }
@@ -1489,11 +1705,7 @@ export class WorkerHarness {
       reason: describeInputDeliveryFailure(reasonCode),
       certainty: detail?.certainty ?? 'unknown',
     }
-    await this.inputDeliveryStore.settleFailed(receipt.worker_id, receipt.delivery_id, failure, this.deps.now())
-    await this.appendAuditEvent(receipt.worker_id, detail?.seq ?? 0, 'input_delivery_failed', {
-      delivery_id: receipt.delivery_id,
-      ...failure,
-    })
+    await this.settlePendingInputFailure(receipt, failure, true)
   }
 
   private async failDurableInputAttempt(
@@ -1501,10 +1713,11 @@ export class WorkerHarness {
     inbox: WorkerInbox,
     error: unknown,
     text: string,
-  ): Promise<void> {
-    const cancellation = await inbox.cancelDelivery(receipt.delivery_id)
+  ): Promise<WorkerInputDeliveryReceipt> {
+    const cancellation = inbox.cancelDeliveryImmediately(receipt.delivery_id)
     const current = await this.inputDeliveryStore.get(receipt.worker_id, receipt.delivery_id)
-    if (!current || current.state !== 'pending') return
+    if (!current) throw new Error(`delivery receipt disappeared: ${receipt.delivery_id}`)
+    if (current.state !== 'pending') return current
 
     const reasonCode: InputDeliveryFailureCode = current.phase === 'continuing'
       ? 'continuation_failed'
@@ -1529,7 +1742,7 @@ export class WorkerHarness {
     this.inputDeliveryControllers.delete(receipt.delivery_id)
     // The synchronous tool is about to return this failure in the Manager context;
     // do not leave the same terminal result queued for a duplicate wake.
-    await this.settlePendingInputFailure(receipt, failure, true)
+    return this.settlePendingInputFailure(receipt, failure, true)
   }
 
   private toSendToWorkerResult(receipt: WorkerInputDeliveryReceipt): SendToWorkerResult {
@@ -1695,6 +1908,8 @@ export class WorkerHarness {
       // 主线化身,不能用"数组最后一个"——fork 之后数组末尾是侧问分支,投递必须仍然打到
       // 主线(protocol-agent-v3 §5.3:fork 不影响主线)。
       const incarnation = requireMainlineIncarnation(found.worker)
+      const expired = this.expiredInboxDelivery(item, incarnation.seq)
+      if (expired) return expired
 
       if (isLegacyIncarnation(incarnation)) {
         if (item.allow_terminal_continuation === false) return 'delivered'
@@ -1748,6 +1963,8 @@ export class WorkerHarness {
           signal: this.inputDeliveryControllers.get(item.delivery_id)?.signal,
         }
       }
+      const expiredBeforeAttempt = this.expiredInboxDelivery(item, incarnation.seq)
+      if (expiredBeforeAttempt) return expiredBeforeAttempt
       const attempt = await this.attemptInput(adapter, handle, item.text, item.raw, {
         ...deliveryOptions,
         ...(item.immediate_redirect ? { immediate_redirect: true } : {}),
@@ -1798,6 +2015,8 @@ export class WorkerHarness {
       if (!isLegacyIncarnation(legacy)) {
         throw new Error('WorkerHarness.legacyContinuation: mainline changed before continuation')
       }
+      const expired = this.expiredInboxDelivery(item, legacy.seq)
+      if (expired) return expired
       if (
         (worker.task.status !== 'completed' && worker.task.status !== 'failed') ||
         !['completed', 'failed', 'pre_migration'].includes(legacy.ended_reason)
@@ -1832,6 +2051,10 @@ export class WorkerHarness {
         worker.worker_id,
         material.workspaceCandidate,
       )
+      // Source reads may have waited past the synchronous deadline. Do not begin a new
+      // provision/handoff after the caller has already received its timeout.
+      const expiredAfterPreparation = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredAfterPreparation) return expiredAfterPreparation
       // P6-C：目标选择来自 registry（排除该 worker 已用过的实现）；无 selector 的旧测试
       // 路径保留 pickUnusedImpl。
       const usedImpls = new Set(worker.incarnations.map((inc) => inc.impl).filter((impl): impl is WorkerImplId => impl !== 'legacy'))
@@ -1841,7 +2064,14 @@ export class WorkerHarness {
       // P6-B §6.5：legacy 接续的 spawn 同样过 registry gate + connection admission——
       // 不得绕过 ready 校验，admin_provider 形态不得回落宿主凭证。
       await this.deps.assertWorkerImplReady?.(targetImpl)
+      const expiredAfterReady = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredAfterReady) return expiredAfterReady
       const admission = await this.deps.admitWorkerConnection?.(targetImpl, worker.worker_id)
+      const expiredAfterAdmission = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredAfterAdmission) {
+        if (admission) void admission.dispose().catch(() => {})
+        return expiredAfterAdmission
+      }
       const targetAdapter = this.deps.adapters.get(targetImpl)
       if (!targetAdapter) {
         if (admission) await admission.dispose()
@@ -1857,11 +2087,21 @@ export class WorkerHarness {
             principal_permissions: auth.principal_permissions,
           })
         : EMPTY_CAPABILITY_BUNDLE
+      const expiredAfterCapabilities = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredAfterCapabilities) {
+        if (admission) void admission.dispose().catch(() => {})
+        return expiredAfterCapabilities
+      }
       if (targetImpl === 'builtin' && !this.deps.builtinSpawnDefaults) {
         throw new Error('WorkerHarness.legacyContinuation: builtin target requires builtinSpawnDefaults')
       }
       // No context, HANDOFF, ledger, provision or spawn side effect precedes target preflight.
       await targetAdapter.preflightProvision?.(workspace, caps)
+      const expiredAfterPreflight = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredAfterPreflight) {
+        if (admission) void admission.dispose().catch(() => {})
+        return expiredAfterPreflight
+      }
 
       const handoffAt = this.deps.now()
       const incarnationId = randomUUID()
@@ -1872,6 +2112,11 @@ export class WorkerHarness {
         workspaceRoot: workspace.root,
         capturedAt: handoffAt,
       })
+      const expiredAfterInstructions = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredAfterInstructions) {
+        if (admission) void admission.dispose().catch(() => {})
+        return expiredAfterInstructions
+      }
       const builtin = targetImpl === 'builtin'
         ? this.deps.builtinSpawnDefaults?.({
             worker_id: worker.worker_id,
@@ -1894,10 +2139,31 @@ export class WorkerHarness {
             instructions,
           })
         : undefined
+      const discardPreparedLegacyContinuation = (): void => {
+        if (claudeBridge?.managed) {
+          void cleanupClaudeWorkspaceBridge({
+            workersDir: this.deps.workersDir,
+            workerId: worker.worker_id,
+            incarnationId,
+            workspaceRoot: workspace.root,
+          }).catch(() => {})
+        }
+        if (admission) void admission.dispose().catch(() => {})
+      }
+      const expiredAfterBridge = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredAfterBridge) {
+        discardPreparedLegacyContinuation()
+        return expiredAfterBridge
+      }
       const legacyIncarnationId = requireStableIncarnationId(legacy, worker.worker_id)
       const persistedActivity = worker.legacy_source?.kind === 'ambiguous_v3_ledger'
         ? await this.nativeActivityStore.activities(worker.worker_id, legacyIncarnationId)
         : material.events
+      const expiredAfterActivityRead = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredAfterActivityRead) {
+        discardPreparedLegacyContinuation()
+        return expiredAfterActivityRead
+      }
       const handoff = await writeHandoffPackage({
         workersDir: this.deps.workersDir,
         workerId: worker.worker_id,
@@ -1909,9 +2175,19 @@ export class WorkerHarness {
           ...traceHandoffEvidence('persisted_activity', legacyIncarnationId, persistedActivity),
         ],
       })
+      const expiredAfterHandoff = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredAfterHandoff) {
+        discardPreparedLegacyContinuation()
+        return expiredAfterHandoff
+      }
       await this.contextStore.write(worker.worker_id, {
         principal_permissions: auth.principal_permissions,
       })
+      const expiredAfterContextWrite = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredAfterContextWrite) {
+        discardPreparedLegacyContinuation()
+        return expiredAfterContextWrite
+      }
       await this.appendEvent(worker.worker_id, legacy.seq, 'handoff_started', {
         target_impl: targetImpl,
         legacy: true,
@@ -1919,9 +2195,35 @@ export class WorkerHarness {
       })
 
       const prompt = renderHandoffPrompt(handoff, item.text)
+      const expiredBeforeSpawn = this.expiredInboxDelivery(item, legacy.seq)
+      if (expiredBeforeSpawn) {
+        if (claudeBridge?.managed) {
+          void cleanupClaudeWorkspaceBridge({
+            workersDir: this.deps.workersDir,
+            workerId: worker.worker_id,
+            incarnationId,
+            workspaceRoot: workspace.root,
+          }).catch(() => {})
+        }
+        if (admission) void admission.dispose().catch(() => {})
+        return expiredBeforeSpawn
+      }
       let handle
       try {
         await targetAdapter.provision(workspace, caps)
+        const expiredAfterProvision = this.expiredInboxDelivery(item, legacy.seq)
+        if (expiredAfterProvision) {
+          if (claudeBridge?.managed) {
+            void cleanupClaudeWorkspaceBridge({
+              workersDir: this.deps.workersDir,
+              workerId: worker.worker_id,
+              incarnationId,
+              workspaceRoot: workspace.root,
+            }).catch(() => {})
+          }
+          if (admission) void admission.dispose().catch(() => {})
+          return expiredAfterProvision
+        }
         handle = await targetAdapter.spawn({
           worker_id: worker.worker_id,
           incarnation_id: incarnationId,
@@ -2249,6 +2551,8 @@ export class WorkerHarness {
         const found = await this.deps.ledger.findWorker(workerId)
         if (!found) throw new WorkerNotFoundError(workerId)
         const { worker, managerKey } = found
+        const expired = this.expiredInboxDelivery(item, curSeq)
+        if (expired) return expired
 
         // task 在锁外投递期间被 killWorker 打断(如 send 卡在 tmux 投递期间调 kill,这条
         // 消息在拿到这把锁之前就已经确定要走接续路径了):§5.5"唯一硬拒绝:cancelled"只
@@ -2302,17 +2606,20 @@ export class WorkerHarness {
             impl: mainline.impl,
             session_ref: mainline.session_ref,
           }
+          const deliveryOptions = item?.delivery_id
+            ? {
+                ...(await this.inputAttemptOptions(workerId, item.delivery_id)),
+                ...(item.immediate_redirect ? { immediate_redirect: true } : {}),
+              }
+            : item?.immediate_redirect ? { immediate_redirect: true } : undefined
+          const expiredBeforeAttempt = this.expiredInboxDelivery(item, mainline.seq)
+          if (expiredBeforeAttempt) return expiredBeforeAttempt
           const attempt = await this.attemptInput(
             adapter,
             handle,
             text,
             raw,
-            item?.delivery_id
-              ? {
-                  ...(await this.inputAttemptOptions(workerId, item.delivery_id)),
-                  ...(item.immediate_redirect ? { immediate_redirect: true } : {}),
-                }
-              : item?.immediate_redirect ? { immediate_redirect: true } : undefined,
+            deliveryOptions,
           )
           if (attempt.kind === 'exited') {
             // adapter 侧权威判定这个"看起来存活"的新主线其实也已经终态(台账的异步状态
@@ -2334,6 +2641,8 @@ export class WorkerHarness {
         }
 
         if (adapter.capabilities().revive) {
+          const expiredBeforeRevive = this.expiredInboxDelivery(item, mainline.seq)
+          if (expiredBeforeRevive) return expiredBeforeRevive
           const delivery = await this.reviveIncarnation(
             managerKey,
             worker,
@@ -2341,6 +2650,7 @@ export class WorkerHarness {
             adapter,
             text,
             curEndReason,
+            item,
           )
           if (isContinuationRetry(delivery)) {
             curImpl = delivery.impl
@@ -2362,6 +2672,8 @@ export class WorkerHarness {
           const targetImpl = this.deps.selectWorkerImpl
             ? this.deps.selectWorkerImpl(undefined, usedImpls2)
             : pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
+          const expiredBeforeHandoff = this.expiredInboxDelivery(item, mainline.seq)
+          if (expiredBeforeHandoff) return expiredBeforeHandoff
           const handoff = await this.handoffIncarnation(
             managerKey,
             worker,
@@ -2370,6 +2682,7 @@ export class WorkerHarness {
             text,
             true,
             raw,
+            item,
           )
           if (isContinuationRetry(handoff.delivery)) {
             curImpl = handoff.delivery.impl
@@ -2415,10 +2728,13 @@ export class WorkerHarness {
     text: string,
     /** adapter 经 WorkerExitedError 报上来的源化身终止原因(见下面回填段的注释)。 */
     sourceEndReason?: IncarnationEndReason,
+    item?: InboxItem,
   ): Promise<ContinuationDelivery> {
     this.deps.assertExecutionAdmission?.()
     // P6-B：resume 重验 ready（「已有 running incarnation 不杀，新 resume/handoff 重验」）。
     await this.deps.assertWorkerImplReady?.(mainline.impl)
+    const expiredAfterReady = this.expiredInboxDelivery(item, mainline.seq)
+    if (expiredAfterReady) return expiredAfterReady
     const incarnationId = randomUUID()
     const instructions = await captureWorkspaceInstructions({
       workersDir: this.deps.workersDir,
@@ -2427,6 +2743,8 @@ export class WorkerHarness {
       workspaceRoot: mainline.workspace,
       capturedAt: this.deps.now(),
     })
+    const expiredAfterInstructions = this.expiredInboxDelivery(item, mainline.seq)
+    if (expiredAfterInstructions) return expiredAfterInstructions
     const claudeBridge = mainline.impl === 'claude-code'
       ? await prepareClaudeWorkspaceBridge({
         workersDir: this.deps.workersDir,
@@ -2436,8 +2754,33 @@ export class WorkerHarness {
         instructions,
       })
       : undefined
+    const expiredAfterBridge = this.expiredInboxDelivery(item, mainline.seq)
+    if (expiredAfterBridge) {
+      if (claudeBridge?.managed) {
+        void cleanupClaudeWorkspaceBridge({
+          workersDir: this.deps.workersDir,
+          workerId: worker.worker_id,
+          incarnationId,
+          workspaceRoot: mainline.workspace,
+        }).catch(() => {})
+      }
+      return expiredAfterBridge
+    }
     // P6-B §6.5：resume 同样 operation-time 解析连接（revision 变化即拒绝）。
     const admission = await this.deps.admitWorkerConnection?.(mainline.impl, worker.worker_id)
+    const expiredAfterAdmission = this.expiredInboxDelivery(item, mainline.seq)
+    if (expiredAfterAdmission) {
+      if (claudeBridge?.managed) {
+        void cleanupClaudeWorkspaceBridge({
+          workersDir: this.deps.workersDir,
+          workerId: worker.worker_id,
+          incarnationId,
+          workspaceRoot: mainline.workspace,
+        }).catch(() => {})
+      }
+      if (admission) void admission.dispose().catch(() => {})
+      return expiredAfterAdmission
+    }
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, incarnation_id: mainline.incarnation_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
@@ -2447,6 +2790,19 @@ export class WorkerHarness {
     } catch (error) {
       // 原生 session 不可读时不伪造 activity；接续本身仍可继续，后续读取再按既有降级处理。
       console.error(`[WorkerHarness] failed to establish native activity baseline for revived worker ${worker.worker_id}#${mainline.seq}:`, error)
+    }
+    const expiredBeforeResume = this.expiredInboxDelivery(item, mainline.seq)
+    if (expiredBeforeResume) {
+      if (claudeBridge?.managed) {
+        void cleanupClaudeWorkspaceBridge({
+          workersDir: this.deps.workersDir,
+          workerId: worker.worker_id,
+          incarnationId,
+          workspaceRoot: mainline.workspace,
+        }).catch(() => {})
+      }
+      if (admission) void admission.dispose().catch(() => {})
+      return expiredBeforeResume
     }
     let newHandle
     try {
@@ -2571,8 +2927,11 @@ export class WorkerHarness {
     input: string,
     inputOwnedByInbox = false,
     inboxRaw = false,
+    deadlineItem?: InboxItem,
   ): Promise<HandoffResult> {
     this.deps.assertExecutionAdmission?.()
+    const expiredBeforePreparation = this.expiredInboxDelivery(deadlineItem, source.seq)
+    if (expiredBeforePreparation) return { restoredDurableReceipt: false, delivery: expiredBeforePreparation }
     const sourceAdapter = this.deps.adapters.get(source.impl)
     const sourceHandle: IncarnationHandle = {
       worker_id: worker.worker_id,
@@ -2602,9 +2961,16 @@ export class WorkerHarness {
     // 保持可重试。
     // P6-B：目标 impl 重验 ready（配置可能在 source 运行期间已失效）。
     await this.deps.assertWorkerImplReady?.(targetImpl)
+    const expiredAfterReady = this.expiredInboxDelivery(deadlineItem, source.seq)
+    if (expiredAfterReady) return { restoredDurableReceipt: false, delivery: expiredAfterReady }
     // P6-B §6.5：handoff 同样过 connection admission——早于 package 生成与 source stop；
     // admin_provider 形态下目标 CLI 不得静默回落宿主原生凭证。
     const admission = await this.deps.admitWorkerConnection?.(targetImpl, worker.worker_id)
+    const expiredAfterAdmission = this.expiredInboxDelivery(deadlineItem, source.seq)
+    if (expiredAfterAdmission) {
+      if (admission) void admission.dispose().catch(() => {})
+      return { restoredDurableReceipt: false, delivery: expiredAfterAdmission }
+    }
     const newAdapter = this.deps.adapters.get(targetImpl)
     if (!newAdapter) {
       if (admission) await admission.dispose()
@@ -2633,9 +2999,19 @@ export class WorkerHarness {
       caps = this.deps.capabilityBundle
         ? await this.deps.capabilityBundle({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
         : EMPTY_CAPABILITY_BUNDLE
+      const expiredAfterCapabilities = this.expiredInboxDelivery(deadlineItem, source.seq)
+      if (expiredAfterCapabilities) {
+        if (admission) void admission.dispose().catch(() => {})
+        return { restoredDurableReceipt: false, delivery: expiredAfterCapabilities }
+      }
       // tracked credential target 等确定性检查必须在 package / source stop 之前完成；preflightProvision
       // 不得写 workspace。正式 provision 仍在 source teardown 之后执行并重检，避免 TOCTOU 静默越界。
       await newAdapter.preflightProvision?.(workspace, caps)
+      const expiredAfterPreflight = this.expiredInboxDelivery(deadlineItem, source.seq)
+      if (expiredAfterPreflight) {
+        if (admission) void admission.dispose().catch(() => {})
+        return { restoredDurableReceipt: false, delivery: expiredAfterPreflight }
+      }
 
       // The target identity, workspace rules snapshot and the private handoff package all exist
       // before we stop the source. Any failure here leaves the source untouched and retryable.
@@ -2648,6 +3024,11 @@ export class WorkerHarness {
         workspaceRoot: workspace.root,
         capturedAt,
       })
+      const expiredAfterInstructions = this.expiredInboxDelivery(deadlineItem, source.seq)
+      if (expiredAfterInstructions) {
+        if (admission) void admission.dispose().catch(() => {})
+        return { restoredDurableReceipt: false, delivery: expiredAfterInstructions }
+      }
       if (targetImpl === 'builtin') {
         builtinInjection = this.deps.builtinSpawnDefaults?.({
           worker_id: worker.worker_id,
@@ -2673,7 +3054,28 @@ export class WorkerHarness {
             instructions: targetInstructions,
           })
         : undefined
+      const discardPreparedHandoff = (): void => {
+        if (targetClaudeBridge?.managed) {
+          void cleanupClaudeWorkspaceBridge({
+            workersDir: this.deps.workersDir,
+            workerId: worker.worker_id,
+            incarnationId: targetIncarnationId,
+            workspaceRoot: workspace.root,
+          }).catch(() => {})
+        }
+        if (admission) void admission.dispose().catch(() => {})
+      }
+      const expiredAfterBridge = this.expiredInboxDelivery(deadlineItem, source.seq)
+      if (expiredAfterBridge) {
+        discardPreparedHandoff()
+        return { restoredDurableReceipt: false, delivery: expiredAfterBridge }
+      }
       handoff = await this.captureHandoffPackage(worker, source, sourceAdapter, sourceHandle, capturedAt)
+      const expiredAfterHandoff = this.expiredInboxDelivery(deadlineItem, source.seq)
+      if (expiredAfterHandoff) {
+        discardPreparedHandoff()
+        return { restoredDurableReceipt: false, delivery: expiredAfterHandoff }
+      }
     } catch (error) {
       // admission 之后、package/kill 之前的前置失败：dispose admission，source 不动。
       if (admission) await admission.dispose()
@@ -2683,6 +3085,19 @@ export class WorkerHarness {
     // 1. Persist the package before source teardown. Terminal capture is deliberately absent:
     // it is a caller-driven diagnostic viewport, not a handoff or result data source.
     try {
+      const expiredBeforeHandoffEvent = this.expiredInboxDelivery(deadlineItem, source.seq)
+      if (expiredBeforeHandoffEvent) {
+        if (targetClaudeBridge?.managed) {
+          void cleanupClaudeWorkspaceBridge({
+            workersDir: this.deps.workersDir,
+            workerId: worker.worker_id,
+            incarnationId: targetIncarnationId,
+            workspaceRoot: workspace.root,
+          }).catch(() => {})
+        }
+        if (admission) void admission.dispose().catch(() => {})
+        return { restoredDurableReceipt: false, delivery: expiredBeforeHandoffEvent }
+      }
       await this.appendEvent(worker.worker_id, source.seq, 'handoff_started', {
         target_impl: targetImpl,
         handoff_id: handoff.package_id,
@@ -2691,6 +3106,19 @@ export class WorkerHarness {
       // 2. A live source crosses the same durable stop-and-verify boundary as the Manager tool.
       // An unknown or failed stop never starts a target, avoiding two simultaneous mainlines.
       if (source.state !== 'exited') {
+        const expiredBeforeSourceStop = this.expiredInboxDelivery(deadlineItem, source.seq)
+        if (expiredBeforeSourceStop) {
+          if (targetClaudeBridge?.managed) {
+            void cleanupClaudeWorkspaceBridge({
+              workersDir: this.deps.workersDir,
+              workerId: worker.worker_id,
+              incarnationId: targetIncarnationId,
+              workspaceRoot: workspace.root,
+            }).catch(() => {})
+          }
+          if (admission) void admission.dispose().catch(() => {})
+          return { restoredDurableReceipt: false, delivery: expiredBeforeSourceStop }
+        }
         const stop = await this.stopSourceForHandoffLocked(managerKey, worker, source)
         if (stop.status !== 'succeeded') {
           throw new Error(`WorkerHarness.handoffIncarnation: source stop did not verify (${stop.status})`)
@@ -2706,9 +3134,35 @@ export class WorkerHarness {
     // the package, so workers never need to read a workspace handoff file.
     // newAdapter / builtinInjection / workspace / caps 已在上面的 pre-flight 里取好。
     const prompt = renderHandoffPrompt(handoff, input)
+    const expiredBeforeProvision = this.expiredInboxDelivery(deadlineItem, source.seq)
+    if (expiredBeforeProvision) {
+      if (targetClaudeBridge?.managed) {
+        void cleanupClaudeWorkspaceBridge({
+          workersDir: this.deps.workersDir,
+          workerId: worker.worker_id,
+          incarnationId: targetIncarnationId,
+          workspaceRoot: workspace.root,
+        }).catch(() => {})
+      }
+      if (admission) void admission.dispose().catch(() => {})
+      return { restoredDurableReceipt: false, delivery: expiredBeforeProvision }
+    }
     let newHandle
     try {
       await newAdapter.provision(workspace, caps)
+      const expiredBeforeSpawn = this.expiredInboxDelivery(deadlineItem, source.seq)
+      if (expiredBeforeSpawn) {
+        if (targetClaudeBridge?.managed) {
+          void cleanupClaudeWorkspaceBridge({
+            workersDir: this.deps.workersDir,
+            workerId: worker.worker_id,
+            incarnationId: targetIncarnationId,
+            workspaceRoot: workspace.root,
+          }).catch(() => {})
+        }
+        if (admission) void admission.dispose().catch(() => {})
+        return { restoredDurableReceipt: false, delivery: expiredBeforeSpawn }
+      }
       newHandle = await newAdapter.spawn({
         worker_id: worker.worker_id,
         incarnation_id: targetIncarnationId,
@@ -3617,14 +4071,13 @@ export class WorkerHarness {
   }
 
   private async reconcileInputDeliveryOperations(): Promise<void> {
-    const nowMs = Date.parse(this.deps.now())
+    const nowMs = Date.now()
     for (const receipt of await this.inputDeliveryStore.listPendingDeliveries()) {
       if (Date.parse(receipt.deadline_at) > nowMs) continue
       this.inputDeliveryControllers.get(receipt.delivery_id)?.abort()
       const cancellation = await this.getInbox(receipt.worker_id).cancelDelivery(receipt.delivery_id)
-      const current = await this.inputDeliveryStore.get(receipt.worker_id, receipt.delivery_id)
-      if (!current || current.state !== 'pending') continue
-
+      // `not_found` can mean a late adapter acceptance whose settlement has not reached the
+      // receipt store yet. Only removing an item from the queue proves no input side effect.
       const safelyWithdrawn = cancellation === 'cancelled'
       const failure: InputDeliveryFailure = safelyWithdrawn
         ? {
@@ -3638,7 +4091,7 @@ export class WorkerHarness {
             certainty: 'unknown',
           }
       this.inputDeliveryControllers.delete(receipt.delivery_id)
-      await this.settlePendingInputFailure(current, failure)
+      await this.settlePendingInputFailure(receipt, failure)
     }
     await this.deliverInputOperationNotifications()
   }
@@ -3647,26 +4100,30 @@ export class WorkerHarness {
     receipt: WorkerInputDeliveryReceipt,
     failure: InputDeliveryFailure,
     managerContextDelivered = false,
-  ): Promise<void> {
-    const settled = await this.inputDeliveryStore.settleFailed(
+  ): Promise<WorkerInputDeliveryReceipt> {
+    const result = await this.inputDeliveryStore.settleFailed(
       receipt.worker_id,
       receipt.delivery_id,
       failure,
       this.deps.now(),
     )
+    let settled = result.receipt
     if (managerContextDelivered && settled.manager_notification.status === 'pending') {
-      await this.inputDeliveryStore.markNotificationConsumed(
+      settled = await this.inputDeliveryStore.markNotificationConsumed(
         receipt.worker_id,
         receipt.delivery_id,
         this.deps.now(),
       )
     }
+    if (!result.transitioned) return settled
     const found = await this.deps.ledger.findWorker(receipt.worker_id)
     const seq = found ? requireMainlineIncarnation(found.worker).seq : 0
+    if (!settled.failure) throw new Error(`failed delivery ${receipt.delivery_id} has no failure detail`)
     await this.appendAuditEvent(receipt.worker_id, seq, 'input_delivery_failed', {
       delivery_id: receipt.delivery_id,
       ...settled.failure,
     })
+    return settled
   }
 
   private async deliverInputOperationNotifications(): Promise<void> {
@@ -4615,8 +5072,12 @@ export class WorkerHarness {
     worker: LedgerWorker,
     incarnation: ExecutableIncarnation,
     kind: WorkerControlOperationKind,
-    options?: { readonly handoffSupersede?: boolean },
+    options?: {
+      readonly handoffSupersede?: boolean
+      readonly inputDeadline?: { readonly deadlineAt: number; readonly deliveryId: string }
+    },
   ): Promise<WorkerControlOperation> {
+    this.assertSynchronousInputDeadline(options?.inputDeadline?.deadlineAt, options?.inputDeadline?.deliveryId)
     if (!incarnation.incarnation_id) throw new Error(`worker ${worker.worker_id} incarnation has no stable identity`)
     const adapter = this.deps.adapters.get(incarnation.impl)
     if (!adapter) throw new Error(`worker adapter unavailable: ${incarnation.impl}`)
@@ -4636,6 +5097,9 @@ export class WorkerHarness {
       this.deps.now(),
     )
     try {
+      // Control persistence may have waited behind I/O. Do not send a late Escape after the
+      // synchronous caller already received its timeout.
+      this.assertSynchronousInputDeadline(options?.inputDeadline?.deadlineAt, options?.inputDeadline?.deliveryId)
       const handle = handleForIncarnation(worker.worker_id, incarnation)
       if (kind === 'interrupt') {
         if (!adapter.interrupt) throw new Error(`worker impl '${incarnation.impl}' does not support interrupt`)
@@ -4660,6 +5124,16 @@ export class WorkerHarness {
       }
       await this.controlOperationStore.transition(worker.worker_id, executing.operation_id, 'verifying', this.deps.now())
     } catch (error) {
+      if (error instanceof InputDeliveryDeadlineError) {
+        void this.settleControlOperation(
+          executing,
+          'unknown',
+          'synchronous input deadline elapsed before control submission',
+        ).catch((settlementError) => {
+          console.error(`[WorkerHarness] failed to settle expired redirect control operation ${executing.operation_id}:`, settlementError)
+        })
+        throw error
+      }
       return this.settleControlOperation(
         executing,
         'failed',
@@ -4677,9 +5151,14 @@ export class WorkerHarness {
   private async interruptForImmediateRedirect(
     workerId: string,
     target: ExecutableIncarnation,
+    deadlineAt?: number,
+    deliveryId?: string,
   ): Promise<void> {
     const operation = await this.withLock(workerId, async () => {
+      this.assertSynchronousInputDeadline(deadlineAt, deliveryId)
       const found = await this.deps.ledger.findWorker(workerId)
+      // Waiting for the worker lock or ledger must never turn into a late redirect.
+      this.assertSynchronousInputDeadline(deadlineAt, deliveryId)
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
       const current = requireMainlineIncarnation(found.worker)
@@ -4691,7 +5170,12 @@ export class WorkerHarness {
       ) {
         throw new Error(`worker ${workerId} mainline changed before immediate redirect interrupt`)
       }
-      return this.executeControlOperationLocked(found.managerKey, found.worker, current, 'interrupt')
+      this.assertSynchronousInputDeadline(deadlineAt, deliveryId)
+      return this.executeControlOperationLocked(found.managerKey, found.worker, current, 'interrupt', {
+        ...(deadlineAt !== undefined && deliveryId !== undefined
+          ? { inputDeadline: { deadlineAt, deliveryId } }
+          : {}),
+      })
     })
     if (operation.status !== 'succeeded') {
       throw new Error(
