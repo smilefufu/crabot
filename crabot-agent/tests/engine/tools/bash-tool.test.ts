@@ -228,7 +228,7 @@ describe('createBashTool with bgCtx', () => {
     const result = await tool.call({ command: 'echo grace-fast' }, {} as ToolCallContext)
     expect(result.isError).toBe(false)
     expect(result.output).toContain('grace-fast')
-    expect(result.output).not.toContain('转入后台')
+    expect(result.output).not.toContain('转后台')
     // 宽限期内结束 → 不入账
     const all = await registry.list()
     expect(all.filter((e) => e.spawned_by_task_id === 'task-grace-fast')).toHaveLength(0)
@@ -246,7 +246,7 @@ describe('createBashTool with bgCtx', () => {
     expect(result.output).toContain('stderr:\nbad')
   })
 
-  it('grace 慢路径：共享文案引导自然结束当前回合与 blocking Output', async () => {
+  it('grace 慢路径：转后台只返回极简事件 + entity_id，引导留在静态提示层', async () => {
     const pushed: ExitInfo[] = []
     // 注入 50ms 短 grace，命令 sleep 0.4s 必然超期
     const tool = createBashTool(() => cwd, undefined, makeBgCtx('task-grace-slow', (info) => pushed.push(info)), 50)
@@ -256,11 +256,9 @@ describe('createBashTool with bgCtx', () => {
       {} as ToolCallContext,
     )
     expect(result.isError).toBe(false)
-    expect(result.output).toContain('转入后台继续运行')
-    expect(result.output).toContain('自然结束当前回合')
-    expect(result.output).toContain('block=true')
-    expect(result.output).toContain('timeout_ms=600000')
-    expect(result.output).not.toContain('工具列表中')
+    expect(result.output).toMatch(/^命令已转后台（entity_id: shell_[0-9a-f]+）$/)
+    expect(result.output).not.toContain('自然结束当前回合')
+    expect(result.output).not.toContain('block=true')
     expect(result.output).not.toContain('exit_code:')
     const match = result.output.match(/shell_[0-9a-f]+/)
     expect(match).not.toBeNull()
@@ -287,6 +285,6 @@ describe('createBashTool with bgCtx', () => {
     const result = await tool.call({ command: 'echo legacy-sync' }, {} as ToolCallContext)
     expect(result.isError).toBe(false)
     expect(result.output).toContain('legacy-sync')
-    expect(result.output).not.toContain('转入后台')
+    expect(result.output).not.toContain('转后台')
   })
 })

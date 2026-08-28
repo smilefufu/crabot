@@ -223,12 +223,10 @@ async function runForegroundWithGrace(
     case 'spawn_error':
       return { output: result.message, isError: true }
     case 'background': {
-      const sec = Math.round(gracePeriodMs / 1000)
+      // 行为指导（去干别的 / end_turn 等唤醒 / blocking Output）在工具描述与 worker
+      // system prompt 里已有静态版本，这里只回事件本身 + entity_id，不重复引导。
       return {
-        output:
-          `命令运行已超过 ${sec}s，转入后台继续运行（entity_id: ${result.entity_id}）——命令未中断。\n` +
-          `若你还有别的事可做，现在就去做；没有其他工作时自然结束当前回合，命令退出会以系统事件唤醒。\n` +
-          `需要同步等待时，请调 Output("${result.entity_id}", block=true, timeout_ms=600000) 阻塞等待并读取输出。`,
+        output: `命令已转后台（entity_id: ${result.entity_id}）`,
         isError: false,
       }
     }
