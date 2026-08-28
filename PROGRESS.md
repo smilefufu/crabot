@@ -146,6 +146,14 @@
 
 ### 技术债与既有 follow-up（P6 后或并行确认）
 
+- **核心配置 revision 机制的升级申报通道缺口（2026-08-28 实锤）**：语义投影（不止存储结构）
+  的任何启动期变化都触发 fingerprint fail-closed 拒绝启动；rebaseline 申报 marker 为全局一次性
+  （done 后永久失效）。PR #122 归一化必备 worker skill（tmp-page / workspace-context-maintenance /
+  scrapling-official → enabled+不可禁用）发生在启动加载阶段且每次重复归一化，磁盘值不收敛，
+  生产实例被锁死在启动失败；手工预埋 marker rebaseline 到 revision 53 解除。follow-up（需 spec）：
+  ① 改动语义投影的 PR 必须同步预埋 marker，纳入升级流程强制检查；② marker 按 projection 名
+  一次一个，替代全局一次性 done marker；③ 评估启动期归一化改走 coordinator mutation 正式记账，
+  首次启动即收敛落盘，不依赖 marker。
 - **wechat channel 群聊门控（@ + 引用）**：`group.only_respond_to_mentions` 协议已有契约
   （protocol-channel.md，true 时 channel 不发布非 @ 消息），feishu / dingtalk 已实现，wechat /
   telegram 缺失。已确认 wechat 按「@ + 引用」放行——引用检测需要新增 wechat 引用消息解析且超出
