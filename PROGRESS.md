@@ -5,7 +5,7 @@
 
 ## 当前状态
 
-### wechat 群聊门控（@ + 引用放行）：实现完成，PR #124 review 跟踪中
+### wechat 群聊门控（@ + 引用放行）：已合并（PR #124 → `ffd32e55`）
 
 - 已确认 spec 与计划发布到 `crabot-docs` main（`2631a13` / `d4d9560`）：`protocol-channel.md` 0.1.2
   §4.2 把 only_respond_to_mentions 字面扩展为「定向」语义（定向 = @ Crabot，Channel 可选扩展引用放行；
@@ -15,12 +15,14 @@
 - `feat/wechat-group-mention-gate`（PR #124）：module.yaml 开关（default false=行为不变）+ main.ts
   env 链路 + handleWechatEvent 门控（丢弃不建 session 不发布）+ 补齐协议 §6.1 MUST 的
   get_config/update_config。新增 16 用例 + 既有 62 全绿。
-- @claude review 4 条真实风险全部闭环：①update_config 字符串开关静默 no-op（已修 `ce3f1feb`）②
+- @claude 四轮 review 共 7 条真实风险全部闭环、复审④ approve 后自动合并（squash `ffd32e55`）：
+  ①update_config 字符串开关静默 no-op（`ce3f1feb`）②
   x-runtime-path 部分标注致 running 实例配置面板退化——用户确认撤回 spec §4.4 排除项，config RPC
-  对齐 feishu 完整模式（全部字段进 get/update，连接类 requires_restart，已修 `61c93baa`，spec
-  修订 docs `4c9f724`）③引用消息 agent 侧延迟巡检——记 follow-up（见技术债段）④占位文件漏删
-  （已修）。合并前人工验证：真实群 ① 普通发言不触发 ② @ 触发 ③ 引用 Crabot 发言触发（预期触达但
-  延迟一个巡检周期，见 follow-up）。
+  对齐 feishu 完整模式（`61c93baa`，spec 修订 docs `4c9f724`）③引用消息 agent 侧延迟巡检——
+  follow-up（见技术债段）④占位文件漏删；三审 ⑤webhook_port 数字字符串（`edde5577`）⑥运行时
+  配置不落盘——follow-up ⑦webhook_secret 请求回调实时读取（启动时快照修复 `72ff8a82`）。
+- **人工验证待做**：真实群 ① 普通发言不触发 ② @ 触发 ③ 引用 Crabot 触发（预期延迟一个巡检周期）
+  ④ 重启后开关回退 false（已知限制，见技术债③）。需重建重启 wechat channel 生效。
 
 ### 群聊响应纪律 prompt：已合并（main `d8ad16c3`）
 
