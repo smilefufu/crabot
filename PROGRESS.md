@@ -184,6 +184,8 @@
   缺省 false 回退方向不安全；feishu 默认 true 回退安全）。收口方向：update_config 成功后按
   `x-runtime-path` 反向映射回写 local-config + 明确配置真相来源，feishu/wechat 一起收口，需独立
   spec（持久化模型变更）。spec `2026-08-28-wechat-group-mention-gate-design.md` §9 已明示该限制。
+  同源收口项（PR #124 三审补充）：`get_health` 读可变 config，未重启时健康视图显示未生效值，
+  收口时改读启动快照；`webhook_port` 校验补 65535 上限；门控 drop 日志在大群的量评估。
 - **telegram 群聊门控**：`group.only_respond_to_mentions` 协议已有契约，feishu / dingtalk 已实现，
   telegram 缺失（wechat 已随 PR #124 实现）。
 - **内置能力归属完成后的后续设计**：当前能力归属 spec 实现并验收完成后，再依次处理三项独立设计：Schedule 支持受控的无 LLM operation，并用其承载 `Memory.run_maintenance("all")`；Manager 获得按 domain 枚举、复用既有权限/确认/undo/审核/脱敏语义的结构化 Crabot 管理工具面；清理活跃代码中会被误解为第三种 Agent 的遗留模块容器命名。三项均不得并入当前能力归属实现。
