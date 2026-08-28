@@ -590,3 +590,96 @@ describe('getBuiltinSubAgents > goal_auditor', () => {
     expect(g.when_to_use).toContain('system_only')
   })
 })
+
+describe('启动序列收敛（fail-open 启动自检，protocol-admin 0.2.5 §3.19.8.1）', () => {
+  it('存量禁用必备 skill：首轮 seeding 记账落盘，二轮启动 revision 稳定', async () => {
+    const { CoreAgentConfigMutationCoordinator } = await import('../src/core-agent-config-revision-store.js')
+    const tmpDir = mkdtempSync(join(tmpdir(), 'skill-fail-open-'))
+    try {
+      // 存量旧形态 registry：必备 skill 被禁用（PR #122 归一化前的持久状态）
+      const workspaceSkill = getBuiltinSkills().find(
+        (entry) => entry.id === BUILTIN_SKILL_IDS.workspaceContextMaintenance,
+      )!
+      writeFileSync(join(tmpDir, 'skills.json'), JSON.stringify([{
+        ...workspaceSkill,
+        enabled: false,
+        can_disable: true,
+      }]))
+
+      const manager = new SkillManager(tmpDir)
+      const snapshot = () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() })
+      let revision = 0
+      const coordinator = new CoreAgentConfigMutationCoordinator(tmpDir, {
+        readSemanticSnapshot: snapshot,
+        publishInvalidation: () => {},
+      })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner((domains, preview, apply) =>
+        coordinator.mutateComputed(domains, preview, apply).then((r) => { revision = r.revision; return undefined }))
+
+      // 第一轮启动：load-only → initialize → seeding 归一化经 mutation 记账落盘
+      await manager.initializeLoadOnly()
+      const firstRecord = await coordinator.initialize()
+      expect(firstRecord.revision).toBe(1)
+      await manager.seedBuiltinSkills(getBuiltinSkills())
+      const revisionAfterFirstBoot = revision
+      expect(revisionAfterFirstBoot).toBe(2)
+
+      // 第二轮启动：投影已收敛，revision 不再前进（无重复重记账）
+      const manager2 = new SkillManager(tmpDir)
+      await manager2.initializeLoadOnly()
+      const coordinator2 = new CoreAgentConfigMutationCoordinator(tmpDir, {
+        readSemanticSnapshot: () => ({ skills: manager2.runtimeSemanticEntries(), storage: manager2.semanticMigrationState() }),
+        publishInvalidation: () => {},
+      })
+      const secondRecord = await coordinator2.initialize()
+      expect(secondRecord.revision).toBe(revisionAfterFirstBoot)
+      expect(manager2.get(BUILTIN_SKILL_IDS.workspaceContextMaintenance)).toMatchObject({ enabled: true, can_disable: false })
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('磁盘漂移（绕过 mutation 的手工改动）：首轮 fail-open 重记账，二轮安静通过', async () => {
+    const { CoreAgentConfigMutationCoordinator } = await import('../src/core-agent-config-revision-store.js')
+    const tmpDir = mkdtempSync(join(tmpdir(), 'skill-fail-open-drift-'))
+    try {
+      const manager = new SkillManager(tmpDir)
+      const snapshot = () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() })
+      const coordinator = new CoreAgentConfigMutationCoordinator(tmpDir, {
+        readSemanticSnapshot: snapshot,
+        publishInvalidation: () => {},
+      })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner((domains, preview, apply) => coordinator.mutateComputed(domains, preview, apply).then(() => undefined))
+      await manager.initializeLoadOnly()
+      await coordinator.initialize()
+      await manager.create({ name: 'user-skill', description: 'd', content: '# x' })
+      const revisionBeforeDrift = (await coordinator.current()).revision
+
+      // 绕过 mutation 直接改磁盘（模拟手工漂移）
+      const raw = JSON.parse(readFileSync(join(tmpDir, 'skills.json'), 'utf-8')) as Array<Record<string, unknown>>
+      raw[0]!['description'] = 'hand-edited'
+      writeFileSync(join(tmpDir, 'skills.json'), JSON.stringify(raw))
+
+      const driftedSnapshot = async () => {
+        const m = new SkillManager(tmpDir)
+        await m.initializeLoadOnly()
+        return { skills: m.runtimeSemanticEntries(), storage: m.semanticMigrationState() }
+      }
+      const drifted = new CoreAgentConfigMutationCoordinator(tmpDir, {
+        readSemanticSnapshot: driftedSnapshot,
+        publishInvalidation: () => {},
+      })
+      await expect(drifted.initialize()).resolves.toMatchObject({ revision: revisionBeforeDrift + 1 })
+
+      const quiet = new CoreAgentConfigMutationCoordinator(tmpDir, {
+        readSemanticSnapshot: driftedSnapshot,
+        publishInvalidation: () => {},
+      })
+      await expect(quiet.initialize()).resolves.toMatchObject({ revision: revisionBeforeDrift + 1 })
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+})

@@ -496,7 +496,6 @@ export class AdminModule extends ModuleBase {
   // Agent 管理器
   private workerImplementationStore!: WorkerImplementationStore
   private workerConnectionRevisionSigner!: WorkerConnectionRevisionSigner
-  private pendingRebaselineDoneMarker?: string
   private workerOperationAssertions!: WorkerOperationAssertions
   private agentManager: AgentManager
 
@@ -879,37 +878,11 @@ export class AdminModule extends ModuleBase {
     //（新部署在此原子落 revision 1 安全初始配置）。
     await this.workerImplementationStore.load()
 
-    // P6-B：worker_implementations 首次进入 semantic 投影时，存量实例的 committed
-    // fingerprint 与 live 不一致——预埋一次性 rebaseline marker，让 coordinator initialize
-    // 以 revision+1 合法扩展（而不是 fail closed）。fresh deploy 无 committed record，
-    // 不需要 marker（initialize 直接以新投影建 revision 1）。
-    {
-      // 一次性化：done marker 存在（无论当年是否真发生 mismatch）就不再预埋——否则每次
-      // 启动都预埋会让 coordinator 的防漂移 fail-closed 永久失效（review R2）。
-      const markerDir = path.join(this.adminConfig.data_dir, 'migrations')
-      const donePath = path.join(markerDir, 'core-config-projection-rebaseline.done.json')
-      const done = await fs.access(donePath).then(() => true).catch(() => false)
-      const recordExists = await fs.access(path.join(this.adminConfig.data_dir, 'config', 'core-agent-config-revision.json')).then(() => true).catch(() => false)
-      if (recordExists && !done) {
-        await fs.mkdir(markerDir, { recursive: true, mode: 0o700 })
-        const markerPath = path.join(markerDir, 'core-config-projection-rebaseline.json')
-        await fs.writeFile(markerPath, JSON.stringify({ projection: 'worker_implementations', prepared_at: new Date().toISOString() }), { mode: 0o600 })
-        // done marker 在 initialize 消费/清理后由下方补写（本轮启动内即可收口）。
-        this.pendingRebaselineDoneMarker = donePath
-      }
-    }
-
     // Recover durable revision/outbox against fully loaded source state before any mutation.
     // Verify any Skill source journal binding before coordinator initialization/recovery trusts source projection.
     await this.skillManager.verifySourceJournalBinding(this.configMutationCoordinator)
     await this.configMutationCoordinator.initialize()
-    if (this.pendingRebaselineDoneMarker) {
-      // coordinator initialize 已消费/清理预埋 marker；写持久 done，之后启动不再预埋。
-      await fs.writeFile(this.pendingRebaselineDoneMarker, JSON.stringify({ completed_at: new Date().toISOString() }), { mode: 0o600 })
-      this.pendingRebaselineDoneMarker = undefined
-    }
     await this.skillManager.recoverSourceJournal(this.configMutationCoordinator)
-    await this.configMutationCoordinator.verifyCommittedFingerprint()
     if (!this.managementOnly) {
       // Normal mode is already eligible to publish; clear a committed startup outbox before
       // builtin seeding attempts another mutation. Management-only deliberately retains it

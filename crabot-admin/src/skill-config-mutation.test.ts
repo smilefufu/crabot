@@ -155,7 +155,13 @@ describe('Skill source mutation journal', () => {
       await coordinator.initialize(); const entry = await manager.create({ name: 'tamper', description: 'tamper', content: skill('tamper') })
       await fs.appendFile(path.join(entry.skill_dir, 'SKILL.md'), ' altered')
       const restarted = new SkillManager(dir); await restarted.initializeLoadOnly()
-      await expect(new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: () => ({ skills: restarted.runtimeSemanticEntries(), storage: restarted.semanticMigrationState() }), publishInvalidation: () => {} }).initialize()).rejects.toThrow('semantic fingerprint does not match committed revision')
+      // fail-open（protocol-admin 0.2.5 §3.19.8.1）：无 outbox 的源漂移不再拒绝启动，
+      // 以 live 投影重记账 revision+1；再次重启指纹一致，revision 不再前进。
+      const tamperedSnapshot = () => ({ skills: restarted.runtimeSemanticEntries(), storage: restarted.semanticMigrationState() })
+      const first = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: tamperedSnapshot, publishInvalidation: () => {} })
+      await expect(first.initialize()).resolves.toMatchObject({ revision: 3 })
+      const second = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: tamperedSnapshot, publishInvalidation: () => {} })
+      await expect(second.initialize()).resolves.toMatchObject({ revision: 3 })
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
