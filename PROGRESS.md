@@ -15,11 +15,12 @@
 - `feat/wechat-group-mention-gate`（PR #124）：module.yaml 开关（default false=行为不变）+ main.ts
   env 链路 + handleWechatEvent 门控（丢弃不建 session 不发布）+ 补齐协议 §6.1 MUST 的
   get_config/update_config。新增 16 用例 + 既有 62 全绿。
-- @claude review 4 条真实风险：①update_config 字符串开关静默 no-op（已修 `ce3f1feb`）②
-  x-runtime-path 单字段标注致 running 实例配置面板退化——修法需把 spec §4.4 排除的
-  WECHAT_MODE/WEBHOOK_* 纳入 config RPC，**待用户确认偏离** ③引用消息 agent 侧延迟巡检——记
-  follow-up（见技术债段）④占位文件漏删（已修）。合并前人工验证：真实群 ① 普通发言不触发 ② @ 触发
-  ③ 引用 Crabot 发言触发（预期触达但延迟一个巡检周期，见 follow-up）。
+- @claude review 4 条真实风险全部闭环：①update_config 字符串开关静默 no-op（已修 `ce3f1feb`）②
+  x-runtime-path 部分标注致 running 实例配置面板退化——用户确认撤回 spec §4.4 排除项，config RPC
+  对齐 feishu 完整模式（全部字段进 get/update，连接类 requires_restart，已修 `61c93baa`，spec
+  修订 docs `4c9f724`）③引用消息 agent 侧延迟巡检——记 follow-up（见技术债段）④占位文件漏删
+  （已修）。合并前人工验证：真实群 ① 普通发言不触发 ② @ 触发 ③ 引用 Crabot 发言触发（预期触达但
+  延迟一个巡检周期，见 follow-up）。
 
 ### 群聊响应纪律 prompt：已合并（main `d8ad16c3`）
 
