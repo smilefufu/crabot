@@ -1,10 +1,9 @@
 /**
  * crab-memory MCP server ↔ 内置 SKILL.md 引用契约测试。
  *
- * 防御内置 SKILL.md 写了一堆
- * mcp__crab-memory__quick_capture / update_long_term / run_maintenance 等
- * 工具调用，但 crab-memory.ts 里压根没注册——内置 schedule 触发反思时全
- * "tool not found"，自学习闭环空转。
+ * 防御仓库保留的 Memory workflow 文档引用
+ * mcp__crab-memory__quick_capture / update_long_term 等工具，但 crab-memory.ts
+ * 没有注册。该文档不作为 Agent Skill 下发，静态对账只用于防止 workflow 规则漂移。
  *
  * 此测试静态对账两侧：
  *   - 左：crab-memory.ts 里 server.registerTool('NAME', ...) 注册集合

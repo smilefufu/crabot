@@ -92,24 +92,14 @@ import type {
 } from '../types.js'
 import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
-
-/** fork 是一次性侧问；保留历史实现的 8 轮上限，避免把“回答”误做成硬编码单轮。 */
-const FORK_MAX_TURNS = 8
-
-const FORK_QUERY_INSTRUCTION = [
-  '## 临时侧问模式（最高优先级）',
-  '停止当前一切工作，然后回答下面问题。这个问题来自 Manager，你现在只回答它。',
-  '本段覆盖上文关于任务执行、事实核验、Execution Bias、Skill 加载以及 send_message 的指令。',
-  '不要继续主任务，不修改文件或系统，不派生子任务，不发送消息，不加载或使用任何 Skill（包括 crabot-cli），也不调用任何工具。',
-  '直接在 assistant 文本中回答 Manager 的问题，优先依据继承的主线完整 history/context。',
-].join('\n')
+import { QUERY_FORK_INSTRUCTION } from '../query-fork-instruction.js'
 
 function forkSystemPrompt(systemPrompt: Resolvable<string>): Resolvable<string> {
   return () => {
     const resolved = resolve(systemPrompt)
     return resolved.trim().length > 0
-      ? `${resolved}\n\n${FORK_QUERY_INSTRUCTION}`
-      : FORK_QUERY_INSTRUCTION
+      ? `${resolved}\n\n${QUERY_FORK_INSTRUCTION}`
+      : QUERY_FORK_INSTRUCTION
   }
 }
 
@@ -1257,7 +1247,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         // 侧问只是回答 Manager 的只读查询，不暴露主线的任何可执行工具。
         tools: [],
         model: builtin.model,
-        maxTurns: FORK_MAX_TURNS,
+        // 侧问不继承主线 burst 的预算；省略 maxTurns，交给 runEngine 使用既有默认值（200）。
+        // 主线的 maxTurnsPerBurst 只控制主线 burst，不能把侧问意外截短。
         ...this.safetyOptions(builtin, []),
         // fork 也必须开：从压缩点**之前**的老节点 fork 时，pathTo 回溯拿到的是完整未压缩
         // 历史，本身就可能超窗口。不开压缩，老链 fork 必撞窗口。代价是轻量侧问也可能付一次

@@ -70,8 +70,8 @@ function cliAccess(perm: 'none' | 'read' | 'write'): CliAccessConfig {
 }
 
 const WORKER_TOOL_ACCESS: ToolAccessConfig = {
-  // 干活必需:读写文件、跑 shell、用 skill / 外部 MCP、查记忆。
-  memory: true,
+  // 干活必需:读写文件、跑 shell、用 skill / 外部 MCP。长期记忆只属于 Manager。
+  memory: false,
   mcp_skill: true,
   file_io: true,
   shell: true,
@@ -122,8 +122,8 @@ const CLI_PERM_RANK: Record<CliPerm, number> = { none: 0, read: 1, write: 2 }
  * - `tool_access`：按类目**与**（两边都允许才允许）；
  * - `cli_access`：按域取**更严**的那一档（none < read < write）；
  * - `storage`：保留 worker 侧（null）——worker 的落盘边界是 workspace，不随发起人变；
- * - `memory_scopes`：**取发起人的**。它不是能力开关而是可见范围，正是要按发起人身份收敛的
- *   那一项（群 A 的内容不该落成群 B 读得到的记忆）。
+ * - `memory_scopes`：保留发起人的身份快照字段，供统一权限结构兼容；Worker 的
+ *   `tool_access.memory` 固定 false，保留 scopes 不会重新开放 Memory。
  *
  * `principal` 为 null（身份未解析）时原样返回 worker 固定档位，与 F 阶段行为逐字相同。
  */

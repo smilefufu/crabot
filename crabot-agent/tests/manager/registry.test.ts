@@ -21,7 +21,11 @@ import type { ChannelMessage, Friend } from '../../src/types.js'
 import type { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
-import type { HarnessEvent, HarnessEventKind } from '../../src/workers/harness/worker-events.js'
+import type {
+  ActivityContextAdmissionReceipt,
+  HarnessEvent,
+  HarnessEventKind,
+} from '../../src/workers/harness/worker-events.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
@@ -481,6 +485,126 @@ describe('ManagerRegistry', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('routeSupervisionDue: 路由准备期间 due 被 clear 后不创建 Manager episode', async () => {
+    const { adapter, calls } = makeAdapter()
+    const routePreparationEntered = deferred()
+    const releaseRoutePreparation = deferred()
+    const owner = 'wechat::periodic-owner' as ManagerKey
+    let current = true
+    const isCurrent = vi.fn(async () => current)
+    const findWorker = vi.fn(async () => {
+      routePreparationEntered.resolve()
+      await releaseRoutePreparation.promise
+      return { managerKey: owner, worker: makeLedgerWorker('w-periodic', owner) }
+    })
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      ledger: { findWorker } as unknown as LedgerStore,
+      harness: { ...FAKE_HARNESS, isSupervisionDueCurrent: isCurrent } as unknown as WorkerHarness,
+    }))
+    const event: HarnessEvent = {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'supervision_due',
+      worker_id: 'w-periodic',
+      seq: 1,
+      detail: { mode: 'periodic_report', due_id: 'cleared-due', mainline_seq: 1, observation: 'none' },
+    }
+
+    const routed = registry.routeSupervisionDue(event)
+    await routePreparationEntered.promise
+    current = false
+    releaseRoutePreparation.resolve()
+
+    await expect(routed).resolves.toBeUndefined()
+    expect(isCurrent).toHaveBeenCalledTimes(2)
+    expect(isCurrent).toHaveBeenNthCalledWith(1, event)
+    expect(isCurrent).toHaveBeenNthCalledWith(2, event)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('routeSupervisionDue: pre-wake 异步刷新期间 due 被 clear 后不创建 Manager episode', async () => {
+    const { adapter, calls } = makeAdapter()
+    const beforeWakeEntered = deferred()
+    const releaseBeforeWake = deferred()
+    const owner = 'wechat::periodic-owner' as ManagerKey
+    let current = true
+    const isCurrent = vi.fn(async () => current)
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      ledger: fakeLedger({ 'w-periodic': makeLedgerWorker('w-periodic', owner) }),
+      harness: { ...FAKE_HARNESS, isSupervisionDueCurrent: isCurrent } as unknown as WorkerHarness,
+      beforeWake: async () => {
+        beforeWakeEntered.resolve()
+        await releaseBeforeWake.promise
+      },
+    }))
+    const event: HarnessEvent = {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'supervision_due',
+      worker_id: 'w-periodic',
+      seq: 1,
+      detail: { mode: 'periodic_report', due_id: 'cleared-at-admission', mainline_seq: 1, observation: 'none' },
+    }
+
+    const routed = registry.routeSupervisionDue(event)
+    await beforeWakeEntered.promise
+    current = false
+    releaseBeforeWake.resolve()
+
+    await expect(routed).resolves.toBeUndefined()
+    expect(isCurrent).toHaveBeenCalledTimes(3)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('routeSupervisionDue: owning Manager 正执行时保留 due，不伪造已消费结果', async () => {
+    const calls: LLMStreamParams[] = []
+    const entered = deferred()
+    const release = deferred()
+    let turn = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        if (isAssistantTextEndTurnReminder(params)) {
+          yield* chunksFromContent([], 'end_turn', { inputTokens: 1, outputTokens: 1 })
+          return
+        }
+        turn++
+        if (turn === 1) {
+          entered.resolve()
+          await release.promise
+        }
+        yield* chunksFromContent([{ type: 'text', text: '当前 episode 完成' }], 'end_turn', { inputTokens: 1, outputTokens: 1 })
+      },
+      updateConfig: () => {},
+    }
+    const owner = 'wechat::periodic-owner' as ManagerKey
+    const event: HarnessEvent = {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'supervision_due',
+      worker_id: 'w-periodic',
+      seq: 1,
+      detail: { mode: 'periodic_report', due_id: 'due-active', mainline_seq: 1, observation: 'none' },
+    }
+    const isCurrent = vi.fn(async () => true)
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      ledger: fakeLedger({ 'w-periodic': makeLedgerWorker('w-periodic', owner) }),
+      harness: { ...FAKE_HARNESS, isSupervisionDueCurrent: isCurrent } as unknown as WorkerHarness,
+    }))
+
+    const active = registry.routeHumanMessages('wechat', 'periodic-owner', [makeChannelMessage('先完成这一轮')])
+    await entered.promise
+    await expect(registry.routeSupervisionDue(event)).resolves.toBeUndefined()
+    expect(isCurrent).toHaveBeenCalledWith(event)
+    expect(calls).toHaveLength(1)
+
+    release.resolve()
+    await active
+    for (const call of calls) {
+      expect(JSON.stringify(call.messages)).not.toContain('due-active')
+    }
+  })
+
   it('operation notification 在 owning Manager 正执行时进入当前 mailbox，下一轮 LLM 批量读取', async () => {
     const calls: LLMStreamParams[] = []
     const entered = deferred()
@@ -527,6 +651,116 @@ describe('ManagerRegistry', () => {
     expect(calls.length).toBeGreaterThan(1)
     expect(JSON.stringify(calls[1].messages)).toContain('delivery-1')
     expect(JSON.stringify(calls[1].messages)).toContain('delivery-2')
+  })
+
+  it('activity notification 在活跃 episode 中只注册 receipt，下一次 LLM 输入才确认', async () => {
+    const calls: LLMStreamParams[] = []
+    const entered = deferred()
+    const release = deferred()
+    let turn = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        turn += 1
+        if (turn === 1) {
+          entered.resolve()
+          await release.promise
+        }
+        yield* chunksFromContent([], 'end_turn', { inputTokens: 1, outputTokens: 1 })
+      },
+      updateConfig: () => {},
+    }
+    const admit = vi.fn(async () => undefined)
+    const reject = vi.fn(async () => undefined)
+    const receipt: ActivityContextAdmissionReceipt = {
+      notification_id: 'activity-notification-1',
+      activity_through: 'opaque-through',
+      admit,
+      reject,
+    }
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+    const key = 'wechat::activity-owner' as ManagerKey
+    const event: HarnessEvent = {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'activity_available',
+      worker_id: 'w-activity',
+      seq: 1,
+      detail: {
+        from_cursor: 'opaque-from',
+        through_cursor: 'opaque-through',
+        preview: 'automatic compaction failed',
+        has_error: true,
+      },
+    }
+
+    const active = registry.routeHumanMessages('wechat', 'activity-owner', [makeChannelMessage('先处理这条')])
+    await entered.promise
+    await expect(registry.routeOperationNotification(key, event, receipt)).resolves.toEqual({
+      consumed: false,
+      registered: true,
+    })
+    expect(admit).not.toHaveBeenCalled()
+    expect(reject).not.toHaveBeenCalled()
+
+    release.resolve()
+    await active
+
+    expect(admit).toHaveBeenCalledOnce()
+    expect(reject).not.toHaveBeenCalled()
+    expect(calls.some((call) => JSON.stringify(call.messages).includes('activity_available'))).toBe(true)
+  })
+
+  it('failed episode 收口期间到达的 activity 会在最后一个活跃 episode 退出时 reject', async () => {
+    const firstRejectEntered = deferred()
+    const releaseFirstReject = deferred()
+    const firstReject = vi.fn(async () => {
+      firstRejectEntered.resolve()
+      await releaseFirstReject.promise
+    })
+    const secondReject = vi.fn(async () => undefined)
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter: () => { throw new Error('manager model unavailable') },
+    }))
+    const key = 'wechat::activity-failure-race' as ManagerKey
+    const event = (workerId: string, through: string): HarnessEvent => ({
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'activity_available',
+      worker_id: workerId,
+      seq: 1,
+      detail: {
+        incarnation_id: `inc-${workerId}`,
+        from_cursor: `from-${through}`,
+        through_cursor: through,
+        preview: 'worker error',
+        has_error: true,
+      },
+    })
+    const receipt = (
+      notificationId: string,
+      through: string,
+      reject: () => Promise<void>,
+    ): ActivityContextAdmissionReceipt => ({
+      notification_id: notificationId,
+      activity_through: through,
+      admit: vi.fn(async () => undefined),
+      reject,
+    })
+
+    await expect(registry.routeOperationNotification(
+      key,
+      event('w-first', 'through-first'),
+      receipt('notification-first', 'through-first', firstReject),
+    )).resolves.toEqual({ consumed: false, registered: true })
+    await firstRejectEntered.promise
+
+    await expect(registry.routeOperationNotification(
+      key,
+      event('w-second', 'through-second'),
+      receipt('notification-second', 'through-second', secondReject),
+    )).resolves.toEqual({ consumed: false, registered: true })
+    releaseFirstReject.resolve()
+
+    await vi.waitFor(() => expect(secondReject).toHaveBeenCalledOnce())
   })
 
   // --- routeSchedule ---

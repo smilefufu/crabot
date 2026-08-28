@@ -14,9 +14,11 @@ export function projectWorkerActivity(
     if (event.source === 'harness') return []
     const kind = event.kind === 'message' && event.role === 'assistant'
       ? 'assistant_text'
-      : event.kind === 'tool_call' || event.kind === 'tool_result'
-        ? event.kind
-        : undefined
+      : event.kind === 'error'
+        ? 'error'
+        : event.kind === 'tool_call' || event.kind === 'tool_result'
+          ? event.kind
+          : undefined
     if (!kind || (view === 'assistant' && kind !== 'assistant_text')) return []
     const activity: WorkerActivity = {
       activity_id: stableActivityId(identity.incarnation_id, event),

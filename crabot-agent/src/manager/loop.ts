@@ -50,10 +50,11 @@ import { formatChannelMessageLine } from '../prompt-manager.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { decideCompaction, foldIntoSummary, type CompactionPolicy, type CompactionDecision } from './compaction.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
+import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
 import type { ManagerSessionState, ManagerKey } from './types.js'
 import type { WorkerHarness } from '../workers/harness/harness'
-import type { HarnessEvent } from '../workers/harness/worker-events'
+import type { ActivityContextAdmissionReceipt, HarnessEvent } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 
 const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出了一段文字、没有调用 send_message，然后结束了回复。\n'
@@ -156,6 +157,8 @@ export interface TimedWakeEnvelope {
   readonly occurred_at?: string
   readonly human_occurred_at?: ReadonlyArray<{ readonly message_id?: string; readonly occurred_at?: string }>
   readonly correlation?: ManagerWakeCorrelation
+  /** Process-local activity delivery receipt; never rendered or persisted. */
+  readonly activity_context_receipt?: ActivityContextAdmissionReceipt
 }
 
 export interface EpisodeResult {
@@ -277,6 +280,8 @@ export class ManagerLoop {
   private currentWakeEvent: TimedWakeEnvelope | null = null
   /** daily reflection 可能在 failed episode 后作为 carried wake 与新 primary 一同消费。 */
   private currentEpisodeEnvelopes: ReadonlyArray<TimedWakeEnvelope> = []
+  private readonly admittedActivityReceipts = new Set<string>()
+  private readonly rejectedActivityReceipts = new Set<string>()
   /**
    * 当前 episode 的 trace id（root 持久化成功后才有值）。worker-tools 经 registry 桥读它
    * 填 `origin.spawned_by_episode`，spawn 成功后经 `recordSpawnedWorker` 回写 trace。
@@ -408,6 +413,15 @@ export class ManagerLoop {
     return this.mailbox.hasPending
   }
 
+  /** A failed final episode returns late activity receipts to their durable Harness producer. */
+  rejectPendingActivityMailbox(): void {
+    const pending = this.mailbox.takePendingActivityEnvelopes()
+    if (pending.length === 0) return
+    void this.rejectPendingActivityEnvelopes(pending).catch((error) => {
+      console.warn('[ManagerLoop] pending activity mailbox rejection failed:', error)
+    })
+  }
+
   /** episode 进行中到达的新事件:渲染成文本推进内部邮箱,由 engine 的 humanMessageQueue
    *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。 */
   enqueueDuringEpisode(envelope: TimedWakeEnvelope): void {
@@ -436,6 +450,9 @@ export class ManagerLoop {
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
   ): Promise<EpisodeResult> {
     const episodeId = randomUUID()
+    this.mailbox.clearContextAdmissions()
+    this.admittedActivityReceipts.clear()
+    this.rejectedActivityReceipts.clear()
     const carriedEnvelopes = this.mailbox.drainEnvelopes()
     const episodeEnvelopes = [...carriedEnvelopes, ...(envelope ? [envelope] : [])]
     if (envelope === undefined && carriedEnvelopes.length === 0) {
@@ -555,13 +572,19 @@ export class ManagerLoop {
           outcome: { summary: '[episode threw]', error: err instanceof Error ? err.message : String(err) },
         })
       }
-      this.mailbox.drainEnvelopes()
-      this.requeueUncommittedEnvelopes(carriedEnvelopes, humanInputsCommitted)
-      if (envelope !== undefined && (!humanInputsCommitted || !isHumanWake(envelope.wake))) this.mailbox.push(envelope)
-      this.requeueUncommittedEnvelopes(this.currentEpisodeInjected ?? [], humanInputsCommitted)
+      const injectedEnvelopes = this.currentEpisodeInjected ?? []
+      await this.settleFailedEpisodeEnvelopes(
+        carriedEnvelopes,
+        envelope,
+        injectedEnvelopes,
+        humanInputsCommitted,
+      )
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
       this.currentEpisodeEnvelopes = []
+      this.mailbox.clearContextAdmissions()
+      this.admittedActivityReceipts.clear()
+      this.rejectedActivityReceipts.clear()
       throw err
     } finally {
       this.currentEpisodeInjected = null
@@ -608,6 +631,10 @@ export class ManagerLoop {
       historyState = withoutProtectedTail(state, committedHumanMessages.length)
     }
 
+    const currentInputEnvelopes = [
+      ...carriedEnvelopes.filter((item) => !isHumanWake(item.wake) || isEmptyHumanWake(item.wake)),
+      ...(envelope && (!isHumanWake(envelope.wake) || isEmptyHumanWake(envelope.wake)) ? [envelope] : []),
+    ]
     const currentTailMessages: EngineMessage[] = [
       ...carriedTexts.map((text) => createUserMessage(text)),
       ...(eventText === undefined ? [] : [createUserMessage(eventText)]),
@@ -617,7 +644,9 @@ export class ManagerLoop {
       ...currentTailMessages,
     ]
 
-    let attempt = await this.runAttempt(episodeId, state, tailMessages, adapter, model)
+    let attempt = await this.runAttempt(episodeId, state, tailMessages, adapter, model, {
+      contextEnvelopes: currentInputEnvelopes,
+    })
     let totalTurnsUsed = attempt.result.totalTurns
     let usedForceHotRetry = false
     // 与 totalTurnsUsed 同一套累加纪律:兜底重试会整体丢弃首次尝试的 finalMessages,但首次
@@ -654,12 +683,18 @@ export class ManagerLoop {
         historyState = withoutProtectedTail(state, committedHumanMessages.length)
         // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
         this.mailbox.drainEnvelopes()
+        this.mailbox.clearContextAdmissions()
+        const retryCurrentEnvelopes = currentInputEnvelopes.filter((item) => this.shouldReplayInAttempt(item))
+        const retryInjectedEnvelopes = (this.currentEpisodeInjected ?? [])
+          .filter((item) => this.shouldReplayInAttempt(item))
         const retryTailMessages: EngineMessage[] = [
           ...state.recent,
-          ...currentTailMessages,
-          ...(this.currentEpisodeInjected?.map((item) => createUserMessage(this.renderEnvelope(item))) ?? []),
+          ...retryCurrentEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
+          ...retryInjectedEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
         ]
-        const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model)
+        const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model, {
+          contextEnvelopes: [...retryCurrentEnvelopes, ...retryInjectedEnvelopes],
+        })
         totalTurnsUsed += retryAttempt.result.totalTurns
         repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages)
         successfulSendMessageTargets = [
@@ -767,10 +802,8 @@ export class ManagerLoop {
       // currentEpisodeInjected 都完整记录了原始文本,是唯一权威来源;先 drainPending()
       // 清空 mailbox 里可能残留的"尚未被消费"那一段(它是 currentEpisodeInjected 的后缀,
       // 不清空会和下面的整体重投重复),再按到达顺序整体重投,保证至少一次投递、不丢失、不重复。
-      this.mailbox.drainEnvelopes()
-      this.requeueUncommittedEnvelopes(carriedEnvelopes, true)
-      if (envelope !== undefined && !isHumanWake(envelope.wake)) this.mailbox.push(envelope)
-      this.requeueUncommittedEnvelopes(this.currentEpisodeInjected ?? [], true)
+      const injectedEnvelopes = this.currentEpisodeInjected ?? []
+      await this.settleFailedEpisodeEnvelopes(carriedEnvelopes, envelope, injectedEnvelopes, true)
     }
 
     const result: EpisodeResult = {
@@ -845,9 +878,73 @@ export class ManagerLoop {
     humanInputsCommitted: boolean,
   ): void {
     for (const envelope of envelopes) {
+      if (envelope.activity_context_receipt) continue
       if (humanInputsCommitted && isHumanWake(envelope.wake)) continue
       this.mailbox.push(envelope)
     }
+  }
+
+  private async settleFailedEpisodeEnvelopes(
+    carriedEnvelopes: ReadonlyArray<TimedWakeEnvelope>,
+    envelope: TimedWakeEnvelope | undefined,
+    injectedEnvelopes: ReadonlyArray<TimedWakeEnvelope>,
+    humanInputsCommitted: boolean,
+  ): Promise<void> {
+    this.mailbox.drainEnvelopes()
+    this.mailbox.clearContextAdmissions()
+    await this.rejectPendingActivityEnvelopes([
+      ...carriedEnvelopes,
+      ...(envelope ? [envelope] : []),
+      ...injectedEnvelopes,
+    ])
+    this.requeueUncommittedEnvelopes(carriedEnvelopes, humanInputsCommitted)
+    if (envelope) this.requeueUncommittedEnvelopes([envelope], humanInputsCommitted)
+    this.requeueUncommittedEnvelopes(injectedEnvelopes, humanInputsCommitted)
+  }
+
+  private admitActivityEnvelopes(envelopes: ReadonlyArray<TimedWakeEnvelope>): void {
+    for (const envelope of envelopes) {
+      const receipt = envelope.activity_context_receipt
+      if (!receipt) continue
+      const key = activityReceiptKey(receipt)
+      if (this.admittedActivityReceipts.has(key) || this.rejectedActivityReceipts.has(key)) continue
+      this.admittedActivityReceipts.add(key)
+      const handleFailure = async (error: unknown): Promise<void> => {
+        try {
+          await receipt.reject()
+        } catch (rejectError) {
+          console.warn('[ManagerLoop] activity admission rejection failed:', rejectError)
+        }
+        console.warn('[ManagerLoop] activity admission acknowledgement failed; durable notification will retry:', error)
+      }
+      try {
+        void receipt.admit().catch(handleFailure)
+      } catch (error) {
+        void handleFailure(error)
+      }
+    }
+  }
+
+  private async rejectPendingActivityEnvelopes(envelopes: ReadonlyArray<TimedWakeEnvelope>): Promise<void> {
+    const seen = new Set<string>()
+    for (const envelope of envelopes) {
+      const receipt = envelope.activity_context_receipt
+      if (!receipt) continue
+      const key = activityReceiptKey(receipt)
+      if (seen.has(key) || this.admittedActivityReceipts.has(key) || this.rejectedActivityReceipts.has(key)) continue
+      seen.add(key)
+      try {
+        await receipt.reject()
+      } catch (error) {
+        console.warn('[ManagerLoop] activity admission rejection failed:', error)
+      }
+      this.rejectedActivityReceipts.add(key)
+    }
+  }
+
+  private shouldReplayInAttempt(envelope: TimedWakeEnvelope): boolean {
+    const receipt = envelope.activity_context_receipt
+    return !receipt || !this.admittedActivityReceipts.has(activityReceiptKey(receipt))
   }
 
   private async settleUnclaimedAdminChatWakes(): Promise<void> {
@@ -942,8 +1039,8 @@ export class ManagerLoop {
         status: toolCall.isError ? 'failed' : 'completed',
         details: {
           name: toolCall.name,
-          input_summary: truncateForTrace(JSON.stringify(toolCall.input)),
-          output_summary: truncateForTrace(toolCall.output),
+          input_summary: summarizeSpanInput(toolCall.input),
+          output_summary: summarizeSpanOutput(toolCall.output),
         },
       })
     }
@@ -1036,7 +1133,10 @@ export class ManagerLoop {
     tailMessages: ReadonlyArray<EngineMessage>,
     adapter: LLMAdapter,
     model: string,
-    overrides?: { readonly initialMessages?: ReadonlyArray<EngineMessage> },
+    overrides?: {
+      readonly initialMessages?: ReadonlyArray<EngineMessage>
+      readonly contextEnvelopes?: ReadonlyArray<TimedWakeEnvelope>
+    },
   ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean; readonly initialMessageCount: number }> {
     this.attemptCounter += 1
     let assistantTextEndTurnReminderSent = false
@@ -1046,6 +1146,7 @@ export class ManagerLoop {
       : hasSummaryMarker
         ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
         : [...tailMessages]
+    let initialContextEnvelopes = [...(overrides?.contextEnvelopes ?? [])]
 
     const dailyReflectionWake = this.currentEpisodeEnvelopes.find((item) =>
       isBuiltinDailyReflectionWake(item.wake),
@@ -1071,6 +1172,16 @@ export class ManagerLoop {
       contextWindowTokens: this.deps.contextWindowTokens,
       disableCompaction: true,
       humanMessageQueue: this.mailbox,
+      onBeforeLlmCall: () => {
+        const envelopes = [
+          ...initialContextEnvelopes,
+          ...this.mailbox.takeContextAdmissionEnvelopes(),
+        ]
+        initialContextEnvelopes = []
+        if (envelopes.some((envelope) => envelope.activity_context_receipt)) {
+          this.admitActivityEnvelopes(envelopes)
+        }
+      },
       // engine 的 forced_summary 兜底(silent end_turn → 注入"你还没向人类发过内容"追问,
       // 最多 3 次)是 v2 worker loop 的机制:那条路径下 caller 用一整套 outbound buffer
       // 跟踪"这轮有没有发过",engine 只是照着它的判定兜底。manager 没有那套跟踪,不传等于
@@ -1110,13 +1221,17 @@ export class ManagerLoop {
 
 // --- Helpers ---
 
+function activityReceiptKey(receipt: ActivityContextAdmissionReceipt): string {
+  return `${receipt.notification_id}\u0000${receipt.activity_through}`
+}
+
 function isBuiltinDailyReflectionWake(wake: WakeEvent | undefined): boolean {
   return wake?.kind === 'schedule'
     && wake.isBuiltin === true
     && wake.taskType === 'daily_reflection'
 }
 
-/** span detail 摘要截断（完整脱敏由 writer 侧 redactSecrets 负责）。 */
+/** trigger 摘要截断（span 摘要见 span-summary.ts；完整脱敏由 writer 侧 redactSecrets 负责）。 */
 function truncateForTrace(text: string, max = 300): string {
   return text.length > max ? text.slice(0, max) + '…' : text
 }
@@ -1233,6 +1348,7 @@ function successfulSendMessageTargetsOf(
 /** Manager-only mailbox: envelopes remain authoritative; the engine receives deterministic text. */
 class TimedWakeMailbox implements HumanMessageQueueLike {
   private pending: TimedWakeEnvelope[] = []
+  private contextAdmissionEnvelopes: TimedWakeEnvelope[] = []
   private barrierResolve: (() => void) | null = null
   private barrierTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -1247,8 +1363,31 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
     return drained
   }
 
+  takePendingActivityEnvelopes(): TimedWakeEnvelope[] {
+    const activity: TimedWakeEnvelope[] = []
+    const remaining: TimedWakeEnvelope[] = []
+    for (const envelope of this.pending) {
+      if (envelope.activity_context_receipt) activity.push(envelope)
+      else remaining.push(envelope)
+    }
+    this.pending = remaining
+    return activity
+  }
+
   drainPending(): string[] {
-    return this.drainEnvelopes().map(renderTimedWakeEnvelope)
+    const drained = this.drainEnvelopes()
+    this.contextAdmissionEnvelopes.push(...drained)
+    return drained.map(renderTimedWakeEnvelope)
+  }
+
+  takeContextAdmissionEnvelopes(): TimedWakeEnvelope[] {
+    const drained = this.contextAdmissionEnvelopes
+    this.contextAdmissionEnvelopes = []
+    return drained
+  }
+
+  clearContextAdmissions(): void {
+    this.contextAdmissionEnvelopes = []
   }
 
   get hasPending(): boolean {

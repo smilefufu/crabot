@@ -325,6 +325,8 @@ export interface EngineOptions {
    * 写入的数组本身是 ReadonlyArray —— 外部只读，不应原地修改。
    */
   readonly messagesRef?: EngineMessagesRef
+  /** 已组装本轮 messages、即将调用 Provider 前的内部准入观察点。 */
+  readonly onBeforeLlmCall?: () => void | Promise<void>
   /**
    * 引擎层主动向 loop 注入 user message 时触发（trace 可见性钩子）。
    *

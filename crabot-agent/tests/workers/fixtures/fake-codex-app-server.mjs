@@ -15,6 +15,7 @@ const forkThreadId = process.env.FAKE_FORK_THREAD_ID ?? '019d0000-0000-7000-8000
 const turnId = process.env.FAKE_TURN_ID ?? '019d0000-0000-7000-8000-000000000002'
 const delayMs = Number(process.env.FAKE_COMPLETION_DELAY_MS ?? '20')
 const terminationFile = process.env.FAKE_TERMINATION_FILE
+const requestFile = process.env.FAKE_REQUEST_FILE
 
 function recordTermination(signal) {
   if (terminationFile) appendFileSync(terminationFile, `${process.pid}:${signal}\n`)
@@ -34,6 +35,9 @@ function error(id, message, code = -32600) {
 const rl = readline.createInterface({ input: process.stdin })
 rl.on('line', (line) => {
   const message = JSON.parse(line)
+  if (requestFile && (message.method === 'thread/fork' || message.method === 'turn/start')) {
+    appendFileSync(requestFile, `${JSON.stringify(message)}\n`)
+  }
   if (message.method === 'initialize') {
     if (mode === 'hang_initialize') return
     send({

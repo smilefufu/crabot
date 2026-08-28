@@ -166,6 +166,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       messagesRef.systemPrompt = currentSystemPrompt
       messagesRef.tools = currentTools
     }
+    const beforeLlmCall = options.onBeforeLlmCall?.()
+    if (beforeLlmCall) await beforeLlmCall
     const llmStartedAtMs = Date.now()
     let llmCallMs = 0
     try {
@@ -200,6 +202,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
     const processed = partitionResponseContent(response.content)
     totalTurns++
+    const hasRemainingTurn = turn + 1 < maxTurns
 
     // Live progress: assistant text arrived (fires before tool execution).
     // 注意：emit 在 totalTurns++ 之后，turn 数与 onTurn.turnNumber 对齐。
@@ -266,7 +269,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     if (stopReason !== 'tool_use') {
       // end_turn 收口前最后一次 supplement check：防止 LLM end_turn 与 finalize 落盘之间
       // 的微秒级窗口漏掉人类补充。补充消息自然取代 forced summary，继续下一轮响应。
-      if (options.humanMessageQueue?.hasPending) {
+      if (hasRemainingTurn && options.humanMessageQueue?.hasPending) {
         const supplements = options.humanMessageQueue.drainPending()
         for (const content of supplements) {
           messages.push(createUserMessage(content))
@@ -430,15 +433,17 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         }))
         messages.push(createBatchToolResultMessage(cancelledResults))
 
-        const supplements = options.humanMessageQueue.drainPending()
-        for (const content of supplements) {
-          messages.push(createUserMessage(content))
-          options.onSystemInjection?.({
-            type: 'supplement',
-            text: typeof content === 'string' ? content : '[ContentBlock[] supplement]',
-            turnNumber: totalTurns,
-            injectedAtMs: Date.now(),
-          })
+        if (hasRemainingTurn) {
+          const supplements = options.humanMessageQueue.drainPending()
+          for (const content of supplements) {
+            messages.push(createUserMessage(content))
+            options.onSystemInjection?.({
+              type: 'supplement',
+              text: typeof content === 'string' ? content : '[ContentBlock[] supplement]',
+              turnNumber: totalTurns,
+              injectedAtMs: Date.now(),
+            })
+          }
         }
 
         // Fire onTurn with cancelled tools for trace recording.
@@ -650,7 +655,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     }
 
     // Inject any pending human supplement messages.
-    if (options.humanMessageQueue) {
+    if (hasRemainingTurn && options.humanMessageQueue) {
       const supplements = options.humanMessageQueue.drainPending()
       for (const content of supplements) {
         messages.push(createUserMessage(content))

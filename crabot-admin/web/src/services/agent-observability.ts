@@ -135,7 +135,7 @@ export interface WorkerListResult extends PaginatedResult<LedgerWorker> {
 
 export interface WorkerTraceEvent {
   ts: string
-  kind: 'message' | 'llm_call' | 'tool_call' | 'tool_result' | 'thinking' | 'lifecycle'
+  kind: 'message' | 'llm_call' | 'tool_call' | 'tool_result' | 'thinking' | 'lifecycle' | 'error'
   role?: 'assistant' | 'user' | 'system'
   summary: string
   subagent_id?: string

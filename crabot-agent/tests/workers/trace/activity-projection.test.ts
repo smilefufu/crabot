@@ -9,6 +9,7 @@ const events: NormalizedTraceEvent[] = [
   { ts: '2026-08-20T00:00:03.000Z', kind: 'tool_result', summary: 'ok', source: 'native' },
   { ts: '2026-08-20T00:00:04.000Z', kind: 'message', role: 'assistant', summary: '检查完成', source: 'native' },
   { ts: '2026-08-20T00:00:05.000Z', kind: 'thinking', role: 'assistant', summary: 'internal', source: 'native' },
+  { ts: '2026-08-20T00:00:06.000Z', kind: 'error', summary: '自动压缩失败', source: 'native' },
 ]
 
 describe('projectWorkerActivity', () => {
@@ -23,9 +24,9 @@ describe('projectWorkerActivity', () => {
     }])
   })
 
-  it('all view adds tool calls/results but still excludes Harness lifecycle and non-assistant content', () => {
+  it('all view adds tool calls/results and error evidence but still excludes Harness lifecycle and non-assistant content', () => {
     expect(projectWorkerActivity(events, 'all', { worker_id: 'w-1', incarnation_id: 'inc-1' }).map((event) => event.kind)).toEqual([
-      'tool_call', 'tool_result', 'assistant_text',
+      'tool_call', 'tool_result', 'assistant_text', 'error',
     ])
   })
 })

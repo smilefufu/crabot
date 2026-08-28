@@ -191,6 +191,8 @@ export interface BootstrapDeps {
   readonly workerImplSnapshot?: import('./tools/worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
   /** Agent-owned structured session projection used by get_worker_activity. */
   readonly readWorkerActivity?: import('./tools/worker-tools.js').WorkerToolsDeps['readWorkerActivity']
+  /** Mints opaque activity cursors from Harness-internal native positions. */
+  readonly mintActivityCursor?: HarnessDeps['mintActivityCursor']
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */
   readonly admitWorkerConnection?: (impl: import('../workers/types.js').WorkerImplId, operationLabel?: string) => Promise<{
     env: Record<string, string>
@@ -354,6 +356,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     workspaces,
     workersDir: join(agentDir, 'workers'),
     now: deps.now,
+    mintActivityCursor: deps.mintActivityCursor,
     // P6-A §8.10：化身终态时主动收割一次 native trace（最后一次 read → Agent-owned copy）。
     onIncarnationTerminal: deps.onIncarnationTerminal,
     onNativeActivityCollected: deps.onNativeActivityCollected,
@@ -390,7 +393,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // A set/clear/expiry/terminal transition can invalidate a due while it was queued, or
           // during its Manager episode. It remains in trace/events.jsonl but must not affect the
           // replacement rule. `undefined` from the narrow route is the before-wake stale case.
-          if (event.kind === 'supervision_due' && (result === undefined || !await harness.isSupervisionDueCurrent(event))) {
+          if (event.kind === 'supervision_due' && result === undefined) {
+            // `undefined` is either a stale due (safe to consume) or an active Manager
+            // defer (keep the durable due for retry). The current-state check distinguishes
+            // those two cases without inventing a completed EpisodeResult.
+            return { consumed: !await harness.isSupervisionDueCurrent(event) }
+          }
+          if (event.kind === 'supervision_due' && !await harness.isSupervisionDueCurrent(event)) {
             return { consumed: true }
           }
           // fail-loud 的判据必须双管:`.catch` 只抓得到 F2(中途抛错),而最常见的 F1(LLM 挂 /
@@ -422,9 +431,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         },
       )
     },
-    onOperationNotification: (managerKey, event) => {
+    onOperationNotification: (managerKey, event, activityReceipt) => {
       if (!registry) return { consumed: false }
-      return registry.routeOperationNotification(managerKey, event).catch((err) => {
+      return registry.routeOperationNotification(managerKey, event, activityReceipt).catch((err) => {
         console.error(
           `[manager-bootstrap] routeOperationNotification failed ` +
             `(manager=${managerKey}, worker=${event.worker_id}, kind=${event.kind}):`,

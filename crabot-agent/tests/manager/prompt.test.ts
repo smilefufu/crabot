@@ -89,6 +89,18 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).not.toContain('`pending` 只表示已登记、正在等待安全输入面')
   })
 
+  it('含 activity error evidence 纪律：先读 all，idle 不覆盖，且不 resolve turn', () => {
+    expect(MANAGER_IDENTITY).toContain('`detail.has_error=true`')
+    expect(MANAGER_IDENTITY).toContain('传 `view=all`')
+    expect(MANAGER_IDENTITY).toContain('`from_cursor` 作为 `after`')
+    expect(MANAGER_IDENTITY).toContain('事件里的 `incarnation_id`')
+    expect(MANAGER_IDENTITY).toContain('`idle` 只表示控制面暂时空闲')
+    expect(MANAGER_IDENTITY).toContain('不能覆盖或否定错误证据')
+    expect(MANAGER_IDENTITY).toContain('activity 不是 completed turn')
+    expect(MANAGER_IDENTITY).toContain('不调用 `resolve_worker_turn`')
+    expect(MANAGER_IDENTITY).toContain('普通 assistant activity 也不要求一律向人类报告')
+  })
+
   it('含执行器选择与复用纪律：有效实现选择、等待投递、运行中改向和 fork 侧问', () => {
     expect(MANAGER_IDENTITY).toContain('选择新执行器')
     expect(MANAGER_IDENTITY).toContain('list_worker_implementations')
@@ -103,6 +115,17 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('immediate_redirect=true')
     expect(MANAGER_IDENTITY).toContain('query_worker')
     expect(MANAGER_IDENTITY).toContain('fork')
+  })
+
+  it('状态/进度/输出先读 read model，query_worker 只用于确需独立推理的侧问', () => {
+    expect(MANAGER_IDENTITY).toContain('状态查询与临时侧问分开')
+    expect(MANAGER_IDENTITY).toContain('get_worker_state')
+    expect(MANAGER_IDENTITY).toContain('get_worker_activity')
+    expect(MANAGER_IDENTITY).toContain('get_worker_turn')
+    expect(MANAGER_IDENTITY).toContain('不得为了查状态调用 `query_worker`')
+    expect(MANAGER_IDENTITY).toContain('read model 不足')
+    expect(MANAGER_IDENTITY).toContain('独立判断或解释')
+    expect(MANAGER_IDENTITY).not.toContain('人类询问任务进度、当前判断等需要向运行中执行器求证的问题，用 `query_worker` 建立 fork')
   })
 
   it('慢工具纪律不再承诺"进展会唤醒你、不需要主动轮询"，而是如实说明唤醒粒度是轮次边界', () => {

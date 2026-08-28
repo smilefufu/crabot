@@ -6,7 +6,7 @@ Snapshot date: 2026-07-05
 
 ---
 name: workspace-context-maintenance
-description: Use after set_cwd when workspace context docs are missing or stale; before durable file changes, reports, scripts, data artifacts, or when the user asks Crabot to remember workspace rules
+description: Use when the current workspace context docs are missing or stale; before durable file changes, reports, scripts, data artifacts, or when the task asks Crabot to remember workspace rules
 ---
 
 # Workspace Context Maintenance
@@ -15,12 +15,12 @@ description: Use after set_cwd when workspace context docs are missing or stale;
 
 在以下任一情况，先使用本 skill：
 
-- `set_cwd` 返回提示显示未发现 `AGENTS.md`。
+- 当前 workspace 中未发现 `AGENTS.md`，或现有上下文文档明显过时。
 - 本任务会修改多个文件、创建脚本、生成报告、生成数据产物、改配置，或产生后续 agent 需要理解的长期结果。
 - 本任务依赖项目历史上下文、实验口径、契约、权威产物或废弃口径。
 - 用户说“记住”“以后按这个来”“维护文档”“沉淀上下文”。
 
-如果任务只是一次性查看、简单问答、读取单个文件，且不修改或生成长期文件，可以不创建文档，但最终说明无需维护的原因。
+如果任务只是一次性查看、简单问答、读取单个文件，且不修改或生成长期文件，可以不创建文档，但要在返回给 Manager 的工作总结中说明无需维护的原因。
 
 ## 工作流程
 
@@ -44,7 +44,7 @@ description: Use after set_cwd when workspace context docs are missing or stale;
 
 5. 任务结束前做文档维护检查。
    - 如果本次改变了长期事实、工作流、契约、权威产物、废弃口径或后续注意事项，更新 `AGENTS.md` 或当前上下文文档。
-   - 若没有更新，最终回复中说明无需更新的原因。
+   - 若没有更新，在返回给 Manager 的工作总结中说明无需更新的原因。
 
 ## 最小 AGENTS.md 模板
 

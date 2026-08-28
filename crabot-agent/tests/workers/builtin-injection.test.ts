@@ -621,7 +621,7 @@ describe('builtin worker 的安全项（hookRegistry / 权限档位）', () => {
     }
   })
 
-  it('固定权限档位：cli_access 全关、messaging/task/remote_exec/desktop 关、干活面开', () => {
+  it('固定权限档位：Memory 与控制面关闭，文件/Shell/Skill 干活面开启', () => {
     expect(Object.values(BUILTIN_WORKER_PERMISSIONS.cli_access).every((v) => v === 'none')).toBe(true)
     expect(BUILTIN_WORKER_PERMISSIONS.tool_access).toMatchObject({
       messaging: false,
@@ -630,7 +630,7 @@ describe('builtin worker 的安全项（hookRegistry / 权限档位）', () => {
       desktop: false,
       file_io: true,
       shell: true,
-      memory: true,
+      memory: false,
       mcp_skill: true,
     })
   })
@@ -685,9 +685,10 @@ describe('narrowWorkerPermissions —— worker 档位 ∩ 派活人档位', () 
     expect(Object.values(out.cli_access).every((v) => v === 'none')).toBe(true)
   })
 
-  it('memory_scopes 取**派活人的**——它是可见范围而不是能力开关，正是要按身份收敛的那项', () => {
+  it('memory_scopes 保留身份快照，但不能重新开放 Worker Memory', () => {
     const out = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, perms({ scopes: ['team-x'] }))
     expect(out.memory_scopes).toEqual(['team-x'])
+    expect(out.tool_access.memory).toBe(false)
   })
 
   it('身份未解析（null）→ 原样退回固定档位，与 F 阶段行为逐字相同', () => {

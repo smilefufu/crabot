@@ -69,6 +69,24 @@ describe('materializeSkills', () => {
     expect(names).toEqual(['crabot-cli', 'crabot-cli-copy'])
   })
 
+  it('再次 provision 只清理上次由 Crabot 管理、但本次已不允许的 Skill', async () => {
+    const targetRoot = path.join(ws, '.claude/skills')
+    await fs.mkdir(path.join(targetRoot, 'native-user-skill'), { recursive: true })
+    await fs.writeFile(path.join(targetRoot, 'native-user-skill/SKILL.md'), 'native')
+
+    await materializeSkills(ws, [
+      { id: 'a', name: 'crabot-cli', skill_dir: FIXTURE_SKILL_DIR },
+      { id: 'b', name: 'crabot-cli-copy', skill_dir: FIXTURE_SKILL_DIR },
+    ], '.claude/skills')
+    await materializeSkills(ws, [
+      { id: 'b', name: 'crabot-cli-copy', skill_dir: FIXTURE_SKILL_DIR },
+    ], '.claude/skills')
+
+    await expect(fs.access(path.join(targetRoot, 'crabot-cli'))).rejects.toThrow()
+    await expect(fs.readFile(path.join(targetRoot, 'crabot-cli-copy/SKILL.md'), 'utf-8')).resolves.toBeTruthy()
+    await expect(fs.readFile(path.join(targetRoot, 'native-user-skill/SKILL.md'), 'utf-8')).resolves.toBe('native')
+  })
+
   // skill.name 未经校验就拼进 fs.rm(dest, {recursive, force}) 的目标路径——含 `/` 或 `..`
   // 的恶意/畸形 name 能让 dest 逃出 <ws>/.claude/skills/,递归删掉 workspace 内甚至外的任意
   // 目录(P2 review #3)。这里逐一验证每种恶意 name 都被 reject,且 reject 发生在任何

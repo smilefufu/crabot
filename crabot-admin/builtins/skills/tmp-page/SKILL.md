@@ -39,23 +39,23 @@ version: "2.0.0"
 - 在页面 JavaScript 中调用 `crabotSubmit({...})` 提交任意结构。
 - 放置 `<p id="crabot-status"></p>` 显示提交状态。
 
-## 发 URL + 等反馈
+## 把 URL 返回 Manager + 等反馈
 
 推荐主路径：
 
 1. 调 `tmp_page_create`。
-2. 用 `send_message(intent='ask_human')` 把 `url` 发给人类并挂起。
-3. 页面提交后系统会自动唤醒你。
-4. 醒来后调 `tmp_page_read_events({ page_id, after_event_id? })` 读取结构化反馈。
+2. 把 `url`、页面用途和希望收集的反馈返回 Manager，由 Manager 负责人类投递。
+3. 若任务需要等待反馈，自然结束当前回合并保持任务可续办；不要把任务标记为完成。
+4. 页面提交后系统会自动唤醒页面所属 Worker。
+5. 醒来后调 `tmp_page_read_events({ page_id, after_event_id? })` 读取结构化反馈，再把反馈结论返回 Manager。
 
-如果不想把 task 标成 `waiting_human`，可以：
+如果页面只用于展示、不需要反馈：
 
-1. 用 `send_message(intent='info')` 发 URL。
-2. 自然结束当前回合；页面反馈事件会唤醒后续处理。
-3. 页面提交后系统同样会唤醒你。
-4. 醒来后调 `tmp_page_read_events`。
+1. 调 `tmp_page_create`。
+2. 把 `url` 和页面用途返回 Manager。
+3. 正常完成自己的任务。
 
-不要轮询等待页面反馈。等待使用 `ask_human` 或 `end_turn`，读取使用 `tmp_page_read_events`。
+不要轮询等待页面反馈。等待时自然结束当前回合；反馈事件会唤醒后续处理，读取使用 `tmp_page_read_events`。
 
 ## 更新、读取、删除
 
@@ -68,4 +68,4 @@ version: "2.0.0"
 
 ## 持久产物
 
-tmp-page 是临时分发层。若需要可复现、可长期保存的页面或报告，先在项目目录生成源码/report，再用 `tmp_page_create` 发布临时 URL 给人查看。
+tmp-page 是临时分发层。若需要可复现、可长期保存的页面或报告，先在项目目录生成源码/report，再用 `tmp_page_create` 发布临时 URL，并把 URL 和产物位置返回 Manager。

@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync, existsSync 
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { SkillManager } from '../src/mcp-skill-manager.js'
+import { getBuiltinSkills } from '../src/builtin-skills.js'
 
 const REPO_BUILTINS_DIR = join(__dirname, '..', 'builtins', 'skills')
 
@@ -57,6 +58,54 @@ describe('SkillManager.registerBuiltins', () => {
     expect(errSpy).not.toHaveBeenCalled()
   })
 
+  it('主线必备 builtin Skill 始终启用且不能被禁用', async () => {
+    const requiredNames = ['tmp-page', 'scrapling-official']
+    for (const name of [...requiredNames, 'review-skill']) writeSkill(builtinsDir, name)
+
+    await mgr.registerBuiltins(builtinsDir)
+
+    for (const name of requiredNames) {
+      const skill = mgr.list().find((entry) => entry.name === name)!
+      expect(skill).toMatchObject({ enabled: true, can_disable: false })
+      await expect(mgr.update(skill.id, { enabled: false })).rejects.toThrow(
+        `Skill "${name}" cannot be disabled`,
+      )
+    }
+    expect(mgr.list().find((entry) => entry.name === 'review-skill')).toMatchObject({
+      enabled: true,
+      can_disable: true,
+    })
+  })
+
+  it('扫描时把存量已禁用的必备 builtin Skill 归一化为启用且不可禁用', async () => {
+    writeSkill(builtinsDir, 'tmp-page')
+    writeFileSync(join(dataDir, 'skills.json'), JSON.stringify([{
+      id: 'legacy-tmp-page',
+      name: 'tmp-page',
+      description: 'old',
+      version: '0.9.0',
+      skill_dir: join(builtinsDir, 'tmp-page'),
+      source_type: 'builtin',
+      is_builtin: true,
+      is_essential: false,
+      can_disable: true,
+      enabled: false,
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    }]))
+    mgr = new SkillManager(dataDir)
+    await mgr.initialize()
+
+    await mgr.registerBuiltins(builtinsDir)
+
+    expect(mgr.get('legacy-tmp-page')).toMatchObject({
+      enabled: true,
+      can_disable: false,
+      description: 'desc tmp-page',
+      version: '1.0.0',
+    })
+  })
+
   it('目录不存在 → 返回 0 且报错，不静默', async () => {
     const count = await mgr.registerBuiltins(join(builtinsDir, 'nope'))
 
@@ -94,6 +143,19 @@ describe('仓库 builtins/skills 载荷', () => {
       await mgr.initialize()
       const count = await mgr.registerBuiltins(REPO_BUILTINS_DIR)
       expect(count).toBe(dirs.length)
+      expect([
+        ...getBuiltinSkills().map((skill) => skill.name),
+        ...mgr.list().map((skill) => skill.name),
+      ].sort()).toEqual([
+        'tmp-page',
+        'scrapling-official',
+        'workspace-context-maintenance',
+        'writing-plans',
+        'systematic-debugging',
+        'verification-before-completion',
+        'memory-graph-linking',
+        'crabot-cli',
+      ].sort())
     } finally {
       rmSync(dataDir, { recursive: true, force: true })
     }

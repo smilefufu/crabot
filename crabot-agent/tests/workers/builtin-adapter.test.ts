@@ -337,6 +337,7 @@ function spec(opts: {
   tools?: ReadonlyArray<ToolDefinition>
   contextWindowTokens?: number
   systemPrompt?: string
+  maxTurnsPerBurst?: number
 }): SpawnSpec {
   return {
     worker_id: opts.worker_id ?? randomUUID(),
@@ -348,6 +349,7 @@ function spec(opts: {
       systemPrompt: opts.systemPrompt ?? '',
       tools: opts.tools ?? [],
       ...(opts.contextWindowTokens !== undefined ? { contextWindowTokens: opts.contextWindowTokens } : {}),
+      ...(opts.maxTurnsPerBurst !== undefined ? { maxTurnsPerBurst: opts.maxTurnsPerBurst } : {}),
     },
   }
 }
@@ -607,7 +609,7 @@ describe('BuiltinWorkerAdapter', () => {
     )
     try {
       const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
-      const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+      const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]), maxTurnsPerBurst: 64 }))
       await vi.waitFor(() => expect(runEngineSpy).toHaveBeenCalledTimes(1))
       expect(await adapter.lastActivityAt(h)).toBe(1_000)
 
@@ -617,6 +619,7 @@ describe('BuiltinWorkerAdapter', () => {
 
       now = 2_000
       const mainOptions = runEngineSpy.mock.calls[0][0].options
+      expect(mainOptions.maxTurns).toBe(64)
       mainOptions.onLiveProgress!({ type: 'tools_start', tools: [] })
       expect(await adapter.lastActivityAt(h)).toBe(2_000)
 
@@ -632,7 +635,7 @@ describe('BuiltinWorkerAdapter', () => {
       await vi.waitFor(() => expect(runEngineSpy).toHaveBeenCalledTimes(2))
       now = 5_000
       const forkEngineOptions = runEngineSpy.mock.calls[1][0].options
-      expect(forkEngineOptions.maxTurns).toBe(8)
+      expect(forkEngineOptions).not.toHaveProperty('maxTurns')
       forkEngineOptions.onLiveProgress!({ type: 'tools_end', results: [] })
       expect(await adapter.lastActivityAt(fork)).toBe(5_000)
 

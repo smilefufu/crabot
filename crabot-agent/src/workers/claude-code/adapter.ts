@@ -59,6 +59,7 @@ import {
 
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
+import { QUERY_FORK_INSTRUCTION } from '../query-fork-instruction.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -108,6 +109,11 @@ function workspaceInstructionPrompt(spec?: import('../types.js').WorkspaceInstru
     spec.text,
     '</workspace-agents-md>',
   ].join('\n')
+}
+
+function forkSystemPrompt(spec?: import('../types.js').WorkspaceInstructionPayload): string {
+  const workspacePrompt = workspaceInstructionPrompt(spec)
+  return workspacePrompt ? `${workspacePrompt}\n\n${QUERY_FORK_INSTRUCTION}` : QUERY_FORK_INSTRUCTION
 }
 
 function appendWorkspaceInstructionPrompt(spec?: import('../types.js').WorkspaceInstructionPayload): string {
@@ -1189,7 +1195,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     let child: ChildProcess
     try {
-      const instructionPrompt = workspaceInstructionPrompt(opts.workspace_instructions)
+      const instructionPrompt = forkSystemPrompt(opts.workspace_instructions)
       const args = [
         '-p', forkInput,
         '--resume', prev.session_ref,
@@ -1199,9 +1205,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         '--include-partial-messages',
         '--mcp-config', MCP_CONFIG_FILE,
         '--strict-mcp-config',
-        ...(instructionPrompt !== undefined
-          ? ['--append-system-prompt', instructionPrompt]
-          : []),
+        '--append-system-prompt', instructionPrompt,
       ]
       const forkBin = await this.resolveBinForCommand()
       if (!forkBin) {
@@ -1475,9 +1479,17 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return (await this.syncState(runtime, h)).state
   }
 
-  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
-    const { events, nextCursor } = await this.readTraceWindow(h, cursor)
-    return { events, nextCursor }
+  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{
+    events: NormalizedTraceEvent[]
+    nextCursor: TraceCursor
+    unavailableReason?: string
+  }> {
+    const { sourceAvailable, events, nextCursor } = await this.readTraceWindow(h, cursor)
+    return {
+      events,
+      nextCursor,
+      ...(sourceAvailable ? {} : { unavailableReason: 'Claude Code native session is unavailable' }),
+    }
   }
 
   async listSubagents(h: IncarnationHandle): Promise<WorkerSubagentSummary[]> {
@@ -2291,6 +2303,10 @@ function normalizeTraceLine(line: string): NormalizedTraceEvent | null {
   }
 
   if (parsed.type === 'assistant') {
+    if (parsed.isApiErrorMessage === true && typeof parsed.error === 'string' && parsed.error.trim()) {
+      const error = parsed.error.trim()
+      return { ts, kind: 'error', summary: truncate(error, 200), detail: { message: error } }
+    }
     const message = parsed.message as { content?: unknown } | undefined
     const content = message?.content
     if (Array.isArray(content)) {

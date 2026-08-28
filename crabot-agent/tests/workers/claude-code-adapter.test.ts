@@ -8,6 +8,11 @@ import { ClaudeCodeAdapter, eventsFilePath, WorkerExitedError } from '../../src/
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
 import type { TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
+import {
+  createTmpPageMcpServerConfig,
+  TMP_PAGE_BRIDGE_ENV,
+  TMP_PAGE_MCP_SERVER_NAME,
+} from '../../src/workers/capability-policy.js'
 import type { ForkEstablishmentError } from '../../src/workers/errors.js'
 import type { IncarnationHandle, SpawnSpec, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 
@@ -181,6 +186,30 @@ describe('ClaudeCodeAdapter.provision', () => {
 
     await expect(fs.access(path.join(ws, 'CLAUDE.md'))).rejects.toThrow()
     await expect(fs.access(path.join(ws, 'AGENTS.md'))).rejects.toThrow()
+  })
+
+  it('把 task-scoped tmp-page bridge 的 argv、env 和 worker 绑定原样物化到 .mcp.json', async () => {
+    const server = createTmpPageMcpServerConfig('worker-cc', {
+      command: process.execPath,
+      args: ['/opt/crabot/crabot-agent/dist/mcp/tmp-page-stdio-server.js'],
+      dataDir: '/var/lib/crabot',
+      baseUrl: 'https://pages.example.test',
+      port: 19099,
+    })
+    const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [server] })
+
+    const rendered = JSON.parse(await fs.readFile(path.join(ws, '.mcp.json'), 'utf-8'))
+    expect(rendered.mcpServers[TMP_PAGE_MCP_SERVER_NAME]).toEqual({
+      command: process.execPath,
+      args: ['/opt/crabot/crabot-agent/dist/mcp/tmp-page-stdio-server.js'],
+      env: {
+        [TMP_PAGE_BRIDGE_ENV.dataDir]: '/var/lib/crabot',
+        [TMP_PAGE_BRIDGE_ENV.baseUrl]: 'https://pages.example.test',
+        [TMP_PAGE_BRIDGE_ENV.workerId]: 'worker-cc',
+        [TMP_PAGE_BRIDGE_ENV.port]: '19099',
+      },
+    })
   })
 
   it('拒绝覆盖 Git 已跟踪的 .mcp.json，避免 ignore 对 tracked file 无效时泄漏凭据', async () => {
@@ -1711,7 +1740,42 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
         '--mcp-config',
         '.mcp.json',
         '--strict-mcp-config',
+        '--append-system-prompt',
+        expect.stringContaining('停止当前一切工作，然后回答下面问题。'),
       ])
+
+      await adapter.kill(h1)
+    },
+    15000,
+  )
+
+  it(
+    'fork 将 query-only 指令放入 system prompt，同时保留 Manager 原问题原样',
+    async () => {
+      const tmux = new CountingTmux()
+      const argvFile = path.join(dataDir, 'fork-query-prompt-argv.jsonl')
+      const claudeBin = forkClaudeBin(argvFile, '侧问回答内容')
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+      const question = '请解释这个函数为什么报错？不要执行任何修改。'
+
+      const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+      const h2 = await adapter.fork(
+        { worker_id: workerId, seq: 1, session_ref: meta1.session_id },
+        question,
+        forkOptions(),
+      )
+      await waitForState(adapter, h2, 'exited')
+
+      const forkArgv = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n').at(-1)!) as string[]
+      expect(forkArgv[forkArgv.indexOf('-p') + 1]).toBe(question)
+      const promptIndex = forkArgv.indexOf('--append-system-prompt')
+      expect(promptIndex).toBeGreaterThan(-1)
+      expect(forkArgv[promptIndex + 1]).toContain('停止当前一切工作，然后回答下面问题。')
+      expect(forkArgv[promptIndex + 1]).toContain('不加载或使用任何 Skill（包括 crabot-cli）')
+      expect(forkArgv[promptIndex + 1]).toContain('也不调用任何工具')
 
       await adapter.kill(h1)
     },
@@ -2168,6 +2232,61 @@ describe('ClaudeCodeAdapter.readTrace', () => {
     // 原始行数是 7(5 条产生事件 + 1 条 queue-operation 跳过 + 1 条坏 JSON 跳过),
     // nextCursor 必须计入被跳过的行,不能等于 events.length。
     expect(nextCursor.offset).toBe(7)
+
+    await adapter.kill(h)
+  })
+
+  it('把真实结构脱敏 fixture 中的 API/压缩失败投影为 error，而不是 assistant message', async () => {
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new NoopTmux(),
+      claudeBin: 'unused',
+      promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const { h, sessionId } = await spawnedHandle(adapter, workerId)
+    const slugDir = path.join(claudeProjectsDir, projectSlug(workspaceRoot))
+    await fs.mkdir(slugDir, { recursive: true })
+    const fixture = await fs.readFile(path.resolve(__dirname, 'fixtures/claude-api-error.jsonl'), 'utf-8')
+    await fs.writeFile(path.join(slugDir, `${sessionId}.jsonl`), fixture, 'utf-8')
+
+    const trace = await adapter.readTrace(h)
+    expect(trace.events).toEqual([expect.objectContaining({
+      kind: 'error',
+      summary: '[redacted] automatic compaction failed',
+      detail: { message: '[redacted] automatic compaction failed' },
+      source_offset: 0,
+    })])
+    expect(trace.nextCursor.offset).toBe(1)
+
+    await adapter.kill(h)
+  })
+
+  it('不把未确认结构的 error-like assistant record 猜成 error', async () => {
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new NoopTmux(),
+      claudeBin: 'unused',
+      promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const { h, sessionId } = await spawnedHandle(adapter, workerId)
+    const slugDir = path.join(claudeProjectsDir, projectSlug(workspaceRoot))
+    await fs.mkdir(slugDir, { recursive: true })
+    await fs.writeFile(path.join(slugDir, `${sessionId}.jsonl`), JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-27T00:00:00.000Z',
+      isApiErrorMessage: false,
+      error: 'tool-shaped failure text',
+      message: { role: 'assistant', content: [{ type: 'text', text: '普通回答' }] },
+    }) + '\n', 'utf-8')
+
+    const trace = await adapter.readTrace(h)
+    expect(trace.events).toEqual([expect.objectContaining({ kind: 'message', role: 'assistant', summary: '普通回答' })])
 
     await adapter.kill(h)
   })

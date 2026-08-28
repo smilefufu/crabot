@@ -23,6 +23,7 @@ export interface PendingActivityNotification {
   readonly activity_from: string
   readonly activity_through: string
   readonly preview: string
+  readonly has_error?: boolean
   readonly event: HarnessEvent
   readonly event_written: boolean
   /** Number of attempts that did not produce a durable Manager consumption acknowledgement. */
@@ -94,6 +95,32 @@ export class NativeActivityStore {
     )
   }
 
+  async trace(
+    workerId: string,
+    incarnationId: IncarnationId,
+    offset: number,
+  ): Promise<{ events: NormalizedTraceEvent[]; nextCursor: { offset: number } }> {
+    return this.mutex(workerId).run(async () => {
+      const state = await this.read(workerId)
+      const nextOffset = state.cursors.find((item) => item.incarnation_id === incarnationId)?.offset ?? offset
+      const events = state.activities
+        .filter((item) =>
+          item.incarnation_id === incarnationId &&
+          item.source_offset !== undefined &&
+          item.source_offset >= offset,
+        )
+        .map((item): NormalizedTraceEvent => ({
+          ts: item.ts,
+          kind: item.kind,
+          ...(item.role ? { role: item.role } : {}),
+          summary: item.summary,
+          source: 'native',
+          ...(item.source_offset === undefined ? {} : { source_offset: item.source_offset }),
+        }))
+      return { events, nextCursor: { offset: Math.max(offset, nextOffset) } }
+    })
+  }
+
   async record(params: Omit<PendingActivityNotification, 'notification_id' | 'event_written' | 'attempts' | 'retry_after_at' | 'consumed_at'>): Promise<PendingActivityNotification> {
     return this.mutex(params.worker_id).run(async () => {
       const state = await this.read(params.worker_id)
@@ -138,6 +165,7 @@ export class NativeActivityStore {
           ...existing,
           activity_through: incoming.activity_through,
           preview: incoming.preview,
+          has_error: existing.has_error === true || incoming.has_error === true,
           event: {
             ...existing.event,
             detail: {
@@ -145,6 +173,7 @@ export class NativeActivityStore {
               from_cursor: existing.activity_from,
               through_cursor: incoming.activity_through,
               preview: incoming.preview,
+              has_error: existing.has_error === true || incoming.has_error === true,
             },
           },
         }
@@ -216,6 +245,45 @@ export class NativeActivityStore {
         attempts,
         retry_after_at: new Date(Date.parse(attemptedAt) + retryDelayMs(attempts)).toISOString(),
       }
+    })
+  }
+
+  /** Upgrade legacy native-offset cursor fields without overwriting a concurrently merged range. */
+  async replaceActivityCursorsIfUnchanged(
+    workerId: string,
+    notificationId: string,
+    expected: { readonly activity_from: string; readonly activity_through: string },
+    replacement: { readonly activity_from: string; readonly activity_through: string },
+  ): Promise<PendingActivityNotification | undefined> {
+    return this.mutex(workerId).run(async () => {
+      const state = await this.read(workerId)
+      const index = state.notifications.findIndex((item) => item.notification_id === notificationId)
+      const current = index < 0 ? undefined : state.notifications[index]
+      if (!current || current.consumed_at !== undefined || current.event.kind !== 'activity_available') return undefined
+      const activityFrom = current.activity_from === expected.activity_from
+        ? replacement.activity_from
+        : current.activity_from
+      const activityThrough = current.activity_through === expected.activity_through
+        ? replacement.activity_through
+        : current.activity_through
+      if (activityFrom === current.activity_from && activityThrough === current.activity_through) return current
+      const notification: PendingActivityNotification = {
+        ...current,
+        activity_from: activityFrom,
+        activity_through: activityThrough,
+        event: {
+          ...current.event,
+          detail: {
+            ...(current.event.detail ?? {}),
+            from_cursor: activityFrom,
+            through_cursor: activityThrough,
+          },
+        },
+      }
+      const notifications = [...state.notifications]
+      notifications[index] = notification
+      await this.write(workerId, { ...state, notifications })
+      return notification
     })
   }
 
@@ -304,5 +372,5 @@ function retryDelayMs(attempts: number): number {
 function activityKey(item: PersistedNativeActivity): string {
   return item.source_offset === undefined
     ? `${item.incarnation_id}:${item.ts}:${item.kind}:${item.role ?? ''}:${item.summary}`
-    : `${item.incarnation_id}:offset:${item.source_offset}`
+    : `${item.incarnation_id}:offset:${item.source_offset}:${item.kind}:${item.role ?? ''}:${item.summary}`
 }

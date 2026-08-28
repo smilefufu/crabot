@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { buildManagerToolFace, assertClosedToolFace, type ToolFaceDeps } from '../../src/manager/tools/tool-face'
-import { createCrabMemoryServer } from '../../src/mcp/crab-memory'
+import { CRAB_MEMORY_MANAGER_TOOL_NAMES, createCrabMemoryServer } from '../../src/mcp/crab-memory'
 import type { WorkerHarness } from '../../src/workers/harness/harness'
 import type { ToolDefinition } from '../../src/engine/index'
 
@@ -100,8 +100,10 @@ describe('buildManagerToolFace', () => {
     expect(nonMemoryNames.sort()).toEqual(
       [...MESSAGING_NORMAL, ...WORKER_TOOLS, ...CRABOT_INFO_TOOLS].sort(),
     )
-    // crab-memory 原样全给，不裁（§4.3），至少有 A 组 6 个
-    expect(memoryToolNames(tools).length).toBeGreaterThanOrEqual(6)
+    expect(memoryToolNames(tools).sort()).toEqual(
+      CRAB_MEMORY_MANAGER_TOOL_NAMES.map((name) => `mcp__crab-memory__${name}`).sort(),
+    )
+    expect(memoryToolNames(tools)).not.toContain('mcp__crab-memory__run_maintenance')
     // 投递类：send_private_message 在（§1 表「普通 manager = 是」），系统线程专属的不在
     expect(names).toContain('send_private_message')
     expect(names).not.toContain('send_master_private')
@@ -334,6 +336,19 @@ describe('buildManagerToolFace', () => {
       call: async () => ({ output: '', isError: false }),
     }
     expect(() => assertClosedToolFace([memoryTool])).not.toThrow()
+  })
+
+  it('crab-memory server 多注册协议外工具时 fail-loud，不原样暴露给 Manager', () => {
+    const memoryServer = makeMemoryServer()
+    memoryServer.registerTool(
+      'run_maintenance',
+      { description: 'not an LLM tool', inputSchema: {} },
+      async () => ({ content: [{ type: 'text' as const, text: '{}' }] }),
+    )
+
+    expect(() => buildManagerToolFace(makeDeps({ memoryServer }))).toThrow(
+      /unexpected=mcp__crab-memory__run_maintenance/,
+    )
   })
 
   it('装配结果本身通过护栏（buildManagerToolFace 不抛错）', () => {

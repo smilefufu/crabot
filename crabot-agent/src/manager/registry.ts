@@ -35,7 +35,11 @@ import type { ManagerKey } from './types.js'
 import type { EngineMessage, LLMAdapter, ToolDefinition } from '../engine/index.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { LedgerStore } from '../workers/harness/ledger-store'
-import type { HarnessEvent, HarnessEventDelivery } from '../workers/harness/worker-events'
+import type {
+  ActivityContextAdmissionReceipt,
+  HarnessEvent,
+  HarnessEventDelivery,
+} from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { HumanPrincipal } from './principal.js'
 import { resolveTimezone } from '../utils/time.js'
@@ -354,25 +358,7 @@ export class ManagerRegistry {
    * 不同的对话对象(同一 friend 跨 channel 共享台账)——这是设计意图,不是需要修正的不一致。
    */
   async routeWorkerEvent(event: HarnessEvent): Promise<EpisodeResult | undefined> {
-    const capture = this.captureIngress()
-    const found = await this.deps.ledger.findWorker(event.worker_id)
-    const eventWithOrigin: HarnessEvent = found
-      ? {
-          ...event,
-          detail: {
-            ...(event.detail ?? {}),
-            ...(event.task_status ? { outcome: event.task_status } : {}),
-            trigger_type: found.worker.origin.trigger_type,
-            task_id: found.worker.task.id,
-          },
-        }
-      : event
-    const envelope = this.makeEnvelope(
-      capture,
-      { kind: 'worker_event', event: eventWithOrigin },
-      typeof event.ts === 'string' ? event.ts : undefined,
-    )
-    const key = found?.worker.manager_key ?? SYSTEM_TASKS_MANAGER_KEY
+    const { key, envelope } = await this.prepareWorkerEventRoute(event)
     const loop = this.getOrCreate(key)
     if (this.isEpisodeActive(key)) {
       // A hook raised while a Manager tool is running belongs to the current episode.
@@ -398,14 +384,53 @@ export class ManagerRegistry {
   async routeSupervisionDue(event: HarnessEvent): Promise<EpisodeResult | undefined> {
     if (event.kind !== 'supervision_due') throw new Error('routeSupervisionDue requires supervision_due')
     if (!await this.deps.harness.isSupervisionDueCurrent(event)) return undefined
-    return this.routeWorkerEvent(event)
+    const { key, envelope } = await this.prepareWorkerEventRoute(event)
+    // A periodic/default supervision due needs a real episode result to decide whether its
+    // persistent due can be consumed. Do not enqueue it into an unrelated active episode
+    // and then fabricate that result: the Harness will retain and retry this due instead.
+    // Route preparation reads the ledger asynchronously, so the due can be cleared or
+    // replaced after the first check. Revalidate immediately before episode admission.
+    if (!await this.deps.harness.isSupervisionDueCurrent(event)) return undefined
+    if (this.isEpisodeActive(key)) return undefined
+    return this.runWake(
+      key,
+      envelope,
+      0,
+      undefined,
+      () => this.deps.harness.isSupervisionDueCurrent(event),
+    )
   }
 
   /** Operation notifications join an active episode mailbox; idle Managers get a fresh wake. */
   async routeOperationNotification(
     key: ManagerKey,
     event: HarnessEvent,
+    activityReceipt?: ActivityContextAdmissionReceipt,
   ): Promise<HarnessEventDelivery> {
+    if (event.kind === 'activity_available' && activityReceipt) {
+      const capture = this.captureIngress()
+      const envelope = this.makeEnvelope(
+        capture,
+        { kind: 'worker_event', event },
+        event.ts,
+        undefined,
+        undefined,
+        activityReceipt,
+      )
+      if (this.isEpisodeActive(key)) {
+        this.getOrCreate(key).enqueueDuringEpisode(envelope)
+      } else {
+        void this.runWake(key, envelope).catch(async (error) => {
+          try {
+            await activityReceipt.reject()
+          } catch (rejectError) {
+            console.error(`[ManagerRegistry] activity receipt rejection failed for ${activityReceipt.notification_id}:`, rejectError)
+          }
+          console.error(`[ManagerRegistry] activity notification episode failed for ${activityReceipt.notification_id}:`, error)
+        })
+      }
+      return { consumed: false, registered: true }
+    }
     const capture = this.captureIngress()
     const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event }, event.ts)
     const loop = this.getOrCreate(key)
@@ -534,12 +559,40 @@ export class ManagerRegistry {
     return { now, timezone, received_at: formatOffsetIso(now, timezone) }
   }
 
+  private async prepareWorkerEventRoute(event: HarnessEvent): Promise<{
+    key: ManagerKey
+    envelope: TimedWakeEnvelope
+  }> {
+    const capture = this.captureIngress()
+    const found = await this.deps.ledger.findWorker(event.worker_id)
+    const eventWithOrigin: HarnessEvent = found
+      ? {
+          ...event,
+          detail: {
+            ...(event.detail ?? {}),
+            ...(event.task_status ? { outcome: event.task_status } : {}),
+            trigger_type: found.worker.origin.trigger_type,
+            task_id: found.worker.task.id,
+          },
+        }
+      : event
+    return {
+      key: found?.worker.manager_key ?? SYSTEM_TASKS_MANAGER_KEY,
+      envelope: this.makeEnvelope(
+        capture,
+        { kind: 'worker_event', event: eventWithOrigin },
+        typeof event.ts === 'string' ? event.ts : undefined,
+      ),
+    }
+  }
+
   private makeEnvelope(
     capture: IngressCapture,
     wake: WakeEvent,
     occurredAt?: string,
     humanMessages?: ReadonlyArray<ChannelMessage>,
     correlation?: import('./loop.js').ManagerWakeCorrelation,
+    activityReceipt?: ActivityContextAdmissionReceipt,
   ): TimedWakeEnvelope {
     const occurred_at = parseOccurredAt(occurredAt, 'source')
     const human_occurred_at = humanMessages?.map((message) => ({
@@ -554,6 +607,7 @@ export class ManagerRegistry {
       ...(occurred_at ? { occurred_at } : {}),
       ...(human_occurred_at ? { human_occurred_at } : {}),
       ...(correlation ? { correlation } : {}),
+      ...(activityReceipt ? { activity_context_receipt: activityReceipt } : {}),
     }
   }
 
@@ -577,15 +631,30 @@ export class ManagerRegistry {
    * 自唤醒都走这里。`event === undefined` ⇒ 自唤醒(只处理 mailbox 残留,见
    * `ManagerLoop.drainMailbox`);`selfWakeChain` 是当前连锁自唤醒的深度,真实唤醒恒为 0。
    */
+  private runWake(
+    key: ManagerKey,
+    envelope: TimedWakeEnvelope | undefined,
+    selfWakeChain?: number,
+    onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+  ): Promise<EpisodeResult>
+  private runWake(
+    key: ManagerKey,
+    envelope: TimedWakeEnvelope | undefined,
+    selfWakeChain: number,
+    onHumanInputCommitted: ((lastCommittedMessageId: string) => Promise<void>) | undefined,
+    shouldAdmit: () => Promise<boolean>,
+  ): Promise<EpisodeResult | undefined>
   private async runWake(
     key: ManagerKey,
     envelope: TimedWakeEnvelope | undefined,
     selfWakeChain = 0,
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
-  ): Promise<EpisodeResult> {
+    shouldAdmit?: () => Promise<boolean>,
+  ): Promise<EpisodeResult | undefined> {
     this.assertWakeAdmission()
     if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
     this.assertWakeAdmission()
+    if (shouldAdmit && !await shouldAdmit()) return undefined
     const loop = this.getOrCreate(key)
     this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
     let result: EpisodeResult | undefined
@@ -603,6 +672,9 @@ export class ManagerRegistry {
       const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
       if (remaining <= 0) this.activeEpisodes.delete(key)
       else this.activeEpisodes.set(key, remaining)
+      if (remaining <= 0 && result?.consumedEvents !== true) {
+        loop.rejectPendingActivityMailbox()
+      }
       // 必须与上面的引用计数递减处在**同一个同步块**里(中间不 await):否则会出现
       // "计数已归零、自唤醒尚未登记"的窗口,`evictIdle` 恰在此时跑就会把实例连同 mailbox
       // 一起回收掉。`maybeSelfWake` 内部的 `runWake` 在第一个 await 之前就完成了 +1。

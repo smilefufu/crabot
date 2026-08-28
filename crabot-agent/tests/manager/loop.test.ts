@@ -10,6 +10,7 @@ import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage, Friend } from '../../src/types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
+import type { ActivityContextAdmissionReceipt } from '../../src/workers/harness/worker-events.js'
 import { createUserMessage, defineTool } from '../../src/engine/index.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
@@ -32,6 +33,40 @@ function defaultSupervisionWake(workerId: string, dueId: string): TimedWakeEnvel
       detail: { mode: 'default', due_id: dueId, mainline_seq: 1, observation: 'text' },
     },
   })
+}
+
+function activityWake(receipt: ActivityContextAdmissionReceipt, workerId = 'w-activity'): TimedWakeEnvelope {
+  return {
+    ...timed({
+      kind: 'worker_event',
+      event: {
+        ts: '2026-01-01T00:00:00.000Z',
+        kind: 'activity_available',
+        worker_id: workerId,
+        seq: 1,
+        detail: {
+          incarnation_id: 'inc-1',
+          from_cursor: 'opaque-from',
+          through_cursor: receipt.activity_through,
+          preview: 'automatic compaction failed',
+          has_error: true,
+        },
+      },
+    }),
+    activity_context_receipt: receipt,
+  }
+}
+
+function makeActivityReceipt(through = 'opaque-through') {
+  const admit = vi.fn(async () => undefined)
+  const reject = vi.fn(async () => undefined)
+  const receipt: ActivityContextAdmissionReceipt = {
+    notification_id: 'activity-notification-1',
+    activity_through: through,
+    admit,
+    reject,
+  }
+  return { receipt, admit, reject }
 }
 
 /** compaction.ts foldIntoSummary 的 system prompt 常量特征串,用它区分"这是折叠 LLM 调用
@@ -228,7 +263,7 @@ describe('ManagerLoop', () => {
       { text: 'done', stopReason: 'end_turn' },
     )
     let nowMs = Date.parse('2026-01-01T00:00:00.000Z')
-    let pendingNote = 'before'
+    let pendingNote = 'dynamic-note-before-sentinel'
     const listWorkers = vi.fn(async (): Promise<LedgerWorker[]> => [])
     const loop = new ManagerLoop(baseDeps({
       store,
@@ -245,7 +280,7 @@ describe('ManagerLoop', () => {
         isReadOnly: false,
         call: async () => {
           nowMs += 60_000
-          pendingNote = 'after'
+          pendingNote = 'dynamic-note-after-sentinel'
           return { output: 'ok', isError: false }
         },
       }],
@@ -256,8 +291,8 @@ describe('ManagerLoop', () => {
     expect(calls).toHaveLength(3)
     for (const call of calls) {
       expect(call.systemPrompt).toBe(calls[0].systemPrompt)
-      expect(call.systemPrompt).not.toContain('before')
-      expect(call.systemPrompt).not.toContain('after')
+      expect(call.systemPrompt).not.toContain('dynamic-note-before-sentinel')
+      expect(call.systemPrompt).not.toContain('dynamic-note-after-sentinel')
     }
     expect(listWorkers).not.toHaveBeenCalled()
   })
@@ -633,6 +668,173 @@ describe('ManagerLoop', () => {
     // turn1 请求里不应该已经看到它(证明确实是"turn 间隙"注入,不是从一开始就在 initialMessages 里)
     const turn1Messages = JSON.stringify(nonFoldCalls[0].messages)
     expect(turn1Messages).not.toContain('sched-1')
+  })
+
+  it('activity 仅入 mailbox 时保持 pending，进入下一次 LLM 输入前才确认', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'inject_activity', id: 'call-activity', input: {} }], stopReason: 'tool_use' })
+    queue.push({ stopReason: 'end_turn' })
+    const { receipt, admit, reject } = makeActivityReceipt()
+
+    let loop!: ManagerLoop
+    loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      toolFace: () => [{
+        name: 'inject_activity',
+        description: 'inject activity',
+        inputSchema: { type: 'object', properties: {} },
+        isReadOnly: false,
+        call: async () => {
+          loop.enqueueDuringEpisode(activityWake(receipt))
+          expect(admit).not.toHaveBeenCalled()
+          return { output: 'ok', isError: false }
+        },
+      }],
+    }))
+
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始')] }))
+
+    expect(result.outcome).toBe('completed')
+    expect(admit).toHaveBeenCalledOnce()
+    expect(reject).not.toHaveBeenCalled()
+    expect(JSON.stringify(calls[0].messages)).not.toContain('activity_available')
+    expect(JSON.stringify(calls[1].messages)).toContain('activity_available')
+  })
+
+  it('activity 在最后一个可用 turn 到达时留待下一次 episode，不在未准入时从 mailbox 消失', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'inject_activity', id: 'call-activity-last-turn', input: {} }], stopReason: 'tool_use' })
+    queue.push({ stopReason: 'end_turn' })
+    const { receipt, admit, reject } = makeActivityReceipt()
+
+    let loop!: ManagerLoop
+    loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      maxTurns: 1,
+      toolFace: () => [{
+        name: 'inject_activity',
+        description: 'inject activity on the last available turn',
+        inputSchema: { type: 'object', properties: {} },
+        isReadOnly: false,
+        call: async () => {
+          loop.enqueueDuringEpisode(activityWake(receipt))
+          return { output: 'ok', isError: false }
+        },
+      }],
+    }))
+
+    const first = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始')] }))
+
+    expect(first.outcome).toBe('max_turns')
+    expect(admit).not.toHaveBeenCalled()
+    expect(reject).not.toHaveBeenCalled()
+    expect(JSON.stringify(calls[0].messages)).not.toContain('activity_available')
+
+    const second = await loop.drainMailbox()
+
+    expect(second.outcome).toBe('completed')
+    expect(admit).toHaveBeenCalledOnce()
+    expect(reject).not.toHaveBeenCalled()
+    expect(JSON.stringify(calls[1].messages)).toContain('activity_available')
+  })
+
+  it('activity 准入后即使 Provider 调用失败也不 reject 或留在 mailbox 重投', async () => {
+    const calls: LLMStreamParams[] = []
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        throw new Error('provider unavailable after admission')
+      },
+      updateConfig: () => {},
+    }
+    const { receipt, admit, reject } = makeActivityReceipt()
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+
+    const result = await loop.wakeUp(activityWake(receipt))
+    const replay = await loop.drainMailbox()
+
+    expect(result).toMatchObject({ outcome: 'failed', consumedEvents: false })
+    expect(admit).toHaveBeenCalledOnce()
+    expect(reject).not.toHaveBeenCalled()
+    expect(calls).toHaveLength(1)
+    expect(replay).toMatchObject({ turns: 0, consumedEvents: true })
+  })
+
+  it('同轮多条 activity 的后一条持久确认失败，不阻断已组装的 LLM 输入', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ stopReason: 'end_turn' })
+    const first = makeActivityReceipt('opaque-through-first')
+    const secondAdmit = vi.fn(async () => { throw new Error('activity store unavailable') })
+    const secondReject = vi.fn(async () => undefined)
+    const secondReceipt: ActivityContextAdmissionReceipt = {
+      notification_id: 'activity-notification-admit-failure',
+      activity_through: 'opaque-through-admit-failure',
+      admit: secondAdmit,
+      reject: secondReject,
+    }
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+    loop.enqueueDuringEpisode(activityWake(first.receipt, 'w-activity-first'))
+
+    const result = await loop.wakeUp(activityWake(secondReceipt, 'w-activity-second'))
+
+    await vi.waitFor(() => expect(secondReject).toHaveBeenCalledOnce())
+    expect(result).toMatchObject({ outcome: 'completed', consumedEvents: true })
+    expect(first.admit).toHaveBeenCalledOnce()
+    expect(first.reject).not.toHaveBeenCalled()
+    expect(secondAdmit).toHaveBeenCalledOnce()
+    expect(JSON.stringify(calls[0].messages)).toContain('w-activity-first')
+    expect(JSON.stringify(calls[0].messages)).toContain('w-activity-second')
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining('activity admission acknowledgement failed'),
+      expect.any(Error),
+    )
+    warning.mockRestore()
+  })
+
+  it('LLM 输入准入前直接失败会 reject activity，且不保留 mailbox 副本', async () => {
+    const { receipt, admit, reject } = makeActivityReceipt()
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter: () => { throw new Error('manager model unavailable') },
+    }))
+
+    await expect(loop.wakeUp(activityWake(receipt))).rejects.toThrow('manager model unavailable')
+    const replay = await loop.drainMailbox()
+
+    expect(admit).not.toHaveBeenCalled()
+    expect(reject).toHaveBeenCalledOnce()
+    expect(replay).toMatchObject({ turns: 0, consumedEvents: true })
+  })
+
+  it('max_tokens 强制折叠重试不再次注入已经准入的 activity', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ stopReason: 'max_tokens' })
+    queue.push({ stopReason: 'end_turn' })
+    const { receipt, admit, reject } = makeActivityReceipt()
+    const policy: CompactionPolicy = {
+      keepRecent: 2,
+      cacheTtlMs: 1000,
+      foldTokenThreshold: 1_000_000,
+      hardCapTokens: 1_000_000,
+    }
+    await store.save({
+      key: KEY,
+      recent: [createUserMessage('旧消息1'), createUserMessage('旧消息2'), createUserMessage('旧消息3')],
+      foldedCount: 0,
+    })
+    const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
+
+    const result = await loop.wakeUp(activityWake(receipt))
+
+    const managerCalls = calls.filter((call) => !call.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    expect(result.outcome).toBe('completed')
+    expect(admit).toHaveBeenCalledOnce()
+    expect(reject).not.toHaveBeenCalled()
+    expect(JSON.stringify(managerCalls[0].messages)).toContain('activity_available')
+    expect(JSON.stringify(managerCalls[1].messages)).not.toContain('activity_available')
   })
 
   it('max_tokens(上下文超限)收场时强制折叠一次并重试一次,成功后 outcome=completed', async () => {

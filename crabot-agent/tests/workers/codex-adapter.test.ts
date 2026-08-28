@@ -10,6 +10,11 @@ import { ForkEstablishmentError } from '../../src/workers/errors.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
 import type { TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
+import {
+  createTmpPageMcpServerConfig,
+  TMP_PAGE_BRIDGE_ENV,
+  TMP_PAGE_MCP_SERVER_NAME,
+} from '../../src/workers/capability-policy.js'
 import type { IncarnationHandle, SpawnSpec, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 
 function detectTmux(): boolean {
@@ -205,6 +210,30 @@ describe('CodexWorkerAdapter.provision', () => {
 
     await expect(fs.access(path.join(ws, 'AGENTS.md'))).rejects.toThrow()
     await expect(fs.access(path.join(ws, 'CLAUDE.md'))).rejects.toThrow()
+  })
+
+  it('把 task-scoped tmp-page bridge 的 argv、env 和 worker 绑定原样物化到 config.toml', async () => {
+    const server = createTmpPageMcpServerConfig('worker-codex', {
+      command: process.execPath,
+      args: ['/opt/crabot/crabot-agent/dist/mcp/tmp-page-stdio-server.js'],
+      dataDir: '/var/lib/crabot',
+      baseUrl: 'https://pages.example.test',
+      port: 19099,
+    })
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [server] })
+
+    const rendered = parseToml(await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')) as any
+    expect(rendered.mcp_servers[TMP_PAGE_MCP_SERVER_NAME]).toEqual({
+      command: process.execPath,
+      args: ['/opt/crabot/crabot-agent/dist/mcp/tmp-page-stdio-server.js'],
+      env: {
+        [TMP_PAGE_BRIDGE_ENV.dataDir]: '/var/lib/crabot',
+        [TMP_PAGE_BRIDGE_ENV.baseUrl]: 'https://pages.example.test',
+        [TMP_PAGE_BRIDGE_ENV.workerId]: 'worker-codex',
+        [TMP_PAGE_BRIDGE_ENV.port]: '19099',
+      },
+    })
   })
 
   it.each(['config.toml', 'auth.json'])('拒绝覆盖 Git 已跟踪的 .codex/%s，且在其他 provision 写入前失败', async (fileName) => {
@@ -1643,12 +1672,13 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
 
   it('turn/start 接受后立即返回真实 fork thread，回答随后异步完成并写 output', async () => {
     const forkThreadId = randomUUID()
+    const requestFile = path.join(dataDir, 'fork-requests.jsonl')
     const states: Array<{ state: WorkerContractState; endReason?: string }> = []
     const adapter = new CodexWorkerAdapter({
       dataDir,
       codexHomeSource: codexHome,
       tmux: new NoopTmux(),
-      codexBin: appServerBin('happy', `FAKE_FORK_THREAD_ID=${forkThreadId} FAKE_COMPLETION_DELAY_MS=200`),
+      codexBin: appServerBin('happy', `FAKE_FORK_THREAD_ID=${forkThreadId} FAKE_COMPLETION_DELAY_MS=200 FAKE_REQUEST_FILE=${shQuote(requestFile)}`),
       onStateChange: (_handle, state, report) => states.push({ state, endReason: report?.endReason }),
     })
     await adapter.detect()
@@ -1671,6 +1701,24 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
     await waitForState(adapter, handle, 'exited')
     await expect(adapter.readTerminal(handle)).resolves.toEqual({ kind: 'headless_text', text: '侧问回答' })
     expect(states).toContainEqual({ state: 'exited', endReason: 'completed' })
+
+    const requests = (await fs.readFile(requestFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { method: string; params: Record<string, unknown> })
+    const forkRequest = requests.find((request) =>
+      request.method === 'thread/fork' && request.params.threadId === parentSessionId,
+    )
+    expect(forkRequest?.params).toMatchObject({
+      threadId: parentSessionId,
+      ephemeral: true,
+      excludeTurns: true,
+      developerInstructions: expect.stringContaining('停止当前一切工作，然后回答下面问题。'),
+    })
+    const turnRequest = requests.find((request) =>
+      request.method === 'turn/start' && request.params.threadId === forkThreadId,
+    )
+    expect(turnRequest?.params.input).toEqual([{ type: 'text', text: '侧问问题' }])
   })
 
   it('turn/start 明确拒绝时在同一次 fork 调用返回 query_submit 失败并收口进程', async () => {
@@ -1998,6 +2046,66 @@ describe('CodexWorkerAdapter.readTrace', () => {
       await adapter.dispose()
     },
   )
+
+  it('把真实结构脱敏 fixture 中的 task_complete failure 投影为 error', async () => {
+    const adapter = new CodexWorkerAdapter({ dataDir, tmux: new NoopTmux(), codexBin: 'unused' })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const sessionId = randomUUID()
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+    const sessionsDir = path.join(workspaceRoot, '.codex', 'sessions', datePath)
+    await fs.mkdir(sessionsDir, { recursive: true })
+    await fs.writeFile(
+      path.join(sessionsDir, rolloutFileNameFor(sessionId)),
+      await fs.readFile(path.resolve(__dirname, 'fixtures/codex-task-error.jsonl'), 'utf-8'),
+      'utf-8',
+    )
+    const workerDir = path.join(dataDir, workerId)
+    await fs.mkdir(workerDir, { recursive: true })
+    await fs.writeFile(
+      path.join(workerDir, 'meta-1.json'),
+      JSON.stringify({ seq: 1, state: 'idle', session_id: sessionId, session_discovery: 'discovered', workspace_root: workspaceRoot }),
+      'utf-8',
+    )
+
+    const trace = await adapter.readTrace({ worker_id: workerId, seq: 1, impl: 'codex', session_ref: sessionId })
+    expect(trace.events).toEqual([expect.objectContaining({
+      kind: 'error',
+      summary: '[redacted] upstream request failed',
+      detail: { message: '[redacted] upstream request failed' },
+      source_offset: 0,
+    })])
+    expect(trace.nextCursor.offset).toBe(1)
+    await adapter.dispose()
+  })
+
+  it('不把没有结构化 error 的 task_complete 或 error-like 其它事件猜成 error', async () => {
+    const adapter = new CodexWorkerAdapter({ dataDir, tmux: new NoopTmux(), codexBin: 'unused' })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const sessionId = randomUUID()
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+    const sessionsDir = path.join(workspaceRoot, '.codex', 'sessions', datePath)
+    await fs.mkdir(sessionsDir, { recursive: true })
+    await fs.writeFile(path.join(sessionsDir, rolloutFileNameFor(sessionId)), [
+      { type: 'event_msg', timestamp: '2026-08-27T00:00:00.000Z', payload: { type: 'task_complete', error: null } },
+      { type: 'event_msg', timestamp: '2026-08-27T00:00:01.000Z', payload: { type: 'stream_error', error: { message: 'unknown shape' } } },
+    ].map((line) => JSON.stringify(line)).join('\n') + '\n', 'utf-8')
+    const workerDir = path.join(dataDir, workerId)
+    await fs.mkdir(workerDir, { recursive: true })
+    await fs.writeFile(
+      path.join(workerDir, 'meta-1.json'),
+      JSON.stringify({ seq: 1, state: 'idle', session_id: sessionId, session_discovery: 'discovered', workspace_root: workspaceRoot }),
+      'utf-8',
+    )
+
+    const trace = await adapter.readTrace({ worker_id: workerId, seq: 1, impl: 'codex', session_ref: sessionId })
+    expect(trace.events.map((event) => event.kind)).toEqual(['lifecycle', 'lifecycle'])
+    expect(trace.events.map((event) => event.summary)).toEqual(['task_complete', 'stream_error'])
+    await adapter.dispose()
+  })
 })
 
 describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 路径)', () => {

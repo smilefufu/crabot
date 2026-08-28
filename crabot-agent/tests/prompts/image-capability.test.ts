@@ -6,12 +6,14 @@ describe('buildImageCapability', () => {
   it('available state names the tool and delivery path', () => {
     const s = buildImageCapability(true)
     expect(s).toContain('generate_image')
-    expect(s).toContain('send_message')
+    expect(s).toContain('Manager')
+    expect(s).not.toContain('send_message')
   })
-  it('unavailable state guides to configure and says auto-effective', () => {
+  it('unavailable state reports the capability gap without suggesting control-plane changes', () => {
     const s = buildImageCapability(false)
-    expect(s).toContain('配置')
-    expect(s).toContain('下一个任务自动生效')
+    expect(s).toContain('尚未配置生图模型')
+    expect(s).not.toContain('CLI')
+    expect(s).not.toContain('send_message')
   })
 })
 

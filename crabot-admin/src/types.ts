@@ -2145,7 +2145,7 @@ export interface MemoryStats {
  *  - vision: 截图 / UI 识别 / 多模态图像理解 */
 export type ModelRole = 'powerful' | 'cost_effective' | 'vision' | 'manager'
 
-/** Subagent 内置能力组开关。每组 5 个 boolean 控制对应工具集是否注入 subagent 工具表。
+/** Subagent 内置能力组配置。file_system/shell/task_intel 控制工具注入；两个 crab_* 字段只兼容旧存储，运行时固定 false。
  *  详见 subagent-tool-filter.ts 的 classifyTool 映射。
  *  **加新组需要写迁移函数**：admin 启动时把老数据缺失字段补 false（与 ModelRole migration 同模式）。 */
 export interface BuiltinCapabilities {
@@ -2155,9 +2155,9 @@ export interface BuiltinCapabilities {
   shell: boolean
   /** find_task / get_task_progress — 任务情报查询 */
   task_intel: boolean
-  /** crab-memory MCP 全部工具 — 长期记忆读写 */
+  /** 兼容旧配置；v3.6.13 起 direct child 运行时固定 false。 */
   crab_memory: boolean
-  /** crab-messaging MCP 全部工具 — channel 消息发送 */
+  /** 兼容旧配置；v3 Worker/direct child 运行时固定 false。 */
   crab_messaging: boolean
 }
 

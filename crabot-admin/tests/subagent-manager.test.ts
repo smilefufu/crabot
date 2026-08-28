@@ -46,6 +46,21 @@ describe('SubAgentManager', () => {
     expect(mgr.list()).toHaveLength(1)
   })
 
+  it('runtime snapshot 将旧 crab_memory=true 归一化为 false', async () => {
+    await mgr.create({
+      name: 'legacy_memory_child', description: '', when_to_use: '', role: '', workflow: '', deliverables: '',
+      provider_id: 'p', model_id: 'm', model_role: null,
+      builtin_capabilities: { file_system: true, shell: true, task_intel: true, crab_memory: true, crab_messaging: false },
+      allowed_mcp_server_ids: [], allowed_skill_ids: [], max_turns: 20,
+    })
+
+    expect(mgr.runtimeSemanticEntries()).toEqual([
+      expect.objectContaining({
+        builtin_capabilities: expect.objectContaining({ crab_memory: false, crab_messaging: false }),
+      }),
+    ])
+  })
+
   it('name 重复拒绝', async () => {
     const baseParams = {
       name: 'dup',

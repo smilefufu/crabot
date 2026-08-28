@@ -65,7 +65,7 @@ export function projectManagerEpisode(
       if (content) replyExcerpt = truncate(content, 120)
     }
     if (name === 'spawn_worker') {
-      const workerId = extractStringField(outputSummary, 'worker_id')
+      const workerId = extractWorkerIdField(outputSummary)
       const title = extractStringField(inputSummary, 'title')
         ?? (workerId ? workerFacts.get(workerId)?.title : undefined)
       actions.push({
@@ -74,7 +74,7 @@ export function projectManagerEpisode(
         ...(workerId ? { worker_id: workerId } : {}),
       })
     } else if (name === 'send_to_worker') {
-      const workerId = extractStringField(inputSummary, 'worker_id')
+      const workerId = extractWorkerIdField(inputSummary) ?? extractWorkerIdField(outputSummary)
       const title = workerId ? workerFacts.get(workerId)?.title : undefined
       actions.push({
         kind: 'send_to_worker',
@@ -82,7 +82,7 @@ export function projectManagerEpisode(
         ...(workerId ? { worker_id: workerId } : {}),
       })
     } else if (name === 'kill_worker' || name === 'cancel_worker') {
-      const workerId = extractStringField(inputSummary, 'worker_id')
+      const workerId = extractWorkerIdField(inputSummary) ?? extractWorkerIdField(outputSummary)
       const title = workerId ? workerFacts.get(workerId)?.title : undefined
       actions.push({
         kind: 'cancel_worker',
@@ -90,7 +90,7 @@ export function projectManagerEpisode(
         ...(workerId ? { worker_id: workerId } : {}),
       })
     } else if (name === 'request_worker_interrupt') {
-      const workerId = extractStringField(inputSummary, 'worker_id')
+      const workerId = extractWorkerIdField(inputSummary) ?? extractWorkerIdField(outputSummary)
       const title = workerId ? workerFacts.get(workerId)?.title : undefined
       actions.push({
         kind: 'other',
@@ -219,6 +219,17 @@ function workerIdFromTrigger(source: string | undefined, summary: string): strin
   if (source?.startsWith('worker:')) return source.slice('worker:'.length)
   const match = summary.match(/\((w-[^)]+)\)/)
   return match?.[1]
+}
+
+/**
+ * worker_id 是精确标识符：以「…」结尾说明来源摘要被截断，前缀值不可用于 join/导航
+ * （存量 300 字符硬截 span 的实测形态）。此时返回 undefined，调用方不产出假 ID；
+ * 需要时由调用方用回执（output_summary）兜底。
+ */
+function extractWorkerIdField(summary: string): string | undefined {
+  const value = extractStringField(summary, 'worker_id')
+  if (value === undefined || value.endsWith('…')) return undefined
+  return value
 }
 
 function truncate(text: string, max: number): string {

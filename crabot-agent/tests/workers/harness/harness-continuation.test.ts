@@ -224,6 +224,7 @@ async function makeHarness(
     workersDir,
     now,
     onEvent: (e) => events.push(e),
+    mintActivityCursor: async ({ offset }) => `opaque-activity-${['start', 'one', 'two', 'three'][offset] ?? 'later'}`,
     // 本文件里 FakeAdapter 缺省 implId 就是 'builtin'（多数测试拿它当泛化的"随便一个实现"
     // 桩用，不关心真实 LLM 注入）；handoffIncarnation 的 pre-flight（裁决 B 修复）对目标
     // impl==='builtin' 硬性要求 HarnessDeps.builtinSpawnDefaults，这里给个无害的桩值，
@@ -953,7 +954,11 @@ describe('WorkerHarness.handoffIncarnation — fixed capability snapshot', () =>
 
     await harness.switchWorkerImpl(worker.worker_id, 'builtin', 'switch with fixed identity')
 
-    expect(capabilityBundle).toHaveBeenLastCalledWith({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
+    expect(capabilityBundle).toHaveBeenLastCalledWith({
+      worker_id: worker.worker_id,
+      impl: 'builtin',
+      principal_permissions: principalPermissions,
+    })
     expect(builtinSpawnDefaults).toHaveBeenLastCalledWith(expect.objectContaining({
       worker_id: worker.worker_id,
       principal_permissions: principalPermissions,

@@ -51,7 +51,6 @@ import { filterToolsByPermission } from './engine/index.js'
 import { getConfiguredBuiltinTools, filterMcpToolsByConfig } from './engine/tools/index.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpConnector, filterMcpServersForWorker } from './agent/mcp-connector.js'
-import { mcpServerToToolDefinitions } from './agent/mcp-tool-bridge.js'
 import { createTmpPageTools } from './agent/tmp-page-tools.js'
 import { createDelegateTaskTool } from './agent/delegate-task-tool.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
@@ -107,7 +106,12 @@ import { NativeTraceCopyStore } from './workers/trace/native-copy.js'
 import { makeAgentEventPublisher, type AgentEventPublisher } from './manager/events.js'
 import { resolveManagerModelConfig } from './manager/model-slot.js'
 import type { ManagerEpisodeFailure } from './manager/types.js'
-import { createCrabMemoryServer, filterMemoryToolsByProfile } from './mcp/crab-memory.js'
+import { createCrabMemoryServer } from './mcp/crab-memory.js'
+import {
+  buildWorkerCapabilityBundle,
+  selectMainlineWorkerSkills,
+  type TmpPageBridgeLaunch,
+} from './workers/capability-policy.js'
 import {
   BUILTIN_WORKER_PERMISSIONS,
   narrowWorkerPermissions,
@@ -150,6 +154,32 @@ import { splitManagerKey } from './manager/principal.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
 const CLI_SUBAGENT_HARVEST_DELAY_MS = 30_000
+const DEFAULT_TMP_PAGE_PORT = 19099
+
+function resolveTmpPageBridgeLaunch(dataDir: string, baseUrl: string | undefined): TmpPageBridgeLaunch {
+  const compiledEntry = path.join(__dirname, 'mcp', 'tmp-page-stdio-server.js')
+  let args: string[]
+  if (fs.existsSync(compiledEntry)) {
+    args = [compiledEntry]
+  } else {
+    const sourceEntry = path.join(__dirname, 'mcp', 'tmp-page-stdio-server.ts')
+    if (!fs.existsSync(sourceEntry)) {
+      throw new Error('worker capability policy: tmp-page stdio bridge entry is unavailable')
+    }
+    const tsconfigPath = path.resolve(__dirname, '..', 'tsconfig.json')
+    const bootstrap = `require(${JSON.stringify(require.resolve('ts-node'))}).register({transpileOnly:true,experimentalResolver:true,project:${JSON.stringify(tsconfigPath)}});require(${JSON.stringify(sourceEntry)}).startTmpPageStdioServer().catch((error)=>{console.error(error instanceof Error?error.message:String(error));process.exitCode=1})`
+    args = ['-e', bootstrap]
+  }
+
+  const configuredPort = process.env.CRABOT_TMP_PAGE_PORT
+  return {
+    command: process.execPath,
+    args,
+    dataDir,
+    baseUrl: baseUrl ?? '',
+    port: configuredPort === undefined ? DEFAULT_TMP_PAGE_PORT : Number(configuredPort),
+  }
+}
 
 interface CliSubagentHarvestWaiter {
   readonly resolve: () => void
@@ -857,6 +887,7 @@ export class UnifiedAgent extends ModuleBase {
       }),
       builtinTraceReader: this.builtinTraceReader(),
       readWorkerActivity: (params) => this.readWorkerActivity(params),
+      mintActivityCursor: (position) => this.mintWorkerActivityCursor(position),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
       onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
       // Parent native activity is already persisted by Harness. Only terminal direct CLI children
@@ -938,16 +969,26 @@ export class UnifiedAgent extends ModuleBase {
       },
       assertExecutionAdmission: () => this.assertRuntimeExecutionAdmission(),
       isClosing: () => this.runtimeClosing,
-      capabilityBundle: async ({ principal_permissions }) => {
+      capabilityBundle: async ({ worker_id, impl, principal_permissions }) => {
         const workerPermissions = narrowWorkerPermissions(
           BUILTIN_WORKER_PERMISSIONS,
           principal_permissions ?? null,
         )
-        return {
-          // skill capability 本次仍不激活，只补 MCP provision 接线。
-          skills: [],
-          mcp_servers: filterMcpServersForWorker(this.agentConfig?.mcp_servers ?? [], workerPermissions),
-        }
+        return buildWorkerCapabilityBundle({
+          impl,
+          workerId: worker_id,
+          permissions: workerPermissions,
+          skills: this.agentConfig?.skills ?? [],
+          mcpServers: this.agentConfig?.mcp_servers ?? [],
+          ...(impl === 'builtin'
+            ? {}
+            : {
+                tmpPageBridge: resolveTmpPageBridgeLaunch(
+                  getDataRootDir(),
+                  this.agentConfig?.tmp_page_base_url,
+                ),
+              }),
+        })
       },
       hasRunningBg: (workerId) => this.agentHandler?.hasRunningBgForWorker(workerId) ?? Promise.resolve(false),
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
@@ -1113,7 +1154,7 @@ export class UnifiedAgent extends ModuleBase {
   /**
    * builtin worker 的工具集（spec 决策 5）。
    *
-   * **装**：内置文件/shell 工具 + skills、crab-memory、外部 MCP、tmp-page / 生图。
+   * **装**：内置文件/shell 工具 + skills、外部 MCP、tmp-page / 生图。
    * **不装**：全部 messaging（v3 语义：worker 不直接跟人类说话）、`set_cwd`、goal 相关、
    * `todo`、`find_task` / `get_task_progress`、
    * subagent coordinator / `request_restart`。它们不是被过滤掉的，而是根本不组装进来。
@@ -1134,51 +1175,35 @@ export class UnifiedAgent extends ModuleBase {
       throw new Error('[builtin-worker] AgentHandler is required to provide persistent background shell support')
     }
     const bgOptions = handler.createBuiltinBgToolOptions(ctx.worker_id)
-    tools.push(...getConfiguredBuiltinTools(
+    const workerSkills = this.resolveMainlineWorkerSkills(ctx)
+    const builtinTools = getConfiguredBuiltinTools(
       () => workspaceRoot,
       this.agentConfig?.builtin_tool_config,
-      { availableSkills: this.agentConfig?.skills ?? [], ...(bgOptions ?? {}) },
-    ))
-
-    // crab-memory：A 组（普通对话档）。可见范围随**派活人身份**收敛（PR F 未决 #2 在此关闭）：
-    // `memory_scopes` 解析出来就用它（写 internal + 限定 scopes），解析不出来才退回原来的
-    // `public` / 空 scopes。放着不收敛的后果是群 A 的内容以 public 落记忆、群 B 读得到。
-    tools.push(...filterMemoryToolsByProfile(
-      mcpServerToToolDefinitions(
-        createCrabMemoryServer(
-          {
-            rpcClient: this.rpcClient,
-            moduleId: this.config.moduleId,
-            getMemoryPort: () => this.getMemoryPort(),
-          },
-          {
-            taskId: ctx.worker_id,
-            ...(principalPerms
-              ? { visibility: 'internal' as const, scopes: [...workerPerms.memory_scopes], sourceType: 'conversation' as const }
-              : { visibility: 'public' as const, scopes: [], sourceType: 'system' as const }),
-            isMasterPrivate: false,
-          },
-        ),
-        'crab-memory',
-      ),
-      'conversation',
-    ))
+      { availableSkills: workerSkills, ...(bgOptions ?? {}) },
+    )
+    tools.push(...builtinTools)
+    const skillTool = builtinTools.find((tool) => tool.name === 'Skill')
+    if (!skillTool) {
+      throw new Error('[builtin-worker] required Skill loader is disabled by builtin_tool_config')
+    }
 
     // 外部 MCP（admin 托管，McpConnector 在 onStart 连接）。
     tools.push(...this.mcpConnector.getAllTools())
 
     // 临时页面：`taskId` 用 worker_id（页面 meta.owner_task_id 与台账里的 worker 对得上）。
-    tools.push(...createTmpPageTools({
+    const tmpPageTools = createTmpPageTools({
       dataDir: getDataRootDir(),
       getTmpPageBaseUrl: () => this.agentConfig?.tmp_page_base_url,
       taskId: ctx.worker_id,
-    }))
+    })
+    tools.push(...tmpPageTools)
 
     // 生图（未配置 image_config 时 imageToolsFor 返回空数组）。
-    tools.push(...imageToolsFor(this.imageConnInfo, {
+    const imageTools = imageToolsFor(this.imageConnInfo, {
       moduleId: this.config.moduleId,
       outputDir: path.join(getAgentDataDir(), 'generated-images'),
-    }))
+    })
+    tools.push(...imageTools)
 
     // disabled_tools 对 MCP 桥接工具的过滤（内置工具的同名过滤已在 getConfiguredBuiltinTools 内完成）。
     const configFiltered = filterMcpToolsByConfig(tools, this.agentConfig?.builtin_tool_config)
@@ -1186,17 +1211,32 @@ export class UnifiedAgent extends ModuleBase {
     // "没权限的工具不进 prompt"——外部 MCP 里可能混进 `desktop` 类工具（computer-use）。
     // 档位 = worker 固定档位 ∩ 派活人档位（见 `narrowWorkerPermissions`）。
     const permitted = filterToolsByPermission(configFiltered, this.getToolPermissionConfig(configFiltered, workerPerms))
+    // Skill/tmp-page/生图是 §6.2 固定的 Crabot 产品能力，不属于第三方 `mcp_skill` 类别。
+    // 只恢复仍在 configFiltered 中的原始工具对象，避免绕过 disabled_tools 或误放行同名外部 MCP。
+    const configuredTools = new Set(configFiltered)
+    const fixedProductTools = new Set(
+      [skillTool, ...tmpPageTools, ...imageTools].filter((tool) => configuredTools.has(tool)),
+    )
+    const permittedTools = new Set(permitted)
+    const effectiveTools = configFiltered.filter((tool) =>
+      permittedTools.has(tool) || fixedProductTools.has(tool),
+    )
     const subagents = this.agentConfig?.subagents ?? []
-    if (subagents.length === 0) return permitted
-    const childPermissionConfig = this.getToolPermissionConfig(permitted, workerPerms)
-    return [...permitted, createDelegateTaskTool({
+    if (subagents.length === 0) return effectiveTools
+    const childPermissionConfig = this.getToolPermissionConfig(effectiveTools, workerPerms)
+    return [...effectiveTools, createDelegateTaskTool({
       subAgents: subagents,
       runSubAgent: (subagent, input, toolContext) => this.builtinSubagentRunner.run(
         subagent,
         input,
         toolContext,
-        permitted,
-        { permissionConfig: childPermissionConfig, resolvedPermissions: workerPerms },
+        effectiveTools,
+        {
+          permissionConfig: childPermissionConfig,
+          resolvedPermissions: workerPerms,
+          availableSkills: this.agentConfig?.skills ?? [],
+          getCwd: () => workspaceRoot,
+        },
       ),
     })]
   }
@@ -1229,12 +1269,28 @@ export class UnifiedAgent extends ModuleBase {
     return ctx.principal_permissions ?? null
   }
 
+  private resolveMainlineWorkerSkills(ctx: BuiltinRuntimeContext): SkillConfig[] {
+    const workerPerms = narrowWorkerPermissions(
+      BUILTIN_WORKER_PERMISSIONS,
+      this.resolveWorkerPrincipalPermissions(ctx),
+    )
+    const availableMcpServers = filterMcpServersForWorker(
+      this.agentConfig?.mcp_servers ?? [],
+      workerPerms,
+    )
+    return selectMainlineWorkerSkills(
+      this.agentConfig?.skills ?? [],
+      availableMcpServers,
+      workerPerms.tool_access.mcp_skill,
+    )
+  }
+
   /**
    * builtin worker 的 system prompt = 现网那套 agent prompt（goal 模式关闭）+ 一段 v3 worker
    * 契约尾巴。两段都在每轮 turn 现拼，admin 改人格 / skills 后下一轮即生效。
    */
   private buildBuiltinWorkerSystemPrompt(ctx: BuiltinRuntimeContext): string {
-    const skillListing = buildWorkerSkillListing(this.agentConfig?.skills)
+    const skillListing = buildWorkerSkillListing(this.resolveMainlineWorkerSkills(ctx))
     const base = this.promptManager.assembleAgentPrompt({
       // 决策 4：builtin worker 不装 goal 模式（既不给 goal 工具也不给 goal 缓冲），
       // 需要目标驱动时由 manager 在派活 prompt 里用指令表达。
@@ -1242,6 +1298,7 @@ export class UnifiedAgent extends ModuleBase {
       ...(this.agentConfig?.system_prompt ? { adminPersonality: this.agentConfig.system_prompt } : {}),
       ...(skillListing ? { skillListing } : {}),
       imageCapability: { available: this.imageCapability.available },
+      memoryToolsAvailable: false,
       ...(this.agentConfig?.subagents?.length
         ? {
             availableSubAgents: this.agentConfig.subagents.map((subagent) => ({
@@ -3732,6 +3789,34 @@ export class UnifiedAgent extends ModuleBase {
         incarnation_id: incarnation.incarnation_id,
       }),
     }
+  }
+
+  private async mintWorkerActivityCursor(position: {
+    worker_id: string
+    incarnation_id: string
+    impl: import('./workers/types.js').WorkerImplId
+    seq: number
+    offset: number
+  }): Promise<string> {
+    const found = await this.requireManagerStack().ledger.findWorker(position.worker_id)
+    const incarnation = found?.worker.incarnations.find(
+      (candidate) => candidate.incarnation_id === position.incarnation_id,
+    )
+    if (!incarnation || incarnation.impl !== position.impl || incarnation.seq !== position.seq) {
+      throw new Error(`worker activity incarnation unavailable: ${position.worker_id}`)
+    }
+    const startedAt = (incarnation as { started_at?: unknown }).started_at
+    const fingerprint = incarnationFingerprint({
+      incarnation_id: position.incarnation_id,
+      impl: position.impl,
+      seq: position.seq,
+      ...(typeof startedAt === 'string' ? { started_at: startedAt } : {}),
+    })
+    return this.traceCursorStore().mintDurable(position.worker_id, fingerprint, {
+      harness: 0,
+      native: position.offset,
+      legacy: 0,
+    })
   }
 
   /** P6-A §3.3：Agent-owned opaque cursor window store（惰性建目录）。 */

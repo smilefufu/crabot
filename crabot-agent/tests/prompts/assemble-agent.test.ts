@@ -103,6 +103,27 @@ describe('assembleAgentPrompt 可选段渲染', () => {
     expect(guidance).not.toContain('list_active_subagents')
     expect(guidance).not.toContain('send_message')
   })
+
+  it('Worker 模式不注入 Memory 或历史任务工具指引，证据不足时返回 Manager', () => {
+    const prompt = assembleAgentPrompt({ goalModeEnabled: false, memoryToolsAvailable: false })
+    const queryGuide = prompt
+      .split('## 信息查询指引（按需查，不预注入）')[1]
+      .split('## 工具使用规范')[0]
+
+    expect(prompt).toContain('返回 Manager')
+    expect(prompt).not.toContain('## 记忆存储指引')
+    for (const toolName of [
+      'store_memory',
+      'quick_capture',
+      'search_memory',
+      'search_long_term',
+      'search_short_term',
+    ]) {
+      expect(prompt).not.toContain(toolName)
+    }
+    expect(queryGuide).not.toContain('find_task')
+    expect(queryGuide).not.toContain('get_task_progress')
+  })
 })
 
 describe('assembleAgentPrompt goalModeEnabled 分支', () => {
