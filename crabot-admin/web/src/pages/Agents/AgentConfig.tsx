@@ -148,11 +148,14 @@ export const AgentConfig: React.FC = () => {
       setAllMCPServers(mcpServers)
       setAllSkills(skills)
 
+      // 全局默认仅用于思考下拉的 placeholder 提示：单独容错。它和 agent 配置共用 catch
+      // 会让 placeholder 级失败把整个表单打回空初始值，此时点保存会把线上配置抹成空
+      // （PR #127 review 意见 2）。
+      providerService.getGlobalConfig()
+        .then((globalConfig) => setGlobalDefaultProviderId(globalConfig.default_llm_provider_id))
+        .catch(() => { /* placeholder 退化为通用提示 */ })
       try {
-        const [existingConfig, globalConfig] = await Promise.all([
-          agentService.getConfig(),
-          providerService.getGlobalConfig(),
-        ])
+        const existingConfig = await agentService.getConfig()
         setConfig({
           system_prompt: existingConfig.system_prompt || '',
           timezone: existingConfig.timezone || '',
@@ -160,7 +163,6 @@ export const AgentConfig: React.FC = () => {
           thinking: existingConfig.thinking || {},
           extra: existingConfig.extra || {},
         })
-        setGlobalDefaultProviderId(globalConfig.default_llm_provider_id)
       } catch {
         // Agent config not available yet, use defaults
       }

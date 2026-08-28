@@ -907,11 +907,8 @@ export class UnifiedAgent extends ModuleBase {
       managerAdapter: () => adapterFromSdkEnv(this.buildSdkEnv(resolveManagerModelConfig(this.agentConfig?.model_config))),
       managerModel: () => resolveManagerModelConfig(this.agentConfig?.model_config).model_id,
       managerThinking: () => {
-        const thinking = thinkingParam(
-          resolveManagerModelConfig(this.agentConfig?.model_config).thinking_level,
-          resolveManagerModelConfig(this.agentConfig?.model_config).thinking_custom,
-        )
-        return thinking
+        const conn = resolveManagerModelConfig(this.agentConfig?.model_config)
+        return thinkingParam(conn.thinking_level, conn.thinking_custom)
       },
       // crab-messaging：与 `createMcpConfigs` 同款依赖，但不传 `getTaskContext`——manager 不是
       // task，且 tool-face 已把 `send_message` 的 intent 去掉，ask_human 路径对 manager 不存在。

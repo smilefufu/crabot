@@ -223,3 +223,40 @@ describe('handleGetAgentConfig — 槽位 thinking 附加', () => {
     expect(result.config.agent_config.model_config.powerful.thinking_level).toBe('off')
   })
 })
+
+// PR #127 review 意见 1 的回归：thinking 必须进 core_agent 语义投影。
+// 否则 thinking-only 变更的 before/after fingerprint 相同，mutateComputed 判 noop
+// 抛 'Config mutation did not change semantic snapshot'（400 且不落盘，主用例必现）。
+describe('readCoreAgentSemanticSnapshot — thinking 进语义投影', () => {
+  function buildSnapshotAdmin(config: Record<string, unknown>): unknown {
+    const admin = Object.create(AdminModule.prototype) as Record<string, unknown>
+    admin.agentManager = { getSemanticCoreConfig: () => config }
+    admin.modelProviderManager = { getGlobalConfig: () => ({}), listProviders: () => [] }
+    admin.mcpServerManager = { runtimeSemanticEntries: () => [] }
+    admin.subAgentManager = { runtimeSemanticEntries: () => [], semanticMigrationState: () => ({ storage_version: 2, legacy_rewrite_pending: false }) }
+    admin.skillManager = { runtimeSemanticEntries: () => [], semanticMigrationState: () => ({ storage_version: 2, legacy_rewrite_pending: false }) }
+    admin.workerImplementationStore = { runtimeSemanticEntries: () => ({}) }
+    return admin
+  }
+
+  function snapshotOf(config: Record<string, unknown>): string {
+    return JSON.stringify((buildSnapshotAdmin(config) as {
+      readCoreAgentSemanticSnapshot: () => unknown
+    }).readCoreAgentSemanticSnapshot())
+  }
+
+  it('仅 thinking 不同的两份配置产生不同语义快照', () => {
+    const base = {
+      model_config: { powerful: { provider_id: 'p1', model_id: 'm1' } },
+      system_prompt: 'x',
+    }
+    const withThinking = { ...base, thinking: { powerful: { thinking_level: 'high' } } }
+    expect(snapshotOf(base)).not.toBe(snapshotOf(withThinking))
+  })
+
+  it('thinking 缺省与空对象在投影中归一化为相同快照（语义等价，不误判 noop 的前提）', () => {
+    const base = { model_config: {}, system_prompt: 'x' }
+    const withEmpty = { ...base, thinking: {} }
+    expect(snapshotOf(base)).toBe(snapshotOf(withEmpty))
+  })
+})

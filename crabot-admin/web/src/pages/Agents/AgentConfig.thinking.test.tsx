@@ -8,6 +8,7 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { AgentConfig } from './AgentConfig'
+import { agentService } from '../../services/agent'
 
 vi.mock('../../components/Layout/MainLayout', () => ({
   MainLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -140,5 +141,18 @@ describe('AgentConfig — 槽位思考强度', () => {
     const input = screen.getByPlaceholderText('如 minimal / xhigh / max')
     fireEvent.change(input, { target: { value: '8192' } })
     expect(screen.getByText(/数字 budget 仅 anthropic 格式支持/)).toBeDefined()
+  })
+
+  it('getGlobalConfig 失败不影响 agent 配置装载（review 意见 2 回归：表单不得被打回空）', async () => {
+    getGlobalConfig.mockRejectedValueOnce(new Error('boom'))
+    ;(agentService.getConfig as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      instance_id: 'inst-1',
+      system_prompt: 'persona-x',
+      model_config: {},
+      thinking: {},
+      extra: {},
+    })
+    renderPage()
+    expect(await screen.findByDisplayValue('persona-x')).toBeDefined()
   })
 })

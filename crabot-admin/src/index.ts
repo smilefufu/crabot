@@ -8740,6 +8740,9 @@ export class AdminModule extends ModuleBase {
     return {
       core_agent: core ? {
         model_config: core.model_config,
+        // thinking 必须进语义投影：thinking-only 变更也要产生不同 fingerprint，
+        // 否则 mutateComputed 判 noop 直接 400（PR #127 review 意见 1）
+        thinking: core.thinking ?? {},
         system_prompt: core.system_prompt,
         max_iterations: core.max_iterations,
         tools_readonly: core.tools_readonly,
