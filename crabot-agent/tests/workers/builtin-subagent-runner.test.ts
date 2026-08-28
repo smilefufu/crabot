@@ -187,15 +187,43 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     )).resolves.toEqual({ allowed: true })
   })
 
-  it('同步与异步 child 都在 allowed Skill 缺失时 fail-loud', async () => {
-    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+  it('同步与异步 child 都告警并跳过当前不可用的 allowed Skill', async () => {
+    spawnPersistentAgent.mockResolvedValue('agent-child')
+    forkEngine.mockResolvedValue({ outcome: 'completed', output: '完成', usage: { inputTokens: 1, outputTokens: 1 }, totalTurns: 1 })
+    const traceStore = {
+      startTrace: vi.fn(() => ({ trace_id: 'trace-child' })),
+      endTrace: vi.fn(),
+    } as unknown as TraceStore
+    const runner = new BuiltinSubagentRunner(traceStore, lspManager, undefined, registry)
     const subagent = testSubagent({ allowed_skill_ids: ['missing-skill'] })
     const context = { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
-    await expect(runner.run(subagent, { task: '异步' }, context, [], executionContext(AVAILABLE_SKILLS)))
-      .rejects.toThrow('allowed Skill unavailable: missing-skill')
-    await expect(runner.run(subagent, { task: '同步', sync: true }, context, [], executionContext(AVAILABLE_SKILLS)))
-      .rejects.toThrow('allowed Skill unavailable: missing-skill')
+    try {
+      await expect(runner.run(
+        subagent,
+        { task: '异步' },
+        context,
+        [fakeTool('Skill')],
+        executionContext(AVAILABLE_SKILLS),
+      )).resolves.toMatchObject({ isError: false })
+      await expect(runner.run(
+        subagent,
+        { task: '同步', sync: true },
+        context,
+        [fakeTool('Skill')],
+        executionContext(AVAILABLE_SKILLS),
+      )).resolves.toMatchObject({ isError: false })
+
+      expect(spawnPersistentAgent.mock.calls[0][0].tools).toEqual([])
+      expect(forkEngine.mock.calls[0][0].tools).toEqual([])
+      expect(warn).toHaveBeenCalledTimes(2)
+      for (const [message] of warn.mock.calls) {
+        expect(String(message)).toContain('missing-skill')
+      }
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 
