@@ -24,6 +24,9 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
   const [refreshing, setRefreshing] = useState(false)
   const [togglingVision, setTogglingVision] = useState<string | null>(null)
   const [modelTestResults, setModelTestResults] = useState<Record<string, ProviderTestState>>({})
+  // 上下文列内联编辑：editingCtx 记录正在编辑的 model_id，ctxInput 为输入框原始值
+  const [editingCtx, setEditingCtx] = useState<string | null>(null)
+  const [ctxInput, setCtxInput] = useState('')
 
   const handleRefreshModels = async () => {
     try {
@@ -82,6 +85,32 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
       toast.error(err instanceof Error ? err.message : '更新失败')
     } finally {
       setTogglingVision(null)
+    }
+  }
+
+  const formatContext = (n: number) => `${Math.round(n / 1000)}K`
+
+  // 保存上下文：空输入 = 清除配置（回退默认 200K）；Enter/失焦触发，Esc 取消
+  const handleSaveContext = async (modelId: string) => {
+    const raw = ctxInput.trim()
+    if (raw !== '' && (!/^\d+$/.test(raw) || parseInt(raw, 10) <= 0)) {
+      toast.error('上下文必须为正整数 token 数')
+      return
+    }
+    try {
+      const updatedModels = provider.models.map(m =>
+        m.model_id === modelId
+          ? (raw === '' ? { ...m, context_window: undefined } : { ...m, context_window: parseInt(raw, 10) })
+          : m
+      )
+      await providerService.updateProvider(provider.id, { models: updatedModels })
+      toast.success(raw === ''
+        ? `已清除 ${modelId} 的上下文配置（回退默认 200K）`
+        : `已保存 ${modelId} 上下文为 ${formatContext(parseInt(raw, 10))}`)
+      setEditingCtx(null)
+      onRefresh()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '更新失败')
     }
   }
 
@@ -164,6 +193,9 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
           <div className="model-table-header">
             <span className="model-table-col-id">模型 ID</span>
             <span className="model-table-col-type">类型</span>
+            <Tooltip content="模型上下文窗口 token 数；用于 Agent 上下文压缩触发阈值（约 80% 时压缩），缺省按 200000 处理" size="lg">
+              <span className="model-table-col-ctx">上下文</span>
+            </Tooltip>
             <Tooltip content="实战测速：和 Agent/Memory 实际调用一致的 payload 形态（带 system + tools + 真实 max_tokens）+ stream 拉首字节，能复现「中转不吃 tools / 大 max_tokens」等典型坑" size="lg">
               <span className="model-table-col-test">首字</span>
             </Tooltip>
@@ -193,6 +225,39 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
                         </span>
                       </Tooltip>
                     </>
+                  )}
+                </span>
+                <span className="model-table-col-ctx">
+                  {model.type === 'image' ? (
+                    <span style={{ color: 'var(--text-secondary)' }}>—</span>
+                  ) : editingCtx === model.model_id ? (
+                    <input
+                      className="input"
+                      style={{ width: '96px', padding: '0.1rem 0.4rem', fontSize: '0.8rem' }}
+                      autoFocus
+                      value={ctxInput}
+                      placeholder="token 数"
+                      onChange={(e) => setCtxInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                        if (e.key === 'Escape') setEditingCtx(null)
+                      }}
+                      onBlur={() => void handleSaveContext(model.model_id)}
+                    />
+                  ) : (
+                    <Tooltip content={model.context_window
+                      ? `已设置 ${formatContext(model.context_window)}（点击修改，清空即回退默认）`
+                      : '未设置；Agent 按 200000 处理（点击设置）'}>
+                      <span
+                        style={{ cursor: 'pointer', color: model.context_window ? undefined : 'var(--text-secondary)' }}
+                        onClick={() => {
+                          setCtxInput(model.context_window ? String(model.context_window) : '')
+                          setEditingCtx(model.model_id)
+                        }}
+                      >
+                        {model.context_window ? formatContext(model.context_window) : '默认 200K'}
+                      </span>
+                    </Tooltip>
                   )}
                 </span>
                 <span className="model-table-col-test">

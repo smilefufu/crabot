@@ -3916,6 +3916,7 @@ input[type="radio"]:disabled {
 
 .model-table-col-id { flex: 2; }
 .model-table-col-type { flex: 1; }
+.model-table-col-ctx { flex: 1; }
 .model-table-col-test { width: 80px; text-align: right; }
 
 /* ============================================================================

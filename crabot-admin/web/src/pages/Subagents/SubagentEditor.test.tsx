@@ -116,6 +116,19 @@ describe('SubagentEditor', () => {
     })
   })
 
+  it('model_role 下拉不再提供 vision 选项（2026-08 槽位收敛）', async () => {
+    renderEditor({
+      mode: 'edit',
+      entry: makeEntry({ provider_id: null, model_id: null, model_role: 'powerful' }),
+    })
+    fireEvent.click(screen.getByText('模型'))
+    fireEvent.click(screen.getByLabelText('使用 role 默认'))
+    const roleSelect = screen.getByLabelText('model_role') as HTMLSelectElement
+    const options = Array.from(roleSelect.options).map((o) => o.value)
+    expect(options).toEqual(['powerful', 'cost_effective'])
+    expect(options).not.toContain('vision')
+  })
+
   it('Tab 5 内置能力默认值：工作能力 on，Memory 与 messaging 协议固定 off', async () => {
     renderEditor()
     fireEvent.click(screen.getByText('内置能力'))

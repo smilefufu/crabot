@@ -390,7 +390,6 @@ const ModelTab: React.FC<{
             >
               <option value="powerful">powerful（强力）</option>
               <option value="cost_effective">cost_effective（性价比）</option>
-              <option value="vision">vision（视觉）</option>
             </select>
             <span style={{ color: 'var(--text-muted)', marginLeft: 12, fontSize: 12 }}>
               实际指向取决于该 agent 实例的 model_config[role]
