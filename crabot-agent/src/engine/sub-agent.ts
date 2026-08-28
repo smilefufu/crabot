@@ -1,4 +1,5 @@
 import type { LLMAdapter } from './llm-adapter'
+import type { LLMThinkingConfig } from './llm-adapter-types'
 import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock, HumanMessageQueueLike, ToolPermissionConfig } from './types'
 import type { ResolvedPermissions } from '../types'
 import type { TraceStore } from '../core/trace-store'
@@ -21,6 +22,8 @@ export interface ForkEngineParams {
   readonly maxTurns?: number
   /** Per-call max output tokens；缺省时让 adapter 走默认行为 */
   readonly maxTokens?: number
+  /** 槽位思考强度；缺省 = 跟随模型默认（请求中不出现任何思考参数） */
+  readonly thinking?: LLMThinkingConfig
   /** Optional: parent context to share (recent messages summary) */
   readonly parentContext?: string
   /** Abort signal (linked to parent) */
@@ -89,6 +92,7 @@ export async function forkEngine(params: ForkEngineParams): Promise<ForkEngineRe
       model: params.model,
       maxTurns: params.maxTurns ?? DEFAULT_SUB_AGENT_MAX_TURNS,
       ...(params.maxTokens !== undefined ? { maxTokens: params.maxTokens } : {}),
+      ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
       abortSignal: params.abortSignal,
       onTurn: params.onTurn,
       supportsVision: params.supportsVision,

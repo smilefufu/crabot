@@ -335,6 +335,8 @@ export interface AgentHandlerDeps {
 }
 
 import type { LLMFormat } from '../engine/llm-adapter'
+import type { LLMThinkingConfig } from '../engine/llm-adapter-types.js'
+import { thinkingParam } from '../engine/llm-adapter-types.js'
 
 export interface WorkerTraceContext {
   traceStore: import('../core/trace-store').TraceStore
@@ -387,6 +389,8 @@ export interface SdkEnvConfig {
   maxTokens?: number
   /** Provider 模型配置的 context_window；未配置时 engine 回退内置默认 200000 */
   contextWindow?: number
+  /** 槽位思考强度；未配置 = 跟随模型默认（请求中不出现任何思考参数） */
+  thinking?: LLMThinkingConfig
   env: Record<string, string>
 }
 
@@ -1766,6 +1770,7 @@ export class AgentHandler {
             adapter,
             modelId: this.sdkEnv.modelId,
             ...(this.sdkEnv.maxTokens !== undefined ? { maxTokens: this.sdkEnv.maxTokens } : {}),
+            ...(this.sdkEnv.thinking !== undefined ? { thinking: this.sdkEnv.thinking } : {}),
             messagesRef,
           }
 
@@ -1829,6 +1834,7 @@ export class AgentHandler {
           model: this.sdkEnv.modelId,
           ...(this.sdkEnv.maxTokens !== undefined ? { maxTokens: this.sdkEnv.maxTokens } : {}),
           ...(this.sdkEnv.contextWindow !== undefined ? { contextWindowTokens: this.sdkEnv.contextWindow } : {}),
+          ...(this.sdkEnv.thinking !== undefined ? { thinking: this.sdkEnv.thinking } : {}),
           maxTurns: 2000,
           supportsVision: this.sdkEnv.supportsVision,
           permissionConfig: initialPermissionConfig,
@@ -3514,6 +3520,10 @@ export class AgentHandler {
         tools: subTools,
         maxTurns: subagent.max_turns,
         ...(subagent.model.max_tokens !== undefined ? { maxTokens: subagent.model.max_tokens } : {}),
+        // role fallback 解析的 subagent 连接信息自带槽位 thinking（spec §6.4）；直连引用不带 → undefined
+        ...(thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) !== undefined
+          ? { thinking: thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) }
+          : {}),
         ...(input.context ? { parentContext: input.context } : {}),
         abortSignal: ctx.abortSignal,
         onTurn: subTraceCallback,
@@ -3722,6 +3732,9 @@ export class AgentHandler {
       systemPrompt: finalSystemPrompt,
       model: subModel.model_id,
       ...(subModel.max_tokens !== undefined ? { maxTokens: subModel.max_tokens } : {}),
+      ...(thinkingParam(subModel.thinking_level, subModel.thinking_custom) !== undefined
+        ? { thinking: thinkingParam(subModel.thinking_level, subModel.thinking_custom) }
+        : {}),
       adapter: subAdapter,
       owner: asyncCtx.owner,
       spawned_by_task_id: deps.parentTaskId,

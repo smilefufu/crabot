@@ -94,6 +94,8 @@ export interface ManagerRegistryDeps {
   readonly model: () => string
   readonly maxTurns?: number
   readonly contextWindowTokens?: number
+  /** manager 的槽位思考强度(随 powerful slot,thunk 支持 hot-reload);undefined = 跟随默认 */
+  readonly thinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
   readonly now: () => Date
   /** Once true, no new wake may create or enqueue work for a Manager episode. */
   readonly isClosing?: () => boolean
@@ -227,6 +229,9 @@ export class ManagerRegistry {
       model: this.deps.model,
       maxTurns: this.deps.maxTurns,
       contextWindowTokens: this.deps.contextWindowTokens,
+      // thunk 原样下传：thinking 的解析在 episode 内与 adapter/model 同点发生（同样的
+      // fail-loud 语义），不能在 getOrCreate 急切调用——缺 powerful 会让唤醒路径直接抛错。
+      thinking: this.deps.thinking,
       // 唤醒事件由 ManagerLoop 按 episode 传入(见 ManagerLoopDeps.toolFace);schedule 之外
       // 的唤醒不带身份,工具面照旧。
       toolFace: (wakeEvent) =>

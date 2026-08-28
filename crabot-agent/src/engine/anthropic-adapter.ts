@@ -12,7 +12,7 @@ import type {
   ToolResultBlockParam,
 } from '@anthropic-ai/sdk/resources/messages'
 import { proxyManager } from 'crabot-shared'
-import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
+import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMThinkingConfig } from './llm-adapter-types.js'
 import { streamWithTimeoutAndRetry } from './stream-timeout.js'
 import { isToolResultMessage, mergeConsecutiveUserMessages, capToolResultForLLM } from './llm-adapter-types.js'
 import type {
@@ -34,6 +34,25 @@ function defaultAnthropicMaxTokens(model: string): number {
   // claude-4 / claude-opus-4 / claude-sonnet-4 / claude-haiku-4 起，上限 32K-64K
   // 32K 是各档位都能接受的安全值（够 reasoning + 长响应）；想跑更长由用户在 admin 上调
   return 32768
+}
+
+// --- 槽位思考强度 → Anthropic 请求字段（spec 2026-08 §5.2）---
+// 跟随默认（undefined）不发任何字段；off → thinking:{type:'disabled'}（4.6+ 必须显式发才能关，
+// 老模型默认即不思考，发 disabled 同样合法）；low/medium/high → output_config:{effort}；
+// 自定义字符串 → output_config:{effort:原样透传}（如 xhigh/max）；自定义数字 → budget_tokens
+// （仅 ≤4.5 老模型接受，新模型 400 由用户改档，不做运行时降级）。
+// SDK 0.30 的类型不含 output_config，故整体以 Params 投影透传。
+function anthropicThinkingFields(thinking: LLMThinkingConfig | undefined): Record<string, unknown> {
+  if (!thinking) return {}
+  if (thinking.custom !== undefined) {
+    if (typeof thinking.custom === 'number') {
+      return { thinking: { type: 'enabled', budget_tokens: thinking.custom } }
+    }
+    return { output_config: { effort: thinking.custom } }
+  }
+  if (thinking.level === 'off') return { thinking: { type: 'disabled' } }
+  if (thinking.level !== undefined) return { output_config: { effort: thinking.level } }
+  return {}
 }
 
 // --- Anthropic Message Normalization ---
@@ -294,7 +313,8 @@ export class AnthropicAdapter implements LLMAdapter {
       ...(system ? { system } : {}),
       messages: cachedMessages,
       ...(cachedTools.length > 0 ? { tools: cachedTools } : {}),
-    })
+      ...anthropicThinkingFields(params.thinking),
+    } as Parameters<typeof this.client.messages.stream>[0])
 
     // signal 通常是 task 级长寿命的（一个 task 内每个 turn 都共用）。如果只 addEventListener
     // 不 removeEventListener，每次 LLM call 都会在 signal 上挂一个 onAbort 闭包，闭包又

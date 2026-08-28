@@ -1,5 +1,6 @@
 import type { LLMAdapter } from './llm-adapter'
 import { callNonStreaming } from './llm-adapter'
+import type { LLMThinkingConfig } from './llm-adapter-types'
 import type { EngineMessage, EngineMessagesRef, EngineTurnEvent } from './types'
 import { createUserMessage } from './types'
 import { hasDanglingToolUse } from './tool-message-integrity.js'
@@ -52,6 +53,8 @@ export interface ProgressDigestDeps {
   readonly modelId: string
   /** 主 loop 的 maxTokens；不传则走 adapter 默认 */
   readonly maxTokens?: number
+  /** 主 loop 的思考强度（spec §6.5 辅助调用继承）；不传 = 跟随模型默认 */
+  readonly thinking?: LLMThinkingConfig
   /**
    * 主 loop 对话状态的只读 holder。engine 在每个 turn 完成时浅拷贝刷新
    * `current`，每次 LLM 调用前快照 systemPrompt/tools。doFlush 时拿当前
@@ -196,6 +199,7 @@ export class ProgressDigest {
       tools: [...tools],
       model: this.deps.modelId,
       ...(this.deps.maxTokens !== undefined ? { maxTokens: this.deps.maxTokens } : {}),
+      ...(this.deps.thinking !== undefined ? { thinking: this.deps.thinking } : {}),
     }
     const response = await callNonStreaming(this.deps.adapter, params)
 

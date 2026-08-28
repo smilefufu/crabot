@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import type { LLMThinkingConfig } from './llm-adapter-types.js'
 
 // --- Content Blocks ---
 
@@ -410,6 +411,12 @@ export interface EngineOptions {
    * 缺失时 engine 回退到内置默认 200000。仅影响 compaction 触发阈值，不影响请求参数。
    */
   readonly contextWindowTokens?: number
+
+  /**
+   * 槽位思考强度（2026-08）；undefined = 跟随模型默认（请求中不出现任何思考参数）。
+   * 来自 provider 槽位配置的 thinking_level/thinking_custom，随 LLMStreamParams 进 adapter。
+   */
+  readonly thinking?: LLMThinkingConfig
 }
 
 export interface HumanMessageQueueLike {

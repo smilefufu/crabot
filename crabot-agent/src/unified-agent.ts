@@ -46,6 +46,7 @@ import { MemoryWriter } from './orchestration/memory-writer.js'
 import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from './orchestration/attention-scheduler.js'
 import { SessionLaneRegistry } from './orchestration/session-lane.js'
 import { AgentHandler, type SdkEnvConfig, type ExecuteTriggerMessageParams, type ExecuteTriggerMessageResult, adapterFromSdkEnv } from './agent/agent-handler.js'
+import { thinkingParam } from './engine/llm-adapter-types.js'
 import type { ToolPermissionConfig, ToolDefinition as EngineToolDefinition } from './engine/types.js'
 import { filterToolsByPermission } from './engine/index.js'
 import { getConfiguredBuiltinTools, filterMcpToolsByConfig } from './engine/tools/index.js'
@@ -901,10 +902,17 @@ export class UnifiedAgent extends ModuleBase {
       // 人类消息渲染的时区（`formatChannelMessageLine` 的 ts 属性）。与 worker 侧
       // `buildBuiltinWorkerRuntime` 取同一个来源，避免 manager 与 worker 看到的时间对不上。
       timezone: () => resolveTimezone(this.agentConfig?.timezone),
-      // §11：manager slot → 回退 powerful。两个 thunk 每个 episode 各解析一次，
-      // 未配置时抛出的错误信息由 model-slot.ts 给出（明确指出缺哪两个 slot）。
+      // §11：2026-08 收敛后 manager 直接用 powerful slot。thunk 每个 episode 各解析一次，
+      // 未配置时抛出的错误信息由 model-slot.ts 给出。
       managerAdapter: () => adapterFromSdkEnv(this.buildSdkEnv(resolveManagerModelConfig(this.agentConfig?.model_config))),
       managerModel: () => resolveManagerModelConfig(this.agentConfig?.model_config).model_id,
+      managerThinking: () => {
+        const thinking = thinkingParam(
+          resolveManagerModelConfig(this.agentConfig?.model_config).thinking_level,
+          resolveManagerModelConfig(this.agentConfig?.model_config).thinking_custom,
+        )
+        return thinking
+      },
       // crab-messaging：与 `createMcpConfigs` 同款依赖，但不传 `getTaskContext`——manager 不是
       // task，且 tool-face 已把 `send_message` 的 intent 去掉，ask_human 路径对 manager 不存在。
       messagingDeps: {
@@ -1062,6 +1070,7 @@ export class UnifiedAgent extends ModuleBase {
       ...(sdkEnv.supportsVision !== undefined ? { supportsVision: sdkEnv.supportsVision } : {}),
       ...(sdkEnv.maxTokens !== undefined ? { maxTokens: sdkEnv.maxTokens } : {}),
       ...(sdkEnv.contextWindow !== undefined ? { contextWindowTokens: sdkEnv.contextWindow } : {}),
+      ...(sdkEnv.thinking !== undefined ? { thinking: sdkEnv.thinking } : {}),
     }
   }
 
@@ -1334,6 +1343,9 @@ export class UnifiedAgent extends ModuleBase {
       supportsVision: connInfo.supports_vision,
       ...(connInfo.max_tokens !== undefined ? { maxTokens: connInfo.max_tokens } : {}),
       ...(connInfo.context_window !== undefined ? { contextWindow: connInfo.context_window } : {}),
+      ...(thinkingParam(connInfo.thinking_level, connInfo.thinking_custom) !== undefined
+        ? { thinking: thinkingParam(connInfo.thinking_level, connInfo.thinking_custom) }
+        : {}),
       env: {
         LLM_BASE_URL: connInfo.endpoint,
         LLM_API_KEY: connInfo.apikey || 'dummy-key',

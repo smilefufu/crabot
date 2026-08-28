@@ -55,6 +55,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { runEngine, defineTool, createUserMessage } from '../../engine/index.js'
 import type { EngineMessage, EngineMessagesRef, EngineResult, ToolDefinition } from '../../engine/index.js'
 import type { Resolvable } from '../../engine/types.js'
+import type { LLMThinkingConfig } from '../../engine/llm-adapter-types.js'
 import { SessionTree } from '../session-tree.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
@@ -1574,6 +1575,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     maxTokens?: number
     contextWindowTokens?: number
     supportsVision?: boolean
+    thinking?: LLMThinkingConfig
     timezone?: string
   } {
     return {
@@ -1586,6 +1588,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       ...(builtin.maxTokens !== undefined ? { maxTokens: builtin.maxTokens } : {}),
       ...(builtin.contextWindowTokens !== undefined ? { contextWindowTokens: builtin.contextWindowTokens } : {}),
       ...(builtin.supportsVision !== undefined ? { supportsVision: builtin.supportsVision } : {}),
+      ...(builtin.thinking !== undefined ? { thinking: builtin.thinking } : {}),
       ...(builtin.timezone !== undefined ? { timezone: builtin.timezone } : {}),
     }
   }

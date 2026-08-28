@@ -5,7 +5,7 @@
  */
 
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
-import { isToolResultMessage, extractText, buildImageUrl, readSSEEvents, capToolResultForLLM } from './llm-adapter-types.js'
+import { isToolResultMessage, extractText, buildImageUrl, readSSEEvents, capToolResultForLLM, thinkingEffortValue } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock, LLMTokenUsage } from './types.js'
 import { HttpResponseError, StreamProtocolError } from './retry-utils.js'
 import { streamWithTimeoutAndRetry } from './stream-timeout.js'
@@ -173,9 +173,14 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
     }
 
     // Codex 特有字段：reasoning 控制和 include（传递加密的 reasoning 上下文）
+    // 思考强度（spec 2026-08 §5.2）：Codex 跟随默认保持现状 effort='medium'；槽位配置覆盖。
+    // OpenAI 官方 Responses 跟随默认不发 reasoning；配置了才发。
     if (isCodexBackend) {
-      body.reasoning = { effort: 'medium', summary: 'auto' }
+      body.reasoning = { effort: thinkingEffortValue(params.thinking) ?? 'medium', summary: 'auto' }
       body.include = ['reasoning.encrypted_content']
+    } else {
+      const reasoningEffort = thinkingEffortValue(params.thinking)
+      if (reasoningEffort !== undefined) body.reasoning = { effort: reasoningEffort }
     }
 
     // max_output_tokens 对 Codex 无效，仅 OpenAI 官方 Responses API 支持

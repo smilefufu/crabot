@@ -137,6 +137,7 @@ export class AgentManager {
       ...existing,
       ...(params.system_prompt !== undefined && { system_prompt: params.system_prompt }),
       ...(params.model_config !== undefined && { model_config: params.model_config }),
+      ...(params.thinking !== undefined && { thinking: params.thinking }),
       ...(params.mcp_server_ids !== undefined && { mcp_server_ids: params.mcp_server_ids }),
       ...(params.skill_ids !== undefined && { skill_ids: params.skill_ids }),
       ...(params.max_iterations !== undefined && { max_iterations: params.max_iterations }),
@@ -150,7 +151,10 @@ export class AgentManager {
       await this.saveConfig(params.instance_id)
     }
     const domains: ConfigDomain[] = [
-      ...(params.model_config !== undefined && canonicalizeJson(existing.model_config) !== canonicalizeJson(updated.model_config) ? ['models' as const] : []),
+      ...((
+        (params.model_config !== undefined && canonicalizeJson(existing.model_config) !== canonicalizeJson(updated.model_config)) ||
+        (params.thinking !== undefined && canonicalizeJson(existing.thinking ?? {}) !== canonicalizeJson(updated.thinking ?? {}))
+      ) ? ['models' as const] : []),
       ...(
         (params.system_prompt !== undefined && existing.system_prompt !== updated.system_prompt) ||
         (params.max_iterations !== undefined && existing.max_iterations !== updated.max_iterations) ||
