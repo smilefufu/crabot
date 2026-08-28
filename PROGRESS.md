@@ -5,7 +5,7 @@
 
 ## 当前状态
 
-### wechat 群聊门控（@ + 引用放行）：实现完成，PR #124 待 review
+### wechat 群聊门控（@ + 引用放行）：实现完成，PR #124 review 跟踪中
 
 - 已确认 spec 与计划发布到 `crabot-docs` main（`2631a13` / `d4d9560`）：`protocol-channel.md` 0.1.2
   §4.2 把 only_respond_to_mentions 字面扩展为「定向」语义（定向 = @ Crabot，Channel 可选扩展引用放行；
@@ -14,8 +14,12 @@
   §type=18 字段契约）；反查失败（字段缺失）直接丢弃，不做名字模糊降级。
 - `feat/wechat-group-mention-gate`（PR #124）：module.yaml 开关（default false=行为不变）+ main.ts
   env 链路 + handleWechatEvent 门控（丢弃不建 session 不发布）+ 补齐协议 §6.1 MUST 的
-  get_config/update_config（feishu 同款：掩码/热改/requires_restart）。新增 15 用例 + 既有 62 全绿。
-- 待 @claude review；合并前人工验证：真实群 ① 普通发言不触发 ② @ 触发 ③ 引用 Crabot 发言触发。
+  get_config/update_config。新增 16 用例 + 既有 62 全绿。
+- @claude review 4 条真实风险：①update_config 字符串开关静默 no-op（已修 `ce3f1feb`）②
+  x-runtime-path 单字段标注致 running 实例配置面板退化——修法需把 spec §4.4 排除的
+  WECHAT_MODE/WEBHOOK_* 纳入 config RPC，**待用户确认偏离** ③引用消息 agent 侧延迟巡检——记
+  follow-up（见技术债段）④占位文件漏删（已修）。合并前人工验证：真实群 ① 普通发言不触发 ② @ 触发
+  ③ 引用 Crabot 发言触发（预期触达但延迟一个巡检周期，见 follow-up）。
 
 ### 群聊响应纪律 prompt：已合并（main `d8ad16c3`）
 
@@ -166,10 +170,14 @@
   ① 改动语义投影的 PR 必须同步预埋 marker，纳入升级流程强制检查；② marker 按 projection 名
   一次一个，替代全局一次性 done marker；③ 评估启动期归一化改走 coordinator mutation 正式记账，
   首次启动即收敛落盘，不依赖 marker。
-- **wechat channel 群聊门控（@ + 引用）**：`group.only_respond_to_mentions` 协议已有契约
-  （protocol-channel.md，true 时 channel 不发布非 @ 消息），feishu / dingtalk 已实现，wechat /
-  telegram 缺失。已确认 wechat 按「@ + 引用」放行——引用检测需要新增 wechat 引用消息解析且超出
-  协议字面（协议写的是「非 @Crabot 消息」），需先写 spec 同步协议再实现。
+- **wechat 群聊门控 PR #124 review follow-up（2026-08-28）**：① agent 侧注意力调度只对
+  `is_mention_crab` 做即时唤醒（`attention-scheduler.ts:62` flushNow），引用放行消息要等一个巡检
+  周期（2-30min）——「@ 与引用同等即时唤醒」是 protocol-agent-v3 §4.5 调度语义变更，需单独 spec
+  （含引用放行是否算 replied/重置间隔）；落地前人工验收项 ③ 预期为触达但延迟一个周期。② feishu
+  channel 存量问题：module.yaml 声明 `type: string` 而 `handleUpdateConfig` 只认 boolean，Admin
+  热改开关静默 no-op（SchemaField enum 分支回传 string，全链路无类型还原），与本 PR 修复同款。
+- **telegram 群聊门控**：`group.only_respond_to_mentions` 协议已有契约，feishu / dingtalk 已实现，
+  telegram 缺失（wechat 已随 PR #124 实现）。
 - **内置能力归属完成后的后续设计**：当前能力归属 spec 实现并验收完成后，再依次处理三项独立设计：Schedule 支持受控的无 LLM operation，并用其承载 `Memory.run_maintenance("all")`；Manager 获得按 domain 枚举、复用既有权限/确认/undo/审核/脱敏语义的结构化 Crabot 管理工具面；清理活跃代码中会被误解为第三种 Agent 的遗留模块容器命名。三项均不得并入当前能力归属实现。
 - **Worker/subagent trace 写点的同类硬截断**：`agent-handler.ts`（`.slice(0, 200/500)`）与 `unified-agent.ts`（`.slice(0, 300)`）对工具 span 摘要仍用整段硬截，与已修复的 manager episode span 同模式；目前无消费方受害（episode 投影不读这些 trace），若未来对其启用结构化提取应先改造为 `span-summary.ts` 的字段级截断（2026-08-27，`7cd86abf`）。
 - **Worker 巡检调度收口**：启动对账与周期巡检应共享 due 投递排他；避免单个 Worker 的长锁阻塞全局活性巡检；默认巡检在全局 LLM 故障时需要有界的失败告警去重/退避。三项均需独立设计，不纳入当前任务巡检 PR。
