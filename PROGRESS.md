@@ -168,11 +168,14 @@
 
 ### 技术债与既有 follow-up（P6 后或并行确认）
 
-- **核心配置 revision 启动自检 fail-open：已合并**（PR #126 → `edab960a`）。PR #122 投影变更
-  撞上一次性 rebaseline 申报通道锁死生产后，按 spec（crabot-docs
-  `2026-08-28-config-revision-startup-fail-open-design.md`、protocol-admin 0.2.5）把启动漂移
-  改为警告 + 重记账继续，marker 申报机制全链路退役；outbox 恢复/两阶段提交/seqlock/cutover
-  gate 未动。部署约束：实例需重建重启后生效，升级不再需要任何申报动作。
+- **核心配置 revision 机制的升级申报通道缺口（2026-08-28 实锤）**：语义投影（不止存储结构）
+  的任何启动期变化都触发 fingerprint fail-closed 拒绝启动；rebaseline 申报 marker 为全局一次性
+  （done 后永久失效）。PR #122 归一化必备 worker skill（tmp-page / workspace-context-maintenance /
+  scrapling-official → enabled+不可禁用）发生在启动加载阶段且每次重复归一化，磁盘值不收敛，
+  生产实例被锁死在启动失败；手工预埋 marker rebaseline 到 revision 53 解除。follow-up（需 spec）：
+  ① 改动语义投影的 PR 必须同步预埋 marker，纳入升级流程强制检查；② marker 按 projection 名
+  一次一个，替代全局一次性 done marker；③ 评估启动期归一化改走 coordinator mutation 正式记账，
+  首次启动即收敛落盘，不依赖 marker。
 - **wechat 群聊门控 PR #124 review follow-up（2026-08-28）**：① agent 侧注意力调度只对
   `is_mention_crab` 做即时唤醒（`attention-scheduler.ts:62` flushNow），引用放行消息要等一个巡检
   周期（2-30min）——「@ 与引用同等即时唤醒」是 protocol-agent-v3 §4.5 调度语义变更，需单独 spec
