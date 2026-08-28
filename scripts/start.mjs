@@ -286,7 +286,7 @@ if (!DAEMON_MODE) {
         }
       }
     } catch { /* keep trying */ }
-    await new Promise(r => setTimeout(r, 1000))
+    await new Promise(r => setTimeout(r, 250))
   }
   console.error(`[crabot] timeout after 30s. Check logs at ${resolve(DATA_DIR, 'logs/mm.stderr.log')}`)
   console.error(`[crabot] supervisor still running at pid ${sup.pid}; if it eventually starts, fine; otherwise crabot stop.`)
