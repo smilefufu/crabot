@@ -168,6 +168,12 @@ const FINISH_TASK_TOOL: ToolDefinition = {
   exitsLoop: true,
 }
 
+/** finish_task 被终态守卫打回时注入会话的系统提醒(拆分 spec 2026-08-28 修订)。 */
+const FINISH_TASK_REJECTED_NOTICE = [
+  '[finish_task 未生效] 仍有正在运行的后台命令或子 Agent，任务此刻不能结束。',
+  '请继续等待它们的完成通知；若确认某个子任务不再需要，先用 Kill 结束它，再重新调用 finish_task。',
+].join('')
+
 interface WorkerInstance {
   readonly worker_id: string
   readonly incarnation_id?: string
@@ -281,6 +287,11 @@ export interface BuiltinTraceHooks {
   appendTurn(traceId: string, event: import('../../engine/types.js').EngineTurnEvent): void
   finishIncarnationTrace(traceId: string, patch: { status: 'completed' | 'failed'; summary: string }): void
   stopWorkerSubagents?(workerId: string): void
+  /**
+   * 该 worker 名下是否仍有 running 的 bg entity(bg-shell / subagent),供 finish_task
+   * 终态守卫查询(拆分 spec 2026-08-28 修订)。缺省视为无,守卫静默关闭。
+   */
+  hasRunningBgEntities?(workerId: string): Promise<boolean>
 }
 
 export interface BuiltinTraceReader {
@@ -1142,6 +1153,20 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       }
 
       if (result.exitToolCall?.name === 'finish_task') {
+        // 终态守卫(拆分 spec 2026-08-28 修订):名下仍有 running bg entity(bg-shell /
+        // subagent)时 finish_task 不落终态——否则化身 exited 会连带终止还在跑的 subagent,
+        // 其完成通知又被 killed 状态静默丢弃,worker 以 end_turn 等待结果的那条路就被这条
+        // 终态出口整体绕过。此处以系统提醒打回并原地续 burst;fork 化身不装配 finish_task,
+        // 查询条件与 transitionExited 的杀因条件(query_id === undefined)保持一致。
+        const bgEntityRunning = handle.query_id === undefined &&
+          (await this.deps.traceHooks?.hasRunningBgEntities?.(instance.worker_id)) === true
+        if (bgEntityRunning) {
+          const notice = createUserMessage(FINISH_TASK_REJECTED_NOTICE)
+          const noticeTip = await instance.sessionTree.append(instance.tip, notice)
+          instance.tip = noticeTip
+          this.setEngineMessagesSnapshot(instance, [...result.finalMessages, notice], noticeTip)
+          return true
+        }
         const rawOutcome = result.exitToolCall.input.outcome
         const outcome: 'completed' | 'failed' = rawOutcome === 'failed' ? 'failed' : 'completed'
         // summary 是 finish_task 的**必填**入参（见 FINISH_TASK_TOOL 的 inputSchema.required），
