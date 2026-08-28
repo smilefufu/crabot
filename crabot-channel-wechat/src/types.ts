@@ -250,6 +250,8 @@ export interface WechatChannelConfig {
   mode: 'socketio' | 'webhook'
   /** Webhook 模式下本地监听端口 */
   webhook_port?: number
+  /** 群聊仅响应定向消息（@ Crabot 或引用/回复 Crabot 发言；true 时不发布其余群消息事件。缺省 false=发布所有消息） */
+  only_respond_to_mentions?: boolean
 }
 
 // ============================================================================

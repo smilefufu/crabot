@@ -10,6 +10,7 @@
  * - WECHAT_MODE: 推送模式 socketio | webhook（默认 socketio）
  * - WECHAT_WEBHOOK_SECRET: Webhook 签名密钥（webhook 模式需要）
  * - WECHAT_WEBHOOK_PORT: Webhook 监听端口（webhook 模式需要）
+ * - WECHAT_ONLY_RESPOND_TO_MENTIONS: 群聊仅响应定向消息（@ 或引用 Crabot；默认 false）
  */
 
 import fs from 'node:fs'
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
   const webhookPort = process.env.WECHAT_WEBHOOK_PORT
     ? parseInt(process.env.WECHAT_WEBHOOK_PORT, 10)
     : undefined
+  const onlyRespondToMentions = (process.env.WECHAT_ONLY_RESPOND_TO_MENTIONS ?? 'false') === 'true'
 
   if (mode === 'webhook' && !webhookPort) {
     console.error('WECHAT_WEBHOOK_PORT is required for webhook mode')
@@ -70,6 +72,7 @@ async function main(): Promise<void> {
       mode,
       webhook_secret: webhookSecret,
       webhook_port: webhookPort,
+      only_respond_to_mentions: onlyRespondToMentions,
     },
   })
 

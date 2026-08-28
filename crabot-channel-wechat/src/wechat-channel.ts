@@ -74,6 +74,8 @@ export class WechatChannel extends ModuleBase {
   private readonly mediaHandleStore: MediaHandleStore
   private readonly mediaCleaner: MediaCleaner
   private readonly mediaFetch: MediaFetchManager
+  /** Crabot 自己的 wxid（puppet 身份仅随事件携带，get_config 用；事件到来前 undefined） */
+  private puppetWxid: string | undefined = undefined
 
   // Socket.IO 连接（动态 import，仅 socketio 模式使用）
   private socket: { disconnect(): void; on(event: string, handler: (...args: unknown[]) => void): void } | null = null
@@ -273,6 +275,31 @@ export class WechatChannel extends ModuleBase {
       `conversation=${event.conversation.name}, isGroup=${isGroup}`
     )
 
+    this.puppetWxid = event.puppet?.wxid ?? this.puppetWxid
+
+    const rawContent = event.message.content as Record<string, unknown>
+
+    // 检测 @Crabot
+    const atString = (rawContent.at_string as string | undefined) ?? ''
+    const isMentionCrab = isGroup && atString.split(',').some(wxid => wxid.trim() === event.puppet.wxid)
+
+    // 群聊门控（group.only_respond_to_mentions）：只放行定向消息——@ Crabot，或
+    // 引用/回复 Crabot 发言（connector 反查补齐的 quoted_sender_wxid 与 puppet.wxid
+    // 同一 ID 空间，精确对照；字段缺失即反查失败，按"无法确认引用 Crabot"丢弃）。
+    // 丢弃发生在 session upsert 与事件发布之前：不建 session、不发布、无 journal。
+    if (this.wechatConfig.only_respond_to_mentions === true && isGroup && !isMentionCrab) {
+      const quotedSenderWxid = typeof rawContent.quoted_sender_wxid === 'string'
+        ? rawContent.quoted_sender_wxid
+        : undefined
+      if (quotedSenderWxid !== event.puppet.wxid) {
+        console.log(
+          `[WechatChannel] Dropped non-directed group message, event=${event.eventId}, ` +
+          `sender=${event.sender.wxid}, quoted_sender_wxid=${quotedSenderWxid ?? '(missing)'}`
+        )
+        return
+      }
+    }
+
     // 创建/更新 Session
     const { session } = this.sessionManager.upsert({
       platform_session_id: platformSessionId,
@@ -284,15 +311,10 @@ export class WechatChannel extends ModuleBase {
 
     // 格式化消息内容（所有消息类型统一通过 formatWechatContent 处理）
     const msgType = event.message.type
-    const rawContent = event.message.content as Record<string, unknown>
     const { content: formattedContent, features: extraFeatures } = formatWechatContent(msgType, rawContent)
 
     // 文件（公开 URL）惰性化：登记 handle，图片保持原样
     const content = await this.lazifyFileContent(formattedContent, session.id, event.message.id)
-
-    // 检测 @Crabot
-    const atString = (rawContent.at_string as string | undefined) ?? ''
-    const isMentionCrab = isGroup && atString.split(',').some(wxid => wxid.trim() === event.puppet.wxid)
 
     // 获取 Crabot 群昵称（仅群聊）
     const crabDisplayName = isGroup
@@ -455,11 +477,74 @@ export class WechatChannel extends ModuleBase {
     this.registerMethod('get_history', this.handleGetHistory.bind(this))
     this.registerMethod('get_message', this.handleGetMessage.bind(this))
     this.registerMethod('fetch_media', this.handleFetchMedia.bind(this))
+    this.registerMethod('get_config', this.handleGetConfig.bind(this))
+    this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
   }
 
   // ============================================================================
   // Channel 协议方法实现
   // ============================================================================
+
+  // ── config（protocol-channel.md §6.1）──────────────────────────────────────
+
+  private handleGetConfig() {
+    const cfg: Record<string, unknown> = {
+      platform: 'wechat',
+      credentials: {
+        connector_url: this.wechatConfig.connector_url,
+        api_key: '***',
+      },
+      group: {
+        only_respond_to_mentions: this.wechatConfig.only_respond_to_mentions,
+      },
+      // puppet 身份仅随事件携带：事件到来前为空串（feishu 的 botOpenId 同款语义）
+      crab_platform_user_id: this.puppetWxid ?? '',
+    }
+    return {
+      config: cfg,
+      schema: {
+        'credentials.connector_url': { hot_reload: false, description: 'wechat-connector 地址，变更需重启' },
+        'credentials.api_key': { sensitive: true, hot_reload: false, description: 'Bot API Key，变更需重启' },
+        'group.only_respond_to_mentions': { hot_reload: true, description: '群聊仅响应定向消息（@ 或引用/回复 Crabot 发言）' },
+      },
+    }
+  }
+
+  /**
+   * Admin Web 把 handleGetConfig 的嵌套结构原样回传，所以 incoming 字段路径必须
+   * 跟 get 输出一一对应：credentials.* / group.*。api_key 收到掩码占位符 *** 表示
+   * 用户没改，跳过覆盖避免清掉真值；credentials 变更只置 requires_restart，不改
+   * 运行态连接（WechatClient 持有构造时的 URL/Key，重启才重建）。
+   */
+  private handleUpdateConfig(params: {
+    config?: {
+      credentials?: { connector_url?: string; api_key?: string }
+      group?: { only_respond_to_mentions?: boolean }
+    }
+  }): { config: Record<string, unknown>; requires_restart: boolean } {
+    const incoming = params.config ?? {}
+    let requiresRestart = false
+
+    const creds = incoming.credentials ?? {}
+    if (typeof creds.connector_url === 'string' && creds.connector_url) {
+      const cleaned = creds.connector_url.replace(/\/puppet-events\/?$/, '').replace(/\/+$/, '')
+      if (cleaned !== this.wechatConfig.connector_url) {
+        this.wechatConfig.connector_url = cleaned
+        requiresRestart = true
+      }
+    }
+    if (typeof creds.api_key === 'string' && creds.api_key && creds.api_key !== '***') {
+      this.wechatConfig.api_key = creds.api_key
+      requiresRestart = true
+    }
+
+    const group = incoming.group ?? {}
+    if (typeof group.only_respond_to_mentions === 'boolean') {
+      this.wechatConfig.only_respond_to_mentions = group.only_respond_to_mentions
+    }
+
+    return { config: this.handleGetConfig().config, requires_restart: requiresRestart }
+  }
 
   /**
    * send_message：Agent 调用此方法发送消息到微信
