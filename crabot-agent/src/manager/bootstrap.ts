@@ -601,8 +601,12 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // @handle,由唤醒边界解析好放在缓存里(见 principal.ts `renderDialogProfile`)。
     // 「待处理通知」仍无解析入口,继续留空——prompt.ts 对缺省有处理。
     promptInputs: (key) => {
-      const dialogProfile = principals.get(key)?.dialogProfile
-      return dialogProfile ? { dialogProfile } : {}
+      const cached = principals.get(key)
+      const dialogProfile = cached?.dialogProfile
+      return {
+        ...(dialogProfile ? { dialogProfile } : {}),
+        ...(cached?.principal.sessionType === 'group' ? { isGroup: true } : {}),
+      }
     },
   })
 

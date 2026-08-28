@@ -1,7 +1,7 @@
 /**
  * Manager system prompt 装配 —— protocol-agent-v3.md §4.2/§4.3。
  *
- * 结构按稳定性排序：静态身份段（+ 系统线程专属纪律）→ 对话对象档案。
+ * 结构按稳定性排序：静态身份段（+ 系统线程/群聊专属纪律）→ 对话对象档案。
  * 每轮变化的 worker 台账、当前时间与通知必须通过 wake event 或工具结果进入消息尾部，
  * 不得进入 system prompt。
  *
@@ -13,6 +13,8 @@ import type { ManagerKey } from './types.js'
 export interface PromptInputs {
   readonly managerKey: ManagerKey
   readonly isSystemThread: boolean
+  /** 群聊会话：装配群聊响应纪律段（与 isSystemThread / isBuiltinDailyReflection 天然互斥）。 */
+  readonly isGroup?: boolean
   /** builtin daily reflection uses a fixed Admin Web delivery action. */
   readonly isBuiltinDailyReflection?: boolean
   /** 对话对象档案：friend 资料/权限/关系要点（来自 ContextAssembler 的 scene_profile 或 admin） */
@@ -79,6 +81,42 @@ Crabot 把"对话"和"干活"拆成了两层：
 **不滥用跨 session 投递**：\`send_message\` 能发到别的会话，但只在人类明确要求时才这么做，不要自作主张往别的会话塞话。`
 
 /**
+ * 群聊 manager 专属追加段（群聊响应纪律）：与 MANAGER_IDENTITY 分离，只在
+ * isGroup=true 时装配，不污染私聊 / 系统线程 manager 的静态段。
+ *
+ * 判据迁移自已退役的 Pre-Front Dispatcher 群聊版 dispatch 规则（spec
+ * 2026-05-19 §3.8 / 2026-05-15 §3.4 群聊 triage）——v3 拆分退役 dispatcher 时
+ * 这段语义没有跟着迁到 manager prompt，生产实测群成员互聊时 agent 连发多条
+ * 附和消息（插话）。信号形态（mention="@you" / mentions= / reply_to /
+ * <quoted_message>）与 prompt-manager.formatChannelMessageLine 的渲染一致。
+ */
+export const GROUP_CHAT_DISCIPLINE = `## 群聊响应纪律（当前会话是群聊）
+
+你是这个群的成员之一，不是主持人。群里大部分消息与你无关——**沉默是默认响应方式**：不调用任何 send_message 直接 end_turn 是完全正常的完成形态，系统不会追问，群聊注意力也会自然退远。
+
+### 发言前先判收件人（优先级高于消息内容）
+
+- 明确发给你的信号：消息带 \`mention="@you"\` 属性 / 正文出现档案里你的 @handle / 明确在追问你 / \`reply_to\` 或 <quoted_message> 引用的是你（identity="me"）发的消息
+- \`mentions=\` 属性里只有别人、又没有同时 @ 你 → 默认不是发给你
+- 没有指定个人收件人的公共请求，才继续判断是否该你承担
+
+### 必须沉默（直接 end_turn，不要 send_message）
+
+- 群成员之间互相讨论（即便话题是你擅长的）
+- 群成员之间一问一答（明确双方，你不是其中之一）
+- 系统通知 / 加群消息 / 分享链接
+- 不确定是否在叫你
+- 你刚发过言之后的后续消息，只要没人 @ 你、没问你、没引用你——不要接话茬、不要补充观点、不要附和、不要总结别人的讨论。刚说完话不等于对话还在等你
+
+### 禁止沉默（必须回应）
+
+- 带 \`mention="@you"\` 的消息
+- 上下文只有发送者和你两个人在对话（群内私聊化）
+- 你之前的消息被引用、被追问
+
+上文"确认后继续"（每条消息先发确认答复）在群聊里只适用于明确发给你的消息——不是发给你的消息没有交代义务。`
+
+/**
  * 系统线程 manager 专属追加段（reach_master 纪律）：与 MANAGER_IDENTITY 分离，
  * 只在 isSystemThread=true 时装配，不污染普通会话 manager 的静态段。
  */
@@ -114,6 +152,8 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
     parts.push(DAILY_REFLECTION_DELIVERY_DISCIPLINE)
   } else if (inputs.isSystemThread) {
     parts.push(SYSTEM_THREAD_REACH_MASTER)
+  } else if (inputs.isGroup) {
+    parts.push(GROUP_CHAT_DISCIPLINE)
   }
 
   if (inputs.dialogProfile) {
