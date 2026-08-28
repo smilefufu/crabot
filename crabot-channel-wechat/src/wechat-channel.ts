@@ -74,6 +74,8 @@ export class WechatChannel extends ModuleBase {
   private readonly mediaHandleStore: MediaHandleStore
   private readonly mediaCleaner: MediaCleaner
   private readonly mediaFetch: MediaFetchManager
+  /** Crabot 自己的 wxid（puppet 身份仅随事件携带，get_config 用；事件到来前 undefined） */
+  private puppetWxid: string | undefined = undefined
 
   // Socket.IO 连接（动态 import，仅 socketio 模式使用）
   private socket: { disconnect(): void; on(event: string, handler: (...args: unknown[]) => void): void } | null = null
@@ -208,6 +210,12 @@ export class WechatChannel extends ModuleBase {
       throw new Error('webhook_port is required for webhook mode')
     }
 
+    // 密钥在启动时快照：签名校验回调若实时读 this.wechatConfig.webhook_secret，
+    // update_config 热改会当场改变运行中 server 的行为（改值→connector 旧密钥全部
+    // 401 静默失聪；清空→签名校验立即短路裸奔），与 schema 声明的 hot_reload: false
+    // 相反。快照后该字段的变更只在重启重建 server 时生效。
+    const webhookSecret = this.wechatConfig.webhook_secret
+
     this.webhookServer = http.createServer((req, res) => {
       if (req.method !== 'POST') {
         res.writeHead(405)
@@ -221,11 +229,11 @@ export class WechatChannel extends ModuleBase {
         try {
           const envelope = JSON.parse(body) as WebhookEnvelope
 
-          // 验证签名
-          if (this.wechatConfig.webhook_secret) {
+          // 验证签名（用启动时快照的密钥）
+          if (webhookSecret) {
             const dataStr = JSON.stringify(envelope.data)
             const expected = crypto
-              .createHmac('sha256', this.wechatConfig.webhook_secret)
+              .createHmac('sha256', webhookSecret)
               .update(dataStr)
               .digest('hex')
 
@@ -273,6 +281,31 @@ export class WechatChannel extends ModuleBase {
       `conversation=${event.conversation.name}, isGroup=${isGroup}`
     )
 
+    this.puppetWxid = event.puppet?.wxid ?? this.puppetWxid
+
+    const rawContent = event.message.content as Record<string, unknown>
+
+    // 检测 @Crabot
+    const atString = (rawContent.at_string as string | undefined) ?? ''
+    const isMentionCrab = isGroup && atString.split(',').some(wxid => wxid.trim() === event.puppet.wxid)
+
+    // 群聊门控（group.only_respond_to_mentions）：只放行定向消息——@ Crabot，或
+    // 引用/回复 Crabot 发言（connector 反查补齐的 quoted_sender_wxid 与 puppet.wxid
+    // 同一 ID 空间，精确对照；字段缺失即反查失败，按"无法确认引用 Crabot"丢弃）。
+    // 丢弃发生在 session upsert 与事件发布之前：不建 session、不发布、无 journal。
+    if (this.wechatConfig.only_respond_to_mentions === true && isGroup && !isMentionCrab) {
+      const quotedSenderWxid = typeof rawContent.quoted_sender_wxid === 'string'
+        ? rawContent.quoted_sender_wxid
+        : undefined
+      if (quotedSenderWxid !== event.puppet.wxid) {
+        console.log(
+          `[WechatChannel] Dropped non-directed group message, event=${event.eventId}, ` +
+          `sender=${event.sender.wxid}, quoted_sender_wxid=${quotedSenderWxid ?? '(missing)'}`
+        )
+        return
+      }
+    }
+
     // 创建/更新 Session
     const { session } = this.sessionManager.upsert({
       platform_session_id: platformSessionId,
@@ -284,15 +317,10 @@ export class WechatChannel extends ModuleBase {
 
     // 格式化消息内容（所有消息类型统一通过 formatWechatContent 处理）
     const msgType = event.message.type
-    const rawContent = event.message.content as Record<string, unknown>
     const { content: formattedContent, features: extraFeatures } = formatWechatContent(msgType, rawContent)
 
     // 文件（公开 URL）惰性化：登记 handle，图片保持原样
     const content = await this.lazifyFileContent(formattedContent, session.id, event.message.id)
-
-    // 检测 @Crabot
-    const atString = (rawContent.at_string as string | undefined) ?? ''
-    const isMentionCrab = isGroup && atString.split(',').some(wxid => wxid.trim() === event.puppet.wxid)
 
     // 获取 Crabot 群昵称（仅群聊）
     const crabDisplayName = isGroup
@@ -455,11 +483,111 @@ export class WechatChannel extends ModuleBase {
     this.registerMethod('get_history', this.handleGetHistory.bind(this))
     this.registerMethod('get_message', this.handleGetMessage.bind(this))
     this.registerMethod('fetch_media', this.handleFetchMedia.bind(this))
+    this.registerMethod('get_config', this.handleGetConfig.bind(this))
+    this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
   }
 
   // ============================================================================
   // Channel 协议方法实现
   // ============================================================================
+
+  // ── config（protocol-channel.md §6.1）──────────────────────────────────────
+
+  private handleGetConfig() {
+    const cfg: Record<string, unknown> = {
+      platform: 'wechat',
+      credentials: {
+        connector_url: this.wechatConfig.connector_url,
+        api_key: '***',
+        mode: this.wechatConfig.mode,
+        ...(this.wechatConfig.webhook_secret ? { webhook_secret: '***' } : {}),
+        ...(this.wechatConfig.webhook_port !== undefined ? { webhook_port: this.wechatConfig.webhook_port } : {}),
+      },
+      group: {
+        only_respond_to_mentions: this.wechatConfig.only_respond_to_mentions,
+      },
+      // puppet 身份仅随事件携带：事件到来前为空串（feishu 的 botOpenId 同款语义）
+      crab_platform_user_id: this.puppetWxid ?? '',
+    }
+    return {
+      config: cfg,
+      schema: {
+        'credentials.connector_url': { hot_reload: false, description: 'wechat-connector 地址，变更需重启' },
+        'credentials.api_key': { sensitive: true, hot_reload: false, description: 'Bot API Key，变更需重启' },
+        'credentials.mode': { hot_reload: false, description: '推送模式，变更需重启' },
+        'credentials.webhook_secret': { sensitive: true, hot_reload: false, description: 'Webhook 签名密钥，变更需重启' },
+        'credentials.webhook_port': { hot_reload: false, description: 'Webhook 监听端口，变更需重启' },
+        'group.only_respond_to_mentions': { hot_reload: true, description: '群聊仅响应定向消息（@ 或引用/回复 Crabot 发言）' },
+      },
+    }
+  }
+
+  /**
+   * Admin Web 把 handleGetConfig 的嵌套结构原样回传，所以 incoming 字段路径必须
+   * 跟 get 输出一一对应：credentials.* / group.*。掩码字段（api_key / webhook_secret）
+   * 收到占位符 *** 表示用户没改，跳过覆盖避免清掉真值。连接/接收类字段变更只置
+   * requires_restart，不改运行态连接（WechatClient 持有构造时的 URL/Key，重启才
+   * 重建）；仅群聊门控开关热生效。
+   */
+  private handleUpdateConfig(params: {
+    config?: {
+      credentials?: {
+        connector_url?: string
+        api_key?: string
+        mode?: string
+        webhook_secret?: string
+        webhook_port?: number | string
+      }
+      group?: { only_respond_to_mentions?: boolean | string }
+    }
+  }): { config: Record<string, unknown>; requires_restart: boolean } {
+    const incoming = params.config ?? {}
+    let requiresRestart = false
+
+    const creds = incoming.credentials ?? {}
+    if (typeof creds.connector_url === 'string' && creds.connector_url) {
+      const cleaned = creds.connector_url.replace(/\/puppet-events\/?$/, '').replace(/\/+$/, '')
+      if (cleaned !== this.wechatConfig.connector_url) {
+        this.wechatConfig.connector_url = cleaned
+        requiresRestart = true
+      }
+    }
+    if (typeof creds.api_key === 'string' && creds.api_key && creds.api_key !== '***') {
+      this.wechatConfig.api_key = creds.api_key
+      requiresRestart = true
+    }
+    if ((creds.mode === 'socketio' || creds.mode === 'webhook') && creds.mode !== this.wechatConfig.mode) {
+      this.wechatConfig.mode = creds.mode
+      requiresRestart = true
+    }
+    if (typeof creds.webhook_secret === 'string' && creds.webhook_secret !== '***') {
+      if (creds.webhook_secret !== this.wechatConfig.webhook_secret) {
+        this.wechatConfig.webhook_secret = creds.webhook_secret || undefined
+        requiresRestart = true
+      }
+    }
+    // Admin SchemaField 的文本框回传字符串，未编辑时原样回传 get_config 的 number——两种都接受
+    const incomingPort = typeof creds.webhook_port === 'string' && /^\d+$/.test(creds.webhook_port)
+      ? Number(creds.webhook_port)
+      : creds.webhook_port
+    if (typeof incomingPort === 'number' && Number.isInteger(incomingPort) && incomingPort > 0
+        && incomingPort !== this.wechatConfig.webhook_port) {
+      this.wechatConfig.webhook_port = incomingPort
+      requiresRestart = true
+    }
+
+    const group = incoming.group ?? {}
+    // Admin SchemaField 的 enum 分支回传字符串（"true"/"false"），用户未动时原样
+    // 回传 get_config 的 boolean——两种都接受，避免运行中热改静默 no-op。
+    const switchValue = group.only_respond_to_mentions
+    if (typeof switchValue === 'boolean') {
+      this.wechatConfig.only_respond_to_mentions = switchValue
+    } else if (switchValue === 'true' || switchValue === 'false') {
+      this.wechatConfig.only_respond_to_mentions = switchValue === 'true'
+    }
+
+    return { config: this.handleGetConfig().config, requires_restart: requiresRestart }
+  }
 
   /**
    * send_message：Agent 调用此方法发送消息到微信
