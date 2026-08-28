@@ -12,6 +12,7 @@ import type {
   ModelProvider,
   LLMRoleRequirement,
   ModelSlotRef,
+  SlotThinkingConfig,
   MCPServerRegistryEntry,
   SkillRegistryEntry,
   ExtraConfigSchema,
@@ -86,7 +87,23 @@ interface AgentUnifiedConfig {
   system_prompt: string
   timezone: string
   model_roles: Record<string, ModelSlotRef>
+  /** 槽位思考强度（2026-08）；与 model_roles 独立，key 一致 */
+  thinking: Record<string, SlotThinkingConfig>
   extra: Record<string, unknown>
+}
+
+/** 思考下拉选项值：'' 跟随默认；off~high 常用档；custom 自定义透传 */
+type ThinkingSelectValue = '' | 'off' | 'low' | 'medium' | 'high' | 'custom'
+
+/** 自定义值归一化：纯数字串 → number（数字 budget 仅 anthropic 支持，后端校验为准） */
+function normalizeCustomThinking(raw: string): string | number {
+  return /^\d+$/.test(raw) ? parseInt(raw, 10) : raw
+}
+
+function thinkingSelectValue(t: SlotThinkingConfig | undefined): ThinkingSelectValue {
+  if (!t) return ''
+  if (t.thinking_level) return t.thinking_level
+  return 'custom'
 }
 
 export const AgentConfig: React.FC = () => {
@@ -102,8 +119,11 @@ export const AgentConfig: React.FC = () => {
     system_prompt: '',
     timezone: '',
     model_roles: {},
+    thinking: {},
     extra: {},
   })
+  /** 全局默认 LLM provider id：slot 未覆盖模型时，思考下拉的 placeholder 按全局默认 format 提示 */
+  const [globalDefaultProviderId, setGlobalDefaultProviderId] = useState<string | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -128,12 +148,19 @@ export const AgentConfig: React.FC = () => {
       setAllMCPServers(mcpServers)
       setAllSkills(skills)
 
+      // 全局默认仅用于思考下拉的 placeholder 提示：单独容错。它和 agent 配置共用 catch
+      // 会让 placeholder 级失败把整个表单打回空初始值，此时点保存会把线上配置抹成空
+      // （PR #127 review 意见 2）。
+      providerService.getGlobalConfig()
+        .then((globalConfig) => setGlobalDefaultProviderId(globalConfig.default_llm_provider_id))
+        .catch(() => { /* placeholder 退化为通用提示 */ })
       try {
         const existingConfig = await agentService.getConfig()
         setConfig({
           system_prompt: existingConfig.system_prompt || '',
           timezone: existingConfig.timezone || '',
           model_roles: existingConfig.model_config || {},
+          thinking: existingConfig.thinking || {},
           extra: existingConfig.extra || {},
         })
       } catch {
@@ -149,10 +176,27 @@ export const AgentConfig: React.FC = () => {
   const handleSave = async () => {
     try {
       setSaving(true)
+      // 自定义思考值归一化 + 空值拦截（后端校验为准，这里只挡明显笔误）
+      for (const [key, t] of Object.entries(config.thinking)) {
+        if (t.thinking_custom !== undefined && typeof t.thinking_custom === 'string' && t.thinking_custom.trim() === '') {
+          toast.error(`槽位 "${key}" 的自定义思考强度不能为空`)
+          setSaving(false)
+          return
+        }
+      }
+      const thinking = Object.fromEntries(
+        Object.entries(config.thinking).map(([key, t]) => [
+          key,
+          t.thinking_custom !== undefined && typeof t.thinking_custom === 'string'
+            ? { thinking_custom: normalizeCustomThinking(t.thinking_custom.trim()) }
+            : t,
+        ])
+      )
       await agentService.updateConfig({
         system_prompt: config.system_prompt,
         timezone: config.timezone || undefined,
         model_config: config.model_roles,
+        thinking,
         extra: Object.keys(config.extra).length > 0 ? config.extra : undefined,
       })
       toast.success('Agent 配置保存成功')
@@ -197,6 +241,45 @@ export const AgentConfig: React.FC = () => {
     const roleConfig = config.model_roles[roleKey]
     if (!roleConfig) return undefined
     return providers.find((p) => p.id === roleConfig.provider_id)
+  }
+
+  // --- 槽位思考强度（2026-08） ---
+
+  /** 该槽位生效 provider 的 format：槽位覆盖优先，回落全局默认；用于 placeholder/弱提示 */
+  const effectiveFormat = (roleKey: string): string | undefined => {
+    return getSelectedProvider(roleKey)?.format
+      ?? providers.find((p) => p.id === globalDefaultProviderId)?.format
+  }
+
+  const thinkingPlaceholder = (roleKey: string): string => {
+    switch (effectiveFormat(roleKey)) {
+      case 'anthropic': return '如 xhigh / max；老模型可填 budget 数字如 8192'
+      case 'openai': return '如 minimal / xhigh / max'
+      case 'openai-responses': return '如 minimal / xhigh / max'
+      case 'gemini': return '如 low / high（兼容层映射 thinking level）'
+      default: return '原生枚举值或 budget 数字'
+    }
+  }
+
+  const handleThinkingChange = (roleKey: string, value: ThinkingSelectValue) => {
+    setConfig((prev) => {
+      const next = { ...prev.thinking }
+      if (value === '') {
+        delete next[roleKey]
+      } else if (value === 'custom') {
+        next[roleKey] = { thinking_custom: prev.thinking[roleKey]?.thinking_custom ?? '' }
+      } else {
+        next[roleKey] = { thinking_level: value }
+      }
+      return { ...prev, thinking: next }
+    })
+  }
+
+  const handleCustomThinkingInput = (roleKey: string, raw: string) => {
+    setConfig((prev) => ({
+      ...prev,
+      thinking: { ...prev.thinking, [roleKey]: { thinking_custom: raw } },
+    }))
   }
 
   const configurableRoles = llmRequirements
@@ -297,7 +380,7 @@ export const AgentConfig: React.FC = () => {
                     {role.description && (
                       <p style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginBottom: '0.5rem', lineHeight: 1.4 }}>{role.description}</p>
                     )}
-                    <div style={{ display: 'grid', gridTemplateColumns: llmModels.length > 0 ? '1fr 1fr' : '1fr', gap: '0.5rem' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: llmModels.length > 0 ? '1fr 1fr 1fr' : '1fr 1fr', gap: '0.5rem' }}>
                       <div className="form-group" style={{ marginBottom: 0 }}>
                         <select
                           className="select"
@@ -320,7 +403,7 @@ export const AgentConfig: React.FC = () => {
                           ))}
                         </select>
                       </div>
-                      {llmModels.length > 0 && (
+                      {llmModels.length > 0 ? (
                         <div className="form-group" style={{ marginBottom: 0 }}>
                           <select
                             className="select"
@@ -334,8 +417,43 @@ export const AgentConfig: React.FC = () => {
                             ))}
                           </select>
                         </div>
-                      )}
+                      ) : null}
+                      <div className="form-group" style={{ marginBottom: 0 }}>
+                        <select
+                          className="select"
+                          value={thinkingSelectValue(config.thinking[role.key])}
+                          onChange={(e) => handleThinkingChange(role.key, e.target.value as ThinkingSelectValue)}
+                        >
+                          <option value="">思考：跟随默认</option>
+                          <option value="off">思考：关闭</option>
+                          <option value="low">思考：低</option>
+                          <option value="medium">思考：中</option>
+                          <option value="high">思考：高</option>
+                          <option value="custom">思考：自定义…</option>
+                        </select>
+                      </div>
                     </div>
+                    {thinkingSelectValue(config.thinking[role.key]) === 'custom' && (
+                      <div style={{ marginTop: '0.5rem' }}>
+                        <input
+                          className="input"
+                          value={typeof config.thinking[role.key]?.thinking_custom === 'string'
+                            ? (config.thinking[role.key].thinking_custom as string)
+                            : config.thinking[role.key]?.thinking_custom !== undefined
+                              ? String(config.thinking[role.key].thinking_custom)
+                              : ''}
+                          onChange={(e) => handleCustomThinkingInput(role.key, e.target.value)}
+                          placeholder={thinkingPlaceholder(role.key)}
+                        />
+                        {typeof config.thinking[role.key]?.thinking_custom === 'string'
+                          && /^\d+$/.test(config.thinking[role.key].thinking_custom as string)
+                          && effectiveFormat(role.key) !== 'anthropic' && (
+                          <div style={{ color: 'var(--warning)', fontSize: '0.6875rem', marginTop: '0.25rem' }}>
+                            数字 budget 仅 anthropic 格式支持，其他格式请填原生枚举值
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )
               })}

@@ -83,17 +83,18 @@ export interface ManagerRegistryDeps {
   /** routeWorkerEvent 的 origin 归属查找用(harness 未公开 findWorker,直接持有台账存储)。 */
   readonly ledger: LedgerStore
   /**
-   * manager model slot 解析器(protocol-agent-v3.md §11):调用方在此按最新 admin config
-   * 解析 `model_config.manager ?? model_config.powerful`(见 `model-slot.ts`
-   * `resolveManagerModelConfig`)、用 `createAdapter` 建出 `LLMAdapter`。做成 thunk 而非
-   * 字面量是为了让"下一个 episode 生效"的热更语义成立——`getOrCreate` 只在 key 首次建
-   * `ManagerLoop` 时把这两个 thunk 原样转给 `ManagerLoopDeps`(见下),`ManagerLoop` 自己
-   * 按 episode 边界调用,本 registry 不缓存解析结果。
+   * manager model 解析器(protocol-agent-v3.md §11;2026-08 收敛后即 `model_config.powerful`,
+   * 见 `model-slot.ts` `resolveManagerModelConfig`)、用 `createAdapter` 建出 `LLMAdapter`。
+   * 做成 thunk 而非字面量是为了让"下一个 episode 生效"的热更语义成立——`getOrCreate` 只在
+   * key 首次建 `ManagerLoop` 时把这两个 thunk 原样转给 `ManagerLoopDeps`(见下),`ManagerLoop`
+   * 自己按 episode 边界调用,本 registry 不缓存解析结果。
    */
   readonly adapter: () => LLMAdapter
   readonly model: () => string
   readonly maxTurns?: number
   readonly contextWindowTokens?: number
+  /** manager 的槽位思考强度(随 powerful slot,thunk 支持 hot-reload);undefined = 跟随默认 */
+  readonly thinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
   readonly now: () => Date
   /** Once true, no new wake may create or enqueue work for a Manager episode. */
   readonly isClosing?: () => boolean
@@ -227,6 +228,9 @@ export class ManagerRegistry {
       model: this.deps.model,
       maxTurns: this.deps.maxTurns,
       contextWindowTokens: this.deps.contextWindowTokens,
+      // thunk 原样下传：thinking 的解析在 episode 内与 adapter/model 同点发生（同样的
+      // fail-loud 语义），不能在 getOrCreate 急切调用——缺 powerful 会让唤醒路径直接抛错。
+      thinking: this.deps.thinking,
       // 唤醒事件由 ManagerLoop 按 episode 传入(见 ManagerLoopDeps.toolFace);schedule 之外
       // 的唤醒不带身份,工具面照旧。
       toolFace: (wakeEvent) =>

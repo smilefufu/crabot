@@ -3,7 +3,7 @@
  */
 
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
-import { isToolResultMessage, extractText, buildImageUrl, readSSELines, mergeConsecutiveUserMessages, capToolResultForLLM } from './llm-adapter-types.js'
+import { isToolResultMessage, extractText, buildImageUrl, readSSELines, mergeConsecutiveUserMessages, capToolResultForLLM, thinkingEffortValue } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock, LLMTokenUsage } from './types.js'
 import { HttpResponseError, StreamProtocolError } from './retry-utils.js'
 import { streamWithTimeoutAndRetry } from './stream-timeout.js'
@@ -178,6 +178,11 @@ export class OpenAIAdapter implements LLMAdapter {
       stream: true,
       stream_options: { include_usage: true },
     }
+
+    // 思考强度（spec 2026-08 §5.2）：跟随默认不发；off→'none'；low/medium/high/自定义字符串
+    // 字面量透传。gemini format 复用本 adapter（OpenAI 兼容层），同样经 reasoning_effort 映射。
+    const reasoningEffort = thinkingEffortValue(params.thinking)
+    if (reasoningEffort !== undefined) body.reasoning_effort = reasoningEffort
 
     if (tools.length > 0) {
       body.tools = tools

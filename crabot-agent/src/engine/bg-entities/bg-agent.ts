@@ -41,6 +41,8 @@ export interface SpawnPersistentAgentOpts {
   readonly model: string
   /** Per-call max output tokens；缺省时让 adapter 走默认行为 */
   readonly maxTokens?: number
+  /** 槽位思考强度；缺省 = 跟随模型默认 */
+  readonly thinking?: import('../llm-adapter-types.js').LLMThinkingConfig
   readonly adapter: LLMAdapter
   /**
    * 工具权限配置——透传给 runEngine。不传时 checkToolPermission 对 dangerous 级
@@ -185,6 +187,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
           tools: [...opts.tools],
           model: opts.model,
           ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
+          ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
           ...(opts.permissionConfig ? { permissionConfig: opts.permissionConfig } : {}),
           hookRegistry: opts.hookRegistry,
           lspManager: opts.lspManager,

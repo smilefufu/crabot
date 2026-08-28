@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { createAdapter } from '../../engine/llm-adapter.js'
+import { thinkingParam } from '../../engine/llm-adapter-types.js'
 import { forkEngine } from '../../engine/sub-agent.js'
 import { recordSubAgentTurn } from '../../engine/sub-agent-trace.js'
 import { spawnPersistentAgent } from '../../engine/bg-entities/bg-agent.js'
@@ -142,6 +143,9 @@ export class BuiltinSubagentRunner {
       systemPrompt: childPrompt,
       model: subagent.model.model_id,
       ...(subagent.model.max_tokens !== undefined ? { maxTokens: subagent.model.max_tokens } : {}),
+      ...(thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) !== undefined
+        ? { thinking: thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) }
+        : {}),
       adapter: createAdapter({
         endpoint: subagent.model.endpoint,
         apikey: subagent.model.apikey,
@@ -282,6 +286,9 @@ export class BuiltinSubagentRunner {
         tools: childTools,
         maxTurns: subagent.max_turns,
         ...(subagent.model.max_tokens !== undefined ? { maxTokens: subagent.model.max_tokens } : {}),
+        ...(thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) !== undefined
+          ? { thinking: thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) }
+          : {}),
         ...(input.context ? { parentContext: input.context } : {}),
         abortSignal: controller.signal,
         onTurn: (event) => recordSubAgentTurn(this.traceStore, trace.trace_id, event, this.redactText),

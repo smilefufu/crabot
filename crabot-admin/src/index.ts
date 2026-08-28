@@ -182,6 +182,7 @@ import {
 import { unionResolved } from './permission-resolution.js'
 import { ModelProviderManager, imageResultToConfigFields } from './model-provider-manager.js'
 import { AgentManager } from './agent-manager.js'
+import { validateAgentSlotThinking } from './agent-config-thinking.js'
 import { buildOnboardFinishResponse } from './onboard-finish-response.js'
 import { ChannelManager } from './channel-manager.js'
 import {
@@ -7248,6 +7249,9 @@ export class AdminModule extends ModuleBase {
     for (const key of Object.keys(config.model_config)) {
       if (!modelRoles.some((role) => role.key === key)) throw new Error(`Unknown core Agent model role: ${key}`)
     }
+    for (const key of Object.keys(config.thinking ?? {})) {
+      if (!modelRoles.some((role) => role.key === key)) throw new Error(`Unknown core Agent thinking role: ${key}`)
+    }
 
     // 全局默认 LLM 配置（作为 fallback，未配置时为 null）
     let globalLLM: LLMConnectionInfo | null = null
@@ -7269,6 +7273,7 @@ export class AdminModule extends ModuleBase {
     for (const role of modelRoles) {
       const ref = config.model_config[role.key]
       const fallback = role.fallback ?? 'global_default'
+      const slotThinking = config.thinking?.[role.key]
 
       if (ref) {
         // 用户显式配置了此 slot
@@ -7290,6 +7295,17 @@ export class AdminModule extends ModuleBase {
         resolvedModelConfig[role.key] = globalLLM
       }
       // fallback === 'none' 且未配置 → 不加入 resolvedModelConfig
+
+      // 思考强度跟 slot 走（protocol-admin §3.19.8）：模型来自 slot 覆盖或全局默认都一样附加；
+      // "跟随默认"（槽位无 thinking 配置）时不加任何字段，请求保持现状。
+      const resolved = resolvedModelConfig[role.key]
+      if (resolved && slotThinking) {
+        resolvedModelConfig[role.key] = {
+          ...resolved,
+          ...(slotThinking.thinking_level !== undefined && { thinking_level: slotThinking.thinking_level }),
+          ...(slotThinking.thinking_custom !== undefined && { thinking_custom: slotThinking.thinking_custom }),
+        }
+      }
     }
 
     if (!resolvedModelConfig.powerful) {
@@ -7366,10 +7382,32 @@ export class AdminModule extends ModuleBase {
       worker_implementations: await this.buildWorkerImplementationRuntimeConfig(),
     }
     delete runtimeConfig.agent_config.extra
+    // thinking 是 Admin 侧存储格式（槽位引用语义），下发的是已附加到 model_config 的解析结果
+    delete runtimeConfig.agent_config.thinking
     return {
       config_revision: epoch.revision,
       config: runtimeConfig,
     }
+  }
+
+  /**
+   * 槽位 thinking 配置校验（2026-08，protocol-admin §3.19.6）。
+   * 纯校验逻辑见 agent-config-thinking.ts；这里组装 roleKeys 与 provider format 解析回调。
+   */
+  private validateAgentSlotThinking(params: UpdateAgentConfigParams): void {
+    const roleKeys = new Set((CORE_AGENT_DEFINITION.model_roles ?? []).map((r) => r.key))
+    validateAgentSlotThinking(
+      params.model_config,
+      params.thinking,
+      roleKeys,
+      (roleKey) => {
+        const ref = params.model_config?.[roleKey]
+        const globalCfg = this.modelProviderManager.getGlobalConfig()
+        const providerId = ref?.provider_id ?? globalCfg.default_llm_provider_id
+        const provider = providerId ? this.modelProviderManager.getProvider(providerId) : undefined
+        return provider?.format
+      },
+    )
   }
 
   private async handleUpdateAgentConfig(params: UpdateAgentConfigParams): Promise<{
@@ -7378,6 +7416,7 @@ export class AdminModule extends ModuleBase {
     if (params.instance_id !== 'crabot-agent') {
       throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Legacy Agent configuration is read-only')
     }
+    this.validateAgentSlotThinking(params)
     const config = await this.agentManager.updateConfig(params)
     this.publishAdminEvent('admin.agent_instance_config_updated', {
       instance_id: params.instance_id,
@@ -8701,6 +8740,9 @@ export class AdminModule extends ModuleBase {
     return {
       core_agent: core ? {
         model_config: core.model_config,
+        // thinking 必须进语义投影：thinking-only 变更也要产生不同 fingerprint，
+        // 否则 mutateComputed 判 noop 直接 400（PR #127 review 意见 1）
+        thinking: core.thinking ?? {},
         system_prompt: core.system_prompt,
         max_iterations: core.max_iterations,
         tools_readonly: core.tools_readonly,
@@ -10629,6 +10671,20 @@ export class AdminModule extends ModuleBase {
         }
         sanitizedBody.model_config = sanitized
       }
+      // 防御性提取 thinking：只保留两个已知字段（语义校验见 validateAgentSlotThinking）
+      if (body.thinking !== undefined) {
+        const sanitizedThinking: Record<string, import('./types.js').SlotThinkingConfig> = {}
+        for (const [key, cfg] of Object.entries(body.thinking ?? {})) {
+          if (!cfg || typeof cfg !== 'object') continue
+          const { thinking_level, thinking_custom } = cfg
+          sanitizedThinking[key] = {
+            ...(thinking_level !== undefined && { thinking_level }),
+            ...(thinking_custom !== undefined && { thinking_custom }),
+          }
+        }
+        sanitizedBody.thinking = sanitizedThinking
+      }
+      this.validateAgentSlotThinking(sanitizedBody)
 
       const config = await this.agentManager.updateConfig(sanitizedBody)
       this.publishAdminEvent('admin.agent_instance_config_updated', {
@@ -11031,7 +11087,9 @@ export class AdminModule extends ModuleBase {
       if (raw.instance_id !== 'crabot-agent') {
         throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', 'agent-configs/crabot-agent.json 的 instance_id 不是 crabot-agent')
       }
-      const allowed = new Set(['powerful', 'cost_effective', 'vision', 'manager'])
+      // 2026-08 槽位收敛：旧备份含 vision/manager key 时 fail-loud 拒绝导入（与 update REST 400 契约一致），
+      // 用户需手动清理归档中的 model_config 后重试。
+      const allowed = new Set(['powerful', 'cost_effective'])
       const badKey = Object.keys((raw.model_config ?? {}) as Record<string, unknown>).find((k) => !allowed.has(k))
       if (badKey) {
         throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', `core config 含未知 model slot key: ${badKey}`)

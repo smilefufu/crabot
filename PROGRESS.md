@@ -5,6 +5,30 @@
 
 ## 当前状态
 
+### 模型槽位收敛 + 上下文/思考强度配置：实现完成，待 PR review（PR #127）
+
+- spec 与协议先行发布 crabot-docs main：spec `e4bc1da`（含 thinking 存储形态修正——ModelSlotRef
+  保持纯引用，thinking 独立 map）；协议 `eeba0c8`（base-protocol 0.2.3、protocol-admin 0.2.6、
+  protocol-agent-v3 3.1.2）。
+- **槽位收敛**（用户决策）：`CoreAgentModelRole` 4→2（powerful/cost_effective）；Manager loop 直接用
+  powerful（原"manager 槽 + 内部回退"按用户定性为多余设计移除）；vision 场景（research_collector）归
+  cost_effective。存量迁移：槽位引用丢弃+warn（不搬运，防隐式改写保留槽解析）；subagent model_role
+  角色引用归一化 vision→cost_effective / manager→powerful（幂等，经既有 seedBuiltin flush 落盘）。
+  backup import preflight 收敛 2 key（旧备份含 legacy key fail-loud）。
+- **思考强度配置**：`AgentInstanceConfig.thinking`（独立 map，level/custom 互斥；自定义值原样透传，
+  数字仅 anthropic）；解析时"强度跟 slot 走"（回落全局默认仍生效）；三 adapter 映射
+  （anthropic effort/disabled/budget_tokens、openai+gemini 兼容层 reasoning_effort、responses；
+  **Codex 跟随默认保持 medium 现状**）；不做运行时降级，档位不匹配由 Provider 400、用户改档自愈。
+- **上下文窗口配置**：`ModelInfo.context_window` 协议本就有字段，补 UI——详情抽屉"上下文"列内联
+  编辑（清空=回退默认 200K），驱动 compaction 阈值。
+- 分支 `worktree-slot-convergence-thinking-config`（PR #127，3 commits）；新增单测 41 例全绿；
+  worktree 全量测试中 main 既有失败与负载 flaky 已逐个甄别标注。
+- @claude review（2026-08-28）两条真实风险已修（`f5f430c6`）：①thinking 加进
+  readCoreAgentSemanticSnapshot 投影（否则 thinking-only 保存被判 noop 400）；②AgentConfig
+  的 getGlobalConfig 拆分容错（placeholder 级失败不再打空表单）。
+- **待做**：spec §9 手工验收三项（真实 provider effort 生效 / 128K compaction 提前 / 存量迁移演练）
+  需起实例验证；协议注释"四个 slots"修正待推 docs（worktree 隔离，会话收尾补）。
+
 ### wechat 群聊门控（@ + 引用放行）：已合并（PR #124 → `ffd32e55`）
 
 - 已确认 spec 与计划发布到 `crabot-docs` main（`2631a13` / `d4d9560`）：`protocol-channel.md` 0.1.2
@@ -171,6 +195,15 @@
 
 ### 技术债与既有 follow-up（P6 后或并行确认）
 
+- **槽位思考强度 PR #127 review follow-up（2026-08-28）**：① anthropic 数字 budget 档位
+  （`thinking:{type:'enabled',budget_tokens:N}`）会开启经典 extended thinking，但
+  anthropic-adapter 流处理只消费 text/input_json delta，thinking block 与 signature 既不产出
+  也不回传——≤4.5 老模型 tool loop 第二轮大概率 400；触发需「anthropic + 老模型 + 主动填数字」
+  组合且 fail-loud，改 UI placeholder 措辞或做 block 回传属后续 spec。② 数字 thinking_custom 的
+  format 校验是保存时一次性判定：槽位无模型引用时事后换全局默认 Provider 不会重校验，
+  `thinkingEffortValue` 对 number 返回 undefined → 静默退化为跟随默认（协议已知边界）。
+  ③ backup import 对 legacy 槽位 key fail-loud 拒绝 vs 启动迁移丢弃+warn 的恢复体验不一致
+  （有意为之，灾难恢复场景用户需手改归档 JSON，观察是否值得放宽）。
 - **核心配置 revision 启动自检 fail-open：已合并**（PR #126 → `edab960a`）。PR #122 投影变更
   撞上一次性 rebaseline 申报通道锁死生产后，按 spec（crabot-docs
   `2026-08-28-config-revision-startup-fail-open-design.md`、protocol-admin 0.2.5）把启动漂移

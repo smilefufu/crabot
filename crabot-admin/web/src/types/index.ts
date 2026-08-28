@@ -213,10 +213,18 @@ export interface ModelSlotRef {
   model_id: string
 }
 
+/** 槽位思考强度配置（2026-08）；与 models 独立，缺省 = 跟随模型默认 */
+export interface SlotThinkingConfig {
+  thinking_level?: 'off' | 'low' | 'medium' | 'high'
+  thinking_custom?: string | number
+}
+
 export interface AgentInstanceConfig {
   instance_id: string
   system_prompt: string
   model_config: Record<string, ModelSlotRef>
+  /** 各槽位思考强度配置；key 与 model_config 一致 */
+  thinking?: Record<string, SlotThinkingConfig>
   mcp_server_ids?: string[]
   skill_ids?: string[]
   max_iterations?: number
@@ -663,7 +671,7 @@ export interface Schedule {
 // SubAgent（与 crabot-admin/src/types.ts 镜像；保持字段名 100% 一致）
 // ============================================================================
 
-export type ModelRole = 'powerful' | 'cost_effective' | 'vision' | 'manager'
+export type ModelRole = 'powerful' | 'cost_effective'
 
 export interface BuiltinCapabilities {
   file_system: boolean

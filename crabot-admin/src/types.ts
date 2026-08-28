@@ -1311,6 +1311,10 @@ export interface LLMConnectionInfo extends ModelConnectionInfo {
   supports_vision?: boolean
   /** 模型上下文窗口（token 数）；agent 侧用于 compaction 触发阈值，缺失时回退内置默认 */
   context_window?: number
+  /** 思考强度档位（槽位配置附加，base-protocol §5.14）；与 thinking_custom 互斥，缺省 = 跟随模型默认 */
+  thinking_level?: 'off' | 'low' | 'medium' | 'high'
+  /** 自定义思考参数原样透传值；字符串 → 枚举型参数，数字 → budget 型参数。与 thinking_level 互斥 */
+  thinking_custom?: string | number
 }
 
 // Model Provider API 参数类型
@@ -1574,6 +1578,14 @@ export interface ModelSlotRef {
   model_id: string
 }
 
+/** 槽位思考强度配置（2026-08 起，protocol-admin §3.19.2）；与 models 独立——槽位未配模型引用时仍可配思考。 */
+export interface SlotThinkingConfig {
+  /** 思考强度档位；与 thinking_custom 互斥，两者均缺省 = 跟随模型默认（不下发任何思考参数） */
+  thinking_level?: 'off' | 'low' | 'medium' | 'high'
+  /** 自定义思考参数原样透传值；字符串 → 枚举型参数，数字 → budget 型参数。与 thinking_level 互斥 */
+  thinking_custom?: string | number
+}
+
 /** Agent 实例配置（存储格式：引用注册表 ID） */
 export interface AgentInstanceConfig {
   /** 实例 ID */
@@ -1582,6 +1594,8 @@ export interface AgentInstanceConfig {
   system_prompt: string
   /** 模型配置（按角色键索引，值为 ModelSlotRef 引用） */
   model_config: Record<string, ModelSlotRef>
+  /** 各槽位思考强度配置（可选，key 与 model_config 一致；缺省键 = 跟随默认） */
+  thinking?: Record<string, SlotThinkingConfig>
   /** @deprecated as of 2026-04-27. MCP enable/disable 已移到 MCPServerRegistryEntry.enabled 全局字段。运行时忽略此字段；前端不再写入此字段。保留兼容期不破坏老数据。 */
   mcp_server_ids?: string[]
   /** @deprecated as of 2026-04-27. Skill enable/disable 已移到 SkillRegistryEntry.enabled 全局字段。运行时忽略此字段；前端不再写入此字段。保留兼容期不破坏老数据。 */
@@ -1716,6 +1730,8 @@ export interface UpdateAgentConfigParams {
   instance_id: string
   system_prompt?: string
   model_config?: Record<string, ModelSlotRef>
+  /** 各槽位思考强度配置（2026-08 起）；语义见 SlotThinkingConfig */
+  thinking?: Record<string, SlotThinkingConfig>
   /** @deprecated as of 2026-04-27. MCP enable/disable 已移到 MCPServerRegistryEntry.enabled 全局字段。运行时忽略此字段；前端不再写入此字段。保留兼容期不破坏老数据。 */
   mcp_server_ids?: string[]
   /** @deprecated as of 2026-04-27. Skill enable/disable 已移到 SkillRegistryEntry.enabled 全局字段。运行时忽略此字段；前端不再写入此字段。保留兼容期不破坏老数据。 */
@@ -2140,10 +2156,10 @@ export interface MemoryStats {
 // ============================================================================
 
 /** Subagent 抽象模型 role。Admin push 时按当前 agent 实例的 model_config[role] 解析为 LLMConnectionInfo。
- *  - powerful: 主 worker / 复杂推理 / planning（如 Claude Sonnet, GPT-5）
- *  - cost_effective: 简单执行 / 摘要 / 高频低成本调用（如 DeepSeek, Haiku）
- *  - vision: 截图 / UI 识别 / 多模态图像理解 */
-export type ModelRole = 'powerful' | 'cost_effective' | 'vision' | 'manager'
+ *  - powerful: 主 worker / 复杂推理 / planning / Manager loop（如 Claude Sonnet, GPT-5）
+ *  - cost_effective: 简单执行 / 摘要 / 高频低成本调用 / 视觉内容消化（如 DeepSeek, Haiku）
+ *  2026-08 槽位收敛：vision/manager 槽位移除（protocol-admin §3.19.11），存量配置启动时丢弃。 */
+export type ModelRole = 'powerful' | 'cost_effective'
 
 /** Subagent 内置能力组配置。file_system/shell/task_intel 控制工具注入；两个 crab_* 字段只兼容旧存储，运行时固定 false。
  *  详见 subagent-tool-filter.ts 的 classifyTool 映射。

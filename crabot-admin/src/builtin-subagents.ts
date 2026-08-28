@@ -636,7 +636,8 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
       verification: RESEARCH_COLLECTOR_VERIFICATION,
       provider_id: null,
       model_id: null,
-      model_role: 'vision',
+      // 2026-08 槽位收敛：原 vision 槽场景（批量消化图片）由 cost_effective 承担（protocol-admin §3.19.11）
+      model_role: 'cost_effective',
       builtin_capabilities: {
         file_system: true,
         shell: true,

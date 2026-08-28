@@ -704,6 +704,10 @@ export interface LLMConnectionInfo {
   supports_vision?: boolean
   /** 模型上下文窗口（token 数）；用于 compaction 触发阈值，缺失时 engine 回退内置默认 200000 */
   context_window?: number
+  /** 思考强度档位（槽位配置附加，base-protocol §5.14）；与 thinking_custom 互斥，缺省 = 跟随模型默认 */
+  thinking_level?: 'off' | 'low' | 'medium' | 'high'
+  /** 自定义思考参数原样透传值；字符串 → 枚举型参数，数字 → budget 型参数。与 thinking_level 互斥 */
+  thinking_custom?: string | number
   /** ChatGPT OAuth 账号 ID（仅 openai-responses + ChatGPT 订阅需要） */
   account_id?: string
 }

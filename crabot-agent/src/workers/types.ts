@@ -1,5 +1,6 @@
 import type { ModelFormat } from 'crabot-shared'
 import type { ToolDefinition, LLMAdapter } from '../engine/index.js'
+import type { LLMThinkingConfig } from '../engine/llm-adapter-types.js'
 import type { Resolvable } from '../engine/types.js'
 // 纯类型引用(两侧都是 `import type`,编译后无运行时依赖,不构成模块环)。
 import type { LedgerWorker } from './harness/ledger-types.js'
@@ -297,6 +298,8 @@ export interface SpawnSpec {
     readonly maxTokens?: number
     readonly contextWindowTokens?: number
     readonly supportsVision?: boolean
+    /** 槽位思考强度（2026-08）；缺省 = 跟随模型默认 */
+    readonly thinking?: LLMThinkingConfig
     /** IANA 时区名,用于 tool_result 时间戳渲染 */
     readonly timezone?: string
   }

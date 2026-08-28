@@ -131,9 +131,11 @@ export interface BootstrapDeps {
    * `agent_config.timezone` 不必重建整个栈。不注入则退回 `resolveTimezone(undefined)`。
    */
   readonly timezone?: () => string
-  /** manager 的 LLM 来源(model_config.manager ?? powerful),thunk 以支持热更 */
+  /** manager 的 LLM 来源(2026-08 收敛后即 powerful slot),thunk 以支持热更 */
   readonly managerAdapter: () => LLMAdapter
   readonly managerModel: () => string
+  /** manager 的槽位思考强度(随 powerful slot),thunk 以支持热更;返回 undefined = 跟随默认 */
+  readonly managerThinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
   readonly messagingDeps: CrabMessagingDeps
   /**
    * crab-memory server **工厂**(P7 J:原本是一个建好的 `McpServer` 定值)。
@@ -504,6 +506,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     ledger,
     adapter: deps.managerAdapter,
     model: deps.managerModel,
+    thinking: deps.managerThinking,
     now: () => new Date(deps.now()),
     isClosing: deps.isClosing,
     timezone: deps.timezone,

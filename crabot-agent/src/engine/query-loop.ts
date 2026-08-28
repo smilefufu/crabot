@@ -177,6 +177,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         tools: [...currentTools],
         model: options.model,
         maxTokens: options.maxTokens,
+        thinking: options.thinking,
         signal: abortSignal,
         onRetry: (event) => {
           if (options.onLiveProgress) {

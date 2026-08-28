@@ -20,9 +20,20 @@ describe('migrateModelConfig', () => {
       .toEqual({ cost_effective: { provider_id: 'p3', model_id: 'm3' } })
   })
 
-  it('vision_expert → vision', () => {
+  it('vision_expert / vision / manager 丢弃（2026-08 槽位收敛，不搬运到保留槽）', () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     expect(migrateModelConfig({ vision_expert: { provider_id: 'p', model_id: 'm' } }))
-      .toEqual({ vision: { provider_id: 'p', model_id: 'm' } })
+      .toEqual({})
+    expect(migrateModelConfig({ vision: { provider_id: 'p', model_id: 'm' } }))
+      .toEqual({})
+    expect(migrateModelConfig({ manager: { provider_id: 'p', model_id: 'm' } }))
+      .toEqual({})
+    // 收敛不隐式改写保留槽的既有解析结果
+    expect(migrateModelConfig({
+      powerful: { provider_id: 'p1', model_id: 'm1' },
+      manager: { provider_id: 'p2', model_id: 'm2' },
+    })).toEqual({ powerful: { provider_id: 'p1', model_id: 'm1' } })
+    spy.mockRestore()
   })
 
   it('coding_expert 丢弃', () => {
@@ -35,7 +46,7 @@ describe('migrateModelConfig', () => {
   it('已是新 key 保持不变', () => {
     const input = {
       powerful: { provider_id: 'p1', model_id: 'm1' },
-      vision: { provider_id: 'p2', model_id: 'm2' },
+      cost_effective: { provider_id: 'p2', model_id: 'm2' },
     }
     expect(migrateModelConfig(input)).toEqual(input)
   })

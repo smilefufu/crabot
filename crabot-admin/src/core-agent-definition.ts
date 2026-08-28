@@ -15,7 +15,7 @@ const CORE_BODY: AgentImplementation = {
   model_roles: [
     {
       key: 'powerful',
-      description: '强力模型，用于主 worker / 复杂推理 / planning',
+      description: '强力模型，用于主 worker / 复杂推理 / planning / Manager loop 对话与决策',
       required: true,
       recommended_capabilities: ['tool_use', 'long_context'],
       used_by: ['front', 'worker'],
@@ -23,32 +23,11 @@ const CORE_BODY: AgentImplementation = {
     },
     {
       key: 'cost_effective',
-      description: '性价比模型，用于简单执行 / 摘要 / 低复杂度调用',
+      description: '性价比模型，用于简单执行 / 摘要 / 低复杂度调用 / 视觉内容消化',
       required: false,
       recommended_capabilities: ['fast'],
       used_by: ['front', 'worker'],
       fallback: 'global_default',
-    },
-    {
-      key: 'vision',
-      description: '视觉模型，用于截图分析 / UI 识别 / 图片内容理解',
-      required: false,
-      recommended_capabilities: ['vision'],
-      used_by: ['worker'],
-      fallback: 'none',
-    },
-    {
-      // protocol-agent-v3.md §11：manager loop 的对话与工具调用决策用模型。
-      // fallback 特意选 'none'（而不是 'global_default'）：未配置时不由 Admin 自动填全局默认，
-      // 而是把"未配置"这个事实原样透传给 agent 侧——agent 按 model_config.manager ?? model_config.powerful
-      // 解析（见 crabot-agent/src/manager/model-slot.ts），这样当用户已显式给 powerful 配了非默认
-      // provider/model 时，manager 会跟着用 powerful 的实际值，而不是被 Admin 全局默认覆盖掉。
-      key: 'manager',
-      description: 'Manager loop 用模型，负责对话与决策；未配置时回退到 powerful',
-      required: false,
-      recommended_capabilities: ['tool_use', 'long_context'],
-      used_by: ['front'],
-      fallback: 'none',
     },
   ],
   extra_schema: [

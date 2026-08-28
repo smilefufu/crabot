@@ -43,12 +43,49 @@ export function wrapOnRetry(
   return (e) => cb({ ...e, source })
 }
 
+/** 槽位思考强度（base-protocol §5.14 thinking_level/thinking_custom 的运行时形态）。 */
+export interface LLMThinkingConfig {
+  readonly level?: 'off' | 'low' | 'medium' | 'high'
+  readonly custom?: string | number
+}
+
+/**
+ * LLMConnectionInfo.thinking_level/custom → LLMThinkingConfig。
+ * 两字段均缺省（跟随默认）时返回 undefined，调用方据此不下发任何思考参数。
+ */
+export function thinkingParam(
+  level: LLMThinkingConfig['level'],
+  custom: LLMThinkingConfig['custom'],
+): LLMThinkingConfig | undefined {
+  if (level === undefined && custom === undefined) return undefined
+  return {
+    ...(level !== undefined ? { level } : {}),
+    ...(custom !== undefined ? { custom } : {}),
+  }
+}
+
+/**
+ * 思考强度 → 枚举型参数值（OpenAI `reasoning_effort` / Responses `reasoning.effort`；
+ * Gemini 经 OpenAI 兼容层映射 thinking level）。
+ * off → 'none'；low/medium/high 字面量透传；自定义字符串原样透传；
+ * 自定义数字是 budget 型参数（仅 anthropic），此处返回 undefined 表示不适用。
+ */
+export function thinkingEffortValue(thinking: LLMThinkingConfig | undefined): string | undefined {
+  if (!thinking) return undefined
+  if (thinking.custom !== undefined) {
+    return typeof thinking.custom === 'string' ? thinking.custom : undefined
+  }
+  return thinking.level === 'off' ? 'none' : thinking.level
+}
+
 export interface LLMStreamParams {
   readonly messages: EngineMessage[]
   readonly systemPrompt: string
   readonly tools: ToolDefinition[]
   readonly model: string
   readonly maxTokens?: number
+  /** 思考强度；undefined = 跟随模型默认（请求中不出现任何思考参数） */
+  readonly thinking?: LLMThinkingConfig
   readonly signal?: AbortSignal
   /** 可观测性回调：retry 发生时触发；用于 worker → admin web 实时显示"LLM 正在重试" */
   readonly onRetry?: (event: LLMRetryEvent) => void

@@ -137,6 +137,7 @@ export class AgentManager {
       ...existing,
       ...(params.system_prompt !== undefined && { system_prompt: params.system_prompt }),
       ...(params.model_config !== undefined && { model_config: params.model_config }),
+      ...(params.thinking !== undefined && { thinking: params.thinking }),
       ...(params.mcp_server_ids !== undefined && { mcp_server_ids: params.mcp_server_ids }),
       ...(params.skill_ids !== undefined && { skill_ids: params.skill_ids }),
       ...(params.max_iterations !== undefined && { max_iterations: params.max_iterations }),
@@ -150,7 +151,10 @@ export class AgentManager {
       await this.saveConfig(params.instance_id)
     }
     const domains: ConfigDomain[] = [
-      ...(params.model_config !== undefined && canonicalizeJson(existing.model_config) !== canonicalizeJson(updated.model_config) ? ['models' as const] : []),
+      ...((
+        (params.model_config !== undefined && canonicalizeJson(existing.model_config) !== canonicalizeJson(updated.model_config)) ||
+        (params.thinking !== undefined && canonicalizeJson(existing.thinking ?? {}) !== canonicalizeJson(updated.thinking ?? {}))
+      ) ? ['models' as const] : []),
       ...(
         (params.system_prompt !== undefined && existing.system_prompt !== updated.system_prompt) ||
         (params.max_iterations !== undefined && existing.max_iterations !== updated.max_iterations) ||
@@ -353,18 +357,19 @@ const LEGACY_ROLE_MIGRATION: Record<string, ModelRole> = {
   triage: 'cost_effective',
   digest: 'cost_effective',
   fast: 'cost_effective',
-  vision_expert: 'vision',
+  // vision_expert / vision 不迁移：2026-08 槽位收敛移除 vision 槽（protocol-admin §3.19.11），
+  // 视觉场景由 cost_effective 承担；不把存量引用搬到 cost_effective，避免隐式改写其既有解析。
   // coding_expert 不迁移：阶段 2 由 code_planner / code_writer 替代，
   // 各自走 powerful / cost_effective role；现有 coding_expert 配置丢弃即可。
 }
 
-const KNOWN_NEW_KEYS: ReadonlySet<string> = new Set(['powerful', 'cost_effective', 'vision', 'manager'])
+const KNOWN_NEW_KEYS: ReadonlySet<string> = new Set(['powerful', 'cost_effective'])
 
 /**
  * 迁移 model_config 旧 keys 到新 ModelRole。
- * - 已是新 key（powerful/cost_effective/vision）直接保留
+ * - 已是新 key（powerful/cost_effective）直接保留
  * - 旧 key 通过 LEGACY_ROLE_MIGRATION 映射；多个旧 key 映射到同一新 key 时不覆盖（保留先遇到的）
- * - 不识别的 key 丢弃并 console.warn
+ * - 不识别的 key（含收敛移除的 vision/manager/vision_expert）丢弃并 console.warn
  */
 export function migrateModelConfig(
   oldConfig: Record<string, ModelSlotRef>

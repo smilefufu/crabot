@@ -210,6 +210,8 @@ export interface ManagerLoopDeps {
   readonly model: () => string
   readonly maxTurns?: number
   readonly contextWindowTokens?: number
+  /** manager 的槽位思考强度(thunk,episode 内与 adapter/model 同点解析);undefined = 跟随默认 */
+  readonly thinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
   /**
    * 工具面提供者(thunk):每轮重算,由调用方决定要不要按最新状态重建。
    *
@@ -615,6 +617,7 @@ export class ManagerLoop {
     // model,固定用这份快照——即使两次解析之间 admin config 已经变了,当前 episode 也不换。
     const adapter = this.deps.adapter()
     const model = this.deps.model()
+    const thinking = this.deps.thinking?.()
 
     let state = initialState
     let historyState = withoutProtectedTail(state, committedHumanMessages.length)
@@ -645,6 +648,7 @@ export class ManagerLoop {
     ]
 
     let attempt = await this.runAttempt(episodeId, state, tailMessages, adapter, model, {
+      thinking,
       contextEnvelopes: currentInputEnvelopes,
     })
     let totalTurnsUsed = attempt.result.totalTurns
@@ -693,6 +697,7 @@ export class ManagerLoop {
           ...retryInjectedEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
         ]
         const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model, {
+          thinking,
           contextEnvelopes: [...retryCurrentEnvelopes, ...retryInjectedEnvelopes],
         })
         totalTurnsUsed += retryAttempt.result.totalTurns
@@ -733,7 +738,7 @@ export class ManagerLoop {
         [],
         adapter,
         model,
-        { initialMessages: continuationInitial },
+        { thinking, initialMessages: continuationInitial },
       )
       totalTurnsUsed += continuation.result.totalTurns
       if (continuation.result.outcome === 'completed' || continuation.result.outcome === 'max_turns') {
@@ -1136,6 +1141,8 @@ export class ManagerLoop {
     overrides?: {
       readonly initialMessages?: ReadonlyArray<EngineMessage>
       readonly contextEnvelopes?: ReadonlyArray<TimedWakeEnvelope>
+      /** 本 episode 的槽位思考强度快照（与 adapter/model 同点解析，episode 内固定） */
+      readonly thinking?: import('../engine/llm-adapter-types.js').LLMThinkingConfig
     },
   ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean; readonly initialMessageCount: number }> {
     this.attemptCounter += 1
@@ -1171,6 +1178,7 @@ export class ManagerLoop {
       model,
       maxTurns: this.deps.maxTurns,
       contextWindowTokens: this.deps.contextWindowTokens,
+      ...(overrides?.thinking !== undefined ? { thinking: overrides.thinking } : {}),
       disableCompaction: true,
       humanMessageQueue: this.mailbox,
       onBeforeLlmCall: () => {
