@@ -210,6 +210,12 @@ export class WechatChannel extends ModuleBase {
       throw new Error('webhook_port is required for webhook mode')
     }
 
+    // 密钥在启动时快照：签名校验回调若实时读 this.wechatConfig.webhook_secret，
+    // update_config 热改会当场改变运行中 server 的行为（改值→connector 旧密钥全部
+    // 401 静默失聪；清空→签名校验立即短路裸奔），与 schema 声明的 hot_reload: false
+    // 相反。快照后该字段的变更只在重启重建 server 时生效。
+    const webhookSecret = this.wechatConfig.webhook_secret
+
     this.webhookServer = http.createServer((req, res) => {
       if (req.method !== 'POST') {
         res.writeHead(405)
@@ -223,11 +229,11 @@ export class WechatChannel extends ModuleBase {
         try {
           const envelope = JSON.parse(body) as WebhookEnvelope
 
-          // 验证签名
-          if (this.wechatConfig.webhook_secret) {
+          // 验证签名（用启动时快照的密钥）
+          if (webhookSecret) {
             const dataStr = JSON.stringify(envelope.data)
             const expected = crypto
-              .createHmac('sha256', this.wechatConfig.webhook_secret)
+              .createHmac('sha256', webhookSecret)
               .update(dataStr)
               .digest('hex')
 
