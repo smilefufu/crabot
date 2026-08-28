@@ -139,6 +139,7 @@
   spec：`crabot-docs/superpowers/specs/2026-08-28-startup-reconcile-fast-probe-design.md`（含 review 修订记录 §10）。
   Review 遗留 follow-up：① `realignAliveIncarnation` 矛盾修复硬写 `running`（理论风险：矛盾+idle 场景会被 sweep 误报一次停摆，触发面窄）；② `ensureInteractionInspected` 先清标记后执行，探测抛错时该次重检丢失（与 main 旧行为一致，非新引入）。
 - **测试基建 `detectTmux()` 缺陷（PR#125 调查中发现，需单独立任务）**：probe session `exit 0` 立即退出使 tmux server 消亡，`kill-server` 失败被 catch 后恒返回 false → `skipIf(!tmuxAvailable)` 的真实 tmux 测试（codex/claude-code 的四轮/五轮 review PoC 组）在部分环境从不执行；强制启用后 PoC②（rollout 内容 id 校验）、PoC③（重启后 resume 撞号）实测为主仓同样挂的预存失败。这使相关回归长期静默跳过，PR#125 首轮验证的"codex 全绿"即由此产生假阴性。
+- **builtin resume 后 native activity 收集静默失效（w-7e31305e 调查，诊断日志已合入 main `2d2a2714`，待部署定位断点）**：resume 后 22 分钟活动收集全部静默失败（native-activity store 零写入），恢复后靠一次性全量补收兜底；任务执行本身不受影响。span 写入（appendTurn）与收集信号（onNativeActivity）同点触发、收集成功必然写盘，故失败点在 collect 链路的某条无日志静默 return。已做：守门分支化 + 源不可用（unavailableReason）留痕 + builtin readTrace 对齐 cc/codex 语义。**下一步**：部署后复现时看 agent stderr 的 `native activity collect skipped` 日志定位具体分支，再针对性修复。附带确认：Output 工具 block 600s 是 worker 传参 `timeout_ms=600000` 所致，非 bug。
 
 ### P6 后 Traces / Worker 生命周期（当前主线）
 
