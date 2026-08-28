@@ -5,6 +5,18 @@
 
 ## 当前状态
 
+### wechat 群聊门控（@ + 引用放行）：实现完成，PR #124 待 review
+
+- 已确认 spec 与计划发布到 `crabot-docs` main（`2631a13` / `d4d9560`）：`protocol-channel.md` 0.1.2
+  §4.2 把 only_respond_to_mentions 字面扩展为「定向」语义（定向 = @ Crabot，Channel 可选扩展引用放行；
+  feishu 仅 @，wechat @ + 引用）。
+- 引用判定走 connector 反查补齐的 `quoted_sender_wxid === puppet.wxid` 精确对照（BOT_INTEGRATION.md
+  §type=18 字段契约）；反查失败（字段缺失）直接丢弃，不做名字模糊降级。
+- `feat/wechat-group-mention-gate`（PR #124）：module.yaml 开关（default false=行为不变）+ main.ts
+  env 链路 + handleWechatEvent 门控（丢弃不建 session 不发布）+ 补齐协议 §6.1 MUST 的
+  get_config/update_config（feishu 同款：掩码/热改/requires_restart）。新增 15 用例 + 既有 62 全绿。
+- 待 @claude review；合并前人工验证：真实群 ① 普通发言不触发 ② @ 触发 ③ 引用 Crabot 发言触发。
+
 ### 群聊响应纪律 prompt：已合并（main `d8ad16c3`）
 
 - v3 拆分退役 Pre-Front Dispatcher 时，群聊静默判断语义（收件人判定优先 / 必须沉默 / 禁止沉默）
