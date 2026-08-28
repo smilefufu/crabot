@@ -133,6 +133,11 @@
 
 ## 当前 follow-up
 
+- **启动对账轻量探测（PR #125，review APPROVED 待合并）**：重启后对账从 ~3 分钟降到秒级（实测 88 worker 820ms）。
+  spec：`crabot-docs/superpowers/specs/2026-08-28-startup-reconcile-fast-probe-design.md`（含 review 修订记录 §10）。
+  Review 遗留 follow-up：① `realignAliveIncarnation` 矛盾修复硬写 `running`（理论风险：矛盾+idle 场景会被 sweep 误报一次停摆，触发面窄）；② `ensureInteractionInspected` 先清标记后执行，探测抛错时该次重检丢失（与 main 旧行为一致，非新引入）。
+- **测试基建 `detectTmux()` 缺陷（PR#125 调查中发现，需单独立任务）**：probe session `exit 0` 立即退出使 tmux server 消亡，`kill-server` 失败被 catch 后恒返回 false → `skipIf(!tmuxAvailable)` 的真实 tmux 测试（codex/claude-code 的四轮/五轮 review PoC 组）在部分环境从不执行；强制启用后 PoC②（rollout 内容 id 校验）、PoC③（重启后 resume 撞号）实测为主仓同样挂的预存失败。这使相关回归长期静默跳过，PR#125 首轮验证的"codex 全绿"即由此产生假阴性。
+
 ### P6 后 Traces / Worker 生命周期（当前主线）
 
 - **Worker 用户级 CLI 安装闭环（已确认，待 PR review）**：默认由 Admin 显式安装官方 npm `latest`；
