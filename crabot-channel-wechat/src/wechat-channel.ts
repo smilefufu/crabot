@@ -519,7 +519,7 @@ export class WechatChannel extends ModuleBase {
   private handleUpdateConfig(params: {
     config?: {
       credentials?: { connector_url?: string; api_key?: string }
-      group?: { only_respond_to_mentions?: boolean }
+      group?: { only_respond_to_mentions?: boolean | string }
     }
   }): { config: Record<string, unknown>; requires_restart: boolean } {
     const incoming = params.config ?? {}
@@ -539,8 +539,13 @@ export class WechatChannel extends ModuleBase {
     }
 
     const group = incoming.group ?? {}
-    if (typeof group.only_respond_to_mentions === 'boolean') {
-      this.wechatConfig.only_respond_to_mentions = group.only_respond_to_mentions
+    // Admin SchemaField 的 enum 分支回传字符串（"true"/"false"），用户未动时原样
+    // 回传 get_config 的 boolean——两种都接受，避免运行中热改静默 no-op。
+    const switchValue = group.only_respond_to_mentions
+    if (typeof switchValue === 'boolean') {
+      this.wechatConfig.only_respond_to_mentions = switchValue
+    } else if (switchValue === 'true' || switchValue === 'false') {
+      this.wechatConfig.only_respond_to_mentions = switchValue === 'true'
     }
 
     return { config: this.handleGetConfig().config, requires_restart: requiresRestart }

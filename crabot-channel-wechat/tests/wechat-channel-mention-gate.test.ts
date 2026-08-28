@@ -50,11 +50,13 @@ describe('WechatChannel group mention gate', () => {
   function groupEvent(overrides: {
     atString?: string
     quotedSenderWxid?: string
+    quotedSenderName?: string
     senderWxid?: string
   }): Record<string, unknown> {
     const content: Record<string, unknown> = { type: 0, text: 'hello group' }
     if (overrides.atString !== undefined) content.at_string = overrides.atString
     if (overrides.quotedSenderWxid !== undefined) content.quoted_sender_wxid = overrides.quotedSenderWxid
+    if (overrides.quotedSenderName !== undefined) content.quoted_sender_name = overrides.quotedSenderName
     return {
       eventId: `event-${Math.random()}`,
       timestamp: 1783858373565,
@@ -131,10 +133,15 @@ describe('WechatChannel group mention gate', () => {
       expect(publishEvent).not.toHaveBeenCalled()
     })
 
-    it('connector 反查失败（quoted_sender_wxid 缺失）→ 丢弃，不做名字模糊降级', async () => {
+    it('connector 反查失败（带 quoted_sender_name 但缺 quoted_sender_wxid）→ 丢弃，不做名字模糊降级', async () => {
       const channel = makeChannel({ onlyRespondToMentions: true })
-      await (channel as any).handleWechatEvent(groupEvent({}))
+      // 即便 name 恰好等于 puppet 昵称也不放行——spec §4.1：wxid 缺失即反查失败，
+      // 名字模糊对照被明确否决
+      await (channel as any).handleWechatEvent(
+        groupEvent({ quotedSenderName: 'Bot' })
+      )
       expect(publishEvent).not.toHaveBeenCalled()
+      expect(upsert).not.toHaveBeenCalled()
     })
 
     it('私聊消息不受门控影响 → 放行', async () => {
@@ -177,6 +184,26 @@ describe('WechatChannel group mention gate', () => {
       const result = (channel as any).handleGetConfig()
       expect(result.config.group.only_respond_to_mentions).toBe(true)
       expect(result.requires_restart === undefined || result.requires_restart === false).toBe(true)
+    })
+
+    it('update_config：接受 Admin SchemaField 回传的字符串 "true"/"false"（热改不静默 no-op）', async () => {
+      const channel = makeChannel({ onlyRespondToMentions: false })
+      const result = (channel as any).handleUpdateConfig({
+        config: { group: { only_respond_to_mentions: 'true' } },
+      })
+      expect(result.config.group.only_respond_to_mentions).toBe(true)
+      expect(result.requires_restart).toBe(false)
+
+      // 热改后：普通群消息应被丢弃
+      await (channel as any).handleWechatEvent(groupEvent({}))
+      expect(publishEvent).not.toHaveBeenCalled()
+
+      // 回传 "false" 关掉
+      ;(channel as any).handleUpdateConfig({
+        config: { group: { only_respond_to_mentions: 'false' } },
+      })
+      await (channel as any).handleWechatEvent(groupEvent({}))
+      expect(publishEvent).toHaveBeenCalledTimes(1)
     })
 
     it('update_config：api_key 掩码 *** 跳过覆盖，不置 requires_restart', () => {
