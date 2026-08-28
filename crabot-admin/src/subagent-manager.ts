@@ -260,6 +260,19 @@ export class SubAgentManager {
       }
     }
 
+    // 2026-08 槽位收敛（protocol-admin §3.19.10）：存量 model_role 角色引用归一化到代替槽位。
+    // model_role 是角色引用而非模型快照，归一化无损；builtin 的 stored state 会覆盖 codeDefault，
+    // 所以仅改 seed 不够，这里对已持久化记录（builtin + 自建）统一收敛。
+    for (const [id, entry] of this.entries) {
+      // model_role 从磁盘 JSON 读入，可能是收敛前的 legacy 值（类型已不含），按字符串比较
+      const legacyRole = entry.model_role as unknown as string | null
+      if (legacyRole === 'vision' || legacyRole === 'manager') {
+        entry.model_role = legacyRole === 'vision' ? 'cost_effective' : 'powerful'
+        needsRewrite = true
+        console.warn(`[SubAgentManager] model_role 收敛：${id} 的 model_role "${legacyRole}" → "${entry.model_role}"`)
+      }
+    }
+
     if (needsRewrite) {
       // Startup recovery must observe the persisted source before legacy normalization. The caller
       // performs the post-recovery write through coordinator-owned seed/reconciliation.

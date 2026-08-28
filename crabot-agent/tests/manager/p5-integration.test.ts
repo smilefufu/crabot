@@ -201,7 +201,6 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
   function boot(modelConfig: Record<string, LLMConnectionInfo> = {
     powerful: connInfo('powerful-model-x'),
-    manager: connInfo('manager-model-x'),
   }): void {
     agent = new UnifiedAgent(makeConfig(modelConfig))
     internals = agent as unknown as AgentInternals
@@ -316,26 +315,22 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(after).not.toContain('send_master_private')
   })
 
-  // --- ⑤ §11 manager slot 与降级路径 ---
+  // --- ⑤ §11 manager 模型解析与降级路径（2026-08 收敛：manager 直接用 powerful） ---
 
-  it('§11 manager slot：manager 优先，缺失回退 powerful', () => {
-    boot({ manager: connInfo('manager-model-x'), powerful: connInfo('powerful-model-y') })
-    const withManager = internals.managerStack as unknown as { registry: { deps: { model: () => string } } }
-    expect(withManager.registry.deps.model()).toBe('manager-model-x')
-
+  it('manager 直接使用 powerful slot（manager 槽位已移除）', () => {
     boot({ powerful: connInfo('powerful-model-y') })
-    const fallback = internals.managerStack as unknown as { registry: { deps: { model: () => string } } }
-    expect(fallback.registry.deps.model()).toBe('powerful-model-y')
+    const stack = internals.managerStack as unknown as { registry: { deps: { model: () => string } } }
+    expect(stack.registry.deps.model()).toBe('powerful-model-y')
   })
 
-  it('降级：两个 slot 都没配（现网此刻的状态）时 agent 照常构造，读模型四件套照常可用，只有 LLM 解析在被用到时才抛', async () => {
+  it('降级：powerful 也没配时 agent 照常构造，读模型四件套照常可用，只有 LLM 解析在被用到时才抛', async () => {
     boot({})
 
     expect(internals.managerStack).toBeDefined()
     await expect(rpc('list_workers_admin', {})).resolves.toBeDefined()
 
     const deps = (internals.managerStack as unknown as { registry: { deps: { model: () => string } } }).registry.deps
-    expect(() => deps.model()).toThrow(/model_config 缺少 'manager' 与 'powerful'/)
+    expect(() => deps.model()).toThrow(/model_config 缺少 'powerful'/)
   })
 
   // --- ② trigger_schedule → 系统线程 manager ---

@@ -2140,10 +2140,10 @@ export interface MemoryStats {
 // ============================================================================
 
 /** Subagent 抽象模型 role。Admin push 时按当前 agent 实例的 model_config[role] 解析为 LLMConnectionInfo。
- *  - powerful: 主 worker / 复杂推理 / planning（如 Claude Sonnet, GPT-5）
- *  - cost_effective: 简单执行 / 摘要 / 高频低成本调用（如 DeepSeek, Haiku）
- *  - vision: 截图 / UI 识别 / 多模态图像理解 */
-export type ModelRole = 'powerful' | 'cost_effective' | 'vision' | 'manager'
+ *  - powerful: 主 worker / 复杂推理 / planning / Manager loop（如 Claude Sonnet, GPT-5）
+ *  - cost_effective: 简单执行 / 摘要 / 高频低成本调用 / 视觉内容消化（如 DeepSeek, Haiku）
+ *  2026-08 槽位收敛：vision/manager 槽位移除（protocol-admin §3.19.11），存量配置启动时丢弃。 */
+export type ModelRole = 'powerful' | 'cost_effective'
 
 /** Subagent 内置能力组配置。file_system/shell/task_intel 控制工具注入；两个 crab_* 字段只兼容旧存储，运行时固定 false。
  *  详见 subagent-tool-filter.ts 的 classifyTool 映射。

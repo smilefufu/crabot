@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'fs'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { SubAgentManager, resolveSubAgentModel } from '../src/subagent-manager.js'
@@ -167,5 +167,75 @@ describe('resolveSubAgentModel', () => {
   it('都缺则抛错', () => {
     const entry = { provider_id: null, model_id: null, model_role: null }
     expect(() => resolveSubAgentModel(entry)).toThrow(/缺失/)
+  })
+})
+
+describe('SubAgentManager model_role 收敛（2026-08，protocol-admin §3.19.10）', () => {
+  let tmpDir: string
+  let warnSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'subagent-role-conv-'))
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    warnSpy.mockRestore()
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  function seedLegacyStore(): void {
+    mkdirSync(tmpDir, { recursive: true })
+    const file = {
+      version: 2,
+      entries: [
+        {
+          id: 'research_collector', is_builtin: true, enabled: true,
+          provider_id: null, model_id: null, model_role: 'vision',
+          created_at: 't', updated_at: 't',
+        },
+        {
+          id: 'custom-1', is_builtin: false, enabled: true, name: 'c', description: '',
+          when_to_use: '', role: '', workflow: '', deliverables: '',
+          provider_id: null, model_id: null, model_role: 'manager',
+          builtin_capabilities: { file_system: false, shell: false, task_intel: false, crab_memory: false, crab_messaging: false },
+          allowed_mcp_server_ids: [], allowed_skill_ids: [], max_turns: 10,
+          created_at: 't', updated_at: 't',
+        },
+      ],
+    }
+    writeFileSync(join(tmpDir, 'subagents.json'), JSON.stringify(file, null, 2))
+  }
+
+  it('启动加载时 vision→cost_effective、manager→powerful 并落盘', async () => {
+    seedLegacyStore()
+    const mgr = new SubAgentManager(tmpDir, () => [])
+    await mgr.initialize()
+    // 生产启动序列中 seedBuiltin 在 coordinator recovery 后触发 pending rewrite 落盘（index.ts:945）
+    await mgr.seedBuiltin([])
+
+    expect(mgr.get('research_collector')?.model_role).toBe('cost_effective')
+    expect(mgr.get('custom-1')?.model_role).toBe('powerful')
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('model_role 收敛'))
+
+    // 归一化已持久化
+    const persisted = JSON.parse(readFileSync(join(tmpDir, 'subagents.json'), 'utf-8'))
+    const roles = Object.fromEntries(persisted.entries.map((e: { id: string; model_role: string }) => [e.id, e.model_role]))
+    expect(roles.research_collector).toBe('cost_effective')
+    expect(roles['custom-1']).toBe('powerful')
+  })
+
+  it('二次启动幂等（无 warn、无改写）', async () => {
+    seedLegacyStore()
+    const mgr = new SubAgentManager(tmpDir, () => [])
+    await mgr.initialize()
+    await mgr.seedBuiltin([])
+    warnSpy.mockClear()
+
+    const mgr2 = new SubAgentManager(tmpDir, () => [])
+    await mgr2.initialize()
+    await mgr2.seedBuiltin([])
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('model_role 收敛'))
+    expect(mgr2.get('research_collector')?.model_role).toBe('cost_effective')
   })
 })

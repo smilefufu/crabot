@@ -241,9 +241,9 @@ describe('getBuiltinSubAgents', () => {
     expect(quality.workflow).not.toContain('spec_reviewer 已 APPROVED')
   })
 
-  it('research_collector 使用 vision role，保留调查能力但不持有 Memory', () => {
+  it('research_collector 使用 cost_effective role（2026-08 槽位收敛），保留调查能力但不持有 Memory', () => {
     const r = getBuiltinSubAgents().find((s) => s.name === 'research_collector')!
-    expect(r.model_role).toBe('vision')
+    expect(r.model_role).toBe('cost_effective')
     expect(r.builtin_capabilities.file_system).toBe(true)
     expect(r.builtin_capabilities.crab_memory).toBe(false)
     const prompt = [r.when_to_use, r.role, r.workflow, r.deliverables, r.verification].join('\n')

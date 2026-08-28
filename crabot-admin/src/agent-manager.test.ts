@@ -166,12 +166,13 @@ describe('AgentManager (P6-D core-config-only)', () => {
     })
   })
 
-  describe('manager model slot（additive，protocol-agent-v3 §11）', () => {
-    it('builtin model_roles 含 manager，required=false', () => {
+  describe('槽位收敛（2026-08，protocol-admin §3.19.11）', () => {
+    it('builtin model_roles 恰为 powerful/cost_effective，不含 vision/manager', () => {
       const impl = agentManager.getImplementation('default')
-      const managerRole = impl?.model_roles.find((r) => r.key === 'manager')
-      expect(managerRole).toBeDefined()
-      expect(managerRole?.required).toBe(false)
+      const keys = (impl?.model_roles ?? []).map((r) => r.key).sort()
+      expect(keys).toEqual(['cost_effective', 'powerful'])
+      const powerful = impl?.model_roles.find((r) => r.key === 'powerful')
+      expect(powerful?.required).toBe(true)
     })
 
     it('既有配置（无 manager 键）启动迁移后仍有效，不报错、不被强行补 manager 键', async () => {
@@ -199,6 +200,41 @@ describe('AgentManager (P6-D core-config-only)', () => {
         expect(config?.model_config).toEqual({ powerful: { provider_id: 'p1', model_id: 'm1' } })
         expect(config?.model_config?.manager).toBeUndefined()
       } finally {
+        await fs.rm(preExistingDataDir, { recursive: true, force: true })
+      }
+    })
+
+    it('存量 vision/manager 槽位引用启动时丢弃，保留槽不受影响', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const preExistingDataDir = path.join(process.cwd(), 'test-data', `agent-manager-converge-${Date.now()}`)
+      await fs.mkdir(path.join(preExistingDataDir, 'agent-configs'), { recursive: true })
+      const legacyConfig = {
+        instance_id: 'crabot-agent',
+        system_prompt: '',
+        model_config: {
+          powerful: { provider_id: 'p1', model_id: 'm1' },
+          cost_effective: { provider_id: 'p2', model_id: 'm2' },
+          vision: { provider_id: 'p3', model_id: 'm3' },
+          manager: { provider_id: 'p4', model_id: 'm4' },
+        },
+      }
+      await fs.writeFile(
+        path.join(preExistingDataDir, 'agent-configs', 'crabot-agent.json'),
+        JSON.stringify(legacyConfig, null, 2)
+      )
+
+      try {
+        const mgr = new AgentManager(preExistingDataDir)
+        await mgr.initialize()
+        await mgr.initializeCoreDefaultsAndMigrations()
+
+        const config = mgr.getConfig('crabot-agent')
+        expect(config?.model_config).toEqual({
+          powerful: { provider_id: 'p1', model_id: 'm1' },
+          cost_effective: { provider_id: 'p2', model_id: 'm2' },
+        })
+      } finally {
+        warnSpy.mockRestore()
         await fs.rm(preExistingDataDir, { recursive: true, force: true })
       }
     })

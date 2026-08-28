@@ -11031,7 +11031,9 @@ export class AdminModule extends ModuleBase {
       if (raw.instance_id !== 'crabot-agent') {
         throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', 'agent-configs/crabot-agent.json 的 instance_id 不是 crabot-agent')
       }
-      const allowed = new Set(['powerful', 'cost_effective', 'vision', 'manager'])
+      // 2026-08 槽位收敛：旧备份含 vision/manager key 时 fail-loud 拒绝导入（与 update REST 400 契约一致），
+      // 用户需手动清理归档中的 model_config 后重试。
+      const allowed = new Set(['powerful', 'cost_effective'])
       const badKey = Object.keys((raw.model_config ?? {}) as Record<string, unknown>).find((k) => !allowed.has(k))
       if (badKey) {
         throw new ImportPreflightRejected('ADMIN_BACKUP_NON_CORE_AGENT_UNSUPPORTED', `core config 含未知 model slot key: ${badKey}`)
