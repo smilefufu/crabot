@@ -31,6 +31,11 @@ function runtimeMcpEntries(entries: Map<string, MCPServerRegistryEntry>): unknow
 const MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024  // 1MB 单文件上限
 const MAX_TOTAL_SIZE_BYTES = 5 * 1024 * 1024 // 5MB 总大小上限
 const SNAPSHOT_SKIPPED_NAMES = new Set(['SKILL.md', '.skill_dir', '.DS_Store'])
+const NON_DISABLEABLE_BUILTIN_SKILL_NAMES = new Set([
+  'tmp-page',
+  'workspace-context-maintenance',
+  'scrapling-official',
+])
 
 // ============================================================================
 // SKILL.md frontmatter 解析
@@ -1607,15 +1612,25 @@ export class SkillManager {
     let changed = false
     const next = new Map(this.skills)
     for (const e of entries) {
+      const isNonDisableable = NON_DISABLEABLE_BUILTIN_SKILL_NAMES.has(e.name)
       const existing = next.get(e.id)
       if (!existing) {
-        next.set(e.id, e)
+        next.set(e.id, isNonDisableable ? { ...e, enabled: true, can_disable: false } : e)
         changed = true
         continue
       }
-      if (!existing.skill_dir && e.skill_dir) {
-        next.set(e.id, { ...existing, skill_dir: e.skill_dir, updated_at: new Date().toISOString() })
-        console.warn(`[SkillManager] Repaired builtin skill "${e.name}" (${e.id}): missing skill_dir → ${e.skill_dir}`)
+      const repairSkillDir = !existing.skill_dir && !!e.skill_dir
+      const repairRequiredState = isNonDisableable && (!existing.enabled || existing.can_disable)
+      if (repairSkillDir || repairRequiredState) {
+        next.set(e.id, {
+          ...existing,
+          ...(repairSkillDir ? { skill_dir: e.skill_dir } : {}),
+          ...(repairRequiredState ? { enabled: true, can_disable: false } : {}),
+          updated_at: new Date().toISOString(),
+        })
+        if (repairSkillDir) {
+          console.warn(`[SkillManager] Repaired builtin skill "${e.name}" (${e.id}): missing skill_dir → ${e.skill_dir}`)
+        }
         changed = true
       }
     }
@@ -1666,6 +1681,7 @@ export class SkillManager {
       }
       found++
       activeBuiltinNames.add(parsed.name)
+      const isNonDisableable = NON_DISABLEABLE_BUILTIN_SKILL_NAMES.has(parsed.name)
 
       if (existingNames.has(parsed.name)) {
         // 已注册：用 SKILL.md 当前 frontmatter 同步条目
@@ -1675,13 +1691,15 @@ export class SkillManager {
             if (
               existing.skill_dir !== skillDir ||
               existing.description !== parsed.description ||
-              existing.version !== parsed.version
+              existing.version !== parsed.version ||
+              (isNonDisableable && (!existing.enabled || existing.can_disable))
             ) {
               this.skills.set(id, {
                 ...existing,
                 skill_dir: skillDir,
                 description: parsed.description,
                 version: parsed.version,
+                ...(isNonDisableable ? { enabled: true, can_disable: false } : {}),
                 updated_at: generateTimestamp(),
               })
               changed = true
@@ -1702,7 +1720,7 @@ export class SkillManager {
         source_type: 'builtin',
         is_builtin: true,
         is_essential: false,
-        can_disable: true,
+        can_disable: !isNonDisableable,
         enabled: true,
         created_at: now,
         updated_at: now,

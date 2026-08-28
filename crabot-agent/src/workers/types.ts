@@ -255,6 +255,7 @@ export interface CapabilityBundle {
 /** Harness 向 capability provider 提供的 worker 身份上下文；权限是 spawn 时固定的快照。 */
 export interface WorkerCapabilityContext {
   readonly worker_id: string
+  readonly impl: WorkerImplId
   readonly principal_permissions?: ResolvedPermissions
 }
 

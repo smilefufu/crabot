@@ -8,6 +8,11 @@ import { ClaudeCodeAdapter, eventsFilePath, WorkerExitedError } from '../../src/
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
 import type { TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
+import {
+  createTmpPageMcpServerConfig,
+  TMP_PAGE_BRIDGE_ENV,
+  TMP_PAGE_MCP_SERVER_NAME,
+} from '../../src/workers/capability-policy.js'
 import type { ForkEstablishmentError } from '../../src/workers/errors.js'
 import type { IncarnationHandle, SpawnSpec, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 
@@ -181,6 +186,30 @@ describe('ClaudeCodeAdapter.provision', () => {
 
     await expect(fs.access(path.join(ws, 'CLAUDE.md'))).rejects.toThrow()
     await expect(fs.access(path.join(ws, 'AGENTS.md'))).rejects.toThrow()
+  })
+
+  it('把 task-scoped tmp-page bridge 的 argv、env 和 worker 绑定原样物化到 .mcp.json', async () => {
+    const server = createTmpPageMcpServerConfig('worker-cc', {
+      command: process.execPath,
+      args: ['/opt/crabot/crabot-agent/dist/mcp/tmp-page-stdio-server.js'],
+      dataDir: '/var/lib/crabot',
+      baseUrl: 'https://pages.example.test',
+      port: 19099,
+    })
+    const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [server] })
+
+    const rendered = JSON.parse(await fs.readFile(path.join(ws, '.mcp.json'), 'utf-8'))
+    expect(rendered.mcpServers[TMP_PAGE_MCP_SERVER_NAME]).toEqual({
+      command: process.execPath,
+      args: ['/opt/crabot/crabot-agent/dist/mcp/tmp-page-stdio-server.js'],
+      env: {
+        [TMP_PAGE_BRIDGE_ENV.dataDir]: '/var/lib/crabot',
+        [TMP_PAGE_BRIDGE_ENV.baseUrl]: 'https://pages.example.test',
+        [TMP_PAGE_BRIDGE_ENV.workerId]: 'worker-cc',
+        [TMP_PAGE_BRIDGE_ENV.port]: '19099',
+      },
+    })
   })
 
   it('拒绝覆盖 Git 已跟踪的 .mcp.json，避免 ignore 对 tracked file 无效时泄漏凭据', async () => {

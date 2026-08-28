@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { SkillManager } from '../src/mcp-skill-manager.js'
@@ -57,6 +57,27 @@ describe('SkillManager.seedBuiltinSkills', () => {
     await mgr2.initialize()
     expect(mgr2.get('builtin-c')?.name).toBe('c')
   })
+
+  it('真实 seed 路径修复存量已禁用的 workspace-context-maintenance', async () => {
+    const workspaceSkill = getBuiltinSkills().find(
+      (entry) => entry.id === BUILTIN_SKILL_IDS.workspaceContextMaintenance,
+    )!
+    writeFileSync(join(tmpDir, 'skills.json'), JSON.stringify([{
+      ...workspaceSkill,
+      enabled: false,
+      can_disable: true,
+    }]))
+    mgr = new SkillManager(tmpDir)
+    await mgr.initialize()
+
+    await mgr.seedBuiltinSkills(getBuiltinSkills())
+
+    const repaired = mgr.get(BUILTIN_SKILL_IDS.workspaceContextMaintenance)!
+    expect(repaired).toMatchObject({ enabled: true, can_disable: false })
+    await expect(mgr.update(repaired.id, { enabled: false })).rejects.toThrow(
+      'Skill "workspace-context-maintenance" cannot be disabled',
+    )
+  })
 })
 
 describe('getBuiltinSkills', () => {
@@ -85,6 +106,35 @@ describe('getBuiltinSkills', () => {
       expect(s.is_builtin).toBe(true)
       expect(s.enabled).toBe(true)
     }
+  })
+
+  it('workspace-context-maintenance 是 seed 路径中的必备且不可禁用 Skill', () => {
+    const list = getBuiltinSkills()
+    expect(Object.fromEntries(list.map((entry) => [entry.name, entry.can_disable]))).toEqual({
+      'writing-plans': true,
+      'systematic-debugging': true,
+      'verification-before-completion': true,
+      'workspace-context-maintenance': false,
+    })
+  })
+
+  it('全部 builtin direct child 的 crab_memory 固定为 false', () => {
+    for (const subagent of getBuiltinSubAgents()) {
+      expect(subagent.builtin_capabilities.crab_memory, subagent.name).toBe(false)
+    }
+  })
+
+  it('七个 builtin direct child 的 Skill 白名单精确匹配能力矩阵', () => {
+    const byName = new Map(getBuiltinSubAgents().map((subagent) => [subagent.name, subagent.allowed_skill_ids]))
+    expect(Object.fromEntries(byName)).toEqual({
+      code_planner: [BUILTIN_SKILL_IDS.writingPlans],
+      code_writer: [BUILTIN_SKILL_IDS.systematicDebugging, BUILTIN_SKILL_IDS.verificationBeforeCompletion],
+      research_collector: [],
+      goal_auditor: [BUILTIN_SKILL_IDS.verificationBeforeCompletion],
+      task_reviewer: [],
+      spec_reviewer: [],
+      code_quality_reviewer: [],
+    })
   })
 })
 
@@ -191,13 +241,14 @@ describe('getBuiltinSubAgents', () => {
     expect(quality.workflow).not.toContain('spec_reviewer 已 APPROVED')
   })
 
-  it('research_collector 使用 vision role + 通用调查员 capabilities 全开', () => {
-    // memory: feedback_research_collector_is_general — 2026-05-21 把 capabilities 全开恢复
-    // 原意（通用调查员，不是 web 专科），断言同步跟上代码 entry。
+  it('research_collector 使用 vision role，保留调查能力但不持有 Memory', () => {
     const r = getBuiltinSubAgents().find((s) => s.name === 'research_collector')!
     expect(r.model_role).toBe('vision')
     expect(r.builtin_capabilities.file_system).toBe(true)
-    expect(r.builtin_capabilities.crab_memory).toBe(true)
+    expect(r.builtin_capabilities.crab_memory).toBe(false)
+    const prompt = [r.when_to_use, r.role, r.workflow, r.deliverables, r.verification].join('\n')
+    expect(prompt).not.toContain('crab-memory')
+    expect(prompt).not.toContain('search_memory')
     // scrapling 是调研用的 web mcp（workflow 明列要用），此前白名单为空导致调研根本调不到，已修。
     expect(r.allowed_mcp_server_ids).toContain('scrapling')
   })

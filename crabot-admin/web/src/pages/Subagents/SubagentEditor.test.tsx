@@ -36,7 +36,7 @@ function makeEntry(over: Partial<SubAgentRegistryEntry> = {}): SubAgentRegistryE
     deliverables: '',
     verification: '',
     builtin_capabilities: {
-      file_system: true, shell: true, task_intel: true, crab_memory: true, crab_messaging: false,
+      file_system: true, shell: true, task_intel: true, crab_memory: false, crab_messaging: false,
     },
     allowed_mcp_server_ids: [],
     allowed_skill_ids: [],
@@ -116,27 +116,37 @@ describe('SubagentEditor', () => {
     })
   })
 
-  it('Tab 5 内置能力默认值：file_system/shell/task_intel/crab_memory on，crab_messaging off', async () => {
+  it('Tab 5 内置能力默认值：工作能力 on，Memory 与 messaging 协议固定 off', async () => {
     renderEditor()
     fireEvent.click(screen.getByText('内置能力'))
     expect(screen.getByLabelText('file_system')).toBeChecked()
     expect(screen.getByLabelText('shell')).toBeChecked()
     expect(screen.getByLabelText('task_intel')).toBeChecked()
-    expect(screen.getByLabelText('crab_memory')).toBeChecked()
+    expect(screen.getByLabelText('crab_memory')).not.toBeChecked()
+    expect(screen.getByLabelText('crab_memory')).toBeDisabled()
     expect(screen.getByLabelText('crab_messaging')).not.toBeChecked()
+    expect(screen.getByLabelText('crab_messaging')).toBeDisabled()
   })
 
-  it('Tab 5 crab_messaging 只读钉死 off：disabled 且 legacy 数据为 on 也显示 off', async () => {
+  it('Tab 5 Memory 与 messaging 只读钉死 off：legacy true 不显示也不写回', async () => {
     renderEditor({
       mode: 'edit',
       entry: makeEntry({ builtin_capabilities: { file_system: true, shell: true, task_intel: true, crab_memory: true, crab_messaging: true } }),
     })
     fireEvent.click(screen.getByText('内置能力'))
-    const checkbox = screen.getByLabelText('crab_messaging') as HTMLInputElement
-    expect(checkbox).toBeDisabled()
-    expect(checkbox).not.toBeChecked()
-    fireEvent.click(checkbox)
-    expect(checkbox).not.toBeChecked()
+    for (const name of ['crab_memory', 'crab_messaging']) {
+      const checkbox = screen.getByLabelText(name) as HTMLInputElement
+      expect(checkbox).toBeDisabled()
+      expect(checkbox).not.toBeChecked()
+      fireEvent.click(checkbox)
+      expect(checkbox).not.toBeChecked()
+    }
+    fireEvent.click(screen.getByText('保存'))
+    await waitFor(() => {
+      expect(subagentService.update).toHaveBeenCalledWith('c1', expect.objectContaining({
+        builtin_capabilities: expect.objectContaining({ crab_memory: false, crab_messaging: false }),
+      }))
+    })
   })
 
   it('create mode 保存调 POST', async () => {
@@ -184,5 +194,23 @@ describe('SubagentEditor', () => {
         expect.objectContaining({ allowed_mcp_server_ids: ['git'] }),
       )
     })
+  })
+
+  it('direct child 的 Skill 白名单不展示主线专用或任何 Agent 都不可用的 Crabot Skill', async () => {
+    ;(skillService.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 'normal', name: 'writing-plans', enabled: true },
+      { id: 'tmp-page', name: 'tmp-page', enabled: true },
+      { id: 'workspace-context', name: 'workspace-context-maintenance', enabled: true },
+      { id: 'memory-graph', name: 'memory-graph-linking', enabled: true },
+      { id: 'cli', name: 'crabot-cli', enabled: true },
+    ])
+    renderEditor()
+    fireEvent.click(screen.getByText('MCP + Skill 白名单'))
+
+    expect(await screen.findByLabelText('writing-plans')).toBeInTheDocument()
+    expect(screen.queryByLabelText('tmp-page')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('workspace-context-maintenance')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('memory-graph-linking')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('crabot-cli')).not.toBeInTheDocument()
   })
 })

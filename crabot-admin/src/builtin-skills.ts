@@ -77,7 +77,7 @@ export function getBuiltinSkills(): SkillRegistryEntry[] {
       source_type: 'builtin',
       is_builtin: true,
       is_essential: false,
-      can_disable: true,
+      can_disable: false,
       enabled: true,
       created_at: SEED_TIMESTAMP,
       updated_at: SEED_TIMESTAMP,

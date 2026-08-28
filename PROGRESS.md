@@ -1,11 +1,24 @@
 # Crabot 项目进度
 
-> 最后整理：2026-08-27
+> 最后整理：2026-08-28
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
 
 ### P6 已完成；Manager -> Worker 同步输入投递待 PR review
+
+### Manager / Worker 内置能力归属：实现完成，待非 Draft PR review
+
+- 已确认设计、实施计划和正式协议已发布到 `crabot-docs` main（`f27661e`）：`protocol-agent-v3`
+  3.6.13、`protocol-memory` 0.3.5。builtin、Claude Code、Codex 共用主线 Skill 策略；CLI Worker
+  通过绑定 `worker_id` 的 task-scoped stdio MCP 获得五个 tmp-page operation，Crabot 生图保持
+  builtin-only。
+- Manager 精确保留 18 项 Memory LLM 工具，所有主线 Worker 和 builtin direct child 均不再装配
+  Memory；`run_maintenance` 只保留既有非 LLM RPC 路径。direct child 的 Skill loader 按
+  `allowed_skill_ids` 重建，CLI reprovision 会清理已撤销的 Crabot 受管 Skill。
+- 能力归属相关 Agent 定向用例均通过；真实 stdio bridge `2/2`、builtin 生产装配 `20/20`、Admin
+  `58/58`、Admin Web `14/14` 通过，Agent/Admin/Admin Web `tsc --noEmit` 通过。Agent 综合批次仅余一条
+  `Goal 模式深度说明` 旧断言失败，已在未改动的 `origin/main` 同样复现。
 
 ### Manager -> Worker 同步输入投递：实现完成
 
@@ -127,7 +140,7 @@
 - **Worker 巡检调度收口**：启动对账与周期巡检应共享 due 投递排他；避免单个 Worker 的长锁阻塞全局活性巡检；默认巡检在全局 LLM 故障时需要有界的失败告警去重/退避。三项均需独立设计，不纳入当前任务巡检 PR。
 - **移除 Agent 内部 legacy `roles` seam**：`AgentLayerConfig.roles` 是 v2 前多 Agent 时代残留（正式协议从未包含），现仅作内部测试 seam/恒真分支；应替换为显式的 worker-layer 开关后删除。
 - **普通 Channel 未消费人类 wake 的跨重启恢复**：2026-08-19 实测，飞书私聊消息已落 Channel journal、reaction 已发且同 session Manager episode 已创建，但 Agent 在首次 LLM 调用前 OOM 重启；启动恢复只将遗留 episode 标为 `interrupted`，未将该 wake 重放，后续 worker 事件遂基于旧上下文回复。需独立设计普通 Channel 的持久化入站 wake、成功消费后结算、重启按原始顺序幂等重放；不得用扩大 Manager recent、滚动摘要或 prompt 约束替代。
-- 失败 Manager episode 的通用带退避 mailbox retry；跨 session 代发目标 Manager 持久注记（§4.2）；Admin skill → worker capability 接线（skill 仍硬编码 `[]`）；Codex provision `auth.json` 错误吞没；P8 调试工具/内部文档重写。
+- 失败 Manager episode 的通用带退避 mailbox retry；跨 session 代发目标 Manager 持久注记（§4.2）；Codex provision `auth.json` 错误吞没；P8 调试工具/内部文档重写。
 - Claude project-scope MCP 文件（已接受边界）；权限 schema 纪律（新增 schema 前先迁移历史 worker context）。
 - Admin source manager 的完整两阶段回滚：当前 mutation 源写入失败且内存态已推进时，靠重启恢复 fail-loud 兜底；各 manager 的事务性回滚（磁盘为准）另行设计。
 - claude-review workflow 已修 retry 阶梯（main `55f9f3a`）：Verify attempt 1/2 加 `continue-on-error`，否则首次未提交 review 直接跳过 attempt 2/3。
@@ -156,6 +169,6 @@
 为避免本文件复制并腐化架构说明，以下内容不再展开：
 
 - 项目开发与流程规则：根目录 `AGENTS.md`。
-- 正式模块契约：`crabot-docs/protocols/`（base 0.2.2、module-manager 0.2.3、admin 0.2.3、agent-v3 3.6.12、crab-messaging 0.3.2、module-spec 0.2.0）。
+- 正式模块契约：`crabot-docs/protocols/`（base 0.2.2、module-manager 0.2.3、admin 0.2.3、agent-v3 3.6.13、memory 0.3.5、crab-messaging 0.3.2、module-spec 0.2.0）。
 - 设计决策与实施计划：`crabot-docs/superpowers/specs/` 与 `plans/`。
 - 开发、部署、调试说明：`AGENTS.md` 与 `crabot-docs/guides/`。

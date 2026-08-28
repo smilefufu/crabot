@@ -23,7 +23,7 @@ function makeEntry(over: Partial<SubAgentRegistryEntry> = {}): SubAgentRegistryE
     deliverables: '',
     verification: '',
     builtin_capabilities: {
-      file_system: true, shell: true, task_intel: true, crab_memory: true, crab_messaging: false,
+      file_system: true, shell: true, task_intel: true, crab_memory: false, crab_messaging: false,
     },
     allowed_mcp_server_ids: [],
     allowed_skill_ids: [],

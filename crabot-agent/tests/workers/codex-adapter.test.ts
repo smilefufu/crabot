@@ -10,6 +10,11 @@ import { ForkEstablishmentError } from '../../src/workers/errors.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
 import type { TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
+import {
+  createTmpPageMcpServerConfig,
+  TMP_PAGE_BRIDGE_ENV,
+  TMP_PAGE_MCP_SERVER_NAME,
+} from '../../src/workers/capability-policy.js'
 import type { IncarnationHandle, SpawnSpec, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 
 function detectTmux(): boolean {
@@ -205,6 +210,30 @@ describe('CodexWorkerAdapter.provision', () => {
 
     await expect(fs.access(path.join(ws, 'AGENTS.md'))).rejects.toThrow()
     await expect(fs.access(path.join(ws, 'CLAUDE.md'))).rejects.toThrow()
+  })
+
+  it('把 task-scoped tmp-page bridge 的 argv、env 和 worker 绑定原样物化到 config.toml', async () => {
+    const server = createTmpPageMcpServerConfig('worker-codex', {
+      command: process.execPath,
+      args: ['/opt/crabot/crabot-agent/dist/mcp/tmp-page-stdio-server.js'],
+      dataDir: '/var/lib/crabot',
+      baseUrl: 'https://pages.example.test',
+      port: 19099,
+    })
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [server] })
+
+    const rendered = parseToml(await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')) as any
+    expect(rendered.mcp_servers[TMP_PAGE_MCP_SERVER_NAME]).toEqual({
+      command: process.execPath,
+      args: ['/opt/crabot/crabot-agent/dist/mcp/tmp-page-stdio-server.js'],
+      env: {
+        [TMP_PAGE_BRIDGE_ENV.dataDir]: '/var/lib/crabot',
+        [TMP_PAGE_BRIDGE_ENV.baseUrl]: 'https://pages.example.test',
+        [TMP_PAGE_BRIDGE_ENV.workerId]: 'worker-codex',
+        [TMP_PAGE_BRIDGE_ENV.port]: '19099',
+      },
+    })
   })
 
   it.each(['config.toml', 'auth.json'])('拒绝覆盖 Git 已跟踪的 .codex/%s，且在其他 provision 写入前失败', async (fileName) => {

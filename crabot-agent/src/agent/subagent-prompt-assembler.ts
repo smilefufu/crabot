@@ -7,13 +7,15 @@
  * Spec: crabot-docs/superpowers/specs/2026-05-17-subagent-customization-and-admin-ui-design.md §2.6
  */
 
-import type { SubAgentConfig } from '../types.js'
+import type { SkillConfig, SubAgentConfig } from '../types.js'
 
 export interface AssembleContext {
   /** 父任务 id（运行时注入到 Session Context 段） */
   readonly parentTaskId: string
   /** 调用方标签（运行时注入到 Session Context 段，如 'main worker'） */
   readonly callerLabel: string
+  /** 已按 direct child 白名单过滤的 Skill；为空时不注入 Skill 说明。 */
+  readonly availableSkills?: ReadonlyArray<SkillConfig>
 }
 
 const HEADER = [
@@ -49,6 +51,21 @@ export function assembleSubAgentPrompt(
 
   if (config.verification !== undefined && config.verification.trim().length > 0) {
     sections.push('—— 完成前自检 ——', config.verification, '')
+  }
+
+  if (ctx.availableSkills && ctx.availableSkills.length > 0) {
+    const skills = ctx.availableSkills.map((skill) => [
+      '<skill>',
+      `<name>${skill.name}</name>`,
+      `<description>${skill.description || skill.name}</description>`,
+      '</skill>',
+    ].join('\n')).join('\n')
+    sections.push(
+      '—— 可用 Skill ——',
+      '任务匹配下列 Skill 时，必须先调用 Skill 工具加载完整指引，再开始工作。',
+      `<available_skills>\n${skills}\n</available_skills>`,
+      '',
+    )
   }
 
   sections.push(

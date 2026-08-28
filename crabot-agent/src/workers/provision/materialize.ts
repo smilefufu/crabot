@@ -8,6 +8,13 @@ import { promisify } from 'node:util'
 import type { MCPServerConfig } from '../../types.js'
 
 const execFileAsync = promisify(execFile)
+const MANAGED_SKILLS_MANIFEST = '.crabot-managed-skills.json'
+
+interface ManagedSkillsManifest {
+  readonly version: 1
+  readonly target_subdir: string
+  readonly managed_skills: string[]
+}
 
 export interface ProvisionSources {
   skills: ReadonlyArray<{ id: string; name: string; skill_dir: string }>
@@ -35,6 +42,58 @@ function validateSkillName(name: string, targetRoot: string): void {
   }
 }
 
+function managedSkillsManifestPath(targetRoot: string): string {
+  return path.join(path.dirname(targetRoot), MANAGED_SKILLS_MANIFEST)
+}
+
+async function readManagedSkillNames(
+  targetRoot: string,
+  targetSubdir: string,
+): Promise<string[]> {
+  const manifestPath = managedSkillsManifestPath(targetRoot)
+  let raw: string
+  try {
+    raw = await fs.readFile(manifestPath, 'utf-8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+
+  let manifest: ManagedSkillsManifest
+  try {
+    manifest = JSON.parse(raw) as ManagedSkillsManifest
+  } catch {
+    throw new Error(`materializeSkills: invalid managed Skill manifest ${manifestPath}`)
+  }
+  if (
+    manifest.version !== 1
+    || manifest.target_subdir !== targetSubdir
+    || !Array.isArray(manifest.managed_skills)
+    || manifest.managed_skills.some((name) => typeof name !== 'string')
+  ) {
+    throw new Error(`materializeSkills: invalid managed Skill manifest ${manifestPath}`)
+  }
+  for (const name of manifest.managed_skills) validateSkillName(name, targetRoot)
+  return [...new Set(manifest.managed_skills)]
+}
+
+async function writeManagedSkillNames(
+  targetRoot: string,
+  targetSubdir: string,
+  names: ReadonlyArray<string>,
+): Promise<void> {
+  const manifest: ManagedSkillsManifest = {
+    version: 1,
+    target_subdir: targetSubdir,
+    managed_skills: [...names],
+  }
+  await fs.mkdir(path.dirname(targetRoot), { recursive: true })
+  await writeSensitiveFileAtomic(
+    managedSkillsManifestPath(targetRoot),
+    JSON.stringify(manifest, null, 2) + '\n',
+  )
+}
+
 /**
  * 逐 skill 把 skill_dir 整目录复制到 <ws>/<targetSubdir>/<name>/。
  * 目标目录已存在时先整体清空再复制,保证与源目录结构一致(不残留源中已删除的旧文件)。
@@ -45,13 +104,33 @@ export async function materializeSkills(
   targetSubdir: string
 ): Promise<void> {
   const targetRoot = path.join(ws, targetSubdir)
+  const nextNames = skills.map((skill) => skill.name)
+  for (const name of nextNames) validateSkillName(name, targetRoot)
+  if (new Set(nextNames).size !== nextNames.length) {
+    throw new Error('materializeSkills: duplicate skill.name in capability bundle')
+  }
+
+  const previousNames = await readManagedSkillNames(targetRoot, targetSubdir)
+  const nextNameSet = new Set(nextNames)
+  // Persist the union before mutating directories. If a later copy fails, the next
+  // provision still knows every directory that may have been written by Crabot.
+  await writeManagedSkillNames(
+    targetRoot,
+    targetSubdir,
+    [...new Set([...previousNames, ...nextNames])],
+  )
+  for (const name of previousNames) {
+    if (!nextNameSet.has(name)) {
+      await fs.rm(path.join(targetRoot, name), { recursive: true, force: true })
+    }
+  }
   for (const skill of skills) {
-    validateSkillName(skill.name, targetRoot)
     const dest = path.join(targetRoot, skill.name)
     await fs.rm(dest, { recursive: true, force: true })
     await fs.mkdir(path.dirname(dest), { recursive: true })
     await fs.cp(skill.skill_dir, dest, { recursive: true })
   }
+  await writeManagedSkillNames(targetRoot, targetSubdir, nextNames)
 }
 
 /** cc 标准 .mcp.json：stdio 保留 env；远端 server 显式 type，并保留认证 headers。 */

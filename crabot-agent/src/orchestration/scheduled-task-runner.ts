@@ -24,7 +24,7 @@ interface AdminTask {
   priority: string
   plan?: string
   task_type?: string
-  /** 任务标签（如 memory_rebuild）；透传给 worker 做按任务用途的工具分组判定。 */
+  /** 任务标签；透传业务语义，但不得提升 Worker 的工具权限。 */
   tags?: string[]
   /**
    * Schedule 目标会话（来自 Schedule.target_session 顶层字段）。

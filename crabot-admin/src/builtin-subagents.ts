@@ -1,8 +1,8 @@
 /**
  * Crabot 内置 Subagent 注入数据。
  *
- * 三个 builtin：code_planner / code_writer / research_collector。
- * 5 段 prompt 文本来自调研报告 §4.2 / §4.3 / §5.3。
+ * 七个 builtin direct child；精确名单见 BUILTIN_SUBAGENT_IDS。
+ * 初始 5 段 prompt 文本来自调研报告 §4.2 / §4.3 / §5.3，后续 profile 在对应 spec 中增补。
  *
  * 由 AdminModule.initialize() 在 SubAgentManager.initialize() 之后调用 seedBuiltin。
  * Spec: crabot-docs/superpowers/specs/2026-05-18-subagent-phase2b-builtin-design.md §1
@@ -218,7 +218,7 @@ const RESEARCH_COLLECTOR_WHEN_TO_USE = `Use this subagent when:
 共同特征：**输入是大量 raw → 输出是 ≤2K tokens 精炼结论**。如果输入不大、调用方一次工具调用就能搞定，不要派。
 
 不要在以下情况使用：
-- 单点查询（一次 web mcp / 一次 Grep / 一次 search_memory 就够）
+- 单点查询（一次 web mcp / 一次 Grep / 一次 Read 就够）
 - 写代码 / 改代码（用 code_planner → code_writer）
 - 决策类问题（"我该不该做 X"——decisions 留给调用方）
 - 主动对话 / 发消息（collector 不与用户交互）
@@ -249,7 +249,7 @@ raw 输入的来源不限——网络 API / 本地文件 / shell 输出 / 图片
 
 边界：
 - 你是 subagent，不是 Crabot 主 agent。完成任务即退出，不主动与用户对话
-- 不要持久化任何状态（除显式存到长期记忆的关键 fact 外）
+- 不要持久化任何状态
 - **不写代码 / 不改代码 / 不发用户消息 / 不调度任务**——你只调查并报告。写代码归 code_writer，发消息和调度归调用方
 - 不要把原始 raw 数据塞回调用方——只回精炼结论。如果原料确实需要上游看，给文件路径或 URL 让调用方自取`
 
@@ -272,8 +272,7 @@ const RESEARCH_COLLECTOR_WORKFLOW = `0. 【项目背景】若调研涉及具体�
    - What does this task require?
    - What is the smallest safe next step?
    - Can the coordinator slice this into one bounded code_writer task? If not, why does it need code_planner or human clarification?
-   - Which files/evidence support the recommendation?
-7. 【可选】关键事实存到长期记忆（crab-memory）便于后续复用`
+   - Which files/evidence support the recommendation?`
 
 const RESEARCH_COLLECTOR_DELIVERABLES = `markdown summary，含：
 - 调查范围：查了什么（文件 / 数据 / API），调用次数大致量
@@ -587,7 +586,7 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
       provider_id: null,
       model_id: null,
       model_role: 'powerful',
-      builtin_capabilities: { file_system: true, shell: true, task_intel: true, crab_memory: true, crab_messaging: false },
+      builtin_capabilities: { file_system: true, shell: true, task_intel: true, crab_memory: false, crab_messaging: false },
       // lsp：探代码库找定义/引用/符号；git：读 status/diff/log 理解近期改动惯例（写操作由 git-write-fence 拦）。
       // 注意：白名单按 MCP server **name** 匹配（运行时工具名 mcp__<name>__*），不是 id。
       allowed_mcp_server_ids: ['lsp', 'git'],
@@ -642,7 +641,7 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
         file_system: true,
         shell: true,
         task_intel: true,
-        crab_memory: true,
+        crab_memory: false,
         crab_messaging: false,
       },
       // scrapling：网络/学术调研（workflow 明列要用 web mcp，此前白名单为空是个 bug，调研根本调不到）；

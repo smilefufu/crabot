@@ -6,7 +6,7 @@
  *
  * 四个来源：
  * 1. crab-messaging（`buildMessagingTools`）—— 按白名单裁剪，`send_message` 额外做"去 intent"包装；
- * 2. crab-memory（`deps.memoryServer`，经 `mcpServerToToolDefinitions` 转换）—— 原样全给，不裁；
+ * 2. crab-memory（`deps.memoryServer`，经 `mcpServerToToolDefinitions` 转换）—— 固定 18 项白名单；
  * 3. worker 编排、观察与回合处置工具（`buildWorkerTools`）—— 原样加入；
  * 4. crabot-info 六件套（Task 3 `buildCrabotInfoTools`）—— 原样加入。
  *
@@ -18,6 +18,7 @@ import { defineTool } from '../../engine/index.js'
 import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
 import type { McpServer } from '../../mcp/mcp-helpers.js'
 import { mcpServerToToolDefinitions } from '../../agent/mcp-tool-bridge.js'
+import { CRAB_MEMORY_MANAGER_TOOL_NAMES } from '../../mcp/crab-memory.js'
 import { buildMessagingTools } from '../../mcp/crab-messaging.js'
 import type { CrabMessagingDeps, MessagingTool, MessagingToolSet } from '../../mcp/crab-messaging.js'
 import { buildWorkerTools } from './worker-tools.js'
@@ -250,6 +251,23 @@ const BANNED_TOOL_NAMES = new Set(['bash', 'read', 'write', 'edit', 'glob', 'gre
 
 /** crab-memory 走 `mcp__crab-memory__*` 前缀，是唯一允许出现在工具面里的 `mcp__` 前缀。 */
 const ALLOWED_MCP_PREFIX = 'mcp__crab-memory__'
+const MANAGER_MEMORY_TOOL_NAMES = CRAB_MEMORY_MANAGER_TOOL_NAMES.map(
+  (name) => `${ALLOWED_MCP_PREFIX}${name}`,
+)
+
+function buildManagerMemoryFace(memoryServer: McpServer): ToolDefinition[] {
+  const tools = mcpServerToToolDefinitions(memoryServer, 'crab-memory')
+  const byName = new Map(tools.map((tool) => [tool.name, tool]))
+  const expected = new Set(MANAGER_MEMORY_TOOL_NAMES)
+  const missing = MANAGER_MEMORY_TOOL_NAMES.filter((name) => !byName.has(name))
+  const unexpected = tools.map((tool) => tool.name).filter((name) => !expected.has(name))
+  if (missing.length > 0 || unexpected.length > 0) {
+    throw new Error(
+      `buildManagerToolFace: crab-memory 工具面与协议不一致 (missing=${missing.join(',') || 'none'}; unexpected=${unexpected.join(',') || 'none'})`,
+    )
+  }
+  return MANAGER_MEMORY_TOOL_NAMES.map((name) => byName.get(name)!)
+}
 
 /**
  * 对装配结果做自检：不得包含通用文件系统/编排工具，也不得包含任何外装 MCP 工具
@@ -274,7 +292,7 @@ export function assertClosedToolFace(tools: readonly ToolDefinition[]): void {
 /** 返回该 manager 的完整工具面；白名单写死在本函数，不接受外部扩展。 */
 export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const messagingTools = buildMessagingFace(deps)
-  const memoryTools = mcpServerToToolDefinitions(deps.memoryServer, 'crab-memory')
+  const memoryTools = buildManagerMemoryFace(deps.memoryServer)
   const workerTools = buildWorkerTools({
     harness: deps.harness,
     context: deps.workerContext,

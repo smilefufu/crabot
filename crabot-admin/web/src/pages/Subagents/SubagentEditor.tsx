@@ -62,7 +62,7 @@ const DEFAULT_FORM: FormState = {
     file_system: true,
     shell: true,
     task_intel: true,
-    crab_memory: true,
+    crab_memory: false,
     crab_messaging: false,
   },
   allowed_mcp_server_ids: [],
@@ -85,7 +85,11 @@ function entryToForm(entry: SubAgentRegistryEntry): FormState {
     model_role: entry.model_role ?? 'cost_effective',
     provider_id: entry.provider_id ?? '',
     model_id: entry.model_id ?? '',
-    builtin_capabilities: entry.builtin_capabilities,
+    builtin_capabilities: {
+      ...entry.builtin_capabilities,
+      crab_memory: false,
+      crab_messaging: false,
+    },
     allowed_mcp_server_ids: entry.allowed_mcp_server_ids,
     allowed_skill_ids: entry.allowed_skill_ids,
     max_turns: entry.max_turns,
@@ -106,7 +110,11 @@ function formToPayload(form: FormState): Partial<SubAgentRegistryEntry> {
     provider_id: form.model_mode === 'specific' ? (form.provider_id || null) : null,
     model_id: form.model_mode === 'specific' ? (form.model_id || null) : null,
     model_role: form.model_mode === 'role' ? form.model_role : null,
-    builtin_capabilities: form.builtin_capabilities,
+    builtin_capabilities: {
+      ...form.builtin_capabilities,
+      crab_memory: false,
+      crab_messaging: false,
+    },
     allowed_mcp_server_ids: form.allowed_mcp_server_ids,
     allowed_skill_ids: form.allowed_skill_ids,
     max_turns: form.max_turns,
@@ -444,9 +452,16 @@ const CAPABILITY_TOOLS: Record<keyof BuiltinCapabilities, string> = {
   file_system: 'Read, Write, Edit, Glob, Grep',
   shell: 'Bash + Output, Kill, ListEntities',
   task_intel: 'search_traces, get_task_details, search_short_term',
-  crab_memory: 'crab-memory MCP 全部工具',
+  crab_memory: 'v3.6.13 协议固定为 off：长期记忆由 Manager 持有，所有 Worker/direct child 均不装配 Memory。此开关只读。',
   crab_messaging: 'crab-messaging MCP 全部工具。v3 协议固定为 off：Worker/subagent 不允许人类出口（见 protocol-admin §3.19 / protocol-agent-v3 §11），此开关只读。',
 }
+
+const DIRECT_CHILD_EXCLUDED_CRABOT_SKILL_NAMES = new Set([
+  'tmp-page',
+  'workspace-context-maintenance',
+  'memory-graph-linking',
+  'crabot-cli',
+])
 
 const CapabilitiesTab: React.FC<{
   form: FormState
@@ -463,7 +478,7 @@ const CapabilitiesTab: React.FC<{
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
       <div>
         <div style={{ color: 'var(--text-muted)', marginBottom: 8, fontSize: 12 }}>常用（默认 on）</div>
-        {(['file_system', 'shell', 'task_intel', 'crab_memory'] as const).map((key) => (
+        {(['file_system', 'shell', 'task_intel'] as const).map((key) => (
           <label
             key={key}
             style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}
@@ -481,21 +496,25 @@ const CapabilitiesTab: React.FC<{
         ))}
       </div>
       <div>
-        <div style={{ color: 'var(--text-muted)', marginBottom: 8, fontSize: 12 }}>敏感（默认 off）</div>
-        {/* crab_messaging 由协议强制 false（v3 Worker/subagent 无人类出口，见 protocol-admin §3.19），
-            下发时 Admin 也硬置 false。UI 若允许勾选会造成「开了却不生效」的误导，故置灰只读。 */}
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: 0.55, cursor: 'not-allowed' }}>
-          <input
-            type="checkbox"
-            aria-label="crab_messaging"
-            checked={false}
-            disabled
-            onChange={() => {}}
-          />
-          <Tooltip content={CAPABILITY_TOOLS.crab_messaging}>
-            <span style={{ fontFamily: 'var(--font-mono)' }}>crab_messaging（协议固定 off）</span>
-          </Tooltip>
-        </label>
+        <div style={{ color: 'var(--text-muted)', marginBottom: 8, fontSize: 12 }}>协议固定 off</div>
+        {/* 两项都由协议强制 false，下发时 Admin 也硬置 false。允许勾选只会制造无效配置。 */}
+        {(['crab_memory', 'crab_messaging'] as const).map((key) => (
+          <label
+            key={key}
+            style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, opacity: 0.55, cursor: 'not-allowed' }}
+          >
+            <input
+              type="checkbox"
+              aria-label={key}
+              checked={false}
+              disabled
+              onChange={() => {}}
+            />
+            <Tooltip content={CAPABILITY_TOOLS[key]}>
+              <span style={{ fontFamily: 'var(--font-mono)' }}>{key}（协议固定 off）</span>
+            </Tooltip>
+          </label>
+        ))}
       </div>
     </div>
   )
@@ -513,7 +532,9 @@ const WhitelistTab: React.FC<{
       setMcpOptions(list.filter((m) => m.enabled).map((m) => ({ id: m.id, name: m.name })))
     })
     void skillService.list().then((list) => {
-      setSkillOptions(list.filter((s) => s.enabled).map((s) => ({ id: s.id, name: s.name })))
+      setSkillOptions(list
+        .filter((s) => s.enabled && !DIRECT_CHILD_EXCLUDED_CRABOT_SKILL_NAMES.has(s.name))
+        .map((s) => ({ id: s.id, name: s.name })))
     })
   }, [])
 

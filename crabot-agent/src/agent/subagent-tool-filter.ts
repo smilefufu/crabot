@@ -7,8 +7,14 @@
  * Spec: crabot-docs/superpowers/specs/2026-05-17-subagent-customization-and-admin-ui-design.md §3.2
  */
 
-import type { ToolDefinition } from '../engine/types.js'
-import type { BuiltinCapabilities } from '../types.js'
+import type { ToolDefinition, ToolPermissionConfig } from '../engine/types.js'
+import { createSkillTool } from '../engine/tools/skill-tool.js'
+import type { BuiltinCapabilities, SkillConfig } from '../types.js'
+import {
+  DIRECT_CHILD_BUILTIN_SKILL_NAMES,
+  MAINLINE_ONLY_CRABOT_SKILL_NAMES,
+  NON_AGENT_CRABOT_SKILL_NAMES,
+} from '../workers/capability-policy.js'
 
 export type ToolGroup =
   | 'file_system'
@@ -16,6 +22,7 @@ export type ToolGroup =
   | 'task_intel'
   | 'crab_memory'
   | 'crab_messaging'
+  | 'crab_image'
   | 'skill_loading'
   | 'mcp_user'
   | 'delegate_task'
@@ -61,6 +68,7 @@ export function classifyTool(name: string): ToolGroup {
     const serverId = extractMcpServerId(name)
     if (serverId === 'crab-memory') return 'crab_memory'
     if (serverId === 'crab-messaging') return 'crab_messaging'
+    if (serverId === 'crab-image') return 'crab_image'
     return 'mcp_user'
   }
   return 'unknown'
@@ -79,7 +87,8 @@ export function extractMcpServerId(toolName: string): string {
  *
  * - 内置能力组：按 BuiltinCapabilities flag 开关
  * - 用户 MCP：按 allowedMcpServerIds 白名单过滤（空 = 全禁）
- * - Skill 加载：与 allowedSkillIds 联动（空 = Skill 工具不注入）
+ * - Skill 加载：父 loader 永远剔除，由 buildCapabilitiesForSubAgent 按 ID 重建
+ * - crab-memory：v3.6.13 起永远剔除，旧配置中的 true 不生效
  * - delegate_task：永远剔除（subagent 不能再委派下一层）
  * - unknown：永远剔除
  */
@@ -87,7 +96,6 @@ export function filterToolsForSubAgent(
   parentTools: ReadonlyArray<ToolDefinition>,
   capabilities: BuiltinCapabilities,
   allowedMcpServerIds: string[],
-  allowedSkillIds: string[],
 ): ToolDefinition[] {
   return parentTools.filter((tool) => {
     const group = classifyTool(tool.name)
@@ -95,12 +103,102 @@ export function filterToolsForSubAgent(
       case 'file_system': return capabilities.file_system
       case 'shell': return capabilities.shell
       case 'task_intel': return capabilities.task_intel
-      case 'crab_memory': return capabilities.crab_memory
-      case 'crab_messaging': return capabilities.crab_messaging
-      case 'skill_loading': return allowedSkillIds.length > 0
+      case 'crab_memory': return false
+      case 'crab_messaging': return false
+      case 'crab_image': return false
+      case 'skill_loading': return false
       case 'mcp_user': return allowedMcpServerIds.includes(extractMcpServerId(tool.name))
       case 'delegate_task': return false
       case 'unknown': return false
     }
   })
+}
+
+export function selectSubAgentSkills(
+  availableSkills: ReadonlyArray<SkillConfig>,
+  allowedSkillIds: ReadonlyArray<string>,
+  allowPermissionGatedSkills = true,
+): SkillConfig[] {
+  if (allowedSkillIds.length === 0) return []
+  const byId = new Map(availableSkills.map((skill) => [skill.id, skill]))
+  const missing = allowedSkillIds.filter((id) => !byId.has(id))
+  if (missing.length > 0) {
+    console.warn(
+      `[SubAgentSkillPolicy] skipping allowed Skill IDs unavailable in current catalog: ${missing.join(', ')}`,
+    )
+  }
+  const selected = allowedSkillIds
+    .map((id) => byId.get(id))
+    .filter((skill): skill is SkillConfig => skill !== undefined)
+  const forbidden = selected
+    .filter((skill) => NON_AGENT_CRABOT_SKILL_NAMES.has(skill.name))
+    .map((skill) => skill.name)
+  if (forbidden.length > 0) {
+    throw new Error(`subagent skill policy: Skill not available to any Agent: ${forbidden.join(', ')}`)
+  }
+  const mainlineOnly = selected
+    .filter((skill) => MAINLINE_ONLY_CRABOT_SKILL_NAMES.has(skill.name))
+    .map((skill) => skill.name)
+  if (mainlineOnly.length > 0) {
+    throw new Error(`subagent skill policy: Skill unavailable to builtin direct child: ${mainlineOnly.join(', ')}`)
+  }
+  return selected.filter((skill) =>
+    allowPermissionGatedSkills || DIRECT_CHILD_BUILTIN_SKILL_NAMES.has(skill.name),
+  )
+}
+
+export function permissionConfigForSubAgent(
+  permissionConfig: ToolPermissionConfig | undefined,
+  skills: ReadonlyArray<SkillConfig>,
+): ToolPermissionConfig | undefined {
+  if (!permissionConfig || !skills.some((skill) => DIRECT_CHILD_BUILTIN_SKILL_NAMES.has(skill.name))) {
+    return permissionConfig
+  }
+  if (permissionConfig.checkPermission) {
+    const inheritedCheck = permissionConfig.checkPermission
+    return {
+      ...permissionConfig,
+      checkPermission: async (toolName, input) =>
+        toolName === 'Skill' ? { allowed: true } : inheritedCheck(toolName, input),
+    }
+  }
+  if (permissionConfig.mode === 'bypass') return permissionConfig
+
+  const toolNames = new Set(permissionConfig.toolNames ?? [])
+  if (permissionConfig.mode === 'allowList') toolNames.add('Skill')
+  else toolNames.delete('Skill')
+  return { ...permissionConfig, toolNames: [...toolNames] }
+}
+
+export function buildCapabilitiesForSubAgent(input: {
+  readonly parentTools: ReadonlyArray<ToolDefinition>
+  readonly capabilities: BuiltinCapabilities
+  readonly allowedMcpServerIds: string[]
+  readonly allowedSkillIds: string[]
+  readonly availableSkills: ReadonlyArray<SkillConfig>
+  readonly getCwd?: () => string
+  readonly allowPermissionGatedSkills?: boolean
+}): { readonly tools: ToolDefinition[]; readonly skills: SkillConfig[] } {
+  const tools = filterToolsForSubAgent(
+    input.parentTools,
+    input.capabilities,
+    input.allowedMcpServerIds,
+  )
+  const skills = selectSubAgentSkills(
+    input.availableSkills,
+    input.allowedSkillIds,
+    input.allowPermissionGatedSkills ?? input.parentTools.some((tool) => tool.name === 'Skill'),
+  )
+  return {
+    tools: skills.length === 0
+      ? tools
+      : [...tools, createSkillTool({ availableSkills: skills, getCwd: input.getCwd })],
+    skills,
+  }
+}
+
+export function buildToolsForSubAgent(
+  input: Parameters<typeof buildCapabilitiesForSubAgent>[0],
+): ToolDefinition[] {
+  return buildCapabilitiesForSubAgent(input).tools
 }

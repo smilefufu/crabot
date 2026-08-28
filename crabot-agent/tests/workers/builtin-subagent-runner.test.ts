@@ -6,7 +6,9 @@ import { BuiltinSubagentRunner } from '../../src/workers/builtin/subagent-runner
 import { BgEntityRegistry } from '../../src/engine/bg-entities/registry.js'
 import type { TraceStore } from '../../src/core/trace-store.js'
 import type { LSPManager } from '../../src/lsp/lsp-manager.js'
-import type { SubAgentConfig } from '../../src/types.js'
+import type { SkillConfig, SubAgentConfig } from '../../src/types.js'
+import type { ToolDefinition } from '../../src/engine/types.js'
+import { checkToolPermission } from '../../src/engine/permission-checker.js'
 import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
 
 const { createAdapter, forkEngine, spawnPersistentAgent } = vi.hoisted(() => ({
@@ -19,7 +21,7 @@ vi.mock('../../src/engine/llm-adapter.js', () => ({ createAdapter }))
 vi.mock('../../src/engine/sub-agent.js', () => ({ forkEngine }))
 vi.mock('../../src/engine/bg-entities/bg-agent.js', () => ({ spawnPersistentAgent }))
 
-function testSubagent(): SubAgentConfig {
+function testSubagent(overrides: Partial<SubAgentConfig> = {}): SubAgentConfig {
   return {
     id: 'code-writer',
     name: 'code_writer',
@@ -31,13 +33,37 @@ function testSubagent(): SubAgentConfig {
     allowed_mcp_server_ids: [],
     allowed_skill_ids: [],
     hook_preset: 'lsp_diagnostics',
+    ...overrides,
   } as SubAgentConfig
 }
 
-function executionContext() {
+const AVAILABLE_SKILLS: SkillConfig[] = [
+  { id: 'skill-a', name: 'skill-a', description: 'A', skill_dir: '/skills/a' },
+  { id: 'skill-b', name: 'skill-b', description: 'B', skill_dir: '/skills/b' },
+  {
+    id: 'builtin-systematic-debugging',
+    name: 'systematic-debugging',
+    description: 'Debugging',
+    skill_dir: '/skills/systematic-debugging',
+  },
+]
+
+function fakeTool(name: string): ToolDefinition {
+  return {
+    name,
+    description: name,
+    inputSchema: { type: 'object', properties: {} },
+    isReadOnly: true,
+    call: async () => ({ output: name, isError: false }),
+  }
+}
+
+function executionContext(availableSkills: ReadonlyArray<SkillConfig> = []) {
   return {
     permissionConfig: { mode: 'bypass' as const },
     resolvedPermissions: BUILTIN_WORKER_PERMISSIONS,
+    availableSkills,
+    getCwd: () => '/workspace',
   }
 }
 
@@ -69,11 +95,14 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
 
     await runner.run(
-      testSubagent(),
+      testSubagent({
+        builtin_capabilities: { ...testSubagent().builtin_capabilities, crab_memory: true },
+        allowed_skill_ids: ['skill-b'],
+      }),
       { task: '运行测试' },
       { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } },
-      [],
-      executionContext(),
+      [fakeTool('Skill'), fakeTool('mcp__crab-memory__search_memory')],
+      executionContext(AVAILABLE_SKILLS),
     )
 
     const options = spawnPersistentAgent.mock.calls[0][0]
@@ -81,6 +110,9 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     expect(options.resolvedPermissions).toEqual(BUILTIN_WORKER_PERMISSIONS)
     expect(options.senderIsMaster).toBe(false)
     expect(options.lspManager).toBe(lspManager)
+    expect(options.tools.map((tool: ToolDefinition) => tool.name)).toEqual(['Skill'])
+    expect(options.systemPrompt).toContain('<name>skill-b</name>')
+    expect(options.systemPrompt).not.toContain('<name>skill-a</name>')
     expect(options.hookRegistry.getMatching('PreToolUse', { toolName: 'Bash', toolInput: { command: 'crabot config get' } })).toHaveLength(1)
     expect(options.hookRegistry.getMatching('PreToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
     expect(options.hookRegistry.getMatching('PostToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
@@ -95,11 +127,14 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     const runner = new BuiltinSubagentRunner(traceStore, lspManager, undefined, registry)
 
     await runner.run(
-      testSubagent(),
+      testSubagent({
+        builtin_capabilities: { ...testSubagent().builtin_capabilities, crab_memory: true },
+        allowed_skill_ids: ['skill-a'],
+      }),
       { task: '运行测试', sync: true },
       { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } },
-      [],
-      executionContext(),
+      [fakeTool('Skill'), fakeTool('mcp__crab-memory__search_memory')],
+      executionContext(AVAILABLE_SKILLS),
     )
 
     const options = forkEngine.mock.calls[0][0]
@@ -107,9 +142,88 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     expect(options.resolvedPermissions).toEqual(BUILTIN_WORKER_PERMISSIONS)
     expect(options.senderIsMaster).toBe(false)
     expect(options.lspManager).toBe(lspManager)
+    expect(options.tools.map((tool: ToolDefinition) => tool.name)).toEqual(['Skill'])
+    expect(options.systemPrompt).toContain('<name>skill-a</name>')
+    expect(options.systemPrompt).not.toContain('<name>skill-b</name>')
     expect(options.hookRegistry.getMatching('PreToolUse', { toolName: 'Bash', toolInput: { command: 'crabot config get' } })).toHaveLength(1)
     expect(options.hookRegistry.getMatching('PreToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
     expect(options.hookRegistry.getMatching('PostToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
+  })
+
+  it('发起人关闭第三方 Skill 时，profile 内置 Skill 仍能在执行期调用', async () => {
+    forkEngine.mockResolvedValue({ outcome: 'completed', output: '完成', usage: { inputTokens: 1, outputTokens: 1 }, totalTurns: 1 })
+    const traceStore = {
+      startTrace: vi.fn(() => ({ trace_id: 'trace-child' })),
+      endTrace: vi.fn(),
+    } as unknown as TraceStore
+    const runner = new BuiltinSubagentRunner(traceStore, lspManager, undefined, registry)
+    const restrictedPermissions = {
+      ...BUILTIN_WORKER_PERMISSIONS,
+      tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, mcp_skill: false },
+    }
+
+    await runner.run(
+      testSubagent({ allowed_skill_ids: ['skill-a', 'builtin-systematic-debugging'] }),
+      { task: '运行测试', sync: true },
+      { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } },
+      [fakeTool('Skill')],
+      {
+        permissionConfig: { mode: 'denyList', toolNames: ['Skill'] },
+        resolvedPermissions: restrictedPermissions,
+        availableSkills: AVAILABLE_SKILLS,
+        getCwd: () => '/workspace',
+      },
+    )
+
+    const options = forkEngine.mock.calls[0][0]
+    const skillTool = options.tools.find((tool: ToolDefinition) => tool.name === 'Skill')
+    expect(options.systemPrompt).toContain('<name>systematic-debugging</name>')
+    expect(options.systemPrompt).not.toContain('<name>skill-a</name>')
+    await expect(checkToolPermission(
+      'Skill',
+      { skill: 'systematic-debugging' },
+      skillTool,
+      options.permissionConfig,
+    )).resolves.toEqual({ allowed: true })
+  })
+
+  it('同步与异步 child 都告警并跳过当前不可用的 allowed Skill', async () => {
+    spawnPersistentAgent.mockResolvedValue('agent-child')
+    forkEngine.mockResolvedValue({ outcome: 'completed', output: '完成', usage: { inputTokens: 1, outputTokens: 1 }, totalTurns: 1 })
+    const traceStore = {
+      startTrace: vi.fn(() => ({ trace_id: 'trace-child' })),
+      endTrace: vi.fn(),
+    } as unknown as TraceStore
+    const runner = new BuiltinSubagentRunner(traceStore, lspManager, undefined, registry)
+    const subagent = testSubagent({ allowed_skill_ids: ['missing-skill'] })
+    const context = { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await expect(runner.run(
+        subagent,
+        { task: '异步' },
+        context,
+        [fakeTool('Skill')],
+        executionContext(AVAILABLE_SKILLS),
+      )).resolves.toMatchObject({ isError: false })
+      await expect(runner.run(
+        subagent,
+        { task: '同步', sync: true },
+        context,
+        [fakeTool('Skill')],
+        executionContext(AVAILABLE_SKILLS),
+      )).resolves.toMatchObject({ isError: false })
+
+      expect(spawnPersistentAgent.mock.calls[0][0].tools).toEqual([])
+      expect(forkEngine.mock.calls[0][0].tools).toEqual([])
+      expect(warn).toHaveBeenCalledTimes(2)
+      for (const [message] of warn.mock.calls) {
+        expect(String(message)).toContain('missing-skill')
+      }
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 

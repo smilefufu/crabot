@@ -1,7 +1,7 @@
 /**
- * Crab-Image MCP Server — Agent 生图能力。
+ * Crab-Image MCP Server — builtin Worker 生图能力。
  * generate_image 调用中转站 OpenAI 兼容 /images/generations，落地成文件、返回路径；
- * 不自动发送——由 agent 决定用 send_message(content_type='image', file_path=...) 交付。
+ * 不自动发送——Worker 把文件路径作为任务结果返回 Manager，由 Manager 负责投递。
  * spec: crabot-docs/superpowers/specs/2026-07-13-image-generation-design.md
  */
 
@@ -116,7 +116,7 @@ export function createCrabImageServer(deps: CrabImageDeps): McpServer {
     'generate_image',
     {
       description:
-        "根据文字描述生成图片，返回本地文件路径（不自动发送）。要给用户看时再调 send_message(content_type='image', file_path=<路径>)。",
+        '根据文字描述生成图片并返回本地文件路径（不自动发送）；把路径和必要说明作为任务结果返回 Manager。',
       inputSchema: GENERATE_IMAGE_SCHEMA,
     },
     async (args) => {

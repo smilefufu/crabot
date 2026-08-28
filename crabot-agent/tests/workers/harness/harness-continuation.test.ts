@@ -954,7 +954,11 @@ describe('WorkerHarness.handoffIncarnation — fixed capability snapshot', () =>
 
     await harness.switchWorkerImpl(worker.worker_id, 'builtin', 'switch with fixed identity')
 
-    expect(capabilityBundle).toHaveBeenLastCalledWith({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
+    expect(capabilityBundle).toHaveBeenLastCalledWith({
+      worker_id: worker.worker_id,
+      impl: 'builtin',
+      principal_permissions: principalPermissions,
+    })
     expect(builtinSpawnDefaults).toHaveBeenLastCalledWith(expect.objectContaining({
       worker_id: worker.worker_id,
       principal_permissions: principalPermissions,

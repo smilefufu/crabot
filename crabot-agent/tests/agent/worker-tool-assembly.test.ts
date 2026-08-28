@@ -1,9 +1,8 @@
 /**
  * Worker 工具组装（buildToolsDynamic）集成测试。
  *
- * spec: 2026-07-21-agent-token-efficiency-design.md 改动 4 / 改动 5
- * - memory 工具按任务 profile 分组：普通任务仅 A 组 6 个；daily_reflection 全量 18 个
- * - disabled_tools 扩展到 MCP 桥接工具（mcp__<server>__<tool> 全名过滤）
+ * spec: 2026-08-27-worker-capability-ownership-design.md §6
+ * - 所有 legacy Worker 与 direct child 均不装配 crab-memory
  * - scene profile 只在首条 task message 注入，不再进 system prompt
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -118,148 +117,42 @@ function memoryToolNames(tools: ReadonlyArray<ToolDefinition>): string[] {
   return tools.filter((t) => t.name.startsWith('mcp__crab-memory__')).map((t) => t.name)
 }
 
-describe('buildToolsDynamic memory 工具分组', () => {
+describe('buildToolsDynamic 不向 Worker 装配 Memory', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockRunEngine.mockReset()
     mockRunEngine.mockResolvedValue(makeEngineResult())
   })
 
-  it('普通任务 → 仅注册 A 组 6 个 crab-memory 工具', async () => {
+  const taskCases: Array<[string, Partial<ExecuteTaskParams['task']>]> = [
+    ['普通任务', {}],
+    ['daily_reflection', { task_type: 'daily_reflection', source: { trigger_type: 'scheduled' } }],
+    ['已退役 memory_curate', { task_type: 'memory_curate', tags: ['memory_curate', 'builtin'] }],
+    ['memory_rebuild tag', { task_type: undefined, source: { trigger_type: 'manual' }, tags: ['memory_rebuild'] }],
+  ]
+
+  it.each(taskCases)('%s 的 Memory 工具集始终为空', async (_label, taskOverrides) => {
     const { tools } = await buildToolsFor(makeHandler(), {
-      task: makeTask(),
+      task: makeTask(taskOverrides),
       context: makeContext(),
     })
-    // store_memory 名字用拼接绕过 crabot-admin v1-cleanup 静态守卫（守卫禁止该 mcp 全名字面量
-    // 出现在仓库中，但 v2 的 store_memory MCP 工具本身是活的，需要断言它在 A 组）
-    const storeMemoryToolName = ['mcp__crab-memory', 'store_memory'].join('__')
-    expect(memoryToolNames(tools).sort()).toEqual([
-      'mcp__crab-memory__delete_scene_profile',
-      'mcp__crab-memory__get_memory_detail',
-      'mcp__crab-memory__get_scene_profile',
-      'mcp__crab-memory__search_memory',
-      'mcp__crab-memory__set_scene_profile',
-      storeMemoryToolName,
-    ])
+    expect(memoryToolNames(tools)).toEqual([])
   })
 
-  it('scheduled + daily_reflection 任务 → 仅注册 A 组 6 个 crab-memory 工具', async () => {
-    const { tools } = await buildToolsFor(makeHandler(), {
-      task: makeTask({
-        task_type: 'daily_reflection',
-        source: { trigger_type: 'scheduled' },
-      }),
-      context: makeContext(),
-    })
-    const names = memoryToolNames(tools)
-    expect(names).toHaveLength(6)
-    expect(names).not.toContain('mcp__crab-memory__quick_capture')
-    expect(names).not.toContain('mcp__crab-memory__run_maintenance')
-    expect(names).not.toContain('mcp__crab-memory__promote_to_rule')
-  })
-
-  it('memory_curate 任务 → 仅注册 A 组 6 个（已退役类型不再获特权）', async () => {
-    const { tools } = await buildToolsFor(makeHandler(), {
-      task: makeTask({
-        task_type: 'memory_curate',
-        source: { trigger_type: 'scheduled' },
-        tags: ['memory_curate', 'builtin'],
-      }),
-      context: makeContext(),
-    })
-    const names = memoryToolNames(tools)
-    expect(names).toHaveLength(6)
-    expect(names).not.toContain('mcp__crab-memory__list_entries')
-    expect(names).not.toContain('mcp__crab-memory__delete_memory')
-    expect(names).not.toContain('mcp__crab-memory__update_long_term')
-  })
-
-  it('tags 含 memory_rebuild 的 manual 任务 → 注册全量 19 个', async () => {
-    // 重建图谱任务：trigger_type=manual、无 task_type，靠 tags 识别
-    const { tools } = await buildToolsFor(makeHandler(), {
-      task: makeTask({
-        task_type: undefined,
-        source: { trigger_type: 'manual' },
-        tags: ['memory_rebuild'],
-      }),
-      context: makeContext(),
-    })
-    const names = memoryToolNames(tools)
-    expect(names).toHaveLength(19)
-    expect(names).toContain('mcp__crab-memory__list_entries')
-    expect(names).toContain('mcp__crab-memory__set_memory_links')
-  })
-
-  it('scheduled 但非 daily_reflection 任务 → 仍仅 A 组 6 个', async () => {
-    const { tools } = await buildToolsFor(makeHandler(), {
-      task: makeTask({
-        task_type: 'user_request',
-        source: { trigger_type: 'scheduled' },
-      }),
-      context: makeContext(),
-    })
-    expect(memoryToolNames(tools)).toHaveLength(6)
-  })
-})
-
-describe('buildToolsDynamic disabled_tools 扩展到 MCP 工具', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    mockRunEngine.mockReset()
-    mockRunEngine.mockResolvedValue(makeEngineResult())
-  })
-
-  it('disabled_tools 可按全名过滤 mcp__crab-memory__run_maintenance', async () => {
-    const handler = makeHandler({
-      builtinToolConfig: { disabled_tools: ['mcp__crab-memory__run_maintenance'] },
-    })
-    const { tools } = await buildToolsFor(handler, {
-      task: makeTask({
-      tags: ['memory_rebuild'],
-      source: { trigger_type: 'manual' },
-      }),
-      context: makeContext(),
-    })
-    const names = memoryToolNames(tools)
-    expect(names).toHaveLength(18)
-    expect(names).not.toContain('mcp__crab-memory__run_maintenance')
-    expect(names).toContain('mcp__crab-memory__quick_capture')
-  })
-
-  it('disabled_tools 同时过滤内置工具与 MCP 工具', async () => {
-    const handler = makeHandler({
-      builtinToolConfig: { disabled_tools: ['Bash', 'mcp__crab-memory__get_memory_detail'] },
-    })
-    const { tools } = await buildToolsFor(handler, {
-      task: makeTask(),
-      context: makeContext(),
-    })
-    const names = tools.map((t) => t.name)
-    expect(names).not.toContain('Bash')
-    expect(names).not.toContain('mcp__crab-memory__get_memory_detail')
-    expect(names).toContain('mcp__crab-memory__search_memory')
-  })
-
-  it('disabled_tools 过滤同样作用于 subagent parentTools（baseToolsRaw 路径）', async () => {
-    const handler = makeHandler({
-      builtinToolConfig: { disabled_tools: ['mcp__crab-memory__get_memory_detail'] },
-      subAgents: [makeSubAgent('writer')],
-    })
-    // 捕获 makeRunSubAgent 收到的 parentTools（即 subagent 继承的 baseTools）
+  it('direct child 的 parentTools 同样没有 Memory，即使旧 profile 仍声明 crab_memory=true', async () => {
+    const subAgent = makeSubAgent('writer')
+    subAgent.builtin_capabilities.crab_memory = true
+    const handler = makeHandler({ subAgents: [subAgent] })
     const spy = vi.spyOn(handler as never, 'makeRunSubAgent' as never)
     await buildToolsFor(handler, {
-      task: makeTask(),
+      task: makeTask({ tags: ['memory_rebuild'] }),
       context: makeContext(),
     })
     expect(spy).toHaveBeenCalled()
     const parentTools = (spy.mock.calls[0][0] as unknown as { parentTools: ReadonlyArray<ToolDefinition> })
       .parentTools
-    const names = parentTools.map((t) => t.name)
-    // 被禁 MCP 工具不得从 subagent 继承路径漏出；未禁的 A 组工具仍可见
-    expect(names).not.toContain('mcp__crab-memory__get_memory_detail')
-    expect(names).toContain('mcp__crab-memory__search_memory')
-    // 既有语义保持：parentTools 不含 set_cwd
-    expect(names).not.toContain('set_cwd')
+    expect(memoryToolNames(parentTools)).toEqual([])
+    expect(parentTools.map((tool) => tool.name)).not.toContain('set_cwd')
   })
 })
 
