@@ -8,6 +8,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { resolveCliDataDir } from './lib/instance.mjs'
+import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const CRABOT_HOME = resolve(__dirname, '..')
@@ -26,7 +27,12 @@ function writeStatus(patch) {
 }
 
 function node(args) {
-  execFileSync(process.execPath, [CLI, ...args], { cwd: CRABOT_HOME, stdio: 'inherit' })
+  execFileSync(process.execPath, [CLI, ...args], {
+    cwd: CRABOT_HOME,
+    stdio: 'inherit',
+    // 锁由本 restart 外层持有全程；子 stop/start 见此 env 跳过抢锁（防自死锁）
+    env: { ...process.env, CRABOT_CLI_LOCK_HELD: '1' },
+  })
 }
 
 function stamp() {
@@ -38,7 +44,13 @@ async function main() {
   console.log(`[restart] start reason=${reason ?? '-'} at=${stamp()}`)
   writeStatus({ phase: 'restarting', started_at: stamp(), reason, finished_at: undefined, error: undefined })
 
+  // 锁持有全程（stop+start 可能 1 分钟级）；被其它 CLI 操作占有时明确报错而非互踩。
+  // process.exit 路径由 exit handler 释放；SIGKILL 残留由陈旧检测接管。
+  let cliLockPath
   try {
+    cliLockPath = await acquireCliLock(DATA_DIR, 'restart')
+    process.on('exit', () => releaseCliLock(cliLockPath))
+
     console.log('[restart] stop')
     node(['stop'])
     console.log('[restart] start -d')

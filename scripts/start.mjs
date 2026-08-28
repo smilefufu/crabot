@@ -18,6 +18,7 @@ import { scanModules, applyMigration } from './upgrade-lib/migrate.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { hasInstance, resolveCliDataDir } from './lib/instance.mjs'
 import { probeMmHealthy } from './lib/mm-probe.mjs'
+import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -148,6 +149,18 @@ const orphanRecoveryEntry = resolve(ROOT, 'crabot-core/dist/orphan-recovery-pref
 if (!existsSync(mmEntry) || !existsSync(orphanRecoveryEntry)) {
   console.error('[crabot] crabot-core build output not found. Run build first.')
   process.exit(1)
+}
+
+// CLI 操作互斥（restart 外层持锁时经 env 跳过）。start 有大量 process.exit 出口，
+// 统一由 exit handler 释放；SIGKILL 残留的死锁由 acquire 侧的陈旧检测接管。
+if (!process.env.CRABOT_CLI_LOCK_HELD) {
+  try {
+    const cliLockPath = await acquireCliLock(DATA_DIR, 'start')
+    process.on('exit', () => releaseCliLock(cliLockPath))
+  } catch (error) {
+    console.error(`[crabot] ${error.message}`)
+    process.exit(1)
+  }
 }
 
 // 单实例预检
