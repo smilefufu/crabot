@@ -2927,7 +2927,13 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       claudeProjectsDir,
     })
 
+    // 冷探测只判活,不自动做交互探测(spec 2026-08-28-startup-reconcile-fast-probe):
+    // 已可见的 exit-plan modal 要等首个会 capture 的入口消费懒化重检时才被发现。
+    // keyCalls 含首个 spawn 首投提交的历史按键,以 dispose 后为基线比较。
+    const keysBeforeRestart = tmux.keyCalls.length
     expect(await restarted.state(h)).toBe('running')
+    expect(tmux.keyCalls.slice(keysBeforeRestart)).toHaveLength(0)
+    await restarted.readTerminal(h)
     await waitFor(() => tmux.keyCalls.some((keys) => keys.join(',') === '1,Enter'))
     expect(tmux.keyCalls.filter((keys) => keys.join(',') === '1,Enter')).toHaveLength(1)
     await restarted.kill(h)
@@ -3850,4 +3856,168 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
     },
     30000,
   )
+})
+
+/**
+ * 冷探测快路径(spec `2026-08-28-startup-reconcile-fast-probe`):无常驻 runtime 时的
+ * state() = meta 读盘 + 一次 tmux isAlive 的最小证据链。判定矩阵、判死 reason 三级推导、
+ * 残影固化、以及"不 capture / 不交互探测 / 判死不建 runtime"的负面断言。
+ * 全程用 mock tmux,不依赖真实 tmux 环境。
+ */
+describe('ClaudeCodeAdapter.state 冷探测快路径(无常驻 runtime)', () => {
+  let dataDir = ''
+  let workspaceRoot = ''
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-cold-probe-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-cold-probe-ws-'))
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true })
+    await fs.rm(workspaceRoot, { recursive: true, force: true })
+  })
+
+  class ProbeTmux extends NoopTmux {
+    alive = true
+    killCalls: string[] = []
+    captureCalls = 0
+
+    override async capturePane(name: string) {
+      this.captureCalls += 1
+      if (!this.alive) throw new Error(`tmux session gone: ${name}`)
+      return { text: this.paneText, dead: !this.alive }
+    }
+
+    override async isAlive(_name: string): Promise<boolean> {
+      return this.alive
+    }
+
+    override async killSession(name: string): Promise<void> {
+      this.killCalls.push(name)
+      this.alive = false
+    }
+  }
+
+  async function seedMeta(workerId: string, meta: Record<string, unknown>): Promise<void> {
+    await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
+    await fs.writeFile(path.join(dataDir, workerId, 'meta-1.json'), JSON.stringify(meta), 'utf-8')
+  }
+
+  function makeAdapter(tmux: ProbeTmux): ClaudeCodeAdapter {
+    return new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused',
+      claudeProjectsDir: path.join(dataDir, 'claude-projects'),
+    })
+  }
+
+  const h = (workerId: string) => ({ worker_id: workerId, seq: 1, impl: 'claude-code' as const })
+
+  it('meta 缺失 → exited,不 capture', async () => {
+    const tmux = new ProbeTmux()
+    const adapter = makeAdapter(tmux)
+    expect(await adapter.state(h('w-nometa'))).toBe('exited')
+    expect(tmux.captureCalls).toBe(0)
+  })
+
+  it('会话已死 + meta.ended_reason 已落终态 → 沿用该 reason,meta 终态化,killSession,不建 runtime', async () => {
+    const workerId = `w-dead-reason-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerId, { seq: 1, state: 'running', session_id: 's1', workspace_root: workspaceRoot, ended_reason: 'killed' })
+    const tmux = new ProbeTmux()
+    tmux.alive = false
+    const adapter = makeAdapter(tmux)
+
+    expect(await adapter.state(h(workerId))).toBe('exited')
+
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.state).toBe('exited')
+    expect(meta.ended_reason).toBe('killed')
+    expect(tmux.killCalls).toEqual([`crabot-w-${workerId}-1`])
+    expect(((adapter as unknown as { runtimes: Map<string, unknown> }).runtimes).size).toBe(0)
+  })
+
+  it('会话已死 + 活视角控制态 waiting_action(startup_stalled) → 保守记 crashed', async () => {
+    const workerId = `w-dead-stall-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerId, { seq: 1, state: 'idle', session_id: 's1', workspace_root: workspaceRoot, startup_stalled: true, wait_mode: 'action' })
+    const tmux = new ProbeTmux()
+    tmux.alive = false
+    const adapter = makeAdapter(tmux)
+
+    expect(await adapter.state(h(workerId))).toBe('exited')
+
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.ended_reason).toBe('crashed')
+  })
+
+  it('会话已死 + running 控制态 → completed 推断(协议 §6.3)', async () => {
+    const workerId = `w-dead-run-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerId, { seq: 1, state: 'running', session_id: 's1', workspace_root: workspaceRoot })
+    const tmux = new ProbeTmux()
+    tmux.alive = false
+    const adapter = makeAdapter(tmux)
+
+    expect(await adapter.state(h(workerId))).toBe('exited')
+
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.ended_reason).toBe('completed')
+  })
+
+  it('会话存活 → 返回 meta 控制态并重建轻核(装事件监视),不 capture、不做交互探测', async () => {
+    const workerId = `w-alive-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerId, { seq: 1, state: 'running', session_id: 's1', workspace_root: workspaceRoot })
+    const tmux = new ProbeTmux()
+    const adapter = makeAdapter(tmux)
+
+    expect(await adapter.state(h(workerId))).toBe('running')
+
+    expect(tmux.captureCalls).toBe(0)
+    const runtimes = (adapter as unknown as { runtimes: Map<string, { stopEventWatch?: unknown; pendingInteractionInspect?: boolean }> }).runtimes
+    expect(runtimes.size).toBe(1)
+    const runtime = runtimes.get(`${workerId}#1`)
+    expect(runtime?.stopEventWatch).toBeTruthy() // 协议 §5.5.3 重连原会话
+    expect(runtime?.pendingInteractionInspect).toBe(true) // 懒化重检待消费
+  })
+
+  it('会话存活 + meta.startup_stalled → 返回 idle(等待动作),不 capture', async () => {
+    const workerId = `w-alive-stall-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerId, { seq: 1, state: 'idle', session_id: 's1', workspace_root: workspaceRoot, startup_stalled: true, wait_mode: 'action' })
+    const tmux = new ProbeTmux()
+    const adapter = makeAdapter(tmux)
+
+    expect(await adapter.state(h(workerId))).toBe('idle')
+    expect(tmux.captureCalls).toBe(0)
+  })
+
+  it('判死残影固化:活残影写入 final snapshot;dead 残影与 tmux 不可达时静默放弃', async () => {
+    const workerIdA = `w-dead-cap-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerIdA, { seq: 1, state: 'running', session_id: 's1', workspace_root: workspaceRoot })
+    const tmuxA = new ProbeTmux()
+    tmuxA.alive = false
+    const adapterA = makeAdapter(tmuxA)
+    // isAlive=false 但 capture 仍能拿到残影(会话刚死的窗口);dead 残影不写。
+    tmuxA.capturePane = async () => ({ text: '最后的画面', dead: true })
+    await adapterA.state(h(workerIdA))
+    await expect(fs.readFile(path.join(dataDir, workerIdA, 'terminal-final-1.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const workerIdB = `w-dead-cap2-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerIdB, { seq: 1, state: 'running', session_id: 's1', workspace_root: workspaceRoot })
+    const tmuxB = new ProbeTmux()
+    tmuxB.alive = false
+    const adapterB = makeAdapter(tmuxB)
+    tmuxB.capturePane = async () => ({ text: '最后的画面', dead: false })
+    await adapterB.state(h(workerIdB))
+    expect(await fs.readFile(path.join(dataDir, workerIdB, 'terminal-final-1.json'), 'utf-8')).toContain('最后的画面')
+
+    const workerIdC = `w-dead-cap3-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerIdC, { seq: 1, state: 'running', session_id: 's1', workspace_root: workspaceRoot })
+    const tmuxC = new ProbeTmux()
+    tmuxC.alive = false
+    const adapterC = makeAdapter(tmuxC)
+    tmuxC.capturePane = async () => { throw new Error('tmux server gone') }
+    expect(await adapterC.state(h(workerIdC))).toBe('exited')
+    await expect(fs.readFile(path.join(dataDir, workerIdC, 'terminal-final-1.json'), 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
 })

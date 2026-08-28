@@ -258,6 +258,12 @@ interface Runtime {
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin 同款语义(P2 review #2)。fork 不受此限制。 */
   resumed?: boolean
+  /**
+   * 冷重建懒化的交互重检标记:ensureRuntime 恢复活会话现场时不再自动 capture 判交互
+   * (启动对账冷探测要最小化,spec `2026-08-28-startup-reconcile-fast-probe`),改由首个
+   * 本来就会 capture 的入口(sendInput/readTerminal)经 ensureInteractionInspected 消费。
+   */
+  pendingInteractionInspect?: boolean
   /** Present only for a headless query fork; mainline incarnations are owned by tmux. */
   headlessChild?: ChildProcess
 }
@@ -1357,6 +1363,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     const { state: current } = await this.syncState(runtime, h)
     if (current === 'exited') throw new WorkerExitedError(h.worker_id, h.seq, runtime.ended_reason)
+    await this.ensureInteractionInspected(runtime, h)
 
     return this.getMutex(h.worker_id).run(async () => {
       if (runtime.controlState.kind === 'exited') throw new WorkerExitedError(h.worker_id, h.seq, runtime.ended_reason)
@@ -1426,6 +1433,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       return chunk ? { kind: 'headless_text', text: chunk } : { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
     }
     if (await this.tmux.isAlive(runtime.sessionName)) {
+      await this.ensureInteractionInspected(runtime, h)
       try {
         const snapshot = await this.capture(runtime)
         if (snapshot.dead) {
@@ -1473,10 +1481,55 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 与旧实现"tmux 会话不存在则返回 exited"的兜底语义一致,直接判 exited。
    */
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
-    const runtime = await this.ensureRuntime(h)
-    if (!runtime) return 'exited'
-    if (runtime.headlessChild) return contractState(runtime.controlState)
-    return (await this.syncState(runtime, h)).state
+    const existing = this.runtimes.get(instanceKey(h))
+    if (existing) {
+      if (existing.headlessChild) return contractState(existing.controlState)
+      return (await this.syncState(existing, h)).state
+    }
+    return this.coldProbeState(h)
+  }
+
+  /**
+   * 冷探测快路径(无常驻 runtime 时的 state()):meta 读盘 + 一次 tmux isAlive 组成最小
+   * 证据链(spec `2026-08-28-startup-reconcile-fast-probe`)。
+   *
+   * 判死:reason 三级推导——meta.ended_reason 已落终态 → 沿用;活视角控制态为
+   * waiting_action → 保守取 'crashed'(无法证明有新 Stop);否则 'completed'(协议 §6.3
+   * 的推断语义,与 syncState 缺省一致)。随后做最小版 transitionExited——残影固化
+   * (final_terminal,tmux server 已不在时 capture 失败静默)、killSession、meta 落终态;
+   * 不建 runtime、不读 events、不做交互探测,也不触发 onStateChange——调用方(harness
+   * 对账 markCrashed)独家落账与事件。
+   *
+   * 判活:走 buildColdRuntimeLocked 轻核重建(装事件监视=协议 §5.5.3 重连原会话),返回
+   * meta 恢复的控制态。不 capture、不做交互恢复——node 死后 CLI 的新进展要等
+   * ensureInteractionInspected 的消费入口或 syncState 才可见(已确认的取舍)。
+   */
+  private async coldProbeState(h: IncarnationHandle): Promise<WorkerContractState> {
+    const key = instanceKey(h)
+    return this.getMutex(h.worker_id).run(async () => {
+      // 锁内重查:排在前面的另一次 ensureRuntime/coldProbeState 可能已重建。命中时只能
+      // 返回 meta 恢复的控制态——syncState 要拿同一把锁,不能在锁内调(常态的常驻探测
+      // 走 state() 的锁外路径;并发首调撞上重查命中的这一个是已确认可接受的滞后)。
+      const resident = this.runtimes.get(key)
+      if (resident) return contractState(resident.controlState)
+      const dir = join(this.deps.dataDir, h.worker_id)
+      const meta = await this.readMetaFile(dir, h.seq)
+      if (!meta) return 'exited'
+      const sessionName = `crabot-w-${h.worker_id}-${h.seq}`
+      if (!(await this.tmux.isAlive(sessionName))) {
+        const reason: IncarnationEndReason = meta.ended_reason
+          ?? (controlFromMeta(meta, true).kind === 'waiting_action' ? 'crashed' : 'completed')
+        try {
+          const snapshot = await this.tmux.capturePane(sessionName)
+          if (!snapshot.dead) await writeFinalTerminalSnapshot(dir, h.seq, snapshot.text, new Date().toISOString())
+        } catch { /* 残影拿不到(如 tmux server 已随整机重启消失)就放弃 */ }
+        await this.tmux.killSession(sessionName)
+        await writeMetaAtomic(dir, h.seq, { ...meta, seq: h.seq, state: 'exited', ended_reason: reason })
+        return 'exited'
+      }
+      const runtime = await this.buildColdRuntimeLocked(h, meta, true)
+      return contractState(runtime.controlState)
+    })
   }
 
   async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{
@@ -1784,53 +1837,60 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
       const alive = await this.tmux.isAlive(sessionName)
       if (!alive) await this.tmux.killSession(sessionName)
-      const workspaceRoot = meta.workspace_root ?? ''
-      const sessionId = meta.session_id ?? ref.session_ref ?? ''
-      const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
-      const eventChannel = new CliEventChannel(eventsPath)
-      const eventWatchOffset = await eventChannel.endOffset()
-
-      let stopBaseline = 0
-      if (workspaceRoot) {
-        const events = await eventChannel.readAll()
-        stopBaseline = events.filter((e) => e.kind === 'stop').length
-      }
-
-      const runtime: Runtime = {
-        worker_id: ref.worker_id,
-        incarnation_id: ref.incarnation_id,
-        seq: ref.seq,
-        dir,
-        workspaceRoot,
-        sessionName,
-        controlEndpoint: meta.control_socket && meta.control_monitor_id
-          ? { socket_path: meta.control_socket, monitor_id: meta.control_monitor_id }
-          : undefined,
-        sessionId,
-        eventChannel,
-        eventWatchOffset,
-        controlState: controlFromMeta(meta, alive),
-        ended_reason: alive ? undefined : meta.ended_reason,
-        stopBaseline,
-        killed: false,
-      }
-      this.runtimes.set(key, runtime)
-      // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视,它之后每一轮 hook
-      // 都能继续推状态给 harness。已终态的化身 startEventWatch 自己会短路掉。
-      this.startEventWatch(runtime, { worker_id: ref.worker_id, incarnation_id: ref.incarnation_id, seq: ref.seq, impl: 'claude-code', session_ref: sessionId })
-      if (alive) {
-        await this.inspectTerminalInteractionLocked(runtime, {
-          worker_id: ref.worker_id,
-          incarnation_id: ref.incarnation_id,
-          seq: ref.seq,
-          impl: 'claude-code',
-          session_ref: sessionId,
-        }).catch((error) => {
-          console.error(`[ClaudeCodeAdapter] recovery interaction check failed for ${ref.worker_id}#${ref.seq}:`, error)
-        })
-      }
-      return runtime
+      return this.buildColdRuntimeLocked(ref, meta, alive)
     })
+  }
+
+  /**
+   * 冷重建的轻核(调用方必须已持有 per-worker 锁):meta 派生字段、events 基线、事件监视
+   * 重连(协议 §5.5.3「重连原会话」)。活会话不再自动做 capture 交互探测——那是对账冷探测
+   * 的最大耗时源(spec `2026-08-28-startup-reconcile-fast-probe`),改为挂
+   * pendingInteractionInspect 标记,由 ensureInteractionInspected 的消费入口补上。
+   */
+  private async buildColdRuntimeLocked(
+    ref: { worker_id: string; incarnation_id?: string; seq: number; session_ref?: string },
+    meta: { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean; control_socket?: string; control_monitor_id?: string },
+    alive: boolean,
+  ): Promise<Runtime> {
+    const key = instanceKey(ref)
+    const dir = join(this.deps.dataDir, ref.worker_id)
+    const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
+    const workspaceRoot = meta.workspace_root ?? ''
+    const sessionId = meta.session_id ?? ref.session_ref ?? ''
+    const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
+    const eventChannel = new CliEventChannel(eventsPath)
+    const eventWatchOffset = await eventChannel.endOffset()
+
+    let stopBaseline = 0
+    if (workspaceRoot) {
+      const events = await eventChannel.readAll()
+      stopBaseline = events.filter((e) => e.kind === 'stop').length
+    }
+
+    const runtime: Runtime = {
+      worker_id: ref.worker_id,
+      incarnation_id: ref.incarnation_id,
+      seq: ref.seq,
+      dir,
+      workspaceRoot,
+      sessionName,
+      controlEndpoint: meta.control_socket && meta.control_monitor_id
+        ? { socket_path: meta.control_socket, monitor_id: meta.control_monitor_id }
+        : undefined,
+      sessionId,
+      eventChannel,
+      eventWatchOffset,
+      controlState: controlFromMeta(meta, alive),
+      ended_reason: alive ? undefined : meta.ended_reason,
+      stopBaseline,
+      killed: false,
+    }
+    this.runtimes.set(key, runtime)
+    // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视,它之后每一轮 hook
+    // 都能继续推状态给 harness。已终态的化身 startEventWatch 自己会短路掉。
+    this.startEventWatch(runtime, { worker_id: ref.worker_id, incarnation_id: ref.incarnation_id, seq: ref.seq, impl: 'claude-code', session_ref: sessionId })
+    if (alive) runtime.pendingInteractionInspect = true
+    return runtime
   }
 
   /** meta-<seq>.json 读取,文件不存在/内容损坏一律返回 undefined(供 ensureRuntime 判定
@@ -2020,6 +2080,22 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
   private inspectTerminalInteraction(runtime: Runtime, h: IncarnationHandle): Promise<void> {
     return this.getMutex(h.worker_id).run(() => this.inspectTerminalInteractionLocked(runtime, h))
+  }
+
+  /**
+   * 冷重建懒化的交互重检消费点:ensureInteractionInspected 在首个本来就会 capture 的入口
+   * (sendInput/readTerminal)补做一次 ensureRuntime 挂起的交互探测,只消费一次;失败只留
+   * 日志,后续 hook 路径(inspectTerminalInteractionAfterHook)仍会重探。走
+   * inspectTerminalInteraction(自带 per-worker 锁)——原 ensureRuntime 冷重建是在锁内跑
+   * 这段探测的,懒化后调用点都在锁外,锁由这里自取(PR#125 review 修正);调用方不得已持有
+   * 该锁,否则自死锁。
+   */
+  private async ensureInteractionInspected(runtime: Runtime, h: IncarnationHandle): Promise<void> {
+    if (!runtime.pendingInteractionInspect) return
+    runtime.pendingInteractionInspect = undefined
+    await this.inspectTerminalInteraction(runtime, h).catch((error) => {
+      console.error(`[ClaudeCodeAdapter] deferred interaction check failed for ${h.worker_id}#${h.seq}:`, error)
+    })
   }
 
   private inspectTerminalInteractionAfterHook(runtime: Runtime, h: IncarnationHandle): Promise<void> {

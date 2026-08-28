@@ -4470,10 +4470,10 @@ export class WorkerHarness {
    *   到的同步/异步异常,一个 worker 出问题不影响其它 worker 被处理)。
    * - 返回 `exited`:台账仍非终态却已经不在跑了,判死,ended_reason='crashed'。
    * - 返回 `running`/`idle`:台账保持(不判死)——tmux worker 独立于 agent 进程,重启后
-   *   往往仍活着;按这次实际观察到的 contractState 用 taskStatusFromIncarnation 把
-   *   task.status 对齐到真实值(可能一步都不用走,也可能需要更新化身的 state 字段),
-   *   发 state_changed 事件(detail.source='reconcile',与被动回调路径区分)通知 P4 manager
-   *   接管这个 worker 的后续监护;归 revived。
+   *   往往仍活着;存活分支不用观察值覆盖台账状态(agent 停机期间 CLI 可能又推进了,冷
+   *   探测看到的是滞后控制态,spec `2026-08-28-startup-reconcile-fast-probe`),只修复
+   *   "台账化身已标 exited 而探测判活"的内部矛盾并发 state_changed
+   *   (detail.source='reconcile',与被动回调路径区分);归 revived。
    */
   async reconcileOnStartup(): Promise<ReconcileReport> {
     const revived: string[] = []
@@ -5103,7 +5103,7 @@ export class WorkerHarness {
         return 'failed'
       }
 
-      await this.realignAliveIncarnation(managerKey, worker, mainline, observed)
+      await this.realignAliveIncarnation(managerKey, worker, mainline)
       return 'revived'
     })
   }
@@ -5179,51 +5179,38 @@ export class WorkerHarness {
   }
 
   /**
-   * reconcileOnStartup 存活分支:台账不判死,只按这次实际观察到的 contractState 对齐
-   * incarnation.state 与 task.status(taskStatusFromIncarnation 同一套映射,与
-   * processStateChange 的被动回调路径共用规则)。若观察结果与台账现状完全一致(既没有
-   * 化身 state 差异也没有 task 状态差异),不做任何写入、不发事件——避免每次巡检都产生
-   * 噪声写盘/事件。
+   * reconcileOnStartup 存活分支(冷探测语义,spec `2026-08-28-startup-reconcile-fast-probe`):
+   * 对账只确认"化身还活着",不用冷探测观察值覆盖台账状态——agent 停机期间 CLI 可能又推进了
+   * (turn 跑完、弹出确认框),冷探测看到的是滞后控制态,把滞后值写进台账不如不写;真实状态由
+   * 保留的 hook watcher 被动回调、manager 首次交互的 syncState、liveness sweep 逐步对齐。
+   *
+   * 唯一例外:台账化身 state='exited' 而探测判活的内部矛盾(死而复生只可能来自上一进程的
+   * 判死与实际不符),修复为 running 并发 state_changed(source='reconcile') 事件;无矛盾则
+   * 不写盘、不发事件。
    */
   private async realignAliveIncarnation(
     managerKey: ManagerKey,
     worker: LedgerWorker,
     mainline: ExecutableIncarnation,
-    observed: WorkerContractState
   ): Promise<void> {
-    const waitingInput = observed === 'idle' ? true : undefined
-    const nextStatus =
-      observed === 'idle' && (this.hasPendingBgNotification(worker.worker_id) || await this.deps.hasRunningBg?.(worker.worker_id))
-        ? 'running'
-        : taskStatusFromIncarnation(observed, undefined, waitingInput)
-    const stateChanged = mainline.state !== observed
-    const statusChanged = worker.task.status !== nextStatus
-    if (!stateChanged && !statusChanged) return
-
+    if (mainline.state !== 'exited') return
     const now = this.deps.now()
     const realigned = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
-      const nextTask = statusChanged ? transitionTaskTo(prev.task, nextStatus, { now }) : prev.task
-      const incarnations = stateChanged
-        ? patchIncarnationBySeq(prev.incarnations, mainline.impl, mainline.seq, { state: observed })
-        : prev.incarnations
-      const supervision = supervisionAfterMainlineTransition(
-        prev.supervision,
-        nextTask.status,
-        observed,
-        mainline.seq,
-        now,
-      )
-      return { ...prev, task: nextTask, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
+      // 锁内重读后矛盾可能已被并发动作收尾,不再成立就不动。
+      const current = findIncarnation(prev, mainline.impl, mainline.seq)
+      if (!current || current.state !== 'exited') return undefined
+      const incarnations = patchIncarnationBySeq(prev.incarnations, mainline.impl, mainline.seq, { state: 'running' })
+      const supervision = supervisionAfterMainlineTransition(prev.supervision, prev.task.status, 'running', mainline.seq, now)
+      return { ...prev, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
     })
-    // 这条事件可能只改了化身 state 而没动 task.status(stateChanged 单独成立);带上落账后的
-    // 状态是无害的——订阅方拿它与上次已知状态比对,相同即静默。
+    if (!realigned) return
     await this.appendEvent(
       worker.worker_id,
       mainline.seq,
       'state_changed',
-      { to: observed, source: 'reconcile' },
-      realigned?.task.status
+      { to: 'running', source: 'reconcile' },
+      realigned.task.status
     )
   }
 
