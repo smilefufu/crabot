@@ -742,9 +742,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
    * trace 引用显式来自 meta-<seq>.json 的 trace_id（不按 task ID 猜）。
    * cursor.offset 是已消费 span 数。
    */
-  async readTrace(h: IncarnationHandle, cursor?: import('../types.js').TraceCursor): Promise<{ events: import('../types.js').NormalizedTraceEvent[]; nextCursor: import('../types.js').TraceCursor }> {
-    const { events, nextCursor } = await this.readTraceWindow(h, cursor)
-    return { events, nextCursor }
+  async readTrace(h: IncarnationHandle, cursor?: import('../types.js').TraceCursor): Promise<{ events: import('../types.js').NormalizedTraceEvent[]; nextCursor: import('../types.js').TraceCursor; unavailableReason?: string }> {
+    const { sourceAvailable, events, nextCursor } = await this.readTraceWindow(h, cursor)
+    // 对齐 claude-code/codex 的既有语义：数据源不可用时带 unavailableReason，让调用方
+    // （harness 的活动收集）能把"源不可用"与"没有新内容"区分开——否则不可用会被当成
+    // 零增量静默放过，收集从此失效且无迹可查（2026-08-28 w-7e31305e 调查）。
+    return sourceAvailable
+      ? { events, nextCursor }
+      : { events, nextCursor, unavailableReason: 'builtin trace source unavailable' }
   }
 
   async listSubagents(h: IncarnationHandle): Promise<WorkerSubagentSummary[]> {
@@ -789,7 +794,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
     }
     const trace = await this.deps.traceReader.readTrace(traceId)
-    if (!trace) return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
+    if (!trace) {
+      // trace store 里读不到本化身的 trace：正常流程不会发生（meta 的 trace_id 由
+      // ensureTraceId 在同一进程内写入同一 TraceStore）。静默返回会让上层把它当成
+      // "没有新内容"，收集从此静默失效（2026-08-28 w-7e31305e 调查的嫌疑断点）。
+      console.warn(`[BuiltinWorkerAdapter] readTraceWindow: trace store has no trace ${traceId} for ${h.worker_id}#${h.seq}`)
+      return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
+    }
     const start = cursor?.offset ?? 0
     const spans = trace.spans.slice(start)
     const events: import('../types.js').NormalizedTraceEvent[] = []

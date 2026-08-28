@@ -3728,8 +3728,27 @@ export class WorkerHarness {
     await this.withLock(h.worker_id, async () => {
       const found = await this.deps.ledger.findWorker(h.worker_id)
       const incarnation = found && findIncarnation(found.worker, h.impl, h.seq)
-      if (!found || isTerminalStatus(found.worker.task.status) || !incarnation ||
-        !isExecutableIncarnation(incarnation) || incarnation.state === 'exited') return
+      if (!found) {
+        // 活动信号的 worker 在台账里不存在：正常流程不会发生（spawn 先落台账再起引擎），
+        // resume 竞态窗口（新化身台账未落时引擎已出首个 turn）也会落在这里。无日志的话
+        // 这类失效完全不可见（2026-08-28 w-7e31305e 调查）。
+        console.warn(`[WorkerHarness] native activity collect skipped: worker not found in ledger for ${h.worker_id}#${h.seq}`)
+        return
+      }
+      if (isTerminalStatus(found.worker.task.status)) {
+        // 任务已终态后的迟到活动信号（finish 收尾期间的最后一次推送）——正常静默。
+        return
+      }
+      if (!incarnation || !isExecutableIncarnation(incarnation)) {
+        console.warn(`[WorkerHarness] native activity collect skipped: incarnation not found/executable for ${h.worker_id}#${h.seq} (task=${found.worker.task.status})`)
+        return
+      }
+      if (incarnation.state === 'exited') {
+        // 化身已退但任务仍未终态：markCrashed/终态收尾的竞态窗口，窗口内活动信号会被丢弃。
+        // 不确定是瞬态还是持续失效时，至少让它留痕。
+        console.warn(`[WorkerHarness] native activity collect skipped: incarnation ${h.worker_id}#${h.seq} already exited while task=${found.worker.task.status}`)
+        return
+      }
       await this.collectNativeActivityLocked({
         ...h,
         incarnation_id: incarnation.incarnation_id,
@@ -3749,6 +3768,14 @@ export class WorkerHarness {
     const observed = !baselineUnobserved || await this.nativeActivityStore.hasCursor(h.worker_id, h.incarnation_id)
     const offset = await this.nativeActivityStore.cursor(h.worker_id, h.incarnation_id)
     const trace = await adapter.readTrace(h, { offset })
+    if (trace.unavailableReason !== undefined) {
+      // 数据源声明不可用（builtin：meta 缺失 / trace_id 缺失 / trace store 读不到；CLI：原生
+      // session 不可读）。此时 readTrace 以"零增量"形态返回，下面的 offset 相等判定会把它
+      // 当成"没有新内容"静默放过——运行中化身的数据源不可用是异常，必须留痕
+      // （2026-08-28 w-7e31305e 调查：resume 后 22 分钟活动收集全部静默失效，失败点无迹可查）。
+      console.warn(`[WorkerHarness] native activity collect skipped: trace source unavailable for ${h.worker_id}#${h.seq} (incarnation_id=${h.incarnation_id}): ${trace.unavailableReason}`)
+      return
+    }
     if (trace.nextCursor.offset < offset) {
       throw new Error(`native trace cursor moved backwards for ${h.worker_id}#${h.seq}`)
     }
