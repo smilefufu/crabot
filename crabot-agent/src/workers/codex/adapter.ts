@@ -1916,18 +1916,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
 
     if (!runtime.rolloutPath) {
-      // 懒查找回填(spec 2026-08-28-startup-reconcile-fast-probe):轻核重建不再扫 sessions
-      // 目录,首次读 trace 时补一次定位。占位 session(无 session_id)或找不到时走下面的
-      // 已知限制降级,cursor 原样透传。
-      if (runtime.sessionDiscoveryStatus === 'discovered' && runtime.codexHome && runtime.sessionId) {
-        try {
-          runtime.rolloutPath = await findRolloutFileBySessionId(join(runtime.codexHome, 'sessions'), runtime.sessionId)
-        } catch (err) {
-          console.warn(`[CodexWorkerAdapter] deferred rollout discovery failed for ${h.worker_id}#${h.seq}:`, err)
-        }
-      }
-    }
-    if (!runtime.rolloutPath) {
       // spawn 时没能发现 rollout 文件(占位 session_id,已知限制)——没有路径可读,退化为空
       // 数组,cursor 原样透传。
       return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
@@ -2169,13 +2157,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   /**
    * 冷重建的轻核(调用方必须已持有 per-worker 锁):meta 派生字段、events 基线、事件监视
-   * 重连(协议 §5.5.3「重连原会话」)。与 cc adapter 的同名拆分一致:
-   * - 活会话不再自动做 capture 交互探测(启动对账冷探测的最大耗时源,spec
-   *   `2026-08-28-startup-reconcile-fast-probe`),改为挂 pendingInteractionInspect 标记,
-   *   由 ensureInteractionInspected 的消费入口补上;
-   * - rollout 文件定位从轻核移出(目录扫描在 sessions 量大时不可忽略),rolloutPath 留空,
-   *   由 readTraceWindow 首次读 trace 时懒查找回填;lastActivityAt 本就有无 runtime 的
-   *   懒查找,不受影响。
+   * 重连(协议 §5.5.3「重连原会话」)。与 cc adapter 的同名拆分一致——活会话不再自动做
+   * capture 交互探测(启动对账冷探测的最大耗时源,spec
+   * `2026-08-28-startup-reconcile-fast-probe`),改为挂 pendingInteractionInspect 标记,
+   * 由 ensureInteractionInspected 的消费入口补上。
+   *
+   * rollout 定位保留在轻核(PR#125 review 修正):rolloutPath 是 resume 门槛(§5.4)、
+   * native trace watch(startNativeTraceWatch)与 lastActivityAt 的共同前置,懒化会在
+   * "重启 → 接续 codex worker"主路径上断掉这三处;它只是本地目录遍历,非对账耗时大头。
    */
   private async buildColdRuntimeLocked(
     ref: { worker_id: string; incarnation_id?: string; seq: number; session_ref?: string },
@@ -2191,6 +2180,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // meta.codex_home）；老 meta 没有该字段才回退 workspace 推导（existing_host 语义）。
     const codexHome = meta.codex_home ?? (workspaceRoot ? join(workspaceRoot, '.codex') : '')
     const sessionDiscoveryStatus: 'discovered' | 'placeholder' = meta.session_discovery ?? 'placeholder'
+    const rolloutPath =
+      sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
     const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
     const eventChannel = new CliEventChannel(eventsPath)
     const eventWatchOffset = await eventChannel.endOffset()
@@ -2213,7 +2204,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         ? { socket_path: meta.control_socket, monitor_id: meta.control_monitor_id }
         : undefined,
       sessionId,
-      rolloutPath: undefined,
+      rolloutPath,
       eventChannel,
       eventWatchOffset,
       sessionDiscoveryStatus,
@@ -2418,13 +2409,15 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   /**
    * 冷重建懒化的交互重检消费点:在首个本来就会 capture 的入口(sendInput/readTerminal)
    * 补做一次 ensureRuntime 挂起的交互探测,只消费一次;失败只留日志,后续 hook 路径
-   * (inspectTerminalInteractionAfterHook)仍会重探。调用方必须不持有 per-worker 锁
-   * (内部自取)。语义与 cc adapter 的同名方法一致。
+   * (inspectTerminalInteractionAfterHook)仍会重探。走 inspectTerminalInteraction(自带
+   * per-worker 锁)——原 ensureRuntime 冷重建是在锁内跑这段探测的,懒化后调用点都在锁外,
+   * 锁由这里自取(PR#125 review 修正);调用方不得已持有该锁,否则自死锁。语义与 cc adapter
+   * 的同名方法一致。
    */
   private async ensureInteractionInspected(runtime: Runtime, h: IncarnationHandle): Promise<void> {
     if (!runtime.pendingInteractionInspect) return
     runtime.pendingInteractionInspect = undefined
-    await this.inspectTerminalInteractionLocked(runtime, h).catch((error) => {
+    await this.inspectTerminalInteraction(runtime, h).catch((error) => {
       console.error(`[CodexWorkerAdapter] deferred interaction check failed for ${h.worker_id}#${h.seq}:`, error)
     })
   }

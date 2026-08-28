@@ -2081,13 +2081,15 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   /**
    * 冷重建懒化的交互重检消费点:ensureInteractionInspected 在首个本来就会 capture 的入口
    * (sendInput/readTerminal)补做一次 ensureRuntime 挂起的交互探测,只消费一次;失败只留
-   * 日志,后续 hook 路径(inspectTerminalInteractionAfterHook)仍会重探。调用方必须不持有
-   * per-worker 锁(内部自取)。
+   * 日志,后续 hook 路径(inspectTerminalInteractionAfterHook)仍会重探。走
+   * inspectTerminalInteraction(自带 per-worker 锁)——原 ensureRuntime 冷重建是在锁内跑
+   * 这段探测的,懒化后调用点都在锁外,锁由这里自取(PR#125 review 修正);调用方不得已持有
+   * 该锁,否则自死锁。
    */
   private async ensureInteractionInspected(runtime: Runtime, h: IncarnationHandle): Promise<void> {
     if (!runtime.pendingInteractionInspect) return
     runtime.pendingInteractionInspect = undefined
-    await this.inspectTerminalInteractionLocked(runtime, h).catch((error) => {
+    await this.inspectTerminalInteraction(runtime, h).catch((error) => {
       console.error(`[ClaudeCodeAdapter] deferred interaction check failed for ${h.worker_id}#${h.seq}:`, error)
     })
   }

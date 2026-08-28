@@ -3193,8 +3193,8 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
 
 /**
  * 冷探测快路径(spec `2026-08-28-startup-reconcile-fast-probe`)的 codex 侧对称覆盖:
- * 判定矩阵、判死 reason 三级推导、rollout 扫描移出冷重建(轻核 rolloutPath 留空,
- * readTrace 懒查找回填)、以及"不 capture / 判死不建 runtime"的负面断言。
+ * 判定矩阵、判死 reason 三级推导、轻核 rollout 定位(resume/trace watch 前置,PR#125
+ * review 修正后保留在冷核)、以及"不 capture / 判死不建 runtime"的负面断言。
  * 全程用 mock tmux,不依赖真实 tmux 环境。
  */
 describe('CodexWorkerAdapter.state 冷探测快路径(无常驻 runtime)', () => {
@@ -3283,9 +3283,17 @@ describe('CodexWorkerAdapter.state 冷探测快路径(无常驻 runtime)', () =>
     expect(meta.ended_reason).toBe('crashed')
   })
 
-  it('会话存活 → 返回 meta 控制态并重建轻核(装事件监视),不 capture;轻核不做 rollout 扫描', async () => {
+  it('会话存活 → 返回 meta 控制态并重建轻核(装事件监视),不 capture;轻核定位 rollout(resume/trace watch 前置,PR#125 review 修正)', async () => {
     const workerId = `w-alive-${randomUUID().slice(0, 8)}`
-    await seedMeta(workerId, { seq: 1, state: 'running', session_id: 's1', workspace_root: workspaceRoot, codex_home: path.join(workspaceRoot, '.codex'), session_discovery: 'discovered' })
+    const sessionId = randomUUID()
+    const codexHome = path.join(workspaceRoot, '.codex')
+    // rollout 按文件名内嵌 uuid 精确匹配:构造可被 findRolloutFileBySessionId 命中的文件
+    const day = new Date().toISOString().slice(0, 10).replaceAll('-', '/')
+    const rolloutDir = path.join(codexHome, 'sessions', day)
+    await fs.mkdir(rolloutDir, { recursive: true })
+    const rolloutFile = path.join(rolloutDir, `rollout-${new Date().toISOString().slice(0, 19).replaceAll(':', '-')}-${sessionId}.jsonl`)
+    await fs.writeFile(rolloutFile, '{}\n', 'utf-8')
+    await seedMeta(workerId, { seq: 1, state: 'running', session_id: sessionId, workspace_root: workspaceRoot, codex_home: codexHome, session_discovery: 'discovered' })
     const tmux = new ProbeTmux()
     const adapter = makeAdapter(tmux)
 
@@ -3297,7 +3305,7 @@ describe('CodexWorkerAdapter.state 冷探测快路径(无常驻 runtime)', () =>
     const runtime = runtimes.get(`${workerId}#1`)
     expect(runtime?.stopEventWatch).toBeTruthy() // 协议 §5.5.3 重连原会话
     expect(runtime?.pendingInteractionInspect).toBe(true) // 懒化重检待消费
-    expect(runtime?.rolloutPath).toBeUndefined() // rollout 定位已移出冷重建
-    expect(runtime?.sessionId).toBe('s1')
+    expect(runtime?.rolloutPath).toBe(rolloutFile) // resume 门槛/native trace watch 前置在冷核即满足
+    expect(runtime?.sessionId).toBe(sessionId)
   })
 })
