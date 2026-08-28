@@ -298,7 +298,7 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     })
   })
 
-  it('adapter 报 idle 且台账仍是 running → 对齐 incarnation.state=idle + task.status=waiting_input，发 state_changed(source=reconcile)，归 revived', async () => {
+  it('adapter 报 idle 且台账化身 state=running(无矛盾) → 台账保持不动、不发事件(冷探测观察值不覆盖台账)，归 revived', async () => {
     const { harness, ledger, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter('builtin')
     adaptersMap.set('builtin', fake)
@@ -310,12 +310,32 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
 
     expect(report).toEqual<ReconcileReport>({ revived: ['w-idle'], failed: [], unchanged: [] })
     const after = await getWorker(ledger, 'w-idle')
-    expect(after.task.status).toBe('waiting_input')
-    expect(after.incarnations[0].state).toBe('idle')
+    expect(after.task.status).toBe('running')
+    expect(after.incarnations[0].state).toBe('running')
 
-    const stateEvents = events.filter((e) => e.kind === 'state_changed' && e.worker_id === 'w-idle')
+    expect(events.filter((e) => e.worker_id === 'w-idle')).toHaveLength(0)
+  })
+
+  it('台账化身 state=exited 但 adapter 报活(内部矛盾) → 矛盾修复为 running，发 state_changed(source=reconcile)，归 revived', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    const worker = makeWorker('w-resurrected', {
+      incarnations: [{ seq: 1, impl: 'builtin', state: 'exited', workspace: '/tmp/ws', session_ref: 'ref-w-resurrected#1', started_at: now() }],
+    })
+    await seed(ledger, DIALOG, worker)
+    fake.setState({ worker_id: 'w-resurrected', seq: 1 }, 'running')
+
+    const report = await harness.reconcileOnStartup()
+
+    expect(report).toEqual<ReconcileReport>({ revived: ['w-resurrected'], failed: [], unchanged: [] })
+    const after = await getWorker(ledger, 'w-resurrected')
+    expect(after.task.status).toBe('running') // task.status 保持，只修复化身 state 的矛盾
+    expect(after.incarnations[0].state).toBe('running')
+
+    const stateEvents = events.filter((e) => e.kind === 'state_changed' && e.worker_id === 'w-resurrected')
     expect(stateEvents).toHaveLength(1)
-    expect(stateEvents[0].detail).toEqual({ to: 'idle', source: 'reconcile' })
+    expect(stateEvents[0].detail).toEqual({ to: 'running', source: 'reconcile' })
   })
 
   it('主线化身的 impl 没有注册 adapter(已禁用/未安装) → 落 failed(crashed)，detail 记原因，不调用任何 adapter.state()', async () => {
@@ -687,7 +707,7 @@ describe('HarnessEvent.task_status —— reconcileOnStartup 的迁移点', () =
     expect(exited[0].task_status).toBe((await getWorker(ledger, 'w-crash')).task.status)
   })
 
-  it('存活对齐(realignAliveIncarnation)的 state_changed 事件带 waiting_input', async () => {
+  it('矛盾修复(realignAliveIncarnation)的 state_changed 事件带落账后的 task 状态；无矛盾时不发事件', async () => {
     const { harness, ledger, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter('builtin')
     adaptersMap.set('builtin', fake)
@@ -696,8 +716,7 @@ describe('HarnessEvent.task_status —— reconcileOnStartup 的迁移点', () =
 
     await harness.reconcileOnStartup()
 
-    const stateEvents = events.filter((e) => e.kind === 'state_changed' && e.worker_id === 'w-realign')
-    expect(stateEvents).toHaveLength(1)
-    expect(stateEvents[0].task_status).toBe('waiting_input')
+    // 台账化身 state=running 与 idle 无矛盾 → 存活分支不再写台账、不发事件。
+    expect(events.filter((e) => e.kind === 'state_changed' && e.worker_id === 'w-realign')).toHaveLength(0)
   })
 })

@@ -3190,3 +3190,114 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
     30000,
   )
 })
+
+/**
+ * 冷探测快路径(spec `2026-08-28-startup-reconcile-fast-probe`)的 codex 侧对称覆盖:
+ * 判定矩阵、判死 reason 三级推导、rollout 扫描移出冷重建(轻核 rolloutPath 留空,
+ * readTrace 懒查找回填)、以及"不 capture / 判死不建 runtime"的负面断言。
+ * 全程用 mock tmux,不依赖真实 tmux 环境。
+ */
+describe('CodexWorkerAdapter.state 冷探测快路径(无常驻 runtime)', () => {
+  let dataDir = ''
+  let workspaceRoot = ''
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cx-cold-probe-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cx-cold-probe-ws-'))
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true })
+    await fs.rm(workspaceRoot, { recursive: true, force: true })
+  })
+
+  class ProbeTmux extends NoopTmux {
+    alive = true
+    killCalls: string[] = []
+    captureCalls = 0
+
+    override async capturePane(name: string) {
+      this.captureCalls += 1
+      if (!this.alive) throw new Error(`tmux session gone: ${name}`)
+      return { text: this.paneText, dead: !this.alive }
+    }
+
+    override async isAlive(_name: string): Promise<boolean> {
+      return this.alive
+    }
+
+    override async killSession(name: string): Promise<void> {
+      this.killCalls.push(name)
+      this.alive = false
+    }
+  }
+
+  async function seedMeta(workerId: string, meta: Record<string, unknown>): Promise<void> {
+    await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
+    await fs.writeFile(path.join(dataDir, workerId, 'meta-1.json'), JSON.stringify(meta), 'utf-8')
+  }
+
+  function makeAdapter(tmux: ProbeTmux): CodexWorkerAdapter {
+    return new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+    })
+  }
+
+  const h = (workerId: string) => ({ worker_id: workerId, seq: 1, impl: 'codex' as const })
+
+  it('meta 缺失 → exited,不 capture', async () => {
+    const tmux = new ProbeTmux()
+    const adapter = makeAdapter(tmux)
+    expect(await adapter.state(h('w-nometa'))).toBe('exited')
+    expect(tmux.captureCalls).toBe(0)
+  })
+
+  it('会话已死 + meta.ended_reason 已落终态 → 沿用该 reason,meta 终态化,killSession,不建 runtime', async () => {
+    const workerId = `w-dead-reason-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerId, { seq: 1, state: 'running', session_id: 's1', workspace_root: workspaceRoot, ended_reason: 'killed', session_discovery: 'placeholder' })
+    const tmux = new ProbeTmux()
+    tmux.alive = false
+    const adapter = makeAdapter(tmux)
+
+    expect(await adapter.state(h(workerId))).toBe('exited')
+
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.state).toBe('exited')
+    expect(meta.ended_reason).toBe('killed')
+    expect(tmux.killCalls).toEqual([`crabot-w-${workerId}-1`])
+    expect(((adapter as unknown as { runtimes: Map<string, unknown> }).runtimes).size).toBe(0)
+  })
+
+  it('会话已死 + 活视角控制态 waiting_action(startup_stalled) → 保守记 crashed', async () => {
+    const workerId = `w-dead-stall-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerId, { seq: 1, state: 'idle', session_id: 's1', workspace_root: workspaceRoot, startup_stalled: true, wait_mode: 'action' })
+    const tmux = new ProbeTmux()
+    tmux.alive = false
+    const adapter = makeAdapter(tmux)
+
+    expect(await adapter.state(h(workerId))).toBe('exited')
+
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.ended_reason).toBe('crashed')
+  })
+
+  it('会话存活 → 返回 meta 控制态并重建轻核(装事件监视),不 capture;轻核不做 rollout 扫描', async () => {
+    const workerId = `w-alive-${randomUUID().slice(0, 8)}`
+    await seedMeta(workerId, { seq: 1, state: 'running', session_id: 's1', workspace_root: workspaceRoot, codex_home: path.join(workspaceRoot, '.codex'), session_discovery: 'discovered' })
+    const tmux = new ProbeTmux()
+    const adapter = makeAdapter(tmux)
+
+    expect(await adapter.state(h(workerId))).toBe('running')
+
+    expect(tmux.captureCalls).toBe(0)
+    const runtimes = (adapter as unknown as { runtimes: Map<string, { stopEventWatch?: unknown; pendingInteractionInspect?: boolean; rolloutPath?: string; sessionId: string }> }).runtimes
+    expect(runtimes.size).toBe(1)
+    const runtime = runtimes.get(`${workerId}#1`)
+    expect(runtime?.stopEventWatch).toBeTruthy() // 协议 §5.5.3 重连原会话
+    expect(runtime?.pendingInteractionInspect).toBe(true) // 懒化重检待消费
+    expect(runtime?.rolloutPath).toBeUndefined() // rollout 定位已移出冷重建
+    expect(runtime?.sessionId).toBe('s1')
+  })
+})
