@@ -98,7 +98,14 @@ describe('MCP and SubAgent coordinator mutations', () => {
       readSemanticSnapshot: () => ({ mcp: [{ id: 'tampered' }], subagents: agents.runtimeSemanticEntries() }),
       publishInvalidation: () => {},
     })
-    await expect(restarted.initialize()).rejects.toThrow('semantic fingerprint does not match committed revision')
+    // fail-open（protocol-admin 0.2.5 §3.19.8.1）：无 outbox 的源漂移不再拒绝启动，
+    // 以 live 投影重记账 revision+1；再次重启指纹一致，revision 不再前进。
+    await expect(restarted.initialize()).resolves.toMatchObject({ revision: changedRevision + 1 })
+    const second = new CoreAgentConfigMutationCoordinator(dir, {
+      readSemanticSnapshot: () => ({ mcp: [{ id: 'tampered' }], subagents: agents.runtimeSemanticEntries() }),
+      publishInvalidation: () => {},
+    })
+    await expect(second.initialize()).resolves.toMatchObject({ revision: changedRevision + 1 })
   })
 
   it('rewrites legacy v1 storage only inside a coordinator mutation', async () => {
