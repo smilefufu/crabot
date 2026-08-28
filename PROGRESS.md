@@ -23,8 +23,11 @@
   编辑（清空=回退默认 200K），驱动 compaction 阈值。
 - 分支 `worktree-slot-convergence-thinking-config`（PR #127，3 commits）；新增单测 41 例全绿；
   worktree 全量测试中 main 既有失败与负载 flaky 已逐个甄别标注。
+- @claude review（2026-08-28）两条真实风险已修（`f5f430c6`）：①thinking 加进
+  readCoreAgentSemanticSnapshot 投影（否则 thinking-only 保存被判 noop 400）；②AgentConfig
+  的 getGlobalConfig 拆分容错（placeholder 级失败不再打空表单）。
 - **待做**：spec §9 手工验收三项（真实 provider effort 生效 / 128K compaction 提前 / 存量迁移演练）
-  需起实例验证；@claude review 跟踪。
+  需起实例验证；协议注释"四个 slots"修正待推 docs（worktree 隔离，会话收尾补）。
 
 ### wechat 群聊门控（@ + 引用放行）：已合并（PR #124 → `ffd32e55`）
 
@@ -191,6 +194,15 @@
 
 ### 技术债与既有 follow-up（P6 后或并行确认）
 
+- **槽位思考强度 PR #127 review follow-up（2026-08-28）**：① anthropic 数字 budget 档位
+  （`thinking:{type:'enabled',budget_tokens:N}`）会开启经典 extended thinking，但
+  anthropic-adapter 流处理只消费 text/input_json delta，thinking block 与 signature 既不产出
+  也不回传——≤4.5 老模型 tool loop 第二轮大概率 400；触发需「anthropic + 老模型 + 主动填数字」
+  组合且 fail-loud，改 UI placeholder 措辞或做 block 回传属后续 spec。② 数字 thinking_custom 的
+  format 校验是保存时一次性判定：槽位无模型引用时事后换全局默认 Provider 不会重校验，
+  `thinkingEffortValue` 对 number 返回 undefined → 静默退化为跟随默认（协议已知边界）。
+  ③ backup import 对 legacy 槽位 key fail-loud 拒绝 vs 启动迁移丢弃+warn 的恢复体验不一致
+  （有意为之，灾难恢复场景用户需手改归档 JSON，观察是否值得放宽）。
 - **核心配置 revision 启动自检 fail-open：已合并**（PR #126 → `edab960a`）。PR #122 投影变更
   撞上一次性 rebaseline 申报通道锁死生产后，按 spec（crabot-docs
   `2026-08-28-config-revision-startup-fail-open-design.md`、protocol-admin 0.2.5）把启动漂移
