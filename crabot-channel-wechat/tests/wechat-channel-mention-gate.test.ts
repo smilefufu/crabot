@@ -161,10 +161,15 @@ describe('WechatChannel group mention gate', () => {
       const result = (channel as any).handleGetConfig()
       expect(result.config.credentials.api_key).toBe('***')
       expect(result.config.credentials.connector_url).toBe('http://localhost:0')
+      expect(result.config.credentials.mode).toBe('socketio')
+      expect(result.config.credentials.webhook_secret).toBeUndefined()
+      expect(result.config.credentials.webhook_port).toBeUndefined()
       expect(result.config.group.only_respond_to_mentions).toBe(true)
       expect(result.config.crab_platform_user_id).toBe(PUPPET_WXID)
       expect(result.schema['group.only_respond_to_mentions'].hot_reload).toBe(true)
       expect(result.schema['credentials.api_key'].sensitive).toBe(true)
+      expect(result.schema['credentials.mode'].hot_reload).toBe(false)
+      expect(result.schema['credentials.webhook_secret'].sensitive).toBe(true)
     })
 
     it('get_config：事件到来前 crab_platform_user_id 为空串', () => {
@@ -224,6 +229,47 @@ describe('WechatChannel group mention gate', () => {
       expect((channel as any).wechatConfig.api_key).toBe('wct_new')
       // WechatClient 构造时持有旧凭据，未被重建
       expect((channel as any).client).toBeDefined()
+    })
+
+    it('update_config：mode 合法值变更置 requires_restart，非法值忽略', () => {
+      const channel = makeChannel()
+      const ok = (channel as any).handleUpdateConfig({
+        config: { credentials: { mode: 'webhook' } },
+      })
+      expect(ok.requires_restart).toBe(true)
+      expect((channel as any).wechatConfig.mode).toBe('webhook')
+
+      const bad = (channel as any).handleUpdateConfig({
+        config: { credentials: { mode: 'grpc' } },
+      })
+      expect(bad.requires_restart).toBe(false)
+      expect((channel as any).wechatConfig.mode).toBe('webhook')
+    })
+
+    it('update_config：webhook_secret 掩码 *** 跳过，实际变更置 requires_restart', () => {
+      const channel = makeChannel()
+      const skip = (channel as any).handleUpdateConfig({
+        config: { credentials: { webhook_secret: '***' } },
+      })
+      expect(skip.requires_restart).toBe(false)
+
+      const set = (channel as any).handleUpdateConfig({
+        config: { credentials: { webhook_secret: 'whsec_1' } },
+      })
+      expect(set.requires_restart).toBe(true)
+      expect((channel as any).wechatConfig.webhook_secret).toBe('whsec_1')
+
+      const get = (channel as any).handleGetConfig()
+      expect(get.config.credentials.webhook_secret).toBe('***')
+    })
+
+    it('update_config：webhook_port 数值变更置 requires_restart', () => {
+      const channel = makeChannel()
+      const result = (channel as any).handleUpdateConfig({
+        config: { credentials: { webhook_port: 9440 } },
+      })
+      expect(result.requires_restart).toBe(true)
+      expect((channel as any).wechatConfig.webhook_port).toBe(9440)
     })
 
     it('update_config：非法类型忽略，不破坏状态', () => {

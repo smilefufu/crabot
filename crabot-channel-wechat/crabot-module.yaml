@@ -26,26 +26,31 @@ config_schema:
       description: 服务器地址（如 http://host:8080），从 Puppet 详情页复制
       format: uri
       default: "http://localhost:3001"
+      x-runtime-path: credentials.connector_url
     WECHAT_API_KEY:
       type: string
       title: Bot API Key
       description: wechat-connector 分配的 Bot API Key（wct_ 前缀）
       format: password
+      x-runtime-path: credentials.api_key
     WECHAT_MODE:
       type: string
       title: 推送模式
-      description: 消息接收方式
+      description: 消息接收方式（变更需重启）
       enum: ["socketio", "webhook"]
       default: "socketio"
+      x-runtime-path: credentials.mode
     WECHAT_WEBHOOK_SECRET:
       type: string
       title: Webhook 签名密钥
-      description: webhook 模式下的签名验证密钥
+      description: webhook 模式下的签名验证密钥（变更需重启）
       format: password
+      x-runtime-path: credentials.webhook_secret
     WECHAT_WEBHOOK_PORT:
       type: number
       title: Webhook 监听端口
-      description: webhook 模式下的 HTTP 监听端口
+      description: webhook 模式下的 HTTP 监听端口（变更需重启）
+      x-runtime-path: credentials.webhook_port
     WECHAT_ONLY_RESPOND_TO_MENTIONS:
       type: string
       title: 群聊仅响应定向消息

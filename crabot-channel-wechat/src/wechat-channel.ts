@@ -493,6 +493,9 @@ export class WechatChannel extends ModuleBase {
       credentials: {
         connector_url: this.wechatConfig.connector_url,
         api_key: '***',
+        mode: this.wechatConfig.mode,
+        ...(this.wechatConfig.webhook_secret ? { webhook_secret: '***' } : {}),
+        ...(this.wechatConfig.webhook_port !== undefined ? { webhook_port: this.wechatConfig.webhook_port } : {}),
       },
       group: {
         only_respond_to_mentions: this.wechatConfig.only_respond_to_mentions,
@@ -505,6 +508,9 @@ export class WechatChannel extends ModuleBase {
       schema: {
         'credentials.connector_url': { hot_reload: false, description: 'wechat-connector 地址，变更需重启' },
         'credentials.api_key': { sensitive: true, hot_reload: false, description: 'Bot API Key，变更需重启' },
+        'credentials.mode': { hot_reload: false, description: '推送模式，变更需重启' },
+        'credentials.webhook_secret': { sensitive: true, hot_reload: false, description: 'Webhook 签名密钥，变更需重启' },
+        'credentials.webhook_port': { hot_reload: false, description: 'Webhook 监听端口，变更需重启' },
         'group.only_respond_to_mentions': { hot_reload: true, description: '群聊仅响应定向消息（@ 或引用/回复 Crabot 发言）' },
       },
     }
@@ -512,13 +518,20 @@ export class WechatChannel extends ModuleBase {
 
   /**
    * Admin Web 把 handleGetConfig 的嵌套结构原样回传，所以 incoming 字段路径必须
-   * 跟 get 输出一一对应：credentials.* / group.*。api_key 收到掩码占位符 *** 表示
-   * 用户没改，跳过覆盖避免清掉真值；credentials 变更只置 requires_restart，不改
-   * 运行态连接（WechatClient 持有构造时的 URL/Key，重启才重建）。
+   * 跟 get 输出一一对应：credentials.* / group.*。掩码字段（api_key / webhook_secret）
+   * 收到占位符 *** 表示用户没改，跳过覆盖避免清掉真值。连接/接收类字段变更只置
+   * requires_restart，不改运行态连接（WechatClient 持有构造时的 URL/Key，重启才
+   * 重建）；仅群聊门控开关热生效。
    */
   private handleUpdateConfig(params: {
     config?: {
-      credentials?: { connector_url?: string; api_key?: string }
+      credentials?: {
+        connector_url?: string
+        api_key?: string
+        mode?: string
+        webhook_secret?: string
+        webhook_port?: number
+      }
       group?: { only_respond_to_mentions?: boolean | string }
     }
   }): { config: Record<string, unknown>; requires_restart: boolean } {
@@ -535,6 +548,20 @@ export class WechatChannel extends ModuleBase {
     }
     if (typeof creds.api_key === 'string' && creds.api_key && creds.api_key !== '***') {
       this.wechatConfig.api_key = creds.api_key
+      requiresRestart = true
+    }
+    if ((creds.mode === 'socketio' || creds.mode === 'webhook') && creds.mode !== this.wechatConfig.mode) {
+      this.wechatConfig.mode = creds.mode
+      requiresRestart = true
+    }
+    if (typeof creds.webhook_secret === 'string' && creds.webhook_secret !== '***') {
+      if (creds.webhook_secret !== this.wechatConfig.webhook_secret) {
+        this.wechatConfig.webhook_secret = creds.webhook_secret || undefined
+        requiresRestart = true
+      }
+    }
+    if (typeof creds.webhook_port === 'number' && creds.webhook_port !== this.wechatConfig.webhook_port) {
+      this.wechatConfig.webhook_port = creds.webhook_port
       requiresRestart = true
     }
 
