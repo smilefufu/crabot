@@ -123,9 +123,13 @@ export function selectSubAgentSkills(
   const byId = new Map(availableSkills.map((skill) => [skill.id, skill]))
   const missing = allowedSkillIds.filter((id) => !byId.has(id))
   if (missing.length > 0) {
-    throw new Error(`subagent skill policy: allowed Skill unavailable: ${missing.join(', ')}`)
+    console.warn(
+      `[SubAgentSkillPolicy] skipping allowed Skill IDs unavailable in current catalog: ${missing.join(', ')}`,
+    )
   }
-  const selected = allowedSkillIds.map((id) => byId.get(id)!)
+  const selected = allowedSkillIds
+    .map((id) => byId.get(id))
+    .filter((skill): skill is SkillConfig => skill !== undefined)
   const forbidden = selected
     .filter((skill) => NON_AGENT_CRABOT_SKILL_NAMES.has(skill.name))
     .map((skill) => skill.name)

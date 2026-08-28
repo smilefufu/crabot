@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  GROUP_CHAT_DISCIPLINE,
   MANAGER_IDENTITY,
   assembleManagerSystemPrompt,
   type PromptInputs,
@@ -187,6 +188,40 @@ describe('assembleManagerSystemPrompt 稳定装配', () => {
     }))
     expect(output).toContain('send_daily_reflection_summary')
     expect(output).not.toContain('只有需要人类立即注意时才 reach_master')
+  })
+
+  it('isGroup 时追加群聊响应纪律段，且位于档案之前', () => {
+    const output = assembleManagerSystemPrompt(baseInputs({ isGroup: true }))
+    expect(output.indexOf('群聊响应纪律')).toBeGreaterThanOrEqual(0)
+    expect(output.indexOf('张三，master，偏好简短回复')).toBeGreaterThan(output.indexOf('群聊响应纪律'))
+  })
+
+  it('群聊纪律段判据齐全：默认沉默、收件人判定、必须沉默、禁止沉默、不接话茬', () => {
+    // 判据迁移自已退役 dispatcher 的群聊 triage 规则（2026-05-19 spec §3.8 /
+    // 2026-05-15 spec §3.4），清单不得静默增删。
+    expect(GROUP_CHAT_DISCIPLINE).toContain('沉默是默认响应方式')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('发言前先判收件人')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('mention="@you"')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('mentions=')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('<quoted_message>')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('群成员之间互相讨论')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('群成员之间一问一答')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('系统通知 / 加群消息 / 分享链接')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('不确定是否在叫你')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('不要接话茬')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('禁止沉默')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('上下文只有发送者和你')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('你之前的消息被引用、被追问')
+    expect(GROUP_CHAT_DISCIPLINE).toContain('只适用于明确发给你的消息')
+  })
+
+  it('非群聊（私聊 / 系统线程 / 每日反思）不含群聊纪律段', () => {
+    expect(assembleManagerSystemPrompt(baseInputs())).not.toContain('群聊响应纪律')
+    expect(assembleManagerSystemPrompt(baseInputs({ isSystemThread: true }))).not.toContain('群聊响应纪律')
+    expect(assembleManagerSystemPrompt(baseInputs({
+      isSystemThread: true,
+      isBuiltinDailyReflection: true,
+    }))).not.toContain('群聊响应纪律')
   })
 
   it('改变曾经的动态输入不影响 system prompt 字节', () => {

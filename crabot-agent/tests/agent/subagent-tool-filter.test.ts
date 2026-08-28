@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   buildCapabilitiesForSubAgent,
   buildToolsForSubAgent,
@@ -148,22 +148,30 @@ describe('filterToolsForSubAgent', () => {
       .resolves.toMatchObject({ allowed: false })
   })
 
-  it('allowed_skill_ids 引用缺失 Skill 时 fail-loud，空白名单不装 loader', () => {
-    expect(() => buildToolsForSubAgent({
-      parentTools: [fakeTool('Skill')],
-      capabilities: ALL_ON,
-      allowedMcpServerIds: [],
-      allowedSkillIds: ['missing-skill'],
-      availableSkills: SKILLS,
-    })).toThrow('allowed Skill unavailable: missing-skill')
+  it('allowed_skill_ids 引用当前不可用 Skill 时告警并跳过，仍装配有效 Skill', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const capabilities = buildCapabilitiesForSubAgent({
+        parentTools: [fakeTool('Skill')],
+        capabilities: ALL_ON,
+        allowedMcpServerIds: [],
+        allowedSkillIds: ['missing-skill', 'skill-b'],
+        availableSkills: SKILLS,
+      })
 
-    expect(buildToolsForSubAgent({
-      parentTools: [fakeTool('Skill')],
-      capabilities: ALL_ON,
-      allowedMcpServerIds: [],
-      allowedSkillIds: [],
-      availableSkills: SKILLS,
-    })).toEqual([])
+      expect(capabilities.skills.map((skill) => skill.name)).toEqual(['skill-b'])
+      expect(capabilities.tools.map((tool) => tool.name)).toEqual(['Skill'])
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('missing-skill'))
+      expect(buildToolsForSubAgent({
+        parentTools: [fakeTool('Skill')],
+        capabilities: ALL_ON,
+        allowedMcpServerIds: [],
+        allowedSkillIds: [],
+        availableSkills: SKILLS,
+      })).toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('crabot-cli 和 memory-graph-linking 等非 Agent Skill 即使出现在旧白名单中也 fail-loud', () => {
