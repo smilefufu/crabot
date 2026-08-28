@@ -530,7 +530,7 @@ export class WechatChannel extends ModuleBase {
         api_key?: string
         mode?: string
         webhook_secret?: string
-        webhook_port?: number
+        webhook_port?: number | string
       }
       group?: { only_respond_to_mentions?: boolean | string }
     }
@@ -560,8 +560,13 @@ export class WechatChannel extends ModuleBase {
         requiresRestart = true
       }
     }
-    if (typeof creds.webhook_port === 'number' && creds.webhook_port !== this.wechatConfig.webhook_port) {
-      this.wechatConfig.webhook_port = creds.webhook_port
+    // Admin SchemaField 的文本框回传字符串，未编辑时原样回传 get_config 的 number——两种都接受
+    const incomingPort = typeof creds.webhook_port === 'string' && /^\d+$/.test(creds.webhook_port)
+      ? Number(creds.webhook_port)
+      : creds.webhook_port
+    if (typeof incomingPort === 'number' && Number.isInteger(incomingPort) && incomingPort > 0
+        && incomingPort !== this.wechatConfig.webhook_port) {
+      this.wechatConfig.webhook_port = incomingPort
       requiresRestart = true
     }
 

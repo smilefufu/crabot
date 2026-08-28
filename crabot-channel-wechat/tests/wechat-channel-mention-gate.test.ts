@@ -272,6 +272,30 @@ describe('WechatChannel group mention gate', () => {
       expect((channel as any).wechatConfig.webhook_port).toBe(9440)
     })
 
+    it('update_config：webhook_port 接受 Admin SchemaField 回传的数字字符串', () => {
+      const channel = makeChannel()
+      const result = (channel as any).handleUpdateConfig({
+        config: { credentials: { webhook_port: '9440' } },
+      })
+      expect(result.requires_restart).toBe(true)
+      expect((channel as any).wechatConfig.webhook_port).toBe(9440)
+
+      // get_config 刷回的是 number（未编辑时 Admin 原样回传 number，同样命中）
+      const again = (channel as any).handleUpdateConfig({
+        config: { credentials: { webhook_port: 9440 } },
+      })
+      expect(again.requires_restart).toBe(false)
+    })
+
+    it('update_config：webhook_port 非法字符串忽略，不破坏状态', () => {
+      const channel = makeChannel()
+      const result = (channel as any).handleUpdateConfig({
+        config: { credentials: { webhook_port: 'abc' } },
+      })
+      expect(result.requires_restart).toBe(false)
+      expect((channel as any).wechatConfig.webhook_port).toBeUndefined()
+    })
+
     it('update_config：非法类型忽略，不破坏状态', () => {
       const channel = makeChannel({ onlyRespondToMentions: true })
       const result = (channel as any).handleUpdateConfig({
