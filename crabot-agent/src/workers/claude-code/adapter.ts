@@ -59,6 +59,7 @@ import {
 
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
+import { QUERY_FORK_INSTRUCTION } from '../query-fork-instruction.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -108,6 +109,11 @@ function workspaceInstructionPrompt(spec?: import('../types.js').WorkspaceInstru
     spec.text,
     '</workspace-agents-md>',
   ].join('\n')
+}
+
+function forkSystemPrompt(spec?: import('../types.js').WorkspaceInstructionPayload): string {
+  const workspacePrompt = workspaceInstructionPrompt(spec)
+  return workspacePrompt ? `${workspacePrompt}\n\n${QUERY_FORK_INSTRUCTION}` : QUERY_FORK_INSTRUCTION
 }
 
 function appendWorkspaceInstructionPrompt(spec?: import('../types.js').WorkspaceInstructionPayload): string {
@@ -1189,7 +1195,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     let child: ChildProcess
     try {
-      const instructionPrompt = workspaceInstructionPrompt(opts.workspace_instructions)
+      const instructionPrompt = forkSystemPrompt(opts.workspace_instructions)
       const args = [
         '-p', forkInput,
         '--resume', prev.session_ref,
@@ -1199,9 +1205,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         '--include-partial-messages',
         '--mcp-config', MCP_CONFIG_FILE,
         '--strict-mcp-config',
-        ...(instructionPrompt !== undefined
-          ? ['--append-system-prompt', instructionPrompt]
-          : []),
+        '--append-system-prompt', instructionPrompt,
       ]
       const forkBin = await this.resolveBinForCommand()
       if (!forkBin) {

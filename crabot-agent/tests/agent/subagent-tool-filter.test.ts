@@ -45,6 +45,12 @@ const SKILLS: SkillConfig[] = [
     skill_dir: '/skills/workspace-context-maintenance',
   },
   { id: 'crabot-cli', name: 'crabot-cli', description: 'CLI', skill_dir: '/skills/crabot-cli' },
+  {
+    id: 'memory-graph-linking',
+    name: 'memory-graph-linking',
+    description: 'Memory graph',
+    skill_dir: '/skills/memory-graph-linking',
+  },
 ]
 
 describe('classifyTool', () => {
@@ -168,14 +174,16 @@ describe('filterToolsForSubAgent', () => {
     }
   })
 
-  it('crabot-cli 等非 Agent Skill 即使出现在旧白名单中也 fail-loud', () => {
-    expect(() => buildToolsForSubAgent({
-      parentTools: [fakeTool('Skill')],
-      capabilities: ALL_ON,
-      allowedMcpServerIds: [],
-      allowedSkillIds: ['crabot-cli'],
-      availableSkills: SKILLS,
-    })).toThrow('Skill not available to any Agent: crabot-cli')
+  it('crabot-cli 和 memory-graph-linking 等非 Agent Skill 即使出现在旧白名单中也 fail-loud', () => {
+    for (const id of ['crabot-cli', 'memory-graph-linking']) {
+      expect(() => buildToolsForSubAgent({
+        parentTools: [fakeTool('Skill')],
+        capabilities: ALL_ON,
+        allowedMcpServerIds: [],
+        allowedSkillIds: [id],
+        availableSkills: SKILLS,
+      })).toThrow(`Skill not available to any Agent: ${id}`)
+    }
   })
 
   it('主线 Worker 专用 Skill 即使写入白名单也不能下发给 direct child', () => {

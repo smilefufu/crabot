@@ -1672,12 +1672,13 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
 
   it('turn/start 接受后立即返回真实 fork thread，回答随后异步完成并写 output', async () => {
     const forkThreadId = randomUUID()
+    const requestFile = path.join(dataDir, 'fork-requests.jsonl')
     const states: Array<{ state: WorkerContractState; endReason?: string }> = []
     const adapter = new CodexWorkerAdapter({
       dataDir,
       codexHomeSource: codexHome,
       tmux: new NoopTmux(),
-      codexBin: appServerBin('happy', `FAKE_FORK_THREAD_ID=${forkThreadId} FAKE_COMPLETION_DELAY_MS=200`),
+      codexBin: appServerBin('happy', `FAKE_FORK_THREAD_ID=${forkThreadId} FAKE_COMPLETION_DELAY_MS=200 FAKE_REQUEST_FILE=${shQuote(requestFile)}`),
       onStateChange: (_handle, state, report) => states.push({ state, endReason: report?.endReason }),
     })
     await adapter.detect()
@@ -1700,6 +1701,28 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
     await waitForState(adapter, handle, 'exited')
     await expect(adapter.readTerminal(handle)).resolves.toEqual({ kind: 'headless_text', text: '侧问回答' })
     expect(states).toContainEqual({ state: 'exited', endReason: 'completed' })
+
+    const requests = (await fs.readFile(requestFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { method: string; params: Record<string, unknown> })
+    const forkRequest = requests.find((request) =>
+      request.method === 'thread/fork' && request.params.threadId === parentSessionId,
+    )
+    expect(forkRequest?.params).toMatchObject({
+      threadId: parentSessionId,
+      ephemeral: true,
+      excludeTurns: true,
+    })
+    expect(forkRequest?.params).not.toHaveProperty('developerInstructions')
+    const turnRequest = requests.find((request) =>
+      request.method === 'turn/start' && request.params.threadId === forkThreadId,
+    )
+    expect(turnRequest?.params.input).toEqual([{
+      type: 'text',
+      text: expect.stringContaining('停止当前一切工作，然后回答下面问题。'),
+    }])
+    expect((turnRequest?.params.input as Array<{ text: string }>)[0].text).toContain('侧问问题')
   })
 
   it('turn/start 明确拒绝时在同一次 fork 调用返回 query_submit 失败并收口进程', async () => {

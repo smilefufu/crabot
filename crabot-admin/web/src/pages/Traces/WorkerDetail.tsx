@@ -38,7 +38,7 @@ const ORIGIN_LABEL: Record<LedgerWorker['origin']['trigger_type'], string> = {
   message: '消息', scheduled: '定时任务', system: '系统',
 }
 const KIND_LABEL: Record<WorkerTraceEvent['kind'], string> = {
-  message: '消息', llm_call: '模型调用', tool_call: '工具调用', tool_result: '工具结果', thinking: '思考', lifecycle: '生命周期',
+  message: '消息', llm_call: '模型调用', tool_call: '工具调用', tool_result: '工具结果', thinking: '思考', lifecycle: '生命周期', error: '错误',
 }
 const ACTIVITY_TONE_COLOR: Record<ActivityTone, string> = {
   manager: 'var(--info)', worker: 'var(--success)', tool: 'var(--warning)', status: 'var(--text-muted)', failure: 'var(--error)',
@@ -201,6 +201,9 @@ function activityFor(event: WorkerTraceEvent, actorLabel: string, isSubagentTrac
   }
   if (event.kind === 'tool_result') {
     return { event, label: '工具结果', tone: 'tool', body: toolResult(event) }
+  }
+  if (event.kind === 'error') {
+    return { event, label: '执行器错误', tone: 'failure', body: failureReason(asRecord(event.detail), event.summary) }
   }
   if (event.kind === 'lifecycle') return lifecycleActivity(event)
   return undefined

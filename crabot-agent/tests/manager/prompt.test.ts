@@ -118,6 +118,17 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('fork')
   })
 
+  it('状态/进度/输出先读 read model，query_worker 只用于确需独立推理的侧问', () => {
+    expect(MANAGER_IDENTITY).toContain('状态查询与临时侧问分开')
+    expect(MANAGER_IDENTITY).toContain('get_worker_state')
+    expect(MANAGER_IDENTITY).toContain('get_worker_activity')
+    expect(MANAGER_IDENTITY).toContain('get_worker_turn')
+    expect(MANAGER_IDENTITY).toContain('不得为了查状态调用 `query_worker`')
+    expect(MANAGER_IDENTITY).toContain('read model 不足')
+    expect(MANAGER_IDENTITY).toContain('独立判断或解释')
+    expect(MANAGER_IDENTITY).not.toContain('人类询问任务进度、当前判断等需要向运行中执行器求证的问题，用 `query_worker` 建立 fork')
+  })
+
   it('慢工具纪律不再承诺"进展会唤醒你、不需要主动轮询"，而是如实说明唤醒粒度是轮次边界', () => {
     // 旧措辞是一句假承诺：turn 内的输出不产生任何事件，LLM 信了就会一直等一个不会来的唤醒。
     expect(MANAGER_IDENTITY).not.toContain('不需要你主动轮询')

@@ -11,7 +11,9 @@ import type {
   ExecuteTaskParams,
   WorkerAgentContext,
   ChannelMessage,
+  SkillConfig,
 } from '../../src/types.js'
+import { PromptManager } from '../../src/prompt-manager.js'
 import type { BgEntityRecord } from '../../src/engine/bg-entities/types.js'
 import type { ToolDefinition } from '../../src/engine/types.js'
 
@@ -1160,6 +1162,61 @@ describe('AgentHandler.updateSkills hot-reload', () => {
     const r2 = await tool2.call({ skill: 'skill-a' }, {})
     expect(r2.output).toContain('# v2 body')
     expect(r2.output).not.toContain('# v1 body')
+  })
+
+  it('主线 Skill 清单和 loader 排除非 Agent Skill，且热更新不会重新引入', async () => {
+    const userSkillDir = writeSkillSource('user-skill', '# user skill')
+    const userSkill: SkillConfig = {
+      id: 'user-skill',
+      name: 'user-skill',
+      description: '用户技能',
+      skill_dir: userSkillDir,
+    }
+    const handler = makeHandler({
+      skills: [
+        userSkill,
+        { id: 'cli', name: 'crabot-cli', description: 'CLI', skill_dir: '/skills/crabot-cli' },
+        { id: 'graph', name: 'memory-graph-linking', description: 'graph', skill_dir: '/skills/graph' },
+      ],
+      promptManager: new PromptManager(),
+    })
+
+    await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+    const options = mockRunEngine.mock.calls.at(-1)![0].options as {
+      tools: () => ReadonlyArray<ToolDefinition>
+      systemPrompt: () => string
+    }
+    const listedNames = async (): Promise<string> => {
+      const skillTool = findTool(options.tools(), 'Skill')
+      const result = await skillTool.call({ skill: 'list' }, {} as never)
+      return result.output
+    }
+
+    const initialList = await listedNames()
+    const initialPrompt = options.systemPrompt()
+    expect(initialList).toContain('user-skill')
+    expect(initialList).not.toContain('crabot-cli')
+    expect(initialList).not.toContain('memory-graph-linking')
+    expect(initialPrompt).toContain('user-skill')
+    expect(initialPrompt).not.toContain('crabot-cli')
+    expect(initialPrompt).not.toContain('memory-graph-linking')
+
+    const nextUserSkillDir = writeSkillSource('next-user-skill', '# next user skill')
+    handler.updateSkills([
+      { id: 'cli-2', name: 'crabot-cli', description: 'CLI', skill_dir: '/skills/crabot-cli-2' },
+      { id: 'graph-2', name: 'memory-graph-linking', description: 'graph', skill_dir: '/skills/graph-2' },
+      { id: 'next-user-skill', name: 'next-user-skill', description: '新用户技能', skill_dir: nextUserSkillDir },
+    ])
+
+    const updatedList = await listedNames()
+    const updatedPrompt = options.systemPrompt()
+    expect(updatedList).toContain('next-user-skill')
+    expect(updatedList).not.toContain('crabot-cli')
+    expect(updatedList).not.toContain('memory-graph-linking')
+    expect(updatedPrompt).toContain('next-user-skill')
+    expect(updatedPrompt).not.toContain('crabot-cli')
+    expect(updatedPrompt).not.toContain('memory-graph-linking')
   })
 })
 

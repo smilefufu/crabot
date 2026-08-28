@@ -173,6 +173,48 @@ describe('WorkerDetail', () => {
     expect(mocked.getWorkerTerminal).toHaveBeenLastCalledWith('w-1234567890ab', { seq: 2 })
   })
 
+  it('临时侧问化身显示 Manager 输入、执行器输出和完成状态', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockImplementation(async (_workerId: string, opts?: { seq?: number }) => ({
+      events: opts?.seq === 2
+        ? [
+            { ts: '2026-08-01T00:05:01.000Z', kind: 'message' as const, role: 'user' as const, summary: '现在进展如何？', source: 'native' as const, detail: { content: '现在进展如何？' } },
+            { ts: '2026-08-01T00:05:02.000Z', kind: 'message' as const, role: 'assistant' as const, summary: '已完成接口核对。', source: 'native' as const, detail: { content: '已完成接口核对。' } },
+            { ts: '2026-08-01T00:05:03.000Z', kind: 'lifecycle' as const, summary: 'query_completed query_id=q-1 fork_seq=2', source: 'harness' as const, detail: { query_id: 'q-1', fork_seq: 2 } },
+          ]
+        : [],
+      next_cursor: 'tok-1',
+    }))
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'headless_text', text: '已完成接口核对。', captured_at: '2026-08-01T00:05:02.000Z' })
+    renderDetail()
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /#2.*临时侧问/ })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /#2.*临时侧问/ }))
+
+    expect(await screen.findByRole('button', { name: /管理会话指令：现在进展如何？/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Worker 文本：已完成接口核对。/ })).toBeInTheDocument()
+    expect(screen.getByText('侧问完成')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /侧问完成：临时侧问已完成/ })).toBeInTheDocument()
+  })
+
+  it('临时侧问错误在默认活动流中显示', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn().mockResolvedValue({
+      events: [{
+        ts: '2026-08-01T00:05:02.000Z',
+        kind: 'error',
+        summary: 'query fork failed',
+        source: 'native',
+        detail: { message: '上游模型拒绝了侧问' },
+      }],
+      next_cursor: 'tok-1',
+    })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'headless_text', text: '', captured_at: '2026-08-01T00:05:02.000Z' })
+    renderDetail()
+
+    expect(await screen.findByRole('button', { name: /执行器错误：上游模型拒绝了侧问/ })).toBeInTheDocument()
+  })
+
   it('投递失败和异常退出保留在默认活动流', async () => {
     mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
     mocked.getWorkerTrace = vi.fn().mockResolvedValue({

@@ -45,6 +45,7 @@ import { probeCodexInput, acceptedCodexInput, classifyCodexTerminalInteraction, 
 
 import { assertInputDeliveryActive } from '../input-delivery-control.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
+import { QUERY_FORK_INSTRUCTION } from '../query-fork-instruction.js'
 import {
   CodexAppServerClient,
   CodexAppServerDeadlineError,
@@ -1600,6 +1601,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     try {
       await client.initialize(opts.establishment_deadline_at)
       const forkResult = asTable(await client.request('thread/fork', {
+        // Keep thread/fork on protocol-agent-v3's three-field contract. The
+        // query-only instruction travels in turn/start so older app-servers do
+        // not reject an unsupported fork parameter.
         threadId: prev.session_ref,
         ephemeral: true,
         excludeTurns: true,
@@ -1616,7 +1620,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       stage = 'query_submit'
       const turnResult = asTable(await client.request('turn/start', {
         threadId: thread.id,
-        input: [{ type: 'text', text: forkInput }],
+        input: [{
+          type: 'text',
+          text: `${QUERY_FORK_INSTRUCTION}\n\n## Manager 的问题\n${forkInput}`,
+        }],
       }, opts.establishment_deadline_at))
       const turn = asTable(turnResult.turn)
       if (typeof turn.id !== 'string') {

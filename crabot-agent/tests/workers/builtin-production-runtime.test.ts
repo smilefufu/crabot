@@ -216,11 +216,11 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   let prevDataDir: string | undefined
   let prevAgentDataDir: string | undefined
   let llm: ReturnType<typeof makeScriptedLLM>
-  let agents: UnifiedAgent[]
+  const agents = new Set<UnifiedAgent>()
 
   function boot(config: UnifiedAgentConfig = makeConfig({})): { agent: UnifiedAgent; internals: AgentInternals } {
     const agent = new UnifiedAgent(config)
-    agents.push(agent)
+    agents.add(agent)
     const internals = agent as unknown as AgentInternals
     internals.adminPort = 1
     return { agent, internals }
@@ -233,14 +233,14 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     delete process.env.CRABOT_AGENT_DATA_DIR
     process.env.DATA_DIR = join(tmpRoot, 'data')
     llm = makeScriptedLLM()
-    agents = []
     // 生产链路上唯一被替换的件：`adapterFromSdkEnv` 是 unified-agent 把 model slot 变成
     // 真会发 HTTP 的 adapter 的唯一出口（manager 与 builtin worker 共用它）。
     vi.spyOn(agentHandlerModule, 'adapterFromSdkEnv').mockReturnValue(llm.adapter as never)
   })
 
   afterEach(async () => {
-    for (const agent of agents.reverse()) await agent.stop()
+    await Promise.all([...agents].map((agent) => agent.stop().catch(() => undefined)))
+    agents.clear()
     vi.restoreAllMocks()
     if (prevDataDir === undefined) delete process.env.DATA_DIR
     else process.env.DATA_DIR = prevDataDir

@@ -24,6 +24,13 @@ export const NON_AGENT_CRABOT_SKILL_NAMES: ReadonlySet<string> = new Set([
   'crabot-cli',
 ])
 
+/** Remove Crabot-internal workflows that are not an Agent Skill from a catalog. */
+export function filterNonAgentCrabotSkills(
+  skills: ReadonlyArray<SkillConfig>,
+): SkillConfig[] {
+  return skills.filter((skill) => !NON_AGENT_CRABOT_SKILL_NAMES.has(skill.name))
+}
+
 export const MAINLINE_ONLY_CRABOT_SKILL_NAMES: ReadonlySet<string> = new Set([
   'tmp-page',
   'workspace-context-maintenance',

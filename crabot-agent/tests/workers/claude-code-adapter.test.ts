@@ -1740,7 +1740,42 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
         '--mcp-config',
         '.mcp.json',
         '--strict-mcp-config',
+        '--append-system-prompt',
+        expect.stringContaining('停止当前一切工作，然后回答下面问题。'),
       ])
+
+      await adapter.kill(h1)
+    },
+    15000,
+  )
+
+  it(
+    'fork 将 query-only 指令放入 system prompt，同时保留 Manager 原问题原样',
+    async () => {
+      const tmux = new CountingTmux()
+      const argvFile = path.join(dataDir, 'fork-query-prompt-argv.jsonl')
+      const claudeBin = forkClaudeBin(argvFile, '侧问回答内容')
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+      const question = '请解释这个函数为什么报错？不要执行任何修改。'
+
+      const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+      const h2 = await adapter.fork(
+        { worker_id: workerId, seq: 1, session_ref: meta1.session_id },
+        question,
+        forkOptions(),
+      )
+      await waitForState(adapter, h2, 'exited')
+
+      const forkArgv = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n').at(-1)!) as string[]
+      expect(forkArgv[forkArgv.indexOf('-p') + 1]).toBe(question)
+      const promptIndex = forkArgv.indexOf('--append-system-prompt')
+      expect(promptIndex).toBeGreaterThan(-1)
+      expect(forkArgv[promptIndex + 1]).toContain('停止当前一切工作，然后回答下面问题。')
+      expect(forkArgv[promptIndex + 1]).toContain('不加载或使用任何 Skill（包括 crabot-cli）')
+      expect(forkArgv[promptIndex + 1]).toContain('也不调用任何工具')
 
       await adapter.kill(h1)
     },

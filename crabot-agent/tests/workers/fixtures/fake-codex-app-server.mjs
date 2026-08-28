@@ -15,6 +15,7 @@ const forkThreadId = process.env.FAKE_FORK_THREAD_ID ?? '019d0000-0000-7000-8000
 const turnId = process.env.FAKE_TURN_ID ?? '019d0000-0000-7000-8000-000000000002'
 const delayMs = Number(process.env.FAKE_COMPLETION_DELAY_MS ?? '20')
 const terminationFile = process.env.FAKE_TERMINATION_FILE
+const requestFile = process.env.FAKE_REQUEST_FILE
 
 function recordTermination(signal) {
   if (terminationFile) appendFileSync(terminationFile, `${process.pid}:${signal}\n`)
@@ -34,6 +35,9 @@ function error(id, message, code = -32600) {
 const rl = readline.createInterface({ input: process.stdin })
 rl.on('line', (line) => {
   const message = JSON.parse(line)
+  if (requestFile && (message.method === 'thread/fork' || message.method === 'turn/start')) {
+    appendFileSync(requestFile, `${JSON.stringify(message)}\n`)
+  }
   if (message.method === 'initialize') {
     if (mode === 'hang_initialize') return
     send({
@@ -126,6 +130,11 @@ rl.on('line', (line) => {
       error(message.id, 'method not found', -32601)
       return
     }
+    const forkKeys = Object.keys(message.params ?? {}).sort().join(',')
+    if (forkKeys !== 'ephemeral,excludeTurns,threadId') {
+      error(message.id, 'invalid thread/fork params', -32602)
+      return
+    }
     if (message.params?.threadId === '00000000-0000-0000-0000-000000000001') {
       setTimeout(() => error(message.id, `no rollout found for thread id ${message.params.threadId}`), 20)
       return
@@ -143,6 +152,18 @@ rl.on('line', (line) => {
     return
   }
   if (message.method === 'turn/start') {
+    if (message.params?.threadId === forkThreadId) {
+      const inputText = Array.isArray(message.params.input)
+        ? message.params.input
+          .filter((item) => item && typeof item === 'object' && typeof item.text === 'string')
+          .map((item) => item.text)
+          .join('\n')
+        : ''
+      if (!inputText.includes('停止当前一切工作，然后回答下面问题。')) {
+        error(message.id, 'missing query fork instruction', -32602)
+        return
+      }
+    }
     if (message.params?.threadId === '00000000-0000-0000-0000-000000000002') {
       error(message.id, `thread not found: ${message.params.threadId}`)
       return

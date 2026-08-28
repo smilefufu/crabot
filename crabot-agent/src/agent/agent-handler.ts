@@ -94,6 +94,7 @@ import { createSubAgentHookRegistry, createCliPermissionHook, createSkillDirFenc
 import { HookRegistry } from '../hooks/hook-registry.js'
 import type { ContentReviewer } from '../hooks/types.js'
 import { reviewCliContent } from './cli-content-reviewer.js'
+import { filterNonAgentCrabotSkills } from '../workers/capability-policy.js'
 import { PromptManager, formatChannelMessageLine, formatShortTermMemoryLine, type QuotedMessageEntry } from '../prompt-manager.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { prefetchQuotedMessages } from './quoted-message-prefetcher.js'
@@ -615,7 +616,7 @@ export class AgentHandler {
     this.extra = config.extra ?? {}
     this.digestSdkEnv = options?.digestSdkEnv
     this.subAgents = options?.subAgents ?? []
-    this.skills = options?.skills ?? []
+    this.skills = filterNonAgentCrabotSkills(options?.skills ?? [])
     this.lspManager = options?.lspManager
     this.memoryWriter = options?.memoryWriter
     this.promptManager = options?.promptManager
@@ -1012,9 +1013,10 @@ export class AgentHandler {
    * 推同样配置时，跳过重复赋值；下一轮 LLM 调用通过 buildToolsDynamic 重建 Skill 工具）。
    */
   updateSkills(newSkills: ReadonlyArray<SkillConfig>): void {
-    const hash = computeSkillsHash(newSkills)
+    const filteredSkills = filterNonAgentCrabotSkills(newSkills)
+    const hash = computeSkillsHash(filteredSkills)
     if (hash === this.lastSkillsHash) return
-    this.skills = newSkills
+    this.skills = filteredSkills
     this.lastSkillsHash = hash
   }
 
@@ -1478,7 +1480,7 @@ export class AgentHandler {
         // 自动继承当前 cwd；但 set_cwd 工具单独 push 在 baseToolsRaw capture 之后，所以子不含。
 
         // 3e. Built-in file/shell tools (filtered by Admin config)
-        const skillsSnapshot = this.skills
+        const skillsSnapshot = filterNonAgentCrabotSkills(this.skills)
         const bgOwner: BgEntityOwner = {
           friend_id: context.sender_friend?.id ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`,
           session_id: context.task_origin?.session_id,
@@ -3322,12 +3324,13 @@ export class AgentHandler {
    * updateSkills 改 this.skills 后，下一轮 buildSystemPrompt 自动反映新列表。
    */
   private buildSkillListingSnapshot(): string | undefined {
-    if (!this.skills || this.skills.length === 0) return undefined
+    const skills = filterNonAgentCrabotSkills(this.skills)
+    if (skills.length === 0) return undefined
     const intro =
       '\n\n以下技能为特定任务提供专业指引。当任务匹配某个技能的描述时，' +
       '必须先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。' +
       '这是强制要求——先加载技能，再执行任务。'
-    const body = this.skills.map((s) => {
+    const body = skills.map((s) => {
       const desc = s.description || s.name
       return `<skill>\n<name>${s.name}</name>\n<description>${desc}</description>\n</skill>`
     }).join('\n')
@@ -3387,7 +3390,7 @@ export class AgentHandler {
       capabilities: subagent.builtin_capabilities,
       allowedMcpServerIds: subagent.allowed_mcp_server_ids,
       allowedSkillIds: subagent.allowed_skill_ids,
-      availableSkills: this.skills,
+      availableSkills: filterNonAgentCrabotSkills(this.skills),
       getCwd: deps.getCwd,
     })
     // caller 注入的专属工具（如 audit 的 submit_audit_result）在 capability filter
@@ -3693,7 +3696,7 @@ export class AgentHandler {
       capabilities: subagent.builtin_capabilities,
       allowedMcpServerIds: subagent.allowed_mcp_server_ids,
       allowedSkillIds: subagent.allowed_skill_ids,
-      availableSkills: this.skills,
+      availableSkills: filterNonAgentCrabotSkills(this.skills),
       getCwd: deps.getCwd,
     })
     const subPermissionConfig = permissionConfigForSubAgent(

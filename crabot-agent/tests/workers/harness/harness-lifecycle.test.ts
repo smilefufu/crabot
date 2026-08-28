@@ -3284,6 +3284,29 @@ describe('WorkerHarness.queryWorker', () => {
     expect(w.task.status).toBe('running')
   })
 
+  it('侧问准备 workspace 快照失败 → receipt 不会永久停在 starting', async () => {
+    const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const workspace = worker.incarnations[0].workspace
+    await fs.mkdir(join(workspace, 'AGENTS.md'))
+
+    await expect(harness.queryWorker(worker.worker_id, '读取当前进度')).rejects.toMatchObject({
+      reason_code: 'fork_create_failed',
+      certainty: 'unknown',
+      query_id: expect.any(String),
+    })
+    expect(fake.forkCalls).toHaveLength(0)
+
+    const queryStore = (harness as unknown as { queryReceiptStore: QueryReceiptStore }).queryReceiptStore
+    expect(await queryStore.list(worker.worker_id)).toMatchObject([{
+      state: 'failed',
+      failure: { reason_code: 'fork_create_failed', phase: 'establishment' },
+      manager_notification: { status: 'pending' },
+    }])
+    expect((await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll())
+      .filter((event) => event.kind === 'query_failed')).toHaveLength(1)
+  })
+
   it('建立失败 receipt 写暂时失败时仍返回 query_id，并由 deadline 巡检收口', async () => {
     const { harness, workersDir } = await makeHarness({
       caps: { fork: true },
@@ -3577,7 +3600,7 @@ describe('WorkerHarness.queryWorker', () => {
     expect(onDisk.filter((e) => e.detail?.query_id === result.query_id)).toHaveLength(1)
   })
 
-  it('回答终态通知在 deferred/route throw 时保持 pending，只有 consumed 后停止重报', async () => {
+  it('回答终态通知可在终态回调后立即投递，deferred/route throw 时保持 pending，consumed 后停止重报', async () => {
     const notifications: HarnessEvent[] = []
     let attempt = 0
     const { harness, fake, workersDir } = await makeHarness(
@@ -3607,8 +3630,6 @@ describe('WorkerHarness.queryWorker', () => {
     const queryStore = (harness as unknown as { queryReceiptStore: QueryReceiptStore }).queryReceiptStore
     await waitUntil(async () => (await queryStore.get(worker.worker_id, result.query_id))?.state === 'completed')
 
-    await harness.sweepLiveness()
-    expect((await queryStore.get(worker.worker_id, result.query_id))?.manager_notification.status).toBe('pending')
     await harness.sweepLiveness()
     expect((await queryStore.get(worker.worker_id, result.query_id))?.manager_notification.status).toBe('pending')
     await harness.sweepLiveness()
