@@ -145,6 +145,34 @@ describe('Anthropic prompt caching（cache breakpoint 注入）', () => {
       { type: 'text', text: 'hi', cache_control: EPHEMERAL },
     ])
   })
+
+  it('无 tools 时将历史 tool blocks 文本化，保留侧问上下文且不触发 Anthropic schema 400', async () => {
+    const body = await captureRequestBody({
+      systemPrompt: '侧问系统提示',
+      tools: [],
+      messages: [
+        createUserMessage('原始任务'),
+        createAssistantMessage([
+          { type: 'text', text: '先读取文件。' },
+          { type: 'tool_use', id: 'tu_1', name: 'Read', input: { path: '/tmp/a' } },
+        ], 'tool_use'),
+        createToolResultMessage('tu_1', '文件内容', false, [
+          { media_type: 'image/png', data: 'image-data' },
+        ]),
+        createUserMessage('当前进展？'),
+      ],
+    })
+
+    expect(body).not.toHaveProperty('tools')
+    const serialized = JSON.stringify(body.messages)
+    expect(serialized).toContain('<historical_tool_use>')
+    expect(serialized).toContain('Read')
+    expect(serialized).toContain('<historical_tool_result>')
+    expect(serialized).toContain('文件内容')
+    expect(serialized).not.toContain('"type":"tool_use"')
+    expect(serialized).not.toContain('"type":"tool_result"')
+    expect(serialized).toContain('"type":"image"')
+  })
 })
 
 // --- 改动 5：空 text block 过滤 ---

@@ -15,7 +15,13 @@ import { proxyManager } from 'crabot-shared'
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
 import { streamWithTimeoutAndRetry } from './stream-timeout.js'
 import { isToolResultMessage, mergeConsecutiveUserMessages, capToolResultForLLM } from './llm-adapter-types.js'
-import type { EngineMessage, ToolDefinition, StreamChunk, LLMTokenUsage } from './types.js'
+import type {
+  EngineMessage,
+  ToolDefinition,
+  StreamChunk,
+  LLMTokenUsage,
+  ToolUseBlock,
+} from './types.js'
 
 // --- Default max_tokens by model family ---
 // Anthropic SDK 强制要求 max_tokens；当上游（admin provider config）没配时，
@@ -32,9 +38,69 @@ function defaultAnthropicMaxTokens(model: string): number {
 
 // --- Anthropic Message Normalization ---
 
-export function normalizeMessagesForAnthropic(messages: ReadonlyArray<EngineMessage>): MessageParam[] {
+interface AnthropicMessageNormalizationOptions {
+  /**
+   * Anthropic rejects tool blocks when the request has no `tools` field. Keep the
+   * historical context, but represent it as ordinary text for a no-tool call.
+   */
+  readonly flattenToolHistory?: boolean
+}
+
+function stringifyHistoricalInput(input: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(input)
+  } catch {
+    return '[unserializable tool input]'
+  }
+}
+
+function historicalToolUseText(block: ToolUseBlock): TextBlockParam {
+  return {
+    type: 'text',
+    text: `<historical_tool_use>\nid: ${block.id}\nname: ${block.name}\ninput: ${stringifyHistoricalInput(block.input)}\n</historical_tool_use>`,
+  }
+}
+
+function historicalToolResultText(
+  toolUseId: string,
+  content: string,
+  isError: boolean,
+): TextBlockParam {
+  return {
+    type: 'text',
+    text: `<historical_tool_result>\ntool_use_id: ${toolUseId}\nstatus: ${isError ? 'error' : 'ok'}\ncontent:\n${capToolResultForLLM(content)}\n</historical_tool_result>`,
+  }
+}
+
+function historicalImages(
+  images: ReadonlyArray<{ readonly media_type: string; readonly data: string }> | undefined,
+): ImageBlockParam[] {
+  return (images ?? []).map((img) => ({
+    type: 'image' as const,
+    source: {
+      type: 'base64' as const,
+      media_type: img.media_type as ImageBlockParam.Source['media_type'],
+      data: img.data,
+    },
+  }))
+}
+
+export function normalizeMessagesForAnthropic(
+  messages: ReadonlyArray<EngineMessage>,
+  options: AnthropicMessageNormalizationOptions = {},
+): MessageParam[] {
+  const flattenToolHistory = options.flattenToolHistory === true
   const raw = messages.map((msg): MessageParam => {
     if (isToolResultMessage(msg)) {
+      if (flattenToolHistory) {
+        return {
+          role: 'user',
+          content: msg.toolResults.flatMap((tr) => [
+            historicalToolResultText(tr.tool_use_id, tr.content, tr.is_error),
+            ...historicalImages(tr.images),
+          ]),
+        }
+      }
       return {
         role: 'user',
         content: msg.toolResults.map((tr) => {
@@ -75,6 +141,7 @@ export function normalizeMessagesForAnthropic(messages: ReadonlyArray<EngineMess
             case 'text':
               return [{ type: 'text' as const, text: block.text }]
             case 'tool_use':
+              if (flattenToolHistory) return [historicalToolUseText(block)]
               return [
                 {
                   type: 'tool_use' as const,
@@ -109,6 +176,10 @@ export function normalizeMessagesForAnthropic(messages: ReadonlyArray<EngineMess
               },
             },
           ]
+        }
+        if (flattenToolHistory && block.type === 'tool_use') return [historicalToolUseText(block)]
+        if (flattenToolHistory && block.type === 'tool_result') {
+          return [historicalToolResultText(block.tool_use_id, block.content, block.is_error)]
         }
         // 不认识的 block 丢弃，不映射成空 text block 发给 API
         if (block.type !== 'text') return []
@@ -179,8 +250,13 @@ export class AnthropicAdapter implements LLMAdapter {
   }
 
   private async *streamOnce(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
-    const messages = normalizeMessagesForAnthropic(params.messages)
     const tools = params.tools.map(AnthropicAdapter.toAnthropicTool)
+    // A fork intentionally exposes no callable tools. Anthropic still rejects a
+    // request containing historical tool blocks unless the wire request defines
+    // tools, so preserve that history as marked text instead of re-enabling tools.
+    const messages = normalizeMessagesForAnthropic(params.messages, {
+      flattenToolHistory: tools.length === 0,
+    })
 
     // Prompt caching：注入 3 个 cache breakpoint（固定 5 分钟 ephemeral，SDK stable
     // 类型尚未带出 cache_control 字段，靠结构化类型直接附加）。只加缓存标记，

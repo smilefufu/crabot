@@ -1713,12 +1713,16 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
       threadId: parentSessionId,
       ephemeral: true,
       excludeTurns: true,
-      developerInstructions: expect.stringContaining('停止当前一切工作，然后回答下面问题。'),
     })
+    expect(forkRequest?.params).not.toHaveProperty('developerInstructions')
     const turnRequest = requests.find((request) =>
       request.method === 'turn/start' && request.params.threadId === forkThreadId,
     )
-    expect(turnRequest?.params.input).toEqual([{ type: 'text', text: '侧问问题' }])
+    expect(turnRequest?.params.input).toEqual([{
+      type: 'text',
+      text: expect.stringContaining('停止当前一切工作，然后回答下面问题。'),
+    }])
+    expect((turnRequest?.params.input as Array<{ text: string }>)[0].text).toContain('侧问问题')
   })
 
   it('turn/start 明确拒绝时在同一次 fork 调用返回 query_submit 失败并收口进程', async () => {
