@@ -29,6 +29,7 @@
 | `WECHAT_MODE` | 否 | socketio（默认）或 webhook |
 | `WECHAT_WEBHOOK_SECRET` | webhook 模式 | Webhook 签名密钥 |
 | `WECHAT_WEBHOOK_PORT` | webhook 模式 | Webhook 监听端口 |
+| `WECHAT_ONLY_RESPOND_TO_MENTIONS` | 否 | `true` 时群聊仅响应定向消息（@ 或引用/回复 Crabot 发言），默认 false；Admin 配置页可热改 |
 
 ## 构建和运行
 
