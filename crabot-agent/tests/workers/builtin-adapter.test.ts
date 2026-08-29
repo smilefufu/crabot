@@ -2228,8 +2228,8 @@ describe('BuiltinWorkerAdapter', () => {
           messageSnapshots.push({ ..._params, messages: [..._params.messages], tools: [..._params.tools] })
           const call = messageSnapshots.length
           return (async function* () {
-            if (call === 1) await toolGate
-            if (call === 2) await llmGate
+            if (call === 1) await toolGate.promise
+            if (call === 2) await llmGate.promise
             const r = call === 1
               ? { toolCalls: [{ name: 'probe_wait', id: 'call_1', input: {} }], stopReason: 'tool_use' as const }
               : { text: call === 2 ? '第一轮收尾' : '续 burst 完成', stopReason: 'end_turn' as const }
@@ -2290,6 +2290,53 @@ describe('BuiltinWorkerAdapter', () => {
     expect(typeof mainOptions?.hasPendingExternalInputs).toBe('function')
     expect(forkOptions2?.drainExternalInputs).toBeUndefined()
     expect(forkOptions2?.hasPendingExternalInputs).toBeUndefined()
+  })
+
+  it('注入消息遇 burst 内压缩:在压缩保留段进入后续上下文,不因压缩丢失', async () => {
+    const toolGate = deferred<void>()
+    const messageSnapshots: LLMStreamParams[] = []
+    const echoTurn = (id: string): TurnScript => ({
+      toolCalls: [{ name: 'echo', id, input: { s: id } }],
+      stopReason: 'tool_use',
+    })
+    const llm = makeCompactionAwareAdapter([
+      // 5 轮 echo 凑过 keepRecentMessages(6);gated 轮 usage 1900 > 阈值 1600,
+      // gated 轮挂起期间注入 → 下一轮开头 shouldCompact 命中,注入在保留段
+      echoTurn('e1'), echoTurn('e2'), echoTurn('e3'), echoTurn('e4'), echoTurn('e5'),
+      { toolCalls: [{ name: 'probe_wait', id: 'call_1', input: {} }], stopReason: 'tool_use', usage: { inputTokens: 1900, outputTokens: 50 } },
+      { text: '压缩后继续', stopReason: 'end_turn' },
+    ])
+    const baseStream = llm.stream as unknown as {
+      mock: { calls: Array<[{ messages: unknown[] }]> }
+    }
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: llm as unknown as LLMAdapter,
+      contextWindowTokens: 2000,
+      tools: [ECHO_TOOL, gatedTool(toolGate.promise)],
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'running')
+    // 等 gated 轮的 LLM 调用开始(第 6 次非压缩调用)再投递,保证注入位于上下文尾部
+    await vi.waitFor(() => {
+      const turnCalls = baseStream.mock.calls.filter(([p]) => !isCompactionCall(p))
+      expect(turnCalls).toHaveLength(6)
+    })
+    await adapter.sendInput(h, '压缩前注入的指令')
+    toolGate.resolve()
+    await waitState(adapter, h, 'idle')
+
+    // 压缩真实发生;注入消息在保留段进入压缩后的上下文(下一轮 LLM 调用可见),
+    // 并随压缩后的序列落 session 树——不因压缩丢失
+    expect(llm.compactionCalls).toBeGreaterThanOrEqual(1)
+    const lastTurnMessages = (() => {
+      const turnCalls = baseStream.mock.calls.filter(([p]) => !isCompactionCall(p))
+      return JSON.stringify(turnCalls.at(-1)![0].messages)
+    })()
+    expect(lastTurnMessages).toContain('压缩前注入的指令')
+    const treeRaw = await fs.readFile(join(tmp, s.worker_id, 'session.jsonl'), 'utf-8')
+    expect(treeRaw).toContain('压缩前注入的指令')
   })
 
   it('appendManagerInput:turn 边界注入的输入经 traceHooks 落 message/user trace 事件', async () => {
