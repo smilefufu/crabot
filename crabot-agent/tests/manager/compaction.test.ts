@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   decideCompaction,
   foldIntoSummary,
+  managerPolicyForWindow,
   type CompactionPolicy,
 } from '../../src/manager/compaction'
 import type { ManagerSessionState, ManagerKey } from '../../src/manager/types'
@@ -269,5 +270,39 @@ describe('foldIntoSummary', () => {
     expect(result).toBe('首次摘要')
     const sentText = JSON.stringify(captured.params?.messages)
     expect(sentText).toContain('第一批历史')
+  })
+})
+
+// --- managerPolicyForWindow（2026-08-29 spec：hardCap 按模型窗口推导，fold 等保持） ---
+
+describe('managerPolicyForWindow', () => {
+  it('window 有值 → hardCap = floor(window × 0.8)，其余字段保持原策略', () => {
+    const out = managerPolicyForWindow(POLICY, 128_000)
+    expect(out.hardCapTokens).toBe(102_400)
+    expect(out.foldTokenThreshold).toBe(POLICY.foldTokenThreshold)
+    expect(out.keepRecent).toBe(POLICY.keepRecent)
+    expect(out.cacheTtlMs).toBe(POLICY.cacheTtlMs)
+    expect(managerPolicyForWindow(POLICY, 1_000_000).hardCapTokens).toBe(800_000)
+  })
+
+  it('window 未配置 → 原样返回 policy（回退现状常量 hardCap）', () => {
+    expect(managerPolicyForWindow(POLICY, undefined)).toBe(POLICY)
+  })
+
+  it('decideCompaction 全链路：force_hot 判定用的是推导后的 hardCap', () => {
+    const history = makeHistory(12) // 12*50 = 600 token
+    const nowMs = 10_000
+    const hotState = baseState({ recent: history, lastActiveAt: new Date(nowMs - 500).toISOString() })
+    const estimate = (msgs: ReadonlyArray<EngineMessage>) => msgs.length * 50
+
+    // window=700 → hardCap=560 < 600 → force_hot（原 policy 500 也触发，这里验证的是推导值生效）
+    expect(decideCompaction({
+      state: hotState, nowMs, policy: managerPolicyForWindow(POLICY, 700), estimateTokens: estimate,
+    })).toMatchObject({ kind: 'force_hot' })
+
+    // window=800 → hardCap=640 ≥ 600 → none（原 policy 500 会触发；证明推导后的 hardCap 取代了常量）
+    expect(decideCompaction({
+      state: hotState, nowMs, policy: managerPolicyForWindow(POLICY, 800), estimateTokens: estimate,
+    })).toEqual({ kind: 'none' })
   })
 })

@@ -92,7 +92,8 @@ export interface ManagerRegistryDeps {
   readonly adapter: () => LLMAdapter
   readonly model: () => string
   readonly maxTurns?: number
-  readonly contextWindowTokens?: number
+  /** manager 模型的上下文窗口(随 powerful slot,thunk 支持 hot-reload);undefined = engine 默认 200K */
+  readonly contextWindowTokens?: () => number | undefined
   /** manager 的槽位思考强度(随 powerful slot,thunk 支持 hot-reload);undefined = 跟随默认 */
   readonly thinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
   readonly now: () => Date

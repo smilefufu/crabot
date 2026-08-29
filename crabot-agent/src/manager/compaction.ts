@@ -15,6 +15,7 @@
 
 import { callNonStreaming, createUserMessage } from '../engine/index.js'
 import type { EngineMessage, LLMAdapter } from '../engine/index.js'
+import { DEFAULT_COMPACT_THRESHOLD } from '../engine/context-manager.js'
 import type { ManagerSessionState } from './types.js'
 
 export interface CompactionPolicy {
@@ -40,6 +41,20 @@ export type CompactionDecision =
       readonly foldMessages: ReadonlyArray<EngineMessage>
       readonly keep: ReadonlyArray<EngineMessage>
     }
+
+/**
+ * 按模型上下文窗口推导生效策略（2026-08-29 spec，PR 后续）：hardCap = floor(window × 0.8)，
+ * 与 worker 侧 compaction 阈值同源同比例。window 未配置（模型没填 context_window）时原样
+ * 返回 policy——即回退 engine 既有默认 200K 对应的常量 hardCap。
+ * foldTokenThreshold / keepRecent / cacheTtlMs 是刻意保守的轻量策略，不随窗口变。
+ */
+export function managerPolicyForWindow(
+  policy: CompactionPolicy,
+  contextWindowTokens: number | undefined,
+): CompactionPolicy {
+  if (contextWindowTokens === undefined) return policy
+  return { ...policy, hardCapTokens: Math.floor(contextWindowTokens * DEFAULT_COMPACT_THRESHOLD) }
+}
 
 /**
  * 纯决策函数:无 IO、无 LLM 调用、不读系统时钟——nowMs 与 estimateTokens 均由调用方
