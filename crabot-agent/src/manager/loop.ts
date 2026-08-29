@@ -425,10 +425,15 @@ export class ManagerLoop {
   }
 
   /** episode 进行中到达的新事件:渲染成文本推进内部邮箱,由 engine 的 humanMessageQueue
-   *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。 */
-  enqueueDuringEpisode(envelope: TimedWakeEnvelope): void {
+   *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。
+   *
+   *  人类消息默认拒绝:必须先经 commitHumanInputs 写入会话历史(协议 §4.1「人类入站
+   *  提交」)才可注入,否则 failed/aborted 后会把 LLM 已见过的输入当新 wake 重放。
+   *  唯一合法入口是 `enqueueHumanWakeDuringActiveEpisode`(先提交、再带
+   *  `humanWakePreCommitted` 放行)。 */
+  enqueueDuringEpisode(envelope: TimedWakeEnvelope, opts?: { humanWakePreCommitted?: boolean }): void {
     assertTimedWakeEnvelope(envelope)
-    if (isHumanWake(envelope.wake)) {
+    if (isHumanWake(envelope.wake) && !opts?.humanWakePreCommitted) {
       throw new Error('human messages must be committed through wakeUp, not queued during an episode')
     }
     this.mailbox.push(envelope)
@@ -436,6 +441,37 @@ export class ManagerLoop {
     for (const id of envelope.correlation?.admin_chat_request_ids ?? []) {
       if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
     }
+  }
+
+  /**
+   * episode 运行中到达的人类消息(P7 cutover 遗留接线,2026-08-29 补):先提交——经
+   * commitHumanInputs 按 platform_message_id 去重写入 state.recent(store),满足协议
+   * §4.1「首次 LLM/工具调用前原子写入」;再入 mailbox 走 turn 边界注入,当前 episode
+   * 的下一轮 LLM 即可见,不再等本 episode 跑完(与 builtin worker 输入注入同语义,
+   * 参照 PR #130)。
+   *
+   * 时序窗口与收口(如实记录):
+   * - 提交的 store.save 与当前 episode 收尾的 save 均基于各自快照,毫秒级并发窗口内
+   *   存在覆盖;若注入未被消费,mailbox 残留由 hasPendingMailbox 自唤醒(#54)取出并
+   *   经 commitHumanInputs 去重重新提交——消息不丢,仅延迟到下一 episode。
+   * - 本 episode failed/aborted:收尾失败分支对已注入(被 drainPending 消费)的人类
+   *   envelope 先补提交进 state.recent,再走既有 settle 重投(去重键使其跳过),下一
+   *   episode 经 tailMessages(state.recent) 重新看到,不丢不重。
+   */
+  async enqueueHumanWakeDuringActiveEpisode(
+    envelope: TimedWakeEnvelope,
+    onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+  ): Promise<void> {
+    await this.deps.store.ensureSession(this.deps.key)
+    const committed = await this.commitHumanInputs(
+      await this.deps.store.load(this.deps.key),
+      [envelope],
+      envelope,
+    )
+    if (committed.lastCurrentWakeCommittedMessageId) {
+      this.notifyHumanInputCommitted(onHumanInputCommitted, committed.lastCurrentWakeCommittedMessageId)
+    }
+    this.enqueueDuringEpisode(envelope, { humanWakePreCommitted: true })
   }
 
   /**
@@ -772,7 +808,21 @@ export class ManagerLoop {
     if (consumedEvents) {
       const priorRecent = state.recent
       const newRecent = attempt.result.finalMessages.slice(attempt.hasSummaryMarker ? 1 : 0)
-      state = { ...state, recent: newRecent, lastActiveAt: this.deps.now().toISOString() }
+      // mid-episode 注入的人类 envelope 其去重键在 enqueueHumanWakeDuringActiveEpisode
+      // 提交时已写入 store;收尾 save 基于本 episode 的旧快照,必须把键合并进来,否则
+      // 会覆盖掉已提交键——channel 重发同 platform_message_id 时会重复提交。
+      const injectedHumanMessageIds = (this.currentEpisodeInjected ?? [])
+        .filter((item) => isHumanWake(item.wake))
+        .flatMap((item) => item.wake.messages.map((m) => m.platform_message_id))
+      const committedIds = injectedHumanMessageIds.length > 0
+        ? Array.from(new Set([...(state.committedHumanMessageIds ?? []), ...injectedHumanMessageIds]))
+        : state.committedHumanMessageIds
+      state = {
+        ...state,
+        recent: newRecent,
+        lastActiveAt: this.deps.now().toISOString(),
+        ...(committedIds !== undefined ? { committedHumanMessageIds: committedIds } : {}),
+      }
       await this.deps.store.save(state)
       const localSupervisionSummary = defaultSupervisionHistorySummary({
         envelope,
@@ -808,6 +858,14 @@ export class ManagerLoop {
       // 清空 mailbox 里可能残留的"尚未被消费"那一段(它是 currentEpisodeInjected 的后缀,
       // 不清空会和下面的整体重投重复),再按到达顺序整体重投,保证至少一次投递、不丢失、不重复。
       const injectedEnvelopes = this.currentEpisodeInjected ?? []
+      // 被 turn 边界注入消费过的人类 envelope:LLM 已见过,失败后必须提交进 recent
+      // (下一 episode 的 tailMessages 重新看到),而不是当作未消费重投——否则既不在
+      // recent(失败路径不做 recent 替换)又被重投去重跳过,消息直接丢失。
+      const injectedHumanEnvelopes = injectedEnvelopes.filter((item) => isHumanWake(item.wake))
+      if (injectedHumanEnvelopes.length > 0) {
+        const committedInjection = await this.commitHumanInputs(state, injectedHumanEnvelopes, undefined)
+        if (committedInjection.messageCount > 0) state = committedInjection.state
+      }
       await this.settleFailedEpisodeEnvelopes(carriedEnvelopes, envelope, injectedEnvelopes, true)
     }
 

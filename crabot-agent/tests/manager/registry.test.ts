@@ -888,7 +888,7 @@ describe('ManagerRegistry', () => {
     expect(scheduleMessages).not.toContain('occurred_at=')
   })
 
-  it('同一 ManagerKey 并发排队的后到事件保留各自入口时间', async () => {
+  it('同一 ManagerKey episode 运行中到达的后到人类消息注入当前 episode,并保留各自入口时间', async () => {
     const calls: LLMStreamParams[] = []
     const firstTurnEntered = deferred()
     const releaseFirstTurn = deferred()
@@ -919,13 +919,17 @@ describe('ManagerRegistry', () => {
     const first = registry.routeHumanMessages('wechat', 'same-key', [makeChannelMessage('first')])
     await firstTurnEntered.promise
     nowMs = Date.parse('2026-08-10T02:00:30.000Z')
-    const second = registry.routeHumanMessages('wechat', 'same-key', [makeChannelMessage('second')])
+    // episode 在跑:后到消息注入当前 episode(turn 间隙),不再排队等独立 episode
+    const second = await registry.routeHumanMessages('wechat', 'same-key', [makeChannelMessage('second')])
+    expect(second).toMatchObject({ outcome: 'completed', episodeId: '' })
     nowMs = Date.parse('2026-08-10T02:05:00.000Z')
     releaseFirstTurn.resolve()
-    await Promise.all([first, second])
+    await first
 
+    // turn1 只见 first;turn2(注入后)见 second,且后到消息的入口时间原样保留
     expect(JSON.stringify(calls[0].messages)).toContain('received_at=\\"2026-08-10T10:00:00+08:00\\"')
-    expect(JSON.stringify(calls[2].messages)).toContain('received_at=\\"2026-08-10T10:00:30+08:00\\"')
+    expect(JSON.stringify(calls[1].messages)).toContain('received_at=\\"2026-08-10T10:00:30+08:00\\"')
+    expect(JSON.stringify(calls[1].messages)).toContain('second')
   })
 
   // --- evictIdle ---
@@ -1017,10 +1021,13 @@ describe('ManagerRegistry', () => {
     const loopBefore = registry.getOrCreate(key)
 
     // 同 key 连续发起两次唤醒、不等第一次完成——B 在 ManagerLoop 内部 mutex 上排队等 A。
-    // routeHumanMessages 内部在第一个 await 之前就已经同步完成 activeEpisodes 计数 +1，
+    // routeHumanMessages 在 episode 运行中已改为 mailbox 注入并立即返回(不再排队),
+    // 因此这里用 routeSchedule 触发两个真正排队的在途 episode,保留对 activeEpisodes
+    // 引用计数的保护意图。
+    // runWake 内部在第一个 await 之前就已经同步完成 activeEpisodes 计数 +1，
     // 因此这里不需要额外同步手段就能保证两次唤醒都已经"在途"。
-    const pA = registry.routeHumanMessages('wechat', 'sess-concurrent', [makeChannelMessage('A')])
-    const pB = registry.routeHumanMessages('wechat', 'sess-concurrent', [makeChannelMessage('B')])
+    const pA = registry.routeSchedule({ scheduleId: 'concurrent-a', title: 'A', description: 'A', targetSession: { channel_id: 'wechat', session_id: 'sess-concurrent' } })
+    const pB = registry.routeSchedule({ scheduleId: 'concurrent-b', title: 'B', description: 'B', targetSession: { channel_id: 'wechat', session_id: 'sess-concurrent' } })
 
     const resultA = await pA // A 的 episode 已经 resolve：引用计数应从 2 降到 1，而不是被误删到 0
     expect(resultA.outcome).toBe('completed')

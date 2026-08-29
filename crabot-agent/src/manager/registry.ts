@@ -353,6 +353,23 @@ export class ManagerRegistry {
       kind === 'human_messages'
         ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
         : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
+    // P7 cutover 遗留接线补齐(2026-08-29):episode 运行中到达的人类消息进入当前
+    // episode mailbox,turn 边界注入当前 episode 的下一轮 LLM——不再阻塞在 wakeUp 的
+    // mutex 上等本 episode 跑完。先提交(写历史+去重+回调)再注入,语义与 builtin
+    // worker 输入注入一致(参照 PR #130)。协议 §4.1「episode 进行中到达的事件直接
+    // 进入当前 Manager mailbox」同样涵盖人类消息。
+    const loop = this.getOrCreate(key)
+    if (this.isEpisodeActive(key)) {
+      await loop.enqueueHumanWakeDuringActiveEpisode({ ...envelope, wake: event }, onHumanInputCommitted)
+      return {
+        episodeId: '',
+        outcome: 'completed',
+        turns: 0,
+        consumedEvents: true,
+        repliedToHuman: false,
+        successfulSendMessageTargets: [],
+      }
+    }
     return this.runWake(key, { ...envelope, wake: event }, 0, onHumanInputCommitted)
   }
 
