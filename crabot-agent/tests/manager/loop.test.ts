@@ -790,6 +790,84 @@ describe('ManagerLoop', () => {
       .toThrow('human messages must be committed through wakeUp')
   })
 
+  it('重复来源(整批已提交)注入在跑 episode 时不进 LLM(协议 §4.1 重复来源守卫)', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ text: '已回复', stopReason: 'end_turn' })
+
+    let loop!: ManagerLoop
+    const deps = baseDeps({
+      store,
+      adapter,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            // 第一次:新消息,正常注入;第二次:同一 platform_message_id 重放(at-least-once),必须被挡
+            const env = timed({ kind: 'human_messages', messages: [makeChannelMessage('重放攻击消息')] })
+            await loop.enqueueHumanWakeDuringActiveEpisode(env)
+            await loop.enqueueHumanWakeDuringActiveEpisode(env)
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
+    expect(result.outcome).toBe('completed')
+
+    // 消息只被注入一次:最终上下文中恰好出现一次(messages 快照跨轮累积,看最后一轮)
+    const nonFoldCalls = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    const lastMessages = JSON.stringify(nonFoldCalls.at(-1)!.messages)
+    expect(lastMessages.split('重放攻击消息')).toHaveLength(2) // 1 次出现
+    // 去重键只记一条
+    const state = await store.load(KEY)
+    expect((state.committedHumanMessageIds ?? []).length).toBe(2) // 主 wake + 注入一次
+  })
+
+  it('部分重叠批次:已提交的旧消息不进 LLM,只注入新消息投影', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ text: '已回复', stopReason: 'end_turn' })
+
+    const oldMsg = makeChannelMessage('已经答复过的旧消息')
+    let loop!: ManagerLoop
+    const deps = baseDeps({
+      store,
+      adapter,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            // 第一批:旧消息单独到达并提交
+            await loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [oldMsg] }))
+            // 第二批:同一旧消息 + 一条新消息(渠道合并重发场景)
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [oldMsg, makeChannelMessage('全新的消息')] }),
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
+
+    // 旧消息只出现一次(第一次注入),第二次注入只带新消息投影——看最终上下文
+    const nonFoldCalls = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    const lastMessages = JSON.stringify(nonFoldCalls.at(-1)!.messages)
+    expect(lastMessages.split('已经答复过的旧消息')).toHaveLength(2) // 1 次出现
+    expect(lastMessages.split('全新的消息')).toHaveLength(2) // 1 次出现
+  })
+
   it('注入委托的结算钩子在 episode 收尾以真实 result 触发(群聊注意力结算用)', async () => {
     const { adapter, queue, calls } = makeAdapter()
     queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })

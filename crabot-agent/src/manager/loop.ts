@@ -479,10 +479,15 @@ export class ManagerLoop {
     if (committed.lastCurrentWakeCommittedMessageId) {
       this.notifyHumanInputCommitted(onHumanInputCommitted, committed.lastCurrentWakeCommittedMessageId)
     }
+    // 协议 §4.1「重复来源不得新增历史、LLM episode 或 reaction」:整批都已提交过
+    // (messageCount=0,at-least-once 重放/渠道重发撞上在跑 episode)→ 不注入,与
+    // runEpisode 的空转守卫同语义;部分重叠 → 只注入新消息的投影,已提交的那部分
+    // 不再进 LLM 输入。
+    if (committed.messageCount === 0) return
+    this.enqueueDuringEpisode(committed.injectedEnvelope ?? envelope, { humanWakePreCommitted: true })
     // 结算委托:调用方关心的「这批消息最终有没有被回复」由被注入 episode 的收尾
     // 真实 result 回答(同 episode 收尾 detectRepliedToHuman),不由注入调用编造。
     if (onEpisodeSettled) this.currentEpisodeSettleHooks.push(onEpisodeSettled)
-    this.enqueueDuringEpisode(envelope, { humanWakePreCommitted: true })
   }
 
   /**
@@ -942,9 +947,13 @@ export class ManagerLoop {
     readonly humanMessages: ReadonlyArray<EngineMessage>
     readonly messageCount: number
     readonly lastCurrentWakeCommittedMessageId?: string
+    /** 只含新提交消息的投影 envelope(按 platform_message_id 去重后);messageCount=0 时为 undefined。
+     *  注入路径用它喂 LLM——已提交过的旧消息不得再进 LLM 输入(协议 §4.1)。 */
+    readonly injectedEnvelope?: TimedWakeEnvelope
   }> {
     const committedIds = new Set(state.committedHumanMessageIds ?? [])
     const committedMessages: EngineMessage[] = []
+    const injectedEnvelopes: TimedWakeEnvelope[] = []
     let lastCurrentWakeCommittedMessageId: string | undefined
 
     for (const envelope of envelopes) {
@@ -956,6 +965,7 @@ export class ManagerLoop {
 
       for (const { message } of newEntries) committedIds.add(message.platform_message_id)
       committedMessages.push(createUserMessage(this.renderEnvelope(projectHumanEnvelope(envelope, newEntries))))
+      injectedEnvelopes.push(projectHumanEnvelope(envelope, newEntries))
       if (envelope === currentEnvelope) {
         lastCurrentWakeCommittedMessageId = newEntries[newEntries.length - 1].message.platform_message_id
       }
@@ -971,7 +981,13 @@ export class ManagerLoop {
       committedHumanMessageIds: Array.from(committedIds),
     }
     await this.deps.store.save(next)
-    return { state: next, humanMessages: committedMessages, messageCount: committedMessages.length, lastCurrentWakeCommittedMessageId }
+    return {
+      state: next,
+      humanMessages: committedMessages,
+      messageCount: committedMessages.length,
+      lastCurrentWakeCommittedMessageId,
+      injectedEnvelope: injectedEnvelopes[0],
+    }
   }
 
   private notifyHumanInputCommitted(
