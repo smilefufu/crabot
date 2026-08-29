@@ -15,6 +15,7 @@ import {
   shouldWakeOnHarnessEvent,
 } from '../../src/manager/inbound-adapters.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
+import type { EpisodeResult } from '../../src/manager/loop.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage, Friend } from '../../src/types.js'
@@ -930,6 +931,56 @@ describe('ManagerRegistry', () => {
     expect(JSON.stringify(calls[0].messages)).toContain('received_at=\\"2026-08-10T10:00:00+08:00\\"')
     expect(JSON.stringify(calls[1].messages)).toContain('received_at=\\"2026-08-10T10:00:30+08:00\\"')
     expect(JSON.stringify(calls[1].messages)).toContain('second')
+  })
+
+  it('routeHumanMessages 注入在跑 episode 时 onEpisodeSettled 以真实收尾 result 触发(含失败),占位 result 不带真实值', async () => {
+    const firstTurnEntered = deferred()
+    const releaseFirstTurn = deferred()
+    let turn = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        if (isAssistantTextEndTurnReminder(params)) {
+          yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+          return
+        }
+        turn++
+        if (turn === 1) {
+          firstTurnEntered.resolve()
+          await releaseFirstTurn.promise
+          yield* chunksFromContent([{ type: 'text', text: 'ok' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+          return
+        }
+        throw new Error('llm down')
+      },
+      updateConfig: () => {},
+    }
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+
+    const first = registry.routeHumanMessages('wechat', 'settle-key', [makeChannelMessage('first')])
+    await firstTurnEntered.promise
+
+    const settlements: EpisodeResult[] = []
+    const second = await registry.routeHumanMessages(
+      'wechat',
+      'settle-key',
+      [makeChannelMessage('second')],
+      undefined,
+      undefined,
+      undefined,
+      (settled) => { settlements.push(settled) },
+    )
+    // 占位:outcome 是编造的 completed,不带真实 episodeId
+    expect(second).toMatchObject({ outcome: 'completed', episodeId: '' })
+    expect(settlements).toHaveLength(0)
+
+    releaseFirstTurn.resolve()
+    const firstResult = await first
+    // turn2 抛错 → episode failed;注入消息的 settle 回调以真实 result 触发,
+    // 调用方(processDirectBatch/processAdminChatMessage)据此补发 fail-loud
+    expect(firstResult.outcome).toBe('failed')
+    expect(settlements).toHaveLength(1)
+    expect(settlements[0].outcome).toBe('failed')
+    expect(settlements[0].episodeId).not.toBe('')
   })
 
   // --- evictIdle ---

@@ -1810,6 +1810,8 @@ export class UnifiedAgent extends ModuleBase {
     const session = messages[0].session
 
     let result
+    // 消息被注入在跑 episode 时(PR #131):占位 result 的 outcome 恒为 completed,
+    // fail-loud 委托给被注入 episode 的真实收尾——失败在这里补发兜底回复。
     try {
       result = await this.requireManagerStack().registry.routeHumanMessages(
         session.channel_id,
@@ -1822,6 +1824,17 @@ export class UnifiedAgent extends ModuleBase {
           session.session_id,
           lastCommittedMessageId,
         ),
+        (settled) => {
+          if (settled.outcome === 'failed' || settled.outcome === 'aborted') {
+            console.error(
+              `[${this.config.moduleId}] processDirectBatch injected episode outcome=${settled.outcome}`,
+            )
+            void this.sendFailLoudReply(session.channel_id, session.session_id, {
+              kind: 'outcome',
+              outcome: settled.outcome,
+            }).catch((err) => console.error(`[${this.config.moduleId}] processDirectBatch settle fail-loud failed:`, err))
+          }
+        },
       )
     } catch (err) {
       console.error(
@@ -1831,6 +1844,9 @@ export class UnifiedAgent extends ModuleBase {
       await this.sendFailLoudReply(session.channel_id, session.session_id, { kind: 'threw', error: err })
       return
     }
+
+    // 注入占位:真实收尾前 outcome/repliedToHuman 都是编造的,不做任何判定与计数。
+    if (result.episodeId === '') return
 
     if (result.outcome === 'failed' || result.outcome === 'aborted') {
       console.error(
@@ -2496,6 +2512,19 @@ export class UnifiedAgent extends ModuleBase {
         [message],
         MASTER_FRIEND,
         { admin_chat_request_ids: [callbackInfo.request_id] },
+        undefined,
+        // 注入在跑 episode 时(PR #131):占位 result 恒 completed,F1 判不到真实失败——
+        // 若被注入 episode 最终 failed/aborted,在此补发 fail-loud 收掉占位气泡(否则
+        // consumedEvents=false 不走 settleUnclaimedAdminChatWakes,气泡转到 agent 重启)。
+        (settled) => {
+          if (settled.outcome === 'failed' || settled.outcome === 'aborted') {
+            console.error(
+              `[${this.config.moduleId}] processAdminChatMessage injected episode outcome=${settled.outcome}`,
+            )
+            void this.sendFailLoudReply('admin-web', sessionId, { kind: 'outcome', outcome: settled.outcome }, callbackInfo.request_id)
+              .catch((err) => console.error(`[${this.config.moduleId}] processAdminChatMessage settle fail-loud failed:`, err))
+          }
+        },
       )
     } catch (err) {
       // F2：episode 中途抛错。
@@ -2511,6 +2540,11 @@ export class UnifiedAgent extends ModuleBase {
       }
       return { decision_types: [] }
     }
+
+    // 注入占位:真实收尾前 outcome/repliedToHuman 都是编造的——F1 与沉默计数都
+    // 等 settle 回调(失败已在上面补发 fail-loud);RPC 先按"暂无直接回复"返回,
+    // 真实回复由后续 delivery 结算占位气泡。
+    if (result.episodeId === '') return { decision_types: [] }
 
     if (result.outcome === 'failed' || result.outcome === 'aborted') {
       // F1：`ManagerLoop` 记下 failed/aborted 后**正常 resolve**，不抛。只写 try/catch 抓不住。

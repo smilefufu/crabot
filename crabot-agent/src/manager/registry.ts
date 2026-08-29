@@ -286,9 +286,12 @@ export class ManagerRegistry {
     correlation?: import('./loop.js').ManagerWakeCorrelation,
     /** 人类输入已持久化进对应 Manager 会话后的非关键通知。 */
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+    /** 消息被注入在跑 episode 时(PR #131),处理结果的结算委托给该 episode 的真实
+     * 收尾 result——调用方以此补跑 fail-loud,不用注入分支立即返回的占位值。 */
+    onEpisodeSettled?: (result: EpisodeResult) => void,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation, onHumanInputCommitted)
+    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation, onHumanInputCommitted, onEpisodeSettled)
   }
 
   /**
