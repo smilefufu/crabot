@@ -906,7 +906,7 @@ describe('ManagerLoop', () => {
     expect(settlements[0]).toEqual({ outcome: 'completed', repliedToHuman: false })
   })
 
-  it('注入未被消费(最后一轮 drain 之后)时不记去重键,自唤醒/下次唤醒按正常路径提交,消息不丢', async () => {
+  it('注入未被消费(最后一轮 drain 之后)时收尾统一提交进 recent,下次唤醒经 tailMessages 重新可见', async () => {
     const { adapter, queue, calls } = makeAdapter()
     // maxTurns=2:turn1 工具(注入未发生) → turn2 工具(此处注入,但其后 hasRemainingTurn=false 不 drain)
     // → 轮次耗尽 max_turns 收尾(consumedEvents=true)
@@ -946,21 +946,24 @@ describe('ManagerLoop', () => {
     const first = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
     expect(first.outcome).toBe('max_turns') // 轮次耗尽,按已消费收口(consumedEvents=true)
 
-    // 风险 1 回归:未消费 → recent 不含注入文本、去重键不记(键在而 recent 无 = 永久丢失)
+    // 风险 1 回归(四审重构语义):未被消费的注入在收尾临界区统一提交——recent 含
+    // 消息、去重键同步落盘(键在 recent 也在),mailbox 已 discard 无残留
     const stateAfter = await store.load(KEY)
-    expect(JSON.stringify(stateAfter.recent)).not.toContain('滞留指令')
-    expect(stateAfter.committedHumanMessageIds ?? []).toHaveLength(1) // 仅主 wake
-    expect(loop.hasPendingMailbox).toBe(true)
+    expect(JSON.stringify(stateAfter.recent)).toContain('滞留指令')
+    expect(stateAfter.committedHumanMessageIds ?? []).toHaveLength(2) // 主 wake + 滞留
+    expect(loop.hasPendingMailbox).toBe(false)
 
-    // 下次唤醒:mailbox 残留经 carry 正常提交,LLM 看到滞留指令
+    // 下次唤醒:tailMessages(state.recent) 含滞留指令,LLM 重新看到,不重复
     queue.push({ text: '补看滞留消息', stopReason: 'end_turn' })
     const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
     expect(second.outcome).toBe('completed')
 
     const secondCall = calls[calls.length - 1]
-    expect(JSON.stringify(secondCall.messages)).toContain('滞留指令')
+    expect(secondCall.messages.filter((m) => JSON.stringify(m).includes('滞留指令'))).toHaveLength(1)
     const finalState = await store.load(KEY)
-    expect(JSON.stringify(finalState.recent)).toContain('滞留指令')
+    const finalText = JSON.stringify(finalState.recent)
+    expect(finalText).toContain('滞留指令')
+    expect(finalText).toContain('新的话')
     expect(finalState.committedHumanMessageIds?.length).toBe(3) // 主 wake + 滞留 + 新的话
   })
 

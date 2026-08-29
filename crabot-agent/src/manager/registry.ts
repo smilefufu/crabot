@@ -364,7 +364,9 @@ export class ManagerRegistry {
     // 进入当前 Manager mailbox」同样涵盖人类消息。
     const loop = this.getOrCreate(key)
     if (this.isEpisodeActive(key)) {
-      await loop.enqueueHumanWakeDuringActiveEpisode({ ...envelope, wake: event }, onHumanInputCommitted, onEpisodeSettled)
+      // 同步入队(check 与 push 之间无 await,与 routeWorkerEvent 同构原子):
+      // 提交延后到当前 episode 收尾临界区,由 settle hook 拿真实处理结果。
+      loop.enqueueHumanWakeDuringActiveEpisode({ ...envelope, wake: event }, onHumanInputCommitted, onEpisodeSettled)
       return {
         episodeId: '',
         outcome: 'completed',
