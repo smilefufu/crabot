@@ -39,7 +39,7 @@ describe('ProviderDrawerDetail', () => {
 
     expect(llmRow).not.toBeNull()
     expect(imageRow).not.toBeNull()
-    expect(within(llmRow!).getByRole('button', { name: '首字测速' })).toBeInTheDocument()
-    expect(within(imageRow!).queryByRole('button', { name: '首字测速' })).toBeNull()
+    expect(within(llmRow!).getByRole('button', { name: '测速' })).toBeInTheDocument()
+    expect(within(imageRow!).queryByRole('button', { name: '测速' })).toBeNull()
   })
 })
