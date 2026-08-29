@@ -5,6 +5,43 @@
 
 ## 当前状态
 
+### manager 人类消息 turn 间注入（含 builtin worker 输入 turn 边界投递）：PR #131（待合并）+ PR #130（已合并 `bad70ce4`）
+
+- 引线：2026-08-29 两起现网案例。① builtin 监控 worker 用 `Output(block=true)` 无限轮询
+  （94 turn 连续 3.5h 不 end_turn），manager 三次投递（含 immediate_redirect）压队 43 分钟
+  未达——投递消费点实际在 burst 边界（end_turn）；② 用户 19:35:50 发消息，manager 19:36:06
+  仍在问旧问题，19:36:47 才处理——`routeHumanWake` 直接 `runWake` 阻塞等前一 episode，
+  P7 cutover roadmap D 项「把人类消息接到 enqueueDuringEpisode」的接线在实现中遗漏。
+- 契约口径（用户拍板）：投递/注入消费点**一直是 turn 边界**；协议 §5.5「burst 自然结束后」
+  为 spec 措辞错误。两份契约文档随修复对齐。
+- PR #130（已合并）：builtin worker 输入 turn 边界注入（engine `drainExternalInputs` +
+  Output 探针提前返回，投递可见性从小时级降到 ≈2s）+ 协议 v3.6.15（docs `93975cf`）+
+  spec 2026-08-20 同步。review 三轮：真实风险 2 项（测试 gate 失效、`[manager input]`
+  前缀误标系统通知）已修。
+- PR #131（review 复审线程全部 resolve，待 approve）：manager 人类消息 episode 运行中
+  到达时先提交（commitHumanInputs 去重写 recent + 回调）再经 mailbox turn 边界注入；
+  attention flush 的结算委托给被注入 episode 的真实收尾（不再用注入分支占位值导致群聊
+  注意力错误 ×5 渐远）。review 首轮三条真实风险已修（未消费注入键在 recent 无=永久丢失；
+  假结算；档位沿用定性修正）。
+- **#131 follow-up 池（review 复审要求记录）**：
+  1. 群聊消息档位随消息——注入消息沿用 episode 起始 wake 发起人的 `principalPermissions`
+     （群聊 B 的指令以 A 的档位执行 worker）；spec 从未定义按发起人区分权限，属权限语义
+     设计项（方向：档位随消息 / 群聊回退排队），需单独立项。私聊同 session 唯一 friend
+     无影响。
+  2. 注入路径未过 `assertWakeAdmission`——isClosing 关停期间消息被静默收下返回 completed，
+     调用方拿不到 fail-loud 信号；已落盘不丢，后续统一收口。
+  3. 结算钩子丢弃窗口——提前 return / `settleInjectedHooks` 之后到达的注入，其 hook 会在
+     下个 episode 起始被清掉不触发 → 该批 flush 没人 reportResult。后果（review 追过
+     scheduler 实现）：仅 `lastActionTime` 不更新，下一条消息 enqueue 时立即 flush，是
+     「更积极」而非「变哑」，可接受。
+  4. 注入未被 drain 时的委托值失真——消息实际由自唤醒 episode 处理，却以被注入 episode
+     的 repliedToHuman 结算；一次性误报非系统性偏置，可接受。
+  5. fail-loud 只闭合了「丢失」——注入消息随 episode 失败已补提交进 recent 不丢，但
+     调用方拿占位 completed 不触发兜底回复，消息等下一次真实唤醒才被处理；「失败即时
+     告知」留 follow-up（53905408 提交信息里「闭合 fail-loud 缺口」表述过头，以此为准）。
+  6. （#130 遗留）redirect 对 builtin 是否允许 interrupt/腰斩工具；v2 agent-handler 遗留
+     （humanQueue/ask_human）清理；Output 超时参数与连续 block 硬性封顶。
+
 ### 移除 macOS FDA 放开机制，受保护目录无条件排除：已合并（PR #129 → `3e268439`）
 
 - 决策：FDA 放开机制要求「设 CRABOT_ENABLE_FDA → 系统设置授权 → 重启」，授权动作必须在
