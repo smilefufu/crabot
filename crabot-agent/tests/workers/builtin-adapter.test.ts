@@ -2339,6 +2339,55 @@ describe('BuiltinWorkerAdapter', () => {
     expect(treeRaw).toContain('压缩前注入的指令')
   })
 
+  it('系统通知不误标:同队列的 <bg-notification> 不加 [manager input] 前缀、不落 manager trace,manager 消息不受影响', async () => {
+    const toolGate = deferred<void>()
+    const managerInputs: string[] = []
+    const messageSnapshots: LLMStreamParams[] = []
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        appendManagerInput: (_traceId, text) => managerInputs.push(text),
+        finishIncarnationTrace: () => {},
+      },
+    })
+    const s = spec({
+      adapter: {
+        stream: vi.fn((_params: LLMStreamParams) => {
+          messageSnapshots.push({ ..._params, messages: [..._params.messages], tools: [..._params.tools] })
+          return (async function* () {
+            const r = messageSnapshots.length === 1
+              ? { toolCalls: [{ name: 'probe_wait', id: 'call_1', input: {} }], stopReason: 'tool_use' as const }
+              : { text: '看到', stopReason: 'end_turn' as const }
+            const content: unknown[] = []
+            if ('text' in r && r.text) content.push({ type: 'text', text: r.text })
+            for (const tc of r.toolCalls ?? []) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+            yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
+          })()
+        }),
+        updateConfig: () => {},
+      } as unknown as LLMAdapter,
+      tools: [gatedTool(toolGate.promise)],
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'running')
+    // 复审识别的场景:running burst 中 bg shell 退出通知与 manager 投递先后进同一队列
+    await adapter.sendInput(h, '<bg-notification>\nshell_xxx 已退出，状态 completed\n</bg-notification>')
+    await adapter.sendInput(h, '真正的 manager 指令')
+    toolGate.resolve()
+    await waitState(adapter, h, 'idle')
+
+    const second = JSON.stringify(messageSnapshots[1]!.messages)
+    // 通知保持裸信封(无 manager 前缀),manager 消息带前缀——worker 可区分来源
+    expect(second).toContain('<bg-notification>\\nshell_xxx 已退出')
+    expect(second).not.toContain('[manager input]\\n<bg-notification>')
+    expect(second).toContain('[manager input]\\n真正的 manager 指令')
+    // trace 只落 manager 消息,不把系统通知误标为 manager 名义
+    expect(managerInputs).toEqual(['[manager input]\n真正的 manager 指令'])
+  })
+
   it('appendManagerInput:turn 边界注入的输入经 traceHooks 落 message/user trace 事件', async () => {
     const toolGate = deferred<void>()
     const managerInputs: string[] = []

@@ -310,6 +310,20 @@ export interface BuiltinTraceReader {
   }>
 }
 
+/**
+ * 系统通知信封（PR #130 复审识别的真实风险）：bg shell 退出（unified-agent renderShellExitNotification）
+ * 与 subagent 完成（subagent-runner deliverCompletion）的通知经同一 inbox 通道（sendToWorker →
+ * sendInput → pendingInputs）投递，自带信封标记。turn 边界 drain 时它们**不是** manager 输入——
+ * 不得加 `[manager input]` 前缀（否则 worker 会把 shell 退出通知当 manager 指令执行），也不得以
+ * manager 名义落 trace（否则 get_worker_activity 出现 manager 从未发过的 message/user 事件）。
+ * 彻底方案（inbox item 带 source 字段透传）属跨模块契约变更，记 spec §8 follow-up。
+ */
+const SYSTEM_NOTIFICATION_ENVELOPES: readonly string[] = ['<bg-notification>', '<sub_agent_notification>']
+
+function isSystemNotificationEnvelope(text: string): boolean {
+  return SYSTEM_NOTIFICATION_ENVELOPES.some((envelope) => text.includes(envelope))
+}
+
 
 export class BuiltinWorkerAdapter implements WorkerAdapter {
   readonly implId = 'builtin' as const
@@ -1100,7 +1114,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         hasPendingExternalInputs: () =>
           instance.pendingImmediateInputs.length > 0 || instance.pendingInputs.length > 0,
         onSystemInjection: (event) => {
-          if (event.type === 'external_input' && instance.traceId) {
+          // 系统通知（bg 退出 / subagent 完成）不落 manager 名义的 trace 事件
+          if (event.type === 'external_input' && instance.traceId && !isSystemNotificationEnvelope(event.text)) {
             this.deps.traceHooks?.appendManagerInput?.(instance.traceId, event.text)
           }
         },
@@ -1536,7 +1551,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       ...instance.pendingImmediateInputs.splice(0, instance.pendingImmediateInputs.length),
       ...instance.pendingInputs.splice(0, instance.pendingInputs.length),
     ]
-    return queued.map((text) => `[manager input]\n${text}`)
+    // 系统通知（bg 退出 / subagent 完成）保持裸信封——只区分 manager 人工投递
+    return queued.map((text) => isSystemNotificationEnvelope(text) ? text : `[manager input]\n${text}`)
   }
 
   /**
