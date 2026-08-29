@@ -234,7 +234,7 @@
   天然有界），现网若观察到连续打回再收紧；③crashed 路径的 subagent 连带终止与通知抑制维持
   现状，是否改为留活自愈（subagent 完成通知经透明接续更快唤醒）待评估；④窄竞态：subagent 已
   完成、通知在途时 finish_task 放行，排队通知进 dead-letter（review 记录不改）。
-- **manager 压缩 hardCap 接模型 context_window：已实现，待 PR review（PR #132）**。worker 侧
+- **manager 压缩 hardCap 接模型 context_window：已合并（PR #132 → `ac09fd4d`）**。worker 侧
   阈值本就按 `context_window × 0.8` 生效（未设置回退 200K）；manager 自管压缩此前是写死常量
   （fold 20K / hardCap 160K）且 bootstrap 从未传 contextWindowTokens。现 `hardCapTokens` 从
   manager 实际模型（powerful 槽位）窗口推导（floor(window×0.8)，未配置回退现状常量），
