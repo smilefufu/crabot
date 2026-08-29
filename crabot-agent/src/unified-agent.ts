@@ -320,6 +320,8 @@ function buildBuiltinWorkerContractPrompt(workspaceRoot: string): string {
     + '你会停下来等待下一条输入。',
     '- 任务完成或确认失败时调用 `finish_task`（`outcome` 取 `completed` 或 `failed`，`summary` 一句话）。'
     + '这是你唯一的终态信号——不调用它，你只是停下来等下一条输入。',
+    '- 还有后台命令或子 Agent 在运行时，任务没有结束——直接结束本轮等它们的完成通知，'
+    + '不要调用 `finish_task`；等全部结束后再收尾。',
   ].join('\n')
 }
 
@@ -3906,6 +3908,9 @@ export class UnifiedAgent extends ModuleBase {
           console.warn(`[${this.config.moduleId}] builtin subagent stop failed for ${workerId}:`, error)
         })
       },
+      // finish_task 终态守卫(拆分 spec 2026-08-28 修订)的查询口径与 harness deps 的
+      // hasRunningBg 相同:bg-shell 与 subagent 都注册在 bg registry、按 owner.worker_id 归属。
+      hasRunningBgEntities: (workerId) => this.agentHandler?.hasRunningBgForWorker(workerId) ?? Promise.resolve(false),
     }
   }
 

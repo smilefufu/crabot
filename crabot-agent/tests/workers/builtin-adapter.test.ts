@@ -892,6 +892,168 @@ describe('BuiltinWorkerAdapter', () => {
     expect(exited!.report?.endReason).toBe('completed')
   })
 
+  it('finish_task 终态守卫:名下仍有 running bg entity → 打回续 burst,等待后 idle(拆分 spec 2026-08-28 修订)', async () => {
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const stopWorkerSubagents = vi.fn()
+    // 第一次查询(收尾段):subagent 还在跑 → 拒绝;之后返回 false(模拟 subagent 完成)。
+    let bgRunning = true
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      onStateChange: (_h, state, report) => {
+        seen.push({ state, ...(report ? { report } : {}) })
+      },
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+        stopWorkerSubagents,
+        hasRunningBgEntities: async () => bgRunning,
+      },
+    })
+    const s = spec({
+      adapter: makeAdapter([
+        // 第一轮:subagent 还在跑时 worker 就调 finish_task → 守卫打回。
+        { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '提前收尾' } }], stopReason: 'tool_use' },
+        // 第二轮:bg entity 已结束,end_turn 正常等待/收尾。
+        { text: '子任务完成,验证通过', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+    bgRunning = false
+    // 打回后必须续过第二轮 burst:第二轮 end_turn 落 idle,证明第一轮没有按 finish_task 终态化。
+    await adapter.sendInput(h, '继续')
+    await waitState(adapter, h, 'idle')
+
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw)
+    expect(meta.state).toBe('idle')
+    expect(meta.ended_reason).toBeUndefined()
+    // 从未 exited:没有终态上报,也没有连带杀 subagent。
+    expect(seen.some((e) => e.state === 'exited')).toBe(false)
+    expect(stopWorkerSubagents).not.toHaveBeenCalled()
+    // 会话树里有打回提醒,worker 下一轮能看到。
+    const treeRaw = await fs.readFile(join(tmp, s.worker_id, 'session.jsonl'), 'utf-8')
+    expect(treeRaw).toContain('finish_task 未生效')
+  })
+
+  it('finish_task 终态守卫:bg entity 全部结束后调用 → 正常 exited(completed)', async () => {
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+        hasRunningBgEntities: async () => false,
+      },
+    })
+    const s = spec({
+      adapter: makeAdapter([
+        { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '搞定了' } }], stopReason: 'tool_use' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'exited')
+
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw)
+    expect(meta.state).toBe('exited')
+    expect(meta.outcome).toBe('completed')
+  })
+
+  it('守卫打回时以失败 tool_result 回给 worker(engine 合成的 [exit_tool] 被改写)', async () => {
+    const gate = deferred<void>()
+    let callNumber = 0
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+        hasRunningBgEntities: async () => true,
+      },
+    })
+    const s = spec({
+      adapter: {
+        stream: vi.fn((_params: LLMStreamParams) => {
+          const currentCall = callNumber++
+          return (async function* () {
+            if (currentCall === 0) await gate
+            const r = currentCall === 0
+              ? { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '收尾' } }], stopReason: 'tool_use' as const }
+              : { text: '继续等待', stopReason: 'end_turn' as const }
+            const content: unknown[] = []
+            if ('text' in r && r.text) content.push({ type: 'text', text: r.text })
+            for (const tc of r.toolCalls ?? []) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+            yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
+          })()
+        }),
+        updateConfig: () => {},
+      } as unknown as LLMAdapter,
+    })
+
+    const h = await adapter.spawn(s)
+    gate.resolve()
+    await waitState(adapter, h, 'idle')
+
+    // 落树的是 finish_task 的失败 tool_result(含提醒文案),不再是成功的 [exit_tool]。
+    const treeRaw = await fs.readFile(join(tmp, s.worker_id, 'session.jsonl'), 'utf-8')
+    expect(treeRaw).toContain('finish_task 未生效')
+    expect(treeRaw).toContain('"is_error":true')
+    expect(treeRaw).not.toContain('[exit_tool]')
+  })
+
+  it('守卫打回时排空收尾期间排队的输入:immediate_redirect 先于普通输入进下一轮上下文', async () => {
+    const gate = deferred<void>()
+    let callNumber = 0
+    const messageSnapshots: LLMStreamParams[] = []
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+        hasRunningBgEntities: async () => true,
+      },
+    })
+    const s = spec({
+      adapter: {
+        stream: vi.fn((_params: LLMStreamParams) => {
+          messageSnapshots.push({ ..._params, messages: [..._params.messages], tools: [..._params.tools] })
+          const currentCall = callNumber++
+          return (async function* () {
+            if (currentCall === 0) await gate
+            const r = currentCall === 0
+              ? { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '收尾' } }], stopReason: 'tool_use' as const }
+              : { text: '收到,继续', stopReason: 'end_turn' as const }
+            const content: unknown[] = []
+            if ('text' in r && r.text) content.push({ type: 'text', text: r.text })
+            for (const tc of r.toolCalls ?? []) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+            yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
+          })()
+        }),
+        updateConfig: () => {},
+      } as unknown as LLMAdapter,
+    })
+
+    const h = await adapter.spawn(s)
+    // 第一轮 LLM 挂起期间(worker running)排队:immediate_redirect 必须先于普通输入被消费。
+    await adapter.sendInput(h, '普通排队输入')
+    await adapter.sendInput(h, '立即改向输入', { immediate_redirect: true })
+    gate.resolve()
+    await waitState(adapter, h, 'idle')
+
+    const second = messageSnapshots[1]
+    expect(second).toBeDefined()
+    const joined = JSON.stringify(second!.messages)
+    expect(joined).toContain('finish_task 未生效')
+    expect(joined).toContain('普通排队输入')
+    expect(joined).toContain('立即改向输入')
+    expect(joined.indexOf('立即改向输入')).toBeLessThan(joined.indexOf('普通排队输入'))
+  })
+
   it('engine 抛错 → exited(crashed)', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({ adapter: throwingAdapter() })

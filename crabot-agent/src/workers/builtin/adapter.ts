@@ -53,7 +53,7 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { runEngine, defineTool, createUserMessage } from '../../engine/index.js'
-import type { EngineMessage, EngineMessagesRef, EngineResult, ToolDefinition } from '../../engine/index.js'
+import type { EngineMessage, EngineMessagesRef, EngineResult, EngineToolResultMessage, ToolDefinition } from '../../engine/index.js'
 import type { Resolvable } from '../../engine/types.js'
 import type { LLMThinkingConfig } from '../../engine/llm-adapter-types.js'
 import { SessionTree } from '../session-tree.js'
@@ -168,6 +168,11 @@ const FINISH_TASK_TOOL: ToolDefinition = {
   exitsLoop: true,
 }
 
+/** finish_task 被终态守卫打回时,作为失败 tool_result 内容回给 worker 的提醒(拆分 spec 2026-08-28 修订)。 */
+const FINISH_TASK_REJECTED_NOTICE =
+  '[finish_task 未生效] 仍有正在运行的后台命令或子 Agent，任务此刻不能结束。' +
+  '请继续等待它们的完成通知；若确认某个子任务不再需要，先用 Kill 结束它，再重新调用 finish_task。'
+
 interface WorkerInstance {
   readonly worker_id: string
   readonly incarnation_id?: string
@@ -281,6 +286,11 @@ export interface BuiltinTraceHooks {
   appendTurn(traceId: string, event: import('../../engine/types.js').EngineTurnEvent): void
   finishIncarnationTrace(traceId: string, patch: { status: 'completed' | 'failed'; summary: string }): void
   stopWorkerSubagents?(workerId: string): void
+  /**
+   * 该 worker 名下是否仍有 running 的 bg entity(bg-shell / subagent),供 finish_task
+   * 终态守卫查询(拆分 spec 2026-08-28 修订)。缺省视为无,守卫静默关闭。
+   */
+  hasRunningBgEntities?(workerId: string): Promise<boolean>
 }
 
 export interface BuiltinTraceReader {
@@ -1067,7 +1077,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 用 `result.finalText` 不行：finish_task 这类早退工具收场时它可能为空串，而那恰恰是
     // manager 最需要看到的一轮。
     let lastAssistantText = ''
-    const result: EngineResult = await runEngine({
+    let result: EngineResult = await runEngine({
       prompt: '',
       adapter: builtin.adapter,
       initialMessages,
@@ -1127,6 +1137,23 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 期间新 sendInput 插队"的窗口——判定与状态落定必须是同一个不可分割的临界区。
     // 续 burst 的递归调用放在锁外触发（见下），不然会把 runEngine 的执行时长堵在锁里。
     const continueBurst = await mutex.run(async () => {
+      // finish_task 终态守卫(拆分 spec 2026-08-28 修订):名下仍有 running bg entity
+      // (bg-shell / subagent)时 finish_task 不落终态——否则化身 exited 会连带终止还在跑的
+      // subagent,其完成通知又被 killed 状态静默丢弃,worker 以 end_turn 等待结果的那条路
+      // 就被这条终态出口整体绕过。判定必须在 writeBack 之前:打回时要先把 engine 为
+      // exitsLoop 合成的成功 tool_result 改写成"失败 + 提醒"(协议 §5.1/§6.4),树和下一轮
+      // 上下文都从 finalMessages 落。fork 化身不装配 finish_task,查询条件与 transitionExited
+      // 的杀因条件(query_id === undefined)一致;aborted/failed 优先级更高,与下方分支顺序一致。
+      let finishTaskRejected = false
+      if (
+        result.outcome !== 'aborted' && result.outcome !== 'failed' &&
+        result.exitToolCall?.name === 'finish_task' && handle.query_id === undefined
+      ) {
+        finishTaskRejected =
+          (await this.deps.traceHooks?.hasRunningBgEntities?.(instance.worker_id)) === true
+        if (finishTaskRejected) result = this.markFinishTaskRejected(result)
+      }
+
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
 
       if (result.outcome === 'aborted' && instance.interruptRequested && !instance.killRequested) {
@@ -1142,6 +1169,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       }
 
       if (result.exitToolCall?.name === 'finish_task') {
+        // 守卫打回:先排空本 burst 收尾期间排队的输入(bg 完成通知恰恰是让 worker 停止
+        // 重试 finish_task 的信息;immediate_redirect 不走 interrupt(builtin 例外),全靠
+        // 这个收尾排空点投递),无论队列空不空都必须续 burst——worker 要对上一条"失败的
+        // finish_task tool_result"重新作出决策。
+        if (finishTaskRejected) {
+          await this.drainQueuedInputs(instance)
+          return true
+        }
         const rawOutcome = result.exitToolCall.input.outcome
         const outcome: 'completed' | 'failed' = rawOutcome === 'failed' ? 'failed' : 'completed'
         // summary 是 finish_task 的**必填**入参（见 FINISH_TASK_TOOL 的 inputSchema.required），
@@ -1180,19 +1215,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // end_turn（或 max_turns 耗尽）→ 若 sendInput 排了队，逐条 append 后原地续 burst
       // （不经过可见的 idle 态）；否则转 idle，等待下一次 resume/sendInput 唤醒。
       if (instance.pendingImmediateInputs.length > 0 || instance.pendingInputs.length > 0) {
-        const queued = [
-          ...instance.pendingImmediateInputs.splice(0, instance.pendingImmediateInputs.length),
-          ...instance.pendingInputs.splice(0, instance.pendingInputs.length),
-        ]
-        const queuedMessages = this.messagesAtTip(instance, instance.tip)
-        let queueParent = instance.tip
-        for (const text of queued) {
-          const queuedMessage = createUserMessage(text)
-          queueParent = await instance.sessionTree.append(queueParent, queuedMessage)
-          queuedMessages.push(queuedMessage)
-        }
-        instance.tip = queueParent
-        this.setEngineMessagesSnapshot(instance, queuedMessages, queueParent)
+        await this.drainQueuedInputs(instance)
         return true
       }
 
@@ -1456,6 +1479,49 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const messages = instance.sessionTree.pathTo(tip)
     this.setEngineMessagesSnapshot(instance, messages, tip)
     return messages
+  }
+
+  /**
+   * 把 sendInput 在 burst 运行期间排队的输入（immediate_redirect 优先，然后普通队列）append
+   * 进会话树并刷新 snapshot，供收尾段续 burst 时消费；队列全空时 no-op。返回排空的条数。
+   */
+  private async drainQueuedInputs(instance: WorkerInstance): Promise<number> {
+    if (instance.pendingImmediateInputs.length === 0 && instance.pendingInputs.length === 0) return 0
+    const queued = [
+      ...instance.pendingImmediateInputs.splice(0, instance.pendingImmediateInputs.length),
+      ...instance.pendingInputs.splice(0, instance.pendingInputs.length),
+    ]
+    const queuedMessages = this.messagesAtTip(instance, instance.tip)
+    let queueParent = instance.tip
+    for (const text of queued) {
+      const queuedMessage = createUserMessage(text)
+      queueParent = await instance.sessionTree.append(queueParent, queuedMessage)
+      queuedMessages.push(queuedMessage)
+    }
+    instance.tip = queueParent
+    this.setEngineMessagesSnapshot(instance, queuedMessages, queueParent)
+    return queued.length
+  }
+
+  /**
+   * 守卫打回 finish_task 时,把 engine 为 exitsLoop 合成的成功 tool_result（`[exit_tool]`,
+   * is_error=false）改写为"失败 + 提醒文案"（协议 §5.1/§6.4:调用方收到失败 tool_result 与
+   * 提醒）。树和下一轮上下文都从 finalMessages 落,所以收尾段必须在 writeBack 前调用它。
+   * 只改写 exitsLoop 工具的条目(content === '[exit_tool]');同轮其他工具是 [skipped...],不动。
+   */
+  private markFinishTaskRejected(result: EngineResult): EngineResult {
+    const last = result.finalMessages[result.finalMessages.length - 1]
+    if (last === undefined || !('toolResults' in last)) return result
+    const rewrittenLast: EngineToolResultMessage = {
+      ...last,
+      toolResults: last.toolResults.map((r) =>
+        r.content === '[exit_tool]' ? { ...r, content: FINISH_TASK_REJECTED_NOTICE, is_error: true } : r,
+      ),
+    }
+    return {
+      ...result,
+      finalMessages: [...result.finalMessages.slice(0, -1), rewrittenLast],
+    }
   }
 
   private setEngineMessagesSnapshot(
