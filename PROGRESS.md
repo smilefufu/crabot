@@ -5,6 +5,19 @@
 
 ## 当前状态
 
+### 移除 macOS FDA 放开机制，受保护目录无条件排除：已合并（PR #129 → `3e268439`）
+
+- 决策：FDA 放开机制要求「设 CRABOT_ENABLE_FDA → 系统设置授权 → 重启」，授权动作必须在
+  GUI 会话完成，agent 对话 / CLI / launchd 后台宿主场景人类无法即时处理，实际无人走完；
+  收敛为受保护目录（~/Library、Desktop/Documents 等 TCC 目录）一律不扫。FDA 话题整体
+  往后放（若未来做管理后台 GUI 引导授权，另行立项）。
+- spec：crabot-docs `f95b06b`。实现 8 文件 +14/−207：删 fda-check.ts + 测试（探针/启动
+  提示/弹设置面板）；getProtectedExcludeGlobs 去 scanProtected 参数，排除无放开路径；
+  MM 不再读取/透传 CRABOT_ENABLE_FDA。
+- 兼容性：唯一行为变化是「已设变量且已授权」的极边缘机器从放开变排除（spec 确认接受）。
+- 验证：crabot-core 172/172 全绿；crabot-agent 全量与主仓基线失败集合一致（9 个存量
+  flaky 文件，差异用例两边单独重跑均全过），无新增失败。**需重建重启 MM + agent 生效。**
+
 ### finish_task 终态守卫（worker 提前收尾连带杀 subagent）：已合并（PR #128 → `04e2681a`）
 
 - 引线：现网事故（2026-08-28，feishu-fengyan::2mpxa9jb）——worker 在 code_writer subagent
