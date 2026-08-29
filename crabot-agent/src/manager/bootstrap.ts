@@ -136,6 +136,8 @@ export interface BootstrapDeps {
   readonly managerModel: () => string
   /** manager 的槽位思考强度(随 powerful slot),thunk 以支持热更;返回 undefined = 跟随默认 */
   readonly managerThinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
+  /** manager 模型的上下文窗口(随 powerful slot),thunk 以支持热更;返回 undefined = engine 默认 200K */
+  readonly managerContextWindowTokens?: () => number | undefined
   readonly messagingDeps: CrabMessagingDeps
   /**
    * crab-memory server **工厂**(P7 J:原本是一个建好的 `McpServer` 定值)。
@@ -507,6 +509,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     adapter: deps.managerAdapter,
     model: deps.managerModel,
     thinking: deps.managerThinking,
+    contextWindowTokens: deps.managerContextWindowTokens,
     now: () => new Date(deps.now()),
     isClosing: deps.isClosing,
     timezone: deps.timezone,
