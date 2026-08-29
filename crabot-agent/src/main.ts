@@ -8,12 +8,11 @@ import { UnifiedAgent } from './unified-agent.js'
 import { RpcClient } from 'crabot-shared'
 import { ConfigLoader } from './core/config-loader.js'
 import { startHeapSampler } from './diagnostics/heap-sampler.js'
-import { checkFdaIfEnabled } from './engine/tools/fda-check.js'
 import type { UnifiedAgentConfig } from './types.js'
 import { getAgentDataDir } from './core/data-paths.js'
 import { installStdioErrorGuard } from './core/stdio-guard.js'
 
-// 必须是进程里的第一件事：它之后的任何一行日志（含下面的 heap sampler / FDA 提示）在
+// 必须是进程里的第一件事：它之后的任何一行日志（含下面的 heap sampler 日志）在
 // stdout/stderr 管道断开时都会以 'error' 事件打到零监听器上 → uncaughtException（见该文件头）。
 installStdioErrorGuard()
 
@@ -21,10 +20,6 @@ installStdioErrorGuard()
 ConfigLoader.captureRuntimeBearer()
 
 startHeapSampler({ intervalMs: 30_000 })
-
-// macOS：用户若开启 CRABOT_ENABLE_FDA 但未真正授予「完全磁盘访问权限」，
-// 这里给出 CLI 提示并 best-effort 打开系统设置面板。非 darwin / 未开启时静默。
-checkFdaIfEnabled((msg) => console.log(msg))
 
 // 未捕获错误兜底：写到 fatal.log 并退出（让 MM 看到 code≠0 → status=error）
 // 此前 agent 静默猝死无栈，是因为 process.on('unhandledRejection'/'uncaughtException') 缺失

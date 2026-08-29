@@ -131,25 +131,21 @@ describe('getProtectedExcludeGlobs', () => {
     }
   })
 
-  it('darwin + 搜索根是家目录（未授权扫描）→ 返回受保护排除列表', () => {
-    expect(getProtectedExcludeGlobs(home, false, 'darwin')).toEqual(MACOS_PROTECTED_EXCLUDE_GLOBS)
+  it('darwin + 搜索根是家目录 → 返回受保护排除列表', () => {
+    expect(getProtectedExcludeGlobs(home, 'darwin')).toEqual(MACOS_PROTECTED_EXCLUDE_GLOBS)
   })
 
   it('darwin + 搜索根是家目录的祖先（/）→ 返回受保护排除列表', () => {
-    expect(getProtectedExcludeGlobs('/', false, 'darwin')).toEqual(MACOS_PROTECTED_EXCLUDE_GLOBS)
+    expect(getProtectedExcludeGlobs('/', 'darwin')).toEqual(MACOS_PROTECTED_EXCLUDE_GLOBS)
   })
 
   it('darwin + 搜索根是具体项目目录 → 返回空（TCC 目录是兄弟，不注入避免误跳同名目录）', () => {
-    expect(getProtectedExcludeGlobs(join(home, 'codes', 'some-project'), false, 'darwin')).toEqual([])
-  })
-
-  it('darwin 且放开扫描（FDA 生效）→ 即便根是家目录也返回空', () => {
-    expect(getProtectedExcludeGlobs(home, true, 'darwin')).toEqual([])
+    expect(getProtectedExcludeGlobs(join(home, 'codes', 'some-project'), 'darwin')).toEqual([])
   })
 
   it('非 darwin 恒返回空（无这些目录名）', () => {
-    expect(getProtectedExcludeGlobs(home, false, 'linux')).toEqual([])
-    expect(getProtectedExcludeGlobs(home, false, 'win32')).toEqual([])
-    expect(getProtectedExcludeGlobs('/', true, 'linux')).toEqual([])
+    expect(getProtectedExcludeGlobs(home, 'linux')).toEqual([])
+    expect(getProtectedExcludeGlobs(home, 'win32')).toEqual([])
+    expect(getProtectedExcludeGlobs('/', 'linux')).toEqual([])
   })
 })

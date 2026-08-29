@@ -16,7 +16,6 @@ export interface BuildCoreModulesOpts {
   mmEndpoint: string
   adminEndpoint: string
   newApiToken: string
-  enableFda: string
 }
 
 type CoreModule = ModuleDefinition & Record<string, unknown>
@@ -68,9 +67,6 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
         CRABOT_MM_ENDPOINT: o.mmEndpoint,
         CRABOT_MM_PORT: String(o.port),
         CRABOT_MODULE_ID: 'crabot-agent',
-        // macOS FDA 意图开关：透传给 agent，决定 glob/grep 是否放开扫描 ~/Library
-        // 等受保护目录（仍需进程真正持有「完全磁盘访问权限」才生效，见 fda-check.ts）。
-        CRABOT_ENABLE_FDA: o.enableFda,
         // agent 的 restart_instance 工具用 CRABOT_HOME 定位 scripts/restart.mjs
         CRABOT_HOME: o.crabotRoot,
       } as Record<string, string>,

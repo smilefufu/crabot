@@ -12,7 +12,6 @@
 import { homedir } from 'node:os'
 import { relative, isAbsolute } from 'node:path'
 import { rgPath } from '@vscode/ripgrep'
-import { shouldScanProtectedDirs } from './fda-check'
 import { runHostProcess } from '../host-process'
 
 export interface RipgrepResult {
@@ -173,23 +172,21 @@ function isHomeOrAncestor(searchRoot: string): boolean {
 }
 
 /**
- * 返回应注入的「受保护目录」排除 glob 列表。
+ * 返回应注入的「受保护目录」排除 glob 列表。受保护目录一律不扫，无放开路径
+ * （macOS TCC 授权必须在 GUI 会话完成，后台/CLI 场景人类无法即时处理，故不做
+ * FDA 意图开关——历史机制已于 2026-08 移除）。
  *
  * - 非 darwin：恒返回 []（没有这些目录名，无需排除）。
- * - darwin 且 `scanProtected`（= CRABOT_ENABLE_FDA 意图开启 **且** 真持有 FDA）：返回 []，
- *   即放开扫描 ~/Library 等。
- * - darwin、未持 FDA、且搜索根是家目录或其祖先：返回 MACOS_PROTECTED_EXCLUDE_GLOBS。
- * - darwin、未持 FDA、但搜索根是某个具体项目（TCC 目录是兄弟而非子节点）：返回 []，
+ * - darwin 且搜索根是家目录或其祖先：返回 MACOS_PROTECTED_EXCLUDE_GLOBS。
+ * - darwin 且搜索根是某个具体项目（TCC 目录是兄弟而非子节点）：返回 []，
  *   不注入排除，避免误跳项目里的同名目录。
  *
- * scanProtected / platform 参数可注入仅为单测；运行时调用方只传 searchRoot。
+ * platform 参数可注入仅为单测；运行时调用方只传 searchRoot。
  */
 export function getProtectedExcludeGlobs(
   searchRoot: string,
-  scanProtected: boolean = shouldScanProtectedDirs(),
   platform: NodeJS.Platform = process.platform,
 ): ReadonlyArray<string> {
   if (platform !== 'darwin') return []
-  if (scanProtected) return []
   return isHomeOrAncestor(searchRoot) ? MACOS_PROTECTED_EXCLUDE_GLOBS : []
 }
