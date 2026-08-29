@@ -1,11 +1,29 @@
 # Crabot 项目进度
 
-> 最后整理：2026-08-28
+> 最后整理：2026-08-29
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
 
-### 模型槽位收敛 + 上下文/思考强度配置：实现完成，待 PR review（PR #127）
+### finish_task 终态守卫（worker 提前收尾连带杀 subagent）：已合并（PR #128 → `04e2681a`）
+
+- 引线：现网事故（2026-08-28，feishu-fengyan::2mpxa9jb）——worker 在 code_writer subagent
+  运行中调 `finish_task(completed)`，化身 exited 连带终止 subagent（stopWorkerSubagents），
+  其完成通知又因 killed 状态被 onExit 静默丢弃；turn_completed 被 manager suppress 后再无
+  事件，汇报永久落空。根因：finish_task 终态语义当初未定义与 bg-shell/subagent 共存的行为。
+- spec/协议先行发布 crabot-docs main（`b5f7ed1`）：拆分 spec §7.5「2026-08-28 实现遗漏修订」；
+  protocol-agent-v3 3.1.3（§5.1/§6.4 结构化 finalize 守卫）。
+- 实现：`finish_task` 时名下仍有 running bg entity（bg-shell/subagent，复用
+  hasRunningBgForWorker 查询口径）→ 不落终态：writeBack 前把 engine 合成的成功 `[exit_tool]`
+  改写为 is_error=true + 提醒（markFinishTaskRejected），排空收尾期排队输入（immediate 优先，
+  drainQueuedInputs 与既有 pendingInputs 分支共用）后原地续 burst；worker 契约尾巴补「有后台
+  命令/子 Agent 在跑时不要 finish_task」。人工 killed 的连带终止 + 通知抑制语义不变。
+- @claude review 两条真实风险已修（`0fcae184`）：①打回未排空 pending 队列（bg 通知被推迟、
+  immediate_redirect 被饿死）；②协议要求「失败 tool_result」未实现（仅 user 提醒纠正）。
+- 测试：builtin-adapter 64/64（新增 4 用例）；tsc 干净；workers/agent 全量失败均为既有 flaky
+  （主仓基线可复现）。**需重建重启 agent 生效。**
+
+### 模型槽位收敛 + 上下文/思考强度配置：已合并（PR #127 → `2e67b42e`）
 
 - spec 与协议先行发布 crabot-docs main：spec `e4bc1da`（含 thinking 存储形态修正——ModelSlotRef
   保持纯引用，thinking 独立 map）；协议 `eeba0c8`（base-protocol 0.2.3、protocol-admin 0.2.6、
@@ -195,6 +213,12 @@
 
 ### 技术债与既有 follow-up（P6 后或并行确认）
 
+- **finish_task 守卫 PR #128 review follow-up（2026-08-29）**：①常驻型 bg-shell（如 dev
+  server）在跑时 finish_task 会被守卫永久拒绝，只能靠提醒引导 worker 先 Kill——需确认这是
+  期望语义，必要时写进守卫文案或文档；②打回暂无次数上限（排空修复后重试循环由 bg 通知驱动、
+  天然有界），现网若观察到连续打回再收紧；③crashed 路径的 subagent 连带终止与通知抑制维持
+  现状，是否改为留活自愈（subagent 完成通知经透明接续更快唤醒）待评估；④窄竞态：subagent 已
+  完成、通知在途时 finish_task 放行，排队通知进 dead-letter（review 记录不改）。
 - **槽位思考强度 PR #127 review follow-up（2026-08-28）**：① anthropic 数字 budget 档位
   （`thinking:{type:'enabled',budget_tokens:N}`）会开启经典 extended thinking，但
   anthropic-adapter 流处理只消费 text/input_json delta，thinking block 与 signature 既不产出
