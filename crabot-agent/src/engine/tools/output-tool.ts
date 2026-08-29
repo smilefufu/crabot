@@ -152,6 +152,10 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
       const requestedTimeout = typeof input.timeout_ms === 'number' ? input.timeout_ms : BLOCK_DEFAULT_TIMEOUT_MS
       const timeoutMs = Math.min(Math.max(0, requestedTimeout), BLOCK_MAX_TIMEOUT_MS)
       const abortSignal = context.abortSignal
+      // 外部输入 pending 探针（spec 2026-08-29-worker-input-turn-boundary-delivery）：
+      // block 等待期间 worker inbox 有排队输入时立即返回让位——本工具返回后就是 turn
+      // 边界，输入在下一轮 LLM 调用前注入。engine 从 options 透传，未接线的调用方为 undefined。
+      const hasPendingExternalInput = context.hasPendingExternalInput
 
       const readOnce = async (): Promise<ReadResult> => {
         if (entityId.startsWith('shell_')) {
@@ -175,7 +179,7 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
         return toResult(first)
       }
 
-      // 进入 poll loop：每 2s 重读，等到有新内容 / 状态变化 / 超时 / abort
+      // 进入 poll loop：每 2s 重读，等到有新内容 / 状态变化 / 超时 / abort / 外部输入 pending
       const startMs = Date.now()
       let last = first
       while (Date.now() - startMs < timeoutMs) {
@@ -184,6 +188,9 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
         } catch {
           break  // abort
         }
+        // 外部输入（如 manager 投递）已排队：立即返回让位——本工具返回后就是 turn 边界，
+        // 输入会在下一轮 LLM 调用前注入，LLM 优先处理新输入。
+        if (hasPendingExternalInput?.()) break
         last = await readOnce()
         if (last.isError || !last.isRunning || !last.output.includes(NO_NEW_OUTPUT_MARKER)) break
       }

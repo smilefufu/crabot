@@ -132,6 +132,12 @@ export interface ToolCallContext {
     readonly worker_id: string
     readonly parent_trace_id?: string
   }
+  /**
+   * 外部输入 pending 探针（spec 2026-08-29-worker-input-turn-boundary-delivery）：
+   * 长等待工具（Output block=true 的 poll loop）每次睡醒后查询——源队列有排队输入时
+   * 提前返回，让输入在紧接着的 turn 边界被注入。非消费性查询。未接线时为 undefined。
+   */
+  readonly hasPendingExternalInput?: () => boolean
 }
 
 export interface ToolCallResult {
@@ -293,6 +299,24 @@ export interface EngineOptions {
   readonly permissionConfig?: ToolPermissionConfig
   readonly supportsVision?: boolean
   readonly humanMessageQueue?: HumanMessageQueueLike
+  /**
+   * turn 边界外部输入源（spec 2026-08-29-worker-input-turn-boundary-delivery）。
+   *
+   * 每轮「工具执行完成后、下一轮 LLM 调用前」调用一次，返回待注入的外部输入文本；
+   * 取出即从源队列移除（由 caller 负责其 FIFO / 优先级 / receipt 结算）。返回的每条
+   * 文本作为 user message 注入当前 burst（worker inbox 的 manager 投递由此在 turn
+   * 边界可见，不再等 burst 结束）。
+   *
+   * 仅在仍有剩余 turn 时调用（最后一轮注入无人消费）；回调抛错时 engine 跳过本轮
+   * 注入（输入保留在源队列，下一轮重试），不影响 burst。不传时行为与现状一致。
+   */
+  readonly drainExternalInputs?: () => ReadonlyArray<string> | Promise<ReadonlyArray<string>>
+  /**
+   * 外部输入 pending 探针（与 drainExternalInputs 同源，非消费性）：engine 经
+   * ToolCallContext.hasPendingExternalInput 透传给长等待工具（Output block），让它在
+   * 源队列有排队输入时提前返回。不传时工具行为与现状一致。
+   */
+  readonly hasPendingExternalInputs?: () => boolean
   readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
   readonly lspManager?: import('../hooks/types').LspManagerLike
   /** IANA 时区名（如 "Asia/Shanghai"），用于 tool_result 时间戳渲染 */
@@ -331,8 +355,9 @@ export interface EngineOptions {
   /**
    * 引擎层主动向 loop 注入 user message 时触发（trace 可见性钩子）。
    *
-   * 当前 4 类注入：
+   * 当前 5 类注入：
    * - `supplement` —— humanMessageQueue 实时纠偏注入
+   * - `external_input` —— drainExternalInputs 在 turn 边界消费的外部输入（worker inbox）
    * - `forced_summary` —— silent end_turn 兜底要求模型重说
    * - `stop_hook` —— Stop hook block 后注入的引导文本
    * - `assistant_text_end_turn` —— 非空 assistant text + end_turn 走错通道纠偏提醒
@@ -436,11 +461,12 @@ export interface SystemInjectionEvent {
   /**
    * 注入类型：
    * - `supplement`：humanMessageQueue 实时纠偏注入
+   * - `external_input`：drainExternalInputs 在 turn 边界消费的外部输入（如 worker inbox 的 manager 投递）
    * - `forced_summary`：silent end_turn 兜底要求模型重说
    * - `stop_hook`：Stop hook block 后注入的引导文本
    * - `assistant_text_end_turn`：非空 assistant text + end_turn 走错通道纠偏提醒
    */
-  readonly type: 'supplement' | 'forced_summary' | 'stop_hook' | 'assistant_text_end_turn'
+  readonly type: 'supplement' | 'external_input' | 'forced_summary' | 'stop_hook' | 'assistant_text_end_turn'
   /** 注入的文本内容（不含 ContentBlock[] 形态——supplement 的 ContentBlock 注入退化为 type 字符串描述） */
   readonly text: string
   /** 注入发生时的 turn 序号（与 EngineTurnEvent.turnNumber 同口径） */

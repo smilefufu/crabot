@@ -2094,6 +2094,243 @@ describe('BuiltinWorkerAdapter', () => {
     expect(meta.ended_reason).toBe('completed') // kill 没有覆盖掉原本的终态原因
   })
 
+  // --- turn 边界外部输入注入（spec 2026-08-29-worker-input-turn-boundary-delivery）---
+
+  /** 受 gate 控制的测试工具：call 挂起即把 burst 卡在「工具执行中」，便于在其间投递。 */
+  function gatedTool(gate: Promise<void>): ToolDefinition {
+    return defineTool({
+      name: 'probe_wait',
+      description: 'test gate tool',
+      inputSchema: { type: 'object', properties: {} },
+      isReadOnly: true,
+      call: async () => {
+        await gate
+        return { output: 'probe done', isError: false }
+      },
+    })
+  }
+
+  it('turn 边界注入:burst 工具执行期间投递的输入,在下一轮 LLM 调用前以 [manager input] user message 出现', async () => {
+    const toolGate = deferred<void>()
+    const messageSnapshots: LLMStreamParams[] = []
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: {
+        stream: vi.fn((_params: LLMStreamParams) => {
+          messageSnapshots.push({ ..._params, messages: [..._params.messages], tools: [..._params.tools] })
+          return (async function* () {
+            const r = messageSnapshots.length === 1
+              ? { toolCalls: [{ name: 'probe_wait', id: 'call_1', input: {} }], stopReason: 'tool_use' as const }
+              : { text: '看到新指令了', stopReason: 'end_turn' as const }
+            const content: unknown[] = []
+            if ('text' in r && r.text) content.push({ type: 'text', text: r.text })
+            for (const tc of r.toolCalls ?? []) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+            yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
+          })()
+        }),
+        updateConfig: () => {},
+      } as unknown as LLMAdapter,
+      tools: [gatedTool(toolGate.promise)],
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'running') // burst 已进入 probe_wait 的 gate
+    await adapter.sendInput(h, '中途指令')
+    toolGate.resolve()
+    await waitState(adapter, h, 'idle')
+
+    const second = messageSnapshots[1]
+    expect(second).toBeDefined()
+    const injected = second!.messages.filter(
+      (m) => m.role === 'user' && JSON.stringify(m).includes('[manager input]') && JSON.stringify(m).includes('中途指令'),
+    )
+    expect(injected).toHaveLength(1)
+  })
+
+  it('immediate 优先:turn 边界注入时 immediate_redirect 输入先于普通输入', async () => {
+    const toolGate = deferred<void>()
+    const messageSnapshots: LLMStreamParams[] = []
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: {
+        stream: vi.fn((_params: LLMStreamParams) => {
+          messageSnapshots.push({ ..._params, messages: [..._params.messages], tools: [..._params.tools] })
+          return (async function* () {
+            const r = messageSnapshots.length === 1
+              ? { toolCalls: [{ name: 'probe_wait', id: 'call_1', input: {} }], stopReason: 'tool_use' as const }
+              : { text: '收到', stopReason: 'end_turn' as const }
+            const content: unknown[] = []
+            if ('text' in r && r.text) content.push({ type: 'text', text: r.text })
+            for (const tc of r.toolCalls ?? []) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+            yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
+          })()
+        }),
+        updateConfig: () => {},
+      } as unknown as LLMAdapter,
+      tools: [gatedTool(toolGate.promise)],
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'running')
+    await adapter.sendInput(h, '普通排队输入')
+    await adapter.sendInput(h, '立即改向输入', { immediate_redirect: true })
+    toolGate.resolve()
+    await waitState(adapter, h, 'idle')
+
+    const second = JSON.stringify(messageSnapshots[1]!.messages)
+    expect(second).toContain('[manager input]')
+    expect(second.indexOf('立即改向输入')).toBeLessThan(second.indexOf('普通排队输入'))
+  })
+
+  it('幂等:turn 边界注入过的输入在 end_turn 收尾时不会被 drainQueuedInputs 重复注入', async () => {
+    const toolGate = deferred<void>()
+    const messageSnapshots: LLMStreamParams[] = []
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: {
+        stream: vi.fn((_params: LLMStreamParams) => {
+          messageSnapshots.push({ ..._params, messages: [..._params.messages], tools: [..._params.tools] })
+          return (async function* () {
+            const r = messageSnapshots.length === 1
+              ? { toolCalls: [{ name: 'probe_wait', id: 'call_1', input: {} }], stopReason: 'tool_use' as const }
+              : { text: '完成', stopReason: 'end_turn' as const }
+            const content: unknown[] = []
+            if ('text' in r && r.text) content.push({ type: 'text', text: r.text })
+            for (const tc of r.toolCalls ?? []) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+            yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
+          })()
+        }),
+        updateConfig: () => {},
+      } as unknown as LLMAdapter,
+      tools: [gatedTool(toolGate.promise)],
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'running')
+    await adapter.sendInput(h, '只注入一次的指令')
+    toolGate.resolve()
+    await waitState(adapter, h, 'idle')
+
+    const second = JSON.stringify(messageSnapshots[1]!.messages)
+    expect(second).toContain('只注入一次的指令')
+    // burst 到 end_turn 收尾为止,该输入在第二轮上下文中恰好出现一次(无收尾重复)
+    expect(second.split('只注入一次的指令')).toHaveLength(2) // 1 次出现 = 2 段
+  })
+
+  it('收尾兜底:turn 边界注入之后、收尾窗口内新到的输入仍走 drainQueuedInputs 续 burst', async () => {
+    const toolGate = deferred<void>()
+    const llmGate = deferred<void>()
+    const messageSnapshots: LLMStreamParams[] = []
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: {
+        stream: vi.fn((_params: LLMStreamParams) => {
+          messageSnapshots.push({ ..._params, messages: [..._params.messages], tools: [..._params.tools] })
+          const call = messageSnapshots.length
+          return (async function* () {
+            if (call === 1) await toolGate
+            if (call === 2) await llmGate
+            const r = call === 1
+              ? { toolCalls: [{ name: 'probe_wait', id: 'call_1', input: {} }], stopReason: 'tool_use' as const }
+              : { text: call === 2 ? '第一轮收尾' : '续 burst 完成', stopReason: 'end_turn' as const }
+            const content: unknown[] = []
+            if ('text' in r && r.text) content.push({ type: 'text', text: r.text })
+            for (const tc of r.toolCalls ?? []) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+            yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
+          })()
+        }),
+        updateConfig: () => {},
+      } as unknown as LLMAdapter,
+      tools: [gatedTool(toolGate.promise)],
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'running')
+    // ① 工具执行期间投递 → turn 边界注入
+    await adapter.sendInput(h, '边界注入')
+    toolGate.resolve()
+    // ② end_turn 前的 LLM 轮挂起期间投递 → end_turn 收尾窗口排队,走 drainQueuedInputs 续 burst
+    await vi.waitFor(async () => expect(messageSnapshots.length).toBe(2))
+    await adapter.sendInput(h, '收尾兜底')
+    llmGate.resolve()
+    await waitState(adapter, h, 'idle')
+
+    // 边界注入出现在第二轮(turn 边界),收尾兜底出现在第二轮且由收尾 drain 带入第三轮
+    expect(JSON.stringify(messageSnapshots[1]!.messages)).toContain('边界注入')
+    const third = messageSnapshots[2]
+    expect(third).toBeDefined()
+    expect(JSON.stringify(third!.messages)).toContain('收尾兜底')
+    expect(JSON.stringify(third!.messages)).toContain('边界注入') // 会话历史延续
+  })
+
+  it('fork 侧问不接输入源:主线 burst 的 engine options 带 drainExternalInputs,fork 的不带', async () => {
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
+    const gate = deferred<void>()
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapterGatedFromSecondCall(gate.promise, [
+        { text: '首轮回复', stopReason: 'end_turn' },
+        { text: '侧问回复', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    const treeBeforeFork = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: treeBeforeFork.latestTip()! }
+    const forkHandle = await adapter.fork(prevRef, '侧问问题', forkOptions())
+    gate.resolve()
+    await waitState(adapter, forkHandle, 'exited')
+
+    expect(runEngineSpy).toHaveBeenCalledTimes(2)
+    const mainOptions = runEngineSpy.mock.calls[0]?.[0].options
+    const forkOptions2 = runEngineSpy.mock.calls[1]?.[0].options
+    expect(typeof mainOptions?.drainExternalInputs).toBe('function')
+    expect(typeof mainOptions?.hasPendingExternalInputs).toBe('function')
+    expect(forkOptions2?.drainExternalInputs).toBeUndefined()
+    expect(forkOptions2?.hasPendingExternalInputs).toBeUndefined()
+  })
+
+  it('appendManagerInput:turn 边界注入的输入经 traceHooks 落 message/user trace 事件', async () => {
+    const toolGate = deferred<void>()
+    const managerInputs: string[] = []
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        appendManagerInput: (_traceId, text) => managerInputs.push(text),
+        finishIncarnationTrace: () => {},
+      },
+    })
+    const s = spec({
+      adapter: {
+        stream: vi.fn((_params: LLMStreamParams) => {
+          return (async function* () {
+            const r = managerInputs.length === 0
+              ? { toolCalls: [{ name: 'probe_wait', id: 'call_1', input: {} }], stopReason: 'tool_use' as const }
+              : { text: '看到', stopReason: 'end_turn' as const }
+            const content: unknown[] = []
+            if ('text' in r && r.text) content.push({ type: 'text', text: r.text })
+            for (const tc of r.toolCalls ?? []) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+            yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
+          })()
+        }),
+        updateConfig: () => {},
+      } as unknown as LLMAdapter,
+      tools: [gatedTool(toolGate.promise)],
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'running')
+    await adapter.sendInput(h, '要进 trace 的输入')
+    toolGate.resolve()
+    await waitState(adapter, h, 'idle')
+
+    expect(managerInputs).toEqual(['[manager input]\n要进 trace 的输入'])
+  })
+
   // --- scanOrphans（崩溃恢复扫描）---
 
   describe('BuiltinWorkerAdapter.scanOrphans', () => {

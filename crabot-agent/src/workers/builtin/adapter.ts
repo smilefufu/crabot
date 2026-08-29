@@ -284,6 +284,12 @@ export interface BuiltinTraceHooks {
     initial_input?: string
   }): string
   appendTurn(traceId: string, event: import('../../engine/types.js').EngineTurnEvent): void
+  /**
+   * turn 边界注入的 manager 输入落 trace（spec 2026-08-29-worker-input-turn-boundary-delivery）：
+   * 落成 context_assembly + message_batch(manager) span，与 spawn 初始输入同款表达，
+   * get_worker_activity(view=assistant) 里以 message/user 事件可见。
+   */
+  appendManagerInput?(traceId: string, text: string): void
   finishIncarnationTrace(traceId: string, patch: { status: 'completed' | 'failed'; summary: string }): void
   stopWorkerSubagents?(workerId: string): void
   /**
@@ -1086,6 +1092,18 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         tools: this.combineTools(builtin.tools, instance),
         model: builtin.model,
         ...(builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
+        // turn 边界外部输入注入（spec 2026-08-29-worker-input-turn-boundary-delivery）：
+        // 主线 burst 把 inbox 排队输入（immediate 优先）接到 engine——工具执行完成后、
+        // 下一轮 LLM 调用前注入为 user message，manager 投递不再等 burst（end_turn）结束。
+        // fork 侧问（runForkBurst）不接，不被主线输入打断。
+        drainExternalInputs: () => this.takeQueuedInputsAsExternal(instance),
+        hasPendingExternalInputs: () =>
+          instance.pendingImmediateInputs.length > 0 || instance.pendingInputs.length > 0,
+        onSystemInjection: (event) => {
+          if (event.type === 'external_input' && instance.traceId) {
+            this.deps.traceHooks?.appendManagerInput?.(instance.traceId, event.text)
+          }
+        },
         ...this.safetyOptions(builtin),
         // 长活 worker 的窗口是在**一次 burst 内部**被跑满的（maxTurns 默认 200），
         // burst 边界折叠够不着，只有 engine 的 per-turn 阈值压缩 + max_tokens 强压重试
@@ -1501,6 +1519,24 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     instance.tip = queueParent
     this.setEngineMessagesSnapshot(instance, queuedMessages, queueParent)
     return queued.length
+  }
+
+  /**
+   * turn 边界外部输入 drain（spec 2026-08-29-worker-input-turn-boundary-delivery）：
+   * 取出 pendingImmediateInputs（immediate 优先）+ pendingInputs，包装 `[manager input]`
+   * 来源标记后交给 engine 注入当前 burst。取出即移除——收尾段 drainQueuedInputs 只会
+   * 看到之后新到的输入，不重复注入。receipt 不在此结算：builtin 投递在 attemptInput
+   * 成功时已 settle（delivered = 已接受并排队），本方法保证「delivered ⇒ 至多一个执行
+   * 步骤后注入」。注入随 writeBack 落 sessionTree；trace 可见性由 onSystemInjection 经
+   * traceHooks.appendManagerInput 落 message/user 事件。
+   */
+  private takeQueuedInputsAsExternal(instance: WorkerInstance): ReadonlyArray<string> {
+    if (instance.pendingImmediateInputs.length === 0 && instance.pendingInputs.length === 0) return []
+    const queued = [
+      ...instance.pendingImmediateInputs.splice(0, instance.pendingImmediateInputs.length),
+      ...instance.pendingInputs.splice(0, instance.pendingInputs.length),
+    ]
+    return queued.map((text) => `[manager input]\n${text}`)
   }
 
   /**
