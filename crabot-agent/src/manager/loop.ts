@@ -482,8 +482,15 @@ export class ManagerLoop {
     // 协议 §4.1「重复来源不得新增历史、LLM episode 或 reaction」:整批都已提交过
     // (messageCount=0,at-least-once 重放/渠道重发撞上在跑 episode)→ 不注入,与
     // runEpisode 的空转守卫同语义;部分重叠 → 只注入新消息的投影,已提交的那部分
-    // 不再进 LLM 输入。
-    if (committed.messageCount === 0) return
+    // 不再进 LLM 输入。重复消息携带的 admin chat request ids 仍要登记进 claims——
+    // 当前 episode 收尾的 settleUnclaimedAdminChatWakes 会结掉它,与 idle 空转守卫
+    // 的结算行为对称(否则 journal 条目 pending、每次启动被 no-op 重放)。
+    if (committed.messageCount === 0) {
+      for (const id of envelope.correlation?.admin_chat_request_ids ?? []) {
+        if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
+      }
+      return
+    }
     this.enqueueDuringEpisode(committed.injectedEnvelope ?? envelope, { humanWakePreCommitted: true })
     // 结算委托:调用方关心的「这批消息最终有没有被回复」由被注入 episode 的收尾
     // 真实 result 回答(同 episode 收尾 detectRepliedToHuman),不由注入调用编造。
@@ -948,7 +955,8 @@ export class ManagerLoop {
     readonly messageCount: number
     readonly lastCurrentWakeCommittedMessageId?: string
     /** 只含新提交消息的投影 envelope(按 platform_message_id 去重后);messageCount=0 时为 undefined。
-     *  注入路径用它喂 LLM——已提交过的旧消息不得再进 LLM 输入(协议 §4.1)。 */
+     *  注入路径用它喂 LLM——已提交过的旧消息不得再进 LLM 输入(协议 §4.1)。
+     *  仅对**单 envelope** 调用有意义(envelopes 多于一个时本字段只含第一份投影)。 */
     readonly injectedEnvelope?: TimedWakeEnvelope
   }> {
     const committedIds = new Set(state.committedHumanMessageIds ?? [])
