@@ -103,7 +103,6 @@ const CORE_MODULES = buildCoreModules({
   mmEndpoint: MM_ENDPOINT,
   adminEndpoint: ADMIN_ENDPOINT,
   newApiToken: process.env.CRABOT_NEW_API_ADMIN_TOKEN || '',
-  enableFda: process.env.CRABOT_ENABLE_FDA || '',
 })
 
 const manager = new ModuleManager({

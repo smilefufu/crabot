@@ -16,7 +16,6 @@ const OPTS = {
   mmEndpoint: 'http://localhost:19000',
   adminEndpoint: 'http://localhost:19001',
   newApiToken: '',
-  enableFda: '',
 }
 
 function envOf(mods: ReturnType<typeof buildCoreModules>, id: string) {
