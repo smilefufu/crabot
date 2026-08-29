@@ -1875,6 +1875,10 @@ export class UnifiedAgent extends ModuleBase {
     const session = messages[0].session
 
     let repliedToHuman = false
+    // flush 消息被注入在跑 episode 时(PR #131):结算委托给该 episode 的真实收尾
+    // (episodeId==='' 的占位 result 不带真实 repliedToHuman),不能再用它 reportResult——
+    // 否则「实际回复了」会被记成沉默,群聊注意力错误 ×5 渐远。
+    let settleDelegated = false
     try {
       const result = await this.requireManagerStack().registry.routeAttentionFlush(
         session.channel_id,
@@ -1886,8 +1890,13 @@ export class UnifiedAgent extends ModuleBase {
           sessionId,
           lastCommittedMessageId,
         ),
+        (settled) => {
+          settleDelegated = true
+          this.attentionScheduler.reportResult(sessionId, settled.repliedToHuman)
+        },
       )
       repliedToHuman = result.repliedToHuman
+      settleDelegated = result.episodeId === ''
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         console.error(
           `[${this.config.moduleId}] processGroupLaneBatch manager episode outcome=${result.outcome}`,
@@ -1907,7 +1916,10 @@ export class UnifiedAgent extends ModuleBase {
 
     // 兜底回复不是 manager 在说话：退避档位仍按"这一轮没出声"上报，
     // 否则故障期间群聊巡检间隔会被冻结在当前值。
-    this.attentionScheduler.reportResult(sessionId, repliedToHuman)
+    // 注入委托场景(settleDelegated)已由被注入 episode 收尾以真实结果结算,此处跳过。
+    if (!settleDelegated) {
+      this.attentionScheduler.reportResult(sessionId, repliedToHuman)
+    }
   }
 
   /**

@@ -790,6 +790,102 @@ describe('ManagerLoop', () => {
       .toThrow('human messages must be committed through wakeUp')
   })
 
+  it('注入委托的结算钩子在 episode 收尾以真实 result 触发(群聊注意力结算用)', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ text: '已回复群消息', stopReason: 'end_turn' })
+
+    let loop!: ManagerLoop
+    const settlements: Array<{ outcome: string; repliedToHuman: boolean }> = []
+    const deps = baseDeps({
+      store,
+      adapter,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [makeChannelMessage('群里的后续消息')] }),
+              undefined,
+              (result) => settlements.push({ outcome: result.outcome, repliedToHuman: result.repliedToHuman }),
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
+    expect(result.outcome).toBe('completed')
+
+    // 结算钩子以被注入 episode 的真实收尾触发一次(不是注入瞬间的编造值):
+    // 本回合以 end_turn 文本收尾(未调 send_message)→ repliedToHuman 如实为 false
+    expect(settlements).toHaveLength(1)
+    expect(settlements[0]).toEqual({ outcome: 'completed', repliedToHuman: false })
+  })
+
+  it('注入未被消费(最后一轮 drain 之后)时不记去重键,自唤醒/下次唤醒按正常路径提交,消息不丢', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    // maxTurns=2:turn1 工具(注入未发生) → turn2 工具(此处注入,但其后 hasRemainingTurn=false 不 drain)
+    // → 轮次耗尽 max_turns 收尾(consumedEvents=true)
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ toolCalls: [{ name: 'inject_tool', id: 'call_2', input: {} }], stopReason: 'tool_use' })
+
+    let loop!: ManagerLoop
+    const deps = baseDeps({
+      store,
+      adapter,
+      maxTurns: 2,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => ({ output: 'ok', isError: false }),
+        },
+        {
+          name: 'inject_tool',
+          description: 'inject',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            // 最后一轮的工具执行后 engine 不再 drain——注入滞留 mailbox
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [makeChannelMessage('滞留指令')] }),
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const first = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
+    expect(first.outcome).toBe('max_turns') // 轮次耗尽,按已消费收口(consumedEvents=true)
+
+    // 风险 1 回归:未消费 → recent 不含注入文本、去重键不记(键在而 recent 无 = 永久丢失)
+    const stateAfter = await store.load(KEY)
+    expect(JSON.stringify(stateAfter.recent)).not.toContain('滞留指令')
+    expect(stateAfter.committedHumanMessageIds ?? []).toHaveLength(1) // 仅主 wake
+    expect(loop.hasPendingMailbox).toBe(true)
+
+    // 下次唤醒:mailbox 残留经 carry 正常提交,LLM 看到滞留指令
+    queue.push({ text: '补看滞留消息', stopReason: 'end_turn' })
+    const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
+    expect(second.outcome).toBe('completed')
+
+    const secondCall = calls[calls.length - 1]
+    expect(JSON.stringify(secondCall.messages)).toContain('滞留指令')
+    const finalState = await store.load(KEY)
+    expect(JSON.stringify(finalState.recent)).toContain('滞留指令')
+    expect(finalState.committedHumanMessageIds?.length).toBe(3) // 主 wake + 滞留 + 新的话
+  })
+
   it('activity 仅入 mailbox 时保持 pending，进入下一次 LLM 输入前才确认', async () => {
     const { adapter, queue, calls } = makeAdapter()
     queue.push({ toolCalls: [{ name: 'inject_activity', id: 'call-activity', input: {} }], stopReason: 'tool_use' })

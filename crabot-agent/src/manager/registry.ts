@@ -310,9 +310,12 @@ export class ManagerRegistry {
     friend?: Friend,
     /** 人类输入已持久化进对应 Manager 会话后的非关键通知。 */
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+    /** flush 消息被注入在跑 episode 时(PR #131),处理结果的结算委托给该 episode 的
+     * 真实收尾 result——调用方以此 reportResult,不用注入分支立即返回的占位值。 */
+    onEpisodeSettled?: (result: EpisodeResult) => void,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'attention_flush', channelId, sessionId, messages, friend, undefined, onHumanInputCommitted)
+    return this.routeHumanWake(capture, 'attention_flush', channelId, sessionId, messages, friend, undefined, onHumanInputCommitted, onEpisodeSettled)
   }
 
   /** 两个人类消息入口的公共路径:解析发起人身份(唤醒边界的唯一一次异步)→ 按 kind 造事件唤醒。 */
@@ -325,6 +328,7 @@ export class ManagerRegistry {
     friend?: Friend,
     correlation?: import('./loop.js').ManagerWakeCorrelation,
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+    onEpisodeSettled?: (result: EpisodeResult) => void,
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
     // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
@@ -360,7 +364,7 @@ export class ManagerRegistry {
     // 进入当前 Manager mailbox」同样涵盖人类消息。
     const loop = this.getOrCreate(key)
     if (this.isEpisodeActive(key)) {
-      await loop.enqueueHumanWakeDuringActiveEpisode({ ...envelope, wake: event }, onHumanInputCommitted)
+      await loop.enqueueHumanWakeDuringActiveEpisode({ ...envelope, wake: event }, onHumanInputCommitted, onEpisodeSettled)
       return {
         episodeId: '',
         outcome: 'completed',
@@ -706,7 +710,8 @@ export class ManagerRegistry {
   /**
    * episode 收口后的 mailbox 兜底(P7 阻塞项 #5):engine 在 end_turn 收口前做最后一次
    * `drainPending`,落在那之后的 `enqueueDuringEpisode` 内容没有任何消费者在等,不自唤醒
-   * 就会一直停滞在内存 mailbox 里。人类输入由 `wakeUp()` 串行提交，不走这条内存补充路径；
+   * 就会一直停滞在内存 mailbox 里。人类输入由 `wakeUp()` 串行提交或经
+   * `enqueueHumanWakeDuringActiveEpisode` 提交后注入(PR #131);
    * 这里在 episode 刚收口、引用计数刚归零的同步窗口里补一次自唤醒。
    *
    * 四道门,缺一不可:
