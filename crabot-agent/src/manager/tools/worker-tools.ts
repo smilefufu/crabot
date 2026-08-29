@@ -364,7 +364,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       '会作为事件唤醒你,事件带状态和待处置回合；用 get_worker_activity 读取原生会话。命中已 cancelled 的任务会被拒绝。' +
       '未知交互界面必须使用 respond_to_worker_ui，普通输入不提供 raw 终端旁路。' +
       '如果这条消息代表立即改变当前任务方向，设置 immediate_redirect=true；非 builtin worker 会先由 Harness 中断当前回合，' +
-      '确认中断完成后再投递，builtin worker 不 abort 而是在下一轮 LLM 调用前优先消费。',
+      '确认中断完成后再投递；builtin worker 不 abort，投递会在它当前执行步骤结束后的下一步之前注入（无论其当前回合多长）。',
     inputSchema: {
       type: 'object',
       properties: {

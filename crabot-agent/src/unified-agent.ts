@@ -3900,6 +3900,23 @@ export class UnifiedAgent extends ModuleBase {
             toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined ? toolCall.startedAtMs + toolCall.durationMs : undefined)
         }
       },
+      // turn 边界注入的 manager 输入（spec 2026-08-29-worker-input-turn-boundary-delivery）：
+      // 与 spawn 初始输入同款 context_assembly + message_batch(manager) span——
+      // normalizeBuiltinSpan 会把它转成 message/user 事件，get_worker_activity 可见。
+      appendManagerInput: (traceId, text) => {
+        const span = this.traceStore.startSpan(traceId, {
+          type: 'context_assembly',
+          details: {
+            context_type: 'worker',
+            message_batch: [{
+              sender: 'manager',
+              text: redact(text),
+              is_mention_crab: false,
+            }],
+          },
+        })
+        this.traceStore.endSpan(traceId, span.span_id, 'completed')
+      },
       finishIncarnationTrace: (traceId, patch) => {
         this.traceStore.endTrace(traceId, patch.status, { summary: redact(patch.summary) })
       },

@@ -284,6 +284,12 @@ export interface BuiltinTraceHooks {
     initial_input?: string
   }): string
   appendTurn(traceId: string, event: import('../../engine/types.js').EngineTurnEvent): void
+  /**
+   * turn 边界注入的 manager 输入落 trace（spec 2026-08-29-worker-input-turn-boundary-delivery）：
+   * 落成 context_assembly + message_batch(manager) span，与 spawn 初始输入同款表达，
+   * get_worker_activity(view=assistant) 里以 message/user 事件可见。
+   */
+  appendManagerInput?(traceId: string, text: string): void
   finishIncarnationTrace(traceId: string, patch: { status: 'completed' | 'failed'; summary: string }): void
   stopWorkerSubagents?(workerId: string): void
   /**
@@ -302,6 +308,20 @@ export interface BuiltinTraceReader {
     nextCursor: TraceCursor
     unavailableReason?: string
   }>
+}
+
+/**
+ * 系统通知信封（PR #130 复审识别的真实风险）：bg shell 退出（unified-agent renderShellExitNotification）
+ * 与 subagent 完成（subagent-runner deliverCompletion）的通知经同一 inbox 通道（sendToWorker →
+ * sendInput → pendingInputs）投递，自带信封标记。turn 边界 drain 时它们**不是** manager 输入——
+ * 不得加 `[manager input]` 前缀（否则 worker 会把 shell 退出通知当 manager 指令执行），也不得以
+ * manager 名义落 trace（否则 get_worker_activity 出现 manager 从未发过的 message/user 事件）。
+ * 彻底方案（inbox item 带 source 字段透传）属跨模块契约变更，记 spec §8 follow-up。
+ */
+const SYSTEM_NOTIFICATION_ENVELOPES: readonly string[] = ['<bg-notification>', '<sub_agent_notification>']
+
+function isSystemNotificationEnvelope(text: string): boolean {
+  return SYSTEM_NOTIFICATION_ENVELOPES.some((envelope) => text.includes(envelope))
 }
 
 
@@ -1086,6 +1106,19 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         tools: this.combineTools(builtin.tools, instance),
         model: builtin.model,
         ...(builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
+        // turn 边界外部输入注入（spec 2026-08-29-worker-input-turn-boundary-delivery）：
+        // 主线 burst 把 inbox 排队输入（immediate 优先）接到 engine——工具执行完成后、
+        // 下一轮 LLM 调用前注入为 user message，manager 投递不再等 burst（end_turn）结束。
+        // fork 侧问（runForkBurst）不接，不被主线输入打断。
+        drainExternalInputs: () => this.takeQueuedInputsAsExternal(instance),
+        hasPendingExternalInputs: () =>
+          instance.pendingImmediateInputs.length > 0 || instance.pendingInputs.length > 0,
+        onSystemInjection: (event) => {
+          // 系统通知（bg 退出 / subagent 完成）不落 manager 名义的 trace 事件
+          if (event.type === 'external_input' && instance.traceId && !isSystemNotificationEnvelope(event.text)) {
+            this.deps.traceHooks?.appendManagerInput?.(instance.traceId, event.text)
+          }
+        },
         ...this.safetyOptions(builtin),
         // 长活 worker 的窗口是在**一次 burst 内部**被跑满的（maxTurns 默认 200），
         // burst 边界折叠够不着，只有 engine 的 per-turn 阈值压缩 + max_tokens 强压重试
@@ -1501,6 +1534,25 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     instance.tip = queueParent
     this.setEngineMessagesSnapshot(instance, queuedMessages, queueParent)
     return queued.length
+  }
+
+  /**
+   * turn 边界外部输入 drain（spec 2026-08-29-worker-input-turn-boundary-delivery）：
+   * 取出 pendingImmediateInputs（immediate 优先）+ pendingInputs，包装 `[manager input]`
+   * 来源标记后交给 engine 注入当前 burst。取出即移除——收尾段 drainQueuedInputs 只会
+   * 看到之后新到的输入，不重复注入。receipt 不在此结算：builtin 投递在 attemptInput
+   * 成功时已 settle（delivered = 已接受并排队），本方法保证「delivered ⇒ 至多一个执行
+   * 步骤后注入」。注入随 writeBack 落 sessionTree；trace 可见性由 onSystemInjection 经
+   * traceHooks.appendManagerInput 落 message/user 事件。
+   */
+  private takeQueuedInputsAsExternal(instance: WorkerInstance): ReadonlyArray<string> {
+    if (instance.pendingImmediateInputs.length === 0 && instance.pendingInputs.length === 0) return []
+    const queued = [
+      ...instance.pendingImmediateInputs.splice(0, instance.pendingImmediateInputs.length),
+      ...instance.pendingInputs.splice(0, instance.pendingInputs.length),
+    ]
+    // 系统通知（bg 退出 / subagent 完成）保持裸信封——只区分 manager 人工投递
+    return queued.map((text) => isSystemNotificationEnvelope(text) ? text : `[manager input]\n${text}`)
   }
 
   /**

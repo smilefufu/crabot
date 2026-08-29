@@ -562,6 +562,8 @@ list_groups / list_contacts 的返回是**分页结果**——看到 \`paginatio
 
 **反 pattern（明令禁止）**：在 agent 主循环里反复调 \`Output(id)\`（不带 block）等同一个 entity——每次调用都污染上下文（tool_call + tool_result 对），且没新内容时纯空跑。**同一 entity 连续 ≥2 次 Output 都返回 \`(no new output)\`，下一次必须 block=true 或干别的事**。
 
+**连续 block 有上限**：不要无限连续 \`block=true\` 盯同一个 entity——连续 3 次 block 超时都没等到新内容，就换方式：\`end_turn\` 转 idle 等通知唤醒、先去做别的、或收窄等待（缩短 timeout / 改 snapshot 抽查）。监控类任务靠「睡醒看一眼」无限循环是最差形态。
+
 **时长分级**：
 - 1min - 1h：转后台 shell；交给它跑、干别的事，等 push notification
 - 1h - 数天：转后台 shell；**转后台的命令跨 task / worker 重启都不被杀（持久）**，由你显式 Kill 或进程自己 exit

@@ -577,6 +577,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     const toolResults = await executeToolBatches(batches, currentTools, {
       abortSignal,
       ...(options.timezone ? { timezone: options.timezone } : {}),
+      ...(options.hasPendingExternalInputs ? { hasPendingExternalInput: options.hasPendingExternalInputs } : {}),
     }, options.permissionConfig, hooks)
     // Live progress: tools finished
     if (options.onLiveProgress) {
@@ -663,6 +664,31 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         options.onSystemInjection?.({
           type: 'supplement',
           text: typeof content === 'string' ? content : '[ContentBlock[] supplement]',
+          turnNumber: totalTurns,
+          injectedAtMs: Date.now(),
+        })
+      }
+    }
+
+    // ── External input injection (turn boundary) ──
+    // worker inbox 等外部输入源在 turn 边界消费：工具执行完成后、下一轮 LLM 调用前，
+    // drain 回调返回的每条输入作为 user message 注入（取出即从源队列移除，FIFO/优先级/
+    // receipt 结算由 caller 负责）。仅在有剩余 turn 时 drain（最后一轮注入无人消费）。
+    // 回调抛错只跳过本轮（输入保留在源队列，下一轮重试），不影响 burst——与上方
+    // supplement 同序，先于下一轮 LLM 调用的 abort 响应。
+    if (hasRemainingTurn && options.drainExternalInputs) {
+      let externalInputs: ReadonlyArray<string> = []
+      try {
+        externalInputs = await options.drainExternalInputs()
+      } catch (error) {
+        console.error(`[engine] drainExternalInputs failed (turn ${totalTurns}), inputs kept in source queue:`,
+          error instanceof Error ? error.message : String(error))
+      }
+      for (const text of externalInputs) {
+        messages.push(createUserMessage(text))
+        options.onSystemInjection?.({
+          type: 'external_input',
+          text,
           turnNumber: totalTurns,
           injectedAtMs: Date.now(),
         })
