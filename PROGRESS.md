@@ -44,8 +44,10 @@
 - @claude review（2026-08-28）两条真实风险已修（`f5f430c6`）：①thinking 加进
   readCoreAgentSemanticSnapshot 投影（否则 thinking-only 保存被判 noop 400）；②AgentConfig
   的 getGlobalConfig 拆分容错（placeholder 级失败不再打空表单）。
+- anthropic placeholder 措辞已改警示（数字 budget 在 thinking block 回传补齐前不再主动引导，
+  见技术债段 ①）。
 - **待做**：spec §9 手工验收三项（真实 provider effort 生效 / 128K compaction 提前 / 存量迁移演练）
-  需起实例验证；协议注释"四个 slots"修正待推 docs（worktree 隔离，会话收尾补）。
+  需起实例验证；改动横跨 admin/agent/web，需重建重启生效。
 
 ### wechat 群聊门控（@ + 引用放行）：已合并（PR #124 → `ffd32e55`）
 
@@ -223,7 +225,8 @@
   （`thinking:{type:'enabled',budget_tokens:N}`）会开启经典 extended thinking，但
   anthropic-adapter 流处理只消费 text/input_json delta，thinking block 与 signature 既不产出
   也不回传——≤4.5 老模型 tool loop 第二轮大概率 400；触发需「anthropic + 老模型 + 主动填数字」
-  组合且 fail-loud，改 UI placeholder 措辞或做 block 回传属后续 spec。② 数字 thinking_custom 的
+  组合且 fail-loud；placeholder 措辞已改警示（引导用户用枚举档位），block 回传支持属后续 spec。
+  ② 数字 thinking_custom 的
   format 校验是保存时一次性判定：槽位无模型引用时事后换全局默认 Provider 不会重校验，
   `thinkingEffortValue` 对 number 返回 undefined → 静默退化为跟随默认（协议已知边界）。
   ③ backup import 对 legacy 槽位 key fail-loud 拒绝 vs 启动迁移丢弃+warn 的恢复体验不一致

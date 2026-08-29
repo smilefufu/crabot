@@ -118,7 +118,7 @@ describe('AgentConfig — 槽位思考强度', () => {
       return found
     })
     fireEvent.change(thinking[0], { target: { value: 'custom' } })
-    const input = await screen.findByPlaceholderText('如 xhigh / max；老模型可填 budget 数字如 8192')
+    const input = await screen.findByPlaceholderText('如 xhigh / max；数字 budget 暂不建议（工具循环可能 400），优先用枚举档位')
     fireEvent.change(input, { target: { value: 'xhigh' } })
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
     await vi.waitFor(() => {

@@ -253,7 +253,7 @@ export const AgentConfig: React.FC = () => {
 
   const thinkingPlaceholder = (roleKey: string): string => {
     switch (effectiveFormat(roleKey)) {
-      case 'anthropic': return '如 xhigh / max；老模型可填 budget 数字如 8192'
+      case 'anthropic': return '如 xhigh / max；数字 budget 暂不建议（工具循环可能 400），优先用枚举档位'
       case 'openai': return '如 minimal / xhigh / max'
       case 'openai-responses': return '如 minimal / xhigh / max'
       case 'gemini': return '如 low / high（兼容层映射 thinking level）'
