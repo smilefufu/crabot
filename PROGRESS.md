@@ -234,6 +234,13 @@
   天然有界），现网若观察到连续打回再收紧；③crashed 路径的 subagent 连带终止与通知抑制维持
   现状，是否改为留活自愈（subagent 完成通知经透明接续更快唤醒）待评估；④窄竞态：subagent 已
   完成、通知在途时 finish_task 放行，排队通知进 dead-letter（review 记录不改）。
+- **manager 压缩未接模型 context_window（2026-08-29 发现，既有缺口）**：worker 侧 compaction
+  阈值已按 `context_window × 0.8` 生效（未设置回退 200K）；manager 是自管压缩
+  （`disableCompaction: true` + `DEFAULT_MANAGER_COMPACTION_POLICY` 写死常量
+  foldTokenThreshold=20K / hardCapTokens=200K×0.8），且 bootstrap 构造 ManagerRegistry 从未传
+  `contextWindowTokens`——manager 压缩与模型窗口无关。fold 20K 是刻意保守策略可保留；
+  hardCapTokens 理论上应从 manager 实际模型（powerful 槽位）的窗口推导（128K 模型时 160K
+  hardCap 偏大，靠爆窗 force_hot 兜底）。改动属 manager 压缩行为语义变更，需单独 spec。
 - **槽位思考强度 PR #127 review follow-up（2026-08-28）**：① anthropic 数字 budget 档位
   （`thinking:{type:'enabled',budget_tokens:N}`）会开启经典 extended thinking，但
   anthropic-adapter 流处理只消费 text/input_json delta，thinking block 与 signature 既不产出
