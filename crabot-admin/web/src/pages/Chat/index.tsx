@@ -143,7 +143,11 @@ export const Chat: React.FC = () => {
             const kept = prev.filter(
               (m) => !(m.message_id.startsWith('msg_') && m.request_id !== undefined && settled.has(m.request_id))
             )
-            return [...kept, ...fresh.map((m) => ({ ...m, status: 'completed' as const }))]
+            // fresh 里可能混有本会话早先已收到回复的 user 消息（WS 文本路径前端不知道
+            // 服务端 UUID，只能等重连补齐）——不能一律 concat 到队尾，按时间戳归位。
+            const merged = [...kept, ...fresh.map((m) => ({ ...m, status: 'completed' as const }))]
+            merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+            return merged
           })
         }).catch(() => {/* ignore */})
       }

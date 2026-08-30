@@ -170,7 +170,7 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     // 断连期间服务端落库（loadHistory 倒序：最新在前）
     loadHistory.mockResolvedValue([
       { message_id: 'srv_reply', role: 'assistant', content: { type: 'text', text: '断连前的回复' }, request_id: 'req-8', timestamp: new Date().toISOString() },
-      { message_id: 'srv_user', role: 'user', content: { type: 'text', text: '帮我看下这个' }, request_id: 'req-8', acknowledged_at: new Date().toISOString(), timestamp: new Date().toISOString() },
+      { message_id: 'srv_user', role: 'user', content: { type: 'text', text: '帮我看下这个' }, request_id: 'req-8', acknowledged_at: new Date().toISOString(), timestamp: new Date(Date.now() - 1000).toISOString() },
     ])
     await act(async () => { statusHandler!('connected') })
 
@@ -189,5 +189,25 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     await act(async () => { statusHandler!('connected') })
 
     expect(screen.getAllByText('只此一条')).toHaveLength(1)
+  })
+
+  it('回复先到、重连补 user 消息：按时间戳归位，提问不沉到回复后面', async () => {
+    await renderAndSend('req-10')
+    // 回复经 chat_push 先到（服务端 UUID 进入已知集合）
+    await push(assistantPush('回复先到了', 'req-10'))
+    // 重连拉历史：回复已 known 被去重跳过，只剩 user 消息进 fresh——
+    // 若 concat 队尾，提问会渲染到回复后面（review 指出的必现顺序错乱）
+    loadHistory.mockResolvedValue([
+      { message_id: 'srv_回复先到了', role: 'assistant', content: { type: 'text', text: '回复先到了' }, request_id: 'req-10', timestamp: new Date().toISOString() },
+      { message_id: 'srv_user', role: 'user', content: { type: 'text', text: '帮我看下这个' }, request_id: 'req-10', acknowledged_at: new Date().toISOString(), timestamp: new Date(Date.now() - 1000).toISOString() },
+    ])
+    await act(async () => { statusHandler!('connected') })
+
+    expect(screen.getAllByText('帮我看下这个')).toHaveLength(1)
+    expect(screen.getAllByText('回复先到了')).toHaveLength(1)
+    // user 消息必须出现在回复之前（DOM 顺序）
+    const user = screen.getByText('帮我看下这个')
+    const reply = screen.getByText('回复先到了')
+    expect(user.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

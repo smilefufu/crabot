@@ -115,6 +115,7 @@ describe('Admin Master Chat 集成测试', () => {
           request_id: requestId,
           content: '测试消息',
         }))
+        ws.close()
         resolve()
       })
 
