@@ -93,11 +93,24 @@ export interface LLMStreamParams {
    */
   readonly configGeneration?: () => number
   /**
-   * 配置变更后的刷新回调。返回新的 adapter/model，callNonStreaming 会在下一次 attempt 使用它们。
+   * 配置变更后的刷新回调。返回新配置的 adapter 与 per-attempt 请求参数
+   * （model/maxTokens/thinking 是 per-model 字段，换 provider 后必须一并替换——
+   * 只换 adapter/model 会把旧模型的 max_tokens/thinking 发给新模型，可能触发
+   * 400 invalid_request_error 这类不可重试失败，protocol-agent-v3 §11 3.6.17）。
+   * 字段缺省 = 维持原值；显式 undefined = 从请求中移除该参数。
+   * callNonStreaming 会在下一次 attempt 使用它们。
    */
-  readonly onConfigChanged?: () => Promise<{ adapter?: LLMAdapter; model?: string } | void>
+  readonly onConfigChanged?: () => Promise<LLMConfigSwap | void>
   /** 可观测性回调：retry 发生时触发；用于 worker → admin web 实时显示"LLM 正在重试" */
   readonly onRetry?: (event: LLMRetryEvent) => void
+}
+
+/** onConfigChanged 的返回形态（review 2nd：随 model 一并替换 per-model 请求参数）。 */
+export interface LLMConfigSwap {
+  readonly adapter?: LLMAdapter
+  readonly model?: string
+  readonly maxTokens?: number
+  readonly thinking?: LLMThinkingConfig
 }
 
 export interface LLMAdapter {
@@ -144,19 +157,37 @@ async function withStreamConsumptionRetry(
   const delayMs = DEFAULT_RETRY_DELAY_MS
   const startedAt = Date.now()
 
-  // 重试期间配置可能热更新：currentAdapter / currentModel 允许被 onConfigChanged 替换。
+  // 重试期间配置可能热更新：adapter 与 per-attempt 请求参数（model/maxTokens/thinking）
+  // 允许被 onConfigChanged 替换——后三者是 per-model 字段，只换 adapter/model 会把旧
+  // 模型的参数发给新模型（可能 400 invalid_request_error，不可重试）。
   // configGeneration 自己记账：代数已前进 → 立即换配置并跳过本次 sleep（只跳一次）；
   // 代数未变 → 正常退避。configChangedSignal 只负责「sleep 期间」的边沿唤醒。
   let currentAdapter = adapter
-  let currentModel = params.model
+  let currentRequestParams: { model: string; maxTokens?: number; thinking?: LLMThinkingConfig } = {
+    model: params.model,
+    ...(params.maxTokens !== undefined ? { maxTokens: params.maxTokens } : {}),
+    ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
+  }
   let generic429Count = 0
   let appliedGeneration = params.configGeneration?.()
 
   const applyConfigChange = async (): Promise<void> => {
     appliedGeneration = params.configGeneration?.()
     const update = await params.onConfigChanged?.()
-    if (update?.adapter) currentAdapter = update.adapter
-    if (update?.model !== undefined) currentModel = update.model
+    if (!update) return
+    if (update.adapter) currentAdapter = update.adapter
+    const next = { ...currentRequestParams } as { model: string; maxTokens?: number; thinking?: LLMThinkingConfig }
+    if (update.model !== undefined) next.model = update.model
+    // 显式 undefined = 新模型无该配置，从请求中移除；字段缺省 = 维持原值。
+    if ('maxTokens' in update) {
+      if (update.maxTokens === undefined) delete next.maxTokens
+      else next.maxTokens = update.maxTokens
+    }
+    if ('thinking' in update) {
+      if (update.thinking === undefined) delete next.thinking
+      else next.thinking = update.thinking
+    }
+    currentRequestParams = next
   }
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -165,7 +196,8 @@ async function withStreamConsumptionRetry(
     let chunkCount = 0
     try {
       const processor = new StreamProcessor()
-      for await (const chunk of currentAdapter.stream({ ...params, model: currentModel })) {
+      const { model: _pModel, maxTokens: _pMaxTokens, thinking: _pThinking, ...baseParams } = params
+      for await (const chunk of currentAdapter.stream({ ...baseParams, ...currentRequestParams } as LLMStreamParams)) {
         if (params.signal?.aborted) {
           throw new DOMException('Aborted', 'AbortError')
         }

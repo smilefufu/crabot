@@ -1864,6 +1864,10 @@ export class AgentHandler {
           onConfigChanged: async () => ({
             adapter: adapterFromSdkEnv(this.sdkEnv),
             model: this.sdkEnv.modelId,
+            // maxTokens/thinking 是 per-model 字段，随 model 一并替换（显式 undefined =
+            // 新模型无该配置，从请求中移除），否则旧模型参数发给新模型可能 400。
+            maxTokens: this.sdkEnv.maxTokens,
+            thinking: this.sdkEnv.thinking,
           }),
           permissionConfig: initialPermissionConfig,
           timezone: this.getTimezone(),

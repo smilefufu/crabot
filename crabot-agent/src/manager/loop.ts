@@ -1247,6 +1247,8 @@ export class ManagerLoop {
       onConfigChanged: async () => ({
         adapter: this.deps.adapter(),
         model: this.deps.model(),
+        // thinking 是 per-model 字段，随 model 一并替换；manager 不发 max_tokens。
+        ...(this.deps.thinking ? { thinking: this.deps.thinking() } : {}),
       }),
     }
 

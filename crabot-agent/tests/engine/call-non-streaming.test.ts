@@ -390,6 +390,10 @@ describe('callNonStreaming', () => {
         async *stream(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
           attempt++
           modelsSeen.push(params.model)
+          // per-model 参数必须随切换一并替换：旧模型显式带 max_tokens=8192，
+          // 新模型无该配置 → 请求中不得出现 max_tokens
+          expect(params.maxTokens).toBeUndefined()
+          expect(params.thinking).toBeUndefined()
           yield { type: 'message_start', messageId: 'msg' }
           if (attempt === 2) {
             // 换到新 provider 后仍被限流（无 Retry-After → 通用 429 路径，1s 退避）
@@ -404,10 +408,12 @@ describe('callNonStreaming', () => {
       const resultPromise = callNonStreaming(adapterA, {
         ...defaultParams,
         model: 'old-model',
+        maxTokens: 8192,
+        thinking: { level: 'high' },
         // 模拟同一次 run 中更早的变更已把信号耗掉
         configChangedSignal: configChanged.signal,
         configGeneration: () => generation,
-        onConfigChanged: async () => ({ adapter: adapterB, model: 'new-model' }),
+        onConfigChanged: async () => ({ adapter: adapterB, model: 'new-model', maxTokens: undefined, thinking: undefined }),
       })
 
       // attempt 1（adapterA）失败：generation 已前进 → 不 sleep，立即换 adapterB

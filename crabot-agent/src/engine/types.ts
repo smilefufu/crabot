@@ -361,7 +361,7 @@ export interface EngineOptions {
    */
   readonly configChangedSignal?: AbortSignal
   readonly configGeneration?: () => number
-  readonly onConfigChanged?: () => Promise<{ adapter?: LLMAdapter; model?: string } | void>
+  readonly onConfigChanged?: () => Promise<import('./llm-adapter-types.js').LLMConfigSwap | void>
   /** 已组装本轮 messages、即将调用 Provider 前的内部准入观察点。 */
   readonly onBeforeLlmCall?: () => void | Promise<void>
   /**
