@@ -140,6 +140,7 @@ export function isRetryableStatus(status: number): boolean {
 export function parseRetryAfterMs(value: string | null | undefined): number | undefined {
   if (!value) return undefined
   const trimmed = value.trim()
+  if (!trimmed) return undefined
   const seconds = Number(trimmed)
   if (Number.isFinite(seconds) && Number.isInteger(seconds) && seconds >= 0) {
     return seconds * 1000

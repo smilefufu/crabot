@@ -170,9 +170,15 @@ async function withStreamConsumptionRetry(
   }
   let generic429Count = 0
   let appliedGeneration = params.configGeneration?.()
+  // 每次消费配置变更授予 1 次额外 attempt 预算（封顶 maxRetries）——变更本身不挤占
+  // 旧 provider 已消耗的配额（协议 3.6.17「不消耗 attempt 配额」），且配置抖动下
+  // 总尝试仍有界（≤ 2×(maxRetries+1)）。新 provider 的 429 计数独立起算。
+  let configSwitchBudget = 0
 
   const applyConfigChange = async (): Promise<void> => {
     appliedGeneration = params.configGeneration?.()
+    configSwitchBudget = Math.min(configSwitchBudget + 1, maxRetries)
+    generic429Count = 0
     const update = await params.onConfigChanged?.()
     if (!update) return
     if (update.adapter) currentAdapter = update.adapter
@@ -190,7 +196,8 @@ async function withStreamConsumptionRetry(
     currentRequestParams = next
   }
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  let lastError: unknown
+  for (let attempt = 0; attempt <= maxRetries + configSwitchBudget; attempt++) {
     const attemptStart = Date.now()
     let firstChunkMs: number | undefined
     let chunkCount = 0
@@ -225,8 +232,17 @@ async function withStreamConsumptionRetry(
         },
       }
     } catch (err) {
+      lastError = err
       if (params.signal?.aborted) throw err
       if (!isRetryableError(err)) throw err
+      // 配置变更消费必须先于所有放弃判定（review 3rd）：变更落在最后一次失败上时，
+      // 新 provider 也要拿到尝试机会——旧 provider 的 Retry-After 结论 / 退避结论 /
+      // attempt 配额都不应结束本次调用。
+      if (params.configGeneration && params.configGeneration() !== appliedGeneration) {
+        // 立即换新配置重试：跳过本次 sleep（旧 provider 的等待指示不适用于新 provider）
+        await applyConfigChange()
+        continue
+      }
       // Retry-After 超上限：provider 要求等的时间比总预算还长，不再等待，按重试耗尽失败
       // （错误上带尝试次数/总耗时，可诊断）。
       const retryAfterMs = getRetryAfterMs(err)
@@ -241,37 +257,36 @@ async function withStreamConsumptionRetry(
         }
       }
       // 放弃可重试错误时把"尝试次数/总耗时"写进错误，让失败 trace 可诊断
-      // （否则 outcome 只剩一句裸 "fetch failed"，看不出是重试耗尽还是首次即挂）
-      if (attempt >= maxRetries) throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
+      // （否则 outcome 只剩一句裸 "fetch failed"，看不出是重试耗尽还是首次即挂）。
+      // 配额 = maxRetries + 每次配置变更授予的额外预算（applyConfigChange 内累计）。
+      if (attempt >= maxRetries + configSwitchBudget) {
+        throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
+      }
       const actualDelay = computeRetryDelayMs(attempt, delayMs, true, retryAfterMs)
       console.error(
-        `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${actualDelay}ms (backoff):`,
+        `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + configSwitchBudget + 1} failed, retrying in ${actualDelay}ms (backoff):`,
         err,
       )
       try {
         params.onRetry?.({
           attempt: attempt + 1,
-          maxAttempts: maxRetries + 1,
+          maxAttempts: maxRetries + configSwitchBudget + 1,
           delayMs: actualDelay,
           error: err instanceof Error ? err : new Error(String(err)),
           source: 'stream',
         })
       } catch { /* observability callback must not break retry */ }
-      if (params.configGeneration && params.configGeneration() !== appliedGeneration) {
-        // 配置在本次 attempt 期间/之间已落地：立即换新配置重试，跳过本次 sleep。
-        await applyConfigChange()
-      } else {
-        await interruptibleSleep(actualDelay, {
-          abortSignal: params.signal,
-          configChangedSignal: params.configChangedSignal,
-          onConfigChanged: applyConfigChange,
-        })
-      }
+      await interruptibleSleep(actualDelay, {
+        abortSignal: params.signal,
+        configChangedSignal: params.configChangedSignal,
+        onConfigChanged: applyConfigChange,
+      })
       // 下一轮 loop 会用全新 processor + 重新 call adapter.stream()，
       // 服务端生成新 response（partial 浪费，但 task 能完成）
     }
   }
-  throw new Error('callNonStreaming: retry loop exited unexpectedly')
+  // 循环条件耗尽（含 configSwitchBudget 路径）也要给出可诊断的放弃错误
+  throw enrichGiveUp(lastError ?? new Error('callNonStreaming: no attempt recorded'), maxRetries + configSwitchBudget + 1, Date.now() - startedAt)
 }
 
 /** 放弃重试时给错误补上"尝试次数/总耗时"上下文，原错误挂在 cause 上。 */
