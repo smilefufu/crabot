@@ -10,9 +10,7 @@
  * 取消（userSignal）严格区分——后者原样抛出 AbortError，不可重试。
  */
 
-import { StreamTimeoutError, streamWithRetry } from './retry-utils.js'
-import { isMaterialChunk } from './stream-processor.js'
-import { wrapOnRetry, type LLMStreamParams } from './llm-adapter-types.js'
+import { StreamTimeoutError } from './retry-utils.js'
 import type { StreamChunk } from './types.js'
 
 // 默认值偏保守，容得下慢 prefill 的大上下文请求；可用环境变量覆盖。
@@ -86,28 +84,4 @@ export async function* withStreamTimeout<T>(
     if (timer) clearTimeout(timer)
     if (userSignal && onUserAbort) userSignal.removeEventListener('abort', onUserAbort)
   }
-}
-
-/**
- * adapter.stream() 的统一封装：内层 = streamOnce + TTFB/空闲超时，外层 = pre-material 重试
- * （streamWithRetry，超时抛 StreamTimeoutError 被判定可重试 → 换新连接重发）。
- *
- * 三个 adapter 共用此封装，避免新 adapter 漏接超时或重试中的一半。
- * 超时的 abort 必须经 withStreamTimeout 注入的 signal 才能传到底层 fetch，所以封装在
- * 这一层（而非 adapter.stream() 外面）。
- */
-export async function* streamWithTimeoutAndRetry(
-  label: string,
-  streamOnce: (params: LLMStreamParams) => AsyncGenerator<StreamChunk>,
-  params: LLMStreamParams,
-): AsyncGenerator<StreamChunk> {
-  yield* streamWithRetry(
-    label,
-    () => withStreamTimeout((signal) => streamOnce({ ...params, signal }), params.signal),
-    {
-      abortSignal: params.signal,
-      isMaterial: isMaterialChunk,
-      onRetry: wrapOnRetry(params.onRetry, 'pre-stream'),
-    },
-  )
 }

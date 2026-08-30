@@ -543,6 +543,8 @@ export class UnifiedAgent extends ModuleBase {
   /** A failed pull destructively detached runtime resources; recovery must rebuild them
    *  even when the revision does not advance. */
   private configResourcesDetached = false
+  /** 运行时配置原子替换后的通知监听器（spec 2026-08-30-llm-retry-config-hotreload）。 */
+  private runtimeConfigAppliedListeners = new Set<() => void>()
 
   // 端口缓存
   private adminPort?: number
@@ -913,6 +915,8 @@ export class UnifiedAgent extends ModuleBase {
         return thinkingParam(conn.thinking_level, conn.thinking_custom)
       },
       managerContextWindowTokens: () => resolveManagerModelConfig(this.agentConfig?.model_config).context_window,
+      // LLM 重试期间配置热切换的通知源（spec 2026-08-30-llm-retry-config-hotreload）
+      onRuntimeConfigApplied: (listener) => this.addRuntimeConfigAppliedListener(listener),
       // crab-messaging：与 `createMcpConfigs` 同款依赖，但不传 `getTaskContext`——manager 不是
       // task，且 tool-face 已把 `send_message` 的 intent 去掉，ask_human 路径对 manager 不存在。
       messagingDeps: {
@@ -1374,6 +1378,8 @@ export class UnifiedAgent extends ModuleBase {
       ...(this.agentConfig?.tmp_page_base_url ? { tmpPageBaseUrl: this.agentConfig.tmp_page_base_url } : {}),
     }, {
       mcpConfigFactory: createMcpConfigs,
+      // LLM 重试期间配置热切换的通知源（spec 2026-08-30-llm-retry-config-hotreload）
+      runtimeConfigAppliedSource: (listener) => this.addRuntimeConfigAppliedListener(listener),
       deps: {
         rpcClient: this.rpcClient,
         moduleId: this.config.moduleId,
@@ -1539,6 +1545,18 @@ export class UnifiedAgent extends ModuleBase {
       this.runRuntimeConfigPull()
     }, 50)
     this.configPullTimer.unref?.()
+  }
+
+  /** 订阅「运行时配置已原子替换」通知；返回退订函数。listener 抛错不影响通知循环。 */
+  private addRuntimeConfigAppliedListener(listener: () => void): () => void {
+    this.runtimeConfigAppliedListeners.add(listener)
+    return () => { this.runtimeConfigAppliedListeners.delete(listener) }
+  }
+
+  private notifyRuntimeConfigApplied(): void {
+    for (const listener of this.runtimeConfigAppliedListeners) {
+      try { listener() } catch { /* listener must not break config apply path */ }
+    }
   }
 
   /** Single-flight wrapper around pullRuntimeConfig with dirty-coalesce and backoff retry. */
@@ -1723,6 +1741,9 @@ export class UnifiedAgent extends ModuleBase {
     this.digestSdkEnv = nextDigestSdk
     this.imageConnInfo = nextImageConn
     this.imageCapability = nextImageCapability
+    // live 字段已原子替换（spec 2026-08-30-llm-retry-config-hotreload）：通知正在
+    // LLM 重试 sleep 中的 manager/worker episode——它们据此提前唤醒并现解析新配置重试。
+    this.notifyRuntimeConfigApplied()
 
     // worker implementation desired config 在 agentConfig 等 live 字段就位后、任何分支
     // return 前应用（R3：early-return 分支曾让这里在热路径上永远走不到）。registry 失败

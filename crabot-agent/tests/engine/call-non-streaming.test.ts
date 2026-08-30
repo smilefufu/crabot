@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { callNonStreaming, type LLMAdapter, type LLMStreamParams } from '../../src/engine/llm-adapter'
+import { HttpResponseError, OVERLOADED_WITHOUT_RETRY_AFTER_MAX_RETRIES } from '../../src/engine/retry-utils'
 import type { StreamChunk } from '../../src/engine/types'
 
 function makeMockAdapter(chunks: StreamChunk[]): LLMAdapter {
@@ -180,7 +181,8 @@ describe('callNonStreaming', () => {
 
     expect(retries).toHaveLength(1)
     expect(retries[0].attempt).toBe(1)
-    expect(retries[0].source).toBe('mid-stream')
+    // 重试层扁平化后 source 统一为 'stream'（由 callNonStreaming 单层处理）
+    expect(retries[0].source).toBe('stream')
     expect(retries[0].error).toBe('socket dropped')
   }, 30_000)
 
@@ -215,6 +217,144 @@ describe('callNonStreaming', () => {
       expect(attempt).toBe(2)
       expect(result.content).toEqual([{ type: 'text', text: 'partial recovered' }])
       expect(result.diagnostics?.retries).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('caps total attempts at DEFAULT_MAX_RETRIES + 1 (single retry layer)', async () => {
+    vi.useFakeTimers()
+    try {
+      let attempt = 0
+      const adapter: LLMAdapter = {
+        async *stream(): AsyncGenerator<StreamChunk> {
+          attempt++
+          yield { type: 'message_start', messageId: 'msg' }
+          const e = new Error('socket dropped') as Error & { code?: string }
+          e.code = 'ETIMEDOUT'
+          throw e
+        },
+        updateConfig() {},
+      }
+
+      // 退避 1+2+4+8+8 = 23s 后耗尽 DEFAULT_MAX_RETRIES
+      const expectation = expect(callNonStreaming(adapter, defaultParams)).rejects.toThrow(/次尝试/)
+      await vi.advanceTimersByTimeAsync(24_000)
+      await expectation
+      expect(attempt).toBe(6)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('fails fast on quota-class 429 without any retry', async () => {
+    let attempt = 0
+    const adapter: LLMAdapter = {
+      async *stream(): AsyncGenerator<StreamChunk> {
+        attempt++
+        yield { type: 'message_start', messageId: 'msg' }
+        throw new HttpResponseError(429, JSON.stringify({ error: { code: 'insufficient_quota' } }), 'test')
+      },
+      updateConfig() {},
+    }
+
+    await expect(callNonStreaming(adapter, defaultParams)).rejects.toThrow(/insufficient_quota/)
+    expect(attempt).toBe(1)
+  })
+
+  it('limits generic 429 (no Retry-After) to 3 retries before giving up', async () => {
+    vi.useFakeTimers()
+    try {
+      let attempt = 0
+      const adapter: LLMAdapter = {
+        async *stream(): AsyncGenerator<StreamChunk> {
+          attempt++
+          yield { type: 'message_start', messageId: 'msg' }
+          throw new HttpResponseError(429, 'Too Many Requests', 'test')
+        },
+        updateConfig() {},
+      }
+
+      const expectation = expect(callNonStreaming(adapter, defaultParams)).rejects.toThrow(/次尝试/)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await expectation
+      expect(attempt).toBe(OVERLOADED_WITHOUT_RETRY_AFTER_MAX_RETRIES + 1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('honors Retry-After delay on 429 retries', async () => {
+    vi.useFakeTimers()
+    try {
+      let attempt = 0
+      const delays: number[] = []
+      const adapter: LLMAdapter = {
+        async *stream(): AsyncGenerator<StreamChunk> {
+          attempt++
+          yield { type: 'message_start', messageId: 'msg' }
+          if (attempt === 1) {
+            throw new HttpResponseError(429, 'rate limited', 'test', 7_000)
+          }
+          yield { type: 'text_delta', text: 'ok' }
+          yield { type: 'message_end', stopReason: 'end_turn' }
+        },
+        updateConfig() {},
+      }
+
+      const resultPromise = callNonStreaming(adapter, {
+        ...defaultParams,
+        onRetry: (e) => delays.push(e.delayMs),
+      })
+      // Retry-After=7000ms：7s 内不应发起第二次 attempt
+      await vi.advanceTimersByTimeAsync(6_999)
+      expect(attempt).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      const result = await resultPromise
+      expect(attempt).toBe(2)
+      expect(delays).toEqual([7_000])
+      expect(result.content).toEqual([{ type: 'text', text: 'ok' }])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('wakes retry sleep early on config change and switches adapter/model for the next attempt', async () => {
+    vi.useFakeTimers()
+    try {
+      const configChanged = new AbortController()
+      let attempt = 0
+      const modelsSeen: string[] = []
+      const adapterA: LLMAdapter = {
+        async *stream(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
+          attempt++
+          modelsSeen.push(params.model)
+          yield { type: 'message_start', messageId: 'msg' }
+          if (attempt === 1) {
+            throw new HttpResponseError(429, 'rate limited', 'test', 60_000)
+          }
+          yield { type: 'text_delta', text: 'from-' + params.model }
+          yield { type: 'message_end', stopReason: 'end_turn' }
+        },
+        updateConfig() {},
+      }
+      const adapterB: LLMAdapter = adapterA
+
+      const resultPromise = callNonStreaming(adapterA, {
+        ...defaultParams,
+        model: 'old-model',
+        configChangedSignal: configChanged.signal,
+        onConfigChanged: async () => ({ adapter: adapterB, model: 'new-model' }),
+      })
+
+      // 第一次 attempt 失败后进入 60s Retry-After sleep；1s 时配置落地 → 提前唤醒
+      await vi.advanceTimersByTimeAsync(1_000)
+      configChanged.abort()
+      const result = await resultPromise
+
+      expect(attempt).toBe(2)
+      expect(modelsSeen).toEqual(['old-model', 'new-model'])
+      expect(result.content).toEqual([{ type: 'text', text: 'from-new-model' }])
     } finally {
       vi.useRealTimers()
     }

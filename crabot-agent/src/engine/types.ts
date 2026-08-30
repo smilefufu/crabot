@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto'
-import type { LLMThinkingConfig } from './llm-adapter-types.js'
+import type { LLMAdapter, LLMThinkingConfig } from './llm-adapter-types.js'
 
 // --- Content Blocks ---
 
@@ -269,12 +269,12 @@ export type LiveProgressEvent =
       }>
     }
   | {
-      /** LLM 调用 mid-stream / pre-stream / complete 路径 retry 触发；用于 admin web 显示"正在重试"状态 */
+      /** LLM 调用重试触发；用于 admin web 显示"正在重试"状态 */
       readonly type: 'llm_retry'
       readonly turn: number          // 当前正在尝试的 turn 编号
       readonly attempt: number       // 第几次失败 (1-indexed)
       readonly maxAttempts: number   // 总配额
-      readonly source: 'pre-stream' | 'mid-stream'
+      readonly source: 'stream'
       readonly error: string         // 触发 retry 的 error message（截断 200）
     }
 
@@ -350,6 +350,16 @@ export interface EngineOptions {
    * 写入的数组本身是 ReadonlyArray —— 外部只读，不应原地修改。
    */
   readonly messagesRef?: EngineMessagesRef
+  /**
+   * LLM 重试期间配置热切换（spec 2026-08-30-llm-retry-config-hotreload）。
+   *
+   * configChangedSignal 在「运行时配置 revision 已前进」时 abort；callNonStreaming 的
+   * 重试 sleep 被它提前唤醒后调用 onConfigChanged，用返回的新 adapter/model 继续
+   * 下一次 attempt（attempt 配额不因此消耗）。仅在重试 sleep 阶段生效：已经开始向
+   * 下游交付 chunk 的调用不中断。不传时行为与现状一致（重试始终用调用时的 adapter）。
+   */
+  readonly configChangedSignal?: AbortSignal
+  readonly onConfigChanged?: () => Promise<{ adapter?: LLMAdapter; model?: string } | void>
   /** 已组装本轮 messages、即将调用 Provider 前的内部准入观察点。 */
   readonly onBeforeLlmCall?: () => void | Promise<void>
   /**

@@ -91,6 +91,8 @@ export interface ManagerRegistryDeps {
    */
   readonly adapter: () => LLMAdapter
   readonly model: () => string
+  /** 运行时配置已原子替换后的通知源(spec 2026-08-30-llm-retry-config-hotreload);原样下传 ManagerLoopDeps。 */
+  readonly onRuntimeConfigApplied?: (listener: () => void) => () => void
   readonly maxTurns?: number
   /** manager 模型的上下文窗口(随 powerful slot,thunk 支持 hot-reload);undefined = engine 默认 200K */
   readonly contextWindowTokens?: () => number | undefined
@@ -227,6 +229,7 @@ export class ManagerRegistry {
       estimateTokens: this.deps.estimateTokens,
       adapter: this.deps.adapter,
       model: this.deps.model,
+      onRuntimeConfigApplied: this.deps.onRuntimeConfigApplied,
       maxTurns: this.deps.maxTurns,
       contextWindowTokens: this.deps.contextWindowTokens,
       // thunk 原样下传：thinking 的解析在 episode 内与 adapter/model 同点发生（同样的

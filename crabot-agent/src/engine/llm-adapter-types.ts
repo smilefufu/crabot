@@ -6,9 +6,12 @@ import { StreamProcessor } from './stream-processor.js'
 import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_RETRY_DELAY_MS,
+  OVERLOADED_WITHOUT_RETRY_AFTER_MAX_RETRIES,
   computeRetryDelayMs,
+  getRetryAfterMs,
+  interruptibleSleep,
+  isOverloadedWithoutRetryAfter,
   isRetryableError,
-  sleep,
 } from './retry-utils.js'
 import { capWithMarker } from './byte-cap.js'
 import type {
@@ -28,19 +31,7 @@ export interface LLMRetryEvent {
   readonly maxAttempts: number  // 总配额
   readonly delayMs: number      // 即将 sleep 多久后 retry
   readonly error: Error         // 触发本次 retry 的错
-  readonly source: 'pre-stream' | 'mid-stream'  // 哪一层 retry
-}
-
-/**
- * 把 LLMStreamParams.onRetry 包装成 retry-utils 的 onRetry 签名（差别只是补一个 source 字段）。
- * 三个 adapter（anthropic/openai/openai-responses）的 stream / complete 方法共用此 helper。
- */
-export function wrapOnRetry(
-  cb: ((e: LLMRetryEvent) => void) | undefined,
-  source: LLMRetryEvent['source'],
-): ((e: { attempt: number; maxAttempts: number; delayMs: number; error: Error }) => void) | undefined {
-  if (!cb) return undefined
-  return (e) => cb({ ...e, source })
+  readonly source: 'stream'     // 重试统一在 callNonStreaming 层处理
 }
 
 /** 槽位思考强度（base-protocol §5.14 thinking_level/thinking_custom 的运行时形态）。 */
@@ -87,6 +78,15 @@ export interface LLMStreamParams {
   /** 思考强度；undefined = 跟随模型默认（请求中不出现任何思考参数） */
   readonly thinking?: LLMThinkingConfig
   readonly signal?: AbortSignal
+  /**
+   * 配置变更信号。重试 sleep 期间若该信号触发，会提前唤醒并调用 onConfigChanged，
+   * 让下一次 attempt 有机会使用新的 adapter/model。
+   */
+  readonly configChangedSignal?: AbortSignal
+  /**
+   * 配置变更后的刷新回调。返回新的 adapter/model，callNonStreaming 会在下一次 attempt 使用它们。
+   */
+  readonly onConfigChanged?: () => Promise<{ adapter?: LLMAdapter; model?: string } | void>
   /** 可观测性回调：retry 发生时触发；用于 worker → admin web 实时显示"LLM 正在重试" */
   readonly onRetry?: (event: LLMRetryEvent) => void
 }
@@ -135,13 +135,24 @@ async function withStreamConsumptionRetry(
   const delayMs = DEFAULT_RETRY_DELAY_MS
   const startedAt = Date.now()
 
+  // 重试期间配置可能热更新：currentAdapter / currentModel 允许被 onConfigChanged 替换。
+  let currentAdapter = adapter
+  let currentModel = params.model
+  let generic429Count = 0
+
+  const applyConfigChange = async (): Promise<void> => {
+    const update = await params.onConfigChanged?.()
+    if (update?.adapter) currentAdapter = update.adapter
+    if (update?.model !== undefined) currentModel = update.model
+  }
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const attemptStart = Date.now()
     let firstChunkMs: number | undefined
     let chunkCount = 0
     try {
       const processor = new StreamProcessor()
-      for await (const chunk of adapter.stream(params)) {
+      for await (const chunk of currentAdapter.stream({ ...params, model: currentModel })) {
         if (params.signal?.aborted) {
           throw new DOMException('Aborted', 'AbortError')
         }
@@ -171,10 +182,17 @@ async function withStreamConsumptionRetry(
     } catch (err) {
       if (params.signal?.aborted) throw err
       if (!isRetryableError(err)) throw err
+      // 无 Retry-After 的通用 429 单独限制次数，避免额度耗尽类伪装成通用 429 时无限拖。
+      if (isOverloadedWithoutRetryAfter(err)) {
+        generic429Count++
+        if (generic429Count > OVERLOADED_WITHOUT_RETRY_AFTER_MAX_RETRIES) {
+          throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
+        }
+      }
       // 放弃可重试错误时把"尝试次数/总耗时"写进错误，让失败 trace 可诊断
       // （否则 outcome 只剩一句裸 "fetch failed"，看不出是重试耗尽还是首次即挂）
       if (attempt >= maxRetries) throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
-      const actualDelay = computeRetryDelayMs(attempt, delayMs, true)
+      const actualDelay = computeRetryDelayMs(attempt, delayMs, true, getRetryAfterMs(err))
       console.error(
         `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${actualDelay}ms (backoff):`,
         err,
@@ -185,10 +203,14 @@ async function withStreamConsumptionRetry(
           maxAttempts: maxRetries + 1,
           delayMs: actualDelay,
           error: err instanceof Error ? err : new Error(String(err)),
-          source: 'mid-stream',
+          source: 'stream',
         })
       } catch { /* observability callback must not break retry */ }
-      await sleep(actualDelay, params.signal)
+      await interruptibleSleep(actualDelay, {
+        abortSignal: params.signal,
+        configChangedSignal: params.configChangedSignal,
+        onConfigChanged: applyConfigChange,
+      })
       // 下一轮 loop 会用全新 processor + 重新 call adapter.stream()，
       // 服务端生成新 response（partial 浪费，但 task 能完成）
     }

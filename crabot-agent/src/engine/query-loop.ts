@@ -179,6 +179,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         maxTokens: options.maxTokens,
         thinking: options.thinking,
         signal: abortSignal,
+        configChangedSignal: options.configChangedSignal,
+        onConfigChanged: options.onConfigChanged,
         onRetry: (event) => {
           if (options.onLiveProgress) {
             options.onLiveProgress({

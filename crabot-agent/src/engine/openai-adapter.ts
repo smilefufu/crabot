@@ -5,8 +5,8 @@
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
 import { isToolResultMessage, extractText, buildImageUrl, readSSELines, mergeConsecutiveUserMessages, capToolResultForLLM, thinkingEffortValue } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock, LLMTokenUsage } from './types.js'
-import { HttpResponseError, StreamProtocolError } from './retry-utils.js'
-import { streamWithTimeoutAndRetry } from './stream-timeout.js'
+import { HttpResponseError, StreamProtocolError, parseRetryAfterMs } from './retry-utils.js'
+import { withStreamTimeout } from './stream-timeout.js'
 
 // --- OpenAI Message Types ---
 
@@ -164,7 +164,8 @@ export class OpenAIAdapter implements LLMAdapter {
   }
 
   async *stream(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
-    yield* streamWithTimeoutAndRetry('openai-adapter', (p) => this.streamOnce(p), params)
+    // 只加 TTFB/空闲超时；重试统一由 callNonStreaming 单层处理（含配置热切换唤醒）。
+    yield* withStreamTimeout((signal) => this.streamOnce({ ...params, signal }), params.signal)
   }
 
   private async *streamOnce(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
@@ -200,7 +201,8 @@ export class OpenAIAdapter implements LLMAdapter {
 
     if (!response.ok) {
       const errorText = await response.text()
-      throw new HttpResponseError(response.status, errorText, 'openai-adapter')
+      const retryAfter = parseRetryAfterMs(response.headers.get('retry-after'))
+      throw new HttpResponseError(response.status, errorText, 'openai-adapter', retryAfter)
     }
 
     if (!response.body) {

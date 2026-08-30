@@ -13,7 +13,8 @@ import type {
 } from '@anthropic-ai/sdk/resources/messages'
 import { proxyManager } from 'crabot-shared'
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMThinkingConfig } from './llm-adapter-types.js'
-import { streamWithTimeoutAndRetry } from './stream-timeout.js'
+import { withStreamTimeout } from './stream-timeout.js'
+import { HttpResponseError, parseRetryAfterMs } from './retry-utils.js'
 import { isToolResultMessage, mergeConsecutiveUserMessages, capToolResultForLLM } from './llm-adapter-types.js'
 import type {
   EngineMessage,
@@ -265,10 +266,29 @@ export class AnthropicAdapter implements LLMAdapter {
   }
 
   async *stream(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
-    yield* streamWithTimeoutAndRetry('anthropic-adapter', (p) => this.streamOnce(p), params)
+    // 只加 TTFB/空闲超时；重试统一由 callNonStreaming 单层处理（含配置热切换唤醒）。
+    yield* withStreamTimeout((signal) => this.streamOnce({ ...params, signal }), params.signal)
   }
 
   private async *streamOnce(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
+    try {
+      yield* this.streamOnceUnsafe(params)
+    } catch (err) {
+      // Anthropic SDK 把 429 以 SDK error 抛出，retry-utils 无法直接读取 Retry-After 与 body code。
+      // 仅对 429 包装成 HttpResponseError，让 429 分类策略生效。
+      const status = (err as Error & { status?: number }).status
+      if (status === 429) {
+        const headers = (err as Error & { headers?: Record<string, string> }).headers
+        const retryAfter = parseRetryAfterMs(headers?.['retry-after'])
+        const body = (err as Error & { error?: unknown }).error
+        const bodyText = typeof body === 'string' ? body : JSON.stringify(body ?? { message: (err as Error).message })
+        throw new HttpResponseError(429, bodyText, 'anthropic-adapter', retryAfter)
+      }
+      throw err
+    }
+  }
+
+  private async *streamOnceUnsafe(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
     const tools = params.tools.map(AnthropicAdapter.toAnthropicTool)
     // A fork intentionally exposes no callable tools. Anthropic still rejects a
     // request containing historical tool blocks unless the wire request defines
