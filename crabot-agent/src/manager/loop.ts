@@ -948,14 +948,9 @@ export class ManagerLoop {
     readonly humanMessages: ReadonlyArray<EngineMessage>
     readonly messageCount: number
     readonly lastCurrentWakeCommittedMessageId?: string
-    /** 只含新提交消息的投影 envelope(按 platform_message_id 去重后);messageCount=0 时为 undefined。
-     *  注入路径用它喂 LLM——已提交过的旧消息不得再进 LLM 输入(协议 §4.1)。
-     *  仅对**单 envelope** 调用有意义(envelopes 多于一个时本字段只含第一份投影)。 */
-    readonly injectedEnvelope?: TimedWakeEnvelope
   }> {
     const committedIds = new Set(state.committedHumanMessageIds ?? [])
     const committedMessages: EngineMessage[] = []
-    const injectedEnvelopes: TimedWakeEnvelope[] = []
     let lastCurrentWakeCommittedMessageId: string | undefined
 
     for (const envelope of envelopes) {
@@ -967,7 +962,6 @@ export class ManagerLoop {
 
       for (const { message } of newEntries) committedIds.add(message.platform_message_id)
       committedMessages.push(createUserMessage(this.renderEnvelope(projectHumanEnvelope(envelope, newEntries))))
-      injectedEnvelopes.push(projectHumanEnvelope(envelope, newEntries))
       if (envelope === currentEnvelope) {
         lastCurrentWakeCommittedMessageId = newEntries[newEntries.length - 1].message.platform_message_id
       }
@@ -988,7 +982,6 @@ export class ManagerLoop {
       humanMessages: committedMessages,
       messageCount: committedMessages.length,
       lastCurrentWakeCommittedMessageId,
-      injectedEnvelope: injectedEnvelopes[0],
     }
   }
 

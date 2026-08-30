@@ -1797,7 +1797,8 @@ export class UnifiedAgent extends ModuleBase {
    * （私聊一般同一人；个别 friend 切换的边缘情况按最新一条处理）。
    *
    * **必须 await manager episode**：lane 的串行语义靠它，兜底回复（fail-loud）也要靠它
-   * 拿到 outcome。改成 fire-and-forget 会让两者同时失效。
+   * 拿到 outcome。改成 fire-and-forget 会让两者同时失效。（例外：mid-episode 注入分支
+   * 返回占位 result 即走，顺序改由 mailbox 与宿主 episode 收尾保证，见 episodeId === '' 判定。）
    *
    * Spec: crabot-docs/superpowers/plans/2026-08-01-mw-p7-j-cutover.md §一
    */
@@ -2553,9 +2554,9 @@ export class UnifiedAgent extends ModuleBase {
       return { decision_types: [] }
     }
 
-    // 注入占位:真实收尾前 outcome/repliedToHuman 都是编造的——F1 与沉默计数都
-    // 等 settle 回调(失败已在上面补发 fail-loud);RPC 先按"暂无直接回复"返回,
-    // 真实回复由后续 delivery 结算占位气泡。
+    // 注入占位:真实收尾前 outcome/repliedToHuman 都是编造的——失败由 settle 回调补发
+    // fail-loud(见上面回调);noteEpisodeSilence 在注入场景不触发(私聊同,仅影响排障
+    // 日志)。RPC 先按"暂无直接回复"返回,真实回复由后续 delivery 结算占位气泡。
     if (result.episodeId === '') return { decision_types: [] }
 
     if (result.outcome === 'failed' || result.outcome === 'aborted') {
