@@ -42,7 +42,8 @@ export async function readImageFile(filePath: string): Promise<Buffer | null> {
   }
 }
 
-async function fetchRemoteImage(url: string): Promise<Buffer | null> {
+/** 下载远程图片（非 2xx / 超大小 / 网络失败返回 null）。供 manager 入站图片注入复用。 */
+export async function fetchRemoteImage(url: string): Promise<Buffer | null> {
   try {
     const response = await fetch(url)
     if (!response.ok) return null

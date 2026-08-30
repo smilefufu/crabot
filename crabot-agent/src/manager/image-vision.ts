@@ -6,29 +6,34 @@
  * 图片被拦成 `[图片: ...]` 文本标记，base64 从不进 LLM 请求——manager 模型明明是
  * VLM 却"看不到"用户发的图（2026-08-30 feishu 看图失败根因）。
  *
- * 数据流：channel 已把图片急切下载到本地（status=ready）。支持 base-protocol 的全部
- * 图片形态：media[]（权威，feishu 富文本多图）与遗留单图 media_url / file_path
- * （feishu 普通单图走 file_path，telegram/wechat 走 media_url）。
- * commitHumanInputs 提交人类消息时把引用记进 ManagerSessionState.imageRefs
- * （**轻量引用，不是 base64**——state.json 持久化且长期滚动，塞图片会撑爆）；
- * 构造 episode 输入时把窗口内命中引用的图片读盘转 ImageBlock 拼进 user message。
+ * 数据流：支持 base-protocol 的全部图片形态——media[]（权威，feishu 富文本多图）、
+ * 遗留单图 media_url / file_path（feishu 普通单图走 file_path，telegram/wechat 走
+ * media_url=公网 CDN 地址，worker 侧 fetchRemoteImage 一直支持下载）。本地路径优先，
+ * 远程 URL 走 fetch。commitHumanInputs 提交人类消息时把引用记进
+ * ManagerSessionState.imageRefs（**轻量引用，不是 base64**——state.json 持久化且
+ * 长期滚动，塞图片会撑爆）；构造 episode 输入时把窗口内命中引用的图片读盘/下载
+ * 转 ImageBlock 拼进 user message。
  *
  * **注入只存在于 LLM 请求投影**：runEngine 的 finalMessages 会原样回写 recent 与
  * episode log，loop 收尾必须用 injectInboundImages 返回的 originals 还原为注入前的
  * 纯文本消息再持久化，否则 base64 进 state.json/episodes/*.jsonl 无限放大。
  *
- * 文件不可读（被 media TTL GC 清理、超大小上限、IO 错误等）时：跳过该图注入，
- * 并把文本标记改写为中性提示，避免 LLM 拿着死路径/标记去瞎猜 fetch_media handle。
- * 失败原因不可区分（readImageFile 不区分 ENOENT/超限/权限），提示不承诺具体原因。
+ * 来源不可读（被 media TTL GC 清理、超大小上限、下载失败、IO 错误等）时：跳过该图
+ * 注入，并把文本标记改写为中性提示，避免 LLM 拿着死路径/标记去瞎猜 fetch_media
+ * handle。失败原因不可区分（readImageFile/fetchRemoteImage 均不区分具体错误），
+ * 提示不承诺具体原因。
  */
 
 import type { EngineMessage, ImageBlock } from '../engine/index.js'
 import type { ChannelMessage } from '../types'
-import { inferMediaType, readImageFile } from '../agent/media-resolver.js'
+import { inferMediaType, readImageFile, fetchRemoteImage } from '../agent/media-resolver.js'
 
-/** 单张入站图片的引用：path 是读盘用的本地路径，label 是 envelope 文本里的展示名。 */
+/** 单张入站图片的引用：path 是本地路径或可 GET 的远程 URL，label 是 envelope 文本里的展示名。 */
 export interface InboundImageRef {
-  /** 本地可读路径（远程 URL 不收：manager 注入只读本地） */
+  /**
+   * 读取来源：本地路径（readImageFile）或远程 URL（fetchRemoteImage，微信渠道的
+   * media_url=resource_url 即公网 CDN 地址）。本地优先——同图两者都有时读盘无网络失败面。
+   */
   readonly path: string
   /**
    * envelope 文本里 `[图片: <label>]` 标记的展示名。必须与 media-resolver
@@ -44,20 +49,36 @@ export interface ManagerImageRef {
   readonly images: ReadonlyArray<InboundImageRef>
 }
 
+/**
+ * 兼容 29a25d08（已在 main）写出的旧 imageRefs 结构 `{message_id, paths: string[]}`：
+ * 读时归一化为 images 形态，label 退化为 path 原样。升级窗口过后可删。
+ */
+export function normalizeImageRefs(raw: ReadonlyArray<ManagerImageRef> | undefined): ReadonlyArray<ManagerImageRef> | undefined {
+  if (!raw) return raw
+  let changed = false
+  const out = raw.map((r) => {
+    if (r.images) return r
+    changed = true
+    const paths = (r as { paths?: ReadonlyArray<string> }).paths
+    return { message_id: r.message_id, images: paths?.map((p) => ({ path: p, label: p })) ?? [] }
+  })
+  return changed ? out : raw
+}
+
 /** 从一条 ChannelMessage 收集入站图片引用（media[] 权威，回退遗留单图形态）。 */
 export function collectInboundImages(msg: ChannelMessage): InboundImageRef[] {
-  const isLocal = (url: string): boolean => url !== '' && !url.startsWith('http://') && !url.startsWith('https://')
   const items = msg.content.media
   if (items && items.length > 0) {
     return items
-      .filter((m) => m.mime_type.startsWith('image/'))
-      .flatMap((m) => (isLocal(m.media_url) ? [{ path: m.media_url, label: m.filename ?? m.media_url }] : []))
+      .filter((m) => m.mime_type.startsWith('image/') && m.media_url !== '')
+      .map((m) => ({ path: m.media_url, label: m.filename ?? m.media_url }))
   }
   if (msg.content.type === 'image') {
-    // 遗留单图：formatMediaRef 渲染 media_url ?? filename ?? file_path;读盘取第一个本地路径
+    // 遗留单图：formatMediaRef 渲染 media_url ?? filename ?? file_path;
+    // 读取来源本地优先(media_url/file_path 都可能存在,读盘无网络失败面)
     const { media_url, filename, file_path } = msg.content
     const displayName = media_url ?? filename ?? file_path
-    const readPath = [media_url, file_path].find((u): u is string => u !== undefined && isLocal(u))
+    const readPath = file_path ?? media_url
     if (displayName && readPath) return [{ path: readPath, label: displayName }]
   }
   return []
@@ -111,9 +132,10 @@ export async function injectInboundImages(
       const blocks: ImageBlock[] = []
       for (const image of images) {
         const marker = new RegExp(`\\[图片: ${escapeRegExp(image.label)}\\]\\n?`, 'g')
-        const buffer = await readImageFile(image.path)
+        const isRemote = image.path.startsWith('http://') || image.path.startsWith('https://')
+        const buffer = isRemote ? await fetchRemoteImage(image.path) : await readImageFile(image.path)
         if (!buffer) {
-          // 文件不可读（已 GC / 超限 / IO）：改写标记防 LLM 瞎猜，不注入
+          // 来源不可读（已 GC / 超限 / 下载失败 / IO，原因不可区分）：改写标记防 LLM 瞎猜，不注入
           text = text.replace(marker, `[图片: ${image.label}（文件不可用，无法查看）]\n`)
           continue
         }

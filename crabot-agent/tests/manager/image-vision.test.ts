@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto'
 import {
   collectInboundImages,
   injectInboundImages,
+  normalizeImageRefs,
   pruneImageRefs,
 } from '../../src/manager/image-vision.js'
 import { createUserMessage, createAssistantMessage } from '../../src/engine/index.js'
@@ -73,19 +74,22 @@ describe('collectInboundImages', () => {
     expect(refs).toEqual([{ path: '/data/media/om_y-1.jpg', label: '/data/media/om_y-1.jpg' }])
   })
 
-  it('混合形态：media_url 远程 + file_path 本地 → 读本地文件，label 与渲染同源（URL）；纯远程无法读 → 过滤', () => {
+  it('混合形态：media_url 远程 + file_path 本地 → 读本地文件，label 与渲染同源（URL）', () => {
     expect(collectInboundImages(channelMsg({
       media_url: 'https://example.com/a.jpg',
       file_path: '/data/media/a.jpg',
       status: 'ready',
     }))).toEqual([{ path: '/data/media/a.jpg', label: 'https://example.com/a.jpg' }])
+  })
+
+  it('纯远程 URL（wechat resource_url 公网 CDN）也收集，注入时走下载', () => {
     expect(collectInboundImages(channelMsg({
-      media_url: 'https://example.com/a.jpg',
+      media_url: 'https://cdn.example.com/abc.jpg',
       status: 'ready',
-    }))).toEqual([])
+    }))).toEqual([{ path: 'https://cdn.example.com/abc.jpg', label: 'https://cdn.example.com/abc.jpg' }])
     expect(collectInboundImages(channelMsg({
-      media: [{ media_url: '/data/media/doc.pdf', mime_type: 'application/pdf', filename: 'doc.pdf' }],
-    }))).toEqual([])
+      media: [{ media_url: 'https://cdn.example.com/abc.jpg', mime_type: 'image/jpeg', filename: 'abc.jpg' }],
+    }))).toEqual([{ path: 'https://cdn.example.com/abc.jpg', label: 'abc.jpg' }])
   })
 
   it('纯文本消息 → 空数组', () => {
@@ -155,6 +159,25 @@ describe('injectInboundImages', () => {
     expect(content[0].text).toContain('mix-missing.png（文件不可用，无法查看）')
   })
 
+  it('远程 URL（wechat CDN）→ 走 fetch 下载注入', async () => {
+    const url = 'https://cdn.example.com/wechat.jpg'
+    const fetchMock = vi.fn().mockResolvedValue(new Response(PNG_BYTES, { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const msg = createUserMessage(`[图片: ${url}]\n`)
+      const { messages: [out] } = await injectInboundImages([msg], {
+        supportsVision: true,
+        imageRefs: [{ message_id: msg.id, images: [{ path: url, label: url }] }],
+      })
+      const content = out.content as Array<{ type: string; source?: { data: string } }>
+      expect(content).toHaveLength(2)
+      expect(content[1].type).toBe('image')
+      expect(content[1].source?.data).toBe(PNG_BYTES.toString('base64'))
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('supportsVision=false → 原样返回（现状纯文本行为，originals 为空）', async () => {
     const ok = await writePng('novision.png')
     const msg = createUserMessage(`[图片: novision.png]`)
@@ -181,6 +204,23 @@ describe('injectInboundImages', () => {
     expect((out[0].content as Array<{ type: string }>)).toHaveLength(2)
     expect(out[1].content).toBe('未命中')
     expect(out[2]).toBe(assistant)
+  })
+})
+
+describe('normalizeImageRefs', () => {
+  it('旧结构 {message_id, paths}（29a25d08 写出）→ 归一化为 images 形态', () => {
+    const legacy = [
+      { message_id: 'm1', paths: ['/data/media/a.jpg'] },
+    ] as never
+    expect(normalizeImageRefs(legacy)).toEqual([
+      { message_id: 'm1', images: [{ path: '/data/media/a.jpg', label: '/data/media/a.jpg' }] },
+    ])
+  })
+
+  it('新结构原样透传；undefined 透传', () => {
+    const modern = [{ message_id: 'm1', images: [{ path: '/a.png', label: 'a.png' }] }]
+    expect(normalizeImageRefs(modern)).toBe(modern)
+    expect(normalizeImageRefs(undefined)).toBeUndefined()
   })
 })
 

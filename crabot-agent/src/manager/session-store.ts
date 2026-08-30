@@ -14,6 +14,7 @@ import { randomUUID } from 'crypto'
 import { AsyncMutex } from '../workers/async-mutex'
 import { encodeSegment, decodeSegment } from '../workers/harness/ledger-store'
 import type { ManagerKey, ManagerSessionState } from './types'
+import { normalizeImageRefs } from './image-vision'
 import type { EngineMessage } from '../engine/index.js'
 
 const STATE_FILE = 'state.json'
@@ -46,7 +47,11 @@ export class ManagerSessionStore {
       throw err
     }
     try {
-      return JSON.parse(raw) as ManagerSessionState
+      const parsed = JSON.parse(raw) as ManagerSessionState
+      // 旧结构兼容:29a25d08 写出的 imageRefs 是 {message_id, paths},归一化为 images 形态
+      return parsed.imageRefs
+        ? { ...parsed, imageRefs: normalizeImageRefs(parsed.imageRefs) }
+        : parsed
     } catch (err) {
       throw new Error(
         `[ManagerSessionStore] state.json 损坏(非法 JSON),拒绝当作空状态处理: ${statePath}: ${(err as Error).message}`
