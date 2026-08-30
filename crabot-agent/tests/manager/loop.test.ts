@@ -2276,7 +2276,7 @@ describe('ManagerLoop 入站图片视觉注入', () => {
     const content = firstUserContent(calls[0])
     expect(typeof content).toBe('string')
     expect(content as string).toContain('vis-gone.png')
-    expect(content as string).toContain('文件已清理')
+    expect(content as string).toContain('文件不可用，无法查看')
   })
 
   it('非 VLM(supportsVision 未注入/false):纯文本不变,标记保留', async () => {
@@ -2289,5 +2289,61 @@ describe('ManagerLoop 入站图片视觉注入', () => {
     const content = firstUserContent(calls[0])
     expect(typeof content).toBe('string')
     expect(content as string).toContain('[图片: vis-no.png]')
+  })
+
+  it('review P1 回归守卫:注入只作 LLM 投影——state.json 与 episode log 落盘的是原始纯文本,无 base64', async () => {
+    const png = join(mediaDir, 'persist-ok.png')
+    await fs.writeFile(png, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    const { adapter } = makeAdapter()
+    const loop = new ManagerLoop(baseDeps({ store, adapter, supportsVision: () => true }))
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [imageMessage('persist-ok.png', png)] }))
+
+    // store 布局:<root>/<key目录>/state.json + episodes/<id>.jsonl——不猜 key 目录名,按后缀找
+    const allFiles: string[] = []
+    const walk = async (dir: string): Promise<void> => {
+      for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+        const p = join(dir, entry.name)
+        if (entry.isDirectory()) await walk(p)
+        else allFiles.push(p)
+      }
+    }
+    await walk(dataDir)
+    const stateFile = allFiles.find((f) => f.endsWith('state.json'))
+    expect(stateFile).toBeTruthy()
+    const raw = await fs.readFile(stateFile!, 'utf8')
+    expect(raw).not.toContain('"data"')        // base64 数据块
+    expect(raw).not.toContain('"source"')      // image source 结构
+    expect(raw).toContain('[图片: persist-ok.png]')  // 原始渲染文本保留,下个 episode 幂等重注入
+    // episode log 同样不落 base64
+    const episodeLogs = allFiles.filter((f) => f.includes('episodes') && f.endsWith('.jsonl'))
+    expect(episodeLogs.length).toBeGreaterThan(0)
+    for (const f of episodeLogs) {
+      const content = await fs.readFile(f, 'utf8')
+      expect(content).not.toContain('"source"')
+      expect(content).not.toContain('"data"')
+    }
+  })
+
+  it('review P1 回归守卫:遗留单图形态(feishu 普通单图 file_path,标记为完整路径)也能注入', async () => {
+    const png = join(mediaDir, 'single-feishu.png')
+    await fs.writeFile(png, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    const { adapter, calls } = makeAdapter()
+    const loop = new ManagerLoop(baseDeps({ store, adapter, supportsVision: () => true }))
+    const message: ChannelMessage = {
+      ...imageMessage('ignored.png', png),
+      content: {
+        type: 'image',
+        text: '你自己看正常不正常？！',
+        file_path: png,
+        status: 'ready',
+        mime_type: 'image/png',
+      },
+    }
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [message] }))
+
+    const content = firstUserContent(calls[0]) as Array<{ type: string; text?: string; source?: { data: string } }>
+    expect(Array.isArray(content)).toBe(true)
+    expect(content[0].text).not.toContain('[图片:')
+    expect(content.filter((b) => b.type === 'image')).toHaveLength(1)
   })
 })

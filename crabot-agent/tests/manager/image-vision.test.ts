@@ -4,7 +4,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
 import {
-  collectInboundImagePaths,
+  collectInboundImages,
   injectInboundImages,
   pruneImageRefs,
 } from '../../src/manager/image-vision.js'
@@ -22,54 +22,85 @@ afterAll(async () => {
   await fs.rm(mediaDir, { recursive: true, force: true })
 })
 
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
 async function writePng(name: string): Promise<string> {
-  // 最小 PNG 签名头（inferMediaType 按扩展名判定，内容只要可读即可）
   const p = join(mediaDir, name)
-  await fs.writeFile(p, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  await fs.writeFile(p, PNG_BYTES)
   return p
 }
 
-function channelMsg(media: Array<{ media_url: string; mime_type: string }>): ChannelMessage {
+function channelMsg(content: Partial<ChannelMessage['content']>): ChannelMessage {
   return {
     platform_message_id: 'om_x',
     session: { session_id: 's' as never, channel_id: 'feishu-1' as never, type: 'private' },
     sender: { platform_user_id: 'ou_1', platform_display_name: '张三' },
-    content: { type: 'image', text: '看图', media },
+    content: { type: 'image', text: '看图', ...content },
     features: { is_mention_crab: false },
     platform_timestamp: '2026-08-30T08:00:00.000Z',
   } as never
 }
 
-describe('collectInboundImagePaths', () => {
-  it('收集 image/* 的本地路径', () => {
-    const paths = collectInboundImagePaths(channelMsg([
-      { media_url: '/data/media/a.jpg', mime_type: 'image/jpeg' },
-      { media_url: '/data/media/b.png', mime_type: 'image/png' },
-    ]))
-    expect(paths).toEqual(['/data/media/a.jpg', '/data/media/b.png'])
+describe('collectInboundImages', () => {
+  it('media[] 形态（feishu 富文本多图）：收集 path + label', () => {
+    const refs = collectInboundImages(channelMsg({
+      media: [
+        { media_url: '/data/media/a.jpg', mime_type: 'image/jpeg', filename: 'a.jpg' },
+        { media_url: '/data/media/b.png', mime_type: 'image/png', filename: 'b.png' },
+      ],
+    }))
+    expect(refs).toEqual([
+      { path: '/data/media/a.jpg', label: 'a.jpg' },
+      { path: '/data/media/b.png', label: 'b.png' },
+    ])
   })
 
-  it('过滤远程 URL 与非图片附件', () => {
-    const paths = collectInboundImagePaths(channelMsg([
-      { media_url: 'https://example.com/a.jpg', mime_type: 'image/jpeg' },
-      { media_url: '/data/media/doc.pdf', mime_type: 'application/pdf' },
-    ]))
-    expect(paths).toEqual([])
+  it('遗留单图 file_path 形态（feishu 普通单图，无 media[]）：读盘 path=file_path，label 与 formatMediaRef 同源', () => {
+    const refs = collectInboundImages(channelMsg({
+      file_path: '/data/media/om_x-1.jpg',
+      status: 'ready',
+      mime_type: 'image/jpeg',
+    }))
+    // formatMediaRef 单图分支渲染 media_url ?? filename ?? file_path——三者仅 file_path 时 label=完整路径
+    expect(refs).toEqual([{ path: '/data/media/om_x-1.jpg', label: '/data/media/om_x-1.jpg' }])
   })
 
-  it('无 media → 空数组', () => {
-    expect(collectInboundImagePaths(channelMsg([])).map(String)).toEqual([])
+  it('遗留单图 media_url 形态（telegram/wechat）', () => {
+    const refs = collectInboundImages(channelMsg({
+      media_url: '/data/media/om_y-1.jpg',
+      status: 'ready',
+    }))
+    expect(refs).toEqual([{ path: '/data/media/om_y-1.jpg', label: '/data/media/om_y-1.jpg' }])
+  })
+
+  it('混合形态：media_url 远程 + file_path 本地 → 读本地文件，label 与渲染同源（URL）；纯远程无法读 → 过滤', () => {
+    expect(collectInboundImages(channelMsg({
+      media_url: 'https://example.com/a.jpg',
+      file_path: '/data/media/a.jpg',
+      status: 'ready',
+    }))).toEqual([{ path: '/data/media/a.jpg', label: 'https://example.com/a.jpg' }])
+    expect(collectInboundImages(channelMsg({
+      media_url: 'https://example.com/a.jpg',
+      status: 'ready',
+    }))).toEqual([])
+    expect(collectInboundImages(channelMsg({
+      media: [{ media_url: '/data/media/doc.pdf', mime_type: 'application/pdf', filename: 'doc.pdf' }],
+    }))).toEqual([])
+  })
+
+  it('纯文本消息 → 空数组', () => {
+    expect(collectInboundImages(channelMsg({ type: 'text', text: '你好' }))).toEqual([])
   })
 })
 
 describe('injectInboundImages', () => {
-  it('文件存在 → content 变 [text(剔除标记), ...ImageBlock]，base64 与文件一致', async () => {
+  it('文件存在 → content 变 [text(剔除标记), ...ImageBlock]，base64 与文件一致，originals 保留原文', async () => {
     const p1 = await writePng('inject-ok-1.png')
     const p2 = await writePng('inject-ok-2.png')
     const msg = createUserMessage(`你自己看\n[图片: inject-ok-1.png]\n[图片: inject-ok-2.png]\n`)
-    const [out] = await injectInboundImages([msg], {
+    const { messages: [out], originals } = await injectInboundImages([msg], {
       supportsVision: true,
-      imageRefs: [{ message_id: msg.id, paths: [p1, p2] }],
+      imageRefs: [{ message_id: msg.id, images: [{ path: p1, label: 'inject-ok-1.png' }, { path: p2, label: 'inject-ok-2.png' }] }],
     })
     expect(out.role).toBe('user')
     const content = out.content as Array<{ type: string; text?: string; source?: { data: string } }>
@@ -80,40 +111,59 @@ describe('injectInboundImages', () => {
     const raw1 = await fs.readFile(p1)
     expect(content[1].source?.data).toBe(raw1.toString('base64'))
     expect(content[2].type).toBe('image')
+    // 收尾持久化靠 originals 还原
+    expect(originals.get(msg.id)).toBe(msg)
   })
 
-  it('文件已被 GC → 不注入，标记改写为过期提示（content 仍是 string）', async () => {
-    const msg = createUserMessage(`看这张\n[图片: gone.png]\n`)
-    const [out] = await injectInboundImages([msg], {
+  it('遗留单图形态：label 为完整路径也能正确剔除标记', async () => {
+    const p = await writePng('full-path.png')
+    const msg = createUserMessage(`你自己看正常不正常？！\n[图片: ${p}]\n`)
+    const { messages: [out] } = await injectInboundImages([msg], {
       supportsVision: true,
-      imageRefs: [{ message_id: msg.id, paths: [join(mediaDir, 'gone.png')] }],
+      imageRefs: [{ message_id: msg.id, images: [{ path: p, label: p }] }],
+    })
+    const content = out.content as Array<{ type: string; text?: string }>
+    expect(content).toHaveLength(2)
+    expect(content[0].text).not.toContain('[图片:')
+  })
+
+  it('文件不可读（GC/超限/IO）→ 不注入，标记改写为中性提示（content 仍是 string）', async () => {
+    const msg = createUserMessage(`看这张\n[图片: gone.png]\n`)
+    const { messages: [out], originals } = await injectInboundImages([msg], {
+      supportsVision: true,
+      imageRefs: [{ message_id: msg.id, images: [{ path: join(mediaDir, 'gone.png'), label: 'gone.png' }] }],
     })
     expect(typeof out.content).toBe('string')
     expect(out.content as string).toContain('gone.png')
-    expect(out.content as string).toContain('文件已清理')
+    expect(out.content as string).toContain('文件不可用，无法查看')
+    expect(originals.get(msg.id)).toBe(msg)
   })
 
   it('部分成功 → 成功的注入剔除、失败的改写保留', async () => {
     const ok = await writePng('mix-ok.png')
     const msg = createUserMessage(`两张图\n[图片: mix-ok.png]\n[图片: mix-missing.png]\n`)
-    const [out] = await injectInboundImages([msg], {
+    const { messages: [out] } = await injectInboundImages([msg], {
       supportsVision: true,
-      imageRefs: [{ message_id: msg.id, paths: [ok, join(mediaDir, 'mix-missing.png')] }],
+      imageRefs: [{
+        message_id: msg.id,
+        images: [{ path: ok, label: 'mix-ok.png' }, { path: join(mediaDir, 'mix-missing.png'), label: 'mix-missing.png' }],
+      }],
     })
     const content = out.content as Array<{ type: string; text?: string }>
     expect(content).toHaveLength(2) // text + 1 image
     expect(content[0].text).not.toContain('mix-ok.png')
-    expect(content[0].text).toContain('mix-missing.png（文件已清理，无法查看）')
+    expect(content[0].text).toContain('mix-missing.png（文件不可用，无法查看）')
   })
 
-  it('supportsVision=false → 原样返回（现状纯文本行为）', async () => {
+  it('supportsVision=false → 原样返回（现状纯文本行为，originals 为空）', async () => {
     const ok = await writePng('novision.png')
     const msg = createUserMessage(`[图片: novision.png]`)
-    const [out] = await injectInboundImages([msg], {
+    const { messages: [out], originals } = await injectInboundImages([msg], {
       supportsVision: false,
-      imageRefs: [{ message_id: msg.id, paths: [ok] }],
+      imageRefs: [{ message_id: msg.id, images: [{ path: ok, label: 'novision.png' }] }],
     })
     expect(out.content).toBe(msg.content)
+    expect(originals.size).toBe(0)
   })
 
   it('未命中 imageRefs 的消息原样返回；assistant 消息不参与', async () => {
@@ -124,9 +174,9 @@ describe('injectInboundImages', () => {
       [{ type: 'text', text: '回复' }],
       'end_turn',
     )
-    const out = await injectInboundImages([hit, miss, assistant], {
+    const { messages: out } = await injectInboundImages([hit, miss, assistant], {
       supportsVision: true,
-      imageRefs: [{ message_id: hit.id, paths: [ok] }],
+      imageRefs: [{ message_id: hit.id, images: [{ path: ok, label: 'hit.png' }] }],
     })
     expect((out[0].content as Array<{ type: string }>)).toHaveLength(2)
     expect(out[1].content).toBe('未命中')
@@ -138,16 +188,16 @@ describe('pruneImageRefs', () => {
   it('清除 recent 里不存在的引用', () => {
     const live = createUserMessage('活')
     const refs = [
-      { message_id: live.id, paths: ['/a.png'] },
-      { message_id: 'dead-id', paths: ['/b.png'] },
+      { message_id: live.id, images: [{ path: '/a.png', label: 'a.png' }] },
+      { message_id: 'dead-id', images: [{ path: '/b.png', label: 'b.png' }] },
     ]
     const out = pruneImageRefs(refs, [live])
-    expect(out).toEqual([{ message_id: live.id, paths: ['/a.png'] }])
+    expect(out).toEqual([{ message_id: live.id, images: [{ path: '/a.png', label: 'a.png' }] }])
   })
 
   it('undefined / 无变化时原样返回', () => {
     expect(pruneImageRefs(undefined, [])).toBeUndefined()
-    const refs = [{ message_id: 'x', paths: ['/a.png'] }]
+    const refs = [{ message_id: 'x', images: [{ path: '/a.png', label: 'a.png' }] }]
     expect(pruneImageRefs(refs, [])).not.toBe(refs) // 有死条目 → 新数组
     expect(pruneImageRefs(refs, [createUserMessage('m')].map((m) => ({ ...m, id: 'x' })))).toBe(refs)
   })

@@ -49,7 +49,7 @@ import { AsyncMutex } from '../workers/async-mutex'
 import { formatChannelMessageLine } from '../prompt-manager.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { decideCompaction, foldIntoSummary, managerPolicyForWindow, type CompactionPolicy, type CompactionDecision } from './compaction.js'
-import { collectInboundImagePaths, injectInboundImages, pruneImageRefs, type ManagerImageRef } from './image-vision.js'
+import { collectInboundImages, injectInboundImages, pruneImageRefs, type ManagerImageRef } from './image-vision.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
 import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
@@ -769,15 +769,22 @@ export class ManagerLoop {
       ...(eventText === undefined ? [] : [createUserMessage(eventText)]),
     ]
     // 入站图片视觉注入:窗口内 human 消息引用的图片读盘转 ImageBlock(VLM 模型才有)。
-    // episode 内与 adapter/model 同点解析一次;文件已被 GC 的引用在变换里改写文本标记。
+    // episode 内与 adapter/model 同点解析一次;文件不可读的引用在变换里改写文本标记。
     // 无图可注入时走同步路径——await 会多让出一个 microtask,打乱既有
     // "manager 提交 → LLM ↔ reaction"时序(变异靶锚定,见 process-direct-batch)。
+    // 注入只作 LLM 请求投影:originalsById 保留注入前消息,收尾持久化前按 id 还原,
+    // 否则 base64 会随 finalMessages 回写进 recent 与 episode log(codex review P1)。
     const supportsVision = this.deps.supportsVision?.() ?? false
     const imageRefs = state.imageRefs ?? []
     const injectable = supportsVision && imageRefs.length > 0
-    const tailMessages: EngineMessage[] = injectable
-      ? await injectInboundImages([...state.recent, ...currentTailMessages], { supportsVision, imageRefs })
-      : [...state.recent, ...currentTailMessages]
+    const baseTailMessages: EngineMessage[] = [...state.recent, ...currentTailMessages]
+    const injectedTail = injectable
+      ? await injectInboundImages(baseTailMessages, { supportsVision, imageRefs })
+      : undefined
+    const tailMessages: EngineMessage[] = injectedTail?.messages ?? baseTailMessages
+    // attempt 可能被 overflow 重试整体替换,重试路径的注入产生自己的 originals——
+    // 用 let + 收尾时读当前值。
+    let originalsById: ReadonlyMap<string, EngineMessage> = injectedTail?.originals ?? new Map()
 
     let attempt = await this.runAttempt(episodeId, state, tailMessages, adapter, model, {
       thinking,
@@ -829,14 +836,17 @@ export class ManagerLoop {
           ...retryCurrentEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
           ...retryInjectedEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
         ]
-        const retryTailMessages: EngineMessage[] = injectable
+        // 重试重建了 current/injected 消息(新 id),注入 originals 必须换成这一份
+        const retryInjected = injectable
           ? await injectInboundImages(retryBaseMessages, { supportsVision, imageRefs })
-          : retryBaseMessages
+          : undefined
+        const retryTailMessages: EngineMessage[] = retryInjected?.messages ?? retryBaseMessages
         const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model, {
           thinking,
           contextWindowTokens,
           contextEnvelopes: [...retryCurrentEnvelopes, ...retryInjectedEnvelopes],
         })
+        originalsById = retryInjected?.originals ?? new Map()
         totalTurnsUsed += retryAttempt.result.totalTurns
         repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages)
         successfulSendMessageTargets = [
@@ -913,7 +923,14 @@ export class ManagerLoop {
       )
     }
 
-    await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, attempt.result.finalMessages)
+    // 注入只存在于 LLM 请求投影:持久化(episode log / recent)前把 finalMessages 里被
+    // 注入过的 user message 还原为注入前的纯文本——base64 不落盘,文本标记保留原样,
+    // 下一 episode 再从 imageRefs 重新注入(幂等)。
+    const persistedFinalMessages = attempt.result.finalMessages.map(
+      (m) => originalsById.get(m.id) ?? m,
+    )
+
+    await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, persistedFinalMessages)
 
     // 只有真正跑完 turn(completed / max_turns)才算"处理过"这批事件;
     // failed / aborted 一律不消费,交回邮箱下次重投。
@@ -921,7 +938,7 @@ export class ManagerLoop {
 
     if (consumedEvents) {
       const priorRecent = state.recent
-      const newRecent = attempt.result.finalMessages.slice(attempt.hasSummaryMarker ? 1 : 0)
+      const newRecent = persistedFinalMessages.slice(attempt.hasSummaryMarker ? 1 : 0)
       // recent 已滚动:修剪不再被引用的图片路径(按新旧 recent 并集判活,supervision 分支
       // 会恢复 priorRecent,误删活引用比多留死条目更糟)。
       const prunedImageRefs = pruneImageRefs(state.imageRefs, [...newRecent, ...priorRecent])
@@ -940,7 +957,7 @@ export class ManagerLoop {
         usedForceHotRetry,
         priorRecentCount: priorRecent.length,
         hasSummaryMarker: attempt.hasSummaryMarker,
-        finalMessages: attempt.result.finalMessages,
+        finalMessages: persistedFinalMessages,
         startedAt: envelope?.received_at,
         endedAt: this.deps.now().toISOString(),
       })
@@ -1012,9 +1029,9 @@ export class ManagerLoop {
       for (const { message } of newEntries) committedIds.add(message.platform_message_id)
       const rendered = createUserMessage(this.renderEnvelope(projectHumanEnvelope(envelope, newEntries)))
       committedMessages.push(rendered)
-      // 记录本批消息的入站图片本地路径(轻量引用,见 image-vision.ts 文件头)
-      const imagePaths = newEntries.flatMap(({ message }) => collectInboundImagePaths(message))
-      if (imagePaths.length > 0) newImageRefs.push({ message_id: rendered.id, paths: imagePaths })
+      // 记录本批消息的入站图片引用(轻量引用,见 image-vision.ts 文件头)
+      const images = newEntries.flatMap(({ message }) => collectInboundImages(message))
+      if (images.length > 0) newImageRefs.push({ message_id: rendered.id, images })
       if (envelope === currentEnvelope) {
         lastCurrentWakeCommittedMessageId = newEntries[newEntries.length - 1].message.platform_message_id
       }

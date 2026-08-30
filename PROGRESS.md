@@ -5,6 +5,26 @@
 
 ## 当前状态
 
+### manager 入站图片视觉注入（P7 拆分能力回退修复）+ get_message 媒体字段：已合入（main `29a25d08` + review 修复）
+
+- 引线：用户 feishu 发图，manager（VLM）回复"媒体句柄解析失败"。trace 定位：channel
+  下载/落盘/envelope 渲染全部正常，manager 装配层把图片拦成纯文本标记——P7 拆分时
+  worker trigger 流的图片注入（`82f890bd` 首修）没搬进 manager envelope 装配，违背拆分
+  spec「差异是策略差异不是机制差异」决策（2026-07-28-manager-worker-agent-split-design §4）。
+- 修复（main `29a25d08`）：`manager/image-vision.ts` 注入机制——state 只存轻量图片引用
+  `imageRefs`，episode 输入构造时读盘转 ImageBlock；`get_message` 透出
+  media/media_url/file_path/handle/status（协议 crab-messaging v0.3.5 随补，docs 直推）。
+- codex review 定性 5 条，修复 4 条：P1 base64 随 finalMessages 回写 recent/episode log
+  → 注入改为仅 LLM 请求投影，收尾按 originals 映射还原后落盘（回归测试断言落盘无
+  base64）；P1 collect 只认 media[] → 补齐遗留单图 media_url/file_path 形态（feishu
+  普通单图走 file_path，标记 label 与 formatMediaRef 渲染同源，含完整路径形态）；
+  P2 协议未同步 → v0.3.5；P2 读失败一律报"已清理" → 中性措辞「文件不可用，无法查看」。
+- **follow-up**：episode 运行中人类插话（turn 间 drain 注入）带图时仍只有文本标记——
+  当轮 `drainPending()` 只返回 string，收尾 `commitPendingHumanInputs(recentReplaced=true)`
+  也不补记 imageRefs，插话的图当轮与后续 episode 都注入不了（主路径能看、插话不能，
+  行为不对称；不产生死路）。修复需把 engine humanMessageQueue 投递契约从 string 扩到
+  ContentBlock[]（投递模型变更），按门禁不并入小改动，需独立立项走 spec。
+
 ### manager 人类消息 turn 间注入（含 builtin worker 输入 turn 边界投递）：已合并（PR #131 → `28a3ae13`）+ PR #130（已合并 `bad70ce4`）
 
 - 引线：2026-08-29 两起现网案例。① builtin 监控 worker 用 `Output(block=true)` 无限轮询
