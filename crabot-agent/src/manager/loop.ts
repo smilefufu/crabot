@@ -48,7 +48,7 @@ import type { HumanMessageQueueLike } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex'
 import { formatChannelMessageLine } from '../prompt-manager.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
-import { decideCompaction, foldIntoSummary, type CompactionPolicy, type CompactionDecision } from './compaction.js'
+import { decideCompaction, foldIntoSummary, managerPolicyForWindow, type CompactionPolicy, type CompactionDecision } from './compaction.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
 import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
@@ -209,7 +209,8 @@ export interface ManagerLoopDeps {
   readonly adapter: () => LLMAdapter
   readonly model: () => string
   readonly maxTurns?: number
-  readonly contextWindowTokens?: number
+  /** manager 模型的上下文窗口(thunk,episode 内与 adapter/model 同点解析);undefined = engine 默认 200K */
+  readonly contextWindowTokens?: () => number | undefined
   /** manager 的槽位思考强度(thunk,episode 内与 adapter/model 同点解析);undefined = 跟随默认 */
   readonly thinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
   /**
@@ -728,6 +729,10 @@ export class ManagerLoop {
     const adapter = this.deps.adapter()
     const model = this.deps.model()
     const thinking = this.deps.thinking?.()
+    // 上下文窗口与折叠策略同点快照（§11 热更语义：下一 episode 生效）：
+    // hardCap 按模型窗口推导（spec 2026-08-29），fold/keepRecent/cacheTtl 保持原策略。
+    const contextWindowTokens = this.deps.contextWindowTokens?.()
+    const policy = managerPolicyForWindow(this.deps.policy, contextWindowTokens)
 
     let state = initialState
     let historyState = withoutProtectedTail(state, committedHumanMessages.length)
@@ -736,7 +741,7 @@ export class ManagerLoop {
     const wakeDecision = decideCompaction({
       state: historyState,
       nowMs,
-      policy: this.deps.policy,
+      policy,
       estimateTokens: this.deps.estimateTokens,
     })
     if (wakeDecision.kind !== 'none') {
@@ -759,6 +764,7 @@ export class ManagerLoop {
 
     let attempt = await this.runAttempt(episodeId, state, tailMessages, adapter, model, {
       thinking,
+      contextWindowTokens,
       contextEnvelopes: currentInputEnvelopes,
     })
     let totalTurnsUsed = attempt.result.totalTurns
@@ -783,7 +789,7 @@ export class ManagerLoop {
     if (isContextOverflow(attempt.result)) {
       // Only pre-existing history may be folded. The current initial wake, carried
       // envelopes and mid-episode supplements are a protected tail (§14.4).
-      const forceDecision = forceHotFold(historyState, this.deps.policy, this.deps.estimateTokens, nowMs)
+      const forceDecision = forceHotFold(historyState, policy, this.deps.estimateTokens, nowMs)
       if (forceDecision.kind !== 'none') {
         usedForceHotRetry = true
         state = await this.applyFoldWithSpan(
@@ -808,6 +814,7 @@ export class ManagerLoop {
         ]
         const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model, {
           thinking,
+          contextWindowTokens,
           contextEnvelopes: [...retryCurrentEnvelopes, ...retryInjectedEnvelopes],
         })
         totalTurnsUsed += retryAttempt.result.totalTurns
@@ -848,7 +855,7 @@ export class ManagerLoop {
         [],
         adapter,
         model,
-        { thinking, initialMessages: continuationInitial },
+        { thinking, contextWindowTokens, initialMessages: continuationInitial },
       )
       totalTurnsUsed += continuation.result.totalTurns
       if (continuation.result.outcome === 'completed' || continuation.result.outcome === 'max_turns') {
@@ -1324,6 +1331,8 @@ export class ManagerLoop {
       readonly contextEnvelopes?: ReadonlyArray<TimedWakeEnvelope>
       /** 本 episode 的槽位思考强度快照（与 adapter/model 同点解析，episode 内固定） */
       readonly thinking?: import('../engine/llm-adapter-types.js').LLMThinkingConfig
+      /** 本 episode 的模型上下文窗口快照（同上） */
+      readonly contextWindowTokens?: number
     },
   ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean; readonly initialMessageCount: number }> {
     this.attemptCounter += 1
@@ -1358,7 +1367,7 @@ export class ManagerLoop {
       tools,
       model,
       maxTurns: this.deps.maxTurns,
-      contextWindowTokens: this.deps.contextWindowTokens,
+      ...(overrides?.contextWindowTokens !== undefined ? { contextWindowTokens: overrides.contextWindowTokens } : {}),
       ...(overrides?.thinking !== undefined ? { thinking: overrides.thinking } : {}),
       disableCompaction: true,
       humanMessageQueue: this.mailbox,

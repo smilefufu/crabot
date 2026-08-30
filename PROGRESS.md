@@ -18,8 +18,9 @@
   Output 探针提前返回，投递可见性从小时级降到 ≈2s）+ 协议 v3.6.15（docs `93975cf`）+
   spec 2026-08-20 同步。review 三轮：真实风险 2 项（测试 gate 失效、`[manager input]`
   前缀误标系统通知）已修。
-- PR #131（OPEN，合并门禁：① 权限立项落地；② §4.1 注入例外措辞——六审固化为门禁，
-  两者均随权限 spec 一并待确认）：manager 人类消息 episode 运行中到达时**同步**入
+- PR #131（OPEN，两项合并门禁均已解除：① 权限立项已随 #133 落地（`57b6ea87`）；
+  ② §4.1 例外措辞已随 docs `ef6888ff` 进协议（admin 0.2.7 / agent-v3 3.6.16），等最终复核合入）：
+  manager 人类消息 episode 运行中到达时**同步**入
   mailbox 走 turn 边界注入（check→push 零 await，与 routeWorkerEvent 同构原子）；store 提交
   延后到 episode 收尾临界区统一落盘（mutex 内单写者，消除注入 RMW 与收尾 save 的 lost
   update）；attention flush / 私聊 / Admin Chat 的结算与 fail-loud 全部委托被注入 episode
@@ -68,6 +69,25 @@
      后续统一收口。
   8. （#130 遗留）redirect 对 builtin 是否允许 interrupt/腰斩工具；v2 agent-handler 遗留
      （humanQueue/ask_human）清理；Output 超时参数与连续 block 硬性封顶。
+### 群聊权限群级统一（与发言人无关）：已合并（PR #133 → `57b6ea87`）
+
+- 决策（2026-08-30）：群聊有群聊的权限，与发言人无关（含 master 在群里也按群档位）；
+  推翻 protocol-admin §3.2.7 原按发言人解析的群聊语义。spec + 协议（admin 0.2.7 /
+  agent-v3 3.6.16 §4.1 注入例外）随 crabot-docs `ef6888ff` 落地。
+- 实现：admin `resolvePrincipalPermissions` 群聊路径提前返回（忽略 sender_friend_id、
+  只按 GroupSessionPermissionConfig/缺省 group_default 解析，模板缺失 → minimal）；
+  私聊不变；agent 侧无代码改动（唤醒边界照常调 RPC）。
+- 关联：落地后解除 PR #131 权限 review 线程前提（注入借 primary wake 档位提权），
+  #131 另一门禁（§4.1 协议例外）已随 docs 落地。
+- **follow-up（#133 review 记录，schedule 权限语义属 spec 非目标、另行立项）**：
+  `crabot-agent/src/manager/bootstrap.ts` `onScheduleWake` 用
+  `principals.get(key)?.principal.sessionType ?? 'private'` 猜会话类型——群聊会话在
+  agent 重启后、尚未被人类消息唤醒过的窗口内猜成 'private'，schedule 解析走私聊路径
+  （master creator 拿回 master_private、普通 creator 拿 friend∪session 并集，均 ≥ 群档位），
+  与群级统一不变量相悖。相对改动前无回归（旧代码群聊 master 本来也短路）；窗口窄
+  （需重启 + 该群无人类消息 + 恰有带 creator 的 schedule 触发）。修法方向：
+  TriggerScheduleParams.target_session 带 session_type（协议改动）或按 session_id
+  特征/配置反查，需 spec。
 
 ### 移除 macOS FDA 放开机制，受保护目录无条件排除：已合并（PR #129 → `3e268439`）
 
@@ -298,6 +318,13 @@
   天然有界），现网若观察到连续打回再收紧；③crashed 路径的 subagent 连带终止与通知抑制维持
   现状，是否改为留活自愈（subagent 完成通知经透明接续更快唤醒）待评估；④窄竞态：subagent 已
   完成、通知在途时 finish_task 放行，排队通知进 dead-letter（review 记录不改）。
+- **manager 压缩 hardCap 接模型 context_window：已合并（PR #132 → `ac09fd4d`）**。worker 侧
+  阈值本就按 `context_window × 0.8` 生效（未设置回退 200K）；manager 自管压缩此前是写死常量
+  （fold 20K / hardCap 160K）且 bootstrap 从未传 contextWindowTokens。现 `hardCapTokens` 从
+  manager 实际模型（powerful 槽位）窗口推导（floor(window×0.8)，未配置回退现状常量），
+  `foldTokenThreshold: 20K` 作为刻意保守策略保留不动；thunk 每 episode 解析（§11 热更语义）。
+  spec：crabot-docs `2026-08-29-manager-compaction-model-window-design.md`（`4eece36`）。
+  **需重建重启 agent 生效。**
 - **槽位思考强度 PR #127 review follow-up（2026-08-28）**：① anthropic 数字 budget 档位
   （`thinking:{type:'enabled',budget_tokens:N}`）会开启经典 extended thinking，但
   anthropic-adapter 流处理只消费 text/input_json delta，thinking block 与 signature 既不产出

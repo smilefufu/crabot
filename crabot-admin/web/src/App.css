@@ -3895,13 +3895,13 @@ input[type="radio"]:disabled {
 .model-table-header,
 .model-table-row {
   display: flex;
-  padding: 0.5rem 0.75rem;
+  padding: 0.4rem 0.6rem;
   align-items: center;
 }
 
 .model-table-header {
   background: var(--surface-elevated, #1a1a1e);
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-color, #2a2a2e);
 }
@@ -3914,10 +3914,199 @@ input[type="radio"]:disabled {
   border-bottom: none;
 }
 
-.model-table-col-id { flex: 2; }
-.model-table-col-type { flex: 1; }
+.model-table-row:hover {
+  background: color-mix(in srgb, var(--surface-elevated, #1a1a1e) 55%, transparent);
+}
+
+.model-table-col-id {
+  flex: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.8rem;
+}
+.model-table-col-type { flex: 1.2; white-space: nowrap; }
 .model-table-col-ctx { flex: 1; }
-.model-table-col-test { width: 80px; text-align: right; }
+.model-table-col-test { width: 92px; text-align: right; white-space: nowrap; }
+
+/* --- Provider 详情抽屉：头部紧凑信息条 --- */
+.provider-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--surface-elevated, #1a1a1e);
+  border: 1px solid var(--border-color, #2a2a2e);
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.provider-head__titleline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.provider-head__title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-head__sub {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  text-transform: none;
+}
+
+.provider-head__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 1.35rem;
+}
+
+.provider-head__meta-label {
+  flex: 0 0 3.2rem;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.provider-head__meta-value {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.provider-head__meta-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+.provider-head__meta-action {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--primary, #4a9eff);
+  font-size: 0.72rem;
+  cursor: pointer;
+  padding: 0 0.15rem;
+}
+
+.provider-head__meta-action:hover { text-decoration: underline; }
+.provider-head__meta-action:disabled { color: var(--text-secondary); cursor: default; text-decoration: none; }
+
+.provider-head__error {
+  font-size: 0.75rem;
+  color: var(--error, #e5484d);
+  word-break: break-all;
+}
+
+.provider-models-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+}
+
+/* --- 上下文 chip（表格内可编辑暗示） --- */
+.ctx-chip {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.ctx-chip--set {
+  border: 1px solid var(--primary, #4a9eff);
+  color: var(--primary, #4a9eff);
+  background: transparent;
+}
+
+.ctx-chip--unset {
+  border: 1px dashed var(--border-color, #2a2a2e);
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.ctx-chip:hover { filter: brightness(1.2); }
+
+/* --- 上下文编辑 Popover 面板 --- */
+.ctx-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem;
+  width: 240px;
+}
+
+.ctx-editor__title {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.ctx-editor__presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.ctx-editor__preset {
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-color, #2a2a2e);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.ctx-editor__preset:hover { border-color: var(--primary, #4a9eff); }
+
+.ctx-editor__preset--active {
+  border-color: var(--primary, #4a9eff);
+  color: var(--primary, #4a9eff);
+  background: color-mix(in srgb, var(--primary, #4a9eff) 12%, transparent);
+}
+
+.ctx-editor__input {
+  width: 100%;
+  font-size: 0.8rem;
+}
+
+.ctx-editor__input--invalid {
+  border-color: var(--error, #e5484d);
+}
+
+.ctx-editor__err {
+  font-size: 0.7rem;
+  color: var(--error, #e5484d);
+  margin-top: -0.25rem;
+}
+
+.ctx-editor__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.ctx-editor__hint {
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
 
 /* ============================================================================
    Session Management — Observatory Design
