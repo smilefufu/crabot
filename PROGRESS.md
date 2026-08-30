@@ -5,6 +5,41 @@
 
 ## 当前状态
 
+### LLM 429 分类重试 + 重试层扁平化 + 重试期间配置热切换：已合并（PR #134 → `f705b104`）
+
+- 引线：现网事故——z-ai/glm-5.3-flash 额度类 429 触发嵌套双重重试（adapter 层 10 次 ×
+  callNonStreaming 10 次 ≈121 次尝试/13+ 分钟 sleep），期间 Admin 切换默认模型不生效。
+- spec/协议先行 crabot-docs（`1299870`）：spec 2026-08-30-llm-retry-config-hotreload-design
+  （Implemented）；protocol-agent-v3 3.6.17（重试阶段例外、429 分类、单层重试约束、
+  invalidation 投递保证）。
+- 实现：①429 三分类（额度类 body code fail-fast / Retry-After 有限重试且 60s 封顶、
+  超上限按失败 / 无 header 通用 429 限 3 次）；②重试层扁平化（adapter 只留超时，
+  唯一重试层 = callNonStreaming，DEFAULT_MAX_RETRIES 10→5，单调用 ≤6 次尝试）；
+  ③重试等待响应配置热切换（configGeneration 代数记账 + 边沿 signal 唤醒，
+  每次 LLMConfigSwap 换 adapter + model/maxTokens/thinking 参数，消费授予 1 次额外
+  attempt 预算封顶 maxRetries，generic429 计数随切换清零）。spec §5.4 复核结论：
+  Admin invalidation gate 关闭窗口静默跳过是既有设计，无代码改动。
+- @claude review 四轮：三轮各修一条真实风险（worker onConfigChanged 读旧 sdkEnv 的
+  notify 时序；一次性 AbortSignal 永久归零退避 → generation 探针方案；变更消费先于
+  放弃判定 + 额外 attempt 预算）；四轮 Approve。遗留 follow-up 见下方待办。
+- 验证：tsc 干净；engine 628/628 全绿；全量失败与 HEAD 基线逐一对照均为存量
+  环境/flaky，无新增。**需重建重启 agent 生效。**
+
+### LLM 重试/热切换 follow-up（PR #134 review 记录，均非阻塞）
+
+- ① `Retry-After: 0`/已过期 HTTP-date 允许 0ms 延迟并绕过通用 429 次数上限
+  （可设延迟下限；纯空白值解析缺陷已修）。
+- ② onRetry.maxAttempts / admin web「正在重试 N/M」分母随 configSwitchBudget 跳动，
+  观测口径与真实配额不一致。
+- ③ 死代码清理：streamWithRetry / isMaterialChunk（本 PR 扁平化后仅测试引用）、
+  anthropic 429 包装丢失 cause/stack、unified-agent `updateLlmClients`（存量）。
+- ④ [理论风险] configGeneration 探针只看代数不看 model_config 是否真变：改
+  system_prompt/skills 也触发一次换配置预算；equal-revision 恢复路径同样 +1。
+  生产 revision 变更稀疏且有界，量级可接受。
+- ⑤ [知情项] 热切换只救当前这一次 LLM 调用：同 runEngine 下一 turn 仍用 loop/episode
+  级快照旧 provider，直到 episode/loop 结束才全面换走（spec §2.2 非目标、协议 3.6.17
+  已写明）。
+
 ### 群聊权限群级统一（与发言人无关）：PR #133（待合并）
 
 - 决策（2026-08-30）：群聊有群聊的权限，与发言人无关（含 master 在群里也按群档位）；
