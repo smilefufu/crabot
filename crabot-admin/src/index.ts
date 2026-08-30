@@ -141,6 +141,7 @@ import {
   type GetChatHistoryResult,
   type UpsertPendingMessageParams,
   type UpsertPendingMessageResult,
+  type ChatAcknowledgeParams,
   type ChatSendMessageParams,
   type ChatSendMessageResult,
   type ChatTaskSnapshot,
@@ -801,6 +802,8 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('get_chat_history', this.handleGetChatHistory.bind(this))
     // admin-web 伪 channel：worker send_message 出站收口（spec 2026-06-10-master-chat-redesign §4）
     this.registerMethod('send_message', this.handleChatSendMessage.bind(this))
+    // chat_acknowledge（protocol-admin §3.20.2）：Agent 人类输入 commit 后打「已接收」标记
+    this.registerMethod('chat_acknowledge', this.handleChatAcknowledge.bind(this))
 
     // TaskGoal 管理（spec: 2026-05-23-goal-mode-design.md §3）
     this.registerMethod('set_task_goal', this.handleSetTaskGoal.bind(this))
@@ -9367,6 +9370,13 @@ export class AdminModule extends ModuleBase {
       throw new Error('Chat manager not initialized')
     }
     return this.chatManager.handleSendMessage(params)
+  }
+
+  private async handleChatAcknowledge(params: ChatAcknowledgeParams): Promise<{ acknowledged: number }> {
+    if (!this.chatManager) {
+      throw new Error('Chat manager not initialized')
+    }
+    return { acknowledged: await this.chatManager.acknowledgeRequests(params.request_ids) }
   }
 
   /** admin-web 来源的非终态任务快照（进行中任务条数据源） */

@@ -1989,6 +1989,27 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
+   * Master Chat 的「已接收」标记（protocol-admin §3.20.2）：admin-web 没有 channel 侧
+   * platform message 可打 reaction，改用 admin 的 `chat_acknowledge` RPC 达成同一语义
+   * （人类输入已被 manager 消费）。admin 侧幂等，未知 request_id 静默忽略。
+   */
+  private async ackAdminChatHumanInput(requestId: string): Promise<void> {
+    try {
+      await this.rpcClient.call(
+        await this.getAdminPort(),
+        'chat_acknowledge',
+        { request_ids: [requestId] },
+        this.config.moduleId,
+      )
+    } catch (err) {
+      console.warn(
+        `[${this.config.moduleId}] chat_acknowledge failed (ignored):`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+  }
+
+  /**
    * fail-loud 兜底：manager episode 没能把话说出来时，**不经 manager、不经 LLM**
    * 直接告诉人类一声。
    *
@@ -2490,7 +2511,8 @@ export class UnifiedAgent extends ModuleBase {
    *
    * 「三不」不变：不进 SessionLane（admin REST 前端 fetch 等响应才发下一条，天然单线）、
    * 不进注意力调度（master 直连每条都要处理）、不打 `add_reaction`（admin-web 没有
-   * channel 侧 platform message 可回应）。
+   * channel 侧 platform message 可回应——「已接收」标记改走 admin `chat_acknowledge`，
+   * 见 routeHumanMessages 的 commit 回调）。
    */
   private async processAdminChatMessage(
     message: ChannelMessage,
@@ -2523,6 +2545,10 @@ export class UnifiedAgent extends ModuleBase {
         [message],
         MASTER_FRIEND,
         { admin_chat_request_ids: [callbackInfo.request_id] },
+        // 「已接收」标记（protocol-agent-v3 §4.1 / protocol-admin §3.20.2）：人类输入
+        // commit 进 manager 会话后 best-effort 通知 admin，web 在对应用户消息上渲染标记，
+        // 与 channel 的 acknowledged reaction 同语义同时机。失败只落日志，不影响回复链路。
+        () => this.ackAdminChatHumanInput(callbackInfo.request_id),
       )
     } catch (err) {
       // F2：episode 中途抛错。
@@ -2531,7 +2557,7 @@ export class UnifiedAgent extends ModuleBase {
         err instanceof Error ? err.message : String(err),
       )
       // 送不出去（冷却命中 / chat_callback 也失败）就把异常原样抛回 admin —— 那边的
-      // `dispatchToAgent` catch 会推 `chat_error`，占位气泡照样收口，且不会往消息库里
+      // `dispatchToAgent` catch 会推 `chat_error`（前端 toast 提示），且不会往消息库里
       // 再落一条重复的兜底文案。冷却在这里保住的正是"不重复落库"这一层。
       if (!(await this.sendFailLoudReply('admin-web', sessionId, { kind: 'threw', error: err }, callbackInfo.request_id))) {
         throw err

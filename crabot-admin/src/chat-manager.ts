@@ -347,8 +347,9 @@ export class ChatManager {
         user_message_id: userMessage.message_id,
       })
 
-      this.pushToClient({ type: 'chat_status', request_id: params.request_id, status: 'processing' })
       // dispatch loop 后台跑；重启由 reconcileInboundDispatches 兜底。
+      // 「已接收」反馈由 Agent commit 后经 chat_acknowledge 打标（protocol-admin §3.20.2），
+      // 入站不再推 chat_status 占位状态。
       void this.runInboundDispatch(journal).catch((error) => {
         console.error(`[ChatManager] inbound dispatch loop failed for ${params.request_id}:`,
           error instanceof Error ? error.message : String(error))
@@ -524,7 +525,6 @@ export class ChatManager {
         fingerprint,
         user_message_id: userMessage.message_id,
       })
-      this.pushToClient({ type: 'chat_status', request_id: params.request_id, status: 'processing' })
       void this.runInboundDispatch(journal).catch((error) => {
         console.error(`[ChatManager] inbound dispatch loop failed for ${params.request_id}:`,
           error instanceof Error ? error.message : String(error))
@@ -550,6 +550,27 @@ export class ChatManager {
     expected: { manager_key: 'admin-web::admin-chat'; request_id: string; payload_sha256: string }
   }): Promise<{ consumed: true; expires_at: string }> {
     return this.assertions.consume(params.assertion, params.expected)
+  }
+
+  /**
+   * chat_acknowledge（protocol-admin §3.20.2）：为入站 request IDs 打「已接收」标记。
+   * 幂等（已打标跳过），未知 request_id 静默忽略；标记随聊天记录持久化，并推一条
+   * `chat_message_acked` 给 ws 客户端（前端据此渲染标记，刷新经聊天历史恢复显示）。
+   */
+  async acknowledgeRequests(requestIds: string[]): Promise<number> {
+    const acknowledgedAt = new Date().toISOString()
+    const marked: string[] = []
+    for (const requestId of requestIds) {
+      const userMessageId = this.requestIndex.get(requestId)?.user_message_id
+      const message = userMessageId ? this.messages.get(userMessageId) : undefined
+      if (!message || message.role !== 'user' || message.acknowledged_at) continue
+      message.acknowledged_at = acknowledgedAt
+      marked.push(requestId)
+    }
+    if (marked.length === 0) return 0
+    await this.saveData()
+    this.pushToClient({ type: 'chat_message_acked', request_ids: marked })
+    return marked.length
   }
 
   private pushToClient(message: ChatServerMessage): void {

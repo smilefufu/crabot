@@ -460,6 +460,38 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
   })
 
   // ==========================================================================
+  // 已接收标记（chat_acknowledge，protocol-admin §3.20.2）
+  // ==========================================================================
+
+  describe('已接收标记（chat_acknowledge）', () => {
+    it('人类输入 commit 后调用 chat_acknowledge，路由到 admin 模块并携带 request_id', async () => {
+      boot({ turns: [[reply()]] })
+      await runAdminChat(amsg({ id: 'a-ack-1' }), 'req-ack-1')
+      // commit 回调是 fire-and-forget：跑完一轮 episode 后补几个宏任务让它落地
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      const ack = rpcCalls.find((c) => c.method === 'chat_acknowledge')
+      expect(ack).toBeDefined()
+      expect(ack!.port).toBe(ADMIN_PORT)
+      expect(ack!.params).toEqual({ request_ids: ['req-ack-1'] })
+    })
+
+    it('chat_acknowledge 失败只落日志：回复链路不受影响（best-effort）', async () => {
+      boot({ turns: [[reply('这就去办')]] })
+      const inner = internals.rpcClient.call
+      internals.rpcClient.call = async (port, method, params, from) => {
+        if (method === 'chat_acknowledge') throw new Error('admin down')
+        return inner(port, method, params, from)
+      }
+
+      const result = await runAdminChat(amsg({ id: 'a-ack-2' }), 'req-ack-2')
+
+      expect(result).toEqual({ decision_types: ['direct_reply'] })
+      expect(rpcCalls.find((c) => c.method === 'send_message')).toBeDefined()
+    })
+  })
+
+  // ==========================================================================
   // master 身份与记忆档位
   // ==========================================================================
 
