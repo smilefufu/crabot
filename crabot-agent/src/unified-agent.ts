@@ -1909,6 +1909,18 @@ export class UnifiedAgent extends ModuleBase {
         (settled) => {
           settleDelegated = true
           this.attentionScheduler.reportResult(sessionId, settled.repliedToHuman)
+          // 注入场景占位 result 的 outcome 恒为 completed(六审):被注入 episode 真实
+          // 收尾 failed/aborted 时在此补发兜底回复,与 processDirectBatch 对称;
+          // 多条注入同 episode 失败的刷屏由 sendFailLoudReply 的按 key 冷却收口。
+          if (settled.outcome === 'failed' || settled.outcome === 'aborted') {
+            console.error(
+              `[${this.config.moduleId}] processGroupLaneBatch injected episode outcome=${settled.outcome}`,
+            )
+            void this.sendFailLoudReply(session.channel_id, sessionId, {
+              kind: 'outcome',
+              outcome: settled.outcome,
+            }).catch((err) => console.error(`[${this.config.moduleId}] processGroupLaneBatch settle fail-loud failed:`, err))
+          }
         },
       )
       repliedToHuman = result.repliedToHuman

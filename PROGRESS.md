@@ -48,6 +48,10 @@
   6. 成功收尾时未被消费的注入留 mailbox 交自唤醒（五审修法），其 reaction 回调随之丢失
      （自唤醒无调用方回调）——与「写入即已接收」自洽（尚未写入本就不该打），窗口窄，
      如实记录不立项。
+  7. commitPendingHumanInputs 在首个 await 前清空 pendingHumanCommit（六审非阻塞观察）：
+     放弃分支里它自身抛错（store I/O 故障）时，catch 的二次调用看到空队列并报
+     injectedHumansCommitted=true → 注入既未落盘也不重投。理论风险（收尾时 store 故障），
+     后续统一收口。
   7. （#130 遗留）redirect 对 builtin 是否允许 interrupt/腰斩工具；v2 agent-handler 遗留
      （humanQueue/ask_human）清理；Output 超时参数与连续 block 硬性封顶。
 
