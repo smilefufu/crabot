@@ -680,6 +680,35 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
     })
 
     /**
+     * 注入占位(六审):flush 撞上在跑 episode 时占位 result 恒 completed,F1 判不到
+     * 真实失败;被注入 episode 收尾 failed/aborted 时由 settle 回调补发兜底回复,
+     * 与私聊 processDirectBatch 对称。占位自身不得触发 fail-loud。
+     */
+    it('注入占位不触发 fail-loud,真实收尾 failed 经 settle 回调补发', async () => {
+      boot({ attentionMinMs: 1000 })
+      internals.managerStack.registry.routeAttentionFlush = async (
+        _ch: string, _sid: string, _msgs: unknown, _friend: unknown, _onCommitted: unknown,
+        onSettled?: (result: { episodeId: string; outcome: string; turns: number; consumedEvents: boolean; repliedToHuman: boolean }) => void,
+      ) => {
+        queueMicrotask(() => onSettled?.({
+          episodeId: 'ep-real', outcome: 'failed', turns: 3, consumedEvents: true, repliedToHuman: false,
+        }))
+        return { episodeId: '', outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
+      }
+
+      await deliverMention(gmsg({ id: 'g-1', mention: true }))
+      // settle 回调是 fire-and-forget,等一拍让它落地
+      await new Promise((r) => setTimeout(r, 20))
+
+      const sent = failLoudSent()
+      expect(sent).toHaveLength(1)
+      expect(sent[0].port).toBe(WECHAT_PORT)
+      expect((sent[0].params.content as { text: string }).text).toContain('管理员')
+      // 退避按 settle 回调的真实 repliedToHuman=false 上报(且只上一次,占位不重复报)
+      expect(internals.attentionScheduler.getCurrentIntervalMs(GROUP_SESSION)).toBe(5000)
+    })
+
+    /**
      * 兜底回复不是 manager 在说话：退避档位仍按"这一轮没出声"上报。
      * 按"出声"算 = 故障期间群聊巡检间隔被冻结在最短值，反而更吵。
      */

@@ -292,9 +292,12 @@ export class ManagerRegistry {
     correlation?: import('./loop.js').ManagerWakeCorrelation,
     /** 人类输入已持久化进对应 Manager 会话后的非关键通知。 */
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+    /** 消息被注入在跑 episode 时(PR #131),处理结果的结算委托给该 episode 的真实
+     * 收尾 result——调用方以此补跑 fail-loud,不用注入分支立即返回的占位值。 */
+    onEpisodeSettled?: (result: EpisodeResult) => void,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation, onHumanInputCommitted)
+    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation, onHumanInputCommitted, onEpisodeSettled)
   }
 
   /**
@@ -316,9 +319,12 @@ export class ManagerRegistry {
     friend?: Friend,
     /** 人类输入已持久化进对应 Manager 会话后的非关键通知。 */
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+    /** flush 消息被注入在跑 episode 时(PR #131),处理结果的结算委托给该 episode 的
+     * 真实收尾 result——调用方以此 reportResult,不用注入分支立即返回的占位值。 */
+    onEpisodeSettled?: (result: EpisodeResult) => void,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'attention_flush', channelId, sessionId, messages, friend, undefined, onHumanInputCommitted)
+    return this.routeHumanWake(capture, 'attention_flush', channelId, sessionId, messages, friend, undefined, onHumanInputCommitted, onEpisodeSettled)
   }
 
   /** 两个人类消息入口的公共路径:解析发起人身份(唤醒边界的唯一一次异步)→ 按 kind 造事件唤醒。 */
@@ -331,6 +337,7 @@ export class ManagerRegistry {
     friend?: Friend,
     correlation?: import('./loop.js').ManagerWakeCorrelation,
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+    onEpisodeSettled?: (result: EpisodeResult) => void,
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
     // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
@@ -359,6 +366,25 @@ export class ManagerRegistry {
       kind === 'human_messages'
         ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
         : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
+    // P7 cutover 遗留接线补齐(2026-08-29):episode 运行中到达的人类消息进入当前
+    // episode mailbox,turn 边界注入当前 episode 的下一轮 LLM——不再阻塞在 wakeUp 的
+    // mutex 上等本 episode 跑完。先提交(写历史+去重+回调)再注入,语义与 builtin
+    // worker 输入注入一致(参照 PR #130)。协议 §4.1「episode 进行中到达的事件直接
+    // 进入当前 Manager mailbox」同样涵盖人类消息。
+    const loop = this.getOrCreate(key)
+    if (this.isEpisodeActive(key)) {
+      // 同步入队(check 与 push 之间无 await,与 routeWorkerEvent 同构原子):
+      // 提交延后到当前 episode 收尾临界区,由 settle hook 拿真实处理结果。
+      loop.enqueueHumanWakeDuringActiveEpisode({ ...envelope, wake: event }, onHumanInputCommitted, onEpisodeSettled)
+      return {
+        episodeId: '',
+        outcome: 'completed',
+        turns: 0,
+        consumedEvents: true,
+        repliedToHuman: false,
+        successfulSendMessageTargets: [],
+      }
+    }
     return this.runWake(key, { ...envelope, wake: event }, 0, onHumanInputCommitted)
   }
 
@@ -695,7 +721,8 @@ export class ManagerRegistry {
   /**
    * episode 收口后的 mailbox 兜底(P7 阻塞项 #5):engine 在 end_turn 收口前做最后一次
    * `drainPending`,落在那之后的 `enqueueDuringEpisode` 内容没有任何消费者在等,不自唤醒
-   * 就会一直停滞在内存 mailbox 里。人类输入由 `wakeUp()` 串行提交，不走这条内存补充路径；
+   * 就会一直停滞在内存 mailbox 里。人类输入由 `wakeUp()` 串行提交或经
+   * `enqueueHumanWakeDuringActiveEpisode` 提交后注入(PR #131);
    * 这里在 episode 刚收口、引用计数刚归零的同步窗口里补一次自唤醒。
    *
    * 四道门,缺一不可:

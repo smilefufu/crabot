@@ -588,6 +588,77 @@ describe('ManagerLoop', () => {
     expect(serialized).toContain('新的话') // 第二次唤醒的新事件
   })
 
+  it('runEpisodeBody 直接 throw 时,mid-episode 注入的人类消息由 catch 分支补提交进 recent,不丢不重复', async () => {
+    const { adapter, queue } = makeAdapter()
+    // 同上一用例的 throw 路径(force-hot 折叠抛错),但 mid-episode 注入的是**人类消息**——
+    // 五审真实风险:catch 分支原来没有 commitPendingHumanInputs,注入消息不在 store、
+    // mailbox 被 drain、requeue 又按主 wake(人类,已提交)跳过 → 永久丢失。
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ stopReason: 'max_tokens' })
+
+    let loop!: ManagerLoop
+    const throwOnFold: LLMAdapter = {
+      async *stream(params) {
+        if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
+          throw new Error('boom: fold llm exhausted retries')
+        }
+        yield* adapter.stream(params)
+      },
+      updateConfig: () => {},
+    }
+
+    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const deps = baseDeps({
+      store,
+      adapter: throwOnFold,
+      policy,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [makeChannelMessage('抛错前注入的指令')] }),
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const seedMessages: EngineMessage[] = [
+      createUserMessage('旧消息1'),
+      createUserMessage('旧消息2'),
+      createUserMessage('旧消息3'),
+    ]
+    await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
+
+    await expect(
+      loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发超限并在折叠时抛错')] }))
+    ).rejects.toThrow('boom: fold llm exhausted retries')
+
+    // catch 分支补提交:注入消息落 recent + 去重键(键与文本同进),mailbox 无残留
+    const stateAfterThrow = await store.load(KEY)
+    expect(JSON.stringify(stateAfterThrow.recent)).toContain('抛错前注入的指令')
+    expect(stateAfterThrow.committedHumanMessageIds ?? []).toHaveLength(2) // 主 wake + 注入
+    expect(loop.hasPendingMailbox).toBe(false)
+
+    // 下次唤醒:注入消息经 tailMessages 可见,commitHumanInputs 按键去重不重复追加
+    queue.push({ text: '正常处理', stopReason: 'end_turn' })
+    const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
+    expect(second.outcome).toBe('completed')
+
+    const finalState = await store.load(KEY)
+    const serialized = JSON.stringify(finalState.recent)
+    expect(serialized).toContain('抛错前注入的指令')
+    expect(serialized).toContain('新的话')
+    // 「抛错前注入的指令」全历史只出现一次(tailMessages 引用同一份 recent,不重复追加)
+    expect(serialized.split('抛错前注入的指令')).toHaveLength(2)
+  })
+
   it('episode 成功:mid-episode 注入的内容已被消费进历史,下次唤醒不会重复投递', async () => {
     const { adapter, queue, calls } = makeAdapter()
     // turn1:调用工具(工具执行期间注入一条新事件,强制进入第二轮);turn2:正常结束
@@ -668,6 +739,304 @@ describe('ManagerLoop', () => {
     // turn1 请求里不应该已经看到它(证明确实是"turn 间隙"注入,不是从一开始就在 initialMessages 里)
     const turn1Messages = JSON.stringify(nonFoldCalls[0].messages)
     expect(turn1Messages).not.toContain('sched-1')
+  })
+
+  it('episode 运行中到达的人类消息:先提交(store recent+去重键+回调)再注入,当前 episode 下一轮可见', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ text: '已处理完毕', stopReason: 'end_turn' })
+
+    let loop!: ManagerLoop
+    const committedIds: string[] = []
+    const deps = baseDeps({
+      store,
+      adapter,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            // 模拟 episode 运行中人类消息到达(P7 cutover 遗留接线):提交+注入一步完成
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [makeChannelMessage('中途新指令')] }),
+              async (id) => { committedIds.push(id) },
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
+    expect(result.outcome).toBe('completed')
+
+    // 注入可见:turn2 含人类新消息,turn1 不含(turn 间隙注入,不是 initialMessages)
+    const nonFoldCalls = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    expect(JSON.stringify(nonFoldCalls[1].messages)).toContain('中途新指令')
+    expect(JSON.stringify(nonFoldCalls[0].messages)).not.toContain('中途新指令')
+
+    // 提交落盘:store recent 含消息、去重键记录、commit 回调触发
+    const state = await store.load(KEY)
+    expect(JSON.stringify(state.recent)).toContain('中途新指令')
+    expect(state.committedHumanMessageIds?.length).toBe(2) // 主 wake + mid-episode 注入
+    expect(committedIds).toHaveLength(1)
+  })
+
+  it('episode 失败:被注入消费的人类消息补提交进 recent,下次唤醒经 tailMessages 重新可见且不重复', async () => {
+    const { adapter, queue } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+
+    let loop!: ManagerLoop
+    let nonFoldCallCount = 0
+    let turn2Messages: EngineMessage[] | undefined
+    const throwOnTurn2: LLMAdapter = {
+      async *stream(params) {
+        if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
+          yield* adapter.stream(params)
+          return
+        }
+        nonFoldCallCount++
+        if (nonFoldCallCount === 2) {
+          turn2Messages = [...params.messages]
+          throw new Error('boom: simulated failure after human injection drain')
+        }
+        yield* adapter.stream(params)
+      },
+      updateConfig: () => {},
+    }
+
+    const deps = baseDeps({
+      store,
+      adapter: throwOnTurn2,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [makeChannelMessage('失败前的人类指令')] }),
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const first = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
+    expect(first.outcome).toBe('failed')
+
+    // 证明确实被注入消费过:turn2 的请求里能看到人类指令
+    expect(turn2Messages).toBeDefined()
+    expect(JSON.stringify(turn2Messages)).toContain('失败前的人类指令')
+
+    // 失败收尾把已消费的人类消息补提交进 recent——下一 episode 经 tailMessages 重新看到
+    const stateAfterFailure = await store.load(KEY)
+    expect(JSON.stringify(stateAfterFailure.recent)).toContain('失败前的人类指令')
+
+    // 下次唤醒:recent 已含该指令(不重复渲染),新输入正常处理
+    queue.push({ text: '正常处理', stopReason: 'end_turn' })
+    const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
+    expect(second.outcome).toBe('completed')
+
+    const finalState = await store.load(KEY)
+    const serialized = JSON.stringify(finalState.recent)
+    expect(serialized).toContain('失败前的人类指令')
+    expect(serialized).toContain('新的话')
+    // 失败 episode 的重投不产生重复:该指令只出现一次
+    expect(serialized.split('失败前的人类指令')).toHaveLength(2)
+  })
+
+  it('未提交的人类消息仍被 enqueueDuringEpisode 拒绝(提交前置守卫保留)', async () => {
+    const { adapter } = makeAdapter()
+    const deps = baseDeps({ store, adapter })
+    const loop = new ManagerLoop(deps)
+
+    expect(() => loop.enqueueDuringEpisode(timed({ kind: 'human_messages', messages: [makeChannelMessage('x')] })))
+      .toThrow('human messages must be committed through wakeUp')
+  })
+
+  it('重复来源(整批已提交)注入在跑 episode 时不进 LLM(协议 §4.1 重复来源守卫)', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ text: '已回复', stopReason: 'end_turn' })
+
+    let loop!: ManagerLoop
+    const deps = baseDeps({
+      store,
+      adapter,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            // 第一次:新消息,正常注入;第二次:同一 platform_message_id 重放(at-least-once),必须被挡
+            const env = timed({ kind: 'human_messages', messages: [makeChannelMessage('重放攻击消息')] })
+            await loop.enqueueHumanWakeDuringActiveEpisode(env)
+            await loop.enqueueHumanWakeDuringActiveEpisode(env)
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
+    expect(result.outcome).toBe('completed')
+
+    // 消息只被注入一次:最终上下文中恰好出现一次(messages 快照跨轮累积,看最后一轮)
+    const nonFoldCalls = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    const lastMessages = JSON.stringify(nonFoldCalls.at(-1)!.messages)
+    expect(lastMessages.split('重放攻击消息')).toHaveLength(2) // 1 次出现
+    // 去重键只记一条
+    const state = await store.load(KEY)
+    expect((state.committedHumanMessageIds ?? []).length).toBe(2) // 主 wake + 注入一次
+  })
+
+  it('部分重叠批次:已提交的旧消息不进 LLM,只注入新消息投影', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ text: '已回复', stopReason: 'end_turn' })
+
+    const oldMsg = makeChannelMessage('已经答复过的旧消息')
+    let loop!: ManagerLoop
+    const deps = baseDeps({
+      store,
+      adapter,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            // 第一批:旧消息单独到达并提交
+            await loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [oldMsg] }))
+            // 第二批:同一旧消息 + 一条新消息(渠道合并重发场景)
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [oldMsg, makeChannelMessage('全新的消息')] }),
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
+
+    // 旧消息只出现一次(第一次注入),第二次注入只带新消息投影——看最终上下文
+    const nonFoldCalls = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    const lastMessages = JSON.stringify(nonFoldCalls.at(-1)!.messages)
+    expect(lastMessages.split('已经答复过的旧消息')).toHaveLength(2) // 1 次出现
+    expect(lastMessages.split('全新的消息')).toHaveLength(2) // 1 次出现
+  })
+
+  it('注入委托的结算钩子在 episode 收尾以真实 result 触发(群聊注意力结算用)', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ text: '已回复群消息', stopReason: 'end_turn' })
+
+    let loop!: ManagerLoop
+    const settlements: Array<{ outcome: string; repliedToHuman: boolean }> = []
+    const deps = baseDeps({
+      store,
+      adapter,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [makeChannelMessage('群里的后续消息')] }),
+              undefined,
+              (result) => settlements.push({ outcome: result.outcome, repliedToHuman: result.repliedToHuman }),
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
+    expect(result.outcome).toBe('completed')
+
+    // 结算钩子以被注入 episode 的真实收尾触发一次(不是注入瞬间的编造值):
+    // 本回合以 end_turn 文本收尾(未调 send_message)→ repliedToHuman 如实为 false
+    expect(settlements).toHaveLength(1)
+    expect(settlements[0]).toEqual({ outcome: 'completed', repliedToHuman: false })
+  })
+
+  it('注入未被消费(最后一轮 drain 之后)时不提交不 discard,留 mailbox 由自唤醒按正常路径提交+投喂', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    // maxTurns=2:turn1 工具(注入未发生) → turn2 工具(此处注入,但其后 hasRemainingTurn=false 不 drain)
+    // → 轮次耗尽 max_turns 收尾(consumedEvents=true)
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ toolCalls: [{ name: 'inject_tool', id: 'call_2', input: {} }], stopReason: 'tool_use' })
+
+    let loop!: ManagerLoop
+    const deps = baseDeps({
+      store,
+      adapter,
+      maxTurns: 2,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => ({ output: 'ok', isError: false }),
+        },
+        {
+          name: 'inject_tool',
+          description: 'inject',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            // 最后一轮的工具执行后 engine 不再 drain——注入滞留 mailbox
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [makeChannelMessage('滞留指令')] }),
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const first = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
+    expect(first.outcome).toBe('max_turns') // 轮次耗尽,按已消费收口(consumedEvents=true)
+
+    // 五审语义:未被消费的注入在成功收尾**不提交、不 discard、不记键**,envelope 留在
+    // mailbox——hasPendingMailbox 触发自唤醒,由下个 episode 按正常路径提交+投喂(提交
+    // 了就没有 episode 回答它;先提交再留邮箱则自唤醒被去重键打成空转)
+    const stateAfter = await store.load(KEY)
+    expect(JSON.stringify(stateAfter.recent)).not.toContain('滞留指令')
+    expect(stateAfter.committedHumanMessageIds ?? []).toHaveLength(1) // 仅主 wake
+    expect(loop.hasPendingMailbox).toBe(true)
+
+    // 自唤醒/下次唤醒:mailbox 残留经 carry 正常提交(键未记,不被去重跳过),LLM 看到
+    queue.push({ text: '补看滞留消息', stopReason: 'end_turn' })
+    const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
+    expect(second.outcome).toBe('completed')
+
+    const secondCall = calls[calls.length - 1]
+    expect(JSON.stringify(secondCall.messages)).toContain('滞留指令')
+    const finalState = await store.load(KEY)
+    const finalText = JSON.stringify(finalState.recent)
+    expect(finalText).toContain('滞留指令')
+    expect(finalText).toContain('新的话')
+    expect(finalState.committedHumanMessageIds?.length).toBe(3) // 主 wake + 滞留 + 新的话
   })
 
   it('activity 仅入 mailbox 时保持 pending，进入下一次 LLM 输入前才确认', async () => {
@@ -1390,6 +1759,97 @@ describe('ManagerLoop', () => {
       expect(continued.outcome).toBe('completed')
       expect(JSON.stringify(calls[2].messages)).not.toContain('[系统复核]')
       expect(JSON.stringify(calls[2].messages).match(/已经确认入站的人类输入/g)).toHaveLength(1)
+    })
+
+    it('复核 continuation（max_turns 外层）失败时，期间被 drain 的注入人类消息还原回 mailbox 不丢失', async () => {
+      // 十审真实风险：外层复核 continuation 的 finalMessages 仅在接管时保留，失败分支
+      // 丢弃——期间被 engine drain 掉的注入人类消息文本随之丢失。若收尾只按「已被消费」
+      // 补去重键，渠道重投被键挡掉、mailbox 又空（不触发自唤醒）→ 键在文本无=静默永久丢失。
+      const { states, traceWriter } = traceRecorder()
+      let streamCount = 0
+      let loop!: ManagerLoop
+      const injectedMsgs: ChannelMessage[] = [
+        { ...makeChannelMessage('首次注入的指令'), platform_message_id: 'pm-injected-first' },
+        { ...makeChannelMessage('复核期间注入的指令'), platform_message_id: 'pm-injected-recheck' },
+      ]
+      const adapter: LLMAdapter = {
+        async *stream() {
+          streamCount++
+          if (streamCount === 1) {
+            // 第一次尝试 turn1：send（记复核标记）+ noop（tool 内注入）
+            yield* chunksFromContent([
+              { type: 'tool_use', id: 'send-1', name: 'send_message', input: { post_send_action: 'spawn_worker' } },
+              { type: 'tool_use', id: 'noop-1', name: 'noop_tool', input: {} },
+            ], 'tool_use')
+            return
+          }
+          if (streamCount === 2) {
+            // 第一次尝试 turn2：继续 tool_use，让第一次尝试以 max_turns 收口（走外层复核）
+            yield* chunksFromContent([
+              { type: 'tool_use', id: 'noop-2', name: 'noop_tool', input: {} },
+            ], 'tool_use')
+            return
+          }
+          if (streamCount === 3) {
+            // 复核 continuation turn1：noop tool 内注入——该注入在其 turn2 前被 drain 吃掉
+            yield* chunksFromContent([
+              { type: 'tool_use', id: 'noop-3', name: 'noop_tool', input: {} },
+            ], 'tool_use')
+            return
+          }
+          // 复核 continuation turn2：drain 已吃掉注入，此后 continuation 失败——
+          // 其 finalMessages（含注入文本）被丢弃
+          throw new Error('recheck provider unavailable')
+        },
+        updateConfig: () => {},
+      }
+      loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        maxTurns: 2,
+        traceWriter,
+        toolFace: () => [
+          defineTool({
+            name: 'send_message', description: 'deliver', inputSchema: { type: 'object', properties: {} },
+            call: async () => {
+              loop.recordPostSendAction()
+              return { output: 'sent' }
+            },
+          }),
+          defineTool({
+            name: 'noop_tool', description: 'noop', inputSchema: { type: 'object', properties: {} },
+            call: async () => {
+              const message = injectedMsgs.shift()
+              if (message) {
+                await loop.enqueueHumanWakeDuringActiveEpisode(
+                  timed({ kind: 'human_messages', messages: [message] }),
+                )
+              }
+              return { output: 'ok', isError: false }
+            },
+          }),
+        ],
+      }))
+
+      const failed = await loop.wakeUp(timed({
+        kind: 'human_messages',
+        messages: [makeChannelMessage('原始请求')],
+      }))
+
+      expect(failed.outcome).toBe('max_turns')
+      expect(failed.consumedEvents).toBe(true)
+      expect(states).toEqual(['marked', 'recheck_injected', 'recheck_failed_open', 'unresolved_accepted'])
+      // 修复判据：注入消息未被消费——还原回 mailbox 触发自唤醒，store 无键无文本（同进同出）
+      expect(loop.hasPendingMailbox).toBe(true)
+      const state = await store.load(KEY)
+      expect(JSON.stringify(state.recent)).not.toContain('复核期间注入的指令')
+      expect(state.committedHumanMessageIds ?? []).not.toContain('pm-injected-recheck')
+
+      // 自唤醒补跑：注入消息正常提交+投喂
+      await loop.drainMailbox()
+      const after = await store.load(KEY)
+      expect(JSON.stringify(after.recent)).toContain('复核期间注入的指令')
+      expect(JSON.stringify(after.recent)).toContain('原始请求')
     })
 
     it('失败 episode 不保留标记：记录 unresolved_failed，重试时不再注入复核', async () => {

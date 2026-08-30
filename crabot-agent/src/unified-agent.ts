@@ -1835,7 +1835,8 @@ export class UnifiedAgent extends ModuleBase {
    * （私聊一般同一人；个别 friend 切换的边缘情况按最新一条处理）。
    *
    * **必须 await manager episode**：lane 的串行语义靠它，兜底回复（fail-loud）也要靠它
-   * 拿到 outcome。改成 fire-and-forget 会让两者同时失效。
+   * 拿到 outcome。改成 fire-and-forget 会让两者同时失效。（例外：mid-episode 注入分支
+   * 返回占位 result 即走，顺序改由 mailbox 与宿主 episode 收尾保证，见 episodeId === '' 判定。）
    *
    * Spec: crabot-docs/superpowers/plans/2026-08-01-mw-p7-j-cutover.md §一
    */
@@ -1848,6 +1849,8 @@ export class UnifiedAgent extends ModuleBase {
     const session = messages[0].session
 
     let result
+    // 消息被注入在跑 episode 时(PR #131):占位 result 的 outcome 恒为 completed,
+    // fail-loud 委托给被注入 episode 的真实收尾——失败在这里补发兜底回复。
     try {
       result = await this.requireManagerStack().registry.routeHumanMessages(
         session.channel_id,
@@ -1860,6 +1863,17 @@ export class UnifiedAgent extends ModuleBase {
           session.session_id,
           lastCommittedMessageId,
         ),
+        (settled) => {
+          if (settled.outcome === 'failed' || settled.outcome === 'aborted') {
+            console.error(
+              `[${this.config.moduleId}] processDirectBatch injected episode outcome=${settled.outcome}`,
+            )
+            void this.sendFailLoudReply(session.channel_id, session.session_id, {
+              kind: 'outcome',
+              outcome: settled.outcome,
+            }).catch((err) => console.error(`[${this.config.moduleId}] processDirectBatch settle fail-loud failed:`, err))
+          }
+        },
       )
     } catch (err) {
       console.error(
@@ -1869,6 +1883,9 @@ export class UnifiedAgent extends ModuleBase {
       await this.sendFailLoudReply(session.channel_id, session.session_id, { kind: 'threw', error: err })
       return
     }
+
+    // 注入占位:真实收尾前 outcome/repliedToHuman 都是编造的,不做任何判定与计数。
+    if (result.episodeId === '') return
 
     if (result.outcome === 'failed' || result.outcome === 'aborted') {
       console.error(
@@ -1913,6 +1930,10 @@ export class UnifiedAgent extends ModuleBase {
     const session = messages[0].session
 
     let repliedToHuman = false
+    // flush 消息被注入在跑 episode 时(PR #131):结算委托给该 episode 的真实收尾
+    // (episodeId==='' 的占位 result 不带真实 repliedToHuman),不能再用它 reportResult——
+    // 否则「实际回复了」会被记成沉默,群聊注意力错误 ×5 渐远。
+    let settleDelegated = false
     try {
       const result = await this.requireManagerStack().registry.routeAttentionFlush(
         session.channel_id,
@@ -1924,8 +1945,25 @@ export class UnifiedAgent extends ModuleBase {
           sessionId,
           lastCommittedMessageId,
         ),
+        (settled) => {
+          settleDelegated = true
+          this.attentionScheduler.reportResult(sessionId, settled.repliedToHuman)
+          // 注入场景占位 result 的 outcome 恒为 completed(六审):被注入 episode 真实
+          // 收尾 failed/aborted 时在此补发兜底回复,与 processDirectBatch 对称;
+          // 多条注入同 episode 失败的刷屏由 sendFailLoudReply 的按 key 冷却收口。
+          if (settled.outcome === 'failed' || settled.outcome === 'aborted') {
+            console.error(
+              `[${this.config.moduleId}] processGroupLaneBatch injected episode outcome=${settled.outcome}`,
+            )
+            void this.sendFailLoudReply(session.channel_id, sessionId, {
+              kind: 'outcome',
+              outcome: settled.outcome,
+            }).catch((err) => console.error(`[${this.config.moduleId}] processGroupLaneBatch settle fail-loud failed:`, err))
+          }
+        },
       )
       repliedToHuman = result.repliedToHuman
+      settleDelegated = result.episodeId === ''
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         console.error(
           `[${this.config.moduleId}] processGroupLaneBatch manager episode outcome=${result.outcome}`,
@@ -1945,7 +1983,10 @@ export class UnifiedAgent extends ModuleBase {
 
     // 兜底回复不是 manager 在说话：退避档位仍按"这一轮没出声"上报，
     // 否则故障期间群聊巡检间隔会被冻结在当前值。
-    this.attentionScheduler.reportResult(sessionId, repliedToHuman)
+    // 注入委托场景(settleDelegated)已由被注入 episode 收尾以真实结果结算,此处跳过。
+    if (!settleDelegated) {
+      this.attentionScheduler.reportResult(sessionId, repliedToHuman)
+    }
   }
 
   /**
@@ -2549,6 +2590,19 @@ export class UnifiedAgent extends ModuleBase {
         // commit 进 manager 会话后 best-effort 通知 admin，web 在对应用户消息上渲染标记，
         // 与 channel 的 acknowledged reaction 同语义同时机。失败只落日志，不影响回复链路。
         () => this.ackAdminChatHumanInput(callbackInfo.request_id),
+        // 注入在跑 episode 时(PR #131):占位 result 恒 completed,F1 判不到真实失败——
+        // 若被注入 episode 最终 failed/aborted,结算委托给该 episode 的真实收尾 result,
+        // 在此补发 fail-loud(否则 consumedEvents=false 不走 settleUnclaimedAdminChatWakes,
+        // 失败无声)。占位气泡已随 PR #135 退役,此处 fail-loud 只负责把失败说出口。
+        (settled) => {
+          if (settled.outcome === 'failed' || settled.outcome === 'aborted') {
+            console.error(
+              `[${this.config.moduleId}] processAdminChatMessage injected episode outcome=${settled.outcome}`,
+            )
+            void this.sendFailLoudReply('admin-web', sessionId, { kind: 'outcome', outcome: settled.outcome }, callbackInfo.request_id)
+              .catch((err) => console.error(`[${this.config.moduleId}] processAdminChatMessage settle fail-loud failed:`, err))
+          }
+        },
       )
     } catch (err) {
       // F2：episode 中途抛错。
@@ -2564,6 +2618,11 @@ export class UnifiedAgent extends ModuleBase {
       }
       return { decision_types: [] }
     }
+
+    // 注入占位:真实收尾前 outcome/repliedToHuman 都是编造的——失败由 settle 回调补发
+    // fail-loud(见上面回调);noteEpisodeSilence 在注入场景不触发(私聊同,仅影响排障
+    // 日志)。RPC 先按"暂无直接回复"返回,真实回复由后续 delivery 推送(chat_push)。
+    if (result.episodeId === '') return { decision_types: [] }
 
     if (result.outcome === 'failed' || result.outcome === 'aborted') {
       // F1：`ManagerLoop` 记下 failed/aborted 后**正常 resolve**，不抛。只写 try/catch 抓不住。

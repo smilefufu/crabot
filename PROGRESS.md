@@ -1,9 +1,77 @@
 # Crabot 项目进度
 
-> 最后整理：2026-08-29
+> 最后整理：2026-08-30
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
+
+### manager 人类消息 turn 间注入（含 builtin worker 输入 turn 边界投递）：PR #131（待合并）+ PR #130（已合并 `bad70ce4`）
+
+- 引线：2026-08-29 两起现网案例。① builtin 监控 worker 用 `Output(block=true)` 无限轮询
+  （94 turn 连续 3.5h 不 end_turn），manager 三次投递（含 immediate_redirect）压队 43 分钟
+  未达——投递消费点实际在 burst 边界（end_turn）；② 用户 19:35:50 发消息，manager 19:36:06
+  仍在问旧问题，19:36:47 才处理——`routeHumanWake` 直接 `runWake` 阻塞等前一 episode，
+  P7 cutover roadmap D 项「把人类消息接到 enqueueDuringEpisode」的接线在实现中遗漏。
+- 契约口径（用户拍板）：投递/注入消费点**一直是 turn 边界**；协议 §5.5「burst 自然结束后」
+  为 spec 措辞错误。两份契约文档随修复对齐。
+- PR #130（已合并）：builtin worker 输入 turn 边界注入（engine `drainExternalInputs` +
+  Output 探针提前返回，投递可见性从小时级降到 ≈2s）+ 协议 v3.6.15（docs `93975cf`）+
+  spec 2026-08-20 同步。review 三轮：真实风险 2 项（测试 gate 失效、`[manager input]`
+  前缀误标系统通知）已修。
+- PR #131（OPEN，三项门禁均已解除：① 权限立项已随 #133 落地（`57b6ea87`）；
+  ② §4.1 例外措辞已随 docs `ef6888ff` 进协议（admin 0.2.7 / agent-v3 3.6.16）；
+  ③ 九审唯一阻塞线程（Admin Chat 注入 fail-loud 冷却 → 占位气泡永久挂死）的前提
+  已随 #135 占位退役消失，fail-loud 冷却语义保留。已 merge origin/main 解 CONFLICTING，
+  push 触发 auto review，等最终复核合入）：
+  manager 人类消息 episode 运行中到达时**同步**入
+  mailbox 走 turn 边界注入（check→push 零 await，与 routeWorkerEvent 同构原子）；store 提交
+  延后到 episode 收尾临界区统一落盘（mutex 内单写者，消除注入 RMW 与收尾 save 的 lost
+  update）；attention flush / 私聊 / Admin Chat 的结算与 fail-loud 全部委托被注入 episode
+  的真实收尾（占位 result 不参与判定）。六轮 review：真实风险累计 9 项已修（未消费注入
+  键在 recent 无=永久丢失；假结算 ×5 渐远；重复来源注入 LLM；RMW 并发；check-to-push
+  窗口；占位 result 打掉私聊/Admin Chat fail-loud；catch 分支丢注入；discard 打掉自唤醒；
+  currentEpisodeInjected 重复入账致 max_tokens 重试渲染两遍）。六审非阻塞观察已处置：
+  删 commitHumanInputs 的 injectedEnvelope 残留（无消费者）、两处注释纠偏、待办池补记
+  （见下 2/3）。
+- **#131 待办与 follow-up 池**：
+  1. ~~群聊消息档位随消息~~ → **已定性更正并立项**：原条目「spec 从未定义按发起人区分
+     权限」不准确——§3.2.7 与 narrowWorkerPermissions（PR F/J）的既有实现就是按发言人
+     区分（reviewer 反驳成立）。用户拍板：**群聊权限群级统一、与发言人无关（含 master
+     在群里也按群档位），之前按发言人区分的 spec 视为设计错误**，单独立项推翻（spec
+     流程）；#131 在该立项落地前不合入，落地后注入与 primary wake 同档位，权限线程
+     前提消失。另：§4.1「首次 LLM/工具调用前原子写入」与收尾提交的字面冲突需协议补
+     注入场景例外（措辞随权限 spec 一并确认）。
+  2. 注入路径未过 `assertWakeAdmission`——isClosing 关停期间消息被静默收下返回 completed，
+     调用方拿不到 fail-loud 信号。~~已落盘不丢~~（六审指出该理由已过期：四审后注入改
+     为收尾才落盘）；实际收口路径：优雅停机走 abort → settleInjectedHooks(failed) →
+     settle 回调补 fail-loud，通路正常；硬杀才会丢（注入尚未落盘）。后续统一收口。
+  3. 结算钩子丢弃窗口——提前 return / `settleInjectedHooks` 之后到达的注入，其 hook 会在
+     下个 episode 起始被清掉不触发 → 该批 flush 没人 reportResult。六审补记两个同定性
+     入口：a) 重复来源批次（newEntries.length===0）提前 return 时 settle hook **从未
+     注册**，该批 flush 永不 reportResult（Admin Chat 侧 claims 在 return 前已登记，
+     仍能被 settleUnclaimedAdminChatWakes 结算）；b) 注入落在 runWake 计数 +1 与
+     runEpisode 起始同步重置之间时，hook 与 pendingHumanCommit 记录一起被重置清掉——
+     消息本身安全（已在 mailbox，作 carried envelope 走正常提交），仅 settle 与
+     reaction 回调不触发，窗口窄（恰好落在 mutex 获取那一跳）；c) runEpisode 开头
+     「重复来源/空批空转」提前 return（committedHumanMessages===0 且 carriedTexts 空
+     且 eventText 空）同样不调 settleInjectedHooks 即返回，且前面隔着 ensureSession /
+     load / commitHumanInputs 三次真实 I/O await，窗口比 b 宽（七审补记，定性相同）。
+     后果（review 追过 scheduler 实现）：仅 `lastActionTime` 不更新，下一条消息 enqueue 时立即 flush，是
+     「更积极」而非「变哑」，可接受。
+  4. 注入未被 drain 时的委托值失真——消息实际由自唤醒 episode 处理，却以被注入 episode
+     的 repliedToHuman 结算；一次性误报非系统性偏置，可接受。
+  5. ~~fail-loud 只闭合了「丢失」~~ → **已修**（eef9f991）：onEpisodeSettled 透传
+     routeHumanMessages，私聊/Admin Chat 在真实收尾 failed/aborted 时补发 fail-loud
+     （Admin Chat 带 request_id 走 delivery CAS 结占位气泡）。
+  6. 成功收尾时未被消费的注入留 mailbox 交自唤醒（五审修法），其 reaction 回调随之丢失
+     （自唤醒无调用方回调）——与「写入即已接收」自洽（尚未写入本就不该打），窗口窄，
+     如实记录不立项。
+  7. commitPendingHumanInputs 在首个 await 前清空 pendingHumanCommit（六审非阻塞观察）：
+     放弃分支里它自身抛错（store I/O 故障）时，catch 的二次调用看到空队列并报
+     injectedHumansCommitted=true → 注入既未落盘也不重投。理论风险（收尾时 store 故障），
+     后续统一收口。
+  8. （#130 遗留）redirect 对 builtin 是否允许 interrupt/腰斩工具；v2 agent-handler 遗留
+     （humanQueue/ask_human）清理；Output 超时参数与连续 block 硬性封顶。
 
 ### Admin Chat 删占位气泡 + 已接收标记（UX 对齐 channel）：已合并（PR #135 → `d7b62171`）
 
@@ -60,7 +128,7 @@
   级快照旧 provider，直到 episode/loop 结束才全面换走（spec §2.2 非目标、协议 3.6.17
   已写明）。
 
-### 群聊权限群级统一（与发言人无关）：PR #133（待合并）
+### 群聊权限群级统一（与发言人无关）：已合并（PR #133 → `57b6ea87`）
 
 - 决策（2026-08-30）：群聊有群聊的权限，与发言人无关（含 master 在群里也按群档位）；
   推翻 protocol-admin §3.2.7 原按发言人解析的群聊语义。spec + 协议（admin 0.2.7 /

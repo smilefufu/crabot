@@ -282,6 +282,27 @@ export class ManagerLoop {
    */
   private currentEpisodeInjected: TimedWakeEnvelope[] | null = null
   /**
+   * 注入方委托的结算钩子(PR #131 review):mid-episode 注入的人类消息(如群聊
+   * attention flush)其调用方关心的处理结果由被注入 episode 的真实收尾回答——
+   * episode 收尾时以真实 result 逐个调用并清空。runEpisode 进入时重置。
+   */
+  private currentEpisodeSettleHooks: Array<(result: EpisodeResult) => void> = []
+  /**
+   * 待提交的注入人类消息(PR #131 四审):注入路径不做 store RMW(与在跑 episode 的
+   * 收尾 save 并发会互相覆盖),只登记到这里;episode 收尾临界区(mutex 内)统一
+   * commitHumanInputs 落盘。runEpisode 进入时清空。
+   */
+  private pendingHumanCommit: Array<{
+    envelope: TimedWakeEnvelope
+    onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>
+  }> = []
+  /**
+   * 本 episode 已提交人类消息 id 的内存镜像(runEpisode 开头 commit 后置位):注入
+   * 投影的同步判定依据。与 store 的偏差方向安全——镜像缺失的 id 在收尾提交时仍被
+   * store 层去重兜底。
+   */
+  private knownCommittedHumanIds: Set<string> = new Set()
+  /**
    * P5 Task 4 additive:本 episode 的 primary 唤醒事件,供非 daily reflection 的
    * `deps.toolFace(wakeEvent)` 按"这次是被什么唤醒的"装配工具面。与 `currentEpisodeInjected`
    * 同一套生命周期纪律(runEpisode 进入时置、finally 清),因此天然是**每 episode 精确**的
@@ -434,10 +455,15 @@ export class ManagerLoop {
   }
 
   /** episode 进行中到达的新事件:渲染成文本推进内部邮箱,由 engine 的 humanMessageQueue
-   *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。 */
-  enqueueDuringEpisode(envelope: TimedWakeEnvelope): void {
+   *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。
+   *
+   *  人类消息默认拒绝:必须先经 commitHumanInputs 写入会话历史(协议 §4.1「人类入站
+   *  提交」)才可注入,否则 failed/aborted 后会把 LLM 已见过的输入当新 wake 重放。
+   *  唯一合法入口是 `enqueueHumanWakeDuringActiveEpisode`(先提交、再带
+   *  `humanWakePreCommitted` 放行)。 */
+  enqueueDuringEpisode(envelope: TimedWakeEnvelope, opts?: { humanWakePreCommitted?: boolean }): void {
     assertTimedWakeEnvelope(envelope)
-    if (isHumanWake(envelope.wake)) {
+    if (isHumanWake(envelope.wake) && !opts?.humanWakePreCommitted) {
       throw new Error('human messages must be committed through wakeUp, not queued during an episode')
     }
     this.mailbox.push(envelope)
@@ -448,11 +474,66 @@ export class ManagerLoop {
   }
 
   /**
+   * episode 运行中到达的人类消息(P7 cutover 遗留接线,2026-08-29 补):**同步**入
+   * mailbox 走 turn 边界注入(check 与 push 之间无 await,与 routeWorkerEvent 同构
+   * 原子);store 提交延后到本 episode 收尾临界区(mutex 内,见 commitPendingHumanInputs)
+   * ——绝不在 mutex 外对 session state 做第二个 RMW(PR #131 四审真实风险:与收尾
+   * save 并发互相覆盖)。
+   *
+   * - 投影按 knownCommittedHumanIds 内存镜像同步计算:整批已提交(重放/渠道重发)→
+   *   只登记 admin chat claims 后返回,不进 LLM(协议 §4.1 重复来源守卫,与 idle
+   *   空转守卫同语义);部分重叠 → 只注入新消息投影。
+   * - 崩溃窗口如实说明:提交延后意味着「注入后、收尾前」进程崩溃时该消息丢失——
+   *   与修复前消息在 lane 内存队列等 mutex 的崩溃窗口同级,不劣于现状。
+   */
+  enqueueHumanWakeDuringActiveEpisode(
+    envelope: TimedWakeEnvelope,
+    onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+    onEpisodeSettled?: (result: EpisodeResult) => void,
+  ): void {
+    assertTimedWakeEnvelope(envelope)
+    const newEntries = isHumanWake(envelope.wake)
+      ? envelope.wake.messages
+          .map((message, index) => ({ message, index }))
+          .filter(({ message }) => !this.knownCommittedHumanIds.has(message.platform_message_id))
+      : []
+    for (const id of envelope.correlation?.admin_chat_request_ids ?? []) {
+      if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
+    }
+    if (newEntries.length === 0) return
+    for (const { message } of newEntries) this.knownCommittedHumanIds.add(message.platform_message_id)
+    const projected = isHumanWake(envelope.wake)
+      ? projectHumanEnvelope(envelope, newEntries)
+      : envelope
+    this.pendingHumanCommit.push({ envelope: projected, onHumanInputCommitted })
+    // currentEpisodeInjected 由 enqueueDuringEpisode 内部统一入账,此处不重复 push
+    // (五审:重复 push 会让 max_tokens 兜底重试把同一消息渲染两遍)。
+    this.enqueueDuringEpisode(projected, { humanWakePreCommitted: true })
+    // 结算委托:调用方关心的「这批消息最终有没有被回复」由被注入 episode 的收尾
+    // 真实 result 回答(同 episode 收尾 detectRepliedToHuman),不由注入调用编造。
+    if (onEpisodeSettled) this.currentEpisodeSettleHooks.push(onEpisodeSettled)
+  }
+
+  /**
    * 唤醒事件 → 投喂给 LLM 的文本。渲染是 envelope 的纯函数，不读取当前时钟；
    * mailbox carry、失败重投或 overflow retry 即使重新渲染，也会得到逐字相同的文本。
    */
   private renderEnvelope(envelope: TimedWakeEnvelope): string {
     return renderTimedWakeEnvelope(envelope)
+  }
+
+  /** 注入结算钩子的统一出口(PR #131):正常收口 / 失败收口 / throw 三条路径都以各自
+   *  的真实 result 调用注册方(见 enqueueHumanWakeDuringActiveEpisode),调用后清空。 */
+  private settleInjectedHooks(result: EpisodeResult): void {
+    const hooks = this.currentEpisodeSettleHooks
+    this.currentEpisodeSettleHooks = []
+    for (const hook of hooks) {
+      try {
+        hook(result)
+      } catch (error) {
+        console.warn('[ManagerLoop] episode settle hook failed (ignored):', error instanceof Error ? error.message : String(error))
+      }
+    }
   }
 
   /** `event === undefined` ⇒ 自唤醒(见 `drainMailbox`):只处理 mailbox 残留,不渲染唤醒事件。 */
@@ -479,6 +560,9 @@ export class ManagerLoop {
       }
     }
     this.currentEpisodeInjected = []
+    this.currentEpisodeSettleHooks = []
+    this.pendingHumanCommit = []
+    this.knownCommittedHumanIds = new Set()
     this.currentWakeEvent = envelope ?? null
     this.currentEpisodeEnvelopes = episodeEnvelopes
     this.needsSpawnRecheck = false
@@ -510,6 +594,8 @@ export class ManagerLoop {
       state = committed.state
       committedHumanMessages = committed.messageCount
       humanInputsCommitted = true
+      // 已提交人类消息 id 的内存镜像:mid-episode 注入的投影判定用它(同步、无 store I/O)
+      this.knownCommittedHumanIds = new Set(state.committedHumanMessageIds ?? [])
       if (committed.lastCurrentWakeCommittedMessageId) {
         this.notifyHumanInputCommitted(onHumanInputCommitted, committed.lastCurrentWakeCommittedMessageId)
       }
@@ -573,6 +659,7 @@ export class ManagerLoop {
       // 否则 wake 永不 settled，每次 Agent 重启都重放历史消息。已 claim 的由 delivery
       // confirm 结算；失败（consumedEvents=false）的整批重投不结算。
       if (result.consumedEvents) await this.settleUnclaimedAdminChatWakes()
+      this.settleInjectedHooks(result)
       return result
     } catch (err) {
       // admission 与直接 throw 都在这里收口。人类提交一旦完成，仅重投非人类事件；否则保留
@@ -584,11 +671,26 @@ export class ManagerLoop {
         })
       }
       const injectedEnvelopes = this.currentEpisodeInjected ?? []
+      // 注入的人类消息先补提交(PR #131 五审真实风险:catch 分支原来没有这一步,
+      // pendingHumanCommit 里的注入既不在 store、又被 settleFailedEpisodeEnvelopes
+      // drain+按主 wake 提交状态跳过重投 → 永久丢失)。与放弃分支同语义:throw 已
+      // 丢弃 finalMessages 副本,必须以 recent 形式保留。提交失败(往往就是 store
+      // 故障与本 err 同源)只记日志、不掩盖原 err;injectedHumansCommitted=false 时
+      // settleFailedEpisodeEnvelopes 把注入人类 wake requeue 回 mailbox,自唤醒按
+      // 正常路径重新提交,消息仍不丢。
+      let injectedHumansCommitted = false
+      try {
+        await this.commitPendingHumanInputs(false)
+        injectedHumansCommitted = true
+      } catch (commitErr) {
+        console.error('[ManagerLoop] episode throw 后注入人类消息补提交失败:', commitErr)
+      }
       await this.settleFailedEpisodeEnvelopes(
         carriedEnvelopes,
         envelope,
         injectedEnvelopes,
         humanInputsCommitted,
+        injectedHumansCommitted,
       )
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
@@ -596,6 +698,14 @@ export class ManagerLoop {
       this.mailbox.clearContextAdmissions()
       this.admittedActivityReceipts.clear()
       this.rejectedActivityReceipts.clear()
+      this.settleInjectedHooks({
+        episodeId,
+        outcome: 'failed',
+        turns: 0,
+        consumedEvents: false,
+        repliedToHuman: false,
+        successfulSendMessageTargets: [],
+      })
       throw err
     } finally {
       this.currentEpisodeInjected = null
@@ -747,6 +857,14 @@ export class ManagerLoop {
         ...attempt.result.finalMessages,
         createUserMessage(POST_SEND_ACTION_RECHECK_PROMPT),
       ]
+      // 复核 continuation 期间 engine 可能在 turn 间隙 drain 掉注入(含人类消息)。其
+      // finalMessages 只在下方接管(attempt = continuation)时保留;失败分支丢弃它们——
+      // 被 drain 的注入人类消息若不还原,收尾会按「已被消费」只补去重键,渠道重投被键
+      // 挡掉、mailbox 又空(不触发自唤醒)→ 键在文本无 = 静默永久丢失(十审真实风险)。
+      // 捕获期间被 drain 的 envelope,失败时把人类消息还原回 mailbox,走收尾既有的
+      // 「留 mailbox 交自唤醒」分支(键未记、文本未提交,下个 episode 正常提交+投喂);
+      // 非人类事件维持既有行为(其丢失不违反本 PR 的「人类消息不丢」承诺)。
+      this.mailbox.startDrainCapture()
       const continuation = await this.runAttempt(
         episodeId,
         state,
@@ -763,10 +881,15 @@ export class ManagerLoop {
           ...successfulSendMessageTargetsOf(continuation.result.finalMessages.slice(continuation.initialMessageCount)),
         ]
         attempt = continuation
+        // 文本已随接管保留在 finalMessages,丢弃捕获记录即可。
+        this.mailbox.takeDrainedForReplay()
       } else {
         // The recheck is advisory. Its own failure must not replay an already
         // consumable episode.
         this.recordPostSendDecision('recheck_failed_open')
+        for (const drained of this.mailbox.takeDrainedForReplay()) {
+          if (isHumanWake(drained.wake)) this.mailbox.push(drained)
+        }
       }
     }
 
@@ -808,6 +931,9 @@ export class ManagerLoop {
         }
         await this.deps.store.save(state)
       }
+      // 注入人类消息的收尾提交(PR #131 四审):必须在 recent 替换与 supervision save
+      // 之后——load 拿到的是最新 state,未被 drain 消费的追加不会被后续 save 覆盖。
+      await this.commitPendingHumanInputs(true)
     } else {
       // 放弃 episode:已落盘的折叠不回滚(见文件头)——若本次途中发生过 force_hot 折叠
       // (上面 max_tokens 兜底重试路径),carriedTexts/eventText 有可能已经作为
@@ -822,7 +948,10 @@ export class ManagerLoop {
       // currentEpisodeInjected 都完整记录了原始文本,是唯一权威来源;先 drainPending()
       // 清空 mailbox 里可能残留的"尚未被消费"那一段(它是 currentEpisodeInjected 的后缀,
       // 不清空会和下面的整体重投重复),再按到达顺序整体重投,保证至少一次投递、不丢失、不重复。
+      // 注入的人类消息由 commitPendingHumanInputs 先落 recent(它们随失败一起丢了
+      // finalMessages 副本,必须以 recent 形式保留),之后 settle 重投按去重键跳过。
       const injectedEnvelopes = this.currentEpisodeInjected ?? []
+      await this.commitPendingHumanInputs(false)
       await this.settleFailedEpisodeEnvelopes(carriedEnvelopes, envelope, injectedEnvelopes, true)
     }
 
@@ -876,7 +1005,12 @@ export class ManagerLoop {
       committedHumanMessageIds: Array.from(committedIds),
     }
     await this.deps.store.save(next)
-    return { state: next, humanMessages: committedMessages, messageCount: committedMessages.length, lastCurrentWakeCommittedMessageId }
+    return {
+      state: next,
+      humanMessages: committedMessages,
+      messageCount: committedMessages.length,
+      lastCurrentWakeCommittedMessageId,
+    }
   }
 
   private notifyHumanInputCommitted(
@@ -891,6 +1025,62 @@ export class ManagerLoop {
     } catch (err) {
       console.warn('[ManagerLoop] human input committed callback failed (ignored):', err instanceof Error ? err.message : String(err))
     }
+  }
+
+  /**
+   * 注入人类消息的收尾提交(PR #131 四审重构):mid-episode 注入路径不做 store RMW
+   * (与在跑 episode 的收尾 save 并发会互相覆盖——review 真实风险),消息登记在
+   * pendingHumanCommit,由本方法在 episode 收尾临界区(loop mutex 内)统一落盘。
+   *
+   * @param recentReplaced 本 episode 是否以 finalMessages 替换过 recent(成功收尾)。
+   *   按它分派每条注入消息:
+   *   - 已被 engine drain 消费(不在 mailbox.pending)且 recentReplaced:文本已随
+   *     替换进入历史 → 只补记去重键,不重复追加;
+   *   - 未被消费且 recentReplaced(成功收尾):**不提交、不 discard、不记键、不回调**,
+   *     envelope 原样留在 mailbox——收尾后 hasPendingMailbox 触发自唤醒(#54),下个
+   *     episode 按正常路径提交+投喂,消息立即被处理(PR #131 五审:提交了就没有
+   *     任何 episode 去回答它,「先提交再留邮箱」则自唤醒被去重键打成空转);代价是
+   *     该消息的 reaction 回调挂起到自唤醒提交时——自唤醒无调用方回调,reaction
+   *     实际丢失,与「写入即已接收」自洽(尚未写入,本就不该打);
+   *   - recentReplaced=false(failed/aborted/throw,finalMessages 已丢弃):先从
+   *     mailbox 移除,再正常提交(recent 追加文本+去重键)——消息必须以 recent
+   *     形式保留,fail-loud 由 settle 回调补发。
+   * 回调(onHumanInputCommitted)在提交落定后触发。调用方必须在 loop mutex 内。
+   */
+  private async commitPendingHumanInputs(recentReplaced: boolean): Promise<void> {
+    if (this.pendingHumanCommit.length === 0) return
+    const pending = this.pendingHumanCommit
+    this.pendingHumanCommit = []
+    let state = await this.deps.store.load(this.deps.key)
+    let dirty = false
+    for (const rec of pending) {
+      if (recentReplaced && this.mailbox.isPending(rec.envelope)) continue // 留 mailbox 交自唤醒
+      const lastMessageId = isHumanWake(rec.envelope.wake)
+        ? rec.envelope.wake.messages.at(-1)?.platform_message_id
+        : undefined
+      if (recentReplaced) {
+        // 已被 drain 消费且 recent 已替换:文本已进历史,只补去重键
+        const ids = isHumanWake(rec.envelope.wake)
+          ? rec.envelope.wake.messages.map((m) => m.platform_message_id)
+          : []
+        const merged = new Set([...(state.committedHumanMessageIds ?? []), ...ids])
+        state = { ...state, committedHumanMessageIds: Array.from(merged) }
+        dirty = dirty || ids.length > 0
+      } else {
+        // 失败收尾(finalMessages 已随失败丢弃,必须以 recent 形式保留;残留 mailbox
+        // 的先移除,避免与 settleFailedEpisodeEnvelopes 的 carry 重投重复):正常提交追加。
+        this.mailbox.discard(rec.envelope)
+        const committed = await this.commitHumanInputs(state, [rec.envelope], rec.envelope)
+        if (committed.messageCount > 0) {
+          state = committed.state
+          dirty = true
+        }
+      }
+      if (lastMessageId) {
+        this.notifyHumanInputCommitted(rec.onHumanInputCommitted, lastMessageId)
+      }
+    }
+    if (dirty) await this.deps.store.save(state)
   }
 
   private requeueUncommittedEnvelopes(
@@ -909,6 +1099,10 @@ export class ManagerLoop {
     envelope: TimedWakeEnvelope | undefined,
     injectedEnvelopes: ReadonlyArray<TimedWakeEnvelope>,
     humanInputsCommitted: boolean,
+    // 注入的人类 wake 是否已提交(五审):与主 wake 的 humanInputsCommitted 解耦——
+    // catch 分支先跑 commitPendingHumanInputs,注入已提交时此处必须为 true(跳过重投),
+    // 而主 wake 自身的提交状态不变。缺省跟随 humanInputsCommitted(B 分支调用现状)。
+    injectedHumansCommitted: boolean = humanInputsCommitted,
   ): Promise<void> {
     this.mailbox.drainEnvelopes()
     this.mailbox.clearContextAdmissions()
@@ -919,7 +1113,7 @@ export class ManagerLoop {
     ])
     this.requeueUncommittedEnvelopes(carriedEnvelopes, humanInputsCommitted)
     if (envelope) this.requeueUncommittedEnvelopes([envelope], humanInputsCommitted)
-    this.requeueUncommittedEnvelopes(injectedEnvelopes, humanInputsCommitted)
+    this.requeueUncommittedEnvelopes(injectedEnvelopes, injectedHumansCommitted)
   }
 
   private admitActivityEnvelopes(envelopes: ReadonlyArray<TimedWakeEnvelope>): void {
@@ -1397,6 +1591,8 @@ function successfulSendMessageTargetsOf(
 class TimedWakeMailbox implements HumanMessageQueueLike {
   private pending: TimedWakeEnvelope[] = []
   private contextAdmissionEnvelopes: TimedWakeEnvelope[] = []
+  /** 非 null 时记录此后 drainPending() 拿走的 envelope(复核 continuation 失败还原用,见 runEpisodeBody)。 */
+  private drainCapture: TimedWakeEnvelope[] | null = null
   private barrierResolve: (() => void) | null = null
   private barrierTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -1409,6 +1605,29 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
     const drained = this.pending
     this.pending = []
     return drained
+  }
+
+  /** 该 envelope 是否仍在等待注入(引用比较)。收尾提交用它区分「已被 drain 消费/未消费」。 */
+  isPending(envelope: TimedWakeEnvelope): boolean {
+    return this.pending.includes(envelope)
+  }
+
+  /** 开始记录此后 drainPending() 拿走的 envelope;与 takeDrainedForReplay 成对使用。 */
+  startDrainCapture(): void {
+    this.drainCapture = []
+  }
+
+  /** 结束记录并返回期间被 drain 的 envelope(按原顺序);未开启时返回空。 */
+  takeDrainedForReplay(): TimedWakeEnvelope[] {
+    const captured = this.drainCapture ?? []
+    this.drainCapture = null
+    return captured
+  }
+
+  /** 按引用移除一个尚未注入的 envelope(收尾提交改为直接落 recent 时使用)。 */
+  discard(envelope: TimedWakeEnvelope): void {
+    const index = this.pending.indexOf(envelope)
+    if (index >= 0) this.pending.splice(index, 1)
   }
 
   takePendingActivityEnvelopes(): TimedWakeEnvelope[] {
@@ -1425,6 +1644,7 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
   drainPending(): string[] {
     const drained = this.drainEnvelopes()
     this.contextAdmissionEnvelopes.push(...drained)
+    this.drainCapture?.push(...drained)
     return drained.map(renderTimedWakeEnvelope)
   }
 
