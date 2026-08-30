@@ -7,6 +7,7 @@ import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_RETRY_DELAY_MS,
   OVERLOADED_WITHOUT_RETRY_AFTER_MAX_RETRIES,
+  RETRY_AFTER_MAX_MS,
   computeRetryDelayMs,
   getRetryAfterMs,
   interruptibleSleep,
@@ -79,10 +80,18 @@ export interface LLMStreamParams {
   readonly thinking?: LLMThinkingConfig
   readonly signal?: AbortSignal
   /**
-   * 配置变更信号。重试 sleep 期间若该信号触发，会提前唤醒并调用 onConfigChanged，
-   * 让下一次 attempt 有机会使用新的 adapter/model。
+   * 配置变更信号（边沿事件）。仅在重试 sleep **期间**触发时提前唤醒并调用
+   * onConfigChanged；入口时已 aborted 不触发任何回调（一次性信号的历史 abort
+   * 不是变更事件，否则会永久归零后续退避）。
    */
   readonly configChangedSignal?: AbortSignal
+  /**
+   * 当前已应用的配置代数 getter（与 configChangedSignal 同源，均来自运行时配置
+   * 原子替换通知）。callNonStreaming 自己记账「上次消费到的代数」：本次 attempt
+   * 失败时代数已前进 → 立即换新配置重试（跳过本次 sleep）；代数未变 → 正常退避。
+   * 这样 sleep 窗口之外的变更也不会丢，且退避只被跳过一次。
+   */
+  readonly configGeneration?: () => number
   /**
    * 配置变更后的刷新回调。返回新的 adapter/model，callNonStreaming 会在下一次 attempt 使用它们。
    */
@@ -136,11 +145,15 @@ async function withStreamConsumptionRetry(
   const startedAt = Date.now()
 
   // 重试期间配置可能热更新：currentAdapter / currentModel 允许被 onConfigChanged 替换。
+  // configGeneration 自己记账：代数已前进 → 立即换配置并跳过本次 sleep（只跳一次）；
+  // 代数未变 → 正常退避。configChangedSignal 只负责「sleep 期间」的边沿唤醒。
   let currentAdapter = adapter
   let currentModel = params.model
   let generic429Count = 0
+  let appliedGeneration = params.configGeneration?.()
 
   const applyConfigChange = async (): Promise<void> => {
+    appliedGeneration = params.configGeneration?.()
     const update = await params.onConfigChanged?.()
     if (update?.adapter) currentAdapter = update.adapter
     if (update?.model !== undefined) currentModel = update.model
@@ -182,6 +195,12 @@ async function withStreamConsumptionRetry(
     } catch (err) {
       if (params.signal?.aborted) throw err
       if (!isRetryableError(err)) throw err
+      // Retry-After 超上限：provider 要求等的时间比总预算还长，不再等待，按重试耗尽失败
+      // （错误上带尝试次数/总耗时，可诊断）。
+      const retryAfterMs = getRetryAfterMs(err)
+      if (retryAfterMs !== undefined && retryAfterMs > RETRY_AFTER_MAX_MS) {
+        throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
+      }
       // 无 Retry-After 的通用 429 单独限制次数，避免额度耗尽类伪装成通用 429 时无限拖。
       if (isOverloadedWithoutRetryAfter(err)) {
         generic429Count++
@@ -192,7 +211,7 @@ async function withStreamConsumptionRetry(
       // 放弃可重试错误时把"尝试次数/总耗时"写进错误，让失败 trace 可诊断
       // （否则 outcome 只剩一句裸 "fetch failed"，看不出是重试耗尽还是首次即挂）
       if (attempt >= maxRetries) throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
-      const actualDelay = computeRetryDelayMs(attempt, delayMs, true, getRetryAfterMs(err))
+      const actualDelay = computeRetryDelayMs(attempt, delayMs, true, retryAfterMs)
       console.error(
         `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${actualDelay}ms (backoff):`,
         err,
@@ -206,11 +225,16 @@ async function withStreamConsumptionRetry(
           source: 'stream',
         })
       } catch { /* observability callback must not break retry */ }
-      await interruptibleSleep(actualDelay, {
-        abortSignal: params.signal,
-        configChangedSignal: params.configChangedSignal,
-        onConfigChanged: applyConfigChange,
-      })
+      if (params.configGeneration && params.configGeneration() !== appliedGeneration) {
+        // 配置在本次 attempt 期间/之间已落地：立即换新配置重试，跳过本次 sleep。
+        await applyConfigChange()
+      } else {
+        await interruptibleSleep(actualDelay, {
+          abortSignal: params.signal,
+          configChangedSignal: params.configChangedSignal,
+          onConfigChanged: applyConfigChange,
+        })
+      }
       // 下一轮 loop 会用全新 processor + 重新 call adapter.stream()，
       // 服务端生成新 response（partial 浪费，但 task 能完成）
     }

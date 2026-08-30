@@ -235,7 +235,7 @@ export class AnthropicAdapter implements LLMAdapter {
       baseURL: config.endpoint,
       apiKey: config.apikey,
       httpAgent: proxyManager.getHttpsAgent(),
-      // Retries are handled by streamWithRetry() at the adapter layer.
+      // Retries are handled by callNonStreaming()（唯一缓冲整流重试层）。
       maxRetries: 0,
     })
   }

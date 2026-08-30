@@ -353,12 +353,14 @@ export interface EngineOptions {
   /**
    * LLM 重试期间配置热切换（spec 2026-08-30-llm-retry-config-hotreload）。
    *
-   * configChangedSignal 在「运行时配置 revision 已前进」时 abort；callNonStreaming 的
-   * 重试 sleep 被它提前唤醒后调用 onConfigChanged，用返回的新 adapter/model 继续
-   * 下一次 attempt（attempt 配额不因此消耗）。仅在重试 sleep 阶段生效：已经开始向
-   * 下游交付 chunk 的调用不中断。不传时行为与现状一致（重试始终用调用时的 adapter）。
+   * configChangedSignal 是「sleep 期间发生配置变更」的边沿唤醒；configGeneration 是
+   * 当前已应用配置代数的探针（callNonStreaming 记账消费，代数前进时立即换新配置并
+   * 跳过一次退避）。唤醒/换代后由 onConfigChanged 返回的新 adapter/model 继续
+   * 下一次 attempt（attempt 配额不因此消耗）。仅覆盖重试等待阶段：已经开始向下游
+   * 交付 chunk 的调用不中断。不传时行为与现状一致（重试始终用调用时的 adapter）。
    */
   readonly configChangedSignal?: AbortSignal
+  readonly configGeneration?: () => number
   readonly onConfigChanged?: () => Promise<{ adapter?: LLMAdapter; model?: string } | void>
   /** 已组装本轮 messages、即将调用 Provider 前的内部准入观察点。 */
   readonly onBeforeLlmCall?: () => void | Promise<void>

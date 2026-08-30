@@ -465,11 +465,13 @@ export interface AgentHandlerOptions {
   /** UnifiedAgent 共享的 Worker background entity registry。 */
   bgRegistry?: BgEntityRegistry
   /**
-   * 运行时配置已原子替换后的通知源（spec 2026-08-30-llm-retry-config-hotreload）：
-   * worker loop 用它构造 configChangedSignal，LLM 重试 sleep 期间配置落地时提前唤醒，
+   * 运行时配置已原子替换后的通知源与代数 getter（spec 2026-08-30-llm-retry-config-hotreload）：
+   * worker loop 用通知源构造 configChangedSignal（sleep 期间边沿唤醒），用代数 getter
+   * 作为 configGeneration 探针（消费 sleep 窗口之外落地的变更）；两者触发时
    * onConfigChanged 现解析 this.sdkEnv 换新 adapter/model 重试。未注入时无此能力。
    */
   runtimeConfigAppliedSource?: (listener: () => void) => () => void
+  runtimeConfigAppliedGeneration?: () => number
 }
 
 export interface ExecuteTriggerMessageParams {
@@ -606,8 +608,9 @@ export class AgentHandler {
   private readonly workerShellExitSettlementTimers = new Map<string, NodeJS.Timeout>()
   /** Interval handle for periodic 24h GC of dead entities */
   private gcIntervalHandle?: NodeJS.Timeout
-  /** 运行时配置原子替换通知源（见 AgentHandlerOptions.runtimeConfigAppliedSource）。 */
+  /** 运行时配置原子替换通知源与代数 getter（见 AgentHandlerOptions 同名字段）。 */
   private readonly runtimeConfigAppliedSource?: (listener: () => void) => () => void
+  private readonly runtimeConfigAppliedGeneration?: () => number
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -622,6 +625,7 @@ export class AgentHandler {
     this.sdkEnv = sdkEnv
     this.mcpConfigFactory = options?.mcpConfigFactory
     this.runtimeConfigAppliedSource = options?.runtimeConfigAppliedSource
+    this.runtimeConfigAppliedGeneration = options?.runtimeConfigAppliedGeneration
     this.deps = options?.deps
     this.systemPrompt = config.systemPrompt
     this.builtinToolConfig = options?.builtinToolConfig
@@ -1856,6 +1860,7 @@ export class AgentHandler {
           maxTurns: 2000,
           supportsVision: this.sdkEnv.supportsVision,
           configChangedSignal: configChanged.signal,
+          configGeneration: this.runtimeConfigAppliedGeneration,
           onConfigChanged: async () => ({
             adapter: adapterFromSdkEnv(this.sdkEnv),
             model: this.sdkEnv.modelId,

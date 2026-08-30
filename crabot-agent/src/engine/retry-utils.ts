@@ -2,7 +2,7 @@ export const DEFAULT_MAX_RETRIES = 5
 export const DEFAULT_RETRY_DELAY_MS = 1_000
 export const BACKOFF_MAX_DELAY_MS = 8_000
 
-/** Retry-After 延迟上限：超过此值不再等待，直接失败。 */
+/** Retry-After 延迟上限：上游要求等待超过此值时不再等待，按重试耗尽失败处理。 */
 export const RETRY_AFTER_MAX_MS = 60_000
 
 /** 无 Retry-After 的通用 429 最多重试次数。 */
@@ -198,7 +198,8 @@ export function isOverloadedError(err: unknown): boolean {
 
 /**
  * 计算单次重试前的等待时间。
- *   - retryAfterMs 有值：优先使用，上限 RETRY_AFTER_MAX_MS。
+ *   - retryAfterMs 有值：优先使用；本函数只做防御性 clamp 到 RETRY_AFTER_MAX_MS，
+ *     「超过上限按失败处理」的判定的职责在调用方（withStreamConsumptionRetry）。
  *   - useBackoff=false：固定 baseDelayMs。
  *   - useBackoff=true：base * 2^attempt（cap 在 BACKOFF_MAX_DELAY_MS）。
  *
@@ -294,17 +295,19 @@ export interface InterruptibleSleepOptions {
 
 /**
  * 可被用户取消或配置变更打断的 sleep。
- * - abortSignal 触发 → 抛 AbortError（用户主动取消）。
- * - configChangedSignal 触发 → 调用 onConfigChanged 并正常 resolve，让外层继续下一次 attempt。
+ * - abortSignal 触发 → 抛 AbortError（用户主动取消）。入口已 aborted 同样立即抛。
+ * - configChangedSignal 在**本次 sleep 期间**触发 → 调用 onConfigChanged 并正常
+ *   resolve，让外层继续下一次 attempt。
+ *
+ * 注意：configChangedSignal 是一次性 AbortSignal（AbortController 不可 reset），因此
+ * 它只表达「sleep 期间发生了变更」这一**边沿事件**；入口时已 aborted 不触发任何回调、
+ * 照常睡满——「sleep 窗口之外发生的变更」由调用方经 configGeneration 探针消费（见
+ * withStreamConsumptionRetry），否则一次变更后本次 run 内所有后续退避都会被永久归零。
  */
 export async function interruptibleSleep(ms: number, options: InterruptibleSleepOptions = {}): Promise<void> {
   const { abortSignal, configChangedSignal, onConfigChanged } = options
   if (abortSignal?.aborted) {
     throw new DOMException('Aborted', 'AbortError')
-  }
-  if (configChangedSignal?.aborted) {
-    await onConfigChanged?.()
-    return
   }
   return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
