@@ -18,16 +18,22 @@
   Output 探针提前返回，投递可见性从小时级降到 ≈2s）+ 协议 v3.6.15（docs `93975cf`）+
   spec 2026-08-20 同步。review 三轮：真实风险 2 项（测试 gate 失效、`[manager input]`
   前缀误标系统通知）已修。
-- PR #131（review 复审线程全部 resolve，待 approve）：manager 人类消息 episode 运行中
-  到达时先提交（commitHumanInputs 去重写 recent + 回调）再经 mailbox turn 边界注入；
-  attention flush 的结算委托给被注入 episode 的真实收尾（不再用注入分支占位值导致群聊
-  注意力错误 ×5 渐远）。review 首轮三条真实风险已修（未消费注入键在 recent 无=永久丢失；
-  假结算；档位沿用定性修正）。
-- **#131 follow-up 池（review 复审要求记录）**：
-  1. 群聊消息档位随消息——注入消息沿用 episode 起始 wake 发起人的 `principalPermissions`
-     （群聊 B 的指令以 A 的档位执行 worker）；spec 从未定义按发起人区分权限，属权限语义
-     设计项（方向：档位随消息 / 群聊回退排队），需单独立项。私聊同 session 唯一 friend
-     无影响。
+- PR #131（OPEN，等权限立项落地后合入）：manager 人类消息 episode 运行中到达时**同步**入
+  mailbox 走 turn 边界注入（check→push 零 await，与 routeWorkerEvent 同构原子）；store 提交
+  延后到 episode 收尾临界区统一落盘（mutex 内单写者，消除注入 RMW 与收尾 save 的 lost
+  update）；attention flush / 私聊 / Admin Chat 的结算与 fail-loud 全部委托被注入 episode
+  的真实收尾（占位 result 不参与判定）。五轮 review：真实风险累计 9 项已修（未消费注入
+  键在 recent 无=永久丢失；假结算 ×5 渐远；重复来源注入 LLM；RMW 并发；check-to-push
+  窗口；占位 result 打掉私聊/Admin Chat fail-loud；catch 分支丢注入；discard 打掉自唤醒；
+  currentEpisodeInjected 重复入账致 max_tokens 重试渲染两遍）。
+- **#131 待办与 follow-up 池**：
+  1. ~~群聊消息档位随消息~~ → **已定性更正并立项**：原条目「spec 从未定义按发起人区分
+     权限」不准确——§3.2.7 与 narrowWorkerPermissions（PR F/J）的既有实现就是按发言人
+     区分（reviewer 反驳成立）。用户拍板：**群聊权限群级统一、与发言人无关（含 master
+     在群里也按群档位），之前按发言人区分的 spec 视为设计错误**，单独立项推翻（spec
+     流程）；#131 在该立项落地前不合入，落地后注入与 primary wake 同档位，权限线程
+     前提消失。另：§4.1「首次 LLM/工具调用前原子写入」与收尾提交的字面冲突需协议补
+     注入场景例外（措辞随权限 spec 一并确认）。
   2. 注入路径未过 `assertWakeAdmission`——isClosing 关停期间消息被静默收下返回 completed，
      调用方拿不到 fail-loud 信号；已落盘不丢，后续统一收口。
   3. 结算钩子丢弃窗口——提前 return / `settleInjectedHooks` 之后到达的注入，其 hook 会在
@@ -36,10 +42,13 @@
      「更积极」而非「变哑」，可接受。
   4. 注入未被 drain 时的委托值失真——消息实际由自唤醒 episode 处理，却以被注入 episode
      的 repliedToHuman 结算；一次性误报非系统性偏置，可接受。
-  5. fail-loud 只闭合了「丢失」——注入消息随 episode 失败已补提交进 recent 不丢，但
-     调用方拿占位 completed 不触发兜底回复，消息等下一次真实唤醒才被处理；「失败即时
-     告知」留 follow-up（53905408 提交信息里「闭合 fail-loud 缺口」表述过头，以此为准）。
-  6. （#130 遗留）redirect 对 builtin 是否允许 interrupt/腰斩工具；v2 agent-handler 遗留
+  5. ~~fail-loud 只闭合了「丢失」~~ → **已修**（eef9f991）：onEpisodeSettled 透传
+     routeHumanMessages，私聊/Admin Chat 在真实收尾 failed/aborted 时补发 fail-loud
+     （Admin Chat 带 request_id 走 delivery CAS 结占位气泡）。
+  6. 成功收尾时未被消费的注入留 mailbox 交自唤醒（五审修法），其 reaction 回调随之丢失
+     （自唤醒无调用方回调）——与「写入即已接收」自洽（尚未写入本就不该打），窗口窄，
+     如实记录不立项。
+  7. （#130 遗留）redirect 对 builtin 是否允许 interrupt/腰斩工具；v2 agent-handler 遗留
      （humanQueue/ask_human）清理；Output 超时参数与连续 block 硬性封顶。
 
 ### 移除 macOS FDA 放开机制，受保护目录无条件排除：已合并（PR #129 → `3e268439`）
