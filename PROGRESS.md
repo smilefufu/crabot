@@ -48,8 +48,11 @@
      仍能被 settleUnclaimedAdminChatWakes 结算）；b) 注入落在 runWake 计数 +1 与
      runEpisode 起始同步重置之间时，hook 与 pendingHumanCommit 记录一起被重置清掉——
      消息本身安全（已在 mailbox，作 carried envelope 走正常提交），仅 settle 与
-     reaction 回调不触发，窗口窄（恰好落在 mutex 获取那一跳）。后果（review 追过
-     scheduler 实现）：仅 `lastActionTime` 不更新，下一条消息 enqueue 时立即 flush，是
+     reaction 回调不触发，窗口窄（恰好落在 mutex 获取那一跳）；c) runEpisode 开头
+     「重复来源/空批空转」提前 return（committedHumanMessages===0 且 carriedTexts 空
+     且 eventText 空）同样不调 settleInjectedHooks 即返回，且前面隔着 ensureSession /
+     load / commitHumanInputs 三次真实 I/O await，窗口比 b 宽（七审补记，定性相同）。
+     后果（review 追过 scheduler 实现）：仅 `lastActionTime` 不更新，下一条消息 enqueue 时立即 flush，是
      「更积极」而非「变哑」，可接受。
   4. 注入未被 drain 时的委托值失真——消息实际由自唤醒 episode 处理，却以被注入 episode
      的 repliedToHuman 结算；一次性误报非系统性偏置，可接受。
