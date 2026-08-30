@@ -27,6 +27,16 @@
   drain 产物（数组 content 取 text block 原文，base64 不落盘）；`commitPendingHumanInputs`
   补记 imageRefs（按渲染文本里 platform_message_id 属性定位 drain 消息 id），下一
   episode 幂等重注入。协议 v3.6.19（agent-v3）随补。
+- **插话远程 URL 预取（第三轮 review P1 修复）**：初版降级把远程图标记改写为
+  「文件不可用」——两处错误：误导（CDN 图明明可下载）且改写后文本流入持久化，
+  下一 episode marker 精确匹配不到残留死标记。改为 enqueue 时对远程图 fire-and-forget
+  预取（`fetchRemoteImage` 8s 超时，WeakMap 按 envelope 引用挂结果），drain 消费已
+  就绪结果当轮注入；未就绪/失败**保留标记原样**（不臆断原因），由收尾补记的
+  imageRefs 下一轮重试。
+- **follow-up**：context overflow 的 force-hot 重试会把插话 envelope 重渲染成纯文本
+  且使用 episode 开始时的旧 imageRefs 快照——「插话带图 + 当轮 overflow + 重试」同时
+  发生时重试后看不到图。触发需三条件叠加，概率低；且重试时上下文已爆，再注图有加剧
+  超限的风险，保守保留现状。
 
 ### manager 人类消息 turn 间注入（含 builtin worker 输入 turn 边界投递）：已合并（PR #131 → `28a3ae13`）+ PR #130（已合并 `bad70ce4`）
 

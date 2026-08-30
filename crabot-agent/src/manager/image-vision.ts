@@ -171,10 +171,11 @@ export function pruneImageRefs(
 
 // --- 插话（turn 间 drain 注入）的同步路径 ---
 //
-// HumanMessageQueueLike.drainPending() 是同步签名,engine 在 turn 边界调用;图片注入
-// 在这里只能用 readFileSync(本地几百 KB,turn 边界一次,毫秒级可接受)。远程 URL 无法
-// 同步下载:降级为保留文本标记 + 收尾补记 imageRefs,下一 episode 由 injectInboundImages
-// 走 fetch 注入。
+// HumanMessageQueueLike.drainPending() 是同步签名,engine 在 turn 边界调用;本地图注入
+// 只能用 readFileSync(几百 KB,turn 边界一次,毫秒级可接受)。远程 URL 无法同步下载:
+// enqueue 时异步预取(fire-and-forget),drain 消费已就绪结果;未就绪/失败的插话保留
+// 文本标记原样——绝不改写标记,否则收尾持久化的文本与 imageRefs 的 label 失配,
+// 下一 episode 的 marker 匹配不到会残留「文件不可用」式死标记。
 
 /** 同步读本地图片（超大小上限或不存在/不可读返回 null）。 */
 export function readImageFileSync(path: string): Buffer | null {
@@ -187,27 +188,10 @@ export function readImageFileSync(path: string): Buffer | null {
   }
 }
 
-export interface SupplementBlocksResult {
-  readonly blocks: ImageBlock[]
-  /** 同步上下文无法读取的图片（远程 URL / 读盘失败），调用方保留其文本标记 */
-  readonly failedLabels: string[]
-}
-
-/** 为插话 drain 构造图片块：本地路径同步读盘；远程 URL 与不可读来源进 failedLabels。 */
-export function buildSupplementBlocks(images: ReadonlyArray<InboundImageRef>): SupplementBlocksResult {
-  const blocks: ImageBlock[] = []
-  const failedLabels: string[] = []
-  for (const image of images) {
-    const isRemote = image.path.startsWith('http://') || image.path.startsWith('https://')
-    const buffer = isRemote ? null : readImageFileSync(image.path)
-    if (!buffer) {
-      failedLabels.push(image.label)
-      continue
-    }
-    blocks.push({
-      type: 'image',
-      source: { type: 'base64', media_type: inferMediaType(undefined, image.path), data: buffer.toString('base64') },
-    })
+/** Buffer → ImageBlock(mime 按路径推断)。 */
+export function toImageBlock(path: string, buffer: Buffer): ImageBlock {
+  return {
+    type: 'image',
+    source: { type: 'base64', media_type: inferMediaType(undefined, path), data: buffer.toString('base64') },
   }
-  return { blocks, failedLabels }
 }

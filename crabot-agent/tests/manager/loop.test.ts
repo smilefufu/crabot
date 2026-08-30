@@ -2399,7 +2399,12 @@ describe('ManagerLoop 入站图片视觉注入', () => {
     expect(nextTurnUser.length).toBeGreaterThan(0)
   })
 
-  it('插话带远程 URL 图(wechat CDN):同步无法下载,当轮降级为文本标记,imageRefs 补记供下一轮 fetch', async () => {
+  it('插话带远程 URL 图(wechat CDN):enqueue 预取就绪 → 当轮 ImageBlock,标记原样无降级文案', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      { status: 200 },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
     const { adapter, queue, calls } = makeAdapter()
     queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
     queue.push({ stopReason: 'end_turn' })
@@ -2418,6 +2423,9 @@ describe('ManagerLoop 入站图片视觉注入', () => {
             await loop.enqueueHumanWakeDuringActiveEpisode(
               timed({ kind: 'human_messages', messages: [imageMessage('cdn.jpg', 'https://cdn.example.com/cdn.jpg')] }),
             )
+            // 线上 enqueue→drain 隔着真实工具执行(宏任务级),预取必然就绪;
+            // mock 立即 resolve 全在微任务级,补一拍让 then 回调 flush,等价线上时序
+            await new Promise((resolve) => setTimeout(resolve, 0))
             return { output: 'ok', isError: false }
           },
         },
@@ -2425,16 +2433,66 @@ describe('ManagerLoop 入站图片视觉注入', () => {
     })
     loop = new ManagerLoop(deps)
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始干活')] }))
+    vi.unstubAllGlobals()
 
-    // 当轮降级:string supplement,标记改写为中性提示
+    // 当轮:supplement 为数组 content(text + ImageBlock),无任何「文件不可用」降级文案
+    const supplement = calls[1].messages.find(
+      (m) => m.role === 'user' && 'content' in m && Array.isArray(m.content),
+    ) as { content: Array<{ type: string; text?: string; source?: { data: string } }> } | undefined
+    expect(supplement).toBeTruthy()
+    expect(supplement!.content[0].text).toContain('cdn.jpg')
+    expect(supplement!.content[0].text).not.toContain('文件不可用')
+    expect(supplement!.content.filter((b) => b.type === 'image')).toHaveLength(1)
+
+    // 落盘守卫:无 base64、标记原样、imageRefs 已补记
+    const stateAfter = await store.load(KEY)
+    expect(JSON.stringify(stateAfter.recent)).not.toContain('"source"')
+    expect(JSON.stringify(stateAfter.recent)).toContain('[图片: cdn.jpg]')
+    expect(JSON.stringify(stateAfter.imageRefs)).toContain('https://cdn.example.com/cdn.jpg')
+  })
+
+  it('插话远程图预取未就绪:当轮保留标记原样(不臆断原因),imageRefs 补记供下一轮 fetch', async () => {
+    // fetch 永不 resolve → drain 时预取未就绪 → 降级为纯文本且标记不改写
+    vi.stubGlobal('fetch', () => new Promise<Response>(() => {}))
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ stopReason: 'end_turn' })
+    let loop!: ManagerLoop
+    const deps = baseDeps({
+      store,
+      adapter,
+      supportsVision: () => true,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [imageMessage('cdn.jpg', 'https://cdn.example.com/cdn.jpg')] }),
+            )
+            // 线上 enqueue→drain 隔着真实工具执行(宏任务级),预取必然就绪;
+            // mock 立即 resolve 全在微任务级,补一拍让 then 回调 flush,等价线上时序
+            await new Promise((resolve) => setTimeout(resolve, 0))
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始干活')] }))
+    vi.unstubAllGlobals()
+
     const supplements = calls[1].messages.filter((m) => m.role === 'user' && 'content' in m && typeof m.content === 'string')
     const supplementText = supplements.map((m) => (m as { content: string }).content).join('\n')
-    expect(supplementText).toContain('cdn.jpg')
-    expect(supplementText).toContain('文件不可用，无法查看')
+    expect(supplementText).toContain('[图片: cdn.jpg]')
+    expect(supplementText).not.toContain('文件不可用')
+    expect(calls[1].messages.some((m) => m.role === 'user' && 'content' in m && Array.isArray(m.content))).toBe(false)
 
-    // imageRefs 已补记,下一 episode 由 fetch 注入
+    // imageRefs 已补记,下一 episode fetch 重试且 marker 可正常匹配
     const stateAfter = await store.load(KEY)
     expect(stateAfter.imageRefs?.length).toBeGreaterThan(0)
-    expect(JSON.stringify(stateAfter.imageRefs)).toContain('https://cdn.example.com/cdn.jpg')
+    expect(JSON.stringify(stateAfter.recent)).toContain('[图片: cdn.jpg]')
   })
 })

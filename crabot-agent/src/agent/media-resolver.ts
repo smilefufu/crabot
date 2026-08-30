@@ -42,10 +42,10 @@ export async function readImageFile(filePath: string): Promise<Buffer | null> {
   }
 }
 
-/** 下载远程图片（非 2xx / 超大小 / 网络失败返回 null）。供 manager 入站图片注入复用。 */
-export async function fetchRemoteImage(url: string): Promise<Buffer | null> {
+/** 下载远程图片（非 2xx / 超大小 / 网络失败 / 超时返回 null）。供 manager 入站图片注入复用。 */
+export async function fetchRemoteImage(url: string, timeoutMs?: number): Promise<Buffer | null> {
   try {
-    const response = await fetch(url)
+    const response = await fetch(url, timeoutMs !== undefined ? { signal: AbortSignal.timeout(timeoutMs) } : undefined)
     if (!response.ok) return null
     const arrayBuffer = await response.arrayBuffer()
     const buffer = Buffer.from(arrayBuffer)

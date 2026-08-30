@@ -50,7 +50,9 @@ import { AsyncMutex } from '../workers/async-mutex'
 import { formatChannelMessageLine } from '../prompt-manager.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { decideCompaction, foldIntoSummary, managerPolicyForWindow, type CompactionPolicy, type CompactionDecision } from './compaction.js'
-import { buildSupplementBlocks, collectInboundImages, injectInboundImages, pruneImageRefs, type ManagerImageRef } from './image-vision.js'
+import { collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, toImageBlock, type ManagerImageRef } from './image-vision.js'
+import { fetchRemoteImage } from '../agent/media-resolver.js'
+import type { ImageBlock } from '../engine/index.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
 import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
@@ -73,6 +75,9 @@ const DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚
 const POST_SEND_ACTION_RECHECK_PROMPT = '[系统复核] 你刚才发出的消息标记为“随后新建 Worker”，但系统尚未观察到成功的 spawn_worker。\n'
   + '请根据真实意图重新确认：若仍需新建 Worker，现在调用 spawn_worker；若刚才只是讨论、无需派发，或字段误填，直接结束即可。\n'
   + '不要因为这条系统提示重复向人类发送消息，也不要向人类提及系统复核。'
+
+/** 插话远程图预取超时:enqueue 与 drain 之间隔着工具执行,后台预取不阻塞任何人。 */
+const REMOTE_IMAGE_PREFETCH_TIMEOUT_MS = 8_000
 
 // --- Public Interface ---
 
@@ -510,6 +515,8 @@ export class ManagerLoop {
       ? projectHumanEnvelope(envelope, newEntries)
       : envelope
     this.pendingHumanCommit.push({ envelope: projected, onHumanInputCommitted })
+    // 远程图预取:fire-and-forget,drain 时消费已就绪结果(见 TimedWakeMailbox.imagePrefetch)
+    this.mailbox.prefetchRemoteImages(projected)
     // currentEpisodeInjected 由 enqueueDuringEpisode 内部统一入账,此处不重复 push
     // (五审:重复 push 会让 max_tokens 兜底重试把同一消息渲染两遍)。
     this.enqueueDuringEpisode(projected, { humanWakePreCommitted: true })
@@ -1681,13 +1688,37 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
   private barrierTimer: ReturnType<typeof setTimeout> | null = null
   /**
    * 插话带图的视觉注入开关。runEpisodeBody 每个 episode 与 supportsVision 解析同点设置;
-   * drainPending 是同步签名,带图插话在本地图上用 readFileSync 注入(毫秒级),远程 URL
-   * 无法同步下载——降级保留文本标记,由收尾补记 imageRefs 下一 episode 走 fetch 注入。
+   * drainPending 是同步签名,本地图 readFileSync 注入(毫秒级);远程 URL(微信 CDN)在
+   * enqueue 时异步预取(fire-and-forget,enqueue 与 drain 之间隔着工具执行,通常已就绪),
+   * 未就绪/失败的插话保留文本标记原样——不改写,下一 episode 由 imageRefs 重新 fetch
+   * 注入(marker 精确匹配不被破坏)。
    */
   private visionEnabled = false
+  /** 远程图预取结果,按 envelope 引用挂 WeakMap(重投/GC 自动清理)。 */
+  private imagePrefetch = new WeakMap<TimedWakeEnvelope, Map<string, ImageBlock | 'failed'>>()
 
   setVisionEnabled(enabled: boolean): void {
     this.visionEnabled = enabled
+  }
+
+  /** 对插话 envelope 的远程图片发起预取(fire-and-forget;仅 visionEnabled 时有意义)。 */
+  prefetchRemoteImages(envelope: TimedWakeEnvelope): void {
+    if (!this.visionEnabled || !isHumanWake(envelope.wake)) return
+    const remote = envelope.wake.messages
+      .flatMap(collectInboundImages)
+      .filter((i) => i.path.startsWith('http://') || i.path.startsWith('https://'))
+    if (remote.length === 0) return
+    let store = this.imagePrefetch.get(envelope)
+    if (!store) {
+      store = new Map()
+      this.imagePrefetch.set(envelope, store)
+    }
+    for (const image of remote) {
+      if (store.has(image.label)) continue
+      void fetchRemoteImage(image.path, REMOTE_IMAGE_PREFETCH_TIMEOUT_MS).then((buffer) => {
+        store!.set(image.label, buffer ? toImageBlock(image.path, buffer) : 'failed')
+      })
+    }
   }
 
   push(envelope: TimedWakeEnvelope): void {
@@ -1744,15 +1775,30 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
       if (!this.visionEnabled || !isHumanWake(envelope.wake)) return text
       const images = envelope.wake.messages.flatMap(collectInboundImages)
       if (images.length === 0) return text
-      // 文本标记原样保留(不剔除):收尾拍平还原后与渲染文本逐字一致,下一 episode
-      // 从 imageRefs 幂等重注入;同步读不到的(远程 URL/超限)标记改写为中性提示。
-      const { blocks, failedLabels } = buildSupplementBlocks(images)
-      let annotated = text
-      for (const label of failedLabels) {
-        annotated = annotated.replace(`[图片: ${label}]`, `[图片: ${label}（文件不可用，无法查看）]`)
+      // 文本标记一律原样保留(不剔除、不改写):收尾拍平还原后与渲染文本逐字一致,
+      // 下一 episode 从 imageRefs 幂等重注入,marker 精确匹配不被破坏。
+      // 本地图同步读盘;远程图用 enqueue 时预取的结果——未就绪/失败的本轮不注入
+      // (保留标记),由收尾补记的 imageRefs 下一轮 fetch 重试。
+      const prefetch = this.imagePrefetch.get(envelope)
+      const blocks: ImageBlock[] = []
+      for (const image of images) {
+        const isRemote = image.path.startsWith('http://') || image.path.startsWith('https://')
+        const buffer = isRemote ? null : readImageFileSync(image.path)
+        if (buffer) {
+          blocks.push(toImageBlock(image.path, buffer))
+          continue
+        }
+        if (isRemote) {
+          const prefetched = prefetch?.get(image.label)
+          if (prefetched && prefetched !== 'failed') {
+            blocks.push(prefetched)
+            continue
+          }
+        }
+        // 本地不可读(已 GC/超限/IO)或远程未就绪/失败:保留标记,不注入,不当轮臆断原因
       }
-      if (blocks.length === 0) return annotated
-      return [{ type: 'text' as const, text: annotated }, ...blocks]
+      if (blocks.length === 0) return text
+      return [{ type: 'text' as const, text }, ...blocks]
     })
   }
 
