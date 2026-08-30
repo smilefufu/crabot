@@ -1761,6 +1761,97 @@ describe('ManagerLoop', () => {
       expect(JSON.stringify(calls[2].messages).match(/已经确认入站的人类输入/g)).toHaveLength(1)
     })
 
+    it('复核 continuation（max_turns 外层）失败时，期间被 drain 的注入人类消息还原回 mailbox 不丢失', async () => {
+      // 十审真实风险：外层复核 continuation 的 finalMessages 仅在接管时保留，失败分支
+      // 丢弃——期间被 engine drain 掉的注入人类消息文本随之丢失。若收尾只按「已被消费」
+      // 补去重键，渠道重投被键挡掉、mailbox 又空（不触发自唤醒）→ 键在文本无=静默永久丢失。
+      const { states, traceWriter } = traceRecorder()
+      let streamCount = 0
+      let loop!: ManagerLoop
+      const injectedMsgs: ChannelMessage[] = [
+        { ...makeChannelMessage('首次注入的指令'), platform_message_id: 'pm-injected-first' },
+        { ...makeChannelMessage('复核期间注入的指令'), platform_message_id: 'pm-injected-recheck' },
+      ]
+      const adapter: LLMAdapter = {
+        async *stream() {
+          streamCount++
+          if (streamCount === 1) {
+            // 第一次尝试 turn1：send（记复核标记）+ noop（tool 内注入）
+            yield* chunksFromContent([
+              { type: 'tool_use', id: 'send-1', name: 'send_message', input: { post_send_action: 'spawn_worker' } },
+              { type: 'tool_use', id: 'noop-1', name: 'noop_tool', input: {} },
+            ], 'tool_use')
+            return
+          }
+          if (streamCount === 2) {
+            // 第一次尝试 turn2：继续 tool_use，让第一次尝试以 max_turns 收口（走外层复核）
+            yield* chunksFromContent([
+              { type: 'tool_use', id: 'noop-2', name: 'noop_tool', input: {} },
+            ], 'tool_use')
+            return
+          }
+          if (streamCount === 3) {
+            // 复核 continuation turn1：noop tool 内注入——该注入在其 turn2 前被 drain 吃掉
+            yield* chunksFromContent([
+              { type: 'tool_use', id: 'noop-3', name: 'noop_tool', input: {} },
+            ], 'tool_use')
+            return
+          }
+          // 复核 continuation turn2：drain 已吃掉注入，此后 continuation 失败——
+          // 其 finalMessages（含注入文本）被丢弃
+          throw new Error('recheck provider unavailable')
+        },
+        updateConfig: () => {},
+      }
+      loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        maxTurns: 2,
+        traceWriter,
+        toolFace: () => [
+          defineTool({
+            name: 'send_message', description: 'deliver', inputSchema: { type: 'object', properties: {} },
+            call: async () => {
+              loop.recordPostSendAction()
+              return { output: 'sent' }
+            },
+          }),
+          defineTool({
+            name: 'noop_tool', description: 'noop', inputSchema: { type: 'object', properties: {} },
+            call: async () => {
+              const message = injectedMsgs.shift()
+              if (message) {
+                await loop.enqueueHumanWakeDuringActiveEpisode(
+                  timed({ kind: 'human_messages', messages: [message] }),
+                )
+              }
+              return { output: 'ok', isError: false }
+            },
+          }),
+        ],
+      }))
+
+      const failed = await loop.wakeUp(timed({
+        kind: 'human_messages',
+        messages: [makeChannelMessage('原始请求')],
+      }))
+
+      expect(failed.outcome).toBe('max_turns')
+      expect(failed.consumedEvents).toBe(true)
+      expect(states).toEqual(['marked', 'recheck_injected', 'recheck_failed_open', 'unresolved_accepted'])
+      // 修复判据：注入消息未被消费——还原回 mailbox 触发自唤醒，store 无键无文本（同进同出）
+      expect(loop.hasPendingMailbox).toBe(true)
+      const state = await store.load(KEY)
+      expect(JSON.stringify(state.recent)).not.toContain('复核期间注入的指令')
+      expect(state.committedHumanMessageIds ?? []).not.toContain('pm-injected-recheck')
+
+      // 自唤醒补跑：注入消息正常提交+投喂
+      await loop.drainMailbox()
+      const after = await store.load(KEY)
+      expect(JSON.stringify(after.recent)).toContain('复核期间注入的指令')
+      expect(JSON.stringify(after.recent)).toContain('原始请求')
+    })
+
     it('失败 episode 不保留标记：记录 unresolved_failed，重试时不再注入复核', async () => {
       const calls: LLMStreamParams[] = []
       let streamCount = 0

@@ -857,6 +857,14 @@ export class ManagerLoop {
         ...attempt.result.finalMessages,
         createUserMessage(POST_SEND_ACTION_RECHECK_PROMPT),
       ]
+      // 复核 continuation 期间 engine 可能在 turn 间隙 drain 掉注入(含人类消息)。其
+      // finalMessages 只在下方接管(attempt = continuation)时保留;失败分支丢弃它们——
+      // 被 drain 的注入人类消息若不还原,收尾会按「已被消费」只补去重键,渠道重投被键
+      // 挡掉、mailbox 又空(不触发自唤醒)→ 键在文本无 = 静默永久丢失(十审真实风险)。
+      // 捕获期间被 drain 的 envelope,失败时把人类消息还原回 mailbox,走收尾既有的
+      // 「留 mailbox 交自唤醒」分支(键未记、文本未提交,下个 episode 正常提交+投喂);
+      // 非人类事件维持既有行为(其丢失不违反本 PR 的「人类消息不丢」承诺)。
+      this.mailbox.startDrainCapture()
       const continuation = await this.runAttempt(
         episodeId,
         state,
@@ -873,10 +881,15 @@ export class ManagerLoop {
           ...successfulSendMessageTargetsOf(continuation.result.finalMessages.slice(continuation.initialMessageCount)),
         ]
         attempt = continuation
+        // 文本已随接管保留在 finalMessages,丢弃捕获记录即可。
+        this.mailbox.takeDrainedForReplay()
       } else {
         // The recheck is advisory. Its own failure must not replay an already
         // consumable episode.
         this.recordPostSendDecision('recheck_failed_open')
+        for (const drained of this.mailbox.takeDrainedForReplay()) {
+          if (isHumanWake(drained.wake)) this.mailbox.push(drained)
+        }
       }
     }
 
@@ -1578,6 +1591,8 @@ function successfulSendMessageTargetsOf(
 class TimedWakeMailbox implements HumanMessageQueueLike {
   private pending: TimedWakeEnvelope[] = []
   private contextAdmissionEnvelopes: TimedWakeEnvelope[] = []
+  /** 非 null 时记录此后 drainPending() 拿走的 envelope(复核 continuation 失败还原用,见 runEpisodeBody)。 */
+  private drainCapture: TimedWakeEnvelope[] | null = null
   private barrierResolve: (() => void) | null = null
   private barrierTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -1595,6 +1610,18 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
   /** 该 envelope 是否仍在等待注入(引用比较)。收尾提交用它区分「已被 drain 消费/未消费」。 */
   isPending(envelope: TimedWakeEnvelope): boolean {
     return this.pending.includes(envelope)
+  }
+
+  /** 开始记录此后 drainPending() 拿走的 envelope;与 takeDrainedForReplay 成对使用。 */
+  startDrainCapture(): void {
+    this.drainCapture = []
+  }
+
+  /** 结束记录并返回期间被 drain 的 envelope(按原顺序);未开启时返回空。 */
+  takeDrainedForReplay(): TimedWakeEnvelope[] {
+    const captured = this.drainCapture ?? []
+    this.drainCapture = null
+    return captured
   }
 
   /** 按引用移除一个尚未注入的 envelope(收尾提交改为直接落 recent 时使用)。 */
@@ -1617,6 +1644,7 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
   drainPending(): string[] {
     const drained = this.drainEnvelopes()
     this.contextAdmissionEnvelopes.push(...drained)
+    this.drainCapture?.push(...drained)
     return drained.map(renderTimedWakeEnvelope)
   }
 
