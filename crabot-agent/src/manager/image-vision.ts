@@ -24,9 +24,10 @@
  * 提示不承诺具体原因。
  */
 
+import { readFileSync } from 'fs'
 import type { EngineMessage, ImageBlock } from '../engine/index.js'
 import type { ChannelMessage } from '../types'
-import { inferMediaType, readImageFile, fetchRemoteImage } from '../agent/media-resolver.js'
+import { inferMediaType, readImageFile, fetchRemoteImage, MAX_IMAGE_SIZE } from '../agent/media-resolver.js'
 
 /** 单张入站图片的引用：path 是本地路径或可 GET 的远程 URL，label 是 envelope 文本里的展示名。 */
 export interface InboundImageRef {
@@ -166,4 +167,47 @@ export function pruneImageRefs(
   const kept = imageRefs.filter((r) => live.has(r.message_id) && r.images.length > 0)
   if (kept.length === imageRefs.length) return imageRefs
   return kept
+}
+
+// --- 插话（turn 间 drain 注入）的同步路径 ---
+//
+// HumanMessageQueueLike.drainPending() 是同步签名,engine 在 turn 边界调用;图片注入
+// 在这里只能用 readFileSync(本地几百 KB,turn 边界一次,毫秒级可接受)。远程 URL 无法
+// 同步下载:降级为保留文本标记 + 收尾补记 imageRefs,下一 episode 由 injectInboundImages
+// 走 fetch 注入。
+
+/** 同步读本地图片（超大小上限或不存在/不可读返回 null）。 */
+export function readImageFileSync(path: string): Buffer | null {
+  try {
+    const buffer = readFileSync(path)
+    if (buffer.length > MAX_IMAGE_SIZE) return null
+    return buffer
+  } catch {
+    return null
+  }
+}
+
+export interface SupplementBlocksResult {
+  readonly blocks: ImageBlock[]
+  /** 同步上下文无法读取的图片（远程 URL / 读盘失败），调用方保留其文本标记 */
+  readonly failedLabels: string[]
+}
+
+/** 为插话 drain 构造图片块：本地路径同步读盘；远程 URL 与不可读来源进 failedLabels。 */
+export function buildSupplementBlocks(images: ReadonlyArray<InboundImageRef>): SupplementBlocksResult {
+  const blocks: ImageBlock[] = []
+  const failedLabels: string[] = []
+  for (const image of images) {
+    const isRemote = image.path.startsWith('http://') || image.path.startsWith('https://')
+    const buffer = isRemote ? null : readImageFileSync(image.path)
+    if (!buffer) {
+      failedLabels.push(image.label)
+      continue
+    }
+    blocks.push({
+      type: 'image',
+      source: { type: 'base64', media_type: inferMediaType(undefined, image.path), data: buffer.toString('base64') },
+    })
+  }
+  return { blocks, failedLabels }
 }

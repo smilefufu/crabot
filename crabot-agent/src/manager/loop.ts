@@ -43,13 +43,14 @@ import {
   type ToolDefinition,
   type LLMAdapter,
   type TextBlock,
+  type ContentBlock,
 } from '../engine/index.js'
 import type { HumanMessageQueueLike } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex'
 import { formatChannelMessageLine } from '../prompt-manager.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { decideCompaction, foldIntoSummary, managerPolicyForWindow, type CompactionPolicy, type CompactionDecision } from './compaction.js'
-import { collectInboundImages, injectInboundImages, pruneImageRefs, type ManagerImageRef } from './image-vision.js'
+import { buildSupplementBlocks, collectInboundImages, injectInboundImages, pruneImageRefs, type ManagerImageRef } from './image-vision.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
 import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
@@ -775,6 +776,8 @@ export class ManagerLoop {
     // 注入只作 LLM 请求投影:originalsById 保留注入前消息,收尾持久化前按 id 还原,
     // 否则 base64 会随 finalMessages 回写进 recent 与 episode log(codex review P1)。
     const supportsVision = this.deps.supportsVision?.() ?? false
+    // 插话 drain 注入的开关:episode 内与 adapter/model 同点快照(§11 热更语义)
+    this.mailbox.setVisionEnabled(supportsVision)
     const imageRefs = state.imageRefs ?? []
     const injectable = supportsVision && imageRefs.length > 0
     const baseTailMessages: EngineMessage[] = [...state.recent, ...currentTailMessages]
@@ -926,9 +929,19 @@ export class ManagerLoop {
     // 注入只存在于 LLM 请求投影:持久化(episode log / recent)前把 finalMessages 里被
     // 注入过的 user message 还原为注入前的纯文本——base64 不落盘,文本标记保留原样,
     // 下一 episode 再从 imageRefs 重新注入(幂等)。
-    const persistedFinalMessages = attempt.result.finalMessages.map(
-      (m) => originalsById.get(m.id) ?? m,
-    )
+    // 两类来源:initialMessages 注入(originalsById 按 id 还原);插话 drain 注入
+    // (query-loop createUserMessage 的随机 id 拿不到,按结构还原——数组 content 的
+    // user message 取 text block 原文,drain 构造时文本标记原样保留,拍平后与渲染
+    // 文本逐字一致)。
+    const persistedFinalMessages = attempt.result.finalMessages.map((m) => {
+      const original = originalsById.get(m.id)
+      if (original) return original
+      if (m.role === 'user' && 'content' in m && Array.isArray(m.content)) {
+        const first = m.content[0]
+        if (first && first.type === 'text') return { ...m, content: first.text }
+      }
+      return m
+    })
 
     await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, persistedFinalMessages)
 
@@ -970,7 +983,7 @@ export class ManagerLoop {
       }
       // 注入人类消息的收尾提交(PR #131 四审):必须在 recent 替换与 supervision save
       // 之后——load 拿到的是最新 state,未被 drain 消费的追加不会被后续 save 覆盖。
-      await this.commitPendingHumanInputs(true)
+      await this.commitPendingHumanInputs(true, persistedFinalMessages)
     } else {
       // 放弃 episode:已落盘的折叠不回滚(见文件头)——若本次途中发生过 force_hot 折叠
       // (上面 max_tokens 兜底重试路径),carriedTexts/eventText 有可能已经作为
@@ -1092,7 +1105,10 @@ export class ManagerLoop {
    *     形式保留,fail-loud 由 settle 回调补发。
    * 回调(onHumanInputCommitted)在提交落定后触发。调用方必须在 loop mutex 内。
    */
-  private async commitPendingHumanInputs(recentReplaced: boolean): Promise<void> {
+  private async commitPendingHumanInputs(
+    recentReplaced: boolean,
+    persistedFinalMessages?: ReadonlyArray<EngineMessage>,
+  ): Promise<void> {
     if (this.pendingHumanCommit.length === 0) return
     const pending = this.pendingHumanCommit
     this.pendingHumanCommit = []
@@ -1104,13 +1120,36 @@ export class ManagerLoop {
         ? rec.envelope.wake.messages.at(-1)?.platform_message_id
         : undefined
       if (recentReplaced) {
-        // 已被 drain 消费且 recent 已替换:文本已进历史,只补去重键
+        // 已被 drain 消费且 recent 已替换:文本已进历史,只补去重键;
+        // 带图插话同时补记 imageRefs——drain 消息(query-loop 随机 id)按渲染文本里的
+        // platform_message_id 属性定位,图引用补齐后下一 episode 才能重新注入。
         const ids = isHumanWake(rec.envelope.wake)
           ? rec.envelope.wake.messages.map((m) => m.platform_message_id)
           : []
         const merged = new Set([...(state.committedHumanMessageIds ?? []), ...ids])
-        state = { ...state, committedHumanMessageIds: Array.from(merged) }
-        dirty = dirty || ids.length > 0
+        const newImageRefs: ManagerImageRef[] = []
+        if (persistedFinalMessages && isHumanWake(rec.envelope.wake)) {
+          const images = rec.envelope.wake.messages.flatMap((m) => collectInboundImages(m))
+          if (images.length > 0) {
+            for (const message of rec.envelope.wake.messages) {
+              const marker = `id="${message.platform_message_id}"`
+              const drainedMessage = persistedFinalMessages.find((m) => {
+                if (m.role !== 'user' || !('content' in m) || typeof m.content !== 'string') return false
+                return m.content.includes(marker)
+              })
+              if (drainedMessage) newImageRefs.push({ message_id: drainedMessage.id, images })
+            }
+          }
+        }
+        const mergedRefs = newImageRefs.length > 0
+          ? [...(state.imageRefs ?? []), ...newImageRefs]
+          : state.imageRefs
+        state = {
+          ...state,
+          committedHumanMessageIds: Array.from(merged),
+          ...(mergedRefs !== state.imageRefs ? { imageRefs: mergedRefs } : {}),
+        }
+        dirty = dirty || ids.length > 0 || newImageRefs.length > 0
       } else {
         // 失败收尾(finalMessages 已随失败丢弃,必须以 recent 形式保留;残留 mailbox
         // 的先移除,避免与 settleFailedEpisodeEnvelopes 的 carry 重投重复):正常提交追加。
@@ -1640,6 +1679,16 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
   private drainCapture: TimedWakeEnvelope[] | null = null
   private barrierResolve: (() => void) | null = null
   private barrierTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * 插话带图的视觉注入开关。runEpisodeBody 每个 episode 与 supportsVision 解析同点设置;
+   * drainPending 是同步签名,带图插话在本地图上用 readFileSync 注入(毫秒级),远程 URL
+   * 无法同步下载——降级保留文本标记,由收尾补记 imageRefs 下一 episode 走 fetch 注入。
+   */
+  private visionEnabled = false
+
+  setVisionEnabled(enabled: boolean): void {
+    this.visionEnabled = enabled
+  }
 
   push(envelope: TimedWakeEnvelope): void {
     this.pending.push(envelope)
@@ -1686,11 +1735,25 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
     return activity
   }
 
-  drainPending(): string[] {
+  drainPending(): Array<string | ContentBlock[]> {
     const drained = this.drainEnvelopes()
     this.contextAdmissionEnvelopes.push(...drained)
     this.drainCapture?.push(...drained)
-    return drained.map(renderTimedWakeEnvelope)
+    return drained.map((envelope) => {
+      const text = renderTimedWakeEnvelope(envelope)
+      if (!this.visionEnabled || !isHumanWake(envelope.wake)) return text
+      const images = envelope.wake.messages.flatMap(collectInboundImages)
+      if (images.length === 0) return text
+      // 文本标记原样保留(不剔除):收尾拍平还原后与渲染文本逐字一致,下一 episode
+      // 从 imageRefs 幂等重注入;同步读不到的(远程 URL/超限)标记改写为中性提示。
+      const { blocks, failedLabels } = buildSupplementBlocks(images)
+      let annotated = text
+      for (const label of failedLabels) {
+        annotated = annotated.replace(`[图片: ${label}]`, `[图片: ${label}（文件不可用，无法查看）]`)
+      }
+      if (blocks.length === 0) return annotated
+      return [{ type: 'text' as const, text: annotated }, ...blocks]
+    })
   }
 
   takeContextAdmissionEnvelopes(): TimedWakeEnvelope[] {

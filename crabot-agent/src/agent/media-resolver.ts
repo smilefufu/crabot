@@ -9,7 +9,7 @@ import { promises as fs } from 'fs'
 import type { ImageBlock } from '../engine/types.js'
 import type { ChannelMessage } from '../types'
 
-const MAX_IMAGE_SIZE = 20 * 1024 * 1024 // 20MB
+export const MAX_IMAGE_SIZE = 20 * 1024 * 1024 // 20MB
 const SUPPORTED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
 
 /** formatMessageContent 在 text + mediaRef 都空时的兜底返回值。

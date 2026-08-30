@@ -19,11 +19,14 @@
   base64）；P1 collect 只认 media[] → 补齐遗留单图 media_url/file_path 形态（feishu
   普通单图走 file_path，标记 label 与 formatMediaRef 渲染同源，含完整路径形态）；
   P2 协议未同步 → v0.3.5；P2 读失败一律报"已清理" → 中性措辞「文件不可用，无法查看」。
-- **follow-up**：episode 运行中人类插话（turn 间 drain 注入）带图时仍只有文本标记——
-  当轮 `drainPending()` 只返回 string，收尾 `commitPendingHumanInputs(recentReplaced=true)`
-  也不补记 imageRefs，插话的图当轮与后续 episode 都注入不了（主路径能看、插话不能，
-  行为不对称；不产生死路）。修复需把 engine humanMessageQueue 投递契约从 string 扩到
-  ContentBlock[]（投递模型变更），按门禁不并入小改动，需独立立项走 spec。
+- **插话带图（第二轮 review P1，用户拍板必修）**：episode 运行中人类插话（turn 间
+  drain 注入）带图时原来只有文本标记。engine 侧 `HumanMessageQueueLike.drainPending`
+  返回类型本就是 `string | ContentBlock[]`（query-loop 消费点原生支持，零改动）——
+  修复全在 manager 侧：`TimedWakeMailbox.drainPending` 对带图插话同步读盘构造
+  ImageBlock（远程 URL 同步无法下载，当轮降级为文本标记）；收尾拍平还原规则覆盖
+  drain 产物（数组 content 取 text block 原文，base64 不落盘）；`commitPendingHumanInputs`
+  补记 imageRefs（按渲染文本里 platform_message_id 属性定位 drain 消息 id），下一
+  episode 幂等重注入。协议 v3.6.19（agent-v3）随补。
 
 ### manager 人类消息 turn 间注入（含 builtin worker 输入 turn 边界投递）：已合并（PR #131 → `28a3ae13`）+ PR #130（已合并 `bad70ce4`）
 

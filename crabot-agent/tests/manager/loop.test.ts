@@ -2346,4 +2346,95 @@ describe('ManagerLoop 入站图片视觉注入', () => {
     expect(content[0].text).not.toContain('[图片:')
     expect(content.filter((b) => b.type === 'image')).toHaveLength(1)
   })
+
+  it('插话带图(本地图):当轮 turn 边界以 ContentBlock[] 注入,落盘无 base64 且补记 imageRefs', async () => {
+    const png = join(mediaDir, 'inject-live.png')
+    await fs.writeFile(png, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ stopReason: 'end_turn' })
+    let loop!: ManagerLoop
+    const deps = baseDeps({
+      store,
+      adapter,
+      supportsVision: () => true,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [imageMessage('inject-live.png', png)] }),
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始干活')] }))
+
+    // 当轮 turn2:supplement 以数组 content 注入(text + ImageBlock)
+    const supplement = calls[1].messages.find(
+      (m) => m.role === 'user' && 'content' in m && Array.isArray(m.content),
+    ) as { content: Array<{ type: string; text?: string; source?: { data: string } }> } | undefined
+    expect(supplement).toBeTruthy()
+    expect(supplement!.content[0].text).toContain('inject-live.png')
+    expect(supplement!.content.filter((b) => b.type === 'image')).toHaveLength(1)
+
+    // 落盘守卫:state 无 base64,文本标记原样,imageRefs 已补记(下一 episode 幂等重注入)
+    const stateAfter = await store.load(KEY)
+    expect(JSON.stringify(stateAfter.recent)).not.toContain('"source"')
+    expect(JSON.stringify(stateAfter.recent)).toContain('[图片: inject-live.png]')
+    expect(stateAfter.imageRefs?.length).toBeGreaterThan(0)
+
+    // 下一 episode:图从 imageRefs 重新注入
+    queue.push({ text: '看到了', stopReason: 'end_turn' })
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('图怎么样')] }))
+    const nextTurnUser = calls[2].messages.filter(
+      (m) => m.role === 'user' && 'content' in m && Array.isArray(m.content),
+    )
+    expect(nextTurnUser.length).toBeGreaterThan(0)
+  })
+
+  it('插话带远程 URL 图(wechat CDN):同步无法下载,当轮降级为文本标记,imageRefs 补记供下一轮 fetch', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ stopReason: 'end_turn' })
+    let loop!: ManagerLoop
+    const deps = baseDeps({
+      store,
+      adapter,
+      supportsVision: () => true,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            await loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [imageMessage('cdn.jpg', 'https://cdn.example.com/cdn.jpg')] }),
+            )
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始干活')] }))
+
+    // 当轮降级:string supplement,标记改写为中性提示
+    const supplements = calls[1].messages.filter((m) => m.role === 'user' && 'content' in m && typeof m.content === 'string')
+    const supplementText = supplements.map((m) => (m as { content: string }).content).join('\n')
+    expect(supplementText).toContain('cdn.jpg')
+    expect(supplementText).toContain('文件不可用，无法查看')
+
+    // imageRefs 已补记,下一 episode 由 fetch 注入
+    const stateAfter = await store.load(KEY)
+    expect(stateAfter.imageRefs?.length).toBeGreaterThan(0)
+    expect(JSON.stringify(stateAfter.imageRefs)).toContain('https://cdn.example.com/cdn.jpg')
+  })
 })
