@@ -453,7 +453,7 @@ export interface LiveTaskSnapshot {
   readonly llm_retry?: {
     readonly attempt: number
     readonly max_attempts: number
-    readonly source: 'pre-stream' | 'mid-stream'
+    readonly source: 'stream'
     readonly last_error: string
     readonly since: number  // ms timestamp
   }

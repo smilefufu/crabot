@@ -6,9 +6,13 @@ import { StreamProcessor } from './stream-processor.js'
 import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_RETRY_DELAY_MS,
+  OVERLOADED_WITHOUT_RETRY_AFTER_MAX_RETRIES,
+  RETRY_AFTER_MAX_MS,
   computeRetryDelayMs,
+  getRetryAfterMs,
+  interruptibleSleep,
+  isOverloadedWithoutRetryAfter,
   isRetryableError,
-  sleep,
 } from './retry-utils.js'
 import { capWithMarker } from './byte-cap.js'
 import type {
@@ -28,19 +32,7 @@ export interface LLMRetryEvent {
   readonly maxAttempts: number  // 总配额
   readonly delayMs: number      // 即将 sleep 多久后 retry
   readonly error: Error         // 触发本次 retry 的错
-  readonly source: 'pre-stream' | 'mid-stream'  // 哪一层 retry
-}
-
-/**
- * 把 LLMStreamParams.onRetry 包装成 retry-utils 的 onRetry 签名（差别只是补一个 source 字段）。
- * 三个 adapter（anthropic/openai/openai-responses）的 stream / complete 方法共用此 helper。
- */
-export function wrapOnRetry(
-  cb: ((e: LLMRetryEvent) => void) | undefined,
-  source: LLMRetryEvent['source'],
-): ((e: { attempt: number; maxAttempts: number; delayMs: number; error: Error }) => void) | undefined {
-  if (!cb) return undefined
-  return (e) => cb({ ...e, source })
+  readonly source: 'stream'     // 重试统一在 callNonStreaming 层处理
 }
 
 /** 槽位思考强度（base-protocol §5.14 thinking_level/thinking_custom 的运行时形态）。 */
@@ -87,8 +79,38 @@ export interface LLMStreamParams {
   /** 思考强度；undefined = 跟随模型默认（请求中不出现任何思考参数） */
   readonly thinking?: LLMThinkingConfig
   readonly signal?: AbortSignal
+  /**
+   * 配置变更信号（边沿事件）。仅在重试 sleep **期间**触发时提前唤醒并调用
+   * onConfigChanged；入口时已 aborted 不触发任何回调（一次性信号的历史 abort
+   * 不是变更事件，否则会永久归零后续退避）。
+   */
+  readonly configChangedSignal?: AbortSignal
+  /**
+   * 当前已应用的配置代数 getter（与 configChangedSignal 同源，均来自运行时配置
+   * 原子替换通知）。callNonStreaming 自己记账「上次消费到的代数」：本次 attempt
+   * 失败时代数已前进 → 立即换新配置重试（跳过本次 sleep）；代数未变 → 正常退避。
+   * 这样 sleep 窗口之外的变更也不会丢，且退避只被跳过一次。
+   */
+  readonly configGeneration?: () => number
+  /**
+   * 配置变更后的刷新回调。返回新配置的 adapter 与 per-attempt 请求参数
+   * （model/maxTokens/thinking 是 per-model 字段，换 provider 后必须一并替换——
+   * 只换 adapter/model 会把旧模型的 max_tokens/thinking 发给新模型，可能触发
+   * 400 invalid_request_error 这类不可重试失败，protocol-agent-v3 §11 3.6.17）。
+   * 字段缺省 = 维持原值；显式 undefined = 从请求中移除该参数。
+   * callNonStreaming 会在下一次 attempt 使用它们。
+   */
+  readonly onConfigChanged?: () => Promise<LLMConfigSwap | void>
   /** 可观测性回调：retry 发生时触发；用于 worker → admin web 实时显示"LLM 正在重试" */
   readonly onRetry?: (event: LLMRetryEvent) => void
+}
+
+/** onConfigChanged 的返回形态（review 2nd：随 model 一并替换 per-model 请求参数）。 */
+export interface LLMConfigSwap {
+  readonly adapter?: LLMAdapter
+  readonly model?: string
+  readonly maxTokens?: number
+  readonly thinking?: LLMThinkingConfig
 }
 
 export interface LLMAdapter {
@@ -135,13 +157,54 @@ async function withStreamConsumptionRetry(
   const delayMs = DEFAULT_RETRY_DELAY_MS
   const startedAt = Date.now()
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  // 重试期间配置可能热更新：adapter 与 per-attempt 请求参数（model/maxTokens/thinking）
+  // 允许被 onConfigChanged 替换——后三者是 per-model 字段，只换 adapter/model 会把旧
+  // 模型的参数发给新模型（可能 400 invalid_request_error，不可重试）。
+  // configGeneration 自己记账：代数已前进 → 立即换配置并跳过本次 sleep（只跳一次）；
+  // 代数未变 → 正常退避。configChangedSignal 只负责「sleep 期间」的边沿唤醒。
+  let currentAdapter = adapter
+  let currentRequestParams: { model: string; maxTokens?: number; thinking?: LLMThinkingConfig } = {
+    model: params.model,
+    ...(params.maxTokens !== undefined ? { maxTokens: params.maxTokens } : {}),
+    ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
+  }
+  let generic429Count = 0
+  let appliedGeneration = params.configGeneration?.()
+  // 每次消费配置变更授予 1 次额外 attempt 预算（封顶 maxRetries）——变更本身不挤占
+  // 旧 provider 已消耗的配额（协议 3.6.17「不消耗 attempt 配额」），且配置抖动下
+  // 总尝试仍有界（≤ 2×(maxRetries+1)）。新 provider 的 429 计数独立起算。
+  let configSwitchBudget = 0
+
+  const applyConfigChange = async (): Promise<void> => {
+    appliedGeneration = params.configGeneration?.()
+    configSwitchBudget = Math.min(configSwitchBudget + 1, maxRetries)
+    generic429Count = 0
+    const update = await params.onConfigChanged?.()
+    if (!update) return
+    if (update.adapter) currentAdapter = update.adapter
+    const next = { ...currentRequestParams } as { model: string; maxTokens?: number; thinking?: LLMThinkingConfig }
+    if (update.model !== undefined) next.model = update.model
+    // 显式 undefined = 新模型无该配置，从请求中移除；字段缺省 = 维持原值。
+    if ('maxTokens' in update) {
+      if (update.maxTokens === undefined) delete next.maxTokens
+      else next.maxTokens = update.maxTokens
+    }
+    if ('thinking' in update) {
+      if (update.thinking === undefined) delete next.thinking
+      else next.thinking = update.thinking
+    }
+    currentRequestParams = next
+  }
+
+  let lastError: unknown
+  for (let attempt = 0; attempt <= maxRetries + configSwitchBudget; attempt++) {
     const attemptStart = Date.now()
     let firstChunkMs: number | undefined
     let chunkCount = 0
     try {
       const processor = new StreamProcessor()
-      for await (const chunk of adapter.stream(params)) {
+      const { model: _pModel, maxTokens: _pMaxTokens, thinking: _pThinking, ...baseParams } = params
+      for await (const chunk of currentAdapter.stream({ ...baseParams, ...currentRequestParams } as LLMStreamParams)) {
         if (params.signal?.aborted) {
           throw new DOMException('Aborted', 'AbortError')
         }
@@ -169,31 +232,61 @@ async function withStreamConsumptionRetry(
         },
       }
     } catch (err) {
+      lastError = err
       if (params.signal?.aborted) throw err
       if (!isRetryableError(err)) throw err
+      // 配置变更消费必须先于所有放弃判定（review 3rd）：变更落在最后一次失败上时，
+      // 新 provider 也要拿到尝试机会——旧 provider 的 Retry-After 结论 / 退避结论 /
+      // attempt 配额都不应结束本次调用。
+      if (params.configGeneration && params.configGeneration() !== appliedGeneration) {
+        // 立即换新配置重试：跳过本次 sleep（旧 provider 的等待指示不适用于新 provider）
+        await applyConfigChange()
+        continue
+      }
+      // Retry-After 超上限：provider 要求等的时间比总预算还长，不再等待，按重试耗尽失败
+      // （错误上带尝试次数/总耗时，可诊断）。
+      const retryAfterMs = getRetryAfterMs(err)
+      if (retryAfterMs !== undefined && retryAfterMs > RETRY_AFTER_MAX_MS) {
+        throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
+      }
+      // 无 Retry-After 的通用 429 单独限制次数，避免额度耗尽类伪装成通用 429 时无限拖。
+      if (isOverloadedWithoutRetryAfter(err)) {
+        generic429Count++
+        if (generic429Count > OVERLOADED_WITHOUT_RETRY_AFTER_MAX_RETRIES) {
+          throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
+        }
+      }
       // 放弃可重试错误时把"尝试次数/总耗时"写进错误，让失败 trace 可诊断
-      // （否则 outcome 只剩一句裸 "fetch failed"，看不出是重试耗尽还是首次即挂）
-      if (attempt >= maxRetries) throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
-      const actualDelay = computeRetryDelayMs(attempt, delayMs, true)
+      // （否则 outcome 只剩一句裸 "fetch failed"，看不出是重试耗尽还是首次即挂）。
+      // 配额 = maxRetries + 每次配置变更授予的额外预算（applyConfigChange 内累计）。
+      if (attempt >= maxRetries + configSwitchBudget) {
+        throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
+      }
+      const actualDelay = computeRetryDelayMs(attempt, delayMs, true, retryAfterMs)
       console.error(
-        `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${actualDelay}ms (backoff):`,
+        `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + configSwitchBudget + 1} failed, retrying in ${actualDelay}ms (backoff):`,
         err,
       )
       try {
         params.onRetry?.({
           attempt: attempt + 1,
-          maxAttempts: maxRetries + 1,
+          maxAttempts: maxRetries + configSwitchBudget + 1,
           delayMs: actualDelay,
           error: err instanceof Error ? err : new Error(String(err)),
-          source: 'mid-stream',
+          source: 'stream',
         })
       } catch { /* observability callback must not break retry */ }
-      await sleep(actualDelay, params.signal)
+      await interruptibleSleep(actualDelay, {
+        abortSignal: params.signal,
+        configChangedSignal: params.configChangedSignal,
+        onConfigChanged: applyConfigChange,
+      })
       // 下一轮 loop 会用全新 processor + 重新 call adapter.stream()，
       // 服务端生成新 response（partial 浪费，但 task 能完成）
     }
   }
-  throw new Error('callNonStreaming: retry loop exited unexpectedly')
+  // 循环条件耗尽（含 configSwitchBudget 路径）也要给出可诊断的放弃错误
+  throw enrichGiveUp(lastError ?? new Error('callNonStreaming: no attempt recorded'), maxRetries + configSwitchBudget + 1, Date.now() - startedAt)
 }
 
 /** 放弃重试时给错误补上"尝试次数/总耗时"上下文，原错误挂在 cause 上。 */

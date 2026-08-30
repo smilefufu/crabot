@@ -543,6 +543,14 @@ export class UnifiedAgent extends ModuleBase {
   /** A failed pull destructively detached runtime resources; recovery must rebuild them
    *  even when the revision does not advance. */
   private configResourcesDetached = false
+  /** 运行时配置原子替换后的通知监听器（spec 2026-08-30-llm-retry-config-hotreload）。 */
+  private runtimeConfigAppliedListeners = new Set<() => void>()
+  /**
+   * 已应用配置代数：每次原子替换 +1。LLM 重试路径用它区分「sleep 期间的边沿唤醒」与
+   * 「sleep 窗口之外落地的变更」——后者由 callNonStreaming 记账消费，避免一次性
+   * AbortSignal 把后续退避永久归零。
+   */
+  private runtimeConfigAppliedGeneration = 0
 
   // 端口缓存
   private adminPort?: number
@@ -913,6 +921,9 @@ export class UnifiedAgent extends ModuleBase {
         return thinkingParam(conn.thinking_level, conn.thinking_custom)
       },
       managerContextWindowTokens: () => resolveManagerModelConfig(this.agentConfig?.model_config).context_window,
+      // LLM 重试期间配置热切换的通知源与代数探针（spec 2026-08-30-llm-retry-config-hotreload）
+      onRuntimeConfigApplied: (listener) => this.addRuntimeConfigAppliedListener(listener),
+      runtimeConfigAppliedGeneration: () => this.getRuntimeConfigAppliedGeneration(),
       // crab-messaging：与 `createMcpConfigs` 同款依赖，但不传 `getTaskContext`——manager 不是
       // task，且 tool-face 已把 `send_message` 的 intent 去掉，ask_human 路径对 manager 不存在。
       messagingDeps: {
@@ -1374,6 +1385,9 @@ export class UnifiedAgent extends ModuleBase {
       ...(this.agentConfig?.tmp_page_base_url ? { tmpPageBaseUrl: this.agentConfig.tmp_page_base_url } : {}),
     }, {
       mcpConfigFactory: createMcpConfigs,
+      // LLM 重试期间配置热切换的通知源与代数探针（spec 2026-08-30-llm-retry-config-hotreload）
+      runtimeConfigAppliedSource: (listener) => this.addRuntimeConfigAppliedListener(listener),
+      runtimeConfigAppliedGeneration: () => this.getRuntimeConfigAppliedGeneration(),
       deps: {
         rpcClient: this.rpcClient,
         moduleId: this.config.moduleId,
@@ -1539,6 +1553,23 @@ export class UnifiedAgent extends ModuleBase {
       this.runRuntimeConfigPull()
     }, 50)
     this.configPullTimer.unref?.()
+  }
+
+  /** 订阅「运行时配置已原子替换」通知；返回退订函数。listener 抛错不影响通知循环。 */
+  private addRuntimeConfigAppliedListener(listener: () => void): () => void {
+    this.runtimeConfigAppliedListeners.add(listener)
+    return () => { this.runtimeConfigAppliedListeners.delete(listener) }
+  }
+
+  private getRuntimeConfigAppliedGeneration(): number {
+    return this.runtimeConfigAppliedGeneration
+  }
+
+  private notifyRuntimeConfigApplied(): void {
+    this.runtimeConfigAppliedGeneration += 1
+    for (const listener of this.runtimeConfigAppliedListeners) {
+      try { listener() } catch { /* listener must not break config apply path */ }
+    }
   }
 
   /** Single-flight wrapper around pullRuntimeConfig with dirty-coalesce and backoff retry. */
@@ -1746,6 +1777,10 @@ export class UnifiedAgent extends ModuleBase {
       if (candidate.tmp_page_base_url !== undefined) this.agentHandler.updateTmpPageBaseUrl(candidate.tmp_page_base_url)
       this.agentHandler.updateImageConfig(nextImageConn, nextImageCapability)
       this.scheduledTaskRunner.setWorkerHandler(this.agentHandler)
+      // 配置落地通知必须在 handler 的 sdkEnv 同步完成之后（review 风险 1）：worker 的
+      // onConfigChanged 在 abort() 的同步栈里就读 this.sdkEnv 建新 adapter——通知早于
+      // updateSdkEnv 会让重试换上的仍是旧 provider。
+      this.notifyRuntimeConfigApplied()
       return
     }
 
@@ -1755,6 +1790,8 @@ export class UnifiedAgent extends ModuleBase {
       this.scheduledTaskRunner.setWorkerHandler(coldHandler)
       this.contextAssembler.setLiveSnapshotProvider((taskId) => this.agentHandler?.getLiveSnapshot(taskId))
     }
+    // 冷启动路径同点通知：live 字段 + handler 均已就位。
+    this.notifyRuntimeConfigApplied()
 
   }
 

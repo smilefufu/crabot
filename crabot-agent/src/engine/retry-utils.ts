@@ -1,6 +1,12 @@
-export const DEFAULT_MAX_RETRIES = 10
+export const DEFAULT_MAX_RETRIES = 5
 export const DEFAULT_RETRY_DELAY_MS = 1_000
 export const BACKOFF_MAX_DELAY_MS = 8_000
+
+/** Retry-After 延迟上限：上游要求等待超过此值时不再等待，按重试耗尽失败处理。 */
+export const RETRY_AFTER_MAX_MS = 60_000
+
+/** 无 Retry-After 的通用 429 最多重试次数。 */
+export const OVERLOADED_WITHOUT_RETRY_AFTER_MAX_RETRIES = 3
 
 const RETRYABLE_CODES = new Set([
   // POSIX
@@ -27,7 +33,7 @@ const OVERLOADED_BODY_CODES = new Set([
 // 错误（过载 / 路由抖动 / token 过期）伪装成 400，按状态码白名单一刀切会错杀整轮请求。
 const NON_RETRYABLE_HTTP_STATUS = new Set([401, 403, 404, 405, 422])
 
-// body code 黑名单：上游把"客户端永久错误"塞进 HTTP 400 body 的特殊 code。
+// body code 黑名单：上游把"客户端永久错误"塞进 HTTP 400/429 body 的特殊 code。
 // 这类错误重试也不会成功（同输入再发还是被拦），必须在状态码默认重试之前先短路。
 const NON_RETRYABLE_BODY_CODES = new Set([
   'content_filter',           // 内容审查命中（OpenAI）
@@ -37,6 +43,12 @@ const NON_RETRYABLE_BODY_CODES = new Set([
   'invalid_request_error',    // 通用请求错（OpenAI 风格）
   'invalid_api_key',
   'invalid_authentication',
+  // 额度 / 计费类：再发多少次都没用，必须 fail-fast 让用户换 provider
+  'insufficient_quota',
+  'quota_exceeded',
+  'balance_exhausted',
+  'credit_exhausted',
+  'billing_not_active',
 ])
 
 export class HttpResponseError extends Error {
@@ -46,6 +58,8 @@ export class HttpResponseError extends Error {
     public readonly status: number,
     public readonly body: string,
     label: string,
+    /** 上游 Retry-After 头解析后的毫秒数（如有）。 */
+    public readonly retryAfterMs?: number,
   ) {
     super(`${label} HTTP ${status}: ${body.slice(0, 300)}`)
     this.name = 'HttpResponseError'
@@ -118,10 +132,55 @@ export function isRetryableStatus(status: number): boolean {
 }
 
 /**
+ * 解析 Retry-After 头值为毫秒数。
+ *   - 纯秒数（如 "5"）→ 直接 ×1000。
+ *   - HTTP-date（如 "Wed, 21 Oct 2026 07:28:00 GMT"）→ 与当前时间差。
+ *   - 无法解析 → undefined。
+ */
+export function parseRetryAfterMs(value: string | null | undefined): number | undefined {
+  if (!value) return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const seconds = Number(trimmed)
+  if (Number.isFinite(seconds) && Number.isInteger(seconds) && seconds >= 0) {
+    return seconds * 1000
+  }
+  const date = Date.parse(trimmed)
+  if (Number.isFinite(date)) {
+    return Math.max(0, date - Date.now())
+  }
+  return undefined
+}
+
+/** 从已知错误形态中提取 Retry-After 毫秒数。 */
+export function getRetryAfterMs(err: unknown): number | undefined {
+  if (err instanceof HttpResponseError) return err.retryAfterMs
+  const headers = (err as Error & { headers?: Record<string, string | string[]> }).headers
+  if (headers) {
+    const value = headers['retry-after'] ?? headers['Retry-After']
+    return parseRetryAfterMs(Array.isArray(value) ? value[0] : value)
+  }
+  return undefined
+}
+
+/** 判断是否为「无 Retry-After 的通用 429」，需要单独限制重试次数。 */
+export function isOverloadedWithoutRetryAfter(err: unknown): boolean {
+  if (err instanceof HttpResponseError) {
+    return err.status === 429 && err.retryAfterMs === undefined
+  }
+  const status = (err as Error & { status?: unknown }).status
+  if (status !== 429) return false
+  return getRetryAfterMs(err) === undefined
+}
+
+/**
  * 是否属于过载/限流类错误，需要走指数退避。包含：
  *   - HTTP 429（标准限流）
  *   - HttpResponseError body code 命中 OVERLOADED_BODY_CODES（如 server_is_overloaded 走 HTTP 400）
  *   - SDK error 自带 status === 429
+ *
+ * 注意：本函数只做「分类」，不做「是否还应继续重试」的判断。
+ * 无 Retry-After 的通用 429 另有次数上限（见 withStreamConsumptionRetry）。
  */
 export function isOverloadedError(err: unknown): boolean {
   if (!(err instanceof Error)) return false
@@ -140,12 +199,17 @@ export function isOverloadedError(err: unknown): boolean {
 
 /**
  * 计算单次重试前的等待时间。
- *   - useBackoff=false：固定 baseDelayMs
- *   - useBackoff=true：base * 2^attempt（cap 在 BACKOFF_MAX_DELAY_MS）
+ *   - retryAfterMs 有值：优先使用；本函数只做防御性 clamp 到 RETRY_AFTER_MAX_MS，
+ *     「超过上限按失败处理」的判定的职责在调用方（withStreamConsumptionRetry）。
+ *   - useBackoff=false：固定 baseDelayMs。
+ *   - useBackoff=true：base * 2^attempt（cap 在 BACKOFF_MAX_DELAY_MS）。
  *
  * attempt 为 0-indexed —— 第一次失败时 attempt=0，对应 base * 1。
  */
-export function computeRetryDelayMs(attempt: number, baseDelayMs: number, useBackoff: boolean): number {
+export function computeRetryDelayMs(attempt: number, baseDelayMs: number, useBackoff: boolean, retryAfterMs?: number): number {
+  if (retryAfterMs !== undefined) {
+    return Math.min(Math.max(retryAfterMs, 0), RETRY_AFTER_MAX_MS)
+  }
   if (!useBackoff) return baseDelayMs
   return Math.min(baseDelayMs * Math.pow(2, attempt), BACKOFF_MAX_DELAY_MS)
 }
@@ -218,6 +282,61 @@ export interface RetryOptions {
    * 主要用途是 worker → admin web 显示"LLM 正在重试中"。
    */
   readonly onRetry?: (event: { attempt: number; maxAttempts: number; delayMs: number; error: Error }) => void
+  /** 配置变更信号；触发时重试 sleep 会提前结束并由 onConfigChanged 刷新配置。 */
+  readonly configChangedSignal?: AbortSignal
+  /** 配置变更信号触发后调用；调用方应在此刷新 adapter/model 等运行时配置。 */
+  readonly onConfigChanged?: () => Promise<void>
+}
+
+export interface InterruptibleSleepOptions {
+  readonly abortSignal?: AbortSignal
+  readonly configChangedSignal?: AbortSignal
+  readonly onConfigChanged?: () => Promise<void>
+}
+
+/**
+ * 可被用户取消或配置变更打断的 sleep。
+ * - abortSignal 触发 → 抛 AbortError（用户主动取消）。入口已 aborted 同样立即抛。
+ * - configChangedSignal 在**本次 sleep 期间**触发 → 调用 onConfigChanged 并正常
+ *   resolve，让外层继续下一次 attempt。
+ *
+ * 注意：configChangedSignal 是一次性 AbortSignal（AbortController 不可 reset），因此
+ * 它只表达「sleep 期间发生了变更」这一**边沿事件**；入口时已 aborted 不触发任何回调、
+ * 照常睡满——「sleep 窗口之外发生的变更」由调用方经 configGeneration 探针消费（见
+ * withStreamConsumptionRetry），否则一次变更后本次 run 内所有后续退避都会被永久归零。
+ */
+export async function interruptibleSleep(ms: number, options: InterruptibleSleepOptions = {}): Promise<void> {
+  const { abortSignal, configChangedSignal, onConfigChanged } = options
+  if (abortSignal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError')
+  }
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup()
+      resolve()
+    }, ms)
+    const cleanup = (): void => {
+      clearTimeout(timer)
+      abortSignal?.removeEventListener('abort', onAbort)
+      configChangedSignal?.removeEventListener('abort', onConfigChangedAbort)
+    }
+    const onAbort = (): void => {
+      cleanup()
+      reject(new DOMException('Aborted', 'AbortError'))
+    }
+    const onConfigChangedAbort = async (): Promise<void> => {
+      cleanup()
+      try {
+        await onConfigChanged?.()
+      } catch (err) {
+        reject(err)
+        return
+      }
+      resolve()
+    }
+    abortSignal?.addEventListener('abort', onAbort, { once: true })
+    configChangedSignal?.addEventListener('abort', onConfigChangedAbort, { once: true })
+  })
 }
 
 export interface StreamRetryOptions<T = unknown> extends RetryOptions {
@@ -253,7 +372,7 @@ export async function withRetry<T>(
       if (abortSignal?.aborted) throw err
       if (!isRetryableError(err)) throw err
       if (attempt >= maxRetries) throw err
-      const actualDelay = computeRetryDelayMs(attempt, delayMs, true)
+      const actualDelay = computeRetryDelayMs(attempt, delayMs, true, getRetryAfterMs(err))
       console.error(
         `[${label}] attempt ${attempt + 1} failed, retrying in ${actualDelay}ms (backoff):`,
         err,
@@ -266,7 +385,11 @@ export async function withRetry<T>(
           error: err instanceof Error ? err : new Error(String(err)),
         })
       } catch { /* observability callback must not break retry */ }
-      await sleep(actualDelay, abortSignal)
+      await interruptibleSleep(actualDelay, {
+        abortSignal,
+        configChangedSignal: options.configChangedSignal,
+        onConfigChanged: options.onConfigChanged,
+      })
     }
   }
 }
@@ -303,7 +426,7 @@ export async function* streamWithRetry<T>(
       if (abortSignal?.aborted) throw err
       if (!isRetryableError(err)) throw err
       if (attempt >= maxRetries) throw err
-      const actualDelay = computeRetryDelayMs(attempt, delayMs, true)
+      const actualDelay = computeRetryDelayMs(attempt, delayMs, true, getRetryAfterMs(err))
       console.error(
         `[${label}] attempt ${attempt + 1} failed, retrying in ${actualDelay}ms (backoff):`,
         err,
@@ -316,7 +439,11 @@ export async function* streamWithRetry<T>(
           error: err instanceof Error ? err : new Error(String(err)),
         })
       } catch { /* observability callback must not break retry */ }
-      await sleep(actualDelay, abortSignal)
+      await interruptibleSleep(actualDelay, {
+        abortSignal,
+        configChangedSignal: options.configChangedSignal,
+        onConfigChanged: options.onConfigChanged,
+      })
     }
   }
 }

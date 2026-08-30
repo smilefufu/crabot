@@ -134,6 +134,16 @@ export interface BootstrapDeps {
   /** manager 的 LLM 来源(2026-08 收敛后即 powerful slot),thunk 以支持热更 */
   readonly managerAdapter: () => LLMAdapter
   readonly managerModel: () => string
+  /**
+   * 运行时配置**已原子替换**后的通知源(spec 2026-08-30-llm-retry-config-hotreload):
+   * 订阅者拿它 abort 自己的 configChangedSignal,让 LLM 重试 sleep 提前唤醒并用
+   * `managerAdapter()/managerModel()` 现解析的新配置重试。必须在 apply 完成后触发
+   * ——在 acceptRevision 时就触发会抢在 agentConfig 替换之前,重试拿到的还是旧配置。
+   */
+  readonly onRuntimeConfigApplied?: (listener: () => void) => () => void
+  /** 已应用配置代数 getter(每次原子替换 +1,与 onRuntimeConfigApplied 同点递增);
+   *  callNonStreaming 记账消费,用于消费「sleep 窗口之外落地的变更」。 */
+  readonly runtimeConfigAppliedGeneration?: () => number
   /** manager 的槽位思考强度(随 powerful slot),thunk 以支持热更;返回 undefined = 跟随默认 */
   readonly managerThinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
   /** manager 模型的上下文窗口(随 powerful slot),thunk 以支持热更;返回 undefined = engine 默认 200K */
@@ -508,6 +518,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     ledger,
     adapter: deps.managerAdapter,
     model: deps.managerModel,
+    onRuntimeConfigApplied: deps.onRuntimeConfigApplied,
+    runtimeConfigAppliedGeneration: deps.runtimeConfigAppliedGeneration,
     thinking: deps.managerThinking,
     contextWindowTokens: deps.managerContextWindowTokens,
     now: () => new Date(deps.now()),

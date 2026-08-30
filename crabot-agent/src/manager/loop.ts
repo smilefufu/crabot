@@ -208,6 +208,14 @@ export interface ManagerLoopDeps {
    */
   readonly adapter: () => LLMAdapter
   readonly model: () => string
+  /**
+   * 运行时配置已原子替换后的通知源与代数 getter(spec 2026-08-30-llm-retry-config-hotreload):
+   * runAttempt 用前者构造 configChangedSignal——LLM 重试 sleep 期间配置落地时提前唤醒,
+   * onConfigChanged 现解析 adapter/model 后下一次 attempt 换新配置重试;后者作为
+   * configGeneration 探针传给 engine,消费「sleep 窗口之外落地的变更」。
+   */
+  readonly onRuntimeConfigApplied?: (listener: () => void) => () => void
+  readonly runtimeConfigAppliedGeneration?: () => number
   readonly maxTurns?: number
   /** manager 模型的上下文窗口(thunk,episode 内与 adapter/model 同点解析);undefined = engine 默认 200K */
   readonly contextWindowTokens?: () => number | undefined
@@ -1181,6 +1189,12 @@ export class ManagerLoop {
     }
     const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(effectiveWake)
 
+    // LLM 重试期间配置热切换的订阅（spec 2026-08-30-llm-retry-config-hotreload）：
+    // 只覆盖本 attempt 的 runEngine 生命周期，结束时确定性退订，不泄漏监听器。
+    const configChanged = new AbortController()
+    const offRuntimeConfigApplied = this.deps.onRuntimeConfigApplied?.(() => configChanged.abort())
+      ?? (() => undefined)
+
     const options: EngineOptions = {
       systemPrompt,
       tools,
@@ -1223,16 +1237,32 @@ export class ManagerLoop {
       // P6-A §6.4：onTurn 是事后观察钩子，用它生成 llm_call/tool_call span；
       // 不复制执行语义、不新增第二个 query loop。
       onTurn: (event) => this.recordTurnSpans(episodeId, event),
+      // LLM 重试期间配置热切换（spec 2026-08-30-llm-retry-config-hotreload）：
+      // onRuntimeConfigApplied 在 agentConfig 原子替换完成后触发 → abort signal →
+      // callNonStreaming 的重试 sleep 提前结束；configGeneration 探针由 engine 记账，
+      // 消费 sleep 窗口之外落地的变更。onConfigChanged 现解析 powerful slot 后下一
+      // 次 attempt 换新 adapter/model。仅覆盖重试阶段，episode 快照语义不变。
+      configChangedSignal: configChanged.signal,
+      configGeneration: this.deps.runtimeConfigAppliedGeneration,
+      onConfigChanged: async () => ({
+        adapter: this.deps.adapter(),
+        model: this.deps.model(),
+        // thinking 是 per-model 字段，随 model 一并替换；manager 不发 max_tokens。
+        ...(this.deps.thinking ? { thinking: this.deps.thinking() } : {}),
+      }),
     }
 
-    const result = await runEngine({
-      prompt: '', // 被忽略:initialMessages 非空时 runEngine 不使用 prompt(见 query-loop.ts)
-      adapter,
-      options,
-      initialMessages,
-    })
-
-    return { result, hasSummaryMarker, initialMessageCount: initialMessages.length }
+    try {
+      const result = await runEngine({
+        prompt: '', // 被忽略:initialMessages 非空时 runEngine 不使用 prompt(见 query-loop.ts)
+        adapter,
+        options,
+        initialMessages,
+      })
+      return { result, hasSummaryMarker, initialMessageCount: initialMessages.length }
+    } finally {
+      offRuntimeConfigApplied()
+    }
   }
 
 }
