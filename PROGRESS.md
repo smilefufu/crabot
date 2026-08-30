@@ -5,7 +5,7 @@
 
 ## 当前状态
 
-### manager 人类消息 turn 间注入（含 builtin worker 输入 turn 边界投递）：PR #131（待合并）+ PR #130（已合并 `bad70ce4`）
+### manager 人类消息 turn 间注入（含 builtin worker 输入 turn 边界投递）：已合并（PR #131 → `28a3ae13`）+ PR #130（已合并 `bad70ce4`）
 
 - 引线：2026-08-29 两起现网案例。① builtin 监控 worker 用 `Output(block=true)` 无限轮询
   （94 turn 连续 3.5h 不 end_turn），manager 三次投递（含 immediate_redirect）压队 43 分钟
@@ -18,11 +18,11 @@
   Output 探针提前返回，投递可见性从小时级降到 ≈2s）+ 协议 v3.6.15（docs `93975cf`）+
   spec 2026-08-20 同步。review 三轮：真实风险 2 项（测试 gate 失效、`[manager input]`
   前缀误标系统通知）已修。
-- PR #131（OPEN，三项门禁均已解除：① 权限立项已随 #133 落地（`57b6ea87`）；
-  ② §4.1 例外措辞已随 docs `ef6888ff` 进协议（admin 0.2.7 / agent-v3 3.6.16）；
+- PR #131（三项门禁均已解除后合入：① 权限立项随 #133 落地（`57b6ea87`）；
+  ② §4.1 例外措辞随 docs `ef6888ff` 进协议（admin 0.2.7 / agent-v3 3.6.16）；
   ③ 九审唯一阻塞线程（Admin Chat 注入 fail-loud 冷却 → 占位气泡永久挂死）的前提
-  已随 #135 占位退役消失，fail-loud 冷却语义保留。已 merge origin/main 解 CONFLICTING，
-  push 触发 auto review，等最终复核合入）：
+  随 #135 占位退役消失，fail-loud 冷却语义保留。merge origin/main（`903ab278`）
+  解 CONFLICTING 后触发十/十一审）：
   manager 人类消息 episode 运行中到达时**同步**入
   mailbox 走 turn 边界注入（check→push 零 await，与 routeWorkerEvent 同构原子）；store 提交
   延后到 episode 收尾临界区统一落盘（mutex 内单写者，消除注入 RMW 与收尾 save 的 lost
@@ -32,7 +32,9 @@
   窗口；占位 result 打掉私聊/Admin Chat fail-loud；catch 分支丢注入；discard 打掉自唤醒；
   currentEpisodeInjected 重复入账致 max_tokens 重试渲染两遍）。六审非阻塞观察已处置：
   删 commitHumanInputs 的 injectedEnvelope 残留（无消费者）、两处注释纠偏、待办池补记
-  （见下 2/3）。
+  （见下 2/3）。十审修最后一条真实风险（复核 continuation 失败丢弃 finalMessages 时，
+  期间被 drain 的注入人类消息经 scoped drain capture 还原回 mailbox 走自唤醒重投，
+  消除「键在文本无」静默丢失，`2a521a02`）；十一审 Approve 后合入。
 - **#131 待办与 follow-up 池**：
   1. ~~群聊消息档位随消息~~ → **已定性更正并立项**：原条目「spec 从未定义按发起人区分
      权限」不准确——§3.2.7 与 narrowWorkerPermissions（PR F/J）的既有实现就是按发言人
@@ -91,7 +93,7 @@
 - 验证：web Chat 10/10、web/admin/agent tsc 干净、agent ack 用例 2/2；chat-integration
   重写为落库轮询（占位推送退役）。**需重建重启 admin + agent 生效。**
 - #131 阻塞解除：九审唯一阻塞线程（Admin Chat 注入 fail-loud 冷却 → 占位气泡永久挂死）
-  的前提随占位退役消失，fail-loud 冷却语义保留；#131 等 reviewer 复核合入。
+  的前提随占位退役消失，fail-loud 冷却语义保留；#131 已合并（`28a3ae13`）。
 
 ### LLM 429 分类重试 + 重试层扁平化 + 重试期间配置热切换：已合并（PR #134 → `f705b104`）
 
