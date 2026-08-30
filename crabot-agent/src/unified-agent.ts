@@ -543,6 +543,14 @@ export class UnifiedAgent extends ModuleBase {
   /** A failed pull destructively detached runtime resources; recovery must rebuild them
    *  even when the revision does not advance. */
   private configResourcesDetached = false
+  /** 运行时配置原子替换后的通知监听器（spec 2026-08-30-llm-retry-config-hotreload）。 */
+  private runtimeConfigAppliedListeners = new Set<() => void>()
+  /**
+   * 已应用配置代数：每次原子替换 +1。LLM 重试路径用它区分「sleep 期间的边沿唤醒」与
+   * 「sleep 窗口之外落地的变更」——后者由 callNonStreaming 记账消费，避免一次性
+   * AbortSignal 把后续退避永久归零。
+   */
+  private runtimeConfigAppliedGeneration = 0
 
   // 端口缓存
   private adminPort?: number
@@ -913,6 +921,9 @@ export class UnifiedAgent extends ModuleBase {
         return thinkingParam(conn.thinking_level, conn.thinking_custom)
       },
       managerContextWindowTokens: () => resolveManagerModelConfig(this.agentConfig?.model_config).context_window,
+      // LLM 重试期间配置热切换的通知源与代数探针（spec 2026-08-30-llm-retry-config-hotreload）
+      onRuntimeConfigApplied: (listener) => this.addRuntimeConfigAppliedListener(listener),
+      runtimeConfigAppliedGeneration: () => this.getRuntimeConfigAppliedGeneration(),
       // crab-messaging：与 `createMcpConfigs` 同款依赖，但不传 `getTaskContext`——manager 不是
       // task，且 tool-face 已把 `send_message` 的 intent 去掉，ask_human 路径对 manager 不存在。
       messagingDeps: {
@@ -1374,6 +1385,9 @@ export class UnifiedAgent extends ModuleBase {
       ...(this.agentConfig?.tmp_page_base_url ? { tmpPageBaseUrl: this.agentConfig.tmp_page_base_url } : {}),
     }, {
       mcpConfigFactory: createMcpConfigs,
+      // LLM 重试期间配置热切换的通知源与代数探针（spec 2026-08-30-llm-retry-config-hotreload）
+      runtimeConfigAppliedSource: (listener) => this.addRuntimeConfigAppliedListener(listener),
+      runtimeConfigAppliedGeneration: () => this.getRuntimeConfigAppliedGeneration(),
       deps: {
         rpcClient: this.rpcClient,
         moduleId: this.config.moduleId,
@@ -1539,6 +1553,23 @@ export class UnifiedAgent extends ModuleBase {
       this.runRuntimeConfigPull()
     }, 50)
     this.configPullTimer.unref?.()
+  }
+
+  /** 订阅「运行时配置已原子替换」通知；返回退订函数。listener 抛错不影响通知循环。 */
+  private addRuntimeConfigAppliedListener(listener: () => void): () => void {
+    this.runtimeConfigAppliedListeners.add(listener)
+    return () => { this.runtimeConfigAppliedListeners.delete(listener) }
+  }
+
+  private getRuntimeConfigAppliedGeneration(): number {
+    return this.runtimeConfigAppliedGeneration
+  }
+
+  private notifyRuntimeConfigApplied(): void {
+    this.runtimeConfigAppliedGeneration += 1
+    for (const listener of this.runtimeConfigAppliedListeners) {
+      try { listener() } catch { /* listener must not break config apply path */ }
+    }
   }
 
   /** Single-flight wrapper around pullRuntimeConfig with dirty-coalesce and backoff retry. */
@@ -1746,6 +1777,10 @@ export class UnifiedAgent extends ModuleBase {
       if (candidate.tmp_page_base_url !== undefined) this.agentHandler.updateTmpPageBaseUrl(candidate.tmp_page_base_url)
       this.agentHandler.updateImageConfig(nextImageConn, nextImageCapability)
       this.scheduledTaskRunner.setWorkerHandler(this.agentHandler)
+      // 配置落地通知必须在 handler 的 sdkEnv 同步完成之后（review 风险 1）：worker 的
+      // onConfigChanged 在 abort() 的同步栈里就读 this.sdkEnv 建新 adapter——通知早于
+      // updateSdkEnv 会让重试换上的仍是旧 provider。
+      this.notifyRuntimeConfigApplied()
       return
     }
 
@@ -1755,6 +1790,8 @@ export class UnifiedAgent extends ModuleBase {
       this.scheduledTaskRunner.setWorkerHandler(coldHandler)
       this.contextAssembler.setLiveSnapshotProvider((taskId) => this.agentHandler?.getLiveSnapshot(taskId))
     }
+    // 冷启动路径同点通知：live 字段 + handler 均已就位。
+    this.notifyRuntimeConfigApplied()
 
   }
 
@@ -1990,6 +2027,27 @@ export class UnifiedAgent extends ModuleBase {
       platform_message_id: platformMessageId,
       kind: 'acknowledged',
     }, this.config.moduleId)
+  }
+
+  /**
+   * Master Chat 的「已接收」标记（protocol-admin §3.20.2）：admin-web 没有 channel 侧
+   * platform message 可打 reaction，改用 admin 的 `chat_acknowledge` RPC 达成同一语义
+   * （人类输入已被 manager 消费）。admin 侧幂等，未知 request_id 静默忽略。
+   */
+  private async ackAdminChatHumanInput(requestId: string): Promise<void> {
+    try {
+      await this.rpcClient.call(
+        await this.getAdminPort(),
+        'chat_acknowledge',
+        { request_ids: [requestId] },
+        this.config.moduleId,
+      )
+    } catch (err) {
+      console.warn(
+        `[${this.config.moduleId}] chat_acknowledge failed (ignored):`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
   }
 
   /**
@@ -2494,7 +2552,8 @@ export class UnifiedAgent extends ModuleBase {
    *
    * 「三不」不变：不进 SessionLane（admin REST 前端 fetch 等响应才发下一条，天然单线）、
    * 不进注意力调度（master 直连每条都要处理）、不打 `add_reaction`（admin-web 没有
-   * channel 侧 platform message 可回应）。
+   * channel 侧 platform message 可回应——「已接收」标记改走 admin `chat_acknowledge`，
+   * 见 routeHumanMessages 的 commit 回调）。
    */
   private async processAdminChatMessage(
     message: ChannelMessage,
@@ -2527,10 +2586,14 @@ export class UnifiedAgent extends ModuleBase {
         [message],
         MASTER_FRIEND,
         { admin_chat_request_ids: [callbackInfo.request_id] },
-        undefined,
+        // 「已接收」标记（protocol-agent-v3 §4.1 / protocol-admin §3.20.2）：人类输入
+        // commit 进 manager 会话后 best-effort 通知 admin，web 在对应用户消息上渲染标记，
+        // 与 channel 的 acknowledged reaction 同语义同时机。失败只落日志，不影响回复链路。
+        () => this.ackAdminChatHumanInput(callbackInfo.request_id),
         // 注入在跑 episode 时(PR #131):占位 result 恒 completed,F1 判不到真实失败——
-        // 若被注入 episode 最终 failed/aborted,在此补发 fail-loud 收掉占位气泡(否则
-        // consumedEvents=false 不走 settleUnclaimedAdminChatWakes,气泡转到 agent 重启)。
+        // 若被注入 episode 最终 failed/aborted,结算委托给该 episode 的真实收尾 result,
+        // 在此补发 fail-loud(否则 consumedEvents=false 不走 settleUnclaimedAdminChatWakes,
+        // 失败无声)。占位气泡已随 PR #135 退役,此处 fail-loud 只负责把失败说出口。
         (settled) => {
           if (settled.outcome === 'failed' || settled.outcome === 'aborted') {
             console.error(
@@ -2548,7 +2611,7 @@ export class UnifiedAgent extends ModuleBase {
         err instanceof Error ? err.message : String(err),
       )
       // 送不出去（冷却命中 / chat_callback 也失败）就把异常原样抛回 admin —— 那边的
-      // `dispatchToAgent` catch 会推 `chat_error`，占位气泡照样收口，且不会往消息库里
+      // `dispatchToAgent` catch 会推 `chat_error`（前端 toast 提示），且不会往消息库里
       // 再落一条重复的兜底文案。冷却在这里保住的正是"不重复落库"这一层。
       if (!(await this.sendFailLoudReply('admin-web', sessionId, { kind: 'threw', error: err }, callbackInfo.request_id))) {
         throw err
@@ -2558,7 +2621,7 @@ export class UnifiedAgent extends ModuleBase {
 
     // 注入占位:真实收尾前 outcome/repliedToHuman 都是编造的——失败由 settle 回调补发
     // fail-loud(见上面回调);noteEpisodeSilence 在注入场景不触发(私聊同,仅影响排障
-    // 日志)。RPC 先按"暂无直接回复"返回,真实回复由后续 delivery 结算占位气泡。
+    // 日志)。RPC 先按"暂无直接回复"返回,真实回复由后续 delivery 推送(chat_push)。
     if (result.episodeId === '') return { decision_types: [] }
 
     if (result.outcome === 'failed' || result.outcome === 'aborted') {

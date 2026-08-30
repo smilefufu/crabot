@@ -3,7 +3,8 @@ import type { StreamChunk, ToolUseBlock, RawReasoningBlock, LLMTokenUsage } from
 
 /**
  * 判断 chunk 是否对消费者可见。message_start 仅携带 messageId，
- * `StreamProcessor.process` 对其 noop —— 仅在它后面断流时允许 streamWithRetry 重试。
+ * `StreamProcessor.process` 对其 noop —— 仅它属于「重试可安全丢弃」的元事件
+ * （重试层为 callNonStreaming 的缓冲整流；streamWithRetry 供非 adapter 场景复用）。
  * 此谓词与 process() 中 noop 分支的判定保持单点同步。
  */
 export function isMaterialChunk(chunk: StreamChunk): boolean {

@@ -2,9 +2,12 @@ import { describe, it, expect } from 'vitest'
 import {
   BACKOFF_MAX_DELAY_MS,
   HttpResponseError,
+  RETRY_AFTER_MAX_MS,
   computeRetryDelayMs,
   isOverloadedError,
+  isOverloadedWithoutRetryAfter,
   isRetryableError,
+  parseRetryAfterMs,
   streamWithRetry,
   withRetry,
 } from '../../src/engine/retry-utils'
@@ -211,10 +214,40 @@ describe('streamWithRetry', () => {
     expect(err.bodyCode).toBe('server_is_overloaded')
   })
 
-  it('treats HTTP 429 as retryable + backoff regardless of body', async () => {
+  it('treats HTTP 429 without Retry-After as retryable but limited to 3 attempts in callNonStreaming', async () => {
     const err = new HttpResponseError(429, 'Too Many Requests', 'test')
     expect(isRetryableError(err)).toBe(true)
     expect(isOverloadedError(err)).toBe(true)
+    expect(isOverloadedWithoutRetryAfter(err)).toBe(true)
+  })
+
+  it('treats HTTP 429 with Retry-After as retryable and preserves retryAfterMs', async () => {
+    const err = new HttpResponseError(429, 'Too Many Requests', 'test', 5_000)
+    expect(isRetryableError(err)).toBe(true)
+    expect(isOverloadedWithoutRetryAfter(err)).toBe(false)
+    expect(err.retryAfterMs).toBe(5_000)
+  })
+
+  it('treats quota/billing body codes as non-retryable even on HTTP 429', async () => {
+    for (const code of ['insufficient_quota', 'quota_exceeded', 'balance_exhausted', 'credit_exhausted', 'billing_not_active']) {
+      const err = new HttpResponseError(429, JSON.stringify({ code }), 'test')
+      expect(isRetryableError(err)).toBe(false)
+    }
+  })
+
+  it('parseRetryAfterMs: parses seconds and HTTP-date', () => {
+    expect(parseRetryAfterMs('5')).toBe(5_000)
+    expect(parseRetryAfterMs('120')).toBe(120_000)
+    expect(parseRetryAfterMs('0')).toBe(0)
+    expect(parseRetryAfterMs('not-a-number')).toBeUndefined()
+    const future = new Date(Date.now() + 7_000).toUTCString()
+    expect(parseRetryAfterMs(future)).toBeGreaterThanOrEqual(6_000)
+    expect(parseRetryAfterMs(future)).toBeLessThanOrEqual(8_000)
+  })
+
+  it('computeRetryDelayMs: uses Retry-When present and caps it', () => {
+    expect(computeRetryDelayMs(0, 1_000, true, 5_000)).toBe(5_000)
+    expect(computeRetryDelayMs(0, 1_000, true, 120_000)).toBe(RETRY_AFTER_MAX_MS)
   })
 
   it('computeRetryDelayMs: fixed delay when useBackoff=false', () => {

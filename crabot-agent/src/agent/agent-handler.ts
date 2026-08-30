@@ -464,6 +464,14 @@ export interface AgentHandlerOptions {
   imageCapability?: { available: boolean; reason?: string }
   /** UnifiedAgent 共享的 Worker background entity registry。 */
   bgRegistry?: BgEntityRegistry
+  /**
+   * 运行时配置已原子替换后的通知源与代数 getter（spec 2026-08-30-llm-retry-config-hotreload）：
+   * worker loop 用通知源构造 configChangedSignal（sleep 期间边沿唤醒），用代数 getter
+   * 作为 configGeneration 探针（消费 sleep 窗口之外落地的变更）；两者触发时
+   * onConfigChanged 现解析 this.sdkEnv 换新 adapter/model 重试。未注入时无此能力。
+   */
+  runtimeConfigAppliedSource?: (listener: () => void) => () => void
+  runtimeConfigAppliedGeneration?: () => number
 }
 
 export interface ExecuteTriggerMessageParams {
@@ -600,6 +608,9 @@ export class AgentHandler {
   private readonly workerShellExitSettlementTimers = new Map<string, NodeJS.Timeout>()
   /** Interval handle for periodic 24h GC of dead entities */
   private gcIntervalHandle?: NodeJS.Timeout
+  /** 运行时配置原子替换通知源与代数 getter（见 AgentHandlerOptions 同名字段）。 */
+  private readonly runtimeConfigAppliedSource?: (listener: () => void) => () => void
+  private readonly runtimeConfigAppliedGeneration?: () => number
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -613,6 +624,8 @@ export class AgentHandler {
     )
     this.sdkEnv = sdkEnv
     this.mcpConfigFactory = options?.mcpConfigFactory
+    this.runtimeConfigAppliedSource = options?.runtimeConfigAppliedSource
+    this.runtimeConfigAppliedGeneration = options?.runtimeConfigAppliedGeneration
     this.deps = options?.deps
     this.systemPrompt = config.systemPrompt
     this.builtinToolConfig = options?.builtinToolConfig
@@ -1336,6 +1349,9 @@ export class AgentHandler {
     // ProgressDigest 与 Worker loop 同生命周期；静默 / text_forward 模式保持 undefined。
     let digest: ProgressDigest | undefined
     let loopSpanId: string | undefined
+    // 运行时配置替换通知的退订句柄（spec 2026-08-30-llm-retry-config-hotreload）：
+    // 在 runEngine 前订阅，outer finally 确定性退订——任何退出路径都不泄漏监听器。
+    let offRuntimeConfigApplied: () => void = () => undefined
 
     try {
       // Skill 工具直接读 admin 传来的 skill_dir 绝对路径；agent 不再复制 SKILL.md 到 instance 目录。
@@ -1824,6 +1840,12 @@ export class AgentHandler {
       // 80% 窗口时自动 compaction 兜底。真正死循环可通过用户 supplement（dispatcher 注入）或 abort 中断。
       let compactionSpanId: string | undefined = undefined
       let compactionStartedAtMs: number | undefined = undefined
+      // LLM 重试期间配置热切换（spec 2026-08-30-llm-retry-config-hotreload）：
+      // adapter 本身仍是 loop 级快照；只有重试 sleep 阶段会被配置落地唤醒，
+      // onConfigChanged 现解析 this.sdkEnv 换新 adapter/model 继续本 attempt 的后续重试。
+      const configChanged = new AbortController()
+      offRuntimeConfigApplied = this.runtimeConfigAppliedSource?.(() => configChanged.abort())
+        ?? (() => undefined)
       const engineResult = await runEngine({
         prompt: taskMessage,
         adapter,
@@ -1837,6 +1859,16 @@ export class AgentHandler {
           ...(this.sdkEnv.thinking !== undefined ? { thinking: this.sdkEnv.thinking } : {}),
           maxTurns: 2000,
           supportsVision: this.sdkEnv.supportsVision,
+          configChangedSignal: configChanged.signal,
+          configGeneration: this.runtimeConfigAppliedGeneration,
+          onConfigChanged: async () => ({
+            adapter: adapterFromSdkEnv(this.sdkEnv),
+            model: this.sdkEnv.modelId,
+            // maxTokens/thinking 是 per-model 字段，随 model 一并替换（显式 undefined =
+            // 新模型无该配置，从请求中移除），否则旧模型参数发给新模型可能 400。
+            maxTokens: this.sdkEnv.maxTokens,
+            thinking: this.sdkEnv.thinking,
+          }),
           permissionConfig: initialPermissionConfig,
           timezone: this.getTimezone(),
           abortSignal: taskState.abortController.signal as AbortSignal,
@@ -2141,6 +2173,7 @@ export class AgentHandler {
       }
 
     } finally {
+      offRuntimeConfigApplied()
       digest?.dispose()
       if (!opts?.skipCleanup) {
         this.humanQueues.get(task.task_id)?.clearBarrier()

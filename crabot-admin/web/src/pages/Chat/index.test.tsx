@@ -1,9 +1,8 @@
 /**
- * Master Chat 「处理中」占位气泡的收口路径。
+ * Master Chat 无占位气泡的追加流 + 「已接收」标记（protocol-admin §3.20.2）。
  *
- * cutover 后 manager 正常回复走 send_message → chat_push（完整 ChatMessage，含 media），
- * 前端必须按 request_id 把占位原地替换掉，否则每条回复后都会留一个永远转圈的气泡。
- * 失败兜底（chat_reply）/ chat_error 两条老路径必须照旧。
+ * 占位退役后：发送只本地追加用户消息；回复（chat_push / chat_reply 历史兼容）一律作为
+ * 独立消息追加；chat_error 走 toast 提示；chat_message_acked 在用户消息上渲染 ✓ 标记。
  */
 import React from 'react'
 import { MemoryRouter } from 'react-router-dom'
@@ -15,21 +14,26 @@ import type { ChatMessage, ChatServerMessage } from '../../types/chat'
 const loadHistory = vi.fn()
 const sendMessage = vi.fn()
 const getTaskSnapshot = vi.fn()
+const toastMocks = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }))
 let messageHandler: ((m: ChatServerMessage) => void) | null = null
+let statusHandler: ((s: 'connected') => void) | null = null
 
 vi.mock('../../components/Layout/MainLayout', () => ({
   MainLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }))
 
 vi.mock('../../contexts/ToastContext', () => ({
-  useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }),
+  useToast: () => toastMocks,
 }))
 
 vi.mock('../../services/chat', () => ({
   chatService: {
     get status() { return 'connected' },
     connect: vi.fn(),
-    onStatusChange: () => () => {},
+    onStatusChange: (handler: (s: 'connected') => void) => {
+      statusHandler = handler
+      return () => { statusHandler = null }
+    },
     onMessage: (handler: (m: ChatServerMessage) => void) => {
       messageHandler = handler
       return () => { messageHandler = null }
@@ -54,7 +58,7 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn()
 })
 
-/** 渲染并发出一条消息，返回它的 request_id（占位气泡此时已生出） */
+/** 渲染并发送一条消息，返回它的 request_id */
 async function renderAndSend(requestId: string): Promise<void> {
   sendMessage.mockReturnValue(requestId)
   render(
@@ -69,8 +73,6 @@ async function renderAndSend(requestId: string): Promise<void> {
   await act(async () => {
     fireEvent.click(screen.getByText('发送'))
   })
-  // 占位气泡在位
-  expect(screen.getByText('思考中...')).toBeInTheDocument()
 }
 
 /** 把一条服务端推送喂给组件已注册的 handler */
@@ -91,79 +93,121 @@ function assistantPush(text: string, requestId?: string): ChatServerMessage {
   return { type: 'chat_push', message }
 }
 
-describe('Master Chat 占位气泡收口', () => {
+describe('Master Chat 无占位追加流与已接收标记', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     messageHandler = null
+    statusHandler = null
     loadHistory.mockResolvedValue([])
     getTaskSnapshot.mockResolvedValue(null)
   })
 
-  it('正常回复：chat_push 按 request_id 原地替换占位，不残留转圈', async () => {
+  it('发送后只显示用户消息，无「思考中」占位', async () => {
     await renderAndSend('req-1')
-    await push(assistantPush('看完了，结论是这样', 'req-1'))
 
+    expect(screen.getByText('帮我看下这个')).toBeInTheDocument()
     expect(screen.queryByText('思考中...')).not.toBeInTheDocument()
+  })
+
+  it('chat_push 回复直接追加为独立消息', async () => {
+    await renderAndSend('req-2')
+    await push(assistantPush('看完了，结论是这样', 'req-2'))
+
+    expect(screen.getByText('帮我看下这个')).toBeInTheDocument()
     expect(screen.getByText('看完了，结论是这样')).toBeInTheDocument()
   })
 
-  it('manager 主动推送（无 request_id）：纯追加，不吃掉在途占位', async () => {
-    await renderAndSend('req-2')
-    await push(assistantPush('顺嘴提醒你一句'))
-
-    // 占位照旧转圈（那条请求还没被回答），主动推送作为新气泡追加
-    expect(screen.getByText('思考中...')).toBeInTheDocument()
-    expect(screen.getByText('顺嘴提醒你一句')).toBeInTheDocument()
-  })
-
-  it('request_id 对不上的 chat_push：纯追加，不误伤别人的占位', async () => {
+  it('一轮多条回复：全部追加，互不覆盖', async () => {
     await renderAndSend('req-3')
-    await push(assistantPush('这是另一轮的回复', 'req-other'))
+    await push(assistantPush('收到，我去办', 'req-3'))
+    await push(assistantPush('办好了，结果如下'))
 
-    expect(screen.getByText('思考中...')).toBeInTheDocument()
-    expect(screen.getByText('这是另一轮的回复')).toBeInTheDocument()
-  })
-
-  it('一轮多条回复：第一条替换占位，后续追加（admin 侧认领即消费，后续不带 request_id）', async () => {
-    await renderAndSend('req-4')
-    await push(assistantPush('收到，我去办', 'req-4'))
-    await push(assistantPush('办好了，结果如下', undefined))
-
-    expect(screen.queryByText('思考中...')).not.toBeInTheDocument()
     expect(screen.getByText('收到，我去办')).toBeInTheDocument()
     expect(screen.getByText('办好了，结果如下')).toBeInTheDocument()
   })
 
-  it('占位已被 chat_push 收口后，同 request_id 再来一条 chat_push：追加而不是覆盖', async () => {
-    await renderAndSend('req-5')
-    await push(assistantPush('第一条', 'req-5'))
-    await push(assistantPush('第二条', 'req-5'))
-
-    expect(screen.queryByText('思考中...')).not.toBeInTheDocument()
-    expect(screen.getByText('第一条')).toBeInTheDocument()
-    expect(screen.getByText('第二条')).toBeInTheDocument()
-  })
-
-  it('失败兜底（chat_reply）路径不受影响：仍按 request_id 收口占位', async () => {
-    await renderAndSend('req-6')
+  it('chat_reply（历史兼容路径）同样追加为独立消息', async () => {
+    await renderAndSend('req-4')
     await push({
       type: 'chat_reply',
-      request_id: 'req-6',
+      request_id: 'req-4',
       content: '我这条消息没处理完，暂时回不了你。',
       reply_type: 'direct_reply',
       status: 'completed',
     })
 
-    expect(screen.queryByText('思考中...')).not.toBeInTheDocument()
     expect(screen.getByText('我这条消息没处理完，暂时回不了你。')).toBeInTheDocument()
   })
 
-  it('chat_error 路径不受影响：占位转 failed 并显示错误', async () => {
-    await renderAndSend('req-7')
-    await push({ type: 'chat_error', request_id: 'req-7', error: '系统暂时不可用，请稍后重试' })
+  it('chat_error 以 toast 提示，不改写消息流', async () => {
+    await renderAndSend('req-5')
+    await push({ type: 'chat_error', request_id: 'req-5', error: '系统暂时不可用，请稍后重试' })
 
-    expect(screen.queryByText('思考中...')).not.toBeInTheDocument()
-    // chat_error 把同 request_id 的 user / assistant 两条都标 failed，错误文案出现不止一处
-    expect(screen.getAllByText(/系统暂时不可用，请稍后重试/).length).toBeGreaterThan(0)
+    expect(toastMocks.error).toHaveBeenCalledWith('系统暂时不可用，请稍后重试')
+    expect(screen.getByText('帮我看下这个')).toBeInTheDocument()
+  })
+
+  it('chat_message_acked 后用户消息出现已接收标记；发送后先无标记', async () => {
+    await renderAndSend('req-6')
+
+    // 未打标：无 ✓ 标记
+    expect(screen.queryByTitle(/已接收/)).not.toBeInTheDocument()
+
+    await push({ type: 'chat_message_acked', request_ids: ['req-6'] })
+
+    expect(screen.getByTitle(/已接收/)).toBeInTheDocument()
+  })
+
+  it('chat_message_acked 对不上的 request_id：不误标别人的消息', async () => {
+    await renderAndSend('req-7')
+    await push({ type: 'chat_message_acked', request_ids: ['req-other'] })
+
+    expect(screen.queryByTitle(/已接收/)).not.toBeInTheDocument()
+  })
+
+  it('重连后补齐断连期间的服务端消息：回复追加、✓ 标记经 acknowledged_at 恢复', async () => {
+    await renderAndSend('req-8')
+    // 断连期间服务端落库（loadHistory 倒序：最新在前）
+    loadHistory.mockResolvedValue([
+      { message_id: 'srv_reply', role: 'assistant', content: { type: 'text', text: '断连前的回复' }, request_id: 'req-8', timestamp: new Date().toISOString() },
+      { message_id: 'srv_user', role: 'user', content: { type: 'text', text: '帮我看下这个' }, request_id: 'req-8', acknowledged_at: new Date().toISOString(), timestamp: new Date(Date.now() - 1000).toISOString() },
+    ])
+    await act(async () => { statusHandler!('connected') })
+
+    expect(screen.getByText('断连前的回复')).toBeInTheDocument()
+    expect(screen.getByTitle(/已接收/)).toBeInTheDocument()
+    // 本地乐观 user 消息被落库版本取代（同 request_id），不重复显示
+    expect(screen.getAllByText('帮我看下这个')).toHaveLength(1)
+  })
+
+  it('重连补齐幂等：重复合并已知的消息不重复追加', async () => {
+    await renderAndSend('req-9')
+    loadHistory.mockResolvedValue([
+      { message_id: 'srv_reply9', role: 'assistant', content: { type: 'text', text: '只此一条' }, request_id: 'req-9', timestamp: new Date().toISOString() },
+    ])
+    await act(async () => { statusHandler!('connected') })
+    await act(async () => { statusHandler!('connected') })
+
+    expect(screen.getAllByText('只此一条')).toHaveLength(1)
+  })
+
+  it('回复先到、重连补 user 消息：按时间戳归位，提问不沉到回复后面', async () => {
+    await renderAndSend('req-10')
+    // 回复经 chat_push 先到（服务端 UUID 进入已知集合）
+    await push(assistantPush('回复先到了', 'req-10'))
+    // 重连拉历史：回复已 known 被去重跳过，只剩 user 消息进 fresh——
+    // 若 concat 队尾，提问会渲染到回复后面（review 指出的必现顺序错乱）
+    loadHistory.mockResolvedValue([
+      { message_id: 'srv_回复先到了', role: 'assistant', content: { type: 'text', text: '回复先到了' }, request_id: 'req-10', timestamp: new Date().toISOString() },
+      { message_id: 'srv_user', role: 'user', content: { type: 'text', text: '帮我看下这个' }, request_id: 'req-10', acknowledged_at: new Date().toISOString(), timestamp: new Date(Date.now() - 1000).toISOString() },
+    ])
+    await act(async () => { statusHandler!('connected') })
+
+    expect(screen.getAllByText('帮我看下这个')).toHaveLength(1)
+    expect(screen.getAllByText('回复先到了')).toHaveLength(1)
+    // user 消息必须出现在回复之前（DOM 顺序）
+    const user = screen.getByText('帮我看下这个')
+    const reply = screen.getByText('回复先到了')
+    expect(user.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

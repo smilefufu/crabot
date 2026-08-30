@@ -18,8 +18,11 @@
   Output 探针提前返回，投递可见性从小时级降到 ≈2s）+ 协议 v3.6.15（docs `93975cf`）+
   spec 2026-08-20 同步。review 三轮：真实风险 2 项（测试 gate 失效、`[manager input]`
   前缀误标系统通知）已修。
-- PR #131（OPEN，两项合并门禁均已解除：① 权限立项已随 #133 落地（`57b6ea87`）；
-  ② §4.1 例外措辞已随 docs `ef6888ff` 进协议（admin 0.2.7 / agent-v3 3.6.16），等最终复核合入）：
+- PR #131（OPEN，三项门禁均已解除：① 权限立项已随 #133 落地（`57b6ea87`）；
+  ② §4.1 例外措辞已随 docs `ef6888ff` 进协议（admin 0.2.7 / agent-v3 3.6.16）；
+  ③ 九审唯一阻塞线程（Admin Chat 注入 fail-loud 冷却 → 占位气泡永久挂死）的前提
+  已随 #135 占位退役消失，fail-loud 冷却语义保留。已 merge origin/main 解 CONFLICTING，
+  push 触发 auto review，等最终复核合入）：
   manager 人类消息 episode 运行中到达时**同步**入
   mailbox 走 turn 边界注入（check→push 零 await，与 routeWorkerEvent 同构原子）；store 提交
   延后到 episode 收尾临界区统一落盘（mutex 内单写者，消除注入 RMW 与收尾 save 的 lost
@@ -69,6 +72,62 @@
      后续统一收口。
   8. （#130 遗留）redirect 对 builtin 是否允许 interrupt/腰斩工具；v2 agent-handler 遗留
      （humanQueue/ask_human）清理；Output 超时参数与连续 block 硬性封顶。
+
+### Admin Chat 删占位气泡 + 已接收标记（UX 对齐 channel）：已合并（PR #135 → `d7b62171`）
+
+- 决策（2026-08-30）：直接删除 admin-web「正在思考」占位气泡；admin chat 增加类 feishu
+  reaction 机制——人类消息被 agent 消费后打 ✓ 标记，把 UX 与 feishu channel 对齐。
+- spec/协议先行 crabot-docs（`66d5a2d` + `9adeb8f`）：spec 2026-08-30-admin-chat-ack-reaction-design；
+  protocol-admin 0.2.8（§3.20.2 chat_acknowledge / chat_message_acked / acknowledged_at、
+  chat_status 退役）；protocol-agent-v3 3.6.18（§4.1 已接收标记与 Channel reaction 同语义同时机）。
+- 实现：web 删乐观占位/8s 轮询/chat_status handler，chat_error → toast，回复一律独立追加，
+  user 气泡 ✓ 标记（重连补齐按 timestamp 归位合并）；admin acknowledgeRequests（幂等 +
+  未知 ID 静默）经 requestIndex 定位 user 消息打标落盘后推送；agent 人类输入 commit 后
+  best-effort chat_acknowledge（复用 onHumanInputCommitted，只对 primary wake 触发，
+  mailbox 重投不打标 = channel 无 reaction 兜底语义）。
+- @claude review 三轮：一轮修真实风险（删 connected 分支时误删重连补齐，恢复为服务端
+  权威合并）；二轮修真实风险（补齐 concat 队尾致提问沉到回复后，改按 timestamp 排序归位）；
+  三轮 Approve。遗留 follow-up 见下方待办。
+- 验证：web Chat 10/10、web/admin/agent tsc 干净、agent ack 用例 2/2；chat-integration
+  重写为落库轮询（占位推送退役）。**需重建重启 admin + agent 生效。**
+- #131 阻塞解除：九审唯一阻塞线程（Admin Chat 注入 fail-loud 冷却 → 占位气泡永久挂死）
+  的前提随占位退役消失，fail-loud 冷却语义保留；#131 等 reviewer 复核合入。
+
+### LLM 429 分类重试 + 重试层扁平化 + 重试期间配置热切换：已合并（PR #134 → `f705b104`）
+
+- 引线：现网事故——z-ai/glm-5.3-flash 额度类 429 触发嵌套双重重试（adapter 层 10 次 ×
+  callNonStreaming 10 次 ≈121 次尝试/13+ 分钟 sleep），期间 Admin 切换默认模型不生效。
+- spec/协议先行 crabot-docs（`1299870`）：spec 2026-08-30-llm-retry-config-hotreload-design
+  （Implemented）；protocol-agent-v3 3.6.17（重试阶段例外、429 分类、单层重试约束、
+  invalidation 投递保证）。
+- 实现：①429 三分类（额度类 body code fail-fast / Retry-After 有限重试且 60s 封顶、
+  超上限按失败 / 无 header 通用 429 限 3 次）；②重试层扁平化（adapter 只留超时，
+  唯一重试层 = callNonStreaming，DEFAULT_MAX_RETRIES 10→5，单调用 ≤6 次尝试）；
+  ③重试等待响应配置热切换（configGeneration 代数记账 + 边沿 signal 唤醒，
+  每次 LLMConfigSwap 换 adapter + model/maxTokens/thinking 参数，消费授予 1 次额外
+  attempt 预算封顶 maxRetries，generic429 计数随切换清零）。spec §5.4 复核结论：
+  Admin invalidation gate 关闭窗口静默跳过是既有设计，无代码改动。
+- @claude review 四轮：三轮各修一条真实风险（worker onConfigChanged 读旧 sdkEnv 的
+  notify 时序；一次性 AbortSignal 永久归零退避 → generation 探针方案；变更消费先于
+  放弃判定 + 额外 attempt 预算）；四轮 Approve。遗留 follow-up 见下方待办。
+- 验证：tsc 干净；engine 628/628 全绿；全量失败与 HEAD 基线逐一对照均为存量
+  环境/flaky，无新增。**需重建重启 agent 生效。**
+
+### LLM 重试/热切换 follow-up（PR #134 review 记录，均非阻塞）
+
+- ① `Retry-After: 0`/已过期 HTTP-date 允许 0ms 延迟并绕过通用 429 次数上限
+  （可设延迟下限；纯空白值解析缺陷已修）。
+- ② onRetry.maxAttempts / admin web「正在重试 N/M」分母随 configSwitchBudget 跳动，
+  观测口径与真实配额不一致。
+- ③ 死代码清理：streamWithRetry / isMaterialChunk（本 PR 扁平化后仅测试引用）、
+  anthropic 429 包装丢失 cause/stack、unified-agent `updateLlmClients`（存量）。
+- ④ [理论风险] configGeneration 探针只看代数不看 model_config 是否真变：改
+  system_prompt/skills 也触发一次换配置预算；equal-revision 恢复路径同样 +1。
+  生产 revision 变更稀疏且有界，量级可接受。
+- ⑤ [知情项] 热切换只救当前这一次 LLM 调用：同 runEngine 下一 turn 仍用 loop/episode
+  级快照旧 provider，直到 episode/loop 结束才全面换走（spec §2.2 非目标、协议 3.6.17
+  已写明）。
+
 ### 群聊权限群级统一（与发言人无关）：已合并（PR #133 → `57b6ea87`）
 
 - 决策（2026-08-30）：群聊有群聊的权限，与发言人无关（含 master 在群里也按群档位）；
@@ -312,6 +371,12 @@
 
 ### 技术债与既有 follow-up（P6 后或并行确认）
 
+- **admin-chat ack PR #135 review follow-up（2026-08-30，均非阻塞）**：①附件路径的 ✓
+  打标竞态——chat_message_acked 若早于 HTTP 响应返回到达则遍历不到本地消息（刷新经历史
+  恢复，量级极小）；②附件路径的 ✓ 不经重连补齐——fresh 按 message_id 去重跳过已知的
+  服务端 UUID user 消息，断连期间丢的 ack 推送补不回（刷新恢复 = channel 无 reaction
+  兜底）；③handleChatAcknowledge 不校验 request_ids 类型（agent 唯一调用方恒传数组，
+  同模块既有风格）。
 - **finish_task 守卫 PR #128 review follow-up（2026-08-29）**：①常驻型 bg-shell（如 dev
   server）在跑时 finish_task 会被守卫永久拒绝，只能靠提醒引导 worker 先 Kill——需确认这是
   期望语义，必要时写进守卫文案或文档；②打回暂无次数上限（排空修复后重试循环由 bg 通知驱动、

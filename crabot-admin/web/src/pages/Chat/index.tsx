@@ -128,66 +128,35 @@ export const Chat: React.FC = () => {
     const unsubStatus = chatService.onStatusChange((status) => {
       setConnectionStatus(status)
       if (status === 'connected') {
-        // 检查并更新 processing 状态的消息
+        // 重连补齐：pushToClient 断连即丢，断连期间的回复与 ✓ 标记经重拉历史找回。
+        // 服务端消息为权威：按 message_id 去重合并；被落库版本取代的本地乐观 user
+        // 消息（msg_ 前缀临时 id，同 request_id）丢弃，未落库的乐观消息原样保留。
         chatService.loadHistory(PAGE_SIZE).then((history) => {
           if (history.length === 0) return
-          const historyMap = new Map(history.map((m) => [m.message_id, m]))
           setMessages((prev) => {
-            const hasStuck = prev.some((m) => m.status === 'processing')
-            if (!hasStuck) return prev
-            return prev.map((m) => {
-              if (m.status !== 'processing') return m
-              const found = historyMap.get(m.message_id)
-              if (found) return { ...found, status: 'completed' as const }
-              // 通过 request_id 匹配（占位消息的 message_id 是临时生成的）
-              const byReqId = history.find((h) => h.request_id === m.request_id && h.role === 'assistant')
-              if (byReqId) return { ...byReqId, status: 'completed' as const }
-              return m
-            })
+            const known = new Set(prev.map((m) => m.message_id))
+            const fresh = [...history].reverse().filter((m) => !known.has(m.message_id))
+            if (fresh.length === 0) return prev
+            const settled = new Set(
+              fresh.map((m) => m.request_id).filter((id): id is string => id !== undefined)
+            )
+            const kept = prev.filter(
+              (m) => !(m.message_id.startsWith('msg_') && m.request_id !== undefined && settled.has(m.request_id))
+            )
+            // fresh 里可能混有本会话早先已收到回复的 user 消息（WS 文本路径前端不知道
+            // 服务端 UUID，只能等重连补齐）——不能一律 concat 到队尾，按时间戳归位。
+            const merged = [...kept, ...fresh.map((m) => ({ ...m, status: 'completed' as const }))]
+            merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+            return merged
           })
         }).catch(() => {/* ignore */})
       }
     })
     const unsubMessage = chatService.onMessage(handleServerMessage)
 
-    // 轮询修复：每 8 秒检查是否有 processing 超过 15 秒的消息
-    // 用于修复 WS 连通但 chat_reply 事件丢失的情况
-    const stuckMessageTimes = new Map<string, number>()
-    const pollInterval = setInterval(() => {
-      setMessages((prev) => {
-        const now = Date.now()
-        const hasStuck = prev.some((m) => {
-          if (m.status !== 'processing') return false
-          const firstSeen = stuckMessageTimes.get(m.message_id)
-          if (!firstSeen) {
-            stuckMessageTimes.set(m.message_id, now)
-            return false
-          }
-          return now - firstSeen > 15000
-        })
-        if (!hasStuck) return prev
-        // 有卡住的消息，从 API 加载最近消息，精确更新 processing 的
-        chatService.loadHistory(PAGE_SIZE).then((history) => {
-          if (history.length === 0) return
-          setMessages((current) => {
-            const stillStuck = current.some((m) => m.status === 'processing')
-            if (!stillStuck) return current
-            return current.map((m) => {
-              if (m.status !== 'processing') return m
-              const byReqId = history.find((h) => h.request_id === m.request_id && h.role === 'assistant')
-              if (byReqId) return { ...byReqId, status: 'completed' as const }
-              return m
-            })
-          })
-        }).catch(() => {/* ignore */})
-        return prev
-      })
-    }, 8000)
-
     return () => {
       unsubStatus()
       unsubMessage()
-      clearInterval(pollInterval)
     }
   }, [])
 
@@ -357,15 +326,7 @@ export const Chat: React.FC = () => {
           timestamp: new Date().toISOString(),
           status: 'completed',
         }
-        // 占位仍在 processing → 原地转为系统提示；否则（已被 direct_reply 填充）追加新消息
-        const idx = prev.findIndex(
-          (m) => m.request_id === message.request_id && m.role === 'assistant' && m.status === 'processing'
-        )
-        if (idx >= 0) {
-          const updated = [...prev]
-          updated[idx] = { ...cardMsg, message_id: prev[idx].message_id }
-          return updated
-        }
+        // 直接追加为独立消息（占位气泡已退役，无原地转换对象）
         return [...prev, cardMsg]
       })
       // task_created：本地 upsert 初始快照 + tag 同 request_id 的 user 消息
@@ -436,46 +397,25 @@ export const Chat: React.FC = () => {
           )
         )
       }
-    } else if (message.type === 'chat_status') {
-      // 只更新 assistant 占位消息的状态为 processing
+    } else if (message.type === 'chat_error') {
+      // 占位气泡退役后无原地收口对象：错误以普通系统提示呈现（toast）。
+      // 失败说明（fail-loud）另经 chat_push 作为独立消息到达，与此不重复。
+      toast.error(message.error || '消息处理失败')
+    } else if (message.type === 'chat_push') {
+      // manager 经 send_message 伪 channel 回流的新消息（完整 ChatMessage，含 media）：
+      // 直接追加为独立消息（占位气泡已退役，无原地结算对象，UX 对齐 channel）。
+      setMessages((prev) => [...prev, { ...message.message, status: 'completed' as const }])
+    } else if (message.type === 'chat_message_acked') {
+      // 「已接收」标记（protocol-admin §3.20.2）：agent 在人类输入 commit 后经
+      // chat_acknowledge 打标并推送。本地时间即可（刷新后经聊天历史读到持久化值）。
       setMessages((prev) =>
         prev.map((m) =>
-          m.request_id === message.request_id && m.role === 'assistant'
-            ? { ...m, status: 'processing' as const }
+          m.role === 'user' && !m.acknowledged_at && m.request_id !== undefined
+            && message.request_ids.includes(m.request_id)
+            ? { ...m, acknowledged_at: new Date().toISOString() }
             : m
         )
       )
-    } else if (message.type === 'chat_error') {
-      if (message.request_id) {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.request_id === message.request_id
-              ? { ...m, status: 'failed' as const, error: message.error }
-              : m
-          )
-        )
-      }
-    } else if (message.type === 'chat_push') {
-      // manager 经 send_message 伪 channel 回流的新消息（完整 ChatMessage，含 media）。
-      // admin 落库时会把当时 in-flight 的 request_id 盖上（chat-manager.storeAssistantMessage），
-      // 命中同 request_id 的 processing 占位就原地替换——正常回复的转圈气泡靠这一步收口。
-      // 没有 request_id（manager 主动推送）或占位已被别的路径收口过 → 维持原来的追加行为。
-      const incoming = message.message
-      setMessages((prev) => {
-        const next: MessageState = { ...incoming, status: 'completed' as const }
-        // P6-A §11：delivery 携带 request_ids（一条回复可原子结算多条占位）；
-        // request_id（单数）只读历史兼容。
-        const claimIds = incoming.request_ids ?? (incoming.request_id ? [incoming.request_id] : [])
-        if (claimIds.length === 0) return [...prev, next]
-        const isPendingFor = (m: MessageState) =>
-          m.role === 'assistant' && m.status === 'processing' && m.request_id !== undefined && claimIds.includes(m.request_id)
-        const idx = prev.findIndex(isPendingFor)
-        if (idx < 0) return [...prev, next]
-        const updated = [...prev]
-        updated[idx] = next
-        // 同 delivery 结算的其余占位一并收口（它们的正式内容就是这条回复）。
-        return updated.filter((m, i) => i === idx || !isPendingFor(m))
-      })
     } else if (message.type === 'chat_task_update') {
       // 任务状态/计划变更：upsert 进 taskStatuses（终态也保留供图标显示 ✓/✗）
       upsertTaskStatus(message.task)
@@ -584,29 +524,22 @@ export const Chat: React.FC = () => {
         // 清空动作放在发送成功之后：失败时保留 input/attachments/quote 让用户直接重试
         const files = attachments
         const composed = composeWithQuote(content)
-        const { message, request_id } = await chatService.sendMessageWithAttachments(composed, files)
+        const { message } = await chatService.sendMessageWithAttachments(composed, files)
         setAttachments([])
         setInput('')
         setQuote(null)
         releasePreviewUrls(files)
+        // 只追加用户消息；回复由 chat_push 作为独立消息到达（占位气泡已退役）。
         setMessages((prev) => [
           ...prev,
           { ...message, status: 'sent' as const },
-          {
-            message_id: `msg_${Date.now()}_assistant`,
-            role: 'assistant' as const,
-            content: { type: 'text' as const, text: '' },
-            request_id,
-            timestamp: new Date().toISOString(),
-            status: 'processing' as const,
-          },
         ])
       } else {
         // 既有 WS 纯文本路径（入口已保证 content 非空）
         const composed = composeWithQuote(content)
         const request_id = chatService.sendMessage(composed)
 
-        // 添加用户消息（内容含引用块前缀）
+        // 添加用户消息（内容含引用块前缀）；回复由 chat_push 作为独立消息到达
         const userMessage: MessageState = {
           message_id: `msg_${Date.now()}`,
           role: 'user',
@@ -616,17 +549,7 @@ export const Chat: React.FC = () => {
           status: 'sent',
         }
 
-        // 添加占位的 assistant 消息
-        const assistantPlaceholder: MessageState = {
-          message_id: `msg_${Date.now()}_assistant`,
-          role: 'assistant',
-          content: { type: 'text', text: '' },
-          request_id,
-          timestamp: new Date().toISOString(),
-          status: 'processing',
-        }
-
-        setMessages((prev) => [...prev, userMessage, assistantPlaceholder])
+        setMessages((prev) => [...prev, userMessage])
         setInput('')
         setQuote(null)
       }
