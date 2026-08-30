@@ -529,7 +529,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     //   `narrowWorkerPermissions(base, null)` 原样返回它,与 admin 侧"空 creator → master_private"
     //   的既有规则同解。
     // - 有 creator → 按该 friend 解析。`sessionType` 取该会话上一次解析出来的私/群(未知按
-    //   'private'):这一项只影响 admin 侧要不要并上 group_default,猜错只会更严,不会更宽。
+    //   'private'):这一项只影响 admin 侧解析路径。2026-08-30 群聊权限群级统一(PR #133)后,
+    //   群聊会话猜成 'private' 是**更宽**而非更严(master creator 拿回 master_private、普通
+    //   creator 拿 friend∪session 并集,均 ≥ 群档位)——agent 重启后该群尚未被人类消息唤醒过
+    //   的窗口内可达;已记 PROGRESS follow-up(schedule 权限语义属 spec 非目标,另行立项)。
     onScheduleWake: async ({ key, creatorFriendId, isBuiltin }) => {
       if (isBuiltin || !creatorFriendId) return null
       const { sessionId } = splitManagerKey(key)

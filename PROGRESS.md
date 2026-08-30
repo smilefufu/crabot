@@ -5,6 +5,26 @@
 
 ## 当前状态
 
+### 群聊权限群级统一（与发言人无关）：PR #133（待合并）
+
+- 决策（2026-08-30）：群聊有群聊的权限，与发言人无关（含 master 在群里也按群档位）；
+  推翻 protocol-admin §3.2.7 原按发言人解析的群聊语义。spec + 协议（admin 0.2.7 /
+  agent-v3 3.6.16 §4.1 注入例外）随 crabot-docs `ef6888ff` 落地。
+- 实现：admin `resolvePrincipalPermissions` 群聊路径提前返回（忽略 sender_friend_id、
+  只按 GroupSessionPermissionConfig/缺省 group_default 解析，模板缺失 → minimal）；
+  私聊不变；agent 侧无代码改动（唤醒边界照常调 RPC）。
+- 关联：落地后解除 PR #131 权限 review 线程前提（注入借 primary wake 档位提权），
+  #131 另一门禁（§4.1 协议例外）已随 docs 落地。
+- **follow-up（#133 review 记录，schedule 权限语义属 spec 非目标、另行立项）**：
+  `crabot-agent/src/manager/bootstrap.ts` `onScheduleWake` 用
+  `principals.get(key)?.principal.sessionType ?? 'private'` 猜会话类型——群聊会话在
+  agent 重启后、尚未被人类消息唤醒过的窗口内猜成 'private'，schedule 解析走私聊路径
+  （master creator 拿回 master_private、普通 creator 拿 friend∪session 并集，均 ≥ 群档位），
+  与群级统一不变量相悖。相对改动前无回归（旧代码群聊 master 本来也短路）；窗口窄
+  （需重启 + 该群无人类消息 + 恰有带 creator 的 schedule 触发）。修法方向：
+  TriggerScheduleParams.target_session 带 session_type（协议改动）或按 session_id
+  特征/配置反查，需 spec。
+
 ### 移除 macOS FDA 放开机制，受保护目录无条件排除：已合并（PR #129 → `3e268439`）
 
 - 决策：FDA 放开机制要求「设 CRABOT_ENABLE_FDA → 系统设置授权 → 重启」，授权动作必须在
