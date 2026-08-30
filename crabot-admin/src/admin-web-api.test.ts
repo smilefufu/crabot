@@ -1372,7 +1372,7 @@ describe('Admin Web API', () => {
   })
 
   describe('resolve_principal_permissions REST', () => {
-    it('master friend → 全 write 短路', async () => {
+    it('master friend → 全 write 短路（私聊；群聊已群级统一、不短路）', async () => {
       const token = await loginAndGetToken()
       const friendId = 'master-resolve-test'
       admin['friends'].set(friendId, {
@@ -1388,7 +1388,7 @@ describe('Admin Web API', () => {
         TEST_WEB_PORT,
         `/api/permissions/resolve-principal`,
         'POST',
-        { sender_friend_id: friendId, session_id: 'any-session', session_type: 'group' },
+        { sender_friend_id: friendId, session_id: 'any-session', session_type: 'private' },
         token,
       )
       expect(response.statusCode).toBe(200)
@@ -1418,7 +1418,7 @@ describe('Admin Web API', () => {
       expect(response.body.sources.session_template_id).toBe('group_scheduler')
     })
 
-    it('friend(standard) ∪ session(group_scheduler) → 并集中 schedule=write', async () => {
+    it('（私聊）friend(standard) ∪ session(group_scheduler) → 并集中 schedule=write', async () => {
       const token = await loginAndGetToken()
       const friendId = 'normal-union-test'
       const sessionId = 'union-session-test'
@@ -1440,7 +1440,7 @@ describe('Admin Web API', () => {
         TEST_WEB_PORT,
         `/api/permissions/resolve-principal`,
         'POST',
-        { sender_friend_id: friendId, session_id: sessionId, session_type: 'group' },
+        { sender_friend_id: friendId, session_id: sessionId, session_type: 'private' },
         token,
       )
       expect(response.statusCode).toBe(200)

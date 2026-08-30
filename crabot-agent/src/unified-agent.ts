@@ -2082,13 +2082,14 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 调 admin RPC 解析"消息发起人"effective permissions（friend ∪ session 并集）。
+   * 调 admin RPC 解析"消息发起人"effective permissions。
    *
    * 取代旧的 resolveSessionPermissions / resolveGroupPermissions 双路径：
    * - master 短路、minimal 兜底、friend explicit-config 优先于 template 等语义
    *   全部由 admin 侧 `resolve_principal_permissions` 统一实现
-   * - 私聊：senderFriend = 私聊对端 friend
-   * - 群聊：senderFriend = 该批次最后一条消息的 friend（即真实发言者，享其个人 friend 模板）
+   * - 私聊：senderFriend = 私聊对端 friend，按 friend ∪ session 并集解析
+   * - 群聊：senderFriend = 该批次最后一条消息的 friend（仅作身份标识；2026-08-30
+   *   群聊权限群级统一后 admin 侧忽略 sender_friend_id，档位只按群配置解析）
    *
    * @param senderFriendId 发起人 friend id（陌生人/无 friend_id 时传 undefined）。收 id 而不是
    *                       Friend 对象：admin 那侧本来就只用 `sender_friend_id`，而 scheduled

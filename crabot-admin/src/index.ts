@@ -9112,14 +9112,14 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * 解析"消息发起人"的 effective permissions（friend ∪ session 并集）
+   * 解析"消息发起人"的 effective permissions
    *
-   * 设计意图：让 hook 层用统一一份 ResolvedPermissions 判断 cli_access / tool_access，
-   * 不再在 agent 侧分私聊/群聊两条解析路径。
+   * 设计意图：让 hook 层用统一一份 ResolvedPermissions 判断 cli_access / tool_access。
    *
-   * 语义：
-   * - master friend 短路：直接返回 master_private 模板的解析结果
-   * - 非 master：friend ResolvedPermissions ∪ session ResolvedPermissions
+   * 语义（protocol-admin §3.2.7，2026-08-30 群聊权限群级统一）：
+   * - 群聊：与发言人无关——只按 GroupSessionPermissionConfig（缺省 group_default）解析
+   * - 私聊 master friend 短路：直接返回 master_private 模板的解析结果
+   * - 私聊非 master：friend ResolvedPermissions ∪ session ResolvedPermissions
    * - 都缺：fallback 到 minimal 模板
    */
   private async resolvePrincipalPermissions(
