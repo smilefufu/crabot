@@ -18,7 +18,7 @@ import type { ChatMessage, ChatTaskSnapshot } from '../../types/chat'
 
 /** 消息状态（从 index.tsx 迁入，UI 层扩展字段） */
 export interface MessageState extends ChatMessage {
-  status?: 'sending' | 'sent' | 'processing' | 'completed' | 'failed'
+  status?: 'sending' | 'sent' | 'completed' | 'failed'
   reply_type?: 'direct_reply' | 'task_created' | 'task_completed' | 'task_failed'
   error?: string
 }
@@ -39,7 +39,6 @@ interface ChatMessageItemProps {
 export const ChatMessageItem = React.memo(function ChatMessageItem({ message, onContextMenu, taskSnapshot, highlighted }: ChatMessageItemProps) {
   const navigate = useNavigate()
   const isUser = message.role === 'user'
-  const isProcessing = message.status === 'processing'
 
   // task_created 消息（含历史存量）渲染为居中单行系统提示样式，不挂右键引用、不挂任务图标
   if (message.task_id && message.content.text?.startsWith('已创建任务')) {
@@ -118,88 +117,88 @@ export const ChatMessageItem = React.memo(function ChatMessageItem({ message, on
           border: isUser ? 'none' : '1px solid var(--border)',
         }}
       >
-        {isProcessing ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <div className="spinner" style={{ width: '16px', height: '16px', borderWidth: '2px' }} />
-            <span style={{ color: 'var(--text-secondary)' }}>思考中...</span>
-          </div>
-        ) : (
-          <>
-            {getReplyTypeHint()}
-            <div
-              className="markdown-content"
-              style={{
-                wordBreak: 'break-word',
-                lineHeight: '1.6',
+        {getReplyTypeHint()}
+        <div
+          className="markdown-content"
+          style={{
+            wordBreak: 'break-word',
+            lineHeight: '1.6',
+          }}
+        >
+          {isUser ? (
+            // user 消息：前导 "> " 行（与 composeWithQuote 格式对应）渲染为引用块
+            (() => {
+              const lines = (message.content.text ?? '').split('\n')
+              let quoteEnd = 0
+              while (quoteEnd < lines.length && lines[quoteEnd].startsWith('> ')) quoteEnd++
+              // 引用块后紧跟的空行也跳过（composeWithQuote 会在引用块后加一行）
+              if (quoteEnd > 0 && quoteEnd < lines.length && lines[quoteEnd] === '') quoteEnd++
+              const quoteBlock = quoteEnd > 0
+                ? lines.slice(0, quoteEnd).join('\n').replace(/^> /gm, '').trimEnd()
+                : null
+              const bodyText = lines.slice(quoteEnd).join('\n')
+              return (
+                <>
+                  {quoteBlock && (
+                    <div
+                      style={{
+                        borderLeft: '3px solid rgba(255,255,255,0.5)',
+                        paddingLeft: '0.6rem',
+                        marginBottom: '0.4rem',
+                        fontSize: '0.82rem',
+                        color: 'rgba(255,255,255,0.75)',
+                        whiteSpace: 'pre-wrap',
+                      }}
+                    >
+                      {quoteBlock}
+                    </div>
+                  )}
+                  <div style={{ whiteSpace: 'pre-wrap' }}>{bodyText}</div>
+                </>
+              )
+            })()
+          ) : (
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                // worker 在正文 markdown 嵌 store 图时统一补 token
+                img: ({ src, alt }) => (
+                  <img
+                    src={typeof src === 'string' ? chatService.mediaSrc(src) : undefined}
+                    alt={alt ?? ''}
+                    style={{ maxWidth: '100%', borderRadius: '8px' }}
+                  />
+                ),
+                // 链接（含临时页面 URL）在新标签打开，不顶掉当前 Admin 页面
+                a: ({ href, children }) => (
+                  <a href={href} target="_blank" rel="noopener noreferrer">
+                    {children}
+                  </a>
+                ),
               }}
             >
-              {isUser ? (
-                // user 消息：前导 "> " 行（与 composeWithQuote 格式对应）渲染为引用块
-                (() => {
-                  const lines = (message.content.text ?? '').split('\n')
-                  let quoteEnd = 0
-                  while (quoteEnd < lines.length && lines[quoteEnd].startsWith('> ')) quoteEnd++
-                  // 引用块后紧跟的空行也跳过（composeWithQuote 会在引用块后加一行）
-                  if (quoteEnd > 0 && quoteEnd < lines.length && lines[quoteEnd] === '') quoteEnd++
-                  const quoteBlock = quoteEnd > 0
-                    ? lines.slice(0, quoteEnd).join('\n').replace(/^> /gm, '').trimEnd()
-                    : null
-                  const bodyText = lines.slice(quoteEnd).join('\n')
-                  return (
-                    <>
-                      {quoteBlock && (
-                        <div
-                          style={{
-                            borderLeft: '3px solid rgba(255,255,255,0.5)',
-                            paddingLeft: '0.6rem',
-                            marginBottom: '0.4rem',
-                            fontSize: '0.82rem',
-                            color: 'rgba(255,255,255,0.75)',
-                            whiteSpace: 'pre-wrap',
-                          }}
-                        >
-                          {quoteBlock}
-                        </div>
-                      )}
-                      <div style={{ whiteSpace: 'pre-wrap' }}>{bodyText}</div>
-                    </>
-                  )
-                })()
-              ) : (
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    // worker 在正文 markdown 嵌 store 图时统一补 token
-                    img: ({ src, alt }) => (
-                      <img
-                        src={typeof src === 'string' ? chatService.mediaSrc(src) : undefined}
-                        alt={alt ?? ''}
-                        style={{ maxWidth: '100%', borderRadius: '8px' }}
-                      />
-                    ),
-                    // 链接（含临时页面 URL）在新标签打开，不顶掉当前 Admin 页面
-                    a: ({ href, children }) => (
-                      <a href={href} target="_blank" rel="noopener noreferrer">
-                        {children}
-                      </a>
-                    ),
-                  }}
-                >
-                  {message.content.text ?? ''}
-                </ReactMarkdown>
-              )}
-            </div>
-            {message.content.media && message.content.media.length > 0 && (
-              <MessageMedia media={message.content.media} />
-            )}
-            {message.error && (
-              <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--error)' }}>
-                {message.error}
-              </div>
-            )}
-          </>
+              {message.content.text ?? ''}
+            </ReactMarkdown>
+          )}
+        </div>
+        {message.content.media && message.content.media.length > 0 && (
+          <MessageMedia media={message.content.media} />
+        )}
+        {message.error && (
+          <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--error)' }}>
+            {message.error}
+          </div>
         )}
       </div>
+      {/* 「已接收」标记（user 消息；agent commit 后经 chat_acknowledge 打标，对齐 channel acknowledged reaction） */}
+      {isUser && message.acknowledged_at && (
+        <span
+          title={`已接收 ${new Date(message.acknowledged_at).toLocaleString()}`}
+          style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', flexShrink: 0 }}
+        >
+          ✓
+        </span>
+      )}
       {/* assistant 消息：任务图标在气泡右侧（后渲染图标） */}
       {message.task_id && !isUser && (
         <TaskStatusIcon taskId={message.task_id} snapshot={taskSnapshot} />

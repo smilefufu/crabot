@@ -104,35 +104,41 @@ describe('Admin Master Chat 集成测试', () => {
     })
   })
 
-  it('应该能够发送消息并接收 processing 状态', async () => {
-    return new Promise<void>((resolve, reject) => {
+  it('应该能够发送消息并写入聊天记录（chat_status processing 占位推送已退役，以落库为准）', async () => {
+    const requestId = 'test-' + Date.now()
+    await new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(`ws://localhost:${webPort}/ws/chat?token=${jwtToken}`)
 
       ws.on('open', () => {
-        const testMessage = {
+        ws.send(JSON.stringify({
           type: 'chat_message',
-          request_id: 'test-' + Date.now(),
+          request_id: requestId,
           content: '测试消息',
-        }
-
-        ws.send(JSON.stringify(testMessage))
-      })
-
-      ws.on('message', (data) => {
-        const message = JSON.parse(data.toString())
-
-        if (message.type === 'chat_status' && message.status === 'processing') {
-          ws.close()
-          resolve()
-        }
+        }))
+        resolve()
       })
 
       ws.on('error', (error) => {
         reject(error)
       })
 
-      setTimeout(() => reject(new Error('未收到响应')), 5000)
+      setTimeout(() => reject(new Error('发送超时')), 5000)
     })
+
+    // 轮询等待受理落库
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      const response = await fetch(`http://localhost:${webPort}/api/chat/messages?limit=10`, {
+        headers: {
+          'Authorization': `Bearer ${jwtToken}`,
+        },
+      })
+      expect(response.status).toBe(200)
+      const data = await response.json() as { messages: Array<{ request_id?: string }> }
+      if (data.messages.some((m) => m.request_id === requestId)) return
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    throw new Error('消息未写入聊天记录')
   })
 
   it('应该能够通过 REST API 查询聊天记录', async () => {

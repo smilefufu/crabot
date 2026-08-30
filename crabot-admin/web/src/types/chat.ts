@@ -30,6 +30,8 @@ export interface ChatMessage {
   /** P6-A §11：本条 assistant 消息的 delivery 事务 ID。 */
   delivery_id?: string
   task_id?: string
+  /** 人类输入已被 Agent 写入 Manager 会话历史的时间（chat_acknowledge 落盘，ISO 8601）；未打标省略。 */
+  acknowledged_at?: string
   timestamp: string
 }
 
@@ -50,12 +52,12 @@ export type ChatServerMessage =
       reply_type: 'direct_reply' | 'task_created' | 'task_completed' | 'task_failed'
       status: 'completed' | 'failed'
     }
-  | { type: 'chat_status'; request_id: string; status: 'processing' }
   | { type: 'chat_error'; request_id?: string; error: string }
   | { type: 'chat_push'; message: ChatMessage }
   | { type: 'chat_task_update'; task: ChatTaskSnapshot }
   | { type: 'chat_message_tagged'; message_id: string; task_id: string }
   | { type: 'chat_message_deleted'; message_id: string }
+  | { type: 'chat_message_acked'; request_ids: string[] }
 
 /** 任务状态快照（chat_task_update / GET /api/chat/tasks/:id） */
 export interface ChatTaskSnapshot {

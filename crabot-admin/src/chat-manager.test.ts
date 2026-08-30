@@ -196,7 +196,8 @@ describe('入站带附件消息（handleInboundMessage）', () => {
     expect(mgr.getMessages(10)).toHaveLength(1)
     // P6-A §11.4：失败不再立即 chat_error——dispatch loop 退避重试（上限后报错），
     // journal 保持 pending_dispatch；重启由 reconcileInboundDispatches 恢复。
-    expect(pushed.map((p) => p.type)).toEqual(['chat_status'])
+    // 2026-08-30：chat_status 占位推送退役（protocol-admin §3.20.2）——无推送。
+    expect(pushed).toEqual([])
     const journalPath = `${TEST_DATA_DIR}/chat-inbound-dispatch-journal/req-err.json`
     const journal = JSON.parse(await fs.readFile(journalPath, 'utf-8'))
     expect(journal.status).toBe('pending_dispatch')
@@ -596,5 +597,59 @@ describe('buildChatTaskSnapshot', () => {
     } as unknown as Task
     const snap = buildChatTaskSnapshot(task)
     expect(snap.step).toEqual({ index: 1, total: 2, description: '第二步' })
+  })
+})
+
+describe('ChatManager.chat_acknowledge（protocol-admin §3.20.2）', () => {
+  beforeEach(async () => {
+    await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
+    await fs.mkdir(TEST_DATA_DIR, { recursive: true })
+  })
+
+  afterEach(async () => {
+    await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
+  })
+
+  /** 落一条 user 消息并挂上可观察的 ws 客户端 */
+  async function makeManagerWithUserMessage(requestId: string): Promise<ChatManager> {
+    const mgr = await makeManager()
+    await mgr.handleInboundMessage({ request_id: requestId, text: '在吗', files: [] }, 'test-token')
+    const pushed: Array<Record<string, unknown>> = []
+    ;(mgr as unknown as { activeClient: unknown }).activeClient = {
+      readyState: 1, // WebSocket.OPEN
+      send: (data: string) => { pushed.push(JSON.parse(data)) },
+    }
+    ;(mgr as unknown as { testPushed?: Array<Record<string, unknown>> }).testPushed = pushed
+    return mgr
+  }
+
+  function pushedOf(mgr: ChatManager): Array<Record<string, unknown>> {
+    return (mgr as unknown as { testPushed?: Array<Record<string, unknown>> }).testPushed ?? []
+  }
+
+  it('打标：写 acknowledged_at、推 chat_message_acked、返回 1；重载后标记仍在（持久化）', async () => {
+    const mgr = await makeManagerWithUserMessage('req-ack-1')
+    expect(await mgr.acknowledgeRequests(['req-ack-1'])).toBe(1)
+
+    const user = mgr.getMessages(10).find((m) => m.role === 'user')
+    expect(user?.acknowledged_at).toBeTruthy()
+    expect(pushedOf(mgr).map((p) => p.type)).toEqual(['chat_message_acked'])
+    expect(pushedOf(mgr)[0].request_ids).toEqual(['req-ack-1'])
+
+    const mgr2 = await makeManager()
+    await mgr2.loadData()
+    expect(mgr2.getMessages(10).find((m) => m.role === 'user')?.acknowledged_at).toBeTruthy()
+  })
+
+  it('幂等：重复调用返回 0，不重复推送', async () => {
+    const mgr = await makeManagerWithUserMessage('req-ack-2')
+    expect(await mgr.acknowledgeRequests(['req-ack-2'])).toBe(1)
+    expect(await mgr.acknowledgeRequests(['req-ack-2'])).toBe(0)
+    expect(pushedOf(mgr)).toHaveLength(1)
+  })
+
+  it('未知 request_id 静默忽略，返回 0', async () => {
+    const mgr = await makeManager()
+    expect(await mgr.acknowledgeRequests(['nope'])).toBe(0)
   })
 })

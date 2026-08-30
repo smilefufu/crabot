@@ -1856,6 +1856,8 @@ export interface ChatMessage {
   /** P6-A §11：本条 assistant 消息的 delivery 事务 ID。 */
   delivery_id?: string
   task_id?: TaskId
+  /** 人类输入已被 Agent 写入 Manager 会话历史的时间（chat_acknowledge 落盘，ISO 8601）；未打标省略。 */
+  acknowledged_at?: string
   timestamp: string
 }
 
@@ -1875,6 +1877,12 @@ export interface ChatSendMessageParams {
   delivery_id?: string
   /** P6-A §11.6：本 delivery 结算的入站 request IDs；空/缺席 = proactive 追加。 */
   request_ids?: string[]
+}
+
+/** chat_acknowledge RPC（protocol-admin §3.20.2）入参：Agent 在人类输入 commit 后打「已接收」标记。 */
+export interface ChatAcknowledgeParams {
+  /** 本次 commit 结算的入站请求集合（与 ChatMessage.request_ids 同源）。 */
+  request_ids: string[]
 }
 
 /** send_message RPC 返回 */
@@ -1914,10 +1922,14 @@ export interface ChatTaskSnapshot {
 
 /** 服务端发送的聊天消息 */
 export interface ChatServerMessage {
-  type: 'chat_reply' | 'chat_status' | 'chat_error' | 'chat_push' | 'chat_task_update' | 'chat_message_tagged' | 'chat_message_deleted'
+  type: 'chat_reply' | 'chat_error' | 'chat_push' | 'chat_task_update' | 'chat_message_tagged' | 'chat_message_deleted' | 'chat_message_acked'
+  /** 单 ID 兼容；新写可为一个 request_ids 成员。 */
   request_id?: string
+  /** 同一 assistant response 显式结算的请求集合；chat_message_acked 携带已接收标记的请求集合；主动 push 省略。 */
+  request_ids?: string[]
   content?: string
-  status?: 'processing' | 'completed' | 'failed'
+  /** 仅 chat_reply 携带（历史兼容）；processing 占位语义随 chat_status 退役（2026-08-30）。 */
+  status?: 'completed' | 'failed'
   /**
    * chat_reply 携带任务关联时填写；chat_message_tagged 必填。
    * 对应 protocol-admin §3.20 ChatServerMessage.task_id 字段。
