@@ -5,6 +5,26 @@
 
 ## 当前状态
 
+### Admin Chat 删占位气泡 + 已接收标记（UX 对齐 channel）：已合并（PR #135 → `d7b62171`）
+
+- 决策（2026-08-30）：直接删除 admin-web「正在思考」占位气泡；admin chat 增加类 feishu
+  reaction 机制——人类消息被 agent 消费后打 ✓ 标记，把 UX 与 feishu channel 对齐。
+- spec/协议先行 crabot-docs（`66d5a2d` + `9adeb8f`）：spec 2026-08-30-admin-chat-ack-reaction-design；
+  protocol-admin 0.2.8（§3.20.2 chat_acknowledge / chat_message_acked / acknowledged_at、
+  chat_status 退役）；protocol-agent-v3 3.6.18（§4.1 已接收标记与 Channel reaction 同语义同时机）。
+- 实现：web 删乐观占位/8s 轮询/chat_status handler，chat_error → toast，回复一律独立追加，
+  user 气泡 ✓ 标记（重连补齐按 timestamp 归位合并）；admin acknowledgeRequests（幂等 +
+  未知 ID 静默）经 requestIndex 定位 user 消息打标落盘后推送；agent 人类输入 commit 后
+  best-effort chat_acknowledge（复用 onHumanInputCommitted，只对 primary wake 触发，
+  mailbox 重投不打标 = channel 无 reaction 兜底语义）。
+- @claude review 三轮：一轮修真实风险（删 connected 分支时误删重连补齐，恢复为服务端
+  权威合并）；二轮修真实风险（补齐 concat 队尾致提问沉到回复后，改按 timestamp 排序归位）；
+  三轮 Approve。遗留 follow-up 见下方待办。
+- 验证：web Chat 10/10、web/admin/agent tsc 干净、agent ack 用例 2/2；chat-integration
+  重写为落库轮询（占位推送退役）。**需重建重启 admin + agent 生效。**
+- #131 阻塞解除：九审唯一阻塞线程（Admin Chat 注入 fail-loud 冷却 → 占位气泡永久挂死）
+  的前提随占位退役消失，fail-loud 冷却语义保留；#131 等 reviewer 复核合入。
+
 ### LLM 429 分类重试 + 重试层扁平化 + 重试期间配置热切换：已合并（PR #134 → `f705b104`）
 
 - 引线：现网事故——z-ai/glm-5.3-flash 额度类 429 触发嵌套双重重试（adapter 层 10 次 ×
@@ -283,6 +303,12 @@
 
 ### 技术债与既有 follow-up（P6 后或并行确认）
 
+- **admin-chat ack PR #135 review follow-up（2026-08-30，均非阻塞）**：①附件路径的 ✓
+  打标竞态——chat_message_acked 若早于 HTTP 响应返回到达则遍历不到本地消息（刷新经历史
+  恢复，量级极小）；②附件路径的 ✓ 不经重连补齐——fresh 按 message_id 去重跳过已知的
+  服务端 UUID user 消息，断连期间丢的 ack 推送补不回（刷新恢复 = channel 无 reaction
+  兜底）；③handleChatAcknowledge 不校验 request_ids 类型（agent 唯一调用方恒传数组，
+  同模块既有风格）。
 - **finish_task 守卫 PR #128 review follow-up（2026-08-29）**：①常驻型 bg-shell（如 dev
   server）在跑时 finish_task 会被守卫永久拒绝，只能靠提醒引导 worker 先 Kill——需确认这是
   期望语义，必要时写进守卫文案或文档；②打回暂无次数上限（排空修复后重试循环由 bg 通知驱动、
