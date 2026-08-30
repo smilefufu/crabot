@@ -8,6 +8,7 @@
  */
 
 import type { EngineMessage } from '../engine/index.js'
+import type { ManagerImageRef } from './image-vision'
 import type { ManagerKey } from '../workers/harness/ledger-types'
 
 export type { ManagerKey }
@@ -25,6 +26,12 @@ export interface ManagerSessionState {
   readonly lastActiveAt?: string
   /** 已折叠进摘要的消息条数(诊断用) */
   readonly foldedCount: number
+  /**
+   * 人类消息携带的入站图片(本地路径引用,按 recent 里消息 id 关联)。base64 不进 state——
+   * 构造 episode 输入时读盘转 ImageBlock(见 manager/image-vision.ts);文件被 media TTL
+   * GC 清理后注入时跳过并改写文本标记。旧 state 无此字段按无图处理。
+   */
+  readonly imageRefs?: ReadonlyArray<ManagerImageRef>
 }
 
 /**

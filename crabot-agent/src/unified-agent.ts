@@ -921,6 +921,8 @@ export class UnifiedAgent extends ModuleBase {
         return thinkingParam(conn.thinking_level, conn.thinking_custom)
       },
       managerContextWindowTokens: () => resolveManagerModelConfig(this.agentConfig?.model_config).context_window,
+      // 入站图片视觉注入的开关:模型不支持视觉时 manager 保持纯文本 envelope(标记仍是文本线索)
+      managerSupportsVision: () => resolveManagerModelConfig(this.agentConfig?.model_config).supports_vision,
       // LLM 重试期间配置热切换的通知源与代数探针（spec 2026-08-30-llm-retry-config-hotreload）
       onRuntimeConfigApplied: (listener) => this.addRuntimeConfigAppliedListener(listener),
       runtimeConfigAppliedGeneration: () => this.getRuntimeConfigAppliedGeneration(),

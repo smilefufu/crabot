@@ -49,6 +49,7 @@ import { AsyncMutex } from '../workers/async-mutex'
 import { formatChannelMessageLine } from '../prompt-manager.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { decideCompaction, foldIntoSummary, managerPolicyForWindow, type CompactionPolicy, type CompactionDecision } from './compaction.js'
+import { collectInboundImagePaths, injectInboundImages, pruneImageRefs, type ManagerImageRef } from './image-vision.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
 import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
@@ -221,6 +222,8 @@ export interface ManagerLoopDeps {
   readonly contextWindowTokens?: () => number | undefined
   /** manager 的槽位思考强度(thunk,episode 内与 adapter/model 同点解析);undefined = 跟随默认 */
   readonly thinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
+  /** manager 模型的视觉能力(thunk,episode 内与 adapter/model 同点解析);false/undefined = 不注入入站图片 */
+  readonly supportsVision?: () => boolean | undefined
   /**
    * 工具面提供者(thunk):每轮重算,由调用方决定要不要按最新状态重建。
    *
@@ -765,10 +768,16 @@ export class ManagerLoop {
       ...carriedTexts.map((text) => createUserMessage(text)),
       ...(eventText === undefined ? [] : [createUserMessage(eventText)]),
     ]
-    const tailMessages: EngineMessage[] = [
-      ...state.recent,
-      ...currentTailMessages,
-    ]
+    // 入站图片视觉注入:窗口内 human 消息引用的图片读盘转 ImageBlock(VLM 模型才有)。
+    // episode 内与 adapter/model 同点解析一次;文件已被 GC 的引用在变换里改写文本标记。
+    // 无图可注入时走同步路径——await 会多让出一个 microtask,打乱既有
+    // "manager 提交 → LLM ↔ reaction"时序(变异靶锚定,见 process-direct-batch)。
+    const supportsVision = this.deps.supportsVision?.() ?? false
+    const imageRefs = state.imageRefs ?? []
+    const injectable = supportsVision && imageRefs.length > 0
+    const tailMessages: EngineMessage[] = injectable
+      ? await injectInboundImages([...state.recent, ...currentTailMessages], { supportsVision, imageRefs })
+      : [...state.recent, ...currentTailMessages]
 
     let attempt = await this.runAttempt(episodeId, state, tailMessages, adapter, model, {
       thinking,
@@ -815,11 +824,14 @@ export class ManagerLoop {
         const retryCurrentEnvelopes = currentInputEnvelopes.filter((item) => this.shouldReplayInAttempt(item))
         const retryInjectedEnvelopes = (this.currentEpisodeInjected ?? [])
           .filter((item) => this.shouldReplayInAttempt(item))
-        const retryTailMessages: EngineMessage[] = [
+        const retryBaseMessages: EngineMessage[] = [
           ...state.recent,
           ...retryCurrentEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
           ...retryInjectedEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
         ]
+        const retryTailMessages: EngineMessage[] = injectable
+          ? await injectInboundImages(retryBaseMessages, { supportsVision, imageRefs })
+          : retryBaseMessages
         const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model, {
           thinking,
           contextWindowTokens,
@@ -910,7 +922,15 @@ export class ManagerLoop {
     if (consumedEvents) {
       const priorRecent = state.recent
       const newRecent = attempt.result.finalMessages.slice(attempt.hasSummaryMarker ? 1 : 0)
-      state = { ...state, recent: newRecent, lastActiveAt: this.deps.now().toISOString() }
+      // recent 已滚动:修剪不再被引用的图片路径(按新旧 recent 并集判活,supervision 分支
+      // 会恢复 priorRecent,误删活引用比多留死条目更糟)。
+      const prunedImageRefs = pruneImageRefs(state.imageRefs, [...newRecent, ...priorRecent])
+      state = {
+        ...state,
+        recent: newRecent,
+        lastActiveAt: this.deps.now().toISOString(),
+        ...(prunedImageRefs !== state.imageRefs ? { imageRefs: prunedImageRefs } : {}),
+      }
       await this.deps.store.save(state)
       const localSupervisionSummary = defaultSupervisionHistorySummary({
         envelope,
@@ -979,6 +999,7 @@ export class ManagerLoop {
   }> {
     const committedIds = new Set(state.committedHumanMessageIds ?? [])
     const committedMessages: EngineMessage[] = []
+    const newImageRefs: ManagerImageRef[] = []
     let lastCurrentWakeCommittedMessageId: string | undefined
 
     for (const envelope of envelopes) {
@@ -989,7 +1010,11 @@ export class ManagerLoop {
       if (newEntries.length === 0) continue
 
       for (const { message } of newEntries) committedIds.add(message.platform_message_id)
-      committedMessages.push(createUserMessage(this.renderEnvelope(projectHumanEnvelope(envelope, newEntries))))
+      const rendered = createUserMessage(this.renderEnvelope(projectHumanEnvelope(envelope, newEntries)))
+      committedMessages.push(rendered)
+      // 记录本批消息的入站图片本地路径(轻量引用,见 image-vision.ts 文件头)
+      const imagePaths = newEntries.flatMap(({ message }) => collectInboundImagePaths(message))
+      if (imagePaths.length > 0) newImageRefs.push({ message_id: rendered.id, paths: imagePaths })
       if (envelope === currentEnvelope) {
         lastCurrentWakeCommittedMessageId = newEntries[newEntries.length - 1].message.platform_message_id
       }
@@ -1003,6 +1028,9 @@ export class ManagerLoop {
       ...state,
       recent: [...state.recent, ...committedMessages],
       committedHumanMessageIds: Array.from(committedIds),
+      ...(newImageRefs.length > 0
+        ? { imageRefs: [...(state.imageRefs ?? []), ...newImageRefs] }
+        : {}),
     }
     await this.deps.store.save(next)
     return {

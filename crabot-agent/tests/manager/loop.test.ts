@@ -2211,3 +2211,83 @@ describe('ManagerLoop', () => {
     })
   })
 })
+
+// --- 入站图片视觉注入(恢复 P7 拆分丢失的能力,见 manager/image-vision.ts) ---
+
+describe('ManagerLoop 入站图片视觉注入', () => {
+  let dataDir: string
+  let store: ManagerSessionStore
+  let mediaDir: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(join(tmpdir(), 'manager-loop-vision-'))
+    store = new ManagerSessionStore(join(dataDir, 'manager-sessions'))
+    mediaDir = await fs.mkdtemp(join(tmpdir(), 'manager-loop-media-'))
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true })
+    await fs.rm(mediaDir, { recursive: true, force: true })
+  })
+
+  function imageMessage(filename: string, mediaUrl: string): ChannelMessage {
+    return {
+      platform_message_id: `pm-img-${Math.random().toString(36).slice(2)}`,
+      session: { session_id: 'sess-loop', channel_id: 'wechat', type: 'private' },
+      sender: { platform_user_id: 'u1', platform_display_name: '测试用户' },
+      content: {
+        type: 'image',
+        text: '你自己看正常不正常？！',
+        media: [{ media_url: mediaUrl, mime_type: 'image/png', filename, size: 8 }],
+        media_url: mediaUrl,
+        status: 'ready',
+      },
+      features: { is_mention_crab: false },
+      platform_timestamp: new Date().toISOString(),
+    }
+  }
+
+  function firstUserContent(call: LLMStreamParams): EngineMessage['content'] {
+    return call.messages.find((m) => m.role === 'user')?.content as EngineMessage['content']
+  }
+
+  it('VLM + 图片在盘:episode 输入的 user message 变 [text(无标记), ...ImageBlock]', async () => {
+    const png = join(mediaDir, 'vis-ok.png')
+    await fs.writeFile(png, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    const { adapter, calls } = makeAdapter()
+    const loop = new ManagerLoop(baseDeps({ store, adapter, supportsVision: () => true }))
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [imageMessage('vis-ok.png', png)] }))
+
+    const content = firstUserContent(calls[0]) as Array<{ type: string; text?: string; source?: { data: string } }>
+    expect(Array.isArray(content)).toBe(true)
+    expect(content[0].type).toBe('text')
+    expect(content[0].text).not.toContain('[图片:')
+    const imageBlocks = content.filter((b) => b.type === 'image')
+    expect(imageBlocks).toHaveLength(1)
+    expect(imageBlocks[0].source?.data).toBe((await fs.readFile(png)).toString('base64'))
+  })
+
+  it('图片已被 GC:不注入 ImageBlock,标记改写为过期提示,不再原文残留', async () => {
+    const missing = join(mediaDir, 'vis-gone.png')
+    const { adapter, calls } = makeAdapter()
+    const loop = new ManagerLoop(baseDeps({ store, adapter, supportsVision: () => true }))
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [imageMessage('vis-gone.png', missing)] }))
+
+    const content = firstUserContent(calls[0])
+    expect(typeof content).toBe('string')
+    expect(content as string).toContain('vis-gone.png')
+    expect(content as string).toContain('文件已清理')
+  })
+
+  it('非 VLM(supportsVision 未注入/false):纯文本不变,标记保留', async () => {
+    const png = join(mediaDir, 'vis-no.png')
+    await fs.writeFile(png, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    const { adapter, calls } = makeAdapter()
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [imageMessage('vis-no.png', png)] }))
+
+    const content = firstUserContent(calls[0])
+    expect(typeof content).toBe('string')
+    expect(content as string).toContain('[图片: vis-no.png]')
+  })
+})

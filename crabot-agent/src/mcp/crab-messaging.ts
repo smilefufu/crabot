@@ -11,7 +11,7 @@ import { resolvePath } from '../engine/tools/utils.js'
 import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
 import { SYSTEM_CHANNEL_ID, SYSTEM_SESSION_ID, type RpcClient } from 'crabot-shared'
-import type { Friend } from '../types.js'
+import type { Friend, MessageContent } from '../types.js'
 import { annotatePagination } from './pagination-annotator.js'
 import { translateChannelError } from './error-translator.js'
 import {
@@ -1182,7 +1182,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
             {
               platform_message_id: string
               sender: { platform_user_id: string; platform_display_name: string }
-              content: { type: string; text?: string; media_url?: string }
+              content: MessageContent
               features: Record<string, unknown>
               platform_timestamp: string
             }
@@ -1216,6 +1216,13 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
             sender_friend_id: senderFriendId,
             content: result.content?.text ?? '',
             content_type: result.content?.type ?? 'text',
+            // 媒体信息按存在性透出：已下载图片带本地路径（media_url/file_path），未下载文件带
+            // handle（配 fetch_media）。只透 text/type 会让 LLM 丢失路径线索、瞎猜 handle。
+            ...(result.content?.media?.length ? { media: result.content.media } : {}),
+            ...(result.content?.media_url ? { media_url: result.content.media_url } : {}),
+            ...(result.content?.file_path ? { file_path: result.content.file_path } : {}),
+            ...(result.content?.handle ? { handle: result.content.handle } : {}),
+            ...(result.content?.status ? { status: result.content.status } : {}),
             timestamp: result.platform_timestamp,
             quote_message_id: result.features?.quote_message_id,
           })

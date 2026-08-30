@@ -31,7 +31,8 @@ export function inferMediaType(mimeType?: string, filePath?: string): ImageMedia
   return 'image/png'
 }
 
-async function readLocalFile(filePath: string): Promise<Buffer | null> {
+/** 读本地图片（超 MAX_IMAGE_SIZE 或不存在/不可读返回 null）。供 manager 入站图片注入复用。 */
+export async function readImageFile(filePath: string): Promise<Buffer | null> {
   try {
     const buffer = await fs.readFile(filePath)
     if (buffer.length > MAX_IMAGE_SIZE) return null
@@ -154,7 +155,7 @@ export async function resolveImageBlocks(
   const results = await Promise.all(
     refs.map(async (ref): Promise<ImageBlock | null> => {
       const isRemote = ref.url.startsWith('http://') || ref.url.startsWith('https://')
-      const buffer = isRemote ? await fetchRemoteImage(ref.url) : await readLocalFile(ref.url)
+      const buffer = isRemote ? await fetchRemoteImage(ref.url) : await readImageFile(ref.url)
       if (!buffer) return null
       const mediaType = inferMediaType(ref.mime, ref.url)
       return {
@@ -175,7 +176,7 @@ export async function resolveImageFromPaths(
 ): Promise<ImageBlock[]> {
   const results = await Promise.all(
     paths.map(async (filePath): Promise<ImageBlock | null> => {
-      const buffer = await readLocalFile(filePath)
+      const buffer = await readImageFile(filePath)
       if (!buffer) return null
 
       const mediaType = inferMediaType(undefined, filePath)
