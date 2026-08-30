@@ -2520,7 +2520,7 @@ export class UnifiedAgent extends ModuleBase {
         err instanceof Error ? err.message : String(err),
       )
       // 送不出去（冷却命中 / chat_callback 也失败）就把异常原样抛回 admin —— 那边的
-      // `dispatchToAgent` catch 会推 `chat_error`，占位气泡照样收口，且不会往消息库里
+      // `dispatchToAgent` catch 会推 `chat_error`（前端 toast 提示），且不会往消息库里
       // 再落一条重复的兜底文案。冷却在这里保住的正是"不重复落库"这一层。
       if (!(await this.sendFailLoudReply('admin-web', sessionId, { kind: 'threw', error: err }, callbackInfo.request_id))) {
         throw err

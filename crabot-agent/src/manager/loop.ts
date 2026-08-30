@@ -373,7 +373,7 @@ export class ManagerLoop {
 
   /**
    * prepare 失败（staging/落盘抛错）时归还 claim：这些 ID 没有任何 delivery record，
-   * 不归还会让 manager 的重发拿到空 claim、回复退化成 proactive、占位气泡永久转圈。
+   * 不归还会让 manager 的重发拿到空 claim、回复退化成 proactive、人类消息得不到回复。
    */
   unclaimAdminChatRequestIds(ids: ReadonlyArray<string>): void {
     for (const id of ids) {

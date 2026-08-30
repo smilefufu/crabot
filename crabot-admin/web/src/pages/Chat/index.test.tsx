@@ -16,6 +16,7 @@ const sendMessage = vi.fn()
 const getTaskSnapshot = vi.fn()
 const toastMocks = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }))
 let messageHandler: ((m: ChatServerMessage) => void) | null = null
+let statusHandler: ((s: 'connected') => void) | null = null
 
 vi.mock('../../components/Layout/MainLayout', () => ({
   MainLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -29,7 +30,10 @@ vi.mock('../../services/chat', () => ({
   chatService: {
     get status() { return 'connected' },
     connect: vi.fn(),
-    onStatusChange: () => () => {},
+    onStatusChange: (handler: (s: 'connected') => void) => {
+      statusHandler = handler
+      return () => { statusHandler = null }
+    },
     onMessage: (handler: (m: ChatServerMessage) => void) => {
       messageHandler = handler
       return () => { messageHandler = null }
@@ -93,6 +97,7 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     messageHandler = null
+    statusHandler = null
     loadHistory.mockResolvedValue([])
     getTaskSnapshot.mockResolvedValue(null)
   })
@@ -158,5 +163,31 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     await push({ type: 'chat_message_acked', request_ids: ['req-other'] })
 
     expect(screen.queryByTitle(/已接收/)).not.toBeInTheDocument()
+  })
+
+  it('重连后补齐断连期间的服务端消息：回复追加、✓ 标记经 acknowledged_at 恢复', async () => {
+    await renderAndSend('req-8')
+    // 断连期间服务端落库（loadHistory 倒序：最新在前）
+    loadHistory.mockResolvedValue([
+      { message_id: 'srv_reply', role: 'assistant', content: { type: 'text', text: '断连前的回复' }, request_id: 'req-8', timestamp: new Date().toISOString() },
+      { message_id: 'srv_user', role: 'user', content: { type: 'text', text: '帮我看下这个' }, request_id: 'req-8', acknowledged_at: new Date().toISOString(), timestamp: new Date().toISOString() },
+    ])
+    await act(async () => { statusHandler!('connected') })
+
+    expect(screen.getByText('断连前的回复')).toBeInTheDocument()
+    expect(screen.getByTitle(/已接收/)).toBeInTheDocument()
+    // 本地乐观 user 消息被落库版本取代（同 request_id），不重复显示
+    expect(screen.getAllByText('帮我看下这个')).toHaveLength(1)
+  })
+
+  it('重连补齐幂等：重复合并已知的消息不重复追加', async () => {
+    await renderAndSend('req-9')
+    loadHistory.mockResolvedValue([
+      { message_id: 'srv_reply9', role: 'assistant', content: { type: 'text', text: '只此一条' }, request_id: 'req-9', timestamp: new Date().toISOString() },
+    ])
+    await act(async () => { statusHandler!('connected') })
+    await act(async () => { statusHandler!('connected') })
+
+    expect(screen.getAllByText('只此一条')).toHaveLength(1)
   })
 })

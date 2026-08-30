@@ -127,6 +127,26 @@ export const Chat: React.FC = () => {
 
     const unsubStatus = chatService.onStatusChange((status) => {
       setConnectionStatus(status)
+      if (status === 'connected') {
+        // 重连补齐：pushToClient 断连即丢，断连期间的回复与 ✓ 标记经重拉历史找回。
+        // 服务端消息为权威：按 message_id 去重合并；被落库版本取代的本地乐观 user
+        // 消息（msg_ 前缀临时 id，同 request_id）丢弃，未落库的乐观消息原样保留。
+        chatService.loadHistory(PAGE_SIZE).then((history) => {
+          if (history.length === 0) return
+          setMessages((prev) => {
+            const known = new Set(prev.map((m) => m.message_id))
+            const fresh = [...history].reverse().filter((m) => !known.has(m.message_id))
+            if (fresh.length === 0) return prev
+            const settled = new Set(
+              fresh.map((m) => m.request_id).filter((id): id is string => id !== undefined)
+            )
+            const kept = prev.filter(
+              (m) => !(m.message_id.startsWith('msg_') && m.request_id !== undefined && settled.has(m.request_id))
+            )
+            return [...kept, ...fresh.map((m) => ({ ...m, status: 'completed' as const }))]
+          })
+        }).catch(() => {/* ignore */})
+      }
     })
     const unsubMessage = chatService.onMessage(handleServerMessage)
 
