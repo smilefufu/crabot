@@ -9127,7 +9127,27 @@ export class AdminModule extends ModuleBase {
   ): Promise<ResolvePrincipalPermissionsResult> {
     const sources: ResolvePrincipalPermissionsResult['sources'] = {}
 
-    // 1. friend 侧
+    // 群聊：群级统一，与发言人无关（2026-08-30 决策，protocol-admin §3.2.7 语义 1）——
+    // 忽略 sender_friend_id，不做 friend 侧解析、不做 master 短路，只按该群的
+    // GroupSessionPermissionConfig（缺省 group_default 基底）解析。模板缺失 → minimal 兜底。
+    if (params.session_type === 'group') {
+      const sessionConfig = this.sessionConfigs.get(params.session_id) ?? null
+      const sessionTemplateId = sessionConfig?.template_id ?? 'group_default'
+      try {
+        return {
+          resolved: this.permissionTemplateManager.resolvePermissions(sessionTemplateId, sessionConfig),
+          sources: { session_template_id: sessionTemplateId },
+        }
+      } catch (err) {
+        console.warn(`[Admin] resolvePrincipalPermissions: session template '${sessionTemplateId}' missing for session ${params.session_id}:`, err)
+        return {
+          resolved: this.permissionTemplateManager.resolvePermissions('minimal', null),
+          sources: { fallback: 'minimal' },
+        }
+      }
+    }
+
+    // 1. friend 侧（私聊）
     let friendResolved: ResolvedPermissions | null = null
     if (params.sender_friend_id) {
       // 'master' 是 admin chat 的合成身份（chat-manager 固定 friend_id='master'，
@@ -9155,15 +9175,11 @@ export class AdminModule extends ModuleBase {
       }
     }
 
-    // 2. session 侧
-    // 群聊：始终以 group_default 作为基底（叠 sessionConfig 字段覆盖），
-    //   非 friend 发言人也按群聊默认权限处理 —— 这是合并 resolveGroupPermissions 时
-    //   语义遗失的回填（commit c609772 引入的 regression）。
-    // 私聊：仅当 sessionConfig 显式 template_id 时才解析；陌生人走 minimal 兜底。
+    // 2. session 侧（私聊：仅当 sessionConfig 显式 template_id 时才解析；陌生人走 minimal 兜底。
+    // 群聊已在上方群级统一路径提前返回，不会走到这里）
     let sessionResolved: ResolvedPermissions | null = null
     const sessionConfig = this.sessionConfigs.get(params.session_id) ?? null
-    const sessionTemplateId = sessionConfig?.template_id
-      ?? (params.session_type === 'group' ? 'group_default' : null)
+    const sessionTemplateId = sessionConfig?.template_id ?? null
     if (sessionTemplateId) {
       try {
         sessionResolved = this.permissionTemplateManager.resolvePermissions(
@@ -9176,7 +9192,7 @@ export class AdminModule extends ModuleBase {
       }
     }
 
-    // 3. 都没有 → minimal 兜底（仅私聊路径会到这里；群聊已被 group_default 兜住）
+    // 3. 都没有 → minimal 兜底（私聊路径）
     if (!friendResolved && !sessionResolved) {
       sources.fallback = 'minimal'
       return {
