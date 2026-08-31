@@ -5595,6 +5595,35 @@ export class WorkerHarness {
       this.deps.now(),
       detail,
     )
+    if (operation.kind === 'stop' && status === 'unknown') {
+      // 协议 §5.2:停止核验失败(unknown)→ 任务落 halted 并注明停止未核验。
+      // 不假装已停止,也不宣称失败;operation_settled 事件(下方投递)会唤醒 manager 处置。
+      try {
+        // 名下仍有 running bg entity 时任务按 §5.2 映射保持 running(工作未停),不落 halted。
+        const bgRunning = (await this.deps.hasRunningBg?.(operation.worker_id)) ?? false
+        if (!bgRunning) {
+          const now = this.deps.now()
+          const halt: TaskHaltEvidence = {
+            halted_at: now,
+            halt_reason: 'unknown',
+            stop_unverified: true,
+            detail,
+          }
+          await this.deps.ledger.upsertWorker(operation.manager_key, operation.worker_id, (prev) => {
+            if (!prev || isTerminalStatus(prev.task.status)) return prev
+            if (prev.task.status === 'halted' && prev.task.halt?.stop_unverified) return prev // 幂等
+            if (prev.task.status === 'halted') {
+              return { ...prev, task: { ...prev.task, halt }, updated_at: now }
+            }
+            const task = applyStatusTransition(prev.task, 'halted', { now, halt })
+            return { ...prev, task, updated_at: now }
+          })
+        }
+      } catch (error) {
+        // 结算路径的兜底失败(含 bg registry 不可用)只记日志,不反噬 control operation 的结算语义。
+        console.error(`[WorkerHarness] stop-unknown task halt failed for ${operation.worker_id}:`, error)
+      }
+    }
     const delivery = this.deliverControlOperationNotifications(settled.worker_id)
     // Without a Manager operation router this is only the durable audit append. Finish it before
     // returning the control result; otherwise a short-lived harness can lose the audit record.

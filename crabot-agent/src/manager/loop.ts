@@ -1969,9 +1969,10 @@ function renderWorkerEvent(event: HarnessEvent): string {
   const detail = Object.keys(rest).length > 0 ? ` detail=${JSON.stringify(rest)}` : ''
   const parts = [`<crabot-event class="${cls}" kind="${event.kind}" worker_id="${event.worker_id}" seq="${event.seq}"${detail}>`]
   if (typeof text === 'string' && text.length > 0) {
-    // blocked(交互界面)事件的 text 是终端画面 capture,不是 worker 说的话,标签必须区分,
-    // 防止 manager 把画面内容误当发言。
-    parts.push(cls === 'blocked' ? `worker 当前画面:\n${text}` : `worker 最后说:\n${text}`)
+    // 只有 interaction_required 事件的 text 是终端画面 capture(不是 worker 说的话),
+    // 标签必须区分,防止 manager 把画面内容误当发言;其余事件的 text 都是发言/指令原文。
+    const isPaneCapture = event.kind === 'state_changed' && event.detail?.kind === 'interaction_required'
+    parts.push(isPaneCapture ? `worker 当前画面:\n${text}` : `worker 最后说:\n${text}`)
   }
   if (typeof summary === 'string' && summary.length > 0) parts.push(`worker 的收尾结论:\n${summary}`)
   parts.push('</crabot-event>')
