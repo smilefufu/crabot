@@ -4943,7 +4943,10 @@ export class WorkerHarness {
         } catch {
           probe = 'failed'
         }
-        if (probe === 'exited' || (observed.mode === 'default' && probe === 'idle')) {
+        if (observed.mode === 'default' && (probe === 'exited' || probe === 'idle')) {
+          // default 巡检只盯 running 主线:idle/exited 走生命周期状态同步,不造 due。
+          // periodic_report 不在此列(协议 §6.3:覆盖 running 与 halted),probe 结果
+          // 不能吞掉它的到期汇报。
           await this.updateSupervision(found.managerKey, workerId, observed, now)
           return { handle, stateToSync: probe }
         }

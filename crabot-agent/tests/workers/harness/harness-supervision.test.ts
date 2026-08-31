@@ -376,6 +376,25 @@ describe('WorkerHarness task supervision', () => {
     expect(worker.supervision?.pending).toBeUndefined()
   })
 
+  it('periodic report remains due when the probe reports exited——task halted 不是约定的终点(2026-08-31 回归)', async () => {
+    const { harness, adapter } = await makeHarness()
+    const workerId = await spawnRunning(harness)
+    await harness.setWorkerPeriodicReport(workerId, { channel_id: 'feishu', session_id: 'session-1' }, 5 * MINUTE)
+    events = []
+    adapter.observation = { kind: 'none', next_cursor: { offset: 0 } }
+    adapter.contractState = 'exited'
+    clockMs += 5 * MINUTE
+
+    await harness.sweepLiveness()
+
+    expect(supervisionEvents(workerId)).toHaveLength(1)
+    expect(supervisionEvents(workerId)[0].detail).toMatchObject({
+      mode: 'periodic_report',
+      observation: 'none',
+      probe: 'exited',
+    })
+  })
+
   it('clearing a rule invalidates a queued due and terminal cleanup removes periodic configuration', async () => {
     const { harness, adapter } = await makeHarness()
     const workerId = await spawnRunning(harness)

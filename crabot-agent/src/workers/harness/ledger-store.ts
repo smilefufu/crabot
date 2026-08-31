@@ -196,16 +196,19 @@ export class LedgerStore {
       throw new Error(`[LedgerStore] manager_key mismatch or invalid ledger for ${key}`)
     }
     let archivedAmbiguousLegacy = false
+    let legacyStatusMigrated = false
     const workers = ledger.workers.map((worker) => {
       const materialized = materializeLegacyIncarnations(worker)
       archivedAmbiguousLegacy ||= materialized.archived
-      return materialized.worker
+      const migrated = migrateLegacyTaskStatus(materialized.worker)
+      legacyStatusMigrated ||= migrated.changed
+      return migrated.worker
     })
     for (const worker of workers) {
       this.assertWorkerOwner(key, worker)
       assertWorkerLegacyShape(worker)
     }
-    return { ledger: { ...ledger, workers }, archivedAmbiguousLegacy }
+    return { ledger: { ...ledger, workers }, archivedAmbiguousLegacy: archivedAmbiguousLegacy || legacyStatusMigrated }
   }
 
   private async readLedgerFileStrict(key: ManagerKey): Promise<WorkerLedger> {
@@ -259,8 +262,51 @@ function legacyIncarnationId(workerId: string, index: number): string {
  * If a numeric fork has multiple candidates, archive the complete worker rather than guessing a
  * mainline or making every worker under the Manager unreadable.
  */
-function materializeLegacyIncarnations(worker: LedgerWorker): { worker: LedgerWorker; archived: boolean } {
-  const bySeq = new Map<number, Incarnation[]>()
+/**
+ * 2026-08-31 状态机修正(base-protocol §5.10)的存量迁移:读取时把旧 6 态归一到
+ * queued/running/halted/closed(spec §7——waiting_input→halted、旧终态→closed(by migration))。
+ * evidence 从主线化身尽力重建(ended_at 作 halted_at;ended_reason crashed → 'crashed');
+ * 推不出的停因记 'unknown' 并 warn,绝不因旧数据阻断启动。已迁移过的原样返回(changed=false)。
+ */
+function migrateLegacyTaskStatus(worker: LedgerWorker): { worker: LedgerWorker; changed: boolean } {
+  const status = worker.task.status
+  if (status === 'queued' || status === 'running' || status === 'halted' || status === 'closed') {
+    return { worker, changed: false }
+  }
+  const mainline = worker.incarnations.filter((incarnation) => incarnation.forked_from === undefined).at(-1)
+  const haltedAt = mainline?.ended_at ?? worker.updated_at
+  if (status === 'waiting_input') {
+    const haltReason = mainline?.ended_reason === 'crashed' ? 'crashed' as const : 'turn_end' as const
+    return {
+      worker: {
+        ...worker,
+        task: { ...worker.task, status: 'halted', halt: { halted_at: haltedAt, halt_reason: haltReason } },
+      },
+      changed: true,
+    }
+  }
+  if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+    const legacyError = (worker.task as Record<string, unknown>).error
+    const note = `migrated from v3 旧值 ${status}${typeof legacyError === 'string' && legacyError ? `；error: ${legacyError}` : ''}`
+    return {
+      worker: {
+        ...worker,
+        task: { ...worker.task, status: 'closed', closed: { at: haltedAt, by: 'migration', note } },
+      },
+      changed: true,
+    }
+  }
+  console.warn(`[LedgerStore] 未知任务状态 '${status}' 归一为 halted(unknown) for ${worker.worker_id}`)
+  return {
+    worker: {
+      ...worker,
+      task: { ...worker.task, status: 'halted', halt: { halted_at: haltedAt, halt_reason: 'unknown' } },
+    },
+    changed: true,
+  }
+}
+
+function materializeLegacyIncarnations(worker: LedgerWorker): { worker: LedgerWorker; archived: boolean } {  const bySeq = new Map<number, Incarnation[]>()
   const ids = new Set<string>()
   const incarnations = worker.incarnations.map((incarnation, index) => {
     const incarnationId = incarnation.incarnation_id ?? legacyIncarnationId(worker.worker_id, index)
