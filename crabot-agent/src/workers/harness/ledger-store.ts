@@ -303,7 +303,11 @@ function materializeLegacyIncarnations(worker: LedgerWorker): { worker: LedgerWo
         ...worker,
         task: isTerminalTaskStatus(worker.task.status)
           ? worker.task
-          : { ...worker.task, status: 'failed', completed_at: worker.task.completed_at ?? archivedAt },
+          : {
+            ...worker.task,
+            status: 'closed',
+            closed: { at: archivedAt, by: 'migration', note: 'ambiguous_v3_ledger archived' },
+          },
         incarnations: [{
           incarnation_id: archiveId,
           seq: 1,
@@ -336,7 +340,7 @@ function materializeLegacyIncarnations(worker: LedgerWorker): { worker: LedgerWo
 }
 
 function isTerminalTaskStatus(status: LedgerWorker['task']['status']): boolean {
-  return status === 'completed' || status === 'failed' || status === 'cancelled'
+  return status === 'closed'
 }
 
 function assertWorkerLegacyShape(worker: LedgerWorker): void {

@@ -2,7 +2,34 @@ import type { ModuleId, FriendId, SessionId, TaskId } from '../../types'
 import type { IncarnationEndReason, IncarnationId, WorkerContractState, WorkerImplId, WorkspaceInstructionSnapshot } from '../types'
 
 export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent'
-export type TaskStatus = 'queued' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled'
+export type TaskStatus = 'queued' | 'running' | 'halted' | 'closed'
+
+/**
+ * 载体停止的事实分类(protocol-agent-v3 §5.2)。只描述"怎么停的",不对任务成败下判断——
+ * 自报、推断与成败判断全部不进状态机(2026-08-31 修正,见 base-protocol §5.10)。
+ */
+export type TaskHaltReason = 'turn_end' | 'worker_finalized' | 'crashed' | 'pre_migration' | 'unknown'
+
+/**
+ * task 停在 `halted` 期间附着的事实记录(spec 2026-08-31-worker-stop-oversight-design §5.1)。
+ * `worker_self_report` 是 worker 的自称,不是任务达成与否的结论;化身级细节(ended_reason、
+ * session 引用)留在化身记录与 turn 记录上,此处不复制。
+ */
+export interface TaskHaltEvidence {
+  halted_at: string
+  halt_reason: TaskHaltReason
+  /** 仅 worker_finalized(`finish_task`)时存在。 */
+  worker_self_report?: { outcome: 'completed' | 'failed'; summary: string }
+  /** request_worker_stop 核验失败(unknown)时为 true。 */
+  stop_unverified?: boolean
+}
+
+/** 唯一终态 `closed` 的关闭信息(manager/admin/系统处置产生,worker 行为不可达)。 */
+export interface TaskClosedInfo {
+  at: string
+  by: 'manager_stop' | 'admin' | 'system' | 'migration'
+  note?: string
+}
 
 /** Manager loop, worker ledger and worker ownership share this session key. */
 export type ManagerKey = `${ModuleId}::${SessionId}`
@@ -125,10 +152,11 @@ export interface LedgerWorker {
     input?: Record<string, unknown>
     tags?: string[]
     goal?: string
-    outcome?: string
     created_at: string
-    completed_at?: string
-    error?: string
+    /** 载体停止的事实记录(status='halted' 时存在;续办回 running 时清除)。 */
+    halt?: TaskHaltEvidence
+    /** 关闭信息(status='closed' 时存在)。 */
+    closed?: TaskClosedInfo
   }
   origin: {
     spawned_by_episode?: string
