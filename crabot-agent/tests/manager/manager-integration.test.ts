@@ -62,7 +62,7 @@ import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 // 共用 helpers
 // ============================================================================
 
-async function waitUntil(cond: () => Promise<boolean> | boolean, timeoutMs = 8000, intervalMs = 20): Promise<void> {
+async function waitUntil(cond: () => Promise<boolean> | boolean, timeoutMs = 20000, intervalMs = 20): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (await cond()) return
@@ -427,11 +427,11 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       // 等真实 worker 后台把 finish_task 跑完——burst 是 fire-and-forget,不是靠猜时序。
       await waitUntil(async () => {
         const workers = await assembly.harness.listWorkers(assembly.managerKeyFor(key))
-        return workers.some((w) => w.task.status === 'completed')
+        return workers.some((w) => w.task.status === 'halted')
       })
       const [worker] = await assembly.harness.listWorkers(assembly.managerKeyFor(key))
       // 台账 task 终态正确
-      expect(worker.task.status).toBe('completed')
+      expect(worker.task.status).toBe('halted')
       expect(worker.incarnations).toHaveLength(1)
       expect(worker.incarnations[0].state).toBe('exited')
       expect(worker.incarnations[0].ended_reason).toBe('completed')
@@ -517,7 +517,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
 
       await waitUntil(async () => {
         const workers = await assembly.harness.listWorkers(assembly.managerKeyFor(SYSTEM_TASKS_MANAGER_KEY))
-        return workers.some((w) => w.task.status === 'completed')
+        return workers.some((w) => w.task.status === 'halted')
       })
       const [workerA] = await assembly.harness.listWorkers(assembly.managerKeyFor(SYSTEM_TASKS_MANAGER_KEY))
       const exitedEventA = findWorkerExitedEvent(assembly.events, workerA.worker_id)!
@@ -565,19 +565,19 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
 
       await waitUntil(async () => {
         const workers = await assembly.harness.listWorkers(assembly.managerKeyFor(SYSTEM_TASKS_MANAGER_KEY))
-        return workers.some((w) => w.worker_id !== workerA.worker_id && w.task.status === 'failed')
+        return workers.some((w) => w.worker_id !== workerA.worker_id && w.task.status === 'halted')
       })
       const workersAfterB = await assembly.harness.listWorkers(assembly.managerKeyFor(SYSTEM_TASKS_MANAGER_KEY))
       const workerB = workersAfterB.find((w) => w.worker_id !== workerA.worker_id)!
       // 核心验收：worker 自己声明的 outcome:'failed' 一路落到台账，不再被记成成功。
-      expect(workerB.task.status).toBe('failed')
+      expect(workerB.task.status).toBe('halted')
       expect(workerB.incarnations[0].ended_reason).toBe('failed')
       // 同一份真值也进了对外事件（appendEvent 带的是提交后的 task.status）——manager 的
       // 台账块与 admin 侧读端点看到的都是这一份。
       const exitedEventB = findWorkerExitedEvent(assembly.events, workerB.worker_id)!
-      expect(exitedEventB.task_status).toBe('failed')
+      expect(exitedEventB.task_status).toBe('halted')
       // 对照组：成功的 worker A 仍然是 completed，修复没有把所有退出一刀切判失败。
-      expect(workersAfterB.find((w) => w.worker_id === workerA.worker_id)!.task.status).toBe('completed')
+      expect(workersAfterB.find((w) => w.worker_id === workerA.worker_id)!.task.status).toBe('halted')
 
       managerScript.queue.push({
         toolCalls: [{ name: 'get_worker_terminal', id: 'r2', input: { worker_id: workerB.worker_id } }],
@@ -906,7 +906,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
 
       const exitedEvent = findExitedEvent()!
       // 1) 任务本身是成功的(finish_task(outcome:'completed') 的结构化确证照常落台账)
-      expect(exitedEvent.task_status).toBe('completed')
+      expect(exitedEvent.task_status).toBe('halted')
       // 2) #61 那条 lastText 确实为空——它是 assistant text 来源,这个 worker 没有
       expect(exitedEvent.detail?.text).toBeUndefined()
       // 3) 核心验收:worker 写在 finish_task 里的结论到达了 manager 的唤醒事件

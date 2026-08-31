@@ -6205,16 +6205,27 @@ export class WorkerHarness {
       // 2026-08-31 状态机修正:化身停止(idle/exited)一律落 halted,停因进 evidence——
       // ended_reason 细节留在化身记录上;closed 只由 manager 处置产生(killed);
       // superseded 由化身链新成员决定任务状态。
+      // finish_task(exit + summary)归 worker_finalized,自报 outcome/summary 进 evidence——
+      // 是 worker 的自称,不是任务终态。
+      const selfReport = state === 'exited' && report?.summary !== undefined
+        ? {
+          outcome: (endReason === 'failed' ? 'failed' : 'completed') as 'completed' | 'failed',
+          summary: report.summary,
+        }
+        : undefined
       const halt: TaskHaltEvidence | undefined = state === 'idle'
         ? { halted_at: now, halt_reason: 'turn_end' }
         : state === 'exited'
           ? {
             halted_at: now,
-            halt_reason: endReason === 'crashed'
-              ? 'crashed'
-              : endReason === 'pre_migration'
-                ? 'pre_migration'
-                : 'turn_end',
+            halt_reason: selfReport
+              ? 'worker_finalized'
+              : endReason === 'crashed'
+                ? 'crashed'
+                : endReason === 'pre_migration'
+                  ? 'pre_migration'
+                  : 'turn_end',
+            ...(selfReport ? { worker_self_report: selfReport } : {}),
             ...(endReason === 'crashed' || endReason === 'failed' ? { detail: endReason } : {}),
           }
           : undefined

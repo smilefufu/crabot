@@ -24,7 +24,7 @@ function trace(over: Partial<ManagerEpisodeTrace> = {}): ManagerEpisodeTrace {
 }
 
 const facts = new Map<string, EpisodeWorkerFact>([
-  ['w-1', { worker_id: 'w-1', title: '部署 Minecraft', status: 'waiting_input' }],
+  ['w-1', { worker_id: 'w-1', title: '部署 Minecraft', status: 'halted' }],
 ])
 
 describe('projectManagerEpisode', () => {
@@ -56,7 +56,7 @@ describe('projectManagerEpisode', () => {
     const joined = projectManagerEpisode(trace({
       trigger: { type: 'worker_event', summary: 'worker 事件:state_changed (w-1)', source: 'worker:w-1' },
     }), facts)
-    expect(joined.worker_ref).toEqual({ worker_id: 'w-1', title: '部署 Minecraft', state_to: 'waiting_input' })
+    expect(joined.worker_ref).toEqual({ worker_id: 'w-1', title: '部署 Minecraft', state_to: 'halted' })
 
     const missing = projectManagerEpisode(trace({
       trigger: { type: 'worker_event', summary: 'worker 事件:state_changed (w-missing)' },
@@ -96,7 +96,7 @@ describe('projectManagerEpisode', () => {
     }), facts))).toBe('你：V6 部署好了吗')
     expect(managerActivitySummary(projectManagerEpisode(trace({
       trigger: { type: 'worker_event', summary: 'worker 事件:state_changed (w-1)', source: 'worker:w-1' },
-    }), facts))).toBe('部署 Minecraft：等输入')
+    }), facts))).toBe('部署 Minecraft：已停止待处置')
   })
 
   it('目标 string 自身被 300 字截断时仍返回可读前缀', () => {

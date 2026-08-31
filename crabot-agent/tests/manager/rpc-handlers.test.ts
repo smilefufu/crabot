@@ -749,7 +749,7 @@ describe('list_workers_admin(§8.3)', () => {
   it('取全量台账 → filterAndPageWorkers(status 过滤 + 分页回显)', async () => {
     const entries = [
       { managerKey: `test::f1` as ManagerKey, worker: makeLedgerWorker({ workerId: 'w-1', status: 'running', updatedAt: '2026-01-03T00:00:00.000Z' }) },
-      { managerKey: `test::f1` as ManagerKey, worker: makeLedgerWorker({ workerId: 'w-2', status: 'completed', updatedAt: '2026-01-02T00:00:00.000Z' }) },
+      { managerKey: `test::f1` as ManagerKey, worker: makeLedgerWorker({ workerId: 'w-2', status: 'closed', updatedAt: '2026-01-02T00:00:00.000Z' }) },
       { managerKey: `test::f2` as ManagerKey, worker: makeLedgerWorker({ workerId: 'w-3', status: 'running', updatedAt: '2026-01-01T00:00:00.000Z' }) },
     ]
     const agent = buildAgent({ ledger: { listAllWorkers: async () => entries } })

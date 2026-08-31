@@ -184,7 +184,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
         worker_id: 'w-1',
         task_id: 'task-1',
         old_status: 'running',
-        new_status: 'completed',
+        new_status: 'halted',
         manager_key: DIALOG_OBJECT_ID,
       }
       publish('agent.task_status_changed', payload)
@@ -504,7 +504,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
         worker_id: 'w-wired',
         task_id: 'task-wired',
         old_status: 'queued',
-        new_status: 'completed',
+        new_status: 'halted',
         manager_key: DIALOG_OBJECT_ID,
       })
     })
@@ -544,7 +544,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
       }))
       const onStateChange = capturedOnStateChange(stack.adapters.get('builtin'))
       onStateChange!({ worker_id: 'w-nopub', seq: 1, impl: 'builtin', session_ref: 'w-nopub-ref' }, 'exited', { endReason: 'completed' })
-      await waitUntil(async () => (await stack.ledger.findWorker('w-nopub'))?.worker.task.status === 'completed')
+      await waitUntil(async () => (await stack.ledger.findWorker('w-nopub'))?.worker.task.status === 'halted')
       expect(unhandled).toEqual([])
     })
   })

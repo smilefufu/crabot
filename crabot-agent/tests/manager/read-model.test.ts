@@ -114,8 +114,8 @@ describe('filterAndPageWorkers', () => {
     const all = [
       entry(ALICE, 'w-running', { status: 'running' }),
       entry(ALICE, 'w-queued', { status: 'queued' }),
-      entry(ALICE, 'w-failed', { status: 'failed' }),
-      entry(ALICE, 'w-completed', { status: 'completed' }),
+      entry(ALICE, 'w-failed', { status: 'closed' }),
+      entry(ALICE, 'w-completed', { status: 'closed' }),
     ]
 
     it('单值形态', () => {
@@ -125,9 +125,9 @@ describe('filterAndPageWorkers', () => {
     })
 
     it('数组形态', () => {
-      const result = filterAndPageWorkers(all, { status: ['queued', 'failed'], include_terminal: true })
-      expect(result.items.map((w) => w.worker_id).sort()).toEqual(['w-failed', 'w-queued'])
-      expect(result.pagination.total_items).toBe(2)
+      const result = filterAndPageWorkers(all, { status: ['queued', 'closed'], include_terminal: true })
+      expect(result.items.map((w) => w.worker_id).sort()).toEqual(['w-completed', 'w-failed', 'w-queued'])
+      expect(result.pagination.total_items).toBe(3)
     })
 
     it('空数组表示"不匹配任何状态",返回空', () => {
@@ -144,10 +144,10 @@ describe('filterAndPageWorkers', () => {
   describe('决策视野/历史/legacy/q/impl', () => {
     const all = [
       entry(ALICE, 'w-active', { status: 'running', title: '部署 Minecraft', impl: 'codex' }),
-      entry(ALICE, 'w-idle', { status: 'waiting_input', title: '等待补充', impl: 'claude-code' }),
-      entry(ALICE, 'w-terminal', { status: 'completed', title: '旧部署', impl: 'codex' }),
+      entry(ALICE, 'w-idle', { status: 'halted', title: '等待补充', impl: 'claude-code' }),
+      entry(ALICE, 'w-terminal', { status: 'closed', title: '旧部署', impl: 'codex' }),
       entry(ALICE, 'w-legacy-live', { status: 'running', title: '续办中的 legacy', impl: 'builtin', legacy: true }),
-      entry(ALICE, 'w-legacy', { status: 'completed', title: '历史导入', impl: 'legacy', legacy: true }),
+      entry(ALICE, 'w-legacy', { status: 'closed', title: '历史导入', impl: 'legacy', legacy: true }),
     ]
 
     it('默认只返回非终态且排除 legacy，计数保留全局事实', () => {
@@ -169,7 +169,7 @@ describe('filterAndPageWorkers', () => {
 
     it('2400 terminal + 6 active 的默认结果严格有界', () => {
       const huge = [
-        ...Array.from({ length: 2400 }, (_, i) => entry(ALICE, `w-done-${i}`, { status: 'completed' })),
+        ...Array.from({ length: 2400 }, (_, i) => entry(ALICE, `w-done-${i}`, { status: 'closed' })),
         ...Array.from({ length: 6 }, (_, i) => entry(ALICE, `w-live-${i}`, { status: 'running' })),
       ]
       const result = filterAndPageWorkers(huge, {})
@@ -365,11 +365,11 @@ describe('filterAndPageWorkers', () => {
     it('total_items 反映过滤后的总数,而非全量', () => {
       const mixed = [
         entry(ALICE, 'w-1', { status: 'running' }),
-        entry(ALICE, 'w-2', { status: 'failed' }),
-        entry(ALICE, 'w-3', { status: 'failed' }),
+        entry(ALICE, 'w-2', { status: 'closed' }),
+        entry(ALICE, 'w-3', { status: 'closed' }),
       ]
       const result = filterAndPageWorkers(mixed, {
-        status: 'failed',
+        status: 'closed',
         include_terminal: true,
         pagination: { page: 1, page_size: 1 },
       })
@@ -408,13 +408,13 @@ describe('filterAndPageWorkers', () => {
 
   it('三种过滤条件可组合', () => {
     const all = [
-      entry(ALICE, 'w-hit', { status: 'failed', createdAt: '2026-07-03T00:00:00.000Z' }),
+      entry(ALICE, 'w-hit', { status: 'closed', createdAt: '2026-07-03T00:00:00.000Z' }),
       entry(ALICE, 'w-status-miss', { status: 'running', createdAt: '2026-07-03T00:00:00.000Z' }),
-      entry(BOB, 'w-dialog-miss', { status: 'failed', createdAt: '2026-07-03T00:00:00.000Z' }),
-      entry(ALICE, 'w-time-miss', { status: 'failed', createdAt: '2026-07-09T00:00:00.000Z' }),
+      entry(BOB, 'w-dialog-miss', { status: 'closed', createdAt: '2026-07-03T00:00:00.000Z' }),
+      entry(ALICE, 'w-time-miss', { status: 'closed', createdAt: '2026-07-09T00:00:00.000Z' }),
     ]
     const result = filterAndPageWorkers(all, {
-      status: ['failed', 'cancelled'],
+      status: ['closed'],
       include_terminal: true,
       manager_key: ALICE,
       time_range: { start: '2026-07-01T00:00:00.000Z', end: '2026-07-04T00:00:00.000Z' },

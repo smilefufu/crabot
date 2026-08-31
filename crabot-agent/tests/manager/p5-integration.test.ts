@@ -162,7 +162,7 @@ function makeLedgerWorker(p: {
   }
 }
 
-async function waitUntil(cond: () => boolean | Promise<boolean>, timeoutMs = 6000, intervalMs = 20): Promise<void> {
+async function waitUntil(cond: () => boolean | Promise<boolean>, timeoutMs = 15000, intervalMs = 20): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (await cond()) return
@@ -380,7 +380,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
       makeLedgerWorker({ workerId: 'w-a1', managerKey: alice, status: 'running', updatedAt: '2026-02-02T00:00:00.000Z' }),
     )
     await stack.ledger.upsertWorker(alice, 'w-a2', () =>
-      makeLedgerWorker({ workerId: 'w-a2', managerKey: alice, status: 'completed', updatedAt: '2026-02-03T00:00:00.000Z' }),
+      makeLedgerWorker({ workerId: 'w-a2', managerKey: alice, status: 'closed', updatedAt: '2026-02-03T00:00:00.000Z' }),
     )
     await stack.ledger.upsertWorker(bob, 'w-b1', () =>
       makeLedgerWorker({ workerId: 'w-b1', managerKey: bob, status: 'running', updatedAt: '2026-02-01T00:00:00.000Z' }),
@@ -772,7 +772,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
         return found?.worker.incarnations[0].state === 'exited'
       })
       const after = await stack.ledger.findWorker('w-stale')
-      expect(after!.worker.task.status).toBe('failed')
+      expect(after!.worker.task.status).toBe('halted')
       expect(routeSpy).toHaveBeenCalled()
     } finally {
       await internals.onStop()

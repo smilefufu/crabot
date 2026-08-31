@@ -695,7 +695,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const listWorkers = defineTool({
     name: 'list_workers',
     description:
-      '列出当前会话可决策的 worker。默认只返回非终态(queued/running/waiting_input)，' +
+      '列出当前会话可决策的 worker。默认只返回非终态(queued/running/halted)，' +
       '需要查历史时显式 include_terminal=true 并分页；需要继续、返工或汇报进度时先查询。',
     inputSchema: {
       type: 'object',
@@ -858,7 +858,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     description: '仅 Master 可用：跨会话列出 worker 精简摘要，支持 manager_key/status/分页过滤。',
     inputSchema: {
       type: 'object', properties: {
-        manager_key: { type: 'string' }, status: { oneOf: [{ type: 'string', enum: ['queued', 'running', 'waiting_input', 'completed', 'failed', 'cancelled'] }, { type: 'array', items: { type: 'string', enum: ['queued', 'running', 'waiting_input', 'completed', 'failed', 'cancelled'] } }] },
+        manager_key: { type: 'string' }, status: { oneOf: [{ type: 'string', enum: ['queued', 'running', 'halted', 'closed'] }, { type: 'array', items: { type: 'string', enum: ['queued', 'running', 'halted', 'closed'] } }] },
         page: { type: 'number' }, page_size: { type: 'number' },
       },
     },
