@@ -5111,6 +5111,14 @@ export class WorkerHarness {
         // nonexistent adapter or mutate the historical record during startup reconciliation.
         return 'unchanged'
       }
+      // 幂等短路 2(2026-08-31 状态机修正):halted 任务不再参与"判死"。判死的对象是
+      // "台账说非终态、却没有证据证明还活着"的 worker;而 halted + 化身 exited 是一份
+      // 完整一致的停止记录——无论是正常停(turn_end/worker_finalized,等 manager 处置)
+      // 还是已记录的崩溃(crashed,recovery notice 已落),处置责任都在 manager,
+      // 重启对账不得重复判定、重复打扰。
+      if (worker.task.status === 'halted' && mainline.state === 'exited') {
+        return 'unchanged'
+      }
 
       const adapter = this.deps.adapters.get(mainline.impl)
       if (!adapter) {

@@ -281,7 +281,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     await waitUntil(async () => {
       const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
-      return w.task.status === 'completed'
+      return w.task.status === 'halted'
     })
 
     // 语义不变量：工具真的执行了（文件真的被写出来），而且是在 workspace 里执行的。
@@ -563,7 +563,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const { workerId } = await spawnBuiltin(internals, managerKey)
     await waitUntil(async () => {
       const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
-      return w.task.status === 'completed'
+      return w.task.status === 'halted'
     })
 
     const sessionPath = join(internals.managerStack!.builtinDataDir, workerId, 'session.jsonl')
@@ -746,7 +746,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     await spawnBuiltin(internals, objB)
     await waitUntil(async () => {
       const [w] = await internals.managerStack!.harness.listWorkers(objB)
-      return w.task.status === 'completed'
+      return w.task.status === 'halted'
     })
     expect(workerBurstModels(runEngineSpy)).toEqual(['model-A', 'model-B'])
   })
@@ -760,7 +760,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const { workerId } = await spawnBuiltin(first, managerKey)
     await waitUntil(async () => {
       const [w] = await first.managerStack!.harness.listWorkers(managerKey)
-      return w.task.status === 'completed'
+      return w.task.status === 'halted'
     })
 
     // ---- 模拟进程重启：同一个 DATA_DIR 上重新装配一整套栈，内存里的 instances / 配置表全空。
@@ -862,7 +862,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     internals.managerStack!.harness.deps.builtinSpawnDefaults = builtinDefaults
 
     const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
-    expect(w.task.status).toBe('failed')
+    expect(w.task.status).toBe('halted')
     expect(w.incarnations[0].ended_reason).toBe('failed')
     // P6-A：episode admission 会在 wake 起点就建 manager 目录/最小 identity，
     // 失败路径也有异步 wake 在飞——等它落定，避免与 afterEach 的目录清理竞争。

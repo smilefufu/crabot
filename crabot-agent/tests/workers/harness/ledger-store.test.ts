@@ -224,7 +224,7 @@ describe('LedgerStore', () => {
 
     const ledger = await store.getLedger(key)
     const archived = ledger.workers[0]
-    expect(archived.task.status).toBe('failed')
+    expect(archived.task.status).toBe('halted')
     expect(archived.incarnations).toEqual([expect.objectContaining({
       impl: 'legacy',
       state: 'exited',
@@ -238,7 +238,7 @@ describe('LedgerStore', () => {
 
     const persisted = JSON.parse(await fs.readFile(join(dir, managerKeyToFilename(key)), 'utf8'))
     expect(persisted.workers[0]).toMatchObject({
-      task: { status: 'failed' },
+      task: { status: 'halted' },
       legacy_source: { kind: 'ambiguous_v3_ledger', original_incarnations: originalIncarnations },
     })
     await expect(new LedgerStore(dir).getLedger(key)).resolves.toEqual(ledger)

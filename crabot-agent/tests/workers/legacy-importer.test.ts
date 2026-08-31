@@ -66,15 +66,15 @@ describe('v2 legacy importer', () => {
     const id = `w-legacy-${createHash('sha256').update('complete').digest('hex').slice(0, 32)}`
     const complete = await d.ledger.findWorker(id)
     expect(complete?.worker.task).toMatchObject({
-      status: 'completed', type: 'analysis', input: { q: 1 }, tags: ['legacy'], goal: 'finish',
-      priority: 'high', outcome: 'done',
+      status: 'closed', type: 'analysis', input: { q: 1 }, tags: ['legacy'], goal: 'finish',
+      priority: 'high', closed: { by: 'migration', note: expect.stringContaining('outcome: done') },
     })
     expect(complete?.worker.legacy_source?.trace_ids).toEqual(['t1', 'old-running'])
     expect(complete?.worker.incarnations[0]).not.toHaveProperty('session_ref')
-    const old = await d.ledger.findWorker(`w-legacy-${createHash('sha256').update('old').digest('hex').slice(0, 32)}`); expect(old?.worker.task).toMatchObject({ status: 'failed', error: expect.stringContaining('v3') })
+    const old = await d.ledger.findWorker(`w-legacy-${createHash('sha256').update('old').digest('hex').slice(0, 32)}`); expect(old?.worker.task).toMatchObject({ status: 'halted', halt: { halt_reason: 'pre_migration' } })
     for (const legacyStatus of ['pending', 'planning', 'waiting-human', 'waiting']) {
       const imported = await d.ledger.findWorker(`w-legacy-${createHash('sha256').update(legacyStatus).digest('hex').slice(0, 32)}`)
-      expect(imported?.worker.task.status).toBe('failed')
+      expect(imported?.worker.task.status).toBe('halted')
       expect(imported?.worker.incarnations[0]?.ended_reason).toBe('pre_migration')
     }
     const manual = await d.ledger.findWorker(`w-legacy-${createHash('sha256').update('manual').digest('hex').slice(0, 32)}`)
@@ -133,7 +133,7 @@ describe('v2 legacy importer', () => {
     await expect(importV2LegacyTasks(secondPass)).resolves.toMatchObject({ imported: 0 })
     const id = `w-legacy-${createHash('sha256').update('cancel').digest('hex').slice(0, 32)}`
     const worker = await deps(f).ledger.findWorker(id)
-    expect(worker?.worker.task).toMatchObject({ status: 'cancelled', completed_at: '2026-01-01T02:00:00.000Z' })
+    expect(worker?.worker.task).toMatchObject({ status: 'closed', closed: { at: '2026-01-01T02:00:00.000Z', by: 'migration' } })
     const events = (await new WorkerEventLog(join(f.agent, 'workers', id)).readAll()).filter(event => event.kind === 'legacy_imported')
     expect(events).toEqual([expect.objectContaining({ ts: '2026-08-10T00:00:00.000Z', detail: { admin_task_id: 'cancel', trace_count: 0, imported_at: '2026-08-10T00:00:00.000Z' } })])
   })
@@ -207,7 +207,7 @@ describe('v2 legacy importer', () => {
       started_at: '2026-01-01T00:00:00.000Z',
       ended_at: '2026-01-01T04:00:00.000Z',
     })
-    expect(worker.task.completed_at).toBe('2026-01-01T04:00:00.000Z')
+    expect(worker.task.closed?.at).toBe('2026-01-01T04:00:00.000Z')
   })
 
   it('uses the latest same-task trace, skips v3/malformed input, and rejects cross-task trace IDs', async () => {
