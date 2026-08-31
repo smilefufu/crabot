@@ -22,6 +22,8 @@ export interface TaskHaltEvidence {
   worker_self_report?: { outcome: 'completed' | 'failed'; summary: string }
   /** request_worker_stop 核验失败(unknown)时为 true。 */
   stop_unverified?: boolean
+  /** 崩溃/启动失败等原因原文(事实记录,非成败判断;替换旧 task.error 的承载)。 */
+  detail?: string
 }
 
 /** 唯一终态 `closed` 的关闭信息(manager/admin/系统处置产生,worker 行为不可达)。 */
