@@ -1948,9 +1948,13 @@ function workerEventClass(event: HarnessEvent): 'content' | 'blocked' | 'review'
   switch (event.kind) {
     case 'state_changed': {
       if (event.detail?.kind === 'interaction_required') return 'blocked'
+      // manager 自己处置动作的回执(stop_verified:任务已 closed)是收据不是新待办,
+      // 归 info——否则每次核验成功的 request_worker_stop 都会立刻要求 manager
+      // 再走一轮"必须处置",而续办对 closed 是硬拒绝,必错。
+      if (event.detail?.reason === 'stop_verified') return 'info'
+      if (event.detail?.source === 'liveness_stall') return 'content'
       // 主线状态机的通用事件点:停止/退出迁移是"有内容待处置",to=running 只是
       // "开始跑了"的纯通报,归 info,不逼 manager 走四选一处置。
-      if (event.detail?.source === 'liveness_stall') return 'content'
       const to = event.detail?.to
       return to === 'idle' || to === 'exited' ? 'content' : 'info'
     }
