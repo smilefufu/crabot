@@ -314,7 +314,7 @@ describe('WorkerHarness task supervision', () => {
     const worker = (await harness.findWorker(workerId))!.worker
     expect(adapter.stateCalls).toBe(1)
     expect(supervisionEvents(workerId)).toHaveLength(0)
-    expect(worker.task.status).toBe('waiting_input')
+    expect(worker.task.status).toBe('halted')
     expect(worker.supervision).toMatchObject({ version: 1, mode: 'default', last_observed_at: now() })
     expect(worker.supervision?.next_due_at).toBeUndefined()
     expect(worker.supervision?.pending).toBeUndefined()
@@ -368,12 +368,31 @@ describe('WorkerHarness task supervision', () => {
       observation: 'none',
       probe: 'idle',
     })
-    expect(worker.task.status).toBe('waiting_input')
+    expect(worker.task.status).toBe('halted')
     expect(worker.supervision).toMatchObject({
       mode: 'periodic_report',
       next_due_at: new Date(clockMs + 5 * MINUTE).toISOString(),
     })
     expect(worker.supervision?.pending).toBeUndefined()
+  })
+
+  it('periodic report remains due when the probe reports exited——task halted 不是约定的终点(2026-08-31 回归)', async () => {
+    const { harness, adapter } = await makeHarness()
+    const workerId = await spawnRunning(harness)
+    await harness.setWorkerPeriodicReport(workerId, { channel_id: 'feishu', session_id: 'session-1' }, 5 * MINUTE)
+    events = []
+    adapter.observation = { kind: 'none', next_cursor: { offset: 0 } }
+    adapter.contractState = 'exited'
+    clockMs += 5 * MINUTE
+
+    await harness.sweepLiveness()
+
+    expect(supervisionEvents(workerId)).toHaveLength(1)
+    expect(supervisionEvents(workerId)[0].detail).toMatchObject({
+      mode: 'periodic_report',
+      observation: 'none',
+      probe: 'exited',
+    })
   })
 
   it('clearing a rule invalidates a queued due and terminal cleanup removes periodic configuration', async () => {

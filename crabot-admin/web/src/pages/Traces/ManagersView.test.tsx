@@ -138,7 +138,7 @@ describe('ManagerDetail', () => {
         {
           trace_id: 'ep-progress', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:01:00.000Z', status: 'completed',
           trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
-          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'halted' },
         },
         {
           trace_id: 'ep-parent', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:00:00.000Z', status: 'completed',
@@ -155,7 +155,7 @@ describe('ManagerDetail', () => {
     )
     await waitFor(() => expect(screen.getByText('你：「开始部署」')).toBeInTheDocument())
     expect(screen.getAllByText('部署 V6').length).toBeGreaterThan(0)
-    expect(screen.getByText('等待输入')).toBeInTheDocument()
+    expect(screen.getByText('已停止待处置')).toBeInTheDocument()
   })
 
   it('带回复或操作的 worker_event 保持自己的时间线位置', async () => {
@@ -164,7 +164,7 @@ describe('ManagerDetail', () => {
         {
           trace_id: 'ep-late-reply', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:10:00.000Z', status: 'completed',
           trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
-          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'halted' },
           reply_excerpt: '该执行器当前无法投递，已请求中断。',
           actions: [{ kind: 'other', label: '请求中断：部署 V6', worker_id: 'w-1' }],
           causal_parent: {
@@ -200,7 +200,7 @@ describe('ManagerDetail', () => {
         {
           trace_id: 'ep-progress-latest', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:03:00.000Z', status: 'completed',
           trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
-          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'halted' },
         },
         {
           trace_id: 'ep-progress-running', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:02:00.000Z', status: 'completed',
@@ -226,7 +226,7 @@ describe('ManagerDetail', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('你：「开始部署」')).toBeInTheDocument())
-    expect(screen.getByText('等待输入')).toBeInTheDocument()
+    expect(screen.getByText('已停止待处置')).toBeInTheDocument()
     expect(screen.queryByText('执行中')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '展开 2 次历史进展' }))
     expect(screen.getByText('执行中')).toBeInTheDocument()
@@ -239,7 +239,7 @@ describe('ManagerDetail', () => {
         {
           trace_id: 'ep-progress-latest', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:03:00.000Z', status: 'completed',
           trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
-          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'halted' },
         },
         {
           trace_id: 'ep-progress-message', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:02:00.000Z', status: 'completed',

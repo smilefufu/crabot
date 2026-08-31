@@ -155,7 +155,7 @@ export function managerActivitySummary(trace: ManagerEpisodeProjection): string 
 function statusLabel(status: string | undefined): string | undefined {
   if (!status) return undefined
   const labels: Record<string, string> = {
-    queued: '排队', running: '执行中', waiting_input: '等输入',
+    queued: '排队', running: '执行中', halted: '已停止待处置',
     completed: '已完成', failed: '失败', cancelled: '已取消',
   }
   return labels[status] ?? status

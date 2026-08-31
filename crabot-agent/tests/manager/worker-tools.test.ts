@@ -909,7 +909,7 @@ describe('worker control operations', () => {
     expect(parseOutput(interrupted.output)).toMatchObject({ operation: { worker_id: worker.worker_id, kind: 'interrupt', status: 'succeeded' } })
     expect(fake.interruptCalls).toHaveLength(1)
     const [afterInterrupt] = await harness.listWorkers(CTX.managerKey)
-    expect(afterInterrupt.task.status).not.toBe('cancelled')
+    expect(afterInterrupt.task.status).not.toBe('closed')
 
     const first = await stopWorker.call({ worker_id: worker.worker_id }, {})
     expect(first.isError).toBe(false)
@@ -917,7 +917,7 @@ describe('worker control operations', () => {
     expect(fake.killCalls).toHaveLength(1)
 
     const [afterFirst] = await harness.listWorkers(CTX.managerKey)
-    expect(afterFirst.task.status).toBe('cancelled')
+    expect(afterFirst.task.status).toBe('closed')
 
   })
 

@@ -10,7 +10,6 @@ import { readLegacyTraces, type LegacyTrace } from './legacy-source-reader.js'
 
 const VERSION = 1
 const SYSTEM_KEY = 'admin-web::system-tasks' as ManagerKey
-const PRE_MIGRATION_ERROR = '旧执行上下文在 v3 切换时终止，可创建新化身续办'
 const LEGACY_STATUSES = new Set([
   'pending',
   'planning',
@@ -179,12 +178,18 @@ async function makeWorker(
       ...(isRecord(task.input) ? { input: task.input } : {}),
       ...(strings(task.tags) ? { tags: task.tags } : {}),
       ...(goal ? { goal } : {}),
-      ...(outcome ? { outcome } : {}),
       created_at: task.created_at,
-      completed_at: endedAt,
-      ...(mapped.preMigration
-        ? { error: PRE_MIGRATION_ERROR }
-        : typeof task.error === 'string' ? { error: task.error } : {}),
+      ...(mapped.status === 'closed'
+        ? {
+          closed: {
+            at: endedAt,
+            by: 'migration' as const,
+            note: `migrated from v2 ${task.status}`
+              + (outcome ? `；outcome: ${outcome}` : '')
+              + (typeof task.error === 'string' ? `；error: ${task.error}` : ''),
+          },
+        }
+        : { halt: { halted_at: endedAt, halt_reason: 'pre_migration' as const } }),
     },
     origin: {
       trigger_type: trigger(source),
@@ -294,10 +299,11 @@ function mapStatus(status: string): {
   readonly endedReason: 'completed' | 'failed' | 'killed' | 'pre_migration'
   readonly preMigration: boolean
 } {
-  if (status === 'completed') return { status, endedReason: 'completed', preMigration: false }
-  if (status === 'failed') return { status, endedReason: 'failed', preMigration: false }
-  if (status === 'cancelled') return { status, endedReason: 'killed', preMigration: false }
-  return { status: 'failed', endedReason: 'pre_migration', preMigration: true }
+  // 2026-08-31 状态机修正：旧终态一律归 closed（旧值记入 closed.note），旧非终态归 halted(pre_migration)。
+  if (status === 'completed') return { status: 'closed', endedReason: 'completed', preMigration: false }
+  if (status === 'failed') return { status: 'closed', endedReason: 'failed', preMigration: false }
+  if (status === 'cancelled') return { status: 'closed', endedReason: 'killed', preMigration: false }
+  return { status: 'halted', endedReason: 'pre_migration', preMigration: true }
 }
 
 function trigger(source: Record<string, unknown>): 'message' | 'scheduled' | 'system' {

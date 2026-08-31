@@ -207,7 +207,7 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
     expect(worker.task.status).toBe('running')
     await waitUntil(async () => {
       const [w] = await harness.listWorkers(managerKey)
-      return w.task.status === 'completed'
+      return w.task.status === 'halted'
     })
 
     // 语义不变量：worker 真的执行了工具调用、真的以 finish_task 收尾。
@@ -284,7 +284,8 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
     ).rejects.toThrow(/model slot 未配置/)
 
     const [w] = await harness.listWorkers(managerKey)
-    expect(w.task.status).toBe('failed')
+    expect(w.task.status).toBe('halted')
+    expect(w.task.halt?.halt_reason).toBe('crashed')
     expect(w.incarnations[0].ended_reason).toBe('failed')
   })
 })

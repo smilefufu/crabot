@@ -3111,7 +3111,7 @@ export class UnifiedAgent extends ModuleBase {
     managerKey: ManagerKey,
     taskId: TaskId,
     to: TaskStatus,
-    opts?: { error?: string; outcome?: string },
+    opts?: { note?: string },
   ): Promise<void> {
     const { ledger } = this.requireManagerStack()
     const now = new Date().toISOString()
@@ -3121,7 +3121,12 @@ export class UnifiedAgent extends ModuleBase {
       oldStatus = previous.task.status
       return {
         ...previous,
-        task: applyStatusTransition(previous.task, to, { ...opts, now }),
+        task: applyStatusTransition(previous.task, to, {
+          now,
+          ...(to === 'closed'
+            ? { closed: { by: 'system' as const, ...(opts?.note ? { note: opts.note } : {}) } }
+            : {}),
+        }),
         updated_at: now,
       }
     })
@@ -3139,15 +3144,14 @@ export class UnifiedAgent extends ModuleBase {
     await this.transitionMaintenanceSystemTask(managerKey, taskId, 'running')
     try {
       await this.memoryWriter.runMaintenance('all')
-      await this.transitionMaintenanceSystemTask(managerKey, taskId, 'completed', {
-        outcome: '记忆维护完成',
+      await this.transitionMaintenanceSystemTask(managerKey, taskId, 'closed', {
+        note: '记忆维护完成',
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[${this.config.moduleId}] memory_maintenance system task ${taskId} failed:`, message)
-      await this.transitionMaintenanceSystemTask(managerKey, taskId, 'failed', {
-        error: message,
-        outcome: `记忆维护失败：${message}`,
+      await this.transitionMaintenanceSystemTask(managerKey, taskId, 'closed', {
+        note: `记忆维护失败：${message}`,
       })
     }
   }
@@ -3582,7 +3586,7 @@ export class UnifiedAgent extends ModuleBase {
       for (const entry of entries) {
         if (!entry.startsWith('w-')) continue
         const found = all.find(({ worker }) => worker.worker_id === entry)
-        if (found && found.worker.task.status !== 'completed' && found.worker.task.status !== 'failed' && found.worker.task.status !== 'cancelled') {
+        if (found && found.worker.task.status !== 'closed') {
           continue // 非终态 worker：协议 §6.5 只授权回收任务终态超 7 天的目录（R8）。
         }
         const task = found?.worker.task

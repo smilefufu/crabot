@@ -146,7 +146,7 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
       // 不是靠猜时序或手动触发回调。
       await waitUntil(async () => {
         const [w] = await harness.listWorkers(managerKey)
-        return w.task.status === 'waiting_input'
+        return w.task.status === 'halted'
       })
 
       // 经 harness.getWorkerTerminal(不是直接戳 adapter)拿到 builtin 真实写盘的纯文本。
@@ -159,11 +159,11 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
 
       await waitUntil(async () => {
         const [w] = await harness.listWorkers(managerKey)
-        return w.task.status === 'completed'
+        return w.task.status === 'halted'
       })
 
       const [finalWorker] = await harness.listWorkers(managerKey)
-      expect(finalWorker.task.status).toBe('completed')
+      expect(finalWorker.task.status).toBe('halted')
       // 注:被动状态回调路径现在会把 adapter 的 ended_reason 一路透传进
       // incarnation.ended_reason 与 task.status,但**不**回填 task.outcome——
       // applyStatusTransition 的 opts.outcome 至今没有任何生产调用点传值,该字段恒
@@ -328,7 +328,7 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
         return current.task.status === 'waiting_input'
       })
       const [settledWorker] = await harness.listWorkers(managerKey)
-      expect(settledWorker.task.status).toBe('waiting_input')
+      expect(settledWorker.task.status).toBe('halted')
       // cc adapter 的真实 session uuid(spawn 返回前即由 adapter 填入,不是台账初始化时的
       // 占位空串),证明 harness 原子补写了 adapter.spawn 返回的真实 handle.session_ref。
       expect(settledWorker.incarnations[0].session_ref).toBeTruthy()

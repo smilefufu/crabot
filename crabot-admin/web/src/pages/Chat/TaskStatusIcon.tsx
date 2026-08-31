@@ -21,9 +21,12 @@ const STATUS_LABELS: Record<string, string> = {
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',
-  // protocol-agent-v3 §5.2
+  // protocol-agent-v3 §5.2(2026-08-31 状态机修正:4 态)
   queued: '排队中',
   running: '执行中',
+  halted: '已停止待处置',
+  closed: '已关闭',
+  // 旧值兼容(历史数据)
   waiting_input: '等回复',
 }
 
@@ -31,7 +34,7 @@ const STATUS_LABELS: Record<string, string> = {
 const SPINNING_STATUSES = new Set(['pending', 'planning', 'executing', 'queued', 'running'])
 
 /** 等待状态（显示 ⏸） */
-const WAITING_STATUSES = new Set(['waiting', 'waiting_human', 'waiting_input'])
+const WAITING_STATUSES = new Set(['waiting', 'waiting_human', 'waiting_input', 'halted'])
 
 interface TaskStatusIconProps {
   taskId: string
@@ -100,6 +103,15 @@ export const TaskStatusIcon: React.FC<TaskStatusIconProps> = ({ taskId, snapshot
         aria-label="已完成"
       >
         ✓
+      </span>
+    )
+  } else if (snapshot.status === 'closed') {
+    icon = (
+      <span
+        style={{ fontSize: 13, lineHeight: 1, color: 'var(--text-secondary)', fontWeight: 700, userSelect: 'none' }}
+        aria-label="已关闭"
+      >
+        ■
       </span>
     )
   } else if (snapshot.status === 'failed' || snapshot.status === 'cancelled') {

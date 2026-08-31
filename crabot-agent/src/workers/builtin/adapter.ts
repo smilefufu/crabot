@@ -152,7 +152,7 @@ export { WorkerExitedError }
 const FINISH_TASK_TOOL: ToolDefinition = {
   ...defineTool({
     name: 'finish_task',
-    description: '结束当前 burst：任务完成或确认失败时调用，附一句话总结。',
+    description: '本轮工作到此结束、交回调度方继续处置时调用；附自报结果（completed/failed）与一句话总结。自报只是你的判断，是否达成由调度方对照任务要求认定。',
     isReadOnly: true,
     inputSchema: {
       type: 'object',

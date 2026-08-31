@@ -191,8 +191,8 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
 
     expect(report).toEqual<ReconcileReport>({ revived: [], failed: ['w-exited'], unchanged: [] })
     const after = await getWorker(ledger, 'w-exited')
-    expect(after.task.status).toBe('failed')
-    expect(after.task.error).toBeTruthy()
+    expect(after.task.status).toBe('halted')
+    expect(after.task.halt?.detail).toBeTruthy()
     expect(after.incarnations[0].state).toBe('exited')
     expect(after.incarnations[0].ended_reason).toBe('crashed')
     expect(after.incarnations[0].ended_at).toBeTruthy()
@@ -284,8 +284,8 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(report).toEqual<ReconcileReport>({ revived: [], failed: ['w-maintenance'], unchanged: [] })
     expect(fake.stateCalls).toHaveLength(0)
     const after = await getWorker(ledger, 'w-maintenance')
-    expect(after.task.status).toBe('failed')
-    expect(after.task.error).toBe('agent restart: execution context lost for agent-native system task')
+    expect(after.task.status).toBe('closed')
+    expect(after.task.closed?.note).toBe('agent restart: execution context lost for agent-native system task')
     expect(after.incarnations).toEqual([])
     expect(after.supervision).toEqual({ version: 1, mode: 'default' })
     const taskEvents = events.filter((e) => e.worker_id === 'w-maintenance')
@@ -293,7 +293,7 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(taskEvents[0]).toMatchObject({
       seq: 0,
       kind: 'exited',
-      task_status: 'failed',
+      task_status: 'closed',
       detail: { reason: 'crashed', message: 'agent restart: execution context lost for agent-native system task' },
     })
   })
@@ -352,7 +352,7 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
 
     expect(report).toEqual<ReconcileReport>({ revived: [], failed: ['w-no-adapter'], unchanged: [] })
     const after = await getWorker(ledger, 'w-no-adapter')
-    expect(after.task.status).toBe('failed')
+    expect(after.task.status).toBe('halted')
     expect(after.incarnations[0].ended_reason).toBe('crashed')
     const exitedEvents = events.filter((e) => e.kind === 'exited' && e.worker_id === 'w-no-adapter')
     expect(exitedEvents[0].detail?.message).toContain('codex')
@@ -376,7 +376,7 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(report.revived).toEqual(['w-ok']) // 另一个 worker 没有被这次异常连累，正常判定
 
     const after = await getWorker(ledger, 'w-throws')
-    expect(after.task.status).toBe('failed')
+    expect(after.task.status).toBe('halted')
     expect(after.incarnations[0].ended_reason).toBe('crashed')
     const exitedEvents = events.filter((e) => e.kind === 'exited' && e.worker_id === 'w-throws')
     expect(exitedEvents[0].detail?.message).toContain('tmux pane 探测失败')
@@ -422,15 +422,15 @@ describe('WorkerHarness.reconcileOnStartup — 终态 worker 不被触碰', () =
     adaptersMap.set('builtin', fake)
 
     const completed = makeWorker('w-completed', {
-      task: { id: 'task-w-completed', title: '测试任务', status: 'completed', created_at: now(), completed_at: now() },
+      task: { id: 'task-w-completed', title: '测试任务', status: 'closed', created_at: now() },
       incarnations: [{ seq: 1, impl: 'builtin', state: 'exited', workspace: '/tmp/ws', session_ref: 'ref#1', started_at: now(), ended_at: now(), ended_reason: 'completed' }],
     })
     const failedAlready = makeWorker('w-failed-already', {
-      task: { id: 'task-w-failed-already', title: '测试任务', status: 'failed', created_at: now(), completed_at: now(), error: 'boom' },
+      task: { id: 'task-w-failed-already', title: '测试任务', status: 'closed', created_at: now(), closed: { at: now(), by: 'migration', note: 'failed: boom' } },
       incarnations: [{ seq: 1, impl: 'builtin', state: 'exited', workspace: '/tmp/ws', session_ref: 'ref#1', started_at: now(), ended_at: now(), ended_reason: 'failed' }],
     })
     const cancelled = makeWorker('w-cancelled', {
-      task: { id: 'task-w-cancelled', title: '测试任务', status: 'cancelled', created_at: now(), completed_at: now() },
+      task: { id: 'task-w-cancelled', title: '测试任务', status: 'closed', created_at: now() },
       incarnations: [{ seq: 1, impl: 'builtin', state: 'exited', workspace: '/tmp/ws', session_ref: 'ref#1', started_at: now(), ended_at: now(), ended_reason: 'killed' }],
     })
     await seed(ledger, DIALOG, completed)
@@ -460,7 +460,7 @@ describe('WorkerHarness.reconcileOnStartup — 报告分类 + 跨对话对象', 
       ledger,
       group,
       makeWorker('group-done', {
-        task: { id: 'task-group-done', title: '测试任务', status: 'completed', created_at: now(), completed_at: now() },
+        task: { id: 'task-group-done', title: '测试任务', status: 'closed', created_at: now() },
         incarnations: [{ seq: 1, impl: 'builtin', state: 'exited', workspace: '/tmp/ws', session_ref: 'ref#1', started_at: now(), ended_at: now(), ended_reason: 'completed' }],
       })
     )
@@ -487,7 +487,7 @@ describe('WorkerHarness.reconcileOnStartup — 幂等', () => {
     const first = await harness.reconcileOnStartup()
     expect(first).toEqual<ReconcileReport>({ revived: [], failed: ['w-repeat'], unchanged: [] })
     const afterFirst = await getWorker(ledger, 'w-repeat')
-    expect(afterFirst.task.status).toBe('failed')
+    expect(afterFirst.task.status).toBe('halted')
     const eventsAfterFirst = events.filter((e) => e.worker_id === 'w-repeat')
     expect(eventsAfterFirst).toHaveLength(1)
 
@@ -521,7 +521,7 @@ describe('WorkerHarness restart recovery notices', () => {
 
     await harness.reconcileOnStartup()
     const crashed = await getWorker(ledger, 'w-recovery-notice')
-    expect(crashed.task.status).toBe('failed')
+    expect(crashed.task.status).toBe('halted')
     expect(crashed.recovery_notices).toEqual([expect.objectContaining({
       incarnation_id: crashed.incarnations[0].incarnation_id,
       status: 'pending',
@@ -568,7 +568,7 @@ describe('WorkerHarness restart recovery notices', () => {
       },
     })
     await seed(ledger, DIALOG, makeWorker('w-historical-crash', {
-      task: { id: 'task-w-historical-crash', title: '历史失败', status: 'failed', created_at: now(), completed_at: now() },
+      task: { id: 'task-w-historical-crash', title: '历史失败', status: 'closed', created_at: now() },
       incarnations: [{
         seq: 1,
         impl: 'builtin',
@@ -703,7 +703,7 @@ describe('HarnessEvent.task_status —— reconcileOnStartup 的迁移点', () =
 
     const exited = events.filter((e) => e.kind === 'exited' && e.worker_id === 'w-crash')
     expect(exited).toHaveLength(1)
-    expect(exited[0].task_status).toBe('failed')
+    expect(exited[0].task_status).toBe('halted')
     expect(exited[0].task_status).toBe((await getWorker(ledger, 'w-crash')).task.status)
   })
 

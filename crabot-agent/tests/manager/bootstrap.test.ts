@@ -286,7 +286,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     // 化身自然结束(非 kill)时三个实现给的都是 'completed'。
     onStateChange!({ worker_id: 'w-builtin-1', seq: 1, impl: 'builtin', session_ref: 'w-builtin-1-ref' }, 'exited', { endReason: 'completed' })
 
-    await waitUntil(async () => (await stack.ledger.findWorker('w-builtin-1'))?.worker.task.status === 'completed')
+    await waitUntil(async () => (await stack.ledger.findWorker('w-builtin-1'))?.worker.task.status === 'halted')
     const after = await stack.ledger.findWorker('w-builtin-1')
     expect(after?.worker.incarnations[0].state).toBe('exited')
 
@@ -309,7 +309,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     await Promise.allSettled(routeSpy.mock.results.map((r) => r.value as Promise<unknown>))
   })
 
-  it('关闭期间 worker crashed 仍落账为 failed，但不再路由 Manager episode', async () => {
+  it('关闭期间 worker crashed 仍落账为 halted(crashed)，但不再路由 Manager episode', async () => {
     const stack = buildManagerStack(makeDeps({ isClosing: () => true }))
     const managerKey = 'wechat::sess-closing' as ManagerKey
     await stack.ledger.upsertWorker(managerKey, 'w-closing', () =>
@@ -324,7 +324,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       { endReason: 'crashed' },
     )
 
-    await waitUntil(async () => (await stack.ledger.findWorker('w-closing'))?.worker.task.status === 'failed')
+    await waitUntil(async () => (await stack.ledger.findWorker('w-closing'))?.worker.task.status === 'halted')
     expect(routeSpy).not.toHaveBeenCalled()
   })
 

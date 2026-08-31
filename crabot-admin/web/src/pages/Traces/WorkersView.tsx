@@ -3,12 +3,13 @@ import { Link } from 'react-router-dom'
 import { Loading } from '../../components/Common/Loading'
 import { agentObservabilityService, type LedgerWorker, type WorkerTaskStatus } from '../../services/agent-observability'
 
-const STATUS_LABEL: Record<WorkerTaskStatus, string> = {
-  queued: '排队', running: '执行中', waiting_input: '等待输入',
+// 键放宽为 string:历史 trace 数据可能携带旧状态值,缺键时回退原样显示
+const STATUS_LABEL: Record<string, string> = {
+  queued: '排队', running: '执行中', halted: '已停止待处置', closed: '已关闭', waiting_input: '等输入',
   completed: '已完成', failed: '失败', cancelled: '已取消',
 }
-const STATUS_COLOR: Record<WorkerTaskStatus, string> = {
-  queued: 'var(--text-muted)', running: 'var(--info)', waiting_input: 'var(--warning)',
+const STATUS_COLOR: Record<string, string> = {
+  queued: 'var(--text-muted)', running: 'var(--info)', halted: 'var(--warning)', closed: 'var(--text-muted)', waiting_input: 'var(--warning)',
   completed: 'var(--success)', failed: 'var(--error)', cancelled: 'var(--text-muted)',
 }
 const IMPLEMENTATION_LABEL: Record<string, string> = {
@@ -42,7 +43,8 @@ export const WorkersView: React.FC = () => {
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [counts, setCounts] = useState({ active: 0, terminal: 0, legacy: 0 })
-  const [status, setStatus] = useState<'' | WorkerTaskStatus>('')
+  // 历史数据/旧下拉项仍可能携带旧状态值,过滤选择器放宽为 string
+  const [status, setStatus] = useState<string>('')
   const [managerKey, setManagerKey] = useState('')
   const [query, setQuery] = useState('')
   const [includeTerminal, setIncludeTerminal] = useState(false)
@@ -58,8 +60,8 @@ export const WorkersView: React.FC = () => {
       ...(status ? { status } : {}),
       ...(managerKey ? { manager_key: managerKey } : {}),
       ...(query.trim() ? { q: query.trim() } : {}),
-      ...(includeTerminal || includeLegacy || status === 'completed' || status === 'failed' || status === 'cancelled'
-        ? { include_terminal: true }
+      ...(includeTerminal || includeLegacy || status === 'closed' || status === 'completed' || status === 'failed' || status === 'cancelled'
+        ? { include_terminal: true }  // closed 是唯一终态;旧终态键仅服务历史数据过滤
         : {}),
       ...(includeLegacy ? { include_legacy: true } : {}),
       page,
@@ -87,7 +89,7 @@ export const WorkersView: React.FC = () => {
           placeholder="搜索任务标题"
           aria-label="标题搜索"
         />
-        <select className="trace-control" value={status} onChange={(e) => { setStatus(e.target.value as '' | WorkerTaskStatus); setPage(1) }} aria-label="状态过滤">
+        <select className="trace-control" value={status} onChange={(e) => { setStatus(e.target.value); setPage(1) }} aria-label="状态过滤">
           {STATUS_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
         <input

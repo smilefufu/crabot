@@ -84,8 +84,10 @@ export interface ManagerEpisodeTrace {
 
 // ── Worker（§8.3 台账 read model）──────────────────────────────
 
+// 2026-08-31 状态机修正:4 态。旧值(waiting_input/completed/failed/cancelled)仅存在于
+// 历史 trace 数据,徽章映射保留旧键做兼容显示。
 export type WorkerTaskStatus =
-  | 'queued' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled'
+  | 'queued' | 'running' | 'halted' | 'closed'
 
 export interface WorkerIncarnation {
   incarnation_id?: string

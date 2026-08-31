@@ -4,82 +4,76 @@ import {
   isTerminalStatus,
   canTransition,
   applyStatusTransition,
+  isDecisionVisibleWorker,
   InvalidTaskTransitionError,
-  taskStatusFromIncarnation,
-  reviveTask,
 } from '../../../src/workers/harness/task-status'
 import type { TaskStatus } from '../../../src/workers/harness/ledger-types'
-import type { WorkerContractState, IncarnationEndReason } from '../../../src/workers/types'
 
-describe('v3 task 状态机', () => {
+describe('v3 task 状态机（2026-08-31 4 态修正）', () => {
   describe('VALID_TRANSITIONS', () => {
-    it('应定义所有 6 个状态', () => {
-      const states: TaskStatus[] = ['queued', 'running', 'waiting_input', 'completed', 'failed', 'cancelled']
+    it('应定义所有 4 个状态', () => {
+      const states: TaskStatus[] = ['queued', 'running', 'halted', 'closed']
       states.forEach((s) => {
         expect(VALID_TRANSITIONS).toHaveProperty(s)
         expect(Array.isArray(VALID_TRANSITIONS[s])).toBe(true)
       })
     })
 
-    it('queued 可转换至 running 和 cancelled', () => {
+    it('queued 可转换至 running 和 closed', () => {
       const allowed = VALID_TRANSITIONS.queued
       expect(allowed).toContain('running')
-      expect(allowed).toContain('cancelled')
-      expect(allowed).not.toContain('waiting_input')
-      expect(allowed).not.toContain('completed')
-      expect(allowed).not.toContain('failed')
+      expect(allowed).toContain('closed')
+      expect(allowed).not.toContain('halted')
     })
 
-    it('running 可转换至 waiting_input, completed, failed, cancelled', () => {
+    it('running 可转换至 halted 和 closed', () => {
       const allowed = VALID_TRANSITIONS.running
-      expect(allowed).toContain('waiting_input')
-      expect(allowed).toContain('completed')
-      expect(allowed).toContain('failed')
-      expect(allowed).toContain('cancelled')
+      expect(allowed).toContain('halted')
+      expect(allowed).toContain('closed')
       expect(allowed).not.toContain('queued')
     })
 
-    it('waiting_input 可转换至 running, completed, failed, cancelled', () => {
-      const allowed = VALID_TRANSITIONS.waiting_input
+    it('halted 可转换至 running 和 closed', () => {
+      const allowed = VALID_TRANSITIONS.halted
       expect(allowed).toContain('running')
-      expect(allowed).toContain('completed')
-      expect(allowed).toContain('failed')
-      expect(allowed).toContain('cancelled')
+      expect(allowed).toContain('closed')
       expect(allowed).not.toContain('queued')
-    })
-
-    it('终态 completed, failed, cancelled 无出边', () => {
-      expect(VALID_TRANSITIONS.completed).toEqual([])
-      expect(VALID_TRANSITIONS.failed).toEqual([])
-      expect(VALID_TRANSITIONS.cancelled).toEqual([])
     })
   })
 
   describe('isTerminalStatus', () => {
-    it('completed, failed, cancelled 是终态', () => {
-      expect(isTerminalStatus('completed')).toBe(true)
-      expect(isTerminalStatus('failed')).toBe(true)
-      expect(isTerminalStatus('cancelled')).toBe(true)
-    })
-
-    it('queued, running, waiting_input 非终态', () => {
+    it('closed 是唯一终态', () => {
+      expect(isTerminalStatus('closed')).toBe(true)
       expect(isTerminalStatus('queued')).toBe(false)
       expect(isTerminalStatus('running')).toBe(false)
-      expect(isTerminalStatus('waiting_input')).toBe(false)
+      expect(isTerminalStatus('halted')).toBe(false)
+    })
+  })
+
+  describe('isDecisionVisibleWorker', () => {
+    it('非终态可见，closed 不可见', () => {
+      expect(isDecisionVisibleWorker('queued')).toBe(true)
+      expect(isDecisionVisibleWorker('running')).toBe(true)
+      expect(isDecisionVisibleWorker('halted')).toBe(true)
+      expect(isDecisionVisibleWorker('closed')).toBe(false)
     })
   })
 
   describe('canTransition', () => {
     it('合法迁移返回 true', () => {
       expect(canTransition('queued', 'running')).toBe(true)
-      expect(canTransition('running', 'waiting_input')).toBe(true)
-      expect(canTransition('waiting_input', 'completed')).toBe(true)
+      expect(canTransition('running', 'halted')).toBe(true)
+      expect(canTransition('halted', 'running')).toBe(true)
+      expect(canTransition('running', 'closed')).toBe(true)
+      expect(canTransition('halted', 'closed')).toBe(true)
+      expect(canTransition('queued', 'closed')).toBe(true)
     })
 
     it('非法迁移返回 false', () => {
-      expect(canTransition('queued', 'waiting_input')).toBe(false)
-      expect(canTransition('completed', 'running')).toBe(false)
-      expect(canTransition('failed', 'cancelled')).toBe(false)
+      expect(canTransition('queued', 'halted')).toBe(false)
+      expect(canTransition('closed', 'running')).toBe(false)
+      expect(canTransition('closed', 'halted')).toBe(false)
+      expect(canTransition('halted', 'queued')).toBe(false)
     })
   })
 
@@ -91,47 +85,75 @@ describe('v3 task 状态机', () => {
       created_at: '2026-07-28T00:00:00Z',
     }
     const now = '2026-07-28T12:00:00Z'
+    const halt = {
+      halted_at: now,
+      halt_reason: 'turn_end' as const,
+    }
 
     it('合法迁移应成功', () => {
       const task = applyStatusTransition(baseTask, 'running', { now })
       expect(task.status).toBe('running')
       expect(task.updated_at).toBeUndefined()
-      expect(task.completed_at).toBeUndefined()
+      expect(task.halt).toBeUndefined()
     })
 
     it('非法迁移应抛 InvalidTaskTransitionError 并含 from/to 字段', () => {
       expect(() => {
-        applyStatusTransition(baseTask, 'waiting_input', { now })
+        applyStatusTransition(baseTask, 'halted', { now, halt })
       }).toThrow(InvalidTaskTransitionError)
 
       try {
-        applyStatusTransition(baseTask, 'waiting_input', { now })
+        applyStatusTransition(baseTask, 'halted', { now, halt })
       } catch (e) {
         const err = e as InvalidTaskTransitionError
         expect(err.from).toBe('queued')
-        expect(err.to).toBe('waiting_input')
+        expect(err.to).toBe('halted')
       }
     })
 
-    it('终态迁移应回填 completed_at', () => {
+    it('进入 halted 必须携带 halt evidence，缺失即抛错', () => {
       const runningTask = { ...baseTask, status: 'running' as TaskStatus }
-      const task = applyStatusTransition(runningTask, 'completed', { now })
-      expect(task.status).toBe('completed')
-      expect(task.completed_at).toBe(now)
+      expect(() => {
+        applyStatusTransition(runningTask, 'halted', { now })
+      }).toThrow(InvalidTaskTransitionError)
+
+      const task = applyStatusTransition(runningTask, 'halted', { now, halt })
+      expect(task.status).toBe('halted')
+      expect(task.halt).toEqual(halt)
     })
 
-    it('失败迁移应设置 error 字段', () => {
-      const runningTask = { ...baseTask, status: 'running' as TaskStatus }
-      const task = applyStatusTransition(runningTask, 'failed', { now, error: 'Connection timeout' })
-      expect(task.status).toBe('failed')
-      expect(task.error).toBe('Connection timeout')
-      expect(task.completed_at).toBe(now)
+    it('halted→running 续办应清除 halt evidence', () => {
+      const haltedTask = {
+        ...baseTask,
+        status: 'halted' as TaskStatus,
+        halt: { ...halt, worker_self_report: { outcome: 'completed' as const, summary: '自报完成' } },
+      }
+      const task = applyStatusTransition(haltedTask, 'running', { now })
+      expect(task.status).toBe('running')
+      expect(task.halt).toBeUndefined()
     })
 
-    it('outcome 应透传', () => {
+    it('进入 closed 必须携带关闭信息，缺失即抛错；at 由 now 回填', () => {
       const runningTask = { ...baseTask, status: 'running' as TaskStatus }
-      const task = applyStatusTransition(runningTask, 'completed', { now, outcome: 'Success' })
-      expect(task.outcome).toBe('Success')
+      expect(() => {
+        applyStatusTransition(runningTask, 'closed', { now })
+      }).toThrow(InvalidTaskTransitionError)
+
+      const task = applyStatusTransition(runningTask, 'closed', {
+        now,
+        closed: { by: 'manager_stop' },
+      })
+      expect(task.status).toBe('closed')
+      expect(task.closed).toEqual({ at: now, by: 'manager_stop' })
+    })
+
+    it('closed 可带备注', () => {
+      const runningTask = { ...baseTask, status: 'running' as TaskStatus }
+      const task = applyStatusTransition(runningTask, 'closed', {
+        now,
+        closed: { by: 'migration', note: '旧值 completed' },
+      })
+      expect(task.closed?.note).toBe('旧值 completed')
     })
 
     it('返回新对象不改变原 task', () => {
@@ -141,102 +163,25 @@ describe('v3 task 状态机', () => {
       expect(task).not.toBe(baseTask)
     })
 
-    it('非失败迁移时 error 应被清空', () => {
-      const runningTask = { ...baseTask, status: 'running' as TaskStatus, error: 'Old error' }
-      const task = applyStatusTransition(runningTask, 'completed', { now })
-      expect(task.error).toBeUndefined()
-    })
-
-    it('终态之间的迁移应失败', () => {
-      const completedTask = { ...baseTask, status: 'completed' as TaskStatus }
-      expect(() => {
-        applyStatusTransition(completedTask, 'failed', { now })
-      }).toThrow(InvalidTaskTransitionError)
-    })
-  })
-
-  describe('taskStatusFromIncarnation', () => {
-    describe('contractState=running', () => {
-      it('应返回 running', () => {
-        const status = taskStatusFromIncarnation('running')
-        expect(status).toBe('running')
-      })
-
-      it('endReason 和 waitingInput 应被忽略', () => {
-        expect(taskStatusFromIncarnation('running', 'completed')).toBe('running')
-        expect(taskStatusFromIncarnation('running', 'failed', true)).toBe('running')
-      })
-    })
-
-    describe('contractState=idle', () => {
-      it('waitingInput=true 应返回 waiting_input', () => {
-        const status = taskStatusFromIncarnation('idle', undefined, true)
-        expect(status).toBe('waiting_input')
-      })
-
-      it('waitingInput=false 或 undefined 应返回 running', () => {
-        expect(taskStatusFromIncarnation('idle', undefined, false)).toBe('running')
-        expect(taskStatusFromIncarnation('idle')).toBe('running')
-      })
-    })
-
-    describe('contractState=exited', () => {
-      it('endReason=completed 应返回 completed', () => {
-        const status = taskStatusFromIncarnation('exited', 'completed')
-        expect(status).toBe('completed')
-      })
-
-      it('endReason=failed 应返回 failed', () => {
-        const status = taskStatusFromIncarnation('exited', 'failed')
-        expect(status).toBe('failed')
-      })
-
-      it('endReason=crashed 应返回 failed', () => {
-        const status = taskStatusFromIncarnation('exited', 'crashed')
-        expect(status).toBe('failed')
-      })
-
-      it('endReason=killed 应返回 cancelled', () => {
-        const status = taskStatusFromIncarnation('exited', 'killed')
-        expect(status).toBe('cancelled')
-      })
-
-      it('endReason=pre_migration 应返回 failed', () => {
-        const status = taskStatusFromIncarnation('exited', 'pre_migration')
-        expect(status).toBe('failed')
-      })
-
-      it('endReason=superseded 应返回 running（由调用方覆盖化身链新成员决定）', () => {
-        // 当化身被取代时，task 生命周期应由新化身决定，不由本函数决定
-        // 因此返回 running 作为占位值，调用方会读新化身并覆盖此状态
-        const status = taskStatusFromIncarnation('exited', 'superseded')
-        expect(status).toBe('running')
-      })
-    })
-
-    it('6 种 endReason + idle 的 waitingInput 两态全覆盖', () => {
-      // 6 种 endReason
-      const endReasons: IncarnationEndReason[] = ['completed', 'failed', 'killed', 'superseded', 'crashed', 'pre_migration']
-      endReasons.forEach((reason) => {
+    it('closed 是唯一终态，无出边（自迁移也不行）', () => {
+      const closedTask = {
+        ...baseTask,
+        status: 'closed' as TaskStatus,
+        closed: { at: now, by: 'manager_stop' as const },
+      }
+      const states: TaskStatus[] = ['queued', 'running', 'halted', 'closed']
+      states.forEach((to) => {
         expect(() => {
-          taskStatusFromIncarnation('exited', reason)
-        }).not.toThrow()
+          applyStatusTransition(closedTask, to, { now, halt, closed: { by: 'admin' } })
+        }).toThrow(InvalidTaskTransitionError)
       })
-
-      // idle 的 waitingInput 两态
-      expect(() => {
-        taskStatusFromIncarnation('idle', undefined, true)
-      }).not.toThrow()
-      expect(() => {
-        taskStatusFromIncarnation('idle', undefined, false)
-      }).not.toThrow()
     })
   })
 
   describe('迁移矩阵完整性检验', () => {
-    const states: TaskStatus[] = ['queued', 'running', 'waiting_input', 'completed', 'failed', 'cancelled']
+    const states: TaskStatus[] = ['queued', 'running', 'halted', 'closed']
 
-    it('6 状态两两组合 36 对，合法的按 VALID_TRANSITIONS，其余全 false', () => {
+    it('4 状态两两组合 16 对，合法的按 VALID_TRANSITIONS，其余全 false', () => {
       for (const from of states) {
         for (const to of states) {
           const expected = VALID_TRANSITIONS[from].includes(to)
@@ -247,96 +192,29 @@ describe('v3 task 状态机', () => {
     })
 
     it('终态无出边（自迁移也不行）', () => {
-      const terminalStates: TaskStatus[] = ['completed', 'failed', 'cancelled']
-      terminalStates.forEach((s) => {
-        expect(VALID_TRANSITIONS[s].length).toBe(0)
-        states.forEach((to) => {
-          expect(canTransition(s, to)).toBe(false, `${s} 不能转换至 ${to}`)
-        })
+      expect(VALID_TRANSITIONS.closed.length).toBe(0)
+      states.forEach((to) => {
+        expect(canTransition('closed', to)).toBe(false, `closed 不能转换至 ${to}`)
       })
-    })
-  })
-
-  describe('reviveTask（protocol-agent-v3 §5.2 接续例外的受控出口）', () => {
-    const now = '2026-07-28T12:00:00Z'
-
-    it('终态 task 经 reviveTask 重新置回 running，清空 completed_at/error', () => {
-      const failedTask = {
-        id: 'task-1',
-        title: 'Test Task',
-        status: 'failed' as TaskStatus,
-        created_at: '2026-07-28T00:00:00Z',
-        completed_at: '2026-07-28T01:00:00Z',
-        error: 'boom',
-      }
-      const task = reviveTask(failedTask, { now })
-      expect(task.status).toBe('running')
-      expect(task.completed_at).toBeUndefined()
-      expect(task.error).toBeUndefined()
-    })
-
-    it('completed / cancelled 终态同样可被 reviveTask 重新置回 running', () => {
-      const completedTask = {
-        id: 'task-2',
-        title: 'Test Task',
-        status: 'completed' as TaskStatus,
-        created_at: '2026-07-28T00:00:00Z',
-        completed_at: '2026-07-28T01:00:00Z',
-      }
-      expect(reviveTask(completedTask, { now }).status).toBe('running')
-
-      const cancelledTask = { ...completedTask, status: 'cancelled' as TaskStatus }
-      expect(reviveTask(cancelledTask, { now }).status).toBe('running')
-    })
-
-    it('非终态 task 调用 reviveTask 应抛 InvalidTaskTransitionError（不是给状态机新增自由出边，只服务终态接续）', () => {
-      const runningTask = {
-        id: 'task-3',
-        title: 'Test Task',
-        status: 'running' as TaskStatus,
-        created_at: '2026-07-28T00:00:00Z',
-      }
-      expect(() => reviveTask(runningTask, { now })).toThrow(InvalidTaskTransitionError)
-
-      const queuedTask = { ...runningTask, status: 'queued' as TaskStatus }
-      expect(() => reviveTask(queuedTask, { now })).toThrow(InvalidTaskTransitionError)
-
-      const waitingTask = { ...runningTask, status: 'waiting_input' as TaskStatus }
-      expect(() => reviveTask(waitingTask, { now })).toThrow(InvalidTaskTransitionError)
-    })
-
-    it('返回新对象，不修改原 task', () => {
-      const failedTask = {
-        id: 'task-1',
-        title: 'Test Task',
-        status: 'failed' as TaskStatus,
-        created_at: '2026-07-28T00:00:00Z',
-        completed_at: '2026-07-28T01:00:00Z',
-        error: 'boom',
-      }
-      const original = { ...failedTask }
-      const task = reviveTask(failedTask, { now })
-      expect(failedTask).toEqual(original)
-      expect(task).not.toBe(failedTask)
     })
   })
 
   describe('InvalidTaskTransitionError', () => {
     it('应是 Error 的子类', () => {
-      const err = new InvalidTaskTransitionError('queued', 'waiting_input')
+      const err = new InvalidTaskTransitionError('queued', 'halted')
       expect(err).toBeInstanceOf(Error)
     })
 
     it('应含 from 和 to 字段', () => {
-      const err = new InvalidTaskTransitionError('queued', 'waiting_input')
+      const err = new InvalidTaskTransitionError('queued', 'halted')
       expect(err.from).toBe('queued')
-      expect(err.to).toBe('waiting_input')
+      expect(err.to).toBe('halted')
     })
 
     it('message 应包含 from 和 to 状态', () => {
-      const err = new InvalidTaskTransitionError('queued', 'waiting_input')
+      const err = new InvalidTaskTransitionError('queued', 'halted')
       expect(err.message).toContain('queued')
-      expect(err.message).toContain('waiting_input')
+      expect(err.message).toContain('halted')
     })
   })
 })

@@ -1940,13 +1940,52 @@ function renderChannelMessages(
   return `${label}\n${lines.join('\n')}`
 }
 
+/**
+ * harness 事件 → manager 决策类别(spec 2026-08-31-worker-stop-oversight-design §5.4)。
+ * content=有内容待处置;blocked=受阻需介入;review=例行巡检;info=通报知情。
+ */
+function workerEventClass(event: HarnessEvent): 'content' | 'blocked' | 'review' | 'info' {
+  switch (event.kind) {
+    case 'state_changed': {
+      if (event.detail?.kind === 'interaction_required') return 'blocked'
+      // manager 自己处置动作的回执(stop_verified:任务已 closed)是收据不是新待办,
+      // 归 info——否则每次核验成功的 request_worker_stop 都会立刻要求 manager
+      // 再走一轮"必须处置",而续办对 closed 是硬拒绝,必错。
+      if (event.detail?.reason === 'stop_verified') return 'info'
+      if (event.detail?.source === 'liveness_stall') return 'content'
+      // 主线状态机的通用事件点:停止/退出迁移是"有内容待处置",to=running 只是
+      // "开始跑了"的纯通报,归 info,不逼 manager 走四选一处置。
+      const to = event.detail?.to
+      return to === 'idle' || to === 'exited' ? 'content' : 'info'
+    }
+    case 'activity_available':
+    case 'turn_completed':
+    case 'query_completed':
+      return 'content'
+    case 'input_delivery_failed':
+    case 'worker_recovery_required':
+      return 'blocked'
+    case 'supervision_due':
+      return 'review'
+    default:
+      return 'info'
+  }
+}
+
 function renderWorkerEvent(event: HarnessEvent): string {
+  const cls = workerEventClass(event)
   const { text, summary, ...rest } = (event.detail ?? {}) as
     { text?: unknown; summary?: unknown } & Record<string, unknown>
   const detail = Object.keys(rest).length > 0 ? ` detail=${JSON.stringify(rest)}` : ''
-  const parts = [`[worker 事件] worker_id=${event.worker_id} seq=${event.seq} kind=${event.kind}${detail}`]
-  if (typeof text === 'string' && text.length > 0) parts.push(`worker 最后说:\n${text}`)
+  const parts = [`<crabot-event class="${cls}" kind="${event.kind}" worker_id="${event.worker_id}" seq="${event.seq}"${detail}>`]
+  if (typeof text === 'string' && text.length > 0) {
+    // 只有 interaction_required 事件的 text 是终端画面 capture(不是 worker 说的话),
+    // 标签必须区分,防止 manager 把画面内容误当发言;其余事件的 text 都是发言/指令原文。
+    const isPaneCapture = event.kind === 'state_changed' && event.detail?.kind === 'interaction_required'
+    parts.push(isPaneCapture ? `worker 当前画面:\n${text}` : `worker 最后说:\n${text}`)
+  }
   if (typeof summary === 'string' && summary.length > 0) parts.push(`worker 的收尾结论:\n${summary}`)
+  parts.push('</crabot-event>')
   return parts.join('\n')
 }
 

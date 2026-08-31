@@ -107,6 +107,8 @@ import {
   type Incarnation,
   type LedgerWorker,
   type ManagerKey,
+  type TaskHaltEvidence,
+  type TaskHaltReason,
   type TaskStatus,
   type WorkerRecoveryNotice,
   type WorkerSupervision,
@@ -151,7 +153,7 @@ import { WorkerUiSnapshotStore, type WorkerUiActionId, type WorkerUiSnapshot } f
 import { projectWorkerActivity } from '../trace/activity-projection'
 import { readLegacyTraces } from '../legacy-source-reader.js'
 import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
-import { applyStatusTransition, canTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
+import { applyStatusTransition, canTransition, isTerminalStatus } from './task-status'
 import { join, dirname } from 'path'
 import {
   InputDeliveryStore,
@@ -340,6 +342,19 @@ function cliContractState(kind: NonNullable<IncarnationHandle['initial_input']>[
   }
 }
 
+const HALT_REASON_SEVERITY: Record<TaskHaltReason, number> = {
+  turn_end: 0,
+  worker_finalized: 1,
+  unknown: 2,
+  pre_migration: 2,
+  crashed: 3,
+}
+
+/** 停因严重度:同为 halted 时,仅当新停因更严重才覆盖 evidence,良性结果不得抹掉严重事实。 */
+function haltSeverity(reason: TaskHaltReason): number {
+  return HALT_REASON_SEVERITY[reason] ?? 0
+}
+
 function settleCliTask(
   task: LedgerWorker['task'],
   state: WorkerContractState,
@@ -347,12 +362,22 @@ function settleCliTask(
   now: string,
 ): LedgerWorker['task'] {
   if (state === 'running') return task
-  if (state === 'idle') return applyStatusTransition(task, 'waiting_input', { now })
-  const target = taskStatusFromIncarnation('exited', report?.endReason)
-  if (target === 'running') return task
-  return applyStatusTransition(task, target, {
+  if (state === 'idle') {
+    return applyStatusTransition(task, 'halted', { now, halt: { halted_at: now, halt_reason: 'turn_end' } })
+  }
+  // 2026-08-31 状态机修正:化身退出落 halted,粗分类停因进 evidence;ended_reason 细节留在化身记录。
+  const reason = report?.endReason
+  if (reason === 'superseded') return task // 任务状态由化身链新成员决定
+  if (reason === 'killed') {
+    return applyStatusTransition(task, 'closed', { now, closed: { by: 'manager_stop' } })
+  }
+  return applyStatusTransition(task, 'halted', {
     now,
-    ...(target === 'failed' ? { error: report?.endReason ?? 'initial CLI process exited' } : {}),
+    halt: {
+      halted_at: now,
+      halt_reason: reason === 'crashed' ? 'crashed' : reason === 'pre_migration' ? 'pre_migration' : reason === undefined ? 'unknown' : 'turn_end',
+      ...(reason === 'failed' || reason === 'crashed' || reason === undefined ? { detail: reason ?? 'exited_without_end_reason' } : {}),
+    },
   })
 }
 
@@ -1126,13 +1151,17 @@ export class WorkerHarness {
         const now = this.deps.now()
         const failed = await this.deps.ledger.upsertWorker(p.managerKey, workerId, (prev) => {
           if (!prev) return undefined
-          // VALID_TRANSITIONS 里 queued 没有直达 failed 的边(只能到 running/cancelled)。
-          // spawn 尝试确实发生过(我们已经调用了 provision/spawn),用 queued→running→failed
-          // 两跳把这次失败尝试如实记录下来,而不是绕开状态机改成不符合协议语义的 cancelled。
+          // VALID_TRANSITIONS 里 queued 没有直达 halted 的边(只能到 running/closed)。
+          // spawn 尝试确实发生过(我们已经调用了 provision/spawn),用 queued→running→halted
+          // 两跳把这次失败尝试如实记录下来,而不是绕开状态机。
           const running = applyStatusTransition(prev.task, 'running', { now })
-          const nextTask = applyStatusTransition(running, 'failed', {
-            error: err instanceof Error ? err.message : String(err),
+          const nextTask = applyStatusTransition(running, 'halted', {
             now,
+            halt: {
+              halted_at: now,
+              halt_reason: 'crashed',
+              detail: err instanceof Error ? err.message : String(err),
+            },
           })
           const incarnations = patchIncarnationBySeq(prev.incarnations, impl, 1, {
             state: 'exited',
@@ -1244,7 +1273,7 @@ export class WorkerHarness {
       // create a redirect hold, receipt, or inbox item after the tool has timed out.
       this.assertSynchronousInputDeadline(synchronousDeadlineAt, deliveryId)
       if (!found) throw new WorkerNotFoundError(workerId)
-      if (found.worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
+      if (found.worker.task.status === 'closed') throw new TaskCancelledError(workerId)
       const mainline = requireMainlineIncarnation(found.worker)
       if (
         opts?.immediate_redirect === true &&
@@ -2017,7 +2046,7 @@ export class WorkerHarness {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
       const { managerKey, worker } = found
-      if (worker.task.status === 'cancelled') {
+      if (worker.task.status === 'closed') {
         await this.appendEvent(workerId, 1, 'state_changed', {
           kind: 'dead_letter',
           reason: 'task_cancelled',
@@ -2038,8 +2067,12 @@ export class WorkerHarness {
       }
       const expired = this.expiredInboxDelivery(item, legacy.seq)
       if (expired) return expired
+      // 可续办集合(2026-08-31 状态机修正):仅 halted。ended_reason 白名单里
+      // completed/failed/pre_migration 现只有 pre_migration 可达——旧终态 v2 任务经
+      // importer 映射为 closed(硬拒绝,见上方短路),不再参与续办;白名单保留是为
+      // 兼容既有台账上历史化身记录的事实值。
       if (
-        (worker.task.status !== 'completed' && worker.task.status !== 'failed') ||
+        worker.task.status !== 'halted' ||
         !['completed', 'failed', 'pre_migration'].includes(legacy.ended_reason)
       ) {
         throw new Error('WorkerHarness.sendToWorker: legacy worker is not eligible for continuation')
@@ -2486,12 +2519,12 @@ export class WorkerHarness {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
       const { worker, managerKey } = found
-      // cancelled 是唯一硬拒绝(protocol-agent-v3 §5.5,与 sendToWorker/continueTerminalWorker
-      // 的 cancelled 短路对齐)。若主线化身已因 killWorker 落 exited,不加这道校验会让
-      // handoffIncarnation 跳过 kill 段直接 provision+spawn 新化身,reopenTaskForContinuation
-      // 命中终态走 reviveTask——用户明确要求终止的任务被无声复活成 running。completed/failed
-      // 允许切换(等价于"在办任务换实现"续办的合理场景,§5.3),只有 cancelled 硬拒绝。
-      if (worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
+      // closed 是唯一硬拒绝(protocol-agent-v3 §5.5,与 sendToWorker/continueTerminalWorker
+      // 的 closed 短路对齐)。若主线化身已因 killWorker 落 exited,不加这道校验会让
+      // handoffIncarnation 跳过 kill 段直接 provision+spawn 新化身,把用户明确要求终止的
+      // 任务无声复活成 running。halted 允许切换(等价于"在办任务换实现"续办的合理场景,
+      // §5.3),只有 closed 硬拒绝。
+      if (worker.task.status === 'closed') throw new TaskCancelledError(workerId)
       const mainline = requireMainlineIncarnation(worker)
       const handoff = await this.handoffIncarnation(managerKey, worker, requireExecutableIncarnation(mainline), impl, note ?? '')
       restoredDurableReceipt = handoff.restoredDurableReceipt
@@ -2577,14 +2610,14 @@ export class WorkerHarness {
         if (expired) return expired
 
         // task 在锁外投递期间被 killWorker 打断(如 send 卡在 tmux 投递期间调 kill,这条
-        // 消息在拿到这把锁之前就已经确定要走接续路径了):§5.5"唯一硬拒绝:cancelled"只
+        // 消息在拿到这把锁之前就已经确定要走接续路径了):§5.5"唯一硬拒绝:closed"只
         // 约束 sendToWorker 入队前的把关(见该方法顶部),这里是入队之后才发现的迟到判定,
-        // 不能再用同一处把关。cancelled 是终态,不能被下面的 reviveIncarnation/handoffIncarnation
-        // 经 reopenTaskForContinuation → reviveTask 复活成 running——那样会让已经明确要求
-        // 终止的 task 又"activate"出一个新化身。同时"send_to_worker 投递永不因状态失败"
+        // 不能再用同一处把关。closed 是唯一终态,不能被下面的 reviveIncarnation/handoffIncarnation
+        // 复活成 running——那样会让已经明确要求终止的 task 又"activate"出一个新化身。
+        // 同时"send_to_worker 投递永不因状态失败"
         // 是调用方(inbox.flush)的既有契约,消息不能静默消失:丢弃这条并记 dead-letter 事件,
         // 不重新抛出(抛出会砸向早已异步返回的 sendToWorker 调用方,变成没人处理的 rejection)。
-        if (worker.task.status === 'cancelled') {
+        if (worker.task.status === 'closed') {
           await this.appendEvent(workerId, curSeq, 'state_changed', {
             kind: 'dead_letter',
             reason: 'task_cancelled',
@@ -4928,7 +4961,10 @@ export class WorkerHarness {
         } catch {
           probe = 'failed'
         }
-        if (probe === 'exited' || (observed.mode === 'default' && probe === 'idle')) {
+        if (observed.mode === 'default' && (probe === 'exited' || probe === 'idle')) {
+          // default 巡检只盯 running 主线:idle/exited 走生命周期状态同步,不造 due。
+          // periodic_report 不在此列(协议 §6.3:覆盖 running 与 halted),probe 结果
+          // 不能吞掉它的到期汇报。
           await this.updateSupervision(found.managerKey, workerId, observed, now)
           return { handle, stateToSync: probe }
         }
@@ -5055,6 +5091,7 @@ export class WorkerHarness {
     try {
       delivery = await this.appendEventAwaitingDelivery(h.worker_id, h.seq, 'state_changed', {
         to: 'running' satisfies WorkerContractState,
+        source: 'liveness_stall',
         ...(text ? { text } : {}),
       })
     } catch (err) {
@@ -5094,6 +5131,14 @@ export class WorkerHarness {
       if (isLegacyIncarnation(mainline)) {
         // Imported legacy records are terminal; a malformed non-terminal one must not probe a
         // nonexistent adapter or mutate the historical record during startup reconciliation.
+        return 'unchanged'
+      }
+      // 幂等短路 2(2026-08-31 状态机修正):halted 任务不再参与"判死"。判死的对象是
+      // "台账说非终态、却没有证据证明还活着"的 worker;而 halted + 化身 exited 是一份
+      // 完整一致的停止记录——无论是正常停(turn_end/worker_finalized,等 manager 处置)
+      // 还是已记录的崩溃(crashed,recovery notice 已落),处置责任都在 manager,
+      // 重启对账不得重复判定、重复打扰。
+      if (worker.task.status === 'halted' && mainline.state === 'exited') {
         return 'unchanged'
       }
 
@@ -5143,7 +5188,7 @@ export class WorkerHarness {
     const message = 'agent restart: execution context lost for agent-native system task'
     const failed = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
-      const nextTask = transitionTaskTo(prev.task, 'failed', { error: message, now })
+      const nextTask = transitionTaskTo(prev.task, 'closed', { now, closed: { by: 'system', note: message } })
       const supervision = supervisionAfterMainlineTransition(prev.supervision, nextTask.status, 'exited', 0, now)
       return { ...prev, task: nextTask, ...(supervision ? { supervision } : {}), updated_at: now }
     })
@@ -5157,9 +5202,10 @@ export class WorkerHarness {
   }
 
   /**
-   * reconcileOnStartup 判死分支:落 failed(ended_reason='crashed')+ exited 事件。三种判死
+   * reconcileOnStartup 判死分支:落 halted(crashed)+ exited 事件。三种判死
    * 场景(adapter 报 exited / adapter 未注册 / adapter.state() 抛错)共用同一段收尾——三者
-   * 语义上都是"至此已经没有任何证据证明这个非终态 worker 还活着"。
+   * 语义上都是"至此已经没有任何证据证明这个非终态 worker 还活着"。任务不落终态:
+   * "载体死了"是事实,"任务失败"是判断,由 manager 处置落定。
    */
   private async markCrashed(
     managerKey: ManagerKey,
@@ -5171,7 +5217,10 @@ export class WorkerHarness {
     const crashed = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const current = findIncarnation(prev, mainline.impl, mainline.seq)
-      const nextTask = transitionTaskTo(prev.task, 'failed', { error: detailReason, now })
+      const nextTask = transitionTaskTo(prev.task, 'halted', {
+        now,
+        halt: { halted_at: now, halt_reason: 'crashed', detail: detailReason },
+      })
       const incarnations = patchIncarnationBySeq(prev.incarnations, mainline.impl, mainline.seq, {
         state: 'exited',
         ended_at: now,
@@ -5373,7 +5422,7 @@ export class WorkerHarness {
       // Waiting for the worker lock or ledger must never turn into a late redirect.
       this.assertSynchronousInputDeadline(deadlineAt, deliveryId)
       if (!found) throw new WorkerNotFoundError(workerId)
-      if (found.worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
+      if (found.worker.task.status === 'closed') throw new TaskCancelledError(workerId)
       const current = requireMainlineIncarnation(found.worker)
       if (
         !isExecutableIncarnation(current) ||
@@ -5424,7 +5473,7 @@ export class WorkerHarness {
     }
     // `cancelAfterVerifiedStop` / `supersedeAfterVerifiedStop` writes ledger truth before the
     // operation becomes succeeded, so restart reconciliation can complete either boundary.
-    if (operation.kind === 'stop' && !handoffSupersede && found?.worker.task.status === 'cancelled') {
+    if (operation.kind === 'stop' && !handoffSupersede && found?.worker.task.status === 'closed') {
       return this.settleControlOperation(current, 'succeeded', 'task was already cancelled after verified stop')
     }
     const incarnation = found?.worker.incarnations.find((item) => item.incarnation_id === operation.incarnation_id)
@@ -5493,7 +5542,7 @@ export class WorkerHarness {
       if (!previous || isTerminalStatus(previous.task.status)) return previous
       const mainline = mainlineIncarnation(previous)
       if (!mainline || mainline.incarnation_id !== incarnation.incarnation_id) return previous
-      const task = applyStatusTransition(previous.task, 'cancelled', { now })
+      const task = applyStatusTransition(previous.task, 'closed', { now, closed: { by: 'manager_stop' } })
       const incarnations = previous.incarnations.map((item) => {
         if (item.forked_from !== undefined && isExecutableIncarnation(item) && item.state !== 'exited') {
           return { ...item, state: 'exited' as const, ended_at: now, ended_reason: 'killed' as const }
@@ -5561,6 +5610,35 @@ export class WorkerHarness {
       this.deps.now(),
       detail,
     )
+    if (operation.kind === 'stop' && status === 'unknown') {
+      // 协议 §5.2:停止核验失败(unknown)→ 任务落 halted 并注明停止未核验。
+      // 不假装已停止,也不宣称失败;operation_settled 事件(下方投递)会唤醒 manager 处置。
+      try {
+        // 名下仍有 running bg entity 时任务按 §5.2 映射保持 running(工作未停),不落 halted。
+        const bgRunning = (await this.deps.hasRunningBg?.(operation.worker_id)) ?? false
+        if (!bgRunning) {
+          const now = this.deps.now()
+          const halt: TaskHaltEvidence = {
+            halted_at: now,
+            halt_reason: 'unknown',
+            stop_unverified: true,
+            detail,
+          }
+          await this.deps.ledger.upsertWorker(operation.manager_key, operation.worker_id, (prev) => {
+            if (!prev || isTerminalStatus(prev.task.status)) return prev
+            if (prev.task.status === 'halted' && prev.task.halt?.stop_unverified) return prev // 幂等
+            if (prev.task.status === 'halted') {
+              return { ...prev, task: { ...prev.task, halt }, updated_at: now }
+            }
+            const task = applyStatusTransition(prev.task, 'halted', { now, halt })
+            return { ...prev, task, updated_at: now }
+          })
+        }
+      } catch (error) {
+        // 结算路径的兜底失败(含 bg registry 不可用)只记日志,不反噬 control operation 的结算语义。
+        console.error(`[WorkerHarness] stop-unknown task halt failed for ${operation.worker_id}:`, error)
+      }
+    }
     const delivery = this.deliverControlOperationNotifications(settled.worker_id)
     // Without a Manager operation router this is only the durable audit append. Finish it before
     // returning the control result; otherwise a short-lived harness can lose the audit record.
@@ -6001,21 +6079,47 @@ export class WorkerHarness {
         return
       }
 
-      let desired: TaskStatus
-      if (external === 'running') desired = 'running'
-      else if (external === 'idle') {
-        const bgRunning = (await this.deps.hasRunningBg?.(h.worker_id)) ?? false
-        desired = bgRunning || this.hasPendingBgNotification(h.worker_id) ? 'running' : 'waiting_input'
-      } else {
-        desired = taskStatusFromIncarnation('exited', report?.endReason)
-      }
       const now = this.deps.now()
+      let desired: TaskStatus
+      let halt: TaskHaltEvidence | undefined
+      if (external === 'running') {
+        desired = 'running'
+      } else if (external === 'idle') {
+        const bgRunning = (await this.deps.hasRunningBg?.(h.worker_id)) ?? false
+        desired = bgRunning || this.hasPendingBgNotification(h.worker_id) ? 'running' : 'halted'
+        halt = { halted_at: now, halt_reason: 'turn_end' }
+      } else {
+        // 2026-08-31 状态机修正:化身退出落 halted(粗分类停因进 evidence);manager 发起的
+        // 停止(killed)事实成立即 closed,stop operation 的核验判据依赖这一点。
+        const reason = report?.endReason
+        if (reason === 'killed') {
+          desired = 'closed'
+        } else if (reason === 'superseded') {
+          desired = 'running' // 占位:任务状态由化身链新成员决定(与既有语义一致)
+        } else {
+          desired = 'halted'
+          halt = {
+            halted_at: now,
+            halt_reason: reason === 'crashed' ? 'crashed' : reason === 'pre_migration' ? 'pre_migration' : reason === undefined ? 'unknown' : 'turn_end',
+            ...(reason === 'failed' || reason === 'crashed' || reason === undefined ? { detail: reason ?? 'exited_without_end_reason' } : {}),
+          }
+        }
+      }
       const committed = await this.deps.ledger.upsertWorker(managerKey, h.worker_id, (prev) => {
         if (!prev) return undefined
-        const task = prev.task.status === desired ? prev.task : applyStatusTransition(prev.task, desired, {
-          now,
-          ...(desired === 'failed' ? { error: report?.endReason ?? 'CLI incarnation exited' } : {}),
-        })
+        let task: LedgerWorker['task']
+        if (prev.task.status === desired) {
+          // 同为 halted:仅当停因升级时覆盖(方向性,见 haltSeverity)。
+          task = desired === 'halted' && halt && haltSeverity(halt.halt_reason) > haltSeverity(prev.task.halt?.halt_reason ?? 'turn_end')
+            ? { ...prev.task, halt }
+            : prev.task
+        } else {
+          task = applyStatusTransition(prev.task, desired, {
+            now,
+            ...(desired === 'halted' && halt ? { halt } : {}),
+            ...(desired === 'closed' ? { closed: { by: 'manager_stop' as const } } : {}),
+          })
+        }
         const incarnations = patchIncarnationBySeq(prev.incarnations, h.impl, h.seq, {
           state: external,
           session_ref: h.session_ref || target.session_ref,
@@ -6149,7 +6253,6 @@ export class WorkerHarness {
 
       // An idle builtin incarnation with an owned shell is still executing work:
       // end_turn is its wait primitive, not task completion.
-      const waitingInput = state === 'idle' ? true : undefined
       const pendingStop = state === 'exited' && (await this.controlOperationStore.active(h.worker_id)).some(
         (operation) => operation.kind === 'stop' && operation.incarnation_id === target.incarnation_id,
       )
@@ -6158,11 +6261,47 @@ export class WorkerHarness {
       const preserveTaskForStop = state === 'exited' && (
         pendingStop || unverifiedStop
       )
+      // 2026-08-31 状态机修正:化身停止(idle/exited)一律落 halted,停因进 evidence——
+      // ended_reason 细节留在化身记录上;closed 只由 manager 处置产生(killed);
+      // superseded 由化身链新成员决定任务状态。
+      // finish_task(exit + summary)归 worker_finalized,自报 outcome/summary 进 evidence——
+      // 是 worker 的自称,不是任务终态。
+      const selfReport = state === 'exited' && report?.summary !== undefined
+        ? {
+          outcome: (endReason === 'failed' ? 'failed' : 'completed') as 'completed' | 'failed',
+          summary: report.summary,
+        }
+        : undefined
+      const halt: TaskHaltEvidence | undefined = state === 'idle'
+        ? { halted_at: now, halt_reason: 'turn_end' }
+        : state === 'exited'
+          ? {
+            halted_at: now,
+            halt_reason: selfReport
+              ? 'worker_finalized'
+              : endReason === 'crashed'
+                ? 'crashed'
+                : endReason === 'pre_migration'
+                  ? 'pre_migration'
+                  : endReason === undefined
+                    ? 'unknown'
+                    : 'turn_end',
+            ...(selfReport ? { worker_self_report: selfReport } : {}),
+            ...(endReason === 'crashed' || endReason === 'failed' ? { detail: endReason }
+              : endReason === undefined ? { detail: 'exited_without_end_reason' } : {}),
+          }
+          : undefined
       const nextStatus: TaskStatus = preserveTaskForStop
         ? worker.task.status
-        : state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
+        : state === 'running'
           ? 'running'
-          : taskStatusFromIncarnation(state, endReason, waitingInput)
+          : state === 'exited' && endReason === 'superseded'
+            ? 'running' // 占位:任务状态由化身链新成员决定(与既有语义一致)
+            : state === 'exited' && endReason === 'killed'
+              ? 'closed' // manager 发起的停止,事实成立即关闭
+              : state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
+                ? 'running'
+                : 'halted'
       // CLI 从 `waiting_action` 转回 `waiting_text` 时，公开协议层仍是 `idle`。
       // completionSource 才是回合边界的权威证据，不能因投影状态相同而过滤。
       const shouldCreateTurn = report?.completionSource !== undefined
@@ -6186,9 +6325,23 @@ export class WorkerHarness {
         // 应保持 task running）。只有两者都已经一致时才是无操作。
         const current = findIncarnation(prev, h.impl, h.seq)
         if (nextStatus === prev.task.status && current?.state === state) return prev
-        const nextTask = nextStatus === prev.task.status
-          ? prev.task
-          : applyStatusTransition(prev.task, nextStatus, { now })
+        let nextTask: LedgerWorker['task']
+        if (nextStatus !== prev.task.status) {
+          nextTask = applyStatusTransition(prev.task, nextStatus, {
+            now,
+            ...(nextStatus === 'halted' && halt ? { halt } : {}),
+            ...(nextStatus === 'closed' ? { closed: { by: 'manager_stop' as const } } : {}),
+          })
+        } else if (
+          nextStatus === 'halted' && halt &&
+          haltSeverity(halt.halt_reason) > haltSeverity(prev.task.halt?.halt_reason ?? 'turn_end')
+        ) {
+          // 同为 halted 但停因升级(如 turn_end 后载体又 crashed):用更严重的新 evidence
+          // 覆盖,不让台账停留在更良性的旧停因上;降级方向(良性覆盖严重)一律拒绝。
+          nextTask = { ...prev.task, halt }
+        } else {
+          nextTask = prev.task
+        }
         // session_ref 现读现取,同上面 fork 分支的注释。
         const incarnations = patchIncarnationBySeq(
           prev.incarnations,
@@ -6543,7 +6696,7 @@ function ledgerHandoffEvidence(worker: LedgerWorker, source: Incarnation): Hando
     {
       source: 'ledger',
       reference: `incarnation:${sourceId}:outcome`,
-      summary: `Source outcome: ${worker.task.outcome ?? source.ended_reason ?? 'unknown'}`,
+      summary: `Source outcome: ${worker.task.halt?.worker_self_report?.summary ?? worker.task.halt?.detail ?? source.ended_reason ?? worker.task.halt?.halt_reason ?? 'unknown'}`,
     },
     ...(worker.legacy_source?.kind === 'ambiguous_v3_ledger'
       ? worker.legacy_source.original_incarnations.map((incarnation, index) => ({
@@ -6720,22 +6873,17 @@ function patchIncarnationBySeq(
 }
 
 /**
- * §5.3 化身接续:把 task 的状态与派生字段重新置回 running,供接续产出的新化身使用。
+ * §5.3 化身接续:把 task 的状态置回 running,供接续产出的新化身使用。
  *
- * 终态化身之上继续开一个新化身是显式的"延续"动作,不是 task-status.ts 描述的线性状态机
- * 内的一次迁移——VALID_TRANSITIONS 里终态(completed/failed/cancelled)无出边是"同一次
- * 尝试内不允许原地复活"的不变量。task 已经终态时,不由 harness 自行拼接字段绕开状态机,
- * 而是走 task-status.ts 官方暴露的受控出口 `reviveTask`(protocol-agent-v3 §5.2"接续
- * 例外")——状态机模块自己承载这条例外,harness 只是调用方。
+ * 2026-08-31 状态机修正后,halted→running 是普通续办边(applyStatusTransition 正常校验,
+ * 顺带清掉上一次停止的 halt evidence);唯一终态 closed 没有"接续复活"出边——send_to_worker
+ * 入队前的把关已对 closed 硬拒绝,走不到这里。
  *
- * task 尚未终态时分两种情况:已经是 running 的(如台账的终态回调还没追上 adapter 的真实
- * 状态,接续发生前 task.status 本就还是 running)不需要任何迁移,直接原样返回(此时按
- * task-status.ts 维护的不变量,completed_at/error 本就已经是未设置状态,无需重置);
- * 其余非终态(queued/waiting_input)走 applyStatusTransition 的正常校验路径迁到 running。
+ * 已经是 running 的(如台账的终态回调还没追上 adapter 的真实状态,接续发生前 task.status
+ * 本就还是 running)不需要任何迁移,直接原样返回。
  */
 function reopenTaskForContinuation(task: LedgerWorker['task'], now: string): LedgerWorker['task'] {
   if (task.status === 'running') return task
-  if (isTerminalStatus(task.status)) return reviveTask(task, { now })
   return applyStatusTransition(task, 'running', { now })
 }
 
@@ -6752,7 +6900,7 @@ function reopenTaskForContinuation(task: LedgerWorker['task'], now: string): Led
 function transitionTaskTo(
   task: LedgerWorker['task'],
   to: TaskStatus,
-  opts: { error?: string; now: string }
+  opts: { now: string; halt?: TaskHaltEvidence; closed?: { by: 'manager_stop' | 'admin' | 'system' | 'migration'; note?: string } }
 ): LedgerWorker['task'] {
   if (canTransition(task.status, to)) {
     return applyStatusTransition(task, to, opts)

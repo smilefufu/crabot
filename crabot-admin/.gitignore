@@ -28,3 +28,4 @@ coverage/
 # Data
 data/
 *.db
+web/node_modules

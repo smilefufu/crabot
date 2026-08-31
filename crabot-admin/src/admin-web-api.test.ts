@@ -1671,7 +1671,7 @@ describe('Admin Web API', () => {
 
       await makeWebRequest(
         TEST_WEB_PORT,
-        '/api/agent/workers?status=running&status=waiting_input&manager_key=telegram-001%3A%3Aprivate-42'
+        '/api/agent/workers?status=running&status=halted&manager_key=telegram-001%3A%3Aprivate-42'
           + '&impl=codex&q=Minecraft&include_terminal=true&include_legacy=true'
           + '&start=2026-07-01T00%3A00%3A00.000Z&end=2026-07-31T00%3A00%3A00.000Z&page=2&page_size=5',
         'GET',
@@ -1680,7 +1680,7 @@ describe('Admin Web API', () => {
       )
 
       expect(spy).toHaveBeenCalledWith('list_workers_admin', {
-        status: ['running', 'waiting_input'],
+        status: ['running', 'halted'],
         manager_key: 'telegram-001::private-42',
         impl: 'codex',
         q: 'Minecraft',

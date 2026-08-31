@@ -76,7 +76,7 @@ function triggerText(episode: ManagerEpisodeTrace): string {
 
 function workerStateLabel(status: string): string {
   const labels: Record<string, string> = {
-    queued: '排队', running: '执行中', waiting_input: '等待输入',
+    queued: '排队', running: '执行中', halted: '已停止待处置', closed: '已关闭', waiting_input: '等输入',
     completed: '已完成', failed: '失败', cancelled: '已取消',
   }
   return labels[status] ?? status

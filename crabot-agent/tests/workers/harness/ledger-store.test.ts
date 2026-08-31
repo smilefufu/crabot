@@ -204,6 +204,41 @@ describe('LedgerStore', () => {
     await expect(corrupt.getLedger(key)).rejects.toThrow('invalid legacy worker')
   })
 
+  it('2026-08-31 状态迁移:旧 6 态台账读取时归一为新 4 态并回写', async () => {
+    const key = 'test::status-migration' as ManagerKey
+    const at = '2026-08-20T00:00:00.000Z'
+    const mk = (id: string, status: string): Partial<LedgerWorker> => ({
+      manager_key: key,
+      task: { id, title: 't', status: status as never, created_at: at },
+      incarnations: [{ seq: 1, impl: 'builtin', state: 'exited', workspace: '/tmp/ws', started_at: at, ended_at: at, ended_reason: 'completed', session_ref: 'r1' }],
+    })
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(join(dir, managerKeyToFilename(key)), JSON.stringify({
+      manager_key: key,
+      workers: [
+        { ...makeWorker('w-old-waiting', mk('w-old-waiting', 'waiting_input')) },
+        { ...makeWorker('w-old-completed', mk('w-old-completed', 'completed')) },
+        { ...makeWorker('w-old-cancelled', mk('w-old-cancelled', 'cancelled')) },
+      ],
+    }))
+
+    const ledger = await store.getLedger(key)
+    const byId = new Map(ledger.workers.map((w) => [w.worker_id, w]))
+    // waiting_input → halted(turn_end),evidence 时间戳取化身 ended_at
+    expect(byId.get('w-old-waiting')?.task.status).toBe('halted')
+    expect(byId.get('w-old-waiting')?.task.halt).toMatchObject({ halted_at: at, halt_reason: 'turn_end' })
+    // 旧终态 → closed(by migration),旧值记入 note
+    expect(byId.get('w-old-completed')?.task.status).toBe('closed')
+    expect(byId.get('w-old-completed')?.task.closed).toMatchObject({ at: at, by: 'migration', note: expect.stringContaining('completed') })
+    expect(byId.get('w-old-cancelled')?.task.status).toBe('closed')
+
+    // 迁移结果落盘:第二次读取(新实例)幂等,不再变化
+    const persisted = JSON.parse(await fs.readFile(join(dir, managerKeyToFilename(key)), 'utf8'))
+    expect(persisted.workers.map((w: LedgerWorker) => w.task.status).sort()).toEqual(['closed', 'closed', 'halted'])
+    const reread = await new LedgerStore(dir).getLedger(key)
+    expect(reread).toEqual(ledger)
+  })
+
   it('同 seq 的 numeric fork 歧义会原子归档 worker，不让整份台账不可读', async () => {
     const key = 'test::ambiguous-v3' as ManagerKey
     const at = '2026-08-20T00:00:00.000Z'
@@ -224,7 +259,7 @@ describe('LedgerStore', () => {
 
     const ledger = await store.getLedger(key)
     const archived = ledger.workers[0]
-    expect(archived.task.status).toBe('failed')
+    expect(archived.task.status).toBe('halted')
     expect(archived.incarnations).toEqual([expect.objectContaining({
       impl: 'legacy',
       state: 'exited',
@@ -238,7 +273,7 @@ describe('LedgerStore', () => {
 
     const persisted = JSON.parse(await fs.readFile(join(dir, managerKeyToFilename(key)), 'utf8'))
     expect(persisted.workers[0]).toMatchObject({
-      task: { status: 'failed' },
+      task: { status: 'halted' },
       legacy_source: { kind: 'ambiguous_v3_ledger', original_incarnations: originalIncarnations },
     })
     await expect(new LedgerStore(dir).getLedger(key)).resolves.toEqual(ledger)

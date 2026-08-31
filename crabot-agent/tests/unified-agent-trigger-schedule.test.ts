@@ -116,9 +116,9 @@ describe('trigger_schedule memory_maintenance system task', () => {
 
     await waitUntil(() => fixture.workers.get(result.task_id!)?.task.status === 'running')
     maintenance.resolve()
-    await waitUntil(() => fixture.workers.get(result.task_id!)?.task.status === 'completed')
+    await waitUntil(() => fixture.workers.get(result.task_id!)?.task.status === 'closed')
 
-    expect(fixture.writes.map((worker) => worker.task.status)).toEqual(['queued', 'running', 'completed'])
+    expect(fixture.writes.map((worker) => worker.task.status)).toEqual(['queued', 'running', 'closed'])
     expect(fixture.workers.get(result.task_id!)?.incarnations).toEqual([])
     expect(fixture.publish).toHaveBeenNthCalledWith(
       1,
@@ -134,7 +134,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
     expect(fixture.publish).toHaveBeenNthCalledWith(
       2,
       'agent.task_status_changed',
-      expect.objectContaining({ old_status: 'running', new_status: 'completed' }),
+      expect.objectContaining({ old_status: 'running', new_status: 'closed' }),
     )
   })
 
@@ -151,14 +151,13 @@ describe('trigger_schedule memory_maintenance system task', () => {
       is_builtin: true,
     })
 
-    await waitUntil(() => fixture.workers.get(result.task_id!)?.task.status === 'failed')
+    await waitUntil(() => fixture.workers.get(result.task_id!)?.task.status === 'closed')
     const task = fixture.workers.get(result.task_id!)!.task
-    expect(task.error).toBe('memory unavailable')
-    expect(task.outcome).toBe('记忆维护失败：memory unavailable')
-    expect(fixture.writes.map((worker) => worker.task.status)).toEqual(['queued', 'running', 'failed'])
+    expect(task.closed?.note).toBe('记忆维护失败：memory unavailable')
+    expect(fixture.writes.map((worker) => worker.task.status)).toEqual(['queued', 'running', 'closed'])
     expect(fixture.publish).toHaveBeenLastCalledWith(
       'agent.task_status_changed',
-      expect.objectContaining({ old_status: 'running', new_status: 'failed' }),
+      expect.objectContaining({ old_status: 'running', new_status: 'closed' }),
     )
     expect(errorSpy).toHaveBeenCalled()
     errorSpy.mockRestore()
