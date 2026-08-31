@@ -160,12 +160,12 @@ describe('agent.task_status_changed 订阅（protocol-agent-v3 §9.2）', () => 
     await internals.onEvent(
       statusEvent({ workerId: 'w-admin-1', taskId: 'task-admin-1', from: 'queued', to: 'running' })
     )
-    workerDetail = { ...ADMIN_CHAT_WORKER, task: { ...ADMIN_CHAT_WORKER.task, status: 'waiting_input' } }
+    workerDetail = { ...ADMIN_CHAT_WORKER, task: { ...ADMIN_CHAT_WORKER.task, status: 'halted' } }
     await internals.onEvent(
-      statusEvent({ workerId: 'w-admin-1', taskId: 'task-admin-1', from: 'running', to: 'waiting_input' })
+      statusEvent({ workerId: 'w-admin-1', taskId: 'task-admin-1', from: 'running', to: 'halted' })
     )
 
-    expect(pushed.map((p) => p.status)).toEqual(['running', 'waiting_input'])
+    expect(pushed.map((p) => p.status)).toEqual(['running', 'halted'])
   })
 
   it('别的渠道的任务不往 Master Chat 推（判据是结果回报目标）', async () => {

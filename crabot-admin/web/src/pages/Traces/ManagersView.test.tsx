@@ -138,7 +138,7 @@ describe('ManagerDetail', () => {
         {
           trace_id: 'ep-progress', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:01:00.000Z', status: 'completed',
           trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
-          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'halted' },
         },
         {
           trace_id: 'ep-parent', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:00:00.000Z', status: 'completed',
@@ -164,7 +164,7 @@ describe('ManagerDetail', () => {
         {
           trace_id: 'ep-late-reply', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:10:00.000Z', status: 'completed',
           trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
-          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'halted' },
           reply_excerpt: '该执行器当前无法投递，已请求中断。',
           actions: [{ kind: 'other', label: '请求中断：部署 V6', worker_id: 'w-1' }],
           causal_parent: {
@@ -200,7 +200,7 @@ describe('ManagerDetail', () => {
         {
           trace_id: 'ep-progress-latest', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:03:00.000Z', status: 'completed',
           trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
-          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'halted' },
         },
         {
           trace_id: 'ep-progress-running', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:02:00.000Z', status: 'completed',
@@ -239,7 +239,7 @@ describe('ManagerDetail', () => {
         {
           trace_id: 'ep-progress-latest', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:03:00.000Z', status: 'completed',
           trigger: { type: 'worker_event', summary: 'worker event', source: 'worker:w-1' }, spans: [], spawned_worker_ids: [],
-          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'waiting_input' },
+          worker_ref: { worker_id: 'w-1', title: '部署 V6', state_to: 'halted' },
         },
         {
           trace_id: 'ep-progress-message', manager_key: 'wechat::sess-1', started_at: '2026-08-01T10:02:00.000Z', status: 'completed',

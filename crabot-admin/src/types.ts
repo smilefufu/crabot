@@ -1898,10 +1898,8 @@ export interface ChatSendMessageResult {
 export type AgentTaskStatus =
   | 'queued'
   | 'running'
-  | 'waiting_input'
-  | 'completed'
-  | 'failed'
-  | 'cancelled'
+  | 'halted'
+  | 'closed'
 
 /** §8.3 `get_worker_detail` 回来的台账条目里，admin 状态卡实际用到的那几个字段。 */
 export interface LedgerWorkerBrief {
