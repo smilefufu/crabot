@@ -346,7 +346,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     }).nativeActivityStore
 
     fake.emitStateChange(sourceHandle, 'exited')
-    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'halted')
 
     await harness.sendToWorker(worker.worker_id, '继续执行')
     const [revived] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
@@ -405,11 +405,11 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     const worker = await harness.spawnWorker(spawnParams())
     const h: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(h, 'exited')
-    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'halted')
 
     await harness.sendToWorker(worker.worker_id, 'continue')
     const [settled] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
-    expect(settled.task.status).toBe('completed')
+    expect(settled.task.status).toBe('halted')
     expect(settled.incarnations[1]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
   })
 
@@ -433,7 +433,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     adaptersMap.set('builtin', fake)
     const worker = await harness.spawnWorker(spawnParams())
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
-    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'halted')
     const settlements: string[] = []
 
     await harness.sendToWorker(worker.worker_id, 'durable bg', {
@@ -479,7 +479,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     adaptersMap.set('builtin', fake)
     const worker = await harness.spawnWorker(spawnParams())
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
-    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'halted')
     const settlements: string[] = []
 
     await harness.sendToWorker(worker.worker_id, 'durable terminal retry', {
@@ -516,7 +516,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     adaptersMap.set('builtin', fake)
     const worker = await harness.spawnWorker(spawnParams())
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
-    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'halted')
     const settlements: string[] = []
 
     await harness.sendToWorker(worker.worker_id, 'durable bg', {
@@ -645,7 +645,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     fake.emitStateChange(h, 'exited', 'failed')
     await waitUntil(async () => {
       const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
-      return w.task.status === 'failed'
+      return w.task.status === 'halted'
     })
 
     await expect(harness.sendToWorker(worker.worker_id, '再试一次')).resolves.toBeUndefined()
@@ -761,7 +761,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
 
     await harness.sendToWorker(worker.worker_id, 'continue')
     const [settled] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
-    expect(settled.task.status).toBe('completed')
+    expect(settled.task.status).toBe('halted')
     expect(settled.incarnations[settled.incarnations.length - 1]).toMatchObject({
       impl: 'claude-code',
       state: 'exited',
@@ -897,7 +897,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     fake.emitStateChange(h, 'exited', 'failed')
     await waitUntil(async () => {
       const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
-      return w.task.status === 'failed'
+      return w.task.status === 'halted'
     })
 
     await expect(harness.sendToWorker(worker.worker_id, '接着把剩下的做完')).resolves.toBeUndefined()
@@ -1672,7 +1672,7 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
     await harness.killWorker(worker.worker_id, 'M2 PoC')
 
     const afterKill = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
-    expect(afterKill.task.status).toBe('cancelled')
+    expect(afterKill.task.status).toBe('closed')
 
     // 放行第一条，让它的 sendInput 正常返回，flush 的 while 循环继续处理队列里的第二条。
     releaseFirst()
@@ -1681,7 +1681,7 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
 
     const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     // 核心断言：task 没有被第二条残留消息的透明接续复活成 running。
-    expect(after.task.status).toBe('cancelled')
+    expect(after.task.status).toBe('closed')
     expect(fake.resumeCalls).toHaveLength(0)
 
     // 残留条目没有静默消失：有 dead-letter 记录。
@@ -1713,7 +1713,7 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
 
     await harness.killWorker(worker.worker_id, 'M2 PoC 2')
     const afterKill = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
-    expect(afterKill.task.status).toBe('cancelled')
+    expect(afterKill.task.status).toBe('closed')
 
     // 放行卡住的 sendInput，让它抛出 WorkerExitedError（模拟 adapter 发现化身已经真的没了）
     // —— deliver() 的 catch 分支会把它转入 continueTerminalWorker。这条条目在 kill 发生时
@@ -1723,7 +1723,7 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
     await send
 
     const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
-    expect(after.task.status).toBe('cancelled') // 核心断言：没有被复活成 running
+    expect(after.task.status).toBe('closed') // 核心断言：没有被复活成 running
     expect(fake.resumeCalls).toHaveLength(0)
 
     const deadLetterEvents = events.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
@@ -1861,7 +1861,7 @@ describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫
       state: 'exited',
       ended_reason: 'completed',
     })
-    expect(settled.task.status).toBe('completed')
+    expect(settled.task.status).toBe('halted')
   })
 })
 
@@ -2048,7 +2048,7 @@ describe('WorkerHarness.switchWorkerImpl — 终审 PoC 回归：M3 cancelled �
     await harness.killWorker(worker.worker_id, '用户明确终止')
 
     const beforeSwitch = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
-    expect(beforeSwitch.task.status).toBe('cancelled')
+    expect(beforeSwitch.task.status).toBe('closed')
     events.length = 0
 
     // 主线化身已 exited（killed）→ handoffIncarnation 会跳过 kill 段，直接 provision+spawn
@@ -2063,7 +2063,7 @@ describe('WorkerHarness.switchWorkerImpl — 终审 PoC 回归：M3 cancelled �
 
     // 台账原样：task 仍 cancelled，没有多出新化身。
     const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
-    expect(after.task.status).toBe('cancelled')
+    expect(after.task.status).toBe('closed')
     expect(after.incarnations).toHaveLength(1)
 
     // 没有产生 handoff_started / superseded / spawned 事件——pre-flight 在写 HANDOFF.md 和
@@ -2287,11 +2287,11 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
     await waitUntil(async () => {
       const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
-      return w.task.status === 'completed' && events.some((e) => e.kind === 'state_changed' && e.task_status === 'completed')
+      return w.task.status === 'halted' && events.some((e) => e.kind === 'state_changed' && e.task_status === 'halted')
     })
     // 终态那一跳自己也带了状态(processStateChange 主线分支)
     const exitedStateEvent = events.filter((e) => e.kind === 'state_changed').pop()!
-    expect(exitedStateEvent.task_status).toBe('completed')
+    expect(exitedStateEvent.task_status).toBe('halted')
     events.length = 0
 
     await harness.sendToWorker(worker.worker_id, '还有件事要办')
@@ -2359,7 +2359,7 @@ describe('legacy incarnation guardrails', () => {
     await ledger.importLegacyWorker(managerKey, {
       worker_id: workerId,
       manager_key: managerKey,
-      task: { id: workerId, title: 'legacy', status: overrides.status ?? 'completed', created_at: at },
+      task: { id: workerId, title: 'legacy', status: overrides.status ?? 'halted', created_at: at },
       origin: { trigger_type: 'system' },
       report_to: { channel_id: 'test', session_id: 'legacy-session' },
       incarnations: [{ seq: 1, impl: 'legacy', state: 'exited', workspace: join(dataDir, 'workspace'), started_at: at, ended_at: at, ended_reason: overrides.endedReason ?? 'completed' }],
@@ -2526,8 +2526,8 @@ describe('legacy incarnation guardrails', () => {
     })
     const target = new FakeAdapter({ implId: 'builtin' })
     adaptersMap.set('builtin', target)
-    await addLegacy(ledger, 'w-legacy-failed', { status: 'failed', endedReason: 'failed' })
-    await addLegacy(ledger, 'w-legacy-pre-migration', { status: 'failed', endedReason: 'pre_migration' })
+    await addLegacy(ledger, 'w-legacy-failed', { status: 'halted', endedReason: 'failed' })
+    await addLegacy(ledger, 'w-legacy-pre-migration', { status: 'halted', endedReason: 'pre_migration' })
 
     await harness.sendToWorker('w-legacy-failed', 'continue failed', {
       legacyContinuationAuth: continuationAuth(),
@@ -2545,11 +2545,11 @@ describe('legacy incarnation guardrails', () => {
     const { harness, ledger, adaptersMap } = await makeHarness({
       validateLegacyContinuationAuth: async () => true,
     })
-    await addLegacy(ledger, 'w-legacy-cancelled', { status: 'cancelled', endedReason: 'killed' })
+    await addLegacy(ledger, 'w-legacy-closed', { status: 'closed', endedReason: 'killed' })
     const target = new FakeAdapter({ implId: 'builtin' })
     adaptersMap.set('builtin', target)
 
-    await expect(harness.sendToWorker('w-legacy-cancelled', 'continue', {
+    await expect(harness.sendToWorker('w-legacy-closed', 'continue', {
       legacyContinuationAuth: continuationAuth(),
     })).rejects.toBeInstanceOf(TaskCancelledError)
     expect(target.preflightProvisionCalls).toHaveLength(0)
@@ -2577,13 +2577,13 @@ describe('legacy incarnation guardrails', () => {
     await expect(fs.stat(join(workersDir, 'w-legacy-preflight', 'context.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(fs.stat(join(workersDir, 'w-legacy-preflight', 'handoffs'))).rejects.toMatchObject({ code: 'ENOENT' })
     const worker = (await ledger.findWorker('w-legacy-preflight'))!.worker
-    expect(worker.task.status).toBe('completed')
+    expect(worker.task.status).toBe('halted')
     expect(worker.incarnations).toHaveLength(1)
   })
 
   it('startup reconciliation leaves terminal legacy workers unchanged without adapter lookup', async () => {
     const { harness, ledger, adaptersMap } = await makeHarness()
-    await addLegacy(ledger, 'w-legacy-reconcile')
+    await addLegacy(ledger, 'w-legacy-reconcile', { status: 'closed' })
     await expect(harness.reconcileOnStartup()).resolves.toMatchObject({ unchanged: ['w-legacy-reconcile'] })
     expect(adaptersMap.size).toBe(0)
   })

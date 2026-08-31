@@ -305,8 +305,8 @@ function materializeLegacyIncarnations(worker: LedgerWorker): { worker: LedgerWo
           ? worker.task
           : {
             ...worker.task,
-            status: 'closed',
-            closed: { at: archivedAt, by: 'migration', note: 'ambiguous_v3_ledger archived' },
+            status: 'halted',
+            halt: { halted_at: archivedAt, halt_reason: 'pre_migration' },
           },
         incarnations: [{
           incarnation_id: archiveId,

@@ -6212,13 +6212,15 @@ export class WorkerHarness {
           : undefined
       const nextStatus: TaskStatus = preserveTaskForStop
         ? worker.task.status
-        : state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
+        : state === 'running'
           ? 'running'
           : state === 'exited' && endReason === 'superseded'
             ? 'running' // 占位:任务状态由化身链新成员决定(与既有语义一致)
             : state === 'exited' && endReason === 'killed'
               ? 'closed' // manager 发起的停止,事实成立即关闭
-              : 'halted'
+              : state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
+                ? 'running'
+                : 'halted'
       // CLI 从 `waiting_action` 转回 `waiting_text` 时，公开协议层仍是 `idle`。
       // completionSource 才是回合边界的权威证据，不能因投影状态相同而过滤。
       const shouldCreateTurn = report?.completionSource !== undefined
@@ -6603,7 +6605,7 @@ function ledgerHandoffEvidence(worker: LedgerWorker, source: Incarnation): Hando
     {
       source: 'ledger',
       reference: `incarnation:${sourceId}:outcome`,
-      summary: `Source outcome: ${worker.task.halt?.worker_self_report?.summary ?? worker.task.halt?.halt_reason ?? source.ended_reason ?? 'unknown'}`,
+      summary: `Source outcome: ${worker.task.halt?.worker_self_report?.summary ?? worker.task.halt?.detail ?? source.ended_reason ?? worker.task.halt?.halt_reason ?? 'unknown'}`,
     },
     ...(worker.legacy_source?.kind === 'ambiguous_v3_ledger'
       ? worker.legacy_source.original_incarnations.map((incarnation, index) => ({

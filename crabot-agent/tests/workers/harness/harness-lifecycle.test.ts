@@ -456,7 +456,7 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(fake.provisionCalls).toEqual([])
     expect(fake.spawnCalls).toEqual([])
     const [failed] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(failed.task).toMatchObject({ status: 'failed', error: 'context disk error' })
+    expect(failed.task).toMatchObject({ status: 'halted', halt: { halt_reason: 'crashed', detail: 'context disk error' } })
     expect(failed.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'failed' })
     expect(events.find((event) => event.kind === 'exited')?.detail).toMatchObject({
       reason: 'spawn_failed',
@@ -474,7 +474,7 @@ describe('WorkerHarness.spawnWorker', () => {
       },
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
-    expect(worker.task.status).toBe('completed')
+    expect(worker.task.status).toBe('halted')
     expect(worker.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
     expect(events.find((event) => event.kind === 'state_changed')?.detail).toEqual({
       to: 'exited',
@@ -495,7 +495,7 @@ describe('WorkerHarness.spawnWorker', () => {
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
 
-    expect(worker.task.status).toBe('waiting_input')
+    expect(worker.task.status).toBe('halted')
     const turn = await harness.getWorkerTurn(worker.worker_id)
     expect(turn).toMatchObject({
       disposition: { status: 'pending' },
@@ -645,7 +645,7 @@ describe('WorkerHarness.spawnWorker', () => {
       },
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code', prompt: 'original' })
-    expect(worker.task.status).toBe('waiting_input')
+    expect(worker.task.status).toBe('halted')
     expect(worker.incarnations[0].state).toBe('idle')
 
     await harness.sendToWorker(worker.worker_id, 'later')
@@ -743,8 +743,8 @@ describe('WorkerHarness.spawnWorker', () => {
     const listed = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(listed).toHaveLength(1)
     const worker = listed[0]
-    expect(worker.task.status).toBe('failed')
-    expect(worker.task.error).toBe('spawn 炸了')
+    expect(worker.task.status).toBe('halted')
+    expect(worker.task.halt?.detail).toBe('spawn 炸了')
     expect(worker.incarnations[0].state).toBe('exited')
     expect(worker.incarnations[0].ended_reason).toBe('failed')
 
@@ -1366,7 +1366,7 @@ describe('WorkerHarness.handleStateChange', () => {
     const worker = await harness.spawnWorker(spawnParams())
     const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(handle, 'exited', undefined, 'completed')
-    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0]?.task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0]?.task.status === 'halted')
     await waitUntil(async () => JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')).cursors[0]?.offset === 1)
     await waitUntil(() => route.mock.calls.some(([, event]) => event.kind === 'activity_available'))
     route.mockClear()
@@ -1513,21 +1513,21 @@ describe('WorkerHarness.handleStateChange', () => {
     await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(w.task.status).toBe('waiting_input')
+    expect(w.task.status).toBe('halted')
     expect(w.incarnations[0].state).toBe('idle')
 
     const stateEvents = events.filter((e) => e.kind === 'state_changed')
     expect(stateEvents).toHaveLength(1)
     expect(stateEvents[0].detail).toMatchObject({ to: 'idle', turn_pending: true, turn_id: expect.any(String) })
 
-    // 化身自然结束(非 kill)→ completed
+    // 化身自然结束(非 kill)→ exited;task 已在 idle 拍落 halted,不再二次迁移
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
     await waitUntil(async () => {
       const [w2] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-      return w2.task.status === 'completed'
+      return w2.incarnations[0].state === 'exited'
     })
     const [w2] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(w2.task.status).toBe('completed')
+    expect(w2.task.status).toBe('halted')
     expect(w2.incarnations[0].ended_reason).toBe('completed')
   })
 
@@ -1550,7 +1550,7 @@ describe('WorkerHarness.handleStateChange', () => {
     expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('running')
 
     fake.emitStateChange(handle, 'exited', undefined, 'killed')
-    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'cancelled')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'closed')
     expect(await harness.getWorkerControlOperations(worker.worker_id)).toEqual([])
   })
 
@@ -1574,7 +1574,7 @@ describe('WorkerHarness.handleStateChange', () => {
     await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({ status: 'succeeded' })
 
     const [stored] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(stored.task.status).toBe('cancelled')
+    expect(stored.task.status).toBe('closed')
     expect(stored.incarnations).toEqual(expect.arrayContaining([
       expect.objectContaining({ seq: 1, state: 'exited', ended_reason: 'killed' }),
       expect.objectContaining({ seq: 2, state: 'exited', ended_reason: 'killed' }),
@@ -1653,7 +1653,7 @@ describe('WorkerHarness.handleStateChange', () => {
 
     complete()
     fake.emitStateChange(handle, 'idle')
-    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0]?.task.status === 'waiting_input')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0]?.task.status === 'halted')
   })
 
   it('CLI交互Notification映射为固定manager-facing detail，不泄漏内部notification对象', async () => {
@@ -1785,16 +1785,16 @@ describe('WorkerHarness.handleStateChange', () => {
 
     await waitUntil(async () => {
       const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-      return w.task.status === 'failed'
+      return w.task.status === 'halted'
     })
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(w.task.status).toBe('failed')
+    expect(w.task.status).toBe('halted')
     expect(w.incarnations[0].ended_reason).toBe('failed')
 
     // 对外事件带的是提交后的 task.status——manager 的台账块、admin 侧读端点看的都是这一份。
     const stateEvents = events.filter((e) => e.kind === 'state_changed')
     expect(stateEvents).toHaveLength(1)
-    expect(stateEvents[0].task_status).toBe('failed')
+    expect(stateEvents[0].task_status).toBe('halted')
   })
 
   it('adapter 上报 endReason=crashed → 台账落 crashed,task.status=failed', async () => {
@@ -1806,7 +1806,7 @@ describe('WorkerHarness.handleStateChange', () => {
 
     await waitUntil(async () => {
       const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-      return w.task.status === 'failed'
+      return w.task.status === 'halted'
     })
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.incarnations[0].ended_reason).toBe('crashed')
@@ -1832,7 +1832,7 @@ describe('WorkerHarness.handleStateChange', () => {
       return w.incarnations[0].state === 'exited'
     })
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(w.task.status).toBe('failed')
+    expect(w.task.status).toBe('halted')
     expect(w.incarnations[0].ended_reason).toBeUndefined() // 不编造原因
   })
 
@@ -2020,7 +2020,7 @@ describe('WorkerHarness.handleStateChange', () => {
     await harness.killWorker(worker.worker_id)
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(w.task.status).toBe('cancelled')
+    expect(w.task.status).toBe('closed')
   })
 })
 
@@ -2533,7 +2533,7 @@ describe('WorkerHarness.sendToWorker', () => {
       impl: 'builtin',
       session_ref: `ref-${worker.worker_id}#1`,
     }, 'exited', undefined, 'completed')
-    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'halted')
     const reviveHarness = harness as unknown as {
       establishCliResumeActivityBaseline(workerId: string, source: unknown, adapter: unknown): Promise<number | undefined>
       settlePendingInputFailure(...args: unknown[]): Promise<unknown>
@@ -2594,7 +2594,7 @@ describe('WorkerHarness.sendToWorker', () => {
       impl: 'builtin',
       session_ref: `ref-${worker.worker_id}#1`,
     }, 'exited', undefined, 'completed')
-    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'halted')
 
     const handoffHarness = harness as unknown as {
       captureHandoffPackage(...args: unknown[]): Promise<unknown>
@@ -2809,7 +2809,7 @@ describe('WorkerHarness.sendToWorker', () => {
     await harness.sendToWorker(worker.worker_id, '很快完成的输入')
     await waitUntil(async () => {
       const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-      return current.task.status === 'waiting_input'
+      return current.task.status === 'halted'
     })
 
     const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
@@ -2844,14 +2844,14 @@ describe('WorkerHarness.sendToWorker', () => {
     }, 'idle')
     await waitUntil(async () => {
       const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-      return current.task.status === 'waiting_input'
+      return current.task.status === 'halted'
     })
 
     release()
     await send
 
     const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(settled.task.status).toBe('waiting_input')
+    expect(settled.task.status).toBe('halted')
     expect(settled.incarnations[0].state).toBe('idle')
     expect(fake.sendInputCalls).toHaveLength(1)
     expect((harness as any).getInbox(worker.worker_id).held).toBe(true)
@@ -2882,7 +2882,7 @@ describe('WorkerHarness.sendToWorker', () => {
       impl: 'claude-code',
       session_ref: `ref-${worker.worker_id}#1`,
     }, 'idle')
-    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'waiting_input')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'halted')
     await harness.queryWorker(worker.worker_id, '侧问一下')
 
     await harness.sendToWorker(worker.worker_id, '主线继续')
@@ -2926,10 +2926,10 @@ describe('WorkerHarness.sendToWorker', () => {
     await harness.sendToWorker(worker.worker_id, 'Escape', { raw: true })
     await waitUntil(async () => {
       const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-      return current.task.status === 'waiting_input'
+      return current.task.status === 'halted'
     })
     const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(settled.task.status).toBe('waiting_input')
+    expect(settled.task.status).toBe('halted')
     expect(settled.incarnations[0].state).toBe('idle')
   })
 
@@ -2995,7 +2995,7 @@ describe('WorkerHarness.sendToWorker', () => {
     await harness.sendToWorker(worker.worker_id, '首条任务')
     await waitUntil(async () => {
       const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-      return current.task.status === 'waiting_input'
+      return current.task.status === 'halted'
     })
 
     const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
@@ -3012,7 +3012,7 @@ describe('WorkerHarness.sendToWorker', () => {
     await harness.sendToWorker(worker.worker_id, '最后一步')
 
     const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(settled.task.status).toBe('completed')
+    expect(settled.task.status).toBe('halted')
     expect(settled.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
     const stateEvents = events.filter((event) => event.kind === 'state_changed')
     expect(stateEvents).toHaveLength(1)
@@ -3030,7 +3030,7 @@ describe('WorkerHarness.sendToWorker', () => {
     expect(fake.sendInputCalls).toHaveLength(1)
     expect(fake.sendInputCalls[0]).toMatchObject({ text: 'C-d', opts: { raw: true } })
     const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(settled.task.status).toBe('completed')
+    expect(settled.task.status).toBe('halted')
     expect(settled.incarnations).toHaveLength(1)
     expect(settled.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
     const stateEvents = events.filter((event) => event.kind === 'state_changed')
@@ -3065,7 +3065,7 @@ describe('WorkerHarness.sendToWorker', () => {
       ['1 Enter', true],
     ])
     const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(settled.task.status).toBe('completed')
+    expect(settled.task.status).toBe('halted')
     expect(settled.incarnations).toHaveLength(1)
     expect(settled.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
   })
@@ -3129,13 +3129,13 @@ describe('WorkerHarness.killWorker', () => {
     expect(fake.killCalls[0]).toMatchObject({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1`, incarnation_id: expect.any(String) })
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(w.task.status).toBe('cancelled')
+    expect(w.task.status).toBe('closed')
     expect(w.incarnations[0].state).toBe('exited')
     expect(w.incarnations[0].ended_reason).toBe('killed')
 
     const stopped = events.filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
     expect(stopped).toHaveLength(1)
-    expect(stopped[0].task_status).toBe('cancelled')
+    expect(stopped[0].task_status).toBe('closed')
   })
 
   it('幂等:对已 cancelled 的 worker 再次 kill 不报错、不重复调用 adapter.kill、不重复发事件', async () => {
@@ -3868,7 +3868,7 @@ describe('WorkerHarness.queryWorker — adapter.fork 挪出锁(P4 Task 4 review 
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     // 主线(seq=1)保持 killWorker 落定的记录,完全不被这次迟到的 fork 落账污染。
-    expect(w.task.status).toBe('cancelled')
+    expect(w.task.status).toBe('closed')
     const mainEntry = w.incarnations.find((i) => i.seq === 1)!
     expect(mainEntry.state).toBe('exited')
     expect(mainEntry.ended_reason).toBe('killed')
@@ -3962,7 +3962,7 @@ describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)
     expect(fake.killCalls.map((call) => call.seq).sort()).toEqual([1, 2])
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
-    expect(w.task.status).toBe('cancelled') // 主线被正确终结,不是台账显示 fork 被 kill 而主线孤儿
+    expect(w.task.status).toBe('closed') // 主线被正确终结,不是台账显示 fork 被 kill 而主线孤儿
     const mainEntry = w.incarnations.find((i) => i.seq === 1)!
     expect(mainEntry.state).toBe('exited')
     expect(mainEntry.ended_reason).toBe('killed')
@@ -4119,7 +4119,7 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
 
     const exited = events.filter((e) => e.kind === 'exited')
     expect(exited).toHaveLength(1)
-    expect(exited[0].task_status).toBe('failed')
+    expect(exited[0].task_status).toBe('halted')
   })
 
   it('迁移点:主线状态回调 → state_changed 带落账后的 waiting_input / completed', async () => {
@@ -4130,11 +4130,11 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
 
     fake.emitStateChange(handle, 'idle')
     await waitUntil(async () => events.some((e) => e.kind === 'state_changed'))
-    expect(events.filter((e) => e.kind === 'state_changed')[0].task_status).toBe('waiting_input')
+    expect(events.filter((e) => e.kind === 'state_changed')[0].task_status).toBe('halted')
 
     fake.emitStateChange(handle, 'exited')
     await waitUntil(async () => events.filter((e) => e.kind === 'state_changed').length >= 2)
-    expect(events.filter((e) => e.kind === 'state_changed')[1].task_status).toBe('completed')
+    expect(events.filter((e) => e.kind === 'state_changed')[1].task_status).toBe('halted')
   })
 
   it('迁移点:verified stop → state_changed 带 cancelled', async () => {
@@ -4146,7 +4146,7 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
 
     const stopped = events.filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
     expect(stopped).toHaveLength(1)
-    expect(stopped[0].task_status).toBe('cancelled')
+    expect(stopped[0].task_status).toBe('closed')
   })
 
   it('非迁移点:input_sent 不带 task_status(投递不动 task 状态)', async () => {
@@ -4179,7 +4179,7 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     expect(deadLetters.length).toBeGreaterThan(0)
     for (const e of deadLetters) expect(e.task_status).toBeUndefined()
     // 同一次 verified stop 的 state_changed 事件才是那次迁移的载体
-    expect(events.find((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')?.task_status).toBe('cancelled')
+    expect(events.find((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')?.task_status).toBe('closed')
   })
 
   it('非迁移点:query_failed 不带 task_status', async () => {
