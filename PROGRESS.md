@@ -489,6 +489,6 @@
 为避免本文件复制并腐化架构说明，以下内容不再展开：
 
 - 项目开发与流程规则：根目录 `AGENTS.md`。
-- 正式模块契约：`crabot-docs/protocols/`（base 0.2.2、module-manager 0.2.3、admin 0.2.3、agent-v3 3.6.13、memory 0.3.5、crab-messaging 0.3.5、module-spec 0.2.0）。
+- 正式模块契约：`crabot-docs/protocols/`（base 0.2.2、module-manager 0.2.3、admin 0.2.3、agent-v3 3.6.19、memory 0.3.5、crab-messaging 0.3.5、module-spec 0.2.0）。
 - 设计决策与实施计划：`crabot-docs/superpowers/specs/` 与 `plans/`。
 - 开发、部署、调试说明：`AGENTS.md` 与 `crabot-docs/guides/`。
