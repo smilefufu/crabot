@@ -155,7 +155,7 @@ describe('ManagerDetail', () => {
     )
     await waitFor(() => expect(screen.getByText('你：「开始部署」')).toBeInTheDocument())
     expect(screen.getAllByText('部署 V6').length).toBeGreaterThan(0)
-    expect(screen.getByText('等待输入')).toBeInTheDocument()
+    expect(screen.getByText('已停止待处置')).toBeInTheDocument()
   })
 
   it('带回复或操作的 worker_event 保持自己的时间线位置', async () => {
@@ -226,7 +226,7 @@ describe('ManagerDetail', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('你：「开始部署」')).toBeInTheDocument())
-    expect(screen.getByText('等待输入')).toBeInTheDocument()
+    expect(screen.getByText('已停止待处置')).toBeInTheDocument()
     expect(screen.queryByText('执行中')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '展开 2 次历史进展' }))
     expect(screen.getByText('执行中')).toBeInTheDocument()

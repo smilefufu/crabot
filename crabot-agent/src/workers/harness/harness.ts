@@ -361,8 +361,8 @@ function settleCliTask(
     now,
     halt: {
       halted_at: now,
-      halt_reason: reason === 'crashed' ? 'crashed' : reason === 'pre_migration' ? 'pre_migration' : 'turn_end',
-      ...(reason === 'failed' || reason === 'crashed' ? { detail: reason } : {}),
+      halt_reason: reason === 'crashed' ? 'crashed' : reason === 'pre_migration' ? 'pre_migration' : reason === undefined ? 'unknown' : 'turn_end',
+      ...(reason === 'failed' || reason === 'crashed' || reason === undefined ? { detail: reason ?? 'exited_without_end_reason' } : {}),
     },
   })
 }
@@ -2053,6 +2053,10 @@ export class WorkerHarness {
       }
       const expired = this.expiredInboxDelivery(item, legacy.seq)
       if (expired) return expired
+      // 可续办集合(2026-08-31 状态机修正):仅 halted。ended_reason 白名单里
+      // completed/failed/pre_migration 现只有 pre_migration 可达——旧终态 v2 任务经
+      // importer 映射为 closed(硬拒绝,见上方短路),不再参与续办;白名单保留是为
+      // 兼容既有台账上历史化身记录的事实值。
       if (
         worker.task.status !== 'halted' ||
         !['completed', 'failed', 'pre_migration'].includes(legacy.ended_reason)
@@ -6052,8 +6056,8 @@ export class WorkerHarness {
           desired = 'halted'
           halt = {
             halted_at: now,
-            halt_reason: reason === 'crashed' ? 'crashed' : reason === 'pre_migration' ? 'pre_migration' : 'turn_end',
-            ...(reason === 'failed' || reason === 'crashed' ? { detail: reason } : {}),
+            halt_reason: reason === 'crashed' ? 'crashed' : reason === 'pre_migration' ? 'pre_migration' : reason === undefined ? 'unknown' : 'turn_end',
+            ...(reason === 'failed' || reason === 'crashed' || reason === undefined ? { detail: reason ?? 'exited_without_end_reason' } : {}),
           }
         }
       }
@@ -6227,9 +6231,12 @@ export class WorkerHarness {
                 ? 'crashed'
                 : endReason === 'pre_migration'
                   ? 'pre_migration'
-                  : 'turn_end',
+                  : endReason === undefined
+                    ? 'unknown'
+                    : 'turn_end',
             ...(selfReport ? { worker_self_report: selfReport } : {}),
-            ...(endReason === 'crashed' || endReason === 'failed' ? { detail: endReason } : {}),
+            ...(endReason === 'crashed' || endReason === 'failed' ? { detail: endReason }
+              : endReason === undefined ? { detail: 'exited_without_end_reason' } : {}),
           }
           : undefined
       const nextStatus: TaskStatus = preserveTaskForStop

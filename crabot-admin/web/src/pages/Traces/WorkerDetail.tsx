@@ -10,7 +10,6 @@ import {
   agentObservabilityService,
   type LedgerWorker,
   type WorkerIncarnation,
-  type WorkerTaskStatus,
   type WorkerTerminalView,
   type WorkerTraceEvent,
   type WorkerSubagentSummary,
@@ -22,11 +21,12 @@ const IMPL_LABEL: Record<WorkerIncarnation['impl'], string> = {
   codex: 'Codex',
   legacy: '旧版记录',
 }
-const STATUS_LABEL: Record<WorkerTaskStatus, string> = {
+// 键放宽为 string:历史 trace 数据可能携带旧状态值,缺键时回退原样显示
+const STATUS_LABEL: Record<string, string> = {
   queued: '排队', running: '执行中', halted: '已停止待处置', closed: '已关闭', waiting_input: '等输入',
   completed: '已完成', failed: '失败', cancelled: '已取消',
 }
-const STATUS_COLOR: Record<WorkerTaskStatus, string> = {
+const STATUS_COLOR: Record<string, string> = {
   queued: 'var(--text-muted)', running: 'var(--info)', halted: 'var(--warning)', closed: 'var(--text-muted)', waiting_input: 'var(--warning)',
   completed: 'var(--success)', failed: 'var(--error)', cancelled: 'var(--text-muted)',
 }
