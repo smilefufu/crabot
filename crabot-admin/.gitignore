@@ -28,3 +28,4 @@ coverage/
 # Data
 data/
 *.db
+crabot-admin/web/node_modules
