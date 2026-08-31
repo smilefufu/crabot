@@ -6092,11 +6092,19 @@ export class WorkerHarness {
       }
       const committed = await this.deps.ledger.upsertWorker(managerKey, h.worker_id, (prev) => {
         if (!prev) return undefined
-        const task = prev.task.status === desired ? prev.task : applyStatusTransition(prev.task, desired, {
-          now,
-          ...(desired === 'halted' && halt ? { halt } : {}),
-          ...(desired === 'closed' ? { closed: { by: 'manager_stop' as const } } : {}),
-        })
+        let task: LedgerWorker['task']
+        if (prev.task.status === desired) {
+          // 同为 halted 但停因升级(如 turn_end 后载体又 crashed):覆盖 evidence。
+          task = desired === 'halted' && halt && prev.task.halt?.halt_reason !== halt.halt_reason
+            ? { ...prev.task, halt }
+            : prev.task
+        } else {
+          task = applyStatusTransition(prev.task, desired, {
+            now,
+            ...(desired === 'halted' && halt ? { halt } : {}),
+            ...(desired === 'closed' ? { closed: { by: 'manager_stop' as const } } : {}),
+          })
+        }
         const incarnations = patchIncarnationBySeq(prev.incarnations, h.impl, h.seq, {
           state: external,
           session_ref: h.session_ref || target.session_ref,
@@ -6302,13 +6310,20 @@ export class WorkerHarness {
         // 应保持 task running）。只有两者都已经一致时才是无操作。
         const current = findIncarnation(prev, h.impl, h.seq)
         if (nextStatus === prev.task.status && current?.state === state) return prev
-        const nextTask = nextStatus === prev.task.status
-          ? prev.task
-          : applyStatusTransition(prev.task, nextStatus, {
+        let nextTask: LedgerWorker['task']
+        if (nextStatus !== prev.task.status) {
+          nextTask = applyStatusTransition(prev.task, nextStatus, {
             now,
             ...(nextStatus === 'halted' && halt ? { halt } : {}),
             ...(nextStatus === 'closed' ? { closed: { by: 'manager_stop' as const } } : {}),
           })
+        } else if (nextStatus === 'halted' && halt && prev.task.halt?.halt_reason !== halt.halt_reason) {
+          // 同为 halted 但停因升级(如 turn_end 后载体又 crashed):用新 evidence 覆盖,
+          // 不让台账停留在更良性的旧停因上。
+          nextTask = { ...prev.task, halt }
+        } else {
+          nextTask = prev.task
+        }
         // session_ref 现读现取,同上面 fork 分支的注释。
         const incarnations = patchIncarnationBySeq(
           prev.incarnations,

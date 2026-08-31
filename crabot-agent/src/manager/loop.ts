@@ -1946,8 +1946,13 @@ function renderChannelMessages(
  */
 function workerEventClass(event: HarnessEvent): 'content' | 'blocked' | 'review' | 'info' {
   switch (event.kind) {
-    case 'state_changed':
-      return event.detail?.kind === 'interaction_required' ? 'blocked' : 'content'
+    case 'state_changed': {
+      if (event.detail?.kind === 'interaction_required') return 'blocked'
+      // 主线状态机的通用事件点:停止/退出迁移是"有内容待处置",to=running 只是
+      // "开始跑了"的纯通报,归 info,不逼 manager 走四选一处置。
+      const to = event.detail?.to
+      return to === 'idle' || to === 'exited' ? 'content' : 'info'
+    }
     case 'activity_available':
     case 'turn_completed':
     case 'query_completed':
