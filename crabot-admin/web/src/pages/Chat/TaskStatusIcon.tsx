@@ -105,6 +105,15 @@ export const TaskStatusIcon: React.FC<TaskStatusIconProps> = ({ taskId, snapshot
         ✓
       </span>
     )
+  } else if (snapshot.status === 'closed') {
+    icon = (
+      <span
+        style={{ fontSize: 13, lineHeight: 1, color: 'var(--text-secondary)', fontWeight: 700, userSelect: 'none' }}
+        aria-label="已关闭"
+      >
+        ■
+      </span>
+    )
   } else if (snapshot.status === 'failed' || snapshot.status === 'cancelled') {
     icon = (
       <span

@@ -108,6 +108,7 @@ import {
   type LedgerWorker,
   type ManagerKey,
   type TaskHaltEvidence,
+  type TaskHaltReason,
   type TaskStatus,
   type WorkerRecoveryNotice,
   type WorkerSupervision,
@@ -339,6 +340,19 @@ function cliContractState(kind: NonNullable<IncarnationHandle['initial_input']>[
     case 'exited': return 'exited'
     default: return 'idle'
   }
+}
+
+const HALT_REASON_SEVERITY: Record<TaskHaltReason, number> = {
+  turn_end: 0,
+  worker_finalized: 1,
+  unknown: 2,
+  pre_migration: 2,
+  crashed: 3,
+}
+
+/** 停因严重度:同为 halted 时,仅当新停因更严重才覆盖 evidence,良性结果不得抹掉严重事实。 */
+function haltSeverity(reason: TaskHaltReason): number {
+  return HALT_REASON_SEVERITY[reason] ?? 0
 }
 
 function settleCliTask(
@@ -5077,6 +5091,7 @@ export class WorkerHarness {
     try {
       delivery = await this.appendEventAwaitingDelivery(h.worker_id, h.seq, 'state_changed', {
         to: 'running' satisfies WorkerContractState,
+        source: 'liveness_stall',
         ...(text ? { text } : {}),
       })
     } catch (err) {
@@ -6094,8 +6109,8 @@ export class WorkerHarness {
         if (!prev) return undefined
         let task: LedgerWorker['task']
         if (prev.task.status === desired) {
-          // 同为 halted 但停因升级(如 turn_end 后载体又 crashed):覆盖 evidence。
-          task = desired === 'halted' && halt && prev.task.halt?.halt_reason !== halt.halt_reason
+          // 同为 halted:仅当停因升级时覆盖(方向性,见 haltSeverity)。
+          task = desired === 'halted' && halt && haltSeverity(halt.halt_reason) > haltSeverity(prev.task.halt?.halt_reason ?? 'turn_end')
             ? { ...prev.task, halt }
             : prev.task
         } else {
@@ -6317,9 +6332,12 @@ export class WorkerHarness {
             ...(nextStatus === 'halted' && halt ? { halt } : {}),
             ...(nextStatus === 'closed' ? { closed: { by: 'manager_stop' as const } } : {}),
           })
-        } else if (nextStatus === 'halted' && halt && prev.task.halt?.halt_reason !== halt.halt_reason) {
-          // 同为 halted 但停因升级(如 turn_end 后载体又 crashed):用新 evidence 覆盖,
-          // 不让台账停留在更良性的旧停因上。
+        } else if (
+          nextStatus === 'halted' && halt &&
+          haltSeverity(halt.halt_reason) > haltSeverity(prev.task.halt?.halt_reason ?? 'turn_end')
+        ) {
+          // 同为 halted 但停因升级(如 turn_end 后载体又 crashed):用更严重的新 evidence
+          // 覆盖,不让台账停留在更良性的旧停因上;降级方向(良性覆盖严重)一律拒绝。
           nextTask = { ...prev.task, halt }
         } else {
           nextTask = prev.task
