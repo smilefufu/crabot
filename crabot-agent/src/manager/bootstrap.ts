@@ -132,6 +132,12 @@ export interface BootstrapDeps {
    */
   readonly timezone?: () => string
   /** manager 的 LLM 来源(2026-08 收敛后即 powerful slot),thunk 以支持热更 */
+  /**
+   * Admin「AI 性格提示词」(`agent_config.system_prompt`,protocol-agent-v3 §4.2 manager
+   * system prompt 的静态段)。thunk:admin 改配置下次 episode 生效,不必重建整个栈。
+   * 缺省/空串 = 不装配该段。
+   */
+  readonly managerPersonality?: () => string | undefined
   readonly managerAdapter: () => LLMAdapter
   readonly managerModel: () => string
   /**
@@ -627,9 +633,11 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     promptInputs: (key) => {
       const cached = principals.get(key)
       const dialogProfile = cached?.dialogProfile
+      const adminPersonality = deps.managerPersonality?.()
       return {
         ...(dialogProfile ? { dialogProfile } : {}),
         ...(cached?.principal.sessionType === 'group' ? { isGroup: true } : {}),
+        ...(adminPersonality ? { adminPersonality } : {}),
       }
     },
   })

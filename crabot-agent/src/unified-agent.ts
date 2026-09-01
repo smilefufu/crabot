@@ -867,6 +867,8 @@ export class UnifiedAgent extends ModuleBase {
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
       now: () => new Date().toISOString(),
+      // Admin「AI 性格提示词」→ manager system prompt(§4.2);thunk 现读,配置热更下次 episode 生效
+      managerPersonality: () => this.agentConfig?.system_prompt,
       // P6-A：Manager episode trace writer（窄接口 + 脱敏收口在 TraceStore.managerTraceWriter）。
       traceWriter: this.traceStore.managerTraceWriter((text) => redactSecrets(text, [...this.knownSecrets])),
       redactFailureReason: (text) => redactSecrets(text, [...this.knownSecrets]),

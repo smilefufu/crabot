@@ -186,7 +186,7 @@ export interface ManagerRegistryDeps {
   /** P6-A §3.2：episode 消费后结算未 claim 的 Admin Chat request IDs。 */
   readonly onAdminChatWakeConsumed?: (key: ManagerKey, requestIds: string[]) => void
   /** Stable system prompt profile material. */
-  readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string; readonly isGroup?: boolean }
+  readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string; readonly isGroup?: boolean; readonly adminPersonality?: string }
 }
 
 export class ManagerRegistry {

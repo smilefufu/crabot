@@ -19,6 +19,8 @@ export interface PromptInputs {
   readonly isBuiltinDailyReflection?: boolean
   /** 对话对象档案：friend 资料/权限/关系要点（来自 ContextAssembler 的 scene_profile 或 admin） */
   readonly dialogProfile?: string
+  /** Admin「AI 性格提示词」（agent_config.system_prompt）：manager 的人格与表达偏好，静态段 */
+  readonly adminPersonality?: string
 }
 
 /**
@@ -160,6 +162,11 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
   const identityWithKey = MANAGER_IDENTITY.replace('{{managerKey}}', inputs.managerKey)
 
   const parts: string[] = [identityWithKey]
+
+  // Admin「AI 性格提示词」：manager 的人格与表达偏好（静态段，紧跟身份段）。
+  if (inputs.adminPersonality) {
+    parts.push(`## AI 性格（管理员配置）\n\n${inputs.adminPersonality}`)
+  }
 
   if (inputs.isBuiltinDailyReflection) {
     parts.push(DAILY_REFLECTION_DELIVERY_DISCIPLINE)

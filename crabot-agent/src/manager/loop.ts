@@ -239,7 +239,7 @@ export interface ManagerLoopDeps {
    */
   readonly toolFace: (wakeEvent?: WakeEvent) => ReadonlyArray<ToolDefinition>
   /** System prompt inputs are stable for the whole dialogProfile revision. */
-  readonly promptInputs: () => { readonly dialogProfile?: string; readonly isGroup?: boolean }
+  readonly promptInputs: () => { readonly dialogProfile?: string; readonly isGroup?: boolean; readonly adminPersonality?: string }
   readonly harness: WorkerHarness
   readonly now: () => Date
   /**
@@ -1470,6 +1470,7 @@ export class ManagerLoop {
         isBuiltinDailyReflection,
         isGroup: extra.isGroup ?? false,
         dialogProfile: extra.dialogProfile,
+        adminPersonality: extra.adminPersonality,
       })
     }
     const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(effectiveWake)
