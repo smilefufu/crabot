@@ -5297,13 +5297,16 @@ export class WorkerHarness {
   }
 
   /**
-   * reconcileOnStartup 判死分支:落 halted(crashed)+ exited 审计事件。三种判死
+   * reconcileOnStartup 判死分支:落 halted(crashed)+ exited 事件。三种判死
    * 场景(adapter 报 exited / adapter 未注册 / adapter.state() 抛错)共用同一段收尾——三者
    * 语义上都是"至此已经没有任何证据证明这个非终态 worker 还活着"。任务不落终态:
    * "载体死了"是事实,"任务失败"是判断,由 manager 处置落定。
    *
-   * 事件只落审计:判死同时落 recovery notice,对 manager 的唯一唤醒由 durable 的
-   * worker_recovery_required 承载(一次崩溃只醒一次,协议 §5.5.3)。
+   * 事件降审计的前提是真的落了 recovery notice（对 manager 的唯一唤醒由 durable 的
+   * worker_recovery_required 承载,一次崩溃只醒一次,协议 §5.5.3）。notice 创建有条件
+   * （mainline 尚未 exited 等）——停止残局（化身已 exited、task 非终态:handoff 第 2 步后
+   * 重启 / stop unknown 有 bg 的 op settle 后重启）不建 notice,此时必须保留唤醒档,否则
+   * 这次崩溃零唤醒零推送、任务永久静默（PR #137 review）。
    */
   private async markCrashed(
     managerKey: ManagerKey,
@@ -5312,6 +5315,7 @@ export class WorkerHarness {
     detailReason: string
   ): Promise<void> {
     const now = this.deps.now()
+    let recoveryCreated = false
     const crashed = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const current = findIncarnation(prev, mainline.impl, mainline.seq)
@@ -5334,6 +5338,7 @@ export class WorkerHarness {
       const recovery = current?.forked_from === undefined && current?.state !== 'exited' && current?.incarnation_id
         ? appendRecoveryNotice(prev.recovery_notices, current.incarnation_id, now)
         : undefined
+      recoveryCreated = recovery?.created === true
       return {
         ...prev,
         task: nextTask,
@@ -5343,13 +5348,24 @@ export class WorkerHarness {
         updated_at: now,
       }
     })
-    await this.appendAuditEvent(
-      worker.worker_id,
-      mainline.seq,
-      'exited',
-      { reason: 'crashed', message: detailReason },
-      crashed?.task.status
-    )
+    if (recoveryCreated) {
+      await this.appendAuditEvent(
+        worker.worker_id,
+        mainline.seq,
+        'exited',
+        { reason: 'crashed', message: detailReason },
+        crashed?.task.status
+      )
+    } else {
+      // 无 recovery notice 兜底（停止残局/同化身重复判死）——保留唤醒档,宁可多醒一次。
+      await this.appendEvent(
+        worker.worker_id,
+        mainline.seq,
+        'exited',
+        { reason: 'crashed', message: detailReason },
+        crashed?.task.status
+      )
+    }
   }
 
   /**

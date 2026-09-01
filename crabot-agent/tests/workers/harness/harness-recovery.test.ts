@@ -203,6 +203,39 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(exitedEvents[0].detail?.reason).toBe('crashed')
   })
 
+  it('停止残局(mainline 已 exited(superseded)、task 仍 running)判死 → 无 notice 可建,exited 保留唤醒档', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    // handoff 第 2 步已把源化身落盘 exited(superseded)、task 仍 running，第 3 步 spawn 目标
+    // 期间进程重启留下的台账形态（PR #137 review 指出的零唤醒缝隙：notice 创建以
+    // "化身尚未 exited" 为条件，此形态建不出 notice，判死事件必须保留唤醒档）。
+    const worker = makeWorker('w-handoff-remnant', {
+      task: { id: 'task-w-handoff-remnant', title: '测试任务', status: 'running', created_at: now() },
+      incarnations: [{
+        incarnation_id: 'incarnation-handoff-remnant',
+        seq: 1, impl: 'builtin', state: 'exited', ended_reason: 'superseded',
+        workspace: '/tmp/ws', session_ref: 'ref-w-handoff-remnant#1', started_at: now(),
+      }],
+    })
+    await seed(ledger, DIALOG, worker)
+    fake.setState({ worker_id: 'w-handoff-remnant', seq: 1 }, 'exited')
+
+    const report = await harness.reconcileOnStartup()
+
+    expect(report.failed).toEqual(['w-handoff-remnant'])
+    const after = await getWorker(ledger, 'w-handoff-remnant')
+    expect(after.task.status).toBe('halted')
+    expect(after.task.halt?.halt_reason).toBe('crashed')
+    // 化身已是 exited → 建不出 recovery notice……
+    expect(after.recovery_notices ?? []).toHaveLength(0)
+    // ……因此判死事件必须保留唤醒档（经 onEvent 到达 manager + §9.2 推送），不能只是审计
+    const exitedWakes = events.filter((e) => e.worker_id === 'w-handoff-remnant' && e.kind === 'exited')
+    expect(exitedWakes).toHaveLength(1)
+    expect(exitedWakes[0].detail?.reason).toBe('crashed')
+    expect(exitedWakes[0].task_status).toBe('halted')
+  })
+
   it('adapter 报 running 且与台账一致 → 台账保持不动、不发事件，归 revived', async () => {
     const { harness, ledger, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter('builtin')

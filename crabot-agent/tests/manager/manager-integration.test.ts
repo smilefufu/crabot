@@ -429,6 +429,8 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(assembly.toolCallLog.some((c) => c.name === 'spawn_worker')).toBe(true)
 
       // 等真实 worker 后台把 finish_task 跑完——burst 是 fire-and-forget,不是靠猜时序。
+      // 回合边界事件走 durable 通道（persist + 异步投递），比台账 halted 晚一跳，
+      // 直接等事件本身出现（场景五同款模式）。
       await waitUntil(async () => {
         const workers = await assembly.harness.listWorkers(assembly.managerKeyFor(key))
         return workers.some((w) => w.task.status === 'halted')
@@ -440,6 +442,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(worker.incarnations[0].state).toBe('exited')
       expect(worker.incarnations[0].ended_reason).toBe('completed')
 
+      await waitUntil(() => findWorkerExitedEvent(assembly.events, worker.worker_id) !== undefined)
       const exitedEvent = findWorkerExitedEvent(assembly.events, worker.worker_id)
       expect(exitedEvent).toBeDefined()
 
@@ -524,6 +527,8 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
         return workers.some((w) => w.task.status === 'halted')
       })
       const [workerA] = await assembly.harness.listWorkers(assembly.managerKeyFor(SYSTEM_TASKS_MANAGER_KEY))
+      // durable 通道事件比台账 halted 晚一跳，等事件本身出现（同场景一）
+      await waitUntil(() => findWorkerExitedEvent(assembly.events, workerA.worker_id) !== undefined)
       const exitedEventA = findWorkerExitedEvent(assembly.events, workerA.worker_id)!
 
       managerScript.queue.push({
@@ -578,6 +583,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(workerB.incarnations[0].ended_reason).toBe('failed')
       // 同一份真值也进了对外事件（appendEvent 带的是提交后的 task.status）——manager 的
       // 台账块与 admin 侧读端点看到的都是这一份。
+      await waitUntil(() => findWorkerExitedEvent(assembly.events, workerB.worker_id) !== undefined)
       const exitedEventB = findWorkerExitedEvent(assembly.events, workerB.worker_id)!
       expect(exitedEventB.task_status).toBe('halted')
       // 对照组：成功的 worker A 仍然是 completed，修复没有把所有退出一刀切判失败。

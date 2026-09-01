@@ -1949,6 +1949,38 @@ describe('WorkerHarness.handleStateChange', () => {
     })
   })
 
+  it('回合通知持久化失败 → 回退补发 fire-and-forget state_changed 保在线送达(协议 §6.3)', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    // 下一次 persist 落盘失败：durable 唤醒不存在,必须回退补发 fire-and-forget
+    // state_changed（PR #137 review #7：这条新引入的失败路径要有定向用例钉住）。
+    const recordSpy = vi.spyOn(NativeActivityStore.prototype, 'record').mockRejectedValueOnce(new Error('disk full'))
+    try {
+      harness.handleStateChange(h, 'idle', {
+        completionSource: 'builtin_end_turn',
+        lastText: '收尾正文',
+      })
+
+      await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+      const fallback = events.filter((e) => e.kind === 'state_changed')
+      expect(fallback).toHaveLength(1)
+      expect(fallback[0].detail).toMatchObject({
+        to: 'idle',
+        text: '收尾正文',
+        turn_id: expect.any(String),
+        turn_pending: true,
+      })
+      expect(fallback[0].task_status).toBe('halted')
+      // durable 通道侧：通知没落盘,events.jsonl 里不应有 turn_completed
+      expect((await harness.readWorkerEvents(worker.worker_id)).some((e) => e.kind === 'turn_completed')).toBe(false)
+    } finally {
+      recordSpy.mockRestore()
+    }
+  })
+
   it('CLI 终端画面不随状态事件自动转发，manager 需要时再显式读取', async () => {
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
