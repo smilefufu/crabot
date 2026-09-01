@@ -1938,16 +1938,6 @@ export interface ChatTaskSnapshot {
   }
   /** 关闭信息(status='closed') */
   closed?: { at: string; by: string; note?: string }
-  /** 载体停止的事实记录(status='halted') */
-  halt?: {
-    halted_at: string
-    halt_reason: string
-    worker_self_report?: { outcome: 'completed' | 'failed'; summary: string }
-    stop_unverified?: boolean
-    detail?: string
-  }
-  /** 关闭信息(status='closed') */
-  closed?: { at: string; by: string; note?: string }
   /** 当前计划步骤（task.plan 存在时） */
   step?: { index: number; total: number; description: string }
 }
