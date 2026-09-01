@@ -1,9 +1,33 @@
 # Crabot 项目进度
 
-> 最后整理：2026-08-30
+> 最后整理：2026-08-31
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
+
+### 任务状态机缩水为 4 态 + manager 停止监督修正：已合入（main `d6a76609`，PR #136）
+
+- 引线：worker `finish_task` 停止后 manager 15/15 零处置，任务静默最长 6 小时直到人类
+  追问（trace 核实：turn_completed 唤醒投递准时无丢失）。根因：builtin finish_task 的
+  **自报** outcome 被 harness 提升为任务终态 `completed`（协议旧文背书"确证"），监督按
+  设计对终态解除武装——系统把可确证的事实（化身退出+自称完成）越权升格为无法确证的
+  判断（任务达成）。
+- 修正（协议先行：base-protocol 0.2.4 / agent-v3 3.7.0，docs `bb679c9`）：
+  TaskStatus 6 态→4 态 `queued/running/halted/closed`——worker 行为只产生事实边
+  running⇄halted，停因与自报进 `TaskHaltEvidence` 标注（halt_reason/worker_self_report/
+  detail）；`closed` 唯一终态仅 manager/admin 处置产生；`reviveTask` 接续例外退役；
+  `finish_task` 自报不再产生终态。存量台账读路径归一迁移（fail-soft+回写）。
+- manager 侧：事件渲染结构化（`<crabot-event class=content|blocked|review|info>`）+
+  system prompt"你的对话对象是 crabot 系统"心智模型段与四类处置规则（内容类
+  "沉默不是合法完成形态"、"自报不等于完成"两要件成文）。弃权防线=prompt 引导
+  （机制兜底按用户决策不做，复发时再议）。
+- review 4 轮 12 条全部处置：存量台账迁移、periodic_report 在 halted 不被 probe 短路
+  吞没、stop 核验 unknown→halted(stop_unverified)+bg 存活保持 running、halted 停因
+  有向升级（haltSeverity，良性不得抹掉严重）、stop_verified 处置回执归 info、
+  liveness_stall 归 content、admin/web 枚举与 Master Chat 图标同步。
+- **follow-up**（spec §11，docs `1a8dbba`）：①事件面收敛（state_changed+turn_completed
+  双投递合并、生命周期 kind 折叠）；②worker home 7 天 GC 判据（halted 不再自动回收，
+  候选方案需单独 spec 决策）；③机制兜底（弃权复发时的首选方案）。
 
 ### manager 入站图片视觉注入（P7 拆分能力回退修复）+ get_message 媒体字段：已合入（main `29a25d08` + review 修复）
 
