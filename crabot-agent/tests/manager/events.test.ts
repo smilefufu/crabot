@@ -261,7 +261,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
       const { ledger } = makeLedgerStub([{ status: 'running' }], { taskId: 'task-42' })
       const bridge = makeTaskStatusEventBridge({ ledger, publish })
 
-      bridge(harnessEvent({ kind: 'spawned', worker_id: 'w-42' }))
+      bridge(harnessEvent({ kind: 'lifecycle_changed', worker_id: 'w-42' }))
       await flush()
 
       expect(publish).toHaveBeenCalledTimes(1)
@@ -290,7 +290,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
       const bridge = makeTaskStatusEventBridge({ ledger, publish })
 
       // 第一条把 task 从初始 queued 带到 running（这是真实迁移，应发）
-      bridge(harnessEvent({ kind: 'spawned' }))
+      bridge(harnessEvent({ kind: 'lifecycle_changed' }))
       await flush()
       expect(publish).toHaveBeenCalledTimes(1)
 
@@ -336,7 +336,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
       ])
       const bridge = makeTaskStatusEventBridge({ ledger, publish })
 
-      bridge(harnessEvent({ kind: 'spawned' }))
+      bridge(harnessEvent({ kind: 'lifecycle_changed' }))
       bridge(harnessEvent({ kind: 'exited' }))
       await flush(20)
 
@@ -363,7 +363,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
       const bridge = makeTaskStatusEventBridge({ ledger, publish })
 
       // ① spawn：台账落 running，事件带 running
-      bridge(harnessEvent({ kind: 'spawned', worker_id: 'w-swallow', task_status: 'running' }))
+      bridge(harnessEvent({ kind: 'lifecycle_changed', worker_id: 'w-swallow', task_status: 'running' }))
       await flush()
 
       // ② 化身自然结束：台账落 completed、harness 发 exited……
@@ -376,7 +376,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
       await flush()
 
       // ③ 接续产出新化身
-      bridge(harnessEvent({ kind: 'resumed', worker_id: 'w-swallow', task_status: 'running' }))
+      bridge(harnessEvent({ kind: 'lifecycle_changed', worker_id: 'w-swallow', task_status: 'running' }))
       await flush()
 
       expect(publish.mock.calls.map(([, p]) => [p.old_status, p.new_status])).toEqual([
@@ -394,7 +394,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
       const { ledger } = makeLedgerStub([{ status: 'running' }])
       const bridge = makeTaskStatusEventBridge({ ledger, publish })
 
-      bridge(harnessEvent({ kind: 'killed', worker_id: 'w-evt', task_status: 'cancelled' }))
+      bridge(harnessEvent({ kind: 'state_changed', worker_id: 'w-evt', task_status: 'cancelled' }))
       await flush()
 
       expect(publish.mock.calls.map(([, p]) => [p.old_status, p.new_status])).toEqual([['queued', 'cancelled']])

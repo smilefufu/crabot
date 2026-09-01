@@ -87,9 +87,16 @@ function normalizeHarnessEvent(
 /** lifecycle 行的 summary 带上关键 detail——裸事件名（如 state_changed 无目标态）是噪音。 */
 function harnessSummary(event: HarnessEvent): string {
   const detail = (event.detail ?? {}) as Record<string, unknown>
-  switch (event.kind) {
+  // 按 string 匹配：2026-09-01 事件面收敛前的历史 events.jsonl 里还有 spawned/superseded 等
+  // 已退役 kind（见下方 legacy case），类型枚举只覆盖新 kind。
+  switch (event.kind as string) {
     case 'state_changed':
       return detail.to ? `state_changed → ${String(detail.to)}` : 'state_changed'
+    case 'lifecycle_changed': {
+      const change = typeof detail.change === 'string' ? detail.change : 'lifecycle_changed'
+      return detail.impl ? `${change} (${String(detail.impl)})` : change
+    }
+    // 服务 2026-09-01 事件面收敛前的历史 events.jsonl（旧 kind 读路径兼容）。
     case 'spawned':
       return detail.impl ? `spawned (${String(detail.impl)})` : 'spawned'
     case 'input_sent':

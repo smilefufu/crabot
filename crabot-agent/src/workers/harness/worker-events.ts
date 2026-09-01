@@ -15,17 +15,22 @@ import { AsyncMutex } from '../async-mutex'
 import type { TaskStatus } from './ledger-types'
 
 export type HarnessEventKind =
-  | 'spawned'
+  /**
+   * 化身链变更（protocol-agent-v3 §4.1）：`detail.change` 区分 `spawned`（含 handoff 完成
+   * 新化身就位）/ `resumed` / `handoff_started` / `superseded`。spawn/resume/handoff 完成点
+   * 唤醒 manager；handoff 进度节点（started/superseded/源退出）只落审计。
+   */
+  | 'lifecycle_changed'
   | 'activity_available'
   | 'turn_completed'
   | 'operation_settled'
   | 'input_sent'
   | 'state_changed'
   | 'exited'
-  | 'killed'
-  | 'superseded'
-  | 'handoff_started'
-  | 'resumed'
+  /** 交互需介入（旧 `state_changed` 的 `detail.kind='interaction_required'` 子形态提升）。 */
+  | 'interaction_required'
+  /** 活性巡检发现疑似停摆（旧 `state_changed` 的 `detail.source='liveness_stall'` 子形态提升）。 */
+  | 'liveness_stall'
   | 'input_delivery_failed'
   /**
    * query 建立或执行失败的持久审计事件。建立失败同时在原工具调用返回结构化错误；执行失败

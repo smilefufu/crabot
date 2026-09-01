@@ -146,10 +146,10 @@ function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerPar
   }
 }
 
-/** 巡检发出的唤醒事件:state_changed + detail.text(#70 同款形状,零新 kind、零新状态)。 */
+/** 巡检发出的唤醒事件:liveness_stall 独立 kind(事件面收敛后,不再借用 state_changed)。 */
 function wakeEvents(workerId: string): HarnessEvent[] {
   return events.filter(
-    (e) => e.worker_id === workerId && e.kind === 'state_changed' && typeof e.detail?.text === 'string',
+    (e) => e.worker_id === workerId && e.kind === 'liveness_stall',
   )
 }
 
@@ -197,8 +197,8 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     expect(text).toContain('读取状态和原生会话活动')
     expect(text).not.toContain('⏺ 正在读取文件…')
     expect(adapter.readTerminalCalls).toHaveLength(0)
-    // 零新事件 kind、零新状态
-    expect(woke[0].kind).toBe('state_changed')
+    // 独立 kind、零新状态
+    expect(woke[0].kind).toBe('liveness_stall')
   })
 
   it('② lastActivityAt 持续前进(真实任务进展)→ 零事件', async () => {

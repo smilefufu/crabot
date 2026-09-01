@@ -173,7 +173,8 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
       expect(finalWorker.incarnations[0].state).toBe('exited')
       expect(finalWorker.incarnations[0].ended_reason).toBe('completed')
 
-      expect(events.filter((e) => e.kind === 'spawned')).toHaveLength(1)
+      expect(events.filter((e) => e.kind === 'lifecycle_changed'
+        && (e.detail as { change?: string } | undefined)?.change === 'spawned')).toHaveLength(1)
       expect(events.filter((e) => e.kind === 'input_sent')).toHaveLength(1)
       // 至少两次真实状态回调(idle 一次、exited 一次)经 handleStateChange 落盘并外发。
       expect(events.filter((e) => e.kind === 'state_changed').length).toBeGreaterThanOrEqual(2)
@@ -367,9 +368,11 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
       expect(finalWorker.incarnations[0].state).toBe('exited')
       expect(finalWorker.incarnations[0].ended_reason).toBe('killed')
 
-      expect(events.filter((e) => e.kind === 'spawned')).toHaveLength(1)
+      expect(events.filter((e) => e.kind === 'lifecycle_changed'
+        && (e.detail as { change?: string } | undefined)?.change === 'spawned')).toHaveLength(1)
       expect(events.filter((e) => e.kind === 'input_sent')).toHaveLength(1)
-      expect(events.filter((e) => e.kind === 'killed')).toHaveLength(1)
+      // 停止操作结算回执(killed kind 已随事件面收敛删除,停止事实由 operation_settled 承载)
+      expect(events.filter((e) => e.kind === 'operation_settled')).toHaveLength(1)
     },
     20000,
   )

@@ -389,9 +389,10 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
     return { to: state, kind: 'initial_input_settled' }
   }
   if (report?.notification) {
+    // interaction_required 已提升为独立事件 kind（protocol §6.3 CliInteractionRequiredDetail），
+    // detail 不再带 kind 字段；事件 kind 由调用方按 report.notification 选择。
     return {
       to: state,
-      kind: 'interaction_required',
       wait_mode: 'action',
       wait_reason: report.waitReason ?? 'interaction_required',
       notification_type: report.notification.type,
@@ -406,6 +407,11 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
     ...(state === 'idle' ? { wait_mode: 'action' } : {}),
     ...(report?.waitReason ? { wait_reason: report.waitReason } : {}),
   }
+}
+
+/** 交互通知（notification）提升为独立 kind，其余 report 形态仍走 state_changed。 */
+function cliReportEventKind(report: StateChangeReport | undefined): 'interaction_required' | 'state_changed' {
+  return report?.notification ? 'interaction_required' : 'state_changed'
 }
 
 function uiSnapshotDetail(snapshot: WorkerUiSnapshot | undefined): Record<string, unknown> {
@@ -1226,11 +1232,11 @@ export class WorkerHarness {
         inbox.hold('input_pending')
       }
 
-      await this.appendEvent(workerId, 1, 'spawned', { impl }, spawned?.task.status)
+      await this.appendEvent(workerId, 1, 'lifecycle_changed', { change: 'spawned', impl }, spawned?.task.status)
       const uiSnapshot = await this.prepareUiSnapshot(spawnedHandle, p.managerKey, initialInput?.report, now)
       const turn = await this.createInitialInputTurn(p.managerKey, spawnedHandle, initialInput, now)
       if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
-        await this.appendEvent(workerId, 1, 'state_changed', {
+        await this.appendEvent(workerId, 1, cliReportEventKind(initialInput.report), {
           ...cliReportDetail(initialState, initialInput.report),
           ...uiSnapshotDetail(uiSnapshot),
           ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
@@ -2243,7 +2249,9 @@ export class WorkerHarness {
         discardPreparedLegacyContinuation()
         return expiredAfterContextWrite
       }
-      await this.appendEvent(worker.worker_id, legacy.seq, 'handoff_started', {
+      // handoff 进度节点：只落审计。完成点（新化身就位的 lifecycle_changed）才唤醒 manager。
+      await this.appendAuditEvent(worker.worker_id, legacy.seq, 'lifecycle_changed', {
+        change: 'handoff_started',
         target_impl: targetImpl,
         legacy: true,
         handoff_id: handoff.package_id,
@@ -2348,8 +2356,8 @@ export class WorkerHarness {
       await this.appendEvent(
         worker.worker_id,
         handle.seq,
-        'spawned',
-        { impl: targetImpl, from_seq: legacy.seq, legacy: true },
+        'lifecycle_changed',
+        { change: 'spawned', impl: targetImpl, from_seq: legacy.seq, legacy: true },
         updated?.task.status,
       )
       const uiSnapshot = await this.prepareUiSnapshot(handle, managerKey, initialInput?.report, now)
@@ -2358,7 +2366,7 @@ export class WorkerHarness {
         await this.appendEvent(
           worker.worker_id,
           handle.seq,
-          'state_changed',
+          cliReportEventKind(initialInput.report),
           {
             ...cliReportDetail(initialState, initialInput.report),
             ...uiSnapshotDetail(uiSnapshot),
@@ -2956,11 +2964,11 @@ export class WorkerHarness {
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
     const replayedConsumed = inbox.requeueConsumed()
-    await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq }, revived?.task.status)
+    await this.appendEvent(worker.worker_id, newHandle.seq, 'lifecycle_changed', { change: 'resumed', from_seq: mainline.seq }, revived?.task.status)
     const uiSnapshot = await this.prepareUiSnapshot(newHandle, managerKey, initialInput?.report, now)
     const turn = await this.createInitialInputTurn(managerKey, newHandle, initialInput, now)
     if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
-      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', {
+      await this.appendEvent(worker.worker_id, newHandle.seq, cliReportEventKind(initialInput.report), {
         ...cliReportDetail(initialState, initialInput.report),
         ...uiSnapshotDetail(uiSnapshot),
         ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
@@ -3157,7 +3165,9 @@ export class WorkerHarness {
         if (admission) void admission.dispose().catch(() => {})
         return { restoredDurableReceipt: false, delivery: expiredBeforeHandoffEvent }
       }
-      await this.appendEvent(worker.worker_id, source.seq, 'handoff_started', {
+      // handoff 进度节点：只落审计。完成点（新化身就位的 lifecycle_changed）才唤醒 manager。
+      await this.appendAuditEvent(worker.worker_id, source.seq, 'lifecycle_changed', {
+        change: 'handoff_started',
         target_impl: targetImpl,
         handoff_id: handoff.package_id,
       })
@@ -3313,19 +3323,20 @@ export class WorkerHarness {
     }
     const replayedConsumed = inbox.requeueConsumed()
     const restoredDurableReceipt = replayedConsumed > 0
-    // 与 reviveIncarnation 收尾时发 'resumed' 事件对称——交接产出的新化身同样是一次"开工",
-    // 缺了这个事件会让事件流看不到 handoff 之后新主线是何时、以何种 impl 建起来的。
+    // 与 reviveIncarnation 收尾时发 lifecycle_changed(resumed) 事件对称——交接产出的新化身同样是
+    // 一次"开工",缺了这个事件会让事件流看不到 handoff 之后新主线是何时、以何种 impl 建起来的。
+    // 这是 handoff 全流程对 manager 的唯一唤醒（进度节点只落审计）。
     await this.appendEvent(
       worker.worker_id,
       newHandle.seq,
-      'spawned',
-      { impl: targetImpl, from_seq: source.seq, handoff_id: handoff.package_id },
+      'lifecycle_changed',
+      { change: 'spawned', impl: targetImpl, from_seq: source.seq, handoff_id: handoff.package_id },
       handedOff?.task.status
     )
     const uiSnapshot = await this.prepareUiSnapshot(newHandle, managerKey, initialInput?.report, now)
     const turn = await this.createInitialInputTurn(managerKey, newHandle, initialInput, now)
     if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
-      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', {
+      await this.appendEvent(worker.worker_id, newHandle.seq, cliReportEventKind(initialInput.report), {
         ...cliReportDetail(initialState, initialInput.report),
         ...uiSnapshotDetail(uiSnapshot),
         ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
@@ -5061,7 +5072,7 @@ export class WorkerHarness {
   }
 
   /**
-   * 上报一次停摆,走 `state_changed` + `detail.text` 这条既有的唤醒形状,并按投递结局更新
+   * 上报一次停摆,走独立的 `liveness_stall` kind + `detail.text` 这条唤醒形状,并按投递结局更新
    * 已报标记(含退避)。
    *
    * **首报带停摆事实、重试不重复**(`attempts`):Harness 不主动读取终端；Manager 若需要
@@ -5089,9 +5100,8 @@ export class WorkerHarness {
     }
     let delivery: HarnessEventDelivery | undefined
     try {
-      delivery = await this.appendEventAwaitingDelivery(h.worker_id, h.seq, 'state_changed', {
+      delivery = await this.appendEventAwaitingDelivery(h.worker_id, h.seq, 'liveness_stall', {
         to: 'running' satisfies WorkerContractState,
-        source: 'liveness_stall',
         ...(text ? { text } : {}),
       })
     } catch (err) {
@@ -5590,11 +5600,12 @@ export class WorkerHarness {
       })
       return { ...previous, incarnations, updated_at: now }
     })
-    await this.appendEvent(
+    // handoff 进度节点：只落审计。完成点（新化身就位的 lifecycle_changed）才唤醒 manager。
+    await this.appendAuditEvent(
       worker.worker_id,
       incarnation.seq,
-      'superseded',
-      { reason: 'handoff_stop_verified' },
+      'lifecycle_changed',
+      { change: 'superseded', reason: 'handoff_stop_verified' },
     )
   }
 
@@ -6139,7 +6150,7 @@ export class WorkerHarness {
       this.fireIncarnationTerminal(h)
     }
     if (report) {
-      await this.appendEvent(h.worker_id, h.seq, 'state_changed', cliReportDetail(external, report), committedStatus)
+      await this.appendEvent(h.worker_id, h.seq, cliReportEventKind(report), cliReportDetail(external, report), committedStatus)
     } else if (external !== 'running') {
       await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: external }, committedStatus)
     }
@@ -6383,17 +6394,24 @@ export class WorkerHarness {
       // 主线分支是 task 状态机的主要推进点——事件必须自带落账后的状态,否则订阅方现读台账
       // 时若已经有下一次落账(如 §5.3 透明接续把终态拉回 running),这次迁移(含 completed
       // 这类终态)会被整条吞掉。见 worker-events.ts `HarnessEvent.task_status`。
-      await this.appendEvent(
-        h.worker_id,
-        h.seq,
-        'state_changed',
-          {
-            ...(report?.notification ? cliReportDetail(state, report) : { to: state, ...wakeDetail }),
-            ...uiSnapshotDetail(uiSnapshot),
-            ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
-        },
-        committed?.task.status
-      )
+      const mainlineEventDetail = {
+        ...(report?.notification ? cliReportDetail(state, report) : { to: state, ...wakeDetail }),
+        ...uiSnapshotDetail(uiSnapshot),
+        ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+      }
+      if (endReason === 'superseded') {
+        // handoff 进度节点（源化身退出）：只落审计——任务状态保持 running 占位，
+        // 对 manager 的唤醒由新化身就位的 lifecycle_changed 承载（一次 handoff 一次唤醒）。
+        await this.appendAuditEvent(h.worker_id, h.seq, cliReportEventKind(report), mainlineEventDetail)
+      } else {
+        await this.appendEvent(
+          h.worker_id,
+          h.seq,
+          cliReportEventKind(report),
+          mainlineEventDetail,
+          committed?.task.status
+        )
+      }
     })
     await this.deliverNativeActivityNotifications(h.worker_id)
     if (recoveryNoticeCreated) {
@@ -6488,11 +6506,11 @@ export class WorkerHarness {
    * `HarnessEvent.task_status` 的字段注释(为什么必须由事件自带,以及缺席时的语义)。
    *
    * 本文件里带这个参数的调用点(8 处,均为 task 级迁移):spawnWorker 的失败/成功收尾、
-   * reviveIncarnation 的 `resumed`、handoffIncarnation 第 4 步的 `spawned`、markCrashed 的
-   * `exited`、realignAliveIncarnation 的 `state_changed`、killWorker 的 `killed`、
-   * processStateChange 主线分支的 `state_changed`。其余调用点(化身级事件:input_sent /
-   * fork 分支 state_changed / query_failed / dead-letter / superseded / handoff_started …)
-   * 都不动 task.status,一律不传。
+   * reviveIncarnation 的 lifecycle_changed(resumed)、handoffIncarnation 第 4 步的
+   * lifecycle_changed(spawned)、markCrashed 的 `exited`、realignAliveIncarnation 的
+   * `state_changed`、kill 核验后化身退出的 `state_changed`、processStateChange 主线分支的
+   * `state_changed`。其余调用点(化身级事件:input_sent / fork 分支 state_changed /
+   * query_failed / dead-letter / handoff 进度节点 …)都不动 task.status,一律不传。
    *
    * upsert 的 mutator 返回 undefined(worker 已不在台账)时 `committed` 是 undefined,这里
    * 原样落成"不带该字段",订阅方退回现读台账兜底,不构造假状态。

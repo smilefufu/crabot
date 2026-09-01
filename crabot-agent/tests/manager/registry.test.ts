@@ -1454,13 +1454,11 @@ describe('inbound-adapters', () => {
     expect(shouldWakeOnHarnessEvent({ ...base, kind: 'legacy_imported' })).toBe(false)
 
     const otherKinds: HarnessEventKind[] = [
-      'spawned',
+      'lifecycle_changed',
       'state_changed',
       'exited',
-      'killed',
-      'superseded',
-      'handoff_started',
-      'resumed',
+      'interaction_required',
+      'liveness_stall',
       'query_failed',
     ]
     for (const kind of otherKinds) {

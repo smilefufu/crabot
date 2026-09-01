@@ -20,12 +20,12 @@ describe('WorkerEventLog', () => {
 
   it('append 后 readAll 能原样往返读回', async () => {
     const log = new WorkerEventLog(workerDir)
-    await log.append({ kind: 'spawned', worker_id: 'w-1', seq: 0, ts: '2026-01-01T00:00:00Z' })
+    await log.append({ kind: 'lifecycle_changed', worker_id: 'w-1', seq: 0, ts: '2026-01-01T00:00:00Z' })
     await log.append({ kind: 'state_changed', worker_id: 'w-1', seq: 0, detail: { from: 'idle', to: 'running' } })
 
     const events: HarnessEvent[] = await log.readAll()
     expect(events).toHaveLength(2)
-    expect(events[0]).toEqual({ kind: 'spawned', worker_id: 'w-1', seq: 0, ts: '2026-01-01T00:00:00Z' })
+    expect(events[0]).toEqual({ kind: 'lifecycle_changed', worker_id: 'w-1', seq: 0, ts: '2026-01-01T00:00:00Z' })
     expect(events[1].kind).toBe('state_changed')
     expect(events[1].detail).toEqual({ from: 'idle', to: 'running' })
     expect(typeof events[1].ts).toBe('string')
@@ -47,7 +47,7 @@ describe('WorkerEventLog', () => {
   it('目录不存在时 append 自动创建', async () => {
     const nested = join(dir, 'a', 'b', 'worker-x')
     const log = new WorkerEventLog(nested)
-    await log.append({ kind: 'spawned', worker_id: 'w-x', seq: 0 })
+    await log.append({ kind: 'lifecycle_changed', worker_id: 'w-x', seq: 0 })
 
     const stat = await fs.stat(join(nested, 'events.jsonl'))
     expect(stat.isFile()).toBe(true)

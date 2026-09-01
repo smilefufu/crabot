@@ -339,8 +339,9 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(fake.spawnCalls).toHaveLength(1)
     expect(fake.spawnCalls[0].worker_id).toBe(worker.worker_id)
 
-    const spawnedEvents = events.filter((e) => e.kind === 'spawned')
+    const spawnedEvents = events.filter((e) => e.kind === 'lifecycle_changed')
     expect(spawnedEvents).toHaveLength(1)
+    expect(spawnedEvents[0].detail).toMatchObject({ change: 'spawned' })
     expect(spawnedEvents[0].worker_id).toBe(worker.worker_id)
     expect(spawnedEvents[0].seq).toBe(1)
 
@@ -529,11 +530,10 @@ describe('WorkerHarness.spawnWorker', () => {
       },
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
-    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')?.detail
+    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'interaction_required')?.detail
     const snapshotId = detail?.snapshot_id
 
     expect(detail).toMatchObject({
-      kind: 'interaction_required',
       snapshot_id: expect.any(String),
       snapshot_expires_at: expect.any(String),
       actions: UI_ACTIONS,
@@ -574,7 +574,7 @@ describe('WorkerHarness.spawnWorker', () => {
       },
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
-    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')?.detail
+    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'interaction_required')?.detail
 
     nowValue += 11 * 60_000
     await expect(harness.respondToWorkerUi(worker.worker_id, detail?.snapshot_id as string, 'confirm')).rejects.toThrow(
@@ -600,7 +600,7 @@ describe('WorkerHarness.spawnWorker', () => {
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
     const incarnation = worker.incarnations[0]
-    const firstSnapshotId = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')
+    const firstSnapshotId = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'interaction_required')
       ?.detail?.snapshot_id as string
     const handle: IncarnationHandle = {
       worker_id: worker.worker_id,
@@ -1673,12 +1673,11 @@ describe('WorkerHarness.handleStateChange', () => {
       ui: { fingerprint: 'question:yes-no', actions: UI_ACTIONS },
       notification: { type: 'permission_prompt', message: 'Choose', title: 'Question' },
     })
-    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
+    await waitUntil(() => events.some((event) => event.kind === 'interaction_required'))
 
-    const detail = events.find((event) => event.kind === 'state_changed')?.detail
+    const detail = events.find((event) => event.kind === 'interaction_required')?.detail
     expect(detail).toMatchObject({
       to: 'idle',
-      kind: 'interaction_required',
       wait_mode: 'action',
       wait_reason: 'interaction_required',
       notification_type: 'permission_prompt',
@@ -1706,10 +1705,9 @@ describe('WorkerHarness.handleStateChange', () => {
       ui: { fingerprint: 'claude_exit_plan:1-2', actions: UI_ACTIONS },
       notification: { type: 'automatic_interaction_failed' },
     })
-    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
+    await waitUntil(() => events.some((event) => event.kind === 'interaction_required'))
 
-    expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
-      kind: 'interaction_required',
+    expect(events.find((event) => event.kind === 'interaction_required')?.detail).toMatchObject({
       notification_type: 'automatic_interaction_failed',
       text: 'Exit plan mode?',
       snapshot_id: expect.any(String),
@@ -1742,7 +1740,7 @@ describe('WorkerHarness.handleStateChange', () => {
       waitReason: 'interaction_required',
       notification: { type: 'permission_prompt', message: '请选择' },
     })
-    await waitUntil(() => events.some((event) => event.worker_id === notificationWorker.worker_id && event.kind === 'state_changed'))
+    await waitUntil(() => events.some((event) => event.worker_id === notificationWorker.worker_id && event.kind === 'interaction_required'))
     expect(await harness.getWorkerTurn(notificationWorker.worker_id)).toBeUndefined()
   })
 
@@ -1755,7 +1753,7 @@ describe('WorkerHarness.handleStateChange', () => {
       waitReason: 'interaction_required',
       notification: { type: 'permission_prompt', message: '请选择' },
     })
-    await waitUntil(() => events.some((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed'))
+    await waitUntil(() => events.some((event) => event.worker_id === worker.worker_id && event.kind === 'interaction_required'))
     expect(await harness.getWorkerTurn(worker.worker_id)).toBeUndefined()
 
     fake.emitStateChange(handle, 'idle', '交互完成后的本轮结果')
@@ -2640,7 +2638,8 @@ describe('WorkerHarness.sendToWorker', () => {
       for (let step = 0; step < 5; step++) await Promise.resolve()
 
       expect((await harness.readWorkerEvents(worker.worker_id))
-        .filter((event) => event.kind === 'handoff_started')).toEqual([])
+        .filter((event) => event.kind === 'lifecycle_changed'
+          && (event.detail as { change?: string } | undefined)?.change === 'handoff_started')).toEqual([])
       expect(target.spawnCalls).toEqual([])
     } finally {
       releaseCapture.resolve()
@@ -3147,7 +3146,7 @@ describe('WorkerHarness.killWorker', () => {
 
     await expect(harness.killWorker(worker.worker_id)).resolves.toBeUndefined()
     expect(fake.killCalls).toHaveLength(1) // 未被再次调用
-    expect(events.filter((e) => e.kind === 'killed')).toHaveLength(0)
+    expect(events).toHaveLength(0) // 不再发任何事件(killed kind 已随事件面收敛删除)
   })
 
   it('不存在的 worker_id → WorkerNotFoundError', async () => {
@@ -4107,8 +4106,9 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
 
-    const spawned = events.filter((e) => e.kind === 'spawned')
+    const spawned = events.filter((e) => e.kind === 'lifecycle_changed')
     expect(spawned).toHaveLength(1)
+    expect(spawned[0].detail).toMatchObject({ change: 'spawned' })
     expect(spawned[0].task_status).toBe('running')
     expect(spawned[0].task_status).toBe(worker.task.status)
   })
