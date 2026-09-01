@@ -1455,7 +1455,6 @@ describe('inbound-adapters', () => {
 
     const otherKinds: HarnessEventKind[] = [
       'spawned',
-      'input_held',
       'state_changed',
       'exited',
       'killed',

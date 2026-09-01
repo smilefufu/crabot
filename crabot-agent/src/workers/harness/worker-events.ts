@@ -20,7 +20,6 @@ export type HarnessEventKind =
   | 'turn_completed'
   | 'operation_settled'
   | 'input_sent'
-  | 'input_held'
   | 'state_changed'
   | 'exited'
   | 'killed'
