@@ -113,6 +113,8 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
         workersDir,
         now,
         onEvent: (e) => events.push(e),
+        // 无回调时 durable 通知不投递、turn_completed 不落 events.jsonl（见 harness-lifecycle 同款注释）
+        onOperationNotification: async () => undefined,
       }
       const harness = new WorkerHarness(deps)
       // onStateChange 接线契约(harness.ts 文件头):harness 先构造好、把 handleStateChange
@@ -176,8 +178,10 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
       expect(events.filter((e) => e.kind === 'lifecycle_changed'
         && (e.detail as { change?: string } | undefined)?.change === 'spawned')).toHaveLength(1)
       expect(events.filter((e) => e.kind === 'input_sent')).toHaveLength(1)
-      // 至少两次真实状态回调(idle 一次、exited 一次)经 handleStateChange 落盘并外发。
-      expect(events.filter((e) => e.kind === 'state_changed').length).toBeGreaterThanOrEqual(2)
+      // 至少两次真实状态回调(idle 一次、exited 一次)经 handleStateChange 落盘——回合边界
+      // 的唯一唤醒是 enriched turn_completed(durable 通道,写 events.jsonl,不经 onEvent)。
+      await waitUntil(async () =>
+        (await harness.readWorkerEvents(worker.worker_id)).filter((e) => e.kind === 'turn_completed').length >= 2)
 
       // reconcileOnStartup 幂等:worker 已是终态,巡检不该把它错误判成 revived/failed,
       // 也不该再调用 adapter.state()(harness.ts reconcileOnStartup 的设计:已终态 worker

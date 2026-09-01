@@ -606,6 +606,34 @@ describe('ManagerRegistry', () => {
     }
   })
 
+  it('routeOperationNotification: turn_completed 等非 activity 通知同样注入 task_id / trigger_type(detail 形态与通道无关)', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ text: '记录回合完成', stopReason: 'end_turn' })
+    const owningKey = 'wechat::op-memory-owner' as ManagerKey
+    const baseWorker = makeLedgerWorker('w-op-memory', owningKey)
+    const worker = { ...baseWorker, task: { ...baseWorker.task, id: 'task-op-memory' } }
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      ledger: fakeLedger({ 'w-op-memory': worker }),
+    }))
+
+    await registry.routeOperationNotification(owningKey, {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'turn_completed',
+      worker_id: 'w-op-memory',
+      seq: 3,
+      task_status: 'halted',
+      detail: { turn_id: 'turn-1', turn_pending: true, summary: '明确结论' },
+    })
+
+    const rendered = calls[0].messages.map((message) =>
+      typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+    ).join('\n')
+    expect(rendered).toContain('"trigger_type":"message"')
+    expect(rendered).toContain('"task_id":"task-op-memory"')
+    expect(rendered).toContain('"outcome":"halted"')
+  })
+
   it('operation notification 在 owning Manager 正执行时进入当前 mailbox，下一轮 LLM 批量读取', async () => {
     const calls: LLMStreamParams[] = []
     const entered = deferred()

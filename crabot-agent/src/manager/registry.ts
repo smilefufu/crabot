@@ -470,14 +470,18 @@ export class ManagerRegistry {
       }
       return { consumed: false, registered: true }
     }
-    const capture = this.captureIngress()
-    const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event }, event.ts)
-    const loop = this.getOrCreate(key)
-    if (this.isEpisodeActive(key)) {
+    // 与 onEvent 通道同一份 detail 形态：trigger_type / task_id / outcome 由
+    // prepareWorkerEventRoute 现读台账注入（manager 的 prompt 判据如「完成结果的记忆候选」
+    // 依赖它们）——durable 通道不能因为是通知就少了这层丰富化。路由目标以台账
+    // manager_key 为准（与 routeWorkerEvent 一致）；台账查不到时退回入参 key——它是
+    // harness 持久化通知时记下的快照，比系统线程更贴近原投递意图。
+    const { key: routedKey, envelope } = await this.prepareWorkerEventRoute(event, key)
+    const loop = this.getOrCreate(routedKey)
+    if (this.isEpisodeActive(routedKey)) {
       loop.enqueueDuringEpisode(envelope)
       return { consumed: true }
     }
-    const result = await this.runWake(key, envelope)
+    const result = await this.runWake(routedKey, envelope)
     return { consumed: result.consumedEvents === true }
   }
 
@@ -598,7 +602,7 @@ export class ManagerRegistry {
     return { now, timezone, received_at: formatOffsetIso(now, timezone) }
   }
 
-  private async prepareWorkerEventRoute(event: HarnessEvent): Promise<{
+  private async prepareWorkerEventRoute(event: HarnessEvent, fallbackKey?: ManagerKey): Promise<{
     key: ManagerKey
     envelope: TimedWakeEnvelope
   }> {
@@ -616,7 +620,7 @@ export class ManagerRegistry {
         }
       : event
     return {
-      key: found?.worker.manager_key ?? SYSTEM_TASKS_MANAGER_KEY,
+      key: found?.worker.manager_key ?? fallbackKey ?? SYSTEM_TASKS_MANAGER_KEY,
       envelope: this.makeEnvelope(
         capture,
         { kind: 'worker_event', event: eventWithOrigin },

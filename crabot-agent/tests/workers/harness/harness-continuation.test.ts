@@ -225,6 +225,8 @@ async function makeHarness(
     workersDir,
     now,
     onEvent: (e) => events.push(e),
+    // 无回调时 durable 通知不投递、turn_completed 不落 events.jsonl（见 harness-lifecycle 同款注释）
+    onOperationNotification: async () => undefined,
     mintActivityCursor: async ({ offset }) => `opaque-activity-${['start', 'one', 'two', 'three'][offset] ?? 'later'}`,
     // 本文件里 FakeAdapter 缺省 implId 就是 'builtin'（多数测试拿它当泛化的"随便一个实现"
     // 桩用，不关心真实 LLM 注入）；handoffIncarnation 的 pre-flight（裁决 B 修复）对目标
@@ -1433,11 +1435,12 @@ describe('BuiltinWorkerAdapter → WorkerHarness — session_ref 时效性修复
     const [afterSecondBurst] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(afterFirstBurstRef)
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(spawnTimeSessionRef)
-    await waitUntil(async () => events.filter((event) =>
-      event.worker_id === worker.worker_id &&
-      event.kind === 'state_changed' &&
-      event.detail?.to === 'idle',
-    ).length === 2)
+    // 两轮 idle 拍各落一条 enriched turn_completed（回合边界唯一唤醒，durable 通道，
+    // 写 events.jsonl，不经 onEvent 的 events 数组）。
+    await waitUntil(async () =>
+      (await harness.readWorkerEvents(worker.worker_id)).filter((event) =>
+        event.kind === 'turn_completed' && event.detail?.to === 'idle',
+      ).length >= 2)
     await builtinAdapter.dispose()
   })
 })
