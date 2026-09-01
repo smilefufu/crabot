@@ -1220,6 +1220,8 @@ export class AdminModule extends ModuleBase {
       task_id: payload.task_id,
       status: payload.new_status,
       title: worker.task?.title ?? payload.task_id,
+      ...(worker.task?.halt ? { halt: worker.task.halt } : {}),
+      ...(worker.task?.closed ? { closed: worker.task.closed } : {}),
     })
   }
 

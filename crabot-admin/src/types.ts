@@ -1904,7 +1904,21 @@ export type AgentTaskStatus =
 /** §8.3 `get_worker_detail` 回来的台账条目里，admin 状态卡实际用到的那几个字段。 */
 export interface LedgerWorkerBrief {
   worker_id: string
-  task?: { id: TaskId; title: string; status: AgentTaskStatus }
+  task?: {
+    id: TaskId
+    title: string
+    status: AgentTaskStatus
+    /** 载体停止的事实记录(status='halted') */
+    halt?: {
+      halted_at: string
+      halt_reason: string
+      worker_self_report?: { outcome: 'completed' | 'failed'; summary: string }
+      stop_unverified?: boolean
+      detail?: string
+    }
+    /** 关闭信息(status='closed') */
+    closed?: { at: string; by: string; note?: string }
+  }
   report_to?: { channel_id: string; session_id: string }
 }
 
@@ -1914,6 +1928,26 @@ export interface ChatTaskSnapshot {
   /** v2 存量任务是 admin 的 `TaskStatus`；v3 起由 agent 事件透传 `AgentTaskStatus`。 */
   status: TaskStatus | AgentTaskStatus
   title: string
+  /** 载体停止的事实记录(status='halted') */
+  halt?: {
+    halted_at: string
+    halt_reason: string
+    worker_self_report?: { outcome: 'completed' | 'failed'; summary: string }
+    stop_unverified?: boolean
+    detail?: string
+  }
+  /** 关闭信息(status='closed') */
+  closed?: { at: string; by: string; note?: string }
+  /** 载体停止的事实记录(status='halted') */
+  halt?: {
+    halted_at: string
+    halt_reason: string
+    worker_self_report?: { outcome: 'completed' | 'failed'; summary: string }
+    stop_unverified?: boolean
+    detail?: string
+  }
+  /** 关闭信息(status='closed') */
+  closed?: { at: string; by: string; note?: string }
   /** 当前计划步骤（task.plan 存在时） */
   step?: { index: number; total: number; description: string }
 }

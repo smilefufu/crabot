@@ -2,26 +2,24 @@ import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Loading } from '../../components/Common/Loading'
 import { agentObservabilityService, type LedgerWorker, type WorkerTaskStatus } from '../../services/agent-observability'
+import { describeWorkerTask, TONE_COLOR } from './worker-state'
 
-// 键放宽为 string:历史 trace 数据可能携带旧状态值,缺键时回退原样显示
-const STATUS_LABEL: Record<string, string> = {
-  queued: '排队', running: '执行中', halted: '已停止待处置', closed: '已关闭', waiting_input: '等输入',
-  completed: '已完成', failed: '失败', cancelled: '已取消',
-}
-const STATUS_COLOR: Record<string, string> = {
-  queued: 'var(--text-muted)', running: 'var(--info)', halted: 'var(--warning)', closed: 'var(--text-muted)', waiting_input: 'var(--warning)',
-  completed: 'var(--success)', failed: 'var(--error)', cancelled: 'var(--text-muted)',
-}
 const IMPLEMENTATION_LABEL: Record<string, string> = {
   builtin: '内置',
   'claude-code': 'Claude Code',
   codex: 'Codex',
   legacy: '旧版',
 }
+// 状态过滤是机器判据(4 态);行内展示由 describeWorkerTask 从 evidence 推导人话,
+// 专门的枚举→中文映射表已删除(spec §11 展示形态优化)。
 const STATUS_OPTIONS: Array<{ value: '' | WorkerTaskStatus; label: string }> = [
   { value: '', label: '全部状态' },
-  ...Object.entries(STATUS_LABEL).map(([value, label]) => ({ value: value as WorkerTaskStatus, label })),
+  { value: 'queued', label: '排队中' },
+  { value: 'running', label: '在跑' },
+  { value: 'halted', label: '已停止' },
+  { value: 'closed', label: '已关闭' },
 ]
+
 
 function relativeTime(iso: string): string {
   const elapsed = Math.max(0, Date.now() - Date.parse(iso))
@@ -134,8 +132,8 @@ export const WorkersView: React.FC = () => {
                   </Link>
                   <div className="trace-table__identifier">{worker.worker_id.slice(0, 12)}</div>
                 </td>
-                <td className="trace-table__status" style={{ color: STATUS_COLOR[worker.task.status] }}>
-                  {STATUS_LABEL[worker.task.status]}
+                <td className="trace-table__status" style={{ color: TONE_COLOR[describeWorkerTask(worker.task).tone] }}>
+                  {describeWorkerTask(worker.task).phrase}
                 </td>
                 <td className="trace-table__implementation">{implementationLabel(worker)}</td>
                 <td className="trace-table__manager">

@@ -29,7 +29,10 @@ function workerFixture() {
   return {
     worker_id: 'w-1234567890ab',
     manager_key: 'wechat::sess-1',
-    task: { id: 'w-1234567890ab', title: '任务标题', status: 'completed', created_at: '2026-08-01T00:00:00.000Z' },
+    task: {
+      id: 'w-1234567890ab', title: '任务标题', status: 'halted', created_at: '2026-08-01T00:00:00.000Z',
+      halt: { halted_at: '2026-08-01T02:00:00.000Z', halt_reason: 'worker_finalized', worker_self_report: { outcome: 'completed', summary: '接口契约核对完毕' } },
+    },
     origin: { trigger_type: 'message' as const, spawned_by_episode: 'ep-abcd1234' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
     incarnations: [
@@ -72,8 +75,8 @@ describe('WorkersView', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('任务标题')).toBeInTheDocument())
-    fireEvent.change(screen.getByLabelText('状态过滤'), { target: { value: 'failed' } })
-    await waitFor(() => expect(mocked.listWorkers).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'failed', include_terminal: true, page: 1 })))
+    fireEvent.change(screen.getByLabelText('状态过滤'), { target: { value: 'halted' } })
+    await waitFor(() => expect(mocked.listWorkers).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'halted', page: 1 })))
   })
 
   it('worker 链接到详情，manager 链接到 manager 详情', async () => {
@@ -301,7 +304,9 @@ describe('WorkerDetail', () => {
 
     await screen.findByText('代码助手')
     expect(screen.getByText('核对接口契约')).toBeInTheDocument()
-    expect(screen.getAllByText('已完成')).toHaveLength(2)
+    // worker 卡片展示 evidence 人话(自报完成);子 Agent 状态仍是已完成
+    expect(screen.getAllByText('已完成')).toHaveLength(1)
+    expect(screen.getByText(/已停止：自报完成：接口契约核对完毕/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /代码助手.*核对接口契约.*用时 2 分钟.*已完成/ })).toHaveAttribute(
       'href',
       `/traces/workers/${encodeURIComponent('w-1234567890ab')}/subagents/${encodeURIComponent('agent-child-1')}`,

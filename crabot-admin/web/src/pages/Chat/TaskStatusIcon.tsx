@@ -12,6 +12,16 @@ import type { ChatTaskSnapshot } from '../../types/chat'
  * 状态中文映射。上半段是 v2 存量任务的状态，下半段是 protocol-agent-v3 §5.2 的精简状态机
  * （cutover 之后 agent 事件推过来的就是这几个值）。两套并存：历史卡片仍要看得懂。
  */
+function haltedPhrase(snapshot: ChatTaskSnapshot): string {
+  const halt = snapshot.halt
+  if (halt?.worker_self_report) {
+    return `已停止：自报${halt.worker_self_report.outcome === 'failed' ? '失败' : '完成'}（${halt.worker_self_report.summary}）`
+  }
+  if (halt?.stop_unverified) return '已停止：停止未核验'
+  if (halt?.halt_reason === 'crashed') return '已停止：崩溃'
+  return '已停止：待处置'
+}
+
 const STATUS_LABELS: Record<string, string> = {
   pending: '排队中',
   planning: '规划中',
@@ -57,7 +67,7 @@ export const TaskStatusIcon: React.FC<TaskStatusIconProps> = ({ taskId, snapshot
       </div>
       {snapshot && (
         <div style={{ color: 'rgba(255,255,255,0.85)' }}>
-          状态：{STATUS_LABELS[snapshot.status] ?? snapshot.status}
+          状态：{snapshot.status === 'halted' ? haltedPhrase(snapshot) : STATUS_LABELS[snapshot.status] ?? snapshot.status}
         </div>
       )}
       {snapshot?.step && (

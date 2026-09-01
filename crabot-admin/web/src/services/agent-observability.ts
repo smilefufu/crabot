@@ -113,9 +113,17 @@ export interface LedgerWorker {
     priority?: string
     tags?: string[]
     goal?: string
-    outcome?: string
     created_at: string
-    completed_at?: string
+    /** 载体停止的事实记录(status='halted'),spec 2026-08-31-worker-stop-oversight-design §5.1 */
+    halt?: {
+      halted_at: string
+      halt_reason: string
+      worker_self_report?: { outcome: 'completed' | 'failed'; summary: string }
+      stop_unverified?: boolean
+      detail?: string
+    }
+    /** 关闭信息(status='closed'),含迁移来源旧值备注 */
+    closed?: { at: string; by: string; note?: string }
     error?: string
   }
   origin: {

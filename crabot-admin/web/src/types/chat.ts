@@ -65,6 +65,16 @@ export interface ChatTaskSnapshot {
   status: string
   title: string
   step?: { index: number; total: number; description: string }
+  /** 载体停止的事实记录(status='halted'):给人看的文案由这里推导 */
+  halt?: {
+    halted_at: string
+    halt_reason: string
+    worker_self_report?: { outcome: 'completed' | 'failed'; summary: string }
+    stop_unverified?: boolean
+    detail?: string
+  }
+  /** 关闭信息(status='closed') */
+  closed?: { at: string; by: string; note?: string }
 }
 
 /** WebSocket 连接状态 */

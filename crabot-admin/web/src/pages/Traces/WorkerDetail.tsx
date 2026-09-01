@@ -14,21 +14,13 @@ import {
   type WorkerTraceEvent,
   type WorkerSubagentSummary,
 } from '../../services/agent-observability'
+import { describeWorkerTask, TONE_COLOR } from './worker-state'
 
 const IMPL_LABEL: Record<WorkerIncarnation['impl'], string> = {
   builtin: '内置',
   'claude-code': 'Claude Code',
   codex: 'Codex',
   legacy: '旧版记录',
-}
-// 键放宽为 string:历史 trace 数据可能携带旧状态值,缺键时回退原样显示
-const STATUS_LABEL: Record<string, string> = {
-  queued: '排队', running: '执行中', halted: '已停止待处置', closed: '已关闭', waiting_input: '等输入',
-  completed: '已完成', failed: '失败', cancelled: '已取消',
-}
-const STATUS_COLOR: Record<string, string> = {
-  queued: 'var(--text-muted)', running: 'var(--info)', halted: 'var(--warning)', closed: 'var(--text-muted)', waiting_input: 'var(--warning)',
-  completed: 'var(--success)', failed: 'var(--error)', cancelled: 'var(--text-muted)',
 }
 const INCARNATION_STATE_LABEL: Record<string, string> = {
   running: '执行中', idle: '等输入', exited: '已结束',
@@ -692,6 +684,8 @@ const WorkerDetailContent: React.FC = () => {
   if (loading) return <Loading />
   if (error || !worker) return <div style={{ color: 'var(--text-muted)', padding: 24 }}>任务详情暂不可用：{error ?? '未找到'}</div>
 
+  const statePhrase = describeWorkerTask(worker.task)
+
   const mainline = mainlineIncarnation(worker.incarnations)
   const mainlineSeq = mainline?.seq
   const selectedIncarnation = worker.incarnations.find((incarnation) => incarnation.seq === selectedSeq) ?? mainline
@@ -704,10 +698,25 @@ const WorkerDetailContent: React.FC = () => {
             <h1 style={{ fontSize: 22, lineHeight: 1.3, margin: 0 }}>{worker.task.title}</h1>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>{worker.worker_id}</div>
           </div>
-          <span style={{ flex: '0 0 auto', color: STATUS_COLOR[worker.task.status], border: `1px solid ${STATUS_COLOR[worker.task.status]}`, padding: '4px 8px', fontSize: 12, fontWeight: 700 }}>
-            {STATUS_LABEL[worker.task.status]}
+          <span style={{ flex: '0 0 auto', color: TONE_COLOR[statePhrase.tone], border: `1px solid ${TONE_COLOR[statePhrase.tone]}`, padding: '4px 8px', fontSize: 12, fontWeight: 700 }}>
+            {statePhrase.phrase}
           </span>
         </div>
+        {worker.task.halt && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
+            {[
+              `停止于 ${new Date(worker.task.halt.halted_at).toLocaleString()}`,
+              ...(worker.task.halt.worker_self_report ? [`执行器自报${worker.task.halt.worker_self_report.outcome === 'failed' ? '失败' : '完成'}：${worker.task.halt.worker_self_report.summary}`] : []),
+              ...(worker.task.halt.stop_unverified ? ['停止未核验'] : []),
+              ...(worker.task.halt.detail ? [`详情：${worker.task.halt.detail}`] : []),
+            ].join(' · ')}
+          </div>
+        )}
+        {worker.task.closed && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
+            {`关闭于 ${new Date(worker.task.closed.at).toLocaleString()}（${worker.task.closed.by}）${worker.task.closed.note ? ` · ${worker.task.closed.note}` : ''}`}
+          </div>
+        )}
       </div>
 
       <section aria-label="任务概览" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', margin: '22px 0 28px', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}>

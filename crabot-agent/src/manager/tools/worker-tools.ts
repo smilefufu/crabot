@@ -179,6 +179,17 @@ function summarizeWorker(worker: LedgerWorker) {
     manager_key: worker.manager_key,
     title: worker.task.title,
     task_status: worker.task.status,
+    // 停止/关闭的 evidence 摘要:manager 据此回答"上次那事怎样了"而不必逐个查详情
+    ...(worker.task.halt ? {
+      task_halt: {
+        halted_at: worker.task.halt.halted_at,
+        halt_reason: worker.task.halt.halt_reason,
+        ...(worker.task.halt.worker_self_report ? { worker_self_report: worker.task.halt.worker_self_report } : {}),
+        ...(worker.task.halt.stop_unverified ? { stop_unverified: true } : {}),
+        ...(worker.task.halt.detail ? { detail: worker.task.halt.detail } : {}),
+      },
+    } : {}),
+    ...(worker.task.closed ? { task_closed: { at: worker.task.closed.at, by: worker.task.closed.by } } : {}),
     ...(mainline ? { incarnation_state: mainline.state, impl: mainline.impl } : {}),
     supervision_mode: worker.supervision?.mode ?? 'default',
     ...(worker.supervision?.next_due_at ? { next_due_at: worker.supervision.next_due_at } : {}),
