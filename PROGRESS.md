@@ -1,9 +1,30 @@
 # Crabot 项目进度
 
-> 最后整理：2026-08-31
+> 最后整理：2026-09-01
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
+
+### 事件面收敛（kind 粒度=处置规则粒度，一次物理事实一次唤醒）：已合入（PR #137，main `83da131a`）
+
+- spec `2026-09-01-event-surface-convergence-design`（#136 follow-up ①）；协议 agent-v3
+  3.8.0 先行（§4.1/§5.5.3/§5.5.4/§6.3/§9.2/§10.1）。五阶段：P1 唤醒/审计两档成文 +
+  删 input_held 死代码；P2 生命周期五 kind 折叠为 `lifecycle_changed{change}`，
+  interaction_required/liveness_stall 独立；P3 停止单回执 `operation_settled`（携带落账后
+  task_status，首投固化重投读回；stop_verified/死信降审计；补现网缺口 stop unknown 无 bg
+  → halted(stop_unverified)）；P4 崩溃单醒 `worker_recovery_required`（投递前校验，已处置
+  不唤醒）；P5 回合单通知——enriched `turn_completed`（detail 并入 to/text/summary + 事件级
+  task_status）为完成回合边界唯一唤醒，同拍 state_changed 让位，持久化失败回退补发。
+- review 修复（`8c2687b3`）：markCrashed 判死降审计改为以「真建了 recovery notice」为条件
+  ——停止残局（handoff 第 2 步后重启 / stop unknown 有 bg 的 op settle 后重启）建不出
+  notice，无条件降审计会让该次崩溃零唤醒零 §9.2 推送、任务永久静默。
+  routeOperationNotification 非 activity 通知补 origin 注入（trigger_type/task_id/outcome，
+  prompt 记忆候选判据依赖）。
+- **follow-up**：①Admin WorkerDetail `lifecycleActivity` 补 turn_completed 分支（回合边界
+  现掉进 technical 列表）；②handoff 内部 supersede stop 的 operation_settled 仍唤醒——
+  「一次 handoff 一次唤醒」未完全达成，加免通知标记需走 spec；③operation_settled 首写
+  task_status 是投递时现读而非结算时刻钉值（理论窗口，需存进 op 记录，走 spec）；
+  ④processStateChange crash 降审计按 recoveryNoticeCreated 对称收口（一行，当前不可达）。
 
 ### 任务状态机缩水为 4 态 + manager 停止监督修正：已合入（main `d6a76609`，PR #136）
 
@@ -25,9 +46,9 @@
   吞没、stop 核验 unknown→halted(stop_unverified)+bg 存活保持 running、halted 停因
   有向升级（haltSeverity，良性不得抹掉严重）、stop_verified 处置回执归 info、
   liveness_stall 归 content、admin/web 枚举与 Master Chat 图标同步。
-- **follow-up**（spec §11，docs `1a8dbba`）：①事件面收敛（state_changed+turn_completed
-  双投递合并、生命周期 kind 折叠）；②worker home 7 天 GC 判据（halted 不再自动回收，
-  候选方案需单独 spec 决策）；③机制兜底（弃权复发时的首选方案）。
+- **follow-up**（spec §11，docs `1a8dbba`）：①worker home 7 天 GC 判据（halted 不再自动
+  回收，候选方案需单独 spec 决策）；②机制兜底（弃权复发时的首选方案）。
+  （原①事件面收敛已完成，见上方 PR #137 段）
 
 ### manager 入站图片视觉注入（P7 拆分能力回退修复）+ get_message 媒体字段：已合入（main `29a25d08` + review 修复）
 
