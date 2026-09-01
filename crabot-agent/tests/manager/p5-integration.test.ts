@@ -751,9 +751,12 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
   it('启动时异步跑一次启动对账（register 之后发起）：台账里残留的 running 化身被对账掉，且不阻塞启动', async () => {
     boot()
     const stack = internals.managerStack!
-    // 对账把化身判死会落 `exited` 事件，onEvent 的另一条支路会去唤醒监护 manager（要跑 LLM）。
-    // 那条路由本身由 bootstrap.test.ts 覆盖，这里挡掉，免得用例结束后还留着一个在重试的 LLM 请求。
-    const routeSpy = vi.spyOn(stack.registry, 'routeWorkerEvent').mockResolvedValue(undefined)
+    // 对账判死的唤醒已改由 durable 恢复通知承载（worker_recovery_required →
+    // routeOperationNotification；markCrashed 的 exited 降审计，不再走 routeWorkerEvent）。
+    // 两条路由都要跑 LLM episode，这里挡掉，免得用例结束后还留着在重试的 LLM 请求。
+    vi.spyOn(stack.registry, 'routeWorkerEvent').mockResolvedValue(undefined)
+    const routeOpSpy = vi.spyOn(stack.registry, 'routeOperationNotification')
+      .mockResolvedValue({ consumed: true })
     // 对账判死同样会发 §9.2 事件（下一条用例专门验它）；这里挡住投递，免得没有 MM 的测试环境
     // 刷一屏 ECONNREFUSED——注意 publisher 本身把失败吃掉了，不挡也不会让用例失败。
     vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(1)
@@ -773,7 +776,8 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
       })
       const after = await stack.ledger.findWorker('w-stale')
       expect(after!.worker.task.status).toBe('halted')
-      expect(routeSpy).toHaveBeenCalled()
+      // 判死 → 恢复通知 durable 投递 → 唤醒监护 manager
+      await waitUntil(async () => routeOpSpy.mock.calls.length > 0)
     } finally {
       await internals.onStop()
     }

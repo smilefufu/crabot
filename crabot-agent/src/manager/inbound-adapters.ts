@@ -38,12 +38,11 @@ export function attentionFlushToWakeEvent(msgs: ReadonlyArray<ChannelMessage>): 
   return { kind: 'attention_flush', messages: msgs }
 }
 
-/** manager 不需要为之醒来的 harness 事件 kind:manager 自己发起 send_to_worker 时已经在同一次
- *  工具调用里同步拿到了投递结果(engine tool_result),不需要再靠事件唤醒一次去获知"已发送"
- *  这件事本身。其余 kind(spawned/input_held/state_changed/exited/killed/superseded/
- *  handoff_started/resumed/query_failed)都代表 worker 生命周期或侧问的进展/终局,manager
- *  需要据此决定要不要转述给人类或采取下一步动作,一律唤醒。`legacy_imported` 只是一条
- *  cutover 历史记录，只落盘，不能批量唤醒 Manager。 */
+/** 审计档事件（protocol-agent-v3 §4.1 两档分层）：只落 events.jsonl，永不唤醒 manager。
+ *  `input_sent`——manager 自己发起 send_to_worker 时已经在同一次工具调用里同步拿到了投递结果，
+ *  不需要再靠事件唤醒一次去获知"已发送"这件事本身；`legacy_imported` 只是 cutover 历史记录。
+ *  其余 kind 都是唤醒档：worker 生命周期/交互/巡检/侧问的进展或终局，manager 需要据此决定
+ *  要不要转述给人类或采取下一步动作。 */
 const NO_WAKE_KINDS: ReadonlySet<HarnessEventKind> = new Set(['input_sent', 'legacy_imported'])
 
 /** harness 事件是否值得唤醒 manager(过滤规则见 `NO_WAKE_KINDS` 注释)。 */

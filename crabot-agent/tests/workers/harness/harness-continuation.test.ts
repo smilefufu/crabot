@@ -14,6 +14,7 @@ import { LedgerStore, managerKeyToFilename } from '../../../src/workers/harness/
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import type { LedgerWorker, ManagerKey } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
+import { WorkerEventLog } from '../../../src/workers/harness/worker-events'
 import { CliInputStallError, WorkerExitedError } from '../../../src/workers/errors'
 import { BuiltinWorkerAdapter } from '../../../src/workers/builtin/adapter'
 import type { BuiltinRuntimeContext } from '../../../src/workers/builtin/runtime'
@@ -224,6 +225,8 @@ async function makeHarness(
     workersDir,
     now,
     onEvent: (e) => events.push(e),
+    // 无回调时 durable 通知不投递、turn_completed 不落 events.jsonl（见 harness-lifecycle 同款注释）
+    onOperationNotification: async () => undefined,
     mintActivityCursor: async ({ offset }) => `opaque-activity-${['start', 'one', 'two', 'three'][offset] ?? 'later'}`,
     // 本文件里 FakeAdapter 缺省 implId 就是 'builtin'（多数测试拿它当泛化的"随便一个实现"
     // 桩用，不关心真实 LLM 注入）；handoffIncarnation 的 pre-flight（裁决 B 修复）对目标
@@ -274,6 +277,14 @@ async function readHandoffPackage(workersDir: string, workerId: string, prompt: 
   return JSON.parse(await fs.readFile(join(workersDir, workerId, 'handoffs', `${handoffId}.json`), 'utf8')) as Record<string, unknown>
 }
 
+/** lifecycle_changed 事件的 detail.change 取值（事件面收敛后 handoff 进度节点只落审计日志）。 */
+const changeOf = (e: HarnessEvent): string | undefined => (e.detail as { change?: string } | undefined)?.change
+
+/** 读 worker 的 events.jsonl 审计日志（handoff 进度节点等审计事件不走 onEvent 唤醒面）。 */
+async function readAuditLog(workersDir: string, workerId: string): Promise<HarnessEvent[]> {
+  return new WorkerEventLog(join(workersDir, workerId)).readAll()
+}
+
 describe('WorkerHarness — 透明接续：revive (capabilities().revive === true)', () => {
   it('台账主线化身已 exited → adapter.resume 被调用（prevRef 用主线化身的 handle）→ 新化身入主线链 → sendToWorker 无感返回 → 事件 resumed', async () => {
     const { harness, adaptersMap } = await makeHarness()
@@ -308,8 +319,9 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     expect(w.incarnations[1].impl).toBe('builtin')
     expect(w.task.status).toBe('running') // 终态化身之上接续，task 重新回到 running
 
-    const resumedEvents = events.filter((e) => e.kind === 'resumed')
+    const resumedEvents = events.filter((e) => e.kind === 'lifecycle_changed')
     expect(resumedEvents).toHaveLength(1)
+    expect(resumedEvents[0].detail).toMatchObject({ change: 'resumed' })
     expect(resumedEvents[0].seq).toBe(w.incarnations[1].seq)
   })
 
@@ -547,8 +559,9 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
 
     expect(fake.sendInputCalls).toHaveLength(1) // 确实尝试过一次正常投递，才捕获到 WorkerExitedError
     expect(fake.resumeCalls).toHaveLength(1)
-    const resumedEvents = events.filter((e) => e.kind === 'resumed')
+    const resumedEvents = events.filter((e) => e.kind === 'lifecycle_changed')
     expect(resumedEvents).toHaveLength(1)
+    expect(resumedEvents[0].detail).toMatchObject({ change: 'resumed' })
   })
 
   it('adapter.sendInput 抛 WorkerExitedError 时台账主线化身仍是 running（迟到状态回调没追上）→ revive 前先把旧化身回填终态，不再永久卡在 running（评审 PoC 实证的修复）', async () => {
@@ -726,10 +739,13 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(newEntry.state).toBe('running')
     expect(w.task.status).toBe('running')
 
-    const handoffEvents = events.filter((e) => e.kind === 'handoff_started')
+    // handoff 进度节点（handoff_started / superseded）已降为审计事件：不出现在唤醒面，
+    // 只落 events.jsonl。
+    const audit = await readAuditLog(workersDir, worker.worker_id)
+    const handoffEvents = audit.filter((e) => e.kind === 'lifecycle_changed' && changeOf(e) === 'handoff_started')
     expect(handoffEvents).toHaveLength(1)
     expect(handoffEvents[0].seq).toBe(1)
-    const supersededEvents = events.filter((e) => e.kind === 'superseded')
+    const supersededEvents = audit.filter((e) => e.kind === 'lifecycle_changed' && changeOf(e) === 'superseded')
     expect(supersededEvents).toHaveLength(1)
   })
 
@@ -1007,13 +1023,13 @@ describe('WorkerHarness.handoffIncarnation — fixed capability snapshot', () =>
     const [current] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(current.incarnations).toHaveLength(1)
     expect(current.incarnations[0].state).toBe('running')
-    expect(events.filter((event) => event.kind === 'handoff_started' || event.kind === 'superseded')).toEqual([])
+    expect(events.filter((event) => event.kind === 'lifecycle_changed')).toEqual([])
   })
 })
 
 describe('WorkerHarness.switchWorkerImpl — 跨实现切换', () => {
   it('走同一条 handoff 路径，目标 adapter 由参数指定，源化身仍存活时先 kill 再标 superseded', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     const source = new FakeAdapter({ implId: 'claude-code', caps: { revive: true }, onStateChange: harness.handleStateChange, outputChunk: '侧问一半的输出' })
     const target = new FakeAdapter({ implId: 'codex', caps: { revive: true }, onStateChange: harness.handleStateChange })
     adaptersMap.set('claude-code', source)
@@ -1040,8 +1056,10 @@ describe('WorkerHarness.switchWorkerImpl — 跨实现切换', () => {
     expect(newEntry.impl).toBe('codex')
     expect(newEntry.forked_from).toBeUndefined()
 
-    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(1)
-    expect(events.filter((e) => e.kind === 'superseded')).toHaveLength(1)
+    // handoff 进度节点（handoff_started / superseded）已降为审计事件，只落 events.jsonl。
+    const auditSwitch = await readAuditLog(workersDir, worker.worker_id)
+    expect(auditSwitch.filter((e) => e.kind === 'lifecycle_changed' && changeOf(e) === 'handoff_started')).toHaveLength(1)
+    expect(auditSwitch.filter((e) => e.kind === 'lifecycle_changed' && changeOf(e) === 'superseded')).toHaveLength(1)
   })
 
   it('replays and settles a consumed durable receipt on the target incarnation', async () => {
@@ -1224,8 +1242,7 @@ describe('WorkerHarness.handoffIncarnation — handoff 目标是 builtin 时的 
 
     await expect(fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')).rejects.toThrow() // 文件未被创建
 
-    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
-    expect(events.filter((e) => e.kind === 'superseded')).toHaveLength(0)
+    expect(events.filter((e) => e.kind === 'lifecycle_changed')).toHaveLength(0)
   })
 
   it('目标是 builtin 且配置了 HarnessDeps.builtinSpawnDefaults → handoff 正常完成，新化身 spawn 时带上了注入的 builtin 配置', async () => {
@@ -1418,11 +1435,12 @@ describe('BuiltinWorkerAdapter → WorkerHarness — session_ref 时效性修复
     const [afterSecondBurst] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(afterFirstBurstRef)
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(spawnTimeSessionRef)
-    await waitUntil(async () => events.filter((event) =>
-      event.worker_id === worker.worker_id &&
-      event.kind === 'state_changed' &&
-      event.detail?.to === 'idle',
-    ).length === 2)
+    // 两轮 idle 拍各落一条 enriched turn_completed（回合边界唯一唤醒，durable 通道，
+    // 写 events.jsonl，不经 onEvent 的 events 数组）。
+    await waitUntil(async () =>
+      (await harness.readWorkerEvents(worker.worker_id)).filter((event) =>
+        event.kind === 'turn_completed' && event.detail?.to === 'idle',
+      ).length >= 2)
     await builtinAdapter.dispose()
   })
 })
@@ -1617,8 +1635,8 @@ describe('WorkerHarness — 终审 PoC 回归：M1 主线守卫按 (impl,seq) �
     expect(newMainline.seq).toBe(1)
     expect(afterHandoff.task.status).toBe('running')
 
-    // 顺带修复：handoff 产出的新化身也发了 spawned 事件（与 revive 路径的 resumed 对称）。
-    expect(events.filter((e) => e.kind === 'spawned')).toHaveLength(1)
+    // 顺带修复：handoff 产出的新化身也发了 lifecycle_changed(spawned) 事件（与 revive 路径的 resumed 对称）。
+    expect(events.filter((e) => e.kind === 'lifecycle_changed' && changeOf(e) === 'spawned')).toHaveLength(1)
 
     // 旧 adapter（claude-code）的迟到 exited 回调打到 handoff 之前的 handle 上，seq 与新
     // 主线 codex#1 相同——只比 seq 不比 impl 的守卫会把它误判成"当前主线化身的回调"。
@@ -1641,7 +1659,7 @@ describe('WorkerHarness — 终审 PoC 回归：M1 主线守卫按 (impl,seq) �
 
 describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞态', () => {
   it('send 卡在投递期间 kill：残留队列条目被 drain 并记 dead-letter，task 保持 cancelled，不触发 resume 复活', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     let releaseFirst!: () => void
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve
@@ -1684,13 +1702,14 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
     expect(after.task.status).toBe('closed')
     expect(fake.resumeCalls).toHaveLength(0)
 
-    // 残留条目没有静默消失：有 dead-letter 记录。
-    const deadLetterEvents = events.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
+    // 残留条目没有静默消失：有 dead-letter 记录（死信已降审计，读 events.jsonl 而非唤醒面）。
+    const auditM2a = await readAuditLog(workersDir, after.worker_id)
+    const deadLetterEvents = auditM2a.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
     expect(deadLetterEvents.length).toBeGreaterThan(0)
   })
 
   it('send 卡住期间被 kill，之后 adapter.sendInput 才抛 WorkerExitedError 走透明接续：in-flight 条目不经过 drain，cancelled task 仍不被 continueTerminalWorker 复活', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     let releaseGate!: (err: Error) => void
     const gate = new Promise<void>((_resolve, reject) => {
       releaseGate = (err) => reject(err)
@@ -1726,7 +1745,9 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
     expect(after.task.status).toBe('closed') // 核心断言：没有被复活成 running
     expect(fake.resumeCalls).toHaveLength(0)
 
-    const deadLetterEvents = events.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
+    // 死信已降审计：读 events.jsonl 而非唤醒面
+    const auditM2b = await readAuditLog(workersDir, after.worker_id)
+    const deadLetterEvents = auditM2b.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
     expect(deadLetterEvents.length).toBeGreaterThan(0)
   })
 })
@@ -1867,7 +1888,7 @@ describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫
 
 describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker 补送分支的终态竞态收口（锁内可重入求值）', () => {
   it('deliver 卡在旧主线投递期间发生跨实现切换，且新主线在本调用拿锁前也已自然终态（台账已落 exited）：不误对已终态化身调 sendInput，径直转接续，调用方无感', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     let releaseGate!: (err: Error) => void
     const gate = new Promise<void>((_resolve, reject) => {
       releaseGate = (err) => reject(err)
@@ -1953,15 +1974,16 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     expect(finalMainline.impl).toBe('codex')
     expect(finalMainline.state).toBe('running')
 
-    // 消息没有滞留：没有产生 dead-letter。
-    const deadLetterEvents = events.filter(
+    // 消息没有滞留：没有产生 dead-letter（死信已降审计，读 events.jsonl 而非唤醒面）。
+    const auditM3a = await readAuditLog(workersDir, worker.worker_id)
+    const deadLetterEvents = auditM3a.filter(
       (e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter'
     )
     expect(deadLetterEvents).toHaveLength(0)
   })
 
   it('新主线仍存活（台账未落终态）但 adapter.sendInput 权威地抛 WorkerExitedError：同样转入接续，不砸向调用方', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     let releaseGate!: (err: Error) => void
     const gate = new Promise<void>((_resolve, reject) => {
       releaseGate = (err) => reject(err)
@@ -2029,7 +2051,9 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     expect(finalMainline.impl).toBe('codex')
     expect(finalMainline.state).toBe('running')
 
-    const deadLetterEvents = events.filter(
+    // 死信已降审计：读 events.jsonl 而非唤醒面
+    const auditM3b = await readAuditLog(workersDir, worker.worker_id)
+    const deadLetterEvents = auditM3b.filter(
       (e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter'
     )
     expect(deadLetterEvents).toHaveLength(0)
@@ -2066,10 +2090,9 @@ describe('WorkerHarness.switchWorkerImpl — 终审 PoC 回归：M3 cancelled �
     expect(after.task.status).toBe('closed')
     expect(after.incarnations).toHaveLength(1)
 
-    // 没有产生 handoff_started / superseded / spawned 事件——pre-flight 在写 HANDOFF.md 和
-    // kill 旧化身之前就已经拒绝。
-    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
-    expect(events.filter((e) => e.kind === 'spawned')).toHaveLength(0)
+    // 没有产生 handoff 相关事件——pre-flight 在写 HANDOFF.md 和 kill 旧化身之前就已经拒绝
+    //（进度节点为审计事件，完成点为唤醒事件，两者都不该出现）。
+    expect(events.filter((e) => e.kind === 'lifecycle_changed')).toHaveLength(0)
   })
 })
 
@@ -2154,10 +2177,8 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
     // The rejected preflight does not create a second package.
     expect(await fs.readdir(handoffDir)).toEqual(handoffBefore)
 
-    // 没有产生新的 handoff_started / superseded 事件——pre-flight 在构造 package 和 kill
-    // 源化身之前就已经拒绝。
-    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
-    expect(events.filter((e) => e.kind === 'superseded')).toHaveLength(0)
+    // 没有产生新的 handoff 事件——pre-flight 在构造 package 和 kill 源化身之前就已经拒绝。
+    expect(events.filter((e) => e.kind === 'lifecycle_changed')).toHaveLength(0)
   })
 
   it('switchWorkerImpl 切到当前正在用的同一个 impl（未曾切换过）→ 同样被 ImplAlreadyUsedError 拒绝，源化身原样存活', async () => {
@@ -2188,11 +2209,11 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
     expect(after.incarnations[0].ended_reason).toBeUndefined()
 
     await expect(fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')).rejects.toThrow() // 文件未被创建
-    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
+    expect(events.filter((e) => e.kind === 'lifecycle_changed')).toHaveLength(0)
   })
 
   it('sendToWorker 触发的自动 handoff（revive:false）在"原 impl 已用过"时改选一个未用过的 impl 并成功', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     const spawnedOnce = new Set<string>()
     // mainline 用的实现（revive:false，触发自动 handoff）——它本身就是"已用过"的那个 impl，
     // handoffIncarnation 若沿用它会必然撞上 spawn 守卫。
@@ -2229,7 +2250,8 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
     expect(newEntry.impl).toBe('builtin')
     expect(newEntry.state).toBe('running')
     expect(w.task.status).toBe('running')
-    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(1)
+    const auditAuto = await readAuditLog(workersDir, worker.worker_id)
+    expect(auditAuto.filter((e) => e.kind === 'lifecycle_changed' && changeOf(e) === 'handoff_started')).toHaveLength(1)
   })
 
   it('sendToWorker 触发的自动 handoff（revive:false）在所有已注册 impl 都用过时 → 抛 ImplAlreadyUsedError，不动源化身', async () => {
@@ -2266,7 +2288,7 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
     expect(after.incarnations[0].ended_reason).toBeUndefined()
 
     await expect(fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')).rejects.toThrow() // 文件未被创建
-    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
+    expect(events.filter((e) => e.kind === 'lifecycle_changed')).toHaveLength(0)
   })
 })
 
@@ -2275,7 +2297,8 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
  * (reviveIncarnation 的 `resumed`、handoffIncarnation 第 4 步的 `spawned`)。这两处是把
  * **终态 task 拉回 running** 的唯一合法出边(§5.2 接续例外),也正是评审 PoC 里让"读晚一步"
  * 吞掉终态 `completed` 的那次落账;事件自带状态之后,终态与这次复活各发各的,不再互相覆盖。
- * 同一条路径上的纯记录事件(handoff_started / superseded)不动 task.status,一律不带。
+ * 同一条路径上的纯记录节点(handoff_started / superseded,已折入 lifecycle_changed 且只落审计)不动
+ * task.status,一律不带。
  */
 describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
   it('revive:终态化身之上接续 → resumed 带 running(与台账落账值一致)', async () => {
@@ -2296,7 +2319,7 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
 
     await harness.sendToWorker(worker.worker_id, '还有件事要办')
 
-    const resumed = events.filter((e) => e.kind === 'resumed')
+    const resumed = events.filter((e) => e.kind === 'lifecycle_changed' && changeOf(e) === 'resumed')
     expect(resumed).toHaveLength(1)
     expect(resumed[0].task_status).toBe('running')
     const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
@@ -2304,7 +2327,7 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
   })
 
   it('handoff:交接产出新化身 → spawned 带 running;handoff_started / superseded 不带', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     const fake = new FakeAdapter({
       caps: { revive: false },
       onStateChange: harness.handleStateChange,
@@ -2320,12 +2343,14 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
 
     await harness.sendToWorker(worker.worker_id, '接着把剩下的做完')
 
-    const spawned = events.filter((e) => e.kind === 'spawned')
+    const spawned = events.filter((e) => e.kind === 'lifecycle_changed' && changeOf(e) === 'spawned')
     expect(spawned).toHaveLength(1)
     expect(spawned[0].task_status).toBe('running')
 
-    expect(events.filter((e) => e.kind === 'handoff_started')[0].task_status).toBeUndefined()
-    expect(events.filter((e) => e.kind === 'superseded')[0].task_status).toBeUndefined()
+    // handoff_started / superseded 已降审计：读 events.jsonl 而非唤醒面
+    const audit = await readAuditLog(workersDir, worker.worker_id)
+    expect(audit.filter((e) => e.kind === 'lifecycle_changed' && changeOf(e) === 'handoff_started')[0].task_status).toBeUndefined()
+    expect(audit.filter((e) => e.kind === 'lifecycle_changed' && changeOf(e) === 'superseded')[0].task_status).toBeUndefined()
   })
 })
 
@@ -2377,13 +2402,14 @@ describe('legacy incarnation guardrails', () => {
 
   it('sendToWorker dead-letters a legacy item without auth before adapter lookup', async () => {
     const settled: string[] = []
-    const { harness, ledger, adaptersMap } = await makeHarness()
+    const { harness, ledger, adaptersMap, workersDir } = await makeHarness()
     await addLegacy(ledger, 'w-legacy-send')
     await expect(harness.sendToWorker('w-legacy-send', 'continue', {
       onSettled: (result) => { settled.push(result) },
     })).resolves.toBeUndefined()
     expect(settled).toEqual(['dead_letter'])
-    expect(events).toContainEqual(expect.objectContaining({
+    // 死信已降审计：读 events.jsonl 而非唤醒面
+    expect(await readAuditLog(workersDir, 'w-legacy-send')).toContainEqual(expect.objectContaining({
       kind: 'state_changed',
       detail: expect.objectContaining({ reason: 'legacy_continuation_authorization_invalid' }),
     }))
@@ -2445,7 +2471,8 @@ describe('legacy incarnation guardrails', () => {
     expect(JSON.stringify(handoff)).toContain('old-task')
     expect(JSON.stringify(handoff)).not.toContain('resume_checkpoint')
     await expect(fs.stat(join(dataDir, 'workspace', 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(events.some((event) => event.kind === 'handoff_started')).toBe(true)
+    const auditLegacy = await readAuditLog(workersDir, 'w-legacy-success')
+    expect(auditLegacy.some((event) => event.kind === 'lifecycle_changed' && changeOf(event) === 'handoff_started')).toBe(true)
   })
 
   it('歧义 v3 历史先归档，再只用归档台账和持久 activity 生成 handoff', async () => {

@@ -389,9 +389,10 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
     return { to: state, kind: 'initial_input_settled' }
   }
   if (report?.notification) {
+    // interaction_required 已提升为独立事件 kind（protocol §6.3 CliInteractionRequiredDetail），
+    // detail 不再带 kind 字段；事件 kind 由调用方按 report.notification 选择。
     return {
       to: state,
-      kind: 'interaction_required',
       wait_mode: 'action',
       wait_reason: report.waitReason ?? 'interaction_required',
       notification_type: report.notification.type,
@@ -405,6 +406,47 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
     kind: report?.waitReason === 'input_pending' ? 'input_pending' : 'input_delivery_stalled',
     ...(state === 'idle' ? { wait_mode: 'action' } : {}),
     ...(report?.waitReason ? { wait_reason: report.waitReason } : {}),
+  }
+}
+
+/** 交互通知（notification）提升为独立 kind，其余 report 形态仍走 state_changed。 */
+function cliReportEventKind(report: StateChangeReport | undefined): 'interaction_required' | 'state_changed' {
+  return report?.notification ? 'interaction_required' : 'state_changed'
+}
+
+/**
+ * 完成回合边界的唤醒材料（协议 §6.3）：迁入 enriched turn_completed 的化身落点与正文，
+ * 以及事件级的落账后 task 状态。
+ */
+interface TurnBoundaryWake {
+  readonly to: WorkerContractState
+  readonly text?: string
+  readonly summary?: string
+  readonly taskStatus?: TaskStatus
+}
+
+/**
+ * createPendingTurn 的结果：`notificationPersisted=false` 时调用方必须回退补发一条
+ * fire-and-forget state_changed 保在线送达（回合通知没能持久化，durable 唤醒不存在）。
+ */
+interface TurnBoundaryOutcome {
+  readonly turn: WorkerTurn
+  readonly notificationPersisted: boolean
+}
+
+/** 首轮输入即完成一个回合时的唤醒材料（与主线 turn 边界同一份 truncate 口径）。 */
+function initialTurnWake(
+  state: WorkerContractState,
+  report: StateChangeReport | undefined,
+  taskStatus: TaskStatus | undefined,
+): TurnBoundaryWake {
+  const text = truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, '', 'head')
+  const summary = truncateWakeText(report?.summary, WAKE_SUMMARY_MAX_CHARS, '', 'head')
+  return {
+    to: state,
+    ...(text ? { text } : {}),
+    ...(summary ? { summary } : {}),
+    ...(taskStatus ? { taskStatus } : {}),
   }
 }
 
@@ -1226,14 +1268,18 @@ export class WorkerHarness {
         inbox.hold('input_pending')
       }
 
-      await this.appendEvent(workerId, 1, 'spawned', { impl }, spawned?.task.status)
+      await this.appendEvent(workerId, 1, 'lifecycle_changed', { change: 'spawned', impl }, spawned?.task.status)
       const uiSnapshot = await this.prepareUiSnapshot(spawnedHandle, p.managerKey, initialInput?.report, now)
-      const turn = await this.createInitialInputTurn(p.managerKey, spawnedHandle, initialInput, now)
-      if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
-        await this.appendEvent(workerId, 1, 'state_changed', {
+      const turnOutcome = await this.createInitialInputTurn(p.managerKey, spawnedHandle, initialInput, now,
+        initialTurnWake(initialState, initialInput?.report, spawned?.task.status))
+      // 首轮完成回合边界的唤醒已由 enriched turn_completed 承载（协议 §6.3）；
+      // 仅当无 turn（首投未干净接受/交互通知）或回合通知持久化失败时才补发 state_changed。
+      if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')
+        && !turnOutcome?.notificationPersisted) {
+        await this.appendEvent(workerId, 1, cliReportEventKind(initialInput.report), {
           ...cliReportDetail(initialState, initialInput.report),
           ...uiSnapshotDetail(uiSnapshot),
-          ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+          ...(turnOutcome ? { turn_id: turnOutcome.turn.turn_id, turn_pending: true } : {}),
         }, spawned?.task.status)
       }
       return spawned as LedgerWorker
@@ -2047,7 +2093,7 @@ export class WorkerHarness {
       if (!found) throw new WorkerNotFoundError(workerId)
       const { managerKey, worker } = found
       if (worker.task.status === 'closed') {
-        await this.appendEvent(workerId, 1, 'state_changed', {
+        await this.appendAuditEvent(workerId, 1, 'state_changed', {
           kind: 'dead_letter',
           reason: 'task_cancelled',
           text_len: item.text.length,
@@ -2084,7 +2130,7 @@ export class WorkerHarness {
         !this.deps.validateLegacyContinuationAuth ||
         !await this.deps.validateLegacyContinuationAuth(auth)
       ) {
-        await this.appendEvent(workerId, legacy.seq, 'state_changed', {
+        await this.appendAuditEvent(workerId, legacy.seq, 'state_changed', {
           kind: 'dead_letter',
           reason: 'legacy_continuation_authorization_invalid',
           text_len: item.text.length,
@@ -2243,7 +2289,9 @@ export class WorkerHarness {
         discardPreparedLegacyContinuation()
         return expiredAfterContextWrite
       }
-      await this.appendEvent(worker.worker_id, legacy.seq, 'handoff_started', {
+      // handoff 进度节点：只落审计。完成点（新化身就位的 lifecycle_changed）才唤醒 manager。
+      await this.appendAuditEvent(worker.worker_id, legacy.seq, 'lifecycle_changed', {
+        change: 'handoff_started',
         target_impl: targetImpl,
         legacy: true,
         handoff_id: handoff.package_id,
@@ -2348,21 +2396,23 @@ export class WorkerHarness {
       await this.appendEvent(
         worker.worker_id,
         handle.seq,
-        'spawned',
-        { impl: targetImpl, from_seq: legacy.seq, legacy: true },
+        'lifecycle_changed',
+        { change: 'spawned', impl: targetImpl, from_seq: legacy.seq, legacy: true },
         updated?.task.status,
       )
       const uiSnapshot = await this.prepareUiSnapshot(handle, managerKey, initialInput?.report, now)
-      const turn = await this.createInitialInputTurn(managerKey, handle, initialInput, now)
-      if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
+      const turnOutcome = await this.createInitialInputTurn(managerKey, handle, initialInput, now,
+        initialTurnWake(initialState, initialInput?.report, updated?.task.status))
+      if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')
+        && !turnOutcome?.notificationPersisted) {
         await this.appendEvent(
           worker.worker_id,
           handle.seq,
-          'state_changed',
+          cliReportEventKind(initialInput.report),
           {
             ...cliReportDetail(initialState, initialInput.report),
             ...uiSnapshotDetail(uiSnapshot),
-            ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+            ...(turnOutcome ? { turn_id: turnOutcome.turn.turn_id, turn_pending: true } : {}),
           },
           updated?.task.status,
         )
@@ -2618,7 +2668,7 @@ export class WorkerHarness {
         // 是调用方(inbox.flush)的既有契约,消息不能静默消失:丢弃这条并记 dead-letter 事件,
         // 不重新抛出(抛出会砸向早已异步返回的 sendToWorker 调用方,变成没人处理的 rejection)。
         if (worker.task.status === 'closed') {
-          await this.appendEvent(workerId, curSeq, 'state_changed', {
+          await this.appendAuditEvent(workerId, curSeq, 'state_changed', {
             kind: 'dead_letter',
             reason: 'task_cancelled',
             text_len: text.length,
@@ -2956,14 +3006,16 @@ export class WorkerHarness {
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
     const replayedConsumed = inbox.requeueConsumed()
-    await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq }, revived?.task.status)
+    await this.appendEvent(worker.worker_id, newHandle.seq, 'lifecycle_changed', { change: 'resumed', from_seq: mainline.seq }, revived?.task.status)
     const uiSnapshot = await this.prepareUiSnapshot(newHandle, managerKey, initialInput?.report, now)
-    const turn = await this.createInitialInputTurn(managerKey, newHandle, initialInput, now)
-    if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
-      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', {
+    const turnOutcome = await this.createInitialInputTurn(managerKey, newHandle, initialInput, now,
+      initialTurnWake(initialState, initialInput?.report, revived?.task.status))
+    if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')
+      && !turnOutcome?.notificationPersisted) {
+      await this.appendEvent(worker.worker_id, newHandle.seq, cliReportEventKind(initialInput.report), {
         ...cliReportDetail(initialState, initialInput.report),
         ...uiSnapshotDetail(uiSnapshot),
-        ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+        ...(turnOutcome ? { turn_id: turnOutcome.turn.turn_id, turn_pending: true } : {}),
       }, revived?.task.status)
     }
     return continuationDelivery(initialInput, initialState, newHandle, replayedConsumed)
@@ -3157,7 +3209,9 @@ export class WorkerHarness {
         if (admission) void admission.dispose().catch(() => {})
         return { restoredDurableReceipt: false, delivery: expiredBeforeHandoffEvent }
       }
-      await this.appendEvent(worker.worker_id, source.seq, 'handoff_started', {
+      // handoff 进度节点：只落审计。完成点（新化身就位的 lifecycle_changed）才唤醒 manager。
+      await this.appendAuditEvent(worker.worker_id, source.seq, 'lifecycle_changed', {
+        change: 'handoff_started',
         target_impl: targetImpl,
         handoff_id: handoff.package_id,
       })
@@ -3313,22 +3367,25 @@ export class WorkerHarness {
     }
     const replayedConsumed = inbox.requeueConsumed()
     const restoredDurableReceipt = replayedConsumed > 0
-    // 与 reviveIncarnation 收尾时发 'resumed' 事件对称——交接产出的新化身同样是一次"开工",
-    // 缺了这个事件会让事件流看不到 handoff 之后新主线是何时、以何种 impl 建起来的。
+    // 与 reviveIncarnation 收尾时发 lifecycle_changed(resumed) 事件对称——交接产出的新化身同样是
+    // 一次"开工",缺了这个事件会让事件流看不到 handoff 之后新主线是何时、以何种 impl 建起来的。
+    // 这是 handoff 全流程对 manager 的唯一唤醒（进度节点只落审计）。
     await this.appendEvent(
       worker.worker_id,
       newHandle.seq,
-      'spawned',
-      { impl: targetImpl, from_seq: source.seq, handoff_id: handoff.package_id },
+      'lifecycle_changed',
+      { change: 'spawned', impl: targetImpl, from_seq: source.seq, handoff_id: handoff.package_id },
       handedOff?.task.status
     )
     const uiSnapshot = await this.prepareUiSnapshot(newHandle, managerKey, initialInput?.report, now)
-    const turn = await this.createInitialInputTurn(managerKey, newHandle, initialInput, now)
-    if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')) {
-      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', {
+    const turnOutcome = await this.createInitialInputTurn(managerKey, newHandle, initialInput, now,
+      initialTurnWake(initialState, initialInput?.report, handedOff?.task.status))
+    if (initialInput && (initialInput.disposition !== 'accepted' || initialState !== 'running')
+      && !turnOutcome?.notificationPersisted) {
+      await this.appendEvent(worker.worker_id, newHandle.seq, cliReportEventKind(initialInput.report), {
         ...cliReportDetail(initialState, initialInput.report),
         ...uiSnapshotDetail(uiSnapshot),
-        ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+        ...(turnOutcome ? { turn_id: turnOutcome.turn.turn_id, turn_pending: true } : {}),
       }, handedOff?.task.status)
     }
     return {
@@ -3638,7 +3695,8 @@ export class WorkerHarness {
     handle: IncarnationHandle,
     report: StateChangeReport | undefined,
     completedAt: string,
-  ): Promise<WorkerTurn | undefined> {
+    wake?: TurnBoundaryWake,
+  ): Promise<TurnBoundaryOutcome | undefined> {
     if (!handle.incarnation_id || !report?.completionSource) return undefined
     const prior = await this.turnStore.latestForIncarnation(handle.worker_id, handle.incarnation_id)
     let activityFrom = prior?.activity_through ?? '0'
@@ -3671,16 +3729,17 @@ export class WorkerHarness {
       completion_source: report.completionSource,
     })
     try {
-      await this.persistTurnNotification(turn)
+      await this.persistTurnNotification(turn, wake)
       void this.deliverNativeActivityNotifications(turn.worker_id).catch((error) => {
         console.error(`[WorkerHarness] native activity notification delivery failed for ${turn.worker_id}:`, error)
       })
+      return { turn, notificationPersisted: true }
     } catch (error) {
-      // processStateChange emits a durable state_changed event carrying turn_id below. Keep that
-      // path live even when the supplementary turn_completed notification cannot be recorded.
+      // 回合通知持久化失败时，调用方回退补发一条 fire-and-forget state_changed 保在线送达
+      // （协议 §6.3）——所以这里必须把"没存上"如实交回去，不能吞成"发了 turn_completed"。
       console.error(`[WorkerHarness] failed to persist completed-turn notification ${turn.turn_id}:`, error)
+      return { turn, notificationPersisted: false }
     }
-    return turn
   }
 
   /** Claude/Codex resume 复用同一原生 session 文件，offset 不会随化身重置。 */
@@ -3746,7 +3805,8 @@ export class WorkerHarness {
     handle: IncarnationHandle,
     initialInput: InitialInputResult | undefined,
     completedAt: string,
-  ): Promise<WorkerTurn | undefined> {
+    wake?: TurnBoundaryWake,
+  ): Promise<TurnBoundaryOutcome | undefined> {
     if (!initialInput?.report?.completionSource) return undefined
     try {
       await this.collectNativeActivityLocked(handle, managerKey)
@@ -3754,7 +3814,7 @@ export class WorkerHarness {
       // The adapter's completion result is authoritative. Activity collection is supplementary.
       console.error(`[WorkerHarness] native activity collection failed at initial turn boundary for ${handle.worker_id}#${handle.seq}:`, error)
     }
-    return this.createPendingTurn(managerKey, handle, initialInput.report, completedAt)
+    return this.createPendingTurn(managerKey, handle, initialInput.report, completedAt, wake)
   }
 
   private async collectNativeActivity(h: IncarnationHandle, baselineUnobserved = false): Promise<void> {
@@ -3872,7 +3932,10 @@ export class WorkerHarness {
     })
   }
 
-  private async persistTurnNotification(turn: WorkerTurn): Promise<void> {
+  private async persistTurnNotification(turn: WorkerTurn, wake?: TurnBoundaryWake): Promise<void> {
+    // turn_completed 是完成回合边界对 Manager 的唯一唤醒（协议 §6.3）：detail 合并承载
+    // 化身落点 to、worker 最后发言 text、收尾结论 summary，事件级携带落账后 task_status；
+    // 同拍不再另发 state_changed 唤醒。
     const event = this.buildEvent(turn.worker_id, turn.seq, 'turn_completed', {
       turn_id: turn.turn_id,
       incarnation_id: turn.incarnation_id,
@@ -3880,7 +3943,10 @@ export class WorkerHarness {
       activity_through: turn.activity_through,
       completion_source: turn.completion_source,
       turn_pending: true,
-    })
+      ...(wake ? { to: wake.to } : {}),
+      ...(wake?.text ? { text: wake.text } : {}),
+      ...(wake?.summary ? { summary: wake.summary } : {}),
+    }, wake?.taskStatus)
     await this.nativeActivityStore.record({
       worker_id: turn.worker_id,
       manager_key: turn.manager_key,
@@ -4624,15 +4690,25 @@ export class WorkerHarness {
         const found = await this.deps.ledger.findWorker(workerId)
         const notice = found?.worker.recovery_notices?.find((item) => item.notice_id === noticeId)
         if (!found || !notice || notice.status !== 'pending' || !recoveryNoticeDue(notice, this.deps.now())) return undefined
+        // 投递前校验（协议 §5.5.3）：只有 task 仍为 crash 停摆才值得唤醒。Manager 的处置
+        // 动作（续办回 running / 交接 / 停止落 closed）本身即视为已消费——直接标 consumed，
+        // 不拿过期事实新开 episode。
+        const task = found.worker.task
+        if (task.status !== 'halted' || task.halt?.halt_reason !== 'crashed') {
+          await this.markRecoveryNoticeConsumed(found.managerKey, workerId, noticeId)
+          return undefined
+        }
         const incarnation = found.worker.incarnations.find((item) => item.incarnation_id === notice.incarnation_id)
         if (!incarnation || !isExecutableIncarnation(incarnation)) return undefined
         return {
           managerKey: found.managerKey,
+          // 携带投递时落账后的 task_status：这条通知是一次崩溃对 manager 的唯一唤醒，
+          // 唤醒面的 state_changed(crashed)/exited 已降审计，halted 只能由它送达。
           event: this.buildEvent(workerId, incarnation.seq, 'worker_recovery_required', {
             notice_id: notice.notice_id,
             incarnation_id: notice.incarnation_id,
             text: '[crabot] worker 的执行载体在重启后确认已中断。请先读取 worker 状态和必要的原生会话活动，再决定继续、交接、汇报或停止。',
-          }),
+          }, task.status),
         }
       })
       if (!prepared) return
@@ -4645,9 +4721,16 @@ export class WorkerHarness {
         console.error(`[WorkerHarness] recovery notice delivery failed for ${workerId}/${noticeId}:`, error)
       }
 
+      if (consumed) {
+        await this.withLock(workerId, async () => {
+          // A route that overlapped shutdown has no durable consumption confirmation. Keep the
+          // notice untouched so the next process can route it again after its gate opens.
+          if (this.recoveryNoticeDeliveryStopped || this.deps.isClosing?.()) return
+          await this.markRecoveryNoticeConsumed(prepared.managerKey, workerId, noticeId)
+        })
+        return
+      }
       await this.withLock(workerId, async () => {
-        // A route that overlapped shutdown has no durable consumption confirmation. Keep the
-        // notice untouched so the next process can route it again after its gate opens.
         if (this.recoveryNoticeDeliveryStopped || this.deps.isClosing?.()) return
         const now = this.deps.now()
         await this.deps.ledger.upsertWorker(prepared.managerKey, workerId, (prev) => {
@@ -4657,16 +4740,29 @@ export class WorkerHarness {
           const current = index < 0 ? undefined : notices[index]
           if (!current || current.status !== 'pending') return prev
           const next = [...notices]
-          next[index] = consumed
-            ? { ...current, status: 'consumed', consumed_at: now, retry_after_at: undefined }
-            : {
-                ...current,
-                attempts: current.attempts + 1,
-                retry_after_at: plusMs(now, recoveryNoticeRetryDelayMs(current.attempts + 1)),
-              }
+          next[index] = {
+            ...current,
+            attempts: current.attempts + 1,
+            retry_after_at: plusMs(now, recoveryNoticeRetryDelayMs(current.attempts + 1)),
+          }
           return { ...prev, recovery_notices: next, updated_at: now }
         })
       })
+    })
+  }
+
+  /** 把 pending 恢复通知标为已消费（manager 处置过 / episode 确认消费两种入口共用）。 */
+  private async markRecoveryNoticeConsumed(managerKey: ManagerKey, workerId: string, noticeId: string): Promise<void> {
+    const now = this.deps.now()
+    await this.deps.ledger.upsertWorker(managerKey, workerId, (prev) => {
+      if (!prev) return undefined
+      const notices = prev.recovery_notices ?? []
+      const index = notices.findIndex((item) => item.notice_id === noticeId)
+      const current = index < 0 ? undefined : notices[index]
+      if (!current || current.status !== 'pending') return prev
+      const next = [...notices]
+      next[index] = { ...current, status: 'consumed', consumed_at: now, retry_after_at: undefined }
+      return { ...prev, recovery_notices: next, updated_at: now }
     })
   }
 
@@ -5061,7 +5157,7 @@ export class WorkerHarness {
   }
 
   /**
-   * 上报一次停摆,走 `state_changed` + `detail.text` 这条既有的唤醒形状,并按投递结局更新
+   * 上报一次停摆,走独立的 `liveness_stall` kind + `detail.text` 这条唤醒形状,并按投递结局更新
    * 已报标记(含退避)。
    *
    * **首报带停摆事实、重试不重复**(`attempts`):Harness 不主动读取终端；Manager 若需要
@@ -5089,9 +5185,8 @@ export class WorkerHarness {
     }
     let delivery: HarnessEventDelivery | undefined
     try {
-      delivery = await this.appendEventAwaitingDelivery(h.worker_id, h.seq, 'state_changed', {
+      delivery = await this.appendEventAwaitingDelivery(h.worker_id, h.seq, 'liveness_stall', {
         to: 'running' satisfies WorkerContractState,
-        source: 'liveness_stall',
         ...(text ? { text } : {}),
       })
     } catch (err) {
@@ -5206,6 +5301,12 @@ export class WorkerHarness {
    * 场景(adapter 报 exited / adapter 未注册 / adapter.state() 抛错)共用同一段收尾——三者
    * 语义上都是"至此已经没有任何证据证明这个非终态 worker 还活着"。任务不落终态:
    * "载体死了"是事实,"任务失败"是判断,由 manager 处置落定。
+   *
+   * 事件降审计的前提是真的落了 recovery notice（对 manager 的唯一唤醒由 durable 的
+   * worker_recovery_required 承载,一次崩溃只醒一次,协议 §5.5.3）。notice 创建有条件
+   * （mainline 尚未 exited 等）——停止残局（化身已 exited、task 非终态:handoff 第 2 步后
+   * 重启 / stop unknown 有 bg 的 op settle 后重启）不建 notice,此时必须保留唤醒档,否则
+   * 这次崩溃零唤醒零推送、任务永久静默（PR #137 review）。
    */
   private async markCrashed(
     managerKey: ManagerKey,
@@ -5214,6 +5315,7 @@ export class WorkerHarness {
     detailReason: string
   ): Promise<void> {
     const now = this.deps.now()
+    let recoveryCreated = false
     const crashed = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const current = findIncarnation(prev, mainline.impl, mainline.seq)
@@ -5236,6 +5338,7 @@ export class WorkerHarness {
       const recovery = current?.forked_from === undefined && current?.state !== 'exited' && current?.incarnation_id
         ? appendRecoveryNotice(prev.recovery_notices, current.incarnation_id, now)
         : undefined
+      recoveryCreated = recovery?.created === true
       return {
         ...prev,
         task: nextTask,
@@ -5245,13 +5348,24 @@ export class WorkerHarness {
         updated_at: now,
       }
     })
-    await this.appendEvent(
-      worker.worker_id,
-      mainline.seq,
-      'exited',
-      { reason: 'crashed', message: detailReason },
-      crashed?.task.status
-    )
+    if (recoveryCreated) {
+      await this.appendAuditEvent(
+        worker.worker_id,
+        mainline.seq,
+        'exited',
+        { reason: 'crashed', message: detailReason },
+        crashed?.task.status
+      )
+    } else {
+      // 无 recovery notice 兜底（停止残局/同化身重复判死）——保留唤醒档,宁可多醒一次。
+      await this.appendEvent(
+        worker.worker_id,
+        mainline.seq,
+        'exited',
+        { reason: 'crashed', message: detailReason },
+        crashed?.task.status
+      )
+    }
   }
 
   /**
@@ -5554,9 +5668,11 @@ export class WorkerHarness {
       const supervision = supervisionAfterMainlineTransition(previous.supervision, task.status, 'exited', incarnation.seq, now)
       return { ...previous, task, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
     })
-    await this.appendEvent(worker.worker_id, incarnation.seq, 'state_changed', { to: 'exited', reason: 'stop_verified' }, cancelled?.task.status)
+    // 停止核验事实与收件箱清空只落审计：一次停止对 manager 的唯一唤醒由 operation_settled
+    // 承载（携带落账后 task_status，见 deliverControlOperationNotifications）。
+    await this.appendAuditEvent(worker.worker_id, incarnation.seq, 'state_changed', { to: 'exited', reason: 'stop_verified' }, cancelled?.task.status)
     for (const item of this.getInbox(worker.worker_id).drain()) {
-      await this.appendEvent(worker.worker_id, incarnation.seq, 'state_changed', {
+      await this.appendAuditEvent(worker.worker_id, incarnation.seq, 'state_changed', {
         kind: 'dead_letter',
         reason: 'task_cancelled',
         text_len: item.text.length,
@@ -5590,11 +5706,12 @@ export class WorkerHarness {
       })
       return { ...previous, incarnations, updated_at: now }
     })
-    await this.appendEvent(
+    // handoff 进度节点：只落审计。完成点（新化身就位的 lifecycle_changed）才唤醒 manager。
+    await this.appendAuditEvent(
       worker.worker_id,
       incarnation.seq,
-      'superseded',
-      { reason: 'handoff_stop_verified' },
+      'lifecycle_changed',
+      { change: 'superseded', reason: 'handoff_stop_verified' },
     )
   }
 
@@ -5657,13 +5774,31 @@ export class WorkerHarness {
     await mutex.run(async () => {
       for (const notification of await this.controlOperationStore.pendingNotifications(workerId)) {
         const { operation } = notification
-        const event = this.buildEvent(workerId, operation.seq, 'operation_settled', {
-          operation_id: operation.operation_id,
-          incarnation_id: operation.incarnation_id,
-          kind: operation.kind,
-          status: operation.status,
-          detail: operation.detail ?? '',
-        })
+        // operation_settled 是一次停止对 manager 的唯一唤醒（协议 §5.5.4）：必须携带落账后
+        // task_status——succeeded 的 closed、unknown 的 halted（含 stop_unverified 现网缺口）
+        // 都由这一条送达，不再另有 state_changed(stop_verified)/死信唤醒。事件首次落盘即
+        // 固化该值；重投读回首次落盘的那一条（task 可能已再迁移，现读台账会造出错误事实）。
+        let event: HarnessEvent
+        if (notification.event_written) {
+          event = (await this.getEventLog(workerId).readAll())
+            .filter((entry) => entry.kind === 'operation_settled' && entry.detail?.operation_id === operation.operation_id)
+            .pop()
+            ?? this.buildEvent(workerId, operation.seq, 'operation_settled', {
+              operation_id: operation.operation_id,
+              incarnation_id: operation.incarnation_id,
+              kind: operation.kind,
+              status: operation.status,
+              detail: operation.detail ?? '',
+            })
+        } else {
+          event = this.buildEvent(workerId, operation.seq, 'operation_settled', {
+            operation_id: operation.operation_id,
+            incarnation_id: operation.incarnation_id,
+            kind: operation.kind,
+            status: operation.status,
+            detail: operation.detail ?? '',
+          }, (await this.deps.ledger.findWorker(workerId))?.worker.task.status)
+        }
         try {
           if (!notification.event_written) {
             await this.getEventLog(workerId).append(event)
@@ -6139,7 +6274,7 @@ export class WorkerHarness {
       this.fireIncarnationTerminal(h)
     }
     if (report) {
-      await this.appendEvent(h.worker_id, h.seq, 'state_changed', cliReportDetail(external, report), committedStatus)
+      await this.appendEvent(h.worker_id, h.seq, cliReportEventKind(report), cliReportDetail(external, report), committedStatus)
     } else if (external !== 'running') {
       await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: external }, committedStatus)
     }
@@ -6373,27 +6508,50 @@ export class WorkerHarness {
         }
       })
       settledCurrentExit = state === 'exited' && committed !== undefined
-      const turn = shouldCreateTurn && committed
+      const turnOutcome = shouldCreateTurn && committed
         ? await this.createPendingTurn(managerKey, {
             ...h,
             ...(target.incarnation_id ? { incarnation_id: target.incarnation_id } : {}),
             session_ref: h.session_ref || target.session_ref,
-          }, report, now)
+          }, report, now, {
+            to: state,
+            ...(wakeText ? { text: wakeText } : {}),
+            ...(wakeSummary ? { summary: wakeSummary } : {}),
+            taskStatus: committed.task.status,
+          })
         : undefined
+      const turn = turnOutcome?.turn
       // 主线分支是 task 状态机的主要推进点——事件必须自带落账后的状态,否则订阅方现读台账
       // 时若已经有下一次落账(如 §5.3 透明接续把终态拉回 running),这次迁移(含 completed
       // 这类终态)会被整条吞掉。见 worker-events.ts `HarnessEvent.task_status`。
-      await this.appendEvent(
-        h.worker_id,
-        h.seq,
-        'state_changed',
-          {
-            ...(report?.notification ? cliReportDetail(state, report) : { to: state, ...wakeDetail }),
-            ...uiSnapshotDetail(uiSnapshot),
-            ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
-        },
-        committed?.task.status
-      )
+      const mainlineEventDetail = {
+        ...(report?.notification ? cliReportDetail(state, report) : { to: state, ...wakeDetail }),
+        ...uiSnapshotDetail(uiSnapshot),
+        ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
+      }
+      if (endReason === 'superseded' || endReason === 'killed' || (endReason === 'crashed' && !preserveTaskForStop)) {
+        // 只落审计的三类退出（一次物理事实 = manager 只醒一次）：
+        // - superseded：handoff 进度节点，唤醒由新化身就位的 lifecycle_changed 承载；
+        // - killed：我方 stop，唤醒由 operation_settled 承载（一次停止一张回执）；
+        // - crashed（非停止核验途中）：唤醒由 durable 的 worker_recovery_required 承载
+        //   （一次崩溃只醒一次，协议 §5.5.3）。停止核验途中崩溃（preserveTaskForStop）
+        //   不建恢复通知，state_changed 保留唤醒作为唯一事实通道。
+        // 审计事件仍自带落账后 task_status，供 trace/排查还原状态迁移。
+        await this.appendAuditEvent(h.worker_id, h.seq, cliReportEventKind(report), mainlineEventDetail, committed?.task.status)
+      } else if (turnOutcome?.notificationPersisted) {
+        // enriched turn_completed 是本拍完成回合边界对 manager 的唯一唤醒（协议 §6.3，
+        // durable 通道），同拍不再另发 state_changed。持久化失败时走下方回退。
+      } else {
+        // 无 turn（普通状态跳动/交互通知）或回合通知持久化失败：fire-and-forget
+        // state_changed/interaction_required 保在线送达。
+        await this.appendEvent(
+          h.worker_id,
+          h.seq,
+          cliReportEventKind(report),
+          mainlineEventDetail,
+          committed?.task.status
+        )
+      }
     })
     await this.deliverNativeActivityNotifications(h.worker_id)
     if (recoveryNoticeCreated) {
@@ -6488,11 +6646,11 @@ export class WorkerHarness {
    * `HarnessEvent.task_status` 的字段注释(为什么必须由事件自带,以及缺席时的语义)。
    *
    * 本文件里带这个参数的调用点(8 处,均为 task 级迁移):spawnWorker 的失败/成功收尾、
-   * reviveIncarnation 的 `resumed`、handoffIncarnation 第 4 步的 `spawned`、markCrashed 的
-   * `exited`、realignAliveIncarnation 的 `state_changed`、killWorker 的 `killed`、
-   * processStateChange 主线分支的 `state_changed`。其余调用点(化身级事件:input_sent /
-   * fork 分支 state_changed / query_failed / dead-letter / superseded / handoff_started …)
-   * 都不动 task.status,一律不传。
+   * reviveIncarnation 的 lifecycle_changed(resumed)、handoffIncarnation 第 4 步的
+   * lifecycle_changed(spawned)、markCrashed 的 `exited`、realignAliveIncarnation 的
+   * `state_changed`、kill 核验后化身退出的 `state_changed`、processStateChange 主线分支的
+   * `state_changed`。其余调用点(化身级事件:input_sent / fork 分支 state_changed /
+   * query_failed / dead-letter / handoff 进度节点 …)都不动 task.status,一律不传。
    *
    * upsert 的 mutator 返回 undefined(worker 已不在台账)时 `committed` 是 undefined,这里
    * 原样落成"不带该字段",订阅方退回现读台账兜底,不构造假状态。
@@ -6541,9 +6699,10 @@ export class WorkerHarness {
     seq: number,
     kind: HarnessEventKind,
     detail?: Record<string, unknown>,
+    taskStatus?: TaskStatus
   ): Promise<void> {
     try {
-      await this.getEventLog(workerId).append(this.buildEvent(workerId, seq, kind, detail))
+      await this.getEventLog(workerId).append(this.buildEvent(workerId, seq, kind, detail, taskStatus))
     } catch (error) {
       console.error(
         `[WorkerHarness] failed to append operation audit event ` +

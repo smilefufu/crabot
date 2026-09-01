@@ -283,7 +283,7 @@ describe('worker 事件路径的 fail-loud（bootstrap.onEvent → reportEpisode
 
     const wakeTexts = async (): Promise<string[]> =>
       (await stack.harness.readWorkerEvents(workerId))
-        .filter((e) => e.kind === 'state_changed' && typeof e.detail?.text === 'string')
+        .filter((e) => e.kind === 'liveness_stall' && typeof e.detail?.text === 'string')
         .map((e) => e.detail!.text as string)
 
     await stack.harness.sweepLiveness()

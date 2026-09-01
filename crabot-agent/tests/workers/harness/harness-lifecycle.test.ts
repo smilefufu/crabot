@@ -244,6 +244,18 @@ let dataDir: string
 let nowValue: number
 const events: HarnessEvent[] = []
 
+/**
+ * turn 边界事件（turn_completed）走 durable 通知通道：写入 events.jsonl 发生在
+ * deliverNativeActivityNotifications 的异步投递里（且需要 onOperationNotification 回调
+ * 存在才走投递），onEvent 收集的 events 数组看不到它。
+ * 这里等待并读回 jsonl（事件面收敛后，完成回合边界对 manager 的唯一唤醒就是它）。
+ */
+async function readTurnCompleted(harness: WorkerHarness, workerId: string): Promise<HarnessEvent[]> {
+  await waitUntil(async () =>
+    (await harness.readWorkerEvents(workerId)).some((e) => e.kind === 'turn_completed'))
+  return (await harness.readWorkerEvents(workerId)).filter((e) => e.kind === 'turn_completed')
+}
+
 function now(): string {
   nowValue += 1000
   return new Date(nowValue).toISOString()
@@ -288,6 +300,10 @@ async function makeHarness(
     workersDir,
     now,
     onEvent: (e) => events.push(e),
+    // durable 通知通道默认给个"无人消费"的回执——没有回调时 deliver*Notifications 根本
+    // 不走投递，turn_completed / operation_settled 也就不会落 events.jsonl；返回 undefined
+    // 保持通知 pending（与 queryWorker deadline 巡检等用例的语义一致）。
+    onOperationNotification: async () => undefined,
     mintActivityCursor: async ({ offset }) => `opaque-activity-${['start', 'one', 'two', 'three'][offset] ?? 'later'}`,
     ...depsOverrides,
   }
@@ -339,8 +355,9 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(fake.spawnCalls).toHaveLength(1)
     expect(fake.spawnCalls[0].worker_id).toBe(worker.worker_id)
 
-    const spawnedEvents = events.filter((e) => e.kind === 'spawned')
+    const spawnedEvents = events.filter((e) => e.kind === 'lifecycle_changed')
     expect(spawnedEvents).toHaveLength(1)
+    expect(spawnedEvents[0].detail).toMatchObject({ change: 'spawned' })
     expect(spawnedEvents[0].worker_id).toBe(worker.worker_id)
     expect(spawnedEvents[0].seq).toBe(1)
 
@@ -506,12 +523,16 @@ describe('WorkerHarness.spawnWorker', () => {
     await expect(harness.getWorkerTurnActivities(turn)).resolves.toEqual({
       events: [expect.objectContaining({ role: 'assistant', summary: '首轮已经完成', source_offset: 0 })],
     })
-    expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
+    // 首轮完成回合边界的唯一唤醒是 enriched turn_completed（initial_input_settled 的
+    // state_changed 不再另发；落账后状态事件级携带）
+    const turnEvents = await readTurnCompleted(harness, worker.worker_id)
+    expect(turnEvents[0]?.detail).toMatchObject({
       to: 'idle',
-      kind: 'initial_input_settled',
       turn_id: expect.any(String),
       turn_pending: true,
     })
+    expect(turnEvents[0]?.task_status).toBe('halted')
+    expect(events.filter((e) => e.kind === 'state_changed')).toHaveLength(0)
   })
 
   it('CLI首投遇到未知界面时创建短期快照，只允许 Manager 应答一次', async () => {
@@ -529,11 +550,10 @@ describe('WorkerHarness.spawnWorker', () => {
       },
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
-    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')?.detail
+    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'interaction_required')?.detail
     const snapshotId = detail?.snapshot_id
 
     expect(detail).toMatchObject({
-      kind: 'interaction_required',
       snapshot_id: expect.any(String),
       snapshot_expires_at: expect.any(String),
       actions: UI_ACTIONS,
@@ -574,7 +594,7 @@ describe('WorkerHarness.spawnWorker', () => {
       },
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
-    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')?.detail
+    const detail = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'interaction_required')?.detail
 
     nowValue += 11 * 60_000
     await expect(harness.respondToWorkerUi(worker.worker_id, detail?.snapshot_id as string, 'confirm')).rejects.toThrow(
@@ -600,7 +620,7 @@ describe('WorkerHarness.spawnWorker', () => {
     })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
     const incarnation = worker.incarnations[0]
-    const firstSnapshotId = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed')
+    const firstSnapshotId = events.find((event) => event.worker_id === worker.worker_id && event.kind === 'interaction_required')
       ?.detail?.snapshot_id as string
     const handle: IncarnationHandle = {
       worker_id: worker.worker_id,
@@ -1500,25 +1520,24 @@ describe('WorkerHarness.handleStateChange', () => {
     )
   })
 
-  it('状态回调驱动台账 task.status 与化身 state,并经 onEvent 外发', async () => {
+  it('状态回调驱动台账 task.status 与化身 state,turn 边界经 turn_completed 单醒外发', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'idle')
 
-    // handleStateChange 签名对齐 adapter 的同步回调(h, state) => void,内部是 fire-and-forget
-    // 的异步台账更新——用轮询等待收敛(与 tests/workers/contract-suite.ts 的 waitForState
-    // 同一套路,不是"睡一下猜时序",是"有界轮询直到可观察结果达到预期,超时即失败")。
-    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
+    // 完成回合边界的唯一唤醒是 enriched turn_completed（durable 通道，落 events.jsonl）
+    const stateEvents = await readTurnCompleted(harness, worker.worker_id)
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('halted')
     expect(w.incarnations[0].state).toBe('idle')
 
-    const stateEvents = events.filter((e) => e.kind === 'state_changed')
     expect(stateEvents).toHaveLength(1)
     expect(stateEvents[0].detail).toMatchObject({ to: 'idle', turn_pending: true, turn_id: expect.any(String) })
+    // 单醒：同拍不再另发 state_changed 唤醒
+    expect(events.filter((e) => e.kind === 'state_changed')).toHaveLength(0)
 
     // 化身自然结束(非 kill)→ exited;task 已在 idle 拍落 halted,不再二次迁移
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
@@ -1600,6 +1619,28 @@ describe('WorkerHarness.handleStateChange', () => {
     expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('running')
   })
 
+  it('stop 核验 unknown 且无 bg → task 落 halted(stop_unverified)，operation_settled 携带 halted(现网缺口修复)', async () => {
+    const opEvents: HarnessEvent[] = []
+    const { harness, fake } = await makeHarness({}, {
+      hasRunningBg: async () => false,
+      onOperationNotification: async (_managerKey, e) => { opEvents.push(e); return { consumed: true } },
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    // 核验阶段 adapter.state 不可用 → 结算 unknown
+    vi.spyOn(fake, 'state').mockRejectedValue(new Error('tmux session gone'))
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({ status: 'unknown' })
+
+    const [stored] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(stored.task.status).toBe('halted')
+    expect(stored.task.halt?.stop_unverified).toBe(true)
+    // 修复前：这次 halted 迁移没有任何事件携带，Admin 收不到推送；现在由唯一回执承载。
+    await waitUntil(() => opEvents.some((e) => e.kind === 'operation_settled'))
+    const settled = opEvents.find((e) => e.kind === 'operation_settled')!
+    expect(settled.detail?.status).toBe('unknown')
+    expect(settled.task_status).toBe('halted')
+  })
+
   it('同步 stop 退出在核验 unknown 后仍保留 task 状态，重启对账也不改写成 cancelled 或 failed', async () => {
     const { harness, fake } = await makeHarness({}, { hasRunningBg: async () => true })
     const worker = await harness.spawnWorker(spawnParams())
@@ -1673,12 +1714,11 @@ describe('WorkerHarness.handleStateChange', () => {
       ui: { fingerprint: 'question:yes-no', actions: UI_ACTIONS },
       notification: { type: 'permission_prompt', message: 'Choose', title: 'Question' },
     })
-    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
+    await waitUntil(() => events.some((event) => event.kind === 'interaction_required'))
 
-    const detail = events.find((event) => event.kind === 'state_changed')?.detail
+    const detail = events.find((event) => event.kind === 'interaction_required')?.detail
     expect(detail).toMatchObject({
       to: 'idle',
-      kind: 'interaction_required',
       wait_mode: 'action',
       wait_reason: 'interaction_required',
       notification_type: 'permission_prompt',
@@ -1706,10 +1746,9 @@ describe('WorkerHarness.handleStateChange', () => {
       ui: { fingerprint: 'claude_exit_plan:1-2', actions: UI_ACTIONS },
       notification: { type: 'automatic_interaction_failed' },
     })
-    await waitUntil(() => events.some((event) => event.kind === 'state_changed'))
+    await waitUntil(() => events.some((event) => event.kind === 'interaction_required'))
 
-    expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
-      kind: 'interaction_required',
+    expect(events.find((event) => event.kind === 'interaction_required')?.detail).toMatchObject({
       notification_type: 'automatic_interaction_failed',
       text: 'Exit plan mode?',
       snapshot_id: expect.any(String),
@@ -1742,7 +1781,7 @@ describe('WorkerHarness.handleStateChange', () => {
       waitReason: 'interaction_required',
       notification: { type: 'permission_prompt', message: '请选择' },
     })
-    await waitUntil(() => events.some((event) => event.worker_id === notificationWorker.worker_id && event.kind === 'state_changed'))
+    await waitUntil(() => events.some((event) => event.worker_id === notificationWorker.worker_id && event.kind === 'interaction_required'))
     expect(await harness.getWorkerTurn(notificationWorker.worker_id)).toBeUndefined()
   })
 
@@ -1755,18 +1794,14 @@ describe('WorkerHarness.handleStateChange', () => {
       waitReason: 'interaction_required',
       notification: { type: 'permission_prompt', message: '请选择' },
     })
-    await waitUntil(() => events.some((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed'))
+    await waitUntil(() => events.some((event) => event.worker_id === worker.worker_id && event.kind === 'interaction_required'))
     expect(await harness.getWorkerTurn(worker.worker_id)).toBeUndefined()
 
     fake.emitStateChange(handle, 'idle', '交互完成后的本轮结果')
     await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id))?.completion_source === 'claude_stop')
-    await waitUntil(() => events.some((event) =>
-      event.worker_id === worker.worker_id &&
-      event.kind === 'state_changed' &&
-      typeof event.detail?.turn_id === 'string',
-    ))
+    const turns = await readTurnCompleted(harness, worker.worker_id)
 
-    const detail = events.filter((event) => event.worker_id === worker.worker_id && event.kind === 'state_changed').at(-1)?.detail
+    const detail = turns.at(-1)?.detail
     expect(detail).toMatchObject({ to: 'idle', turn_id: expect.any(String), turn_pending: true })
   })
 
@@ -1861,8 +1896,7 @@ describe('WorkerHarness.handleStateChange', () => {
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(h, 'idle', '  调研完成,结论是 X 方案可行。  ')
 
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    const [ev] = await readTurnCompleted(harness, worker.worker_id)
     expect(ev.detail).toMatchObject({
       to: 'idle',
       text: '调研完成,结论是 X 方案可行。',
@@ -1880,8 +1914,7 @@ describe('WorkerHarness.handleStateChange', () => {
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(h, 'idle', long)
 
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    const [ev] = await readTurnCompleted(harness, worker.worker_id)
     const text = (ev.detail as { text: string }).text
     // 保留头部 2000 字符；完整文本可由结构化活动流提供，不伪造终端历史入口。
     expect(text.startsWith('啊'.repeat(2000))).toBe(true)
@@ -1906,8 +1939,7 @@ describe('WorkerHarness.handleStateChange', () => {
       summary: '  盘点完成:三处配置漂移已修正,另有一处需人工确认。  ',
     })
 
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    const [ev] = await readTurnCompleted(harness, worker.worker_id)
     expect(ev.detail).toMatchObject({
       to: 'exited',
       text: '已经全部跑完了。',
@@ -1915,6 +1947,38 @@ describe('WorkerHarness.handleStateChange', () => {
       turn_id: expect.any(String),
       turn_pending: true,
     })
+  })
+
+  it('回合通知持久化失败 → 回退补发 fire-and-forget state_changed 保在线送达(协议 §6.3)', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    // 下一次 persist 落盘失败：durable 唤醒不存在,必须回退补发 fire-and-forget
+    // state_changed（PR #137 review #7：这条新引入的失败路径要有定向用例钉住）。
+    const recordSpy = vi.spyOn(NativeActivityStore.prototype, 'record').mockRejectedValueOnce(new Error('disk full'))
+    try {
+      harness.handleStateChange(h, 'idle', {
+        completionSource: 'builtin_end_turn',
+        lastText: '收尾正文',
+      })
+
+      await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+      const fallback = events.filter((e) => e.kind === 'state_changed')
+      expect(fallback).toHaveLength(1)
+      expect(fallback[0].detail).toMatchObject({
+        to: 'idle',
+        text: '收尾正文',
+        turn_id: expect.any(String),
+        turn_pending: true,
+      })
+      expect(fallback[0].task_status).toBe('halted')
+      // durable 通道侧：通知没落盘,events.jsonl 里不应有 turn_completed
+      expect((await harness.readWorkerEvents(worker.worker_id)).some((e) => e.kind === 'turn_completed')).toBe(false)
+    } finally {
+      recordSpy.mockRestore()
+    }
   })
 
   it('CLI 终端画面不随状态事件自动转发，manager 需要时再显式读取', async () => {
@@ -1960,8 +2024,10 @@ describe('WorkerHarness.handleStateChange', () => {
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
     harness.handleStateChange(h, 'exited', { endReason: 'crashed' })
 
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    // crashed 退出已降审计（唤醒由 worker_recovery_required 承载）：读 events.jsonl 验证
+    // detail 形状——审计与唤醒共用同一个 detail 构造函数。
+    await waitUntil(async () => (await harness.readWorkerEvents(worker.worker_id)).some((e) => e.kind === 'state_changed'))
+    const [ev] = (await harness.readWorkerEvents(worker.worker_id)).filter((e) => e.kind === 'state_changed')
     expect(ev.detail).toMatchObject({ to: 'exited' })
   })
 
@@ -1993,10 +2059,11 @@ describe('WorkerHarness.handleStateChange', () => {
 
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(h, 'idle')
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    expect(events.filter((e) => e.kind === 'state_changed')[0].detail).toMatchObject({ to: 'idle', turn_pending: true })
+    const idleTurns = await readTurnCompleted(harness, worker.worker_id)
+    expect(idleTurns[0].detail).toMatchObject({ to: 'idle', turn_pending: true })
 
-    // 纯空白同样折成"没有正文",不塞空字段。
+    // 纯空白同样折成"没有正文",不塞空字段。（running 拍无 completionSource，仍走
+    // fire-and-forget state_changed）
     events.length = 0
     fake.emitStateChange(h, 'running', '   \n  ')
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
@@ -2640,7 +2707,8 @@ describe('WorkerHarness.sendToWorker', () => {
       for (let step = 0; step < 5; step++) await Promise.resolve()
 
       expect((await harness.readWorkerEvents(worker.worker_id))
-        .filter((event) => event.kind === 'handoff_started')).toEqual([])
+        .filter((event) => event.kind === 'lifecycle_changed'
+          && (event.detail as { change?: string } | undefined)?.change === 'handoff_started')).toEqual([])
       expect(target.spawnCalls).toEqual([])
     } finally {
       releaseCapture.resolve()
@@ -3119,7 +3187,10 @@ describe('WorkerHarness.sendToWorker', () => {
 
 describe('WorkerHarness.killWorker', () => {
   it('adapter.kill 被调用,台账落 cancelled,化身 exited(killed),事件外发', async () => {
-    const { harness, fake } = await makeHarness()
+    const opEvents: HarnessEvent[] = []
+    const { harness, fake } = await makeHarness({}, {
+      onOperationNotification: async (_managerKey, e) => { opEvents.push(e); return { consumed: true } },
+    })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
@@ -3133,9 +3204,17 @@ describe('WorkerHarness.killWorker', () => {
     expect(w.incarnations[0].state).toBe('exited')
     expect(w.incarnations[0].ended_reason).toBe('killed')
 
-    const stopped = events.filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
-    expect(stopped).toHaveLength(1)
-    expect(stopped[0].task_status).toBe('closed')
+    // 一次停止一张回执：operation_settled 是对 manager 的唯一唤醒，自带落账后 closed。
+    // （operation 通知是异步投递，等它到达）
+    await waitUntil(() => opEvents.filter((e) => e.kind === 'operation_settled').length === 1)
+    const settled = opEvents.filter((e) => e.kind === 'operation_settled')
+    expect(settled[0].task_status).toBe('closed')
+    // stop_verified 已降审计：不进唤醒面，events.jsonl 里仍可查（同样带 closed）。
+    expect(events.filter((e) => e.detail?.reason === 'stop_verified')).toHaveLength(0)
+    const auditStopped = (await harness.readWorkerEvents(worker.worker_id))
+      .filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
+    expect(auditStopped).toHaveLength(1)
+    expect(auditStopped[0].task_status).toBe('closed')
   })
 
   it('幂等:对已 cancelled 的 worker 再次 kill 不报错、不重复调用 adapter.kill、不重复发事件', async () => {
@@ -3147,7 +3226,7 @@ describe('WorkerHarness.killWorker', () => {
 
     await expect(harness.killWorker(worker.worker_id)).resolves.toBeUndefined()
     expect(fake.killCalls).toHaveLength(1) // 未被再次调用
-    expect(events.filter((e) => e.kind === 'killed')).toHaveLength(0)
+    expect(events).toHaveLength(0) // 不再发任何事件(killed kind 已随事件面收敛删除)
   })
 
   it('不存在的 worker_id → WorkerNotFoundError', async () => {
@@ -4107,8 +4186,9 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
 
-    const spawned = events.filter((e) => e.kind === 'spawned')
+    const spawned = events.filter((e) => e.kind === 'lifecycle_changed')
     expect(spawned).toHaveLength(1)
+    expect(spawned[0].detail).toMatchObject({ change: 'spawned' })
     expect(spawned[0].task_status).toBe('running')
     expect(spawned[0].task_status).toBe(worker.task.status)
   })
@@ -4122,31 +4202,36 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     expect(exited[0].task_status).toBe('halted')
   })
 
-  it('迁移点:主线状态回调 → state_changed 带落账后的 waiting_input / completed', async () => {
+  it('迁移点:主线状态回调 → turn_completed 带落账后的 task 状态(turn 边界唯一唤醒)', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
     const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as WorkerImplId, session_ref: `ref-${worker.worker_id}#1` }
     events.length = 0
 
     fake.emitStateChange(handle, 'idle')
-    await waitUntil(async () => events.some((e) => e.kind === 'state_changed'))
-    expect(events.filter((e) => e.kind === 'state_changed')[0].task_status).toBe('halted')
+    const idleTurns = await readTurnCompleted(harness, worker.worker_id)
+    expect(idleTurns[0].task_status).toBe('halted')
 
     fake.emitStateChange(handle, 'exited')
-    await waitUntil(async () => events.filter((e) => e.kind === 'state_changed').length >= 2)
-    expect(events.filter((e) => e.kind === 'state_changed')[1].task_status).toBe('halted')
+    await waitUntil(async () =>
+      (await harness.readWorkerEvents(worker.worker_id)).filter((e) => e.kind === 'turn_completed').length >= 2)
+    const allTurns = (await harness.readWorkerEvents(worker.worker_id)).filter((e) => e.kind === 'turn_completed')
+    expect(allTurns[1].task_status).toBe('halted')
   })
 
-  it('迁移点:verified stop → state_changed 带 cancelled', async () => {
-    const { harness } = await makeHarness()
+  it('迁移点:verified stop → operation_settled 带 closed(stop_verified 已降审计)', async () => {
+    const opEvents: HarnessEvent[] = []
+    const { harness } = await makeHarness({}, {
+      onOperationNotification: async (_managerKey, e) => { opEvents.push(e); return { consumed: true } },
+    })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
     await harness.killWorker(worker.worker_id, '用户要求终止')
 
-    const stopped = events.filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
-    expect(stopped).toHaveLength(1)
-    expect(stopped[0].task_status).toBe('closed')
+    await waitUntil(() => opEvents.filter((e) => e.kind === 'operation_settled').length === 1)
+    const settled = opEvents.filter((e) => e.kind === 'operation_settled')
+    expect(settled[0].task_status).toBe('closed')
   })
 
   it('非迁移点:input_sent 不带 task_status(投递不动 task 状态)', async () => {
@@ -4161,10 +4246,13 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     expect(inputSent[0].task_status).toBeUndefined()
   })
 
-  it('非迁移点:stop 后 drain 出的 dead_letter 不带 task_status(迁移由 stop_verified 事件承载)', async () => {
+  it('非迁移点:stop 后 drain 出的 dead_letter 不带 task_status(迁移由 operation_settled 承载)', async () => {
+    const opEvents: HarnessEvent[] = []
     const { harness } = await makeHarness({
       // 让第一条卡在投递里,第二条就会留在队列上等 killWorker 去 drain
       sendInputBehavior: () => new Promise((resolve) => setTimeout(resolve, 30)),
+    }, {
+      onOperationNotification: async (_managerKey, e) => { opEvents.push(e); return { consumed: true } },
     })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
@@ -4175,11 +4263,14 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     await inFlight.catch(() => undefined)
     await queued
 
-    const deadLetters = events.filter((e) => e.kind === 'state_changed' && e.detail?.kind === 'dead_letter')
+    // 死信已降审计：读 events.jsonl 而非唤醒面
+    const deadLetters = (await harness.readWorkerEvents(worker.worker_id))
+      .filter((e) => e.kind === 'state_changed' && e.detail?.kind === 'dead_letter')
     expect(deadLetters.length).toBeGreaterThan(0)
     for (const e of deadLetters) expect(e.task_status).toBeUndefined()
-    // 同一次 verified stop 的 state_changed 事件才是那次迁移的载体
-    expect(events.find((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')?.task_status).toBe('closed')
+    // 同一次 verified stop 的迁移载体是 operation_settled（唯一唤醒，自带 closed）
+    await waitUntil(() => opEvents.some((e) => e.kind === 'operation_settled'))
+    expect(opEvents.find((e) => e.kind === 'operation_settled')?.task_status).toBe('closed')
   })
 
   it('非迁移点:query_failed 不带 task_status', async () => {

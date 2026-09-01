@@ -164,15 +164,16 @@ function channelSessionFromKey(key: ManagerKey): { channel_id: string; session_i
 }
 
 /**
- * worker 自然跑到终态(finish_task/burst 正常收尾)时,harness.processStateChange 落的事件
- * kind 恒为 'state_changed'、`detail.to==='exited'`——`'exited'` 这个 HarnessEventKind 只在
- * spawn 失败 / reconcileOnStartup 判崩 / fork 化身完成三条路径使用(读 harness.ts 的
- * `appendEvent(..., 'exited', ...)` 调用点确认,不是猜测),不对应本文件场景一/二里
- * worker 主线正常 finish_task 收尾这条路径。取最后一条匹配的事件(理论上只有一条:该 worker
- * 单轮 burst 内直接从 running 转 exited,不经过 idle 中间态)。
+ * worker 自然跑到终态(finish_task/burst 正常收尾)时,唤醒事件是 enriched turn_completed
+ * (协议 §6.3:完成回合边界对 manager 的唯一唤醒,durable 通道投递)——同拍不再另发
+ * state_changed。`'exited'` 这个 HarnessEventKind 只在 spawn 失败 / reconcileOnStartup
+ * 判崩 / fork 化身完成三条路径使用(读 harness.ts 的 `appendEvent(..., 'exited', ...)`
+ * 调用点确认,不是猜测),不对应本文件场景一/二里 worker 主线正常 finish_task 收尾这条
+ * 路径。取最后一条匹配的事件(理论上只有一条:该 worker 单轮 burst 内直接从 running 转
+ * exited,不经过 idle 中间态)。
  */
 function findWorkerExitedEvent(events: readonly HarnessEvent[], workerId: string): HarnessEvent | undefined {
-  return [...events].reverse().find((e) => e.worker_id === workerId && e.kind === 'state_changed' && e.detail?.to === 'exited')
+  return [...events].reverse().find((e) => e.worker_id === workerId && e.kind === 'turn_completed')
 }
 
 // ============================================================================
@@ -275,6 +276,9 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
     workersDir,
     now: harnessNow,
     onEvent: (e) => events.push(e),
+    // durable 通知通道(turn_completed / operation_settled 等):收进同一个 events 数组供断言,
+    // 回执 undefined(无人消费)——通知保持 pending,事件在投递前已落 events.jsonl。
+    onOperationNotification: async (_managerKey, e) => { events.push(e); return undefined },
     builtinSpawnDefaults: () => {
       const cfg = builtinConfigQueue.shift()
       if (!cfg) throw new Error('测试装配缺口:没有为下一次 builtin spawn 预置 builtinConfigQueue 条目')
@@ -425,6 +429,8 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(assembly.toolCallLog.some((c) => c.name === 'spawn_worker')).toBe(true)
 
       // 等真实 worker 后台把 finish_task 跑完——burst 是 fire-and-forget,不是靠猜时序。
+      // 回合边界事件走 durable 通道（persist + 异步投递），比台账 halted 晚一跳，
+      // 直接等事件本身出现（场景五同款模式）。
       await waitUntil(async () => {
         const workers = await assembly.harness.listWorkers(assembly.managerKeyFor(key))
         return workers.some((w) => w.task.status === 'halted')
@@ -436,6 +442,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(worker.incarnations[0].state).toBe('exited')
       expect(worker.incarnations[0].ended_reason).toBe('completed')
 
+      await waitUntil(() => findWorkerExitedEvent(assembly.events, worker.worker_id) !== undefined)
       const exitedEvent = findWorkerExitedEvent(assembly.events, worker.worker_id)
       expect(exitedEvent).toBeDefined()
 
@@ -520,6 +527,8 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
         return workers.some((w) => w.task.status === 'halted')
       })
       const [workerA] = await assembly.harness.listWorkers(assembly.managerKeyFor(SYSTEM_TASKS_MANAGER_KEY))
+      // durable 通道事件比台账 halted 晚一跳，等事件本身出现（同场景一）
+      await waitUntil(() => findWorkerExitedEvent(assembly.events, workerA.worker_id) !== undefined)
       const exitedEventA = findWorkerExitedEvent(assembly.events, workerA.worker_id)!
 
       managerScript.queue.push({
@@ -574,6 +583,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(workerB.incarnations[0].ended_reason).toBe('failed')
       // 同一份真值也进了对外事件（appendEvent 带的是提交后的 task.status）——manager 的
       // 台账块与 admin 侧读端点看到的都是这一份。
+      await waitUntil(() => findWorkerExitedEvent(assembly.events, workerB.worker_id) !== undefined)
       const exitedEventB = findWorkerExitedEvent(assembly.events, workerB.worker_id)!
       expect(exitedEventB.task_status).toBe('halted')
       // 对照组：成功的 worker A 仍然是 completed，修复没有把所有退出一刀切判失败。
@@ -763,12 +773,12 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(episode1.outcome).toBe('completed')
 
       const [worker] = await assembly.harness.listWorkers(assembly.managerKeyFor(key))
-      // 等**事件**本身出现，不是等台账转 idle——processStateChange 先 upsert 台账、再 appendEvent，
-      // 盯台账会在这两步之间抢跑（实测在全量并发下偶发）。
+      // 等**事件**本身出现，不是等台账转 idle——回合边界的唤醒是 durable 通道的
+      // turn_completed（persist + 异步投递），盯台账会在事件到达前抢跑。
       const findIdleEvent = () =>
         [...assembly.events]
           .reverse()
-          .find((e) => e.worker_id === worker.worker_id && e.kind === 'state_changed' && e.detail?.to === 'idle')
+          .find((e) => e.worker_id === worker.worker_id && e.kind === 'turn_completed' && e.detail?.to === 'idle')
       await waitUntil(() => findIdleEvent() !== undefined)
 
       // 1) harness 事件本身带上了正文（不是只有一个 {to:'idle'}）
