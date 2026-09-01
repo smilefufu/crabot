@@ -4635,15 +4635,25 @@ export class WorkerHarness {
         const found = await this.deps.ledger.findWorker(workerId)
         const notice = found?.worker.recovery_notices?.find((item) => item.notice_id === noticeId)
         if (!found || !notice || notice.status !== 'pending' || !recoveryNoticeDue(notice, this.deps.now())) return undefined
+        // 投递前校验（协议 §5.5.3）：只有 task 仍为 crash 停摆才值得唤醒。Manager 的处置
+        // 动作（续办回 running / 交接 / 停止落 closed）本身即视为已消费——直接标 consumed，
+        // 不拿过期事实新开 episode。
+        const task = found.worker.task
+        if (task.status !== 'halted' || task.halt?.halt_reason !== 'crashed') {
+          await this.markRecoveryNoticeConsumed(found.managerKey, workerId, noticeId)
+          return undefined
+        }
         const incarnation = found.worker.incarnations.find((item) => item.incarnation_id === notice.incarnation_id)
         if (!incarnation || !isExecutableIncarnation(incarnation)) return undefined
         return {
           managerKey: found.managerKey,
+          // 携带投递时落账后的 task_status：这条通知是一次崩溃对 manager 的唯一唤醒，
+          // 唤醒面的 state_changed(crashed)/exited 已降审计，halted 只能由它送达。
           event: this.buildEvent(workerId, incarnation.seq, 'worker_recovery_required', {
             notice_id: notice.notice_id,
             incarnation_id: notice.incarnation_id,
             text: '[crabot] worker 的执行载体在重启后确认已中断。请先读取 worker 状态和必要的原生会话活动，再决定继续、交接、汇报或停止。',
-          }),
+          }, task.status),
         }
       })
       if (!prepared) return
@@ -4656,9 +4666,16 @@ export class WorkerHarness {
         console.error(`[WorkerHarness] recovery notice delivery failed for ${workerId}/${noticeId}:`, error)
       }
 
+      if (consumed) {
+        await this.withLock(workerId, async () => {
+          // A route that overlapped shutdown has no durable consumption confirmation. Keep the
+          // notice untouched so the next process can route it again after its gate opens.
+          if (this.recoveryNoticeDeliveryStopped || this.deps.isClosing?.()) return
+          await this.markRecoveryNoticeConsumed(prepared.managerKey, workerId, noticeId)
+        })
+        return
+      }
       await this.withLock(workerId, async () => {
-        // A route that overlapped shutdown has no durable consumption confirmation. Keep the
-        // notice untouched so the next process can route it again after its gate opens.
         if (this.recoveryNoticeDeliveryStopped || this.deps.isClosing?.()) return
         const now = this.deps.now()
         await this.deps.ledger.upsertWorker(prepared.managerKey, workerId, (prev) => {
@@ -4668,16 +4685,29 @@ export class WorkerHarness {
           const current = index < 0 ? undefined : notices[index]
           if (!current || current.status !== 'pending') return prev
           const next = [...notices]
-          next[index] = consumed
-            ? { ...current, status: 'consumed', consumed_at: now, retry_after_at: undefined }
-            : {
-                ...current,
-                attempts: current.attempts + 1,
-                retry_after_at: plusMs(now, recoveryNoticeRetryDelayMs(current.attempts + 1)),
-              }
+          next[index] = {
+            ...current,
+            attempts: current.attempts + 1,
+            retry_after_at: plusMs(now, recoveryNoticeRetryDelayMs(current.attempts + 1)),
+          }
           return { ...prev, recovery_notices: next, updated_at: now }
         })
       })
+    })
+  }
+
+  /** 把 pending 恢复通知标为已消费（manager 处置过 / episode 确认消费两种入口共用）。 */
+  private async markRecoveryNoticeConsumed(managerKey: ManagerKey, workerId: string, noticeId: string): Promise<void> {
+    const now = this.deps.now()
+    await this.deps.ledger.upsertWorker(managerKey, workerId, (prev) => {
+      if (!prev) return undefined
+      const notices = prev.recovery_notices ?? []
+      const index = notices.findIndex((item) => item.notice_id === noticeId)
+      const current = index < 0 ? undefined : notices[index]
+      if (!current || current.status !== 'pending') return prev
+      const next = [...notices]
+      next[index] = { ...current, status: 'consumed', consumed_at: now, retry_after_at: undefined }
+      return { ...prev, recovery_notices: next, updated_at: now }
     })
   }
 
@@ -5212,10 +5242,13 @@ export class WorkerHarness {
   }
 
   /**
-   * reconcileOnStartup 判死分支:落 halted(crashed)+ exited 事件。三种判死
+   * reconcileOnStartup 判死分支:落 halted(crashed)+ exited 审计事件。三种判死
    * 场景(adapter 报 exited / adapter 未注册 / adapter.state() 抛错)共用同一段收尾——三者
    * 语义上都是"至此已经没有任何证据证明这个非终态 worker 还活着"。任务不落终态:
    * "载体死了"是事实,"任务失败"是判断,由 manager 处置落定。
+   *
+   * 事件只落审计:判死同时落 recovery notice,对 manager 的唯一唤醒由 durable 的
+   * worker_recovery_required 承载(一次崩溃只醒一次,协议 §5.5.3)。
    */
   private async markCrashed(
     managerKey: ManagerKey,
@@ -5255,7 +5288,7 @@ export class WorkerHarness {
         updated_at: now,
       }
     })
-    await this.appendEvent(
+    await this.appendAuditEvent(
       worker.worker_id,
       mainline.seq,
       'exited',
@@ -6419,10 +6452,14 @@ export class WorkerHarness {
         ...uiSnapshotDetail(uiSnapshot),
         ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
       }
-      if (endReason === 'superseded' || endReason === 'killed') {
-        // handoff 进度节点（源化身退出）/ 我方 stop 的化身退出：只落审计——前者的唤醒由
-        // 新化身就位的 lifecycle_changed 承载；后者由 operation_settled 承载（一次停止
-        // 一张回执）。审计事件仍自带落账后 task_status，供 trace/排查还原状态迁移。
+      if (endReason === 'superseded' || endReason === 'killed' || (endReason === 'crashed' && !preserveTaskForStop)) {
+        // 只落审计的三类退出（一次物理事实 = manager 只醒一次）：
+        // - superseded：handoff 进度节点，唤醒由新化身就位的 lifecycle_changed 承载；
+        // - killed：我方 stop，唤醒由 operation_settled 承载（一次停止一张回执）；
+        // - crashed（非停止核验途中）：唤醒由 durable 的 worker_recovery_required 承载
+        //   （一次崩溃只醒一次，协议 §5.5.3）。停止核验途中崩溃（preserveTaskForStop）
+        //   不建恢复通知，state_changed 保留唤醒作为唯一事实通道。
+        // 审计事件仍自带落账后 task_status，供 trace/排查还原状态迁移。
         await this.appendAuditEvent(h.worker_id, h.seq, cliReportEventKind(report), mainlineEventDetail, committed?.task.status)
       } else {
         await this.appendEvent(

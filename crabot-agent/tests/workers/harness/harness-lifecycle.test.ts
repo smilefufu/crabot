@@ -1980,8 +1980,10 @@ describe('WorkerHarness.handleStateChange', () => {
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
     harness.handleStateChange(h, 'exited', { endReason: 'crashed' })
 
-    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    // crashed 退出已降审计（唤醒由 worker_recovery_required 承载）：读 events.jsonl 验证
+    // detail 形状——审计与唤醒共用同一个 detail 构造函数。
+    await waitUntil(async () => (await harness.readWorkerEvents(worker.worker_id)).some((e) => e.kind === 'state_changed'))
+    const [ev] = (await harness.readWorkerEvents(worker.worker_id)).filter((e) => e.kind === 'state_changed')
     expect(ev.detail).toMatchObject({ to: 'exited' })
   })
 

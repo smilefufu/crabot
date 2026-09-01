@@ -197,7 +197,8 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(after.incarnations[0].ended_reason).toBe('crashed')
     expect(after.incarnations[0].ended_at).toBeTruthy()
 
-    const exitedEvents = events.filter((e) => e.kind === 'exited' && e.worker_id === 'w-exited')
+    // 判死事件已降审计（唤醒由 worker_recovery_required 承载）：读 events.jsonl 而非唤醒面
+    const exitedEvents = (await harness.readWorkerEvents('w-exited')).filter((e) => e.kind === 'exited')
     expect(exitedEvents).toHaveLength(1)
     expect(exitedEvents[0].detail?.reason).toBe('crashed')
   })
@@ -354,7 +355,7 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     const after = await getWorker(ledger, 'w-no-adapter')
     expect(after.task.status).toBe('halted')
     expect(after.incarnations[0].ended_reason).toBe('crashed')
-    const exitedEvents = events.filter((e) => e.kind === 'exited' && e.worker_id === 'w-no-adapter')
+    const exitedEvents = (await harness.readWorkerEvents('w-no-adapter')).filter((e) => e.kind === 'exited')
     expect(exitedEvents[0].detail?.message).toContain('codex')
     expect(builtinFake.stateCalls).toHaveLength(0) // 不存在的 impl，不该错调到别的 adapter 上
   })
@@ -378,7 +379,7 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     const after = await getWorker(ledger, 'w-throws')
     expect(after.task.status).toBe('halted')
     expect(after.incarnations[0].ended_reason).toBe('crashed')
-    const exitedEvents = events.filter((e) => e.kind === 'exited' && e.worker_id === 'w-throws')
+    const exitedEvents = (await harness.readWorkerEvents('w-throws')).filter((e) => e.kind === 'exited')
     expect(exitedEvents[0].detail?.message).toContain('tmux pane 探测失败')
   })
 })
@@ -488,7 +489,8 @@ describe('WorkerHarness.reconcileOnStartup — 幂等', () => {
     expect(first).toEqual<ReconcileReport>({ revived: [], failed: ['w-repeat'], unchanged: [] })
     const afterFirst = await getWorker(ledger, 'w-repeat')
     expect(afterFirst.task.status).toBe('halted')
-    const eventsAfterFirst = events.filter((e) => e.worker_id === 'w-repeat')
+    // 判死事件已降审计：读 events.jsonl 而非唤醒面
+    const eventsAfterFirst = (await harness.readWorkerEvents('w-repeat')).filter((e) => e.kind === 'exited')
     expect(eventsAfterFirst).toHaveLength(1)
 
     const second = await harness.reconcileOnStartup()
@@ -496,7 +498,7 @@ describe('WorkerHarness.reconcileOnStartup — 幂等', () => {
     // adapter.state() 完全不会再被这个已终态 worker 调用第二次。
     expect(fake.stateCalls.filter((h) => h.worker_id === 'w-repeat')).toHaveLength(1)
     // 没有产生第二条事件。
-    expect(events.filter((e) => e.worker_id === 'w-repeat')).toHaveLength(1)
+    expect((await harness.readWorkerEvents('w-repeat')).filter((e) => e.kind === 'exited')).toHaveLength(1)
     const afterSecond = await getWorker(ledger, 'w-repeat')
     expect(afterSecond).toEqual(afterFirst) // 台账没有被第二次改写
   })
@@ -537,6 +539,8 @@ describe('WorkerHarness restart recovery notices', () => {
       expect(delivered[index]).toMatchObject({
         kind: 'worker_recovery_required',
         worker_id: 'w-recovery-notice',
+        // 一次崩溃对 manager 的唯一唤醒：必须携带落账后 task_status（唤醒面 exited 已降审计）
+        task_status: 'halted',
         detail: expect.objectContaining({ notice_id: crashed.recovery_notices?.[0].notice_id }),
       })
       const pending = (await getWorker(ledger, 'w-recovery-notice')).recovery_notices?.[0]
@@ -554,6 +558,35 @@ describe('WorkerHarness restart recovery notices', () => {
     await harness.reconcileRecoveryNoticesOnStartup()
     expect(delivered).toHaveLength(6)
     expect((await getWorker(ledger, 'w-recovery-notice')).recovery_notices?.[0]).toMatchObject({
+      status: 'consumed',
+      consumed_at: expect.any(String),
+    })
+  })
+
+  it('投递前校验：notice 到期时 task 已被 manager 处置(非 crash 停摆) → 直接标 consumed，不拿过期事实唤醒', async () => {
+    const delivered: HarnessEvent[] = []
+    const { harness, ledger, adaptersMap } = await makeHarness({
+      onOperationNotification: async (_managerKey, event) => {
+        delivered.push(event)
+        return { consumed: true }
+      },
+    })
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    await seed(ledger, DIALOG, makeWorker('w-stale-notice'))
+    fake.setState({ worker_id: 'w-stale-notice', seq: 1 }, 'exited')
+    await harness.reconcileOnStartup()
+    expect((await getWorker(ledger, 'w-stale-notice')).recovery_notices).toHaveLength(1)
+
+    // manager 在通知投递前已经处置：停止落定 closed（续办回 running 同理不再 crash 停摆）
+    await harness.killWorker('w-stale-notice')
+    expect((await getWorker(ledger, 'w-stale-notice')).task.status).toBe('closed')
+
+    await harness.reconcileRecoveryNoticesOnStartup()
+
+    // 不投递过期事实；notice 被处置动作本身视为已消费
+    expect(delivered.filter((e) => e.kind === 'worker_recovery_required')).toEqual([])
+    expect((await getWorker(ledger, 'w-stale-notice')).recovery_notices?.[0]).toMatchObject({
       status: 'consumed',
       consumed_at: expect.any(String),
     })
@@ -687,12 +720,14 @@ describe('WorkerHarness restart recovery notices', () => {
 })
 
 /**
- * P5 修复:`HarnessEvent.task_status` —— 对账路径上的两个 task 级迁移点
+ * `HarnessEvent.task_status` —— 对账路径上的两个 task 级迁移点
  * (markCrashed 的 `exited`、realignAliveIncarnation 的 `state_changed`)必须自带落账后的
- * 状态,订阅方不再现读台账。分类总表见 harness.ts `appendEvent` 注释。
+ * 状态。markCrashed 已降审计（唤醒由 worker_recovery_required 承载），这里读 events.jsonl
+ * 验证审计事件仍自带状态；realignAliveIncarnation 仍在唤醒面。分类总表见 harness.ts
+ * `appendEvent` 注释。
  */
 describe('HarnessEvent.task_status —— reconcileOnStartup 的迁移点', () => {
-  it('判死(markCrashed)的 exited 事件带 failed', async () => {
+  it('判死(markCrashed)的 exited 审计事件带 halted', async () => {
     const { harness, ledger, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter('builtin')
     adaptersMap.set('builtin', fake)
@@ -701,7 +736,7 @@ describe('HarnessEvent.task_status —— reconcileOnStartup 的迁移点', () =
 
     await harness.reconcileOnStartup()
 
-    const exited = events.filter((e) => e.kind === 'exited' && e.worker_id === 'w-crash')
+    const exited = (await harness.readWorkerEvents('w-crash')).filter((e) => e.kind === 'exited')
     expect(exited).toHaveLength(1)
     expect(exited[0].task_status).toBe('halted')
     expect(exited[0].task_status).toBe((await getWorker(ledger, 'w-crash')).task.status)
