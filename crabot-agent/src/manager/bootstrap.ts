@@ -454,6 +454,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       )
     },
     onOperationNotification: (managerKey, event, activityReceipt) => {
+      // 对外事件与 onEvent 通道同理:operation_settled 自带落账后 task_status 后,
+      // 停止/核验的 closed·halted 推送只经这条通道到达(唤醒面的对应事件已降审计)。
+      publishTaskStatusChanged?.(event)
       if (!registry) return { consumed: false }
       return registry.routeOperationNotification(managerKey, event, activityReceipt).catch((err) => {
         console.error(

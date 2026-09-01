@@ -1656,7 +1656,7 @@ describe('WorkerHarness — 终审 PoC 回归：M1 主线守卫按 (impl,seq) �
 
 describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞态', () => {
   it('send 卡在投递期间 kill：残留队列条目被 drain 并记 dead-letter，task 保持 cancelled，不触发 resume 复活', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     let releaseFirst!: () => void
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve
@@ -1699,13 +1699,14 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
     expect(after.task.status).toBe('closed')
     expect(fake.resumeCalls).toHaveLength(0)
 
-    // 残留条目没有静默消失：有 dead-letter 记录。
-    const deadLetterEvents = events.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
+    // 残留条目没有静默消失：有 dead-letter 记录（死信已降审计，读 events.jsonl 而非唤醒面）。
+    const auditM2a = await readAuditLog(workersDir, after.worker_id)
+    const deadLetterEvents = auditM2a.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
     expect(deadLetterEvents.length).toBeGreaterThan(0)
   })
 
   it('send 卡住期间被 kill，之后 adapter.sendInput 才抛 WorkerExitedError 走透明接续：in-flight 条目不经过 drain，cancelled task 仍不被 continueTerminalWorker 复活', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     let releaseGate!: (err: Error) => void
     const gate = new Promise<void>((_resolve, reject) => {
       releaseGate = (err) => reject(err)
@@ -1741,7 +1742,9 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
     expect(after.task.status).toBe('closed') // 核心断言：没有被复活成 running
     expect(fake.resumeCalls).toHaveLength(0)
 
-    const deadLetterEvents = events.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
+    // 死信已降审计：读 events.jsonl 而非唤醒面
+    const auditM2b = await readAuditLog(workersDir, after.worker_id)
+    const deadLetterEvents = auditM2b.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
     expect(deadLetterEvents.length).toBeGreaterThan(0)
   })
 })
@@ -1882,7 +1885,7 @@ describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫
 
 describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker 补送分支的终态竞态收口（锁内可重入求值）', () => {
   it('deliver 卡在旧主线投递期间发生跨实现切换，且新主线在本调用拿锁前也已自然终态（台账已落 exited）：不误对已终态化身调 sendInput，径直转接续，调用方无感', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     let releaseGate!: (err: Error) => void
     const gate = new Promise<void>((_resolve, reject) => {
       releaseGate = (err) => reject(err)
@@ -1968,15 +1971,16 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     expect(finalMainline.impl).toBe('codex')
     expect(finalMainline.state).toBe('running')
 
-    // 消息没有滞留：没有产生 dead-letter。
-    const deadLetterEvents = events.filter(
+    // 消息没有滞留：没有产生 dead-letter（死信已降审计，读 events.jsonl 而非唤醒面）。
+    const auditM3a = await readAuditLog(workersDir, worker.worker_id)
+    const deadLetterEvents = auditM3a.filter(
       (e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter'
     )
     expect(deadLetterEvents).toHaveLength(0)
   })
 
   it('新主线仍存活（台账未落终态）但 adapter.sendInput 权威地抛 WorkerExitedError：同样转入接续，不砸向调用方', async () => {
-    const { harness, adaptersMap } = await makeHarness()
+    const { harness, adaptersMap, workersDir } = await makeHarness()
     let releaseGate!: (err: Error) => void
     const gate = new Promise<void>((_resolve, reject) => {
       releaseGate = (err) => reject(err)
@@ -2044,7 +2048,9 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     expect(finalMainline.impl).toBe('codex')
     expect(finalMainline.state).toBe('running')
 
-    const deadLetterEvents = events.filter(
+    // 死信已降审计：读 events.jsonl 而非唤醒面
+    const auditM3b = await readAuditLog(workersDir, worker.worker_id)
+    const deadLetterEvents = auditM3b.filter(
       (e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter'
     )
     expect(deadLetterEvents).toHaveLength(0)
@@ -2393,13 +2399,14 @@ describe('legacy incarnation guardrails', () => {
 
   it('sendToWorker dead-letters a legacy item without auth before adapter lookup', async () => {
     const settled: string[] = []
-    const { harness, ledger, adaptersMap } = await makeHarness()
+    const { harness, ledger, adaptersMap, workersDir } = await makeHarness()
     await addLegacy(ledger, 'w-legacy-send')
     await expect(harness.sendToWorker('w-legacy-send', 'continue', {
       onSettled: (result) => { settled.push(result) },
     })).resolves.toBeUndefined()
     expect(settled).toEqual(['dead_letter'])
-    expect(events).toContainEqual(expect.objectContaining({
+    // 死信已降审计：读 events.jsonl 而非唤醒面
+    expect(await readAuditLog(workersDir, 'w-legacy-send')).toContainEqual(expect.objectContaining({
       kind: 'state_changed',
       detail: expect.objectContaining({ reason: 'legacy_continuation_authorization_invalid' }),
     }))

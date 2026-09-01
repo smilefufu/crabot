@@ -2053,7 +2053,7 @@ export class WorkerHarness {
       if (!found) throw new WorkerNotFoundError(workerId)
       const { managerKey, worker } = found
       if (worker.task.status === 'closed') {
-        await this.appendEvent(workerId, 1, 'state_changed', {
+        await this.appendAuditEvent(workerId, 1, 'state_changed', {
           kind: 'dead_letter',
           reason: 'task_cancelled',
           text_len: item.text.length,
@@ -2090,7 +2090,7 @@ export class WorkerHarness {
         !this.deps.validateLegacyContinuationAuth ||
         !await this.deps.validateLegacyContinuationAuth(auth)
       ) {
-        await this.appendEvent(workerId, legacy.seq, 'state_changed', {
+        await this.appendAuditEvent(workerId, legacy.seq, 'state_changed', {
           kind: 'dead_letter',
           reason: 'legacy_continuation_authorization_invalid',
           text_len: item.text.length,
@@ -2626,7 +2626,7 @@ export class WorkerHarness {
         // 是调用方(inbox.flush)的既有契约,消息不能静默消失:丢弃这条并记 dead-letter 事件,
         // 不重新抛出(抛出会砸向早已异步返回的 sendToWorker 调用方,变成没人处理的 rejection)。
         if (worker.task.status === 'closed') {
-          await this.appendEvent(workerId, curSeq, 'state_changed', {
+          await this.appendAuditEvent(workerId, curSeq, 'state_changed', {
             kind: 'dead_letter',
             reason: 'task_cancelled',
             text_len: text.length,
@@ -5564,9 +5564,11 @@ export class WorkerHarness {
       const supervision = supervisionAfterMainlineTransition(previous.supervision, task.status, 'exited', incarnation.seq, now)
       return { ...previous, task, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
     })
-    await this.appendEvent(worker.worker_id, incarnation.seq, 'state_changed', { to: 'exited', reason: 'stop_verified' }, cancelled?.task.status)
+    // 停止核验事实与收件箱清空只落审计：一次停止对 manager 的唯一唤醒由 operation_settled
+    // 承载（携带落账后 task_status，见 deliverControlOperationNotifications）。
+    await this.appendAuditEvent(worker.worker_id, incarnation.seq, 'state_changed', { to: 'exited', reason: 'stop_verified' }, cancelled?.task.status)
     for (const item of this.getInbox(worker.worker_id).drain()) {
-      await this.appendEvent(worker.worker_id, incarnation.seq, 'state_changed', {
+      await this.appendAuditEvent(worker.worker_id, incarnation.seq, 'state_changed', {
         kind: 'dead_letter',
         reason: 'task_cancelled',
         text_len: item.text.length,
@@ -5668,13 +5670,31 @@ export class WorkerHarness {
     await mutex.run(async () => {
       for (const notification of await this.controlOperationStore.pendingNotifications(workerId)) {
         const { operation } = notification
-        const event = this.buildEvent(workerId, operation.seq, 'operation_settled', {
-          operation_id: operation.operation_id,
-          incarnation_id: operation.incarnation_id,
-          kind: operation.kind,
-          status: operation.status,
-          detail: operation.detail ?? '',
-        })
+        // operation_settled 是一次停止对 manager 的唯一唤醒（协议 §5.5.4）：必须携带落账后
+        // task_status——succeeded 的 closed、unknown 的 halted（含 stop_unverified 现网缺口）
+        // 都由这一条送达，不再另有 state_changed(stop_verified)/死信唤醒。事件首次落盘即
+        // 固化该值；重投读回首次落盘的那一条（task 可能已再迁移，现读台账会造出错误事实）。
+        let event: HarnessEvent
+        if (notification.event_written) {
+          event = (await this.getEventLog(workerId).readAll())
+            .filter((entry) => entry.kind === 'operation_settled' && entry.detail?.operation_id === operation.operation_id)
+            .pop()
+            ?? this.buildEvent(workerId, operation.seq, 'operation_settled', {
+              operation_id: operation.operation_id,
+              incarnation_id: operation.incarnation_id,
+              kind: operation.kind,
+              status: operation.status,
+              detail: operation.detail ?? '',
+            })
+        } else {
+          event = this.buildEvent(workerId, operation.seq, 'operation_settled', {
+            operation_id: operation.operation_id,
+            incarnation_id: operation.incarnation_id,
+            kind: operation.kind,
+            status: operation.status,
+            detail: operation.detail ?? '',
+          }, (await this.deps.ledger.findWorker(workerId))?.worker.task.status)
+        }
         try {
           if (!notification.event_written) {
             await this.getEventLog(workerId).append(event)
@@ -6399,10 +6419,11 @@ export class WorkerHarness {
         ...uiSnapshotDetail(uiSnapshot),
         ...(turn ? { turn_id: turn.turn_id, turn_pending: true } : {}),
       }
-      if (endReason === 'superseded') {
-        // handoff 进度节点（源化身退出）：只落审计——任务状态保持 running 占位，
-        // 对 manager 的唤醒由新化身就位的 lifecycle_changed 承载（一次 handoff 一次唤醒）。
-        await this.appendAuditEvent(h.worker_id, h.seq, cliReportEventKind(report), mainlineEventDetail)
+      if (endReason === 'superseded' || endReason === 'killed') {
+        // handoff 进度节点（源化身退出）/ 我方 stop 的化身退出：只落审计——前者的唤醒由
+        // 新化身就位的 lifecycle_changed 承载；后者由 operation_settled 承载（一次停止
+        // 一张回执）。审计事件仍自带落账后 task_status，供 trace/排查还原状态迁移。
+        await this.appendAuditEvent(h.worker_id, h.seq, cliReportEventKind(report), mainlineEventDetail, committed?.task.status)
       } else {
         await this.appendEvent(
           h.worker_id,
@@ -6559,9 +6580,10 @@ export class WorkerHarness {
     seq: number,
     kind: HarnessEventKind,
     detail?: Record<string, unknown>,
+    taskStatus?: TaskStatus
   ): Promise<void> {
     try {
-      await this.getEventLog(workerId).append(this.buildEvent(workerId, seq, kind, detail))
+      await this.getEventLog(workerId).append(this.buildEvent(workerId, seq, kind, detail, taskStatus))
     } catch (error) {
       console.error(
         `[WorkerHarness] failed to append operation audit event ` +

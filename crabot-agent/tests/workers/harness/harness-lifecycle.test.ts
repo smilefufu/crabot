@@ -1600,6 +1600,28 @@ describe('WorkerHarness.handleStateChange', () => {
     expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('running')
   })
 
+  it('stop 核验 unknown 且无 bg → task 落 halted(stop_unverified)，operation_settled 携带 halted(现网缺口修复)', async () => {
+    const opEvents: HarnessEvent[] = []
+    const { harness, fake } = await makeHarness({}, {
+      hasRunningBg: async () => false,
+      onOperationNotification: async (_managerKey, e) => { opEvents.push(e); return { consumed: true } },
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    // 核验阶段 adapter.state 不可用 → 结算 unknown
+    vi.spyOn(fake, 'state').mockRejectedValue(new Error('tmux session gone'))
+
+    await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({ status: 'unknown' })
+
+    const [stored] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(stored.task.status).toBe('halted')
+    expect(stored.task.halt?.stop_unverified).toBe(true)
+    // 修复前：这次 halted 迁移没有任何事件携带，Admin 收不到推送；现在由唯一回执承载。
+    await waitUntil(() => opEvents.some((e) => e.kind === 'operation_settled'))
+    const settled = opEvents.find((e) => e.kind === 'operation_settled')!
+    expect(settled.detail?.status).toBe('unknown')
+    expect(settled.task_status).toBe('halted')
+  })
+
   it('同步 stop 退出在核验 unknown 后仍保留 task 状态，重启对账也不改写成 cancelled 或 failed', async () => {
     const { harness, fake } = await makeHarness({}, { hasRunningBg: async () => true })
     const worker = await harness.spawnWorker(spawnParams())
@@ -3118,7 +3140,10 @@ describe('WorkerHarness.sendToWorker', () => {
 
 describe('WorkerHarness.killWorker', () => {
   it('adapter.kill 被调用,台账落 cancelled,化身 exited(killed),事件外发', async () => {
-    const { harness, fake } = await makeHarness()
+    const opEvents: HarnessEvent[] = []
+    const { harness, fake } = await makeHarness({}, {
+      onOperationNotification: async (_managerKey, e) => { opEvents.push(e); return { consumed: true } },
+    })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
@@ -3132,9 +3157,17 @@ describe('WorkerHarness.killWorker', () => {
     expect(w.incarnations[0].state).toBe('exited')
     expect(w.incarnations[0].ended_reason).toBe('killed')
 
-    const stopped = events.filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
-    expect(stopped).toHaveLength(1)
-    expect(stopped[0].task_status).toBe('closed')
+    // 一次停止一张回执：operation_settled 是对 manager 的唯一唤醒，自带落账后 closed。
+    // （operation 通知是异步投递，等它到达）
+    await waitUntil(() => opEvents.filter((e) => e.kind === 'operation_settled').length === 1)
+    const settled = opEvents.filter((e) => e.kind === 'operation_settled')
+    expect(settled[0].task_status).toBe('closed')
+    // stop_verified 已降审计：不进唤醒面，events.jsonl 里仍可查（同样带 closed）。
+    expect(events.filter((e) => e.detail?.reason === 'stop_verified')).toHaveLength(0)
+    const auditStopped = (await harness.readWorkerEvents(worker.worker_id))
+      .filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
+    expect(auditStopped).toHaveLength(1)
+    expect(auditStopped[0].task_status).toBe('closed')
   })
 
   it('幂等:对已 cancelled 的 worker 再次 kill 不报错、不重复调用 adapter.kill、不重复发事件', async () => {
@@ -4137,16 +4170,19 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     expect(events.filter((e) => e.kind === 'state_changed')[1].task_status).toBe('halted')
   })
 
-  it('迁移点:verified stop → state_changed 带 cancelled', async () => {
-    const { harness } = await makeHarness()
+  it('迁移点:verified stop → operation_settled 带 closed(stop_verified 已降审计)', async () => {
+    const opEvents: HarnessEvent[] = []
+    const { harness } = await makeHarness({}, {
+      onOperationNotification: async (_managerKey, e) => { opEvents.push(e); return { consumed: true } },
+    })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
     await harness.killWorker(worker.worker_id, '用户要求终止')
 
-    const stopped = events.filter((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')
-    expect(stopped).toHaveLength(1)
-    expect(stopped[0].task_status).toBe('closed')
+    await waitUntil(() => opEvents.filter((e) => e.kind === 'operation_settled').length === 1)
+    const settled = opEvents.filter((e) => e.kind === 'operation_settled')
+    expect(settled[0].task_status).toBe('closed')
   })
 
   it('非迁移点:input_sent 不带 task_status(投递不动 task 状态)', async () => {
@@ -4161,10 +4197,13 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     expect(inputSent[0].task_status).toBeUndefined()
   })
 
-  it('非迁移点:stop 后 drain 出的 dead_letter 不带 task_status(迁移由 stop_verified 事件承载)', async () => {
+  it('非迁移点:stop 后 drain 出的 dead_letter 不带 task_status(迁移由 operation_settled 承载)', async () => {
+    const opEvents: HarnessEvent[] = []
     const { harness } = await makeHarness({
       // 让第一条卡在投递里,第二条就会留在队列上等 killWorker 去 drain
       sendInputBehavior: () => new Promise((resolve) => setTimeout(resolve, 30)),
+    }, {
+      onOperationNotification: async (_managerKey, e) => { opEvents.push(e); return { consumed: true } },
     })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
@@ -4175,11 +4214,14 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     await inFlight.catch(() => undefined)
     await queued
 
-    const deadLetters = events.filter((e) => e.kind === 'state_changed' && e.detail?.kind === 'dead_letter')
+    // 死信已降审计：读 events.jsonl 而非唤醒面
+    const deadLetters = (await harness.readWorkerEvents(worker.worker_id))
+      .filter((e) => e.kind === 'state_changed' && e.detail?.kind === 'dead_letter')
     expect(deadLetters.length).toBeGreaterThan(0)
     for (const e of deadLetters) expect(e.task_status).toBeUndefined()
-    // 同一次 verified stop 的 state_changed 事件才是那次迁移的载体
-    expect(events.find((e) => e.kind === 'state_changed' && e.detail?.reason === 'stop_verified')?.task_status).toBe('closed')
+    // 同一次 verified stop 的迁移载体是 operation_settled（唯一唤醒，自带 closed）
+    await waitUntil(() => opEvents.some((e) => e.kind === 'operation_settled'))
+    expect(opEvents.find((e) => e.kind === 'operation_settled')?.task_status).toBe('closed')
   })
 
   it('非迁移点:query_failed 不带 task_status', async () => {
