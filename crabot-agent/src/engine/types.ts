@@ -169,6 +169,12 @@ export interface ToolDefinition {
    * 用于"调完就走"的早退工具（如 submit_audit_result）。
    */
   readonly exitsLoop?: boolean
+  /**
+   * 确定性参数修复（spec 2026-09-03-tool-input-repair）：真实调用前按声明规则修正入参。
+   * 只承载确定性规则——规则不适用时必须原样返回入参；引擎额外保证：本函数抛错或
+   * 返回非对象时按未修复处理（原样透传），不产生任何错误结果或附加输出。
+   */
+  readonly repairInput?: (input: Record<string, unknown>) => Promise<Record<string, unknown>>
   readonly call: (input: Record<string, unknown>, context: ToolCallContext) => Promise<ToolCallResult>
 }
 

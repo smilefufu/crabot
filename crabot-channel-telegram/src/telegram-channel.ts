@@ -25,6 +25,7 @@ import {
   MediaHandleStore,
   MediaCleaner,
   MediaFetchManager,
+  RpcError,
   type FetchMediaResult,
 } from 'crabot-shared'
 import { TelegramClient, TelegramApiError } from './telegram-client.js'
@@ -679,7 +680,7 @@ export class TelegramChannel extends ModuleBase {
 
   private handleGetSession(params: GetSessionParams) {
     const session = this.sessionManager.findById(params.session_id)
-    if (!session) throw new Error('Session not found')
+    if (!session) throw new RpcError('NOT_FOUND', 'Session not found')
     return { session }
   }
 

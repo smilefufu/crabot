@@ -77,3 +77,17 @@ describe('WechatChannel capabilities', () => {
     })
   })
 })
+
+describe('WechatChannel get_session handler', () => {
+  it('session 不存在时抛协议级 NOT_FOUND', () => {
+    const channel = makeChannel()
+    const invoke = () => (channel as unknown as {
+      handleGetSession(params: { session_id: string }): unknown
+    }).handleGetSession({ session_id: 'missing' })
+
+    expect(invoke).toThrowError(expect.objectContaining({
+      name: 'RpcError',
+      code: 'NOT_FOUND',
+    }))
+  })
+})

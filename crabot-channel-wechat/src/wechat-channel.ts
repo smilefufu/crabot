@@ -21,6 +21,7 @@ import {
   MediaHandleStore,
   MediaCleaner,
   MediaFetchManager,
+  RpcError,
   type MediaHandleRecord,
   type FetchMediaResult,
 } from 'crabot-shared'
@@ -855,7 +856,7 @@ export class WechatChannel extends ModuleBase {
 
   private handleGetSession(params: GetSessionParams) {
     const session = this.sessionManager.findById(params.session_id)
-    if (!session) throw new Error('Session not found')
+    if (!session) throw new RpcError('NOT_FOUND', 'Session not found')
     return { session }
   }
 

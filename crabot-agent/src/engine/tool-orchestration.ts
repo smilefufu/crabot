@@ -78,14 +78,23 @@ async function executeSingleTool(
     return stampTiming({ tool_use_id: block.id, content: stamp(`Permission denied: ${permission.reason}`), is_error: true })
   }
 
-  // --- PreToolUse hook ---
+  // --- 确定性参数修复（spec 2026-09-03-tool-input-repair）---
+  // 规则不适用/抛错/返回非对象一律原样透传，不产生任何错误或附加输出（组件语义红线）。
   let effectiveInput = block.input
+  if (tool.repairInput) {
+    try {
+      const repaired = await tool.repairInput(effectiveInput)
+      if (repaired && typeof repaired === 'object') effectiveInput = repaired
+    } catch { /* 修复失败 → 透传 */ }
+  }
+
+  // --- PreToolUse hook ---
   if (hooks) {
-    const filePaths = extractFilePaths(block.input)
+    const filePaths = extractFilePaths(effectiveInput)
     const preInput = {
       event: 'PreToolUse' as const,
       toolName: block.name,
-      toolInput: block.input,
+      toolInput: effectiveInput,
       workingDirectory: hooks.context.workingDirectory,
       filePaths,
     }

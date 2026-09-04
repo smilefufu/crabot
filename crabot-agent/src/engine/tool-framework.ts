@@ -9,6 +9,7 @@ export interface DefineToolParams {
   readonly isReadOnly?: boolean
   readonly permissionLevel?: ToolPermissionLevel
   readonly category?: ToolCategory
+  readonly repairInput?: (input: Record<string, unknown>) => Promise<Record<string, unknown>>
   readonly call: (input: Record<string, unknown>, context: ToolCallContext) => Promise<ToolCallResult>
 }
 
@@ -20,6 +21,7 @@ export function defineTool(params: DefineToolParams): ToolDefinition {
     isReadOnly: params.isReadOnly ?? false,
     ...(params.permissionLevel !== undefined ? { permissionLevel: params.permissionLevel } : {}),
     ...(params.category !== undefined ? { category: params.category } : {}),
+    ...(params.repairInput !== undefined ? { repairInput: params.repairInput } : {}),
     call: params.call,
   }
 }

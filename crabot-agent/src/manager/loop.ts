@@ -1050,13 +1050,23 @@ export class ManagerLoop {
       await this.settleFailedEpisodeEnvelopes(carriedEnvelopes, envelope, injectedEnvelopes, true)
     }
 
+    const allSuccessfulSendMessageTargets = new Set(
+      successfulSendMessageTargets.map((target) => `${target.channel_id}\u0000${target.session_id}`),
+    )
+    for (const key of this.successfulSendMessageTargetsInCurrentEpisode) {
+      allSuccessfulSendMessageTargets.add(key)
+    }
+
     const result: EpisodeResult = {
       episodeId,
       outcome: attempt.result.outcome,
       turns: totalTurnsUsed,
       consumedEvents,
       repliedToHuman,
-      successfulSendMessageTargets,
+      successfulSendMessageTargets: [...allSuccessfulSendMessageTargets].map((key) => {
+        const [channelId, sessionId] = key.split('\u0000')
+        return { channel_id: channelId, session_id: sessionId }
+      }),
     }
     this.deps.onEpisodeEnd?.(result)
     return result

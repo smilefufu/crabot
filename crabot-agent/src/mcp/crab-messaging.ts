@@ -10,7 +10,7 @@
 import { resolvePath } from '../engine/tools/utils.js'
 import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
-import { SYSTEM_CHANNEL_ID, SYSTEM_SESSION_ID, type RpcClient } from 'crabot-shared'
+import { RpcCallError, SYSTEM_CHANNEL_ID, SYSTEM_SESSION_ID, type RpcClient } from 'crabot-shared'
 import type { Friend, MessageContent } from '../types.js'
 import { annotatePagination } from './pagination-annotator.js'
 import { translateChannelError } from './error-translator.js'
@@ -414,6 +414,98 @@ const FEISHU_WRITE_SCHEMA = {
 const FETCH_MEDIA_SCHEMA = {
   channel_id: z.string().describe('Channel 模块实例 ID'),
   handle: z.string().describe('媒体下载句柄（消息标记里的 handle=fm_xxx）'),
+}
+
+// ================================================================
+// send_message 参数修复规则（spec 2026-09-03-tool-input-repair）
+// ================================================================
+
+/**
+ * `send_message` 省略 `channel_id` 时按 `session_id` 反查归属渠道的确定性修复规则。
+ *
+ * 仅当 `channel_id` 缺失且 `session_id` 为非空字符串时介入。目标恰好命中一个渠道时补全；
+ * 多渠道命中时仅在当前 manager 归属渠道也命中时选择该渠道。任一列表、端口解析或探测步骤
+ * 无法给出确定结果时原样透传，由工具自身处理。本规则不生成错误，也不改写工具返回内容。
+ */
+export function createSendMessageChannelRepair(
+  deps: Pick<CrabMessagingDeps, 'rpcClient' | 'moduleId' | 'getAdminPort' | 'resolveChannelPort'>,
+  managerTarget?: { readonly channel_id: string; readonly session_id: string },
+): (input: Record<string, unknown>) => Promise<Record<string, unknown>> {
+  return async (input) => {
+    if (input.channel_id !== undefined) return input
+    const sessionId = input.session_id
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return input
+
+    if (managerTarget?.session_id === sessionId) {
+      return { ...input, channel_id: managerTarget.channel_id }
+    }
+
+    try {
+      const adminPort = await deps.getAdminPort()
+      const ids: string[] = []
+      const pageSize = 50
+      let page = 1
+      let totalPages: number
+
+      do {
+        const result = await deps.rpcClient.call<
+          { page: number; page_size: number },
+          {
+            items: Array<{ id: string }>
+            pagination: {
+              page: number
+              page_size: number
+              total_items: number
+              total_pages: number
+            }
+          }
+        >(adminPort, 'list_channel_instances', { page, page_size: pageSize }, deps.moduleId)
+        if (
+          !result
+          || !Array.isArray(result.items)
+          || !result.items.every((item) => item && typeof item.id === 'string')
+          || !result.pagination
+          || !Number.isInteger(result.pagination.total_pages)
+          || result.pagination.total_pages < 0
+          || result.pagination.page !== page
+        ) {
+          return input
+        }
+        ids.push(...result.items.map((item) => item.id))
+        totalPages = result.pagination.total_pages
+        page += 1
+      } while (page <= totalPages)
+
+      const hits: string[] = []
+      for (const channelId of ids) {
+        const port = await deps.resolveChannelPort(channelId)
+        if (!port) return input
+        try {
+          const result = await deps.rpcClient.call<
+            { session_id: string },
+            { session: { id: string } }
+          >(port, 'get_session', { session_id: sessionId }, deps.moduleId)
+          if (!result?.session || typeof result.session.id !== 'string') return input
+          hits.push(channelId)
+        } catch (error) {
+          if (error instanceof RpcCallError && error.code === 'NOT_FOUND') continue
+          return input
+        }
+      }
+
+      if (hits.length === 1) return { ...input, channel_id: hits[0] }
+      if (
+        hits.length > 1
+        && managerTarget !== undefined
+        && hits.includes(managerTarget.channel_id)
+      ) {
+        return { ...input, channel_id: managerTarget.channel_id }
+      }
+      return input
+    } catch {
+      return input
+    }
+  }
 }
 
 /**

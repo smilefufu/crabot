@@ -190,3 +190,16 @@ describe('FeishuChannel capabilities', () => {
     expect(caps).toMatchObject({ supports_list_contacts: true, supports_list_groups: true })
   })
 })
+
+describe('FeishuChannel get_session handler', () => {
+  it('session 不存在时抛协议级 NOT_FOUND', () => {
+    const invoke = () => (channel as unknown as {
+      handleGetSession(params: { session_id: string }): unknown
+    }).handleGetSession({ session_id: 'missing' })
+
+    expect(invoke).toThrowError(expect.objectContaining({
+      name: 'RpcError',
+      code: 'NOT_FOUND',
+    }))
+  })
+})

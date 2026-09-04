@@ -11,8 +11,12 @@
  * - 可见性门与运行时门同源：可见的 send_private_message 真调一次不被 requireDeclaredShortcut 拦
  */
 import { describe, it, expect, vi } from 'vitest'
+import { RpcCallError } from 'crabot-shared'
+import { executeToolBatches } from '../../src/engine/tool-orchestration'
 import { buildManagerToolFace, assertClosedToolFace, type ToolFaceDeps } from '../../src/manager/tools/tool-face'
 import { CRAB_MEMORY_MANAGER_TOOL_NAMES, createCrabMemoryServer } from '../../src/mcp/crab-memory'
+import { createCrabMessagingServer } from '../../src/mcp/crab-messaging'
+import { mcpServerToToolDefinitions } from '../../src/agent/mcp-tool-bridge'
 import type { WorkerHarness } from '../../src/workers/harness/harness'
 import type { ToolDefinition } from '../../src/engine/index'
 import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
@@ -379,5 +383,130 @@ describe('buildManagerToolFace', () => {
 
   it('装配结果本身通过护栏（buildManagerToolFace 不抛错）', () => {
     expect(() => buildManagerToolFace(makeDeps({ isSystemThread: true }))).not.toThrow()
+  })
+
+  describe('send_message 参数修复（spec 2026-09-03-tool-input-repair）', () => {
+    // 渠道 ch-2 上存在 session 'sess-9'；其余渠道没有。portOf 约定与实现探测顺序无关。
+    function makeRoutingMessagingDeps(): ToolFaceDeps['messagingDeps'] {
+      const channels: Record<string, string[]> = { 'ch-1': [], 'ch-2': ['sess-9'] }
+      const ids = Object.keys(channels)
+      const portOf = new Map(ids.map((id, i) => [id, 20_000 + i]))
+      return {
+        rpcClient: {
+          call: async <P, R>(_port: number, method: string, params: P): Promise<R> => {
+            if (method === 'list_channel_instances') {
+              return {
+                items: ids.map((id) => ({ id })),
+                pagination: {
+                  page: 1,
+                  page_size: 50,
+                  total_items: ids.length,
+                  total_pages: 1,
+                },
+              } as R
+            }
+            if (method === 'get_session') {
+              const session = (params as { session_id: string }).session_id
+              const channelId = ids.find((id) => portOf.get(id) === _port)
+              if (channelId && channels[channelId].includes(session)) {
+                return { session: { id: session } } as R
+              }
+              throw new RpcCallError('NOT_FOUND', 'Session not found')
+            }
+            throw new Error(`unexpected method: ${method}`)
+          },
+        } as never,
+        moduleId: 'manager-test',
+        getAdminPort: async () => 19001,
+        resolveChannelPort: async (channelId: string) => portOf.get(channelId) ?? 0,
+      }
+    }
+
+    it('send_message 携带 repairInput，省略 channel_id 时按 session 反查补全', async () => {
+      const tools = buildManagerToolFace(makeDeps({
+        managerTarget: { channel_id: 'ch-1', session_id: 'sess-1' },
+        messagingDeps: makeRoutingMessagingDeps(),
+      }))
+      const send = tools.find((t) => t.name === 'send_message')
+      expect(send?.repairInput).toBeTypeOf('function')
+      const repaired = await send!.repairInput!({ session_id: 'sess-9', content: 'x' })
+      expect(repaired).toEqual({ channel_id: 'ch-2', session_id: 'sess-9', content: 'x' })
+    })
+
+    it('零命中时透传；repairInput 只挂在 send_message 上', async () => {
+      const tools = buildManagerToolFace(makeDeps({
+        managerTarget: { channel_id: 'ch-1', session_id: 'sess-1' },
+        messagingDeps: makeRoutingMessagingDeps(),
+      }))
+      const send = tools.find((t) => t.name === 'send_message')!
+      const input = { session_id: 'no-such', content: 'x' }
+      expect(await send.repairInput!(input)).toEqual(input)
+      // 其余工具（含其他投递工具）不带修复规则
+      for (const tool of tools) {
+        if (tool.name !== 'send_message') expect(tool.repairInput, tool.name).toBeUndefined()
+      }
+    })
+
+    it('仅 Manager schema 允许省略 channel_id，raw messaging schema 仍要求该字段', () => {
+      const tools = buildManagerToolFace(makeDeps())
+      const send = tools.find((tool) => tool.name === 'send_message')!
+      const schema = send.inputSchema as { required?: string[] }
+      expect(schema.required).toContain('session_id')
+      expect(schema.required).not.toContain('channel_id')
+
+      const rawServer = createCrabMessagingServer(makeMessagingDeps())
+      const raw = mcpServerToToolDefinitions(rawServer, 'crab-messaging')
+        .find((tool) => tool.name === 'mcp__crab-messaging__send_message')!
+      expect((raw.inputSchema as { required?: string[] }).required).toContain('channel_id')
+      expect(raw.repairInput).toBeUndefined()
+    })
+
+    it('engine 真实调用链使用 repaired target，且原工具返回内容不被改写', async () => {
+      const call = vi.fn(async (_port: number, method: string) => {
+        if (method === 'list_channel_instances') {
+          return {
+            items: [{ id: 'ch-1' }, { id: 'ch-2' }],
+            pagination: { page: 1, page_size: 50, total_items: 2, total_pages: 1 },
+          }
+        }
+        if (method === 'get_session') {
+          if (_port === 19002) return { session: { id: 'sess-9' } }
+          throw new RpcCallError('NOT_FOUND', 'Session not found')
+        }
+        if (method === 'send_message') {
+          return { platform_message_id: 'pm-1', sent_at: '2026-09-04T00:00:00.000Z' }
+        }
+        throw new Error(`未预期的 RPC: ${method}`)
+      })
+      const onSuccessfulSendMessage = vi.fn()
+      const tools = buildManagerToolFace(makeDeps({
+        managerTarget: { channel_id: 'ch-1', session_id: 'sess-1' },
+        onSuccessfulSendMessage,
+        messagingDeps: makeMessagingDeps({
+          rpcClient: { call } as never,
+          resolveChannelPort: async (channelId) => channelId === 'ch-1' ? 19001 : 19002,
+        }),
+      }))
+
+      const [result] = await executeToolBatches(
+        [{ parallel: false, blocks: [{
+          id: 'send-1',
+          name: 'send_message',
+          input: { session_id: 'sess-9', content: 'hi', post_send_action: 'none' },
+        }] }],
+        tools,
+      )
+
+      expect(result.is_error).toBe(false)
+      expect(result.content).toContain('pm-1')
+      expect(result.content).not.toContain('repaired')
+      expect(call).toHaveBeenCalledWith(
+        19002,
+        'send_message',
+        expect.objectContaining({ session_id: 'sess-9' }),
+        'manager-test',
+      )
+      expect(onSuccessfulSendMessage).toHaveBeenCalledWith({ channel_id: 'ch-2', session_id: 'sess-9' })
+    })
   })
 })

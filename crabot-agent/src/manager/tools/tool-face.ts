@@ -21,7 +21,7 @@ import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
 import type { McpServer } from '../../mcp/mcp-helpers.js'
 import { mcpServerToToolDefinitions } from '../../agent/mcp-tool-bridge.js'
 import { CRAB_MEMORY_MANAGER_TOOL_NAMES } from '../../mcp/crab-memory.js'
-import { buildMessagingTools } from '../../mcp/crab-messaging.js'
+import { buildMessagingTools, createSendMessageChannelRepair } from '../../mcp/crab-messaging.js'
 import type { CrabMessagingDeps, MessagingTool, MessagingToolSet } from '../../mcp/crab-messaging.js'
 import { buildWorkerTools } from './worker-tools.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
@@ -40,6 +40,11 @@ export interface ToolFaceDeps {
   readonly workerContext: Parameters<typeof buildWorkerTools>[0]['context']
   /** 复用现有类型 —— crab-messaging 的依赖注入接口。 */
   readonly messagingDeps: CrabMessagingDeps
+  /** 本 manager 的归属目标（来自 managerKey `channel::session`）。用于确定性补全 send_message.channel_id。 */
+  readonly managerTarget?: {
+    readonly channel_id: string
+    readonly session_id: string
+  }
   /** crab-memory，现有 createCrabMemoryServer 产物。 */
   readonly memoryServer: McpServer
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
@@ -172,7 +177,14 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
   const isHumanDelivery = HUMAN_DELIVERY_TOOL_NAMES.has(tool.name)
 
   const baseShape = isSendMessage
-    ? Object.fromEntries(Object.entries(tool.schema).filter(([key]) => key !== 'intent'))
+    ? {
+        ...Object.fromEntries(
+          Object.entries(tool.schema).filter(([key]) => key !== 'intent' && key !== 'channel_id'),
+        ),
+        channel_id: z.string().optional().describe(
+          'Channel 模块实例 ID；可省略，省略时系统按 session_id 反查归属渠道（多渠道命中时取当前 manager 归属渠道）',
+        ),
+      }
     : tool.schema
   const shape = isHumanDelivery
     ? { ...baseShape, post_send_action: z.enum(['none', 'spawn_worker']).describe('本条消息发出后是否预计新建 Worker；仅供系统在本轮结束时做一次内部复核，不会自动派发或重复发送消息') }
@@ -190,6 +202,13 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
     description: tool.description,
     inputSchema,
     isReadOnly: MESSAGING_READ_ONLY.has(tool.name),
+    ...(isSendMessage
+      ? {
+          // 确定性参数修复（spec 2026-09-03-tool-input-repair）：channel_id 省略时按
+          // session_id 反查归属渠道。修复失败/不适用由规则内部原样透传，无任何额外输出。
+          repairInput: createSendMessageChannelRepair(deps.messagingDeps, deps.managerTarget),
+        }
+      : {}),
     call: async (input): Promise<ToolCallResult> => {
       const postSendAction = input.post_send_action
       if (isHumanDelivery && postSendAction !== 'none' && postSendAction !== 'spawn_worker') {

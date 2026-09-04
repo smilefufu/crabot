@@ -27,6 +27,7 @@ import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
 import type { ChannelMessage, ResolvedPermissions } from '../../src/types.js'
 import { CLI_DOMAINS } from '../../src/types.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
+import { RpcCallError } from 'crabot-shared'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // ============================================================================
@@ -357,6 +358,88 @@ describe('manager bootstrap（P5 Task 1）', () => {
 
     expect(result.outcome).toBe('completed')
     expect(enqueueSpy).not.toHaveBeenCalled()
+  })
+
+  it('ManagerKey 的完整归属目标进入 send_message repair，当前会话缺 channel_id 时零探测补全', async () => {
+    const rpcCall = vi.fn(async (_port: number, method: string, params: Record<string, unknown>) => {
+      if (method === 'send_message') {
+        return { platform_message_id: 'pm-self', sent_at: '2026-09-04T00:00:00.000Z' }
+      }
+      throw new Error(`不应探测 ${method}`)
+    })
+    let invoked = false
+    const stack = buildManagerStack(makeDeps({
+      managerAdapter: () => ({
+        async *stream(params: LLMStreamParams) {
+          if (!invoked) {
+            invoked = true
+            const send = params.tools.find((tool) => tool.name === 'send_message')!
+            const repaired = await send.repairInput!({
+              session_id: 'sess-boot',
+              content: '当前会话回复',
+              post_send_action: 'none',
+            })
+            expect(repaired).toEqual({
+              channel_id: 'wechat',
+              session_id: 'sess-boot',
+              content: '当前会话回复',
+              post_send_action: 'none',
+            })
+            const result = await send.call(repaired, {} as never)
+            expect(result.isError).toBe(false)
+          }
+          yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+        },
+        updateConfig: () => {},
+      }),
+      messagingDeps: {
+        ...makeMessagingDeps(),
+        rpcClient: { call: rpcCall } as never,
+      },
+    }))
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('回复我')])
+
+    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['send_message'])
+  })
+
+  it('跨会话 repair 仍按 Channel NOT_FOUND 扫描，而非误用当前 Manager session', async () => {
+    const rpcCall = vi.fn(async (port: number, method: string) => {
+      if (method === 'list_channel_instances') {
+        return {
+          items: [{ id: 'wechat' }, { id: 'telegram' }],
+          pagination: { page: 1, page_size: 50, total_items: 2, total_pages: 1 },
+        }
+      }
+      if (method === 'get_session') {
+        if (port === 19010) return { session: { id: 'other-session' } }
+        throw new RpcCallError('NOT_FOUND', 'Session not found')
+      }
+      throw new Error(`unexpected ${method}`)
+    })
+    let checked = false
+    const stack = buildManagerStack(makeDeps({
+      managerAdapter: () => ({
+        async *stream(params: LLMStreamParams) {
+          if (!checked) {
+            checked = true
+            const send = params.tools.find((tool) => tool.name === 'send_message')!
+            await expect(send.repairInput!({ session_id: 'other-session', content: 'x' }))
+              .resolves.toEqual({ channel_id: 'telegram', session_id: 'other-session', content: 'x' })
+          }
+          yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+        },
+        updateConfig: () => {},
+      }),
+      messagingDeps: {
+        ...makeMessagingDeps(),
+        rpcClient: { call: rpcCall } as never,
+        resolveChannelPort: async (channelId: string) => channelId === 'wechat' ? 19009 : 19010,
+      },
+    }))
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('查另一个会话')])
+    expect(checked).toBe(true)
   })
 
   // --- ④ 空台账对账 ---
