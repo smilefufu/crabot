@@ -100,27 +100,6 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
-function workspaceInstructionPrompt(spec?: import('../types.js').WorkspaceInstructionPayload): string | undefined {
-  if (spec?.snapshot.source !== 'agents_md' || spec.text === undefined) return undefined
-  return [
-    'The following is an immutable, read-only snapshot of the workspace AGENTS.md for this incarnation.',
-    'Follow it together with any user-maintained CLAUDE.md. Do not modify the snapshot itself.',
-    '<workspace-agents-md>',
-    spec.text,
-    '</workspace-agents-md>',
-  ].join('\n')
-}
-
-function forkSystemPrompt(spec?: import('../types.js').WorkspaceInstructionPayload): string {
-  const workspacePrompt = workspaceInstructionPrompt(spec)
-  return workspacePrompt ? `${workspacePrompt}\n\n${QUERY_FORK_INSTRUCTION}` : QUERY_FORK_INSTRUCTION
-}
-
-function appendWorkspaceInstructionPrompt(spec?: import('../types.js').WorkspaceInstructionPayload): string {
-  const prompt = workspaceInstructionPrompt(spec)
-  return prompt ? ` --append-system-prompt ${shQuote(prompt)}` : ''
-}
-
 function safeProcessError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim().slice(0, 1000)
 }
@@ -951,7 +930,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 不同 binary」的版本错配/command not found 由此杜绝。
     const spawnBin = await this.resolveBinForCommand()
     if (!spawnBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.spawn: no user-level claude installation`)
-    const command = `${spawnBin} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode auto${appendWorkspaceInstructionPrompt(spec.workspace_instructions)}`
+    const command = `${spawnBin} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode auto`
     const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
     const eventWatchOffset = await eventChannel.endOffset()
     const stopBaseline = await this.initialStopBaseline(eventChannel)
@@ -1081,7 +1060,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
       const resumeBin = await this.resolveBinForCommand()
       if (!resumeBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.resume: no user-level claude installation`)
-      const command = `${resumeBin} ${STRICT_MCP_CONFIG_ARGS} --permission-mode auto --resume ${shQuote(prev.session_ref)}${appendWorkspaceInstructionPrompt(opts?.workspace_instructions)}`
+      const command = `${resumeBin} ${STRICT_MCP_CONFIG_ARGS} --permission-mode auto --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
@@ -1201,7 +1180,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     let child: ChildProcess
     try {
-      const instructionPrompt = forkSystemPrompt(opts.workspace_instructions)
+      const instructionPrompt = QUERY_FORK_INSTRUCTION
       const args = [
         '-p', forkInput,
         '--resume', prev.session_ref,

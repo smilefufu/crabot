@@ -454,6 +454,18 @@ describe('worker observation and turn closure', () => {
 // ---- spawn_worker ----
 
 describe('spawn_worker', () => {
+  it('title schema 要求任务主题与具体执行内容，并禁止对话指代', async () => {
+    const { harness } = await makeHarness()
+    const spawnWorker = buildWorkerTools({ harness, context: () => CTX }).find((t) => t.name === 'spawn_worker')!
+    const schema = spawnWorker.inputSchema as {
+      properties?: { title?: { description?: string } }
+    }
+
+    expect(schema.properties?.title?.description).toContain('所属任务主题')
+    expect(schema.properties?.title?.description).toContain('具体执行内容')
+    expect(schema.properties?.title?.description).toContain('继续处理')
+  })
+
   it('透传 managerKey/origin/report_to 到台账，异步返回简短确认（非完整 worker 记录）', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })

@@ -15,6 +15,10 @@ import { buildManagerToolFace, assertClosedToolFace, type ToolFaceDeps } from '.
 import { CRAB_MEMORY_MANAGER_TOOL_NAMES, createCrabMemoryServer } from '../../src/mcp/crab-memory'
 import type { WorkerHarness } from '../../src/workers/harness/harness'
 import type { ToolDefinition } from '../../src/engine/index'
+import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
+import type { ManagerKey } from '../../src/manager/types.js'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 /**
  * 普通 manager 的 messaging 工具（无飞书 channel 实例时）。
@@ -47,6 +51,15 @@ const CRABOT_INFO_TOOLS = [
   'get_friend_permissions',
 ]
 
+const CONTEXT_TOOLS = [
+  'inspect_workboard',
+  'change_workboard',
+  'inspect_project_docs',
+  'manage_decision_doc',
+]
+
+const MANAGER_KEY = 'ch-1::sess-1' as ManagerKey
+
 function makeMemoryServer() {
   return createCrabMemoryServer(
     {
@@ -76,13 +89,25 @@ function makeDeps(overrides: Partial<ToolFaceDeps> = {}): ToolFaceDeps {
   return {
     harness: {} as unknown as WorkerHarness,
     workerContext: () => ({
-      managerKey: 'ch-1::sess-1',
+      managerKey: MANAGER_KEY,
       reportTo: { channel_id: 'ch-1', session_id: 'sess-1' },
     }),
     messagingDeps: makeMessagingDeps(),
     memoryServer: makeMemoryServer(),
     callAdmin: vi.fn(async () => ({})) as unknown as ToolFaceDeps['callAdmin'],
     isSystemThread: false,
+    workboard: {
+      store: new ManagerWorkboardStore(join(tmpdir(), 'manager-tool-face-test')),
+      managerKey: MANAGER_KEY,
+    },
+    projectDocs: {
+      ledger: {
+        listWorkers: vi.fn(async () => []),
+        findWorker: vi.fn(async () => undefined),
+      } as never,
+      readWorkerContext: vi.fn(async () => undefined),
+      managerKey: MANAGER_KEY,
+    },
     ...overrides,
   }
 }
@@ -98,7 +123,7 @@ describe('buildManagerToolFace', () => {
     const nonMemoryNames = names.filter((n) => !n.startsWith('mcp__crab-memory__'))
 
     expect(nonMemoryNames.sort()).toEqual(
-      [...MESSAGING_NORMAL, ...WORKER_TOOLS, ...CRABOT_INFO_TOOLS].sort(),
+      [...MESSAGING_NORMAL, ...WORKER_TOOLS, ...CONTEXT_TOOLS, ...CRABOT_INFO_TOOLS].sort(),
     )
     expect(memoryToolNames(tools).sort()).toEqual(
       CRAB_MEMORY_MANAGER_TOOL_NAMES.map((name) => `mcp__crab-memory__${name}`).sort(),
@@ -175,6 +200,7 @@ describe('buildManagerToolFace', () => {
           ...FEISHU_READ_ONLY_TOOLS,
           ...(isSystemThread ? ['send_master_private'] : []),
           ...WORKER_TOOLS,
+          ...CONTEXT_TOOLS,
           ...CRABOT_INFO_TOOLS,
         ].sort(),
       )
@@ -190,12 +216,12 @@ describe('buildManagerToolFace', () => {
     }))
     const byName = new Map(tools.map((t) => [t.name, t]))
 
-    const readOnly = ['get_history', 'get_message', 'lookup_friend', 'list_sessions', 'list_contacts', 'list_groups', 'list_group_members', 'fetch_media', ...FEISHU_READ_ONLY_TOOLS, 'get_worker_state', 'get_worker_activity', 'get_worker_turn', 'get_worker_terminal', 'list_workers', ...CRABOT_INFO_TOOLS]
+    const readOnly = ['get_history', 'get_message', 'lookup_friend', 'list_sessions', 'list_contacts', 'list_groups', 'list_group_members', 'fetch_media', ...FEISHU_READ_ONLY_TOOLS, 'get_worker_state', 'get_worker_activity', 'get_worker_turn', 'get_worker_terminal', 'list_workers', 'inspect_workboard', 'inspect_project_docs', ...CRABOT_INFO_TOOLS]
     for (const name of readOnly) {
       expect(byName.get(name)?.isReadOnly, `${name} 应为 isReadOnly:true`).toBe(true)
     }
 
-    const writeTools = ['send_message', 'send_master_private', 'send_private_message', 'spawn_worker', 'send_to_worker', 'query_worker', 'resolve_worker_turn', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'set_worker_periodic_report', 'clear_worker_periodic_report']
+    const writeTools = ['send_message', 'send_master_private', 'send_private_message', 'spawn_worker', 'send_to_worker', 'query_worker', 'resolve_worker_turn', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'set_worker_periodic_report', 'clear_worker_periodic_report', 'change_workboard', 'manage_decision_doc']
     for (const name of writeTools) {
       expect(byName.get(name)?.isReadOnly, `${name} 应为 isReadOnly:false`).toBe(false)
     }

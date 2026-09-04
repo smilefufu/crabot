@@ -385,7 +385,7 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(await fs.readFile(join(workspace, 'AGENTS.md'), 'utf-8')).toBe(agents)
   })
 
-  it('把同一 AGENTS.md 快照交给 builtin 和有用户自有 CLAUDE.md 的 Claude worker', async () => {
+  it('builtin 接收不可变快照，Claude/Codex 只通过 workspace 原生入口加载同一正文', async () => {
     const agents = '# Workspace rules\nDo not create HANDOFF.md.\n'
     const builtinWorkspace = join(dataDir, 'builtin-workspace')
     await fs.mkdir(builtinWorkspace, { recursive: true })
@@ -401,16 +401,50 @@ describe('WorkerHarness.spawnWorker', () => {
     const claudeWorkspace = join(dataDir, 'claude-user-owned-workspace')
     const userClaude = '# User maintained Claude instructions\n'
     await fs.mkdir(claudeWorkspace, { recursive: true })
-    await fs.writeFile(join(claudeWorkspace, 'AGENTS.md'), agents)
     await fs.writeFile(join(claudeWorkspace, 'CLAUDE.md'), userClaude)
     const { harness: claudeHarness, fake: claude } = await makeHarness({ implId: 'claude-code' })
 
     await claudeHarness.spawnWorker(spawnParams({ impl: 'claude-code', workspace: claudeWorkspace }))
-    expect(claude.spawnCalls[0].workspace_instructions).toMatchObject({
-      snapshot: { source: 'agents_md' },
-      text: agents,
-    })
+    expect(claude.spawnCalls[0].workspace_instructions).toBeUndefined()
+    expect(await fs.readlink(join(claudeWorkspace, 'AGENTS.md'))).toBe('CLAUDE.md')
     expect(await fs.readFile(join(claudeWorkspace, 'CLAUDE.md'), 'utf-8')).toBe(userClaude)
+
+    const codexWorkspace = join(dataDir, 'codex-workspace')
+    await fs.mkdir(codexWorkspace, { recursive: true })
+    await fs.writeFile(join(codexWorkspace, 'AGENTS.md'), agents)
+    const { harness: codexHarness, fake: codex } = await makeHarness({ implId: 'codex' })
+
+    await codexHarness.spawnWorker(spawnParams({ impl: 'codex', workspace: codexWorkspace }))
+    expect(codex.spawnCalls[0].workspace_instructions).toBeUndefined()
+    expect(await fs.readlink(join(codexWorkspace, 'CLAUDE.md'))).toBe('AGENTS.md')
+  })
+
+  it('Claude spawn 失败后仍保留项目级长期软链接', async () => {
+    const workspace = join(dataDir, 'claude-failed-workspace')
+    await fs.mkdir(workspace, { recursive: true })
+    await fs.writeFile(join(workspace, 'AGENTS.md'), '# Persistent rules\n')
+    const { harness } = await makeHarness({ implId: 'claude-code', spawnShouldFail: new Error('spawn failed') })
+
+    await expect(harness.spawnWorker(spawnParams({ impl: 'claude-code', workspace }))).rejects.toThrow('spawn failed')
+
+    expect(await fs.readlink(join(workspace, 'CLAUDE.md'))).toBe('AGENTS.md')
+    expect(await fs.readFile(join(workspace, 'CLAUDE.md'), 'utf-8')).toBe('# Persistent rules\n')
+  })
+
+  it('Worker 结束和 Harness 重建都不清理项目级长期软链接', async () => {
+    const workspace = join(dataDir, 'claude-persistent-workspace')
+    await fs.mkdir(workspace, { recursive: true })
+    await fs.writeFile(join(workspace, 'AGENTS.md'), '# Long-lived rules\n')
+    const { harness } = await makeHarness({ implId: 'claude-code' })
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code', workspace }))
+    await harness.killWorker(worker.worker_id, '测试结束')
+    expect(await fs.readlink(join(workspace, 'CLAUDE.md'))).toBe('AGENTS.md')
+
+    const rebuilt = await makeHarness({ implId: 'claude-code' })
+    await rebuilt.harness.reconcileOnStartup()
+    expect(await fs.readlink(join(workspace, 'CLAUDE.md'))).toBe('AGENTS.md')
+    expect(await fs.readFile(join(workspace, 'CLAUDE.md'), 'utf-8')).toBe('# Long-lived rules\n')
   })
 
   it('首次 provision 前落 harness context，并把同一固定权限快照交给 capability provider', async () => {
@@ -3652,6 +3686,9 @@ describe('WorkerHarness.queryWorker', () => {
   it('capabilities().fork 为 true → 返回 started 并以同一 query_id 落 handle/ledger/receipt', async () => {
     const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
+    const latestRules = '# Fork 启动前的最新规则\n'
+    const workspace = worker.incarnations[0].workspace
+    await fs.writeFile(join(workspace, 'AGENTS.md'), latestRules)
     events.length = 0
 
     const result = await harness.queryWorker(worker.worker_id, '侧问一下')
@@ -3659,6 +3696,7 @@ describe('WorkerHarness.queryWorker', () => {
     expect(result).toMatchObject({ status: 'started', fork_seq: 2, query_id: expect.any(String) })
     expect(fake.forkCalls).toHaveLength(1)
     expect(fake.forkCalls[0].forkInput).toBe('侧问一下')
+    expect(fake.forkCalls[0].opts.workspace_instructions?.text).toBe(latestRules)
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.incarnations).toHaveLength(2)
@@ -3674,6 +3712,13 @@ describe('WorkerHarness.queryWorker', () => {
     // adapter.fork 返回的 handle 自己的引用,不是从主线(seq=1)照抄的(§6.1)。
     expect(w.incarnations[1].forked_from).toBe(w.incarnations[0].incarnation_id)
     expect(w.incarnations[1].session_ref).not.toBe(w.incarnations[0].session_ref)
+    expect(w.incarnations[0].workspace_instructions.source).toBe('absent')
+    expect(w.incarnations[1].workspace_instructions.source).toBe('agents_md')
+    expect(await fs.readFile(
+      join(workersDir, worker.worker_id, 'workspace-instructions', `${w.incarnations[1].incarnation_id}.md`),
+      'utf-8',
+    )).toBe(latestRules)
+    expect(await fs.readlink(join(workspace, 'CLAUDE.md'))).toBe('AGENTS.md')
 
     const onDisk = await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll()
     expect(onDisk.filter((e) => e.detail?.query_id === result.query_id)).toHaveLength(1)

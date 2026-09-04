@@ -53,6 +53,7 @@ import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage } from '../../src/types.js'
 import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
+import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
 import { createUserMessage, defineTool } from '../../src/engine/index.js'
 import type { LLMAdapter, LLMStreamParams, ToolDefinition } from '../../src/engine/index.js'
@@ -344,7 +345,7 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
     managerKeyFor,
     adapter: () => opts.managerAdapter,
     model: () => 'test-manager-model',
-    toolFace: (key, isSystemThread) => {
+    toolFace: (key, isSystemThread, _schedule, _human, _permissions, _trace, wakeEvent) => {
       const tools = buildManagerToolFace({
         harness,
         workerContext: () => ({
@@ -356,6 +357,16 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
         memoryServer,
         callAdmin: async () => ({}),
         isSystemThread,
+        workboard: {
+          store: new ManagerWorkboardStore(join(opts.dataDir, 'manager-workboards')),
+          managerKey: key,
+        },
+        projectDocs: {
+          ledger,
+          readWorkerContext: async () => undefined,
+          managerKey: key,
+          wakeEvent,
+        },
       })
       // 记录每次真实工具调用(名称+入参),供断言"工具调用序列符合预期" / "send_master_private
       // 是否被调用"——不干预调用本身,只是在真实 call 前后各插一条日志。

@@ -48,6 +48,7 @@ import { makeTaskStatusEventBridge, type AgentEventPublisher } from './events.js
 import { shouldWakeOnHarnessEvent } from './inbound-adapters.js'
 import { buildManagerToolFace } from './tools/tool-face.js'
 import { PrincipalBindingStore } from './principal-binding-store.js'
+import { ManagerWorkboardStore } from './workboard-store.js'
 import {
   ManagerPrincipalStore,
   applyGroupScopeFallback,
@@ -67,6 +68,7 @@ import type { LLMAdapter } from '../engine/index.js'
 import type { CrabMessagingDeps } from '../mcp/crab-messaging.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import type { McpServer } from '../mcp/mcp-helpers.js'
+import { WorkerContextStore } from '../workers/harness/context-store.js'
 
 /**
  * 全局缺省 worker 实现(§6.4"实现选择":人类显式指定 > manager 按偏好选择 > 全局默认)。
@@ -324,6 +326,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const ledger = new LedgerStore(join(agentDir, 'worker-ledgers'))
   const principalBindings = new PrincipalBindingStore(join(agentDir, 'manager-principal-bindings.json'))
   const workspaces = new WorkspaceManager(resolveWorkspacesRoot(deps.dataRoot))
+  const workersDir = join(agentDir, 'workers')
+  const workerContextStore = new WorkerContextStore(workersDir)
 
   // 见文件头"与 registry 的环形依赖"。
   let registry: ManagerRegistry | undefined
@@ -376,7 +380,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     ...(deps.admitWorkerConnection ? { admitWorkerConnection: deps.admitWorkerConnection } : {}),
     ledger,
     workspaces,
-    workersDir: join(agentDir, 'workers'),
+    workersDir,
     now: deps.now,
     mintActivityCursor: deps.mintActivityCursor,
     // P6-A §8.10：化身终态时主动收割一次 native trace（最后一次 read → Agent-owned copy）。
@@ -518,7 +522,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   // 发起人身份:唤醒边界异步解析一次,三个同步 thunk 读缓存(见 principal.ts 文件头)。
   const principals = new ManagerPrincipalStore(deps.principalResolver, principalBindings, () => new Date(deps.now()))
 
-  const sessionStore = new ManagerSessionStore(join(agentDir, 'managers'))
+  const managersDir = join(agentDir, 'managers')
+  const sessionStore = new ManagerSessionStore(managersDir)
+  const workboardStore = new ManagerWorkboardStore(managersDir, deps.now)
   registry = new ManagerRegistry({
     traceWriter: deps.traceWriter,
     onAdminChatWakeConsumed: deps.onAdminChatWakeConsumed,
@@ -568,7 +574,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         sessionId,
       )
     },
-    toolFace: (key, isSystemThread, scheduleIdentity, humanPrincipal, principalPermissions, traceHooks) => {
+    toolFace: (key, isSystemThread, scheduleIdentity, humanPrincipal, principalPermissions, traceHooks, wakeEvent) => {
       // Capture at tool-face construction. Calling the resulting factory later must not
       // pick up a regrant/new generation from a subsequent wake.
       const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
@@ -628,6 +634,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         onSuccessfulSendMessage: traceHooks?.onSuccessfulSendMessage,
         hasContinuedWorker: traceHooks?.hasContinuedWorker,
         onWorkerContinuation: traceHooks?.onWorkerContinuation,
+        workboard: { store: workboardStore, managerKey: key },
+        projectDocs: {
+          ledger,
+          readWorkerContext: (workerId) => workerContextStore.read(workerId),
+          managerKey: key,
+          wakeEvent,
+        },
       })
     },
     // system prompt 的「对话对象档案」段(§4.2 5b/5d):场景画像 + crab 在该渠道的
