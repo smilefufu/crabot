@@ -7,8 +7,13 @@ import {
   type ContentBlock,
   type StreamChunk,
 } from '../../src/engine/types'
-import { ContextManager, CompactionFailedError } from '../../src/engine/context-manager'
-import type { LLMAdapter } from '../../src/engine/llm-adapter'
+import {
+  ContextManager,
+  CompactionFailedError,
+  createBuiltinCompactionProfile,
+  type CompactionState,
+} from '../../src/engine/context-manager'
+import type { LLMAdapter, LLMStreamParams } from '../../src/engine/llm-adapter'
 
 function mockAdapter(responseText: string): LLMAdapter {
   return {
@@ -74,6 +79,47 @@ function makeTextMessages(count: number, charsEach: number): EngineMessage[] {
     }
   }
   return messages
+}
+
+function compactionState(messages: ReadonlyArray<EngineMessage>): CompactionState {
+  return {
+    protectedHead: messages.slice(0, 1),
+    history: messages.slice(1),
+    protectedTail: [],
+  }
+}
+
+function scriptedAdapter(
+  handle: (
+    params: LLMStreamParams,
+    callIndex: number,
+  ) => { readonly text: string; readonly stopReason?: string } | Error,
+): { readonly adapter: LLMAdapter; readonly calls: LLMStreamParams[] } {
+  const calls: LLMStreamParams[] = []
+  const adapter: LLMAdapter = {
+    async *stream(params) {
+      const callIndex = calls.length
+      calls.push(params)
+      const reply = handle(params, callIndex)
+      if (reply instanceof Error) throw reply
+      yield { type: 'message_start', messageId: `summary-${callIndex}` } as StreamChunk
+      if (reply.text.length > 0) {
+        yield { type: 'text_delta', text: reply.text } as StreamChunk
+      }
+      yield {
+        type: 'message_end',
+        stopReason: reply.stopReason ?? 'end_turn',
+      } as StreamChunk
+    },
+    updateConfig() {},
+  }
+  return { adapter, calls }
+}
+
+function promptText(params: LLMStreamParams): string {
+  const content = (params.messages[0] as { content: string | ContentBlock[] }).content
+  if (typeof content !== 'string') throw new Error('expected text summary prompt')
+  return content
 }
 
 describe('ContextManager', () => {
@@ -260,152 +306,6 @@ describe('ContextManager', () => {
     })
   })
 
-  describe('compactMessages', () => {
-    it('should preserve recent messages and summarize old ones', () => {
-      const cm = new ContextManager({
-        maxContextTokens: 10000,
-        keepRecentMessages: 2,
-      })
-
-      const messages: EngineMessage[] = [
-        createUserMessage('First question'),
-        createAssistantMessage([{ type: 'text', text: 'First answer' }], 'end_turn'),
-        createUserMessage('Second question'),
-        createAssistantMessage([{ type: 'text', text: 'Second answer' }], 'end_turn'),
-        createUserMessage('Third question'),
-        createAssistantMessage([{ type: 'text', text: 'Third answer' }], 'end_turn'),
-      ]
-
-      const compacted = cm.compactMessages(messages)
-
-      // Should have: 1 first user msg (immortal) + 1 summary + 2 recent = 4
-      expect(compacted).toHaveLength(4)
-
-      // First slot 是被钉住的首条 user message（含 task_origin 等）
-      expect(compacted[0]).toBe(messages[0])
-
-      // Second slot 才是摘要
-      expect(compacted[1].role).toBe('user')
-      const summaryContent = compacted[1] as { content: string | ContentBlock[] }
-      if (typeof summaryContent.content === 'string') {
-        expect(summaryContent.content).toContain('[Summary')
-      } else {
-        const textBlock = summaryContent.content.find((b) => b.type === 'text')
-        expect(textBlock).toBeDefined()
-      }
-
-      // Last 2 messages should be preserved exactly
-      expect(compacted[2]).toBe(messages[4])
-      expect(compacted[3]).toBe(messages[5])
-    })
-
-    it('should return messages as-is when count is at or below keepRecentMessages', () => {
-      const cm = new ContextManager({
-        maxContextTokens: 10000,
-        keepRecentMessages: 6,
-      })
-
-      const messages: EngineMessage[] = [
-        createUserMessage('Hello'),
-        createAssistantMessage([{ type: 'text', text: 'Hi' }], 'end_turn'),
-      ]
-
-      const compacted = cm.compactMessages(messages)
-
-      expect(compacted).toHaveLength(2)
-      expect(compacted[0]).toBe(messages[0])
-      expect(compacted[1]).toBe(messages[1])
-    })
-
-    it('should not split between assistant tool_use and its tool_result', () => {
-      // 默认切点会落在 tool_result 上 → recent 首条会变成孤儿。
-      // findSafeSplitIndex 回退 1 步，把 assistant_with_tool_use 一起带进 recent。
-      const cm = new ContextManager({
-        maxContextTokens: 10000,
-        keepRecentMessages: 2,
-      })
-
-      const messages: EngineMessage[] = [
-        createUserMessage('Question 1'),
-        createAssistantMessage([{ type: 'text', text: 'Answer 1' }], 'end_turn'),
-        createUserMessage('Question 2'),
-        createAssistantMessage([
-          { type: 'tool_use', id: 'tu_X', name: 'search', input: { q: 'foo' } },
-        ], 'tool_use'),
-        createToolResultMessage('tu_X', 'Found something', false),
-      ]
-      // 默认 splitIndex = 5 - 2 = 3 → messages[3] = assistant_with_tool_use（不是 tool_result）。
-      // 但 messages[3] 后面紧跟 messages[4] = tool_result，所以这个 split 本身是安全的：
-      // recent[0]=assistant_with_tool_use, recent[1]=tool_result，配对完整。
-      const compacted = cm.compactMessages(messages)
-
-      // 1 first + 1 summary + 2 recent，且 recent 完整保留 tool_use → tool_result 配对
-      expect(compacted).toHaveLength(4)
-      expect(compacted[0]).toBe(messages[0]) // 首条 user message 钉住
-      expect(compacted[2]).toBe(messages[3]) // assistant_with_tool_use
-      expect(compacted[3]).toBe(messages[4]) // tool_result
-    })
-
-    it('should retreat split when default split lands on a tool_result', () => {
-      // 构造让默认 split 直接落在 tool_result：
-      // [Q0, Q1, assistant_tool_use, tool_result, user, assistant, tool_result]
-      //                                ^splitIndex=3 (= 7 - 4) 落在 tool_result 上
-      // findSafeSplitIndex 应回退 1 步到 2（assistant_tool_use），让两者一起进 recent
-      const cm = new ContextManager({
-        maxContextTokens: 10000,
-        keepRecentMessages: 4,
-      })
-
-      const messages: EngineMessage[] = [
-        createUserMessage('Q0'),
-        createUserMessage('Q1'),
-        createAssistantMessage([
-          { type: 'tool_use', id: 'tu_A', name: 'search', input: {} },
-        ], 'tool_use'),
-        createToolResultMessage('tu_A', 'A', false),
-        createUserMessage('Q2'),
-        createAssistantMessage([
-          { type: 'tool_use', id: 'tu_B', name: 'search', input: {} },
-        ], 'tool_use'),
-        createToolResultMessage('tu_B', 'B', false),
-      ]
-
-      const compacted = cm.compactMessages(messages)
-
-      // 回退后 splitIndex=2，首条钉住=Q0，oldMessages=[Q1]，recent=后 5 条，全部带配对
-      expect(compacted).toHaveLength(7) // 1 first + 1 summary + 5 recent
-      expect(compacted[0]).toBe(messages[0]) // 首条 user message 钉住
-      expect(compacted[2]).toBe(messages[2]) // assistant_tool_use A
-      expect(compacted[3]).toBe(messages[3]) // tool_result A
-      expect(compacted[4]).toBe(messages[4])
-      expect(compacted[5]).toBe(messages[5])
-      expect(compacted[6]).toBe(messages[6])
-      // 关键不变量：recent 第一条不是孤儿 tool_result
-      expect('toolResults' in compacted[2]).toBe(false)
-    })
-
-    it('should return as-is when retreating split would leave nothing to summarize', () => {
-      // 全部消息几乎都是 tool_result，回退到 0 → 没东西可压缩
-      const cm = new ContextManager({
-        maxContextTokens: 10000,
-        keepRecentMessages: 1,
-      })
-
-      const messages: EngineMessage[] = [
-        createAssistantMessage([
-          { type: 'tool_use', id: 'tu_X', name: 'x', input: {} },
-        ], 'tool_use'),
-        createToolResultMessage('tu_X', 'r', false),
-      ]
-      // splitIndex 默认 = 1，messages[1] 是 tool_result → 回退到 0 → 不压缩
-      const compacted = cm.compactMessages(messages)
-
-      expect(compacted).toHaveLength(2)
-      expect(compacted[0]).toBe(messages[0])
-      expect(compacted[1]).toBe(messages[1])
-    })
-  })
-
   describe('updateFromUsage / getCumulativeUsage', () => {
     it('should track cumulative usage across multiple updates', () => {
       const cm = new ContextManager({ maxContextTokens: 10000 })
@@ -439,7 +339,7 @@ describe('ContextManager', () => {
         createAssistantMessage([{ type: 'text', text: 'Third answer' }], 'end_turn'),
       ]
 
-      const adapter = mockAdapter('The user asked two questions and received answers about topics.')
+      const adapter = mockAdapter('S')
       const compacted = await cm.compactWithLLM(messages, adapter, 'test-model')
 
       // Should have: 1 first + 1 summary + 2 recent = 4
@@ -453,7 +353,7 @@ describe('ContextManager', () => {
       const summaryContent = (compacted[1] as { content: string | ContentBlock[] }).content
       expect(typeof summaryContent).toBe('string')
       expect(summaryContent).toContain('[Earlier conversation summary]')
-      expect(summaryContent).toContain('The user asked two questions')
+      expect(summaryContent).toContain('\nS')
 
       // Last 2 messages should be preserved exactly
       expect(compacted[2]).toBe(messages[4])
@@ -467,14 +367,14 @@ describe('ContextManager', () => {
       })
 
       const messages: EngineMessage[] = [
-        createUserMessage('Old message 1'),
-        createAssistantMessage([{ type: 'text', text: 'Old response 1' }], 'end_turn'),
+        createUserMessage(`Old message 1 ${'x'.repeat(200)}`),
+        createAssistantMessage([{ type: 'text', text: `Old response 1 ${'x'.repeat(200)}` }], 'end_turn'),
         createUserMessage('Recent 1'),
         createAssistantMessage([{ type: 'text', text: 'Recent response 1' }], 'end_turn'),
         createUserMessage('Recent 2'),
       ]
 
-      const adapter = mockAdapter('Summary of old conversation.')
+      const adapter = mockAdapter('S')
       const compacted = await cm.compactWithLLM(messages, adapter, 'test-model')
 
       // 1 first + 1 summary + 3 recent = 5
@@ -495,7 +395,7 @@ describe('ContextManager', () => {
 
       const messages: EngineMessage[] = [
         createUserMessage('First question'),
-        createAssistantMessage([{ type: 'text', text: 'First answer' }], 'end_turn'),
+        createAssistantMessage([{ type: 'text', text: `First answer ${'x'.repeat(200)}` }], 'end_turn'),
         createUserMessage('Second question'),
         createAssistantMessage([{ type: 'text', text: 'Second answer' }], 'end_turn'),
       ]
@@ -597,13 +497,13 @@ describe('ContextManager', () => {
       })
       const messages: EngineMessage[] = [
         createUserMessage('First question'),
-        createAssistantMessage([{ type: 'text', text: 'First answer' }], 'end_turn'),
+        createAssistantMessage([{ type: 'text', text: `First answer ${'x'.repeat(200)}` }], 'end_turn'),
         createUserMessage('Second question'),
         createAssistantMessage([{ type: 'text', text: 'Second answer' }], 'end_turn'),
       ]
 
       const controller = new AbortController()
-      const { adapter, captured } = capturingAdapter('摘要')
+      const { adapter, captured } = capturingAdapter('S')
       await cm.compactWithLLM(messages, adapter, 'test-model', controller.signal)
 
       expect(captured.signal).toBe(controller.signal)
@@ -636,36 +536,48 @@ describe('ContextManager', () => {
       expect(prompt.length).toBeLessThan(10000)
     })
 
-    it('caps the total summary prompt by a budget derived from the context window', async () => {
-      // maxContextTokens=1000 → 预算 1000 * 4 * 0.5 = 2000 字符。
-      // 30 条 2000 字符的 tool_result（逐条截断后仍有 6 万字符）必须被整体裁到预算内。
-      const cm = new ContextManager({
-        maxContextTokens: 1000,
-        keepRecentMessages: 2,
+    it('splits oversized history into bounded requests without omitting old messages', async () => {
+      const cm = new ContextManager({ maxContextTokens: 256_000 })
+      const messages: EngineMessage[] = [createUserMessage('task-origin')]
+      for (let i = 1; i < 100; i++) {
+        const marker = `MESSAGE_${String(i).padStart(3, '0')}`
+        const text = `${marker}:${'x'.repeat(20_000)}`
+        messages.push(i % 2 === 0
+          ? createUserMessage(text)
+          : createAssistantMessage([{ type: 'text', text }], 'end_turn'))
+      }
+      const { adapter, calls } = scriptedAdapter((_params, index) => ({ text: `summary-${index}` }))
+
+      const result = await cm.compactIncrementally({
+        state: compactionState(messages),
+        profile: createBuiltinCompactionProfile({
+          preferredKeepRecent: 6,
+          mainRequestFixedTokens: 0,
+          summarySystemPrompt: 'summarize',
+        }),
+        target: { kind: 'preserve_recent' },
+        adapter,
+        model: 'test-model',
       })
 
-      const messages: EngineMessage[] = [createUserMessage('任务')]
-      for (let i = 0; i < 30; i++) {
-        messages.push(
-          createAssistantMessage(
-            [{ type: 'tool_use', id: `tu_${i}`, name: 'Bash', input: { command: `run ${i}` } }],
-            'tool_use',
-          ),
-        )
-        messages.push(createToolResultMessage(`tu_${i}`, `result ${i} ${'z'.repeat(2000)}`, false))
+      expect(result.failedReason).toBeUndefined()
+      expect(result.batchesApplied).toBeGreaterThanOrEqual(3)
+      expect(result.consumedMessages).toBe(93)
+      const ceiling = Math.floor(256_000 * 0.8)
+      for (const call of calls) {
+        const requestTokens = cm.estimateStaticPromptTokens(call.systemPrompt, call.tools)
+          + cm.estimateTotalTokens(call.messages)
+        expect(requestTokens).toBeLessThanOrEqual(ceiling)
+        expect(promptText(call)).not.toContain('已省略更早')
       }
-      messages.push(createUserMessage('继续'))
-      messages.push(createAssistantMessage([{ type: 'text', text: '好的' }], 'end_turn'))
-
-      const { adapter, captured } = capturingAdapter('摘要')
-      await cm.compactWithLLM(messages, adapter, 'test-model')
-
-      const prompt = (captured.messages[0] as { content: string }).content
-      expect(prompt.length).toBeLessThan(3000)
-      expect(prompt).toContain('已省略更早')
-      // 保留的是最近的那一段（最旧的被丢）
-      expect(prompt).toContain('result 29')
-      expect(prompt).not.toContain('result 0 ')
+      const successfulInput = calls.map(promptText).join('\n')
+      for (let i = 1; i <= 93; i++) {
+        const marker = `MESSAGE_${String(i).padStart(3, '0')}`
+        expect(successfulInput.split(marker)).toHaveLength(2)
+      }
+      for (let i = 94; i < 100; i++) {
+        expect(successfulInput).not.toContain(`MESSAGE_${String(i).padStart(3, '0')}`)
+      }
     })
 
     // 坑 4：findSafeSplitIndex 的回退无界——外部来源（resume checkpoint / session 树回灌）
@@ -828,21 +740,264 @@ describe('ContextManager', () => {
       const customPrompt = 'You are a custom summarizer. Be very brief.'
       const cm = new ContextManager({
         maxContextTokens: 10000,
-        keepRecentMessages: 2,
+        keepRecentMessages: 1,
         compactSystemPrompt: customPrompt,
       })
 
       const messages: EngineMessage[] = [
         createUserMessage('First'),
-        createAssistantMessage([{ type: 'text', text: 'Response' }], 'end_turn'),
+        createAssistantMessage([{ type: 'text', text: `Response ${'x'.repeat(100)}` }], 'end_turn'),
         createUserMessage('Second'),
         createAssistantMessage([{ type: 'text', text: 'Response 2' }], 'end_turn'),
       ]
 
-      const { adapter, captured } = capturingAdapter('Brief summary.')
+      const { adapter, captured } = capturingAdapter('S')
       await cm.compactWithLLM(messages, adapter, 'test-model')
 
       expect(captured.systemPrompt).toBe(customPrompt)
     })
+  })
+})
+
+describe('ContextManager.compactIncrementally', () => {
+  function userHistory(count: number, charsEach: number): EngineMessage[] {
+    return Array.from({ length: count }, (_, index) =>
+      createUserMessage(`HISTORY_${index}:${'h'.repeat(charsEach)}`),
+    )
+  }
+
+  it('strictly shrinks a max_tokens batch, then restores the full ceiling for the next batch', async () => {
+    const cm = new ContextManager({ maxContextTokens: 1_500 })
+    const state: CompactionState = {
+      protectedHead: [createUserMessage('task-origin')],
+      history: userHistory(12, 600),
+      protectedTail: [],
+    }
+    const successfulPrompts: string[] = []
+    const { adapter, calls } = scriptedAdapter((params, index) => {
+      if (index === 0) return { text: 'partial', stopReason: 'max_tokens' }
+      successfulPrompts.push(promptText(params))
+      return { text: `summary-${index}` }
+    })
+
+    const result = await cm.compactIncrementally({
+      state,
+      profile: createBuiltinCompactionProfile({
+        preferredKeepRecent: 2,
+        mainRequestFixedTokens: 0,
+        summarySystemPrompt: 'summarize',
+      }),
+      target: { kind: 'preserve_recent' },
+      adapter,
+      model: 'test-model',
+    })
+
+    expect(result.failedReason).toBeUndefined()
+    expect(result.consumedMessages).toBe(10)
+    const markersPerCall = calls.map((call) => promptText(call).match(/HISTORY_\d+/g)?.length ?? 0)
+    expect(markersPerCall[1]).toBeLessThan(markersPerCall[0])
+    expect(Math.max(...markersPerCall.slice(2))).toBeGreaterThan(markersPerCall[1])
+    for (let index = 0; index < 10; index++) {
+      const marker = `HISTORY_${index}`
+      expect(successfulPrompts.join('\n').split(marker)).toHaveLength(2)
+    }
+  })
+
+  it('shrinks a batch after an explicit provider context overflow', async () => {
+    const cm = new ContextManager({ maxContextTokens: 1_500 })
+    const state: CompactionState = {
+      protectedHead: [createUserMessage('task-origin')],
+      history: userHistory(10, 600),
+      protectedTail: [],
+    }
+    const { adapter, calls } = scriptedAdapter((_params, index) =>
+      index === 0
+        ? new Error('maximum context length exceeded')
+        : { text: `summary-${index}` },
+    )
+
+    const result = await cm.compactIncrementally({
+      state,
+      profile: createBuiltinCompactionProfile({
+        preferredKeepRecent: 2,
+        mainRequestFixedTokens: 0,
+        summarySystemPrompt: 'summarize',
+      }),
+      target: { kind: 'preserve_recent' },
+      adapter,
+      model: 'test-model',
+    })
+
+    expect(result.failedReason).toBeUndefined()
+    expect(result.consumedMessages).toBe(8)
+    const firstCount = promptText(calls[0]).match(/HISTORY_\d+/g)?.length ?? 0
+    const retryCount = promptText(calls[1]).match(/HISTORY_\d+/g)?.length ?? 0
+    expect(retryCount).toBeLessThan(firstCount)
+  })
+
+  it('keeps successful batches when a later batch fails with a non-size provider error', async () => {
+    const cm = new ContextManager({ maxContextTokens: 800 })
+    const state: CompactionState = {
+      protectedHead: [createUserMessage('task-origin')],
+      history: userHistory(8, 700),
+      protectedTail: [],
+    }
+    const applied: Array<{ consumedMessages: number; remaining: number }> = []
+    const { adapter, calls } = scriptedAdapter((_params, index) =>
+      index === 0 ? { text: 'first-summary' } : new Error('invalid api key'),
+    )
+
+    const result = await cm.compactIncrementally({
+      state,
+      profile: createBuiltinCompactionProfile({
+        preferredKeepRecent: 1,
+        mainRequestFixedTokens: 0,
+        summarySystemPrompt: 'summarize',
+        onBatchApplied: (batch) => {
+          applied.push({
+            consumedMessages: batch.consumedMessages,
+            remaining: batch.state.history.length,
+          })
+        },
+      }),
+      target: { kind: 'preserve_recent' },
+      adapter,
+      model: 'test-model',
+    })
+
+    expect(calls).toHaveLength(2)
+    expect(result.failedReason).toContain('invalid api key')
+    expect(result.batchesApplied).toBe(1)
+    expect(result.consumedMessages).toBe(applied[0].consumedMessages)
+    expect(result.state.previousSummary).toBe('first-summary')
+    expect(result.state.history).toHaveLength(applied[0].remaining)
+    expect(result.state.history.length).toBeLessThan(state.history.length)
+  })
+
+  it('keeps successful batches when a later summary call is aborted', async () => {
+    const cm = new ContextManager({ maxContextTokens: 800 })
+    const state: CompactionState = {
+      protectedHead: [createUserMessage('task-origin')],
+      history: userHistory(8, 700),
+      protectedTail: [],
+    }
+    const { adapter } = scriptedAdapter((_params, index) =>
+      index === 0
+        ? { text: 'first-summary' }
+        : new DOMException('Aborted', 'AbortError'),
+    )
+
+    const result = await cm.compactIncrementally({
+      state,
+      profile: createBuiltinCompactionProfile({
+        preferredKeepRecent: 1,
+        mainRequestFixedTokens: 0,
+        summarySystemPrompt: 'summarize',
+      }),
+      target: { kind: 'preserve_recent' },
+      adapter,
+      model: 'test-model',
+    })
+
+    expect(result.aborted).toBe(true)
+    expect(result.batchesApplied).toBe(1)
+    expect(result.state.previousSummary).toBe('first-summary')
+    expect(result.state.history.length).toBeLessThan(state.history.length)
+  })
+
+  it('counts fixed system/tool overhead when fitting the main request hard cap', async () => {
+    const cm = new ContextManager({ maxContextTokens: 1_000 })
+    const state: CompactionState = {
+      protectedHead: [createUserMessage('task-origin')],
+      history: userHistory(5, 160),
+      protectedTail: [createUserMessage('current-human-input')],
+    }
+    const withoutFixed = createBuiltinCompactionProfile({
+      preferredKeepRecent: 3,
+      mainRequestFixedTokens: 0,
+      summarySystemPrompt: 'summarize',
+    })
+    const withFixed = createBuiltinCompactionProfile({
+      preferredKeepRecent: 3,
+      mainRequestFixedTokens: 100,
+      summarySystemPrompt: 'summarize',
+    })
+    const noCall = scriptedAdapter(() => new Error('must not be called'))
+    const compacting = scriptedAdapter(() => ({ text: 'summary' }))
+
+    const alreadyFits = await cm.compactIncrementally({
+      state,
+      profile: withoutFixed,
+      target: { kind: 'fit_hard_cap', hardCapTokens: 300 },
+      adapter: noCall.adapter,
+      model: 'test-model',
+    })
+    const result = await cm.compactIncrementally({
+      state,
+      profile: withFixed,
+      target: { kind: 'fit_hard_cap', hardCapTokens: 300 },
+      adapter: compacting.adapter,
+      model: 'test-model',
+    })
+
+    expect(alreadyFits.batchesApplied).toBe(0)
+    expect(noCall.calls).toHaveLength(0)
+    expect(result.failedReason).toBeUndefined()
+    expect(result.batchesApplied).toBeGreaterThan(0)
+    expect(compacting.calls.length).toBeGreaterThan(0)
+    expect(cm.estimateCompactionStateTokens(result.state, withFixed)).toBeLessThanOrEqual(300)
+  })
+
+  it('fails without calling the provider when the minimum safe group exceeds the summary ceiling', async () => {
+    const cm = new ContextManager({ maxContextTokens: 100 })
+    const state: CompactionState = {
+      protectedHead: [createUserMessage('task-origin')],
+      history: [createUserMessage('x'.repeat(2_000)), createUserMessage('keep')],
+      protectedTail: [],
+    }
+    const { adapter, calls } = scriptedAdapter(() => ({ text: 'summary' }))
+
+    const result = await cm.compactIncrementally({
+      state,
+      profile: createBuiltinCompactionProfile({
+        preferredKeepRecent: 1,
+        mainRequestFixedTokens: 0,
+        summarySystemPrompt: 's',
+      }),
+      target: { kind: 'preserve_recent' },
+      adapter,
+      model: 'test-model',
+    })
+
+    expect(result.failedReason).toContain('最小安全消息组')
+    expect(result.batchesApplied).toBe(0)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('rejects non-decreasing summaries after finite strict batch reductions', async () => {
+    const cm = new ContextManager({ maxContextTokens: 10_000 })
+    const state: CompactionState = {
+      protectedHead: [createUserMessage('task-origin')],
+      history: userHistory(6, 100),
+      protectedTail: [],
+    }
+    const { adapter, calls } = scriptedAdapter(() => ({ text: 's'.repeat(5_000) }))
+
+    const result = await cm.compactIncrementally({
+      state,
+      profile: createBuiltinCompactionProfile({
+        preferredKeepRecent: 2,
+        mainRequestFixedTokens: 0,
+        summarySystemPrompt: 'summarize',
+      }),
+      target: { kind: 'preserve_recent' },
+      adapter,
+      model: 'test-model',
+    })
+
+    expect(result.failedReason).toContain('token 未下降')
+    expect(result.batchesApplied).toBe(0)
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls.length).toBeLessThanOrEqual(4)
   })
 })

@@ -7,8 +7,8 @@ import { BuiltinWorkerAdapter, WorkerExitedError } from '../../src/workers/built
 import { SessionTree } from '../../src/workers/session-tree.js'
 import type { SpawnSpec, IncarnationHandle, IncarnationRef, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 import type { LLMAdapter, LLMStreamParams } from '../../src/engine/llm-adapter-types.js'
-import { defineTool } from '../../src/engine/index.js'
-import type { EngineMessage, ToolDefinition } from '../../src/engine/index.js'
+import { createUserMessage, defineTool } from '../../src/engine/index.js'
+import type { EngineMessage, EngineResult, ToolDefinition } from '../../src/engine/index.js'
 import type { AgentTrace } from '../../src/types.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
@@ -2814,6 +2814,63 @@ describe('BuiltinWorkerAdapter', () => {
   })
 
   // --- 上下文压缩（F2） ---
+
+  it.each(['failed', 'aborted'] as const)(
+    '部分成功后 %s 收尾仍把最后成功状态写成新根链',
+    async (outcome) => {
+      const runEngineSpy = vi.spyOn(engineModule, 'runEngine').mockImplementationOnce(async (params) => {
+        const origin = params.initialMessages?.[0] ?? createUserMessage('task-origin')
+        const finalMessages = [
+          origin,
+          createUserMessage('[Earlier conversation summary]\nfirst-batch-summary'),
+          createUserMessage('RECENT_AFTER_PARTIAL_COMPACTION'),
+        ]
+        params.options.onCompactionEnd?.({
+          beforeCount: params.initialMessages?.length ?? 0,
+          afterCount: finalMessages.length,
+          batchesApplied: 1,
+          consumedMessages: 4,
+          durationMs: 1,
+          failedReason: outcome === 'aborted' ? 'aborted' : 'second batch failed',
+        })
+        return {
+          outcome,
+          finalText: '',
+          totalTurns: 0,
+          usage: { inputTokens: 0, outputTokens: 0 },
+          ...(outcome === 'failed' ? { error: 'second batch failed' } : {}),
+          finalMessages,
+          tool_call_count: 0,
+          wrote_memory_or_scene: false,
+        } satisfies EngineResult
+      })
+
+      try {
+        const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+        const s = spec({ adapter: makeAdapter([{ text: 'unused', stopReason: 'end_turn' }]) })
+        const h = await adapter.spawn(s)
+        await waitState(adapter, h, 'exited')
+
+        const raw = await fs.readFile(join(tmp, s.worker_id, 'session.jsonl'), 'utf-8')
+        const nodes = raw.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line) as {
+          node_id: string
+          parent_id: string | null
+        })
+        expect(nodes.filter((node) => node.parent_id === null)).toHaveLength(2)
+
+        const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+        const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as {
+          tip_node_id: string
+        }
+        const compactedPath = tree.pathTo(meta.tip_node_id)
+        expect(JSON.stringify(compactedPath)).toContain('first-batch-summary')
+        expect(JSON.stringify(compactedPath)).toContain('RECENT_AFTER_PARTIAL_COMPACTION')
+        expect(tree.pathTo(nodes[0].node_id)).toHaveLength(1)
+      } finally {
+        runEngineSpy.mockRestore()
+      }
+    },
+  )
 
   it('burst 内发生压缩 → 不得把错位后缀嫁接到老链（数据损坏复现）', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })

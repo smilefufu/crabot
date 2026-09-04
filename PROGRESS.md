@@ -5,6 +5,11 @@
 
 ## 当前状态
 
+### Agent Engine 自适应增量上下文压缩：实现与验证完成，待 PR #139 review
+
+- Manager 与 builtin Worker 已共用 Engine 单一批次算法：按当前模型窗口的 80% 规划完整摘要请求，
+  遇摘要截断或 Provider 上下文超限自适应缩批；成功批次不回滚，调用方各自保留持久化与生命周期语义。
+
 ### Manager 会话任务板与项目文档共享：实现与定向验证完成，待非 Draft PR review
 
 - 已确认并发布设计、计划及正式协议（crabot-docs `753c922`）：每个 Manager 会话一张支持多任务的
