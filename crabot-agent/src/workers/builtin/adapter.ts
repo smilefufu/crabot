@@ -129,12 +129,10 @@ const CONTEXT_OVERFLOW_NOTICE =
  * completed 收场——与上下文超限无关。这里对齐同一判定：只统计末条 assistant 消息里的 text 块
  * （忽略 tool_use/raw_reasoning，与 partitionResponseContent 一致），trim 后为空才算静默。
  *
- * 判定与 `manager/loop.ts` 的 `isContextOverflow` 分支 1 同源（P4 在 manager 上踩的是同一个坑，
- * 那段注释是这条判定的原始考据）。这里没有直接 import 复用，两个原因：
- *   1. 那是 manager loop 的模块私有函数，worker 反向依赖 manager 是跨模块方向错误；
- *   2. 抽到 engine 公共层属于 engine 改动，超出本次"只动 builtin adapter"的修 bug 范围。
- * manager 那份还有"分支 2：outcome==='failed' 且 error 文案含超限关键字"，这里不需要——
- * builtin adapter 对 `outcome === 'failed'` 一律落 `exited(crashed)`，本就是 fail-loud 的终态。
+ * 判定与 `manager/loop.ts` 的 `isContextOverflow` 分支 1 同源，但两者消费的生命周期不同：
+ * Manager 用它决定是否执行 episode 级重试；builtin 已用完 Engine 内部重试，只需决定是否
+ * 从 completed 改落 failed。Manager 还识别 Provider 主调用抛出的超限错误，builtin 则仅把
+ * Engine 明确标记的压缩失败归为 failed，其它 Engine/Provider 故障仍归为 crashed。
  */
 function isSilentContextOverflow(result: EngineResult): boolean {
   const last = result.finalMessages[result.finalMessages.length - 1]

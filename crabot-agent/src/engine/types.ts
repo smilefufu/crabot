@@ -447,7 +447,8 @@ export interface EngineOptions {
 
   /**
    * 当前模型的 context window（token 数），来自 provider 模型配置的 context_window。
-   * 缺失时 engine 回退到内置默认 200000。仅影响 compaction 触发阈值，不影响请求参数。
+   * 缺失时 engine 回退到内置默认 200000。用于 compaction 触发阈值、hard cap 和摘要
+   * 输入上限，不直接写入 Provider 请求参数。
    */
   readonly contextWindowTokens?: number
 
