@@ -11,7 +11,6 @@
  * - 可见性门与运行时门同源：可见的 send_private_message 真调一次不被 requireDeclaredShortcut 拦
  */
 import { describe, it, expect, vi } from 'vitest'
-import { RpcCallError } from 'crabot-shared'
 import { executeToolBatches } from '../../src/engine/tool-orchestration'
 import { buildManagerToolFace, assertClosedToolFace, type ToolFaceDeps } from '../../src/manager/tools/tool-face'
 import { CRAB_MEMORY_MANAGER_TOOL_NAMES, createCrabMemoryServer } from '../../src/mcp/crab-memory'
@@ -149,14 +148,16 @@ describe('buildManagerToolFace', () => {
     expect(systemNames).toEqual([...normalNames, 'send_master_private'].sort())
   })
 
-  it('builtin daily reflection 只暴露固定 Admin Web 摘要动作', async () => {
+  it('builtin daily reflection 只暴露固定 Admin Web 摘要动作，并登记成功投递的固定目标', async () => {
     const call = vi.fn(async () => ({
       platform_message_id: 'pm-daily',
       sent_at: '2026-08-21T02:00:00.000Z',
     }))
+    const onObservedSessionTargets = vi.fn()
     const tools = buildManagerToolFace(makeDeps({
       isSystemThread: true,
       isBuiltinDailyReflection: true,
+      onObservedSessionTargets,
       messagingDeps: makeMessagingDeps({
         rpcClient: { call } as never,
         resolveChannelPort: async (channelId: string) => channelId === 'admin-web' ? 19001 : 19009,
@@ -187,6 +188,35 @@ describe('buildManagerToolFace', () => {
       },
       'manager-test',
     )
+    expect(onObservedSessionTargets).toHaveBeenCalledWith([
+      { channel_id: 'admin-web', session_id: 'system-tasks' },
+    ])
+    expect(result.output).not.toContain('observedSessionTargets')
+  })
+
+  it('builtin daily reflection 的观察回调失败不改变原工具结果', async () => {
+    const call = vi.fn(async () => ({
+      platform_message_id: 'pm-daily',
+      sent_at: '2026-08-21T02:00:00.000Z',
+    }))
+    const onObservedSessionTargets = vi.fn(() => { throw new Error('index unavailable') })
+    const summary = buildManagerToolFace(makeDeps({
+      isSystemThread: true,
+      isBuiltinDailyReflection: true,
+      onObservedSessionTargets,
+      messagingDeps: makeMessagingDeps({ rpcClient: { call } as never }),
+    })).find((tool) => tool.name === 'send_daily_reflection_summary')!
+
+    const result = await summary.call({ content: '今日无重大变化。' }, {} as never)
+
+    expect(result).toEqual({
+      output: JSON.stringify({
+        platform_message_id: 'pm-daily',
+        sent_at: '2026-08-21T02:00:00.000Z',
+      }),
+      isError: false,
+    })
+    expect(onObservedSessionTargets).toHaveBeenCalledOnce()
   })
 
   it('存在飞书 channel 实例时：两类 manager 都多出 §2.10 只读三件套，都不含 feishu_write', () => {
@@ -308,7 +338,7 @@ describe('buildManagerToolFace', () => {
     expect(onSuccessfulSendMessage).not.toHaveBeenCalled()
   })
 
-  it('普通 manager 真调一次 send_private_message：不被 requireDeclaredShortcut 拦，RPC 真的打出去', async () => {
+  it('普通 manager 真调一次 send_private_message：不被 requireDeclaredShortcut 拦，RPC 真的打出去并登记真实目标', async () => {
     const call = vi.fn(async (_port: number, method: string) => {
       switch (method) {
         case 'get_friend':
@@ -321,8 +351,10 @@ describe('buildManagerToolFace', () => {
           throw new Error(`未预期的 RPC: ${method}`)
       }
     })
+    const onObservedSessionTargets = vi.fn()
     const tools = buildManagerToolFace(makeDeps({
       isSystemThread: false,
+      onObservedSessionTargets,
       messagingDeps: makeMessagingDeps({ rpcClient: { call } as never }),
     }))
     const sendPrivate = tools.find((t) => t.name === 'send_private_message')!
@@ -334,6 +366,9 @@ describe('buildManagerToolFace', () => {
     expect(result.isError).toBe(false)
     expect(result.output).not.toContain('SCHEDULED_ONLY_TOOL')
     expect(JSON.parse(result.output)).toMatchObject({ channel_id: 'ch-1', session_id: 'sess-9', platform_message_id: 'pm-1' })
+    expect(onObservedSessionTargets).toHaveBeenCalledWith([
+      { channel_id: 'ch-1', session_id: 'sess-9' },
+    ])
     expect(call.mock.calls.map((c) => c[1])).toEqual(['get_friend', 'find_or_create_private_session', 'send_message'])
   })
 
@@ -386,62 +421,30 @@ describe('buildManagerToolFace', () => {
   })
 
   describe('send_message 参数修复（spec 2026-09-03-tool-input-repair）', () => {
-    // 渠道 ch-2 上存在 session 'sess-9'；其余渠道没有。portOf 约定与实现探测顺序无关。
-    function makeRoutingMessagingDeps(): ToolFaceDeps['messagingDeps'] {
-      const channels: Record<string, string[]> = { 'ch-1': [], 'ch-2': ['sess-9'] }
-      const ids = Object.keys(channels)
-      const portOf = new Map(ids.map((id, i) => [id, 20_000 + i]))
-      return {
-        rpcClient: {
-          call: async <P, R>(_port: number, method: string, params: P): Promise<R> => {
-            if (method === 'list_channel_instances') {
-              return {
-                items: ids.map((id) => ({ id })),
-                pagination: {
-                  page: 1,
-                  page_size: 50,
-                  total_items: ids.length,
-                  total_pages: 1,
-                },
-              } as R
-            }
-            if (method === 'get_session') {
-              const session = (params as { session_id: string }).session_id
-              const channelId = ids.find((id) => portOf.get(id) === _port)
-              if (channelId && channels[channelId].includes(session)) {
-                return { session: { id: session } } as R
-              }
-              throw new RpcCallError('NOT_FOUND', 'Session not found')
-            }
-            throw new Error(`unexpected method: ${method}`)
-          },
-        } as never,
-        moduleId: 'manager-test',
-        getAdminPort: async () => 19001,
-        resolveChannelPort: async (channelId: string) => portOf.get(channelId) ?? 0,
-      }
-    }
-
-    it('send_message 携带 repairInput，省略 channel_id 时按 session 反查补全', async () => {
+    it('send_message 携带 repairInput，省略 channel_id 时只查当前 Manager 已登记归属', async () => {
+      const lookup = vi.fn((sessionId: string) =>
+        sessionId === 'sess-9' ? new Set(['ch-2']) : undefined
+      )
       const tools = buildManagerToolFace(makeDeps({
         managerTarget: { channel_id: 'ch-1', session_id: 'sess-1' },
-        messagingDeps: makeRoutingMessagingDeps(),
+        sessionChannelsFor: lookup,
       }))
       const send = tools.find((t) => t.name === 'send_message')
       expect(send?.repairInput).toBeTypeOf('function')
       const repaired = await send!.repairInput!({ session_id: 'sess-9', content: 'x' })
       expect(repaired).toEqual({ channel_id: 'ch-2', session_id: 'sess-9', content: 'x' })
+      expect(lookup).toHaveBeenCalledOnce()
+      expect(lookup).toHaveBeenCalledWith('sess-9')
     })
 
-    it('零命中时透传；repairInput 只挂在 send_message 上', async () => {
+    it('零命中时原对象透传；repairInput 只挂在 send_message 上', async () => {
       const tools = buildManagerToolFace(makeDeps({
         managerTarget: { channel_id: 'ch-1', session_id: 'sess-1' },
-        messagingDeps: makeRoutingMessagingDeps(),
+        sessionChannelsFor: () => undefined,
       }))
       const send = tools.find((t) => t.name === 'send_message')!
       const input = { session_id: 'no-such', content: 'x' }
-      expect(await send.repairInput!(input)).toEqual(input)
-      // 其余工具（含其他投递工具）不带修复规则
+      expect(await send.repairInput!(input)).toBe(input)
       for (const tool of tools) {
         if (tool.name !== 'send_message') expect(tool.repairInput, tool.name).toBeUndefined()
       }
@@ -461,30 +464,23 @@ describe('buildManagerToolFace', () => {
       expect(raw.repairInput).toBeUndefined()
     })
 
-    it('engine 真实调用链使用 repaired target，且原工具返回内容不被改写', async () => {
+    it('engine 真实调用链使用 repaired target，不扫描 Channel，也不改写原工具返回', async () => {
       const call = vi.fn(async (_port: number, method: string) => {
-        if (method === 'list_channel_instances') {
-          return {
-            items: [{ id: 'ch-1' }, { id: 'ch-2' }],
-            pagination: { page: 1, page_size: 50, total_items: 2, total_pages: 1 },
-          }
-        }
-        if (method === 'get_session') {
-          if (_port === 19002) return { session: { id: 'sess-9' } }
-          throw new RpcCallError('NOT_FOUND', 'Session not found')
-        }
         if (method === 'send_message') {
-          return { platform_message_id: 'pm-1', sent_at: '2026-09-04T00:00:00.000Z' }
+          return { platform_message_id: 'pm-1', sent_at: '2026-09-05T00:00:00.000Z' }
         }
         throw new Error(`未预期的 RPC: ${method}`)
       })
       const onSuccessfulSendMessage = vi.fn()
+      const onObservedSessionTargets = vi.fn()
       const tools = buildManagerToolFace(makeDeps({
         managerTarget: { channel_id: 'ch-1', session_id: 'sess-1' },
+        sessionChannelsFor: () => new Set(['ch-2']),
         onSuccessfulSendMessage,
+        onObservedSessionTargets,
         messagingDeps: makeMessagingDeps({
           rpcClient: { call } as never,
-          resolveChannelPort: async (channelId) => channelId === 'ch-1' ? 19001 : 19002,
+          resolveChannelPort: async (channelId) => channelId === 'ch-2' ? 19002 : 0,
         }),
       }))
 
@@ -498,15 +494,71 @@ describe('buildManagerToolFace', () => {
       )
 
       expect(result.is_error).toBe(false)
-      expect(result.content).toContain('pm-1')
-      expect(result.content).not.toContain('repaired')
+      expect(JSON.parse(result.content.slice(result.content.indexOf('\n') + 1))).toEqual({
+        platform_message_id: 'pm-1',
+        sent_at: '2026-09-05T00:00:00.000Z',
+      })
+      expect(result.content).not.toContain('observedSessionTargets')
+      expect(call.mock.calls.map((entry) => entry[1])).toEqual(['send_message'])
       expect(call).toHaveBeenCalledWith(
         19002,
         'send_message',
         expect.objectContaining({ session_id: 'sess-9' }),
         'manager-test',
       )
+      expect(onObservedSessionTargets).toHaveBeenCalledWith([
+        { channel_id: 'ch-2', session_id: 'sess-9' },
+      ])
       expect(onSuccessfulSendMessage).toHaveBeenCalledWith({ channel_id: 'ch-2', session_id: 'sess-9' })
+    })
+
+    it('只消费成功 handler 提供的结构化观察，observer 抛错不改变工具结果', async () => {
+      const onObservedSessionTargets = vi.fn(() => { throw new Error('index unavailable') })
+      const call = vi.fn(async (_port: number, method: string) => {
+        if (method === 'get_sessions') {
+          return {
+            items: [{ id: 'sess-9', channel_id: 'ch-2', type: 'private' }],
+            pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+          }
+        }
+        throw new Error(`未预期的 RPC: ${method}`)
+      })
+      const tools = buildManagerToolFace(makeDeps({
+        onObservedSessionTargets,
+        messagingDeps: makeMessagingDeps({ rpcClient: { call } as never }),
+      }))
+      const listSessions = tools.find((tool) => tool.name === 'list_sessions')!
+
+      const result = await listSessions.call({ channel_id: 'ch-2' }, {} as never)
+
+      expect(result.isError).toBe(false)
+      expect(JSON.parse(result.output)).toMatchObject({
+        items: [{ id: 'sess-9', channel_id: 'ch-2' }],
+      })
+      expect(result.output).not.toContain('observedSessionTargets')
+      expect(onObservedSessionTargets).toHaveBeenCalledWith([
+        { channel_id: 'ch-2', session_id: 'sess-9' },
+      ])
+    })
+
+    it('失败的目标操作不登记模型提供的 pair', async () => {
+      const onObservedSessionTargets = vi.fn()
+      const tools = buildManagerToolFace(makeDeps({
+        onObservedSessionTargets,
+        messagingDeps: makeMessagingDeps({
+          rpcClient: { call: vi.fn(async () => { throw new Error('channel down') }) } as never,
+        }),
+      }))
+
+      const result = await tools.find((tool) => tool.name === 'get_message')!.call({
+        channel_id: 'ch-2',
+        session_id: 'sess-untrusted',
+        platform_message_id: 'pm-1',
+      }, {} as never)
+
+      expect(result.isError).toBe(false)
+      expect(JSON.parse(result.output)).toMatchObject({ error: expect.stringContaining('channel down') })
+      expect(onObservedSessionTargets).not.toHaveBeenCalled()
     })
   })
 })

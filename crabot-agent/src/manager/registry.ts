@@ -41,6 +41,7 @@ import type {
   HarnessEventDelivery,
 } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
+import type { SessionTarget } from '../mcp/crab-messaging.js'
 import type { HumanPrincipal } from './principal.js'
 import { resolveTimezone } from '../utils/time.js'
 
@@ -177,6 +178,8 @@ export interface ManagerRegistryDeps {
       onPostSendAction: () => void
       hasSuccessfulSendMessageTo: (target: { channel_id: string; session_id: string }) => boolean
       onSuccessfulSendMessage: (target: { channel_id: string; session_id: string }) => void
+      sessionChannelsFor: (sessionId: string) => ReadonlySet<string> | undefined
+      onObservedSessionTargets: (targets: ReadonlyArray<SessionTarget>) => void
       hasContinuedWorker: (workerId: string) => boolean
       onWorkerContinuation: (workerId: string) => void
     },
@@ -257,6 +260,8 @@ export class ManagerRegistry {
             onPostSendAction: () => this.loops.get(key)?.recordPostSendAction(),
             hasSuccessfulSendMessageTo: (target) => this.loops.get(key)?.hasSuccessfulSendMessageTo(target) ?? false,
             onSuccessfulSendMessage: (target) => this.loops.get(key)?.recordSuccessfulSendMessage(target),
+            sessionChannelsFor: (sessionId) => this.loops.get(key)?.sessionChannelsFor(sessionId),
+            onObservedSessionTargets: (targets) => this.loops.get(key)?.recordObservedSessionTargets(targets),
             hasContinuedWorker: (workerId) => this.loops.get(key)?.hasContinuedWorker(workerId) ?? false,
             onWorkerContinuation: (workerId) => this.loops.get(key)?.recordWorkerContinuation(workerId),
           },

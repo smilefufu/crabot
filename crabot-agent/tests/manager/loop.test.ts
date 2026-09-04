@@ -188,6 +188,25 @@ describe('ManagerLoop', () => {
     await fs.rm(dataDir, { recursive: true, force: true })
   })
 
+  it('结构化 Session 归属在同一 Loop 内多值保留且重复登记幂等，新 Loop 从空索引开始', () => {
+    const { adapter } = makeAdapter()
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+
+    loop.recordObservedSessionTargets([
+      { channel_id: 'ch-a', session_id: 'shared' },
+      { channel_id: 'ch-a', session_id: 'shared' },
+      { channel_id: 'ch-b', session_id: 'shared' },
+      { channel_id: '', session_id: 'ignored' },
+      { channel_id: 'ignored', session_id: '' },
+    ])
+
+    expect(loop.sessionChannelsFor('shared')).toEqual(new Set(['ch-a', 'ch-b']))
+    expect(loop.sessionChannelsFor('ignored')).toBeUndefined()
+
+    const freshLoop = new ManagerLoop(baseDeps({ store, adapter }))
+    expect(freshLoop.sessionChannelsFor('shared')).toBeUndefined()
+  })
+
   it('拒绝绕过 registry 直接提交裸 WakeEvent', async () => {
     const { adapter } = makeAdapter()
     const loop = new ManagerLoop(baseDeps({ store, adapter }))

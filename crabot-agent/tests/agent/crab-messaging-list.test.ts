@@ -112,15 +112,48 @@ describe('crab-messaging list_contacts 工具', () => {
 })
 
 describe('crab-messaging list_sessions 工具', () => {
-  it('返回也带分页元信息', async () => {
+  it('返回分页元信息，并用 canonical Session.id + channel_id 暴露结构化归属观察', async () => {
     const deps = makeDeps()
     deps.rpcClient.call = vi.fn().mockResolvedValue({
-      items: [{ session_id: 's1', type: 'group', title: 'X', participant_count: 5 }],
+      items: [
+        { id: 's1', channel_id: 'wechat-x', type: 'group', title: 'X', participant_count: 5 },
+        { id: '', channel_id: 'wechat-x', type: 'group', title: 'malformed' },
+        { session_id: 'legacy-only', channel_id: 'wechat-x', type: 'private' },
+      ],
       pagination: { page: 1, page_size: 20, total_items: 80, total_pages: 4 },
     })
     const tools = buildWorkerMessagingTools(deps as never)
     const out = await findTool(tools, 'list_sessions').handler({ channel_id: 'wechat-x' })
     const parsed = parseToolResult(out)
     expect(parsed.pagination).toMatchObject({ has_more: true, next_page: 2 })
+    expect(out.observedSessionTargets).toEqual([
+      { channel_id: 'wechat-x', session_id: 's1' },
+    ])
+    expect(parsed).not.toHaveProperty('observedSessionTargets')
+  })
+})
+
+describe('crab-messaging list_group_members 工具', () => {
+  it('底层查询成功后暴露完整目标归属，失败时不把调用参数登记为观察', async () => {
+    const deps = makeDeps()
+    deps.rpcClient.call = vi.fn()
+      .mockResolvedValueOnce({
+        items: [],
+        pagination: { page: 1, page_size: 50, total_items: 0, total_pages: 0 },
+        member_count: 0,
+        members_complete: true,
+      })
+      .mockRejectedValueOnce(new Error('channel unavailable'))
+    const tool = findTool(buildWorkerMessagingTools(deps as never), 'list_group_members')
+
+    const success = await tool.handler({ channel_id: 'wechat-x', session_id: 'group-1' })
+    expect(success.observedSessionTargets).toEqual([
+      { channel_id: 'wechat-x', session_id: 'group-1' },
+    ])
+    expect(parseToolResult(success)).not.toHaveProperty('observedSessionTargets')
+
+    const failure = await tool.handler({ channel_id: 'wechat-x', session_id: 'untrusted' })
+    expect(failure.observedSessionTargets).toBeUndefined()
+    expect(parseToolResult(failure)).toHaveProperty('error')
   })
 })

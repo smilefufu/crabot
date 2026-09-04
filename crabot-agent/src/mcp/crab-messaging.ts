@@ -10,7 +10,7 @@
 import { resolvePath } from '../engine/tools/utils.js'
 import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
-import { RpcCallError, SYSTEM_CHANNEL_ID, SYSTEM_SESSION_ID, type RpcClient } from 'crabot-shared'
+import { SYSTEM_CHANNEL_ID, SYSTEM_SESSION_ID, type RpcClient } from 'crabot-shared'
 import type { Friend, MessageContent } from '../types.js'
 import { annotatePagination } from './pagination-annotator.js'
 import { translateChannelError } from './error-translator.js'
@@ -169,23 +169,70 @@ const ASK_HUMAN_BARRIER_TIMEOUT_MS = 24 * 60 * 60 * 1000 + 15 * 60 * 1000
 // 工具类型定义
 // ============================================================================
 
+export interface SessionTarget {
+  readonly channel_id: string
+  readonly session_id: string
+}
+
+export interface MessagingToolResult {
+  content: Array<{ type: 'text'; text: string }>
+  isError?: boolean
+  /** Manager 内部消费的可信结构化观察；不得暴露到 MCP/LLM 输出。 */
+  observedSessionTargets?: ReadonlyArray<SessionTarget>
+}
+
 export interface MessagingTool {
   name: string
   description: string
   schema: Record<string, z.ZodTypeAny>
-  handler: (args: Record<string, unknown>) => Promise<{
-    content: Array<{ type: 'text'; text: string }>
-    isError?: boolean
-  }>
+  handler: (args: Record<string, unknown>) => Promise<MessagingToolResult>
 }
 
 // ============================================================================
 // 内部 helper
 // ============================================================================
 
-function wrapText(payload: unknown, opts?: { isError?: boolean }) {
+function wrapText(payload: unknown, opts?: { isError?: boolean }): MessagingToolResult {
   const base = { content: [{ type: 'text' as const, text: JSON.stringify(payload) }] }
   return opts?.isError ? { ...base, isError: true } : base
+}
+
+function withObservedSessionTargets(
+  result: MessagingToolResult,
+  targets: ReadonlyArray<SessionTarget>,
+): MessagingToolResult {
+  const valid = targets.filter(
+    (target) =>
+      typeof target.channel_id === 'string'
+      && target.channel_id.length > 0
+      && typeof target.session_id === 'string'
+      && target.session_id.length > 0,
+  )
+  return valid.length > 0
+    ? { ...result, observedSessionTargets: valid }
+    : result
+}
+
+function sessionTarget(channelId: string, sessionId: string): SessionTarget {
+  return { channel_id: channelId, session_id: sessionId }
+}
+
+function sessionTargetsFromItems(items: unknown): SessionTarget[] {
+  if (!Array.isArray(items)) return []
+  const targets: SessionTarget[] = []
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue
+    const { id, channel_id } = item as { id?: unknown; channel_id?: unknown }
+    if (
+      typeof id === 'string'
+      && id.length > 0
+      && typeof channel_id === 'string'
+      && channel_id.length > 0
+    ) {
+      targets.push(sessionTarget(channel_id, id))
+    }
+  }
+  return targets
 }
 
 /**
@@ -420,16 +467,19 @@ const FETCH_MEDIA_SCHEMA = {
 // send_message 参数修复规则（spec 2026-09-03-tool-input-repair）
 // ================================================================
 
+export type SessionChannelLookup = (
+  sessionId: string,
+) => ReadonlySet<string> | undefined
+
 /**
- * `send_message` 省略 `channel_id` 时按 `session_id` 反查归属渠道的确定性修复规则。
+ * `send_message` 省略 `channel_id` 时按当前 Manager 已登记的 Session 归属确定性补全。
  *
- * 仅当 `channel_id` 缺失且 `session_id` 为非空字符串时介入。目标恰好命中一个渠道时补全；
- * 多渠道命中时仅在当前 manager 归属渠道也命中时选择该渠道。任一列表、端口解析或探测步骤
- * 无法给出确定结果时原样透传，由工具自身处理。本规则不生成错误，也不改写工具返回内容。
+ * 只查本地索引，不枚举 Channel、探测 Session 或在 miss 时回退扫描。无确定结果或索引读取
+ * 失败时原样透传，由工具自身处理；本规则不生成错误，也不改写工具返回内容。
  */
 export function createSendMessageChannelRepair(
-  deps: Pick<CrabMessagingDeps, 'rpcClient' | 'moduleId' | 'getAdminPort' | 'resolveChannelPort'>,
-  managerTarget?: { readonly channel_id: string; readonly session_id: string },
+  lookupSessionChannels: SessionChannelLookup | undefined,
+  managerTarget?: SessionTarget,
 ): (input: Record<string, unknown>) => Promise<Record<string, unknown>> {
   return async (input) => {
     if (input.channel_id !== undefined) return input
@@ -441,70 +491,22 @@ export function createSendMessageChannelRepair(
     }
 
     try {
-      const adminPort = await deps.getAdminPort()
-      const ids: string[] = []
-      const pageSize = 50
-      let page = 1
-      let totalPages: number
-
-      do {
-        const result = await deps.rpcClient.call<
-          { page: number; page_size: number },
-          {
-            items: Array<{ id: string }>
-            pagination: {
-              page: number
-              page_size: number
-              total_items: number
-              total_pages: number
-            }
-          }
-        >(adminPort, 'list_channel_instances', { page, page_size: pageSize }, deps.moduleId)
-        if (
-          !result
-          || !Array.isArray(result.items)
-          || !result.items.every((item) => item && typeof item.id === 'string')
-          || !result.pagination
-          || !Number.isInteger(result.pagination.total_pages)
-          || result.pagination.total_pages < 0
-          || result.pagination.page !== page
-        ) {
-          return input
-        }
-        ids.push(...result.items.map((item) => item.id))
-        totalPages = result.pagination.total_pages
-        page += 1
-      } while (page <= totalPages)
-
-      const hits: string[] = []
-      for (const channelId of ids) {
-        const port = await deps.resolveChannelPort(channelId)
-        if (!port) return input
-        try {
-          const result = await deps.rpcClient.call<
-            { session_id: string },
-            { session: { id: string } }
-          >(port, 'get_session', { session_id: sessionId }, deps.moduleId)
-          if (!result?.session || typeof result.session.id !== 'string') return input
-          hits.push(channelId)
-        } catch (error) {
-          if (error instanceof RpcCallError && error.code === 'NOT_FOUND') continue
-          return input
-        }
+      const channels = lookupSessionChannels?.(sessionId)
+      if (!channels || channels.size === 0) return input
+      if (channels.size === 1) {
+        const channelId = channels.values().next().value
+        return channelId === undefined
+          ? input
+          : { ...input, channel_id: channelId }
       }
-
-      if (hits.length === 1) return { ...input, channel_id: hits[0] }
-      if (
-        hits.length > 1
-        && managerTarget !== undefined
-        && hits.includes(managerTarget.channel_id)
-      ) {
+      if (managerTarget && channels.has(managerTarget.channel_id)) {
         return { ...input, channel_id: managerTarget.channel_id }
       }
-      return input
     } catch {
-      return input
+      // 派生索引不可用不应改变原工具的输入/错误语义。
     }
+
+    return input
   }
 }
 
@@ -722,7 +724,10 @@ export function buildMessagingTools(
             { type: args.type as string | undefined, pagination: { page, page_size } },
             moduleId,
           )
-          return wrapText(annotatePagination(result, { requestedPage: page, requestedPageSize: page_size, userSpecifiedPageSize }))
+          return withObservedSessionTargets(
+            wrapText(annotatePagination(result, { requestedPage: page, requestedPageSize: page_size, userSpecifiedPageSize })),
+            sessionTargetsFromItems(result.items),
+          )
         } catch (err) {
           return wrapText(translateChannelError(err))
         }
@@ -771,7 +776,10 @@ export function buildMessagingTools(
             { session_id, pagination: { page, page_size } },
             moduleId,
           )
-          return wrapText(annotatePagination(result, { requestedPage: page, requestedPageSize: page_size, userSpecifiedPageSize }))
+          return withObservedSessionTargets(
+            wrapText(annotatePagination(result, { requestedPage: page, requestedPageSize: page_size, userSpecifiedPageSize })),
+            [sessionTarget(channel_id, session_id)],
+          )
         } catch (err) {
           return wrapText(translateChannelError(err))
         }
@@ -844,11 +852,14 @@ export function buildMessagingTools(
                 }, moduleId)
               })
 
-              return wrapText({
-                ...sendResult,
-                channel_id: identity.channel_id,
-                session_id: sessionId,
-              })
+              return withObservedSessionTargets(
+                wrapText({
+                  ...sendResult,
+                  channel_id: identity.channel_id,
+                  session_id: sessionId,
+                }),
+                [sessionTarget(identity.channel_id, sessionId)],
+              )
             } catch (err) {
               lastError = err instanceof Error ? err.message : String(err)
               continue
@@ -948,12 +959,15 @@ export function buildMessagingTools(
               }, moduleId)
             })
 
-            return wrapText({
-              ...sendResult,
-              channel_id: identity.channel_id,
-              session_id: sessionId,
-              friend_id: master.id,
-            })
+            return withObservedSessionTargets(
+              wrapText({
+                ...sendResult,
+                channel_id: identity.channel_id,
+                session_id: sessionId,
+                friend_id: master.id,
+              }),
+              [sessionTarget(identity.channel_id, sessionId)],
+            )
           } catch (err) {
             lastError = err instanceof Error ? err.message : String(err)
             continue
@@ -1138,10 +1152,13 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           if (stateError !== undefined) {
             // 补齐失败 / transient admin 故障：消息已发但状态没切。
             // 返回含 ask_human_state_error 的结果，worker 看到 error 字段会自己处理，不设 barrier 防止卡死。
-            return wrapText({
-              ...sendResult,
-              ask_human_state_error: stateError,
-            })
+            return withObservedSessionTargets(
+              wrapText({
+                ...sendResult,
+                ask_human_state_error: stateError,
+              }),
+              [sessionTarget(channel_id, session_id)],
+            )
           }
 
           // Step 3: setBarrier（本地内存操作，从不失败）
@@ -1151,9 +1168,12 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           })
         }
 
-        return wrapText({
-          ...sendResult,
-        })
+        return withObservedSessionTargets(
+          wrapText({
+            ...sendResult,
+          }),
+          [sessionTarget(channel_id, session_id)],
+        )
       },
     },
 
@@ -1243,7 +1263,10 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
             timestamp: msg.timestamp,
           }))
 
-          return wrapText({ messages: enrichedMessages })
+          return withObservedSessionTargets(
+            wrapText({ messages: enrichedMessages }),
+            [sessionTarget(channel_id, session_id)],
+          )
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           return wrapText({ error: `查询历史失败: ${msg}` })
@@ -1302,22 +1325,25 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
             }
           }
 
-          return wrapText({
-            platform_message_id: result.platform_message_id,
-            sender_name: result.sender?.platform_display_name,
-            sender_friend_id: senderFriendId,
-            content: result.content?.text ?? '',
-            content_type: result.content?.type ?? 'text',
-            // 媒体信息按存在性透出：已下载图片带本地路径（media_url/file_path），未下载文件带
-            // handle（配 fetch_media）。只透 text/type 会让 LLM 丢失路径线索、瞎猜 handle。
-            ...(result.content?.media?.length ? { media: result.content.media } : {}),
-            ...(result.content?.media_url ? { media_url: result.content.media_url } : {}),
-            ...(result.content?.file_path ? { file_path: result.content.file_path } : {}),
-            ...(result.content?.handle ? { handle: result.content.handle } : {}),
-            ...(result.content?.status ? { status: result.content.status } : {}),
-            timestamp: result.platform_timestamp,
-            quote_message_id: result.features?.quote_message_id,
-          })
+          return withObservedSessionTargets(
+            wrapText({
+              platform_message_id: result.platform_message_id,
+              sender_name: result.sender?.platform_display_name,
+              sender_friend_id: senderFriendId,
+              content: result.content?.text ?? '',
+              content_type: result.content?.type ?? 'text',
+              // 媒体信息按存在性透出：已下载图片带本地路径（media_url/file_path），未下载文件带
+              // handle（配 fetch_media）。只透 text/type 会让 LLM 丢失路径线索、瞎猜 handle。
+              ...(result.content?.media?.length ? { media: result.content.media } : {}),
+              ...(result.content?.media_url ? { media_url: result.content.media_url } : {}),
+              ...(result.content?.file_path ? { file_path: result.content.file_path } : {}),
+              ...(result.content?.handle ? { handle: result.content.handle } : {}),
+              ...(result.content?.status ? { status: result.content.status } : {}),
+              timestamp: result.platform_timestamp,
+              quote_message_id: result.features?.quote_message_id,
+            }),
+            [sessionTarget(channel_id, session_id)],
+          )
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           return wrapText({ error: `查询消息失败: ${msg}` })
@@ -1461,7 +1487,16 @@ export function createCrabMessagingServer(
 
   const tools = buildWorkerMessagingTools(deps, sandboxPathMappingsRef)
   for (const t of tools) {
-    server.registerTool(t.name, { description: t.description, inputSchema: t.schema }, t.handler as never)
+    server.registerTool(
+      t.name,
+      { description: t.description, inputSchema: t.schema },
+      (async (args: Record<string, unknown>) => {
+        const result = await t.handler(args)
+        return result.isError
+          ? { content: result.content, isError: true }
+          : { content: result.content }
+      }) as never,
+    )
   }
 
   return server

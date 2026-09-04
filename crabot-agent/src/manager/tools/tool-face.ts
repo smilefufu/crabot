@@ -22,7 +22,13 @@ import type { McpServer } from '../../mcp/mcp-helpers.js'
 import { mcpServerToToolDefinitions } from '../../agent/mcp-tool-bridge.js'
 import { CRAB_MEMORY_MANAGER_TOOL_NAMES } from '../../mcp/crab-memory.js'
 import { buildMessagingTools, createSendMessageChannelRepair } from '../../mcp/crab-messaging.js'
-import type { CrabMessagingDeps, MessagingTool, MessagingToolSet } from '../../mcp/crab-messaging.js'
+import type {
+  CrabMessagingDeps,
+  MessagingTool,
+  MessagingToolSet,
+  SessionChannelLookup,
+  SessionTarget,
+} from '../../mcp/crab-messaging.js'
 import { buildWorkerTools } from './worker-tools.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
 import { buildCrabotInfoTools } from './crabot-info.js'
@@ -41,10 +47,11 @@ export interface ToolFaceDeps {
   /** 复用现有类型 —— crab-messaging 的依赖注入接口。 */
   readonly messagingDeps: CrabMessagingDeps
   /** 本 manager 的归属目标（来自 managerKey `channel::session`）。用于确定性补全 send_message.channel_id。 */
-  readonly managerTarget?: {
-    readonly channel_id: string
-    readonly session_id: string
-  }
+  readonly managerTarget?: SessionTarget
+  /** 当前 Manager 已从可信结构化结果观察到的 Session 归属。 */
+  readonly sessionChannelsFor?: SessionChannelLookup
+  /** 将成功 messaging 调用产生的可信结构化 Session 归属登记到当前 Manager。 */
+  readonly onObservedSessionTargets?: (targets: ReadonlyArray<SessionTarget>) => void
   /** crab-memory，现有 createCrabMemoryServer 产物。 */
   readonly memoryServer: McpServer
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
@@ -172,6 +179,18 @@ const HUMAN_DELIVERY_TOOL_NAMES = new Set([
   'send_master_private',
 ])
 
+const MANAGER_SEND_MESSAGE_CHANNEL_SCHEMA = z.string().optional().describe(
+  'Channel 模块实例 ID；可省略，省略时系统按当前 Manager 已登记的结构化 Session 归属补全（多渠道命中时仅取当前 Manager 归属渠道）',
+)
+
+const POST_SEND_ACTION_SCHEMA = z.enum(['none', 'spawn_worker']).describe(
+  '本条消息发出后是否预计新建 Worker；仅供系统在本轮结束时做一次内部复核，不会自动派发或重复发送消息',
+)
+
+const DAILY_REFLECTION_SUMMARY_SCHEMA = z.object({
+  content: z.string().describe('给人类看的自然语言摘要'),
+})
+
 function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): ToolDefinition {
   const isSendMessage = tool.name === 'send_message'
   const isHumanDelivery = HUMAN_DELIVERY_TOOL_NAMES.has(tool.name)
@@ -181,13 +200,11 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
         ...Object.fromEntries(
           Object.entries(tool.schema).filter(([key]) => key !== 'intent' && key !== 'channel_id'),
         ),
-        channel_id: z.string().optional().describe(
-          'Channel 模块实例 ID；可省略，省略时系统按 session_id 反查归属渠道（多渠道命中时取当前 manager 归属渠道）',
-        ),
+        channel_id: MANAGER_SEND_MESSAGE_CHANNEL_SCHEMA,
       }
     : tool.schema
   const shape = isHumanDelivery
-    ? { ...baseShape, post_send_action: z.enum(['none', 'spawn_worker']).describe('本条消息发出后是否预计新建 Worker；仅供系统在本轮结束时做一次内部复核，不会自动派发或重复发送消息') }
+    ? { ...baseShape, post_send_action: POST_SEND_ACTION_SCHEMA }
     : baseShape
 
   let inputSchema: Record<string, unknown> = { type: 'object', properties: {} }
@@ -205,8 +222,8 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
     ...(isSendMessage
       ? {
           // 确定性参数修复（spec 2026-09-03-tool-input-repair）：channel_id 省略时按
-          // session_id 反查归属渠道。修复失败/不适用由规则内部原样透传，无任何额外输出。
-          repairInput: createSendMessageChannelRepair(deps.messagingDeps, deps.managerTarget),
+          // 当前 Manager 已登记的 Session 归属补全。未知/歧义时原样透传，无额外输出。
+          repairInput: createSendMessageChannelRepair(deps.sessionChannelsFor, deps.managerTarget),
         }
       : {}),
     call: async (input): Promise<ToolCallResult> => {
@@ -217,6 +234,13 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
       const args = Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'intent' && key !== 'post_send_action'))
       try {
         const result = await tool.handler(args)
+        if (result.observedSessionTargets?.length) {
+          try {
+            deps.onObservedSessionTargets?.(result.observedSessionTargets)
+          } catch {
+            // 派生观察登记失败不得改变原工具结果。
+          }
+        }
         if (!result.isError && postSendAction === 'spawn_worker') deps.onPostSendAction?.('spawn_worker')
         const text = result.content.map((block) => block.text).join('\n')
         if (isSendMessage && !result.isError) {
@@ -251,9 +275,7 @@ function buildDailyReflectionMessagingFace(deps: ToolFaceDeps): ToolDefinition[]
   return [defineTool({
     name: 'send_daily_reflection_summary',
     description: '将每日反思的必要摘要发送到 Admin Web 系统任务线程。仅接收人类可读文本，投递目标固定且不可修改。',
-    inputSchema: z.toJSONSchema(z.object({
-      content: z.string().describe('给人类看的自然语言摘要'),
-    })) as Record<string, unknown>,
+    inputSchema: z.toJSONSchema(DAILY_REFLECTION_SUMMARY_SCHEMA) as Record<string, unknown>,
     isReadOnly: false,
     call: async (input): Promise<ToolCallResult> => {
       try {
@@ -261,6 +283,13 @@ function buildDailyReflectionMessagingFace(deps: ToolFaceDeps): ToolDefinition[]
           ...DAILY_REFLECTION_SUMMARY_TARGET,
           content: input.content as string,
         })
+        if (result.observedSessionTargets?.length) {
+          try {
+            deps.onObservedSessionTargets?.(result.observedSessionTargets)
+          } catch {
+            // 派生观察登记失败不得改变原工具结果。
+          }
+        }
         return {
           output: result.content.map((block) => block.text).join('\n'),
           isError: !!result.isError,
