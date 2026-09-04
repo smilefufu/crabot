@@ -129,12 +129,10 @@ const CONTEXT_OVERFLOW_NOTICE =
  * completed 收场——与上下文超限无关。这里对齐同一判定：只统计末条 assistant 消息里的 text 块
  * （忽略 tool_use/raw_reasoning，与 partitionResponseContent 一致），trim 后为空才算静默。
  *
- * 判定与 `manager/loop.ts` 的 `isContextOverflow` 分支 1 同源（P4 在 manager 上踩的是同一个坑，
- * 那段注释是这条判定的原始考据）。这里没有直接 import 复用，两个原因：
- *   1. 那是 manager loop 的模块私有函数，worker 反向依赖 manager 是跨模块方向错误；
- *   2. 抽到 engine 公共层属于 engine 改动，超出本次"只动 builtin adapter"的修 bug 范围。
- * manager 那份还有"分支 2：outcome==='failed' 且 error 文案含超限关键字"，这里不需要——
- * builtin adapter 对 `outcome === 'failed'` 一律落 `exited(crashed)`，本就是 fail-loud 的终态。
+ * 判定与 `manager/loop.ts` 的 `isContextOverflow` 分支 1 同源，但两者消费的生命周期不同：
+ * Manager 用它决定是否执行 episode 级重试；builtin 已用完 Engine 内部重试，只需决定是否
+ * 从 completed 改落 failed。Manager 还识别 Provider 主调用抛出的超限错误，builtin 则仅把
+ * Engine 明确标记的压缩失败归为 failed，其它 Engine/Provider 故障仍归为 crashed。
  */
 function isSilentContextOverflow(result: EngineResult): boolean {
   const last = result.finalMessages[result.finalMessages.length - 1]
@@ -144,6 +142,11 @@ function isSilentContextOverflow(result: EngineResult): boolean {
     .map((b) => b.text)
     .join('')
   return text.trim().length === 0
+}
+
+function isExplicitContextOverflowFailure(result: EngineResult): boolean {
+  return result.outcome === 'failed'
+    && result.error?.startsWith('上下文超限：上下文压缩失败：') === true
 }
 
 /** Re-export for backward compatibility and convenience. */
@@ -1085,10 +1088,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 本次 burst 内是否真的发生过一次成功的压缩。压缩是对 messages 的**整体重写**
     // （query-loop.ts compactInPlace：messages.length = 0 后重填），一旦发生，
     // finalMessages 就不再是 initialMessages 的后缀，下面的 write-back 必须换一条路径。
-    // 判据只看 failedReason 缺席：压缩失败 / abort 都会带上它且 messages 保持原样
-    // （engine 压缩故障链修复后的语义，见 EngineOptions.onCompactionEnd 注释），
-    // 所以"没带 failedReason" ⇒ messages 已被重写。宁可多判（压缩恰好是空操作时也走整条
-    // 重写路径，代价只是多复制一份节点），也绝不能漏判——漏判就是静默数据损坏。
+    // 判据看实际应用批次数：部分成功后失败 / abort 时 messages 也已经被整体重写，
+    // 必须从最后成功状态写成一条新根链；零成功批次才保留原后缀追加路径。
     let compactedThisBurst = false
     // 本次 burst 里 worker 最后说的那段话（末一个非空 assistantText）。收尾时随状态转换一起
     // 交给 harness，进唤醒事件的 detail——manager 醒来即可知道 worker 说了什么。
@@ -1135,7 +1136,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         // 由上面的收尾段落成 idle 等下一次唤醒，本就是正常态。
         suppressForcedSummary: () => true,
         onCompactionEnd: (info) => {
-          if (info.failedReason === undefined) compactedThisBurst = true
+          if (info.batchesApplied > 0) compactedThisBurst = true
         },
         abortSignal: abortController.signal,
         messagesRef: instance.engineMessagesRef,
@@ -1188,6 +1189,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       }
 
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
+
+      if (isExplicitContextOverflowFailure(result)) {
+        await instance.outputLog.append(`[builtin-worker] ${result.error} 本化身以 failed 收场。\n`)
+        await this.transitionExited(instance, handle, 'failed', 'failed', lastAssistantText)
+        return false
+      }
 
       if (result.outcome === 'aborted' && instance.interruptRequested && !instance.killRequested) {
         instance.interruptRequested = false
@@ -1327,7 +1334,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         // 决定，不能再注入“发给人类”的第二条任务指令。
         suppressForcedSummary: () => true,
         onCompactionEnd: (info) => {
-          if (info.failedReason === undefined) compactedThisBurst = true
+          if (info.batchesApplied > 0) compactedThisBurst = true
         },
         abortSignal: abortController.signal,
         messagesRef: instance.engineMessagesRef,
@@ -1359,6 +1366,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
     await mutex.run(async () => {
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
+
+      if (isExplicitContextOverflowFailure(result)) {
+        await instance.outputLog.append(`[builtin-worker] ${result.error} 本化身以 failed 收场。\n`)
+        await this.transitionExited(instance, handle, 'failed', 'failed', instance.lastBurstAssistantText)
+        return
+      }
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         const endReason = result.outcome === 'aborted' ? this.interruptionEndReason(instance) : 'crashed'

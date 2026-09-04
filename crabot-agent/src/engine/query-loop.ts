@@ -7,6 +7,7 @@ import type {
   EngineResult,
   EngineTurnEvent,
   RawReasoningBlock,
+  ToolDefinition,
   ToolUseBlock,
 } from './types'
 import {
@@ -145,7 +146,20 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       systemPrompt: currentSystemPrompt,
       tools: currentTools,
     })) {
-      const compaction = await compactInPlace(messages, contextManager, adapter, options, abortSignal)
+      const compaction = await compactInPlace(
+        messages,
+        contextManager,
+        adapter,
+        options,
+        // shouldCompact 可能由 Provider usage 触发，而本地 chars/4 估算偏低；
+        // 触发信号已成立时至少应用一批，再用本地 hardCap 判断是否继续。
+        { systemPrompt: currentSystemPrompt, tools: currentTools, force: true },
+        abortSignal,
+      )
+      if (compaction.batchesApplied > 0) {
+        lastObservedContextTokens = undefined
+        refreshMessagesRef()
+      }
       if (!compaction.ok) {
         // 压缩是唯一的下压手段（engine 无 provider 溢出恢复路径）。压不下去还继续跑，
         // 只会每轮再烧一次注定失败的摘要调用、最终撞窗口——直接以可诊断的原因收尾。
@@ -154,8 +168,6 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         }
         return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, `上下文压缩失败：${compaction.failedReason}`)
       }
-      // compaction 改写了 messages，上一轮的 usage 观测已失效，回退估算路径
-      lastObservedContextTokens = undefined
     }
 
     // Call LLM (non-streaming by default; streaming infra preserved for rollback
@@ -319,17 +331,36 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           maxTokensCompactRetryCount++
           fireOnTurn(buildSilentTurnEvent(totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, undefined, response.usage))
           messages.pop()
-          const compaction = await compactInPlace(messages, contextManager, adapter, options, abortSignal)
+          const compaction = await compactInPlace(
+            messages,
+            contextManager,
+            adapter,
+            options,
+            { systemPrompt: currentSystemPrompt, tools: currentTools, force: true },
+            abortSignal,
+          )
+          if (compaction.batchesApplied > 0) {
+            lastObservedContextTokens = undefined
+            refreshMessagesRef()
+          }
           if (!compaction.ok) {
             // max_tokens 已是 context 打满的硬信号，压缩又没压成 —— 再 continue 只是
             // 拿同样超大的 input 重跑一次。诚实收尾，不把"没压成"当成配额耗尽。
             if (compaction.aborted) {
               return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
             }
-            return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, `上下文压缩失败：${compaction.failedReason}`)
+            return buildResult(
+              'failed',
+              finalText,
+              totalTurns,
+              contextManager,
+              messages,
+              exitToolCall,
+              toolCallCount,
+              wroteMemoryOrScene,
+              `上下文超限：上下文压缩失败：${compaction.failedReason}`,
+            )
           }
-          // compaction 改写了 messages，上一轮的 usage 观测已失效，回退估算路径
-          lastObservedContextTokens = undefined
           continue
         }
         // 配额耗尽（或 subagent 禁用了 compact）：input 已被压过两次仍 max_tokens，
@@ -710,49 +741,88 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
 // --- Helpers ---
 
-/**
- * compaction 结果。失败时 messages 保持原样——**绝不用"假压缩"冒充成功**
- * （旧实现的文本回退对 tool_result 正文一字不减，等于每轮再烧一次注定失败的摘要调用）。
- */
 type CompactionOutcome =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly aborted: true }
-  | { readonly ok: false; readonly aborted: false; readonly failedReason: string }
+  | {
+      readonly ok: true
+      readonly batchesApplied: number
+      readonly consumedMessages: number
+    }
+  | {
+      readonly ok: false
+      readonly aborted: boolean
+      readonly failedReason: string
+      readonly batchesApplied: number
+      readonly consumedMessages: number
+    }
 
 async function compactInPlace(
   messages: EngineMessage[],
   contextManager: ContextManager,
   adapter: LLMAdapter,
   options: EngineOptions,
+  request: {
+    readonly systemPrompt: string
+    readonly tools: ReadonlyArray<ToolDefinition>
+    readonly force: boolean
+  },
   abortSignal?: AbortSignal,
 ): Promise<CompactionOutcome> {
   const startedAtMs = Date.now()
   const beforeCount = messages.length
   options.onCompactionStart?.()
   let failedReason: string | undefined
+  let batchesApplied = 0
+  let consumedMessages = 0
   try {
-    const compacted = await contextManager.compactWithLLM(messages, adapter, options.model, abortSignal)
-    const finalMessages = options.onAfterCompaction
-      ? options.onAfterCompaction(compacted)
-      : compacted
-    messages.length = 0
-    for (const msg of finalMessages) {
-      messages.push(msg)
+    const result = await contextManager.compactBuiltinMessages({
+      messages,
+      adapter,
+      model: options.model,
+      target: {
+        kind: 'fit_hard_cap',
+        hardCapTokens: contextManager.getHardCapTokens(),
+        ...(request.force ? { force: true } : {}),
+      },
+      mainRequestFixedTokens: contextManager.estimateStaticPromptTokens(
+        request.systemPrompt,
+        request.tools,
+      ),
+      ...(abortSignal ? { signal: abortSignal } : {}),
+      onBatchApplied: (batch) => {
+        messages.length = 0
+        messages.push(...batch.messages)
+      },
+    })
+    batchesApplied = result.batchesApplied
+    consumedMessages = result.consumedMessages
+    if (result.aborted) {
+      failedReason = 'aborted'
+      return { ok: false, aborted: true, failedReason, batchesApplied, consumedMessages }
     }
-    return { ok: true }
+    if (result.failedReason !== undefined) {
+      failedReason = result.failedReason
+      return { ok: false, aborted: false, failedReason, batchesApplied, consumedMessages }
+    }
+    const finalMessages = options.onAfterCompaction
+      ? options.onAfterCompaction(result.messages)
+      : result.messages
+    messages.length = 0
+    messages.push(...finalMessages)
+    return { ok: true, batchesApplied, consumedMessages }
   } catch (error) {
     if (abortSignal?.aborted === true || (error instanceof Error && error.name === 'AbortError')) {
       failedReason = 'aborted'
-      return { ok: false, aborted: true }
+      return { ok: false, aborted: true, failedReason, batchesApplied, consumedMessages }
     }
     console.error('[query-loop] context compaction failed:', error)
     failedReason = formatError(error)
-    return { ok: false, aborted: false, failedReason }
+    return { ok: false, aborted: false, failedReason, batchesApplied, consumedMessages }
   } finally {
-    // 失败时 afterCount === beforeCount，且带上 failedReason——onCompactionEnd 不得谎报压缩成功
     options.onCompactionEnd?.({
       beforeCount,
       afterCount: messages.length,
+      batchesApplied,
+      consumedMessages,
       durationMs: Date.now() - startedAtMs,
       ...(failedReason !== undefined ? { failedReason } : {}),
     })

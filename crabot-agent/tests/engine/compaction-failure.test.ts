@@ -49,7 +49,7 @@ function textResponse(text: string): ReadonlyArray<StreamChunk> {
 }
 
 /**
- * 5 轮 tool_use（messages 达 11 条 > keepRecentMessages=6），第 5 轮 usage 90 >= 阈值 80，
+ * 5 轮 tool_use（messages 达 11 条 > keepRecentMessages=6），第 5 轮 usage 9000 >= 阈值 8000，
  * 第 6 轮开始前触发压缩。第 6 次 adapter 调用就是压缩摘要调用。
  */
 function historyResponses(): ReadonlyArray<ReadonlyArray<StreamChunk>> {
@@ -59,7 +59,7 @@ function historyResponses(): ReadonlyArray<ReadonlyArray<StreamChunk>> {
     toolUseResponse(small),
     toolUseResponse(small),
     toolUseResponse(small),
-    toolUseResponse({ inputTokens: 90, outputTokens: 10 }),
+    toolUseResponse({ inputTokens: 9_000, outputTokens: 10 }),
   ]
 }
 
@@ -110,7 +110,7 @@ describe('runEngine context compaction failure', () => {
       adapter,
       options: baseOptions({
         tools: [readTool],
-        contextWindowTokens: 100,
+        contextWindowTokens: 10_000,
         onCompactionEnd,
       }),
     })
@@ -125,10 +125,14 @@ describe('runEngine context compaction failure', () => {
     const info = onCompactionEnd.mock.calls[0][0] as {
       beforeCount: number
       afterCount: number
+      batchesApplied: number
+      consumedMessages: number
       failedReason?: string
     }
     expect(info.failedReason).toBeDefined()
     expect(info.afterCount).toBe(info.beforeCount)
+    expect(info.batchesApplied).toBe(0)
+    expect(info.consumedMessages).toBe(0)
   })
 
   it('does not rewrite messages when the run is aborted during compaction', async () => {
@@ -146,7 +150,7 @@ describe('runEngine context compaction failure', () => {
       adapter,
       options: baseOptions({
         tools: [readTool],
-        contextWindowTokens: 100,
+        contextWindowTokens: 10_000,
         abortSignal: controller.signal,
       }),
     })
@@ -215,14 +219,22 @@ describe('runEngine context compaction failure', () => {
     const result = await runEngine({
       prompt: 'hi',
       adapter,
-      options: baseOptions({ tools: [readTool], contextWindowTokens: 100, onCompactionEnd }),
+      options: baseOptions({ tools: [readTool], contextWindowTokens: 10_000, onCompactionEnd }),
     })
 
     expect(result.outcome).toBe('completed')
     expect(result.finalText).toBe('done')
     expect(hasSummaryMessage(result.finalMessages)).toBe(true)
-    const info = onCompactionEnd.mock.calls[0][0] as { failedReason?: string; afterCount: number; beforeCount: number }
+    const info = onCompactionEnd.mock.calls[0][0] as {
+      failedReason?: string
+      afterCount: number
+      beforeCount: number
+      batchesApplied: number
+      consumedMessages: number
+    }
     expect(info.failedReason).toBeUndefined()
     expect(info.afterCount).toBeLessThan(info.beforeCount)
+    expect(info.batchesApplied).toBe(1)
+    expect(info.consumedMessages).toBeGreaterThan(0)
   })
 })

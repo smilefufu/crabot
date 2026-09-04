@@ -1992,12 +1992,15 @@ export class AgentHandler {
           onCompactionEnd: (info) => {
             if (compactionSpanId) {
               const endedAtMs = (compactionStartedAtMs ?? Date.now()) + info.durationMs
-              // 压缩失败时 span 必须写成失败——上下文没压下去却报 "compacted N → N" 是谎报
+              // 失败前可能已有批次成功应用；trace 必须同时保留部分进展与最终失败。
+              const progress =
+                `${info.batchesApplied} batch(es), ${info.consumedMessages} source msg(s), ` +
+                `${info.beforeCount} → ${info.afterCount} msgs`
               traceCallback?.onToolCallEnd(
                 compactionSpanId,
                 info.failedReason === undefined
-                  ? `compacted ${info.beforeCount} → ${info.afterCount} msgs in ${info.durationMs}ms`
-                  : `compaction failed after ${info.durationMs}ms (messages unchanged: ${info.beforeCount})`,
+                  ? `compacted ${progress} in ${info.durationMs}ms`
+                  : `compaction failed after ${info.durationMs}ms (${progress})`,
                 info.failedReason,
                 endedAtMs,
               )

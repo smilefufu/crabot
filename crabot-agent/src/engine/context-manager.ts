@@ -16,6 +16,49 @@ export interface ContextManagerOptions {
   readonly compactSystemPrompt?: string
 }
 
+export interface CompactionState {
+  readonly protectedHead: ReadonlyArray<EngineMessage>
+  readonly previousSummary?: string
+  readonly history: ReadonlyArray<EngineMessage>
+  readonly protectedTail: ReadonlyArray<EngineMessage>
+}
+
+export interface CompactionBatchApplication {
+  readonly state: CompactionState
+  readonly messages: ReadonlyArray<EngineMessage>
+  readonly batchNumber: number
+  readonly consumedMessages: number
+  readonly totalConsumedMessages: number
+}
+
+export interface CompactionProfile {
+  readonly kind: 'builtin' | 'manager'
+  readonly preferredKeepRecent: number
+  readonly mainRequestFixedTokens: number
+  readonly summarySystemPrompt: string
+  readonly summaryMessagePrefix: string
+  readonly onBatchApplied?: (batch: CompactionBatchApplication) => void | Promise<void>
+}
+
+export type CompactionTarget =
+  | { readonly kind: 'preserve_recent' }
+  | {
+      readonly kind: 'fit_hard_cap'
+      readonly hardCapTokens: number
+      /** Provider 已明确报满窗口时，即使本地估算偏低也至少压缩一批。 */
+      readonly force?: boolean
+    }
+
+export interface IncrementalCompactionResult {
+  readonly state: CompactionState
+  readonly messages: ReadonlyArray<EngineMessage>
+  readonly batchesApplied: number
+  readonly consumedMessages: number
+  readonly failedReason?: string
+  readonly aborted?: boolean
+  readonly cause?: unknown
+}
+
 /**
  * shouldCompact 的触发上下文。spec: 2026-07-21-agent-token-efficiency-design.md 改动 3。
  *
@@ -51,9 +94,21 @@ interface CumulativeUsage {
  * 注意：abort 不包在这里——AbortError 原样穿透，让调用方以 aborted 收尾。
  */
 export class CompactionFailedError extends Error {
-  constructor(message: string, cause?: unknown) {
+  readonly batchesApplied: number
+  readonly consumedMessages: number
+
+  constructor(
+    message: string,
+    cause?: unknown,
+    progress: { readonly batchesApplied: number; readonly consumedMessages: number } = {
+      batchesApplied: 0,
+      consumedMessages: 0,
+    },
+  ) {
     super(message)
     this.name = 'CompactionFailedError'
+    this.batchesApplied = progress.batchesApplied
+    this.consumedMessages = progress.consumedMessages
     if (cause !== undefined) {
       ;(this as Error & { cause?: unknown }).cause = cause
     }
@@ -74,14 +129,7 @@ const IMAGE_TOKENS = 1000
  */
 const SUMMARY_TOOL_RESULT_MAX_CHARS = 2000
 
-/**
- * 摘要输入的总预算比例（相对 maxContextTokens）。
- * 依据：摘要调用与主循环共用同一个上下文窗口，而它恰恰发生在上下文已过 80% 阈值时——
- * 逐条截断不设总量上限时，待折叠段的条数仍然无界（几百条 × 2000 字符照样超窗）。
- * 取窗口的一半：留出 compact system prompt（约 1k token）与摘要输出空间，
- * 且不引入新的可配置项（保留条数/触发阈值/prompt 内容一律不动）。
- */
-const SUMMARY_INPUT_BUDGET_RATIO = 0.5
+const SUMMARY_INPUT_BUDGET_RATIO = 0.8
 
 /** findSafeSplitIndex 的哨兵：整段没有任何合法切点（recent 段必然以孤儿 tool_result 打头）。 */
 const NO_SAFE_SPLIT = -1
@@ -147,10 +195,59 @@ const DEFAULT_COMPACT_SYSTEM_PROMPT = `你正在为一个长任务压缩上下�
 - 不要编造原对话中没有的信息；不确定就写成未解决问题或风险。
 - 保持简洁，但不能为了简洁丢掉会改变后续行为的信息。`
 
+const MANAGER_COMPACT_SYSTEM_PROMPT =
+  '你是对话历史压缩助手,负责把对话折叠成简洁但保留关键信息的摘要,供后续对话轮次续接上下文。'
+
+export const BUILTIN_SUMMARY_MESSAGE_PREFIX = '[Earlier conversation summary]\n'
+export const MANAGER_SUMMARY_MESSAGE_PREFIX =
+  '[以下是本次对话更早历史的滚动摘要,不是用户刚发的话]\n\n'
+
+interface CompactionProfileOptions {
+  readonly preferredKeepRecent?: number
+  readonly mainRequestFixedTokens?: number
+  readonly summarySystemPrompt?: string
+  readonly onBatchApplied?: CompactionProfile['onBatchApplied']
+}
+
+export function createBuiltinCompactionProfile(
+  options: CompactionProfileOptions = {},
+): CompactionProfile {
+  return {
+    kind: 'builtin',
+    preferredKeepRecent: options.preferredKeepRecent ?? DEFAULT_KEEP_RECENT,
+    mainRequestFixedTokens: options.mainRequestFixedTokens ?? 0,
+    summarySystemPrompt: options.summarySystemPrompt ?? DEFAULT_COMPACT_SYSTEM_PROMPT,
+    summaryMessagePrefix: BUILTIN_SUMMARY_MESSAGE_PREFIX,
+    ...(options.onBatchApplied ? { onBatchApplied: options.onBatchApplied } : {}),
+  }
+}
+
+export function createManagerCompactionProfile(
+  options: CompactionProfileOptions = {},
+): CompactionProfile {
+  return {
+    kind: 'manager',
+    preferredKeepRecent: options.preferredKeepRecent ?? 20,
+    mainRequestFixedTokens: options.mainRequestFixedTokens ?? 0,
+    summarySystemPrompt: options.summarySystemPrompt ?? MANAGER_COMPACT_SYSTEM_PROMPT,
+    summaryMessagePrefix: MANAGER_SUMMARY_MESSAGE_PREFIX,
+    ...(options.onBatchApplied ? { onBatchApplied: options.onBatchApplied } : {}),
+  }
+}
+
 /** 超长文本按字符上限截断并标注原长度（摘要输入用）。 */
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
   return `${text.slice(0, maxChars)}…[已截断，原长 ${text.length} 字符]`
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
+}
+
+function isContextWindowError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /(?:maximum\s+)?context.{0,24}(?:length|window|limit|too\s+(?:long|large)|exceed)|prompt.{0,24}too\s+(?:long|large)|too\s+many\s+tokens|token\s+limit.{0,16}(?:exceed|reach)/i.test(message)
 }
 
 export class ContextManager {
@@ -217,8 +314,12 @@ export class ContextManager {
     return staticTokens + this.estimateTotalTokens(messages) >= threshold
   }
 
-  /** system prompt + tools schema 的 chars/4 估算（估算回退路径用） */
-  private estimateStaticPromptTokens(
+  getHardCapTokens(): number {
+    return Math.floor(this.maxContextTokens * this.compactThreshold)
+  }
+
+  /** system prompt + tools schema 的 chars/4 估算。 */
+  estimateStaticPromptTokens(
     systemPrompt?: string,
     tools?: ReadonlyArray<ToolDefinition>,
   ): number {
@@ -229,86 +330,212 @@ export class ContextManager {
     return Math.ceil(chars / CHARS_PER_TOKEN)
   }
 
-  compactMessages(messages: ReadonlyArray<EngineMessage>): ReadonlyArray<EngineMessage> {
-    if (messages.length <= this.keepRecentMessages) {
-      return [...messages]
-    }
-
-    const split = this.partitionForCompaction(messages)
-    if (split.kind !== 'ok') {
-      return [...messages]
-    }
-
-    const summaryText = this.buildSummary(split.oldMessages)
-    const summaryMessage = createUserMessage(summaryText)
-
-    return [split.firstMessage, summaryMessage, ...split.recentMessages]
-  }
-
-  /**
-   * LLM 摘要压缩。失败**不再**静默回退到 compactMessages（那条回退对 tool_result
-   * 正文一字不减，等于假压缩）：
-   * - 摘要调用失败 / 摘要为空 / 无合法切点 → 抛 CompactionFailedError，由调用方决定收尾；
-   * - abort → 原样抛出 AbortError（不包装、不吞掉），调用方以 aborted 收尾。
-   *
-   * @param signal 任务级取消信号，透传给摘要调用——否则中止后摘要仍会跑完重试链。
-   */
+  /** 兼容原 builtin 调用形态；实际工作全部委托给统一的增量压缩循环。 */
   async compactWithLLM(
     messages: ReadonlyArray<EngineMessage>,
     adapter: LLMAdapter,
     model: string,
     signal?: AbortSignal,
   ): Promise<ReadonlyArray<EngineMessage>> {
-    if (messages.length <= this.keepRecentMessages) {
-      return [...messages]
+    const result = await this.compactBuiltinMessages({
+      messages,
+      adapter,
+      model,
+      target: { kind: 'preserve_recent' },
+      ...(signal ? { signal } : {}),
+    })
+    if (result.aborted) {
+      throw result.cause ?? new DOMException('Aborted', 'AbortError')
     }
-
-    const split = this.partitionForCompaction(messages)
-    if (split.kind === 'no-safe-split') {
-      throw new CompactionFailedError(
-        `找不到合法的压缩切点：消息序列中 [1, ${messages.length}) 全是 tool_result，` +
-        '任何切点都会让 recent 段以孤儿 tool_result 打头',
-      )
+    if (result.failedReason !== undefined) {
+      throw new CompactionFailedError(result.failedReason, result.cause, result)
     }
-    if (split.kind === 'nothing-to-compact') {
-      return [...messages]
-    }
+    return result.messages
+  }
 
-    const summaryPrompt = this.buildSummaryPrompt(split.oldMessages)
-    const promptMessage = createUserMessage(summaryPrompt)
+  async compactBuiltinMessages(args: {
+    readonly messages: ReadonlyArray<EngineMessage>
+    readonly adapter: LLMAdapter
+    readonly model: string
+    readonly target: CompactionTarget
+    readonly mainRequestFixedTokens?: number
+    readonly signal?: AbortSignal
+    readonly onBatchApplied?: CompactionProfile['onBatchApplied']
+  }): Promise<IncrementalCompactionResult> {
+    const state = this.projectBuiltinState(args.messages)
+    const result = await this.compactIncrementally({
+      state,
+      profile: createBuiltinCompactionProfile({
+        preferredKeepRecent: this.keepRecentMessages,
+        mainRequestFixedTokens: args.mainRequestFixedTokens,
+        summarySystemPrompt: this.compactSystemPrompt,
+        onBatchApplied: args.onBatchApplied,
+      }),
+      target: args.target,
+      adapter: args.adapter,
+      model: args.model,
+      ...(args.signal ? { signal: args.signal } : {}),
+    })
+    return result.batchesApplied === 0
+      ? { ...result, messages: [...args.messages] }
+      : result
+  }
 
-    let response
-    try {
-      response = await callNonStreaming(adapter, {
-        messages: [promptMessage],
-        systemPrompt: this.compactSystemPrompt,
-        tools: [],
-        model,
-        ...(signal !== undefined ? { signal } : {}),
-      })
-    } catch (error) {
-      // abort 穿透：任务已在中止路上，不再改写上下文
-      if (signal?.aborted === true || (error instanceof Error && error.name === 'AbortError')) {
-        throw error
+  async compactIncrementally(args: {
+    readonly state: CompactionState
+    readonly profile: CompactionProfile
+    readonly target: CompactionTarget
+    readonly adapter: LLMAdapter
+    readonly model: string
+    readonly signal?: AbortSignal
+  }): Promise<IncrementalCompactionResult> {
+    const { profile, target, adapter, model, signal } = args
+    let state = this.copyState(args.state)
+    let messages = this.materializeCompactionState(state, profile)
+    let batchesApplied = 0
+    let consumedMessages = 0
+    let forcedBatchPending = target.kind === 'fit_hard_cap' && target.force === true
+
+    const finish = (
+      extra: Pick<IncrementalCompactionResult, 'failedReason' | 'aborted' | 'cause'> = {},
+    ): IncrementalCompactionResult => ({
+      state,
+      messages,
+      batchesApplied,
+      consumedMessages,
+      ...extra,
+    })
+
+    while (true) {
+      if (signal?.aborted) {
+        return finish({ aborted: true, cause: new DOMException('Aborted', 'AbortError') })
       }
-      throw new CompactionFailedError(`摘要 LLM 调用失败: ${String(error)}`, error)
+      if (target.kind === 'preserve_recent') {
+        if (state.history.length <= profile.preferredKeepRecent) return finish()
+      } else if (!forcedBatchPending && this.estimateCompactionStateTokens(state, profile) <= target.hardCapTokens) {
+        return finish()
+      }
+
+      const maxBatchMessages = this.maxConsumablePrefix(state.history, profile.preferredKeepRecent)
+      if (maxBatchMessages <= 0) {
+        if (
+          target.kind === 'preserve_recent'
+          && state.history.length > 0
+          && !this.isToolResultMessage(state.history[0])
+        ) {
+          return finish()
+        }
+        return finish({
+          failedReason: target.kind === 'fit_hard_cap'
+            && (state.history.length === 0 || !this.isToolResultMessage(state.history[0]))
+            ? `主请求固定开销、受保护内容与最小安全消息组仍超过 hardCap ${target.hardCapTokens} token，历史压缩无法解决`
+            : '找不到合法的压缩切点：必须保留至少一个安全消息组，且 remaining history 不能以孤儿 tool_result 开头',
+        })
+      }
+
+      let candidateLimit = Math.floor(this.maxContextTokens * SUMMARY_INPUT_BUDGET_RATIO)
+      let candidateMaxMessages = maxBatchMessages
+      let retryReason: string | undefined
+
+      while (true) {
+        const candidate = this.selectLargestBatch(
+          state,
+          profile,
+          candidateMaxMessages,
+          candidateLimit,
+        )
+        if (!candidate) {
+          return finish({
+            failedReason: retryReason
+              ? `${retryReason}；缩至最小安全消息组后仍无法继续`
+              : `最小安全消息组的完整摘要请求仍超过输入上限 ${candidateLimit} token`,
+          })
+        }
+
+        let response
+        try {
+          response = await callNonStreaming(adapter, {
+            messages: [createUserMessage(candidate.prompt)],
+            systemPrompt: profile.summarySystemPrompt,
+            tools: [],
+            model,
+            ...(signal ? { signal } : {}),
+          })
+        } catch (error) {
+          if (signal?.aborted || isAbortError(error)) {
+            return finish({ aborted: true, cause: error })
+          }
+          if (!isContextWindowError(error)) {
+            return finish({ failedReason: `摘要 LLM 调用失败: ${String(error)}`, cause: error })
+          }
+          retryReason = `摘要请求超过 Provider 上下文窗口: ${String(error)}`
+          const shrunk = this.shrinkCandidate(state, profile, candidate)
+          candidateLimit = shrunk.inputLimit
+          candidateMaxMessages = shrunk.maxMessages
+          continue
+        }
+
+        if (response.stopReason === 'max_tokens') {
+          retryReason = '摘要 LLM 输出因 max_tokens 截断'
+          const shrunk = this.shrinkCandidate(state, profile, candidate)
+          candidateLimit = shrunk.inputLimit
+          candidateMaxMessages = shrunk.maxMessages
+          continue
+        }
+
+        const summary = response.content
+          .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+          .map((block) => block.text)
+          .join('')
+        if (summary.trim().length === 0) {
+          return finish({ failedReason: '摘要 LLM 返回空摘要' })
+        }
+
+        const nextState: CompactionState = {
+          protectedHead: state.protectedHead,
+          previousSummary: summary,
+          history: state.history.slice(candidate.messageCount),
+          protectedTail: state.protectedTail,
+        }
+        const beforeTokens = this.estimateCompactionStateTokens(state, profile)
+        const afterTokens = this.estimateCompactionStateTokens(nextState, profile)
+        if (afterTokens >= beforeTokens) {
+          retryReason = `压缩后 token 未下降（before=${beforeTokens}, after=${afterTokens}）`
+          const shrunk = this.shrinkCandidate(state, profile, candidate)
+          candidateLimit = shrunk.inputLimit
+          candidateMaxMessages = shrunk.maxMessages
+          continue
+        }
+
+        const nextMessages = this.materializeCompactionState(nextState, profile)
+        try {
+          await profile.onBatchApplied?.({
+            state: nextState,
+            messages: nextMessages,
+            batchNumber: batchesApplied + 1,
+            consumedMessages: candidate.messageCount,
+            totalConsumedMessages: consumedMessages + candidate.messageCount,
+          })
+        } catch (error) {
+          if (signal?.aborted || isAbortError(error)) {
+            return finish({ aborted: true, cause: error })
+          }
+          return finish({ failedReason: `压缩批次应用失败: ${String(error)}`, cause: error })
+        }
+
+        state = nextState
+        messages = nextMessages
+        batchesApplied++
+        consumedMessages += candidate.messageCount
+        forcedBatchPending = false
+        break
+      }
     }
+  }
 
-    const summaryText = response.content
-      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-      .map((b) => b.text)
-      .join('')
-
-    if (summaryText.trim().length === 0) {
-      // 空摘要 = 被折叠的一整段凭空消失，同样是"假装压缩成功"
-      throw new CompactionFailedError('摘要 LLM 返回空摘要')
-    }
-
-    const summaryMessage = createUserMessage(
-      `[Earlier conversation summary]\n${summaryText}`
-    )
-
-    return [split.firstMessage, summaryMessage, ...split.recentMessages]
+  estimateCompactionStateTokens(state: CompactionState, profile: CompactionProfile): number {
+    return profile.mainRequestFixedTokens
+      + this.estimateTotalTokens(this.materializeCompactionState(state, profile))
   }
 
   updateFromUsage(usage: { readonly inputTokens: number; readonly outputTokens: number }): void {
@@ -322,72 +549,126 @@ export class ContextManager {
     return this.cumulativeUsage
   }
 
-  /**
-   * 切出三段：首条 user message（钉住不压，含 task_origin 等任务级 immortal facts，
-   * 被摘要 LLM 丢字段会导致回复发错 channel）、待压缩段、recent 段。
-   *
-   * - `nothing-to-compact`：首条之后没有更多 old 消息（对话本来就短），正常 no-op；
-   * - `no-safe-split`：存在可折叠内容，但整段找不到合法切点——**故障**，不再静默 no-op。
-   */
-  private partitionForCompaction(messages: ReadonlyArray<EngineMessage>):
-    | {
-        kind: 'ok'
-        firstMessage: EngineMessage
-        oldMessages: ReadonlyArray<EngineMessage>
-        recentMessages: ReadonlyArray<EngineMessage>
-      }
-    | { kind: 'nothing-to-compact' }
-    | { kind: 'no-safe-split' } {
-    const splitIndex = this.findSafeSplitIndex(messages)
-    if (splitIndex === NO_SAFE_SPLIT) {
-      return { kind: 'no-safe-split' }
-    }
-    if (splitIndex <= 1) {
-      return { kind: 'nothing-to-compact' }
-    }
+  private copyState(state: CompactionState): CompactionState {
     return {
-      kind: 'ok',
-      firstMessage: messages[0],
-      oldMessages: messages.slice(1, splitIndex),
-      recentMessages: messages.slice(splitIndex),
+      protectedHead: [...state.protectedHead],
+      ...(state.previousSummary !== undefined ? { previousSummary: state.previousSummary } : {}),
+      history: [...state.history],
+      protectedTail: [...state.protectedTail],
     }
   }
 
-  /**
-   * 找到一个安全的 compaction 切割点：保证 recent 段第一条消息不是孤儿 tool_result
-   * （其匹配的 tool_use 在被压缩段，会触发 LLM API 400）。
-   *
-   * 默认切点 = messages.length - keepRecentMessages。如果该位置是 tool_result，
-   * 向前回退把对应的 assistant_with_tool_use 一起拉进 recent。engine 自造消息时
-   * assistant 与 tool_result 严格相邻，最多回退一步。
-   *
-   * 但 initialMessages 是外部来源（resume checkpoint / session 树回灌），可能出现
-   * 连续 tool_result——旧实现会一路回退到 <=1，让压缩静默变 no-op。因此回退触底后
-   * 改为**向后**找第一个非 tool_result 位置（recent 段变短，但配对安全）；
-   * 整段都没有合法切点时返回 NO_SAFE_SPLIT，由调用方明确报错，不静默吞掉。
-   */
-  private findSafeSplitIndex(messages: ReadonlyArray<EngineMessage>): number {
-    const defaultIndex = messages.length - this.keepRecentMessages
-    if (defaultIndex <= 1) {
-      // 对话本来就短：无可折叠内容，交由 partitionForCompaction 判 nothing-to-compact
-      return defaultIndex
-    }
-
-    let splitIndex = defaultIndex
-    while (splitIndex > 1 && this.isToolResultMessage(messages[splitIndex])) {
-      splitIndex--
-    }
-    if (splitIndex > 1 && !this.isToolResultMessage(messages[splitIndex])) {
-      return splitIndex
-    }
-
-    // 回退触底（连续 tool_result）：向后找第一个合法切点
-    for (let forward = defaultIndex + 1; forward < messages.length; forward++) {
-      if (!this.isToolResultMessage(messages[forward])) {
-        return forward
+  private projectBuiltinState(messages: ReadonlyArray<EngineMessage>): CompactionState {
+    const protectedHead = messages.slice(0, 1)
+    const possibleSummary = messages[1]
+    if (
+      possibleSummary?.role === 'user'
+      && !('toolResults' in possibleSummary)
+      && typeof possibleSummary.content === 'string'
+      && possibleSummary.content.startsWith(BUILTIN_SUMMARY_MESSAGE_PREFIX)
+    ) {
+      return {
+        protectedHead,
+        previousSummary: possibleSummary.content.slice(BUILTIN_SUMMARY_MESSAGE_PREFIX.length),
+        history: messages.slice(2),
+        protectedTail: [],
       }
     }
+    return { protectedHead, history: messages.slice(1), protectedTail: [] }
+  }
+
+  private materializeCompactionState(
+    state: CompactionState,
+    profile: CompactionProfile,
+  ): ReadonlyArray<EngineMessage> {
+    return [
+      ...state.protectedHead,
+      ...(state.previousSummary === undefined
+        ? []
+        : [createUserMessage(profile.summaryMessagePrefix + state.previousSummary)]),
+      ...state.history,
+      ...state.protectedTail,
+    ]
+  }
+
+  private maxConsumablePrefix(
+    history: ReadonlyArray<EngineMessage>,
+    preferredKeepRecent: number,
+  ): number {
+    const preferred = history.length - preferredKeepRecent
+    if (preferred > 0) {
+      for (let split = preferred; split > 0; split--) {
+        if (this.isSafeSplit(history, split)) return split
+      }
+      for (let split = preferred + 1; split < history.length; split++) {
+        if (this.isSafeSplit(history, split)) return split
+      }
+      return NO_SAFE_SPLIT
+    }
+
+    // hardCap / Provider 强制恢复允许少保留于 preferred 数量，但至少留一个安全消息组。
+    for (let split = history.length - 1; split > 0; split--) {
+      if (this.isSafeSplit(history, split)) return split
+    }
     return NO_SAFE_SPLIT
+  }
+
+  private isSafeSplit(history: ReadonlyArray<EngineMessage>, split: number): boolean {
+    return split > 0
+      && split < history.length
+      && !this.isToolResultMessage(history[split])
+  }
+
+  private selectLargestBatch(
+    state: CompactionState,
+    profile: CompactionProfile,
+    maxMessages: number,
+    inputLimit: number,
+  ): { readonly messageCount: number; readonly prompt: string; readonly inputTokens: number } | undefined {
+    const safeCounts: number[] = []
+    for (let count = 1; count <= maxMessages; count++) {
+      if (this.isSafeSplit(state.history, count)) safeCounts.push(count)
+    }
+    let low = 0
+    let high = safeCounts.length - 1
+    let selected: { messageCount: number; prompt: string; inputTokens: number } | undefined
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2)
+      const messageCount = safeCounts[middle]
+      const prompt = this.buildSummaryPrompt(
+        state.previousSummary,
+        state.history.slice(0, messageCount),
+        profile,
+      )
+      const inputTokens = this.estimateSummaryRequestTokens(prompt, profile)
+      if (inputTokens <= inputLimit) {
+        selected = { messageCount, prompt, inputTokens }
+        low = middle + 1
+      } else {
+        high = middle - 1
+      }
+    }
+    return selected
+  }
+
+  private shrinkCandidate(
+    state: CompactionState,
+    profile: CompactionProfile,
+    candidate: { readonly messageCount: number; readonly inputTokens: number },
+  ): { readonly maxMessages: number; readonly inputLimit: number } {
+    const fixedTokens = this.estimateSummaryRequestTokens(
+      this.buildSummaryPrompt(state.previousSummary, [], profile),
+      profile,
+    )
+    return {
+      maxMessages: candidate.messageCount - 1,
+      inputLimit: fixedTokens + Math.max(1, Math.floor((candidate.inputTokens - fixedTokens) / 2)),
+    }
+  }
+
+  private estimateSummaryRequestTokens(prompt: string, profile: CompactionProfile): number {
+    return this.estimateStaticPromptTokens(profile.summarySystemPrompt, [])
+      + this.estimateMessageTokens(createUserMessage(prompt))
   }
 
   private isToolResultMessage(msg: EngineMessage): boolean {
@@ -417,86 +698,51 @@ export class ContextManager {
     return chars
   }
 
-  private buildSummary(messages: ReadonlyArray<EngineMessage>): string {
-    const parts: string[] = []
-    for (const msg of messages) {
-      const role = msg.role === 'assistant' ? 'Assistant' : 'User'
-      const text = this.extractText(msg)
-      if (text) {
-        parts.push(`${role}: ${text}`)
-      }
+  private buildSummaryPrompt(
+    previousSummary: string | undefined,
+    messages: ReadonlyArray<EngineMessage>,
+    profile: CompactionProfile,
+  ): string {
+    if (profile.kind === 'manager') {
+      const parts: string[] = []
+      if (previousSummary !== undefined) parts.push(`此前摘要:\n${previousSummary}`)
+      parts.push(`待折叠的新增对话:\n${messages.map((message) => this.renderManagerMessage(message)).join('\n\n')}`)
+      parts.push('请把以上内容(含此前摘要,若有)合并为一段更新后的摘要,只输出摘要正文本身,不要加任何前后缀说明、时间戳或计数。')
+      return parts.join('\n\n')
     }
 
-    const conversationSummary = parts.join('\n')
-    return `[Summary of earlier conversation]\n${conversationSummary}`
-  }
-
-  private buildSummaryPrompt(messages: ReadonlyArray<EngineMessage>): string {
     const parts: string[] = []
     const toolNames = new Set<string>()
-
-    for (const msg of messages) {
-      if (msg.role === 'assistant') {
-        const assistantMsg = msg as EngineAssistantMessage
-        for (const block of assistantMsg.content) {
-          if (block.type === 'tool_use') {
-            toolNames.add(block.name)
-          }
+    for (const message of messages) {
+      if (message.role === 'assistant') {
+        for (const block of message.content) {
+          if (block.type === 'tool_use') toolNames.add(block.name)
         }
       }
-
-      const role = msg.role === 'assistant' ? 'Assistant' : 'User'
-      const text = this.extractText(msg, SUMMARY_TOOL_RESULT_MAX_CHARS)
-      if (text) {
-        parts.push(`${role}: ${text}`)
-      }
+      const role = message.role === 'assistant' ? 'Assistant' : 'User'
+      const text = this.extractText(message, SUMMARY_TOOL_RESULT_MAX_CHARS)
+      if (text) parts.push(`${role}: ${text}`)
     }
 
-    const lines: string[] = [
-      '以下是需要压缩的历史上下文。请生成后续继续执行任务所需的结构化摘要：',
-      '',
-      ...this.applySummaryInputBudget(parts),
-    ]
-
-    if (toolNames.size > 0) {
-      lines.push('')
-      lines.push(`使用过的工具: ${[...toolNames].join(', ')}`)
+    const lines = ['以下是需要压缩的历史上下文。请生成后续继续执行任务所需的结构化摘要：']
+    if (previousSummary !== undefined) {
+      lines.push('', `此前摘要:\n${previousSummary}`)
     }
-
+    lines.push('', ...parts)
+    if (toolNames.size > 0) lines.push('', `使用过的工具: ${[...toolNames].join(', ')}`)
     return lines.join('\n')
   }
 
-  /**
-   * 摘要输入的总量上界：逐条截断之后条数仍然无界，所以再按总字符预算从**最旧**开始丢弃。
-   * 丢最旧是安全的——首条 user message（task_origin / 原始请求）本就被钉住不进摘要输入。
-   */
-  private applySummaryInputBudget(parts: ReadonlyArray<string>): ReadonlyArray<string> {
-    const budgetChars = Math.floor(
-      this.maxContextTokens * SUMMARY_INPUT_BUDGET_RATIO * CHARS_PER_TOKEN,
-    )
-    let used = 0
-    let firstKept = parts.length
-    for (let i = parts.length - 1; i >= 0; i--) {
-      const cost = parts[i].length + 1  // +1: join 的换行
-      if (used + cost > budgetChars) break
-      used += cost
-      firstKept = i
+  private renderManagerMessage(message: EngineMessage): string {
+    if (message.role === 'assistant') {
+      return `assistant: ${this.extractText(message)}`
     }
-    if (firstKept === 0) {
-      return parts
+    if ('toolResults' in message) {
+      return message.toolResults
+        .map((result) => `tool_result(${result.tool_use_id}): ${result.content}`)
+        .join('\n')
     }
-    if (firstKept === parts.length) {
-      // 连最后一条都塞不下：保留它的头部，绝不把摘要输入清空
-      firstKept = parts.length - 1
-      return [
-        `[已省略更早的 ${firstKept} 条消息：摘要输入超出 ${budgetChars} 字符预算]`,
-        truncate(parts[firstKept], budgetChars),
-      ]
-    }
-    return [
-      `[已省略更早的 ${firstKept} 条消息：摘要输入超出 ${budgetChars} 字符预算]`,
-      ...parts.slice(firstKept),
-    ]
+    return `user: ${this.extractText(message)}`
   }
 
   /**

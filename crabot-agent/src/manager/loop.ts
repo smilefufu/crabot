@@ -5,10 +5,11 @@
  * (ManagerSessionStore)。`wakeUp` 是唯一入口——被唤醒→跑一个 episode(一次完整的
  * runEngine 往返)→回睡,同一 loop 内串行(AsyncMutex),不同 loop 相互独立、可并行。
  *
- * ## 压缩自管(disableCompaction:true)
+ * ## 压缩调度自管(disableCompaction:true)
  *
- * manager 把 engine 内建的两条压缩路径都关掉(见 compaction.ts 文件头),自己在唤醒边界
- * 接管:load → decideCompaction → 需要则 foldIntoSummary 并落盘 → 把
+ * manager 关闭 query-loop 的 turn 内自动调度，自己在唤醒边界执行缓存策略；实际批次规划、
+ * 摘要调用、缩批与安全切点统一委托给 Engine ContextManager。流程是
+ * load → decideCompaction → 需要则调用共享压缩器并逐批落盘 → 把
  * [摘要块(如有)] + [尾巴] + [本次事件] 拼成 initialMessages 喂 runEngine。折叠只发生在
  * 唤醒边界,burst(同一 episode 内的多轮 turn)绝不压缩。
  *
@@ -49,7 +50,18 @@ import type { HumanMessageQueueLike } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex'
 import { formatChannelMessageLine } from '../prompt-manager.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
-import { decideCompaction, foldIntoSummary, managerPolicyForWindow, type CompactionPolicy, type CompactionDecision } from './compaction.js'
+import { decideCompaction, managerPolicyForWindow, type CompactionPolicy, type CompactionDecision } from './compaction.js'
+import {
+  CompactionFailedError,
+  ContextManager,
+  MANAGER_SUMMARY_MESSAGE_PREFIX as SUMMARY_MESSAGE_PREFIX,
+  createManagerCompactionProfile,
+  type CompactionProfile,
+  type CompactionState,
+  type CompactionTarget,
+  type IncrementalCompactionResult,
+} from '../engine/context-manager.js'
+import { DEFAULT_MAX_CONTEXT_TOKENS } from '../engine/query-loop.js'
 import { collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, toImageBlock, type ManagerImageRef } from './image-vision.js'
 import { fetchRemoteImage } from '../agent/media-resolver.js'
 import type { ImageBlock } from '../engine/index.js'
@@ -263,8 +275,16 @@ export interface ManagerLoopDeps {
   readonly onAdminChatWakeConsumed?: (requestIds: string[]) => void
 }
 
-/** 滚动摘要块在 initialMessages 里的前缀标记,避免 LLM 把它误当成用户刚发的话。 */
-const SUMMARY_MESSAGE_PREFIX = '[以下是本次对话更早历史的滚动摘要,不是用户刚发的话]\n\n'
+interface ManagerCompactionRequest {
+  readonly state: ManagerSessionState
+  readonly decision: Extract<CompactionDecision, { kind: 'fold_at_wake' | 'force_hot' }>
+  readonly contextManager: ContextManager
+  readonly profile: CompactionProfile
+  readonly target: CompactionTarget
+  readonly adapter: LLMAdapter
+  readonly model: string
+  readonly protectedTail: ReadonlyArray<EngineMessage>
+}
 
 export class ManagerLoop {
   private readonly deps: ManagerLoopDeps
@@ -752,6 +772,27 @@ export class ManagerLoop {
     // hardCap 按模型窗口推导（spec 2026-08-29），fold/keepRecent/cacheTtl 保持原策略。
     const contextWindowTokens = this.deps.contextWindowTokens?.()
     const policy = managerPolicyForWindow(this.deps.policy, contextWindowTokens)
+    const contextManager = new ContextManager({
+      maxContextTokens: contextWindowTokens ?? DEFAULT_MAX_CONTEXT_TOKENS,
+    })
+    const effectiveWake = this.effectiveWakeForCurrentEpisode()
+    const currentInputEnvelopes = [
+      ...carriedEnvelopes.filter((item) => !isHumanWake(item.wake) || isEmptyHumanWake(item.wake)),
+      ...(envelope && (!isHumanWake(envelope.wake) || isEmptyHumanWake(envelope.wake)) ? [envelope] : []),
+    ]
+    const currentTailMessages: EngineMessage[] = [
+      ...carriedTexts.map((text) => createUserMessage(text)),
+      ...(eventText === undefined ? [] : [createUserMessage(eventText)]),
+    ]
+    // 非人类 current inputs 在压缩前不进 Manager store；把它们计作主请求固定开销，
+    // 既能正确判断 hardCap，又不会误放进可折叠 history。
+    const compactionProfile = createManagerCompactionProfile({
+      preferredKeepRecent: policy.keepRecent,
+      mainRequestFixedTokens: contextManager.estimateStaticPromptTokens(
+        this.managerSystemPrompt(effectiveWake),
+        this.deps.toolFace(effectiveWake),
+      ) + contextManager.estimateTotalTokens(currentTailMessages),
+    })
 
     let state = initialState
     let historyState = withoutProtectedTail(state, committedHumanMessages.length)
@@ -762,20 +803,28 @@ export class ManagerLoop {
       nowMs,
       policy,
       estimateTokens: this.deps.estimateTokens,
+      mainRequestTokens: contextManager.estimateCompactionStateTokens(
+        toManagerCompactionState(historyState, committedHumanMessages),
+        compactionProfile,
+      ),
     })
     if (wakeDecision.kind !== 'none') {
-      state = await this.applyFoldWithSpan(episodeId, historyState, wakeDecision, adapter, model, committedHumanMessages)
+      state = await this.applyFoldWithSpan({
+        episodeId,
+        state: historyState,
+        decision: wakeDecision,
+        contextManager,
+        profile: compactionProfile,
+        target: wakeDecision.kind === 'fold_at_wake'
+          ? { kind: 'preserve_recent' }
+          : { kind: 'fit_hard_cap', hardCapTokens: policy.hardCapTokens },
+        adapter,
+        model,
+        protectedTail: committedHumanMessages,
+      })
       historyState = withoutProtectedTail(state, committedHumanMessages.length)
     }
 
-    const currentInputEnvelopes = [
-      ...carriedEnvelopes.filter((item) => !isHumanWake(item.wake) || isEmptyHumanWake(item.wake)),
-      ...(envelope && (!isHumanWake(envelope.wake) || isEmptyHumanWake(envelope.wake)) ? [envelope] : []),
-    ]
-    const currentTailMessages: EngineMessage[] = [
-      ...carriedTexts.map((text) => createUserMessage(text)),
-      ...(eventText === undefined ? [] : [createUserMessage(eventText)]),
-    ]
     // 入站图片视觉注入:窗口内 human 消息引用的图片读盘转 ImageBlock(VLM 模型才有)。
     // episode 内与 adapter/model 同点解析一次;文件不可读的引用在变换里改写文本标记。
     // 无图可注入时走同步路径——await 会多让出一个 microtask,打乱既有
@@ -823,56 +872,48 @@ export class ManagerLoop {
     if (isContextOverflow(attempt.result)) {
       // Only pre-existing history may be folded. The current initial wake, carried
       // envelopes and mid-episode supplements are a protected tail (§14.4).
-      const forceDecision = forceHotFold(historyState, policy, this.deps.estimateTokens, nowMs)
-      if (forceDecision.kind !== 'none') {
-        usedForceHotRetry = true
-        state = await this.applyFoldWithSpan(
-          episodeId,
-          historyState,
-          forceDecision,
-          adapter,
-          model,
-          committedHumanMessages,
-        )
-        historyState = withoutProtectedTail(state, committedHumanMessages.length)
-        // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
-        this.mailbox.drainEnvelopes()
-        this.mailbox.clearContextAdmissions()
-        const retryCurrentEnvelopes = currentInputEnvelopes.filter((item) => this.shouldReplayInAttempt(item))
-        const retryInjectedEnvelopes = (this.currentEpisodeInjected ?? [])
-          .filter((item) => this.shouldReplayInAttempt(item))
-        const retryBaseMessages: EngineMessage[] = [
-          ...state.recent,
-          ...retryCurrentEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
-          ...retryInjectedEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
-        ]
-        // 重试重建了 current/injected 消息(新 id),注入 originals 必须换成这一份
-        const retryInjected = injectable
-          ? await injectInboundImages(retryBaseMessages, { supportsVision, imageRefs })
-          : undefined
-        const retryTailMessages: EngineMessage[] = retryInjected?.messages ?? retryBaseMessages
-        const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model, {
-          thinking,
-          contextWindowTokens,
-          contextEnvelopes: [...retryCurrentEnvelopes, ...retryInjectedEnvelopes],
-        })
-        originalsById = retryInjected?.originals ?? new Map()
-        totalTurnsUsed += retryAttempt.result.totalTurns
-        repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages)
-        successfulSendMessageTargets = [
-          ...successfulSendMessageTargets,
-          ...successfulSendMessageTargetsOf(retryAttempt.result.finalMessages.slice(retryAttempt.initialMessageCount)),
-        ]
-        attempt = retryAttempt
-      }
-      // forceDecision.kind === 'none':无法进一步压缩,直接接受第一次尝试的结果,不重试
-      // (大概率仍是 outcome='completed' 空 finalText,不强行判 failed——engine 本身没有报错,
-      // 只是这条上下文天生就大)。触发场景有两类:①历史短到连一条都折不动(< keepRecent);
-      // ②历史恰好等于 keepRecent 条(decideCompaction 的 force_hot 分支已对 foldMessages
-      // 为空这一情形短路返回 none,见 compaction.ts)——这两类都意味着"折叠"这条缓解手段已经
-      // 榨不出任何进展,再重试一次只会拿同样大小的上下文重新问一遍 LLM,注定再次超限,纯烧钱,
-      // 因此这里不为它们单独加重试:维持"forceDecision.kind==='none' 就不重试"这一既有分支
-      // 覆盖两类触发场景,不需要额外判断。
+      usedForceHotRetry = true
+      state = await this.applyFoldWithSpan({
+        episodeId,
+        state: historyState,
+        decision: { kind: 'force_hot' },
+        contextManager,
+        profile: compactionProfile,
+        target: { kind: 'fit_hard_cap', hardCapTokens: policy.hardCapTokens, force: true },
+        adapter,
+        model,
+        protectedTail: committedHumanMessages,
+      })
+      historyState = withoutProtectedTail(state, committedHumanMessages.length)
+      // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
+      this.mailbox.drainEnvelopes()
+      this.mailbox.clearContextAdmissions()
+      const retryCurrentEnvelopes = currentInputEnvelopes.filter((item) => this.shouldReplayInAttempt(item))
+      const retryInjectedEnvelopes = (this.currentEpisodeInjected ?? [])
+        .filter((item) => this.shouldReplayInAttempt(item))
+      const retryBaseMessages: EngineMessage[] = [
+        ...state.recent,
+        ...retryCurrentEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
+        ...retryInjectedEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
+      ]
+      // 重试重建了 current/injected 消息(新 id),注入 originals 必须换成这一份
+      const retryInjected = injectable
+        ? await injectInboundImages(retryBaseMessages, { supportsVision, imageRefs })
+        : undefined
+      const retryTailMessages: EngineMessage[] = retryInjected?.messages ?? retryBaseMessages
+      const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model, {
+        thinking,
+        contextWindowTokens,
+        contextEnvelopes: [...retryCurrentEnvelopes, ...retryInjectedEnvelopes],
+      })
+      originalsById = retryInjected?.originals ?? new Map()
+      totalTurnsUsed += retryAttempt.result.totalTurns
+      repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages)
+      successfulSendMessageTargets = [
+        ...successfulSendMessageTargets,
+        ...successfulSendMessageTargetsOf(retryAttempt.result.finalMessages.slice(retryAttempt.initialMessageCount)),
+      ]
+      attempt = retryAttempt
     }
 
     // end_turn / stop_sequence 会在 runEngine 内经 endTurnGate 得到复核；max_turns 及
@@ -992,11 +1033,8 @@ export class ManagerLoop {
       // 之后——load 拿到的是最新 state,未被 drain 消费的追加不会被后续 save 覆盖。
       await this.commitPendingHumanInputs(true, persistedFinalMessages)
     } else {
-      // 放弃 episode:已落盘的折叠不回滚(见文件头)——若本次途中发生过 force_hot 折叠
-      // (上面 max_tokens 兜底重试路径),carriedTexts/eventText 有可能已经作为
-      // tailMessages 的一部分被折进了 rollingSummary(见 forceHotFold),这里仍会原样
-      // 重投它们,导致同一份内容同时以"摘要"与"原始文本"两种形式留存——已知取舍,不在此修复。
-      //
+      // 放弃 episode:已落盘的折叠不回滚(见文件头)；本 episode current inputs 从未进入
+      // 可折叠 history，因此仍按原始 envelope 重投，不会与 rollingSummary 重复。
       // 把尚未提交的人类输入和非人类输入按原始到达顺序推回邮箱。已提交人类输入已在
       // `state.recent`，不能再以 wake 形式重放。
       // episode 期间经 enqueueDuringEpisode 注入的内容(currentEpisodeInjected,顺序即
@@ -1351,19 +1389,15 @@ export class ManagerLoop {
     }
   }
 
-  /** applyFold + context_assembly span：只记录计数/耗时/结果，不存摘要全文（§6.5）。 */
+  /** 共享压缩器 + context_assembly span：只记录计数/耗时/结果，不存摘要全文（§6.5）。 */
   private async applyFoldWithSpan(
-    episodeId: string,
-    state: ManagerSessionState,
-    decision: Extract<CompactionDecision, { kind: 'fold_at_wake' | 'force_hot' }>,
-    adapter: LLMAdapter,
-    model: string,
-    protectedTail: ReadonlyArray<EngineMessage> = [],
+    args: ManagerCompactionRequest & { readonly episodeId: string },
   ): Promise<ManagerSessionState> {
+    const { episodeId, decision } = args
     const writer = this.deps.traceWriter
     const startedAt = new Date().toISOString()
     try {
-      const next = await this.applyFold(state, decision, adapter, model, protectedTail)
+      const applied = await this.applyFold(args)
       if (writer && this.currentTraceId === episodeId) {
         const endedAt = new Date().toISOString()
         writer.appendSpan(episodeId, {
@@ -1374,13 +1408,20 @@ export class ManagerLoop {
           ended_at: endedAt,
           duration_ms: new Date(endedAt).getTime() - new Date(startedAt).getTime(),
           status: 'completed',
-          details: { kind: decision.kind, folded: decision.foldMessages.length, keep: decision.keep.length },
+          details: {
+            kind: decision.kind,
+            batches: applied.result.batchesApplied,
+            folded: applied.result.consumedMessages,
+            keep: applied.result.state.history.length,
+          },
         })
       }
-      return next
+      return applied.state
     } catch (error) {
       if (writer && this.currentTraceId === episodeId) {
         const endedAt = new Date().toISOString()
+        const batches = error instanceof CompactionFailedError ? error.batchesApplied : 0
+        const folded = error instanceof CompactionFailedError ? error.consumedMessages : 0
         writer.appendSpan(episodeId, {
           span_id: `fold-${episodeId}-${this.attemptCounter}-${decision.kind}`,
           parent_span_id: `root-${episodeId}`,
@@ -1389,45 +1430,73 @@ export class ManagerLoop {
           ended_at: endedAt,
           duration_ms: new Date(endedAt).getTime() - new Date(startedAt).getTime(),
           status: 'failed',
-          details: { kind: decision.kind, folded: decision.foldMessages.length, keep: decision.keep.length, error: error instanceof Error ? error.message : String(error) },
+          details: {
+            kind: decision.kind,
+            batches,
+            folded,
+            error: error instanceof Error ? error.message : String(error),
+          },
         })
       }
       throw error
     }
   }
 
-  /** 按 decision 折叠并立即落盘(唤醒边界折叠 / 强制 force_hot 折叠共用同一落盘逻辑)。
-   *  adapter/model 由调用方(runEpisodeBody)按本次 episode 的快照传入,不在此处重新解析。 */
+  /** 每个成功批次立即原子落盘；后续批次失败时，已保存的进展不回滚。 */
   private async applyFold(
-    state: ManagerSessionState,
-    decision: Extract<CompactionDecision, { kind: 'fold_at_wake' | 'force_hot' }>,
-    adapter: LLMAdapter,
-    model: string,
-    protectedTail: ReadonlyArray<EngineMessage> = [],
-  ): Promise<ManagerSessionState> {
-    const newSummary = await foldIntoSummary({
-      adapter,
-      model,
-      prevSummary: state.rollingSummary,
-      foldMessages: decision.foldMessages,
+    args: ManagerCompactionRequest,
+  ): Promise<{ readonly state: ManagerSessionState; readonly result: IncrementalCompactionResult }> {
+    let latestState: ManagerSessionState = {
+      ...args.state,
+      recent: [...args.state.recent, ...args.protectedTail],
+    }
+    const result = await args.contextManager.compactIncrementally({
+      state: toManagerCompactionState(args.state, args.protectedTail),
+      profile: {
+        ...args.profile,
+        onBatchApplied: async (batch) => {
+          if (batch.state.previousSummary === undefined) {
+            throw new Error('压缩批次缺少 rollingSummary')
+          }
+          const nextState: ManagerSessionState = {
+            ...latestState,
+            rollingSummary: batch.state.previousSummary,
+            recent: [...batch.state.history, ...batch.state.protectedTail],
+            foldedCount: latestState.foldedCount + batch.consumedMessages,
+          }
+          await this.deps.store.save(nextState)
+          latestState = nextState
+        },
+      },
+      target: args.target,
+      adapter: args.adapter,
+      model: args.model,
     })
-    // 落盘前的最后一道防线:decision.keep 首条按 compaction.ts findSafeSplitIndex 的约定
-    // 不应是孤儿 tool_result(其匹配的 tool_use 已被折进 rollingSummary)——一旦真的落盘,
-    // 下一个 episode 必然把它原样发给 LLM 触发 API 400,且无自愈路径(见 findSafeSplitIndex
-    // 注释)。这里只是复核 decideCompaction 的既有保证,不引入新语义;命中即说明调用方绕过了
-    // findSafeSplitIndex 构造了 decision,直接拒绝落盘、把损坏状态挡在这一步,好过让它随
-    // runEpisode 外层 catch 重投后在下次唤醒继续复现。
-    if (decision.keep.length > 0 && 'toolResults' in decision.keep[0]) {
-      throw new Error('[applyFold] decision.keep 首条是孤儿 tool_result,拒绝落盘(见 compaction.ts findSafeSplitIndex)')
+    if (result.aborted) {
+      throw result.cause instanceof Error ? result.cause : new Error('上下文压缩已中止')
     }
-    const next: ManagerSessionState = {
-      ...state,
-      rollingSummary: newSummary,
-      recent: [...decision.keep, ...protectedTail],
-      foldedCount: state.foldedCount + decision.foldMessages.length,
+    if (result.failedReason !== undefined) {
+      throw new CompactionFailedError(result.failedReason, result.cause, result)
     }
-    await this.deps.store.save(next)
-    return next
+    return { state: latestState, result }
+  }
+
+  private effectiveWakeForCurrentEpisode(): WakeEvent | undefined {
+    return this.currentEpisodeEnvelopes.find((item) =>
+      isBuiltinDailyReflectionWake(item.wake),
+    )?.wake ?? this.currentWakeEvent?.wake
+  }
+
+  private managerSystemPrompt(effectiveWake: WakeEvent | undefined): string {
+    const extra = this.deps.promptInputs()
+    return assembleManagerSystemPrompt({
+      managerKey: this.deps.key,
+      isSystemThread: this.deps.isSystemThread,
+      isBuiltinDailyReflection: isBuiltinDailyReflectionWake(effectiveWake),
+      isGroup: extra.isGroup ?? false,
+      dialogProfile: extra.dialogProfile,
+      adminPersonality: extra.adminPersonality,
+    })
   }
 
   /** 跑一次 runEngine(可能是首次尝试,也可能是 max_tokens 兜底的重试)。
@@ -1457,22 +1526,9 @@ export class ManagerLoop {
         : [...tailMessages]
     let initialContextEnvelopes = [...(overrides?.contextEnvelopes ?? [])]
 
-    const dailyReflectionWake = this.currentEpisodeEnvelopes.find((item) =>
-      isBuiltinDailyReflectionWake(item.wake),
-    )?.wake
-    const effectiveWake = dailyReflectionWake ?? this.currentWakeEvent?.wake
+    const effectiveWake = this.effectiveWakeForCurrentEpisode()
     const isBuiltinDailyReflection = isBuiltinDailyReflectionWake(effectiveWake)
-    const systemPrompt = (): string => {
-      const extra = this.deps.promptInputs()
-      return assembleManagerSystemPrompt({
-        managerKey: this.deps.key,
-        isSystemThread: this.deps.isSystemThread,
-        isBuiltinDailyReflection,
-        isGroup: extra.isGroup ?? false,
-        dialogProfile: extra.dialogProfile,
-        adminPersonality: extra.adminPersonality,
-      })
-    }
+    const systemPrompt = (): string => this.managerSystemPrompt(effectiveWake)
     const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(effectiveWake)
 
     // LLM 重试期间配置热切换的订阅（spec 2026-08-30-llm-retry-config-hotreload）：
@@ -1902,6 +1958,18 @@ function withoutProtectedTail(state: ManagerSessionState, protectedTailLength: n
   return { ...state, recent: state.recent.slice(0, -protectedTailLength) }
 }
 
+function toManagerCompactionState(
+  state: ManagerSessionState,
+  protectedTail: ReadonlyArray<EngineMessage>,
+): CompactionState {
+  return {
+    protectedHead: [],
+    ...(state.rollingSummary !== undefined ? { previousSummary: state.rollingSummary } : {}),
+    history: state.recent,
+    protectedTail,
+  }
+}
+
 function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope): string {
   switch (event.kind) {
     case 'human_messages':
@@ -2058,27 +2126,6 @@ function defaultSupervisionHistorySummary(args: {
     `时间=${args.startedAt ?? event.ts} 至 ${args.endedAt}; ` +
     `进展分类=${observation}; 未执行外部动作。`
   )
-}
-
-/**
- * 强制 force_hot 折叠:复用 decideCompaction 的切分规则(不重复实现 slicing 逻辑),
- * 通过覆盖 policy/state 让它无视 TTL 与阈值、只要历史够长(>= keepRecent)就必然判定
- * force_hot——lastActiveAt 钉在 nowMs 上保证 isCold=false(不会误走 fold_at_wake 分支),
- * hardCapTokens 覆盖为 0 保证任何非空历史都判定"超过硬上限"。
- * 历史不足 keepRecent 条时原样返回 'none'(没有可折叠的东西,调用方需自行处理)。
- */
-function forceHotFold(
-  state: ManagerSessionState,
-  policy: CompactionPolicy,
-  estimateTokens: (msgs: ReadonlyArray<EngineMessage>) => number,
-  nowMs: number,
-): CompactionDecision {
-  return decideCompaction({
-    state: { ...state, lastActiveAt: new Date(nowMs).toISOString() },
-    nowMs,
-    policy: { ...policy, hardCapTokens: 0 },
-    estimateTokens,
-  })
 }
 
 /**

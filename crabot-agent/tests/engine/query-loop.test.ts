@@ -3,6 +3,7 @@ import { runEngine } from '../../src/engine/query-loop.js'
 import { defineTool } from '../../src/engine/tool-framework.js'
 import type { LLMAdapter } from '../../src/engine/llm-adapter.js'
 import type { StreamChunk, EngineOptions, EngineMessage } from '../../src/engine/types.js'
+import { createUserMessage } from '../../src/engine/types.js'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
 import { chunksFromContent } from './helpers/mock-stream.js'
 
@@ -671,8 +672,13 @@ describe('runEngine max_tokens silent compact retry', () => {
       updateConfig() {},
     }
 
+    const initialMessages = [
+      createUserMessage('do work task origin'),
+      ...Array.from({ length: 7 }, (_, index) => createUserMessage(`old-${index}-${'x'.repeat(400)}`)),
+    ]
     const result = await runEngine({
-      prompt: 'do work',
+      prompt: 'unused',
+      initialMessages,
       adapter,
       options: baseOptions(),
     })
@@ -681,12 +687,11 @@ describe('runEngine max_tokens silent compact retry', () => {
     expect(result.finalText).toBe('压缩后真实汇报：完成 X')
     expect(result.totalTurns).toBe(2)
     // 关键差异（vs 真静默 end_turn 路径）：空 assistant 已 pop、无 FORCED_SUMMARY_PROMPT 注入
-    const secondCall = capturedMessages[1] as Array<{ role: string; content: unknown }>
-    expect(secondCall).toHaveLength(1)
-    expect(secondCall[0].role).toBe('user')
-    const lastUserContent = JSON.stringify(secondCall[0].content)
+    const retryMainCall = capturedMessages[2] as Array<{ role: string; content: unknown }>
+    expect(retryMainCall.some((message) => JSON.stringify(message.content).includes('[Earlier conversation summary]'))).toBe(true)
+    const lastUserContent = JSON.stringify(retryMainCall.at(-1)?.content)
     expect(lastUserContent).not.toContain('end_turn 结束但没有输出任何文字')
-    expect(lastUserContent).toContain('do work')
+    expect(callIndex).toBe(3) // 主调用 + 摘要调用 + 压缩后主调用
   })
 
   it('returns partial text without retry when max_tokens has non-empty text', async () => {
@@ -720,15 +725,22 @@ describe('runEngine max_tokens silent compact retry', () => {
     // 不再走 FORCED_SUMMARY_PROMPT（input 已被压过两次，再加 user msg 只会更糟）。
     let callIndex = 0
     const adapter: LLMAdapter = {
-      async *stream() {
+      async *stream(params) {
         callIndex++
-        for (const chunk of maxTokensEmptyResponse()) yield chunk
+        const chunks = params.systemPrompt.includes('[任务连续性状态]')
+          ? textResponse('S')
+          : maxTokensEmptyResponse()
+        for (const chunk of chunks) yield chunk
       },
       updateConfig() {},
     }
 
     const result = await runEngine({
-      prompt: 'do work',
+      prompt: 'unused',
+      initialMessages: [
+        createUserMessage('do work task origin'),
+        ...Array.from({ length: 10 }, (_, index) => createUserMessage(`old-${index}-${'x'.repeat(400)}`)),
+      ],
       adapter,
       options: baseOptions(),
     })
@@ -737,7 +749,7 @@ describe('runEngine max_tokens silent compact retry', () => {
     expect(result.finalText).toBe('')
     // 1 次原始 + 2 次 compact 重试 = 3 轮（MAX_MAX_TOKENS_COMPACT_RETRIES=2）
     expect(result.totalTurns).toBe(3)
-    expect(callIndex).toBe(3)
+    expect(callIndex).toBe(5) // 3 次主调用 + 2 次摘要调用
   })
 })
 
@@ -1127,6 +1139,62 @@ describe('runEngine onAfterCompaction hook', () => {
   })
 })
 
+describe('runEngine incremental compaction progress', () => {
+  it('keeps the first successful batch when the second fails and skips onAfterCompaction', async () => {
+    const initialMessages = [
+      createUserMessage('task-origin'),
+      ...Array.from({ length: 8 }, (_, index) =>
+        createUserMessage(`PARTIAL_${index}:${'x'.repeat(700)}`),
+      ),
+    ]
+    const messagesRef = { current: [] as ReadonlyArray<EngineMessage> }
+    const onAfterCompaction = vi.fn((messages: ReadonlyArray<EngineMessage>) => messages)
+    const onCompactionEnd = vi.fn()
+    let compactionCalls = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        if (params.systemPrompt.includes('[任务连续性状态]')) {
+          compactionCalls++
+          if (compactionCalls === 1) {
+            yield* chunksFromContent([{ type: 'text', text: 'first-summary' }], 'end_turn')
+            return
+          }
+          throw new Error('invalid api key on second batch')
+        }
+        throw new Error('main LLM must not run after compaction failure')
+      },
+      updateConfig() {},
+    }
+
+    const result = await runEngine({
+      prompt: 'unused',
+      initialMessages,
+      adapter,
+      options: baseOptions({
+        contextWindowTokens: 800,
+        messagesRef,
+        onAfterCompaction,
+        onCompactionEnd,
+      }),
+    })
+
+    expect(result.outcome).toBe('failed')
+    expect(result.error).toContain('invalid api key on second batch')
+    expect(onAfterCompaction).not.toHaveBeenCalled()
+    expect(onCompactionEnd).toHaveBeenCalledOnce()
+    expect(onCompactionEnd).toHaveBeenCalledWith(expect.objectContaining({
+      batchesApplied: 1,
+      consumedMessages: expect.any(Number),
+      failedReason: expect.stringContaining('invalid api key on second batch'),
+    }))
+    expect(JSON.stringify(result.finalMessages)).toContain('[Earlier conversation summary]')
+    expect(JSON.stringify(result.finalMessages)).toContain('first-summary')
+    expect(JSON.stringify(result.finalMessages)).not.toContain('PARTIAL_0')
+    expect(JSON.stringify(result.finalMessages)).toContain('PARTIAL_7')
+    expect(messagesRef.current).toEqual(result.finalMessages)
+  })
+})
+
 // spec 2026-07-21 改动 3：compaction 真实 usage 触发
 describe('runEngine compaction triggered by real usage', () => {
   const readTool = defineTool({
@@ -1169,21 +1237,21 @@ describe('runEngine compaction triggered by real usage', () => {
       toolUseResponseWithUsage(small),
       toolUseResponseWithUsage(small),
       toolUseResponseWithUsage(lastUsage),
-      textResponse('对话摘要'),  // compaction 摘要 LLM 调用
+      textResponse('S'),         // compaction 摘要 LLM 调用
       textResponse('done'),      // 主轮 6
     ]
   }
 
   it('triggers compaction when observed prompt tokens exceed threshold', async () => {
-    // contextWindowTokens=100 → 阈值 80。第 5 轮 usage 观测 90 >= 80 → 第 6 轮前触发压缩。
-    const adapter = mockAdapter(historyThenDone({ inputTokens: 90, outputTokens: 10 }))
+    // contextWindowTokens=10000 → 阈值 8000。第 5 轮 usage 观测 9000 → 第 6 轮前触发压缩。
+    const adapter = mockAdapter(historyThenDone({ inputTokens: 9_000, outputTokens: 10 }))
     const onCompactionStart = vi.fn()
     const result = await runEngine({
       prompt: 'hi',
       adapter,
       options: baseOptions({
         tools: [readTool],
-        contextWindowTokens: 100,
+        contextWindowTokens: 10_000,
         onCompactionStart,
       }),
     })
@@ -1200,15 +1268,15 @@ describe('runEngine compaction triggered by real usage', () => {
   })
 
   it('counts cacheReadTokens and cacheCreationTokens into the observed prompt size', async () => {
-    // inputTokens=10 本身远低于阈值 80，但 10+60+20=90 >= 80 → 触发
-    const adapter = mockAdapter(historyThenDone({ inputTokens: 10, outputTokens: 10, cacheReadTokens: 60, cacheCreationTokens: 20 }))
+    // inputTokens=1000 本身低于阈值 8000，但 1000+6000+2000=9000 → 触发
+    const adapter = mockAdapter(historyThenDone({ inputTokens: 1_000, outputTokens: 10, cacheReadTokens: 6_000, cacheCreationTokens: 2_000 }))
     const onCompactionStart = vi.fn()
     const result = await runEngine({
       prompt: 'hi',
       adapter,
       options: baseOptions({
         tools: [readTool],
-        contextWindowTokens: 100,
+        contextWindowTokens: 10_000,
         onCompactionStart,
       }),
     })
@@ -1229,7 +1297,7 @@ describe('runEngine compaction triggered by real usage', () => {
       adapter,
       options: baseOptions({
         tools: [readTool],
-        contextWindowTokens: 100,
+        contextWindowTokens: 10_000,
         onCompactionStart,
       }),
     })
@@ -1239,32 +1307,31 @@ describe('runEngine compaction triggered by real usage', () => {
     expect(result.finalText).toBe('done')
   })
 
-  it('falls back to estimation including system prompt when usage is missing', async () => {
-    // usage 缺失 → 估算路径。systemPrompt 400 chars / 4 = 100 >= 阈值 80 → 首轮前就触发压缩。
-    // 消息数 1 <= keepRecentMessages，compaction 提前返回、不调摘要 LLM，
-    // 所以 adapter 第一个响应就是主轮响应。
+  it('fails explicitly when an oversized system prompt leaves no compressible history', async () => {
+    // usage 缺失 → 估算路径。固定开销本身超过 hardCap，且只有受保护的 task-origin，
+    // 历史压缩无法解决时不得把 no-op 当成成功。
     const adapter = mockAdapter([textResponseNoUsage('done')])
     const onCompactionStart = vi.fn()
     const result = await runEngine({
       prompt: 'hi',
       adapter,
       options: baseOptions({
-        systemPrompt: 's'.repeat(400),
-        contextWindowTokens: 100,
+        systemPrompt: 's'.repeat(40_000),
+        contextWindowTokens: 10_000,
         onCompactionStart,
       }),
     })
 
     expect(onCompactionStart).toHaveBeenCalledTimes(1)
-    expect(result.outcome).toBe('completed')
-    expect(result.finalText).toBe('done')
+    expect(result.outcome).toBe('failed')
+    expect(result.error).toContain('上下文压缩失败')
   })
 
-  it('falls back to estimation including tools schema when usage is missing', async () => {
-    // 工具 description 320 chars / 4 = 80 >= 阈值 80 → 触发（旧实现不计 tools，不会触发）
+  it('fails explicitly when an oversized tools schema leaves no compressible history', async () => {
+    // 工具 schema 固定开销本身超过 hardCap，且没有可压缩历史。
     const bigTool = defineTool({
       name: 'BigTool',
-      description: 'd'.repeat(320),
+      description: 'd'.repeat(32_000),
       inputSchema: { type: 'object', properties: {} },
       isReadOnly: true,
       call: async () => ({ output: 'ok', isError: false }),
@@ -1276,14 +1343,14 @@ describe('runEngine compaction triggered by real usage', () => {
       adapter,
       options: baseOptions({
         tools: [bigTool],
-        contextWindowTokens: 100,
+        contextWindowTokens: 10_000,
         onCompactionStart,
       }),
     })
 
     expect(onCompactionStart).toHaveBeenCalledTimes(1)
-    expect(result.outcome).toBe('completed')
-    expect(result.finalText).toBe('done')
+    expect(result.outcome).toBe('failed')
+    expect(result.error).toContain('上下文压缩失败')
   })
 
   it('does not trigger estimation fallback when system prompt and tools are small', async () => {
@@ -1294,7 +1361,7 @@ describe('runEngine compaction triggered by real usage', () => {
       adapter,
       options: baseOptions({
         tools: [readTool],
-        contextWindowTokens: 100,
+        contextWindowTokens: 10_000,
         onCompactionStart,
       }),
     })

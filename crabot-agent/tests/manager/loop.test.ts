@@ -13,6 +13,7 @@ import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { ActivityContextAdmissionReceipt } from '../../src/workers/harness/worker-events.js'
 import { createUserMessage, defineTool } from '../../src/engine/index.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
+import { MANAGER_WORKBOARD_CONTEXT } from '../../src/manager/prompt.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // --- Fixtures / helpers ---
@@ -69,7 +70,7 @@ function makeActivityReceipt(through = 'opaque-through') {
   return { receipt, admit, reject }
 }
 
-/** compaction.ts foldIntoSummary 的 system prompt 常量特征串,用它区分"这是折叠 LLM 调用
+/** Engine Manager profile 的 system prompt 常量特征串,用它区分"这是折叠 LLM 调用
  *  还是普通 engine turn 调用",不需要 vi.mock/vi.spyOn 侵入模块内部。 */
 const FOLD_SYSTEM_PROMPT_MARKER = '对话历史压缩助手'
 
@@ -140,6 +141,10 @@ function makeChannelMessage(text: string): ChannelMessage {
 
 /** 每条消息计 10 token,数量可控、无需真实分词(与 compaction.test.ts 的约定一致)。 */
 const estimateTokens = (msgs: ReadonlyArray<EngineMessage>): number => msgs.length * 10
+
+function compressibleHistoryMessage(label: string, chars = 800): EngineMessage {
+  return createUserMessage(`${label}:${'x'.repeat(chars)}`)
+}
 
 const FAKE_HARNESS = { listWorkers: async (): Promise<LedgerWorker[]> => [] } as unknown as WorkerHarness
 
@@ -256,7 +261,7 @@ describe('ManagerLoop', () => {
     expect(state.lastActiveAt).toBeTruthy()
   })
 
-  it('同一 episode 内时钟、台账与通知变化不改变 system prompt，也不自动读取台账', async () => {
+  it('任务板规则稳定装配，但动态任务状态不进入 system prompt，也不触发自动读取', async () => {
     const { adapter, queue, calls } = makeAdapter()
     queue.push(
       { toolCalls: [{ name: 'mutate_dynamic_state', id: 'mutate-1', input: {} }], stopReason: 'tool_use' },
@@ -291,9 +296,14 @@ describe('ManagerLoop', () => {
     expect(calls).toHaveLength(3)
     for (const call of calls) {
       expect(call.systemPrompt).toBe(calls[0].systemPrompt)
+      expect(call.systemPrompt).toContain(MANAGER_WORKBOARD_CONTEXT)
       expect(call.systemPrompt).not.toContain('dynamic-note-before-sentinel')
       expect(call.systemPrompt).not.toContain('dynamic-note-after-sentinel')
     }
+    expect(MANAGER_WORKBOARD_CONTEXT).toContain('任务板不会自动进入上下文')
+    expect(MANAGER_WORKBOARD_CONTEXT).toContain('主动查阅任务板')
+    expect(MANAGER_WORKBOARD_CONTEXT).not.toContain('重启')
+    expect(MANAGER_WORKBOARD_CONTEXT).not.toContain('压缩后')
     expect(listWorkers).not.toHaveBeenCalled()
   })
 
@@ -356,6 +366,150 @@ describe('ManagerLoop', () => {
 
     const state = await store.load(KEY)
     expect(state.rollingSummary).toBeTruthy()
+  })
+
+  it('500K 历史切到 256K 模型时逐批压缩并在每批后推进持久状态', async () => {
+    const { adapter, queue, foldCalls } = makeAdapter()
+    queue.push({ text: '降窗后继续处理', stopReason: 'end_turn' })
+    const history = Array.from({ length: 40 }, (_, index) =>
+      compressibleHistoryMessage(`HISTORY_${index}`, 50_000),
+    )
+    await store.save({
+      key: KEY,
+      recent: history,
+      foldedCount: 0,
+      lastActiveAt: '2025-12-31T23:00:00.000Z',
+    })
+
+    const foldedProgress: number[] = []
+    const save = store.save.bind(store)
+    vi.spyOn(store, 'save').mockImplementation(async (next) => {
+      if (next.foldedCount > (foldedProgress.at(-1) ?? 0)) {
+        foldedProgress.push(next.foldedCount)
+      }
+      await save(next)
+    })
+    const policy: CompactionPolicy = {
+      keepRecent: 2,
+      cacheTtlMs: 1_000,
+      foldTokenThreshold: 1,
+      hardCapTokens: 1_000_000,
+    }
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      policy,
+      contextWindowTokens: () => 256_000,
+    }))
+
+    const result = await loop.wakeUp(timed({
+      kind: 'human_messages',
+      messages: [makeChannelMessage('CURRENT_HUMAN_MUST_STAY_RAW')],
+    }))
+
+    expect(result.outcome).toBe('completed')
+    expect(foldCalls.length).toBeGreaterThanOrEqual(2)
+    expect(foldedProgress.length).toBe(foldCalls.length)
+    expect(foldedProgress.every((value, index) => index === 0 || value > foldedProgress[index - 1])).toBe(true)
+    expect(foldedProgress.at(-1)).toBeGreaterThan(0)
+    expect(foldedProgress.at(-1)).toBeLessThan(38)
+    for (const call of foldCalls) {
+      expect(JSON.stringify(call.messages)).not.toContain('CURRENT_HUMAN_MUST_STAY_RAW')
+    }
+
+    const state = await store.load(KEY)
+    expect(state.foldedCount).toBe(foldedProgress.at(-1))
+    expect(state.rollingSummary).toBe('折叠后的摘要')
+    const remainingHistory = state.recent.filter((message) =>
+      JSON.stringify(message).includes('HISTORY_'),
+    )
+    expect(remainingHistory).toHaveLength(history.length - state.foldedCount)
+    expect(JSON.stringify(state.recent)).toContain('CURRENT_HUMAN_MUST_STAY_RAW')
+  })
+
+  it('hard cap 计入本 episode 的非人类事件，但摘要只消费此前历史', async () => {
+    const { adapter, queue, foldCalls } = makeAdapter()
+    queue.push({ text: '事件已处理', stopReason: 'end_turn' })
+    const history = Array.from({ length: 3 }, (_, index) =>
+      compressibleHistoryMessage(`EVENT_BUDGET_HISTORY_${index}`, 80_000),
+    )
+    await store.save({ key: KEY, recent: history, foldedCount: 0 })
+
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      policy: {
+        keepRecent: 3,
+        cacheTtlMs: 1_000,
+        foldTokenThreshold: 1_000_000,
+        hardCapTokens: 1_000_000,
+      },
+      contextWindowTokens: () => 256_000,
+    }))
+    const eventMarker = `CURRENT_MEDIA_EVENT:${'e'.repeat(600_000)}`
+
+    const result = await loop.wakeUp(timed({ kind: 'media_notification', text: eventMarker }))
+
+    expect(result.outcome).toBe('completed')
+    expect(foldCalls.length).toBeGreaterThan(0)
+    for (const call of foldCalls) {
+      expect(JSON.stringify(call.messages)).not.toContain('CURRENT_MEDIA_EVENT')
+    }
+    const state = await store.load(KEY)
+    expect(state.foldedCount).toBeGreaterThan(0)
+    expect(JSON.stringify(state.recent)).toContain('CURRENT_MEDIA_EVENT')
+  })
+
+  it('第二批摘要失败时保留第一批落盘结果，且当前人类输入始终不进入摘要', async () => {
+    const base = makeAdapter()
+    const foldAttempts: LLMStreamParams[] = []
+    const failSecondBatch: LLMAdapter = {
+      async *stream(params) {
+        if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
+          foldAttempts.push({ ...params, messages: [...params.messages] })
+          if (foldAttempts.length === 2) throw new Error('second compaction batch failed')
+        }
+        yield* base.adapter.stream(params)
+      },
+      updateConfig: () => {},
+    }
+    const history = Array.from({ length: 40 }, (_, index) =>
+      compressibleHistoryMessage(`PARTIAL_HISTORY_${index}`, 50_000),
+    )
+    await store.save({
+      key: KEY,
+      recent: history,
+      foldedCount: 0,
+      lastActiveAt: '2025-12-31T23:00:00.000Z',
+    })
+    const policy: CompactionPolicy = {
+      keepRecent: 2,
+      cacheTtlMs: 1_000,
+      foldTokenThreshold: 1,
+      hardCapTokens: 1_000_000,
+    }
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter: failSecondBatch,
+      policy,
+      contextWindowTokens: () => 256_000,
+    }))
+
+    await expect(loop.wakeUp(timed({
+      kind: 'human_messages',
+      messages: [makeChannelMessage('PARTIAL_CURRENT_HUMAN')],
+    }))).rejects.toThrow('second compaction batch failed')
+
+    expect(foldAttempts).toHaveLength(2)
+    for (const call of foldAttempts) {
+      expect(JSON.stringify(call.messages)).not.toContain('PARTIAL_CURRENT_HUMAN')
+    }
+    const state = await store.load(KEY)
+    expect(state.rollingSummary).toBe('折叠后的摘要')
+    expect(state.foldedCount).toBeGreaterThan(0)
+    expect(state.foldedCount).toBeLessThan(38)
+    expect(JSON.stringify(state.recent)).toContain('PARTIAL_CURRENT_HUMAN')
+    expect(state.recent.length).toBe(history.length - state.foldedCount + 1)
   })
 
   it('episode 失败(LLM 报错)后已提交人类输入留在 history，下一次新 wake 继续会话', async () => {
@@ -551,12 +705,11 @@ describe('ManagerLoop', () => {
     })
     loop = new ManagerLoop(deps)
 
-    // 预置 3 条历史,让 force_hot 真正折掉点东西(否则 forceHotFold 直接返回 none,走不到
-    // foldIntoSummary,测不到这条抛错路径)。
+    // 预置 3 条可压缩历史，让 force_hot 真正应用批次，测到摘要调用抛错路径。
     const seedMessages: EngineMessage[] = [
-      createUserMessage('旧消息1'),
-      createUserMessage('旧消息2'),
-      createUserMessage('旧消息3'),
+      compressibleHistoryMessage('旧消息1'),
+      compressibleHistoryMessage('旧消息2'),
+      compressibleHistoryMessage('旧消息3'),
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
@@ -630,9 +783,9 @@ describe('ManagerLoop', () => {
     loop = new ManagerLoop(deps)
 
     const seedMessages: EngineMessage[] = [
-      createUserMessage('旧消息1'),
-      createUserMessage('旧消息2'),
-      createUserMessage('旧消息3'),
+      compressibleHistoryMessage('旧消息1'),
+      compressibleHistoryMessage('旧消息2'),
+      compressibleHistoryMessage('旧消息3'),
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
@@ -1191,7 +1344,11 @@ describe('ManagerLoop', () => {
     }
     await store.save({
       key: KEY,
-      recent: [createUserMessage('旧消息1'), createUserMessage('旧消息2'), createUserMessage('旧消息3')],
+      recent: [
+        compressibleHistoryMessage('旧消息1'),
+        compressibleHistoryMessage('旧消息2'),
+        compressibleHistoryMessage('旧消息3'),
+      ],
       foldedCount: 0,
     })
     const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
@@ -1215,12 +1372,11 @@ describe('ManagerLoop', () => {
     const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
     const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
 
-    // 预置 3 条历史,让 force_hot 的 slicing(history.length - keepRecent = 1)真正折掉点东西,
-    // 而不是从空历史开始导致 forceHotFold 直接返回 'none'。
+    // 预置 3 条可压缩历史，让 force_hot 真正应用一个批次。
     const seedMessages: EngineMessage[] = [
-      createUserMessage('旧消息1'),
-      createUserMessage('旧消息2'),
-      createUserMessage('旧消息3'),
+      compressibleHistoryMessage('旧消息1'),
+      compressibleHistoryMessage('旧消息2'),
+      compressibleHistoryMessage('旧消息3'),
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
@@ -1263,9 +1419,9 @@ describe('ManagerLoop', () => {
     // 预置 3 条历史(同上一个 max_tokens 用例),让 force_hot 若被误触发也真能折出东西——
     // 避免"误判但恰好 forceDecision=none 侥幸不重试"的假阳性掩盖 bug。
     const seedMessages: EngineMessage[] = [
-      createUserMessage('旧消息1'),
-      createUserMessage('旧消息2'),
-      createUserMessage('旧消息3'),
+      compressibleHistoryMessage('旧消息1'),
+      compressibleHistoryMessage('旧消息2'),
+      compressibleHistoryMessage('旧消息3'),
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
@@ -1291,9 +1447,9 @@ describe('ManagerLoop', () => {
     const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
 
     const seedMessages: EngineMessage[] = [
-      createUserMessage('旧消息1'),
-      createUserMessage('旧消息2'),
-      createUserMessage('旧消息3'),
+      compressibleHistoryMessage('旧消息1'),
+      compressibleHistoryMessage('旧消息2'),
+      compressibleHistoryMessage('旧消息3'),
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
@@ -1343,9 +1499,9 @@ describe('ManagerLoop', () => {
 
     // 预置 3 条历史(同 'max_tokens 收场' 测试),让 force_hot 真正折掉点东西
     const seedMessages: EngineMessage[] = [
-      createUserMessage('旧消息1'),
-      createUserMessage('旧消息2'),
-      createUserMessage('旧消息3'),
+      compressibleHistoryMessage('旧消息1'),
+      compressibleHistoryMessage('旧消息2'),
+      compressibleHistoryMessage('旧消息3'),
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
@@ -1380,7 +1536,7 @@ describe('ManagerLoop', () => {
     queue.push({ stopReason: 'end_turn' }) // 纠偏提醒后静默收口
 
     let loop!: ManagerLoop
-    // 在折叠 LLM 调用期间(applyFold → foldIntoSummary 调 adapter.stream 时)注入一条
+    // 在折叠 LLM 调用期间(共享压缩器调 adapter.stream 时)注入一条
     // mid-episode 事件,模拟"事件恰好在两次尝试之间(折叠调用期间)到达"——此时它必然还没被
     // 任何 engine drainPending() 消费过,原样躺在 mailbox.pending 里,同时也被
     // currentEpisodeInjected 记录(两份来源同时存在,正是 review 指出的重复投递触发条件)。
@@ -1400,9 +1556,9 @@ describe('ManagerLoop', () => {
 
     // 预置 3 条历史,让 force_hot 真正折掉点东西
     const seedMessages: EngineMessage[] = [
-      createUserMessage('旧消息1'),
-      createUserMessage('旧消息2'),
-      createUserMessage('旧消息3'),
+      compressibleHistoryMessage('旧消息1'),
+      compressibleHistoryMessage('旧消息2'),
+      compressibleHistoryMessage('旧消息3'),
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
@@ -1419,31 +1575,41 @@ describe('ManagerLoop', () => {
     // drain 与显式追加的 currentEpisodeInjected 重复计入
   })
 
-  it('force_hot 因 history.length===keepRecent(无可折叠内容)返回 none 时不产生零进展的折叠 LLM 调用', async () => {
+  it('history.length===keepRecent 但完整请求超 hardCap 时继续压缩到更少保留条数', async () => {
     const { adapter, queue, foldCalls } = makeAdapter()
     queue.push({ text: '正常处理', stopReason: 'end_turn' })
 
-    // hardCapTokens 故意压得极低,确保 wakeDecision 会走进 force_hot 的 token 超限判断——
-    // 唯一能拦住它的只有本次要验证的"foldMessages 为空则 none"这条修复。
-    const policy: CompactionPolicy = { keepRecent: 3, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1 }
-    const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
+    const policy: CompactionPolicy = {
+      keepRecent: 3,
+      cacheTtlMs: 1_000,
+      foldTokenThreshold: 1_000_000,
+      hardCapTokens: 1_000_000,
+    }
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      policy,
+      contextWindowTokens: () => 50_000,
+    }))
 
-    // 预置恰好 keepRecent(3)条历史:splitAt=0,没有可折叠的内容
+    // 三条历史恰好等于 keepRecent，但完整请求超过 50K×0.8 hardCap。
     const seedMessages: EngineMessage[] = [
-      createUserMessage('旧消息1'),
-      createUserMessage('旧消息2'),
-      createUserMessage('旧消息3'),
+      compressibleHistoryMessage('OVERSIZED_0', 60_000),
+      compressibleHistoryMessage('OVERSIZED_1', 60_000),
+      compressibleHistoryMessage('OVERSIZED_2', 60_000),
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
     const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发')] }))
 
-    expect(foldCalls.length).toBe(0) // 没有可折叠内容(splitAt=0),不该调折叠 LLM
+    expect(foldCalls).toHaveLength(1)
     expect(result.outcome).toBe('completed')
-    expect(result.turns).toBe(2) // 未经过强制折叠重试，第二轮仅为文字纠偏
 
     const state = await store.load(KEY)
-    expect(state.rollingSummary).toBeUndefined() // 没发生过折叠
+    expect(state.rollingSummary).toBe('折叠后的摘要')
+    expect(state.foldedCount).toBe(2)
+    expect(JSON.stringify(state.recent)).toContain('OVERSIZED_2')
+    expect(JSON.stringify(state.recent)).not.toContain('OVERSIZED_0')
   })
 
   // --- drainMailbox(自唤醒入口,P7 阻塞项 #5) ---

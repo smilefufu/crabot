@@ -24,7 +24,7 @@ import { QueryEstablishmentError } from '../../src/workers/errors.js'
 import { type ManagerKey, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerAdapter, WorkerImplId, IncarnationHandle, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
-import type { ChannelMessage } from '../../src/types.js'
+import type { ChannelMessage, ResolvedPermissions } from '../../src/types.js'
 import { CLI_DOMAINS } from '../../src/types.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
@@ -589,6 +589,83 @@ describe('manager bootstrap（P5 Task 1）', () => {
       expect(systemPrompt).toContain('喜欢简短回答，讨厌寒暄')
       expect(systemPrompt).toContain('@crabot_wx')
     }
+  })
+
+  it('生产工具面可读写任务板和授权项目文档，且不会自动注入后续 LLM 请求', async () => {
+    const projectRoot = join(tmpRoot, 'project')
+    await fs.mkdir(projectRoot, { recursive: true })
+    await fs.writeFile(join(projectRoot, 'README.md'), '# 装配验证\n')
+    const permissions: ResolvedPermissions = {
+      tool_access: {
+        memory: false,
+        messaging: false,
+        task: false,
+        mcp_skill: false,
+        file_io: true,
+        browser: false,
+        shell: false,
+        remote_exec: false,
+        desktop: false,
+      },
+      cli_access: {
+        provider: 'none', agent: 'none', mcp: 'none', skill: 'none', schedule: 'none',
+        channel: 'none', friend: 'none', permission: 'none', config: 'none', undo: 'none',
+      },
+      storage: { workspace_path: projectRoot, access: 'readwrite' },
+      memory_scopes: [],
+    }
+    const requests: LLMStreamParams[] = []
+    let created: unknown
+    let inspectedBoard: unknown
+    let inspectedDoc: unknown
+    const stack = buildManagerStack(makeDeps({
+      managerAdapter: () => ({
+        async *stream(params: LLMStreamParams) {
+          requests.push({ ...params, messages: [...params.messages] })
+          if (requests.length === 1) {
+            const byName = new Map(params.tools.map((tool) => [tool.name, tool]))
+            expect([...byName.keys()]).toEqual(expect.arrayContaining([
+              'inspect_workboard', 'change_workboard', 'inspect_project_docs', 'manage_decision_doc',
+            ]))
+            created = JSON.parse((await byName.get('change_workboard')!.call({
+              action: 'create',
+              item: {
+                title: '验证主控上下文生产装配',
+                status: 'in_progress',
+                project_root: projectRoot,
+                objective: '证明任务板工具已接入真实主控栈',
+                acceptance: ['后续请求不自动包含任务板正文'],
+                current_state: '正在验证',
+                next_action: '读取任务板和项目文档',
+                blockers: [],
+              },
+            }, {} as never)).output)
+            inspectedBoard = JSON.parse((await byName.get('inspect_workboard')!.call({}, {} as never)).output)
+            inspectedDoc = JSON.parse((await byName.get('inspect_project_docs')!.call({
+              project_root: projectRoot,
+              operation: 'read',
+              path: 'README.md',
+            }, {} as never)).output)
+          }
+          yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+        },
+        updateConfig: () => {},
+      }),
+      principalResolver: {
+        ...makePrincipalResolver(),
+        resolvePermissions: async () => permissions,
+      },
+    }))
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('开始装配验证')], FRIEND_A)
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('继续其它对话')], FRIEND_A)
+
+    expect(created).toMatchObject({ action: 'created' })
+    expect(inspectedBoard).toMatchObject({ active_count: 1, items: [{ title: '验证主控上下文生产装配' }] })
+    expect(inspectedDoc).toMatchObject({ operation: 'read', path: 'README.md', content: '# 装配验证' })
+    expect(requests).toHaveLength(2)
+    expect(requests[1].systemPrompt).not.toContain('验证主控上下文生产装配')
+    expect(JSON.stringify(requests[1].messages)).not.toContain('验证主控上下文生产装配')
   })
 
   it('reconcileManagerStack 对空台账快速返回空三桶，且不探测任何 adapter', async () => {

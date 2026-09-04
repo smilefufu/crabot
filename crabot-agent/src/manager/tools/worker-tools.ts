@@ -311,7 +311,10 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     inputSchema: {
       type: 'object',
       properties: {
-        title: { type: 'string', description: '任务标题(简短)' },
+        title: {
+          type: 'string',
+          description: '可脱离当前对话独立理解的任务标题，必须包含所属任务主题和本次具体执行内容；禁止使用“继续处理”“接着做”“上次那个问题”等对话指代',
+        },
         prompt: {
           type: 'string',
           description: '交给 worker 的任务描述/初始输入。要它目标驱动就把目标写在这里',

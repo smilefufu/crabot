@@ -1,14 +1,16 @@
 /**
  * manager 封闭工具面装配 —— protocol-agent-v3.md §4.3。
  *
- * manager 的工具面是**写死的白名单**，不接受外部扩展：四个来源原样/裁剪拼接后，末尾还有一道
+ * manager 的工具面是**写死的白名单**，不接受外部扩展：六个来源原样/裁剪拼接后，末尾还有一道
  * 运行时护栏兜底（见 `assertClosedToolFace`），把"封闭"变成不变量而非只靠 review。
  *
- * 四个来源：
+ * 六个来源：
  * 1. crab-messaging（`buildMessagingTools`）—— 按白名单裁剪，`send_message` 额外做"去 intent"包装；
  * 2. crab-memory（`deps.memoryServer`，经 `mcpServerToToolDefinitions` 转换）—— 固定 18 项白名单；
  * 3. worker 编排、观察与回合处置工具（`buildWorkerTools`）—— 原样加入；
  * 4. crabot-info 六件套（Task 3 `buildCrabotInfoTools`）—— 原样加入。
+ * 5. 当前 ManagerKey 的任务板两件套——只按需读取或修改独立任务板存储；
+ * 6. 当前 episode 授权的项目文档两件套——只在调用时读取控制面权限和项目路径。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.3
  */
@@ -25,6 +27,9 @@ import { buildWorkerTools } from './worker-tools.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
 import { buildCrabotInfoTools } from './crabot-info.js'
 import type { MasterAuthorization } from '../principal.js'
+import { buildWorkboardTools } from './workboard-tools.js'
+import type { ManagerWorkboardStore } from '../workboard-store.js'
+import { buildProjectDocTools, type ProjectDocToolDeps } from './project-doc-tools.js'
 
 export interface ToolFaceDeps {
   readonly harness: WorkerHarness
@@ -55,6 +60,13 @@ export interface ToolFaceDeps {
   readonly onSuccessfulSendMessage?: (target: { channel_id: string; session_id: string }) => void
   readonly hasContinuedWorker?: (workerId: string) => boolean
   readonly onWorkerContinuation?: (workerId: string) => void
+  /** 当前 ManagerKey 的独立任务板；不进入 ManagerSessionState 或自动上下文。 */
+  readonly workboard: {
+    readonly store: ManagerWorkboardStore
+    readonly managerKey: import('../types.js').ManagerKey
+  }
+  /** 当前 episode 的项目文档授权上下文；原始 WakeEvent 仅作控制面输入。 */
+  readonly projectDocs: ProjectDocToolDeps
 }
 
 // ============================================================================
@@ -318,8 +330,17 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
   })
+  const workboardTools = buildWorkboardTools(deps.workboard)
+  const projectDocTools = buildProjectDocTools(deps.projectDocs)
 
-  const tools = [...messagingTools, ...memoryTools, ...workerTools, ...infoTools]
+  const tools = [
+    ...messagingTools,
+    ...memoryTools,
+    ...workerTools,
+    ...workboardTools,
+    ...projectDocTools,
+    ...infoTools,
+  ]
   assertClosedToolFace(tools)
   return tools
 }

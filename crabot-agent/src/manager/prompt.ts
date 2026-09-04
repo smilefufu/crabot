@@ -95,6 +95,12 @@ Crabot 为了能够在把事儿办好的基础上给人类一个更好的使用�
 
 **不滥用跨 session 投递**：\`send_message\` 能发到别的会话，但只在人类明确要求时才这么做，不要自作主张往别的会话塞话。`
 
+export const MANAGER_WORKBOARD_CONTEXT = `## 用任务板管理上下文
+
+任务板记录本会话各项未结任务的最新目标、验收标准、当前结论、下一步和阻塞，帮助你在多任务和长对话中保持一致判断。任务板不会自动进入上下文；当你不确定当前有哪些任务、新消息属于哪项、任务要求是否已经变化，或准备派发、续办执行器时，主动查阅任务板。
+
+需要跨处理回合推进的事情及时建项，情况发生实质变化就更新，完成或放弃就归档；一次即可回答的事情不用记录。标题和正文要脱离当前对话也能看懂。任务板由你维护，不交给执行器；无关任务使用新的执行器，要求变化时向仍相关的执行器发送完整的新要求。项目长期规则和决策查项目文档，不写进任务板，也不把任务板或项目文档自动同步到记忆。`
+
 /**
  * 群聊 manager 专属追加段（群聊响应纪律）：与 MANAGER_IDENTITY 分离，只在
  * isGroup=true 时装配，不污染私聊 / 系统线程 manager 的静态段。
@@ -161,7 +167,7 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
   // 先把身份段中的 {{managerKey}} 占位符替换成实际值
   const identityWithKey = MANAGER_IDENTITY.replace('{{managerKey}}', inputs.managerKey)
 
-  const parts: string[] = [identityWithKey]
+  const parts: string[] = [identityWithKey, MANAGER_WORKBOARD_CONTEXT]
 
   // Admin「AI 性格提示词」：manager 的人格与表达偏好（静态段，紧跟身份段）。
   if (inputs.adminPersonality) {
