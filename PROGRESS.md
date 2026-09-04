@@ -1,9 +1,18 @@
 # Crabot 项目进度
 
-> 最后整理：2026-09-04
+> 最后整理：2026-09-05
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
+
+### send_message 缺 channel_id 的确定性修复改为来源登记：实现与验证完成，待 PR review
+
+- 已将发送时的 Channel 枚举与逐实例 `get_session` 探测替换为当前 Manager 的运行时多值索引：
+  成功的结构化 messaging 结果登记 `session_id → Set<channel_id>`，缺参发送只做本地查询；
+  唯一命中或当前 Manager Channel 可消歧时补全，其余继续原样透传。
+- 索引不持久化、不跨 Manager 共享，也不作为权限或当前可路由性的事实源；Loop 回收或 Agent
+  重启后自然清空。raw MCP 仍要求显式 `channel_id`，内部观察元数据不进入工具结果。
+- 正式协议 crab-messaging v0.3.7 与修订 Spec 已先行发布（crabot-docs `b725b1c`）。
 
 ### Agent Engine 自适应增量上下文压缩：实现与验证完成，待 PR #139 review
 

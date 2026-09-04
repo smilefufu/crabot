@@ -60,6 +60,10 @@ describe('get_message 媒体字段透出', () => {
     ])
     expect(result.media_url).toBe('/data/media/om_img-1.jpg')
     expect(result.status).toBe('ready')
+    expect(out.observedSessionTargets).toEqual([
+      { channel_id: 'feishu-1', session_id: 's1' },
+    ])
+    expect(result).not.toHaveProperty('observedSessionTargets')
   })
 
   it('not_fetched 文件消息 → 透出 handle 供 fetch_media 使用', async () => {

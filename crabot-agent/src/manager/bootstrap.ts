@@ -618,8 +618,11 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           triggerType: scheduleIdentity ? 'scheduled' : isSystemThread ? 'system' : 'message',
         }),
         messagingDeps: deps.messagingDeps,
-        // send_message 省略 channel_id 时使用的 manager 归属目标（spec 2026-09-03-tool-input-repair）
+        // send_message 省略 channel_id 时使用的 manager 归属目标与结构化 Session 观察索引
+        // （spec 2026-09-03-tool-input-repair）。两条桥都在工具调用时动态读取当前 Loop。
         managerTarget: channelSessionFromManagerKey(key),
+        sessionChannelsFor: traceHooks?.sessionChannelsFor,
+        onObservedSessionTargets: traceHooks?.onObservedSessionTargets,
         onPostSendAction: traceHooks?.onPostSendAction,
         // 记忆档位按**这个会话最近一次解析出来的发起人身份**现建。这里刻意不用
         // `humanPrincipal`:worker 事件唤醒的 episode 里没人说话,但该会话的记忆可见范围

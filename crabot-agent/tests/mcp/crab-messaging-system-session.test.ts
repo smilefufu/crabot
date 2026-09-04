@@ -81,13 +81,17 @@ describe('send_message rejects SYSTEM_SESSION sentinel', () => {
     })
 
     const sendTool = findTool(tools, 'send_message')
-    await sendTool.handler({
+    const result = await sendTool.handler({
       channel_id: 'wechat-real',
       session_id: 'sess-real',
       content: 'real send',
     })
 
     expect(callMock).toHaveBeenCalled()
+    expect(result.observedSessionTargets).toEqual([
+      { channel_id: 'wechat-real', session_id: 'sess-real' },
+    ])
+    expect(JSON.parse(result.content[0].text)).not.toHaveProperty('observedSessionTargets')
   })
 
   it('marks a channel delivery failure as a tool error', async () => {
@@ -112,6 +116,7 @@ describe('send_message rejects SYSTEM_SESSION sentinel', () => {
     })
 
     expect(result.isError).toBe(true)
+    expect(result.observedSessionTargets).toBeUndefined()
     expect(JSON.parse(result.content[0].text)).toMatchObject({ error: '发送失败: channel offline' })
   })
 })

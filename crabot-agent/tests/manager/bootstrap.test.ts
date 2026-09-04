@@ -27,7 +27,6 @@ import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
 import type { ChannelMessage, ResolvedPermissions } from '../../src/types.js'
 import { CLI_DOMAINS } from '../../src/types.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
-import { RpcCallError } from 'crabot-shared'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // ============================================================================
@@ -403,29 +402,45 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['send_message'])
   })
 
-  it('跨会话 repair 仍按 Channel NOT_FOUND 扫描，而非误用当前 Manager session', async () => {
+  it('跨 episode 先从 list_sessions 登记来源，后续 send_message 只查当前 Loop 本地索引', async () => {
     const rpcCall = vi.fn(async (port: number, method: string) => {
-      if (method === 'list_channel_instances') {
+      if (method === 'get_sessions') {
+        expect(port).toBe(19010)
         return {
-          items: [{ id: 'wechat' }, { id: 'telegram' }],
-          pagination: { page: 1, page_size: 50, total_items: 2, total_pages: 1 },
+          items: [{ id: 'other-session', channel_id: 'telegram', type: 'private' }],
+          pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
         }
       }
-      if (method === 'get_session') {
-        if (port === 19010) return { session: { id: 'other-session' } }
-        throw new RpcCallError('NOT_FOUND', 'Session not found')
+      if (method === 'send_message') {
+        expect(port).toBe(19010)
+        return { platform_message_id: 'pm-other', sent_at: '2026-09-05T00:00:00.000Z' }
       }
-      throw new Error(`unexpected ${method}`)
+      throw new Error(`不应扫描或探测 ${method}`)
     })
-    let checked = false
+    let episode = 0
     const stack = buildManagerStack(makeDeps({
       managerAdapter: () => ({
         async *stream(params: LLMStreamParams) {
-          if (!checked) {
-            checked = true
+          episode += 1
+          if (episode === 1) {
+            const list = params.tools.find((tool) => tool.name === 'list_sessions')!
+            const result = await list.call({ channel_id: 'telegram' }, {} as never)
+            expect(result.isError).toBe(false)
+          } else if (episode === 2) {
             const send = params.tools.find((tool) => tool.name === 'send_message')!
-            await expect(send.repairInput!({ session_id: 'other-session', content: 'x' }))
-              .resolves.toEqual({ channel_id: 'telegram', session_id: 'other-session', content: 'x' })
+            const repaired = await send.repairInput!({
+              session_id: 'other-session',
+              content: 'x',
+              post_send_action: 'none',
+            })
+            expect(repaired).toEqual({
+              channel_id: 'telegram',
+              session_id: 'other-session',
+              content: 'x',
+              post_send_action: 'none',
+            })
+            const result = await send.call(repaired, {} as never)
+            expect(result.isError).toBe(false)
           }
           yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
         },
@@ -434,12 +449,60 @@ describe('manager bootstrap（P5 Task 1）', () => {
       messagingDeps: {
         ...makeMessagingDeps(),
         rpcClient: { call: rpcCall } as never,
-        resolveChannelPort: async (channelId: string) => channelId === 'wechat' ? 19009 : 19010,
+        resolveChannelPort: async (channelId: string) => channelId === 'telegram' ? 19010 : 19009,
       },
     }))
 
-    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('查另一个会话')])
-    expect(checked).toBe(true)
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('先列出会话')])
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('再发送')])
+
+    expect(episode).toBe(2)
+    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['get_sessions', 'send_message'])
+  })
+
+  it('Session 归属索引按 Manager 隔离，不从其他 Manager 的观察补全', async () => {
+    const rpcCall = vi.fn(async (port: number, method: string) => {
+      if (method === 'get_sessions') {
+        expect(port).toBe(19010)
+        return {
+          items: [{ id: 'shared-session', channel_id: 'telegram', type: 'private' }],
+          pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+        }
+      }
+      throw new Error(`unexpected ${method}`)
+    })
+    const seenKeys = new Set<string>()
+    const stack = buildManagerStack(makeDeps({
+      managerAdapter: () => ({
+        async *stream(params: LLMStreamParams) {
+          const wake = params.messages.at(-1)?.content
+          const key = typeof wake === 'string' && wake.includes('登记') ? 'source' : 'other'
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key)
+            if (key === 'source') {
+              const list = params.tools.find((tool) => tool.name === 'list_sessions')!
+              await list.call({ channel_id: 'telegram' }, {} as never)
+            } else {
+              const send = params.tools.find((tool) => tool.name === 'send_message')!
+              const input = { session_id: 'shared-session', content: 'x' }
+              await expect(send.repairInput!(input)).resolves.toBe(input)
+            }
+          }
+          yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+        },
+        updateConfig: () => {},
+      }),
+      messagingDeps: {
+        ...makeMessagingDeps(),
+        rpcClient: { call: rpcCall } as never,
+        resolveChannelPort: async (channelId: string) => channelId === 'telegram' ? 19010 : 19009,
+      },
+    }))
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-source', [makeChannelMessage('登记目标会话')])
+    await stack.registry.routeHumanMessages('wechat', 'sess-other', [makeChannelMessage('尝试使用目标')])
+
+    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['get_sessions'])
   })
 
   // --- ④ 空台账对账 ---

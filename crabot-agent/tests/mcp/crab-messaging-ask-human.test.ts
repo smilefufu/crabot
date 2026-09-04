@@ -269,6 +269,11 @@ describe('send_message intent=ask_human', () => {
     const parsed = JSON.parse(text)
     expect(parsed.ask_human_state_error).toBeDefined()
     expect(parsed.ask_human_state_error).toContain('update_task_status')
+    // 消息已经成功发出，即使后续状态切换失败，目标仍是可信观察。
+    expect(result.observedSessionTargets).toEqual([
+      { channel_id: 'telegram-001', session_id: 's1' },
+    ])
+    expect(parsed).not.toHaveProperty('observedSessionTargets')
   })
 
   it('persistent state machine reject（ADMIN_INVALID_STATUS_TRANSITION）时先补齐状态机再 setBarrier', async () => {

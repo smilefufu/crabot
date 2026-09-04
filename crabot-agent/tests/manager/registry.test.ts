@@ -1059,6 +1059,10 @@ describe('ManagerRegistry', () => {
 
     await registry.routeHumanMessages('wechat', 'sess-evict', [makeChannelMessage('你好')])
     const loopBefore = registry.getOrCreate(key)
+    loopBefore.recordObservedSessionTargets([
+      { channel_id: 'telegram', session_id: 'observed-before-eviction' },
+    ])
+    expect(loopBefore.sessionChannelsFor('observed-before-eviction')).toEqual(new Set(['telegram']))
 
     nowMs += 10 * 60 * 1000 // 10 分钟后
     const evicted = registry.evictIdle(5 * 60 * 1000, nowMs) // 5 分钟阈值
@@ -1068,8 +1072,10 @@ describe('ManagerRegistry', () => {
     const result = await registry.routeHumanMessages('wechat', 'sess-evict', [makeChannelMessage('还在吗')])
     expect(result.outcome).toBe('completed')
 
-    // 回收后再次唤醒重建了新的 ManagerLoop 实例
-    expect(registry.getOrCreate(key)).not.toBe(loopBefore)
+    // 回收后再次唤醒重建了新的 ManagerLoop 实例，运行时归属索引不持久化。
+    const loopAfter = registry.getOrCreate(key)
+    expect(loopAfter).not.toBe(loopBefore)
+    expect(loopAfter.sessionChannelsFor('observed-before-eviction')).toBeUndefined()
 
     // 但盘上历史连续，两次唤醒的内容都还在
     const state = await store.load(key)

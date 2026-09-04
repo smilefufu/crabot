@@ -14,6 +14,12 @@ import { describe, test, expect, vi } from 'vitest'
 import { globalRegistry } from 'zod/v4/core'
 import { createCrabMemoryServer, type MemoryTaskContext } from '../../src/mcp/crab-memory.js'
 import { createCrabMessagingServer } from '../../src/mcp/crab-messaging.js'
+import { buildManagerToolFace, type ToolFaceDeps } from '../../src/manager/tools/tool-face.js'
+import type { WorkerHarness } from '../../src/workers/harness/harness.js'
+import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
+import type { ManagerKey } from '../../src/manager/types.js'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 function registrySize(): number {
   return (globalRegistry as unknown as { _map: Map<unknown, unknown> })._map.size
@@ -43,6 +49,35 @@ const messagingDeps = {
   enableFeishuDocTool: true,
 }
 
+const managerKey = 'channel::session' as ManagerKey
+
+function managerDeps(): ToolFaceDeps {
+  return {
+    harness: {} as WorkerHarness,
+    workerContext: () => ({
+      managerKey,
+      reportTo: { channel_id: 'channel', session_id: 'session' },
+    }),
+    messagingDeps,
+    managerTarget: { channel_id: 'channel', session_id: 'session' },
+    memoryServer: createCrabMemoryServer(memoryDeps, memoryCtx),
+    callAdmin: vi.fn(async () => ({})) as unknown as ToolFaceDeps['callAdmin'],
+    isSystemThread: false,
+    workboard: {
+      store: new ManagerWorkboardStore(join(tmpdir(), 'manager-zod-registry-test')),
+      managerKey,
+    },
+    projectDocs: {
+      ledger: {
+        listWorkers: vi.fn(async () => []),
+        findWorker: vi.fn(async () => undefined),
+      } as never,
+      readWorkerContext: vi.fn(async () => undefined),
+      managerKey,
+    },
+  }
+}
+
 describe('zod globalRegistry 泄漏回归', () => {
   test('重复构建 crab-memory server 不增加 globalRegistry 条目', () => {
     // 首次构建：允许模块加载/首次执行注册 schema
@@ -62,6 +97,17 @@ describe('zod globalRegistry 泄漏回归', () => {
 
     for (let i = 0; i < 3; i++) {
       createCrabMessagingServer(messagingDeps)
+    }
+
+    expect(registrySize() - before).toBe(0)
+  })
+
+  test('重复构建 manager 工具面不增加 globalRegistry 条目', () => {
+    buildManagerToolFace(managerDeps())
+    const before = registrySize()
+
+    for (let i = 0; i < 3; i++) {
+      buildManagerToolFace(managerDeps())
     }
 
     expect(registrySize() - before).toBe(0)

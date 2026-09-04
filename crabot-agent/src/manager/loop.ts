@@ -72,6 +72,7 @@ import type { ManagerSessionState, ManagerKey } from './types.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { ActivityContextAdmissionReceipt, HarnessEvent } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
+import type { SessionTarget } from '../mcp/crab-messaging.js'
 
 const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出了一段文字、没有调用 send_message，然后结束了回复。\n'
   + '请注意：直接输出的文字只留在系统内部，人类看不到；只有 send_message 发送的内容才能送达人类。\n'
@@ -359,6 +360,8 @@ export class ManagerLoop {
   /** Delivery/continuation evidence belongs to one Manager episode and is never inferred from history. */
   private readonly successfulSendMessageTargetsInCurrentEpisode = new Set<string>()
   private readonly continuedWorkersInCurrentEpisode = new Set<string>()
+  /** 当前 Manager 从成功的结构化 messaging 结果观察到的多值 Session 归属；随 Loop 回收。 */
+  private readonly sessionChannels = new Map<string, Set<string>>()
 
   /** 当前 episode 的 trace id（仅 episode 进行中）；registry 桥/worker-tools 读取用。 */
   get currentEpisodeTraceId(): string | undefined {
@@ -372,6 +375,27 @@ export class ManagerLoop {
   recordSuccessfulSendMessage(target: { channel_id: string; session_id: string }): void {
     if (this.currentTraceId !== undefined) {
       this.successfulSendMessageTargetsInCurrentEpisode.add(`${target.channel_id}\u0000${target.session_id}`)
+    }
+  }
+
+  sessionChannelsFor(sessionId: string): ReadonlySet<string> | undefined {
+    return this.sessionChannels.get(sessionId)
+  }
+
+  recordObservedSessionTargets(targets: ReadonlyArray<SessionTarget>): void {
+    for (const target of targets) {
+      if (
+        typeof target.channel_id !== 'string'
+        || target.channel_id.length === 0
+        || typeof target.session_id !== 'string'
+        || target.session_id.length === 0
+      ) continue
+      let channels = this.sessionChannels.get(target.session_id)
+      if (!channels) {
+        channels = new Set()
+        this.sessionChannels.set(target.session_id, channels)
+      }
+      channels.add(target.channel_id)
     }
   }
 

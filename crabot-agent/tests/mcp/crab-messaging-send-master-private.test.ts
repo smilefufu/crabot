@@ -220,6 +220,10 @@ describe('send_master_private', () => {
       session_id: 'sess-abc',
       friend_id: 'master-friend',
     })
+    expect(result.observedSessionTargets).toEqual([
+      { channel_id: 'feishu-001', session_id: 'sess-abc' },
+    ])
+    expect(payload).not.toHaveProperty('observedSessionTargets')
 
     // 用第一个 channel 的端口发送
     const sendCall = calls.find(c => c.method === 'send_message')
