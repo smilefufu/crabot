@@ -418,13 +418,15 @@ export interface EngineOptions {
   readonly onCompactionStart?: () => void
   /**
    * 上下文压缩结束时触发（成功与失败都触发，失败路径也要关掉 trace span）。
-   * `info` 含压缩前后消息数与耗时；`failedReason` 存在表示这次**没压成**
-   * （messages 保持原样，afterCount === beforeCount）——不得当成压缩成功汇报。
+   * `info` 含压缩前后消息数、已应用批次与耗时。`failedReason` 可以与
+   * `batchesApplied > 0` 同时存在：表示前序批次已保留，当前批次失败。
    * 值为 'aborted' 时表示任务被中止，非压缩本身故障。
    */
   readonly onCompactionEnd?: (info: {
     readonly beforeCount: number
     readonly afterCount: number
+    readonly batchesApplied: number
+    readonly consumedMessages: number
     readonly durationMs: number
     readonly failedReason?: string
   }) => void

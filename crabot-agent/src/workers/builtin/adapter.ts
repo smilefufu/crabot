@@ -146,6 +146,11 @@ function isSilentContextOverflow(result: EngineResult): boolean {
   return text.trim().length === 0
 }
 
+function isExplicitContextOverflowFailure(result: EngineResult): boolean {
+  return result.outcome === 'failed'
+    && result.error?.startsWith('上下文超限：上下文压缩失败：') === true
+}
+
 /** Re-export for backward compatibility and convenience. */
 export { WorkerExitedError }
 
@@ -1085,10 +1090,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 本次 burst 内是否真的发生过一次成功的压缩。压缩是对 messages 的**整体重写**
     // （query-loop.ts compactInPlace：messages.length = 0 后重填），一旦发生，
     // finalMessages 就不再是 initialMessages 的后缀，下面的 write-back 必须换一条路径。
-    // 判据只看 failedReason 缺席：压缩失败 / abort 都会带上它且 messages 保持原样
-    // （engine 压缩故障链修复后的语义，见 EngineOptions.onCompactionEnd 注释），
-    // 所以"没带 failedReason" ⇒ messages 已被重写。宁可多判（压缩恰好是空操作时也走整条
-    // 重写路径，代价只是多复制一份节点），也绝不能漏判——漏判就是静默数据损坏。
+    // 判据看实际应用批次数：部分成功后失败 / abort 时 messages 也已经被整体重写，
+    // 必须从最后成功状态写成一条新根链；零成功批次才保留原后缀追加路径。
     let compactedThisBurst = false
     // 本次 burst 里 worker 最后说的那段话（末一个非空 assistantText）。收尾时随状态转换一起
     // 交给 harness，进唤醒事件的 detail——manager 醒来即可知道 worker 说了什么。
@@ -1135,7 +1138,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         // 由上面的收尾段落成 idle 等下一次唤醒，本就是正常态。
         suppressForcedSummary: () => true,
         onCompactionEnd: (info) => {
-          if (info.failedReason === undefined) compactedThisBurst = true
+          if (info.batchesApplied > 0) compactedThisBurst = true
         },
         abortSignal: abortController.signal,
         messagesRef: instance.engineMessagesRef,
@@ -1188,6 +1191,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       }
 
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
+
+      if (isExplicitContextOverflowFailure(result)) {
+        await instance.outputLog.append(`[builtin-worker] ${result.error} 本化身以 failed 收场。\n`)
+        await this.transitionExited(instance, handle, 'failed', 'failed', lastAssistantText)
+        return false
+      }
 
       if (result.outcome === 'aborted' && instance.interruptRequested && !instance.killRequested) {
         instance.interruptRequested = false
@@ -1327,7 +1336,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         // 决定，不能再注入“发给人类”的第二条任务指令。
         suppressForcedSummary: () => true,
         onCompactionEnd: (info) => {
-          if (info.failedReason === undefined) compactedThisBurst = true
+          if (info.batchesApplied > 0) compactedThisBurst = true
         },
         abortSignal: abortController.signal,
         messagesRef: instance.engineMessagesRef,
@@ -1359,6 +1368,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
     await mutex.run(async () => {
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
+
+      if (isExplicitContextOverflowFailure(result)) {
+        await instance.outputLog.append(`[builtin-worker] ${result.error} 本化身以 failed 收场。\n`)
+        await this.transitionExited(instance, handle, 'failed', 'failed', instance.lastBurstAssistantText)
+        return
+      }
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         const endReason = result.outcome === 'aborted' ? this.interruptionEndReason(instance) : 'crashed'
