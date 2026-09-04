@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "marshmallow-sanitized-timeline",
+  "title": "棉花糖会话脱敏回放",
+  "redaction_notice": "仅保留经确认的问题结构；会话标识、用户标识、生产路径、凭据、媒体正文和真实项目内容均已替换。",
+  "workitems": [
+    {
+      "title": "核查会话上下文混乱",
+      "status": "in_progress",
+      "objective": "逐次还原主控请求",
+      "acceptance": ["解释每次请求为何缺少或混入信息"],
+      "current_state": "已发现多任务上下文容易混淆",
+      "next_action": "继续核对请求级证据",
+      "blockers": []
+    },
+    {
+      "title": "设计轻量任务板",
+      "status": "in_progress",
+      "objective": "形成可落地的上下文管理方案",
+      "acceptance": ["一会话一板且一板支持多任务"],
+      "current_state": "正在收敛工具契约",
+      "next_action": "验证多任务关联",
+      "blockers": []
+    }
+  ],
+  "workers": [
+    { "worker_id": "worker-request-audit", "title": "核查会话上下文混乱：逐次还原请求" },
+    { "worker_id": "worker-workboard-design", "title": "设计轻量任务板：核对工具契约" }
+  ],
+  "steps": [
+    { "kind": "worker", "worker_id": "worker-request-audit", "text": "请求还原发现一处上下文缺口，需要继续核对。" },
+    { "kind": "human", "text": "任务板保持轻量，不要加入优先级、任务项标识或执行器关联字段。" },
+    { "kind": "worker", "worker_id": "worker-workboard-design", "text": "工具契约核对完成，等待确认下一步。" },
+    { "kind": "human", "text": "继续核查最初的请求混乱，但不要把任务板内容写进记忆。" }
+  ],
+  "expect": {
+    "forbidden_tools": ["mcp__crab-memory__store_memory", "mcp__crab-memory__quick_capture", "mcp__crab-memory__update_long_term"],
+    "forbidden_calls": [
+      { "tool": "send_to_worker", "equals": { "worker_id": "worker-workboard-design" }, "contains": { "text": "请求混乱" } },
+      { "tool": "send_to_worker", "equals": { "worker_id": "worker-request-audit" }, "contains": { "text": "工具契约" } }
+    ]
+  }
+}

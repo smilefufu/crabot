@@ -15,7 +15,7 @@ import {
   shouldWakeOnHarnessEvent,
 } from '../../src/manager/inbound-adapters.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
-import type { EpisodeResult } from '../../src/manager/loop.js'
+import type { EpisodeResult, WakeEvent } from '../../src/manager/loop.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage, Friend } from '../../src/types.js'
@@ -32,6 +32,7 @@ import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
 import { QueryEstablishmentError } from '../../src/workers/errors.js'
+import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
 
 // --- Fixtures / helpers（与 tests/manager/loop.test.ts 同一套约定） ---
 
@@ -406,6 +407,42 @@ describe('ManagerRegistry', () => {
 
       expect(result.outcome).toBe('completed')
       expect(toolFaceCalls[0]).toEqual({ friendId: undefined, sessionType: 'group' })
+    })
+
+    it('工具面收到当前 episode 的原始唤醒事件，且该事件不依赖会话级身份缓存', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const owningKey = 'wechat::wake-owner' as ManagerKey
+      const workerEvent: HarnessEvent = {
+        ts: '2026-01-01T00:00:00.000Z',
+        kind: 'turn_completed',
+        worker_id: 'w-wake',
+        seq: 1,
+      }
+      const observed: WakeEvent[] = []
+      const registry = new ManagerRegistry(baseRegistryDeps({
+        adapter,
+        ledger: fakeLedger({ 'w-wake': makeLedgerWorker('w-wake', owningKey) }),
+        toolFace: (_key, _system, _schedule, _human, _permissions, _trace, wakeEvent) => {
+          if (wakeEvent) observed.push(wakeEvent)
+          return []
+        },
+      }))
+
+      const humanMessage = makeChannelMessage('检查当前项目')
+      await registry.routeHumanMessages('wechat', 'wake-human', [humanMessage], FRIEND_G)
+      await registry.routeWorkerEvent(workerEvent)
+
+      expect(observed).toHaveLength(2)
+      expect(observed[0]).toMatchObject({
+        kind: 'human_messages',
+        messages: [humanMessage],
+        friend: FRIEND_G,
+      })
+      expect(observed[1]).toMatchObject({
+        kind: 'worker_event',
+        event: expect.objectContaining({ worker_id: 'w-wake', seq: 1 }),
+      })
     })
   })
 
@@ -1442,6 +1479,15 @@ describe('ManagerRegistry', () => {
             memoryServer: makeMemoryServer(),
             callAdmin: async () => ({}),
             isSystemThread,
+            workboard: {
+              store: new ManagerWorkboardStore(join(dataDir, 'manager-workboards')),
+              managerKey: k,
+            },
+            projectDocs: {
+              ledger: fakeLedger({}),
+              readWorkerContext: async () => undefined,
+              managerKey: k,
+            },
           }),
       })
     )

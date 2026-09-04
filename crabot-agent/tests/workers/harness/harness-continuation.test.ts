@@ -34,6 +34,7 @@ import type {
   AdapterCapabilities,
   DetectResult,
   NormalizedTraceEvent,
+  ResumeOptions,
 } from '../../../src/workers/types'
 
 // ---- FakeAdapter：与 Task 7 harness-lifecycle.test.ts 同款可编程桩，本文件独立一份
@@ -63,7 +64,7 @@ class FakeAdapter implements WorkerAdapter {
   readonly preflightProvisionCalls: Array<{ ws: Workspace; caps: CapabilityBundle }> = []
   readonly provisionCalls: Array<{ ws: Workspace; caps: CapabilityBundle }> = []
   readonly spawnCalls: SpawnSpec[] = []
-  readonly resumeCalls: Array<{ prev: IncarnationRef; wakeInput: string }> = []
+  readonly resumeCalls: Array<{ prev: IncarnationRef; wakeInput: string; opts?: ResumeOptions }> = []
   readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: { raw?: boolean } }> = []
   readonly killCalls: IncarnationHandle[] = []
   readonly readTerminalCalls: IncarnationHandle[] = []
@@ -113,8 +114,8 @@ class FakeAdapter implements WorkerAdapter {
     return handle
   }
 
-  async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
-    this.resumeCalls.push({ prev, wakeInput })
+  async resume(prev: IncarnationRef, wakeInput: string, opts?: ResumeOptions): Promise<IncarnationHandle> {
+    this.resumeCalls.push({ prev, wakeInput, opts })
     if (this.opts.resumeBehavior) {
       const handle = await this.opts.resumeBehavior(prev, wakeInput)
       this.states.set(handleKey(handle), 'running')
@@ -323,6 +324,46 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     expect(resumedEvents).toHaveLength(1)
     expect(resumedEvents[0].detail).toMatchObject({ change: 'resumed' })
     expect(resumedEvents[0].seq).toBe(w.incarnations[1].seq)
+  })
+
+  it('新 revive 化身读取最新 AGENTS.md，旧化身快照保持不可变', async () => {
+    const workspace = join(dataDir, 'revive-workspace')
+    const firstRules = '# 第一版规则\n'
+    const secondRules = '# 第二版规则\n'
+    await fs.mkdir(workspace, { recursive: true })
+    await fs.writeFile(join(workspace, 'AGENTS.md'), firstRules)
+    const { harness, adaptersMap, workersDir } = await makeHarness()
+    const fake = new FakeAdapter({ caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', fake)
+
+    const worker = await harness.spawnWorker(spawnParams({ workspace }))
+    const source = worker.incarnations[0]
+    expect(fake.spawnCalls[0].workspace_instructions?.text).toBe(firstRules)
+
+    await fs.writeFile(join(workspace, 'AGENTS.md'), secondRules)
+    expect(await fs.readFile(
+      join(workersDir, worker.worker_id, 'workspace-instructions', `${source.incarnation_id}.md`),
+      'utf-8',
+    )).toBe(firstRules)
+
+    fake.emitStateChange({
+      worker_id: worker.worker_id,
+      incarnation_id: source.incarnation_id,
+      seq: source.seq,
+      impl: source.impl,
+      session_ref: source.session_ref,
+    }, 'exited')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'halted')
+    await harness.sendToWorker(worker.worker_id, '按最新规则继续')
+
+    expect(fake.resumeCalls[0].opts?.workspace_instructions?.text).toBe(secondRules)
+    const [revived] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
+    const target = revived.incarnations[1]
+    expect(await fs.readFile(
+      join(workersDir, worker.worker_id, 'workspace-instructions', `${target.incarnation_id}.md`),
+      'utf-8',
+    )).toBe(secondRules)
+    expect(await fs.readlink(join(workspace, 'CLAUDE.md'))).toBe('AGENTS.md')
   })
 
   it('升级后首次 CLI复活先建立源 session 基线，不重放旧 activity', async () => {
@@ -690,6 +731,8 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
 
     const worker = await harness.spawnWorker(spawnParams())
     const workspaceRoot = worker.incarnations[0].workspace
+    const latestRules = '# Handoff 前更新的规则\n'
+    await fs.writeFile(join(workspaceRoot, 'AGENTS.md'), latestRules)
     events.length = 0
 
     await expect(harness.sendToWorker(worker.worker_id, '接着把剩下的做完')).resolves.toBeUndefined()
@@ -700,6 +743,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(target.resumeCalls).toHaveLength(0)
     expect(target.spawnCalls).toHaveLength(1)
     const handoffSpawn = target.spawnCalls[0]
+    expect(handoffSpawn.workspace_instructions).toBeUndefined()
     expect(handoffSpawn.prompt).toContain('Handoff package:')
     expect(handoffSpawn.prompt).not.toContain('HANDOFF.md')
     expect(handoffSpawn.prompt).toContain('接着把剩下的做完')
@@ -737,6 +781,12 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(newEntry.impl).toBe('claude-code')
     expect(newEntry.forked_from).toBeUndefined()
     expect(newEntry.state).toBe('running')
+    expect(newEntry.workspace_instructions.source).toBe('agents_md')
+    expect(await fs.readFile(
+      join(workersDir, worker.worker_id, 'workspace-instructions', `${newEntry.incarnation_id}.md`),
+      'utf-8',
+    )).toBe(latestRules)
+    expect(await fs.readlink(join(workspaceRoot, 'CLAUDE.md'))).toBe('AGENTS.md')
     expect(w.task.status).toBe('running')
 
     // handoff 进度节点（handoff_started / superseded）已降为审计事件：不出现在唤醒面，

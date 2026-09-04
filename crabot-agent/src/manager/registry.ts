@@ -180,6 +180,8 @@ export interface ManagerRegistryDeps {
       hasContinuedWorker: (workerId: string) => boolean
       onWorkerContinuation: (workerId: string) => void
     },
+    /** 当前 episode 的原始唤醒事件；仅供工具调用时授权，不进入 schema 或 history。 */
+    wakeEvent?: WakeEvent,
   ) => ReadonlyArray<ToolDefinition>
   /** Manager episode trace writer（窄接口；见 ManagerLoopDeps.traceWriter）。 */
   readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
@@ -258,6 +260,7 @@ export class ManagerRegistry {
             hasContinuedWorker: (workerId) => this.loops.get(key)?.hasContinuedWorker(workerId) ?? false,
             onWorkerContinuation: (workerId) => this.loops.get(key)?.recordWorkerContinuation(workerId),
           },
+          wakeEvent,
         ),
       promptInputs: () => this.deps.promptInputs(key),
       harness: this.deps.harness,

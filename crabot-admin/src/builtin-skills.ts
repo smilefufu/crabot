@@ -71,8 +71,8 @@ export function getBuiltinSkills(): SkillRegistryEntry[] {
     {
       id: BUILTIN_SKILL_IDS.workspaceContextMaintenance,
       name: 'workspace-context-maintenance',
-      description: '进入文件工作区后维护 AGENTS.md / CURRENT_CONTEXT.md 等上下文文档；缺少上下文、会生成长期产物或用户要求记住项目规则时使用',
-      version: '1.0.0-crabot',
+      description: '在文件工作区遵守 AGENTS.md，按任务读取 README、架构、决策和领域文档，并报告长期事实缺口',
+      version: '2.0.0-crabot',
       skill_dir: join(SKILL_ROOT, 'workspace-context-maintenance'),
       source_type: 'builtin',
       is_builtin: true,
