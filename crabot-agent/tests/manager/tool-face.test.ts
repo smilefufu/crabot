@@ -354,4 +354,59 @@ describe('buildManagerToolFace', () => {
   it('装配结果本身通过护栏（buildManagerToolFace 不抛错）', () => {
     expect(() => buildManagerToolFace(makeDeps({ isSystemThread: true }))).not.toThrow()
   })
+
+  describe('send_message 参数修复（spec 2026-09-03-tool-input-repair）', () => {
+    // 渠道 ch-2 上存在 session 'sess-9'；其余渠道没有。portOf 约定与实现探测顺序无关。
+    function makeRoutingMessagingDeps(): ToolFaceDeps['messagingDeps'] {
+      const channels: Record<string, string[]> = { 'ch-1': [], 'ch-2': ['sess-9'] }
+      const ids = Object.keys(channels)
+      const portOf = new Map(ids.map((id, i) => [id, 20_000 + i]))
+      return {
+        rpcClient: {
+          call: async <P, R>(_port: number, method: string, params: P): Promise<R> => {
+            if (method === 'list_channel_instances') {
+              return { items: ids.map((id) => ({ id })) } as R
+            }
+            if (method === 'get_session') {
+              const session = (params as { session_id: string }).session_id
+              const channelId = ids.find((id) => portOf.get(id) === _port)
+              if (channelId && channels[channelId].includes(session)) {
+                return { session: { id: session } } as R
+              }
+              throw new Error('Session not found')
+            }
+            throw new Error(`unexpected method: ${method}`)
+          },
+        } as never,
+        moduleId: 'manager-test',
+        getAdminPort: async () => 19001,
+        resolveChannelPort: async (channelId: string) => portOf.get(channelId) ?? 0,
+      }
+    }
+
+    it('send_message 携带 repairInput，省略 channel_id 时按 session 反查补全', async () => {
+      const tools = buildManagerToolFace(makeDeps({
+        managerChannelId: 'ch-1',
+        messagingDeps: makeRoutingMessagingDeps(),
+      }))
+      const send = tools.find((t) => t.name === 'send_message')
+      expect(send?.repairInput).toBeTypeOf('function')
+      const repaired = await send!.repairInput!({ session_id: 'sess-9', content: 'x' })
+      expect(repaired).toEqual({ channel_id: 'ch-2', session_id: 'sess-9', content: 'x' })
+    })
+
+    it('零命中时透传；repairInput 只挂在 send_message 上', async () => {
+      const tools = buildManagerToolFace(makeDeps({
+        managerChannelId: 'ch-1',
+        messagingDeps: makeRoutingMessagingDeps(),
+      }))
+      const send = tools.find((t) => t.name === 'send_message')!
+      const input = { session_id: 'no-such', content: 'x' }
+      expect(await send.repairInput!(input)).toEqual(input)
+      // 其余工具（含其他投递工具）不带修复规则
+      for (const tool of tools) {
+        if (tool.name !== 'send_message') expect(tool.repairInput, tool.name).toBeUndefined()
+      }
+    })
+  })
 })

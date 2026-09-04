@@ -19,7 +19,7 @@ import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
 import type { McpServer } from '../../mcp/mcp-helpers.js'
 import { mcpServerToToolDefinitions } from '../../agent/mcp-tool-bridge.js'
 import { CRAB_MEMORY_MANAGER_TOOL_NAMES } from '../../mcp/crab-memory.js'
-import { buildMessagingTools } from '../../mcp/crab-messaging.js'
+import { buildMessagingTools, createSendMessageChannelRepair } from '../../mcp/crab-messaging.js'
 import type { CrabMessagingDeps, MessagingTool, MessagingToolSet } from '../../mcp/crab-messaging.js'
 import { buildWorkerTools } from './worker-tools.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
@@ -35,6 +35,8 @@ export interface ToolFaceDeps {
   readonly workerContext: Parameters<typeof buildWorkerTools>[0]['context']
   /** 复用现有类型 —— crab-messaging 的依赖注入接口。 */
   readonly messagingDeps: CrabMessagingDeps
+  /** 本 manager 归属 channel（managerKey `channel::session` 的 channel 段）。send_message 省略 channel_id 时反查的优先渠道。 */
+  readonly managerChannelId?: string
   /** crab-memory，现有 createCrabMemoryServer 产物。 */
   readonly memoryServer: McpServer
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
@@ -178,6 +180,13 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
     description: tool.description,
     inputSchema,
     isReadOnly: MESSAGING_READ_ONLY.has(tool.name),
+    ...(isSendMessage
+      ? {
+          // 确定性参数修复（spec 2026-09-03-tool-input-repair）：channel_id 省略时按
+          // session_id 反查归属渠道。修复失败/不适用由规则内部原样透传，无任何额外输出。
+          repairInput: createSendMessageChannelRepair(deps.messagingDeps, deps.managerChannelId),
+        }
+      : {}),
     call: async (input): Promise<ToolCallResult> => {
       const postSendAction = input.post_send_action
       if (isHumanDelivery && postSendAction !== 'none' && postSendAction !== 'spawn_worker') {

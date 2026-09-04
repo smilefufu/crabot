@@ -354,7 +354,7 @@ const SEND_MASTER_PRIVATE_SCHEMA = {
 }
 
 const SEND_MESSAGE_SCHEMA = {
-  channel_id: z.string().describe('Channel 模块实例 ID'),
+  channel_id: z.string().optional().describe('Channel 模块实例 ID；可省略，省略时系统按 session_id 反查归属渠道（多渠道命中时取当前 manager 归属渠道）'),
   session_id: z.string().describe('目标 Session ID'),
   content: z.string().describe('消息内容（给人类看的自然语言；禁止塞 audit/criterion/`/清除目标` 等内部黑话）'),
   intent: z.enum(['info', 'ask_human']).optional().describe('意图：info=进度告知 / 最终交付（默认，单向，不等回复）；ask_human=阻塞等人类同步回复'),
@@ -414,6 +414,67 @@ const FEISHU_WRITE_SCHEMA = {
 const FETCH_MEDIA_SCHEMA = {
   channel_id: z.string().describe('Channel 模块实例 ID'),
   handle: z.string().describe('媒体下载句柄（消息标记里的 handle=fm_xxx）'),
+}
+
+// ================================================================
+// send_message 参数修复规则（spec 2026-09-03-tool-input-repair）
+// ================================================================
+
+/**
+ * `send_message` 省略 `channel_id` 时按 `session_id` 反查归属渠道的确定性修复规则。
+ *
+ * 语义（spec 已确认）：仅当 `channel_id` 缺失且 `session_id` 为非空字符串时才尝试修复；
+ * 遍历已注册渠道逐个 `get_session` 探测（manager 归属渠道排最前）。唯一命中 → 补全；
+ * 多命中且 manager 归属渠道在列（探测顺序保证其排最前）→ 取归属渠道；多命中但归属
+ * 渠道不在列（无法确定目标）、零命中、双参全缺、本函数任一步失败 → 一律原样返回入参，
+ * 由工具自身逻辑处理（含报错）。本规则永不抛错、不感知工具返回内容。
+ */
+export function createSendMessageChannelRepair(
+  deps: Pick<CrabMessagingDeps, 'rpcClient' | 'moduleId' | 'getAdminPort' | 'resolveChannelPort'>,
+  homeChannelId?: string,
+): (input: Record<string, unknown>) => Promise<Record<string, unknown>> {
+  return async (input) => {
+    if (input.channel_id !== undefined) return input
+    const sessionId = input.session_id
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return input
+    try {
+      const adminPort = await deps.getAdminPort()
+      const result = await deps.rpcClient.call<
+        { pagination: { page: number; page_size: number } },
+        { items: Array<{ id: string }> }
+      >(adminPort, 'list_channel_instances', { pagination: { page: 1, page_size: 50 } }, deps.moduleId)
+      const ids = result.items.map((c) => c.id)
+      const ordered = homeChannelId ? [homeChannelId, ...ids.filter((id) => id !== homeChannelId)] : ids
+      const hits: string[] = []
+      for (const channelId of ordered) {
+        let port: number
+        try {
+          port = await deps.resolveChannelPort(channelId)
+        } catch {
+          continue
+        }
+        if (!port) continue
+        try {
+          await deps.rpcClient.call<{ session_id: string }, { session: unknown }>(
+            port,
+            'get_session',
+            { session_id: sessionId },
+            deps.moduleId,
+          )
+          hits.push(channelId)
+        } catch {
+          // 该渠道无此 session，继续探测下一个
+        }
+      }
+      if (hits.length === 1) return { ...input, channel_id: hits[0] }
+      if (hits.length > 1 && homeChannelId !== undefined && hits[0] === homeChannelId) {
+        return { ...input, channel_id: homeChannelId }
+      }
+      return input
+    } catch {
+      return input
+    }
+  }
 }
 
 /**
