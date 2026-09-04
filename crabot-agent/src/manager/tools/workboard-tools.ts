@@ -119,6 +119,15 @@ export function buildWorkboardTools(deps: {
     name: 'change_workboard',
     description: '创建、完整替换或归档本会话的任务项。任务项以标题和正文作语义区分，不使用对外标识或关联表。',
     inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['create', 'revise', 'archive'] },
+        current_title: { type: 'string', description: 'revise/archive 用当前标题精确定位' },
+        item: ITEM_SCHEMA,
+        archived_as: { type: 'string', enum: ['completed', 'abandoned'] },
+      },
+      required: ['action'],
+      additionalProperties: false,
       oneOf: [
         {
           type: 'object',

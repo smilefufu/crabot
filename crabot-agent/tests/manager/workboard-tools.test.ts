@@ -45,6 +45,7 @@ describe('workboard tools', () => {
     expect(tools.map((entry) => entry.name)).toEqual(['inspect_workboard', 'change_workboard'])
     expect(tool('inspect_workboard').isReadOnly).toBe(true)
     expect(tool('change_workboard').isReadOnly).toBe(false)
+    expect(tools.map((entry) => entry.inputSchema.type)).toEqual(['object', 'object'])
 
     const schemas = JSON.stringify(tools.map((entry) => entry.inputSchema)).toLowerCase()
     for (const forbidden of ['workitem_id', 'worker_id', 'priority', 'reason', 'revision_note', 'decision_doc']) {
