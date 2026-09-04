@@ -10,7 +10,7 @@
 import { resolvePath } from '../engine/tools/utils.js'
 import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
-import { SYSTEM_CHANNEL_ID, SYSTEM_SESSION_ID, type RpcClient } from 'crabot-shared'
+import { RpcCallError, SYSTEM_CHANNEL_ID, SYSTEM_SESSION_ID, type RpcClient } from 'crabot-shared'
 import type { Friend, MessageContent } from '../types.js'
 import { annotatePagination } from './pagination-annotator.js'
 import { translateChannelError } from './error-translator.js'
@@ -354,7 +354,7 @@ const SEND_MASTER_PRIVATE_SCHEMA = {
 }
 
 const SEND_MESSAGE_SCHEMA = {
-  channel_id: z.string().optional().describe('Channel 模块实例 ID；可省略，省略时系统按 session_id 反查归属渠道（多渠道命中时取当前 manager 归属渠道）'),
+  channel_id: z.string().describe('Channel 模块实例 ID'),
   session_id: z.string().describe('目标 Session ID'),
   content: z.string().describe('消息内容（给人类看的自然语言；禁止塞 audit/criterion/`/清除目标` 等内部黑话）'),
   intent: z.enum(['info', 'ask_human']).optional().describe('意图：info=进度告知 / 最终交付（默认，单向，不等回复）；ask_human=阻塞等人类同步回复'),
@@ -423,52 +423,83 @@ const FETCH_MEDIA_SCHEMA = {
 /**
  * `send_message` 省略 `channel_id` 时按 `session_id` 反查归属渠道的确定性修复规则。
  *
- * 语义（spec 已确认）：仅当 `channel_id` 缺失且 `session_id` 为非空字符串时才尝试修复；
- * 遍历已注册渠道逐个 `get_session` 探测（manager 归属渠道排最前）。唯一命中 → 补全；
- * 多命中且 manager 归属渠道在列（探测顺序保证其排最前）→ 取归属渠道；多命中但归属
- * 渠道不在列（无法确定目标）、零命中、双参全缺、本函数任一步失败 → 一律原样返回入参，
- * 由工具自身逻辑处理（含报错）。本规则永不抛错、不感知工具返回内容。
+ * 仅当 `channel_id` 缺失且 `session_id` 为非空字符串时介入。目标恰好命中一个渠道时补全；
+ * 多渠道命中时仅在当前 manager 归属渠道也命中时选择该渠道。任一列表、端口解析或探测步骤
+ * 无法给出确定结果时原样透传，由工具自身处理。本规则不生成错误，也不改写工具返回内容。
  */
 export function createSendMessageChannelRepair(
   deps: Pick<CrabMessagingDeps, 'rpcClient' | 'moduleId' | 'getAdminPort' | 'resolveChannelPort'>,
-  homeChannelId?: string,
+  managerTarget?: { readonly channel_id: string; readonly session_id: string },
 ): (input: Record<string, unknown>) => Promise<Record<string, unknown>> {
   return async (input) => {
     if (input.channel_id !== undefined) return input
     const sessionId = input.session_id
     if (typeof sessionId !== 'string' || sessionId.length === 0) return input
+
+    if (managerTarget?.session_id === sessionId) {
+      return { ...input, channel_id: managerTarget.channel_id }
+    }
+
     try {
       const adminPort = await deps.getAdminPort()
-      const result = await deps.rpcClient.call<
-        { pagination: { page: number; page_size: number } },
-        { items: Array<{ id: string }> }
-      >(adminPort, 'list_channel_instances', { pagination: { page: 1, page_size: 50 } }, deps.moduleId)
-      const ids = result.items.map((c) => c.id)
-      const ordered = homeChannelId ? [homeChannelId, ...ids.filter((id) => id !== homeChannelId)] : ids
-      const hits: string[] = []
-      for (const channelId of ordered) {
-        let port: number
-        try {
-          port = await deps.resolveChannelPort(channelId)
-        } catch {
-          continue
+      const ids: string[] = []
+      const pageSize = 50
+      let page = 1
+      let totalPages: number
+
+      do {
+        const result = await deps.rpcClient.call<
+          { page: number; page_size: number },
+          {
+            items: Array<{ id: string }>
+            pagination: {
+              page: number
+              page_size: number
+              total_items: number
+              total_pages: number
+            }
+          }
+        >(adminPort, 'list_channel_instances', { page, page_size: pageSize }, deps.moduleId)
+        if (
+          !result
+          || !Array.isArray(result.items)
+          || !result.items.every((item) => item && typeof item.id === 'string')
+          || !result.pagination
+          || !Number.isInteger(result.pagination.total_pages)
+          || result.pagination.total_pages < 0
+          || result.pagination.page !== page
+        ) {
+          return input
         }
-        if (!port) continue
+        ids.push(...result.items.map((item) => item.id))
+        totalPages = result.pagination.total_pages
+        page += 1
+      } while (page <= totalPages)
+
+      const hits: string[] = []
+      for (const channelId of ids) {
+        const port = await deps.resolveChannelPort(channelId)
+        if (!port) return input
         try {
-          await deps.rpcClient.call<{ session_id: string }, { session: unknown }>(
-            port,
-            'get_session',
-            { session_id: sessionId },
-            deps.moduleId,
-          )
+          const result = await deps.rpcClient.call<
+            { session_id: string },
+            { session: { id: string } }
+          >(port, 'get_session', { session_id: sessionId }, deps.moduleId)
+          if (!result?.session || typeof result.session.id !== 'string') return input
           hits.push(channelId)
-        } catch {
-          // 该渠道无此 session，继续探测下一个
+        } catch (error) {
+          if (error instanceof RpcCallError && error.code === 'NOT_FOUND') continue
+          return input
         }
       }
+
       if (hits.length === 1) return { ...input, channel_id: hits[0] }
-      if (hits.length > 1 && homeChannelId !== undefined && hits[0] === homeChannelId) {
-        return { ...input, channel_id: homeChannelId }
+      if (
+        hits.length > 1
+        && managerTarget !== undefined
+        && hits.includes(managerTarget.channel_id)
+      ) {
+        return { ...input, channel_id: managerTarget.channel_id }
       }
       return input
     } catch {

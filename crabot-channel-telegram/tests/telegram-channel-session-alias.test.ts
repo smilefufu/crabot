@@ -32,6 +32,17 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true })
 })
 
+describe('TelegramChannel get_session handler', () => {
+  it('session 不存在时抛协议级 NOT_FOUND', () => {
+    const invoke = () => (channel as any).handleGetSession({ session_id: 'missing' })
+
+    expect(invoke).toThrowError(expect.objectContaining({
+      name: 'RpcError',
+      code: 'NOT_FOUND',
+    }))
+  })
+})
+
 describe('TelegramChannel session aliases', () => {
   it('uses canonical session id for message store access after resolving a legacy alias', async () => {
     const legacyId = 'legacy-telegram-session-id'

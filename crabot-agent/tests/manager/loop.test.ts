@@ -2276,6 +2276,86 @@ describe('ManagerLoop', () => {
       const failed = await runSendMessageCase({ channel_id: 'feishu', session_id: 'target-session', content: '进度' }, true)
       expect(failed.successfulSendMessageTargets).toEqual([])
     })
+
+    it('repair 后的真实成功目标进入 EpisodeResult，并与 raw tool_use 证据去重', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push(
+        { toolCalls: [{ name: 'send_message', id: 'send-1', input: { session_id: 'target-session', content: '进度' } }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+      )
+      let loop: ManagerLoop
+      loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        toolFace: () => [defineTool({
+          name: 'send_message',
+          description: 'deliver',
+          inputSchema: { type: 'object', properties: {} },
+          repairInput: async (input) => ({ ...input, channel_id: 'feishu' }),
+          call: async (input) => {
+            loop.recordSuccessfulSendMessage({
+              channel_id: input.channel_id as string,
+              session_id: input.session_id as string,
+            })
+            return { output: 'delivery result', isError: false }
+          },
+        })],
+      }))
+
+      const result = await loop.wakeUp(timed({
+        kind: 'worker_event',
+        event: {
+          ts: '2026-01-01T00:00:00.000Z',
+          kind: 'supervision_due',
+          worker_id: 'w-periodic',
+          seq: 1,
+          detail: {
+            mode: 'periodic_report',
+            due_id: 'due-periodic-repaired',
+            mainline_seq: 1,
+            observation: 'tool_only',
+            report_to: { channel_id: 'feishu', session_id: 'target-session' },
+          },
+        },
+      }))
+
+      expect(result.successfulSendMessageTargets).toEqual([
+        { channel_id: 'feishu', session_id: 'target-session' },
+      ])
+    })
+
+    it('callback 与 raw tool_use 指向同一成功目标时只记录一次；失败发送不写 callback 证据', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push(
+        { toolCalls: [{ name: 'send_message', id: 'send-1', input: { channel_id: 'feishu', session_id: 'target-session' } }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+      )
+      let loop: ManagerLoop
+      loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        toolFace: () => [defineTool({
+          name: 'send_message',
+          description: 'deliver',
+          inputSchema: { type: 'object', properties: {} },
+          call: async (input) => {
+            loop.recordSuccessfulSendMessage({
+              channel_id: input.channel_id as string,
+              session_id: input.session_id as string,
+            })
+            return { output: 'delivery result', isError: false }
+          },
+        })],
+      }))
+
+      const result = await loop.wakeUp(defaultSupervisionWake('w-periodic', 'due-periodic-dedupe'))
+      expect(result.successfulSendMessageTargets).toEqual([
+        { channel_id: 'feishu', session_id: 'target-session' },
+      ])
+
+      const failed = await runSendMessageCase({ session_id: 'target-session', content: '进度' }, true)
+      expect(failed.successfulSendMessageTargets).toEqual([])
+    })
   })
 
   // --- 消息渲染器(P7 J Task 4:@、引用、媒体、时间戳、message_id) ---

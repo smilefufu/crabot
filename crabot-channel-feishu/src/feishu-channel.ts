@@ -1015,7 +1015,7 @@ export class FeishuChannel extends ModuleBase {
 
   private handleGetSession(params: GetSessionParams) {
     const session = this.sessionManager.findById(params.session_id)
-    if (!session) throwError('NOT_FOUND', 'Session not found')
+    if (!session) throw new RpcError('NOT_FOUND', 'Session not found')
     return { session }
   }
 

@@ -90,11 +90,11 @@ async function executeSingleTool(
 
   // --- PreToolUse hook ---
   if (hooks) {
-    const filePaths = extractFilePaths(block.input)
+    const filePaths = extractFilePaths(effectiveInput)
     const preInput = {
       event: 'PreToolUse' as const,
       toolName: block.name,
-      toolInput: block.input,
+      toolInput: effectiveInput,
       workingDirectory: hooks.context.workingDirectory,
       filePaths,
     }
