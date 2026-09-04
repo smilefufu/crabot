@@ -130,11 +130,7 @@ import {
   type HarnessEventKind,
 } from './worker-events'
 import { WorkerContextStore, type WorkerContext } from './context-store'
-import {
-  captureWorkspaceInstructions,
-  cleanupClaudeWorkspaceBridge,
-  prepareClaudeWorkspaceBridge,
-} from './workspace-instructions'
+import { captureWorkspaceInstructions } from './workspace-instructions'
 import {
   renderHandoffPrompt,
   writeHandoffPackage,
@@ -1079,15 +1075,6 @@ export class WorkerHarness {
         workspaceRoot: workspace.root,
         capturedAt: startedAt,
       })
-      const claudeBridge = impl === 'claude-code'
-        ? await prepareClaudeWorkspaceBridge({
-            workersDir: this.deps.workersDir,
-            workerId,
-            incarnationId,
-            workspaceRoot: workspace.root,
-            instructions,
-          })
-        : undefined
       const initial: LedgerWorker = {
         worker_id: workerId,
         manager_key: p.managerKey,
@@ -1156,9 +1143,7 @@ export class WorkerHarness {
           incarnation_id: incarnationId,
           prompt: p.prompt,
           workspace,
-          ...(impl === 'builtin' || claudeBridge?.kind === 'user_owned_claude_md'
-            ? { workspace_instructions: instructions }
-            : {}),
+          ...(impl === 'builtin' ? { workspace_instructions: instructions } : {}),
           goal: p.goal,
           origin: p.origin,
           principal_permissions: context.principal_permissions,
@@ -1181,13 +1166,6 @@ export class WorkerHarness {
         }
         await this.deps.reportWorkerOutcome?.(impl, null)
       } catch (err) {
-        // This bridge is a Harness-owned workspace artifact. A failed spawn leaves no active
-        // Claude incarnation to use it, so remove it only when this invocation created it.
-        if (claudeBridge?.managed) {
-          const { cleanupClaudeWorkspaceBridge } = await import('./workspace-instructions')
-          await cleanupClaudeWorkspaceBridge({ workersDir: this.deps.workersDir, workerId, incarnationId, workspaceRoot: workspace.root })
-            .catch((cleanupError) => console.warn(`[WorkerHarness] failed to clean Claude workspace bridge for ${workerId}:`, cleanupError))
-        }
         releaseFence()
         if (admission) await admission.dispose()
         const now = this.deps.now()
@@ -2231,30 +2209,8 @@ export class WorkerHarness {
       if (targetImpl === 'builtin' && !builtin) {
         throw new Error('WorkerHarness.legacyContinuation: builtinSpawnDefaults returned no runtime config')
       }
-      const claudeBridge = targetImpl === 'claude-code'
-        ? await prepareClaudeWorkspaceBridge({
-            workersDir: this.deps.workersDir,
-            workerId: worker.worker_id,
-            incarnationId,
-            workspaceRoot: workspace.root,
-            instructions,
-          })
-        : undefined
       const discardPreparedLegacyContinuation = (): void => {
-        if (claudeBridge?.managed) {
-          void cleanupClaudeWorkspaceBridge({
-            workersDir: this.deps.workersDir,
-            workerId: worker.worker_id,
-            incarnationId,
-            workspaceRoot: workspace.root,
-          }).catch(() => {})
-        }
         if (admission) void admission.dispose().catch(() => {})
-      }
-      const expiredAfterBridge = this.expiredInboxDelivery(item, legacy.seq)
-      if (expiredAfterBridge) {
-        discardPreparedLegacyContinuation()
-        return expiredAfterBridge
       }
       const legacyIncarnationId = requireStableIncarnationId(legacy, worker.worker_id)
       const persistedActivity = worker.legacy_source?.kind === 'ambiguous_v3_ledger'
@@ -2300,14 +2256,6 @@ export class WorkerHarness {
       const prompt = renderHandoffPrompt(handoff, item.text)
       const expiredBeforeSpawn = this.expiredInboxDelivery(item, legacy.seq)
       if (expiredBeforeSpawn) {
-        if (claudeBridge?.managed) {
-          void cleanupClaudeWorkspaceBridge({
-            workersDir: this.deps.workersDir,
-            workerId: worker.worker_id,
-            incarnationId,
-            workspaceRoot: workspace.root,
-          }).catch(() => {})
-        }
         if (admission) void admission.dispose().catch(() => {})
         return expiredBeforeSpawn
       }
@@ -2316,14 +2264,6 @@ export class WorkerHarness {
         await targetAdapter.provision(workspace, caps)
         const expiredAfterProvision = this.expiredInboxDelivery(item, legacy.seq)
         if (expiredAfterProvision) {
-          if (claudeBridge?.managed) {
-            void cleanupClaudeWorkspaceBridge({
-              workersDir: this.deps.workersDir,
-              workerId: worker.worker_id,
-              incarnationId,
-              workspaceRoot: workspace.root,
-            }).catch(() => {})
-          }
           if (admission) void admission.dispose().catch(() => {})
           return expiredAfterProvision
         }
@@ -2332,9 +2272,7 @@ export class WorkerHarness {
           incarnation_id: incarnationId,
           prompt,
           workspace,
-          ...(targetImpl === 'builtin' || claudeBridge?.kind === 'user_owned_claude_md'
-            ? { workspace_instructions: instructions }
-            : {}),
+          ...(targetImpl === 'builtin' ? { workspace_instructions: instructions } : {}),
           goal: worker.task.goal,
           origin: worker.origin,
           principal_permissions: auth.principal_permissions,
@@ -2342,14 +2280,6 @@ export class WorkerHarness {
           ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
         })
       } catch (error) {
-        if (claudeBridge?.managed) {
-          await cleanupClaudeWorkspaceBridge({
-            workersDir: this.deps.workersDir,
-            workerId: worker.worker_id,
-            incarnationId,
-            workspaceRoot: workspace.root,
-          }).catch((cleanupError) => console.warn(`[WorkerHarness] failed to clean Claude workspace bridge for ${worker.worker_id}:`, cleanupError))
-        }
         if (admission) await admission.dispose()
         throw error
       }
@@ -2850,39 +2780,10 @@ export class WorkerHarness {
     })
     const expiredAfterInstructions = this.expiredInboxDelivery(item, mainline.seq)
     if (expiredAfterInstructions) return expiredAfterInstructions
-    const claudeBridge = mainline.impl === 'claude-code'
-      ? await prepareClaudeWorkspaceBridge({
-        workersDir: this.deps.workersDir,
-        workerId: worker.worker_id,
-        incarnationId,
-        workspaceRoot: mainline.workspace,
-        instructions,
-      })
-      : undefined
-    const expiredAfterBridge = this.expiredInboxDelivery(item, mainline.seq)
-    if (expiredAfterBridge) {
-      if (claudeBridge?.managed) {
-        void cleanupClaudeWorkspaceBridge({
-          workersDir: this.deps.workersDir,
-          workerId: worker.worker_id,
-          incarnationId,
-          workspaceRoot: mainline.workspace,
-        }).catch(() => {})
-      }
-      return expiredAfterBridge
-    }
     // P6-B §6.5：resume 同样 operation-time 解析连接（revision 变化即拒绝）。
     const admission = await this.deps.admitWorkerConnection?.(mainline.impl, worker.worker_id)
     const expiredAfterAdmission = this.expiredInboxDelivery(item, mainline.seq)
     if (expiredAfterAdmission) {
-      if (claudeBridge?.managed) {
-        void cleanupClaudeWorkspaceBridge({
-          workersDir: this.deps.workersDir,
-          workerId: worker.worker_id,
-          incarnationId,
-          workspaceRoot: mainline.workspace,
-        }).catch(() => {})
-      }
       if (admission) void admission.dispose().catch(() => {})
       return expiredAfterAdmission
     }
@@ -2898,14 +2799,6 @@ export class WorkerHarness {
     }
     const expiredBeforeResume = this.expiredInboxDelivery(item, mainline.seq)
     if (expiredBeforeResume) {
-      if (claudeBridge?.managed) {
-        void cleanupClaudeWorkspaceBridge({
-          workersDir: this.deps.workersDir,
-          workerId: worker.worker_id,
-          incarnationId,
-          workspaceRoot: mainline.workspace,
-        }).catch(() => {})
-      }
       if (admission) void admission.dispose().catch(() => {})
       return expiredBeforeResume
     }
@@ -2914,9 +2807,7 @@ export class WorkerHarness {
       const returnedHandle = await adapter.resume(prevRef, text, {
         ...(admission ? { connection_env: admission.env } : {}),
         incarnation_id: incarnationId,
-        ...(mainline.impl === 'builtin' || claudeBridge?.kind === 'user_owned_claude_md'
-          ? { workspace_instructions: instructions }
-          : {}),
+        ...(mainline.impl === 'builtin' ? { workspace_instructions: instructions } : {}),
       })
       if (returnedHandle.incarnation_id !== undefined && returnedHandle.incarnation_id !== incarnationId) {
         throw new Error(`WorkerHarness.reviveIncarnation: adapter returned mismatched incarnation_id for ${worker.worker_id}`)
@@ -3090,7 +2981,6 @@ export class WorkerHarness {
     let caps
     let targetIncarnationId: string
     let targetInstructions: Awaited<ReturnType<typeof captureWorkspaceInstructions>>
-    let targetClaudeBridge: Awaited<ReturnType<typeof prepareClaudeWorkspaceBridge>> | undefined
     let handoff: HandoffPackage
     try {
       handoffContext = await this.contextStore.read(worker.worker_id)
@@ -3156,30 +3046,13 @@ export class WorkerHarness {
           )
         }
       }
-      targetClaudeBridge = targetImpl === 'claude-code'
-        ? await prepareClaudeWorkspaceBridge({
-            workersDir: this.deps.workersDir,
-            workerId: worker.worker_id,
-            incarnationId: targetIncarnationId,
-            workspaceRoot: workspace.root,
-            instructions: targetInstructions,
-          })
-        : undefined
       const discardPreparedHandoff = (): void => {
-        if (targetClaudeBridge?.managed) {
-          void cleanupClaudeWorkspaceBridge({
-            workersDir: this.deps.workersDir,
-            workerId: worker.worker_id,
-            incarnationId: targetIncarnationId,
-            workspaceRoot: workspace.root,
-          }).catch(() => {})
-        }
         if (admission) void admission.dispose().catch(() => {})
       }
-      const expiredAfterBridge = this.expiredInboxDelivery(deadlineItem, source.seq)
-      if (expiredAfterBridge) {
+      const expiredAfterInjection = this.expiredInboxDelivery(deadlineItem, source.seq)
+      if (expiredAfterInjection) {
         discardPreparedHandoff()
-        return { restoredDurableReceipt: false, delivery: expiredAfterBridge }
+        return { restoredDurableReceipt: false, delivery: expiredAfterInjection }
       }
       handoff = await this.captureHandoffPackage(worker, source, sourceAdapter, sourceHandle, capturedAt)
       const expiredAfterHandoff = this.expiredInboxDelivery(deadlineItem, source.seq)
@@ -3198,14 +3071,6 @@ export class WorkerHarness {
     try {
       const expiredBeforeHandoffEvent = this.expiredInboxDelivery(deadlineItem, source.seq)
       if (expiredBeforeHandoffEvent) {
-        if (targetClaudeBridge?.managed) {
-          void cleanupClaudeWorkspaceBridge({
-            workersDir: this.deps.workersDir,
-            workerId: worker.worker_id,
-            incarnationId: targetIncarnationId,
-            workspaceRoot: workspace.root,
-          }).catch(() => {})
-        }
         if (admission) void admission.dispose().catch(() => {})
         return { restoredDurableReceipt: false, delivery: expiredBeforeHandoffEvent }
       }
@@ -3221,14 +3086,6 @@ export class WorkerHarness {
       if (source.state !== 'exited') {
         const expiredBeforeSourceStop = this.expiredInboxDelivery(deadlineItem, source.seq)
         if (expiredBeforeSourceStop) {
-          if (targetClaudeBridge?.managed) {
-            void cleanupClaudeWorkspaceBridge({
-              workersDir: this.deps.workersDir,
-              workerId: worker.worker_id,
-              incarnationId: targetIncarnationId,
-              workspaceRoot: workspace.root,
-            }).catch(() => {})
-          }
           if (admission) void admission.dispose().catch(() => {})
           return { restoredDurableReceipt: false, delivery: expiredBeforeSourceStop }
         }
@@ -3249,14 +3106,6 @@ export class WorkerHarness {
     const prompt = renderHandoffPrompt(handoff, input)
     const expiredBeforeProvision = this.expiredInboxDelivery(deadlineItem, source.seq)
     if (expiredBeforeProvision) {
-      if (targetClaudeBridge?.managed) {
-        void cleanupClaudeWorkspaceBridge({
-          workersDir: this.deps.workersDir,
-          workerId: worker.worker_id,
-          incarnationId: targetIncarnationId,
-          workspaceRoot: workspace.root,
-        }).catch(() => {})
-      }
       if (admission) void admission.dispose().catch(() => {})
       return { restoredDurableReceipt: false, delivery: expiredBeforeProvision }
     }
@@ -3265,14 +3114,6 @@ export class WorkerHarness {
       await newAdapter.provision(workspace, caps)
       const expiredBeforeSpawn = this.expiredInboxDelivery(deadlineItem, source.seq)
       if (expiredBeforeSpawn) {
-        if (targetClaudeBridge?.managed) {
-          void cleanupClaudeWorkspaceBridge({
-            workersDir: this.deps.workersDir,
-            workerId: worker.worker_id,
-            incarnationId: targetIncarnationId,
-            workspaceRoot: workspace.root,
-          }).catch(() => {})
-        }
         if (admission) void admission.dispose().catch(() => {})
         return { restoredDurableReceipt: false, delivery: expiredBeforeSpawn }
       }
@@ -3281,9 +3122,7 @@ export class WorkerHarness {
         incarnation_id: targetIncarnationId,
         prompt,
         workspace,
-        ...(targetImpl === 'builtin' || targetClaudeBridge?.kind === 'user_owned_claude_md'
-          ? { workspace_instructions: targetInstructions }
-          : {}),
+        ...(targetImpl === 'builtin' ? { workspace_instructions: targetInstructions } : {}),
         goal: worker.task.goal,
         origin: worker.origin,
         principal_permissions: principalPermissions,
@@ -3291,14 +3130,6 @@ export class WorkerHarness {
         ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
       })
     } catch (error) {
-      if (targetClaudeBridge?.managed) {
-        await cleanupClaudeWorkspaceBridge({
-          workersDir: this.deps.workersDir,
-          workerId: worker.worker_id,
-          incarnationId: targetIncarnationId,
-          workspaceRoot: workspace.root,
-        }).catch((cleanupError) => console.warn(`[WorkerHarness] failed to clean Claude workspace bridge for ${worker.worker_id}:`, cleanupError))
-      }
       // provision/spawn 失败：dispose admission；只认 impl 失效证据才置 degraded。
       if (error instanceof WorkerImplUnavailableError) {
         await this.deps.reportWorkerOutcome?.(targetImpl, error.message)
@@ -5910,7 +5741,6 @@ export class WorkerHarness {
     let forkHandle: IncarnationHandle | undefined
     let forkInstructions: Awaited<ReturnType<typeof captureWorkspaceInstructions>> | undefined
     const forkIncarnationId = randomUUID()
-    let forkClaudeBridge: Awaited<ReturnType<typeof prepareClaudeWorkspaceBridge>> | undefined
     const disposeAdmission = async (): Promise<void> => {
       const owned = admission
       admission = undefined
@@ -5921,17 +5751,6 @@ export class WorkerHarness {
         console.error(`[WorkerHarness] failed to dispose query admission ${prep.receipt.query_id}:`, error)
       }
     }
-    const cleanupPreparedBridge = async (): Promise<void> => {
-      if (!forkClaudeBridge?.managed) return
-      await cleanupClaudeWorkspaceBridge({
-        workersDir: this.deps.workersDir,
-        workerId,
-        incarnationId: forkIncarnationId,
-        workspaceRoot: prep.workspace,
-      }).catch((error) => {
-        console.warn(`[WorkerHarness] failed to clean query workspace bridge ${prep.receipt.query_id}:`, error)
-      })
-    }
     try {
       forkInstructions = await captureWorkspaceInstructions({
         workersDir: this.deps.workersDir,
@@ -5940,23 +5759,12 @@ export class WorkerHarness {
         workspaceRoot: prep.workspace,
         capturedAt: this.deps.now(),
       })
-      forkClaudeBridge = prep.implId === 'claude-code'
-        ? await prepareClaudeWorkspaceBridge({
-          workersDir: this.deps.workersDir,
-          workerId,
-          incarnationId: forkIncarnationId,
-          workspaceRoot: prep.workspace,
-          instructions: forkInstructions,
-        })
-        : undefined
       admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
       const forkOptions: ForkOptions = {
         query_id: prep.receipt.query_id,
         incarnation_id: forkIncarnationId,
         establishment_deadline_at: prep.receipt.establishment_deadline_at,
-        ...(prep.implId === 'builtin' || forkClaudeBridge?.kind === 'user_owned_claude_md'
-          ? { workspace_instructions: forkInstructions }
-          : {}),
+        ...(prep.implId === 'builtin' ? { workspace_instructions: forkInstructions } : {}),
         ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
       }
       const remainingMs = Date.parse(prep.receipt.establishment_deadline_at) - Date.parse(this.deps.now())
@@ -5980,16 +5788,13 @@ export class WorkerHarness {
         throw new Error('adapter returned a fork handle with a mismatched query_id')
       }
     } catch (error) {
-      let forkStopped = forkHandle === undefined
       if (forkHandle) {
         try {
           await prep.adapter.kill(forkHandle)
-          forkStopped = true
         } catch (killError) {
           console.error(`[WorkerHarness] failed to stop rejected query fork ${prep.receipt.query_id}:`, killError)
         }
       }
-      if (forkStopped) await cleanupPreparedBridge()
       await disposeAdmission()
       return this.failQueryEstablishment(
         prep.receipt,

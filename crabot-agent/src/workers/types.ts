@@ -18,7 +18,7 @@ export interface WorkspaceInstructionSnapshot {
   readonly artifact_id?: string
 }
 
-/** Harness-private, immutable AGENTS.md capture delivered to an adapter at incarnation launch. */
+/** Harness-private, immutable AGENTS.md capture delivered only to builtin at incarnation launch. */
 export interface WorkspaceInstructionPayload {
   readonly snapshot: WorkspaceInstructionSnapshot
   readonly text?: string
@@ -183,7 +183,7 @@ export interface ForkOptions {
   readonly incarnation_id?: IncarnationId
   readonly establishment_deadline_at: string
   readonly connection_env?: Record<string, string>
-  /** Present only when this adapter needs Harness to inject the AGENTS.md capture at launch. */
+  /** Present only for builtin; CLI implementations discover their workspace instruction file natively. */
   readonly workspace_instructions?: WorkspaceInstructionPayload
 }
 
@@ -266,7 +266,7 @@ export interface SpawnSpec {
   readonly incarnation_id?: IncarnationId
   readonly prompt: string
   readonly workspace: Workspace
-  /** Present only when this adapter needs Harness to inject the AGENTS.md capture at launch. */
+  /** Present only for builtin; CLI implementations discover their workspace instruction file natively. */
   readonly workspace_instructions?: WorkspaceInstructionPayload
   /**
    * P6-B §6.5：operation admission 由 translator 注入的最小连接 env（CLI adapter 透传到
@@ -308,7 +308,7 @@ export interface SpawnSpec {
 export interface ResumeOptions {
   readonly connection_env?: Record<string, string>
   readonly incarnation_id?: IncarnationId
-  /** Present only when this adapter needs Harness to inject the AGENTS.md capture at launch. */
+  /** Present only for builtin; CLI implementations discover their workspace instruction file natively. */
   readonly workspace_instructions?: WorkspaceInstructionPayload
 }
 

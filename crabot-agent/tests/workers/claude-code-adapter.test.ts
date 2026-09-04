@@ -426,7 +426,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    '用户自有 CLAUDE.md 时可把 AGENTS.md 快照追加到启动上下文',
+    '即使调用方误传 workspace snapshot，Claude 启动也只依赖原生 CLAUDE.md 发现',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const argvFile = path.join(dataDir, 'spawn-workspace-instructions-argv.jsonl')
@@ -449,10 +449,8 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
       })
 
       const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
-      const promptIndex = argv.indexOf('--append-system-prompt')
-      expect(promptIndex).toBeGreaterThan(-1)
-      expect(argv[promptIndex + 1]).toContain(agents)
-      expect(argv[promptIndex + 1]).toContain('read-only snapshot')
+      expect(argv).not.toContain('--append-system-prompt')
+      expect(argv).not.toContain(expect.stringContaining(agents))
 
       await adapter.kill(h)
     },

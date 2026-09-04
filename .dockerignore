@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+**/node_modules
+**/dist
+**/dist-eval
+**/data
+**/coverage
+**/*.log
+crabot-docs
+crabot-agent/eval/manager-context/out

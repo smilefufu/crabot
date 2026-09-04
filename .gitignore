@@ -43,6 +43,8 @@ coverage/
 .pytest_cache/
 .coverage
 htmlcov/
+crabot-agent/dist-eval/
+crabot-agent/eval/manager-context/out/
 
 # V8 heap snapshots（OOM 自动 dump 的诊断文件，体积大）
 *.heapsnapshot

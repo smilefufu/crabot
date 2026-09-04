@@ -13,6 +13,7 @@ import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { ActivityContextAdmissionReceipt } from '../../src/workers/harness/worker-events.js'
 import { createUserMessage, defineTool } from '../../src/engine/index.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
+import { MANAGER_WORKBOARD_CONTEXT } from '../../src/manager/prompt.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // --- Fixtures / helpers ---
@@ -256,7 +257,7 @@ describe('ManagerLoop', () => {
     expect(state.lastActiveAt).toBeTruthy()
   })
 
-  it('同一 episode 内时钟、台账与通知变化不改变 system prompt，也不自动读取台账', async () => {
+  it('任务板规则稳定装配，但动态任务状态不进入 system prompt，也不触发自动读取', async () => {
     const { adapter, queue, calls } = makeAdapter()
     queue.push(
       { toolCalls: [{ name: 'mutate_dynamic_state', id: 'mutate-1', input: {} }], stopReason: 'tool_use' },
@@ -291,9 +292,14 @@ describe('ManagerLoop', () => {
     expect(calls).toHaveLength(3)
     for (const call of calls) {
       expect(call.systemPrompt).toBe(calls[0].systemPrompt)
+      expect(call.systemPrompt).toContain(MANAGER_WORKBOARD_CONTEXT)
       expect(call.systemPrompt).not.toContain('dynamic-note-before-sentinel')
       expect(call.systemPrompt).not.toContain('dynamic-note-after-sentinel')
     }
+    expect(MANAGER_WORKBOARD_CONTEXT).toContain('任务板不会自动进入上下文')
+    expect(MANAGER_WORKBOARD_CONTEXT).toContain('主动查阅任务板')
+    expect(MANAGER_WORKBOARD_CONTEXT).not.toContain('重启')
+    expect(MANAGER_WORKBOARD_CONTEXT).not.toContain('压缩后')
     expect(listWorkers).not.toHaveBeenCalled()
   })
 

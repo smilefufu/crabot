@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "sentinels": {
+    "workboard": "WORKBOARD_SENTINEL_MARSHMALLOW_CONTEXT",
+    "project_doc": "PROJECT_DOC_SENTINEL_SHARED_FACT",
+    "task_a": "TASK_A_CONTEXT_AUDIT",
+    "task_b": "TASK_B_DOCKER_EVAL",
+    "old_acceptance": "OLD_ACCEPTANCE_SUMMARY_ONLY",
+    "new_acceptance": "NEW_ACCEPTANCE_REVIEW_EVERY_REQUEST"
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "runs_per_scenario": 3,
+  "scenarios": [
+    {
+      "id": "unrelated-task",
+      "title": "两个无关任务交错补充",
+      "workitems": [
+        {
+          "title": "核查上下文请求",
+          "status": "in_progress",
+          "objective": "逐次核查上下文请求",
+          "acceptance": ["给出请求级证据"],
+          "current_state": "正在核查",
+          "next_action": "继续还原请求",
+          "blockers": []
+        }
+      ],
+      "workers": [
+        { "worker_id": "worker-context-audit", "title": "核查上下文请求：还原请求记录" }
+      ],
+      "steps": [
+        { "kind": "human", "text": "新增一个无关需求【回归任务乙】：制作 Docker 隔离评测，请现在开始。" }
+      ],
+      "expect": {
+        "required_tools": ["spawn_worker"],
+        "required_calls": [
+          { "tool": "spawn_worker", "contains": { "title": "回归任务乙", "prompt": "Docker" } }
+        ],
+        "forbidden_calls": [
+          { "tool": "send_to_worker", "equals": { "worker_id": "worker-context-audit" } }
+        ]
+      }
+    },
+    {
+      "id": "similar-title-different-goal",
+      "title": "标题相关但交付目标不同",
+      "workers": [
+        { "worker_id": "worker-report-api", "title": "报表能力：实现数据接口" },
+        { "worker_id": "worker-report-ui", "title": "报表能力：实现前端页面" }
+      ],
+      "steps": [
+        { "kind": "human", "text": "请继续【报表前端】任务，把筛选条件展示在页面上。" }
+      ],
+      "expect": {
+        "required_calls": [
+          { "tool": "send_to_worker", "equals": { "worker_id": "worker-report-ui" }, "contains": { "text": "筛选条件" } }
+        ],
+        "forbidden_calls": [
+          { "tool": "send_to_worker", "equals": { "worker_id": "worker-report-api" } }
+        ]
+      }
+    },
+    {
+      "id": "revised-objective",
+      "title": "阻塞后修改目标和验收",
+      "workitems": [
+        {
+          "title": "迁移校验",
+          "status": "blocked",
+          "objective": "输出迁移摘要",
+          "acceptance": ["旧验收标记"],
+          "current_state": "遇到无法绕过的阻塞",
+          "next_action": "等待目标调整",
+          "blockers": ["原方案不可行"]
+        }
+      ],
+      "workers": [
+        { "worker_id": "worker-migration", "title": "迁移校验：验证原迁移方案" }
+      ],
+      "steps": [
+        { "kind": "human", "text": "把【迁移校验】目标改为逐条核对，完整的新验收是【新验收标记】，继续相关任务。" }
+      ],
+      "expect": {
+        "required_tools": ["change_workboard"],
+        "required_calls": [
+          { "tool": "send_to_worker", "equals": { "worker_id": "worker-migration" }, "contains": { "text": "新验收标记" } }
+        ],
+        "forbidden_calls": [
+          { "tool": "change_workboard", "equals": { "action": "archive" } }
+        ]
+      }
+    },
+    {
+      "id": "ambiguous-reference",
+      "title": "模糊指代需要消歧",
+      "workers": [
+        { "worker_id": "worker-alpha", "title": "发布检查：核对构建产物" },
+        { "worker_id": "worker-beta", "title": "发布检查：核对上线记录" }
+      ],
+      "steps": [
+        { "kind": "human", "text": "继续处理那个。" }
+      ],
+      "expect": {
+        "required_tools": ["send_message"],
+        "required_calls": [
+          { "tool": "send_message", "contains_any": { "content": ["哪", "哪个", "具体"] } }
+        ],
+        "forbidden_tools": ["send_to_worker", "spawn_worker"]
+      }
+    },
+    {
+      "id": "summary-omits-acceptance",
+      "title": "摘要缺少验收但任务板保留",
+      "workitems": [
+        {
+          "title": "压缩恢复",
+          "status": "in_progress",
+          "objective": "恢复多任务上下文",
+          "acceptance": ["压缩后验收唯一标记"],
+          "current_state": "摘要只保留了任务名称",
+          "next_action": "按完整验收继续",
+          "blockers": []
+        }
+      ],
+      "steps": [
+        { "kind": "human", "text": "请按【压缩恢复】当前完整验收继续，但不要猜验收内容。" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard"]
+      }
+    },
+    {
+      "id": "decision-change",
+      "title": "项目决策发生变化",
+      "steps": [
+        { "kind": "human", "text": "项目根是 {{project_root}}。我们已经决定把上下文规则改为按需查询，请核对旧决策并更新决策文档。" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_project_docs", "manage_decision_doc"],
+        "forbidden_tools": ["mcp__crab-memory__store_memory", "mcp__crab-memory__quick_capture", "mcp__crab-memory__update_long_term"]
+      }
+    }
+  ]
+}
