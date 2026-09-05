@@ -224,7 +224,7 @@ function parseCodexModels(raw: unknown[]): ModelInfo[] {
       display_name: (typeof item.display_name === 'string' && item.display_name) || slug,
       type: 'llm',
       supports_vision: supportsVision,
-      context_window: typeof item.context_window === 'number' ? item.context_window : undefined,
+      ...(typeof item.context_window === 'number' && { context_window: item.context_window }),
     })
   }
   return models
@@ -282,6 +282,10 @@ export function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
     const supportsVision =
       type === 'llm' &&
       (capabilities?.vision === true || modalities.includes('image') || item.supports_image_in === true)
+    const contextWindow =
+      (typeof item.context_window === 'number' ? item.context_window : undefined) ??
+      (typeof item.context_length === 'number' ? item.context_length : undefined) ??
+      (typeof item.context_tokens === 'number' ? item.context_tokens : undefined)
 
     models.push({
       model_id: modelId,
@@ -291,10 +295,7 @@ export function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
         modelId,
       type,
       supports_vision: supportsVision,
-      context_window:
-        (typeof item.context_window === 'number' ? item.context_window : undefined) ??
-        (typeof item.context_length === 'number' ? item.context_length : undefined) ??
-        (typeof item.context_tokens === 'number' ? item.context_tokens : undefined),
+      ...(contextWindow !== undefined && { context_window: contextWindow }),
     })
   }
   return models

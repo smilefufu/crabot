@@ -22,6 +22,18 @@ describe('isNonChatModel', () => {
 })
 
 describe('parseOpenAIModels', () => {
+  it.each([
+    [{ context_window: 128000 }, 128000],
+    [{ context_length: 262144 }, 262144],
+    [{ context_tokens: 64000 }, 64000],
+    [{ context_window: 128000, context_length: 262144, context_tokens: 64000 }, 128000],
+    [{ context_window: null, context_length: 262144 }, 262144],
+    [{ context_window: '128000', context_tokens: 64000 }, 64000],
+  ])('preserves numeric context metadata and alias precedence: %j', (metadata, expected) => {
+    const [model] = parseOpenAIModels([{ id: 'test-model', ...metadata }])
+    expect(model.context_window).toBe(expected)
+  })
+
   it('keeps image models with type image, excludes embeddings', () => {
     const models = parseOpenAIModels([
       { id: 'gpt-4o' },
