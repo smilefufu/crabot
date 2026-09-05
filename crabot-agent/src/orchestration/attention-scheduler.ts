@@ -129,6 +129,11 @@ export class AttentionScheduler {
     return this.states.get(sessionId)?.buffer.length ?? 0
   }
 
+  /** Admin 可观测性只读快照：复制数组，不创建状态、不消费消息。 */
+  snapshotBuffer(sessionId: SessionId): BufferedMessage[] {
+    return [...(this.states.get(sessionId)?.buffer ?? [])]
+  }
+
   private getOrCreateState(sessionId: SessionId): SessionAttentionState {
     let state = this.states.get(sessionId)
     if (!state) {

@@ -100,6 +100,36 @@ describe('SessionLane', () => {
     // 第二批应该是 b/c/d 合并
     expect(calls).toEqual([['a'], ['b', 'c', 'd']])
   })
+
+  it('snapshot 同时返回当前 batch 和后续队列，读取不消费或重排', async () => {
+    let release: () => void = () => {}
+    const blocker = new Promise<void>(resolve => { release = resolve })
+    const calls: string[][] = []
+    const lane = new SessionLane<string>(
+      'k',
+      async (batch) => {
+        calls.push([...batch])
+        if (calls.length === 1) await blocker
+      },
+      vi.fn(),
+    )
+
+    lane.enqueue('a')
+    await new Promise(setImmediate)
+    lane.enqueue('b')
+    lane.enqueue('c')
+
+    const snapshot = lane.snapshot()
+    expect(snapshot).toEqual({ current: ['a'], queued: ['b', 'c'] })
+    snapshot.current.splice(0)
+    snapshot.queued.reverse()
+
+    expect(lane.snapshot()).toEqual({ current: ['a'], queued: ['b', 'c'] })
+    release()
+    await new Promise(setImmediate)
+    await new Promise(setImmediate)
+    expect(calls).toEqual([['a'], ['b', 'c']])
+  })
 })
 
 describe('SessionLaneRegistry', () => {
@@ -141,5 +171,20 @@ describe('SessionLaneRegistry', () => {
     const second = registry.getOrCreate('k')
     expect(second).not.toBe(first)
     expect(registry.size()).toBe(1)
+  })
+
+  it('snapshot 只读取 exact key，未知或已注销 lane 返回空快照', async () => {
+    let release: () => void = () => {}
+    const blocker = new Promise<void>(resolve => { release = resolve })
+    const registry = new SessionLaneRegistry<string>(async () => blocker)
+    registry.getOrCreate('target').enqueue('a')
+    await new Promise(setImmediate)
+
+    expect(registry.snapshot('target')).toEqual({ current: ['a'], queued: [] })
+    expect(registry.snapshot('other')).toEqual({ current: [], queued: [] })
+
+    release()
+    await new Promise(setImmediate)
+    expect(registry.snapshot('target')).toEqual({ current: [], queued: [] })
   })
 })

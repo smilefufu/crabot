@@ -5,6 +5,16 @@
 
 ## 当前状态
 
+### Manager 会话在途消息统一时间流：实现完成
+
+- Admin 只读聚合 Manager 当前上下文、私聊 SessionLane 和群聊 AttentionScheduler，按
+  `platform_message_id` 去重后暴露 `queued / processing`；`processing` 只表示消息已进入
+  尚未结束的 episode 上下文，不新增运行时状态或持久化副本。
+- 会话详情将排队中、正在处理和已处理活动按消息/episode 时间统一倒序展示；轮询不重叠，页面
+  隐藏时暂停，旧页面响应不可覆盖新页面；running episode 与对应 processing 消息不重复。
+- Spec 与 agent-v3 `3.9.2` 已先行发布（crabot-docs `d44dc8e`）；Agent/Admin/Web 定向测试、
+  三包 TypeScript/生产构建及桌面/窄屏浏览器验收均通过。
+
 ### send_message 缺 channel_id 的确定性修复改为来源登记：已合入（PR #141，main `c8311d58`）
 
 - 已将发送时的 Channel 枚举与逐实例 `get_session` 探测替换为当前 Manager 的运行时多值索引：
