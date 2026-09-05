@@ -5,6 +5,11 @@
 
 ## 当前状态
 
+### 模型目录刷新兼容缺省上下文长度：已修复
+
+- OpenAI/Codex 模型目录缺少上下文长度时省略 `context_window`，避免 `undefined` 导致配置指纹
+  计算异常并返回 500；已有数值和字段别名优先级保持不变。回归覆盖真实指纹、落盘和重复刷新。
+
 ### send_message 缺 channel_id 的确定性修复改为来源登记：已合入（PR #141，main `c8311d58`）
 
 - 已将发送时的 Channel 枚举与逐实例 `get_session` 探测替换为当前 Manager 的运行时多值索引：

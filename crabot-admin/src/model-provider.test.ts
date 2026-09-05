@@ -2,10 +2,11 @@
  * Model Provider Manager 单元测试
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs/promises'
 import path from 'path'
 import { ModelProviderManager } from './model-provider-manager.js'
+import { CoreAgentConfigMutationCoordinator } from './core-agent-config-revision-store.js'
 import type { CreateModelProviderParams, ModelProvider } from './types.js'
 
 describe('ModelProviderManager', () => {
@@ -22,6 +23,7 @@ describe('ModelProviderManager', () => {
   })
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     // 清理测试目录
     await fs.rm(testDataDir, { recursive: true, force: true })
   })
@@ -131,6 +133,54 @@ describe('ModelProviderManager', () => {
       asAny.fetchVendorModels = async () => models.map((m) => ({ ...m }))
       // 厂商返回与本地一致是最常见的 refresh 结果：必须允许 noop 并继续后续流程。
       await expect(manager.refreshModels(created.id)).resolves.toMatchObject({ added: [], removed: [] })
+    })
+
+    it.each([
+      {
+        vendor: 'openai', format: 'openai' as const,
+        response: { data: [
+          { id: 'unknown-context', object: 'model', created: 1, owned_by: 'openai' },
+          { id: 'known-context', context_window: 128000 },
+        ] },
+      },
+      {
+        vendor: 'chatgpt-subscription', format: 'openai-responses' as const,
+        response: { models: [
+          { slug: 'unknown-context', visibility: 'list' },
+          { slug: 'known-context', visibility: 'list', context_window: 128000 },
+        ] },
+      },
+    ])('refreshes $format models without context lengths through config fingerprinting', async ({ vendor, format, response }) => {
+      const created = await manager.createProvider({
+        name: 'Preset', type: 'preset', preset_vendor: vendor, format,
+        endpoint: 'https://provider.example/v1', api_key: 'test-key', models: [],
+      })
+      const snapshot = () => ({ providers: manager.listProviders().map(({ id, models }) => ({ id, models })) })
+      const publishInvalidation = vi.fn()
+      const coordinator = new CoreAgentConfigMutationCoordinator(testDataDir, {
+        readSemanticSnapshot: snapshot, publishInvalidation,
+      })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop) => {
+        await coordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop)
+      })
+      await coordinator.initialize()
+
+      const clientVersion = await import('./oauth/codex-client-version.js')
+      vi.spyOn(clientVersion, 'resolveCodexClientVersion').mockResolvedValue('0.124.0')
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(response)))
+
+      const refreshed = await manager.refreshModels(created.id)
+      expect(refreshed).toMatchObject({ added: ['unknown-context', 'known-context'], removed: [] })
+      expect(refreshed.models[0]).not.toHaveProperty('context_window')
+      expect(refreshed.models[1].context_window).toBe(128000)
+      const persisted = JSON.parse(await fs.readFile(path.join(testDataDir, 'model_providers.json'), 'utf8'))
+      expect(persisted[0].models).toStrictEqual(refreshed.models)
+      expect((await coordinator.current()).revision).toBe(2)
+
+      await expect(manager.refreshModels(created.id)).resolves.toMatchObject({ added: [], removed: [] })
+      expect((await coordinator.current()).revision).toBe(2)
+      expect(publishInvalidation).toHaveBeenCalledTimes(1)
     })
 
     it('clears OAuth credential idempotently (logout of a logged-out provider is a noop)', async () => {
