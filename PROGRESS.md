@@ -5,7 +5,7 @@
 
 ## 当前状态
 
-### send_message 缺 channel_id 的确定性修复改为来源登记：实现与验证完成，待 PR review
+### send_message 缺 channel_id 的确定性修复改为来源登记：已合入（PR #141，main `c8311d58`）
 
 - 已将发送时的 Channel 枚举与逐实例 `get_session` 探测替换为当前 Manager 的运行时多值索引：
   成功的结构化 messaging 结果登记 `session_id → Set<channel_id>`，缺参发送只做本地查询；
@@ -14,12 +14,12 @@
   重启后自然清空。raw MCP 仍要求显式 `channel_id`，内部观察元数据不进入工具结果。
 - 正式协议 crab-messaging v0.3.7 与修订 Spec 已先行发布（crabot-docs `b725b1c`）。
 
-### Agent Engine 自适应增量上下文压缩：实现与验证完成，待 PR #139 review
+### Agent Engine 自适应增量上下文压缩：已合入（PR #139，main `9be4c5fd`）
 
 - Manager 与 builtin Worker 已共用 Engine 单一批次算法：按当前模型窗口的 80% 规划完整摘要请求，
   遇摘要截断或 Provider 上下文超限自适应缩批；成功批次不回滚，调用方各自保留持久化与生命周期语义。
 
-### Manager 会话任务板与项目文档共享：实现与定向验证完成，待非 Draft PR review
+### Manager 会话任务板与项目文档共享：已合入（PR #138，main `ab275c14`），边界收口验证完成
 
 - 已确认并发布设计、计划及正式协议（crabot-docs `753c922`）：每个 Manager 会话一张支持多任务的
   轻量任务板；任务项以可独立理解的标题和完整当前快照作语义区分，不暴露 ID、优先级、修订理由、
@@ -30,9 +30,12 @@
 - `AGENTS.md` / `CLAUDE.md` 规范化为长期相对软链接的一份正文；双缺失保持 absent，历史双正文冲突
   fail loud，仅迁移有私有记录证明所有权的旧 bridge。builtin 注入不可变快照，Claude/Codex 使用
   原生文件发现；revive、fork、handoff 的新化身读取最新正文。
-- Manager 提示词只保留一段简明的任务板使用规则；无关任务必须使用新 Worker，要求变化时向仍相关
-  Worker 发送完整新要求。Docker 隔离确定性评测 13/13 通过，Memory 调用 0；无专用 Provider
-  凭据时行为评测明确跳过。
+- Manager 提示词只保留一段简明的任务板使用规则；任务板和决策文档由 Manager 直接维护，Worker 只
+  查阅决策文档并返回证据；无关任务必须使用新 Worker，要求变化时向仍相关 Worker 发送完整新要求。
+  项目/任务偏好进入决策文档，只有跨项目、跨任务长期适用的通用偏好进入 Memory。
+- 在最新 `c8311d58` 基线上重新构建验证：TypeScript 编译通过，定向测试 20/20，Docker 确定性评测
+  13/13；`mirror-xinshu / gpt-5.6-sol` 真实行为评测 105/105，八个场景均 3/3，共 171 次脱敏 LLM
+  请求且无请求错误。报告未包含 API key、Bearer 凭证或宿主绝对路径。
 
 ### 事件面收敛（kind 粒度=处置规则粒度，一次物理事实一次唤醒）：已合入（PR #137，main `83da131a`）
 
@@ -361,6 +364,9 @@
 
 - **任务板 Admin Web 共管界面**：本期只落 Manager 工具与存储；人类查看、编辑和归档任务项的界面及
   API 另行设计，不阻塞当前能力。
+- **`spawn_worker.workspace` 无效可选值容错**：真实上下文评测的无关任务场景前两轮分别传入不存在路径
+  和空字符串，工具拒绝后模型省略参数并成功重试，三轮最终均创建新 Worker。需独立评估 schema 或参数
+  修复层是否应把无效可选值视为省略，以减少额外模型回合；不阻塞任务板与偏好分流上线。
 - **启动对账 PR #125 review 遗留**：① `realignAliveIncarnation` 矛盾修复硬写 `running`（理论风险：
   矛盾+idle 场景会被 sweep 误报一次停摆，触发面窄）；② `ensureInteractionInspected` 先清标记后执行，
   探测抛错时该次重检丢失（与合入前行为一致）。
