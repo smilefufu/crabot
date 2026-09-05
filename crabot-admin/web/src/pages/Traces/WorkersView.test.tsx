@@ -383,12 +383,41 @@ describe('WorkerDetail', () => {
 
     renderDetail()
 
-    await screen.findByRole('button', { name: /工具调用：调用 shell.*展开详情/ })
+    await screen.findByRole('button', { name: /工具调用：调用 shell · 执行中.*展开详情/ })
     expect(screen.queryByText('Worker 文本')).not.toBeInTheDocument()
     expect(screen.queryByText('任务输出')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '技术事件 1' }))
     expect(await screen.findByRole('button', { name: /原生记录 · 模型调用：llm tool_use/ })).toBeInTheDocument()
+  })
+
+  it('增量工具结果按 call_id 合并到原调用，并从执行中切换为已返回结果', async () => {
+    mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
+    mocked.getWorkerTrace = vi.fn()
+      .mockResolvedValueOnce({
+        events: [{
+          ts: '2026-08-01T00:00:02.000Z', kind: 'tool_call', role: 'assistant', summary: 'delegate_task', source: 'native',
+          detail: { call_id: 'engine-call-1', tool_use_id: 'provider-call-1', name: 'delegate_task', input: '{"task":"核对数据"}' },
+        }],
+        next_cursor: 'cursor-after-call',
+      })
+      .mockResolvedValueOnce({
+        events: [{
+          ts: '2026-08-01T00:00:03.000Z', kind: 'tool_result', role: 'user', summary: '已启动', source: 'native',
+          subagent_id: 'agent-child-1',
+          detail: { call_id: 'engine-call-1', tool_use_id: 'provider-call-1', output: '{"agent_id":"agent-child-1","status":"launched"}' },
+        }],
+        next_cursor: 'cursor-after-result',
+      })
+    mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
+
+    renderDetail()
+
+    expect(await screen.findByRole('button', { name: /工具调用：调用 delegate_task · 执行中.*展开详情/ })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '检查新活动' }))
+    expect(await screen.findByRole('button', { name: /工具调用：调用 delegate_task · 已返回结果.*展开详情/ })).toBeInTheDocument()
+    expect(screen.queryByText('工具结果')).not.toBeInTheDocument()
+    expect(mocked.getWorkerTrace).toHaveBeenLastCalledWith('w-1234567890ab', { seq: 1, cursor: 'cursor-after-call' })
   })
 
   it('builtin assistant text 在默认活动流中显示为 Worker 文本', async () => {

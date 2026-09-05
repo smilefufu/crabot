@@ -405,6 +405,68 @@ describe('BuiltinWorkerAdapter', () => {
     })
   })
 
+  it('首次 spawn 把执行用的同一 prompt 传给化身 trace，且只传一次', async () => {
+    const startIncarnationTrace = vi.fn(() => 'trace-initial')
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace,
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+    })
+    const s = spec({ adapter: makeAdapter([{ text: '等待后续', stopReason: 'end_turn' }]) })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    expect(startIncarnationTrace).toHaveBeenCalledOnce()
+    expect(startIncarnationTrace).toHaveBeenCalledWith(expect.objectContaining({
+      worker_id: s.worker_id,
+      seq: 1,
+      initial_input: s.prompt,
+    }))
+  })
+
+  it('工具生命周期只写 trace，不在完整 turn 前触发 native activity 通知', async () => {
+    const gate = deferred<void>()
+    const appendToolLifecycle = vi.fn()
+    const onNativeActivity = vi.fn()
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      onNativeActivity,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-tool',
+        appendTurn: () => {},
+        appendToolLifecycle,
+        finishIncarnationTrace: () => {},
+      },
+    })
+    const waitTool = defineTool({
+      name: 'wait_tool', description: 'wait', inputSchema: {},
+      call: async () => {
+        await gate.promise
+        return { output: 'done', isError: false }
+      },
+    })
+    const h = await adapter.spawn(spec({
+      adapter: makeAdapter([
+        { toolCalls: [{ name: 'wait_tool', id: 'provider-call', input: {} }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+      ]),
+      tools: [waitTool],
+    }))
+
+    await vi.waitFor(() => expect(appendToolLifecycle).toHaveBeenCalledWith(
+      'trace-tool', expect.objectContaining({ type: 'tool_started', toolUseId: 'provider-call' }),
+    ))
+    expect(onNativeActivity).not.toHaveBeenCalled()
+
+    gate.resolve()
+    await waitState(adapter, h, 'idle')
+    expect(onNativeActivity).toHaveBeenCalled()
+  })
+
   it('没有可读结构化 trace 时，巡检保守返回 unknown', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const h = await adapter.spawn(spec({
@@ -470,6 +532,59 @@ describe('BuiltinWorkerAdapter', () => {
     await expect(adapter.inspectSupervisionActivity(h, { offset: 2 })).resolves.toEqual({
       kind: 'text',
       next_cursor: { offset: 3 },
+    })
+  })
+
+  it('append-only 工具结果可从上次 cursor 单独读到，并与调用共享 call_id', async () => {
+    const trace = {
+      spans: [{
+        span_id: 'source-call',
+        type: 'tool_call',
+        started_at: '2026-08-20T01:00:01.000Z',
+        status: 'completed',
+        details: {
+          call_id: 'engine-call', tool_use_id: 'provider-call', tool_name: 'delegate_task',
+          input_summary: '{"task":"核对数据"}',
+        },
+      }],
+    } as unknown as AgentTrace
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+      traceReader: { readTrace: async () => trace },
+    })
+    const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+    await waitState(adapter, h, 'idle')
+
+    const first = await adapter.readTrace(h)
+    expect(first).toMatchObject({
+      events: [{ kind: 'tool_call', detail: { call_id: 'engine-call', tool_use_id: 'provider-call' } }],
+      nextCursor: { offset: 1 },
+    })
+
+    trace.spans.push({
+      span_id: 'source-result',
+      trace_id: 'trace-1',
+      type: 'tool_result',
+      started_at: '2026-08-20T01:00:02.000Z',
+      ended_at: '2026-08-20T01:00:02.000Z',
+      status: 'completed',
+      details: {
+        call_id: 'engine-call', tool_use_id: 'provider-call', tool_name: 'delegate_task',
+        output_summary: '{"agent_id":"agent-child","status":"launched"}',
+        subagent_id: 'agent-child',
+      },
+    } as never)
+    await expect(adapter.readTrace(h, first.nextCursor)).resolves.toMatchObject({
+      events: [{
+        kind: 'tool_result', subagent_id: 'agent-child',
+        detail: { call_id: 'engine-call', tool_use_id: 'provider-call' },
+      }],
+      nextCursor: { offset: 2 },
     })
   })
 

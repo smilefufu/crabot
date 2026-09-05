@@ -1,15 +1,9 @@
-import { randomBytes } from 'node:crypto'
-import { promises as fs } from 'node:fs'
-import path from 'node:path'
 import { createAdapter } from '../../engine/llm-adapter.js'
 import { thinkingParam } from '../../engine/llm-adapter-types.js'
-import { forkEngine } from '../../engine/sub-agent.js'
-import { recordSubAgentTurn } from '../../engine/sub-agent-trace.js'
 import { spawnPersistentAgent } from '../../engine/bg-entities/bg-agent.js'
 import type { BgEntityRegistry } from '../../engine/bg-entities/registry.js'
 import type { BgAgentRegistryRecord } from '../../engine/bg-entities/types.js'
 import { createLspDiagnosticsHook } from '../../hooks/defaults.js'
-import { getBgEntitiesLogsDir } from '../../core/data-paths.js'
 import type { TraceStore } from '../../core/trace-store.js'
 import type { ResolvedPermissions, SkillConfig, SubAgentConfig } from '../../types.js'
 import type { ToolCallContext, ToolCallResult, ToolDefinition, ToolPermissionConfig } from '../../engine/types.js'
@@ -18,6 +12,7 @@ import {
   buildCapabilitiesForSubAgent,
   permissionConfigForSubAgent,
 } from '../../agent/subagent-tool-filter.js'
+import { buildDelegatedTaskPrompt } from '../../agent/delegate-task-tool.js'
 import { assembleSubAgentPrompt } from '../../agent/subagent-prompt-assembler.js'
 import { createBuiltinWorkerHookRegistry } from './runtime.js'
 
@@ -100,7 +95,7 @@ export class BuiltinSubagentRunner {
 
   async run(
     subagent: SubAgentConfig,
-    input: { task: string; context?: string; sync?: boolean },
+    input: { task: string; context?: string },
     context: ToolCallContext,
     parentTools: ReadonlyArray<ToolDefinition>,
     execution: BuiltinSubagentExecutionContext,
@@ -120,23 +115,12 @@ export class BuiltinSubagentRunner {
     }
     const childPrompt = assembleSubAgentPrompt(subagent, {
       parentTaskId: worker.worker_id,
-      callerLabel: input.sync ? 'builtin worker' : 'builtin worker (async)',
+      callerLabel: 'builtin worker (async)',
       availableSkills: childCapabilities.skills,
     })
-    if (input.sync) {
-      return this.runSynchronously(
-        subagent,
-        input,
-        context,
-        childCapabilities.tools,
-        childPrompt,
-        worker,
-        childExecution,
-      )
-    }
 
     const entityId = await spawnPersistentAgent({
-      prompt: input.task,
+      prompt: buildDelegatedTaskPrompt(input),
       task_description: input.task,
       subagent_type: subagent.name,
       tools: childCapabilities.tools,
@@ -233,104 +217,6 @@ export class BuiltinSubagentRunner {
       }))
   }
 
-  private async runSynchronously(
-    subagent: SubAgentConfig,
-    input: { task: string; context?: string },
-    context: ToolCallContext,
-    childTools: ReadonlyArray<ToolDefinition>,
-    childPrompt: string,
-    worker: NonNullable<ToolCallContext['worker_subagent']>,
-    execution: BuiltinSubagentExecutionContext,
-  ): Promise<ToolCallResult> {
-    const registry = this.requireRegistry()
-    const entityId = `agent_${randomBytes(6).toString('hex')}`
-    const now = new Date().toISOString()
-    const trace = this.traceStore.startTrace({
-      module_id: 'sub-agent',
-      trigger: { type: 'sub_agent_call', summary: `[${subagent.name}] ${input.task}`.slice(0, 200) },
-      parent_trace_id: worker.parent_trace_id!,
-    })
-    const logsDir = getBgEntitiesLogsDir()
-    await fs.mkdir(logsDir, { recursive: true })
-    await registry.register({
-      entity_id: entityId,
-      type: 'agent',
-      subagent_type: subagent.name,
-      trace_id: trace.trace_id,
-      status: 'running',
-      task_description: input.task,
-      messages_log_file: path.join(logsDir, `${entityId}.jsonl`),
-      result_file: null,
-      owner: { friend_id: WORKER_OWNER, worker_id: worker.worker_id },
-      spawned_by_task_id: worker.worker_id,
-      spawned_at: now,
-      exit_code: null,
-      ended_at: null,
-      last_activity_at: now,
-    })
-    const controller = new AbortController()
-    this.abortControllers.set(entityId, controller)
-    const abortParent = () => controller.abort()
-    context.abortSignal?.addEventListener('abort', abortParent, { once: true })
-    try {
-      const result = await forkEngine({
-        prompt: input.task,
-        adapter: createAdapter({
-          endpoint: subagent.model.endpoint,
-          apikey: subagent.model.apikey,
-          format: subagent.model.format,
-          ...(subagent.model.account_id ? { accountId: subagent.model.account_id } : {}),
-        }),
-        model: subagent.model.model_id,
-        systemPrompt: childPrompt,
-        tools: childTools,
-        maxTurns: subagent.max_turns,
-        ...(subagent.model.max_tokens !== undefined ? { maxTokens: subagent.model.max_tokens } : {}),
-        ...(thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) !== undefined
-          ? { thinking: thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) }
-          : {}),
-        ...(input.context ? { parentContext: input.context } : {}),
-        abortSignal: controller.signal,
-        onTurn: (event) => recordSubAgentTurn(this.traceStore, trace.trace_id, event, this.redactText),
-        supportsVision: subagent.model.supports_vision,
-        ...(subagent.model.context_window !== undefined ? { contextWindowTokens: subagent.model.context_window } : {}),
-        permissionConfig: execution.permissionConfig,
-        resolvedPermissions: execution.resolvedPermissions,
-        senderIsMaster: false,
-        hookRegistry: this.childHookRegistry(subagent),
-        lspManager: subagent.hook_preset === 'lsp_diagnostics' ? this.lspManager : undefined,
-      })
-      const completed = result.outcome === 'completed'
-      this.traceStore.endTrace(trace.trace_id, completed ? 'completed' : 'failed', {
-        summary: (result.output || result.error || '').slice(0, 200),
-        ...(!completed && result.error ? { error: result.error.slice(0, 200) } : {}),
-      })
-      await registry.update(entityId, {
-        status: completed ? 'completed' : 'failed',
-        result_file: null,
-        exit_code: completed ? 0 : 1,
-        ended_at: new Date().toISOString(),
-      })
-      return {
-        isError: !completed,
-        output: JSON.stringify({
-          agent_id: entityId,
-          status: completed ? 'completed' : 'failed',
-          output: result.output,
-          child_trace_id: trace.trace_id,
-        }),
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.traceStore.endTrace(trace.trace_id, 'failed', { summary: message.slice(0, 200), error: message.slice(0, 200) })
-      await registry.update(entityId, { status: 'failed', error: message, exit_code: 1, ended_at: new Date().toISOString() })
-      return { isError: true, output: JSON.stringify({ agent_id: entityId, status: 'failed', child_trace_id: trace.trace_id, error: message }) }
-    } finally {
-      context.abortSignal?.removeEventListener('abort', abortParent)
-      this.abortControllers.delete(entityId)
-    }
-  }
-
   private capabilitiesFor(
     subagent: SubAgentConfig,
     parentTools: ReadonlyArray<ToolDefinition>,
@@ -372,10 +258,33 @@ function normalizeTraceSpan(span: import('../../types.js').AgentSpan): Normalize
   }
   if (span.type === 'tool_call') {
     const name = typeof details.tool_name === 'string' ? details.tool_name : 'tool call'
+    const input = typeof details.input_summary === 'string' ? details.input_summary : undefined
+    const callId = typeof details.call_id === 'string' ? details.call_id : span.span_id
     return [
-      { ts: span.started_at, kind: 'tool_call', role: 'assistant', summary: name, detail: details },
-      ...(typeof details.output_summary === 'string' ? [{ ts: span.ended_at ?? span.started_at, kind: 'tool_result' as const, role: 'user' as const, summary: details.output_summary, detail: details }] : []),
+      {
+        ts: span.started_at,
+        kind: 'tool_call',
+        role: 'assistant',
+        summary: name,
+        detail: { ...details, call_id: callId, name, ...(input !== undefined ? { input } : {}) },
+      },
+      ...(typeof details.output_summary === 'string' ? [{ ts: span.ended_at ?? span.started_at, kind: 'tool_result' as const, role: 'user' as const, summary: details.output_summary, detail: { ...details, call_id: callId } }] : []),
     ]
+  }
+  if (span.type === 'tool_result') {
+    const output = typeof details.output_summary === 'string'
+      ? details.output_summary
+      : typeof details.error === 'string' ? details.error : ''
+    const callId = typeof details.call_id === 'string' ? details.call_id : span.span_id
+    const subagentId = typeof details.subagent_id === 'string' ? details.subagent_id : undefined
+    return [{
+      ts: span.started_at,
+      kind: 'tool_result',
+      role: 'user',
+      summary: output,
+      detail: { ...details, call_id: callId, output },
+      ...(subagentId ? { subagent_id: subagentId } : {}),
+    }]
   }
   return [{ ts: span.started_at, kind: 'lifecycle', summary: span.type, detail: details }]
 }

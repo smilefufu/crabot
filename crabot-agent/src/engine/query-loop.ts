@@ -23,6 +23,7 @@ import { formatError } from './error-utils'
 import type { HookInput } from '../hooks/types'
 import { executeHooks } from '../hooks/hook-executor'
 import * as fs from 'fs'
+import { randomUUID } from 'crypto'
 import { getWorkspaceDir } from '../core/data-paths.js'
 
 // --- Public Interface ---
@@ -450,6 +451,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       return finishTask()
     }
 
+    const toolCallIds = new Map(processed.toolUseBlocks.map((block) => [block.id, randomUUID()]))
+
     // ── Barrier check: wait for potential supplement before executing tools ──
     if (options.humanMessageQueue?.hasBarrier) {
       await options.humanMessageQueue.waitBarrier(abortSignal)
@@ -487,6 +490,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           turnNumber: totalTurns,
           assistantText: processed.text,
           toolCalls: processed.toolUseBlocks.map(b => ({
+            callId: toolCallIds.get(b.id)!,
             id: b.id,
             name: b.name,
             input: b.input,
@@ -532,6 +536,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           turnNumber: totalTurns,
           assistantText: processed.text,
           toolCalls: processed.toolUseBlocks.map(b => ({
+            callId: toolCallIds.get(b.id)!,
             id: b.id,
             name: b.name,
             input: b.input,
@@ -580,6 +585,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         toolCalls: processed.toolUseBlocks.map(b => {
           const r = exitToolResultById.get(b.id)
           return {
+            callId: toolCallIds.get(b.id)!,
             id: b.id,
             name: b.name,
             input: b.input,
@@ -612,7 +618,11 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       abortSignal,
       ...(options.timezone ? { timezone: options.timezone } : {}),
       ...(options.hasPendingExternalInputs ? { hasPendingExternalInput: options.hasPendingExternalInputs } : {}),
-    }, options.permissionConfig, hooks)
+    }, options.permissionConfig, hooks, {
+      turnNumber: totalTurns,
+      callIds: toolCallIds,
+      onToolLifecycle: options.onToolLifecycle,
+    })
     // Live progress: tools finished
     if (options.onLiveProgress) {
       options.onLiveProgress({
@@ -659,6 +669,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       toolCalls: processed.toolUseBlocks.map((b, i) => {
         const r = toolResults[i]
         const tc: EngineTurnEvent['toolCalls'][number] = {
+          callId: toolCallIds.get(b.id)!,
           id: b.id,
           name: b.name,
           input: b.input,

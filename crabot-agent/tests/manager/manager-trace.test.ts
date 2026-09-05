@@ -103,6 +103,10 @@ describe('TraceStore manager episode traces', () => {
     store.appendManagerSpan('ep-5', {
       span_id: 'sp-live', type: 'llm_call', started_at: new Date().toISOString(), status: 'running', details: { n: 1 },
     })
+    store.appendManagerSpan('ep-5', {
+      span_id: 'tool-live', type: 'tool_call', started_at: new Date().toISOString(), status: 'running',
+      details: { call_id: 'call-live', name: 'slow_tool', input_summary: '{}' },
+    })
     // span 增量走 deferred flush（覆盖式 running 文件）；生产由 15s 定时器兜底。
     ;(store as unknown as { flushInFlightTraces(): void }).flushInFlightTraces()
     const rebuilt = new TraceStore(100, dir, 'traces-running.jsonl', 'traces-v3-')
@@ -112,6 +116,14 @@ describe('TraceStore manager episode traces', () => {
     expect(episode.outcome?.summary).toContain('interrupted')
     expect(episode.spans[0].status).toBe('failed')
     expect(episode.spans[0].details).toEqual({ n: 1 })
+    expect(episode.spans[1]).toMatchObject({
+      status: 'failed',
+      details: {
+        call_id: 'call-live',
+        output_summary: '[interrupted: agent restarted]',
+        is_error: true,
+      },
+    })
     rebuilt.stopFlushTimer()
   })
 

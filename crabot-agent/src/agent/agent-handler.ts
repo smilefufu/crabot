@@ -62,7 +62,6 @@ import type {
   TaskSummary,
   MemoryPermissions,
   RuntimeSceneProfile,
-  AgentTrace,
 } from '../types.js'
 import type { RpcClient } from 'crabot-shared'
 import { SYSTEM_CHANNEL_ID } from 'crabot-shared'
@@ -70,14 +69,12 @@ import { mcpServerToToolDefinitions } from './mcp-tool-bridge.js'
 import { imageToolsFor, type ImageConnInfo } from '../mcp/crab-image.js'
 import { formatMessageContent, resolveImageBlocks, EMPTY_MESSAGE_PLACEHOLDER } from './media-resolver.js'
 import type { McpConnector } from './mcp-connector.js'
-import { forkEngine } from '../engine/sub-agent.js'
 import type { SubAgentTraceConfig } from '../engine/sub-agent.js'
-import { createDelegateTaskTool } from './delegate-task-tool.js'
+import { buildDelegatedTaskPrompt, createDelegateTaskTool } from './delegate-task-tool.js'
 import type { RunSubAgentFn, RunSubAgentInput } from './delegate-task-tool.js'
 import { createSubagentCoordinatorTools } from './subagent-coordinator-tools.js'
 import { createTmpPageTools } from './tmp-page-tools.js'
 import { createRequestRestartTool } from './restart-instance-tool.js'
-import { buildSubAgentFailureOutput } from './subagent-error-classifier.js'
 import {
   buildCapabilitiesForSubAgent,
   permissionConfigForSubAgent,
@@ -90,7 +87,7 @@ import {
 } from '../prompts/agent-sections.js'
 import type { SubAgentConfig } from '../types.js'
 import { HumanMessageQueue } from '../engine/human-message-queue.js'
-import { createSubAgentHookRegistry, createCliPermissionHook, createSkillDirFenceHook } from '../hooks/defaults.js'
+import { createCliPermissionHook, createSkillDirFenceHook } from '../hooks/defaults.js'
 import { HookRegistry } from '../hooks/hook-registry.js'
 import type { ContentReviewer } from '../hooks/types.js'
 import { reviewCliContent } from './cli-content-reviewer.js'
@@ -162,7 +159,7 @@ export function extractLaunchedSubagentId(output: string | undefined): string | 
       return parsed.agent_id
     }
   } catch {
-    // 非 JSON / 非 async-launched 结果（sync 路径直接返回文字），忽略
+    // 非 JSON / 非 async-launched 结果忽略
   }
   return undefined
 }
@@ -405,7 +402,7 @@ export function adapterFromSdkEnv(sdkEnv: SdkEnvConfig) {
 
 /**
  * 按 subagent / auditor 解析出的 model（LLMConnectionInfo）自建 adapter。
- * 同步(runSubAgentDirect)、异步(runSubAgentAsync)、goal_audit 三条派发路径共用，
+ * delegate_task 异步派发与系统侧模型调用共用，
  * 确保子 agent 始终用自己 provider 的 endpoint/apikey，绝不复用父 agent 的 adapter
  * （否则会把子模型名发到父端点，如 deepseek 模型打到 Codex 镜像 → HTTP 400）。
  */
@@ -1575,12 +1572,10 @@ export class AgentHandler {
           const baseRunSubAgent = this.makeRunSubAgent({
             parentTools: baseTools,
             parentTaskId: task.task_id,
-            callerLabel: 'main worker',
             getCwd,
             humanQueue,
             permissionConfig: baseToolsPermissionConfig,
             traceConfig: subAgentTraceConfig,
-            asyncEnabled: isMasterPrivate,
             asyncCtx: {
               owner: {
                 friend_id: context.sender_friend?.id ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`,
@@ -1589,8 +1584,8 @@ export class AgentHandler {
               },
             },
           })
-          // wrap：异步路径返回 `{agent_id, status:'launched'}` → 抓出来加入 taskState.activeAsyncSubagentIds，
-          // 供 end_turn.hasActiveAsyncSubagent 判断。同步路径不带 launched 状态，不影响。
+          // delegate_task 返回 `{agent_id, status:'launched'}` → 抓出来加入
+          // taskState.activeAsyncSubagentIds，供 end_turn.hasActiveAsyncSubagent 判断。
           const trackingRunSubAgent: typeof baseRunSubAgent = async (subagent, input, ctx) => {
             const result = await baseRunSubAgent(subagent, input, ctx)
             if (!result.isError && typeof result.output === 'string') {
@@ -1642,8 +1637,8 @@ export class AgentHandler {
           }))
         }
 
-        // 3k. Subagent coordinator tools（async 路径：list_active_subagents / get_subagent_output / stop_subagent）
-        // 仅在 asyncEnabled（master + 私聊）时注入，其他场景 subagent 是同步的，无需协调工具
+        // 3k. Subagent coordinator tools（list_active_subagents / get_subagent_output / stop_subagent）
+        // 仅 master 私聊注入；其它场景由完成通知驱动后续 turn。
         if (isMasterPrivate) {
           tools.push(...createSubagentCoordinatorTools({
             taskId: task.task_id,
@@ -3380,326 +3375,30 @@ export class AgentHandler {
   }
 
   /**
-   * 直接执行 subagent 的核心 helper，被 makeRunSubAgent（delegate_task 路径）
-   * 和 goal audit gate 路径（Task 7 引入的 runGoalAudit）共用。
-   *
-   * 与 makeRunSubAgent 的关系：makeRunSubAgent 只是把 deps 闭包包成 RunSubAgentFn 薄壳，
-   * 实际执行（tool filter → prompt 装配 → adapter → sub-trace → forkEngine → 错误包装）
-   * 全在这里。goal audit gate 可通过 traceSummaryPrefix/traceTaskType 定制 trace 显示
-   * 而不需要复制粘贴这段逻辑。
-   *
-   * 返回值额外带 traceId，方便上层（如 goal audit）记录子 trace ID。
-   * makeRunSubAgent 会把 traceId 摘掉再返回（RunSubAgentFn 类型不含此字段）。
-   */
-  private async runSubAgentDirect(
-    subagent: SubAgentConfig,
-    input: import('./delegate-task-tool.js').RunSubAgentInput,
-    ctx: import('../engine/types.js').ToolCallContext,
-    deps: {
-      readonly parentTools: ReadonlyArray<import('../engine/types.js').ToolDefinition>
-      readonly parentTaskId: string
-      readonly callerLabel: string
-      readonly getCwd?: () => string
-      readonly humanQueue?: import('../engine/human-message-queue.js').HumanMessageQueue
-      readonly permissionConfig?: import('../engine/types.js').ToolPermissionConfig
-      readonly traceConfig?: SubAgentTraceConfig
-      /** trace summary 前缀；缺省 `[${subagent.name}]`。goal_audit 路径传 `'[goal_audit]'`。 */
-      readonly traceSummaryPrefix?: string
-      /** trigger.task_type；缺省不设。goal_audit 路径传 `'goal_audit'`，Admin UI 用来标特殊样式。 */
-      readonly traceTaskType?: string
-      /** caller 注入的专属工具（如 audit 路径的 submit_audit_result），
-       *  在 capability filter **之后** concat 进 subTools。这些工具不走 capability 体系，
-       *  专属用法不污染通用过滤逻辑。 */
-      readonly extraTools?: ReadonlyArray<import('../engine/types.js').ToolDefinition>
-    },
-  ): Promise<import('../engine/types.js').ToolCallResult & {
-    readonly traceId?: string
-    /** auditor 等系统侧 caller 用的 raw subagent output（裸 finalText，不被 JSON 包裹）。
-     *  delegate_task 工具路径继续用 output（JSON 包了元信息）；runGoalAudit 等不要解 JSON。 */
-    readonly rawOutput?: string
-    /** exitsLoop 工具触发的早退判决：tool name + schema-enforced input。
-     *  例：audit subagent 调 submit_audit_result(pass, failed_criteria, evidence)
-     *  时直接拿到结构化判决，不必 regex parse free text。 */
-    readonly exitToolCall?: { readonly name: string; readonly input: Record<string, unknown> }
-    /** ForkEngineResult.outcome 顶层透出，让系统侧 caller（如 runGoalAudit）能
-     *  在 isError=true 之外进一步区分 max_turns（截断）与 failed（异常）。
-     *  catch 抛错路径不填（属于纯异常，按 unknown 走）。 */
-    readonly outcome?: import('../engine/types.js').EngineResult['outcome']
-  }> {
-    // 1. filter parent tools by subagent capabilities (delegate_task always excluded by filter)
-    const subCapabilities = buildCapabilitiesForSubAgent({
-      parentTools: deps.parentTools,
-      capabilities: subagent.builtin_capabilities,
-      allowedMcpServerIds: subagent.allowed_mcp_server_ids,
-      allowedSkillIds: subagent.allowed_skill_ids,
-      availableSkills: filterNonAgentCrabotSkills(this.skills),
-      getCwd: deps.getCwd,
-    })
-    // caller 注入的专属工具（如 audit 的 submit_audit_result）在 capability filter
-    // 之后 concat，绕开 filter 的 unknown-default-deny 逻辑（这些工具不属于任何
-    // capability group，本来就会被剔除）。
-    const subTools = deps.extraTools
-      ? [...subCapabilities.tools, ...deps.extraTools]
-      : subCapabilities.tools
-    const subPermissionConfig = permissionConfigForSubAgent(
-      deps.permissionConfig,
-      subCapabilities.skills,
-    )
-
-    // 2. assemble 5-section system prompt
-    const systemPrompt = assembleSubAgentPrompt(subagent, {
-      parentTaskId: deps.parentTaskId,
-      callerLabel: deps.callerLabel,
-      availableSkills: subCapabilities.skills,
-    })
-
-    // 3. build adapter from subagent's resolved model
-    const subAdapter = adapterFromModel(subagent.model)
-
-    // 4. resolve hook registry：lsp_diagnostics 预设（post-edit 诊断 push） + git 写操作 fence（按能力叠加）
-    const wantsLspDiagnostics = subagent.hook_preset === 'lsp_diagnostics'
-    const hookRegistry = createSubAgentHookRegistry({
-      lspDiagnostics: wantsLspDiagnostics,
-      gitWriteFence: subagent.allowed_mcp_server_ids.includes('git'),
-    })
-    // lspManager 仅 lsp-diagnostics 钩子需要；git-fence 不依赖它。
-    const lspManager = wantsLspDiagnostics ? this.lspManager : undefined
-
-    // 5. trace stitching: create sub-trace linked to parent trace
-    const tc = deps.traceConfig
-    let subTrace: AgentTrace | undefined
-    let subTraceCallback: ((event: EngineTurnEvent) => void) | undefined
-
-    if (tc) {
-      // summary 前缀带 subagent name，让 Admin Traces 列表展开行一眼看出
-      // "这是谁派的子任务" — 否则只能看见 task prompt 内容，分不清是哪个 subagent。
-      // goal_audit 等定制路径可通过 deps.traceSummaryPrefix 覆盖。
-      const taskPrompt = String(input.task).slice(0, 180)
-      const summaryPrefix = deps.traceSummaryPrefix ?? `[${subagent.name}]`
-      subTrace = tc.traceStore.startTrace({
-        module_id: 'sub-agent',
-        trigger: {
-          type: 'sub_agent_call',
-          summary: `${summaryPrefix} ${taskPrompt}`,
-          ...(deps.traceTaskType ? { task_type: deps.traceTaskType } : {}),
-        },
-        parent_trace_id: tc.parentTraceId,
-        parent_span_id: tc.parentSpanId,
-        related_task_id: tc.relatedTaskId,
-      })
-
-      // onTurn fires post-hoc (after LLM + tools); back-date span timestamps
-      // with engine-measured ms to keep the waterfall accurate.
-      subTraceCallback = (event: EngineTurnEvent) => {
-        const llmEndedAtMs =
-          event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined
-            ? event.llmStartedAtMs + event.llmCallMs
-            : undefined
-
-        const llmSpan = tc.traceStore.startSpan(subTrace!.trace_id, {
-          type: 'llm_call',
-          details: {
-            iteration: event.turnNumber,
-            input_summary: `turn ${event.turnNumber}`,
-          },
-          ...(event.llmStartedAtMs !== undefined ? { started_at_ms: event.llmStartedAtMs } : {}),
-        })
-
-        for (const toolCall of event.toolCalls) {
-          const toolEndedAtMs =
-            toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined
-              ? toolCall.startedAtMs + toolCall.durationMs
-              : undefined
-
-          const toolSpan = tc.traceStore.startSpan(subTrace!.trace_id, {
-            type: 'tool_call',
-            parent_span_id: llmSpan.span_id,
-            details: {
-              tool_name: toolCall.name,
-              input_summary: JSON.stringify(toolCall.input ?? {}).slice(0, 200),
-            },
-            ...(toolCall.startedAtMs !== undefined ? { started_at_ms: toolCall.startedAtMs } : {}),
-          })
-          tc.traceStore.endSpan(
-            subTrace!.trace_id,
-            toolSpan.span_id,
-            toolCall.isError ? 'failed' : 'completed',
-            {
-              output_summary: String(toolCall.output).slice(0, 500),
-              error: toolCall.isError ? String(toolCall.output) : undefined,
-            },
-            toolEndedAtMs,
-          )
-        }
-
-        tc.traceStore.endSpan(
-          subTrace!.trace_id,
-          llmSpan.span_id,
-          'completed',
-          {
-            stop_reason: event.stopReason ?? undefined,
-            output_summary: event.assistantText.slice(0, 200) || undefined,
-            tool_calls_count: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
-          },
-          llmEndedAtMs,
-        )
-      }
-    }
-
-    // TODO(phase-2b): image_paths support for vision subagents
-    try {
-      const result = await forkEngine({
-        prompt: input.task,
-        adapter: subAdapter,
-        model: subagent.model.model_id,
-        systemPrompt,
-        tools: subTools,
-        maxTurns: subagent.max_turns,
-        ...(subagent.model.max_tokens !== undefined ? { maxTokens: subagent.model.max_tokens } : {}),
-        // role fallback 解析的 subagent 连接信息自带槽位 thinking（spec §6.4）；直连引用不带 → undefined
-        ...(thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) !== undefined
-          ? { thinking: thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) }
-          : {}),
-        ...(input.context ? { parentContext: input.context } : {}),
-        abortSignal: ctx.abortSignal,
-        onTurn: subTraceCallback,
-        supportsVision: subagent.model.supports_vision,
-        ...(subagent.model.context_window !== undefined ? { contextWindowTokens: subagent.model.context_window } : {}),
-        hookRegistry,
-        lspManager,
-        permissionConfig: subPermissionConfig,
-      })
-
-      // outcome 一并视为"非完成"的两个 case：failed（异常）+ max_turns（截断）。
-      // exitToolCall 触发（exitsLoop 工具被调）= 业务终态，按 completed 处理。
-      const isAbnormalExit =
-        (result.outcome === 'failed' || result.outcome === 'max_turns') &&
-        result.exitToolCall === undefined
-
-      if (subTrace && tc) {
-        const traceSummary = result.output.slice(0, 200) || result.error?.slice(0, 200) || ''
-        // max_turns 的元信息独立维护，不被 partial output 覆盖——partial 可能有几十
-        // turn 累出的文本，会顶掉 "max_turns reached" 字符串导致 trace 里分不清失败原因。
-        const maxTurnsTag = result.outcome === 'max_turns'
-          ? `[max_turns reached after ${result.totalTurns} turns]`
-          : ''
-        const baseError = isAbnormalExit
-          ? (result.error?.slice(0, 200) || result.output.slice(0, 200) || undefined)
-          : undefined
-        const errorWithTag = maxTurnsTag
-          ? (baseError ? `${maxTurnsTag} ${baseError}` : maxTurnsTag)
-          : baseError
-        tc.traceStore.endTrace(
-          subTrace.trace_id,
-          isAbnormalExit ? 'failed' : 'completed',
-          {
-            summary: traceSummary,
-            error: errorWithTag,
-          },
-        )
-      }
-
-      if (isAbnormalExit) {
-        const isMaxTurns = result.outcome === 'max_turns'
-        const errSrc = result.error || (isMaxTurns ? undefined : result.output) || 'subagent failed without error message'
-        const failure = buildSubAgentFailureOutput({
-          errorSource: isMaxTurns ? new Error(`max_turns reached (${result.totalTurns} turns)`) : new Error(errSrc),
-          subagentName: subagent.name,
-          providerEndpoint: subagent.model.endpoint,
-          model: subagent.model.model_id,
-          ...(result.output ? { partialOutput: result.output } : {}),
-          totalTurns: result.totalTurns,
-          ...(subTrace ? { childTraceId: subTrace.trace_id } : {}),
-          ...(isMaxTurns ? { kindOverride: 'max_turns' as const, stopReason: 'max_turns' as const } : { stopReason: 'failed' as const }),
-        })
-        return {
-          output: JSON.stringify(failure),
-          rawOutput: result.output,
-          isError: true,
-          outcome: result.outcome,
-          ...(subTrace ? { traceId: subTrace.trace_id } : {}),
-          ...(result.exitToolCall ? { exitToolCall: result.exitToolCall } : {}),
-        }
-      }
-
-      return {
-        // output 给 delegate_task 工具 caller (worker LLM) 看：JSON 包了 child_trace_id 等
-        // 元信息，便于 worker 拼下一轮 prompt 追溯
-        output: JSON.stringify({
-          output: result.output,
-          outcome: result.outcome,
-          totalTurns: result.totalTurns,
-          child_trace_id: subTrace?.trace_id,
-        }),
-        // rawOutput 给系统侧 caller（如 runGoalAudit）解 auditor 原始文本，不要解 JSON
-        rawOutput: result.output,
-        isError: false,
-        outcome: result.outcome,
-        ...(subTrace ? { traceId: subTrace.trace_id } : {}),
-        // exitToolCall：sub-agent 通过 exitsLoop 工具早退时的结构化判决（如 audit
-        // 的 submit_audit_result）。caller 优先用它而不是 parse free text。
-        ...(result.exitToolCall ? { exitToolCall: result.exitToolCall } : {}),
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (subTrace && tc) {
-        tc.traceStore.endTrace(subTrace.trace_id, 'failed', { summary: msg, error: msg })
-      }
-      const failure = buildSubAgentFailureOutput({
-        errorSource: err,
-        subagentName: subagent.name,
-        providerEndpoint: subagent.model.endpoint,
-        model: subagent.model.model_id,
-        ...(subTrace ? { childTraceId: subTrace.trace_id } : {}),
-      })
-      return {
-        output: JSON.stringify(failure),
-        isError: true,
-        ...(subTrace ? { traceId: subTrace.trace_id } : {}),
-      }
-    }
-  }
-
-  /**
    * 构造 RunSubAgentFn，注入到 delegate_task 工具。
    * 每次 createWorkerHandler 时调用，deps 绑定当次任务的 humanQueue / permissionConfig 等上下文。
    *
-   * 同步路径（sync=true 或非 persistent 模式）：转发到 runSubAgentDirect。
-   * 异步路径（默认）：走 spawnPersistentAgent，工具立即返回 launched，完成时通过 humanQueue 通知。
+   * 唯一路径走 spawnPersistentAgent：工具立即返回 launched，完成时通过 humanQueue 通知。
    */
   private makeRunSubAgent(deps: {
     readonly parentTools: ReadonlyArray<import('../engine/types.js').ToolDefinition>
     readonly parentTaskId: string
-    readonly callerLabel: string
     readonly getCwd?: () => string
-    readonly humanQueue?: import('../engine/human-message-queue.js').HumanMessageQueue
+    readonly humanQueue: import('../engine/human-message-queue.js').HumanMessageQueue
     readonly permissionConfig?: import('../engine/types.js').ToolPermissionConfig
     readonly traceConfig?: SubAgentTraceConfig
-    /** 是否允许异步派发（master + 私聊 session）。false 时总走同步。 */
-    readonly asyncEnabled?: boolean
-    /** 异步派发时的 subagent 上下文（owner 信息） */
-    readonly asyncCtx?: {
+    readonly asyncCtx: {
       readonly owner: import('../engine/bg-entities/types.js').BgEntityOwner
     }
   }): RunSubAgentFn {
-    return async (subagent, input, ctx) => {
-      const typedInput = input as RunSubAgentInput & { sync?: boolean }
-
+    return async (subagent, input) => {
       // 派发时从最新热更的 this.subAgents 重解析：loop 启动时的 snapshot 只保证
       // subagent「列表」一致（工具 enum / prompt），列表内各项的 model 等配置在每次
       // 派发时取 live 值 —— model_config 热更新对 subagent 派发 in-flight 生效。
       // live 列表中已被删除时回退快照，不打断 in-flight 推理。
       // spec: 2026-07-19-subagent-model-hot-reload-design.md
       const effective = this.resolveLiveSubAgent(subagent)
-
-      // 异步路径：asyncEnabled + 没有显式 sync=true
-      if (deps.asyncEnabled && !typedInput.sync && deps.asyncCtx && deps.humanQueue) {
-        return this.runSubAgentAsync(effective, typedInput, deps.asyncCtx, deps)
-      }
-
-      // 同步路径（默认 fallback / 显式 sync=true）
-      const { traceId: _traceId, ...result } = await this.runSubAgentDirect(effective, input, ctx, deps)
-      return result
+      return this.runSubAgentAsync(effective, input, deps.asyncCtx, deps)
     }
   }
 
@@ -3717,7 +3416,7 @@ export class AgentHandler {
   /** 异步派发 subagent：via spawnPersistentAgent，工具立即返回，完成时通知父 humanQueue。 */
   private async runSubAgentAsync(
     subagent: SubAgentConfig,
-    input: RunSubAgentInput & { sync?: boolean },
+    input: RunSubAgentInput,
     asyncCtx: {
       readonly owner: import('../engine/bg-entities/types.js').BgEntityOwner
     },
@@ -3725,7 +3424,7 @@ export class AgentHandler {
       readonly parentTools: ReadonlyArray<import('../engine/types.js').ToolDefinition>
       readonly parentTaskId: string
       readonly getCwd?: () => string
-      readonly humanQueue?: import('../engine/human-message-queue.js').HumanMessageQueue
+      readonly humanQueue: import('../engine/human-message-queue.js').HumanMessageQueue
       readonly permissionConfig?: import('../engine/types.js').ToolPermissionConfig
       readonly traceConfig?: SubAgentTraceConfig
     },
@@ -3733,10 +3432,10 @@ export class AgentHandler {
     const { spawnPersistentAgent } = await import('../engine/bg-entities/bg-agent.js')
 
     const subModel = subagent.model
-    // 异步 subagent 必须按自己的 model 自建 adapter，不复用父 adapter（同步路径一致）。
+    // 异步 subagent 必须按自己的 model 自建 adapter，不复用父 adapter。
     const subAdapter = adapterFromModel(subModel)
 
-    // 子 agent 工具集：从父工具里过滤（同 runSubAgentDirect 路径）
+    // 子 agent 工具集从父工具里按 subagent capability 过滤。
     const subCapabilities = buildCapabilitiesForSubAgent({
       parentTools: deps.parentTools,
       capabilities: subagent.builtin_capabilities,
@@ -3761,7 +3460,7 @@ export class AgentHandler {
       : undefined
 
     const entity_id = await spawnPersistentAgent({
-      prompt: input.task,
+      prompt: buildDelegatedTaskPrompt(input),
       task_description: input.task,
       tools: subCapabilities.tools,
       ...(subPermissionConfig ? { permissionConfig: subPermissionConfig } : {}),
@@ -3777,8 +3476,8 @@ export class AgentHandler {
       registry: this.bgRegistry,
       abortControllers: this.agentAbortControllers,
       ...(bgTraceCtx ? { traceContext: bgTraceCtx } : {}),
-      // 子 agent 自己的 sub_agent_call 子 trace —— 让异步 delegate 在 Admin Traces
-      // 页以独立行显示并可 drill-in（与同步 runSubAgentDirect 路径一致）。
+      // 子 agent 自己的 sub_agent_call 子 trace，让异步 delegate 在 Admin Traces
+      // 页以独立行显示并可 drill-in。
       ...(deps.traceConfig
         ? {
             subTrace: {
@@ -3792,7 +3491,6 @@ export class AgentHandler {
         : {}),
       onExit: (info) => {
         const queue = deps.humanQueue
-        if (!queue) return
         // 唤醒快照：附上还在跑的其他对象，agent 醒来即知是否要继续等（spec 2026-07-16 §6）。
         // 快照查询失败降级为纯通知，绝不阻塞投递。
         void this.buildStillRunningLine(deps.parentTaskId, info.entity_id)

@@ -8,7 +8,7 @@
  *    delegate_task 派发用 live 列表里的新 model 建 adapter —— 不重启、不等下个 loop。
  * 2. delegate_task 的 enum（subagent 列表）仍是 loop 启动时快照 —— 列表一致性不受热更影响。
  * 3. loop 运行期间 subagent 被从 live 列表删除 → 派发回退用快照，不报错。
- * 4. 异步派发（spawnPersistentAgent）同样取 live model。
+ * 4. 旧输入带 sync=true 也只走异步派发。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { AgentHandler } from '../../src/agent/agent-handler.js'
@@ -20,11 +20,6 @@ vi.mock('../../src/engine/index.js', async (importOriginal) => {
   return { ...actual, runEngine: vi.fn() }
 })
 
-vi.mock('../../src/engine/sub-agent.js', async (importOriginal) => {
-  const actual = await importOriginal() as Record<string, unknown>
-  return { ...actual, forkEngine: vi.fn() }
-})
-
 vi.mock('../../src/engine/bg-entities/bg-agent.js', async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>
   return { ...actual, spawnPersistentAgent: vi.fn() }
@@ -32,11 +27,9 @@ vi.mock('../../src/engine/bg-entities/bg-agent.js', async (importOriginal) => {
 
 
 import { runEngine } from '../../src/engine/index.js'
-import { forkEngine } from '../../src/engine/sub-agent.js'
 import { spawnPersistentAgent } from '../../src/engine/bg-entities/bg-agent.js'
 
 const mockRunEngine = vi.mocked(runEngine)
-const mockForkEngine = vi.mocked(forkEngine)
 const mockSpawnPersistentAgent = vi.mocked(spawnPersistentAgent)
 
 function makeSdkEnv() {
@@ -90,7 +83,7 @@ function getDelegateTool(options: any) {
   return tools.find((t) => t.name === 'delegate_task')
 }
 
-/** forkEngine 收到的 adapter 是 AnthropicAdapter，私有字段 config 存了 endpoint/apikey。 */
+/** spawnPersistentAgent 收到的 adapter 是 AnthropicAdapter，私有字段 config 存了 endpoint/apikey。 */
 function adapterEndpoint(call: any): { endpoint: string; apikey: string } {
   const cfg = (call.adapter as any).config
   return { endpoint: cfg.endpoint, apikey: cfg.apikey }
@@ -99,9 +92,7 @@ function adapterEndpoint(call: any): { endpoint: string; apikey: string } {
 describe('subagent model 热生效（delegate 时实时解析）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockForkEngine.mockImplementation(async () => ({
-      outcome: 'completed', output: 'ok', totalTurns: 1,
-    }) as never)
+    mockSpawnPersistentAgent.mockResolvedValue('agent_test1')
   })
 
   it('in-flight loop 内 updateSubagents 后，delegate_task 用新 model 建 adapter；enum 仍是快照', async () => {
@@ -125,7 +116,7 @@ describe('subagent model 热生效（delegate 时实时解析）', () => {
       expect(enumAfter).toEqual(['code_writer'])
 
       // 第二次派发：应取 live 的新 model
-      await dt.call({ subagent_type: 'code_writer', task: 'second' }, {})
+      await dt.call({ subagent_type: 'code_writer', task: 'second', sync: true }, {})
 
       return {
         outcome: 'completed', finalText: 'ok', totalTurns: 1,
@@ -136,9 +127,9 @@ describe('subagent model 热生效（delegate 时实时解析）', () => {
 
     await handler.executeTask({ task: makeTask(), context: makeContext() })
 
-    expect(mockForkEngine).toHaveBeenCalledTimes(2)
-    const first = mockForkEngine.mock.calls[0][0] as any
-    const second = mockForkEngine.mock.calls[1][0] as any
+    expect(mockSpawnPersistentAgent).toHaveBeenCalledTimes(2)
+    const first = mockSpawnPersistentAgent.mock.calls[0][0] as any
+    const second = mockSpawnPersistentAgent.mock.calls[1][0] as any
     expect(first.model).toBe('old-model')
     expect(adapterEndpoint(first)).toEqual({ endpoint: 'https://old.example.com', apikey: 'old-key' })
     // 核心语义断言：第二次派发用新 provider 的 model/endpoint/apikey
@@ -169,8 +160,8 @@ describe('subagent model 热生效（delegate 时实时解析）', () => {
 
     await handler.executeTask({ task: makeTask(), context: makeContext() })
 
-    expect(mockForkEngine).toHaveBeenCalledTimes(1)
-    const call = mockForkEngine.mock.calls[0][0] as any
+    expect(mockSpawnPersistentAgent).toHaveBeenCalledTimes(1)
+    const call = mockSpawnPersistentAgent.mock.calls[0][0] as any
     expect(call.model).toBe('old-model')
     expect(adapterEndpoint(call).endpoint).toBe('https://old.example.com')
   })
@@ -198,35 +189,32 @@ describe('subagent model 热生效（delegate 时实时解析）', () => {
     await handler.executeTask({ task: makeTask(), context: makeContext() })
 
     // name 匹配语义：同名重建视为同一 subagent 换配置，派发用新配置而非静默回退旧快照
-    expect(mockForkEngine).toHaveBeenCalledTimes(1)
-    const call = mockForkEngine.mock.calls[0][0] as any
+    expect(mockSpawnPersistentAgent).toHaveBeenCalledTimes(1)
+    const call = mockSpawnPersistentAgent.mock.calls[0][0] as any
     expect(call.model).toBe('new-model')
     expect(adapterEndpoint(call).endpoint).toBe('https://new.example.com')
   })
 
-  it('异步派发（spawnPersistentAgent）同样取 live model', async () => {
+  it('makeRunSubAgent 直接调用同样取 live model', async () => {
     const snapshotEntry = makeSubAgent('code_writer', 'old')
     const handler = new AgentHandler(makeSdkEnv(), { systemPrompt: 'sys' }, {
       subAgents: [snapshotEntry],
     })
     handler.updateSubagents([makeSubAgent('code_writer', 'new')])
 
-    mockSpawnPersistentAgent.mockImplementation(async () => 'agent_test1' as never)
-
     const runSubAgent = (handler as any).makeRunSubAgent({
       parentTools: [],
       parentTaskId: 't1',
-      callerLabel: 'test',
       humanQueue: new HumanMessageQueue(),
-      asyncEnabled: true,
       asyncCtx: { owner: { friend_id: 'f1', session_id: 's1' } },
     })
     // delegate_task 闭包传进来的是 loop 快照里的旧 entry
-    await runSubAgent(snapshotEntry, { task: 'async job' }, {})
+    await runSubAgent(snapshotEntry, { task: 'async job', context: 'parent facts' }, {})
 
     expect(mockSpawnPersistentAgent).toHaveBeenCalledTimes(1)
     const spawnOpts = mockSpawnPersistentAgent.mock.calls[0][0] as any
     expect(spawnOpts.model).toBe('new-model')
+    expect(spawnOpts.prompt).toBe('## Parent Context\nparent facts\n\n## Your Task\nasync job')
     expect((spawnOpts.adapter as any).config.endpoint).toBe('https://new.example.com')
     expect((spawnOpts.adapter as any).config.apikey).toBe('new-key')
   })

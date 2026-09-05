@@ -569,7 +569,7 @@ list_groups / list_contacts 的返回是**分页结果**——看到 \`paginatio
 - 1h - 数天：转后台 shell；**转后台的命令跨 task / worker 重启都不被杀（持久）**，由你显式 Kill 或进程自己 exit
 - 数天 - 几周：考虑物化为项目内 cron / daemon
 
-**子任务委派**类似但工具不同：\`delegate_task(subagent_type, task)\` 默认**异步**立即返回 agent_id → 没别的事就 \`end_turn\` 挂起 → 完成时系统推 \`<sub_agent_notification>\`（含 status + 结果文件路径）唤醒你 → 用 \`get_subagent_output(agent_id)\` 读结果（**不要用 Output**，Output 只读 shell；也不要轮询进度）。`
+**子任务委派**类似但工具不同：\`delegate_task(subagent_type, task)\` 只会**异步派发**并立即返回 agent_id → 没别的事就 \`end_turn\` 挂起 → 完成时系统推 \`<sub_agent_notification>\`（含 status + 结果文件路径）唤醒你 → 用 \`get_subagent_output(agent_id)\` 读结果（**不要用 Output**，Output 只读 shell；也不要轮询进度）。`
 
 export const TASK_HARD_CONSTRAINTS = `## 任务推进硬约束
 

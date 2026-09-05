@@ -7,6 +7,7 @@ export type {
   EngineOptions,
   EngineResult,
   EngineTurnEvent,
+  EngineToolLifecycleEvent,
   LiveProgressEvent,
   ToolDefinition,
   ToolCallContext,

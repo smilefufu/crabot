@@ -263,7 +263,7 @@ function formatDetail(text: string): string {
 function activityPreview(entry: ActivityEntry): string {
   if (entry.event.kind === 'tool_call') {
     const name = entry.title ? `调用 ${entry.title}` : '工具调用'
-    return entry.result ? `${name} · 已返回结果` : name
+    return entry.result ? `${name} · 已返回结果` : `${name} · 执行中`
   }
   if (entry.event.kind === 'tool_result') return '工具结果'
   return oneLine(entry.body)

@@ -196,6 +196,8 @@ export interface EngineTurnEvent {
   readonly turnNumber: number
   readonly assistantText: string
   readonly toolCalls: ReadonlyArray<{
+    /** Engine-owned stable correlation id shared with tool lifecycle events. */
+    readonly callId: string
     readonly id: string
     readonly name: string
     readonly input: Record<string, unknown>
@@ -222,6 +224,30 @@ export interface EngineTurnEvent {
   /** 本轮 LLM 流式消费诊断（首 chunk 延迟 / chunk 数 / 重试次数）；无则缺省 */
   readonly diagnostics?: LLMCallDiagnostics
 }
+
+export type EngineToolLifecycleEvent =
+  | {
+      readonly type: 'tool_started'
+      readonly callId: string
+      readonly turnNumber: number
+      readonly toolUseId: string
+      readonly name: string
+      readonly input: Record<string, unknown>
+      readonly startedAtMs: number
+    }
+  | {
+      readonly type: 'tool_finished'
+      readonly callId: string
+      readonly turnNumber: number
+      readonly toolUseId: string
+      readonly name: string
+      readonly input: Record<string, unknown>
+      readonly output: string
+      readonly isError: boolean
+      readonly startedAtMs: number
+      readonly endedAtMs: number
+      readonly durationMs: number
+    }
 
 /** 流式消费诊断（仅成功路径填充），供 trace/span 观测 */
 export interface LLMCallDiagnostics {
@@ -300,6 +326,8 @@ export interface EngineOptions {
   readonly maxTokens?: number
   readonly abortSignal?: AbortSignal
   readonly onTurn?: (event: EngineTurnEvent) => void
+  /** Synchronous, best-effort observer for individual tool execution boundaries. */
+  readonly onToolLifecycle?: (event: EngineToolLifecycleEvent) => void
   /** 实时进度回调（fires LLM 返回 / 工具开始 / 工具结束三处）—— 见 LiveProgressEvent */
   readonly onLiveProgress?: (event: LiveProgressEvent) => void
   readonly permissionConfig?: ToolPermissionConfig

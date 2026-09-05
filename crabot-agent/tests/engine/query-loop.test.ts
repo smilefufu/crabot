@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { runEngine } from '../../src/engine/query-loop.js'
 import { defineTool } from '../../src/engine/tool-framework.js'
 import type { LLMAdapter } from '../../src/engine/llm-adapter.js'
-import type { StreamChunk, EngineOptions, EngineMessage } from '../../src/engine/types.js'
+import type { StreamChunk, EngineOptions, EngineMessage, EngineToolLifecycleEvent } from '../../src/engine/types.js'
 import { createUserMessage } from '../../src/engine/types.js'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
 import { chunksFromContent } from './helpers/mock-stream.js'
@@ -153,6 +153,7 @@ describe('runEngine', () => {
     })
 
     const onTurn = vi.fn()
+    const lifecycleEvents: EngineToolLifecycleEvent[] = []
 
     const adapter = mockAdapter([
       toolUseResponse('tu-1', 'Read', { path: '/test' }),
@@ -162,7 +163,11 @@ describe('runEngine', () => {
     await runEngine({
       prompt: 'Read it',
       adapter,
-      options: baseOptions({ tools: [readTool], onTurn }),
+      options: baseOptions({
+        tools: [readTool],
+        onTurn,
+        onToolLifecycle: (event) => lifecycleEvents.push(event),
+      }),
     })
 
     // 自 cdaa253 起，final text turn 也补 fire 一次让 trace 能记录最后一轮（早 return 路径之前漏记）。
@@ -184,6 +189,10 @@ describe('runEngine', () => {
         toolCalls: [],
       })
     )
+    const turnCall = onTurn.mock.calls[0][0].toolCalls[0]
+    expect(turnCall.callId).toEqual(expect.any(String))
+    expect(lifecycleEvents.map((event) => event.type)).toEqual(['tool_started', 'tool_finished'])
+    expect(lifecycleEvents.every((event) => event.callId === turnCall.callId)).toBe(true)
   })
 
   it('refreshes messagesRef with tool results before onTurn observers run', async () => {

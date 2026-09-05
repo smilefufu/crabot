@@ -41,6 +41,7 @@ import {
   type EngineMessage,
   type EngineResult,
   type EngineOptions,
+  type EngineToolLifecycleEvent,
   type ToolDefinition,
   type LLMAdapter,
   type TextBlock,
@@ -352,6 +353,8 @@ export class ManagerLoop {
    * episode 由 mutex 串行，不存在交叠。
    */
   private currentTraceId: string | undefined = undefined
+  private readonly tracedToolStarts = new Set<string>()
+  private readonly tracedToolFinishes = new Set<string>()
   /** 当前 episode 的一次性发送后动作复核状态；不进入 session/ledger。 */
   private needsSpawnRecheck = false
   private spawnRecheckInjected = false
@@ -800,6 +803,8 @@ export class ManagerLoop {
       this.currentWakeEvent = null
       this.currentEpisodeEnvelopes = []
       this.currentTraceId = undefined
+      this.tracedToolStarts.clear()
+      this.tracedToolFinishes.clear()
       this.successfulSendMessageTargetsInCurrentEpisode.clear()
       this.continuedWorkersInCurrentEpisode.clear()
       this.needsSpawnRecheck = false
@@ -1399,7 +1404,63 @@ export class ManagerLoop {
     })
   }
 
-  /** engine onTurn → llm_call/tool_call span（截断摘要由 writer 侧统一脱敏落盘）。 */
+  private toolSpanId(episodeId: string, callId: string): string {
+    return `tool-${episodeId}-${callId}`
+  }
+
+  private recordToolLifecycle(episodeId: string, event: EngineToolLifecycleEvent): void {
+    const writer = this.deps.traceWriter
+    if (!writer || this.currentTraceId !== episodeId) return
+    const spanId = this.toolSpanId(episodeId, event.callId)
+    const details = {
+      call_id: event.callId,
+      tool_use_id: event.toolUseId,
+      name: event.name,
+      input_summary: summarizeSpanInput(event.input),
+      ...(event.type === 'tool_finished' ? {
+        output_summary: summarizeSpanOutput(event.output),
+        is_error: event.isError,
+      } : {}),
+    }
+
+    if (event.type === 'tool_started') {
+      if (this.tracedToolStarts.has(event.callId)) return
+      writer.appendSpan(episodeId, {
+        span_id: spanId,
+        parent_span_id: `llm-${episodeId}-${this.attemptCounter}-${event.turnNumber}`,
+        type: 'tool_call',
+        started_at: new Date(event.startedAtMs).toISOString(),
+        status: 'running',
+        details,
+      })
+      this.tracedToolStarts.add(event.callId)
+      return
+    }
+
+    if (this.tracedToolFinishes.has(event.callId)) return
+    if (this.tracedToolStarts.has(event.callId)) {
+      writer.finishSpan(episodeId, spanId, {
+        status: event.isError ? 'failed' : 'completed',
+        ended_at: new Date(event.endedAtMs).toISOString(),
+        details,
+      })
+    } else {
+      writer.appendSpan(episodeId, {
+        span_id: spanId,
+        parent_span_id: `llm-${episodeId}-${this.attemptCounter}-${event.turnNumber}`,
+        type: 'tool_call',
+        started_at: new Date(event.startedAtMs).toISOString(),
+        ended_at: new Date(event.endedAtMs).toISOString(),
+        duration_ms: event.durationMs,
+        status: event.isError ? 'failed' : 'completed',
+        details,
+      })
+      this.tracedToolStarts.add(event.callId)
+    }
+    this.tracedToolFinishes.add(event.callId)
+  }
+
+  /** engine onTurn → llm_call span + lifecycle 补漏（截断摘要由 writer 侧统一脱敏落盘）。 */
   private recordTurnSpans(episodeId: string, event: import('../engine/types.js').EngineTurnEvent): void {
     const writer = this.deps.traceWriter
     if (!writer || this.currentTraceId !== episodeId) return
@@ -1436,23 +1497,40 @@ export class ManagerLoop {
       },
     })
     for (const toolCall of event.toolCalls) {
+      if (this.tracedToolFinishes.has(toolCall.callId)) continue
       const toolStarted = toolCall.startedAtMs !== undefined ? new Date(toolCall.startedAtMs).toISOString() : llmStarted
-      writer.appendSpan(episodeId, {
-        span_id: `tool-${episodeId}-${attemptTag}-${event.turnNumber}-${toolCall.id}`,
-        parent_span_id: llmSpanId,
-        type: 'tool_call',
-        started_at: toolStarted,
-        ended_at: toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined
-          ? new Date(toolCall.startedAtMs + toolCall.durationMs).toISOString()
-          : undefined,
-        duration_ms: toolCall.durationMs,
-        status: toolCall.isError ? 'failed' : 'completed',
-        details: {
-          name: toolCall.name,
-          input_summary: summarizeSpanInput(toolCall.input),
-          output_summary: summarizeSpanOutput(toolCall.output),
-        },
-      })
+      const endedAt = toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined
+        ? new Date(toolCall.startedAtMs + toolCall.durationMs).toISOString()
+        : undefined
+      const details = {
+        call_id: toolCall.callId,
+        tool_use_id: toolCall.id,
+        name: toolCall.name,
+        input_summary: summarizeSpanInput(toolCall.input),
+        output_summary: summarizeSpanOutput(toolCall.output),
+        is_error: toolCall.isError,
+      }
+      const spanId = this.toolSpanId(episodeId, toolCall.callId)
+      if (this.tracedToolStarts.has(toolCall.callId)) {
+        writer.finishSpan(episodeId, spanId, {
+          status: toolCall.isError ? 'failed' : 'completed',
+          ended_at: endedAt,
+          details,
+        })
+      } else {
+        writer.appendSpan(episodeId, {
+          span_id: spanId,
+          parent_span_id: llmSpanId,
+          type: 'tool_call',
+          started_at: toolStarted,
+          ended_at: endedAt,
+          duration_ms: toolCall.durationMs,
+          status: toolCall.isError ? 'failed' : 'completed',
+          details,
+        })
+        this.tracedToolStarts.add(toolCall.callId)
+      }
+      this.tracedToolFinishes.add(toolCall.callId)
     }
   }
 
@@ -1646,6 +1724,7 @@ export class ManagerLoop {
       // P6-A §6.4：onTurn 是事后观察钩子，用它生成 llm_call/tool_call span；
       // 不复制执行语义、不新增第二个 query loop。
       onTurn: (event) => this.recordTurnSpans(episodeId, event),
+      onToolLifecycle: (event) => this.recordToolLifecycle(episodeId, event),
       // LLM 重试期间配置热切换（spec 2026-08-30-llm-retry-config-hotreload）：
       // onRuntimeConfigApplied 在 agentConfig 原子替换完成后触发 → abort signal →
       // callNonStreaming 的重试 sleep 提前结束；configGeneration 探针由 engine 记账，
