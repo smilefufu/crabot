@@ -44,6 +44,7 @@ import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { SessionTarget } from '../mcp/crab-messaging.js'
 import type { HumanPrincipal } from './principal.js'
 import { resolveTimezone } from '../utils/time.js'
+import type { ManagerInboundMessageFact } from './inbound-status.js'
 
 /** §4.4 保留线程:未配置目标 session 的 scheduled 触发 / 台账查不到监护 session 的 worker 事件落此。 */
 export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
@@ -217,6 +218,11 @@ export class ManagerRegistry {
   /** 内存 registry 当前 running manager 的只读快照（P6-A §7.3：补充尚未首次 save 的当前 manager）。 */
   listActiveManagers(): Array<{ key: ManagerKey; lastActiveAtMs?: number }> {
     return Array.from(this.loops.keys()).map((key) => ({ key, lastActiveAtMs: this.lastActiveAtMs.get(key) }))
+  }
+
+  /** 不创建 loop；只读取 exact ManagerKey 当前内存上下文与 mailbox。 */
+  snapshotHumanInbound(key: ManagerKey): ManagerInboundMessageFact[] {
+    return this.loops.get(key)?.snapshotHumanInbound() ?? []
   }
 
   /** 惰性拉起:key 无实例则建;同 key 幂等返回同一实例。实例常驻内存,session 状态在盘上。 */

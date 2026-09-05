@@ -9,8 +9,14 @@
 
 export type BatchHandler<T> = (batch: ReadonlyArray<T>) => Promise<void>
 
+export interface SessionLaneSnapshot<T> {
+  current: T[]
+  queued: T[]
+}
+
 export class SessionLane<T> {
   private queue: T[] = []
+  private current: ReadonlyArray<T> = []
   private processing = false
 
   constructor(
@@ -28,17 +34,25 @@ export class SessionLane<T> {
     return !this.processing && this.queue.length === 0
   }
 
+  /** 当前 handler batch 与后续 queue 的同步副本；读取不改变 lane 顺序。 */
+  snapshot(): SessionLaneSnapshot<T> {
+    return { current: [...this.current], queued: [...this.queue] }
+  }
+
   private async kick(): Promise<void> {
     if (this.processing) return
     this.processing = true
     try {
       while (this.queue.length > 0) {
         const batch = this.queue.splice(0)
+        this.current = batch
         try {
           await this.handler(batch)
         } catch (err) {
           // handler 内部应该自己 catch；这里只防御性兜底
           console.error(`[session-lane:${this.key}] handler threw:`, err instanceof Error ? err.message : String(err))
+        } finally {
+          this.current = []
         }
       }
     } finally {
@@ -60,6 +74,10 @@ export class SessionLaneRegistry<T> {
       this.lanes.set(key, lane)
     }
     return lane
+  }
+
+  snapshot(key: string): SessionLaneSnapshot<T> {
+    return this.lanes.get(key)?.snapshot() ?? { current: [], queued: [] }
   }
 
   private dispose(key: string): void {

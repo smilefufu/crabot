@@ -957,6 +957,69 @@ describe('ManagerLoop', () => {
     expect(committedIds).toHaveLength(1)
   })
 
+  it('只读快照将当前上下文标为 processing，mailbox 插话在 drain 前后从 queued 转为 processing', async () => {
+    let releaseSecondTurn!: () => void
+    const secondTurnRelease = new Promise<void>((resolve) => { releaseSecondTurn = resolve })
+    let enterSecondTurn!: () => void
+    const secondTurnEntered = new Promise<void>((resolve) => { enterSecondTurn = resolve })
+    let turn = 0
+    let loop!: ManagerLoop
+    let initialSnapshot: ReturnType<ManagerLoop['snapshotHumanInbound']> = []
+    let queuedSnapshot: ReturnType<ManagerLoop['snapshotHumanInbound']> = []
+    let drainedSnapshot: ReturnType<ManagerLoop['snapshotHumanInbound']> = []
+
+    const first = { ...makeChannelMessage('开始任务'), platform_message_id: 'pm-first' }
+    const supplement = { ...makeChannelMessage('中途补充'), platform_message_id: 'pm-supplement' }
+    const adapter: LLMAdapter = {
+      async *stream() {
+        turn++
+        if (turn === 1) {
+          initialSnapshot = loop.snapshotHumanInbound()
+          yield* chunksFromContent([
+            { type: 'tool_use', id: 'call-snapshot', name: 'snapshot_tool', input: {} },
+          ], 'tool_use', { inputTokens: 10, outputTokens: 5 })
+          return
+        }
+        drainedSnapshot = loop.snapshotHumanInbound()
+        enterSecondTurn()
+        await secondTurnRelease
+        yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+    loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      toolFace: () => [{
+        name: 'snapshot_tool',
+        description: 'capture mailbox state',
+        inputSchema: { type: 'object', properties: {} },
+        isReadOnly: false,
+        call: async () => {
+          loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [supplement] }))
+          queuedSnapshot = loop.snapshotHumanInbound()
+          return { output: 'ok', isError: false }
+        },
+      }],
+    }))
+
+    const episode = loop.wakeUp(timed({ kind: 'human_messages', messages: [first] }))
+    await secondTurnEntered
+
+    const initial = initialSnapshot.find(({ message }) => message.platform_message_id === 'pm-first')
+    const queued = queuedSnapshot.find(({ message }) => message.platform_message_id === 'pm-supplement')
+    const drained = drainedSnapshot.find(({ message }) => message.platform_message_id === 'pm-supplement')
+    expect(initial).toMatchObject({ status: 'processing', episode_id: expect.any(String) })
+    expect(queued).toMatchObject({ status: 'queued' })
+    expect(queued).not.toHaveProperty('episode_id')
+    expect(drained).toMatchObject({ status: 'processing', episode_id: initial?.episode_id })
+    expect(loop.snapshotHumanInbound()).toEqual(drainedSnapshot)
+
+    releaseSecondTurn()
+    await episode
+    expect(loop.snapshotHumanInbound()).toEqual([])
+  })
+
   it('episode 失败:被注入消费的人类消息补提交进 recent,下次唤醒经 tailMessages 重新可见且不重复', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })

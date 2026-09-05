@@ -73,6 +73,7 @@ import type { WorkerHarness } from '../workers/harness/harness'
 import type { ActivityContextAdmissionReceipt, HarnessEvent } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { SessionTarget } from '../mcp/crab-messaging.js'
+import type { ManagerInboundMessageFact } from './inbound-status.js'
 
 const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出了一段文字、没有调用 send_message，然后结束了回复。\n'
   + '请注意：直接输出的文字只留在系统内部，人类看不到；只有 send_message 发送的内容才能送达人类。\n'
@@ -496,6 +497,38 @@ export class ManagerLoop {
    */
   get hasPendingMailbox(): boolean {
     return this.mailbox.hasPending
+  }
+
+  /** 当前人类入站事实的同步只读投影；不 drain mailbox，也不修改 episode 上下文。 */
+  snapshotHumanInbound(): ManagerInboundMessageFact[] {
+    const facts: ManagerInboundMessageFact[] = []
+    const pending = new Set(this.mailbox.snapshotPendingEnvelopes())
+    const append = (
+      envelope: TimedWakeEnvelope,
+      status: ManagerInboundMessageFact['status'],
+      episodeId?: string,
+    ): void => {
+      if (!isHumanWake(envelope.wake)) return
+      for (const message of envelope.wake.messages) {
+        facts.push({
+          message,
+          status,
+          ...(status === 'processing' && episodeId ? { episode_id: episodeId } : {}),
+        })
+      }
+    }
+
+    if (this.currentTraceId) {
+      for (const envelope of this.currentEpisodeEnvelopes) {
+        append(envelope, 'processing', this.currentTraceId)
+      }
+    }
+    for (const envelope of this.currentEpisodeInjected ?? []) {
+      if (pending.delete(envelope)) append(envelope, 'queued')
+      else if (this.currentTraceId) append(envelope, 'processing', this.currentTraceId)
+    }
+    for (const envelope of pending) append(envelope, 'queued')
+    return facts
   }
 
   /** A failed final episode returns late activity receipts to their durable Harness producer. */
@@ -1821,6 +1854,10 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
     const drained = this.pending
     this.pending = []
     return drained
+  }
+
+  snapshotPendingEnvelopes(): TimedWakeEnvelope[] {
+    return [...this.pending]
   }
 
   /** 该 envelope 是否仍在等待注入(引用比较)。收尾提交用它区分「已被 drain 消费/未消费」。 */
