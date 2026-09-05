@@ -1606,6 +1606,32 @@ describe('Admin Web API', () => {
       )
     })
 
+    it('GET /api/agent/managers/:key/inbound-status 转发只读快照 RPC（path decode 一次）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        manager_key: 'wechat::sess%2Fone',
+        snapshot_at: '2026-09-05T06:28:20.000Z',
+        items: [],
+      })
+      const key = encodeURIComponent('wechat::sess%2Fone')
+      const response = await makeWebRequest(TEST_WEB_PORT, `/api/agent/managers/${key}/inbound-status`, 'GET', null, token)
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith(
+        expect.any(Number),
+        'get_manager_inbound_status_admin',
+        { manager_key: 'wechat::sess%2Fone' },
+        expect.any(String),
+      )
+    })
+
+    it('inbound-status 的 manager key 非法 percent-encoding → 400，不发 RPC', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc()
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/managers/%E0%A4%A/inbound-status', 'GET', null, token)
+      expect(response.statusCode).toBe(400)
+      expect(spy).not.toHaveBeenCalled()
+    })
+
     it('manager key 非法 percent-encoding → 400，不发 RPC', async () => {
       const token = await loginAndGetToken()
       const spy = spyAgentRpc()

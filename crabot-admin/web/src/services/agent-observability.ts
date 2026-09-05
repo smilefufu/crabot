@@ -83,6 +83,21 @@ export interface ManagerEpisodeTrace {
   }
 }
 
+export interface ManagerInboundMessageSnapshot {
+  platform_message_id: string
+  status: 'queued' | 'processing'
+  preview: string
+  sender_display_name?: string
+  platform_timestamp: string
+  episode_id?: string
+}
+
+export interface ManagerInboundStatusResult {
+  manager_key: string
+  snapshot_at: string
+  items: ManagerInboundMessageSnapshot[]
+}
+
 // ── Worker（§8.3 台账 read model）──────────────────────────────
 
 // 2026-08-31 状态机修正:4 态。旧值(waiting_input/completed/failed/cancelled)仅存在于
@@ -287,6 +302,10 @@ export const agentObservabilityService = {
       ...mutation,
       expected_revision: expectedRevision,
     })
+  },
+
+  getManagerInboundStatus(managerKey: string): Promise<ManagerInboundStatusResult> {
+    return api.get(`/agent/managers/${encodeURIComponent(managerKey)}/inbound-status`)
   },
 
   listWorkers(params: {

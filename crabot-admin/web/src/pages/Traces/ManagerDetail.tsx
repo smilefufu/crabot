@@ -8,6 +8,7 @@ import {
   type ManagerAdminSummary,
   type ManagerEpisodeSpan,
   type ManagerEpisodeTrace,
+  type ManagerInboundMessageSnapshot,
 } from '../../services/agent-observability'
 import './ManagerDetail.css'
 
@@ -17,6 +18,10 @@ type RunningWorkers =
   | { status: 'loading' }
   | { status: 'ready'; items: LedgerWorker[] }
   | { status: 'unknown' }
+type InboundStatus =
+  | { status: 'loading'; items: [] }
+  | { status: 'ready'; items: ManagerInboundMessageSnapshot[]; snapshotAt: string }
+  | { status: 'unknown'; items: [] }
 
 const SPAN_STATUS_COLOR: Record<ManagerEpisodeSpan['status'], string> = {
   running: 'var(--warning)', completed: 'var(--success)', failed: 'var(--error)',
@@ -48,6 +53,16 @@ function displayTime(iso: string): string {
   return date.toDateString() === today.toDateString()
     ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
     : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function elapsedLabel(fromIso: string, snapshotIso: string): string {
+  const parsedSeconds = Math.floor((Date.parse(snapshotIso) - Date.parse(fromIso)) / 1000)
+  const elapsedSeconds = Number.isFinite(parsedSeconds) ? Math.max(0, parsedSeconds) : 0
+  if (elapsedSeconds < 60) return `${elapsedSeconds} 秒`
+  const minutes = Math.floor(elapsedSeconds / 60)
+  if (minutes < 60) return `${minutes} 分 ${elapsedSeconds % 60} 秒`
+  const hours = Math.floor(minutes / 60)
+  return `${hours} 小时 ${minutes % 60} 分`
 }
 
 function channelLabel(managerKey: string): string {
@@ -86,6 +101,10 @@ function workerStateLabel(status: string): string {
 
 function episodeStatusLabel(status: ManagerEpisodeTrace['status']): string {
   return status === 'running' ? '执行中' : status === 'failed' ? '失败' : '已完成'
+}
+
+function episodeActivityStatusLabel(status: ManagerEpisodeTrace['status']): string {
+  return status === 'running' ? '正在处理' : status === 'failed' ? '失败' : '已处理'
 }
 
 function TechnicalDetails({ episode }: { episode: ManagerEpisodeTrace }) {
@@ -227,15 +246,78 @@ function WorkerProgress({ progress, runningWorkerIds }: { progress: WorkerProgre
   )
 }
 
+function InboundDetails({ item }: { item: ManagerInboundMessageSnapshot }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="manager-detail__inbound-details">
+      <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}>
+        {open ? '收起消息详情' : '查看消息详情'}
+      </button>
+      {open && (
+        <div className="manager-detail__inbound-detail-body">
+          <span>消息标识：{item.platform_message_id}</span>
+          {item.episode_id && <span>Episode：{item.episode_id}</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function InboundEntry({
+  item,
+  queuePosition,
+  snapshotAt,
+}: {
+  item: ManagerInboundMessageSnapshot
+  queuePosition?: number
+  snapshotAt: string
+}) {
+  const processing = item.status === 'processing'
+  const statusMeta = processing
+    ? elapsedLabel(item.platform_timestamp, snapshotAt)
+    : `第 ${queuePosition ?? 1} 位 · ${elapsedLabel(item.platform_timestamp, snapshotAt)}`
+  return (
+    <article className={`manager-detail__event manager-detail__event--inbound is-${item.status}`}>
+      <time className="manager-detail__event-time" dateTime={item.platform_timestamp}>{displayTime(item.platform_timestamp)}</time>
+      <div className="manager-detail__event-body">
+        <div className="manager-detail__event-header">
+          <div className="manager-detail__event-labels">
+            <span className="manager-detail__event-status">
+              <span className="manager-detail__status-dot" aria-hidden="true" />
+              {processing ? '正在处理' : '排队中'}
+            </span>
+            <span className="manager-detail__status-meta">{statusMeta}</span>
+          </div>
+          <InboundDetails item={item} />
+        </div>
+        <div className="manager-detail__event-title">{item.preview}</div>
+        <div className="manager-detail__message-meta">
+          <span>{item.sender_display_name || '未知发送者'}</span>
+          {item.episode_id && <code>episode · {item.episode_id.slice(0, 8)}</code>}
+        </div>
+      </div>
+    </article>
+  )
+}
+
 function EpisodeEntry({ episode, progress, runningWorkerIds }: { episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[]; runningWorkerIds: ReadonlySet<string> }) {
-  const tone = episode.status === 'failed' ? ' is-failed' : episode.trigger.type === 'worker_event' ? ' is-worker' : ''
+  const tone = episode.status === 'failed'
+    ? ' is-failed'
+    : episode.status === 'running'
+      ? ' is-processing'
+      : episode.trigger.type === 'worker_event'
+        ? ' is-worker'
+        : ''
   const workerProgress = groupWorkerProgress(progress)
   return (
     <article className={`manager-detail__event${tone}`}>
-      <time className="manager-detail__event-time">{displayTime(episode.started_at)}</time>
+      <time className="manager-detail__event-time" dateTime={episode.started_at}>{displayTime(episode.started_at)}</time>
       <div className="manager-detail__event-body">
         <div className="manager-detail__event-header">
-          <span>{TRIGGER_LABEL[episode.trigger.type]}</span>
+          <div className="manager-detail__event-labels">
+            <span>{TRIGGER_LABEL[episode.trigger.type]}</span>
+            <span className="manager-detail__episode-status">{episodeActivityStatusLabel(episode.status)}</span>
+          </div>
           <TechnicalDetails episode={episode} />
         </div>
         <div className="manager-detail__event-title">{triggerText(episode)}</div>
@@ -281,7 +363,12 @@ function Pagination({ page, totalPages, onPageChange }: { page: number; totalPag
   )
 }
 
-function groupEpisodes(episodes: ManagerEpisodeTrace[]): Array<{ episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[] }> {
+interface GroupedEpisode {
+  episode: ManagerEpisodeTrace
+  progress: ManagerEpisodeTrace[]
+}
+
+function groupEpisodes(episodes: ManagerEpisodeTrace[]): GroupedEpisode[] {
   const nodes = new Map(episodes.map((episode) => [episode.trace_id, episode]))
 
   // Current page may contain only a late worker event; materialize its minimal parent context.
@@ -347,6 +434,57 @@ function keepsOwnTimelinePosition(episode: ManagerEpisodeTrace): boolean {
   return episode.trigger.type === 'worker_event' && (Boolean(episode.reply_excerpt) || Boolean(episode.actions?.length))
 }
 
+type ConversationTimelineItem =
+  | { kind: 'inbound'; id: string; timestamp: string; item: ManagerInboundMessageSnapshot; queuePosition?: number }
+  | { kind: 'episode'; id: string; timestamp: string; grouped: GroupedEpisode }
+
+function currentInboundMessages(
+  episodes: ReadonlyArray<ManagerEpisodeTrace>,
+  inbound: ReadonlyArray<ManagerInboundMessageSnapshot>,
+): ManagerInboundMessageSnapshot[] {
+  const endedEpisodeIds = new Set(
+    episodes.filter((episode) => episode.status !== 'running').map((episode) => episode.trace_id),
+  )
+  return inbound.filter((item) => (
+    item.status !== 'processing' || !item.episode_id || !endedEpisodeIds.has(item.episode_id)
+  ))
+}
+
+function mergeConversationTimeline(
+  groupedEpisodes: ReadonlyArray<GroupedEpisode>,
+  inbound: ReadonlyArray<ManagerInboundMessageSnapshot>,
+): ConversationTimelineItem[] {
+  const processingEpisodeIds = new Set(
+    inbound.flatMap((item) => item.status === 'processing' && item.episode_id ? [item.episode_id] : []),
+  )
+  const queuePosition = new Map(
+    inbound
+      .filter((item) => item.status === 'queued')
+      .sort((a, b) => a.platform_timestamp.localeCompare(b.platform_timestamp)
+        || a.platform_message_id.localeCompare(b.platform_message_id))
+      .map((item, index) => [item.platform_message_id, index + 1]),
+  )
+
+  const items: ConversationTimelineItem[] = [
+    ...inbound.map((item): ConversationTimelineItem => ({
+      kind: 'inbound',
+      id: `inbound:${item.platform_message_id}`,
+      timestamp: item.platform_timestamp,
+      item,
+      ...(item.status === 'queued' ? { queuePosition: queuePosition.get(item.platform_message_id) } : {}),
+    })),
+    ...groupedEpisodes
+      .filter(({ episode }) => episode.status !== 'running' || !processingEpisodeIds.has(episode.trace_id))
+      .map((grouped): ConversationTimelineItem => ({
+        kind: 'episode',
+        id: `episode:${grouped.episode.trace_id}`,
+        timestamp: grouped.episode.started_at,
+        grouped,
+      })),
+  ]
+  return items.sort((a, b) => b.timestamp.localeCompare(a.timestamp) || a.id.localeCompare(b.id))
+}
+
 async function listRunningWorkers(managerKey: string): Promise<LedgerWorker[]> {
   const items: LedgerWorker[] = []
   let page = 1
@@ -374,7 +512,22 @@ const ManagerDetailContent: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [view, setView] = useState<ViewMode>('conversation')
   const [runningWorkers, setRunningWorkers] = useState<RunningWorkers>({ status: 'loading' })
+  const [inboundStatus, setInboundStatus] = useState<InboundStatus>({ status: 'loading', items: [] })
   const grouped = useMemo(() => groupEpisodes(episodes), [episodes])
+  const currentInbound = useMemo(
+    () => currentInboundMessages(episodes, inboundStatus.status === 'ready' ? inboundStatus.items : []),
+    [episodes, inboundStatus],
+  )
+  const timeline = useMemo(
+    () => mergeConversationTimeline(grouped, currentInbound),
+    [grouped, currentInbound],
+  )
+  const queuedCount = inboundStatus.status === 'ready'
+    ? currentInbound.filter((item) => item.status === 'queued').length
+    : undefined
+  const processingCount = inboundStatus.status === 'ready'
+    ? currentInbound.filter((item) => item.status === 'processing').length
+    : undefined
   const runningWorkerIds = useMemo(
     () => new Set(runningWorkers.status === 'ready' ? runningWorkers.items.map((worker) => worker.worker_id) : []),
     [runningWorkers],
@@ -393,22 +546,66 @@ const ManagerDetailContent: React.FC = () => {
   }, [managerKey])
 
   useEffect(() => {
+    setPage(1)
+  }, [managerKey])
+
+  useEffect(() => {
     let cancelled = false
+    let requestInFlight = false
     setLoading(true)
     setError(null)
-    agentObservabilityService.listManagerEpisodes(managerKey, page, 20)
-      .then((result) => {
+    setInboundStatus({ status: 'loading', items: [] })
+
+    const refresh = async (initial: boolean): Promise<void> => {
+      if (cancelled || requestInFlight) return
+      requestInFlight = true
+      const refreshEpisodes = initial || page === 1
+      try {
+        const [inboundResult, episodeResult] = await Promise.allSettled([
+          agentObservabilityService.getManagerInboundStatus(managerKey),
+          refreshEpisodes
+            ? agentObservabilityService.listManagerEpisodes(managerKey, page, 20)
+            : Promise.resolve(null),
+        ])
         if (cancelled) return
-        setEpisodes(result.items)
-        setTotalPages(Math.max(1, result.pagination.total_pages))
-      })
-      .catch((err) => {
-        if (cancelled) return
-        setError(err instanceof Error ? err.message : String(err))
-        setEpisodes([])
-      })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
+
+        if (inboundResult.status === 'fulfilled') {
+          setInboundStatus({
+            status: 'ready',
+            items: inboundResult.value.items,
+            snapshotAt: inboundResult.value.snapshot_at,
+          })
+        } else {
+          setInboundStatus({ status: 'unknown', items: [] })
+        }
+
+        if (episodeResult.status === 'fulfilled' && episodeResult.value) {
+          setEpisodes(episodeResult.value.items)
+          setTotalPages(Math.max(1, episodeResult.value.pagination.total_pages))
+          setError(null)
+        } else if (episodeResult.status === 'rejected') {
+          setError(episodeResult.reason instanceof Error ? episodeResult.reason.message : String(episodeResult.reason))
+          if (initial) setEpisodes([])
+        }
+      } finally {
+        requestInFlight = false
+        if (!cancelled && initial) setLoading(false)
+      }
+    }
+
+    void refresh(true)
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') void refresh(false)
+    }, 2_000)
+    const handleVisibilityChange = (): void => {
+      if (document.visibilityState !== 'hidden') void refresh(false)
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
   }, [managerKey, page])
 
   useEffect(() => {
@@ -434,11 +631,7 @@ const ManagerDetailContent: React.FC = () => {
         </div>
         {manager?.last_activity_at && <div className="manager-detail__last-activity">最近活动：{displayTime(manager.last_activity_at)}</div>}
       </header>
-      {loading ? <Loading /> : error ? (
-        <div className="manager-detail__empty">运行记录暂不可用：{error}</div>
-      ) : grouped.length === 0 ? (
-        <div className="manager-detail__empty">该会话暂无运行记录。</div>
-      ) : (
+      {loading ? <Loading /> : (
         <>
           <div className="manager-detail__tabs" role="tablist" aria-label="会话视图">
             <button className={view === 'conversation' ? 'is-active' : ''} type="button" role="tab" aria-selected={view === 'conversation'} onClick={() => setView('conversation')}>对话与操作</button>
@@ -447,9 +640,38 @@ const ManagerDetailContent: React.FC = () => {
           {view === 'conversation' ? (
             <div className="manager-detail__content-grid" role="tabpanel" aria-label="对话与操作">
               <section>
-                <div className="manager-detail__stream-heading"><strong>活动记录</strong><span>按会话因果关系归并</span></div>
-                <div className="manager-detail__event-list">
-                  {grouped.map(({ episode, progress }) => <EpisodeEntry key={episode.trace_id} episode={episode} progress={progress} runningWorkerIds={runningWorkerIds} />)}
+                <div className="manager-detail__stream-heading">
+                  <strong>会话动态</strong>
+                  {inboundStatus.status === 'unknown' ? (
+                    <span className="manager-detail__live-state is-unknown">在途状态暂不可用</span>
+                  ) : (
+                    <span className="manager-detail__live-state">
+                      <span aria-hidden="true" />最新在上 · 刚刚更新
+                    </span>
+                  )}
+                </div>
+                {error && <div className="manager-detail__history-error">历史活动暂不可用：{error}</div>}
+                <div className={`manager-detail__event-list${timeline.length === 0 ? ' is-empty' : ''}`} aria-live="polite">
+                  {timeline.map((timelineItem) => timelineItem.kind === 'inbound' ? (
+                    <InboundEntry
+                      key={timelineItem.id}
+                      item={timelineItem.item}
+                      queuePosition={timelineItem.queuePosition}
+                      snapshotAt={inboundStatus.status === 'ready' ? inboundStatus.snapshotAt : timelineItem.timestamp}
+                    />
+                  ) : (
+                    <EpisodeEntry
+                      key={timelineItem.id}
+                      episode={timelineItem.grouped.episode}
+                      progress={timelineItem.grouped.progress}
+                      runningWorkerIds={runningWorkerIds}
+                    />
+                  ))}
+                  {timeline.length === 0 && (
+                    <div className="manager-detail__empty">
+                      {inboundStatus.status === 'unknown' ? '当前消息状态未知，且暂无可显示的历史活动。' : '该会话暂无动态。'}
+                    </div>
+                  )}
                 </div>
                 <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
               </section>
@@ -462,6 +684,9 @@ const ManagerDetailContent: React.FC = () => {
                 <section>
                   <h2>当前状态</h2>
                   <dl>
+                    {processingCount !== undefined && <div><dt>正在处理</dt><dd>{processingCount} 条</dd></div>}
+                    {queuedCount !== undefined && <div><dt>排队中</dt><dd>{queuedCount} 条</dd></div>}
+                    {inboundStatus.status === 'unknown' && <div><dt>消息状态</dt><dd className="is-unknown">未知</dd></div>}
                     {manager && <div><dt>未结束</dt><dd>{manager.active_worker_count > 0 ? `${manager.active_worker_count} 个` : '—'}</dd></div>}
                     <div><dt>本页记录</dt><dd>{episodes.length} 条</dd></div>
                     <div><dt>当前页</dt><dd>{page} / {totalPages}</dd></div>
@@ -488,7 +713,10 @@ const ManagerDetailContent: React.FC = () => {
             </div>
           ) : (
             <>
-              <TechnicalEventList episodes={episodes} />
+              {error && <div className="manager-detail__history-error">技术事件暂不可用：{error}</div>}
+              {episodes.length > 0
+                ? <TechnicalEventList episodes={episodes} />
+                : !error && <div className="manager-detail__empty">该会话暂无技术事件。</div>}
               <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
             </>
           )}

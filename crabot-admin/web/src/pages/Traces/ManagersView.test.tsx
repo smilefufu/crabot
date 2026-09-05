@@ -2,11 +2,14 @@
  * P6-A §10 UI 测试：Manager/Worker 视图的路由编解码、分页、错误态与 cursor 恢复。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { ManagersView } from './ManagersView'
 import { ManagerDetail } from './ManagerDetail'
-import { agentObservabilityService } from '../../services/agent-observability'
+import {
+  agentObservabilityService,
+  type ManagerInboundStatusResult,
+} from '../../services/agent-observability'
 
 vi.mock('../../services/agent-observability')
 vi.mock('../../components/Layout/MainLayout', () => ({
@@ -16,6 +19,7 @@ vi.mock('../../components/Layout/MainLayout', () => ({
 const mocked = agentObservabilityService as unknown as {
   listManagers: ReturnType<typeof vi.fn>
   listManagerEpisodes: ReturnType<typeof vi.fn>
+  getManagerInboundStatus: ReturnType<typeof vi.fn>
   listWorkers: ReturnType<typeof vi.fn>
 }
 
@@ -95,6 +99,293 @@ describe('ManagerDetail', () => {
       items: [],
       pagination: { page: 1, page_size: 100, total_items: 0, total_pages: 1 },
     })
+    mocked.getManagerInboundStatus = vi.fn().mockResolvedValue({
+      manager_key: 'wechat::sess-1',
+      snapshot_at: '2026-09-05T06:28:20.000Z',
+      items: [],
+    })
+  })
+
+  it('排队、正在处理和已处理活动合并为一个最新在上的时间流，running episode 不重复', async () => {
+    mocked.getManagerInboundStatus = vi.fn().mockResolvedValue({
+      manager_key: 'wechat::sess-1',
+      snapshot_at: '2026-09-05T06:28:21.000Z',
+      items: [
+        {
+          platform_message_id: 'pm-processing', status: 'processing', preview: '帮我排查消息链路',
+          sender_display_name: '你', platform_timestamp: '2026-09-05T06:28:06.000Z', episode_id: 'ep-running',
+        },
+        {
+          platform_message_id: 'pm-queued-1', status: 'queued', preview: '补充看 Manager 上下文',
+          sender_display_name: '你', platform_timestamp: '2026-09-05T06:28:15.000Z',
+        },
+        {
+          platform_message_id: 'pm-queued-2', status: 'queued', preview: '把排队时长也显示出来',
+          sender_display_name: '你', platform_timestamp: '2026-09-05T06:28:20.000Z',
+        },
+      ],
+    })
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [
+        {
+          trace_id: 'ep-running', manager_key: 'wechat::sess-1', started_at: '2026-09-05T06:28:06.000Z', status: 'running',
+          trigger: { type: 'human_message', summary: '人类消息 x1：帮我排查消息链路' }, spans: [], spawned_worker_ids: [],
+        },
+        {
+          trace_id: 'ep-complete', manager_key: 'wechat::sess-1', started_at: '2026-09-05T06:21:03.000Z', status: 'completed',
+          trigger: { type: 'human_message', summary: '人类消息 x1：目前只能看到处理完的消息' }, spans: [], spawned_worker_ids: [],
+          reply_excerpt: '我正在核对消息处理链路。',
+        },
+      ],
+      pagination: { page: 1, page_size: 20, total_items: 2, total_pages: 1 },
+    })
+
+    render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => expect(screen.getByText('把排队时长也显示出来')).toBeInTheDocument())
+    const rows = Array.from(document.querySelectorAll('article.manager-detail__event'))
+    expect(rows).toHaveLength(4)
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining('把排队时长也显示出来'),
+      expect.stringContaining('补充看 Manager 上下文'),
+      expect.stringContaining('帮我排查消息链路'),
+      expect.stringContaining('目前只能看到处理完的消息'),
+    ])
+    expect(screen.getAllByText('帮我排查消息链路')).toHaveLength(1)
+    expect(screen.queryByText('你：「帮我排查消息链路」')).toBeNull()
+    expect(Array.from(document.querySelectorAll('.manager-detail__event-status')).map((node) => node.textContent))
+      .toEqual(['排队中', '排队中', '正在处理'])
+    expect(screen.getByText('已处理')).toBeInTheDocument()
+    expect(screen.getByText('会话动态')).toBeInTheDocument()
+  })
+
+  it('已结束 episode 优先于晚到的 processing 快照', async () => {
+    mocked.getManagerInboundStatus = vi.fn().mockResolvedValue({
+      manager_key: 'wechat::sess-1',
+      snapshot_at: '2026-09-05T06:28:21.000Z',
+      items: [{
+        platform_message_id: 'pm-stale', status: 'processing', preview: '不应出现的过时快照',
+        platform_timestamp: '2026-09-05T06:28:06.000Z', episode_id: 'ep-complete',
+      }],
+    })
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [{
+        trace_id: 'ep-complete', manager_key: 'wechat::sess-1', started_at: '2026-09-05T06:28:06.000Z', status: 'completed',
+        trigger: { type: 'human_message', summary: '人类消息 x1：真实已处理消息' }, spans: [], spawned_worker_ids: [],
+      }],
+      pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+    })
+
+    render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => expect(screen.getByText('你：「真实已处理消息」')).toBeInTheDocument())
+    expect(screen.queryByText('不应出现的过时快照')).toBeNull()
+    expect(document.querySelectorAll('article.manager-detail__event')).toHaveLength(1)
+    expect(screen.getByText('正在处理').parentElement).toHaveTextContent('正在处理0 条')
+  })
+
+  it('在途快照失败时保留历史，并明确显示状态暂不可用', async () => {
+    mocked.getManagerInboundStatus = vi.fn().mockRejectedValue(new Error('agent unavailable'))
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [{
+        trace_id: 'ep-history', manager_key: 'wechat::sess-1', started_at: '2026-09-05T06:21:03.000Z', status: 'completed',
+        trigger: { type: 'human_message', summary: '人类消息 x1：保留这条历史' }, spans: [], spawned_worker_ids: [],
+      }],
+      pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+    })
+
+    render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => expect(screen.getByText('在途状态暂不可用')).toBeInTheDocument())
+    expect(screen.getByText('你：「保留这条历史」')).toBeInTheDocument()
+  })
+
+  it('每 2 秒刷新在途状态和首页 episode；页面隐藏时暂停，恢复可见后立即刷新', async () => {
+    vi.useFakeTimers()
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    const setVisibility = (value: 'visible' | 'hidden') => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value })
+    }
+    setVisibility('visible')
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [],
+      pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+    })
+    const rendered = render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    try {
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      expect(mocked.getManagerInboundStatus).toHaveBeenCalledTimes(1)
+      expect(mocked.listManagerEpisodes).toHaveBeenCalledTimes(1)
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+      expect(mocked.getManagerInboundStatus).toHaveBeenCalledTimes(2)
+      expect(mocked.listManagerEpisodes).toHaveBeenCalledTimes(2)
+
+      setVisibility('hidden')
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
+      expect(mocked.getManagerInboundStatus).toHaveBeenCalledTimes(2)
+      expect(mocked.listManagerEpisodes).toHaveBeenCalledTimes(2)
+
+      setVisibility('visible')
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'))
+        await Promise.resolve()
+      })
+      expect(mocked.getManagerInboundStatus).toHaveBeenCalledTimes(3)
+      expect(mocked.listManagerEpisodes).toHaveBeenCalledTimes(3)
+    } finally {
+      rendered.unmount()
+      if (originalVisibility) Object.defineProperty(document, 'visibilityState', originalVisibility)
+      else delete (document as { visibilityState?: string }).visibilityState
+      vi.useRealTimers()
+    }
+  })
+
+  it('上一轮刷新未结束时不发起重叠请求', async () => {
+    vi.useFakeTimers()
+    let resolveFirstInbound: ((result: ManagerInboundStatusResult) => void) | undefined
+    mocked.getManagerInboundStatus = vi.fn()
+      .mockImplementationOnce(() => new Promise<ManagerInboundStatusResult>((resolve) => {
+        resolveFirstInbound = resolve
+      }))
+      .mockResolvedValue({
+        manager_key: 'wechat::sess-1',
+        snapshot_at: '2026-09-05T06:28:22.000Z',
+        items: [],
+      })
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [],
+      pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+    })
+    const rendered = render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    try {
+      await act(async () => { await Promise.resolve() })
+      expect(mocked.getManagerInboundStatus).toHaveBeenCalledTimes(1)
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(6_000) })
+      expect(mocked.getManagerInboundStatus).toHaveBeenCalledTimes(1)
+      expect(mocked.listManagerEpisodes).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        resolveFirstInbound?.({
+          manager_key: 'wechat::sess-1',
+          snapshot_at: '2026-09-05T06:28:21.000Z',
+          items: [],
+        })
+        await Promise.resolve()
+      })
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+      expect(mocked.getManagerInboundStatus).toHaveBeenCalledTimes(2)
+      expect(mocked.listManagerEpisodes).toHaveBeenCalledTimes(2)
+    } finally {
+      rendered.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('翻页后旧轮询响应不覆盖新页数据', async () => {
+    vi.useFakeTimers()
+    let resolveStaleInbound: ((result: ManagerInboundStatusResult) => void) | undefined
+    mocked.getManagerInboundStatus = vi.fn()
+      .mockResolvedValueOnce({
+        manager_key: 'wechat::sess-1',
+        snapshot_at: '2026-09-05T06:28:20.000Z',
+        items: [],
+      })
+      .mockImplementationOnce(() => new Promise<ManagerInboundStatusResult>((resolve) => {
+        resolveStaleInbound = resolve
+      }))
+      .mockResolvedValueOnce({
+        manager_key: 'wechat::sess-1',
+        snapshot_at: '2026-09-05T06:28:24.000Z',
+        items: [{
+          platform_message_id: 'pm-current', status: 'queued', preview: '第二页请求拿到的新快照',
+          platform_timestamp: '2026-09-05T06:28:23.000Z',
+        }],
+      })
+    mocked.listManagerEpisodes = vi.fn()
+      .mockResolvedValueOnce({
+        items: [{
+          trace_id: 'ep-page-1', manager_key: 'wechat::sess-1', started_at: '2026-09-05T06:20:00.000Z', status: 'completed',
+          trigger: { type: 'human_message', summary: '人类消息 x1：第一页初始记录' }, spans: [], spawned_worker_ids: [],
+        }],
+        pagination: { page: 1, page_size: 20, total_items: 21, total_pages: 2 },
+      })
+      .mockResolvedValueOnce({
+        items: [{
+          trace_id: 'ep-stale-poll', manager_key: 'wechat::sess-1', started_at: '2026-09-05T06:22:00.000Z', status: 'completed',
+          trigger: { type: 'human_message', summary: '人类消息 x1：不应回写的首页轮询' }, spans: [], spawned_worker_ids: [],
+        }],
+        pagination: { page: 1, page_size: 20, total_items: 21, total_pages: 2 },
+      })
+      .mockResolvedValueOnce({
+        items: [{
+          trace_id: 'ep-page-2', manager_key: 'wechat::sess-1', started_at: '2026-09-05T06:10:00.000Z', status: 'completed',
+          trigger: { type: 'human_message', summary: '人类消息 x1：第二页历史记录' }, spans: [], spawned_worker_ids: [],
+        }],
+        pagination: { page: 2, page_size: 20, total_items: 21, total_pages: 2 },
+      })
+    const rendered = render(
+      <MemoryRouter initialEntries={[`/traces/managers/${encodeURIComponent('wechat::sess-1')}`]}>
+        <Routes><Route path="/traces/managers/:managerKey" element={<ManagerDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+
+    try {
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      expect(screen.getByText('你：「第一页初始记录」')).toBeInTheDocument()
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+      expect(mocked.getManagerInboundStatus).toHaveBeenCalledTimes(2)
+      fireEvent.click(screen.getByRole('button', { name: '下一页' }))
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+      expect(screen.getByText('第二页请求拿到的新快照')).toBeInTheDocument()
+      expect(screen.getByText('你：「第二页历史记录」')).toBeInTheDocument()
+      expect(mocked.listManagerEpisodes).toHaveBeenLastCalledWith('wechat::sess-1', 2, 20)
+
+      await act(async () => {
+        resolveStaleInbound?.({
+          manager_key: 'wechat::sess-1',
+          snapshot_at: '2026-09-05T06:28:21.000Z',
+          items: [{
+            platform_message_id: 'pm-stale', status: 'processing', preview: '不应回写的旧快照',
+            platform_timestamp: '2026-09-05T06:28:06.000Z', episode_id: 'ep-stale-poll',
+          }],
+        })
+        await Promise.resolve()
+      })
+
+      expect(screen.getByText('第二页请求拿到的新快照')).toBeInTheDocument()
+      expect(screen.getByText('你：「第二页历史记录」')).toBeInTheDocument()
+      expect(screen.queryByText('不应回写的旧快照')).toBeNull()
+      expect(screen.queryByText('你：「不应回写的首页轮询」')).toBeNull()
+    } finally {
+      rendered.unmount()
+      vi.useRealTimers()
+    }
   })
 
   it('episode 渲染：trigger/状态/时间/spawned worker 链接', async () => {

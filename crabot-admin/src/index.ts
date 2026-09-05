@@ -2492,6 +2492,11 @@ export class AdminModule extends ModuleBase {
         await this.handleListManagersApi(req, res, url)
         return
       }
+      const managerInboundStatusMatch = pathname.match(/^\/api\/agent\/managers\/([^/]+)\/inbound-status$/)
+      if (managerInboundStatusMatch && req.method === 'GET') {
+        await this.handleGetManagerInboundStatusApi(req, res, managerInboundStatusMatch[1])
+        return
+      }
       const managerEpisodesMatch = pathname.match(/^\/api\/agent\/managers\/([^/]+)\/episodes$/)
       if (managerEpisodesMatch && req.method === 'GET') {
         await this.handleListManagerEpisodesApi(req, res, managerEpisodesMatch[1], url)
@@ -10562,6 +10567,24 @@ export class AdminModule extends ModuleBase {
       const unavailable = message.includes('Agent not available') || message.includes('ECONNREFUSED') || message.includes('connect failed')
       sendJson(res, unavailable ? 503 : 500, { error: unavailable ? 'Agent not available' : message })
     }
+  }
+
+  /** §8.4/§10.4：GET /api/agent/managers/:managerKey/inbound-status —— path 参数只 decode 一次。 */
+  private async handleGetManagerInboundStatusApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    rawManagerKey: string,
+  ): Promise<void> {
+    let managerKey: string
+    try {
+      managerKey = decodeURIComponent(rawManagerKey)
+    } catch {
+      sendJson(res, 400, { error: 'Invalid percent-encoding in manager key' })
+      return
+    }
+    await this.proxyAgentRpc(res, 'get_manager_inbound_status_admin', {
+      manager_key: managerKey,
+    })
   }
 
   private async handleListWorkersApi(

@@ -5,6 +5,16 @@
 
 ## 当前状态
 
+### Manager 会话在途消息统一时间流：实现完成
+
+- Admin 只读聚合 Manager 当前上下文、私聊 SessionLane 和群聊 AttentionScheduler，按
+  `platform_message_id` 去重后暴露 `queued / processing`；`processing` 只表示消息已进入
+  尚未结束的 episode 上下文，不新增运行时状态或持久化副本。
+- 会话详情将排队中、正在处理和已处理活动按消息/episode 时间统一倒序展示；轮询不重叠，页面
+  隐藏时暂停，旧页面响应不可覆盖新页面；running episode 与对应 processing 消息不重复。
+- Spec 与 agent-v3 `3.9.2` 已先行发布（crabot-docs `d44dc8e`）；Agent/Admin/Web 定向测试、
+  三包 TypeScript/生产构建及桌面/窄屏浏览器验收均通过。
+
 ### 模型目录刷新兼容缺省上下文长度：已修复
 
 - OpenAI/Codex 模型目录缺少上下文长度时省略 `context_window`，避免 `undefined` 导致配置指纹
@@ -34,7 +44,7 @@
   人类与 Manager 的静默覆盖。
 - 系统提示仅提醒 Manager 主动查阅最新任务板，不携带任务板正文，也不写入会话历史或 episode log；未消费
   提示可在 Agent 重启后恢复投递，连续保存只保留最新通知。会话列表始终返回任务板摘要（正常或 unknown）。
-- 验证：Agent 定向 148/148、Admin API/assertion 6/6、前端 17/17 与生产构建、共享敏感 RPC 111/111；
+- 验证：Agent 定向 149/149、Admin API/assertion 6/6、前端 17/17 与生产构建、共享敏感 RPC 111/111；
   无网络只读 Docker 确定性评测 13/13。所有测试数据与报告均使用临时目录，未访问本机部署或 LLM 凭证。
 
 ### Manager 会话任务板与项目文档共享：已合入（PR #138，main `ab275c14`），边界收口验证完成

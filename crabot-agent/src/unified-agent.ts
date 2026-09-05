@@ -160,6 +160,12 @@ import {
   type WorkboardView,
 } from './manager/workboard-store.js'
 import { isManagerKey } from './workers/harness/ledger-store.js'
+import {
+  projectManagerInboundMessages,
+  type GetManagerInboundStatusAdminParams,
+  type GetManagerInboundStatusAdminResult,
+  type ManagerInboundMessageFact,
+} from './manager/inbound-status.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
 const CLI_SUBAGENT_HARVEST_DELAY_MS = 30_000
@@ -1536,6 +1542,7 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('inspect_worker_implementation_bootstrap', this.handleInspectWorkerBootstrap.bind(this))
     this.registerMethod('commit_worker_implementation_bootstrap', this.handleCommitWorkerBootstrap.bind(this))
     this.registerMethod('list_manager_episodes_admin', this.handleListManagerEpisodesAdmin.bind(this))
+    this.registerMethod('get_manager_inbound_status_admin', this.handleGetManagerInboundStatusAdmin.bind(this))
     this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
     this.registerMethod('get_worker_terminal', this.handleGetWorkerTerminal.bind(this))
     this.registerMethod('get_worker_trace', this.handleGetWorkerTrace.bind(this))
@@ -3946,6 +3953,45 @@ export class UnifiedAgent extends ModuleBase {
           : undefined
         return withCausalParent(episode, parent)
       }),
+    }
+  }
+
+  /** §8.4：聚合既有 buffer/lane/Manager 上下文的同步只读入站快照。 */
+  private async handleGetManagerInboundStatusAdmin(
+    params: GetManagerInboundStatusAdminParams,
+  ): Promise<GetManagerInboundStatusAdminResult> {
+    const stack = this.requireManagerStack()
+    if (!params || typeof params.manager_key !== 'string' || params.manager_key.length === 0) {
+      throw new Error('manager_key is required')
+    }
+    const { channelId, sessionId } = splitManagerKey(params.manager_key)
+    const facts: ManagerInboundMessageFact[] = []
+    const addQueued = (messages: ReadonlyArray<ChannelMessage>): void => {
+      for (const message of messages) {
+        if (message.session.channel_id === channelId && message.session.session_id === sessionId) {
+          facts.push({ message, status: 'queued' })
+        }
+      }
+    }
+
+    addQueued(this.attentionScheduler.snapshotBuffer(sessionId).map(({ message }) => message))
+    const direct = this.directLaneRegistry.snapshot(params.manager_key)
+    addQueued([...direct.current, ...direct.queued].map(({ message }) => message))
+    const group = this.groupLaneRegistry.snapshot(params.manager_key)
+    addQueued(
+      [...group.current, ...group.queued]
+        .flatMap(({ messages }) => messages)
+        .map(({ message }) => message),
+    )
+    facts.push(...stack.registry.snapshotHumanInbound(params.manager_key))
+
+    return {
+      manager_key: params.manager_key,
+      snapshot_at: new Date().toISOString(),
+      items: projectManagerInboundMessages(
+        facts,
+        (text) => redactSecrets(text, [...this.knownSecrets]),
+      ),
     }
   }
 

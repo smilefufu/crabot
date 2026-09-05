@@ -39,6 +39,7 @@ import type {
   GetWorkerSubagentTraceResult,
 } from '../../src/manager/read-model.js'
 import type { TriggerScheduleParams, TriggerScheduleResult } from '../../src/unified-agent.js'
+import type { ChannelMessage } from '../../src/types.js'
 
 // ============================================================================
 // helpers
@@ -1519,6 +1520,7 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
     return agent as unknown as {
       handleListManagersAdmin(p: unknown): Promise<unknown>
       handleListManagerEpisodesAdmin(p: unknown): Promise<unknown>
+      handleGetManagerInboundStatusAdmin(p: unknown): Promise<unknown>
     }
   }
 
@@ -1543,6 +1545,7 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
     const agent = buildAgentWithTraceStack({ noStack: true })
     await expect(agent.handleListManagersAdmin({})).rejects.toThrow('Manager stack not initialized')
     await expect(agent.handleListManagerEpisodesAdmin({ manager_key: 'wechat::sess-a' })).rejects.toThrow('Manager stack not initialized')
+    await expect(agent.handleGetManagerInboundStatusAdmin({ manager_key: 'wechat::sess-a' })).rejects.toThrow('Manager stack not initialized')
   })
 
   it('list_manager_episodes_admin 按 exact key 透传 TraceStore 分页', async () => {
@@ -1562,6 +1565,101 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
     expect(result.pagination.page).toBe(2)
     expect(seen).toEqual([['wechat::sess-a', { page: 2, page_size: 5 }]])
     await expect(agent.handleListManagerEpisodesAdmin({ manager_key: '' })).rejects.toThrow('manager_key')
+  })
+
+  it('get_manager_inbound_status_admin 聚合运行时所有者，exact 过滤、processing 去重并脱敏', async () => {
+    const makeMessage = (p: {
+      id: string
+      channel?: string
+      timestamp: string
+      text: string
+    }): ChannelMessage => ({
+      platform_message_id: p.id,
+      session: { session_id: 'sess-a', channel_id: p.channel ?? 'wechat', type: 'private' },
+      sender: { platform_user_id: `user-${p.id}`, platform_display_name: '测试用户' },
+      content: { type: 'text', text: p.text, file_path: '/private/hidden' },
+      features: { is_mention_crab: false },
+      platform_timestamp: p.timestamp,
+    })
+    const duplicate = makeMessage({
+      id: 'pm-duplicate',
+      timestamp: '2026-09-05T06:28:15.000Z',
+      text: 'token secret-value-123456',
+    })
+    const queued = makeMessage({
+      id: 'pm-queued',
+      timestamp: '2026-09-05T06:28:20.000Z',
+      text: '仍在排队',
+    })
+    const attentionQueued = makeMessage({
+      id: 'pm-attention',
+      timestamp: '2026-09-05T06:28:21.000Z',
+      text: '仍在注意力缓冲',
+    })
+    const groupQueued = makeMessage({
+      id: 'pm-group',
+      timestamp: '2026-09-05T06:28:22.000Z',
+      text: '仍在群聊 lane',
+    })
+    const foreign = makeMessage({
+      id: 'pm-foreign',
+      channel: 'feishu',
+      timestamp: '2026-09-05T06:28:10.000Z',
+      text: '其它渠道',
+    })
+    const agent = buildAgentWithTraceStack({}) as unknown as Record<string, any>
+    agent.knownSecrets = new Set(['secret-value-123456'])
+    agent.attentionScheduler = {
+      snapshotBuffer: vi.fn(() => [{ message: foreign, friend: {} }, { message: attentionQueued, friend: {} }]),
+    }
+    agent.directLaneRegistry = {
+      snapshot: vi.fn(() => ({ current: [{ message: duplicate, friend: {} }], queued: [{ message: queued, friend: {} }] })),
+    }
+    agent.groupLaneRegistry = {
+      snapshot: vi.fn(() => ({ current: [{ messages: [{ message: groupQueued, friend: {} }], sessionId: 'sess-a' }], queued: [] })),
+    }
+    agent.managerStack.registry.snapshotHumanInbound = vi.fn(() => [{
+      message: duplicate,
+      status: 'processing',
+      episode_id: 'ep-running',
+    }])
+
+    const result = await agent.handleGetManagerInboundStatusAdmin({ manager_key: 'wechat::sess-a' })
+
+    expect(result).toMatchObject({
+      manager_key: 'wechat::sess-a',
+      snapshot_at: expect.any(String),
+      items: [
+        {
+          platform_message_id: 'pm-duplicate',
+          status: 'processing',
+          preview: 'token [REDACTED]',
+          episode_id: 'ep-running',
+        },
+        {
+          platform_message_id: 'pm-queued',
+          status: 'queued',
+          preview: '仍在排队',
+        },
+        {
+          platform_message_id: 'pm-attention',
+          status: 'queued',
+          preview: '仍在注意力缓冲',
+        },
+        {
+          platform_message_id: 'pm-group',
+          status: 'queued',
+          preview: '仍在群聊 lane',
+        },
+      ],
+    })
+    expect(JSON.stringify(result)).not.toContain('/private/hidden')
+    expect(JSON.stringify(result)).not.toContain('user-pm')
+    expect(agent.attentionScheduler.snapshotBuffer).toHaveBeenCalledWith('sess-a')
+    expect(agent.directLaneRegistry.snapshot).toHaveBeenCalledWith('wechat::sess-a')
+    expect(agent.groupLaneRegistry.snapshot).toHaveBeenCalledWith('wechat::sess-a')
+    expect(agent.managerStack.registry.snapshotHumanInbound).toHaveBeenCalledWith('wechat::sess-a')
+    await expect(agent.handleGetManagerInboundStatusAdmin({ manager_key: '' })).rejects.toThrow('manager_key')
   })
 
   it('worker_event 的 spawn 父 episode 跨分页时返回 causal_parent', async () => {
