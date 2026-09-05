@@ -20,7 +20,7 @@
         { "worker_id": "worker-context-audit", "title": "核查上下文请求：还原请求记录" }
       ],
       "steps": [
-        { "kind": "human", "text": "新增一个无关需求【回归任务乙】：制作 Docker 隔离评测，请现在开始。" }
+        { "kind": "human", "text": "新增一个无关需求【回归任务乙】：制作一套不依赖现有项目、可独立运行的 Docker 隔离评测，请现在开始。" }
       ],
       "expect": {
         "required_tools": ["spawn_worker"],
@@ -129,6 +129,17 @@
       "expect": {
         "required_tools": ["inspect_project_docs", "manage_decision_doc"],
         "forbidden_tools": ["mcp__crab-memory__store_memory", "mcp__crab-memory__quick_capture", "mcp__crab-memory__update_long_term"]
+      }
+    },
+    {
+      "id": "general-preference",
+      "title": "通用偏好进入长期记忆",
+      "steps": [
+        { "kind": "human", "text": "无论处理哪个项目或任务，我都希望你先说结论，再补充必要细节。请把这个通用偏好记住。" }
+      ],
+      "expect": {
+        "required_tools": ["mcp__crab-memory__store_memory"],
+        "forbidden_tools": ["manage_decision_doc"]
       }
     }
   ]

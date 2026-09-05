@@ -29,13 +29,15 @@
   ],
   "steps": [
     { "kind": "worker", "worker_id": "worker-request-audit", "text": "请求还原发现一处上下文缺口，需要继续核对。" },
-    { "kind": "human", "text": "任务板保持轻量，不要加入优先级、任务项标识或执行器关联字段。" },
+    { "kind": "human", "text": "项目根是 {{project_root}}。这个项目里的任务板保持轻量，不要加入优先级、任务项标识或执行器关联字段。" },
     { "kind": "worker", "worker_id": "worker-workboard-design", "text": "工具契约核对完成，等待确认下一步。" },
     { "kind": "human", "text": "继续核查最初的请求混乱，但不要把任务板内容写进记忆。" }
   ],
   "expect": {
+    "required_tools": ["manage_decision_doc"],
     "forbidden_tools": ["mcp__crab-memory__store_memory", "mcp__crab-memory__quick_capture", "mcp__crab-memory__update_long_term"],
     "forbidden_calls": [
+      { "tool": "change_workboard", "equals": { "action": "create" } },
       { "tool": "send_to_worker", "equals": { "worker_id": "worker-workboard-design" }, "contains": { "text": "请求混乱" } },
       { "tool": "send_to_worker", "equals": { "worker_id": "worker-request-audit" }, "contains": { "text": "工具契约" } }
     ]

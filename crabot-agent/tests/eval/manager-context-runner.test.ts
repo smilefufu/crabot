@@ -7,6 +7,7 @@ import {
   redactForEvaluation,
   runBehaviorEvaluation,
   runDeterministicEvaluation,
+  selectMemoryWriteCalls,
 } from '../../eval/manager-context/runner.js'
 
 const EVAL_ENV_NAMES = [
@@ -83,6 +84,18 @@ describe('manager context 隔离评测 runner', () => {
     expect(output).not.toContain(root)
     expect(output).toContain('<data_root>')
     expect(output).toContain('[REDACTED_IMAGE]')
+  })
+
+  it('任务板镜像检查忽略只读查询但保留 Memory 写操作', () => {
+    const calls = [
+      { method: 'search_short_term', params: { query: '任务板内容' } },
+      { method: 'search_long_term', params: { query: '项目决策' } },
+      { method: 'quick_capture', params: { content: '跨任务偏好' } },
+    ]
+
+    expect(selectMemoryWriteCalls(calls)).toEqual([
+      { method: 'quick_capture', params: { content: '跨任务偏好' } },
+    ])
   })
 
   it('行为档缺少显式专用 Provider 配置时明确跳过且不发请求', async () => {

@@ -964,6 +964,23 @@ function matchesRule(call: ToolCallProjection, rule: BehaviorCallRule): boolean 
   return true
 }
 
+const READ_ONLY_MEMORY_METHODS = new Set([
+  'search_short_term',
+  'search_long_term',
+  'get_memory',
+  'list_recent',
+  'list_entries',
+  'get_stats',
+  'get_evolution_mode',
+  'get_scene_profile',
+])
+
+export function selectMemoryWriteCalls(
+  calls: ReadonlyArray<{ readonly method: string; readonly params: unknown }>,
+): Array<{ readonly method: string; readonly params: unknown }> {
+  return calls.filter((call) => !READ_ONLY_MEMORY_METHODS.has(call.method))
+}
+
 function gradeBehaviorScenario(
   scenario: BehaviorScenario,
   run: number,
@@ -986,7 +1003,7 @@ function gradeBehaviorScenario(
     results.push(assertion(`${prefix}-forbidden-call-${index}`, !calls.some((call) => matchesRule(call, rule)), `${scenario.title} 出现禁止的 ${rule.tool} 调用`))
   }
 
-  const memoryPayload = JSON.stringify(env.memoryCalls)
+  const memoryPayload = JSON.stringify(selectMemoryWriteCalls(env.memoryCalls))
   const markers = [
     ...(scenario.workitems ?? []).flatMap((item) => [item.title, item.objective, ...item.acceptance]),
     'PROJECT_DOC_SENTINEL_SHARED_FACT',

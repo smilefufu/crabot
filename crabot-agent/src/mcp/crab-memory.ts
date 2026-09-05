@@ -127,7 +127,7 @@ const STORE_MEMORY_SCHEMA = {
   type: z.enum(['fact', 'lesson', 'concept']).optional()
     .describe('记忆类型：fact=客观事实, lesson=经验教训, concept=概念定义（默认 fact）'),
   importance: z.number().min(1).max(10).optional()
-    .describe('重要性 1-10，日常偏好 3-5，重要决策 6-8，关键信息 9-10（用于推断 importance_factors）'),
+    .describe('重要性 1-10；仅对符合本工具存储边界的信息评分，按长期稳定性和通用复用价值判断（用于推断重要性因子）'),
   tags: z.array(z.string()).optional()
     .describe('分类标签'),
 }
@@ -313,7 +313,7 @@ export function createCrabMemoryServer(
   server.registerTool(
         'store_memory',
         {
-          description: '将信息写入长期记忆 inbox。用户要求记住时必须使用；发现有价值的偏好、案例、模式等信息时也应主动使用。',
+          description: '将信息写入长期记忆的待确认区。只保存跨项目、跨任务长期适用的通用偏好、事实或经验。关于某个项目、任务、交付物或系统功能应如何设计、实现或验收的偏好属于项目决策，应写入项目文档；当前任务状态由任务板承载。两者都不得写入本工具。',
           inputSchema: STORE_MEMORY_SCHEMA,
         },
         async (args) => {

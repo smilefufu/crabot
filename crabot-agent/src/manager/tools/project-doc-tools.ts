@@ -503,7 +503,7 @@ export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[]
 
   const manage = defineTool({
     name: 'manage_decision_doc',
-    description: '在已授权项目的决策目录中排他创建决策记录，或依据读取到的完整 digest 更新普通 Markdown。',
+    description: '在已授权项目的决策目录中创建或更新决策记录。人类提出项目/任务偏好时，由你直接使用本工具记录；创建采用排他写入，更新必须依据完整读取所得的内容摘要。',
     inputSchema: {
       type: 'object',
       properties: {
