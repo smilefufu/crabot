@@ -117,7 +117,7 @@ export function buildWorkboardTools(deps: {
 
   const change = defineTool({
     name: 'change_workboard',
-    description: '创建、完整替换或归档本会话的任务项。创建前先查看当前任务板，根据标题和正文判断是否已有同一事项；已有时完整更新原任务项，只有确属新事项时才创建。',
+    description: '创建、完整替换或归档本会话中需要持续管理的人类事项。创建前先查看当前任务板，根据标题和正文判断是否已有同一事项；已有时完整更新原任务项，只有确属新事项时才创建。',
     inputSchema: {
       type: 'object',
       properties: {
