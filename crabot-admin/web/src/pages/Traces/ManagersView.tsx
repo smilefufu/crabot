@@ -64,7 +64,8 @@ export const ManagersView: React.FC = () => {
           <thead>
             <tr>
               <th>会话</th>
-              <th>在办</th>
+              <th>执行器</th>
+              <th>任务板</th>
               <th>最近动态</th>
             </tr>
           </thead>
@@ -83,6 +84,15 @@ export const ManagersView: React.FC = () => {
                   <span className={item.active_worker_count > 0 ? 'trace-count is-active' : 'trace-count'}>
                     {item.active_worker_count > 0 ? `${item.active_worker_count} 个` : '—'}
                   </span>
+                </td>
+                <td className="trace-table__count">
+                  <Link className="trace-table__workboard-link" to={`/traces/managers/${encodeURIComponent(item.manager_key)}/workboard`}>
+                    {item.workboard.status === 'unknown'
+                      ? '暂不可用'
+                      : item.workboard.active_count === 0
+                        ? '空'
+                        : `${item.workboard.active_count} 项${item.workboard.blocked_count > 0 ? ` · ${item.workboard.blocked_count} 项阻塞` : ''}`}
+                  </Link>
                 </td>
                 <td className="trace-table__activity-cell">
                   <div className={item.recent_activity_summary ? 'trace-table__activity' : 'trace-table__activity is-empty'}>{item.recent_activity_summary || '暂无活动摘要'}</div>

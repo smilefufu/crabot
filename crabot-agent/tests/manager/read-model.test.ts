@@ -497,11 +497,15 @@ describe('buildManagerAdminSummaries（P6-A §7）', () => {
         : { latestStartedAt: key === 'wechat::sess-c' ? '2026-08-02T10:00:00.000Z' : undefined },
       activeWorkerCount: (key) => (key === 'wechat::sess-b' ? 2 : 0),
       runningLastActiveAtMs: (key) => (key === 'wechat::sess-a' ? Date.parse('2026-08-03T10:00:00.000Z') : undefined),
+      workboardSummary: (key) => key === 'wechat::sess-b'
+        ? { status: 'ready', active_count: 2, blocked_count: 1 }
+        : { status: 'ready', active_count: 0, blocked_count: 0 },
     }, { page: 1, page_size: 20 })
     expect(result.items.map((item) => item.manager_key)).toEqual(['wechat::sess-a', 'wechat::sess-c', 'wechat::sess-b'])
     expect(result.items.find((item) => item.manager_key === 'wechat::sess-b')).toMatchObject({
       active_worker_count: 2,
       recent_activity_summary: 'worker 进展：部署中',
+      workboard: { status: 'ready', active_count: 2, blocked_count: 1 },
     })
     expect(result.items[0]).not.toHaveProperty('episode_count')
     expect(result.items[0]).not.toHaveProperty('worker_count')
@@ -515,6 +519,7 @@ describe('buildManagerAdminSummaries（P6-A §7）', () => {
       episodeStats: () => ({}),
       activeWorkerCount: () => 0,
       runningLastActiveAtMs: () => undefined,
+      workboardSummary: () => ({ status: 'unknown' }),
     }, { page: 0, page_size: 99999 })
     expect(empty.items).toEqual([])
     expect(empty.pagination).toMatchObject({ page: 1, page_size: 100, total_items: 0 })

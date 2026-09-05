@@ -26,10 +26,11 @@ export interface ManagerAdminSummary {
   last_activity_at?: string
   recent_activity_summary?: string
   active_worker_count: number
+  workboard: { status: 'ready'; active_count: number; blocked_count: number } | { status: 'unknown' }
 }
 
 export interface ManagerEpisodeTrigger {
-  type: 'human_message' | 'worker_event' | 'schedule' | 'attention_flush' | 'sub_agent_call'
+  type: 'human_message' | 'worker_event' | 'schedule' | 'attention_flush' | 'sub_agent_call' | 'system'
   summary: string
   source?: string
 }
@@ -201,6 +202,63 @@ export interface TraceCleanupResult {
   deleted_trace_ids: string[]
 }
 
+// ── 任务板（§8.4）──────────────────────────────────────────────
+
+export type WorkboardItemStatus = 'ready' | 'in_progress' | 'blocked'
+export type WorkboardArchiveOutcome = 'completed' | 'abandoned'
+
+export interface WorkboardItem {
+  title: string
+  status: WorkboardItemStatus
+  project_root?: string
+  objective: string
+  acceptance: string[]
+  current_state: string
+  next_action: string
+  blockers: string[]
+  updated_at: string
+}
+
+export interface ArchivedWorkboardItem extends WorkboardItem {
+  archived_as: WorkboardArchiveOutcome
+  archived_at: string
+}
+
+export interface WorkboardItemDraft {
+  title: string
+  status: WorkboardItemStatus
+  project_root?: string
+  objective: string
+  acceptance: string[]
+  current_state: string
+  next_action: string
+  blockers: string[]
+}
+
+export interface ManagerWorkboardResult {
+  manager_key: string
+  revision: number
+  view: 'active' | 'archive'
+  items: Array<WorkboardItem | ArchivedWorkboardItem>
+  active_count: number
+  archive_count: number
+  pagination: Pagination
+}
+
+export type ChangeWorkboardMutation =
+  | { action: 'create'; item: WorkboardItemDraft }
+  | { action: 'revise'; current_title: string; item: WorkboardItemDraft }
+  | { action: 'archive'; current_title: string; archived_as: WorkboardArchiveOutcome }
+
+export interface ChangeWorkboardResult {
+  manager_key: string
+  revision: number
+  item: WorkboardItem | ArchivedWorkboardItem
+  active_count: number
+  archive_count: number
+  manager_notification: 'pending'
+}
+
 // ── API ────────────────────────────────────────────────────────
 
 function qs(page: number, pageSize: number): string {
@@ -214,6 +272,21 @@ export const agentObservabilityService = {
 
   listManagerEpisodes(managerKey: string, page = 1, pageSize = 20): Promise<PaginatedResult<ManagerEpisodeTrace>> {
     return api.get(`/agent/managers/${encodeURIComponent(managerKey)}/episodes?${qs(page, pageSize)}`)
+  },
+
+  getManagerWorkboard(managerKey: string, view: 'active' | 'archive'): Promise<ManagerWorkboardResult> {
+    return api.get(`/agent/managers/${encodeURIComponent(managerKey)}/workboard?view=${view}&page=1&page_size=100`)
+  },
+
+  changeManagerWorkboard(
+    managerKey: string,
+    expectedRevision: number,
+    mutation: ChangeWorkboardMutation,
+  ): Promise<ChangeWorkboardResult> {
+    return api.patch(`/agent/managers/${encodeURIComponent(managerKey)}/workboard`, {
+      ...mutation,
+      expected_revision: expectedRevision,
+    })
   },
 
   listWorkers(params: {

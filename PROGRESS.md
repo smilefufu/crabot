@@ -24,6 +24,19 @@
 - Manager 与 builtin Worker 已共用 Engine 单一批次算法：按当前模型窗口的 80% 规划完整摘要请求，
   遇摘要截断或 Provider 上下文超限自适应缩批；成功批次不回滚，调用方各自保留持久化与生命周期语义。
 
+### Manager 任务板 Admin Web 共管：开发完成，待 PR 审查
+
+- 已按确认 spec（crabot-docs `a17871e`）实现会话列表的任务板入口与独立任务板页面；人类可查看、
+  新建、完整编辑或归档当前任务项，并可查看 archive 终态快照。页面以整板 revision 保存，冲突后保留
+  本地草稿并提示重新核对。
+- Admin 写入经短期一次性 assertion 和 `callSensitive` 核销后才由 Agent 原子落盘；同一次保存持久化
+  revision、Manager 必读栅栏、权限快照和待投递系统提示。Manager 读取受影响事项后才能再修改，避免
+  人类与 Manager 的静默覆盖。
+- 系统提示仅提醒 Manager 主动查阅最新任务板，不携带任务板正文，也不写入会话历史或 episode log；未消费
+  提示可在 Agent 重启后恢复投递，连续保存只保留最新通知。会话列表始终返回任务板摘要（正常或 unknown）。
+- 验证：Agent 定向 148/148、Admin API/assertion 6/6、前端 17/17 与生产构建、共享敏感 RPC 111/111；
+  无网络只读 Docker 确定性评测 13/13。所有测试数据与报告均使用临时目录，未访问本机部署或 LLM 凭证。
+
 ### Manager 会话任务板与项目文档共享：已合入（PR #138，main `ab275c14`），边界收口验证完成
 
 - 已确认并发布设计、计划及正式协议（crabot-docs 初版 `753c922`，边界修正 `500a030`）：每个 Manager

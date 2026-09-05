@@ -98,6 +98,8 @@ export interface ManagerStack {
   readonly ledger: LedgerStore
   /** Manager session 持久化（P6-A 读模型用：disk session keys 枚举）。 */
   readonly store: ManagerSessionStore
+  /** Manager 与 Admin 共同写入的任务板真相源。 */
+  readonly workboard: ManagerWorkboardStore
   readonly workspaces: WorkspaceManager
   readonly harness: WorkerHarness
   readonly registry: ManagerRegistry
@@ -230,6 +232,8 @@ export interface BootstrapDeps {
   readonly onNativeActivityCollected?: (handle: import('../workers/types.js').IncarnationHandle) => void
   /** P6-A §3.2：episode 消费后结算未 claim 的 Admin Chat request IDs（写 correlation store）。 */
   readonly onAdminChatWakeConsumed?: (key: import('../workers/harness/ledger-types.js').ManagerKey, requestIds: string[]) => void
+  /** 任务板系统输入被成功消费后的 notice 结算出口。 */
+  readonly onWorkboardAdminUpdateConsumed?: (key: import('../workers/harness/ledger-types.js').ManagerKey, noticeRevisions: ReadonlyArray<number>) => void | Promise<void>
   /**
    * fail-loud 兜底出口:worker 事件唤醒的 manager episode 失败时,直接告诉人类一声。
    * 接线范式与上面的 `publishEvent` 完全一致(可选;不注入则这条路保持"只记日志"的既有行为)。
@@ -528,6 +532,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   registry = new ManagerRegistry({
     traceWriter: deps.traceWriter,
     onAdminChatWakeConsumed: deps.onAdminChatWakeConsumed,
+    onWorkboardAdminUpdateConsumed: deps.onWorkboardAdminUpdateConsumed,
     store: sessionStore,
     policy: DEFAULT_MANAGER_COMPACTION_POLICY,
     estimateTokens: (msgs) => tokenEstimator.estimateTotalTokens(msgs),
@@ -549,7 +554,11 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
     onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
     beforeWake: async (key, envelope) => {
-      if (envelope?.wake.kind !== 'human_messages' && envelope?.wake.kind !== 'attention_flush') await principals.refreshForNonHumanWake(key)
+      if (
+        envelope?.wake.kind !== 'human_messages'
+        && envelope?.wake.kind !== 'attention_flush'
+        && envelope?.wake.kind !== 'workboard_admin_update'
+      ) await principals.refreshForNonHumanWake(key)
     },
     // scheduled 唤醒边界(§4.4"权限按 `Schedule.creator_friend_id` 解析,`is_builtin` 按 master
     // 等价"):按**调度自己的身份**解析,不碰该会话的发起人缓存(既不读也不写)。
@@ -578,6 +587,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       // Capture at tool-face construction. Calling the resulting factory later must not
       // pick up a regrant/new generation from a subsequent wake.
       const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
+      const isWorkboardAdminUpdate = wakeEvent?.kind === 'workboard_admin_update'
       return buildManagerToolFace({
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
@@ -615,7 +625,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           ),
           // scheduled 触发(不论有无目标 session)记 'scheduled';系统线程的其余唤醒
           // (查不到监护 session 的 worker 事件)记 'system';人类消息记 'message'。
-          triggerType: scheduleIdentity ? 'scheduled' : isSystemThread ? 'system' : 'message',
+          triggerType: scheduleIdentity ? 'scheduled' : isWorkboardAdminUpdate || isSystemThread ? 'system' : 'message',
         }),
         messagingDeps: deps.messagingDeps,
         // send_message 省略 channel_id 时使用的 manager 归属目标与结构化 Session 观察索引
@@ -627,7 +637,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         // 记忆档位按**这个会话最近一次解析出来的发起人身份**现建。这里刻意不用
         // `humanPrincipal`:worker 事件唤醒的 episode 里没人说话,但该会话的记忆可见范围
         // 并不因此改变——它是会话属性,不是本轮属性。
-        memoryServer: deps.memoryServerFor(memoryContextFor(key, principals.get(key))),
+        memoryServer: deps.memoryServerFor(memoryContextFor(key, isWorkboardAdminUpdate ? undefined : principals.get(key))),
         callAdmin: deps.callAdmin,
         getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
         isSystemThread,
@@ -680,7 +690,19 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     return disposePromise
   }
 
-  return { ledger, workspaces, harness, registry, adapters, principals, principalBindings, builtinDataDir, store: sessionStore, dispose }
+  return {
+    ledger,
+    workspaces,
+    harness,
+    registry,
+    adapters,
+    principals,
+    principalBindings,
+    builtinDataDir,
+    store: sessionStore,
+    workboard: workboardStore,
+    dispose,
+  }
 }
 
 /**

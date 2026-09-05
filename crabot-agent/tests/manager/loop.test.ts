@@ -913,6 +913,82 @@ describe('ManagerLoop', () => {
     expect(turn1Messages).not.toContain('sched-1')
   })
 
+  it('运行中的任务板系统输入在下一轮切换工具面的权限快照', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push(
+      { toolCalls: [{ name: 'queue_workboard_update', id: 'call_1', input: {} }], stopReason: 'tool_use' },
+      { text: '已核对', stopReason: 'end_turn' },
+    )
+    const toolFaceWakes: Array<WakeEvent | undefined> = []
+    const systemPermissions = {
+      tool_access: { shell: true },
+      cli_access: { filesystem: 'allow' },
+      storage: null,
+      memory_scopes: ['system-owner-marker'],
+    }
+    const consumed = vi.fn()
+    let loop!: ManagerLoop
+    loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      toolFace: (wake) => {
+        toolFaceWakes.push(wake)
+        return [{
+          name: 'queue_workboard_update',
+          description: 'test only',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            loop.enqueueWorkboardAdminUpdate(timed({
+              kind: 'workboard_admin_update',
+              noticeRevision: 9,
+              principalPermissions: systemPermissions,
+            }))
+            return { output: 'queued', isError: false }
+          },
+        }]
+      },
+      onWorkboardAdminUpdateConsumed: consumed,
+    }))
+
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('继续处理')] }))
+
+    expect(JSON.stringify(calls[1].messages)).toContain('管理员已更新任务板')
+    expect(toolFaceWakes).toContainEqual(expect.objectContaining({
+      kind: 'workboard_admin_update',
+      noticeRevision: 9,
+      principalPermissions: systemPermissions,
+    }))
+    expect(consumed).toHaveBeenCalledWith([9])
+  })
+
+  it('任务板系统提示仅进入当前 LLM 输入，不落会话历史或 episode log', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ text: '已核对', stopReason: 'end_turn' })
+    const consumed = vi.fn()
+    const loop = new ManagerLoop(baseDeps({ store, adapter, onWorkboardAdminUpdateConsumed: consumed }))
+
+    await loop.wakeUp(timed({
+      kind: 'workboard_admin_update',
+      noticeRevision: 3,
+      principalPermissions: {
+        tool_access: { shell: true },
+        cli_access: { filesystem: 'allow' },
+        storage: null,
+        memory_scopes: [],
+      },
+    }))
+
+    expect(JSON.stringify(calls[0].messages)).toContain('管理员已更新任务板')
+    expect(JSON.stringify((await store.load(KEY)).recent)).not.toContain('管理员已更新任务板')
+    const files = await fs.readdir(dataDir, { recursive: true })
+    const episodeLogs = files.filter((file) => file.includes('episodes/') && file.endsWith('.jsonl'))
+    for (const file of episodeLogs) {
+      await expect(fs.readFile(join(dataDir, file), 'utf-8')).resolves.not.toContain('管理员已更新任务板')
+    }
+    expect(consumed).toHaveBeenCalledWith([3])
+  })
+
   it('episode 运行中到达的人类消息:先提交(store recent+去重键+回调)再注入,当前 episode 下一轮可见', async () => {
     const { adapter, queue, calls } = makeAdapter()
     queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })

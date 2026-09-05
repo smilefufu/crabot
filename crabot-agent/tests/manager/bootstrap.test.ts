@@ -628,6 +628,62 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(search!.params.accessible_scopes).toEqual(['sess-boot'])
   })
 
+  it('任务板系统更新不继承目标会话的人类 Memory scope', async () => {
+    const memoryCalls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        if (JSON.stringify(params.messages).includes('管理员已更新任务板')) {
+          const tool = params.tools.find((candidate) => candidate.name === 'mcp__crab-memory__search_memory')
+          expect(tool, '任务板系统更新应保留 Memory 工具').toBeDefined()
+          await tool!.call({ query: '当前偏好', level: 'short_term', limit: 5 }, {} as never)
+        }
+        yield* chunksFromContent([{ type: 'text', text: '已处理' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+    const stack = buildManagerStack(makeDeps({
+      managerAdapter: () => adapter,
+      principalResolver: {
+        ...makePrincipalResolver(),
+        resolvePermissions: async () => ({
+          tool_access: { memory: true, messaging: true, task: true, mcp_skill: true, file_io: true, browser: true, shell: true, remote_exec: false, desktop: false },
+          cli_access: Object.fromEntries(CLI_DOMAINS.map((domain) => [domain, 'none'])) as never,
+          storage: null,
+          memory_scopes: ['human-private-scope'],
+        }),
+      },
+      memoryServerFor: (ctx) => createCrabMemoryServer(
+        {
+          rpcClient: {
+            call: async (_port: number, method: string, params: Record<string, unknown>) => {
+              memoryCalls.push({ method, params })
+              return { results: [] }
+            },
+          } as never,
+          moduleId: 'manager-bootstrap-test',
+          getMemoryPort: async () => 19100,
+        },
+        ctx,
+      ),
+    }))
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('先建立会话权限')], FRIEND_A)
+    await stack.registry.routeWorkboardAdminUpdate({
+      key: 'wechat::sess-boot' as ManagerKey,
+      noticeRevision: 1,
+      principalPermissions: {
+        tool_access: { memory: true, messaging: true, task: true, mcp_skill: true, file_io: true, browser: true, shell: true, remote_exec: true, desktop: true },
+        cli_access: Object.fromEntries(CLI_DOMAINS.map((domain) => [domain, 'write'])) as never,
+        storage: null,
+        memory_scopes: ['system-owner-scope'],
+      },
+    })
+
+    const search = memoryCalls.find((call) => call.method === 'search_short_term')
+    expect(search!.params.min_visibility).toBe('public')
+    expect(search!.params).not.toHaveProperty('accessible_scopes')
+  })
+
 
   // --- ⑥ 发起人身份 → origin.creator_friend_id（P7 J Task 2） ---
 

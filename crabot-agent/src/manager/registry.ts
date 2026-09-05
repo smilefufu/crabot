@@ -190,6 +190,8 @@ export interface ManagerRegistryDeps {
   readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
   /** P6-A §3.2：episode 消费后结算未 claim 的 Admin Chat request IDs。 */
   readonly onAdminChatWakeConsumed?: (key: ManagerKey, requestIds: string[]) => void
+  /** 仅在任务板系统输入实际被成功 episode 消费后结算其持久化 notice。 */
+  readonly onWorkboardAdminUpdateConsumed?: (key: ManagerKey, noticeRevisions: ReadonlyArray<number>) => void | Promise<void>
   /** Stable system prompt profile material. */
   readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string; readonly isGroup?: boolean; readonly adminPersonality?: string }
 }
@@ -275,6 +277,9 @@ export class ManagerRegistry {
       traceWriter: this.deps.traceWriter,
       onAdminChatWakeConsumed: this.deps.onAdminChatWakeConsumed
         ? (ids) => this.deps.onAdminChatWakeConsumed!(key, ids)
+        : undefined,
+      onWorkboardAdminUpdateConsumed: this.deps.onWorkboardAdminUpdateConsumed
+        ? (revisions) => this.deps.onWorkboardAdminUpdateConsumed!(key, revisions)
         : undefined,
     }
 
@@ -572,6 +577,39 @@ export class ManagerRegistry {
     })
   }
 
+  /** Admin 任务板保存的系统管理输入：权限快照随 wake 走，不触碰会话主体缓存。 */
+  async routeWorkboardAdminUpdate(p: {
+    key: ManagerKey
+    noticeRevision: number
+    principalPermissions: ResolvedPermissions
+    onSettled?: (result: EpisodeResult) => void
+  }): Promise<EpisodeResult> {
+    const capture = this.captureIngress()
+    const envelope = this.makeEnvelope(capture, {
+      kind: 'workboard_admin_update',
+      noticeRevision: p.noticeRevision,
+      principalPermissions: p.principalPermissions,
+    })
+    const onSettled = (result: EpisodeResult): void => {
+      p.onSettled?.(result)
+    }
+    const loop = this.getOrCreate(p.key)
+    if (this.isEpisodeActive(p.key)) {
+      loop.enqueueWorkboardAdminUpdate(envelope)
+      return {
+        episodeId: '',
+        outcome: 'completed',
+        turns: 0,
+        consumedEvents: false,
+        repliedToHuman: false,
+        successfulSendMessageTargets: [],
+      }
+    }
+    const result = await this.runWake(p.key, envelope)
+    onSettled(result)
+    return result
+  }
+
   /**
    * 空闲实例回收:回收 `nowMs - 最后活跃时间 > idleMs`、当前无 episode 在跑、且 **mailbox 为空**
    * 的实例。只删内存里的 `ManagerLoop` 引用,不碰 `ManagerSessionStore` 的盘上状态——回收后
@@ -813,7 +851,8 @@ function principalPermissionsOf(wakeEvent: WakeEvent | undefined): ResolvedPermi
   if (
     wakeEvent?.kind !== 'human_messages' &&
     wakeEvent?.kind !== 'attention_flush' &&
-    wakeEvent?.kind !== 'schedule'
+    wakeEvent?.kind !== 'schedule' &&
+    wakeEvent?.kind !== 'workboard_admin_update'
   ) {
     return undefined
   }
