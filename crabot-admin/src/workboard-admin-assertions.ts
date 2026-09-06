@@ -9,7 +9,22 @@ const ISSUER = 'admin-web'
 const TTL_SECONDS = 60
 const CLAIM_KEYS = ['assertion_id', 'issuer_module_id', 'audience', 'purpose', 'manager_key', 'action', 'expected_revision', 'payload_sha256', 'issued_at', 'expires_at'] as const
 
-export type WorkboardAdminAction = 'create' | 'revise' | 'archive'
+export type WorkboardAdminAction =
+  | 'create_objective'
+  | 'revise_objective'
+  | 'archive_objective'
+  | 'create_work_item'
+  | 'revise_work_item'
+  | 'archive_work_item'
+
+const WORKBOARD_ADMIN_ACTIONS = new Set<WorkboardAdminAction>([
+  'create_objective',
+  'revise_objective',
+  'archive_objective',
+  'create_work_item',
+  'revise_work_item',
+  'archive_work_item',
+])
 
 export interface WorkboardAdminAssertionClaims {
   assertion_id: string
@@ -53,7 +68,7 @@ function validClaims(value: unknown): value is WorkboardAdminAssertionClaims {
   return typeof claims.assertion_id === 'string' && claims.assertion_id.length > 0
     && claims.issuer_module_id === ISSUER && claims.audience === AUDIENCE && claims.purpose === PURPOSE
     && typeof claims.manager_key === 'string' && claims.manager_key.length > 0
-    && (claims.action === 'create' || claims.action === 'revise' || claims.action === 'archive')
+    && typeof claims.action === 'string' && WORKBOARD_ADMIN_ACTIONS.has(claims.action as WorkboardAdminAction)
     && typeof claims.expected_revision === 'number' && Number.isSafeInteger(claims.expected_revision) && claims.expected_revision >= 0
     && typeof claims.payload_sha256 === 'string' && /^[a-f0-9]{64}$/.test(claims.payload_sha256)
     && typeof claims.issued_at === 'string' && Number.isFinite(Date.parse(claims.issued_at))
@@ -99,6 +114,7 @@ export class WorkboardAdminAssertions {
 
   async issue(input: ExpectedWorkboardAdminAssertion): Promise<string> {
     if (!input.manager_key || !/^[a-f0-9]{64}$/.test(input.payload_sha256)) throw new Error('invalid assertion input')
+    if (!WORKBOARD_ADMIN_ACTIONS.has(input.action)) throw new Error('invalid assertion action')
     if (!Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0) throw new Error('invalid expected revision')
     const issued = this.now()
     const expires = new Date(issued.getTime() + TTL_SECONDS * 1_000)

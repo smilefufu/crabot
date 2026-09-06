@@ -26,7 +26,12 @@ export interface ManagerAdminSummary {
   last_activity_at?: string
   recent_activity_summary?: string
   active_worker_count: number
-  workboard: { status: 'ready'; active_count: number; blocked_count: number } | { status: 'unknown' }
+  workboard: {
+    status: 'ready'
+    current_objective_count: number
+    current_work_item_count: number
+    blocked_work_item_count: number
+  } | { status: 'unknown' }
 }
 
 export interface ManagerEpisodeTrigger {
@@ -222,57 +227,90 @@ export interface TraceCleanupResult {
 export type WorkboardItemStatus = 'ready' | 'in_progress' | 'blocked'
 export type WorkboardArchiveOutcome = 'completed' | 'abandoned'
 
-export interface WorkboardItem {
+export interface WorkboardObjectiveDraft {
   title: string
-  status: WorkboardItemStatus
-  project_root?: string
-  objective: string
-  acceptance: string[]
-  current_state: string
-  next_action: string
-  blockers: string[]
-  updated_at: string
-}
-
-export interface ArchivedWorkboardItem extends WorkboardItem {
-  archived_as: WorkboardArchiveOutcome
-  archived_at: string
+  completion_criteria: string[]
 }
 
 export interface WorkboardItemDraft {
   title: string
   status: WorkboardItemStatus
   project_root?: string
-  objective: string
-  acceptance: string[]
-  current_state: string
+  current_judgement?: string
   next_action: string
-  blockers: string[]
+  blocker?: string
 }
 
-export interface ManagerWorkboardResult {
+export interface WorkboardItem extends WorkboardItemDraft {
+  updated_at: string
+}
+
+export interface ArchivedWorkboardItem extends WorkboardItem {
+  objective: WorkboardObjectiveDraft
+  archived_as: WorkboardArchiveOutcome
+  archived_at: string
+}
+
+export interface WorkboardObjective extends WorkboardObjectiveDraft {
+  work_items: WorkboardItem[]
+  updated_at: string
+}
+
+export interface ArchivedWorkboardObjective extends WorkboardObjectiveDraft {
+  archived_as: WorkboardArchiveOutcome
+  archived_at: string
+}
+
+export interface WorkboardCounts {
+  current_objectives: number
+  current_work_items: number
+  blocked_work_items: number
+  archive_entries: number
+}
+
+interface ManagerWorkboardResultBase {
   manager_key: string
   revision: number
-  view: 'active' | 'archive'
-  items: Array<WorkboardItem | ArchivedWorkboardItem>
-  active_count: number
-  archive_count: number
+  counts: WorkboardCounts
   pagination: Pagination
 }
 
-export type ChangeWorkboardMutation =
-  | { action: 'create'; item: WorkboardItemDraft }
-  | { action: 'revise'; current_title: string; item: WorkboardItemDraft }
-  | { action: 'archive'; current_title: string; archived_as: WorkboardArchiveOutcome }
+export type ManagerWorkboardResult =
+  | ManagerWorkboardResultBase & { view: 'active'; objectives: WorkboardObjective[] }
+  | ManagerWorkboardResultBase & { view: 'archive'; entries: Array<ArchivedWorkboardItem | ArchivedWorkboardObjective> }
 
-export interface ChangeWorkboardResult {
+export type ChangeWorkboardMutation =
+  | { action: 'create_objective'; objective: WorkboardObjectiveDraft }
+  | { action: 'revise_objective'; current_objective_title: string; objective: WorkboardObjectiveDraft }
+  | { action: 'archive_objective'; current_objective_title: string; archived_as: WorkboardArchiveOutcome }
+  | { action: 'create_work_item'; objective_title: string; work_item: WorkboardItemDraft }
+  | {
+      action: 'revise_work_item'
+      current_objective_title: string
+      current_work_item_title: string
+      target_objective_title: string
+      work_item: WorkboardItemDraft
+    }
+  | {
+      action: 'archive_work_item'
+      current_objective_title: string
+      current_work_item_title: string
+      archived_as: WorkboardArchiveOutcome
+    }
+
+interface ChangeWorkboardResultBase {
   manager_key: string
   revision: number
-  item: WorkboardItem | ArchivedWorkboardItem
-  active_count: number
-  archive_count: number
+  counts: WorkboardCounts
   manager_notification: 'pending'
 }
+
+export type ChangeWorkboardResult = ChangeWorkboardResultBase & (
+  | { action: 'objective_created' | 'objective_revised'; objective: Omit<WorkboardObjective, 'work_items'> }
+  | { action: 'objective_archived'; objective: ArchivedWorkboardObjective }
+  | { action: 'work_item_created' | 'work_item_revised'; objective_title: string; work_item: WorkboardItem }
+  | { action: 'work_item_archived'; work_item: ArchivedWorkboardItem }
+)
 
 // ── API ────────────────────────────────────────────────────────
 

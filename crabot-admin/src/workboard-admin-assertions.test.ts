@@ -7,7 +7,7 @@ import { WorkboardAdminAssertions } from './workboard-admin-assertions.js'
 
 const EXPECTED = {
   manager_key: 'feishu::cotton-candy',
-  action: 'revise' as const,
+  action: 'revise_work_item' as const,
   expected_revision: 7,
   payload_sha256: 'a'.repeat(64),
 }
@@ -73,6 +73,12 @@ describe('WorkboardAdminAssertions', () => {
     const tamperedPayload = `${payload!.slice(0, -1)}${payload!.endsWith('A') ? 'B' : 'A'}`
     const tampered = `${header}.${tamperedPayload}.${signature}`
     await expect(assertions.consume(tampered, EXPECTED)).rejects.toThrow(/invalid/)
+  })
+
+  it('签发时拒绝退役的扁平事项 action', async () => {
+    const assertions = new WorkboardAdminAssertions(dir, 'test-secret', () => now)
+
+    await expect(assertions.issue({ ...EXPECTED, action: 'revise' as never })).rejects.toThrow(/invalid assertion action/)
   })
 
   it('兼容旧 assertion store 的权限残留，并在正常持久化时删除', async () => {

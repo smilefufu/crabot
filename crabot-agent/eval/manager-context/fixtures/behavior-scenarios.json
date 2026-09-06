@@ -5,15 +5,18 @@
     {
       "id": "unrelated-task",
       "title": "两个无关任务交错补充",
-      "workitems": [
+      "objectives": [
         {
-          "title": "核查上下文请求",
-          "status": "in_progress",
-          "objective": "逐次核查上下文请求",
-          "acceptance": ["给出请求级证据"],
-          "current_state": "正在核查",
-          "next_action": "继续还原请求",
-          "blockers": []
+          "title": "逐次核查上下文请求",
+          "completion_criteria": ["给出请求级证据"],
+          "work_items": [
+            {
+              "title": "核查上下文请求",
+              "status": "in_progress",
+              "current_judgement": "正在核查",
+              "next_action": "继续还原请求"
+            }
+          ]
         }
       ],
       "workers": [
@@ -53,32 +56,45 @@
     },
     {
       "id": "revised-objective",
-      "title": "阻塞后修改目标和验收",
-      "workitems": [
+      "title": "阻塞后修改目标和完成条件",
+      "objectives": [
         {
-          "title": "迁移校验",
-          "status": "blocked",
-          "objective": "输出迁移摘要",
-          "acceptance": ["旧验收标记"],
-          "current_state": "遇到无法绕过的阻塞",
-          "next_action": "等待目标调整",
-          "blockers": ["原方案不可行"]
+          "title": "输出迁移摘要",
+          "completion_criteria": ["旧完成条件标记"],
+          "work_items": [
+            {
+              "title": "迁移校验",
+              "status": "blocked",
+              "current_judgement": "遇到无法绕过的阻塞",
+              "next_action": "等待目标调整",
+              "blocker": "原方案不可行"
+            }
+          ]
         }
       ],
       "workers": [
         { "worker_id": "worker-migration", "title": "迁移校验：验证原迁移方案" }
       ],
       "steps": [
-        { "kind": "human", "text": "把【迁移校验】目标改为逐条核对，完整的新验收是【新验收标记】，继续相关任务。" }
+        { "kind": "human", "text": "把【输出迁移摘要】这个目标改成【逐条核对迁移结果】，完整的新完成条件是【新完成条件标记】，继续让原执行器处理相关事项。" }
       ],
       "expect": {
         "required_tools": ["change_workboard"],
         "required_calls": [
-          { "tool": "send_to_worker", "equals": { "worker_id": "worker-migration" }, "contains": { "text": "新验收标记" } }
+          { "tool": "change_workboard", "equals": { "action": "revise_objective" } },
+          { "tool": "send_to_worker", "equals": { "worker_id": "worker-migration" }, "contains": { "text": "新完成条件标记" } }
         ],
         "forbidden_calls": [
-          { "tool": "change_workboard", "equals": { "action": "archive" } }
-        ]
+          { "tool": "change_workboard", "equals": { "action": "archive_objective" } },
+          { "tool": "change_workboard", "equals": { "action": "archive_work_item" } }
+        ],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["逐条核对迁移结果", "新完成条件标记", "迁移校验"],
+          "excludes": ["旧完成条件标记"]
+        }
       }
     },
     {
@@ -94,27 +110,30 @@
       "expect": {
         "required_tools": ["send_message"],
         "required_calls": [
-          { "tool": "send_message", "contains_any": { "content": ["哪", "哪个", "具体"] } }
+          { "tool": "send_message", "contains_any": { "content": ["哪", "哪个", "具体", "还是"] } }
         ],
         "forbidden_tools": ["send_to_worker", "spawn_worker"]
       }
     },
     {
-      "id": "summary-omits-acceptance",
-      "title": "摘要缺少验收但任务板保留",
-      "workitems": [
+      "id": "summary-omits-completion-criteria",
+      "title": "摘要缺少完成条件但任务板保留",
+      "objectives": [
         {
-          "title": "压缩恢复",
-          "status": "in_progress",
-          "objective": "恢复多任务上下文",
-          "acceptance": ["压缩后验收唯一标记"],
-          "current_state": "摘要只保留了任务名称",
-          "next_action": "按完整验收继续",
-          "blockers": []
+          "title": "恢复多任务上下文",
+          "completion_criteria": ["压缩后完成条件唯一标记"],
+          "work_items": [
+            {
+              "title": "压缩恢复",
+              "status": "in_progress",
+              "current_judgement": "摘要只保留了事项名称",
+              "next_action": "按完整完成条件继续"
+            }
+          ]
         }
       ],
       "steps": [
-        { "kind": "human", "text": "请按【压缩恢复】当前完整验收继续，但不要猜验收内容。" }
+        { "kind": "human", "text": "请按【压缩恢复】所属目标的当前完整完成条件继续，但不要猜具体内容。" }
       ],
       "expect": {
         "required_tools": ["inspect_workboard"]
@@ -140,6 +159,129 @@
       "expect": {
         "required_tools": ["mcp__crab-memory__store_memory"],
         "forbidden_tools": ["manage_decision_doc"]
+      }
+    },
+    {
+      "id": "one-objective-multiple-items",
+      "title": "同一目标下新增第二个事项",
+      "objectives": [
+        {
+          "title": "让任务板在人类侧保持清楚",
+          "completion_criteria": ["目标和事项一眼可区分"],
+          "work_items": [
+            {
+              "title": "收紧任务板文案",
+              "status": "in_progress",
+              "current_judgement": "需要减少技术细节",
+              "next_action": "完成提示词调整"
+            }
+          ]
+        }
+      ],
+      "steps": [
+        { "kind": "human", "text": "在【让任务板在人类侧保持清楚】这个现有目标下，再增加一个需要持续管理的事项【验证窄屏任务板】，下一步是检查手机宽度布局。不要另建目标。" }
+      ],
+      "expect": {
+        "required_calls": [
+          { "tool": "change_workboard", "equals": { "action": "create_work_item", "objective_title": "让任务板在人类侧保持清楚" }, "contains": { "work_item.title": "验证窄屏任务板" } }
+        ],
+        "forbidden_calls": [
+          { "tool": "change_workboard", "equals": { "action": "create_objective" } }
+        ],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 2,
+          "archive_entries": 0,
+          "contains": ["收紧任务板文案", "验证窄屏任务板"]
+        }
+      }
+    },
+    {
+      "id": "discussion-temporary-verification",
+      "title": "讨论中临时派执行器但不建项",
+      "steps": [
+        { "kind": "human", "text": "我们现在只讨论是否应该改缓存策略，还没有决定实施。为了回答这个问题，请先派一个执行器只读核查当前代码；这次临时查证不需要持续管理任务板。" }
+      ],
+      "expect": {
+        "required_tools": ["spawn_worker"],
+        "forbidden_tools": ["change_workboard"],
+        "board": {
+          "current_objectives": 0,
+          "current_work_items": 0,
+          "archive_entries": 0
+        }
+      }
+    },
+    {
+      "id": "archive-completed-item",
+      "title": "完成事项后只归档事项",
+      "objectives": [
+        {
+          "title": "让任务板在人类侧保持清楚",
+          "completion_criteria": ["目标和事项一眼可区分"],
+          "work_items": [
+            {
+              "title": "核对任务板术语",
+              "status": "in_progress",
+              "current_judgement": "术语已经确认",
+              "next_action": "等待人类验收"
+            }
+          ]
+        }
+      ],
+      "steps": [
+        { "kind": "human", "text": "【核对任务板术语】已经完成并验收，请把这个事项标为已完成并归档；目标还没整体结束，继续保留目标。" }
+      ],
+      "expect": {
+        "required_calls": [
+          { "tool": "change_workboard", "equals": { "action": "archive_work_item", "archived_as": "completed" } }
+        ],
+        "forbidden_calls": [
+          { "tool": "change_workboard", "equals": { "action": "archive_objective" } }
+        ],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 0,
+          "archive_entries": 1,
+          "contains": ["核对任务板术语"]
+        }
+      }
+    },
+    {
+      "id": "technical-detail-condensation",
+      "title": "执行器技术结果只提炼管理结论",
+      "objectives": [
+        {
+          "title": "完成任务板接口改造",
+          "completion_criteria": ["接口与协议一致", "Admin 页面可以读取新版结构"],
+          "work_items": [
+            {
+              "title": "适配 Admin 接口",
+              "status": "in_progress",
+              "current_judgement": "等待执行器核查",
+              "next_action": "接收核查结论"
+            }
+          ]
+        }
+      ],
+      "workers": [
+        { "worker_id": "worker-admin-api", "title": "适配 Admin 接口：核查协议一致性" }
+      ],
+      "steps": [
+        { "kind": "worker", "worker_id": "worker-admin-api", "text": "核查结束。管理结论：接口契约已对齐，Admin 页面读取新版结构尚未验证。下一步：验证 Admin 页面能否读取新版结构。技术过程：运行 pnpm test，检查 src/index.ts 第 469 行，42 条日志均通过。TECH_DETAIL_SHOULD_NOT_ENTER_BOARD" },
+        { "kind": "human", "text": "请把刚才执行器的结果更新到任务板，只保留管理结论和下一步，不要抄命令、文件行号或日志过程。" }
+      ],
+      "expect": {
+        "required_calls": [
+          { "tool": "change_workboard", "equals": { "action": "revise_work_item" }, "contains": { "work_item.current_judgement": "接口契约已对齐", "work_item.next_action": "Admin 页面" } }
+        ],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["接口契约已对齐"],
+          "excludes": ["pnpm", "src/index.ts", "42 条日志", "TECH_DETAIL_SHOULD_NOT_ENTER_BOARD"]
+        }
       }
     }
   ]

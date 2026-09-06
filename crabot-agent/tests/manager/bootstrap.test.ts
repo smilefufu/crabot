@@ -893,17 +893,22 @@ describe('manager bootstrap（P5 Task 1）', () => {
             expect([...byName.keys()]).toEqual(expect.arrayContaining([
               'inspect_workboard', 'change_workboard', 'inspect_project_docs', 'manage_decision_doc',
             ]))
+            await byName.get('change_workboard')!.call({
+              action: 'create_objective',
+              objective: {
+                title: '证明任务板工具已接入真实主控栈',
+                completion_criteria: ['后续请求不自动包含任务板正文'],
+              },
+            }, {} as never)
             created = JSON.parse((await byName.get('change_workboard')!.call({
-              action: 'create',
-              item: {
+              action: 'create_work_item',
+              objective_title: '证明任务板工具已接入真实主控栈',
+              work_item: {
                 title: '验证主控上下文生产装配',
                 status: 'in_progress',
                 project_root: projectRoot,
-                objective: '证明任务板工具已接入真实主控栈',
-                acceptance: ['后续请求不自动包含任务板正文'],
-                current_state: '正在验证',
+                current_judgement: '正在验证',
                 next_action: '读取任务板和项目文档',
-                blockers: [],
               },
             }, {} as never)).output)
             inspectedBoard = JSON.parse((await byName.get('inspect_workboard')!.call({}, {} as never)).output)
@@ -926,8 +931,14 @@ describe('manager bootstrap（P5 Task 1）', () => {
     await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('开始装配验证')], FRIEND_A)
     await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('继续其它对话')], FRIEND_A)
 
-    expect(created).toMatchObject({ action: 'created' })
-    expect(inspectedBoard).toMatchObject({ active_count: 1, items: [{ title: '验证主控上下文生产装配' }] })
+    expect(created).toMatchObject({ action: 'work_item_created' })
+    expect(inspectedBoard).toMatchObject({
+      counts: { current_objectives: 1, current_work_items: 1 },
+      objectives: [{
+        title: '证明任务板工具已接入真实主控栈',
+        work_items: [{ title: '验证主控上下文生产装配' }],
+      }],
+    })
     expect(inspectedDoc).toMatchObject({ operation: 'read', path: 'README.md', content: '# 装配验证' })
     expect(requests).toHaveLength(2)
     expect(requests[1].systemPrompt).not.toContain('验证主控上下文生产装配')

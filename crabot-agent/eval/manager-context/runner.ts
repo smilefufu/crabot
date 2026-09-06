@@ -16,7 +16,11 @@ import {
 } from '../../src/engine/index.js'
 import { buildManagerStack, type ManagerStack } from '../../src/manager/bootstrap.js'
 import type { PrincipalResolverDeps } from '../../src/manager/principal.js'
-import { ManagerWorkboardStore, type WorkboardItemDraft } from '../../src/manager/workboard-store.js'
+import {
+  ManagerWorkboardStore,
+  type WorkboardItemDraft,
+  type WorkboardObjectiveDraft,
+} from '../../src/manager/workboard-store.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
 import { CLI_DOMAINS, type ChannelMessage, type Friend, type ResolvedPermissions } from '../../src/types.js'
 import type { LedgerWorker, ManagerKey } from '../../src/workers/harness/ledger-types.js'
@@ -95,8 +99,8 @@ interface DeterministicFixture {
     readonly project_doc: string
     readonly task_a: string
     readonly task_b: string
-    readonly old_acceptance: string
-    readonly new_acceptance: string
+    readonly old_completion_criterion: string
+    readonly new_completion_criterion: string
   }
 }
 
@@ -112,12 +116,23 @@ interface BehaviorExpectation {
   readonly forbidden_tools?: string[]
   readonly required_calls?: BehaviorCallRule[]
   readonly forbidden_calls?: BehaviorCallRule[]
+  readonly board?: {
+    readonly current_objectives?: number
+    readonly current_work_items?: number
+    readonly archive_entries?: number
+    readonly contains?: string[]
+    readonly excludes?: string[]
+  }
+}
+
+interface SeedObjective extends WorkboardObjectiveDraft {
+  readonly work_items: WorkboardItemDraft[]
 }
 
 interface BehaviorScenario {
   readonly id: string
   readonly title: string
-  readonly workitems?: WorkboardItemDraft[]
+  readonly objectives?: SeedObjective[]
   readonly workers?: Array<{ readonly worker_id: string; readonly title: string }>
   readonly steps: Array<
     | { readonly kind: 'human'; readonly text: string }
@@ -627,9 +642,17 @@ function workboardStore(env: EvaluationEnvironment): ManagerWorkboardStore {
   return new ManagerWorkboardStore(path.join(env.dataRoot, 'agent', 'managers'), env.now)
 }
 
-async function seedWorkitems(env: EvaluationEnvironment, items: readonly WorkboardItemDraft[]): Promise<void> {
+async function seedObjectives(env: EvaluationEnvironment, objectives: readonly SeedObjective[]): Promise<void> {
   const store = workboardStore(env)
-  for (const item of items) await store.create(env.managerKey, item)
+  for (const objective of objectives) {
+    await store.createObjective(env.managerKey, {
+      title: objective.title,
+      completion_criteria: objective.completion_criteria,
+    })
+    for (const item of objective.work_items) {
+      await store.createWorkItem(env.managerKey, objective.title, item)
+    }
+  }
 }
 
 async function seedWorker(env: EvaluationEnvironment, workerId: string, title: string): Promise<void> {
@@ -698,15 +721,16 @@ async function deterministicWorkboardScenario(
     return textResponse('已根据任务板核对当前任务。')
   })
   const env = await createEnvironment({ root: runRoot, scenario: 'deterministic-workboard', projectRoot, adapter })
-  await seedWorkitems(env, [{
-    title: '核查棉花糖上下文',
-    status: 'in_progress',
-    project_root: projectRoot,
-    objective: markers.workboard,
-    acceptance: ['逐次核对请求'],
-    current_state: '等待主控主动查询',
-    next_action: '读取当前任务板',
-    blockers: [],
+  await seedObjectives(env, [{
+    title: markers.workboard,
+    completion_criteria: ['逐次核对请求'],
+    work_items: [{
+      title: '核查棉花糖上下文',
+      status: 'in_progress',
+      project_root: projectRoot,
+      current_judgement: '等待主控主动查询',
+      next_action: '读取当前任务板',
+    }],
   }])
   env.setStep('inspect-workboard')
   await env.routeHuman('请核对当前未结事项，再告诉我下一步。')
@@ -758,23 +782,21 @@ async function deterministicInterleavingScenario(
   markers: DeterministicFixture['sentinels'],
 ): Promise<{ env: EvaluationEnvironment; assertions: EvaluationAssertion[] }> {
   const turns = new Map<string, number>()
+  const objective: WorkboardObjectiveDraft = {
+    title: '让多任务事件保持独立且可追踪',
+    completion_criteria: ['两个事项交错推进时互不串线'],
+  }
   const itemA: WorkboardItemDraft = {
     title: '核查上下文请求',
     status: 'in_progress',
-    objective: markers.task_a,
-    acceptance: ['还原全部请求'],
-    current_state: '等待事件 A',
+    current_judgement: '等待事件 A',
     next_action: '处理事件 A',
-    blockers: [],
   }
   const itemB: WorkboardItemDraft = {
     title: '构建隔离评测',
     status: 'in_progress',
-    objective: markers.task_b,
-    acceptance: ['Docker 无网络运行'],
-    current_state: '等待事件 B',
+    current_judgement: '等待事件 B',
     next_action: '处理事件 B',
-    blockers: [],
   }
   const adapter = new RecordingAdapter('deterministic-interleaving', ({ step }) => {
     const turn = turns.get(step) ?? 0
@@ -783,9 +805,11 @@ async function deterministicInterleavingScenario(
     if (step === 'worker-a') {
       return { blocks: [
         toolCall('revise-a', 'change_workboard', {
-          action: 'revise',
-          current_title: itemA.title,
-          item: { ...itemA, current_state: `${markers.task_a} 已收到新证据`, next_action: '继续逐次核对' },
+          action: 'revise_work_item',
+          current_objective_title: objective.title,
+          current_work_item_title: itemA.title,
+          target_objective_title: objective.title,
+          work_item: { ...itemA, current_judgement: `${markers.task_a} 已收到新证据`, next_action: '继续逐次核对' },
         }),
         toolCall('send-a', 'send_to_worker', { worker_id: 'worker-a', text: `继续 ${markers.task_a}，只处理请求核查。` }),
       ] }
@@ -793,9 +817,11 @@ async function deterministicInterleavingScenario(
     if (step === 'worker-b') {
       return { blocks: [
         toolCall('revise-b', 'change_workboard', {
-          action: 'revise',
-          current_title: itemB.title,
-          item: { ...itemB, current_state: `${markers.task_b} 已完成镜像准备`, next_action: '运行无网络评测' },
+          action: 'revise_work_item',
+          current_objective_title: objective.title,
+          current_work_item_title: itemB.title,
+          target_objective_title: objective.title,
+          work_item: { ...itemB, current_judgement: `${markers.task_b} 已完成镜像准备`, next_action: '运行无网络评测' },
         }),
         toolCall('send-b', 'send_to_worker', { worker_id: 'worker-b', text: `继续 ${markers.task_b}，只处理 Docker 评测。` }),
       ] }
@@ -803,7 +829,7 @@ async function deterministicInterleavingScenario(
     return textResponse()
   })
   const env = await createEnvironment({ root: runRoot, scenario: 'deterministic-interleaving', projectRoot, adapter })
-  await seedWorkitems(env, [itemA, itemB])
+  await seedObjectives(env, [{ ...objective, work_items: [itemA, itemB] }])
   await seedWorker(env, 'worker-a', '核查上下文请求：逐次还原请求')
   await seedWorker(env, 'worker-b', '构建隔离评测：验证 Docker 场景')
   env.setStep('worker-a')
@@ -824,9 +850,10 @@ async function deterministicInterleavingScenario(
       assertion('interleaved-worker-b-target', detailB.includes(markers.task_b) && !detailB.includes(markers.task_a), 'B 事件只能续办 B 执行器和 B 内容'),
       assertion(
         'interleaved-workboard-items-isolated',
-        board.active.some((item) => item.title === itemA.title && item.current_state.includes(markers.task_a) && !item.current_state.includes(markers.task_b)) &&
-          board.active.some((item) => item.title === itemB.title && item.current_state.includes(markers.task_b) && !item.current_state.includes(markers.task_a)),
-        '交错事件后的两个任务项必须各自保留对应状态',
+        board.objectives.length === 1 && board.objectives[0].work_items.length === 2 &&
+          board.objectives[0].work_items.some((item) => item.title === itemA.title && item.current_judgement?.includes(markers.task_a) && !item.current_judgement.includes(markers.task_b)) &&
+          board.objectives[0].work_items.some((item) => item.title === itemB.title && item.current_judgement?.includes(markers.task_b) && !item.current_judgement.includes(markers.task_a)),
+        '同一目标下交错推进的两个事项必须各自保留对应判断',
       ),
     ],
   }
@@ -838,23 +865,19 @@ async function deterministicRevisionScenario(
   markers: DeterministicFixture['sentinels'],
 ): Promise<{ env: EvaluationEnvironment; assertions: EvaluationAssertion[] }> {
   const turns = new Map<string, number>()
-  const oldItem: WorkboardItemDraft = {
+  const oldObjective: WorkboardObjectiveDraft = {
+    title: '输出迁移摘要',
+    completion_criteria: [markers.old_completion_criterion],
+  }
+  const newObjective: WorkboardObjectiveDraft = {
+    title: '逐次核对所有请求',
+    completion_criteria: [markers.new_completion_criterion],
+  }
+  const item: WorkboardItemDraft = {
     title: '迁移方案核查',
     status: 'in_progress',
-    objective: '输出简要结论',
-    acceptance: [markers.old_acceptance],
-    current_state: '按旧目标执行中',
+    current_judgement: '按旧目标执行中',
     next_action: '等待结果',
-    blockers: [],
-  }
-  const newItem: WorkboardItemDraft = {
-    title: oldItem.title,
-    status: 'in_progress',
-    objective: '逐次核对所有请求',
-    acceptance: [markers.new_acceptance],
-    current_state: '目标与验收已经更新',
-    next_action: '按新验收继续核查',
-    blockers: [],
   }
   const adapter = new RecordingAdapter('deterministic-revision', ({ step }) => {
     const turn = turns.get(step) ?? 0
@@ -862,28 +885,32 @@ async function deterministicRevisionScenario(
     if (turn > 0) return textResponse()
     if (step === 'human-revision') {
       return { blocks: [
-        toolCall('revise-current', 'change_workboard', { action: 'revise', current_title: oldItem.title, item: newItem }),
+        toolCall('revise-current', 'change_workboard', {
+          action: 'revise_objective',
+          current_objective_title: oldObjective.title,
+          objective: newObjective,
+        }),
         toolCall('continue-current', 'send_to_worker', {
           worker_id: 'worker-revision',
-          text: `当前完整要求：目标是逐次核对所有请求；验收为 ${markers.new_acceptance}。旧要求失效。`,
+          text: `当前完整要求：目标是逐次核对所有请求；完成条件为 ${markers.new_completion_criterion}。旧要求失效。`,
         }),
       ] }
     }
     if (step === 'old-result') {
       return { blocks: [toolCall('reject-old-result', 'send_to_worker', {
         worker_id: 'worker-revision',
-        text: `你提交的是失效目标，请继续按当前完整验收 ${markers.new_acceptance} 执行。`,
+        text: `你提交的是失效目标，请继续按当前完成条件 ${markers.new_completion_criterion} 执行。`,
       })] }
     }
     return textResponse()
   })
   const env = await createEnvironment({ root: runRoot, scenario: 'deterministic-revision', projectRoot, adapter })
-  await seedWorkitems(env, [oldItem])
+  await seedObjectives(env, [{ ...oldObjective, work_items: [item] }])
   await seedWorker(env, 'worker-revision', '迁移方案核查：验证当前验收')
   env.setStep('human-revision')
   await env.routeHuman('目标调整为逐次核对所有请求，验收也以新的完整要求为准。')
   env.setStep('old-result')
-  await env.routeWorker('worker-revision', `已经按 ${markers.old_acceptance} 做完。`)
+  await env.routeWorker('worker-revision', `已经按 ${markers.old_completion_criterion} 做完。`)
 
   const board = await workboardStore(env).load(env.managerKey)
   const calls = responseCalls(adapter.records)
@@ -894,13 +921,15 @@ async function deterministicRevisionScenario(
     env,
     assertions: [
       assertion(
-        'revision-replaces-old-acceptance',
-        board.active.length === 1 && board.active[0].acceptance.join('\n').includes(markers.new_acceptance) &&
-          !board.active[0].acceptance.join('\n').includes(markers.old_acceptance),
-        'revise 必须完整替换旧验收',
+        'revision-replaces-old-completion-criterion',
+        board.objectives.length === 1 && board.objectives[0].title === newObjective.title &&
+          board.objectives[0].completion_criteria.join('\n').includes(markers.new_completion_criterion) &&
+          !board.objectives[0].completion_criteria.join('\n').includes(markers.old_completion_criterion) &&
+          board.objectives[0].work_items.length === 1 && board.objectives[0].work_items[0].title === item.title,
+        'revise_objective 必须完整替换旧完成条件并保留其事项',
       ),
-      assertion('revision-does-not-archive-old-result', board.archive.length === 0 && !calls.some((call) => call.name === 'change_workboard' && call.input.action === 'archive'), '旧验收结果不得触发完成归档'),
-      assertion('revision-worker-receives-current-requirements', sentTexts.length === 2 && sentTexts.every((text) => text.includes(markers.new_acceptance)), '相关执行器每次续办都应收到完整的新验收'),
+      assertion('revision-does-not-archive-old-result', board.archive.length === 0 && !calls.some((call) => call.name === 'change_workboard' && (call.input.action === 'archive_objective' || call.input.action === 'archive_work_item')), '旧完成条件下的结果不得触发完成归档'),
+      assertion('revision-worker-receives-current-requirements', sentTexts.length === 2 && sentTexts.every((text) => text.includes(markers.new_completion_criterion)), '相关执行器每次续办都应收到完整的新完成条件'),
     ],
   }
 }
@@ -958,9 +987,12 @@ export async function runDeterministicEvaluation(options: EvalOptions = {}): Pro
 
 function matchesRule(call: ToolCallProjection, rule: BehaviorCallRule): boolean {
   if (call.name !== rule.tool) return false
-  if (rule.equals && !Object.entries(rule.equals).every(([key, value]) => call.input[key] === value)) return false
-  if (rule.contains && !Object.entries(rule.contains).every(([key, value]) => typeof call.input[key] === 'string' && (call.input[key] as string).includes(value))) return false
-  if (rule.contains_any && !Object.entries(rule.contains_any).every(([key, values]) => typeof call.input[key] === 'string' && values.some((value) => (call.input[key] as string).includes(value)))) return false
+  const valueAt = (key: string): unknown => key.split('.').reduce<unknown>((value, part) => (
+    value && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord)[part] : undefined
+  ), call.input)
+  if (rule.equals && !Object.entries(rule.equals).every(([key, value]) => valueAt(key) === value)) return false
+  if (rule.contains && !Object.entries(rule.contains).every(([key, value]) => typeof valueAt(key) === 'string' && (valueAt(key) as string).includes(value))) return false
+  if (rule.contains_any && !Object.entries(rule.contains_any).every(([key, values]) => typeof valueAt(key) === 'string' && values.some((value) => (valueAt(key) as string).includes(value)))) return false
   return true
 }
 
@@ -981,11 +1013,11 @@ export function selectMemoryWriteCalls(
   return calls.filter((call) => !READ_ONLY_MEMORY_METHODS.has(call.method))
 }
 
-function gradeBehaviorScenario(
+async function gradeBehaviorScenario(
   scenario: BehaviorScenario,
   run: number,
   env: EvaluationEnvironment,
-): EvaluationAssertion[] {
+): Promise<EvaluationAssertion[]> {
   const calls = responseCalls(env.recordingAdapter.records)
   const names = new Set(calls.map((call) => call.name))
   const prefix = `${scenario.id}-run-${run}`
@@ -1005,7 +1037,17 @@ function gradeBehaviorScenario(
 
   const memoryPayload = JSON.stringify(selectMemoryWriteCalls(env.memoryCalls))
   const markers = [
-    ...(scenario.workitems ?? []).flatMap((item) => [item.title, item.objective, ...item.acceptance]),
+    ...(scenario.objectives ?? []).flatMap((objective) => [
+      objective.title,
+      ...objective.completion_criteria,
+      ...objective.work_items.flatMap((item) => [
+        item.title,
+        item.project_root,
+        item.current_judgement,
+        item.next_action,
+        item.blocker,
+      ]),
+    ]).filter((value): value is string => typeof value === 'string'),
     'PROJECT_DOC_SENTINEL_SHARED_FACT',
   ]
   results.push(assertion(
@@ -1013,6 +1055,28 @@ function gradeBehaviorScenario(
     markers.every((marker) => !memoryPayload.includes(marker)),
     `${scenario.title} 不得把任务板或项目文档正文镜像进 Memory`,
   ))
+
+  if (scenario.expect.board) {
+    const board = await workboardStore(env).load(env.managerKey)
+    const payload = JSON.stringify(board)
+    const itemCount = board.objectives.reduce((count, objective) => count + objective.work_items.length, 0)
+    const expected = scenario.expect.board
+    if (expected.current_objectives !== undefined) {
+      results.push(assertion(`${prefix}-board-objectives`, board.objectives.length === expected.current_objectives, `${scenario.title} 当前目标数量应为 ${expected.current_objectives}`))
+    }
+    if (expected.current_work_items !== undefined) {
+      results.push(assertion(`${prefix}-board-items`, itemCount === expected.current_work_items, `${scenario.title} 当前事项数量应为 ${expected.current_work_items}`))
+    }
+    if (expected.archive_entries !== undefined) {
+      results.push(assertion(`${prefix}-board-archive`, board.archive.length === expected.archive_entries, `${scenario.title} 归档数量应为 ${expected.archive_entries}`))
+    }
+    for (const [index, marker] of (expected.contains ?? []).entries()) {
+      results.push(assertion(`${prefix}-board-contains-${index}`, payload.includes(marker), `${scenario.title} 任务板应包含 ${marker}`))
+    }
+    for (const [index, marker] of (expected.excludes ?? []).entries()) {
+      results.push(assertion(`${prefix}-board-excludes-${index}`, !payload.includes(marker), `${scenario.title} 任务板不应包含 ${marker}`))
+    }
+  }
   return results
 }
 
@@ -1077,7 +1141,7 @@ export async function runBehaviorEvaluation(options: EvalOptions = {}): Promise<
         const adapter = new RecordingAdapter(scenarioId, undefined, delegate)
         const env = await createEnvironment({ root: runRoot, scenario: scenarioId, projectRoot, adapter, model: config.model })
         environments.push(env)
-        await seedWorkitems(env, scenario.workitems ?? [])
+        await seedObjectives(env, scenario.objectives ?? [])
         for (const worker of scenario.workers ?? []) await seedWorker(env, worker.worker_id, worker.title)
 
         try {
@@ -1089,7 +1153,7 @@ export async function runBehaviorEvaluation(options: EvalOptions = {}): Promise<
               await env.routeWorker(step.worker_id, step.text)
             }
           }
-          assertions.push(...gradeBehaviorScenario(scenario, run, env))
+          assertions.push(...await gradeBehaviorScenario(scenario, run, env))
         } catch (error) {
           assertions.push(assertion(
             `${scenario.id}-run-${run}-infrastructure`,

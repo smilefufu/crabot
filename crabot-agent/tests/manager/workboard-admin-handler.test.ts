@@ -7,14 +7,15 @@ import type { ManagerKey } from '../../src/manager/types.js'
 import { makeAgentConfig, useTmpDataDir, type DataDirGuard } from '../inbound/harness.js'
 
 const KEY = 'feishu::cotton-candy' as ManagerKey
+const OBJECTIVE = {
+  title: '确认 Manager 的上下文状态',
+  completion_criteria: ['能说明发生过的事情'],
+}
 const ITEM = {
   title: '核查上下文',
   status: 'in_progress' as const,
-  objective: '确认 Manager 的上下文状态',
-  acceptance: ['能说明发生过的事情'],
-  current_state: '等待核查',
+  current_judgement: '等待核查',
   next_action: '读取调用记录',
-  blockers: [],
 }
 interface AgentInternals {
   managerStack: ManagerStack
@@ -62,8 +63,8 @@ describe('UnifiedAgent task-board Admin handler', () => {
 
     await expect(current.handleChangeWorkboardAdmin({
       manager_key: KEY,
-      action: 'create',
-      item: ITEM,
+      action: 'create_objective',
+      objective: OBJECTIVE,
       expected_revision: 0,
       assertion: 'opaque-assertion',
     })).resolves.toMatchObject({ revision: 1, manager_notification: 'pending' })
@@ -75,9 +76,9 @@ describe('UnifiedAgent task-board Admin handler', () => {
         assertion: 'opaque-assertion',
         expected: {
           manager_key: KEY,
-          action: 'create',
+          action: 'create_objective',
           expected_revision: 0,
-          payload_sha256: sha256CanonicalJson({ action: 'create', item: ITEM }),
+          payload_sha256: sha256CanonicalJson({ action: 'create_objective', objective: OBJECTIVE }),
         },
       }),
       'workboard-admin-handler-test',
@@ -85,7 +86,7 @@ describe('UnifiedAgent task-board Admin handler', () => {
     )
     await expect(current.managerStack.workboard.loadAdmin(KEY)).resolves.toMatchObject({
       revision: 1,
-      active: [{ title: ITEM.title }],
+      objectives: [{ title: OBJECTIVE.title }],
     })
     await expect(current.managerStack.workboard.pendingAdminNotice(KEY)).resolves.toMatchObject({
       revision: 1,
@@ -100,13 +101,13 @@ describe('UnifiedAgent task-board Admin handler', () => {
 
     await expect(current.handleChangeWorkboardAdmin({
       manager_key: KEY,
-      action: 'create',
-      item: ITEM,
+      action: 'create_objective',
+      objective: OBJECTIVE,
       expected_revision: 0,
       assertion: 'invalid-assertion',
     })).rejects.toMatchObject({ code: 'FORBIDDEN' })
 
-    await expect(current.managerStack.workboard.loadAdmin(KEY)).resolves.toMatchObject({ revision: 0, active: [] })
+    await expect(current.managerStack.workboard.loadAdmin(KEY)).resolves.toMatchObject({ revision: 0, objectives: [] })
     await expect(current.managerStack.workboard.pendingAdminNotice(KEY)).resolves.toBeUndefined()
     expect(current.dispatchWorkboardAdminNotice).not.toHaveBeenCalled()
   })
@@ -117,16 +118,21 @@ describe('UnifiedAgent task-board Admin handler', () => {
       consumed: true,
       expires_at: '2026-09-05T00:01:00.000Z',
     })
+    await current.managerStack.workboard.createObjective(KEY, OBJECTIVE)
 
     await expect(current.handleChangeWorkboardAdmin({
       manager_key: KEY,
-      action: 'create',
-      item: { ...ITEM, status: 'blocked', blockers: [] },
-      expected_revision: 0,
+      action: 'create_work_item',
+      objective_title: OBJECTIVE.title,
+      work_item: { ...ITEM, status: 'blocked' },
+      expected_revision: 1,
       assertion: 'opaque-assertion',
-    })).rejects.toMatchObject({ code: 'INVALID_PARAMS', message: 'blocked 任务项必须至少包含一个 blocker' })
+    })).rejects.toMatchObject({ code: 'INVALID_PARAMS', message: 'blocked 事项必须包含 blocker' })
 
-    await expect(current.managerStack.workboard.loadAdmin(KEY)).resolves.toMatchObject({ revision: 0, active: [] })
+    await expect(current.managerStack.workboard.loadAdmin(KEY)).resolves.toMatchObject({
+      revision: 1,
+      objectives: [{ work_items: [] }],
+    })
     expect(current.dispatchWorkboardAdminNotice).not.toHaveBeenCalled()
   })
 
@@ -140,7 +146,7 @@ describe('UnifiedAgent task-board Admin handler', () => {
       onSettled?.(result)
       return result
     })
-    await current.managerStack.workboard.adminCreate(KEY, 0, ITEM)
+    await current.managerStack.workboard.adminCreateObjective(KEY, 0, OBJECTIVE)
 
     current.dispatchWorkboardAdminNotice(KEY)
 
@@ -159,12 +165,15 @@ describe('UnifiedAgent task-board Admin handler', () => {
     const route = vi.spyOn(current.managerStack.registry, 'routeWorkboardAdminUpdate')
       .mockImplementationOnce(async () => firstResult)
       .mockResolvedValue(completed)
-    await current.managerStack.workboard.adminCreate(KEY, 0, ITEM)
+    await current.managerStack.workboard.adminCreateObjective(KEY, 0, OBJECTIVE)
 
     current.dispatchWorkboardAdminNotice(KEY)
     await vi.waitFor(() => expect(route).toHaveBeenCalledTimes(1))
     await current.managerStack.workboard.clearAdminNoticeIfCurrent(KEY, 1)
-    await current.managerStack.workboard.adminCreate(KEY, 1, { ...ITEM, title: '核查新版上下文' })
+    await current.managerStack.workboard.adminCreateObjective(KEY, 1, {
+      title: '确认新版上下文状态',
+      completion_criteria: ['能按新版要求说明发生过的事情'],
+    })
     current.dispatchWorkboardAdminNotice(KEY)
 
     settleFirst(completed)

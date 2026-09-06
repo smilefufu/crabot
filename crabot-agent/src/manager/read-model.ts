@@ -279,8 +279,9 @@ export interface ManagerAdminSummary {
 
 export interface ManagerWorkboardSummary {
   status: 'ready'
-  active_count: number
-  blocked_count: number
+  current_objective_count: number
+  current_work_item_count: number
+  blocked_work_item_count: number
 }
 
 export interface ManagerSummarySources {

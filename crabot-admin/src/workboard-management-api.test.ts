@@ -11,15 +11,37 @@ const KEY = 'feishu::cotton-candy'
 const WEB_PORT = 13057
 const PROTOCOL_PORT = 19857
 
-const ITEM = {
+const OBJECTIVE = {
+  title: '让 Manager 准确回顾上下文',
+  completion_criteria: ['连续追问时结论前后一致'],
+}
+
+const WORK_ITEM = {
   title: '核查上下文',
   status: 'in_progress',
-  objective: '确认 Manager 的上下文状态',
-  acceptance: ['能说明发生过的事情'],
-  current_state: '等待核查',
-  next_action: '读取调用记录',
-  blockers: [],
+  current_judgement: '需要检查调用记录',
+  next_action: '读取调用记录并归纳原因',
 }
+
+const MUTATIONS = [
+  { action: 'create_objective', objective: OBJECTIVE },
+  { action: 'revise_objective', current_objective_title: OBJECTIVE.title, objective: { ...OBJECTIVE, title: '让 Manager 稳定回顾上下文' } },
+  { action: 'archive_objective', current_objective_title: OBJECTIVE.title, archived_as: 'completed' },
+  { action: 'create_work_item', objective_title: OBJECTIVE.title, work_item: WORK_ITEM },
+  {
+    action: 'revise_work_item',
+    current_objective_title: OBJECTIVE.title,
+    current_work_item_title: WORK_ITEM.title,
+    target_objective_title: '让人类能共管任务板',
+    work_item: { ...WORK_ITEM, title: '核查上下文新版' },
+  },
+  {
+    action: 'archive_work_item',
+    current_objective_title: OBJECTIVE.title,
+    current_work_item_title: WORK_ITEM.title,
+    archived_as: 'abandoned',
+  },
+] as const
 
 describe('Manager workboard Admin API', () => {
   let admin: AdminModule
@@ -62,9 +84,8 @@ describe('Manager workboard Admin API', () => {
         manager_key: KEY,
         revision: 4,
         view: 'archive',
-        items: [],
-        active_count: 1,
-        archive_count: 2,
+        entries: [],
+        counts: { current_objectives: 1, current_work_items: 1, blocked_work_items: 0, archive_entries: 2 },
         pagination: { page: 2, page_size: 4, total_items: 2, total_pages: 1 },
       }
     }
@@ -81,19 +102,19 @@ describe('Manager workboard Admin API', () => {
     expect(invalid.status).toBe(400)
   })
 
-  it('PATCH 由服务端签发 assertion，并经 callSensitive 转交 Agent', async () => {
+  it('六种 PATCH mutation 都由服务端签发精确 assertion，并经 callSensitive 转交 Agent', async () => {
     const calls: Array<{ port: number; method: string; params: Record<string, unknown> }> = []
     ;(admin as unknown as { ensureAgentPort: () => Promise<number> }).ensureAgentPort = async () => 19991
     ;(admin as unknown as {
       rpcClient: { callSensitive: (port: number, method: string, params: Record<string, unknown>, source: string) => Promise<unknown> }
     }).rpcClient.callSensitive = async (port, method, params) => {
       calls.push({ port, method, params })
-      const mutation = { action: params.action, item: params.item }
+      const { manager_key: _managerKey, expected_revision: _revision, assertion, ...mutation } = params
       await (admin as unknown as {
         workboardAdminAssertions: {
           consume(assertion: string, expected: Record<string, unknown>): Promise<unknown>
         }
-      }).workboardAdminAssertions.consume(params.assertion as string, {
+      }).workboardAdminAssertions.consume(assertion as string, {
         manager_key: params.manager_key,
         action: params.action,
         expected_revision: params.expected_revision,
@@ -102,9 +123,9 @@ describe('Manager workboard Admin API', () => {
       return {
         manager_key: KEY,
         revision: 1,
-        item: { ...ITEM, updated_at: '2026-09-05T00:00:00.000Z' },
-        active_count: 1,
-        archive_count: 0,
+        action: 'objective_created',
+        objective: { ...OBJECTIVE, updated_at: '2026-09-05T00:00:00.000Z' },
+        counts: { current_objectives: 1, current_work_items: 0, blocked_work_items: 0, archive_entries: 0 },
         manager_notification: 'pending',
       }
     }
@@ -112,19 +133,21 @@ describe('Manager workboard Admin API', () => {
       throw new Error('任务板保存不得解析系统所有者权限')
     }
 
-    const response = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
-      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create', item: ITEM, expected_revision: 0 }),
-    })
-    const body = await response.json() as Record<string, unknown>
-    expect(response.status).toBe(200)
-    expect(body).toMatchObject({ manager_key: KEY, revision: 1, manager_notification: 'pending' })
-    expect(JSON.stringify(body)).not.toContain('assertion')
-    expect(calls).toHaveLength(1)
-    expect(calls[0]).toMatchObject({
-      port: 19991,
-      method: 'change_workboard_admin',
-      params: { manager_key: KEY, action: 'create', item: ITEM, expected_revision: 0, assertion: expect.any(String) },
-    })
+    for (const [index, mutation] of MUTATIONS.entries()) {
+      const response = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
+        method: 'PATCH', headers: headers(), body: JSON.stringify({ ...mutation, expected_revision: index }),
+      })
+      const body = await response.json() as Record<string, unknown>
+      expect(response.status).toBe(200)
+      expect(body).toMatchObject({ manager_key: KEY, revision: 1, manager_notification: 'pending' })
+      expect(JSON.stringify(body)).not.toContain('assertion')
+      expect(calls[index]).toMatchObject({
+        port: 19991,
+        method: 'change_workboard_admin',
+        params: { manager_key: KEY, ...mutation, expected_revision: index, assertion: expect.any(String) },
+      })
+    }
+    expect(calls).toHaveLength(MUTATIONS.length)
   })
 
   it('将 Agent 的 404、409 和不可用错误映射为稳定 HTTP 结果', async () => {
@@ -143,7 +166,7 @@ describe('Manager workboard Admin API', () => {
       throw error
     }
     const conflict = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
-      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create', item: ITEM, expected_revision: 0 }),
+      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create_work_item', objective_title: OBJECTIVE.title, work_item: WORK_ITEM, expected_revision: 0 }),
     })
     expect(conflict.status).toBe(409)
     expect(await conflict.json()).toMatchObject({ code: 'WORKBOARD_REVISION_CONFLICT', current_revision: 8 })
@@ -151,10 +174,10 @@ describe('Manager workboard Admin API', () => {
     ;(admin as unknown as {
       rpcClient: { callSensitive: (port: number, method: string, params: Record<string, unknown>, source: string) => Promise<unknown> }
     }).rpcClient.callSensitive = async () => {
-      throw Object.assign(new Error('blocked 任务项必须至少包含一个 blocker'), { code: 'INVALID_PARAMS' })
+      throw Object.assign(new Error('blocked 事项必须填写 blocker'), { code: 'INVALID_PARAMS' })
     }
     const invalidAgentInput = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
-      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create', item: ITEM, expected_revision: 0 }),
+      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create_work_item', objective_title: OBJECTIVE.title, work_item: WORK_ITEM, expected_revision: 0 }),
     })
     expect(invalidAgentInput.status).toBe(400)
     expect(await invalidAgentInput.json()).toMatchObject({ code: 'INVALID_PARAMS' })
@@ -163,12 +186,12 @@ describe('Manager workboard Admin API', () => {
       rpcClient: { callSensitive: (port: number, method: string, params: Record<string, unknown>, source: string) => Promise<unknown> }
     }).rpcClient.callSensitive = async () => { throw new Error('Agent not available') }
     const unavailable = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
-      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create', item: ITEM, expected_revision: 0 }),
+      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create_objective', objective: OBJECTIVE, expected_revision: 0 }),
     })
     expect(unavailable.status).toBe(503)
 
     const invalid = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
-      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create', item: ITEM, expected_revision: -1 }),
+      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create_objective', objective: OBJECTIVE, expected_revision: -1 }),
     })
     expect(invalid.status).toBe(400)
   })

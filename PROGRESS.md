@@ -62,19 +62,20 @@
 - Manager 与 builtin Worker 已共用 Engine 单一批次算法：按当前模型窗口的 80% 规划完整摘要请求，
   遇摘要截断或 Provider 上下文超限自适应缩批；成功批次不回滚，调用方各自保留持久化与生命周期语义。
 
-### Manager 任务板 Admin Web 共管：开发完成，待 PR 审查
+### Manager 任务板目标/事项分层与 Admin Web 共管：开发完成，待 PR 审查
 
-- 已按确认 spec（crabot-docs `a17871e`）实现会话列表的任务板入口与独立任务板页面；人类可查看、
-  新建、完整编辑或归档当前任务项，并可查看 archive 终态快照。页面以整板 revision 保存，冲突后保留
-  本地草稿并提示重新核对。
-- Admin 写入经短期一次性 assertion 和 `callSensitive` 核销后才由 Agent 原子落盘；同一次保存持久化
-  revision、Manager 必读栅栏和待投递系统提示。assertion 只授权本次写入，不传递或改变 Manager、Worker、
-  项目文档或 Memory 的权限；独立通知复用既有 Manager 主体，运行中注入保持宿主 episode 主体。Manager
-  读取受影响事项后才能再修改，避免人类与 Manager 的静默覆盖。
-- 系统提示仅提醒 Manager 主动查阅最新任务板，不携带任务板正文，也不写入会话历史或 episode log；未消费
-  提示可在 Agent 重启后恢复投递，连续保存只保留最新通知。会话列表始终返回任务板摘要（正常或 unknown）。
-- 验证：Agent 定向 149/149、Admin API/assertion 6/6、前端 17/17 与生产构建、共享敏感 RPC 111/111；
-  无网络只读 Docker 确定性评测 13/13。所有测试数据与报告均使用临时目录，未访问本机部署或 LLM 凭证。
+- 已按确认 spec（crabot-docs `ba2cfb2`）把一会话一板改为 Objective/WorkItem 两层：目标记录结果与完成条件，
+  一个目标可有多项当前事项；事项只保留状态、可选项目范围、当前判断、下一步和一个主要阻塞。完成或放弃后
+  进入 archive 最终快照，不增加优先级、对外 ID、Worker 绑定、决策引用或历史恢复。
+- Manager 仍只使用 `inspect_workboard` / `change_workboard` 两个工具；Store schema v3 支持目标和事项各三种
+  新建、完整修订、归档操作，事项可原子移动目标。Admin 继续整板 revision 保存，Manager 无需携带 revision；
+  人类保存后只阻止受影响的目标或事项被 Manager 静默覆盖，重新读取即可继续修改。
+- 会话列表摘要和独立任务板页已按目标分区，默认显示完成条件与紧凑事项卡，并提供目标、事项的编辑及归档入口。
+  人类保存仍复用原 Manager 身份唤醒，不改变任何权限；系统提示只提醒主动查阅，不携带任务板正文，不写入
+  会话历史、Memory 或 episode log。
+- 当前验证：Agent 定向 193/193、Admin API/assertion 8/8、前端任务板与会话列表 30/30、三包构建及 Docker
+  确定性评测 13/13 均通过；桌面与移动端实测通过保存目标、查看 archive、无横向溢出及无应用控制台错误。
+  真实 LLM 上轮调用行为已逐项核对符合预期；本轮只收紧评测断言，未再次消耗凭证。
 
 ### Manager 会话任务板与项目文档共享：已合入（PR #138，main `ab275c14`），边界收口验证完成
 

@@ -3,24 +3,30 @@
   "id": "marshmallow-sanitized-timeline",
   "title": "棉花糖会话脱敏回放",
   "redaction_notice": "仅保留经确认的问题结构；会话标识、用户标识、生产路径、凭据、媒体正文和真实项目内容均已替换。",
-  "workitems": [
+  "objectives": [
     {
-      "title": "核查会话上下文混乱",
-      "status": "in_progress",
-      "objective": "逐次还原主控请求",
-      "acceptance": ["解释每次请求为何缺少或混入信息"],
-      "current_state": "已发现多任务上下文容易混淆",
-      "next_action": "继续核对请求级证据",
-      "blockers": []
+      "title": "让主控准确回顾会话上下文",
+      "completion_criteria": ["解释每次请求为何缺少或混入信息"],
+      "work_items": [
+        {
+          "title": "核查会话上下文混乱",
+          "status": "in_progress",
+          "current_judgement": "已发现多任务上下文容易混淆",
+          "next_action": "继续核对请求级证据"
+        }
+      ]
     },
     {
-      "title": "设计轻量任务板",
-      "status": "in_progress",
-      "objective": "形成可落地的上下文管理方案",
-      "acceptance": ["一会话一板且一板支持多任务"],
-      "current_state": "正在收敛工具契约",
-      "next_action": "验证多任务关联",
-      "blockers": []
+      "title": "形成可落地的上下文管理方案",
+      "completion_criteria": ["一会话一板且一板支持多目标、多事项"],
+      "work_items": [
+        {
+          "title": "设计轻量任务板",
+          "status": "in_progress",
+          "current_judgement": "正在收敛工具契约",
+          "next_action": "验证多任务关联"
+        }
+      ]
     }
   ],
   "workers": [
@@ -37,8 +43,9 @@
     "required_tools": ["manage_decision_doc"],
     "forbidden_tools": ["mcp__crab-memory__store_memory", "mcp__crab-memory__quick_capture", "mcp__crab-memory__update_long_term"],
     "forbidden_calls": [
-      { "tool": "change_workboard", "equals": { "action": "create" } },
-      { "tool": "send_to_worker", "equals": { "worker_id": "worker-workboard-design" }, "contains": { "text": "请求混乱" } },
+      { "tool": "change_workboard", "equals": { "action": "create_objective" } },
+      { "tool": "change_workboard", "equals": { "action": "create_work_item" } },
+      { "tool": "send_to_worker", "equals": { "worker_id": "worker-workboard-design" }, "contains": { "text": "继续原核查主线" } },
       { "tool": "send_to_worker", "equals": { "worker_id": "worker-request-audit" }, "contains": { "text": "工具契约" } }
     ]
   }

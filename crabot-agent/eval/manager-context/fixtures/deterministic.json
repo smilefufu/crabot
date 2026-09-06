@@ -5,7 +5,7 @@
     "project_doc": "PROJECT_DOC_SENTINEL_SHARED_FACT",
     "task_a": "TASK_A_CONTEXT_AUDIT",
     "task_b": "TASK_B_DOCKER_EVAL",
-    "old_acceptance": "OLD_ACCEPTANCE_SUMMARY_ONLY",
-    "new_acceptance": "NEW_ACCEPTANCE_REVIEW_EVERY_REQUEST"
+    "old_completion_criterion": "OLD_COMPLETION_SUMMARY_ONLY",
+    "new_completion_criterion": "NEW_COMPLETION_REVIEW_EVERY_REQUEST"
   }
 }
