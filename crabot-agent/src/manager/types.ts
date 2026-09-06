@@ -22,7 +22,7 @@ export interface ManagerSessionState {
   readonly recent: ReadonlyArray<EngineMessage>
   /** 已原子写入会话的人类来源消息 ID（历史 state 缺失时按空集处理）。 */
   readonly committedHumanMessageIds?: ReadonlyArray<string>
-  /** 上次活动时间(ISO),用于压缩的 TTL 判定 */
+  /** 上次活动时间(ISO) */
   readonly lastActiveAt?: string
   /** 已折叠进摘要的消息条数(诊断用) */
   readonly foldedCount: number

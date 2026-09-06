@@ -1,9 +1,21 @@
 # Crabot 项目进度
 
-> 最后整理：2026-09-05
+> 最后整理：2026-09-06
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
+
+### Manager 取消按空闲时间提前压缩：实现完成，待合入
+
+- 取消空闲超过 5 分钟且旧历史超过 20K tokens 时的 `fold_at_wake`；保留完整请求容量压缩、
+  既有溢出恢复，以及 Manager 与 builtin Worker 共用的 Engine 增量压缩器。
+- 已按确认方案删除专属阈值和旧历史估算器依赖注入；agent-v3 3.10.1 已先行发布，书面方案见
+  [设计 spec](crabot-docs/superpowers/specs/2026-09-06-manager-remove-idle-compaction-design.md)。
+  旧实现复现 6 个不必要摘要调用；删除后 361 个定向测试与 Agent TypeScript 构建通过。
+- 验证遗留：Registry 工具面唤醒事件测试预期调用 2 次、实际 4 次，在未修改基线 `e7e3ef8a`
+  同样失败，作为独立 follow-up；本次 diff review 未发现新增问题，运行实例尚未部署。
+- 合并最新 main 后的 Agent 全量测试：3034 通过、63 跳过、23 失败；其中 20 个失败在 main
+  基线复现，其余 3 个单独复跑通过。完整对照记录见文档仓实施计划，本次不扩围修复已有测试问题。
 
 ### Claude Code 工作目录字符转换：已修复
 
@@ -450,7 +462,7 @@
   阈值本就按 `context_window × 0.8` 生效（未设置回退 200K）；manager 自管压缩此前是写死常量
   （fold 20K / hardCap 160K）且 bootstrap 从未传 contextWindowTokens。现 `hardCapTokens` 从
   manager 实际模型（powerful 槽位）窗口推导（floor(window×0.8)，未配置回退现状常量），
-  `foldTokenThreshold: 20K` 作为刻意保守策略保留不动；thunk 每 episode 解析（§11 热更语义）。
+  thunk 每 episode 解析（§11 热更语义）；当时保留的空闲 20K 折叠规则由本次取消方案删除。
   spec：crabot-docs `2026-08-29-manager-compaction-model-window-design.md`（`4eece36`）。
   **需重建重启 agent 生效。**
 - **槽位思考强度 PR #127 review follow-up（2026-08-28）**：① anthropic 数字 budget 档位

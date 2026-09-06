@@ -27,7 +27,7 @@ import type {
   HarnessEvent,
   HarnessEventKind,
 } from '../../src/workers/harness/worker-events.js'
-import type { LLMAdapter, LLMStreamParams, EngineMessage } from '../../src/engine/index.js'
+import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
@@ -81,8 +81,6 @@ function deferred(): { readonly promise: Promise<void>; readonly resolve: () => 
   const promise = new Promise<void>((done) => { resolve = done })
   return { promise, resolve }
 }
-
-const estimateTokens = (msgs: ReadonlyArray<EngineMessage>): number => msgs.length * 10
 
 const FAKE_HARNESS = { listWorkers: async (): Promise<LedgerWorker[]> => [] } as unknown as WorkerHarness
 
@@ -151,12 +149,11 @@ describe('ManagerRegistry', () => {
       readonly model?: string | (() => string)
     }
   ): ManagerRegistryDeps {
-    const policy: CompactionPolicy = { keepRecent: 100, cacheTtlMs: 1_000_000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const policy: CompactionPolicy = { keepRecent: 100, hardCapTokens: 1_000_000 }
     const { adapter, model, ...rest } = overrides
     return {
       store,
       policy,
-      estimateTokens,
       harness: FAKE_HARNESS,
       ledger: fakeLedger({}),
       now: () => new Date(Date.parse('2026-01-01T00:00:00.000Z')),

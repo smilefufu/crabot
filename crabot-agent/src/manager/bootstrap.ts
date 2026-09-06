@@ -62,7 +62,7 @@ import type { ManagerEpisodeFailure } from './types.js'
 
 // 与 `unified-agent.ts` 同款引用路径:这两个常量没有从 `engine/index.ts` 转出,直接引子模块
 // (engine 本阶段零改动,不为此新增 barrel 导出)。
-import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from '../engine/context-manager.js'
+import { DEFAULT_COMPACT_THRESHOLD } from '../engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../engine/query-loop.js'
 import type { LLMAdapter } from '../engine/index.js'
 import type { CrabMessagingDeps } from '../mcp/crab-messaging.js'
@@ -81,16 +81,11 @@ const DEFAULT_WORKER_IMPL: WorkerImplId = 'builtin'
  * manager 会话压缩参数(§4.2"参数经 extra 配置"——尚无配置入口,这里给一份可用缺省)。
  * - `keepRecent`:唤醒边界之外保留的原始消息条数,取 20(manager 的一轮 episode 常有
  *   数条工具调用往返,留太少会把同一件事的上下文折断);
- * - `cacheTtlMs`:prompt 缓存热判定窗口,取 5 分钟——与 provider 侧 prompt cache 的常见
- *   TTL 一致,超过它再压缩不会浪费一次已经失效的缓存前缀;
- * - `foldTokenThreshold`:唤醒边界折叠的历史 token 门槛;
- * - `hardCapTokens`:热态强压兜底,直接复用 engine 自己的比例常量
+ * - `hardCapTokens`:完整请求容量上限,直接复用 engine 自己的比例常量
  *   `DEFAULT_COMPACT_THRESHOLD` × 默认上下文窗口,不另定一个数。
  */
 export const DEFAULT_MANAGER_COMPACTION_POLICY: CompactionPolicy = {
   keepRecent: 20,
-  cacheTtlMs: 5 * 60_000,
-  foldTokenThreshold: 20_000,
   hardCapTokens: Math.floor(DEFAULT_MAX_CONTEXT_TOKENS * DEFAULT_COMPACT_THRESHOLD),
 }
 
@@ -518,11 +513,6 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     }),
   )
 
-  // token 估算复用 engine 既有的 `ContextManager.estimateTotalTokens`(chars/4 + 每条消息
-  // 固定开销 + 图片按固定 token 折算),与 `unified-agent.ts` 里同款用法一致——不另写一版
-  // 估算器,避免"重造版本漏掉原版有的条件"。
-  const tokenEstimator = new ContextManager({ maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS })
-
   // 发起人身份:唤醒边界异步解析一次,三个同步 thunk 读缓存(见 principal.ts 文件头)。
   const principals = new ManagerPrincipalStore(deps.principalResolver, principalBindings, () => new Date(deps.now()))
 
@@ -535,7 +525,6 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     onWorkboardAdminUpdateConsumed: deps.onWorkboardAdminUpdateConsumed,
     store: sessionStore,
     policy: DEFAULT_MANAGER_COMPACTION_POLICY,
-    estimateTokens: (msgs) => tokenEstimator.estimateTotalTokens(msgs),
     harness,
     ledger,
     adapter: deps.managerAdapter,

@@ -7,7 +7,7 @@
  *
  * ## 压缩调度自管(disableCompaction:true)
  *
- * manager 关闭 query-loop 的 turn 内自动调度，自己在唤醒边界执行缓存策略；实际批次规划、
+ * manager 关闭 query-loop 的 turn 内自动调度，自己在唤醒边界检查完整请求容量；实际批次规划、
  * 摘要调用、缩批与安全切点统一委托给 Engine ContextManager。流程是
  * load → decideCompaction → 需要则调用共享压缩器并逐批落盘 → 把
  * [摘要块(如有)] + [尾巴] + [本次事件] 拼成 initialMessages 喂 runEngine。折叠只发生在
@@ -223,8 +223,6 @@ export interface ManagerLoopDeps {
   readonly managerKey: () => ManagerKey
   readonly store: ManagerSessionStore
   readonly policy: CompactionPolicy
-  /** decideCompaction 的 token 估算器,调用方注入(与 compaction.ts 的既定依赖注入方式一致)。 */
-  readonly estimateTokens: (msgs: ReadonlyArray<EngineMessage>) => number
   /**
    * LLM adapter / model 解析器(protocol-agent-v3.md §11:"manager 的 prompt / model 热更于
    * 下一个 episode 生效")。刻意做成 thunk 而不是字面量:`ManagerLoop` 实例按 key 常驻
@@ -288,7 +286,7 @@ export interface ManagerLoopDeps {
 
 interface ManagerCompactionRequest {
   readonly state: ManagerSessionState
-  readonly decision: Extract<CompactionDecision, { kind: 'fold_at_wake' | 'force_hot' }>
+  readonly decision: Extract<CompactionDecision, { kind: 'force_hot' }>
   readonly contextManager: ContextManager
   readonly profile: CompactionProfile
   readonly target: CompactionTarget
@@ -861,7 +859,7 @@ export class ManagerLoop {
     const model = this.deps.model()
     const thinking = this.deps.thinking?.()
     // 上下文窗口与折叠策略同点快照（§11 热更语义：下一 episode 生效）：
-    // hardCap 按模型窗口推导（spec 2026-08-29），fold/keepRecent/cacheTtl 保持原策略。
+    // hardCap 按模型窗口推导（spec 2026-08-29），keepRecent 保持原策略。
     const contextWindowTokens = this.deps.contextWindowTokens?.()
     const policy = managerPolicyForWindow(this.deps.policy, contextWindowTokens)
     const contextManager = new ContextManager({
@@ -888,13 +886,9 @@ export class ManagerLoop {
 
     let state = initialState
     let historyState = withoutProtectedTail(state, committedHumanMessages.length)
-    const nowMs = this.deps.now().getTime()
 
     const wakeDecision = decideCompaction({
-      state: historyState,
-      nowMs,
       policy,
-      estimateTokens: this.deps.estimateTokens,
       mainRequestTokens: contextManager.estimateCompactionStateTokens(
         toManagerCompactionState(historyState, committedHumanMessages),
         compactionProfile,
@@ -907,9 +901,7 @@ export class ManagerLoop {
         decision: wakeDecision,
         contextManager,
         profile: compactionProfile,
-        target: wakeDecision.kind === 'fold_at_wake'
-          ? { kind: 'preserve_recent' }
-          : { kind: 'fit_hard_cap', hardCapTokens: policy.hardCapTokens },
+        target: { kind: 'fit_hard_cap', hardCapTokens: policy.hardCapTokens },
         adapter,
         model,
         protectedTail: committedHumanMessages,

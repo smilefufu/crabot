@@ -32,7 +32,7 @@ import { ManagerLoop, type WakeEvent, type TimedWakeEnvelope, type EpisodeResult
 import type { ManagerSessionStore } from './session-store.js'
 import type { CompactionPolicy } from './compaction.js'
 import type { ManagerKey } from './types.js'
-import type { EngineMessage, LLMAdapter, ToolDefinition } from '../engine/index.js'
+import type { LLMAdapter, ToolDefinition } from '../engine/index.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { LedgerStore } from '../workers/harness/ledger-store'
 import type {
@@ -80,7 +80,6 @@ export interface ScheduleIdentity {
 export interface ManagerRegistryDeps {
   readonly store: ManagerSessionStore
   readonly policy: CompactionPolicy
-  readonly estimateTokens: (msgs: ReadonlyArray<EngineMessage>) => number
   readonly harness: WorkerHarness
   /** routeWorkerEvent 的 origin 归属查找用(harness 未公开 findWorker,直接持有台账存储)。 */
   readonly ledger: LedgerStore
@@ -242,7 +241,6 @@ export class ManagerRegistry {
       managerKey: () => this.deps.managerKeyFor(key),
       store: this.deps.store,
       policy: this.deps.policy,
-      estimateTokens: this.deps.estimateTokens,
       adapter: this.deps.adapter,
       model: this.deps.model,
       onRuntimeConfigApplied: this.deps.onRuntimeConfigApplied,
