@@ -5191,8 +5191,15 @@ export class UnifiedAgent extends ModuleBase {
     // Business ingress is registered only after onStart resolves; initialize durable
     // subject bindings before any Manager tool face can mint a continuation credential.
     await this.managerStack?.principals.init()
-    // P6-A §7.7：开放 Manager read model 前先收口遗留 running episode（failed/interrupted）。
-    this.traceStore.reconcileInterruptedManagerEpisodes()
+    const managerCheckpoints = await this.managerStack?.store.listCheckpoints() ?? []
+    const resumableManagerCheckpoints = managerCheckpoints.filter((checkpoint) => {
+      const episode = this.traceStore.getManagerEpisode(checkpoint.episodeId)
+      if (!episode || episode.status === 'running') return true
+      this.managerStack!.store.clearCheckpoint(checkpoint.state.key, checkpoint.episodeId)
+      return false
+    })
+    this.managerStack?.registry.registerResumeCheckpoints(resumableManagerCheckpoints)
+    this.traceStore.reconcileInterruptedManagerEpisodes(new Set(resumableManagerCheckpoints.map((checkpoint) => checkpoint.episodeId)))
     // P6-B §6：activation registry 载入持久 verification 状态；runtime config 已在
     // constructor/pull 路径应用过时 applyRuntimeConfigCandidate 会补 apply（见下）。
     await this.activationRegistry.load()
@@ -5302,6 +5309,9 @@ export class UnifiedAgent extends ModuleBase {
         // reconciliation must not keep the routing gate closed for this process.
         this.managerReconciliationSettled = true
         if (this.runtimeClosing) return
+        void stack.registry.resumeInterruptedEpisodes().catch((error) => {
+          console.error(`[${this.config.moduleId}] Manager startup resume failed:`, error)
+        })
         await this.agentHandler?.releaseRecoveredWorkerShellExits()
         // CLI child copy is a terminal artifact: retry only after the startup state reconciliation
         // has decided which parent incarnations are actually terminal.

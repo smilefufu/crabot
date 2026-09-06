@@ -41,6 +41,7 @@ import type {
   HarnessEventDelivery,
 } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
+import type { ManagerResumeCheckpoint } from './resume-checkpoint.js'
 import type { SessionTarget } from '../mcp/crab-messaging.js'
 import type { HumanPrincipal } from './principal.js'
 import { resolveTimezone } from '../utils/time.js'
@@ -213,8 +214,62 @@ export class ManagerRegistry {
   private readonly activeEpisodes = new Map<ManagerKey, number>()
   /** 每个 key 最近一次"活跃"的时间戳(创建时 / 每次 episode 结束时刷新),evictIdle 的判据。 */
   private readonly lastActiveAtMs = new Map<ManagerKey, number>()
+  private readonly pendingResumes = new Map<ManagerKey, ManagerResumeCheckpoint>()
+  private readonly resumeTasks = new Map<ManagerKey, Promise<void>>()
+  private resumeReady: Promise<void> = Promise.resolve()
+  private releaseResumes?: () => void
 
   constructor(private readonly deps: ManagerRegistryDeps) {}
+
+  registerResumeCheckpoints(checkpoints: ReadonlyArray<ManagerResumeCheckpoint>): void {
+    for (const checkpoint of checkpoints) this.pendingResumes.set(checkpoint.state.key, checkpoint)
+    if (checkpoints.length > 0) {
+      this.resumeReady = new Promise((resolve) => { this.releaseResumes = resolve })
+    }
+  }
+
+  async resumeInterruptedEpisodes(): Promise<void> {
+    this.releaseResumes?.()
+    this.releaseResumes = undefined
+    await Promise.all([...this.pendingResumes.keys()].map(async (key) => {
+      try { await this.ensureResumed(key) } catch (error) {
+        console.error(`[ManagerRegistry] resume failed for ${key}:`, error)
+      }
+    }))
+  }
+
+  private async ensureResumed(key: ManagerKey): Promise<void> {
+    const checkpoint = this.pendingResumes.get(key)
+    if (!checkpoint) return
+    const existing = this.resumeTasks.get(key)
+    if (existing) return existing
+    const task = this.resumeReady.then(async () => {
+      const envelopes: TimedWakeEnvelope[] = []
+      for (const [index, item] of checkpoint.envelopes.entries()) {
+        const wake = item.wake
+        if (index === checkpoint.wakeIndex || (wake.kind === 'schedule' && wake.isBuiltin && wake.taskType === 'daily_reflection')) {
+          envelopes.push(await this.refreshResumeEnvelope(key, item))
+        } else envelopes.push(item)
+      }
+      await this.runWake(key, envelopes[checkpoint.wakeIndex], 0, undefined, undefined, { ...checkpoint, envelopes })
+    }).finally(() => { this.resumeTasks.delete(key) })
+    this.resumeTasks.set(key, task)
+    return task
+  }
+
+  private async refreshResumeEnvelope(key: ManagerKey, envelope: TimedWakeEnvelope): Promise<TimedWakeEnvelope> {
+    const wake = envelope.wake
+    let permissions: ResolvedPermissions | null | void
+    if (wake.kind === 'human_messages' || wake.kind === 'attention_flush') {
+      permissions = await this.deps.onHumanWake?.(key, {
+        friend: wake.friend,
+        sessionType: wake.messages[0]?.session.type === 'group' ? 'group' : 'private',
+      })
+    } else if (wake.kind === 'schedule') {
+      permissions = await this.deps.onScheduleWake?.({ key, creatorFriendId: wake.creatorFriendId, isBuiltin: wake.isBuiltin })
+    } else return envelope
+    return { ...envelope, wake: { ...wake, principalPermissions: permissions ?? undefined } }
+  }
 
   /** 内存 registry 当前 running manager 的只读快照（P6-A §7.3：补充尚未首次 save 的当前 manager）。 */
   listActiveManagers(): Array<{ key: ManagerKey; lastActiveAtMs?: number }> {
@@ -360,6 +415,7 @@ export class ManagerRegistry {
     onEpisodeSettled?: (result: EpisodeResult) => void,
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
+    if (this.pendingResumes.has(key)) await this.ensureResumed(key)
     // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
     // 与 `handleMessageReceived` 的默认分流一致。
     const sessionType = messages[0]?.session.type === 'group' ? 'group' : 'private'
@@ -727,6 +783,8 @@ export class ManagerRegistry {
     envelope: TimedWakeEnvelope | undefined,
     selfWakeChain?: number,
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+    shouldAdmit?: undefined,
+    recovery?: ManagerResumeCheckpoint,
   ): Promise<EpisodeResult>
   private runWake(
     key: ManagerKey,
@@ -741,7 +799,9 @@ export class ManagerRegistry {
     selfWakeChain = 0,
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
     shouldAdmit?: () => Promise<boolean>,
+    recovery?: ManagerResumeCheckpoint,
   ): Promise<EpisodeResult | undefined> {
+    if (!recovery && this.pendingResumes.has(key)) await this.ensureResumed(key)
     this.assertWakeAdmission()
     if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
     this.assertWakeAdmission()
@@ -751,7 +811,10 @@ export class ManagerRegistry {
     let result: EpisodeResult | undefined
     try {
       // `wakeUp()` 会在输入持久化后才触发非关键通知；这不是 LLM 已完成的确认。
-      if (envelope === undefined) {
+      if (recovery) {
+        this.pendingResumes.delete(key)
+        result = await loop.resume(recovery)
+      } else if (envelope === undefined) {
         result = await loop.drainMailbox()
       } else if (onHumanInputCommitted) {
         result = await loop.wakeUp(envelope, onHumanInputCommitted)

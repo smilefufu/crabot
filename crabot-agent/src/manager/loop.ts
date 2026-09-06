@@ -76,6 +76,7 @@ import type { ActivityContextAdmissionReceipt, HarnessEvent } from '../workers/h
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { SessionTarget } from '../mcp/crab-messaging.js'
 import type { ManagerInboundMessageFact } from './inbound-status.js'
+import { resumeManagerMessages, settleInterruptedManagerTools, type ManagerResumeCheckpoint } from './resume-checkpoint.js'
 
 const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出了一段文字、没有调用 send_message，然后结束了回复。\n'
   + '请注意：直接输出的文字只留在系统内部，人类看不到；只有 send_message 发送的内容才能送达人类。\n'
@@ -435,6 +436,9 @@ export class ManagerLoop {
   /** spawn_worker 成功回调（registry 桥经 worker-tools 调）：把 worker ID 追加进当前 trace。 */
   recordSpawnedWorker(workerId: string): void {
     if (this.currentTraceId) this.deps.traceWriter?.addSpawnedWorker(this.currentTraceId, workerId)
+    if (this.resumeCheckpoint) {
+      this.resumeCheckpoint = { ...this.resumeCheckpoint, spawnedWorkerIds: [...this.resumeCheckpoint.spawnedWorkerIds, workerId] }
+    }
     if (!this.needsSpawnRecheck) return
     this.needsSpawnRecheck = false
     this.spawnRecheckInjected = false
@@ -477,6 +481,70 @@ export class ManagerLoop {
 
   constructor(deps: ManagerLoopDeps) {
     this.deps = deps
+  }
+
+  private resumeCheckpoint?: ManagerResumeCheckpoint
+  private checkpointError?: unknown
+  private readonly restoredContextEnvelopes = new Set<TimedWakeEnvelope>()
+
+  async resume(checkpoint: ManagerResumeCheckpoint): Promise<EpisodeResult> {
+    if (checkpoint.state.key !== this.deps.key) throw new Error('Manager checkpoint owner mismatch')
+    return this.mutex.run(() => this.runEpisode(undefined, undefined, settleInterruptedManagerTools(checkpoint)))
+  }
+
+  private checkpointExecution(): ManagerResumeCheckpoint['execution'] {
+    return {
+      needsSpawnRecheck: this.needsSpawnRecheck,
+      spawnRecheckInjected: this.spawnRecheckInjected,
+      spawnRecheckOutcomeRecorded: this.spawnRecheckOutcomeRecorded,
+      postSendRecheckSequence: this.postSendRecheckSequence,
+      successfulSendMessageTargets: [...this.successfulSendMessageTargetsInCurrentEpisode],
+      continuedWorkers: [...this.continuedWorkersInCurrentEpisode],
+    }
+  }
+
+  private flushObservedCheckpoint(): void {
+    try {
+      this.flushCheckpoint()
+    } catch (error) {
+      // Lifecycle observers cannot interrupt a tool. Fail at the next clean checkpoint instead.
+      this.checkpointError = error
+    }
+  }
+
+  private flushCheckpoint(state?: ManagerSessionState): void {
+    if (!this.resumeCheckpoint) return
+    const pending = this.mailbox.snapshotPendingEnvelopes()
+    const pendingSet = new Set(pending)
+    const envelopes = [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]
+      .filter((item) => !pendingSet.has(item))
+    const nextState = state ?? this.resumeCheckpoint.state
+    const committedIds = new Set(nextState.committedHumanMessageIds ?? [])
+    const imageRefs = new Map((nextState.imageRefs ?? []).map((ref) => [ref.message_id, ref]))
+    if (state) {
+      for (const item of envelopes) {
+        if (isHumanWake(item.wake)) {
+          for (const message of item.wake.messages) committedIds.add(message.platform_message_id)
+          const images = item.wake.messages.flatMap(collectInboundImages)
+          if (images.length > 0) {
+            const text = this.renderEnvelope(item)
+            const message = state.recent.find((message) => 'content' in message && message.content === text)
+            if (message) imageRefs.set(message.id, { message_id: message.id, images })
+          }
+        }
+      }
+    }
+    this.resumeCheckpoint = {
+      ...this.resumeCheckpoint,
+      state: { ...nextState, committedHumanMessageIds: [...committedIds], ...(imageRefs.size > 0 ? { imageRefs: [...imageRefs.values()] } : {}) },
+      envelopes,
+      wakeIndex: this.currentWakeEvent ? envelopes.indexOf(this.currentWakeEvent) : -1,
+      pending,
+      hasEngineMessages: state !== undefined || this.resumeCheckpoint.hasEngineMessages,
+      adminChatClaims: [...this.adminChatClaims],
+      execution: this.checkpointExecution(),
+    }
+    this.deps.store.saveCheckpoint(this.resumeCheckpoint)
   }
 
   /** 唯一入口:被唤醒 → 跑一个 episode → 回睡。同一 loop 串行,不同 loop 互不影响。 */
@@ -572,6 +640,7 @@ export class ManagerLoop {
       if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
     }
     if (opts?.onEpisodeSettled) this.currentEpisodeSettleHooks.push(opts.onEpisodeSettled)
+    this.flushCheckpoint()
   }
 
   /** 连续 Admin 保存只保留尚未注入的最新任务板系统事件。 */
@@ -586,6 +655,7 @@ export class ManagerLoop {
     } else if (!replaced) {
       this.currentEpisodeInjected?.push(envelope)
     }
+    this.flushCheckpoint()
   }
 
   /**
@@ -598,8 +668,7 @@ export class ManagerLoop {
    * - 投影按 knownCommittedHumanIds 内存镜像同步计算:整批已提交(重放/渠道重发)→
    *   只登记 admin chat claims 后返回,不进 LLM(协议 §4.1 重复来源守卫,与 idle
    *   空转守卫同语义);部分重叠 → 只注入新消息投影。
-   * - 崩溃窗口如实说明:提交延后意味着「注入后、收尾前」进程崩溃时该消息丢失——
-   *   与修复前消息在 lane 内存队列等 mutex 的崩溃窗口同级,不劣于现状。
+   * - 运行中输入同步进入恢复检查点；重启后按已消费上下文或待注入邮箱续接。
    */
   enqueueHumanWakeDuringActiveEpisode(
     envelope: TimedWakeEnvelope,
@@ -657,14 +726,18 @@ export class ManagerLoop {
   private async runEpisode(
     envelope: TimedWakeEnvelope | undefined,
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
+    recovery?: ManagerResumeCheckpoint,
   ): Promise<EpisodeResult> {
-    const episodeId = randomUUID()
+    const episodeId = recovery?.episodeId ?? randomUUID()
+    if (recovery) envelope = recovery.envelopes[recovery.wakeIndex]
     this.mailbox.clearContextAdmissions()
     this.admittedActivityReceipts.clear()
     this.rejectedActivityReceipts.clear()
-    const carriedEnvelopes = this.mailbox.drainEnvelopes()
-    const episodeEnvelopes = [...carriedEnvelopes, ...(envelope ? [envelope] : [])]
-    if (envelope === undefined && carriedEnvelopes.length === 0) {
+    const carriedEnvelopes = recovery
+      ? recovery.envelopes.filter((_, index) => index !== recovery.wakeIndex)
+      : this.mailbox.drainEnvelopes()
+    const episodeEnvelopes = recovery ? [...recovery.envelopes] : [...carriedEnvelopes, ...(envelope ? [envelope] : [])]
+    if (!recovery && envelope === undefined && carriedEnvelopes.length === 0) {
       // 自唤醒但 mailbox 已空(残留被排在前面的另一个 episode 顺带 drain 走了)——
       // 没有任何新内容,直接空转返回,不开 episode(见 drainMailbox 注释)。
       return {
@@ -687,6 +760,7 @@ export class ManagerLoop {
     this.spawnRecheckOutcomeRecorded = false
     this.postSendRecheckSequence = 0
     this.adminChatClaims = new Map()
+    this.checkpointError = undefined
     this.successfulSendMessageTargetsInCurrentEpisode.clear()
     this.continuedWorkersInCurrentEpisode.clear()
     for (const item of episodeEnvelopes) {
@@ -703,12 +777,32 @@ export class ManagerLoop {
     let traceStarted = false
     try {
       await this.deps.store.ensureSession(this.deps.key)
-      const committed = await this.commitHumanInputs(
+      const committed = recovery ? {
+        state: { ...recovery.state, recent: resumeManagerMessages(recovery).filter((message) => !recovery.transientMessageIds.includes(message.id)) },
+        messageCount: 0,
+        humanMessages: [],
+        lastCurrentWakeCommittedMessageId: undefined,
+      } : await this.commitHumanInputs(
         await this.deps.store.load(this.deps.key),
         [...carriedEnvelopes, ...(envelope ? [envelope] : [])],
         envelope,
       )
       state = committed.state
+      if (recovery) {
+        await this.deps.store.save(state)
+        if (recovery.hasEngineMessages) {
+          for (const item of episodeEnvelopes) {
+            if (item.wake.kind !== 'workboard_admin_update') this.restoredContextEnvelopes.add(item)
+          }
+        }
+        this.adminChatClaims = new Map(recovery.adminChatClaims)
+        this.needsSpawnRecheck = recovery.execution.needsSpawnRecheck
+        this.spawnRecheckInjected = recovery.execution.spawnRecheckInjected
+        this.spawnRecheckOutcomeRecorded = recovery.execution.spawnRecheckOutcomeRecorded
+        this.postSendRecheckSequence = recovery.execution.postSendRecheckSequence
+        for (const target of recovery.execution.successfulSendMessageTargets) this.successfulSendMessageTargetsInCurrentEpisode.add(target)
+        for (const worker of recovery.execution.continuedWorkers) this.continuedWorkersInCurrentEpisode.add(worker)
+      }
       committedHumanMessages = committed.messageCount
       humanInputsCommitted = true
       // 已提交人类消息 id 的内存镜像:mid-episode 注入的投影判定用它(同步、无 store I/O)
@@ -717,13 +811,17 @@ export class ManagerLoop {
         this.notifyHumanInputCommitted(onHumanInputCommitted, committed.lastCurrentWakeCommittedMessageId)
       }
 
+      const restoredMessages = recovery?.hasEngineMessages === true
       const carriedTexts = carriedEnvelopes
-        .filter((item) => !isHumanWake(item.wake) || isEmptyHumanWake(item.wake))
+        .filter((item) => restoredMessages
+          ? item.wake.kind === 'workboard_admin_update'
+          : !isHumanWake(item.wake) || isEmptyHumanWake(item.wake))
         .map((item) => this.renderEnvelope(item))
-      const eventText = envelope && (!isHumanWake(envelope.wake) || isEmptyHumanWake(envelope.wake))
+      const eventText = envelope && (!restoredMessages || envelope.wake.kind === 'workboard_admin_update')
+        && (!isHumanWake(envelope.wake) || isEmptyHumanWake(envelope.wake))
         ? this.renderEnvelope(envelope)
         : undefined
-      if (committedHumanMessages === 0 && carriedTexts.length === 0 && eventText === undefined) {
+      if (!recovery && committedHumanMessages === 0 && carriedTexts.length === 0 && eventText === undefined) {
         await this.settleUnclaimedAdminChatWakes()
         return {
           episodeId,
@@ -735,11 +833,28 @@ export class ManagerLoop {
         }
       }
 
+      if (recovery) {
+        for (const pending of recovery.pending) {
+          if (isHumanWake(pending.wake)) this.enqueueHumanWakeDuringActiveEpisode(pending)
+          else this.enqueueDuringEpisode(pending)
+        }
+      }
+      this.resumeCheckpoint = recovery
+        ? { ...recovery, state, transientMessageIds: [] }
+        : {
+            episodeId, state, envelopes: episodeEnvelopes, wakeIndex: envelope ? episodeEnvelopes.indexOf(envelope) : -1,
+            pending: [], hasEngineMessages: false, turns: [], responses: [], tools: [],
+            adminChatClaims: [...this.adminChatClaims], transientMessageIds: [], spawnedWorkerIds: [],
+            execution: this.checkpointExecution(),
+          }
+      this.flushCheckpoint()
+
       // 人类提交成功后，trace admission 的失败也不得倒回已提交输入。
       this.deps.traceWriter?.startEpisode(
         episodeId,
         this.deps.managerKey(),
-        managerTriggerFromWake(envelope ?? carriedEnvelopes[0], carriedEnvelopes.length + (envelope ? 1 : 0)),
+        managerTriggerFromWake(envelope ?? carriedEnvelopes[0], episodeEnvelopes.length),
+        recovery !== undefined,
       )
       this.currentTraceId = episodeId
       traceStarted = true
@@ -749,8 +864,14 @@ export class ManagerLoop {
         type: 'agent_loop',
         started_at: new Date().toISOString(),
         status: 'running',
-        details: { merged_envelopes: carriedEnvelopes.length + (envelope ? 1 : 0) },
+        details: { merged_envelopes: episodeEnvelopes.length },
       })
+      if (recovery) {
+        for (const response of recovery.responses) this.recordLlmResponse(episodeId, response)
+        for (const turn of recovery.turns) this.recordTurnSpans(episodeId, turn)
+        for (const event of recovery.tools) this.recordToolLifecycle(episodeId, event)
+        for (const workerId of recovery.spawnedWorkerIds) this.deps.traceWriter?.addSpawnedWorker(episodeId, workerId)
+      }
       const result = await this.runEpisodeBody(
         episodeId,
         state,
@@ -777,6 +898,7 @@ export class ManagerLoop {
       // confirm 结算；失败（consumedEvents=false）的整批重投不结算。
       if (result.consumedEvents) await this.settleUnclaimedAdminChatWakes()
       this.settleInjectedHooks(result)
+      this.deps.store.clearCheckpoint(this.deps.key, episodeId)
       return result
     } catch (err) {
       // admission 与直接 throw 都在这里收口。人类提交一旦完成，仅重投非人类事件；否则保留
@@ -823,6 +945,7 @@ export class ManagerLoop {
         repliedToHuman: false,
         successfulSendMessageTargets: [],
       })
+      this.deps.store.clearCheckpoint(this.deps.key, episodeId)
       throw err
     } finally {
       this.currentEpisodeInjected = null
@@ -841,6 +964,9 @@ export class ManagerLoop {
       this.postSendRecheckSequence = 0
       this.currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
       this.attemptCounter = 0
+      this.resumeCheckpoint = undefined
+      this.checkpointError = undefined
+      this.restoredContextEnvelopes.clear()
     }
   }
 
@@ -1070,6 +1196,7 @@ export class ManagerLoop {
     const durablePrefixLength = state.recent.length + (attempt.hasSummaryMarker ? 1 : 0)
     let remainingTransientWorkboardUpdates = transientWorkboardUpdates
     const persistedFinalMessages = attempt.result.finalMessages.flatMap((m, index) => {
+      if (this.resumeCheckpoint?.transientMessageIds.includes(m.id)) return []
       // 系统提示只服务当前 LLM 请求。只在本次动态尾部之后按数量剔除，避免误删旧 history
       // 中恰好同文的人类消息；Worker/任务板正文从未进入这里。
       if (
@@ -1328,6 +1455,7 @@ export class ManagerLoop {
     humanInputsCommitted: boolean,
   ): void {
     for (const envelope of envelopes) {
+      if (this.restoredContextEnvelopes.has(envelope)) continue
       if (envelope.activity_context_receipt) continue
       if (humanInputsCommitted && isHumanWake(envelope.wake)) continue
       this.mailbox.push(envelope)
@@ -1397,6 +1525,7 @@ export class ManagerLoop {
   }
 
   private shouldReplayInAttempt(envelope: TimedWakeEnvelope): boolean {
+    if (this.restoredContextEnvelopes.has(envelope)) return false
     const receipt = envelope.activity_context_receipt
     return !receipt || !this.admittedActivityReceipts.has(activityReceiptKey(receipt))
   }
@@ -1758,6 +1887,31 @@ export class ManagerLoop {
     const isBuiltinDailyReflection = isBuiltinDailyReflectionWake(effectiveWake)
     const systemPrompt = (): string => this.managerSystemPrompt(this.effectiveWakeForCurrentEpisode())
     const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(this.effectiveWakeForCurrentEpisode())
+    const messagesRef = { current: initialMessages as ReadonlyArray<EngineMessage> }
+    const checkpoint = (): void => {
+      if (this.checkpointError) throw this.checkpointError
+      const originals = new Map(state.recent.map((message) => [message.id, message]))
+      const recent = messagesRef.current.slice(hasSummaryMarker ? 1 : 0).map((message) => {
+        if (message.role !== 'user' || !('content' in message) || !Array.isArray(message.content)) return message
+        const original = originals.get(message.id)
+        if (original) return original
+        const first = message.content[0]
+        return first?.type === 'text' ? { ...message, content: first.text } : message
+      })
+      if (this.resumeCheckpoint) {
+        const transientIds = new Set(this.resumeCheckpoint.transientMessageIds)
+        let remaining = [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]
+          .filter((item) => item.wake.kind === 'workboard_admin_update').length
+        for (const message of recent.slice(state.recent.length)) {
+          if (remaining > 0 && 'content' in message && message.content === '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。') {
+            transientIds.add(message.id)
+            remaining -= 1
+          }
+        }
+        this.resumeCheckpoint = { ...this.resumeCheckpoint, transientMessageIds: [...transientIds] }
+      }
+      this.flushCheckpoint({ ...state, recent })
+    }
 
     // LLM 重试期间配置热切换的订阅（spec 2026-08-30-llm-retry-config-hotreload）：
     // 只覆盖本 attempt 的 runEngine 生命周期，结束时确定性退订，不泄漏监听器。
@@ -1774,7 +1928,9 @@ export class ManagerLoop {
       ...(overrides?.thinking !== undefined ? { thinking: overrides.thinking } : {}),
       disableCompaction: true,
       humanMessageQueue: this.mailbox,
+      messagesRef,
       onBeforeLlmCall: () => {
+        checkpoint()
         const envelopes = [
           ...initialContextEnvelopes,
           ...this.mailbox.takeContextAdmissionEnvelopes(),
@@ -1807,9 +1963,29 @@ export class ManagerLoop {
       endTurnGate: async () => this.takeSpawnRecheckPrompt(),
       // P6-A §6.4：response/lifecycle 钩子即时投影，onTurn 负责补漏与 usage 结算；
       // 三者都只观察共享 Engine，不复制执行语义或新增第二个 query loop。
-      onLlmResponse: (event) => this.recordLlmResponse(episodeId, event),
-      onTurn: (event) => this.recordTurnSpans(episodeId, event),
-      onToolLifecycle: (event) => this.recordToolLifecycle(episodeId, event),
+      onLlmResponse: (event) => {
+        this.recordLlmResponse(episodeId, event)
+        if (this.resumeCheckpoint) {
+          this.resumeCheckpoint = { ...this.resumeCheckpoint, responses: [...this.resumeCheckpoint.responses, event] }
+          this.flushObservedCheckpoint()
+        }
+      },
+      onTurn: (event) => {
+        this.recordTurnSpans(episodeId, event)
+        if (this.resumeCheckpoint) {
+          this.resumeCheckpoint = { ...this.resumeCheckpoint, turns: [...this.resumeCheckpoint.turns, event] }
+        }
+        checkpoint()
+      },
+      onToolLifecycle: (event) => {
+        this.recordToolLifecycle(episodeId, event)
+        if (this.resumeCheckpoint) {
+          const tools = new Map(this.resumeCheckpoint.tools.map((item) => [item.callId, item]))
+          tools.set(event.callId, event)
+          this.resumeCheckpoint = { ...this.resumeCheckpoint, tools: [...tools.values()] }
+          this.flushObservedCheckpoint()
+        }
+      },
       // LLM 重试期间配置热切换（spec 2026-08-30-llm-retry-config-hotreload）：
       // onRuntimeConfigApplied 在 agentConfig 原子替换完成后触发 → abort signal →
       // callNonStreaming 的重试 sleep 提前结束；configGeneration 探针由 engine 记账，

@@ -101,7 +101,7 @@ export function isValidManagerEpisodeTrace(trace: unknown): trace is ManagerEpis
  */
 export interface ManagerTraceWriter {
   /** episode admission：持久化失败必须 throw（调用方不得继续调用 LLM/tool）。 */
-  startEpisode(traceId: string, managerKey: ManagerKey, trigger: ManagerEpisodeTrigger): void
+  startEpisode(traceId: string, managerKey: ManagerKey, trigger: ManagerEpisodeTrigger, resume?: boolean): void
   appendSpan(traceId: string, span: ManagerEpisodeSpan): void
   finishSpan(traceId: string, spanId: string, patch: { status: 'completed' | 'failed'; ended_at?: string; details?: unknown }): void
   finishEpisode(traceId: string, patch: { status: 'completed' | 'failed'; outcome?: { summary: string; error?: string }; total_usage?: ManagerEpisodeUsage }): void
