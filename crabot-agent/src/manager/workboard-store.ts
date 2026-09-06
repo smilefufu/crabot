@@ -89,6 +89,14 @@ export class WorkboardRevisionConflictError extends Error {
   }
 }
 
+/** Admin mutation data is syntactically valid but cannot be applied to the current board. */
+export class WorkboardValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'WorkboardValidationError'
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -530,7 +538,16 @@ export class ManagerWorkboardStore {
     return this.mutexFor(key).run(async () => {
       const before = await this.readUnlocked(key)
       if (before.revision !== expectedRevision) throw new WorkboardRevisionConflictError(before.revision)
-      const result = change(before)
+      let result: ReturnType<typeof change>
+      try {
+        // `change` only validates request-derived values against the loaded board;
+        // read and write failures intentionally remain ordinary internal errors.
+        result = change(before)
+      } catch (error) {
+        if (error instanceof WorkboardValidationError) throw error
+        if (error instanceof Error) throw new WorkboardValidationError(error.message)
+        throw error
+      }
       const revision = before.revision + 1
       const notice: PendingAdminWorkboardNotice = {
         revision,

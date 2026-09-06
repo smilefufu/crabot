@@ -150,6 +150,17 @@ describe('Manager workboard Admin API', () => {
 
     ;(admin as unknown as {
       rpcClient: { callSensitive: (port: number, method: string, params: Record<string, unknown>, source: string) => Promise<unknown> }
+    }).rpcClient.callSensitive = async () => {
+      throw Object.assign(new Error('blocked 任务项必须至少包含一个 blocker'), { code: 'INVALID_PARAMS' })
+    }
+    const invalidAgentInput = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
+      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create', item: ITEM, expected_revision: 0 }),
+    })
+    expect(invalidAgentInput.status).toBe(400)
+    expect(await invalidAgentInput.json()).toMatchObject({ code: 'INVALID_PARAMS' })
+
+    ;(admin as unknown as {
+      rpcClient: { callSensitive: (port: number, method: string, params: Record<string, unknown>, source: string) => Promise<unknown> }
     }).rpcClient.callSensitive = async () => { throw new Error('Agent not available') }
     const unavailable = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
       method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create', item: ITEM, expected_revision: 0 }),

@@ -111,6 +111,25 @@ describe('UnifiedAgent task-board Admin handler', () => {
     expect(current.dispatchWorkboardAdminNotice).not.toHaveBeenCalled()
   })
 
+  it('任务项内容校验失败时返回 INVALID_PARAMS，不写入也不安排系统唤醒', async () => {
+    const current = await boot()
+    current.rpcClient.callSensitive = vi.fn().mockResolvedValue({
+      consumed: true,
+      expires_at: '2026-09-05T00:01:00.000Z',
+    })
+
+    await expect(current.handleChangeWorkboardAdmin({
+      manager_key: KEY,
+      action: 'create',
+      item: { ...ITEM, status: 'blocked', blockers: [] },
+      expected_revision: 0,
+      assertion: 'opaque-assertion',
+    })).rejects.toMatchObject({ code: 'INVALID_PARAMS', message: 'blocked 任务项必须至少包含一个 blocker' })
+
+    await expect(current.managerStack.workboard.loadAdmin(KEY)).resolves.toMatchObject({ revision: 0, active: [] })
+    expect(current.dispatchWorkboardAdminNotice).not.toHaveBeenCalled()
+  })
+
   it('宿主 episode 的成功结束不能替代任务板系统输入消费来清除 notice', async () => {
     const current = await boot(false)
     const result = {

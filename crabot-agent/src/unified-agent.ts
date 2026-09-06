@@ -154,6 +154,7 @@ import { SYSTEM_TASKS_MANAGER_KEY } from './manager/registry.js'
 import { splitManagerKey } from './manager/principal.js'
 import {
   WorkboardRevisionConflictError,
+  WorkboardValidationError,
   type WorkboardArchiveOutcome,
   type WorkboardItem,
   type WorkboardItemDraft,
@@ -3449,6 +3450,9 @@ export class UnifiedAgent extends ModuleBase {
         throw new RpcError('WORKBOARD_REVISION_CONFLICT', `任务板 revision 冲突（当前为 ${error.currentRevision}）`, {
           current_revision: error.currentRevision,
         })
+      }
+      if (error instanceof WorkboardValidationError) {
+        throw new RpcError('INVALID_PARAMS', error.message)
       }
       throw error
     }
