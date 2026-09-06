@@ -187,6 +187,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       messagesRef.systemPrompt = currentSystemPrompt
       messagesRef.tools = currentTools
     }
+    refreshMessagesRef()
     const beforeLlmCall = options.onBeforeLlmCall?.()
     if (beforeLlmCall) await beforeLlmCall
     const llmStartedAtMs = Date.now()

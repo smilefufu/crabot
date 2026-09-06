@@ -1257,7 +1257,9 @@ export class TraceStore {
    * 持久化失败必须 throw——调用方（ManagerLoop）不得继续调用 LLM/tool，
    * 原 wake 保持未结算走失败重投语义。
    */
-  startManagerEpisode(traceId: string, managerKey: ManagerKey, trigger: ManagerEpisodeTrigger): void {
+  startManagerEpisode(traceId: string, managerKey: ManagerKey, trigger: ManagerEpisodeTrigger, resume = false): void {
+    const existing = this.managerEpisodes.get(traceId)
+    if (resume && existing?.manager_key === managerKey && existing.status === 'running') return
     if (this.managerEpisodes.has(traceId)) throw new Error(`[TraceStore] duplicate manager episode ${traceId}`)
     const episode: ManagerEpisodeTrace = {
       trace_id: traceId,
@@ -1279,7 +1281,9 @@ export class TraceStore {
   appendManagerSpan(traceId: string, span: ManagerEpisodeSpan): void {
     const episode = this.managerEpisodes.get(traceId)
     if (!episode) return
-    episode.spans.push(span)
+    const existing = episode.spans.findIndex((item) => item.span_id === span.span_id)
+    if (existing < 0) episode.spans.push(span)
+    else episode.spans[existing] = { ...span, started_at: episode.spans[existing].started_at }
     // span 级变更不整份重写归档（否则单 episode 落盘量随 span 数 O(n²)）：
     // running flush 每 15s 全量覆盖 running 文件兜底崩溃现场；start/finish 各落一行。
     this.persistManagerEpisode(episode, false, true)
@@ -1383,10 +1387,10 @@ export class TraceStore {
   }
 
   /**
-   * 启动收口：遗留 running episode 标 failed（outcome 写明 interrupted），保留 spans。
+   * 启动收口：可续跑 episode 保持 running；无检查点的遗留 episode 标 failed/interrupted。
    * 必须在开放 Manager read model 前调用（UnifiedAgent.onStart）。
    */
-  reconcileInterruptedManagerEpisodes(): void {
+  reconcileInterruptedManagerEpisodes(resumableIds: ReadonlySet<string> = new Set()): void {
     for (const id of [...this.runningManagerEpisodeIds]) {
       const episode = this.managerEpisodes.get(id)
       if (!episode || episode.status !== 'running') {
@@ -1394,10 +1398,13 @@ export class TraceStore {
         continue
       }
       const endedAt = new Date().toISOString()
-      episode.status = 'failed'
-      episode.ended_at = endedAt
-      episode.duration_ms = new Date(endedAt).getTime() - new Date(episode.started_at).getTime()
-      episode.outcome = { summary: '[interrupted: agent restarted]' }
+      const resumable = resumableIds.has(id)
+      if (!resumable) {
+        episode.status = 'failed'
+        episode.ended_at = endedAt
+        episode.duration_ms = new Date(endedAt).getTime() - new Date(episode.started_at).getTime()
+        episode.outcome = { summary: '[interrupted: agent restarted]' }
+      }
       for (const span of episode.spans) {
         if (span.status === 'running') {
           span.status = 'failed'
@@ -1413,8 +1420,10 @@ export class TraceStore {
         }
       }
       this.persistManagerEpisode(episode, false)
-      this.runningManagerEpisodeIds.delete(id)
-      this.trackFinishedManagerEpisode(id)
+      if (!resumable) {
+        this.runningManagerEpisodeIds.delete(id)
+        this.trackFinishedManagerEpisode(id)
+      }
     }
   }
 
@@ -1437,7 +1446,7 @@ export class TraceStore {
       ...(trigger.source ? { source: redact(trigger.source) } : {}),
     })
     return {
-      startEpisode: (traceId, managerKey, trigger) => this.startManagerEpisode(traceId, managerKey, redactTrigger(trigger)),
+      startEpisode: (traceId, managerKey, trigger, resume) => this.startManagerEpisode(traceId, managerKey, redactTrigger(trigger), resume),
       appendSpan: (traceId, span) => this.appendManagerSpan(traceId, { ...span, details: redactDetails(span.details) }),
       finishSpan: (traceId, spanId, patch) => this.finishManagerSpan(traceId, spanId, {
         ...patch,

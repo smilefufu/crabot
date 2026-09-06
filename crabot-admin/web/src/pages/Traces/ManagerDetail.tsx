@@ -267,12 +267,18 @@ function InboundEntry({
   item,
   queuePosition,
   snapshotAt,
+  activity,
+  runningWorkerIds,
 }: {
   item: ManagerInboundMessageSnapshot
   queuePosition?: number
   snapshotAt: string
+  activity?: GroupedEpisode
+  runningWorkerIds: ReadonlySet<string>
 }) {
   const processing = item.status === 'processing'
+  let statusLabel = processing ? '正在处理' : '排队中'
+  if (processing && activity?.episode.reply_excerpt) statusLabel = '本轮已回复，继续处理'
   const statusMeta = processing
     ? elapsedLabel(item.platform_timestamp, snapshotAt)
     : `第 ${queuePosition ?? 1} 位 · ${elapsedLabel(item.platform_timestamp, snapshotAt)}`
@@ -284,7 +290,7 @@ function InboundEntry({
           <div className="manager-detail__event-labels">
             <span className="manager-detail__event-status">
               <span className="manager-detail__status-dot" aria-hidden="true" />
-              {processing ? '正在处理' : '排队中'}
+              {statusLabel}
             </span>
             <span className="manager-detail__status-meta">{statusMeta}</span>
           </div>
@@ -295,6 +301,7 @@ function InboundEntry({
           <span>{item.sender_display_name || '未知发送者'}</span>
           {item.episode_id && <code>episode · {item.episode_id.slice(0, 8)}</code>}
         </div>
+        {activity && <EpisodeActivity episode={activity.episode} progress={activity.progress} runningWorkerIds={runningWorkerIds} />}
       </div>
     </article>
   )
@@ -308,7 +315,6 @@ function EpisodeEntry({ episode, progress, runningWorkerIds }: { episode: Manage
       : episode.trigger.type === 'worker_event'
         ? ' is-worker'
         : ''
-  const workerProgress = groupWorkerProgress(progress)
   return (
     <article className={`manager-detail__event${tone}`}>
       <time className="manager-detail__event-time" dateTime={episode.started_at}>{displayTime(episode.started_at)}</time>
@@ -321,16 +327,25 @@ function EpisodeEntry({ episode, progress, runningWorkerIds }: { episode: Manage
           <TechnicalDetails episode={episode} />
         </div>
         <div className="manager-detail__event-title">{triggerText(episode)}</div>
-        {episode.reply_excerpt && <div className="manager-detail__reply"><strong>管理会话回复</strong>：{episode.reply_excerpt}</div>}
-        <ActionList episode={episode} runningWorkerIds={runningWorkerIds} />
-        {episode.status === 'failed' && <div className="manager-detail__failure">失败原因：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
-        {workerProgress.length > 0 && (
-          <div className="manager-detail__worker-chain">
-            {workerProgress.map((child) => <WorkerProgress key={child.latest.worker_ref?.worker_id ?? child.latest.trace_id} progress={child} runningWorkerIds={runningWorkerIds} />)}
-          </div>
-        )}
+        <EpisodeActivity episode={episode} progress={progress} runningWorkerIds={runningWorkerIds} />
       </div>
     </article>
+  )
+}
+
+function EpisodeActivity({ episode, progress, runningWorkerIds }: { episode: ManagerEpisodeTrace; progress: ManagerEpisodeTrace[]; runningWorkerIds: ReadonlySet<string> }) {
+  const workerProgress = groupWorkerProgress(progress)
+  return (
+    <>
+      {episode.reply_excerpt && <div className="manager-detail__reply"><strong>管理会话回复</strong>：{episode.reply_excerpt}</div>}
+      <ActionList episode={episode} runningWorkerIds={runningWorkerIds} />
+      {episode.status === 'failed' && <div className="manager-detail__failure">失败原因：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
+      {workerProgress.length > 0 && (
+        <div className="manager-detail__worker-chain">
+          {workerProgress.map((child) => <WorkerProgress key={child.latest.worker_ref?.worker_id ?? child.latest.trace_id} progress={child} runningWorkerIds={runningWorkerIds} />)}
+        </div>
+      )}
+    </>
   )
 }
 
@@ -435,7 +450,7 @@ function keepsOwnTimelinePosition(episode: ManagerEpisodeTrace): boolean {
 }
 
 type ConversationTimelineItem =
-  | { kind: 'inbound'; id: string; timestamp: string; item: ManagerInboundMessageSnapshot; queuePosition?: number }
+  | { kind: 'inbound'; id: string; timestamp: string; item: ManagerInboundMessageSnapshot; queuePosition?: number; activity?: GroupedEpisode }
   | { kind: 'episode'; id: string; timestamp: string; grouped: GroupedEpisode }
 
 function currentInboundMessages(
@@ -457,6 +472,8 @@ function mergeConversationTimeline(
   const processingEpisodeIds = new Set(
     inbound.flatMap((item) => item.status === 'processing' && item.episode_id ? [item.episode_id] : []),
   )
+  const activities = new Map(groupedEpisodes.map((grouped) => [grouped.episode.trace_id, grouped]))
+  const attachedActivities = new Set<string>()
   const queuePosition = new Map(
     inbound
       .filter((item) => item.status === 'queued')
@@ -466,13 +483,20 @@ function mergeConversationTimeline(
   )
 
   const items: ConversationTimelineItem[] = [
-    ...inbound.map((item): ConversationTimelineItem => ({
-      kind: 'inbound',
-      id: `inbound:${item.platform_message_id}`,
-      timestamp: item.platform_timestamp,
-      item,
-      ...(item.status === 'queued' ? { queuePosition: queuePosition.get(item.platform_message_id) } : {}),
-    })),
+    ...inbound.map((item): ConversationTimelineItem => {
+      const activity = item.status === 'processing' && item.episode_id && !attachedActivities.has(item.episode_id)
+        ? activities.get(item.episode_id)
+        : undefined
+      if (activity) attachedActivities.add(activity.episode.trace_id)
+      return {
+        kind: 'inbound',
+        id: `inbound:${item.platform_message_id}`,
+        timestamp: item.platform_timestamp,
+        item,
+        ...(activity ? { activity } : {}),
+        ...(item.status === 'queued' ? { queuePosition: queuePosition.get(item.platform_message_id) } : {}),
+      }
+    }),
     ...groupedEpisodes
       .filter(({ episode }) => episode.status !== 'running' || !processingEpisodeIds.has(episode.trace_id))
       .map((grouped): ConversationTimelineItem => ({
@@ -658,6 +682,8 @@ const ManagerDetailContent: React.FC = () => {
                       item={timelineItem.item}
                       queuePosition={timelineItem.queuePosition}
                       snapshotAt={inboundStatus.status === 'ready' ? inboundStatus.snapshotAt : timelineItem.timestamp}
+                      activity={timelineItem.activity}
+                      runningWorkerIds={runningWorkerIds}
                     />
                   ) : (
                     <EpisodeEntry

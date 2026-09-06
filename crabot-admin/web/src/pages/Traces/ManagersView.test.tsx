@@ -164,6 +164,35 @@ describe('ManagerDetail', () => {
     expect(screen.getByText('会话动态')).toBeInTheDocument()
   })
 
+  it('运行中的消息保留本轮已发送的回复和动作，多条插话不重复展示活动', async () => {
+    mocked.getManagerInboundStatus = vi.fn().mockResolvedValue({
+      manager_key: 'wechat::sess-1',
+      snapshot_at: '2026-09-05T06:28:21.000Z',
+      items: [
+        { platform_message_id: 'pm-1', status: 'processing', preview: '换个执行器继续', platform_timestamp: '2026-09-05T06:26:00.000Z', episode_id: 'ep-running' },
+        { platform_message_id: 'pm-2', status: 'processing', preview: '保留测试结果', platform_timestamp: '2026-09-05T06:28:00.000Z', episode_id: 'ep-running' },
+      ],
+    })
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [{
+        trace_id: 'ep-running', manager_key: 'wechat::sess-1', started_at: '2026-09-05T06:26:00.000Z', status: 'running',
+        trigger: { type: 'human_message', summary: '人类消息 x1：换个执行器继续' }, spans: [], spawned_worker_ids: ['w-new'],
+        reply_excerpt: '已经回复，接着交接测试工作。',
+        actions: [{ kind: 'spawn_worker', label: '派活：接手测试', worker_id: 'w-new' }],
+      }],
+      pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+    })
+    render(<MemoryRouter initialEntries={['/traces/managers/wechat%3A%3Asess-1']}><Routes>
+      <Route path="/traces/managers/:managerKey" element={<ManagerDetail />} />
+    </Routes></MemoryRouter>)
+
+    await waitFor(() => expect(screen.getByText('本轮已回复，继续处理')).toBeInTheDocument())
+    expect(screen.getAllByText('已经回复，接着交接测试工作。', { exact: false })).toHaveLength(1)
+    expect(screen.getAllByText('接手测试')).toHaveLength(1)
+    expect(document.querySelectorAll('article.manager-detail__event')).toHaveLength(2)
+    expect(screen.queryByText('已处理')).toBeNull()
+  })
+
   it('已结束 episode 优先于晚到的 processing 快照', async () => {
     mocked.getManagerInboundStatus = vi.fn().mockResolvedValue({
       manager_key: 'wechat::sess-1',
