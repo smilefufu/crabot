@@ -108,6 +108,9 @@ describe('Manager workboard Admin API', () => {
         manager_notification: 'pending',
       }
     }
+    ;(admin as unknown as { resolveSystemTaskPermissions: () => never }).resolveSystemTaskPermissions = () => {
+      throw new Error('任务板保存不得解析系统所有者权限')
+    }
 
     const response = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
       method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create', item: ITEM, expected_revision: 0 }),

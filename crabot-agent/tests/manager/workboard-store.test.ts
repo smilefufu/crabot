@@ -9,7 +9,6 @@ import {
 } from '../../src/manager/workboard-store.js'
 import { encodeSegment } from '../../src/workers/harness/ledger-store.js'
 import type { ManagerKey } from '../../src/manager/types.js'
-import type { ResolvedPermissions } from '../../src/types.js'
 
 const KEY = 'feishu::cotton-candy' as ManagerKey
 const OTHER_KEY = 'feishu::other' as ManagerKey
@@ -25,19 +24,6 @@ function draft(title: string, overrides: Partial<WorkboardItemDraft> = {}): Work
     blockers: [],
     ...overrides,
   }
-}
-
-const ADMIN_PERMISSIONS: ResolvedPermissions = {
-  tool_access: {
-    memory: true, messaging: true, task: true, mcp_skill: true, file_io: true,
-    browser: true, shell: true, remote_exec: true, desktop: true,
-  },
-  cli_access: {
-    provider: 'write', agent: 'write', mcp: 'write', skill: 'write', schedule: 'write',
-    channel: 'write', friend: 'write', permission: 'write', config: 'write', undo: 'write',
-  },
-  storage: null,
-  memory_scopes: [],
 }
 
 describe('ManagerWorkboardStore', () => {
@@ -174,10 +160,11 @@ describe('ManagerWorkboardStore', () => {
 
   it('Admin CAS、同项 read fence 与 notice 都在同一原子写入边界', async () => {
     await store.create(KEY, draft('核查上下文'))
-    const admin = await store.adminRevise(KEY, 1, '核查上下文', draft('核查上下文', { current_state: '管理员已修订' }), ADMIN_PERMISSIONS)
+    const admin = await store.adminRevise(KEY, 1, '核查上下文', draft('核查上下文', { current_state: '管理员已修订' }))
     expect(admin.board.revision).toBe(2)
-    expect(admin.notice).toMatchObject({ revision: 2, attempts: 0, principal_permissions: ADMIN_PERMISSIONS })
-    await expect(store.adminCreate(KEY, 1, draft('旧表单'), ADMIN_PERMISSIONS)).rejects.toMatchObject({
+    expect(admin.notice).toMatchObject({ revision: 2, attempts: 0 })
+    expect(admin.notice).not.toHaveProperty('principal_permissions')
+    await expect(store.adminCreate(KEY, 1, draft('旧表单'))).rejects.toMatchObject({
       code: 'WORKBOARD_REVISION_CONFLICT', currentRevision: 2,
     })
     await expect(store.revise(KEY, '核查上下文', draft('核查上下文'))).rejects.toThrow('请先使用 inspect_workboard')
@@ -198,9 +185,9 @@ describe('ManagerWorkboardStore', () => {
   it('改标题和归档保留同一事项的标题别名，另一事项的 fence 不被覆盖', async () => {
     await store.create(KEY, draft('任务甲'))
     await store.create(KEY, draft('任务乙'))
-    await store.adminRevise(KEY, 2, '任务甲', draft('任务甲新版'), ADMIN_PERMISSIONS)
-    await store.adminArchive(KEY, 3, '任务甲新版', 'completed', ADMIN_PERMISSIONS)
-    await store.adminRevise(KEY, 4, '任务乙', draft('任务乙', { current_state: '管理员更新' }), ADMIN_PERMISSIONS)
+    await store.adminRevise(KEY, 2, '任务甲', draft('任务甲新版'))
+    await store.adminArchive(KEY, 3, '任务甲新版', 'completed')
+    await store.adminRevise(KEY, 4, '任务乙', draft('任务乙', { current_state: '管理员更新' }))
 
     await expect(store.create(KEY, draft('任务甲'))).rejects.toThrow('请先使用 inspect_workboard')
     await expect(store.revise(KEY, '任务乙', draft('任务乙'))).rejects.toThrow('请先使用 inspect_workboard')
@@ -212,9 +199,9 @@ describe('ManagerWorkboardStore', () => {
 
   it('旧的 inspect 快照不能确认之后同一事项的 Admin 更新', async () => {
     await store.create(KEY, draft('核查上下文'))
-    await store.adminRevise(KEY, 1, '核查上下文', draft('核查上下文', { current_state: '管理员第一次更新' }), ADMIN_PERMISSIONS)
+    await store.adminRevise(KEY, 1, '核查上下文', draft('核查上下文', { current_state: '管理员第一次更新' }))
     const stale = await store.loadAdmin(KEY)
-    await store.adminRevise(KEY, 2, '核查上下文', draft('核查上下文', { current_state: '管理员第二次更新' }), ADMIN_PERMISSIONS)
+    await store.adminRevise(KEY, 2, '核查上下文', draft('核查上下文', { current_state: '管理员第二次更新' }))
 
     await store.acknowledgeManagerRead(KEY, 'active', stale.active, stale.revision)
     await expect(store.revise(KEY, '核查上下文', draft('核查上下文'))).rejects.toThrow('请先使用 inspect_workboard')
@@ -222,5 +209,29 @@ describe('ManagerWorkboardStore', () => {
     const current = await store.loadAdmin(KEY)
     await store.acknowledgeManagerRead(KEY, 'active', current.active, current.revision)
     await expect(store.revise(KEY, '核查上下文', draft('核查上下文', { next_action: '按最新要求执行' }))).resolves.toBeDefined()
+  })
+
+  it('读取旧 notice 的权限残留但正常任务板写入会删除它', async () => {
+    const directory = join(root, encodeSegment(KEY))
+    const file = join(directory, 'workboard.json')
+    const legacyNotice = {
+      schema_version: 2,
+      manager_key: KEY,
+      revision: 1,
+      active: [{ ...draft('旧任务'), updated_at: '2026-09-04T00:00:00.000Z' }],
+      archive: [],
+      pending_admin_notice: {
+        revision: 1,
+        created_at: '2026-09-04T00:00:00.000Z',
+        principal_permissions: { obsolete: true },
+        attempts: 0,
+      },
+    }
+    await fs.mkdir(directory, { recursive: true })
+    await fs.writeFile(file, JSON.stringify(legacyNotice), 'utf8')
+
+    await expect(store.pendingAdminNotice(KEY)).resolves.toMatchObject({ revision: 1, attempts: 0 })
+    await store.revise(KEY, '旧任务', draft('旧任务', { current_state: '已经续办' }))
+    expect(await fs.readFile(file, 'utf8')).not.toContain('principal_permissions')
   })
 })

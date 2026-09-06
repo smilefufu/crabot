@@ -4,8 +4,6 @@ import path from 'node:path'
 
 import { AsyncMutex } from '../workers/async-mutex.js'
 import { decodeSegment, encodeSegment, isManagerKey } from '../workers/harness/ledger-store.js'
-import { isResolvedPermissionsSnapshot } from '../workers/harness/context-store.js'
-import type { ResolvedPermissions } from '../types.js'
 import type { ManagerKey } from './types.js'
 
 const WORKBOARD_FILE = 'workboard.json'
@@ -49,7 +47,6 @@ export interface ManagerWorkboardAdminView extends ManagerWorkboard {
 export interface PendingAdminWorkboardNotice {
   readonly revision: number
   readonly created_at: string
-  readonly principal_permissions: ResolvedPermissions
   readonly attempts: number
   readonly retry_after_at?: string
 }
@@ -228,8 +225,10 @@ function normalizeBoardItems(value: Record<string, unknown>, key: ManagerKey): P
 
 function normalizeNotice(value: unknown): PendingAdminWorkboardNotice {
   if (!isRecord(value)) throw new Error('pending_admin_notice 非法')
+  // `principal_permissions` was persisted by the first v2 implementation. It is
+  // no longer an execution input, but old notices remain readable until any normal
+  // workboard write rewrites them without the retired field.
   assertOnlyKeys(value, ['revision', 'created_at', 'principal_permissions', 'attempts', 'retry_after_at'], 'pending_admin_notice')
-  if (!isResolvedPermissionsSnapshot(value.principal_permissions)) throw new Error('pending_admin_notice 权限快照非法')
   if (typeof value.attempts !== 'number' || !Number.isSafeInteger(value.attempts) || value.attempts < 0) {
     throw new Error('pending_admin_notice attempts 非法')
   }
@@ -237,7 +236,6 @@ function normalizeNotice(value: unknown): PendingAdminWorkboardNotice {
   return {
     revision: assertRevision(value.revision),
     created_at: assertTimestamp(value.created_at, 'created_at'),
-    principal_permissions: value.principal_permissions,
     attempts: value.attempts,
     ...(retryAfter ? { retry_after_at: retryAfter } : {}),
   }
@@ -363,9 +361,8 @@ export class ManagerWorkboardStore {
     key: ManagerKey,
     expectedRevision: number,
     value: WorkboardItemDraft,
-    principalPermissions: ResolvedPermissions,
   ): Promise<AdminWorkboardMutationResult<WorkboardItem>> {
-    return this.adminMutate(key, expectedRevision, principalPermissions, (board) => {
+    return this.adminMutate(key, expectedRevision, (board) => {
       const item = this.materializeItem(value)
       if (board.active.some((candidate) => candidate.title === item.title)) throw new Error(`active 任务项标题重复: ${item.title}`)
       return { board: { ...board, active: [...board.active, item] }, item, fence: { view: 'active', titles: [item.title] } }
@@ -377,9 +374,8 @@ export class ManagerWorkboardStore {
     expectedRevision: number,
     currentTitle: string,
     value: WorkboardItemDraft,
-    principalPermissions: ResolvedPermissions,
   ): Promise<AdminWorkboardMutationResult<WorkboardItem>> {
-    return this.adminMutate(key, expectedRevision, principalPermissions, (board) => {
+    return this.adminMutate(key, expectedRevision, (board) => {
       const target = normalizedString(currentTitle, 'current_title', false)
       const index = this.uniqueActiveIndex(board, target)
       const item = this.materializeItem(value)
@@ -397,9 +393,8 @@ export class ManagerWorkboardStore {
     expectedRevision: number,
     currentTitle: string,
     archivedAs: WorkboardArchiveOutcome,
-    principalPermissions: ResolvedPermissions,
   ): Promise<AdminWorkboardMutationResult<ArchivedWorkboardItem>> {
-    return this.adminMutate(key, expectedRevision, principalPermissions, (board) => {
+    return this.adminMutate(key, expectedRevision, (board) => {
       const target = normalizedString(currentTitle, 'current_title', false)
       const index = this.uniqueActiveIndex(board, target)
       if (archivedAs !== 'completed' && archivedAs !== 'abandoned') throw new Error('archived_as 必须是 completed 或 abandoned')
@@ -528,12 +523,10 @@ export class ManagerWorkboardStore {
   private async adminMutate<T extends WorkboardItem | ArchivedWorkboardItem>(
     key: ManagerKey,
     expectedRevision: number,
-    principalPermissions: ResolvedPermissions,
     change: (board: InternalBoard) => { board: InternalBoard; item: T; fence: { view: WorkboardView; titles: string[] } },
   ): Promise<AdminWorkboardMutationResult<T>> {
     this.assertKey(key)
     assertRevision(expectedRevision)
-    if (!isResolvedPermissionsSnapshot(principalPermissions)) throw new Error('管理员权限快照非法')
     return this.mutexFor(key).run(async () => {
       const before = await this.readUnlocked(key)
       if (before.revision !== expectedRevision) throw new WorkboardRevisionConflictError(before.revision)
@@ -542,7 +535,6 @@ export class ManagerWorkboardStore {
       const notice: PendingAdminWorkboardNotice = {
         revision,
         created_at: this.now(),
-        principal_permissions: principalPermissions,
         attempts: 0,
       }
       const board: InternalBoard = {

@@ -3409,7 +3409,7 @@ export class UnifiedAgent extends ModuleBase {
         assertion: string
         expected: { manager_key: ManagerKey; action: WorkboardAdminMutation['action']; expected_revision: number; payload_sha256: string }
       },
-      { consumed?: unknown; expires_at?: unknown; principal_permissions?: unknown }
+      { consumed?: unknown; expires_at?: unknown }
     >(
       adminPort,
       'consume_workboard_admin_assertion',
@@ -3431,10 +3431,10 @@ export class UnifiedAgent extends ModuleBase {
     const store = this.requireManagerStack().workboard
     try {
       const result = mutation.action === 'create'
-        ? await store.adminCreate(key, params.expected_revision, mutation.item, consumed.principal_permissions as ResolvedPermissions)
+        ? await store.adminCreate(key, params.expected_revision, mutation.item)
         : mutation.action === 'revise'
-          ? await store.adminRevise(key, params.expected_revision, mutation.current_title, mutation.item, consumed.principal_permissions as ResolvedPermissions)
-          : await store.adminArchive(key, params.expected_revision, mutation.current_title, mutation.archived_as, consumed.principal_permissions as ResolvedPermissions)
+          ? await store.adminRevise(key, params.expected_revision, mutation.current_title, mutation.item)
+          : await store.adminArchive(key, params.expected_revision, mutation.current_title, mutation.archived_as)
       this.dispatchWorkboardAdminNotice(key)
       return {
         manager_key: key,
@@ -3473,7 +3473,6 @@ export class UnifiedAgent extends ModuleBase {
       const result = await stack.registry.routeWorkboardAdminUpdate({
         key,
         noticeRevision: notice.revision,
-        principalPermissions: notice.principal_permissions,
         onSettled: (settled) => {
           if (!settled.consumedEvents) this.deferWorkboardAdminNotice(key, notice.revision)
         },

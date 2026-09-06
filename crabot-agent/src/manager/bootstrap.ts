@@ -557,7 +557,6 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       if (
         envelope?.wake.kind !== 'human_messages'
         && envelope?.wake.kind !== 'attention_flush'
-        && envelope?.wake.kind !== 'workboard_admin_update'
       ) await principals.refreshForNonHumanWake(key)
     },
     // scheduled 唤醒边界(§4.4"权限按 `Schedule.creator_friend_id` 解析,`is_builtin` 按 master
@@ -588,6 +587,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       // pick up a regrant/new generation from a subsequent wake.
       const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
       const isWorkboardAdminUpdate = wakeEvent?.kind === 'workboard_admin_update'
+      const workboardPrincipal = isWorkboardAdminUpdate ? principals.get(key)?.principal : undefined
       return buildManagerToolFace({
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
@@ -609,9 +609,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // episode 里没有人在说话,拿上一次的发言者冒充会把 worker 记到错的人名下。
           creatorFriendId: scheduleIdentity
             ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
-            : humanPrincipal?.friend?.id,
-          // 上面那个身份**算好的档位**,随 spawn 下传给 worker 并落盘(§8.2)。与
-          // `creatorFriendId` 同源同刻:两者都来自本 episode 的唤醒事件,不来自会话级缓存。
+            : humanPrincipal?.friend?.id ?? workboardPrincipal?.friend?.id,
+          // 人类/调度唤醒的身份档位随 wake 进入本轮；独立任务板通知则复用刚刷新过的既有
+          // Manager 主体。两种情况下都在 spawn 时固定并落盘，后续不再从 Admin 或任务板取数。
           //
           // 没有身份的唤醒(worker 事件 / 自唤醒)落到 `principals.get(key)`:那类 episode 里
           // 没人说话,但它仍发生在这个会话里,记忆可见范围是**会话属性**(与下面 memoryServer
@@ -637,7 +637,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         // 记忆档位按**这个会话最近一次解析出来的发起人身份**现建。这里刻意不用
         // `humanPrincipal`:worker 事件唤醒的 episode 里没人说话,但该会话的记忆可见范围
         // 并不因此改变——它是会话属性,不是本轮属性。
-        memoryServer: deps.memoryServerFor(memoryContextFor(key, isWorkboardAdminUpdate ? undefined : principals.get(key))),
+        memoryServer: deps.memoryServerFor(memoryContextFor(key, principals.get(key))),
         callAdmin: deps.callAdmin,
         getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
         isSystemThread,
@@ -655,6 +655,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           readWorkerContext: (workerId) => workerContextStore.read(workerId),
           managerKey: key,
           wakeEvent,
+          ...(isWorkboardAdminUpdate
+            ? { managerPrincipalPermissions: principals.get(key)?.permissions ?? undefined }
+            : {}),
         },
       })
     },

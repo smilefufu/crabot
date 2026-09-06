@@ -40,8 +40,9 @@
   新建、完整编辑或归档当前任务项，并可查看 archive 终态快照。页面以整板 revision 保存，冲突后保留
   本地草稿并提示重新核对。
 - Admin 写入经短期一次性 assertion 和 `callSensitive` 核销后才由 Agent 原子落盘；同一次保存持久化
-  revision、Manager 必读栅栏、权限快照和待投递系统提示。Manager 读取受影响事项后才能再修改，避免
-  人类与 Manager 的静默覆盖。
+  revision、Manager 必读栅栏和待投递系统提示。assertion 只授权本次写入，不传递或改变 Manager、Worker、
+  项目文档或 Memory 的权限；独立通知复用既有 Manager 主体，运行中注入保持宿主 episode 主体。Manager
+  读取受影响事项后才能再修改，避免人类与 Manager 的静默覆盖。
 - 系统提示仅提醒 Manager 主动查阅最新任务板，不携带任务板正文，也不写入会话历史或 episode log；未消费
   提示可在 Agent 重启后恢复投递，连续保存只保留最新通知。会话列表始终返回任务板摘要（正常或 unknown）。
 - 验证：Agent 定向 149/149、Admin API/assertion 6/6、前端 17/17 与生产构建、共享敏感 RPC 111/111；

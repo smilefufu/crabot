@@ -2,7 +2,6 @@ import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { generateId } from 'crabot-shared'
-import type { ResolvedPermissions } from './types.js'
 
 const AUDIENCE = 'crabot-agent'
 const PURPOSE = 'admin_workboard_change'
@@ -31,7 +30,7 @@ export type ExpectedWorkboardAdminAssertion = Pick<
 >
 
 interface PersistedAssertions {
-  issued: Record<string, { expires_at: string; principal_permissions: ResolvedPermissions }>
+  issued: Record<string, { expires_at: string }>
   consumed: Record<string, string>
 }
 
@@ -81,18 +80,9 @@ function verify(token: string, secret: string): WorkboardAdminAssertionClaims | 
   return validClaims(claims) ? claims : undefined
 }
 
-function validPermissions(value: unknown): value is ResolvedPermissions {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const record = value as Record<string, unknown>
-  return !!record.tool_access && typeof record.tool_access === 'object'
-    && !!record.cli_access && typeof record.cli_access === 'object'
-    && (record.storage === null || typeof record.storage === 'object')
-    && Array.isArray(record.memory_scopes) && record.memory_scopes.every((scope) => typeof scope === 'string')
-}
-
 /**
  * Admin task-board writes get their own assertion namespace and persistent one-time redemption.
- * The frozen system-owner permission snapshot stays server-side until exact consumption.
+ * An assertion authorizes only one board mutation; it never carries execution permissions.
  */
 export class WorkboardAdminAssertions {
   private readonly filePath: string
@@ -107,8 +97,7 @@ export class WorkboardAdminAssertions {
     this.filePath = path.join(dataDir, 'workboard-admin-assertions.json')
   }
 
-  async issue(input: ExpectedWorkboardAdminAssertion & { principal_permissions: ResolvedPermissions }): Promise<string> {
-    if (!validPermissions(input.principal_permissions)) throw new Error('invalid system owner permissions')
+  async issue(input: ExpectedWorkboardAdminAssertion): Promise<string> {
     if (!input.manager_key || !/^[a-f0-9]{64}$/.test(input.payload_sha256)) throw new Error('invalid assertion input')
     if (!Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0) throw new Error('invalid expected revision')
     const issued = this.now()
@@ -128,10 +117,7 @@ export class WorkboardAdminAssertions {
     await this.serialize(async () => {
       const state = await this.loadUnlocked()
       this.prune(state, issued.getTime())
-      state.issued[claims.assertion_id] = {
-        expires_at: claims.expires_at,
-        principal_permissions: input.principal_permissions,
-      }
+      state.issued[claims.assertion_id] = { expires_at: claims.expires_at }
       await this.persistUnlocked(state)
     })
     return sign(claims, this.secret)
@@ -140,7 +126,7 @@ export class WorkboardAdminAssertions {
   async consume(
     assertion: string,
     expected: ExpectedWorkboardAdminAssertion,
-  ): Promise<{ consumed: true; expires_at: string; principal_permissions: ResolvedPermissions }> {
+  ): Promise<{ consumed: true; expires_at: string }> {
     return this.serialize(async () => {
       const claims = verify(assertion, this.secret)
       if (!claims) throw new Error('invalid workboard admin assertion')
@@ -156,13 +142,13 @@ export class WorkboardAdminAssertions {
       this.prune(state, current)
       if (state.consumed[claims.assertion_id]) throw new Error('workboard admin assertion already consumed')
       const issued = state.issued[claims.assertion_id]
-      if (!issued || issued.expires_at !== claims.expires_at || !validPermissions(issued.principal_permissions)) {
+      if (!issued || issued.expires_at !== claims.expires_at) {
         throw new Error('workboard admin assertion is unavailable')
       }
       delete state.issued[claims.assertion_id]
       state.consumed[claims.assertion_id] = claims.expires_at
       await this.persistUnlocked(state)
-      return { consumed: true, expires_at: claims.expires_at, principal_permissions: issued.principal_permissions }
+      return { consumed: true, expires_at: claims.expires_at }
     })
   }
 
@@ -179,10 +165,16 @@ export class WorkboardAdminAssertions {
       for (const [id, value] of Object.entries(record.issued as Record<string, unknown>)) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid assertion store')
         const item = value as Record<string, unknown>
-        if (!exactKeys(item, ['expires_at', 'principal_permissions']) || typeof item.expires_at !== 'string' || !validPermissions(item.principal_permissions)) {
+        // Existing stores may retain the retired permission snapshot. It is deliberately
+        // ignored, and the next ordinary persistence rewrites the entry without it.
+        if (
+          (!exactKeys(item, ['expires_at']) && !exactKeys(item, ['expires_at', 'principal_permissions']))
+          || typeof item.expires_at !== 'string'
+          || !Number.isFinite(Date.parse(item.expires_at))
+        ) {
           throw new Error('invalid assertion store')
         }
-        issued[id] = { expires_at: item.expires_at, principal_permissions: item.principal_permissions }
+        issued[id] = { expires_at: item.expires_at }
       }
       const consumed: PersistedAssertions['consumed'] = {}
       for (const [id, expiry] of Object.entries(record.consumed as Record<string, unknown>)) {

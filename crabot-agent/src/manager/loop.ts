@@ -153,7 +153,6 @@ export type WakeEvent =
       /** 已鉴权 Admin 保存任务板后的控制面系统输入；正文不含任务板快照。 */
       readonly kind: 'workboard_admin_update'
       readonly noticeRevision: number
-      readonly principalPermissions: ResolvedPermissions
     }
   | {
       readonly kind: 'attention_flush'
@@ -582,14 +581,6 @@ export class ManagerLoop {
       if (index >= 0) this.currentEpisodeInjected[index] = envelope
     } else if (!replaced) {
       this.currentEpisodeInjected?.push(envelope)
-    }
-    // 后续 LLM turn 的工具面会重新读取有效 wake。把最新系统快照同步到这个集合，
-    // 避免 Manager 在已经收到 Admin 更新后仍沿用原会话的权限身份。
-    if (this.currentEpisodeInjected) {
-      const index = this.currentEpisodeEnvelopes.findIndex((candidate) => candidate.wake.kind === 'workboard_admin_update')
-      this.currentEpisodeEnvelopes = index < 0
-        ? [...this.currentEpisodeEnvelopes, envelope]
-        : this.currentEpisodeEnvelopes.map((candidate, candidateIndex) => candidateIndex === index ? envelope : candidate)
     }
   }
 
@@ -1618,8 +1609,6 @@ export class ManagerLoop {
   private effectiveWakeForCurrentEpisode(): WakeEvent | undefined {
     return this.currentEpisodeEnvelopes.find((item) =>
       isBuiltinDailyReflectionWake(item.wake),
-    )?.wake ?? this.currentEpisodeEnvelopes.find((item) =>
-      item.wake.kind === 'workboard_admin_update',
     )?.wake ?? this.currentWakeEvent?.wake
   }
 

@@ -9136,20 +9136,6 @@ export class AdminModule extends ModuleBase {
     return friend.permission_template_id ?? 'standard'
   }
 
-  /**
-   * 系统触发的一次性任务（记忆图谱重建 / self-healing recovery）执行权限。
-   * 这类任务无 creator friend，统一用 master_private（最高权限，含 memory/file/shell），
-   * 否则 worker 走 FAIL_CLOSED 拿不到任何工具，跑一轮空转就结束。
-   */
-  private resolveSystemTaskPermissions(): ResolvedPermissions | null {
-    try {
-      return this.permissionTemplateManager.resolvePermissions('master_private', null)
-    } catch (err) {
-      console.error('[Admin] master_private template missing for system task dispatch:', err)
-      return null
-    }
-  }
-
   private buildResolvedFriendPermissions(friend: Friend): ResolvedPermissions | null {
     if (friend.permission === 'master') {
       return this.permissionTemplateManager.resolvePermissions('master_private', null)
@@ -9836,11 +9822,11 @@ export class AdminModule extends ModuleBase {
     return { connection, connection_revision: revision, policy_revision: desired.revision }
   }
 
-  /** 只允许持当前 runtime bearer 的 exact core Agent 领取任务板 assertion 与权限快照。 */
+  /** 只允许持当前 runtime bearer 的 exact core Agent 核销任务板 mutation assertion。 */
   private async handleConsumeWorkboardAdminAssertion(
     params: { assertion?: unknown; expected?: unknown },
     context?: RpcHandlerContext,
-  ): Promise<{ consumed: true; expires_at: string; principal_permissions: ResolvedPermissions }> {
+  ): Promise<{ consumed: true; expires_at: string }> {
     const bearer = context?.authorizationBearer
     if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
     await this.rpcClient.callModuleManagerSensitive(
@@ -10524,17 +10510,11 @@ export class AdminModule extends ModuleBase {
         return
       }
       const mutation = parseWorkboardAdminMutation(body)
-      const principalPermissions = this.resolveSystemTaskPermissions()
-      if (!principalPermissions) {
-        sendJson(res, 503, { error: 'master_private 权限模板暂不可用' })
-        return
-      }
       const assertion = await this.workboardAdminAssertions.issue({
         manager_key: managerKey,
         action: mutation.action,
         expected_revision: expectedRevision,
         payload_sha256: sha256CanonicalJson(mutation),
-        principal_permissions: principalPermissions,
       })
       const port = await this.ensureAgentPort()
       const result = await this.rpcClient.callSensitive<Record<string, unknown>, unknown>(

@@ -628,7 +628,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(search!.params.accessible_scopes).toEqual(['sess-boot'])
   })
 
-  it('任务板系统更新不继承目标会话的人类 Memory scope', async () => {
+  it('独立任务板系统更新复用已有 Manager 的 Memory scope', async () => {
     const memoryCalls: Array<{ method: string; params: Record<string, unknown> }> = []
     const adapter: LLMAdapter = {
       async *stream(params) {
@@ -671,17 +671,81 @@ describe('manager bootstrap（P5 Task 1）', () => {
     await stack.registry.routeWorkboardAdminUpdate({
       key: 'wechat::sess-boot' as ManagerKey,
       noticeRevision: 1,
-      principalPermissions: {
-        tool_access: { memory: true, messaging: true, task: true, mcp_skill: true, file_io: true, browser: true, shell: true, remote_exec: true, desktop: true },
-        cli_access: Object.fromEntries(CLI_DOMAINS.map((domain) => [domain, 'write'])) as never,
-        storage: null,
-        memory_scopes: ['system-owner-scope'],
-      },
     })
 
     const search = memoryCalls.find((call) => call.method === 'search_short_term')
-    expect(search!.params.min_visibility).toBe('public')
-    expect(search!.params).not.toHaveProperty('accessible_scopes')
+    expect(search!.params.min_visibility).toBe('internal')
+    expect(search!.params.accessible_scopes).toEqual(['human-private-scope'])
+  })
+
+  it('独立任务板系统更新用已有 Manager 主体授权项目文档', async () => {
+    const projectRoot = join(tmpRoot, 'workboard-project')
+    await fs.mkdir(projectRoot, { recursive: true })
+    await fs.writeFile(join(projectRoot, 'README.md'), '# 项目文档\n')
+    const principalPermissions: ResolvedPermissions = {
+      tool_access: {
+        memory: false, messaging: false, task: false, mcp_skill: false, file_io: true,
+        browser: false, shell: false, remote_exec: false, desktop: false,
+      },
+      cli_access: Object.fromEntries(CLI_DOMAINS.map((domain) => [domain, 'none'])) as never,
+      storage: { workspace_path: projectRoot, access: 'readwrite' },
+      memory_scopes: ['project-scope'],
+    }
+    let inspected: { isError: boolean; output: string } | undefined
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        if (JSON.stringify(params.messages).includes('管理员已更新任务板')) {
+          const inspect = params.tools.find((tool) => tool.name === 'inspect_project_docs')
+          expect(inspect).toBeDefined()
+          inspected = await inspect!.call({ project_root: projectRoot, operation: 'read', path: 'README.md' }, {} as never)
+        }
+        yield* chunksFromContent([{ type: 'text', text: '已处理' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+    const stack = buildManagerStack(makeDeps({
+      managerAdapter: () => adapter,
+      principalResolver: {
+        ...makePrincipalResolver(),
+        resolvePermissions: async () => principalPermissions,
+      },
+    }))
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('先建立主体')], FRIEND_A)
+    await stack.registry.routeWorkboardAdminUpdate({ key: 'wechat::sess-boot' as ManagerKey, noticeRevision: 1 })
+
+    expect(inspected).toMatchObject({ isError: false })
+    expect(inspected?.output).toContain('README.md')
+  })
+
+  it('独立任务板系统更新派出的 Worker 保留既有主体归因和权限', async () => {
+    const principalPermissions: ResolvedPermissions = {
+      tool_access: {
+        memory: false, messaging: false, task: true, mcp_skill: false, file_io: false,
+        browser: false, shell: false, remote_exec: false, desktop: false,
+      },
+      cli_access: Object.fromEntries(CLI_DOMAINS.map((domain) => [domain, 'none'])) as never,
+      storage: null,
+      memory_scopes: ['worker-scope'],
+    }
+    let adapter: LLMAdapter = silentManager()
+    const stack = buildManagerStack(makeDeps({
+      managerAdapter: () => adapter,
+      principalResolver: {
+        ...makePrincipalResolver(),
+        resolvePermissions: async () => principalPermissions,
+      },
+    }))
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('先建立主体')], FRIEND_A)
+    adapter = spawnOnce()
+    await stack.registry.routeWorkboardAdminUpdate({ key: 'wechat::sess-boot' as ManagerKey, noticeRevision: 1 })
+    await settle()
+
+    const [spawned] = await stack.ledger.listAllWorkers()
+    expect(spawned?.worker.origin).toMatchObject({ trigger_type: 'system', creator_friend_id: FRIEND_A.id })
+    const context = JSON.parse(await fs.readFile(join(dataRoot, 'agent', 'workers', spawned!.worker.worker_id, 'context.json'), 'utf8'))
+    expect(context.principal_permissions).toEqual(principalPermissions)
   })
 
 

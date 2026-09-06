@@ -913,19 +913,13 @@ describe('ManagerLoop', () => {
     expect(turn1Messages).not.toContain('sched-1')
   })
 
-  it('运行中的任务板系统输入在下一轮切换工具面的权限快照', async () => {
+  it('运行中的任务板系统输入在下一轮保留宿主工具面', async () => {
     const { adapter, queue, calls } = makeAdapter()
     queue.push(
       { toolCalls: [{ name: 'queue_workboard_update', id: 'call_1', input: {} }], stopReason: 'tool_use' },
       { text: '已核对', stopReason: 'end_turn' },
     )
     const toolFaceWakes: Array<WakeEvent | undefined> = []
-    const systemPermissions = {
-      tool_access: { shell: true },
-      cli_access: { filesystem: 'allow' },
-      storage: null,
-      memory_scopes: ['system-owner-marker'],
-    }
     const consumed = vi.fn()
     let loop!: ManagerLoop
     loop = new ManagerLoop(baseDeps({
@@ -942,7 +936,6 @@ describe('ManagerLoop', () => {
             loop.enqueueWorkboardAdminUpdate(timed({
               kind: 'workboard_admin_update',
               noticeRevision: 9,
-              principalPermissions: systemPermissions,
             }))
             return { output: 'queued', isError: false }
           },
@@ -954,11 +947,8 @@ describe('ManagerLoop', () => {
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('继续处理')] }))
 
     expect(JSON.stringify(calls[1].messages)).toContain('管理员已更新任务板')
-    expect(toolFaceWakes).toContainEqual(expect.objectContaining({
-      kind: 'workboard_admin_update',
-      noticeRevision: 9,
-      principalPermissions: systemPermissions,
-    }))
+    expect(toolFaceWakes).not.toContainEqual(expect.objectContaining({ kind: 'workboard_admin_update' }))
+    expect(toolFaceWakes.every((wake) => wake?.kind === 'human_messages')).toBe(true)
     expect(consumed).toHaveBeenCalledWith([9])
   })
 
@@ -971,12 +961,6 @@ describe('ManagerLoop', () => {
     await loop.wakeUp(timed({
       kind: 'workboard_admin_update',
       noticeRevision: 3,
-      principalPermissions: {
-        tool_access: { shell: true },
-        cli_access: { filesystem: 'allow' },
-        storage: null,
-        memory_scopes: [],
-      },
     }))
 
     expect(JSON.stringify(calls[0].messages)).toContain('管理员已更新任务板')

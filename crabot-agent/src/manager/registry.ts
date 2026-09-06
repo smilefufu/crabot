@@ -583,18 +583,16 @@ export class ManagerRegistry {
     })
   }
 
-  /** Admin 任务板保存的系统管理输入：权限快照随 wake 走，不触碰会话主体缓存。 */
+  /** Admin 任务板保存的系统管理输入：只携带通知 revision，不改变会话主体。 */
   async routeWorkboardAdminUpdate(p: {
     key: ManagerKey
     noticeRevision: number
-    principalPermissions: ResolvedPermissions
     onSettled?: (result: EpisodeResult) => void
   }): Promise<EpisodeResult> {
     const capture = this.captureIngress()
     const envelope = this.makeEnvelope(capture, {
       kind: 'workboard_admin_update',
       noticeRevision: p.noticeRevision,
-      principalPermissions: p.principalPermissions,
     })
     const onSettled = (result: EpisodeResult): void => {
       p.onSettled?.(result)
@@ -857,8 +855,7 @@ function principalPermissionsOf(wakeEvent: WakeEvent | undefined): ResolvedPermi
   if (
     wakeEvent?.kind !== 'human_messages' &&
     wakeEvent?.kind !== 'attention_flush' &&
-    wakeEvent?.kind !== 'schedule' &&
-    wakeEvent?.kind !== 'workboard_admin_update'
+    wakeEvent?.kind !== 'schedule'
   ) {
     return undefined
   }

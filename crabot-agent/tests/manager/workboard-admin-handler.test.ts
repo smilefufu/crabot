@@ -4,7 +4,6 @@ import { RpcError, sha256CanonicalJson } from 'crabot-shared'
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import type { ManagerStack } from '../../src/manager/bootstrap.js'
 import type { ManagerKey } from '../../src/manager/types.js'
-import type { ResolvedPermissions } from '../../src/types.js'
 import { makeAgentConfig, useTmpDataDir, type DataDirGuard } from '../inbound/harness.js'
 
 const KEY = 'feishu::cotton-candy' as ManagerKey
@@ -17,19 +16,6 @@ const ITEM = {
   next_action: '读取调用记录',
   blockers: [],
 }
-const PERMISSIONS: ResolvedPermissions = {
-  tool_access: {
-    memory: true, messaging: true, task: true, mcp_skill: true, file_io: true,
-    browser: true, shell: true, remote_exec: true, desktop: true,
-  },
-  cli_access: {
-    provider: 'write', agent: 'write', mcp: 'write', skill: 'write', schedule: 'write',
-    channel: 'write', friend: 'write', permission: 'write', config: 'write', undo: 'write',
-  },
-  storage: null,
-  memory_scopes: [],
-}
-
 interface AgentInternals {
   managerStack: ManagerStack
   attentionScheduler: { stopAll(): void }
@@ -72,7 +58,6 @@ describe('UnifiedAgent task-board Admin handler', () => {
     current.rpcClient.callSensitive = vi.fn().mockResolvedValue({
       consumed: true,
       expires_at: '2026-09-05T00:01:00.000Z',
-      principal_permissions: PERMISSIONS,
     })
 
     await expect(current.handleChangeWorkboardAdmin({
@@ -104,8 +89,8 @@ describe('UnifiedAgent task-board Admin handler', () => {
     })
     await expect(current.managerStack.workboard.pendingAdminNotice(KEY)).resolves.toMatchObject({
       revision: 1,
-      principal_permissions: PERMISSIONS,
     })
+    expect(await current.managerStack.workboard.pendingAdminNotice(KEY)).not.toHaveProperty('principal_permissions')
     expect(current.dispatchWorkboardAdminNotice).toHaveBeenCalledWith(KEY)
   })
 
@@ -136,7 +121,7 @@ describe('UnifiedAgent task-board Admin handler', () => {
       onSettled?.(result)
       return result
     })
-    await current.managerStack.workboard.adminCreate(KEY, 0, ITEM, PERMISSIONS)
+    await current.managerStack.workboard.adminCreate(KEY, 0, ITEM)
 
     current.dispatchWorkboardAdminNotice(KEY)
 
@@ -155,12 +140,12 @@ describe('UnifiedAgent task-board Admin handler', () => {
     const route = vi.spyOn(current.managerStack.registry, 'routeWorkboardAdminUpdate')
       .mockImplementationOnce(async () => firstResult)
       .mockResolvedValue(completed)
-    await current.managerStack.workboard.adminCreate(KEY, 0, ITEM, PERMISSIONS)
+    await current.managerStack.workboard.adminCreate(KEY, 0, ITEM)
 
     current.dispatchWorkboardAdminNotice(KEY)
     await vi.waitFor(() => expect(route).toHaveBeenCalledTimes(1))
     await current.managerStack.workboard.clearAdminNoticeIfCurrent(KEY, 1)
-    await current.managerStack.workboard.adminCreate(KEY, 1, { ...ITEM, title: '核查新版上下文' }, PERMISSIONS)
+    await current.managerStack.workboard.adminCreate(KEY, 1, { ...ITEM, title: '核查新版上下文' })
     current.dispatchWorkboardAdminNotice(KEY)
 
     settleFirst(completed)

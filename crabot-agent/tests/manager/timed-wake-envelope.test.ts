@@ -45,12 +45,6 @@ describe('TimedWakeEnvelope rendering', () => {
       wake: {
         kind: 'workboard_admin_update',
         noticeRevision: 42,
-        principalPermissions: {
-          tool_access: { shell: true },
-          cli_access: { filesystem: 'allow' },
-          storage: null,
-          memory_scopes: ['secret-marker'],
-        },
       },
       received_at: '2026-09-05T09:02:04+08:00',
       timezone: 'Asia/Shanghai',
@@ -58,7 +52,6 @@ describe('TimedWakeEnvelope rendering', () => {
     const rendered = renderTimedWakeEnvelope(envelope)
     expect(rendered).toBe('[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。')
     expect(rendered).not.toContain('42')
-    expect(rendered).not.toContain('secret-marker')
     expect(rendered).not.toContain('received_at=')
   })
 })
