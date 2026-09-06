@@ -6,12 +6,14 @@ import { join } from 'path'
 import { ManagerLoop, type WakeEvent, type TimedWakeEnvelope, type ManagerLoopDeps } from '../../src/manager/loop.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
+import { DEFAULT_MANAGER_COMPACTION_POLICY } from '../../src/manager/bootstrap.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage, Friend } from '../../src/types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { ActivityContextAdmissionReceipt } from '../../src/workers/harness/worker-events.js'
 import { createUserMessage, defineTool } from '../../src/engine/index.js'
+import { ContextManager } from '../../src/engine/context-manager.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import type { ManagerEpisodeSpan, ManagerTraceWriter } from '../../src/manager/trace-types.js'
 import { MANAGER_WORKBOARD_CONTEXT } from '../../src/manager/prompt.js'
@@ -140,9 +142,6 @@ function makeChannelMessage(text: string): ChannelMessage {
   }
 }
 
-/** 每条消息计 10 token,数量可控、无需真实分词(与 compaction.test.ts 的约定一致)。 */
-const estimateTokens = (msgs: ReadonlyArray<EngineMessage>): number => msgs.length * 10
-
 function compressibleHistoryMessage(label: string, chars = 800): EngineMessage {
   return createUserMessage(`${label}:${'x'.repeat(chars)}`)
 }
@@ -158,14 +157,13 @@ function baseDeps(
   }
 ): ManagerLoopDeps {
   let nowMs = Date.parse('2026-01-01T00:00:00.000Z')
-  const policy: CompactionPolicy = { keepRecent: 3, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+  const policy: CompactionPolicy = { keepRecent: 3, hardCapTokens: 1_000_000 }
   const { adapter, model, ...rest } = overrides
   return {
     key: KEY,
     isSystemThread: false,
     managerKey: () => DIALOG_OBJECT_ID,
     policy,
-    estimateTokens,
     toolFace: () => [],
     promptInputs: () => ({}),
     harness: FAKE_HARNESS,
@@ -421,33 +419,73 @@ describe('ManagerLoop', () => {
     expect(modelResolveCalls).toBe(2)
   })
 
-  it('burst 内(未超 TTL)不压缩;跨 TTL 唤醒时折叠恰好一次', async () => {
-    const { adapter, queue, foldCalls } = makeAdapter()
-    // 3 次唤醒各消费一条脚本回复
-    queue.push({ text: '回复1', stopReason: 'end_turn' })
-    queue.push({ text: '回复2', stopReason: 'end_turn' })
-    queue.push({ text: '回复3', stopReason: 'end_turn' })
+  it.each(
+    [0, 5 * 60_000, 5 * 60_000 + 1, 32 * 60_000, 24 * 60 * 60_000, undefined]
+      .flatMap((idleMs) => ['human', 'worker'].map((source) => ({ idleMs, source }))),
+  )('空闲 $idleMs ms 后 $source 唤醒在容量内不压缩', async ({ idleMs, source }) => {
+    const { adapter, calls, foldCalls } = makeAdapter()
+    const nowMs = Date.parse('2026-01-02T00:00:00.000Z')
+    const policy = DEFAULT_MANAGER_COMPACTION_POLICY
+    const contextManager = new ContextManager({ maxContextTokens: 200_000 })
+    const history = Array.from({ length: 30 }, (_, index) =>
+      compressibleHistoryMessage(`IDLE_HISTORY_${index}`, 9_000),
+    )
+    expect(contextManager.estimateTotalTokens(history.slice(0, -policy.keepRecent))).toBeGreaterThan(20_000)
+    await store.save({
+      key: KEY,
+      recent: history,
+      rollingSummary: 'IDLE_PRIOR_SUMMARY',
+      foldedCount: 7,
+      ...(idleMs !== undefined ? { lastActiveAt: new Date(nowMs - idleMs).toISOString() } : {}),
+    })
+    const traceWriter: ManagerTraceWriter = {
+      startEpisode: vi.fn(),
+      appendSpan: vi.fn(),
+      finishSpan: vi.fn(),
+      finishEpisode: vi.fn(),
+      addSpawnedWorker: vi.fn(),
+    }
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      policy,
+      now: () => new Date(nowMs),
+      traceWriter,
+    }))
+    const wake: WakeEvent = source === 'human'
+      ? { kind: 'human_messages', messages: [makeChannelMessage('IDLE_CURRENT_INPUT')] }
+      : {
+        kind: 'worker_event',
+        event: {
+          ts: new Date(nowMs).toISOString(),
+          kind: 'liveness_stall',
+          worker_id: 'idle-worker',
+          seq: 1,
+          detail: { text: 'IDLE_CURRENT_INPUT' },
+        },
+      }
 
-    let nowMs = Date.parse('2026-01-01T00:00:00.000Z')
-    const policy: CompactionPolicy = { keepRecent: 3, cacheTtlMs: 1000, foldTokenThreshold: 5, hardCapTokens: 1_000_000 }
-    const loop = new ManagerLoop(baseDeps({ store, adapter, policy, now: () => new Date(nowMs) }))
+    const result = await loop.wakeUp(timed(wake))
 
-    // wakeUp #1 @ t=0
-    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('msg1')] }))
-    expect(foldCalls.length).toBe(0)
-
-    // wakeUp #2 @ t=100ms(远小于 TTL=1000ms)——burst,不压缩
-    nowMs += 100
-    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('msg2')] }))
-    expect(foldCalls.length).toBe(0)
-
-    // wakeUp #3 @ t=100+5000ms(远超 TTL),此时累计历史(4 条)已超 foldTokenThreshold
-    nowMs += 5000
-    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('msg3')] }))
-    expect(foldCalls.length).toBe(1)
-
+    expect(result.outcome).toBe('completed')
+    expect(foldCalls).toHaveLength(0)
+    const request = calls[0]
+    expect(request.messages.slice(1, 1 + history.length)).toEqual(history)
+    expect(JSON.stringify(request.messages)).toContain('IDLE_PRIOR_SUMMARY')
+    expect(JSON.stringify(request.messages)).toContain('IDLE_CURRENT_INPUT')
+    expect(contextManager.estimateTotalTokens(request.messages)
+      + contextManager.estimateStaticPromptTokens(request.systemPrompt, request.tools)).toBeLessThan(policy.hardCapTokens)
     const state = await store.load(KEY)
-    expect(state.rollingSummary).toBeTruthy()
+    expect(state.recent.slice(0, history.length)).toEqual(history)
+    expect(state.rollingSummary).toBe('IDLE_PRIOR_SUMMARY')
+    expect(state.foldedCount).toBe(7)
+    expect(state.lastActiveAt).toBe(new Date(nowMs).toISOString())
+    expect(traceWriter.appendSpan).not.toHaveBeenCalledWith(
+      expect.any(String), expect.objectContaining({ type: 'context_assembly' }),
+    )
+    expect(traceWriter.finishEpisode).toHaveBeenCalledWith(
+      result.episodeId, expect.objectContaining({ status: 'completed' }),
+    )
   })
 
   it('500K 历史切到 256K 模型时逐批压缩并在每批后推进持久状态', async () => {
@@ -473,8 +511,6 @@ describe('ManagerLoop', () => {
     })
     const policy: CompactionPolicy = {
       keepRecent: 2,
-      cacheTtlMs: 1_000,
-      foldTokenThreshold: 1,
       hardCapTokens: 1_000_000,
     }
     const loop = new ManagerLoop(baseDeps({
@@ -522,8 +558,6 @@ describe('ManagerLoop', () => {
       adapter,
       policy: {
         keepRecent: 3,
-        cacheTtlMs: 1_000,
-        foldTokenThreshold: 1_000_000,
         hardCapTokens: 1_000_000,
       },
       contextWindowTokens: () => 256_000,
@@ -566,8 +600,6 @@ describe('ManagerLoop', () => {
     })
     const policy: CompactionPolicy = {
       keepRecent: 2,
-      cacheTtlMs: 1_000,
-      foldTokenThreshold: 1,
       hardCapTokens: 1_000_000,
     }
     const loop = new ManagerLoop(baseDeps({
@@ -767,7 +799,7 @@ describe('ManagerLoop', () => {
       updateConfig: () => {},
     }
 
-    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const policy: CompactionPolicy = { keepRecent: 2, hardCapTokens: 1_000_000 }
     const deps = baseDeps({
       store,
       adapter: throwOnFold,
@@ -842,7 +874,7 @@ describe('ManagerLoop', () => {
       updateConfig: () => {},
     }
 
-    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const policy: CompactionPolicy = { keepRecent: 2, hardCapTokens: 1_000_000 }
     const deps = baseDeps({
       store,
       adapter: throwOnFold,
@@ -1543,8 +1575,6 @@ describe('ManagerLoop', () => {
     const { receipt, admit, reject } = makeActivityReceipt()
     const policy: CompactionPolicy = {
       keepRecent: 2,
-      cacheTtlMs: 1000,
-      foldTokenThreshold: 1_000_000,
       hardCapTokens: 1_000_000,
     }
     await store.save({
@@ -1574,7 +1604,7 @@ describe('ManagerLoop', () => {
     // 强制折叠后的重试:正常结束
     queue.push({ text: '折叠后重试成功', stopReason: 'end_turn' })
 
-    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const policy: CompactionPolicy = { keepRecent: 2, hardCapTokens: 1_000_000 }
     const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
 
     // 预置 3 条可压缩历史，让 force_hot 真正应用一个批次。
@@ -1618,7 +1648,7 @@ describe('ManagerLoop', () => {
     // 重复触发首次尝试里已执行的副作用(如已发送的 send_message、已拉起的 spawn_worker)。
     queue.push({ text: '这是一段被截断的长回复,但确实已经写出了实际内容', stopReason: 'max_tokens' })
 
-    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const policy: CompactionPolicy = { keepRecent: 2, hardCapTokens: 1_000_000 }
     const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
 
     // 预置 3 条历史(同上一个 max_tokens 用例),让 force_hot 若被误触发也真能折出东西——
@@ -1648,7 +1678,7 @@ describe('ManagerLoop', () => {
     queue.push({ reasoning: { summary: '在思考要不要超限' }, stopReason: 'max_tokens' })
     queue.push({ text: '折叠后重试成功', stopReason: 'end_turn' })
 
-    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const policy: CompactionPolicy = { keepRecent: 2, hardCapTokens: 1_000_000 }
     const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
 
     const seedMessages: EngineMessage[] = [
@@ -1681,7 +1711,7 @@ describe('ManagerLoop', () => {
     queue.push({ stopReason: 'end_turn' })
 
     let loop!: ManagerLoop
-    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const policy: CompactionPolicy = { keepRecent: 2, hardCapTokens: 1_000_000 }
     const deps = baseDeps({
       store,
       adapter,
@@ -1755,7 +1785,7 @@ describe('ManagerLoop', () => {
       updateConfig: () => {},
     }
 
-    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const policy: CompactionPolicy = { keepRecent: 2, hardCapTokens: 1_000_000 }
     const deps = baseDeps({ store, adapter: injectDuringFold, policy })
     loop = new ManagerLoop(deps)
 
@@ -1786,8 +1816,6 @@ describe('ManagerLoop', () => {
 
     const policy: CompactionPolicy = {
       keepRecent: 3,
-      cacheTtlMs: 1_000,
-      foldTokenThreshold: 1_000_000,
       hardCapTokens: 1_000_000,
     }
     const loop = new ManagerLoop(baseDeps({

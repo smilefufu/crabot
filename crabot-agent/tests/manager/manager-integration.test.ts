@@ -153,8 +153,6 @@ function makeManagerAdapter(): {
 
 const GENEROUS_POLICY: CompactionPolicy = {
   keepRecent: 1000,
-  cacheTtlMs: 10_000_000,
-  foldTokenThreshold: 10_000_000,
   hardCapTokens: 10_000_000,
 }
 
@@ -338,7 +336,6 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
   const registryDeps: ManagerRegistryDeps = {
     store,
     policy: opts.policy,
-    estimateTokens: (msgs) => msgs.length * 10,
     harness,
     ledger,
     now: opts.managerNow,
@@ -622,12 +619,12 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
     20000,
   )
 
-  // --- 场景三：跨 TTL 折叠 ---
+  // --- 场景三：长时间空闲后保持未超容量的历史 ---
 
-  it('场景三：连续两次唤醒，第二次 now 推进超过 cacheTtlMs 且历史超阈值 → 折叠恰好发生一次，摘要块进入第二轮 prompt，尾巴保留 K 条', async () => {
+  it('场景三：连续两次唤醒，跨 32 分钟且旧历史超过 20K tokens 时仍保持原历史', async () => {
     const managerScript = makeManagerAdapter()
     const KEEP_RECENT = 2
-    const policy: CompactionPolicy = { keepRecent: KEEP_RECENT, cacheTtlMs: 1000, foldTokenThreshold: 5, hardCapTokens: 10_000_000 }
+    const policy: CompactionPolicy = { keepRecent: KEEP_RECENT, hardCapTokens: 10_000_000 }
     let managerNowMs = Date.parse('2026-01-01T00:00:00.000Z')
     const assembly = await setupAssembly({
       dataDir,
@@ -637,39 +634,37 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
     })
 
     const key = 'wechat::sess-fold' as ManagerKey
-    // 预置 3 条历史（超过 keepRecent=2），lastActiveAt 钉在 t0，保证 wake#1 处于"未冷"状态。
+    const history = [createUserMessage(`旧消息1:${'x'.repeat(90_000)}`), createUserMessage('旧消息2'), createUserMessage('旧消息3')]
     await assembly.store.save({
       key,
-      recent: [createUserMessage('旧消息1'), createUserMessage('旧消息2'), createUserMessage('旧消息3')],
+      recent: history,
       foldedCount: 0,
       lastActiveAt: new Date(managerNowMs).toISOString(),
     })
 
-    // wake#1 @ t0+10ms（远小于 cacheTtlMs=1000ms）——burst，不该折叠
     managerNowMs += 10
     managerScript.queue.push({ text: '收到，处理中', stopReason: 'end_turn' })
     const wake1 = await assembly.registry.routeHumanMessages('wechat', 'sess-fold', [makeChannelMessage('第一条')])
     expect(wake1.outcome).toBe('completed')
     expect(managerScript.foldCalls.length).toBe(0)
 
-    // wake#2 @ t0+10+cacheTtlMs+500ms（远超 TTL），此时历史已超 keepRecent 且超 foldTokenThreshold
-    managerNowMs += policy.cacheTtlMs + 500
+    managerNowMs += 32 * 60_000
     managerScript.queue.push({ text: '收到，继续处理', stopReason: 'end_turn' })
     const wake2 = await assembly.registry.routeHumanMessages('wechat', 'sess-fold', [makeChannelMessage('第二条')])
     expect(wake2.outcome).toBe('completed')
 
-    // 折叠发生恰好一次
-    expect(managerScript.foldCalls.length).toBe(1)
+    expect(managerScript.foldCalls).toHaveLength(0)
 
     const state = await assembly.store.load(key)
-    expect(state.rollingSummary).toBeTruthy()
+    expect(state.rollingSummary).toBeUndefined()
+    expect(state.foldedCount).toBe(0)
+    expect(state.recent.slice(0, history.length)).toEqual(history)
 
     const nonFoldCalls = managerScript.calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
     const wake2Call = nonFoldCalls[nonFoldCalls.length - 2]
-    // 摘要块进入了第二轮的 prompt/messages（第一条消息即摘要标记块）
-    expect(JSON.stringify(wake2Call.messages[0])).toContain('滚动摘要')
-    // 尾巴保留 K 条：messages = [摘要块(1)] + [尾巴(K 条)] + [本次唤醒事件(1 条)]
-    expect(wake2Call.messages.length).toBe(1 + KEEP_RECENT + 1)
+    expect(wake2Call.messages.slice(0, history.length)).toEqual(history)
+    expect(JSON.stringify(wake2Call.messages)).toContain('第一条')
+    expect(JSON.stringify(wake2Call.messages)).toContain('第二条')
   })
 
   // --- 场景四：query_worker 同步建立失败 + 持久通知责任 ---

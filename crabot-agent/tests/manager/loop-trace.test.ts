@@ -17,7 +17,7 @@ import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage } from '../../src/types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
-import type { LLMAdapter, LLMStreamParams, EngineMessage } from '../../src/engine/index.js'
+import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 const KEY: ManagerKey = 'wechat::sess-trace'
@@ -57,7 +57,6 @@ function makeMessage(text: string): ChannelMessage {
   }
 }
 
-const estimateTokens = (msgs: ReadonlyArray<EngineMessage>): number => msgs.length * 10
 const FAKE_HARNESS = { listWorkers: async (): Promise<LedgerWorker[]> => [] } as unknown as WorkerHarness
 
 describe('ManagerLoop episode trace wiring', () => {
@@ -72,8 +71,7 @@ describe('ManagerLoop episode trace wiring', () => {
       isSystemThread: false,
       managerKey: () => KEY,
       store,
-      policy: { keepRecent: 3, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 },
-      estimateTokens,
+      policy: { keepRecent: 3, hardCapTokens: 1_000_000 },
       toolFace: () => [],
       promptInputs: () => ({}),
       harness: FAKE_HARNESS,
