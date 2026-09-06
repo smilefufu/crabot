@@ -70,7 +70,7 @@ describe('lastActivityAt(活性信号,adapter 层边界)', () => {
       'claude-code',
       async (workerId, sessionId) => {
         const projectsDir = path.join(dataDir, 'claude-projects')
-        const slug = workspaceRoot.replace(/[/.]/g, '-')
+        const slug = workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-')
         const nativePath = path.join(projectsDir, slug, `${sessionId}.jsonl`)
         await fs.mkdir(path.dirname(nativePath), { recursive: true })
         await fs.writeFile(nativePath, '{}\n', 'utf-8')

@@ -948,7 +948,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     await fs.rm(claudeProjectsDir, { recursive: true, force: true }).catch(() => {})
   })
 
-  const slug = (root: string) => root.replace(/[/.]/g, '-')
+  const slug = (root: string) => root.replace(/[^a-zA-Z0-9]/g, '-')
 
   /** cc 落盘用 workspace 的 realpath slug(macOS /var → /private/var 软链,见 adapter spawn 注释)。 */
   async function wsSlug(): Promise<string> {
@@ -1163,7 +1163,7 @@ describe('ClaudeCodeAdapter subagent observability', () => {
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const sessionId = randomUUID()
     const childId = 'agent-childabc'
-    const slug = workspaceRoot.replace(/[/.]/g, '-')
+    const slug = workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-')
     const childDir = path.join(projectsDir, slug, sessionId, 'subagents')
     await fs.mkdir(childDir, { recursive: true })
     await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
@@ -1205,7 +1205,7 @@ describe('ClaudeCodeAdapter subagent observability', () => {
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const sessionId = randomUUID()
     const childId = 'agent-running'
-    const slug = workspaceRoot.replace(/[/.]/g, '-')
+    const slug = workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-')
     const childDir = path.join(projectsDir, slug, sessionId, 'subagents')
     await fs.mkdir(childDir, { recursive: true })
     await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
@@ -2125,11 +2125,11 @@ describe('ClaudeCodeAdapter.readTrace', () => {
   })
 
   function projectSlug(cwd: string): string {
-    return cwd.replace(/[/.]/g, '-')
+    return cwd.replace(/[^a-zA-Z0-9]/g, '-')
   }
 
-  async function spawnedHandle(adapter: ClaudeCodeAdapter, workerId: string): Promise<{ h: IncarnationHandle; sessionId: string }> {
-    const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+  async function spawnedHandle(adapter: ClaudeCodeAdapter, workerId: string, workspace = workspaceRoot): Promise<{ h: IncarnationHandle; sessionId: string }> {
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspace } })
     const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
     return { h, sessionId: meta.session_id }
   }
@@ -2232,6 +2232,61 @@ describe('ClaudeCodeAdapter.readTrace', () => {
     expect(nextCursor.offset).toBe(7)
 
     await adapter.kill(h)
+  })
+
+  it.each([
+    ['test_server_2026-08-28', 'test-server-2026-08-28'],
+    ['Project.name + test@2', 'Project-name---test-2'],
+    ['项目_2026', '---2026'],
+  ])('读取含特殊字符的工作目录 %s 对应的 CC 原生记录', async (workspaceName, projectName) => {
+    const workspace = path.join(await fs.realpath(workspaceRoot), workspaceName)
+    await fs.mkdir(workspace)
+    const adapter = new ClaudeCodeAdapter({
+      dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux: new NoopTmux(),
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0, claudeProjectsDir,
+    })
+    try {
+      const { h, sessionId } = await spawnedHandle(adapter, `cctest-${randomUUID().slice(0, 8)}`, workspace)
+      // 特殊字符部分使用 CC 实际目录名样例，不由待测规则计算。
+      const slugDir = path.join(claudeProjectsDir, `${projectSlug(await fs.realpath(workspaceRoot))}-${projectName}`)
+      await fs.mkdir(slugDir, { recursive: true })
+      const sessionFile = path.join(slugDir, `${sessionId}.jsonl`)
+      await fs.writeFile(sessionFile, sampleJsonl(sessionId), 'utf-8')
+      const nativeAt = new Date(Date.now() + 10_000)
+      await fs.utimes(sessionFile, nativeAt, nativeAt)
+
+      const trace = await adapter.readTrace(h)
+      expect(trace.unavailableReason).toBeUndefined()
+      expect(trace.events).toHaveLength(5)
+      expect(trace.events[3]).toMatchObject({ kind: 'message', role: 'assistant', summary: '问题在于第 12 行没有判空。' })
+      expect(trace.nextCursor.offset).toBe(7)
+      expect(await adapter.lastActivityAt(h)).toBe((await fs.stat(sessionFile)).mtimeMs)
+    } finally {
+      await adapter.dispose()
+    }
+  })
+
+  it('含下划线的工作目录在原生会话追加后通知对应化身', async () => {
+    const workspace = path.join(await fs.realpath(workspaceRoot), 'test_server_2026-08-28')
+    await fs.mkdir(workspace)
+    const slugDir = path.join(claudeProjectsDir, `${projectSlug(await fs.realpath(workspaceRoot))}-test-server-2026-08-28`)
+    await fs.mkdir(slugDir, { recursive: true })
+    const onNativeActivity = vi.fn()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux: new NoopTmux(),
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0, claudeProjectsDir, onNativeActivity,
+    })
+    try {
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+      const { h, sessionId } = await spawnedHandle(adapter, workerId, workspace)
+      await fs.appendFile(path.join(slugDir, `${sessionId}.jsonl`), sampleJsonl(sessionId), 'utf-8')
+
+      await vi.waitFor(() => expect(onNativeActivity).toHaveBeenCalledWith(expect.objectContaining({
+        worker_id: workerId, seq: h.seq, impl: 'claude-code', session_ref: sessionId,
+      })), { timeout: 4000 })
+    } finally {
+      await adapter.dispose()
+    }
   })
 
   it('把真实结构脱敏 fixture 中的 API/压缩失败投影为 error，而不是 assistant message', async () => {
@@ -2780,7 +2835,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const h = await adapter.spawn({ worker_id: workerId, prompt: 'work', workspace: { root: workspaceRoot } })
-    const slug = (await fs.realpath(workspaceRoot)).replace(/[/.]/g, '-')
+    const slug = (await fs.realpath(workspaceRoot)).replace(/[^a-zA-Z0-9]/g, '-')
     const sessionDir = path.join(claudeProjectsDir, slug)
     await fs.mkdir(sessionDir, { recursive: true })
     sessionFile = path.join(sessionDir, `${h.session_ref}.jsonl`)
@@ -2905,7 +2960,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const h = await first.spawn({ worker_id: workerId, prompt: 'work', workspace: { root: workspaceRoot } })
-    const slug = (await fs.realpath(workspaceRoot)).replace(/[/.]/g, '-')
+    const slug = (await fs.realpath(workspaceRoot)).replace(/[^a-zA-Z0-9]/g, '-')
     const sessionDir = path.join(claudeProjectsDir, slug)
     await fs.mkdir(sessionDir, { recursive: true })
     sessionFile = path.join(sessionDir, `${h.session_ref}.jsonl`)
