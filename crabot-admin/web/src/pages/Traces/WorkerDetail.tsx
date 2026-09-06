@@ -105,6 +105,11 @@ function callId(event: WorkerTraceEvent): string | undefined {
   return value.split('|', 1)[0]
 }
 
+function hasExplicitCallId(event: WorkerTraceEvent): boolean {
+  const value = asRecord(event.detail)?.call_id
+  return typeof value === 'string' && value.length > 0
+}
+
 function subagentId(event: WorkerTraceEvent): string | undefined {
   if (typeof event.subagent_id === 'string' && event.subagent_id) return event.subagent_id
   const value = asRecord(event.detail)?.subagent_id
@@ -263,7 +268,8 @@ function formatDetail(text: string): string {
 function activityPreview(entry: ActivityEntry): string {
   if (entry.event.kind === 'tool_call') {
     const name = entry.title ? `调用 ${entry.title}` : '工具调用'
-    return entry.result ? `${name} · 已返回结果` : `${name} · 执行中`
+    if (entry.result) return `${name} · 已返回结果`
+    return hasExplicitCallId(entry.event) ? `${name} · 执行中` : name
   }
   if (entry.event.kind === 'tool_result') return '工具结果'
   return oneLine(entry.body)

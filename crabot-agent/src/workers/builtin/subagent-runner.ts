@@ -259,30 +259,42 @@ function normalizeTraceSpan(span: import('../../types.js').AgentSpan): Normalize
   if (span.type === 'tool_call') {
     const name = typeof details.tool_name === 'string' ? details.tool_name : 'tool call'
     const input = typeof details.input_summary === 'string' ? details.input_summary : undefined
-    const callId = typeof details.call_id === 'string' ? details.call_id : span.span_id
+    const output = typeof details.output_summary === 'string' ? details.output_summary : undefined
+    const callId = typeof details.call_id === 'string'
+      ? details.call_id
+      : output !== undefined ? span.span_id : undefined
+    const normalizedDetails = {
+      ...details,
+      ...(callId !== undefined ? { call_id: callId } : {}),
+    }
     return [
       {
         ts: span.started_at,
         kind: 'tool_call',
         role: 'assistant',
         summary: name,
-        detail: { ...details, call_id: callId, name, ...(input !== undefined ? { input } : {}) },
+        detail: { ...normalizedDetails, name, ...(input !== undefined ? { input } : {}) },
       },
-      ...(typeof details.output_summary === 'string' ? [{ ts: span.ended_at ?? span.started_at, kind: 'tool_result' as const, role: 'user' as const, summary: details.output_summary, detail: { ...details, call_id: callId } }] : []),
+      ...(output !== undefined ? [{
+        ts: span.ended_at ?? span.started_at,
+        kind: 'tool_result' as const,
+        role: 'user' as const,
+        summary: output,
+        detail: normalizedDetails,
+      }] : []),
     ]
   }
   if (span.type === 'tool_result') {
     const output = typeof details.output_summary === 'string'
       ? details.output_summary
       : typeof details.error === 'string' ? details.error : ''
-    const callId = typeof details.call_id === 'string' ? details.call_id : span.span_id
     const subagentId = typeof details.subagent_id === 'string' ? details.subagent_id : undefined
     return [{
       ts: span.started_at,
       kind: 'tool_result',
       role: 'user',
       summary: output,
-      detail: { ...details, call_id: callId, output },
+      detail: { ...details, output },
       ...(subagentId ? { subagent_id: subagentId } : {}),
     }]
   }

@@ -375,6 +375,7 @@ export class TraceStore {
       const details = span.details as Record<string, unknown>
       const callId = details.call_id
       if (typeof callId !== 'string' || resultCallIds.has(callId)) continue
+      const responseId = typeof details.response_id === 'string' ? details.response_id : undefined
       const toolUseId = typeof details.tool_use_id === 'string' ? details.tool_use_id : undefined
       const toolName = typeof details.tool_name === 'string'
         ? details.tool_name
@@ -388,6 +389,7 @@ export class TraceStore {
         duration_ms: 0,
         status: 'failed',
         details: {
+          ...(responseId ? { response_id: responseId } : {}),
           call_id: callId,
           ...(toolUseId ? { tool_use_id: toolUseId } : {}),
           ...(toolName ? { tool_name: toolName } : {}),

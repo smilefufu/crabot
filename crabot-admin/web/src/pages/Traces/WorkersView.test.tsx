@@ -370,12 +370,15 @@ describe('WorkerDetail', () => {
     expect(screen.getByText('item_completed')).toBeInTheDocument()
   })
 
-  it('builtin assistant text 与模型调用分开，纯工具轮不伪造 Worker 文本', async () => {
+  it('Codex 已完成单事件工具保持中性，不伪造 Worker 文本或执行中状态', async () => {
     mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
     mocked.getWorkerTrace = vi.fn().mockResolvedValue({
       events: [
         { ts: '2026-08-01T00:00:01.000Z', kind: 'llm_call', summary: 'llm tool_use', source: 'native', detail: { stop_reason: 'tool_use' } },
-        { ts: '2026-08-01T00:00:02.000Z', kind: 'tool_call', role: 'assistant', summary: 'shell', source: 'native', detail: { name: 'shell', arguments: 'pwd' } },
+        {
+          ts: '2026-08-01T00:00:02.000Z', kind: 'tool_call', role: 'assistant', summary: 'exec_command(pwd)', source: 'native',
+          detail: { type: 'commandExecution', name: 'exec_command', input: { command: ['pwd'] }, status: 'completed' },
+        },
       ],
       next_cursor: 'tok-1',
     })
@@ -383,7 +386,8 @@ describe('WorkerDetail', () => {
 
     renderDetail()
 
-    await screen.findByRole('button', { name: /工具调用：调用 shell · 执行中.*展开详情/ })
+    await screen.findByRole('button', { name: /工具调用：调用 exec_command，展开详情/ })
+    expect(screen.queryByRole('button', { name: /调用 exec_command · 执行中/ })).not.toBeInTheDocument()
     expect(screen.queryByText('Worker 文本')).not.toBeInTheDocument()
     expect(screen.queryByText('任务输出')).not.toBeInTheDocument()
 

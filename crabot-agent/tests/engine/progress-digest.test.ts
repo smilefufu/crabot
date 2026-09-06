@@ -49,6 +49,7 @@ function makeDeps(opts: {
 
 function makeEvent(overrides: Partial<EngineTurnEvent> = {}): EngineTurnEvent {
   return {
+    responseId: 'response-1',
     turnNumber: 1,
     assistantText: '处理中',
     toolCalls: [],
@@ -58,9 +59,10 @@ function makeEvent(overrides: Partial<EngineTurnEvent> = {}): EngineTurnEvent {
 }
 
 function makeToolCall(
-  overrides: Partial<{ id: string; name: string; input: Record<string, unknown>; output: string; isError: boolean }> = {},
+  overrides: Partial<{ callId: string; id: string; name: string; input: Record<string, unknown>; output: string; isError: boolean }> = {},
 ) {
   return {
+    callId: 'call-1',
     id: 'tool-1',
     name: 'Read',
     input: {},

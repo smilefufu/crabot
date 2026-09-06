@@ -22,6 +22,7 @@ export interface HookConfig {
 }
 
 export interface ToolLifecycleContext {
+  readonly responseId: string
   readonly turnNumber: number
   readonly callIds: ReadonlyMap<string, string>
   readonly onToolLifecycle?: (event: EngineToolLifecycleEvent) => void
@@ -77,6 +78,7 @@ async function executeSingleTool(
   if (callId !== undefined && lifecycle !== undefined) {
     observe({
       type: 'tool_started',
+      responseId: lifecycle.responseId,
       callId,
       turnNumber: lifecycle.turnNumber,
       toolUseId: block.id,
@@ -95,6 +97,7 @@ async function executeSingleTool(
     if (callId !== undefined && lifecycle !== undefined) {
       observe({
         type: 'tool_finished',
+        responseId: lifecycle.responseId,
         callId,
         turnNumber: lifecycle.turnNumber,
         toolUseId: block.id,

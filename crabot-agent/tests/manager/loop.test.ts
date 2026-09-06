@@ -321,8 +321,13 @@ describe('ManagerLoop', () => {
       expect(spans.filter((span) => span.type === 'tool_call')).toHaveLength(1)
       expect(spans.find((span) => span.type === 'tool_call')?.status).toBe('running')
     })
+    expect(spans.filter((span) => span.type === 'llm_call' || span.type === 'tool_call').map((span) => span.type))
+      .toEqual(['llm_call', 'tool_call'])
+    const llmSpan = spans.find((span) => span.type === 'llm_call')!
     const runningSpan = spans.find((span) => span.type === 'tool_call')!
+    expect(llmSpan.details).toMatchObject({ response_id: expect.any(String) })
     expect(runningSpan.details).toMatchObject({
+      response_id: (llmSpan.details as { response_id: string }).response_id,
       call_id: expect.any(String),
       tool_use_id: 'provider-call',
       name: 'deferred_tool',
@@ -332,6 +337,7 @@ describe('ManagerLoop', () => {
     await running
 
     expect(spans.filter((span) => span.type === 'tool_call')).toHaveLength(1)
+    expect(spans.filter((span) => span.type === 'llm_call')).toHaveLength(2)
     expect(runningSpan.status).toBe('completed')
     expect(runningSpan.details).toMatchObject({ output_summary: expect.stringContaining('done') })
     expect(traceWriter.finishSpan).toHaveBeenCalledOnce()

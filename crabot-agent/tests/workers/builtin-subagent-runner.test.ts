@@ -256,6 +256,45 @@ describe('BuiltinSubagentRunner restart recovery', () => {
     }
   })
 
+  it('旧 tool span 只有确切结果时才生成兼容配对 ID', async () => {
+    const dir = await fs.mkdtemp(join(tmpdir(), 'builtin-subagent-legacy-trace-'))
+    try {
+      const registry = new BgEntityRegistry(join(dir, 'registry.json'))
+      await registry.register({
+        entity_id: 'agent-child', type: 'agent', status: 'completed', trace_id: 'trace-child',
+        task_description: '读取文件', messages_log_file: join(dir, 'child.jsonl'), result_file: null,
+        owner: { friend_id: '__builtin_worker__', worker_id: 'worker-1' }, spawned_by_task_id: 'worker-1',
+        spawned_at: '2026-08-22T00:00:00.000Z', exit_code: 0,
+        ended_at: '2026-08-22T00:00:03.000Z', last_activity_at: '2026-08-22T00:00:03.000Z',
+      })
+      const traceStore = {
+        getFullTrace: vi.fn(async () => ({
+          spans: [
+            {
+              span_id: 'legacy-no-result', type: 'tool_call', started_at: '2026-08-22T00:00:01.000Z',
+              details: { tool_name: 'Read', input_summary: '{"path":"a"}' },
+            },
+            {
+              span_id: 'legacy-completed', type: 'tool_call', started_at: '2026-08-22T00:00:02.000Z',
+              ended_at: '2026-08-22T00:00:03.000Z',
+              details: { tool_name: 'Bash', input_summary: 'pwd', output_summary: 'done' },
+            },
+          ],
+        })),
+      } as unknown as TraceStore
+      const runner = new BuiltinSubagentRunner(traceStore, {} as LSPManager, undefined, registry)
+
+      const result = await runner.readTrace('worker-1', 'agent-child')
+      expect(result.events[0].detail).not.toHaveProperty('call_id')
+      expect(result.events.slice(1)).toMatchObject([
+        { kind: 'tool_call', detail: { call_id: 'legacy-completed' } },
+        { kind: 'tool_result', detail: { call_id: 'legacy-completed' } },
+      ])
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('marks only Worker-owned running children as interrupted after an Agent restart', async () => {
     const dir = await fs.mkdtemp(join(tmpdir(), 'builtin-subagent-recovery-'))
     try {

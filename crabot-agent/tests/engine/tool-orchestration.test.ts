@@ -77,6 +77,7 @@ describe('executeToolBatches', () => {
       undefined,
       undefined,
       {
+        responseId: 'engine-response',
         turnNumber: 4,
         callIds: new Map([['provider-call', 'engine-call']]),
         onToolLifecycle: (event) => events.push(event),
@@ -104,6 +105,7 @@ describe('executeToolBatches', () => {
     const events: EngineToolLifecycleEvent[] = []
     const blocks = [makeBlock('slow_gate', 'slow'), makeBlock('fast_gate', 'fast')]
     const lifecycle = {
+      responseId: 'engine-response',
       turnNumber: 1,
       callIds: new Map([['slow', 'call-slow'], ['fast', 'call-fast']]),
       onToolLifecycle: (event: EngineToolLifecycleEvent) => events.push(event),
@@ -145,6 +147,7 @@ describe('executeToolBatches', () => {
       ],
       undefined, undefined, undefined,
       {
+        responseId: 'engine-response',
         turnNumber: 1,
         callIds: new Map([['one', 'call-one'], ['two', 'call-two']]),
         onToolLifecycle: (event) => events.push(event),
@@ -170,6 +173,7 @@ describe('executeToolBatches', () => {
       { mode: 'denyList', toolNames: ['write_file'] },
       undefined,
       {
+        responseId: 'engine-response',
         turnNumber: 1,
         callIds: new Map([['denied', 'call-denied']]),
         onToolLifecycle: (event) => events.push(event),
@@ -193,6 +197,7 @@ describe('executeToolBatches', () => {
       setup.permission,
       setup.hooks as never,
       {
+        responseId: 'engine-response',
         turnNumber: 1,
         callIds: new Map([['throws', 'call-throws']]),
         onToolLifecycle: (event) => events.push(event),
@@ -213,6 +218,7 @@ describe('executeToolBatches', () => {
         [defineTool({ name: 'observed', description: '', inputSchema: {}, call })],
         undefined, undefined, undefined,
         {
+          responseId: 'engine-response',
           turnNumber: 1,
           callIds: new Map([['provider-call', 'engine-call']]),
           onToolLifecycle: () => { throw new Error('trace unavailable') },

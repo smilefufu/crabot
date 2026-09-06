@@ -287,6 +287,7 @@ export interface BuiltinTraceHooks {
     summary: string
     initial_input?: string
   }): string
+  appendLlmResponse?(traceId: string, event: import('../../engine/types.js').EngineLlmResponseEvent): void
   appendTurn(traceId: string, event: import('../../engine/types.js').EngineTurnEvent): void
   appendToolLifecycle?(traceId: string, event: import('../../engine/types.js').EngineToolLifecycleEvent): void
   /**
@@ -1146,6 +1147,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         onLiveProgress: () => {
           instance.activityAt = Date.now()
         },
+        onLlmResponse: (event) => {
+          instance.activityAt = Date.now()
+          if (instance.traceId) this.deps.traceHooks?.appendLlmResponse?.(instance.traceId, event)
+        },
         onToolLifecycle: (event) => {
           instance.activityAt = Date.now()
           if (instance.traceId) this.deps.traceHooks?.appendToolLifecycle?.(instance.traceId, event)
@@ -1347,6 +1352,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         messagesRef: instance.engineMessagesRef,
         onLiveProgress: () => {
           instance.activityAt = Date.now()
+        },
+        onLlmResponse: (event) => {
+          instance.activityAt = Date.now()
+          if (instance.traceId) this.deps.traceHooks?.appendLlmResponse?.(instance.traceId, event)
         },
         onToolLifecycle: (event) => {
           instance.activityAt = Date.now()
@@ -1992,21 +2001,23 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
       const error = typeof details.error === 'string' ? details.error : undefined
       const recordedSubagentId = typeof details.subagent_id === 'string' ? details.subagent_id : undefined
       const subagentId = recordedSubagentId ?? (name === 'delegate_task' ? subagentIdFromToolOutput(output ?? error) : undefined)
-      const callId = typeof details.call_id === 'string' ? details.call_id : span.span_id
+      const result = output ?? error
+      const callId = typeof details.call_id === 'string'
+        ? details.call_id
+        : result ? span.span_id : undefined
       const call = {
         ...base,
         kind: 'tool_call',
         summary: name,
         detail: {
           ...details,
-          call_id: callId,
+          ...(callId !== undefined ? { call_id: callId } : {}),
           name,
           ...(input !== undefined ? { input } : {}),
           ...(subagentId ? { subagent_id: subagentId } : {}),
         },
         ...(subagentId ? { subagent_id: subagentId } : {}),
       } as const
-      const result = output ?? error
       if (!result) return [call]
       return [
         call,
@@ -2028,7 +2039,6 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
       const output = typeof details.output_summary === 'string'
         ? details.output_summary
         : typeof details.error === 'string' ? details.error : ''
-      const callId = typeof details.call_id === 'string' ? details.call_id : span.span_id
       const recordedSubagentId = typeof details.subagent_id === 'string' ? details.subagent_id : undefined
       const subagentId = recordedSubagentId ?? (name === 'delegate_task' ? subagentIdFromToolOutput(output) : undefined)
       return [{
@@ -2037,7 +2047,6 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
         summary: output,
         detail: {
           ...details,
-          call_id: callId,
           output,
           ...(span.status === 'failed' || details.is_error === true ? { is_error: true } : {}),
         },

@@ -47,7 +47,7 @@ import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from '
 import { SessionLaneRegistry } from './orchestration/session-lane.js'
 import { AgentHandler, type SdkEnvConfig, type ExecuteTriggerMessageParams, type ExecuteTriggerMessageResult, adapterFromSdkEnv } from './agent/agent-handler.js'
 import { thinkingParam } from './engine/llm-adapter-types.js'
-import { recordEngineToolLifecycle, recordEngineTurnTools } from './engine/sub-agent-trace.js'
+import { recordEngineLlmResponse, recordEngineToolLifecycle, recordSubAgentTurn } from './engine/sub-agent-trace.js'
 import type { ToolPermissionConfig, ToolDefinition as EngineToolDefinition } from './engine/types.js'
 import { filterToolsByPermission } from './engine/index.js'
 import { getConfiguredBuiltinTools, filterMcpToolsByConfig } from './engine/tools/index.js'
@@ -4035,21 +4035,11 @@ export class UnifiedAgent extends ModuleBase {
         }
         return trace.trace_id
       },
+      appendLlmResponse: (traceId, event) => {
+        recordEngineLlmResponse(this.traceStore, traceId, event, redact)
+      },
       appendTurn: (traceId, event) => {
-        const assistantText = redact(event.assistantText)
-        const llmSpan = this.traceStore.startSpan(traceId, {
-          type: 'llm_call',
-          details: {
-            model: '',
-            stop_reason: event.stopReason,
-            ...(assistantText.trim() ? { assistant_text: assistantText } : {}),
-            ...(event.usage ? { usage: event.usage } : {}),
-          } as import('./types.js').AgentSpanDetails,
-          started_at_ms: event.llmStartedAtMs,
-        })
-        this.traceStore.endSpan(traceId, llmSpan.span_id, 'completed', undefined,
-          event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined ? event.llmStartedAtMs + event.llmCallMs : undefined)
-        recordEngineTurnTools(this.traceStore, traceId, event, redact, llmSpan.span_id)
+        recordSubAgentTurn(this.traceStore, traceId, event, redact)
       },
       appendToolLifecycle: (traceId, event) => {
         recordEngineToolLifecycle(this.traceStore, traceId, event, redact)

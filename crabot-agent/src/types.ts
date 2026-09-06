@@ -964,13 +964,15 @@ export interface TokenUsage {
 }
 
 export interface LlmCallDetails {
+  /** Engine-owned stable identity shared with this response's tool lifecycle. */
+  response_id?: string
   iteration?: number
   attempt?: number
   input_summary?: string
   output_summary?: string
   /** builtin worker 本轮产生的脱敏 assistant text；仅用于 worker trace read model。 */
   assistant_text?: string
-  stop_reason?: string
+  stop_reason?: string | null
   tool_calls_count?: number
   full_input?: string
   full_output?: string
@@ -988,6 +990,8 @@ export interface LlmCallDetails {
 }
 
 export interface ToolCallDetails {
+  /** Engine response that produced this call. */
+  response_id?: string
   /** Engine-owned stable correlation id shared by append-only call/result records. */
   call_id?: string
   tool_name: string
@@ -1001,6 +1005,8 @@ export interface ToolCallDetails {
 }
 
 export interface ToolResultDetails {
+  /** Engine response that produced this result. */
+  response_id?: string
   call_id: string
   tool_use_id?: string
   tool_name?: string

@@ -21,7 +21,7 @@ import type { BgEntityRegistry } from './registry.js'
 import type { BgEntityOwner, BgAgentRegistryRecord } from './types.js'
 import { emitInstantSpan, type BgEntityTraceContext } from './trace.js'
 import type { TraceStore } from '../../core/trace-store.js'
-import { recordEngineToolLifecycle, recordSubAgentTurn } from '../sub-agent-trace.js'
+import { recordEngineLlmResponse, recordEngineToolLifecycle, recordSubAgentTurn } from '../sub-agent-trace.js'
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -199,6 +199,8 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
           disableCompaction: true,
           ...(subTrace && subTraceStore
             ? {
+                onLlmResponse: (event) =>
+                  recordEngineLlmResponse(subTraceStore, subTrace.trace_id, event, opts.subTrace?.redactText),
                 onTurn: (event) =>
                   recordSubAgentTurn(subTraceStore, subTrace.trace_id, event, opts.subTrace?.redactText),
                 onToolLifecycle: (event) =>
