@@ -26,6 +26,7 @@ import { SkillList } from './pages/Skills/SkillList'
 import { SubagentList } from './pages/Subagents/SubagentList'
 import { Traces } from './pages/Traces'
 import { ManagerDetail } from './pages/Traces/ManagerDetail'
+import { ManagerWorkboard } from './pages/Traces/ManagerWorkboard'
 import { WorkerDetail } from './pages/Traces/WorkerDetail'
 import { SubagentDetail } from './pages/Traces/SubagentDetail'
 import { ScheduleList } from './pages/Schedules/ScheduleList'
@@ -233,6 +234,14 @@ const AppRoutes: React.FC = () => {
         element={
           <PrivateRoute>
             <Traces />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/traces/managers/:managerKey/workboard"
+        element={
+          <PrivateRoute>
+            <ManagerWorkboard />
           </PrivateRoute>
         }
       />

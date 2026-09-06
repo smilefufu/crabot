@@ -191,6 +191,8 @@ export interface ManagerRegistryDeps {
   readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
   /** P6-A §3.2：episode 消费后结算未 claim 的 Admin Chat request IDs。 */
   readonly onAdminChatWakeConsumed?: (key: ManagerKey, requestIds: string[]) => void
+  /** 仅在任务板系统输入实际被成功 episode 消费后结算其持久化 notice。 */
+  readonly onWorkboardAdminUpdateConsumed?: (key: ManagerKey, noticeRevisions: ReadonlyArray<number>) => void | Promise<void>
   /** Stable system prompt profile material. */
   readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string; readonly isGroup?: boolean; readonly adminPersonality?: string }
 }
@@ -281,6 +283,9 @@ export class ManagerRegistry {
       traceWriter: this.deps.traceWriter,
       onAdminChatWakeConsumed: this.deps.onAdminChatWakeConsumed
         ? (ids) => this.deps.onAdminChatWakeConsumed!(key, ids)
+        : undefined,
+      onWorkboardAdminUpdateConsumed: this.deps.onWorkboardAdminUpdateConsumed
+        ? (revisions) => this.deps.onWorkboardAdminUpdateConsumed!(key, revisions)
         : undefined,
     }
 
@@ -576,6 +581,37 @@ export class ManagerRegistry {
         ...(principalPermissions ? { principalPermissions } : {}),
       },
     })
+  }
+
+  /** Admin 任务板保存的系统管理输入：只携带通知 revision，不改变会话主体。 */
+  async routeWorkboardAdminUpdate(p: {
+    key: ManagerKey
+    noticeRevision: number
+    onSettled?: (result: EpisodeResult) => void
+  }): Promise<EpisodeResult> {
+    const capture = this.captureIngress()
+    const envelope = this.makeEnvelope(capture, {
+      kind: 'workboard_admin_update',
+      noticeRevision: p.noticeRevision,
+    })
+    const onSettled = (result: EpisodeResult): void => {
+      p.onSettled?.(result)
+    }
+    const loop = this.getOrCreate(p.key)
+    if (this.isEpisodeActive(p.key)) {
+      loop.enqueueWorkboardAdminUpdate(envelope)
+      return {
+        episodeId: '',
+        outcome: 'completed',
+        turns: 0,
+        consumedEvents: false,
+        repliedToHuman: false,
+        successfulSendMessageTargets: [],
+      }
+    }
+    const result = await this.runWake(p.key, envelope)
+    onSettled(result)
+    return result
   }
 
   /**

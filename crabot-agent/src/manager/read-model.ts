@@ -274,6 +274,13 @@ export interface ManagerAdminSummary {
   last_activity_at?: string
   recent_activity_summary?: string
   active_worker_count: number
+  workboard: ManagerWorkboardSummary | { status: 'unknown' }
+}
+
+export interface ManagerWorkboardSummary {
+  status: 'ready'
+  active_count: number
+  blocked_count: number
 }
 
 export interface ManagerSummarySources {
@@ -287,6 +294,8 @@ export interface ManagerSummarySources {
   readonly activeWorkerCount: (key: ManagerKey) => number
   /** 内存 registry 当前 running manager 的最近活跃毫秒（补充尚未首次 save 的当前 manager）。 */
   readonly runningLastActiveAtMs: (key: ManagerKey) => number | undefined
+  /** 任务板摘要由 Agent 内部同一 Store 读取；失败必须显式标记 unknown。 */
+  readonly workboardSummary: (key: ManagerKey) => ManagerWorkboardSummary | { status: 'unknown' }
 }
 
 /**
@@ -315,6 +324,7 @@ export function buildManagerAdminSummaries(
       ...(lastActivity ? { last_activity_at: lastActivity } : {}),
       ...(stats.latestSummary ? { recent_activity_summary: stats.latestSummary } : {}),
       active_worker_count: sources.activeWorkerCount(key),
+      workboard: sources.workboardSummary(key),
     }
   })
 

@@ -44,6 +44,7 @@ describe('ManagersView', () => {
         last_activity_at: '2026-08-01T10:00:00.000Z',
         recent_activity_summary: '你问：部署好了吗',
         active_worker_count: 2,
+        workboard: { status: 'ready', active_count: 0, blocked_count: 0 },
       }],
       pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
     })
@@ -73,7 +74,7 @@ describe('ManagersView', () => {
 
   it('翻页触发带页码的重新拉取', async () => {
     mocked.listManagers = vi.fn().mockResolvedValue({
-      items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 会话', active_worker_count: 0 }],
+      items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 会话', active_worker_count: 0, workboard: { status: 'ready', active_count: 0, blocked_count: 0 } }],
       pagination: { page: 1, page_size: 20, total_items: 40, total_pages: 2 },
     })
     render(
@@ -91,7 +92,7 @@ describe('ManagerDetail', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     mocked.listManagers = vi.fn().mockResolvedValue({
-      items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 测试会话', active_worker_count: 1 }],
+      items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 测试会话', active_worker_count: 1, workboard: { status: 'ready', active_count: 0, blocked_count: 0 } }],
       pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
     })
     mocked.listWorkers = vi.fn().mockResolvedValue({
@@ -633,7 +634,7 @@ describe('ManagerDetail', () => {
 
   it('当前执行者来自独立 running 快照，未结束不冒充正在执行', async () => {
     mocked.listManagers = vi.fn().mockResolvedValue({
-      items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 测试会话', active_worker_count: 11 }],
+      items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 测试会话', active_worker_count: 11, workboard: { status: 'ready', active_count: 0, blocked_count: 0 } }],
       pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
     })
     mocked.listWorkers = vi.fn().mockResolvedValue({

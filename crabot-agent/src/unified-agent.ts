@@ -9,7 +9,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { ModuleBase, generateId, sha256CanonicalJson, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
+import { ModuleBase, RpcError, generateId, sha256CanonicalJson, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
 import type {
   UnifiedAgentConfig,
@@ -154,6 +154,15 @@ import { applyStatusTransition, isDecisionVisibleWorker } from './workers/harnes
 import { SYSTEM_TASKS_MANAGER_KEY } from './manager/registry.js'
 import { splitManagerKey } from './manager/principal.js'
 import {
+  WorkboardRevisionConflictError,
+  WorkboardValidationError,
+  type WorkboardArchiveOutcome,
+  type WorkboardItem,
+  type WorkboardItemDraft,
+  type WorkboardView,
+} from './manager/workboard-store.js'
+import { isManagerKey } from './workers/harness/ledger-store.js'
+import {
   projectManagerInboundMessages,
   type GetManagerInboundStatusAdminParams,
   type GetManagerInboundStatusAdminResult,
@@ -163,6 +172,39 @@ import {
 const BARRIER_TIMEOUT_MS = 8_000
 const CLI_SUBAGENT_HARVEST_DELAY_MS = 30_000
 const DEFAULT_TMP_PAGE_PORT = 19099
+const WORKBOARD_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000] as const
+
+type WorkboardAdminMutation =
+  | { readonly action: 'create'; readonly item: WorkboardItemDraft }
+  | { readonly action: 'revise'; readonly current_title: string; readonly item: WorkboardItemDraft }
+  | { readonly action: 'archive'; readonly current_title: string; readonly archived_as: WorkboardArchiveOutcome }
+
+function requireWorkboardMutation(value: Record<string, unknown>): WorkboardAdminMutation {
+  if (value.action === 'create' && value.item !== undefined) return { action: 'create', item: value.item as WorkboardItemDraft }
+  if (value.action === 'revise' && typeof value.current_title === 'string' && value.item !== undefined) {
+    return { action: 'revise', current_title: value.current_title, item: value.item as WorkboardItemDraft }
+  }
+  if (
+    value.action === 'archive'
+    && typeof value.current_title === 'string'
+    && (value.archived_as === 'completed' || value.archived_as === 'abandoned')
+  ) return { action: 'archive', current_title: value.current_title, archived_as: value.archived_as }
+  throw new RpcError('INVALID_PARAMS', '任务板修改参数非法')
+}
+
+function workboardMutationPayload(mutation: WorkboardAdminMutation): Record<string, unknown> {
+  if (mutation.action === 'create') return { action: mutation.action, item: mutation.item }
+  if (mutation.action === 'revise') return { action: mutation.action, current_title: mutation.current_title, item: mutation.item }
+  return { action: mutation.action, current_title: mutation.current_title, archived_as: mutation.archived_as }
+}
+
+function normalizeWorkboardPage(value: unknown, fallback: number): number {
+  if (value === undefined) return fallback
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new RpcError('INVALID_PARAMS', 'page 和 page_size 必须是正整数')
+  }
+  return value
+}
 
 function resolveTmpPageBridgeLaunch(dataDir: string, baseUrl: string | undefined): TmpPageBridgeLaunch {
   const compiledEntry = path.join(__dirname, 'mcp', 'tmp-page-stdio-server.js')
@@ -606,6 +648,9 @@ export class UnifiedAgent extends ModuleBase {
   /** True after startup reconciliation has settled, even when it failed. */
   private managerReconciliationSettled = false
   private runtimeClosing = false
+  /** 每个 ManagerKey 至多一个任务板 notice 路由尝试；最新 revision 仍以 Store 为准。 */
+  private readonly workboardNoticeDispatching = new Set<ManagerKey>()
+  private readonly workboardNoticeRetryTimers = new Map<ManagerKey, ReturnType<typeof setTimeout>>()
 
   private reserveWorkerOperation(impl: import('./workers/types.js').CLIWorkerImplId): void {
     if (this.workerOperationReservations.has(impl) || this.workerOperationStore.hasActiveFor(impl)) {
@@ -907,6 +952,7 @@ export class UnifiedAgent extends ModuleBase {
       },
       // P6-A §3.2：episode 消费（含沉默终态）即结算未 claim 的 request IDs。
       onAdminChatWakeConsumed: async (key, ids) => { await this.adminChatCorrelationStore().settleInbound(key, ids) },
+      onWorkboardAdminUpdateConsumed: (key, revisions) => this.acknowledgeConsumedWorkboardNotices(key, revisions),
       // 人类消息渲染的时区（`formatChannelMessageLine` 的 ts 属性）。与 worker 侧
       // `buildBuiltinWorkerRuntime` 取同一个来源，避免 manager 与 worker 看到的时间对不上。
       timezone: () => resolveTimezone(this.agentConfig?.timezone),
@@ -1477,6 +1523,8 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
     this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
+    this.registerMethod('get_workboard_admin', this.handleGetWorkboardAdmin.bind(this))
+    this.registerMethod('change_workboard_admin', this.handleChangeWorkboardAdmin.bind(this))
     this.registerMethod('list_worker_implementation_status', this.handleListWorkerImplementationStatus.bind(this))
     this.registerMethod('install_worker_implementation', this.handleInstallWorkerImplementation.bind(this))
     this.registerMethod('verify_worker_implementation', this.handleVerifyWorkerImplementation.bind(this))
@@ -3278,6 +3326,219 @@ export class UnifiedAgent extends ModuleBase {
     return filterAndPageWorkers(all, params ?? {})
   }
 
+  private async requireKnownManagerKey(raw: unknown): Promise<ManagerKey> {
+    if (typeof raw !== 'string' || !isManagerKey(raw)) throw new RpcError('INVALID_PARAMS', 'manager_key 非法')
+    const key = raw as ManagerKey
+    const stack = this.requireManagerStack()
+    const known = new Set<ManagerKey>([
+      ...await stack.store.listManagerKeys(),
+      ...this.traceStore.listTraceManagerKeys(),
+      ...stack.registry.listActiveManagers().map((entry) => entry.key),
+    ])
+    if (!known.has(key)) throw new RpcError('NOT_FOUND', `Manager 不存在: ${key}`)
+    return key
+  }
+
+  /** §8.4：Admin 读取同一份任务板真相源；revision 仅在此控制面返回。 */
+  private async handleGetWorkboardAdmin(params: {
+    manager_key?: unknown
+    view?: unknown
+    page?: unknown
+    page_size?: unknown
+  }): Promise<{
+    manager_key: ManagerKey
+    revision: number
+    view: WorkboardView
+    items: Array<WorkboardItem | import('./manager/workboard-store.js').ArchivedWorkboardItem>
+    active_count: number
+    archive_count: number
+    pagination: { page: number; page_size: number; total_items: number; total_pages: number }
+  }> {
+    const key = await this.requireKnownManagerKey(params.manager_key)
+    const view: WorkboardView = params.view === undefined ? 'active' : params.view === 'active' || params.view === 'archive'
+      ? params.view
+      : (() => { throw new RpcError('INVALID_PARAMS', 'view 必须是 active 或 archive') })()
+    const page = normalizeWorkboardPage(params.page, 1)
+    const pageSize = Math.min(normalizeWorkboardPage(params.page_size, 20), 100)
+    const board = await this.requireManagerStack().workboard.loadAdmin(key)
+    const items = [...(view === 'active' ? board.active : board.archive)].sort((left, right) => {
+      const order = { ready: 0, in_progress: 1, blocked: 2 } as const
+      const status = order[left.status] - order[right.status]
+      return status === 0 ? left.title.localeCompare(right.title) : status
+    })
+    const offset = (page - 1) * pageSize
+    return {
+      manager_key: key,
+      revision: board.revision,
+      view,
+      items: items.slice(offset, offset + pageSize),
+      active_count: board.active.length,
+      archive_count: board.archive.length,
+      pagination: { page, page_size: pageSize, total_items: items.length, total_pages: Math.ceil(items.length / pageSize) },
+    }
+  }
+
+  /** §8.4：Admin 写入先核销专用 assertion，再在 Store 内完成整板 CAS 与 notice 落盘。 */
+  private async handleChangeWorkboardAdmin(params: Record<string, unknown>): Promise<{
+    manager_key: ManagerKey
+    revision: number
+    item: WorkboardItem | import('./manager/workboard-store.js').ArchivedWorkboardItem
+    active_count: number
+    archive_count: number
+    manager_notification: 'pending'
+  }> {
+    const key = await this.requireKnownManagerKey(params.manager_key)
+    if (typeof params.expected_revision !== 'number' || !Number.isSafeInteger(params.expected_revision) || params.expected_revision < 0) {
+      throw new RpcError('INVALID_PARAMS', 'expected_revision 必须是非负安全整数')
+    }
+    if (typeof params.assertion !== 'string') throw new RpcError('INVALID_PARAMS', 'assertion 必填')
+    const mutation = requireWorkboardMutation(params)
+    const adminPort = await this.getAdminPort()
+    const payloadSha256 = sha256CanonicalJson(workboardMutationPayload(mutation))
+    const consumed = await this.rpcClient.callSensitive<
+      {
+        assertion: string
+        expected: { manager_key: ManagerKey; action: WorkboardAdminMutation['action']; expected_revision: number; payload_sha256: string }
+      },
+      { consumed?: unknown; expires_at?: unknown }
+    >(
+      adminPort,
+      'consume_workboard_admin_assertion',
+      {
+        assertion: params.assertion,
+        expected: {
+          manager_key: key,
+          action: mutation.action,
+          expected_revision: params.expected_revision,
+          payload_sha256: payloadSha256,
+        },
+      },
+      this.config.moduleId,
+      { authorizationBearer: ConfigLoader.getRuntimeBearer() },
+    )
+    if (consumed.consumed !== true || typeof consumed.expires_at !== 'string' || !Number.isFinite(Date.parse(consumed.expires_at))) {
+      throw new RpcError('FORBIDDEN', '任务板 assertion 核销结果非法')
+    }
+    const store = this.requireManagerStack().workboard
+    try {
+      const result = mutation.action === 'create'
+        ? await store.adminCreate(key, params.expected_revision, mutation.item)
+        : mutation.action === 'revise'
+          ? await store.adminRevise(key, params.expected_revision, mutation.current_title, mutation.item)
+          : await store.adminArchive(key, params.expected_revision, mutation.current_title, mutation.archived_as)
+      this.dispatchWorkboardAdminNotice(key)
+      return {
+        manager_key: key,
+        revision: result.board.revision,
+        item: result.item,
+        active_count: result.board.active.length,
+        archive_count: result.board.archive.length,
+        manager_notification: 'pending',
+      }
+    } catch (error) {
+      if (error instanceof WorkboardRevisionConflictError) {
+        throw new RpcError('WORKBOARD_REVISION_CONFLICT', `任务板 revision 冲突（当前为 ${error.currentRevision}）`, {
+          current_revision: error.currentRevision,
+        })
+      }
+      if (error instanceof WorkboardValidationError) {
+        throw new RpcError('INVALID_PARAMS', error.message)
+      }
+      throw error
+    }
+  }
+
+  /** 已持久化的 notice 是最终真相；进程内只负责去重调度和有界重试。 */
+  private dispatchWorkboardAdminNotice(key: ManagerKey): void {
+    if (this.runtimeClosing || this.workboardNoticeDispatching.has(key)) return
+    const scheduled = this.workboardNoticeRetryTimers.get(key)
+    if (scheduled) {
+      clearTimeout(scheduled)
+      this.workboardNoticeRetryTimers.delete(key)
+    }
+    this.workboardNoticeDispatching.add(key)
+    let dispatchedRevision: number | undefined
+    void (async () => {
+      const stack = this.requireManagerStack()
+      const notice = await stack.workboard.pendingAdminNotice(key)
+      if (!notice) return
+      dispatchedRevision = notice.revision
+      await stack.workboard.recordAdminNoticeAttempt(key, notice.revision)
+      const result = await stack.registry.routeWorkboardAdminUpdate({
+        key,
+        noticeRevision: notice.revision,
+        onSettled: (settled) => {
+          if (!settled.consumedEvents) this.deferWorkboardAdminNotice(key, notice.revision)
+        },
+      })
+      // 空 episode ID 表示已注入正在运行的 Manager mailbox；只有该输入真正进入并完成
+      // 一次 LLM 回合，Loop 才会经 acknowledgeConsumedWorkboardNotices 清除 notice。
+      if (result.episodeId === '') return
+    })().catch((error) => {
+      console.warn(`[${this.config.moduleId}] task-board notice dispatch failed:`, error)
+      void this.deferWorkboardAdminNotice(key)
+    }).finally(() => {
+      this.workboardNoticeDispatching.delete(key)
+      // Admin 可能在旧 notice 已结算、当前派发尚未释放去重标记时完成了新保存。
+      // 仅补派发更晚的 revision，保留同 revision 的既有退避或 active mailbox 语义。
+      void this.dispatchNewerPendingWorkboardNotice(key, dispatchedRevision).catch((error) => {
+        console.warn(`[${this.config.moduleId}] task-board pending notice recheck failed:`, error)
+      })
+    })
+  }
+
+  private async dispatchNewerPendingWorkboardNotice(key: ManagerKey, dispatchedRevision: number | undefined): Promise<void> {
+    if (this.runtimeClosing) return
+    const pending = await this.requireManagerStack().workboard.pendingAdminNotice(key)
+    if (pending && pending.revision !== dispatchedRevision) this.dispatchWorkboardAdminNotice(key)
+  }
+
+  /** 只清除实际被成功 episode 消费的 revision；更晚的 Admin 保存保持待投递。 */
+  private async acknowledgeConsumedWorkboardNotices(key: ManagerKey, revisions: ReadonlyArray<number>): Promise<void> {
+    const stack = this.requireManagerStack()
+    for (const revision of revisions) {
+      try {
+        const cleared = await stack.workboard.clearAdminNoticeIfCurrent(key, revision)
+        if (!cleared) setTimeout(() => this.dispatchWorkboardAdminNotice(key), 0)
+      } catch (error) {
+        console.warn(`[${this.config.moduleId}] task-board notice acknowledgement failed:`, error)
+        await this.deferWorkboardAdminNotice(key, revision)
+      }
+    }
+  }
+
+  private async deferWorkboardAdminNotice(key: ManagerKey, revision?: number): Promise<void> {
+    if (this.runtimeClosing || this.workboardNoticeRetryTimers.has(key)) return
+    const stack = this.requireManagerStack()
+    const notice = await stack.workboard.pendingAdminNotice(key)
+    if (!notice || (revision !== undefined && notice.revision !== revision)) return
+    const delay = WORKBOARD_RETRY_DELAYS_MS[Math.min(notice.attempts, WORKBOARD_RETRY_DELAYS_MS.length - 1)]
+    const retryAfter = new Date(Date.now() + delay).toISOString()
+    await stack.workboard.recordAdminNoticeAttempt(key, notice.revision, retryAfter)
+    this.workboardNoticeRetryTimers.set(key, setTimeout(() => {
+      this.workboardNoticeRetryTimers.delete(key)
+      this.dispatchWorkboardAdminNotice(key)
+    }, delay))
+  }
+
+  private async replayPendingWorkboardNotices(): Promise<void> {
+    const stack = this.requireManagerStack()
+    const notices = await stack.workboard.listPendingAdminNotices()
+    for (const { manager_key, notice } of notices) {
+      if (notice.retry_after_at && Date.parse(notice.retry_after_at) > Date.now()) {
+        const delay = Date.parse(notice.retry_after_at) - Date.now()
+        if (!this.workboardNoticeRetryTimers.has(manager_key)) {
+          this.workboardNoticeRetryTimers.set(manager_key, setTimeout(() => {
+            this.workboardNoticeRetryTimers.delete(manager_key)
+            this.dispatchWorkboardAdminNotice(manager_key)
+          }, delay))
+        }
+      } else {
+        this.dispatchWorkboardAdminNotice(manager_key)
+      }
+    }
+  }
+
   /** §8.4 list_managers_admin：disk session keys ∪ TraceStore keys ∪ 内存 running keys 的去重 union。 */
   private async handleListManagersAdmin(params: { pagination?: import('crabot-shared').PaginationParams }): Promise<import('crabot-shared').PaginatedResult<import('./manager/read-model.js').ManagerAdminSummary>> {
     const stack = this.requireManagerStack()
@@ -3292,6 +3553,20 @@ export class UnifiedAgent extends ModuleBase {
       activeWorkerCounts.set(managerKey, (activeWorkerCounts.get(managerKey) ?? 0) + 1)
     }
     const running = new Map(stack.registry.listActiveManagers().map(({ key, lastActiveAtMs }) => [key, lastActiveAtMs] as const))
+    const workboardSummaries = new Map<ManagerKey, import('./manager/read-model.js').ManagerWorkboardSummary | { status: 'unknown' }>()
+    const managerKeys = new Set<ManagerKey>([...diskKeys, ...traceKeys, ...running.keys()])
+    await Promise.all([...managerKeys].map(async (key) => {
+      try {
+        const board = await stack.workboard.loadAdmin(key)
+        workboardSummaries.set(key, {
+          status: 'ready',
+          active_count: board.active.length,
+          blocked_count: board.active.filter((item) => item.status === 'blocked').length,
+        })
+      } catch {
+        workboardSummaries.set(key, { status: 'unknown' })
+      }
+    }))
     return buildManagerAdminSummaries({
       diskSessionKeys: diskKeys,
       traceKeys,
@@ -3305,6 +3580,7 @@ export class UnifiedAgent extends ModuleBase {
       },
       activeWorkerCount: (key) => activeWorkerCounts.get(key) ?? 0,
       runningLastActiveAtMs: (key) => running.get(key),
+      workboardSummary: (key) => workboardSummaries.get(key) ?? { status: 'unknown' },
     }, params?.pagination)
   }
 
@@ -4799,6 +5075,9 @@ export class UnifiedAgent extends ModuleBase {
           const message = error instanceof Error ? error.message : String(error)
           console.warn(`[${this.config.moduleId}] worker recovery notice delivery startup failed（不影响启动）:`, message)
         })
+        void this.replayPendingWorkboardNotices().catch((error) => {
+          console.warn(`[${this.config.moduleId}] task-board notice recovery failed（不影响启动）:`, error)
+        })
         if (this.runtimeClosing) return
         stack.harness.startLivenessSweep()
       })
@@ -4807,6 +5086,8 @@ export class UnifiedAgent extends ModuleBase {
   protected override async onStop(): Promise<void> {
     this.runtimeClosing = true
     this.stopCliSubagentHarvestScheduler()
+    for (const timer of this.workboardNoticeRetryTimers.values()) clearTimeout(timer)
+    this.workboardNoticeRetryTimers.clear()
 
     // 优雅停机前补一次所有活跃 worker task 的 resume checkpoint flush，
     // 让 crabot stop 场景的停机窗口（最后一 turn 到进程退出之间）也无损。

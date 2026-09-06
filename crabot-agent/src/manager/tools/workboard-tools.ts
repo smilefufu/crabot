@@ -89,7 +89,7 @@ export function buildWorkboardTools(deps: {
         if (input.query !== undefined && typeof input.query !== 'string') throw new Error('query 必须是字符串')
         const page = positiveInteger(input.page, 1, Number.MAX_SAFE_INTEGER, 'page')
         const pageSize = positiveInteger(input.page_size, 20, 100, 'page_size')
-        const board = await deps.store.load(deps.managerKey)
+        const board = await deps.store.loadAdmin(deps.managerKey)
         const source = view === 'active' ? board.active : board.archive
         const filtered = input.query === undefined
           ? source
@@ -97,9 +97,12 @@ export function buildWorkboardTools(deps: {
         const sorted = stableSort(filtered)
         const offset = (page - 1) * pageSize
         const totalItems = sorted.length
+        const items = sorted.slice(offset, offset + pageSize)
+        // 只有这次实际返回了受保护事项，且其 revision 未落后于栅栏时，才能解除同项写入保护。
+        await deps.store.acknowledgeManagerRead(deps.managerKey, view, items, board.revision)
         return output({
           view,
-          items: sorted.slice(offset, offset + pageSize),
+          items,
           active_count: board.active.length,
           archive_count: board.archive.length,
           pagination: {
