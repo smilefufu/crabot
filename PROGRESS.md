@@ -1,9 +1,17 @@
 # Crabot 项目进度
 
-> 最后整理：2026-09-05
+> 最后整理：2026-09-06
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
+
+### Manager 取消按空闲时间提前压缩：Spec 待确认
+
+- 取消空闲超过 5 分钟且旧历史超过 20K tokens 时的 `fold_at_wake`；保留完整请求容量压缩、
+  既有溢出恢复，以及 Manager 与 builtin Worker 共用的 Engine 增量压缩器。
+- 已核对协议、当前实现与内部接口清理范围，书面方案见
+  [设计 spec](crabot-docs/superpowers/specs/2026-09-06-manager-remove-idle-compaction-design.md)。
+  等待书面 spec 确认后更新正式协议并进入实现；当前未改变运行行为。
 
 ### Engine 工具调用实时 Trace 与 builtin 异步委派：实现完成，待合入
 
