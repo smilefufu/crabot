@@ -922,6 +922,7 @@ export type AgentSpanType =
   | 'agent_loop'
   | 'llm_call'
   | 'tool_call'
+  | 'tool_result'
   | 'sub_agent_call'
   | 'decision'
   | 'context_assembly'
@@ -963,13 +964,15 @@ export interface TokenUsage {
 }
 
 export interface LlmCallDetails {
+  /** Engine-owned stable identity shared with this response's tool lifecycle. */
+  response_id?: string
   iteration?: number
   attempt?: number
   input_summary?: string
   output_summary?: string
   /** builtin worker 本轮产生的脱敏 assistant text；仅用于 worker trace read model。 */
   assistant_text?: string
-  stop_reason?: string
+  stop_reason?: string | null
   tool_calls_count?: number
   full_input?: string
   full_output?: string
@@ -987,6 +990,10 @@ export interface LlmCallDetails {
 }
 
 export interface ToolCallDetails {
+  /** Engine response that produced this call. */
+  response_id?: string
+  /** Engine-owned stable correlation id shared by append-only call/result records. */
+  call_id?: string
   tool_name: string
   input_summary: string
   output_summary?: string
@@ -995,6 +1002,18 @@ export interface ToolCallDetails {
   child_trace_id?: string
   /** 本工具对应的 tool_use id,供 UI 从 messages 精确匹配完整 I/O。 */
   tool_use_id?: string
+}
+
+export interface ToolResultDetails {
+  /** Engine response that produced this result. */
+  response_id?: string
+  call_id: string
+  tool_use_id?: string
+  tool_name?: string
+  output_summary: string
+  is_error?: boolean
+  error?: string
+  subagent_id?: string
 }
 
 export interface SubAgentCallDetails {
@@ -1095,6 +1114,7 @@ export type AgentSpanDetails =
   | AgentLoopDetails
   | LlmCallDetails
   | ToolCallDetails
+  | ToolResultDetails
   | SubAgentCallDetails
   | DecisionDetails
   | ContextAssemblyDetails

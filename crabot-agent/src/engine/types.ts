@@ -192,10 +192,28 @@ export type StreamChunk =
 
 // --- Engine Options & Result ---
 
+export interface EngineLlmResponseEvent {
+  /** Engine-owned stable identity, unique across separate runEngine bursts. */
+  readonly responseId: string
+  readonly turnNumber: number
+  readonly assistantText: string
+  readonly stopReason: EngineAssistantMessage['stopReason']
+  readonly toolCallsCount: number
+  readonly llmCallMs: number
+  readonly llmStartedAtMs: number
+  readonly forcedSummaryAttempt?: number
+  readonly usage?: LLMTokenUsage
+  readonly diagnostics?: LLMCallDiagnostics
+}
+
 export interface EngineTurnEvent {
+  /** Shared with the preceding EngineLlmResponseEvent and tool lifecycle events. */
+  readonly responseId: string
   readonly turnNumber: number
   readonly assistantText: string
   readonly toolCalls: ReadonlyArray<{
+    /** Engine-owned stable correlation id shared with tool lifecycle events. */
+    readonly callId: string
     readonly id: string
     readonly name: string
     readonly input: Record<string, unknown>
@@ -222,6 +240,32 @@ export interface EngineTurnEvent {
   /** 本轮 LLM 流式消费诊断（首 chunk 延迟 / chunk 数 / 重试次数）；无则缺省 */
   readonly diagnostics?: LLMCallDiagnostics
 }
+
+export type EngineToolLifecycleEvent =
+  | {
+      readonly type: 'tool_started'
+      readonly responseId: string
+      readonly callId: string
+      readonly turnNumber: number
+      readonly toolUseId: string
+      readonly name: string
+      readonly input: Record<string, unknown>
+      readonly startedAtMs: number
+    }
+  | {
+      readonly type: 'tool_finished'
+      readonly responseId: string
+      readonly callId: string
+      readonly turnNumber: number
+      readonly toolUseId: string
+      readonly name: string
+      readonly input: Record<string, unknown>
+      readonly output: string
+      readonly isError: boolean
+      readonly startedAtMs: number
+      readonly endedAtMs: number
+      readonly durationMs: number
+    }
 
 /** 流式消费诊断（仅成功路径填充），供 trace/span 观测 */
 export interface LLMCallDiagnostics {
@@ -252,9 +296,9 @@ export interface EngineMessagesRef {
 /**
  * 实时进度事件（细粒度）。
  *
- * 与 `EngineTurnEvent` 的区别：onTurn 是事后回调（工具执行完才触发，所有 span
- * 一次性写入），而 `LiveProgressEvent` 在 LLM 返回 / 工具开始 / 工具结束三个时
- * 间点都会发送，让外部观察者能感知"飞行中"状态。
+ * 与 `EngineTurnEvent` 的区别：onTurn 是工具执行完后的干净 checkpoint；
+ * `LiveProgressEvent` 在 LLM 返回 / 工具开始 / 工具结束三个时间点发送，
+ * 让外部观察者能感知"飞行中"状态。
  */
 export type LiveProgressEvent =
   | {
@@ -300,6 +344,10 @@ export interface EngineOptions {
   readonly maxTokens?: number
   readonly abortSignal?: AbortSignal
   readonly onTurn?: (event: EngineTurnEvent) => void
+  /** Synchronous, best-effort observer emitted before any tool started by this response. */
+  readonly onLlmResponse?: (event: EngineLlmResponseEvent) => void
+  /** Synchronous, best-effort observer for individual tool execution boundaries. */
+  readonly onToolLifecycle?: (event: EngineToolLifecycleEvent) => void
   /** 实时进度回调（fires LLM 返回 / 工具开始 / 工具结束三处）—— 见 LiveProgressEvent */
   readonly onLiveProgress?: (event: LiveProgressEvent) => void
   readonly permissionConfig?: ToolPermissionConfig

@@ -5,6 +5,16 @@
 
 ## 当前状态
 
+### Engine 工具调用实时 Trace 与 builtin 异步委派：实现完成，待合入
+
+- 共享 Engine 已先按稳定 `response_id` 发出完整 LLM 响应事实，再按稳定 `call_id` 发出逐工具
+  start/finish：Manager 在完整 episode 快照中原地收口 running span，builtin Worker、fork 与后台 child
+  以追加式 response/call/result 保证因果顺序和增量 cursor 不漏结果；重启会为已持久但未收口的调用补
+  唯一 interrupted result。
+- builtin 首次 spawn 的实际 `prompt` 已进入本化身脱敏 trace；`delegate_task` 删除 `sync` schema、提示词
+  与运行时 fallback，只在 child 注册并受理后异步返回，旧输入额外携带 `sync=true` 也不会恢复同步等待。
+- 正式协议 agent-v3 `3.9.6` 与确认后的 Spec 已先行发布（crabot-docs `4eae35e`）。
+
 ### Manager 会话在途消息统一时间流：实现完成
 
 - Admin 只读聚合 Manager 当前上下文、私聊 SessionLane 和群聊 AttentionScheduler，按

@@ -405,6 +405,84 @@ describe('BuiltinWorkerAdapter', () => {
     })
   })
 
+  it('首次 spawn 把执行用的同一 prompt 传给化身 trace，且只传一次', async () => {
+    const startIncarnationTrace = vi.fn(() => 'trace-initial')
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace,
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+    })
+    const s = spec({ adapter: makeAdapter([{ text: '等待后续', stopReason: 'end_turn' }]) })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    expect(startIncarnationTrace).toHaveBeenCalledOnce()
+    expect(startIncarnationTrace).toHaveBeenCalledWith(expect.objectContaining({
+      worker_id: s.worker_id,
+      seq: 1,
+      initial_input: s.prompt,
+    }))
+  })
+
+  it('工具生命周期只写 trace，不在完整 turn 前触发 native activity 通知', async () => {
+    const gate = deferred<void>()
+    const traceEvents: Array<{ phase: string; responseId: string }> = []
+    const appendLlmResponse = vi.fn((_traceId, event) => {
+      traceEvents.push({ phase: 'llm_response', responseId: event.responseId })
+    })
+    const appendToolLifecycle = vi.fn()
+    const onNativeActivity = vi.fn()
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      onNativeActivity,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-tool',
+        appendLlmResponse,
+        appendTurn: (_traceId, event) => {
+          traceEvents.push({ phase: 'turn', responseId: event.responseId })
+        },
+        appendToolLifecycle: (traceId, event) => {
+          appendToolLifecycle(traceId, event)
+          traceEvents.push({ phase: event.type, responseId: event.responseId })
+        },
+        finishIncarnationTrace: () => {},
+      },
+    })
+    const waitTool = defineTool({
+      name: 'wait_tool', description: 'wait', inputSchema: {},
+      call: async () => {
+        await gate.promise
+        return { output: 'done', isError: false }
+      },
+    })
+    const h = await adapter.spawn(spec({
+      adapter: makeAdapter([
+        { toolCalls: [{ name: 'wait_tool', id: 'provider-call', input: {} }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+      ]),
+      tools: [waitTool],
+    }))
+
+    await vi.waitFor(() => expect(appendToolLifecycle).toHaveBeenCalledWith(
+      'trace-tool', expect.objectContaining({ type: 'tool_started', toolUseId: 'provider-call' }),
+    ))
+    expect(traceEvents.map((event) => event.phase)).toEqual(['llm_response', 'tool_started'])
+    expect(traceEvents[1].responseId).toBe(traceEvents[0].responseId)
+    expect(onNativeActivity).not.toHaveBeenCalled()
+
+    gate.resolve()
+    await waitState(adapter, h, 'idle')
+    expect(traceEvents.map((event) => event.phase)).toEqual([
+      'llm_response', 'tool_started', 'tool_finished', 'turn', 'llm_response', 'turn',
+    ])
+    expect(traceEvents.slice(0, 4).every((event) => event.responseId === traceEvents[0].responseId)).toBe(true)
+    expect(onNativeActivity).toHaveBeenCalled()
+  })
+
   it('没有可读结构化 trace 时，巡检保守返回 unknown', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const h = await adapter.spawn(spec({
@@ -471,6 +549,86 @@ describe('BuiltinWorkerAdapter', () => {
       kind: 'text',
       next_cursor: { offset: 3 },
     })
+  })
+
+  it('append-only 工具结果可从上次 cursor 单独读到，并与调用共享 call_id', async () => {
+    const trace = {
+      spans: [{
+        span_id: 'source-call',
+        type: 'tool_call',
+        started_at: '2026-08-20T01:00:01.000Z',
+        status: 'completed',
+        details: {
+          call_id: 'engine-call', tool_use_id: 'provider-call', tool_name: 'delegate_task',
+          input_summary: '{"task":"核对数据"}',
+        },
+      }],
+    } as unknown as AgentTrace
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+      traceReader: { readTrace: async () => trace },
+    })
+    const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+    await waitState(adapter, h, 'idle')
+
+    const first = await adapter.readTrace(h)
+    expect(first).toMatchObject({
+      events: [{ kind: 'tool_call', detail: { call_id: 'engine-call', tool_use_id: 'provider-call' } }],
+      nextCursor: { offset: 1 },
+    })
+
+    trace.spans.push({
+      span_id: 'source-result',
+      trace_id: 'trace-1',
+      type: 'tool_result',
+      started_at: '2026-08-20T01:00:02.000Z',
+      ended_at: '2026-08-20T01:00:02.000Z',
+      status: 'completed',
+      details: {
+        call_id: 'engine-call', tool_use_id: 'provider-call', tool_name: 'delegate_task',
+        output_summary: '{"agent_id":"agent-child","status":"launched"}',
+        subagent_id: 'agent-child',
+      },
+    } as never)
+    await expect(adapter.readTrace(h, first.nextCursor)).resolves.toMatchObject({
+      events: [{
+        kind: 'tool_result', subagent_id: 'agent-child',
+        detail: { call_id: 'engine-call', tool_use_id: 'provider-call' },
+      }],
+      nextCursor: { offset: 2 },
+    })
+  })
+
+  it('旧 tool span 没有结果时不伪造 paired-lifecycle call_id', async () => {
+    const trace = {
+      spans: [{
+        span_id: 'legacy-no-result',
+        type: 'tool_call',
+        started_at: '2026-08-20T01:00:01.000Z',
+        status: 'completed',
+        details: { name: 'shell', input_summary: 'pwd' },
+      }],
+    } as unknown as AgentTrace
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-1',
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+      traceReader: { readTrace: async () => trace },
+    })
+    const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+    await waitState(adapter, h, 'idle')
+
+    const result = await adapter.readTrace(h)
+    expect(result.events).toMatchObject([{ kind: 'tool_call', detail: { name: 'shell', input: 'pwd' } }])
+    expect(result.events[0].detail).not.toHaveProperty('call_id')
   })
 
   it('context_assembly 的 message_batch 投影为 Manager user message', async () => {
@@ -624,7 +782,7 @@ describe('BuiltinWorkerAdapter', () => {
       expect(await adapter.lastActivityAt(h)).toBe(2_000)
 
       now = 3_000
-      mainOptions.onTurn!({ turnNumber: 1, assistantText: '', toolCalls: [], stopReason: 'end_turn' })
+      mainOptions.onTurn!({ responseId: 'response-1', turnNumber: 1, assistantText: '', toolCalls: [], stopReason: 'end_turn' })
       expect(await adapter.lastActivityAt(h)).toBe(3_000)
 
       now = 4_000
@@ -650,7 +808,8 @@ describe('BuiltinWorkerAdapter', () => {
 
   it('fork 不暴露主线工具并追加侧问指令，且收尾不停止主线的 child', async () => {
     const stopWorkerSubagents = vi.fn()
-    const startIncarnationTrace = vi.fn(() => 'trace-1')
+    const startIncarnationTrace = vi.fn(({ seq }: { seq: number }) => `trace-${seq}`)
+    const traceEvents: Array<{ traceId: string; phase: string; responseId: string }> = []
     const forkReports: StateChangeReport[] = []
     const delegateTask = defineTool({
       name: 'delegate_task',
@@ -676,7 +835,15 @@ describe('BuiltinWorkerAdapter', () => {
       },
       traceHooks: {
         startIncarnationTrace,
-        appendTurn: () => {},
+        appendLlmResponse: (traceId, event) => {
+          traceEvents.push({ traceId, phase: 'llm_response', responseId: event.responseId })
+        },
+        appendTurn: (traceId, event) => {
+          traceEvents.push({ traceId, phase: 'turn', responseId: event.responseId })
+        },
+        appendToolLifecycle: (traceId, event) => {
+          traceEvents.push({ traceId, phase: event.type, responseId: event.responseId })
+        },
         finishIncarnationTrace: () => {},
         stopWorkerSubagents,
       },
@@ -702,6 +869,11 @@ describe('BuiltinWorkerAdapter', () => {
     expect(forkCall.systemPrompt).not.toContain('只有问题明确询问 Crabot 系统自身的实时运行事实')
     expect(forkReports.at(-1)?.lastText).toBe('侧问结果')
     expect(stopWorkerSubagents).not.toHaveBeenCalled()
+    const forkTraceEvents = traceEvents.filter((event) => event.traceId === `trace-${forkHandle.seq}`)
+    expect(forkTraceEvents.map((event) => event.phase)).toEqual([
+      'llm_response', 'tool_started', 'tool_finished', 'turn', 'llm_response', 'turn',
+    ])
+    expect(forkTraceEvents.slice(0, 4).every((event) => event.responseId === forkTraceEvents[0].responseId)).toBe(true)
     expect(startIncarnationTrace).toHaveBeenCalledWith(expect.objectContaining({
       seq: forkHandle.seq,
       initial_input: '侧问',

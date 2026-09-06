@@ -13,6 +13,7 @@ import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { ActivityContextAdmissionReceipt } from '../../src/workers/harness/worker-events.js'
 import { createUserMessage, defineTool } from '../../src/engine/index.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
+import type { ManagerEpisodeSpan, ManagerTraceWriter } from '../../src/manager/trace-types.js'
 import { MANAGER_WORKBOARD_CONTEXT } from '../../src/manager/prompt.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
@@ -278,6 +279,68 @@ describe('ManagerLoop', () => {
     expect(state.recent.length).toBe(4) // 事件 + 直接文字 + 纠偏提醒 + 纠偏后的静默收口
     expect(JSON.stringify(state.recent)).toContain('你好')
     expect(state.lastActiveAt).toBeTruthy()
+  })
+
+  it('工具未返回时已有 running span，返回后原地收口且 onTurn 不重复追加', async () => {
+    const { adapter, queue } = makeAdapter()
+    queue.push(
+      { toolCalls: [{ name: 'deferred_tool', id: 'provider-call', input: { value: 1 } }], stopReason: 'tool_use' },
+      { stopReason: 'end_turn' },
+    )
+    let resolveTool!: () => void
+    const toolGate = new Promise<void>((resolve) => { resolveTool = resolve })
+    const spans: ManagerEpisodeSpan[] = []
+    const traceWriter: ManagerTraceWriter = {
+      startEpisode: vi.fn(),
+      appendSpan: vi.fn((_traceId, span) => { spans.push({ ...span }) }),
+      finishSpan: vi.fn((_traceId, spanId, patch) => {
+        const span = spans.find((item) => item.span_id === spanId)
+        if (!span || span.status !== 'running') return
+        span.status = patch.status
+        span.ended_at = patch.ended_at
+        span.details = patch.details ?? span.details
+      }),
+      finishEpisode: vi.fn(),
+      addSpawnedWorker: vi.fn(),
+    }
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      traceWriter,
+      toolFace: () => [defineTool({
+        name: 'deferred_tool', description: 'wait', inputSchema: {},
+        call: async () => {
+          await toolGate
+          return { output: 'done', isError: false }
+        },
+      })],
+    }))
+
+    const running = loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始')] }))
+    await vi.waitFor(() => {
+      expect(spans.filter((span) => span.type === 'tool_call')).toHaveLength(1)
+      expect(spans.find((span) => span.type === 'tool_call')?.status).toBe('running')
+    })
+    expect(spans.filter((span) => span.type === 'llm_call' || span.type === 'tool_call').map((span) => span.type))
+      .toEqual(['llm_call', 'tool_call'])
+    const llmSpan = spans.find((span) => span.type === 'llm_call')!
+    const runningSpan = spans.find((span) => span.type === 'tool_call')!
+    expect(llmSpan.details).toMatchObject({ response_id: expect.any(String) })
+    expect(runningSpan.details).toMatchObject({
+      response_id: (llmSpan.details as { response_id: string }).response_id,
+      call_id: expect.any(String),
+      tool_use_id: 'provider-call',
+      name: 'deferred_tool',
+    })
+
+    resolveTool()
+    await running
+
+    expect(spans.filter((span) => span.type === 'tool_call')).toHaveLength(1)
+    expect(spans.filter((span) => span.type === 'llm_call')).toHaveLength(2)
+    expect(runningSpan.status).toBe('completed')
+    expect(runningSpan.details).toMatchObject({ output_summary: expect.stringContaining('done') })
+    expect(traceWriter.finishSpan).toHaveBeenCalledOnce()
   })
 
   it('任务板规则稳定装配，但动态任务状态不进入 system prompt，也不触发自动读取', async () => {

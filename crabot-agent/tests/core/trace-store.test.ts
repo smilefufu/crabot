@@ -852,6 +852,76 @@ describe('loadResumableCheckpoints', () => {
 
     fs.rmSync(dir, { recursive: true, force: true })
   })
+
+  it('为可 resume trace 中未收口的工具调用补 interrupted result', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tracestore-'))
+    try {
+      const trace = {
+        trace_id: 'tr-tool', module_id: 'agent-1', started_at: new Date(0).toISOString(),
+        status: 'running', trigger: { type: 'task', summary: 't' }, related_task_id: 'task-tool',
+        spans: [{
+          span_id: 'span-call', trace_id: 'tr-tool', type: 'tool_call',
+          started_at: new Date(1_000).toISOString(), ended_at: new Date(1_000).toISOString(),
+          duration_ms: 0, status: 'completed',
+          details: { call_id: 'engine-call', tool_use_id: 'provider-call', tool_name: 'Read', input_summary: '{}' },
+        }],
+        resume_checkpoint: { agent_version: '1.0.0', system_prompt: 'SP',
+          messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }], worker_state: { todo_items: [] } },
+      }
+      fs.writeFileSync(path.join(dir, 'traces-running-task-tool.jsonl'), JSON.stringify(trace) + '\n')
+
+      const store = new TraceStore(100, dir)
+      const loaded = store.getTrace('tr-tool')
+      expect(store.getResumableCheckpoint('task-tool')).toBeDefined()
+      expect(loaded?.status).toBe('running')
+      expect(loaded?.spans.filter((span) => span.type === 'tool_call')).toHaveLength(1)
+      expect(loaded?.spans.filter((span) => span.type === 'tool_result')).toHaveLength(1)
+      expect(loaded?.spans.find((span) => span.type === 'tool_result')).toMatchObject({
+        status: 'failed',
+        details: { call_id: 'engine-call', is_error: true, output_summary: '[interrupted: agent restarted]' },
+      })
+
+      store.stopFlushTimer()
+      const rebuilt = new TraceStore(100, dir)
+      expect(rebuilt.getTrace('tr-tool')?.spans.filter((span) => span.type === 'tool_result')).toHaveLength(1)
+      rebuilt.stopFlushTimer()
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('可 resume trace 使用全局 in-flight 快照中的较新工具 spans', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tracestore-'))
+    try {
+      const store = new TraceStore(100, dir)
+      const trace = store.startTrace({
+        module_id: 'agent-1', trigger: { type: 'task', summary: 't' }, related_task_id: 'task-tool',
+      })
+      store.flushWorkerCheckpoint('task-tool', trace.trace_id, {
+        agent_version: '1.0.0', system_prompt: 'SP',
+        messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }], worker_state: { todo_items: [] },
+      })
+      const call = store.startSpan(trace.trace_id, {
+        type: 'tool_call', started_at_ms: 1_000,
+        details: { call_id: 'engine-call', tool_use_id: 'provider-call', tool_name: 'Read', input_summary: '{}' },
+      })
+      store.endSpan(trace.trace_id, call.span_id, 'completed', undefined, 1_000)
+      ;(store as unknown as { flushInFlightTraces(): void }).flushInFlightTraces()
+
+      const rebuilt = new TraceStore(100, dir)
+      const loaded = rebuilt.getTrace(trace.trace_id)
+      expect(rebuilt.getResumableCheckpoint('task-tool')).toBeDefined()
+      expect(loaded?.status).toBe('running')
+      expect(loaded?.spans.filter((span) => span.type === 'tool_call')).toHaveLength(1)
+      expect(loaded?.spans.filter((span) => span.type === 'tool_result')).toHaveLength(1)
+      expect(loaded?.spans.find((span) => span.type === 'tool_result')).toMatchObject({
+        status: 'failed',
+        details: { call_id: 'engine-call', output_summary: '[interrupted: agent restarted]' },
+      })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('TraceStore getSpansAtDepth', () => {

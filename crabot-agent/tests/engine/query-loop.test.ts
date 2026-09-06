@@ -2,7 +2,14 @@ import { describe, it, expect, vi } from 'vitest'
 import { runEngine } from '../../src/engine/query-loop.js'
 import { defineTool } from '../../src/engine/tool-framework.js'
 import type { LLMAdapter } from '../../src/engine/llm-adapter.js'
-import type { StreamChunk, EngineOptions, EngineMessage } from '../../src/engine/types.js'
+import type {
+  StreamChunk,
+  EngineLlmResponseEvent,
+  EngineOptions,
+  EngineMessage,
+  EngineToolLifecycleEvent,
+  EngineTurnEvent,
+} from '../../src/engine/types.js'
 import { createUserMessage } from '../../src/engine/types.js'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
 import { chunksFromContent } from './helpers/mock-stream.js'
@@ -38,6 +45,22 @@ function toolUseResponse(
 ): ReadonlyArray<StreamChunk> {
   return [
     { type: 'message_start', messageId: 'msg-1' },
+    { type: 'tool_use_start', id: toolId, name: toolName },
+    { type: 'tool_use_delta', id: toolId, inputJson: JSON.stringify(input) },
+    { type: 'tool_use_end', id: toolId },
+    { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 20, outputTokens: 10 } },
+  ]
+}
+
+function textAndToolUseResponse(
+  text: string,
+  toolId: string,
+  toolName: string,
+  input: Record<string, unknown>,
+): ReadonlyArray<StreamChunk> {
+  return [
+    { type: 'message_start', messageId: 'msg-1' },
+    { type: 'text_delta', text },
     { type: 'tool_use_start', id: toolId, name: toolName },
     { type: 'tool_use_delta', id: toolId, inputJson: JSON.stringify(input) },
     { type: 'tool_use_end', id: toolId },
@@ -153,6 +176,7 @@ describe('runEngine', () => {
     })
 
     const onTurn = vi.fn()
+    const lifecycleEvents: EngineToolLifecycleEvent[] = []
 
     const adapter = mockAdapter([
       toolUseResponse('tu-1', 'Read', { path: '/test' }),
@@ -162,7 +186,11 @@ describe('runEngine', () => {
     await runEngine({
       prompt: 'Read it',
       adapter,
-      options: baseOptions({ tools: [readTool], onTurn }),
+      options: baseOptions({
+        tools: [readTool],
+        onTurn,
+        onToolLifecycle: (event) => lifecycleEvents.push(event),
+      }),
     })
 
     // 自 cdaa253 起，final text turn 也补 fire 一次让 trace 能记录最后一轮（早 return 路径之前漏记）。
@@ -184,6 +212,102 @@ describe('runEngine', () => {
         toolCalls: [],
       })
     )
+    const turnCall = onTurn.mock.calls[0][0].toolCalls[0]
+    expect(turnCall.callId).toEqual(expect.any(String))
+    expect(lifecycleEvents.map((event) => event.type)).toEqual(['tool_started', 'tool_finished'])
+    expect(lifecycleEvents.every((event) => event.callId === turnCall.callId)).toBe(true)
+  })
+
+  it('emits the complete LLM response before a deferred tool lifecycle and reuses stable ids', async () => {
+    let releaseTool!: () => void
+    const toolGate = new Promise<void>((resolve) => { releaseTool = resolve })
+    const waitTool = defineTool({
+      name: 'wait_tool',
+      description: 'Wait for release',
+      inputSchema: {},
+      isReadOnly: true,
+      call: async () => {
+        await toolGate
+        return { output: 'done', isError: false }
+      },
+    })
+    const sequence: string[] = []
+    const responses: EngineLlmResponseEvent[] = []
+    const lifecycle: EngineToolLifecycleEvent[] = []
+    const turns: EngineTurnEvent[] = []
+
+    const running = runEngine({
+      prompt: 'Wait',
+      adapter: mockAdapter([textAndToolUseResponse('I will wait.', 'provider-call', 'wait_tool', { value: 1 })]),
+      options: baseOptions({
+        tools: [waitTool],
+        maxTurns: 1,
+        onLlmResponse: (event) => {
+          responses.push(event)
+          sequence.push('llm_response')
+        },
+        onToolLifecycle: (event) => {
+          lifecycle.push(event)
+          sequence.push(event.type)
+        },
+        onTurn: (event) => {
+          turns.push(event)
+          sequence.push('turn')
+        },
+      }),
+    })
+
+    await vi.waitFor(() => expect(sequence).toEqual(['llm_response', 'tool_started']))
+    expect(responses[0]).toMatchObject({
+      responseId: expect.any(String),
+      turnNumber: 1,
+      assistantText: 'I will wait.',
+      stopReason: 'tool_use',
+      toolCallsCount: 1,
+      llmCallMs: expect.any(Number),
+      llmStartedAtMs: expect.any(Number),
+      usage: { inputTokens: 20, outputTokens: 10 },
+    })
+    expect(lifecycle[0].responseId).toBe(responses[0].responseId)
+
+    releaseTool()
+    await running
+
+    expect(sequence).toEqual(['llm_response', 'tool_started', 'tool_finished', 'turn'])
+    expect(lifecycle[1].responseId).toBe(responses[0].responseId)
+    expect(turns[0].responseId).toBe(responses[0].responseId)
+    expect(turns[0].toolCalls[0].callId).toBe(lifecycle[0].callId)
+  })
+
+  it('isolates LLM response observer failures from execution', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const onTurn = vi.fn()
+
+    const result = await runEngine({
+      prompt: 'Hi',
+      adapter: mockAdapter([textResponse('Hello')]),
+      options: baseOptions({
+        onLlmResponse: () => { throw new Error('trace unavailable: secret-value') },
+        onTurn,
+      }),
+    })
+
+    expect(result).toMatchObject({ outcome: 'completed', finalText: 'Hello' })
+    expect(onTurn).toHaveBeenCalledOnce()
+    expect(warn).toHaveBeenCalledWith('[engine] LLM response observer failed')
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('secret-value')
+    warn.mockRestore()
+  })
+
+  it('uses unique response ids across separate bursts even when turn numbers reset', async () => {
+    const responses: EngineLlmResponseEvent[] = []
+    const options = baseOptions({ onLlmResponse: (event) => responses.push(event) })
+
+    await runEngine({ prompt: 'first', adapter: mockAdapter([textResponse('one')]), options })
+    await runEngine({ prompt: 'second', adapter: mockAdapter([textResponse('two')]), options })
+
+    expect(responses.map((event) => event.turnNumber)).toEqual([1, 1])
+    expect(responses[0].responseId).not.toBe(responses[1].responseId)
   })
 
   it('refreshes messagesRef with tool results before onTurn observers run', async () => {
@@ -293,15 +417,22 @@ describe('runEngine', () => {
 
   it('returns failed when LLM stream ends without a terminal stopReason', async () => {
     const adapter = mockAdapter([nullStopResponse()])
+    const onLlmResponse = vi.fn()
 
     const result = await runEngine({
       prompt: 'Hi',
       adapter,
-      options: baseOptions({ suppressForcedSummary: () => true }),
+      options: baseOptions({ suppressForcedSummary: () => true, onLlmResponse }),
     })
 
     expect(result.outcome).toBe('failed')
     expect(result.error).toContain('missing terminal stopReason')
+    expect(onLlmResponse).toHaveBeenCalledWith(expect.objectContaining({
+      assistantText: '',
+      stopReason: null,
+      toolCallsCount: 0,
+      responseId: expect.any(String),
+    }))
   })
 
   it('returns failed when adapter yields error chunk', async () => {

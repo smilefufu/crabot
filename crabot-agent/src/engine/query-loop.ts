@@ -3,6 +3,7 @@ import { callNonStreaming } from './llm-adapter'
 import type {
   ContentBlock,
   EngineMessage,
+  EngineLlmResponseEvent,
   EngineOptions,
   EngineResult,
   EngineTurnEvent,
@@ -23,6 +24,7 @@ import { formatError } from './error-utils'
 import type { HookInput } from '../hooks/types'
 import { executeHooks } from '../hooks/hook-executor'
 import * as fs from 'fs'
+import { randomUUID } from 'crypto'
 import { getWorkspaceDir } from '../core/data-paths.js'
 
 // --- Public Interface ---
@@ -84,6 +86,13 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   const fireOnTurn = (event: EngineTurnEvent): void => {
     refreshMessagesRef()
     options.onTurn?.(event)
+  }
+  const fireOnLlmResponse = (event: EngineLlmResponseEvent): void => {
+    try {
+      options.onLlmResponse?.(event)
+    } catch {
+      console.warn('[engine] LLM response observer failed')
+    }
   }
 
   let totalTurns = 0
@@ -265,10 +274,22 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
     finalText = processed.text
 
+    const llmResponseEvent: EngineLlmResponseEvent = {
+      responseId: randomUUID(),
+      turnNumber: totalTurns,
+      assistantText: processed.text,
+      stopReason,
+      toolCallsCount: processed.toolUseBlocks.length,
+      llmCallMs,
+      llmStartedAtMs,
+      ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
+      ...(response.usage ? { usage: response.usage } : {}),
+      ...(response.diagnostics ? { diagnostics: response.diagnostics } : {}),
+    }
+    fireOnLlmResponse(llmResponseEvent)
+
     if (stopReason === null) {
-      fireOnTurn(buildSilentTurnEvent(
-        totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, forcedSummaryAttempt, response.usage,
-      ))
+      fireOnTurn(buildTurnEvent(llmResponseEvent, []))
       return buildResult(
         'failed',
         finalText,
@@ -329,7 +350,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         // 父 agent 通过 outcome + totalTurns + 空 output 判断要不要拆任务 / 上调 budget。
         if (!options.disableCompaction && maxTokensCompactRetryCount < MAX_MAX_TOKENS_COMPACT_RETRIES) {
           maxTokensCompactRetryCount++
-          fireOnTurn(buildSilentTurnEvent(totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, undefined, response.usage))
+          fireOnTurn(buildTurnEvent(llmResponseEvent, []))
           messages.pop()
           const compaction = await compactInPlace(
             messages,
@@ -372,9 +393,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       // 但 caller 可通过 suppressForcedSummary 回调表达"silent end_turn 是正常完成态"——
       // 用于新 unified loop（交付走 send_message 工具、不写 finalText）。
       if (isSilentText && options.suppressForcedSummary?.() === true) {
-        fireOnTurn(buildSilentTurnEvent(
-          totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, forcedSummaryAttempt, response.usage,
-        ))
+        fireOnTurn(buildTurnEvent(llmResponseEvent, []))
         if (options.endTurnGate) {
           const gateResult = await options.endTurnGate()
           if (typeof gateResult === 'string') {
@@ -395,9 +414,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       }
       if (isSilentText && silentEndTurnCount < MAX_SILENT_END_TURN_RETRIES) {
         silentEndTurnCount++
-        fireOnTurn(buildSilentTurnEvent(
-          totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, forcedSummaryAttempt, response.usage,
-        ))
+        fireOnTurn(buildTurnEvent(llmResponseEvent, []))
         messages.push(createUserMessage(FORCED_SUMMARY_PROMPT))
         options.onSystemInjection?.({
           type: 'forced_summary',
@@ -411,9 +428,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
       // 有文字的 end_turn / forced_summary 次数耗尽的静默 end_turn：同样属于"早 return 路径"，
       // 补 fire 让 trace 看到这一轮（同 suppressForcedSummary 路径的处理逻辑）。
-      fireOnTurn(buildSilentTurnEvent(
-        totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, forcedSummaryAttempt, response.usage,
-      ))
+      fireOnTurn(buildTurnEvent(llmResponseEvent, []))
       if (options.endTurnGate) {
         const gateResult = await options.endTurnGate()
         if (typeof gateResult === 'string') {
@@ -450,6 +465,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       return finishTask()
     }
 
+    const toolCallIds = new Map(processed.toolUseBlocks.map((block) => [block.id, randomUUID()]))
+
     // ── Barrier check: wait for potential supplement before executing tools ──
     if (options.humanMessageQueue?.hasBarrier) {
       await options.humanMessageQueue.waitBarrier(abortSignal)
@@ -483,22 +500,14 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
         // Fire onTurn with cancelled tools for trace recording.
         // Cancelled tools never executed → omit per-tool timing entirely.
-        fireOnTurn({
-          turnNumber: totalTurns,
-          assistantText: processed.text,
-          toolCalls: processed.toolUseBlocks.map(b => ({
+        fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map(b => ({
+            callId: toolCallIds.get(b.id)!,
             id: b.id,
             name: b.name,
             input: b.input,
             output: '[cancelled by supplement]',
             isError: false,
-          })),
-          stopReason,
-          llmCallMs,
-          llmStartedAtMs,
-          ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
-          ...(response.usage ? { usage: response.usage } : {}),
-        })
+          }))))
 
         continue  // Skip tool execution, go to next LLM turn
       }
@@ -528,22 +537,14 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         // tool_use 补齐 tool_result，否则下一轮重放会触发 LLM API 400。
         messages.push(createBatchToolResultMessage(violatingResults))
         // fire onTurn for trace recording
-        fireOnTurn({
-          turnNumber: totalTurns,
-          assistantText: processed.text,
-          toolCalls: processed.toolUseBlocks.map(b => ({
+        fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map(b => ({
+            callId: toolCallIds.get(b.id)!,
             id: b.id,
             name: b.name,
             input: b.input,
             output: violatingResults.find(r => r.tool_use_id === b.id)?.content ?? '',
             isError: violatingResults.find(r => r.tool_use_id === b.id)?.is_error ?? false,
-          })),
-          stopReason,
-          llmCallMs,
-          llmStartedAtMs,
-          ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
-          ...(response.usage ? { usage: response.usage } : {}),
-        })
+          }))))
         continue
       }
     }
@@ -574,25 +575,17 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         }
       })))
       // Fire onTurn for trace recording after all same-turn tool_use blocks have results.
-      fireOnTurn({
-        turnNumber: totalTurns,
-        assistantText: processed.text,
-        toolCalls: processed.toolUseBlocks.map(b => {
+      fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map(b => {
           const r = exitToolResultById.get(b.id)
           return {
+            callId: toolCallIds.get(b.id)!,
             id: b.id,
             name: b.name,
             input: b.input,
             output: r?.content ?? '[skipped: exitsLoop tool selected]',
             isError: r?.isError ?? false,
           }
-        }),
-        stopReason,
-        llmCallMs,
-        llmStartedAtMs,
-        ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
-        ...(response.usage ? { usage: response.usage } : {}),
-      })
+        })))
       return finishTask()
     }
 
@@ -612,7 +605,12 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       abortSignal,
       ...(options.timezone ? { timezone: options.timezone } : {}),
       ...(options.hasPendingExternalInputs ? { hasPendingExternalInput: options.hasPendingExternalInputs } : {}),
-    }, options.permissionConfig, hooks)
+    }, options.permissionConfig, hooks, {
+      responseId: llmResponseEvent.responseId,
+      turnNumber: totalTurns,
+      callIds: toolCallIds,
+      onToolLifecycle: options.onToolLifecycle,
+    })
     // Live progress: tools finished
     if (options.onLiveProgress) {
       options.onLiveProgress({
@@ -653,12 +651,10 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // Fire onTurn only after tool_result is in messages. Checkpoint/resume and
     // progress observers treat onTurn as the clean turn boundary, so every
     // assistant tool_use must already have matching toolResults here.
-    fireOnTurn({
-      turnNumber: totalTurns,
-      assistantText: processed.text,
-      toolCalls: processed.toolUseBlocks.map((b, i) => {
+    fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map((b, i) => {
         const r = toolResults[i]
         const tc: EngineTurnEvent['toolCalls'][number] = {
+          callId: toolCallIds.get(b.id)!,
           id: b.id,
           name: b.name,
           input: b.input,
@@ -668,14 +664,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           ...(r?.started_at_ms !== undefined ? { startedAtMs: r.started_at_ms } : {}),
         }
         return tc
-      }),
-      stopReason,
-      llmCallMs,
-      llmStartedAtMs,
-      ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
-      ...(response.usage ? { usage: response.usage } : {}),
-      ...(response.diagnostics ? { diagnostics: response.diagnostics } : {}),
-    })
+      })))
 
     // ── Post-tool barrier check ──
     // 工具可能在执行中 setBarrier（如 send_message(intent='ask_human')）。
@@ -829,24 +818,21 @@ async function compactInPlace(
   }
 }
 
-function buildSilentTurnEvent(
-  turnNumber: number,
-  assistantText: string,
-  stopReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | null,
-  llmCallMs: number,
-  llmStartedAtMs: number | undefined,
-  forcedSummaryAttempt?: number,
-  usage?: import('./types.js').LLMTokenUsage,
+function buildTurnEvent(
+  response: EngineLlmResponseEvent,
+  toolCalls: EngineTurnEvent['toolCalls'],
 ): EngineTurnEvent {
   return {
-    turnNumber,
-    assistantText,
-    toolCalls: [],
-    stopReason,
-    llmCallMs,
-    ...(llmStartedAtMs !== undefined ? { llmStartedAtMs } : {}),
-    ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
-    ...(usage ? { usage } : {}),
+    responseId: response.responseId,
+    turnNumber: response.turnNumber,
+    assistantText: response.assistantText,
+    toolCalls,
+    stopReason: response.stopReason,
+    llmCallMs: response.llmCallMs,
+    llmStartedAtMs: response.llmStartedAtMs,
+    ...(response.forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt: response.forcedSummaryAttempt } : {}),
+    ...(response.usage ? { usage: response.usage } : {}),
+    ...(response.diagnostics ? { diagnostics: response.diagnostics } : {}),
   }
 }
 

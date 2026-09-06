@@ -1,4 +1,4 @@
-import type { ToolDefinition, ToolCallContext, ToolPermissionConfig } from './types'
+import type { EngineToolLifecycleEvent, ToolDefinition, ToolCallContext, ToolPermissionConfig } from './types'
 import { findTool, type ToolBatch } from './tool-framework'
 import { checkToolPermission } from './permission-checker'
 import type { HookExecutorContext } from '../hooks/types'
@@ -19,6 +19,13 @@ export interface ToolResultEntry {
 export interface HookConfig {
   readonly registry: HookRegistry
   readonly context: HookExecutorContext
+}
+
+export interface ToolLifecycleContext {
+  readonly responseId: string
+  readonly turnNumber: number
+  readonly callIds: ReadonlyMap<string, string>
+  readonly onToolLifecycle?: (event: EngineToolLifecycleEvent) => void
 }
 
 const MAX_CONCURRENT = 10
@@ -57,25 +64,73 @@ async function executeSingleTool(
   context: ToolCallContext,
   permissionConfig?: ToolPermissionConfig,
   hooks?: HookConfig,
+  lifecycle?: ToolLifecycleContext,
 ): Promise<ToolResultEntry> {
   const startedAtMs = Date.now()
-  const stampTiming = (entry: ToolResultEntry): ToolResultEntry => ({
-    ...entry,
-    started_at_ms: startedAtMs,
-    duration_ms: Date.now() - startedAtMs,
-  })
+  const callId = lifecycle?.callIds.get(block.id)
+  const observe = (event: EngineToolLifecycleEvent): void => {
+    try {
+      lifecycle?.onToolLifecycle?.(event)
+    } catch {
+      console.warn('[engine] tool lifecycle observer failed')
+    }
+  }
+  if (callId !== undefined && lifecycle !== undefined) {
+    observe({
+      type: 'tool_started',
+      responseId: lifecycle.responseId,
+      callId,
+      turnNumber: lifecycle.turnNumber,
+      toolUseId: block.id,
+      name: block.name,
+      input: block.input,
+      startedAtMs,
+    })
+  }
+  const finish = (entry: ToolResultEntry): ToolResultEntry => {
+    const endedAtMs = Date.now()
+    const stamped = {
+      ...entry,
+      started_at_ms: startedAtMs,
+      duration_ms: endedAtMs - startedAtMs,
+    }
+    if (callId !== undefined && lifecycle !== undefined) {
+      observe({
+        type: 'tool_finished',
+        responseId: lifecycle.responseId,
+        callId,
+        turnNumber: lifecycle.turnNumber,
+        toolUseId: block.id,
+        name: block.name,
+        input: block.input,
+        output: stamped.content,
+        isError: stamped.is_error,
+        startedAtMs,
+        endedAtMs,
+        durationMs: stamped.duration_ms,
+      })
+    }
+    return stamped
+  }
   // context.timezone 由调用方（runEngine）保证已 resolve；缺省时兜底
   const timezone = context.timezone ?? resolveTimezone(undefined)
   const stamp = (content: string): string => stampToolResult(content, timezone)
 
   const tool = findTool(tools, block.name)
   if (tool === undefined) {
-    return stampTiming({ tool_use_id: block.id, content: stamp(`Tool not found: ${block.name}`), is_error: true })
+    return finish({ tool_use_id: block.id, content: stamp(`Tool not found: ${block.name}`), is_error: true })
   }
 
-  const permission = await checkToolPermission(block.name, block.input, tool, permissionConfig)
+  let permission
+  try {
+    permission = await checkToolPermission(block.name, block.input, tool, permissionConfig)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    finish({ tool_use_id: block.id, content: stamp(`Tool execution error: ${message}`), is_error: true })
+    throw error
+  }
   if (!permission.allowed) {
-    return stampTiming({ tool_use_id: block.id, content: stamp(`Permission denied: ${permission.reason}`), is_error: true })
+    return finish({ tool_use_id: block.id, content: stamp(`Permission denied: ${permission.reason}`), is_error: true })
   }
 
   // --- 确定性参数修复（spec 2026-09-03-tool-input-repair）---
@@ -89,25 +144,31 @@ async function executeSingleTool(
   }
 
   // --- PreToolUse hook ---
-  if (hooks) {
-    const filePaths = extractFilePaths(effectiveInput)
-    const preInput = {
-      event: 'PreToolUse' as const,
-      toolName: block.name,
-      toolInput: effectiveInput,
-      workingDirectory: hooks.context.workingDirectory,
-      filePaths,
-    }
-    const matching = hooks.registry.getMatching('PreToolUse', preInput)
-    if (matching.length > 0) {
-      const preResult = await executeHooks(matching, preInput, hooks.context)
-      if (preResult.action === 'block') {
-        return stampTiming({ tool_use_id: block.id, content: stamp(preResult.message ?? 'Blocked by hook'), is_error: true })
+  try {
+    if (hooks) {
+      const filePaths = extractFilePaths(effectiveInput)
+      const preInput = {
+        event: 'PreToolUse' as const,
+        toolName: block.name,
+        toolInput: effectiveInput,
+        workingDirectory: hooks.context.workingDirectory,
+        filePaths,
       }
-      if (preResult.modifiedInput) {
-        effectiveInput = { ...effectiveInput, ...preResult.modifiedInput }
+      const matching = hooks.registry.getMatching('PreToolUse', preInput)
+      if (matching.length > 0) {
+        const preResult = await executeHooks(matching, preInput, hooks.context)
+        if (preResult.action === 'block') {
+          return finish({ tool_use_id: block.id, content: stamp(preResult.message ?? 'Blocked by hook'), is_error: true })
+        }
+        if (preResult.modifiedInput) {
+          effectiveInput = { ...effectiveInput, ...preResult.modifiedInput }
+        }
       }
     }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    finish({ tool_use_id: block.id, content: stamp(`Tool execution error: ${message}`), is_error: true })
+    throw error
   }
 
   try {
@@ -137,7 +198,7 @@ async function executeSingleTool(
       }
     }
 
-    return stampTiming({
+    return finish({
       tool_use_id: block.id,
       content: stamp(capToolOutput(finalContent)),
       ...(result.images !== undefined ? { images: result.images } : {}),
@@ -145,7 +206,7 @@ async function executeSingleTool(
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return stampTiming({ tool_use_id: block.id, content: stamp(`Tool execution error: ${message}`), is_error: true })
+    return finish({ tool_use_id: block.id, content: stamp(`Tool execution error: ${message}`), is_error: true })
   }
 }
 
@@ -155,6 +216,7 @@ async function executeParallelBatch(
   context: ToolCallContext,
   permissionConfig?: ToolPermissionConfig,
   hooks?: HookConfig,
+  lifecycle?: ToolLifecycleContext,
 ): Promise<ReadonlyArray<ToolResultEntry>> {
   const blocks = batch.blocks
   const results: ToolResultEntry[] = new Array(blocks.length)
@@ -163,7 +225,7 @@ async function executeParallelBatch(
   for (let i = 0; i < blocks.length; i += MAX_CONCURRENT) {
     const chunk = blocks.slice(i, i + MAX_CONCURRENT)
     const chunkResults = await Promise.all(
-      chunk.map((block) => executeSingleTool(block, tools, context, permissionConfig, hooks))
+      chunk.map((block) => executeSingleTool(block, tools, context, permissionConfig, hooks, lifecycle))
     )
     for (let j = 0; j < chunkResults.length; j++) {
       results[i + j] = chunkResults[j]
@@ -179,10 +241,11 @@ async function executeSerialBatch(
   context: ToolCallContext,
   permissionConfig?: ToolPermissionConfig,
   hooks?: HookConfig,
+  lifecycle?: ToolLifecycleContext,
 ): Promise<ReadonlyArray<ToolResultEntry>> {
   const results: ToolResultEntry[] = []
   for (const block of batch.blocks) {
-    const result = await executeSingleTool(block, tools, context, permissionConfig, hooks)
+    const result = await executeSingleTool(block, tools, context, permissionConfig, hooks, lifecycle)
     results.push(result)
   }
   return results
@@ -194,14 +257,15 @@ export async function executeToolBatches(
   context?: ToolCallContext,
   permissionConfig?: ToolPermissionConfig,
   hooks?: HookConfig,
+  lifecycle?: ToolLifecycleContext,
 ): Promise<ToolResultEntry[]> {
   const resolvedContext: ToolCallContext = context ?? {}
   const allResults: ToolResultEntry[] = []
 
   for (const batch of batches) {
     const batchResults = batch.parallel
-      ? await executeParallelBatch(batch, tools, resolvedContext, permissionConfig, hooks)
-      : await executeSerialBatch(batch, tools, resolvedContext, permissionConfig, hooks)
+      ? await executeParallelBatch(batch, tools, resolvedContext, permissionConfig, hooks, lifecycle)
+      : await executeSerialBatch(batch, tools, resolvedContext, permissionConfig, hooks, lifecycle)
 
     for (const result of batchResults) {
       allResults.push(result)

@@ -133,6 +133,7 @@ export class TraceStore {
       this.rebuildIndex()
       this.loadResumableCheckpoints()
       this.loadRunningTraces()
+      this.reconcileInterruptedResumableToolCalls()
     }
   }
 
@@ -363,6 +364,60 @@ export class TraceStore {
    * 启动时加载当前实例的 in-flight 文件（默认为 traces-running.jsonl）。
    * 把这些 trace 标记为 failed（interrupted），写入日期文件，然后清空 running 文件。
    */
+  private appendInterruptedToolResults(trace: AgentTrace, endedAt: string): void {
+    const resultCallIds = new Set(trace.spans.flatMap((span) => {
+      if (span.type !== 'tool_result') return []
+      const callId = (span.details as Record<string, unknown>).call_id
+      return typeof callId === 'string' ? [callId] : []
+    }))
+    for (const span of [...trace.spans]) {
+      if (span.type !== 'tool_call') continue
+      const details = span.details as Record<string, unknown>
+      const callId = details.call_id
+      if (typeof callId !== 'string' || resultCallIds.has(callId)) continue
+      const responseId = typeof details.response_id === 'string' ? details.response_id : undefined
+      const toolUseId = typeof details.tool_use_id === 'string' ? details.tool_use_id : undefined
+      const toolName = typeof details.tool_name === 'string'
+        ? details.tool_name
+        : typeof details.name === 'string' ? details.name : undefined
+      trace.spans.push({
+        span_id: crypto.randomUUID(),
+        trace_id: trace.trace_id,
+        type: 'tool_result',
+        started_at: endedAt,
+        ended_at: endedAt,
+        duration_ms: 0,
+        status: 'failed',
+        details: {
+          ...(responseId ? { response_id: responseId } : {}),
+          call_id: callId,
+          ...(toolUseId ? { tool_use_id: toolUseId } : {}),
+          ...(toolName ? { tool_name: toolName } : {}),
+          output_summary: '[interrupted: agent restarted]',
+          is_error: true,
+          error: '[interrupted: agent restarted]',
+        },
+      })
+      resultCallIds.add(callId)
+    }
+  }
+
+  private reconcileInterruptedResumableToolCalls(): void {
+    const endedAt = new Date().toISOString()
+    for (const [taskId, entry] of this.resumableCheckpoints) {
+      const trace = this.traces.get(entry.traceId)
+      if (!trace) continue
+      const spanCount = trace.spans.length
+      this.appendInterruptedToolResults(trace, endedAt)
+      if (trace.spans.length === spanCount) continue
+      try {
+        this.flushWorkerCheckpoint(taskId, trace.trace_id, entry.checkpoint)
+      } catch (error) {
+        console.warn(`[TraceStore] interrupted tool result checkpoint failed for ${trace.trace_id}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+
   private loadRunningTraces(): void {
     if (!this.persistDir) return
     const filePath = path.join(this.persistDir, this.runningFlushFile)
@@ -393,12 +448,23 @@ export class TraceStore {
         if (record && record.kind === 'legacy_agent_trace') {
           try {
           const trace = record.trace as AgentTrace
+          // 正在等 resume 裁决的 worker 保持 running；全局快照可能比 per-task checkpoint
+          // 多出尚未走到 onTurn 的工具生命周期 spans，只在确实更完整时接管 trace 正文。
+          if (resumableTraceIds.has(trace.trace_id)) {
+            const resumable = this.traces.get(trace.trace_id)
+            if (!resumable || trace.spans.length > resumable.spans.length) {
+              if (resumable?.resume_checkpoint) trace.resume_checkpoint = resumable.resume_checkpoint
+              this.traces.set(trace.trace_id, trace)
+              if (!this.order.includes(trace.trace_id)) this.order.push(trace.trace_id)
+              this.refreshTraceIndexFromMemory(trace)
+            }
+            continue
+          }
           // 已经 endTrace 过的（rebuildIndex 已读到）跳过
           if (this.traceIndex.some(e => e.trace_id === trace.trace_id)) continue
-          // 正在等 resume 裁决的 worker trace 跳过（见上方注释）
-          if (resumableTraceIds.has(trace.trace_id)) continue
           // 标记为 interrupted，写入日期文件让 UI 正确显示
           const now = new Date()
+          this.appendInterruptedToolResults(trace, now.toISOString())
           trace.status = 'failed'
           if (!trace.ended_at) {
             trace.ended_at = now.toISOString()
@@ -1337,6 +1403,13 @@ export class TraceStore {
           span.status = 'failed'
           span.ended_at = endedAt
           span.duration_ms = new Date(endedAt).getTime() - new Date(span.started_at).getTime()
+          if (span.type === 'tool_call' && span.details && typeof span.details === 'object' && !Array.isArray(span.details)) {
+            span.details = {
+              ...(span.details as Record<string, unknown>),
+              output_summary: '[interrupted: agent restarted]',
+              is_error: true,
+            }
+          }
         }
       }
       this.persistManagerEpisode(episode, false)

@@ -102,9 +102,9 @@ export function assembleAgentPrompt(opts: AssembleAgentPromptOptions): string {
   return parts.join('\n\n')
 }
 
-const ASYNC_SUBAGENT_GUIDANCE = `## 异步 Subagent（默认行为）
+const ASYNC_SUBAGENT_GUIDANCE = `## 异步 Subagent（唯一行为）
 
-调 \`delegate_task\` **默认异步**：工具立即返回 \`{agent_id, status:"launched"}\`，不阻塞你。
+调 \`delegate_task\` **只会异步派发**：工具立即返回 \`{agent_id, status:"launched"}\`，不阻塞你。
 
 **派出后你可以做的事：**
 - 同 turn 内再 batch 调多次 \`delegate_task\` 并发派更多 subagent
@@ -112,7 +112,7 @@ const ASYNC_SUBAGENT_GUIDANCE = `## 异步 Subagent（默认行为）
 - 然后 end_turn 等通知
 
 **通知回流机制：**
-subagent 完成时，系统自动推送 \`<sub_agent_notification>\` 到你的下一轮 turn。
+subagent 完成时，系统自动推送 \`<sub_agent_notification>\`；完成通知进入后续 turn。
 用户的任何 supplement（进度询问、改方向、取消）也会同步回流——你不会被长任务卡住。
 
 **通知中包含：**
@@ -121,20 +121,14 @@ subagent 完成时，系统自动推送 \`<sub_agent_notification>\` 到你的�
 - result_preview（成功时**内联结果预览**）：没有 \`truncated="true"\` 就是完整结果，**直接用，不必再读**
 - output_file（结果文件路径）；仅当预览被截断（\`truncated="true"\`）或你要全文时，用 \`get_subagent_output(agent_id)\` 读
 
-**\`sync: true\` 仅在以下场景使用（极少）：**
-- subagent 输出需要在同 turn 立即被读取后再决策
-- 强一致性串行依赖：A 必须完成且输出决定 B 是否要派
-
 **禁止的反模式：**
 - ❌ 用 \`get_subagent_output\` 轮询进度（等通知，不要主动查）
 - ❌ 用 \`list_active_subagents\` 反复轮询状态（只在用户问进度时才调）`
 
 const BUILTIN_WORKER_SUBAGENT_GUIDANCE = `## 子 Agent 委派
 
-调 \`delegate_task\` 默认异步：工具立即返回 \`{agent_id, status:"launched"}\`；可用时还会带 \`child_trace_id\`。
+调 \`delegate_task\` 只会异步派发：工具立即返回 \`{agent_id, status:"launched"}\`；可用时还会带 \`child_trace_id\`。
 
-子 Agent 完成或失败后，系统会在后续 turn 注入 \`<sub_agent_notification>…</sub_agent_notification>\`，其中包含子 Agent 名称、状态和最终结果或错误。收到通知后，基于结果继续当前 Worker 的任务。
-
-只有必须在同一 turn 取得结果后才能继续决策时，才使用 \`sync: true\`；此时结果直接在 \`delegate_task\` 返回值中。
+子 Agent 完成或失败后，系统会注入 \`<sub_agent_notification>…</sub_agent_notification>\`，其中包含子 Agent 名称、状态和最终结果或错误。完成通知进入后续 turn；收到通知后，基于结果继续当前 Worker 的任务。
 
 不要调用未提供的子 Agent 查询或管理工具。`

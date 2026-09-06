@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { executeToolBatches } from '../../src/engine/tool-orchestration'
 import { defineTool } from '../../src/engine/tool-framework'
-import type { ToolDefinition, ToolUseBlock } from '../../src/engine/types'
+import type { EngineToolLifecycleEvent, ToolCallResult, ToolDefinition, ToolUseBlock } from '../../src/engine/types'
 
 function makeBlock(name: string, id: string, input: Record<string, unknown> = {}): ToolUseBlock {
   return { type: 'tool_use', id, name, input }
@@ -9,6 +9,12 @@ function makeBlock(name: string, id: string, input: Record<string, unknown> = {}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
 }
 
 describe('executeToolBatches', () => {
@@ -55,6 +61,179 @@ describe('executeToolBatches', () => {
   })
 
   const tools: ReadonlyArray<ToolDefinition> = [slowReadTool, fastReadTool, writeTool, errorTool]
+
+  it('emits start before a deferred tool settles and finish immediately when it does', async () => {
+    const gate = deferred<ToolCallResult>()
+    const events: EngineToolLifecycleEvent[] = []
+    const block = makeBlock('deferred', 'provider-call', { value: 1 })
+    const tool = defineTool({
+      name: 'deferred', description: 'wait', inputSchema: {}, isReadOnly: true,
+      call: async () => gate.promise,
+    })
+    const running = executeToolBatches(
+      [{ parallel: true, blocks: [block] }],
+      [tool],
+      undefined,
+      undefined,
+      undefined,
+      {
+        responseId: 'engine-response',
+        turnNumber: 4,
+        callIds: new Map([['provider-call', 'engine-call']]),
+        onToolLifecycle: (event) => events.push(event),
+      },
+    )
+
+    await vi.waitFor(() => expect(events).toHaveLength(1))
+    expect(events[0]).toMatchObject({
+      type: 'tool_started', callId: 'engine-call', turnNumber: 4,
+      toolUseId: 'provider-call', name: 'deferred', input: { value: 1 },
+    })
+
+    gate.resolve({ output: 'done', isError: false })
+    await running
+    expect(events).toHaveLength(2)
+    expect(events[1]).toMatchObject({
+      type: 'tool_finished', callId: 'engine-call', toolUseId: 'provider-call',
+      output: expect.stringContaining('done'), isError: false,
+    })
+  })
+
+  it('reports parallel completion order without changing result order', async () => {
+    const slow = deferred<ToolCallResult>()
+    const fast = deferred<ToolCallResult>()
+    const events: EngineToolLifecycleEvent[] = []
+    const blocks = [makeBlock('slow_gate', 'slow'), makeBlock('fast_gate', 'fast')]
+    const lifecycle = {
+      responseId: 'engine-response',
+      turnNumber: 1,
+      callIds: new Map([['slow', 'call-slow'], ['fast', 'call-fast']]),
+      onToolLifecycle: (event: EngineToolLifecycleEvent) => events.push(event),
+    }
+    const running = executeToolBatches(
+      [{ parallel: true, blocks }],
+      [
+        defineTool({ name: 'slow_gate', description: '', inputSchema: {}, isReadOnly: true, call: async () => slow.promise }),
+        defineTool({ name: 'fast_gate', description: '', inputSchema: {}, isReadOnly: true, call: async () => fast.promise }),
+      ],
+      undefined, undefined, undefined, lifecycle,
+    )
+
+    await vi.waitFor(() => expect(events.map((event) => event.type)).toEqual(['tool_started', 'tool_started']))
+    fast.resolve({ output: 'fast', isError: false })
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'tool_finished' && event.callId === 'call-fast')).toBe(true))
+    expect(events.some((event) => event.type === 'tool_finished' && event.callId === 'call-slow')).toBe(false)
+    slow.resolve({ output: 'slow', isError: false })
+
+    const results = await running
+    expect(events.map((event) => `${event.type}:${event.callId}`)).toEqual([
+      'tool_started:call-slow', 'tool_started:call-fast',
+      'tool_finished:call-fast', 'tool_finished:call-slow',
+    ])
+    expect(results.map((result) => result.tool_use_id)).toEqual(['slow', 'fast'])
+  })
+
+  it('does not report a serial call as started before the previous call finishes', async () => {
+    const first = deferred<ToolCallResult>()
+    const events: EngineToolLifecycleEvent[] = []
+    const running = executeToolBatches(
+      [
+        { parallel: false, blocks: [makeBlock('first', 'one')] },
+        { parallel: false, blocks: [makeBlock('second', 'two')] },
+      ],
+      [
+        defineTool({ name: 'first', description: '', inputSchema: {}, call: async () => first.promise }),
+        defineTool({ name: 'second', description: '', inputSchema: {}, call: async () => ({ output: 'two', isError: false }) }),
+      ],
+      undefined, undefined, undefined,
+      {
+        responseId: 'engine-response',
+        turnNumber: 1,
+        callIds: new Map([['one', 'call-one'], ['two', 'call-two']]),
+        onToolLifecycle: (event) => events.push(event),
+      },
+    )
+
+    await vi.waitFor(() => expect(events).toHaveLength(1))
+    expect(events[0]).toMatchObject({ type: 'tool_started', callId: 'call-one' })
+    first.resolve({ output: 'one', isError: false })
+    await running
+    expect(events.map((event) => `${event.type}:${event.callId}`)).toEqual([
+      'tool_started:call-one', 'tool_finished:call-one',
+      'tool_started:call-two', 'tool_finished:call-two',
+    ])
+  })
+
+  it('emits one failed finish when permission rejects a call', async () => {
+    const events: EngineToolLifecycleEvent[] = []
+    const results = await executeToolBatches(
+      [{ parallel: false, blocks: [makeBlock('write_file', 'denied')] }],
+      tools,
+      undefined,
+      { mode: 'denyList', toolNames: ['write_file'] },
+      undefined,
+      {
+        responseId: 'engine-response',
+        turnNumber: 1,
+        callIds: new Map([['denied', 'call-denied']]),
+        onToolLifecycle: (event) => events.push(event),
+      },
+    )
+
+    expect(results[0]).toMatchObject({ tool_use_id: 'denied', is_error: true })
+    expect(events.map((event) => event.type)).toEqual(['tool_started', 'tool_finished'])
+    expect(events[1]).toMatchObject({ callId: 'call-denied', isError: true })
+  })
+
+  it.each([
+    ['permission callback', { permission: { mode: 'bypass' as const, checkPermission: async () => { throw new Error('permission failed') } } }],
+    ['pre-hook matching', { hooks: { registry: { getMatching: () => { throw new Error('hook failed') } }, context: { workingDirectory: '/tmp' } } }],
+  ])('emits one failed finish before a %s error is rethrown', async (_label, setup) => {
+    const events: EngineToolLifecycleEvent[] = []
+    const running = executeToolBatches(
+      [{ parallel: false, blocks: [makeBlock('write_file', 'throws')] }],
+      tools,
+      undefined,
+      setup.permission,
+      setup.hooks as never,
+      {
+        responseId: 'engine-response',
+        turnNumber: 1,
+        callIds: new Map([['throws', 'call-throws']]),
+        onToolLifecycle: (event) => events.push(event),
+      },
+    )
+
+    await expect(running).rejects.toThrow(/failed/)
+    expect(events.map((event) => event.type)).toEqual(['tool_started', 'tool_finished'])
+    expect(events[1]).toMatchObject({ callId: 'call-throws', isError: true })
+  })
+
+  it('observer failure does not change the tool result or repeat the side effect', async () => {
+    const call = vi.fn(async () => ({ output: 'done', isError: false }))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const results = await executeToolBatches(
+        [{ parallel: false, blocks: [makeBlock('observed', 'provider-call')] }],
+        [defineTool({ name: 'observed', description: '', inputSchema: {}, call })],
+        undefined, undefined, undefined,
+        {
+          responseId: 'engine-response',
+          turnNumber: 1,
+          callIds: new Map([['provider-call', 'engine-call']]),
+          onToolLifecycle: () => { throw new Error('trace unavailable') },
+        },
+      )
+
+      expect(call).toHaveBeenCalledOnce()
+      expect(results).toHaveLength(1)
+      expect(results[0]).toMatchObject({ tool_use_id: 'provider-call', is_error: false })
+      expect(results[0].content).toContain('done')
+      expect(warn).toHaveBeenCalledTimes(2)
+    } finally {
+      warn.mockRestore()
+    }
+  })
 
   it('parallel read-only tools execute concurrently (verified by timing)', async () => {
     const batches = [

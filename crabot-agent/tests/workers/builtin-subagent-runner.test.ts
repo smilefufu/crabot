@@ -11,14 +11,12 @@ import type { ToolDefinition } from '../../src/engine/types.js'
 import { checkToolPermission } from '../../src/engine/permission-checker.js'
 import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
 
-const { createAdapter, forkEngine, spawnPersistentAgent } = vi.hoisted(() => ({
+const { createAdapter, spawnPersistentAgent } = vi.hoisted(() => ({
   createAdapter: vi.fn(),
-  forkEngine: vi.fn(),
   spawnPersistentAgent: vi.fn(),
 }))
 
 vi.mock('../../src/engine/llm-adapter.js', () => ({ createAdapter }))
-vi.mock('../../src/engine/sub-agent.js', () => ({ forkEngine }))
 vi.mock('../../src/engine/bg-entities/bg-agent.js', () => ({ spawnPersistentAgent }))
 
 function testSubagent(overrides: Partial<SubAgentConfig> = {}): SubAgentConfig {
@@ -118,26 +116,23 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     expect(options.hookRegistry.getMatching('PostToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
   })
 
-  it('同步 child 同样继承 Worker 权限和完整执行 hooks', async () => {
-    forkEngine.mockResolvedValue({ outcome: 'completed', output: '完成', usage: { inputTokens: 1, outputTokens: 1 }, totalTurns: 1 })
-    const traceStore = {
-      startTrace: vi.fn(() => ({ trace_id: 'trace-child' })),
-      endTrace: vi.fn(),
-    } as unknown as TraceStore
-    const runner = new BuiltinSubagentRunner(traceStore, lspManager, undefined, registry)
+  it('旧输入额外携带 sync=true 也只异步派发，并继承 Worker 权限和完整执行 hooks', async () => {
+    spawnPersistentAgent.mockResolvedValue('agent-child')
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
 
     await runner.run(
       testSubagent({
         builtin_capabilities: { ...testSubagent().builtin_capabilities, crab_memory: true },
         allowed_skill_ids: ['skill-a'],
       }),
-      { task: '运行测试', sync: true },
+      { task: '运行测试', context: '保留父上下文', sync: true } as never,
       { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } },
       [fakeTool('Skill'), fakeTool('mcp__crab-memory__search_memory')],
       executionContext(AVAILABLE_SKILLS),
     )
 
-    const options = forkEngine.mock.calls[0][0]
+    const options = spawnPersistentAgent.mock.calls[0][0]
+    expect(options.prompt).toBe('## Parent Context\n保留父上下文\n\n## Your Task\n运行测试')
     expect(options.permissionConfig).toEqual(executionContext().permissionConfig)
     expect(options.resolvedPermissions).toEqual(BUILTIN_WORKER_PERMISSIONS)
     expect(options.senderIsMaster).toBe(false)
@@ -148,15 +143,12 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     expect(options.hookRegistry.getMatching('PreToolUse', { toolName: 'Bash', toolInput: { command: 'crabot config get' } })).toHaveLength(1)
     expect(options.hookRegistry.getMatching('PreToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
     expect(options.hookRegistry.getMatching('PostToolUse', { toolName: 'Write', toolInput: {} })).toHaveLength(1)
+    expect(spawnPersistentAgent).toHaveBeenCalledOnce()
   })
 
   it('发起人关闭第三方 Skill 时，profile 内置 Skill 仍能在执行期调用', async () => {
-    forkEngine.mockResolvedValue({ outcome: 'completed', output: '完成', usage: { inputTokens: 1, outputTokens: 1 }, totalTurns: 1 })
-    const traceStore = {
-      startTrace: vi.fn(() => ({ trace_id: 'trace-child' })),
-      endTrace: vi.fn(),
-    } as unknown as TraceStore
-    const runner = new BuiltinSubagentRunner(traceStore, lspManager, undefined, registry)
+    spawnPersistentAgent.mockResolvedValue('agent-child')
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
     const restrictedPermissions = {
       ...BUILTIN_WORKER_PERMISSIONS,
       tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, mcp_skill: false },
@@ -164,7 +156,7 @@ describe('BuiltinSubagentRunner execution boundary', () => {
 
     await runner.run(
       testSubagent({ allowed_skill_ids: ['skill-a', 'builtin-systematic-debugging'] }),
-      { task: '运行测试', sync: true },
+      { task: '运行测试' },
       { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } },
       [fakeTool('Skill')],
       {
@@ -175,7 +167,7 @@ describe('BuiltinSubagentRunner execution boundary', () => {
       },
     )
 
-    const options = forkEngine.mock.calls[0][0]
+    const options = spawnPersistentAgent.mock.calls[0][0]
     const skillTool = options.tools.find((tool: ToolDefinition) => tool.name === 'Skill')
     expect(options.systemPrompt).toContain('<name>systematic-debugging</name>')
     expect(options.systemPrompt).not.toContain('<name>skill-a</name>')
@@ -187,14 +179,9 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     )).resolves.toEqual({ allowed: true })
   })
 
-  it('同步与异步 child 都告警并跳过当前不可用的 allowed Skill', async () => {
+  it('常规输入与旧 sync 输入都告警并跳过当前不可用的 allowed Skill', async () => {
     spawnPersistentAgent.mockResolvedValue('agent-child')
-    forkEngine.mockResolvedValue({ outcome: 'completed', output: '完成', usage: { inputTokens: 1, outputTokens: 1 }, totalTurns: 1 })
-    const traceStore = {
-      startTrace: vi.fn(() => ({ trace_id: 'trace-child' })),
-      endTrace: vi.fn(),
-    } as unknown as TraceStore
-    const runner = new BuiltinSubagentRunner(traceStore, lspManager, undefined, registry)
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
     const subagent = testSubagent({ allowed_skill_ids: ['missing-skill'] })
     const context = { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } }
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -209,14 +196,14 @@ describe('BuiltinSubagentRunner execution boundary', () => {
       )).resolves.toMatchObject({ isError: false })
       await expect(runner.run(
         subagent,
-        { task: '同步', sync: true },
+        { task: '旧输入', sync: true } as never,
         context,
         [fakeTool('Skill')],
         executionContext(AVAILABLE_SKILLS),
       )).resolves.toMatchObject({ isError: false })
 
       expect(spawnPersistentAgent.mock.calls[0][0].tools).toEqual([])
-      expect(forkEngine.mock.calls[0][0].tools).toEqual([])
+      expect(spawnPersistentAgent.mock.calls[1][0].tools).toEqual([])
       expect(warn).toHaveBeenCalledTimes(2)
       for (const [message] of warn.mock.calls) {
         expect(String(message)).toContain('missing-skill')
@@ -228,6 +215,86 @@ describe('BuiltinSubagentRunner execution boundary', () => {
 })
 
 describe('BuiltinSubagentRunner restart recovery', () => {
+  it('child trace 用追加式 call/result 保证增量 cursor 不漏结果', async () => {
+    const dir = await fs.mkdtemp(join(tmpdir(), 'builtin-subagent-trace-'))
+    try {
+      const registry = new BgEntityRegistry(join(dir, 'registry.json'))
+      await registry.register({
+        entity_id: 'agent-child', type: 'agent', status: 'running', trace_id: 'trace-child',
+        task_description: '读取文件', messages_log_file: join(dir, 'child.jsonl'), result_file: null,
+        owner: { friend_id: '__builtin_worker__', worker_id: 'worker-1' }, spawned_by_task_id: 'worker-1',
+        spawned_at: '2026-08-22T00:00:00.000Z', exit_code: null, ended_at: null, last_activity_at: '2026-08-22T00:00:00.000Z',
+      })
+      const trace = {
+        spans: [{
+          type: 'tool_call', started_at: '2026-08-22T00:00:01.000Z',
+          details: { call_id: 'engine-call', tool_use_id: 'provider-call', tool_name: 'Read', input_summary: '{"path":"a"}' },
+        }],
+      }
+      const traceStore = { getFullTrace: vi.fn(async () => trace) } as unknown as TraceStore
+      const runner = new BuiltinSubagentRunner(traceStore, {} as LSPManager, undefined, registry)
+
+      const first = await runner.readTrace('worker-1', 'agent-child')
+      expect(first).toMatchObject({
+        events: [{
+          kind: 'tool_call',
+          detail: { call_id: 'engine-call', tool_use_id: 'provider-call', name: 'Read', input: '{"path":"a"}' },
+        }],
+        nextCursor: { offset: 1 },
+      })
+      trace.spans.push({
+        type: 'tool_result', started_at: '2026-08-22T00:00:02.000Z',
+        details: { call_id: 'engine-call', tool_use_id: 'provider-call', output_summary: 'done' },
+      })
+
+      await expect(runner.readTrace('worker-1', 'agent-child', first.nextCursor)).resolves.toMatchObject({
+        events: [{ kind: 'tool_result', detail: { call_id: 'engine-call', tool_use_id: 'provider-call' } }],
+        nextCursor: { offset: 2 },
+      })
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('旧 tool span 只有确切结果时才生成兼容配对 ID', async () => {
+    const dir = await fs.mkdtemp(join(tmpdir(), 'builtin-subagent-legacy-trace-'))
+    try {
+      const registry = new BgEntityRegistry(join(dir, 'registry.json'))
+      await registry.register({
+        entity_id: 'agent-child', type: 'agent', status: 'completed', trace_id: 'trace-child',
+        task_description: '读取文件', messages_log_file: join(dir, 'child.jsonl'), result_file: null,
+        owner: { friend_id: '__builtin_worker__', worker_id: 'worker-1' }, spawned_by_task_id: 'worker-1',
+        spawned_at: '2026-08-22T00:00:00.000Z', exit_code: 0,
+        ended_at: '2026-08-22T00:00:03.000Z', last_activity_at: '2026-08-22T00:00:03.000Z',
+      })
+      const traceStore = {
+        getFullTrace: vi.fn(async () => ({
+          spans: [
+            {
+              span_id: 'legacy-no-result', type: 'tool_call', started_at: '2026-08-22T00:00:01.000Z',
+              details: { tool_name: 'Read', input_summary: '{"path":"a"}' },
+            },
+            {
+              span_id: 'legacy-completed', type: 'tool_call', started_at: '2026-08-22T00:00:02.000Z',
+              ended_at: '2026-08-22T00:00:03.000Z',
+              details: { tool_name: 'Bash', input_summary: 'pwd', output_summary: 'done' },
+            },
+          ],
+        })),
+      } as unknown as TraceStore
+      const runner = new BuiltinSubagentRunner(traceStore, {} as LSPManager, undefined, registry)
+
+      const result = await runner.readTrace('worker-1', 'agent-child')
+      expect(result.events[0].detail).not.toHaveProperty('call_id')
+      expect(result.events.slice(1)).toMatchObject([
+        { kind: 'tool_call', detail: { call_id: 'legacy-completed' } },
+        { kind: 'tool_result', detail: { call_id: 'legacy-completed' } },
+      ])
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('marks only Worker-owned running children as interrupted after an Agent restart', async () => {
     const dir = await fs.mkdtemp(join(tmpdir(), 'builtin-subagent-recovery-'))
     try {

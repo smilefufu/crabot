@@ -47,6 +47,7 @@ import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from '
 import { SessionLaneRegistry } from './orchestration/session-lane.js'
 import { AgentHandler, type SdkEnvConfig, type ExecuteTriggerMessageParams, type ExecuteTriggerMessageResult, adapterFromSdkEnv } from './agent/agent-handler.js'
 import { thinkingParam } from './engine/llm-adapter-types.js'
+import { recordEngineLlmResponse, recordEngineToolLifecycle, recordSubAgentTurn } from './engine/sub-agent-trace.js'
 import type { ToolPermissionConfig, ToolDefinition as EngineToolDefinition } from './engine/types.js'
 import { filterToolsByPermission } from './engine/index.js'
 import { getConfiguredBuiltinTools, filterMcpToolsByConfig } from './engine/tools/index.js'
@@ -268,17 +269,6 @@ function isTerminalSubagent(subagent: WorkerSubagentSummary): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function subagentIdFromDelegateTaskOutput(output: string): string | undefined {
-  try {
-    const parsed: unknown = JSON.parse(output)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
-    const agentId = (parsed as Record<string, unknown>).agent_id
-    return typeof agentId === 'string' && agentId ? agentId : undefined
-  } catch {
-    return undefined
-  }
 }
 
 function redactTraceDetail(detail: unknown, redact: (text: string) => string): unknown {
@@ -4321,38 +4311,14 @@ export class UnifiedAgent extends ModuleBase {
         }
         return trace.trace_id
       },
+      appendLlmResponse: (traceId, event) => {
+        recordEngineLlmResponse(this.traceStore, traceId, event, redact)
+      },
       appendTurn: (traceId, event) => {
-        const assistantText = redact(event.assistantText)
-        const llmSpan = this.traceStore.startSpan(traceId, {
-          type: 'llm_call',
-          details: {
-            model: '',
-            stop_reason: event.stopReason,
-            ...(assistantText.trim() ? { assistant_text: assistantText } : {}),
-            ...(event.usage ? { usage: event.usage } : {}),
-          } as import('./types.js').AgentSpanDetails,
-          started_at_ms: event.llmStartedAtMs,
-        })
-        this.traceStore.endSpan(traceId, llmSpan.span_id, 'completed', undefined,
-          event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined ? event.llmStartedAtMs + event.llmCallMs : undefined)
-        for (const toolCall of event.toolCalls) {
-          const subagentId = toolCall.name === 'delegate_task'
-            ? subagentIdFromDelegateTaskOutput(toolCall.output)
-            : undefined
-          const span = this.traceStore.startSpan(traceId, {
-            type: 'tool_call',
-            parent_span_id: llmSpan.span_id,
-            details: {
-              name: toolCall.name,
-              input_summary: redact(JSON.stringify(toolCall.input).slice(0, 300)),
-              output_summary: redact(toolCall.output.slice(0, 300)),
-              ...(subagentId ? { subagent_id: subagentId } : {}),
-            } as import('./types.js').AgentSpanDetails,
-            started_at_ms: toolCall.startedAtMs,
-          })
-          this.traceStore.endSpan(traceId, span.span_id, toolCall.isError ? 'failed' : 'completed', undefined,
-            toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined ? toolCall.startedAtMs + toolCall.durationMs : undefined)
-        }
+        recordSubAgentTurn(this.traceStore, traceId, event, redact)
+      },
+      appendToolLifecycle: (traceId, event) => {
+        recordEngineToolLifecycle(this.traceStore, traceId, event, redact)
       },
       // turn 边界注入的 manager 输入（spec 2026-08-29-worker-input-turn-boundary-delivery）：
       // 与 spawn 初始输入同款 context_assembly + message_batch(manager) span——

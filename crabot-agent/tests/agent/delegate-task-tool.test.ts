@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { buildDelegateTaskDescription, createDelegateTaskTool } from '../../src/agent/delegate-task-tool.js'
+import { buildDelegatedTaskPrompt, buildDelegateTaskDescription, createDelegateTaskTool } from '../../src/agent/delegate-task-tool.js'
 import type { SubAgentConfig } from '../../src/types.js'
 
 function fakeSubAgent(name: string, when_to_use = `Use this subagent when ${name}.`): SubAgentConfig {
@@ -66,6 +66,22 @@ describe('buildDelegateTaskDescription', () => {
     expect(desc).toContain('不继承父对话历史')
     expect(desc).toContain('不能再委派下一层')
   })
+
+  it('只声明异步派发，不向模型暴露同步模式', () => {
+    const desc = buildDelegateTaskDescription([fakeSubAgent('x')])
+    expect(desc).toContain('只会异步')
+    expect(desc).not.toContain('sync')
+    expect(desc).not.toContain('同 turn 立即')
+  })
+})
+
+describe('buildDelegatedTaskPrompt', () => {
+  it('保留可选父上下文并与任务正文明确分隔', () => {
+    expect(buildDelegatedTaskPrompt({ task: '检查实现', context: '父任务背景' })).toBe(
+      '## Parent Context\n父任务背景\n\n## Your Task\n检查实现',
+    )
+    expect(buildDelegatedTaskPrompt({ task: '检查实现' })).toBe('检查实现')
+  })
 })
 
 describe('createDelegateTaskTool', () => {
@@ -84,6 +100,12 @@ describe('createDelegateTaskTool', () => {
   it('inputSchema.required 含 subagent_type 和 task', () => {
     const tool = createDelegateTaskTool({ subAgents: [fakeSubAgent('a')], runSubAgent: vi.fn() })
     expect(tool.inputSchema.required).toEqual(expect.arrayContaining(['subagent_type', 'task']))
+  })
+
+  it('inputSchema 不声明 sync', () => {
+    const tool = createDelegateTaskTool({ subAgents: [fakeSubAgent('a')], runSubAgent: vi.fn() })
+    const props = tool.inputSchema.properties as Record<string, unknown>
+    expect(props).not.toHaveProperty('sync')
   })
 
   it('未知 subagent_type 返回 isError + 可用列表', async () => {

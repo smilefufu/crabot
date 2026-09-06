@@ -83,7 +83,6 @@ describe('runSubAgentAsync child trace', () => {
       {
         parentTools: [],
         parentTaskId: 'task-9',
-        callerLabel: 'main worker',
         humanQueue: new HumanMessageQueue(),
         traceConfig: {
           traceStore: {} as never,
@@ -113,7 +112,6 @@ describe('runSubAgentAsync child trace', () => {
       {
         parentTools: [],
         parentTaskId: 'task-9',
-        callerLabel: 'main worker',
         humanQueue: new HumanMessageQueue(),
       },
     )

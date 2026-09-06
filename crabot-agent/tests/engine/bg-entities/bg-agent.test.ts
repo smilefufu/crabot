@@ -297,6 +297,70 @@ describe('spawnPersistentAgent', () => {
     })
   })
 
+  it('subTrace 在后台工具完成前按 response/call 追加，完成后再追加 result', async () => {
+    let releaseTool!: () => void
+    const toolGate = new Promise<void>((resolve) => { releaseTool = resolve })
+    const adapter = mockAdapter([
+      [
+        { type: 'message_start', messageId: 'msg-tool' },
+        { type: 'text_delta', text: '先等待工具。' },
+        { type: 'tool_use_start', id: 'provider-call', name: 'wait_tool' },
+        { type: 'tool_use_delta', id: 'provider-call', inputJson: '{"value":1}' },
+        { type: 'tool_use_end', id: 'provider-call' },
+        { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 5 } },
+      ],
+      textResponse('完成'),
+    ])
+    const traceStore = new TraceStore()
+    const parent = traceStore.startTrace({
+      module_id: 'agent',
+      trigger: { type: 'task', summary: 'parent worker task' },
+    })
+    const id = await spawnPersistentAgent({
+      ...baseOpts(adapter),
+      tools: [{
+        name: 'wait_tool', description: 'wait', inputSchema: {}, isReadOnly: true,
+        call: async () => {
+          await toolGate
+          return { output: 'done', isError: false }
+        },
+      }],
+      subTrace: { traceStore, parentTraceId: parent.trace_id },
+    })
+
+    await waitFor(async () => {
+      const record = await registry.get(id)
+      return record?.type === 'agent'
+        && typeof record.trace_id === 'string'
+        && traceStore.getTrace(record.trace_id)?.spans.some((span) => span.type === 'tool_call') === true
+    })
+
+    const record = await registry.get(id) as import('../../../src/engine/bg-entities/types').BgAgentRegistryRecord
+    const inFlight = traceStore.getTrace(record.trace_id!)!
+    expect(inFlight.spans.map((span) => span.type)).toEqual(['llm_call', 'tool_call'])
+    expect(inFlight.spans[0].details).toMatchObject({
+      response_id: expect.any(String), assistant_text: '先等待工具。', stop_reason: 'tool_use',
+    })
+    expect(inFlight.spans[1]).toMatchObject({
+      parent_span_id: inFlight.spans[0].span_id,
+      details: {
+        response_id: (inFlight.spans[0].details as { response_id: string }).response_id,
+        call_id: expect.any(String), tool_use_id: 'provider-call', tool_name: 'wait_tool',
+      },
+    })
+
+    releaseTool()
+    await waitFor(async () => (await registry.get(id))?.status === 'completed')
+
+    const completed = traceStore.getTrace(record.trace_id!)!
+    expect(completed.spans.map((span) => span.type)).toEqual(['llm_call', 'tool_call', 'tool_result', 'llm_call'])
+    expect(completed.spans[2].details).toMatchObject({
+      response_id: (completed.spans[0].details as { response_id: string }).response_id,
+      call_id: (completed.spans[1].details as { call_id: string }).call_id,
+      tool_use_id: 'provider-call', output_summary: expect.stringContaining('done'),
+    })
+  })
+
   it('multiple parallel spawns produce independent result_files without mixing', async () => {
     const messages = ['alpha result', 'beta result', 'gamma result']
     const adapters = messages.map((m) => mockAdapter([textResponse(m)]))

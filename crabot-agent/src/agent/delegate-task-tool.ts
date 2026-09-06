@@ -11,7 +11,6 @@
  *
  * Spec: crabot-docs/superpowers/specs/2026-05-17-subagent-customization-and-admin-ui-design.md §3.2
  *
- * TODO(phase-2b): support run_in_background for persistent subagent spawn
  */
 
 import type { ToolDefinition, ToolCallContext, ToolCallResult } from '../engine/types.js'
@@ -23,12 +22,12 @@ export interface RunSubAgentInput {
   readonly task: string
   readonly context?: string
   readonly image_paths?: string[]
-  /**
-   * 显式同步模式：true = 阻塞等待 subagent 完成后返回结果。
-   * 默认 false（异步派发，工具立即返回 {agent_id, status:'launched'}）。
-   * 仅在 subagent 输出需要在同 turn 立即使用的少数场景传 true。
-   */
-  readonly sync?: boolean
+}
+
+export function buildDelegatedTaskPrompt(input: Pick<RunSubAgentInput, 'task' | 'context'>): string {
+  return input.context
+    ? `## Parent Context\n${input.context}\n\n## Your Task\n${input.task}`
+    : input.task
 }
 
 /** 调用 subagent 的实际函数；由 caller（agent-handler）实现，注入到 createDelegateTaskTool */
@@ -84,12 +83,11 @@ export function buildDelegateTaskDescription(subAgents: ReadonlyArray<SubAgentCo
   lines.push(
     '',
     'Usage notes:',
-    '- 默认异步：工具立即返回 {agent_id, status:"launched"}，不阻塞你；subagent 完成时系统自动推送 <sub_agent_notification> 给你',
+    '- 只会异步派发：工具立即返回 {agent_id, status:"launched"}，不阻塞你；subagent 完成时系统自动推送 <sub_agent_notification> 给你',
     '- 单条 message 内可 batch 调多次 delegate_task 并发派出多个 subagent',
     '- subagent 在隔离上下文执行，不继承父对话历史；prompt 要写完整任务描述',
     '- 子 agent 返回 final output 后退出，无法续会话',
     '- subagent 看不到 delegate_task 工具，不能再委派下一层',
-    '- sync: true 仅在 subagent 输出需要在同 turn 立即使用时传入（极少数场景）',
   )
   return lines.join('\n')
 }
@@ -122,10 +120,6 @@ export function createDelegateTaskTool(opts: CreateDelegateTaskToolOptions): Too
           type: 'array',
           items: { type: 'string' },
           description: '可选；仅当 subagent 的模型支持 vision 时生效',
-        },
-        sync: {
-          type: 'boolean',
-          description: '默认 false（异步）。true = 同步等待 subagent 完成后返回结果，仅在同 turn 内必须用 subagent 输出时传入',
         },
       },
       required: ['subagent_type', 'task'],

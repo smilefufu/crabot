@@ -87,6 +87,11 @@ describe('assembleAgentPrompt 可选段渲染', () => {
     })
     expect(prompt).toContain('Sub-agent')
     expect(prompt).toContain('reviewer')
+    expect(prompt).toContain('## 异步 Subagent（唯一行为）')
+    expect(prompt).not.toContain('sync: true')
+    expect(prompt).not.toContain('默认异步')
+    expect(prompt).toContain('只会**异步派发**并立即返回 agent_id')
+    expect(prompt).toContain('完成通知进入后续 turn')
   })
 
   it('builtin worker 使用与 delegate_task 实际能力一致的委派说明', () => {
@@ -102,6 +107,9 @@ describe('assembleAgentPrompt 可选段渲染', () => {
     expect(guidance).not.toContain('get_subagent_output')
     expect(guidance).not.toContain('list_active_subagents')
     expect(guidance).not.toContain('send_message')
+    expect(guidance).toContain('只会异步派发')
+    expect(guidance).not.toContain('sync: true')
+    expect(guidance).toContain('完成通知进入后续 turn')
   })
 
   it('Worker 模式不注入 Memory 或历史任务工具指引，证据不足时返回 Manager', () => {

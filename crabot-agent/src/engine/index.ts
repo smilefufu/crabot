@@ -6,7 +6,9 @@ export type { RunEngineParams } from './query-loop'
 export type {
   EngineOptions,
   EngineResult,
+  EngineLlmResponseEvent,
   EngineTurnEvent,
+  EngineToolLifecycleEvent,
   LiveProgressEvent,
   ToolDefinition,
   ToolCallContext,

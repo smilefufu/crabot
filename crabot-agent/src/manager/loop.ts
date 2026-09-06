@@ -40,7 +40,9 @@ import {
   createUserMessage,
   type EngineMessage,
   type EngineResult,
+  type EngineLlmResponseEvent,
   type EngineOptions,
+  type EngineToolLifecycleEvent,
   type ToolDefinition,
   type LLMAdapter,
   type TextBlock,
@@ -359,6 +361,10 @@ export class ManagerLoop {
    * episode 由 mutex 串行，不存在交叠。
    */
   private currentTraceId: string | undefined = undefined
+  private readonly tracedLlmResponses = new Set<string>()
+  private readonly tracedUsageResponses = new Set<string>()
+  private readonly tracedToolStarts = new Set<string>()
+  private readonly tracedToolFinishes = new Set<string>()
   /** 当前 episode 的一次性发送后动作复核状态；不进入 session/ledger。 */
   private needsSpawnRecheck = false
   private spawnRecheckInjected = false
@@ -825,6 +831,10 @@ export class ManagerLoop {
       this.currentWakeEvent = null
       this.currentEpisodeEnvelopes = []
       this.currentTraceId = undefined
+      this.tracedLlmResponses.clear()
+      this.tracedUsageResponses.clear()
+      this.tracedToolStarts.clear()
+      this.tracedToolFinishes.clear()
       this.successfulSendMessageTargetsInCurrentEpisode.clear()
       this.continuedWorkersInCurrentEpisode.clear()
       this.needsSpawnRecheck = false
@@ -1457,35 +1467,30 @@ export class ManagerLoop {
     })
   }
 
-  /** engine onTurn → llm_call/tool_call span（截断摘要由 writer 侧统一脱敏落盘）。 */
-  private recordTurnSpans(episodeId: string, event: import('../engine/types.js').EngineTurnEvent): void {
+  private toolSpanId(episodeId: string, callId: string): string {
+    return `tool-${episodeId}-${callId}`
+  }
+
+  private llmSpanId(episodeId: string, responseId: string): string {
+    return `llm-${episodeId}-${responseId}`
+  }
+
+  private recordLlmResponse(episodeId: string, event: EngineLlmResponseEvent): void {
     const writer = this.deps.traceWriter
-    if (!writer || this.currentTraceId !== episodeId) return
-    const usage = event.usage
-    if (usage) {
-      this.currentUsage.input_tokens += usage.inputTokens ?? 0
-      this.currentUsage.output_tokens += usage.outputTokens ?? 0
-      this.currentUsage.cache_creation_tokens += usage.cacheCreationTokens ?? 0
-      this.currentUsage.cache_read_tokens += usage.cacheReadTokens ?? 0
-    }
-    const attemptTag = this.attemptCounter
-    const llmSpanId = `llm-${episodeId}-${attemptTag}-${event.turnNumber}`
-    const llmStarted = event.llmStartedAtMs !== undefined ? new Date(event.llmStartedAtMs).toISOString() : new Date().toISOString()
-    const llmEnded = event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined
-      ? new Date(event.llmStartedAtMs + event.llmCallMs).toISOString()
-      : undefined
+    if (!writer || this.currentTraceId !== episodeId || this.tracedLlmResponses.has(event.responseId)) return
     writer.appendSpan(episodeId, {
-      span_id: llmSpanId,
+      span_id: this.llmSpanId(episodeId, event.responseId),
       parent_span_id: `root-${episodeId}`,
       type: 'llm_call',
-      started_at: llmStarted,
-      ended_at: llmEnded,
+      started_at: new Date(event.llmStartedAtMs).toISOString(),
+      ended_at: new Date(event.llmStartedAtMs + event.llmCallMs).toISOString(),
       duration_ms: event.llmCallMs,
       status: 'completed',
       details: {
+        response_id: event.responseId,
         turn: event.turnNumber,
         stop_reason: event.stopReason,
-        ...(usage ? { usage } : {}),
+        ...(event.usage ? { usage: event.usage } : {}),
         ...(event.diagnostics ? {
           retries: event.diagnostics.retries,
           first_chunk_ms: event.diagnostics.firstChunkMs,
@@ -1493,24 +1498,124 @@ export class ManagerLoop {
         } : {}),
       },
     })
-    for (const toolCall of event.toolCalls) {
-      const toolStarted = toolCall.startedAtMs !== undefined ? new Date(toolCall.startedAtMs).toISOString() : llmStarted
+    this.tracedLlmResponses.add(event.responseId)
+  }
+
+  private recordToolLifecycle(episodeId: string, event: EngineToolLifecycleEvent): void {
+    const writer = this.deps.traceWriter
+    if (!writer || this.currentTraceId !== episodeId) return
+    const spanId = this.toolSpanId(episodeId, event.callId)
+    const details = {
+      response_id: event.responseId,
+      call_id: event.callId,
+      tool_use_id: event.toolUseId,
+      name: event.name,
+      input_summary: summarizeSpanInput(event.input),
+      ...(event.type === 'tool_finished' ? {
+        output_summary: summarizeSpanOutput(event.output),
+        is_error: event.isError,
+      } : {}),
+    }
+
+    if (event.type === 'tool_started') {
+      if (this.tracedToolStarts.has(event.callId)) return
       writer.appendSpan(episodeId, {
-        span_id: `tool-${episodeId}-${attemptTag}-${event.turnNumber}-${toolCall.id}`,
-        parent_span_id: llmSpanId,
+        span_id: spanId,
+        parent_span_id: this.llmSpanId(episodeId, event.responseId),
         type: 'tool_call',
-        started_at: toolStarted,
-        ended_at: toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined
-          ? new Date(toolCall.startedAtMs + toolCall.durationMs).toISOString()
-          : undefined,
-        duration_ms: toolCall.durationMs,
-        status: toolCall.isError ? 'failed' : 'completed',
-        details: {
-          name: toolCall.name,
-          input_summary: summarizeSpanInput(toolCall.input),
-          output_summary: summarizeSpanOutput(toolCall.output),
-        },
+        started_at: new Date(event.startedAtMs).toISOString(),
+        status: 'running',
+        details,
       })
+      this.tracedToolStarts.add(event.callId)
+      return
+    }
+
+    if (this.tracedToolFinishes.has(event.callId)) return
+    if (this.tracedToolStarts.has(event.callId)) {
+      writer.finishSpan(episodeId, spanId, {
+        status: event.isError ? 'failed' : 'completed',
+        ended_at: new Date(event.endedAtMs).toISOString(),
+        details,
+      })
+    } else {
+      writer.appendSpan(episodeId, {
+        span_id: spanId,
+        parent_span_id: this.llmSpanId(episodeId, event.responseId),
+        type: 'tool_call',
+        started_at: new Date(event.startedAtMs).toISOString(),
+        ended_at: new Date(event.endedAtMs).toISOString(),
+        duration_ms: event.durationMs,
+        status: event.isError ? 'failed' : 'completed',
+        details,
+      })
+      this.tracedToolStarts.add(event.callId)
+    }
+    this.tracedToolFinishes.add(event.callId)
+  }
+
+  /** engine onTurn → LLM/lifecycle 补漏与 usage 结算（writer 侧统一脱敏落盘）。 */
+  private recordTurnSpans(episodeId: string, event: import('../engine/types.js').EngineTurnEvent): void {
+    const writer = this.deps.traceWriter
+    if (!writer || this.currentTraceId !== episodeId) return
+    this.recordLlmResponse(episodeId, {
+      responseId: event.responseId,
+      turnNumber: event.turnNumber,
+      assistantText: event.assistantText,
+      stopReason: event.stopReason,
+      toolCallsCount: event.toolCalls.length,
+      llmCallMs: event.llmCallMs ?? 0,
+      llmStartedAtMs: event.llmStartedAtMs ?? Date.now(),
+      ...(event.forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt: event.forcedSummaryAttempt } : {}),
+      ...(event.usage ? { usage: event.usage } : {}),
+      ...(event.diagnostics ? { diagnostics: event.diagnostics } : {}),
+    })
+    const usage = event.usage
+    if (usage && !this.tracedUsageResponses.has(event.responseId)) {
+      this.currentUsage.input_tokens += usage.inputTokens ?? 0
+      this.currentUsage.output_tokens += usage.outputTokens ?? 0
+      this.currentUsage.cache_creation_tokens += usage.cacheCreationTokens ?? 0
+      this.currentUsage.cache_read_tokens += usage.cacheReadTokens ?? 0
+      this.tracedUsageResponses.add(event.responseId)
+    }
+    const llmSpanId = this.llmSpanId(episodeId, event.responseId)
+    const llmStarted = event.llmStartedAtMs !== undefined ? new Date(event.llmStartedAtMs).toISOString() : new Date().toISOString()
+    for (const toolCall of event.toolCalls) {
+      if (this.tracedToolFinishes.has(toolCall.callId)) continue
+      const toolStarted = toolCall.startedAtMs !== undefined ? new Date(toolCall.startedAtMs).toISOString() : llmStarted
+      const endedAt = toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined
+        ? new Date(toolCall.startedAtMs + toolCall.durationMs).toISOString()
+        : undefined
+      const details = {
+        response_id: event.responseId,
+        call_id: toolCall.callId,
+        tool_use_id: toolCall.id,
+        name: toolCall.name,
+        input_summary: summarizeSpanInput(toolCall.input),
+        output_summary: summarizeSpanOutput(toolCall.output),
+        is_error: toolCall.isError,
+      }
+      const spanId = this.toolSpanId(episodeId, toolCall.callId)
+      if (this.tracedToolStarts.has(toolCall.callId)) {
+        writer.finishSpan(episodeId, spanId, {
+          status: toolCall.isError ? 'failed' : 'completed',
+          ended_at: endedAt,
+          details,
+        })
+      } else {
+        writer.appendSpan(episodeId, {
+          span_id: spanId,
+          parent_span_id: llmSpanId,
+          type: 'tool_call',
+          started_at: toolStarted,
+          ended_at: endedAt,
+          duration_ms: toolCall.durationMs,
+          status: toolCall.isError ? 'failed' : 'completed',
+          details,
+        })
+        this.tracedToolStarts.add(toolCall.callId)
+      }
+      this.tracedToolFinishes.add(toolCall.callId)
     }
   }
 
@@ -1708,9 +1813,11 @@ export class ManagerLoop {
         }
       },
       endTurnGate: async () => this.takeSpawnRecheckPrompt(),
-      // P6-A §6.4：onTurn 是事后观察钩子，用它生成 llm_call/tool_call span；
-      // 不复制执行语义、不新增第二个 query loop。
+      // P6-A §6.4：response/lifecycle 钩子即时投影，onTurn 负责补漏与 usage 结算；
+      // 三者都只观察共享 Engine，不复制执行语义或新增第二个 query loop。
+      onLlmResponse: (event) => this.recordLlmResponse(episodeId, event),
       onTurn: (event) => this.recordTurnSpans(episodeId, event),
+      onToolLifecycle: (event) => this.recordToolLifecycle(episodeId, event),
       // LLM 重试期间配置热切换（spec 2026-08-30-llm-retry-config-hotreload）：
       // onRuntimeConfigApplied 在 agentConfig 原子替换完成后触发 → abort signal →
       // callNonStreaming 的重试 sleep 提前结束；configGeneration 探针由 engine 记账，

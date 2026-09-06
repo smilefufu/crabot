@@ -94,6 +94,7 @@ import type {
 import { classifySupervisionActivity } from '../types.js'
 import type { SupervisionObservation } from '../types.js'
 import { QUERY_FORK_INSTRUCTION } from '../query-fork-instruction.js'
+import { subagentIdFromToolOutput } from '../../engine/sub-agent-trace.js'
 
 function forkSystemPrompt(systemPrompt: Resolvable<string>): Resolvable<string> {
   return () => {
@@ -286,7 +287,9 @@ export interface BuiltinTraceHooks {
     summary: string
     initial_input?: string
   }): string
+  appendLlmResponse?(traceId: string, event: import('../../engine/types.js').EngineLlmResponseEvent): void
   appendTurn(traceId: string, event: import('../../engine/types.js').EngineTurnEvent): void
+  appendToolLifecycle?(traceId: string, event: import('../../engine/types.js').EngineToolLifecycleEvent): void
   /**
    * turn 边界注入的 manager 输入落 trace（spec 2026-08-29-worker-input-turn-boundary-delivery）：
    * 落成 context_assembly + message_batch(manager) span，与 spawn 初始输入同款表达，
@@ -462,6 +465,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         engineMessagesRef: createEngineMessagesRef([rootMessage]),
         engineMessagesTip: rootId,
         activityAt: Date.now(),
+        initialTraceInput: spec.prompt,
         state: 'running',
         pendingInputs: [],
         pendingImmediateInputs: [],
@@ -1143,6 +1147,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         onLiveProgress: () => {
           instance.activityAt = Date.now()
         },
+        onLlmResponse: (event) => {
+          instance.activityAt = Date.now()
+          if (instance.traceId) this.deps.traceHooks?.appendLlmResponse?.(instance.traceId, event)
+        },
+        onToolLifecycle: (event) => {
+          instance.activityAt = Date.now()
+          if (instance.traceId) this.deps.traceHooks?.appendToolLifecycle?.(instance.traceId, event)
+        },
         onTurn: (event) => {
           instance.activityAt = Date.now()
           if (instance.traceId) this.deps.traceHooks?.appendTurn(instance.traceId, event)
@@ -1340,6 +1352,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         messagesRef: instance.engineMessagesRef,
         onLiveProgress: () => {
           instance.activityAt = Date.now()
+        },
+        onLlmResponse: (event) => {
+          instance.activityAt = Date.now()
+          if (instance.traceId) this.deps.traceHooks?.appendLlmResponse?.(instance.traceId, event)
+        },
+        onToolLifecycle: (event) => {
+          instance.activityAt = Date.now()
+          if (instance.traceId) this.deps.traceHooks?.appendToolLifecycle?.(instance.traceId, event)
         },
         onTurn: (event) => {
           instance.activityAt = Date.now()
@@ -1980,22 +2000,24 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
       const output = typeof details.output_summary === 'string' ? details.output_summary : undefined
       const error = typeof details.error === 'string' ? details.error : undefined
       const recordedSubagentId = typeof details.subagent_id === 'string' ? details.subagent_id : undefined
-      const subagentId = recordedSubagentId ?? (name === 'delegate_task' ? subagentIdFromOutput(output ?? error) : undefined)
-      const callId = span.span_id
+      const subagentId = recordedSubagentId ?? (name === 'delegate_task' ? subagentIdFromToolOutput(output ?? error) : undefined)
+      const result = output ?? error
+      const callId = typeof details.call_id === 'string'
+        ? details.call_id
+        : result ? span.span_id : undefined
       const call = {
         ...base,
         kind: 'tool_call',
         summary: name,
         detail: {
           ...details,
-          call_id: callId,
+          ...(callId !== undefined ? { call_id: callId } : {}),
           name,
           ...(input !== undefined ? { input } : {}),
           ...(subagentId ? { subagent_id: subagentId } : {}),
         },
         ...(subagentId ? { subagent_id: subagentId } : {}),
       } as const
-      const result = output ?? error
       if (!result) return [call]
       return [
         call,
@@ -2012,17 +2034,26 @@ function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import(
         },
       ]
     }
+    case 'tool_result': {
+      const name = typeof details.tool_name === 'string' ? details.tool_name : 'tool result'
+      const output = typeof details.output_summary === 'string'
+        ? details.output_summary
+        : typeof details.error === 'string' ? details.error : ''
+      const recordedSubagentId = typeof details.subagent_id === 'string' ? details.subagent_id : undefined
+      const subagentId = recordedSubagentId ?? (name === 'delegate_task' ? subagentIdFromToolOutput(output) : undefined)
+      return [{
+        ...base,
+        kind: 'tool_result',
+        summary: output,
+        detail: {
+          ...details,
+          output,
+          ...(span.status === 'failed' || details.is_error === true ? { is_error: true } : {}),
+        },
+        ...(subagentId ? { subagent_id: subagentId } : {}),
+      }]
+    }
     default:
       return [{ ...base, kind: 'lifecycle', summary: span.type, detail: details }]
-  }
-}
-
-function subagentIdFromOutput(output: string | undefined): string | undefined {
-  if (!output) return undefined
-  try {
-    const parsed = JSON.parse(output) as { agent_id?: unknown }
-    return typeof parsed.agent_id === 'string' ? parsed.agent_id : undefined
-  } catch {
-    return undefined
   }
 }
