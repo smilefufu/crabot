@@ -645,6 +645,31 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
   // --- ⑥ onStart 的启动对账 ---
 
+  it('启动只登记未完成 Manager 检查点，丢弃已完成 episode 的迟到检查点', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const traces = (agent as unknown as { traceStore: import('../../src/core/trace-store.js').TraceStore }).traceStore
+    const pending = { episodeId: 'resume-pending', state: { key: 'test::pending' } } as import('../../src/manager/resume-checkpoint.js').ManagerResumeCheckpoint
+    const completed = { episodeId: 'resume-completed', state: { key: 'test::completed' } } as import('../../src/manager/resume-checkpoint.js').ManagerResumeCheckpoint
+    traces.startManagerEpisode(pending.episodeId, pending.state.key, { type: 'human_message', summary: 'pending' })
+    traces.startManagerEpisode(completed.episodeId, completed.state.key, { type: 'human_message', summary: 'completed' })
+    traces.finishManagerEpisode(completed.episodeId, { status: 'completed', outcome: { summary: 'done' } })
+    vi.spyOn(stack.store, 'listCheckpoints').mockResolvedValue([pending, completed])
+    const cleanup = vi.spyOn(stack.store, 'clearCheckpoint').mockImplementation(() => {})
+    const register = vi.spyOn(stack.registry, 'registerResumeCheckpoints').mockImplementation(() => {})
+    const resume = vi.spyOn(stack.registry, 'resumeInterruptedEpisodes').mockResolvedValue(undefined)
+    await internals.onStart()
+    try {
+      expect(register).toHaveBeenCalledWith([pending])
+      expect(cleanup).toHaveBeenCalledWith(completed.state.key, completed.episodeId)
+      expect(traces.getManagerEpisode(pending.episodeId)?.status).toBe('running')
+      expect(traces.getManagerEpisode(completed.episodeId)?.status).toBe('completed')
+      expect(resume).not.toHaveBeenCalled()
+    } finally {
+      await internals.onStop()
+    }
+  })
+
   /**
    * 对账的**发起点在 register 之后**（`main.ts`：start → register → startManagerStackReconciliation），
    * 不再挂在 `onStart()` 里：它的 fs 扫描 + tmux 子进程会和 `register()` 的 getaddrinfo 抢同一个
@@ -658,12 +683,33 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     const release = vi.fn().mockResolvedValue(undefined)
     internals.agentHandler = { releaseRecoveredWorkerShellExits: release } as any
     const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
+    const resume = vi.spyOn(stack.registry, 'resumeInterruptedEpisodes').mockResolvedValue(undefined)
     vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     agent.startManagerStackReconciliation()
     await waitUntil(async () => release.mock.calls.length === 1)
 
     expect(sweep).toHaveBeenCalledOnce()
+    expect(resume).toHaveBeenCalledOnce()
+  })
+
+  it('Worker 对账完成后才恢复 Manager，Manager LLM 不阻塞后台恢复和巡检', async () => {
+    boot()
+    const stack = internals.managerStack!
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    vi.spyOn(stack.harness, 'reconcileOnStartup').mockImplementation(async () => {
+      await gate
+      return { revived: [], failed: [], unchanged: [] }
+    })
+    const resume = vi.spyOn(stack.registry, 'resumeInterruptedEpisodes').mockImplementation(async () => new Promise(() => {}))
+    const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
+    agent.startManagerStackReconciliation()
+    await Promise.resolve()
+    expect(resume).not.toHaveBeenCalled()
+    release()
+    await waitUntil(() => sweep.mock.calls.length === 1)
+    expect(resume).toHaveBeenCalledOnce()
   })
 
   it('启动对账收尾在 bg-shell 结算后后台投递恢复提醒，不阻塞活性巡检', async () => {

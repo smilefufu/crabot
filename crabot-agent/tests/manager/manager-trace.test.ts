@@ -73,6 +73,20 @@ describe('TraceStore manager episode traces', () => {
     expect(episode.spawned_worker_ids).toEqual(['w-1', 'w-2'])
   })
 
+  it('keeps an interrupted episode resumable instead of marking the whole episode failed', () => {
+    store.startManagerEpisode('ep-resume', KEY_A, TRIGGER)
+    store.appendManagerSpan('ep-resume', {
+      span_id: 'interrupted-call', type: 'tool_call', started_at: new Date().toISOString(), status: 'running', details: { name: 'send_message' },
+    })
+    store.reconcileInterruptedManagerEpisodes(new Set(['ep-resume']))
+    expect(store.getManagerEpisode('ep-resume')!.status).toBe('running')
+    expect(store.getManagerEpisode('ep-resume')!.spans[0].status).toBe('failed')
+    store.startManagerEpisode('ep-resume', KEY_A, TRIGGER, true)
+    store.finishManagerEpisode('ep-resume', { status: 'completed', outcome: { summary: 'resumed' } })
+    expect(store.getManagerEpisode('ep-resume')!.status).toBe('completed')
+    expect(store.listManagerEpisodes(KEY_A).items).toHaveLength(1)
+  })
+
   it('finish closes leftover running spans with the episode status', () => {
     store.startManagerEpisode('ep-3', KEY_A, TRIGGER)
     store.appendManagerSpan('ep-3', {

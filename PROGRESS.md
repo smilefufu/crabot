@@ -5,6 +5,17 @@
 
 ## 当前状态
 
+### Manager 重启续跑与处理中回复展示：实现与定向验证完成，待合入
+
+- 补齐 Manager 的 Engine 检查点与启动恢复接线；Worker 启动对账后沿用原会话、episode 和唤醒身份续跑，
+  保留完成的工具结果、排队/已消费插话及图片引用。未知工具结果明确 interrupted，恢复机制不直接重执行。
+- 在途消息合并 episode 后继续展示真实回复和后续动作；同轮已回复但未结束时显示“本轮已回复，继续处理”。
+- 修复 Engine 下一次 LLM 前 messagesRef 未刷新造成的插话快照遗漏；有效检查点不再因 Agent 重启一律 failed。
+  无检查点的旧中断记录仍据实收口，既有终态不重放。
+- 已覆盖首次 LLM 前中断、已发送结果、连续重启、排队/图片插话、原发起人权限、续跑失败及启动顺序。
+  Agent 类型检查、前端 21 项测试与构建通过，桌面/手机 Playwright 状态切换通过。
+  扩大检查中的 7 项失败均在未修改基线复现（6 项缺失 tmp-page 测试 fixture、1 项工具面调用次数断言）。
+
 ### Manager 取消按空闲时间提前压缩：实现完成，待合入
 
 - 取消空闲超过 5 分钟且旧历史超过 20K tokens 时的 `fold_at_wake`；保留完整请求容量压缩、
@@ -500,7 +511,7 @@
 - **Worker/subagent trace 写点的同类硬截断**：`agent-handler.ts`（`.slice(0, 200/500)`）与 `unified-agent.ts`（`.slice(0, 300)`）对工具 span 摘要仍用整段硬截，与已修复的 manager episode span 同模式；目前无消费方受害（episode 投影不读这些 trace），若未来对其启用结构化提取应先改造为 `span-summary.ts` 的字段级截断（2026-08-27，`7cd86abf`）。
 - **Worker 巡检调度收口**：启动对账与周期巡检应共享 due 投递排他；避免单个 Worker 的长锁阻塞全局活性巡检；默认巡检在全局 LLM 故障时需要有界的失败告警去重/退避。三项均需独立设计，不纳入当前任务巡检 PR。
 - **移除 Agent 内部 legacy `roles` seam**：`AgentLayerConfig.roles` 是 v2 前多 Agent 时代残留（正式协议从未包含），现仅作内部测试 seam/恒真分支；应替换为显式的 worker-layer 开关后删除。
-- **普通 Channel 未消费人类 wake 的跨重启恢复**：2026-08-19 实测，飞书私聊消息已落 Channel journal、reaction 已发且同 session Manager episode 已创建，但 Agent 在首次 LLM 调用前 OOM 重启；启动恢复只将遗留 episode 标为 `interrupted`，未将该 wake 重放，后续 worker 事件遂基于旧上下文回复。需独立设计普通 Channel 的持久化入站 wake、成功消费后结算、重启按原始顺序幂等重放；不得用扩大 Manager recent、滚动摘要或 prompt 约束替代。
+- **普通 Channel 在 Manager 接收前的跨重启恢复**：未进入 Manager 的 Channel/lane 内存缓冲仍不在本次检查点覆盖范围；若需保证这一阶段跨进程投递，另行处理。2026-09-06 核对确认已提交的原始人类输入保留在 Manager history，缺失的是未完成 episode 主动续跑，见当前修复。
 - 失败 Manager episode 的通用带退避 mailbox retry；跨 session 代发目标 Manager 持久注记（§4.2）；Codex provision `auth.json` 错误吞没；P8 调试工具/内部文档重写。
 - Claude project-scope MCP 文件（已接受边界）；权限 schema 纪律（新增 schema 前先迁移历史 worker context）。
 - Admin source manager 的完整两阶段回滚：当前 mutation 源写入失败且内存态已推进时，靠重启恢复 fail-loud 兜底；各 manager 的事务性回滚（磁盘为准）另行设计。

@@ -9,6 +9,7 @@
  */
 
 import { promises as fs } from 'fs'
+import { writeFileSync, renameSync, unlinkSync, readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
 import { AsyncMutex } from '../workers/async-mutex'
@@ -16,9 +17,12 @@ import { encodeSegment, decodeSegment } from '../workers/harness/ledger-store'
 import type { ManagerKey, ManagerSessionState } from './types'
 import { normalizeImageRefs } from './image-vision'
 import type { EngineMessage } from '../engine/index.js'
+import type { ManagerResumeCheckpoint } from './resume-checkpoint.js'
+import type { TimedWakeEnvelope } from './loop.js'
 
 const STATE_FILE = 'state.json'
 const EPISODES_DIR = 'episodes'
+const CHECKPOINT_FILE = 'running.json'
 
 async function writeJsonAtomic(path: string, data: unknown): Promise<void> {
   const tmpPath = join(dirname(path), `.tmp-${randomUUID()}.json`)
@@ -124,6 +128,70 @@ export class ManagerSessionStore {
       await fs.mkdir(this.dirFor(state.key), { recursive: true })
       await writeJsonAtomic(this.statePathFor(state.key), state)
     })
+  }
+
+  /** Same atomic, synchronous turn-boundary flush used by the existing Engine resume path. */
+  saveCheckpoint(checkpoint: ManagerResumeCheckpoint): void {
+    const target = join(this.dirFor(checkpoint.state.key), CHECKPOINT_FILE)
+    const temporary = `${target}.${randomUUID()}.tmp`
+    const durableEnvelope = ({ activity_context_receipt: _receipt, ...envelope }: TimedWakeEnvelope): TimedWakeEnvelope => envelope
+    try {
+      writeFileSync(temporary, JSON.stringify({
+        ...checkpoint,
+        envelopes: checkpoint.envelopes.map(durableEnvelope),
+        pending: checkpoint.pending.map(durableEnvelope),
+      }), { encoding: 'utf-8', mode: 0o600 })
+      renameSync(temporary, target)
+    } finally {
+      try { unlinkSync(temporary) } catch { /* rename already removed the temporary file */ }
+    }
+  }
+
+  async loadCheckpoint(key: ManagerKey): Promise<ManagerResumeCheckpoint | undefined> {
+    let raw: string
+    try {
+      raw = await fs.readFile(join(this.dirFor(key), CHECKPOINT_FILE), 'utf-8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
+    const checkpoint = JSON.parse(raw) as ManagerResumeCheckpoint
+    if (checkpoint.state?.key !== key || typeof checkpoint.episodeId !== 'string'
+      || !Array.isArray(checkpoint.state.recent) || !Array.isArray(checkpoint.envelopes)
+      || !Number.isInteger(checkpoint.wakeIndex) || checkpoint.wakeIndex < -1 || checkpoint.wakeIndex >= checkpoint.envelopes.length
+      || !Array.isArray(checkpoint.pending) || !Array.isArray(checkpoint.turns)
+      || !Array.isArray(checkpoint.responses) || !Array.isArray(checkpoint.tools)
+      || !Array.isArray(checkpoint.adminChatClaims) || !Array.isArray(checkpoint.transientMessageIds)
+      || !Array.isArray(checkpoint.spawnedWorkerIds) || typeof checkpoint.hasEngineMessages !== 'boolean'
+      || !Array.isArray(checkpoint.execution?.successfulSendMessageTargets) || !Array.isArray(checkpoint.execution?.continuedWorkers)) {
+      throw new Error(`[ManagerSessionStore] invalid resume checkpoint for ${key}`)
+    }
+    return checkpoint
+  }
+
+  clearCheckpoint(key: ManagerKey, episodeId: string): void {
+    const target = join(this.dirFor(key), CHECKPOINT_FILE)
+    try {
+      const checkpoint = JSON.parse(readFileSync(target, 'utf-8')) as ManagerResumeCheckpoint
+      if (checkpoint.episodeId === episodeId) unlinkSync(target)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.warn(`[ManagerSessionStore] checkpoint cleanup failed for ${key}:`, error)
+      }
+    }
+  }
+
+  async listCheckpoints(): Promise<ManagerResumeCheckpoint[]> {
+    const checkpoints: ManagerResumeCheckpoint[] = []
+    for (const key of await this.listManagerKeys()) {
+      try {
+        const checkpoint = await this.loadCheckpoint(key)
+        if (checkpoint) checkpoints.push(checkpoint)
+      } catch (error) {
+        console.error(`[ManagerSessionStore] resume checkpoint unavailable for ${key}:`, error)
+      }
+    }
+    return checkpoints
   }
 
   /** episode 进行中的消息增量落盘(崩溃后可诊断,不参与 load);目录不存在自动创建 */
