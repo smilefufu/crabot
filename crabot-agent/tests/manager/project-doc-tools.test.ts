@@ -117,17 +117,18 @@ describe('project document tools', () => {
     await fs.rm(root, { recursive: true, force: true })
   })
 
-  function tools(wakeEvent: WakeEvent | undefined) {
+  function tools(wakeEvent: WakeEvent | undefined, managerPrincipalPermissions?: ResolvedPermissions) {
     return buildProjectDocTools({
       ledger,
       readWorkerContext: async (workerId) => contexts.get(workerId),
       managerKey: KEY,
       wakeEvent,
+      ...(managerPrincipalPermissions ? { managerPrincipalPermissions } : {}),
     })
   }
 
-  function tool(wakeEvent: WakeEvent | undefined, name: string) {
-    return tools(wakeEvent).find((entry) => entry.name === name)!
+  function tool(wakeEvent: WakeEvent | undefined, name: string, managerPrincipalPermissions?: ResolvedPermissions) {
+    return tools(wakeEvent, managerPrincipalPermissions).find((entry) => entry.name === name)!
   }
 
   it('只暴露项目文档读取与决策写入两个工具，且没有 worker_id 参数', () => {
@@ -187,6 +188,20 @@ describe('project document tools', () => {
       expect(result.isError).toBe(true)
       expect(result.output).toMatch(/权限|主体|file_io/)
     }
+  })
+
+  it('独立任务板通知只可复用现有 Manager 主体权限，缺失时拒绝项目访问', async () => {
+    const wake: WakeEvent = { kind: 'workboard_admin_update', noticeRevision: 1 }
+    const granted = await tool(
+      wake,
+      'inspect_project_docs',
+      permissions({ storage: { workspace_path: root, access: 'readwrite' } }),
+    ).call({ project_root: project, operation: 'list' }, {} as never)
+    expect(granted.isError).toBe(false)
+
+    const denied = await tool(wake, 'inspect_project_docs').call({ project_root: project, operation: 'list' }, {} as never)
+    expect(denied.isError).toBe(true)
+    expect(denied.output).toContain('没有可用的主体权限快照')
   })
 
   it('storage 约束读取范围，read 档位不能写决策', async () => {

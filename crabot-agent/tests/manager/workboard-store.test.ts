@@ -45,7 +45,6 @@ describe('ManagerWorkboardStore', () => {
 
   it('缺文件返回一张空板且不产生目录', async () => {
     await expect(store.load(KEY)).resolves.toEqual({
-      schema_version: 1,
       manager_key: KEY,
       active: [],
       archive: [],
@@ -123,7 +122,7 @@ describe('ManagerWorkboardStore', () => {
     await fs.writeFile(path, JSON.stringify({ schema_version: 1, manager_key: OTHER_KEY, active: [], archive: [] }))
     await expect(store.load(KEY)).rejects.toThrow(/manager_key/)
 
-    await fs.writeFile(path, JSON.stringify({ schema_version: 2, manager_key: KEY, active: [], archive: [] }))
+    await fs.writeFile(path, JSON.stringify({ schema_version: 3, manager_key: KEY, active: [], archive: [] }))
     await expect(store.load(KEY)).rejects.toThrow(/schema_version/)
 
     await fs.writeFile(path, JSON.stringify({ schema_version: 1, manager_key: KEY, active: [], archive: [], id: 'nope' }))
@@ -138,5 +137,101 @@ describe('ManagerWorkboardStore', () => {
     const board = await store.load(KEY)
     expect(board.active).toHaveLength(12)
     expect(new Set(board.active.map((item) => item.title)).size).toBe(12)
+  })
+
+  it('v1 只读投影为 revision 0，首次写入才原子升级为 v2', async () => {
+    const dir = join(root, encodeSegment(KEY))
+    const file = join(dir, 'workboard.json')
+    const legacy = {
+      schema_version: 1,
+      manager_key: KEY,
+      active: [{ ...draft('旧任务'), updated_at: '2026-09-04T00:00:00.000Z' }],
+      archive: [],
+    }
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(file, JSON.stringify(legacy), 'utf-8')
+
+    await expect(store.loadAdmin(KEY)).resolves.toMatchObject({ revision: 0, active: [{ title: '旧任务' }] })
+    await expect(fs.readFile(file, 'utf-8')).resolves.toBe(JSON.stringify(legacy))
+
+    await store.revise(KEY, '旧任务', draft('旧任务', { current_state: '已更新' }))
+    await expect(JSON.parse(await fs.readFile(file, 'utf-8'))).toMatchObject({ schema_version: 2, revision: 1 })
+  })
+
+  it('Admin CAS、同项 read fence 与 notice 都在同一原子写入边界', async () => {
+    await store.create(KEY, draft('核查上下文'))
+    const admin = await store.adminRevise(KEY, 1, '核查上下文', draft('核查上下文', { current_state: '管理员已修订' }))
+    expect(admin.board.revision).toBe(2)
+    expect(admin.notice).toMatchObject({ revision: 2, attempts: 0 })
+    expect(admin.notice).not.toHaveProperty('principal_permissions')
+    await expect(store.adminCreate(KEY, 1, draft('旧表单'))).rejects.toMatchObject({
+      code: 'WORKBOARD_REVISION_CONFLICT', currentRevision: 2,
+    })
+    await expect(store.revise(KEY, '核查上下文', draft('核查上下文'))).rejects.toThrow('请先使用 inspect_workboard')
+
+    const visible = await store.loadAdmin(KEY)
+    await store.acknowledgeManagerRead(KEY, 'active', visible.active, visible.revision)
+    await expect(store.revise(KEY, '核查上下文', draft('核查上下文', { next_action: '按新要求执行' }))).resolves.toMatchObject({
+      board: { active: [{ next_action: '按新要求执行' }] },
+    })
+    expect((await store.loadAdmin(KEY)).revision).toBe(3)
+    // notice 指向最近一次 Admin 保存；Manager 后续写入可以推进整板 revision，
+    // 但不能把未消费的系统管理输入误判为损坏或由其它 revision 清除。
+    await expect(store.pendingAdminNotice(KEY)).resolves.toMatchObject({ revision: 2 })
+    await expect(store.clearAdminNoticeIfCurrent(KEY, 3)).resolves.toBe(false)
+    await expect(store.clearAdminNoticeIfCurrent(KEY, 2)).resolves.toBe(true)
+  })
+
+  it('改标题和归档保留同一事项的标题别名，另一事项的 fence 不被覆盖', async () => {
+    await store.create(KEY, draft('任务甲'))
+    await store.create(KEY, draft('任务乙'))
+    await store.adminRevise(KEY, 2, '任务甲', draft('任务甲新版'))
+    await store.adminArchive(KEY, 3, '任务甲新版', 'completed')
+    await store.adminRevise(KEY, 4, '任务乙', draft('任务乙', { current_state: '管理员更新' }))
+
+    await expect(store.create(KEY, draft('任务甲'))).rejects.toThrow('请先使用 inspect_workboard')
+    await expect(store.revise(KEY, '任务乙', draft('任务乙'))).rejects.toThrow('请先使用 inspect_workboard')
+    const archive = await store.loadAdmin(KEY)
+    await store.acknowledgeManagerRead(KEY, 'archive', archive.archive, archive.revision)
+    await expect(store.create(KEY, draft('任务甲'))).resolves.toBeDefined()
+    await expect(store.revise(KEY, '任务乙', draft('任务乙'))).rejects.toThrow('请先使用 inspect_workboard')
+  })
+
+  it('旧的 inspect 快照不能确认之后同一事项的 Admin 更新', async () => {
+    await store.create(KEY, draft('核查上下文'))
+    await store.adminRevise(KEY, 1, '核查上下文', draft('核查上下文', { current_state: '管理员第一次更新' }))
+    const stale = await store.loadAdmin(KEY)
+    await store.adminRevise(KEY, 2, '核查上下文', draft('核查上下文', { current_state: '管理员第二次更新' }))
+
+    await store.acknowledgeManagerRead(KEY, 'active', stale.active, stale.revision)
+    await expect(store.revise(KEY, '核查上下文', draft('核查上下文'))).rejects.toThrow('请先使用 inspect_workboard')
+
+    const current = await store.loadAdmin(KEY)
+    await store.acknowledgeManagerRead(KEY, 'active', current.active, current.revision)
+    await expect(store.revise(KEY, '核查上下文', draft('核查上下文', { next_action: '按最新要求执行' }))).resolves.toBeDefined()
+  })
+
+  it('读取旧 notice 的权限残留但正常任务板写入会删除它', async () => {
+    const directory = join(root, encodeSegment(KEY))
+    const file = join(directory, 'workboard.json')
+    const legacyNotice = {
+      schema_version: 2,
+      manager_key: KEY,
+      revision: 1,
+      active: [{ ...draft('旧任务'), updated_at: '2026-09-04T00:00:00.000Z' }],
+      archive: [],
+      pending_admin_notice: {
+        revision: 1,
+        created_at: '2026-09-04T00:00:00.000Z',
+        principal_permissions: { obsolete: true },
+        attempts: 0,
+      },
+    }
+    await fs.mkdir(directory, { recursive: true })
+    await fs.writeFile(file, JSON.stringify(legacyNotice), 'utf8')
+
+    await expect(store.pendingAdminNotice(KEY)).resolves.toMatchObject({ revision: 1, attempts: 0 })
+    await store.revise(KEY, '旧任务', draft('旧任务', { current_state: '已经续办' }))
+    expect(await fs.readFile(file, 'utf8')).not.toContain('principal_permissions')
   })
 })

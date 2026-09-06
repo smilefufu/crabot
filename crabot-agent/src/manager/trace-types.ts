@@ -9,7 +9,7 @@ import type { ManagerKey } from '../workers/harness/ledger-types.js'
 import type { AgentTrace } from '../types.js'
 
 export interface ManagerEpisodeTrigger {
-  type: 'human_message' | 'worker_event' | 'schedule' | 'attention_flush' | 'sub_agent_call'
+  type: 'human_message' | 'worker_event' | 'schedule' | 'attention_flush' | 'sub_agent_call' | 'system'
   /** 脱敏摘要；不复制完整人类正文/terminal output/tool secret */
   summary: string
   source?: string

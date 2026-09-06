@@ -34,6 +34,7 @@ import { WorkerImplementationStore } from './worker-implementation-store.js'
 import type { WorkerImplementationRuntimeConfig, CLIWorkerImplId } from './types.js'
 import { WorkerConnectionRevisionSigner } from './worker-connection-revision.js'
 import { WorkerOperationAssertions } from './worker-operation-assertions.js'
+import { WorkboardAdminAssertions } from './workboard-admin-assertions.js'
 import { LegacyAgentArchiveStore, LegacyAgentArchiveError } from './legacy-agent-archive.js'
 import { CoreAgentCutoverStore } from './core-agent-cutover.js'
 import { CORE_AGENT_DEFINITION } from './core-agent-definition.js'
@@ -55,6 +56,7 @@ import { canonicalizeJson,
   type ProxyConfig,
   type RpcHandlerContext,
   RpcError,
+  sha256CanonicalJson,
   CLAIM_COMMANDS,
   CLAIM_PAIR_COMMANDS,
   normalizeSlash,
@@ -445,6 +447,51 @@ function isWorkerNotFoundError(message: string): boolean {
   return normalized.includes('worker not found') || normalized.includes('worker subagent not found')
 }
 
+function isManagerNotFoundError(message: string): boolean {
+  return message.includes('Manager 不存在:')
+}
+
+function decodeManagerKeyForApi(raw: string, res: ServerResponse): string | undefined {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    sendJson(res, 400, { error: 'Invalid percent-encoding in manager key' })
+    return undefined
+  }
+}
+
+function parseStrictPositiveInt(raw: string | null): number | undefined {
+  if (raw === null || !/^[1-9]\d*$/.test(raw)) return undefined
+  const parsed = Number(raw)
+  return Number.isSafeInteger(parsed) ? parsed : undefined
+}
+
+type WorkboardAdminMutationInput =
+  | { action: 'create'; item: Record<string, unknown> }
+  | { action: 'revise'; current_title: string; item: Record<string, unknown> }
+  | { action: 'archive'; current_title: string; archived_as: 'completed' | 'abandoned' }
+
+function parseWorkboardAdminMutation(body: Record<string, unknown>): WorkboardAdminMutationInput {
+  if (body.action === 'create' && isPlainRecord(body.item)) {
+    return { action: 'create', item: body.item }
+  }
+  if (body.action === 'revise' && typeof body.current_title === 'string' && isPlainRecord(body.item)) {
+    return { action: 'revise', current_title: body.current_title, item: body.item }
+  }
+  if (
+    body.action === 'archive'
+    && typeof body.current_title === 'string'
+    && (body.archived_as === 'completed' || body.archived_as === 'abandoned')
+  ) {
+    return { action: 'archive', current_title: body.current_title, archived_as: body.archived_as }
+  }
+  throw new RpcError('INVALID_PARAMS', '任务板修改参数非法')
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(body))
@@ -499,6 +546,7 @@ export class AdminModule extends ModuleBase {
   private workerImplementationStore!: WorkerImplementationStore
   private workerConnectionRevisionSigner!: WorkerConnectionRevisionSigner
   private workerOperationAssertions!: WorkerOperationAssertions
+  private workboardAdminAssertions!: WorkboardAdminAssertions
   private agentManager: AgentManager
 
   // Channel 管理器
@@ -748,6 +796,7 @@ export class AdminModule extends ModuleBase {
     // Agent 配置管理
     this.registerMethod('get_agent_config', this.handleGetAgentConfig.bind(this))
     this.registerMethod('resolve_worker_connection', this.handleResolveWorkerConnection.bind(this))
+    this.registerMethod('consume_workboard_admin_assertion', this.handleConsumeWorkboardAdminAssertion.bind(this))
     this.registerMethod('consume_worker_operation_assertion', this.handleConsumeWorkerOperationAssertion.bind(this))
     this.registerMethod('update_agent_config', this.handleUpdateAgentConfig.bind(this))
 
@@ -829,6 +878,7 @@ export class AdminModule extends ModuleBase {
     }
     // worker operation assertion 签名密钥复用 jwtSecret（与 admin-chat assertion 同纪律）。
     this.workerOperationAssertions = new WorkerOperationAssertions(this.adminConfig.data_dir, this.jwtSecret)
+    this.workboardAdminAssertions = new WorkboardAdminAssertions(this.adminConfig.data_dir, this.jwtSecret)
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
@@ -2450,6 +2500,15 @@ export class AdminModule extends ModuleBase {
       const managerEpisodesMatch = pathname.match(/^\/api\/agent\/managers\/([^/]+)\/episodes$/)
       if (managerEpisodesMatch && req.method === 'GET') {
         await this.handleListManagerEpisodesApi(req, res, managerEpisodesMatch[1], url)
+        return
+      }
+      const managerWorkboardMatch = pathname.match(/^\/api\/agent\/managers\/([^/]+)\/workboard$/)
+      if (managerWorkboardMatch && req.method === 'GET') {
+        await this.handleGetManagerWorkboardApi(req, res, managerWorkboardMatch[1], url)
+        return
+      }
+      if (managerWorkboardMatch && req.method === 'PATCH') {
+        await this.handleChangeManagerWorkboardApi(req, res, managerWorkboardMatch[1])
         return
       }
 
@@ -9077,20 +9136,6 @@ export class AdminModule extends ModuleBase {
     return friend.permission_template_id ?? 'standard'
   }
 
-  /**
-   * 系统触发的一次性任务（记忆图谱重建 / self-healing recovery）执行权限。
-   * 这类任务无 creator friend，统一用 master_private（最高权限，含 memory/file/shell），
-   * 否则 worker 走 FAIL_CLOSED 拿不到任何工具，跑一轮空转就结束。
-   */
-  private resolveSystemTaskPermissions(): ResolvedPermissions | null {
-    try {
-      return this.permissionTemplateManager.resolvePermissions('master_private', null)
-    } catch (err) {
-      console.error('[Admin] master_private template missing for system task dispatch:', err)
-      return null
-    }
-  }
-
   private buildResolvedFriendPermissions(friend: Friend): ResolvedPermissions | null {
     if (friend.permission === 'master') {
       return this.permissionTemplateManager.resolvePermissions('master_private', null)
@@ -9777,6 +9822,32 @@ export class AdminModule extends ModuleBase {
     return { connection, connection_revision: revision, policy_revision: desired.revision }
   }
 
+  /** 只允许持当前 runtime bearer 的 exact core Agent 核销任务板 mutation assertion。 */
+  private async handleConsumeWorkboardAdminAssertion(
+    params: { assertion?: unknown; expected?: unknown },
+    context?: RpcHandlerContext,
+  ): Promise<{ consumed: true; expires_at: string }> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime',
+      { expected_module_id: 'crabot-agent' },
+      this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+    if (typeof params.assertion !== 'string' || !params.expected || typeof params.expected !== 'object') {
+      throw new RpcError('INVALID_PARAMS', 'assertion and expected are required')
+    }
+    try {
+      return await this.workboardAdminAssertions.consume(
+        params.assertion,
+        params.expected as Parameters<WorkboardAdminAssertions['consume']>[1],
+      )
+    } catch (error) {
+      throw new RpcError('FORBIDDEN', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   /**
    * §3.19.12 consume_worker_operation_assertion：Agent 在执行 operation 前核销。
    * runtime bearer 先经 MM 验证 exact core Agent；nonce 一次性原子持久。
@@ -10390,6 +10461,92 @@ export class AdminModule extends ModuleBase {
       manager_key: managerKey,
       pagination: { page, page_size: pageSize },
     })
+  }
+
+  /** 任务板读取保持普通只读 RPC；URL 中的 manager key 只在这里 decode 一次。 */
+  private async handleGetManagerWorkboardApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    rawManagerKey: string,
+    url: URL,
+  ): Promise<void> {
+    const managerKey = decodeManagerKeyForApi(rawManagerKey, res)
+    if (!managerKey) return
+    const page = url.searchParams.has('page') ? parseStrictPositiveInt(url.searchParams.get('page')) : undefined
+    const pageSize = url.searchParams.has('page_size') ? parseStrictPositiveInt(url.searchParams.get('page_size')) : undefined
+    if ((url.searchParams.has('page') && page === undefined) || (url.searchParams.has('page_size') && pageSize === undefined)) {
+      sendJson(res, 400, { error: 'page 和 page_size 必须是正整数' })
+      return
+    }
+    await this.proxyAgentRpc(
+      res,
+      'get_workboard_admin',
+      {
+        manager_key: managerKey,
+        ...(url.searchParams.has('view') ? { view: url.searchParams.get('view') } : {}),
+        ...(page !== undefined ? { page } : {}),
+        ...(pageSize !== undefined ? { page_size: pageSize } : {}),
+      },
+      isManagerNotFoundError,
+    )
+  }
+
+  /**
+   * 任务板保存：浏览器只提交 mutation + revision；Admin 在 JWT 边界签发 assertion，
+   * 然后以 no-trace sensitive RPC 交给 Agent 原子核销与写入。
+   */
+  private async handleChangeManagerWorkboardApi(
+    req: IncomingMessage,
+    res: ServerResponse,
+    rawManagerKey: string,
+  ): Promise<void> {
+    const managerKey = decodeManagerKeyForApi(rawManagerKey, res)
+    if (!managerKey) return
+    try {
+      const body = await this.readJsonBody<Record<string, unknown>>(req)
+      const expectedRevision = body.expected_revision
+      if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+        sendJson(res, 400, { error: 'expected_revision 必须是非负安全整数' })
+        return
+      }
+      const mutation = parseWorkboardAdminMutation(body)
+      const assertion = await this.workboardAdminAssertions.issue({
+        manager_key: managerKey,
+        action: mutation.action,
+        expected_revision: expectedRevision,
+        payload_sha256: sha256CanonicalJson(mutation),
+      })
+      const port = await this.ensureAgentPort()
+      const result = await this.rpcClient.callSensitive<Record<string, unknown>, unknown>(
+        port,
+        'change_workboard_admin',
+        { manager_key: managerKey, expected_revision: expectedRevision, ...mutation, assertion },
+        this.config.moduleId,
+      )
+      sendJson(res, 200, result)
+    } catch (error) {
+      const code = (error as { code?: unknown }).code
+      const message = error instanceof Error ? error.message : String(error)
+      if (code === 'WORKBOARD_REVISION_CONFLICT') {
+        const currentRevision = (error as { details?: { current_revision?: unknown } }).details?.current_revision
+        sendJson(res, 409, {
+          error: message,
+          code,
+          ...(typeof currentRevision === 'number' ? { current_revision: currentRevision } : {}),
+        })
+        return
+      }
+      if (code === 'NOT_FOUND' || isManagerNotFoundError(message)) {
+        sendJson(res, 404, { error: message })
+        return
+      }
+      if (code === 'INVALID_PARAMS' || code === 'FORBIDDEN' || message.includes('任务板修改参数非法')) {
+        sendJson(res, 400, { error: message, ...(typeof code === 'string' ? { code } : {}) })
+        return
+      }
+      const unavailable = message.includes('Agent not available') || message.includes('ECONNREFUSED') || message.includes('connect failed')
+      sendJson(res, unavailable ? 503 : 500, { error: unavailable ? 'Agent not available' : message })
+    }
   }
 
   /** §8.4/§10.4：GET /api/agent/managers/:managerKey/inbound-status —— path 参数只 decode 一次。 */

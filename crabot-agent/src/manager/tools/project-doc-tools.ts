@@ -33,6 +33,8 @@ export interface ProjectDocToolDeps {
   readonly readWorkerContext: (workerId: string) => Promise<WorkerContext | undefined>
   readonly managerKey: ManagerKey
   readonly wakeEvent?: WakeEvent
+  /** Only for a standalone task-board notice, from the existing Manager binding. */
+  readonly managerPrincipalPermissions?: ResolvedPermissions
 }
 
 interface MarkdownFile {
@@ -133,7 +135,10 @@ function mainlineWorkspace(worker: LedgerWorker, seq?: number): string {
   return incarnation.workspace
 }
 
-function permissionsFromWake(wakeEvent: WakeEvent | undefined): ResolvedPermissions | undefined {
+function permissionsFromWake(
+  wakeEvent: WakeEvent | undefined,
+  managerPrincipalPermissions: ResolvedPermissions | undefined,
+): ResolvedPermissions | undefined {
   if (
     wakeEvent?.kind === 'human_messages' ||
     wakeEvent?.kind === 'attention_flush' ||
@@ -141,6 +146,7 @@ function permissionsFromWake(wakeEvent: WakeEvent | undefined): ResolvedPermissi
   ) {
     return wakeEvent.principalPermissions
   }
+  if (wakeEvent?.kind === 'workboard_admin_update') return managerPrincipalPermissions
   return undefined
 }
 
@@ -171,7 +177,7 @@ async function authorizeProjectRoot(
     return requested
   }
 
-  const permissions = permissionsFromWake(wake)
+  const permissions = permissionsFromWake(wake, deps.managerPrincipalPermissions)
   if (!permissions) throw new Error('当前处理回合没有可用的主体权限快照')
   if (!permissions.tool_access.file_io) throw new Error('当前处理回合主体没有 file_io 权限')
   if (write && permissions.storage?.access !== 'readwrite' && permissions.storage !== null) {

@@ -150,6 +150,11 @@ export type WakeEvent =
       readonly principalPermissions?: ResolvedPermissions
     }
   | {
+      /** 已鉴权 Admin 保存任务板后的控制面系统输入；正文不含任务板快照。 */
+      readonly kind: 'workboard_admin_update'
+      readonly noticeRevision: number
+    }
+  | {
       readonly kind: 'attention_flush'
       readonly messages: ReadonlyArray<ChannelMessage>
       /**
@@ -275,6 +280,8 @@ export interface ManagerLoopDeps {
    * 已 claim 的 ID 由 delivery confirm 路径结算，不在此列。
    */
   readonly onAdminChatWakeConsumed?: (requestIds: string[]) => void
+  /** 仅当任务板系统输入被成功 episode 消费后，才允许结算对应的持久化 notice。 */
+  readonly onWorkboardAdminUpdateConsumed?: (noticeRevisions: ReadonlyArray<number>) => void | Promise<void>
 }
 
 interface ManagerCompactionRequest {
@@ -547,7 +554,10 @@ export class ManagerLoop {
    *  提交」)才可注入,否则 failed/aborted 后会把 LLM 已见过的输入当新 wake 重放。
    *  唯一合法入口是 `enqueueHumanWakeDuringActiveEpisode`(先提交、再带
    *  `humanWakePreCommitted` 放行)。 */
-  enqueueDuringEpisode(envelope: TimedWakeEnvelope, opts?: { humanWakePreCommitted?: boolean }): void {
+  enqueueDuringEpisode(envelope: TimedWakeEnvelope, opts?: {
+    humanWakePreCommitted?: boolean
+    onEpisodeSettled?: (result: EpisodeResult) => void
+  }): void {
     assertTimedWakeEnvelope(envelope)
     if (isHumanWake(envelope.wake) && !opts?.humanWakePreCommitted) {
       throw new Error('human messages must be committed through wakeUp, not queued during an episode')
@@ -556,6 +566,21 @@ export class ManagerLoop {
     this.currentEpisodeInjected?.push(envelope)
     for (const id of envelope.correlation?.admin_chat_request_ids ?? []) {
       if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
+    }
+    if (opts?.onEpisodeSettled) this.currentEpisodeSettleHooks.push(opts.onEpisodeSettled)
+  }
+
+  /** 连续 Admin 保存只保留尚未注入的最新任务板系统事件。 */
+  enqueueWorkboardAdminUpdate(envelope: TimedWakeEnvelope): void {
+    if (envelope.wake.kind !== 'workboard_admin_update') {
+      throw new Error('enqueueWorkboardAdminUpdate requires a workboard admin wake')
+    }
+    const replaced = this.mailbox.replaceWorkboardAdminUpdate(envelope)
+    if (replaced && this.currentEpisodeInjected) {
+      const index = this.currentEpisodeInjected.indexOf(replaced)
+      if (index >= 0) this.currentEpisodeInjected[index] = envelope
+    } else if (!replaced) {
+      this.currentEpisodeInjected?.push(envelope)
     }
   }
 
@@ -1038,14 +1063,30 @@ export class ManagerLoop {
     // (query-loop createUserMessage 的随机 id 拿不到,按结构还原——数组 content 的
     // user message 取 text block 原文,drain 构造时文本标记原样保留,拍平后与渲染
     // 文本逐字一致)。
-    const persistedFinalMessages = attempt.result.finalMessages.map((m) => {
+    const transientWorkboardUpdates = currentInputEnvelopes.filter((item) => item.wake.kind === 'workboard_admin_update').length
+      + (this.currentEpisodeInjected ?? []).filter((item) => item.wake.kind === 'workboard_admin_update').length
+    const durablePrefixLength = state.recent.length + (attempt.hasSummaryMarker ? 1 : 0)
+    let remainingTransientWorkboardUpdates = transientWorkboardUpdates
+    const persistedFinalMessages = attempt.result.finalMessages.flatMap((m, index) => {
+      // 系统提示只服务当前 LLM 请求。只在本次动态尾部之后按数量剔除，避免误删旧 history
+      // 中恰好同文的人类消息；Worker/任务板正文从未进入这里。
+      if (
+        index >= durablePrefixLength
+        && remainingTransientWorkboardUpdates > 0
+        && m.role === 'user'
+        && 'content' in m
+        && m.content === '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。'
+      ) {
+        remainingTransientWorkboardUpdates -= 1
+        return []
+      }
       const original = originalsById.get(m.id)
-      if (original) return original
+      if (original) return [original]
       if (m.role === 'user' && 'content' in m && Array.isArray(m.content)) {
         const first = m.content[0]
-        if (first && first.type === 'text') return { ...m, content: first.text }
+        if (first && first.type === 'text') return [{ ...m, content: first.text }]
       }
-      return m
+      return [m]
     })
 
     await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, persistedFinalMessages)
@@ -1089,6 +1130,7 @@ export class ManagerLoop {
       // 注入人类消息的收尾提交(PR #131 四审):必须在 recent 替换与 supervision save
       // 之后——load 拿到的是最新 state,未被 drain 消费的追加不会被后续 save 覆盖。
       await this.commitPendingHumanInputs(true, persistedFinalMessages)
+      await this.settleConsumedWorkboardUpdates(currentInputEnvelopes, attempt.admittedContextEnvelopes)
     } else {
       // 放弃 episode:已落盘的折叠不回滚(见文件头)；本 episode current inputs 从未进入
       // 可折叠 history，因此仍按原始 envelope 重投，不会与 rollingSummary 重复。
@@ -1370,6 +1412,22 @@ export class ManagerLoop {
     }
   }
 
+  /** 只结算最终成功 attempt 实际送进 LLM 的任务板系统输入。 */
+  private async settleConsumedWorkboardUpdates(
+    currentInputEnvelopes: ReadonlyArray<TimedWakeEnvelope>,
+    admittedContextEnvelopes: ReadonlyArray<TimedWakeEnvelope>,
+  ): Promise<void> {
+    if (!this.deps.onWorkboardAdminUpdateConsumed) return
+    const revisions = [...new Set([...currentInputEnvelopes, ...admittedContextEnvelopes]
+      .flatMap((envelope) => envelope.wake.kind === 'workboard_admin_update' ? [envelope.wake.noticeRevision] : []))]
+    if (revisions.length === 0) return
+    try {
+      await this.deps.onWorkboardAdminUpdateConsumed(revisions)
+    } catch (error) {
+      console.warn('[ManagerLoop] task-board notice acknowledgement failed:', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   private takeSpawnRecheckPrompt(): string | null {
     if (!this.needsSpawnRecheck || this.spawnRecheckInjected) return null
     this.spawnRecheckInjected = true
@@ -1582,7 +1640,12 @@ export class ManagerLoop {
       /** 本 episode 的模型上下文窗口快照（同上） */
       readonly contextWindowTokens?: number
     },
-  ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean; readonly initialMessageCount: number }> {
+  ): Promise<{
+    readonly result: EngineResult
+    readonly hasSummaryMarker: boolean
+    readonly initialMessageCount: number
+    readonly admittedContextEnvelopes: ReadonlyArray<TimedWakeEnvelope>
+  }> {
     this.attemptCounter += 1
     let assistantTextEndTurnReminderSent = false
     const hasSummaryMarker = state.rollingSummary !== undefined
@@ -1592,11 +1655,12 @@ export class ManagerLoop {
         ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
         : [...tailMessages]
     let initialContextEnvelopes = [...(overrides?.contextEnvelopes ?? [])]
+    const admittedContextEnvelopes: TimedWakeEnvelope[] = []
 
     const effectiveWake = this.effectiveWakeForCurrentEpisode()
     const isBuiltinDailyReflection = isBuiltinDailyReflectionWake(effectiveWake)
-    const systemPrompt = (): string => this.managerSystemPrompt(effectiveWake)
-    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(effectiveWake)
+    const systemPrompt = (): string => this.managerSystemPrompt(this.effectiveWakeForCurrentEpisode())
+    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(this.effectiveWakeForCurrentEpisode())
 
     // LLM 重试期间配置热切换的订阅（spec 2026-08-30-llm-retry-config-hotreload）：
     // 只覆盖本 attempt 的 runEngine 生命周期，结束时确定性退订，不泄漏监听器。
@@ -1619,6 +1683,7 @@ export class ManagerLoop {
           ...this.mailbox.takeContextAdmissionEnvelopes(),
         ]
         initialContextEnvelopes = []
+        admittedContextEnvelopes.push(...envelopes)
         if (envelopes.some((envelope) => envelope.activity_context_receipt)) {
           this.admitActivityEnvelopes(envelopes)
         }
@@ -1668,7 +1733,7 @@ export class ManagerLoop {
         options,
         initialMessages,
       })
-      return { result, hasSummaryMarker, initialMessageCount: initialMessages.length }
+      return { result, hasSummaryMarker, initialMessageCount: initialMessages.length, admittedContextEnvelopes }
     } finally {
       offRuntimeConfigApplied()
     }
@@ -1719,6 +1784,8 @@ export function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, 
     }
     case 'schedule':
       return { type: 'schedule', summary: `定时任务:${wake.title}${mergedNote}`, source: `schedule:${wake.scheduleId}` }
+    case 'workboard_admin_update':
+      return { type: 'system', summary: `管理员更新任务板${mergedNote}` }
     case 'worker_event':
       return { type: 'worker_event', summary: `worker 事件:${wake.event.kind} (${wake.event.worker_id})${mergedNote}`, source: `worker:${wake.event.worker_id}` }
     case 'media_notification':
@@ -1848,6 +1915,20 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
   push(envelope: TimedWakeEnvelope): void {
     this.pending.push(envelope)
     this.clearBarrier()
+  }
+
+  /** 返回被替换的旧 event，供调用方同步更新 episode 级控制面引用。 */
+  replaceWorkboardAdminUpdate(envelope: TimedWakeEnvelope): TimedWakeEnvelope | undefined {
+    if (envelope.wake.kind !== 'workboard_admin_update') throw new Error('expected workboard admin update')
+    const index = this.pending.findIndex((candidate) => candidate.wake.kind === 'workboard_admin_update')
+    if (index < 0) {
+      this.push(envelope)
+      return undefined
+    }
+    const previous = this.pending[index]
+    this.pending[index] = envelope
+    this.clearBarrier()
+    return previous
   }
 
   drainEnvelopes(): TimedWakeEnvelope[] {
@@ -1994,6 +2075,9 @@ function assertTimedWakeEnvelope(value: TimedWakeEnvelope): void {
 
 /** Pure projection of ingress-fixed time; this function never reads a live clock. */
 export function renderTimedWakeEnvelope(envelope: TimedWakeEnvelope): string {
+  if (envelope.wake.kind === 'workboard_admin_update') {
+    return '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。'
+  }
   const header = `[event received_at="${envelope.received_at}" timezone="${envelope.timezone}"]`
   const occurred = envelope.occurred_at ? `\n[event occurred_at="${envelope.occurred_at}"]` : ''
   return `${header}${occurred}\n${renderWakeEvent(envelope.wake, envelope)}`
@@ -2058,6 +2142,8 @@ function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope): string 
       return `[媒体下载完成]\n${event.text}`
     case 'schedule':
       return `[定时任务触发] scheduleId=${event.scheduleId}\n标题:${event.title}\n描述:${event.description}`
+    case 'workboard_admin_update':
+      return '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。'
   }
 }
 

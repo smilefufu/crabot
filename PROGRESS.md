@@ -34,6 +34,20 @@
 - Manager 与 builtin Worker 已共用 Engine 单一批次算法：按当前模型窗口的 80% 规划完整摘要请求，
   遇摘要截断或 Provider 上下文超限自适应缩批；成功批次不回滚，调用方各自保留持久化与生命周期语义。
 
+### Manager 任务板 Admin Web 共管：开发完成，待 PR 审查
+
+- 已按确认 spec（crabot-docs `a17871e`）实现会话列表的任务板入口与独立任务板页面；人类可查看、
+  新建、完整编辑或归档当前任务项，并可查看 archive 终态快照。页面以整板 revision 保存，冲突后保留
+  本地草稿并提示重新核对。
+- Admin 写入经短期一次性 assertion 和 `callSensitive` 核销后才由 Agent 原子落盘；同一次保存持久化
+  revision、Manager 必读栅栏和待投递系统提示。assertion 只授权本次写入，不传递或改变 Manager、Worker、
+  项目文档或 Memory 的权限；独立通知复用既有 Manager 主体，运行中注入保持宿主 episode 主体。Manager
+  读取受影响事项后才能再修改，避免人类与 Manager 的静默覆盖。
+- 系统提示仅提醒 Manager 主动查阅最新任务板，不携带任务板正文，也不写入会话历史或 episode log；未消费
+  提示可在 Agent 重启后恢复投递，连续保存只保留最新通知。会话列表始终返回任务板摘要（正常或 unknown）。
+- 验证：Agent 定向 149/149、Admin API/assertion 6/6、前端 17/17 与生产构建、共享敏感 RPC 111/111；
+  无网络只读 Docker 确定性评测 13/13。所有测试数据与报告均使用临时目录，未访问本机部署或 LLM 凭证。
+
 ### Manager 会话任务板与项目文档共享：已合入（PR #138，main `ab275c14`），边界收口验证完成
 
 - 已确认并发布设计、计划及正式协议（crabot-docs 初版 `753c922`，边界修正 `500a030`）：每个 Manager
@@ -380,8 +394,10 @@
 
 ## 当前 follow-up
 
-- **任务板 Admin Web 共管界面**：本期只落 Manager 工具与存储；人类查看、编辑和归档任务项的界面及
-  API 另行设计，不阻塞当前能力。
+- **任务板 Admin Web 共管 review 遗留（均非阻塞）**：①任务板 notice 派发已失败后，重试调度本身若再读写
+  `workboard.json` 失败会产生未处理 Promise；②中途注入失败后的同进程重投只依赖下次唤醒或重启；③大量
+  archive 后 fence 的提示未明确要求查询 archive，列表全量读任务板也会随会话数线性放大；④补齐后台页面不轮询
+  的组件测试。持久历史中移除系统提示后留下的孤立 assistant 回合仅在空 recent 的罕见状态可达，另行评估。
 - **`spawn_worker.workspace` 无效可选值容错**：真实上下文评测的无关任务场景前两轮分别传入不存在路径
   和空字符串，工具拒绝后模型省略参数并成功重试，三轮最终均创建新 Worker。需独立评估 schema 或参数
   修复层是否应把无效可选值视为省略，以减少额外模型回合；不阻塞任务板与偏好分流上线。

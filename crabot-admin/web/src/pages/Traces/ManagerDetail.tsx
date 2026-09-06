@@ -33,6 +33,7 @@ const TRIGGER_LABEL: Record<ManagerEpisodeTrace['trigger']['type'], string> = {
   schedule: '定时触发',
   worker_event: '执行器进展',
   sub_agent_call: '子代理调用',
+  system: '系统提示',
 }
 
 function SpanRow({ span }: { span: ManagerEpisodeSpan }) {
@@ -86,6 +87,7 @@ function triggerText(episode: ManagerEpisodeTrace): string {
       ? `「${episode.worker_ref.title}」进展${episode.worker_ref.state_to ? `：${workerStateLabel(episode.worker_ref.state_to)}` : ''}`
       : summary
     case 'sub_agent_call': return `子代理调用：${summary}`
+    case 'system': return summary
   }
 }
 
