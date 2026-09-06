@@ -467,23 +467,76 @@ function parseStrictPositiveInt(raw: string | null): number | undefined {
 }
 
 type WorkboardAdminMutationInput =
-  | { action: 'create'; item: Record<string, unknown> }
-  | { action: 'revise'; current_title: string; item: Record<string, unknown> }
-  | { action: 'archive'; current_title: string; archived_as: 'completed' | 'abandoned' }
+  | { action: 'create_objective'; objective: Record<string, unknown> }
+  | { action: 'revise_objective'; current_objective_title: string; objective: Record<string, unknown> }
+  | { action: 'archive_objective'; current_objective_title: string; archived_as: 'completed' | 'abandoned' }
+  | { action: 'create_work_item'; objective_title: string; work_item: Record<string, unknown> }
+  | {
+      action: 'revise_work_item'
+      current_objective_title: string
+      current_work_item_title: string
+      target_objective_title: string
+      work_item: Record<string, unknown>
+    }
+  | {
+      action: 'archive_work_item'
+      current_objective_title: string
+      current_work_item_title: string
+      archived_as: 'completed' | 'abandoned'
+    }
 
 function parseWorkboardAdminMutation(body: Record<string, unknown>): WorkboardAdminMutationInput {
-  if (body.action === 'create' && isPlainRecord(body.item)) {
-    return { action: 'create', item: body.item }
+  if (body.action === 'create_objective' && isPlainRecord(body.objective)) {
+    return { action: 'create_objective', objective: body.objective }
   }
-  if (body.action === 'revise' && typeof body.current_title === 'string' && isPlainRecord(body.item)) {
-    return { action: 'revise', current_title: body.current_title, item: body.item }
+  if (body.action === 'revise_objective' && typeof body.current_objective_title === 'string' && isPlainRecord(body.objective)) {
+    return {
+      action: 'revise_objective',
+      current_objective_title: body.current_objective_title,
+      objective: body.objective,
+    }
   }
   if (
-    body.action === 'archive'
-    && typeof body.current_title === 'string'
+    body.action === 'archive_objective'
+    && typeof body.current_objective_title === 'string'
     && (body.archived_as === 'completed' || body.archived_as === 'abandoned')
   ) {
-    return { action: 'archive', current_title: body.current_title, archived_as: body.archived_as }
+    return {
+      action: 'archive_objective',
+      current_objective_title: body.current_objective_title,
+      archived_as: body.archived_as,
+    }
+  }
+  if (body.action === 'create_work_item' && typeof body.objective_title === 'string' && isPlainRecord(body.work_item)) {
+    return { action: 'create_work_item', objective_title: body.objective_title, work_item: body.work_item }
+  }
+  if (
+    body.action === 'revise_work_item'
+    && typeof body.current_objective_title === 'string'
+    && typeof body.current_work_item_title === 'string'
+    && typeof body.target_objective_title === 'string'
+    && isPlainRecord(body.work_item)
+  ) {
+    return {
+      action: 'revise_work_item',
+      current_objective_title: body.current_objective_title,
+      current_work_item_title: body.current_work_item_title,
+      target_objective_title: body.target_objective_title,
+      work_item: body.work_item,
+    }
+  }
+  if (
+    body.action === 'archive_work_item'
+    && typeof body.current_objective_title === 'string'
+    && typeof body.current_work_item_title === 'string'
+    && (body.archived_as === 'completed' || body.archived_as === 'abandoned')
+  ) {
+    return {
+      action: 'archive_work_item',
+      current_objective_title: body.current_objective_title,
+      current_work_item_title: body.current_work_item_title,
+      archived_as: body.archived_as,
+    }
   }
   throw new RpcError('INVALID_PARAMS', '任务板修改参数非法')
 }

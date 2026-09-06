@@ -3,27 +3,43 @@ import type { ToolCallResult, ToolDefinition } from '../../engine/index.js'
 import type { ManagerKey } from '../types.js'
 import {
   ManagerWorkboardStore,
+  workboardCounts,
   type ArchivedWorkboardItem,
+  type WorkboardArchiveEntry,
   type WorkboardArchiveOutcome,
   type WorkboardItem,
   type WorkboardItemDraft,
+  type WorkboardObjective,
+  type WorkboardObjectiveDraft,
 } from '../workboard-store.js'
 
-const ITEM_PROPERTIES = {
-  title: { type: 'string', minLength: 1, maxLength: 200, description: '脱离当前对话也能独立理解的任务标题' },
-  status: { type: 'string', enum: ['ready', 'in_progress', 'blocked'] },
-  project_root: { type: 'string', description: '规范化后的项目根绝对路径；纯对话或跨项目事项可省略' },
-  objective: { type: 'string', minLength: 1 },
-  acceptance: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } },
-  current_state: { type: 'string', minLength: 1, description: '面向人类和主控的当前结论，不是执行日志' },
-  next_action: { type: 'string', minLength: 1 },
-  blockers: { type: 'array', items: { type: 'string', minLength: 1 }, description: '只记录需要管理判断的阻塞' },
+const OBJECTIVE_SCHEMA = {
+  type: 'object',
+  properties: {
+    title: { type: 'string', minLength: 1, maxLength: 200, description: '人类希望最终得到的结果' },
+    completion_criteria: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 5,
+      items: { type: 'string', minLength: 1 },
+      description: '用于判断目标是否达成的可观察结果',
+    },
+  },
+  required: ['title', 'completion_criteria'],
+  additionalProperties: false,
 } as const
 
 const ITEM_SCHEMA = {
   type: 'object',
-  properties: ITEM_PROPERTIES,
-  required: ['title', 'status', 'objective', 'acceptance', 'current_state', 'next_action', 'blockers'],
+  properties: {
+    title: { type: 'string', minLength: 1, maxLength: 200, description: '为所属目标推进的一件独立管理事项' },
+    status: { type: 'string', enum: ['ready', 'in_progress', 'blocked'] },
+    project_root: { type: 'string', description: '供编排执行器参考的规范化项目根绝对路径；可以省略' },
+    current_judgement: { type: 'string', minLength: 1, description: '当前已确认的管理结论；待开始时可以省略' },
+    next_action: { type: 'string', minLength: 1, description: '主控下一步要协调、判断或确认的动作' },
+    blocker: { type: 'string', minLength: 1, description: '仅已阻塞时填写一个需要介入的主要阻塞' },
+  },
+  required: ['title', 'status', 'next_action'],
   additionalProperties: false,
 } as const
 
@@ -48,19 +64,63 @@ function hasOnlyKeys(input: Record<string, unknown>, allowed: readonly string[])
   return Object.keys(input).every((key) => allowed.includes(key))
 }
 
-function stableSort(items: Array<WorkboardItem | ArchivedWorkboardItem>): Array<WorkboardItem | ArchivedWorkboardItem> {
-  const statusOrder = { ready: 0, in_progress: 1, blocked: 2 } as const
-  return [...items].sort((left, right) => {
-    const statusDifference = statusOrder[left.status] - statusOrder[right.status]
-    if (statusDifference !== 0) return statusDifference
-    return left.title < right.title ? -1 : left.title > right.title ? 1 : 0
-  })
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
 }
 
-function matchesQuery(item: WorkboardItem | ArchivedWorkboardItem, query: string): boolean {
-  const needle = query.toLowerCase()
-  return [item.title, item.objective, item.current_state, item.next_action, ...item.blockers]
+function sortItems(items: ReadonlyArray<WorkboardItem>): WorkboardItem[] {
+  const statusOrder = { ready: 0, in_progress: 1, blocked: 2 } as const
+  return [...items].sort((left, right) => (
+    statusOrder[left.status] - statusOrder[right.status] || compareText(left.title, right.title)
+  ))
+}
+
+function sortObjectives(objectives: ReadonlyArray<WorkboardObjective>): WorkboardObjective[] {
+  return [...objectives]
+    .sort((left, right) => compareText(left.title, right.title))
+    .map((objective) => ({ ...objective, work_items: sortItems(objective.work_items) }))
+}
+
+function sortArchive(entries: ReadonlyArray<WorkboardArchiveEntry>): WorkboardArchiveEntry[] {
+  return [...entries].sort((left, right) => (
+    compareText(right.archived_at, left.archived_at) || compareText(left.title, right.title)
+  ))
+}
+
+function itemText(item: WorkboardItem): string[] {
+  return [
+    item.title,
+    ...(item.project_root ? [item.project_root] : []),
+    ...(item.current_judgement ? [item.current_judgement] : []),
+    item.next_action,
+    ...(item.blocker ? [item.blocker] : []),
+  ]
+}
+
+function matchesObjective(objective: WorkboardObjective, needle: string): boolean {
+  return [objective.title, ...objective.completion_criteria, ...objective.work_items.flatMap(itemText)]
     .some((value) => value.toLowerCase().includes(needle))
+}
+
+function matchesArchive(entry: WorkboardArchiveEntry, needle: string): boolean {
+  const values = 'objective' in entry
+    ? [...itemText(entry), entry.objective.title, ...entry.objective.completion_criteria]
+    : [entry.title, ...entry.completion_criteria]
+  return values.some((value) => value.toLowerCase().includes(needle))
+}
+
+function objectiveHeader(objective: WorkboardObjective): Omit<WorkboardObjective, 'work_items'> {
+  const { work_items: _items, ...header } = objective
+  return header
+}
+
+function pagination(page: number, pageSize: number, totalItems: number) {
+  return {
+    page,
+    page_size: pageSize,
+    total_items: totalItems,
+    total_pages: Math.ceil(totalItems / pageSize),
+  }
 }
 
 export function buildWorkboardTools(deps: {
@@ -69,12 +129,12 @@ export function buildWorkboardTools(deps: {
 }): ToolDefinition[] {
   const inspect = defineTool({
     name: 'inspect_workboard',
-    description: '按需查看本会话任务板的当前任务项或归档终态快照。字面过滤只用于缩小候选，不判断任务是否相同。',
+    description: '按需查看本会话的当前目标及其事项，或查看目标和事项的归档快照。字面过滤只缩小候选，不判断语义归属。',
     inputSchema: {
       type: 'object',
       properties: {
         view: { type: 'string', enum: ['active', 'archive'], description: '默认 active；归档必须显式选择 archive' },
-        query: { type: 'string', description: '在标题、目标、当前状态、下一步和阻塞中做不区分大小写的字面过滤' },
+        query: { type: 'string', description: '在目标、完成条件和事项管理摘要中做不区分大小写的字面过滤' },
         page: { type: 'integer', minimum: 1, description: '默认 1' },
         page_size: { type: 'integer', minimum: 1, maximum: 100, description: '默认 20，最大 100' },
       },
@@ -90,28 +150,27 @@ export function buildWorkboardTools(deps: {
         const page = positiveInteger(input.page, 1, Number.MAX_SAFE_INTEGER, 'page')
         const pageSize = positiveInteger(input.page_size, 20, 100, 'page_size')
         const board = await deps.store.loadAdmin(deps.managerKey)
-        const source = view === 'active' ? board.active : board.archive
-        const filtered = input.query === undefined
-          ? source
-          : source.filter((item) => matchesQuery(item, input.query as string))
-        const sorted = stableSort(filtered)
+        const needle = typeof input.query === 'string' ? input.query.toLowerCase() : undefined
+        const counts = workboardCounts(board)
         const offset = (page - 1) * pageSize
-        const totalItems = sorted.length
-        const items = sorted.slice(offset, offset + pageSize)
-        // 只有这次实际返回了受保护事项，且其 revision 未落后于栅栏时，才能解除同项写入保护。
-        await deps.store.acknowledgeManagerRead(deps.managerKey, view, items, board.revision)
-        return output({
-          view,
-          items,
-          active_count: board.active.length,
-          archive_count: board.archive.length,
-          pagination: {
-            page,
-            page_size: pageSize,
-            total_items: totalItems,
-            total_pages: Math.ceil(totalItems / pageSize),
-          },
-        })
+
+        if (view === 'active') {
+          const filtered = needle === undefined
+            ? board.objectives
+            : board.objectives.filter((objective) => matchesObjective(objective, needle))
+          const sorted = sortObjectives(filtered)
+          const objectives = sorted.slice(offset, offset + pageSize)
+          await deps.store.acknowledgeManagerRead(deps.managerKey, view, objectives, board.revision)
+          return output({ view, objectives, counts, pagination: pagination(page, pageSize, sorted.length) })
+        }
+
+        const filtered = needle === undefined
+          ? board.archive
+          : board.archive.filter((entry) => matchesArchive(entry, needle))
+        const sorted = sortArchive(filtered)
+        const entries = sorted.slice(offset, offset + pageSize)
+        await deps.store.acknowledgeManagerRead(deps.managerKey, view, entries, board.revision)
+        return output({ view, entries, counts, pagination: pagination(page, pageSize, sorted.length) })
       } catch (error) {
         return failure('inspect_workboard', error)
       }
@@ -120,13 +179,23 @@ export function buildWorkboardTools(deps: {
 
   const change = defineTool({
     name: 'change_workboard',
-    description: '创建、完整替换或归档本会话中需要持续管理的人类事项。创建前先查看当前任务板，根据标题和正文判断是否已有同一事项；已有时完整更新原任务项，只有确属新事项时才创建。',
+    description: '维护本会话需要持续共管的目标和事项。目标记录结果与完成条件，事项记录当前推进状态；修改不会自动操作 Worker，派发 Worker 不要求建项。',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['create', 'revise', 'archive'] },
-        current_title: { type: 'string', description: 'revise/archive 用当前标题精确定位' },
-        item: ITEM_SCHEMA,
+        action: {
+          type: 'string',
+          enum: [
+            'create_objective', 'revise_objective', 'archive_objective',
+            'create_work_item', 'revise_work_item', 'archive_work_item',
+          ],
+        },
+        current_objective_title: { type: 'string', description: '用当前目标标题精确定位' },
+        objective_title: { type: 'string', description: '新事项所属的当前目标标题' },
+        current_work_item_title: { type: 'string', description: '用当前事项标题在所属目标内精确定位' },
+        target_objective_title: { type: 'string', description: '修订后所属目标；不移动时仍填写当前目标标题' },
+        objective: OBJECTIVE_SCHEMA,
+        work_item: ITEM_SCHEMA,
         archived_as: { type: 'string', enum: ['completed', 'abandoned'] },
       },
       required: ['action'],
@@ -134,24 +203,63 @@ export function buildWorkboardTools(deps: {
       oneOf: [
         {
           type: 'object',
-          properties: { action: { const: 'create' }, item: ITEM_SCHEMA },
-          required: ['action', 'item'],
-          additionalProperties: false,
-        },
-        {
-          type: 'object',
-          properties: { action: { const: 'revise' }, current_title: { type: 'string' }, item: ITEM_SCHEMA },
-          required: ['action', 'current_title', 'item'],
+          properties: { action: { const: 'create_objective' }, objective: OBJECTIVE_SCHEMA },
+          required: ['action', 'objective'],
           additionalProperties: false,
         },
         {
           type: 'object',
           properties: {
-            action: { const: 'archive' },
-            current_title: { type: 'string' },
+            action: { const: 'revise_objective' },
+            current_objective_title: { type: 'string' },
+            objective: OBJECTIVE_SCHEMA,
+          },
+          required: ['action', 'current_objective_title', 'objective'],
+          additionalProperties: false,
+        },
+        {
+          type: 'object',
+          properties: {
+            action: { const: 'archive_objective' },
+            current_objective_title: { type: 'string' },
             archived_as: { type: 'string', enum: ['completed', 'abandoned'] },
           },
-          required: ['action', 'current_title', 'archived_as'],
+          required: ['action', 'current_objective_title', 'archived_as'],
+          additionalProperties: false,
+        },
+        {
+          type: 'object',
+          properties: {
+            action: { const: 'create_work_item' },
+            objective_title: { type: 'string' },
+            work_item: ITEM_SCHEMA,
+          },
+          required: ['action', 'objective_title', 'work_item'],
+          additionalProperties: false,
+        },
+        {
+          type: 'object',
+          properties: {
+            action: { const: 'revise_work_item' },
+            current_objective_title: { type: 'string' },
+            current_work_item_title: { type: 'string' },
+            target_objective_title: { type: 'string' },
+            work_item: ITEM_SCHEMA,
+          },
+          required: [
+            'action', 'current_objective_title', 'current_work_item_title', 'target_objective_title', 'work_item',
+          ],
+          additionalProperties: false,
+        },
+        {
+          type: 'object',
+          properties: {
+            action: { const: 'archive_work_item' },
+            current_objective_title: { type: 'string' },
+            current_work_item_title: { type: 'string' },
+            archived_as: { type: 'string', enum: ['completed', 'abandoned'] },
+          },
+          required: ['action', 'current_objective_title', 'current_work_item_title', 'archived_as'],
           additionalProperties: false,
         },
       ],
@@ -159,30 +267,92 @@ export function buildWorkboardTools(deps: {
     isReadOnly: false,
     call: async (input): Promise<ToolCallResult> => {
       try {
-        if (input.action === 'create') {
-          if (!hasOnlyKeys(input, ['action', 'item']) || input.item === undefined) throw new Error('create 参数不完整或含未定义字段')
-          const result = await deps.store.create(deps.managerKey, input.item as WorkboardItemDraft)
-          return output({ action: 'created', item: result.item, active_count: result.board.active.length, archive_count: result.board.archive.length })
-        }
-        if (input.action === 'revise') {
-          if (!hasOnlyKeys(input, ['action', 'current_title', 'item']) || typeof input.current_title !== 'string' || input.item === undefined) {
-            throw new Error('revise 参数不完整或含未定义字段')
+        if (input.action === 'create_objective') {
+          if (!hasOnlyKeys(input, ['action', 'objective']) || input.objective === undefined) {
+            throw new Error('create_objective 参数不完整或含未定义字段')
           }
-          const result = await deps.store.revise(deps.managerKey, input.current_title, input.item as WorkboardItemDraft)
-          return output({ action: 'revised', item: result.item, active_count: result.board.active.length, archive_count: result.board.archive.length })
+          const result = await deps.store.createObjective(deps.managerKey, input.objective as WorkboardObjectiveDraft)
+          return output({ action: 'objective_created', objective: objectiveHeader(result.value), counts: workboardCounts(result.board) })
         }
-        if (input.action === 'archive') {
-          if (!hasOnlyKeys(input, ['action', 'current_title', 'archived_as']) || typeof input.current_title !== 'string') {
-            throw new Error('archive 参数不完整或含未定义字段')
+        if (input.action === 'revise_objective') {
+          if (!hasOnlyKeys(input, ['action', 'current_objective_title', 'objective'])
+            || typeof input.current_objective_title !== 'string' || input.objective === undefined) {
+            throw new Error('revise_objective 参数不完整或含未定义字段')
           }
-          const result = await deps.store.archive(
+          const result = await deps.store.reviseObjective(
             deps.managerKey,
-            input.current_title,
+            input.current_objective_title,
+            input.objective as WorkboardObjectiveDraft,
+          )
+          return output({ action: 'objective_revised', objective: objectiveHeader(result.value), counts: workboardCounts(result.board) })
+        }
+        if (input.action === 'archive_objective') {
+          if (!hasOnlyKeys(input, ['action', 'current_objective_title', 'archived_as'])
+            || typeof input.current_objective_title !== 'string') {
+            throw new Error('archive_objective 参数不完整或含未定义字段')
+          }
+          const result = await deps.store.archiveObjective(
+            deps.managerKey,
+            input.current_objective_title,
             input.archived_as as WorkboardArchiveOutcome,
           )
-          return output({ action: 'archived', item: result.item, active_count: result.board.active.length, archive_count: result.board.archive.length })
+          return output({ action: 'objective_archived', objective: result.value, counts: workboardCounts(result.board) })
         }
-        throw new Error('action 必须是 create、revise 或 archive')
+        if (input.action === 'create_work_item') {
+          if (!hasOnlyKeys(input, ['action', 'objective_title', 'work_item'])
+            || typeof input.objective_title !== 'string' || input.work_item === undefined) {
+            throw new Error('create_work_item 参数不完整或含未定义字段')
+          }
+          const result = await deps.store.createWorkItem(
+            deps.managerKey,
+            input.objective_title,
+            input.work_item as WorkboardItemDraft,
+          )
+          return output({
+            action: 'work_item_created',
+            objective_title: input.objective_title.trim(),
+            work_item: result.value,
+            counts: workboardCounts(result.board),
+          })
+        }
+        if (input.action === 'revise_work_item') {
+          if (!hasOnlyKeys(input, [
+            'action', 'current_objective_title', 'current_work_item_title', 'target_objective_title', 'work_item',
+          ]) || typeof input.current_objective_title !== 'string'
+            || typeof input.current_work_item_title !== 'string'
+            || typeof input.target_objective_title !== 'string'
+            || input.work_item === undefined) {
+            throw new Error('revise_work_item 参数不完整或含未定义字段')
+          }
+          const result = await deps.store.reviseWorkItem(
+            deps.managerKey,
+            input.current_objective_title,
+            input.current_work_item_title,
+            input.target_objective_title,
+            input.work_item as WorkboardItemDraft,
+          )
+          return output({
+            action: 'work_item_revised',
+            objective_title: input.target_objective_title.trim(),
+            work_item: result.value,
+            counts: workboardCounts(result.board),
+          })
+        }
+        if (input.action === 'archive_work_item') {
+          if (!hasOnlyKeys(input, ['action', 'current_objective_title', 'current_work_item_title', 'archived_as'])
+            || typeof input.current_objective_title !== 'string'
+            || typeof input.current_work_item_title !== 'string') {
+            throw new Error('archive_work_item 参数不完整或含未定义字段')
+          }
+          const result = await deps.store.archiveWorkItem(
+            deps.managerKey,
+            input.current_objective_title,
+            input.current_work_item_title,
+            input.archived_as as WorkboardArchiveOutcome,
+          )
+          return output({ action: 'work_item_archived', work_item: result.value, counts: workboardCounts(result.board) })
+        }
+        throw new Error('action 必须是六种目标或事项操作之一')
       } catch (error) {
         return failure('change_workboard', error)
       }

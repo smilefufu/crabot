@@ -47,6 +47,7 @@ describe('manager context 隔离评测 runner', () => {
         'workboard-not-injected-before-inspect',
         'project-doc-not-injected-before-read',
         'interleaved-worker-a-target',
+        'revision-replaces-old-completion-criterion',
         'revision-does-not-archive-old-result',
         'memory-has-no-workboard-or-project-doc-mirror',
       ]) {

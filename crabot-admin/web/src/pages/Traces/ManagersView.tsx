@@ -89,9 +89,9 @@ export const ManagersView: React.FC = () => {
                   <Link className="trace-table__workboard-link" to={`/traces/managers/${encodeURIComponent(item.manager_key)}/workboard`}>
                     {item.workboard.status === 'unknown'
                       ? '暂不可用'
-                      : item.workboard.active_count === 0
+                      : item.workboard.current_objective_count === 0
                         ? '空'
-                        : `${item.workboard.active_count} 项${item.workboard.blocked_count > 0 ? ` · ${item.workboard.blocked_count} 项阻塞` : ''}`}
+                        : `${item.workboard.current_objective_count} 个目标 · ${item.workboard.current_work_item_count} 项${item.workboard.blocked_work_item_count > 0 ? ` · ${item.workboard.blocked_work_item_count} 项阻塞` : ''}`}
                   </Link>
                 </td>
                 <td className="trace-table__activity-cell">

@@ -156,9 +156,16 @@ import { splitManagerKey } from './manager/principal.js'
 import {
   WorkboardRevisionConflictError,
   WorkboardValidationError,
+  workboardCounts,
+  type ArchivedWorkboardItem,
+  type ArchivedWorkboardObjective,
+  type ManagerWorkboardAdminView,
+  type WorkboardArchiveEntry,
   type WorkboardArchiveOutcome,
   type WorkboardItem,
   type WorkboardItemDraft,
+  type WorkboardObjective,
+  type WorkboardObjectiveDraft,
   type WorkboardView,
 } from './manager/workboard-store.js'
 import { isManagerKey } from './workers/harness/ledger-store.js'
@@ -175,27 +182,116 @@ const DEFAULT_TMP_PAGE_PORT = 19099
 const WORKBOARD_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000] as const
 
 type WorkboardAdminMutation =
-  | { readonly action: 'create'; readonly item: WorkboardItemDraft }
-  | { readonly action: 'revise'; readonly current_title: string; readonly item: WorkboardItemDraft }
-  | { readonly action: 'archive'; readonly current_title: string; readonly archived_as: WorkboardArchiveOutcome }
+  | { readonly action: 'create_objective'; readonly objective: WorkboardObjectiveDraft }
+  | {
+      readonly action: 'revise_objective'
+      readonly current_objective_title: string
+      readonly objective: WorkboardObjectiveDraft
+    }
+  | {
+      readonly action: 'archive_objective'
+      readonly current_objective_title: string
+      readonly archived_as: WorkboardArchiveOutcome
+    }
+  | {
+      readonly action: 'create_work_item'
+      readonly objective_title: string
+      readonly work_item: WorkboardItemDraft
+    }
+  | {
+      readonly action: 'revise_work_item'
+      readonly current_objective_title: string
+      readonly current_work_item_title: string
+      readonly target_objective_title: string
+      readonly work_item: WorkboardItemDraft
+    }
+  | {
+      readonly action: 'archive_work_item'
+      readonly current_objective_title: string
+      readonly current_work_item_title: string
+      readonly archived_as: WorkboardArchiveOutcome
+    }
 
 function requireWorkboardMutation(value: Record<string, unknown>): WorkboardAdminMutation {
-  if (value.action === 'create' && value.item !== undefined) return { action: 'create', item: value.item as WorkboardItemDraft }
-  if (value.action === 'revise' && typeof value.current_title === 'string' && value.item !== undefined) {
-    return { action: 'revise', current_title: value.current_title, item: value.item as WorkboardItemDraft }
+  if (value.action === 'create_objective' && value.objective !== undefined) {
+    return { action: 'create_objective', objective: value.objective as WorkboardObjectiveDraft }
   }
-  if (
-    value.action === 'archive'
-    && typeof value.current_title === 'string'
-    && (value.archived_as === 'completed' || value.archived_as === 'abandoned')
-  ) return { action: 'archive', current_title: value.current_title, archived_as: value.archived_as }
+  if (value.action === 'revise_objective' && typeof value.current_objective_title === 'string' && value.objective !== undefined) {
+    return {
+      action: 'revise_objective',
+      current_objective_title: value.current_objective_title,
+      objective: value.objective as WorkboardObjectiveDraft,
+    }
+  }
+  if (value.action === 'archive_objective'
+    && typeof value.current_objective_title === 'string'
+    && (value.archived_as === 'completed' || value.archived_as === 'abandoned')) {
+    return {
+      action: 'archive_objective',
+      current_objective_title: value.current_objective_title,
+      archived_as: value.archived_as,
+    }
+  }
+  if (value.action === 'create_work_item' && typeof value.objective_title === 'string' && value.work_item !== undefined) {
+    return {
+      action: 'create_work_item',
+      objective_title: value.objective_title,
+      work_item: value.work_item as WorkboardItemDraft,
+    }
+  }
+  if (value.action === 'revise_work_item'
+    && typeof value.current_objective_title === 'string'
+    && typeof value.current_work_item_title === 'string'
+    && typeof value.target_objective_title === 'string'
+    && value.work_item !== undefined) {
+    return {
+      action: 'revise_work_item',
+      current_objective_title: value.current_objective_title,
+      current_work_item_title: value.current_work_item_title,
+      target_objective_title: value.target_objective_title,
+      work_item: value.work_item as WorkboardItemDraft,
+    }
+  }
+  if (value.action === 'archive_work_item'
+    && typeof value.current_objective_title === 'string'
+    && typeof value.current_work_item_title === 'string'
+    && (value.archived_as === 'completed' || value.archived_as === 'abandoned')) {
+    return {
+      action: 'archive_work_item',
+      current_objective_title: value.current_objective_title,
+      current_work_item_title: value.current_work_item_title,
+      archived_as: value.archived_as,
+    }
+  }
   throw new RpcError('INVALID_PARAMS', '任务板修改参数非法')
 }
 
 function workboardMutationPayload(mutation: WorkboardAdminMutation): Record<string, unknown> {
-  if (mutation.action === 'create') return { action: mutation.action, item: mutation.item }
-  if (mutation.action === 'revise') return { action: mutation.action, current_title: mutation.current_title, item: mutation.item }
-  return { action: mutation.action, current_title: mutation.current_title, archived_as: mutation.archived_as }
+  if (mutation.action === 'create_objective') return { action: mutation.action, objective: mutation.objective }
+  if (mutation.action === 'revise_objective') {
+    return { action: mutation.action, current_objective_title: mutation.current_objective_title, objective: mutation.objective }
+  }
+  if (mutation.action === 'archive_objective') {
+    return { action: mutation.action, current_objective_title: mutation.current_objective_title, archived_as: mutation.archived_as }
+  }
+  if (mutation.action === 'create_work_item') {
+    return { action: mutation.action, objective_title: mutation.objective_title, work_item: mutation.work_item }
+  }
+  if (mutation.action === 'revise_work_item') {
+    return {
+      action: mutation.action,
+      current_objective_title: mutation.current_objective_title,
+      current_work_item_title: mutation.current_work_item_title,
+      target_objective_title: mutation.target_objective_title,
+      work_item: mutation.work_item,
+    }
+  }
+  return {
+    action: mutation.action,
+    current_objective_title: mutation.current_objective_title,
+    current_work_item_title: mutation.current_work_item_title,
+    archived_as: mutation.archived_as,
+  }
 }
 
 function normalizeWorkboardPage(value: unknown, fallback: number): number {
@@ -204,6 +300,58 @@ function normalizeWorkboardPage(value: unknown, fallback: number): number {
     throw new RpcError('INVALID_PARAMS', 'page 和 page_size 必须是正整数')
   }
   return value
+}
+
+type WorkboardAdminChangePayload =
+  | {
+      readonly action: 'objective_created' | 'objective_revised'
+      readonly objective: Omit<WorkboardObjective, 'work_items'>
+      readonly counts: ReturnType<typeof workboardCounts>
+    }
+  | {
+      readonly action: 'objective_archived'
+      readonly objective: ArchivedWorkboardObjective
+      readonly counts: ReturnType<typeof workboardCounts>
+    }
+  | {
+      readonly action: 'work_item_created' | 'work_item_revised'
+      readonly objective_title: string
+      readonly work_item: WorkboardItem
+      readonly counts: ReturnType<typeof workboardCounts>
+    }
+  | {
+      readonly action: 'work_item_archived'
+      readonly work_item: ArchivedWorkboardItem
+      readonly counts: ReturnType<typeof workboardCounts>
+    }
+
+function workboardObjectiveHeader(objective: WorkboardObjective): Omit<WorkboardObjective, 'work_items'> {
+  const { work_items: _items, ...header } = objective
+  return header
+}
+
+function compareWorkboardText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+function sortWorkboardObjectives(objectives: ReadonlyArray<WorkboardObjective>): WorkboardObjective[] {
+  const statusOrder = { ready: 0, in_progress: 1, blocked: 2 } as const
+  return [...objectives]
+    .sort((left, right) => compareWorkboardText(left.title, right.title))
+    .map((objective) => ({
+      ...objective,
+      work_items: [...objective.work_items].sort((left, right) => (
+        statusOrder[left.status] - statusOrder[right.status]
+        || compareWorkboardText(left.title, right.title)
+      )),
+    }))
+}
+
+function sortWorkboardArchive(entries: ReadonlyArray<WorkboardArchiveEntry>): WorkboardArchiveEntry[] {
+  return [...entries].sort((left, right) => (
+    compareWorkboardText(right.archived_at, left.archived_at)
+    || compareWorkboardText(left.title, right.title)
+  ))
 }
 
 function resolveTmpPageBridgeLaunch(dataDir: string, baseUrl: string | undefined): TmpPageBridgeLaunch {
@@ -3345,15 +3493,24 @@ export class UnifiedAgent extends ModuleBase {
     view?: unknown
     page?: unknown
     page_size?: unknown
-  }): Promise<{
-    manager_key: ManagerKey
-    revision: number
-    view: WorkboardView
-    items: Array<WorkboardItem | import('./manager/workboard-store.js').ArchivedWorkboardItem>
-    active_count: number
-    archive_count: number
-    pagination: { page: number; page_size: number; total_items: number; total_pages: number }
-  }> {
+  }): Promise<
+    | {
+        manager_key: ManagerKey
+        revision: number
+        view: 'active'
+        objectives: WorkboardObjective[]
+        counts: ReturnType<typeof workboardCounts>
+        pagination: { page: number; page_size: number; total_items: number; total_pages: number }
+      }
+    | {
+        manager_key: ManagerKey
+        revision: number
+        view: 'archive'
+        entries: WorkboardArchiveEntry[]
+        counts: ReturnType<typeof workboardCounts>
+        pagination: { page: number; page_size: number; total_items: number; total_pages: number }
+      }
+  > {
     const key = await this.requireKnownManagerKey(params.manager_key)
     const view: WorkboardView = params.view === undefined ? 'active' : params.view === 'active' || params.view === 'archive'
       ? params.view
@@ -3361,30 +3518,44 @@ export class UnifiedAgent extends ModuleBase {
     const page = normalizeWorkboardPage(params.page, 1)
     const pageSize = Math.min(normalizeWorkboardPage(params.page_size, 20), 100)
     const board = await this.requireManagerStack().workboard.loadAdmin(key)
-    const items = [...(view === 'active' ? board.active : board.archive)].sort((left, right) => {
-      const order = { ready: 0, in_progress: 1, blocked: 2 } as const
-      const status = order[left.status] - order[right.status]
-      return status === 0 ? left.title.localeCompare(right.title) : status
-    })
     const offset = (page - 1) * pageSize
+    const counts = workboardCounts(board)
+    if (view === 'active') {
+      const objectives = sortWorkboardObjectives(board.objectives)
+      return {
+        manager_key: key,
+        revision: board.revision,
+        view,
+        objectives: objectives.slice(offset, offset + pageSize),
+        counts,
+        pagination: {
+          page,
+          page_size: pageSize,
+          total_items: objectives.length,
+          total_pages: Math.ceil(objectives.length / pageSize),
+        },
+      }
+    }
+    const entries = sortWorkboardArchive(board.archive)
     return {
       manager_key: key,
       revision: board.revision,
       view,
-      items: items.slice(offset, offset + pageSize),
-      active_count: board.active.length,
-      archive_count: board.archive.length,
-      pagination: { page, page_size: pageSize, total_items: items.length, total_pages: Math.ceil(items.length / pageSize) },
+      entries: entries.slice(offset, offset + pageSize),
+      counts,
+      pagination: {
+        page,
+        page_size: pageSize,
+        total_items: entries.length,
+        total_pages: Math.ceil(entries.length / pageSize),
+      },
     }
   }
 
   /** §8.4：Admin 写入先核销专用 assertion，再在 Store 内完成整板 CAS 与 notice 落盘。 */
-  private async handleChangeWorkboardAdmin(params: Record<string, unknown>): Promise<{
+  private async handleChangeWorkboardAdmin(params: Record<string, unknown>): Promise<WorkboardAdminChangePayload & {
     manager_key: ManagerKey
     revision: number
-    item: WorkboardItem | import('./manager/workboard-store.js').ArchivedWorkboardItem
-    active_count: number
-    archive_count: number
     manager_notification: 'pending'
   }> {
     const key = await this.requireKnownManagerKey(params.manager_key)
@@ -3421,18 +3592,84 @@ export class UnifiedAgent extends ModuleBase {
     }
     const store = this.requireManagerStack().workboard
     try {
-      const result = mutation.action === 'create'
-        ? await store.adminCreate(key, params.expected_revision, mutation.item)
-        : mutation.action === 'revise'
-          ? await store.adminRevise(key, params.expected_revision, mutation.current_title, mutation.item)
-          : await store.adminArchive(key, params.expected_revision, mutation.current_title, mutation.archived_as)
+      let board: ManagerWorkboardAdminView
+      let payload: WorkboardAdminChangePayload
+      if (mutation.action === 'create_objective') {
+        const result = await store.adminCreateObjective(key, params.expected_revision, mutation.objective)
+        board = result.board
+        payload = {
+          action: 'objective_created',
+          objective: workboardObjectiveHeader(result.value),
+          counts: workboardCounts(board),
+        }
+      } else if (mutation.action === 'revise_objective') {
+        const result = await store.adminReviseObjective(
+          key,
+          params.expected_revision,
+          mutation.current_objective_title,
+          mutation.objective,
+        )
+        board = result.board
+        payload = {
+          action: 'objective_revised',
+          objective: workboardObjectiveHeader(result.value),
+          counts: workboardCounts(board),
+        }
+      } else if (mutation.action === 'archive_objective') {
+        const result = await store.adminArchiveObjective(
+          key,
+          params.expected_revision,
+          mutation.current_objective_title,
+          mutation.archived_as,
+        )
+        board = result.board
+        payload = { action: 'objective_archived', objective: result.value, counts: workboardCounts(board) }
+      } else if (mutation.action === 'create_work_item') {
+        const result = await store.adminCreateWorkItem(
+          key,
+          params.expected_revision,
+          mutation.objective_title,
+          mutation.work_item,
+        )
+        board = result.board
+        payload = {
+          action: 'work_item_created',
+          objective_title: mutation.objective_title.trim(),
+          work_item: result.value,
+          counts: workboardCounts(board),
+        }
+      } else if (mutation.action === 'revise_work_item') {
+        const result = await store.adminReviseWorkItem(
+          key,
+          params.expected_revision,
+          mutation.current_objective_title,
+          mutation.current_work_item_title,
+          mutation.target_objective_title,
+          mutation.work_item,
+        )
+        board = result.board
+        payload = {
+          action: 'work_item_revised',
+          objective_title: mutation.target_objective_title.trim(),
+          work_item: result.value,
+          counts: workboardCounts(board),
+        }
+      } else {
+        const result = await store.adminArchiveWorkItem(
+          key,
+          params.expected_revision,
+          mutation.current_objective_title,
+          mutation.current_work_item_title,
+          mutation.archived_as,
+        )
+        board = result.board
+        payload = { action: 'work_item_archived', work_item: result.value, counts: workboardCounts(board) }
+      }
       this.dispatchWorkboardAdminNotice(key)
       return {
         manager_key: key,
-        revision: result.board.revision,
-        item: result.item,
-        active_count: result.board.active.length,
-        archive_count: result.board.archive.length,
+        revision: board.revision,
+        ...payload,
         manager_notification: 'pending',
       }
     } catch (error) {
@@ -3558,10 +3795,12 @@ export class UnifiedAgent extends ModuleBase {
     await Promise.all([...managerKeys].map(async (key) => {
       try {
         const board = await stack.workboard.loadAdmin(key)
+        const counts = workboardCounts(board)
         workboardSummaries.set(key, {
           status: 'ready',
-          active_count: board.active.length,
-          blocked_count: board.active.filter((item) => item.status === 'blocked').length,
+          current_objective_count: counts.current_objectives,
+          current_work_item_count: counts.current_work_items,
+          blocked_work_item_count: counts.blocked_work_items,
         })
       } catch {
         workboardSummaries.set(key, { status: 'unknown' })

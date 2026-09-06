@@ -381,7 +381,10 @@ describe('ManagerLoop', () => {
       expect(call.systemPrompt).not.toContain('dynamic-note-after-sentinel')
     }
     expect(MANAGER_WORKBOARD_CONTEXT).toContain('任务板不会自动进入上下文')
-    expect(MANAGER_WORKBOARD_CONTEXT).toContain('主动查阅任务板')
+    expect(MANAGER_WORKBOARD_CONTEXT).toContain('一张任务板可以有多个目标，每个目标下可以有多个事项')
+    expect(MANAGER_WORKBOARD_CONTEXT).toContain('为当前讨论临时派执行器查证')
+    expect(MANAGER_WORKBOARD_CONTEXT).toContain('执行过程、命令、日志和详细技术论证留在执行记录或项目文档')
+    expect(MANAGER_WORKBOARD_CONTEXT).not.toMatch(/[A-Za-z]/)
     expect(MANAGER_WORKBOARD_CONTEXT).not.toContain('重启')
     expect(MANAGER_WORKBOARD_CONTEXT).not.toContain('压缩后')
     expect(listWorkers).not.toHaveBeenCalled()
