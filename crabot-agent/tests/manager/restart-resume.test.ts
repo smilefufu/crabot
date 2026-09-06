@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { ManagerRegistry, type ManagerRegistryDeps } from '../../src/manager/registry.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import { TraceStore } from '../../src/core/trace-store.js'
-import { defineTool, type LLMAdapter, type LLMStreamParams } from '../../src/engine/index.js'
+import { createUserMessage, defineTool, type LLMAdapter, type LLMStreamParams } from '../../src/engine/index.js'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../../src/types.js'
 import type { ManagerResumeCheckpoint } from '../../src/manager/resume-checkpoint.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
@@ -225,6 +225,170 @@ describe('Manager restart continuation', () => {
     for (const span of spans.filter((span) => span.type === 'tool_call')) {
       expect(spans.some((parent) => parent.span_id === span.parent_span_id)).toBe(true)
     }
+  })
+
+  it('does not restore completed calls discarded by an overflow retry', async () => {
+    await store.save({ key: KEY, foldedCount: 0, recent: [
+      createUserMessage('old history: ' + 'x'.repeat(3000)),
+      createUserMessage('more old history: ' + 'x'.repeat(3000)),
+    ] })
+    const sent = vi.fn(async () => ({ output: 'already delivered', isError: false }))
+    const send = defineTool({ name: 'send_message', description: '', inputSchema: {}, isReadOnly: false, call: sent })
+    let calls = 0
+    const old = registry({ async *stream(params) {
+      if (params.systemPrompt.includes('对话历史压缩助手')) {
+        yield* chunksFromContent([{ type: 'text', text: 'Old history summary' }], 'end_turn')
+      } else if (calls++ === 0) {
+        yield* chunksFromContent([{ type: 'tool_use', id: 'discarded-call', name: 'send_message', input: {} }], 'tool_use')
+      } else if (calls === 2) {
+        yield* chunksFromContent([], 'max_tokens')
+      } else await new Promise(() => {})
+    }, updateConfig() {} }, { toolFace: () => [send], policy: { keepRecent: 0, hardCapTokens: 1000000 } })
+    void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Continue after overflow')])
+    const checkpoint = await checkpointWhere((value) => value.state.foldedCount > 0 && calls === 3)
+    expect(checkpoint.tools).toHaveLength(1)
+    expect(JSON.stringify(checkpoint.state.recent)).not.toContain('discarded-call')
+    const inputs: string[] = []
+    const restored = registry({ async *stream(params) {
+      inputs.push(JSON.stringify(params.messages))
+      yield* chunksFromContent([], 'end_turn')
+    }, updateConfig() {} })
+    restored.registerResumeCheckpoints([checkpoint])
+    await restored.resumeInterruptedEpisodes()
+    expect(inputs).toHaveLength(1)
+    expect(inputs[0]).not.toContain('discarded-call')
+    expect(JSON.stringify(await store.load(KEY))).not.toContain('discarded-call')
+    expect(sent).toHaveBeenCalledTimes(1)
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.spans.filter((span) => span.type === 'tool_call')).toHaveLength(1)
+  })
+
+  it('does not reconstruct settled interrupted calls after compaction and another restart', async () => {
+    const read = defineTool({ name: 'read', description: '', inputSchema: {}, isReadOnly: true,
+      call: async () => ({ output: 'old-tool-result:' + 'x'.repeat(160000), isError: false }) })
+    const wait = defineTool({ name: 'wait', description: '', inputSchema: {}, isReadOnly: false,
+      call: async () => new Promise<{ output: string; isError: boolean }>(() => {}) })
+    const old = registry({ async *stream() {
+      yield* chunksFromContent([
+        { type: 'tool_use', id: 'old-read', name: 'read', input: {} },
+        { type: 'tool_use', id: 'old-wait', name: 'wait', input: {} },
+      ], 'tool_use')
+    }, updateConfig() {} }, { toolFace: () => [read, wait] })
+    void old.routeWorkboardAdminUpdate({ key: KEY, noticeRevision: 1 })
+    const checkpoint = await checkpointWhere((value) => value.tools.some((event) => event.name === 'wait'))
+    const next = defineTool({ name: 'next', description: '', inputSchema: {}, isReadOnly: true,
+      call: async () => ({ output: 'new result', isError: false }) })
+    let resumedCalls = 0
+    const firstRestart = registry({ async *stream() {
+      if (resumedCalls++ === 0) {
+        yield* chunksFromContent([{ type: 'tool_use', id: 'new-call', name: 'next', input: {} }], 'tool_use')
+      } else await new Promise(() => {})
+    }, updateConfig() {} }, { toolFace: () => [next] })
+    firstRestart.registerResumeCheckpoints([checkpoint])
+    void firstRestart.resumeInterruptedEpisodes()
+    const materialized = await checkpointWhere((value) => value.turns.length === 1 && resumedCalls === 2)
+    const secondRestart = registry({ async *stream(params) {
+      if (params.systemPrompt.includes('对话历史压缩助手')) {
+        yield* chunksFromContent([{ type: 'text', text: 'Prior tools were settled after interruption' }], 'end_turn')
+      } else await new Promise(() => {})
+    }, updateConfig() {} }, { policy: { keepRecent: 0, hardCapTokens: 12000 } })
+    secondRestart.registerResumeCheckpoints([materialized])
+    void secondRestart.resumeInterruptedEpisodes()
+    const continued = await checkpointWhere((value) => value.state.foldedCount > 0)
+    expect(JSON.stringify(continued.state.recent)).not.toContain('old-tool-result:')
+    const inputs: string[] = []
+    const thirdRestart = registry({ async *stream(params) {
+      inputs.push(JSON.stringify(params.messages))
+      yield* chunksFromContent([], 'end_turn')
+    }, updateConfig() {} })
+    thirdRestart.registerResumeCheckpoints([continued])
+    await thirdRestart.resumeInterruptedEpisodes()
+    expect(inputs).toHaveLength(1)
+    expect(inputs[0]).not.toContain('old-tool-result:')
+    expect(inputs[0]).not.toContain('old-wait')
+    expect(JSON.stringify(await store.load(KEY))).not.toContain('old-read')
+    const spans = trace.getManagerEpisode(continued.episodeId)!.spans
+    expect(spans.filter((span) => span.type === 'tool_call')).toHaveLength(3)
+    expect(spans.filter((span) => span.type === 'tool_call' && span.status === 'failed')).toHaveLength(1)
+  })
+
+  it('keeps the current human input protected when a resumed episode compacts history', async () => {
+    await store.save({ key: KEY, foldedCount: 0, recent: [
+      createUserMessage('old history: ' + 'x'.repeat(80000)),
+      createUserMessage('last old history'),
+    ] })
+    const read = defineTool({ name: 'read', description: '', inputSchema: {}, isReadOnly: true,
+      call: async () => ({ output: 'current result', isError: false }) })
+    let calls = 0
+    const old = registry({ async *stream() {
+      if (calls++ === 0) {
+        yield* chunksFromContent([{ type: 'tool_use', id: 'current-call', name: 'read', input: {} }], 'tool_use')
+      } else await new Promise(() => {})
+    }, updateConfig() {} }, { toolFace: () => [read] })
+    void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Current request stays literal')])
+    const checkpoint = await checkpointWhere((value) => value.turns.length === 1 && calls === 2)
+    const folds: string[] = []
+    const inputs: string[] = []
+    const restored = registry({ async *stream(params) {
+      if (params.systemPrompt.includes('对话历史压缩助手')) {
+        folds.push(JSON.stringify(params.messages))
+        yield* chunksFromContent([{ type: 'text', text: 'Old history summary' }], 'end_turn')
+      } else {
+        inputs.push(JSON.stringify(params.messages))
+        yield* chunksFromContent([], 'end_turn')
+      }
+    }, updateConfig() {} }, { policy: { keepRecent: 0, hardCapTokens: 12000 } })
+    restored.registerResumeCheckpoints([checkpoint])
+    await restored.resumeInterruptedEpisodes()
+    expect(folds).not.toHaveLength(0)
+    expect(folds.join('\n')).not.toContain('Current request stays literal')
+    expect(inputs[0].match(/Current request stays literal/g)).toHaveLength(1)
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
+  })
+
+  it('protects a human supplement whose Engine message ID changed during an overflow retry', async () => {
+    await store.save({ key: KEY, foldedCount: 0, recent: [
+      ...Array.from({ length: 3 }, (_, index) => createUserMessage(`old history ${index}: ` + 'x'.repeat(80000))),
+      createUserMessage('last old history'),
+    ] })
+    const read = defineTool({ name: 'read', description: '', inputSchema: {}, isReadOnly: true,
+      call: async () => {
+        await old.routeHumanMessages('feishu', 'restart-test', [message('supplement', 'Keep this correction literal')])
+        return { output: 'current result', isError: false }
+      } })
+    const next = defineTool({ name: 'next', description: '', inputSchema: {}, isReadOnly: true,
+      call: async () => ({ output: 'retry result', isError: false }) })
+    let calls = 0
+    const old = registry({ async *stream(params) {
+      if (params.systemPrompt.includes('对话历史压缩助手')) {
+        yield* chunksFromContent([{ type: 'text', text: 'Old history summary' }], 'end_turn')
+      } else if (calls++ === 0) {
+        yield* chunksFromContent([{ type: 'tool_use', id: 'read-call', name: 'read', input: {} }], 'tool_use')
+      } else if (calls === 2) {
+        yield* chunksFromContent([], 'max_tokens')
+      } else if (calls === 3) {
+        yield* chunksFromContent([{ type: 'tool_use', id: 'retry-call', name: 'next', input: {} }], 'tool_use')
+      } else await new Promise(() => {})
+    }, updateConfig() {} }, { toolFace: () => [read, next], policy: { keepRecent: 2, hardCapTokens: 1000000 } })
+    void old.routeWorkboardAdminUpdate({ key: KEY, noticeRevision: 1 })
+    const checkpoint = await checkpointWhere((value) => value.state.foldedCount > 0 && calls === 4)
+    const folds: string[] = []
+    const inputs: string[] = []
+    const restored = registry({ async *stream(params) {
+      if (params.systemPrompt.includes('对话历史压缩助手')) {
+        folds.push(JSON.stringify(params.messages))
+        yield* chunksFromContent([{ type: 'text', text: 'Old history summary' }], 'end_turn')
+      } else {
+        inputs.push(JSON.stringify(params.messages))
+        yield* chunksFromContent([], 'end_turn')
+      }
+    }, updateConfig() {} }, { policy: { keepRecent: 0, hardCapTokens: 12000 } })
+    restored.registerResumeCheckpoints([checkpoint])
+    await restored.resumeInterruptedEpisodes()
+    expect(folds).not.toHaveLength(0)
+    expect(folds.join('\n')).not.toContain('Keep this correction literal')
+    expect(inputs[0].match(/Keep this correction literal/g)).toHaveLength(1)
+    expect((await store.load(KEY)).committedHumanMessageIds).toContain('supplement')
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
   })
 
   it('restores a consumed image supplement from its reference without persisting inbound base64', async () => {

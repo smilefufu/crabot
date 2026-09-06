@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后整理：2026-09-06
+> 最后整理：2026-09-07
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
@@ -13,6 +13,8 @@
 - 修复 Engine 下一次 LLM 前 messagesRef 未刷新造成的插话快照遗漏；有效检查点不再因 Agent 重启一律 failed。
   无检查点的旧中断记录仍据实收口，既有终态不重放。
 - 已覆盖首次 LLM 前中断、已发送结果、连续重启、排队/图片插话、原发起人权限、续跑失败及启动顺序。
+  PR review 补齐工具结果并入历史的检查点边界与本轮人类输入的压缩保护；溢出重试、压缩后连续重启及
+  插话消息 ID 重建回归通过，后端定向 192 项通过。
   Agent 类型检查、前端 21 项测试与构建通过，桌面/手机 Playwright 状态切换通过。
   扩大检查中的 7 项失败均在未修改基线复现（6 项缺失 tmp-page 测试 fixture、1 项工具面调用次数断言）。
 
@@ -433,6 +435,10 @@
 - PR #76～#89 完成 CLI worker 输入/活性/权限/ManagerKey、legacy loop 退役、bg-shell durable notification、worker-scoped MCP、Admin Chat assertion、会话隔离与 v2 只读导入；生产切换见里程碑归档（`git show 49b9cb4:PROGRESS.md` 有完整细节）。
 
 ## 当前 follow-up
+
+- **Manager 重启续跑 PR #147 review（非阻塞）**：身份绑定存储异常下恢复准入的失败收口、启动对账中
+  关停时恢复 gate 的释放、磁盘异常下邮箱入队与重投的原子性，以及大上下文同步检查点写入的性能测量。
+  投递成功但结果未落盘仍属于 interrupted/unknown，恢复不承诺外部副作用 exactly-once。
 
 - **任务板 Admin Web 共管 review 遗留（均非阻塞）**：①任务板 notice 派发已失败后，重试调度本身若再读写
   `workboard.json` 失败会产生未处理 Promise；②中途注入失败后的同进程重投只依赖下次唤醒或重启；③大量

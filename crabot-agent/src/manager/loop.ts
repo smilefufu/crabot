@@ -521,17 +521,20 @@ export class ManagerLoop {
     const nextState = state ?? this.resumeCheckpoint.state
     const committedIds = new Set(nextState.committedHumanMessageIds ?? [])
     const imageRefs = new Map((nextState.imageRefs ?? []).map((ref) => [ref.message_id, ref]))
+    let protectedTailMessageId = this.resumeCheckpoint.protectedTailMessageId
     if (state) {
+      // Overflow retries can recreate injected human messages with new Engine IDs.
+      if (!state.recent.some((message) => message.id === protectedTailMessageId)) protectedTailMessageId = undefined
       for (const item of envelopes) {
-        if (isHumanWake(item.wake)) {
-          for (const message of item.wake.messages) committedIds.add(message.platform_message_id)
-          const images = item.wake.messages.flatMap(collectInboundImages)
-          if (images.length > 0) {
-            const text = this.renderEnvelope(item)
-            const message = state.recent.find((message) => 'content' in message && message.content === text)
-            if (message) imageRefs.set(message.id, { message_id: message.id, images })
-          }
-        }
+        if (!isHumanWake(item.wake)) continue
+        for (const message of item.wake.messages) committedIds.add(message.platform_message_id)
+        const images = item.wake.messages.flatMap(collectInboundImages)
+        if (images.length === 0 && protectedTailMessageId !== undefined) continue
+        const text = this.renderEnvelope(item)
+        const message = state.recent.find((message) => 'content' in message && message.content === text)
+        if (!message) continue
+        protectedTailMessageId ??= message.id
+        if (images.length > 0) imageRefs.set(message.id, { message_id: message.id, images })
       }
     }
     this.resumeCheckpoint = {
@@ -540,6 +543,7 @@ export class ManagerLoop {
       envelopes,
       wakeIndex: this.currentWakeEvent ? envelopes.indexOf(this.currentWakeEvent) : -1,
       pending,
+      protectedTailMessageId,
       hasEngineMessages: state !== undefined || this.resumeCheckpoint.hasEngineMessages,
       adminChatClaims: [...this.adminChatClaims],
       execution: this.checkpointExecution(),
@@ -777,10 +781,14 @@ export class ManagerLoop {
     let traceStarted = false
     try {
       await this.deps.store.ensureSession(this.deps.key)
+      const restoredRecent = recovery
+        ? resumeManagerMessages(recovery).filter((message) => !recovery.transientMessageIds.includes(message.id))
+        : []
+      const protectedTailStart = restoredRecent.findIndex((message) => message.id === recovery?.protectedTailMessageId)
       const committed = recovery ? {
-        state: { ...recovery.state, recent: resumeManagerMessages(recovery).filter((message) => !recovery.transientMessageIds.includes(message.id)) },
+        state: { ...recovery.state, recent: restoredRecent },
         messageCount: 0,
-        humanMessages: [],
+        humanMessages: protectedTailStart < 0 ? [] : restoredRecent.slice(protectedTailStart),
         lastCurrentWakeCommittedMessageId: undefined,
       } : await this.commitHumanInputs(
         await this.deps.store.load(this.deps.key),
@@ -840,10 +848,11 @@ export class ManagerLoop {
         }
       }
       this.resumeCheckpoint = recovery
-        ? { ...recovery, state, transientMessageIds: [] }
+        ? { ...recovery, state, pendingToolCallIds: [], transientMessageIds: [] }
         : {
             episodeId, state, envelopes: episodeEnvelopes, wakeIndex: envelope ? episodeEnvelopes.indexOf(envelope) : -1,
             pending: [], hasEngineMessages: false, turns: [], responses: [], tools: [],
+            pendingToolCallIds: [], protectedTailMessageId: committed.humanMessages[0]?.id,
             adminChatClaims: [...this.adminChatClaims], transientMessageIds: [], spawnedWorkerIds: [],
             execution: this.checkpointExecution(),
           }
@@ -973,7 +982,7 @@ export class ManagerLoop {
   private async runEpisodeBody(
     episodeId: string,
     initialState: ManagerSessionState,
-    committedHumanMessages: ReadonlyArray<EngineMessage>,
+    protectedTail: ReadonlyArray<EngineMessage>,
     carriedTexts: ReadonlyArray<string>,
     eventText: string | undefined,
     carriedEnvelopes: ReadonlyArray<TimedWakeEnvelope>,
@@ -1011,12 +1020,12 @@ export class ManagerLoop {
     })
 
     let state = initialState
-    let historyState = withoutProtectedTail(state, committedHumanMessages.length)
+    let historyState = withoutProtectedTail(state, protectedTail.length)
 
     const wakeDecision = decideCompaction({
       policy,
       mainRequestTokens: contextManager.estimateCompactionStateTokens(
-        toManagerCompactionState(historyState, committedHumanMessages),
+        toManagerCompactionState(historyState, protectedTail),
         compactionProfile,
       ),
     })
@@ -1030,9 +1039,9 @@ export class ManagerLoop {
         target: { kind: 'fit_hard_cap', hardCapTokens: policy.hardCapTokens },
         adapter,
         model,
-        protectedTail: committedHumanMessages,
+        protectedTail,
       })
-      historyState = withoutProtectedTail(state, committedHumanMessages.length)
+      historyState = withoutProtectedTail(state, protectedTail.length)
     }
 
     // 入站图片视觉注入:窗口内 human 消息引用的图片读盘转 ImageBlock(VLM 模型才有)。
@@ -1092,9 +1101,9 @@ export class ManagerLoop {
         target: { kind: 'fit_hard_cap', hardCapTokens: policy.hardCapTokens, force: true },
         adapter,
         model,
-        protectedTail: committedHumanMessages,
+        protectedTail,
       })
-      historyState = withoutProtectedTail(state, committedHumanMessages.length)
+      historyState = withoutProtectedTail(state, protectedTail.length)
       // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
       this.mailbox.drainEnvelopes()
       this.mailbox.clearContextAdmissions()
@@ -1973,7 +1982,7 @@ export class ManagerLoop {
       onTurn: (event) => {
         this.recordTurnSpans(episodeId, event)
         if (this.resumeCheckpoint) {
-          this.resumeCheckpoint = { ...this.resumeCheckpoint, turns: [...this.resumeCheckpoint.turns, event] }
+          this.resumeCheckpoint = { ...this.resumeCheckpoint, turns: [...this.resumeCheckpoint.turns, event], pendingToolCallIds: [] }
         }
         checkpoint()
       },
@@ -1982,7 +1991,9 @@ export class ManagerLoop {
         if (this.resumeCheckpoint) {
           const tools = new Map(this.resumeCheckpoint.tools.map((item) => [item.callId, item]))
           tools.set(event.callId, event)
-          this.resumeCheckpoint = { ...this.resumeCheckpoint, tools: [...tools.values()] }
+          const pendingToolCallIds = new Set(this.resumeCheckpoint.pendingToolCallIds)
+          pendingToolCallIds.add(event.callId)
+          this.resumeCheckpoint = { ...this.resumeCheckpoint, tools: [...tools.values()], pendingToolCallIds: [...pendingToolCallIds] }
           this.flushObservedCheckpoint()
         }
       },

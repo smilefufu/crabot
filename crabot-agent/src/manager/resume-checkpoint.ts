@@ -20,6 +20,9 @@ export interface ManagerResumeCheckpoint {
   readonly turns: ReadonlyArray<EngineTurnEvent>
   readonly responses: ReadonlyArray<EngineLlmResponseEvent>
   readonly tools: ReadonlyArray<EngineToolLifecycleEvent>
+  /** Calls whose results have not yet been committed to state.recent. */
+  readonly pendingToolCallIds: ReadonlyArray<string>
+  readonly protectedTailMessageId?: string
   readonly adminChatClaims: ReadonlyArray<readonly [string, 'unclaimed' | 'claimed']>
   readonly transientMessageIds: ReadonlyArray<string>
   readonly spawnedWorkerIds: ReadonlyArray<string>
@@ -45,10 +48,11 @@ export function settleInterruptedManagerTools(checkpoint: ManagerResumeCheckpoin
 }
 
 export function resumeManagerMessages(checkpoint: ManagerResumeCheckpoint): ReadonlyArray<EngineMessage> {
+  const pending = new Set(checkpoint.pendingToolCallIds)
   const results = new Set(checkpoint.state.recent.flatMap((message) =>
     'toolResults' in message ? message.toolResults.map((result) => result.tool_use_id) : [],
   ))
-  const tools = checkpoint.tools.filter((event) => !results.has(event.toolUseId))
+  const tools = checkpoint.tools.filter((event) => pending.has(event.callId) && !results.has(event.toolUseId))
   if (tools.length === 0) return checkpoint.state.recent
   // Completed calls keep their real results. An interrupted call is not executed again by recovery.
   return [

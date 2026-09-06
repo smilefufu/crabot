@@ -160,7 +160,7 @@ export class ManagerSessionStore {
       || !Array.isArray(checkpoint.state.recent) || !Array.isArray(checkpoint.envelopes)
       || !Number.isInteger(checkpoint.wakeIndex) || checkpoint.wakeIndex < -1 || checkpoint.wakeIndex >= checkpoint.envelopes.length
       || !Array.isArray(checkpoint.pending) || !Array.isArray(checkpoint.turns)
-      || !Array.isArray(checkpoint.responses) || !Array.isArray(checkpoint.tools)
+      || !Array.isArray(checkpoint.responses) || !Array.isArray(checkpoint.tools) || !Array.isArray(checkpoint.pendingToolCallIds)
       || !Array.isArray(checkpoint.adminChatClaims) || !Array.isArray(checkpoint.transientMessageIds)
       || !Array.isArray(checkpoint.spawnedWorkerIds) || typeof checkpoint.hasEngineMessages !== 'boolean'
       || !Array.isArray(checkpoint.execution?.successfulSendMessageTargets) || !Array.isArray(checkpoint.execution?.continuedWorkers)) {
