@@ -2302,9 +2302,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 }
 
-/** cc 的 project 目录 slug 规则:cwd 路径里的 `/` 与 `.` 都替换成 `-`(已用真实 ~/.claude/projects/ 核实)。 */
+/** CC project 目录名的字符转换：cwd 中每个非 ASCII 字母或数字字符都替换为 `-`。 */
 function projectSlug(cwd: string): string {
-  return cwd.replace(/[/.]/g, '-')
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
 function truncate(text: string, max: number): string {
