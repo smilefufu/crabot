@@ -60,7 +60,7 @@ export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
  * 真实唤醒(人类消息 / worker 事件 / schedule)顺带 drain 走,仍满足 §4.1 至少一次投递。
  */
 export const MAX_SELF_WAKE_CHAIN = 3
-export const WORKBOARD_IDLE_REVIEW_DELAY_MS = 60 * 60 * 1000
+const WORKBOARD_IDLE_REVIEW_DELAY_MS = 60 * 60 * 1000
 
 interface IdleReviewTimer {
   readonly generation: number

@@ -344,7 +344,72 @@
       ],
       "expect": {
         "required_tools": ["inspect_workboard"],
-        "forbidden_tools": ["spawn_worker", "send_to_worker", "query_worker"]
+        "forbidden_tools": [
+          "spawn_worker",
+          "send_to_worker",
+          "query_worker",
+          "request_worker_interrupt",
+          "request_worker_stop",
+          "respond_to_worker_ui",
+          "change_workboard",
+          "send_message"
+        ],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["等待执行器的结果事件"],
+          "excludes": ["本次已检查", "查询失败"]
+        }
+      }
+    },
+    {
+      "id": "idle-review-query-worker-progress",
+      "title": "空闲时通过独立侧问了解执行器进度",
+      "objectives": [
+        {
+          "title": "完成支付回归验证",
+          "completion_criteria": ["支付回归结果已经核验"],
+          "work_items": [
+            {
+              "title": "运行支付回归",
+              "status": "in_progress",
+              "current_judgement": "执行器仍在运行，但现有状态不足以说明具体进度",
+              "next_action": "通过独立侧问了解进度，等待旁路结果"
+            }
+          ]
+        }
+      ],
+      "workers": [
+        { "worker_id": "worker-payments-query", "title": "运行支付回归：执行测试", "state": "running" }
+      ],
+      "history": [
+        { "kind": "human", "text": "让现有执行器继续按原方向运行。空闲检查时，如果现有状态不足，可以通过独立侧问了解它做到哪了；不要向主线追加消息，也不要改变方向。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard", "query_worker"],
+        "required_calls": [
+          { "tool": "query_worker", "equals": { "worker_id": "worker-payments-query" }, "contains_any": { "question": ["进度", "做到", "当前"] } }
+        ],
+        "forbidden_tools": [
+          "spawn_worker",
+          "send_to_worker",
+          "request_worker_interrupt",
+          "request_worker_stop",
+          "respond_to_worker_ui",
+          "change_workboard",
+          "send_message"
+        ],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["执行器仍在运行", "通过独立侧问了解进度"],
+          "excludes": ["本次已检查", "查询失败", "已经纠偏"]
+        }
       }
     },
     {
@@ -533,7 +598,7 @@
               "title": "执行生产发布",
               "status": "blocked",
               "current_judgement": "发布等待人类提供审批码",
-              "next_action": "确认是否已经提醒过人类",
+              "next_action": "收到审批码后继续发布",
               "blocker": "缺少生产发布审批码"
             }
           ]
@@ -544,7 +609,14 @@
       ],
       "expect": {
         "required_tools": ["inspect_workboard", "get_history"],
-        "forbidden_tools": ["send_message", "spawn_worker", "send_to_worker"]
+        "forbidden_tools": ["send_message", "spawn_worker", "send_to_worker", "change_workboard"],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["发布等待人类提供审批码", "收到审批码后继续发布"],
+          "excludes": ["无法可靠读取", "查询失败"]
+        }
       }
     },
     {
