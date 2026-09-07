@@ -146,7 +146,10 @@ function permissionsFromWake(
   ) {
     return wakeEvent.principalPermissions
   }
-  if (wakeEvent?.kind === 'workboard_admin_update') return managerPrincipalPermissions
+  if (
+    wakeEvent?.kind === 'workboard_admin_update'
+    || wakeEvent?.kind === 'workboard_idle_review'
+  ) return managerPrincipalPermissions
   return undefined
 }
 

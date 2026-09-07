@@ -190,18 +190,23 @@ describe('project document tools', () => {
     }
   })
 
-  it('独立任务板通知只可复用现有 Manager 主体权限，缺失时拒绝项目访问', async () => {
-    const wake: WakeEvent = { kind: 'workboard_admin_update', noticeRevision: 1 }
-    const granted = await tool(
-      wake,
-      'inspect_project_docs',
-      permissions({ storage: { workspace_path: root, access: 'readwrite' } }),
-    ).call({ project_root: project, operation: 'list' }, {} as never)
-    expect(granted.isError).toBe(false)
+  it('任务板系统输入只可复用现有 Manager 主体权限，缺失时拒绝项目访问', async () => {
+    const wakes: WakeEvent[] = [
+      { kind: 'workboard_admin_update', noticeRevision: 1 },
+      { kind: 'workboard_idle_review' },
+    ]
+    for (const wake of wakes) {
+      const granted = await tool(
+        wake,
+        'inspect_project_docs',
+        permissions({ storage: { workspace_path: root, access: 'readwrite' } }),
+      ).call({ project_root: project, operation: 'list' }, {} as never)
+      expect(granted.isError).toBe(false)
 
-    const denied = await tool(wake, 'inspect_project_docs').call({ project_root: project, operation: 'list' }, {} as never)
-    expect(denied.isError).toBe(true)
-    expect(denied.output).toContain('没有可用的主体权限快照')
+      const denied = await tool(wake, 'inspect_project_docs').call({ project_root: project, operation: 'list' }, {} as never)
+      expect(denied.isError).toBe(true)
+      expect(denied.output).toContain('没有可用的主体权限快照')
+    }
   })
 
   it('storage 约束读取范围，read 档位不能写决策', async () => {

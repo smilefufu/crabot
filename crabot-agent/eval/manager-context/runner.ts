@@ -4,9 +4,13 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
+  createAssistantMessage,
   createAdapter,
+  createToolResultMessage,
+  createUserMessage,
   StreamProcessor,
   type ContentBlock,
+  type EngineMessage,
   type LLMAdapter,
   type LLMAdapterConfig,
   type LLMFormat,
@@ -116,6 +120,11 @@ interface BehaviorExpectation {
   readonly forbidden_tools?: string[]
   readonly required_calls?: BehaviorCallRule[]
   readonly forbidden_calls?: BehaviorCallRule[]
+  readonly worker_spawns?: {
+    readonly count?: number
+    readonly workspace?: 'project_root'
+    readonly prompt_contains?: string
+  }
   readonly board?: {
     readonly current_objectives?: number
     readonly current_work_items?: number
@@ -133,10 +142,20 @@ interface BehaviorScenario {
   readonly id: string
   readonly title: string
   readonly objectives?: SeedObjective[]
-  readonly workers?: Array<{ readonly worker_id: string; readonly title: string }>
+  readonly workers?: Array<{
+    readonly worker_id: string
+    readonly title: string
+    readonly state?: WorkerContractState
+  }>
+  readonly history?: Array<{
+    readonly kind: 'human' | 'manager_sent'
+    readonly text: string
+  }>
+  readonly history_unavailable?: boolean
   readonly steps: Array<
     | { readonly kind: 'human'; readonly text: string }
     | { readonly kind: 'worker'; readonly worker_id: string; readonly text: string }
+    | { readonly kind: 'idle_review' }
   >
   readonly expect: BehaviorExpectation
 }
@@ -150,6 +169,7 @@ interface BehaviorFixture {
 interface EvalOptions {
   readonly fixtureDir?: string
   readonly tempRoot?: string
+  readonly scenarioPrefix?: string
 }
 
 interface EnvironmentOptions {
@@ -158,6 +178,8 @@ interface EnvironmentOptions {
   readonly projectRoot: string
   readonly adapter: RecordingAdapter
   readonly model?: string
+  readonly history?: BehaviorScenario['history']
+  readonly historyUnavailable?: boolean
 }
 
 interface EvaluationEnvironment {
@@ -174,6 +196,7 @@ interface EvaluationEnvironment {
   setStep(step: string): void
   routeHuman(text: string): Promise<void>
   routeWorker(workerId: string, text: string): Promise<void>
+  routeIdleReview(): Promise<void>
   close(): Promise<void>
 }
 
@@ -497,12 +520,33 @@ function principalResolver(projectRoot: string): PrincipalResolverDeps {
   }
 }
 
-function fakeRpcResult(method: string, sequence: number): unknown {
+function channelHistory(
+  history: BehaviorScenario['history'] = [],
+): Array<Pick<ChannelMessage, 'platform_message_id' | 'sender' | 'content' | 'features' | 'platform_timestamp'>> {
+  return history.map((entry, index) => ({
+    platform_message_id: `eval-history-${index + 1}`,
+    sender: entry.kind === 'human'
+      ? { friend_id: FRIEND.id, platform_user_id: 'eval-user', platform_display_name: '评测用户' }
+      : { platform_user_id: 'eval-manager', platform_display_name: '评测 Manager' },
+    content: { type: 'text', text: entry.text },
+    features: { is_mention_crab: false },
+    platform_timestamp: new Date(FIXED_START_MS + index * 1000).toISOString(),
+  }))
+}
+
+function fakeRpcResult(
+  method: string,
+  sequence: number,
+  history: BehaviorScenario['history'] = [],
+): unknown {
   switch (method) {
     case 'send_message':
       return { platform_message_id: `eval-outbound-${sequence}`, sent_at: new Date(FIXED_START_MS + sequence * 1000).toISOString() }
     case 'get_history':
-      return { messages: [], pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } }
+      return {
+        items: channelHistory(history),
+        pagination: { page: 1, page_size: 20, total_items: history.length, total_pages: history.length > 0 ? 1 : 0 },
+      }
     case 'list_entries':
       return { entries: [], pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } }
     case 'search_memory':
@@ -535,7 +579,8 @@ async function createEnvironment(options: EnvironmentOptions): Promise<Evaluatio
   const messagingRpc = {
     call: async (_port: number, method: string, params: unknown) => {
       messagingCalls.push({ method, params })
-      return fakeRpcResult(method, rpcSequence++)
+      if (method === 'get_history' && options.historyUnavailable) throw new Error('评测历史暂不可用')
+      return fakeRpcResult(method, rpcSequence++, options.history)
     },
   }
 
@@ -585,6 +630,7 @@ async function createEnvironment(options: EnvironmentOptions): Promise<Evaluatio
   stack.adapters.set('claude-code', new FakeWorkerAdapter('claude-code', now))
   stack.adapters.set('codex', new FakeWorkerAdapter('codex', now))
   await Promise.allSettled(originalAdapters.map((adapter) => adapter.dispose()))
+  await stack.principals.resolve(managerKey, { friend: FRIEND, sessionType: 'private' })
 
   options.adapter.setReplacements(replacementMap({ dataRoot, projectRoot: options.projectRoot }))
 
@@ -617,6 +663,17 @@ async function createEnvironment(options: EnvironmentOptions): Promise<Evaluatio
     }
   }
 
+  const routeIdleReview = async (): Promise<void> => {
+    const result = await stack.registry.getOrCreate(managerKey).wakeUp({
+      wake: { kind: 'workboard_idle_review' },
+      received_at: now(),
+      timezone: 'Asia/Shanghai',
+    })
+    if (result.outcome !== 'completed' && result.outcome !== 'max_turns') {
+      throw new Error(`Manager 空闲自省 episode 失败: ${result.outcome}`)
+    }
+  }
+
   return {
     scenario: options.scenario,
     managerKey,
@@ -634,6 +691,7 @@ async function createEnvironment(options: EnvironmentOptions): Promise<Evaluatio
     },
     routeHuman,
     routeWorker,
+    routeIdleReview,
     close: () => stack.dispose(),
   }
 }
@@ -655,7 +713,24 @@ async function seedObjectives(env: EvaluationEnvironment, objectives: readonly S
   }
 }
 
-async function seedWorker(env: EvaluationEnvironment, workerId: string, title: string): Promise<void> {
+function materializeObjectives(objectives: readonly SeedObjective[], projectRoot: string): SeedObjective[] {
+  return objectives.map((objective) => ({
+    ...objective,
+    work_items: objective.work_items.map((item) => ({
+      ...item,
+      ...(item.project_root
+        ? { project_root: item.project_root.split('{{project_root}}').join(projectRoot) }
+        : {}),
+    })),
+  }))
+}
+
+async function seedWorker(
+  env: EvaluationEnvironment,
+  workerId: string,
+  title: string,
+  state: WorkerContractState = 'idle',
+): Promise<void> {
   const createdAt = env.now()
   const worker: LedgerWorker = {
     worker_id: workerId,
@@ -667,7 +742,7 @@ async function seedWorker(env: EvaluationEnvironment, workerId: string, title: s
       incarnation_id: `${workerId}-inc-1`,
       seq: 1,
       impl: 'builtin',
-      state: 'idle',
+      state,
       workspace: env.projectRoot,
       session_ref: `${workerId}-session`,
       started_at: createdAt,
@@ -675,7 +750,32 @@ async function seedWorker(env: EvaluationEnvironment, workerId: string, title: s
     updated_at: createdAt,
   }
   await env.stack.ledger.upsertWorker(env.managerKey, workerId, () => worker)
-  env.workerAdapter.setState(workerId, 'idle')
+  env.workerAdapter.setState(workerId, state)
+}
+
+async function seedHistory(env: EvaluationEnvironment, history: BehaviorScenario['history'] = []): Promise<void> {
+  if (history.length === 0) return
+  const recent: EngineMessage[] = []
+  for (const [index, entry] of history.entries()) {
+    if (entry.kind === 'human') {
+      recent.push(createUserMessage(`[历史中的人类消息]\n${entry.text}`))
+      continue
+    }
+    const toolUseId = `eval-history-send-${index + 1}`
+    recent.push(
+      createAssistantMessage([{
+        type: 'tool_use',
+        id: toolUseId,
+        name: 'send_message',
+        input: { channel_id: 'eval-channel', session_id: env.scenario, content: entry.text },
+      }], 'tool_use'),
+      createToolResultMessage(toolUseId, JSON.stringify({
+        platform_message_id: `eval-history-outbound-${index + 1}`,
+        sent_at: env.now(),
+      }), false),
+    )
+  }
+  await env.stack.store.save({ key: env.managerKey, recent, foldedCount: 0 })
 }
 
 function toolCall(id: string, name: string, input: JsonRecord): ScriptBlock {
@@ -696,6 +796,27 @@ function responseCalls(records: readonly RequestProjection[]): Array<ToolCallPro
     scenario: record.scenario,
     step: record.step,
   })))
+}
+
+async function waitForEvaluationQuiescence(env: EvaluationEnvironment): Promise<void> {
+  const deadline = Date.now() + 3 * 60 * 1000
+  let stableSince: number | undefined
+  let stableRequestCount = -1
+  while (Date.now() < deadline) {
+    const requestCount = env.recordingAdapter.records.length
+    const requestsSettled = env.recordingAdapter.records.every((record) => record.response !== undefined || record.error !== undefined)
+    const checkpoint = await env.stack.store.loadCheckpoint(env.managerKey)
+    const mailboxEmpty = !env.stack.registry.getOrCreate(env.managerKey).hasPendingMailbox
+    if (requestsSettled && checkpoint === undefined && mailboxEmpty && requestCount === stableRequestCount) {
+      stableSince ??= Date.now()
+      if (Date.now() - stableSince >= 100) return
+    } else {
+      stableSince = undefined
+      stableRequestCount = requestCount
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error(`等待评测场景 ${env.scenario} 收口超时`)
 }
 
 function assertion(id: string, passed: boolean, detail: string): EvaluationAssertion {
@@ -1035,6 +1156,42 @@ async function gradeBehaviorScenario(
     results.push(assertion(`${prefix}-forbidden-call-${index}`, !calls.some((call) => matchesRule(call, rule)), `${scenario.title} 出现禁止的 ${rule.tool} 调用`))
   }
 
+  if (scenario.expect.worker_spawns) {
+    const expected = scenario.expect.worker_spawns
+    const spawnCalls = env.workerAdapter.calls.filter((call) => call.operation === 'spawn')
+    const durableWorkers = new Map((await env.stack.ledger.listWorkers(env.managerKey)).map((worker) => [worker.worker_id, worker]))
+    if (expected.count !== undefined) {
+      const succeeded = spawnCalls.length === expected.count && spawnCalls.every((call) => {
+        const worker = durableWorkers.get(call.worker_id)
+        return worker?.incarnations.some((incarnation) => (
+          typeof incarnation.session_ref === 'string' && incarnation.session_ref.length > 0
+        )) === true
+      })
+      results.push(assertion(`${prefix}-worker-spawn-count`, succeeded, `${scenario.title} 应成功创建 ${expected.count} 个执行器`))
+    }
+    if (expected.workspace === 'project_root') {
+      results.push(assertion(
+        `${prefix}-worker-spawn-workspace`,
+        spawnCalls.length > 0 && spawnCalls.every((call) => (
+          call.detail && typeof call.detail === 'object' &&
+          (call.detail as JsonRecord).workspace === env.projectRoot
+        )),
+        `${scenario.title} 新执行器必须使用任务板中的项目根`,
+      ))
+    }
+    if (expected.prompt_contains) {
+      results.push(assertion(
+        `${prefix}-worker-spawn-prompt`,
+        spawnCalls.length > 0 && spawnCalls.every((call) => (
+          call.detail && typeof call.detail === 'object' &&
+          typeof (call.detail as JsonRecord).prompt === 'string' &&
+          ((call.detail as JsonRecord).prompt as string).includes(expected.prompt_contains!)
+        )),
+        `${scenario.title} 派发的执行器任务必须包含 ${expected.prompt_contains}`,
+      ))
+    }
+  }
+
   const memoryPayload = JSON.stringify(selectMemoryWriteCalls(env.memoryCalls))
   const markers = [
     ...(scenario.objectives ?? []).flatMap((objective) => [
@@ -1042,7 +1199,7 @@ async function gradeBehaviorScenario(
       ...objective.completion_criteria,
       ...objective.work_items.flatMap((item) => [
         item.title,
-        item.project_root,
+        item.project_root?.split('{{project_root}}').join(env.projectRoot),
         item.current_judgement,
         item.next_action,
         item.blocker,
@@ -1080,10 +1237,13 @@ async function gradeBehaviorScenario(
   return results
 }
 
-async function behaviorScenarios(fixtureDir: string): Promise<{ runs: number; scenarios: BehaviorScenario[] }> {
+async function behaviorScenarios(fixtureDir: string, scenarioPrefix?: string): Promise<{ runs: number; scenarios: BehaviorScenario[] }> {
   const fixture = await readJson<BehaviorFixture>(path.join(fixtureDir, 'behavior-scenarios.json'))
   const timeline = await readJson<BehaviorScenario & { schema_version: 1 }>(path.join(fixtureDir, 'marshmallow-timeline.json'))
-  return { runs: fixture.runs_per_scenario, scenarios: [...fixture.scenarios, timeline] }
+  const scenarios = [...fixture.scenarios, timeline]
+    .filter((scenario) => scenarioPrefix === undefined || scenario.id.startsWith(scenarioPrefix))
+  if (scenarios.length === 0) throw new Error(`没有匹配 ${scenarioPrefix} 的行为评测场景`)
+  return { runs: fixture.runs_per_scenario, scenarios }
 }
 
 function behaviorConfigFromEnv(): { format: LLMFormat; endpoint: string; apikey: string; model: string; accountId?: string } | { missing: string[] } {
@@ -1123,7 +1283,7 @@ export async function runBehaviorEvaluation(options: EvalOptions = {}): Promise<
   const fixtureDir = options.fixtureDir ? path.resolve(options.fixtureDir) : defaultFixtureDir()
   const ownedRoot = options.tempRoot === undefined
   const runRoot = options.tempRoot ? path.resolve(options.tempRoot) : await fs.mkdtemp(path.join(tmpdir(), 'crabot-manager-context-behavior-'))
-  const loaded = await behaviorScenarios(fixtureDir)
+  const loaded = await behaviorScenarios(fixtureDir, options.scenarioPrefix)
   const environments: EvaluationEnvironment[] = []
   const assertions: EvaluationAssertion[] = []
 
@@ -1139,20 +1299,38 @@ export async function runBehaviorEvaluation(options: EvalOptions = {}): Promise<
           ...(config.accountId ? { accountId: config.accountId } : {}),
         })
         const adapter = new RecordingAdapter(scenarioId, undefined, delegate)
-        const env = await createEnvironment({ root: runRoot, scenario: scenarioId, projectRoot, adapter, model: config.model })
+        const history = scenario.history?.map((entry) => ({
+          ...entry,
+          text: entry.text.split('{{project_root}}').join(projectRoot),
+        }))
+        const env = await createEnvironment({
+          root: runRoot,
+          scenario: scenarioId,
+          projectRoot,
+          adapter,
+          model: config.model,
+          history,
+          historyUnavailable: scenario.history_unavailable,
+        })
         environments.push(env)
-        await seedObjectives(env, scenario.objectives ?? [])
-        for (const worker of scenario.workers ?? []) await seedWorker(env, worker.worker_id, worker.title)
+        await seedObjectives(env, materializeObjectives(scenario.objectives ?? [], projectRoot))
+        for (const worker of scenario.workers ?? []) {
+          await seedWorker(env, worker.worker_id, worker.title, worker.state)
+        }
+        await seedHistory(env, history)
 
         try {
           for (const [index, step] of scenario.steps.entries()) {
             env.setStep(`step-${index + 1}-${step.kind}`)
             if (step.kind === 'human') {
               await env.routeHuman(step.text.split('{{project_root}}').join(projectRoot))
-            } else {
+            } else if (step.kind === 'worker') {
               await env.routeWorker(step.worker_id, step.text)
+            } else {
+              await env.routeIdleReview()
             }
           }
+          await waitForEvaluationQuiescence(env)
           assertions.push(...await gradeBehaviorScenario(scenario, run, env))
         } catch (error) {
           assertions.push(assertion(
@@ -1192,10 +1370,12 @@ export async function writeEvaluationReport(report: EvaluationReport, outputDir:
 
 async function main(): Promise<void> {
   const mode = process.argv[2] ?? process.env.EVAL_MODE ?? 'deterministic'
-  if (mode !== 'deterministic' && mode !== 'behavior') throw new Error('评测模式必须是 deterministic 或 behavior')
+  if (mode !== 'deterministic' && mode !== 'behavior' && mode !== 'behavior-idle-review') {
+    throw new Error('评测模式必须是 deterministic、behavior 或 behavior-idle-review')
+  }
   const report = mode === 'deterministic'
     ? await runDeterministicEvaluation()
-    : await runBehaviorEvaluation()
+    : await runBehaviorEvaluation(mode === 'behavior-idle-review' ? { scenarioPrefix: 'idle-review-' } : {})
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const outputDir = process.env.EVAL_OUTPUT_DIR
     ? path.resolve(process.env.EVAL_OUTPUT_DIR)

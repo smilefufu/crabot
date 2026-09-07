@@ -157,6 +157,7 @@ describe('ManagerRegistry', () => {
       harness: FAKE_HARNESS,
       ledger: fakeLedger({}),
       now: () => new Date(Date.parse('2026-01-01T00:00:00.000Z')),
+      hasCurrentWorkboardObjectives: async () => false,
       managerKeyFor: (key) => key,
       toolFace: () => [],
       promptInputs: () => ({}),
@@ -1361,6 +1362,350 @@ describe('ManagerRegistry', () => {
     await registry.routeHumanMessages('wechat', 'sess-chain', [makeChannelMessage('还在吗')])
     const lastCall = calls[calls.length - 1]
     expect(JSON.stringify(lastCall.messages)).toContain(`notification-${1 + MAX_SELF_WAKE_CHAIN}`)
+  })
+
+  describe('任务板空闲自省', () => {
+    const HOUR_MS = 60 * 60 * 1000
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-09-07T00:00:00.000Z'))
+    })
+
+    afterEach(() => {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    })
+
+    function withCurrentObjectives(deps: ManagerRegistryDeps, value: () => boolean = () => true): ManagerRegistryDeps {
+      return Object.assign(deps, { hasCurrentWorkboardObjectives: async () => value() })
+    }
+
+    async function waitForIdleReview(key: ManagerKey, calls: ReadonlyArray<unknown>, expectedCalls: number): Promise<void> {
+      await vi.waitFor(() => expect(calls).toHaveLength(expectedCalls))
+      await vi.waitFor(async () => expect(await store.loadCheckpoint(key)).toBeUndefined())
+    }
+
+    it('普通 episode 成功收口后满一小时只自省一次，不足一小时不触发', async () => {
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+      })))
+
+      await registry.routeHumanMessages('wechat', 'idle-review', [makeChannelMessage('开始处理')])
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 1)
+      expect(calls).toHaveLength(1)
+
+      await vi.advanceTimersByTimeAsync(1)
+      await waitForIdleReview('wechat::idle-review' as ManagerKey, calls, 2)
+      expect(calls[1].messages.at(-1)?.content).toContain('本会话已经空闲一小时')
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS * 2)
+      expect(calls).toHaveLength(2)
+    })
+
+    it('新真实输入使旧计时失效，并从新 episode 实际结束时重新计时', async () => {
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+      })))
+
+      await registry.routeHumanMessages('wechat', 'idle-reset', [makeChannelMessage('第一件事')])
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 60_000)
+      await registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'idle-reset', text: '新的结果' })
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(calls).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 60_001)
+      expect(calls).toHaveLength(2)
+
+      await vi.advanceTimersByTimeAsync(1)
+      await waitForIdleReview('wechat::idle-reset' as ManagerKey, calls, 3)
+      expect(calls[2].messages.at(-1)?.content).toContain('本会话已经空闲一小时')
+    })
+
+    it('任务板读取耗时不顺延从 episode 实际结束时计算的一小时', async () => {
+      const readStarted = deferred()
+      const releaseRead = deferred()
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+        hasCurrentWorkboardObjectives: async () => {
+          readStarted.resolve()
+          await releaseRead.promise
+          return true
+        },
+      }))
+
+      await registry.routeHumanMessages('wechat', 'idle-board-read', [makeChannelMessage('开始处理')])
+      await readStarted.promise
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+      releaseRead.resolve()
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+
+      await vi.advanceTimersByTimeAsync(50 * 60 * 1000 - 1)
+      expect(calls).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await waitForIdleReview('wechat::idle-board-read' as ManagerKey, calls, 2)
+    })
+
+    it('空板不登记；Loop 被回收后计时仍可重建同一会话执行自省', async () => {
+      let hasObjectives = false
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+      }), () => hasObjectives))
+
+      await registry.routeHumanMessages('wechat', 'idle-evict', [makeChannelMessage('空板回合')])
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      expect(calls).toHaveLength(1)
+
+      hasObjectives = true
+      await registry.routeHumanMessages('wechat', 'idle-evict', [makeChannelMessage('建立目标')])
+      const key = 'wechat::idle-evict' as ManagerKey
+      const oldLoop = registry.getOrCreate(key)
+      expect(registry.evictIdle(-1, Date.now())).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview(key, calls, 3)
+      expect(registry.getOrCreate(key)).not.toBe(oldLoop)
+      expect(calls[2].messages.at(-1)?.content).toContain('本会话已经空闲一小时')
+    })
+
+    it('失败 episode、系统任务线程和 builtin 每日反思均不登记自省', async () => {
+      const failedCalls: LLMStreamParams[] = []
+      const failed = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter: {
+          async *stream(params) {
+            failedCalls.push(params)
+            throw new Error('provider unavailable')
+          },
+          updateConfig: () => {},
+        },
+        now: () => new Date(),
+      })))
+      const failedResult = await failed.routeHumanMessages('wechat', 'idle-failed', [makeChannelMessage('会失败')])
+      expect(failedResult.consumedEvents).toBe(false)
+
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const excluded = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({ adapter, now: () => new Date() })))
+      await excluded.routeSchedule({ scheduleId: 'system', title: '系统任务', description: '系统任务' })
+      await excluded.routeSchedule({
+        scheduleId: 'reflection',
+        title: '每日反思',
+        description: '每日反思',
+        taskType: 'daily_reflection',
+        isBuiltin: true,
+        targetSession: { channel_id: 'wechat', session_id: 'daily-reflection' },
+      })
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS * 2)
+      expect(failedCalls).toHaveLength(1)
+      expect(calls).toHaveLength(2)
+    })
+
+    it('真实 episode 正在异步准备时不误判为空闲，并从其实际结束时重新计时', async () => {
+      const entered = deferred()
+      const release = deferred()
+      let blockWake = false
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+        beforeWake: async () => {
+          if (!blockWake) return
+          entered.resolve()
+          await release.promise
+        },
+      })))
+
+      await registry.routeHumanMessages('wechat', 'idle-preparing', [makeChannelMessage('开始')])
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 1)
+      blockWake = true
+      const scheduled = registry.routeSchedule({
+        scheduleId: 'queued',
+        title: '排队事件',
+        description: '排队事件',
+        targetSession: { channel_id: 'wechat', session_id: 'idle-preparing' },
+      })
+      await entered.promise
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      expect(calls).toHaveLength(1)
+
+      release.resolve()
+      await scheduled
+      blockWake = false
+      expect(calls).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 1)
+      expect(calls).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(1)
+      await waitForIdleReview('wechat::idle-preparing' as ManagerKey, calls, 3)
+    })
+
+    it('自省期间到达的真实输入在主体解析完成前阻止提前计时', async () => {
+      const idleReviewEntered = deferred()
+      const releaseIdleReview = deferred()
+      const principalLookupEntered = deferred()
+      const releasePrincipalLookup = deferred()
+      const calls: LLMStreamParams[] = []
+      let invocation = 0
+      let principalLookups = 0
+      const adapter: LLMAdapter = {
+        async *stream(params) {
+          calls.push({ ...params, messages: [...params.messages] })
+          invocation += 1
+          if (invocation === 2) {
+            idleReviewEntered.resolve()
+            await releaseIdleReview.promise
+          }
+          yield* chunksFromContent([], 'end_turn')
+        },
+        updateConfig: () => {},
+      }
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+        onHumanWake: async () => {
+          principalLookups += 1
+          if (principalLookups === 2) {
+            principalLookupEntered.resolve()
+            await releasePrincipalLookup.promise
+          }
+          return undefined
+        },
+      })))
+
+      await registry.routeHumanMessages('wechat', 'idle-principal-race', [makeChannelMessage('开始')])
+      const firstDue = vi.advanceTimersByTimeAsync(HOUR_MS)
+      await idleReviewEntered.promise
+      const humanWake = registry.routeHumanMessages(
+        'wechat',
+        'idle-principal-race',
+        [makeChannelMessage('新的真实输入')],
+      )
+      await principalLookupEntered.promise
+
+      releaseIdleReview.resolve()
+      await firstDue
+      const key = 'wechat::idle-principal-race' as ManagerKey
+      await waitForIdleReview(key, calls, 2)
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      expect(calls).toHaveLength(2)
+
+      releasePrincipalLookup.resolve()
+      await humanWake
+      expect(calls).toHaveLength(3)
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 1)
+      expect(calls).toHaveLength(3)
+      await vi.advanceTimersByTimeAsync(1)
+      await waitForIdleReview(key, calls, 4)
+    })
+
+    it('episode 运行中进入的新真实事件仍开启下一轮一小时检查', async () => {
+      const entered = deferred()
+      const release = deferred()
+      const calls: LLMStreamParams[] = []
+      let firstCall = true
+      const adapter: LLMAdapter = {
+        async *stream(params) {
+          calls.push({ ...params, messages: [...params.messages] })
+          if (firstCall) {
+            firstCall = false
+            entered.resolve()
+            await release.promise
+          }
+          yield* chunksFromContent([], 'end_turn')
+        },
+        updateConfig: () => {},
+      }
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({ adapter, now: () => new Date() })))
+      const first = registry.routeHumanMessages('wechat', 'idle-injected', [makeChannelMessage('开始')])
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
+      await registry.routeMediaNotification({
+        channelId: 'wechat',
+        sessionId: 'idle-injected',
+        text: '执行结果已到达',
+      })
+      release.resolve()
+      await first
+
+      const key = 'wechat::idle-injected' as ManagerKey
+      await vi.waitFor(async () => {
+        expect(JSON.stringify((await store.load(key)).recent)).toContain('执行结果已到达')
+      })
+      const callsBeforeIdleReview = calls.length
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 1_000)
+      expect(calls).toHaveLength(callsBeforeIdleReview)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await waitForIdleReview(key, calls, callsBeforeIdleReview + 1)
+      expect(calls.at(-1)?.messages.at(-1)?.content).toContain('本会话已经空闲一小时')
+    })
+
+    it('到期时任务板已无目标则静默结束；dispose 后也不再触发', async () => {
+      let hasObjectives = true
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+      }), () => hasObjectives))
+
+      await registry.routeHumanMessages('wechat', 'idle-expiry-board', [makeChannelMessage('第一个周期')])
+      hasObjectives = false
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      expect(calls).toHaveLength(1)
+
+      hasObjectives = true
+      await registry.routeHumanMessages('wechat', 'idle-expiry-board', [makeChannelMessage('第二个周期')])
+      registry.dispose()
+      await vi.advanceTimersByTimeAsync(HOUR_MS * 2)
+      expect(calls).toHaveLength(2)
+    })
+
+    it('到期准入的异步刷新期间进入真实事件时，旧检查失效且只保留新周期', async () => {
+      const refreshEntered = deferred()
+      const releaseRefresh = deferred()
+      let blockIdleRefresh = false
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+        beforeWake: async (_key, envelope) => {
+          if (!blockIdleRefresh || envelope?.wake.kind !== 'workboard_idle_review') return
+          refreshEntered.resolve()
+          await releaseRefresh.promise
+        },
+      })))
+
+      await registry.routeHumanMessages('wechat', 'idle-race', [makeChannelMessage('旧周期')])
+      blockIdleRefresh = true
+      const due = vi.advanceTimersByTimeAsync(HOUR_MS)
+      await refreshEntered.promise
+
+      await registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'idle-race', text: '新事件' })
+      releaseRefresh.resolve()
+      await due
+      blockIdleRefresh = false
+      expect(calls).toHaveLength(2)
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview('wechat::idle-race' as ManagerKey, calls, 3)
+      const idlePrompts = calls.filter((call) => JSON.stringify(call.messages).includes('本会话已经空闲一小时'))
+      expect(idlePrompts).toHaveLength(1)
+    })
   })
 
   // --- media notification: 独立 manager 唤醒，不伪装 schedule/bg ---

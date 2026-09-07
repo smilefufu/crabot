@@ -146,14 +146,16 @@ describe('ManagerLoop episode trace wiring', () => {
     expect(traceStore.listManagerEpisodes(KEY, {}).items).toHaveLength(0)
   })
 
-  it('trigger 映射：schedule / worker_event / attention_flush', async () => {
+  it('trigger 映射：schedule / worker_event / attention_flush / 任务板空闲自省', async () => {
     const { adapter } = makeAdapter()
     const loop = new ManagerLoop(deps(adapter, traceWriter))
     await loop.wakeUp(timed({ kind: 'schedule', scheduleId: 'sc-1', title: '日报', description: 'd' }))
     await loop.wakeUp(timed({ kind: 'worker_event', event: { kind: 'exited', worker_id: 'w-9', ts: new Date().toISOString() } as never }))
     await loop.wakeUp(timed({ kind: 'attention_flush', messages: [makeMessage('群消息')] }))
+    await loop.wakeUp(timed({ kind: 'workboard_idle_review' }))
     const episodes = traceStore.listManagerEpisodes(KEY, { page: 1, page_size: 20 })
-    expect(episodes.items.map((item) => item.trigger.type).sort()).toEqual(['attention_flush', 'schedule', 'worker_event'])
+    expect(episodes.items.map((item) => item.trigger.type).sort()).toEqual(['attention_flush', 'schedule', 'system', 'worker_event'])
+    expect(episodes.items.find((item) => item.trigger.type === 'system')?.trigger.summary).toBe('任务板空闲自省')
   })
 
   it('episode 失败：trace 收口 failed，但已提交人类输入不重投', async () => {

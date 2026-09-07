@@ -25,6 +25,14 @@ const KEY: ManagerKey = 'wechat::sess-loop'
 const FIXED_RECEIVED_AT = '2026-01-01T08:00:00+08:00'
 function timed(wake: WakeEvent): TimedWakeEnvelope { return { wake, received_at: FIXED_RECEIVED_AT, timezone: 'Asia/Shanghai' } }
 const DIALOG_OBJECT_ID = (`test::${'friend-loop'}` as ManagerKey)
+const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
+本会话已经空闲一小时，但任务板仍有当前目标。请查阅当前任务板和聊天历史，重新确认人类的最新意图。任务板只是可修订的管理摘要；如果它与人类已经表达的意图不一致，以人类的最新意图为准并更新任务板。
+
+仍能推进的，在本回合继续推进；正在等待已经安排的执行结果或明确的外部事件时，不要重复操作；目标或事项已经变化、取消或重复时，及时调整、合并或归档；确实需要人类介入时，清楚说明阻塞以及需要人类提供的帮助。
+
+再次提醒人类前，检查你最近成功发送到本会话的三条消息。如果其中已经有一条整条消息都在专门提醒同一个阻塞，就不要重复提醒；如果此前只是夹在其他内容中提到该阻塞，不算单独提醒。无法可靠读取最近消息时，不得再次发送阻塞提醒。
+
+不要只回复本提示，也不要发送没有新信息的进度消息。`
 
 function defaultSupervisionWake(workerId: string, dueId: string): TimedWakeEnvelope {
   return timed({
@@ -1069,6 +1077,46 @@ describe('ManagerLoop', () => {
       await expect(fs.readFile(join(dataDir, file), 'utf-8')).resolves.not.toContain('管理员已更新任务板')
     }
     expect(consumed).toHaveBeenCalledWith([3])
+  })
+
+  it('任务板空闲自省提示逐字进入本次请求尾部，且不落历史、episode log 或下一次请求', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+
+    await loop.wakeUp(timed({ kind: 'workboard_idle_review' } as WakeEvent))
+
+    expect(calls[0].messages.at(-1)).toMatchObject({ role: 'user', content: WORKBOARD_IDLE_REVIEW_PROMPT })
+    expect(JSON.stringify((await store.load(KEY)).recent)).not.toContain('本会话已经空闲一小时')
+    const files = await fs.readdir(dataDir, { recursive: true })
+    const episodeLogs = files.filter((file) => file.includes('episodes/') && file.endsWith('.jsonl'))
+    for (const file of episodeLogs) {
+      await expect(fs.readFile(join(dataDir, file), 'utf-8')).resolves.not.toContain('本会话已经空闲一小时')
+    }
+
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的真实输入')] }))
+    expect(JSON.stringify(calls[1].messages)).not.toContain('本会话已经空闲一小时')
+  })
+
+  it('任务板空闲自省 episode 失败后丢弃提示，不随下一条真实输入重投', async () => {
+    const calls: LLMStreamParams[] = []
+    let invocation = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        invocation += 1
+        if (invocation === 1) throw new Error('provider unavailable')
+        yield* chunksFromContent([], 'end_turn')
+      },
+      updateConfig: () => {},
+    }
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+
+    const failed = await loop.wakeUp(timed({ kind: 'workboard_idle_review' } as WakeEvent))
+    expect(failed).toMatchObject({ outcome: 'failed', consumedEvents: false })
+
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('继续')] }))
+    expect(JSON.stringify(calls[1].messages)).not.toContain('本会话已经空闲一小时')
   })
 
   it('episode 运行中到达的人类消息:先提交(store recent+去重键+回调)再注入,当前 episode 下一轮可见', async () => {

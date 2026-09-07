@@ -12,7 +12,7 @@ case "$MODE" in
   deterministic)
     NETWORK=none
     ;;
-  behavior)
+  behavior|behavior-idle-review)
     BEHAVIOR_CONFIGURED=1
     if [ -z "${EVAL_FORMAT:-}" ] || [ -z "${EVAL_ENDPOINT:-}" ] || [ -z "${EVAL_API_KEY:-}" ] || [ -z "${EVAL_MODEL:-}" ]; then
       BEHAVIOR_CONFIGURED=0
@@ -22,7 +22,7 @@ case "$MODE" in
     fi
     ;;
   *)
-    echo "用法: $0 [deterministic|behavior]" >&2
+    echo "用法: $0 [deterministic|behavior|behavior-idle-review]" >&2
     exit 2
     ;;
 esac
@@ -41,7 +41,7 @@ set -- docker run --rm \
   --mount "type=bind,src=$OUTPUT_DIR,dst=/output" \
   --env EVAL_OUTPUT_DIR=/output
 
-if [ "$MODE" = "behavior" ] && [ "$BEHAVIOR_CONFIGURED" = "1" ]; then
+if [ "$MODE" != "deterministic" ] && [ "$BEHAVIOR_CONFIGURED" = "1" ]; then
   set -- "$@" \
     --env EVAL_FORMAT \
     --env EVAL_ENDPOINT \

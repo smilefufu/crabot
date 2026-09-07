@@ -60,6 +60,17 @@ export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
  * 真实唤醒(人类消息 / worker 事件 / schedule)顺带 drain 走,仍满足 §4.1 至少一次投递。
  */
 export const MAX_SELF_WAKE_CHAIN = 3
+export const WORKBOARD_IDLE_REVIEW_DELAY_MS = 60 * 60 * 1000
+
+interface IdleReviewTimer {
+  readonly generation: number
+  readonly handle: ReturnType<typeof setTimeout>
+}
+
+interface CompletedIdleReviewCycle {
+  readonly generation: number
+  readonly dueAtMs: number
+}
 
 /**
  * scheduled 唤醒随行的**权限身份**(protocol-agent-v3 §8.2 的 `creator_friend_id` /
@@ -106,6 +117,8 @@ export interface ManagerRegistryDeps {
   readonly now: () => Date
   /** Once true, no new wake may create or enqueue work for a Manager episode. */
   readonly isClosing?: () => boolean
+  /** 只读取任务板当前区是否至少有一个 Objective；不得返回或缓存任务板正文。 */
+  readonly hasCurrentWorkboardObjectives: (key: ManagerKey) => Promise<boolean>
   /** 人类消息渲染的时区(见 `ManagerLoopDeps.timezone`);不注入则退回 `resolveTimezone(undefined)`。 */
   readonly timezone?: () => string
   /**
@@ -212,12 +225,19 @@ export class ManagerRegistry {
    * 能正确表达"还有几个在途",避免这个问题。
    */
   private readonly activeEpisodes = new Map<ManagerKey, number>()
+  /** 已进入 runWake、尚在恢复/权限刷新/准入检查中的调用；只参与空闲自省的“无排队 episode”判定。 */
+  private readonly wakePreparations = new Map<ManagerKey, number>()
   /** 每个 key 最近一次"活跃"的时间戳(创建时 / 每次 episode 结束时刷新),evictIdle 的判据。 */
   private readonly lastActiveAtMs = new Map<ManagerKey, number>()
   private readonly pendingResumes = new Map<ManagerKey, ManagerResumeCheckpoint>()
   private readonly resumeTasks = new Map<ManagerKey, Promise<void>>()
+  private readonly idleReviewGenerations = new Map<ManagerKey, number>()
+  private readonly pendingIdleReviewCycles = new Map<ManagerKey, number>()
+  private readonly completedIdleReviewCycles = new Map<ManagerKey, CompletedIdleReviewCycle>()
+  private readonly idleReviewTimers = new Map<ManagerKey, IdleReviewTimer>()
   private resumeReady: Promise<void> = Promise.resolve()
   private releaseResumes?: () => void
+  private disposed = false
 
   constructor(private readonly deps: ManagerRegistryDeps) {}
 
@@ -232,18 +252,23 @@ export class ManagerRegistry {
     this.releaseResumes?.()
     this.releaseResumes = undefined
     await Promise.all([...this.pendingResumes.keys()].map(async (key) => {
-      try { await this.ensureResumed(key) } catch (error) {
+      try { await this.ensureResumed(key, true) } catch (error) {
         console.error(`[ManagerRegistry] resume failed for ${key}:`, error)
       }
     }))
   }
 
-  private async ensureResumed(key: ManagerKey): Promise<void> {
+  private async ensureResumed(key: ManagerKey, restoreIdleReviewCycle = false): Promise<void> {
     const checkpoint = this.pendingResumes.get(key)
     if (!checkpoint) return
     const existing = this.resumeTasks.get(key)
     if (existing) return existing
     const task = this.resumeReady.then(async () => {
+      if (restoreIdleReviewCycle) {
+        for (const item of [...checkpoint.envelopes, ...checkpoint.pending]) {
+          this.noteExternalInput(key, item.wake)
+        }
+      }
       const envelopes: TimedWakeEnvelope[] = []
       for (const [index, item] of checkpoint.envelopes.entries()) {
         const wake = item.wake
@@ -423,45 +448,51 @@ export class ManagerRegistry {
     const initialWake: WakeEvent = kind === 'human_messages'
       ? { kind: 'human_messages', messages, ...(friend ? { friend } : {}) }
       : { kind: 'attention_flush', messages, ...(friend ? { friend } : {}) }
-    // Capture before principal lookup so queueing cannot rewrite ingress time.
-    const envelope = this.makeEnvelope(capture, initialWake, undefined, messages, correlation)
-    // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
-    let principalPermissions: ResolvedPermissions | undefined
-    if (this.deps.onHumanWake) {
-      try {
-        principalPermissions = (await this.deps.onHumanWake(key, principal)) ?? undefined
-      } catch (err) {
-        console.error(`[ManagerRegistry] manager '${key}' 的发起人身份解析失败,按未解析继续:`, err)
+    this.noteExternalInput(key, initialWake)
+    const finishPreparation = this.beginWakePreparation(key)
+    try {
+      // Capture before principal lookup so queueing cannot rewrite ingress time.
+      const envelope = this.makeEnvelope(capture, initialWake, undefined, messages, correlation)
+      // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
+      let principalPermissions: ResolvedPermissions | undefined
+      if (this.deps.onHumanWake) {
+        try {
+          principalPermissions = (await this.deps.onHumanWake(key, principal)) ?? undefined
+        } catch (err) {
+          console.error(`[ManagerRegistry] manager '${key}' 的发起人身份解析失败,按未解析继续:`, err)
+        }
       }
-    }
 
-    const withFriend = friend ? { friend } : {}
-    // 档位挂在事件上,和 friend 一样按 episode 随行(见 `principalPermissionsOf`)。
-    const withPerms = principalPermissions ? { principalPermissions } : {}
-    const event: WakeEvent =
-      kind === 'human_messages'
-        ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
-        : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
-    // P7 cutover 遗留接线补齐(2026-08-29):episode 运行中到达的人类消息进入当前
-    // episode mailbox,turn 边界注入当前 episode 的下一轮 LLM——不再阻塞在 wakeUp 的
-    // mutex 上等本 episode 跑完。先提交(写历史+去重+回调)再注入,语义与 builtin
-    // worker 输入注入一致(参照 PR #130)。协议 §4.1「episode 进行中到达的事件直接
-    // 进入当前 Manager mailbox」同样涵盖人类消息。
-    const loop = this.getOrCreate(key)
-    if (this.isEpisodeActive(key)) {
-      // 同步入队(check 与 push 之间无 await,与 routeWorkerEvent 同构原子):
-      // 提交延后到当前 episode 收尾临界区,由 settle hook 拿真实处理结果。
-      loop.enqueueHumanWakeDuringActiveEpisode({ ...envelope, wake: event }, onHumanInputCommitted, onEpisodeSettled)
-      return {
-        episodeId: '',
-        outcome: 'completed',
-        turns: 0,
-        consumedEvents: true,
-        repliedToHuman: false,
-        successfulSendMessageTargets: [],
+      const withFriend = friend ? { friend } : {}
+      // 档位挂在事件上,和 friend 一样按 episode 随行(见 `principalPermissionsOf`)。
+      const withPerms = principalPermissions ? { principalPermissions } : {}
+      const event: WakeEvent =
+        kind === 'human_messages'
+          ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
+          : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
+      // P7 cutover 遗留接线补齐(2026-08-29):episode 运行中到达的人类消息进入当前
+      // episode mailbox,turn 边界注入当前 episode 的下一轮 LLM——不再阻塞在 wakeUp 的
+      // mutex 上等本 episode 跑完。先提交(写历史+去重+回调)再注入,语义与 builtin
+      // worker 输入注入一致(参照 PR #130)。协议 §4.1「episode 进行中到达的事件直接
+      // 进入当前 Manager mailbox」同样涵盖人类消息。
+      const loop = this.getOrCreate(key)
+      if (this.isEpisodeActive(key)) {
+        // 同步入队(check 与 push 之间无 await,与 routeWorkerEvent 同构原子):
+        // 提交延后到当前 episode 收尾临界区,由 settle hook 拿真实处理结果。
+        loop.enqueueHumanWakeDuringActiveEpisode({ ...envelope, wake: event }, onHumanInputCommitted, onEpisodeSettled)
+        return {
+          episodeId: '',
+          outcome: 'completed',
+          turns: 0,
+          consumedEvents: true,
+          repliedToHuman: false,
+          successfulSendMessageTargets: [],
+        }
       }
+      return this.runWake(key, { ...envelope, wake: event }, 0, onHumanInputCommitted)
+    } finally {
+      finishPreparation()
     }
-    return this.runWake(key, { ...envelope, wake: event }, 0, onHumanInputCommitted)
   }
 
   /**
@@ -471,6 +502,7 @@ export class ManagerRegistry {
    */
   async routeWorkerEvent(event: HarnessEvent): Promise<EpisodeResult | undefined> {
     const { key, envelope } = await this.prepareWorkerEventRoute(event)
+    this.noteExternalInput(key, envelope.wake)
     const loop = this.getOrCreate(key)
     if (this.isEpisodeActive(key)) {
       // A hook raised while a Manager tool is running belongs to the current episode.
@@ -504,6 +536,7 @@ export class ManagerRegistry {
     // replaced after the first check. Revalidate immediately before episode admission.
     if (!await this.deps.harness.isSupervisionDueCurrent(event)) return undefined
     if (this.isEpisodeActive(key)) return undefined
+    this.noteExternalInput(key, envelope.wake)
     return this.runWake(
       key,
       envelope,
@@ -529,6 +562,7 @@ export class ManagerRegistry {
         undefined,
         activityReceipt,
       )
+      this.noteExternalInput(key, envelope.wake)
       if (this.isEpisodeActive(key)) {
         this.getOrCreate(key).enqueueDuringEpisode(envelope)
       } else {
@@ -549,6 +583,7 @@ export class ManagerRegistry {
     // manager_key 为准（与 routeWorkerEvent 一致）；台账查不到时退回入参 key——它是
     // harness 持久化通知时记下的快照，比系统线程更贴近原投递意图。
     const { key: routedKey, envelope } = await this.prepareWorkerEventRoute(event, key)
+    this.noteExternalInput(routedKey, envelope.wake)
     const loop = this.getOrCreate(routedKey)
     if (this.isEpisodeActive(routedKey)) {
       loop.enqueueDuringEpisode(envelope)
@@ -567,6 +602,7 @@ export class ManagerRegistry {
     const capture = this.captureIngress()
     const envelope = this.makeEnvelope(capture, { kind: 'media_notification', text: p.text }, p.occurredAt)
     const key = `${p.channelId}::${p.sessionId}` as ManagerKey
+    this.noteExternalInput(key, envelope.wake)
     if (this.isEpisodeActive(key)) {
       this.getOrCreate(key).enqueueDuringEpisode(envelope)
       return {
@@ -610,31 +646,37 @@ export class ManagerRegistry {
       creatorFriendId: p.creatorFriendId,
       isBuiltin: p.isBuiltin,
     })
+    this.noteExternalInput(key, envelope.wake)
+    const finishPreparation = this.beginWakePreparation(key)
 
     // 调度自己的权限身份在唤醒边界解析一次(§4.4),随事件走。**绝不能退回该 key 的会话级
     // 缓存**:打进人类会话的调度会因此拿到"那个会话最近谁在说话"的档位(PR #59 review)。
     // 失败不阻断触发:档位缺失只是让 worker 退回固定档位,调度本身照跑。
-    let principalPermissions: ResolvedPermissions | undefined
-    if (this.deps.onScheduleWake) {
-      try {
-        principalPermissions =
-          (await this.deps.onScheduleWake({
-            key,
-            creatorFriendId: p.creatorFriendId,
-            isBuiltin: p.isBuiltin,
-          })) ?? undefined
-      } catch (err) {
-        console.error(`[ManagerRegistry] schedule '${p.scheduleId}' 的权限身份解析失败,按未解析继续:`, err)
+    try {
+      let principalPermissions: ResolvedPermissions | undefined
+      if (this.deps.onScheduleWake) {
+        try {
+          principalPermissions =
+            (await this.deps.onScheduleWake({
+              key,
+              creatorFriendId: p.creatorFriendId,
+              isBuiltin: p.isBuiltin,
+            })) ?? undefined
+        } catch (err) {
+          console.error(`[ManagerRegistry] schedule '${p.scheduleId}' 的权限身份解析失败,按未解析继续:`, err)
+        }
       }
-    }
 
-    return this.runWake(key, {
-      ...envelope,
-      wake: {
-        ...envelope.wake,
-        ...(principalPermissions ? { principalPermissions } : {}),
-      },
-    })
+      return this.runWake(key, {
+        ...envelope,
+        wake: {
+          ...envelope.wake,
+          ...(principalPermissions ? { principalPermissions } : {}),
+        },
+      })
+    } finally {
+      finishPreparation()
+    }
   }
 
   /** Admin 任务板保存的系统管理输入：只携带通知 revision，不改变会话主体。 */
@@ -648,6 +690,7 @@ export class ManagerRegistry {
       kind: 'workboard_admin_update',
       noticeRevision: p.noticeRevision,
     })
+    this.noteExternalInput(p.key, envelope.wake)
     const onSettled = (result: EpisodeResult): void => {
       p.onSettled?.(result)
     }
@@ -697,6 +740,16 @@ export class ManagerRegistry {
       evicted++
     }
     return evicted
+  }
+
+  /** 使尚未触发的一小时检查全部失效；已经准入的 episode 仍按既有关闭流程收口。 */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    for (const timer of this.idleReviewTimers.values()) clearTimeout(timer.handle)
+    this.idleReviewTimers.clear()
+    this.pendingIdleReviewCycles.clear()
+    this.completedIdleReviewCycles.clear()
   }
 
   private captureIngress(): IngressCapture {
@@ -793,6 +846,15 @@ export class ManagerRegistry {
     onHumanInputCommitted: ((lastCommittedMessageId: string) => Promise<void>) | undefined,
     shouldAdmit: () => Promise<boolean>,
   ): Promise<EpisodeResult | undefined>
+  private runWake(
+    key: ManagerKey,
+    envelope: TimedWakeEnvelope,
+    selfWakeChain: number,
+    onHumanInputCommitted: undefined,
+    shouldAdmit: undefined,
+    recovery: undefined,
+    admissionGuard: () => boolean,
+  ): Promise<EpisodeResult | undefined>
   private async runWake(
     key: ManagerKey,
     envelope: TimedWakeEnvelope | undefined,
@@ -800,14 +862,22 @@ export class ManagerRegistry {
     onHumanInputCommitted?: (lastCommittedMessageId: string) => Promise<void>,
     shouldAdmit?: () => Promise<boolean>,
     recovery?: ManagerResumeCheckpoint,
+    admissionGuard?: () => boolean,
   ): Promise<EpisodeResult | undefined> {
-    if (!recovery && this.pendingResumes.has(key)) await this.ensureResumed(key)
-    this.assertWakeAdmission()
-    if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
-    this.assertWakeAdmission()
-    if (shouldAdmit && !await shouldAdmit()) return undefined
-    const loop = this.getOrCreate(key)
-    this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
+    const finishPreparation = this.beginWakePreparation(key)
+    let loop!: ManagerLoop
+    try {
+      if (!recovery && this.pendingResumes.has(key)) await this.ensureResumed(key)
+      this.assertWakeAdmission()
+      if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
+      this.assertWakeAdmission()
+      if (shouldAdmit && !await shouldAdmit()) return undefined
+      if (admissionGuard && !admissionGuard()) return undefined
+      loop = this.getOrCreate(key)
+      this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
+    } finally {
+      finishPreparation()
+    }
     let result: EpisodeResult | undefined
     try {
       // `wakeUp()` 会在输入持久化后才触发非关键通知；这不是 LLM 已完成的确认。
@@ -833,6 +903,137 @@ export class ManagerRegistry {
       // "计数已归零、自唤醒尚未登记"的窗口,`evictIdle` 恰在此时跑就会把实例连同 mailbox
       // 一起回收掉。`maybeSelfWake` 内部的 `runWake` 在第一个 await 之前就完成了 +1。
       this.maybeSelfWake(key, loop, result, selfWakeChain)
+      this.maybeScheduleIdleReview(key, loop, result)
+    }
+  }
+
+  private noteExternalInput(key: ManagerKey, wake: WakeEvent): void {
+    if (wake.kind === 'workboard_idle_review') return
+    const generation = (this.idleReviewGenerations.get(key) ?? 0) + 1
+    this.idleReviewGenerations.set(key, generation)
+    const timer = this.idleReviewTimers.get(key)
+    if (timer) clearTimeout(timer.handle)
+    this.idleReviewTimers.delete(key)
+    this.pendingIdleReviewCycles.delete(key)
+    this.completedIdleReviewCycles.delete(key)
+
+    const isBuiltinDailyReflection = wake.kind === 'schedule'
+      && wake.isBuiltin === true
+      && wake.taskType === 'daily_reflection'
+    if (key !== SYSTEM_TASKS_MANAGER_KEY && !isBuiltinDailyReflection) {
+      this.pendingIdleReviewCycles.set(key, generation)
+    }
+  }
+
+  private maybeScheduleIdleReview(
+    key: ManagerKey,
+    loop: ManagerLoop,
+    result: EpisodeResult | undefined,
+  ): void {
+    const generation = this.pendingIdleReviewCycles.get(key)
+    if (generation === undefined) return
+    if (result?.consumedEvents !== true || result.turns === 0) {
+      if (this.completedIdleReviewCycles.get(key)?.generation === generation) {
+        this.completedIdleReviewCycles.delete(key)
+      }
+      return
+    }
+    this.completedIdleReviewCycles.set(key, {
+      generation,
+      dueAtMs: this.deps.now().getTime() + WORKBOARD_IDLE_REVIEW_DELAY_MS,
+    })
+    this.maybeStartIdleReviewTimer(key, loop)
+  }
+
+  private maybeStartIdleReviewTimer(key: ManagerKey, knownLoop?: ManagerLoop): void {
+    const generation = this.pendingIdleReviewCycles.get(key)
+    const completed = this.completedIdleReviewCycles.get(key)
+    if (generation === undefined || completed?.generation !== generation) return
+    const loop = knownLoop ?? this.loops.get(key)
+    if (!loop || this.isEpisodeActive(key) || this.hasWakePreparation(key) || loop.hasPendingMailbox) return
+    this.completedIdleReviewCycles.delete(key)
+    void this.scheduleIdleReview(key, generation, completed.dueAtMs).catch((error) => {
+      console.error(`[ManagerRegistry] manager '${key}' 的任务板空闲自省计时登记失败:`, error)
+    })
+  }
+
+  private async scheduleIdleReview(key: ManagerKey, generation: number, dueAtMs: number): Promise<void> {
+    let hasObjectives: boolean
+    try {
+      hasObjectives = await this.deps.hasCurrentWorkboardObjectives(key)
+    } catch (error) {
+      if (this.pendingIdleReviewCycles.get(key) === generation) {
+        this.pendingIdleReviewCycles.delete(key)
+      }
+      this.completedIdleReviewCycles.delete(key)
+      console.warn(`[ManagerRegistry] manager '${key}' 的任务板读取失败，跳过本次空闲自省:`, error)
+      return
+    }
+
+    if (!this.canArmIdleReview(key, generation)) return
+    if (!hasObjectives) {
+      this.pendingIdleReviewCycles.delete(key)
+      this.completedIdleReviewCycles.delete(key)
+      return
+    }
+
+    const existing = this.idleReviewTimers.get(key)
+    if (existing) clearTimeout(existing.handle)
+    const handle = setTimeout(async () => {
+      await this.onIdleReviewDue(key, generation)
+    }, Math.max(0, dueAtMs - this.deps.now().getTime()))
+    handle.unref?.()
+    this.idleReviewTimers.set(key, { generation, handle })
+    this.pendingIdleReviewCycles.delete(key)
+  }
+
+  private canArmIdleReview(key: ManagerKey, generation: number): boolean {
+    if (this.disposed || this.deps.isClosing?.()) return false
+    if (key === SYSTEM_TASKS_MANAGER_KEY) return false
+    if (this.idleReviewGenerations.get(key) !== generation) return false
+    if (this.pendingIdleReviewCycles.get(key) !== generation) return false
+    if (this.isEpisodeActive(key) || this.hasWakePreparation(key)) return false
+    return this.loops.get(key)?.hasPendingMailbox !== true
+  }
+
+  private canAdmitIdleReview(key: ManagerKey, generation: number, includesOwnPreparation = false): boolean {
+    if (this.disposed || this.deps.isClosing?.()) return false
+    if (this.idleReviewGenerations.get(key) !== generation) return false
+    if (this.isEpisodeActive(key)) return false
+    if ((this.wakePreparations.get(key) ?? 0) > (includesOwnPreparation ? 1 : 0)) return false
+    return this.loops.get(key)?.hasPendingMailbox !== true
+  }
+
+  private async onIdleReviewDue(key: ManagerKey, generation: number): Promise<void> {
+    const timer = this.idleReviewTimers.get(key)
+    if (!timer || timer.generation !== generation) return
+    this.idleReviewTimers.delete(key)
+    if (!this.canAdmitIdleReview(key, generation)) return
+
+    let hasObjectives: boolean
+    try {
+      hasObjectives = await this.deps.hasCurrentWorkboardObjectives(key)
+    } catch (error) {
+      console.warn(`[ManagerRegistry] manager '${key}' 的任务板读取失败，跳过本次空闲自省:`, error)
+      return
+    }
+    if (!hasObjectives || !this.canAdmitIdleReview(key, generation)) return
+
+    try {
+      const envelope = this.makeEnvelope(this.captureIngress(), { kind: 'workboard_idle_review' })
+      await this.runWake(
+        key,
+        envelope,
+        0,
+        undefined,
+        undefined,
+        undefined,
+        () => this.canAdmitIdleReview(key, generation, true),
+      )
+    } catch (error) {
+      if (!this.disposed && !this.deps.isClosing?.()) {
+        console.error(`[ManagerRegistry] manager '${key}' 的任务板空闲自省失败:`, error)
+      }
     }
   }
 
@@ -877,7 +1078,24 @@ export class ManagerRegistry {
   }
 
   private assertWakeAdmission(): void {
-    if (this.deps.isClosing?.()) throw new Error('AGENT_SHUTTING_DOWN')
+    if (this.disposed || this.deps.isClosing?.()) throw new Error('AGENT_SHUTTING_DOWN')
+  }
+
+  private hasWakePreparation(key: ManagerKey): boolean {
+    return (this.wakePreparations.get(key) ?? 0) > 0
+  }
+
+  private beginWakePreparation(key: ManagerKey): () => void {
+    this.wakePreparations.set(key, (this.wakePreparations.get(key) ?? 0) + 1)
+    let finished = false
+    return () => {
+      if (finished) return
+      finished = true
+      const remaining = (this.wakePreparations.get(key) ?? 1) - 1
+      if (remaining <= 0) this.wakePreparations.delete(key)
+      else this.wakePreparations.set(key, remaining)
+      if (remaining <= 0) this.maybeStartIdleReviewTimer(key)
+    }
   }
 }
 
