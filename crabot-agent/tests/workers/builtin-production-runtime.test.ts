@@ -36,6 +36,7 @@ import type {
   Friend,
   ResolvedPermissions,
   BuiltinToolConfig,
+  SubAgentConfig,
 } from '../../src/types.js'
 import { BUILTIN_WORKER_PERMISSIONS, type BuiltinRuntimeContext } from '../../src/workers/builtin/runtime.js'
 import { CLI_DOMAINS } from '../../src/types.js'
@@ -101,6 +102,7 @@ function makeConfig(p: {
   tmpPageBaseUrl?: string
   imageConfig?: LLMConnectionInfo
   builtinToolConfig?: BuiltinToolConfig
+  subagents?: SubAgentConfig[]
 }): UnifiedAgentConfig {
   return {
     module_id: 'p7f-runtime-agent' as ModuleId,
@@ -117,6 +119,7 @@ function makeConfig(p: {
       skills: p.skills ?? REQUIRED_MAINLINE_SKILLS,
       ...(p.tmpPageBaseUrl ? { tmp_page_base_url: p.tmpPageBaseUrl } : {}),
       ...(p.builtinToolConfig ? { builtin_tool_config: p.builtinToolConfig } : {}),
+      ...(p.subagents ? { subagents: p.subagents } : {}),
     },
     ...(p.imageConfig ? { image_config: p.imageConfig } : {}),
   }
@@ -780,11 +783,21 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
   // --- systemPrompt：v3 worker 契约尾巴 ---
 
-  it('systemPrompt = 现网 agent prompt（goal 模式关闭）+ AGENTS.md 快照 + v3 worker 契约尾巴', () => {
-    const { internals } = boot(makeConfig({ systemPrompt: '你是测试人格', skills: [
-      ...REQUIRED_MAINLINE_SKILLS,
-      { id: 'demo-skill', name: 'demo-skill', description: '演示技能', skill_dir: '/tmp/skills/demo' },
-    ] }))
+  it.each([false, true])('systemPrompt 按 builtin 能力装配并保留人格、Skill 与 workspace 快照（subagents=%s）', (withSubagents) => {
+    const { internals } = boot(makeConfig({
+      systemPrompt: '你是测试人格',
+      skills: [
+        ...REQUIRED_MAINLINE_SKILLS,
+        { id: 'demo-skill', name: 'demo-skill', description: '演示技能', skill_dir: '/tmp/skills/demo' },
+      ],
+      subagents: withSubagents ? [{
+        id: 'reviewer', name: 'reviewer', description: '代码审查', when_to_use: '需要审查时使用',
+        role: '审查员', workflow: '读取并审查', deliverables: '审查结论',
+        model: connInfo('review-model'), max_turns: 3,
+        builtin_capabilities: { file_system: true, shell: false, task_intel: false, crab_memory: false, crab_messaging: false },
+        allowed_mcp_server_ids: [], allowed_skill_ids: [],
+      }] : undefined,
+    }))
     const workspaceRoot = join(tmpRoot, 'ws-prompt')
     const agents = '# Workspace rules\nInspect the current implementation before editing.\n'
     const builtin = internals.buildBuiltinWorkerRuntime({
@@ -803,6 +816,23 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).toContain('demo-skill')
     expect(prompt).toContain(agents)
     expect(prompt).toContain('<workspace-agents-md>')
+    expect(prompt).toContain('## 你是 Crabot 的内置执行器')
+    expect(prompt).toContain('进展、结论、证据和问题，都要清晰地说明。')
+    for (const unavailable of [
+      'send_message', 'ask_human', 'todo', 'lookup_friend', 'list_groups', 'list_contacts',
+      'list_sessions', 'get_subagent_output', 'list_active_subagents', 'find_task',
+      'get_task_progress', 'set_task_goal', 'store_memory', 'search_long_term', 'process_highlights',
+    ]) {
+      expect(prompt, `builtin prompt 不应引导调用 ${unavailable}`).not.toContain(unavailable)
+    }
+    expect(prompt).not.toContain('主控')
+    expect(prompt).not.toContain('Manager')
+    expect(prompt).not.toContain('## 你和 Crabot 系统的对话边界')
+    expect(prompt.includes('## 子 Agent 委派')).toBe(withSubagents)
+    if (withSubagents) {
+      expect(prompt).toContain('reviewer：需要审查时使用')
+      expect(prompt).toContain('<sub_agent_notification>')
+    }
     expect(prompt).not.toContain('crabot-cli')
     expect(prompt).not.toContain('crabot mcp add')
     expect(prompt).not.toContain('## 记忆存储指引')
@@ -821,6 +851,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(tailStart, '契约尾巴应点名这个 worker 的 workspace').toBeGreaterThan(-1)
     const tail = prompt.slice(tailStart)
     expect(tail).toContain(WORKER_PROMPT_MARKER)
+    expect(tail).toContain('等待下一条输入')
+    expect(tail).toContain('不要调用 `finish_task`')
 
     // 尾巴不提"你没有联系人类的工具"这类否定式说明：worker 的工具集里本来就没有这些原语
     // （上面"工具集逐项断言"那组用例钉的就是这一点），在 prompt 里点名它们反而把这个念头

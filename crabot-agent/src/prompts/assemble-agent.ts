@@ -8,24 +8,30 @@
  *   工具使用规范 → 任务推进硬约束 → [GOAL_MODE_DETAILS 仅 goalModeEnabled 时注入] →
  *   slash 指令认知 → 记忆存储指引 → 收尾责任 → [skillListing?] → [subAgents?]
  *
+ * builtin_worker 使用执行器段落，不注入消息投递、goal、slash 或 Memory 工具指引。
+ *
  * Spec: crabot-docs/superpowers/specs/2026-06-05-goal-soft-control-workflow-redesign-design.md §3 §5
  */
 
 import {
   CRABOT_BRAIN_IDENTITY,
+  BUILTIN_WORKER_IDENTITY,
   SYSTEM_DIALOGUE_BOUNDARY,
   buildWorkflow,
   SEND_MESSAGE_SPEC,
   END_TURN_SELF_CHECK,
+  BUILTIN_WORKER_END_TURN_SELF_CHECK,
   TIME_AWARENESS,
+  BUILTIN_WORKER_TIME_AWARENESS,
   INFO_QUERY_GUIDE,
-  WORKER_INFO_QUERY_GUIDE,
-  TOOL_USAGE,
-  TASK_HARD_CONSTRAINTS,
+  buildWorkerInfoQueryGuide,
+  buildToolUsage,
+  buildTaskHardConstraints,
   GOAL_MODE_DETAILS,
   SLASH_AWARENESS_GUIDANCE,
   MEMORY_STORE_GUIDE,
   CLOSURE_DUTIES,
+  BUILTIN_WORKER_CLOSURE_DUTIES,
   buildImageCapability,
 } from './agent-sections.js'
 
@@ -38,8 +44,8 @@ export interface AssembleAgentPromptOptions {
     readonly toolName: string
     readonly workerHint: string
   }>
-  /** Worker only has delegate_task, not AgentHandler's subagent coordinator tools. */
-  readonly subagentGuidance?: 'agent' | 'builtin_worker'
+  /** 按实际执行角色选择提示词段落，与是否配置专项子 Agent 无关。 */
+  readonly profile?: 'agent' | 'builtin_worker'
   readonly imageCapability?: { readonly available: boolean }
   /** false 时不注入任何 Memory LLM 工具指引；v3 Worker 固定为 false。 */
   readonly memoryToolsAvailable?: boolean
@@ -51,12 +57,15 @@ function escapeSceneProfileContent(content: string): string {
 
 export function assembleAgentPrompt(opts: AssembleAgentPromptOptions): string {
   const parts: string[] = []
+  const builtinWorker = opts.profile === 'builtin_worker'
+  const goalModeEnabled = !builtinWorker && opts.goalModeEnabled
+  const memoryToolsAvailable = !builtinWorker && opts.memoryToolsAvailable !== false
 
   if (opts.adminPersonality) {
     parts.push(opts.adminPersonality)
   }
 
-  parts.push(CRABOT_BRAIN_IDENTITY)
+  parts.push(builtinWorker ? BUILTIN_WORKER_IDENTITY : CRABOT_BRAIN_IDENTITY)
 
   if (opts.sceneProfile) {
     const escaped = escapeSceneProfileContent(opts.sceneProfile.content)
@@ -65,21 +74,21 @@ export function assembleAgentPrompt(opts: AssembleAgentPromptOptions): string {
     )
   }
 
-  parts.push(SYSTEM_DIALOGUE_BOUNDARY)
-  parts.push(buildWorkflow(opts.goalModeEnabled))
-  parts.push(SEND_MESSAGE_SPEC)
-  parts.push(END_TURN_SELF_CHECK)
-  parts.push(TIME_AWARENESS)
-  parts.push(opts.memoryToolsAvailable === false ? WORKER_INFO_QUERY_GUIDE : INFO_QUERY_GUIDE)
-  parts.push(TOOL_USAGE)
+  if (!builtinWorker) parts.push(SYSTEM_DIALOGUE_BOUNDARY)
+  parts.push(buildWorkflow(goalModeEnabled, builtinWorker))
+  if (!builtinWorker) parts.push(SEND_MESSAGE_SPEC)
+  parts.push(builtinWorker ? BUILTIN_WORKER_END_TURN_SELF_CHECK : END_TURN_SELF_CHECK)
+  parts.push(builtinWorker ? BUILTIN_WORKER_TIME_AWARENESS : TIME_AWARENESS)
+  parts.push(memoryToolsAvailable ? INFO_QUERY_GUIDE : buildWorkerInfoQueryGuide(builtinWorker))
+  parts.push(buildToolUsage(builtinWorker))
   parts.push(buildImageCapability(opts.imageCapability?.available ?? false))
-  parts.push(TASK_HARD_CONSTRAINTS)
-  if (opts.goalModeEnabled) {
+  parts.push(buildTaskHardConstraints(builtinWorker))
+  if (goalModeEnabled) {
     parts.push(GOAL_MODE_DETAILS)
   }
-  parts.push(SLASH_AWARENESS_GUIDANCE)
-  if (opts.memoryToolsAvailable !== false) parts.push(MEMORY_STORE_GUIDE)
-  parts.push(CLOSURE_DUTIES)
+  if (!builtinWorker) parts.push(SLASH_AWARENESS_GUIDANCE)
+  if (memoryToolsAvailable) parts.push(MEMORY_STORE_GUIDE)
+  parts.push(builtinWorker ? BUILTIN_WORKER_CLOSURE_DUTIES : CLOSURE_DUTIES)
 
   if (opts.skillListing) {
     parts.push(opts.skillListing)
@@ -96,7 +105,7 @@ export function assembleAgentPrompt(opts: AssembleAgentPromptOptions): string {
       `1. 你的能力不足以完成某个子任务（如你没有视觉能力但需要分析图片）\n` +
       `2. 子任务的中间过程你不关心，只需要最终结果（避免污染你的上下文）`,
     )
-    parts.push(opts.subagentGuidance === 'builtin_worker' ? BUILTIN_WORKER_SUBAGENT_GUIDANCE : ASYNC_SUBAGENT_GUIDANCE)
+    parts.push(builtinWorker ? BUILTIN_WORKER_SUBAGENT_GUIDANCE : ASYNC_SUBAGENT_GUIDANCE)
   }
 
   return parts.join('\n\n')
