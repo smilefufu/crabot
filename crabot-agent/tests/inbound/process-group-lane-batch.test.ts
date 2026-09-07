@@ -121,7 +121,7 @@ interface ResolvedPrincipalView {
 
 interface Internals {
   onEvent(event: Event): Promise<void>
-  processGroupLaneBatch(batch: GroupBatch): Promise<void>
+  processGroupLaneBatch(batch: GroupBatch, release?: () => void): Promise<void>
   buildBuiltinWorkerRuntime(ctx: unknown): { tools: () => ReadonlyArray<{ name: string }> }
   contextAssembler: unknown
   agentHandler: unknown
@@ -191,10 +191,10 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
 
     // 事件入口驱动时 lane 是同步 kick 的但 handler 内部有 await；把 in-flight promise 记下来。
     const realGroupBatch = (
-      Object.getPrototypeOf(agent) as { processGroupLaneBatch: (b: GroupBatch) => Promise<void> }
+      Object.getPrototypeOf(agent) as Pick<Internals, 'processGroupLaneBatch'>
     ).processGroupLaneBatch.bind(agent)
-    internals.processGroupLaneBatch = (batch: GroupBatch) => {
-      const p = realGroupBatch(batch)
+    internals.processGroupLaneBatch = (...args) => {
+      const p = realGroupBatch(...args)
       inflight.push(p)
       return p
     }

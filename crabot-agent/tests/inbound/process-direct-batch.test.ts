@@ -28,6 +28,11 @@
  * - 零 fake timer。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type { Event } from 'crabot-shared'
+import type { LLMStreamParams } from '../../src/engine/index.js'
+import type { ManagerRegistry } from '../../src/manager/registry.js'
+import type { EpisodeResult } from '../../src/manager/loop.js'
+import type { BufferedMessage } from '../../src/orchestration/attention-scheduler.js'
 
 import type {
   ChannelMessage,
@@ -37,7 +42,7 @@ import type {
   RuntimeSceneProfile,
   ToolAccessConfig,
 } from '../../src/types.js'
-import { makeAgentConfig, makeFriend, makeMessage, useTmpDataDir, type DataDirGuard } from './harness.js'
+import { authorizedEvent, makeAgentConfig, makeFriend, makeMessage, useTmpDataDir, type DataDirGuard } from './harness.js'
 import {
   makeManagerScript,
   searchMemoryBlock,
@@ -98,15 +103,25 @@ interface ResolvedPrincipalView {
 }
 
 interface Internals {
+  onEvent(event: Event): Promise<void>
   processDirectBatch(batch: ReadonlyArray<{ message: ChannelMessage; friend: Friend }>): Promise<void>
+  processGroupLaneBatch(batch: ReadonlyArray<{ messages: BufferedMessage[]; sessionId: string }>): Promise<void>
   buildBuiltinWorkerRuntime(ctx: unknown): { tools: () => ReadonlyArray<{ name: string }> }
   contextAssembler: unknown
   channelPorts: Map<string, number>
   crabSelfHandles: Map<string, string>
-  attentionScheduler: { stopAll(): void; getCurrentIntervalMs(sessionId: string): number | undefined }
+  attentionScheduler: {
+    stopAll(): void
+    getCurrentIntervalMs(sessionId: string): number | undefined
+    reportResult(sessionId: string, replied: boolean): void
+  }
   managerStack: {
     principals: { get(key: string): ResolvedPrincipalView | undefined }
-    registry: { routeHumanMessages: (...args: unknown[]) => Promise<unknown> }
+    registry: {
+      routeHumanMessages: (...args: unknown[]) => Promise<unknown>
+      routeAttentionFlush: (...args: unknown[]) => Promise<unknown>
+      snapshotHumanInbound: ManagerRegistry['snapshotHumanInbound']
+    }
     harness: { spawnWorker: (p: Record<string, unknown>) => Promise<unknown> }
   }
   failLoudSentAt: Map<string, number>
@@ -248,6 +263,111 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
     internals?.attentionScheduler.stopAll()
     vi.restoreAllMocks()
     await dataDir.restore()
+  })
+
+  describe.each(['private', 'group'] as const)('渠道入站 %s → 下一次 LLM 请求', (type) => {
+    it.each(['initializing', 'llm_running'])('后续消息在 %s 到达时注入同一 episode', async (arrival) => {
+      boot([[sendMessageBlock({ channelId: 'wechat', sessionId: 'sess-1', text: '已处理' })]])
+      const gate = () => {
+        let resolve!: () => void
+        const promise = new Promise<void>((r) => { resolve = r })
+        return { promise, resolve }
+      }
+      const permissionsEntered = gate()
+      const permissionsRelease = gate()
+      const firstTurnEntered = gate()
+      const firstTurnRelease = gate()
+      const reactionRelease = gate()
+      const requests: string[] = []
+      hoisted.managerAdapter = {
+        async *stream(params: LLMStreamParams) {
+          requests.push(JSON.stringify(params.messages))
+          if (requests.length === 1) {
+            firstTurnEntered.resolve()
+            await firstTurnRelease.promise
+          }
+          yield* script.adapter.stream(params)
+        },
+        updateConfig: () => {},
+      }
+
+      let firstPermissions = true
+      const rpcCall = internals.rpcClient.call
+      vi.spyOn(internals.rpcClient, 'call').mockImplementation(async (...args) => {
+        if (args[1] === 'resolve_principal_permissions' && firstPermissions) {
+          firstPermissions = false
+          permissionsEntered.resolve()
+          await permissionsRelease.promise
+        }
+        if (args[1] === 'add_reaction') await reactionRelease.promise
+        return rpcCall(...args)
+      })
+      const direct = vi.spyOn(internals, 'processDirectBatch')
+      const group = vi.spyOn(internals, 'processGroupLaneBatch')
+      const route = vi.spyOn(internals.managerStack.registry, type === 'private' ? 'routeHumanMessages' : 'routeAttentionFlush')
+      const report = vi.spyOn(internals.attentionScheduler, 'reportResult')
+      const deliver = (id: string) => internals.onEvent(authorizedEvent({
+        message: makeMessage({ id, type, mention: type === 'group', text: `turn-input-${id}` }),
+        friend: makeFriend('f-1'),
+      }))
+      const handlers = () => [...direct.mock.results, ...group.mock.results].map((r) => r.value as Promise<void>)
+
+      try {
+        await deliver('first')
+        await permissionsEntered.promise
+        if (arrival === 'llm_running') {
+          permissionsRelease.resolve()
+          await firstTurnEntered.promise
+        }
+        await deliver('second')
+        await deliver('third')
+        if (arrival === 'initializing') {
+          expect(handlers()).toHaveLength(1)
+          expect(requests).toHaveLength(0)
+          permissionsRelease.resolve()
+          await firstTurnEntered.promise
+        }
+
+        // 首轮 LLM 和 reaction 均未结束；后续输入已经越过 lane 进入 Manager。
+        await vi.waitFor(() => {
+          const ids = internals.managerStack.registry.snapshotHumanInbound(MANAGER_KEY)
+            .map((fact) => fact.message.platform_message_id)
+          expect(ids).toEqual(expect.arrayContaining(['first', 'second', 'third']))
+        })
+        await Promise.all(handlers().slice(1))
+        await deliver('second')
+        await Promise.all(handlers().slice(1))
+        expect(requests).toHaveLength(1)
+        expect(report).not.toHaveBeenCalled()
+        reactionRelease.resolve()
+        firstTurnRelease.resolve()
+        await Promise.all(handlers())
+
+        expect(requests.length).toBeGreaterThanOrEqual(2)
+        for (const id of ['second', 'third']) {
+          expect(requests[1].split(`turn-input-${id}`)).toHaveLength(2)
+        }
+        if (arrival === 'llm_running') expect(requests[0]).not.toContain('turn-input-second')
+        const results = await Promise.all(route.mock.results.map((r) => r.value)) as EpisodeResult[]
+        expect(results.filter((result) => result.episodeId !== '')).toHaveLength(1)
+        expect(results[0]).toMatchObject({ outcome: 'completed', repliedToHuman: true })
+        if (type === 'group') {
+          expect(report).toHaveBeenCalledWith('sess-1', true)
+          expect(report.mock.calls.every(([, replied]) => replied)).toBe(true)
+        }
+      } finally {
+        permissionsRelease.resolve()
+        reactionRelease.resolve()
+        firstTurnRelease.resolve()
+        // 失败断言也要收完后台 handler，避免下一批落盘晚于临时目录清理。
+        let count: number
+        do {
+          count = handlers().length
+          await Promise.allSettled(handlers())
+          await new Promise(setImmediate)
+        } while (handlers().length !== count)
+      }
+    })
   })
 
   // ==========================================================================

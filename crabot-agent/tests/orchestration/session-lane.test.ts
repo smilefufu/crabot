@@ -52,6 +52,75 @@ describe('SessionLane', () => {
     errSpy.mockRestore()
   })
 
+  it('交接完成即可放行下一批，旧 handler 收尾不影响当前 batch', async () => {
+    let releaseFirst!: () => void
+    let finishFirst!: () => void
+    let finishSecond!: () => void
+    const firstDone = new Promise<void>((resolve) => { finishFirst = resolve })
+    const secondDone = new Promise<void>((resolve) => { finishSecond = resolve })
+    const calls: string[][] = []
+    const onDispose = vi.fn()
+    const lane = new SessionLane<string>('k', async (batch, release) => {
+      calls.push([...batch])
+      if (calls.length === 1) {
+        releaseFirst = release
+        await firstDone
+      } else {
+        await secondDone
+      }
+    }, onDispose)
+
+    lane.enqueue('a')
+    lane.enqueue('b')
+    lane.enqueue('c')
+    expect(calls).toEqual([['a']])
+    expect(lane.snapshot()).toEqual({ current: ['a'], queued: ['b', 'c'] })
+    releaseFirst()
+    await new Promise(setImmediate)
+    expect(calls).toEqual([['a'], ['b', 'c']])
+    expect(lane.snapshot()).toEqual({ current: ['b', 'c'], queued: [] })
+
+    releaseFirst()
+    finishFirst()
+    await new Promise(setImmediate)
+    expect(lane.snapshot()).toEqual({ current: ['b', 'c'], queued: [] })
+    expect(onDispose).not.toHaveBeenCalled()
+    finishSecond()
+    await new Promise(setImmediate)
+    expect(lane.isIdle()).toBe(true)
+    expect(onDispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('提前放行后 handler 抛错仍记录一次，已放行的批次不重复处理', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let failFirst!: () => void
+    const failure = new Promise<void>((resolve) => { failFirst = resolve })
+    const calls: string[][] = []
+    const lane = new SessionLane<string>('k', async (batch, release) => {
+      calls.push([...batch])
+      if (calls.length === 1) {
+        release()
+        await failure
+        throw new Error('late failure')
+      }
+    }, vi.fn())
+    try {
+      lane.enqueue('a')
+      lane.enqueue('b')
+      await new Promise(setImmediate)
+      expect(calls).toEqual([['a'], ['b']])
+      expect(lane.isIdle()).toBe(true)
+      failFirst()
+      await new Promise(setImmediate)
+      expect(errSpy).toHaveBeenCalledTimes(1)
+      expect(errSpy).toHaveBeenCalledWith('[session-lane:k] handler threw:', 'late failure')
+      expect(calls).toEqual([['a'], ['b']])
+    } finally {
+      failFirst()
+      errSpy.mockRestore()
+    }
+  })
+
   it('处理完且队列空时调 onDispose', async () => {
     const onDispose = vi.fn()
     const lane = new SessionLane<string>('k', async () => {}, onDispose)
