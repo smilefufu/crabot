@@ -57,7 +57,7 @@ export function getBuiltinSkills(): SkillRegistryEntry[] {
     {
       id: BUILTIN_SKILL_IDS.verificationBeforeCompletion,
       name: 'verification-before-completion',
-      description: '完成前必须运行 verification 命令再上报；用于 code_writer 防"假完成"',
+      description: '完成前核对当前改动和结论范围内的验证证据；用于 code_writer 防"假完成"',
       version: '1.0.0-superpowers-5.0.7',
       skill_dir: join(SKILL_ROOT, 'verification-before-completion'),
       source_type: 'builtin',

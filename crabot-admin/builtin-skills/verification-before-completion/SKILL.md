@@ -2,12 +2,12 @@
 Source: superpowers v5.0.7 (MIT License) — https://github.com/obra/superpowers/blob/v5.0.7/skills/verification-before-completion/SKILL.md
 Snapshot date: 2026-05-18
 本文件由 Crabot 内置以提供 code_writer subagent 的"完成前自检"指南。
-内容保持与上游一致；修改前请确认对 plan-and-execute 协同的影响。
+基于上述上游版本，按 Crabot 的任务职责和验证原则适配。
 -->
 
 ---
 name: verification-before-completion
-description: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always
+description: Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires verification evidence that applies to the current changes and the scope of the claim; evidence before assertions always
 ---
 
 # Verification Before Completion
@@ -23,18 +23,22 @@ Claiming work is complete without verification is dishonesty, not efficiency.
 ## The Iron Law
 
 ```
-NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
+NO COMPLETION CLAIMS WITHOUT VALID VERIFICATION EVIDENCE
 ```
 
-If you haven't run the verification command in this message, you cannot claim it passes.
+Before claiming a result, confirm that verification evidence covers the current changes and the scope of the claim. Reuse earlier command output when relevant code, dependencies, configuration, and environment are unchanged and no new evidence calls the result into question.
+
+Run verification again when relevant inputs changed, the evidence is incomplete, or a new failure needs investigation. A new message or task handoff alone does not invalidate existing evidence.
+
+Choose verification scope to match the change and the claim. A targeted check supports a targeted conclusion; it does not establish that the entire project passes.
 
 ## The Gate Function
 
 ```
-BEFORE claiming any status or expressing satisfaction:
+BEFORE claiming success, completion, or correctness:
 
 1. IDENTIFY: What command proves this claim?
-2. RUN: Execute the FULL command (fresh, complete)
+2. OBTAIN: Reuse applicable output, or run the required checks if evidence is missing, stale, or incomplete
 3. READ: Full output, check exit code, count failures
 4. VERIFY: Does output confirm the claim?
    - If NO: State actual status with evidence
@@ -48,8 +52,8 @@ Skip any step = lying, not verifying
 
 | Claim | Requires | Not Sufficient |
 |-------|----------|----------------|
-| Tests pass | Test command output: 0 failures | Previous run, "should pass" |
-| Linter clean | Linter output: 0 errors | Partial check, extrapolation |
+| Tests pass | Output for the claimed test scope: 0 failures | Stale output, incomplete evidence, "should pass" |
+| Linter clean | Linter output for the claimed scope: 0 errors | Extrapolating beyond checked files |
 | Build succeeds | Build command: exit 0 | Linter passing, logs look good |
 | Bug fixed | Test original symptom: passes | Code changed, assumed fixed |
 | Regression test works | Red-green cycle verified | Test passes once |
@@ -62,10 +66,10 @@ Skip any step = lying, not verifying
 - Expressing satisfaction before verification ("Great!", "Perfect!", "Done!", etc.)
 - About to commit/push/PR without verification
 - Trusting agent success reports
-- Relying on partial verification
+- Claiming more than the verification covers
 - Thinking "just this once"
 - Tired and wanting work over
-- **ANY wording implying success without having run verification**
+- **ANY wording implying success without applicable verification evidence**
 
 ## Rationalization Prevention
 
@@ -77,7 +81,7 @@ Skip any step = lying, not verifying
 | "Linter passed" | Linter ≠ compiler |
 | "Agent said success" | Verify independently |
 | "I'm tired" | Exhaustion ≠ excuse |
-| "Partial check is enough" | Partial proves nothing |
+| "A targeted check proves everything" | Match the claim to the verified scope |
 | "Different words so rule doesn't apply" | Spirit over letter |
 
 ## Key Patterns
@@ -123,13 +127,7 @@ From 24 failure memories:
 
 ## When To Apply
 
-**ALWAYS before:**
-- ANY variation of success/completion claims
-- ANY expression of satisfaction
-- ANY positive statement about work state
-- Committing, PR creation, task completion
-- Moving to next task
-- Delegating to agents
+**ALWAYS when claiming success, completion, or correctness**, including commits, PRs, task completion, and task handoffs. Check that the evidence is still applicable; these events do not by themselves require another test run.
 
 **Rule applies to:**
 - Exact phrases
@@ -141,6 +139,6 @@ From 24 failure memories:
 
 **No shortcuts for verification.**
 
-Run the command. Read the output. THEN claim the result.
+Confirm applicable evidence. Read the output. THEN claim the result.
 
 This is non-negotiable.
