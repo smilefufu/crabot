@@ -1500,12 +1500,13 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * builtin worker 的 system prompt = 现网那套 agent prompt（goal 模式关闭）+ 一段 v3 worker
+   * builtin worker 的 system prompt = builtin profile 的 agent prompt + 一段 v3 worker
    * 契约尾巴。两段都在每轮 turn 现拼，admin 改人格 / skills 后下一轮即生效。
    */
   private buildBuiltinWorkerSystemPrompt(ctx: BuiltinRuntimeContext): string {
     const skillListing = buildWorkerSkillListing(this.resolveMainlineWorkerSkills(ctx))
     const base = this.promptManager.assembleAgentPrompt({
+      profile: 'builtin_worker',
       // 决策 4：builtin worker 不装 goal 模式（既不给 goal 工具也不给 goal 缓冲），
       // 需要目标驱动时由 manager 在派活 prompt 里用指令表达。
       goalModeEnabled: false,
@@ -1519,7 +1520,6 @@ export class UnifiedAgent extends ModuleBase {
               toolName: subagent.name,
               workerHint: subagent.when_to_use.split('\n')[0] || subagent.description || subagent.name,
             })),
-            subagentGuidance: 'builtin_worker' as const,
           }
         : {}),
     })

@@ -98,7 +98,7 @@ describe('assembleAgentPrompt 可选段渲染', () => {
     const prompt = assembleAgentPrompt({
       goalModeEnabled: false,
       availableSubAgents: [{ toolName: 'reviewer', workerHint: '代码评审' }],
-      subagentGuidance: 'builtin_worker',
+      profile: 'builtin_worker',
     })
 
     const guidance = prompt.slice(prompt.indexOf('## 子 Agent 委派'))
@@ -110,6 +110,14 @@ describe('assembleAgentPrompt 可选段渲染', () => {
     expect(guidance).toContain('只会异步派发')
     expect(guidance).not.toContain('sync: true')
     expect(guidance).toContain('完成通知进入后续 turn')
+    for (const unavailable of ['send_message', 'ask_human', 'todo', 'get_subagent_output', 'list_active_subagents']) {
+      expect(prompt).not.toContain(unavailable)
+    }
+    expect(prompt).toContain('你是 coordinator')
+    expect(prompt).toContain('你负责 task slicing')
+    expect(prompt).toContain('整 plan 范围 final review')
+    expect(prompt).toContain('研究 / 探索类任务的负向结论例外')
+    expect(prompt).toContain('禁止未尝试的后续方向')
   })
 
   it('Worker 模式不注入 Memory 或历史任务工具指引，证据不足时返回 Manager', () => {
