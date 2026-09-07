@@ -5,6 +5,13 @@
 
 ## 当前状态
 
+### Manager 渠道消息逐轮注入：已修复
+
+- 修复 SessionLane 等待完整 episode 导致渠道后续消息无法进入 Manager mailbox 的接线缺口；
+  首批输入提交后放行 lane，后续消息进入下一次 LLM 请求，handler 仍按真实结果执行失败兜底与群聊反馈。
+- 私聊/群聊、初始化期间/LLM 请求期间到达、延迟 reaction、重发去重及放行后异常回归通过。
+  定向 253 项通过；7 项失败在未修改 main 完全复现。Agent TypeScript 检查与构建通过。
+
 ### builtin 提示词与 Skill 规则对齐：已实现
 
 - 按确认稿装配 builtin 专属提示词，删除不可用的消息、通讯录、旧任务工具及反思指引，
@@ -446,6 +453,10 @@
 - PR #76～#89 完成 CLI worker 输入/活性/权限/ManagerKey、legacy loop 退役、bg-shell durable notification、worker-scoped MCP、Admin Chat assertion、会话隔离与 v2 只读导入；生产切换见里程碑归档（`git show 49b9cb4:PROGRESS.md` 有完整细节）。
 
 ## 当前 follow-up
+
+- **Manager 注入批内去重**：`enqueueHumanWakeDuringActiveEpisode` 先整批 filter 再更新去重键，
+  同一批内重复的 `platform_message_id` 会重复进入 LLM 文本；跨批重发去重正常。渠道初始化攒批
+  回归已复现这一既有缺口，需单独补批内重复输入回归并修复，不影响本次 lane 放行时机修复。
 
 - **Manager 重启续跑 PR #147 review（非阻塞）**：身份绑定存储异常下恢复准入的失败收口、启动对账中
   关停时恢复 gate 的释放、磁盘异常下邮箱入队与重投的原子性，以及大上下文同步检查点写入的性能测量。

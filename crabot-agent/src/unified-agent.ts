@@ -927,8 +927,8 @@ export class UnifiedAgent extends ModuleBase {
       },
     )
 
-    this.directLaneRegistry = new SessionLaneRegistry((batch) => this.processDirectBatch(batch))
-    this.groupLaneRegistry = new SessionLaneRegistry((batch) => this.processGroupLaneBatch(batch))
+    this.directLaneRegistry = new SessionLaneRegistry((batch, release) => this.processDirectBatch(batch, release))
+    this.groupLaneRegistry = new SessionLaneRegistry((batch, release) => this.processGroupLaneBatch(batch, release))
 
     // 初始化智能体层组件（如果有配置）
     if (this.agentConfig) {
@@ -2031,14 +2031,15 @@ export class UnifiedAgent extends ModuleBase {
    * 同 session 连发消息合并为一个 batch；用最后一条的 friend 作为发言者
    * （私聊一般同一人；个别 friend 切换的边缘情况按最新一条处理）。
    *
-   * **必须 await manager episode**：lane 的串行语义靠它，兜底回复（fail-loud）也要靠它
-   * 拿到 outcome。改成 fire-and-forget 会让两者同时失效。（例外：mid-episode 注入分支
-   * 返回占位 result 即走，顺序改由 mailbox 与宿主 episode 收尾保证，见 episodeId === '' 判定。）
+   * 首批输入提交后放行 lane，让后续消息进入在跑 episode 的 mailbox；handler 仍 await
+   * manager episode，按真实 outcome 发送兜底回复。mid-episode 注入分支返回占位 result，
+   * 收尾由宿主 episode 的回调负责，见 episodeId === '' 判定。
    *
    * Spec: crabot-docs/superpowers/plans/2026-08-01-mw-p7-j-cutover.md §一
    */
   private async processDirectBatch(
     batch: ReadonlyArray<{ message: ChannelMessage; friend: Friend }>,
+    release?: () => void,
   ): Promise<void> {
     if (batch.length === 0) return
     const messages = batch.map(b => b.message)
@@ -2055,11 +2056,14 @@ export class UnifiedAgent extends ModuleBase {
         messages,
         friend,
         undefined,
-        (lastCommittedMessageId) => this.reactToCommittedHumanMessage(
-          session.channel_id,
-          session.session_id,
-          lastCommittedMessageId,
-        ),
+        (lastCommittedMessageId) => {
+          release?.()
+          return this.reactToCommittedHumanMessage(
+            session.channel_id,
+            session.session_id,
+            lastCommittedMessageId,
+          )
+        },
         (settled) => {
           if (settled.outcome === 'failed' || settled.outcome === 'aborted') {
             console.error(
@@ -2111,6 +2115,7 @@ export class UnifiedAgent extends ModuleBase {
    */
   private async processGroupLaneBatch(
     batch: ReadonlyArray<{ messages: BufferedMessage[]; sessionId: string }>,
+    release?: () => void,
   ): Promise<void> {
     if (batch.length === 0) return
     const buffered: BufferedMessage[] = batch.flatMap(b => b.messages)
@@ -2137,11 +2142,14 @@ export class UnifiedAgent extends ModuleBase {
         sessionId,
         messages,
         lastEntry.friend,
-        (lastCommittedMessageId) => this.reactToCommittedHumanMessage(
-          session.channel_id,
-          sessionId,
-          lastCommittedMessageId,
-        ),
+        (lastCommittedMessageId) => {
+          release?.()
+          return this.reactToCommittedHumanMessage(
+            session.channel_id,
+            sessionId,
+            lastCommittedMessageId,
+          )
+        },
         (settled) => {
           settleDelegated = true
           this.attentionScheduler.reportResult(sessionId, settled.repliedToHuman)

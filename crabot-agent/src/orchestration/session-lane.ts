@@ -1,13 +1,14 @@
 /**
  * Per-session coalescing mailbox（actor model 风格）。
  *
- * 同 key 的 enqueue 串行处理；handler 处理期间到达的 item 进入队列，
- * handler 返回后一次性 take 整批进入下一轮。空了自动从 registry 注销。
+ * 同 key 的交接串行处理；交接期间到达的 item 进入队列，
+ * handler 调用 release 或返回后一次性 take 整批进入下一轮。空了自动从 registry 注销。
  *
  * Spec: crabot-docs/superpowers/specs/2026-05-20-session-lane-dispatcher-design.md §3.2
+ * Manager 入站放行时机: protocol-agent-v3.md §4.1（运行中输入在下一次 LLM 调用前注入）。
  */
 
-export type BatchHandler<T> = (batch: ReadonlyArray<T>) => Promise<void>
+export type BatchHandler<T> = (batch: ReadonlyArray<T>, release: () => void) => Promise<void>
 
 export interface SessionLaneSnapshot<T> {
   current: T[]
@@ -46,14 +47,18 @@ export class SessionLane<T> {
       while (this.queue.length > 0) {
         const batch = this.queue.splice(0)
         this.current = batch
-        try {
-          await this.handler(batch)
-        } catch (err) {
-          // handler 内部应该自己 catch；这里只防御性兜底
-          console.error(`[session-lane:${this.key}] handler threw:`, err instanceof Error ? err.message : String(err))
-        } finally {
-          this.current = []
-        }
+        let release!: () => void
+        const released = new Promise<void>((resolve) => { release = resolve })
+        // 提前放行只结束 lane 的等待；handler 后续失败仍必须被接住。
+        const completed = (async () => {
+          try {
+            await this.handler(batch, release)
+          } catch (err) {
+            console.error(`[session-lane:${this.key}] handler threw:`, err instanceof Error ? err.message : String(err))
+          }
+        })()
+        await Promise.race([released, completed])
+        this.current = []
       }
     } finally {
       this.processing = false
