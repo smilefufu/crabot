@@ -27,7 +27,7 @@ import type {
   HarnessEvent,
   HarnessEventKind,
 } from '../../src/workers/harness/worker-events.js'
-import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
+import { defineTool, type LLMAdapter, type LLMStreamParams } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
@@ -38,6 +38,7 @@ import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
 
 interface TurnScript {
   readonly text?: string
+  readonly toolCalls?: ReadonlyArray<{ readonly name: string; readonly id: string; readonly input: Record<string, unknown> }>
   readonly stopReason: 'end_turn' | 'tool_use' | 'max_tokens'
 }
 
@@ -58,6 +59,9 @@ function makeAdapter(): { readonly adapter: LLMAdapter; readonly queue: TurnScri
       }
       const r = queue.shift() ?? { text: '(默认回复)', stopReason: 'end_turn' as const }
       const content: unknown[] = r.text ? [{ type: 'text', text: r.text }] : []
+      for (const toolCall of r.toolCalls ?? []) {
+        content.push({ type: 'tool_use', id: toolCall.id, name: toolCall.name, input: toolCall.input })
+      }
       yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
     },
     updateConfig: () => {},
@@ -431,16 +435,20 @@ describe('ManagerRegistry', () => {
       await registry.routeHumanMessages('wechat', 'wake-human', [humanMessage], FRIEND_G)
       await registry.routeWorkerEvent(workerEvent)
 
-      expect(observed).toHaveLength(2)
-      expect(observed[0]).toMatchObject({
-        kind: 'human_messages',
-        messages: [humanMessage],
-        friend: FRIEND_G,
-      })
-      expect(observed[1]).toMatchObject({
-        kind: 'worker_event',
-        event: expect.objectContaining({ worker_id: 'w-wake', seq: 1 }),
-      })
+      const humanWakes = observed.filter((wake) => wake.kind === 'human_messages')
+      const workerWakes = observed.filter((wake) => wake.kind === 'worker_event')
+      expect(humanWakes.length).toBeGreaterThan(0)
+      expect(workerWakes.length).toBeGreaterThan(0)
+      for (const wake of humanWakes) {
+        expect(wake).toMatchObject({ kind: 'human_messages', messages: [humanMessage], friend: FRIEND_G })
+      }
+      for (const wake of workerWakes) {
+        expect(wake).toMatchObject({
+          kind: 'worker_event',
+          event: expect.objectContaining({ worker_id: 'w-wake', seq: 1 }),
+        })
+      }
+      expect(observed).toHaveLength(humanWakes.length + workerWakes.length)
     })
   })
 
@@ -499,6 +507,174 @@ describe('ManagerRegistry', () => {
 
     const state = await store.load(SYSTEM_TASKS_MANAGER_KEY)
     expect(state.recent.length).toBeGreaterThan(0)
+  })
+
+  describe('待回复义务', () => {
+    function deliveryToolFace(): ManagerRegistryDeps['toolFace'] {
+      return (_key, _isSystemThread, _scheduleIdentity, _humanPrincipal, _permissions, traceHooks) => [
+        defineTool({
+          name: 'send_message',
+          description: 'deliver',
+          inputSchema: { type: 'object', properties: {} },
+          call: async (input) => {
+            if (input.fail === true) return { output: 'failed', isError: true }
+            traceHooks?.onSuccessfulSendMessage({
+              channel_id: input.channel_id as string,
+              session_id: input.session_id as string,
+            })
+            return { output: 'sent', isError: false }
+          },
+        }),
+        defineTool({
+          name: 'send_private_message',
+          description: 'deliver elsewhere',
+          inputSchema: { type: 'object', properties: {} },
+          call: async () => ({ output: 'sent privately', isError: false }),
+        }),
+      ]
+    }
+
+    it.each([
+      {
+        name: '当前会话 send_message 成功',
+        toolName: 'send_message',
+        input: { channel_id: 'wechat', session_id: 'reply-owner' },
+        reminderExpected: false,
+      },
+      {
+        name: 'send_message 成功但目标是其它会话',
+        toolName: 'send_message',
+        input: { channel_id: 'wechat', session_id: 'other-session' },
+        reminderExpected: true,
+      },
+      {
+        name: '当前会话 send_message 失败',
+        toolName: 'send_message',
+        input: { channel_id: 'wechat', session_id: 'reply-owner', fail: true },
+        reminderExpected: true,
+      },
+      {
+        name: 'send_private_message 成功',
+        toolName: 'send_private_message',
+        input: {},
+        reminderExpected: true,
+      },
+    ])('$name 后的执行器事件按义务状态决定是否复核', async ({ toolName, input, reminderExpected }) => {
+      const { adapter, queue, calls } = makeAdapter()
+      const key = 'wechat::reply-owner' as ManagerKey
+      queue.push(
+        { toolCalls: [{ name: toolName, id: 'delivery-1', input }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+        { text: '执行器事件的内部文字', stopReason: 'end_turn' },
+      )
+      const registry = new ManagerRegistry(baseRegistryDeps({
+        adapter,
+        ledger: fakeLedger({ 'w-reply': makeLedgerWorker('w-reply', key) }),
+        toolFace: deliveryToolFace(),
+      }))
+
+      await registry.routeHumanMessages('wechat', 'reply-owner', [makeChannelMessage('请处理')])
+      await registry.routeWorkerEvent({
+        ts: '2026-01-01T00:00:00.000Z',
+        kind: 'exited',
+        worker_id: 'w-reply',
+        seq: 1,
+      })
+
+      const reminders = calls.filter(isAssistantTextEndTurnReminder)
+      expect(reminders).toHaveLength(reminderExpected ? 1 : 0)
+      expect(calls).toHaveLength(reminderExpected ? 4 : 3)
+    })
+
+    it('Loop 空闲回收后义务仍在', async () => {
+      const { adapter, queue, calls } = makeAdapter()
+      const key = 'wechat::reply-evicted' as ManagerKey
+      let nowMs = Date.parse('2026-01-01T00:00:00.000Z')
+      queue.push({ stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(baseRegistryDeps({
+        adapter,
+        now: () => new Date(nowMs),
+        ledger: fakeLedger({ 'w-evicted': makeLedgerWorker('w-evicted', key) }),
+      }))
+
+      await registry.routeHumanMessages('wechat', 'reply-evicted', [makeChannelMessage('稍后告诉我结果')])
+      const before = registry.getOrCreate(key)
+      nowMs += 10_000
+      expect(registry.evictIdle(1_000, nowMs)).toBe(1)
+      expect(registry.getOrCreate(key)).not.toBe(before)
+
+      queue.push({ text: '回收后拿到结果', stopReason: 'end_turn' })
+      await registry.routeWorkerEvent({
+        ts: '2026-01-01T00:00:10.000Z',
+        kind: 'exited',
+        worker_id: 'w-evicted',
+        seq: 1,
+      })
+
+      expect(calls.filter(isAssistantTextEndTurnReminder)).toHaveLength(1)
+    })
+
+    it('人类消息 episode 失败后义务仍在', async () => {
+      const base = makeAdapter()
+      const key = 'wechat::reply-after-failure' as ManagerKey
+      let failed = false
+      const adapter: LLMAdapter = {
+        async *stream(params) {
+          if (!failed) {
+            failed = true
+            throw new Error('provider unavailable')
+          }
+          yield* base.adapter.stream(params)
+        },
+        updateConfig: () => {},
+      }
+      base.queue.push({ text: '失败后收到的执行器结果', stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(baseRegistryDeps({
+        adapter,
+        ledger: fakeLedger({ 'w-after-failure': makeLedgerWorker('w-after-failure', key) }),
+      }))
+
+      const first = await registry.routeHumanMessages(
+        'wechat',
+        'reply-after-failure',
+        [makeChannelMessage('稍后告诉我结果')],
+      )
+      expect(first.outcome).toBe('failed')
+
+      await registry.routeWorkerEvent({
+        ts: '2026-01-01T00:00:01.000Z',
+        kind: 'exited',
+        worker_id: 'w-after-failure',
+        seq: 1,
+      })
+
+      expect(base.calls.filter(isAssistantTextEndTurnReminder)).toHaveLength(1)
+    })
+
+    it('Registry 关闭并重建后不从历史恢复义务', async () => {
+      const key = 'wechat::reply-restart' as ManagerKey
+      const firstAdapter = makeAdapter()
+      firstAdapter.queue.push({ stopReason: 'end_turn' })
+      const first = new ManagerRegistry(baseRegistryDeps({ adapter: firstAdapter.adapter }))
+      await first.routeHumanMessages('wechat', 'reply-restart', [makeChannelMessage('重启前的问题')])
+      first.dispose()
+
+      const secondAdapter = makeAdapter()
+      secondAdapter.queue.push({ text: '只是一条内部执行器记录', stopReason: 'end_turn' })
+      const second = new ManagerRegistry(baseRegistryDeps({
+        adapter: secondAdapter.adapter,
+        ledger: fakeLedger({ 'w-restart': makeLedgerWorker('w-restart', key) }),
+      }))
+      await second.routeWorkerEvent({
+        ts: '2026-01-01T00:00:00.000Z',
+        kind: 'exited',
+        worker_id: 'w-restart',
+        seq: 1,
+      })
+
+      expect(secondAdapter.calls).toHaveLength(1)
+      expect(secondAdapter.calls.filter(isAssistantTextEndTurnReminder)).toHaveLength(0)
+    })
   })
 
   it('routeSupervisionDue: 已被 clear 或替换的 due 不创建 Manager episode', async () => {
@@ -938,7 +1114,9 @@ describe('ManagerRegistry', () => {
     nowMs = Date.parse('2026-08-10T01:02:00.000Z')
     workerRelease.resolve()
     await workerWake
-    const workerMessages = JSON.stringify(calls[2].messages)
+    const workerCall = calls.find((call) => JSON.stringify(call.messages).includes('worker_id=\\"w-timed\\"'))
+    expect(workerCall).toBeDefined()
+    const workerMessages = JSON.stringify(workerCall!.messages)
     expect(workerMessages).toContain('received_at=\\"2026-08-10T09:01:00+08:00\\"')
     expect(workerMessages).toContain('occurred_at=\\"2026-08-10T00:59:30.000Z\\"')
 
@@ -947,7 +1125,9 @@ describe('ManagerRegistry', () => {
     nowMs = Date.parse('2026-08-10T01:03:00.000Z')
     scheduleRelease.resolve()
     await schedule
-    const scheduleMessages = JSON.stringify(calls[4].messages)
+    const scheduleCall = calls.find((call) => JSON.stringify(call.messages).includes('[定时任务触发] scheduleId=timed'))
+    expect(scheduleCall).toBeDefined()
+    const scheduleMessages = JSON.stringify(scheduleCall!.messages)
     expect(scheduleMessages).toContain('received_at=\\"2026-08-10T09:02:00+08:00\\"')
     expect(scheduleMessages).not.toContain('occurred_at=')
   })

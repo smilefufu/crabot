@@ -76,6 +76,8 @@ describe('ManagerLoop episode trace wiring', () => {
       promptInputs: () => ({}),
       harness: FAKE_HARNESS,
       now: () => new Date(),
+      markPendingReply: () => {},
+      hasPendingReply: () => true,
       adapter: () => adapter,
       model: () => 'test-model',
       ...(trace ? { traceWriter: trace } : {}),

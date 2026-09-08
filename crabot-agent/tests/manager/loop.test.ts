@@ -26,15 +26,15 @@ const FIXED_RECEIVED_AT = '2026-01-01T08:00:00+08:00'
 function timed(wake: WakeEvent): TimedWakeEnvelope { return { wake, received_at: FIXED_RECEIVED_AT, timezone: 'Asia/Shanghai' } }
 const DIALOG_OBJECT_ID = (`test::${'friend-loop'}` as ManagerKey)
 const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
+本提示用于提醒你跟进任务板中尚未收口的工作，做好进度管理。
+
 本会话已经空闲一小时，但任务板仍有当前目标。请查阅当前任务板和聊天历史，重新确认人类的最新意图。任务板只是可修订的管理摘要；如果它与人类已经表达的意图不一致，以人类的最新意图为准并更新任务板。
 
 仍能推进的，就在本回合继续推进。正在等待已经安排的执行结果时，可以按需查看执行器的状态和活动，必要时通过独立侧问了解进度；不要反复查询，也不要仅因本次检查向仍在运行的执行器主线发送催促、补充或纠偏。正在等待明确的外部事件时，不要重复操作。目标或事项已经变化、取消或重复时，及时调整、合并或归档；确实需要人类介入时，清楚说明阻塞以及需要人类提供的帮助。
 
 再次提醒人类前，检查你最近成功发送到本会话的三条消息。如果其中已经有一条整条消息都在专门提醒同一个阻塞，就不要重复提醒；如果此前只是夹在其他内容中提到该阻塞，不算单独提醒。当前上下文不足以确认时，先查询聊天历史；查询失败或结果仍不足时，不得再次发送阻塞提醒。
 
-任务板没有实质变化时，不要只为记录本次检查、等待状态或查询失败而修改任务板。
-
-不要只回复本提示，也不要发送没有新信息的进度消息。`
+任务板没有实质变化时，不要只为记录本次检查、等待状态或查询失败而修改任务板。`
 
 function defaultSupervisionWake(workerId: string, dueId: string): TimedWakeEnvelope {
   return timed({
@@ -178,6 +178,8 @@ function baseDeps(
     promptInputs: () => ({}),
     harness: FAKE_HARNESS,
     now: () => new Date(nowMs),
+    markPendingReply: () => {},
+    hasPendingReply: () => true,
     adapter: typeof adapter === 'function' ? adapter : () => adapter,
     model: typeof model === 'function' ? model : () => model ?? 'test-model',
     ...rest,
@@ -392,6 +394,7 @@ describe('ManagerLoop', () => {
     }
     expect(MANAGER_WORKBOARD_CONTEXT).toContain('任务板不会自动进入上下文')
     expect(MANAGER_WORKBOARD_CONTEXT).toContain('一张任务板可以有多个目标，每个目标下可以有多个事项')
+    expect(MANAGER_WORKBOARD_CONTEXT).toContain('确认成功前，不要把任务板当作已经更新')
     expect(MANAGER_WORKBOARD_CONTEXT).toContain('为当前讨论临时派执行器查证')
     expect(MANAGER_WORKBOARD_CONTEXT).toContain('执行过程、命令、日志和详细技术论证留在执行记录或项目文档')
     expect(MANAGER_WORKBOARD_CONTEXT).not.toMatch(/[A-Za-z]/)
@@ -2005,6 +2008,156 @@ describe('ManagerLoop', () => {
     expect(calls).toHaveLength(3)
     expect(JSON.stringify(calls[1].messages)).toContain('[系统提醒]')
     expect(JSON.stringify(calls[1].messages)).toContain('只有 send_message 发送的内容才能送达人类')
+  })
+
+  describe('待回复义务门控', () => {
+    it('初始直接人类消息落盘后建立义务，文字 end_turn 仍触发一次交付复核', async () => {
+      const { adapter, calls, queue } = makeAdapter()
+      let pendingReply = false
+      const markPendingReply = vi.fn(() => { pendingReply = true })
+      queue.push({ text: '给人类的答复', stopReason: 'end_turn' })
+      const loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        markPendingReply,
+        hasPendingReply: () => pendingReply,
+      }))
+
+      await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('请回答')] }))
+
+      expect(markPendingReply).toHaveBeenCalledTimes(1)
+      expect(calls).toHaveLength(2)
+      expect(JSON.stringify(calls[1].messages)).toContain('[系统提醒]')
+    })
+
+    it('重复、空批和 attention_flush 不建立义务，也不复核内部文字', async () => {
+      const { adapter, calls, queue } = makeAdapter()
+      let pendingReply = false
+      const markPendingReply = vi.fn(() => { pendingReply = true })
+      const message = makeChannelMessage('只提交一次')
+      const loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        markPendingReply,
+        hasPendingReply: () => pendingReply,
+      }))
+
+      queue.push({ stopReason: 'end_turn' })
+      await loop.wakeUp(timed({ kind: 'human_messages', messages: [message] }))
+      expect(markPendingReply).toHaveBeenCalledTimes(1)
+
+      pendingReply = false
+      await loop.wakeUp(timed({ kind: 'human_messages', messages: [message] }))
+      await loop.wakeUp(timed({ kind: 'human_messages', messages: [] }))
+      queue.push({ text: '群聊后台补齐的内部判断', stopReason: 'end_turn' })
+      await loop.wakeUp(timed({ kind: 'attention_flush', messages: [makeChannelMessage('后台补齐')] }))
+
+      expect(markPendingReply).toHaveBeenCalledTimes(1)
+      // 空批仍沿用现有空事件 episode；这里只约束它不建立义务、不追加交付复核。
+      expect(calls).toHaveLength(3)
+      expect(JSON.stringify(calls)).not.toContain('[系统提醒]')
+    })
+
+    it('无待回复义务的执行器事件产生内部文字时直接收口', async () => {
+      const { adapter, calls, queue } = makeAdapter()
+      queue.push({ text: '仅供内部记录的执行器动态', stopReason: 'end_turn' })
+      const loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        markPendingReply: vi.fn(),
+        hasPendingReply: () => false,
+      }))
+
+      const result = await loop.wakeUp(defaultSupervisionWake('w-internal', 'due-internal'))
+
+      expect(result.turns).toBe(1)
+      expect(calls).toHaveLength(1)
+      expect(JSON.stringify(calls)).not.toContain('[系统提醒]')
+    })
+
+    it('人类消息后只派执行器未回复，后续执行器事件仍会复核文字答案', async () => {
+      const { adapter, calls, queue } = makeAdapter()
+      let pendingReply = false
+      queue.push(
+        { toolCalls: [{ name: 'spawn_worker', id: 'spawn-1', input: {} }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+        { text: '执行结果已经整理好', stopReason: 'end_turn' },
+      )
+      const loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        markPendingReply: () => { pendingReply = true },
+        hasPendingReply: () => pendingReply,
+        toolFace: () => [defineTool({
+          name: 'spawn_worker',
+          description: 'dispatch',
+          inputSchema: { type: 'object', properties: {} },
+          call: async () => ({ output: 'started', isError: false }),
+        })],
+      }))
+
+      await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('查一下')] }))
+      await loop.wakeUp(defaultSupervisionWake('w-dispatched', 'due-result'))
+
+      expect(calls).toHaveLength(4)
+      expect(JSON.stringify(calls[3].messages)).toContain('[系统提醒]')
+    })
+
+    it('episode 运行中注入的新直接人类消息同步建立义务', async () => {
+      const { adapter, queue } = makeAdapter()
+      let pendingReply = false
+      const markPendingReply = vi.fn(() => { pendingReply = true })
+      let loop: ManagerLoop
+      let injected = false
+      queue.push({ stopReason: 'end_turn' })
+      const injectingAdapter: LLMAdapter = {
+        async *stream(params) {
+          if (!injected) {
+            injected = true
+            loop.enqueueHumanWakeDuringActiveEpisode(
+              timed({ kind: 'human_messages', messages: [makeChannelMessage('中途追问')] }),
+            )
+          }
+          yield* adapter.stream(params)
+        },
+        updateConfig: () => {},
+      }
+      loop = new ManagerLoop(baseDeps({
+        store,
+        adapter: injectingAdapter,
+        markPendingReply,
+        hasPendingReply: () => pendingReply,
+      }))
+
+      await loop.wakeUp(timed({ kind: 'attention_flush', messages: [makeChannelMessage('后台上下文')] }))
+
+      expect(markPendingReply).toHaveBeenCalledTimes(1)
+      expect(pendingReply).toBe(true)
+    })
+
+    it('builtin 每日反思没有普通待回复义务时仍使用专用交付复核', async () => {
+      const { adapter, calls, queue } = makeAdapter()
+      queue.push({ text: '每日反思摘要', stopReason: 'end_turn' })
+      const loop = new ManagerLoop(baseDeps({
+        store,
+        adapter,
+        isSystemThread: true,
+        markPendingReply: vi.fn(),
+        hasPendingReply: () => false,
+      }))
+
+      await loop.wakeUp(timed({
+        kind: 'schedule',
+        scheduleId: 'daily-reflection',
+        title: '每日反思',
+        description: '整理记忆',
+        isBuiltin: true,
+        taskType: 'daily_reflection',
+      }))
+
+      expect(calls).toHaveLength(2)
+      expect(JSON.stringify(calls[1].messages)).toContain('send_daily_reflection_summary')
+    })
   })
 
   it('manager 收到提醒后的下一次文字 end_turn 不再重复提醒', async () => {

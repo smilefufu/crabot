@@ -24,22 +24,22 @@ type WorkboardView = 'active' | 'archive'
 
 type ObjectiveEditor =
   | { kind: 'objective'; mode: 'create'; draft: WorkboardObjectiveDraft }
-  | { kind: 'objective'; mode: 'revise'; currentObjectiveTitle: string; draft: WorkboardObjectiveDraft }
+  | { kind: 'objective'; mode: 'revise'; objectiveId: string; draft: WorkboardObjectiveDraft }
 
 type WorkItemEditor =
-  | { kind: 'work_item'; mode: 'create'; objectiveTitle: string; draft: WorkboardItemDraft }
+  | { kind: 'work_item'; mode: 'create'; objectiveId: string; draft: WorkboardItemDraft }
   | {
       kind: 'work_item'
       mode: 'revise'
-      currentObjectiveTitle: string
-      currentWorkItemTitle: string
-      targetObjectiveTitle: string
+      workItemId: string
+      currentObjectiveId: string
+      targetObjectiveId: string
       draft: WorkboardItemDraft
     }
 
 type ArchiveEditor =
-  | { kind: 'objective'; mode: 'archive'; currentObjectiveTitle: string }
-  | { kind: 'work_item'; mode: 'archive'; currentObjectiveTitle: string; currentWorkItemTitle: string }
+  | { kind: 'objective'; mode: 'archive'; objectiveId: string; title: string }
+  | { kind: 'work_item'; mode: 'archive'; workItemId: string; title: string }
 
 type Editor = ObjectiveEditor | WorkItemEditor | ArchiveEditor
 
@@ -135,13 +135,13 @@ function applyMutation(
   if (mutation.action === 'create_objective' && result.action === 'objective_created') {
     objectives = [...objectives, { ...result.objective, work_items: [] }]
   } else if (mutation.action === 'revise_objective' && result.action === 'objective_revised') {
-    objectives = objectives.map((objective) => objective.title === mutation.current_objective_title
+    objectives = objectives.map((objective) => objective.objective_id === mutation.objective_id
       ? { ...result.objective, work_items: objective.work_items }
       : objective)
   } else if (mutation.action === 'archive_objective' && result.action === 'objective_archived') {
-    objectives = objectives.filter((objective) => objective.title !== mutation.current_objective_title)
+    objectives = objectives.filter((objective) => objective.objective_id !== mutation.objective_id)
   } else if (mutation.action === 'create_work_item' && result.action === 'work_item_created') {
-    objectives = objectives.map((objective) => objective.title === result.objective_title
+    objectives = objectives.map((objective) => objective.objective_id === result.objective.objective_id
       ? {
           ...objective,
           updated_at: result.work_item.updated_at,
@@ -150,24 +150,24 @@ function applyMutation(
       : objective)
   } else if (mutation.action === 'revise_work_item' && result.action === 'work_item_revised') {
     objectives = objectives.map((objective) => {
-      const withoutCurrent = objective.title === mutation.current_objective_title
-        ? objective.work_items.filter((item) => item.title !== mutation.current_work_item_title)
-        : objective.work_items
-      const workItems = objective.title === result.objective_title
+      const withoutCurrent = objective.work_items.filter((item) => item.work_item_id !== mutation.work_item_id)
+      const workItems = objective.objective_id === result.objective.objective_id
         ? [...withoutCurrent, result.work_item]
         : withoutCurrent
-      return workItems !== objective.work_items
+      return withoutCurrent.length !== objective.work_items.length || objective.objective_id === result.objective.objective_id
         ? { ...objective, updated_at: result.work_item.updated_at, work_items: workItems }
         : objective
     })
   } else if (mutation.action === 'archive_work_item' && result.action === 'work_item_archived') {
-    objectives = objectives.map((objective) => objective.title === mutation.current_objective_title
-      ? {
+    objectives = objectives.map((objective) => {
+      const workItems = objective.work_items.filter((item) => item.work_item_id !== mutation.work_item_id)
+      return workItems.length !== objective.work_items.length ? {
           ...objective,
           updated_at: result.work_item.archived_at,
-          work_items: objective.work_items.filter((item) => item.title !== mutation.current_work_item_title),
+          work_items: workItems,
         }
-      : objective)
+        : objective
+    })
   }
 
   return {
@@ -252,7 +252,7 @@ function ObjectiveSection({ objective, labels, onEdit, onArchive, onCreateItem, 
                 <h3>{STATUS_LABEL[status]}<span>{items.length}</span></h3>
                 <div>{items.map((item) => (
                   <WorkboardItemCard
-                    key={item.title}
+                    key={item.work_item_id}
                     item={item}
                     projectLabel={item.project_root ? labels.get(item.project_root) : undefined}
                     onEdit={() => onEditItem(item)}
@@ -300,7 +300,7 @@ function ObjectiveEditorDialog({ editor, busy, onClose, onSubmit }: {
     }
     onSubmit(editor.mode === 'create'
       ? { action: 'create_objective', objective }
-      : { action: 'revise_objective', current_objective_title: editor.currentObjectiveTitle, objective })
+      : { action: 'revise_objective', objective_id: editor.objectiveId, objective })
   }
   return (
     <DialogShell title={title} busy={busy} onClose={onClose}>
@@ -328,8 +328,8 @@ function WorkItemEditorDialog({ editor, objectives, busy, onClose, onSubmit }: {
   onSubmit: (mutation: ChangeWorkboardMutation) => void
 }) {
   const [draft, setDraft] = useState(editor.draft)
-  const [targetObjectiveTitle, setTargetObjectiveTitle] = useState(
-    editor.mode === 'create' ? editor.objectiveTitle : editor.targetObjectiveTitle,
+  const [targetObjectiveId, setTargetObjectiveId] = useState(
+    editor.mode === 'create' ? editor.objectiveId : editor.targetObjectiveId,
   )
   const title = editor.mode === 'create' ? '新建事项' : '编辑事项'
   const submit = (event: React.FormEvent): void => {
@@ -346,12 +346,11 @@ function WorkItemEditorDialog({ editor, objectives, busy, onClose, onSubmit }: {
       ...(blocker ? { blocker } : {}),
     }
     onSubmit(editor.mode === 'create'
-      ? { action: 'create_work_item', objective_title: editor.objectiveTitle, work_item: workItem }
+      ? { action: 'create_work_item', objective_id: editor.objectiveId, work_item: workItem }
       : {
           action: 'revise_work_item',
-          current_objective_title: editor.currentObjectiveTitle,
-          current_work_item_title: editor.currentWorkItemTitle,
-          target_objective_title: targetObjectiveTitle,
+          work_item_id: editor.workItemId,
+          ...(targetObjectiveId === editor.currentObjectiveId ? {} : { target_objective_id: targetObjectiveId }),
           work_item: workItem,
         })
   }
@@ -363,8 +362,8 @@ function WorkItemEditorDialog({ editor, objectives, busy, onClose, onSubmit }: {
           <label>状态<select value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value as WorkboardItemStatus })}>
             <option value="ready">待开始</option><option value="in_progress">进行中</option><option value="blocked">已阻塞</option>
           </select></label>
-          {editor.mode === 'revise' && <label className="manager-workboard__form-wide">所属目标<select value={targetObjectiveTitle} onChange={(event) => setTargetObjectiveTitle(event.target.value)}>
-            {objectives.map((objective) => <option key={objective.title} value={objective.title}>{objective.title}</option>)}
+          {editor.mode === 'revise' && <label className="manager-workboard__form-wide">所属目标<select value={targetObjectiveId} onChange={(event) => setTargetObjectiveId(event.target.value)}>
+            {objectives.map((objective) => <option key={objective.objective_id} value={objective.objective_id}>{objective.title}</option>)}
           </select></label>}
           <label className="manager-workboard__form-wide">项目根目录（可选）<input placeholder="例如：/workspace/crabot" value={draft.project_root ?? ''} onChange={(event) => setDraft({ ...draft, project_root: event.target.value })} /></label>
           <label className="manager-workboard__form-wide">当前判断{draft.status === 'ready' ? '（可选）' : ''}<textarea required={draft.status !== 'ready'} placeholder="例如：已确认历史输入存在缺口" value={draft.current_judgement ?? ''} onChange={(event) => setDraft({ ...draft, current_judgement: event.target.value })} /></label>
@@ -394,14 +393,13 @@ function ArchiveDialog({ editor, busy, onClose, onSubmit }: {
 }) {
   const isObjective = editor.kind === 'objective'
   const title = isObjective ? '归档目标' : '归档事项'
-  const target = isObjective ? editor.currentObjectiveTitle : editor.currentWorkItemTitle
+  const target = editor.title
   const archive = (archivedAs: WorkboardArchiveOutcome): void => {
     onSubmit(isObjective
-      ? { action: 'archive_objective', current_objective_title: editor.currentObjectiveTitle, archived_as: archivedAs }
+      ? { action: 'archive_objective', objective_id: editor.objectiveId, archived_as: archivedAs }
       : {
           action: 'archive_work_item',
-          current_objective_title: editor.currentObjectiveTitle,
-          current_work_item_title: editor.currentWorkItemTitle,
+          work_item_id: editor.workItemId,
           archived_as: archivedAs,
         })
   }
@@ -461,8 +459,8 @@ function ArchivedWorkItemView({ item }: { item: ArchivedWorkboardItem }) {
 }
 
 function editorKey(editor: Editor): string {
-  if (editor.kind === 'objective') return `${editor.kind}-${editor.mode}-${editor.mode === 'create' ? 'new' : editor.currentObjectiveTitle}`
-  return `${editor.kind}-${editor.mode}-${editor.mode === 'create' ? editor.objectiveTitle : `${editor.currentObjectiveTitle}-${editor.currentWorkItemTitle}`}`
+  if (editor.kind === 'objective') return `${editor.kind}-${editor.mode}-${editor.mode === 'create' ? 'new' : editor.objectiveId}`
+  return `${editor.kind}-${editor.mode}-${editor.mode === 'create' ? editor.objectiveId : editor.workItemId}`
 }
 
 const ManagerWorkboardContent: React.FC = () => {
@@ -592,14 +590,14 @@ const ManagerWorkboardContent: React.FC = () => {
           <div className="manager-workboard__objectives" role="tabpanel" aria-label="当前任务">
             {objectives.map((objective) => (
               <ObjectiveSection
-                key={objective.title}
+                key={objective.objective_id}
                 objective={objective}
                 labels={labels}
-                onEdit={() => setEditor({ kind: 'objective', mode: 'revise', currentObjectiveTitle: objective.title, draft: { title: objective.title, completion_criteria: objective.completion_criteria } })}
-                onArchive={() => setEditor({ kind: 'objective', mode: 'archive', currentObjectiveTitle: objective.title })}
-                onCreateItem={() => setEditor({ kind: 'work_item', mode: 'create', objectiveTitle: objective.title, draft: emptyWorkItemDraft() })}
-                onEditItem={(item) => setEditor({ kind: 'work_item', mode: 'revise', currentObjectiveTitle: objective.title, currentWorkItemTitle: item.title, targetObjectiveTitle: objective.title, draft: workItemDraftOf(item) })}
-                onArchiveItem={(item) => setEditor({ kind: 'work_item', mode: 'archive', currentObjectiveTitle: objective.title, currentWorkItemTitle: item.title })}
+                onEdit={() => setEditor({ kind: 'objective', mode: 'revise', objectiveId: objective.objective_id, draft: { title: objective.title, completion_criteria: objective.completion_criteria } })}
+                onArchive={() => setEditor({ kind: 'objective', mode: 'archive', objectiveId: objective.objective_id, title: objective.title })}
+                onCreateItem={() => setEditor({ kind: 'work_item', mode: 'create', objectiveId: objective.objective_id, draft: emptyWorkItemDraft() })}
+                onEditItem={(item) => setEditor({ kind: 'work_item', mode: 'revise', workItemId: item.work_item_id, currentObjectiveId: objective.objective_id, targetObjectiveId: objective.objective_id, draft: workItemDraftOf(item) })}
+                onArchiveItem={(item) => setEditor({ kind: 'work_item', mode: 'archive', workItemId: item.work_item_id, title: item.title })}
               />
             ))}
           </div>
@@ -607,8 +605,8 @@ const ManagerWorkboardContent: React.FC = () => {
       {board && view === 'archive' && (
         archiveEntries.length === 0 ? <div className="manager-workboard__empty">归档中没有内容。</div> :
           <div className="manager-workboard__archive" role="tabpanel" aria-label="归档">
-            {archivedObjectives.length > 0 && <section><h2>已归档目标 <span>{archivedObjectives.length}</span></h2>{archivedObjectives.map((objective) => <ArchivedObjectiveView key={`${objective.title}-${objective.archived_at}`} objective={objective} />)}</section>}
-            {archivedWorkItems.length > 0 && <section><h2>已归档事项 <span>{archivedWorkItems.length}</span></h2>{archivedWorkItems.map((item) => <ArchivedWorkItemView key={`${item.objective.title}-${item.title}-${item.archived_at}`} item={item} />)}</section>}
+            {archivedObjectives.length > 0 && <section><h2>已归档目标 <span>{archivedObjectives.length}</span></h2>{archivedObjectives.map((objective) => <ArchivedObjectiveView key={objective.objective_id} objective={objective} />)}</section>}
+            {archivedWorkItems.length > 0 && <section><h2>已归档事项 <span>{archivedWorkItems.length}</span></h2>{archivedWorkItems.map((item) => <ArchivedWorkItemView key={item.work_item_id} item={item} />)}</section>}
           </div>
       )}
       {editor && <EditorDialog key={editorKey(editor)} editor={editor} objectives={objectives} busy={saving} onClose={() => setEditor(undefined)} onSubmit={(mutation) => { void save(mutation) }} />}

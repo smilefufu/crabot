@@ -185,81 +185,91 @@ type WorkboardAdminMutation =
   | { readonly action: 'create_objective'; readonly objective: WorkboardObjectiveDraft }
   | {
       readonly action: 'revise_objective'
-      readonly current_objective_title: string
+      readonly objective_id: string
       readonly objective: WorkboardObjectiveDraft
     }
   | {
       readonly action: 'archive_objective'
-      readonly current_objective_title: string
+      readonly objective_id: string
       readonly archived_as: WorkboardArchiveOutcome
     }
   | {
       readonly action: 'create_work_item'
-      readonly objective_title: string
+      readonly objective_id: string
       readonly work_item: WorkboardItemDraft
     }
   | {
       readonly action: 'revise_work_item'
-      readonly current_objective_title: string
-      readonly current_work_item_title: string
-      readonly target_objective_title: string
+      readonly work_item_id: string
+      readonly target_objective_id?: string
       readonly work_item: WorkboardItemDraft
     }
   | {
       readonly action: 'archive_work_item'
-      readonly current_objective_title: string
-      readonly current_work_item_title: string
+      readonly work_item_id: string
       readonly archived_as: WorkboardArchiveOutcome
     }
 
+function hasOnlyWorkboardParams(value: Record<string, unknown>, mutationKeys: readonly string[]): boolean {
+  const allowed = new Set(['manager_key', 'expected_revision', 'assertion', 'action', ...mutationKeys])
+  return Object.keys(value).every((key) => allowed.has(key))
+}
+
 function requireWorkboardMutation(value: Record<string, unknown>): WorkboardAdminMutation {
-  if (value.action === 'create_objective' && value.objective !== undefined) {
+  if (value.action === 'create_objective'
+    && value.objective !== undefined
+    && hasOnlyWorkboardParams(value, ['objective'])) {
     return { action: 'create_objective', objective: value.objective as WorkboardObjectiveDraft }
   }
-  if (value.action === 'revise_objective' && typeof value.current_objective_title === 'string' && value.objective !== undefined) {
+  if (value.action === 'revise_objective'
+    && typeof value.objective_id === 'string'
+    && value.objective !== undefined
+    && hasOnlyWorkboardParams(value, ['objective_id', 'objective'])) {
     return {
       action: 'revise_objective',
-      current_objective_title: value.current_objective_title,
+      objective_id: value.objective_id,
       objective: value.objective as WorkboardObjectiveDraft,
     }
   }
   if (value.action === 'archive_objective'
-    && typeof value.current_objective_title === 'string'
-    && (value.archived_as === 'completed' || value.archived_as === 'abandoned')) {
+    && typeof value.objective_id === 'string'
+    && (value.archived_as === 'completed' || value.archived_as === 'abandoned')
+    && hasOnlyWorkboardParams(value, ['objective_id', 'archived_as'])) {
     return {
       action: 'archive_objective',
-      current_objective_title: value.current_objective_title,
+      objective_id: value.objective_id,
       archived_as: value.archived_as,
     }
   }
-  if (value.action === 'create_work_item' && typeof value.objective_title === 'string' && value.work_item !== undefined) {
+  if (value.action === 'create_work_item'
+    && typeof value.objective_id === 'string'
+    && value.work_item !== undefined
+    && hasOnlyWorkboardParams(value, ['objective_id', 'work_item'])) {
     return {
       action: 'create_work_item',
-      objective_title: value.objective_title,
+      objective_id: value.objective_id,
       work_item: value.work_item as WorkboardItemDraft,
     }
   }
   if (value.action === 'revise_work_item'
-    && typeof value.current_objective_title === 'string'
-    && typeof value.current_work_item_title === 'string'
-    && typeof value.target_objective_title === 'string'
-    && value.work_item !== undefined) {
+    && typeof value.work_item_id === 'string'
+    && (value.target_objective_id === undefined || typeof value.target_objective_id === 'string')
+    && value.work_item !== undefined
+    && hasOnlyWorkboardParams(value, ['work_item_id', 'target_objective_id', 'work_item'])) {
     return {
       action: 'revise_work_item',
-      current_objective_title: value.current_objective_title,
-      current_work_item_title: value.current_work_item_title,
-      target_objective_title: value.target_objective_title,
+      work_item_id: value.work_item_id,
+      ...(value.target_objective_id === undefined ? {} : { target_objective_id: value.target_objective_id }),
       work_item: value.work_item as WorkboardItemDraft,
     }
   }
   if (value.action === 'archive_work_item'
-    && typeof value.current_objective_title === 'string'
-    && typeof value.current_work_item_title === 'string'
-    && (value.archived_as === 'completed' || value.archived_as === 'abandoned')) {
+    && typeof value.work_item_id === 'string'
+    && (value.archived_as === 'completed' || value.archived_as === 'abandoned')
+    && hasOnlyWorkboardParams(value, ['work_item_id', 'archived_as'])) {
     return {
       action: 'archive_work_item',
-      current_objective_title: value.current_objective_title,
-      current_work_item_title: value.current_work_item_title,
+      work_item_id: value.work_item_id,
       archived_as: value.archived_as,
     }
   }
@@ -269,27 +279,25 @@ function requireWorkboardMutation(value: Record<string, unknown>): WorkboardAdmi
 function workboardMutationPayload(mutation: WorkboardAdminMutation): Record<string, unknown> {
   if (mutation.action === 'create_objective') return { action: mutation.action, objective: mutation.objective }
   if (mutation.action === 'revise_objective') {
-    return { action: mutation.action, current_objective_title: mutation.current_objective_title, objective: mutation.objective }
+    return { action: mutation.action, objective_id: mutation.objective_id, objective: mutation.objective }
   }
   if (mutation.action === 'archive_objective') {
-    return { action: mutation.action, current_objective_title: mutation.current_objective_title, archived_as: mutation.archived_as }
+    return { action: mutation.action, objective_id: mutation.objective_id, archived_as: mutation.archived_as }
   }
   if (mutation.action === 'create_work_item') {
-    return { action: mutation.action, objective_title: mutation.objective_title, work_item: mutation.work_item }
+    return { action: mutation.action, objective_id: mutation.objective_id, work_item: mutation.work_item }
   }
   if (mutation.action === 'revise_work_item') {
     return {
       action: mutation.action,
-      current_objective_title: mutation.current_objective_title,
-      current_work_item_title: mutation.current_work_item_title,
-      target_objective_title: mutation.target_objective_title,
+      work_item_id: mutation.work_item_id,
+      ...(mutation.target_objective_id === undefined ? {} : { target_objective_id: mutation.target_objective_id }),
       work_item: mutation.work_item,
     }
   }
   return {
     action: mutation.action,
-    current_objective_title: mutation.current_objective_title,
-    current_work_item_title: mutation.current_work_item_title,
+    work_item_id: mutation.work_item_id,
     archived_as: mutation.archived_as,
   }
 }
@@ -315,7 +323,7 @@ type WorkboardAdminChangePayload =
     }
   | {
       readonly action: 'work_item_created' | 'work_item_revised'
-      readonly objective_title: string
+      readonly objective: Pick<WorkboardObjective, 'objective_id' | 'title'>
       readonly work_item: WorkboardItem
       readonly counts: ReturnType<typeof workboardCounts>
     }
@@ -328,6 +336,15 @@ type WorkboardAdminChangePayload =
 function workboardObjectiveHeader(objective: WorkboardObjective): Omit<WorkboardObjective, 'work_items'> {
   const { work_items: _items, ...header } = objective
   return header
+}
+
+function workboardObjectiveForItem(
+  objectives: ReadonlyArray<WorkboardObjective>,
+  workItemId: string,
+): Pick<WorkboardObjective, 'objective_id' | 'title'> {
+  const objective = objectives.find((entry) => entry.work_items.some((item) => item.work_item_id === workItemId))
+  if (!objective) throw new Error(`修改后的事项不在当前目标中: ${workItemId}`)
+  return { objective_id: objective.objective_id, title: objective.title }
 }
 
 function compareWorkboardText(left: string, right: string): number {
@@ -3614,7 +3631,7 @@ export class UnifiedAgent extends ModuleBase {
         const result = await store.adminReviseObjective(
           key,
           params.expected_revision,
-          mutation.current_objective_title,
+          mutation.objective_id,
           mutation.objective,
         )
         board = result.board
@@ -3627,7 +3644,7 @@ export class UnifiedAgent extends ModuleBase {
         const result = await store.adminArchiveObjective(
           key,
           params.expected_revision,
-          mutation.current_objective_title,
+          mutation.objective_id,
           mutation.archived_as,
         )
         board = result.board
@@ -3636,13 +3653,13 @@ export class UnifiedAgent extends ModuleBase {
         const result = await store.adminCreateWorkItem(
           key,
           params.expected_revision,
-          mutation.objective_title,
+          mutation.objective_id,
           mutation.work_item,
         )
         board = result.board
         payload = {
           action: 'work_item_created',
-          objective_title: mutation.objective_title.trim(),
+          objective: workboardObjectiveForItem(board.objectives, result.value.work_item_id),
           work_item: result.value,
           counts: workboardCounts(board),
         }
@@ -3650,15 +3667,14 @@ export class UnifiedAgent extends ModuleBase {
         const result = await store.adminReviseWorkItem(
           key,
           params.expected_revision,
-          mutation.current_objective_title,
-          mutation.current_work_item_title,
-          mutation.target_objective_title,
+          mutation.work_item_id,
+          mutation.target_objective_id,
           mutation.work_item,
         )
         board = result.board
         payload = {
           action: 'work_item_revised',
-          objective_title: mutation.target_objective_title.trim(),
+          objective: workboardObjectiveForItem(board.objectives, result.value.work_item_id),
           work_item: result.value,
           counts: workboardCounts(board),
         }
@@ -3666,8 +3682,7 @@ export class UnifiedAgent extends ModuleBase {
         const result = await store.adminArchiveWorkItem(
           key,
           params.expected_revision,
-          mutation.current_objective_title,
-          mutation.current_work_item_title,
+          mutation.work_item_id,
           mutation.archived_as,
         )
         board = result.board

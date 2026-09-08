@@ -963,16 +963,16 @@ describe('manager bootstrap（P5 Task 1）', () => {
             expect([...byName.keys()]).toEqual(expect.arrayContaining([
               'inspect_workboard', 'change_workboard', 'inspect_project_docs', 'manage_decision_doc',
             ]))
-            await byName.get('change_workboard')!.call({
+            const objectiveCreated = JSON.parse((await byName.get('change_workboard')!.call({
               action: 'create_objective',
               objective: {
                 title: '证明任务板工具已接入真实主控栈',
                 completion_criteria: ['后续请求不自动包含任务板正文'],
               },
-            }, {} as never)
+            }, {} as never)).output) as { objective: { objective_id: string } }
             created = JSON.parse((await byName.get('change_workboard')!.call({
               action: 'create_work_item',
-              objective_title: '证明任务板工具已接入真实主控栈',
+              objective_id: objectiveCreated.objective.objective_id,
               work_item: {
                 title: '验证主控上下文生产装配',
                 status: 'in_progress',

@@ -22,6 +22,7 @@ import { buildManagerStack, type ManagerStack } from '../../src/manager/bootstra
 import type { PrincipalResolverDeps } from '../../src/manager/principal.js'
 import {
   ManagerWorkboardStore,
+  type WorkboardObjective,
   type WorkboardItemDraft,
   type WorkboardObjectiveDraft,
 } from '../../src/manager/workboard-store.js'
@@ -120,6 +121,8 @@ interface BehaviorExpectation {
   readonly forbidden_tools?: string[]
   readonly required_calls?: BehaviorCallRule[]
   readonly forbidden_calls?: BehaviorCallRule[]
+  readonly max_delivery_reviews?: number
+  readonly workboard_failure_recovery?: boolean
   readonly worker_spawns?: {
     readonly count?: number
     readonly workspace?: 'project_root'
@@ -155,6 +158,11 @@ interface BehaviorScenario {
   readonly steps: Array<
     | { readonly kind: 'human'; readonly text: string }
     | { readonly kind: 'worker'; readonly worker_id: string; readonly text: string }
+    | {
+        readonly kind: 'admin_revise_objective'
+        readonly target_title: string
+        readonly objective: WorkboardObjectiveDraft
+      }
     | { readonly kind: 'idle_review' }
   >
   readonly expect: BehaviorExpectation
@@ -700,17 +708,18 @@ function workboardStore(env: EvaluationEnvironment): ManagerWorkboardStore {
   return new ManagerWorkboardStore(path.join(env.dataRoot, 'agent', 'managers'), env.now)
 }
 
-async function seedObjectives(env: EvaluationEnvironment, objectives: readonly SeedObjective[]): Promise<void> {
+async function seedObjectives(env: EvaluationEnvironment, objectives: readonly SeedObjective[]): Promise<WorkboardObjective[]> {
   const store = workboardStore(env)
   for (const objective of objectives) {
-    await store.createObjective(env.managerKey, {
+    const created = await store.createObjective(env.managerKey, {
       title: objective.title,
       completion_criteria: objective.completion_criteria,
     })
     for (const item of objective.work_items) {
-      await store.createWorkItem(env.managerKey, objective.title, item)
+      await store.createWorkItem(env.managerKey, created.value.objective_id, item)
     }
   }
+  return (await store.load(env.managerKey)).objectives
 }
 
 function materializeObjectives(objectives: readonly SeedObjective[], projectRoot: string): SeedObjective[] {
@@ -903,6 +912,8 @@ async function deterministicInterleavingScenario(
   markers: DeterministicFixture['sentinels'],
 ): Promise<{ env: EvaluationEnvironment; assertions: EvaluationAssertion[] }> {
   const turns = new Map<string, number>()
+  let itemAId = ''
+  let itemBId = ''
   const objective: WorkboardObjectiveDraft = {
     title: '让多任务事件保持独立且可追踪',
     completion_criteria: ['两个事项交错推进时互不串线'],
@@ -927,9 +938,7 @@ async function deterministicInterleavingScenario(
       return { blocks: [
         toolCall('revise-a', 'change_workboard', {
           action: 'revise_work_item',
-          current_objective_title: objective.title,
-          current_work_item_title: itemA.title,
-          target_objective_title: objective.title,
+          work_item_id: itemAId,
           work_item: { ...itemA, current_judgement: `${markers.task_a} 已收到新证据`, next_action: '继续逐次核对' },
         }),
         toolCall('send-a', 'send_to_worker', { worker_id: 'worker-a', text: `继续 ${markers.task_a}，只处理请求核查。` }),
@@ -939,9 +948,7 @@ async function deterministicInterleavingScenario(
       return { blocks: [
         toolCall('revise-b', 'change_workboard', {
           action: 'revise_work_item',
-          current_objective_title: objective.title,
-          current_work_item_title: itemB.title,
-          target_objective_title: objective.title,
+          work_item_id: itemBId,
           work_item: { ...itemB, current_judgement: `${markers.task_b} 已完成镜像准备`, next_action: '运行无网络评测' },
         }),
         toolCall('send-b', 'send_to_worker', { worker_id: 'worker-b', text: `继续 ${markers.task_b}，只处理 Docker 评测。` }),
@@ -950,7 +957,9 @@ async function deterministicInterleavingScenario(
     return textResponse()
   })
   const env = await createEnvironment({ root: runRoot, scenario: 'deterministic-interleaving', projectRoot, adapter })
-  await seedObjectives(env, [{ ...objective, work_items: [itemA, itemB] }])
+  const [seededObjective] = await seedObjectives(env, [{ ...objective, work_items: [itemA, itemB] }])
+  itemAId = seededObjective.work_items.find((item) => item.title === itemA.title)!.work_item_id
+  itemBId = seededObjective.work_items.find((item) => item.title === itemB.title)!.work_item_id
   await seedWorker(env, 'worker-a', '核查上下文请求：逐次还原请求')
   await seedWorker(env, 'worker-b', '构建隔离评测：验证 Docker 场景')
   env.setStep('worker-a')
@@ -986,6 +995,7 @@ async function deterministicRevisionScenario(
   markers: DeterministicFixture['sentinels'],
 ): Promise<{ env: EvaluationEnvironment; assertions: EvaluationAssertion[] }> {
   const turns = new Map<string, number>()
+  let objectiveId = ''
   const oldObjective: WorkboardObjectiveDraft = {
     title: '输出迁移摘要',
     completion_criteria: [markers.old_completion_criterion],
@@ -1008,7 +1018,7 @@ async function deterministicRevisionScenario(
       return { blocks: [
         toolCall('revise-current', 'change_workboard', {
           action: 'revise_objective',
-          current_objective_title: oldObjective.title,
+          objective_id: objectiveId,
           objective: newObjective,
         }),
         toolCall('continue-current', 'send_to_worker', {
@@ -1026,7 +1036,8 @@ async function deterministicRevisionScenario(
     return textResponse()
   })
   const env = await createEnvironment({ root: runRoot, scenario: 'deterministic-revision', projectRoot, adapter })
-  await seedObjectives(env, [{ ...oldObjective, work_items: [item] }])
+  const [seededObjective] = await seedObjectives(env, [{ ...oldObjective, work_items: [item] }])
+  objectiveId = seededObjective.objective_id
   await seedWorker(env, 'worker-revision', '迁移方案核查：验证当前验收')
   env.setStep('human-revision')
   await env.routeHuman('目标调整为逐次核对所有请求，验收也以新的完整要求为准。')
@@ -1055,6 +1066,153 @@ async function deterministicRevisionScenario(
   }
 }
 
+async function deterministicWorkboardFailureRecoveryScenario(
+  runRoot: string,
+  projectRoot: string,
+): Promise<{ env: EvaluationEnvironment; assertions: EvaluationAssertion[] }> {
+  const missingWorkItemId = '00000000-0000-4000-8000-000000000001'
+  const recoveredJudgement = '已在写入失败后重新查阅并完成修改'
+  let workItemId = ''
+  const originalItem: WorkboardItemDraft = {
+    title: '核对失败闭环',
+    status: 'in_progress',
+    current_judgement: '等待修改',
+    next_action: '更新任务板判断',
+  }
+  const adapter = new RecordingAdapter('deterministic-workboard-failure-recovery', ({ requestIndex }) => {
+    if (requestIndex === 0) {
+      return { blocks: [toolCall('fail-write', 'change_workboard', {
+        action: 'revise_work_item',
+        work_item_id: missingWorkItemId,
+        work_item: { ...originalItem, current_judgement: recoveredJudgement },
+      })] }
+    }
+    if (requestIndex === 1) {
+      return { blocks: [toolCall('recover-inspect', 'inspect_workboard', { view: 'active' })] }
+    }
+    if (requestIndex === 2) {
+      return { blocks: [toolCall('recover-write', 'change_workboard', {
+        action: 'revise_work_item',
+        work_item_id: workItemId,
+        work_item: { ...originalItem, current_judgement: recoveredJudgement },
+      })] }
+    }
+    return textResponse('任务板修改已在重新查阅后完成。')
+  })
+  const env = await createEnvironment({
+    root: runRoot,
+    scenario: 'deterministic-workboard-failure-recovery',
+    projectRoot,
+    adapter,
+  })
+  const [objective] = await seedObjectives(env, [{
+    title: '保证任务板修改完成闭环',
+    completion_criteria: ['失败后重新查阅并完成原修改'],
+    work_items: [originalItem],
+  }])
+  workItemId = objective.work_items[0].work_item_id
+
+  env.setStep('failure-recovery')
+  await env.routeHuman('请更新任务板中的失败闭环事项，并确认修改真正成功。')
+
+  const board = await workboardStore(env).load(env.managerKey)
+  const calls = responseCalls(adapter.records)
+  const callNames = calls.map((call) => call.name)
+  const failedResult = JSON.stringify(adapter.records[1]?.tool_results ?? [])
+  const retriedItem = board.objectives[0]?.work_items[0]
+  return {
+    env,
+    assertions: [
+      assertion(
+        'workboard-failure-returned-to-manager',
+        failedResult.includes('当前事项不存在') && failedResult.includes(missingWorkItemId),
+        '首次任务板写入失败必须作为工具错误进入下一次请求',
+      ),
+      assertion(
+        'workboard-failure-recovery-sequence',
+        callNames.join(',') === 'change_workboard,inspect_workboard,change_workboard',
+        '写入失败后必须先重新查阅任务板，再重试原修改',
+      ),
+      assertion(
+        'workboard-failure-retry-uses-current-id',
+        calls[2]?.input.work_item_id === workItemId && retriedItem?.work_item_id === workItemId,
+        '重试必须使用重新查阅得到的当前事项 ID',
+      ),
+      assertion(
+        'workboard-failure-retry-committed',
+        retriedItem?.current_judgement === recoveredJudgement,
+        'Manager 只有在重试成功后才可把任务板视为已更新',
+      ),
+    ],
+  }
+}
+
+async function deterministicPendingReplyHumanScenario(
+  runRoot: string,
+  projectRoot: string,
+): Promise<{ env: EvaluationEnvironment; assertions: EvaluationAssertion[] }> {
+  const scenario = 'deterministic-pending-reply-human'
+  const adapter = new RecordingAdapter(scenario, ({ requestIndex }) => {
+    if (requestIndex === 0) return textResponse('这段答复走错了内部通道。')
+    if (requestIndex === 1) {
+      return { blocks: [toolCall('deliver-reply', 'send_message', {
+        channel_id: 'eval-channel',
+        session_id: scenario,
+        content: '这次通过正确通道回复。',
+        post_send_action: 'none',
+      })] }
+    }
+    return { blocks: [], stopReason: 'end_turn' }
+  })
+  const env = await createEnvironment({ root: runRoot, scenario, projectRoot, adapter })
+
+  env.setStep('human-missed-delivery')
+  await env.routeHuman('请直接回答这个问题。')
+
+  const reminder = adapter.records[1]
+  return {
+    env,
+    assertions: [
+      assertion(
+        'pending-reply-human-injects-delivery-review',
+        adapter.records.length === 3 && !!reminder && JSON.stringify(reminder.messages).includes('只有 send_message 发送的内容才能送达人类'),
+        '直接人类消息尚未回复时，内部文字 end_turn 必须触发一次交付复核',
+      ),
+      assertion(
+        'pending-reply-human-recovers-with-send-message',
+        env.messagingCalls.some((call) => call.method === 'send_message'
+          && (call.params as JsonRecord).session_id === scenario),
+        '交付复核后必须能通过当前会话 send_message 完成回复',
+      ),
+    ],
+  }
+}
+
+async function deterministicPendingReplyWorkerScenario(
+  runRoot: string,
+  projectRoot: string,
+): Promise<{ env: EvaluationEnvironment; assertions: EvaluationAssertion[] }> {
+  const scenario = 'deterministic-pending-reply-worker'
+  const adapter = new RecordingAdapter(scenario, () => textResponse('只保留在内部的执行器事件判断。'))
+  const env = await createEnvironment({ root: runRoot, scenario, projectRoot, adapter })
+  await seedWorker(env, 'worker-pending-reply', '核查待回复门控')
+
+  env.setStep('worker-only')
+  await env.routeWorker('worker-pending-reply', '执行器已更新状态。')
+
+  return {
+    env,
+    assertions: [
+      assertion(
+        'pending-reply-worker-does-not-review-delivery',
+        adapter.records.length === 1
+          && !adapter.records.some((record) => JSON.stringify(record.messages).includes('只有 send_message 发送的内容才能送达人类')),
+        '没有直接人类消息义务时，执行器事件的内部文字必须一次请求后收口',
+      ),
+    ],
+  }
+}
+
 function projectWorkerCalls(environments: readonly EvaluationEnvironment[], replacements: ReadonlyMap<string, string>): EvaluationReport['worker_calls'] {
   return environments.flatMap((env) => env.workerAdapter.calls.map((call) => redactForEvaluation(call, replacements) as EvaluationReport['worker_calls'][number]))
 }
@@ -1074,6 +1232,9 @@ export async function runDeterministicEvaluation(options: EvalOptions = {}): Pro
       deterministicProjectDocScenario,
       deterministicInterleavingScenario,
       deterministicRevisionScenario,
+      deterministicWorkboardFailureRecoveryScenario,
+      deterministicPendingReplyHumanScenario,
+      deterministicPendingReplyWorkerScenario,
     ]) {
       const result = await run(runRoot, projectRoot, fixture.sentinels)
       environments.push(result.env)
@@ -1117,6 +1278,47 @@ function matchesRule(call: ToolCallProjection, rule: BehaviorCallRule): boolean 
   return true
 }
 
+function hasWorkboardFailureRecovery(records: readonly RequestProjection[]): boolean {
+  const failureDeliveryIndex = records.findIndex((record) => (
+    JSON.stringify(record.tool_results).includes('change_workboard 失败')
+  ))
+  if (failureDeliveryIndex < 1) return false
+
+  const failedCall = records[failureDeliveryIndex - 1].response?.tool_calls.find((call) => call.name === 'change_workboard')
+  if (!failedCall || typeof failedCall.input.action !== 'string') return false
+
+  const inspectIndex = records.findIndex((record, index) => (
+    index >= failureDeliveryIndex && record.response?.tool_calls.some((call) => call.name === 'inspect_workboard')
+  ))
+  if (inspectIndex < 0) return false
+
+  const retryIndex = records.findIndex((record, index) => (
+    index > inspectIndex && record.response?.tool_calls.some((call) => (
+      call.name === 'change_workboard' && call.input.action === failedCall.input.action
+    ))
+  ))
+  if (retryIndex < 0) return false
+
+  const successActions: Record<string, string> = {
+    create_objective: 'objective_created',
+    revise_objective: 'objective_revised',
+    archive_objective: 'objective_archived',
+    create_work_item: 'work_item_created',
+    revise_work_item: 'work_item_revised',
+    archive_work_item: 'work_item_archived',
+  }
+  const successAction = successActions[failedCall.input.action]
+  if (!successAction) return false
+  return records.slice(retryIndex + 1).some((record) => {
+    const results = Array.isArray(record.tool_results) ? record.tool_results : []
+    return results.some((result) => (
+      result && typeof result === 'object'
+      && (result as JsonRecord).is_error !== true
+      && JSON.stringify((result as JsonRecord).content).includes(successAction)
+    ))
+  })
+}
+
 const READ_ONLY_MEMORY_METHODS = new Set([
   'search_short_term',
   'search_long_term',
@@ -1154,6 +1356,23 @@ async function gradeBehaviorScenario(
   }
   for (const [index, rule] of (scenario.expect.forbidden_calls ?? []).entries()) {
     results.push(assertion(`${prefix}-forbidden-call-${index}`, !calls.some((call) => matchesRule(call, rule)), `${scenario.title} 出现禁止的 ${rule.tool} 调用`))
+  }
+  if (scenario.expect.max_delivery_reviews !== undefined) {
+    const reviews = env.recordingAdapter.records.filter((record) => (
+      JSON.stringify(record.messages).includes('只有 send_message 发送的内容才能送达人类')
+    )).length
+    results.push(assertion(
+      `${prefix}-max-delivery-reviews`,
+      reviews <= scenario.expect.max_delivery_reviews,
+      `${scenario.title} 的交付复核请求数不得超过 ${scenario.expect.max_delivery_reviews}，实际为 ${reviews}`,
+    ))
+  }
+  if (scenario.expect.workboard_failure_recovery) {
+    results.push(assertion(
+      `${prefix}-workboard-failure-recovery`,
+      hasWorkboardFailureRecovery(env.recordingAdapter.records),
+      `${scenario.title} 必须在任务板写入失败后重新查阅并完成同类修改`,
+    ))
   }
 
   if (scenario.expect.worker_spawns) {
@@ -1326,6 +1545,16 @@ export async function runBehaviorEvaluation(options: EvalOptions = {}): Promise<
               await env.routeHuman(step.text.split('{{project_root}}').join(projectRoot))
             } else if (step.kind === 'worker') {
               await env.routeWorker(step.worker_id, step.text)
+            } else if (step.kind === 'admin_revise_objective') {
+              const board = await env.stack.workboard.loadAdmin(env.managerKey)
+              const objective = board.objectives.find((entry) => entry.title === step.target_title)
+              if (!objective) throw new Error(`评测 Admin 找不到目标: ${step.target_title}`)
+              await env.stack.workboard.adminReviseObjective(
+                env.managerKey,
+                board.revision,
+                objective.objective_id,
+                step.objective,
+              )
             } else {
               await env.routeIdleReview()
             }
@@ -1373,9 +1602,11 @@ async function main(): Promise<void> {
   if (mode !== 'deterministic' && mode !== 'behavior' && mode !== 'behavior-idle-review') {
     throw new Error('评测模式必须是 deterministic、behavior 或 behavior-idle-review')
   }
+  const configuredPrefix = process.env.EVAL_SCENARIO_PREFIX?.trim() || undefined
+  const scenarioPrefix = mode === 'behavior-idle-review' ? 'idle-review-' : configuredPrefix
   const report = mode === 'deterministic'
     ? await runDeterministicEvaluation()
-    : await runBehaviorEvaluation(mode === 'behavior-idle-review' ? { scenarioPrefix: 'idle-review-' } : {})
+    : await runBehaviorEvaluation(scenarioPrefix ? { scenarioPrefix } : {})
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const outputDir = process.env.EVAL_OUTPUT_DIR
     ? path.resolve(process.env.EVAL_OUTPUT_DIR)

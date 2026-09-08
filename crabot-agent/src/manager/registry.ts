@@ -43,7 +43,7 @@ import type {
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { ManagerResumeCheckpoint } from './resume-checkpoint.js'
 import type { SessionTarget } from '../mcp/crab-messaging.js'
-import type { HumanPrincipal } from './principal.js'
+import { splitManagerKey, type HumanPrincipal } from './principal.js'
 import { resolveTimezone } from '../utils/time.js'
 import type { ManagerInboundMessageFact } from './inbound-status.js'
 
@@ -235,6 +235,8 @@ export class ManagerRegistry {
   private readonly pendingIdleReviewCycles = new Map<ManagerKey, number>()
   private readonly completedIdleReviewCycles = new Map<ManagerKey, CompletedIdleReviewCycle>()
   private readonly idleReviewTimers = new Map<ManagerKey, IdleReviewTimer>()
+  /** 已接收直接人类消息、但尚未成功回复当前会话的 ManagerKey。Loop 回收不清除。 */
+  private readonly pendingReplies = new Set<ManagerKey>()
   private resumeReady: Promise<void> = Promise.resolve()
   private releaseResumes?: () => void
   private disposed = false
@@ -345,7 +347,13 @@ export class ManagerRegistry {
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
             onPostSendAction: () => this.loops.get(key)?.recordPostSendAction(),
             hasSuccessfulSendMessageTo: (target) => this.loops.get(key)?.hasSuccessfulSendMessageTo(target) ?? false,
-            onSuccessfulSendMessage: (target) => this.loops.get(key)?.recordSuccessfulSendMessage(target),
+            onSuccessfulSendMessage: (target) => {
+              this.loops.get(key)?.recordSuccessfulSendMessage(target)
+              const current = splitManagerKey(key)
+              if (target.channel_id === current.channelId && target.session_id === current.sessionId) {
+                this.pendingReplies.delete(key)
+              }
+            },
             sessionChannelsFor: (sessionId) => this.loops.get(key)?.sessionChannelsFor(sessionId),
             onObservedSessionTargets: (targets) => this.loops.get(key)?.recordObservedSessionTargets(targets),
             hasContinuedWorker: (workerId) => this.loops.get(key)?.hasContinuedWorker(workerId) ?? false,
@@ -357,6 +365,8 @@ export class ManagerRegistry {
       harness: this.deps.harness,
       now: this.deps.now,
       timezone: this.deps.timezone,
+      markPendingReply: () => { this.pendingReplies.add(key) },
+      hasPendingReply: () => this.pendingReplies.has(key),
       onEpisodeEnd: () => this.lastActiveAtMs.set(key, this.deps.now().getTime()),
       traceWriter: this.deps.traceWriter,
       onAdminChatWakeConsumed: this.deps.onAdminChatWakeConsumed
@@ -750,6 +760,7 @@ export class ManagerRegistry {
     this.idleReviewTimers.clear()
     this.pendingIdleReviewCycles.clear()
     this.completedIdleReviewCycles.clear()
+    this.pendingReplies.clear()
   }
 
   private captureIngress(): IngressCapture {

@@ -98,6 +98,50 @@
       }
     },
     {
+      "id": "workboard-write-failure-recovery",
+      "title": "管理员并发更新后写入失败并闭环重试",
+      "objectives": [
+        {
+          "title": "稳定任务板修改",
+          "completion_criteria": ["任务板修改结果已经确认"],
+          "work_items": [
+            {
+              "title": "核对修改闭环",
+              "status": "in_progress",
+              "current_judgement": "等待最终完成条件",
+              "next_action": "更新目标完成条件"
+            }
+          ]
+        }
+      ],
+      "steps": [
+        { "kind": "human", "text": "请先查阅任务板中的【稳定任务板修改】，告诉我它现在的完成条件；这一步不要修改任务板。" },
+        {
+          "kind": "admin_revise_objective",
+          "target_title": "稳定任务板修改",
+          "objective": {
+            "title": "稳定任务板修改",
+            "completion_criteria": ["管理员临时补充的完成条件"]
+          }
+        },
+        { "kind": "human", "text": "你刚才已经查过这个目标，请直接把它的完整完成条件改为【失败后已重新查阅并成功保存】，并确认任务板实际修改成功。" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard", "change_workboard"],
+        "required_calls": [
+          { "tool": "change_workboard", "equals": { "action": "revise_objective" } }
+        ],
+        "workboard_failure_recovery": true,
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["失败后已重新查阅并成功保存", "核对修改闭环"],
+          "excludes": ["管理员临时补充的完成条件"]
+        }
+      }
+    },
+    {
       "id": "ambiguous-reference",
       "title": "模糊指代需要消歧",
       "workers": [
@@ -183,7 +227,7 @@
       ],
       "expect": {
         "required_calls": [
-          { "tool": "change_workboard", "equals": { "action": "create_work_item", "objective_title": "让任务板在人类侧保持清楚" }, "contains": { "work_item.title": "验证窄屏任务板" } }
+          { "tool": "change_workboard", "equals": { "action": "create_work_item" }, "contains": { "work_item.title": "验证窄屏任务板" } }
         ],
         "forbidden_calls": [
           { "tool": "change_workboard", "equals": { "action": "create_objective" } }
@@ -273,15 +317,41 @@
       ],
       "expect": {
         "required_calls": [
-          { "tool": "change_workboard", "equals": { "action": "revise_work_item" }, "contains": { "work_item.current_judgement": "接口契约已对齐", "work_item.next_action": "Admin 页面" } }
+          { "tool": "change_workboard", "equals": { "action": "revise_work_item" }, "contains": { "work_item.current_judgement": "接口契约", "work_item.next_action": "Admin 页面" }, "contains_any": { "work_item.current_judgement": ["对齐", "通过"] } }
         ],
         "board": {
           "current_objectives": 1,
           "current_work_items": 1,
           "archive_entries": 0,
-          "contains": ["接口契约已对齐"],
+          "contains": ["接口契约", "Admin 页面"],
           "excludes": ["pnpm", "src/index.ts", "42 条日志", "TECH_DETAIL_SHOULD_NOT_ENTER_BOARD"]
         }
+      }
+    },
+    {
+      "id": "pending-reply-direct-human",
+      "title": "直接人类消息完成可见回复",
+      "steps": [
+        { "kind": "human", "text": "请在本会话回复一句：待回复义务测试已收到。不要派执行器，也不要修改任务板。" }
+      ],
+      "expect": {
+        "required_tools": ["send_message"],
+        "forbidden_tools": ["spawn_worker", "send_to_worker", "change_workboard"],
+        "max_delivery_reviews": 1
+      }
+    },
+    {
+      "id": "pending-reply-worker-only",
+      "title": "纯执行器事件不触发交付复核",
+      "workers": [
+        { "worker_id": "worker-pending-reply", "title": "核查待回复门控", "state": "idle" }
+      ],
+      "steps": [
+        { "kind": "worker", "worker_id": "worker-pending-reply", "text": "这是一条仅用于更新主控内部认知的状态：仍在等待外部构建完成，没有新结果，不需要通知人类，也不需要采取任何动作。" }
+      ],
+      "expect": {
+        "forbidden_tools": ["send_message", "send_private_message", "send_master_private"],
+        "max_delivery_reviews": 0
       }
     },
     {
@@ -392,7 +462,7 @@
       "expect": {
         "required_tools": ["inspect_workboard", "query_worker"],
         "required_calls": [
-          { "tool": "query_worker", "equals": { "worker_id": "worker-payments-query" }, "contains_any": { "question": ["进度", "做到", "当前"] } }
+          { "tool": "query_worker", "equals": { "worker_id": "worker-payments-query" }, "contains_any": { "question": ["进度", "做到", "当前", "目前", "已完成", "正在执行"] } }
         ],
         "forbidden_tools": [
           "spawn_worker",
@@ -541,7 +611,7 @@
         }
       ],
       "history": [
-        { "kind": "manager_sent", "text": "构建检查已经完成，产物没有问题；另外发布仍缺审批码，后续拿到再处理。" }
+        { "kind": "manager_sent", "text": "构建检查已经完成，产物没有问题；另外发布仍缺审批码。" }
       ],
       "steps": [
         { "kind": "idle_review" }

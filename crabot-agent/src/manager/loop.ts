@@ -94,15 +94,15 @@ const POST_SEND_ACTION_RECHECK_PROMPT = '[系统复核] 你刚才发出的消息
   + '不要因为这条系统提示重复向人类发送消息，也不要向人类提及系统复核。'
 const WORKBOARD_ADMIN_UPDATE_PROMPT = '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。'
 const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
+本提示用于提醒你跟进任务板中尚未收口的工作，做好进度管理。
+
 本会话已经空闲一小时，但任务板仍有当前目标。请查阅当前任务板和聊天历史，重新确认人类的最新意图。任务板只是可修订的管理摘要；如果它与人类已经表达的意图不一致，以人类的最新意图为准并更新任务板。
 
 仍能推进的，就在本回合继续推进。正在等待已经安排的执行结果时，可以按需查看执行器的状态和活动，必要时通过独立侧问了解进度；不要反复查询，也不要仅因本次检查向仍在运行的执行器主线发送催促、补充或纠偏。正在等待明确的外部事件时，不要重复操作。目标或事项已经变化、取消或重复时，及时调整、合并或归档；确实需要人类介入时，清楚说明阻塞以及需要人类提供的帮助。
 
 再次提醒人类前，检查你最近成功发送到本会话的三条消息。如果其中已经有一条整条消息都在专门提醒同一个阻塞，就不要重复提醒；如果此前只是夹在其他内容中提到该阻塞，不算单独提醒。当前上下文不足以确认时，先查询聊天历史；查询失败或结果仍不足时，不得再次发送阻塞提醒。
 
-任务板没有实质变化时，不要只为记录本次检查、等待状态或查询失败而修改任务板。
-
-不要只回复本提示，也不要发送没有新信息的进度消息。`
+任务板没有实质变化时，不要只为记录本次检查、等待状态或查询失败而修改任务板。`
 
 /** 插话远程图预取超时:enqueue 与 drain 之间隔着工具执行,后台预取不阻塞任何人。 */
 const REMOTE_IMAGE_PREFETCH_TIMEOUT_MS = 8_000
@@ -283,6 +283,10 @@ export interface ManagerLoopDeps {
    * 不注入则退回 `resolveTimezone(undefined)`(env `CRABOT_DEFAULT_TIMEZONE` → Asia/Shanghai)。
    */
   readonly timezone?: () => string
+  /** 新的直接人类消息已被当前 Manager 接受；待回复状态由 Registry 跨 Loop 持有。 */
+  readonly markPendingReply: () => void
+  /** 当前会话是否仍欠人类一次标准 send_message 回复。 */
+  readonly hasPendingReply: () => boolean
   readonly onEpisodeEnd?: (result: EpisodeResult) => void
   /**
    * Manager episode trace writer（P6-A §6）：窄接口，episode 边界调用。
@@ -704,6 +708,7 @@ export class ManagerLoop {
       if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
     }
     if (newEntries.length === 0) return
+    if (envelope.wake.kind === 'human_messages') this.deps.markPendingReply()
     for (const { message } of newEntries) this.knownCommittedHumanIds.add(message.platform_message_id)
     const projected = isHumanWake(envelope.wake)
       ? projectHumanEnvelope(envelope, newEntries)
@@ -804,6 +809,7 @@ export class ManagerLoop {
         state: { ...recovery.state, recent: restoredRecent },
         messageCount: 0,
         humanMessages: protectedTailStart < 0 ? [] : restoredRecent.slice(protectedTailStart),
+        hasNewDirectHumanMessages: false,
         lastCurrentWakeCommittedMessageId: undefined,
       } : await this.commitHumanInputs(
         await this.deps.store.load(this.deps.key),
@@ -828,6 +834,7 @@ export class ManagerLoop {
       }
       committedHumanMessages = committed.messageCount
       humanInputsCommitted = true
+      if (committed.hasNewDirectHumanMessages) this.deps.markPendingReply()
       // 已提交人类消息 id 的内存镜像:mid-episode 注入的投影判定用它(同步、无 store I/O)
       this.knownCommittedHumanIds = new Set(state.committedHumanMessageIds ?? [])
       if (committed.lastCurrentWakeCommittedMessageId) {
@@ -1334,11 +1341,13 @@ export class ManagerLoop {
     readonly state: ManagerSessionState
     readonly humanMessages: ReadonlyArray<EngineMessage>
     readonly messageCount: number
+    readonly hasNewDirectHumanMessages: boolean
     readonly lastCurrentWakeCommittedMessageId?: string
   }> {
     const committedIds = new Set(state.committedHumanMessageIds ?? [])
     const committedMessages: EngineMessage[] = []
     const newImageRefs: ManagerImageRef[] = []
+    let hasNewDirectHumanMessages = false
     let lastCurrentWakeCommittedMessageId: string | undefined
 
     for (const envelope of envelopes) {
@@ -1348,6 +1357,7 @@ export class ManagerLoop {
         .filter(({ message }) => !committedIds.has(message.platform_message_id))
       if (newEntries.length === 0) continue
 
+      if (envelope.wake.kind === 'human_messages') hasNewDirectHumanMessages = true
       for (const { message } of newEntries) committedIds.add(message.platform_message_id)
       const rendered = createUserMessage(this.renderEnvelope(projectHumanEnvelope(envelope, newEntries)))
       committedMessages.push(rendered)
@@ -1360,7 +1370,7 @@ export class ManagerLoop {
     }
 
     if (committedMessages.length === 0) {
-      return { state, humanMessages: [], messageCount: 0 }
+      return { state, humanMessages: [], messageCount: 0, hasNewDirectHumanMessages: false }
     }
 
     const next: ManagerSessionState = {
@@ -1376,6 +1386,7 @@ export class ManagerLoop {
       state: next,
       humanMessages: committedMessages,
       messageCount: committedMessages.length,
+      hasNewDirectHumanMessages,
       lastCurrentWakeCommittedMessageId,
     }
   }
@@ -1986,6 +1997,7 @@ export class ManagerLoop {
       suppressForcedSummary: () => true,
       assistantTextEndTurnHandler: async () => {
         if (assistantTextEndTurnReminderSent) return { kind: 'complete' as const }
+        if (!isBuiltinDailyReflection && !this.deps.hasPendingReply()) return { kind: 'complete' as const }
         assistantTextEndTurnReminderSent = true
         return {
           kind: 'inject' as const,

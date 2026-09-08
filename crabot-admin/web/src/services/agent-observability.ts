@@ -242,6 +242,7 @@ export interface WorkboardItemDraft {
 }
 
 export interface WorkboardItem extends WorkboardItemDraft {
+  work_item_id: string
   updated_at: string
 }
 
@@ -252,11 +253,13 @@ export interface ArchivedWorkboardItem extends WorkboardItem {
 }
 
 export interface WorkboardObjective extends WorkboardObjectiveDraft {
+  objective_id: string
   work_items: WorkboardItem[]
   updated_at: string
 }
 
 export interface ArchivedWorkboardObjective extends WorkboardObjectiveDraft {
+  objective_id: string
   archived_as: WorkboardArchiveOutcome
   archived_at: string
 }
@@ -281,20 +284,18 @@ export type ManagerWorkboardResult =
 
 export type ChangeWorkboardMutation =
   | { action: 'create_objective'; objective: WorkboardObjectiveDraft }
-  | { action: 'revise_objective'; current_objective_title: string; objective: WorkboardObjectiveDraft }
-  | { action: 'archive_objective'; current_objective_title: string; archived_as: WorkboardArchiveOutcome }
-  | { action: 'create_work_item'; objective_title: string; work_item: WorkboardItemDraft }
+  | { action: 'revise_objective'; objective_id: string; objective: WorkboardObjectiveDraft }
+  | { action: 'archive_objective'; objective_id: string; archived_as: WorkboardArchiveOutcome }
+  | { action: 'create_work_item'; objective_id: string; work_item: WorkboardItemDraft }
   | {
       action: 'revise_work_item'
-      current_objective_title: string
-      current_work_item_title: string
-      target_objective_title: string
+      work_item_id: string
+      target_objective_id?: string
       work_item: WorkboardItemDraft
     }
   | {
       action: 'archive_work_item'
-      current_objective_title: string
-      current_work_item_title: string
+      work_item_id: string
       archived_as: WorkboardArchiveOutcome
     }
 
@@ -308,7 +309,11 @@ interface ChangeWorkboardResultBase {
 export type ChangeWorkboardResult = ChangeWorkboardResultBase & (
   | { action: 'objective_created' | 'objective_revised'; objective: Omit<WorkboardObjective, 'work_items'> }
   | { action: 'objective_archived'; objective: ArchivedWorkboardObjective }
-  | { action: 'work_item_created' | 'work_item_revised'; objective_title: string; work_item: WorkboardItem }
+  | {
+      action: 'work_item_created' | 'work_item_revised'
+      objective: Pick<WorkboardObjective, 'objective_id' | 'title'>
+      work_item: WorkboardItem
+    }
   | { action: 'work_item_archived'; work_item: ArchivedWorkboardItem }
 )
 

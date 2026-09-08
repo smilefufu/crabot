@@ -37,6 +37,7 @@ describe('manager context 隔离评测 runner', () => {
         tempRoot: root,
       })
 
+      expect(report.assertions.filter((entry) => !entry.passed)).toEqual([])
       expect(report.status).toBe('passed')
       expect(report.requests.length).toBeGreaterThan(4)
       expect(report.memory_calls).toEqual([])
@@ -49,6 +50,13 @@ describe('manager context 隔离评测 runner', () => {
         'interleaved-worker-a-target',
         'revision-replaces-old-completion-criterion',
         'revision-does-not-archive-old-result',
+        'workboard-failure-returned-to-manager',
+        'workboard-failure-recovery-sequence',
+        'workboard-failure-retry-uses-current-id',
+        'workboard-failure-retry-committed',
+        'pending-reply-human-injects-delivery-review',
+        'pending-reply-human-recovers-with-send-message',
+        'pending-reply-worker-does-not-review-delivery',
         'memory-has-no-workboard-or-project-doc-mirror',
       ]) {
         expect(ids).toContain(id)

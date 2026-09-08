@@ -50,6 +50,9 @@ if [ "$MODE" != "deterministic" ] && [ "$BEHAVIOR_CONFIGURED" = "1" ]; then
   if [ -n "${EVAL_ACCOUNT_ID:-}" ]; then
     set -- "$@" --env EVAL_ACCOUNT_ID
   fi
+  if [ -n "${EVAL_SCENARIO_PREFIX:-}" ]; then
+    set -- "$@" --env EVAL_SCENARIO_PREFIX
+  fi
 fi
 
 "$@" "$IMAGE" "$MODE"
