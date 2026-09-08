@@ -58,6 +58,7 @@ async function captureRequestBody(params: {
   }
 
   expect(spy).toHaveBeenCalledTimes(1)
+  expect(spy.mock.calls[0][0]).not.toHaveProperty('prompt_cache_key')
   return spy.mock.calls[0][0] as Record<string, unknown>
 }
 
