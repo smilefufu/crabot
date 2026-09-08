@@ -5,6 +5,12 @@
 
 ## 当前状态
 
+### 项目初始化与 Harness Git 检测：spec 待确认
+
+- [设计 spec](crabot-docs/superpowers/specs/2026-09-08-project-bootstrap-git-observation-design.md) 已发布，覆盖新旧项目文档初始化、
+  Harness 统一 Git 检测、按需刷新、提交纪律和主控验收；附主控提示词与共享 Skill 的候选 diff。
+- 自审、文档链接与候选 diff 应用检查通过；等待人类确认后再更新正式协议和实施，当前未改运行时代码或提示词。
+
 ### OpenAI prompt_cache_key：实现与验证完成
 
 - `openai` / `openai-responses` 请求顶层统一添加稳定 key，按模型与完整 system prompt
