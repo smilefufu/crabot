@@ -89,6 +89,17 @@ interface AdminWorkboardReadFence {
   readonly location: WorkboardEntityLocation
 }
 
+interface V3WorkboardLocation {
+  readonly objective_title: string
+  readonly work_item_title?: string
+}
+
+interface V3AdminWorkboardReadFence {
+  readonly revision: number
+  readonly view: WorkboardView
+  readonly locations: V3WorkboardLocation[]
+}
+
 interface InternalBoard extends ManagerWorkboardAdminView {
   readonly schema_version: 4
   readonly pending_admin_notice?: PendingAdminWorkboardNotice
@@ -376,6 +387,35 @@ function normalizeFence(value: unknown): AdminWorkboardReadFence {
   return { revision: assertRevision(value.revision), view: value.view, location: normalizeLocation(value.location) }
 }
 
+function normalizeV3Location(value: unknown): V3WorkboardLocation {
+  if (!isRecord(value)) throw new Error('schema v3 任务板位置非法')
+  assertOnlyKeys(value, ['objective_title', 'work_item_title'], 'schema v3 任务板位置')
+  const workItemTitle = value.work_item_title === undefined
+    ? undefined
+    : normalizedTitle(value.work_item_title, 'work_item_title', true)
+  return {
+    objective_title: normalizedTitle(value.objective_title, 'objective_title', true),
+    ...(workItemTitle !== undefined ? { work_item_title: workItemTitle } : {}),
+  }
+}
+
+function normalizeV3Fence(value: unknown): V3AdminWorkboardReadFence {
+  if (!isRecord(value)) throw new Error('schema v3 admin_read_fence 非法')
+  assertOnlyKeys(value, ['revision', 'view', 'locations'], 'schema v3 admin_read_fence')
+  if (value.view !== 'active' && value.view !== 'archive') throw new Error('admin_read_fence view 非法')
+  if (!Array.isArray(value.locations) || value.locations.length === 0) {
+    throw new Error('admin_read_fence.locations 至少包含一项')
+  }
+  const locations = value.locations.map(normalizeV3Location)
+  const keys = locations.map((location) => JSON.stringify([location.objective_title, location.work_item_title ?? null]))
+  if (new Set(keys).size !== keys.length) throw new Error('admin_read_fence.locations 重复')
+  const itemLevel = locations[0].work_item_title !== undefined
+  if (locations.some((location) => (location.work_item_title !== undefined) !== itemLevel)) {
+    throw new Error('admin_read_fence 不能混合目标和事项位置')
+  }
+  return { revision: assertRevision(value.revision), view: value.view, locations }
+}
+
 function emptyBoard(key: ManagerKey): InternalBoard {
   return { schema_version: 4, manager_key: key, revision: 0, objectives: [], archive: [] }
 }
@@ -440,6 +480,116 @@ function validateBoard(value: unknown, key: ManagerKey): InternalBoard {
     if (fence.revision > board.revision) throw new Error('admin_read_fence revision 超前')
   }
   return board
+}
+
+function addV3EntityId(
+  value: unknown,
+  idField: 'objective_id' | 'work_item_id',
+  usedIds: Set<string>,
+  label: string,
+): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error(`${label} 必须是对象`)
+  if (idField in value) throw new Error(`${label} 包含未定义字段: ${idField}`)
+  const id = uniqueGeneratedId(usedIds)
+  usedIds.add(id)
+  return { ...value, [idField]: id }
+}
+
+function addV3ObjectiveId(
+  value: unknown,
+  objectiveIds: Set<string>,
+  workItemIds: Set<string>,
+): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error('schema v3 当前目标必须是对象')
+  if (!Array.isArray(value.work_items)) throw new Error('任务板 work_items 必须是数组')
+  return addV3EntityId({
+    ...value,
+    work_items: value.work_items.map((item) => (
+      addV3EntityId(item, 'work_item_id', workItemIds, 'schema v3 当前事项')
+    )),
+  }, 'objective_id', objectiveIds, 'schema v3 当前目标')
+}
+
+function addV3ArchiveId(
+  value: unknown,
+  objectiveIds: Set<string>,
+  workItemIds: Set<string>,
+): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error('schema v3 归档条目必须是对象')
+  if (value.status !== undefined || value.objective !== undefined) {
+    return addV3EntityId(value, 'work_item_id', workItemIds, 'schema v3 归档事项')
+  }
+  if (value.completion_criteria !== undefined) {
+    return addV3EntityId(value, 'objective_id', objectiveIds, 'schema v3 归档目标')
+  }
+  throw new Error('schema v3 归档条目类型非法')
+}
+
+function resolveV3FenceLocation(board: InternalBoard, fence: V3AdminWorkboardReadFence): WorkboardEntityLocation {
+  const current = fence.locations[fence.locations.length - 1]
+  let matches: WorkboardEntityLocation[]
+  if (fence.view === 'active') {
+    matches = board.objectives.flatMap((objective) => {
+      if (objective.title !== current.objective_title) return []
+      if (current.work_item_title === undefined) return [objectiveLocation(objective.objective_id)]
+      return objective.work_items.flatMap((item) => (
+        item.title === current.work_item_title ? [itemLocation(item.work_item_id)] : []
+      ))
+    })
+  } else if (current.work_item_title === undefined) {
+    matches = board.archive.flatMap((entry) => (
+      !('objective' in entry) && entry.title === current.objective_title
+        ? [objectiveLocation(entry.objective_id)]
+        : []
+    ))
+  } else {
+    matches = board.archive.flatMap((entry) => (
+      'objective' in entry
+      && entry.objective.title === current.objective_title
+      && entry.title === current.work_item_title
+        ? [itemLocation(entry.work_item_id)]
+        : []
+    ))
+  }
+  if (matches.length !== 1) {
+    throw new Error(`admin_read_fence 当前位置无法唯一映射: ${JSON.stringify(current)}`)
+  }
+  return matches[0]
+}
+
+function migrateV3Board(value: unknown, key: ManagerKey): InternalBoard {
+  if (!isRecord(value) || value.schema_version !== 3) throw new Error('任务板不是 schema v3')
+  assertOnlyKeys(
+    value,
+    ['schema_version', 'manager_key', 'revision', 'objectives', 'archive', 'pending_admin_notice', 'admin_read_fences'],
+    'schema v3 任务板',
+  )
+  if (value.manager_key !== key) throw new Error(`manager_key 不匹配: ${String(value.manager_key)}`)
+  if (!Array.isArray(value.objectives) || !Array.isArray(value.archive)) {
+    throw new Error('任务板 objectives/archive 必须是数组')
+  }
+
+  const objectiveIds = new Set<string>()
+  const workItemIds = new Set<string>()
+  const board = validateBoard({
+    schema_version: 4,
+    manager_key: value.manager_key,
+    revision: value.revision,
+    objectives: value.objectives.map((objective) => addV3ObjectiveId(objective, objectiveIds, workItemIds)),
+    archive: value.archive.map((entry) => addV3ArchiveId(entry, objectiveIds, workItemIds)),
+    ...(value.pending_admin_notice !== undefined ? { pending_admin_notice: value.pending_admin_notice } : {}),
+  }, key)
+  if (value.admin_read_fences === undefined) return board
+  if (!Array.isArray(value.admin_read_fences)) throw new Error('admin_read_fences 必须是数组')
+  const fences = value.admin_read_fences.map(normalizeV3Fence).map((fence) => ({
+    revision: fence.revision,
+    view: fence.view,
+    location: resolveV3FenceLocation(board, fence),
+  }))
+  return validateBoard({
+    ...board,
+    ...(fences.length > 0 ? { admin_read_fences: fences } : {}),
+  }, key)
 }
 
 function managerProjection(board: InternalBoard): ManagerWorkboard {
@@ -1000,11 +1150,21 @@ export class ManagerWorkboardStore {
     } catch (error) {
       throw new Error(`[ManagerWorkboardStore] workboard.json 损坏: ${file}: ${(error as Error).message}`)
     }
+    const shouldMigrate = isRecord(parsed) && parsed.schema_version === 3
+    let board: InternalBoard
     try {
-      return validateBoard(parsed, key)
+      board = shouldMigrate ? migrateV3Board(parsed, key) : validateBoard(parsed, key)
     } catch (error) {
       throw new Error(`[ManagerWorkboardStore] 非法任务板 ${file}: ${(error as Error).message}`)
     }
+    if (shouldMigrate) {
+      try {
+        await this.writeUnlocked(key, board)
+      } catch (error) {
+        throw new Error(`[ManagerWorkboardStore] schema v3 迁移写回失败 ${file}: ${(error as Error).message}`)
+      }
+    }
+    return board
   }
 
   private async writeUnlocked(key: ManagerKey, board: InternalBoard): Promise<void> {
