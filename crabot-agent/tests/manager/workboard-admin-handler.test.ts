@@ -61,13 +61,18 @@ describe('UnifiedAgent task-board Admin handler', () => {
       expires_at: '2026-09-05T00:01:00.000Z',
     })
 
-    await expect(current.handleChangeWorkboardAdmin({
+    const response = current.handleChangeWorkboardAdmin({
       manager_key: KEY,
       action: 'create_objective',
       objective: OBJECTIVE,
       expected_revision: 0,
       assertion: 'opaque-assertion',
-    })).resolves.toMatchObject({ revision: 1, manager_notification: 'pending' })
+    })
+    await expect(response).resolves.toMatchObject({
+      revision: 1,
+      objective: { objective_id: expect.any(String), title: OBJECTIVE.title },
+      manager_notification: 'pending',
+    })
 
     expect(current.rpcClient.callSensitive).toHaveBeenCalledWith(
       19001,
@@ -118,12 +123,12 @@ describe('UnifiedAgent task-board Admin handler', () => {
       consumed: true,
       expires_at: '2026-09-05T00:01:00.000Z',
     })
-    await current.managerStack.workboard.createObjective(KEY, OBJECTIVE)
+    const created = await current.managerStack.workboard.createObjective(KEY, OBJECTIVE)
 
     await expect(current.handleChangeWorkboardAdmin({
       manager_key: KEY,
       action: 'create_work_item',
-      objective_title: OBJECTIVE.title,
+      objective_id: created.value.objective_id,
       work_item: { ...ITEM, status: 'blocked' },
       expected_revision: 1,
       assertion: 'opaque-assertion',
@@ -134,6 +139,64 @@ describe('UnifiedAgent task-board Admin handler', () => {
       objectives: [{ work_items: [] }],
     })
     expect(current.dispatchWorkboardAdminNotice).not.toHaveBeenCalled()
+  })
+
+  it('事项移动的 assertion 摘要覆盖稳定 ID，结果返回当前目标地址', async () => {
+    const current = await boot()
+    current.rpcClient.callSensitive = vi.fn().mockResolvedValue({
+      consumed: true,
+      expires_at: '2026-09-05T00:01:00.000Z',
+    })
+    const source = await current.managerStack.workboard.createObjective(KEY, OBJECTIVE)
+    const target = await current.managerStack.workboard.createObjective(KEY, {
+      title: '建立隔离验证',
+      completion_criteria: ['验证结果可核对'],
+    })
+    const createdItem = await current.managerStack.workboard.createWorkItem(KEY, source.value.objective_id, ITEM)
+    const mutation = {
+      action: 'revise_work_item',
+      work_item_id: createdItem.value.work_item_id,
+      target_objective_id: target.value.objective_id,
+      work_item: { ...ITEM, next_action: '在隔离目标下继续核查' },
+    }
+
+    await expect(current.handleChangeWorkboardAdmin({
+      manager_key: KEY,
+      ...mutation,
+      expected_revision: 3,
+      assertion: 'opaque-assertion',
+    })).resolves.toMatchObject({
+      revision: 4,
+      objective: { objective_id: target.value.objective_id, title: '建立隔离验证' },
+      work_item: { work_item_id: createdItem.value.work_item_id },
+    })
+
+    expect(current.rpcClient.callSensitive).toHaveBeenCalledWith(
+      19001,
+      'consume_workboard_admin_assertion',
+      expect.objectContaining({
+        expected: expect.objectContaining({
+          payload_sha256: sha256CanonicalJson(mutation),
+        }),
+      }),
+      'workboard-admin-handler-test',
+      expect.any(Object),
+    )
+  })
+
+  it('create 请求夹带调用方指定的 ID 时在 assertion 核销前拒绝', async () => {
+    const current = await boot()
+    current.rpcClient.callSensitive = vi.fn()
+
+    await expect(current.handleChangeWorkboardAdmin({
+      manager_key: KEY,
+      action: 'create_objective',
+      objective_id: '00000000-0000-4000-8000-000000000001',
+      objective: OBJECTIVE,
+      expected_revision: 0,
+      assertion: 'opaque-assertion',
+    })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+    expect(current.rpcClient.callSensitive).not.toHaveBeenCalled()
   })
 
   it('宿主 episode 的成功结束不能替代任务板系统输入消费来清除 notice', async () => {

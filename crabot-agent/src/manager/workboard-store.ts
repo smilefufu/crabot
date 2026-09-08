@@ -12,6 +12,8 @@ const MAX_ENTRY_BYTES = 32 * 1024
 export type WorkboardItemStatus = 'ready' | 'in_progress' | 'blocked'
 export type WorkboardArchiveOutcome = 'completed' | 'abandoned'
 export type WorkboardView = 'active' | 'archive'
+export type ObjectiveId = string
+export type WorkItemId = string
 
 export interface WorkboardObjectiveDraft {
   readonly title: string
@@ -28,10 +30,12 @@ export interface WorkboardItemDraft {
 }
 
 export interface WorkboardItem extends WorkboardItemDraft {
+  readonly work_item_id: WorkItemId
   readonly updated_at: string
 }
 
 export interface WorkboardObjective extends WorkboardObjectiveDraft {
+  readonly objective_id: ObjectiveId
   readonly work_items: WorkboardItem[]
   readonly updated_at: string
 }
@@ -43,6 +47,7 @@ export interface ArchivedWorkboardItem extends WorkboardItem {
 }
 
 export interface ArchivedWorkboardObjective extends WorkboardObjectiveDraft {
+  readonly objective_id: ObjectiveId
   readonly archived_as: WorkboardArchiveOutcome
   readonly archived_at: string
 }
@@ -74,19 +79,18 @@ export interface PendingAdminWorkboardNotice {
   readonly retry_after_at?: string
 }
 
-interface WorkboardLocation {
-  readonly objective_title: string
-  readonly work_item_title?: string
-}
+type WorkboardEntityLocation =
+  | { readonly objective_id: ObjectiveId }
+  | { readonly work_item_id: WorkItemId }
 
 interface AdminWorkboardReadFence {
   readonly revision: number
   readonly view: WorkboardView
-  readonly locations: WorkboardLocation[]
+  readonly location: WorkboardEntityLocation
 }
 
 interface InternalBoard extends ManagerWorkboardAdminView {
-  readonly schema_version: 3
+  readonly schema_version: 4
   readonly pending_admin_notice?: PendingAdminWorkboardNotice
   readonly admin_read_fences?: AdminWorkboardReadFence[]
 }
@@ -111,7 +115,6 @@ interface BoardChange<T extends WorkboardMutationValue> {
 
 interface AdminBoardChange<T extends WorkboardMutationValue> extends BoardChange<T> {
   readonly fence: Omit<AdminWorkboardReadFence, 'revision'>
-  readonly merge_fence_from?: WorkboardLocation
 }
 
 export class WorkboardRevisionConflictError extends Error {
@@ -152,6 +155,13 @@ function normalizedTitle(value: unknown, field: string, persisted: boolean): str
   const result = normalizedString(value, field, persisted)
   if (Array.from(result).length > 200) throw new Error(`${field} 必须为 1 至 200 个 Unicode 字符`)
   return result
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+function normalizedId(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) throw new Error(`${field} 必须是合法 UUID`)
+  return value
 }
 
 function normalizedStringList(
@@ -237,17 +247,21 @@ function normalizeItemDraft(value: unknown, persisted: boolean): WorkboardItemDr
 function normalizePersistedItem(value: unknown): WorkboardItem {
   if (!isRecord(value)) throw new Error('事项必须是对象')
   const draft = normalizeItemDraft(
-    Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'updated_at')),
+    Object.fromEntries(Object.entries(value).filter(([key]) => !['work_item_id', 'updated_at'].includes(key))),
     true,
   )
   const expectedKeys = [
-    'title', 'status', 'next_action', 'updated_at',
+    'work_item_id', 'title', 'status', 'next_action', 'updated_at',
     ...(value.project_root === undefined ? [] : ['project_root']),
     ...(value.current_judgement === undefined ? [] : ['current_judgement']),
     ...(value.blocker === undefined ? [] : ['blocker']),
   ]
   assertOnlyKeys(value, expectedKeys, '当前事项')
-  const result = { ...draft, updated_at: assertTimestamp(value.updated_at, 'updated_at') }
+  const result = {
+    ...draft,
+    work_item_id: normalizedId(value.work_item_id, 'work_item_id'),
+    updated_at: assertTimestamp(value.updated_at, 'updated_at'),
+  }
   assertEntrySize(result, '事项')
   return result
 }
@@ -255,7 +269,7 @@ function normalizePersistedItem(value: unknown): WorkboardItem {
 function normalizePersistedObjective(value: unknown): WorkboardObjective {
   if (!isRecord(value)) throw new Error('目标必须是对象')
   const draft = normalizeObjectiveDraft({ title: value.title, completion_criteria: value.completion_criteria }, true)
-  assertOnlyKeys(value, ['title', 'completion_criteria', 'work_items', 'updated_at'], '当前目标')
+  assertOnlyKeys(value, ['objective_id', 'title', 'completion_criteria', 'work_items', 'updated_at'], '当前目标')
   if (!Array.isArray(value.work_items)) throw new Error('work_items 必须是数组')
   const workItems = value.work_items.map(normalizePersistedItem)
   const titles = new Set<string>()
@@ -265,6 +279,7 @@ function normalizePersistedObjective(value: unknown): WorkboardObjective {
   }
   const result: WorkboardObjective = {
     ...draft,
+    objective_id: normalizedId(value.objective_id, 'objective_id'),
     work_items: workItems,
     updated_at: assertTimestamp(value.updated_at, 'updated_at'),
   }
@@ -281,11 +296,11 @@ function normalizeArchiveOutcome(value: unknown): WorkboardArchiveOutcome {
 
 function normalizeArchivedItem(value: Record<string, unknown>): ArchivedWorkboardItem {
   const draftValue = Object.fromEntries(
-    Object.entries(value).filter(([key]) => !['updated_at', 'objective', 'archived_as', 'archived_at'].includes(key)),
+    Object.entries(value).filter(([key]) => !['work_item_id', 'updated_at', 'objective', 'archived_as', 'archived_at'].includes(key)),
   )
   const item = normalizeItemDraft(draftValue, true)
   const expectedKeys = [
-    'title', 'status', 'next_action', 'updated_at', 'objective', 'archived_as', 'archived_at',
+    'work_item_id', 'title', 'status', 'next_action', 'updated_at', 'objective', 'archived_as', 'archived_at',
     ...(value.project_root === undefined ? [] : ['project_root']),
     ...(value.current_judgement === undefined ? [] : ['current_judgement']),
     ...(value.blocker === undefined ? [] : ['blocker']),
@@ -293,6 +308,7 @@ function normalizeArchivedItem(value: Record<string, unknown>): ArchivedWorkboar
   assertOnlyKeys(value, expectedKeys, '归档事项')
   const result: ArchivedWorkboardItem = {
     ...item,
+    work_item_id: normalizedId(value.work_item_id, 'work_item_id'),
     updated_at: assertTimestamp(value.updated_at, 'updated_at'),
     objective: normalizeObjectiveDraft(value.objective, true),
     archived_as: normalizeArchiveOutcome(value.archived_as),
@@ -303,9 +319,10 @@ function normalizeArchivedItem(value: Record<string, unknown>): ArchivedWorkboar
 }
 
 function normalizeArchivedObjective(value: Record<string, unknown>): ArchivedWorkboardObjective {
-  assertOnlyKeys(value, ['title', 'completion_criteria', 'archived_as', 'archived_at'], '归档目标')
+  assertOnlyKeys(value, ['objective_id', 'title', 'completion_criteria', 'archived_as', 'archived_at'], '归档目标')
   const result: ArchivedWorkboardObjective = {
     ...normalizeObjectiveDraft({ title: value.title, completion_criteria: value.completion_criteria }, true),
+    objective_id: normalizedId(value.objective_id, 'objective_id'),
     archived_as: normalizeArchiveOutcome(value.archived_as),
     archived_at: assertTimestamp(value.archived_at, 'archived_at'),
   }
@@ -335,71 +352,37 @@ function normalizeNotice(value: unknown): PendingAdminWorkboardNotice {
   }
 }
 
-function normalizeLocation(value: unknown): WorkboardLocation {
+function normalizeLocation(value: unknown): WorkboardEntityLocation {
   if (!isRecord(value)) throw new Error('任务板位置非法')
-  assertOnlyKeys(value, ['objective_title', 'work_item_title'], '任务板位置')
-  const workItemTitle = value.work_item_title === undefined
-    ? undefined
-    : normalizedTitle(value.work_item_title, 'work_item_title', true)
-  return {
-    objective_title: normalizedTitle(value.objective_title, 'objective_title', true),
-    ...(workItemTitle !== undefined ? { work_item_title: workItemTitle } : {}),
+  if ('objective_id' in value && !('work_item_id' in value)) {
+    assertOnlyKeys(value, ['objective_id'], '任务板位置')
+    return { objective_id: normalizedId(value.objective_id, 'objective_id') }
   }
+  if ('work_item_id' in value && !('objective_id' in value)) {
+    assertOnlyKeys(value, ['work_item_id'], '任务板位置')
+    return { work_item_id: normalizedId(value.work_item_id, 'work_item_id') }
+  }
+  throw new Error('任务板位置必须且只能包含 objective_id 或 work_item_id')
 }
 
-function locationKey(location: WorkboardLocation): string {
-  return JSON.stringify([location.objective_title, location.work_item_title ?? null])
+function locationKey(location: WorkboardEntityLocation): string {
+  return 'objective_id' in location ? `objective:${location.objective_id}` : `work_item:${location.work_item_id}`
 }
 
 function normalizeFence(value: unknown): AdminWorkboardReadFence {
   if (!isRecord(value)) throw new Error('admin_read_fence 非法')
-  assertOnlyKeys(value, ['revision', 'view', 'locations'], 'admin_read_fence')
+  assertOnlyKeys(value, ['revision', 'view', 'location'], 'admin_read_fence')
   if (value.view !== 'active' && value.view !== 'archive') throw new Error('admin_read_fence view 非法')
-  if (!Array.isArray(value.locations) || value.locations.length === 0) {
-    throw new Error('admin_read_fence.locations 至少包含一项')
-  }
-  const locations = value.locations.map(normalizeLocation)
-  if (new Set(locations.map(locationKey)).size !== locations.length) {
-    throw new Error('admin_read_fence.locations 重复')
-  }
-  const itemLevel = locations[0].work_item_title !== undefined
-  if (locations.some((location) => (location.work_item_title !== undefined) !== itemLevel)) {
-    throw new Error('admin_read_fence 不能混合目标和事项位置')
-  }
-  return { revision: assertRevision(value.revision), view: value.view, locations }
-}
-
-function currentFenceLocation(fence: Pick<AdminWorkboardReadFence, 'locations'>): WorkboardLocation {
-  return fence.locations[fence.locations.length - 1]
-}
-
-function sameFenceRecord(left: AdminWorkboardReadFence, right: AdminWorkboardReadFence): boolean {
-  return left.revision === right.revision
-    && left.view === right.view
-    && left.locations.length === right.locations.length
-    && left.locations.every((location, index) => locationKey(location) === locationKey(right.locations[index]))
-}
-
-function locationsWithCurrentLast(
-  locations: ReadonlyArray<WorkboardLocation>,
-  current: WorkboardLocation,
-): WorkboardLocation[] {
-  const currentKey = locationKey(current)
-  const unique = new Map<string, WorkboardLocation>()
-  for (const location of locations) {
-    const key = locationKey(location)
-    if (key !== currentKey) unique.set(key, location)
-  }
-  return [...unique.values(), current]
+  return { revision: assertRevision(value.revision), view: value.view, location: normalizeLocation(value.location) }
 }
 
 function emptyBoard(key: ManagerKey): InternalBoard {
-  return { schema_version: 3, manager_key: key, revision: 0, objectives: [], archive: [] }
+  return { schema_version: 4, manager_key: key, revision: 0, objectives: [], archive: [] }
 }
 
 function validateBoard(value: unknown, key: ManagerKey): InternalBoard {
   if (!isRecord(value)) throw new Error('任务板 shape 非法')
-  if (value.schema_version !== 3) throw new Error(`未知 schema_version: ${String(value.schema_version)}`)
+  if (value.schema_version !== 4) throw new Error(`未知 schema_version: ${String(value.schema_version)}`)
   assertOnlyKeys(
     value,
     ['schema_version', 'manager_key', 'revision', 'objectives', 'archive', 'pending_admin_notice', 'admin_read_fences'],
@@ -410,10 +393,25 @@ function validateBoard(value: unknown, key: ManagerKey): InternalBoard {
     throw new Error('任务板 objectives/archive 必须是数组')
   }
   const objectives = value.objectives.map(normalizePersistedObjective)
+  const archive = value.archive.map(normalizeArchiveEntry)
   const titles = new Set<string>()
   for (const objective of objectives) {
     if (titles.has(objective.title)) throw new Error(`当前目标标题重复: ${objective.title}`)
     titles.add(objective.title)
+  }
+  const objectiveIds = new Set<string>()
+  for (const objective of [...objectives, ...archive.filter((entry): entry is ArchivedWorkboardObjective => !('objective' in entry))]) {
+    if (objectiveIds.has(objective.objective_id)) throw new Error(`objective_id 重复: ${objective.objective_id}`)
+    objectiveIds.add(objective.objective_id)
+  }
+  const workItemIds = new Set<string>()
+  const workItems = [
+    ...objectives.flatMap((objective) => objective.work_items),
+    ...archive.filter((entry): entry is ArchivedWorkboardItem => 'objective' in entry),
+  ]
+  for (const item of workItems) {
+    if (workItemIds.has(item.work_item_id)) throw new Error(`work_item_id 重复: ${item.work_item_id}`)
+    workItemIds.add(item.work_item_id)
   }
   const notice = value.pending_admin_notice === undefined ? undefined : normalizeNotice(value.pending_admin_notice)
   const fences = value.admin_read_fences === undefined
@@ -421,19 +419,20 @@ function validateBoard(value: unknown, key: ManagerKey): InternalBoard {
     : (() => {
         if (!Array.isArray(value.admin_read_fences)) throw new Error('admin_read_fences 必须是数组')
         const normalized = value.admin_read_fences.map(normalizeFence)
-        for (let index = 0; index < normalized.length; index++) {
-          if (normalized.slice(0, index).some((candidate) => sameFenceRecord(candidate, normalized[index]))) {
-            throw new Error('admin_read_fences 不能有重复记录')
-          }
+        const locations = new Set<string>()
+        for (const fence of normalized) {
+          const location = locationKey(fence.location)
+          if (locations.has(location)) throw new Error('admin_read_fences 不能重复保护同一实体')
+          locations.add(location)
         }
         return normalized
       })()
   const board: InternalBoard = {
-    schema_version: 3,
+    schema_version: 4,
     manager_key: key,
     revision: assertRevision(value.revision),
     objectives,
-    archive: value.archive.map(normalizeArchiveEntry),
+    archive,
     ...(notice ? { pending_admin_notice: notice } : {}),
     ...(fences && fences.length > 0 ? { admin_read_fences: fences } : {}),
   }
@@ -461,55 +460,38 @@ export function workboardCounts(board: Pick<ManagerWorkboard, 'objectives' | 'ar
   }
 }
 
-function objectiveLocation(title: string): WorkboardLocation {
-  return { objective_title: title }
+function objectiveLocation(objectiveId: ObjectiveId): WorkboardEntityLocation {
+  return { objective_id: objectiveId }
 }
 
-function itemLocation(objectiveTitle: string, itemTitle: string): WorkboardLocation {
-  return { objective_title: objectiveTitle, work_item_title: itemTitle }
+function itemLocation(workItemId: WorkItemId): WorkboardEntityLocation {
+  return { work_item_id: workItemId }
 }
 
-function locationConflicts(left: WorkboardLocation, right: WorkboardLocation): boolean {
-  if (left.objective_title !== right.objective_title) return false
-  return left.work_item_title === undefined
-    || right.work_item_title === undefined
-    || left.work_item_title === right.work_item_title
-}
-
-function visibleLocations(view: WorkboardView, entries: ReadonlyArray<WorkboardObjective | WorkboardArchiveEntry>): WorkboardLocation[] {
+function visibleLocations(
+  view: WorkboardView,
+  entries: ReadonlyArray<WorkboardObjective | WorkboardArchiveEntry>,
+): WorkboardEntityLocation[] {
   if (view === 'active') {
     return entries.flatMap((entry) => {
       if (!('work_items' in entry)) return []
       return [
-        objectiveLocation(entry.title),
-        ...entry.work_items.map((item) => itemLocation(entry.title, item.title)),
+        objectiveLocation(entry.objective_id),
+        ...entry.work_items.map((item) => itemLocation(item.work_item_id)),
       ]
     })
   }
   return entries.flatMap((entry) => (
     'objective' in entry
-      ? [itemLocation(entry.objective.title, entry.title)]
-      : [objectiveLocation(entry.title)]
+      ? [itemLocation(entry.work_item_id)]
+      : [objectiveLocation(entry.objective_id)]
   ))
 }
 
-function addObjectiveAlias(
-  fences: ReadonlyArray<AdminWorkboardReadFence> | undefined,
-  currentTitle: string,
-  nextTitle: string,
-): AdminWorkboardReadFence[] | undefined {
-  if (!fences || currentTitle === nextTitle) return fences ? [...fences] : undefined
-  return fences.map((fence) => {
-    const current = currentFenceLocation(fence)
-    if (fence.view !== 'active' || current.objective_title !== currentTitle) return fence
-    const additions = fence.locations.flatMap((location) => (
-      location.objective_title === currentTitle
-        ? [{ ...location, objective_title: nextTitle }]
-        : []
-    ))
-    const nextCurrent = { ...current, objective_title: nextTitle }
-    return { ...fence, locations: locationsWithCurrentLast([...fence.locations, ...additions], nextCurrent) }
-  })
+function uniqueGeneratedId(used: ReadonlySet<string>): string {
+  let id = randomUUID()
+  while (used.has(id)) id = randomUUID()
+  return id
 }
 
 export class ManagerWorkboardStore {
@@ -532,83 +514,81 @@ export class ManagerWorkboardStore {
 
   async createObjective(key: ManagerKey, value: WorkboardObjectiveDraft): Promise<WorkboardMutationResult<WorkboardObjective>> {
     const draft = normalizeObjectiveDraft(value, false)
-    return this.managerMutate(key, (board) => {
-      this.assertNoUnreadFence(board, [objectiveLocation(draft.title)])
-      return this.createObjectiveChange(board, draft)
-    })
+    return this.managerMutate(key, (board) => this.createObjectiveChange(board, draft))
   }
 
   async reviseObjective(
     key: ManagerKey,
-    currentTitle: string,
+    objectiveId: ObjectiveId,
     value: WorkboardObjectiveDraft,
   ): Promise<WorkboardMutationResult<WorkboardObjective>> {
-    const target = normalizedTitle(currentTitle, 'current_objective_title', false)
+    const target = normalizedId(objectiveId, 'objective_id')
     const draft = normalizeObjectiveDraft(value, false)
     return this.managerMutate(key, (board) => {
-      this.assertNoUnreadObjectiveFence(board, [target, draft.title])
+      this.assertNoUnreadFence(board, [objectiveLocation(target)])
       return this.reviseObjectiveChange(board, target, draft)
     })
   }
 
   async archiveObjective(
     key: ManagerKey,
-    currentTitle: string,
+    objectiveId: ObjectiveId,
     archivedAs: WorkboardArchiveOutcome,
   ): Promise<WorkboardMutationResult<ArchivedWorkboardObjective>> {
-    const target = normalizedTitle(currentTitle, 'current_objective_title', false)
+    const target = normalizedId(objectiveId, 'objective_id')
     const outcome = normalizeArchiveOutcome(archivedAs)
     return this.managerMutate(key, (board) => {
-      this.assertNoUnreadObjectiveFence(board, [target])
+      this.assertNoUnreadFence(board, [objectiveLocation(target)])
       return this.archiveObjectiveChange(board, target, outcome)
     })
   }
 
   async createWorkItem(
     key: ManagerKey,
-    objectiveTitle: string,
+    objectiveId: ObjectiveId,
     value: WorkboardItemDraft,
   ): Promise<WorkboardMutationResult<WorkboardItem>> {
-    const target = normalizedTitle(objectiveTitle, 'objective_title', false)
+    const target = normalizedId(objectiveId, 'objective_id')
     const draft = normalizeItemDraft(value, false)
     return this.managerMutate(key, (board) => {
-      this.assertNoUnreadFence(board, [itemLocation(target, draft.title)])
+      this.assertNoUnreadFence(board, [objectiveLocation(target)])
       return this.createWorkItemChange(board, target, draft)
     })
   }
 
   async reviseWorkItem(
     key: ManagerKey,
-    currentObjectiveTitle: string,
-    currentWorkItemTitle: string,
-    targetObjectiveTitle: string,
+    workItemId: WorkItemId,
+    targetObjectiveId: ObjectiveId | undefined,
     value: WorkboardItemDraft,
   ): Promise<WorkboardMutationResult<WorkboardItem>> {
-    const currentObjective = normalizedTitle(currentObjectiveTitle, 'current_objective_title', false)
-    const currentItem = normalizedTitle(currentWorkItemTitle, 'current_work_item_title', false)
-    const targetObjective = normalizedTitle(targetObjectiveTitle, 'target_objective_title', false)
+    const itemId = normalizedId(workItemId, 'work_item_id')
+    const targetId = targetObjectiveId === undefined ? undefined : normalizedId(targetObjectiveId, 'target_objective_id')
     const draft = normalizeItemDraft(value, false)
     return this.managerMutate(key, (board) => {
       this.assertNoUnreadFence(board, [
-        itemLocation(currentObjective, currentItem),
-        itemLocation(targetObjective, draft.title),
+        itemLocation(itemId),
+        ...(targetId === undefined ? [] : [objectiveLocation(targetId)]),
       ])
-      return this.reviseWorkItemChange(board, currentObjective, currentItem, targetObjective, draft)
+      const { objectiveIndex } = this.uniqueWorkItemLocation(board, itemId)
+      const sourceObjectiveId = board.objectives[objectiveIndex].objective_id
+      this.assertNoUnreadFence(board, [objectiveLocation(sourceObjectiveId)])
+      return this.reviseWorkItemChange(board, itemId, targetId, draft)
     })
   }
 
   async archiveWorkItem(
     key: ManagerKey,
-    currentObjectiveTitle: string,
-    currentWorkItemTitle: string,
+    workItemId: WorkItemId,
     archivedAs: WorkboardArchiveOutcome,
   ): Promise<WorkboardMutationResult<ArchivedWorkboardItem>> {
-    const objectiveTitle = normalizedTitle(currentObjectiveTitle, 'current_objective_title', false)
-    const itemTitle = normalizedTitle(currentWorkItemTitle, 'current_work_item_title', false)
+    const itemId = normalizedId(workItemId, 'work_item_id')
     const outcome = normalizeArchiveOutcome(archivedAs)
     return this.managerMutate(key, (board) => {
-      this.assertNoUnreadFence(board, [itemLocation(objectiveTitle, itemTitle)])
-      return this.archiveWorkItemChange(board, objectiveTitle, itemTitle, outcome)
+      this.assertNoUnreadFence(board, [itemLocation(itemId)])
+      const { objectiveIndex } = this.uniqueWorkItemLocation(board, itemId)
+      this.assertNoUnreadFence(board, [objectiveLocation(board.objectives[objectiveIndex].objective_id)])
+      return this.archiveWorkItemChange(board, itemId, outcome)
     })
   }
 
@@ -619,98 +599,74 @@ export class ManagerWorkboardStore {
   ): Promise<AdminWorkboardMutationResult<WorkboardObjective>> {
     return this.adminMutate(key, expectedRevision, (board) => {
       const draft = normalizeObjectiveDraft(value, false)
-      return { ...this.createObjectiveChange(board, draft), fence: { view: 'active', locations: [objectiveLocation(draft.title)] } }
+      const change = this.createObjectiveChange(board, draft)
+      return { ...change, fence: { view: 'active', location: objectiveLocation(change.value.objective_id) } }
     })
   }
 
   async adminReviseObjective(
     key: ManagerKey,
     expectedRevision: number,
-    currentTitle: string,
+    objectiveId: ObjectiveId,
     value: WorkboardObjectiveDraft,
   ): Promise<AdminWorkboardMutationResult<WorkboardObjective>> {
     return this.adminMutate(key, expectedRevision, (board) => {
-      const target = normalizedTitle(currentTitle, 'current_objective_title', false)
+      const target = normalizedId(objectiveId, 'objective_id')
       const draft = normalizeObjectiveDraft(value, false)
-      return {
-        ...this.reviseObjectiveChange(board, target, draft),
-        fence: { view: 'active', locations: [objectiveLocation(target), objectiveLocation(draft.title)] },
-        merge_fence_from: objectiveLocation(target),
-      }
+      return { ...this.reviseObjectiveChange(board, target, draft), fence: { view: 'active', location: objectiveLocation(target) } }
     })
   }
 
   async adminArchiveObjective(
     key: ManagerKey,
     expectedRevision: number,
-    currentTitle: string,
+    objectiveId: ObjectiveId,
     archivedAs: WorkboardArchiveOutcome,
   ): Promise<AdminWorkboardMutationResult<ArchivedWorkboardObjective>> {
     return this.adminMutate(key, expectedRevision, (board) => {
-      const target = normalizedTitle(currentTitle, 'current_objective_title', false)
-      return {
-        ...this.archiveObjectiveChange(board, target, normalizeArchiveOutcome(archivedAs)),
-        fence: { view: 'archive', locations: [objectiveLocation(target)] },
-        merge_fence_from: objectiveLocation(target),
-      }
+      const target = normalizedId(objectiveId, 'objective_id')
+      return { ...this.archiveObjectiveChange(board, target, normalizeArchiveOutcome(archivedAs)), fence: { view: 'archive', location: objectiveLocation(target) } }
     })
   }
 
   async adminCreateWorkItem(
     key: ManagerKey,
     expectedRevision: number,
-    objectiveTitle: string,
+    objectiveId: ObjectiveId,
     value: WorkboardItemDraft,
   ): Promise<AdminWorkboardMutationResult<WorkboardItem>> {
     return this.adminMutate(key, expectedRevision, (board) => {
-      const target = normalizedTitle(objectiveTitle, 'objective_title', false)
+      const target = normalizedId(objectiveId, 'objective_id')
       const draft = normalizeItemDraft(value, false)
-      return {
-        ...this.createWorkItemChange(board, target, draft),
-        fence: { view: 'active', locations: [itemLocation(target, draft.title)] },
-      }
+      const change = this.createWorkItemChange(board, target, draft)
+      return { ...change, fence: { view: 'active', location: itemLocation(change.value.work_item_id) } }
     })
   }
 
   async adminReviseWorkItem(
     key: ManagerKey,
     expectedRevision: number,
-    currentObjectiveTitle: string,
-    currentWorkItemTitle: string,
-    targetObjectiveTitle: string,
+    workItemId: WorkItemId,
+    targetObjectiveId: ObjectiveId | undefined,
     value: WorkboardItemDraft,
   ): Promise<AdminWorkboardMutationResult<WorkboardItem>> {
     return this.adminMutate(key, expectedRevision, (board) => {
-      const currentObjective = normalizedTitle(currentObjectiveTitle, 'current_objective_title', false)
-      const currentItem = normalizedTitle(currentWorkItemTitle, 'current_work_item_title', false)
-      const targetObjective = normalizedTitle(targetObjectiveTitle, 'target_objective_title', false)
+      const itemId = normalizedId(workItemId, 'work_item_id')
+      const targetId = targetObjectiveId === undefined ? undefined : normalizedId(targetObjectiveId, 'target_objective_id')
       const draft = normalizeItemDraft(value, false)
-      return {
-        ...this.reviseWorkItemChange(board, currentObjective, currentItem, targetObjective, draft),
-        fence: {
-          view: 'active',
-          locations: [itemLocation(currentObjective, currentItem), itemLocation(targetObjective, draft.title)],
-        },
-        merge_fence_from: itemLocation(currentObjective, currentItem),
-      }
+      return { ...this.reviseWorkItemChange(board, itemId, targetId, draft), fence: { view: 'active', location: itemLocation(itemId) } }
     })
   }
 
   async adminArchiveWorkItem(
     key: ManagerKey,
     expectedRevision: number,
-    currentObjectiveTitle: string,
-    currentWorkItemTitle: string,
+    workItemId: WorkItemId,
     archivedAs: WorkboardArchiveOutcome,
   ): Promise<AdminWorkboardMutationResult<ArchivedWorkboardItem>> {
     return this.adminMutate(key, expectedRevision, (board) => {
-      const objectiveTitle = normalizedTitle(currentObjectiveTitle, 'current_objective_title', false)
-      const itemTitle = normalizedTitle(currentWorkItemTitle, 'current_work_item_title', false)
-      return {
-        ...this.archiveWorkItemChange(board, objectiveTitle, itemTitle, normalizeArchiveOutcome(archivedAs)),
-        fence: { view: 'archive', locations: [itemLocation(objectiveTitle, itemTitle)] },
-        merge_fence_from: itemLocation(objectiveTitle, itemTitle),
-      }
+      const itemId = normalizedId(workItemId, 'work_item_id')
+      return { ...this.archiveWorkItemChange(board, itemId, normalizeArchiveOutcome(archivedAs)), fence: { view: 'archive', location: itemLocation(itemId) } }
     })
   }
 
@@ -728,20 +684,12 @@ export class ManagerWorkboardStore {
     await this.mutexFor(key).run(async () => {
       const board = await this.readUnlocked(key)
       const fences = board.admin_read_fences ?? []
-      let changed = false
-      const remaining = fences.flatMap((fence) => {
-        if (fence.revision > observedRevision || fence.view !== view) return [fence]
-        const current = currentFenceLocation(fence)
-        if (visible.has(locationKey(current))) {
-          changed = true
-          return []
-        }
-        const locations = fence.locations.filter((location) => !visible.has(locationKey(location)))
-        if (locations.length === fence.locations.length) return [fence]
-        changed = true
-        return [{ ...fence, locations }]
-      })
-      if (!changed) return
+      const remaining = fences.filter((fence) => (
+        fence.revision > observedRevision
+        || fence.view !== view
+        || !visible.has(locationKey(fence.location))
+      ))
+      if (remaining.length === fences.length) return
       const { admin_read_fences: _fences, ...withoutFences } = board
       await this.writeUnlocked(key, remaining.length > 0 ? { ...withoutFences, admin_read_fences: remaining } : withoutFences)
     })
@@ -806,45 +754,51 @@ export class ManagerWorkboardStore {
       throw new Error(`当前目标标题重复: ${draft.title}`)
     }
     const timestamp = this.now()
-    const objective: WorkboardObjective = { ...draft, work_items: [], updated_at: timestamp }
-    assertEntrySize({ ...draft, updated_at: timestamp }, '目标')
+    const usedIds = new Set([
+      ...board.objectives.map((objective) => objective.objective_id),
+      ...board.archive.flatMap((entry) => 'objective_id' in entry ? [entry.objective_id] : []),
+    ])
+    const objective: WorkboardObjective = {
+      ...draft,
+      objective_id: uniqueGeneratedId(usedIds),
+      work_items: [],
+      updated_at: timestamp,
+    }
+    assertEntrySize({ ...draft, objective_id: objective.objective_id, updated_at: timestamp }, '目标')
     return { board: { ...board, objectives: [...board.objectives, objective] }, value: objective }
   }
 
   private reviseObjectiveChange(
     board: InternalBoard,
-    currentTitle: string,
+    objectiveId: ObjectiveId,
     draft: WorkboardObjectiveDraft,
   ): BoardChange<WorkboardObjective> {
-    const index = this.uniqueObjectiveIndex(board, currentTitle)
+    const index = this.uniqueObjectiveIndex(board, objectiveId)
     if (board.objectives.some((objective, candidateIndex) => candidateIndex !== index && objective.title === draft.title)) {
       throw new Error(`当前目标标题重复: ${draft.title}`)
     }
     const objective: WorkboardObjective = {
       ...draft,
+      objective_id: board.objectives[index].objective_id,
       work_items: board.objectives[index].work_items,
       updated_at: this.now(),
     }
-    assertEntrySize({ ...draft, updated_at: objective.updated_at }, '目标')
+    assertEntrySize({ ...draft, objective_id: objective.objective_id, updated_at: objective.updated_at }, '目标')
     const objectives = [...board.objectives]
     objectives[index] = objective
-    const fences = addObjectiveAlias(board.admin_read_fences, currentTitle, draft.title)
-    const { admin_read_fences: _fences, ...withoutFences } = board
-    return {
-      board: { ...withoutFences, objectives, ...(fences && fences.length > 0 ? { admin_read_fences: fences } : {}) },
-      value: objective,
-    }
+    return { board: { ...board, objectives }, value: objective }
   }
 
   private archiveObjectiveChange(
     board: InternalBoard,
-    currentTitle: string,
+    objectiveId: ObjectiveId,
     archivedAs: WorkboardArchiveOutcome,
   ): BoardChange<ArchivedWorkboardObjective> {
-    const index = this.uniqueObjectiveIndex(board, currentTitle)
+    const index = this.uniqueObjectiveIndex(board, objectiveId)
     const current = board.objectives[index]
-    if (current.work_items.length > 0) throw new Error(`目标仍有当前事项，不能归档: ${currentTitle}`)
+    if (current.work_items.length > 0) throw new Error(`目标仍有当前事项，不能归档: ${current.title}`)
     const objective: ArchivedWorkboardObjective = {
+      objective_id: current.objective_id,
       title: current.title,
       completion_criteria: current.completion_criteria,
       archived_as: archivedAs,
@@ -863,16 +817,20 @@ export class ManagerWorkboardStore {
 
   private createWorkItemChange(
     board: InternalBoard,
-    objectiveTitle: string,
+    objectiveId: ObjectiveId,
     draft: WorkboardItemDraft,
   ): BoardChange<WorkboardItem> {
-    const objectiveIndex = this.uniqueObjectiveIndex(board, objectiveTitle)
+    const objectiveIndex = this.uniqueObjectiveIndex(board, objectiveId)
     const currentObjective = board.objectives[objectiveIndex]
     if (currentObjective.work_items.some((item) => item.title === draft.title)) {
       throw new Error(`目标内事项标题重复: ${draft.title}`)
     }
     const timestamp = this.now()
-    const item: WorkboardItem = { ...draft, updated_at: timestamp }
+    const usedIds = new Set([
+      ...board.objectives.flatMap((objective) => objective.work_items.map((item) => item.work_item_id)),
+      ...board.archive.flatMap((entry) => 'work_item_id' in entry ? [entry.work_item_id] : []),
+    ])
+    const item: WorkboardItem = { ...draft, work_item_id: uniqueGeneratedId(usedIds), updated_at: timestamp }
     assertEntrySize(item, '事项')
     const objectives = [...board.objectives]
     objectives[objectiveIndex] = {
@@ -885,15 +843,13 @@ export class ManagerWorkboardStore {
 
   private reviseWorkItemChange(
     board: InternalBoard,
-    currentObjectiveTitle: string,
-    currentItemTitle: string,
-    targetObjectiveTitle: string,
+    workItemId: WorkItemId,
+    targetObjectiveId: ObjectiveId | undefined,
     draft: WorkboardItemDraft,
   ): BoardChange<WorkboardItem> {
-    const sourceIndex = this.uniqueObjectiveIndex(board, currentObjectiveTitle)
-    const targetIndex = this.uniqueObjectiveIndex(board, targetObjectiveTitle)
+    const { objectiveIndex: sourceIndex, itemIndex } = this.uniqueWorkItemLocation(board, workItemId)
+    const targetIndex = targetObjectiveId === undefined ? sourceIndex : this.uniqueObjectiveIndex(board, targetObjectiveId)
     const source = board.objectives[sourceIndex]
-    const itemIndex = this.uniqueWorkItemIndex(source, currentItemTitle)
     const target = board.objectives[targetIndex]
     if (target.work_items.some((item, candidateIndex) => (
       item.title === draft.title && (sourceIndex !== targetIndex || candidateIndex !== itemIndex)
@@ -902,7 +858,7 @@ export class ManagerWorkboardStore {
     }
 
     const timestamp = this.now()
-    const item: WorkboardItem = { ...draft, updated_at: timestamp }
+    const item: WorkboardItem = { ...draft, work_item_id: workItemId, updated_at: timestamp }
     assertEntrySize(item, '事项')
     const objectives = [...board.objectives]
     if (sourceIndex === targetIndex) {
@@ -922,13 +878,11 @@ export class ManagerWorkboardStore {
 
   private archiveWorkItemChange(
     board: InternalBoard,
-    objectiveTitle: string,
-    itemTitle: string,
+    workItemId: WorkItemId,
     archivedAs: WorkboardArchiveOutcome,
   ): BoardChange<ArchivedWorkboardItem> {
-    const objectiveIndex = this.uniqueObjectiveIndex(board, objectiveTitle)
+    const { objectiveIndex, itemIndex } = this.uniqueWorkItemLocation(board, workItemId)
     const objective = board.objectives[objectiveIndex]
-    const itemIndex = this.uniqueWorkItemIndex(objective, itemTitle)
     const timestamp = this.now()
     const item: ArchivedWorkboardItem = {
       ...objective.work_items[itemIndex],
@@ -946,32 +900,30 @@ export class ManagerWorkboardStore {
     return { board: { ...board, objectives, archive: [...board.archive, item] }, value: item }
   }
 
-  private uniqueObjectiveIndex(board: InternalBoard, title: string): number {
-    const matches = board.objectives.flatMap((objective, index) => objective.title === title ? [index] : [])
-    if (matches.length === 0) throw new Error(`当前目标不存在: ${title}`)
-    if (matches.length > 1) throw new Error(`当前目标标题不唯一: ${title}`)
+  private uniqueObjectiveIndex(board: InternalBoard, objectiveId: ObjectiveId): number {
+    const matches = board.objectives.flatMap((objective, index) => objective.objective_id === objectiveId ? [index] : [])
+    if (matches.length === 0) throw new Error(`当前目标不存在: ${objectiveId}`)
+    if (matches.length > 1) throw new Error(`当前目标 objective_id 不唯一: ${objectiveId}`)
     return matches[0]
   }
 
-  private uniqueWorkItemIndex(objective: WorkboardObjective, title: string): number {
-    const matches = objective.work_items.flatMap((item, index) => item.title === title ? [index] : [])
-    if (matches.length === 0) throw new Error(`目标内当前事项不存在: ${title}`)
-    if (matches.length > 1) throw new Error(`目标内当前事项标题不唯一: ${title}`)
+  private uniqueWorkItemLocation(
+    board: InternalBoard,
+    workItemId: WorkItemId,
+  ): { objectiveIndex: number; itemIndex: number } {
+    const matches = board.objectives.flatMap((objective, objectiveIndex) => (
+      objective.work_items.flatMap((item, itemIndex) => (
+        item.work_item_id === workItemId ? [{ objectiveIndex, itemIndex }] : []
+      ))
+    ))
+    if (matches.length === 0) throw new Error(`当前事项不存在: ${workItemId}`)
+    if (matches.length > 1) throw new Error(`当前事项 work_item_id 不唯一: ${workItemId}`)
     return matches[0]
   }
 
-  private assertNoUnreadFence(board: InternalBoard, locations: ReadonlyArray<WorkboardLocation>): void {
-    if (board.admin_read_fences?.some((fence) => (
-      fence.locations.some((protectedLocation) => locations.some((location) => locationConflicts(protectedLocation, location)))
-    ))) {
-      throw new Error('任务板已被管理员更新，请先使用 inspect_workboard 查阅最新内容后重试。')
-    }
-  }
-
-  private assertNoUnreadObjectiveFence(board: InternalBoard, titles: ReadonlyArray<string>): void {
-    if (board.admin_read_fences?.some((fence) => fence.locations.some((location) => (
-      location.work_item_title === undefined && titles.includes(location.objective_title)
-    )))) {
+  private assertNoUnreadFence(board: InternalBoard, locations: ReadonlyArray<WorkboardEntityLocation>): void {
+    const targets = new Set(locations.map(locationKey))
+    if (board.admin_read_fences?.some((fence) => targets.has(locationKey(fence.location)))) {
       throw new Error('任务板已被管理员更新，请先使用 inspect_workboard 查阅最新内容后重试。')
     }
   }
@@ -984,7 +936,7 @@ export class ManagerWorkboardStore {
     return this.mutexFor(key).run(async () => {
       const before = await this.readUnlocked(key)
       const result = change(before)
-      const board: InternalBoard = { ...result.board, schema_version: 3, revision: before.revision + 1 }
+      const board: InternalBoard = { ...result.board, schema_version: 4, revision: before.revision + 1 }
       await this.writeUnlocked(key, board)
       return { board: managerProjection(board), value: result.value }
     })
@@ -1012,13 +964,12 @@ export class ManagerWorkboardStore {
       const notice: PendingAdminWorkboardNotice = { revision, created_at: this.now(), attempts: 0 }
       const board: InternalBoard = {
         ...result.board,
-        schema_version: 3,
+        schema_version: 4,
         revision,
         pending_admin_notice: notice,
         admin_read_fences: this.mergeFence(
           result.board.admin_read_fences ?? [],
           { ...result.fence, revision },
-          result.merge_fence_from,
         ),
       }
       await this.writeUnlocked(key, board)
@@ -1029,27 +980,9 @@ export class ManagerWorkboardStore {
   private mergeFence(
     existing: ReadonlyArray<AdminWorkboardReadFence>,
     next: AdminWorkboardReadFence,
-    mergeFrom?: WorkboardLocation,
   ): AdminWorkboardReadFence[] {
-    if (!mergeFrom) return [...existing, next]
-    const nextCurrent = currentFenceLocation(next)
-    const mergeLocations = new Set([locationKey(mergeFrom), locationKey(nextCurrent)])
-    const aliases: WorkboardLocation[] = []
-    const remaining: AdminWorkboardReadFence[] = []
-    for (const fence of existing) {
-      const current = currentFenceLocation(fence)
-      const sameLevel = (current.work_item_title === undefined) === (nextCurrent.work_item_title === undefined)
-      if (fence.view !== 'active' || !sameLevel || !mergeLocations.has(locationKey(current))) {
-        remaining.push(fence)
-        continue
-      }
-      aliases.push(...fence.locations)
-    }
-    return [...remaining, {
-      revision: next.revision,
-      view: next.view,
-      locations: locationsWithCurrentLast([...aliases, ...next.locations], nextCurrent),
-    }]
+    const key = locationKey(next.location)
+    return [...existing.filter((fence) => locationKey(fence.location) !== key), next]
   }
 
   private async readUnlocked(key: ManagerKey): Promise<InternalBoard> {

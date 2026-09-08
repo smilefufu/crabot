@@ -11,7 +11,7 @@ import { resolvePath } from '../engine/tools/utils.js'
 import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
 import { SYSTEM_CHANNEL_ID, SYSTEM_SESSION_ID, type RpcClient } from 'crabot-shared'
-import type { Friend, MessageContent } from '../types.js'
+import type { ChannelMessage, Friend, MessageContent } from '../types.js'
 import { annotatePagination } from './pagination-annotator.js'
 import { translateChannelError } from './error-translator.js'
 import {
@@ -1211,14 +1211,8 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
             },
             {
               // Channel 协议返回 PaginatedResult<HistoryMessage>，字段名是 items
-              items: Array<{
-                platform_message_id: string
-                sender_name: string
-                sender_platform_user_id?: string
-                content: string
-                content_type: string
-                timestamp: string
-              }>
+              items: Array<Pick<ChannelMessage,
+                'platform_message_id' | 'sender' | 'content' | 'features' | 'platform_timestamp'>>
             }
           >(channelPort, 'get_history', {
             session_id: session_id,
@@ -1230,37 +1224,39 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           const messages = result.items ?? []
 
           // 将 platform_user_id 映射为 friend_id（去重后批量查询）
-          const adminPort = await getAdminPort()
           const uniqueUserIds = [...new Set(
             messages
-              .map(m => m.sender_platform_user_id)
+              .filter(m => !m.sender.friend_id)
+              .map(m => m.sender.platform_user_id)
               .filter((id): id is string => !!id),
           )]
           const friendMap = new Map<string, string | undefined>()
-          await Promise.all(uniqueUserIds.map(async (puid) => {
-            try {
-              const resolveResult = await rpcClient.call<
-                { channel_id: string; platform_user_id: string },
-                { friend: Friend | null }
-              >(adminPort, 'resolve_friend', {
-                channel_id: channel_id,
-                platform_user_id: puid,
-              }, moduleId)
-              friendMap.set(puid, resolveResult.friend?.id)
-            } catch {
-              // ignore mapping failures
-            }
-          }))
+          if (uniqueUserIds.length > 0) {
+            const adminPort = await getAdminPort()
+            await Promise.all(uniqueUserIds.map(async (puid) => {
+              try {
+                const resolveResult = await rpcClient.call<
+                  { channel_id: string; platform_user_id: string },
+                  { friend: Friend | null }
+                >(adminPort, 'resolve_friend', {
+                  channel_id: channel_id,
+                  platform_user_id: puid,
+                }, moduleId)
+                friendMap.set(puid, resolveResult.friend?.id)
+              } catch {
+                // ignore mapping failures
+              }
+            }))
+          }
 
           const enrichedMessages = messages.map(msg => ({
             platform_message_id: msg.platform_message_id,
-            sender_name: msg.sender_name,
-            sender_friend_id: msg.sender_platform_user_id
-              ? friendMap.get(msg.sender_platform_user_id)
-              : undefined,
-            content: msg.content,
-            content_type: msg.content_type,
-            timestamp: msg.timestamp,
+            sender_name: msg.sender.platform_display_name,
+            sender_friend_id: msg.sender.friend_id ?? friendMap.get(msg.sender.platform_user_id),
+            content: msg.content.text ?? '',
+            content_type: msg.content.type,
+            timestamp: msg.platform_timestamp,
+            quote_message_id: msg.features.quote_message_id,
           }))
 
           return withObservedSessionTargets(

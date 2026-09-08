@@ -536,6 +536,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     supportsVision: deps.managerSupportsVision,
     now: () => new Date(deps.now()),
     isClosing: deps.isClosing,
+    hasCurrentWorkboardObjectives: async (key) => (await workboardStore.load(key)).objectives.length > 0,
     timezone: deps.timezone,
     managerKeyFor: (key) => key,
     // 人类消息唤醒边界:这是人类消息链路上**唯一**一次异步解析。返回本批发言者算好的档位,
@@ -575,8 +576,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       // Capture at tool-face construction. Calling the resulting factory later must not
       // pick up a regrant/new generation from a subsequent wake.
       const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
-      const isWorkboardAdminUpdate = wakeEvent?.kind === 'workboard_admin_update'
-      const workboardPrincipal = isWorkboardAdminUpdate ? principals.get(key)?.principal : undefined
+      const isWorkboardSystemInput = wakeEvent?.kind === 'workboard_admin_update'
+        || wakeEvent?.kind === 'workboard_idle_review'
+      const workboardPrincipal = isWorkboardSystemInput ? principals.get(key)?.principal : undefined
       return buildManagerToolFace({
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
@@ -614,7 +616,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           ),
           // scheduled 触发(不论有无目标 session)记 'scheduled';系统线程的其余唤醒
           // (查不到监护 session 的 worker 事件)记 'system';人类消息记 'message'。
-          triggerType: scheduleIdentity ? 'scheduled' : isWorkboardAdminUpdate || isSystemThread ? 'system' : 'message',
+          triggerType: scheduleIdentity ? 'scheduled' : isWorkboardSystemInput || isSystemThread ? 'system' : 'message',
         }),
         messagingDeps: deps.messagingDeps,
         // send_message 省略 channel_id 时使用的 manager 归属目标与结构化 Session 观察索引
@@ -644,7 +646,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           readWorkerContext: (workerId) => workerContextStore.read(workerId),
           managerKey: key,
           wakeEvent,
-          ...(isWorkboardAdminUpdate
+          ...(isWorkboardSystemInput
             ? { managerPrincipalPermissions: principals.get(key)?.permissions ?? undefined }
             : {}),
         },
@@ -669,6 +671,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const dispose = (): Promise<void> => {
     if (disposePromise) return disposePromise
     disposePromise = (async () => {
+      registry?.dispose()
       const results = await Promise.allSettled(
         [...adapters.values()].map((adapter) => Promise.resolve().then(() => adapter.dispose())),
       )

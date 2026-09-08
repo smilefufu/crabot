@@ -92,6 +92,17 @@ const DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚
 const POST_SEND_ACTION_RECHECK_PROMPT = '[系统复核] 你刚才发出的消息标记为“随后新建 Worker”，但系统尚未观察到成功的 spawn_worker。\n'
   + '请根据真实意图重新确认：若仍需新建 Worker，现在调用 spawn_worker；若刚才只是讨论、无需派发，或字段误填，直接结束即可。\n'
   + '不要因为这条系统提示重复向人类发送消息，也不要向人类提及系统复核。'
+const WORKBOARD_ADMIN_UPDATE_PROMPT = '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。'
+const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
+本提示用于提醒你跟进任务板中尚未收口的工作，做好进度管理。
+
+本会话已经空闲一小时，但任务板仍有当前目标。请查阅当前任务板和聊天历史，重新确认人类的最新意图。任务板只是可修订的管理摘要；如果它与人类已经表达的意图不一致，以人类的最新意图为准并更新任务板。
+
+仍能推进的，就在本回合继续推进。正在等待已经安排的执行结果时，可以按需查看执行器的状态和活动，必要时通过独立侧问了解进度；不要反复查询，也不要仅因本次检查向仍在运行的执行器主线发送催促、补充或纠偏。正在等待明确的外部事件时，不要重复操作。目标或事项已经变化、取消或重复时，及时调整、合并或归档；确实需要人类介入时，清楚说明阻塞以及需要人类提供的帮助。
+
+再次提醒人类前，检查你最近成功发送到本会话的三条消息。如果其中已经有一条整条消息都在专门提醒同一个阻塞，就不要重复提醒；如果此前只是夹在其他内容中提到该阻塞，不算单独提醒。当前上下文不足以确认时，先查询聊天历史；查询失败或结果仍不足时，不得再次发送阻塞提醒。
+
+任务板没有实质变化时，不要只为记录本次检查、等待状态或查询失败而修改任务板。`
 
 /** 插话远程图预取超时:enqueue 与 drain 之间隔着工具执行,后台预取不阻塞任何人。 */
 const REMOTE_IMAGE_PREFETCH_TIMEOUT_MS = 8_000
@@ -156,6 +167,10 @@ export type WakeEvent =
       /** 已鉴权 Admin 保存任务板后的控制面系统输入；正文不含任务板快照。 */
       readonly kind: 'workboard_admin_update'
       readonly noticeRevision: number
+    }
+  | {
+      /** 任务板仍有当前目标时的一次性空闲复核；不携带任务板正文或计时元数据。 */
+      readonly kind: 'workboard_idle_review'
     }
   | {
       readonly kind: 'attention_flush'
@@ -268,6 +283,10 @@ export interface ManagerLoopDeps {
    * 不注入则退回 `resolveTimezone(undefined)`(env `CRABOT_DEFAULT_TIMEZONE` → Asia/Shanghai)。
    */
   readonly timezone?: () => string
+  /** 新的直接人类消息已被当前 Manager 接受；待回复状态由 Registry 跨 Loop 持有。 */
+  readonly markPendingReply: () => void
+  /** 当前会话是否仍欠人类一次标准 send_message 回复。 */
+  readonly hasPendingReply: () => boolean
   readonly onEpisodeEnd?: (result: EpisodeResult) => void
   /**
    * Manager episode trace writer（P6-A §6）：窄接口，episode 边界调用。
@@ -689,6 +708,7 @@ export class ManagerLoop {
       if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
     }
     if (newEntries.length === 0) return
+    if (envelope.wake.kind === 'human_messages') this.deps.markPendingReply()
     for (const { message } of newEntries) this.knownCommittedHumanIds.add(message.platform_message_id)
     const projected = isHumanWake(envelope.wake)
       ? projectHumanEnvelope(envelope, newEntries)
@@ -789,6 +809,7 @@ export class ManagerLoop {
         state: { ...recovery.state, recent: restoredRecent },
         messageCount: 0,
         humanMessages: protectedTailStart < 0 ? [] : restoredRecent.slice(protectedTailStart),
+        hasNewDirectHumanMessages: false,
         lastCurrentWakeCommittedMessageId: undefined,
       } : await this.commitHumanInputs(
         await this.deps.store.load(this.deps.key),
@@ -800,7 +821,7 @@ export class ManagerLoop {
         await this.deps.store.save(state)
         if (recovery.hasEngineMessages) {
           for (const item of episodeEnvelopes) {
-            if (item.wake.kind !== 'workboard_admin_update') this.restoredContextEnvelopes.add(item)
+            if (!transientSystemPromptForWake(item.wake)) this.restoredContextEnvelopes.add(item)
           }
         }
         this.adminChatClaims = new Map(recovery.adminChatClaims)
@@ -813,6 +834,7 @@ export class ManagerLoop {
       }
       committedHumanMessages = committed.messageCount
       humanInputsCommitted = true
+      if (committed.hasNewDirectHumanMessages) this.deps.markPendingReply()
       // 已提交人类消息 id 的内存镜像:mid-episode 注入的投影判定用它(同步、无 store I/O)
       this.knownCommittedHumanIds = new Set(state.committedHumanMessageIds ?? [])
       if (committed.lastCurrentWakeCommittedMessageId) {
@@ -822,10 +844,10 @@ export class ManagerLoop {
       const restoredMessages = recovery?.hasEngineMessages === true
       const carriedTexts = carriedEnvelopes
         .filter((item) => restoredMessages
-          ? item.wake.kind === 'workboard_admin_update'
+          ? transientSystemPromptForWake(item.wake) !== undefined
           : !isHumanWake(item.wake) || isEmptyHumanWake(item.wake))
         .map((item) => this.renderEnvelope(item))
-      const eventText = envelope && (!restoredMessages || envelope.wake.kind === 'workboard_admin_update')
+      const eventText = envelope && (!restoredMessages || transientSystemPromptForWake(envelope.wake) !== undefined)
         && (!isHumanWake(envelope.wake) || isEmptyHumanWake(envelope.wake))
         ? this.renderEnvelope(envelope)
         : undefined
@@ -1200,22 +1222,24 @@ export class ManagerLoop {
     // (query-loop createUserMessage 的随机 id 拿不到,按结构还原——数组 content 的
     // user message 取 text block 原文,drain 构造时文本标记原样保留,拍平后与渲染
     // 文本逐字一致)。
-    const transientWorkboardUpdates = currentInputEnvelopes.filter((item) => item.wake.kind === 'workboard_admin_update').length
-      + (this.currentEpisodeInjected ?? []).filter((item) => item.wake.kind === 'workboard_admin_update').length
+    const transientPromptCounts = new Map<string, number>()
+    for (const item of [...currentInputEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
+      const prompt = transientSystemPromptForWake(item.wake)
+      if (prompt) transientPromptCounts.set(prompt, (transientPromptCounts.get(prompt) ?? 0) + 1)
+    }
     const durablePrefixLength = state.recent.length + (attempt.hasSummaryMarker ? 1 : 0)
-    let remainingTransientWorkboardUpdates = transientWorkboardUpdates
     const persistedFinalMessages = attempt.result.finalMessages.flatMap((m, index) => {
       if (this.resumeCheckpoint?.transientMessageIds.includes(m.id)) return []
       // 系统提示只服务当前 LLM 请求。只在本次动态尾部之后按数量剔除，避免误删旧 history
       // 中恰好同文的人类消息；Worker/任务板正文从未进入这里。
       if (
         index >= durablePrefixLength
-        && remainingTransientWorkboardUpdates > 0
         && m.role === 'user'
         && 'content' in m
-        && m.content === '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。'
+        && typeof m.content === 'string'
+        && (transientPromptCounts.get(m.content) ?? 0) > 0
       ) {
-        remainingTransientWorkboardUpdates -= 1
+        transientPromptCounts.set(m.content, transientPromptCounts.get(m.content)! - 1)
         return []
       }
       const original = originalsById.get(m.id)
@@ -1317,11 +1341,13 @@ export class ManagerLoop {
     readonly state: ManagerSessionState
     readonly humanMessages: ReadonlyArray<EngineMessage>
     readonly messageCount: number
+    readonly hasNewDirectHumanMessages: boolean
     readonly lastCurrentWakeCommittedMessageId?: string
   }> {
     const committedIds = new Set(state.committedHumanMessageIds ?? [])
     const committedMessages: EngineMessage[] = []
     const newImageRefs: ManagerImageRef[] = []
+    let hasNewDirectHumanMessages = false
     let lastCurrentWakeCommittedMessageId: string | undefined
 
     for (const envelope of envelopes) {
@@ -1331,6 +1357,7 @@ export class ManagerLoop {
         .filter(({ message }) => !committedIds.has(message.platform_message_id))
       if (newEntries.length === 0) continue
 
+      if (envelope.wake.kind === 'human_messages') hasNewDirectHumanMessages = true
       for (const { message } of newEntries) committedIds.add(message.platform_message_id)
       const rendered = createUserMessage(this.renderEnvelope(projectHumanEnvelope(envelope, newEntries)))
       committedMessages.push(rendered)
@@ -1343,7 +1370,7 @@ export class ManagerLoop {
     }
 
     if (committedMessages.length === 0) {
-      return { state, humanMessages: [], messageCount: 0 }
+      return { state, humanMessages: [], messageCount: 0, hasNewDirectHumanMessages: false }
     }
 
     const next: ManagerSessionState = {
@@ -1359,6 +1386,7 @@ export class ManagerLoop {
       state: next,
       humanMessages: committedMessages,
       messageCount: committedMessages.length,
+      hasNewDirectHumanMessages,
       lastCurrentWakeCommittedMessageId,
     }
   }
@@ -1466,6 +1494,7 @@ export class ManagerLoop {
     for (const envelope of envelopes) {
       if (this.restoredContextEnvelopes.has(envelope)) continue
       if (envelope.activity_context_receipt) continue
+      if (envelope.wake.kind === 'workboard_idle_review') continue
       if (humanInputsCommitted && isHumanWake(envelope.wake)) continue
       this.mailbox.push(envelope)
     }
@@ -1909,12 +1938,19 @@ export class ManagerLoop {
       })
       if (this.resumeCheckpoint) {
         const transientIds = new Set(this.resumeCheckpoint.transientMessageIds)
-        let remaining = [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]
-          .filter((item) => item.wake.kind === 'workboard_admin_update').length
+        const remaining = new Map<string, number>()
+        for (const item of [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
+          const prompt = transientSystemPromptForWake(item.wake)
+          if (prompt) remaining.set(prompt, (remaining.get(prompt) ?? 0) + 1)
+        }
         for (const message of recent.slice(state.recent.length)) {
-          if (remaining > 0 && 'content' in message && message.content === '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。') {
+          if (
+            'content' in message
+            && typeof message.content === 'string'
+            && (remaining.get(message.content) ?? 0) > 0
+          ) {
             transientIds.add(message.id)
-            remaining -= 1
+            remaining.set(message.content, remaining.get(message.content)! - 1)
           }
         }
         this.resumeCheckpoint = { ...this.resumeCheckpoint, transientMessageIds: [...transientIds] }
@@ -1961,6 +1997,7 @@ export class ManagerLoop {
       suppressForcedSummary: () => true,
       assistantTextEndTurnHandler: async () => {
         if (assistantTextEndTurnReminderSent) return { kind: 'complete' as const }
+        if (!isBuiltinDailyReflection && !this.deps.hasPendingReply()) return { kind: 'complete' as const }
         assistantTextEndTurnReminderSent = true
         return {
           kind: 'inject' as const,
@@ -2072,6 +2109,8 @@ export function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, 
       return { type: 'schedule', summary: `定时任务:${wake.title}${mergedNote}`, source: `schedule:${wake.scheduleId}` }
     case 'workboard_admin_update':
       return { type: 'system', summary: `管理员更新任务板${mergedNote}` }
+    case 'workboard_idle_review':
+      return { type: 'system', summary: `任务板空闲自省${mergedNote}` }
     case 'worker_event':
       return { type: 'worker_event', summary: `worker 事件:${wake.event.kind} (${wake.event.worker_id})${mergedNote}`, source: `worker:${wake.event.worker_id}` }
     case 'media_notification':
@@ -2361,9 +2400,8 @@ function assertTimedWakeEnvelope(value: TimedWakeEnvelope): void {
 
 /** Pure projection of ingress-fixed time; this function never reads a live clock. */
 export function renderTimedWakeEnvelope(envelope: TimedWakeEnvelope): string {
-  if (envelope.wake.kind === 'workboard_admin_update') {
-    return '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。'
-  }
+  const transientPrompt = transientSystemPromptForWake(envelope.wake)
+  if (transientPrompt) return transientPrompt
   const header = `[event received_at="${envelope.received_at}" timezone="${envelope.timezone}"]`
   const occurred = envelope.occurred_at ? `\n[event occurred_at="${envelope.occurred_at}"]` : ''
   return `${header}${occurred}\n${renderWakeEvent(envelope.wake, envelope)}`
@@ -2373,6 +2411,12 @@ type HumanWake = Extract<WakeEvent, { readonly kind: 'human_messages' | 'attenti
 
 function isHumanWake(wake: WakeEvent): wake is HumanWake {
   return wake.kind === 'human_messages' || wake.kind === 'attention_flush'
+}
+
+function transientSystemPromptForWake(wake: WakeEvent): string | undefined {
+  if (wake.kind === 'workboard_admin_update') return WORKBOARD_ADMIN_UPDATE_PROMPT
+  if (wake.kind === 'workboard_idle_review') return WORKBOARD_IDLE_REVIEW_PROMPT
+  return undefined
 }
 
 function isEmptyHumanWake(wake: HumanWake): boolean {
@@ -2429,7 +2473,9 @@ function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope): string 
     case 'schedule':
       return `[定时任务触发] scheduleId=${event.scheduleId}\n标题:${event.title}\n描述:${event.description}`
     case 'workboard_admin_update':
-      return '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。'
+      return WORKBOARD_ADMIN_UPDATE_PROMPT
+    case 'workboard_idle_review':
+      return WORKBOARD_IDLE_REVIEW_PROMPT
   }
 }
 

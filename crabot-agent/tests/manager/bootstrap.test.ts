@@ -229,16 +229,20 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect((stack.harness as unknown as { deps: HarnessDeps }).deps.capabilityBundle).toBe(capabilityBundle)
   })
 
-  it('dispose 释放三个 adapter，重复调用只执行一次', async () => {
+  it('dispose 先停止 Registry 计时，再释放三个 adapter；重复调用只执行一次', async () => {
     const stack = buildManagerStack(makeDeps())
+    const order: string[] = []
+    const registryDispose = vi.spyOn(stack.registry, 'dispose').mockImplementation(() => { order.push('registry') })
     const disposers = [...stack.adapters.values()].map((adapter) => {
-      const dispose = vi.fn(async () => {})
+      const dispose = vi.fn(async () => { order.push('adapter') })
       ;(adapter as WorkerAdapter & { dispose: () => Promise<void> }).dispose = dispose
       return dispose
     })
 
     await Promise.all([stack.dispose(), stack.dispose()])
 
+    expect(registryDispose).toHaveBeenCalledTimes(1)
+    expect(order[0]).toBe('registry')
     for (const dispose of disposers) expect(dispose).toHaveBeenCalledTimes(1)
   })
 
@@ -748,6 +752,72 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(context.principal_permissions).toEqual(principalPermissions)
   })
 
+  it('任务板空闲自省沿用已有主体的项目文档权限，派出 Worker 记为 system 来源', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-07T00:00:00.000Z'))
+    try {
+      const projectRoot = join(tmpRoot, 'idle-review-project')
+      await fs.mkdir(projectRoot, { recursive: true })
+      await fs.writeFile(join(projectRoot, 'README.md'), '# 自省项目\n')
+      const principalPermissions: ResolvedPermissions = {
+        tool_access: {
+          memory: false, messaging: false, task: true, mcp_skill: false, file_io: true,
+          browser: false, shell: false, remote_exec: false, desktop: false,
+        },
+        cli_access: Object.fromEntries(CLI_DOMAINS.map((domain) => [domain, 'none'])) as never,
+        storage: { workspace_path: projectRoot, access: 'readwrite' },
+        memory_scopes: ['idle-review-scope'],
+      }
+      let inspected: { isError: boolean; output: string } | undefined
+      const stack = buildManagerStack(makeDeps({
+        managerAdapter: () => ({
+          async *stream(params: LLMStreamParams) {
+            if (JSON.stringify(params.messages).includes('本会话已经空闲一小时')) {
+              const byName = new Map(params.tools.map((tool) => [tool.name, tool]))
+              inspected = await byName.get('inspect_project_docs')!.call({
+                project_root: projectRoot,
+                operation: 'read',
+                path: 'README.md',
+              }, {} as never)
+              await byName.get('spawn_worker')!.call({ title: '核查自省任务', prompt: '核查项目现状' }, {} as never)
+            }
+            yield* chunksFromContent([], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+          },
+          updateConfig: () => {},
+        }),
+        principalResolver: {
+          ...makePrincipalResolver(),
+          resolvePermissions: async () => principalPermissions,
+        },
+      }))
+      const key = 'wechat::sess-boot' as ManagerKey
+      await stack.workboard.createObjective(key, {
+        title: '验证空闲自省权限',
+        completion_criteria: ['自省可查项目文档并正确派发 Worker'],
+      })
+
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('先建立主体')], FRIEND_A)
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBeGreaterThan(0))
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+      await vi.waitFor(() => expect(inspected).toBeDefined())
+      await vi.advanceTimersByTimeAsync(100)
+
+      expect(inspected).toMatchObject({ isError: false })
+      expect(inspected?.output).toContain('# 自省项目')
+      const [spawned] = await stack.ledger.listAllWorkers()
+      expect(spawned?.worker.origin).toMatchObject({ trigger_type: 'system', creator_friend_id: FRIEND_A.id })
+      const context = JSON.parse(await fs.readFile(
+        join(dataRoot, 'agent', 'workers', spawned!.worker.worker_id, 'context.json'),
+        'utf8',
+      ))
+      expect(context.principal_permissions).toEqual(principalPermissions)
+      await stack.dispose()
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
 
   // --- ⑥ 发起人身份 → origin.creator_friend_id（P7 J Task 2） ---
 
@@ -893,16 +963,16 @@ describe('manager bootstrap（P5 Task 1）', () => {
             expect([...byName.keys()]).toEqual(expect.arrayContaining([
               'inspect_workboard', 'change_workboard', 'inspect_project_docs', 'manage_decision_doc',
             ]))
-            await byName.get('change_workboard')!.call({
+            const objectiveCreated = JSON.parse((await byName.get('change_workboard')!.call({
               action: 'create_objective',
               objective: {
                 title: '证明任务板工具已接入真实主控栈',
                 completion_criteria: ['后续请求不自动包含任务板正文'],
               },
-            }, {} as never)
+            }, {} as never)).output) as { objective: { objective_id: string } }
             created = JSON.parse((await byName.get('change_workboard')!.call({
               action: 'create_work_item',
-              objective_title: '证明任务板工具已接入真实主控栈',
+              objective_id: objectiveCreated.objective.objective_id,
               work_item: {
                 title: '验证主控上下文生产装配',
                 status: 'in_progress',

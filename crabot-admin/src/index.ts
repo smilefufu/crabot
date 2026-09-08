@@ -468,73 +468,83 @@ function parseStrictPositiveInt(raw: string | null): number | undefined {
 
 type WorkboardAdminMutationInput =
   | { action: 'create_objective'; objective: Record<string, unknown> }
-  | { action: 'revise_objective'; current_objective_title: string; objective: Record<string, unknown> }
-  | { action: 'archive_objective'; current_objective_title: string; archived_as: 'completed' | 'abandoned' }
-  | { action: 'create_work_item'; objective_title: string; work_item: Record<string, unknown> }
+  | { action: 'revise_objective'; objective_id: string; objective: Record<string, unknown> }
+  | { action: 'archive_objective'; objective_id: string; archived_as: 'completed' | 'abandoned' }
+  | { action: 'create_work_item'; objective_id: string; work_item: Record<string, unknown> }
   | {
       action: 'revise_work_item'
-      current_objective_title: string
-      current_work_item_title: string
-      target_objective_title: string
+      work_item_id: string
+      target_objective_id?: string
       work_item: Record<string, unknown>
     }
   | {
       action: 'archive_work_item'
-      current_objective_title: string
-      current_work_item_title: string
+      work_item_id: string
       archived_as: 'completed' | 'abandoned'
     }
 
+function hasOnlyWorkboardMutationBody(body: Record<string, unknown>, mutationKeys: readonly string[]): boolean {
+  const allowed = new Set(['action', 'expected_revision', ...mutationKeys])
+  return Object.keys(body).every((key) => allowed.has(key))
+}
+
 function parseWorkboardAdminMutation(body: Record<string, unknown>): WorkboardAdminMutationInput {
-  if (body.action === 'create_objective' && isPlainRecord(body.objective)) {
+  if (body.action === 'create_objective'
+    && isPlainRecord(body.objective)
+    && hasOnlyWorkboardMutationBody(body, ['objective'])) {
     return { action: 'create_objective', objective: body.objective }
   }
-  if (body.action === 'revise_objective' && typeof body.current_objective_title === 'string' && isPlainRecord(body.objective)) {
+  if (body.action === 'revise_objective'
+    && typeof body.objective_id === 'string'
+    && isPlainRecord(body.objective)
+    && hasOnlyWorkboardMutationBody(body, ['objective_id', 'objective'])) {
     return {
       action: 'revise_objective',
-      current_objective_title: body.current_objective_title,
+      objective_id: body.objective_id,
       objective: body.objective,
     }
   }
   if (
     body.action === 'archive_objective'
-    && typeof body.current_objective_title === 'string'
+    && typeof body.objective_id === 'string'
     && (body.archived_as === 'completed' || body.archived_as === 'abandoned')
+    && hasOnlyWorkboardMutationBody(body, ['objective_id', 'archived_as'])
   ) {
     return {
       action: 'archive_objective',
-      current_objective_title: body.current_objective_title,
+      objective_id: body.objective_id,
       archived_as: body.archived_as,
     }
   }
-  if (body.action === 'create_work_item' && typeof body.objective_title === 'string' && isPlainRecord(body.work_item)) {
-    return { action: 'create_work_item', objective_title: body.objective_title, work_item: body.work_item }
+  if (body.action === 'create_work_item'
+    && typeof body.objective_id === 'string'
+    && isPlainRecord(body.work_item)
+    && hasOnlyWorkboardMutationBody(body, ['objective_id', 'work_item'])) {
+    return { action: 'create_work_item', objective_id: body.objective_id, work_item: body.work_item }
   }
   if (
     body.action === 'revise_work_item'
-    && typeof body.current_objective_title === 'string'
-    && typeof body.current_work_item_title === 'string'
-    && typeof body.target_objective_title === 'string'
+    && typeof body.work_item_id === 'string'
+    && (body.target_objective_id === undefined || typeof body.target_objective_id === 'string')
     && isPlainRecord(body.work_item)
+    && hasOnlyWorkboardMutationBody(body, ['work_item_id', 'target_objective_id', 'work_item'])
   ) {
     return {
       action: 'revise_work_item',
-      current_objective_title: body.current_objective_title,
-      current_work_item_title: body.current_work_item_title,
-      target_objective_title: body.target_objective_title,
+      work_item_id: body.work_item_id,
+      ...(body.target_objective_id === undefined ? {} : { target_objective_id: body.target_objective_id }),
       work_item: body.work_item,
     }
   }
   if (
     body.action === 'archive_work_item'
-    && typeof body.current_objective_title === 'string'
-    && typeof body.current_work_item_title === 'string'
+    && typeof body.work_item_id === 'string'
     && (body.archived_as === 'completed' || body.archived_as === 'abandoned')
+    && hasOnlyWorkboardMutationBody(body, ['work_item_id', 'archived_as'])
   ) {
     return {
       action: 'archive_work_item',
-      current_objective_title: body.current_objective_title,
-      current_work_item_title: body.current_work_item_title,
+      work_item_id: body.work_item_id,
       archived_as: body.archived_as,
     }
   }

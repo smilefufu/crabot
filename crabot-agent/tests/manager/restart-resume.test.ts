@@ -43,6 +43,7 @@ describe('Manager restart continuation', () => {
       promptInputs: () => ({}),
       toolFace: () => [],
       now: () => new Date('2026-09-06T14:05:00.000Z'),
+      hasCurrentWorkboardObjectives: async () => false,
       timezone: () => 'Asia/Shanghai',
       harness: {} as ManagerRegistryDeps['harness'],
       ledger: {} as ManagerRegistryDeps['ledger'],
@@ -438,6 +439,31 @@ describe('Manager restart continuation', () => {
     await restored.resumeInterruptedEpisodes()
     expect(JSON.stringify(await store.load(KEY))).not.toContain('管理员已更新任务板')
     expect(consumed).toHaveBeenCalledWith(KEY, [17])
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
+  })
+
+  it('续跑已准入的任务板空闲自省，且临时提示仍只出现一次、不落历史', async () => {
+    const old = registry({ async *stream() { await new Promise(() => {}) }, updateConfig() {} })
+    void old.getOrCreate(KEY).wakeUp({
+      wake: { kind: 'workboard_idle_review' },
+      received_at: '2026-09-06T22:05:00+08:00',
+      timezone: 'Asia/Shanghai',
+    })
+    const checkpoint = await checkpointWhere((value) => value.hasEngineMessages)
+    expect(checkpoint.transientMessageIds).toHaveLength(1)
+
+    const restored = registry({
+      async *stream(params) {
+        expect(JSON.stringify(params.messages).match(/本会话已经空闲一小时/g)).toHaveLength(1)
+        yield* chunksFromContent([], 'end_turn')
+      },
+      updateConfig() {},
+    })
+    restored.registerResumeCheckpoints([checkpoint])
+    trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
+    await restored.resumeInterruptedEpisodes()
+
+    expect(JSON.stringify(await store.load(KEY))).not.toContain('本会话已经空闲一小时')
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
   })
 

@@ -19,12 +19,19 @@ const mocked = agentObservabilityService as unknown as {
 
 const KEY = 'feishu::cotton-candy'
 const UPDATED_AT = '2026-09-05T00:00:00.000Z'
+const OBJECTIVE_A_ID = '11111111-1111-4111-8111-111111111111'
+const OBJECTIVE_B_ID = '22222222-2222-4222-8222-222222222222'
+const WORK_ITEM_A_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const WORK_ITEM_B_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+const DUPLICATE_WORK_ITEM_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const OBJECTIVE_A = {
+  objective_id: OBJECTIVE_A_ID,
   title: '让 Manager 准确回顾上下文',
   completion_criteria: ['连续追问时结论前后一致', '任务切换后仍能说清当前目标'],
   updated_at: UPDATED_AT,
   work_items: [
     {
+      work_item_id: WORK_ITEM_A_ID,
       title: '核查上下文请求',
       status: 'in_progress' as const,
       project_root: '/workspace/crabot',
@@ -33,6 +40,7 @@ const OBJECTIVE_A = {
       updated_at: UPDATED_AT,
     },
     {
+      work_item_id: WORK_ITEM_B_ID,
       title: '验证多任务切换',
       status: 'blocked' as const,
       current_judgement: '仍缺少真实模型结果',
@@ -43,6 +51,7 @@ const OBJECTIVE_A = {
   ],
 }
 const OBJECTIVE_B = {
+  objective_id: OBJECTIVE_B_ID,
   title: '让人类能共管任务板',
   completion_criteria: ['页面能清楚区分目标和事项'],
   updated_at: UPDATED_AT,
@@ -115,6 +124,10 @@ describe('ManagerWorkboard', () => {
     expect(screen.getByText('主要阻塞')).toBeInTheDocument()
     expect(screen.getByText('crabot')).toHaveAttribute('title', '/workspace/crabot')
     expect(screen.queryByText('/workspace/crabot')).toBeNull()
+    expect(document.body).not.toHaveTextContent(OBJECTIVE_A_ID)
+    expect(document.body).not.toHaveTextContent(WORK_ITEM_A_ID)
+    expect(screen.queryByLabelText(OBJECTIVE_A_ID)).toBeNull()
+    expect(screen.queryByLabelText(WORK_ITEM_A_ID)).toBeNull()
   })
 
   it('项目名重名时显示末两级路径，并保留完整路径供悬停查看', async () => {
@@ -124,6 +137,7 @@ describe('ManagerWorkboard', () => {
         {
           ...OBJECTIVE_B,
           work_items: [{
+            work_item_id: DUPLICATE_WORK_ITEM_ID,
             title: '核查另一个同名项目',
             status: 'ready',
             project_root: '/srv/crabot',
@@ -169,7 +183,7 @@ describe('ManagerWorkboard', () => {
       manager_key: KEY,
       revision: 2,
       action: 'work_item_revised',
-      objective_title: OBJECTIVE_B.title,
+      objective: { objective_id: OBJECTIVE_B_ID, title: OBJECTIVE_B.title },
       work_item: revised,
       counts: COUNTS,
       manager_notification: 'pending',
@@ -180,16 +194,15 @@ describe('ManagerWorkboard', () => {
     fireEvent.click(within(item.closest('article') as HTMLElement).getByRole('button', { name: '编辑' }))
     expect((screen.getByLabelText('项目根目录（可选）') as HTMLInputElement).value).toBe('/workspace/crabot')
     fireEvent.change(screen.getByLabelText('项目根目录（可选）'), { target: { value: '' } })
-    fireEvent.change(screen.getByLabelText('所属目标'), { target: { value: OBJECTIVE_B.title } })
+    fireEvent.change(screen.getByLabelText('所属目标'), { target: { value: OBJECTIVE_B_ID } })
     fireEvent.change(screen.getByLabelText('标题'), { target: { value: revised.title } })
     fireEvent.change(screen.getByLabelText('当前判断'), { target: { value: revised.current_judgement } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
     await waitFor(() => expect(mocked.changeManagerWorkboard).toHaveBeenCalledWith(KEY, 1, {
       action: 'revise_work_item',
-      current_objective_title: OBJECTIVE_A.title,
-      current_work_item_title: '核查上下文请求',
-      target_objective_title: OBJECTIVE_B.title,
+      work_item_id: WORK_ITEM_A_ID,
+      target_objective_id: OBJECTIVE_B_ID,
       work_item: expect.objectContaining({ title: revised.title, current_judgement: revised.current_judgement }),
     }))
     const mutation = mocked.changeManagerWorkboard.mock.calls[0][2] as { work_item: Record<string, unknown> }
@@ -204,6 +217,7 @@ describe('ManagerWorkboard', () => {
       revision: 2,
       action: 'objective_revised',
       objective: {
+        objective_id: OBJECTIVE_A_ID,
         title: revisedTitle,
         completion_criteria: ['三轮追问结论一致'],
         updated_at: '2026-09-05T01:00:00.000Z',
@@ -221,11 +235,54 @@ describe('ManagerWorkboard', () => {
 
     await waitFor(() => expect(mocked.changeManagerWorkboard).toHaveBeenCalledWith(KEY, 1, {
       action: 'revise_objective',
-      current_objective_title: OBJECTIVE_A.title,
+      objective_id: OBJECTIVE_A_ID,
       objective: { title: revisedTitle, completion_criteria: ['三轮追问结论一致'] },
     }))
     expect(await screen.findByRole('heading', { name: revisedTitle })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '核查上下文请求' })).toBeInTheDocument()
+  })
+
+  it('跨目标同名事项按稳定 ID 修改，不影响另一条同名事项', async () => {
+    const duplicate = {
+      ...OBJECTIVE_A.work_items[0],
+      work_item_id: DUPLICATE_WORK_ITEM_ID,
+      project_root: '/srv/another-crabot',
+      current_judgement: '这是另一个目标下的同名事项',
+      next_action: '只修改这一条事项',
+    }
+    const revised = {
+      ...duplicate,
+      title: '核查另一个上下文请求',
+      updated_at: '2026-09-05T01:00:00.000Z',
+    }
+    mocked.getManagerWorkboard.mockResolvedValue(board({
+      objectives: [OBJECTIVE_A, { ...OBJECTIVE_B, work_items: [duplicate] }],
+      counts: { ...COUNTS, current_work_items: 3 },
+    }))
+    mocked.changeManagerWorkboard = vi.fn().mockResolvedValue({
+      manager_key: KEY,
+      revision: 2,
+      action: 'work_item_revised',
+      objective: { objective_id: OBJECTIVE_B_ID, title: OBJECTIVE_B.title },
+      work_item: revised,
+      counts: { ...COUNTS, current_work_items: 3 },
+      manager_notification: 'pending',
+    })
+    renderPage()
+
+    await screen.findAllByRole('heading', { name: duplicate.title })
+    const duplicateHeading = within(objectiveSection(OBJECTIVE_B.title)).getByRole('heading', { name: duplicate.title })
+    fireEvent.click(within(duplicateHeading.closest('article') as HTMLElement).getByRole('button', { name: '编辑' }))
+    fireEvent.change(screen.getByLabelText('标题'), { target: { value: revised.title } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => expect(mocked.changeManagerWorkboard).toHaveBeenCalledWith(KEY, 1, {
+      action: 'revise_work_item',
+      work_item_id: DUPLICATE_WORK_ITEM_ID,
+      work_item: expect.objectContaining({ title: revised.title }),
+    }))
+    expect(within(objectiveSection(OBJECTIVE_A.title)).getByRole('heading', { name: duplicate.title })).toBeInTheDocument()
+    expect(within(objectiveSection(OBJECTIVE_B.title)).getByRole('heading', { name: revised.title })).toBeInTheDocument()
   })
 
   it('归档分别展示目标和事项的最终快照，不提供恢复入口', async () => {
@@ -236,6 +293,7 @@ describe('ManagerWorkboard', () => {
           view: 'archive',
           entries: [
             {
+              objective_id: OBJECTIVE_B_ID,
               title: OBJECTIVE_B.title,
               completion_criteria: OBJECTIVE_B.completion_criteria,
               archived_as: 'completed',
@@ -290,6 +348,7 @@ describe('ManagerWorkboard', () => {
       revision: 2,
       view: 'archive' as const,
       entries: [{
+        objective_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
         title: '已完成的上下文核查',
         completion_criteria: ['已给出请求级证据'],
         archived_as: 'completed' as const,
@@ -320,6 +379,7 @@ describe('ManagerWorkboard', () => {
       revision: 2,
       action: 'objective_revised',
       objective: {
+        objective_id: OBJECTIVE_A_ID,
         title: revisedTitle,
         completion_criteria: OBJECTIVE_A.completion_criteria,
         updated_at: '2026-09-05T01:00:00.000Z',
@@ -372,6 +432,7 @@ describe('ManagerWorkboard', () => {
         revision: 2,
         action: 'objective_revised',
         objective: {
+          objective_id: OBJECTIVE_A_ID,
           title: revisedTitle,
           completion_criteria: OBJECTIVE_A.completion_criteria,
           updated_at: '2026-09-05T01:00:00.000Z',

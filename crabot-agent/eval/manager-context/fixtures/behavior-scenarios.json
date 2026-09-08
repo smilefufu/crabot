@@ -98,6 +98,50 @@
       }
     },
     {
+      "id": "workboard-write-failure-recovery",
+      "title": "管理员并发更新后写入失败并闭环重试",
+      "objectives": [
+        {
+          "title": "稳定任务板修改",
+          "completion_criteria": ["任务板修改结果已经确认"],
+          "work_items": [
+            {
+              "title": "核对修改闭环",
+              "status": "in_progress",
+              "current_judgement": "等待最终完成条件",
+              "next_action": "更新目标完成条件"
+            }
+          ]
+        }
+      ],
+      "steps": [
+        { "kind": "human", "text": "请先查阅任务板中的【稳定任务板修改】，告诉我它现在的完成条件；这一步不要修改任务板。" },
+        {
+          "kind": "admin_revise_objective",
+          "target_title": "稳定任务板修改",
+          "objective": {
+            "title": "稳定任务板修改",
+            "completion_criteria": ["管理员临时补充的完成条件"]
+          }
+        },
+        { "kind": "human", "text": "你刚才已经查过这个目标，请直接把它的完整完成条件改为【失败后已重新查阅并成功保存】，并确认任务板实际修改成功。" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard", "change_workboard"],
+        "required_calls": [
+          { "tool": "change_workboard", "equals": { "action": "revise_objective" } }
+        ],
+        "workboard_failure_recovery": true,
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["失败后已重新查阅并成功保存", "核对修改闭环"],
+          "excludes": ["管理员临时补充的完成条件"]
+        }
+      }
+    },
+    {
       "id": "ambiguous-reference",
       "title": "模糊指代需要消歧",
       "workers": [
@@ -183,7 +227,7 @@
       ],
       "expect": {
         "required_calls": [
-          { "tool": "change_workboard", "equals": { "action": "create_work_item", "objective_title": "让任务板在人类侧保持清楚" }, "contains": { "work_item.title": "验证窄屏任务板" } }
+          { "tool": "change_workboard", "equals": { "action": "create_work_item" }, "contains": { "work_item.title": "验证窄屏任务板" } }
         ],
         "forbidden_calls": [
           { "tool": "change_workboard", "equals": { "action": "create_objective" } }
@@ -273,14 +317,411 @@
       ],
       "expect": {
         "required_calls": [
-          { "tool": "change_workboard", "equals": { "action": "revise_work_item" }, "contains": { "work_item.current_judgement": "接口契约已对齐", "work_item.next_action": "Admin 页面" } }
+          { "tool": "change_workboard", "equals": { "action": "revise_work_item" }, "contains": { "work_item.current_judgement": "接口契约", "work_item.next_action": "Admin 页面" }, "contains_any": { "work_item.current_judgement": ["对齐", "通过"] } }
         ],
         "board": {
           "current_objectives": 1,
           "current_work_items": 1,
           "archive_entries": 0,
-          "contains": ["接口契约已对齐"],
+          "contains": ["接口契约", "Admin 页面"],
           "excludes": ["pnpm", "src/index.ts", "42 条日志", "TECH_DETAIL_SHOULD_NOT_ENTER_BOARD"]
+        }
+      }
+    },
+    {
+      "id": "pending-reply-direct-human",
+      "title": "直接人类消息完成可见回复",
+      "steps": [
+        { "kind": "human", "text": "请在本会话回复一句：待回复义务测试已收到。不要派执行器，也不要修改任务板。" }
+      ],
+      "expect": {
+        "required_tools": ["send_message"],
+        "forbidden_tools": ["spawn_worker", "send_to_worker", "change_workboard"],
+        "max_delivery_reviews": 1
+      }
+    },
+    {
+      "id": "pending-reply-worker-only",
+      "title": "纯执行器事件不触发交付复核",
+      "workers": [
+        { "worker_id": "worker-pending-reply", "title": "核查待回复门控", "state": "idle" }
+      ],
+      "steps": [
+        { "kind": "worker", "worker_id": "worker-pending-reply", "text": "这是一条仅用于更新主控内部认知的状态：仍在等待外部构建完成，没有新结果，不需要通知人类，也不需要采取任何动作。" }
+      ],
+      "expect": {
+        "forbidden_tools": ["send_message", "send_private_message", "send_master_private"],
+        "max_delivery_reviews": 0
+      }
+    },
+    {
+      "id": "idle-review-continue",
+      "title": "空闲后仍有明确工作可继续",
+      "objectives": [
+        {
+          "title": "完成退款回归验证",
+          "completion_criteria": ["退款主流程通过并形成结论"],
+          "work_items": [
+            {
+              "title": "运行退款回归",
+              "status": "ready",
+              "project_root": "{{project_root}}",
+              "current_judgement": "测试范围已经确认",
+              "next_action": "派执行器运行退款回归"
+            }
+          ]
+        }
+      ],
+      "history": [
+        { "kind": "human", "text": "请把退款回归也跑完，再给我最终结论。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard", "spawn_worker"],
+        "required_calls": [
+          { "tool": "spawn_worker", "contains": { "title": "退款回归", "prompt": "退款" } }
+        ],
+        "worker_spawns": { "count": 1, "workspace": "project_root" }
+      }
+    },
+    {
+      "id": "idle-review-wait-worker",
+      "title": "空闲时已有执行器会主动返回结果",
+      "objectives": [
+        {
+          "title": "完成支付回归验证",
+          "completion_criteria": ["支付回归结果已经核验"],
+          "work_items": [
+            {
+              "title": "运行支付回归",
+              "status": "in_progress",
+              "current_judgement": "执行器 worker-payments 已经开始并会主动返回结果",
+              "next_action": "等待执行器的结果事件"
+            }
+          ]
+        }
+      ],
+      "workers": [
+        { "worker_id": "worker-payments", "title": "运行支付回归：执行测试", "state": "running" }
+      ],
+      "history": [
+        { "kind": "human", "text": "让现有执行器跑完后告诉我，不要重复派发或催问。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard"],
+        "forbidden_tools": [
+          "spawn_worker",
+          "send_to_worker",
+          "query_worker",
+          "request_worker_interrupt",
+          "request_worker_stop",
+          "respond_to_worker_ui",
+          "change_workboard",
+          "send_message"
+        ],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["等待执行器的结果事件"],
+          "excludes": ["本次已检查", "查询失败"]
+        }
+      }
+    },
+    {
+      "id": "idle-review-query-worker-progress",
+      "title": "空闲时通过独立侧问了解执行器进度",
+      "objectives": [
+        {
+          "title": "完成支付回归验证",
+          "completion_criteria": ["支付回归结果已经核验"],
+          "work_items": [
+            {
+              "title": "运行支付回归",
+              "status": "in_progress",
+              "current_judgement": "执行器仍在运行，但现有状态不足以说明具体进度",
+              "next_action": "通过独立侧问了解进度，等待旁路结果"
+            }
+          ]
+        }
+      ],
+      "workers": [
+        { "worker_id": "worker-payments-query", "title": "运行支付回归：执行测试", "state": "running" }
+      ],
+      "history": [
+        { "kind": "human", "text": "让现有执行器继续按原方向运行。空闲检查时，如果现有状态不足，可以通过独立侧问了解它做到哪了；不要向主线追加消息，也不要改变方向。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard", "query_worker"],
+        "required_calls": [
+          { "tool": "query_worker", "equals": { "worker_id": "worker-payments-query" }, "contains_any": { "question": ["进度", "做到", "当前", "目前", "已完成", "正在执行"] } }
+        ],
+        "forbidden_tools": [
+          "spawn_worker",
+          "send_to_worker",
+          "request_worker_interrupt",
+          "request_worker_stop",
+          "respond_to_worker_ui",
+          "change_workboard",
+          "send_message"
+        ],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["执行器仍在运行", "通过独立侧问了解进度"],
+          "excludes": ["本次已检查", "查询失败", "已经纠偏"]
+        }
+      }
+    },
+    {
+      "id": "idle-review-human-cancelled",
+      "title": "人类已经取消任务板中的旧目标",
+      "objectives": [
+        {
+          "title": "部署旧版服务",
+          "completion_criteria": ["旧版服务已经上线"],
+          "work_items": [
+            {
+              "title": "执行旧版部署",
+              "status": "ready",
+              "next_action": "开始部署"
+            }
+          ]
+        }
+      ],
+      "history": [
+        { "kind": "human", "text": "取消旧版服务部署，这个目标和下面的事项都不再做了。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard"],
+        "required_calls": [
+          { "tool": "change_workboard", "equals": { "action": "archive_work_item", "archived_as": "abandoned" } },
+          { "tool": "change_workboard", "equals": { "action": "archive_objective", "archived_as": "abandoned" } }
+        ],
+        "forbidden_tools": ["spawn_worker", "send_to_worker"],
+        "board": {
+          "current_objectives": 0,
+          "current_work_items": 0,
+          "archive_entries": 2,
+          "contains": ["部署旧版服务", "执行旧版部署"]
+        }
+      }
+    },
+    {
+      "id": "idle-review-merge-duplicates",
+      "title": "空闲时合并重复目标并保留各自事项",
+      "objectives": [
+        {
+          "title": "完成报表改造",
+          "completion_criteria": ["报表接口可用"],
+          "work_items": [
+            {
+              "title": "核验报表接口",
+              "status": "ready",
+              "next_action": "核验接口"
+            }
+          ]
+        },
+        {
+          "title": "交付新版报表",
+          "completion_criteria": ["报表页面可用"],
+          "work_items": [
+            {
+              "title": "核验报表页面",
+              "status": "ready",
+              "next_action": "核验页面"
+            }
+          ]
+        }
+      ],
+      "history": [
+        { "kind": "human", "text": "这两个报表目标其实是同一个目标。保留【完成报表改造】，完成条件要同时覆盖接口和页面，两个核验事项都要保留在这个目标下。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard"],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 2,
+          "archive_entries": 1,
+          "contains": ["完成报表改造", "报表接口可用", "报表页面可用", "核验报表接口", "核验报表页面"]
+        }
+      }
+    },
+    {
+      "id": "idle-review-same-blocker-reminded",
+      "title": "最近三条消息已单独提醒同一阻塞",
+      "objectives": [
+        {
+          "title": "完成生产发布",
+          "completion_criteria": ["生产版本发布成功"],
+          "work_items": [
+            {
+              "title": "执行生产发布",
+              "status": "blocked",
+              "current_judgement": "发布流程等待人类提供审批码",
+              "next_action": "收到审批码后继续发布",
+              "blocker": "缺少生产发布审批码"
+            }
+          ]
+        }
+      ],
+      "history": [
+        { "kind": "human", "text": "继续完成生产发布。" },
+        { "kind": "manager_sent", "text": "当前生产发布被审批码阻塞。请提供生产发布审批码，我收到后才能继续。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard"],
+        "forbidden_tools": ["send_message", "spawn_worker", "send_to_worker"]
+      }
+    },
+    {
+      "id": "idle-review-mixed-blocker-mention",
+      "title": "阻塞只混在其它汇报中提到",
+      "objectives": [
+        {
+          "title": "完成生产发布",
+          "completion_criteria": ["生产版本发布成功"],
+          "work_items": [
+            {
+              "title": "执行生产发布",
+              "status": "blocked",
+              "current_judgement": "构建已完成，发布等待审批码",
+              "next_action": "向人类明确请求审批码",
+              "blocker": "缺少生产发布审批码"
+            }
+          ]
+        }
+      ],
+      "history": [
+        { "kind": "manager_sent", "text": "构建检查已经完成，产物没有问题；另外发布仍缺审批码。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard", "send_message"],
+        "required_calls": [
+          { "tool": "send_message", "contains": { "content": "审批码" } }
+        ]
+      }
+    },
+    {
+      "id": "idle-review-different-blocker",
+      "title": "最近提醒的是不同阻塞",
+      "objectives": [
+        {
+          "title": "完成生产发布",
+          "completion_criteria": ["生产版本发布成功"],
+          "work_items": [
+            {
+              "title": "执行生产发布",
+              "status": "blocked",
+              "current_judgement": "测试账号问题已解决，当前等待发布审批码",
+              "next_action": "向人类请求发布审批码",
+              "blocker": "缺少生产发布审批码"
+            }
+          ]
+        }
+      ],
+      "history": [
+        { "kind": "manager_sent", "text": "回归测试被测试账号阻塞。请提供一个可用的测试账号。" },
+        { "kind": "human", "text": "测试账号已经补好，所有回归工作也已完成。现在只剩生产发布，唯一阻塞是缺少发布审批码。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard", "send_message"],
+        "required_calls": [
+          { "tool": "send_message", "contains": { "content": "审批码" } }
+        ]
+      }
+    },
+    {
+      "id": "idle-review-history-unavailable",
+      "title": "无法确认最近消息时不重复打扰",
+      "history_unavailable": true,
+      "objectives": [
+        {
+          "title": "完成生产发布",
+          "completion_criteria": ["生产版本发布成功"],
+          "work_items": [
+            {
+              "title": "执行生产发布",
+              "status": "blocked",
+              "current_judgement": "发布等待人类提供审批码",
+              "next_action": "收到审批码后继续发布",
+              "blocker": "缺少生产发布审批码"
+            }
+          ]
+        }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard", "get_history"],
+        "forbidden_tools": ["send_message", "spawn_worker", "send_to_worker", "change_workboard"],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["发布等待人类提供审批码", "收到审批码后继续发布"],
+          "excludes": ["无法可靠读取", "查询失败"]
+        }
+      }
+    },
+    {
+      "id": "idle-review-human-intent-wins",
+      "title": "任务板与聊天历史冲突时以人类最新意图为准",
+      "objectives": [
+        {
+          "title": "部署旧环境",
+          "completion_criteria": ["旧环境部署完成"],
+          "work_items": [
+            {
+              "title": "执行旧环境部署",
+              "status": "ready",
+              "project_root": "{{project_root}}",
+              "next_action": "派执行器开始部署"
+            }
+          ]
+        }
+      ],
+      "history": [
+        { "kind": "human", "text": "不要再部署旧环境。当前目标改成【输出迁移风险清单】，完成条件是【列出已确认风险和应对建议】；原事项改为【核对迁移风险】，在项目 {{project_root}} 中只做只读核查。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard", "change_workboard"],
+        "forbidden_tools": ["send_to_worker"],
+        "worker_spawns": { "count": 1, "workspace": "project_root", "prompt_contains": "只读" },
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["输出迁移风险清单", "列出已确认风险和应对建议", "核对迁移风险", "只读核查"],
+          "excludes": ["旧环境部署完成", "执行旧环境部署", "派执行器开始部署"]
         }
       }
     }

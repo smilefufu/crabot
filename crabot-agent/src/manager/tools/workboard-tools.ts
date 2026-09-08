@@ -43,6 +43,18 @@ const ITEM_SCHEMA = {
   additionalProperties: false,
 } as const
 
+const OBJECTIVE_ID_SCHEMA = {
+  type: 'string',
+  pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+  description: '来自 inspect_workboard 的目标内部标识，只用于精确定位',
+} as const
+
+const WORK_ITEM_ID_SCHEMA = {
+  type: 'string',
+  pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+  description: '来自 inspect_workboard 的事项内部标识，只用于精确定位',
+} as const
+
 function output(value: unknown): ToolCallResult {
   return { output: JSON.stringify(value), isError: false }
 }
@@ -114,6 +126,15 @@ function objectiveHeader(objective: WorkboardObjective): Omit<WorkboardObjective
   return header
 }
 
+function objectiveForItem(
+  objectives: ReadonlyArray<WorkboardObjective>,
+  workItemId: string,
+): Pick<WorkboardObjective, 'objective_id' | 'title'> {
+  const objective = objectives.find((entry) => entry.work_items.some((item) => item.work_item_id === workItemId))
+  if (!objective) throw new Error(`修改后的事项不在当前目标中: ${workItemId}`)
+  return { objective_id: objective.objective_id, title: objective.title }
+}
+
 function pagination(page: number, pageSize: number, totalItems: number) {
   return {
     page,
@@ -179,7 +200,7 @@ export function buildWorkboardTools(deps: {
 
   const change = defineTool({
     name: 'change_workboard',
-    description: '维护本会话需要持续共管的目标和事项。目标记录结果与完成条件，事项记录当前推进状态；修改不会自动操作 Worker，派发 Worker 不要求建项。',
+    description: '维护本会话需要持续共管的目标和事项。目标记录结果与完成条件，事项记录当前推进状态；修改不会自动操作执行器，派发执行器不要求建项。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -190,10 +211,9 @@ export function buildWorkboardTools(deps: {
             'create_work_item', 'revise_work_item', 'archive_work_item',
           ],
         },
-        current_objective_title: { type: 'string', description: '用当前目标标题精确定位' },
-        objective_title: { type: 'string', description: '新事项所属的当前目标标题' },
-        current_work_item_title: { type: 'string', description: '用当前事项标题在所属目标内精确定位' },
-        target_objective_title: { type: 'string', description: '修订后所属目标；不移动时仍填写当前目标标题' },
+        objective_id: OBJECTIVE_ID_SCHEMA,
+        work_item_id: WORK_ITEM_ID_SCHEMA,
+        target_objective_id: { ...OBJECTIVE_ID_SCHEMA, description: '事项要移动到的目标内部标识；不移动时省略' },
         objective: OBJECTIVE_SCHEMA,
         work_item: ITEM_SCHEMA,
         archived_as: { type: 'string', enum: ['completed', 'abandoned'] },
@@ -211,55 +231,51 @@ export function buildWorkboardTools(deps: {
           type: 'object',
           properties: {
             action: { const: 'revise_objective' },
-            current_objective_title: { type: 'string' },
+            objective_id: OBJECTIVE_ID_SCHEMA,
             objective: OBJECTIVE_SCHEMA,
           },
-          required: ['action', 'current_objective_title', 'objective'],
+          required: ['action', 'objective_id', 'objective'],
           additionalProperties: false,
         },
         {
           type: 'object',
           properties: {
             action: { const: 'archive_objective' },
-            current_objective_title: { type: 'string' },
+            objective_id: OBJECTIVE_ID_SCHEMA,
             archived_as: { type: 'string', enum: ['completed', 'abandoned'] },
           },
-          required: ['action', 'current_objective_title', 'archived_as'],
+          required: ['action', 'objective_id', 'archived_as'],
           additionalProperties: false,
         },
         {
           type: 'object',
           properties: {
             action: { const: 'create_work_item' },
-            objective_title: { type: 'string' },
+            objective_id: OBJECTIVE_ID_SCHEMA,
             work_item: ITEM_SCHEMA,
           },
-          required: ['action', 'objective_title', 'work_item'],
+          required: ['action', 'objective_id', 'work_item'],
           additionalProperties: false,
         },
         {
           type: 'object',
           properties: {
             action: { const: 'revise_work_item' },
-            current_objective_title: { type: 'string' },
-            current_work_item_title: { type: 'string' },
-            target_objective_title: { type: 'string' },
+            work_item_id: WORK_ITEM_ID_SCHEMA,
+            target_objective_id: OBJECTIVE_ID_SCHEMA,
             work_item: ITEM_SCHEMA,
           },
-          required: [
-            'action', 'current_objective_title', 'current_work_item_title', 'target_objective_title', 'work_item',
-          ],
+          required: ['action', 'work_item_id', 'work_item'],
           additionalProperties: false,
         },
         {
           type: 'object',
           properties: {
             action: { const: 'archive_work_item' },
-            current_objective_title: { type: 'string' },
-            current_work_item_title: { type: 'string' },
+            work_item_id: WORK_ITEM_ID_SCHEMA,
             archived_as: { type: 'string', enum: ['completed', 'abandoned'] },
           },
-          required: ['action', 'current_objective_title', 'current_work_item_title', 'archived_as'],
+          required: ['action', 'work_item_id', 'archived_as'],
           additionalProperties: false,
         },
       ],
@@ -275,79 +291,74 @@ export function buildWorkboardTools(deps: {
           return output({ action: 'objective_created', objective: objectiveHeader(result.value), counts: workboardCounts(result.board) })
         }
         if (input.action === 'revise_objective') {
-          if (!hasOnlyKeys(input, ['action', 'current_objective_title', 'objective'])
-            || typeof input.current_objective_title !== 'string' || input.objective === undefined) {
+          if (!hasOnlyKeys(input, ['action', 'objective_id', 'objective'])
+            || typeof input.objective_id !== 'string' || input.objective === undefined) {
             throw new Error('revise_objective 参数不完整或含未定义字段')
           }
           const result = await deps.store.reviseObjective(
             deps.managerKey,
-            input.current_objective_title,
+            input.objective_id,
             input.objective as WorkboardObjectiveDraft,
           )
           return output({ action: 'objective_revised', objective: objectiveHeader(result.value), counts: workboardCounts(result.board) })
         }
         if (input.action === 'archive_objective') {
-          if (!hasOnlyKeys(input, ['action', 'current_objective_title', 'archived_as'])
-            || typeof input.current_objective_title !== 'string') {
+          if (!hasOnlyKeys(input, ['action', 'objective_id', 'archived_as'])
+            || typeof input.objective_id !== 'string') {
             throw new Error('archive_objective 参数不完整或含未定义字段')
           }
           const result = await deps.store.archiveObjective(
             deps.managerKey,
-            input.current_objective_title,
+            input.objective_id,
             input.archived_as as WorkboardArchiveOutcome,
           )
           return output({ action: 'objective_archived', objective: result.value, counts: workboardCounts(result.board) })
         }
         if (input.action === 'create_work_item') {
-          if (!hasOnlyKeys(input, ['action', 'objective_title', 'work_item'])
-            || typeof input.objective_title !== 'string' || input.work_item === undefined) {
+          if (!hasOnlyKeys(input, ['action', 'objective_id', 'work_item'])
+            || typeof input.objective_id !== 'string' || input.work_item === undefined) {
             throw new Error('create_work_item 参数不完整或含未定义字段')
           }
           const result = await deps.store.createWorkItem(
             deps.managerKey,
-            input.objective_title,
+            input.objective_id,
             input.work_item as WorkboardItemDraft,
           )
           return output({
             action: 'work_item_created',
-            objective_title: input.objective_title.trim(),
+            objective: objectiveForItem(result.board.objectives, result.value.work_item_id),
             work_item: result.value,
             counts: workboardCounts(result.board),
           })
         }
         if (input.action === 'revise_work_item') {
-          if (!hasOnlyKeys(input, [
-            'action', 'current_objective_title', 'current_work_item_title', 'target_objective_title', 'work_item',
-          ]) || typeof input.current_objective_title !== 'string'
-            || typeof input.current_work_item_title !== 'string'
-            || typeof input.target_objective_title !== 'string'
+          if (!hasOnlyKeys(input, ['action', 'work_item_id', 'target_objective_id', 'work_item'])
+            || typeof input.work_item_id !== 'string'
+            || (input.target_objective_id !== undefined && typeof input.target_objective_id !== 'string')
             || input.work_item === undefined) {
             throw new Error('revise_work_item 参数不完整或含未定义字段')
           }
           const result = await deps.store.reviseWorkItem(
             deps.managerKey,
-            input.current_objective_title,
-            input.current_work_item_title,
-            input.target_objective_title,
+            input.work_item_id,
+            input.target_objective_id,
             input.work_item as WorkboardItemDraft,
           )
           return output({
             action: 'work_item_revised',
-            objective_title: input.target_objective_title.trim(),
+            objective: objectiveForItem(result.board.objectives, result.value.work_item_id),
             work_item: result.value,
             counts: workboardCounts(result.board),
           })
         }
         if (input.action === 'archive_work_item') {
-          if (!hasOnlyKeys(input, ['action', 'current_objective_title', 'current_work_item_title', 'archived_as'])
-            || typeof input.current_objective_title !== 'string'
-            || typeof input.current_work_item_title !== 'string') {
+          if (!hasOnlyKeys(input, ['action', 'work_item_id', 'archived_as'])
+            || typeof input.work_item_id !== 'string') {
             throw new Error('archive_work_item 参数不完整或含未定义字段')
           }
           const result = await deps.store.archiveWorkItem(
             deps.managerKey,
-            input.current_objective_title,
-            input.current_work_item_title,
+            input.work_item_id,
             input.archived_as as WorkboardArchiveOutcome,
           )
           return output({ action: 'work_item_archived', work_item: result.value, counts: workboardCounts(result.board) })

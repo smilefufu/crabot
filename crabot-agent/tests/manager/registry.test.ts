@@ -27,7 +27,7 @@ import type {
   HarnessEvent,
   HarnessEventKind,
 } from '../../src/workers/harness/worker-events.js'
-import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
+import { defineTool, type LLMAdapter, type LLMStreamParams } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
@@ -38,6 +38,7 @@ import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
 
 interface TurnScript {
   readonly text?: string
+  readonly toolCalls?: ReadonlyArray<{ readonly name: string; readonly id: string; readonly input: Record<string, unknown> }>
   readonly stopReason: 'end_turn' | 'tool_use' | 'max_tokens'
 }
 
@@ -58,6 +59,9 @@ function makeAdapter(): { readonly adapter: LLMAdapter; readonly queue: TurnScri
       }
       const r = queue.shift() ?? { text: '(默认回复)', stopReason: 'end_turn' as const }
       const content: unknown[] = r.text ? [{ type: 'text', text: r.text }] : []
+      for (const toolCall of r.toolCalls ?? []) {
+        content.push({ type: 'tool_use', id: toolCall.id, name: toolCall.name, input: toolCall.input })
+      }
       yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
     },
     updateConfig: () => {},
@@ -157,6 +161,7 @@ describe('ManagerRegistry', () => {
       harness: FAKE_HARNESS,
       ledger: fakeLedger({}),
       now: () => new Date(Date.parse('2026-01-01T00:00:00.000Z')),
+      hasCurrentWorkboardObjectives: async () => false,
       managerKeyFor: (key) => key,
       toolFace: () => [],
       promptInputs: () => ({}),
@@ -430,16 +435,20 @@ describe('ManagerRegistry', () => {
       await registry.routeHumanMessages('wechat', 'wake-human', [humanMessage], FRIEND_G)
       await registry.routeWorkerEvent(workerEvent)
 
-      expect(observed).toHaveLength(2)
-      expect(observed[0]).toMatchObject({
-        kind: 'human_messages',
-        messages: [humanMessage],
-        friend: FRIEND_G,
-      })
-      expect(observed[1]).toMatchObject({
-        kind: 'worker_event',
-        event: expect.objectContaining({ worker_id: 'w-wake', seq: 1 }),
-      })
+      const humanWakes = observed.filter((wake) => wake.kind === 'human_messages')
+      const workerWakes = observed.filter((wake) => wake.kind === 'worker_event')
+      expect(humanWakes.length).toBeGreaterThan(0)
+      expect(workerWakes.length).toBeGreaterThan(0)
+      for (const wake of humanWakes) {
+        expect(wake).toMatchObject({ kind: 'human_messages', messages: [humanMessage], friend: FRIEND_G })
+      }
+      for (const wake of workerWakes) {
+        expect(wake).toMatchObject({
+          kind: 'worker_event',
+          event: expect.objectContaining({ worker_id: 'w-wake', seq: 1 }),
+        })
+      }
+      expect(observed).toHaveLength(humanWakes.length + workerWakes.length)
     })
   })
 
@@ -498,6 +507,174 @@ describe('ManagerRegistry', () => {
 
     const state = await store.load(SYSTEM_TASKS_MANAGER_KEY)
     expect(state.recent.length).toBeGreaterThan(0)
+  })
+
+  describe('待回复义务', () => {
+    function deliveryToolFace(): ManagerRegistryDeps['toolFace'] {
+      return (_key, _isSystemThread, _scheduleIdentity, _humanPrincipal, _permissions, traceHooks) => [
+        defineTool({
+          name: 'send_message',
+          description: 'deliver',
+          inputSchema: { type: 'object', properties: {} },
+          call: async (input) => {
+            if (input.fail === true) return { output: 'failed', isError: true }
+            traceHooks?.onSuccessfulSendMessage({
+              channel_id: input.channel_id as string,
+              session_id: input.session_id as string,
+            })
+            return { output: 'sent', isError: false }
+          },
+        }),
+        defineTool({
+          name: 'send_private_message',
+          description: 'deliver elsewhere',
+          inputSchema: { type: 'object', properties: {} },
+          call: async () => ({ output: 'sent privately', isError: false }),
+        }),
+      ]
+    }
+
+    it.each([
+      {
+        name: '当前会话 send_message 成功',
+        toolName: 'send_message',
+        input: { channel_id: 'wechat', session_id: 'reply-owner' },
+        reminderExpected: false,
+      },
+      {
+        name: 'send_message 成功但目标是其它会话',
+        toolName: 'send_message',
+        input: { channel_id: 'wechat', session_id: 'other-session' },
+        reminderExpected: true,
+      },
+      {
+        name: '当前会话 send_message 失败',
+        toolName: 'send_message',
+        input: { channel_id: 'wechat', session_id: 'reply-owner', fail: true },
+        reminderExpected: true,
+      },
+      {
+        name: 'send_private_message 成功',
+        toolName: 'send_private_message',
+        input: {},
+        reminderExpected: true,
+      },
+    ])('$name 后的执行器事件按义务状态决定是否复核', async ({ toolName, input, reminderExpected }) => {
+      const { adapter, queue, calls } = makeAdapter()
+      const key = 'wechat::reply-owner' as ManagerKey
+      queue.push(
+        { toolCalls: [{ name: toolName, id: 'delivery-1', input }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+        { text: '执行器事件的内部文字', stopReason: 'end_turn' },
+      )
+      const registry = new ManagerRegistry(baseRegistryDeps({
+        adapter,
+        ledger: fakeLedger({ 'w-reply': makeLedgerWorker('w-reply', key) }),
+        toolFace: deliveryToolFace(),
+      }))
+
+      await registry.routeHumanMessages('wechat', 'reply-owner', [makeChannelMessage('请处理')])
+      await registry.routeWorkerEvent({
+        ts: '2026-01-01T00:00:00.000Z',
+        kind: 'exited',
+        worker_id: 'w-reply',
+        seq: 1,
+      })
+
+      const reminders = calls.filter(isAssistantTextEndTurnReminder)
+      expect(reminders).toHaveLength(reminderExpected ? 1 : 0)
+      expect(calls).toHaveLength(reminderExpected ? 4 : 3)
+    })
+
+    it('Loop 空闲回收后义务仍在', async () => {
+      const { adapter, queue, calls } = makeAdapter()
+      const key = 'wechat::reply-evicted' as ManagerKey
+      let nowMs = Date.parse('2026-01-01T00:00:00.000Z')
+      queue.push({ stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(baseRegistryDeps({
+        adapter,
+        now: () => new Date(nowMs),
+        ledger: fakeLedger({ 'w-evicted': makeLedgerWorker('w-evicted', key) }),
+      }))
+
+      await registry.routeHumanMessages('wechat', 'reply-evicted', [makeChannelMessage('稍后告诉我结果')])
+      const before = registry.getOrCreate(key)
+      nowMs += 10_000
+      expect(registry.evictIdle(1_000, nowMs)).toBe(1)
+      expect(registry.getOrCreate(key)).not.toBe(before)
+
+      queue.push({ text: '回收后拿到结果', stopReason: 'end_turn' })
+      await registry.routeWorkerEvent({
+        ts: '2026-01-01T00:00:10.000Z',
+        kind: 'exited',
+        worker_id: 'w-evicted',
+        seq: 1,
+      })
+
+      expect(calls.filter(isAssistantTextEndTurnReminder)).toHaveLength(1)
+    })
+
+    it('人类消息 episode 失败后义务仍在', async () => {
+      const base = makeAdapter()
+      const key = 'wechat::reply-after-failure' as ManagerKey
+      let failed = false
+      const adapter: LLMAdapter = {
+        async *stream(params) {
+          if (!failed) {
+            failed = true
+            throw new Error('provider unavailable')
+          }
+          yield* base.adapter.stream(params)
+        },
+        updateConfig: () => {},
+      }
+      base.queue.push({ text: '失败后收到的执行器结果', stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(baseRegistryDeps({
+        adapter,
+        ledger: fakeLedger({ 'w-after-failure': makeLedgerWorker('w-after-failure', key) }),
+      }))
+
+      const first = await registry.routeHumanMessages(
+        'wechat',
+        'reply-after-failure',
+        [makeChannelMessage('稍后告诉我结果')],
+      )
+      expect(first.outcome).toBe('failed')
+
+      await registry.routeWorkerEvent({
+        ts: '2026-01-01T00:00:01.000Z',
+        kind: 'exited',
+        worker_id: 'w-after-failure',
+        seq: 1,
+      })
+
+      expect(base.calls.filter(isAssistantTextEndTurnReminder)).toHaveLength(1)
+    })
+
+    it('Registry 关闭并重建后不从历史恢复义务', async () => {
+      const key = 'wechat::reply-restart' as ManagerKey
+      const firstAdapter = makeAdapter()
+      firstAdapter.queue.push({ stopReason: 'end_turn' })
+      const first = new ManagerRegistry(baseRegistryDeps({ adapter: firstAdapter.adapter }))
+      await first.routeHumanMessages('wechat', 'reply-restart', [makeChannelMessage('重启前的问题')])
+      first.dispose()
+
+      const secondAdapter = makeAdapter()
+      secondAdapter.queue.push({ text: '只是一条内部执行器记录', stopReason: 'end_turn' })
+      const second = new ManagerRegistry(baseRegistryDeps({
+        adapter: secondAdapter.adapter,
+        ledger: fakeLedger({ 'w-restart': makeLedgerWorker('w-restart', key) }),
+      }))
+      await second.routeWorkerEvent({
+        ts: '2026-01-01T00:00:00.000Z',
+        kind: 'exited',
+        worker_id: 'w-restart',
+        seq: 1,
+      })
+
+      expect(secondAdapter.calls).toHaveLength(1)
+      expect(secondAdapter.calls.filter(isAssistantTextEndTurnReminder)).toHaveLength(0)
+    })
   })
 
   it('routeSupervisionDue: 已被 clear 或替换的 due 不创建 Manager episode', async () => {
@@ -937,7 +1114,9 @@ describe('ManagerRegistry', () => {
     nowMs = Date.parse('2026-08-10T01:02:00.000Z')
     workerRelease.resolve()
     await workerWake
-    const workerMessages = JSON.stringify(calls[2].messages)
+    const workerCall = calls.find((call) => JSON.stringify(call.messages).includes('worker_id=\\"w-timed\\"'))
+    expect(workerCall).toBeDefined()
+    const workerMessages = JSON.stringify(workerCall!.messages)
     expect(workerMessages).toContain('received_at=\\"2026-08-10T09:01:00+08:00\\"')
     expect(workerMessages).toContain('occurred_at=\\"2026-08-10T00:59:30.000Z\\"')
 
@@ -946,7 +1125,9 @@ describe('ManagerRegistry', () => {
     nowMs = Date.parse('2026-08-10T01:03:00.000Z')
     scheduleRelease.resolve()
     await schedule
-    const scheduleMessages = JSON.stringify(calls[4].messages)
+    const scheduleCall = calls.find((call) => JSON.stringify(call.messages).includes('[定时任务触发] scheduleId=timed'))
+    expect(scheduleCall).toBeDefined()
+    const scheduleMessages = JSON.stringify(scheduleCall!.messages)
     expect(scheduleMessages).toContain('received_at=\\"2026-08-10T09:02:00+08:00\\"')
     expect(scheduleMessages).not.toContain('occurred_at=')
   })
@@ -1361,6 +1542,350 @@ describe('ManagerRegistry', () => {
     await registry.routeHumanMessages('wechat', 'sess-chain', [makeChannelMessage('还在吗')])
     const lastCall = calls[calls.length - 1]
     expect(JSON.stringify(lastCall.messages)).toContain(`notification-${1 + MAX_SELF_WAKE_CHAIN}`)
+  })
+
+  describe('任务板空闲自省', () => {
+    const HOUR_MS = 60 * 60 * 1000
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-09-07T00:00:00.000Z'))
+    })
+
+    afterEach(() => {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    })
+
+    function withCurrentObjectives(deps: ManagerRegistryDeps, value: () => boolean = () => true): ManagerRegistryDeps {
+      return Object.assign(deps, { hasCurrentWorkboardObjectives: async () => value() })
+    }
+
+    async function waitForIdleReview(key: ManagerKey, calls: ReadonlyArray<unknown>, expectedCalls: number): Promise<void> {
+      await vi.waitFor(() => expect(calls).toHaveLength(expectedCalls))
+      await vi.waitFor(async () => expect(await store.loadCheckpoint(key)).toBeUndefined())
+    }
+
+    it('普通 episode 成功收口后满一小时只自省一次，不足一小时不触发', async () => {
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+      })))
+
+      await registry.routeHumanMessages('wechat', 'idle-review', [makeChannelMessage('开始处理')])
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 1)
+      expect(calls).toHaveLength(1)
+
+      await vi.advanceTimersByTimeAsync(1)
+      await waitForIdleReview('wechat::idle-review' as ManagerKey, calls, 2)
+      expect(calls[1].messages.at(-1)?.content).toContain('本会话已经空闲一小时')
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS * 2)
+      expect(calls).toHaveLength(2)
+    })
+
+    it('新真实输入使旧计时失效，并从新 episode 实际结束时重新计时', async () => {
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+      })))
+
+      await registry.routeHumanMessages('wechat', 'idle-reset', [makeChannelMessage('第一件事')])
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 60_000)
+      await registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'idle-reset', text: '新的结果' })
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(calls).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 60_001)
+      expect(calls).toHaveLength(2)
+
+      await vi.advanceTimersByTimeAsync(1)
+      await waitForIdleReview('wechat::idle-reset' as ManagerKey, calls, 3)
+      expect(calls[2].messages.at(-1)?.content).toContain('本会话已经空闲一小时')
+    })
+
+    it('任务板读取耗时不顺延从 episode 实际结束时计算的一小时', async () => {
+      const readStarted = deferred()
+      const releaseRead = deferred()
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+        hasCurrentWorkboardObjectives: async () => {
+          readStarted.resolve()
+          await releaseRead.promise
+          return true
+        },
+      }))
+
+      await registry.routeHumanMessages('wechat', 'idle-board-read', [makeChannelMessage('开始处理')])
+      await readStarted.promise
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+      releaseRead.resolve()
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+
+      await vi.advanceTimersByTimeAsync(50 * 60 * 1000 - 1)
+      expect(calls).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await waitForIdleReview('wechat::idle-board-read' as ManagerKey, calls, 2)
+    })
+
+    it('空板不登记；Loop 被回收后计时仍可重建同一会话执行自省', async () => {
+      let hasObjectives = false
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+      }), () => hasObjectives))
+
+      await registry.routeHumanMessages('wechat', 'idle-evict', [makeChannelMessage('空板回合')])
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      expect(calls).toHaveLength(1)
+
+      hasObjectives = true
+      await registry.routeHumanMessages('wechat', 'idle-evict', [makeChannelMessage('建立目标')])
+      const key = 'wechat::idle-evict' as ManagerKey
+      const oldLoop = registry.getOrCreate(key)
+      expect(registry.evictIdle(-1, Date.now())).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview(key, calls, 3)
+      expect(registry.getOrCreate(key)).not.toBe(oldLoop)
+      expect(calls[2].messages.at(-1)?.content).toContain('本会话已经空闲一小时')
+    })
+
+    it('失败 episode、系统任务线程和 builtin 每日反思均不登记自省', async () => {
+      const failedCalls: LLMStreamParams[] = []
+      const failed = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter: {
+          async *stream(params) {
+            failedCalls.push(params)
+            throw new Error('provider unavailable')
+          },
+          updateConfig: () => {},
+        },
+        now: () => new Date(),
+      })))
+      const failedResult = await failed.routeHumanMessages('wechat', 'idle-failed', [makeChannelMessage('会失败')])
+      expect(failedResult.consumedEvents).toBe(false)
+
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const excluded = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({ adapter, now: () => new Date() })))
+      await excluded.routeSchedule({ scheduleId: 'system', title: '系统任务', description: '系统任务' })
+      await excluded.routeSchedule({
+        scheduleId: 'reflection',
+        title: '每日反思',
+        description: '每日反思',
+        taskType: 'daily_reflection',
+        isBuiltin: true,
+        targetSession: { channel_id: 'wechat', session_id: 'daily-reflection' },
+      })
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS * 2)
+      expect(failedCalls).toHaveLength(1)
+      expect(calls).toHaveLength(2)
+    })
+
+    it('真实 episode 正在异步准备时不误判为空闲，并从其实际结束时重新计时', async () => {
+      const entered = deferred()
+      const release = deferred()
+      let blockWake = false
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+        beforeWake: async () => {
+          if (!blockWake) return
+          entered.resolve()
+          await release.promise
+        },
+      })))
+
+      await registry.routeHumanMessages('wechat', 'idle-preparing', [makeChannelMessage('开始')])
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 1)
+      blockWake = true
+      const scheduled = registry.routeSchedule({
+        scheduleId: 'queued',
+        title: '排队事件',
+        description: '排队事件',
+        targetSession: { channel_id: 'wechat', session_id: 'idle-preparing' },
+      })
+      await entered.promise
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      expect(calls).toHaveLength(1)
+
+      release.resolve()
+      await scheduled
+      blockWake = false
+      expect(calls).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 1)
+      expect(calls).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(1)
+      await waitForIdleReview('wechat::idle-preparing' as ManagerKey, calls, 3)
+    })
+
+    it('自省期间到达的真实输入在主体解析完成前阻止提前计时', async () => {
+      const idleReviewEntered = deferred()
+      const releaseIdleReview = deferred()
+      const principalLookupEntered = deferred()
+      const releasePrincipalLookup = deferred()
+      const calls: LLMStreamParams[] = []
+      let invocation = 0
+      let principalLookups = 0
+      const adapter: LLMAdapter = {
+        async *stream(params) {
+          calls.push({ ...params, messages: [...params.messages] })
+          invocation += 1
+          if (invocation === 2) {
+            idleReviewEntered.resolve()
+            await releaseIdleReview.promise
+          }
+          yield* chunksFromContent([], 'end_turn')
+        },
+        updateConfig: () => {},
+      }
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+        onHumanWake: async () => {
+          principalLookups += 1
+          if (principalLookups === 2) {
+            principalLookupEntered.resolve()
+            await releasePrincipalLookup.promise
+          }
+          return undefined
+        },
+      })))
+
+      await registry.routeHumanMessages('wechat', 'idle-principal-race', [makeChannelMessage('开始')])
+      const firstDue = vi.advanceTimersByTimeAsync(HOUR_MS)
+      await idleReviewEntered.promise
+      const humanWake = registry.routeHumanMessages(
+        'wechat',
+        'idle-principal-race',
+        [makeChannelMessage('新的真实输入')],
+      )
+      await principalLookupEntered.promise
+
+      releaseIdleReview.resolve()
+      await firstDue
+      const key = 'wechat::idle-principal-race' as ManagerKey
+      await waitForIdleReview(key, calls, 2)
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      expect(calls).toHaveLength(2)
+
+      releasePrincipalLookup.resolve()
+      await humanWake
+      expect(calls).toHaveLength(3)
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 1)
+      expect(calls).toHaveLength(3)
+      await vi.advanceTimersByTimeAsync(1)
+      await waitForIdleReview(key, calls, 4)
+    })
+
+    it('episode 运行中进入的新真实事件仍开启下一轮一小时检查', async () => {
+      const entered = deferred()
+      const release = deferred()
+      const calls: LLMStreamParams[] = []
+      let firstCall = true
+      const adapter: LLMAdapter = {
+        async *stream(params) {
+          calls.push({ ...params, messages: [...params.messages] })
+          if (firstCall) {
+            firstCall = false
+            entered.resolve()
+            await release.promise
+          }
+          yield* chunksFromContent([], 'end_turn')
+        },
+        updateConfig: () => {},
+      }
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({ adapter, now: () => new Date() })))
+      const first = registry.routeHumanMessages('wechat', 'idle-injected', [makeChannelMessage('开始')])
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
+      await registry.routeMediaNotification({
+        channelId: 'wechat',
+        sessionId: 'idle-injected',
+        text: '执行结果已到达',
+      })
+      release.resolve()
+      await first
+
+      const key = 'wechat::idle-injected' as ManagerKey
+      await vi.waitFor(async () => {
+        expect(JSON.stringify((await store.load(key)).recent)).toContain('执行结果已到达')
+      })
+      const callsBeforeIdleReview = calls.length
+      await vi.advanceTimersByTimeAsync(HOUR_MS - 1_000)
+      expect(calls).toHaveLength(callsBeforeIdleReview)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await waitForIdleReview(key, calls, callsBeforeIdleReview + 1)
+      expect(calls.at(-1)?.messages.at(-1)?.content).toContain('本会话已经空闲一小时')
+    })
+
+    it('到期时任务板已无目标则静默结束；dispose 后也不再触发', async () => {
+      let hasObjectives = true
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+      }), () => hasObjectives))
+
+      await registry.routeHumanMessages('wechat', 'idle-expiry-board', [makeChannelMessage('第一个周期')])
+      hasObjectives = false
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      expect(calls).toHaveLength(1)
+
+      hasObjectives = true
+      await registry.routeHumanMessages('wechat', 'idle-expiry-board', [makeChannelMessage('第二个周期')])
+      registry.dispose()
+      await vi.advanceTimersByTimeAsync(HOUR_MS * 2)
+      expect(calls).toHaveLength(2)
+    })
+
+    it('到期准入的异步刷新期间进入真实事件时，旧检查失效且只保留新周期', async () => {
+      const refreshEntered = deferred()
+      const releaseRefresh = deferred()
+      let blockIdleRefresh = false
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' }, { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({
+        adapter,
+        now: () => new Date(),
+        beforeWake: async (_key, envelope) => {
+          if (!blockIdleRefresh || envelope?.wake.kind !== 'workboard_idle_review') return
+          refreshEntered.resolve()
+          await releaseRefresh.promise
+        },
+      })))
+
+      await registry.routeHumanMessages('wechat', 'idle-race', [makeChannelMessage('旧周期')])
+      blockIdleRefresh = true
+      const due = vi.advanceTimersByTimeAsync(HOUR_MS)
+      await refreshEntered.promise
+
+      await registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'idle-race', text: '新事件' })
+      releaseRefresh.resolve()
+      await due
+      blockIdleRefresh = false
+      expect(calls).toHaveLength(2)
+
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview('wechat::idle-race' as ManagerKey, calls, 3)
+      const idlePrompts = calls.filter((call) => JSON.stringify(call.messages).includes('本会话已经空闲一小时'))
+      expect(idlePrompts).toHaveLength(1)
+    })
   })
 
   // --- media notification: 独立 manager 唤醒，不伪装 schedule/bg ---

@@ -10,6 +10,9 @@ import { newCredentialsFromPassword, writeCredentials } from './credentials.js'
 const KEY = 'feishu::cotton-candy'
 const WEB_PORT = 13057
 const PROTOCOL_PORT = 19857
+const OBJECTIVE_ID = '00000000-0000-4000-8000-000000000001'
+const TARGET_OBJECTIVE_ID = '00000000-0000-4000-8000-000000000002'
+const WORK_ITEM_ID = '00000000-0000-4000-8000-000000000003'
 
 const OBJECTIVE = {
   title: '让 Manager 准确回顾上下文',
@@ -25,20 +28,18 @@ const WORK_ITEM = {
 
 const MUTATIONS = [
   { action: 'create_objective', objective: OBJECTIVE },
-  { action: 'revise_objective', current_objective_title: OBJECTIVE.title, objective: { ...OBJECTIVE, title: '让 Manager 稳定回顾上下文' } },
-  { action: 'archive_objective', current_objective_title: OBJECTIVE.title, archived_as: 'completed' },
-  { action: 'create_work_item', objective_title: OBJECTIVE.title, work_item: WORK_ITEM },
+  { action: 'revise_objective', objective_id: OBJECTIVE_ID, objective: { ...OBJECTIVE, title: '让 Manager 稳定回顾上下文' } },
+  { action: 'archive_objective', objective_id: OBJECTIVE_ID, archived_as: 'completed' },
+  { action: 'create_work_item', objective_id: OBJECTIVE_ID, work_item: WORK_ITEM },
   {
     action: 'revise_work_item',
-    current_objective_title: OBJECTIVE.title,
-    current_work_item_title: WORK_ITEM.title,
-    target_objective_title: '让人类能共管任务板',
+    work_item_id: WORK_ITEM_ID,
+    target_objective_id: TARGET_OBJECTIVE_ID,
     work_item: { ...WORK_ITEM, title: '核查上下文新版' },
   },
   {
     action: 'archive_work_item',
-    current_objective_title: OBJECTIVE.title,
-    current_work_item_title: WORK_ITEM.title,
+    work_item_id: WORK_ITEM_ID,
     archived_as: 'abandoned',
   },
 ] as const
@@ -124,7 +125,7 @@ describe('Manager workboard Admin API', () => {
         manager_key: KEY,
         revision: 1,
         action: 'objective_created',
-        objective: { ...OBJECTIVE, updated_at: '2026-09-05T00:00:00.000Z' },
+        objective: { objective_id: OBJECTIVE_ID, ...OBJECTIVE, updated_at: '2026-09-05T00:00:00.000Z' },
         counts: { current_objectives: 1, current_work_items: 0, blocked_work_items: 0, archive_entries: 0 },
         manager_notification: 'pending',
       }
@@ -166,7 +167,7 @@ describe('Manager workboard Admin API', () => {
       throw error
     }
     const conflict = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
-      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create_work_item', objective_title: OBJECTIVE.title, work_item: WORK_ITEM, expected_revision: 0 }),
+      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create_work_item', objective_id: OBJECTIVE_ID, work_item: WORK_ITEM, expected_revision: 0 }),
     })
     expect(conflict.status).toBe(409)
     expect(await conflict.json()).toMatchObject({ code: 'WORKBOARD_REVISION_CONFLICT', current_revision: 8 })
@@ -177,7 +178,7 @@ describe('Manager workboard Admin API', () => {
       throw Object.assign(new Error('blocked 事项必须填写 blocker'), { code: 'INVALID_PARAMS' })
     }
     const invalidAgentInput = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
-      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create_work_item', objective_title: OBJECTIVE.title, work_item: WORK_ITEM, expected_revision: 0 }),
+      method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create_work_item', objective_id: OBJECTIVE_ID, work_item: WORK_ITEM, expected_revision: 0 }),
     })
     expect(invalidAgentInput.status).toBe(400)
     expect(await invalidAgentInput.json()).toMatchObject({ code: 'INVALID_PARAMS' })
@@ -194,5 +195,19 @@ describe('Manager workboard Admin API', () => {
       method: 'PATCH', headers: headers(), body: JSON.stringify({ action: 'create_objective', objective: OBJECTIVE, expected_revision: -1 }),
     })
     expect(invalid.status).toBe(400)
+
+    const callerSuppliedId = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
+      method: 'PATCH', headers: headers(), body: JSON.stringify({
+        action: 'create_objective', objective_id: OBJECTIVE_ID, objective: OBJECTIVE, expected_revision: 0,
+      }),
+    })
+    expect(callerSuppliedId.status).toBe(400)
+
+    const legacyLocator = await fetch(`http://localhost:${WEB_PORT}${endpoint}`, {
+      method: 'PATCH', headers: headers(), body: JSON.stringify({
+        action: 'revise_objective', current_objective_title: OBJECTIVE.title, objective: OBJECTIVE, expected_revision: 0,
+      }),
+    })
+    expect(legacyLocator.status).toBe(400)
   })
 })
