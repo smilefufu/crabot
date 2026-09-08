@@ -16,7 +16,7 @@ import {
   createSkillDirFenceHook,
   createGitWriteFenceHook,
 } from '../../hooks/defaults.js'
-import type { SpawnSpec, Workspace, WorkspaceInstructionPayload } from '../types.js'
+import type { SpawnSpec, Workspace, WorkspaceInstructionPayload, WorkerWorkspaceGitContext } from '../types.js'
 import type { LedgerWorker } from '../harness/ledger-types.js'
 
 /**
@@ -29,6 +29,7 @@ import type { LedgerWorker } from '../harness/ledger-types.js'
  * 构造 `SpawnSpec` 的契约套件与单测可能没有台账语境。工厂实现须自行决定缺省时的行为。
  */
 export interface BuiltinRuntimeContext {
+  readonly workspace_git?: WorkerWorkspaceGitContext
   readonly worker_id: string
   readonly workspace: Workspace
   /** Immutable AGENTS.md capture for the incarnation currently being configured. */

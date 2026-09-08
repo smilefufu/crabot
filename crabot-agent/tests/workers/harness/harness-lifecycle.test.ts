@@ -3695,7 +3695,7 @@ describe('WorkerHarness.queryWorker', () => {
 
     expect(result).toMatchObject({ status: 'started', fork_seq: 2, query_id: expect.any(String) })
     expect(fake.forkCalls).toHaveLength(1)
-    expect(fake.forkCalls[0].forkInput).toBe('侧问一下')
+    expect(fake.forkCalls[0].forkInput).toMatch(/^侧问一下\n\n<workspace-git-observation>/)
     expect(fake.forkCalls[0].opts.workspace_instructions?.text).toBe(latestRules)
 
     const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)

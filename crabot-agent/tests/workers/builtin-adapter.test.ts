@@ -12,6 +12,8 @@ import type { EngineMessage, EngineResult, ToolDefinition } from '../../src/engi
 import type { AgentTrace } from '../../src/types.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
+import { WorkspaceGitInspector } from '../../src/workers/harness/workspace-git-inspector.js'
+import { createWorkspaceGitTool } from '../../src/workers/workspace-git-capability.js'
 
 /** engine 的 FORCED_SUMMARY_PROMPT 首句(query-loop.ts)。worker 不跟人类说话、也没有
  *  send_message 工具，这段文案一旦出现在它的上下文里就是 bug。 */
@@ -1357,6 +1359,35 @@ describe('BuiltinWorkerAdapter', () => {
     expect(JSON.stringify(tree.pathTo(meta.tip_node_id))).toContain('第一轮回复')
     expect(JSON.stringify(tree.pathTo(meta.tip_node_id))).toContain('重启后继续')
     expect(JSON.stringify(tree.pathTo(meta.tip_node_id))).toContain('重建后的回复')
+  })
+
+  it.each([true, false])('重启后的真实 Git 工具保留启动基线且不补造历史（baseline=%s）', async (hasBaseline) => {
+    const workerId = randomUUID()
+    const binding = { worker_id: workerId, incarnation_id: randomUUID(), workspace_root: tmp,
+      ...(hasBaseline ? { baseline: (await new WorkspaceGitInspector().inspect(tmp)).current } : {}) }
+    const adapter1 = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const h = await adapter1.spawn({ ...spec({ worker_id: workerId, adapter: makeAdapter([{ text: 'idle', stopReason: 'end_turn' }]) }),
+      incarnation_id: binding.incarnation_id, workspace: { root: tmp }, workspace_git: binding })
+    await waitState(adapter1, h, 'idle')
+    const llm = makeAdapter([
+      { toolCalls: [{ name: 'inspect_workspace_git', id: 'inspect-restored', input: {} }], stopReason: 'tool_use' },
+      { text: 'refreshed', stopReason: 'end_turn' },
+    ])
+    const adapter2 = new BuiltinWorkerAdapter({ dataDir: tmp, resolveRuntime: (ctx) => {
+      expect(ctx.workspace_git).toEqual(binding)
+      return { adapter: llm, model: 'test', systemPrompt: '', tools: [createWorkspaceGitTool(ctx.workspace_git!)] }
+    } })
+    await adapter2.sendInput(h, 'inspect after restart')
+    await waitState(adapter2, h, 'idle')
+    const params = vi.mocked(llm.stream).mock.calls[1][0]
+    const content = params.messages.flatMap((message) => 'toolResults' in message ? message.toolResults : []).find((block) => block.tool_use_id === 'inspect-restored')
+    expect(content).toMatchObject({ is_error: false })
+    if (!content) throw new Error('missing real tool result')
+    const result = JSON.parse(content.content.replace(/^\[\d{2}:\d{2}:\d{2}\]\n/, ''))
+    expect(result).toMatchObject({ worker_id: workerId, incarnation_id: binding.incarnation_id,
+      git: { comparison: hasBaseline ? 'not_repository' : 'unavailable' } })
+    expect(result.git.baseline).toEqual(binding.baseline)
+    if (!hasBaseline) expect(result.git.comparison_reason).toBe('baseline_missing')
   })
 
   it('重启后先 fork 再重建 idle 主线时复用已驻留的 session tree', async () => {

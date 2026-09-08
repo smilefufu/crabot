@@ -78,6 +78,7 @@ export interface WorkerToolsContext {
 }
 
 export interface WorkerToolsDeps {
+  readonly authorizeProjectRead?: (workspaceRoot: string) => Promise<string>
   readonly harness: WorkerHarness
   /** Agent-owned structured session projection; manager never receives a native session path. */
   readonly readWorkerActivity?: (params: {
@@ -359,7 +360,9 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
           workspace,
         })
         ctx.onWorkerSpawned?.(worker.worker_id)
-        return ok({ status: 'spawned', worker_id: worker.worker_id, impl: worker.incarnations[0]?.impl })
+        const incarnation = worker.incarnations[0]
+        return ok({ status: 'spawned', worker_id: worker.worker_id, impl: incarnation?.impl,
+          ...(incarnation && incarnation.impl !== 'legacy' ? { workspace_git: incarnation.workspace_git } : {}) })
       } catch (error) {
         return mapError('spawn_worker', error)
       }
@@ -453,6 +456,23 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       } catch (error) {
         return mapError(`query_worker(${worker_id})`, error)
       }
+    },
+  })
+
+  const inspectWorkspaceGit = defineTool({
+    name: 'inspect_workspace_git',
+    description: '按当前回合文件读取授权，实时核验 worker 主线工作区 Git 状态与化身启动基线；提交和干净状态不单独证明完成。',
+    inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } }, required: ['worker_id'], additionalProperties: false },
+    isReadOnly: true,
+    async call(input) {
+      if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.worker_id !== 'string' || !input.worker_id || Object.keys(input).some((key) => key !== 'worker_id')) {
+        return invalid('inspect_workspace_git 只接受 worker_id')
+      }
+      try {
+        await authorizeWorker(input.worker_id)
+        if (!deps.authorizeProjectRead) throw new Error('当前回合没有项目读取授权')
+        return ok(await harness.inspectWorkspaceGit(input.worker_id, deps.authorizeProjectRead))
+      } catch (error) { return mapError('inspect_workspace_git', error) }
     },
   })
 
@@ -900,6 +920,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     sendToWorker,
     queryWorker,
     getWorkerState,
+    inspectWorkspaceGit,
     getWorkerActivity,
     getWorkerTurn,
     requestWorkerInterrupt,

@@ -103,6 +103,12 @@ export const MANAGER_WORKBOARD_CONTEXT = `## 用任务板管理上下文
 
 维护任务板和决策文档属于你的管理工作，直接使用相应工具完成，不交给执行器；执行器只查阅决策文档，并把建议和证据返回给你。无关任务使用新的执行器，要求变化时向仍相关的执行器发送完整的新要求。项目或任务偏好写入项目决策文档；跨项目、跨任务长期适用的沟通、协作和输出偏好才写入记忆。任务板内容不写入记忆。任务板修改失败时，先根据错误结果重新查阅或修正后完成修改；确认成功前，不要把任务板当作已经更新。`
 
+export const MANAGER_PROJECT_WORKSPACE_CONTEXT = `## 项目初始化与版本核验
+
+持续开发代码项目时，先确定实际开发目录，把必要文档和 Git 基线的初始化纳入首次开发任务，并要求在业务修改前完成；只读和一次性任务不初始化。已有项目约定优先，缺失规则由主线执行器按共享 Skill 补齐，完成后复读关键文档。独立 worktree 先准备再派发；开发目录改变时重新安排执行器并建立基线。
+
+系统在执行器启动和回合结束时提供 Git 检测事实，需要最新状态时使用 inspect_workspace_git。没有仓库或已有改动交由执行器按任务处理；检测或必要基线提交失败时先排障，暂缓相关业务修改。结合实际提交、剩余改动和验证证据验收；工作区干净、HEAD 变化或回合结束都不能单独证明任务完成。发布遵循已有授权。`
+
 /**
  * 群聊 manager 专属追加段（群聊响应纪律）：与 MANAGER_IDENTITY 分离，只在
  * isGroup=true 时装配，不污染私聊 / 系统线程 manager 的静态段。
@@ -169,7 +175,7 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
   // 先把身份段中的 {{managerKey}} 占位符替换成实际值
   const identityWithKey = MANAGER_IDENTITY.replace('{{managerKey}}', inputs.managerKey)
 
-  const parts: string[] = [identityWithKey, MANAGER_WORKBOARD_CONTEXT]
+  const parts: string[] = [identityWithKey, MANAGER_WORKBOARD_CONTEXT, MANAGER_PROJECT_WORKSPACE_CONTEXT]
 
   // Admin「AI 性格提示词」：manager 的人格与表达偏好（静态段，紧跟身份段）。
   if (inputs.adminPersonality) {

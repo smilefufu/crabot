@@ -7,6 +7,7 @@ import {
   TMP_PAGE_MCP_SERVER_NAME,
 } from '../../src/workers/capability-policy.js'
 import type { WorkerImplId } from '../../src/workers/types.js'
+import { WORKSPACE_GIT_MCP_SERVER_NAME } from '../../src/workers/workspace-git-capability.js'
 
 const builtinSkills = [...CRABOT_BUILTIN_SKILL_NAMES].map((name) => ({
   id: `builtin-${name}`,
@@ -104,7 +105,7 @@ describe('mainline Worker capability policy', () => {
       'tmp-page',
       'workspace-context-maintenance',
     ])
-    expect(result.mcp_servers.map((server) => server.name)).toEqual([TMP_PAGE_MCP_SERVER_NAME])
+    expect(result.mcp_servers.map((server) => server.name)).toEqual([TMP_PAGE_MCP_SERVER_NAME, WORKSPACE_GIT_MCP_SERVER_NAME])
   })
 
   it('缺少任一必需内置 Skill 时 fail-loud 并指出名称', () => {
@@ -130,7 +131,7 @@ describe('mainline Worker capability policy', () => {
   it('CLI bundle 追加绑定 worker_id 的受控 stdio entry，builtin 不追加', () => {
     expect(bundle('builtin').mcp_servers.map((server) => server.name)).toEqual(['git', 'scrapling'])
 
-    const cliEntry = bundle('claude-code').mcp_servers.at(-1)!
+    const cliEntry = bundle('claude-code').mcp_servers.find((server) => server.name === TMP_PAGE_MCP_SERVER_NAME)!
     expect(cliEntry).toEqual({
       name: TMP_PAGE_MCP_SERVER_NAME,
       transport: 'stdio',
@@ -180,6 +181,19 @@ describe('mainline Worker capability policy', () => {
       mcpServers: [],
       tmpPageBridge: { ...bridge, baseUrl: 'file:///tmp/pages' },
     })).toThrow('tmp-page bridge base URL must use http or https')
+  })
+
+  it('Git bridge follows file_io independently of external MCP permissions and has no credential config', () => {
+    for (const impl of ['claude-code', 'codex'] as const) {
+      const denied = permissions(false)
+      denied.tool_access.file_io = false
+      const result = buildWorkerCapabilityBundle({ impl, workerId: 'w', permissions: denied,
+        skills: builtinSkills, mcpServers: [], tmpPageBridge: bridge })
+      expect(result.mcp_servers.map((server) => server.name)).not.toContain(WORKSPACE_GIT_MCP_SERVER_NAME)
+      const entry = bundle(impl, false).mcp_servers.find((server) => server.name === WORKSPACE_GIT_MCP_SERVER_NAME)!
+      expect(entry).toMatchObject({ transport: 'stdio', command: process.execPath })
+      expect(entry.env).toBeUndefined()
+    }
   })
 
   it('外部 MCP 不得占用 Crabot tmp-page bridge 的保留名', () => {

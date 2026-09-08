@@ -131,19 +131,7 @@ interface Turn {
   readonly stopReason: 'end_turn' | 'tool_use'
 }
 
-/**
- * mock LLM 区分 worker burst 与 manager episode 的锚点。
- *
- * 取 `finish_task` 而不是契约尾巴的某句措辞：措辞会被反复打磨（这个常量已经因此坏过一次），
- * 但"`finish_task` 是 builtin worker 的终态信号、必须在 system prompt 里交代给它"是
- * protocol-agent-v3 §5.1（finalize 即 exited）规定的不变量，而 manager 没有也不该有这个
- * 工具（§4.3 的封闭白名单）。全仓 system prompt 里唯一写出这个词的地方就是 worker 契约
- * 尾巴（`unified-agent.ts` 的 `buildBuiltinWorkerContractPrompt`）。
- *
- * 下面"systemPrompt = 现网 agent prompt + v3 worker 契约尾巴"那条用例复用同一个常量断言它
- * 确实在 prompt 里——锚点一旦从 prompt 里消失，那条用例先炸，而不是靠本文件的脚本被
- * manager 抢走这种间接症状去发现。
- */
+/** Worker system prompt 的 finish_task 契约断言。 */
 const WORKER_PROMPT_MARKER = 'finish_task'
 
 const FINISH: Turn = {
@@ -154,16 +142,16 @@ const FINISH: Turn = {
 /**
  * 队列驱动的 mock LLM：整条生产链路上唯一被替换的件。
  *
- * **按 system prompt 分流**：harness 的事件会经 `onEvent` 唤醒真实的 manager loop（生产接线，
+ * **按实际工具面分流**：harness 的事件会经 `onEvent` 唤醒真实的 manager loop（生产接线，
  * 不该为了测试拆掉），而 manager 与 builtin worker 走的是同一个 `adapterFromSdkEnv` 出口。
- * 不分流的话 manager 会抢走给 worker 排的脚本——`WORKER_PROMPT_MARKER`（见其注释）是两者
- * system prompt 上稳定且语义正确的分界。manager 一律一句话收工，不干扰任何断言。
+ * Manager 提示词也会提及 finish_task，但只有 Worker 拥有该工具；不能靠提示词提及判断角色。
+ * Manager 一律一句话收工，不干扰任何断言。
  */
 function makeScriptedLLM(): { adapter: LLMAdapter; queue: Turn[] } {
   const queue: Turn[] = []
   const adapter = {
-    stream: vi.fn(async function* (params: { systemPrompt: string }) {
-      const isWorker = params.systemPrompt.includes(WORKER_PROMPT_MARKER)
+    stream: vi.fn(async function* (params: { systemPrompt: string; tools: ToolDefinition[] }) {
+      const isWorker = params.tools.some((tool) => tool.name === 'finish_task')
       const r = isWorker
         ? queue.shift() ?? { text: '(没有脚本了)', stopReason: 'end_turn' as const }
         : { text: '(manager 收到，无动作)', stopReason: 'end_turn' as const }
@@ -284,7 +272,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     await waitUntil(async () => {
       const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
-      return w.task.status === 'halted'
+      return w.incarnations[0].state === 'exited' && Boolean(await internals.managerStack!.harness.getWorkerTurn(w.worker_id))
     })
 
     // 语义不变量：工具真的执行了（文件真的被写出来），而且是在 workspace 里执行的。
@@ -297,6 +285,37 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
 
   // --- P7 J Task 2：worker 权限随派活人身份收敛（端到端，真实生产装配） ---
+
+  it('生产主线实际调用绑定的 Git 工具，动态观察仅进入消息历史', async () => {
+    const { internals } = boot()
+    llm.queue.push(
+      { toolCalls: [{ name: 'inspect_workspace_git', id: 'git-live', input: {} }], stopReason: 'tool_use' },
+      FINISH,
+    )
+    const managerKey = 'test::git-live' as ManagerKey
+    const { workerId } = await spawnBuiltin(internals, managerKey)
+    await waitUntil(async () => (await internals.managerStack!.harness.listWorkers(managerKey))[0].task.status === 'halted')
+    const requests = vi.mocked(llm.adapter.stream).mock.calls.map(([params]) => params).filter((params) => params.tools.some((tool) => tool.name === 'finish_task'))
+    const content = requests[1].messages.flatMap((message) => 'toolResults' in message ? message.toolResults : []).find((block) => block.tool_use_id === 'git-live')
+    expect(content).toMatchObject({ is_error: false })
+    if (!content) throw new Error('missing Git result')
+    const result = JSON.parse(content.content.replace(/^\[\d{2}:\d{2}:\d{2}\]\n/, ''))
+    expect(result).toMatchObject({ worker_id: workerId, git: { comparison: 'not_repository' } })
+    expect(result.incarnation_id).toBeTruthy()
+    expect(requests[0].systemPrompt).toBe(requests[1].systemPrompt)
+    expect(requests[0].systemPrompt).not.toContain('<workspace-git-observation>')
+    expect(JSON.stringify(requests[0].messages)).toContain('<workspace-git-observation>')
+    await waitUntil(async () => Boolean(await internals.managerStack!.harness.getWorkerTurn(workerId)))
+  })
+
+  it('生产工具装配在 file_io 被拒绝时不暴露 Git 刷新能力', () => {
+    const { internals } = boot()
+    const builtin = internals.buildBuiltinWorkerRuntime({ worker_id: 'w-denied', workspace: { root: tmpRoot },
+      workspace_git: { worker_id: 'w-denied', incarnation_id: 'i-denied', workspace_root: tmpRoot },
+      principal_permissions: { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, file_io: false } },
+    })!
+    expect(resolveTools(builtin).map((tool) => tool.name)).not.toContain('inspect_workspace_git')
+  })
 
   /**
    * PR F spec 写死给 J 的验收项："worker 权限随发起人身份解析——否则 cutover 当天群里
@@ -757,14 +776,15 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   // --- 验收 2：重启后 revive ---
 
   it('验收 2：换一个 UnifiedAgent 实例（内存态全丢）后，send_to_worker 仍能透明接续已终态的 worker', async () => {
-    const { internals: first } = boot()
+    const { agent: firstAgent, internals: first } = boot()
     llm.queue.push(FINISH)
     const managerKey = (`test::${'friend-revive'}` as ManagerKey)
     const { workerId } = await spawnBuiltin(first, managerKey)
     await waitUntil(async () => {
       const [w] = await first.managerStack!.harness.listWorkers(managerKey)
-      return w.task.status === 'halted'
+      return w.incarnations[0].state === 'exited' && Boolean(await first.managerStack!.harness.getWorkerTurn(workerId))
     })
+    await firstAgent.stop()
 
     // ---- 模拟进程重启：同一个 DATA_DIR 上重新装配一整套栈，内存里的 instances / 配置表全空。
     const { internals: restarted } = boot()

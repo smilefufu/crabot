@@ -161,7 +161,8 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
 
       await waitUntil(async () => {
         const [w] = await harness.listWorkers(managerKey)
-        return w.task.status === 'halted'
+        return w.incarnations[0].state === 'exited' &&
+          (await harness.readWorkerEvents(worker.worker_id)).filter((event) => event.kind === 'turn_completed').length >= 2
       })
 
       const [finalWorker] = await harness.listWorkers(managerKey)

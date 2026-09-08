@@ -5,11 +5,15 @@
 
 ## 当前状态
 
-### 项目初始化与 Harness Git 检测：spec 待确认
+### 项目初始化与 Harness Git 检测：实现与验收完成，待 PR 审查
 
-- [设计 spec](crabot-docs/superpowers/specs/2026-09-08-project-bootstrap-git-observation-design.md) 已发布，覆盖新旧项目文档初始化、
-  Harness 统一 Git 检测、按需刷新、提交纪律和主控验收；附主控提示词与共享 Skill 的候选 diff。
-- 自审、文档链接与候选 diff 应用检查通过；等待人类确认后再更新正式协议和实施，当前未改运行时代码或提示词。
+- 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-08-project-bootstrap-git-observation-design.md) 先发布 Agent v3.14.0，
+  再接入单一只读 Git Inspector、三执行器启动基线/按需刷新、主线回合记录及 Manager 文件授权。
+- 已应用批准的 Manager 初始化/验收提示与共享 Skill v3；CLI 使用独立 stdio MCP 和私有化身绑定文件，
+  不扩展 tmp-page、不自动执行 Git 写操作；旧数据缺失基线明确 unavailable。
+- Agent/Admin 类型检查、8 个真实模型行为场景、两种 CLI 原生调用及内置重启绑定通过。
+  扩大回归 771 通过、10 失败、44 跳过；其中 9 项在原始源码复现，另 1 项 tmux 超时单独复跑通过。
+  失败范围与复现证据见对应 plan；运行实例尚未部署。
 
 ### OpenAI prompt_cache_key：实现与验证完成
 

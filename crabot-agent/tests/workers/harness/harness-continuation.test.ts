@@ -311,7 +311,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     expect(fake.sendInputCalls).toHaveLength(0)
     expect(fake.resumeCalls).toHaveLength(1)
     expect(fake.resumeCalls[0].prev).toMatchObject({ worker_id: worker.worker_id, seq: 1, session_ref: mainlineHandle.session_ref })
-    expect(fake.resumeCalls[0].wakeInput).toBe('还有件事要办')
+    expect(fake.resumeCalls[0].wakeInput).toMatch(/^还有件事要办\n\n<workspace-git-observation>/)
 
     const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(w.incarnations).toHaveLength(2)
@@ -747,6 +747,9 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(handoffSpawn.prompt).toContain('Handoff package:')
     expect(handoffSpawn.prompt).not.toContain('HANDOFF.md')
     expect(handoffSpawn.prompt).toContain('接着把剩下的做完')
+    expect(handoffSpawn.workspace_git).toMatchObject({ worker_id: worker.worker_id,
+      incarnation_id: handoffSpawn.incarnation_id, workspace_root: workspaceRoot, baseline: { state: { status: 'not_repository' } } })
+    expect(handoffSpawn.workspace_git!.incarnation_id).not.toBe(worker.incarnations[0].incarnation_id)
 
     const handoff = await readHandoffPackage(workersDir, worker.worker_id, handoffSpawn.prompt)
     expect(handoff).toMatchObject({
@@ -778,6 +781,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
 
     // 新化身入主线链，impl 是改选出来的 'claude-code'。
     const newEntry = w.incarnations[w.incarnations.length - 1]
+    expect(newEntry).toMatchObject({ workspace_git: handoffSpawn.workspace_git!.baseline })
     expect(newEntry.impl).toBe('claude-code')
     expect(newEntry.forked_from).toBeUndefined()
     expect(newEntry.state).toBe('running')
@@ -2016,7 +2020,7 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
       seq: 1,
       session_ref: newMainline.session_ref,
     })
-    expect(target.resumeCalls[0].wakeInput).toBe('并发终态竞态')
+    expect(target.resumeCalls[0].wakeInput).toMatch(/^并发终态竞态\n\n<workspace-git-observation>/)
 
     const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(after.incarnations).toHaveLength(3)
@@ -2088,7 +2092,7 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
       seq: 1,
       session_ref: newMainline.session_ref,
     })
-    expect(target.resumeCalls[0].wakeInput).toBe('权威抛错场景')
+    expect(target.resumeCalls[0].wakeInput).toMatch(/^权威抛错场景\n\n<workspace-git-observation>/)
 
     const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(after.incarnations).toHaveLength(3)

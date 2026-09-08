@@ -54,6 +54,7 @@ import { getConfiguredBuiltinTools, filterMcpToolsByConfig } from './engine/tool
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpConnector, filterMcpServersForWorker } from './agent/mcp-connector.js'
 import { createTmpPageTools } from './agent/tmp-page-tools.js'
+import { createWorkspaceGitTool } from './workers/workspace-git-capability.js'
 import { createDelegateTaskTool } from './agent/delegate-task-tool.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
@@ -1428,6 +1429,9 @@ export class UnifiedAgent extends ModuleBase {
       taskId: ctx.worker_id,
     })
     tools.push(...tmpPageTools)
+    const workspaceGitTool = workerPerms.tool_access.file_io && ctx.workspace_git
+      ? createWorkspaceGitTool(ctx.workspace_git) : undefined
+    if (workspaceGitTool) tools.push(workspaceGitTool)
 
     // 生图（未配置 image_config 时 imageToolsFor 返回空数组）。
     const imageTools = imageToolsFor(this.imageConnInfo, {
@@ -1461,7 +1465,7 @@ export class UnifiedAgent extends ModuleBase {
         subagent,
         input,
         toolContext,
-        effectiveTools,
+        effectiveTools.filter((tool) => tool !== workspaceGitTool),
         {
           permissionConfig: childPermissionConfig,
           resolvedPermissions: workerPerms,

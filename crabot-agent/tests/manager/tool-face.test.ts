@@ -55,6 +55,7 @@ const CRABOT_INFO_TOOLS = [
 ]
 
 const CONTEXT_TOOLS = [
+  'inspect_workspace_git',
   'inspect_workboard',
   'change_workboard',
   'inspect_project_docs',

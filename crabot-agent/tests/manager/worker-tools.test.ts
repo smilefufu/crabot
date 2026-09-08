@@ -203,7 +203,7 @@ afterEach(async () => {
 // ---- 工具面形状 ----
 
 describe('buildWorkerTools — 工具面形状', () => {
-  it('普通 Manager 有十六项 worker 工具；状态、活动与回合查询均为只读', async () => {
+  it('普通 Manager 有十七项 worker 工具；状态、活动、Git 与回合查询均为只读', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
 
@@ -214,6 +214,7 @@ describe('buildWorkerTools — 工具面形状', () => {
         'get_worker_detail',
         'get_worker_state',
         'get_worker_turn',
+        'inspect_workspace_git',
         'list_worker_implementations',
         'list_workers',
         'query_worker',
@@ -235,6 +236,7 @@ describe('buildWorkerTools — 工具面形状', () => {
       'get_worker_state',
       'get_worker_terminal',
       'get_worker_turn',
+      'inspect_workspace_git',
       'list_worker_implementations',
       'list_workers',
     ])
@@ -480,7 +482,7 @@ describe('spawn_worker', () => {
     const parsed = parseOutput(result.output)
     expect(parsed.status).toBe('spawned')
     expect(typeof parsed.worker_id).toBe('string')
-    expect(Object.keys(parsed).sort()).toEqual(['impl', 'status', 'worker_id'])
+    expect(Object.keys(parsed).sort()).toEqual(['impl', 'status', 'worker_id', 'workspace_git'])
 
     // 真正落盘的台账记录：origin/report_to/managerKey 与 context() 提供的完全一致。
     const listed = await harness.listWorkers(CTX.managerKey)
