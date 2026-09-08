@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -72,6 +72,7 @@ describe('ManagerWorkboardStore', () => {
   })
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     await fs.rm(root, { recursive: true, force: true })
   })
 
@@ -235,7 +236,7 @@ describe('ManagerWorkboardStore', () => {
     await expect(store.createWorkItem(KEY, '目标甲', item('旧标题参数'))).rejects.toThrow(/objective_id/)
   })
 
-  it('坏 JSON、错误 manager_key、旧版本和非法字段都 fail-loud', async () => {
+  it('坏 JSON、错误 manager_key、未知版本和非法字段都 fail-loud', async () => {
     const dir = join(root, encodeSegment(KEY))
     const file = join(dir, 'workboard.json')
     await fs.mkdir(dir, { recursive: true })
@@ -246,11 +247,186 @@ describe('ManagerWorkboardStore', () => {
     await fs.writeFile(file, JSON.stringify({ schema_version: 4, manager_key: OTHER_KEY, revision: 0, objectives: [], archive: [] }))
     await expect(store.load(KEY)).rejects.toThrow(/manager_key/)
 
-    await fs.writeFile(file, JSON.stringify({ schema_version: 3, manager_key: KEY, revision: 0, objectives: [], archive: [] }))
+    await fs.writeFile(file, JSON.stringify({ schema_version: 2, manager_key: KEY, revision: 0, objectives: [], archive: [] }))
     await expect(store.load(KEY)).rejects.toThrow(/schema_version/)
 
     await fs.writeFile(file, JSON.stringify({ schema_version: 4, manager_key: KEY, revision: 0, objectives: [], archive: [], id: 'nope' }))
     await expect(store.load(KEY)).rejects.toThrow(/字段|shape/)
+  })
+
+  it('首次读取将完整 schema v3 原子迁移为 v4，保留 revision、notice 并按 fence 最后位置映射 ID', async () => {
+    const dir = join(root, encodeSegment(KEY))
+    const file = join(dir, 'workboard.json')
+    const notice = {
+      revision: 9,
+      created_at: TIMESTAMP,
+      attempts: 2,
+      retry_after_at: '2026-09-06T01:00:00.000Z',
+    }
+    const legacy = {
+      schema_version: 3,
+      manager_key: KEY,
+      revision: 9,
+      objectives: [{
+        title: '当前目标',
+        completion_criteria: ['当前目标完成'],
+        work_items: [{
+          title: '当前事项',
+          status: 'in_progress',
+          current_judgement: '正在核对',
+          next_action: '完成核对',
+          updated_at: TIMESTAMP,
+        }],
+        updated_at: TIMESTAMP,
+      }],
+      archive: [{
+        title: '归档事项',
+        status: 'ready',
+        next_action: '无需继续',
+        updated_at: TIMESTAMP,
+        objective: { title: '事项原目标', completion_criteria: ['原目标完成'] },
+        archived_as: 'completed',
+        archived_at: TIMESTAMP,
+      }, {
+        title: '归档目标',
+        completion_criteria: ['归档目标完成'],
+        archived_as: 'abandoned',
+        archived_at: TIMESTAMP,
+      }],
+      pending_admin_notice: notice,
+      admin_read_fences: [{
+        revision: 6,
+        view: 'active',
+        locations: [{ objective_title: '当前目标旧名' }, { objective_title: '当前目标' }],
+      }, {
+        revision: 7,
+        view: 'active',
+        locations: [
+          { objective_title: '当前目标', work_item_title: '当前事项旧名' },
+          { objective_title: '当前目标', work_item_title: '当前事项' },
+        ],
+      }, {
+        revision: 8,
+        view: 'archive',
+        locations: [{ objective_title: '事项原目标', work_item_title: '归档事项' }],
+      }, {
+        revision: 9,
+        view: 'archive',
+        locations: [{ objective_title: '归档目标' }],
+      }],
+    }
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(file, JSON.stringify(legacy, null, 2), 'utf-8')
+
+    const first = await store.loadAdmin(KEY)
+    const firstRaw = await fs.readFile(file, 'utf-8')
+    const persisted = JSON.parse(firstRaw)
+    const objectiveId = persisted.objectives[0].objective_id
+    const workItemId = persisted.objectives[0].work_items[0].work_item_id
+    const archivedWorkItemId = persisted.archive[0].work_item_id
+    const archivedObjectiveId = persisted.archive[1].objective_id
+
+    expect(first).toMatchObject({
+      manager_key: KEY,
+      revision: 9,
+      objectives: [{ objective_id: objectiveId, work_items: [{ work_item_id: workItemId }] }],
+      archive: [{ work_item_id: archivedWorkItemId }, { objective_id: archivedObjectiveId }],
+    })
+    expect([objectiveId, workItemId, archivedWorkItemId, archivedObjectiveId]).toEqual([
+      expect.stringMatching(UUID),
+      expect.stringMatching(UUID),
+      expect.stringMatching(UUID),
+      expect.stringMatching(UUID),
+    ])
+    expect(new Set([objectiveId, archivedObjectiveId]).size).toBe(2)
+    expect(new Set([workItemId, archivedWorkItemId]).size).toBe(2)
+    expect(persisted).toMatchObject({
+      schema_version: 4,
+      revision: 9,
+      pending_admin_notice: notice,
+      admin_read_fences: [
+        { revision: 6, view: 'active', location: { objective_id: objectiveId } },
+        { revision: 7, view: 'active', location: { work_item_id: workItemId } },
+        { revision: 8, view: 'archive', location: { work_item_id: archivedWorkItemId } },
+        { revision: 9, view: 'archive', location: { objective_id: archivedObjectiveId } },
+      ],
+    })
+
+    await expect(store.loadAdmin(KEY)).resolves.toEqual(first)
+    await expect(fs.readFile(file, 'utf-8')).resolves.toBe(firstRaw)
+  })
+
+  it.each([
+    {
+      name: '非法内容',
+      board: {
+        schema_version: 3,
+        manager_key: KEY,
+        revision: 0,
+        objectives: [{
+          title: '目标甲',
+          completion_criteria: ['目标完成'],
+          work_items: [{ title: '事项甲', status: 'unknown', next_action: '继续', updated_at: TIMESTAMP }],
+          updated_at: TIMESTAMP,
+        }],
+        archive: [],
+      },
+      error: /status/,
+    },
+    {
+      name: '归档 fence 位置歧义',
+      board: {
+        schema_version: 3,
+        manager_key: KEY,
+        revision: 2,
+        objectives: [],
+        archive: [{
+          title: '同名目标',
+          completion_criteria: ['第一次完成'],
+          archived_as: 'completed',
+          archived_at: TIMESTAMP,
+        }, {
+          title: '同名目标',
+          completion_criteria: ['第二次完成'],
+          archived_as: 'abandoned',
+          archived_at: TIMESTAMP,
+        }],
+        admin_read_fences: [{
+          revision: 2,
+          view: 'archive',
+          locations: [{ objective_title: '同名目标' }],
+        }],
+      },
+      error: /无法唯一映射/,
+    },
+  ])('$name 时 fail-loud 且原文件字节不变', async ({ board, error }) => {
+    const dir = join(root, encodeSegment(KEY))
+    const file = join(dir, 'workboard.json')
+    const original = JSON.stringify(board, null, 2)
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(file, original, 'utf-8')
+
+    await expect(store.load(KEY)).rejects.toThrow(error)
+    await expect(fs.readFile(file, 'utf-8')).resolves.toBe(original)
+  })
+
+  it('schema v3 迁移写回失败时保留原文件并清理临时文件', async () => {
+    const dir = join(root, encodeSegment(KEY))
+    const file = join(dir, 'workboard.json')
+    const original = JSON.stringify({
+      schema_version: 3,
+      manager_key: KEY,
+      revision: 0,
+      objectives: [],
+      archive: [],
+    }, null, 2)
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(file, original, 'utf-8')
+    vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('模拟 rename 失败'))
+
+    await expect(store.load(KEY)).rejects.toThrow(/迁移写回失败/)
+    await expect(fs.readFile(file, 'utf-8')).resolves.toBe(original)
+    await expect(fs.readdir(dir)).resolves.toEqual(['workboard.json'])
   })
 
   it('缺失、非法或同类型重复 ID 的 schema v4 数据 fail-loud', async () => {
