@@ -1,9 +1,20 @@
 # Crabot 项目进度
 
-> 最后整理：2026-09-07
+> 最后整理：2026-09-08
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
+
+### OpenAI prompt_cache_key：实现与验证完成
+
+- `openai` / `openai-responses` 请求顶层统一添加稳定 key，按模型与完整 system prompt
+  确定性生成；明确排除 `gemini` / `anthropic`，不增加配置或改变现有错误处理。
+- 新增 17 项请求回归，覆盖消息增长、适配器重建、重试和切到 Gemini 后的字段省略；
+  相关 130 项测试与 Agent TypeScript 构建通过。
+- 新适配器向 mirror-xinshu / gpt-6-astra 实测 8 次请求全部成功，Chat 2/4、Responses 3/4
+  命中 5632 tokens，原始 usage 与解析一致；运行实例尚未部署。
+- 协议 Agent v3.13.1 已先行发布，依据
+  [设计 spec](crabot-docs/superpowers/specs/2026-09-08-openai-prompt-cache-key-design.md)。
 
 ### Manager 渠道消息逐轮注入：已修复
 

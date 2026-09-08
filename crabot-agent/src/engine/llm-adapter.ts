@@ -54,7 +54,7 @@ export function createAdapter(config: CreateAdapterConfig): LLMAdapter {
     case 'openai':
       return new OpenAIAdapter({ endpoint: config.endpoint, apikey: config.apikey })
     case 'gemini':
-      return new OpenAIAdapter({ endpoint: config.endpoint, apikey: config.apikey })
+      return new OpenAIAdapter({ endpoint: config.endpoint, apikey: config.apikey }, 'gemini')
     case 'openai-responses':
       return new OpenAIResponsesAdapter({
         endpoint: config.endpoint,
