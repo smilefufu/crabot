@@ -88,8 +88,13 @@ import type {
   IncarnationId,
   TraceCursor,
   WorkerSubagentSummary,
+  WorkspaceGitObservation,
+  WorkspaceGitCheck,
+  InspectWorkspaceGitResult,
+  WorkerWorkspaceGitContext,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
+import { BUILTIN_WORKER_PERMISSIONS, narrowWorkerPermissions } from '../builtin/runtime'
 import type { ResolvedPermissions } from '../../types'
 import {
   CapabilityNotSupportedError,
@@ -131,6 +136,7 @@ import {
 } from './worker-events'
 import { WorkerContextStore, type WorkerContext } from './context-store'
 import { captureWorkspaceInstructions } from './workspace-instructions'
+import { WorkspaceGitInspector, workspaceGitError, appendWorkspaceGitObservation, summarizeWorkspaceGit } from './workspace-git-inspector'
 import {
   renderHandoffPrompt,
   writeHandoffPackage,
@@ -877,6 +883,7 @@ function continuationDelivery(
 export class WorkerHarness {
   private readonly pendingBgNotifications = new Map<string, number>()
   private readonly contextStore: WorkerContextStore
+  private readonly gitInspector = new WorkspaceGitInspector()
   private readonly inputDeliveryStore: InputDeliveryStore
   private readonly queryReceiptStore: QueryReceiptStore
   private readonly turnStore: WorkerTurnStore
@@ -1068,6 +1075,10 @@ export class WorkerHarness {
 
     return this.withLock(workerId, async () => {
       const startedAt = this.deps.now()
+      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, p.principal_permissions)).current
+      const gitContext: WorkerWorkspaceGitContext = {
+        worker_id: workerId, incarnation_id: incarnationId, workspace_root: workspace.root, baseline: workspaceGit,
+      }
       const instructions = await captureWorkspaceInstructions({
         workersDir: this.deps.workersDir,
         workerId,
@@ -1095,6 +1106,7 @@ export class WorkerHarness {
             state: 'running',
             workspace: workspace.root,
             workspace_instructions: instructions.snapshot,
+            workspace_git: workspaceGit,
             // adapter.spawn 尚未调用,真实 session_ref 此刻还不存在,先占位;spawn 成功后
             // 下面会用 adapter.spawn 返回的 IncarnationHandle.session_ref(protocol-agent-v3
             // §6.1,handle 自描述真值)原子补写,不依赖任何"从 handle 反查"的额外方法。
@@ -1136,12 +1148,14 @@ export class WorkerHarness {
                 goal: p.goal,
                 principal_permissions: context.principal_permissions,
                 workspace_instructions: instructions,
+                workspace_git: gitContext,
               })
             : undefined)
         const spec: SpawnSpec = {
           worker_id: workerId,
           incarnation_id: incarnationId,
-          prompt: p.prompt,
+          prompt: appendWorkspaceGitObservation(p.prompt, workspaceGit),
+          workspace_git: gitContext,
           workspace,
           ...(impl === 'builtin' ? { workspace_instructions: instructions } : {}),
           goal: p.goal,
@@ -2184,6 +2198,10 @@ export class WorkerHarness {
 
       const handoffAt = this.deps.now()
       const incarnationId = randomUUID()
+      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, auth.principal_permissions)).current
+      const gitContext: WorkerWorkspaceGitContext = {
+        worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: workspace.root, baseline: workspaceGit,
+      }
       const instructions = await captureWorkspaceInstructions({
         workersDir: this.deps.workersDir,
         workerId: worker.worker_id,
@@ -2204,6 +2222,7 @@ export class WorkerHarness {
             goal: worker.task.goal,
             principal_permissions: auth.principal_permissions,
             workspace_instructions: instructions,
+            workspace_git: gitContext,
           })
         : undefined
       if (targetImpl === 'builtin' && !builtin) {
@@ -2270,7 +2289,8 @@ export class WorkerHarness {
         handle = await targetAdapter.spawn({
           worker_id: worker.worker_id,
           incarnation_id: incarnationId,
-          prompt,
+          prompt: appendWorkspaceGitObservation(prompt, workspaceGit),
+          workspace_git: gitContext,
           workspace,
           ...(targetImpl === 'builtin' ? { workspace_instructions: instructions } : {}),
           goal: worker.task.goal,
@@ -2303,6 +2323,7 @@ export class WorkerHarness {
           state: initialState,
           workspace: workspace.root,
           workspace_instructions: instructions.snapshot,
+          workspace_git: workspaceGit,
           session_ref: handle.session_ref,
           started_at: now,
           ...(initialState === 'exited'
@@ -2771,6 +2792,11 @@ export class WorkerHarness {
     const expiredAfterReady = this.expiredInboxDelivery(item, mainline.seq)
     if (expiredAfterReady) return expiredAfterReady
     const incarnationId = randomUUID()
+    const gitPermissions = (await this.contextStore.read(worker.worker_id))?.principal_permissions
+    const workspaceGit = (await this.checkWorkspaceGit(mainline.workspace, gitPermissions)).current
+    const gitContext: WorkerWorkspaceGitContext = {
+      worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: mainline.workspace, baseline: workspaceGit,
+    }
     const instructions = await captureWorkspaceInstructions({
       workersDir: this.deps.workersDir,
       workerId: worker.worker_id,
@@ -2804,7 +2830,8 @@ export class WorkerHarness {
     }
     let newHandle
     try {
-      const returnedHandle = await adapter.resume(prevRef, text, {
+      const returnedHandle = await adapter.resume(prevRef, appendWorkspaceGitObservation(text, workspaceGit), {
+        workspace_git: gitContext,
         ...(admission ? { connection_env: admission.env } : {}),
         incarnation_id: incarnationId,
         ...(mainline.impl === 'builtin' ? { workspace_instructions: instructions } : {}),
@@ -2843,6 +2870,7 @@ export class WorkerHarness {
         session_ref: newHandle.session_ref,
         started_at: now,
         workspace_instructions: instructions.snapshot,
+        workspace_git: workspaceGit,
         ...(initialState === 'exited'
           ? { ended_at: now, ended_reason: initialInput?.report?.endReason ?? 'crashed' }
           : {}),
@@ -2981,6 +3009,8 @@ export class WorkerHarness {
     let caps
     let targetIncarnationId: string
     let targetInstructions: Awaited<ReturnType<typeof captureWorkspaceInstructions>>
+    let targetGit: WorkspaceGitObservation
+    let targetGitContext: WorkerWorkspaceGitContext
     let handoff: HandoffPackage
     try {
       handoffContext = await this.contextStore.read(worker.worker_id)
@@ -3018,6 +3048,10 @@ export class WorkerHarness {
       // before we stop the source. Any failure here leaves the source untouched and retryable.
       targetIncarnationId = randomUUID()
       const capturedAt = this.deps.now()
+      targetGit = (await this.checkWorkspaceGit(workspace.root, principalPermissions)).current
+      targetGitContext = {
+        worker_id: worker.worker_id, incarnation_id: targetIncarnationId, workspace_root: workspace.root, baseline: targetGit,
+      }
       targetInstructions = await captureWorkspaceInstructions({
         workersDir: this.deps.workersDir,
         workerId: worker.worker_id,
@@ -3038,6 +3072,7 @@ export class WorkerHarness {
           goal: worker.task.goal,
           principal_permissions: principalPermissions,
           workspace_instructions: targetInstructions,
+          workspace_git: targetGitContext,
         })
         if (!builtinInjection) {
           throw new Error(
@@ -3120,7 +3155,8 @@ export class WorkerHarness {
       newHandle = await newAdapter.spawn({
         worker_id: worker.worker_id,
         incarnation_id: targetIncarnationId,
-        prompt,
+        prompt: appendWorkspaceGitObservation(prompt, targetGit),
+        workspace_git: targetGitContext,
         workspace,
         ...(targetImpl === 'builtin' ? { workspace_instructions: targetInstructions } : {}),
         goal: worker.task.goal,
@@ -3162,6 +3198,7 @@ export class WorkerHarness {
         state: initialState,
         workspace: source.workspace,
         workspace_instructions: targetInstructions.snapshot,
+        workspace_git: targetGit,
         session_ref: newHandle.session_ref,
         started_at: now,
         ...(initialState === 'exited'
@@ -3521,6 +3558,49 @@ export class WorkerHarness {
     return this.turnStore.resolve(workerId, turnId, resolution, this.deps.now(), reason)
   }
 
+  private async checkWorkspaceGit(
+    workspaceRoot: string,
+    permissions: ResolvedPermissions | undefined,
+    baseline?: WorkspaceGitObservation,
+  ): Promise<WorkspaceGitCheck> {
+    if (!narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, permissions ?? null).tool_access.file_io) {
+      return { current: workspaceGitError(workspaceRoot, 'access_denied'), ...(baseline ? { baseline } : {}),
+        comparison: 'unavailable', comparison_reason: 'access_denied', commits: [], commits_truncated: false }
+    }
+    return this.gitInspector.inspect(workspaceRoot, baseline)
+  }
+
+  async inspectWorkspaceGit(
+    workerId: string,
+    authorizeWorkspace: (workspaceRoot: string) => Promise<string>,
+  ): Promise<InspectWorkspaceGitResult> {
+    const found = await this.deps.ledger.findWorker(workerId)
+    if (!found) throw new WorkerNotFoundError(workerId)
+    const incarnation = requireMainlineIncarnation(found.worker)
+    if (!isExecutableIncarnation(incarnation)) throw new Error('legacy worker has no executable Git baseline')
+    const workspace = await authorizeWorkspace(incarnation.workspace)
+    const permissions = (await this.contextStore.read(workerId))?.principal_permissions
+    if (!narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, permissions ?? null).tool_access.file_io) {
+      throw new Error('Worker 没有 file_io 权限')
+    }
+    return { worker_id: workerId, incarnation_id: requireStableIncarnationId(incarnation, workerId),
+      git: await this.checkWorkspaceGit(workspace, permissions, incarnation.workspace_git) }
+  }
+
+  private async turnWorkspaceGit(handle: IncarnationHandle): Promise<WorkspaceGitCheck | undefined> {
+    const found = await this.deps.ledger.findWorker(handle.worker_id)
+    const incarnation = found?.worker.incarnations.find((item) => item.incarnation_id === handle.incarnation_id)
+    if (!incarnation || !isExecutableIncarnation(incarnation) || incarnation.forked_from !== undefined) return undefined
+    let permissions: ResolvedPermissions | undefined
+    try {
+      permissions = (await this.contextStore.read(handle.worker_id))?.principal_permissions
+    } catch {
+      return { current: workspaceGitError(incarnation.workspace, 'access_denied'), baseline: incarnation.workspace_git,
+        comparison: 'unavailable', comparison_reason: 'worker_permissions_unavailable', commits: [], commits_truncated: false }
+    }
+    return this.checkWorkspaceGit(incarnation.workspace, permissions, incarnation.workspace_git)
+  }
+
   private async createPendingTurn(
     managerKey: ManagerKey,
     handle: IncarnationHandle,
@@ -3558,6 +3638,7 @@ export class WorkerHarness {
       activity_through: activityThrough,
       completed_at: completedAt,
       completion_source: report.completionSource,
+      workspace_git: await this.turnWorkspaceGit(handle),
     })
     try {
       await this.persistTurnNotification(turn, wake)
@@ -3774,6 +3855,7 @@ export class WorkerHarness {
       activity_through: turn.activity_through,
       completion_source: turn.completion_source,
       turn_pending: true,
+      ...(turn.workspace_git ? { workspace_git: summarizeWorkspaceGit(turn.workspace_git) } : {}),
       ...(wake ? { to: wake.to } : {}),
       ...(wake?.text ? { text: wake.text } : {}),
       ...(wake?.summary ? { summary: wake.summary } : {}),
@@ -5740,6 +5822,7 @@ export class WorkerHarness {
     let admission: Awaited<ReturnType<NonNullable<HarnessDeps['admitWorkerConnection']>>> | undefined
     let forkHandle: IncarnationHandle | undefined
     let forkInstructions: Awaited<ReturnType<typeof captureWorkspaceInstructions>> | undefined
+    let forkGit: WorkspaceGitObservation | undefined
     const forkIncarnationId = randomUUID()
     const disposeAdmission = async (): Promise<void> => {
       const owned = admission
@@ -5752,6 +5835,8 @@ export class WorkerHarness {
       }
     }
     try {
+      const permissions = (await this.contextStore.read(workerId))?.principal_permissions
+      forkGit = (await this.checkWorkspaceGit(prep.workspace, permissions)).current
       forkInstructions = await captureWorkspaceInstructions({
         workersDir: this.deps.workersDir,
         workerId,
@@ -5761,6 +5846,7 @@ export class WorkerHarness {
       })
       admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
       const forkOptions: ForkOptions = {
+        workspace_git: { worker_id: workerId, incarnation_id: forkIncarnationId, workspace_root: prep.workspace, baseline: forkGit },
         query_id: prep.receipt.query_id,
         incarnation_id: forkIncarnationId,
         establishment_deadline_at: prep.receipt.establishment_deadline_at,
@@ -5776,7 +5862,7 @@ export class WorkerHarness {
         )
       }
       forkHandle = await this.awaitForkEstablishment(
-        prep.adapter.fork(prep.ref, question, forkOptions),
+        prep.adapter.fork(prep.ref, appendWorkspaceGitObservation(question, forkGit), forkOptions),
         prep.adapter,
         remainingMs,
       )
@@ -5826,6 +5912,7 @@ export class WorkerHarness {
             session_ref: forkHandle!.session_ref,
             started_at: now,
             workspace_instructions: forkInstructions!.snapshot,
+            workspace_git: forkGit,
             forked_from: prep.ref.incarnation_id ?? prep.ref.seq,
             query_id: prep.receipt.query_id,
           }

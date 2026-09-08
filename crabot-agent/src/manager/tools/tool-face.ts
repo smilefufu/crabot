@@ -35,7 +35,7 @@ import { buildCrabotInfoTools } from './crabot-info.js'
 import type { MasterAuthorization } from '../principal.js'
 import { buildWorkboardTools } from './workboard-tools.js'
 import type { ManagerWorkboardStore } from '../workboard-store.js'
-import { buildProjectDocTools, type ProjectDocToolDeps } from './project-doc-tools.js'
+import { buildProjectDocTools, authorizeProjectRoot, type ProjectDocToolDeps } from './project-doc-tools.js'
 
 export interface ToolFaceDeps {
   readonly harness: WorkerHarness
@@ -354,6 +354,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const messagingTools = buildMessagingFace(deps)
   const memoryTools = buildManagerMemoryFace(deps.memoryServer)
   const workerTools = buildWorkerTools({
+    authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot(deps.projectDocs, workspaceRoot, false),
     harness: deps.harness,
     context: deps.workerContext,
     authorization: deps.authorization,

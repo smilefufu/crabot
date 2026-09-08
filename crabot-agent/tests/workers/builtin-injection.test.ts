@@ -207,7 +207,7 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
     expect(worker.task.status).toBe('running')
     await waitUntil(async () => {
       const [w] = await harness.listWorkers(managerKey)
-      return w.task.status === 'halted'
+      return w.incarnations[0].state === 'exited' && Boolean(await harness.getWorkerTurn(worker.worker_id))
     })
 
     // 语义不变量：worker 真的执行了工具调用、真的以 finish_task 收尾。

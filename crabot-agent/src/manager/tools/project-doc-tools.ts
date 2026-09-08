@@ -153,7 +153,7 @@ function permissionsFromWake(
   return undefined
 }
 
-async function authorizeProjectRoot(
+export async function authorizeProjectRoot(
   deps: ProjectDocToolDeps,
   rawProjectRoot: unknown,
   write: boolean,

@@ -9,11 +9,15 @@ describe('workspace-context-maintenance skill doc', () => {
       'utf8',
     )
 
-    expect(doc).toContain('确认并遵守项目根目录的 `AGENTS.md`')
+    expect(doc).toContain('读取并遵守项目根目录已有的 `AGENTS.md`')
     expect(doc).toContain('`README.md`')
     expect(doc).toContain('`ARCHITECTURE.md`')
     expect(doc).toContain('向主控说明具体缺口和证据')
-    expect(doc).toContain('不自动创建 `AGENTS.md`')
+    expect(doc).toContain('持续开发代码项目且规则正文缺失时，在首次业务修改前创建最小 `AGENTS.md`')
+    expect(doc).toContain('只读调查、问答和一次性文件处理不初始化项目')
+    expect(doc).toContain('项目禁止自动提交时遵循其约定')
+    expect(doc).toContain('不能混入或清理别人的工作')
+    expect(doc).toContain('inspect_workspace_git')
     expect(doc).toContain('不创建、修改、取代或迁移决策记录')
     expect(doc).not.toContain('CURRENT_CONTEXT.md')
     expect(doc).not.toContain('返回给 Manager 的工作总结')

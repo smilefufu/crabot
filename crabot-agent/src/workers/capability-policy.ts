@@ -2,6 +2,7 @@ import path from 'node:path'
 import type { MCPServerConfig, ResolvedPermissions, SkillConfig } from '../types.js'
 import { filterMcpServersForWorker } from '../agent/mcp-connector.js'
 import type { CapabilityBundle, WorkerImplId } from './types.js'
+import { createWorkspaceGitMcpServerConfig, WORKSPACE_GIT_MCP_SERVER_NAME } from './workspace-git-capability.js'
 
 export const CRABOT_BUILTIN_SKILL_NAMES: ReadonlySet<string> = new Set([
   'tmp-page',
@@ -146,8 +147,9 @@ export function createTmpPageMcpServerConfig(
 }
 
 export function buildWorkerCapabilityBundle(input: WorkerCapabilityPolicyInput): CapabilityBundle {
-  if (input.mcpServers.some((server) => server.name === TMP_PAGE_MCP_SERVER_NAME)) {
-    throw new Error(`worker capability policy: MCP server name '${TMP_PAGE_MCP_SERVER_NAME}' is reserved`)
+  const reserved = input.mcpServers.find((server) => [TMP_PAGE_MCP_SERVER_NAME, WORKSPACE_GIT_MCP_SERVER_NAME].includes(server.name))
+  if (reserved) {
+    throw new Error(`worker capability policy: MCP server name '${reserved.name}' is reserved`)
   }
   const mcpServers = filterMcpServersForWorker(input.mcpServers, input.permissions)
   const skills = selectMainlineWorkerSkills(
@@ -162,6 +164,7 @@ export function buildWorkerCapabilityBundle(input: WorkerCapabilityPolicyInput):
   }
   return {
     skills,
-    mcp_servers: [...mcpServers, createTmpPageMcpServerConfig(input.workerId, input.tmpPageBridge)],
+    mcp_servers: [...mcpServers, createTmpPageMcpServerConfig(input.workerId, input.tmpPageBridge),
+      ...(input.permissions.tool_access.file_io ? [createWorkspaceGitMcpServerConfig()] : [])],
   }
 }

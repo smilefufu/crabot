@@ -44,6 +44,7 @@ import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { buildChildEnv } from '../../core/runtime-env.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
+import { workspaceGitBridgeEnv } from '../workspace-git-capability.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { WorkerExitedError, CliInputStallError, WorkerImplUnavailableError, ForkEstablishmentError } from '../errors.js'
 import {
@@ -941,7 +942,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       name: sessionName,
       cwd: spec.workspace.root,
       command,
-      env: spec.connection_env,
+      env: { ...spec.connection_env, ...await workspaceGitBridgeEnv(dir, seq, spec.workspace_git) },
       control_log_path: controlDiagnosticPath({ dir, seq }),
     })
 
@@ -1070,7 +1071,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         name: sessionName,
         cwd: prevRuntime.workspaceRoot,
         command,
-        env: opts?.connection_env,
+        env: { ...opts?.connection_env, ...await workspaceGitBridgeEnv(dir, seq, opts?.workspace_git) },
         control_log_path: controlDiagnosticPath({ dir, seq }),
       })
       runtime = {
@@ -1202,7 +1203,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       }
       const shellCommand = `${forkBin} ${args.map(shQuote).join(' ')}`
       const inheritedConnectionEnv = opts.connection_env ?? prevRuntime.connectionEnv ?? {}
-      const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...buildScrubbedChildEnv(), [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv } }
+      const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...buildScrubbedChildEnv(), [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv, ...await workspaceGitBridgeEnv(dir, runtime.seq, opts.workspace_git) } }
 
       child = spawn('/bin/sh', ['-c', shellCommand], {
         ...execOpts,

@@ -1,5 +1,5 @@
 import type { ModuleId, FriendId, SessionId, TaskId } from '../../types'
-import type { IncarnationEndReason, IncarnationId, WorkerContractState, WorkerImplId, WorkspaceInstructionSnapshot } from '../types'
+import type { IncarnationEndReason, IncarnationId, WorkerContractState, WorkerImplId, WorkspaceInstructionSnapshot, WorkspaceGitObservation } from '../types'
 
 export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent'
 export type TaskStatus = 'queued' | 'running' | 'halted' | 'closed'
@@ -53,6 +53,7 @@ interface IncarnationBase {
 }
 
 export interface ExecutableIncarnation extends IncarnationBase {
+  workspace_git?: WorkspaceGitObservation
   impl: WorkerImplId
   session_ref: string
   tmux_session?: string

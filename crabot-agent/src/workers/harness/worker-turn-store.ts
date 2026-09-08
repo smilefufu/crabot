@@ -2,12 +2,13 @@ import { randomUUID } from 'crypto'
 import { promises as fs } from 'fs'
 import { dirname, join } from 'path'
 import { AsyncMutex } from '../async-mutex.js'
-import type { IncarnationEndReason, IncarnationId, WorkerContractState, WorkerImplId } from '../types.js'
+import type { IncarnationEndReason, IncarnationId, WorkerContractState, WorkerImplId, WorkspaceGitCheck } from '../types.js'
 import type { ManagerKey } from './ledger-types.js'
 
 export type WorkerTurnResolution = 'continued' | 'reported' | 'asked_human' | 'suppressed'
 
 export interface WorkerTurn {
+  readonly workspace_git?: WorkspaceGitCheck
   readonly turn_id: string
   readonly worker_id: string
   readonly manager_key: ManagerKey

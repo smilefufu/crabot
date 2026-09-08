@@ -6,6 +6,67 @@ import type { Resolvable } from '../engine/types.js'
 import type { LedgerWorker } from './harness/ledger-types.js'
 import type { ResolvedPermissions, MCPServerConfig } from '../types.js'
 
+export interface WorkspaceGitChange {
+  path: string
+  previous_path?: string
+  index_status: string
+  worktree_status: string
+}
+
+export type WorkspaceGitState =
+  | { status: 'not_repository' }
+  | {
+      status: 'repository'
+      repository_root: string
+      scope: 'repository' | 'subdirectory'
+      linked_worktree: boolean
+      workspace_ignored: boolean
+      branch: string | null
+      head: string | null
+      dirty: boolean
+      change_count: number
+      unmerged_count: number
+      changes: WorkspaceGitChange[]
+      changes_truncated: boolean
+    }
+  | {
+      status: 'error'
+      reason_code: 'git_unavailable' | 'workspace_unavailable' | 'access_denied'
+        | 'unsafe_repository' | 'inspection_failed' | 'inspection_timeout'
+        | 'output_limit' | 'changed_during_inspection'
+      message: string
+    }
+
+export interface WorkspaceGitObservation {
+  captured_at: string
+  workspace_root: string
+  state: WorkspaceGitState
+}
+
+export interface WorkspaceGitCheck {
+  current: WorkspaceGitObservation
+  baseline?: WorkspaceGitObservation
+  comparison: 'unavailable' | 'not_repository' | 'repository_appeared'
+    | 'repository_changed' | 'same_head' | 'advanced' | 'history_changed'
+  comparison_reason?: string
+  commits: string[]
+  commits_truncated: boolean
+}
+
+export interface InspectWorkspaceGitResult {
+  worker_id: string
+  incarnation_id: IncarnationId
+  git: WorkspaceGitCheck
+}
+
+/** Internal launch binding, never accepted from a tool input. */
+export interface WorkerWorkspaceGitContext {
+  readonly worker_id: string
+  readonly incarnation_id: IncarnationId
+  readonly workspace_root: string
+  readonly baseline?: WorkspaceGitObservation
+}
+
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
 export type CLIWorkerImplId = Exclude<WorkerImplId, 'builtin'>
 export type WorkerInstallProfile = 'latest' | 'fallback'
@@ -178,6 +239,7 @@ export type WorkerUiResponse =
   | { readonly kind: 'text'; readonly text: string }
 
 export interface ForkOptions {
+  readonly workspace_git?: WorkerWorkspaceGitContext
   readonly query_id: string
   /** Allocated by Harness before adapter.fork; direct adapter callers may omit it. */
   readonly incarnation_id?: IncarnationId
@@ -261,6 +323,7 @@ export interface WorkerCapabilityContext {
 }
 
 export interface SpawnSpec {
+  readonly workspace_git?: WorkerWorkspaceGitContext
   readonly worker_id: string
   /** Harness-owned identity. Direct adapter tests may omit it, production Harness never does. */
   readonly incarnation_id?: IncarnationId
@@ -306,6 +369,7 @@ export interface SpawnSpec {
 }
 
 export interface ResumeOptions {
+  readonly workspace_git?: WorkerWorkspaceGitContext
   readonly connection_env?: Record<string, string>
   readonly incarnation_id?: IncarnationId
   /** Present only for builtin; CLI implementations discover their workspace instruction file natively. */
