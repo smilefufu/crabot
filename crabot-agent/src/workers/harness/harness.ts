@@ -782,6 +782,7 @@ export interface SpawnWorkerParams {
 }
 
 export interface HarnessSendToWorkerOptions {
+  readonly rejectStoppedParent?: boolean
   readonly raw?: boolean
   /** Interrupt a non-builtin mainline before delivering this direction change. */
   readonly immediate_redirect?: boolean
@@ -942,6 +943,10 @@ export class WorkerHarness {
   private recoveryNoticeDrainInFlight = false
   private recoveryNoticeTimer?: ReturnType<typeof setTimeout>
   private recoveryNoticeDeliveryStopped = false
+
+  nativeTraceOffset(workerId: string, incarnationId: IncarnationId): Promise<number> {
+    return this.nativeActivityStore.cursor(workerId, incarnationId)
+  }
 
   constructor(private readonly deps: HarnessDeps) {
     this.contextStore = new WorkerContextStore(deps.workersDir)
@@ -1313,6 +1318,7 @@ export class WorkerHarness {
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'closed') throw new TaskCancelledError(workerId)
       const mainline = requireMainlineIncarnation(found.worker)
+      if (opts?.rejectStoppedParent && mainline.ended_reason === 'killed') throw new TaskCancelledError(workerId)
       if (
         opts?.immediate_redirect === true &&
         isExecutableIncarnation(mainline) &&
@@ -1367,6 +1373,7 @@ export class WorkerHarness {
         raw: opts?.raw ?? false,
         enqueued_at: this.deps.now(),
         allow_terminal_continuation: true,
+        ...(opts?.rejectStoppedParent ? { reject_stopped_parent: true } : {}),
         ...(opts?.immediate_redirect === true ? { immediate_redirect: true } : {}),
         ...(durableReceipt
           ? {
@@ -2034,6 +2041,7 @@ export class WorkerHarness {
       const handle: IncarnationHandle = {
         worker_id: workerId,
         seq: incarnation.seq,
+        incarnation_id: incarnation.incarnation_id,
         impl: incarnation.impl,
         session_ref: incarnation.session_ref,
       }
@@ -2607,6 +2615,8 @@ export class WorkerHarness {
         const found = await this.deps.ledger.findWorker(workerId)
         if (!found) throw new WorkerNotFoundError(workerId)
         const { worker, managerKey } = found
+        if (item?.reject_stopped_parent &&
+          (curEndReason === 'killed' || requireMainlineIncarnation(worker).ended_reason === 'killed')) return 'dead_letter'
         const expired = this.expiredInboxDelivery(item, curSeq)
         if (expired) return expired
 

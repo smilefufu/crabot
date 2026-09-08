@@ -48,6 +48,8 @@ export interface InboxItem {
   readonly deadline_at?: string
   /** False for untrusted wakeups that must never revive a terminal task. */
   readonly allow_terminal_continuation?: boolean
+  /** Child completion must not revive a parent explicitly stopped by the caller. */
+  readonly reject_stopped_parent?: boolean
   /** Process-local receipt; durable truth remains with the producer. */
   readonly onSettled?: (settlement: InboxSettlement, detail?: InboxSettlementDetail) => void | Promise<void>
   /** Pending is diagnostic only and never settles the producer receipt. */

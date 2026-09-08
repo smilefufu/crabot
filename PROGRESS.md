@@ -5,6 +5,14 @@
 
 ## 当前状态
 
+### builtin Worker 恢复、观测与 subagent 控制：实现完成，待 PR 审查
+
+- 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-08-builtin-worker-recovery-observation-control-design.md) 先发布 Agent v3.14.3；恢复同一 idle 化身的可写 trace，拒绝向已缺失的历史位置续写。
+- subagent 终态与退出通知原子持久化，通过 WorkerInbox 确认；ListEntities 按 Worker 归属查询，Kill 命中实际执行者，整体停止仍核验后台实体。
+- 真实装配验证两次重启后的工具 trace、无需人类输入的 child 中断唤醒、工具阻塞期间 Kill 和整体 stop unknown。定向扩大回归 268 通过、1 项既有 shell 进程时间测试失败；TypeScript 通过。
+- Agent 全量首轮 3209/3251 通过；失败项在未修改基线复现 40 项，其余 2 项并发用例单独复跑通过。本次引入的旧 mock 配置读取问题已修复并对齐基线结果。
+- 尚未部署或修改故障 Worker 现场；合并后的独立测试 Worker 重启验收与存量 trace 保全/受控接续仍待执行。
+
 ### 项目初始化与 Harness Git 检测：实现与验收完成，待 PR 审查
 
 - 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-08-project-bootstrap-git-observation-design.md) 先发布 Agent v3.14.0，

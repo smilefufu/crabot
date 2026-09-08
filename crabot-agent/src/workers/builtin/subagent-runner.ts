@@ -1,4 +1,5 @@
 import { createAdapter } from '../../engine/llm-adapter.js'
+import { readFile } from 'node:fs/promises'
 import { thinkingParam } from '../../engine/llm-adapter-types.js'
 import { spawnPersistentAgent } from '../../engine/bg-entities/bg-agent.js'
 import type { BgEntityRegistry } from '../../engine/bg-entities/registry.js'
@@ -62,7 +63,7 @@ export class BuiltinSubagentRunner {
   constructor(
     private readonly traceStore: TraceStore,
     private readonly lspManager: import('../../lsp/lsp-manager.js').LSPManager,
-    private readonly deliverCompletion?: (workerId: string, text: string) => Promise<void>,
+    private readonly deliverCompletion?: (workerId: string, entityId: string) => Promise<void>,
     registry?: BgEntityRegistry,
     redactText: (text: string) => string = (text) => text,
   ) {
@@ -153,10 +154,8 @@ export class BuiltinSubagentRunner {
       },
       onExit: async (info) => {
         const current = await registry.get(info.entity_id)
-        if (current?.status === 'killed') return
-        const outcome = info.status === 'completed' ? '已完成' : '失败'
-        const detail = info.finalText || info.error || '无可读结果'
-        await this.deliverCompletion?.(worker.worker_id, `<sub_agent_notification>\n${subagent.name} ${outcome}：${detail}\n</sub_agent_notification>`)
+        if (current?.exit_notification?.status !== 'pending') return
+        await this.deliverCompletion?.(worker.worker_id, info.entity_id)
       },
     })
     const record = await registry.get(entityId)
@@ -176,6 +175,18 @@ export class BuiltinSubagentRunner {
       .filter((record): record is BgAgentRegistryRecord => record.type === 'agent' && record.owner.worker_id === workerId)
       .map((record) => summaryOf(workerId, record))
       .sort((left, right) => (right.started_at ?? '').localeCompare(left.started_at ?? ''))
+  }
+
+  async renderCompletion(workerId: string, entityId: string): Promise<string> {
+    const record = await this.requireRegistry().get(entityId)
+    if (record?.type !== 'agent' || record.owner.worker_id !== workerId || record.spawned_by_task_id !== workerId) {
+      throw new Error(`Worker child not found: ${entityId}`)
+    }
+    const detail = record.result_file ? await readFile(record.result_file, 'utf8') : record.error
+    const fallback = record.status === 'stalled'
+      ? 'Agent restarted; child execution interrupted.'
+      : 'No readable result.'
+    return this.redactText(`<sub_agent_notification>\n${entityId} (${record.subagent_type ?? 'subagent'}) status=${statusOf(record.status)}: ${detail || record.error || fallback}\n</sub_agent_notification>`)
   }
 
   async get(workerId: string, subagentId: string): Promise<WorkerSubagentSummary | undefined> {
@@ -211,10 +222,23 @@ export class BuiltinSubagentRunner {
     const records = await registry.list({ type: 'agent', spawned_by_task_id: workerId })
     await Promise.all(records
       .filter((record): record is BgAgentRegistryRecord => record.type === 'agent' && record.owner.worker_id === workerId && record.status === 'running')
-      .map(async (record) => {
-        this.abortControllers.get(record.entity_id)?.abort()
-        await registry.update(record.entity_id, { status: 'killed', ended_at: new Date().toISOString() })
-      }))
+      .map((record) => this.stopAgent(workerId, record.entity_id)))
+    // Harness verifies the remaining running records; abort submission is not exit proof.
+  }
+
+  async stopAgent(workerId: string, entityId: string): Promise<ToolCallResult> {
+    const registry = this.requireRegistry()
+    const record = await registry.get(entityId)
+    if (record?.type !== 'agent' || record.owner.worker_id !== workerId || record.spawned_by_task_id !== workerId) {
+      return { output: `Worker child not found: ${entityId}`, isError: true }
+    }
+    if (record.status !== 'running') return { output: `Already ${record.status}, no-op`, isError: false }
+    const controller = this.abortControllers.get(entityId)
+    if (!controller) return { output: `Child ${entityId} controller unavailable; stop not confirmed.`, isError: true }
+    const updated = await registry.update(entityId, { stop_requested_at: new Date().toISOString() })
+    if (updated?.status !== 'running') return { output: `Already ${updated?.status}, no-op`, isError: false }
+    controller.abort()
+    return { output: `Child ${entityId}: stop requested; execution exit not confirmed.`, isError: false }
   }
 
   private capabilitiesFor(

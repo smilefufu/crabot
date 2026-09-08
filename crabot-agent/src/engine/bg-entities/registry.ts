@@ -52,7 +52,7 @@ class AsyncMutex {
 }
 
 function hasPendingExitNotification(record: BgEntityRecord): boolean {
-  return record.type === 'shell' && record.exit_notification?.status === 'pending'
+  return record.exit_notification?.status === 'pending'
 }
 
 /** Worker delegate_task identities belong to Worker observability retention, not the 7d entity GC. */
@@ -100,6 +100,9 @@ export class BgEntityRegistry {
       const existing = file.entities[entity_id]
       if (!existing) return null
 
+      if (isWorkerOwnedBuiltinAgent(existing) && existing.status !== 'running' &&
+        (patch.status !== undefined || ('stop_requested_at' in patch))) return existing
+
       // Do not allow downgrading from a terminal state that was set intentionally
       // (e.g. kill tool sets 'killed'; exit handler must not overwrite with 'failed').
       const TERMINAL_PRIORITY: ReadonlyArray<BgEntityStatus> = ['killed', 'stalled']
@@ -112,6 +115,12 @@ export class BgEntityRegistry {
       }
 
       const next = { ...existing, ...patch } as BgEntityRecord
+      if (next.type === 'agent' && isWorkerOwnedBuiltinAgent(next) && existing.status === 'running' && next.status !== 'running') {
+        if (next.stop_requested_at) next.status = 'killed'
+        else if (!next.exit_notification) {
+          next.exit_notification = { status: 'pending', updated_at: next.ended_at ?? new Date().toISOString(), attempts: 0 }
+        }
+      }
       if (
         next.type === 'shell' &&
         next.owner.worker_id &&
@@ -367,8 +376,8 @@ export class BgEntityRegistry {
     await this.mutex.run(async () => {
       const file = await this.readFile()
       const existing = file.entities[entityId]
-      if (existing?.type !== 'shell' || existing.exit_notification === undefined) return
-      const next: BgShellRegistryRecord = {
+      if (!existing || existing.exit_notification === undefined) return
+      const next: BgEntityRecord = {
         ...existing,
         exit_notification: mutate(existing.exit_notification, new Date().toISOString()),
       }
@@ -385,8 +394,9 @@ export class BgEntityRegistry {
     try {
       const raw = await fs.readFile(this.registryPath, 'utf8')
       return JSON.parse(raw) as RegistryFile
-    } catch {
-      return { entities: {} }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { entities: {} }
+      throw error
     }
   }
 

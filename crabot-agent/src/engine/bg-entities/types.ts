@@ -6,6 +6,7 @@
 export type BgEntityType = 'shell' | 'agent'
 export type BgEntityStatus = 'running' | 'completed' | 'failed' | 'killed' | 'stalled'
 export type BgExitNotificationStatus = 'pending' | 'delivered' | 'dead_letter'
+export const BG_EXIT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 10_000] as const
 
 export interface BgExitNotificationState {
   readonly status: BgExitNotificationStatus
@@ -49,6 +50,8 @@ export interface BgShellRegistryRecord extends BgEntityBase {
 
 export interface BgAgentRegistryRecord extends BgEntityBase {
   readonly type: 'agent'
+  exit_notification?: BgExitNotificationState
+  stop_requested_at?: string
   /** Present when this persistent agent was started through delegate_task. */
   readonly subagent_type?: string
   /** Its independent TraceStore trace, when the caller enabled tracing. */

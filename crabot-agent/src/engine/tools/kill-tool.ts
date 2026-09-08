@@ -51,6 +51,10 @@ async function killAgent(
   entityId: string,
   deps: BgToolDeps,
 ): Promise<{ output: string; isError: boolean }> {
+  if (deps.ownerWorkerId) {
+    if (!deps.stopWorkerAgent) return { output: 'Worker child control unavailable; stop not confirmed.', isError: true }
+    return deps.stopWorkerAgent(entityId)
+  }
   const record = await deps.registry.get(entityId)
   if (!record) {
     return { output: `Entity not found: ${entityId}`, isError: true }
