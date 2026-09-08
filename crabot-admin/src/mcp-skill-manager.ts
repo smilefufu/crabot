@@ -1605,8 +1605,7 @@ export class SkillManager {
   }
 
   /**
-   * 注入内置 Skill：仅当 id 不存在时插入，已存在则跳过。
-   * 与 SubAgentManager.seedBuiltin 相同语义。
+   * 注入内置 Skill：插入缺失条目，修复必需状态及项目上下文 Skill 的版本简介。
    */
   private async seedBuiltinSkillsUnlocked(entries: SkillRegistryEntry[]): Promise<void> {
     let changed = false
@@ -1621,11 +1620,14 @@ export class SkillManager {
       }
       const repairSkillDir = !existing.skill_dir && !!e.skill_dir
       const repairRequiredState = isNonDisableable && (!existing.enabled || existing.can_disable)
-      if (repairSkillDir || repairRequiredState) {
+      const repairWorkspaceContextMetadata = existing.is_builtin && existing.name === 'workspace-context-maintenance'
+        && e.name === existing.name && (existing.description !== e.description || existing.version !== e.version)
+      if (repairSkillDir || repairRequiredState || repairWorkspaceContextMetadata) {
         next.set(e.id, {
           ...existing,
           ...(repairSkillDir ? { skill_dir: e.skill_dir } : {}),
           ...(repairRequiredState ? { enabled: true, can_disable: false } : {}),
+          ...(repairWorkspaceContextMetadata ? { description: e.description, version: e.version } : {}),
           updated_at: new Date().toISOString(),
         })
         if (repairSkillDir) {
