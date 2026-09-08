@@ -9,6 +9,7 @@ import { isToolResultMessage, extractText, buildImageUrl, readSSEEvents, capTool
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock, LLMTokenUsage } from './types.js'
 import { HttpResponseError, StreamProtocolError, parseRetryAfterMs } from './retry-utils.js'
 import { withStreamTimeout } from './stream-timeout.js'
+import { buildPromptCacheKey } from './prompt-cache-key.js'
 
 // --- Responses API Message Normalization ---
 
@@ -164,6 +165,7 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
 
     const body: Record<string, unknown> = {
       model: params.model,
+      prompt_cache_key: buildPromptCacheKey(params.model, params.systemPrompt),
       instructions: params.systemPrompt,
       input,
       tools,

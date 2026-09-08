@@ -7,6 +7,7 @@ import { isToolResultMessage, extractText, buildImageUrl, readSSELines, mergeCon
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock, LLMTokenUsage } from './types.js'
 import { HttpResponseError, StreamProtocolError, parseRetryAfterMs } from './retry-utils.js'
 import { withStreamTimeout } from './stream-timeout.js'
+import { buildPromptCacheKey } from './prompt-cache-key.js'
 
 // --- OpenAI Message Types ---
 
@@ -152,7 +153,7 @@ function mapOpenAIFinishReason(raw: string | null | undefined): EngineStopReason
 export class OpenAIAdapter implements LLMAdapter {
   private config: LLMAdapterConfig
 
-  constructor(config: LLMAdapterConfig) {
+  constructor(config: LLMAdapterConfig, private readonly format: 'openai' | 'gemini' = 'openai') {
     this.config = config
   }
 
@@ -178,6 +179,10 @@ export class OpenAIAdapter implements LLMAdapter {
       messages: [{ role: 'system', content: params.systemPrompt }, ...messages],
       stream: true,
       stream_options: { include_usage: true },
+    }
+
+    if (this.format === 'openai') {
+      body.prompt_cache_key = buildPromptCacheKey(params.model, params.systemPrompt)
     }
 
     // 思考强度（spec 2026-08 §5.2）：跟随默认不发；off→'none'；low/medium/high/自定义字符串
