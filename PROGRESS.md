@@ -5,6 +5,13 @@
 
 ## 当前状态
 
+### Manager 任务板逐项空闲自省：实现与验收完成
+
+- 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-09-manager-workboard-item-idle-introspection-design.md) 发布 Agent v3.14.5 协议；当前事项及无事项目标按自身更新时间计算唯一最早期限。
+- 真实输入和任务板变化不再推迟其它停滞事项；忙碌时延后重算，自省正常收口后至少隔一小时再次复核，空板停止，失败不重试、重启不恢复计时。
+- Manager 全目录 562 项回归、TypeScript 与隔离 Docker 确定性评测 20 项断言通过。
+- `mirror-xinshu / gpt-6-astra` 隔离真实模型评测：12 场景各 3 次、408 项断言全部通过（219 次请求）；其中新增多任务场景 51 项断言验证活跃事项安排保持正确、超时事项按人类最新意图复核收口。运行实例尚未部署。
+
 ### Scheduler 定时 instruction、脚本 Schedule 与旧 Supervision 退役：实现完成，待 PR 审查
 
 - 普通 Schedule 按完整目标会话进入 Manager 串行队列；Manager 获得通用 Schedule CRUD，Worker 生命周期不再驱动任何巡检 Schedule。
@@ -141,9 +148,9 @@
   Manager 必须重新查阅并使用当前 ID 重试，不能在失败后声称修改成功。
 - Manager 仍只使用 `inspect_workboard` / `change_workboard` 两个工具；Admin 继续整板 revision 保存，Manager
   无需携带 revision。人类保存后只阻止受影响的目标或事项被静默覆盖；会话列表和独立任务板页继续按目标分区。
-- 普通 Manager 成功处理真实事件后一小时仍空闲且有当前目标时，Registry 产生一次临时系统自省；它要求对照
-  聊天历史和任务板，以人类最新意图为准继续、等待、修订、归档或求助。纯自省不递归计时，提示不进入静态
-  prompt、会话历史、Memory 或后续请求；允许只读查询或独立侧问执行器，不得向主线催促、纠偏或重复派发。
+- Registry 通过临时系统输入提醒 Manager 对照聊天历史和任务板，以人类最新意图为准继续、等待、修订、归档
+  或求助；计时规则已由上方“任务板逐项空闲自省”修订。提示不进入静态 prompt、会话历史、Memory 或后续请求；
+  允许只读查询或独立侧问执行器，不得向主线催促、纠偏或重复派发。
 - 普通文字交付复核改由进程内“待回复义务”门控：仅去重后的直接人类消息建立，只有当前会话 `send_message`
   成功清除；执行器/系统事件、`attention_flush` 不建立，发送失败、跨会话发送、episode 失败和 Loop 回收不清除，
   Agent 重启不恢复。每日反思继续使用独立复核。

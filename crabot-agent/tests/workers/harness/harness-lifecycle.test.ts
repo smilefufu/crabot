@@ -466,6 +466,7 @@ describe('WorkerHarness.spawnWorker', () => {
     })
     expect(fake.provisionCalls).toHaveLength(1)
     expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf-8'))).toEqual({
+      manager_key: 'test::friend-1',
       principal_permissions: principalPermissions,
     })
   })
@@ -493,7 +494,9 @@ describe('WorkerHarness.spawnWorker', () => {
   it('无 principal 的新 worker 仍在 provision 前落空 context，而非误作 legacy ENOENT', async () => {
     const { harness, workersDir } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
-    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf-8'))).toEqual({})
+    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf-8'))).toEqual({
+      manager_key: 'test::friend-1',
+    })
   })
 
   it('context 原子写失败时不调用 provision，并按既有 spawn_failed 语义落账', async () => {
@@ -2758,7 +2761,13 @@ describe('WorkerHarness.sendToWorker', () => {
     await harness.sendToWorker(worker.worker_id, '继续干活')
 
     expect(fake.sendInputCalls).toHaveLength(1)
-    expect(fake.sendInputCalls[0].h).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
+    expect(fake.sendInputCalls[0].h).toEqual({
+      worker_id: worker.worker_id,
+      incarnation_id: worker.incarnations[0].incarnation_id,
+      seq: 1,
+      impl: 'builtin',
+      session_ref: `ref-${worker.worker_id}#1`,
+    })
     expect(fake.sendInputCalls[0].text).toBe('继续干活')
 
     const inputEvents = events.filter((e) => e.kind === 'input_sent')

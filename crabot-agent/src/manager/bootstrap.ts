@@ -487,7 +487,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 
   const managersDir = join(agentDir, 'managers')
   const sessionStore = new ManagerSessionStore(managersDir)
-  const workboardStore = new ManagerWorkboardStore(managersDir, deps.now)
+  const workboardStore = new ManagerWorkboardStore(managersDir, deps.now, (key) => registry?.onWorkboardChanged(key))
   registry = new ManagerRegistry({
     traceWriter: deps.traceWriter,
     onAdminChatWakeConsumed: deps.onAdminChatWakeConsumed,
@@ -505,7 +505,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     supportsVision: deps.managerSupportsVision,
     now: () => new Date(deps.now()),
     isClosing: deps.isClosing,
-    hasCurrentWorkboardObjectives: async (key) => (await workboardStore.load(key)).objectives.length > 0,
+    readCurrentWorkboard: (key) => workboardStore.load(key),
     timezone: deps.timezone,
     managerKeyFor: (key) => key,
     // 人类消息唤醒边界:这是人类消息链路上**唯一**一次异步解析。返回本批发言者算好的档位,

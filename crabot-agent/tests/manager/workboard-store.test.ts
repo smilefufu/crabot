@@ -63,6 +63,23 @@ describe('ManagerWorkboardStore', () => {
   let nowIndex: number
   let store: ManagerWorkboardStore
 
+  it('只在 Manager/Admin 业务修改成功后通知，内部元数据和失败修改不通知', async () => {
+    const changed = vi.fn()
+    const observed = new ManagerWorkboardStore(root, () => TIMESTAMP, changed)
+    await observed.createObjective(KEY, objective('目标甲'))
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(changed).toHaveBeenCalledWith(KEY)
+    const current = await observed.loadAdmin(KEY)
+    await observed.adminReviseObjective(KEY, current.revision, current.objectives[0].objective_id, objective('目标乙'))
+    expect(changed).toHaveBeenCalledTimes(2)
+    const admin = await observed.loadAdmin(KEY)
+    await observed.recordAdminNoticeAttempt(KEY, admin.revision)
+    await observed.clearAdminNoticeIfCurrent(KEY, admin.revision)
+    await expect(observed.adminCreateObjective(KEY, current.revision, objective('冲突'))).rejects.toThrow()
+    await expect(observed.createObjective(KEY, objective('目标乙'))).rejects.toThrow()
+    expect(changed).toHaveBeenCalledTimes(2)
+  })
+
   beforeEach(async () => {
     root = await fs.mkdtemp(join(tmpdir(), 'manager-workboard-'))
     nowIndex = 0

@@ -28,7 +28,7 @@ const DIALOG_OBJECT_ID = (`test::${'friend-loop'}` as ManagerKey)
 const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
 本提示用于提醒你跟进任务板中尚未收口的工作，做好进度管理。
 
-本会话已经空闲一小时，但任务板仍有当前目标。请查阅当前任务板和聊天历史，重新确认人类的最新意图。任务板只是可修订的管理摘要；如果它与人类已经表达的意图不一致，以人类的最新意图为准并更新任务板。
+任务板中至少有一项尚未收口的工作已经一小时没有更新。请查阅当前任务板和聊天历史，重新确认人类的最新意图。任务板只是可修订的管理摘要；如果它与人类已经表达的意图不一致，以人类的最新意图为准并更新任务板。
 
 查阅任务板时，要逐项复核尚未收口的事项，尤其不要把“已阻塞”直接等同于“继续等待”。重新判断阻塞是否仍然成立、能否由你或执行器解除；能够解除或前置条件已经满足的，立即恢复推进。只有确实依赖人类输入或明确外部事件时，才保持阻塞。
 
@@ -1094,15 +1094,15 @@ describe('ManagerLoop', () => {
     await loop.wakeUp(timed({ kind: 'workboard_idle_review' } as WakeEvent))
 
     expect(calls[0].messages.at(-1)).toMatchObject({ role: 'user', content: WORKBOARD_IDLE_REVIEW_PROMPT })
-    expect(JSON.stringify((await store.load(KEY)).recent)).not.toContain('本会话已经空闲一小时')
+    expect(JSON.stringify((await store.load(KEY)).recent)).not.toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
     const files = await fs.readdir(dataDir, { recursive: true })
     const episodeLogs = files.filter((file) => file.includes('episodes/') && file.endsWith('.jsonl'))
     for (const file of episodeLogs) {
-      await expect(fs.readFile(join(dataDir, file), 'utf-8')).resolves.not.toContain('本会话已经空闲一小时')
+      await expect(fs.readFile(join(dataDir, file), 'utf-8')).resolves.not.toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
     }
 
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的真实输入')] }))
-    expect(JSON.stringify(calls[1].messages)).not.toContain('本会话已经空闲一小时')
+    expect(JSON.stringify(calls[1].messages)).not.toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
   })
 
   it('任务板空闲自省 episode 失败后丢弃提示，不随下一条真实输入重投', async () => {
@@ -1123,7 +1123,7 @@ describe('ManagerLoop', () => {
     expect(failed).toMatchObject({ outcome: 'failed', consumedEvents: false })
 
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('继续')] }))
-    expect(JSON.stringify(calls[1].messages)).not.toContain('本会话已经空闲一小时')
+    expect(JSON.stringify(calls[1].messages)).not.toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
   })
 
   it('episode 运行中到达的人类消息:先提交(store recent+去重键+回调)再注入,当前 episode 下一轮可见', async () => {
