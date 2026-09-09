@@ -16,6 +16,8 @@ export interface BgToolDeps {
   readonly cursorMap: Map<string, number>
   readonly taskId: string
   readonly ownerFriendId?: string
+  readonly ownerWorkerId?: string
+  readonly stopWorkerAgent?: (entityId: string) => Promise<{ output: string; isError: boolean }>
   /** Sub-agent abortControllers map (key=entity_id); used to abort a running bg agent on Kill */
   readonly agentAbortControllers?: Map<string, AbortController>
 }

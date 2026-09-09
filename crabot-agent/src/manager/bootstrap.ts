@@ -717,6 +717,10 @@ export async function reconcileManagerStack(stack: ManagerStack): Promise<Reconc
   // 第一次追加回调把升级前会话重放成新 activity。
   await stack.harness.reconcileNativeActivityOnStartup()
   const report = await stack.harness.reconcileOnStartup()
+  const builtin = stack.adapters.get('builtin')
+  if (builtin instanceof BuiltinWorkerAdapter) {
+    await builtin.reconcileTraces((await stack.ledger.listAllWorkers()).map(({ worker }) => worker))
+  }
   await stack.harness.reconcileInputDeliveriesOnStartup()
   await stack.harness.reconcileQueryReceiptsOnStartup()
   await stack.harness.reconcileControlOperationsOnStartup()

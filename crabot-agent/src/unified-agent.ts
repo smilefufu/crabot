@@ -875,13 +875,15 @@ export class UnifiedAgent extends ModuleBase {
       'traces-running-v3.jsonl',
       'traces-v3-',
       ['traces-', 'traces-v3-'],
+      true,
     )
     this.lspManager = createLSPManager()
     this.builtinSubagentRunner = new BuiltinSubagentRunner(
       this.traceStore,
       this.lspManager,
-      async (workerId, text) => {
-        await this.requireManagerStack().harness.sendToWorker(workerId, text)
+      async (workerId, entityId) => {
+        if (!this.agentHandler) throw new Error('child notification route is not ready')
+        await this.agentHandler.routeBuiltinChildExit(workerId, entityId)
       },
       this.builtinBgRegistry,
       (text) => redactSecrets(text, [...this.knownSecrets]),
@@ -1308,6 +1310,20 @@ export class UnifiedAgent extends ModuleBase {
     },
     onSettled: (settlement: { status: 'delivered' } | { status: 'dead_letter'; reason: string }) => Promise<void>,
   ): Promise<void> {
+    return this.deliverBuiltinEntityExit(workerId, `bg-shell:${info.entity_id}`, async () => {
+      if (!this.agentHandler) throw new Error('builtin shell renderer is not ready')
+      const text = await this.agentHandler.renderShellExitNotification(info)
+      return `<bg-notification>\n${text}\n</bg-notification>`
+    }, onSettled)
+  }
+
+  private deliverBuiltinEntityExit(
+    workerId: string,
+    dedupeKey: string,
+    render: () => Promise<string>,
+    onSettled: (settlement: { status: 'delivered' } | { status: 'dead_letter'; reason: string }) => Promise<void>,
+    rejectStoppedParent = false,
+  ): Promise<void> {
     const complete = this.requireManagerStack().harness.beginBgNotification(workerId)
     let completed = false
     const completeOnce = (): void => {
@@ -1327,7 +1343,7 @@ export class UnifiedAgent extends ModuleBase {
     const previous = this.builtinBgDeliveryTails.get(workerId) ?? Promise.resolve()
     const delivery = previous
       .catch(() => undefined)
-      .then(() => this.deliverBuiltinShellExitNow(workerId, info, settle, completeOnce))
+      .then(() => this.deliverBuiltinEntityExitNow(workerId, dedupeKey, render, settle, completeOnce, rejectStoppedParent))
       .catch((error) => {
         completeOnce()
         throw error
@@ -1339,25 +1355,20 @@ export class UnifiedAgent extends ModuleBase {
     return delivery
   }
 
-  private async deliverBuiltinShellExitNow(
+  private async deliverBuiltinEntityExitNow(
     workerId: string,
-    info: {
-      entity_id: string
-      command: string
-      status: 'completed' | 'failed' | 'killed'
-      exit_code: number
-      runtime_ms?: number
-    },
+    dedupeKey: string,
+    render: () => Promise<string>,
     onSettled: (settlement: { status: 'delivered' } | { status: 'dead_letter'; reason: string }) => Promise<void>,
     onDeduplicated: () => void,
+    rejectStoppedParent: boolean,
   ): Promise<void> {
-    const handler = this.agentHandler
-    if (!handler) throw new Error('builtin shell exit cannot be delivered before AgentHandler initialization')
     const harness = this.requireManagerStack().harness
     try {
-      const text = await handler.renderShellExitNotification(info)
-      await harness.sendToWorker(workerId, `<bg-notification>\n${text}\n</bg-notification>`, {
-        dedupeKey: `bg-shell:${info.entity_id}`,
+      const text = await render()
+      await harness.sendToWorker(workerId, text, {
+        dedupeKey,
+        ...(rejectStoppedParent ? { rejectStoppedParent: true } : {}),
         onDeduplicated,
         onSettled: async (settlement) => {
           await onSettled(
@@ -1407,6 +1418,12 @@ export class UnifiedAgent extends ModuleBase {
       throw new Error('[builtin-worker] AgentHandler is required to provide persistent background shell support')
     }
     const bgOptions = handler.createBuiltinBgToolOptions(ctx.worker_id)
+    if (bgOptions) {
+      bgOptions.bgToolDeps = {
+        ...bgOptions.bgToolDeps,
+        stopWorkerAgent: (entityId) => this.builtinSubagentRunner.stopAgent(ctx.worker_id, entityId),
+      }
+    }
     const workerSkills = this.resolveMainlineWorkerSkills(ctx)
     const builtinTools = getConfiguredBuiltinTools(
       () => workspaceRoot,
@@ -1633,6 +1650,10 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private attachBuiltinShellExitDispatcher(handler: AgentHandler): void {
+    handler.setBuiltinChildExitDispatcher((workerId, entityId, onSettled) =>
+      this.deliverBuiltinEntityExit(workerId, `bg-agent:${entityId}`,
+        () => this.builtinSubagentRunner.renderCompletion(workerId, entityId), onSettled, true),
+    )
     handler.setBuiltinShellExitDispatcher((workerId, info, onSettled) =>
       this.deliverBuiltinShellExit(workerId, info, onSettled),
     )
@@ -1640,7 +1661,7 @@ export class UnifiedAgent extends ModuleBase {
     // handler. Open that handler's routing gate immediately instead of waiting
     // for a process restart that may never happen.
     if (this.managerReconciliationSettled && !this.runtimeClosing) {
-      void handler.releaseRecoveredWorkerShellExits().catch((error) => {
+      void handler.releaseRecoveredWorkerEntityExits().catch((error) => {
         console.error(`[${this.config.moduleId}] failed to release late worker shell exits:`, error)
       })
     }
@@ -4556,6 +4577,13 @@ export class UnifiedAgent extends ModuleBase {
   private builtinTraceHooks(): import('./workers/builtin/adapter.js').BuiltinTraceHooks {
     const redact = (text: string) => redactSecrets(text, [...this.knownSecrets])
     return {
+      acquireTraceWriter: async (traceId, workerId, incarnationId) => {
+        const offset = incarnationId && this.managerStack
+          ? await this.managerStack.harness.nativeTraceOffset(workerId, incarnationId) : 0
+        await this.traceStore.acquireBuiltinTraceWriter(traceId, offset)
+      },
+      releaseTraceWriter: (traceId) => this.traceStore.releaseBuiltinTraceWriter(traceId),
+      finishTraceRecovery: () => this.traceStore.reconcileDeferredBuiltinTraces(),
       startIncarnationTrace: ({ worker_id, seq, summary, initial_input }) => {
         const trace = this.traceStore.startTrace({
           module_id: this.config.moduleId,
@@ -4606,11 +4634,7 @@ export class UnifiedAgent extends ModuleBase {
       finishIncarnationTrace: (traceId, patch) => {
         this.traceStore.endTrace(traceId, patch.status, { summary: redact(patch.summary) })
       },
-      stopWorkerSubagents: (workerId) => {
-        void this.builtinSubagentRunner.stopWorker(workerId).catch((error) => {
-          console.warn(`[${this.config.moduleId}] builtin subagent stop failed for ${workerId}:`, error)
-        })
-      },
+      stopWorkerSubagents: (workerId) => this.builtinSubagentRunner.stopWorker(workerId),
       // finish_task 终态守卫(拆分 spec 2026-08-28 修订)的查询口径与 harness deps 的
       // hasRunningBg 相同:bg-shell 与 subagent 都注册在 bg registry、按 owner.worker_id 归属。
       hasRunningBgEntities: (workerId) => this.agentHandler?.hasRunningBgForWorker(workerId) ?? Promise.resolve(false),
@@ -4619,6 +4643,8 @@ export class UnifiedAgent extends ModuleBase {
 
   private builtinTraceReader(): import('./workers/builtin/adapter.js').BuiltinTraceReader {
     return {
+      minimumOffset: (workerId, incarnationId) => incarnationId && this.managerStack
+        ? this.managerStack.harness.nativeTraceOffset(workerId, incarnationId) : Promise.resolve(0),
       readTrace: async (traceId) => this.traceStore.getFullTrace(traceId),
       listSubagents: (workerId) => this.builtinSubagentRunner.list(workerId),
       getSubagent: (workerId, subagentId) => this.builtinSubagentRunner.get(workerId, subagentId),
@@ -5339,7 +5365,7 @@ export class UnifiedAgent extends ModuleBase {
         void stack.registry.resumeInterruptedEpisodes().catch((error) => {
           console.error(`[${this.config.moduleId}] Manager startup resume failed:`, error)
         })
-        await this.agentHandler?.releaseRecoveredWorkerShellExits()
+        await this.agentHandler?.releaseRecoveredWorkerEntityExits()
         // CLI child copy is a terminal artifact: retry only after the startup state reconciliation
         // has decided which parent incarnations are actually terminal.
         void this.recoverTerminalCliSubagentTraces().catch((error) => {

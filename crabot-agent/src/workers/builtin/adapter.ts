@@ -299,7 +299,10 @@ export interface BuiltinTraceHooks {
    */
   appendManagerInput?(traceId: string, text: string): void
   finishIncarnationTrace(traceId: string, patch: { status: 'completed' | 'failed'; summary: string }): void
-  stopWorkerSubagents?(workerId: string): void
+  stopWorkerSubagents?(workerId: string): Promise<void> | void
+  acquireTraceWriter?(traceId: string, workerId: string, incarnationId?: string): Promise<void>
+  releaseTraceWriter?(traceId: string): void
+  finishTraceRecovery?(): void
   /**
    * 该 worker 名下是否仍有 running 的 bg entity(bg-shell / subagent),供 finish_task
    * 终态守卫查询(拆分 spec 2026-08-28 修订)。缺省视为无,守卫静默关闭。
@@ -309,6 +312,7 @@ export interface BuiltinTraceHooks {
 
 export interface BuiltinTraceReader {
   readTrace(traceId: string): Promise<import('../../types.js').AgentTrace | undefined>
+  minimumOffset?(workerId: string, incarnationId?: string): Promise<number>
   listSubagents?(workerId: string): Promise<WorkerSubagentSummary[]>
   getSubagent?(workerId: string, subagentId: string): Promise<WorkerSubagentSummary | undefined>
   readSubagentTrace?(workerId: string, subagentId: string, cursor?: TraceCursor): Promise<{
@@ -686,6 +690,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // 运行配置现取：idle 态下没有 burst 在跑，重新解析一次不会干扰任何正在执行的东西，
       // 语义与"起化身现取"一致（正在跑的 burst 用旧配置，见 runBurst 续 burst 路径）。
       const builtin = rehydratedRuntime ?? await this.runtimeFor(h.worker_id, 'sendInput', instance.workspaceInstructions, instance.workspaceGit)
+      await this.ensureTraceId(instance, `worker ${instance.worker_id}#${instance.seq}`)
       const currentMessages = this.messagesAtTip(instance, instance.tip)
       const inputMessage = createUserMessage(text)
       instance.tip = await instance.sessionTree.append(instance.tip, inputMessage)
@@ -782,19 +787,40 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return { instance, runtime }
   }
 
+  async reconcileTraces(workers: ReadonlyArray<import('../harness/ledger-types.js').LedgerWorker>): Promise<void> {
+    for (const worker of workers) {
+      if (worker.task.status === 'closed') continue
+      const incarnation = [...worker.incarnations].reverse().find((item) => !item.forked_from)
+      if (incarnation?.impl !== 'builtin' || incarnation.state !== 'idle') continue
+      try {
+        await this.getMutex(worker.worker_id).run(async () => {
+          if (this.instances.has(instanceKey(worker.worker_id, incarnation.seq))) return
+          const h: IncarnationHandle = { ...incarnation, worker_id: worker.worker_id }
+          const recovered = await this.rehydrateIdleInstance(h)
+          if (!recovered) throw new Error('idle incarnation meta/session does not match')
+          await this.ensureTraceId(recovered.instance, `worker ${worker.worker_id}#${incarnation.seq}`)
+          if (recovered.instance.traceId) this.deps.traceHooks?.releaseTraceWriter?.(recovered.instance.traceId)
+        })
+      } catch (error) {
+        console.warn(`[builtin-adapter] trace recovery failed for ${worker.worker_id}:`, error)
+      }
+    }
+    this.deps.traceHooks?.finishTraceRecovery?.()
+  }
+
   /**
    * builtin 结构化 trace（P6-A §8.4）：从 TraceStore 读本化身的结构化事件，
    * trace 引用显式来自 meta-<seq>.json 的 trace_id（不按 task ID 猜）。
    * cursor.offset 是已消费 span 数。
    */
   async readTrace(h: IncarnationHandle, cursor?: import('../types.js').TraceCursor): Promise<{ events: import('../types.js').NormalizedTraceEvent[]; nextCursor: import('../types.js').TraceCursor; unavailableReason?: string }> {
-    const { sourceAvailable, events, nextCursor } = await this.readTraceWindow(h, cursor)
+    const { sourceAvailable, events, nextCursor, unavailableReason } = await this.readTraceWindow(h, cursor)
     // 对齐 claude-code/codex 的既有语义：数据源不可用时带 unavailableReason，让调用方
     // （harness 的活动收集）能把"源不可用"与"没有新内容"区分开——否则不可用会被当成
     // 零增量静默放过，收集从此失效且无迹可查（2026-08-28 w-7e31305e 调查）。
     return sourceAvailable
       ? { events, nextCursor }
-      : { events, nextCursor, unavailableReason: 'builtin trace source unavailable' }
+      : { events, nextCursor, unavailableReason: unavailableReason ?? 'builtin trace source unavailable' }
   }
 
   async listSubagents(h: IncarnationHandle): Promise<WorkerSubagentSummary[]> {
@@ -821,6 +847,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     cursor?: import('../types.js').TraceCursor,
   ): Promise<{
     sourceAvailable: boolean
+    unavailableReason?: string
     spans: ReadonlyArray<import('../../types.js').AgentSpan>
     events: import('../types.js').NormalizedTraceEvent[]
     nextCursor: import('../types.js').TraceCursor
@@ -847,6 +874,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return { sourceAvailable: false, spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
     }
     const start = cursor?.offset ?? 0
+    const publishedOffset = await this.deps.traceReader.minimumOffset?.(h.worker_id, h.incarnation_id) ?? 0
+    if (Math.max(start, publishedOffset) > trace.spans.length) {
+      console.warn(`[BuiltinWorkerAdapter] trace source incomplete: ${traceId}, cursor=${start}, spans=${trace.spans.length}`)
+      return { sourceAvailable: false, unavailableReason: 'builtin trace source incomplete', spans: [], events: [], nextCursor: cursor ?? { offset: 0 } }
+    }
     const spans = trace.spans.slice(start)
     const events: import('../types.js').NormalizedTraceEvent[] = []
     let consumed = start
@@ -900,6 +932,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       instance.killRequested = true
       instance.abortController?.abort()
     })
+    if (h.query_id === undefined) await this.deps.traceHooks?.stopWorkerSubagents?.(h.worker_id)
   }
 
   async interrupt(h: IncarnationHandle): Promise<void> {
@@ -1039,12 +1072,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
   /**
    * 保证本化身的 trace 引用存在（P6-A §8.4）：spawn 时随 meta 持久化；旧 meta 缺
-   * trace_id（升级前写入）时现建并补写 meta。所有 burst 入口共用，失败不阻塞 burst
-   * （trace 是观测面，不是执行面）。
+   * trace_id（升级前写入）时现建并补写 meta。所有 burst 入口必须取得可写 trace 后执行。
    */
   private async ensureTraceId(instance: WorkerInstance, summary: string): Promise<void> {
-    if (instance.traceId || !this.deps.traceHooks) return
-    try {
+    if (!this.deps.traceHooks) return
+    if (!instance.traceId) {
       instance.traceId = this.deps.traceHooks.startIncarnationTrace({
         worker_id: instance.worker_id,
         seq: instance.seq,
@@ -1052,10 +1084,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         ...(instance.initialTraceInput !== undefined ? { initial_input: instance.initialTraceInput } : {}),
       })
       await this.writeMeta(instance)
-    } catch (error) {
-      console.warn(`[BuiltinWorkerAdapter] trace start failed for ${instance.worker_id}#${instance.seq}:`,
-        error instanceof Error ? error.message : String(error))
     }
+    await this.deps.traceHooks.acquireTraceWriter?.(instance.traceId, instance.worker_id, instance.incarnation_id)
   }
 
   private async runBurst(
@@ -1861,6 +1891,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     lastText?: string,
     completionHint = true,
   ): Promise<void> {
+    if (state === 'idle' && instance.traceId) {
+      try { this.deps.traceHooks?.releaseTraceWriter?.(instance.traceId) }
+      catch (error) { console.warn(`[builtin-adapter] trace snapshot unavailable for ${instance.worker_id}:`, error) }
+    }
     await this.writeMeta(instance, { state })
     instance.state = state
     // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获
@@ -1892,7 +1926,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
      */
     summary?: string,
   ): Promise<void> {
-    if (handle.query_id === undefined) this.deps.traceHooks?.stopWorkerSubagents?.(instance.worker_id)
+    if (handle.query_id === undefined && ended_reason !== 'killed') {
+      try { await this.deps.traceHooks?.stopWorkerSubagents?.(instance.worker_id) }
+      catch (error) { console.warn(`[builtin-adapter] child exit not confirmed for ${instance.worker_id}:`, error) }
+    }
     const pending = [...instance.pendingImmediateInputs, ...instance.pendingInputs]
     if (pending.length > 0) {
       const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${pending.length} unsent message(s): ${pending.join(' | ')}\n`

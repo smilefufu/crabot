@@ -25,7 +25,7 @@ import { ConfigLoader } from '../../src/core/config-loader.js'
 import * as agentHandlerModule from '../../src/agent/agent-handler.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import type { ManagerKey } from '../../src/workers/harness/ledger-types.js'
-import type { ManagerStack } from '../../src/manager/bootstrap.js'
+import { reconcileManagerStack, type ManagerStack } from '../../src/manager/bootstrap.js'
 import type { LLMAdapter, ToolDefinition } from '../../src/engine/index.js'
 import type {
   UnifiedAgentConfig,
@@ -802,6 +802,92 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   })
 
   // --- systemPrompt：v3 worker 契约尾巴 ---
+
+  it('整体停止不能因主线退出就掩盖仍未确认退出的 child', async () => {
+    const { internals } = boot()
+    const key = 'test::child-stop' as ManagerKey
+    llm.queue.push({ text: '等待 child', stopReason: 'end_turn' })
+    const { workerId } = await spawnBuiltin(internals, key)
+    const harness = internals.managerStack!.harness
+    await waitUntil(async () => (await harness.listWorkers(key))[0].incarnations[0].state === 'idle')
+    const registry = (internals as any).agentHandler.getBuiltinBgEntityRegistry()
+    const now = new Date().toISOString()
+    await registry.register({ entity_id: 'agent_unconfirmed', type: 'agent', status: 'running', owner: { friend_id: '__builtin_worker__', worker_id: workerId }, spawned_by_task_id: workerId, spawned_at: now, last_activity_at: now, ended_at: null, exit_code: null, task_description: 'unconfirmed child', messages_log_file: join(tmpRoot, 'child.jsonl'), result_file: null })
+    const operation = await harness.requestWorkerStop(workerId)
+    expect(operation.status).toBe('unknown')
+    expect((await registry.get('agent_unconfirmed'))?.status).toBe('running')
+    expect((await harness.listWorkers(key))[0].task.status).toBe('halted')
+    await registry.update('agent_unconfirmed', { status: 'completed', ended_at: new Date().toISOString() })
+    await (internals as any).agentHandler.releaseRecoveredWorkerEntityExits()
+    await waitUntil(async () => (await registry.get('agent_unconfirmed'))?.exit_notification?.status === 'dead_letter')
+    expect((await harness.listWorkers(key))[0].incarnations).toHaveLength(1)
+  })
+
+  it('重启中断 child 后无需人类输入，持久通知实际进入父 Worker 下一轮', async () => {
+    const first = boot()
+    const key = 'test::child-restart' as ManagerKey
+    llm.queue.push({ text: '等待 child', stopReason: 'end_turn' })
+    const { workerId } = await spawnBuiltin(first.internals, key)
+    await waitUntil(async () => (await first.internals.managerStack!.harness.listWorkers(key))[0].incarnations[0].state === 'idle')
+    const registry = (first.internals as any).agentHandler.getBuiltinBgEntityRegistry()
+    const now = new Date().toISOString()
+    await registry.register({ entity_id: 'agent_interrupted', type: 'agent', status: 'running', owner: { friend_id: '__builtin_worker__', worker_id: workerId }, spawned_by_task_id: workerId, spawned_at: now, last_activity_at: now, ended_at: null, exit_code: null, task_description: 'child test', messages_log_file: join(tmpRoot, 'child.jsonl'), result_file: null })
+    await first.agent.stop()
+    const restarted = boot()
+    const handler = (restarted.internals as any).agentHandler
+    const runner = (restarted.internals as any).builtinSubagentRunner
+    await handler.getBuiltinBgEntityRegistry().recoverPersistent()
+    await runner.recoverAfterRestart()
+    await reconcileManagerStack(restarted.internals.managerStack!)
+    llm.queue.push({ text: '已收到子任务中断事实', stopReason: 'end_turn' })
+    await handler.releaseRecoveredWorkerEntityExits()
+    await waitUntil(async () => (await registry.get('agent_interrupted'))?.exit_notification?.status === 'delivered')
+    await waitUntil(async () => (await restarted.internals.managerStack!.harness.listWorkers(key))[0].incarnations[0].state === 'idle')
+    const session = await fs.readFile(join(restarted.internals.managerStack!.builtinDataDir, workerId, 'session.jsonl'), 'utf8')
+    expect(session).toContain('<sub_agent_notification>')
+    expect(session).toContain('agent_interrupted')
+    expect(session).toContain('interrupted')
+    expect((await registry.list({ type: 'agent' })).length).toBe(1)
+  })
+
+  it('idle 重启两次仍续写同一 trace，旧 cursor 可读取真实新增工具结果', async () => {
+    let current = boot()
+    llm.queue.push({ text: '等待下一步', stopReason: 'end_turn' })
+    const key = 'test::trace-restart' as ManagerKey
+    const { workerId } = await spawnBuiltin(current.internals, key)
+    const idle = async () => {
+      const [worker] = await current.internals.managerStack!.harness.listWorkers(key)
+      return worker.incarnations[0].state === 'idle' && Boolean(await current.internals.managerStack!.harness.getWorkerTurn(workerId))
+    }
+    await waitUntil(idle)
+    const metaPath = join(current.internals.managerStack!.builtinDataDir, workerId, 'meta-1.json')
+    const traceId = JSON.parse(await fs.readFile(metaPath, 'utf8')).trace_id
+    const store = () => (current.internals as any).traceStore
+    const prefix = structuredClone((await store().getFullTrace(traceId)).spans)
+    let offset = prefix.length
+    for (let restart = 0; restart < 2; restart++) {
+      await current.agent.stop()
+      current = boot()
+      await reconcileManagerStack(current.internals.managerStack!)
+      llm.queue.push(
+        { toolCalls: [{ name: 'Bash', id: `restart-${restart}`, input: { command: `printf test-${restart}` } }], stopReason: 'tool_use' },
+        { text: `已检查 ${restart}`, stopReason: 'end_turn' },
+      )
+      await current.internals.managerStack!.harness.sendToWorker(workerId, '继续检查')
+      await waitUntil(idle)
+      const [worker] = await current.internals.managerStack!.harness.listWorkers(key)
+      expect(worker.incarnations).toHaveLength(1)
+      expect(JSON.parse(await fs.readFile(metaPath, 'utf8')).trace_id).toBe(traceId)
+      const adapter = current.internals.managerStack!.adapters.get('builtin')!
+      const window = await adapter.readTrace({ ...worker.incarnations[0], worker_id: workerId } as any, { offset })
+      expect(window.unavailableReason).toBeUndefined()
+      expect(window.events.some((event) => event.kind === 'tool_result')).toBe(true)
+      const trace = await store().getFullTrace(traceId)
+      expect(trace.spans.slice(0, prefix.length)).toEqual(prefix)
+      expect(window.nextCursor.offset).toBeGreaterThan(offset)
+      offset = window.nextCursor.offset
+    }
+  })
 
   it.each([false, true])('systemPrompt 按 builtin 能力装配并保留人格、Skill 与 workspace 快照（subagents=%s）', (withSubagents) => {
     const { internals } = boot(makeConfig({

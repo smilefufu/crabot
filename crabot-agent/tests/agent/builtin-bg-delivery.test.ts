@@ -15,12 +15,12 @@ const shellInfo = (entityId: string, workerId?: string) => ({
 
 function makeHandler(): any {
   const handler = Object.create(AgentHandler.prototype) as any
-  handler.workerShellExitRoutingReady = true
-  handler.queuedWorkerShellExits = []
-  handler.workerShellExitRetryTimers = new Map()
-  handler.workerShellExitSettlementTimers = new Map()
-  handler.workerShellExitQueues = new Map()
-  handler.drainingWorkerShellExitQueues = new Set()
+  handler.workerEntityExitRoutingReady = true
+  handler.queuedWorkerEntityExits = []
+  handler.workerEntityExitRetryTimers = new Map()
+  handler.workerEntityExitSettlementTimers = new Map()
+  handler.workerEntityExitQueues = new Map()
+  handler.drainingWorkerEntityExitQueues = new Set()
   handler.bgRegistry = {
     get: vi.fn(async (entityId: string) => ({
       entity_id: entityId,
@@ -42,6 +42,19 @@ afterEach(() => {
 })
 
 describe('builtin background shell exit routing', () => {
+  it('child uses the shared queue while hold leaves its durable receipt pending', async () => {
+    const handler = makeHandler()
+    const record = { type: 'agent', entity_id: 'agent-child', exit_notification: { status: 'pending', attempts: 0 } }
+    handler.bgRegistry.get.mockImplementation(async () => record)
+    let settle!: (value: { status: 'delivered' }) => Promise<void>
+    handler.setBuiltinChildExitDispatcher(async (_worker, _entity, callback) => { settle = callback })
+    await handler.routeBuiltinChildExit('worker-1', 'agent-child')
+    expect(handler.bgRegistry.settleExitNotification).not.toHaveBeenCalled()
+    expect(handler.deliverShellExitNotification).not.toHaveBeenCalled()
+    await settle({ status: 'delivered' })
+    expect(handler.bgRegistry.settleExitNotification).toHaveBeenCalledWith('agent-child', 'delivered', undefined)
+  })
+
   it('worker owner routes through dispatcher and durably settles; missing worker_id keeps legacy delivery', async () => {
     const handler = makeHandler()
     const dispatch = vi.fn(async (_workerId, _info, settle) => settle({ status: 'delivered' }))
@@ -90,15 +103,15 @@ describe('builtin background shell exit routing', () => {
 
   it('holds recovered worker exits until reconciliation release, then dispatches without unrelated input', async () => {
     const handler = makeHandler()
-    handler.workerShellExitRoutingReady = false
+    handler.workerEntityExitRoutingReady = false
     const dispatch = vi.fn(async (_workerId, _info, settle) => settle({ status: 'delivered' }))
     handler.builtinShellExitDispatcher = dispatch
 
     await handler.routeShellExit(shellInfo('bg-recovered', 'worker-1'))
     expect(dispatch).not.toHaveBeenCalled()
-    expect(handler.queuedWorkerShellExits).toHaveLength(1)
+    expect(handler.queuedWorkerEntityExits).toHaveLength(1)
 
-    await handler.releaseRecoveredWorkerShellExits()
+    await handler.releaseRecoveredWorkerEntityExits()
     await vi.waitFor(() => {
       expect(dispatch).toHaveBeenCalledWith(
         'worker-1',
@@ -106,12 +119,12 @@ describe('builtin background shell exit routing', () => {
         expect.any(Function),
       )
     })
-    expect(handler.queuedWorkerShellExits).toHaveLength(0)
+    expect(handler.queuedWorkerEntityExits).toHaveLength(0)
   })
 
   it('releases recovered queues independently so one hung worker does not block another or startup', async () => {
     const handler = makeHandler()
-    handler.workerShellExitRoutingReady = false
+    handler.workerEntityExitRoutingReady = false
     let releaseWorkerA!: () => void
     const workerAGate = new Promise<void>((resolve) => { releaseWorkerA = resolve })
     const delivered: string[] = []
@@ -123,7 +136,7 @@ describe('builtin background shell exit routing', () => {
 
     await handler.routeShellExit(shellInfo('bg-a', 'worker-a'))
     await handler.routeShellExit(shellInfo('bg-b', 'worker-b'))
-    await expect(handler.releaseRecoveredWorkerShellExits()).resolves.toBeUndefined()
+    await expect(handler.releaseRecoveredWorkerEntityExits()).resolves.toBeUndefined()
 
     await vi.waitFor(() => expect(delivered).toContain('worker-b'))
     expect(delivered).not.toContain('worker-a')
@@ -135,7 +148,7 @@ describe('builtin background shell exit routing', () => {
   it('retains a failed recovered delivery as pending, retries it, and does not block another worker', async () => {
     vi.useFakeTimers()
     const handler = makeHandler()
-    handler.workerShellExitRoutingReady = false
+    handler.workerEntityExitRoutingReady = false
     const dispatch = vi.fn()
       .mockRejectedValueOnce(new Error('adapter unavailable'))
       .mockImplementation(async (_workerId, _info, settle) => settle({ status: 'delivered' }))
@@ -144,7 +157,7 @@ describe('builtin background shell exit routing', () => {
 
     await handler.routeShellExit(shellInfo('bg-failed', 'worker-1'))
     await handler.routeShellExit(shellInfo('bg-next', 'worker-2'))
-    await handler.releaseRecoveredWorkerShellExits()
+    await handler.releaseRecoveredWorkerEntityExits()
 
     await vi.advanceTimersByTimeAsync(0)
     expect(dispatch).toHaveBeenCalledTimes(2)
@@ -198,7 +211,7 @@ describe('builtin background shell exit routing', () => {
     }
 
     expect(handler.builtinShellExitDispatcher).toHaveBeenCalledTimes(7)
-    expect(handler.workerShellExitRetryTimers.has('bg-long-outage')).toBe(true)
+    expect(handler.workerEntityExitRetryTimers.has('bg-long-outage')).toBe(true)
   })
 
   it('retries only the durable settlement after input delivery, without enqueueing the input again', async () => {
@@ -209,13 +222,13 @@ describe('builtin background shell exit routing', () => {
       .mockResolvedValue(undefined)
     vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    await expect(handler.settleWorkerShellExit('bg-settlement', { status: 'delivered' }))
+    await expect(handler.settleWorkerEntityExit('bg-settlement', { status: 'delivered' }))
       .rejects.toThrow('registry rename failed')
-    expect(handler.workerShellExitSettlementTimers.has('bg-settlement')).toBe(true)
+    expect(handler.workerEntityExitSettlementTimers.has('bg-settlement')).toBe(true)
 
     await vi.advanceTimersByTimeAsync(1_000)
     expect(handler.bgRegistry.settleExitNotification).toHaveBeenCalledTimes(2)
-    expect(handler.workerShellExitSettlementTimers.has('bg-settlement')).toBe(false)
+    expect(handler.workerEntityExitSettlementTimers.has('bg-settlement')).toBe(false)
   })
 
   it('marks pending synchronously, serializes same-worker delivery, and clears only after settlement', async () => {

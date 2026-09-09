@@ -19,6 +19,7 @@ import { getErrorMessage } from '../tools/utils.js'
 import { getBgEntitiesLogsDir } from '../../core/data-paths.js'
 import type { BgEntityRegistry } from './registry.js'
 import type { BgEntityOwner, BgAgentRegistryRecord } from './types.js'
+import { BG_EXIT_RETRY_DELAYS_MS } from './types.js'
 import { emitInstantSpan, type BgEntityTraceContext } from './trace.js'
 import type { TraceStore } from '../../core/trace-store.js'
 import { recordEngineLlmResponse, recordEngineToolLifecycle, recordSubAgentTurn } from '../sub-agent-trace.js'
@@ -175,6 +176,20 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
   await opts.registry.register(record)
 
   const agentSpawnedAtMs = Date.now()
+  const commitExit = async (patch: Partial<BgAgentRegistryRecord>): Promise<void> => {
+    let attempt = 0
+    for (;;) {
+      try {
+        await opts.registry.update(entity_id, patch)
+        return
+      } catch (error) {
+        if (!opts.owner.worker_id || opts.owner.worker_id !== opts.spawned_by_task_id) throw error
+        console.error(`[bg-agent] exit persistence pending for ${entity_id}:`, error)
+        const delay = BG_EXIT_RETRY_DELAYS_MS[Math.min(attempt++, BG_EXIT_RETRY_DELAYS_MS.length - 1)]
+        await new Promise<void>((resolve) => { const timer = setTimeout(resolve, delay); timer.unref?.() })
+      }
+    }
+  }
 
   // fire-and-forget — intentionally not awaited by caller
   void (async () => {
@@ -248,15 +263,13 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
           ...(failureError ? { error: failureError.slice(0, 200) } : {}),
         })
       }
-      await opts.registry
-        .update(entity_id, {
-          status: endedStatus,
-          result_file: resultFile,
-          exit_code: exitCode,
-          ended_at: new Date().toISOString(),
-          ...(failureError ? { error: failureError } : {}),
-        } as Partial<BgAgentRegistryRecord>)
-        .catch(() => {})
+      await commitExit({
+        status: endedStatus,
+        result_file: resultFile,
+        exit_code: exitCode,
+        ended_at: new Date().toISOString(),
+        ...(failureError ? { error: failureError } : {}),
+      })
       if (opts.onExit) {
         try {
           await opts.onExit({
@@ -297,14 +310,12 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
           error: errMsg.slice(0, 200),
         })
       }
-      await opts.registry
-        .update(entity_id, {
-          status: 'failed' as const,
-          exit_code: 1,
-          ended_at: new Date().toISOString(),
-          error: errMsg,
-        } as Partial<BgAgentRegistryRecord>)
-        .catch(() => {})
+      await commitExit({
+        status: 'failed',
+        exit_code: 1,
+        ended_at: new Date().toISOString(),
+        error: errMsg,
+      })
       if (opts.onExit) {
         try {
           await opts.onExit({
@@ -325,7 +336,9 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
     } finally {
       opts.abortControllers.delete(entity_id)
     }
-  })()
+  })().catch((error) => {
+    console.error(`[bg-agent] failed to persist exit for ${entity_id}:`, error)
+  })
 
   return entity_id
 }

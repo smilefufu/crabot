@@ -681,7 +681,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     const stack = internals.managerStack!
     vi.spyOn(stack.harness, 'reconcileOnStartup').mockRejectedValue(new Error('reconcile failed'))
     const release = vi.fn().mockResolvedValue(undefined)
-    internals.agentHandler = { releaseRecoveredWorkerShellExits: release } as any
+    internals.agentHandler = { releaseRecoveredWorkerEntityExits: release } as any
     const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
     const resume = vi.spyOn(stack.registry, 'resumeInterruptedEpisodes').mockResolvedValue(undefined)
     vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -720,7 +720,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     let recoveryFinished = false
     const recoveryGate = new Promise<void>((resolve) => { releaseRecovery = resolve })
     internals.agentHandler = {
-      releaseRecoveredWorkerShellExits: vi.fn(async () => { order.push('bg-shell') }),
+      releaseRecoveredWorkerEntityExits: vi.fn(async () => { order.push('bg-shell') }),
     } as any
     vi.spyOn(stack.harness, 'reconcileRecoveryNoticesOnStartup').mockImplementation(async () => {
       order.push('recovery-notices')
@@ -765,7 +765,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
       return { revived: [], failed: [], unchanged: [] }
     })
     const release = vi.fn().mockResolvedValue(undefined)
-    internals.agentHandler = { releaseRecoveredWorkerShellExits: release } as any
+    internals.agentHandler = { releaseRecoveredWorkerEntityExits: release } as any
     const sweep = vi.spyOn(stack.harness, 'startLivenessSweep')
 
     agent.startManagerStackReconciliation()
@@ -784,7 +784,8 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     const release = vi.fn().mockResolvedValue(undefined)
     const lateHandler = {
       setBuiltinShellExitDispatcher: setDispatcher,
-      releaseRecoveredWorkerShellExits: release,
+      setBuiltinChildExitDispatcher: vi.fn(),
+      releaseRecoveredWorkerEntityExits: release,
     }
 
     ;(agent as any).attachBuiltinShellExitDispatcher(lateHandler)

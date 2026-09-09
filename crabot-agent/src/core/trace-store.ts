@@ -115,6 +115,9 @@ export class TraceStore {
   // traces-running-<taskId>.jsonl。启动时 loadResumableCheckpoints 把这些文件
   // 读进此 Map，等 admin 裁决（HOLD，不立即标 failed）。
   private resumableCheckpoints = new Map<string, { traceId: string; checkpoint: import('../types.js').ResumeCheckpoint }>()
+  private readonly deferredBuiltinTraces = new Set<string>()
+  private readonly idleBuiltinTraces = new Set<string>()
+  private readonly activeTraceWriters = new Set<string>()
 
   constructor(
     maxSize = 100,
@@ -122,6 +125,7 @@ export class TraceStore {
     runningFlushFile = 'traces-running.jsonl',
     archiveFilePrefix = 'traces-',
     readableArchiveFilePrefixes: readonly string[] = [archiveFilePrefix],
+    private readonly deferBuiltinRecovery = false,
   ) {
     this.maxSize = maxSize
     this.persistDir = persistDir
@@ -448,6 +452,15 @@ export class TraceStore {
         if (record && record.kind === 'legacy_agent_trace') {
           try {
           const trace = record.trace as AgentTrace
+          if (this.deferBuiltinRecovery && trace.trigger.type === 'task' && !trace.related_task_id) {
+            const archived = this.readTraceFromIndex(trace.trace_id)
+            if (!archived || (archived.status === 'running' && trace.spans.length >= archived.spans.length)) {
+              this.traces.set(trace.trace_id, trace)
+              if (!this.order.includes(trace.trace_id)) this.order.push(trace.trace_id)
+              this.deferredBuiltinTraces.add(trace.trace_id)
+            }
+            continue
+          }
           // 正在等 resume 裁决的 worker 保持 running；全局快照可能比 per-task checkpoint
           // 多出尚未走到 onTurn 的工具生命周期 spans，只在确实更完整时接管 trace 正文。
           if (resumableTraceIds.has(trace.trace_id)) {
@@ -479,7 +492,8 @@ export class TraceStore {
         }
       }
       // 清空 running 文件——这些 trace 已落到日期文件
-      fs.writeFileSync(filePath, '', 'utf-8')
+      if (this.deferredBuiltinTraces.size > 0) this.flushInFlightTraces()
+      else fs.writeFileSync(filePath, '', 'utf-8')
     } catch (err) {
       console.warn(`[TraceStore] loadRunningTraces failed: ${err instanceof Error ? err.message : err}`)
     }
@@ -624,14 +638,60 @@ export class TraceStore {
     }
 
     // Ring Buffer：超出容量时淘汰最旧的
-    if (this.order.length >= this.maxSize) {
-      const oldest = this.order.shift()!
-      this.traces.delete(oldest)
-    }
+    this.evictHistory()
 
     this.traces.set(trace.trace_id, trace)
     this.order.push(trace.trace_id)
     return trace
+  }
+
+  private evictHistory(): void {
+    while (this.order.length >= this.maxSize) {
+      const index = this.order.findIndex((id) => !this.activeTraceWriters.has(id) &&
+        (this.traces.get(id)?.status !== 'running' || this.idleBuiltinTraces.has(id)))
+      if (index < 0) break
+      const [id] = this.order.splice(index, 1)
+      this.traces.delete(id)
+      this.idleBuiltinTraces.delete(id)
+    }
+  }
+
+  async acquireBuiltinTraceWriter(traceId: string, minimumOffset = 0): Promise<void> {
+    const trace = await this.getFullTrace(traceId)
+    if (!trace) throw new Error(`builtin trace writer unavailable: ${traceId}`)
+    if (trace.spans.length < minimumOffset) throw new Error(`builtin trace source incomplete: ${traceId}, spans=${trace.spans.length}, cursor=${minimumOffset}`)
+    if (this.activeTraceWriters.has(traceId) && this.traces.has(traceId)) return
+    // Only the adapter's validated live/idle incarnation may reopen its own trace.
+    trace.status = 'running'
+    delete trace.ended_at
+    delete trace.duration_ms
+    delete trace.outcome
+    this.persistTrace(trace, true)
+    this.traces.set(traceId, trace)
+    if (!this.order.includes(traceId)) this.order.push(traceId)
+    this.activeTraceWriters.add(traceId)
+    this.idleBuiltinTraces.delete(traceId)
+    this.deferredBuiltinTraces.delete(traceId)
+  }
+
+  releaseBuiltinTraceWriter(traceId: string): void {
+    const trace = this.traces.get(traceId)
+    if (!trace) throw new Error(`builtin trace writer lost: ${traceId}`)
+    this.persistTrace(trace, true)
+    this.activeTraceWriters.delete(traceId)
+    this.idleBuiltinTraces.add(traceId)
+    this.evictHistory()
+  }
+
+  reconcileDeferredBuiltinTraces(): void {
+    for (const id of this.deferredBuiltinTraces) {
+      const trace = this.traces.get(id)
+      if (!trace) continue
+      this.appendInterruptedToolResults(trace, new Date().toISOString())
+      this.endTrace(id, 'failed', { summary: '[interrupted: agent restarted]' })
+    }
+    this.deferredBuiltinTraces.clear()
+    this.flushInFlightTraces()
   }
 
   startSpan(
@@ -693,7 +753,7 @@ export class TraceStore {
     status: 'completed' | 'failed',
     outcome?: AgentTrace['outcome']
   ): void {
-    const trace = this.traces.get(traceId)
+    const trace = this.traces.get(traceId) ?? this.readTraceFromIndex(traceId)
     if (!trace) return
 
     const now = new Date()
@@ -709,6 +769,8 @@ export class TraceStore {
     }
 
     this.persistTrace(trace)
+    this.activeTraceWriters.delete(traceId)
+    this.idleBuiltinTraces.delete(traceId)
   }
 
   /**
@@ -1156,7 +1218,7 @@ export class TraceStore {
     }
   }
 
-  private persistTrace(trace: AgentTrace): void {
+  private persistTrace(trace: AgentTrace, required = false): void {
     if (!this.persistDir) return
     try {
       const date = trace.started_at.slice(0, 10)
@@ -1184,6 +1246,7 @@ export class TraceStore {
       // persist failure must not affect main flow
       const msg = err instanceof Error ? err.message : String(err)
       console.warn(`[TraceStore] persistTrace failed for ${trace.trace_id}: ${msg}`)
+      if (required) throw err
     }
   }
 

@@ -122,11 +122,12 @@ export function createListEntitiesTool(deps: BgToolDeps): ToolDefinition {
 
       // Persistent (disk-backed) entities — 后台 shell / sub-agent 现在全是持久实体
       const persistentRecords = await deps.registry.list({
-        owner_friend_id: deps.ownerFriendId,
+        ...(deps.ownerWorkerId ? { spawned_by_task_id: deps.ownerWorkerId } : { owner_friend_id: deps.ownerFriendId }),
         status: wantedStatuses,
       })
 
       const allRows: RowData[] = persistentRecords
+        .filter((rec) => !deps.ownerWorkerId || rec.owner.worker_id === deps.ownerWorkerId)
         .map((rec: BgEntityRecord) => ({
           type: rec.type,
           entityId: rec.entity_id,
