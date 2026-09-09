@@ -434,6 +434,47 @@
       }
     },
     {
+      "id": "idle-review-blocker-recheck",
+      "title": "空闲时重新判断已经失效的阻塞",
+      "objectives": [
+        {
+          "title": "完成异常分类验证",
+          "completion_criteria": ["取得可核分类证据并完成受控复测"],
+          "work_items": [
+            {
+              "title": "运行受控复测",
+              "status": "blocked",
+              "project_root": "{{project_root}}",
+              "current_judgement": "此前因诊断能力缺失，无法取得可核分类证据",
+              "next_action": "诊断修复完成后运行受控复测",
+              "blocker": "缺少可核分类证据"
+            }
+          ]
+        }
+      ],
+      "history": [
+        { "kind": "human", "text": "诊断能力修好并留证后，继续做受控复测，把问题收口，不需要再等我确认。" },
+        { "kind": "manager_sent", "text": "诊断留证修复已经完成，相关 29 项测试全部通过。" }
+      ],
+      "steps": [
+        { "kind": "idle_review" }
+      ],
+      "expect": {
+        "required_tools": ["inspect_workboard", "change_workboard", "spawn_worker"],
+        "required_calls": [
+          { "tool": "spawn_worker", "contains": { "title": "受控复测", "prompt": "受控复测" } }
+        ],
+        "worker_spawns": { "count": 1, "workspace": "project_root" },
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 0,
+          "contains": ["受控复测", "in_progress"],
+          "excludes": ["缺少可核分类证据"]
+        }
+      }
+    },
+    {
       "id": "idle-review-query-worker-progress",
       "title": "空闲时通过独立侧问了解执行器进度",
       "objectives": [
