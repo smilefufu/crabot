@@ -339,7 +339,7 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
     harness,
     ledger,
     now: opts.managerNow,
-    hasCurrentWorkboardObjectives: async () => false,
+    readCurrentWorkboard: async (key) => ({ manager_key: key, objectives: [], archive: [] }),
     managerKeyFor,
     adapter: () => opts.managerAdapter,
     model: () => 'test-manager-model',

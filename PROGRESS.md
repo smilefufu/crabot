@@ -5,6 +5,12 @@
 
 ## 当前状态
 
+### Manager 任务板逐项空闲自省：实现完成，待真实模型验收
+
+- 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-09-manager-workboard-item-idle-introspection-design.md) 发布 Agent v3.14.5 协议；当前事项及无事项目标按自身更新时间计算唯一最早期限。
+- 真实输入和任务板变化不再推迟其它停滞事项；忙碌时延后重算，自省正常收口后至少隔一小时再次复核，空板停止，失败不重试、重启不恢复计时。
+- Manager 全目录 562 项回归、TypeScript 与隔离 Docker 确定性评测 20 项断言通过；新增活跃事项与超时事项并存的真实模型用例，待授权使用现有第三方 Provider 凭证后执行。运行实例尚未部署。
+
 ### builtin Worker 恢复、观测与 subagent 控制：实现完成，待 PR 审查
 
 - 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-08-builtin-worker-recovery-observation-control-design.md) 先发布 Agent v3.14.3；恢复同一 idle 化身的可写 trace，拒绝向已缺失的历史位置续写。
