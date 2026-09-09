@@ -108,6 +108,11 @@ export const BUILTIN_WORKER_PERMISSIONS: ResolvedPermissions = {
   memory_scopes: [],
 }
 
+const WORKER_CLI_EXECUTION_PROFILE: ResolvedPermissions = {
+  ...BUILTIN_WORKER_PERMISSIONS,
+  cli_access: cliAccess('write'),
+}
+
 const CLI_PERM_RANK: Record<CliPerm, number> = { none: 0, read: 1, write: 2 }
 
 /**
@@ -151,6 +156,15 @@ export function narrowWorkerPermissions(
   ) as CliAccessConfig
 
   return { tool_access, cli_access, storage: base.storage, memory_scopes: [...principal.memory_scopes] }
+}
+
+/** Agent CLI is inherited only by workers with a trusted principal snapshot. */
+export function workerCliExecutionPermissions(
+  principal: ResolvedPermissions | undefined,
+): { cli_access: CliAccessConfig; shell: boolean } {
+  if (!principal) return { cli_access: cliAccess('none'), shell: false }
+  const effective = narrowWorkerPermissions(WORKER_CLI_EXECUTION_PROFILE, principal)
+  return { cli_access: effective.cli_access, shell: effective.tool_access.shell }
 }
 
 /**

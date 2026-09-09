@@ -19,7 +19,7 @@ import {
 } from '../engine/index.js'
 import { createSetCwdTool, createReadTool, filterMcpToolsByConfig } from '../engine/tools/index.js'
 import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
-import { buildChildEnv } from '../core/runtime-env.js'
+import { buildChildEnv, withChildExecutionEnv } from '../core/runtime-env.js'
 import { killShellTree } from '../engine/bg-entities/bg-shell.js'
 import { ReadoptReaper } from '../engine/bg-entities/reaper.js'
 import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType, BgShellRegistryRecord } from '../engine/bg-entities/types.js'
@@ -98,7 +98,7 @@ import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { prefetchQuotedMessages } from './quoted-message-prefetcher.js'
 import { formatNow, formatChannelMessageTime, resolveTimezone, formatRuntimeMs } from '../utils/time.js'
 import { renderActiveTasksSection } from './active-tasks-section.js'
-import { getAgentDataDir, getDataRootDir, getAdminDataDir, getAdminInternalTokenPath, getWorkspaceDir, getBgEntitiesLogsDir } from '../core/data-paths.js'
+import { getAgentDataDir, getDataRootDir, getAdminDataDir, getWorkspaceDir, getBgEntitiesLogsDir } from '../core/data-paths.js'
 import { llmUsageToTrace } from '../core/trace-usage.js'
 import { TodoStore } from './worker-todo-store.js'
 import { createTodoTool } from './worker-todo-tool.js'
@@ -321,6 +321,11 @@ export interface AgentHandlerDeps {
     tools: ReadonlyArray<ToolDefinition>,
     resolvedPerms?: ResolvedPermissions,
   ) => ToolPermissionConfig
+  /** Per-legacy-task child environment; credentials remain outside shared process.env. */
+  issueAgentCliExecutionEnv?: (
+    taskId: TaskId,
+    context: WorkerAgentContext,
+  ) => Promise<Readonly<Record<string, string>> | undefined>
   /** 反思补轮注入接口（测试用）。生产路径走默认 reflectStructuredOutcome。 */
   reflectFn?: typeof reflectStructuredOutcome
   /**
@@ -1833,35 +1838,6 @@ export class AgentHandler {
       // 以确保 admin N=1 previous_snapshot + UI diff + restore 链路生效。
       workerHookRegistry.register(createSkillDirFenceHook())
 
-      // 6c. 注入 CLI 环境变量（CRABOT_TOKEN + CRABOT_ACTOR）
-      // 总是注入（不论 isMasterPrivate）—— token 只是让子进程能调 CLI；
-      // 真正的权限边界在 cli-permission-gate hook（按 effective cli_access 判定）。
-      // 不注入会让群聊/非 master 任务的 read 类 CLI（如 'crabot mcp list'）也跑不起来。
-      if (!process.env.CRABOT_TOKEN) {
-        const tokenPath = getAdminInternalTokenPath()
-        try {
-          const token = fs.readFileSync(tokenPath, 'utf-8').trim()
-          process.env.CRABOT_TOKEN = token
-        } catch {
-          // internal-token 不存在时不注入，CLI 命令将报错
-        }
-      }
-      // CRABOT_ACTOR 让 CLI undo log / audit log 把 worker 子进程的写操作正确记为 'agent'
-      // 而不是默认的 'human'。
-      process.env.CRABOT_ACTOR = 'agent'
-
-      // CRABOT_TASK_FRIEND_ID：当前 task 关联的 friend（master 私聊 = master id；定时任务 = 空）。
-      // CLI write 命令（如 `crabot schedule add`）从这里读取并填到请求体的 creator_friend_id，
-      // **不通过 CLI flag 传**，避免 LLM 通过命令行参数伪造身份。
-      // 真正的写权限闸由 cli-permission-gate hook 按 effective cli_access[domain] + 内容审核判定；
-      // 这里 friend_id 来自 task_origin，可能是 master / 普通 friend / 系统 schedule（空）。
-      const taskFriendId = context.task_origin?.friend_id
-      if (taskFriendId) {
-        process.env.CRABOT_TASK_FRIEND_ID = taskFriendId
-      } else {
-        delete process.env.CRABOT_TASK_FRIEND_ID
-      }
-
       // 7. Run engine — systemPrompt 和 tools 传 lambda，每轮 LLM 调用前 query-loop 重新 resolve
       // maxTurns: 主任务允许长时间执行（探索类任务可能跑 1000+ turn）；context-manager 在
       // 80% 窗口时自动 compaction 兜底。真正死循环可通过用户 supplement（dispatcher 注入）或 abort 中断。
@@ -1873,7 +1849,8 @@ export class AgentHandler {
       const configChanged = new AbortController()
       offRuntimeConfigApplied = this.runtimeConfigAppliedSource?.(() => configChanged.abort())
         ?? (() => undefined)
-      const engineResult = await runEngine({
+      const childExecutionEnv = await this.deps?.issueAgentCliExecutionEnv?.(task.task_id, context)
+      const engineResult = await withChildExecutionEnv(childExecutionEnv, () => runEngine({
         prompt: taskMessage,
         adapter,
         ...(opts?.initialMessages ? { initialMessages: [...opts.initialMessages] } : {}),
@@ -2183,7 +2160,7 @@ export class AgentHandler {
             opts?.onAfterTurn?.(event)
           },
         },
-      })
+      }))
 
       // Dispose ProgressDigest (also in finally block as safety net)
       digest?.dispose()
@@ -3276,6 +3253,10 @@ export class AgentHandler {
 
   hasActiveTask(taskId: TaskId): boolean {
     return this.activeTasks.has(taskId)
+  }
+
+  getTaskResolvedPermissions(taskId: TaskId): ResolvedPermissions | undefined {
+    return this.activeTasks.get(taskId)?.resolvedPermissions
   }
 
   setBarrierForTask(taskId: TaskId, timeoutMs: number): boolean {

@@ -165,25 +165,6 @@ export type IncarnationEndReason =
 export interface Workspace { readonly root: string }
 export interface TraceCursor { readonly offset: number }
 
-export interface SupervisionObservation {
-  readonly kind: 'text' | 'tool_only' | 'none' | 'unknown'
-  readonly next_cursor: { readonly offset: number }
-}
-
-/** Shared classification for each adapter's native structured trace reader. */
-export function classifySupervisionActivity(
-  events: ReadonlyArray<NormalizedTraceEvent>,
-  next_cursor: { readonly offset: number },
-): SupervisionObservation {
-  if (events.some((event) => event.kind === 'message' && event.role === 'assistant' && event.summary.trim())) {
-    return { kind: 'text', next_cursor }
-  }
-  if (events.some((event) => event.kind === 'tool_call' || event.kind === 'tool_result')) {
-    return { kind: 'tool_only', next_cursor }
-  }
-  return { kind: 'none', next_cursor }
-}
-
 export interface SendInputOptions {
   readonly raw?: boolean
   /** Manager-requested direction change; Harness interrupts CLI workers before delivery. */
@@ -245,6 +226,8 @@ export interface ForkOptions {
   readonly incarnation_id?: IncarnationId
   readonly establishment_deadline_at: string
   readonly connection_env?: Record<string, string>
+  /** Exact-incarnation Crabot CLI credential; never persisted with provider connection state. */
+  readonly execution_env?: Record<string, string>
   /** Present only for builtin; CLI implementations discover their workspace instruction file natively. */
   readonly workspace_instructions?: WorkspaceInstructionPayload
 }
@@ -337,6 +320,8 @@ export interface SpawnSpec {
    * 只能来自 activation registry admission 的 translator 输出。
    */
   readonly connection_env?: Record<string, string>
+  /** Exact-incarnation Crabot CLI credential; never persisted with provider connection state. */
+  readonly execution_env?: Record<string, string>
   readonly goal?: string
   /**
    * 台账 origin(派发来源与权限身份)。builtin adapter 把它与 workspace/goal 一起持久化,
@@ -371,6 +356,8 @@ export interface SpawnSpec {
 export interface ResumeOptions {
   readonly workspace_git?: WorkerWorkspaceGitContext
   readonly connection_env?: Record<string, string>
+  /** Exact-incarnation Crabot CLI credential; never persisted with provider connection state. */
+  readonly execution_env?: Record<string, string>
   readonly incarnation_id?: IncarnationId
   /** Present only for builtin; CLI implementations discover their workspace instruction file natively. */
   readonly workspace_instructions?: WorkspaceInstructionPayload
@@ -513,10 +500,6 @@ export interface WorkerAdapter {
    * builtin 以真实 engine 进展更新、无常驻实例时以 meta 兜底。
    */
   lastActivityAt?(h: IncarnationHandle): Promise<number | undefined>
-  inspectSupervisionActivity(
-    h: IncarnationHandle,
-    cursor?: { readonly offset: number },
-  ): Promise<SupervisionObservation>
   readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<{
     events: NormalizedTraceEvent[]
     nextCursor: TraceCursor

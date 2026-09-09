@@ -65,6 +65,7 @@
 
 import { randomUUID } from 'crypto'
 import { promises as fs } from 'fs'
+import type { AgentCliExecutionRef } from 'crabot-shared'
 import type {
   WorkerAdapter,
   WorkerImplId,
@@ -94,8 +95,8 @@ import type {
   WorkerWorkspaceGitContext,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
-import { BUILTIN_WORKER_PERMISSIONS, narrowWorkerPermissions } from '../builtin/runtime'
-import type { ResolvedPermissions } from '../../types'
+import { BUILTIN_WORKER_PERMISSIONS, narrowWorkerPermissions, workerCliExecutionPermissions } from '../builtin/runtime'
+import type { CliDomain, ResolvedPermissions } from '../../types'
 import {
   CapabilityNotSupportedError,
   WorkerExitedError,
@@ -116,7 +117,6 @@ import {
   type TaskHaltReason,
   type TaskStatus,
   type WorkerRecoveryNotice,
-  type WorkerSupervision,
 } from './ledger-types'
 import type { LedgerStore } from './ledger-store'
 import type { WorkspaceManager } from './workspace-manager'
@@ -133,6 +133,7 @@ import {
   type HarnessEvent,
   type HarnessEventDelivery,
   type HarnessEventKind,
+  type HistoricalHarnessEvent,
 } from './worker-events'
 import { WorkerContextStore, type WorkerContext } from './context-store'
 import { captureWorkspaceInstructions } from './workspace-instructions'
@@ -504,8 +505,6 @@ export const LIVENESS_STALL_MS = 30 * 60_000
  * 量级)可以忽略不计。
  */
 export const LIVENESS_SWEEP_INTERVAL_MS = 5 * 60_000
-export const SUPERVISION_DEFAULT_INTERVAL_MS = 15 * 60_000
-const SUPERVISION_RETRY_INTERVAL_MS = 5 * 60_000
 const RECOVERY_NOTICE_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000] as const
 
 // findWorker() reloads and validates the worker's whole owning ledger. A manager can own thousands
@@ -607,14 +606,6 @@ interface StallReportMark {
   /** 下一次重试最早可以发生的时刻(epoch ms);只在 `delivery === 'failed'` 时有意义。 */
   retryAfterMs: number
 }
-
-interface PreparedSupervisionDue {
-  readonly handle: IncarnationHandle
-  readonly event?: HarnessEvent
-  readonly stateToSync?: WorkerContractState
-}
-
-type SupervisionProbe = WorkerContractState | 'failed'
 
 /** 请求的 worker_id 在台账中不存在。 */
 export class WorkerNotFoundError extends Error {
@@ -748,11 +739,17 @@ export interface HarnessDeps {
     connectionRevision?: string
     dispose(): Promise<void>
   }>
+  readonly issueAgentCliCredential?: (context: {
+    execution: AgentCliExecutionRef
+    manager_key: ManagerKey
+    target_session: { channel_id: string; session_id: string; type: 'private' | 'group' }
+    creator_friend_id?: string
+  }) => Promise<{ token: string; expires_at: string }>
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string) => Promise<boolean>
   /** Validates an opaque legacy continuation credential immediately before side effects. */
   readonly validateLegacyContinuationAuth?: (auth: LegacyContinuationAuth) => Promise<boolean>
-  /** Stops periodic supervision from creating new work during shutdown. */
+  /** Stops background recovery delivery from creating new work during shutdown. */
   readonly isClosing?: () => boolean
 }
 
@@ -767,6 +764,7 @@ export interface SpawnWorkerParams {
   readonly prompt: string
   readonly origin: LedgerWorker['origin']
   readonly report_to: LedgerWorker['report_to']
+  readonly target_session?: { channel_id: string; session_id: string; type: 'private' | 'group' }
   readonly impl?: WorkerImplId
   readonly workspace?: string
   readonly goal?: string
@@ -958,6 +956,21 @@ export class WorkerHarness {
     this.uiSnapshotStore = new WorkerUiSnapshotStore(deps.workersDir)
   }
 
+  private async executionEnv(
+    context: WorkerContext,
+    execution: AgentCliExecutionRef,
+  ): Promise<{ execution_env?: Record<string, string> }> {
+    if (!this.deps.issueAgentCliCredential || !context.manager_key || !context.target_session) return {}
+    const credential = await this.deps.issueAgentCliCredential({
+      execution,
+      manager_key: context.manager_key as ManagerKey,
+      target_session: context.target_session,
+      ...(context.creator_friend_id ? { creator_friend_id: context.creator_friend_id } : {}),
+    })
+    if (!credential.token) throw new Error('Admin returned an empty Agent CLI credential')
+    return { execution_env: { CRABOT_TOKEN: credential.token, CRABOT_ACTOR: 'agent' } }
+  }
+
   private inputOwnershipRevision(workerId: string): number {
     return this.inputOwnershipRevisions.get(workerId) ?? 0
   }
@@ -1126,9 +1139,12 @@ export class WorkerHarness {
       let spawnedHandle: IncarnationHandle
       try {
         // 跨实现身份快照必须先于 provision 落盘：CLI-first worker 与 builtin 一样需要它。
-        const requestedContext: WorkerContext = p.principal_permissions === undefined
-          ? {}
-          : { principal_permissions: p.principal_permissions }
+        const requestedContext: WorkerContext = {
+          ...(p.principal_permissions === undefined ? {} : { principal_permissions: p.principal_permissions }),
+          manager_key: p.managerKey,
+          ...(p.target_session ? { target_session: p.target_session } : {}),
+          ...(p.origin.creator_friend_id ? { creator_friend_id: p.origin.creator_friend_id } : {}),
+        }
         const context = await this.contextStore.write(workerId, requestedContext)
         const caps = this.deps.capabilityBundle
           ? await this.deps.capabilityBundle({
@@ -1168,6 +1184,7 @@ export class WorkerHarness {
           principal_permissions: context.principal_permissions,
           builtin,
           ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
+          ...await this.executionEnv(context, { kind: 'worker', worker_id: workerId, incarnation_id: incarnationId }),
         }
         // 失败归因只认 WorkerImplUnavailableError（能证明 impl 失效的 adapter 级错误）；
         // 调用方/状态/数据错误（already spawned、meta 缺失等）与 provision 错误都不置 degraded。
@@ -1237,15 +1254,7 @@ export class WorkerHarness {
             ? { ended_at: now, ended_reason: initialInput?.report?.endReason ?? 'crashed' }
             : {}),
         })
-        const supervision = supervisionAfterMainlineTransition(
-          prev.supervision,
-          nextTask.status,
-          initialState,
-          1,
-          now,
-          true,
-        )
-        return { ...prev, task: nextTask, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
+        return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
 
       // runtime file（如 codex admin_provider 的 CODEX_HOME）必须活到化身终态——
@@ -2802,7 +2811,8 @@ export class WorkerHarness {
     const expiredAfterReady = this.expiredInboxDelivery(item, mainline.seq)
     if (expiredAfterReady) return expiredAfterReady
     const incarnationId = randomUUID()
-    const gitPermissions = (await this.contextStore.read(worker.worker_id))?.principal_permissions
+    const workerContext = await this.contextStore.read(worker.worker_id)
+    const gitPermissions = workerContext?.principal_permissions
     const workspaceGit = (await this.checkWorkspaceGit(mainline.workspace, gitPermissions)).current
     const gitContext: WorkerWorkspaceGitContext = {
       worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: mainline.workspace, baseline: workspaceGit,
@@ -2843,6 +2853,9 @@ export class WorkerHarness {
       const returnedHandle = await adapter.resume(prevRef, appendWorkspaceGitObservation(text, workspaceGit), {
         workspace_git: gitContext,
         ...(admission ? { connection_env: admission.env } : {}),
+        ...await this.executionEnv(workerContext ?? {}, {
+          kind: 'worker', worker_id: worker.worker_id, incarnation_id: incarnationId,
+        }),
         incarnation_id: incarnationId,
         ...(mainline.impl === 'builtin' ? { workspace_instructions: instructions } : {}),
       })
@@ -2907,19 +2920,10 @@ export class WorkerHarness {
           : prev.incarnations
       let nextTask = reopenTaskForContinuation(prev.task, now)
       nextTask = settleCliTask(nextTask, initialState, initialInput?.report, now)
-      const supervision = supervisionAfterMainlineTransition(
-        prev.supervision,
-        nextTask.status,
-        initialState,
-        newHandle.seq,
-        now,
-        true,
-      )
       return {
         ...prev,
         task: nextTask,
         incarnations: [...incarnations, newIncarnation],
-        ...(supervision ? { supervision } : {}),
         updated_at: now,
       }
     })
@@ -3021,6 +3025,7 @@ export class WorkerHarness {
     let targetInstructions: Awaited<ReturnType<typeof captureWorkspaceInstructions>>
     let targetGit: WorkspaceGitObservation
     let targetGitContext: WorkerWorkspaceGitContext
+    let targetExecutionEnv: { execution_env?: Record<string, string> } = {}
     let handoff: HandoffPackage
     try {
       handoffContext = await this.contextStore.read(worker.worker_id)
@@ -3068,6 +3073,9 @@ export class WorkerHarness {
         incarnationId: targetIncarnationId,
         workspaceRoot: workspace.root,
         capturedAt,
+      })
+      targetExecutionEnv = await this.executionEnv(handoffContext ?? {}, {
+        kind: 'worker', worker_id: worker.worker_id, incarnation_id: targetIncarnationId,
       })
       const expiredAfterInstructions = this.expiredInboxDelivery(deadlineItem, source.seq)
       if (expiredAfterInstructions) {
@@ -3174,6 +3182,7 @@ export class WorkerHarness {
         principal_permissions: principalPermissions,
         builtin: builtinInjection,
         ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
+        ...targetExecutionEnv,
       })
     } catch (error) {
       // provision/spawn 失败：dispose admission；只认 impl 失效证据才置 degraded。
@@ -3217,19 +3226,10 @@ export class WorkerHarness {
       }
       let nextTask = reopenTaskForContinuation(prev.task, now)
       nextTask = settleCliTask(nextTask, initialState, initialInput?.report, now)
-      const supervision = supervisionAfterMainlineTransition(
-        prev.supervision,
-        nextTask.status,
-        initialState,
-        newHandle.seq,
-        now,
-        true,
-      )
       return {
         ...prev,
         task: nextTask,
         incarnations: [...prev.incarnations, newIncarnation],
-        ...(supervision ? { supervision } : {}),
         updated_at: now,
       }
     })
@@ -3374,6 +3374,23 @@ export class WorkerHarness {
 
   async findWorker(workerId: string): Promise<{ managerKey: ManagerKey; worker: LedgerWorker } | undefined> {
     return this.deps.ledger.findWorker(workerId)
+  }
+
+  async authorizeAgentCliExecution(
+    execution: Extract<AgentCliExecutionRef, { kind: 'worker' }>,
+    domain: CliDomain,
+  ): Promise<{ valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean }> {
+    const found = await this.deps.ledger.findWorker(execution.worker_id)
+    const incarnation = found?.worker.incarnations.find(
+      (item) => item.incarnation_id === execution.incarnation_id,
+    )
+    if (!found || found.worker.task.status === 'closed' || !incarnation
+      || !isExecutableIncarnation(incarnation) || incarnation.state === 'exited') {
+      throw new Error('FORBIDDEN')
+    }
+    const context = await this.contextStore.read(execution.worker_id)
+    const permissions = workerCliExecutionPermissions(context?.principal_permissions)
+    return { valid: true, cli_access: permissions.cli_access[domain], shell: permissions.shell }
   }
 
   async getWorkerTurn(workerId: string, turnId?: string): Promise<WorkerTurn | undefined> {
@@ -4039,80 +4056,6 @@ export class WorkerHarness {
     }
   }
 
-  async setWorkerPeriodicReport(
-    workerId: string,
-    reportTo: LedgerWorker['report_to'],
-    intervalMs: number,
-    expiresAt?: string,
-  ): Promise<WorkerSupervision> {
-    if (!Number.isInteger(intervalMs) || intervalMs <= 0) throw new Error('interval_minutes 必须是正整数')
-    const now = this.deps.now()
-    if (expiresAt !== undefined) {
-      const expiresAtMs = Date.parse(expiresAt)
-      if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.parse(now)) {
-        throw new Error('expires_at 必须是晚于当前时间的有效绝对时间')
-      }
-    }
-    return this.withLock(workerId, async () => {
-      const found = await this.deps.ledger.findWorker(workerId)
-      if (!found) throw new WorkerNotFoundError(workerId)
-      if (isTerminalStatus(found.worker.task.status)) throw new Error(`worker ${workerId} 已结束，不能设置定期汇报`)
-      const supervision: WorkerSupervision = {
-        version: 1,
-        mode: 'periodic_report',
-        next_due_at: plusMs(now, intervalMs),
-        periodic_report: {
-          interval_ms: intervalMs,
-          ...(expiresAt ? { expires_at: expiresAt } : {}),
-          report_to: reportTo,
-        },
-      }
-      const updated = await this.deps.ledger.upsertWorker(found.managerKey, workerId, (prev) => prev && ({
-        ...prev,
-        supervision,
-        updated_at: now,
-      }))
-      if (!updated?.supervision) throw new Error(`worker ${workerId} 的定期汇报规则未能保存`)
-      return updated.supervision
-    })
-  }
-
-  async clearWorkerPeriodicReport(workerId: string): Promise<WorkerSupervision> {
-    const now = this.deps.now()
-    return this.withLock(workerId, async () => {
-      const found = await this.deps.ledger.findWorker(workerId)
-      if (!found) throw new WorkerNotFoundError(workerId)
-      if (isTerminalStatus(found.worker.task.status)) throw new Error(`worker ${workerId} 已结束，不能清除定期汇报`)
-      const mainline = mainlineIncarnation(found.worker)
-      const running = found.worker.task.status === 'running' && mainline?.state === 'running'
-      const supervision: WorkerSupervision = {
-        version: 1,
-        mode: 'default',
-        ...(running ? { next_due_at: plusMs(now, SUPERVISION_DEFAULT_INTERVAL_MS) } : {}),
-      }
-      const updated = await this.deps.ledger.upsertWorker(found.managerKey, workerId, (prev) => prev && ({
-        ...prev,
-        supervision,
-        updated_at: now,
-      }))
-      if (!updated?.supervision) throw new Error(`worker ${workerId} 的例行巡检规则未能保存`)
-      return updated.supervision
-    })
-  }
-
-  /** Stale queued supervision events must not wake a Manager or mutate a replacement rule. */
-  async isSupervisionDueCurrent(event: HarnessEvent): Promise<boolean> {
-    if (event.kind !== 'supervision_due') return false
-    return this.withLock(event.worker_id, async () => {
-      const found = await this.deps.ledger.findWorker(event.worker_id)
-      const pending = found?.worker.supervision?.pending
-      return pending !== undefined
-        && pending.due_id === event.detail?.due_id
-        && pending.kind === supervisionKindForMode(event.detail?.mode)
-        && found?.worker.supervision?.mode === event.detail?.mode
-    })
-  }
-
   async listAllWorkers(): Promise<Array<{ managerKey: ManagerKey; worker: LedgerWorker }>> {
     return this.deps.ledger.listAllWorkers()
   }
@@ -4127,7 +4070,7 @@ export class WorkerHarness {
    * `getEventLog` 这一个入口访问(带实例缓存),对外只补一个只读出口,不让调用方自己按
    * `workersDir` 拼路径另建 `WorkerEventLog`——那会让"事件流文件在哪"出现第二处真相。
    */
-  async readWorkerEvents(workerId: string): Promise<HarnessEvent[]> {
+  async readWorkerEvents(workerId: string): Promise<HistoricalHarnessEvent[]> {
     return this.getEventLog(workerId).readAll()
   }
 
@@ -4801,7 +4744,6 @@ export class WorkerHarness {
       for (const { worker } of allWorkers) {
         await this.deliverNativeActivityNotifications(worker.worker_id)
       }
-      await this.sweepSupervision()
       const nowMs = Date.parse(this.deps.now())
       const all = await this.deps.ledger.listAllWorkers()
       const reports: Array<Promise<void>> = []
@@ -4864,219 +4806,6 @@ export class WorkerHarness {
     } finally {
       this.sweepInFlight = false
     }
-  }
-
-  /** Startup recovery reuses the normal sweep: overdue windows coalesce into one pending due. */
-  async reconcileSupervisionOnStartup(): Promise<void> {
-    await this.sweepSupervision()
-  }
-
-  private async sweepSupervision(): Promise<void> {
-    if (this.deps.isClosing?.()) return
-    const now = this.deps.now()
-    const candidates = (await this.deps.ledger.listAllWorkers()).filter(({ worker }) => {
-      if (isTerminalStatus(worker.task.status)) return false
-      const mainline = mainlineIncarnation(worker)
-      return mainline !== undefined && isExecutableIncarnation(mainline)
-    })
-    const prepared: Array<PreparedSupervisionDue | undefined> = []
-    for (let start = 0; start < candidates.length; start += WORKER_SWEEP_CONCURRENCY) {
-      const batch = candidates.slice(start, start + WORKER_SWEEP_CONCURRENCY)
-      prepared.push(...await Promise.all(
-        batch.map(({ worker }) => this.prepareSupervisionDue(worker.worker_id, now)),
-      ))
-    }
-    for (const item of prepared) {
-      if (item?.stateToSync) {
-        await this.processStateChange(item.handle, item.stateToSync)
-      }
-    }
-    if (this.deps.isClosing?.()) return
-    const events = prepared.flatMap((item) => item?.event ? [item.event] : [])
-    for (let start = 0; start < events.length; start += WORKER_SWEEP_CONCURRENCY) {
-      await Promise.allSettled(
-        events.slice(start, start + WORKER_SWEEP_CONCURRENCY)
-          .map((event) => this.deliverSupervisionDue(event)),
-      )
-    }
-  }
-
-  private async prepareSupervisionDue(
-    workerId: string,
-    now: string,
-  ): Promise<PreparedSupervisionDue | undefined> {
-    return this.withLock(workerId, async () => {
-      const found = await this.deps.ledger.findWorker(workerId)
-      if (!found || isTerminalStatus(found.worker.task.status)) return undefined
-      const worker = found.worker
-      const mainline = mainlineIncarnation(worker)
-      if (!mainline || !isExecutableIncarnation(mainline)) return undefined
-      const handle = handleForIncarnation(worker.worker_id, mainline)
-      const adapter = this.deps.adapters.get(mainline.impl)
-      let supervision = worker.supervision
-      if (!supervision) {
-        if (worker.task.status !== 'running' || mainline.state !== 'running') return undefined
-        supervision = { version: 1, mode: 'default', next_due_at: plusMs(now, SUPERVISION_DEFAULT_INTERVAL_MS) }
-        await this.updateSupervision(found.managerKey, workerId, supervision, now)
-        return undefined
-      }
-
-      if (supervision.mode === 'default' && (worker.task.status !== 'running' || mainline.state !== 'running')) {
-        if (supervision.next_due_at || supervision.pending) {
-          await this.updateSupervision(found.managerKey, workerId, { version: 1, mode: 'default' }, now)
-        }
-        return undefined
-      }
-      if (supervision.mode === 'periodic_report' && supervision.periodic_report?.expires_at && Date.parse(supervision.periodic_report.expires_at) <= Date.parse(now)) {
-        const defaultRule: WorkerSupervision = {
-          version: 1,
-          mode: 'default',
-          ...(worker.task.status === 'running' && mainline.state === 'running'
-            ? { next_due_at: plusMs(now, SUPERVISION_DEFAULT_INTERVAL_MS) }
-            : {}),
-        }
-        await this.updateSupervision(found.managerKey, workerId, defaultRule, now)
-        return undefined
-      }
-
-      if (supervision.pending) {
-        if (supervision.pending.retry_after_at && Date.parse(supervision.pending.retry_after_at) > Date.parse(now)) return undefined
-        return {
-          handle,
-          event: this.buildSupervisionEvent(worker, handle, supervision, supervision.pending.due_id, 'unknown'),
-        }
-      }
-      if (!supervision.next_due_at || Date.parse(supervision.next_due_at) > Date.parse(now)) return undefined
-
-      let observation: 'text' | 'tool_only' | 'none' | 'unknown' = 'unknown'
-      let cursor = supervision.observation?.mainline_seq === mainline.seq ? supervision.observation.cursor : undefined
-      try {
-        if (adapter) {
-          const result = await adapter.inspectSupervisionActivity(handle, cursor)
-          observation = result.kind
-          cursor = result.next_cursor
-        }
-      } catch {
-        observation = 'unknown'
-      }
-
-      const observed = {
-        ...supervision,
-        observation: cursor ? { mainline_seq: mainline.seq, cursor } : undefined,
-        last_observed_at: now,
-      }
-      if (observed.mode === 'default' && observation === 'tool_only') {
-        await this.updateSupervision(found.managerKey, workerId, {
-          ...observed,
-          next_due_at: plusMs(now, SUPERVISION_DEFAULT_INTERVAL_MS),
-        }, now)
-        return undefined
-      }
-
-      let probe: SupervisionProbe | undefined
-      if (observation === 'none' || observation === 'unknown') {
-        try {
-          probe = adapter ? await adapter.state(handle) : 'failed'
-        } catch {
-          probe = 'failed'
-        }
-        if (observed.mode === 'default' && (probe === 'exited' || probe === 'idle')) {
-          // default 巡检只盯 running 主线:idle/exited 走生命周期状态同步,不造 due。
-          // periodic_report 不在此列(协议 §6.3:覆盖 running 与 halted),probe 结果
-          // 不能吞掉它的到期汇报。
-          await this.updateSupervision(found.managerKey, workerId, observed, now)
-          return { handle, stateToSync: probe }
-        }
-      }
-
-      const pending = {
-        due_id: randomUUID(),
-        kind: observed.mode === 'periodic_report' ? 'periodic_report' as const : 'default_review' as const,
-        due_at: now,
-        attempts: 0,
-      }
-      const dueRule: WorkerSupervision = { ...observed, pending }
-      await this.updateSupervision(found.managerKey, workerId, dueRule, now)
-      return {
-        handle,
-        ...(observed.mode === 'periodic_report' && probe === 'idle' && worker.task.status === 'running'
-          ? { stateToSync: 'idle' as const }
-          : {}),
-        event: this.buildSupervisionEvent(worker, handle, dueRule, pending.due_id, observation, probe),
-      }
-    })
-  }
-
-  private async deliverSupervisionDue(event: HarnessEvent): Promise<void> {
-    let delivery: HarnessEventDelivery | undefined
-    try {
-      delivery = await this.appendPreparedEventAwaitingDelivery(event)
-    } catch (error) {
-      console.error(`[WorkerHarness] supervision delivery failed for ${event.worker_id}:`, error)
-    }
-    await this.withLock(event.worker_id, async () => {
-      const found = await this.deps.ledger.findWorker(event.worker_id)
-      const current = found?.worker.supervision
-      const pending = current?.pending
-      if (!found || !current || !pending || pending.due_id !== event.detail?.due_id || pending.kind !== supervisionKindForMode(event.detail?.mode) || current.mode !== event.detail?.mode) return
-      const now = this.deps.now()
-      if (delivery?.consumed) {
-        const interval = current.mode === 'periodic_report'
-          ? current.periodic_report?.interval_ms
-          : SUPERVISION_DEFAULT_INTERVAL_MS
-        if (!interval) return
-        await this.updateSupervision(found.managerKey, event.worker_id, {
-          ...current,
-          pending: undefined,
-          next_due_at: plusMs(now, interval),
-          last_effective_review_at: now,
-        }, now)
-        return
-      }
-      const attempts = pending.attempts + 1
-      await this.updateSupervision(found.managerKey, event.worker_id, {
-        ...current,
-        pending: {
-          ...pending,
-          attempts,
-          retry_after_at: plusMs(now, SUPERVISION_RETRY_INTERVAL_MS * Math.min(2 ** (attempts - 1), 4)),
-        },
-      }, now)
-    })
-  }
-
-  private buildSupervisionEvent(
-    worker: LedgerWorker,
-    handle: IncarnationHandle,
-    supervision: WorkerSupervision,
-    dueId: string,
-    observation: 'text' | 'tool_only' | 'none' | 'unknown',
-    probe?: SupervisionProbe,
-  ): HarnessEvent {
-    return this.buildEvent(worker.worker_id, handle.seq, 'supervision_due', {
-      mode: supervision.mode,
-      due_id: dueId,
-      mainline_incarnation_id: handle.incarnation_id,
-      mainline_seq: handle.seq,
-      observation,
-      ...(probe ? { probe } : {}),
-      ...(supervision.mode === 'periodic_report' && supervision.periodic_report
-        ? { report_to: supervision.periodic_report.report_to }
-        : {}),
-    })
-  }
-
-  private async updateSupervision(
-    managerKey: ManagerKey,
-    workerId: string,
-    supervision: WorkerSupervision,
-    now: string,
-  ): Promise<void> {
-    await this.deps.ledger.upsertWorker(managerKey, workerId, (worker) => worker && ({
-      ...worker,
-      supervision,
-      updated_at: now,
-    }))
   }
 
   /**
@@ -5207,8 +4936,7 @@ export class WorkerHarness {
     const failed = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const nextTask = transitionTaskTo(prev.task, 'closed', { now, closed: { by: 'system', note: message } })
-      const supervision = supervisionAfterMainlineTransition(prev.supervision, nextTask.status, 'exited', 0, now)
-      return { ...prev, task: nextTask, ...(supervision ? { supervision } : {}), updated_at: now }
+      return { ...prev, task: nextTask, updated_at: now }
     })
     await this.appendEvent(
       worker.worker_id,
@@ -5251,13 +4979,6 @@ export class WorkerHarness {
         ended_at: now,
         ended_reason: 'crashed',
       })
-      const supervision = supervisionAfterMainlineTransition(
-        prev.supervision,
-        nextTask.status,
-        'exited',
-        mainline.seq,
-        now,
-      )
       const recovery = current?.forked_from === undefined && current?.state !== 'exited' && current?.incarnation_id
         ? appendRecoveryNotice(prev.recovery_notices, current.incarnation_id, now)
         : undefined
@@ -5266,7 +4987,6 @@ export class WorkerHarness {
         ...prev,
         task: nextTask,
         incarnations,
-        ...(supervision ? { supervision } : {}),
         ...(recovery ? { recovery_notices: recovery.notices } : {}),
         updated_at: now,
       }
@@ -5314,8 +5034,7 @@ export class WorkerHarness {
       const current = findIncarnation(prev, mainline.impl, mainline.seq)
       if (!current || current.state !== 'exited') return undefined
       const incarnations = patchIncarnationBySeq(prev.incarnations, mainline.impl, mainline.seq, { state: 'running' })
-      const supervision = supervisionAfterMainlineTransition(prev.supervision, prev.task.status, 'running', mainline.seq, now)
-      return { ...prev, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
+      return { ...prev, incarnations, updated_at: now }
     })
     if (!realigned) return
     await this.appendEvent(
@@ -5588,8 +5307,7 @@ export class WorkerHarness {
           ? { ...item, state: 'exited' as const, ended_at: now, ended_reason: 'killed' as const }
           : item
       })
-      const supervision = supervisionAfterMainlineTransition(previous.supervision, task.status, 'exited', incarnation.seq, now)
-      return { ...previous, task, incarnations, ...(supervision ? { supervision } : {}), updated_at: now }
+      return { ...previous, task, incarnations, updated_at: now }
     })
     // 停止核验事实与收件箱清空只落审计：一次停止对 manager 的唯一唤醒由 operation_settled
     // 承载（携带落账后 task_status，见 deliverControlOperationNotifications）。
@@ -5703,10 +5421,12 @@ export class WorkerHarness {
         // 固化该值；重投读回首次落盘的那一条（task 可能已再迁移，现读台账会造出错误事实）。
         let event: HarnessEvent
         if (notification.event_written) {
-          event = (await this.getEventLog(workerId).readAll())
+          const persisted = (await this.getEventLog(workerId).readAll())
             .filter((entry) => entry.kind === 'operation_settled' && entry.detail?.operation_id === operation.operation_id)
             .pop()
-            ?? this.buildEvent(workerId, operation.seq, 'operation_settled', {
+          event = persisted
+            ? { ...persisted, kind: 'operation_settled' }
+            : this.buildEvent(workerId, operation.seq, 'operation_settled', {
               operation_id: operation.operation_id,
               incarnation_id: operation.incarnation_id,
               kind: operation.kind,
@@ -5845,7 +5565,8 @@ export class WorkerHarness {
       }
     }
     try {
-      const permissions = (await this.contextStore.read(workerId))?.principal_permissions
+      const workerContext = await this.contextStore.read(workerId)
+      const permissions = workerContext?.principal_permissions
       forkGit = (await this.checkWorkspaceGit(prep.workspace, permissions)).current
       forkInstructions = await captureWorkspaceInstructions({
         workersDir: this.deps.workersDir,
@@ -5862,6 +5583,9 @@ export class WorkerHarness {
         establishment_deadline_at: prep.receipt.establishment_deadline_at,
         ...(prep.implId === 'builtin' ? { workspace_instructions: forkInstructions } : {}),
         ...(admission && Object.keys(admission.env).length > 0 ? { connection_env: admission.env } : {}),
+        ...await this.executionEnv(workerContext ?? {}, {
+          kind: 'worker', worker_id: workerId, incarnation_id: forkIncarnationId,
+        }),
       }
       const remainingMs = Date.parse(prep.receipt.establishment_deadline_at) - Date.parse(this.deps.now())
       if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
@@ -6388,13 +6112,6 @@ export class WorkerHarness {
             ? { state, ended_at: now, ended_reason: endReason, session_ref: h.session_ref }
             : { state, session_ref: h.session_ref }
         )
-        const supervision = supervisionAfterMainlineTransition(
-          prev.supervision,
-          nextTask.status,
-          state,
-          h.seq,
-          now,
-        )
         const recovery = state === 'exited' && endReason === 'crashed' && !preserveTaskForStop &&
           current?.forked_from === undefined && current?.state !== 'exited' && current?.incarnation_id
           ? appendRecoveryNotice(prev.recovery_notices, current.incarnation_id, now)
@@ -6404,7 +6121,6 @@ export class WorkerHarness {
           ...prev,
           task: nextTask,
           incarnations,
-          ...(supervision ? { supervision } : {}),
           ...(recovery ? { recovery_notices: recovery.notices } : {}),
           updated_at: now,
         }
@@ -6670,70 +6386,6 @@ function plusMs(now: string, durationMs: number): string {
   return new Date(Date.parse(now) + durationMs).toISOString()
 }
 
-function supervisionKindForMode(mode: unknown): 'default_review' | 'periodic_report' | undefined {
-  if (mode === 'default') return 'default_review'
-  if (mode === 'periodic_report') return 'periodic_report'
-  return undefined
-}
-
-/**
- * Applies the supervision lifecycle rules at the same ledger mutation that changes the mainline.
- * It deliberately does not observe or control a Worker; the caller already owns the state change.
- */
-function supervisionAfterMainlineTransition(
-  current: WorkerSupervision | undefined,
-  taskStatus: TaskStatus,
-  mainlineState: WorkerContractState,
-  mainlineSeq: number,
-  now: string,
-  newMainline = false,
-): WorkerSupervision | undefined {
-  if (isTerminalStatus(taskStatus)) {
-    return current ? { version: 1, mode: 'default' } : undefined
-  }
-
-  const supervision = current ?? { version: 1, mode: 'default' as const }
-  const observation = supervision.observation?.mainline_seq === mainlineSeq
-    ? supervision.observation
-    : undefined
-
-  if (supervision.mode === 'periodic_report' && supervision.periodic_report) {
-    return {
-      ...supervision,
-      ...(observation ? { observation } : { observation: undefined }),
-      ...(supervision.next_due_at
-        ? {}
-        : { next_due_at: plusMs(now, supervision.periodic_report.interval_ms) }),
-    }
-  }
-
-  const {
-    next_due_at: _nextDueAt,
-    pending: _pending,
-    periodic_report: _periodicReport,
-    observation: _observation,
-    ...defaultFields
-  } = supervision
-  if (taskStatus !== 'running' || mainlineState !== 'running') {
-    return {
-      ...defaultFields,
-      version: 1,
-      mode: 'default',
-      ...(observation ? { observation } : {}),
-    }
-  }
-  return {
-    ...defaultFields,
-    version: 1,
-    mode: 'default',
-    ...(observation ? { observation } : {}),
-    next_due_at: !newMainline && supervision.next_due_at
-      ? supervision.next_due_at
-      : plusMs(now, SUPERVISION_DEFAULT_INTERVAL_MS),
-    ...(!newMainline && supervision.pending ? { pending: supervision.pending } : {}),
-  }
-}
-
 function requireStableIncarnationId(incarnation: Incarnation, workerId: string) {
   if (!incarnation.incarnation_id) {
     throw new Error(`WorkerHarness: worker ${workerId} incarnation ${incarnation.impl}#${incarnation.seq} has no stable identity`)
@@ -6790,7 +6442,7 @@ function traceHandoffEvidence(
 function ledgerEventHandoffEvidence(
   workerId: string,
   source: Incarnation,
-  events: ReadonlyArray<HarnessEvent>,
+  events: ReadonlyArray<HistoricalHarnessEvent>,
 ): HandoffEvidenceInput[] {
   const sourceId = requireStableIncarnationId(source, workerId)
   return events.map((event, index) => ({

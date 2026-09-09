@@ -43,7 +43,7 @@ const MESSAGING_NORMAL = [
 /** protocol-crab-messaging.md §2.10 的 channel 透传只读三件套（仅当存在飞书 channel 实例）。 */
 const FEISHU_READ_ONLY_TOOLS = ['read_feishu_document', 'feishu_raw_get', 'feishu_download_file']
 
-const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'get_worker_state', 'get_worker_activity', 'get_worker_turn', 'resolve_worker_turn', 'get_worker_terminal', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'list_workers', 'get_worker_detail', 'list_worker_implementations', 'set_worker_periodic_report', 'clear_worker_periodic_report']
+const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'get_worker_state', 'get_worker_activity', 'get_worker_turn', 'resolve_worker_turn', 'get_worker_terminal', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'list_workers', 'get_worker_detail', 'list_worker_implementations']
 
 const CRABOT_INFO_TOOLS = [
   'get_system_status',
@@ -256,7 +256,7 @@ describe('buildManagerToolFace', () => {
       expect(byName.get(name)?.isReadOnly, `${name} 应为 isReadOnly:true`).toBe(true)
     }
 
-    const writeTools = ['send_message', 'send_master_private', 'send_private_message', 'spawn_worker', 'send_to_worker', 'query_worker', 'resolve_worker_turn', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'set_worker_periodic_report', 'clear_worker_periodic_report', 'change_workboard', 'manage_decision_doc']
+    const writeTools = ['send_message', 'send_master_private', 'send_private_message', 'spawn_worker', 'send_to_worker', 'query_worker', 'resolve_worker_turn', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'change_workboard', 'manage_decision_doc']
     for (const name of writeTools) {
       expect(byName.get(name)?.isReadOnly, `${name} 应为 isReadOnly:false`).toBe(false)
     }

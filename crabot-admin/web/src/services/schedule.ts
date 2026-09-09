@@ -1,5 +1,5 @@
 import { api } from './api'
-import type { Schedule, ScheduleTrigger, ScheduleTaskTemplate } from '../types'
+import type { Schedule, ScheduleScriptInput, ScheduleTrigger, ScheduleTaskTemplate } from '../types'
 
 export interface ScheduleListResult {
   items: Schedule[]
@@ -11,13 +11,22 @@ export interface ScheduleListResult {
   }
 }
 
-export interface CreateScheduleData {
+interface ScheduleWriteData {
   name: string
   description?: string
   enabled?: boolean
   trigger: ScheduleTrigger
-  task_template: ScheduleTaskTemplate
   target_session?: Schedule['target_session']
+}
+
+export type CreateScheduleData = ScheduleWriteData & (
+  | { task_template: ScheduleTaskTemplate; script?: never }
+  | { task_template?: never; script: ScheduleScriptInput }
+)
+
+export type UpdateScheduleData = Partial<Omit<ScheduleWriteData, 'target_session'>> & {
+  task_template?: ScheduleTaskTemplate | null
+  script?: ScheduleScriptInput | null
 }
 
 export const scheduleService = {
@@ -38,8 +47,9 @@ export const scheduleService = {
     return api.get<ScheduleListResult>(`/schedules${qs ? `?${qs}` : ''}`)
   },
 
-  async get(id: string): Promise<{ schedule: Schedule }> {
-    return api.get<{ schedule: Schedule }>(`/schedules/${encodeURIComponent(id)}`)
+  async get(id: string, includeScriptSource = false): Promise<{ schedule: Schedule }> {
+    const query = includeScriptSource ? '?include_script_source=true' : ''
+    return api.get<{ schedule: Schedule }>(`/schedules/${encodeURIComponent(id)}${query}`)
   },
 
   async create(data: CreateScheduleData): Promise<{ schedule: Schedule }> {
@@ -48,10 +58,7 @@ export const scheduleService = {
 
   async update(
     id: string,
-    data: Partial<Pick<Schedule, 'name' | 'description' | 'enabled' | 'trigger' | 'task_template'>> & {
-      /** 显式 null 表示清除 target_session（与 admin RPC 语义一致） */
-      target_session?: Schedule['target_session'] | null
-    }
+    data: UpdateScheduleData,
   ): Promise<{ schedule: Schedule }> {
     return api.patch<{ schedule: Schedule }>(`/schedules/${encodeURIComponent(id)}`, data)
   },

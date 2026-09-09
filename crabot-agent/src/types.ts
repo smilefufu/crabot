@@ -936,6 +936,8 @@ export type AgentSpanType =
   | 'bg_entity_output'
   | 'bg_entity_kill'
   | 'bg_entity_exit'
+  | 'schedule_script_execution'
+  | 'schedule_result_delivery'
   // 前置决策器 span types（2026-05-19 引入，P7/J cutover 后不再产生）。
   // **保留枚举值**：盘上存量 trace 还带这两种 span，且前端 `Record<AgentSpanType,string>`
   // 是穷举映射——删了历史 trace 页面直接炸。
@@ -1054,6 +1056,33 @@ export interface RpcCallDetails {
   error?: string
 }
 
+export interface ScheduleScriptExecutionDetails {
+  schedule_id: ScheduleId
+  trigger_id: string
+  source_sha256: string
+  outcome?: 'succeeded' | 'failed' | 'interrupted' | 'skipped'
+  started_at: string
+  ended_at?: string
+  exit_code?: number
+  signal?: string
+  failure_kind?: 'spawn_error' | 'nonzero_exit' | 'signal' | 'timeout' | 'output_limit' | 'aborted' | 'recovery'
+  stdout_bytes: number
+  stderr_bytes: number
+  output_tail?: string
+}
+
+export interface ScheduleResultDeliveryDetails {
+  schedule_id: ScheduleId
+  trigger_id: string
+  outcome?: 'delivered' | 'failed' | 'interrupted'
+  target_session: {
+    channel_id: ModuleId
+    session_id: SessionId
+    type: 'private' | 'group'
+  }
+  error?: string
+}
+
 /** dispatch_call span details（P7/J 之后只用于渲染存量历史 trace，不再产生新数据） */
 export interface DispatchCallDetails {
   /** 前置决策器使用的 LLM 模型 ID */
@@ -1120,6 +1149,8 @@ export type AgentSpanDetails =
   | ContextAssemblyDetails
   | MemoryWriteDetails
   | RpcCallDetails
+  | ScheduleScriptExecutionDetails
+  | ScheduleResultDeliveryDetails
   | DispatchCallDetails
   | DispatchActionDetails
 

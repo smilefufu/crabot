@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
+import crypto from 'node:crypto'
 import http from 'node:http'
 import { WebSocket } from 'ws'
 import { sha256CanonicalJson } from 'crabot-shared'
@@ -18,6 +19,22 @@ import { newCredentialsFromPassword, writeCredentials } from './credentials.js'
 const TEST_PROTOCOL_PORT = 19807
 const TEST_WEB_PORT = 13007
 const TEST_DATA_DIR = './test-data/admin-web-api-test'
+const AGENT_CLI_TARGET = { channel_id: 'telegram-agent-cli', session_id: 'group-agent-cli', type: 'group' as const }
+
+function makeAgentCliToken(exp: number): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  const header = encode({ alg: 'HS256', typ: 'JWT' })
+  const payload = encode({
+    sub: 'agent-cli', iat: exp - 60, exp,
+    agent_cli: {
+      execution: { kind: 'worker', worker_id: 'worker-agent-cli', incarnation_id: 'inc-agent-cli' },
+      manager_key: `${AGENT_CLI_TARGET.channel_id}::${AGENT_CLI_TARGET.session_id}`,
+      target_session: AGENT_CLI_TARGET,
+    },
+  })
+  const signature = crypto.createHmac('sha256', process.env.TEST_JWT_SECRET_WEB!).update(`${header}.${payload}`).digest('base64url')
+  return `${header}.${payload}.${signature}`
+}
 
 describe('Admin Web API', () => {
   let admin: AdminModule
@@ -119,6 +136,61 @@ describe('Admin Web API', () => {
         'invalid-token'
       )
       expect(response.statusCode).toBe(401)
+    })
+
+    it('Agent CLI bearer 在 exp 时刻即失效，伪造 token 与未声明路由都不回退 Admin 身份', async () => {
+      const now = Math.floor(Date.now() / 1000)
+      const expired = makeAgentCliToken(now)
+      const valid = makeAgentCliToken(now + 60)
+      const forged = `${valid.slice(0, -1)}${valid.endsWith('x') ? 'y' : 'x'}`
+
+      expect((await makeWebRequest(TEST_WEB_PORT, '/api/schedules', 'GET', null, expired)).statusCode).toBe(401)
+      expect((await makeWebRequest(TEST_WEB_PORT, '/api/schedules', 'GET', null, forged)).statusCode).toBe(401)
+      expect((await makeWebRequest(TEST_WEB_PORT, '/api/tasks', 'GET', null, makeAgentCliToken(now + 60))).statusCode).toBe(403)
+    })
+
+    it('Agent CLI bearer 对脚本 Schedule 的 source/create/update/enable/trigger 叠加 shell gate', async () => {
+      ;(admin as unknown as { agentPort: number }).agentPort = 19002
+      vi.spyOn(admin['rpcClient'], 'call').mockResolvedValue({ valid: true, cli_access: 'write', shell: true } as never)
+      vi.spyOn(admin as any, 'resolvePrincipalPermissions').mockResolvedValue({
+        resolved: {
+          tool_access: {
+            memory: false, messaging: false, task: false, mcp_skill: false, file_io: false,
+            browser: false, shell: false, remote_exec: false, desktop: false,
+          },
+          cli_access: { ...createCliAccessConfig('none'), schedule: 'write' },
+          storage: null,
+          memory_scopes: [],
+        },
+      })
+      const created = await (admin as any).handleCreateSchedule({
+        name: 'agent-shell-gate-existing',
+        trigger: { type: 'interval', seconds: 60 },
+        script: { source: 'echo original' },
+        target_session: AGENT_CLI_TARGET,
+        enabled: false,
+      })
+      const id = created.schedule.id as string
+      const token = makeAgentCliToken(Math.floor(Date.now() / 1000) + 60)
+      const blocked: Array<[string, string, unknown]> = [
+        ['POST', '/api/schedules', {
+          name: 'agent-shell-gate-new', trigger: { type: 'interval', seconds: 60 }, script: { source: 'echo new' },
+        }],
+        ['GET', `/api/schedules/${id}?include_script_source=true`, null],
+        ['PATCH', `/api/schedules/${id}`, { script: { source: 'echo changed' } }],
+        ['PATCH', `/api/schedules/${id}`, { enabled: true }],
+        ['POST', `/api/schedules/${id}/trigger`, null],
+      ]
+      for (const [method, pathname, body] of blocked) {
+        const response = await makeWebRequest(TEST_WEB_PORT, pathname, method, body, token)
+        expect(response.statusCode, `${method} ${pathname}`).toBeGreaterThanOrEqual(400)
+        expect(response.statusCode, `${method} ${pathname}`).toBeLessThan(500)
+      }
+      const unchanged = await (admin as any).handleGetSchedule({ schedule_id: id, include_script_source: true })
+      expect(unchanged.schedule).toMatchObject({ enabled: false, script: { source: 'echo original' } })
+
+      expect((await makeWebRequest(TEST_WEB_PORT, `/api/schedules/${id}`, 'PATCH', { enabled: false }, token)).statusCode).toBe(200)
+      expect((await makeWebRequest(TEST_WEB_PORT, `/api/schedules/${id}`, 'DELETE', null, token)).statusCode).toBe(200)
     })
   })
 
@@ -544,7 +616,16 @@ describe('Admin Web API', () => {
       expect(response.statusCode).toBe(200)
       expect(response.body.accepted).toBe(true)
       expect(callSpy).toHaveBeenCalledWith(19002, 'trigger_schedule', expect.objectContaining({
-        schedule_id: 'memory-graph-rebuild', title: '重建长期记忆图谱', is_builtin: true,
+        schedule_id: 'memory-graph-rebuild',
+        trigger_id: expect.any(String),
+        schedule_name: '重建长期记忆图谱',
+        title: '重建长期记忆图谱',
+        target_session: {
+          channel_id: 'admin-web',
+          session_id: 'system-tasks',
+          type: 'private',
+        },
+        is_builtin: true,
         description: expect.stringMatching(/mcp__crab-memory__list_entries[\s\S]*mcp__crab-memory__set_memory_links/),
       }), expect.anything())
       const rebuildCall = callSpy.mock.calls.find((call) => call[1] === 'trigger_schedule')

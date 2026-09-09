@@ -31,6 +31,11 @@ export type MemoryId = string
 /** 调度项唯一标识，UUID v4 */
 export type ScheduleId = string
 
+/** 模型可执行上下文的精确身份；仅用于 Agent CLI 作用域认证。 */
+export type AgentCliExecutionRef =
+  | { kind: 'worker'; worker_id: string; incarnation_id: string }
+  | { kind: 'legacy_task'; task_id: TaskId }
+
 // ============================================================================
 // 模块状态
 // ============================================================================

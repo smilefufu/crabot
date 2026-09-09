@@ -110,27 +110,6 @@ export interface AmbiguousV3LedgerArchiveSource {
 
 export type LegacySourceRef = V2LegacySourceRef | AmbiguousV3LedgerArchiveSource
 
-export interface WorkerSupervision {
-  version: 1
-  mode: 'default' | 'periodic_report'
-  next_due_at?: string
-  last_observed_at?: string
-  last_effective_review_at?: string
-  observation?: { mainline_seq: number; cursor: { offset: number } }
-  pending?: {
-    due_id: string
-    kind: 'default_review' | 'periodic_report'
-    due_at: string
-    attempts: number
-    retry_after_at?: string
-  }
-  periodic_report?: {
-    interval_ms: number
-    expires_at?: string
-    report_to: { channel_id: ModuleId; session_id: SessionId }
-  }
-}
-
 /** Durable responsibility to wake the owning Manager after a mainline execution carrier crashed. */
 export interface WorkerRecoveryNotice {
   notice_id: string
@@ -168,7 +147,6 @@ export interface LedgerWorker {
   }
   report_to: { channel_id: ModuleId; session_id: SessionId }
   incarnations: Incarnation[]
-  supervision?: WorkerSupervision
   /** Missing on historical ledgers means no recovery work is inferred. */
   recovery_notices?: WorkerRecoveryNotice[]
   legacy_source?: LegacySourceRef

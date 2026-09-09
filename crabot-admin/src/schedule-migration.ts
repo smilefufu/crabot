@@ -52,8 +52,9 @@ export async function migrateScheduleTargetSession(
 ): Promise<Schedule> {
   if (schedule.target_session) return schedule
 
-  const input = schedule.task_template?.input
-  if (!input) return schedule
+  const taskTemplate = schedule.task_template
+  const input = taskTemplate?.input
+  if (!taskTemplate || !input) return schedule
 
   const legacyChannelId = input.target_channel_id
   const legacySessionId = input.target_session_id
@@ -85,7 +86,7 @@ export async function migrateScheduleTargetSession(
       type: sessionType,
     },
     task_template: {
-      ...schedule.task_template,
+      ...taskTemplate,
       input: newInput,
     },
     updated_at: new Date().toISOString(),

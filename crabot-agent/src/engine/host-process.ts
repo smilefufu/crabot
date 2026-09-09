@@ -25,6 +25,8 @@ export interface HostProcessRunSpec extends HostProcessLaunchSpec {
   readonly stdin?: string
   readonly limits: HostProcessLimits
   readonly abortSignal?: AbortSignal
+  /** Runs after spawn and before stdin is written. A rejection terminates the child without running stdin. */
+  readonly beforeStdin?: (child: ChildProcess) => Promise<void> | void
   /** 供流式消费者使用；不会改变有限 collector 的超限判断。 */
   readonly onStdoutChunk?: (chunk: Buffer) => void
   readonly onStderrChunk?: (chunk: Buffer) => void
@@ -119,7 +121,7 @@ function isDirectProcessAlive(pid: number): boolean {
 }
 
 /** Terminate a controlled tree and wait until its process group has gone away. */
-async function terminateHostProcessTreeAndWait(pid: number, graceMs: number): Promise<void> {
+export async function terminateHostProcessTreeAndWait(pid: number, graceMs = DEFAULT_KILL_GRACE_MS): Promise<void> {
   if (process.platform === 'win32') {
     await new Promise<void>((resolve) => {
       execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv() }, () => resolve())
@@ -235,6 +237,7 @@ export function runHostProcess(spec: HostProcessRunSpec): Promise<HostProcessOut
     const stderr = createCollector(spec.limits.stderrBytes, true)
     const killGraceMs = spec.limits.killGraceMs ?? DEFAULT_KILL_GRACE_MS
     let terminal: Exclude<HostProcessOutcomeKind, 'exit' | 'spawn_error'> | undefined
+    let beforeStdinError: string | undefined
     let termination: Promise<void> | undefined
     let settled = false
 
@@ -280,19 +283,25 @@ export function runHostProcess(spec: HostProcessRunSpec): Promise<HostProcessOut
       void (async () => {
         await termination
         finish({
-          kind: terminal ?? 'exit', exitCode, signal,
+          kind: beforeStdinError ? 'spawn_error' : terminal ?? 'exit', exitCode, signal,
           stdout: stdout.finish(), stderr: stderr.finish(), stdoutBytes: stdout.bytes(), stderrBytes: stderr.bytes(),
+          ...(beforeStdinError ? { message: beforeStdinError } : {}),
         })
       })()
     })
 
-    if (spec.stdin !== undefined) {
-      child.stdin?.on('error', () => {
-        // EPIPE means the child declined the request. Its close result determines the tool error.
-      })
+    child.stdin?.on('error', () => {
+      // EPIPE means the child declined the request. Its close result determines the tool error.
+    })
+    void Promise.resolve(spec.beforeStdin?.(child)).then(() => {
       child.stdin?.end(spec.stdin)
-    } else {
-      child.stdin?.end()
-    }
+    }).catch((error) => {
+      beforeStdinError = error instanceof Error ? error.message : String(error)
+      if (child.pid !== undefined) {
+        termination = spec.detached === false
+          ? terminateDirectProcessAndWait(child.pid, killGraceMs)
+          : terminateHostProcessTreeAndWait(child.pid, killGraceMs)
+      }
+    })
   })
 }

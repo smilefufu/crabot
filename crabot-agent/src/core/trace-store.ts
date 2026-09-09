@@ -158,6 +158,11 @@ export class TraceStore {
     this.flushTimer.unref?.()
   }
 
+  /** Persist current running traces at an external side-effect admission boundary. */
+  flushRunningTraces(): void {
+    this.flushInFlightTraces()
+  }
+
   stopFlushTimer(): void {
     if (this.flushTimer) {
       clearInterval(this.flushTimer)

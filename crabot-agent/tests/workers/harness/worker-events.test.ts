@@ -75,6 +75,24 @@ describe('WorkerEventLog', () => {
     expect(events[0].kind).toBe('spawned')
   })
 
+  it('保留历史 supervision_due 作为只读审计记录', async () => {
+    await fs.mkdir(workerDir, { recursive: true })
+    await fs.writeFile(
+      join(workerDir, 'events.jsonl'),
+      '{"ts":"2026-01-01T00:00:00Z","kind":"supervision_due","worker_id":"w-1","seq":1,"detail":{"due_id":"legacy-due"}}\n',
+      'utf-8',
+    )
+
+    const events = await new WorkerEventLog(workerDir).readAll()
+    expect(events).toEqual([{
+      ts: '2026-01-01T00:00:00Z',
+      kind: 'supervision_due',
+      worker_id: 'w-1',
+      seq: 1,
+      detail: { due_id: 'legacy-due' },
+    }])
+  })
+
   it('半行(无换行符终结)不被消费,补全后可读', async () => {
     const log = new WorkerEventLog(workerDir)
     await fs.mkdir(workerDir, { recursive: true })

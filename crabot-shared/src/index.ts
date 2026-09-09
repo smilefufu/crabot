@@ -8,6 +8,7 @@ export {
   type TaskId,
   type MemoryId,
   type ScheduleId,
+  type AgentCliExecutionRef,
   type ModuleStatus,
   type HealthStatus,
   type Request,

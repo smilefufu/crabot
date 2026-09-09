@@ -37,7 +37,10 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<vo
 function buildAgent(runMaintenance: () => Promise<void>) {
   const workers = new Map<string, LedgerWorker>()
   const writes: LedgerWorker[] = []
-  const routeSchedule = vi.fn(() => Promise.resolve())
+  const authorizeSchedule = vi.fn(async () => undefined)
+  const admitSchedule = vi.fn(async () => ({
+    completion: Promise.resolve({ outcome: 'completed' }),
+  }))
   const publish = vi.fn<AgentEventPublisher>()
   const managerKey = 'admin-web::system-tasks' as ManagerKey
 
@@ -65,13 +68,23 @@ function buildAgent(runMaintenance: () => Promise<void>) {
   agent.managerStack = {
     ledger,
     principals: { managerKeyFor: () => managerKey },
-    registry: { routeSchedule },
+    registry: { authorizeSchedule, admitSchedule },
   }
   agent.memoryWriter = { runMaintenance }
   agent.managerEventPublisher = publish
 
-  return { agent, workers, writes, ledger, routeSchedule, publish, managerKey }
+  return { agent, workers, writes, ledger, authorizeSchedule, admitSchedule, publish, managerKey }
 }
+
+const TRIGGER_CONTEXT = {
+  trigger_id: 'trigger-test',
+  schedule_name: 'Test Schedule',
+  target_session: {
+    channel_id: 'admin-web',
+    session_id: 'system-tasks',
+    type: 'private',
+  },
+} as const
 
 describe('trigger_schedule memory_maintenance system task', () => {
   it('persists one Agent-owned task before accepted, then completes without manager or worker', async () => {
@@ -79,6 +92,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
     const fixture = buildAgent(() => maintenance.promise)
 
     const result = await fixture.agent.handleTriggerSchedule({
+      ...TRIGGER_CONTEXT,
       schedule_id: 'schedule-maintenance',
       task_type: 'memory_maintenance',
       title: '记忆维护',
@@ -91,7 +105,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
 
     expect(result.accepted).toBe(true)
     expect(result.task_id).toBeTypeOf('string')
-    expect(fixture.routeSchedule).not.toHaveBeenCalled()
+    expect(fixture.admitSchedule).not.toHaveBeenCalled()
     expect(fixture.writes[0]).toMatchObject({
       worker_id: result.task_id,
       manager_key: 'admin-web::system-tasks',
@@ -144,6 +158,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
     const fixture = buildAgent(() => Promise.reject(error))
 
     const result = await fixture.agent.handleTriggerSchedule({
+      ...TRIGGER_CONTEXT,
       schedule_id: 'schedule-maintenance',
       task_type: 'memory_maintenance',
       title: '记忆维护',
@@ -167,6 +182,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
     const fixture = buildAgent(() => Promise.resolve())
 
     const result = await fixture.agent.handleTriggerSchedule({
+      ...TRIGGER_CONTEXT,
       schedule_id: 'schedule-user-maintenance',
       task_type: 'memory_maintenance',
       title: '用户自建维护',
@@ -176,7 +192,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
     })
 
     expect(result).toEqual({ accepted: true })
-    expect(fixture.routeSchedule).toHaveBeenCalledTimes(1)
+    expect(fixture.admitSchedule).toHaveBeenCalledTimes(1)
     expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
   })
 
@@ -186,33 +202,35 @@ describe('trigger_schedule memory_maintenance system task', () => {
     ;(fixture.agent as AgentUnderTest & { sendBackgroundFailLoud: typeof reportFailure }).sendBackgroundFailLoud = reportFailure
 
     const result = await fixture.agent.handleTriggerSchedule({
+      ...TRIGGER_CONTEXT,
       schedule_id: 'schedule-user-curate',
       task_type: 'memory_curate',
       title: '用户自建记忆整理',
       description: 'legacy schedule',
       is_builtin: false,
-      target_session: { channel_id: 'telegram-default', session_id: 'legacy-session' },
+      target_session: { channel_id: 'telegram-default', session_id: 'legacy-session', type: 'private' },
     })
 
     expect(result).toEqual({ accepted: true })
     await waitUntil(() => reportFailure.mock.calls.length === 1)
     expect(reportFailure).toHaveBeenCalledWith(
-      { channel_id: 'telegram-default', session_id: 'legacy-session' },
+      { channel_id: 'telegram-default', session_id: 'legacy-session', type: 'private' },
       '定时任务「用户自建记忆整理」',
       {
         kind: 'threw',
         error: expect.objectContaining({ message: 'memory_curate 已退役，请使用每日反思' }),
       },
     )
-    expect(fixture.routeSchedule).not.toHaveBeenCalled()
+    expect(fixture.admitSchedule).not.toHaveBeenCalled()
     expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
   })
 
   it('keeps ordinary schedules on the fire-and-forget manager route', async () => {
     const fixture = buildAgent(() => Promise.resolve())
-    fixture.routeSchedule.mockImplementation(() => new Promise<never>(() => {}))
+    fixture.admitSchedule.mockResolvedValue({ completion: new Promise<never>(() => {}) })
 
     const result = await fixture.agent.handleTriggerSchedule({
+      ...TRIGGER_CONTEXT,
       schedule_id: 'schedule-normal',
       task_type: 'daily_reflection',
       title: '每日反思',
@@ -221,12 +239,17 @@ describe('trigger_schedule memory_maintenance system task', () => {
     })
 
     expect(result).toEqual({ accepted: true })
-    expect(fixture.routeSchedule).toHaveBeenCalledWith({
+    expect(fixture.admitSchedule).toHaveBeenCalledWith({
       scheduleId: 'schedule-normal',
+      triggerId: 'trigger-test',
+      scheduleName: 'Test Schedule',
       title: '每日反思',
       description: 'reflect',
+      priority: undefined,
+      input: undefined,
+      tags: undefined,
       taskType: 'daily_reflection',
-      targetSession: undefined,
+      targetSession: TRIGGER_CONTEXT.target_session,
       creatorFriendId: 'friend-1',
       isBuiltin: undefined,
     })

@@ -333,7 +333,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(() => deps.model()).toThrow(/model_config 缺少 'powerful'/)
   })
 
-  // --- ② trigger_schedule → 系统线程 manager ---
+  // --- ② trigger_schedule → 精确系统线程 manager ---
 
   it('trigger_schedule 经真实分发表 → 唤醒系统线程 manager，派出的 worker 记在 admin-web::system-tasks 名下', async () => {
     boot()
@@ -346,12 +346,25 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
       ]),
     )
     const spawnSpy = vi.spyOn(stack.harness, 'spawnWorker').mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned', managerKey: SYSTEM_TASKS_MANAGER_KEY }))
-    const routeSpy = vi.spyOn(stack.registry, 'routeSchedule')
+    const routeSpy = vi.spyOn(stack.registry, 'admitSchedule')
+    ;(stack.registry as unknown as { deps: { onScheduleWake: () => Promise<unknown> } })
+      .deps.onScheduleWake = async () => ({
+        tool_access: {
+          memory: true, messaging: true, task: true, mcp_skill: true,
+          file_io: true, browser: true, shell: true, remote_exec: false, desktop: false,
+        },
+        cli_access: { schedule: 'write' },
+        storage: null,
+        memory_scopes: [],
+      })
 
     const accepted = await rpc('trigger_schedule', {
       schedule_id: 'sc-sys',
+      trigger_id: 'trigger-sc-sys',
+      schedule_name: '系统巡检',
       title: '系统巡检',
       description: '无目标会话',
+      target_session: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' },
       creator_friend_id: 'friend-42',
     })
 
@@ -365,7 +378,8 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(params.origin.trigger_type).toBe('scheduled')
     expect(params.origin.creator_friend_id).toBe('friend-42')
 
-    await Promise.allSettled(routeSpy.mock.results.map((r) => r.value as Promise<unknown>))
+    const admissions = await Promise.all(routeSpy.mock.results.map((r) => r.value))
+    await Promise.allSettled(admissions.map((admission) => admission.completion))
   })
 
   // --- ③ 三个读端点对真实台账 ---

@@ -22,6 +22,13 @@ const CLI_PERMISSIONS = new Set(['none', 'read', 'write'])
 
 export interface WorkerContext {
   readonly principal_permissions?: ResolvedPermissions
+  readonly manager_key?: string
+  readonly target_session?: {
+    readonly channel_id: string
+    readonly session_id: string
+    readonly type: 'private' | 'group'
+  }
+  readonly creator_friend_id?: string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -82,22 +89,42 @@ function normalizeResolvedPermissionsForWrite(value: unknown, path: string): Res
 }
 
 function validatePersistedContext(value: unknown, path: string): WorkerContext {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['principal_permissions'])) {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['principal_permissions', 'manager_key', 'target_session', 'creator_friend_id'])) {
     throw new Error(`WorkerContextStore: invalid context at ${path}`)
   }
   if (value.principal_permissions !== undefined && !isResolvedPermissionsSnapshot(value.principal_permissions)) {
     throw new Error(`WorkerContextStore: invalid principal_permissions at ${path}`)
   }
-  return value.principal_permissions === undefined ? {} : { principal_permissions: value.principal_permissions }
+  if (value.manager_key !== undefined && typeof value.manager_key !== 'string') {
+    throw new Error(`WorkerContextStore: invalid manager_key at ${path}`)
+  }
+  const target = value.target_session
+  if (target !== undefined && (!isRecord(target) || !hasOnlyKeys(target, ['channel_id', 'session_id', 'type'])
+    || typeof target.channel_id !== 'string' || typeof target.session_id !== 'string'
+    || (target.type !== 'private' && target.type !== 'group'))) {
+    throw new Error(`WorkerContextStore: invalid target_session at ${path}`)
+  }
+  if (value.creator_friend_id !== undefined && typeof value.creator_friend_id !== 'string') {
+    throw new Error(`WorkerContextStore: invalid creator_friend_id at ${path}`)
+  }
+  return {
+    ...(value.principal_permissions === undefined ? {} : { principal_permissions: value.principal_permissions }),
+    ...(value.manager_key === undefined ? {} : { manager_key: value.manager_key }),
+    ...(target === undefined ? {} : { target_session: target as WorkerContext['target_session'] }),
+    ...(value.creator_friend_id === undefined ? {} : { creator_friend_id: value.creator_friend_id }),
+  }
 }
 
 function normalizeContextForWrite(value: unknown, path: string): WorkerContext {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['principal_permissions'])) {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['principal_permissions', 'manager_key', 'target_session', 'creator_friend_id'])) {
     throw new Error(`WorkerContextStore: invalid context at ${path}`)
   }
-  return value.principal_permissions === undefined
-    ? {}
-    : { principal_permissions: normalizeResolvedPermissionsForWrite(value.principal_permissions, path) }
+  return validatePersistedContext({
+    ...value,
+    ...(value.principal_permissions === undefined
+      ? {}
+      : { principal_permissions: normalizeResolvedPermissionsForWrite(value.principal_permissions, path) }),
+  }, path)
 }
 
 /** Harness 持有的跨实现 worker 身份快照；文件内容严格限于协议定义字段。 */

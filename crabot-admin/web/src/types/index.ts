@@ -640,6 +640,19 @@ export interface ScheduleTaskTemplate {
   tags: string[]
 }
 
+export interface ScheduleScriptInput {
+  source: string
+  timeout_seconds?: number
+  deliver_result?: boolean
+}
+
+export interface ScheduleScript {
+  source?: string
+  source_sha256: string
+  timeout_seconds: number
+  deliver_result: boolean
+}
+
 export interface Schedule {
   id: string
   name: string
@@ -647,7 +660,8 @@ export interface Schedule {
   enabled: boolean
   is_builtin?: boolean
   trigger: ScheduleTrigger
-  task_template: ScheduleTaskTemplate
+  task_template?: ScheduleTaskTemplate
+  script?: ScheduleScript
   /**
    * 触发的 task 的目标会话（可选）。
    * 详见 protocol-admin §3.19 / spec 2026-06-04-trigger-messages-unified-design §7。

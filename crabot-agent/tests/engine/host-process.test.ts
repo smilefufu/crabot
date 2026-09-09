@@ -64,4 +64,16 @@ describe('runHostProcess', () => {
     expect(limited.stdout).not.toContain('HEAD_MARKER')
     expect(Buffer.byteLength(limited.stdout, 'utf8')).toBeLessThanOrEqual(64 * 1024)
   })
+
+  it('does not write stdin when the pre-stdin admission callback fails', async () => {
+    const output = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'host-process-admission-')), 'ran')
+    temporaryPaths.push(path.dirname(output))
+    const outcome = await shell('bash -s', {
+      stdin: `touch ${JSON.stringify(output)}`,
+      beforeStdin: async () => { throw new Error('marker failed') },
+    })
+
+    expect(outcome).toMatchObject({ kind: 'spawn_error', message: 'marker failed' })
+    await expect(fs.stat(output)).rejects.toThrow()
+  })
 })

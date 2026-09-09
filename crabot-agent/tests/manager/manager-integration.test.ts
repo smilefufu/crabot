@@ -504,7 +504,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
   // --- 场景二：系统任务线程 ---
 
   it(
-    '场景二：routeSchedule(无 targetSession)唤醒系统线程 manager；例行成功留在本线程（不调 send_master_private），' +
+    '场景二：routeSchedule(精确 system-tasks target)唤醒系统线程 manager；例行成功留在本线程（不调 send_master_private），' +
       '失败场景改走 send_master_private',
     async () => {
       const managerScript = makeManagerAdapter()
@@ -528,7 +528,11 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       })
       managerScript.queue.push({ text: '已安排巡检任务。', stopReason: 'end_turn' })
 
-      const scheduleResult1 = await assembly.registry.routeSchedule({ scheduleId: 'sc-1', title: '例行巡检', description: '每日巡检' })
+      const scheduleResult1 = await assembly.registry.routeSchedule({
+        scheduleId: 'sc-1', triggerId: 'trigger-sc-1', scheduleName: '例行巡检',
+        title: '例行巡检', description: '每日巡检',
+        targetSession: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' },
+      })
       expect(scheduleResult1.outcome).toBe('completed')
 
       await waitUntil(async () => {
@@ -578,7 +582,11 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       })
       managerScript.queue.push({ text: '已安排巡检任务。', stopReason: 'end_turn' })
 
-      const scheduleResult2 = await assembly.registry.routeSchedule({ scheduleId: 'sc-2', title: '例行巡检', description: '每日巡检' })
+      const scheduleResult2 = await assembly.registry.routeSchedule({
+        scheduleId: 'sc-2', triggerId: 'trigger-sc-2', scheduleName: '例行巡检',
+        title: '例行巡检', description: '每日巡检',
+        targetSession: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' },
+      })
       expect(scheduleResult2.outcome).toBe('completed')
 
       await waitUntil(async () => {

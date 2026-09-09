@@ -85,8 +85,6 @@ import type {
   WorkerTerminalView,
   WorkerUiResponse,
 } from '../types.js'
-import { classifySupervisionActivity } from '../types.js'
-import type { SupervisionObservation } from '../types.js'
 
 const execFileAsync = promisify(execFile)
 const INTERACTION_PROBE_DELAYS_MS = [100, 200, 400, 800, 1600] as const
@@ -942,7 +940,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       name: sessionName,
       cwd: spec.workspace.root,
       command,
-      env: { ...spec.connection_env, ...await workspaceGitBridgeEnv(dir, seq, spec.workspace_git) },
+      env: { ...spec.connection_env, ...await workspaceGitBridgeEnv(dir, seq, spec.workspace_git), ...spec.execution_env },
       control_log_path: controlDiagnosticPath({ dir, seq }),
     })
 
@@ -1071,7 +1069,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         name: sessionName,
         cwd: prevRuntime.workspaceRoot,
         command,
-        env: { ...opts?.connection_env, ...await workspaceGitBridgeEnv(dir, seq, opts?.workspace_git) },
+        env: { ...opts?.connection_env, ...await workspaceGitBridgeEnv(dir, seq, opts?.workspace_git), ...opts?.execution_env },
         control_log_path: controlDiagnosticPath({ dir, seq }),
       })
       runtime = {
@@ -1203,7 +1201,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       }
       const shellCommand = `${forkBin} ${args.map(shQuote).join(' ')}`
       const inheritedConnectionEnv = opts.connection_env ?? prevRuntime.connectionEnv ?? {}
-      const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...buildScrubbedChildEnv(), [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv, ...await workspaceGitBridgeEnv(dir, runtime.seq, opts.workspace_git) } }
+      const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...buildScrubbedChildEnv(), [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv, ...await workspaceGitBridgeEnv(dir, runtime.seq, opts.workspace_git), ...opts.execution_env } }
 
       child = spawn('/bin/sh', ['-c', shellCommand], {
         ...execOpts,
@@ -1679,19 +1677,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         ...(startedAt ? { started_at: startedAt } : {}),
         ...(endedAt ? { ended_at: endedAt } : {}),
       },
-    }
-  }
-
-  async inspectSupervisionActivity(
-    h: IncarnationHandle,
-    cursor?: { readonly offset: number },
-  ): Promise<SupervisionObservation> {
-    try {
-      const trace = await this.readTraceWindow(h, cursor)
-      if (!trace.sourceAvailable) return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
-      return classifySupervisionActivity(trace.events, trace.nextCursor)
-    } catch {
-      return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
     }
   }
 

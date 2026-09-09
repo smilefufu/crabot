@@ -8,7 +8,8 @@
  * - 工具名集合恰为六项(防后人误增写操作)
  */
 import { describe, it, expect, vi } from 'vitest'
-import { buildCrabotInfoTools } from '../../src/manager/tools/crabot-info'
+import { buildCrabotInfoTools, type ManagerScheduleToolsContext } from '../../src/manager/tools/crabot-info'
+import type { ResolvedPermissions } from '../../src/types'
 
 function makeCallAdmin(handlers: Record<string, (params: unknown) => unknown>) {
   const callAdmin = vi.fn(async (method: string, params: unknown) => {
@@ -27,6 +28,34 @@ function makeCallAdmin(handlers: Record<string, (params: unknown) => unknown>) {
 
 function runtimeConfigSummary(callAdmin: ReturnType<typeof makeCallAdmin>): unknown {
   return (callAdmin as typeof callAdmin & { runtimeConfigSummary: () => unknown }).runtimeConfigSummary()
+}
+
+function schedulePermissions(schedule: 'none' | 'read' | 'write' = 'write', shell = true): ResolvedPermissions {
+  return {
+    tool_access: {
+      memory: true, messaging: true, task: true, mcp_skill: true, file_io: true,
+      browser: true, shell, remote_exec: true, desktop: false,
+    },
+    cli_access: {
+      provider: 'none', agent: 'none', mcp: 'none', skill: 'none', schedule,
+      channel: 'none', friend: 'none', permission: 'none', config: 'none', undo: 'none',
+    },
+    storage: null,
+    memory_scopes: [],
+  }
+}
+
+const PRIVATE_TARGET = { channel_id: 'telegram', session_id: 'private-1', type: 'private' as const }
+const GROUP_TARGET = { channel_id: 'telegram', session_id: 'group-1', type: 'group' as const }
+
+function scheduleContext(overrides: Partial<ManagerScheduleToolsContext> = {}): ManagerScheduleToolsContext {
+  return {
+    targetSession: PRIVATE_TARGET,
+    creatorFriendId: 'friend-1',
+    canCreate: true,
+    resolvePermissions: async () => schedulePermissions(),
+    ...overrides,
+  }
 }
 
 describe('buildCrabotInfoTools', () => {
@@ -148,6 +177,143 @@ describe('buildCrabotInfoTools', () => {
       const tool = tools.find((t) => t.name === 'list_schedules')!
       const result = await tool.call({}, {})
       expect(result.isError).toBe(false)
+    })
+  })
+
+  describe('Schedule 管理工具', () => {
+    it('有可信上下文时暴露六个通用 Schedule 工具', () => {
+      const tools = buildCrabotInfoTools({ callAdmin: makeCallAdmin({}), schedule: scheduleContext() })
+      expect(tools.map((tool) => tool.name).filter((name) => name.includes('schedule')).sort()).toEqual([
+        'create_schedule', 'delete_schedule', 'get_schedule', 'list_schedules', 'trigger_schedule', 'update_schedule',
+      ])
+    })
+
+    it('先跨 Admin 页按 private target/creator 过滤，再按请求分页', async () => {
+      const visible = (id: string) => ({ id, target_session: PRIVATE_TARGET, creator_friend_id: 'friend-1' })
+      const callAdmin = makeCallAdmin({
+        list_schedules: (raw) => {
+          const params = raw as { page: number; page_size: number }
+          expect(params.page_size).toBe(100)
+          return params.page === 1
+            ? {
+                items: [visible('visible-1'), { ...visible('other-friend'), creator_friend_id: 'friend-2' }],
+                pagination: { page: 1, page_size: 100, total_items: 4, total_pages: 2 },
+              }
+            : {
+                items: [visible('visible-2'), { ...visible('other-target'), target_session: GROUP_TARGET }],
+                pagination: { page: 2, page_size: 100, total_items: 4, total_pages: 2 },
+              }
+        },
+      })
+      const tool = buildCrabotInfoTools({ callAdmin, schedule: scheduleContext() })
+        .find((item) => item.name === 'list_schedules')!
+      const result = await tool.call({ page: 2, page_size: 1 }, {})
+
+      expect(JSON.parse(result.output)).toEqual({
+        items: [visible('visible-2')],
+        pagination: { page: 2, page_size: 1, total_items: 2, total_pages: 2 },
+      })
+      expect(callAdmin).toHaveBeenCalledTimes(2)
+    })
+
+    it('group 只按 target；只有当前人类 Master 私聊可跨 target', async () => {
+      const foreign = { id: 'foreign', target_session: PRIVATE_TARGET, creator_friend_id: 'someone-else' }
+      const group = { id: 'group', target_session: GROUP_TARGET, creator_friend_id: 'deleted-friend' }
+      const handlers = {
+        list_schedules: () => ({
+          items: [foreign, group],
+          pagination: { page: 1, page_size: 100, total_items: 2, total_pages: 1 },
+        }),
+      }
+      const groupResult = await buildCrabotInfoTools({
+        callAdmin: makeCallAdmin(handlers),
+        schedule: scheduleContext({ targetSession: GROUP_TARGET }),
+      }).find((item) => item.name === 'list_schedules')!.call({}, {})
+      expect(JSON.parse(groupResult.output).items).toEqual([group])
+
+      const auth = { kind: 'friend_master', manager_key: 'telegram::private-1', friend_id: 'friend-1', generation: 1 } as const
+      const masterResult = await buildCrabotInfoTools({
+        callAdmin: makeCallAdmin(handlers),
+        schedule: scheduleContext({ masterAuthorization: auth, validateMasterAuthorization: async () => true }),
+      }).find((item) => item.name === 'list_schedules')!.call({}, {})
+      expect(JSON.parse(masterResult.output).items).toEqual([foreign, group])
+
+      const scheduledResult = await buildCrabotInfoTools({
+        callAdmin: makeCallAdmin(handlers), schedule: scheduleContext(),
+      }).find((item) => item.name === 'list_schedules')!.call({}, {})
+      expect(JSON.parse(scheduledResult.output).items).toEqual([])
+    })
+
+    it('create 注入 target/creator/default，拒绝模型伪造受管字段', async () => {
+      const callAdmin = makeCallAdmin({ create_schedule: (params) => ({ schedule: params }) })
+      const tool = buildCrabotInfoTools({ callAdmin, schedule: scheduleContext() })
+        .find((item) => item.name === 'create_schedule')!
+      const result = await tool.call({
+        name: '巡检提醒', trigger: { type: 'interval', seconds: 600 }, instruction: { title: '看一下进度' },
+      }, {})
+      expect(JSON.parse(result.output).schedule).toMatchObject({
+        target_session: PRIVATE_TARGET,
+        creator_friend_id: 'friend-1',
+        task_template: { title: '看一下进度', priority: 'normal', tags: [] },
+      })
+
+      const forged = await tool.call({
+        name: 'forged', trigger: { type: 'interval', seconds: 60 }, instruction: { title: 'x' },
+        creator_friend_id: 'master',
+      }, {})
+      expect(forged.isError).toBe(true)
+      expect(callAdmin).toHaveBeenCalledTimes(1)
+    })
+
+    it('脚本 source/create/enable/trigger 要求 shell，disable/delete 不要求', async () => {
+      const script = { id: 'script-1', target_session: PRIVATE_TARGET, creator_friend_id: 'friend-1', script: {
+        source_sha256: 'hash', timeout_seconds: 120, deliver_result: false,
+      } }
+      const callAdmin = makeCallAdmin({
+        get_schedule: () => ({ schedule: script }),
+        update_schedule: (params) => ({ schedule: params }),
+        delete_schedule: () => ({ deleted: true }),
+      })
+      const tools = buildCrabotInfoTools({
+        callAdmin,
+        schedule: scheduleContext({ resolvePermissions: async () => schedulePermissions('write', false) }),
+      })
+      const call = (name: string, input: Record<string, unknown>) => tools.find((item) => item.name === name)!.call(input, {})
+
+      expect((await call('create_schedule', {
+        name: 'script', trigger: { type: 'interval', seconds: 60 }, script: { source: 'echo ok' },
+      })).isError).toBe(true)
+      expect((await call('get_schedule', { schedule_id: 'script-1', include_script_source: true })).isError).toBe(true)
+      expect((await call('update_schedule', { schedule_id: 'script-1', enabled: true })).isError).toBe(true)
+      expect((await call('trigger_schedule', { schedule_id: 'script-1' })).isError).toBe(true)
+      expect((await call('update_schedule', { schedule_id: 'script-1', enabled: false })).isError).toBe(false)
+      expect((await call('delete_schedule', { schedule_id: 'script-1' })).isError).toBe(false)
+    })
+
+    it('update/trigger 带内容种类 CAS，builtin 只读，且每次调用重新解析权限', async () => {
+      let resolveCount = 0
+      const instruction = { id: 'instruction-1', target_session: PRIVATE_TARGET, creator_friend_id: 'friend-1' }
+      const builtin = { ...instruction, id: 'builtin-1', is_builtin: true }
+      const callAdmin = makeCallAdmin({
+        get_schedule: (raw) => ({ schedule: (raw as { schedule_id: string }).schedule_id === 'builtin-1' ? builtin : instruction }),
+        update_schedule: (params) => ({ schedule: params }),
+        trigger_now: (params) => ({ accepted: true, params }),
+      })
+      const tools = buildCrabotInfoTools({
+        callAdmin,
+        schedule: scheduleContext({ resolvePermissions: async () => { resolveCount += 1; return schedulePermissions() } }),
+      })
+      const update = tools.find((item) => item.name === 'update_schedule')!
+      const trigger = tools.find((item) => item.name === 'trigger_schedule')!
+      expect((await update.call({ schedule_id: 'instruction-1', enabled: false }, {})).isError).toBe(false)
+      expect(callAdmin).toHaveBeenCalledWith('update_schedule', expect.objectContaining({ expected_content_kind: 'instruction' }))
+      expect((await trigger.call({ schedule_id: 'instruction-1' }, {})).isError).toBe(false)
+      expect(callAdmin).toHaveBeenCalledWith('trigger_now', {
+        schedule_id: 'instruction-1', expected_content_kind: 'instruction',
+      })
+      expect((await update.call({ schedule_id: 'builtin-1', enabled: false }, {})).isError).toBe(true)
+      expect((await trigger.call({ schedule_id: 'builtin-1' }, {})).isError).toBe(true)
+      expect(resolveCount).toBe(4)
     })
   })
 

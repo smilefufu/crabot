@@ -38,15 +38,15 @@ const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
 
 任务板没有实质变化时，不要只为记录本次检查、等待状态或查询失败而修改任务板。`
 
-function defaultSupervisionWake(workerId: string, dueId: string): TimedWakeEnvelope {
+function workerEventWake(workerId: string): TimedWakeEnvelope {
   return timed({
     kind: 'worker_event',
     event: {
       ts: '2026-01-01T00:00:00.000Z',
-      kind: 'supervision_due',
+      kind: 'state_changed',
       worker_id: workerId,
       seq: 1,
-      detail: { mode: 'default', due_id: dueId, mainline_seq: 1, observation: 'text' },
+      detail: { from: 'running', to: 'idle' },
     },
   })
 }
@@ -262,7 +262,7 @@ describe('ManagerLoop', () => {
 
     const failed = await loop.wakeUp(dailyReflection)
     expect(failed).toMatchObject({ outcome: 'failed', consumedEvents: false })
-    await loop.wakeUp(defaultSupervisionWake('w-follow-up', 'after-daily-failure'))
+    await loop.wakeUp(workerEventWake('w-follow-up'))
 
     expect(calls.slice(1).every((call) => call.systemPrompt.includes('send_daily_reflection_summary'))).toBe(true)
     expect(toolFaceWakes.slice(1)).toEqual(expect.arrayContaining([
@@ -2070,7 +2070,7 @@ describe('ManagerLoop', () => {
         hasPendingReply: () => false,
       }))
 
-      const result = await loop.wakeUp(defaultSupervisionWake('w-internal', 'due-internal'))
+      const result = await loop.wakeUp(workerEventWake('w-internal'))
 
       expect(result.turns).toBe(1)
       expect(calls).toHaveLength(1)
@@ -2099,7 +2099,7 @@ describe('ManagerLoop', () => {
       }))
 
       await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('查一下')] }))
-      await loop.wakeUp(defaultSupervisionWake('w-dispatched', 'due-result'))
+      await loop.wakeUp(workerEventWake('w-dispatched'))
 
       expect(calls).toHaveLength(4)
       expect(JSON.stringify(calls[3].messages)).toContain('[系统提醒]')
@@ -2588,90 +2588,6 @@ describe('ManagerLoop', () => {
     })
   })
 
-  describe('任务巡检 episode', () => {
-    it('只读的默认巡检会在完整 trace 落账后压缩为本地历史摘要', async () => {
-      const { adapter, queue } = makeAdapter()
-      queue.push(
-        { toolCalls: [{ name: 'get_worker_terminal', id: 'read-1', input: { worker_id: 'w-supervised' } }], stopReason: 'tool_use' },
-        { stopReason: 'end_turn' },
-      )
-      const loop = new ManagerLoop(baseDeps({
-        store,
-        adapter,
-        toolFace: () => [defineTool({
-          name: 'get_worker_terminal',
-          description: 'read only',
-          inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } } },
-          isReadOnly: true,
-          call: async () => ({ output: 'worker output', isError: false }),
-        })],
-      }))
-
-      const result = await loop.wakeUp(defaultSupervisionWake('w-supervised', 'due-read-only'))
-
-      expect(result.outcome).toBe('completed')
-      const state = await store.load(KEY)
-      expect(state.recent).toHaveLength(1)
-      expect(JSON.stringify(state.recent)).toContain('[任务巡检摘要] worker_id=w-supervised')
-      expect(JSON.stringify(state.recent)).not.toContain('due-read-only')
-    })
-
-    it('原生 worker 查询工具同样保留默认巡检的本地历史压缩', async () => {
-      for (const toolName of ['get_worker_state', 'get_worker_activity', 'get_worker_turn']) {
-        const { adapter, queue } = makeAdapter()
-        queue.push(
-          { toolCalls: [{ name: toolName, id: `read-${toolName}`, input: { worker_id: 'w-supervised' } }], stopReason: 'tool_use' },
-          { stopReason: 'end_turn' },
-        )
-        const isolatedStore = new ManagerSessionStore(join(dataDir, `supervision-${toolName}`))
-        const loop = new ManagerLoop(baseDeps({
-          store: isolatedStore,
-          adapter,
-          toolFace: () => [defineTool({
-            name: toolName,
-            description: 'read only',
-            inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } } },
-            isReadOnly: true,
-            call: async () => ({ output: 'worker state', isError: false }),
-          })],
-        }))
-
-        await loop.wakeUp(defaultSupervisionWake('w-supervised', `due-${toolName}`))
-
-        const state = await isolatedStore.load(KEY)
-        expect(state.recent).toHaveLength(1)
-        expect(JSON.stringify(state.recent)).toContain('[任务巡检摘要] worker_id=w-supervised')
-      }
-    })
-
-    it('默认巡检一旦发送消息或写记忆，就保留完整 episode 历史', async () => {
-      for (const toolName of ['send_message', 'mcp__crab-memory__store_memory']) {
-        const { adapter, queue } = makeAdapter()
-        queue.push(
-          { toolCalls: [{ name: toolName, id: `call-${toolName}`, input: {} }], stopReason: 'tool_use' },
-          { stopReason: 'end_turn' },
-        )
-        const isolatedStore = new ManagerSessionStore(join(dataDir, `supervision-${toolName}`))
-        const loop = new ManagerLoop(baseDeps({
-          store: isolatedStore,
-          adapter,
-          toolFace: () => [defineTool({
-            name: toolName,
-            description: 'side effect',
-            inputSchema: { type: 'object', properties: {} },
-            call: async () => ({ output: 'ok', isError: false }),
-          })],
-        }))
-
-        await loop.wakeUp(defaultSupervisionWake('w-supervised', `due-${toolName}`))
-
-        const state = await isolatedStore.load(KEY)
-        expect(JSON.stringify(state.recent)).toContain(`due-${toolName}`)
-        expect(JSON.stringify(state.recent)).not.toContain('[任务巡检摘要]')
-      }
-    })
-  })
-
   describe('EpisodeResult.successfulSendMessageTargets', () => {
     async function runSendMessageCase(input: Record<string, unknown>, isError = false) {
       const { adapter, queue } = makeAdapter()
@@ -2689,22 +2605,7 @@ describe('ManagerLoop', () => {
           call: async () => ({ output: 'delivery result', isError }),
         })],
       }))
-      return loop.wakeUp(timed({
-        kind: 'worker_event',
-        event: {
-          ts: '2026-01-01T00:00:00.000Z',
-          kind: 'supervision_due',
-          worker_id: 'w-periodic',
-          seq: 1,
-          detail: {
-            mode: 'periodic_report',
-            due_id: 'due-periodic',
-            mainline_seq: 1,
-            observation: 'tool_only',
-            report_to: { channel_id: 'feishu', session_id: 'target-session' },
-          },
-        },
-      }))
+      return loop.wakeUp(workerEventWake('w-send-result'))
     }
 
     it('只记录成功 send_message 的精确目标', async () => {
@@ -2743,22 +2644,7 @@ describe('ManagerLoop', () => {
         })],
       }))
 
-      const result = await loop.wakeUp(timed({
-        kind: 'worker_event',
-        event: {
-          ts: '2026-01-01T00:00:00.000Z',
-          kind: 'supervision_due',
-          worker_id: 'w-periodic',
-          seq: 1,
-          detail: {
-            mode: 'periodic_report',
-            due_id: 'due-periodic-repaired',
-            mainline_seq: 1,
-            observation: 'tool_only',
-            report_to: { channel_id: 'feishu', session_id: 'target-session' },
-          },
-        },
-      }))
+      const result = await loop.wakeUp(workerEventWake('w-send-repaired'))
 
       expect(result.successfulSendMessageTargets).toEqual([
         { channel_id: 'feishu', session_id: 'target-session' },
@@ -2789,7 +2675,7 @@ describe('ManagerLoop', () => {
         })],
       }))
 
-      const result = await loop.wakeUp(defaultSupervisionWake('w-periodic', 'due-periodic-dedupe'))
+      const result = await loop.wakeUp(workerEventWake('w-send-dedupe'))
       expect(result.successfulSendMessageTargets).toEqual([
         { channel_id: 'feishu', session_id: 'target-session' },
       ])

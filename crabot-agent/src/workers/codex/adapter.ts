@@ -81,8 +81,6 @@ import type {
   WorkerTerminalView,
   WorkerUiResponse,
 } from '../types.js'
-import { classifySupervisionActivity } from '../types.js'
-import type { SupervisionObservation } from '../types.js'
 
 const execFileAsync = promisify(execFile)
 const INTERACTION_PROBE_DELAYS_MS = [100, 200, 400, 800, 1600] as const
@@ -1220,7 +1218,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const stopBaseline = await this.initialStopBaseline(eventChannel)
     const spawnBin = (await this.resolveBinForCommand())?.cmd
     if (!spawnBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.spawn: no user-level codex installation')
-    const env = await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env, ...await workspaceGitBridgeEnv(dir, seq, spec.workspace_git) })
+    const env = await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env, ...await workspaceGitBridgeEnv(dir, seq, spec.workspace_git), ...spec.execution_env })
     await assertNoCodexHookSources(codexHome, 'spawn')
     await installGeneratedCodexHookConfiguration(codexHome, eventChannel, 'spawn')
     const command = `${spawnBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT}`
@@ -1394,7 +1392,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const stopBaseline = await this.initialStopBaseline(eventChannel)
       const resumeBin = (await this.resolveBinForCommand())?.cmd
       if (!resumeBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.resume: no user-level codex installation')
-      const env = await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome, ...await workspaceGitBridgeEnv(dir, seq, opts?.workspace_git) })
+      const env = await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome, ...await workspaceGitBridgeEnv(dir, seq, opts?.workspace_git), ...opts?.execution_env })
       await assertNoCodexHookSources(resumeCodexHome, 'resume')
       await installGeneratedCodexHookConfiguration(resumeCodexHome, eventChannel, 'resume')
       const command = `${resumeBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT} resume ${shQuote(prev.session_ref)}`
@@ -1538,6 +1536,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
           CODEX_HOME: opts.connection_env?.CODEX_HOME ?? prevRuntime.codexHome,
           ...opts.connection_env,
           ...await workspaceGitBridgeEnv(dir, runtime.seq, opts.workspace_git),
+          ...opts.execution_env,
         })),
       }
       client = new CodexAppServerClient({
@@ -1960,19 +1959,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       consumed = i + 1
     }
     return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
-  }
-
-  async inspectSupervisionActivity(
-    h: IncarnationHandle,
-    cursor?: { readonly offset: number },
-  ): Promise<SupervisionObservation> {
-    try {
-      const trace = await this.readTraceWindow(h, cursor)
-      if (!trace.sourceAvailable) return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
-      return classifySupervisionActivity(trace.events, trace.nextCursor)
-    } catch {
-      return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
-    }
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
