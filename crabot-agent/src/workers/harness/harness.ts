@@ -960,7 +960,11 @@ export class WorkerHarness {
     context: WorkerContext,
     execution: AgentCliExecutionRef,
   ): Promise<{ execution_env?: Record<string, string> }> {
-    if (!this.deps.issueAgentCliCredential || !context.manager_key || !context.target_session) return {}
+    if (!this.deps.issueAgentCliCredential || !context.manager_key || !context.target_session) {
+      // Keep the child in Agent mode even when no scoped bearer can be minted;
+      // the CLI must fail closed instead of reading Admin's internal token.
+      return { execution_env: { CRABOT_ACTOR: 'agent' } }
+    }
     const credential = await this.deps.issueAgentCliCredential({
       execution,
       manager_key: context.manager_key as ManagerKey,

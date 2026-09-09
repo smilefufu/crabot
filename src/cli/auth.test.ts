@@ -6,6 +6,7 @@ import { resolveAuth } from './auth.js'
 
 interface EnvSnapshot {
   readonly CRABOT_TOKEN: string | undefined
+  readonly CRABOT_ACTOR: string | undefined
   readonly CRABOT_ENDPOINT: string | undefined
   readonly CRABOT_HOME: string | undefined
   readonly CRABOT_PORT_OFFSET: string | undefined
@@ -15,6 +16,7 @@ interface EnvSnapshot {
 function snapshotEnv(): EnvSnapshot {
   return {
     CRABOT_TOKEN: process.env['CRABOT_TOKEN'],
+    CRABOT_ACTOR: process.env['CRABOT_ACTOR'],
     CRABOT_ENDPOINT: process.env['CRABOT_ENDPOINT'],
     CRABOT_HOME: process.env['CRABOT_HOME'],
     CRABOT_PORT_OFFSET: process.env['CRABOT_PORT_OFFSET'],
@@ -49,6 +51,7 @@ describe('resolveAuth', () => {
   beforeEach(() => {
     envSnap = snapshotEnv()
     delete process.env['CRABOT_TOKEN']
+    delete process.env['CRABOT_ACTOR']
     delete process.env['CRABOT_ENDPOINT']
     delete process.env['CRABOT_HOME']
     delete process.env['CRABOT_PORT_OFFSET']
@@ -86,6 +89,21 @@ describe('resolveAuth', () => {
     process.env['CRABOT_TOKEN'] = 'env-token'
     process.env['CRABOT_HOME'] = '/non/existent/path'
     expect(resolveAuth({}).token).toBe('env-token')
+  })
+
+  it('Agent bearer 缺失时不回退 Admin internal-token', () => {
+    process.env['CRABOT_ACTOR'] = 'agent'
+    process.env['CRABOT_HOME'] = makeFakeHome('admin-token\n')
+
+    expect(() => resolveAuth({})).toThrow(/CRABOT_TOKEN is required.*fallback is disabled/)
+  })
+
+  it('Agent bearer 已存在时原样交给 Admin（过期也不改用 internal-token）', () => {
+    process.env['CRABOT_ACTOR'] = 'agent'
+    process.env['CRABOT_TOKEN'] = 'expired-agent-token'
+    process.env['CRABOT_HOME'] = makeFakeHome('admin-token\n')
+
+    expect(resolveAuth({}).token).toBe('expired-agent-token')
   })
 
   it('DATA_DIR 为绝对路径（MM 注入 agent 子目录）时正确解析 token', () => {

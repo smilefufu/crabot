@@ -1850,6 +1850,7 @@ export class AgentHandler {
       offRuntimeConfigApplied = this.runtimeConfigAppliedSource?.(() => configChanged.abort())
         ?? (() => undefined)
       const childExecutionEnv = await this.deps?.issueAgentCliExecutionEnv?.(task.task_id, context)
+        ?? { CRABOT_ACTOR: 'agent' }
       const engineResult = await withChildExecutionEnv(childExecutionEnv, () => runEngine({
         prompt: taskMessage,
         adapter,

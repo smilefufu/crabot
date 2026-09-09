@@ -337,6 +337,14 @@ afterEach(async () => {
 })
 
 describe('WorkerHarness.spawnWorker', () => {
+  it('缺少可信 Worker context 时保持 Agent 标记，不回退 Admin token', async () => {
+    const { harness, fake } = await makeHarness()
+
+    await harness.spawnWorker(spawnParams())
+
+    expect(fake.spawnCalls[0].execution_env).toEqual({ CRABOT_ACTOR: 'agent' })
+  })
+
   it('全链路成功:worker_id = task.id、台账终态 running、化身 seq=1 running、事件 spawned、onEvent 外发', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())

@@ -16,6 +16,7 @@ import type {
 import { PromptManager } from '../../src/prompt-manager.js'
 import type { BgEntityRecord } from '../../src/engine/bg-entities/types.js'
 import type { ToolDefinition } from '../../src/engine/types.js'
+import { buildChildEnv } from '../../src/core/runtime-env.js'
 
 // Mock the engine's runEngine function
 vi.mock('../../src/engine/index.js', async (importOriginal) => {
@@ -218,6 +219,20 @@ describe('AgentHandler', () => {
       expect(typeof callArgs.options.systemPrompt).toBe('function')
       const resolvedPrompt = (callArgs.options.systemPrompt as () => string)()
       expect(resolvedPrompt).toContain('You are a helpful worker.')
+    })
+
+    it('缺少 legacy Agent bearer 时保持 Agent 标记，不回退 Admin token', async () => {
+      let childEnv: Record<string, string> | undefined
+      mockRunEngine.mockImplementation(async () => {
+        childEnv = buildChildEnv()
+        return makeEngineResult()
+      })
+
+      const handler = makeHandler()
+      await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+      expect(childEnv?.CRABOT_ACTOR).toBe('agent')
+      expect(childEnv?.CRABOT_TOKEN).toBeUndefined()
     })
 
     it('should handle aborted result', async () => {
