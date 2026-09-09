@@ -138,7 +138,7 @@ interface BehaviorExpectation {
 }
 
 interface SeedObjective extends WorkboardObjectiveDraft {
-  readonly work_items: WorkboardItemDraft[]
+  readonly work_items: Array<WorkboardItemDraft & { readonly updated_at?: string }>
 }
 
 interface BehaviorScenario {
@@ -709,13 +709,16 @@ function workboardStore(env: EvaluationEnvironment): ManagerWorkboardStore {
 }
 
 async function seedObjectives(env: EvaluationEnvironment, objectives: readonly SeedObjective[]): Promise<WorkboardObjective[]> {
-  const store = workboardStore(env)
+  let updatedAt: string | undefined
+  const store = new ManagerWorkboardStore(path.join(env.dataRoot, 'agent', 'managers'), () => updatedAt ?? env.now())
   for (const objective of objectives) {
+    updatedAt = undefined
     const created = await store.createObjective(env.managerKey, {
       title: objective.title,
       completion_criteria: objective.completion_criteria,
     })
-    for (const item of objective.work_items) {
+    for (const { updated_at, ...item } of objective.work_items) {
+      updatedAt = updated_at
       await store.createWorkItem(env.managerKey, created.value.objective_id, item)
     }
   }

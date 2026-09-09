@@ -650,6 +650,7 @@ export class ManagerWorkboardStore {
   constructor(
     private readonly managersDir: string,
     private readonly now: () => string = () => new Date().toISOString(),
+    private readonly onChanged?: (key: ManagerKey) => void,
   ) {}
 
   async load(key: ManagerKey): Promise<ManagerWorkboard> {
@@ -1088,6 +1089,7 @@ export class ManagerWorkboardStore {
       const result = change(before)
       const board: InternalBoard = { ...result.board, schema_version: 4, revision: before.revision + 1 }
       await this.writeUnlocked(key, board)
+      this.onChanged?.(key)
       return { board: managerProjection(board), value: result.value }
     })
   }
@@ -1123,6 +1125,7 @@ export class ManagerWorkboardStore {
         ),
       }
       await this.writeUnlocked(key, board)
+      this.onChanged?.(key)
       return { board: adminProjection(board), value: result.value, notice }
     })
   }

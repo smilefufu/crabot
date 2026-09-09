@@ -355,6 +355,49 @@
       }
     },
     {
+      "id": "idle-review-active-and-stale-items",
+      "title": "活跃事项不遮蔽超时事项，并按最新人类意图收口",
+      "objectives": [
+        {
+          "title": "完成支付与退款验证",
+          "completion_criteria": ["按人类最新范围完成验证"],
+          "work_items": [
+            {
+              "title": "运行支付回归",
+              "status": "in_progress",
+              "current_judgement": "worker-payments 正在运行，刚报告执行进度且会主动返回结果",
+              "next_action": "等待支付执行器的结果事件",
+              "updated_at": "2026-09-04T00:00:00.000Z"
+            },
+            {
+              "title": "运行旧版退款回归",
+              "status": "ready",
+              "current_judgement": "旧版退款测试尚未开始",
+              "next_action": "派执行器运行旧版退款回归",
+              "updated_at": "2026-09-03T22:00:00.000Z"
+            }
+          ]
+        }
+      ],
+      "workers": [{ "worker_id": "worker-payments", "title": "运行支付回归：执行测试", "state": "running" }],
+      "history": [
+        { "kind": "human", "text": "支付回归按原计划让现有执行器继续，等结果，不要催问或重复派发。旧版退款回归已取消，不要再做，任务板还没来得及更新。" },
+        { "kind": "manager_sent", "text": "支付执行器刚报告仍在运行，将主动返回结果。" }
+      ],
+      "steps": [{ "kind": "idle_review" }],
+      "expect": {
+        "required_tools": ["inspect_workboard", "change_workboard"],
+        "required_calls": [{ "tool": "change_workboard", "equals": { "action": "archive_work_item", "archived_as": "abandoned" } }],
+        "forbidden_tools": ["spawn_worker", "send_to_worker", "query_worker", "request_worker_interrupt", "request_worker_stop", "respond_to_worker_ui"],
+        "board": {
+          "current_objectives": 1,
+          "current_work_items": 1,
+          "archive_entries": 1,
+          "contains": ["运行支付回归", "等待支付执行器的结果事件", "运行旧版退款回归", "abandoned"]
+        }
+      }
+    },
+    {
       "id": "idle-review-continue",
       "title": "空闲后仍有明确工作可继续",
       "objectives": [

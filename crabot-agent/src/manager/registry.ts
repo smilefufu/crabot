@@ -46,6 +46,7 @@ import type { SessionTarget } from '../mcp/crab-messaging.js'
 import { splitManagerKey, type HumanPrincipal } from './principal.js'
 import { resolveTimezone } from '../utils/time.js'
 import type { ManagerInboundMessageFact } from './inbound-status.js'
+import type { ManagerWorkboard } from './workboard-store.js'
 
 /** §4.4 保留线程:未配置目标 session 的 scheduled 触发 / 台账查不到监护 session 的 worker 事件落此。 */
 export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
@@ -65,11 +66,6 @@ const WORKBOARD_IDLE_REVIEW_DELAY_MS = 60 * 60 * 1000
 interface IdleReviewTimer {
   readonly generation: number
   readonly handle: ReturnType<typeof setTimeout>
-}
-
-interface CompletedIdleReviewCycle {
-  readonly generation: number
-  readonly dueAtMs: number
 }
 
 /**
@@ -117,8 +113,8 @@ export interface ManagerRegistryDeps {
   readonly now: () => Date
   /** Once true, no new wake may create or enqueue work for a Manager episode. */
   readonly isClosing?: () => boolean
-  /** 只读取任务板当前区是否至少有一个 Objective；不得返回或缓存任务板正文。 */
-  readonly hasCurrentWorkboardObjectives: (key: ManagerKey) => Promise<boolean>
+  /** 仅用于计算当前事项期限，不缓存或注入任务板正文。 */
+  readonly readCurrentWorkboard: (key: ManagerKey) => Promise<ManagerWorkboard>
   /** 人类消息渲染的时区(见 `ManagerLoopDeps.timezone`);不注入则退回 `resolveTimezone(undefined)`。 */
   readonly timezone?: () => string
   /**
@@ -233,8 +229,9 @@ export class ManagerRegistry {
   private readonly resumeTasks = new Map<ManagerKey, Promise<void>>()
   private readonly idleReviewGenerations = new Map<ManagerKey, number>()
   private readonly pendingIdleReviewCycles = new Map<ManagerKey, number>()
-  private readonly completedIdleReviewCycles = new Map<ManagerKey, CompletedIdleReviewCycle>()
+  private readonly completedIdleReviewCycles = new Map<ManagerKey, number>()
   private readonly idleReviewTimers = new Map<ManagerKey, IdleReviewTimer>()
+  private readonly lastIdleReviewCompletedAtMs = new Map<ManagerKey, number>()
   /** 已接收直接人类消息、但尚未成功回复当前会话的 ManagerKey。Loop 回收不清除。 */
   private readonly pendingReplies = new Set<ManagerKey>()
   private resumeReady: Promise<void> = Promise.resolve()
@@ -760,6 +757,7 @@ export class ManagerRegistry {
     this.idleReviewTimers.clear()
     this.pendingIdleReviewCycles.clear()
     this.completedIdleReviewCycles.clear()
+    this.lastIdleReviewCompletedAtMs.clear()
     this.pendingReplies.clear()
   }
 
@@ -914,20 +912,13 @@ export class ManagerRegistry {
       // "计数已归零、自唤醒尚未登记"的窗口,`evictIdle` 恰在此时跑就会把实例连同 mailbox
       // 一起回收掉。`maybeSelfWake` 内部的 `runWake` 在第一个 await 之前就完成了 +1。
       this.maybeSelfWake(key, loop, result, selfWakeChain)
-      this.maybeScheduleIdleReview(key, loop, result)
+      this.maybeScheduleIdleReview(key, loop, result, envelope?.wake.kind === 'workboard_idle_review')
     }
   }
 
   private noteExternalInput(key: ManagerKey, wake: WakeEvent): void {
     if (wake.kind === 'workboard_idle_review') return
-    const generation = (this.idleReviewGenerations.get(key) ?? 0) + 1
-    this.idleReviewGenerations.set(key, generation)
-    const timer = this.idleReviewTimers.get(key)
-    if (timer) clearTimeout(timer.handle)
-    this.idleReviewTimers.delete(key)
-    this.pendingIdleReviewCycles.delete(key)
-    this.completedIdleReviewCycles.delete(key)
-
+    const generation = this.resetIdleReviewCycle(key)
     const isBuiltinDailyReflection = wake.kind === 'schedule'
       && wake.isBuiltin === true
       && wake.taskType === 'daily_reflection'
@@ -936,66 +927,110 @@ export class ManagerRegistry {
     }
   }
 
+  /** 只由成功的业务 mutation 通知；读取、迁移及内部 notice/fence 写入不触发。 */
+  onWorkboardChanged(key: ManagerKey): void {
+    if (this.disposed || this.deps.isClosing?.() || key === SYSTEM_TASKS_MANAGER_KEY) return
+    const busy = this.isEpisodeActive(key) || this.hasWakePreparation(key) || this.loops.get(key)?.hasPendingMailbox === true
+    if (busy && !this.pendingIdleReviewCycles.has(key)) return
+    const ready = (!this.isEpisodeActive(key) && this.loops.get(key)?.hasPendingMailbox !== true)
+      || this.completedIdleReviewCycles.has(key) || this.idleReviewTimers.has(key)
+    const generation = this.resetIdleReviewCycle(key)
+    this.pendingIdleReviewCycles.set(key, generation)
+    if (ready) this.completedIdleReviewCycles.set(key, generation)
+    this.maybeStartIdleReviewTimer(key)
+  }
+
+  private resetIdleReviewCycle(key: ManagerKey): number {
+    const generation = (this.idleReviewGenerations.get(key) ?? 0) + 1
+    this.idleReviewGenerations.set(key, generation)
+    const timer = this.idleReviewTimers.get(key)
+    if (timer) clearTimeout(timer.handle)
+    this.idleReviewTimers.delete(key)
+    this.pendingIdleReviewCycles.delete(key)
+    this.completedIdleReviewCycles.delete(key)
+    return generation
+  }
+
   private maybeScheduleIdleReview(
     key: ManagerKey,
     loop: ManagerLoop,
     result: EpisodeResult | undefined,
+    isIdleReview: boolean,
   ): void {
-    const generation = this.pendingIdleReviewCycles.get(key)
-    if (generation === undefined) return
     if (result?.consumedEvents !== true || result.turns === 0) {
-      if (this.completedIdleReviewCycles.get(key)?.generation === generation) {
-        this.completedIdleReviewCycles.delete(key)
-      }
+      this.completedIdleReviewCycles.delete(key)
       return
     }
-    this.completedIdleReviewCycles.set(key, {
-      generation,
-      dueAtMs: this.deps.now().getTime() + WORKBOARD_IDLE_REVIEW_DELAY_MS,
-    })
+    if (isIdleReview) {
+      this.lastIdleReviewCompletedAtMs.set(key, this.deps.now().getTime())
+      if (!this.pendingIdleReviewCycles.has(key)) {
+        const generation = this.resetIdleReviewCycle(key)
+        this.pendingIdleReviewCycles.set(key, generation)
+      }
+    }
+    const generation = this.pendingIdleReviewCycles.get(key)
+    if (generation === undefined) return
+    this.completedIdleReviewCycles.set(key, generation)
     this.maybeStartIdleReviewTimer(key, loop)
   }
 
   private maybeStartIdleReviewTimer(key: ManagerKey, knownLoop?: ManagerLoop): void {
     const generation = this.pendingIdleReviewCycles.get(key)
     const completed = this.completedIdleReviewCycles.get(key)
-    if (generation === undefined || completed?.generation !== generation) return
+    if (generation === undefined || completed !== generation) return
     const loop = knownLoop ?? this.loops.get(key)
-    if (!loop || this.isEpisodeActive(key) || this.hasWakePreparation(key) || loop.hasPendingMailbox) return
+    if (this.isEpisodeActive(key) || this.hasWakePreparation(key) || loop?.hasPendingMailbox) return
     this.completedIdleReviewCycles.delete(key)
-    void this.scheduleIdleReview(key, generation, completed.dueAtMs).catch((error) => {
+    void this.scheduleIdleReview(key, generation).catch((error) => {
       console.error(`[ManagerRegistry] manager '${key}' 的任务板空闲自省计时登记失败:`, error)
     })
   }
 
-  private async scheduleIdleReview(key: ManagerKey, generation: number, dueAtMs: number): Promise<void> {
-    let hasObjectives: boolean
+  private async readIdleReviewDueAt(key: ManagerKey): Promise<number | undefined> {
+    const board = await this.deps.readCurrentWorkboard(key)
+    let earliest = Infinity
+    for (const objective of board.objectives) {
+      const candidates = objective.work_items.length > 0 ? objective.work_items : [objective]
+      for (const candidate of candidates) {
+        earliest = Math.min(earliest, Date.parse(candidate.updated_at) + WORKBOARD_IDLE_REVIEW_DELAY_MS)
+      }
+    }
+    if (earliest === Infinity) return undefined
+    const completedAt = this.lastIdleReviewCompletedAtMs.get(key)
+    return completedAt === undefined ? earliest : Math.max(earliest, completedAt + WORKBOARD_IDLE_REVIEW_DELAY_MS)
+  }
+
+  private async scheduleIdleReview(key: ManagerKey, generation: number): Promise<void> {
+    let dueAtMs: number | undefined
     try {
-      hasObjectives = await this.deps.hasCurrentWorkboardObjectives(key)
+      dueAtMs = await this.readIdleReviewDueAt(key)
     } catch (error) {
       if (this.pendingIdleReviewCycles.get(key) === generation) {
         this.pendingIdleReviewCycles.delete(key)
+        this.completedIdleReviewCycles.delete(key)
       }
-      this.completedIdleReviewCycles.delete(key)
       console.warn(`[ManagerRegistry] manager '${key}' 的任务板读取失败，跳过本次空闲自省:`, error)
       return
     }
 
     if (!this.canArmIdleReview(key, generation)) return
-    if (!hasObjectives) {
+    if (dueAtMs === undefined) {
       this.pendingIdleReviewCycles.delete(key)
       this.completedIdleReviewCycles.delete(key)
       return
     }
+    this.armIdleReviewTimer(key, generation, dueAtMs)
+  }
 
+  private armIdleReviewTimer(key: ManagerKey, generation: number, dueAtMs: number): void {
     const existing = this.idleReviewTimers.get(key)
     if (existing) clearTimeout(existing.handle)
     const handle = setTimeout(async () => {
+      if (this.idleReviewTimers.get(key)?.handle !== handle) return
       await this.onIdleReviewDue(key, generation)
     }, Math.max(0, dueAtMs - this.deps.now().getTime()))
     handle.unref?.()
     this.idleReviewTimers.set(key, { generation, handle })
-    this.pendingIdleReviewCycles.delete(key)
   }
 
   private canArmIdleReview(key: ManagerKey, generation: number): boolean {
@@ -1019,18 +1054,31 @@ export class ManagerRegistry {
     const timer = this.idleReviewTimers.get(key)
     if (!timer || timer.generation !== generation) return
     this.idleReviewTimers.delete(key)
+    this.completedIdleReviewCycles.set(key, generation)
     if (!this.canAdmitIdleReview(key, generation)) return
 
-    let hasObjectives: boolean
+    let dueAtMs: number | undefined
     try {
-      hasObjectives = await this.deps.hasCurrentWorkboardObjectives(key)
+      dueAtMs = await this.readIdleReviewDueAt(key)
     } catch (error) {
+      if (this.completedIdleReviewCycles.get(key) === generation) this.completedIdleReviewCycles.delete(key)
       console.warn(`[ManagerRegistry] manager '${key}' 的任务板读取失败，跳过本次空闲自省:`, error)
       return
     }
-    if (!hasObjectives || !this.canAdmitIdleReview(key, generation)) return
+    if (!this.canAdmitIdleReview(key, generation)) return
+    if (dueAtMs === undefined) {
+      this.pendingIdleReviewCycles.delete(key)
+      this.completedIdleReviewCycles.delete(key)
+      return
+    }
+    if (dueAtMs > this.deps.now().getTime()) {
+      this.completedIdleReviewCycles.delete(key)
+      this.armIdleReviewTimer(key, generation, dueAtMs)
+      return
+    }
 
     try {
+      this.completedIdleReviewCycles.delete(key)
       const envelope = this.makeEnvelope(this.captureIngress(), { kind: 'workboard_idle_review' })
       await this.runWake(
         key,
@@ -1042,6 +1090,7 @@ export class ManagerRegistry {
         () => this.canAdmitIdleReview(key, generation, true),
       )
     } catch (error) {
+      if (this.completedIdleReviewCycles.get(key) === generation) this.completedIdleReviewCycles.delete(key)
       if (!this.disposed && !this.deps.isClosing?.()) {
         console.error(`[ManagerRegistry] manager '${key}' 的任务板空闲自省失败:`, error)
       }
