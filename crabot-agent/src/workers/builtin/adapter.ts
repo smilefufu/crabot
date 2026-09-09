@@ -793,11 +793,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       const incarnation = [...worker.incarnations].reverse().find((item) => !item.forked_from)
       if (incarnation?.impl !== 'builtin' || incarnation.state !== 'idle') continue
       try {
-        const h: IncarnationHandle = { ...incarnation, worker_id: worker.worker_id }
-        const recovered = await this.rehydrateIdleInstance(h)
-        if (!recovered) throw new Error('idle incarnation meta/session does not match')
-        await this.ensureTraceId(recovered.instance, `worker ${worker.worker_id}#${incarnation.seq}`)
-        if (recovered.instance.traceId) this.deps.traceHooks?.releaseTraceWriter?.(recovered.instance.traceId)
+        await this.getMutex(worker.worker_id).run(async () => {
+          if (this.instances.has(instanceKey(worker.worker_id, incarnation.seq))) return
+          const h: IncarnationHandle = { ...incarnation, worker_id: worker.worker_id }
+          const recovered = await this.rehydrateIdleInstance(h)
+          if (!recovered) throw new Error('idle incarnation meta/session does not match')
+          await this.ensureTraceId(recovered.instance, `worker ${worker.worker_id}#${incarnation.seq}`)
+          if (recovered.instance.traceId) this.deps.traceHooks?.releaseTraceWriter?.(recovered.instance.traceId)
+        })
       } catch (error) {
         console.warn(`[builtin-adapter] trace recovery failed for ${worker.worker_id}:`, error)
       }

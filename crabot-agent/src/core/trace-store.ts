@@ -660,6 +660,7 @@ export class TraceStore {
     const trace = await this.getFullTrace(traceId)
     if (!trace) throw new Error(`builtin trace writer unavailable: ${traceId}`)
     if (trace.spans.length < minimumOffset) throw new Error(`builtin trace source incomplete: ${traceId}, spans=${trace.spans.length}, cursor=${minimumOffset}`)
+    if (this.activeTraceWriters.has(traceId) && this.traces.has(traceId)) return
     // Only the adapter's validated live/idle incarnation may reopen its own trace.
     trace.status = 'running'
     delete trace.ended_at

@@ -1331,6 +1331,42 @@ describe('BuiltinWorkerAdapter', () => {
     })
   })
 
+  it.each([true, false])('startup trace recovery serializes with input without replacing its session (recoveryFirst=%s)', async (recoveryFirst) => {
+    const adapter1 = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const h = await adapter1.spawn(spec({ adapter: makeAdapter([{ text: 'initial reply', stopReason: 'end_turn' }]) }))
+    await waitState(adapter1, h, 'idle')
+    const entered = deferred()
+    const gate = deferred()
+    const resolveRuntime = vi.fn(async () => {
+      if (resolveRuntime.mock.calls.length === 1) {
+        entered.resolve()
+        await gate.promise
+      }
+      return { adapter: makeAdapter([{ text: 'continued reply', stopReason: 'end_turn' }]), model: 'test', systemPrompt: '', tools: [] }
+    })
+    const adapter2 = new BuiltinWorkerAdapter({ dataDir: tmp, resolveRuntime })
+    const recover = () => adapter2.reconcileTraces([{ worker_id: h.worker_id, task: { status: 'executing' }, incarnations: [{ ...h, impl: 'builtin', state: 'idle' }] }] as any)
+    const input = () => adapter2.sendInput(h, 'first concurrent input')
+    const first = recoveryFirst ? recover() : input()
+    await entered.promise
+    const second = recoveryFirst ? input() : recover()
+    // Drain the competing filesystem reads while the first rehydration is suspended.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const callsWhileBlocked = resolveRuntime.mock.calls.length
+    gate.resolve()
+    await Promise.all([first, second])
+    await waitState(adapter2, h, 'idle')
+    await adapter2.sendInput(h, 'second input')
+    await waitState(adapter2, h, 'idle')
+    const meta = JSON.parse(await fs.readFile(join(tmp, h.worker_id, 'meta-1.json'), 'utf8'))
+    const tree = await SessionTree.load(join(tmp, h.worker_id, 'session.jsonl'))
+    const path = JSON.stringify(tree.pathTo(meta.tip_node_id))
+    expect(callsWhileBlocked).toBe(1)
+    expect(path).toContain('initial reply')
+    expect(path).toContain('first concurrent input')
+    expect(path).toContain('second input')
+  })
+
   it('进程重启后的 idle 化身按下一条普通输入重建同一 session，并起新的 burst', async () => {
     const workerId = randomUUID()
     const adapter1 = new BuiltinWorkerAdapter({ dataDir: tmp })
