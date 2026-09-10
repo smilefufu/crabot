@@ -5,6 +5,13 @@
 
 ## 当前状态
 
+### Manager 首次 LLM 响应 reaction：实现与定向验证完成，待 PR 审查
+
+- 按用户修订后的 `2026-09-10-manager-input-reaction-timing-design.md`，初始与追加输入在首次包含它的主处理 LLM 请求完整成功返回后自动确认，不等待工具或 episode 收尾；Channel 与 Admin Chat 同步。
+- lane 仍在初始历史提交后放行。首次 token、旧在途请求、仅入队/落盘或请求失败不确认；失败收尾保留的正文与尾部消息在同进程后续成功请求中确认，发送失败或挂起不阻塞、不重试。
+- 新时序要求先复现 5 项失败再修复；覆盖初始部分流响应、批次去重、未 drain/已 drain 失败、私聊/群聊/Admin 接线及图片/溢出恢复。
+- 定向 380 项通过，6 项缺少 `tmp-page` fixture 的失败在未修改 main `72a6025c` 全部复现；Agent 类型检查通过。尚未部署，飞书验收待合入部署后执行。
+
 ### Feishu 引用 interactive 消息：实现与定向验证完成，待 PR 审查
 
 - 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-10-feishu-quoted-interactive-message-design.md)，get/list 请求原始卡片，统一 mapper 提取可读正文；Manager 初始、插话及恢复待注入消息接入共享引用预拉。
@@ -326,9 +333,7 @@
   5. ~~fail-loud 只闭合了「丢失」~~ → **已修**（eef9f991）：onEpisodeSettled 透传
      routeHumanMessages，私聊/Admin Chat 在真实收尾 failed/aborted 时补发 fail-loud
      （Admin Chat 带 request_id 走 delivery CAS 结占位气泡）。
-  6. 成功收尾时未被消费的注入留 mailbox 交自唤醒（五审修法），其 reaction 回调随之丢失
-     （自唤醒无调用方回调）——与「写入即已接收」自洽（尚未写入本就不该打），窗口窄，
-     如实记录不立项。
+  6. 尾部未消费输入的 reaction 回调丢失由当前“Manager 首次 LLM 响应 reaction”修复覆盖，见当前状态。
   7. commitPendingHumanInputs 在首个 await 前清空 pendingHumanCommit（六审非阻塞观察）：
      放弃分支里它自身抛错（store I/O 故障）时，catch 的二次调用看到空队列并报
      injectedHumansCommitted=true → 注入既未落盘也不重投。理论风险（收尾时 store 故障），

@@ -410,7 +410,7 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       })
     })
 
-    it('Manager 提交消息后才 reaction；manager 沉默时也照样发过', async () => {
+    it('Manager 成功收到 LLM 响应后才 reaction；manager 沉默时也照样发过', async () => {
       boot() // 空脚本 = manager 一句话都不说
       await runGroup([gmsg({ id: 'g-1', text: '你们中午吃啥' })])
 
@@ -418,12 +418,12 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
     })
 
-    it('只有 registry 确认消息已提交时才 reaction', async () => {
+    it('只有 registry 通知包含输入的 LLM 请求成功时才 reaction', async () => {
       boot()
       internals.managerStack.registry.routeAttentionFlush = async (...args: unknown[]) => {
         calls.push('manager_accepted')
-        const onHumanInputCommitted = args[4] as ((messageId: string) => Promise<void>) | undefined
-        void onHumanInputCommitted?.('g-1')
+        const callbacks = args[4] as { onLlmResponse?: (messageId: string) => Promise<void> }
+        void callbacks.onLlmResponse?.('g-1')
         return { episodeId: 'ep-g1', outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
       }
 

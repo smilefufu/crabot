@@ -418,13 +418,14 @@ describe('Manager restart continuation', () => {
   })
 
   it('protects a human supplement whose Engine message ID changed during an overflow retry', async () => {
+    const accepted = vi.fn(async () => {})
     await store.save({ key: KEY, foldedCount: 0, recent: [
       ...Array.from({ length: 3 }, (_, index) => createUserMessage(`old history ${index}: ` + 'x'.repeat(80000))),
       createUserMessage('last old history'),
     ] })
     const read = defineTool({ name: 'read', description: '', inputSchema: {}, isReadOnly: true,
       call: async () => {
-        await old.routeHumanMessages('feishu', 'restart-test', [message('supplement', 'Keep this correction literal')])
+        await old.routeHumanMessages('feishu', 'restart-test', [message('supplement', 'Keep this correction literal')], undefined, undefined, { onLlmResponse: accepted })
         return { output: 'current result', isError: false }
       } })
     const next = defineTool({ name: 'next', description: '', inputSchema: {}, isReadOnly: true,
@@ -436,6 +437,7 @@ describe('Manager restart continuation', () => {
       } else if (calls++ === 0) {
         yield* chunksFromContent([{ type: 'tool_use', id: 'read-call', name: 'read', input: {} }], 'tool_use')
       } else if (calls === 2) {
+        expect(accepted).not.toHaveBeenCalled()
         yield* chunksFromContent([], 'max_tokens')
       } else if (calls === 3) {
         yield* chunksFromContent([{ type: 'tool_use', id: 'retry-call', name: 'next', input: {} }], 'tool_use')
@@ -443,6 +445,7 @@ describe('Manager restart continuation', () => {
     }, updateConfig() {} }, { toolFace: () => [read, next], policy: { keepRecent: 2, hardCapTokens: 1000000 } })
     void old.routeWorkboardAdminUpdate({ key: KEY, noticeRevision: 1 })
     const checkpoint = await checkpointWhere((value) => value.state.foldedCount > 0 && calls === 4)
+    expect(accepted).toHaveBeenCalledTimes(1)
     const folds: string[] = []
     const inputs: string[] = []
     const restored = registry({ async *stream(params) {
@@ -461,9 +464,11 @@ describe('Manager restart continuation', () => {
     expect(inputs[0].match(/Keep this correction literal/g)).toHaveLength(1)
     expect((await store.load(KEY)).committedHumanMessageIds).toContain('supplement')
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
+    expect(accepted).toHaveBeenCalledTimes(1)
   })
 
   it('restores a consumed image supplement from its reference without persisting inbound base64', async () => {
+    const accepted = vi.fn(async () => {})
     const path = join(dir, 'supplement.png')
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
     await fs.writeFile(path, bytes)
@@ -479,11 +484,13 @@ describe('Manager restart continuation', () => {
     const imageMessage = { ...message('image-supplement', 'See image'), content: {
       type: 'image' as const, file_path: path, filename: 'supplement.png', mime_type: 'image/png',
     } }
-    await old.routeHumanMessages('feishu', 'restart-test', [imageMessage])
+    await old.routeHumanMessages('feishu', 'restart-test', [imageMessage], undefined, undefined, { onLlmResponse: accepted })
+    expect(accepted).not.toHaveBeenCalled()
     release()
     const checkpoint = await checkpointWhere((value) => value.state.committedHumanMessageIds?.includes('image-supplement') === true)
     expect(JSON.stringify(checkpoint)).not.toContain(bytes.toString('base64'))
     expect(checkpoint.state.imageRefs).toHaveLength(1)
+    expect(accepted).not.toHaveBeenCalled()
     const restored = registry({ async *stream(params) {
       expect(JSON.stringify(params.messages)).toContain(bytes.toString('base64'))
       yield* chunksFromContent([], 'end_turn')
@@ -493,6 +500,7 @@ describe('Manager restart continuation', () => {
     await restored.resumeInterruptedEpisodes()
     expect(JSON.stringify(await store.load(KEY))).not.toContain(bytes.toString('base64'))
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
+    expect(accepted).not.toHaveBeenCalled()
   })
 
   it('keeps restored workboard notices transient and acknowledges the original revision', async () => {

@@ -464,10 +464,58 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
   // ==========================================================================
 
   describe('已接收标记（chat_acknowledge）', () => {
-    it('人类输入 commit 后调用 chat_acknowledge，路由到 admin 模块并携带 request_id', async () => {
+    it('运行中输入只在包含它的模型请求成功返回后标记接收', async () => {
+      boot({ turns: [[reply()], []] })
+      const gate = () => {
+        let resolve!: () => void
+        const promise = new Promise<void>((r) => { resolve = r })
+        return { promise, resolve }
+      }
+      const firstEntered = gate()
+      const firstRelease = gate()
+      const secondEntered = gate()
+      const secondRelease = gate()
+      let turn = 0
+      hoisted.managerAdapter = {
+        async *stream(params: unknown) {
+          if (++turn === 1) {
+            firstEntered.resolve()
+            await firstRelease.promise
+          } else if (turn === 2) {
+            secondEntered.resolve()
+            await secondRelease.promise
+          }
+          yield* script.adapter.stream(params as never)
+        }, updateConfig() {},
+      }
+      const episode = runAdminChat(amsg({ id: 'initial' }), 'req-initial')
+      try {
+        await firstEntered.promise
+        await runAdminChat(amsg({ id: 'supplement', text: 'follow up' }), 'req-supplement')
+        const acknowledgements = () => rpcCalls.filter((c) => c.method === 'chat_acknowledge' && c.params.request_ids?.includes('req-supplement'))
+        expect(acknowledgements()).toHaveLength(0)
+        expect(rpcCalls.filter((c) => c.method === 'chat_acknowledge')).toHaveLength(0)
+        firstRelease.resolve()
+        await secondEntered.promise
+        expect(acknowledgements()).toHaveLength(0)
+        await vi.waitFor(() => expect(rpcCalls.some((c) => c.method === 'chat_acknowledge' && c.params.request_ids?.includes('req-initial'))).toBe(true))
+        secondRelease.resolve()
+        await episode
+        await vi.waitFor(() => expect(acknowledgements()).toHaveLength(1))
+        expect(acknowledgements()[0].port).toBe(ADMIN_PORT)
+        expect(acknowledgements()).toHaveLength(1)
+        expectThreeNots()
+      } finally {
+        firstRelease.resolve()
+        secondRelease.resolve()
+        await episode
+      }
+    })
+
+    it('包含人类输入的 LLM 请求成功后调用 chat_acknowledge，携带 request_id', async () => {
       boot({ turns: [[reply()]] })
       await runAdminChat(amsg({ id: 'a-ack-1' }), 'req-ack-1')
-      // commit 回调是 fire-and-forget：跑完一轮 episode 后补几个宏任务让它落地
+      // 响应回调是 fire-and-forget：跑完一轮 episode 后补几个宏任务让它落地
       await new Promise((resolve) => setTimeout(resolve, 0))
 
       const ack = rpcCalls.find((c) => c.method === 'chat_acknowledge')
