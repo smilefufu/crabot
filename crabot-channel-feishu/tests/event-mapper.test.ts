@@ -12,6 +12,33 @@ import {
 } from '../src/event-mapper'
 import type { FeishuMention } from '../src/types'
 
+describe('mapMessageContent — interactive', () => {
+  it('reads schema 2.0 markdown in display order without exposing card metadata', () => {
+    const out = mapMessageContent('interactive', JSON.stringify({
+      schema: '2.0',
+      header: { title: { tag: 'plain_text', content: 'Report' } },
+      body: { elements: [
+        { tag: 'markdown', content: '**Result**\n| A | B |\n| - | - |\n| 1 | 2 |' },
+        { tag: 'div', text: { tag: 'plain_text', content: 'Last line: report.md' } },
+      ] },
+      config: { summary: { content: 'hidden metadata' } },
+    }), [])
+    expect(out.content).toEqual({ type: 'text', text: 'Report\n**Result**\n| A | B |\n| - | - |\n| 1 | 2 |\nLast line: report.md' })
+  })
+
+  it('reads REST flattened rows and replaces mention placeholders', () => {
+    const out = mapMessageContent('interactive', JSON.stringify({ title: 'Report', elements: [
+      [{ tag: 'text', text: 'Hello ' }, { tag: 'text', text: '@_user_1' }],
+      [{ tag: 'text', text: 'Last line' }],
+    ] }), [{ key: '@_user_1', name: 'Alice', id: { open_id: 'ou_a' } }])
+    expect(out.content).toEqual({ type: 'text', text: 'Report\nHello @Alice\nLast line' })
+  })
+
+  it.each(['{}', 'null', '[]', 'invalid', '{"body":{"elements":[null,4,{"tag":"button","value":{"content":"hidden"}}]}}'])('degrades malformed or unreadable card: %s', (json) => {
+    expect(mapMessageContent('interactive', json, []).content).toEqual({ type: 'text', text: '[交互卡片]' })
+  })
+})
+
 describe('mapMessageContent — text', () => {
   it('replaces @_user_X placeholders with @Name and emits mentions', () => {
     const mentions: FeishuMention[] = [

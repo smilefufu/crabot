@@ -159,6 +159,46 @@ describe('Manager restart continuation', () => {
     expect((await store.load(KEY)).committedHumanMessageIds).toEqual(expect.arrayContaining(['original', 'queued', 'new']))
   })
 
+  it('preserves committed quotes and prepares pending quotes after restart without extending checkpoints', async () => {
+    const call = vi.fn(async (_port: number, _method: string, params: { platform_message_id: string }) =>
+      message(params.platform_message_id, `Body of ${params.platform_message_id}`))
+    const quotedPrefetch = {
+      rpcClient: { call } as never, moduleId: 'agent-test', resolveChannelPort: async () => 19009,
+    }
+    const original = message('original', 'Original instruction')
+    original.features.reply_to_message_id = 'quote-original'
+    const queued = message('queued', 'Queued correction')
+    queued.features.quote_message_id = 'quote-queued'
+    const old = registry({ async *stream() { await new Promise(() => {}) }, updateConfig() {} }, { quotedPrefetch })
+    void old.routeHumanMessages('feishu', 'restart-test', [original])
+    await checkpointWhere((value) => value.hasEngineMessages)
+    await old.routeHumanMessages('feishu', 'restart-test', [queued])
+    const checkpoint = await checkpointWhere((value) => value.pending.length === 1)
+    const pendingSnapshot = JSON.stringify(checkpoint.pending)
+    expect(pendingSnapshot).not.toContain('Body of')
+    expect(JSON.stringify(checkpoint.state.recent)).toContain('Body of quote-original')
+    call.mockClear()
+
+    const inputs: string[] = []
+    const restored = registry({
+      async *stream(params) { inputs.push(JSON.stringify(params.messages)); yield* chunksFromContent([], 'end_turn') },
+      updateConfig() {},
+    }, { quotedPrefetch })
+    restored.registerResumeCheckpoints([checkpoint])
+    trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
+    await restored.resumeInterruptedEpisodes()
+
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(call).toHaveBeenCalledWith(19009, 'get_message', {
+      session_id: 'restart-test', platform_message_id: 'quote-queued',
+    }, 'agent-test')
+    expect(inputs[0]).toContain('Body of quote-original')
+    expect(inputs.join('\n')).toContain('Body of quote-queued')
+    expect(inputs.join('\n')).toContain('<quoted_message')
+    expect(JSON.stringify(checkpoint.pending)).toBe(pendingSnapshot)
+    expect((await store.load(KEY)).committedHumanMessageIds).toEqual(expect.arrayContaining(['original', 'queued']))
+  })
+
   it('resumes an initial checkpoint with the original human identity and freshly resolved permissions', async () => {
     const friend: Friend = {
       id: 'original-friend', display_name: 'Original friend', permission: 'normal',

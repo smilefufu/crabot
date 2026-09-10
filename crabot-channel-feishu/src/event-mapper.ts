@@ -108,6 +108,13 @@ export function mapMessageContent(
         ...(parsed.imageKeys.length > 0 ? { raw: { image_keys: parsed.imageKeys } } : {}),
       }
     }
+    case 'interactive': {
+      const text = parseInteractiveText(raw)
+      return {
+        content: { type: 'text', text: applyMentionPlaceholders(text || '[交互卡片]', mentions) },
+        features,
+      }
+    }
     case 'image': {
       const image_key = (raw.image_key as string | undefined) ?? ''
       return {
@@ -161,6 +168,35 @@ export function mapMessageContent(
       }
     }
   }
+}
+
+/** Read visible card text only; config, callback values and component IDs are not message content. */
+function parseInteractiveText(card: unknown): string {
+  const record = (value: unknown): Record<string, unknown> =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  const elements = (value: unknown): string =>
+    Array.isArray(value) ? value.map(element).filter((text) => text.trim()).join('\n') : ''
+  const element = (value: unknown): string => {
+    if (value === null || typeof value !== 'object') return ''
+    // REST's default card representation uses inline rows; original cards use block elements.
+    if (Array.isArray(value)) return value.map(element).join('')
+    const node = record(value)
+    if (node.tag === 'text') return typeof node.text === 'string' ? node.text : ''
+    if (node.tag === 'markdown' || node.tag === 'plain_text' || node.tag === 'lark_md') {
+      return typeof node.content === 'string' ? node.content : ''
+    }
+    if (node.tag === 'div' || node.tag === 'column' || node.tag === 'column_set' || node.tag === 'note') {
+      return [element(node.text), elements(node.fields), elements(node.elements), elements(node.columns)]
+        .filter((text) => text.trim()).join('\n')
+    }
+    // Card fields have no tag, but their visible text is still explicitly typed.
+    if (node.tag === undefined && node.text !== undefined) return element(node.text)
+    return ''
+  }
+  const root = record(card)
+  const title = typeof root.title === 'string' ? root.title : element(record(root.header).title)
+  return [title, elements(record(root.body).elements ?? root.elements)]
+    .filter((text) => text.trim()).join('\n')
 }
 
 /**

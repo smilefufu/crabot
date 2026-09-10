@@ -201,6 +201,57 @@ describe('ManagerLoop', () => {
     await fs.rm(dataDir, { recursive: true, force: true })
   })
 
+  it.each(['human_messages', 'attention_flush'] as const)('prefetches quoted content for %s before the LLM call', async (kind) => {
+    const { adapter, calls } = makeAdapter()
+    const original = makeChannelMessage('Quoted body with final line')
+    const message = makeChannelMessage('Read my quote')
+    message.features.reply_to_message_id = original.platform_message_id
+    const call = vi.fn().mockResolvedValue(original)
+    const loop = new ManagerLoop(baseDeps({ store, adapter, quotedPrefetch: {
+      rpcClient: { call } as never, moduleId: 'agent-test', resolveChannelPort: async () => 19009,
+    } }))
+    await loop.wakeUp(timed({ kind, messages: [message] }))
+    expect(call).toHaveBeenCalledWith(19009, 'get_message', {
+      session_id: 'sess-loop', platform_message_id: original.platform_message_id,
+    }, 'agent-test')
+    const input = JSON.stringify(calls[0].messages)
+    expect(input).toContain('<quoted_message')
+    expect(input).toContain('Quoted body with final line')
+    expect(input).toContain('Read my quote')
+    expect(message.content.text).toBe('Read my quote')
+    expect(JSON.stringify(message)).not.toContain('Quoted body')
+  })
+
+  it('keeps the human message and reference ID when the quoted RPC fails', async () => {
+    const { adapter, calls } = makeAdapter()
+    const message = makeChannelMessage('Still answer this')
+    message.features.quote_message_id = 'om_missing'
+    const call = vi.fn().mockRejectedValue(new Error('unavailable'))
+    const loop = new ManagerLoop(baseDeps({ store, adapter, quotedPrefetch: {
+      rpcClient: { call } as never, moduleId: 'agent-test', resolveChannelPort: async () => 19009,
+    } }))
+    expect((await loop.wakeUp(timed({ kind: 'human_messages', messages: [message] }))).outcome).toBe('completed')
+    expect(call).toHaveBeenCalledTimes(1)
+    const input = JSON.stringify(calls[0].messages)
+    expect(input).toContain('om_missing')
+    expect(input).toContain('Still answer this')
+    expect(input).not.toContain('<quoted_message')
+  })
+
+  it('reuses a quoted message already present in the current batch without RPC', async () => {
+    const { adapter, calls } = makeAdapter()
+    const original = makeChannelMessage('Already visible')
+    const message = makeChannelMessage('Read that')
+    message.features.quote_message_id = original.platform_message_id
+    const call = vi.fn()
+    const loop = new ManagerLoop(baseDeps({ store, adapter, quotedPrefetch: {
+      rpcClient: { call } as never, moduleId: 'agent-test', resolveChannelPort: async () => 19009,
+    } }))
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [original, message] }))
+    expect(call).not.toHaveBeenCalled()
+    expect(JSON.stringify(calls[0].messages)).toContain('<quoted_message')
+  })
+
   it('结构化 Session 归属在同一 Loop 内多值保留且重复登记幂等，新 Loop 从空索引开始', () => {
     const { adapter } = makeAdapter()
     const loop = new ManagerLoop(baseDeps({ store, adapter }))

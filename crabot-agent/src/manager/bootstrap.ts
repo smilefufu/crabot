@@ -534,6 +534,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     thinking: deps.managerThinking,
     contextWindowTokens: deps.managerContextWindowTokens,
     supportsVision: deps.managerSupportsVision,
+    quotedPrefetch: deps.messagingDeps,
     now: () => new Date(deps.now()),
     isClosing: deps.isClosing,
     readCurrentWorkboard: (key) => workboardStore.load(key),
