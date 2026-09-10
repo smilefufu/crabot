@@ -22,7 +22,7 @@ const SCHEDULE_SCRIPT_LAUNCHER_SOURCE = [
   "const nonceArg = args.find((arg) => arg.startsWith(launcherArg + '='))",
   'const bash = args[args.length - 1]',
   'if (!nonceArg || !bash) process.exit(64)',
-  "const child = spawn(bash, ['--noprofile', '--norc', '-s'], { cwd: process.cwd(), env: process.env, stdio: ['pipe', 'pipe', 'pipe'] })",
+  "const child = spawn(bash, ['--noprofile', '--norc', '-s'], { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'pipe'] })",
   'process.stdin.pipe(child.stdin)',
   'child.stdout.pipe(process.stdout)',
   'child.stderr.pipe(process.stderr)',
