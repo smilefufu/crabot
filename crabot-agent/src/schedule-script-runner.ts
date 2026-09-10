@@ -7,6 +7,7 @@ import { buildChildEnv } from './core/runtime-env.js'
 import type { TraceStore } from './core/trace-store.js'
 import { runHostProcess, terminateHostProcessTreeAndWait, type HostProcessOutcome } from './engine/host-process.js'
 import { BASH_NOT_FOUND_MESSAGE, resolveBashPath } from './utils/resolve-bash-path.js'
+import { buildScrubbedChildEnv } from './workers/connections/secret-env.js'
 
 const OUTPUT_LIMIT_BYTES = 1024 * 1024
 const DELIVERY_TAIL_BYTES = 50_000
@@ -249,7 +250,7 @@ export class ScheduleScriptRunner {
         bash,
       ],
       cwd: this.deps.cwd,
-      env: buildChildEnv(),
+      env: buildScrubbedChildEnv(),
       stdin: run.source,
       abortSignal: abort.signal,
       limits: {

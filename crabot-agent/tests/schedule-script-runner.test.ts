@@ -119,10 +119,12 @@ describe('ScheduleScriptRunner', () => {
 
   it('scrubs credentials and keeps a valid UTF-8 50,000-byte delivery tail', async () => {
     const previousToken = process.env.CRABOT_TOKEN
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY
     process.env.CRABOT_TOKEN = 'must-not-leak'
+    process.env.ANTHROPIC_API_KEY = 'provider-secret-must-not-leak'
     try {
       const f = await fixture()
-      const source = "printf \"$CRABOT_TOKEN\"; printf 'x%.0s' {1..50001}; printf '😀'"
+      const source = "printf 'x%.0s' {1..50001}; printf '%s|%s' \"$CRABOT_TOKEN\" \"$ANTHROPIC_API_KEY\"; printf '😀'"
       await f.runner.admit({
         scheduleId: 'schedule-tail', triggerId: 'trigger-tail', scheduleName: 'tail',
         source, sourceSha256: 'hash-tail', timeoutSeconds: 2, deliverResult: true,
@@ -135,10 +137,13 @@ describe('ScheduleScriptRunner', () => {
       expect(delivered.outputTail.endsWith('😀')).toBe(true)
       expect(delivered.outputTail).not.toContain('\uFFFD')
       expect(delivered.outputTail).not.toContain('must-not-leak')
+      expect(delivered.outputTail).not.toContain('provider-secret-must-not-leak')
       expect(JSON.stringify(f.traceStore.getTraces(10, 0).traces[0])).not.toContain(source)
     } finally {
       if (previousToken === undefined) delete process.env.CRABOT_TOKEN
       else process.env.CRABOT_TOKEN = previousToken
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey
     }
   })
 
