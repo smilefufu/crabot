@@ -2141,12 +2141,12 @@ export class UnifiedAgent extends ModuleBase {
         messages,
         friend,
         undefined,
-        (lastCommittedMessageId) => {
+        (lastAcceptedMessageId) => {
           release?.()
-          return this.reactToCommittedHumanMessage(
+          return this.reactToAcceptedHumanMessage(
             session.channel_id,
             session.session_id,
-            lastCommittedMessageId,
+            lastAcceptedMessageId,
           )
         },
         (settled) => {
@@ -2227,12 +2227,12 @@ export class UnifiedAgent extends ModuleBase {
         sessionId,
         messages,
         lastEntry.friend,
-        (lastCommittedMessageId) => {
+        (lastAcceptedMessageId) => {
           release?.()
-          return this.reactToCommittedHumanMessage(
+          return this.reactToAcceptedHumanMessage(
             session.channel_id,
             sessionId,
-            lastCommittedMessageId,
+            lastAcceptedMessageId,
           )
         },
         (settled) => {
@@ -2280,7 +2280,7 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 人类输入已持久化进 Manager 会话后，给本批最后一个**新提交**的消息打「已接收」表情。
+   * 人类输入已写入 Manager 历史或运行中上下文检查点后，给本批最后一个新消息打「已接收」表情。
    *
    * 落在接线层而不是 manager 工具面：`add_reaction` 不是 crab-messaging 工具，它是编排层的
    * 机械动作，不该破坏 `assertClosedToolFace` 的封闭不变量。
@@ -2290,7 +2290,7 @@ export class UnifiedAgent extends ModuleBase {
    *
    * Spec: 2026-06-04-channel-task-pickup-reaction-design.md §4
    */
-  private async reactToCommittedHumanMessage(
+  private async reactToAcceptedHumanMessage(
     channelId: string,
     sessionId: string,
     platformMessageId: string,
@@ -2843,7 +2843,7 @@ export class UnifiedAgent extends ModuleBase {
    * 「三不」不变：不进 SessionLane（admin REST 前端 fetch 等响应才发下一条，天然单线）、
    * 不进注意力调度（master 直连每条都要处理）、不打 `add_reaction`（admin-web 没有
    * channel 侧 platform message 可回应——「已接收」标记改走 admin `chat_acknowledge`，
-   * 见 routeHumanMessages 的 commit 回调）。
+   * 见 routeHumanMessages 的持久接收回调）。
    */
   private async processAdminChatMessage(
     message: ChannelMessage,
@@ -2877,7 +2877,7 @@ export class UnifiedAgent extends ModuleBase {
         MASTER_FRIEND,
         { admin_chat_request_ids: [callbackInfo.request_id] },
         // 「已接收」标记（protocol-agent-v3 §4.1 / protocol-admin §3.20.2）：人类输入
-        // commit 进 manager 会话后 best-effort 通知 admin，web 在对应用户消息上渲染标记，
+        // 写入 manager 历史或运行中上下文检查点后 best-effort 通知 admin，web 在对应用户消息上渲染标记，
         // 与 channel 的 acknowledged reaction 同语义同时机。失败只落日志，不影响回复链路。
         () => this.ackAdminChatHumanInput(callbackInfo.request_id),
         // 注入在跑 episode 时(PR #131):占位 result 恒 completed,F1 判不到真实失败——

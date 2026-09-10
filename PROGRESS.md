@@ -5,6 +5,13 @@
 
 ## 当前状态
 
+### Manager 输入即时 reaction：实现与定向验证完成，待 PR 审查
+
+- 按已确认的 `2026-09-10-manager-input-reaction-timing-design.md`，运行中输入进入上下文且检查点保存成功后自动确认，不等待模型回复或 episode 收尾；Channel 与 Admin Chat 使用同一边界。
+- 历史仍在收尾提交，一次性确认责任独立保存；未消费尾部消息的回调随同进程下一轮继续，检查点失败不确认，确认失败或挂起不阻塞 loop。
+- 6 项时序/失败/尾部消息回归先失败后通过；覆盖批次去重、私聊/群聊/Admin 接线、图片与溢出重试后的重启恢复。
+- 定向 378 项通过，6 项缺少 `tmp-page` fixture 的失败在未修改 main `72a6025c` 全部复现；Agent 类型检查通过。尚未部署，飞书实际创建时间验收待合入部署后执行。
+
 ### Feishu 引用 interactive 消息：实现与定向验证完成，待 PR 审查
 
 - 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-10-feishu-quoted-interactive-message-design.md)，get/list 请求原始卡片，统一 mapper 提取可读正文；Manager 初始、插话及恢复待注入消息接入共享引用预拉。

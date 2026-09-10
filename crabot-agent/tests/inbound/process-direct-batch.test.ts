@@ -277,6 +277,8 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       const permissionsRelease = gate()
       const firstTurnEntered = gate()
       const firstTurnRelease = gate()
+      const secondTurnEntered = gate()
+      const secondTurnRelease = gate()
       const reactionRelease = gate()
       const requests: string[] = []
       hoisted.managerAdapter = {
@@ -285,6 +287,10 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
           if (requests.length === 1) {
             firstTurnEntered.resolve()
             await firstTurnRelease.promise
+          }
+          if (requests.length === 2) {
+            secondTurnEntered.resolve()
+            await secondTurnRelease.promise
           }
           yield* script.adapter.stream(params)
         },
@@ -341,6 +347,13 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
         expect(report).not.toHaveBeenCalled()
         reactionRelease.resolve()
         firstTurnRelease.resolve()
+        await secondTurnEntered.promise
+        await vi.waitFor(() => {
+          const reacted = rpcCalls.filter((c) => c.method === 'add_reaction').map((c) => c.params.platform_message_id)
+          expect(reacted).toContain('third')
+        })
+        expect(report).not.toHaveBeenCalled()
+        secondTurnRelease.resolve()
         await Promise.all(handlers())
 
         expect(requests.length).toBeGreaterThanOrEqual(2)
@@ -359,6 +372,7 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
         permissionsRelease.resolve()
         reactionRelease.resolve()
         firstTurnRelease.resolve()
+        secondTurnRelease.resolve()
         // 失败断言也要收完后台 handler，避免下一批落盘晚于临时目录清理。
         let count: number
         do {
