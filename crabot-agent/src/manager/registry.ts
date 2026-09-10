@@ -700,6 +700,7 @@ export class ManagerRegistry {
   }): Promise<{ completion: Promise<EpisodeResult> }> {
     const capture = this.captureIngress()
     const key = `${p.targetSession.channel_id}::${p.targetSession.session_id}` as ManagerKey
+    if (this.pendingResumes.has(key)) await this.ensureResumed(key)
     const envelope = this.makeEnvelope(capture, {
       kind: 'schedule',
       scheduleId: p.scheduleId,
