@@ -50,7 +50,9 @@ import {
 } from '../engine/index.js'
 import type { HumanMessageQueueLike } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex'
-import { formatChannelMessageLine } from '../prompt-manager.js'
+import { formatChannelMessageLine, type QuotedMessageEntry } from '../prompt-manager.js'
+import { prefetchQuotedMessages, type PrefetchQuotedDeps } from '../utils/quoted-message-prefetcher.js'
+import { splitManagerKey } from './principal.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { decideCompaction, managerPolicyForWindow, type CompactionPolicy, type CompactionDecision } from './compaction.js'
 import {
@@ -267,6 +269,7 @@ export interface ManagerLoopDeps {
   readonly thinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
   /** manager 模型的视觉能力(thunk,episode 内与 adapter/model 同点解析);false/undefined = 不注入入站图片 */
   readonly supportsVision?: () => boolean | undefined
+  readonly quotedPrefetch?: PrefetchQuotedDeps
   /**
    * 工具面提供者(thunk):每轮重算,由调用方决定要不要按最新状态重建。
    *
@@ -334,7 +337,9 @@ export class ManagerLoop {
    * 在 episode 收口时按 `hasPendingMailbox` 自唤醒(`drainMailbox`)兜底,并由 `evictIdle`
    * 拒绝回收 mailbox 非空的实例保证它不会先被回收掉(P7 阻塞项 #5)。
    */
-  private readonly mailbox = new TimedWakeMailbox()
+  private readonly mailbox = new TimedWakeMailbox((envelope) => this.renderEnvelope(envelope))
+  /** Projection only: message references survive deduplication; nothing is added to wake checkpoints. */
+  private readonly quotedByMessage = new WeakMap<ChannelMessage, ReadonlyMap<string, QuotedMessageEntry>>()
   /**
    * 本 episode 进行中经 `enqueueDuringEpisode` 推进 mailbox 的原始 envelope（按到达顺序）。
    * episode 失败时，即使其中一部分已被 engine `drainPending()` 消费进失败的
@@ -726,12 +731,35 @@ export class ManagerLoop {
     if (onEpisodeSettled) this.currentEpisodeSettleHooks.push(onEpisodeSettled)
   }
 
-  /**
-   * 唤醒事件 → 投喂给 LLM 的文本。渲染是 envelope 的纯函数，不读取当前时钟；
-   * mailbox carry、失败重投或 overflow retry 即使重新渲染，也会得到逐字相同的文本。
-   */
+  /** Prepare before registry's synchronous active-check/enqueue, or before initial history commit. */
+  async prepareHumanWake(envelope: TimedWakeEnvelope): Promise<void> {
+    if (!this.deps.quotedPrefetch || !isHumanWake(envelope.wake)) return
+    const { messages, friend } = envelope.wake
+    if (messages.length === 0 || messages.every((message) => this.quotedByMessage.has(message))) return
+    const { channelId, sessionId } = splitManagerKey(this.deps.key)
+    let quoted: ReadonlyMap<string, QuotedMessageEntry> = new Map()
+    try {
+      quoted = await prefetchQuotedMessages(
+        messages, [], channelId, sessionId,
+        messages[0].session.type === 'group' ? 'group' : 'private',
+        this.deps.quotedPrefetch,
+        (msg) => resolveSenderIdentity({ msg, ...(friend ? { senderFriend: friend } : {}) }),
+      )
+    } catch {
+      // A malformed Channel response must not prevent admission of the human message.
+    }
+    for (const message of messages) this.quotedByMessage.set(message, quoted)
+  }
+
+  /** Frozen quote projection and ingress time keep mailbox/retry rendering deterministic. */
   private renderEnvelope(envelope: TimedWakeEnvelope): string {
-    return renderTimedWakeEnvelope(envelope)
+    const quoted = new Map<string, QuotedMessageEntry>()
+    if (isHumanWake(envelope.wake)) {
+      for (const message of envelope.wake.messages) {
+        for (const [id, entry] of this.quotedByMessage.get(message) ?? []) quoted.set(id, entry)
+      }
+    }
+    return renderTimedWakeEnvelope(envelope, quoted)
   }
 
   /** 注入结算钩子的统一出口(PR #131):正常收口 / 失败收口 / throw 三条路径都以各自
@@ -867,6 +895,7 @@ export class ManagerLoop {
 
       if (recovery) {
         for (const pending of recovery.pending) {
+          await this.prepareHumanWake(pending)
           if (isHumanWake(pending.wake)) this.enqueueHumanWakeDuringActiveEpisode(pending)
           else this.enqueueDuringEpisode(pending)
         }
@@ -1359,6 +1388,7 @@ export class ManagerLoop {
         .filter(({ message }) => !committedIds.has(message.platform_message_id))
       if (newEntries.length === 0) continue
 
+      await this.prepareHumanWake(envelope)
       if (envelope.wake.kind === 'human_messages') hasNewDirectHumanMessages = true
       for (const { message } of newEntries) committedIds.add(message.platform_message_id)
       const rendered = createUserMessage(this.renderEnvelope(projectHumanEnvelope(envelope, newEntries)))
@@ -2198,6 +2228,8 @@ function successfulSendMessageTargetsOf(
 
 /** Manager-only mailbox: envelopes remain authoritative; the engine receives deterministic text. */
 class TimedWakeMailbox implements HumanMessageQueueLike {
+  constructor(private readonly render: (envelope: TimedWakeEnvelope) => string) {}
+
   private pending: TimedWakeEnvelope[] = []
   private contextAdmissionEnvelopes: TimedWakeEnvelope[] = []
   /** 非 null 时记录此后 drainPending() 拿走的 envelope(复核 continuation 失败还原用,见 runEpisodeBody)。 */
@@ -2307,7 +2339,7 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
     this.contextAdmissionEnvelopes.push(...drained)
     this.drainCapture?.push(...drained)
     return drained.map((envelope) => {
-      const text = renderTimedWakeEnvelope(envelope)
+      const text = this.render(envelope)
       if (!this.visionEnabled || !isHumanWake(envelope.wake)) return text
       const images = envelope.wake.messages.flatMap(collectInboundImages)
       if (images.length === 0) return text
@@ -2401,12 +2433,12 @@ function assertTimedWakeEnvelope(value: TimedWakeEnvelope): void {
 }
 
 /** Pure projection of ingress-fixed time; this function never reads a live clock. */
-export function renderTimedWakeEnvelope(envelope: TimedWakeEnvelope): string {
+export function renderTimedWakeEnvelope(envelope: TimedWakeEnvelope, quotedMessages?: ReadonlyMap<string, QuotedMessageEntry>): string {
   const transientPrompt = transientSystemPromptForWake(envelope.wake)
   if (transientPrompt) return transientPrompt
   const header = `[event received_at="${envelope.received_at}" timezone="${envelope.timezone}"]`
   const occurred = envelope.occurred_at ? `\n[event occurred_at="${envelope.occurred_at}"]` : ''
-  return `${header}${occurred}\n${renderWakeEvent(envelope.wake, envelope)}`
+  return `${header}${occurred}\n${renderWakeEvent(envelope.wake, envelope, quotedMessages)}`
 }
 
 type HumanWake = Extract<WakeEvent, { readonly kind: 'human_messages' | 'attention_flush' }>
@@ -2457,16 +2489,17 @@ function toManagerCompactionState(
   }
 }
 
-function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope): string {
+function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope, quotedMessages?: ReadonlyMap<string, QuotedMessageEntry>): string {
   switch (event.kind) {
     case 'human_messages':
-      return renderChannelMessages('[人类消息]', event.messages, event.friend, envelope)
+      return renderChannelMessages('[人类消息]', event.messages, event.friend, envelope, quotedMessages)
     case 'attention_flush':
       return renderChannelMessages(
         '[补齐:群聊注意力放行期间累积的人类消息]',
         event.messages,
         event.friend,
         envelope,
+        quotedMessages,
       )
     case 'worker_event':
       return renderWorkerEvent(event.event)
@@ -2486,6 +2519,7 @@ function renderChannelMessages(
   messages: ReadonlyArray<ChannelMessage>,
   friend: Friend | undefined,
   envelope: TimedWakeEnvelope,
+  quotedMessages?: ReadonlyMap<string, QuotedMessageEntry>,
 ): string {
   if (messages.length === 0) return `${label}(空)`
   const lines = messages.map((message, index) => {
@@ -2495,6 +2529,7 @@ function renderChannelMessages(
       timezone: envelope.timezone,
       now: new Date(envelope.received_at),
       identity: resolveSenderIdentity({ msg: message, ...(friend ? { senderFriend: friend } : {}) }),
+      quotedMessages,
     })
   })
   return `${label}\n${lines.join('\n')}`

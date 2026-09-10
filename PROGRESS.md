@@ -5,6 +5,12 @@
 
 ## 当前状态
 
+### Feishu 引用 interactive 消息：实现与定向验证完成，待 PR 审查
+
+- 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-10-feishu-quoted-interactive-message-design.md)，get/list 请求原始卡片，统一 mapper 提取可读正文；Manager 初始、插话及恢复待注入消息接入共享引用预拉。
+- 事故消息只读回放得到 1306 字符正文，最后一句完整保留；Manager 继续沿用既有引用截断与单层渲染，完整正文由 get_message 提供。
+- Feishu 249 项、Agent Manager/引用/消息工具 579 项通过，两模块构建通过；未更改提示词文案、协议或持久化格式，尚未部署。
+
 ### Manager 任务板逐项空闲自省：实现与验收完成
 
 - 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-09-manager-workboard-item-idle-introspection-design.md) 发布 Agent v3.14.5 协议；当前事项及无事项目标按自身更新时间计算唯一最早期限。

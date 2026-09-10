@@ -58,6 +58,21 @@ function makeClient() {
   return new FeishuClient({ app_id: 'cli_x', app_secret: 'sec', domain: 'feishu' })
 }
 
+describe('FeishuClient raw card reads', () => {
+  it('requests original card JSON for get and list while retaining pagination', async () => {
+    const c = makeClient()
+    const sdk = (c as any).client
+    await c.getMessage('om_card')
+    expect(sdk.im.message.get).toHaveBeenCalledWith({
+      path: { message_id: 'om_card' }, params: { user_id_type: 'open_id', card_msg_content_type: 'user_card_content' },
+    })
+    await c.listMessages({ container_id_type: 'chat', container_id: 'oc_x', page_token: 'next', page_size: 30 })
+    expect(sdk.im.message.list).toHaveBeenCalledWith({ params: expect.objectContaining({
+      card_msg_content_type: 'user_card_content', container_id: 'oc_x', page_token: 'next', page_size: 30,
+    }) })
+  })
+})
+
 describe('FeishuClient.getBotInfo', () => {
   it('returns app_id / app_name / open_id from /open-apis/bot/v3/info/', async () => {
     const c = makeClient()

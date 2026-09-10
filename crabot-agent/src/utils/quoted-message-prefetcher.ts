@@ -1,5 +1,5 @@
 /**
- * 引用消息异步预拉 helper。
+ * Agent 与 Manager 共用的引用消息异步预拉 helper；不改变调用方的任务或会话语义。
  *
  * 早期 prompt 渲染走 markdown，引用内容用 `> ` 前缀区分以避免和正文 markdown 混淆；
  * 现在统一到 XML <message> 标签后，等价做法是嵌套 <quoted_message> 子标签。但要做到
