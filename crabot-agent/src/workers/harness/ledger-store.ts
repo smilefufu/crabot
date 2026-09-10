@@ -6,7 +6,7 @@ import { AsyncMutex } from '../async-mutex'
 import type { Incarnation, LedgerWorker, LegacyArchivedIncarnation, ManagerKey, WorkerLedger } from './ledger-types'
 
 const FILE_SUFFIX = '.json'
-const ATOMIC_TEMP_FILE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i
+export const ATOMIC_TEMP_FILE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i
 
 export function encodeSegment(s: string): string {
   return encodeURIComponent(s).replace(/[.!~*'()]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'))

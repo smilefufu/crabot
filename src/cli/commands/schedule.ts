@@ -17,8 +17,11 @@ const COLUMNS: Column[] = [
 const ALLOWED_PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const
 
 export interface ScheduleAddOpts {
-  readonly title: string
-  readonly priority: string
+  readonly title?: string
+  readonly priority?: string
+  readonly script?: string
+  readonly timeoutSeconds?: string
+  readonly deliverResult?: string
   readonly name?: string
   readonly description?: string
   readonly taskDescription?: string
@@ -44,12 +47,18 @@ export interface ScheduleSnapshot {
     | { readonly type: 'cron'; readonly expression: string; readonly timezone?: string }
     | { readonly type: 'interval'; readonly seconds: number }
     | { readonly type: 'once'; readonly execute_at: string }
-  readonly task_template: {
+  readonly task_template?: {
     readonly title: string
     readonly priority: string
     readonly description?: string
     readonly type?: string
     readonly tags: readonly string[]
+  }
+  readonly script?: {
+    readonly source?: string
+    readonly timeout_seconds: number
+    readonly deliver_result: boolean
+    readonly source_sha256: string
   }
 }
 
@@ -71,12 +80,13 @@ export interface ScheduleUpdateOpts {
   readonly taskType?: string
   readonly tag?: ReadonlyArray<string>
   readonly clearTags?: boolean
+  readonly script?: string
+  readonly timeoutSeconds?: string
+  readonly deliverResult?: string
+}
 
-  // target_session 三态
-  readonly targetChannel?: string
-  readonly targetSession?: string
-  readonly targetType?: string
-  readonly clearTarget?: boolean
+export function buildShowSchedulePath(id: string, includeScriptSource = false): string {
+  return `/api/schedules/${id}${includeScriptSource ? '?include_script_source=true' : ''}`
 }
 
 /**
@@ -85,8 +95,9 @@ export interface ScheduleUpdateOpts {
  * 不合法时抛 CliError('INVALID_ARGUMENT', ...) — 走 main.ts 顶层 catch。
  */
 export function buildCreateScheduleBody(opts: ScheduleAddOpts): Record<string, unknown> {
-  const title = assertNonEmpty('--title', opts.title)
-  const priority = assertEnum('--priority', opts.priority, ALLOWED_PRIORITIES)
+  const scriptMode = opts.script !== undefined
+  const title = scriptMode ? undefined : assertNonEmpty('--title', opts.title)
+  const priority = scriptMode ? undefined : assertEnum('--priority', opts.priority, ALLOWED_PRIORITIES)
   const triggerFlagCount = [opts.cron, opts.intervalSeconds, opts.triggerAt].filter(Boolean).length
   if (triggerFlagCount === 0) {
     throw new CliError(
@@ -135,13 +146,31 @@ export function buildCreateScheduleBody(opts: ScheduleAddOpts): Record<string, u
     trigger = { type: 'once', execute_at: new Date(raw).toISOString() }
   }
 
-  const taskTemplate: Record<string, unknown> = {
-    title,
-    priority,
-    tags: opts.tag ? [...opts.tag] : [],
+  const content: Record<string, unknown> = {}
+  if (scriptMode) {
+    const source = assertNonEmpty('--script', opts.script)
+    const timeout = opts.timeoutSeconds === undefined ? undefined : Number(opts.timeoutSeconds)
+    if (timeout !== undefined && (!Number.isInteger(timeout) || timeout < 1 || timeout > 600)) {
+      throw new CliError('INVALID_ARGUMENT', '--timeout-seconds 必须是 1 到 600 的整数')
+    }
+    if (opts.deliverResult !== undefined && opts.deliverResult !== 'true' && opts.deliverResult !== 'false') {
+      throw new CliError('INVALID_ARGUMENT', '--deliver-result 必须是 true 或 false')
+    }
+    content['script'] = {
+      source,
+      ...(timeout === undefined ? {} : { timeout_seconds: timeout }),
+      ...(opts.deliverResult === undefined ? {} : { deliver_result: opts.deliverResult === 'true' }),
+    }
+  } else {
+    const taskTemplate: Record<string, unknown> = {
+      title,
+      priority,
+      tags: opts.tag ? [...opts.tag] : [],
+    }
+    if (opts.taskType?.trim()) taskTemplate['type'] = opts.taskType.trim()
+    if (opts.taskDescription?.trim()) taskTemplate['description'] = opts.taskDescription.trim()
+    content['task_template'] = taskTemplate
   }
-  if (opts.taskType?.trim()) taskTemplate['type'] = opts.taskType.trim()
-  if (opts.taskDescription?.trim()) taskTemplate['description'] = opts.taskDescription.trim()
   const hasAnyTarget = !!(opts.targetChannel || opts.targetSession || opts.targetType)
   const hasAllTarget = !!(opts.targetChannel && opts.targetSession && opts.targetType)
   if (hasAnyTarget && !hasAllTarget) {
@@ -154,7 +183,7 @@ export function buildCreateScheduleBody(opts: ScheduleAddOpts): Record<string, u
   const body: Record<string, unknown> = {
     name: opts.name?.trim() || title,
     trigger,
-    task_template: taskTemplate,
+    ...content,
     enabled: !opts.disabled,
   }
   if (opts.description?.trim()) body['description'] = opts.description.trim()
@@ -168,12 +197,7 @@ export function buildCreateScheduleBody(opts: ScheduleAddOpts): Record<string, u
     }
   }
 
-  // creator_friend_id 不暴露 CLI flag，从 env 读 — 由 worker 在 task 启动时
-  // 把 task_origin.friend_id 注入到 CRABOT_TASK_FRIEND_ID，agent 没法通过命令行参数伪造身份。
-  // 没设环境变量（如直接调 CLI 的运维场景）就不传，让 admin 兜底（POST /api/schedules
-  // 会自动填 master friend）。
-  const envFriendId = process.env.CRABOT_TASK_FRIEND_ID?.trim()
-  if (envFriendId) body['creator_friend_id'] = envFriendId
+  if (!body['name']) throw new CliError('INVALID_ARGUMENT', '脚本 Schedule 必须提供 --name')
 
   return body
 }
@@ -290,7 +314,13 @@ export function buildUpdateScheduleBody(
       throw new CliError('INVALID_ARGUMENT', '--tag 与 --clear-tags 互斥')
     }
 
-    const tt = { ...current.task_template, tags: [...current.task_template.tags] }
+    const base = current.task_template
+    if (!base && !opts.title?.trim()) {
+      throw new CliError('INVALID_ARGUMENT', '从脚本切换为 instruction 时必须提供 --title')
+    }
+    const tt = base
+      ? { ...base, tags: [...base.tags] }
+      : { title: opts.title!.trim(), priority: 'normal', tags: [] as string[] }
     if (opts.title?.trim()) tt.title = opts.title.trim()
     if (opts.taskDescription !== undefined) tt.description = opts.taskDescription.trim()
     if (opts.taskPriority) {
@@ -300,35 +330,37 @@ export function buildUpdateScheduleBody(
     if (opts.tag) tt.tags = [...opts.tag]
     if (opts.clearTags) tt.tags = []
     body['task_template'] = tt
+    if (current.script) body['script'] = null
   }
 
-  // target_session 三态：undefined 不变 / null 清除 / 对象更新
-  const hasAnyTarget = !!(opts.targetChannel || opts.targetSession || opts.targetType)
-  const hasAllTarget = !!(opts.targetChannel && opts.targetSession && opts.targetType)
-  if (opts.clearTarget && hasAnyTarget) {
-    throw new CliError('INVALID_ARGUMENT', '--clear-target 与 --target-* 互斥')
-  }
-  if (hasAnyTarget && !hasAllTarget) {
-    throw new CliError(
-      'INVALID_ARGUMENT',
-      '--target-channel / --target-session / --target-type 必须同时提供（要么三个都给，要么都不给）',
-    )
-  }
-  if (opts.clearTarget) {
-    body['target_session'] = null
-  } else if (hasAllTarget) {
-    const type = assertEnum('--target-type', opts.targetType, ALLOWED_TARGET_TYPES)
-    body['target_session'] = {
-      channel_id: opts.targetChannel,
-      session_id: opts.targetSession,
-      type,
+  const hasScriptOpt = opts.script !== undefined || opts.timeoutSeconds !== undefined || opts.deliverResult !== undefined
+  if (hasScriptOpt) {
+    if (hasTemplateOpt) throw new CliError('INVALID_ARGUMENT', 'instruction 与 script 修改不能同时提供')
+    const source = opts.script ?? current.script?.source
+    if (!source) throw new CliError('INVALID_ARGUMENT', '修改脚本配置时必须能读取现有 source 或提供 --script')
+    const timeout = opts.timeoutSeconds === undefined
+      ? current.script?.timeout_seconds
+      : Number(opts.timeoutSeconds)
+    if (timeout !== undefined && (!Number.isInteger(timeout) || timeout < 1 || timeout > 600)) {
+      throw new CliError('INVALID_ARGUMENT', '--timeout-seconds 必须是 1 到 600 的整数')
     }
+    if (opts.deliverResult !== undefined && opts.deliverResult !== 'true' && opts.deliverResult !== 'false') {
+      throw new CliError('INVALID_ARGUMENT', '--deliver-result 必须是 true 或 false')
+    }
+    body['script'] = {
+      source: assertNonEmpty('--script', source),
+      ...(timeout === undefined ? {} : { timeout_seconds: timeout }),
+      deliver_result: opts.deliverResult === undefined
+        ? current.script?.deliver_result ?? false
+        : opts.deliverResult === 'true',
+    }
+    if (current.task_template) body['task_template'] = null
   }
 
   if (Object.keys(body).length === 0) {
     throw new CliError(
       'INVALID_ARGUMENT',
-      '至少需要提供一个修改字段（--name / --description / --enabled / trigger flags / task_template flags / target_session flags / --clear-target / --clear-tags）',
+      '至少需要提供一个修改字段',
     )
   }
   return body
@@ -353,18 +385,22 @@ export function registerScheduleCommands(parent: Command): void {
   schedule
     .command('show <ref>')
     .description('Show a schedule')
-    .action(async (ref: string) => {
+    .option('--include-script-source', 'Include inline Bash source (requires shell permission)')
+    .action(async (ref: string, opts: { includeScriptSource?: boolean }) => {
       const ctx = createContext(parent)
       const { id } = await resolveRef(ctx.client, 'schedule', ref)
-      const data = await ctx.client.get<unknown>(`/api/schedules/${id}`)
+      const data = await ctx.client.get<unknown>(buildShowSchedulePath(id, opts.includeScriptSource === true))
       renderResult(maskSensitive(data), { mode: ctx.mode, columns: COLUMNS })
     })
 
   schedule
     .command('add')
     .description('Add a schedule')
-    .requiredOption('--title <title>', 'Task template title (会作为触发任务的标题，可含 {{date}}/{{datetime}} 占位符)')
-    .requiredOption('--priority <priority>', `Task priority (${ALLOWED_PRIORITIES.join('|')})`)
+    .option('--title <title>', 'Instruction title（与 --script 二选一）')
+    .option('--priority <priority>', `Instruction priority (${ALLOWED_PRIORITIES.join('|')})`)
+    .option('--script <source>', 'Inline Bash source（与 --title 二选一）')
+    .option('--timeout-seconds <n>', 'Script timeout，1-600 秒')
+    .option('--deliver-result <true|false>', '是否把脚本结果投递给目标 Manager')
     .option('--name <name>', 'Schedule 名称（不传则 fallback 到 --title）')
     .option('--description <desc>', 'Schedule 描述（人读层面，给 master 看）')
     .option('--task-description <desc>', 'Task 描述（任务触发时给 LLM 的 prompt）')
@@ -384,9 +420,10 @@ export function registerScheduleCommands(parent: Command): void {
 
       const cmdParts = [
         'schedule add',
-        `--title ${JSON.stringify(opts.title)}`,
-        `--priority ${opts.priority}`,
       ]
+      if (opts.title) cmdParts.push(`--title ${JSON.stringify(opts.title)}`)
+      if (opts.priority) cmdParts.push(`--priority ${opts.priority}`)
+      if (opts.script !== undefined) cmdParts.push('--script [redacted]')
       if (opts.name) cmdParts.push(`--name ${JSON.stringify(opts.name)}`)
       if (opts.cron) cmdParts.push(`--cron ${JSON.stringify(opts.cron)}`)
       if (opts.intervalSeconds) cmdParts.push(`--interval-seconds ${opts.intervalSeconds}`)
@@ -397,7 +434,9 @@ export function registerScheduleCommands(parent: Command): void {
 
       const result = await runWrite({
         subcommand: 'schedule add',
-        args: { '--title': opts.title, '--priority': opts.priority },
+        args: opts.script === undefined
+          ? { '--title': opts.title, '--priority': opts.priority }
+          : { '--script': '[redacted]' },
         command_text: cmdParts.join(' '),
         execute: () => ctx.client.post('/api/schedules', body),
         reverseFromResult: (r) => {
@@ -430,10 +469,9 @@ export function registerScheduleCommands(parent: Command): void {
     .option('--task-type <type>', 'Task 类型')
     .option('--tag <tag>', 'Task 标签（覆盖原 tags；可重复 --tag a --tag b）', collectTag)
     .option('--clear-tags', '清空 task tags')
-    .option('--target-channel <id>', '目标 channel instance id（三个 target-* 必须同时提供）')
-    .option('--target-session <id>', '目标 session id')
-    .option('--target-type <type>', '目标 session 类型 (private|group)')
-    .option('--clear-target', '清除已配置的 target_session（与三个 target-* 互斥）')
+    .option('--script <source>', '替换为 inline Bash 或更新 source')
+    .option('--timeout-seconds <n>', 'Script timeout，1-600 秒')
+    .option('--deliver-result <true|false>', '是否把脚本结果投递给目标 Manager')
     .option('--confirm <token>', 'Confirmation token from preview response')
     .action(async (ref: string, opts: ScheduleUpdateOpts & { confirm?: string }) => {
       const ctx = createContext(parent)
@@ -446,7 +484,15 @@ export function registerScheduleCommands(parent: Command): void {
         'schedule',
       )
 
-      const body = buildUpdateScheduleBody(before, opts)
+      const needsScriptSource = before.script
+        && (opts.script !== undefined || opts.timeoutSeconds !== undefined || opts.deliverResult !== undefined)
+      const current = needsScriptSource
+        ? await ctx.client.getUnwrap<ScheduleSnapshot & Record<string, unknown>>(
+            `/api/schedules/${id}?include_script_source=true`, 'schedule',
+          )
+        : before
+
+      const body = buildUpdateScheduleBody(current, opts)
 
       const args: Record<string, unknown> = { _positional: ref }
       if (opts.confirm) args['--confirm'] = opts.confirm
@@ -465,10 +511,9 @@ export function registerScheduleCommands(parent: Command): void {
       if (opts.taskType !== undefined) setParts.push(`--task-type ${JSON.stringify(opts.taskType)}`)
       if (opts.tag) for (const t of opts.tag) setParts.push(`--tag ${JSON.stringify(t)}`)
       if (opts.clearTags) setParts.push('--clear-tags')
-      if (opts.targetChannel) setParts.push(`--target-channel ${opts.targetChannel}`)
-      if (opts.targetSession) setParts.push(`--target-session ${opts.targetSession}`)
-      if (opts.targetType) setParts.push(`--target-type ${opts.targetType}`)
-      if (opts.clearTarget) setParts.push('--clear-target')
+      if (opts.script !== undefined) setParts.push('--script [redacted]')
+      if (opts.timeoutSeconds !== undefined) setParts.push(`--timeout-seconds ${opts.timeoutSeconds}`)
+      if (opts.deliverResult) setParts.push('--deliver-result')
       const cmdText = opts.confirm
         ? `schedule update ${ref} ${setParts.join(' ')} --confirm ${opts.confirm}`
         : `schedule update ${ref} ${setParts.join(' ')}`

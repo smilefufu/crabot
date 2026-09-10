@@ -53,6 +53,7 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { runEngine, defineTool, createUserMessage } from '../../engine/index.js'
+import { withChildExecutionEnv } from '../../core/runtime-env.js'
 import type { EngineMessage, EngineMessagesRef, EngineResult, EngineToolResultMessage, ToolDefinition } from '../../engine/index.js'
 import type { Resolvable } from '../../engine/types.js'
 import type { LLMThinkingConfig } from '../../engine/llm-adapter-types.js'
@@ -92,8 +93,6 @@ import type {
   NormalizedTraceEvent,
   TraceCursor,
 } from '../types.js'
-import { classifySupervisionActivity } from '../types.js'
-import type { SupervisionObservation } from '../types.js'
 import { QUERY_FORK_INSTRUCTION } from '../query-fork-instruction.js'
 import { subagentIdFromToolOutput } from '../../engine/sub-agent-trace.js'
 
@@ -185,6 +184,7 @@ interface WorkerInstance {
   readonly dir: string
   readonly sessionTree: SessionTree
   readonly outputLog: OutputLog
+  readonly executionEnv?: Readonly<Record<string, string>>
   /**
    * 本化身自己的当前 tip node_id（不是 sessionTree.latestTip()）。sessionTree 是跨化身
    * 共享的同一个对象，其内部 tip 是"整个文件最后一次 append"的全局游标——fork 分支往
@@ -467,6 +467,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         dir,
         sessionTree,
         outputLog,
+        executionEnv: spec.execution_env,
         tip: rootId,
         engineMessagesRef: createEngineMessagesRef([rootMessage]),
         engineMessagesTip: rootId,
@@ -545,6 +546,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         dir,
         sessionTree,
         outputLog,
+        executionEnv: opts?.execution_env,
         tip: wakeId,
         engineMessagesRef: createEngineMessagesRef(initialMessages),
         engineMessagesTip: wakeId,
@@ -616,6 +618,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         dir,
         sessionTree,
         outputLog,
+        executionEnv: opts.execution_env,
         tip: forkId,
         engineMessagesRef: createEngineMessagesRef(
           forkInitialMessages,
@@ -772,6 +775,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       dir,
       sessionTree,
       outputLog: new OutputLog(join(dir, `output-${h.seq}.log`)),
+      // A restarted builtin has no persisted scoped bearer; keep CLI auth in Agent mode so it
+      // fails closed instead of falling back to Admin's internal token.
+      executionEnv: { CRABOT_ACTOR: 'agent' },
       tip: meta.tip_node_id,
       engineMessagesRef: createEngineMessagesRef(sessionTree.pathTo(meta.tip_node_id)),
       engineMessagesTip: meta.tip_node_id,
@@ -888,21 +894,6 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       consumed = i + 1
     }
     return { sourceAvailable: true, spans, events, nextCursor: { offset: consumed } }
-  }
-
-  async inspectSupervisionActivity(
-    h: IncarnationHandle,
-    cursor?: { readonly offset: number },
-  ): Promise<SupervisionObservation> {
-    try {
-      const trace = await this.readTraceWindow(h, cursor)
-      if (!trace.sourceAvailable) return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
-      // 页面 read model 不得改变既有 Manager 巡检语义：任何 LLM turn 都延续为 text。
-      if (trace.spans.some((span) => span.type === 'llm_call')) return { kind: 'text', next_cursor: trace.nextCursor }
-      return classifySupervisionActivity(trace.events, trace.nextCursor)
-    } catch {
-      return { kind: 'unknown', next_cursor: cursor ?? { offset: 0 } }
-    }
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
@@ -1139,7 +1130,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 用 `result.finalText` 不行：finish_task 这类早退工具收场时它可能为空串，而那恰恰是
     // manager 最需要看到的一轮。
     let lastAssistantText = ''
-    let result: EngineResult = await runEngine({
+    let result: EngineResult = await withChildExecutionEnv(instance.executionEnv, () => runEngine({
       prompt: '',
       adapter: builtin.adapter,
       initialMessages,
@@ -1206,7 +1197,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           }
         },
       },
-    })
+    }))
     await Promise.all(pendingWrites)
     if (writeErrors.length > 0) {
       throw new Error(
@@ -1362,7 +1353,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const writeErrors: unknown[] = []
     // 见 runBurst 同名变量的注释。
     let compactedThisBurst = false
-    const result: EngineResult = await runEngine({
+    const result: EngineResult = await withChildExecutionEnv(instance.executionEnv, () => runEngine({
       prompt: '',
       adapter: builtin.adapter,
       initialMessages,
@@ -1412,7 +1403,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           }
         },
       },
-    })
+    }))
     await Promise.all(pendingWrites)
     if (writeErrors.length > 0) {
       throw new Error(

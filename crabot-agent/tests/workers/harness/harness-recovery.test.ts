@@ -15,6 +15,8 @@ import {
   type LedgerWorker,
 } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
+import { WorkerContextStore } from '../../../src/workers/harness/context-store'
+import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime'
 import type {
   WorkerAdapter,
   WorkerImplId,
@@ -300,16 +302,6 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
       origin: {
       trigger_type: 'system' },
       incarnations: [],
-      supervision: {
-        version: 1,
-        mode: 'periodic_report',
-        next_due_at: now(),
-        pending: { due_id: 'due-maintenance', kind: 'periodic_report', due_at: now(), attempts: 0 },
-        periodic_report: {
-          interval_ms: 5 * 60_000,
-          report_to: { channel_id: 'wechat', session_id: 'sess-recovery' },
-        },
-      },
     })
     await seed(ledger, DIALOG, worker)
 
@@ -321,7 +313,6 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(after.task.status).toBe('closed')
     expect(after.task.closed?.note).toBe('agent restart: execution context lost for agent-native system task')
     expect(after.incarnations).toEqual([])
-    expect(after.supervision).toEqual({ version: 1, mode: 'default' })
     const taskEvents = events.filter((e) => e.worker_id === 'w-maintenance')
     expect(taskEvents).toHaveLength(1)
     expect(taskEvents[0]).toMatchObject({
@@ -786,5 +777,58 @@ describe('HarnessEvent.task_status —— reconcileOnStartup 的迁移点', () =
 
     // 台账化身 state=running 与 idle 无矛盾 → 存活分支不再写台账、不发事件。
     expect(events.filter((e) => e.kind === 'state_changed' && e.worker_id === 'w-realign')).toHaveLength(0)
+  })
+})
+
+describe('WorkerHarness Agent CLI execution authorization', () => {
+  it('主线与 query fork 同权绑定各自 exact incarnation，并在化身退出或任务关闭后失效', async () => {
+    const { harness, ledger } = await makeHarness()
+    const workerId = 'w-agent-cli'
+    const mainId = 'inc-main'
+    const forkId = 'inc-query'
+    await seed(ledger, DIALOG, makeWorker(workerId, {
+      incarnations: [
+        { incarnation_id: mainId, seq: 1, impl: 'builtin', state: 'running', workspace: '/tmp/ws', session_ref: 'main', started_at: now() },
+        {
+          incarnation_id: forkId, seq: 2, impl: 'builtin', state: 'idle', workspace: '/tmp/ws', session_ref: 'query',
+          started_at: now(), forked_from: mainId, query_id: 'query-1',
+        },
+      ],
+    }))
+    await new WorkerContextStore(join(dataDir, 'workers')).write(workerId, {
+      principal_permissions: {
+        ...BUILTIN_WORKER_PERMISSIONS,
+        cli_access: { ...BUILTIN_WORKER_PERMISSIONS.cli_access, schedule: 'write' },
+      },
+    })
+
+    const main = await harness.authorizeAgentCliExecution(
+      { kind: 'worker', worker_id: workerId, incarnation_id: mainId }, 'schedule',
+    )
+    const fork = await harness.authorizeAgentCliExecution(
+      { kind: 'worker', worker_id: workerId, incarnation_id: forkId }, 'schedule',
+    )
+    expect(main).toEqual({ valid: true, cli_access: 'write', shell: true })
+    expect(fork).toEqual(main)
+
+    await ledger.upsertWorker(DIALOG, workerId, (current) => ({
+      ...current!,
+      incarnations: current!.incarnations.map((item) => item.incarnation_id === forkId
+        ? { ...item, state: 'exited' as const, ended_at: now(), ended_reason: 'completed' as const }
+        : item),
+    }))
+    await expect(harness.authorizeAgentCliExecution(
+      { kind: 'worker', worker_id: workerId, incarnation_id: forkId }, 'schedule',
+    )).rejects.toThrow('FORBIDDEN')
+    await expect(harness.authorizeAgentCliExecution(
+      { kind: 'worker', worker_id: workerId, incarnation_id: mainId }, 'schedule',
+    )).resolves.toEqual(main)
+
+    await ledger.upsertWorker(DIALOG, workerId, (current) => ({
+      ...current!, task: { ...current!.task, status: 'closed' as const },
+    }))
+    await expect(harness.authorizeAgentCliExecution(
+      { kind: 'worker', worker_id: workerId, incarnation_id: mainId }, 'schedule',
+    )).rejects.toThrow('FORBIDDEN')
   })
 })

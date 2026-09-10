@@ -32,6 +32,7 @@ import { ManagerLoop, type WakeEvent, type TimedWakeEnvelope, type EpisodeResult
 import type { ManagerSessionStore } from './session-store.js'
 import type { CompactionPolicy } from './compaction.js'
 import type { ManagerKey } from './types.js'
+import type { TaskPriority } from '../workers/harness/ledger-types.js'
 import type { LLMAdapter, ToolDefinition } from '../engine/index.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { LedgerStore } from '../workers/harness/ledger-store'
@@ -83,6 +84,11 @@ export interface ScheduleIdentity {
   readonly creatorFriendId?: string
   readonly isBuiltin?: boolean
   readonly taskType?: string
+  readonly targetSession?: {
+    readonly channel_id: string
+    readonly session_id: string
+    readonly type: 'private' | 'group'
+  }
 }
 
 export interface ManagerRegistryDeps {
@@ -158,6 +164,12 @@ export interface ManagerRegistryDeps {
     key: ManagerKey
     creatorFriendId?: string
     isBuiltin?: boolean
+    targetSession?: {
+      channel_id: string
+      session_id: string
+      type: 'private' | 'group'
+    }
+    requireShell?: boolean
   }) => Promise<ResolvedPermissions | null>
   /**
    * 工具面工厂:调用方据 key/isSystemThread 装配 `buildManagerToolFace` 的完整依赖并返回
@@ -235,6 +247,7 @@ export class ManagerRegistry {
   private readonly lastIdleReviewCompletedAtMs = new Map<ManagerKey, number>()
   /** 已接收直接人类消息、但尚未成功回复当前会话的 ManagerKey。Loop 回收不清除。 */
   private readonly pendingReplies = new Set<ManagerKey>()
+  private readonly scheduleAdmissions = new Map<string, Promise<{ completion: Promise<EpisodeResult> }>>()
   private resumeReady: Promise<void> = Promise.resolve()
   private releaseResumes?: () => void
   private disposed = false
@@ -291,7 +304,12 @@ export class ManagerRegistry {
         sessionType: wake.messages[0]?.session.type === 'group' ? 'group' : 'private',
       })
     } else if (wake.kind === 'schedule') {
-      permissions = await this.deps.onScheduleWake?.({ key, creatorFriendId: wake.creatorFriendId, isBuiltin: wake.isBuiltin })
+      permissions = await this.deps.onScheduleWake?.({
+        key,
+        creatorFriendId: wake.creatorFriendId,
+        isBuiltin: wake.isBuiltin,
+        targetSession: wake.targetSession,
+      })
     } else return envelope
     return { ...envelope, wake: { ...wake, principalPermissions: permissions ?? undefined } }
   }
@@ -531,31 +549,6 @@ export class ManagerRegistry {
     return this.runWake(key, envelope)
   }
 
-  /**
-   * A supervision due has a persistent pending identity. Check it immediately before admission so
-   * a rule replaced while the event was queued stays audit-only and never creates a Manager episode.
-   */
-  async routeSupervisionDue(event: HarnessEvent): Promise<EpisodeResult | undefined> {
-    if (event.kind !== 'supervision_due') throw new Error('routeSupervisionDue requires supervision_due')
-    if (!await this.deps.harness.isSupervisionDueCurrent(event)) return undefined
-    const { key, envelope } = await this.prepareWorkerEventRoute(event)
-    // A periodic/default supervision due needs a real episode result to decide whether its
-    // persistent due can be consumed. Do not enqueue it into an unrelated active episode
-    // and then fabricate that result: the Harness will retain and retry this due instead.
-    // Route preparation reads the ledger asynchronously, so the due can be cleared or
-    // replaced after the first check. Revalidate immediately before episode admission.
-    if (!await this.deps.harness.isSupervisionDueCurrent(event)) return undefined
-    if (this.isEpisodeActive(key)) return undefined
-    this.noteExternalInput(key, envelope.wake)
-    return this.runWake(
-      key,
-      envelope,
-      0,
-      undefined,
-      () => this.deps.harness.isSupervisionDueCurrent(event),
-    )
-  }
-
   /** Operation notifications join an active episode mailbox; idle Managers get a fresh wake. */
   async routeOperationNotification(
     key: ManagerKey,
@@ -636,22 +629,92 @@ export class ManagerRegistry {
    */
   async routeSchedule(p: {
     scheduleId: string
+    triggerId: string
+    scheduleName: string
     title: string
     description: string
+    priority?: TaskPriority
+    input?: Record<string, unknown>
+    tags?: string[]
     taskType?: string
-    targetSession?: { channel_id: string; session_id: string }
+    targetSession: { channel_id: string; session_id: string; type: 'private' | 'group' }
     creatorFriendId?: string
     isBuiltin?: boolean
   }): Promise<EpisodeResult> {
+    return (await this.admitSchedule(p)).completion
+  }
+
+  admitSchedule(p: {
+    scheduleId: string
+    triggerId: string
+    scheduleName: string
+    title: string
+    description: string
+    priority?: TaskPriority
+    input?: Record<string, unknown>
+    tags?: string[]
+    taskType?: string
+    targetSession: { channel_id: string; session_id: string; type: 'private' | 'group' }
+    creatorFriendId?: string
+    isBuiltin?: boolean
+  }): Promise<{ completion: Promise<EpisodeResult> }> {
+    const existing = this.scheduleAdmissions.get(p.triggerId)
+    if (existing) return existing
+    const admission = this.admitScheduleOnce(p)
+    this.scheduleAdmissions.set(p.triggerId, admission)
+    void admission
+      .then(({ completion }) => completion)
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.scheduleAdmissions.get(p.triggerId) === admission) this.scheduleAdmissions.delete(p.triggerId)
+      })
+    return admission
+  }
+
+  async authorizeSchedule(p: {
+    targetSession: { channel_id: string; session_id: string; type: 'private' | 'group' }
+    creatorFriendId?: string
+    isBuiltin?: boolean
+    requireShell?: boolean
+  }): Promise<ResolvedPermissions | undefined> {
+    const key = `${p.targetSession.channel_id}::${p.targetSession.session_id}` as ManagerKey
+    return (await this.deps.onScheduleWake?.({
+      key,
+      creatorFriendId: p.creatorFriendId,
+      isBuiltin: p.isBuiltin,
+      targetSession: p.targetSession,
+      requireShell: p.requireShell,
+    })) ?? undefined
+  }
+
+  private async admitScheduleOnce(p: {
+    scheduleId: string
+    triggerId: string
+    scheduleName: string
+    title: string
+    description: string
+    priority?: TaskPriority
+    input?: Record<string, unknown>
+    tags?: string[]
+    taskType?: string
+    targetSession: { channel_id: string; session_id: string; type: 'private' | 'group' }
+    creatorFriendId?: string
+    isBuiltin?: boolean
+  }): Promise<{ completion: Promise<EpisodeResult> }> {
     const capture = this.captureIngress()
-    const key = p.targetSession
-      ? (`${p.targetSession.channel_id}::${p.targetSession.session_id}` as ManagerKey)
-      : SYSTEM_TASKS_MANAGER_KEY
+    const key = `${p.targetSession.channel_id}::${p.targetSession.session_id}` as ManagerKey
+    if (this.pendingResumes.has(key)) await this.ensureResumed(key)
     const envelope = this.makeEnvelope(capture, {
       kind: 'schedule',
       scheduleId: p.scheduleId,
+      triggerId: p.triggerId,
+      scheduleName: p.scheduleName,
       title: p.title,
       description: p.description,
+      priority: p.priority,
+      input: p.input,
+      tags: p.tags,
+      targetSession: p.targetSession,
       taskType: p.taskType,
       creatorFriendId: p.creatorFriendId,
       isBuiltin: p.isBuiltin,
@@ -661,29 +724,49 @@ export class ManagerRegistry {
 
     // 调度自己的权限身份在唤醒边界解析一次(§4.4),随事件走。**绝不能退回该 key 的会话级
     // 缓存**:打进人类会话的调度会因此拿到"那个会话最近谁在说话"的档位(PR #59 review)。
-    // 失败不阻断触发:档位缺失只是让 worker 退回固定档位,调度本身照跑。
     try {
-      let principalPermissions: ResolvedPermissions | undefined
-      if (this.deps.onScheduleWake) {
-        try {
-          principalPermissions =
-            (await this.deps.onScheduleWake({
-              key,
-              creatorFriendId: p.creatorFriendId,
-              isBuiltin: p.isBuiltin,
-            })) ?? undefined
-        } catch (err) {
-          console.error(`[ManagerRegistry] schedule '${p.scheduleId}' 的权限身份解析失败,按未解析继续:`, err)
-        }
-      }
-
-      return this.runWake(key, {
+      const principalPermissions = await this.authorizeSchedule({
+        targetSession: p.targetSession,
+        creatorFriendId: p.creatorFriendId,
+        isBuiltin: p.isBuiltin,
+      })
+      const admittedEnvelope: TimedWakeEnvelope = {
         ...envelope,
         wake: {
           ...envelope.wake,
           ...(principalPermissions ? { principalPermissions } : {}),
         },
+      }
+      const loop = this.getOrCreate(key)
+      this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
+      let result: EpisodeResult | undefined
+      const completion = loop.wakeUpPrepared(async () => {
+        this.assertWakeAdmission()
+        if (this.deps.beforeWake) await this.deps.beforeWake(key, admittedEnvelope)
+        this.assertWakeAdmission()
+        const refreshed = await this.authorizeSchedule({
+          targetSession: p.targetSession,
+          creatorFriendId: p.creatorFriendId,
+          isBuiltin: p.isBuiltin,
+        })
+        return {
+          ...admittedEnvelope,
+          wake: { ...admittedEnvelope.wake, principalPermissions: refreshed },
+        }
+      }).then((value) => {
+        result = value
+        return value
+      }).finally(() => {
+        const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
+        if (remaining <= 0) this.activeEpisodes.delete(key)
+        else this.activeEpisodes.set(key, remaining)
+        if (remaining <= 0 && result?.consumedEvents !== true) {
+          loop.rejectPendingActivityMailbox()
+        }
+        this.maybeSelfWake(key, loop, result, 0)
+        this.maybeScheduleIdleReview(key, loop, result, false)
       })
+      return { completion }
     } finally {
       finishPreparation()
     }
@@ -1169,6 +1252,7 @@ function scheduleIdentityOf(wakeEvent: WakeEvent | undefined): ScheduleIdentity 
     creatorFriendId: wakeEvent.creatorFriendId,
     isBuiltin: wakeEvent.isBuiltin,
     taskType: wakeEvent.taskType,
+    targetSession: wakeEvent.targetSession,
   }
 }
 

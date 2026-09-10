@@ -4,7 +4,7 @@
  * @see crabot-docs/protocols/protocol-admin.md
  */
 
-import type { ModuleId, FriendId, PaginatedResult, PaginationParams, TaskId, ScheduleId, SessionId, ProxyConfig } from 'crabot-shared'
+import type { AgentCliExecutionRef, ModuleId, FriendId, PaginatedResult, PaginationParams, TaskId, ScheduleId, SessionId, ProxyConfig } from 'crabot-shared'
 
 export type { ProxyConfig }
 
@@ -376,6 +376,22 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   jwt_secret_env: 'CRABOT_JWT_SECRET',
   token_ttl: 86400, // 24 hours
   data_dir: './data/admin',
+}
+
+export interface AgentCliCredentialContext {
+  execution: AgentCliExecutionRef
+  manager_key: string
+  target_session: ScheduleTargetSession
+  creator_friend_id?: FriendId
+}
+
+export interface IssueAgentCliCredentialParams {
+  context: AgentCliCredentialContext
+}
+
+export interface IssueAgentCliCredentialResult {
+  token: string
+  expires_at: string
 }
 
 // ============================================================================
@@ -786,6 +802,19 @@ export interface ScheduleTaskTemplate {
   tags: string[]
 }
 
+export interface ScheduleScriptInput {
+  source: string
+  timeout_seconds?: number
+  deliver_result?: boolean
+}
+
+export interface ScheduleScript {
+  source: string
+  source_sha256: string
+  timeout_seconds: number
+  deliver_result: boolean
+}
+
 /**
  * Schedule 触发的 task 的目标会话。
  *
@@ -813,8 +842,10 @@ export interface Schedule {
   enabled: boolean
   /** 触发器配置 */
   trigger: ScheduleTrigger
-  /** 任务模板 */
-  task_template: ScheduleTaskTemplate
+  /** 普通 instruction 内容；与 script 恰好一个存在。 */
+  task_template?: ScheduleTaskTemplate
+  /** inline Bash 内容；与 task_template 恰好一个存在。 */
+  script?: ScheduleScript
   /** 上次执行时间 */
   last_triggered_at?: string
   /** 下次执行时间 */
@@ -847,6 +878,11 @@ export interface Schedule {
    * 历史 schedule 通过启动迁移从 task_template.input.target_channel_id/_session_id 自动迁移。
    */
   target_session?: ScheduleTargetSession
+}
+
+/** 默认脱敏的 API/Manager 投影。 */
+export type ScheduleView = Omit<Schedule, 'script'> & {
+  script?: Omit<ScheduleScript, 'source'> & { source?: string }
 }
 
 // ============================================================================
@@ -1067,12 +1103,11 @@ export interface TaskStats {
 // ============================================================================
 
 // 创建调度
-export interface CreateScheduleParams {
+export type CreateScheduleParams = {
   name: string
   description?: string
   enabled?: boolean
   trigger: ScheduleTrigger
-  task_template: ScheduleTaskTemplate
   /**
    * 创建者 Friend ID。
    * - 用户/CLI 调用必须传：触发时 task 沿用该 friend 的权限。
@@ -1081,19 +1116,23 @@ export interface CreateScheduleParams {
   creator_friend_id?: FriendId
   /** 目标会话（可选）。详见 ScheduleTargetSession。 */
   target_session?: ScheduleTargetSession
-}
+} & (
+  | { task_template: ScheduleTaskTemplate; script?: never }
+  | { task_template?: never; script: ScheduleScriptInput }
+)
 
 export interface CreateScheduleResult {
-  schedule: Schedule
+  schedule: ScheduleView
 }
 
 // 获取调度
 export interface GetScheduleParams {
   schedule_id: ScheduleId
+  include_script_source?: boolean
 }
 
 export interface GetScheduleResult {
-  schedule: Schedule
+  schedule: ScheduleView
 }
 
 // 调度列表过滤
@@ -1108,27 +1147,22 @@ export interface ListSchedulesParams extends PaginationParams {
   filter?: ScheduleFilter
 }
 
-export type ListSchedulesResult = PaginatedResult<Schedule>
+export type ListSchedulesResult = PaginatedResult<ScheduleView>
 
 // 更新调度
 export interface UpdateScheduleParams {
   schedule_id: ScheduleId
+  expected_content_kind?: 'instruction' | 'script'
   name?: string
   description?: string
   enabled?: boolean
   trigger?: ScheduleTrigger
-  task_template?: ScheduleTaskTemplate
-  /**
-   * 目标会话。
-   * - 不传字段：不变
-   * - 传 null：清除已配置的 target_session
-   * - 传对象：更新为新值
-   */
-  target_session?: ScheduleTargetSession | null
+  task_template?: ScheduleTaskTemplate | null
+  script?: ScheduleScriptInput | null
 }
 
 export interface UpdateScheduleResult {
-  schedule: Schedule
+  schedule: ScheduleView
 }
 
 // 删除调度
@@ -1143,11 +1177,12 @@ export interface DeleteScheduleResult {
 // 立即触发
 export interface TriggerNowParams {
   schedule_id: ScheduleId
+  expected_content_kind?: 'instruction' | 'script'
 }
 
 export interface TriggerNowResult {
-  task: Task
-  schedule: Schedule
+  accepted: true
+  task_id?: TaskId
 }
 
 // ============================================================================
@@ -1783,11 +1818,16 @@ export interface AdminEventPayloads {
   'admin.task_plan_updated': { task_id: TaskId; plan: TaskPlan }
   'admin.task_cancelled': { task_id: TaskId; reason?: string }
   'admin.task_updated': { task: Task }
-  'admin.schedule_created': { schedule: Schedule }
-  'admin.schedule_updated': { schedule: Schedule }
+  'admin.schedule_created': { schedule: ScheduleView }
+  'admin.schedule_updated': { schedule: ScheduleView }
   'admin.schedule_deleted': { schedule_id: ScheduleId }
   /** P7/J：`trigger_schedule` 受理即返回，触发的那一刻还不存在 task，故不再带 task_id。 */
-  'admin.schedule_triggered': { schedule: Schedule }
+  'admin.schedule_triggered': {
+    schedule_id: ScheduleId
+    trigger_id: string
+    trigger_type: ScheduleTriggerType
+    task_id?: TaskId
+  }
   'admin.model_provider_created': { provider: ModelProvider }
   'admin.model_provider_updated': { provider: ModelProvider }
   'admin.model_provider_deleted': { provider_id: string }

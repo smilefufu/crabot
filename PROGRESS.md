@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后整理：2026-09-08
+> 最后整理：2026-09-10
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
@@ -17,6 +17,13 @@
 - 真实输入和任务板变化不再推迟其它停滞事项；忙碌时延后重算，自省正常收口后至少隔一小时再次复核，空板停止，失败不重试、重启不恢复计时。
 - Manager 全目录 562 项回归、TypeScript 与隔离 Docker 确定性评测 20 项断言通过。
 - `mirror-xinshu / gpt-6-astra` 隔离真实模型评测：12 场景各 3 次、408 项断言全部通过（219 次请求）；其中新增多任务场景 51 项断言验证活跃事项安排保持正确、超时事项按人类最新意图复核收口。运行实例尚未部署。
+
+### Scheduler 定时 instruction、脚本 Schedule 与旧 Supervision 退役：实现完成，待 PR 审查
+
+- 普通 Schedule 按完整目标会话进入 Manager 串行队列；Manager 获得通用 Schedule CRUD，Worker 生命周期不再驱动任何巡检 Schedule。
+- 脚本 Schedule 使用独立 Bash runner、active marker 和现有 trace，可选把有界结果投递给同一 Manager；每次触发重新校验 Schedule 与 shell 权限。
+- Agent CLI 凭据绑定 exact Worker incarnation 或 legacy task，主线与 query fork 同权；只有 Master 私聊可跨会话管理 Schedule，凭据不进入全局环境或脚本子进程。
+- 旧 supervision 生产状态、事件和专用工具已删除，liveness sweep 保留；启动迁移先备份 ledger，只报告无法安全自动重建的旧 periodic 候选。
 
 ### builtin Worker 恢复、观测与 subagent 控制：实现完成，待 PR 审查
 
@@ -394,15 +401,6 @@
   私聊不变；agent 侧无代码改动（唤醒边界照常调 RPC）。
 - 关联：落地后解除 PR #131 权限 review 线程前提（注入借 primary wake 档位提权），
   #131 另一门禁（§4.1 协议例外）已随 docs 落地。
-- **follow-up（#133 review 记录，schedule 权限语义属 spec 非目标、另行立项）**：
-  `crabot-agent/src/manager/bootstrap.ts` `onScheduleWake` 用
-  `principals.get(key)?.principal.sessionType ?? 'private'` 猜会话类型——群聊会话在
-  agent 重启后、尚未被人类消息唤醒过的窗口内猜成 'private'，schedule 解析走私聊路径
-  （master creator 拿回 master_private、普通 creator 拿 friend∪session 并集，均 ≥ 群档位），
-  与群级统一不变量相悖。相对改动前无回归（旧代码群聊 master 本来也短路）；窗口窄
-  （需重启 + 该群无人类消息 + 恰有带 creator 的 schedule 触发）。修法方向：
-  TriggerScheduleParams.target_session 带 session_type（协议改动）或按 session_id
-  特征/配置反查，需 spec。
 
 ### 移除 macOS FDA 放开机制，受保护目录无条件排除：已合并（PR #129 → `3e268439`）
 
@@ -589,7 +587,6 @@
   telegram 缺失（wechat 已随 PR #124 实现）。
 - **内置能力归属完成后的后续设计**：当前能力归属 spec 实现并验收完成后，再依次处理三项独立设计：Schedule 支持受控的无 LLM operation，并用其承载 `Memory.run_maintenance("all")`；Manager 获得按 domain 枚举、复用既有权限/确认/undo/审核/脱敏语义的结构化 Crabot 管理工具面；清理活跃代码中会被误解为第三种 Agent 的遗留模块容器命名。三项均不得并入当前能力归属实现。
 - **Worker/subagent trace 写点的同类硬截断**：`agent-handler.ts`（`.slice(0, 200/500)`）与 `unified-agent.ts`（`.slice(0, 300)`）对工具 span 摘要仍用整段硬截，与已修复的 manager episode span 同模式；目前无消费方受害（episode 投影不读这些 trace），若未来对其启用结构化提取应先改造为 `span-summary.ts` 的字段级截断（2026-08-27，`7cd86abf`）。
-- **Worker 巡检调度收口**：启动对账与周期巡检应共享 due 投递排他；避免单个 Worker 的长锁阻塞全局活性巡检；默认巡检在全局 LLM 故障时需要有界的失败告警去重/退避。三项均需独立设计，不纳入当前任务巡检 PR。
 - **移除 Agent 内部 legacy `roles` seam**：`AgentLayerConfig.roles` 是 v2 前多 Agent 时代残留（正式协议从未包含），现仅作内部测试 seam/恒真分支；应替换为显式的 worker-layer 开关后删除。
 - **普通 Channel 在 Manager 接收前的跨重启恢复**：未进入 Manager 的 Channel/lane 内存缓冲仍不在本次检查点覆盖范围；若需保证这一阶段跨进程投递，另行处理。2026-09-06 核对确认已提交的原始人类输入保留在 Manager history，缺失的是未完成 episode 主动续跑，见当前修复。
 - 失败 Manager episode 的通用带退避 mailbox retry；跨 session 代发目标 Manager 持久注记（§4.2）；Codex provision `auth.json` 错误吞没；P8 调试工具/内部文档重写。

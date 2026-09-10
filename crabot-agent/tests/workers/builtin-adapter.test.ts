@@ -485,20 +485,6 @@ describe('BuiltinWorkerAdapter', () => {
     expect(onNativeActivity).toHaveBeenCalled()
   })
 
-  it('没有可读结构化 trace 时，巡检保守返回 unknown', async () => {
-    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
-    const h = await adapter.spawn(spec({
-      adapter: makeAdapter([{ stopReason: 'end_turn' }]),
-    }))
-
-    await expect(adapter.inspectSupervisionActivity(h, { offset: 3 })).resolves.toEqual({
-      kind: 'unknown',
-      next_cursor: { offset: 3 },
-    })
-
-    await adapter.kill(h)
-  })
-
   it('llm span 分开投影模型调用与 assistant 文本，且 cursor 按 span 推进一次', async () => {
     const longAssistantText = `先检查当前配置。\n${'这是完整的子 Agent 输出。'.repeat(40)}`
     const trace = {
@@ -547,10 +533,6 @@ describe('BuiltinWorkerAdapter', () => {
     expect(first.nextCursor).toEqual({ offset: 3 })
 
     await expect(adapter.readTrace(h, first.nextCursor)).resolves.toEqual({ events: [], nextCursor: { offset: 3 } })
-    await expect(adapter.inspectSupervisionActivity(h, { offset: 2 })).resolves.toEqual({
-      kind: 'text',
-      next_cursor: { offset: 3 },
-    })
   })
 
   it('append-only 工具结果可从上次 cursor 单独读到，并与调用共享 call_id', async () => {
@@ -1389,6 +1371,8 @@ describe('BuiltinWorkerAdapter', () => {
     await adapter2.sendInput(h, '重启后继续')
     await waitState(adapter2, h, 'idle')
 
+    const restored = (adapter2 as any).instances.get(`${workerId}#1`) as { executionEnv?: Record<string, string> }
+    expect(restored.executionEnv).toEqual({ CRABOT_ACTOR: 'agent' })
     const meta = JSON.parse(await fs.readFile(join(tmp, workerId, 'meta-1.json'), 'utf-8'))
     expect(meta.state).toBe('idle')
     const tree = await SessionTree.load(join(tmp, workerId, 'session.jsonl'))

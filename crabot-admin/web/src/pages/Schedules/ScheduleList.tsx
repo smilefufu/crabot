@@ -1,5 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { scheduleService, type CreateScheduleData } from '../../services/schedule'
+import {
+  scheduleService,
+  type CreateScheduleData,
+  type UpdateScheduleData,
+} from '../../services/schedule'
 import { channelService } from '../../services/channel'
 import { sessionService, type ChannelSession } from '../../services/session'
 import { MainLayout } from '../../components/Layout/MainLayout'
@@ -11,6 +15,7 @@ import type {
   Schedule,
   ScheduleTrigger,
   ScheduleTriggerType,
+  ScheduleScriptInput,
   ScheduleTaskTemplate,
   ChannelInstance,
 } from '../../types'
@@ -84,10 +89,14 @@ interface ScheduleFormState {
   cronTimezone: string
   intervalSeconds: string
   onceAt: string
+  contentType: 'instruction' | 'script'
   taskTitle: string
   taskDescription: string
   taskPriority: string
   taskTags: string
+  scriptSource: string
+  scriptTimeoutSeconds: string
+  scriptDeliverResult: boolean
   /** 目标 channel id；空串表示未配置 */
   targetChannelId: string
   /** 目标 session id；空串表示未配置 */
@@ -105,10 +114,14 @@ const EMPTY_FORM: ScheduleFormState = {
   cronTimezone: '',
   intervalSeconds: '3600',
   onceAt: '',
+  contentType: 'instruction',
   taskTitle: '',
   taskDescription: '',
   taskPriority: 'normal',
   taskTags: '',
+  scriptSource: '',
+  scriptTimeoutSeconds: '120',
+  scriptDeliverResult: false,
   targetChannelId: '',
   targetSessionId: '',
   targetSessionType: '',
@@ -140,7 +153,7 @@ export function buildScheduleTargetSession(
   }
 }
 
-function formToPayload(
+export function formToPayload(
   form: ScheduleFormState,
   sessions: ChannelSession[],
   existingSchedule?: Schedule | null,
@@ -162,12 +175,22 @@ function formToPayload(
       break
   }
 
-  const task_template: ScheduleTaskTemplate = {
-    title: form.taskTitle.trim(),
-    description: form.taskDescription.trim() || undefined,
-    priority: form.taskPriority as ScheduleTaskTemplate['priority'],
-    tags: form.taskTags.split(',').map(s => s.trim()).filter(Boolean),
-  }
+  const content = form.contentType === 'instruction'
+    ? {
+        task_template: {
+          title: form.taskTitle.trim(),
+          description: form.taskDescription.trim() || undefined,
+          priority: form.taskPriority as ScheduleTaskTemplate['priority'],
+          tags: form.taskTags.split(',').map(s => s.trim()).filter(Boolean),
+        },
+      }
+    : {
+        script: {
+          source: form.scriptSource,
+          timeout_seconds: Number(form.scriptTimeoutSeconds),
+          deliver_result: form.scriptDeliverResult,
+        } satisfies ScheduleScriptInput,
+      }
 
   const targetSession = buildScheduleTargetSession(
     {
@@ -184,22 +207,41 @@ function formToPayload(
     description: form.description.trim() || undefined,
     enabled: form.enabled,
     trigger,
-    task_template,
+    ...content,
     ...(targetSession ? { target_session: targetSession } : {}),
-  }
+  } as CreateScheduleData
 }
 
-function scheduleToForm(s: Schedule): ScheduleFormState {
+export function buildScheduleUpdateData(
+  form: ScheduleFormState,
+  existingSchedule: Schedule,
+): UpdateScheduleData {
+  const { target_session: _targetSession, ...payload } = formToPayload(form, [], existingSchedule)
+  if (form.contentType === 'instruction' && existingSchedule.script) {
+    return { ...payload, script: null }
+  }
+  if (form.contentType === 'script' && existingSchedule.task_template) {
+    return { ...payload, task_template: null }
+  }
+  return payload
+}
+
+export function scheduleToForm(s: Schedule): ScheduleFormState {
+  const task = s.task_template
   const base: ScheduleFormState = {
     ...EMPTY_FORM,
     name: s.name,
     description: s.description ?? '',
     enabled: s.enabled,
     triggerType: s.trigger.type,
-    taskTitle: s.task_template.title,
-    taskDescription: s.task_template.description ?? '',
-    taskPriority: s.task_template.priority,
-    taskTags: s.task_template.tags.join(', '),
+    contentType: s.script ? 'script' : 'instruction',
+    taskTitle: task?.title ?? '',
+    taskDescription: task?.description ?? '',
+    taskPriority: task?.priority ?? 'normal',
+    taskTags: task?.tags.join(', ') ?? '',
+    scriptSource: s.script?.source ?? '',
+    scriptTimeoutSeconds: String(s.script?.timeout_seconds ?? 120),
+    scriptDeliverResult: s.script?.deliver_result ?? false,
     targetChannelId: s.target_session?.channel_id ?? '',
     targetSessionId: s.target_session?.session_id ?? '',
     targetSessionType: s.target_session?.type ?? '',
@@ -343,16 +385,30 @@ export const ScheduleList: React.FC = () => {
     setShowForm(true)
   }
 
-  const openEdit = (s: Schedule) => {
-    setEditingId(s.id)
-    setEditingSchedule(s)
-    setForm(scheduleToForm(s))
-    setShowForm(true)
+  const openEdit = async (s: Schedule) => {
+    try {
+      const schedule = s.script ? (await scheduleService.get(s.id, true)).schedule : s
+      setEditingId(schedule.id)
+      setEditingSchedule(schedule)
+      setForm(scheduleToForm(schedule))
+      setShowForm(true)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '加载计划失败')
+    }
   }
 
   const handleSave = async () => {
     if (!form.name.trim()) { toast.error('名称不能为空'); return }
-    if (!form.taskTitle.trim()) { toast.error('任务标题不能为空'); return }
+    if (form.contentType === 'instruction' && !form.taskTitle.trim()) {
+      toast.error('任务标题不能为空'); return
+    }
+    if (form.contentType === 'script') {
+      const timeout = Number(form.scriptTimeoutSeconds)
+      if (!form.scriptSource.trim()) { toast.error('脚本不能为空'); return }
+      if (!Number.isInteger(timeout) || timeout < 1 || timeout > 600) {
+        toast.error('脚本超时必须是 1 到 600 秒'); return
+      }
+    }
     if (form.triggerType === 'interval') {
       const s = parseInt(form.intervalSeconds, 10)
       if (!s || s < 1) { toast.error('间隔秒数必须大于 0'); return }
@@ -361,18 +417,11 @@ export const ScheduleList: React.FC = () => {
 
     setSaving(true)
     try {
-      const payload = formToPayload(form, sessions, editingSchedule)
       if (editingId) {
-        // 更新路径：若用户清空了原本配置过的 target_session，传 null 显式清除
-        const wasTargetSet = !!editingSchedule?.target_session
-        const nowTargetSet = !!payload.target_session
-        const updateData = wasTargetSet && !nowTargetSet
-          ? { ...payload, target_session: null }
-          : payload
-        await scheduleService.update(editingId, updateData)
+        await scheduleService.update(editingId, buildScheduleUpdateData(form, editingSchedule!))
         toast.success('更新成功')
       } else {
-        await scheduleService.create(payload)
+        await scheduleService.create(formToPayload(form, sessions))
         toast.success('创建成功')
       }
       setShowForm(false)
@@ -609,62 +658,124 @@ export const ScheduleList: React.FC = () => {
               </div>
             )}
 
-            {/* Task template */}
-            <div style={{ ...sectionTitle, marginTop: '1.25rem' }}>任务模板</div>
-            <div className="sched-form-grid-2">
-              <div>
-                <label style={labelStyle}>任务标题 *</label>
-                <input
-                  className="input"
-                  value={form.taskTitle}
-                  onChange={e => updateForm({ taskTitle: e.target.value })}
-                  placeholder="支持 {{date}} {{time}} {{schedule_name}}"
-                />
-              </div>
-              <div>
-                <label style={labelStyle}>优先级</label>
-                <select
-                  className="select"
-                  value={form.taskPriority}
-                  onChange={e => updateForm({ taskPriority: e.target.value })}
+            {/* Schedule content */}
+            <div style={{ ...sectionTitle, marginTop: '1.25rem' }}>执行内容</div>
+            <div className="sched-trigger-tabs">
+              {(['instruction', 'script'] as const).map(type => (
+                <button
+                  key={type}
+                  type="button"
+                  className={`sched-trigger-tab ${form.contentType === type ? 'active' : ''}`}
+                  onClick={() => updateForm({ contentType: type })}
                 >
-                  <option value="low">低</option>
-                  <option value="normal">普通</option>
-                  <option value="high">高</option>
-                  <option value="urgent">紧急</option>
-                </select>
-              </div>
-            </div>
-            <div style={{ marginTop: '0.75rem' }}>
-              <label style={labelStyle}>任务描述</label>
-              <textarea
-                className="input"
-                value={form.taskDescription}
-                onChange={e => updateForm({ taskDescription: e.target.value })}
-                rows={3}
-                placeholder="详细描述任务内容（支持模板变量）"
-                style={{ resize: 'vertical' }}
-              />
-            </div>
-            <div style={{ marginTop: '0.75rem' }}>
-              <label style={labelStyle}>标签（逗号分隔）</label>
-              <input
-                className="input"
-                value={form.taskTags}
-                onChange={e => updateForm({ taskTags: e.target.value })}
-                placeholder="例: reflection, reminder, builtin"
-              />
+                  {type === 'instruction' ? '指令' : '脚本'}
+                </button>
+              ))}
             </div>
 
+            {form.contentType === 'instruction' ? (
+              <>
+                <div className="sched-form-grid-2" style={{ marginTop: '0.75rem' }}>
+                  <div>
+                    <label style={labelStyle}>任务标题 *</label>
+                    <input
+                      className="input"
+                      value={form.taskTitle}
+                      onChange={e => updateForm({ taskTitle: e.target.value })}
+                      placeholder="支持 {{date}} {{time}} {{schedule_name}}"
+                    />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>优先级</label>
+                    <select
+                      className="select"
+                      value={form.taskPriority}
+                      onChange={e => updateForm({ taskPriority: e.target.value })}
+                    >
+                      <option value="low">低</option>
+                      <option value="normal">普通</option>
+                      <option value="high">高</option>
+                      <option value="urgent">紧急</option>
+                    </select>
+                  </div>
+                </div>
+                <div style={{ marginTop: '0.75rem' }}>
+                  <label style={labelStyle}>任务描述</label>
+                  <textarea
+                    className="input"
+                    value={form.taskDescription}
+                    onChange={e => updateForm({ taskDescription: e.target.value })}
+                    rows={3}
+                    placeholder="详细描述任务内容（支持模板变量）"
+                    style={{ resize: 'vertical' }}
+                  />
+                </div>
+                <div style={{ marginTop: '0.75rem' }}>
+                  <label style={labelStyle}>标签（逗号分隔）</label>
+                  <input
+                    className="input"
+                    value={form.taskTags}
+                    onChange={e => updateForm({ taskTags: e.target.value })}
+                    placeholder="例: reflection, reminder, builtin"
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ marginTop: '0.75rem' }}>
+                  <label style={labelStyle}>Bash 脚本 *</label>
+                  <textarea
+                    className="input mono"
+                    value={form.scriptSource}
+                    onChange={e => updateForm({ scriptSource: e.target.value })}
+                    rows={8}
+                    spellCheck={false}
+                    style={{ resize: 'vertical' }}
+                  />
+                </div>
+                <div className="sched-form-grid-2" style={{ marginTop: '0.75rem' }}>
+                  <div>
+                    <label style={labelStyle}>超时（秒）</label>
+                    <input
+                      className="input"
+                      type="number"
+                      min="1"
+                      max="600"
+                      value={form.scriptTimeoutSeconds}
+                      onChange={e => updateForm({ scriptTimeoutSeconds: e.target.value })}
+                    />
+                  </div>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginTop: '1.25rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={form.scriptDeliverResult}
+                      onChange={e => updateForm({ scriptDeliverResult: e.target.checked })}
+                    />
+                    <span style={{ fontSize: '0.85rem' }}>将执行结果投递给 Manager</span>
+                  </label>
+                </div>
+                {editingSchedule?.script && (
+                  <div className="mono" style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
+                    SHA-256: {editingSchedule.script.source_sha256}
+                  </div>
+                )}
+              </>
+            )}
+
             {/* Target session */}
-            <div style={{ ...sectionTitle, marginTop: '1.25rem' }}>目标会话（可选）</div>
+            <div style={{ ...sectionTitle, marginTop: '1.25rem' }}>目标会话{editingId ? '' : '（可选）'}</div>
+            {editingId ? (
+              <div className="mono" style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                {form.targetChannelId}::{form.targetSessionId} [{form.targetSessionType}]
+              </div>
+            ) : <>
             <div style={{
               fontSize: '0.75rem',
               color: 'var(--text-muted)',
               marginBottom: '0.75rem',
               lineHeight: 1.5,
             }}>
-              配置后 schedule 触发时 worker 直接知道往哪发；不配置则任务自行决定汇报对象。
+              未选择时使用 Admin 系统会话。
             </div>
             <div className="sched-form-grid-2">
               <div>
@@ -734,6 +845,7 @@ export const ScheduleList: React.FC = () => {
                 </button>
               </div>
             )}
+            </>}
 
             {/* Enabled toggle */}
             <div style={{ marginTop: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -801,6 +913,9 @@ export const ScheduleList: React.FC = () => {
                       }}
                     >
                       {triggerTypeLabel(s.trigger.type)}
+                    </span>
+                    <span className="sched-badge" style={{ background: 'var(--surface-raised)', color: 'var(--text-secondary)' }}>
+                      {s.script ? '脚本' : '指令'}
                     </span>
                     {s.is_builtin && (
                       <span className="sched-badge" style={{
@@ -890,21 +1005,30 @@ export const ScheduleList: React.FC = () => {
                         : '--'}
                     </span>
                   </div>
-                  <div className="sched-stat">
-                    <span className="sched-stat-label">任务模板</span>
-                    <span className="sched-stat-value" style={{ fontSize: '0.75rem' }}>
-                      {s.task_template.title.length > 30
-                        ? s.task_template.title.slice(0, 30) + '...'
-                        : s.task_template.title}
-                      <span style={{ color: 'var(--text-muted)', marginLeft: '0.5rem' }}>
-                        [{priorityLabel(s.task_template.priority)}]
+                  {s.task_template ? (
+                    <div className="sched-stat">
+                      <span className="sched-stat-label">指令</span>
+                      <span className="sched-stat-value" style={{ fontSize: '0.75rem' }}>
+                        {s.task_template.title.length > 30
+                          ? s.task_template.title.slice(0, 30) + '...'
+                          : s.task_template.title}
+                        <span style={{ color: 'var(--text-muted)', marginLeft: '0.5rem' }}>
+                          [{priorityLabel(s.task_template.priority)}]
+                        </span>
                       </span>
-                    </span>
-                  </div>
+                    </div>
+                  ) : s.script && (
+                    <div className="sched-stat">
+                      <span className="sched-stat-label">脚本</span>
+                      <span className="sched-stat-value mono" style={{ fontSize: '0.75rem' }}>
+                        {s.script.source_sha256.slice(0, 12)} · {s.script.timeout_seconds}s · {s.script.deliver_result ? '投递结果' : '不投递'}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Tags */}
-                {s.task_template.tags.length > 0 && (
+                {s.task_template && s.task_template.tags.length > 0 && (
                   <div className="sched-card-tags">
                     {s.task_template.tags.map(tag => (
                       <span key={tag} className="sched-tag">{tag}</span>

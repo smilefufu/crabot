@@ -199,6 +199,37 @@ describe('Manager restart continuation', () => {
     expect((await store.load(KEY)).committedHumanMessageIds).toEqual(expect.arrayContaining(['original', 'queued']))
   })
 
+  it('restores an interrupted episode before admitting a schedule for the same Manager', async () => {
+    const old = registry({ async *stream() { await new Promise(() => {}) }, updateConfig() {} })
+    void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Original instruction')])
+    const checkpoint = await checkpointWhere((value) => value.hasEngineMessages)
+    const inputs: string[] = []
+    const restored = registry({
+      async *stream(params) { inputs.push(JSON.stringify(params.messages)); yield* chunksFromContent([], 'end_turn') },
+      updateConfig() {},
+    })
+    restored.registerResumeCheckpoints([checkpoint])
+    trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
+    const scheduled = restored.routeSchedule({
+      scheduleId: 'follow-up', triggerId: 'follow-up-trigger', scheduleName: 'Follow up',
+      title: 'Follow up', description: 'Scheduled follow-up',
+      targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' },
+    })
+    await Promise.resolve()
+    expect(inputs).toHaveLength(0)
+
+    await restored.resumeInterruptedEpisodes()
+    await scheduled
+    expect(inputs).toHaveLength(2)
+    expect(inputs[0]).toContain('Original instruction')
+    expect(inputs[0]).not.toContain('Scheduled follow-up')
+    expect(inputs[1]).toContain('Original instruction')
+    expect(inputs[1]).toContain('Scheduled follow-up')
+    const history = JSON.stringify((await store.load(KEY)).recent)
+    expect(history).toContain('Original instruction')
+    expect(history).toContain('Scheduled follow-up')
+  })
+
   it('resumes an initial checkpoint with the original human identity and freshly resolved permissions', async () => {
     const friend: Friend = {
       id: 'original-friend', display_name: 'Original friend', permission: 'normal',
@@ -522,8 +553,12 @@ describe('Manager restart continuation', () => {
 
   it('settles a failed continuation without replaying the restored schedule as a new wake', async () => {
     const old = registry({ async *stream() { await new Promise(() => {}) }, updateConfig() {} })
-    void old.routeSchedule({ scheduleId: 'original-schedule', title: 'Original schedule', description: 'Original scheduled instruction',
-      creatorFriendId: 'creator', targetSession: { channel_id: 'feishu', session_id: 'restart-test' } })
+    void old.routeSchedule({
+      scheduleId: 'original-schedule', triggerId: 'original-trigger', scheduleName: 'Original schedule',
+      title: 'Original schedule', description: 'Original scheduled instruction',
+      creatorFriendId: 'creator',
+      targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' },
+    })
     const checkpoint = await checkpointWhere((value) => value.hasEngineMessages)
     const resolve = vi.fn(async () => null)
     let shouldFail = true
@@ -535,7 +570,12 @@ describe('Manager restart continuation', () => {
     restored.registerResumeCheckpoints([checkpoint])
     trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
     await restored.resumeInterruptedEpisodes()
-    expect(resolve).toHaveBeenCalledWith({ key: KEY, creatorFriendId: 'creator', isBuiltin: undefined })
+    expect(resolve).toHaveBeenCalledWith({
+      key: KEY,
+      creatorFriendId: 'creator',
+      isBuiltin: undefined,
+      targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' },
+    })
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('failed')
     expect(await store.loadCheckpoint(KEY)).toBeUndefined()
     expect(restored.getOrCreate(KEY).hasPendingMailbox).toBe(false)

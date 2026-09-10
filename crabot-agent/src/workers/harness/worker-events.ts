@@ -39,7 +39,6 @@ export type HarnessEventKind =
    */
   | 'query_failed'
   | 'query_completed'
-  | 'supervision_due'
   /** Durable wake for a mainline execution carrier that was confirmed crashed after restart. */
   | 'worker_recovery_required'
   /** v2 import history record: persisted only, never bridged to a Manager wake. */
@@ -97,7 +96,10 @@ export interface ActivityContextAdmissionReceipt {
   readonly reject: () => Promise<void>
 }
 
-function parseLine(line: string): HarnessEvent | null {
+/** Append-only audit records may contain kinds retired from the live event union. */
+export type HistoricalHarnessEvent = Omit<HarnessEvent, 'kind'> & { readonly kind: string }
+
+function parseLine(line: string): HistoricalHarnessEvent | null {
   const trimmed = line.trim()
   if (!trimmed) return null
   try {
@@ -112,13 +114,13 @@ function parseLine(line: string): HarnessEvent | null {
     ) {
       // task_status 是 P5 additive 字段:老日志文件里没有,读回来就是没有(与在线事件缺席
       // 时同一含义,见字段注释)。按字符串校验后原样带回,不让往返读丢字段。
-      const base: HarnessEvent = {
+      const base = {
         ts: parsed.ts,
         kind: parsed.kind,
         worker_id: parsed.worker_id,
         seq: parsed.seq,
       }
-      const event: HarnessEvent =
+      const event: HistoricalHarnessEvent =
         typeof parsed.task_status === 'string' ? { ...base, task_status: parsed.task_status } : base
       return 'detail' in parsed ? { ...event, detail: parsed.detail } : event
     }
@@ -146,7 +148,7 @@ export class WorkerEventLog {
     })
   }
 
-  async readAll(): Promise<HarnessEvent[]> {
+  async readAll(): Promise<HistoricalHarnessEvent[]> {
     let text: string
     try {
       text = await fs.readFile(this.filePath, 'utf-8')
@@ -154,7 +156,7 @@ export class WorkerEventLog {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
       throw error
     }
-    const events: HarnessEvent[] = []
+    const events: HistoricalHarnessEvent[] = []
     for (const line of text.split('\n')) {
       const event = parseLine(line)
       if (event) events.push(event)

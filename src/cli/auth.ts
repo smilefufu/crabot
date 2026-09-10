@@ -47,6 +47,12 @@ function resolveToken(opts: { token?: string; crabotHome?: string }, offset: num
     return envToken
   }
 
+  if (process.env['CRABOT_ACTOR'] === 'agent') {
+    throw new Error(
+      'Cannot resolve Agent auth token. CRABOT_TOKEN is required; Admin internal-token fallback is disabled.'
+    )
+  }
+
   // When DATA_DIR is absolute (set by MM to a module-specific path like /path/data/agent),
   // the admin token lives in the sibling admin directory.
   // path.join does NOT reset on absolute mid-segments (unlike path.resolve), so we must

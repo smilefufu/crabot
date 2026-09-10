@@ -50,6 +50,7 @@ import {
 } from '../engine/index.js'
 import type { HumanMessageQueueLike } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex'
+import type { TaskPriority } from '../workers/harness/ledger-types.js'
 import { formatChannelMessageLine, type QuotedMessageEntry } from '../prompt-manager.js'
 import { prefetchQuotedMessages, type PrefetchQuotedDeps } from '../utils/quoted-message-prefetcher.js'
 import { splitManagerKey } from './principal.js'
@@ -142,8 +143,18 @@ export type WakeEvent =
   | {
       readonly kind: 'schedule'
       readonly scheduleId: string
+      readonly triggerId: string
+      readonly scheduleName: string
       readonly title: string
       readonly description: string
+      readonly priority?: TaskPriority
+      readonly input?: Record<string, unknown>
+      readonly tags?: ReadonlyArray<string>
+      readonly targetSession: {
+        readonly channel_id: string
+        readonly session_id: string
+        readonly type: 'private' | 'group'
+      }
       /**
        * Schedule task subtype. It controls the per-episode tool face but never enters
        * the rendered schedule prompt.
@@ -584,6 +595,11 @@ export class ManagerLoop {
   ): Promise<EpisodeResult> {
     assertTimedWakeEnvelope(envelope)
     return this.mutex.run(() => this.runEpisode(envelope, onHumanInputCommitted))
+  }
+
+  /** Queue now, then refresh authorization at the exact episode boundary. */
+  async wakeUpPrepared(prepare: () => Promise<TimedWakeEnvelope>): Promise<EpisodeResult> {
+    return this.mutex.run(async () => this.runEpisode(await prepare()))
   }
 
   /**
@@ -1291,8 +1307,7 @@ export class ManagerLoop {
     if (consumedEvents) {
       const priorRecent = state.recent
       const newRecent = persistedFinalMessages.slice(attempt.hasSummaryMarker ? 1 : 0)
-      // recent 已滚动:修剪不再被引用的图片路径(按新旧 recent 并集判活,supervision 分支
-      // 会恢复 priorRecent,误删活引用比多留死条目更糟)。
+      // recent 已滚动:按新旧 recent 并集判活，避免误删仍被引用的图片路径。
       const prunedImageRefs = pruneImageRefs(state.imageRefs, [...newRecent, ...priorRecent])
       state = {
         ...state,
@@ -1301,27 +1316,8 @@ export class ManagerLoop {
         ...(prunedImageRefs !== state.imageRefs ? { imageRefs: prunedImageRefs } : {}),
       }
       await this.deps.store.save(state)
-      const localSupervisionSummary = defaultSupervisionHistorySummary({
-        envelope,
-        carriedEnvelopes,
-        injectedEnvelopes: this.currentEpisodeInjected ?? [],
-        outcome: attempt.result.outcome,
-        usedForceHotRetry,
-        priorRecentCount: priorRecent.length,
-        hasSummaryMarker: attempt.hasSummaryMarker,
-        finalMessages: persistedFinalMessages,
-        startedAt: envelope?.received_at,
-        endedAt: this.deps.now().toISOString(),
-      })
-      if (localSupervisionSummary) {
-        state = {
-          ...state,
-          recent: [...priorRecent, createUserMessage(localSupervisionSummary)],
-        }
-        await this.deps.store.save(state)
-      }
-      // 注入人类消息的收尾提交(PR #131 四审):必须在 recent 替换与 supervision save
-      // 之后——load 拿到的是最新 state,未被 drain 消费的追加不会被后续 save 覆盖。
+      // 注入人类消息的收尾提交(PR #131 四审):必须在 recent 替换之后——load 拿到的是
+      // 最新 state,未被 drain 消费的追加不会被后续 save 覆盖。
       await this.commitPendingHumanInputs(true, persistedFinalMessages)
       await this.settleConsumedWorkboardUpdates(currentInputEnvelopes, attempt.admittedContextEnvelopes)
     } else {
@@ -2138,7 +2134,18 @@ export function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, 
       }
     }
     case 'schedule':
-      return { type: 'schedule', summary: `定时任务:${wake.title}${mergedNote}`, source: `schedule:${wake.scheduleId}` }
+      return {
+        type: 'schedule',
+        summary: `定时任务:${wake.title}${mergedNote}`,
+        source: `schedule:${wake.scheduleId}:${wake.triggerId}`,
+        schedule: {
+          schedule_id: wake.scheduleId,
+          trigger_id: wake.triggerId,
+          target_session: wake.targetSession,
+          ...(wake.taskType ? { task_type: wake.taskType } : {}),
+          ...(wake.isBuiltin !== undefined ? { is_builtin: wake.isBuiltin } : {}),
+        },
+      }
     case 'workboard_admin_update':
       return { type: 'system', summary: `管理员更新任务板${mergedNote}` }
     case 'workboard_idle_review':
@@ -2506,7 +2513,14 @@ function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope, quotedMe
     case 'media_notification':
       return `[媒体下载完成]\n${event.text}`
     case 'schedule':
-      return `[定时任务触发] scheduleId=${event.scheduleId}\n标题:${event.title}\n描述:${event.description}`
+      return [
+        `[定时任务触发] scheduleId=${event.scheduleId} triggerId=${event.triggerId}`,
+        `标题:${event.title}`,
+        `描述:${event.description}`,
+        ...(event.priority ? [`优先级:${event.priority}`] : []),
+        ...(event.input ? [`输入:${JSON.stringify(event.input)}`] : []),
+        ...(event.tags?.length ? [`标签:${event.tags.join(',')}`] : []),
+      ].join('\n')
     case 'workboard_admin_update':
       return WORKBOARD_ADMIN_UPDATE_PROMPT
     case 'workboard_idle_review':
@@ -2537,9 +2551,9 @@ function renderChannelMessages(
 
 /**
  * harness 事件 → manager 决策类别(spec 2026-08-31-worker-stop-oversight-design §5.4)。
- * content=有内容待处置;blocked=受阻需介入;review=例行巡检;info=通报知情。
+ * content=有内容待处置;blocked=受阻需介入;info=通报知情。
  */
-function workerEventClass(event: HarnessEvent): 'content' | 'blocked' | 'review' | 'info' {
+function workerEventClass(event: HarnessEvent): 'content' | 'blocked' | 'info' {
   switch (event.kind) {
     case 'state_changed': {
       // 主线状态机的通用事件点:停止/退出迁移是"有内容待处置",to=running 只是
@@ -2557,8 +2571,6 @@ function workerEventClass(event: HarnessEvent): 'content' | 'blocked' | 'review'
     case 'input_delivery_failed':
     case 'worker_recovery_required':
       return 'blocked'
-    case 'supervision_due':
-      return 'review'
     default:
       return 'info'
   }
@@ -2579,79 +2591,6 @@ function renderWorkerEvent(event: HarnessEvent): string {
   if (typeof summary === 'string' && summary.length > 0) parts.push(`worker 的收尾结论:\n${summary}`)
   parts.push('</crabot-event>')
   return parts.join('\n')
-}
-
-const SUPERVISION_READ_ONLY_TOOL_NAMES = new Set([
-  'get_worker_terminal',
-  'get_worker_state',
-  'get_worker_activity',
-  'get_worker_turn',
-  'list_workers',
-  'get_worker_detail',
-  'get_history',
-  'get_message',
-  'lookup_friend',
-  'list_sessions',
-  'list_contacts',
-  'list_groups',
-  'list_group_members',
-  'fetch_media',
-  'read_feishu_document',
-  'feishu_raw_get',
-  'feishu_download_file',
-  'get_system_status',
-  'get_deployment_info',
-  'list_schedules',
-  'get_config_summary',
-  'list_capabilities',
-  'get_friend_permissions',
-  'mcp__crab-memory__search_memory',
-  'mcp__crab-memory__get_memory_detail',
-  'mcp__crab-memory__search_long_term',
-  'mcp__crab-memory__list_recent',
-  'mcp__crab-memory__list_entries',
-  'mcp__crab-memory__get_stats',
-  'mcp__crab-memory__get_evolution_mode',
-  'mcp__crab-memory__get_scene_profile',
-])
-
-function defaultSupervisionHistorySummary(args: {
-  readonly envelope: TimedWakeEnvelope | undefined
-  readonly carriedEnvelopes: ReadonlyArray<TimedWakeEnvelope>
-  readonly injectedEnvelopes: ReadonlyArray<TimedWakeEnvelope>
-  readonly outcome: EpisodeResult['outcome']
-  readonly usedForceHotRetry: boolean
-  readonly priorRecentCount: number
-  readonly hasSummaryMarker: boolean
-  readonly finalMessages: ReadonlyArray<EngineMessage>
-  readonly startedAt: string | undefined
-  readonly endedAt: string
-}): string | undefined {
-  const event = args.envelope?.wake.kind === 'worker_event' ? args.envelope.wake.event : undefined
-  if (
-    event?.kind !== 'supervision_due' ||
-    event.detail?.mode !== 'default' ||
-    args.carriedEnvelopes.length !== 0 ||
-    args.injectedEnvelopes.length !== 0 ||
-    args.outcome !== 'completed' ||
-    args.usedForceHotRetry
-  ) return undefined
-
-  const start = (args.hasSummaryMarker ? 1 : 0) + args.priorRecentCount + 1
-  const episodeMessages = args.finalMessages.slice(start)
-  for (const message of episodeMessages) {
-    if (message.role !== 'assistant') continue
-    for (const block of message.content) {
-      if (block.type === 'tool_use' && !SUPERVISION_READ_ONLY_TOOL_NAMES.has(block.name)) return undefined
-    }
-  }
-
-  const observation = typeof event.detail.observation === 'string' ? event.detail.observation : 'unknown'
-  return (
-    `[任务巡检摘要] worker_id=${event.worker_id}; ` +
-    `时间=${args.startedAt ?? event.ts} 至 ${args.endedAt}; ` +
-    `进展分类=${observation}; 未执行外部动作。`
-  )
 }
 
 /**

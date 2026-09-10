@@ -1,9 +1,20 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildCreateScheduleBody,
+  buildShowSchedulePath,
   buildUpdateScheduleBody,
   type ScheduleSnapshot,
 } from './schedule.js'
+
+describe('buildShowSchedulePath', () => {
+  it('默认只读取 Schedule metadata，不请求脚本源码', () => {
+    expect(buildShowSchedulePath('schedule-1')).toBe('/api/schedules/schedule-1')
+  })
+
+  it('显式要求时才请求脚本源码', () => {
+    expect(buildShowSchedulePath('schedule-1', true)).toBe('/api/schedules/schedule-1?include_script_source=true')
+  })
+})
 
 function makeCronSchedule(): ScheduleSnapshot {
   return {
@@ -14,6 +25,18 @@ function makeCronSchedule(): ScheduleSnapshot {
       description: 'orig task desc',
       type: 'orig_type',
       tags: ['a', 'b'],
+    },
+  }
+}
+
+function makeScriptSchedule(): ScheduleSnapshot {
+  return {
+    trigger: { type: 'interval', seconds: 60 },
+    script: {
+      source: 'echo old',
+      source_sha256: 'old-hash',
+      timeout_seconds: 120,
+      deliver_result: false,
     },
   }
 }
@@ -326,52 +349,23 @@ describe('buildCreateScheduleBody', () => {
     })
   })
 
-  describe('creator_friend_id 通过 env 注入', () => {
-    it('CRABOT_TASK_FRIEND_ID 非空时塞进 body', () => {
-      const original = process.env.CRABOT_TASK_FRIEND_ID
-      process.env.CRABOT_TASK_FRIEND_ID = 'friend-master-123'
-      try {
-        const body = buildCreateScheduleBody({
-          title: 't',
-          priority: 'normal',
-          cron: '0 0 * * *',
-        })
-        expect(body['creator_friend_id']).toBe('friend-master-123')
-      } finally {
-        if (original === undefined) delete process.env.CRABOT_TASK_FRIEND_ID
-        else process.env.CRABOT_TASK_FRIEND_ID = original
-      }
-    })
-
-    it('CRABOT_TASK_FRIEND_ID 未设置时不塞 creator_friend_id', () => {
-      const original = process.env.CRABOT_TASK_FRIEND_ID
+  describe('script 内容', () => {
+    it('与 instruction 二选一且不把 creator 写进 body', () => {
+      process.env.CRABOT_TASK_FRIEND_ID = 'untrusted'
+      const body = buildCreateScheduleBody({
+        name: 'script job',
+        script: 'echo ok',
+        timeoutSeconds: '30',
+        deliverResult: 'true',
+        intervalSeconds: '60',
+      })
       delete process.env.CRABOT_TASK_FRIEND_ID
-      try {
-        const body = buildCreateScheduleBody({
-          title: 't',
-          priority: 'normal',
-          cron: '0 0 * * *',
-        })
-        expect(body['creator_friend_id']).toBeUndefined()
-      } finally {
-        if (original !== undefined) process.env.CRABOT_TASK_FRIEND_ID = original
-      }
-    })
-
-    it('CRABOT_TASK_FRIEND_ID 是空白字符串时也不塞', () => {
-      const original = process.env.CRABOT_TASK_FRIEND_ID
-      process.env.CRABOT_TASK_FRIEND_ID = '   '
-      try {
-        const body = buildCreateScheduleBody({
-          title: 't',
-          priority: 'normal',
-          cron: '0 0 * * *',
-        })
-        expect(body['creator_friend_id']).toBeUndefined()
-      } finally {
-        if (original === undefined) delete process.env.CRABOT_TASK_FRIEND_ID
-        else process.env.CRABOT_TASK_FRIEND_ID = original
-      }
+      expect(body).toMatchObject({
+        name: 'script job',
+        script: { source: 'echo ok', timeout_seconds: 30, deliver_result: true },
+      })
+      expect(body['task_template']).toBeUndefined()
+      expect(body['creator_friend_id']).toBeUndefined()
     })
   })
 
@@ -616,73 +610,27 @@ describe('buildUpdateScheduleBody — task_template 字段级 merge', () => {
   })
 })
 
-describe('buildUpdateScheduleBody — target_session 三态', () => {
-  it('三个 target-* 都给 → 顶层 target_session', () => {
-    const body = buildUpdateScheduleBody(makeCronSchedule(), {
-      targetChannel: 'telegram-001',
-      targetSession: 'sess-abc',
-      targetType: 'private',
-    })
-    expect(body['target_session']).toEqual({
-      channel_id: 'telegram-001',
-      session_id: 'sess-abc',
-      type: 'private',
+describe('buildUpdateScheduleBody — content branch', () => {
+  it('从 instruction 原子切换为 script', () => {
+    expect(buildUpdateScheduleBody(makeCronSchedule(), { script: 'echo next' })).toEqual({
+      script: { source: 'echo next', deliver_result: false },
+      task_template: null,
     })
   })
 
-  it('--clear-target → target_session: null', () => {
-    const body = buildUpdateScheduleBody(makeCronSchedule(), { clearTarget: true })
-    expect(body['target_session']).toBeNull()
+  it('修改脚本配置沿用显式读取的 source', () => {
+    expect(buildUpdateScheduleBody(makeScriptSchedule(), {
+      timeoutSeconds: '45',
+      deliverResult: 'true',
+    })).toEqual({
+      script: { source: 'echo old', timeout_seconds: 45, deliver_result: true },
+    })
   })
 
-  it('三个 target-* 缺一报错（缺 channel）', () => {
-    expect(() =>
-      buildUpdateScheduleBody(makeCronSchedule(), {
-        targetSession: 'sess-abc',
-        targetType: 'private',
-      })
-    ).toThrow(/--target-channel.*--target-session.*--target-type 必须同时提供/)
-  })
-
-  it('三个 target-* 缺一报错（缺 session）', () => {
-    expect(() =>
-      buildUpdateScheduleBody(makeCronSchedule(), {
-        targetChannel: 'telegram-001',
-        targetType: 'private',
-      })
-    ).toThrow(/--target-channel.*--target-session.*--target-type 必须同时提供/)
-  })
-
-  it('三个 target-* 缺一报错（缺 type）', () => {
-    expect(() =>
-      buildUpdateScheduleBody(makeCronSchedule(), {
-        targetChannel: 'telegram-001',
-        targetSession: 'sess-abc',
-      })
-    ).toThrow(/--target-channel.*--target-session.*--target-type 必须同时提供/)
-  })
-
-  it('--clear-target 与 --target-channel 互斥', () => {
-    expect(() =>
-      buildUpdateScheduleBody(makeCronSchedule(), {
-        clearTarget: true,
-        targetChannel: 'telegram-001',
-      })
-    ).toThrow(/--clear-target 与 --target-\* 互斥/)
-  })
-
-  it('--target-type 不在白名单报错', () => {
-    expect(() =>
-      buildUpdateScheduleBody(makeCronSchedule(), {
-        targetChannel: 'telegram-001',
-        targetSession: 'sess-abc',
-        targetType: 'channel',
-      })
-    ).toThrow(/--target-type 必须是 private \| group/)
-  })
-
-  it('不给任何 target flag → body 里不出现 target_session key', () => {
-    const body = buildUpdateScheduleBody(makeCronSchedule(), { name: '只改名字' })
-    expect('target_session' in body).toBe(false)
+  it('从 script 切换为 instruction', () => {
+    expect(buildUpdateScheduleBody(makeScriptSchedule(), { title: '巡检' })).toEqual({
+      task_template: { title: '巡检', priority: 'normal', tags: [] },
+      script: null,
+    })
   })
 })

@@ -7,12 +7,20 @@
 
 import type { ManagerKey } from '../workers/harness/ledger-types.js'
 import type { AgentTrace } from '../types.js'
+import type { ModuleId, ScheduleId, SessionId } from 'crabot-shared'
 
 export interface ManagerEpisodeTrigger {
   type: 'human_message' | 'worker_event' | 'schedule' | 'attention_flush' | 'sub_agent_call' | 'system'
   /** 脱敏摘要；不复制完整人类正文/terminal output/tool secret */
   summary: string
   source?: string
+  schedule?: {
+    schedule_id: ScheduleId
+    trigger_id: string
+    target_session: { channel_id: ModuleId; session_id: SessionId; type: 'private' | 'group' }
+    task_type?: string
+    is_builtin?: boolean
+  }
 }
 
 export interface ManagerEpisodeSpan {

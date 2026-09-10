@@ -21,7 +21,7 @@ import {
   type Incarnation,
 } from '../harness/ledger-types.js'
 import type { WorkerAdapter, IncarnationHandle, NormalizedTraceEvent, WorkerImplId } from '../types.js'
-import type { HarnessEvent } from '../harness/worker-events.js'
+import type { HistoricalHarnessEvent } from '../harness/worker-events.js'
 import { readLegacyTraceEvents, type LegacyTraceEventEntry } from '../legacy-source-reader.js'
 import {
   incarnationFingerprint,
@@ -67,7 +67,7 @@ interface SourcedEvent {
 const SOURCE_ORDER: Record<'harness' | 'native' | 'legacy', number> = { harness: 0, native: 1, legacy: 2 }
 
 function normalizeHarnessEvent(
-  event: HarnessEvent,
+  event: HistoricalHarnessEvent,
   inputDeliveryPreviews: ReadonlyMap<string, string>,
 ): NormalizedTraceEvent {
   const deliveryId = event.kind === 'input_sent' ? event.detail?.delivery_id : undefined
@@ -85,7 +85,7 @@ function normalizeHarnessEvent(
 }
 
 /** lifecycle 行的 summary 带上关键 detail——裸事件名（如 state_changed 无目标态）是噪音。 */
-function harnessSummary(event: HarnessEvent): string {
+function harnessSummary(event: HistoricalHarnessEvent): string {
   const detail = (event.detail ?? {}) as Record<string, unknown>
   // 按 string 匹配：2026-09-01 事件面收敛前的历史 events.jsonl 里还有 spawned/superseded 等
   // 已退役 kind（见下方 legacy case），类型枚举只覆盖新 kind。

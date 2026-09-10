@@ -120,10 +120,19 @@ function makeMemoryServer() {
   )
 }
 
-/** 身份解析原料的最小桩:一律"解析不出来",即 manager 退回未接线时的既有行为。 */
+/** Schedule 路由集成测试的最小当前权限。 */
 function makePrincipalResolver(): PrincipalResolverDeps {
   return {
-    resolvePermissions: async () => null,
+    resolvePermissions: async () => ({
+      tool_access: {
+        memory: true, messaging: true, task: true, mcp_skill: true,
+        file_io: true, browser: true, shell: true, remote_exec: false, desktop: false,
+      },
+      cli_access: { schedule: 'write' } as never,
+      storage: null,
+      memory_scopes: [],
+    }),
+    getFriend: async (friendId) => ({ id: friendId }) as never,
     sessionMemoryScopes: async (sessionId) => [sessionId],
     sceneProfile: async () => null,
     crabSelfHandle: () => undefined,
@@ -171,6 +180,26 @@ async function waitUntil(cond: () => boolean, timeoutMs = 6000, intervalMs = 20)
   throw new Error('waitUntil timed out')
 }
 
+let scheduleTriggerSequence = 0
+type TriggerScheduleFixture = Omit<Partial<TriggerScheduleParams>, 'target_session'> & {
+  schedule_id: TriggerScheduleParams['schedule_id']
+  target_session?: Omit<TriggerScheduleParams['target_session'], 'type'> & {
+    type?: TriggerScheduleParams['target_session']['type']
+  }
+}
+
+function scheduleTrigger(params: TriggerScheduleFixture): TriggerScheduleParams {
+  const { target_session: targetSession, ...rest } = params
+  return {
+    trigger_id: `trigger-${++scheduleTriggerSequence}`,
+    schedule_name: params.title ?? String(params.schedule_id),
+    ...rest,
+    target_session: targetSession
+      ? { ...targetSession, type: targetSession.type ?? 'private' }
+      : { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' },
+  }
+}
+
 // ============================================================================
 // §8.2 trigger_schedule
 // ============================================================================
@@ -186,28 +215,26 @@ describe('trigger_schedule(§8.2)', () => {
     vi.restoreAllMocks()
   })
 
-  it('受理即返回 {accepted:true}——routeSchedule 永不 resolve 也不阻塞 handler', async () => {
+  it('受理即返回 {accepted:true}——episode completion 永不 resolve 也不阻塞 handler', async () => {
     let routeCalls = 0
     const stack = {
       registry: {
-        routeSchedule: () => {
+        admitSchedule: async () => {
           routeCalls++
-          return new Promise<never>(() => {
-            /* 永不 resolve:handler 若 await 它就永远回不来 */
-          })
+          return { completion: new Promise<never>(() => {}) }
         },
       },
     }
     const agent = buildAgent(stack)
 
     // handler 是同步返回的:拿到返回值这件事本身就证明它没有等待路由完成
-    const result = await agent.handleTriggerSchedule({ schedule_id: 'sc-1', title: '巡检', description: '每日巡检' })
+    const result = await agent.handleTriggerSchedule(scheduleTrigger({ schedule_id: 'sc-1', title: '巡检', description: '每日巡检' }))
 
     expect(result).toEqual({ accepted: true })
     expect(routeCalls).toBe(1)
   })
 
-  it('routeSchedule 抛错不产生 unhandledRejection(游离 promise 必须 .catch)', async () => {
+  it('episode completion 抛错不产生 unhandledRejection(游离 promise 必须 .catch)', async () => {
     const unhandled: unknown[] = []
     const onUnhandled = (reason: unknown): void => {
       unhandled.push(reason)
@@ -215,11 +242,11 @@ describe('trigger_schedule(§8.2)', () => {
     process.on('unhandledRejection', onUnhandled)
     try {
       const stack = {
-        registry: { routeSchedule: () => Promise.reject(new Error('路由炸了')) },
+        registry: { admitSchedule: async () => ({ completion: Promise.reject(new Error('路由炸了')) }) },
       }
       const agent = buildAgent(stack)
 
-      await expect(agent.handleTriggerSchedule({ schedule_id: 'sc-1', title: 't', description: 'd' })).resolves.toEqual({
+      await expect(agent.handleTriggerSchedule(scheduleTrigger({ schedule_id: 'sc-1', title: 't', description: 'd' }))).resolves.toEqual({
         accepted: true,
       })
 
@@ -233,15 +260,18 @@ describe('trigger_schedule(§8.2)', () => {
     }
   })
 
-  it('参数按 §8.2 原样透传给 registry.routeSchedule(含 target_session / 权限身份)', async () => {
+  it('参数按 §8.2 原样透传给 registry.admitSchedule(含 target_session / 权限身份)', async () => {
     const calls: unknown[] = []
     // resolve 一个**成功**的 episode:handler 的收尾要读 `outcome`(fail-loud 判据双管),
-    // 裸 `Promise.resolve()` 已经不是 `routeSchedule` 的真实契约形状。
+    // 准入与 episode completion 是两个阶段。
     const agent = buildAgent({
-      registry: { routeSchedule: (p: unknown) => { calls.push(p); return Promise.resolve(completedEpisode()) } },
+      registry: { admitSchedule: async (p: unknown) => {
+        calls.push(p)
+        return { completion: Promise.resolve(completedEpisode()) }
+      } },
     })
 
-    await agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-9',
       title: '标题',
       description: '描述',
@@ -249,14 +279,19 @@ describe('trigger_schedule(§8.2)', () => {
       target_session: { channel_id: 'wechat', session_id: 'sess-1' },
       creator_friend_id: 'friend-42',
       is_builtin: false,
-    })
+    }))
 
     expect(calls[0]).toEqual({
       scheduleId: 'sc-9',
+      triggerId: expect.any(String),
+      scheduleName: '标题',
       title: '标题',
       description: '描述',
+      priority: undefined,
+      input: undefined,
+      tags: undefined,
       taskType: 'daily_reflection',
-      targetSession: { channel_id: 'wechat', session_id: 'sess-1' },
+      targetSession: { channel_id: 'wechat', session_id: 'sess-1', type: 'private' },
       creatorFriendId: 'friend-42',
       isBuiltin: false,
     })
@@ -264,7 +299,7 @@ describe('trigger_schedule(§8.2)', () => {
 
   it('manager 栈未装配时抛明确错误(P5 阶段启动路径尚未接线)', async () => {
     const agent = buildAgent()
-    await expect(agent.handleTriggerSchedule({ schedule_id: 'sc', title: 't', description: 'd' })).rejects.toThrow(
+    await expect(agent.handleTriggerSchedule(scheduleTrigger({ schedule_id: 'sc', title: 't', description: 'd' }))).rejects.toThrow(
       /Manager stack not initialized/,
     )
   })
@@ -277,7 +312,7 @@ describe('trigger_schedule(§8.2)', () => {
 // (F1:LLM 挂 / key 过期 / 限流耗尽,不抛错、只把 outcome 写成 failed)因此完全静默,
 // 人类那边的表现就是"早报没发、反思没生成",而且没有任何提示。
 //
-// 这里只替身 `registry.routeSchedule` 与出站 `rpcClient`:判据、文案、冷却、目标解析
+// 这里只替身 `registry.admitSchedule` 与出站 `rpcClient`:判据、文案、冷却、目标解析
 // 全部走生产代码。
 // ============================================================================
 
@@ -302,7 +337,9 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
   } {
     const rpcCalls: RpcCall[] = []
     const failSend = { value: false }
-    const agent = buildAgent({ registry: { routeSchedule } }) as unknown as Record<string, unknown>
+    const agent = buildAgent({ registry: {
+      admitSchedule: async () => ({ completion: routeSchedule() }),
+    } }) as unknown as Record<string, unknown>
     agent.failLoudSentAt = new Map<string, number>()
     agent.silentEpisodeStreak = new Map<string, number>()
     // 端口预置:出站不走 rpcClient.resolve(那是另一条链路的事)
@@ -345,12 +382,12 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
   it('F1(outcome=failed,不抛错)→ 目标会话收到兜底消息', async () => {
     const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('failed'))
 
-    await agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-morning',
       title: '每日早报',
       description: '每天 8 点发早报',
       target_session: { channel_id: 'wechat', session_id: 'sess-1' },
-    })
+    }))
     await settle()
 
     const sent = rpcCalls.find((c) => c.method === 'send_message')
@@ -362,12 +399,12 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
   it('文案是"非人类触发"变体:点名哪个定时任务,且不出现第二人称的"回不了你"', async () => {
     const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('failed'))
 
-    await agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-morning',
       title: '每日早报',
       description: 'd',
       target_session: { channel_id: 'wechat', session_id: 'sess-1' },
-    })
+    }))
     await settle()
 
     const text = sentText(rpcCalls)
@@ -385,12 +422,12 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
       throw new Error('adapter thunk 炸了')
     })
 
-    await agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-x',
       title: '晚间反思',
       description: 'd',
       target_session: { channel_id: 'wechat', session_id: 'sess-1' },
-    })
+    }))
     await settle()
 
     const text = sentText(rpcCalls)
@@ -401,21 +438,21 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
   it('outcome=completed → 不发兜底(误报比漏报更伤)', async () => {
     const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('completed'))
 
-    await agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-ok',
       title: '正常任务',
       description: 'd',
       target_session: { channel_id: 'wechat', session_id: 'sess-1' },
-    })
+    }))
     await settle()
 
     expect(rpcCalls).toEqual([])
   })
 
-  it('无 target_session → 投系统任务线程(与 routeSchedule 的路由归属同一判据)', async () => {
+  it('canonical system target → 投系统任务线程', async () => {
     const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('failed'))
 
-    await agent.handleTriggerSchedule({ schedule_id: 'sc-sys', title: '系统巡检', description: 'd' })
+    await agent.handleTriggerSchedule(scheduleTrigger({ schedule_id: 'sc-sys', title: '系统巡检', description: 'd' }))
     await settle()
 
     const sent = rpcCalls.find((c) => c.method === 'send_message')
@@ -426,12 +463,12 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
   it('target_session 指向 Master Chat 时改投 system-tasks —— 不认领人类那条在飞的占位气泡', async () => {
     const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('failed'))
 
-    await agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-master',
       title: '主人专属早报',
       description: 'd',
       target_session: { channel_id: 'admin-web', session_id: 'admin-chat' },
-    })
+    }))
     await settle()
 
     const sent = rpcCalls.find((c) => c.method === 'send_message')
@@ -446,12 +483,12 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
     const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('failed'))
 
     for (let i = 0; i < 3; i++) {
-      await agent.handleTriggerSchedule({
+      await agent.handleTriggerSchedule(scheduleTrigger({
         schedule_id: 'sc-loop',
         title: '高频任务',
         description: 'd',
         target_session: { channel_id: 'wechat', session_id: 'sess-1' },
-      })
+      }))
       await settle()
     }
 
@@ -470,12 +507,12 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
       failSend.value = true
 
       expect(
-        await agent.handleTriggerSchedule({
+        await agent.handleTriggerSchedule(scheduleTrigger({
           schedule_id: 'sc-dead',
           title: '任务',
           description: 'd',
           target_session: { channel_id: 'wechat', session_id: 'sess-1' },
-        }),
+        })),
       ).toEqual({ accepted: true })
       await settle()
       await new Promise((resolve) => setTimeout(resolve, 50))
@@ -530,20 +567,20 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     ])
   }
 
-  it('无 target_session → 系统线程 manager;creator_friend_id 落到 origin.creator_friend_id,trigger_type=scheduled', async () => {
+  it('canonical system target → 系统线程 manager;creator_friend_id 落到 origin.creator_friend_id,trigger_type=scheduled', async () => {
     const stack = makeStack(spawnScript())
     const spawnSpy = vi
       .spyOn(stack.harness, 'spawnWorker')
       .mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned' }))
-    const routeSpy = vi.spyOn(stack.registry, 'routeSchedule')
+    const routeSpy = vi.spyOn(stack.registry, 'admitSchedule')
     const agent = buildAgent(stack)
 
-    const result = await agent.handleTriggerSchedule({
+    const result = await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-sys',
       title: '系统巡检',
       description: '无目标会话',
       creator_friend_id: 'friend-42',
-    })
+    }))
 
     expect(result).toEqual({ accepted: true })
     // fire-and-forget 的另一面自证:受理返回那一刻 episode 还没跑到派发 worker
@@ -555,7 +592,8 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     expect(params.origin.creator_friend_id).toBe('friend-42')
     expect(params.origin.trigger_type).toBe('scheduled')
 
-    await Promise.allSettled(routeSpy.mock.results.map((r) => r.value as Promise<unknown>))
+    const admissions = await Promise.all(routeSpy.mock.results.map((r) => r.value))
+    await Promise.allSettled(admissions.map((admission) => admission.completion))
   })
 
   it('有 target_session → 该会话的 manager', async () => {
@@ -563,16 +601,16 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     const spawnSpy = vi
       .spyOn(stack.harness, 'spawnWorker')
       .mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned' }))
-    const routeSpy = vi.spyOn(stack.registry, 'routeSchedule')
+    const routeSpy = vi.spyOn(stack.registry, 'admitSchedule')
     const agent = buildAgent(stack)
 
-    await agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-sess',
       title: '会话内巡检',
       description: '有目标会话',
       target_session: { channel_id: 'wechat', session_id: 'sess-1' },
       creator_friend_id: 'friend-7',
-    })
+    }))
 
     await waitUntil(() => spawnSpy.mock.calls.length > 0)
     const params = spawnSpy.mock.calls[0][0]
@@ -580,7 +618,8 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     expect(params.origin.creator_friend_id).toBe('friend-7')
     expect(params.origin.trigger_type).toBe('scheduled')
 
-    await Promise.allSettled(routeSpy.mock.results.map((r) => r.value as Promise<unknown>))
+    const admissions = await Promise.all(routeSpy.mock.results.map((r) => r.value))
+    await Promise.allSettled(admissions.map((admission) => admission.completion))
   })
 
   it('is_builtin=true → 不以任何 friend 身份执行(creator_friend_id 留空,按 §4.4「master 等价」的既有空值规则)', async () => {
@@ -588,21 +627,22 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     const spawnSpy = vi
       .spyOn(stack.harness, 'spawnWorker')
       .mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned' }))
-    const routeSpy = vi.spyOn(stack.registry, 'routeSchedule')
+    const routeSpy = vi.spyOn(stack.registry, 'admitSchedule')
     const agent = buildAgent(stack)
 
-    await agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-builtin',
       title: '内置巡检',
       description: '系统内置',
       is_builtin: true,
       creator_friend_id: 'friend-should-be-ignored',
-    })
+    }))
 
     await waitUntil(() => spawnSpy.mock.calls.length > 0)
     expect(spawnSpy.mock.calls[0][0].origin.creator_friend_id).toBeUndefined()
 
-    await Promise.allSettled(routeSpy.mock.results.map((r) => r.value as Promise<unknown>))
+    const admissions = await Promise.all(routeSpy.mock.results.map((r) => r.value))
+    await Promise.allSettled(admissions.map((admission) => admission.completion))
   })
 
   it('非 schedule 唤醒(人类消息)不受影响:trigger_type 仍是 message,不带 creator_friend_id', async () => {
@@ -642,7 +682,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
             memory: true, messaging: true, task: true, mcp_skill: true,
             file_io: true, browser: true, shell: true, remote_exec: false, desktop: false,
           },
-          cli_access: {} as never,
+          cli_access: { schedule: 'write' } as never,
           storage: null,
           memory_scopes: [`scope-of-${p.senderFriendId ?? 'session'}`],
         }
@@ -651,6 +691,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
       sceneProfile: async () => null,
       crabSelfHandle: () => undefined,
       masterFriendId: async () => undefined,
+      getFriend: async (friendId) => ({ id: friendId }) as never,
     }
     return { deps, calls }
   }
@@ -689,19 +730,19 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
       sessionType: 'private',
     })
 
-    await agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-sess',
       title: '会话内巡检',
       description: '有目标会话',
       target_session: { channel_id: 'wechat', session_id: 'sess-1' },
       creator_friend_id: 'friend-7',
-    })
+    }))
 
     await waitUntil(() => spawnSpy.mock.calls.length > 0)
     const params = spawnSpy.mock.calls[0][0]
     expect(params.origin.creator_friend_id).toBe('friend-7')
     // 解析是以调度的 creator 名义发起的，档位也是那一份
-    expect(calls.map((c) => c.senderFriendId)).toEqual(['f-lastspeaker', 'friend-7'])
+    expect(calls.map((c) => c.senderFriendId)).toEqual(['f-lastspeaker', 'friend-7', 'friend-7'])
     expect(params.principal_permissions?.memory_scopes).toEqual(['scope-of-friend-7'])
   })
 
@@ -725,13 +766,13 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
       sessionType: 'private',
     })
 
-    await agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule(scheduleTrigger({
       schedule_id: 'sc-builtin',
       title: '内置巡检',
       description: '系统内置',
       target_session: { channel_id: 'wechat', session_id: 'sess-1' },
       is_builtin: true,
-    })
+    }))
 
     await waitUntil(() => spawnSpy.mock.calls.length > 0)
     const params = spawnSpy.mock.calls[0][0]

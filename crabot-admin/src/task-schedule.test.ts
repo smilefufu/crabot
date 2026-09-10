@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import http from 'node:http'
 import fs from 'node:fs/promises'
 import AdminModule from './index.js'
-import { RpcClient } from 'crabot-shared'
+import { RpcCallError, RpcClient } from 'crabot-shared'
 import type { Friend, Task, Schedule } from './types.js'
 
 const TEST_PROTOCOL_PORT = 19802
@@ -670,24 +670,120 @@ describe('AdminModule - Schedule Management', () => {
 
       const scheduleId = createResponse.data.schedule.id
 
-      const response = await makeProtocolRequest<{ task_id: string; schedule: Schedule }>(
+      const response = await makeProtocolRequest<{ accepted: true; task_id?: string }>(
         TEST_PROTOCOL_PORT,
         'trigger_now',
         { schedule_id: scheduleId }
       )
 
       expect(response.success).toBe(true)
-      expect(response.data.schedule.last_triggered_at).toBeDefined()
-      expect(response.data.schedule.execution_count).toBeGreaterThanOrEqual(1)
+      expect(response.data.accepted).toBe(true)
+      const updated = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'get_schedule',
+        { schedule_id: scheduleId },
+      )
+      expect(updated.data.schedule.last_triggered_at).toBeDefined()
+      expect(updated.data.schedule.execution_count).toBeGreaterThanOrEqual(1)
+
+      const firstCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'trigger_schedule')!
+      expect(firstCall[2]).toMatchObject({
+        schedule_id: scheduleId,
+        trigger_id: expect.any(String),
+        schedule_name: 'Trigger Test Schedule',
+        target_session: {
+          channel_id: 'admin-web',
+          session_id: 'system-tasks',
+          type: 'private',
+        },
+      })
+
+      await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: scheduleId })
+      const secondCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'trigger_schedule')!
+      expect((secondCall[2] as { trigger_id: string }).trigger_id)
+        .not.toBe((firstCall[2] as { trigger_id: string }).trigger_id)
+    })
+
+    it('disables a schedule only when Agent confirms authorization was revoked', async () => {
+      const created = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'create_schedule',
+        {
+          name: 'Revoked Schedule',
+          trigger: { type: 'cron', expression: '0 0 * * *' },
+          task_template: { type: 'routine', title: 'T', priority: 'normal' },
+        },
+      )
+      const scheduleId = created.data.schedule.id
+      const defaultImplementation = triggerCallSpy.getMockImplementation()
+      const error = new RpcCallError(
+        'AGENT_SCHEDULE_AUTH_REVOKED',
+        'authorization revoked',
+        { disable_schedule: true },
+      )
+      triggerCallSpy.mockImplementation((port, method, callParams) => method === 'trigger_schedule'
+        ? Promise.reject(error)
+        : defaultImplementation!(port, method, callParams))
+
+      const trigger = await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', {
+        schedule_id: scheduleId,
+      })
+      expect(trigger.success).toBe(false)
+
+      const get = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'get_schedule',
+        { schedule_id: scheduleId },
+      )
+      expect(get.data.schedule.enabled).toBe(false)
+      triggerCallSpy.mockImplementation(defaultImplementation!)
+    })
+
+    it.each([
+      ['authorization resolver unavailable', new RpcCallError('AUTH_UNAVAILABLE', 'try later')],
+      ['revocation without disable instruction', new RpcCallError(
+        'AGENT_SCHEDULE_AUTH_REVOKED',
+        'not conclusive',
+        { disable_schedule: false },
+      )],
+      ['ordinary RPC failure', new Error('wire failure')],
+    ])('keeps a schedule enabled after %s', async (_label, error) => {
+      const created = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'create_schedule',
+        {
+          name: `Transient Failure ${String(_label)}`,
+          trigger: { type: 'cron', expression: '0 0 * * *' },
+          task_template: { type: 'routine', title: 'T', priority: 'normal' },
+        },
+      )
+      const scheduleId = created.data.schedule.id
+      const defaultImplementation = triggerCallSpy.getMockImplementation()
+      triggerCallSpy.mockImplementation((port, method, callParams) => method === 'trigger_schedule'
+        ? Promise.reject(error)
+        : defaultImplementation!(port, method, callParams))
+
+      const trigger = await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', {
+        schedule_id: scheduleId,
+      })
+      expect(trigger.success).toBe(false)
+
+      const get = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'get_schedule',
+        { schedule_id: scheduleId },
+      )
+      expect(get.data.schedule.enabled).toBe(true)
+      triggerCallSpy.mockImplementation(defaultImplementation!)
     })
 
     /**
      * P7/J：调用点切到 `trigger_schedule`（protocol-agent-v3 §8.2）。
-     * 普通 schedule 不下发 `task_type` / `input` / `resolved_permissions`——
+     * 普通 schedule 下发完整渲染 instruction，但不下发 `task_type` / `resolved_permissions`——
      * 模板变量仍在 title/description 上渲染，权限改由 agent 按 `creator_friend_id` 解析，
      * 所以 admin 传的是**事实**（谁建的、是不是内置），不是解析结果。
      */
-    it('普通 schedule 切到 trigger_schedule：渲染 title/description，不下发 task_type/input/resolved_permissions', async () => {
+    it('普通 schedule 切到 trigger_schedule：渲染完整 instruction，不下发 task_type/resolved_permissions', async () => {
       const schedResult = await makeProtocolRequest<{ schedule: Schedule }>(
         TEST_PROTOCOL_PORT,
         'create_schedule',
@@ -726,7 +822,13 @@ describe('AdminModule - Schedule Management', () => {
       expect(payload.title).toMatch(/^Targeted Task \d{4}-\d{2}-\d{2}$/)
       expect(String(payload.description)).toContain('Send update at 20')
       expect(payload.task_type).toBeUndefined()
-      expect(payload.input).toBeUndefined()
+      expect(payload.priority).toBe('normal')
+      expect(payload.input).toEqual({
+        target_channel_id: 'feishu-fengyan',
+        target_session_id: 'e283b6c6-373a-4568-ab6f-db134fa71790',
+        target_session_type: 'group',
+      })
+      expect(payload.tags).toEqual([])
       expect(payload.resolved_permissions).toBeUndefined()
     })
 
@@ -778,7 +880,7 @@ describe('AdminModule - Schedule Management', () => {
         }
       )
 
-      const response = await makeProtocolRequest<{ accepted: true; schedule: Schedule; task_id?: string }>(
+      const response = await makeProtocolRequest<{ accepted: true; task_id?: string }>(
         TEST_PROTOCOL_PORT,
         'trigger_now',
         { schedule_id: schedResult.data!.schedule.id }
@@ -787,8 +889,13 @@ describe('AdminModule - Schedule Management', () => {
       expect(response.success).toBe(true)
       expect(response.data.accepted).toBe(true)
       expect(response.data.task_id).toBeUndefined()
-      expect(response.data.schedule.last_task_id).toBeUndefined()
-      expect(response.data.schedule.execution_count).toBeGreaterThanOrEqual(1)
+      const updated = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'get_schedule',
+        { schedule_id: schedResult.data!.schedule.id },
+      )
+      expect(updated.data.schedule.last_task_id).toBeUndefined()
+      expect(updated.data.schedule.execution_count).toBeGreaterThanOrEqual(1)
     })
 
     it('builtin memory_maintenance forwards system-task metadata and stores returned task_id', async () => {
@@ -816,7 +923,6 @@ describe('AdminModule - Schedule Management', () => {
 
         const response = await makeProtocolRequest<{
           accepted: true
-          schedule: Schedule
           task_id?: string
         }>(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: maintenance.id })
 
@@ -830,7 +936,12 @@ describe('AdminModule - Schedule Management', () => {
           is_builtin: true,
         })
         expect(response.data!.task_id).toBe('agent-system-task-1')
-        expect(response.data!.schedule.last_task_id).toBe('agent-system-task-1')
+        const updated = await makeProtocolRequest<{ schedule: Schedule }>(
+          TEST_PROTOCOL_PORT,
+          'get_schedule',
+          { schedule_id: maintenance.id },
+        )
+        expect(updated.data.schedule.last_task_id).toBe('agent-system-task-1')
       } finally {
         triggerCallSpy.mockImplementation(defaultImplementation!)
       }
@@ -848,7 +959,6 @@ describe('AdminModule - Schedule Management', () => {
 
       const response = await makeProtocolRequest<{
         accepted: true
-        schedule: Schedule
         task_id?: string
       }>(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: dailyReflection.id })
 
@@ -856,13 +966,12 @@ describe('AdminModule - Schedule Management', () => {
       expect(call[2]).toMatchObject({
         schedule_id: dailyReflection.id,
         task_type: 'daily_reflection',
+        priority: 'low',
+        input: undefined,
+        tags: ['daily_reflection', 'builtin'],
         is_builtin: true,
       })
-      expect(call[2]).not.toHaveProperty('priority')
-      expect(call[2]).not.toHaveProperty('input')
-      expect(call[2]).not.toHaveProperty('tags')
       expect(response.data!.task_id).toBeUndefined()
-      expect(response.data!.schedule.last_task_id).toBeUndefined()
     })
 
     it('user-created memory_maintenance type remains on the ordinary manager route', async () => {
@@ -891,11 +1000,11 @@ describe('AdminModule - Schedule Management', () => {
       const call = triggerCallSpy.mock.calls.findLast((item) => item[1] === 'trigger_schedule')!
       expect(call[2]).toMatchObject({
         schedule_id: created.data!.schedule.id,
+        priority: 'normal',
+        input: { scope: 'all' },
+        tags: ['user-owned'],
       })
       expect(call[2]).not.toHaveProperty('task_type')
-      expect(call[2]).not.toHaveProperty('priority')
-      expect(call[2]).not.toHaveProperty('input')
-      expect(call[2]).not.toHaveProperty('tags')
       expect(response.data!.task_id).toBeUndefined()
     })
 
@@ -926,10 +1035,10 @@ describe('AdminModule - Schedule Management', () => {
       expect(call[2]).toMatchObject({
         schedule_id: created.data!.schedule.id,
         task_type: 'memory_curate',
+        priority: 'normal',
+        input: { scope: 'all' },
+        tags: ['user-owned'],
       })
-      expect(call[2]).not.toHaveProperty('priority')
-      expect(call[2]).not.toHaveProperty('input')
-      expect(call[2]).not.toHaveProperty('tags')
       expect(response.data!.task_id).toBeUndefined()
     })
 

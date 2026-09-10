@@ -9,7 +9,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { ModuleBase, RpcError, generateId, sha256CanonicalJson, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
+import { ModuleBase, RpcError, generateId, sha256CanonicalJson, type AgentCliExecutionRef, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
 import type {
   UnifiedAgentConfig,
@@ -35,7 +35,9 @@ import type {
   TaskOrigin,
   WorkerAgentContext,
   SubAgentConfig,
+  CliDomain,
 } from './types.js'
+import { CLI_DOMAINS } from './types.js'
 import { SessionManager } from './orchestration/session-manager.js'
 import { PermissionChecker } from './orchestration/permission-checker.js'
 import { WorkerSelector } from './orchestration/worker-selector.js'
@@ -59,6 +61,7 @@ import { createDelegateTaskTool } from './agent/delegate-task-tool.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
 import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
+import { retireWorkerSupervision } from './workers/harness/supervision-retirement-migration.js'
 import { ConfigLoader } from './core/config-loader.js'
 import { TraceStore } from './core/trace-store.js'
 import { BuiltinSubagentRunner } from './workers/builtin/subagent-runner.js'
@@ -79,6 +82,7 @@ import { WorkerOperationStore } from './workers/operations/store.js'
 import { resolveUserLevelBinary } from './workers/cli-binary.js'
 import { UserLevelInstaller } from './workers/install/user-level-installer.js'
 import { GrandfatherBootstrapStore } from './workers/operations/bootstrap.js'
+import { ScheduleScriptRunner, type ScheduleScriptDelivery } from './schedule-script-runner.js'
 
 function sanitizeWorkerOperationError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error))
@@ -554,35 +558,49 @@ export function resolveOverdueReminder(value: boolean | undefined): boolean {
   return value ?? true
 }
 
-/**
- * protocol-agent-v3 §8.2 trigger_schedule —— 调度触发（调度触发）。
- * 字段与协议逐字一致；`resolved_permissions` 是**唯一的额外字段**，见下方注释。
- */
+/** protocol-agent-v3 §8.2 trigger_schedule。 */
 export interface TriggerScheduleParams {
   schedule_id: ScheduleId
+  trigger_id: string
+  schedule_name: string
   task_type?: string
-  title: string
+  title?: string
   description?: string
   priority?: TaskPriority
   input?: Record<string, unknown>
   tags?: string[]
-  target_session?: { channel_id: ModuleId; session_id: SessionId }
+  target_session: {
+    channel_id: ModuleId
+    session_id: SessionId
+    platform_session_id?: string
+    type: 'private' | 'group'
+  }
   creator_friend_id?: FriendId
+  script?: {
+    source: string
+    source_sha256: string
+    timeout_seconds: number
+    deliver_result: boolean
+  }
   is_builtin?: boolean
-  /**
-   * 过渡期兼容字段（**不在 §8.2 里**，P7 cutover 后删）：v2 的 admin 在自己那侧把 schedule
-   * 的权限解析成 `resolved_permissions` 再下发（见 handleCreateTaskFromSchedule / protocol-admin
-   * §"is_builtin=true 或 creator_friend_id 为空 → master_private"）。v3 改为 agent 侧按
-   * `origin.creator_friend_id` 解析，因此本 handler **不消费**它——声明在这里只是为了让过渡期
-   * 里仍在下发该字段的调用方不至于类型不匹配，避免 admin 侧被迫与 agent 同步切换。
-   */
-  resolved_permissions?: ResolvedPermissions
 }
 
 /** §8.2：同步受理即返回（是否派 worker、如何执行由被唤醒的 manager 决定）。 */
 export interface TriggerScheduleResult {
   accepted: true
   task_id?: TaskId
+}
+
+interface AuthorizeAgentCliExecutionParams {
+  execution: AgentCliExecutionRef
+  domain: CliDomain
+  access: 'read' | 'write'
+}
+
+interface AuthorizeAgentCliExecutionResult {
+  valid: true
+  cli_access: 'none' | 'read' | 'write'
+  shell: boolean
 }
 
 /**
@@ -831,6 +849,7 @@ export class UnifiedAgent extends ModuleBase {
 
   // Trace 存储
   private traceStore: TraceStore
+  private scheduleScriptRunner: ScheduleScriptRunner
   private lspManager: LSPManager
   private builtinSubagentRunner: BuiltinSubagentRunner
   private traceCleanupInterval?: ReturnType<typeof setInterval>
@@ -877,6 +896,13 @@ export class UnifiedAgent extends ModuleBase {
       ['traces-', 'traces-v3-'],
       true,
     )
+    this.scheduleScriptRunner = new ScheduleScriptRunner({
+      traceStore: this.traceStore,
+      moduleId: config.module_id,
+      markerDir: path.join(getAgentDataDir(), 'schedule-script-active'),
+      cwd: process.env.CRABOT_HOME ?? path.resolve(__dirname, '../..'),
+      deliver: (result) => this.deliverScheduleScriptResult(result),
+    })
     this.lspManager = createLSPManager()
     this.builtinSubagentRunner = new BuiltinSubagentRunner(
       this.traceStore,
@@ -1223,6 +1249,7 @@ export class UnifiedAgent extends ModuleBase {
               }),
         })
       },
+      issueAgentCliCredential: (context) => this.issueAgentCliCredential(context),
       hasRunningBg: (workerId) => this.agentHandler?.hasRunningBgForWorker(workerId) ?? Promise.resolve(false),
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
       // 翻译与去重在 manager/events.ts，这里只负责把口子接上。
@@ -1627,6 +1654,21 @@ export class UnifiedAgent extends ModuleBase {
         getMemoryPort: () => this.getMemoryPort(),
         getAdminPort: () => this.getAdminPort(),
         getPermissionConfig: (tools, resolvedPerms) => this.getToolPermissionConfig(tools, resolvedPerms),
+        issueAgentCliExecutionEnv: async (taskId, context) => {
+          const origin = context.task_origin
+          if (!origin?.channel_id || !origin.session_id || !origin.session_type || !origin.friend_id) return undefined
+          const credential = await this.issueAgentCliCredential({
+            execution: { kind: 'legacy_task', task_id: taskId },
+            manager_key: `${origin.channel_id}::${origin.session_id}` as ManagerKey,
+            target_session: {
+              channel_id: origin.channel_id,
+              session_id: origin.session_id,
+              type: origin.session_type,
+            },
+            creator_friend_id: origin.friend_id,
+          })
+          return { CRABOT_TOKEN: credential.token, CRABOT_ACTOR: 'agent' }
+        },
         // 透传沙盒路径映射给 outbound flush 路径，让 buffered info 携带 file_path 时
         // 能跟 immediate-send 一样做沙盒→主机路径转换，不再 silent drop。
         // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5
@@ -1711,6 +1753,7 @@ export class UnifiedAgent extends ModuleBase {
 
     // Manager/Worker（v3）接口：§8.2 调度触发 + §8.3 task 读模型四件套。
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
+    this.registerMethod('authorize_agent_cli_execution', this.handleAuthorizeAgentCliExecution.bind(this))
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
     this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
     this.registerMethod('get_workboard_admin', this.handleGetWorkboardAdmin.bind(this))
@@ -3414,7 +3457,7 @@ export class UnifiedAgent extends ModuleBase {
       task: {
         id: taskId,
         type: params.task_type,
-        title: params.title,
+        title: params.title ?? params.schedule_name,
         status: 'queued',
         priority: params.priority ?? 'low',
         input: params.input,
@@ -3447,30 +3490,47 @@ export class UnifiedAgent extends ModuleBase {
     return { accepted: true, task_id: taskId }
   }
 
-  /**
-   * §8.2：maintenance 走 Agent-owned system task；退役 memory_curate fail-loud；其他 schedule 继续唤醒 manager。
-   *
-   * **manager 路由那条分支的 fail-loud（判据双管）**：fire-and-forget 只 `.catch()` 等于漏掉
-   * 最常见的那种失败——F1（LLM 挂 / key 过期 / 限流耗尽）不抛错，只在 `EpisodeResult.outcome`
-   * 上写 `failed`。定时任务本来就没人盯着，静默失败的表现是"早报没发、反思没生成"，而人类
-   * 收不到任何提示。因此这里既看 `outcome` 也 `catch`，两条都接到 `sendBackgroundFailLoud`
-   * （文案第三人称、点名是哪个定时任务）。目标会话 = `target_session`，没有则落系统任务线程
-   * （与 `routeSchedule` 的路由归属同一判据，见 `SYSTEM_TASKS_MANAGER_KEY`）。
-   *
-   * maintenance 那条分支**不走这里**：它是 Agent 自持的 system task，失败会落到台账
-   * （`status='failed'` + `agent.task_status_changed` 事件），有自己的可见性通道。
-   *
-   * 受理仍是"不等 episode"：新增的只是游离 promise 的收尾，一步都没 await。
-   */
+  /** §8.2：maintenance 走 Agent-owned system task；其他 Schedule 投递 instruction 或执行脚本。 */
   private async handleTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
     this.assertRuntimeExecutionAdmission()
-    if (params.task_type === 'memory_curate') {
-      const systemThread = splitManagerKey(SYSTEM_TASKS_MANAGER_KEY)
-      const target = params.target_session ?? {
-        channel_id: systemThread.channelId,
-        session_id: systemThread.sessionId,
+    if (!params.trigger_id?.trim() || !params.schedule_name?.trim()
+      || !params.target_session?.channel_id || !params.target_session.session_id
+      || (params.target_session.type !== 'private' && params.target_session.type !== 'group')) {
+      throw new RpcError('INVALID_PARAMS', 'Schedule trigger context is incomplete', {
+        disable_schedule: false,
+        reason: 'invalid trigger context',
+      })
+    }
+    const hasInstruction = typeof params.title === 'string' && params.title.trim().length > 0
+    const hasScript = params.script !== undefined
+    if (hasInstruction === hasScript || (hasScript && (
+      params.description !== undefined || params.priority !== undefined
+      || params.input !== undefined || params.tags !== undefined
+    ))) {
+      throw new RpcError('INVALID_PARAMS', 'Schedule trigger content must have exactly one branch', {
+        disable_schedule: false,
+        reason: 'invalid schedule content',
+      })
+    }
+    if (params.script) {
+      const hash = createHash('sha256').update(params.script.source, 'utf8').digest('hex')
+      if (hash !== params.script.source_sha256
+        || !Number.isInteger(params.script.timeout_seconds)
+        || params.script.timeout_seconds < 1 || params.script.timeout_seconds > 600) {
+        throw new RpcError('INVALID_PARAMS', 'Schedule script snapshot is invalid', {
+          disable_schedule: false,
+          reason: 'invalid script snapshot',
+        })
       }
-      const subject = `定时任务「${params.title || params.schedule_id}」`
+    }
+    if (params.task_type === 'memory_curate') {
+      await this.requireManagerStack().registry.authorizeSchedule({
+        targetSession: params.target_session,
+        creatorFriendId: params.creator_friend_id,
+        isBuiltin: params.is_builtin,
+      })
+      const target = params.target_session
+      const subject = `定时任务「${params.title ?? params.schedule_name}」`
       void this.sendBackgroundFailLoud(target, subject, {
         kind: 'threw',
         error: new Error('memory_curate 已退役，请使用每日反思'),
@@ -3482,22 +3542,33 @@ export class UnifiedAgent extends ModuleBase {
     }
 
     const { registry } = this.requireManagerStack()
-    const systemThread = splitManagerKey(SYSTEM_TASKS_MANAGER_KEY)
-    const target = params.target_session ?? {
-      channel_id: systemThread.channelId,
-      session_id: systemThread.sessionId,
-    }
-    const subject = `定时任务「${params.title || params.schedule_id}」`
-    void registry
-      .routeSchedule({
-        scheduleId: params.schedule_id,
-        title: params.title,
-        description: params.description ?? '',
-        taskType: params.task_type,
+    if (params.script) {
+      await registry.authorizeSchedule({
         targetSession: params.target_session,
         creatorFriendId: params.creator_friend_id,
         isBuiltin: params.is_builtin,
+        requireShell: true,
       })
+      await this.startScheduleScript(params)
+      return { accepted: true }
+    }
+    const target = params.target_session
+    const subject = `定时任务「${params.title ?? params.schedule_name}」`
+    const { completion } = await registry.admitSchedule({
+      scheduleId: params.schedule_id,
+      triggerId: params.trigger_id,
+      scheduleName: params.schedule_name,
+      title: params.title!,
+      description: params.description ?? '',
+      priority: params.priority,
+      input: params.input,
+      tags: params.tags,
+      taskType: params.task_type,
+      targetSession: params.target_session,
+      creatorFriendId: params.creator_friend_id,
+      isBuiltin: params.is_builtin,
+    })
+    void completion
       .then(async (result) => {
         // `?.` 与 bootstrap 侧的同款收尾一致：拿不到 EpisodeResult 时按"没有失败信号"放过，
         // 而不是让 TypeError 掉进下面的 catch —— 那会给人类推一条内容是内部报错的假兜底。
@@ -3516,6 +3587,92 @@ export class UnifiedAgent extends ModuleBase {
         await this.sendBackgroundFailLoud(target, subject, { kind: 'threw', error })
       })
     return { accepted: true }
+  }
+
+  private async issueAgentCliCredential(context: {
+    execution: AgentCliExecutionRef
+    manager_key: ManagerKey
+    target_session: { channel_id: string; session_id: string; type: 'private' | 'group' }
+    creator_friend_id?: string
+  }): Promise<{ token: string; expires_at: string }> {
+    return this.rpcClient.callSensitive(
+      await this.getAdminPort(),
+      'issue_agent_cli_credential',
+      { context },
+      this.config.moduleId,
+      { authorizationBearer: ConfigLoader.getRuntimeBearer() },
+    )
+  }
+
+  private async handleAuthorizeAgentCliExecution(
+    params: AuthorizeAgentCliExecutionParams,
+  ): Promise<AuthorizeAgentCliExecutionResult> {
+    if (!params || !CLI_DOMAINS.includes(params.domain)
+      || (params.access !== 'read' && params.access !== 'write')) {
+      throw new RpcError('FORBIDDEN', 'Agent execution is not authorized')
+    }
+    try {
+      if (params.execution?.kind === 'worker') {
+        return await this.requireManagerStack().harness.authorizeAgentCliExecution(
+          params.execution,
+          params.domain,
+        )
+      }
+      if (params.execution?.kind === 'legacy_task') {
+        const permissions = this.agentHandler?.getTaskResolvedPermissions(params.execution.task_id)
+        if (!permissions || !this.agentHandler?.hasActiveTask(params.execution.task_id)) throw new Error('FORBIDDEN')
+        return {
+          valid: true,
+          cli_access: permissions.cli_access[params.domain],
+          shell: permissions.tool_access.shell,
+        }
+      }
+    } catch {
+      // Execution existence and lifecycle are intentionally indistinguishable.
+    }
+    throw new RpcError('FORBIDDEN', 'Agent execution is not authorized')
+  }
+
+  private async startScheduleScript(params: TriggerScheduleParams): Promise<void> {
+    const script = params.script!
+    await this.scheduleScriptRunner.admit({
+      scheduleId: params.schedule_id,
+      triggerId: params.trigger_id,
+      scheduleName: params.schedule_name,
+      source: script.source,
+      sourceSha256: script.source_sha256,
+      timeoutSeconds: script.timeout_seconds,
+      deliverResult: script.deliver_result,
+      targetSession: params.target_session,
+      creatorFriendId: params.creator_friend_id,
+      isBuiltin: params.is_builtin,
+    })
+  }
+
+  private async deliverScheduleScriptResult(result: ScheduleScriptDelivery): Promise<void> {
+    const lines = [
+      `Schedule: ${result.scheduleName}`,
+      `Trigger ID: ${result.triggerId}`,
+      `Source SHA-256: ${result.sourceSha256}`,
+      `Started: ${result.startedAt}`,
+      `Ended: ${result.endedAt}`,
+      `Outcome: ${result.outcome}`,
+      ...(result.exitCode === undefined ? [] : [`Exit code: ${result.exitCode}`]),
+      ...(result.signal ? [`Signal: ${result.signal}`] : []),
+      `Stdout bytes: ${result.stdoutBytes}`,
+      `Stderr bytes: ${result.stderrBytes}`,
+      ...(result.outputTail ? ['Output tail:', result.outputTail] : []),
+    ]
+    await this.requireManagerStack().registry.admitSchedule({
+      scheduleId: result.scheduleId,
+      triggerId: result.triggerId,
+      scheduleName: result.scheduleName,
+      title: `脚本 Schedule「${result.scheduleName}」执行结果`,
+      description: lines.join('\n'),
+      targetSession: result.targetSession,
+      creatorFriendId: result.creatorFriendId,
+      isBuiltin: result.isBuiltin,
+    })
   }
 
   /** §8.3 list_workers_admin：跨对话对象扁平查询（过滤/排序/分页语义见 manager/read-model.ts）。 */
@@ -5235,6 +5392,8 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   protected override async onStart(): Promise<void> {
+    await retireWorkerSupervision(getAgentDataDir())
+    await this.scheduleScriptRunner.recover()
     try {
       await this.builtinSubagentRunner.recoverAfterRestart()
     } catch (error) {
@@ -5387,6 +5546,7 @@ export class UnifiedAgent extends ModuleBase {
 
   protected override async onStop(): Promise<void> {
     this.runtimeClosing = true
+    await this.scheduleScriptRunner.stop()
     this.stopCliSubagentHarvestScheduler()
     for (const timer of this.workboardNoticeRetryTimers.values()) clearTimeout(timer)
     this.workboardNoticeRetryTimers.clear()

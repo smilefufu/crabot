@@ -31,7 +31,7 @@ import type {
 } from '../../mcp/crab-messaging.js'
 import { buildWorkerTools } from './worker-tools.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
-import { buildCrabotInfoTools } from './crabot-info.js'
+import { buildCrabotInfoTools, type ManagerScheduleToolsContext } from './crabot-info.js'
 import type { MasterAuthorization } from '../principal.js'
 import { buildWorkboardTools } from './workboard-tools.js'
 import type { ManagerWorkboardStore } from '../workboard-store.js'
@@ -56,6 +56,7 @@ export interface ToolFaceDeps {
   readonly memoryServer: McpServer
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
   readonly getRuntimeConfigSummary?: () => unknown
+  readonly schedule?: ManagerScheduleToolsContext
   /** 该 manager 是否为保留的"系统任务"线程（决定 send_master_private / send_private_message 可见性）。 */
   readonly isSystemThread: boolean
   /** builtin daily reflection uses a fixed Admin Web delivery action instead of generic messaging. */
@@ -369,6 +370,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     callAdmin: deps.callAdmin,
     getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
+    ...(deps.schedule ? { schedule: deps.schedule } : {}),
   })
   const workboardTools = buildWorkboardTools(deps.workboard)
   const projectDocTools = buildProjectDocTools(deps.projectDocs)

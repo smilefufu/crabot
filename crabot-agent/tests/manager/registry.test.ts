@@ -86,6 +86,27 @@ function deferred(): { readonly promise: Promise<void>; readonly resolve: () => 
   return { promise, resolve }
 }
 
+let scheduleSequence = 0
+function scheduleWake(params: {
+  scheduleId: string
+  title: string
+  description: string
+  taskType?: string
+  creatorFriendId?: string
+  isBuiltin?: boolean
+  targetSession?: { channel_id: string; session_id: string; type?: 'private' | 'group' }
+}) {
+  const { targetSession, ...rest } = params
+  return {
+    ...rest,
+    triggerId: `trigger-${++scheduleSequence}`,
+    scheduleName: params.title,
+    targetSession: targetSession
+      ? { ...targetSession, type: targetSession.type ?? 'private' as const }
+      : { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' as const },
+  }
+}
+
 const FAKE_HARNESS = { listWorkers: async (): Promise<LedgerWorker[]> => [] } as unknown as WorkerHarness
 
 function makeLedgerWorker(workerId: string, managerKey: ManagerKey): LedgerWorker {
@@ -273,7 +294,7 @@ describe('ManagerRegistry', () => {
     queue.push({ text: '普通线程回复', stopReason: 'end_turn' })
     const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
 
-    await registry.routeSchedule({ scheduleId: 'sc', title: 't', description: 'd' }) // 无 targetSession → 落系统线程
+    await registry.routeSchedule(scheduleWake({ scheduleId: 'sc', title: 't', description: 'd' }))
     await registry.routeHumanMessages('wechat', 'sess-normal', [makeChannelMessage('hi')])
 
     expect(calls[0].systemPrompt).toContain('系统线程纪律')
@@ -711,146 +732,6 @@ describe('ManagerRegistry', () => {
     })
   })
 
-  it('routeSupervisionDue: 已被 clear 或替换的 due 不创建 Manager episode', async () => {
-    const { adapter, calls } = makeAdapter()
-    const isCurrent = vi.fn(async () => false)
-    const registry = new ManagerRegistry(baseRegistryDeps({
-      adapter,
-      harness: { ...FAKE_HARNESS, isSupervisionDueCurrent: isCurrent } as unknown as WorkerHarness,
-    }))
-    const event: HarnessEvent = {
-      ts: '2026-01-01T00:00:00.000Z',
-      kind: 'supervision_due',
-      worker_id: 'w-stale',
-      seq: 1,
-      detail: { mode: 'periodic_report', due_id: 'old-due', mainline_seq: 1, observation: 'none' },
-    }
-
-    await expect(registry.routeSupervisionDue(event)).resolves.toBeUndefined()
-    expect(isCurrent).toHaveBeenCalledWith(event)
-    expect(calls).toHaveLength(0)
-  })
-
-  it('routeSupervisionDue: 路由准备期间 due 被 clear 后不创建 Manager episode', async () => {
-    const { adapter, calls } = makeAdapter()
-    const routePreparationEntered = deferred()
-    const releaseRoutePreparation = deferred()
-    const owner = 'wechat::periodic-owner' as ManagerKey
-    let current = true
-    const isCurrent = vi.fn(async () => current)
-    const findWorker = vi.fn(async () => {
-      routePreparationEntered.resolve()
-      await releaseRoutePreparation.promise
-      return { managerKey: owner, worker: makeLedgerWorker('w-periodic', owner) }
-    })
-    const registry = new ManagerRegistry(baseRegistryDeps({
-      adapter,
-      ledger: { findWorker } as unknown as LedgerStore,
-      harness: { ...FAKE_HARNESS, isSupervisionDueCurrent: isCurrent } as unknown as WorkerHarness,
-    }))
-    const event: HarnessEvent = {
-      ts: '2026-01-01T00:00:00.000Z',
-      kind: 'supervision_due',
-      worker_id: 'w-periodic',
-      seq: 1,
-      detail: { mode: 'periodic_report', due_id: 'cleared-due', mainline_seq: 1, observation: 'none' },
-    }
-
-    const routed = registry.routeSupervisionDue(event)
-    await routePreparationEntered.promise
-    current = false
-    releaseRoutePreparation.resolve()
-
-    await expect(routed).resolves.toBeUndefined()
-    expect(isCurrent).toHaveBeenCalledTimes(2)
-    expect(isCurrent).toHaveBeenNthCalledWith(1, event)
-    expect(isCurrent).toHaveBeenNthCalledWith(2, event)
-    expect(calls).toHaveLength(0)
-  })
-
-  it('routeSupervisionDue: pre-wake 异步刷新期间 due 被 clear 后不创建 Manager episode', async () => {
-    const { adapter, calls } = makeAdapter()
-    const beforeWakeEntered = deferred()
-    const releaseBeforeWake = deferred()
-    const owner = 'wechat::periodic-owner' as ManagerKey
-    let current = true
-    const isCurrent = vi.fn(async () => current)
-    const registry = new ManagerRegistry(baseRegistryDeps({
-      adapter,
-      ledger: fakeLedger({ 'w-periodic': makeLedgerWorker('w-periodic', owner) }),
-      harness: { ...FAKE_HARNESS, isSupervisionDueCurrent: isCurrent } as unknown as WorkerHarness,
-      beforeWake: async () => {
-        beforeWakeEntered.resolve()
-        await releaseBeforeWake.promise
-      },
-    }))
-    const event: HarnessEvent = {
-      ts: '2026-01-01T00:00:00.000Z',
-      kind: 'supervision_due',
-      worker_id: 'w-periodic',
-      seq: 1,
-      detail: { mode: 'periodic_report', due_id: 'cleared-at-admission', mainline_seq: 1, observation: 'none' },
-    }
-
-    const routed = registry.routeSupervisionDue(event)
-    await beforeWakeEntered.promise
-    current = false
-    releaseBeforeWake.resolve()
-
-    await expect(routed).resolves.toBeUndefined()
-    expect(isCurrent).toHaveBeenCalledTimes(3)
-    expect(calls).toHaveLength(0)
-  })
-
-  it('routeSupervisionDue: owning Manager 正执行时保留 due，不伪造已消费结果', async () => {
-    const calls: LLMStreamParams[] = []
-    const entered = deferred()
-    const release = deferred()
-    let turn = 0
-    const adapter: LLMAdapter = {
-      async *stream(params) {
-        calls.push({ ...params, messages: [...params.messages] })
-        if (isAssistantTextEndTurnReminder(params)) {
-          yield* chunksFromContent([], 'end_turn', { inputTokens: 1, outputTokens: 1 })
-          return
-        }
-        turn++
-        if (turn === 1) {
-          entered.resolve()
-          await release.promise
-        }
-        yield* chunksFromContent([{ type: 'text', text: '当前 episode 完成' }], 'end_turn', { inputTokens: 1, outputTokens: 1 })
-      },
-      updateConfig: () => {},
-    }
-    const owner = 'wechat::periodic-owner' as ManagerKey
-    const event: HarnessEvent = {
-      ts: '2026-01-01T00:00:00.000Z',
-      kind: 'supervision_due',
-      worker_id: 'w-periodic',
-      seq: 1,
-      detail: { mode: 'periodic_report', due_id: 'due-active', mainline_seq: 1, observation: 'none' },
-    }
-    const isCurrent = vi.fn(async () => true)
-    const registry = new ManagerRegistry(baseRegistryDeps({
-      adapter,
-      ledger: fakeLedger({ 'w-periodic': makeLedgerWorker('w-periodic', owner) }),
-      harness: { ...FAKE_HARNESS, isSupervisionDueCurrent: isCurrent } as unknown as WorkerHarness,
-    }))
-
-    const active = registry.routeHumanMessages('wechat', 'periodic-owner', [makeChannelMessage('先完成这一轮')])
-    await entered.promise
-    await expect(registry.routeSupervisionDue(event)).resolves.toBeUndefined()
-    expect(isCurrent).toHaveBeenCalledWith(event)
-    expect(calls).toHaveLength(1)
-
-    release.resolve()
-    await active
-    for (const call of calls) {
-      expect(JSON.stringify(call.messages)).not.toContain('due-active')
-    }
-  })
-
   it('routeOperationNotification: turn_completed 等非 activity 通知同样注入 task_id / trigger_type(detail 形态与通道无关)', async () => {
     const { adapter, queue, calls } = makeAdapter()
     queue.push({ text: '记录回合完成', stopReason: 'end_turn' })
@@ -1037,6 +918,52 @@ describe('ManagerRegistry', () => {
     await vi.waitFor(() => expect(secondReject).toHaveBeenCalledOnce())
   })
 
+  it('scheduled episode 失败收口期间到达的 activity 也会 reject', async () => {
+    const entered = deferred()
+    const release = deferred()
+    const reject = vi.fn(async () => undefined)
+    const { adapter } = makeAdapter()
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      beforeWake: async () => {
+        entered.resolve()
+        await release.promise
+        throw new Error('scheduled wake failed')
+      },
+    }))
+    const key = 'wechat::scheduled-activity-failure' as ManagerKey
+    const schedule = registry.routeSchedule(scheduleWake({
+      scheduleId: 'scheduled-failure',
+      title: 'scheduled failure',
+      description: 'scheduled failure',
+      targetSession: { channel_id: 'wechat', session_id: 'scheduled-activity-failure' },
+    }))
+    await entered.promise
+
+    await expect(registry.routeOperationNotification(key, {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'activity_available',
+      worker_id: 'w-scheduled-failure',
+      seq: 1,
+      detail: {
+        incarnation_id: 'inc-scheduled-failure',
+        from_cursor: 'from-scheduled-failure',
+        through_cursor: 'through-scheduled-failure',
+        preview: 'worker error',
+        has_error: true,
+      },
+    }, {
+      notification_id: 'notification-scheduled-failure',
+      activity_through: 'through-scheduled-failure',
+      admit: vi.fn(async () => undefined),
+      reject,
+    })).resolves.toEqual({ consumed: false, registered: true })
+
+    release.resolve()
+    await expect(schedule).rejects.toThrow('scheduled wake failed')
+    await vi.waitFor(() => expect(reject).toHaveBeenCalledOnce())
+  })
+
   // --- routeSchedule ---
 
   it('routeSchedule: 有 targetSession → 该 session 的 manager', async () => {
@@ -1044,12 +971,12 @@ describe('ManagerRegistry', () => {
     queue.push({ text: '定时任务已处理', stopReason: 'end_turn' })
     const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
 
-    await registry.routeSchedule({
+    await registry.routeSchedule(scheduleWake({
       scheduleId: 'sc-1',
       title: '标题',
       description: '描述',
       targetSession: { channel_id: 'wechat', session_id: 'sess-target' },
-    })
+    }))
 
     const state = await store.load('wechat::sess-target' as ManagerKey)
     expect(state.recent.length).toBeGreaterThan(0)
@@ -1057,12 +984,12 @@ describe('ManagerRegistry', () => {
     expect(systemState.recent.length).toBe(0)
   })
 
-  it('routeSchedule: 无 targetSession → 系统线程 manager', async () => {
+  it('routeSchedule: canonical system target → 系统线程 manager', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ text: '系统任务已处理', stopReason: 'end_turn' })
     const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
 
-    await registry.routeSchedule({ scheduleId: 'sc-2', title: '标题', description: '描述' })
+    await registry.routeSchedule(scheduleWake({ scheduleId: 'sc-2', title: '标题', description: '描述' }))
 
     const state = await store.load(SYSTEM_TASKS_MANAGER_KEY)
     expect(state.recent.length).toBeGreaterThan(0)
@@ -1080,13 +1007,13 @@ describe('ManagerRegistry', () => {
       },
     }))
 
-    await registry.routeSchedule({
+    await registry.routeSchedule(scheduleWake({
       scheduleId: 'daily',
       title: '每日反思',
       description: 'reflect',
       taskType: 'daily_reflection',
       isBuiltin: true,
-    })
+    }))
 
     expect(identities.length).toBeGreaterThan(0)
     for (const identity of identities) {
@@ -1154,7 +1081,7 @@ describe('ManagerRegistry', () => {
     expect(workerMessages).toContain('received_at=\\"2026-08-10T09:01:00+08:00\\"')
     expect(workerMessages).toContain('occurred_at=\\"2026-08-10T00:59:30.000Z\\"')
 
-    const schedule = registry.routeSchedule({ scheduleId: 'timed', title: 't', description: 'd' })
+    const schedule = registry.routeSchedule(scheduleWake({ scheduleId: 'timed', title: 't', description: 'd' }))
     await scheduleEntered.promise
     nowMs = Date.parse('2026-08-10T01:03:00.000Z')
     scheduleRelease.resolve()
@@ -1360,8 +1287,8 @@ describe('ManagerRegistry', () => {
     // 引用计数的保护意图。
     // runWake 内部在第一个 await 之前就已经同步完成 activeEpisodes 计数 +1，
     // 因此这里不需要额外同步手段就能保证两次唤醒都已经"在途"。
-    const pA = registry.routeSchedule({ scheduleId: 'concurrent-a', title: 'A', description: 'A', targetSession: { channel_id: 'wechat', session_id: 'sess-concurrent' } })
-    const pB = registry.routeSchedule({ scheduleId: 'concurrent-b', title: 'B', description: 'B', targetSession: { channel_id: 'wechat', session_id: 'sess-concurrent' } })
+    const pA = registry.routeSchedule(scheduleWake({ scheduleId: 'concurrent-a', title: 'A', description: 'A', targetSession: { channel_id: 'wechat', session_id: 'sess-concurrent' } }))
+    const pB = registry.routeSchedule(scheduleWake({ scheduleId: 'concurrent-b', title: 'B', description: 'B', targetSession: { channel_id: 'wechat', session_id: 'sess-concurrent' } }))
 
     const resultA = await pA // A 的 episode 已经 resolve：引用计数应从 2 降到 1，而不是被误删到 0
     expect(resultA.outcome).toBe('completed')
@@ -1400,7 +1327,7 @@ describe('ManagerRegistry', () => {
       },
     }))
 
-    const wake = registry.routeSchedule({ scheduleId: 'closing', title: 't', description: 'd' })
+    const wake = registry.routeSchedule(scheduleWake({ scheduleId: 'closing', title: 't', description: 'd' }))
     await entered.promise
     closing = true
     release.resolve()
@@ -1904,15 +1831,15 @@ describe('ManagerRegistry', () => {
       const { adapter, queue, calls } = makeAdapter()
       queue.push({ stopReason: 'end_turn' }, { stopReason: 'end_turn' })
       const excluded = new ManagerRegistry(withCurrentObjectives(baseRegistryDeps({ adapter, now: () => new Date() })))
-      await excluded.routeSchedule({ scheduleId: 'system', title: '系统任务', description: '系统任务' })
-      await excluded.routeSchedule({
+      await excluded.routeSchedule(scheduleWake({ scheduleId: 'system', title: '系统任务', description: '系统任务' }))
+      await excluded.routeSchedule(scheduleWake({
         scheduleId: 'reflection',
         title: '每日反思',
         description: '每日反思',
         taskType: 'daily_reflection',
         isBuiltin: true,
         targetSession: { channel_id: 'wechat', session_id: 'daily-reflection' },
-      })
+      }))
 
       await vi.advanceTimersByTimeAsync(HOUR_MS * 2)
       expect(failedCalls).toHaveLength(1)
@@ -1938,12 +1865,12 @@ describe('ManagerRegistry', () => {
       await registry.routeHumanMessages('wechat', 'idle-preparing', [makeChannelMessage('开始')])
       await vi.advanceTimersByTimeAsync(HOUR_MS - 1)
       blockWake = true
-      const scheduled = registry.routeSchedule({
+      const scheduled = registry.routeSchedule(scheduleWake({
         scheduleId: 'queued',
         title: '排队事件',
         description: '排队事件',
         targetSession: { channel_id: 'wechat', session_id: 'idle-preparing' },
-      })
+      }))
       await entered.promise
 
       await vi.advanceTimersByTimeAsync(HOUR_MS)

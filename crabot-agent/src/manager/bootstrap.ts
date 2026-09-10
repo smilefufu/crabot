@@ -31,6 +31,7 @@
  */
 
 import { join, resolve } from 'path'
+import { RpcError } from 'crabot-shared'
 
 import { WorkerHarness, type HarnessDeps, type ReconcileReport } from '../workers/harness/harness'
 import { LedgerStore } from '../workers/harness/ledger-store'
@@ -187,6 +188,7 @@ export interface BootstrapDeps {
   readonly isClosing?: () => boolean
   /** 当前 worker capability；调用方必须按 harness 给出的固定权限快照过滤。 */
   readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
+  readonly issueAgentCliCredential?: HarnessDeps['issueAgentCliCredential']
   /** Shared bg registry ownership check for builtin end_turn state mapping. */
   readonly hasRunningBg?: (workerId: string) => Promise<boolean>
   /**
@@ -262,17 +264,6 @@ export type EpisodeFailureReporter = (report: {
 function channelSessionFromManagerKey(key: ManagerKey): { channel_id: string; session_id: string } {
   const { channelId, sessionId } = splitManagerKey(key)
   return { channel_id: channelId, session_id: sessionId }
-}
-
-function periodicReportTarget(event: import('../workers/harness/worker-events.js').HarnessEvent):
-  { channel_id: string; session_id: string } | undefined {
-  if (event.kind !== 'supervision_due' || event.detail?.mode !== 'periodic_report') return undefined
-  const target = event.detail.report_to
-  if (!target || typeof target !== 'object') return undefined
-  const { channel_id, session_id } = target as Record<string, unknown>
-  return typeof channel_id === 'string' && typeof session_id === 'string'
-    ? { channel_id, session_id }
-    : undefined
 }
 
 /**
@@ -410,23 +401,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 
       if (deps.isClosing?.()) return { consumed: false }
       if (!registry || !shouldWakeOnHarnessEvent(event)) return { consumed: false }
-      const routed = event.kind === 'supervision_due'
-        ? registry.routeSupervisionDue(event)
-        : registry.routeWorkerEvent(event)
-      return routed.then(
+      return registry.routeWorkerEvent(event).then(
         async (result) => {
-          // A set/clear/expiry/terminal transition can invalidate a due while it was queued, or
-          // during its Manager episode. It remains in trace/events.jsonl but must not affect the
-          // replacement rule. `undefined` from the narrow route is the before-wake stale case.
-          if (event.kind === 'supervision_due' && result === undefined) {
-            // `undefined` is either a stale due (safe to consume) or an active Manager
-            // defer (keep the durable due for retry). The current-state check distinguishes
-            // those two cases without inventing a completed EpisodeResult.
-            return { consumed: !await harness.isSupervisionDueCurrent(event) }
-          }
-          if (event.kind === 'supervision_due' && !await harness.isSupervisionDueCurrent(event)) {
-            return { consumed: true }
-          }
           // fail-loud 的判据必须双管:`.catch` 只抓得到 F2(中途抛错),而最常见的 F1(LLM 挂 /
           // key 过期 / 限流耗尽)是**正常 resolve 且 outcome='failed'**——只 catch 等于对它全瞎。
           if (result?.outcome === 'failed' || result?.outcome === 'aborted') {
@@ -439,15 +415,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // 巡检拿到"未消费"因而下一轮还能重报(这里)。`ManagerLoop` 只在
           // outcome ∈ {completed, max_turns} 时置 consumedEvents,所以失败分支这一句必然
           // 返回 false,两条语义天然对齐,不需要在这里另判一次。
-          if (event.kind !== 'supervision_due') return { consumed: result?.consumedEvents === true }
-          if (result?.consumedEvents !== true) return { consumed: false }
-          const target = periodicReportTarget(event)
-          if (!target) return { consumed: true }
-          return {
-            consumed: result.successfulSendMessageTargets.some(
-              (sent) => sent.channel_id === target.channel_id && sent.session_id === target.session_id,
-            ),
-          }
+          return { consumed: result?.consumedEvents === true }
         },
         async (err) => {
           console.error(`[manager-bootstrap] routeWorkerEvent 失败 (worker=${event.worker_id}, kind=${event.kind}):`, err)
@@ -474,6 +442,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
     assertExecutionAdmission: deps.assertExecutionAdmission,
     capabilityBundle: deps.capabilityBundle,
+    issueAgentCliCredential: deps.issueAgentCliCredential,
     hasRunningBg: deps.hasRunningBg,
     isClosing: deps.isClosing,
     validateLegacyContinuationAuth: (auth) => principals.validateLegacyContinuationAuth(auth),
@@ -562,16 +531,72 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     //   群聊会话猜成 'private' 是**更宽**而非更严(master creator 拿回 master_private、普通
     //   creator 拿 friend∪session 并集,均 ≥ 群档位)——agent 重启后该群尚未被人类消息唤醒过
     //   的窗口内可达;已记 PROGRESS follow-up(schedule 权限语义属 spec 非目标,另行立项)。
-    onScheduleWake: async ({ key, creatorFriendId, isBuiltin }) => {
-      if (isBuiltin || !creatorFriendId) return null
-      const { sessionId } = splitManagerKey(key)
-      const sessionType = principals.get(key)?.principal.sessionType ?? 'private'
-      // 群聊防跨群泄漏的收敛与人类消息那条路共用同一个规则(空 scopes → 本会话)。
-      return applyGroupScopeFallback(
-        await deps.principalResolver.resolvePermissions({ senderFriendId: creatorFriendId, sessionId, sessionType }),
-        sessionType,
-        sessionId,
-      )
+    onScheduleWake: async ({ creatorFriendId, isBuiltin, targetSession, requireShell }) => {
+      if (isBuiltin) return null
+      if (!targetSession?.type) {
+        throw new RpcError('AGENT_SCHEDULE_AUTH_UNAVAILABLE', 'Schedule target 不完整', {
+          disable_schedule: false,
+          reason: 'target context unavailable',
+        })
+      }
+      if (targetSession.type === 'private' && !creatorFriendId) {
+        throw new RpcError('AGENT_SCHEDULE_AUTH_REVOKED', 'Schedule 创建者已失效', {
+          disable_schedule: true,
+          reason: 'private creator unavailable',
+        })
+      }
+      const isAdminChatMaster = targetSession.type === 'private'
+        && targetSession.channel_id === 'admin-web'
+        && targetSession.session_id === 'admin-chat'
+        && creatorFriendId === 'master'
+      if (targetSession.type === 'private' && !isAdminChatMaster) {
+        try {
+          if (!await deps.principalResolver.getFriend?.(creatorFriendId!)) {
+            throw new RpcError('AGENT_SCHEDULE_AUTH_REVOKED', 'Schedule 创建者已失效', {
+              disable_schedule: true,
+              reason: 'private creator unavailable',
+            })
+          }
+        } catch (error) {
+          if (error instanceof RpcError) throw error
+          const missing = error instanceof Error && error.message.includes('Friend not found')
+          throw new RpcError(
+            missing ? 'AGENT_SCHEDULE_AUTH_REVOKED' : 'AGENT_SCHEDULE_AUTH_UNAVAILABLE',
+            missing ? 'Schedule 创建者已失效' : 'Schedule 权限解析暂不可用',
+            { disable_schedule: missing, reason: missing ? 'private creator unavailable' : 'permission resolver unavailable' },
+          )
+        }
+      }
+      let permissions: import('../types.js').ResolvedPermissions | null
+      try {
+        permissions = applyGroupScopeFallback(
+          await deps.principalResolver.resolvePermissions({
+            ...(targetSession.type === 'private' ? { senderFriendId: creatorFriendId! } : {}),
+            sessionId: targetSession.session_id,
+            sessionType: targetSession.type,
+          }),
+          targetSession.type,
+          targetSession.session_id,
+        )
+      } catch {
+        throw new RpcError('AGENT_SCHEDULE_AUTH_UNAVAILABLE', 'Schedule 权限解析暂不可用', {
+          disable_schedule: false,
+          reason: 'permission resolver unavailable',
+        })
+      }
+      if (!permissions) {
+        throw new RpcError('AGENT_SCHEDULE_AUTH_UNAVAILABLE', 'Schedule 权限解析暂不可用', {
+          disable_schedule: false,
+          reason: 'permission resolver unavailable',
+        })
+      }
+      if (permissions.cli_access.schedule !== 'write' || (requireShell && !permissions.tool_access.shell)) {
+        throw new RpcError('AGENT_SCHEDULE_AUTH_REVOKED', 'Schedule 执行权限已撤销', {
+          disable_schedule: true,
+          reason: requireShell ? 'schedule or shell permission revoked' : 'schedule permission revoked',
+        })
+      }
+      return permissions
     },
     toolFace: (key, isSystemThread, scheduleIdentity, humanPrincipal, principalPermissions, traceHooks, wakeEvent) => {
       // Capture at tool-face construction. Calling the resulting factory later must not
@@ -580,6 +605,21 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       const isWorkboardSystemInput = wakeEvent?.kind === 'workboard_admin_update'
         || wakeEvent?.kind === 'workboard_idle_review'
       const workboardPrincipal = isWorkboardSystemInput ? principals.get(key)?.principal : undefined
+      const target = channelSessionFromManagerKey(key)
+      const targetSessionType = scheduleIdentity?.targetSession?.type
+        ?? humanPrincipal?.sessionType
+        ?? principals.get(key)?.principal.sessionType
+      const scheduleTarget = scheduleIdentity?.targetSession
+        ?? (targetSessionType ? { ...target, type: targetSessionType } : undefined)
+      const schedulePrincipal = scheduleIdentity
+        ? undefined
+        : humanPrincipal ?? (isWorkboardSystemInput ? workboardPrincipal : principals.get(key)?.principal)
+      const scheduleCreatorFriendId = scheduleIdentity
+        ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
+        : schedulePrincipal?.friend?.id
+      const scheduleMasterAuthorization = humanPrincipal?.sessionType === 'private'
+        ? principals.currentMasterAuthorization(key)
+        : undefined
       return buildManagerToolFace({
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
@@ -590,7 +630,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // spawn 成功后经 onWorkerSpawned 回写同一 trace 的 spawned_worker_ids。
           episodeId: traceHooks?.currentTraceId(),
           onWorkerSpawned: traceHooks?.onWorkerSpawned,
-          reportTo: channelSessionFromManagerKey(key),
+          reportTo: target,
+          ...(targetSessionType ? { targetSession: { ...target, type: targetSessionType } } : {}),
           // 权限身份(§4.4"权限按 Schedule.creator_friend_id 解析(is_builtin 按 master
           // 等价)"):内置 schedule 不以任何 friend 的名义执行,显式留空——空 creator 正是
           // admin 侧既有的 master 等价规则(protocol-admin §"is_builtin=true 或
@@ -622,7 +663,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         messagingDeps: deps.messagingDeps,
         // send_message 省略 channel_id 时使用的 manager 归属目标与结构化 Session 观察索引
         // （spec 2026-09-03-tool-input-repair）。两条桥都在工具调用时动态读取当前 Loop。
-        managerTarget: channelSessionFromManagerKey(key),
+        managerTarget: target,
         sessionChannelsFor: traceHooks?.sessionChannelsFor,
         onObservedSessionTargets: traceHooks?.onObservedSessionTargets,
         onPostSendAction: traceHooks?.onPostSendAction,
@@ -632,6 +673,27 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         memoryServer: deps.memoryServerFor(memoryContextFor(key, principals.get(key))),
         callAdmin: deps.callAdmin,
         getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
+        schedule: {
+          ...(scheduleTarget ? { targetSession: scheduleTarget } : {}),
+          ...(scheduleCreatorFriendId ? { creatorFriendId: scheduleCreatorFriendId } : {}),
+          canCreate: scheduleIdentity?.isBuiltin !== true && scheduleCreatorFriendId !== undefined,
+          resolvePermissions: async () => {
+            if (!scheduleTarget || (scheduleTarget.type === 'private' && !scheduleCreatorFriendId)) return null
+            return applyGroupScopeFallback(
+              await deps.principalResolver.resolvePermissions({
+                ...(scheduleTarget.type === 'private'
+                  ? { senderFriendId: scheduleCreatorFriendId! }
+                  : {}),
+                sessionId: scheduleTarget.session_id,
+                sessionType: scheduleTarget.type,
+              }),
+              scheduleTarget.type,
+              scheduleTarget.session_id,
+            )
+          },
+          ...(scheduleMasterAuthorization ? { masterAuthorization: scheduleMasterAuthorization } : {}),
+          validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),
+        },
         isSystemThread,
         isBuiltinDailyReflection:
           scheduleIdentity?.isBuiltin === true && scheduleIdentity.taskType === 'daily_reflection',
@@ -725,6 +787,5 @@ export async function reconcileManagerStack(stack: ManagerStack): Promise<Reconc
   await stack.harness.reconcileInputDeliveriesOnStartup()
   await stack.harness.reconcileQueryReceiptsOnStartup()
   await stack.harness.reconcileControlOperationsOnStartup()
-  await stack.harness.reconcileSupervisionOnStartup()
   return report
 }

@@ -47,8 +47,11 @@ import { canonicalizeJson,
   type Event,
   type ModuleId,
   type FriendId,
+  type SessionId,
   type TaskId,
   type ScheduleId,
+  type AgentCliExecutionRef,
+  type CliDomain,
   generateId,
   generateTimestamp,
   proxyManager,
@@ -56,6 +59,7 @@ import { canonicalizeJson,
   type ProxyConfig,
   type RpcHandlerContext,
   RpcError,
+  RpcCallError,
   sha256CanonicalJson,
   CLAIM_COMMANDS,
   CLAIM_PAIR_COMMANDS,
@@ -86,6 +90,12 @@ import {
   AdminErrorCode,
   type Task,
   type Schedule,
+  type ScheduleScript,
+  type ScheduleScriptInput,
+  type ScheduleView,
+  type AgentCliCredentialContext,
+  type IssueAgentCliCredentialParams,
+  type IssueAgentCliCredentialResult,
   type TaskStatus,
   type CreateTaskParams,
   type GetTaskParams,
@@ -260,6 +270,54 @@ interface JwtPayload {
   iat: number
   exp: number
   e?: number          // token_epoch；internal-token 无此字段
+  agent_cli?: AgentCliCredentialContext
+}
+
+interface AgentCliWebAuth {
+  context: AgentCliCredentialContext
+  shell: boolean
+  masterPrivate: boolean
+}
+
+interface AgentCliRoute {
+  domain: CliDomain
+  access: 'read' | 'write'
+}
+
+function classifyAgentCliRoute(method: string | undefined, pathname: string): AgentCliRoute | null {
+  if (!method) return null
+  const access = method === 'GET' ? 'read' : 'write'
+  const allowed = (domain: CliDomain, methods: readonly string[], pattern: RegExp): AgentCliRoute | null =>
+    methods.includes(method) && pattern.test(pathname) ? { domain, access } : null
+
+  return allowed('provider', ['GET', 'POST', 'DELETE'], /^\/api\/model-providers(?:\/[^/]+(?:\/(?:test|refresh-models))?)?$/)
+    ?? allowed('agent', ['GET', 'PATCH'], /^\/api\/agent-instances(?:\/[^/]+(?:\/config)?)?$/)
+    ?? allowed('agent', ['POST'], /^\/api\/modules\/crabot-agent\/restart$/)
+    ?? allowed('mcp', ['GET', 'POST', 'PATCH', 'DELETE'], /^\/api\/mcp-servers(?:\/import-json|\/[^/]+)?$/)
+    ?? allowed('skill', ['GET', 'POST', 'PATCH', 'DELETE'], /^\/api\/skills(?:\/import-git\/(?:scan|install)|\/import-local|\/[^/]+(?:\/restore)?)?$/)
+    ?? allowed('schedule', ['GET', 'POST', 'PATCH', 'DELETE'], /^\/api\/schedules(?:\/[^/]+(?:\/trigger)?)?$/)
+    ?? allowed('channel', ['GET', 'POST', 'PATCH'], /^\/api\/channel-instances(?:\/[^/]+(?:\/(?:config|start|stop|restart))?)?$/)
+    ?? allowed('friend', ['GET', 'POST', 'PATCH', 'DELETE'], /^\/api\/friends(?:\/[^/]+)?$/)
+    ?? allowed('permission', ['GET', 'POST', 'PATCH', 'DELETE'], /^\/api\/permission-templates(?:\/[^/]+)?$/)
+    ?? allowed('config', ['GET', 'PATCH'], /^\/api\/(?:model-config\/global|proxy-config)$/)
+}
+
+function hasCliAccess(actual: 'none' | 'read' | 'write', required: 'read' | 'write'): boolean {
+  return actual === 'write' || (required === 'read' && actual === 'read')
+}
+
+function sameScheduleTarget(a: ScheduleTargetSession, b: ScheduleTargetSession): boolean {
+  return a.channel_id === b.channel_id && a.session_id === b.session_id && a.type === b.type
+}
+
+function isAdminChatMasterIdentity(
+  creatorFriendId: FriendId | undefined,
+  targetSession: ScheduleTargetSession,
+): boolean {
+  return creatorFriendId === 'master'
+    && targetSession.channel_id === 'admin-web'
+    && targetSession.session_id === 'admin-chat'
+    && targetSession.type === 'private'
 }
 
 function base64UrlEncode(data: string): string {
@@ -301,7 +359,7 @@ function verifyJwt(token: string, secret: string): JwtPayload | null {
 
   try {
     const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString())
-    if (payload.exp < Math.floor(Date.now() / 1000)) return null
+    if (payload.exp <= Math.floor(Date.now() / 1000)) return null
     return payload
   } catch {
     return null
@@ -859,6 +917,7 @@ export class AdminModule extends ModuleBase {
     // Agent 配置管理
     this.registerMethod('get_agent_config', this.handleGetAgentConfig.bind(this))
     this.registerMethod('resolve_worker_connection', this.handleResolveWorkerConnection.bind(this))
+    this.registerMethod('issue_agent_cli_credential', this.handleIssueAgentCliCredential.bind(this))
     this.registerMethod('consume_workboard_admin_assertion', this.handleConsumeWorkboardAdminAssertion.bind(this))
     this.registerMethod('consume_worker_operation_assertion', this.handleConsumeWorkerOperationAssertion.bind(this))
     this.registerMethod('update_agent_config', this.handleUpdateAgentConfig.bind(this))
@@ -1394,6 +1453,7 @@ export class AdminModule extends ModuleBase {
 
     const url = new URL(req.url ?? '/', `http://localhost:${this.adminConfig.web_port}`)
     const pathname = url.pathname
+    let agentCliAuth: AgentCliWebAuth | undefined
 
     if (!this.cutoverActivated && (pathname === '/api/chat/messages' || pathname === '/api/chat/tasks' || pathname.startsWith('/api/chat/messages/') || pathname.startsWith('/api/chat/tasks/'))) {
       sendJson(res, 503, { error: 'Core Agent cutover is incomplete' })
@@ -1417,10 +1477,20 @@ export class AdminModule extends ModuleBase {
         return
       }
 
-      const payload = await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
-      if (!payload) {
+      const basicPayload = verifyJwt(token, this.jwtSecret)
+      if (basicPayload?.sub === 'agent-cli') {
+        try {
+          agentCliAuth = await this.authorizeAgentCliRequest(basicPayload, req.method, pathname)
+        } catch (error) {
+          const unavailable = error instanceof Error && error.message === 'Agent unavailable'
+          sendJson(res, unavailable ? 503 : 403, { error: unavailable ? 'Agent unavailable' : 'Forbidden' })
+          return
+        }
+      } else {
+        const payload = await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
+        if (!payload) {
         // 区分 token 不合法 vs epoch 失效
-        const basicValid = verifyJwt(token, this.jwtSecret)
+        const basicValid = basicPayload
         if (basicValid && basicValid.sub !== 'internal') {
           res.writeHead(401)
           res.end(JSON.stringify({
@@ -1432,6 +1502,7 @@ export class AdminModule extends ModuleBase {
           res.end(JSON.stringify({ error: 'Invalid or expired token' }))
         }
         return
+        }
       }
     }
 
@@ -2731,36 +2802,36 @@ export class AdminModule extends ModuleBase {
 
       // Schedule 管理路由
       if (pathname === '/api/schedules' && req.method === 'GET') {
-        await this.handleListSchedulesApi(req, res, url)
+        await this.handleListSchedulesApi(req, res, url, agentCliAuth)
         return
       }
 
       if (pathname === '/api/schedules' && req.method === 'POST') {
-        await this.handleCreateScheduleApi(req, res)
+        await this.handleCreateScheduleApi(req, res, agentCliAuth)
         return
       }
 
       if (pathname.match(/^\/api\/schedules\/[^/]+\/trigger$/) && req.method === 'POST') {
         const id = decodeURIComponent(pathname.split('/')[3])
-        await this.handleTriggerNowApi(req, res, id)
+        await this.handleTriggerNowApi(req, res, id, agentCliAuth)
         return
       }
 
       if (pathname.match(/^\/api\/schedules\/[^/]+$/) && req.method === 'GET') {
         const id = decodeURIComponent(pathname.split('/')[3])
-        await this.handleGetScheduleApi(req, res, id)
+        await this.handleGetScheduleApi(req, res, id, url, agentCliAuth)
         return
       }
 
       if (pathname.match(/^\/api\/schedules\/[^/]+$/) && req.method === 'PATCH') {
         const id = decodeURIComponent(pathname.split('/')[3])
-        await this.handleUpdateScheduleApi(req, res, id)
+        await this.handleUpdateScheduleApi(req, res, id, agentCliAuth)
         return
       }
 
       if (pathname.match(/^\/api\/schedules\/[^/]+$/) && req.method === 'DELETE') {
         const id = decodeURIComponent(pathname.split('/')[3])
-        await this.handleDeleteScheduleApi(req, res, id)
+        await this.handleDeleteScheduleApi(req, res, id, agentCliAuth)
         return
       }
 
@@ -5039,8 +5110,15 @@ export class AdminModule extends ModuleBase {
       + '5) 完成后报告遍历条目数、清空条目数、新建链接数和 relation 分布。'
     await this.callAgentRpc('trigger_schedule', {
       schedule_id: 'memory-graph-rebuild',
+      trigger_id: generateId(),
+      schedule_name: '重建长期记忆图谱',
       title: '重建长期记忆图谱',
       description,
+      target_session: {
+        channel_id: 'admin-web',
+        session_id: 'system-tasks',
+        type: 'private',
+      },
       is_builtin: true,
     })
     return { accepted: true }
@@ -5810,7 +5888,38 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  private async handleCreateSchedule(params: CreateScheduleParams): Promise<{ schedule: Schedule }> {
+  private normalizeScheduleScript(input: ScheduleScriptInput): ScheduleScript {
+    if (Object.prototype.hasOwnProperty.call(input, 'source_sha256')) {
+      throw new Error('INVALID_PARAMS')
+    }
+    if (typeof input.source !== 'string' || input.source.trim().length === 0) {
+      throw new Error('INVALID_PARAMS')
+    }
+    if (Buffer.byteLength(input.source, 'utf8') > 64 * 1024) {
+      throw new Error('INVALID_PARAMS')
+    }
+    const timeout = input.timeout_seconds ?? 120
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 600) {
+      throw new Error('INVALID_PARAMS')
+    }
+    if (input.deliver_result !== undefined && typeof input.deliver_result !== 'boolean') {
+      throw new Error('INVALID_PARAMS')
+    }
+    return {
+      source: input.source,
+      source_sha256: crypto.createHash('sha256').update(input.source, 'utf8').digest('hex'),
+      timeout_seconds: timeout,
+      deliver_result: input.deliver_result ?? false,
+    }
+  }
+
+  private scheduleView(schedule: Schedule, includeSource = false): ScheduleView {
+    if (!schedule.script) return { ...schedule }
+    const { source, ...script } = schedule.script
+    return { ...schedule, script: includeSource ? { ...script, source } : script }
+  }
+
+  private async handleCreateSchedule(params: CreateScheduleParams): Promise<{ schedule: ScheduleView }> {
     this.assertIngressOpen()
     // 验证 cron 表达式
     if (params.trigger.type === 'cron') {
@@ -5826,16 +5935,28 @@ export class AdminModule extends ModuleBase {
         throw new Error(`Invalid execute_at: "${params.trigger.execute_at}" is not a valid ISO 8601 date`)
       }
     }
+    if (params.trigger.type === 'interval'
+      && (!Number.isFinite(params.trigger.seconds) || params.trigger.seconds <= 0)) {
+      throw new Error('INVALID_PARAMS')
+    }
 
-    // 校验 creator_friend_id：传了就必须能解析到 friend；不传按系统级处理（触发时最高权限）。
-    if (params.creator_friend_id !== undefined && !this.friends.has(params.creator_friend_id)) {
+    const targetSession = params.target_session ?? {
+      channel_id: 'admin-web' as ModuleId,
+      session_id: 'system-tasks' as SessionId,
+      type: 'private' as const,
+    }
+    this.validateTargetSession(targetSession)
+
+    const isAdminChatMaster = isAdminChatMasterIdentity(params.creator_friend_id, targetSession)
+    if (params.creator_friend_id !== undefined
+      && !isAdminChatMaster
+      && !this.friends.has(params.creator_friend_id)) {
       throw new Error(`creator_friend_id ${params.creator_friend_id} not found`)
     }
 
-    // 校验 target_session
-    if (params.target_session !== undefined) {
-      this.validateTargetSession(params.target_session)
-    }
+    const hasTemplate = params.task_template !== undefined
+    const hasScript = params.script !== undefined
+    if (hasTemplate === hasScript) throw new Error('INVALID_PARAMS')
 
     const now = generateTimestamp()
     const schedule: Schedule = {
@@ -5844,7 +5965,8 @@ export class AdminModule extends ModuleBase {
       description: params.description,
       enabled: params.enabled ?? true,
       trigger: params.trigger,
-      task_template: params.task_template,
+      ...(params.task_template ? { task_template: params.task_template } : {}),
+      ...(params.script ? { script: this.normalizeScheduleScript(params.script) } : {}),
       last_triggered_at: undefined,
       next_trigger_at: this.calculateNextTriggerTime(params.trigger),
       execution_count: 0,
@@ -5852,7 +5974,7 @@ export class AdminModule extends ModuleBase {
       creator_friend_id: params.creator_friend_id,
       created_at: now,
       updated_at: now,
-      target_session: params.target_session,
+      target_session: targetSession,
     }
 
     this.schedules.set(schedule.id, schedule)
@@ -5860,21 +5982,31 @@ export class AdminModule extends ModuleBase {
     await this.saveData()
 
     // 发布事件
-    this.publishAdminEvent('admin.schedule_created', { schedule })
+    const view = this.scheduleView(schedule)
+    this.publishAdminEvent('admin.schedule_created', { schedule: view })
 
-    return { schedule }
+    return { schedule: view }
   }
 
-  private async handleGetSchedule(params: GetScheduleParams): Promise<{ schedule: Schedule }> {
+  private async handleGetSchedule(params: GetScheduleParams): Promise<{ schedule: ScheduleView }> {
     const schedule = this.schedules.get(params.schedule_id)
     if (!schedule) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
     }
-    return { schedule }
+    return { schedule: this.scheduleView(schedule, params.include_script_source === true) }
   }
 
-  private async handleListSchedules(params: ListSchedulesParams): Promise<{ items: Schedule[]; pagination: { page: number; page_size: number; total_items: number; total_pages: number } }> {
-    let schedules = Array.from(this.schedules.values())
+  private async handleListSchedules(
+    params: ListSchedulesParams,
+  ): Promise<{ items: ScheduleView[]; pagination: { page: number; page_size: number; total_items: number; total_pages: number } }> {
+    return this.listSchedules(params)
+  }
+
+  private async listSchedules(
+    params: ListSchedulesParams,
+    visible: (schedule: Schedule) => boolean = () => true,
+  ): Promise<{ items: ScheduleView[]; pagination: { page: number; page_size: number; total_items: number; total_pages: number } }> {
+    let schedules = Array.from(this.schedules.values()).filter(visible)
 
     // 过滤
     if (params.filter) {
@@ -5906,7 +6038,7 @@ export class AdminModule extends ModuleBase {
     schedules = schedules.slice(offset, offset + pageSize)
 
     return {
-      items: schedules,
+      items: schedules.map((schedule) => this.scheduleView(schedule)),
       pagination: {
         page,
         page_size: pageSize,
@@ -5916,21 +6048,31 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  private async handleUpdateSchedule(params: UpdateScheduleParams): Promise<{ schedule: Schedule }> {
+  private async handleUpdateSchedule(params: UpdateScheduleParams): Promise<{ schedule: ScheduleView }> {
     this.assertIngressOpen()
     const existing = this.schedules.get(params.schedule_id)
     if (!existing) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
     }
 
+    if (Object.prototype.hasOwnProperty.call(params, 'target_session')
+      || Object.prototype.hasOwnProperty.call(params, 'creator_friend_id')
+      || Object.prototype.hasOwnProperty.call(params, 'is_builtin')) {
+      throw new Error('INVALID_PARAMS')
+    }
+    const existingKind = existing.script ? 'script' : 'instruction'
+    if (params.expected_content_kind !== undefined && params.expected_content_kind !== existingKind) {
+      throw new RpcError('ADMIN_SCHEDULE_CONTENT_CHANGED', 'Schedule content changed')
+    }
+
     if (this.isManagedBuiltinSchedule(existing)) {
-      const expectedTrigger = this.getManagedBuiltinTrigger(existing.task_template.type!)
+      const expectedTrigger = this.getManagedBuiltinTrigger(existing.task_template!.type!)
       if (params.trigger !== undefined
         && JSON.stringify(params.trigger) !== JSON.stringify(expectedTrigger)) {
         throw new Error('INVALID_PARAMS')
       }
       if (params.task_template !== undefined
-        && params.task_template.type !== existing.task_template.type) {
+        && params.task_template?.type !== existing.task_template!.type) {
         throw new Error('INVALID_PARAMS')
       }
     }
@@ -5939,16 +6081,20 @@ export class AdminModule extends ModuleBase {
       if (params.trigger.type === 'cron' && !this.isValidCronExpression(params.trigger.expression)) {
         throw new Error(AdminErrorCode.INVALID_CRON_EXPRESSION)
       }
+      if (params.trigger.type === 'once' && Number.isNaN(new Date(params.trigger.execute_at).getTime())) {
+        throw new Error('INVALID_PARAMS')
+      }
+      if (params.trigger.type === 'interval'
+        && (!Number.isFinite(params.trigger.seconds) || params.trigger.seconds <= 0)) {
+        throw new Error('INVALID_PARAMS')
+      }
     }
 
-    // target_session 三态：undefined 不变 / null 清除 / 对象更新
-    let targetSessionPatch: { target_session?: ScheduleTargetSession | undefined } = {}
-    if (params.target_session === null) {
-      targetSessionPatch = { target_session: undefined }
-    } else if (params.target_session !== undefined) {
-      this.validateTargetSession(params.target_session)
-      targetSessionPatch = { target_session: params.target_session }
-    }
+    let taskTemplate = existing.task_template
+    let script = existing.script
+    if (params.task_template !== undefined) taskTemplate = params.task_template ?? undefined
+    if (params.script !== undefined) script = params.script === null ? undefined : this.normalizeScheduleScript(params.script)
+    if ((taskTemplate !== undefined) === (script !== undefined)) throw new Error('INVALID_PARAMS')
 
     const merged: Schedule = {
       ...existing,
@@ -5956,8 +6102,13 @@ export class AdminModule extends ModuleBase {
       ...(params.description !== undefined ? { description: params.description } : {}),
       ...(params.enabled !== undefined ? { enabled: params.enabled } : {}),
       ...(params.trigger !== undefined ? { trigger: params.trigger } : {}),
-      ...(params.task_template !== undefined ? { task_template: params.task_template } : {}),
-      ...targetSessionPatch,
+      task_template: taskTemplate,
+      script,
+      target_session: existing.target_session ?? {
+        channel_id: 'admin-web' as ModuleId,
+        session_id: 'system-tasks' as SessionId,
+        type: 'private' as const,
+      },
       updated_at: generateTimestamp(),
     }
     const schedule: Schedule = {
@@ -5981,9 +6132,10 @@ export class AdminModule extends ModuleBase {
     await this.saveData()
 
     // 发布事件
-    this.publishAdminEvent('admin.schedule_updated', { schedule })
+    const view = this.scheduleView(schedule)
+    this.publishAdminEvent('admin.schedule_updated', { schedule: view })
 
-    return { schedule }
+    return { schedule: view }
   }
 
   private async handleDeleteSchedule(params: DeleteScheduleParams): Promise<{ deleted: true }> {
@@ -6013,12 +6165,15 @@ export class AdminModule extends ModuleBase {
    */
   private async handleTriggerNow(params: TriggerNowParams): Promise<{
     accepted: true
-    schedule: Schedule
     task_id?: string
   }> {
     const schedule = this.schedules.get(params.schedule_id)
     if (!schedule) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
+    }
+    if (params.expected_content_kind !== undefined
+      && params.expected_content_kind !== (schedule.script ? 'script' : 'instruction')) {
+      throw new RpcError('ADMIN_SCHEDULE_CONTENT_CHANGED', 'Schedule content changed')
     }
 
     // 走统一触发链路（RPC → Agent trigger_schedule）
@@ -6027,12 +6182,8 @@ export class AdminModule extends ModuleBase {
       throw new Error('Schedule trigger failed: Agent not available or RPC error')
     }
 
-    // 从 Map 中取最新状态（handleScheduleTrigger 已更新）
-    const updatedSchedule = this.schedules.get(params.schedule_id) ?? schedule
-
     return {
       accepted: true,
-      schedule: updatedSchedule,
       ...(result.task_id ? { task_id: result.task_id } : {}),
     }
   }
@@ -6062,6 +6213,7 @@ export class AdminModule extends ModuleBase {
     }
 
     const now = new Date()
+    const triggerId = generateId()
 
     // 替换模板变量
     const replaceVars = (text: string): string =>
@@ -6086,8 +6238,12 @@ export class AdminModule extends ModuleBase {
       return value
     }
 
-    const title = replaceVars(schedule.task_template.title)
-    const description = replaceVars(schedule.task_template.description ?? '')
+    const template = schedule.task_template
+    const targetSession = schedule.target_session ?? {
+      channel_id: 'admin-web' as ModuleId,
+      session_id: 'system-tasks' as SessionId,
+      type: 'private' as const,
+    }
 
     // 找到 Agent 模块并 RPC 调用
     try {
@@ -6098,23 +6254,25 @@ export class AdminModule extends ModuleBase {
       }
 
       const directMaintenance = schedule.is_builtin === true
-        && schedule.task_template.type === 'memory_maintenance'
+        && template?.type === 'memory_maintenance'
       const builtinDailyReflection = schedule.is_builtin === true
-        && schedule.task_template.type === 'daily_reflection'
-      const retiredMemoryCurate = schedule.task_template.type === 'memory_curate'
+        && template?.type === 'daily_reflection'
+      const retiredMemoryCurate = template?.type === 'memory_curate'
       const triggerResult = await this.rpcClient.call<
         {
           schedule_id: string
-          title: string
-          description: string
-          /** Schedule 的目标会话（可选）。无值时 agent 路由到系统任务线程 manager。 */
-          target_session?: ScheduleTargetSession
+          trigger_id: string
+          schedule_name: string
+          title?: string
+          description?: string
+          target_session: ScheduleTargetSession
           creator_friend_id?: FriendId
           is_builtin?: boolean
           task_type?: string
           priority?: TaskPriority
           input?: Record<string, unknown>
           tags?: string[]
+          script?: ScheduleScript
         },
         { accepted: true; task_id?: string }
       >(
@@ -6122,19 +6280,29 @@ export class AdminModule extends ModuleBase {
         'trigger_schedule',
         {
           schedule_id: schedule.id,
-          title,
-          description,
-          ...(schedule.target_session ? { target_session: schedule.target_session } : {}),
+          trigger_id: triggerId,
+          schedule_name: schedule.name,
+          ...(template ? {
+            title: replaceVars(template.title),
+            description: replaceVars(template.description ?? ''),
+          } : {}),
+          target_session: targetSession,
           ...(schedule.creator_friend_id ? { creator_friend_id: schedule.creator_friend_id } : {}),
           ...(schedule.is_builtin ? { is_builtin: schedule.is_builtin } : {}),
           ...(directMaintenance || builtinDailyReflection || retiredMemoryCurate ? {
-            task_type: schedule.task_template.type,
+            task_type: template!.type,
           } : {}),
           ...(directMaintenance ? {
-            priority: schedule.task_template.priority,
-            input: renderTemplateValue(schedule.task_template.input) as Record<string, unknown> | undefined,
-            tags: schedule.task_template.tags,
+            priority: template!.priority,
+            input: renderTemplateValue(template!.input) as Record<string, unknown> | undefined,
+            tags: template!.tags,
           } : {}),
+          ...(!directMaintenance && template ? {
+            priority: template.priority,
+            input: renderTemplateValue(template.input) as Record<string, unknown> | undefined,
+            tags: template.tags,
+          } : {}),
+          ...(schedule.script ? { script: { ...schedule.script } } : {}),
         },
         this.config.moduleId
       )
@@ -6161,7 +6329,12 @@ export class AdminModule extends ModuleBase {
       // 持久化状态变更（fire-and-forget，不阻塞触发链路）
       this.saveData().catch(() => {})
 
-      this.publishAdminEvent('admin.schedule_triggered', { schedule: updated })
+      this.publishAdminEvent('admin.schedule_triggered', {
+        schedule_id: schedule.id,
+        trigger_id: triggerId,
+        trigger_type: schedule.trigger.type,
+        ...(triggerResult.task_id ? { task_id: triggerResult.task_id as TaskId } : {}),
+      })
       return {
         accepted: true,
         ...(triggerResult.task_id ? { task_id: triggerResult.task_id } : {}),
@@ -6169,6 +6342,16 @@ export class AdminModule extends ModuleBase {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       console.error(`[Admin] Schedule trigger RPC failed for ${schedule.id} (${schedule.name}): ${msg}`)
+      if (error instanceof RpcCallError
+        && error.code === 'AGENT_SCHEDULE_AUTH_REVOKED'
+        && error.details?.disable_schedule === true) {
+        const current = this.schedules.get(schedule.id)
+        if (current?.enabled) {
+          this.schedules.set(schedule.id, { ...current, enabled: false, updated_at: generateTimestamp() })
+          this.scheduleEngine.disable(schedule.id)
+          await this.saveData()
+        }
+      }
       return
     }
   }
@@ -6239,8 +6422,8 @@ export class AdminModule extends ModuleBase {
 
   private isManagedBuiltinSchedule(schedule: Pick<Schedule, 'is_builtin' | 'task_template'>): boolean {
     return schedule.is_builtin === true
-      && (schedule.task_template.type === 'daily_reflection'
-        || schedule.task_template.type === 'memory_maintenance')
+      && (schedule.task_template?.type === 'daily_reflection'
+        || schedule.task_template?.type === 'memory_maintenance')
   }
 
   private getManagedBuiltinTrigger(taskType: string): ScheduleTrigger {
@@ -6259,7 +6442,7 @@ export class AdminModule extends ModuleBase {
   private async ensureBuiltinSchedules(): Promise<void> {
     let retiredMemoryCurates = 0
     for (const [id, schedule] of this.schedules) {
-      if (schedule.is_builtin && schedule.task_template.type === 'memory_curate') {
+      if (schedule.is_builtin && schedule.task_template?.type === 'memory_curate') {
         this.schedules.delete(id)
         retiredMemoryCurates += 1
       }
@@ -6294,7 +6477,7 @@ export class AdminModule extends ModuleBase {
     // 两个受管日任务以 is_builtin + task_template.type 为身份；其余 builtin
     // 延续按名称识别。重复项只保留 created_at 最早的原记录与统计。
     const identityOf = (schedule: Schedule): string => this.isManagedBuiltinSchedule(schedule)
-      ? `type:${schedule.task_template.type}`
+      ? `type:${schedule.task_template!.type}`
       : `name:${schedule.name}`
     const builtinByIdentity = new Map<string, Schedule[]>()
     for (const schedule of this.schedules.values()) {
@@ -6314,11 +6497,11 @@ export class AdminModule extends ModuleBase {
     }
 
     const findExisting = (seed: Pick<Schedule, 'name' | 'task_template'>): Schedule | undefined => {
-      const managedType = seed.task_template.type === 'daily_reflection'
-        || seed.task_template.type === 'memory_maintenance'
+      const managedType = seed.task_template!.type === 'daily_reflection'
+        || seed.task_template!.type === 'memory_maintenance'
       return Array.from(this.schedules.values()).find(schedule => schedule.is_builtin && (
         managedType
-          ? schedule.task_template.type === seed.task_template.type
+          ? schedule.task_template?.type === seed.task_template!.type
           : schedule.name === seed.name
       ))
     }
@@ -6331,8 +6514,8 @@ export class AdminModule extends ModuleBase {
         // 系统 offset 决定受管 trigger；每日反思的 workflow 也必须同步为
         // Manager-owned 指令，其余用户可见字段和运行统计保持原值。
         const triggerChanged = JSON.stringify(current.trigger) !== JSON.stringify(seed.trigger)
-        const dailyDescriptionChanged = seed.task_template.type === 'daily_reflection'
-          && current.task_template.description !== seed.task_template.description
+        const dailyDescriptionChanged = seed.task_template!.type === 'daily_reflection'
+          && current.task_template!.description !== seed.task_template!.description
         if (triggerChanged || dailyDescriptionChanged) {
           this.schedules.set(current.id, {
             ...current,
@@ -6341,7 +6524,7 @@ export class AdminModule extends ModuleBase {
               next_trigger_at: this.calculateNextTriggerTime(seed.trigger),
             } : {}),
             ...(dailyDescriptionChanged ? {
-              task_template: { ...current.task_template, description: seed.task_template.description },
+              task_template: { ...current.task_template!, description: seed.task_template!.description },
             } : {}),
             updated_at: generateTimestamp(),
           })
@@ -6387,10 +6570,36 @@ export class AdminModule extends ModuleBase {
   // Schedule REST API
   // ============================================================================
 
+  private scheduleVisibleToAgent(schedule: Schedule, auth: AgentCliWebAuth): boolean {
+    if (auth.masterPrivate) return true
+    const target = schedule.target_session ?? {
+      channel_id: 'admin-web' as ModuleId,
+      session_id: 'system-tasks' as SessionId,
+      type: 'private' as const,
+    }
+    if (target.channel_id !== auth.context.target_session.channel_id
+      || target.session_id !== auth.context.target_session.session_id
+      || target.type !== auth.context.target_session.type) return false
+    return target.type === 'group' || schedule.creator_friend_id === auth.context.creator_friend_id
+  }
+
+  private scheduleForAgent(id: string, auth: AgentCliWebAuth): Schedule {
+    const schedule = this.schedules.get(id)
+    if (!schedule || !this.scheduleVisibleToAgent(schedule, auth)) {
+      throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
+    }
+    return schedule
+  }
+
+  private requireAgentShell(auth: AgentCliWebAuth): void {
+    if (!auth.shell) throw new RpcError('FORBIDDEN', 'Schedule script requires shell permission')
+  }
+
   private async handleListSchedulesApi(
     _req: IncomingMessage,
     res: ServerResponse,
-    url: URL
+    url: URL,
+    auth?: AgentCliWebAuth,
   ): Promise<void> {
     const params: ListSchedulesParams = {
       page: parseInt(url.searchParams.get('page') ?? '1', 10),
@@ -6404,24 +6613,45 @@ export class AdminModule extends ModuleBase {
     const search = url.searchParams.get('search')
     if (search) params.filter!.search = search
 
-    const result = await this.handleListSchedules(params)
+    const result = await this.listSchedules(
+      params,
+      auth ? (schedule) => this.scheduleVisibleToAgent(schedule, auth) : undefined,
+    )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
   }
 
   private async handleCreateScheduleApi(
     req: IncomingMessage,
-    res: ServerResponse
+    res: ServerResponse,
+    auth?: AgentCliWebAuth,
   ): Promise<void> {
     try {
-      const params = await this.readJsonBody<CreateScheduleParams>(req)
-      // Admin Web / 人类直接调 CLI 时 creator_friend_id 通常为空 → 自动填 master，
-      // 让触发时能解析到 master_private 的最高权限。Worker 子进程通过 env 显式带创建人，
-      // 走的是同一 REST 端点但已有值，跳过补 master。
-      let effectiveParams = params
-      if (params.creator_friend_id === undefined) {
+      const params = await this.readJsonBody<CreateScheduleParams & Record<string, unknown>>(req)
+      if (Object.prototype.hasOwnProperty.call(params, 'creator_friend_id')
+        || Object.prototype.hasOwnProperty.call(params, 'is_builtin')) throw new Error('INVALID_PARAMS')
+      let effectiveParams: CreateScheduleParams
+      if (auth) {
+        if (params.script) this.requireAgentShell(auth)
+        const requestedTarget = params.target_session
+        if (requestedTarget && !sameScheduleTarget(requestedTarget, auth.context.target_session)
+          && !auth.masterPrivate) throw new RpcError('FORBIDDEN', 'Cross-session Schedule access denied')
+        effectiveParams = {
+          ...params,
+          target_session: requestedTarget ?? auth.context.target_session,
+          ...(auth.context.creator_friend_id ? { creator_friend_id: auth.context.creator_friend_id } : {}),
+        }
+      } else {
         const master = this.findMasterFriend()
-        if (master) effectiveParams = { ...params, creator_friend_id: master.id }
+        effectiveParams = {
+          ...params,
+          target_session: params.target_session ?? {
+            channel_id: 'admin-web' as ModuleId,
+            session_id: 'system-tasks' as SessionId,
+            type: 'private',
+          },
+          ...(master ? { creator_friend_id: master.id } : {}),
+        }
       }
       const result = await this.handleCreateSchedule(effectiveParams)
       res.writeHead(201, { 'Content-Type': 'application/json' })
@@ -6574,14 +6804,21 @@ export class AdminModule extends ModuleBase {
   private async handleGetScheduleApi(
     _req: IncomingMessage,
     res: ServerResponse,
-    id: string
+    id: string,
+    url: URL,
+    auth?: AgentCliWebAuth,
   ): Promise<void> {
     try {
-      const result = await this.handleGetSchedule({ schedule_id: id })
+      if (auth) this.scheduleForAgent(id, auth)
+      const includeSource = url.searchParams.get('include_script_source') === 'true'
+      if (auth && includeSource) this.requireAgentShell(auth)
+      const result = await this.handleGetSchedule({ schedule_id: id, include_script_source: includeSource })
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(result))
     } catch (err) {
-      const status = err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 400
+      const status = err instanceof RpcError && err.code === 'FORBIDDEN'
+        ? 403
+        : err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 400
       res.writeHead(status, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'get failed' }))
     }
@@ -6590,15 +6827,29 @@ export class AdminModule extends ModuleBase {
   private async handleUpdateScheduleApi(
     req: IncomingMessage,
     res: ServerResponse,
-    id: string
+    id: string,
+    auth?: AgentCliWebAuth,
   ): Promise<void> {
     try {
-      const body = await this.readJsonBody<Omit<UpdateScheduleParams, 'schedule_id'>>(req)
+      const body = await this.readJsonBody<Omit<UpdateScheduleParams, 'schedule_id'> & Record<string, unknown>>(req)
+      if (Object.prototype.hasOwnProperty.call(body, 'expected_content_kind')
+        || Object.prototype.hasOwnProperty.call(body, 'target_session')
+        || Object.prototype.hasOwnProperty.call(body, 'creator_friend_id')
+        || Object.prototype.hasOwnProperty.call(body, 'is_builtin')) throw new Error('INVALID_PARAMS')
+      if (auth) {
+        const schedule = this.scheduleForAgent(id, auth)
+        if (schedule.is_builtin) throw new RpcError('FORBIDDEN', 'Builtin Schedule is read-only')
+        const pureScriptDisable = schedule.script !== undefined
+          && Object.keys(body).length === 1 && body.enabled === false
+        if ((schedule.script && !pureScriptDisable) || body.script) this.requireAgentShell(auth)
+      }
       const result = await this.handleUpdateSchedule({ ...body, schedule_id: id })
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(result))
     } catch (err) {
-      const status = err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 400
+      const status = err instanceof RpcError && err.code === 'FORBIDDEN'
+        ? 403
+        : err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 400
       res.writeHead(status, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'update failed' }))
     }
@@ -6607,14 +6858,21 @@ export class AdminModule extends ModuleBase {
   private async handleDeleteScheduleApi(
     _req: IncomingMessage,
     res: ServerResponse,
-    id: string
+    id: string,
+    auth?: AgentCliWebAuth,
   ): Promise<void> {
     try {
+      if (auth) {
+        const schedule = this.scheduleForAgent(id, auth)
+        if (schedule.is_builtin) throw new RpcError('FORBIDDEN', 'Builtin Schedule is read-only')
+      }
       await this.handleDeleteSchedule({ schedule_id: id })
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ deleted: true }))
     } catch (err) {
-      const status = err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 400
+      const status = err instanceof RpcError && err.code === 'FORBIDDEN'
+        ? 403
+        : err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 400
       res.writeHead(status, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'delete failed' }))
     }
@@ -6623,14 +6881,22 @@ export class AdminModule extends ModuleBase {
   private async handleTriggerNowApi(
     _req: IncomingMessage,
     res: ServerResponse,
-    id: string
+    id: string,
+    auth?: AgentCliWebAuth,
   ): Promise<void> {
     try {
+      if (auth) {
+        const schedule = this.scheduleForAgent(id, auth)
+        if (schedule.is_builtin) throw new RpcError('FORBIDDEN', 'Builtin Schedule is read-only')
+        if (schedule.script) this.requireAgentShell(auth)
+      }
       const result = await this.handleTriggerNow({ schedule_id: id })
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(result))
     } catch (err) {
-      const status = err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 500
+      const status = err instanceof RpcError && err.code === 'FORBIDDEN'
+        ? 403
+        : err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 500
       res.writeHead(status, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'trigger failed' }))
     }
@@ -7519,6 +7785,111 @@ export class AdminModule extends ModuleBase {
     return {
       config_revision: epoch.revision,
       config: runtimeConfig,
+    }
+  }
+
+  private async handleIssueAgentCliCredential(
+    params: IssueAgentCliCredentialParams,
+    context?: RpcHandlerContext,
+  ): Promise<IssueAgentCliCredentialResult> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime',
+      { expected_module_id: 'crabot-agent' },
+      this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+
+    const credential = params?.context
+    if (!credential || typeof credential !== 'object') throw new RpcError('INVALID_PARAMS', 'context is required')
+    this.validateTargetSession(credential.target_session)
+    if (credential.manager_key !== `${credential.target_session.channel_id}::${credential.target_session.session_id}`) {
+      throw new RpcError('INVALID_PARAMS', 'manager_key does not match target_session')
+    }
+    const execution = credential.execution
+    const validExecution = execution?.kind === 'worker'
+      ? typeof execution.worker_id === 'string' && execution.worker_id.length > 0
+        && typeof execution.incarnation_id === 'string' && execution.incarnation_id.length > 0
+      : execution?.kind === 'legacy_task'
+        && typeof execution.task_id === 'string' && execution.task_id.length > 0
+    if (!validExecution) throw new RpcError('INVALID_PARAMS', 'execution is invalid')
+    if (credential.target_session.type === 'private' && !credential.creator_friend_id) {
+      throw new RpcError('FORBIDDEN', 'Private Agent execution has no trusted creator')
+    }
+    const isAdminChatMaster = isAdminChatMasterIdentity(credential.creator_friend_id, credential.target_session)
+    if (credential.creator_friend_id && !isAdminChatMaster && !this.friends.has(credential.creator_friend_id)) {
+      throw new RpcError('FORBIDDEN', 'Credential principal is unavailable')
+    }
+
+    const now = Math.floor(Date.now() / 1000)
+    const payload: JwtPayload = {
+      sub: 'agent-cli',
+      iat: now,
+      exp: now + this.adminConfig.token_ttl,
+      agent_cli: {
+        execution: { ...execution } as AgentCliExecutionRef,
+        manager_key: credential.manager_key,
+        target_session: { ...credential.target_session },
+        ...(credential.creator_friend_id ? { creator_friend_id: credential.creator_friend_id } : {}),
+      },
+    }
+    return {
+      token: signJwt(payload, this.jwtSecret),
+      expires_at: new Date(payload.exp * 1000).toISOString(),
+    }
+  }
+
+  private async authorizeAgentCliRequest(
+    payload: JwtPayload,
+    method: string | undefined,
+    pathname: string,
+  ): Promise<AgentCliWebAuth> {
+    const route = classifyAgentCliRoute(method, pathname)
+    const credential = payload.agent_cli
+    if (!route || !credential) throw new RpcError('FORBIDDEN', 'Agent CLI route is not allowed')
+
+    let execution: { valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean }
+    try {
+      const port = await this.ensureAgentPort()
+      if (!port) throw new Error('Agent unavailable')
+      execution = await this.rpcClient.call<
+        { execution: AgentCliExecutionRef; domain: CliDomain; access: 'read' | 'write' },
+        { valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean }
+      >(port, 'authorize_agent_cli_execution', {
+        execution: credential.execution,
+        domain: route.domain,
+        access: route.access,
+      }, this.config.moduleId)
+    } catch (error) {
+      if (error instanceof RpcCallError && error.code === 'FORBIDDEN') {
+        throw new RpcError('FORBIDDEN', 'Agent execution is not authorized')
+      }
+      throw new Error('Agent unavailable')
+    }
+    if (execution.valid !== true || !['none', 'read', 'write'].includes(execution.cli_access)
+      || typeof execution.shell !== 'boolean') throw new RpcError('FORBIDDEN', 'Invalid execution authorization')
+
+    const principal = await this.resolvePrincipalPermissions({
+      ...(credential.target_session.type === 'private' && credential.creator_friend_id
+        ? { sender_friend_id: credential.creator_friend_id }
+        : {}),
+      session_id: credential.target_session.session_id,
+      session_type: credential.target_session.type,
+    })
+    if (!hasCliAccess(execution.cli_access, route.access)
+      || !hasCliAccess(principal.resolved.cli_access[route.domain], route.access)) {
+      throw new RpcError('FORBIDDEN', 'Agent CLI permission denied')
+    }
+    const isAdminChatMaster = isAdminChatMasterIdentity(credential.creator_friend_id, credential.target_session)
+    const friend = credential.creator_friend_id
+      ? (isAdminChatMaster ? this.findMasterFriend() : this.friends.get(credential.creator_friend_id))
+      : undefined
+    return {
+      context: credential,
+      shell: principal.resolved.tool_access.shell && execution.shell,
+      masterPrivate: credential.target_session.type === 'private'
+        && (isAdminChatMaster || friend?.permission === 'master'),
     }
   }
 
