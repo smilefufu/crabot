@@ -10,6 +10,28 @@ import { BASH_NOT_FOUND_MESSAGE, resolveBashPath } from './utils/resolve-bash-pa
 
 const OUTPUT_LIMIT_BYTES = 1024 * 1024
 const DELIVERY_TAIL_BYTES = 50_000
+const SCHEDULE_LAUNCHER_ARG = '--crabot-schedule-launcher'
+const SCHEDULE_LAUNCHER_NONCE = /--crabot-schedule-launcher=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
+
+// The outer Node process keeps the nonce visible while forwarding stdin/stdout/stderr to Bash.
+const SCHEDULE_SCRIPT_LAUNCHER_SOURCE = [
+  "const { spawn } = require('node:child_process')",
+  `const launcherArg = ${JSON.stringify(SCHEDULE_LAUNCHER_ARG)}`,
+  'const args = process.argv.slice(1)',
+  "const nonceArg = args.find((arg) => arg.startsWith(launcherArg + '='))",
+  'const bash = args[args.length - 1]',
+  'if (!nonceArg || !bash) process.exit(64)',
+  "const child = spawn(bash, ['--noprofile', '--norc', '-s'], { cwd: process.cwd(), env: process.env, stdio: ['pipe', 'pipe', 'pipe'] })",
+  'process.stdin.pipe(child.stdin)',
+  'child.stdout.pipe(process.stdout)',
+  'child.stderr.pipe(process.stderr)',
+  "const signals = ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT']",
+  'let forwarding = false',
+  "for (const signal of signals) process.on(signal, () => { if (forwarding) return; forwarding = true; try { child.kill(signal) } catch {} })",
+  "child.stdin.on('error', () => {})",
+  "child.once('error', () => { for (const signal of signals) process.removeAllListeners(signal); process.exit(127) })",
+  "child.once('exit', (code, signal) => { for (const current of signals) process.removeAllListeners(current); if (signal) { try { process.kill(process.pid, signal) } catch { process.exit(128) } } else process.exit(code === null ? 1 : code) })",
+].join(';')
 
 export interface ScheduleScriptRun {
   scheduleId: string
@@ -65,19 +87,41 @@ function execText(file: string, args: string[]): Promise<string> {
   })
 }
 
-/** Fail-closed process identity used only for Schedule marker admission and recovery. */
-export async function readProcessStartIdentity(pid: number): Promise<string> {
-  const output = process.platform === 'win32'
+export function parseScheduleScriptLauncherNonce(commandLine: string): string {
+  const match = commandLine.match(SCHEDULE_LAUNCHER_NONCE)
+  if (!match) throw new Error('schedule script launcher nonce unavailable')
+  return match[1]
+}
+
+async function readProcessCommandLine(pid: number): Promise<string> {
+  return process.platform === 'win32'
     ? await execText('powershell.exe', [
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
+        `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop).CommandLine`,
       ])
-    : await execText('ps', ['-o', 'lstart=', '-p', String(pid)])
-  const identity = output.trim()
-  if (!identity) throw new Error('process identity unavailable')
-  return identity
+    : await execText('ps', ['-ww', '-o', 'args=', '-p', String(pid)])
+}
+
+/** Fail-closed process identity used only for Schedule marker admission and recovery. */
+export async function readProcessStartIdentity(pid: number): Promise<string> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('process identity unavailable')
+  const [startOutput, commandLine] = await Promise.all([
+    process.platform === 'win32'
+      ? execText('powershell.exe', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
+        ])
+      : execText('ps', ['-ww', '-o', 'lstart=', '-p', String(pid)]),
+    readProcessCommandLine(pid),
+  ])
+  const startIdentity = startOutput.trim()
+  if (!startIdentity) throw new Error('process identity unavailable')
+  const nonce = parseScheduleScriptLauncherNonce(commandLine)
+  return `${startIdentity}|nonce=${nonce}`
 }
 
 function appendTail(current: Buffer, chunk: Buffer): Buffer {
@@ -180,6 +224,7 @@ export class ScheduleScriptRunner {
     let outputTail: Buffer<ArrayBufferLike> = Buffer.alloc(0)
     let markerPath: string | undefined
     let admissionSettled = false
+    let admissionAccepted = false
     let resolveAdmission!: () => void
     let rejectAdmission!: (error: Error) => void
     const admission = new Promise<void>((resolve, reject) => {
@@ -193,8 +238,16 @@ export class ScheduleScriptRunner {
       else resolveAdmission()
     }
 
+    const nonce = randomUUID()
     const processRun = (this.deps.runProcess ?? runHostProcess)({
-      argv: [bash, '--noprofile', '--norc', '-s'],
+      argv: [
+        process.execPath,
+        '-e',
+        SCHEDULE_SCRIPT_LAUNCHER_SOURCE,
+        '--',
+        `${SCHEDULE_LAUNCHER_ARG}=${nonce}`,
+        bash,
+      ],
       cwd: this.deps.cwd,
       env: buildChildEnv(),
       stdin: run.source,
@@ -220,6 +273,7 @@ export class ScheduleScriptRunner {
             process_start_identity: identity,
             created_at: new Date().toISOString(),
           })
+          admissionAccepted = true
           settleAdmission()
         } catch {
           settleAdmission(new Error('Schedule script admission failed'))
@@ -243,7 +297,7 @@ export class ScheduleScriptRunner {
         ...(run.deliverResult ? { output_tail: outputTail.toString('utf8') } : {}),
       })
 
-      const deliverySpan = run.deliverResult
+      const deliverySpan = admissionAccepted && run.deliverResult
         ? this.deps.traceStore.startSpan(trace.trace_id, {
             type: 'schedule_result_delivery',
             details: {

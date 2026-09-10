@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { ATOMIC_TEMP_FILE } from './ledger-store.js'
 
 const MIGRATION_NAME = 'worker-supervision-retirement-v1'
 
@@ -137,7 +138,9 @@ export async function retireWorkerSupervision(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
 
-  const sourceFiles = (await fs.readdir(ledgersDir)).filter((file) => file.endsWith('.json')).sort()
+  const sourceFiles = (await fs.readdir(ledgersDir))
+    .filter((file) => file.endsWith('.json') && !ATOMIC_TEMP_FILE.test(file))
+    .sort()
   const backupFiles = (await fs.readdir(backupDir)).filter((file) => file.endsWith('.json')).sort()
   const files = [...new Set([...sourceFiles, ...backupFiles])].sort()
   const originals = new Map<string, LegacyLedger>()

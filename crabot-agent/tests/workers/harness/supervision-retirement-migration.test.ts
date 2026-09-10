@@ -91,6 +91,22 @@ describe('retireWorkerSupervision', () => {
     await expect(retireWorkerSupervision(agentDir, () => NOW)).resolves.toEqual({ schema_version: 1, candidates: [] })
   })
 
+  it('ignores LedgerStore atomic temporary files', async () => {
+    const agentDir = await tempAgentDir()
+    await writeLedger(agentDir, 'telegram%3A%3Asession-1.json', [
+      worker('plain', 'running'),
+    ])
+    const temporary = path.join(
+      agentDir,
+      'worker-ledgers',
+      '.tmp-12345678-1234-1234-1234-123456789abc.json',
+    )
+    await fs.writeFile(temporary, '{truncated')
+
+    await expect(retireWorkerSupervision(agentDir, () => NOW)).resolves.toEqual({ schema_version: 1, candidates: [] })
+    expect(await fs.readFile(temporary, 'utf8')).toBe('{truncated')
+  })
+
   it('continues from create-once backups after a partial source rewrite', async () => {
     const agentDir = await tempAgentDir()
     const rule = {

@@ -1,9 +1,20 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildCreateScheduleBody,
+  buildShowSchedulePath,
   buildUpdateScheduleBody,
   type ScheduleSnapshot,
 } from './schedule.js'
+
+describe('buildShowSchedulePath', () => {
+  it('默认只读取 Schedule metadata，不请求脚本源码', () => {
+    expect(buildShowSchedulePath('schedule-1')).toBe('/api/schedules/schedule-1')
+  })
+
+  it('显式要求时才请求脚本源码', () => {
+    expect(buildShowSchedulePath('schedule-1', true)).toBe('/api/schedules/schedule-1?include_script_source=true')
+  })
+})
 
 function makeCronSchedule(): ScheduleSnapshot {
   return {

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { TraceStore } from '../src/core/trace-store.js'
 import {
+  parseScheduleScriptLauncherNonce,
   ScheduleScriptRunner,
   type ScheduleScriptDelivery,
   type ScheduleScriptRunnerDeps,
@@ -47,7 +48,7 @@ describe('ScheduleScriptRunner', () => {
   }
 
   it('admits only after a 0600 marker exists, then records and delivers the bounded result', async () => {
-    const f = await fixture()
+    const f = await fixture(undefined, { readProcessIdentity: undefined })
     const source = "printf 'ok'; sleep 0.15; printf 'err' >&2"
     await f.runner.admit({
       scheduleId: 'schedule-1', triggerId: 'trigger-1', scheduleName: 'script one',
@@ -57,7 +58,9 @@ describe('ScheduleScriptRunner', () => {
 
     const markerPath = path.join(f.markerDir, 'trigger-1.json')
     expect((await fs.stat(markerPath)).mode & 0o777).toBe(0o600)
-    expect(await fs.readFile(markerPath, 'utf8')).not.toContain(source)
+    const marker = await fs.readFile(markerPath, 'utf8')
+    expect(marker).not.toContain(source)
+    expect(JSON.parse(marker).process_start_identity).toMatch(/\|nonce=[0-9a-f-]{36}$/i)
     await waitUntil(async () => (await fs.readdir(f.markerDir)).length === 0)
 
     expect(f.deliver).toHaveBeenCalledWith(expect.objectContaining({
@@ -68,6 +71,27 @@ describe('ScheduleScriptRunner', () => {
     expect(trace.spans.map((span) => [span.type, span.status])).toEqual([
       ['schedule_script_execution', 'completed'],
       ['schedule_result_delivery', 'completed'],
+    ])
+  })
+
+  it('does not deliver a result when active marker admission fails', async () => {
+    const f = await fixture(undefined, {
+      readProcessIdentity: async () => { throw new Error('identity unavailable') },
+    })
+
+    await expect(f.runner.admit({
+      scheduleId: 'schedule-admission-failure', triggerId: 'trigger-admission-failure',
+      scheduleName: 'admission failure', source: 'printf should-not-run', sourceSha256: 'hash-admission-failure',
+      timeoutSeconds: 2, deliverResult: true,
+      targetSession: { channel_id: 'telegram', session_id: 'private-1', type: 'private' },
+    })).rejects.toThrow('Schedule script admission failed')
+    await f.runner.stop()
+
+    expect(f.deliver).not.toHaveBeenCalled()
+    const trace = f.traceStore.getTraces(10, 0).traces[0]
+    expect(trace).toMatchObject({ status: 'failed' })
+    expect(trace.spans.map((span) => [span.type, span.status])).toEqual([
+      ['schedule_script_execution', 'failed'],
     ])
   })
 
@@ -140,22 +164,22 @@ describe('ScheduleScriptRunner', () => {
     const terminateProcess = vi.fn<(pid: number) => Promise<void>>().mockResolvedValue(undefined)
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const f = await fixture(undefined, {
-      readProcessIdentity: async (pid) => pid === 101 ? 'same' : 'different',
+      readProcessIdentity: async (pid) => pid === 101 ? 'same-start|nonce=nonce-a' : 'same-start|nonce=nonce-c',
       terminateProcess,
     })
     await fs.mkdir(f.markerDir, { recursive: true })
-    const marker = (trigger_id: string, pid: number) => ({
+    const marker = (trigger_id: string, pid: number, nonce: string) => ({
       schema_version: 1,
       schedule_id: `schedule-${pid}`,
       trigger_id,
       source_sha256: `hash-${pid}`,
       pid,
-      process_start_identity: 'same',
+      process_start_identity: `same-start|nonce=${nonce}`,
       created_at: NOW,
     })
     const NOW = '2026-09-10T00:00:00.000Z'
-    await fs.writeFile(path.join(f.markerDir, 'matching.json'), JSON.stringify(marker('matching', 101)))
-    await fs.writeFile(path.join(f.markerDir, 'reused.json'), JSON.stringify(marker('reused', 102)))
+    await fs.writeFile(path.join(f.markerDir, 'matching.json'), JSON.stringify(marker('matching', 101, 'nonce-a')))
+    await fs.writeFile(path.join(f.markerDir, 'reused.json'), JSON.stringify(marker('reused', 102, 'nonce-b')))
 
     await f.runner.recover()
 
@@ -167,5 +191,12 @@ describe('ScheduleScriptRunner', () => {
     expect(traces).toHaveLength(2)
     for (const trace of traces) expect(trace.spans[0].details).not.toHaveProperty('source')
     warn.mockRestore()
+  })
+
+  it('extracts the launcher nonce used in the process identity', () => {
+    expect(parseScheduleScriptLauncherNonce(
+      'node --crabot-schedule-launcher=123e4567-e89b-12d3-a456-426614174000 /bin/bash',
+    )).toBe('123e4567-e89b-12d3-a456-426614174000')
+    expect(() => parseScheduleScriptLauncherNonce('bash -s')).toThrow('schedule script launcher nonce unavailable')
   })
 })

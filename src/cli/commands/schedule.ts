@@ -85,6 +85,10 @@ export interface ScheduleUpdateOpts {
   readonly deliverResult?: string
 }
 
+export function buildShowSchedulePath(id: string, includeScriptSource = false): string {
+  return `/api/schedules/${id}${includeScriptSource ? '?include_script_source=true' : ''}`
+}
+
 /**
  * 把 CLI 选项翻译成 admin 协议（CreateScheduleParams）的请求体。
  * 拆出来是为了：单测独立 + 协议字段映射集中在一处。
@@ -381,10 +385,11 @@ export function registerScheduleCommands(parent: Command): void {
   schedule
     .command('show <ref>')
     .description('Show a schedule')
-    .action(async (ref: string) => {
+    .option('--include-script-source', 'Include inline Bash source (requires shell permission)')
+    .action(async (ref: string, opts: { includeScriptSource?: boolean }) => {
       const ctx = createContext(parent)
       const { id } = await resolveRef(ctx.client, 'schedule', ref)
-      const data = await ctx.client.get<unknown>(`/api/schedules/${id}?include_script_source=true`)
+      const data = await ctx.client.get<unknown>(buildShowSchedulePath(id, opts.includeScriptSource === true))
       renderResult(maskSensitive(data), { mode: ctx.mode, columns: COLUMNS })
     })
 

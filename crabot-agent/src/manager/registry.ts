@@ -756,6 +756,9 @@ export class ManagerRegistry {
         const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
         if (remaining <= 0) this.activeEpisodes.delete(key)
         else this.activeEpisodes.set(key, remaining)
+        if (remaining <= 0 && result?.consumedEvents !== true) {
+          loop.rejectPendingActivityMailbox()
+        }
         this.maybeSelfWake(key, loop, result, 0)
         this.maybeScheduleIdleReview(key, loop, result, false)
       })

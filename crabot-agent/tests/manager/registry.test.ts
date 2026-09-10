@@ -884,6 +884,52 @@ describe('ManagerRegistry', () => {
     await vi.waitFor(() => expect(secondReject).toHaveBeenCalledOnce())
   })
 
+  it('scheduled episode 失败收口期间到达的 activity 也会 reject', async () => {
+    const entered = deferred()
+    const release = deferred()
+    const reject = vi.fn(async () => undefined)
+    const { adapter } = makeAdapter()
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      beforeWake: async () => {
+        entered.resolve()
+        await release.promise
+        throw new Error('scheduled wake failed')
+      },
+    }))
+    const key = 'wechat::scheduled-activity-failure' as ManagerKey
+    const schedule = registry.routeSchedule(scheduleWake({
+      scheduleId: 'scheduled-failure',
+      title: 'scheduled failure',
+      description: 'scheduled failure',
+      targetSession: { channel_id: 'wechat', session_id: 'scheduled-activity-failure' },
+    }))
+    await entered.promise
+
+    await expect(registry.routeOperationNotification(key, {
+      ts: '2026-01-01T00:00:00.000Z',
+      kind: 'activity_available',
+      worker_id: 'w-scheduled-failure',
+      seq: 1,
+      detail: {
+        incarnation_id: 'inc-scheduled-failure',
+        from_cursor: 'from-scheduled-failure',
+        through_cursor: 'through-scheduled-failure',
+        preview: 'worker error',
+        has_error: true,
+      },
+    }, {
+      notification_id: 'notification-scheduled-failure',
+      activity_through: 'through-scheduled-failure',
+      admit: vi.fn(async () => undefined),
+      reject,
+    })).resolves.toEqual({ consumed: false, registered: true })
+
+    release.resolve()
+    await expect(schedule).rejects.toThrow('scheduled wake failed')
+    await vi.waitFor(() => expect(reject).toHaveBeenCalledOnce())
+  })
+
   // --- routeSchedule ---
 
   it('routeSchedule: 有 targetSession → 该 session 的 manager', async () => {
