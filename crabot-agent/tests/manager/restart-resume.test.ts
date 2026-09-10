@@ -425,7 +425,7 @@ describe('Manager restart continuation', () => {
     ] })
     const read = defineTool({ name: 'read', description: '', inputSchema: {}, isReadOnly: true,
       call: async () => {
-        await old.routeHumanMessages('feishu', 'restart-test', [message('supplement', 'Keep this correction literal')], undefined, undefined, accepted)
+        await old.routeHumanMessages('feishu', 'restart-test', [message('supplement', 'Keep this correction literal')], undefined, undefined, { onLlmResponse: accepted })
         return { output: 'current result', isError: false }
       } })
     const next = defineTool({ name: 'next', description: '', inputSchema: {}, isReadOnly: true,
@@ -437,7 +437,7 @@ describe('Manager restart continuation', () => {
       } else if (calls++ === 0) {
         yield* chunksFromContent([{ type: 'tool_use', id: 'read-call', name: 'read', input: {} }], 'tool_use')
       } else if (calls === 2) {
-        expect(accepted).toHaveBeenCalledTimes(1)
+        expect(accepted).not.toHaveBeenCalled()
         yield* chunksFromContent([], 'max_tokens')
       } else if (calls === 3) {
         yield* chunksFromContent([{ type: 'tool_use', id: 'retry-call', name: 'next', input: {} }], 'tool_use')
@@ -484,14 +484,13 @@ describe('Manager restart continuation', () => {
     const imageMessage = { ...message('image-supplement', 'See image'), content: {
       type: 'image' as const, file_path: path, filename: 'supplement.png', mime_type: 'image/png',
     } }
-    await old.routeHumanMessages('feishu', 'restart-test', [imageMessage], undefined, undefined, accepted)
+    await old.routeHumanMessages('feishu', 'restart-test', [imageMessage], undefined, undefined, { onLlmResponse: accepted })
     expect(accepted).not.toHaveBeenCalled()
     release()
     const checkpoint = await checkpointWhere((value) => value.state.committedHumanMessageIds?.includes('image-supplement') === true)
     expect(JSON.stringify(checkpoint)).not.toContain(bytes.toString('base64'))
     expect(checkpoint.state.imageRefs).toHaveLength(1)
-    expect(accepted).toHaveBeenCalledTimes(1)
-    expect(accepted).toHaveBeenCalledWith('image-supplement')
+    expect(accepted).not.toHaveBeenCalled()
     const restored = registry({ async *stream(params) {
       expect(JSON.stringify(params.messages)).toContain(bytes.toString('base64'))
       yield* chunksFromContent([], 'end_turn')
@@ -501,7 +500,7 @@ describe('Manager restart continuation', () => {
     await restored.resumeInterruptedEpisodes()
     expect(JSON.stringify(await store.load(KEY))).not.toContain(bytes.toString('base64'))
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
-    expect(accepted).toHaveBeenCalledTimes(1)
+    expect(accepted).not.toHaveBeenCalled()
   })
 
   it('keeps restored workboard notices transient and acknowledges the original revision', async () => {

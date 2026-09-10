@@ -348,12 +348,12 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
         reactionRelease.resolve()
         firstTurnRelease.resolve()
         await secondTurnEntered.promise
-        await vi.waitFor(() => {
-          const reacted = rpcCalls.filter((c) => c.method === 'add_reaction').map((c) => c.params.platform_message_id)
-          expect(reacted).toContain('third')
-        })
+        const reacted = () => rpcCalls.filter((c) => c.method === 'add_reaction').map((c) => c.params.platform_message_id)
+        await vi.waitFor(() => expect(reacted()).toContain('first'))
+        expect(reacted()).not.toContain('third')
         expect(report).not.toHaveBeenCalled()
         secondTurnRelease.resolve()
+        await vi.waitFor(() => expect(reacted()).toContain('third'))
         await Promise.all(handlers())
 
         expect(requests.length).toBeGreaterThanOrEqual(2)
@@ -456,22 +456,22 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       })
     })
 
-    it('Manager 提交消息后才 reaction，仍不依赖 LLM 决策结果', async () => {
+    it('Manager 成功收到 LLM 响应后才 reaction，仍不依赖 LLM 决策结果', async () => {
       boot([[sendMessageBlock({ channelId: 'wechat', sessionId: 'sess-1', text: '在的' })]])
 
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
-      // 提交前先完成身份/场景解析。reaction 是非阻塞外显，可能与后续 LLM 并发。
+      // 提交前先完成身份/场景解析。reaction 是非阻塞外显，可能与后续工具/LLM 并发。
       expect(calls.indexOf('add_reaction')).toBeGreaterThan(calls.indexOf('resolve_permissions'))
       expect(calls.indexOf('add_reaction')).toBeGreaterThan(calls.indexOf('resolve_scene_profile'))
     })
 
-    it('只有 registry 确认消息已提交时才 reaction', async () => {
+    it('只有 registry 通知包含输入的 LLM 请求成功时才 reaction', async () => {
       boot()
       internals.managerStack.registry.routeHumanMessages = async (...args: unknown[]) => {
         calls.push('manager_accepted')
-        const onHumanInputCommitted = args[5] as ((messageId: string) => Promise<void>) | undefined
-        void onHumanInputCommitted?.('m-1')
+        const callbacks = args[5] as { onLlmResponse?: (messageId: string) => Promise<void> }
+        void callbacks.onLlmResponse?.('m-1')
         return { episodeId: 'ep-1', outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
       }
 

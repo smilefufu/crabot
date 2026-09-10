@@ -317,7 +317,7 @@ describe('ManagerRegistry', () => {
     expect(otherState.recent.length).toBe(0)
   })
 
-  it('human wake 持久化进 Manager history 后通知调用方', async () => {
+  it('human wake 的 LLM 请求成功响应后通知调用方', async () => {
     const { adapter, calls } = makeAdapter()
     const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
     const message = makeChannelMessage('你好')
@@ -332,11 +332,11 @@ describe('ManagerRegistry', () => {
       [message],
       undefined,
       undefined,
-      async (lastCommittedMessageId) => {
+      { onLlmResponse: async (lastCommittedMessageId) => {
         committedId = lastCommittedMessageId
         committedState = JSON.stringify(await store.load('wechat::sess-accepted' as ManagerKey))
         resolveCommitted()
-      },
+      } },
     )
 
     await committed
@@ -360,7 +360,7 @@ describe('ManagerRegistry', () => {
       [makeChannelMessage('你好')],
       undefined,
       undefined,
-      async () => { accepted = true },
+      { onLlmResponse: async () => { accepted = true } },
     )).rejects.toThrow('agent is closing')
 
     expect(accepted).toBe(false)

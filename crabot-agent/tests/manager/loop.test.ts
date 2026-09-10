@@ -1221,11 +1221,93 @@ describe('ManagerLoop', () => {
     expect(committedIds).toHaveLength(1)
   })
 
-  it.each(['resolved', 'rejected', 'throwing', 'pending'] as const)('confirms persisted input before the slow model returns, with a %s callback', async (callbackResult) => {
+  it('initial input releases its lane on commit but waits for the complete response to confirm', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    let entered!: () => void
+    const partialResponse = new Promise<void>((resolve) => { entered = resolve })
+    const confirmed = vi.fn(async () => {})
+    const committed = vi.fn()
+    const adapter: LLMAdapter = {
+      async *stream() {
+        yield { type: 'message_start', messageId: 'partial' }
+        yield { type: 'text_delta', text: 'still generating' }
+        entered()
+        await held
+        yield { type: 'message_end', stopReason: 'end_turn' }
+      }, updateConfig() {},
+    }
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+    const message = makeChannelMessage('initial request')
+    const episode = loop.wakeUp(timed({ kind: 'human_messages', messages: [message] }), confirmed, committed)
+    try {
+      await partialResponse
+      expect(committed).toHaveBeenCalledTimes(1)
+      expect((await store.load(KEY)).committedHumanMessageIds).toContain(message.platform_message_id)
+      expect(confirmed).not.toHaveBeenCalled()
+    } finally {
+      release()
+      await episode
+    }
+    expect(confirmed).toHaveBeenCalledTimes(1)
+    expect(confirmed).toHaveBeenCalledWith(message.platform_message_id)
+  })
+
+  it('keeps callbacks for initial and queued inputs after a failed request until a later response contains them', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    let entered!: () => void
+    const firstRequest = new Promise<void>((resolve) => { entered = resolve })
+    const initial = makeChannelMessage('initial failed request')
+    const supplement = makeChannelMessage('queued before failure')
+    const initialConfirmed = vi.fn(async () => {})
+    const supplementConfirmed = vi.fn(async () => {})
+    const duplicate = vi.fn(async () => {})
+    let calls = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        if (++calls === 1) {
+          entered()
+          await held
+          throw new Error('non-retryable provider failure')
+        }
+        expect(JSON.stringify(params.messages)).toContain('initial failed request')
+        expect(JSON.stringify(params.messages)).toContain('queued before failure')
+        expect(initialConfirmed).not.toHaveBeenCalled()
+        expect(supplementConfirmed).not.toHaveBeenCalled()
+        yield* chunksFromContent([], 'end_turn')
+      }, updateConfig() {},
+    }
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+    const episode = loop.wakeUp(timed({ kind: 'human_messages', messages: [initial] }), initialConfirmed)
+    try {
+      await firstRequest
+      loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [supplement] }), supplementConfirmed)
+      loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [supplement] }), duplicate)
+    } finally {
+      release()
+    }
+    expect((await episode).outcome).toBe('failed')
+    expect(initialConfirmed).not.toHaveBeenCalled()
+    expect(supplementConfirmed).not.toHaveBeenCalled()
+    expect(JSON.stringify((await store.load(KEY)).recent)).toContain('queued before failure')
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('try again')] }))
+    expect(initialConfirmed).toHaveBeenCalledTimes(1)
+    expect(initialConfirmed).toHaveBeenCalledWith(initial.platform_message_id)
+    expect(supplementConfirmed).toHaveBeenCalledTimes(1)
+    expect(supplementConfirmed).toHaveBeenCalledWith(supplement.platform_message_id)
+    expect(duplicate).not.toHaveBeenCalled()
+  })
+
+  it.each(['resolved', 'rejected', 'throwing', 'pending'] as const)('confirms input after its complete response and before tools finish, with a %s callback', async (callbackResult) => {
     let release!: () => void
     const held = new Promise<void>((resolve) => { release = resolve })
     let entered!: () => void
     const secondTurn = new Promise<void>((resolve) => { entered = resolve })
+    let releaseTool!: () => void
+    const heldTool = new Promise<void>((resolve) => { releaseTool = resolve })
+    let toolEntered!: () => void
+    const inTool = new Promise<void>((resolve) => { toolEntered = resolve })
     const initial = makeChannelMessage('start')
     const earlier = makeChannelMessage('earlier in batch')
     const supplement = { ...makeChannelMessage('persisted supplement'), platform_message_id: 'pm-accepted' }
@@ -1246,8 +1328,12 @@ describe('ManagerLoop', () => {
           yield* chunksFromContent([{ type: 'tool_use', id: 'inject', name: 'inject', input: {} }], 'tool_use')
           return
         }
-        entered()
-        await held
+        if (turn === 2) {
+          entered()
+          await held
+          yield* chunksFromContent([{ type: 'tool_use', id: 'wait', name: 'wait', input: {} }], 'tool_use')
+          return
+        }
         yield* chunksFromContent([], 'end_turn')
       },
       updateConfig() {},
@@ -1260,6 +1346,13 @@ describe('ManagerLoop', () => {
         expect(accepted).not.toHaveBeenCalled()
         return { output: 'ok', isError: false }
       },
+    }), defineTool({
+      name: 'wait', description: 'wait', inputSchema: {}, isReadOnly: false,
+      call: async () => {
+        toolEntered()
+        await heldTool
+        return { output: 'ok', isError: false }
+      },
     })] }))
     const episode = loop.wakeUp(timed({ kind: 'human_messages', messages: [initial] }))
     try {
@@ -1268,6 +1361,9 @@ describe('ManagerLoop', () => {
       expect(checkpoint?.state.committedHumanMessageIds).toContain(supplement.platform_message_id)
       expect(JSON.stringify(checkpoint?.state.recent)).toContain('persisted supplement')
       expect(JSON.stringify((await store.load(KEY)).recent)).not.toContain('persisted supplement')
+      expect(accepted).not.toHaveBeenCalled()
+      release()
+      await inTool
       expect(accepted).toHaveBeenCalledTimes(1)
       expect(accepted).toHaveBeenCalledWith(supplement.platform_message_id)
       const persistedAtAcceptance = JSON.parse(acceptedCheckpoint)
@@ -1276,6 +1372,7 @@ describe('ManagerLoop', () => {
       expect(duplicate).not.toHaveBeenCalled()
     } finally {
       release()
+      releaseTool()
       await episode
     }
     expect(accepted).toHaveBeenCalledTimes(1)
@@ -1391,7 +1488,7 @@ describe('ManagerLoop', () => {
         }
         nonFoldCallCount++
         if (nonFoldCallCount === 2) {
-          expect(accepted).toHaveBeenCalledTimes(1)
+          expect(accepted).not.toHaveBeenCalled()
           turn2Messages = [...params.messages]
           throw new Error('boom: simulated failure after human injection drain')
         }
@@ -1423,6 +1520,7 @@ describe('ManagerLoop', () => {
 
     const first = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
     expect(first.outcome).toBe('failed')
+    expect(accepted).not.toHaveBeenCalled()
 
     // 证明确实被注入消费过:turn2 的请求里能看到人类指令
     expect(turn2Messages).toBeDefined()

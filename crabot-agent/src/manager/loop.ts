@@ -369,8 +369,11 @@ export class ManagerLoop {
    * commitHumanInputs 落盘。runEpisode 进入时清空。
    */
   private pendingHumanCommit: TimedWakeEnvelope[] = []
-  /** 同进程跨 episode 保留未消费输入的确认责任；不进入恢复检查点。 */
-  private readonly pendingHumanAcceptance = new Map<TimedWakeEnvelope, (lastAcceptedMessageId: string) => Promise<void>>()
+  /** 同进程保留尚未取得成功 LLM 响应的输入确认；不进入恢复检查点。 */
+  private readonly pendingHumanResponses = new Map<string, {
+    text: string
+    callback: (lastRespondedMessageId: string) => Promise<void>
+  }>()
   /**
    * 本 episode 已提交人类消息 id 的内存镜像(runEpisode 开头 commit 后置位):注入
    * 投影的同步判定依据。与 store 的偏差方向安全——镜像缺失的 id 在收尾提交时仍被
@@ -585,23 +588,16 @@ export class ManagerLoop {
       execution: this.checkpointExecution(),
     }
     this.deps.store.saveCheckpoint(this.resumeCheckpoint)
-    // 只有刷新了实际 Engine 上下文且保存成功的检查点，才能确认已注入的人类输入。
-    if (state && this.pendingHumanAcceptance.size > 0) {
-      this.acceptHumanInputs(envelopes.filter((envelope) => {
-        if (!this.pendingHumanAcceptance.has(envelope)) return false
-        const text = this.renderEnvelope(envelope)
-        return state.recent.some((message) => 'content' in message && message.content === text)
-      }))
-    }
   }
 
   /** 唯一入口:被唤醒 → 跑一个 episode → 回睡。同一 loop 串行,不同 loop 互不影响。 */
   async wakeUp(
     envelope: TimedWakeEnvelope,
-    onHumanInputAccepted?: (lastAcceptedMessageId: string) => Promise<void>,
+    onHumanInputResponse?: (lastRespondedMessageId: string) => Promise<void>,
+    onInitialInputCommitted?: () => void,
   ): Promise<EpisodeResult> {
     assertTimedWakeEnvelope(envelope)
-    return this.mutex.run(() => this.runEpisode(envelope, onHumanInputAccepted))
+    return this.mutex.run(() => this.runEpisode(envelope, onHumanInputResponse, undefined, onInitialInputCommitted))
   }
 
   /** Queue now, then refresh authorization at the exact episode boundary. */
@@ -678,7 +674,7 @@ export class ManagerLoop {
    *  人类消息默认拒绝:必须登记去重和历史提交责任，否则 failed/aborted 后会把
    *  LLM 已见过的输入当新 wake 重放。
    *  唯一合法入口是 `enqueueHumanWakeDuringActiveEpisode`，它登记去重与延后历史
-   *  提交责任后带 `humanWakePreCommitted` 放行，检查点持久接收后才确认。 */
+   *  提交责任后带 `humanWakePreCommitted` 放行，包含输入的 LLM 请求成功后才确认。 */
   enqueueDuringEpisode(envelope: TimedWakeEnvelope, opts?: {
     humanWakePreCommitted?: boolean
     onEpisodeSettled?: (result: EpisodeResult) => void
@@ -725,7 +721,7 @@ export class ManagerLoop {
    */
   enqueueHumanWakeDuringActiveEpisode(
     envelope: TimedWakeEnvelope,
-    onHumanInputAccepted?: (lastAcceptedMessageId: string) => Promise<void>,
+    onHumanInputResponse?: (lastRespondedMessageId: string) => Promise<void>,
     onEpisodeSettled?: (result: EpisodeResult) => void,
   ): void {
     assertTimedWakeEnvelope(envelope)
@@ -744,7 +740,7 @@ export class ManagerLoop {
       ? projectHumanEnvelope(envelope, newEntries)
       : envelope
     this.pendingHumanCommit.push(projected)
-    if (onHumanInputAccepted) this.pendingHumanAcceptance.set(projected, onHumanInputAccepted)
+    this.trackHumanResponse(projected, onHumanInputResponse)
     // 远程图预取:fire-and-forget,drain 时消费已就绪结果(见 TimedWakeMailbox.imagePrefetch)
     this.mailbox.prefetchRemoteImages(projected)
     // currentEpisodeInjected 由 enqueueDuringEpisode 内部统一入账,此处不重复 push
@@ -803,8 +799,9 @@ export class ManagerLoop {
   /** `event === undefined` ⇒ 自唤醒(见 `drainMailbox`):只处理 mailbox 残留,不渲染唤醒事件。 */
   private async runEpisode(
     envelope: TimedWakeEnvelope | undefined,
-    onHumanInputAccepted?: (lastAcceptedMessageId: string) => Promise<void>,
+    onHumanInputResponse?: (lastRespondedMessageId: string) => Promise<void>,
     recovery?: ManagerResumeCheckpoint,
+    onInitialInputCommitted?: () => void,
   ): Promise<EpisodeResult> {
     const episodeId = recovery?.episodeId ?? randomUUID()
     if (recovery) envelope = recovery.envelopes[recovery.wakeIndex]
@@ -864,7 +861,7 @@ export class ManagerLoop {
         messageCount: 0,
         humanMessages: protectedTailStart < 0 ? [] : restoredRecent.slice(protectedTailStart),
         hasNewDirectHumanMessages: false,
-        lastCurrentWakeCommittedMessageId: undefined,
+        currentHumanEnvelope: undefined,
       } : await this.commitHumanInputs(
         await this.deps.store.load(this.deps.key),
         [...carriedEnvelopes, ...(envelope ? [envelope] : [])],
@@ -891,10 +888,21 @@ export class ManagerLoop {
       if (committed.hasNewDirectHumanMessages) this.deps.markPendingReply()
       // 已提交人类消息 id 的内存镜像:mid-episode 注入的投影判定用它(同步、无 store I/O)
       this.knownCommittedHumanIds = new Set(state.committedHumanMessageIds ?? [])
-      if (committed.lastCurrentWakeCommittedMessageId) {
-        this.notifyHumanInputAccepted(onHumanInputAccepted, committed.lastCurrentWakeCommittedMessageId)
+      if (committed.currentHumanEnvelope) {
+        this.trackHumanResponse(committed.currentHumanEnvelope, onHumanInputResponse)
+        try {
+          onInitialInputCommitted?.()
+        } catch (err) {
+          console.warn('[ManagerLoop] initial input committed callback failed (ignored):', err)
+        }
       }
-      this.acceptHumanInputs(carriedEnvelopes)
+      // 失败收尾保存的输入可在本次请求中再次出现；只清理已不在历史或 mailbox 的责任。
+      const pendingTexts = new Set(this.mailbox.snapshotPendingEnvelopes().map((item) => this.renderEnvelope(item)))
+      for (const [id, pending] of this.pendingHumanResponses) {
+        if (!pendingTexts.has(pending.text) && !state.recent.some((message) =>
+          'content' in message && message.content === pending.text,
+        )) this.pendingHumanResponses.delete(id)
+      }
 
       const restoredMessages = recovery?.hasEngineMessages === true
       const carriedTexts = carriedEnvelopes
@@ -1035,10 +1043,6 @@ export class ManagerLoop {
       this.deps.store.clearCheckpoint(this.deps.key, episodeId)
       throw err
     } finally {
-      // 尚在 mailbox 的输入交给下一轮；其余未确认输入已终局收口，不能迟发确认。
-      for (const pending of this.pendingHumanAcceptance.keys()) {
-        if (!this.mailbox.isPending(pending)) this.pendingHumanAcceptance.delete(pending)
-      }
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
       this.currentEpisodeEnvelopes = []
@@ -1382,13 +1386,13 @@ export class ManagerLoop {
     readonly humanMessages: ReadonlyArray<EngineMessage>
     readonly messageCount: number
     readonly hasNewDirectHumanMessages: boolean
-    readonly lastCurrentWakeCommittedMessageId?: string
+    readonly currentHumanEnvelope?: TimedWakeEnvelope
   }> {
     const committedIds = new Set(state.committedHumanMessageIds ?? [])
     const committedMessages: EngineMessage[] = []
     const newImageRefs: ManagerImageRef[] = []
     let hasNewDirectHumanMessages = false
-    let lastCurrentWakeCommittedMessageId: string | undefined
+    let currentHumanEnvelope: TimedWakeEnvelope | undefined
 
     for (const envelope of envelopes) {
       if (!isHumanWake(envelope.wake)) continue
@@ -1400,13 +1404,14 @@ export class ManagerLoop {
       await this.prepareHumanWake(envelope)
       if (envelope.wake.kind === 'human_messages') hasNewDirectHumanMessages = true
       for (const { message } of newEntries) committedIds.add(message.platform_message_id)
-      const rendered = createUserMessage(this.renderEnvelope(projectHumanEnvelope(envelope, newEntries)))
+      const projected = projectHumanEnvelope(envelope, newEntries)
+      const rendered = createUserMessage(this.renderEnvelope(projected))
       committedMessages.push(rendered)
       // 记录本批消息的入站图片引用(轻量引用,见 image-vision.ts 文件头)
       const images = newEntries.flatMap(({ message }) => collectInboundImages(message))
       if (images.length > 0) newImageRefs.push({ message_id: rendered.id, images })
       if (envelope === currentEnvelope) {
-        lastCurrentWakeCommittedMessageId = newEntries[newEntries.length - 1].message.platform_message_id
+        currentHumanEnvelope = projected
       }
     }
 
@@ -1428,33 +1433,41 @@ export class ManagerLoop {
       humanMessages: committedMessages,
       messageCount: committedMessages.length,
       hasNewDirectHumanMessages,
-      lastCurrentWakeCommittedMessageId,
+      currentHumanEnvelope,
     }
   }
 
-  private acceptHumanInputs(envelopes: ReadonlyArray<TimedWakeEnvelope>): void {
-    for (const envelope of envelopes) {
-      const callback = this.pendingHumanAcceptance.get(envelope)
-      if (!callback) continue
-      this.pendingHumanAcceptance.delete(envelope)
-      const lastMessageId = isHumanWake(envelope.wake)
-        ? envelope.wake.messages.at(-1)?.platform_message_id
-        : undefined
-      if (lastMessageId) this.notifyHumanInputAccepted(callback, lastMessageId)
+  private trackHumanResponse(
+    envelope: TimedWakeEnvelope,
+    callback: ((messageId: string) => Promise<void>) | undefined,
+  ): void {
+    if (!callback || !isHumanWake(envelope.wake)) return
+    const id = envelope.wake.messages.at(-1)?.platform_message_id
+    if (id && !this.pendingHumanResponses.has(id)) {
+      this.pendingHumanResponses.set(id, { text: this.renderEnvelope(envelope), callback })
     }
   }
 
-  private notifyHumanInputAccepted(
-    callback: ((lastAcceptedMessageId: string) => Promise<void>) | undefined,
-    lastAcceptedMessageId: string,
+  private confirmHumanResponses(messageIds: ReadonlyArray<string>): void {
+    for (const id of messageIds) {
+      const pending = this.pendingHumanResponses.get(id)
+      if (!pending) continue
+      this.pendingHumanResponses.delete(id)
+      this.notifyHumanInputResponse(pending.callback, id)
+    }
+  }
+
+  private notifyHumanInputResponse(
+    callback: ((lastRespondedMessageId: string) => Promise<void>) | undefined,
+    lastRespondedMessageId: string,
   ): void {
     if (!callback) return
     try {
-      void callback(lastAcceptedMessageId).catch((err) => {
-        console.warn('[ManagerLoop] human input accepted callback failed (ignored):', err instanceof Error ? err.message : String(err))
+      void callback(lastRespondedMessageId).catch((err) => {
+        console.warn('[ManagerLoop] human input response callback failed (ignored):', err instanceof Error ? err.message : String(err))
       })
     } catch (err) {
-      console.warn('[ManagerLoop] human input accepted callback failed (ignored):', err instanceof Error ? err.message : String(err))
+      console.warn('[ManagerLoop] human input response callback failed (ignored):', err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -1471,11 +1484,11 @@ export class ManagerLoop {
    *     envelope 原样留在 mailbox——收尾后 hasPendingMailbox 触发自唤醒(#54),下个
    *     episode 按正常路径提交+投喂,消息立即被处理(PR #131 五审:提交了就没有
    *     任何 episode 去回答它,「先提交再留邮箱」则自唤醒被去重键打成空转)。
-   *     pendingHumanAcceptance 保留该消息的确认责任，下一 episode 持久接收时触发;
+   *     pendingHumanResponses 保留确认责任，包含它的请求成功响应后触发;
    *   - recentReplaced=false(failed/aborted/throw,finalMessages 已丢弃):先从
    *     mailbox 移除,再正常提交(recent 追加文本+去重键)——消息必须以 recent
    *     形式保留,fail-loud 由 settle 回调补发。
-   * 此处只负责历史提交，自动确认由上下文持久接收点触发。调用方必须在 loop mutex 内。
+   * 此处只负责历史提交，自动确认由包含输入的请求成功响应触发。调用方必须在 loop mutex 内。
    */
   private async commitPendingHumanInputs(
     recentReplaced: boolean,
@@ -1966,6 +1979,7 @@ export class ManagerLoop {
         : [...tailMessages]
     let initialContextEnvelopes = [...(overrides?.contextEnvelopes ?? [])]
     const admittedContextEnvelopes: TimedWakeEnvelope[] = []
+    let responseHumanInputs: string[] = []
 
     const effectiveWake = this.effectiveWakeForCurrentEpisode()
     const isBuiltinDailyReflection = isBuiltinDailyReflectionWake(effectiveWake)
@@ -2022,6 +2036,11 @@ export class ManagerLoop {
       messagesRef,
       onBeforeLlmCall: () => {
         checkpoint()
+        // 捕获本次请求，响应期间进入 mailbox 的消息不能被旧请求确认。
+        const recent = this.resumeCheckpoint?.state.recent ?? []
+        responseHumanInputs = [...this.pendingHumanResponses]
+          .filter(([, pending]) => recent.some((message) => 'content' in message && message.content === pending.text))
+          .map(([id]) => id)
         const envelopes = [
           ...initialContextEnvelopes,
           ...this.mailbox.takeContextAdmissionEnvelopes(),
@@ -2056,6 +2075,8 @@ export class ManagerLoop {
       // P6-A §6.4：response/lifecycle 钩子即时投影，onTurn 负责补漏与 usage 结算；
       // 三者都只观察共享 Engine，不复制执行语义或新增第二个 query loop。
       onLlmResponse: (event) => {
+        this.confirmHumanResponses(responseHumanInputs)
+        responseHumanInputs = []
         this.recordLlmResponse(episodeId, event)
         if (this.resumeCheckpoint) {
           this.resumeCheckpoint = { ...this.resumeCheckpoint, responses: [...this.resumeCheckpoint.responses, event] }
