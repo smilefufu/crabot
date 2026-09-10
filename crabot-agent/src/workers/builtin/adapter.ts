@@ -775,6 +775,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       dir,
       sessionTree,
       outputLog: new OutputLog(join(dir, `output-${h.seq}.log`)),
+      // A restarted builtin has no persisted scoped bearer; keep CLI auth in Agent mode so it
+      // fails closed instead of falling back to Admin's internal token.
+      executionEnv: { CRABOT_ACTOR: 'agent' },
       tip: meta.tip_node_id,
       engineMessagesRef: createEngineMessagesRef(sessionTree.pathTo(meta.tip_node_id)),
       engineMessagesTip: meta.tip_node_id,

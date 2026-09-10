@@ -5,7 +5,7 @@
  * 但真实 master friend 的 id 是 UUID。修复前 friends.get('master') 查不到 →
  * 落 minimal（陌生人）模板 → worker 工具全被滤光（tools=[]），admin chat 回复链路静默断裂。
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import AdminModule from './index.js'
 
@@ -45,6 +45,10 @@ describe('resolvePrincipalPermissions: admin chat 合成 master 身份', () => {
     await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
   })
 
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it("sender_friend_id='master' 且无 master friend 记录 → 按 master_private 模板解析（不落 minimal）", async () => {
     const result = await (admin as any).resolvePrincipalPermissions({
       sender_friend_id: 'master',
@@ -66,6 +70,42 @@ describe('resolvePrincipalPermissions: admin chat 合成 master 身份', () => {
       session_type: 'private',
     })
     expect(result.sources.friend_template_id).toBe('master_private')
+  })
+
+  it('admin chat 合成 master 身份可以签发 Agent CLI 凭据', async () => {
+    vi.spyOn((admin as any).rpcClient, 'callModuleManagerSensitive').mockResolvedValue({ verified: true })
+
+    await expect((admin as any).handleIssueAgentCliCredential(
+      {
+        context: {
+          execution: { kind: 'worker', worker_id: 'worker-1', incarnation_id: 'inc-1' },
+          manager_key: 'admin-web::admin-chat',
+          target_session: { channel_id: 'admin-web', session_id: 'admin-chat', type: 'private' },
+          creator_friend_id: 'master',
+        },
+      },
+      { authorizationBearer: 'runtime-bearer' },
+    )).resolves.toMatchObject({ token: expect.any(String) })
+  })
+
+  it('admin chat 合成 master 凭据保留跨会话 master 权限', async () => {
+    vi.spyOn(admin as any, 'ensureAgentPort').mockResolvedValue(19002)
+    vi.spyOn((admin as any).rpcClient, 'call').mockResolvedValue({ valid: true, cli_access: 'read', shell: false })
+
+    const result = await (admin as any).authorizeAgentCliRequest(
+      {
+        agent_cli: {
+          execution: { kind: 'worker', worker_id: 'worker-1', incarnation_id: 'inc-1' },
+          manager_key: 'admin-web::admin-chat',
+          target_session: { channel_id: 'admin-web', session_id: 'admin-chat', type: 'private' },
+          creator_friend_id: 'master',
+        },
+      },
+      'GET',
+      '/api/schedules',
+    )
+
+    expect(result.masterPrivate).toBe(true)
   })
 
   it('不存在的普通 friend id → 仍落 minimal 兜底（回归）', async () => {

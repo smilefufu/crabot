@@ -310,6 +310,16 @@ function sameScheduleTarget(a: ScheduleTargetSession, b: ScheduleTargetSession):
   return a.channel_id === b.channel_id && a.session_id === b.session_id && a.type === b.type
 }
 
+function isAdminChatMasterIdentity(
+  creatorFriendId: FriendId | undefined,
+  targetSession: ScheduleTargetSession,
+): boolean {
+  return creatorFriendId === 'master'
+    && targetSession.channel_id === 'admin-web'
+    && targetSession.session_id === 'admin-chat'
+    && targetSession.type === 'private'
+}
+
 function base64UrlEncode(data: string): string {
   return Buffer.from(data)
     .toString('base64')
@@ -5937,10 +5947,7 @@ export class AdminModule extends ModuleBase {
     }
     this.validateTargetSession(targetSession)
 
-    const isAdminChatMaster = params.creator_friend_id === 'master'
-      && targetSession.channel_id === 'admin-web'
-      && targetSession.session_id === 'admin-chat'
-      && targetSession.type === 'private'
+    const isAdminChatMaster = isAdminChatMasterIdentity(params.creator_friend_id, targetSession)
     if (params.creator_friend_id !== undefined
       && !isAdminChatMaster
       && !this.friends.has(params.creator_friend_id)) {
@@ -7810,7 +7817,8 @@ export class AdminModule extends ModuleBase {
     if (credential.target_session.type === 'private' && !credential.creator_friend_id) {
       throw new RpcError('FORBIDDEN', 'Private Agent execution has no trusted creator')
     }
-    if (credential.creator_friend_id && !this.friends.has(credential.creator_friend_id)) {
+    const isAdminChatMaster = isAdminChatMasterIdentity(credential.creator_friend_id, credential.target_session)
+    if (credential.creator_friend_id && !isAdminChatMaster && !this.friends.has(credential.creator_friend_id)) {
       throw new RpcError('FORBIDDEN', 'Credential principal is unavailable')
     }
 
@@ -7873,11 +7881,15 @@ export class AdminModule extends ModuleBase {
       || !hasCliAccess(principal.resolved.cli_access[route.domain], route.access)) {
       throw new RpcError('FORBIDDEN', 'Agent CLI permission denied')
     }
-    const friend = credential.creator_friend_id ? this.friends.get(credential.creator_friend_id) : undefined
+    const isAdminChatMaster = isAdminChatMasterIdentity(credential.creator_friend_id, credential.target_session)
+    const friend = credential.creator_friend_id
+      ? (isAdminChatMaster ? this.findMasterFriend() : this.friends.get(credential.creator_friend_id))
+      : undefined
     return {
       context: credential,
       shell: principal.resolved.tool_access.shell && execution.shell,
-      masterPrivate: credential.target_session.type === 'private' && friend?.permission === 'master',
+      masterPrivate: credential.target_session.type === 'private'
+        && (isAdminChatMaster || friend?.permission === 'master'),
     }
   }
 

@@ -1371,6 +1371,8 @@ describe('BuiltinWorkerAdapter', () => {
     await adapter2.sendInput(h, '重启后继续')
     await waitState(adapter2, h, 'idle')
 
+    const restored = (adapter2 as any).instances.get(`${workerId}#1`) as { executionEnv?: Record<string, string> }
+    expect(restored.executionEnv).toEqual({ CRABOT_ACTOR: 'agent' })
     const meta = JSON.parse(await fs.readFile(join(tmp, workerId, 'meta-1.json'), 'utf-8'))
     expect(meta.state).toBe('idle')
     const tree = await SessionTree.load(join(tmp, workerId, 'session.jsonl'))
