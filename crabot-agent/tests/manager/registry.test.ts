@@ -192,6 +192,40 @@ describe('ManagerRegistry', () => {
     }
   }
 
+  it('prepares mid-episode quotes before synchronous mailbox insertion', async () => {
+    const entered = deferred()
+    const release = deferred()
+    const calls: LLMStreamParams[] = []
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        if (calls.length === 1) { entered.resolve(); await release.promise }
+        yield* chunksFromContent([], 'end_turn')
+      },
+      updateConfig: () => {},
+    }
+    const original = makeChannelMessage('Original final line')
+    const call = vi.fn().mockResolvedValue(original)
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter, quotedPrefetch: {
+      rpcClient: { call } as never, moduleId: 'agent-test', resolveChannelPort: async () => 19009,
+    } }))
+    const active = registry.routeHumanMessages('wechat', 'sess', [makeChannelMessage('First')])
+    await entered.promise
+    const message = makeChannelMessage('Later quote')
+    message.features.reply_to_message_id = original.platform_message_id
+    try {
+      const result = await registry.routeHumanMessages('wechat', 'sess', [message])
+      expect(result.episodeId).toBe('')
+    } finally { release.resolve() }
+    await active
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(calls[0].messages)).not.toContain('Original final line')
+    expect(JSON.stringify(calls[1].messages)).toContain('<quoted_message')
+    expect(JSON.stringify(calls[1].messages)).toContain('Original final line')
+    const state = await store.load('wechat::sess')
+    expect(state.committedHumanMessageIds).toContain(message.platform_message_id)
+  })
+
   // --- getOrCreate ---
 
   it('getOrCreate: 同 key 幂等返回同一实例，不同 key 返回不同实例', () => {

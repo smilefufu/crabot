@@ -377,16 +377,19 @@ export class FeishuClient {
 
   /** 历史消息查询：im.v1.message.list */
   async listMessages(params: { container_id_type: 'chat'; container_id: string; start_time?: string; end_time?: string; page_size?: number; page_token?: string; sort_type?: 'ByCreateTimeAsc' | 'ByCreateTimeDesc' }): Promise<{ items: Array<Record<string, unknown>>; page_token?: string; has_more: boolean }> {
+    // The SDK accepts query fields at runtime, but its types predate original-card reads.
+    const query = {
+      container_id_type: params.container_id_type,
+      container_id: params.container_id,
+      start_time: params.start_time,
+      end_time: params.end_time,
+      page_size: params.page_size ?? 20,
+      page_token: params.page_token,
+      sort_type: params.sort_type,
+      card_msg_content_type: 'user_card_content',
+    }
     const resp = await this.client.im.message.list({
-      params: {
-        container_id_type: params.container_id_type,
-        container_id: params.container_id,
-        start_time: params.start_time,
-        end_time: params.end_time,
-        page_size: params.page_size ?? 20,
-        page_token: params.page_token,
-        sort_type: params.sort_type,
-      },
+      params: query,
     })
     return {
       items: (resp.data?.items ?? []) as Array<Record<string, unknown>>,
@@ -397,7 +400,8 @@ export class FeishuClient {
 
   /** 单条消息查询：im.v1.message.get */
   async getMessage(messageId: string): Promise<Record<string, unknown> | null> {
-    const resp = await this.client.im.message.get({ path: { message_id: messageId } })
+    const params = { user_id_type: 'open_id' as const, card_msg_content_type: 'user_card_content' }
+    const resp = await this.client.im.message.get({ path: { message_id: messageId }, params })
     const items = resp.data?.items ?? []
     return items.length > 0 ? (items[0] as Record<string, unknown>) : null
   }

@@ -106,6 +106,33 @@ function makeFeishuFileMsg(id: string, fileKey: string, fileName: string, fileSi
   }
 }
 
+describe('interactive history reads', () => {
+  it('maps remote get/history/backfill consistently and uses the local cache after backfill', async () => {
+    const internals = channel as unknown as ChannelInternals
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_card', title: 'Cards', participants: [],
+    })
+    const remote = {
+      ...makeFeishuMsg('om_card', '', 1_700_000_000_000),
+      msg_type: 'interactive', parent_id: 'om_parent', root_id: 'om_root',
+      body: { content: JSON.stringify({ schema: '2.0', body: { elements: [
+        { tag: 'markdown', content: 'Last line: report.md' },
+      ] } }) },
+    }
+    const getMessage = vi.fn().mockResolvedValue(remote)
+    internals.client = { getMessage, listMessages: vi.fn().mockResolvedValue({ items: [remote], has_more: false }) }
+    const params = { session_id: session.id, platform_message_id: 'om_card' }
+    const message = await internals.handleGetMessage(params)
+    expect(message.content).toEqual({ type: 'text', text: 'Last line: report.md' })
+    expect(message.features).toMatchObject({ reply_to_message_id: 'om_parent', root_message_id: 'om_root' })
+    expect((await internals.handleGetHistory({ session_id: session.id })).items).toEqual([message])
+    await internals.backfillHistory({ session_id: session.id })
+    getMessage.mockRejectedValue(new Error('remote unavailable'))
+    expect(await internals.handleGetMessage(params)).toEqual(message)
+    expect(getMessage).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('FeishuChannel.backfillHistory', () => {
   it('单聊 session 抛 INVALID_ARGUMENT，飞书 listMessages 不被调用', async () => {
     const internals = channel as unknown as ChannelInternals

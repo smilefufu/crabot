@@ -3196,7 +3196,7 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /** 引用消息预拉依赖（`prefetchQuotedMessages` 的注入口）。 */
-  private buildQuotedPrefetchDeps(): import('./agent/quoted-message-prefetcher').PrefetchQuotedDeps {
+  private buildQuotedPrefetchDeps(): import('./utils/quoted-message-prefetcher').PrefetchQuotedDeps {
     return {
       rpcClient: this.rpcClient,
       moduleId: this.config.moduleId,

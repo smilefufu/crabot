@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { prefetchQuotedMessages, type PrefetchQuotedDeps } from '../../src/agent/quoted-message-prefetcher.js'
+import { prefetchQuotedMessages, type PrefetchQuotedDeps } from '../../src/utils/quoted-message-prefetcher.js'
 import type { ChannelMessage } from '../../src/types.js'
 import type { SenderIdentity } from '../../src/utils/sender-identity.js'
 

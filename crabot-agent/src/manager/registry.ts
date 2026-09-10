@@ -116,6 +116,7 @@ export interface ManagerRegistryDeps {
   readonly thinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
   /** manager 模型的视觉能力(随 powerful slot,thunk 支持 hot-reload);原样下传 ManagerLoopDeps */
   readonly supportsVision?: () => boolean | undefined
+  readonly quotedPrefetch?: ManagerLoopDeps['quotedPrefetch']
   readonly now: () => Date
   /** Once true, no new wake may create or enqueue work for a Manager episode. */
   readonly isClosing?: () => boolean
@@ -348,6 +349,7 @@ export class ManagerRegistry {
       // fail-loud 语义），不能在 getOrCreate 急切调用——缺 powerful 会让唤醒路径直接抛错。
       thinking: this.deps.thinking,
       supportsVision: this.deps.supportsVision,
+      quotedPrefetch: this.deps.quotedPrefetch,
       // 唤醒事件由 ManagerLoop 按 episode 传入(见 ManagerLoopDeps.toolFace);schedule 之外
       // 的唤醒不带身份,工具面照旧。
       toolFace: (wakeEvent) =>
@@ -452,7 +454,7 @@ export class ManagerRegistry {
     return this.routeHumanWake(capture, 'attention_flush', channelId, sessionId, messages, friend, undefined, onHumanInputCommitted, onEpisodeSettled)
   }
 
-  /** 两个人类消息入口的公共路径:解析发起人身份(唤醒边界的唯一一次异步)→ 按 kind 造事件唤醒。 */
+  /** 两个人类消息入口的公共路径:准备发起人身份与引用正文 → 按 kind 造事件唤醒。 */
   private async routeHumanWake(
     capture: IngressCapture,
     kind: 'human_messages' | 'attention_flush',
@@ -501,6 +503,7 @@ export class ManagerRegistry {
       // worker 输入注入一致(参照 PR #130)。协议 §4.1「episode 进行中到达的事件直接
       // 进入当前 Manager mailbox」同样涵盖人类消息。
       const loop = this.getOrCreate(key)
+      await loop.prepareHumanWake({ ...envelope, wake: event })
       if (this.isEpisodeActive(key)) {
         // 同步入队(check 与 push 之间无 await,与 routeWorkerEvent 同构原子):
         // 提交延后到当前 episode 收尾临界区,由 settle hook 拿真实处理结果。
