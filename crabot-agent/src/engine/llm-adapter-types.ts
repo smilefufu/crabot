@@ -103,6 +103,17 @@ export interface LLMStreamParams {
   readonly onConfigChanged?: () => Promise<LLMConfigSwap | void>
   /** 可观测性回调：retry 发生时触发；用于 worker → admin web 实时显示"LLM 正在重试" */
   readonly onRetry?: (event: LLMRetryEvent) => void
+  /** 原始流诊断；只用于失败现场持久化，不进入模型上下文。 */
+  readonly onStreamDiagnostic?: (event: LLMStreamDiagnostic) => void
+}
+
+export interface LLMStreamDiagnostic {
+  readonly status: 'completed' | 'failed'
+  readonly rawEvents: ReadonlyArray<string>
+  readonly bytes: number
+  readonly sawDone: boolean
+  readonly finishReason?: string | null
+  readonly error?: string
 }
 
 /** onConfigChanged 的返回形态（review 2nd：随 model 一并替换 per-model 请求参数）。 */

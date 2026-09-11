@@ -199,6 +199,7 @@ export interface SubAgentExitInfo {
   readonly runtime_ms: number
   readonly error?: string
   readonly result_file: string | null
+  readonly diagnostics_file?: string
   readonly finalText?: string
 }
 
@@ -223,6 +224,7 @@ export function formatSubAgentNotification(info: SubAgentExitInfo): string {
       ? `<result_preview${truncated ? ' truncated="true"' : ''}>\n${preview}\n</result_preview>`
       : '',
     info.result_file ? `<output_file>${info.result_file}</output_file>` : '',
+    info.diagnostics_file ? `<diagnostics_file>${info.diagnostics_file}</diagnostics_file>` : '',
     !failed && truncated
       ? `<guidance>结果已截断；完整内容用 get_subagent_output("${info.entity_id}") 读。</guidance>`
       : '',

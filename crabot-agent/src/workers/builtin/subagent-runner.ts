@@ -186,7 +186,7 @@ export class BuiltinSubagentRunner {
     const fallback = record.status === 'stalled'
       ? 'Agent restarted; child execution interrupted.'
       : 'No readable result.'
-    return this.redactText(`<sub_agent_notification>\n${entityId} (${record.subagent_type ?? 'subagent'}) status=${statusOf(record.status)}: ${detail || record.error || fallback}\n</sub_agent_notification>`)
+    return this.redactText(`<sub_agent_notification>\n${entityId} (${record.subagent_type ?? 'subagent'}) status=${statusOf(record.status)}: ${detail || record.error || fallback}${record.diagnostics_file ? `\n诊断现场: ${record.diagnostics_file}` : ''}\n</sub_agent_notification>`)
   }
 
   async get(workerId: string, subagentId: string): Promise<WorkerSubagentSummary | undefined> {
