@@ -16,7 +16,7 @@ import { createUserMessage, defineTool } from '../../src/engine/index.js'
 import { ContextManager } from '../../src/engine/context-manager.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import type { ManagerEpisodeSpan, ManagerTraceWriter } from '../../src/manager/trace-types.js'
-import { MANAGER_WORKBOARD_CONTEXT } from '../../src/manager/prompt.js'
+import { MANAGER_PROJECT_WORKSPACE_CONTEXT, MANAGER_WORKBOARD_CONTEXT } from '../../src/manager/prompt.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // --- Fixtures / helpers ---
@@ -453,6 +453,10 @@ describe('ManagerLoop', () => {
     expect(MANAGER_WORKBOARD_CONTEXT).not.toMatch(/[A-Za-z]/)
     expect(MANAGER_WORKBOARD_CONTEXT).not.toContain('重启')
     expect(MANAGER_WORKBOARD_CONTEXT).not.toContain('压缩后')
+    expect(MANAGER_PROJECT_WORKSPACE_CONTEXT).toContain('项目目录绑定')
+    expect(MANAGER_PROJECT_WORKSPACE_CONTEXT).toContain('必须先确定项目实际目录')
+    expect(MANAGER_PROJECT_WORKSPACE_CONTEXT).toContain('不得因为没有现成 Worker 就创建空工作区')
+    expect(MANAGER_PROJECT_WORKSPACE_CONTEXT).toContain('存在多个候选目录，必须向人类确认')
     expect(listWorkers).not.toHaveBeenCalled()
   })
 
