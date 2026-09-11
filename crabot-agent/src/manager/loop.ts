@@ -240,6 +240,7 @@ export interface EpisodeResult {
   readonly repliedToHuman: boolean
   /** Successful `send_message` deliveries, paired with their tool results by tool_use_id. */
   readonly successfulSendMessageTargets: ReadonlyArray<{ readonly channel_id: string; readonly session_id: string }>
+  readonly error?: string
 }
 
 export interface ManagerLoopDeps {
@@ -1372,6 +1373,7 @@ export class ManagerLoop {
         const [channelId, sessionId] = key.split('\u0000')
         return { channel_id: channelId, session_id: sessionId }
       }),
+      ...(attempt.result.error !== undefined ? { error: attempt.result.error } : {}),
     }
     this.deps.onEpisodeEnd?.(result)
     return result

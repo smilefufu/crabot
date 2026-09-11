@@ -48,4 +48,4 @@ export interface ManagerSessionState {
  */
 export type ManagerEpisodeFailure =
   | { readonly kind: 'threw'; readonly error: unknown }
-  | { readonly kind: 'outcome'; readonly outcome: 'failed' | 'aborted' }
+  | { readonly kind: 'outcome'; readonly outcome: 'failed' | 'aborted'; readonly error?: string }

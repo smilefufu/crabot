@@ -645,6 +645,13 @@ const SILENT_EPISODE_WARN_THRESHOLD = 3
 /** 兜底文案里回带的原始错误信息截断长度（够人转述给管理员，又不至于糊一屏）。 */
 const FAIL_LOUD_ERROR_MAX_CHARS = 200
 
+function failureDetail(error: string | undefined): string {
+  if (!error) return ''
+  const safe = redactSecrets(error, [])
+  const detail = safe.length > FAIL_LOUD_ERROR_MAX_CHARS ? `${safe.slice(0, FAIL_LOUD_ERROR_MAX_CHARS)}…` : safe
+  return `错误：${detail}。`
+}
+
 /**
  * 兜底回复的正文。**文案必须能指导下一步动作**——"我出错了"对人类没有任何用。
  *
@@ -653,10 +660,10 @@ const FAIL_LOUD_ERROR_MAX_CHARS = 200
  */
 function buildFailLoudText(failure: ManagerEpisodeFailure): string {
   if (failure.kind === 'outcome') {
+    const detail = failureDetail(failure.error)
     return (
-      `我这条消息没处理完（模型这一轮 ${failure.outcome} 了），暂时回不了你。` +
-      '常见原因是 LLM 服务不可用、API key 过期或额度用尽——' +
-      '请管理员到 Admin 的全局设置里检查模型配置，之后再发一次。'
+      `我这条消息没处理完（模型这一轮 ${failure.outcome} 了），暂时回不了你。${detail}` +
+      '请管理员检查 LLM 配置或上游服务，之后再发一次。'
     )
   }
 
@@ -687,10 +694,10 @@ function buildFailLoudText(failure: ManagerEpisodeFailure): string {
  */
 function buildBackgroundFailLoudText(subject: string, failure: ManagerEpisodeFailure): string {
   if (failure.kind === 'outcome') {
+    const detail = failureDetail(failure.error)
     return (
-      `${subject}没跑成（模型这一轮 ${failure.outcome} 了）。` +
-      '常见原因是 LLM 服务不可用、API key 过期或额度用尽——' +
-      '请管理员到 Admin 的全局设置里检查模型配置，之后手动重跑一次。'
+      `${subject}没跑成（模型这一轮 ${failure.outcome} 了）。${detail}` +
+      '请管理员检查 LLM 配置或上游服务，之后手动重跑一次。'
     )
   }
 
@@ -2889,7 +2896,7 @@ export class UnifiedAgent extends ModuleBase {
             console.error(
               `[${this.config.moduleId}] processAdminChatMessage injected episode outcome=${settled.outcome}`,
             )
-            void this.sendFailLoudReply('admin-web', sessionId, { kind: 'outcome', outcome: settled.outcome }, callbackInfo.request_id)
+            void this.sendFailLoudReply('admin-web', sessionId, { kind: 'outcome', outcome: settled.outcome, ...(settled.error ? { error: settled.error } : {}) }, callbackInfo.request_id)
               .catch((err) => console.error(`[${this.config.moduleId}] processAdminChatMessage settle fail-loud failed:`, err))
           }
         },
@@ -2919,7 +2926,7 @@ export class UnifiedAgent extends ModuleBase {
       console.error(
         `[${this.config.moduleId}] processAdminChatMessage manager episode outcome=${result.outcome}`,
       )
-      const failure: ManagerEpisodeFailure = { kind: 'outcome', outcome: result.outcome }
+      const failure: ManagerEpisodeFailure = { kind: 'outcome', outcome: result.outcome, ...(result.error ? { error: result.error } : {}) }
       if (!(await this.sendFailLoudReply('admin-web', sessionId, failure, callbackInfo.request_id))) {
         throw new Error(`manager episode ${result.outcome}`)
       }

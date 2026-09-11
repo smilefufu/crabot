@@ -9,10 +9,12 @@ import {
   OVERLOADED_WITHOUT_RETRY_AFTER_MAX_RETRIES,
   RETRY_AFTER_MAX_MS,
   computeRetryDelayMs,
+  computeConnectionRecoveryDelayMs,
   getRetryAfterMs,
   interruptibleSleep,
   isOverloadedWithoutRetryAfter,
   isRetryableError,
+  isConnectionRecoveryError,
 } from './retry-utils.js'
 import { capWithMarker } from './byte-cap.js'
 import type {
@@ -208,7 +210,9 @@ async function withStreamConsumptionRetry(
   }
 
   let lastError: unknown
-  for (let attempt = 0; attempt <= maxRetries + configSwitchBudget; attempt++) {
+  let attempt = 0
+  let recoveryAttempt = 0
+  for (;;) {
     const attemptStart = Date.now()
     let firstChunkMs: number | undefined
     let chunkCount = 0
@@ -252,6 +256,34 @@ async function withStreamConsumptionRetry(
       if (params.configGeneration && params.configGeneration() !== appliedGeneration) {
         // 立即换新配置重试：跳过本次 sleep（旧 provider 的等待指示不适用于新 provider）
         await applyConfigChange()
+        recoveryAttempt = 0
+        continue
+      }
+      const connectionRecovery = isConnectionRecoveryError(err)
+      if (connectionRecovery) {
+        const actualDelay = computeConnectionRecoveryDelayMs(recoveryAttempt++)
+        console.error(
+          `[callNonStreaming] connection recovery attempt ${recoveryAttempt} failed, retrying in ${actualDelay}ms:`,
+          err,
+        )
+        try {
+          params.onRetry?.({
+            attempt: attempt + 1,
+            maxAttempts: Number.MAX_SAFE_INTEGER,
+            delayMs: actualDelay,
+            error: err instanceof Error ? err : new Error(String(err)),
+            source: 'stream',
+          })
+        } catch { /* observability callback must not break retry */ }
+        await interruptibleSleep(actualDelay, {
+          abortSignal: params.signal,
+          configChangedSignal: params.configChangedSignal,
+          onConfigChanged: async () => {
+            await applyConfigChange()
+            recoveryAttempt = 0
+          },
+        })
+        attempt++
         continue
       }
       // Retry-After 超上限：provider 要求等的时间比总预算还长，不再等待，按重试耗尽失败
@@ -292,6 +324,7 @@ async function withStreamConsumptionRetry(
         configChangedSignal: params.configChangedSignal,
         onConfigChanged: applyConfigChange,
       })
+      attempt++
       // 下一轮 loop 会用全新 processor + 重新 call adapter.stream()，
       // 服务端生成新 response（partial 浪费，但 task 能完成）
     }

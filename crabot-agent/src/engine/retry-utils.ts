@@ -1,6 +1,8 @@
 export const DEFAULT_MAX_RETRIES = 5
 export const DEFAULT_RETRY_DELAY_MS = 1_000
 export const BACKOFF_MAX_DELAY_MS = 8_000
+export const CONNECTION_RECOVERY_DELAYS_MS = [5_000, 10_000, 20_000, 40_000, 60_000] as const
+export const CONNECTION_RECOVERY_MAX_DELAY_MS = 60_000
 
 /** Retry-After 延迟上限：上游要求等待超过此值时不再等待，按重试耗尽失败处理。 */
 export const RETRY_AFTER_MAX_MS = 60_000
@@ -253,6 +255,32 @@ export function isRetryableError(err: unknown): boolean {
 
   // Last resort: match generic undici message strings
   return RETRYABLE_MESSAGE_PATTERNS.some((p) => err.message.includes(p))
+}
+
+/** Errors for which the request may remain recoverable after the normal retry budget. */
+export function isConnectionRecoveryError(err: unknown): boolean {
+  if (err instanceof StreamTimeoutError) return true
+  if (!(err instanceof Error) || err.name === 'AbortError') return false
+  if (err instanceof StreamProtocolError) return true
+  if (err instanceof HttpResponseError) return false
+  const status = (err as Error & { status?: unknown }).status
+  if (typeof status === 'number') return status === 0
+  if (err.name === 'APIConnectionError' || err.name === 'APIConnectionTimeoutError') return true
+  const seen = new Set<unknown>()
+  let cur: unknown = err
+  while (cur instanceof Error && !seen.has(cur)) {
+    seen.add(cur)
+    const code = (cur as Error & { code?: unknown }).code
+    if (typeof code === 'string' && RETRYABLE_CODES.has(code)) return true
+    cur = (cur as Error & { cause?: unknown }).cause
+  }
+  return RETRYABLE_MESSAGE_PATTERNS.some((p) => err.message.includes(p))
+}
+
+export function computeConnectionRecoveryDelayMs(recoveryAttempt: number): number {
+  const base = CONNECTION_RECOVERY_DELAYS_MS[Math.min(recoveryAttempt, CONNECTION_RECOVERY_DELAYS_MS.length - 1)]
+  const jitter = 0.9 + Math.random() * 0.2
+  return Math.min(Math.round(base * jitter), CONNECTION_RECOVERY_MAX_DELAY_MS)
 }
 
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {

@@ -1,12 +1,16 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   BACKOFF_MAX_DELAY_MS,
+  CONNECTION_RECOVERY_MAX_DELAY_MS,
+  StreamTimeoutError,
+  computeConnectionRecoveryDelayMs,
   HttpResponseError,
   RETRY_AFTER_MAX_MS,
   computeRetryDelayMs,
   isOverloadedError,
   isOverloadedWithoutRetryAfter,
   isRetryableError,
+  isConnectionRecoveryError,
   parseRetryAfterMs,
   streamWithRetry,
   withRetry,
@@ -33,6 +37,14 @@ interface Chunk {
 const isMaterial = (c: Chunk) => c.type !== 'message_start'
 
 describe('streamWithRetry', () => {
+  it('classifies connection failures for long recovery and caps the delay', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    expect(isConnectionRecoveryError(new StreamTimeoutError('ttfb', 90_000))).toBe(true)
+    expect(isConnectionRecoveryError(new HttpResponseError(401, 'bad key', 'test'))).toBe(false)
+    expect(computeConnectionRecoveryDelayMs(0)).toBe(5_000)
+    expect(computeConnectionRecoveryDelayMs(99)).toBe(CONNECTION_RECOVERY_MAX_DELAY_MS)
+    vi.restoreAllMocks()
+  })
   it('retries when only non-material chunks (message_start) were yielded before failure', async () => {
     let attempts = 0
     const collected: Chunk[] = []
