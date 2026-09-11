@@ -216,6 +216,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
             })
           }
         },
+        onStreamDiagnostic: options.onStreamDiagnostic,
       })
       llmCallMs = Date.now() - llmStartedAtMs
     } catch (error) {

@@ -59,6 +59,8 @@ export interface BgAgentRegistryRecord extends BgEntityBase {
   readonly task_description: string
   readonly messages_log_file: string
   result_file: string | null
+  /** 每次 LLM 流 attempt 的有界原始 SSE 诊断文件。 */
+  diagnostics_file?: string
   /** 失败原因（status='failed' 时填）。供 get_subagent_output 把失败原因回传给父 agent。 */
   error?: string | null
 }

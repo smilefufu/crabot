@@ -6,6 +6,9 @@ import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapte
 import { isToolResultMessage, extractText, buildImageUrl, readSSELines, mergeConsecutiveUserMessages, capToolResultForLLM, thinkingEffortValue } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock, LLMTokenUsage } from './types.js'
 import { HttpResponseError, StreamProtocolError, parseRetryAfterMs } from './retry-utils.js'
+
+const MAX_DIAGNOSTIC_EVENTS = 256
+const MAX_DIAGNOSTIC_BYTES = 256 * 1024
 import { withStreamTimeout } from './stream-timeout.js'
 import { buildPromptCacheKey } from './prompt-cache-key.js'
 
@@ -224,20 +227,47 @@ export class OpenAIAdapter implements LLMAdapter {
     // 留下无 output 的 function_call，下一轮被后端拒为 "No tool output found for function call"。
     let finalStopReason: EngineStopReason = null
     let finalUsage: LLMTokenUsage | undefined = undefined
+    const rawEvents: string[] = []
+    let rawBytes = 0
+    let sawDone = false
+    let diagnosticError: string | undefined
     // response.body 是 ReadableStream。提前 break（[DONE]）或异常退出时不显式 cancel，
     // undici 在 keep-alive 路径下可能晚释放 socket / decompressor（这块是 native heap，
     // V8 看不见）。详见 2026-06-06 kernel watchdog panic 复盘 —— anthropic-adapter 是
     // 主因，这里属同类防御。
     const sseBody = response.body
     try {
-    for await (const line of readSSELines(sseBody)) {
-      if (line === '[DONE]') break
+      for await (const line of readSSELines(sseBody)) {
+      const lineBytes = Buffer.byteLength(line, 'utf8')
+      if (rawEvents.length < MAX_DIAGNOSTIC_EVENTS && rawBytes + lineBytes <= MAX_DIAGNOSTIC_BYTES) {
+        rawEvents.push(line)
+        rawBytes += lineBytes
+      }
+      if (line === '[DONE]') {
+        sawDone = true
+        break
+      }
 
       let data: Record<string, unknown>
       try {
         data = JSON.parse(line)
       } catch {
         continue
+      }
+
+      // Some OpenAI-compatible gateways return an application error as a
+      // 200/SSE event instead of an HTTP error. Preserve that error so the
+      // retry classifier can distinguish quota/auth/request failures from
+      // a genuinely truncated stream.
+      const streamError = data.error
+      if (streamError && typeof streamError === 'object') {
+        const error = streamError as { status?: unknown }
+        const status = typeof error.status === 'number' ? error.status : 502
+        throw new HttpResponseError(
+          status,
+          JSON.stringify({ error: streamError }),
+          'openai-adapter stream',
+        )
       }
 
       if (!messageStarted) {
@@ -310,9 +340,23 @@ export class OpenAIAdapter implements LLMAdapter {
           }
         }
       }
-    }
+      }
+    } catch (error) {
+      diagnosticError = error instanceof Error ? error.message : String(error)
+      throw error
     } finally {
       try { await sseBody.cancel() } catch { /* already drained / errored */ }
+      if (!diagnosticError && finalStopReason === null) {
+        diagnosticError = 'openai-adapter stream ended without finish_reason'
+      }
+      params.onStreamDiagnostic?.({
+        status: finalStopReason === null ? 'failed' : 'completed',
+        rawEvents,
+        bytes: rawBytes,
+        sawDone,
+        finishReason: finalStopReason,
+        ...(diagnosticError ? { error: diagnosticError } : {}),
+      })
     }
 
     // 单次 message_end：流正常结束（[DONE] / 自然收尾）后发出。中途 throw 不会走到这里

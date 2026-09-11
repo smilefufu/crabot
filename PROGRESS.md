@@ -12,18 +12,17 @@
 - 新时序要求先复现 5 项失败再修复；覆盖初始部分流响应、批次去重、未 drain/已 drain 失败、私聊/群聊/Admin 接线及图片/溢出恢复。
 - 定向 380 项通过，6 项缺少 `tmp-page` fixture 的失败在未修改 main `72a6025c` 全部复现；Agent 类型检查通过。尚未部署，飞书验收待合入部署后执行。
 
-### Feishu 引用 interactive 消息：实现与定向验证完成，待 PR 审查
+### Manager 项目目录记忆：主动查询已验证，正确目录使用未闭环
 
-- 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-10-feishu-quoted-interactive-message-design.md)，get/list 请求原始卡片，统一 mapper 提取可读正文；Manager 初始、插话及恢复待注入消息接入共享引用预拉。
-- 事故消息只读回放得到 1306 字符正文，最后一句完整保留；Manager 继续沿用既有引用截断与单层渲染，完整正文由 get_message 提供。
-- Feishu 249 项、Agent Manager/引用/消息工具 579 项通过，两模块构建通过；未更改提示词文案、协议或持久化格式，尚未部署。
+- 一个真实需求历史重复三次，候选提示词 3/3 先查长期记忆，原提示词 0/3；不等同于目录已找到。
+- 接入当前记忆副本和部署版真实检索后，三个查询中两次返回含 Fusion 子目录的记忆，一次被摘要筛选丢弃；Manager 三次均先转查 Worker，尚未观察到读取正文和使用正确目录。
+- Worker 回执续跑在平台审批阶段未启动，不计为模型失败。生产提示词及线上记忆未改；后续验收应覆盖实际目录确认与派发，证据保存在本地忽略目录 `crabot-agent/eval/manager-context/out/2026-09-10-project-directory-retrieval/REPORT.md`。
 
-### Manager 任务板逐项空闲自省：实现与验收完成
+### Manager 交接提示词：身份框架验证完成，原案例局部改善
 
-- 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-09-manager-workboard-item-idle-introspection-design.md) 发布 Agent v3.14.5 协议；当前事项及无事项目标按自身更新时间计算唯一最早期限。
-- 真实输入和任务板变化不再推迟其它停滞事项；忙碌时延后重算，自省正常收口后至少隔一小时再次复核，空板停止，失败不重试、重启不恢复计时。
-- Manager 全目录 562 项回归、TypeScript 与隔离 Docker 确定性评测 20 项断言通过。
-- `mirror-xinshu / gpt-6-astra` 隔离真实模型评测：12 场景各 3 次、408 项断言全部通过（219 次请求）；其中新增多任务场景 51 项断言验证活跃事项安排保持正确、超时事项按人类最新意图复核收口。运行实例尚未部署。
+- 固定历史、目标 Worker、redirect、工具面及插入位置，4 案 × 3 次 × baseline/detailed/identity 得到 36 条完整交接；38 次请求含 2 次零输出超时重试，全部记录保留、无完整输出补抽、无真实工具执行。
+- 先隐藏条件评阅再揭示标签：identity 在原权限案例 3 次均比 baseline/detailed 更贴近主控直接委托，其他九组总体接近；关键任务和授权边界保留，但仍残留质疑、催办解释及密集限制，尚未证明泛化。此前批次和越界反例保留。
+- 身份批 8 项本地测试、冻结请求、流式重建与 36 处评语引用核验通过；生产提示词未改，私有材料仅保留在本地忽略目录。后续以身份框架扩展不同背景的真实坏交接，继续检查范围保真，不能以禁词或篇幅衡量效果。
 
 ### Scheduler 定时 instruction、脚本 Schedule 与旧 Supervision 退役：实现完成，待 PR 审查
 
@@ -32,7 +31,7 @@
 - Agent CLI 凭据绑定 exact Worker incarnation 或 legacy task，主线与 query fork 同权；只有 Master 私聊可跨会话管理 Schedule，凭据不进入全局环境或脚本子进程。
 - 旧 supervision 生产状态、事件和专用工具已删除，liveness sweep 保留；启动迁移先备份 ledger，只报告无法安全自动重建的旧 periodic 候选。
 
-### builtin Worker 恢复、观测与 subagent 控制：实现完成，待 PR 审查
+### builtin Worker 恢复、观测与 subagent 控制：已部署，待完整运行时验收
 
 - 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-08-builtin-worker-recovery-observation-control-design.md) 先发布 Agent v3.14.3；恢复同一 idle 化身的可写 trace，拒绝向已缺失的历史位置续写。
 - subagent 终态与退出通知原子持久化，通过 WorkerInbox 确认；ListEntities 按 Worker 归属查询，Kill 命中实际执行者，整体停止仍核验后台实体。
@@ -40,7 +39,7 @@
 - Agent 全量首轮 3209/3251 通过；失败项在未修改基线复现 40 项，其余 2 项并发用例单独复跑通过。本次引入的旧 mock 配置读取问题已修复并对齐基线结果。
 - PR #152 review：启动 trace 恢复纳入 Worker 互斥并跳过常驻实例；已持有写者时跳过重复快照，仍校验 cursor。3 项新增回归先失败后通过；相关 114 项首轮 113 通过，1 项目录清理 ENOTEMPTY，adapter 全文件重跑 82 项通过；TypeScript 通过。
 - 待决策：上述去重仍保留每轮全量归档的容量增长，改变快照持久化模型需另行确认。follow-up：启动时 idle session 全量常驻；结果文件不可读、非 Worker 退出写盘失败及启动对账提前失败的异常收口，详见 PR #152 review。
-- 尚未部署或修改故障 Worker 现场；合并后的独立测试 Worker 重启验收与存量 trace 保全/受控接续仍待执行。
+- 2026-09-09 已从 main `6ffe4da5` 构建并重启 Admin/Agent；健康检查与 Worker detail/trace RPC 通过，启动对账 failed=0。部署前已备份事故 trace/session/activity/registry，后台补测 PID 86126 跨重启存活。独立测试 Worker 的完整重启验收与旧 trace 缺口的受控接续仍待执行，不将部署等同于历史修复。
 
 ### 项目初始化与 Harness Git 检测：实现与验收完成，待 PR 审查
 

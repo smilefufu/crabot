@@ -346,6 +346,8 @@ export interface EngineOptions {
   readonly onTurn?: (event: EngineTurnEvent) => void
   /** Synchronous, best-effort observer emitted before any tool started by this response. */
   readonly onLlmResponse?: (event: EngineLlmResponseEvent) => void
+  /** 每次流式 attempt 结束时的原始诊断，用于失败现场持久化。 */
+  readonly onStreamDiagnostic?: (event: import('./llm-adapter-types.js').LLMStreamDiagnostic) => void
   /** Synchronous, best-effort observer for individual tool execution boundaries. */
   readonly onToolLifecycle?: (event: EngineToolLifecycleEvent) => void
   /** 实时进度回调（fires LLM 返回 / 工具开始 / 工具结束三处）—— 见 LiveProgressEvent */

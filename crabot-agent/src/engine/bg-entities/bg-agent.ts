@@ -109,6 +109,8 @@ export interface SpawnPersistentAgentOpts {
     trace_id?: string
     /** 失败原因（status='failed' 时填），供 caller 把失败原因回传给父 agent / 通知人类。 */
     error?: string
+    /** 有界原始流诊断文件路径。 */
+    diagnostics_file?: string
     outcome?: 'completed' | 'failed' | 'max_turns' | 'aborted'
     exitToolCall?: { readonly name: string; readonly input: Record<string, unknown> }
     finalText?: string
@@ -133,6 +135,8 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
   await fs.promises.mkdir(logsDir, { recursive: true })
 
   const messagesLog = path.join(logsDir, `${entity_id}.jsonl`)
+  const diagnosticsFile = path.join(logsDir, `${entity_id}.diagnostics.jsonl`)
+  let diagnosticsWritten = false
 
   const abortController = new AbortController()
   opts.abortControllers.set(entity_id, abortController)
@@ -235,6 +239,18 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
               } as Partial<BgAgentRegistryRecord>)
               .catch(() => {})
           },
+          onStreamDiagnostic: (event) => {
+            // Raw SSE is bounded by the adapter; diagnostics are append-only and
+            // best-effort so persistence cannot terminate the worker.
+            if (event.status !== 'failed') return
+            diagnosticsWritten = true
+            void fs.promises
+              .appendFile(diagnosticsFile, JSON.stringify({
+                recorded_at: new Date().toISOString(),
+                ...event,
+              }) + '\n', 'utf-8')
+              .catch(() => {})
+          },
         },
       })
 
@@ -269,6 +285,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
         exit_code: exitCode,
         ended_at: new Date().toISOString(),
         ...(failureError ? { error: failureError } : {}),
+        ...(diagnosticsWritten ? { diagnostics_file: diagnosticsFile } : {}),
       })
       if (opts.onExit) {
         try {
@@ -285,6 +302,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
             outcome: result.outcome,
             ...(result.exitToolCall ? { exitToolCall: result.exitToolCall } : {}),
             finalText: result.finalText ?? '',
+            ...(diagnosticsWritten ? { diagnostics_file: diagnosticsFile } : {}),
           })
         } catch (err) {
           console.error(`[bg-agent] onExit callback failed for ${entity_id}:`, err)
@@ -315,6 +333,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
         exit_code: 1,
         ended_at: new Date().toISOString(),
         error: errMsg,
+        ...(diagnosticsWritten ? { diagnostics_file: diagnosticsFile } : {}),
       })
       if (opts.onExit) {
         try {
@@ -326,6 +345,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
             runtime_ms: runtimeMs,
             spawned_at: now,
             result_file: null,
+            ...(diagnosticsWritten ? { diagnostics_file: diagnosticsFile } : {}),
             ...(subTrace ? { trace_id: subTrace.trace_id } : {}),
             error: errMsg,
           })

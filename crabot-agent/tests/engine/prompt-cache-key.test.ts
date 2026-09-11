@@ -38,6 +38,16 @@ function requestBodies(fetchMock: ReturnType<typeof mockFetch>): Array<Record<st
 afterEach(() => vi.unstubAllGlobals())
 
 describe('OpenAI prompt cache key', () => {
+  it('preserves an SSE error event instead of masking it as a missing finish reason', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      `data: ${JSON.stringify({ error: { code: 'insufficient_quota', message: 'fixture quota exhausted' } })}\n\ndata: [DONE]\n\n`,
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    )))
+
+    await expect(callNonStreaming(new OpenAIAdapter(connection), params))
+      .rejects.toThrow(/insufficient_quota/)
+  })
+
   it.each(formats)('adds only the top-level key to the %s request', async (format) => {
     const fetchMock = mockFetch()
     await callNonStreaming(createAdapter({ ...connection, format }), { ...params, tools: [tool] })
