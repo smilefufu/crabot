@@ -136,6 +136,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
 
   const messagesLog = path.join(logsDir, `${entity_id}.jsonl`)
   const diagnosticsFile = path.join(logsDir, `${entity_id}.diagnostics.jsonl`)
+  let diagnosticsWritten = false
 
   const abortController = new AbortController()
   opts.abortControllers.set(entity_id, abortController)
@@ -242,6 +243,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
             // Raw SSE is bounded by the adapter; diagnostics are append-only and
             // best-effort so persistence cannot terminate the worker.
             if (event.status !== 'failed') return
+            diagnosticsWritten = true
             void fs.promises
               .appendFile(diagnosticsFile, JSON.stringify({
                 recorded_at: new Date().toISOString(),
@@ -283,7 +285,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
         exit_code: exitCode,
         ended_at: new Date().toISOString(),
         ...(failureError ? { error: failureError } : {}),
-        diagnostics_file: diagnosticsFile,
+        ...(diagnosticsWritten ? { diagnostics_file: diagnosticsFile } : {}),
       })
       if (opts.onExit) {
         try {
@@ -300,6 +302,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
             outcome: result.outcome,
             ...(result.exitToolCall ? { exitToolCall: result.exitToolCall } : {}),
             finalText: result.finalText ?? '',
+            ...(diagnosticsWritten ? { diagnostics_file: diagnosticsFile } : {}),
           })
         } catch (err) {
           console.error(`[bg-agent] onExit callback failed for ${entity_id}:`, err)
@@ -330,7 +333,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
         exit_code: 1,
         ended_at: new Date().toISOString(),
         error: errMsg,
-        diagnostics_file: diagnosticsFile,
+        ...(diagnosticsWritten ? { diagnostics_file: diagnosticsFile } : {}),
       })
       if (opts.onExit) {
         try {
@@ -342,7 +345,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
             runtime_ms: runtimeMs,
             spawned_at: now,
             result_file: null,
-            diagnostics_file: diagnosticsFile,
+            ...(diagnosticsWritten ? { diagnostics_file: diagnosticsFile } : {}),
             ...(subTrace ? { trace_id: subTrace.trace_id } : {}),
             error: errMsg,
           })
