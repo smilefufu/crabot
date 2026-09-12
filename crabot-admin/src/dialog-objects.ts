@@ -7,21 +7,22 @@ import type {
   DialogObjectPrivatePoolEntry,
   Friend,
   PendingMessage,
-  SessionPermissionConfig,
+  GroupSessionPermissionConfig,
 } from './types.js'
+import { groupSessionConfigKey } from './group-session-config.js'
 
 interface PrivatePoolProjectionInput {
   friends: Iterable<Friend>
   pendingMessages: Iterable<PendingMessage>
   sessions: Iterable<DialogObjectChannelSession>
-  sessionConfigs: ReadonlyMap<string, SessionPermissionConfig> | Iterable<[string, SessionPermissionConfig]>
+  sessionConfigs: ReadonlyMap<string, GroupSessionPermissionConfig> | Iterable<[string, GroupSessionPermissionConfig]>
   now?: Date
 }
 
 interface GroupProjectionInput {
   friends: Iterable<Friend>
   sessions: Iterable<DialogObjectChannelSession>
-  sessionConfigs: ReadonlyMap<string, SessionPermissionConfig> | Iterable<[string, SessionPermissionConfig]>
+  sessionConfigs: ReadonlyMap<string, GroupSessionPermissionConfig> | Iterable<[string, GroupSessionPermissionConfig]>
   /** channel_id → platform 映射。用于标注 group 是否支持 backfill */
   channelPlatforms?: ReadonlyMap<string, string>
 }
@@ -50,7 +51,7 @@ interface CollectDialogObjectSessionsInput<TChannel> {
 }
 
 function toSessionConfigIdSet(
-  sessionConfigs: ReadonlyMap<string, SessionPermissionConfig> | Iterable<[string, SessionPermissionConfig]>
+  sessionConfigs: ReadonlyMap<string, GroupSessionPermissionConfig> | Iterable<[string, GroupSessionPermissionConfig]>
 ): Set<string> {
   if (sessionConfigs instanceof Map) {
     return new Set(sessionConfigs.keys())
@@ -262,8 +263,6 @@ export function projectPrivatePoolDialogObjects(input: PrivatePoolProjectionInpu
   const assignedFriendIds = buildFriendIdSet(friends)
   const assignedIdentities = buildAssignedIdentitySet(friends)
   const pendingMessageIndex = buildPendingMessageIndex(input.pendingMessages, input.now ?? new Date())
-  const sessionConfigIds = toSessionConfigIdSet(input.sessionConfigs)
-
   return Array.from(input.sessions)
     .filter((session) => session.type === 'private')
     .filter((session) =>
@@ -273,7 +272,7 @@ export function projectPrivatePoolDialogObjects(input: PrivatePoolProjectionInpu
     )
     .map((session) => ({
       ...session,
-      has_session_config: sessionConfigIds.has(session.id),
+      has_session_config: false,
       matching_pending_application_ids: Array.from(
         new Set(
           session.participants.flatMap((participant) =>
@@ -295,7 +294,7 @@ export function projectGroupDialogObjects(input: GroupProjectionInput): DialogOb
       return {
         ...session,
         participant_count: session.participants.length,
-        has_session_config: sessionConfigIds.has(session.id),
+        has_session_config: sessionConfigIds.has(groupSessionConfigKey(session.channel_id, session.id)),
         master_in_group: sessionHasMasterParticipant(session, friends),
         supports_backfill: channelPlatforms?.get(session.channel_id) === 'feishu',
       }

@@ -1159,7 +1159,15 @@ export class UnifiedAgent extends ModuleBase {
       timezone: () => resolveTimezone(this.agentConfig?.timezone),
       // §11：2026-08 收敛后 manager 直接用 powerful slot。thunk 每个 episode 各解析一次，
       // 未配置时抛出的错误信息由 model-slot.ts 给出。
-      managerAdapter: () => adapterFromSdkEnv(this.buildSdkEnv(resolveManagerModelConfig(this.agentConfig?.model_config))),
+      managerAdapter: () => {
+        const connection = resolveManagerModelConfig(this.agentConfig?.model_config)
+        const adapter = adapterFromSdkEnv(this.buildSdkEnv(connection))
+        return {
+          traceIdentity: { providerId: connection.provider_id, format: connection.format },
+          stream: (params) => adapter.stream(params),
+          updateConfig: (config) => adapter.updateConfig(config),
+        }
+      },
       managerModel: () => resolveManagerModelConfig(this.agentConfig?.model_config).model_id,
       managerThinking: () => {
         const conn = resolveManagerModelConfig(this.agentConfig?.model_config)
@@ -1208,11 +1216,33 @@ export class UnifiedAgent extends ModuleBase {
       callAdmin: async <P, R>(method: string, params: P): Promise<R> =>
         this.rpcClient.call<P, R>(await this.getAdminPort(), method, params, this.config.moduleId),
       getRuntimeConfigSummary: () => this.agentConfig,
+      managerMcpToolsFor: ({ permissions }) => {
+        if (process.env.CRABOT_MANAGER_MCP_ENABLED !== '1' || !permissions) return []
+        return this.mcpConnector.getAllTools().filter((tool) => {
+          const category = tool.category
+          return (category === 'desktop' || category === 'mcp_skill') && permissions.tool_access[category] === true
+        })
+      },
+      managerMcpToolAuthorization: async ({ targetSession, creatorFriendId, category }) => {
+        if (process.env.CRABOT_MANAGER_MCP_ENABLED !== '1' || !targetSession
+          || (targetSession.type === 'private' && !creatorFriendId)
+          || (category !== 'desktop' && category !== 'mcp_skill')) return false
+        const permissions = await this.resolvePrincipalPermissions(
+          targetSession.type === 'private' ? creatorFriendId : undefined,
+          targetSession.session_id,
+          targetSession.type,
+          targetSession.channel_id,
+        )
+        if (!permissions) return false
+        return category === 'desktop'
+          ? permissions.tool_access.desktop
+          : permissions.tool_access.mcp_skill
+      },
       // 发起人身份的解析原料：全是**既有**入口，本处只做注入，不新造解析逻辑。
       principalResolver: {
         resolvePermissions: (p) =>
-          this.resolvePrincipalPermissions(p.senderFriendId, p.sessionId, p.sessionType),
-        sessionMemoryScopes: (sessionId) => this.getSessionMemoryScopes(sessionId),
+          this.resolvePrincipalPermissions(p.senderFriendId, p.sessionId, p.sessionType, p.channelId),
+        sessionMemoryScopes: (sessionId, channelId, sessionType) => this.getSessionMemoryScopes(sessionId, channelId, sessionType),
         sceneProfile: (p) =>
           this.contextAssembler.resolveSceneProfile(
             p.channelId as ModuleId,
@@ -2483,7 +2513,7 @@ export class UnifiedAgent extends ModuleBase {
    * 取代旧的 resolveSessionPermissions / resolveGroupPermissions 双路径：
    * - master 短路、minimal 兜底、friend explicit-config 优先于 template 等语义
    *   全部由 admin 侧 `resolve_principal_permissions` 统一实现
-   * - 私聊：senderFriend = 私聊对端 friend，按 friend ∪ session 并集解析
+   * - 私聊：senderFriend = 本 episode 的可信 creator，按 Friend 当前权限解析
    * - 群聊：senderFriend = 该批次最后一条消息的 friend（仅作身份标识；2026-08-30
    *   群聊权限群级统一后 admin 侧忽略 sender_friend_id，档位只按群配置解析）
    *
@@ -2497,17 +2527,19 @@ export class UnifiedAgent extends ModuleBase {
     senderFriendId: string | undefined,
     sessionId: string,
     sessionType: 'private' | 'group',
+    channelId: string,
   ): Promise<ResolvedPermissions | null> {
     try {
       const adminPort = await this.getAdminPort()
       const result = await this.rpcClient.call<
-        { sender_friend_id?: string; session_id: string; session_type: 'private' | 'group' },
+        { sender_friend_id?: string; channel_id: string; session_id: string; session_type: 'private' | 'group' },
         { resolved: ResolvedPermissions; sources: Record<string, string> }
       >(
         adminPort,
         'resolve_principal_permissions',
         {
           ...(senderFriendId ? { sender_friend_id: senderFriendId } : {}),
+          channel_id: channelId,
           session_id: sessionId,
           session_type: sessionType,
         },
@@ -2534,6 +2566,7 @@ export class UnifiedAgent extends ModuleBase {
       principal.senderFriend?.id,
       principal.sessionId,
       principal.sessionType,
+      principal.channelId,
     )
     if (perms) this.agentHandler.updateTaskPermissions(taskId, perms)
   }
@@ -2559,8 +2592,10 @@ export class UnifiedAgent extends ModuleBase {
   /**
    * 从 Admin 获取 Session 的 memory_scopes（带 TTL 缓存），fallback 到 [sessionId]
    */
-  private async getSessionMemoryScopes(sessionId: string): Promise<string[]> {
-    const cached = this.sessionScopesCache.get(sessionId)
+  private async getSessionMemoryScopes(sessionId: string, channelId: string, sessionType: 'private' | 'group'): Promise<string[]> {
+    if (sessionType === 'private') return [sessionId]
+    const key = JSON.stringify([channelId, sessionId])
+    const cached = this.sessionScopesCache.get(key)
     if (cached && cached.expiresAt > Date.now()) {
       return cached.scopes
     }
@@ -2569,9 +2604,9 @@ export class UnifiedAgent extends ModuleBase {
     try {
       const adminPort = await this.getAdminPort()
       const result = await this.rpcClient.call<
-        { session_id: string },
+        { channel_id: string; session_id: string },
         { config: { memory_scopes?: string[] } | null }
-      >(adminPort, 'get_session_config', { session_id: sessionId }, this.config.moduleId)
+      >(adminPort, 'get_group_session_config', { channel_id: channelId, session_id: sessionId }, this.config.moduleId)
       if (result.config?.memory_scopes && result.config.memory_scopes.length > 0) {
         scopes = result.config.memory_scopes
       }
@@ -2579,15 +2614,15 @@ export class UnifiedAgent extends ModuleBase {
       // Admin 不可达或 session 未配置，使用默认值
     }
 
-    this.sessionScopesCache.set(sessionId, { scopes, expiresAt: Date.now() + 60_000 })
+    this.sessionScopesCache.set(key, { scopes, expiresAt: Date.now() + 60_000 })
     return scopes
   }
 
   /**
    * 构建非 master 的 session 级 MemoryPermissions（群聊 / channel 内部调用共用）
    */
-  private async buildSessionMemoryPermissions(sessionId: string): Promise<MemoryPermissions> {
-    const memoryScopes = await this.getSessionMemoryScopes(sessionId)
+  private async buildSessionMemoryPermissions(sessionId: string, channelId: string, sessionType: 'private' | 'group'): Promise<MemoryPermissions> {
+    const memoryScopes = await this.getSessionMemoryScopes(sessionId, channelId, sessionType)
     return {
       write_visibility: 'internal',
       write_scopes: memoryScopes,

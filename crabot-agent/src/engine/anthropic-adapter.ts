@@ -297,10 +297,10 @@ export class AnthropicAdapter implements LLMAdapter {
       flattenToolHistory: tools.length === 0,
     })
 
-    // Prompt caching：注入 3 个 cache breakpoint（固定 5 分钟 ephemeral，SDK stable
+    // Prompt caching：最多 4 个 cache breakpoint（固定 5 分钟 ephemeral，SDK stable
     // 类型尚未带出 cache_control 字段，靠结构化类型直接附加）。只加缓存标记，
     // 不改消息内容本身。breakpoint 位置：1) system 末尾 2) 最后一个 tool 定义
-    // 3) 最后一条消息的最后一个 content block（缓存整段会话历史前缀）。
+    // 3) 最后一条消息末块；Manager 额外标记稳定核心末项，动态尾部不改该断点。
     const EPHEMERAL = { type: 'ephemeral' } as const
 
     // 空 system prompt 不传（空 text block 会被 API 拒绝）
@@ -308,8 +308,9 @@ export class AnthropicAdapter implements LLMAdapter {
       ? [{ type: 'text' as const, text: params.systemPrompt, cache_control: EPHEMERAL }]
       : undefined
 
+    const stableBoundary = params.tools.findIndex((tool) => tool.cacheBreakpoint === true)
     const cachedTools = tools.map((tool, i) =>
-      i === tools.length - 1 ? { ...tool, cache_control: EPHEMERAL } : tool,
+      i === stableBoundary || i === tools.length - 1 ? { ...tool, cache_control: EPHEMERAL } : tool,
     )
 
     const cachedMessages = messages.map((msg, i) => {

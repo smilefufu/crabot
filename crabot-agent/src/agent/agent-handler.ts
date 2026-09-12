@@ -3064,6 +3064,7 @@ export class AgentHandler {
    */
   getTaskPrincipal(taskId: TaskId): {
     senderFriend?: Friend
+    channelId: string
     sessionId: string
     sessionType: 'private' | 'group'
   } | null {
@@ -3072,11 +3073,12 @@ export class AgentHandler {
     // 其权限由 Admin 按 creator（含 master_private）解析下发，严禁按匿名会话身份重解析。
     if (!taskState || taskState.triggerType !== 'message') return null
     const origin = taskState.resumeWorkerContext?.task_origin
-    if (!origin?.session_id || !origin.session_type) return null
+    if (!origin?.channel_id || !origin.session_id || !origin.session_type) return null
     return {
       ...(taskState.resumeWorkerContext?.sender_friend
         ? { senderFriend: taskState.resumeWorkerContext.sender_friend }
         : {}),
+      channelId: origin.channel_id,
       sessionId: origin.session_id,
       sessionType: origin.session_type,
     }

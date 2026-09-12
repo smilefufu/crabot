@@ -34,7 +34,7 @@
  */
 
 import { randomUUID } from 'crypto'
-import type { ManagerEpisodeTrigger, ManagerTraceWriter } from './trace-types.js'
+import type { ManagerEpisodeTrigger, ManagerEpisodeUsage, ManagerTraceWriter } from './trace-types.js'
 import {
   runEngine,
   createUserMessage,
@@ -48,12 +48,23 @@ import {
   type TextBlock,
   type ContentBlock,
 } from '../engine/index.js'
-import type { HumanMessageQueueLike } from '../engine/types.js'
+import type { HumanMessageQueueLike, LLMRequestEvent } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex'
 import type { TaskPriority } from '../workers/harness/ledger-types.js'
 import { formatChannelMessageLine, type QuotedMessageEntry } from '../prompt-manager.js'
 import { prefetchQuotedMessages, type PrefetchQuotedDeps } from '../utils/quoted-message-prefetcher.js'
 import { splitManagerKey } from './principal.js'
+import {
+  createManagerToolFaceState,
+  toolSearchQueryStats,
+  serializedToolBytes,
+  serializedToolSetBytes,
+  managerToolProfileForSchedule,
+  MANAGER_TOOL_CATALOG_REVISION,
+  type ManagerToolFaceState,
+  type ManagerToolLoadingMode,
+  type ManagerToolProfile,
+} from './tools/tool-catalog.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { decideCompaction, managerPolicyForWindow, type CompactionPolicy, type CompactionDecision } from './compaction.js'
 import {
@@ -289,7 +300,7 @@ export interface ManagerLoopDeps {
    * 装配工具面(当前唯一用途:scheduled 触发的权限身份 → `spawn_worker` 的
    * `origin.creator_friend_id`)。可选参数,既有调用方 `() => [...]` 无需改动。
    */
-  readonly toolFace: (wakeEvent?: WakeEvent) => ReadonlyArray<ToolDefinition>
+  readonly toolFace: (wakeEvent?: WakeEvent, faceState?: ManagerToolFaceState) => ReadonlyArray<ToolDefinition>
   /** System prompt inputs are stable for the whole dialogProfile revision. */
   readonly promptInputs: () => { readonly dialogProfile?: string; readonly isGroup?: boolean; readonly adminPersonality?: string }
   readonly harness: WorkerHarness
@@ -389,6 +400,10 @@ export class ManagerLoop {
    * 这正是不把它做成 registry 侧 `Map<ManagerKey, …>` 的原因(那样并发唤醒会串身份)。
   */
   private currentWakeEvent: TimedWakeEnvelope | null = null
+  private currentToolProfile: ManagerToolProfile | undefined
+  /** 工具渐进加载状态只属于当前 episode，绝不跨 episode 或重启继承。 */
+  private currentToolFaceState: ManagerToolFaceState | undefined
+  private readonly deferredSettleHooks = new Map<TimedWakeEnvelope, (result: EpisodeResult) => void>()
   /** daily reflection 可能在 failed episode 后作为 carried wake 与新 primary 一同消费。 */
   private currentEpisodeEnvelopes: ReadonlyArray<TimedWakeEnvelope> = []
   private readonly admittedActivityReceipts = new Set<string>()
@@ -404,6 +419,7 @@ export class ManagerLoop {
   private readonly tracedUsageResponses = new Set<string>()
   private readonly tracedToolStarts = new Set<string>()
   private readonly tracedToolFinishes = new Set<string>()
+  private observedRequestCount = 0
   /** 当前 episode 的一次性发送后动作复核状态；不进入 session/ledger。 */
   private needsSpawnRecheck = false
   private spawnRecheckInjected = false
@@ -469,7 +485,7 @@ export class ManagerLoop {
   private adminChatClaims: Map<string, 'unclaimed' | 'claimed'> = new Map()
 
   /** 本 episode 的 token 用量累加器（onTurn 回调写入，finish 时聚合成 total_usage）。 */
-  private currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
+  private currentUsage: ManagerEpisodeUsage = { input_tokens: 0, output_tokens: 0 }
   /** max_tokens 兜底重试与新 episode 的 span 计数区分（engine turnNumber 在重试时会重数）。 */
   private attemptCounter = 0
 
@@ -582,6 +598,7 @@ export class ManagerLoop {
       state: { ...nextState, committedHumanMessageIds: [...committedIds], ...(imageRefs.size > 0 ? { imageRefs: [...imageRefs.values()] } : {}) },
       envelopes,
       wakeIndex: this.currentWakeEvent ? envelopes.indexOf(this.currentWakeEvent) : -1,
+      ...(this.currentToolProfile ? { toolProfile: this.currentToolProfile } : {}),
       pending,
       protectedTailMessageId,
       hasEngineMessages: state !== undefined || this.resumeCheckpoint.hasEngineMessages,
@@ -625,7 +642,11 @@ export class ManagerLoop {
    * 事件或尚未提交的人类输入；已提交人类输入已在 state，不能再依赖 mailbox。
    */
   get hasPendingMailbox(): boolean {
-    return this.mailbox.hasPending
+    return this.mailbox.hasAnyPending
+  }
+
+  acceptsWakeDuringEpisode(wake: WakeEvent): boolean {
+    return this.currentToolProfile !== undefined && managerToolProfileForWake(wake) === this.currentToolProfile
   }
 
   /** 当前人类入站事实的同步只读投影；不 drain mailbox，也不修改 episode 上下文。 */
@@ -685,11 +706,19 @@ export class ManagerLoop {
       throw new Error('human messages must be committed through wakeUp, not queued during an episode')
     }
     this.mailbox.push(envelope)
-    this.currentEpisodeInjected?.push(envelope)
-    for (const id of envelope.correlation?.admin_chat_request_ids ?? []) {
-      if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
+    if (this.acceptsWakeDuringEpisode(envelope.wake)) {
+      this.currentEpisodeInjected?.push(envelope)
+      for (const id of envelope.correlation?.admin_chat_request_ids ?? []) {
+        if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
+      }
     }
-    if (opts?.onEpisodeSettled) this.currentEpisodeSettleHooks.push(opts.onEpisodeSettled)
+    if (opts?.onEpisodeSettled) {
+      if (this.acceptsWakeDuringEpisode(envelope.wake)) {
+        this.currentEpisodeSettleHooks.push(opts.onEpisodeSettled)
+      } else {
+        this.deferredSettleHooks.set(envelope, opts.onEpisodeSettled)
+      }
+    }
     this.flushCheckpoint()
   }
 
@@ -699,11 +728,13 @@ export class ManagerLoop {
       throw new Error('enqueueWorkboardAdminUpdate requires a workboard admin wake')
     }
     const replaced = this.mailbox.replaceWorkboardAdminUpdate(envelope)
-    if (replaced && this.currentEpisodeInjected) {
-      const index = this.currentEpisodeInjected.indexOf(replaced)
-      if (index >= 0) this.currentEpisodeInjected[index] = envelope
-    } else if (!replaced) {
-      this.currentEpisodeInjected?.push(envelope)
+    if (this.acceptsWakeDuringEpisode(envelope.wake)) {
+      if (replaced && this.currentEpisodeInjected) {
+        const index = this.currentEpisodeInjected.indexOf(replaced)
+        if (index >= 0) this.currentEpisodeInjected[index] = envelope
+      } else if (!replaced) {
+        this.currentEpisodeInjected?.push(envelope)
+      }
     }
     this.flushCheckpoint()
   }
@@ -726,6 +757,9 @@ export class ManagerLoop {
     onEpisodeSettled?: (result: EpisodeResult) => void,
   ): void {
     assertTimedWakeEnvelope(envelope)
+    if (!this.acceptsWakeDuringEpisode(envelope.wake)) {
+      throw new Error('human wake profile does not match the active episode; queue it through wakeUp')
+    }
     const newEntries = isHumanWake(envelope.wake)
       ? envelope.wake.messages
           .map((message, index) => ({ message, index }))
@@ -746,10 +780,7 @@ export class ManagerLoop {
     this.mailbox.prefetchRemoteImages(projected)
     // currentEpisodeInjected 由 enqueueDuringEpisode 内部统一入账,此处不重复 push
     // (五审:重复 push 会让 max_tokens 兜底重试把同一消息渲染两遍)。
-    this.enqueueDuringEpisode(projected, { humanWakePreCommitted: true })
-    // 结算委托:调用方关心的「这批消息最终有没有被回复」由被注入 episode 的收尾
-    // 真实 result 回答(同 episode 收尾 detectRepliedToHuman),不由注入调用编造。
-    if (onEpisodeSettled) this.currentEpisodeSettleHooks.push(onEpisodeSettled)
+    this.enqueueDuringEpisode(projected, { humanWakePreCommitted: true, onEpisodeSettled })
   }
 
   /** Prepare before registry's synchronous active-check/enqueue, or before initial history commit. */
@@ -809,9 +840,12 @@ export class ManagerLoop {
     this.mailbox.clearContextAdmissions()
     this.admittedActivityReceipts.clear()
     this.rejectedActivityReceipts.clear()
+    const toolProfile = recovery?.toolProfile ?? managerToolProfileForWake(
+      recovery?.envelopes[recovery.wakeIndex]?.wake ?? envelope?.wake ?? this.mailbox.peekPendingEnvelope()?.wake,
+    )
     const carriedEnvelopes = recovery
       ? recovery.envelopes.filter((_, index) => index !== recovery.wakeIndex)
-      : this.mailbox.drainEnvelopes()
+      : this.mailbox.drainEnvelopesForProfile(toolProfile)
     const episodeEnvelopes = recovery ? [...recovery.envelopes] : [...carriedEnvelopes, ...(envelope ? [envelope] : [])]
     if (!recovery && envelope === undefined && carriedEnvelopes.length === 0) {
       // 自唤醒但 mailbox 已空(残留被排在前面的另一个 episode 顺带 drain 走了)——
@@ -831,6 +865,9 @@ export class ManagerLoop {
     this.knownCommittedHumanIds = new Set()
     this.currentWakeEvent = envelope ?? null
     this.currentEpisodeEnvelopes = episodeEnvelopes
+    this.currentToolProfile = toolProfile
+    this.mailbox.setActiveProfile(toolProfile)
+    this.currentToolFaceState = createManagerToolFaceState(managerToolLoadingModeForKey(this.deps.key))
     this.needsSpawnRecheck = false
     this.spawnRecheckInjected = false
     this.spawnRecheckOutcomeRecorded = false
@@ -838,6 +875,13 @@ export class ManagerLoop {
     this.adminChatClaims = new Map()
     this.checkpointError = undefined
     this.successfulSendMessageTargetsInCurrentEpisode.clear()
+    for (const item of episodeEnvelopes) {
+      const hook = this.deferredSettleHooks.get(item)
+      if (hook) {
+        this.currentEpisodeSettleHooks.push(hook)
+        this.deferredSettleHooks.delete(item)
+      }
+    }
     this.continuedWorkersInCurrentEpisode.clear()
     for (const item of episodeEnvelopes) {
       for (const id of item.correlation?.admin_chat_request_ids ?? []) {
@@ -940,6 +984,7 @@ export class ManagerLoop {
             episodeId, state, envelopes: episodeEnvelopes, wakeIndex: envelope ? episodeEnvelopes.indexOf(envelope) : -1,
             pending: [], hasEngineMessages: false, turns: [], responses: [], tools: [],
             pendingToolCallIds: [], protectedTailMessageId: committed.humanMessages[0]?.id,
+            toolProfile,
             adminChatClaims: [...this.adminChatClaims], transientMessageIds: [], spawnedWorkerIds: [],
             execution: this.checkpointExecution(),
           }
@@ -954,13 +999,30 @@ export class ManagerLoop {
       )
       this.currentTraceId = episodeId
       traceStarted = true
+      const initialTools = !recovery
+        ? this.deps.toolFace(this.effectiveWakeForCurrentEpisode(), this.currentToolFaceState)
+        : undefined
+      const toolFaceDetails = initialTools
+        ? {
+            tool_loading_mode: this.currentToolFaceState?.mode ?? 'progressive',
+            capability_profile: toolProfile,
+            catalog_revision: this.currentToolFaceState?.catalog?.catalogRevision ?? MANAGER_TOOL_CATALOG_REVISION,
+            initial_tool_names: initialTools.map((tool) => tool.name),
+            initial_visible_count: initialTools.length,
+            initial_schema_bytes: serializedToolSetBytes(initialTools),
+          }
+        : undefined
       // root agent_loop span 覆盖整个 episode；finishEpisode 会按 episode 状态收口它。
       this.deps.traceWriter?.appendSpan(episodeId, {
         span_id: `root-${episodeId}`,
         type: 'agent_loop',
         started_at: new Date().toISOString(),
         status: 'running',
-        details: { merged_envelopes: episodeEnvelopes.length },
+        details: {
+          request_observation_version: 1,
+          merged_envelopes: episodeEnvelopes.length,
+          ...(toolFaceDetails ?? {}),
+        },
       })
       if (recovery) {
         for (const response of recovery.responses) this.recordLlmResponse(episodeId, response)
@@ -980,6 +1042,7 @@ export class ManagerLoop {
       // completed/max_turns → completed；failed/aborted → failed（plan §5.5）。
       const failed = result.outcome === 'failed' || result.outcome === 'aborted'
       if (traceStarted) {
+        this.recordRequestCoverage(episodeId, recovery !== undefined)
         this.deps.traceWriter?.finishEpisode(episodeId, {
           status: failed ? 'failed' : 'completed',
           outcome: {
@@ -1000,6 +1063,7 @@ export class ManagerLoop {
       // admission 与直接 throw 都在这里收口。人类提交一旦完成，仅重投非人类事件；否则保留
       // 原输入，下一次 wake 再试提交。
       if (traceStarted) {
+        this.recordRequestCoverage(episodeId, recovery !== undefined)
         this.deps.traceWriter?.finishEpisode(episodeId, {
           status: 'failed',
           outcome: { summary: '[episode threw]', error: err instanceof Error ? err.message : String(err) },
@@ -1029,6 +1093,9 @@ export class ManagerLoop {
       )
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
+      this.currentToolProfile = undefined
+      this.currentToolFaceState = undefined
+      this.mailbox.clearActiveProfile()
       this.currentEpisodeEnvelopes = []
       this.mailbox.clearContextAdmissions()
       this.admittedActivityReceipts.clear()
@@ -1046,19 +1113,23 @@ export class ManagerLoop {
     } finally {
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
+      this.currentToolProfile = undefined
+      this.currentToolFaceState = undefined
+      this.mailbox.clearActiveProfile()
       this.currentEpisodeEnvelopes = []
       this.currentTraceId = undefined
       this.tracedLlmResponses.clear()
       this.tracedUsageResponses.clear()
       this.tracedToolStarts.clear()
       this.tracedToolFinishes.clear()
+      this.observedRequestCount = 0
       this.successfulSendMessageTargetsInCurrentEpisode.clear()
       this.continuedWorkersInCurrentEpisode.clear()
       this.needsSpawnRecheck = false
       this.spawnRecheckInjected = false
       this.spawnRecheckOutcomeRecorded = false
       this.postSendRecheckSequence = 0
-      this.currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
+      this.currentUsage = { input_tokens: 0, output_tokens: 0 }
       this.attemptCounter = 0
       this.resumeCheckpoint = undefined
       this.checkpointError = undefined
@@ -1102,7 +1173,7 @@ export class ManagerLoop {
       preferredKeepRecent: policy.keepRecent,
       mainRequestFixedTokens: contextManager.estimateStaticPromptTokens(
         this.managerSystemPrompt(effectiveWake),
-        this.deps.toolFace(effectiveWake),
+        this.deps.toolFace(effectiveWake, this.currentToolFaceState),
       ) + contextManager.estimateTotalTokens(currentTailMessages),
     })
 
@@ -1192,7 +1263,7 @@ export class ManagerLoop {
       })
       historyState = withoutProtectedTail(state, protectedTail.length)
       // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
-      this.mailbox.drainEnvelopes()
+      this.mailbox.drainActiveProfileEnvelopes()
       this.mailbox.clearContextAdmissions()
       const retryCurrentEnvelopes = currentInputEnvelopes.filter((item) => this.shouldReplayInAttempt(item))
       const retryInjectedEnvelopes = (this.currentEpisodeInjected ?? [])
@@ -1571,7 +1642,7 @@ export class ManagerLoop {
     // 而主 wake 自身的提交状态不变。缺省跟随 humanInputsCommitted(B 分支调用现状)。
     injectedHumansCommitted: boolean = humanInputsCommitted,
   ): Promise<void> {
-    this.mailbox.drainEnvelopes()
+    this.mailbox.drainActiveProfileEnvelopes()
     this.mailbox.clearContextAdmissions()
     await this.rejectPendingActivityEnvelopes([
       ...carriedEnvelopes,
@@ -1695,9 +1766,60 @@ export class ManagerLoop {
     return `llm-${episodeId}-${responseId}`
   }
 
+  private observeAdapter(episodeId: string, adapter: LLMAdapter, purpose: 'inference' | 'compaction'): LLMAdapter {
+    const writer = this.deps.traceWriter
+    if (!writer) return adapter
+    const mode = this.currentToolFaceState?.mode ?? 'full'
+    const profile = managerToolProfileForWake(this.effectiveWakeForCurrentEpisode())
+    return {
+      traceIdentity: adapter.traceIdentity,
+      stream: (params) => adapter.stream(params),
+      updateConfig: (config) => adapter.updateConfig(config),
+      onRequestLifecycle: (event: LLMRequestEvent) => {
+        if (this.currentTraceId !== episodeId) return
+        if (event.status === 'running') this.observedRequestCount++
+        // Stable ID makes start/finish an upsert; response/tool causal spans stay separate.
+        writer.appendSpan(episodeId, {
+          span_id: `request-${episodeId}-${event.requestId}`,
+          parent_span_id: `root-${episodeId}`,
+          type: 'rpc_call', status: event.status,
+          started_at: new Date(event.startedAtMs).toISOString(),
+          ...(event.endedAtMs !== undefined ? {
+            ended_at: new Date(event.endedAtMs).toISOString(),
+            duration_ms: event.endedAtMs - event.startedAtMs,
+          } : {}),
+          details: {
+            kind: 'llm_request', request_observation_version: 1, purpose,
+            request_id: event.requestId, call_id: event.callId, attempt: event.attempt,
+            provider_id: event.providerId, model_id: event.model, format: event.format,
+            tool_loading_mode: mode, capability_profile: profile,
+            visible_tool_count: event.toolCount,
+            first_chunk_ms: event.firstChunkMs, chunk_count: event.chunkCount,
+            ...(event.usage ? { usage: event.usage } : {}),
+            ...(event.failureKind ? { failure_kind: event.failureKind } : {}),
+          },
+        })
+      },
+    }
+  }
+
+  private recordRequestCoverage(episodeId: string, resumed: boolean): void {
+    const now = new Date().toISOString()
+    try {
+      this.deps.traceWriter?.appendSpan(episodeId, {
+        span_id: `request-coverage-${episodeId}`, parent_span_id: `root-${episodeId}`, type: 'decision',
+        status: 'completed', started_at: now, ended_at: now, duration_ms: 0,
+        details: { kind: 'llm_request_coverage', request_count: this.observedRequestCount, resumed },
+      })
+    } catch { /* missing coverage must invalidate evaluation, not retry the episode */ }
+  }
+
   private recordLlmResponse(episodeId: string, event: EngineLlmResponseEvent): void {
     const writer = this.deps.traceWriter
     if (!writer || this.currentTraceId !== episodeId || this.tracedLlmResponses.has(event.responseId)) return
+    const state = this.currentToolFaceState
+    const visible = state?.catalog?.project(state, state.searchTool)
+    const shadowCore = state?.mode === 'shadow' ? state.catalog?.project(createManagerToolFaceState(), state.searchTool) : undefined
     writer.appendSpan(episodeId, {
       span_id: this.llmSpanId(episodeId, event.responseId),
       parent_span_id: `root-${episodeId}`,
@@ -1710,11 +1832,30 @@ export class ManagerLoop {
         response_id: event.responseId,
         turn: event.turnNumber,
         stop_reason: event.stopReason,
+        ...(state?.catalog && visible ? {
+          tool_loading_mode: state.mode,
+          capability_profile: state.catalog.profile,
+          catalog_revision: state.catalog.catalogRevision,
+          authorized_catalog_digest: state.catalog.authorizedCatalogDigest,
+          visible_tool_count: visible.length,
+          schema_bytes: serializedToolSetBytes(visible),
+          loaded_schema_bytes: [...state.loadedNames].reduce((bytes, name) => bytes + serializedToolBytes(state.catalog!.get(name)!), 0),
+          search_count: state.searches ?? 0,
+          connector_generation: state.externalMcpTools?.[0]?.traceMetadata?.connector_generation,
+          ...(shadowCore ? { shadow_core_count: shadowCore.length, shadow_core_schema_bytes: serializedToolSetBytes(shadowCore),
+            shadow_candidate_count: state.catalog.candidateCount } : {}),
+        } : {}),
         ...(event.usage ? { usage: event.usage } : {}),
         ...(event.diagnostics ? {
           retries: event.diagnostics.retries,
           first_chunk_ms: event.diagnostics.firstChunkMs,
           chunk_count: event.diagnostics.chunkCount,
+          ...(event.diagnostics.request ? {
+            request_id: event.diagnostics.request.requestId,
+            provider_id: event.diagnostics.request.providerId,
+            model_id: event.diagnostics.request.model,
+            format: event.diagnostics.request.format,
+          } : {}),
         } : {}),
       },
     })
@@ -1730,11 +1871,12 @@ export class ManagerLoop {
       call_id: event.callId,
       tool_use_id: event.toolUseId,
       name: event.name,
-      input_summary: summarizeSpanInput(event.input),
+      input_summary: summarizeManagerToolInput(event.name, event.input, event.traceMetadata?.mcp_server !== undefined),
       ...(event.type === 'tool_finished' ? {
         output_summary: summarizeSpanOutput(event.output),
         is_error: event.isError,
       } : {}),
+      ...(event.traceMetadata ?? {}),
     }
 
     if (event.type === 'tool_started') {
@@ -1791,11 +1933,19 @@ export class ManagerLoop {
       ...(event.diagnostics ? { diagnostics: event.diagnostics } : {}),
     })
     const usage = event.usage
-    if (usage && !this.tracedUsageResponses.has(event.responseId)) {
-      this.currentUsage.input_tokens += usage.inputTokens ?? 0
-      this.currentUsage.output_tokens += usage.outputTokens ?? 0
-      this.currentUsage.cache_creation_tokens += usage.cacheCreationTokens ?? 0
-      this.currentUsage.cache_read_tokens += usage.cacheReadTokens ?? 0
+    if (!this.tracedUsageResponses.has(event.responseId)) {
+      this.currentUsage.input_tokens += usage?.inputTokens ?? 0
+      this.currentUsage.output_tokens += usage?.outputTokens ?? 0
+      for (const [totalKey, usageKey] of [
+        ['cache_creation_tokens', 'cacheCreationTokens'], ['cache_read_tokens', 'cacheReadTokens'],
+      ] as const) {
+        const value = usage?.[usageKey]
+        if (value !== undefined && (this.tracedUsageResponses.size === 0 || this.currentUsage[totalKey] !== undefined)) {
+          this.currentUsage[totalKey] = (this.currentUsage[totalKey] ?? 0) + value
+        } else {
+          delete this.currentUsage[totalKey]
+        }
+      }
       this.tracedUsageResponses.add(event.responseId)
     }
     const llmSpanId = this.llmSpanId(episodeId, event.responseId)
@@ -1811,9 +1961,10 @@ export class ManagerLoop {
         call_id: toolCall.callId,
         tool_use_id: toolCall.id,
         name: toolCall.name,
-        input_summary: summarizeSpanInput(toolCall.input),
+        input_summary: summarizeManagerToolInput(toolCall.name, toolCall.input, toolCall.traceMetadata?.mcp_server !== undefined),
         output_summary: summarizeSpanOutput(toolCall.output),
         is_error: toolCall.isError,
+        ...(toolCall.traceMetadata ?? {}),
       }
       const spanId = this.toolSpanId(episodeId, toolCall.callId)
       if (this.tracedToolStarts.has(toolCall.callId)) {
@@ -1847,7 +1998,7 @@ export class ManagerLoop {
     const writer = this.deps.traceWriter
     const startedAt = new Date().toISOString()
     try {
-      const applied = await this.applyFold(args)
+      const applied = await this.applyFold({ ...args, adapter: this.observeAdapter(episodeId, args.adapter, 'compaction') })
       if (writer && this.currentTraceId === episodeId) {
         const endedAt = new Date().toISOString()
         writer.appendSpan(episodeId, {
@@ -1932,9 +2083,7 @@ export class ManagerLoop {
   }
 
   private effectiveWakeForCurrentEpisode(): WakeEvent | undefined {
-    return this.currentEpisodeEnvelopes.find((item) =>
-      isBuiltinDailyReflectionWake(item.wake),
-    )?.wake ?? this.currentWakeEvent?.wake
+    return this.currentWakeEvent?.wake ?? this.currentEpisodeEnvelopes[0]?.wake
   }
 
   private managerSystemPrompt(effectiveWake: WakeEvent | undefined): string {
@@ -1986,7 +2135,10 @@ export class ManagerLoop {
     const effectiveWake = this.effectiveWakeForCurrentEpisode()
     const isBuiltinDailyReflection = isBuiltinDailyReflectionWake(effectiveWake)
     const systemPrompt = (): string => this.managerSystemPrompt(this.effectiveWakeForCurrentEpisode())
-    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(this.effectiveWakeForCurrentEpisode())
+    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(
+      this.effectiveWakeForCurrentEpisode(),
+      this.currentToolFaceState,
+    )
     const messagesRef = { current: initialMessages as ReadonlyArray<EngineMessage> }
     const checkpoint = (): void => {
       if (this.checkpointError) throw this.checkpointError
@@ -2062,6 +2214,10 @@ export class ManagerLoop {
       // (纪律写在 manager system prompt 的收尾责任段里),不需要 engine 在运行时替它决定。
       // 静默 end_turn 对 manager 是完全正常的完成态(比如这次唤醒只是派活或只读检查)。
       suppressForcedSummary: () => true,
+      unavailableToolResult: (name) => {
+        const output = this.currentToolFaceState?.catalog?.missingToolOutput(name) ?? 'TOOL_UNAVAILABLE'
+        return { output, isError: true, traceMetadata: { tool_error_code: output.split(':')[0] } }
+      },
       assistantTextEndTurnHandler: async () => {
         if (assistantTextEndTurnReminderSent) return { kind: 'complete' as const }
         if (!isBuiltinDailyReflection && !this.deps.hasPendingReply()) return { kind: 'complete' as const }
@@ -2111,7 +2267,7 @@ export class ManagerLoop {
       configChangedSignal: configChanged.signal,
       configGeneration: this.deps.runtimeConfigAppliedGeneration,
       onConfigChanged: async () => ({
-        adapter: this.deps.adapter(),
+        adapter: this.observeAdapter(episodeId, this.deps.adapter(), 'inference'),
         model: this.deps.model(),
         // thinking 是 per-model 字段，随 model 一并替换；manager 不发 max_tokens。
         ...(this.deps.thinking ? { thinking: this.deps.thinking() } : {}),
@@ -2121,7 +2277,7 @@ export class ManagerLoop {
     try {
       const result = await runEngine({
         prompt: '', // 被忽略:initialMessages 非空时 runEngine 不使用 prompt(见 query-loop.ts)
-        adapter,
+        adapter: this.observeAdapter(episodeId, adapter, 'inference'),
         options,
         initialMessages,
       })
@@ -2137,6 +2293,27 @@ export class ManagerLoop {
 
 function activityReceiptKey(receipt: ActivityContextAdmissionReceipt): string {
   return `${receipt.notification_id}\u0000${receipt.activity_through}`
+}
+
+function summarizeManagerToolInput(name: string, input: Record<string, unknown>, isExternalMcp: boolean): string {
+  if (name === 'search_tools') return JSON.stringify(toolSearchQueryStats(input.query))
+  if (isExternalMcp) return JSON.stringify({ argument_count: Object.keys(input).length })
+  return summarizeSpanInput(input)
+}
+
+export function managerToolProfileForWake(wake: WakeEvent | undefined): ManagerToolProfile {
+  return managerToolProfileForSchedule(wake?.kind === 'schedule' ? wake : undefined)
+}
+
+export function managerToolLoadingModeForKey(key: string): ManagerToolLoadingMode {
+  const configured = process.env.CRABOT_MANAGER_TOOL_LOADING_MODE
+  const mode: ManagerToolLoadingMode = configured === 'full' || configured === 'shadow' || configured === 'progressive'
+    ? configured
+    : 'full'
+  const rawCohort = process.env.CRABOT_MANAGER_TOOL_LOADING_KEYS?.trim()
+  if (!rawCohort) return mode
+  const cohort = new Set(rawCohort.split(',').map((item) => item.trim()).filter(Boolean))
+  return cohort.has(key) ? mode : 'full'
 }
 
 function isBuiltinDailyReflectionWake(wake: WakeEvent | undefined): boolean {
@@ -2279,6 +2456,7 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
   constructor(private readonly render: (envelope: TimedWakeEnvelope) => string) {}
 
   private pending: TimedWakeEnvelope[] = []
+  private activeProfile: ManagerToolProfile | undefined
   private contextAdmissionEnvelopes: TimedWakeEnvelope[] = []
   /** 非 null 时记录此后 drainPending() 拿走的 envelope(复核 continuation 失败还原用,见 runEpisodeBody)。 */
   private drainCapture: TimedWakeEnvelope[] | null = null
@@ -2321,7 +2499,7 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
 
   push(envelope: TimedWakeEnvelope): void {
     this.pending.push(envelope)
-    this.clearBarrier()
+    if (this.activeProfile === managerToolProfileForWake(envelope.wake)) this.clearBarrier()
   }
 
   /** 返回被替换的旧 event，供调用方同步更新 episode 级控制面引用。 */
@@ -2342,6 +2520,33 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
     const drained = this.pending
     this.pending = []
     return drained
+  }
+
+  drainEnvelopesForProfile(profile: ManagerToolProfile): TimedWakeEnvelope[] {
+    const drained: TimedWakeEnvelope[] = []
+    const remaining: TimedWakeEnvelope[] = []
+    for (const envelope of this.pending) {
+      if (managerToolProfileForWake(envelope.wake) === profile) drained.push(envelope)
+      else remaining.push(envelope)
+    }
+    this.pending = remaining
+    return drained
+  }
+
+  peekPendingEnvelope(): TimedWakeEnvelope | undefined {
+    return this.pending[0]
+  }
+
+  setActiveProfile(profile: ManagerToolProfile): void {
+    this.activeProfile = profile
+  }
+
+  clearActiveProfile(): void {
+    this.activeProfile = undefined
+  }
+
+  drainActiveProfileEnvelopes(): TimedWakeEnvelope[] {
+    return this.activeProfile === undefined ? [] : this.drainEnvelopesForProfile(this.activeProfile)
   }
 
   snapshotPendingEnvelopes(): TimedWakeEnvelope[] {
@@ -2383,7 +2588,7 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
   }
 
   drainPending(): Array<string | ContentBlock[]> {
-    const drained = this.drainEnvelopes()
+    const drained = this.drainActiveProfileEnvelopes()
     this.contextAdmissionEnvelopes.push(...drained)
     this.drainCapture?.push(...drained)
     return drained.map((envelope) => {
@@ -2429,6 +2634,11 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
   }
 
   get hasPending(): boolean {
+    return this.activeProfile !== undefined
+      && this.pending.some((envelope) => managerToolProfileForWake(envelope.wake) === this.activeProfile)
+  }
+
+  get hasAnyPending(): boolean {
     return this.pending.length > 0
   }
 

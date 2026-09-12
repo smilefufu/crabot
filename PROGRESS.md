@@ -1,15 +1,19 @@
 # Crabot 项目进度
 
-> 最后整理：2026-09-10
+> 最后整理：2026-09-12
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
 
-### Manager 工具语义精简：独立 55 工具发布基线
+### Manager 工具渐进加载：本地发布验证与计量已补齐，线上验收待执行
 
-- 按已确认 `2026-09-03-manager-tool-surface-optimization-design.md` 的第一发布阶段，退役语义失真的 `get_system_status`，三项只读自省合并为 `inspect_crabot(view)`；数据源、脱敏和错误语义不变。
-- 普通 Manager 仍完整装配 55 项业务工具，含六项 Schedule 工具；保留 `send_private_message`。本版本不包含渐进加载、search_tools、外部 MCP 或权限迁移。
-- 本地验证后走独立 PR，不自行部署。部署后须观察至少 72 小时；后续加载器 full control 为 56 项，不能替代本基线。
+- 已按确认 spec 实现自省精简、normal/daily/graph 固定核心、本地检索与 episode 内追加加载；同轮未加载调用被拒绝，重启保留完成结果但不继承 loaded set。
+- 跨 profile 的人类消息、回复关联和任务板通知隔离已补回归；MCP 目录、校验、超时和隐私守卫已接入，64 KiB Manager 预算不影响 Worker 目录。
+- 已按补充确认实现权限 RPC 的完整目标校验、群复合键与 CLI 增量覆盖；默认群仅开放 memory/messaging，legacy 快照先备份隔离。保存失败不发布授权，备份不能覆盖系统模板；Schedule creator/群目标、撤权及非人类唤醒的 MCP 生产接线矩阵通过。
+- Agent 最终扩大回归 92 文件、1,389 项通过（含报表 11 项），另补共享流式消费 14 项通过；Admin 1,252 项（排除已复现的 v1-cleanup 基线失败）、Web 41 项与三套类型检查通过。桌面/手机权限验证、其余基线失败及三 adapter 请求字节数见实施计划。
+- 已补齐每次真实请求（含重试/压缩）的安全 provider/model/format 身份、用量和失败事实；OpenAI 缓存 0 与缺失分别保留。只读报表分层比较云成本/自托管 workload，对缺失请求、混合模型、重启或会话切组不伪造可比结论。
+- 默认 full、完整 ManagerKey cohort、episode 边界回退及在途 MCP 只执行一次通过回归。独立 55 工具基线 `06586f06` 已通过 221 项回归和类型检查；加载器版本须在该基线部署并观察至少 72 小时后推进，PR 暂以 draft 保留发布门禁。
+- 权限临时硬锁已解除，默认仍 full，Manager MCP 仍需显式开关且 full/shadow 不开放外部 MCP。未部署、未开启实验；72 小时语义基线、7 日影子和指定会话的线上缓存/成本及业务闭环验收仍待执行。
 
 ### Manager 首次 LLM 响应 reaction：实现与定向验证完成，待 PR 审查
 

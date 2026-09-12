@@ -16,7 +16,7 @@ import type {
   ToolAccessConfig,
   ToolCategory,
 } from '../../../types'
-import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS } from '../../../types'
+import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../../types'
 
 const workbenchLinkStyle: React.CSSProperties = {
   display: 'inline-flex',
@@ -80,7 +80,7 @@ const PermissionSwitchRow: React.FC<{
   onChange: (cat: ToolCategory, checked: boolean) => void
 }> = ({ label, category, checked, onChange }) => {
   return (
-    <label className="session-permission-switch-row">
+    <label className="session-permission-switch-row" title={category === 'mcp_skill' ? MCP_SKILL_PERMISSION_DESCRIPTION : undefined}>
       <span className="session-permission-switch-value">
         <span>{label}</span>
         <span>{checked ? '开启' : '关闭'}</span>

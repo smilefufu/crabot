@@ -191,6 +191,7 @@ describe('AgentHandler 任务权限持有者', () => {
     const principal = h.getTaskPrincipal(taskId)
     expect(principal).toEqual({
       senderFriend: expect.objectContaining({ id: 'f1' }),
+      channelId: 'c1',
       sessionId: 's1',
       sessionType: 'private',
     })

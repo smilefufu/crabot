@@ -1,4 +1,4 @@
-import type { EngineToolLifecycleEvent, ToolDefinition, ToolCallContext, ToolPermissionConfig } from './types'
+import type { EngineToolLifecycleEvent, ToolDefinition, ToolCallContext, ToolPermissionConfig, ToolTraceMetadata } from './types'
 import { findTool, type ToolBatch } from './tool-framework'
 import { checkToolPermission } from './permission-checker'
 import type { HookExecutorContext } from '../hooks/types'
@@ -14,6 +14,7 @@ export interface ToolResultEntry {
   readonly is_error: boolean
   readonly duration_ms?: number
   readonly started_at_ms?: number
+  readonly traceMetadata?: ToolTraceMetadata
 }
 
 export interface HookConfig {
@@ -68,6 +69,7 @@ async function executeSingleTool(
 ): Promise<ToolResultEntry> {
   const startedAtMs = Date.now()
   const callId = lifecycle?.callIds.get(block.id)
+  const tool = findTool(tools, block.name)
   const observe = (event: EngineToolLifecycleEvent): void => {
     try {
       lifecycle?.onToolLifecycle?.(event)
@@ -84,13 +86,18 @@ async function executeSingleTool(
       toolUseId: block.id,
       name: block.name,
       input: block.input,
+      ...(tool?.traceMetadata !== undefined ? { traceMetadata: tool.traceMetadata } : {}),
       startedAtMs,
     })
   }
   const finish = (entry: ToolResultEntry): ToolResultEntry => {
     const endedAtMs = Date.now()
+    const traceMetadata = tool?.traceMetadata !== undefined || entry.traceMetadata !== undefined
+      ? { ...tool?.traceMetadata, ...entry.traceMetadata }
+      : undefined
     const stamped = {
       ...entry,
+      ...(traceMetadata !== undefined ? { traceMetadata } : {}),
       started_at_ms: startedAtMs,
       duration_ms: endedAtMs - startedAtMs,
     }
@@ -103,6 +110,7 @@ async function executeSingleTool(
         toolUseId: block.id,
         name: block.name,
         input: block.input,
+        ...(traceMetadata !== undefined ? { traceMetadata } : {}),
         output: stamped.content,
         isError: stamped.is_error,
         startedAtMs,
@@ -116,8 +124,11 @@ async function executeSingleTool(
   const timezone = context.timezone ?? resolveTimezone(undefined)
   const stamp = (content: string): string => stampToolResult(content, timezone)
 
-  const tool = findTool(tools, block.name)
   if (tool === undefined) {
+    if (context.unavailableToolResult) {
+      const result = context.unavailableToolResult(block.name)
+      return finish({ tool_use_id: block.id, content: stamp(result.output), is_error: true, traceMetadata: result.traceMetadata })
+    }
     return finish({ tool_use_id: block.id, content: stamp(`Tool not found: ${block.name}`), is_error: true })
   }
 
@@ -202,6 +213,7 @@ async function executeSingleTool(
       tool_use_id: block.id,
       content: stamp(capToolOutput(finalContent)),
       ...(result.images !== undefined ? { images: result.images } : {}),
+      ...(result.traceMetadata !== undefined ? { traceMetadata: result.traceMetadata } : {}),
       is_error: result.isError,
     })
   } catch (error) {

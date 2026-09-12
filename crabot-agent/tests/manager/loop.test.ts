@@ -280,7 +280,7 @@ describe('ManagerLoop', () => {
     expect(() => loop.enqueueDuringEpisode(bare as never)).toThrow('TimedWakeEnvelope')
   })
 
-  it('daily reflection 重投为 carried wake 时仍使用受限投递面', async () => {
+  it('不同 profile 的重投不会并入普通 episode，daily wake 保留到同 profile episode', async () => {
     const calls: LLMStreamParams[] = []
     const toolFaceWakes: Array<WakeEvent | undefined> = []
     let streamCount = 0
@@ -315,13 +315,88 @@ describe('ManagerLoop', () => {
     expect(failed).toMatchObject({ outcome: 'failed', consumedEvents: false })
     await loop.wakeUp(workerEventWake('w-follow-up'))
 
-    expect(calls.slice(1).every((call) => call.systemPrompt.includes('send_daily_reflection_summary'))).toBe(true)
-    expect(toolFaceWakes.slice(1)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'schedule', taskType: 'daily_reflection' }),
-    ]))
-    expect(toolFaceWakes.slice(1)).not.toEqual(expect.arrayContaining([
+    expect(calls.slice(1).some((call) => !call.systemPrompt.includes('send_daily_reflection_summary'))).toBe(true)
+    expect(toolFaceWakes).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'worker_event' }),
     ]))
+    expect(toolFaceWakes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'schedule', taskType: 'daily_reflection' }),
+    ]))
+    expect(toolFaceWakes.findIndex((wake) => wake?.kind === 'worker_event'))
+      .toBeGreaterThan(toolFaceWakes.findIndex((wake) => wake?.kind === 'schedule' && wake.taskType === 'daily_reflection'))
+  })
+
+  it('其它 profile 的 mailbox 事件不让当前 Engine 空转，结算留给下一 episode', async () => {
+    const calls: LLMStreamParams[] = []
+    const settled = vi.fn()
+    let loop: ManagerLoop
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        if (calls.length === 1) {
+          loop.enqueueDuringEpisode({
+            ...workerEventWake('deferred-normal-worker'),
+            correlation: { admin_chat_request_ids: ['deferred-correlation'] },
+          }, { onEpisodeSettled: settled })
+          expect(loop.claimAdminChatRequestIds()).toEqual([])
+        } else {
+          expect(loop.claimAdminChatRequestIds()).toEqual(['deferred-correlation'])
+        }
+        yield* chunksFromContent([], 'end_turn')
+      },
+      updateConfig: () => {},
+    }
+    loop = new ManagerLoop(baseDeps({ store, adapter, maxTurns: 3 }))
+    const graph = await loop.wakeUp(timed({
+      kind: 'schedule', scheduleId: 'memory-graph-rebuild', title: 'graph', description: 'link memory', isBuiltin: true,
+    }))
+    expect(graph).toMatchObject({ outcome: 'completed', turns: 1 })
+    expect(calls).toHaveLength(1)
+    expect(JSON.stringify(calls[0].messages)).not.toContain('deferred-normal-worker')
+    expect(settled).not.toHaveBeenCalled()
+    expect(loop.hasPendingMailbox).toBe(true)
+
+    const normal = await loop.drainMailbox()
+    expect(normal).toMatchObject({ outcome: 'completed', turns: 1 })
+    expect(calls).toHaveLength(2)
+    expect(JSON.stringify(calls[1].messages)).toContain('deferred-normal-worker')
+    expect(settled).toHaveBeenCalledOnce()
+    expect(loop.hasPendingMailbox).toBe(false)
+  })
+
+  it.each([false, true])('专用 profile 不注入或提前结算任务板通知，保留最新版本到普通 episode: fails=%s', async (fails) => {
+    const calls: LLMStreamParams[] = []
+    const consumed = vi.fn()
+    let loop: ManagerLoop
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        if (calls.length === 1) {
+          loop.enqueueWorkboardAdminUpdate(timed({ kind: 'workboard_admin_update', noticeRevision: 1 }))
+          loop.enqueueWorkboardAdminUpdate(timed({ kind: 'workboard_admin_update', noticeRevision: 2 }))
+          const checkpoint = await store.loadCheckpoint(KEY)
+          expect(checkpoint?.envelopes.some((item) => item.wake.kind === 'workboard_admin_update')).toBe(false)
+          expect(checkpoint?.pending).toEqual([expect.objectContaining({
+            wake: { kind: 'workboard_admin_update', noticeRevision: 2 },
+          })])
+          if (fails) throw new Error('graph episode failed')
+        }
+        yield* chunksFromContent([], 'end_turn')
+      },
+      updateConfig: () => {},
+    }
+    loop = new ManagerLoop(baseDeps({ store, adapter, onWorkboardAdminUpdateConsumed: consumed }))
+    const graph = await loop.wakeUp(timed({
+      kind: 'schedule', scheduleId: 'memory-graph-rebuild', title: 'graph', description: 'link memory', isBuiltin: true,
+    }))
+    expect(graph.outcome).toBe(fails ? 'failed' : 'completed')
+    expect(calls).toHaveLength(1)
+    expect(consumed).not.toHaveBeenCalled()
+    expect(loop.hasPendingMailbox).toBe(true)
+    await loop.wakeUp(workerEventWake('normal-follow-up'))
+    expect(JSON.stringify(calls[1].messages)).toContain('管理员已更新任务板')
+    expect(consumed).toHaveBeenCalledOnce()
+    expect(consumed).toHaveBeenCalledWith([2])
   })
 
   it('唤醒 → 跑一个 turn → 回睡的完整往返', async () => {
@@ -347,7 +422,7 @@ describe('ManagerLoop', () => {
   it('工具未返回时已有 running span，返回后原地收口且 onTurn 不重复追加', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push(
-      { toolCalls: [{ name: 'deferred_tool', id: 'provider-call', input: { value: 1 } }], stopReason: 'tool_use' },
+      { toolCalls: [{ name: 'deferred_tool', id: 'provider-call', input: { value: 1, secret: 'private-mcp-argument' } }], stopReason: 'tool_use' },
       { stopReason: 'end_turn' },
     )
     let resolveTool!: () => void
@@ -372,9 +447,10 @@ describe('ManagerLoop', () => {
       traceWriter,
       toolFace: () => [defineTool({
         name: 'deferred_tool', description: 'wait', inputSchema: {},
+        traceMetadata: { mcp_server: 'example', connector_generation: 4 },
         call: async () => {
           await toolGate
-          return { output: 'done', isError: false }
+          return { output: 'done', isError: false, traceMetadata: { mcp_output_truncated: false } }
         },
       })],
     }))
@@ -403,7 +479,35 @@ describe('ManagerLoop', () => {
     expect(spans.filter((span) => span.type === 'llm_call')).toHaveLength(2)
     expect(runningSpan.status).toBe('completed')
     expect(runningSpan.details).toMatchObject({ output_summary: expect.stringContaining('done') })
+    expect(runningSpan.details).toMatchObject({ mcp_server: 'example', connector_generation: 4, mcp_output_truncated: false })
+    expect(runningSpan.details).toMatchObject({ input_summary: '{"argument_count":2}' })
+    expect(JSON.stringify(spans)).not.toContain('private-mcp-argument')
     expect(traceWriter.finishSpan).toHaveBeenCalledOnce()
+  })
+
+  it('search_tools 查询仅保留在既有历史，不进入生命周期或补记 trace', async () => {
+    const { adapter, queue } = makeAdapter()
+    const query = 'private-search-text-that-must-not-be-logged'
+    queue.push(
+      { toolCalls: [{ name: 'search_tools', id: 'search-1', input: { query } }], stopReason: 'tool_use' },
+      { stopReason: 'end_turn' },
+    )
+    const traceWriter: ManagerTraceWriter = {
+      startEpisode: vi.fn(), appendSpan: vi.fn(), finishSpan: vi.fn(), finishEpisode: vi.fn(), addSpawnedWorker: vi.fn(),
+    }
+    const loop = new ManagerLoop(baseDeps({
+      store, adapter, traceWriter,
+      toolFace: () => [defineTool({
+        name: 'search_tools', description: 'search', inputSchema: { type: 'object' }, isReadOnly: false,
+        call: async () => ({ output: '{"status":"no_match"}', isError: false }),
+      })],
+    }))
+    await loop.wakeUp(workerEventWake('trace-search'))
+    const traceCalls = [vi.mocked(traceWriter.appendSpan).mock.calls, vi.mocked(traceWriter.finishSpan!).mock.calls]
+    expect(JSON.stringify(traceCalls)).not.toContain(query)
+    expect(JSON.stringify(traceCalls)).toContain('query_characters')
+    expect(JSON.stringify(traceCalls)).toContain('query_tokens')
+    expect(JSON.stringify((await store.load(KEY)).recent)).toContain(query)
   })
 
   it('任务板规则稳定装配，但动态任务状态不进入 system prompt，也不触发自动读取', async () => {

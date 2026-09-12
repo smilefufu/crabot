@@ -48,6 +48,7 @@ import { splitManagerKey, type HumanPrincipal } from './principal.js'
 import { resolveTimezone } from '../utils/time.js'
 import type { ManagerInboundMessageFact } from './inbound-status.js'
 import type { ManagerWorkboard } from './workboard-store.js'
+import type { ManagerToolFaceState } from './tools/tool-catalog.js'
 
 /** §4.4 保留线程:未配置目标 session 的 scheduled 触发 / 台账查不到监护 session 的 worker 事件落此。 */
 export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
@@ -86,6 +87,7 @@ export interface HumanInputCallbacks {
  * 在 P7 cutover 时才接上。
  */
 export interface ScheduleIdentity {
+  readonly scheduleId?: string
   readonly creatorFriendId?: string
   readonly isBuiltin?: boolean
   readonly taskType?: string
@@ -213,6 +215,7 @@ export interface ManagerRegistryDeps {
     },
     /** 当前 episode 的原始唤醒事件；仅供工具调用时授权，不进入 schema 或 history。 */
     wakeEvent?: WakeEvent,
+    faceState?: ManagerToolFaceState,
   ) => ReadonlyArray<ToolDefinition>
   /** Manager episode trace writer（窄接口；见 ManagerLoopDeps.traceWriter）。 */
   readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
@@ -357,7 +360,7 @@ export class ManagerRegistry {
       quotedPrefetch: this.deps.quotedPrefetch,
       // 唤醒事件由 ManagerLoop 按 episode 传入(见 ManagerLoopDeps.toolFace);schedule 之外
       // 的唤醒不带身份,工具面照旧。
-      toolFace: (wakeEvent) =>
+      toolFace: (wakeEvent, faceState) =>
         this.deps.toolFace(
           key,
           isSystemThread,
@@ -382,6 +385,7 @@ export class ManagerRegistry {
             onWorkerContinuation: (workerId) => this.loops.get(key)?.recordWorkerContinuation(workerId),
           },
           wakeEvent,
+          faceState,
         ),
       promptInputs: () => this.deps.promptInputs(key),
       harness: this.deps.harness,
@@ -509,7 +513,7 @@ export class ManagerRegistry {
       // 进入当前 Manager mailbox」同样涵盖人类消息。
       const loop = this.getOrCreate(key)
       await loop.prepareHumanWake({ ...envelope, wake: event })
-      if (this.isEpisodeActive(key)) {
+      if (this.isEpisodeActive(key) && loop.acceptsWakeDuringEpisode(event)) {
         // 同步入队(check 与 push 之间无 await,与 routeWorkerEvent 同构原子):
         // 提交延后到当前 episode 收尾临界区,由 settle hook 拿真实处理结果。
         loop.enqueueHumanWakeDuringActiveEpisode({ ...envelope, wake: event }, humanInputCallbacks?.onLlmResponse, onEpisodeSettled)
@@ -522,6 +526,7 @@ export class ManagerRegistry {
           successfulSendMessageTargets: [],
         }
       }
+      // 专用 profile 期间保持来源队列的提交责任，由普通 episode 出队后接收。
       return this.runWake(key, { ...envelope, wake: event }, 0, humanInputCallbacks)
     } finally {
       finishPreparation()
@@ -1254,6 +1259,7 @@ export class ManagerRegistry {
 function scheduleIdentityOf(wakeEvent: WakeEvent | undefined): ScheduleIdentity | undefined {
   if (wakeEvent?.kind !== 'schedule') return undefined
   return {
+    scheduleId: wakeEvent.scheduleId,
     creatorFriendId: wakeEvent.creatorFriendId,
     isBuiltin: wakeEvent.isBuiltin,
     taskType: wakeEvent.taskType,

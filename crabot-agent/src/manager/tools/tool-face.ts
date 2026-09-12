@@ -1,16 +1,7 @@
 /**
- * manager 封闭工具面装配 —— protocol-agent-v3.md §4.3。
- *
- * manager 的工具面是**写死的白名单**，不接受外部扩展：六个来源原样/裁剪拼接后，末尾还有一道
- * 运行时护栏兜底（见 `assertClosedToolFace`），把"封闭"变成不变量而非只靠 review。
- *
- * 六个来源：
- * 1. crab-messaging（`buildMessagingTools`）—— 按白名单裁剪，`send_message` 额外做"去 intent"包装；
- * 2. crab-memory（`deps.memoryServer`，经 `mcpServerToToolDefinitions` 转换）—— 固定 18 项白名单；
- * 3. worker 编排、观察与回合处置工具（`buildWorkerTools`）—— 原样加入；
- * 4. crabot-info 六件套（Task 3 `buildCrabotInfoTools`）—— 原样加入。
- * 5. 当前 ManagerKey 的任务板两件套——只按需读取或修改独立任务板存储；
- * 6. 当前 episode 授权的项目文档两件套——只在调用时读取控制面权限和项目路径。
+ * Manager 能力目录与 episode 工具投影 —— protocol-agent-v3.md §4.3。
+ * 内置 messaging、memory、Worker、自省、任务板和项目文档仍按白名单构造；
+ * 外部 MCP 另经授权和兼容过滤。profile 固定核心之后只追加当前 episode 搜索出的定义。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.3
  */
@@ -36,6 +27,14 @@ import type { MasterAuthorization } from '../principal.js'
 import { buildWorkboardTools } from './workboard-tools.js'
 import type { ManagerWorkboardStore } from '../workboard-store.js'
 import { buildProjectDocTools, authorizeProjectRoot, type ProjectDocToolDeps } from './project-doc-tools.js'
+import {
+  ManagerToolCatalog,
+  ToolSearchInputError,
+  toolSearchQueryStats,
+  serializedToolBytes,
+  type ManagerToolFaceState,
+  type ManagerToolProfile,
+} from './tool-catalog.js'
 
 export interface ToolFaceDeps {
   readonly harness: WorkerHarness
@@ -59,7 +58,7 @@ export interface ToolFaceDeps {
   readonly schedule?: ManagerScheduleToolsContext
   /** 该 manager 是否为保留的"系统任务"线程（决定 send_master_private / send_private_message 可见性）。 */
   readonly isSystemThread: boolean
-  /** builtin daily reflection uses a fixed Admin Web delivery action instead of generic messaging. */
+  /** Daily reflection keeps send_message plus its fixed-target final summary action. */
   readonly isBuiltinDailyReflection?: boolean
   /** 成功投递且声明随后派发时，标记当前 Manager episode 做一次终止复核。 */
   readonly onPostSendAction?: (action: 'spawn_worker') => void
@@ -78,6 +77,15 @@ export interface ToolFaceDeps {
   }
   /** 当前 episode 的项目文档授权上下文；原始 WakeEvent 仅作控制面输入。 */
   readonly projectDocs: ProjectDocToolDeps
+  /** 当前 Manager profile；未提供时按普通 Manager 处理。 */
+  readonly profile?: ManagerToolProfile
+  /** 当前 episode 的渐进加载状态；缺省表示返回兼容的完整内置工具面。 */
+  readonly faceState?: ManagerToolFaceState
+  readonly candidatePermissions?: import('../../types.js').ResolvedPermissions
+  /** 当前 episode 已通过权限过滤的外部 MCP 工具目录。 */
+  readonly externalMcpTools?: ReadonlyArray<ToolDefinition>
+  /** 外部 MCP 每次实际调用前的当前主体/目标权限复核。 */
+  readonly authorizeExternalMcpTool?: (tool: Pick<ToolDefinition, 'name' | 'category'>) => Promise<boolean>
 }
 
 // ============================================================================
@@ -134,7 +142,6 @@ function managerMessagingToolSet(isSystemThread: boolean): MessagingToolSet {
 }
 
 const DAILY_REFLECTION_MESSAGING_TOOL_SET: MessagingToolSet = {
-  // The generic handler is reused internally, but never exposed under this name.
   tools: new Set(['send_message']),
   allowAskHuman: false,
 }
@@ -273,7 +280,7 @@ function buildDailyReflectionMessagingFace(deps: ToolFaceDeps): ToolDefinition[]
   ).find((tool) => tool.name === 'send_message')
   if (!sendMessage) throw new Error('daily reflection summary requires send_message')
 
-  return [defineTool({
+  return [messagingToolToDefinition(sendMessage, deps), defineTool({
     name: 'send_daily_reflection_summary',
     description: '将每日反思的必要摘要发送到 Admin Web 系统任务线程。仅接收人类可读文本，投递目标固定且不可修改。',
     inputSchema: z.toJSONSchema(DAILY_REFLECTION_SUMMARY_SCHEMA) as Record<string, unknown>,
@@ -310,7 +317,7 @@ function buildDailyReflectionMessagingFace(deps: ToolFaceDeps): ToolDefinition[]
 /** worker 通用文件系统/编排类工具，manager 绝不应可见（一律派 worker 执行）。 */
 const BANNED_TOOL_NAMES = new Set(['bash', 'read', 'write', 'edit', 'glob', 'grep', 'delegate_task'])
 
-/** crab-memory 走 `mcp__crab-memory__*` 前缀，是唯一允许出现在工具面里的 `mcp__` 前缀。 */
+/** 内置 memory 的保留前缀；外部 MCP 不得复用该名称空间。 */
 const ALLOWED_MCP_PREFIX = 'mcp__crab-memory__'
 const MANAGER_MEMORY_TOOL_NAMES = CRAB_MEMORY_MANAGER_TOOL_NAMES.map(
   (name) => `${ALLOWED_MCP_PREFIX}${name}`,
@@ -335,12 +342,12 @@ function buildManagerMemoryFace(memoryServer: McpServer): ToolDefinition[] {
  * （即 `mcp__` 前缀里非 crab-memory 的）。命中即抛错——本函数独立导出，供测试直接
  * 注入违规工具验证（`buildManagerToolFace` 内部也会在返回前调用它）。
  */
-export function assertClosedToolFace(tools: readonly ToolDefinition[]): void {
+export function assertClosedToolFace(tools: readonly ToolDefinition[], allowExternalMcp = false): void {
   for (const tool of tools) {
     if (BANNED_TOOL_NAMES.has(tool.name.toLowerCase())) {
       throw new Error(`buildManagerToolFace: 检测到不应出现在 manager 工具面的通用工具 '${tool.name}'`)
     }
-    if (tool.name.startsWith('mcp__') && !tool.name.startsWith(ALLOWED_MCP_PREFIX)) {
+    if (!allowExternalMcp && tool.name.startsWith('mcp__') && !tool.name.startsWith(ALLOWED_MCP_PREFIX)) {
       throw new Error(`buildManagerToolFace: 检测到不应出现在 manager 工具面的外装 MCP 工具 '${tool.name}'`)
     }
   }
@@ -350,8 +357,104 @@ export function assertClosedToolFace(tools: readonly ToolDefinition[]): void {
 // 装配入口
 // ============================================================================
 
-/** 返回该 manager 的完整工具面；白名单写死在本函数，不接受外部扩展。 */
+function buildSearchToolsTool(catalog: ManagerToolCatalog, state: ManagerToolFaceState): ToolDefinition {
+  return defineTool({
+    name: 'search_tools',
+    description: '按动作和对象搜索当前 episode 可用的 Manager 工具。命中的具体工具从下一轮开始可见并可直接调用。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        query: { type: 'string', minLength: 1, maxLength: 500, description: '简短的动作 + 对象，不要复制完整消息或秘密' },
+        limit: { type: 'integer', minimum: 1, maximum: 5, default: 3 },
+      },
+      required: ['query'],
+    },
+    isReadOnly: false,
+    call: async (input): Promise<ToolCallResult> => {
+      state.searches = (state.searches ?? 0) + 1
+      try {
+        const result = catalog.search(state, input.query, input.limit)
+        return {
+          output: JSON.stringify({
+            status: result.status,
+            scope: 'current_episode',
+            catalog_revision: result.catalogRevision,
+            loaded: result.loaded,
+            already_visible: result.alreadyVisible,
+            omitted_due_to_budget: result.omittedDueToBudget,
+          }),
+          isError: false,
+          traceMetadata: {
+            ...toolSearchQueryStats(input.query),
+            tool_search_status: result.status,
+            loaded_names: result.loaded.join(','),
+            already_visible: result.alreadyVisible.join(','),
+            omitted_due_to_budget: result.omittedDueToBudget,
+            loaded_schema_bytes: result.loaded.reduce((bytes, name) => bytes + serializedToolBytes(catalog.get(name)!), 0),
+          },
+        }
+      } catch (error) {
+        if (!(error instanceof ToolSearchInputError)) {
+          catalog.loadBuiltinFallback(state)
+          return {
+            output: JSON.stringify({ status: 'degraded', scope: 'current_episode', catalog_revision: catalog.catalogRevision,
+              loaded: [], already_visible: [], omitted_due_to_budget: 0 }),
+            isError: false,
+            traceMetadata: { tool_search_status: 'degraded' },
+          }
+        }
+        return {
+          output: error instanceof Error ? error.message : String(error),
+          isError: true,
+        }
+      }
+    },
+  })
+}
+
+function wrapExternalMcpTool(
+  tool: ToolDefinition,
+  authorize: ToolFaceDeps['authorizeExternalMcpTool'],
+): ToolDefinition | undefined {
+  // External MCP is a discoverable-and-executable capability. If the caller
+  // cannot provide the runtime authorization hook, fail closed at admission.
+  if (!authorize || !/^mcp__[a-zA-Z0-9_-]+$/.test(tool.name) || tool.name.length > 64
+    || tool.name.startsWith('mcp__crab-memory__')
+    || (tool.category !== 'desktop' && tool.category !== 'mcp_skill')
+    || hasUnsafeMetadata(tool.description) || hasUnsafeMetadata(tool.inputSchema)
+    || serializedToolBytes(tool) > 64 * 1024) return undefined
+  return {
+    ...tool,
+    isReadOnly: false,
+    call: async (input, context) => {
+      let allowed = false
+      try {
+        allowed = await authorize(tool)
+      } catch {
+        allowed = false
+      }
+      if (!allowed) return {
+        output: 'TOOL_CATALOG_CHANGED', isError: true,
+        traceMetadata: { mcp_status: 'permission_changed', tool_error_code: 'TOOL_CATALOG_CHANGED' },
+      }
+      return tool.call(input, context)
+    },
+  }
+}
+
+function hasUnsafeMetadata(value: unknown): boolean {
+  if (typeof value === 'string') return /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)
+  if (Array.isArray(value)) return value.some(hasUnsafeMetadata)
+  if (value && typeof value === 'object') {
+    return Object.entries(value).some(([key, item]) => hasUnsafeMetadata(key) || hasUnsafeMetadata(item))
+  }
+  return false
+}
+
+/** 返回完整内置工具面；有 episode 状态时投影为稳定核心 + 已加载尾部。 */
 export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
+  if (deps.faceState?.catalog) return deps.faceState.catalog.project(deps.faceState, deps.faceState.searchTool)
   const messagingTools = buildMessagingFace(deps)
   const memoryTools = buildManagerMemoryFace(deps.memoryServer)
   const workerTools = buildWorkerTools({
@@ -375,7 +478,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const workboardTools = buildWorkboardTools(deps.workboard)
   const projectDocTools = buildProjectDocTools(deps.projectDocs)
 
-  const tools = [
+  const builtinTools = [
     ...messagingTools,
     ...memoryTools,
     ...workerTools,
@@ -383,6 +486,55 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...projectDocTools,
     ...infoTools,
   ]
-  assertClosedToolFace(tools)
-  return tools
+  assertClosedToolFace(builtinTools)
+  if (!deps.faceState) return builtinTools
+
+  const profile = deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')
+  const mode = deps.faceState.mode ?? 'progressive'
+  let externalMcpTools: ReadonlyArray<ToolDefinition> = []
+  if (mode === 'progressive' && profile === 'normal') {
+    if (!deps.faceState.externalMcpToolsCaptured) {
+      deps.faceState.externalMcpTools = (deps.externalMcpTools ?? [])
+        .map((tool) => wrapExternalMcpTool(tool, deps.authorizeExternalMcpTool))
+        .filter((tool): tool is ToolDefinition => tool !== undefined)
+      deps.faceState.externalMcpToolsCaptured = true
+    }
+    externalMcpTools = deps.faceState.externalMcpTools ?? []
+  }
+  const catalog = new ManagerToolCatalog(
+    [...builtinTools.sort((a, b) => Number(CONDITIONAL_TOOLS.has(a.name)) - Number(CONDITIONAL_TOOLS.has(b.name)) || a.name.localeCompare(b.name)), ...externalMcpTools],
+    profile,
+    undefined,
+    undefined,
+    (tool) => {
+      if (profile !== 'normal') return true
+      const permissions = deps.candidatePermissions
+      if (tool.name.startsWith('mcp__') && !tool.name.startsWith('mcp__crab-memory__')) {
+        return (tool.category === 'mcp_skill' || tool.category === 'desktop') && permissions?.tool_access[tool.category] === true
+      }
+      if (tool.name.startsWith('mcp__crab-memory__')) return permissions?.tool_access.memory === true
+      if (messagingTools.some((item) => item.name === tool.name)) return permissions?.tool_access.messaging === true
+      if (tool.name === 'inspect_workspace_git') return permissions?.tool_access.file_io === true
+      if (workerTools.some((item) => item.name === tool.name)) return permissions?.tool_access.task === true
+      if (tool.name.endsWith('_schedule') || tool.name === 'list_schedules') {
+        const access = permissions?.cli_access.schedule
+        return access === 'write' || (access === 'read' && (tool.name === 'get_schedule' || tool.name === 'list_schedules'))
+      }
+      if (tool.name === 'get_friend_permissions') return permissions?.cli_access.permission === 'read' || permissions?.cli_access.permission === 'write'
+      return true
+    },
+  )
+  deps.faceState.catalog = catalog
+  if (profile === 'memory_graph_rebuild') {
+    const projected = catalog.project(deps.faceState)
+    assertClosedToolFace(projected, true)
+    return projected
+  }
+  const searchTool = buildSearchToolsTool(catalog, deps.faceState)
+  deps.faceState.searchTool = searchTool
+  const projected = catalog.project(deps.faceState, searchTool)
+  assertClosedToolFace(projected, true)
+  return projected
 }
+
+const CONDITIONAL_TOOLS = new Set(['read_feishu_document', 'feishu_raw_get', 'feishu_download_file', 'send_master_private', 'list_all_workers'])

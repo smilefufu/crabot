@@ -381,13 +381,13 @@ interface ResponsesApiUsage {
  * 拍成统一语义（Anthropic 风格）：inputTokens 仅记未命中部分。
  */
 function extractResponsesApiUsage(raw: ResponsesApiUsage | undefined): LLMTokenUsage | undefined {
-  if (!raw) return undefined
-  const total = raw.input_tokens ?? 0
-  const cached = raw.input_tokens_details?.cached_tokens ?? 0
-  const uncached = Math.max(0, total - cached)
+  if (!raw || typeof raw.input_tokens !== 'number' || typeof raw.output_tokens !== 'number') return undefined
+  const total = raw.input_tokens
+  const cached = raw.input_tokens_details?.cached_tokens
+  const uncached = Math.max(0, total - (cached ?? 0))
   return {
     inputTokens: uncached,
-    outputTokens: raw.output_tokens ?? 0,
-    ...(cached > 0 ? { cacheReadTokens: cached } : {}),
+    outputTokens: raw.output_tokens,
+    ...(typeof cached === 'number' ? { cacheReadTokens: cached } : {}),
   }
 }

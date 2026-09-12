@@ -22,6 +22,14 @@ import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createManagerToolFaceState, NORMAL_MANAGER_CORE_NAMES, DAILY_REFLECTION_CORE_NAMES, MEMORY_GRAPH_REBUILD_CORE_NAMES } from '../../src/manager/tools/tool-catalog.js'
+import type { ResolvedPermissions } from '../../src/types.js'
+import { runEngine } from '../../src/engine/query-loop.js'
+import type { EngineTurnEvent, LLMAdapter } from '../../src/engine/index.js'
+import { chunksFromContent } from '../engine/helpers/mock-stream.js'
+import { TOOL_SEARCH_QUERIES } from './fixtures/tool-search-queries.js'
+import { callNonStreaming, createAdapter } from '../../src/engine/llm-adapter.js'
+import { createUserMessage } from '../../src/engine/types.js'
 
 /**
  * 普通 manager 的 messaging 工具（无飞书 channel 实例时）。
@@ -118,6 +126,244 @@ function memoryToolNames(tools: ToolDefinition[]): string[] {
 }
 
 describe('buildManagerToolFace', () => {
+  const permissions: ResolvedPermissions = {
+    tool_access: { memory: true, messaging: true, task: true, mcp_skill: true, file_io: true, browser: true, shell: true, remote_exec: true, desktop: true },
+    cli_access: { provider: 'write', agent: 'write', mcp: 'write', skill: 'write', schedule: 'write', channel: 'write', friend: 'write', permission: 'write', config: 'write', undo: 'write' },
+    storage: null, memory_scopes: [],
+  }
+  const schedule = {
+    targetSession: { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' as const }, creatorFriendId: 'creator',
+    canCreate: true, resolvePermissions: async () => permissions,
+  }
+
+  it('真实 55 项内置基线与 56 项 full，所有模式核心字节一致且不超过 20 KiB', () => {
+    const deps = makeDeps({ schedule, candidatePermissions: permissions })
+    expect(buildManagerToolFace(deps)).toHaveLength(55)
+    const full = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
+    const core = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() })
+    expect(full).toHaveLength(56)
+    expect(core.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
+    const wire = (tools: ToolDefinition[]) => JSON.stringify(tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })))
+    expect(wire(full.slice(0, 13))).toBe(wire(core))
+    expect(Buffer.byteLength(wire(core))).toBeLessThanOrEqual(20 * 1024)
+    const restricted = buildManagerToolFace({ ...deps, candidatePermissions: undefined, faceState: createManagerToolFaceState() })
+    expect(wire(restricted)).toBe(wire(core))
+  })
+
+  it('episode 固定目录，搜索后下一轮追加；schema 变化只影响新 episode', async () => {
+    const state = createManagerToolFaceState()
+    const deps = makeDeps({ schedule, candidatePermissions: permissions, faceState: state })
+    const core = buildManagerToolFace(deps)
+    const result = await core[0].call({ query: '创建定时任务', limit: 1 }, {})
+    expect(JSON.parse(result.output).loaded).toContain('create_schedule')
+    const next = buildManagerToolFace({ ...deps, messagingDeps: makeMessagingDeps({ enableFeishuDocTool: true }) })
+    expect(next.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES, 'create_schedule'])
+    expect(state.catalog?.get('read_feishu_document')).toBeUndefined()
+  })
+
+  it.each(['anthropic', 'openai', 'openai-responses'] as const)('%s 实际 wire 保持 13 项核心前缀，记录完整/核心/追加后的 schema bytes', async (format) => {
+    const bodies: Array<Record<string, any>> = []
+    const requestBytes: number[] = []
+    const fetchMock = vi.fn(async (_url, init: RequestInit) => {
+      bodies.push(JSON.parse(init.body as string))
+      requestBytes.push(Buffer.byteLength(init.body as string))
+      let data: string
+      if (format === 'anthropic') {
+        const events = [
+          { type: 'message_start', message: { id: 'fixture', type: 'message', role: 'assistant', content: [], model: 'fixture', stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+          { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'OK' } },
+          { type: 'content_block_stop', index: 0 },
+          { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } },
+          { type: 'message_stop' },
+        ]
+        data = events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
+      } else if (format === 'openai-responses') {
+        data = `event: response.completed\ndata: ${JSON.stringify({ response: { id: 'fixture', output: [] } })}\n\n`
+      } else {
+        data = `data: ${JSON.stringify({ id: 'fixture', choices: [{ delta: { content: 'OK' }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`
+      }
+      return new Response(data, { headers: { 'Content-Type': 'text/event-stream' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const deps = makeDeps({ schedule, candidatePermissions: permissions })
+      const full = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
+      const state = createManagerToolFaceState()
+      const core = buildManagerToolFace({ ...deps, faceState: state })
+      await core[0].call({ query: 'create_schedule', limit: 1 }, {})
+      const expanded = buildManagerToolFace({ ...deps, faceState: state })
+      const adapter = createAdapter({ endpoint: 'https://example.test/v1', apikey: 'test-key', format })
+      // This SDK version captures node-fetch at import time, not globalThis.fetch.
+      if (format === 'anthropic') vi.spyOn((adapter as any).client, 'fetch').mockImplementation(fetchMock)
+      for (const tools of [full, core, expanded]) {
+        await callNonStreaming(adapter, { model: 'fixture', systemPrompt: 'Stable Manager instructions', messages: [createUserMessage('fixture')], tools, maxTokens: 64 })
+      }
+      expect(bodies.map(body => body.tools.length)).toEqual([56, 13, 14])
+      expect(JSON.stringify(bodies[0].tools.slice(0, 13))).toBe(JSON.stringify(bodies[1].tools))
+      expect(JSON.stringify(bodies[2].tools.slice(0, 13))).toBe(JSON.stringify(bodies[1].tools))
+      if (format === 'anthropic') {
+        expect(bodies.every(body => body.tools[12].cache_control?.type === 'ephemeral')).toBe(true)
+        expect(bodies.every(body => (JSON.stringify(body).match(/cache_control/g) ?? []).length <= 4)).toBe(true)
+      } else {
+        expect(new Set(bodies.map(body => body.prompt_cache_key)).size).toBe(1)
+        expect(bodies[0].prompt_cache_key).toMatch(/^[a-f0-9]{64}$/)
+      }
+      expect(JSON.stringify(bodies)).not.toMatch(/cacheBreakpoint|traceMetadata|additional_tools|prompt_cache_options/)
+      const bytes = bodies.map(body => Buffer.byteLength(JSON.stringify(body.tools)))
+      expect(bytes[1]).toBeLessThan(bytes[0])
+      console.info('manager-tool-wire-bytes', { format, full: bytes[0], core: bytes[1], with_schedule: bytes[2], request_bytes: requestBytes })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('全部保留的尾部工具中英文 recall@3 至少 95%，精确工具名全部命中', () => {
+    const state = createManagerToolFaceState()
+    buildManagerToolFace(makeDeps({
+      schedule, candidatePermissions: permissions, faceState: state, isSystemThread: true,
+      messagingDeps: makeMessagingDeps({ enableFeishuDocTool: true }),
+      authorization: () => ({ kind: 'friend_master', manager_key: MANAGER_KEY, friend_id: 'master', generation: 1 }),
+    }))
+    const catalog = state.catalog!
+    const tailNames = catalog.tools.map((tool) => tool.name).filter((name) => !(NORMAL_MANAGER_CORE_NAMES as readonly string[]).includes(name))
+    expect(TOOL_SEARCH_QUERIES.map(([name]) => name).sort()).toEqual(tailNames.sort())
+    const misses: string[] = []
+    for (const [name, ...queries] of TOOL_SEARCH_QUERIES) {
+      expect(catalog.search(createManagerToolFaceState(), name, 3).loaded, name).toContain(name)
+      for (const query of queries) {
+        if (!catalog.search(createManagerToolFaceState(), query, 3).loaded.includes(name)) misses.push(`${name}: ${query}`)
+      }
+    }
+    expect(misses, misses.join('\n')).toHaveLength(0)
+    for (const alias of ['get_deployment_info', 'get_config_summary', 'list_capabilities']) {
+      expect(catalog.search(createManagerToolFaceState(), alias, 3).loaded[0]).toBe('inspect_crabot')
+    }
+  })
+
+  it('MCP 已加载后撤权拒绝执行，未知 category 不进入目录', async () => {
+    let authorized = true
+    const call = vi.fn(async () => ({ output: 'result', isError: false }))
+    const external = { name: 'mcp__remote__lookup', description: 'remote lookup', category: 'mcp_skill' as const, inputSchema: { type: 'object' }, isReadOnly: false, call }
+    const state = createManagerToolFaceState()
+    const deps = makeDeps({ faceState: state, candidatePermissions: permissions, externalMcpTools: [external, { ...external, name: 'mcp__remote__unknown', category: undefined }],
+      authorizeExternalMcpTool: async () => authorized })
+    await buildManagerToolFace(deps)[0].call({ query: external.name }, {})
+    const loaded = buildManagerToolFace(deps).find((tool) => tool.name === external.name)!
+    authorized = false
+    expect(await loaded.call({}, {})).toMatchObject({ output: 'TOOL_CATALOG_CHANGED', isError: true })
+    expect(call).not.toHaveBeenCalled()
+    expect(state.catalog?.missingToolOutput('mcp__remote__unknown')).toBe('TOOL_UNAVAILABLE')
+  })
+
+  it('真实 Engine 同轮搜索不能调用新 MCP，下一轮才可执行，重新开始不继承 loaded set', async () => {
+    const call = vi.fn(async () => ({ output: 'external result', isError: false }))
+    const external = { name: 'mcp__remote__lookup', description: 'lookup', category: 'mcp_skill' as const,
+      inputSchema: { type: 'object' }, isReadOnly: false, call }
+    const state = createManagerToolFaceState()
+    const deps = makeDeps({ faceState: state, candidatePermissions: permissions, externalMcpTools: [external], authorizeExternalMcpTool: async () => true })
+    const names: string[][] = []
+    const turns: EngineTurnEvent[] = []
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        names.push(params.tools.map((tool) => tool.name))
+        if (names.length === 1) yield* chunksFromContent([
+          { type: 'tool_use', id: 'search', name: 'search_tools', input: { query: external.name, limit: 1 } },
+          { type: 'tool_use', id: 'too-early', name: external.name, input: {} },
+        ], 'tool_use')
+        else if (names.length === 2) yield* chunksFromContent([{ type: 'tool_use', id: 'allowed', name: external.name, input: {} }], 'tool_use')
+        else yield* chunksFromContent([{ type: 'text', text: 'done' }], 'end_turn')
+      },
+      updateConfig() {},
+    }
+    const result = await runEngine({
+      prompt: 'lookup', adapter,
+      options: {
+        model: 'test', systemPrompt: 'test', maxTurns: 3, tools: () => buildManagerToolFace(deps),
+        onTurn: (turn) => { turns.push(turn) },
+        unavailableToolResult: (name) => ({ output: state.catalog!.missingToolOutput(name), isError: true }),
+      },
+    })
+    expect(result.outcome).toBe('completed')
+    expect(turns[0].toolCalls[1]).toMatchObject({ output: expect.stringContaining('TOOL_NOT_LOADED'), isError: true })
+    expect(names[0]).toEqual([...NORMAL_MANAGER_CORE_NAMES])
+    expect(names[1]).toEqual([...NORMAL_MANAGER_CORE_NAMES, external.name])
+    expect(names[2]).toEqual(names[1])
+    expect(call).toHaveBeenCalledOnce()
+    expect(buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() }).map((tool) => tool.name)).toEqual(names[0])
+  })
+
+  it('外部 MCP 先按最低类别权限过滤，拒绝不安全 metadata，忽略只读 annotation', async () => {
+    const external = { name: 'mcp__remote__lookup', description: 'remote', category: 'mcp_skill' as const,
+      inputSchema: { type: 'object' }, isReadOnly: true, call: vi.fn(async () => ({ output: 'ok', isError: false })) }
+    const state = createManagerToolFaceState()
+    const deps = makeDeps({ faceState: state, candidatePermissions: permissions, externalMcpTools: [
+      external,
+      { ...external, name: 'mcp__remote__unsafe_description', description: 'unsafe\u0000description' },
+      { ...external, name: 'mcp__remote__unsafe_schema', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'unsafe\u001b' } } } },
+      { ...external, name: 'mcp__remote__large_schema', inputSchema: { type: 'object', description: 'x'.repeat(66 * 1024) } },
+    ], authorizeExternalMcpTool: async () => true })
+    const first = buildManagerToolFace(deps)
+    await first[0].call({ query: external.name, limit: 1 }, {})
+    expect(buildManagerToolFace(deps).find((tool) => tool.name === external.name)?.isReadOnly).toBe(false)
+    for (const name of ['mcp__remote__unsafe_description', 'mcp__remote__unsafe_schema', 'mcp__remote__large_schema']) {
+      expect(state.catalog!.missingToolOutput(name)).toBe('TOOL_UNAVAILABLE')
+    }
+    const restricted = createManagerToolFaceState()
+    buildManagerToolFace({ ...deps, faceState: restricted, candidatePermissions: { ...permissions, tool_access: { ...permissions.tool_access, mcp_skill: false } } })
+    expect(restricted.catalog!.missingToolOutput(external.name)).toBe('TOOL_UNAVAILABLE')
+    expect(restricted.catalog!.search(restricted, external.name, 3).loaded).not.toContain(external.name)
+  })
+
+  it('检索异常只展开内置能力，无匹配不降级；专用 profile 不暴露外部 MCP', async () => {
+    const state = createManagerToolFaceState()
+    const deps = makeDeps({ faceState: state, candidatePermissions: permissions })
+    const search = buildManagerToolFace(deps)[0]
+    expect(JSON.parse((await search.call({ query: 'unmatchedtoken' }, {})).output).status).toBe('no_match')
+    expect(buildManagerToolFace(deps)).toHaveLength(13)
+    const spy = vi.spyOn(state.catalog!, 'search').mockImplementationOnce(() => { throw new Error('index failed') })
+    expect(JSON.parse((await search.call({ query: 'anything' }, {})).output).status).toBe('degraded')
+    expect(buildManagerToolFace(deps).every((tool) => !tool.name.startsWith('mcp__') || tool.name.startsWith('mcp__crab-memory__'))).toBe(true)
+    spy.mockRestore()
+    for (const [profile, names] of [['daily_reflection', DAILY_REFLECTION_CORE_NAMES], ['memory_graph_rebuild', MEMORY_GRAPH_REBUILD_CORE_NAMES]] as const) {
+      const face = buildManagerToolFace(makeDeps({ profile, isBuiltinDailyReflection: profile === 'daily_reflection', faceState: createManagerToolFaceState() }))
+      expect(face.map((tool) => tool.name)).toEqual([...names])
+    }
+  })
+
+  it.each([false, true])('降级展开的内置尾部在检索恢复后仍只追加；已有 MCP: %s', async (preloadMcp) => {
+    const state = createManagerToolFaceState()
+    const external = ['before', 'after'].map((name) => ({
+      name: `mcp__remote__${name}`, description: name, category: 'mcp_skill' as const,
+      inputSchema: { type: 'object' }, isReadOnly: false,
+      call: vi.fn(async () => ({ output: 'ok', isError: false })),
+    }))
+    const deps = makeDeps({ faceState: state, candidatePermissions: permissions,
+      externalMcpTools: external, authorizeExternalMcpTool: async () => true })
+    const search = buildManagerToolFace(deps)[0]
+    if (preloadMcp) await search.call({ query: external[0].name, limit: 1 }, {})
+    const before = buildManagerToolFace(deps)
+
+    const spy = vi.spyOn(state.catalog!, 'search').mockImplementationOnce(() => { throw new Error('index failed') })
+    expect(JSON.parse((await search.call({ query: 'anything' }, {})).output).status).toBe('degraded')
+    spy.mockRestore()
+    const fallback = buildManagerToolFace(deps)
+    expect(fallback.slice(0, before.length)).toEqual(before)
+    expect(fallback.some((tool) => tool.name === 'inspect_crabot')).toBe(true)
+    expect(fallback.filter((tool) => tool.name.startsWith('mcp__remote__')).map((tool) => tool.name))
+      .toEqual(preloadMcp ? [external[0].name] : [])
+
+    const result = JSON.parse((await search.call({ query: external[1].name, limit: 1 }, {})).output)
+    expect(result).toMatchObject({ status: 'loaded', loaded: [external[1].name] })
+    const recovered = buildManagerToolFace(deps)
+    expect(recovered.slice(0, fallback.length)).toEqual(fallback)
+    expect(recovered.at(-1)?.name).toBe(external[1].name)
+    expect(JSON.parse((await search.call({ query: 'inspect_crabot', limit: 1 }, {})).output))
+      .toMatchObject({ status: 'already_visible', loaded: [], already_visible: ['inspect_crabot'] })
+    expect(new Set(recovered.map((tool) => tool.name)).size).toBe(recovered.length)
+    for (const tool of external) expect(tool.call).not.toHaveBeenCalled()
+  })
+
   it('独立语义精简发布版本保持完整 55 项，不装配 search_tools 或外部 MCP', () => {
     const tools = buildManagerToolFace(makeDeps({ schedule: {
       targetSession: { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' },
@@ -179,8 +425,9 @@ describe('buildManagerToolFace', () => {
     const names = tools.map((tool) => tool.name)
 
     expect(names).toContain('send_daily_reflection_summary')
+    expect(names).toContain('send_message')
     for (const forbidden of [
-      'send_message', 'send_private_message', 'send_master_private', 'lookup_friend',
+      'send_private_message', 'send_master_private', 'lookup_friend',
       'list_sessions', 'list_contacts', 'list_groups', 'list_group_members', 'fetch_media',
     ]) {
       expect(names).not.toContain(forbidden)

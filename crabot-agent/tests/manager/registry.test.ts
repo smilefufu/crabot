@@ -1137,6 +1137,85 @@ describe('ManagerRegistry', () => {
     expect(JSON.stringify(calls[1].messages)).toContain('second')
   })
 
+  it.each([
+    { scheduleId: 'daily', taskType: 'daily_reflection', fails: false },
+    { scheduleId: 'daily', taskType: 'daily_reflection', fails: true },
+    { scheduleId: 'memory-graph-rebuild', taskType: undefined, fails: false },
+    { scheduleId: 'memory-graph-rebuild', taskType: undefined, fails: true },
+  ])('跨 profile 人类输入独立排队、提交和领取回复关联: $scheduleId / fails=$fails', async ({ scheduleId, taskType, fails }) => {
+    const entered = deferred()
+    const release = deferred()
+    const releaseHuman = deferred()
+    const calls: LLMStreamParams[] = []
+    const claims: string[][] = []
+    let registry: ManagerRegistry
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        if (calls.length === 1) {
+          entered.resolve()
+          await release.promise
+          claims.push(registry.getOrCreate(SYSTEM_TASKS_MANAGER_KEY).claimAdminChatRequestIds())
+          if (fails) throw new Error('specialized episode failed')
+        } else {
+          claims.push(registry.getOrCreate(SYSTEM_TASKS_MANAGER_KEY).claimAdminChatRequestIds())
+          await releaseHuman.promise
+        }
+        yield* chunksFromContent([], 'end_turn')
+      },
+      updateConfig: () => {},
+    }
+    registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+    const loop = registry.getOrCreate(SYSTEM_TASKS_MANAGER_KEY)
+    const wakeUp = vi.spyOn(loop, 'wakeUp')
+    const schedule = registry.routeSchedule(scheduleWake({
+      scheduleId, taskType, title: 'builtin', description: 'specialized work', isBuiltin: true,
+    }))
+    await entered.promise
+    const message = makeChannelMessage('queued-human-input')
+    message.session = { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' }
+    const committed = vi.fn()
+    const responded = vi.fn(async () => undefined)
+    const injectedSettled = vi.fn()
+    const human = registry.routeHumanMessages(
+      'admin-web', 'system-tasks', [message], undefined,
+      { admin_chat_request_ids: ['queued-human-request'] },
+      { onInitialInputCommitted: committed, onLlmResponse: responded }, injectedSettled,
+    )
+    try {
+      await vi.waitFor(() => expect(wakeUp).toHaveBeenCalledOnce())
+      expect(committed).not.toHaveBeenCalled()
+      expect(responded).not.toHaveBeenCalled()
+      expect(loop.claimAdminChatRequestIds()).toEqual([])
+      expect((await store.load(SYSTEM_TASKS_MANAGER_KEY)).committedHumanMessageIds ?? [])
+        .not.toContain(message.platform_message_id)
+      release.resolve()
+      const result = await schedule
+      expect(result.outcome).toBe(fails ? 'failed' : 'completed')
+      await vi.waitFor(() => expect(calls).toHaveLength(2))
+      expect(claims).toEqual([[], ['queued-human-request']])
+      expect(JSON.stringify(calls[0].messages)).not.toContain('queued-human-input')
+      expect(JSON.stringify(calls[1].messages)).toContain('queued-human-input')
+      expect(committed).toHaveBeenCalledOnce()
+      expect(responded).not.toHaveBeenCalled()
+      expect(injectedSettled).not.toHaveBeenCalled()
+      releaseHuman.resolve()
+      expect(await human).toMatchObject({ outcome: 'completed', consumedEvents: true, turns: 1 })
+      expect((await human).episodeId).not.toBe(result.episodeId)
+      expect(responded).toHaveBeenCalledOnce()
+      expect(responded).toHaveBeenCalledWith(message.platform_message_id)
+      const state = await store.load(SYSTEM_TASKS_MANAGER_KEY)
+      expect(state.committedHumanMessageIds?.filter((id) => id === message.platform_message_id)).toHaveLength(1)
+      expect(loop.hasPendingMailbox).toBe(false)
+    } finally {
+      release.resolve()
+      releaseHuman.resolve()
+      await schedule
+      await human
+      await vi.waitFor(() => expect(registry.isEpisodeActive(SYSTEM_TASKS_MANAGER_KEY)).toBe(false))
+    }
+  })
+
   it('routeHumanMessages 注入在跑 episode 时 onEpisodeSettled 以真实收尾 result 触发(含失败),占位 result 不带真实值', async () => {
     const firstTurnEntered = deferred()
     const releaseFirstTurn = deferred()
