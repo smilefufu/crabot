@@ -59,16 +59,13 @@ function scheduleContext(overrides: Partial<ManagerScheduleToolsContext> = {}): 
 }
 
 describe('buildCrabotInfoTools', () => {
-  it('工具名集合恰为六项', () => {
+  it('无 Schedule 管理上下文时恰为三项，三个自省入口合并为 inspect_crabot', () => {
     const tools = buildCrabotInfoTools({ callAdmin: makeCallAdmin({}) })
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual(
       [
-        'get_config_summary',
-        'get_deployment_info',
         'get_friend_permissions',
-        'get_system_status',
-        'list_capabilities',
+        'inspect_crabot',
         'list_schedules',
       ].sort(),
     )
@@ -81,31 +78,21 @@ describe('buildCrabotInfoTools', () => {
     }
   })
 
-  describe('get_system_status', () => {
-    it('组合 get_task_stats / list_agent_instances / list_channel_instances 返回摘要', async () => {
+  describe('inspect_crabot deployment', () => {
+    it('查询部署拓扑且不调用已退役的系统状态 RPC', async () => {
       const callAdmin = makeCallAdmin({
-        get_task_stats: () => ({
-          total: 5,
-          by_status: { executing: 2, completed: 3 },
-          by_priority: { normal: 5 },
-        }),
-        list_agent_instances: () => ({
-          items: [{ id: 'crabot-agent' }],
-          pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
-        }),
         list_channel_instances: () => ({
           items: [{ id: 'wechat-1' }, { id: 'web-1' }],
           pagination: { page: 1, page_size: 100, total_items: 2, total_pages: 1 },
         }),
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_system_status')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'deployment' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
-      expect(parsed.task_stats.total).toBe(5)
-      expect(parsed.agent_instance_count).toBe(1)
-      expect(parsed.channel_instance_count).toBe(2)
+      expect(parsed.channel_instances).toHaveLength(2)
+      expect(callAdmin).not.toHaveBeenCalledWith('get_task_stats', {})
     })
 
     it('admin RPC 失败时返回 isError', async () => {
@@ -113,14 +100,14 @@ describe('buildCrabotInfoTools', () => {
         throw new Error('admin unreachable')
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_system_status')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'deployment' }, {})
       expect(result.isError).toBe(true)
       expect(result.output).toContain('admin unreachable')
     })
   })
 
-  describe('get_deployment_info', () => {
+  describe('inspect_crabot deployment', () => {
     it('P6-D：agent 实例为静态 core 身份，不再调 list_agent_instances；channel 仍走 admin', async () => {
       const called: string[] = []
       const callAdmin = makeCallAdmin({
@@ -133,8 +120,8 @@ describe('buildCrabotInfoTools', () => {
         }),
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_deployment_info')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'deployment' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
       expect(parsed.agent_instances).toEqual([
@@ -354,8 +341,8 @@ describe('buildCrabotInfoTools', () => {
         },
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_config_summary')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'config' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
 
@@ -389,8 +376,8 @@ describe('buildCrabotInfoTools', () => {
         }),
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_config_summary')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'config' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
       const output_str = JSON.stringify(parsed)
@@ -434,8 +421,8 @@ describe('buildCrabotInfoTools', () => {
         }),
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_config_summary')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'config' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
       const output_str = JSON.stringify(parsed)
@@ -477,8 +464,8 @@ describe('buildCrabotInfoTools', () => {
         }),
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_config_summary')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'config' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
       const output_str = JSON.stringify(parsed)
@@ -500,8 +487,8 @@ describe('buildCrabotInfoTools', () => {
         }),
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_config_summary')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'config' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
       const output_str = JSON.stringify(parsed)
@@ -527,8 +514,8 @@ describe('buildCrabotInfoTools', () => {
         }),
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_config_summary')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'config' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
       const output_str = JSON.stringify(parsed)
@@ -569,8 +556,8 @@ describe('buildCrabotInfoTools', () => {
         }),
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_config_summary')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'config' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
 
@@ -595,8 +582,8 @@ describe('buildCrabotInfoTools', () => {
         get_agent_config: () => ({ config: { instance_id: 'crabot-agent', model_config: {} } }),
       })
       const tools = buildCrabotInfoTools({ callAdmin, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'get_config_summary')!
-      const result = await tool.call({ instance_id: 'other-instance' }, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'config', instance_id: 'other-instance' }, {})
       expect(result.isError).toBe(false)
       expect(callAdmin).not.toHaveBeenCalled()
     })
@@ -617,8 +604,8 @@ describe('buildCrabotInfoTools', () => {
         statuses: [{ impl: 'claude-code', ready: true, enabled: true, capabilities: { fork: true } }],
       })
       const tools = buildCrabotInfoTools({ callAdmin, workerImplSnapshot, getRuntimeConfigSummary: () => runtimeConfigSummary(callAdmin) })
-      const tool = tools.find((t) => t.name === 'list_capabilities')!
-      const result = await tool.call({}, {})
+      const tool = tools.find((t) => t.name === 'inspect_crabot')!
+      const result = await tool.call({ view: 'capabilities' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
       expect(parsed.agent_implementations).toEqual([

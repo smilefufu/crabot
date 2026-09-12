@@ -46,11 +46,8 @@ const FEISHU_READ_ONLY_TOOLS = ['read_feishu_document', 'feishu_raw_get', 'feish
 const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'get_worker_state', 'get_worker_activity', 'get_worker_turn', 'resolve_worker_turn', 'get_worker_terminal', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'list_workers', 'get_worker_detail', 'list_worker_implementations']
 
 const CRABOT_INFO_TOOLS = [
-  'get_system_status',
-  'get_deployment_info',
+  'inspect_crabot',
   'list_schedules',
-  'get_config_summary',
-  'list_capabilities',
   'get_friend_permissions',
 ]
 
@@ -121,6 +118,21 @@ function memoryToolNames(tools: ToolDefinition[]): string[] {
 }
 
 describe('buildManagerToolFace', () => {
+  it('独立语义精简发布版本保持完整 55 项，不装配 search_tools 或外部 MCP', () => {
+    const tools = buildManagerToolFace(makeDeps({ schedule: {
+      targetSession: { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' },
+      creatorFriendId: 'creator', canCreate: true, resolvePermissions: async () => null,
+    } }))
+    expect(tools).toHaveLength(55)
+    expect(tools.map(tool => tool.name).filter(name => name.startsWith('mcp__') && !name.startsWith('mcp__crab-memory__'))).toEqual([])
+    for (const name of ['search_tools', 'get_system_status', 'get_deployment_info', 'get_config_summary', 'list_capabilities']) {
+      expect(tools.map(tool => tool.name)).not.toContain(name)
+    }
+    for (const name of ['inspect_crabot', 'create_schedule', 'get_schedule', 'list_schedules', 'update_schedule', 'delete_schedule', 'trigger_schedule', 'send_private_message']) {
+      expect(tools.map(tool => tool.name)).toContain(name)
+    }
+  })
+
   it('普通 manager 工具名集合精确匹配预期清单', () => {
     const tools = buildManagerToolFace(makeDeps())
     const names = tools.map((t) => t.name)
