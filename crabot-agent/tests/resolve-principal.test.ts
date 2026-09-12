@@ -48,6 +48,7 @@ function buildAgent(rpcCall: ReturnType<typeof vi.fn>): unknown {
   agent.config = { moduleId: 'test-agent' }
   agent.rpcClient = { call: rpcCall }
   agent.getAdminPort = async () => ADMIN_PORT
+  agent.sessionScopesCache = new Map()
   return agent
 }
 
@@ -55,6 +56,7 @@ type ResolveFn = (
   senderFriendId: string | undefined,
   sessionId: string,
   sessionType: 'private' | 'group',
+  channelId: string,
 ) => Promise<ResolvedPermissions | null>
 
 describe('UnifiedAgent.resolvePrincipalPermissions', () => {
@@ -64,7 +66,7 @@ describe('UnifiedAgent.resolvePrincipalPermissions', () => {
     const friend = makeFriend('friend-1')
 
     const result = await (agent as { resolvePrincipalPermissions: ResolveFn })
-      .resolvePrincipalPermissions(friend.id, 'session-private-1', 'private')
+      .resolvePrincipalPermissions(friend.id, 'session-private-1', 'private', 'channel-private')
 
     expect(rpcCall).toHaveBeenCalledTimes(1)
     expect(rpcCall).toHaveBeenCalledWith(
@@ -72,6 +74,7 @@ describe('UnifiedAgent.resolvePrincipalPermissions', () => {
       'resolve_principal_permissions',
       {
         sender_friend_id: 'friend-1',
+        channel_id: 'channel-private',
         session_id: 'session-private-1',
         session_type: 'private',
       },
@@ -86,13 +89,14 @@ describe('UnifiedAgent.resolvePrincipalPermissions', () => {
     const friend = makeFriend('friend-group-speaker')
 
     await (agent as { resolvePrincipalPermissions: ResolveFn })
-      .resolvePrincipalPermissions(friend.id, 'session-group-1', 'group')
+      .resolvePrincipalPermissions(friend.id, 'session-group-1', 'group', 'channel-group')
 
     expect(rpcCall).toHaveBeenCalledWith(
       ADMIN_PORT,
       'resolve_principal_permissions',
       {
         sender_friend_id: 'friend-group-speaker',
+        channel_id: 'channel-group',
         session_id: 'session-group-1',
         session_type: 'group',
       },
@@ -105,12 +109,13 @@ describe('UnifiedAgent.resolvePrincipalPermissions', () => {
     const agent = buildAgent(rpcCall)
 
     await (agent as { resolvePrincipalPermissions: ResolveFn })
-      .resolvePrincipalPermissions(undefined, 'session-x', 'private')
+      .resolvePrincipalPermissions(undefined, 'session-x', 'private', 'channel-x')
 
     expect(rpcCall).toHaveBeenCalledWith(
       ADMIN_PORT,
       'resolve_principal_permissions',
       {
+        channel_id: 'channel-x',
         session_id: 'session-x',
         session_type: 'private',
       },
@@ -126,10 +131,21 @@ describe('UnifiedAgent.resolvePrincipalPermissions', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     const result = await (agent as { resolvePrincipalPermissions: ResolveFn })
-      .resolvePrincipalPermissions(makeFriend('friend-z'), 'session-y', 'group')
+      .resolvePrincipalPermissions('friend-z', 'session-y', 'group', 'channel-y')
 
     expect(result).toBeNull()
     expect(warnSpy).toHaveBeenCalled()
     warnSpy.mockRestore()
+  })
+
+  it('群 memory 配置按完整目标查询和缓存，私聊不读群或 legacy 配置', async () => {
+    const rpcCall = vi.fn(async (_port, _method, params) => ({ config: { memory_scopes: [params.channel_id] } }))
+    const agent = buildAgent(rpcCall) as { getSessionMemoryScopes: (session: string, channel: string, type: 'private' | 'group') => Promise<string[]> }
+    expect(await agent.getSessionMemoryScopes('same-id', 'channel-a', 'group')).toEqual(['channel-a'])
+    expect(await agent.getSessionMemoryScopes('same-id', 'channel-b', 'group')).toEqual(['channel-b'])
+    expect(await agent.getSessionMemoryScopes('same-id', 'channel-a', 'group')).toEqual(['channel-a'])
+    expect(await agent.getSessionMemoryScopes('same-id', 'channel-a', 'private')).toEqual(['same-id'])
+    expect(rpcCall).toHaveBeenCalledTimes(2)
+    expect(rpcCall).toHaveBeenCalledWith(ADMIN_PORT, 'get_group_session_config', { channel_id: 'channel-b', session_id: 'same-id' }, 'test-agent')
   })
 })

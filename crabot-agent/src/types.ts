@@ -696,6 +696,7 @@ export interface LLMRoleRequirement {
 }
 
 export interface LLMConnectionInfo {
+  provider_id?: string
   endpoint: string
   apikey: string
   model_id: string
@@ -714,6 +715,7 @@ export interface LLMConnectionInfo {
 
 export interface MCPServerConfig {
   name: string
+  description?: string
   transport?: 'stdio' | 'streamable-http' | 'sse'
   // stdio fields
   command?: string

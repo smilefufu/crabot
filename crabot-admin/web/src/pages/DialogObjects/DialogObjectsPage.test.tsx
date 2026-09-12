@@ -73,8 +73,8 @@ vi.mock('../../services/permission-template', () => ({
 
 vi.mock('../../services/session', () => ({
   sessionService: {
-    getConfig: (...args: unknown[]) => getSessionConfig(...args),
-    updateConfig: (...args: unknown[]) => updateSessionConfig(...args),
+    getGroupConfig: (...args: unknown[]) => getSessionConfig(...args),
+    updateGroupConfig: (...args: unknown[]) => updateSessionConfig(...args),
   },
 }))
 
@@ -204,12 +204,12 @@ describe('DialogObjectsPage', () => {
           tool_access: {
             memory: true,
             messaging: true,
-            task: true,
-            mcp_skill: true,
-            file_io: true,
-            browser: true,
-            shell: true,
-            remote_exec: true,
+            task: false,
+            mcp_skill: false,
+            file_io: false,
+            browser: false,
+            shell: false,
+            remote_exec: false,
             desktop: false,
           },
           cli_access: createCliAccessConfig('none'),
@@ -267,12 +267,12 @@ describe('DialogObjectsPage', () => {
         tool_access: {
           memory: true,
           messaging: true,
-          task: true,
-          mcp_skill: true,
-          file_io: true,
-          browser: true,
-          shell: true,
-          remote_exec: true,
+          task: false,
+          mcp_skill: false,
+          file_io: false,
+          browser: false,
+          shell: false,
+          remote_exec: false,
           desktop: false,
         },
         cli_access: createCliAccessConfig('none'),
@@ -759,7 +759,7 @@ describe('DialogObjectsPage', () => {
     expect(memoryLink).toHaveAttribute('href', '/memory/long-term?friend_id=friend-1&context_label=Alice')
   })
 
-  it('shows group session status and opens an editable permission drawer without template id', async () => {
+  it('opens the exact group with its permission template and CLI overrides', async () => {
     render(<DialogObjectsPage />)
 
     fireEvent.click(await screen.findByRole('tab', { name: /群聊/ }))
@@ -776,8 +776,10 @@ describe('DialogObjectsPage', () => {
     fireEvent.click(scopedGroupDetail.getByRole('button', { name: '编辑群权限' }))
 
     expect(await screen.findByRole('heading', { name: '群聊权限编辑' })).toBeInTheDocument()
-    expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()
-    expect(screen.getByLabelText('记忆读写')).toBeChecked()
+    expect(await screen.findByLabelText('记忆读写')).toBeChecked()
+    expect(screen.getByLabelText('群聊权限模板')).toHaveValue('group_default')
+    expect(getSessionConfig).toHaveBeenCalledWith('wechat-main', 'group-1')
+    expect(screen.queryByLabelText('桌面控制')).not.toBeInTheDocument()
     expect(screen.getByLabelText('消息操作')).not.toBeChecked()
     expect(screen.getByLabelText('启用存储')).toBeChecked()
     expect(screen.getByLabelText('工作区路径')).toHaveValue('/srv/dialog/group-1')
@@ -785,7 +787,7 @@ describe('DialogObjectsPage', () => {
     expect(screen.getByLabelText('自定义范围')).toBeChecked()
     expect(screen.getByLabelText('范围标识')).toHaveValue('group-scope-a, group-scope-b')
     expect(screen.getByRole('button', { name: '保存配置' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '重置为继承' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '恢复模板' })).toBeInTheDocument()
   })
 
   it('exposes group scene and memory entry points from the group workbench', async () => {
@@ -805,7 +807,52 @@ describe('DialogObjectsPage', () => {
     expect(memoryLink).toHaveAttribute('href', '/memory/long-term?accessible_scope=group-1&context_label=Master+Group')
   })
 
-  it('saves explicit effective group permissions', async () => {
+  it('does not serialize unchanged defaults, but saves an explicit Schedule grant', async () => {
+    getSessionConfig.mockResolvedValue({ config: null })
+    render(<DialogObjectsPage />)
+    fireEvent.click(await screen.findByRole('tab', { name: /群聊/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '编辑群权限' }))
+    expect(await screen.findByLabelText('schedule-none')).toBeChecked()
+    fireEvent.click(screen.getByLabelText('schedule-write'))
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+    await waitFor(() => expect(updateSessionConfig).toHaveBeenCalledWith('wechat-main', 'group-1', {
+      template_id: 'group_default', cli_access: { schedule: 'write' },
+    }))
+  })
+
+  it('restores template inheritance without resaving a complete effective permission snapshot', async () => {
+    render(<DialogObjectsPage />)
+    fireEvent.click(await screen.findByRole('tab', { name: /群聊/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '编辑群权限' }))
+    await screen.findByLabelText('schedule-none')
+    fireEvent.click(screen.getByRole('button', { name: '恢复模板' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+    await waitFor(() => expect(updateSessionConfig).toHaveBeenCalledWith('wechat-main', 'group-1', { template_id: 'group_default' }))
+  })
+
+  it('keeps same-id groups from separate channels independently selectable', async () => {
+    const { items } = await listGroups()
+    listGroups.mockResolvedValue({ items: [items[0], { ...items[0], channel_id: 'another-channel', title: 'Other Group' }] })
+    render(<DialogObjectsPage />)
+    fireEvent.click(await screen.findByRole('tab', { name: /群聊/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Other Group' }))
+    fireEvent.click(screen.getByRole('button', { name: '编辑群权限' }))
+    await screen.findByLabelText('schedule-none')
+    expect(getSessionConfig).toHaveBeenCalledWith('another-channel', 'group-1')
+  })
+
+  it('cannot save an empty fallback form after group permission loading fails', async () => {
+    getSessionConfig.mockRejectedValue(new Error('offline'))
+    render(<DialogObjectsPage />)
+    fireEvent.click(await screen.findByRole('tab', { name: /群聊/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '编辑群权限' }))
+    const save = await screen.findByRole('button', { name: '保存配置' })
+    expect(save).toBeDisabled()
+    fireEvent.click(save)
+    expect(updateSessionConfig).not.toHaveBeenCalled()
+  })
+
+  it('saves only group overrides and preserves existing explicit values', async () => {
     render(<DialogObjectsPage />)
 
     fireEvent.click(await screen.findByRole('tab', { name: /群聊/ }))
@@ -814,7 +861,7 @@ describe('DialogObjectsPage', () => {
 
     expect(await screen.findByRole('heading', { name: '群聊权限编辑' })).toBeInTheDocument()
 
-    const storageToggle = screen.getByLabelText('启用存储')
+    const storageToggle = await screen.findByLabelText('启用存储')
     expect(storageToggle).toBeChecked()
     const storagePath = screen.getByLabelText('工作区路径')
     fireEvent.click(screen.getByLabelText('消息操作'))
@@ -825,19 +872,12 @@ describe('DialogObjectsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
 
     await waitFor(() => {
-      expect(updateSessionConfig).toHaveBeenCalledWith('group-1', {
+      expect(updateSessionConfig).toHaveBeenCalledWith('wechat-main', 'group-1', {
+        template_id: 'group_default',
         tool_access: {
           memory: true,
           messaging: true,
-          task: true,
-          mcp_skill: true,
-          file_io: true,
-          browser: true,
-          shell: true,
-          remote_exec: true,
-          desktop: false,
         },
-        cli_access: createCliAccessConfig('none'),
         storage: {
           workspace_path: '/data/dialog/group-1',
           access: 'read',

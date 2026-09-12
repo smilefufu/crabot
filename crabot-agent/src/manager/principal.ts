@@ -150,11 +150,12 @@ export interface PrincipalResolverDeps {
    */
   readonly resolvePermissions: (p: {
     senderFriendId?: string
+    channelId: string
     sessionId: string
     sessionType: 'private' | 'group'
   }) => Promise<ResolvedPermissions | null>
-  /** admin `get_session_config.memory_scopes`,兜底 `[sessionId]`(v2 `buildSessionMemoryPermissions` 同源)。 */
-  readonly sessionMemoryScopes: (sessionId: string) => Promise<ReadonlyArray<string>>
+  /** 群配置按完整目标查询；解析失败仍兜底 `[sessionId]`。 */
+  readonly sessionMemoryScopes: (sessionId: string, channelId: string, sessionType: 'private' | 'group') => Promise<ReadonlyArray<string>>
   /** memory `get_scene_profile`;失败/不支持返回 null。 */
   readonly sceneProfile: (p: {
     channelId: string
@@ -207,6 +208,7 @@ export class ManagerPrincipalStore {
       permissions = applyGroupScopeFallback(
         await this.deps.resolvePermissions({
           ...(principal.friend ? { senderFriendId: principal.friend.id } : {}),
+          channelId,
           sessionId,
           sessionType: principal.sessionType,
         }),
@@ -223,7 +225,7 @@ export class ManagerPrincipalStore {
       // v2 `buildSessionMemoryPermissions`:退到 session 级 memory_scopes,再兜底 [sessionId]。
       let scopes: ReadonlyArray<string> = [sessionId]
       try {
-        const fromSession = await this.deps.sessionMemoryScopes(sessionId)
+        const fromSession = await this.deps.sessionMemoryScopes(sessionId, channelId, principal.sessionType)
         if (fromSession.length > 0) scopes = fromSession
       } catch (err) {
         console.warn(`[manager-principal] 解析 '${key}' 的 session memory_scopes 失败,兜底本会话:`, err)
@@ -283,6 +285,11 @@ export class ManagerPrincipalStore {
   }
 
   async refreshForNonHumanWake(key: ManagerKey): Promise<void> {
+    const cached = this.resolved.get(key)
+    if (cached?.principal.sessionType === 'group') {
+      await this.resolve(key, cached.principal)
+      return
+    }
     const binding = this.bindings?.get(key)
     if (binding?.kind !== 'friend' || !binding.friend_id) return
     try {

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '../../components/Common/Button'
 import { Drawer } from '../../components/Common/Drawer'
 import { Input } from '../../components/Common/Input'
+import { Select } from '../../components/Common/Select'
 import { Loading } from '../../components/Common/Loading'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { useToast } from '../../contexts/ToastContext'
@@ -9,20 +10,20 @@ import { useDialogApplications } from '../../contexts/DialogApplicationsContext'
 import { dialogObjectsService } from '../../services/dialog-objects'
 import { friendService } from '../../services/friend'
 import { permissionTemplateService } from '../../services/permission-template'
-import { sessionService } from '../../services/session'
+import { sessionService, type GroupSessionPermissionConfig } from '../../services/session'
 import { ApplicationQueueModal } from './components/ApplicationQueueModal'
 import { CliAccessEditor } from './components/CliAccessEditor'
 import { DialogDomain, DomainNav } from './components/DomainNav'
 import { FriendWorkbench } from './components/FriendWorkbench'
 import { GroupWorkbench } from './components/GroupWorkbench'
-import { TemplateInitButton } from './components/TemplateInitButton'
 import {
   buildExplicitFriendPermissionConfig,
   parseMemoryScopes,
   summarizeFriendMemoryScopes,
   summarizeFriendStorage,
 } from './friend-permission-utils'
-import { ObjectList } from './components/ObjectList'
+import { ObjectList, dialogObjectSelectionId } from './components/ObjectList'
+import { buildGroupPermissionOverrides, resolveGroupPermissions } from './group-permission-utils'
 import { PrivatePoolWorkbench } from './components/PrivatePoolWorkbench'
 import type {
   DialogObjectApplication,
@@ -38,7 +39,7 @@ import type {
   ToolAccessConfig,
   ToolCategory,
 } from '../../types'
-import { createCliAccessConfig, TOOL_CATEGORIES, TOOL_CATEGORY_LABELS } from '../../types'
+import { createCliAccessConfig, TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../types'
 
 type QueueTarget = { id: string; channel_id: string; title: string }
 type QueueTargetKind = 'privatePool' | 'application'
@@ -60,41 +61,6 @@ function buildToolAccess(defaultValue: boolean): ToolAccessConfig {
   }
 }
 
-function resolveGroupPermissions(
-  sessionId: string,
-  template: PermissionTemplate | null,
-  config: {
-    tool_access?: Partial<ToolAccessConfig>
-    cli_access?: CliAccessConfig
-    storage?: StoragePermission | null
-    memory_scopes?: string[]
-  } | null
-): {
-  tool_access: ToolAccessConfig
-  cli_access: CliAccessConfig
-  storage: StoragePermission | null
-  memory_scopes: string[]
-} {
-  const tool_access = {
-    ...(template ? template.tool_access : buildToolAccess(false)),
-    ...(config?.tool_access ?? {}),
-  }
-  const cli_access: CliAccessConfig = config?.cli_access
-    ? { ...config.cli_access }
-    : (template ? { ...template.cli_access } : createCliAccessConfig('none'))
-  const storage = config?.storage !== undefined ? config.storage : (template ? template.storage : null)
-  const memory_scopes = config?.memory_scopes !== undefined
-    ? config.memory_scopes
-    : (template ? template.memory_scopes : [])
-
-  return {
-    tool_access,
-    cli_access,
-    storage,
-    memory_scopes: memory_scopes.length > 0 ? memory_scopes : [sessionId],
-  }
-}
-
 const PermissionSwitchRow: React.FC<{
   label: string
   category: ToolCategory
@@ -102,7 +68,7 @@ const PermissionSwitchRow: React.FC<{
   onChange: (cat: ToolCategory, checked: boolean) => void
 }> = ({ label, category, checked, onChange }) => {
   return (
-    <label className="session-permission-switch-row">
+    <label className="session-permission-switch-row" title={category === 'mcp_skill' ? MCP_SKILL_PERMISSION_DESCRIPTION : undefined}>
       <span className="session-permission-switch-value">
         <span>{label}</span>
         <span>{checked ? '开启' : '关闭'}</span>
@@ -175,6 +141,9 @@ export const DialogObjectsPage: React.FC = () => {
   const [unlinkingIdentity, setUnlinkingIdentity] = useState(false)
   const [editingGroup, setEditingGroup] = useState<DialogObjectGroupEntry | null>(null)
   const [groupConfigLoading, setGroupConfigLoading] = useState(false)
+  const [groupTemplate, setGroupTemplate] = useState<PermissionTemplate | null>(null)
+  const [groupConfig, setGroupConfig] = useState<GroupSessionPermissionConfig | null>(null)
+  const groupConfigRequest = useRef(0)
   const [groupSaving, setGroupSaving] = useState(false)
   const [groupToolAccess, setGroupToolAccess] = useState<ToolAccessConfig>(() => buildToolAccess(false))
   const [groupCliAccess, setGroupCliAccess] = useState<CliAccessConfig>(() => createCliAccessConfig('none'))
@@ -198,7 +167,9 @@ export const DialogObjectsPage: React.FC = () => {
   }, [])
 
   const handleInitializeGroupFromTemplate = useCallback((tpl: PermissionTemplate) => {
-    setGroupToolAccess({ ...tpl.tool_access })
+    setGroupTemplate(tpl)
+    setGroupConfig(null)
+    setGroupToolAccess({ ...tpl.tool_access, desktop: false })
     setGroupCliAccess({ ...tpl.cli_access })
     setGroupStorageEnabled(!!tpl.storage)
     if (tpl.storage) {
@@ -343,8 +314,8 @@ export const DialogObjectsPage: React.FC = () => {
       return
     }
 
-    if (!selectedId || !currentItems.some((item) => item.id === selectedId)) {
-      setSelectedIds((prev) => ({ ...prev, [domain]: currentItems[0].id }))
+    if (!selectedId || !currentItems.some((item) => dialogObjectSelectionId(item) === selectedId)) {
+      setSelectedIds((prev) => ({ ...prev, [domain]: dialogObjectSelectionId(currentItems[0]) }))
     }
   }, [domain, itemsByDomain, selectedIds])
 
@@ -357,7 +328,7 @@ export const DialogObjectsPage: React.FC = () => {
     }
   }, [applications, selectedApplicationId])
 
-  const selectedItem = filteredItems.find((item) => item.id === selectedIds[domain]) ?? filteredItems[0] ?? null
+  const selectedItem = filteredItems.find((item) => dialogObjectSelectionId(item) === selectedIds[domain]) ?? filteredItems[0] ?? null
 
   const masterFriends = useMemo(
     () => friends.filter((friend) => friend.permission === 'master'),
@@ -645,6 +616,8 @@ export const DialogObjectsPage: React.FC = () => {
   }
 
   const resetGroupConfigForm = useCallback(() => {
+    setGroupTemplate(null)
+    setGroupConfig(null)
     setGroupToolAccess(buildToolAccess(false))
     setGroupCliAccess(createCliAccessConfig('none'))
     setGroupStorageEnabled(false)
@@ -655,19 +628,21 @@ export const DialogObjectsPage: React.FC = () => {
   }, [])
 
   const openGroupPermissionEditor = useCallback(async (group: DialogObjectGroupEntry) => {
+    const request = ++groupConfigRequest.current
     setEditingGroup(group)
     resetGroupConfigForm()
     setGroupConfigLoading(true)
 
     try {
-      const cachedGroupDefault = permissionTemplates.find((template) => template.id === 'group_default')
-      const [configResult, templateResult] = await Promise.all([
-        sessionService.getConfig(group.id),
-        cachedGroupDefault
-          ? Promise.resolve({ template: cachedGroupDefault })
-          : permissionTemplateService.get('group_default'),
-      ])
-      const resolved = resolveGroupPermissions(group.id, templateResult.template, configResult.config)
+      const configResult = await sessionService.getGroupConfig(group.channel_id, group.id)
+      const templateId = configResult.config?.template_id ?? 'group_default'
+      const template = permissionTemplates.find((item) => item.id === templateId)
+        ?? (await permissionTemplateService.get(templateId)).template
+      if (request !== groupConfigRequest.current) return
+      if (!template) throw new Error('群聊权限模板不存在')
+      const resolved = resolveGroupPermissions(group.id, template, configResult.config)
+      setGroupTemplate(template)
+      setGroupConfig(configResult.config)
 
       setGroupToolAccess(resolved.tool_access)
       setGroupCliAccess(resolved.cli_access ?? createCliAccessConfig('none'))
@@ -683,18 +658,19 @@ export const DialogObjectsPage: React.FC = () => {
       }
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : '加载群聊权限失败'
-      notifyError(message)
+      if (request === groupConfigRequest.current) notifyError(message)
     } finally {
-      setGroupConfigLoading(false)
+      if (request === groupConfigRequest.current) setGroupConfigLoading(false)
     }
   }, [notifyError, permissionTemplates, resetGroupConfigForm])
 
   const closeGroupPermissionEditor = useCallback(() => {
+    groupConfigRequest.current++
     setEditingGroup(null)
   }, [])
 
   const handleSaveGroupConfig = async () => {
-    if (!editingGroup) return
+    if (!editingGroup || !groupTemplate) return
 
     try {
       setGroupSaving(true)
@@ -719,14 +695,16 @@ export const DialogObjectsPage: React.FC = () => {
           }
         : null
 
-      const config = {
+      const config = buildGroupPermissionOverrides(editingGroup.id, groupTemplate, {
         tool_access: groupToolAccess,
         cli_access: groupCliAccess,
         storage,
         memory_scopes: memoryScopes,
-      }
+      }, groupConfig)
 
-      await sessionService.updateConfig(editingGroup.id, config)
+      const request = groupConfigRequest.current
+      const result = await sessionService.updateGroupConfig(editingGroup.channel_id, editingGroup.id, config)
+      if (request === groupConfigRequest.current) setGroupConfig(result.config)
       success('群聊权限配置已保存')
       triggerRefresh()
     } catch (caughtError) {
@@ -799,7 +777,7 @@ export const DialogObjectsPage: React.FC = () => {
           <ObjectList
             domain={domain}
             items={filteredItems}
-            selectedId={selectedItem?.id ?? null}
+            selectedId={selectedItem ? dialogObjectSelectionId(selectedItem) : null}
             onSelect={(id) => setSelectedIds((prev) => ({ ...prev, [domain]: id }))}
           />
 
@@ -1004,9 +982,6 @@ export const DialogObjectsPage: React.FC = () => {
           <div style={{ display: 'grid', gap: '1rem' }}>
             <div>
               <h2 style={{ margin: 0 }}>群聊权限编辑</h2>
-              <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-                直接编辑当前生效权限。
-              </p>
             </div>
 
             {groupConfigLoading ? (
@@ -1014,16 +989,28 @@ export const DialogObjectsPage: React.FC = () => {
             ) : (
               <>
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
-                  <TemplateInitButton
-                    templates={permissionTemplates}
-                    onInitialize={handleInitializeGroupFromTemplate}
+                  <Select
+                    label="群聊权限模板"
+                    value={groupTemplate?.id ?? ''}
+                    disabled={!groupTemplate || groupSaving}
+                    options={[
+                      ...permissionTemplates,
+                      ...(groupTemplate && !permissionTemplates.some(item => item.id === groupTemplate.id) ? [groupTemplate] : []),
+                    ].map(template => ({ value: template.id, label: template.name }))}
+                    onChange={(event) => {
+                      const template = permissionTemplates.find(item => item.id === event.target.value)
+                      if (template) handleInitializeGroupFromTemplate(template)
+                    }}
                   />
+                  <Button variant="secondary" disabled={!groupTemplate || groupSaving} onClick={() => {
+                    if (groupTemplate) handleInitializeGroupFromTemplate(groupTemplate)
+                  }}>恢复模板</Button>
                 </div>
 
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
                   <div style={{ fontWeight: 600 }}>工具权限</div>
                   <div className="session-permission-switch-list">
-                    {TOOL_CATEGORIES.map((category) => (
+                    {TOOL_CATEGORIES.filter(category => category !== 'desktop').map((category) => (
                       <PermissionSwitchRow
                         key={category}
                         label={TOOL_CATEGORY_LABELS[category]}
@@ -1155,7 +1142,7 @@ export const DialogObjectsPage: React.FC = () => {
                   <Button
                     variant="primary"
                     onClick={() => void handleSaveGroupConfig()}
-                    disabled={groupSaving}
+                    disabled={groupSaving || !groupTemplate}
                   >
                     {groupSaving ? '保存中...' : '保存配置'}
                   </Button>

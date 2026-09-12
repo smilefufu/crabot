@@ -148,6 +148,18 @@ describe('renderDialogProfile', () => {
 // ============================================================================
 
 describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', () => {
+  it('non-human group wakes refresh permissions and never retain a revoked or unavailable MCP grant', async () => {
+    const granted = makePerms(['group-scope'])
+    const revoked = { ...granted, tool_access: { ...granted.tool_access, mcp_skill: false } }
+    const resolvePermissions = vi.fn().mockResolvedValueOnce(granted).mockResolvedValueOnce(revoked).mockResolvedValueOnce(null)
+    const store = new ManagerPrincipalStore(makeResolverDeps({ resolvePermissions }))
+    await store.resolve(GROUP_KEY, { friend: makeFriend('master', 'master'), sessionType: 'group' })
+    await store.refreshForNonHumanWake(GROUP_KEY)
+    expect(store.get(GROUP_KEY)?.permissions?.tool_access.mcp_skill).toBe(false)
+    expect(resolvePermissions).toHaveBeenLastCalledWith({ senderFriendId: 'master', ...splitManagerKey(GROUP_KEY), sessionType: 'group' })
+    await store.refreshForNonHumanWake(GROUP_KEY)
+    expect(store.get(GROUP_KEY)?.permissions).toBeNull()
+  })
   it('这个 friend 的 memory_scopes 真的决定了记忆的读写可见范围', async () => {
     const resolvePermissions = vi.fn(async () => makePerms(['team-x']))
     const store = new ManagerPrincipalStore(makeResolverDeps({ resolvePermissions }))
@@ -156,7 +168,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
 
     // 解析是**以这个 friend 的名义**发起的（不是拿 session 顶包）
     expect(resolvePermissions).toHaveBeenCalledWith(
-      expect.objectContaining({ senderFriendId: 'f-1', sessionId: 'sess-1', sessionType: 'private' }),
+      { senderFriendId: 'f-1', channelId: splitManagerKey(PRIVATE_KEY).channelId, sessionId: 'sess-1', sessionType: 'private' },
     )
     // 可见范围真的收敛到了这个 friend 的 scopes
     expect(entry.memory.read_accessible_scopes).toEqual(['team-x'])

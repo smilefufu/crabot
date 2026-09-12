@@ -605,6 +605,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     }
     const toolResults = await executeToolBatches(batches, currentTools, {
       abortSignal,
+      unavailableToolResult: options.unavailableToolResult,
       ...(options.timezone ? { timezone: options.timezone } : {}),
       ...(options.hasPendingExternalInputs ? { hasPendingExternalInput: options.hasPendingExternalInputs } : {}),
     }, options.permissionConfig, hooks, {
@@ -660,6 +661,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           id: b.id,
           name: b.name,
           input: b.input,
+          ...(r?.traceMetadata !== undefined ? { traceMetadata: r.traceMetadata } : {}),
           output: r?.content ?? '',
           isError: r?.is_error ?? false,
           ...(r?.duration_ms !== undefined ? { durationMs: r.duration_ms } : {}),

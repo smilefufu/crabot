@@ -4,7 +4,7 @@ import { Tooltip } from '../../components/Common/Tooltip'
 import { useToast } from '../../contexts/ToastContext'
 import { permissionTemplateService } from '../../services/permission-template'
 import type { PermissionTemplate, ToolCategory, ToolAccessConfig, CliDomain, CliPerm, CliAccessConfig, StoragePermission } from '../../types'
-import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, CLI_DOMAINS, CLI_DOMAIN_LABELS, createCliAccessConfig } from '../../types'
+import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, CLI_DOMAINS, CLI_DOMAIN_LABELS, createCliAccessConfig, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../types'
 
 interface PermissionTemplateFormProps {
   template?: PermissionTemplate
@@ -209,7 +209,7 @@ export const PermissionTemplateForm: React.FC<PermissionTemplateFormProps> = ({
             const disabled = isSystem || (isDesktop && !isMasterPrivate)
             const hint = isDesktop && !isMasterPrivate
               ? '桌面控制（computer-use）仅 Master 私聊可开启'
-              : undefined
+              : cat === 'mcp_skill' ? MCP_SKILL_PERMISSION_DESCRIPTION : undefined
             return (
               <Tooltip key={cat} content={hint}>
               <label

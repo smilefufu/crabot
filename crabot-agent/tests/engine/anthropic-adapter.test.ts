@@ -67,6 +67,20 @@ const EPHEMERAL = { type: 'ephemeral' }
 // --- 改动 1：prompt caching cache breakpoint ---
 
 describe('Anthropic prompt caching（cache breakpoint 注入）', () => {
+  it('核心断点不因尾部追加而移动，含历史中本轮未声明的工具，最多四个断点', async () => {
+    const core = [makeTool('search_tools'), { ...makeTool('send_message'), cacheBreakpoint: true }]
+    const messages = [
+      createAssistantMessage([{ type: 'tool_use', id: 'old', name: 'old_episode_tool', input: {} }], 'tool_use'),
+      createToolResultMessage('old', 'previous result', false),
+    ]
+    const first = await captureRequestBody({ systemPrompt: 'stable', tools: core, messages })
+    const next = await captureRequestBody({ systemPrompt: 'stable', tools: [...core, makeTool('loaded_tool')], messages })
+    expect((next.tools as unknown[]).slice(0, core.length)).toEqual(first.tools)
+    expect((next.tools as any[]).filter((tool) => tool.cache_control)).toHaveLength(2)
+    expect(JSON.stringify(next).match(/cache_control/g)).toHaveLength(4)
+    expect(JSON.stringify(next)).toContain('old_episode_tool')
+    expect(JSON.stringify(next)).not.toContain('cacheBreakpoint')
+  })
   it('system / 末位 tool / 末条消息末块 三处注入 cache_control，消息内容不被修改', async () => {
     const body = await captureRequestBody({
       systemPrompt: 'sys prompt',

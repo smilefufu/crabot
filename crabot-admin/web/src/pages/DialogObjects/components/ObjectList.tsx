@@ -8,6 +8,10 @@ import type { DialogDomain } from './DomainNav'
 
 type DialogObjectListItem = DialogObjectFriend | DialogObjectPrivatePoolEntry | DialogObjectGroupEntry
 
+export function dialogObjectSelectionId(item: DialogObjectListItem): string {
+  return 'type' in item && item.type === 'group' ? JSON.stringify([item.channel_id, item.id]) : item.id
+}
+
 interface ObjectListProps {
   domain: DialogDomain
   items: DialogObjectListItem[]
@@ -48,14 +52,15 @@ export const ObjectList: React.FC<ObjectListProps> = ({ domain, items, selectedI
       ) : (
         <ul className="dlg-list__items">
           {items.map((item) => {
-            const active = item.id === selectedId
+            const id = dialogObjectSelectionId(item)
+            const active = id === selectedId
             const { title, subtitle, tag } = describe(item)
             return (
-              <li key={`${domain}:${item.id}`}>
+              <li key={`${domain}:${id}`}>
                 <button
                   type="button"
                   aria-label={title}
-                  onClick={() => onSelect(item.id)}
+                  onClick={() => onSelect(id)}
                   className={`dlg-list__item${active ? ' is-active' : ''}`}
                 >
                   <span className="dlg-list__item-title">

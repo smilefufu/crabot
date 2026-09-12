@@ -65,11 +65,30 @@ import type { ManagerEpisodeFailure } from './types.js'
 // (engine 本阶段零改动,不为此新增 barrel 导出)。
 import { DEFAULT_COMPACT_THRESHOLD } from '../engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../engine/query-loop.js'
-import type { LLMAdapter } from '../engine/index.js'
+import type { LLMAdapter, ToolDefinition } from '../engine/index.js'
 import type { CrabMessagingDeps } from '../mcp/crab-messaging.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import type { McpServer } from '../mcp/mcp-helpers.js'
 import { WorkerContextStore } from '../workers/harness/context-store.js'
+import { managerToolProfileForSchedule, type ManagerToolProfile } from './tools/tool-catalog.js'
+
+export interface ManagerMcpAccessContext {
+  readonly managerKey: ManagerKey
+  readonly targetSession?: {
+    readonly channel_id: string
+    readonly session_id: string
+    readonly type: 'private' | 'group'
+  }
+  readonly profile: ManagerToolProfile
+  readonly creatorFriendId?: string
+  readonly isBuiltin?: boolean
+  readonly permissions?: import('../types.js').ResolvedPermissions
+}
+
+export interface ManagerMcpToolAuthorizationContext extends ManagerMcpAccessContext {
+  readonly toolName: string
+  readonly category?: string
+}
 
 /**
  * 全局缺省 worker 实现(§6.4"实现选择":人类显式指定 > manager 按偏好选择 > 全局默认)。
@@ -168,6 +187,10 @@ export interface BootstrapDeps {
   readonly memoryServerFor: (ctx: MemoryTaskContext) => McpServer
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
   readonly getRuntimeConfigSummary?: () => unknown
+  /** 返回当前已连接、供 Manager 按 episode 权限过滤的外部 MCP 工具定义。 */
+  readonly managerMcpToolsFor?: (context: ManagerMcpAccessContext) => ReadonlyArray<ToolDefinition>
+  /** 每次 Manager 实际调用外部 MCP 前重新复核当前主体和目标权限。 */
+  readonly managerMcpToolAuthorization?: (context: ManagerMcpToolAuthorizationContext) => Promise<boolean>
   /**
    * 发起人身份的解析原料(admin 权限解析 / session memory_scopes / 场景画像 /
    * crab self handle / master friend id)。本模块据它在**唤醒边界**解析一次并缓存,
@@ -572,6 +595,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         permissions = applyGroupScopeFallback(
           await deps.principalResolver.resolvePermissions({
             ...(targetSession.type === 'private' ? { senderFriendId: creatorFriendId! } : {}),
+            channelId: targetSession.channel_id,
             sessionId: targetSession.session_id,
             sessionType: targetSession.type,
           }),
@@ -598,7 +622,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       }
       return permissions
     },
-    toolFace: (key, isSystemThread, scheduleIdentity, humanPrincipal, principalPermissions, traceHooks, wakeEvent) => {
+    toolFace: (key, isSystemThread, scheduleIdentity, humanPrincipal, principalPermissions, traceHooks, wakeEvent, faceState) => {
       // Capture at tool-face construction. Calling the resulting factory later must not
       // pick up a regrant/new generation from a subsequent wake.
       const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
@@ -620,6 +644,20 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       const scheduleMasterAuthorization = humanPrincipal?.sessionType === 'private'
         ? principals.currentMasterAuthorization(key)
         : undefined
+      const profile = managerToolProfileForSchedule(scheduleIdentity)
+      const managerPermissions = principalPermissions
+        ?? (scheduleIdentity ? undefined : principals.get(key)?.permissions)
+      const mcpCreatorFriendId = scheduleIdentity
+        ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
+        : humanPrincipal?.friend?.id ?? principals.get(key)?.principal.friend?.id
+      const mcpAccessContext: ManagerMcpAccessContext = {
+        managerKey: key,
+        targetSession: scheduleTarget,
+        profile,
+        ...(mcpCreatorFriendId ? { creatorFriendId: mcpCreatorFriendId } : {}),
+        ...(scheduleIdentity?.isBuiltin !== undefined ? { isBuiltin: scheduleIdentity.isBuiltin } : {}),
+        ...(managerPermissions ? { permissions: managerPermissions } : {}),
+      }
       return buildManagerToolFace({
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
@@ -673,6 +711,17 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         memoryServer: deps.memoryServerFor(memoryContextFor(key, principals.get(key))),
         callAdmin: deps.callAdmin,
         getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
+        profile,
+        faceState,
+        candidatePermissions: managerPermissions ?? undefined,
+        externalMcpTools: deps.managerMcpToolsFor?.(mcpAccessContext),
+        authorizeExternalMcpTool: deps.managerMcpToolAuthorization
+          ? (tool) => deps.managerMcpToolAuthorization!({
+              ...mcpAccessContext,
+              toolName: tool.name,
+              ...(tool.category ? { category: tool.category } : {}),
+            })
+          : undefined,
         schedule: {
           ...(scheduleTarget ? { targetSession: scheduleTarget } : {}),
           ...(scheduleCreatorFriendId ? { creatorFriendId: scheduleCreatorFriendId } : {}),
@@ -684,6 +733,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
                 ...(scheduleTarget.type === 'private'
                   ? { senderFriendId: scheduleCreatorFriendId! }
                   : {}),
+                channelId: scheduleTarget.channel_id,
                 sessionId: scheduleTarget.session_id,
                 sessionType: scheduleTarget.type,
               }),

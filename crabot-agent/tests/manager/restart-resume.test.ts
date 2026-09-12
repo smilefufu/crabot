@@ -9,6 +9,7 @@ import { createUserMessage, defineTool, type LLMAdapter, type LLMStreamParams } 
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../../src/types.js'
 import type { ManagerResumeCheckpoint } from '../../src/manager/resume-checkpoint.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
+import { ManagerToolCatalog, NORMAL_MANAGER_CORE_NAMES, type ManagerToolFaceState } from '../../src/manager/tools/tool-catalog.js'
 
 const KEY = 'feishu::restart-test'
 const message = (id: string, text: string): ChannelMessage => ({
@@ -31,6 +32,7 @@ describe('Manager restart continuation', () => {
     trace = new TraceStore(100, join(dir, 'traces'), 'running.jsonl', 'traces-v3-')
   })
   afterEach(async () => {
+    vi.unstubAllEnvs()
     trace.stopFlushTimer()
     await fs.rm(dir, { recursive: true, force: true })
   })
@@ -104,6 +106,63 @@ describe('Manager restart continuation', () => {
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.spawned_worker_ids).toEqual(['spawned-worker'])
     expect(trace.listManagerEpisodes(KEY).items).toHaveLength(1)
+    expect(await store.loadCheckpoint(KEY)).toBeUndefined()
+  })
+
+  it('restarts with only the fixed core while retaining completed calls to previously loaded tools', async () => {
+    vi.stubEnv('CRABOT_MANAGER_TOOL_LOADING_MODE', 'progressive')
+    vi.stubEnv('CRABOT_MANAGER_TOOL_LOADING_KEYS', KEY)
+    const inspected = vi.fn(async () => ({ output: 'completed-inspection', isError: false }))
+    const tools = NORMAL_MANAGER_CORE_NAMES.filter((name) => name !== 'search_tools').map((name) => defineTool({
+      name, description: name, inputSchema: { type: 'object' }, call: async () => ({ output: '', isError: false }),
+    }))
+    tools.push(defineTool({ name: 'inspect_crabot', description: 'inspect deployment', inputSchema: { type: 'object' }, call: inspected }))
+    const states = new Set<ManagerToolFaceState>()
+    const toolFace: ManagerRegistryDeps['toolFace'] = (_key, _system, _identity, _principal, _permissions, _hooks, _wake, state) => {
+      if (!state) throw new Error('episode tool state missing')
+      states.add(state)
+      state.catalog ??= new ManagerToolCatalog(tools, 'normal')
+      const catalog = state.catalog
+      state.searchTool ??= defineTool({
+        name: 'search_tools', description: 'search', inputSchema: { type: 'object' }, isReadOnly: false,
+        call: async (input) => ({ output: JSON.stringify(catalog.search(state, input.query, 1)), isError: false }),
+      })
+      return catalog.project(state, state.searchTool)
+    }
+    let calls = 0
+    const old = registry({
+      async *stream(params) {
+        calls += 1
+        if (calls === 1) {
+          yield* chunksFromContent([{ type: 'tool_use', id: 'search', name: 'search_tools', input: { query: 'inspect_crabot' } }], 'tool_use')
+        } else if (calls === 2) {
+          expect(params.tools.at(-1)?.name).toBe('inspect_crabot')
+          yield* chunksFromContent([{ type: 'tool_use', id: 'inspect', name: 'inspect_crabot', input: {} }], 'tool_use')
+        } else {
+          await new Promise(() => {})
+        }
+      }, updateConfig() {},
+    }, { toolFace })
+    void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Inspect deployment')])
+    const checkpoint = await checkpointWhere((value) => value.turns.length === 2 && calls === 3)
+    expect([...states][0].loadedNames.has('inspect_crabot')).toBe(true)
+
+    const inputs: LLMStreamParams[] = []
+    const restored = registry({
+      async *stream(params) {
+        inputs.push({ ...params, messages: [...params.messages] })
+        yield* chunksFromContent([], 'end_turn')
+      }, updateConfig() {},
+    }, { toolFace })
+    restored.registerResumeCheckpoints([checkpoint])
+    trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
+    await restored.resumeInterruptedEpisodes()
+    expect(inputs).toHaveLength(1)
+    expect(inputs[0].tools.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
+    expect(JSON.stringify(inputs[0].messages)).toContain('completed-inspection')
+    expect(states.size).toBe(2)
+    expect([...states][1].loadedNames.size).toBe(0)
+    expect(inspected).toHaveBeenCalledOnce()
     expect(await store.loadCheckpoint(KEY)).toBeUndefined()
   })
 
@@ -257,7 +316,16 @@ describe('Manager restart continuation', () => {
     trace.reconcileInterruptedManagerEpisodes(new Set([initial!.episodeId]))
     await restored.resumeInterruptedEpisodes()
     expect(resolve).toHaveBeenCalledWith(KEY, { friend, sessionType: 'private' })
-    expect(tools).toHaveBeenCalledWith(KEY, false, undefined, { friend, sessionType: 'private' }, permissions, expect.any(Object), expect.objectContaining({ kind: 'human_messages', friend }))
+    expect(tools).toHaveBeenCalledWith(
+      KEY,
+      false,
+      undefined,
+      { friend, sessionType: 'private' },
+      permissions,
+      expect.any(Object),
+      expect.objectContaining({ kind: 'human_messages', friend }),
+      expect.objectContaining({ mode: 'full', loadedNames: expect.any(Set) }),
+    )
     expect(trace.getManagerEpisode(initial!.episodeId)?.trigger.type).toBe('human_message')
     expect(trace.getManagerEpisode(initial!.episodeId)?.status).toBe('completed')
   })

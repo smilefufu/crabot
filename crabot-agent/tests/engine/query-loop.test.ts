@@ -172,7 +172,8 @@ describe('runEngine', () => {
       description: 'Read a file',
       inputSchema: {},
       isReadOnly: true,
-      call: async () => ({ output: 'file content', isError: false }),
+      traceMetadata: { mcp_server: 'test' },
+      call: async () => ({ output: 'file content', isError: false, traceMetadata: { mcp_output_truncated: false } }),
     })
 
     const onTurn = vi.fn()
@@ -213,6 +214,7 @@ describe('runEngine', () => {
       })
     )
     const turnCall = onTurn.mock.calls[0][0].toolCalls[0]
+    expect(turnCall.traceMetadata).toEqual({ mcp_server: 'test', mcp_output_truncated: false })
     expect(turnCall.callId).toEqual(expect.any(String))
     expect(lifecycleEvents.map((event) => event.type)).toEqual(['tool_started', 'tool_finished'])
     expect(lifecycleEvents.every((event) => event.callId === turnCall.callId)).toBe(true)

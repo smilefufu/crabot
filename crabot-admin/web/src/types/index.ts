@@ -509,6 +509,8 @@ export const TOOL_CATEGORY_LABELS: Record<ToolCategory, string> = {
   desktop: '桌面控制（仅 Master 私聊）',
 }
 
+export const MCP_SKILL_PERMISSION_DESCRIPTION = '授权 Worker 使用 MCP/Skill，并授权普通 Manager 直接调用全部已启用的非桌面 MCP。启用 MCP server 也表示信任其工具元数据；本权限不逐次弹窗确认。'
+
 export const TOOL_CATEGORIES: readonly ToolCategory[] = [
   'memory', 'messaging', 'task', 'mcp_skill', 'file_io', 'browser', 'shell', 'remote_exec', 'desktop',
 ] as const
