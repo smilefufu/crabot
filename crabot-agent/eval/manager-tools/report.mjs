@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 
 const MODES = new Set(['full', 'shadow', 'progressive'])
 const PROFILES = new Set(['normal', 'daily_reflection', 'memory_graph_rebuild'])
+const METRIC_EPSILON = 1e-12
 const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0
 const identity = d => [d.provider_id, d.model_id, d.format, d.capability_profile]
 const identityKey = d => JSON.stringify(identity(d))
@@ -204,11 +205,11 @@ export function buildReport(episodes, { start, end, rates, sourceQuality = {} })
       extra_requests_per_episode: extraRequests, technical_completion_delta: completionDelta, cache_read_ratio_delta: cacheDelta,
       cost_change_ratio: costChange, workload_change_ratio: workloadChange, p95_latency_change_ratio: latencyChange,
       gates: {
-        technical_completion: gate(completionDelta, v => v >= -0.01), extra_requests: gate(extraRequests, v => v <= 0.2),
-        cache_read_ratio: gate(cacheDelta, v => v >= -0.05),
-        mean_cost: gate(costChange, v => v <= 0),
-        self_hosted_workload: group.cost_kind === 'self_hosted' ? gate(workloadChange, v => v <= 0) : 'not_applicable',
-        p95_latency: gate(latencyChange, v => v <= 0.1),
+        technical_completion: gate(completionDelta, v => v >= -0.01 - METRIC_EPSILON), extra_requests: gate(extraRequests, v => v <= 0.2 + METRIC_EPSILON),
+        cache_read_ratio: gate(cacheDelta, v => v >= -0.05 - METRIC_EPSILON),
+        mean_cost: gate(costChange, v => v <= METRIC_EPSILON),
+        self_hosted_workload: group.cost_kind === 'self_hosted' ? gate(workloadChange, v => v <= METRIC_EPSILON) : 'not_applicable',
+        p95_latency: gate(latencyChange, v => v <= 0.1 + METRIC_EPSILON),
         worker_turn_closure: 'manual_review', unresolved_tool_errors: 'manual_review',
       },
     }

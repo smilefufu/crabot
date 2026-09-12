@@ -36,6 +36,21 @@ describe('read-only Manager cost report', () => {
     expect(JSON.stringify(result)).not.toContain('private text')
   })
 
+  it('accepts the exact latency boundary but rejects higher cost, extra calls and slower completion', () => {
+    const treatment = episode('treatment', 'progressive', 120)
+    treatment.duration_ms = 1100
+    const boundary = report([episode('control'), treatment]).comparisons[0]
+    expect(boundary.gates.p95_latency).toBe('pass')
+    expect(boundary.gates.mean_cost).toBe('fail')
+    treatment.duration_ms = 2000
+    treatment.spans.push({ ...treatment.spans[1], span_id: 'second', details: {
+      ...treatment.spans[1].details, request_id: 'second', call_id: 'second-call',
+    } })
+    treatment.spans[3].details.request_count = 2
+    const regression = report([episode('control'), treatment]).comparisons[0]
+    expect(regression.gates).toMatchObject({ p95_latency: 'fail', extra_requests: 'fail', mean_cost: 'fail' })
+  })
+
   it('includes compaction and failed attempts, and refuses to turn their missing cost into zero', () => {
     const trace = episode()
     trace.spans.push({ ...trace.spans[1], span_id: 'fold', status: 'failed', details: {
