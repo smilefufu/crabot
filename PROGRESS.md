@@ -18,15 +18,14 @@
 - 用户希望按任务临时创建 subagent，无需先在 Admin 注册固定角色。当前 `delegate_task` 只能派发已注册、启用且对当前 Worker 可见的角色。
 - 独立于本次提示词精简，暂不实现；后续明确临时角色定义、模型选择、工具权限与生命周期，再进入设计和验证。
 
-### Manager 工具渐进加载：本地发布验证与计量已补齐，线上验收待执行
+### Manager 工具渐进加载：实现与审查完成，部署及线上验收待执行
 
-- 已按确认 spec 实现自省精简、normal/daily/graph 固定核心、本地检索与 episode 内追加加载；同轮未加载调用被拒绝，重启保留完成结果但不继承 loaded set。
-- 跨 profile 的人类消息、回复关联和任务板通知隔离已补回归；MCP 目录、校验、超时和隐私守卫已接入，64 KiB Manager 预算不影响 Worker 目录。
-- 已按补充确认实现权限 RPC 的完整目标校验、群复合键与 CLI 增量覆盖；默认群仅开放 memory/messaging，legacy 快照先备份隔离。保存失败不发布授权，备份不能覆盖系统模板；Schedule creator/群目标、撤权及非人类唤醒的 MCP 生产接线矩阵通过。
-- Agent 最终扩大回归 92 文件、1,389 项通过（含报表 11 项），另补共享流式消费 14 项通过；Admin 1,252 项（排除已复现的 v1-cleanup 基线失败）、Web 41 项与三套类型检查通过。桌面/手机权限验证、其余基线失败及三 adapter 请求字节数见实施计划。
-- 已补齐每次真实请求（含重试/压缩）的安全 provider/model/format 身份、用量和失败事实；OpenAI 缓存 0 与缺失分别保留。只读报表分层比较云成本/自托管 workload，对缺失请求、混合模型、重启或会话切组不伪造可比结论。
-- 默认 full、完整 ManagerKey cohort、episode 边界回退及在途 MCP 只执行一次通过回归。独立 55 工具基线 `06586f06` 已通过 221 项回归和类型检查；加载器版本须在该基线部署并观察至少 72 小时后推进，PR 暂以 draft 保留发布门禁。
-- 权限临时硬锁已解除，默认仍 full，Manager MCP 仍需显式开关且 full/shadow 不开放外部 MCP。未部署、未开启实验；72 小时语义基线、7 日影子和指定会话的线上缓存/成本及业务闭环验收仍待执行。
+- 自省精简、normal/daily/graph 固定核心、本地检索、episode 内追加加载与 MCP 授权守卫已完成；同轮未加载调用拒绝，跨 profile 输入隔离，重启不继承 loaded set、不重放未知副作用。
+- 缓存前缀、完整 ManagerKey cohort、episode 边界回退与在途 MCP 一次性执行通过回归；请求级观测区分缺失用量与明确零值，报表不把混合模型、重启或会话切组算成收益。
+- 原 Agent 扩大回归 1,389 项、共享流式消费 14 项、Admin 1,252 项、Web 41 项及三套类型检查通过；review 补齐两条 inbound 旧断言，目标 2/2 通过。两份完整 inbound 文件 59 通过、4 条缺少 `tmp-page` fixture 的失败在未修改语义基线同样复现，不计为全量通过。
+- 默认 full、Manager 外部 MCP 默认关闭；代码合入不等于部署或完成观察。55 工具语义基线至少 72 小时、7 日影子、指定会话缓存/总成本和业务闭环验收仍待执行，不能以 draft/approve 代替这些发布条件。
+- 首次部署加载器版本即生效的变化：daily/graph 工具范围收敛为 8/3 项；无 `channel_id` 的旧群配置备份隔离，群默认仅 memory/messaging，管理员须在已验证的具体群上重新保存所需权限。这些变化不受 progressive/MCP 开关保护。
+- 发布前重新核对最新 Manager/每日反思提示词与实际工具面；旧检查点恢复、部分 usage、图谱报告措辞等非阻塞观察及完整验证记录见[实施计划](crabot-docs/superpowers/plans/2026-09-12-manager-progressive-tools-implementation.md)。本轮不部署、不扩量、不顺手修改恢复或权限语义。
 
 ### Manager 首次 LLM 响应 reaction：实现与定向验证完成，待 PR 审查
 
