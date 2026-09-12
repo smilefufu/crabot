@@ -592,15 +592,14 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       })
     })
 
-    it('身份解析失败时档位回落到该 session 配置的 scopes（仍不是公开）', async () => {
+    it('身份解析失败时私聊不回落到 legacy session 配置（仍不是公开）', async () => {
       boot([[searchMemoryBlock()]])
       permsResponse = 'throw'
-      sessionScopes = ['session-scope-1']
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
-      expect(calls).toContain('get_session_config')
+      expect(calls).not.toContain('get_session_config')
       const search = rpcCalls.find((c) => c.method === 'search_short_term')
-      expect(search!.params.accessible_scopes).toEqual(['session-scope-1'])
+      expect(search!.params.accessible_scopes).toEqual(['sess-1'])
       expect(search!.params.min_visibility).toBe('internal')
     })
   })

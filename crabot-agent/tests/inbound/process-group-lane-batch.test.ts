@@ -230,8 +230,8 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
           calls.push('resolve_permissions')
           if (permsResponse === 'throw') throw new Error('admin unreachable')
           return { resolved: permsResponse, sources: {} }
-        case 'get_session_config':
-          calls.push('get_session_config')
+        case 'get_group_session_config':
+          calls.push('get_group_session_config')
           return { config: { memory_scopes: sessionScopes } }
         case 'find_master_friend':
           return { friend: null }
@@ -528,7 +528,7 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       sessionScopes = ['session-scope-1']
       await runGroup([gmsg({ id: 'g-1' })])
 
-      expect(calls).toContain('get_session_config')
+      expect(calls).toContain('get_group_session_config')
       const search = rpcCalls.find((c) => c.method === 'search_short_term')
       expect(search!.params.accessible_scopes).toEqual(['session-scope-1'])
       expect(search!.params.min_visibility).toBe('internal')
