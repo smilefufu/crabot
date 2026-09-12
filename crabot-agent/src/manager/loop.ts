@@ -34,7 +34,7 @@
  */
 
 import { randomUUID } from 'crypto'
-import type { ManagerEpisodeTrigger, ManagerTraceWriter } from './trace-types.js'
+import type { ManagerEpisodeTrigger, ManagerEpisodeUsage, ManagerTraceWriter } from './trace-types.js'
 import {
   runEngine,
   createUserMessage,
@@ -48,7 +48,7 @@ import {
   type TextBlock,
   type ContentBlock,
 } from '../engine/index.js'
-import type { HumanMessageQueueLike } from '../engine/types.js'
+import type { HumanMessageQueueLike, LLMRequestEvent } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex'
 import type { TaskPriority } from '../workers/harness/ledger-types.js'
 import { formatChannelMessageLine, type QuotedMessageEntry } from '../prompt-manager.js'
@@ -419,6 +419,7 @@ export class ManagerLoop {
   private readonly tracedUsageResponses = new Set<string>()
   private readonly tracedToolStarts = new Set<string>()
   private readonly tracedToolFinishes = new Set<string>()
+  private observedRequestCount = 0
   /** 当前 episode 的一次性发送后动作复核状态；不进入 session/ledger。 */
   private needsSpawnRecheck = false
   private spawnRecheckInjected = false
@@ -484,7 +485,7 @@ export class ManagerLoop {
   private adminChatClaims: Map<string, 'unclaimed' | 'claimed'> = new Map()
 
   /** 本 episode 的 token 用量累加器（onTurn 回调写入，finish 时聚合成 total_usage）。 */
-  private currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
+  private currentUsage: ManagerEpisodeUsage = { input_tokens: 0, output_tokens: 0 }
   /** max_tokens 兜底重试与新 episode 的 span 计数区分（engine turnNumber 在重试时会重数）。 */
   private attemptCounter = 0
 
@@ -1018,6 +1019,7 @@ export class ManagerLoop {
         started_at: new Date().toISOString(),
         status: 'running',
         details: {
+          request_observation_version: 1,
           merged_envelopes: episodeEnvelopes.length,
           ...(toolFaceDetails ?? {}),
         },
@@ -1040,6 +1042,7 @@ export class ManagerLoop {
       // completed/max_turns → completed；failed/aborted → failed（plan §5.5）。
       const failed = result.outcome === 'failed' || result.outcome === 'aborted'
       if (traceStarted) {
+        this.recordRequestCoverage(episodeId, recovery !== undefined)
         this.deps.traceWriter?.finishEpisode(episodeId, {
           status: failed ? 'failed' : 'completed',
           outcome: {
@@ -1060,6 +1063,7 @@ export class ManagerLoop {
       // admission 与直接 throw 都在这里收口。人类提交一旦完成，仅重投非人类事件；否则保留
       // 原输入，下一次 wake 再试提交。
       if (traceStarted) {
+        this.recordRequestCoverage(episodeId, recovery !== undefined)
         this.deps.traceWriter?.finishEpisode(episodeId, {
           status: 'failed',
           outcome: { summary: '[episode threw]', error: err instanceof Error ? err.message : String(err) },
@@ -1118,13 +1122,14 @@ export class ManagerLoop {
       this.tracedUsageResponses.clear()
       this.tracedToolStarts.clear()
       this.tracedToolFinishes.clear()
+      this.observedRequestCount = 0
       this.successfulSendMessageTargetsInCurrentEpisode.clear()
       this.continuedWorkersInCurrentEpisode.clear()
       this.needsSpawnRecheck = false
       this.spawnRecheckInjected = false
       this.spawnRecheckOutcomeRecorded = false
       this.postSendRecheckSequence = 0
-      this.currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
+      this.currentUsage = { input_tokens: 0, output_tokens: 0 }
       this.attemptCounter = 0
       this.resumeCheckpoint = undefined
       this.checkpointError = undefined
@@ -1761,6 +1766,54 @@ export class ManagerLoop {
     return `llm-${episodeId}-${responseId}`
   }
 
+  private observeAdapter(episodeId: string, adapter: LLMAdapter, purpose: 'inference' | 'compaction'): LLMAdapter {
+    const writer = this.deps.traceWriter
+    if (!writer) return adapter
+    const mode = this.currentToolFaceState?.mode ?? 'full'
+    const profile = managerToolProfileForWake(this.effectiveWakeForCurrentEpisode())
+    return {
+      traceIdentity: adapter.traceIdentity,
+      stream: (params) => adapter.stream(params),
+      updateConfig: (config) => adapter.updateConfig(config),
+      onRequestLifecycle: (event: LLMRequestEvent) => {
+        if (this.currentTraceId !== episodeId) return
+        if (event.status === 'running') this.observedRequestCount++
+        // Stable ID makes start/finish an upsert; response/tool causal spans stay separate.
+        writer.appendSpan(episodeId, {
+          span_id: `request-${episodeId}-${event.requestId}`,
+          parent_span_id: `root-${episodeId}`,
+          type: 'rpc_call', status: event.status,
+          started_at: new Date(event.startedAtMs).toISOString(),
+          ...(event.endedAtMs !== undefined ? {
+            ended_at: new Date(event.endedAtMs).toISOString(),
+            duration_ms: event.endedAtMs - event.startedAtMs,
+          } : {}),
+          details: {
+            kind: 'llm_request', request_observation_version: 1, purpose,
+            request_id: event.requestId, call_id: event.callId, attempt: event.attempt,
+            provider_id: event.providerId, model_id: event.model, format: event.format,
+            tool_loading_mode: mode, capability_profile: profile,
+            visible_tool_count: event.toolCount,
+            first_chunk_ms: event.firstChunkMs, chunk_count: event.chunkCount,
+            ...(event.usage ? { usage: event.usage } : {}),
+            ...(event.failureKind ? { failure_kind: event.failureKind } : {}),
+          },
+        })
+      },
+    }
+  }
+
+  private recordRequestCoverage(episodeId: string, resumed: boolean): void {
+    const now = new Date().toISOString()
+    try {
+      this.deps.traceWriter?.appendSpan(episodeId, {
+        span_id: `request-coverage-${episodeId}`, parent_span_id: `root-${episodeId}`, type: 'decision',
+        status: 'completed', started_at: now, ended_at: now, duration_ms: 0,
+        details: { kind: 'llm_request_coverage', request_count: this.observedRequestCount, resumed },
+      })
+    } catch { /* missing coverage must invalidate evaluation, not retry the episode */ }
+  }
+
   private recordLlmResponse(episodeId: string, event: EngineLlmResponseEvent): void {
     const writer = this.deps.traceWriter
     if (!writer || this.currentTraceId !== episodeId || this.tracedLlmResponses.has(event.responseId)) return
@@ -1789,13 +1842,20 @@ export class ManagerLoop {
           loaded_schema_bytes: [...state.loadedNames].reduce((bytes, name) => bytes + serializedToolBytes(state.catalog!.get(name)!), 0),
           search_count: state.searches ?? 0,
           connector_generation: state.externalMcpTools?.[0]?.traceMetadata?.connector_generation,
-          ...(shadowCore ? { shadow_core_count: shadowCore.length, shadow_core_schema_bytes: serializedToolSetBytes(shadowCore) } : {}),
+          ...(shadowCore ? { shadow_core_count: shadowCore.length, shadow_core_schema_bytes: serializedToolSetBytes(shadowCore),
+            shadow_candidate_count: state.catalog.candidateCount } : {}),
         } : {}),
         ...(event.usage ? { usage: event.usage } : {}),
         ...(event.diagnostics ? {
           retries: event.diagnostics.retries,
           first_chunk_ms: event.diagnostics.firstChunkMs,
           chunk_count: event.diagnostics.chunkCount,
+          ...(event.diagnostics.request ? {
+            request_id: event.diagnostics.request.requestId,
+            provider_id: event.diagnostics.request.providerId,
+            model_id: event.diagnostics.request.model,
+            format: event.diagnostics.request.format,
+          } : {}),
         } : {}),
       },
     })
@@ -1876,8 +1936,16 @@ export class ManagerLoop {
     if (usage && !this.tracedUsageResponses.has(event.responseId)) {
       this.currentUsage.input_tokens += usage.inputTokens ?? 0
       this.currentUsage.output_tokens += usage.outputTokens ?? 0
-      this.currentUsage.cache_creation_tokens += usage.cacheCreationTokens ?? 0
-      this.currentUsage.cache_read_tokens += usage.cacheReadTokens ?? 0
+      for (const [totalKey, usageKey] of [
+        ['cache_creation_tokens', 'cacheCreationTokens'], ['cache_read_tokens', 'cacheReadTokens'],
+      ] as const) {
+        const value = usage[usageKey]
+        if (value !== undefined && (this.tracedUsageResponses.size === 0 || this.currentUsage[totalKey] !== undefined)) {
+          this.currentUsage[totalKey] = (this.currentUsage[totalKey] ?? 0) + value
+        } else {
+          delete this.currentUsage[totalKey]
+        }
+      }
       this.tracedUsageResponses.add(event.responseId)
     }
     const llmSpanId = this.llmSpanId(episodeId, event.responseId)
@@ -1930,7 +1998,7 @@ export class ManagerLoop {
     const writer = this.deps.traceWriter
     const startedAt = new Date().toISOString()
     try {
-      const applied = await this.applyFold(args)
+      const applied = await this.applyFold({ ...args, adapter: this.observeAdapter(episodeId, args.adapter, 'compaction') })
       if (writer && this.currentTraceId === episodeId) {
         const endedAt = new Date().toISOString()
         writer.appendSpan(episodeId, {
@@ -2199,7 +2267,7 @@ export class ManagerLoop {
       configChangedSignal: configChanged.signal,
       configGeneration: this.deps.runtimeConfigAppliedGeneration,
       onConfigChanged: async () => ({
-        adapter: this.deps.adapter(),
+        adapter: this.observeAdapter(episodeId, this.deps.adapter(), 'inference'),
         model: this.deps.model(),
         // thinking 是 per-model 字段，随 model 一并替换；manager 不发 max_tokens。
         ...(this.deps.thinking ? { thinking: this.deps.thinking() } : {}),
@@ -2209,7 +2277,7 @@ export class ManagerLoop {
     try {
       const result = await runEngine({
         prompt: '', // 被忽略:initialMessages 非空时 runEngine 不使用 prompt(见 query-loop.ts)
-        adapter,
+        adapter: this.observeAdapter(episodeId, adapter, 'inference'),
         options,
         initialMessages,
       })

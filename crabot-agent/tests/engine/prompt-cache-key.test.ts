@@ -38,6 +38,32 @@ function requestBodies(fetchMock: ReturnType<typeof mockFetch>): Array<Record<st
 afterEach(() => vi.unstubAllGlobals())
 
 describe('OpenAI prompt cache key', () => {
+  it.each(formats)('%s does not manufacture zero tokens from partial or empty usage', async (format) => {
+    for (const usage of [{}, { prompt_tokens: 100, input_tokens: 100 }, { completion_tokens: 5, output_tokens: 5 }]) {
+      const data = format === 'openai'
+        ? `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage })}\n\ndata: [DONE]\n\n`
+        : `event: response.completed\ndata: ${JSON.stringify({ response: { output: [], usage } })}\n\n`
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(data, { headers: { 'Content-Type': 'text/event-stream' } })))
+      expect((await callNonStreaming(createAdapter({ ...connection, format }), params)).usage).toBeUndefined()
+    }
+  })
+
+  it.each(formats)('%s distinguishes absent cache usage from explicitly reported zero', async (format) => {
+    for (const cached of [undefined, 0, 30]) {
+      const details = cached === undefined ? {} : { cached_tokens: cached }
+      const usage = format === 'openai'
+        ? { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: details }
+        : { input_tokens: 100, output_tokens: 5, input_tokens_details: details }
+      const data = format === 'openai'
+        ? `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage })}\n\ndata: [DONE]\n\n`
+        : `event: response.completed\ndata: ${JSON.stringify({ response: { output: [], usage } })}\n\n`
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(data, { headers: { 'Content-Type': 'text/event-stream' } })))
+      const result = await callNonStreaming(createAdapter({ ...connection, format }), params)
+      expect(result.usage).toEqual({ inputTokens: 100 - (cached ?? 0), outputTokens: 5,
+        ...(cached !== undefined ? { cacheReadTokens: cached } : {}) })
+    }
+  })
+
   it.each(formats)('%s 加载尾部、full 回退与旧工具历史均不改变 key 和核心前缀', async (format) => {
     const fetchMock = mockFetch()
     const adapter = createAdapter({ ...connection, format })

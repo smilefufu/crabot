@@ -2,6 +2,7 @@
  * LLM Adapter 共享类型和工具函数
  */
 
+import { randomUUID } from 'node:crypto'
 import { StreamProcessor } from './stream-processor.js'
 import {
   DEFAULT_MAX_RETRIES,
@@ -25,6 +26,7 @@ import type {
   ContentBlock,
   LLMTokenUsage,
   LLMCallDiagnostics,
+  LLMRequestEvent,
 } from './types.js'
 
 // --- Interfaces ---
@@ -127,6 +129,10 @@ export interface LLMConfigSwap {
 }
 
 export interface LLMAdapter {
+  /** 调用方从连接快照显式选取的安全标识，不能包含 endpoint 或 credential。 */
+  readonly traceIdentity?: { readonly providerId?: string; readonly format?: string }
+  /** 同步 best-effort 内部观察；未装配时不额外生成请求事实。 */
+  onRequestLifecycle?: (event: LLMRequestEvent) => void
   // 统一只暴露 stream()：所有 LLM 调用走流式消费 + 缓冲整流重试（见 callNonStreaming）。
   // 2026-06 起移除了非流式 complete()——静默连接易被链路网关掐断，详见 stream-timeout.ts。
   stream(params: LLMStreamParams): AsyncGenerator<StreamChunk>
@@ -212,8 +218,26 @@ async function withStreamConsumptionRetry(
   let lastError: unknown
   let attempt = 0
   let recoveryAttempt = 0
+  const callId = randomUUID()
+  let requestAttempt = 0
   for (;;) {
     const attemptStart = Date.now()
+    requestAttempt++
+    const observer = currentAdapter.onRequestLifecycle
+    const request: LLMRequestEvent | undefined = observer ? {
+      requestId: randomUUID(), callId, attempt: requestAttempt,
+      providerId: currentAdapter.traceIdentity?.providerId,
+      format: currentAdapter.traceIdentity?.format,
+      model: currentRequestParams.model,
+      toolCount: params.tools.length,
+      startedAtMs: attemptStart, status: 'running',
+    } : undefined
+    const observe = (event: LLMRequestEvent): void => {
+      try {
+        observer?.({ ...event, ...(event.usage ? { usage: { ...event.usage } } : {}) })
+      } catch { /* observation must not affect requests or retries */ }
+    }
+    if (request) observe(request)
     let firstChunkMs: number | undefined
     let chunkCount = 0
     try {
@@ -231,6 +255,11 @@ async function withStreamConsumptionRetry(
         processor.process(chunk)
       }
       const result = processor.finalize()
+      const completed: LLMRequestEvent | undefined = request ? {
+        ...request, status: 'completed', endedAtMs: Date.now(), firstChunkMs, chunkCount,
+        ...(result.usage ? { usage: { ...result.usage } } : {}),
+      } : undefined
+      if (completed) observe(completed)
       return {
         content: [
           // Reasoning items come first so they precede text/tool_use when replayed to Codex
@@ -244,9 +273,14 @@ async function withStreamConsumptionRetry(
           retries: attempt,
           firstChunkMs,
           chunkCount,
+          ...(completed ? { request: completed } : {}),
         },
       }
     } catch (err) {
+      if (request) observe({
+        ...request, status: 'failed', endedAtMs: Date.now(), firstChunkMs, chunkCount,
+        failureKind: params.signal?.aborted ? 'aborted' : 'request_failed',
+      })
       lastError = err
       if (params.signal?.aborted) throw err
       if (!isRetryableError(err)) throw err

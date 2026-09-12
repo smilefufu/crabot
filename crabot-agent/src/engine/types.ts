@@ -289,6 +289,24 @@ export type EngineToolLifecycleEvent =
       readonly durationMs: number
     }
 
+/** 内部请求事实；与成功响应/工具生命周期分开，不进入 Provider payload。 */
+export interface LLMRequestEvent {
+  readonly requestId: string
+  readonly callId: string
+  readonly attempt: number
+  readonly providerId?: string
+  readonly format?: string
+  readonly model: string
+  readonly toolCount: number
+  readonly startedAtMs: number
+  readonly status: 'running' | 'completed' | 'failed'
+  readonly endedAtMs?: number
+  readonly firstChunkMs?: number
+  readonly chunkCount?: number
+  readonly usage?: LLMTokenUsage
+  readonly failureKind?: 'aborted' | 'request_failed'
+}
+
 /** 流式消费诊断（仅成功路径填充），供 trace/span 观测 */
 export interface LLMCallDiagnostics {
   /** 成功前重试了几次（0 = 一次成功） */
@@ -297,6 +315,8 @@ export interface LLMCallDiagnostics {
   readonly firstChunkMs?: number
   /** 本次成功 attempt 收到的 chunk 数 */
   readonly chunkCount: number
+  /** 启用请求观察时附带实际成功 attempt，供 checkpoint 补漏。 */
+  readonly request?: LLMRequestEvent
 }
 
 /** 既可传静态值也可传 callback（每轮 resolve） */

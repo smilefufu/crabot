@@ -1159,7 +1159,15 @@ export class UnifiedAgent extends ModuleBase {
       timezone: () => resolveTimezone(this.agentConfig?.timezone),
       // §11：2026-08 收敛后 manager 直接用 powerful slot。thunk 每个 episode 各解析一次，
       // 未配置时抛出的错误信息由 model-slot.ts 给出。
-      managerAdapter: () => adapterFromSdkEnv(this.buildSdkEnv(resolveManagerModelConfig(this.agentConfig?.model_config))),
+      managerAdapter: () => {
+        const connection = resolveManagerModelConfig(this.agentConfig?.model_config)
+        const adapter = adapterFromSdkEnv(this.buildSdkEnv(connection))
+        return {
+          traceIdentity: { providerId: connection.provider_id, format: connection.format },
+          stream: (params) => adapter.stream(params),
+          updateConfig: (config) => adapter.updateConfig(config),
+        }
+      },
       managerModel: () => resolveManagerModelConfig(this.agentConfig?.model_config).model_id,
       managerThinking: () => {
         const conn = resolveManagerModelConfig(this.agentConfig?.model_config)

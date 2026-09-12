@@ -95,6 +95,19 @@ describe('Manager MCP production authorization wiring', () => {
     })
   }
 
+  it('Manager adapter exposes only the safe identity of its own powerful-slot snapshot', () => {
+    agent.agentConfig.model_config = { powerful: {
+      endpoint: 'https://provider.invalid/v1', apikey: 'private-key', provider_id: 'provider-a', model_id: 'model-a', format: 'openai',
+    } }
+    const first = deps.adapter()
+    agent.agentConfig.model_config.powerful = {
+      endpoint: 'https://other.invalid/v1', apikey: 'other-key', provider_id: 'provider-b', model_id: 'model-b', format: 'anthropic',
+    }
+    expect(first.traceIdentity).toEqual({ providerId: 'provider-a', format: 'openai' })
+    expect(deps.adapter().traceIdentity).toEqual({ providerId: 'provider-b', format: 'anthropic' })
+    expect(JSON.stringify(first.traceIdentity)).not.toMatch(/private-key|endpoint|apikey/)
+  })
+
   function groupTarget(mcp = false): ScheduleIdentity['targetSession'] {
     admin.resolveChannelSession.mockResolvedValue({ channel_id: target.channel_id, id: target.session_id, type: 'group' })
     admin.sessionConfigs.set(groupSessionConfigKey(target.channel_id, target.session_id), {
@@ -242,5 +255,27 @@ describe('Manager MCP production authorization wiring', () => {
     expect(await loaded.call({}, {} as never)).toMatchObject({ isError: true })
     await (await scheduled(identity)).expectHidden(mcpName)
     expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('rollback during an in-flight MCP call does not repeat its side effect', async () => {
+    grantPrivate()
+    const identity = { targetSession: target, creatorFriendId: 'creator' }
+    const episode = await scheduled(identity)
+    await episode.search(mcpName)
+    let finish!: () => void
+    let started!: () => void
+    const entered = new Promise<void>(resolve => { started = resolve })
+    const pending = new Promise<void>(resolve => { finish = resolve })
+    execute.mockImplementationOnce(async () => { started(); await pending; return { output: 'once', isError: false } })
+    const tool = episode.tools().find(tool => tool.name === mcpName)!
+    const result = tool.call({}, {} as never)
+    await entered
+    vi.stubEnv('CRABOT_MANAGER_MCP_ENABLED', '0')
+    vi.stubEnv('CRABOT_MANAGER_TOOL_LOADING_MODE', 'full')
+    finish()
+    expect(await result).toMatchObject({ output: 'once', isError: false })
+    expect(await tool.call({}, {} as never)).toMatchObject({ isError: true })
+    await (await scheduled(identity)).expectHidden(mcpName)
+    expect(execute).toHaveBeenCalledOnce()
   })
 })

@@ -392,13 +392,13 @@ function extractOpenAIUsage(raw: unknown): LLMTokenUsage | undefined {
     completion_tokens?: number
     prompt_tokens_details?: { cached_tokens?: number }
   }
-  if (typeof u.prompt_tokens !== 'number' && typeof u.completion_tokens !== 'number') return undefined
-  const promptTokens = u.prompt_tokens ?? 0
-  const cached = u.prompt_tokens_details?.cached_tokens ?? 0
-  const uncached = Math.max(0, promptTokens - cached)
+  if (typeof u.prompt_tokens !== 'number' || typeof u.completion_tokens !== 'number') return undefined
+  const promptTokens = u.prompt_tokens
+  const cached = u.prompt_tokens_details?.cached_tokens
+  const uncached = Math.max(0, promptTokens - (cached ?? 0))
   return {
     inputTokens: uncached,
-    outputTokens: u.completion_tokens ?? 0,
-    ...(cached > 0 ? { cacheReadTokens: cached } : {}),
+    outputTokens: u.completion_tokens,
+    ...(typeof cached === 'number' ? { cacheReadTokens: cached } : {}),
   }
 }

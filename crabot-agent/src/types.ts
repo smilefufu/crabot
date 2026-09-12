@@ -696,6 +696,7 @@ export interface LLMRoleRequirement {
 }
 
 export interface LLMConnectionInfo {
+  provider_id?: string
   endpoint: string
   apikey: string
   model_id: string

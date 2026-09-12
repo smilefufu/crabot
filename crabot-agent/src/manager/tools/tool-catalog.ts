@@ -334,6 +334,10 @@ export class ManagerToolCatalog {
     return [...this.byName.values()]
   }
 
+  get candidateCount(): number {
+    return this.documents.length
+  }
+
   get(name: string): ToolDefinition | undefined {
     return this.isAllowed(name) ? this.byName.get(name) : undefined
   }
