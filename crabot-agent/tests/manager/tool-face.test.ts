@@ -28,6 +28,8 @@ import { runEngine } from '../../src/engine/query-loop.js'
 import type { EngineTurnEvent, LLMAdapter } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { TOOL_SEARCH_QUERIES } from './fixtures/tool-search-queries.js'
+import { callNonStreaming, createAdapter } from '../../src/engine/llm-adapter.js'
+import { createUserMessage } from '../../src/engine/types.js'
 
 /**
  * 普通 manager 的 messaging 工具（无飞书 channel 实例时）。
@@ -157,6 +159,63 @@ describe('buildManagerToolFace', () => {
     const next = buildManagerToolFace({ ...deps, messagingDeps: makeMessagingDeps({ enableFeishuDocTool: true }) })
     expect(next.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES, 'create_schedule'])
     expect(state.catalog?.get('read_feishu_document')).toBeUndefined()
+  })
+
+  it.each(['anthropic', 'openai', 'openai-responses'] as const)('%s 实际 wire 保持 13 项核心前缀，记录完整/核心/追加后的 schema bytes', async (format) => {
+    const bodies: Array<Record<string, any>> = []
+    const requestBytes: number[] = []
+    const fetchMock = vi.fn(async (_url, init: RequestInit) => {
+      bodies.push(JSON.parse(init.body as string))
+      requestBytes.push(Buffer.byteLength(init.body as string))
+      let data: string
+      if (format === 'anthropic') {
+        const events = [
+          { type: 'message_start', message: { id: 'fixture', type: 'message', role: 'assistant', content: [], model: 'fixture', stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+          { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'OK' } },
+          { type: 'content_block_stop', index: 0 },
+          { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } },
+          { type: 'message_stop' },
+        ]
+        data = events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
+      } else if (format === 'openai-responses') {
+        data = `event: response.completed\ndata: ${JSON.stringify({ response: { id: 'fixture', output: [] } })}\n\n`
+      } else {
+        data = `data: ${JSON.stringify({ id: 'fixture', choices: [{ delta: { content: 'OK' }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`
+      }
+      return new Response(data, { headers: { 'Content-Type': 'text/event-stream' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const deps = makeDeps({ schedule, candidatePermissions: permissions })
+      const full = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
+      const state = createManagerToolFaceState()
+      const core = buildManagerToolFace({ ...deps, faceState: state })
+      await core[0].call({ query: 'create_schedule', limit: 1 }, {})
+      const expanded = buildManagerToolFace({ ...deps, faceState: state })
+      const adapter = createAdapter({ endpoint: 'https://example.test/v1', apikey: 'test-key', format })
+      // This SDK version captures node-fetch at import time, not globalThis.fetch.
+      if (format === 'anthropic') vi.spyOn((adapter as any).client, 'fetch').mockImplementation(fetchMock)
+      for (const tools of [full, core, expanded]) {
+        await callNonStreaming(adapter, { model: 'fixture', systemPrompt: 'Stable Manager instructions', messages: [createUserMessage('fixture')], tools, maxTokens: 64 })
+      }
+      expect(bodies.map(body => body.tools.length)).toEqual([56, 13, 14])
+      expect(JSON.stringify(bodies[0].tools.slice(0, 13))).toBe(JSON.stringify(bodies[1].tools))
+      expect(JSON.stringify(bodies[2].tools.slice(0, 13))).toBe(JSON.stringify(bodies[1].tools))
+      if (format === 'anthropic') {
+        expect(bodies.every(body => body.tools[12].cache_control?.type === 'ephemeral')).toBe(true)
+        expect(bodies.every(body => (JSON.stringify(body).match(/cache_control/g) ?? []).length <= 4)).toBe(true)
+      } else {
+        expect(new Set(bodies.map(body => body.prompt_cache_key)).size).toBe(1)
+        expect(bodies[0].prompt_cache_key).toMatch(/^[a-f0-9]{64}$/)
+      }
+      expect(JSON.stringify(bodies)).not.toMatch(/cacheBreakpoint|traceMetadata|additional_tools|prompt_cache_options/)
+      const bytes = bodies.map(body => Buffer.byteLength(JSON.stringify(body.tools)))
+      expect(bytes[1]).toBeLessThan(bytes[0])
+      console.info('manager-tool-wire-bytes', { format, full: bytes[0], core: bytes[1], with_schedule: bytes[2], request_bytes: requestBytes })
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('全部保留的尾部工具中英文 recall@3 至少 95%，精确工具名全部命中', () => {

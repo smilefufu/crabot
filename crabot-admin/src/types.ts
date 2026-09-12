@@ -169,6 +169,43 @@ export interface SessionPermissionConfig {
   updated_at: string
 }
 
+export interface GroupSessionPermissionConfig {
+  tool_access?: Partial<ToolAccessConfig>
+  cli_access?: Partial<CliAccessConfig>
+  storage?: StoragePermission | null
+  memory_scopes?: string[]
+  template_id?: string
+  updated_at: string
+}
+
+export interface GetGroupSessionConfigParams {
+  channel_id: ModuleId
+  session_id: SessionId
+}
+
+export interface GetGroupSessionConfigResult {
+  config: GroupSessionPermissionConfig | null
+}
+
+export interface UpdateGroupSessionConfigParams {
+  channel_id: ModuleId
+  session_id: SessionId
+  config: GroupSessionPermissionConfig
+}
+
+export interface UpdateGroupSessionConfigResult {
+  config: GroupSessionPermissionConfig
+}
+
+export interface DeleteGroupSessionConfigParams {
+  channel_id: ModuleId
+  session_id: SessionId
+}
+
+export interface DeleteGroupSessionConfigResult {
+  deleted: true
+}
+
 export interface FriendPermissionConfig {
   tool_access: ToolAccessConfig
   cli_access: CliAccessConfig
@@ -201,6 +238,7 @@ export interface UpdateFriendPermissionBody {
 export interface ResolvePrincipalPermissionsParams {
   /** 发送者 friend ID（无 friend_id 时不传）*/
   sender_friend_id?: FriendId
+  channel_id?: ModuleId
   session_id: SessionId
   session_type: 'private' | 'group'
 }
@@ -1812,6 +1850,7 @@ export interface UninstallModuleResult {
 
 /** Admin 事件 Payload 类型映射 */
 export interface AdminEventPayloads {
+  'admin.session_config_updated': { channel_id: ModuleId; session_id: SessionId; config: GroupSessionPermissionConfig | null }
   'admin.task_created': { task: Task }
   'admin.task_status_changed': { task_id: TaskId; old_status: TaskStatus; new_status: TaskStatus }
   'admin.task_assigned': { task_id: TaskId; worker_agent_id: ModuleId }

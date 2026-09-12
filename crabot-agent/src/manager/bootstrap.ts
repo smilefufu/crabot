@@ -595,6 +595,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         permissions = applyGroupScopeFallback(
           await deps.principalResolver.resolvePermissions({
             ...(targetSession.type === 'private' ? { senderFriendId: creatorFriendId! } : {}),
+            channelId: targetSession.channel_id,
             sessionId: targetSession.session_id,
             sessionType: targetSession.type,
           }),
@@ -732,6 +733,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
                 ...(scheduleTarget.type === 'private'
                   ? { senderFriendId: scheduleCreatorFriendId! }
                   : {}),
+                channelId: scheduleTarget.channel_id,
                 sessionId: scheduleTarget.session_id,
                 sessionType: scheduleTarget.type,
               }),

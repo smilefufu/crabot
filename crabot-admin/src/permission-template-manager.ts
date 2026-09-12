@@ -9,6 +9,7 @@ import type {
   UpdatePermissionTemplateParams,
   ResolvedPermissions,
   SessionPermissionConfig,
+  GroupSessionPermissionConfig,
 } from './types.js'
 import { createToolAccessConfig, createCliAccessConfig, CLI_DOMAINS } from './types.js'
 import { generateId, generateTimestamp } from 'crabot-shared'
@@ -74,9 +75,9 @@ export class PermissionTemplateManager {
       {
         id: 'group_default',
         name: '群聊默认',
-        description: '群聊的默认权限配置（除 desktop/computer-use 外全部开放）',
+        description: '群聊的默认权限配置（仅开放记忆和消息）',
         is_system: true,
-        tool_access: { ...createToolAccessConfig(true), desktop: false },
+        tool_access: { ...createToolAccessConfig(false), memory: true, messaging: true },
         cli_access: createCliAccessConfig('none'),
         storage: null,
         memory_scopes: [],
@@ -137,6 +138,7 @@ export class PermissionTemplateManager {
   }
 
   upsertById(template: PermissionTemplate, onConflict: OnConflict): 'imported' | 'overwritten' | 'skipped' {
+    if (this.templates.get(template.id)?.is_system) return 'skipped'
     const exists = this.templates.has(template.id)
     if (exists && onConflict === 'skip') return 'skipped'
     this.templates.set(template.id, template)
@@ -196,6 +198,16 @@ export class PermissionTemplateManager {
       throw Object.assign(new Error('Template is in use'), { code: 'ADMIN_TEMPLATE_IN_USE' })
     }
     this.templates.delete(id)
+  }
+
+  resolveGroupPermissions(templateId: string, config?: GroupSessionPermissionConfig | null): ResolvedPermissions {
+    const base = this.resolvePermissions(templateId)
+    return {
+      tool_access: { ...base.tool_access, ...config?.tool_access, desktop: false },
+      cli_access: { ...base.cli_access, ...config?.cli_access },
+      storage: config?.storage !== undefined ? structuredClone(config.storage) : base.storage,
+      memory_scopes: config?.memory_scopes !== undefined ? [...config.memory_scopes] : base.memory_scopes,
+    }
   }
 
   resolvePermissions(templateId: string, sessionConfig?: SessionPermissionConfig | null): ResolvedPermissions {

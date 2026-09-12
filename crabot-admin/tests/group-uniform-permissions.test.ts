@@ -6,9 +6,10 @@
  * 修复前群内 master 发言人短路拿 master_private 全量档位、普通成员取 friend∪session 并集，
  * 群内不同成员持有不同档位；该差异是 PR #131 注入路径提权问题（已单独立项消除）的前提。
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import AdminModule from '../src/index.js'
+import { groupSessionConfigKey } from '../src/group-session-config.js'
 
 const TEST_PROTOCOL_PORT = 19841
 const TEST_WEB_PORT = 13041
@@ -39,6 +40,7 @@ describe('resolvePrincipalPermissions: 群聊群级统一', () => {
     process.env.TEST_ADMIN_PASSWORD_GROUPPERM = 'test_password_123'
     process.env.TEST_JWT_SECRET_GROUPPERM = 'test_jwt_secret_at_least_32_chars'
     await admin.start()
+    vi.spyOn(admin as any, 'resolveChannelSession').mockImplementation(async (...args: unknown[]) => ({ channel_id: args[0], id: args[1], type: 'group' }))
   })
 
   afterAll(async () => {
@@ -49,6 +51,7 @@ describe('resolvePrincipalPermissions: 群聊群级统一', () => {
   it('群聊 + master sender 不短路：按 group_default 解析，sources 无 friend 侧；同一 sender 私聊仍短路（对照）', async () => {
     const group = await (admin as any).resolvePrincipalPermissions({
       sender_friend_id: 'master',
+      channel_id: 'channel-a',
       session_id: 'group-a',
       session_type: 'group',
     })
@@ -58,6 +61,7 @@ describe('resolvePrincipalPermissions: 群聊群级统一', () => {
 
     const priv = await (admin as any).resolvePrincipalPermissions({
       sender_friend_id: 'master',
+      channel_id: 'admin-web',
       session_id: 'admin-chat',
       session_type: 'private',
     })
@@ -66,16 +70,19 @@ describe('resolvePrincipalPermissions: 群聊群级统一', () => {
 
   it('同一群内 master / 陌生 id / 不带 sender → 解析结果恒等（sender 被完全忽略）', async () => {
     const asMaster = await (admin as any).resolvePrincipalPermissions({
+      channel_id: 'channel-a',
       sender_friend_id: 'master',
       session_id: 'group-a',
       session_type: 'group',
     })
     const asStranger = await (admin as any).resolvePrincipalPermissions({
+      channel_id: 'channel-a',
       sender_friend_id: 'no-such-friend',
       session_id: 'group-a',
       session_type: 'group',
     })
     const asAnonymous = await (admin as any).resolvePrincipalPermissions({
+      channel_id: 'channel-a',
       session_id: 'group-a',
       session_type: 'group',
     })
@@ -86,12 +93,13 @@ describe('resolvePrincipalPermissions: 群聊群级统一', () => {
   })
 
   it('群聊自定义 template_id：按 session 配置解析（不再并上 friend 侧）', async () => {
-    ;(admin as any).sessionConfigs.set('group-custom', {
+    ;(admin as any).sessionConfigs.set(groupSessionConfigKey('channel-a', 'group-custom'), {
       template_id: 'standard',
       updated_at: '2026-08-30T00:00:00.000Z',
     })
     const result = await (admin as any).resolvePrincipalPermissions({
       sender_friend_id: 'master',
+      channel_id: 'channel-a',
       session_id: 'group-custom',
       session_type: 'group',
     })
@@ -102,12 +110,13 @@ describe('resolvePrincipalPermissions: 群聊群级统一', () => {
   })
 
   it('群模板缺失 → minimal 兜底（沿用降级链路）', async () => {
-    ;(admin as any).sessionConfigs.set('group-broken', {
+    ;(admin as any).sessionConfigs.set(groupSessionConfigKey('channel-a', 'group-broken'), {
       template_id: 'no-such-template',
       updated_at: '2026-08-30T00:00:00.000Z',
     })
     const result = await (admin as any).resolvePrincipalPermissions({
       sender_friend_id: 'master',
+      channel_id: 'channel-a',
       session_id: 'group-broken',
       session_type: 'group',
     })

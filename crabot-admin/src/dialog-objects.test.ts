@@ -244,7 +244,7 @@ describe('dialog object projections', () => {
       expect.objectContaining({
         id: 'session-new',
         type: 'private',
-        has_session_config: true,
+        has_session_config: false,
         matching_pending_application_ids: ['pending-private-match'],
       }),
     ])
@@ -314,7 +314,7 @@ describe('dialog object projections', () => {
         }),
       ],
       sessionConfigs: new Map([
-        ['group-with-master', makeSessionConfig()],
+        [JSON.stringify(['wechat-main', 'group-with-master']), makeSessionConfig()],
       ]),
     })
 

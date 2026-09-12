@@ -163,7 +163,13 @@ import {
   type FriendPermissionConfig,
   type GetFriendPermissionResult,
   type ResolvedPermissions,
-  type SessionPermissionConfig,
+  type GroupSessionPermissionConfig,
+  type GetGroupSessionConfigParams,
+  type GetGroupSessionConfigResult,
+  type UpdateGroupSessionConfigParams,
+  type UpdateGroupSessionConfigResult,
+  type DeleteGroupSessionConfigParams,
+  type DeleteGroupSessionConfigResult,
   type UpdateFriendPermissionBody,
   type CreatePermissionTemplateParams,
   type UpdatePermissionTemplateParams,
@@ -192,7 +198,7 @@ import {
   shouldAutoBlock,
   TASK_GOAL_BLOCKED_THRESHOLD,
 } from './task-goal.js'
-import { unionResolved } from './permission-resolution.js'
+import { resolvePermissionSessionTarget } from './permission-session-target.js'
 import { ModelProviderManager, imageResultToConfigFields } from './model-provider-manager.js'
 import { AgentManager } from './agent-manager.js'
 import { validateAgentSlotThinking } from './agent-config-thinking.js'
@@ -244,7 +250,7 @@ import {
   repairTaskInvariants,
 } from './task-state-machine.js'
 import { getBuiltinSkills } from './builtin-skills.js'
-import { snapshotSessionConfig } from './session-config-snapshot-migration.js'
+import { groupSessionConfigKey, parseGroupSessionConfig, parseGroupSessionConfigRecord, loadGroupSessionConfigs, serializeGroupSessionConfigs, quarantineGroupSessionConfigs } from './group-session-config.js'
 import { getBuiltinSubAgents } from './builtin-subagents.js'
 import { parseCleanupParams } from './trace-cleanup-cron.js'
 import {
@@ -657,7 +663,7 @@ export class AdminModule extends ModuleBase {
   private channelIdentityIndex: Map<string, FriendId> = new Map() // 快速查找
   private tasks: Map<TaskId, Task> = new Map()
   private schedules: Map<ScheduleId, Schedule> = new Map()
-  private sessionConfigs: Map<string, SessionPermissionConfig> = new Map()
+  private sessionConfigs: Map<string, GroupSessionPermissionConfig> = new Map()
   private friendPermissionConfigs: Map<FriendId, FriendPermissionConfig> = new Map()
 
   // 模型供应商管理器
@@ -963,6 +969,9 @@ export class AdminModule extends ModuleBase {
       await this.handleGetFriendPermission(params.friend_id)
     )
     this.registerMethod('resolve_principal_permissions', this.resolvePrincipalPermissions.bind(this))
+    this.registerMethod('get_group_session_config', this.handleGetGroupSessionConfig.bind(this))
+    this.registerMethod('update_group_session_config', this.handleUpdateGroupSessionConfig.bind(this))
+    this.registerMethod('delete_group_session_config', this.handleDeleteGroupSessionConfig.bind(this))
     this.registerMethod('get_session_config', this.handleGetSessionConfig.bind(this))
     this.registerMethod('update_session_config', this.handleUpdateSessionConfig.bind(this))
     this.registerMethod('delete_session_config', this.handleDeleteSessionConfig.bind(this))
@@ -1028,9 +1037,6 @@ export class AdminModule extends ModuleBase {
 
     // 初始化系统权限模板
     await this.initSystemTemplates()
-
-    // 迁移旧 sessionConfig：补齐缺失的 cli_access 字段（幂等）
-    await this.runSessionConfigSnapshotMigration()
 
     // 加载模块 env 配置缓存
     await this.loadModuleEnvConfigCache()
@@ -2284,10 +2290,7 @@ export class AdminModule extends ModuleBase {
 
       // Effective permissions 解析（agent 用，跨 friend × session）
       if (pathname === '/api/permissions/resolve-principal' && req.method === 'POST') {
-        const body = await this.readJsonBody<ResolvePrincipalPermissionsParams>(req)
-        const result = await this.resolvePrincipalPermissions(body)
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify(result))
+        await this.handlePermissionApi(res, async () => this.resolvePrincipalPermissions(await this.readJsonBody<ResolvePrincipalPermissionsParams>(req)))
         return
       }
 
@@ -2320,6 +2323,18 @@ export class AdminModule extends ModuleBase {
       }
 
       // Session 配置路由
+      const groupConfigMatch = pathname.match(/^\/api\/group-sessions\/([^/]+)\/([^/]+)\/config$/)
+      if (groupConfigMatch && ['GET', 'PUT', 'DELETE'].includes(req.method ?? '')) {
+        await this.handlePermissionApi(res, async () => {
+          const target = { channel_id: decodeURIComponent(groupConfigMatch[1]), session_id: decodeURIComponent(groupConfigMatch[2]) }
+          if (req.method === 'GET') return this.handleGetGroupSessionConfig(target)
+          if (req.method === 'DELETE') return this.handleDeleteGroupSessionConfig(target)
+          const body = await this.readJsonBody<{ config: GroupSessionPermissionConfig }>(req)
+          return this.handleUpdateGroupSessionConfig({ ...target, config: body.config })
+        })
+        return
+      }
+
       if (pathname.match(/^\/api\/sessions\/[^/]+\/config$/) && req.method === 'GET') {
         const sessionId = decodeURIComponent(pathname.split('/')[3])
         await this.handleGetSessionConfigApi(res, sessionId)
@@ -4746,16 +4761,8 @@ export class AdminModule extends ModuleBase {
       console.log('[Admin] No existing pending messages data')
     }
 
-    try {
-      const sessionConfigsData = await fs.readFile(this.sessionConfigsFilePath, 'utf-8')
-      const entries = JSON.parse(sessionConfigsData) as Array<{ session_id: string; config: SessionPermissionConfig }>
-      for (const entry of entries) {
-        this.sessionConfigs.set(entry.session_id, entry.config)
-      }
-      console.log(`[Admin] Loaded ${this.sessionConfigs.size} session configs`)
-    } catch {
-      console.log('[Admin] No existing session configs data')
-    }
+    this.sessionConfigs = await loadGroupSessionConfigs(this.sessionConfigsFilePath)
+    console.log(`[Admin] Loaded ${this.sessionConfigs.size} group session configs`)
 
     try {
       const friendPermissionConfigsData = await fs.readFile(this.friendPermissionConfigsFilePath, 'utf-8')
@@ -4916,26 +4923,6 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * 迁移旧 sessionConfig：补齐缺失的 cli_access 字段（快照式，幂等）。
-   * 必须在 initSystemTemplates() 之后调用，确保模板已就绪。
-   */
-  private async runSessionConfigSnapshotMigration(): Promise<void> {
-    const total = this.sessionConfigs.size
-    let migratedCount = 0
-    for (const [sessionId, config] of Array.from(this.sessionConfigs.entries())) {
-      const upgraded = snapshotSessionConfig(config, this.permissionTemplateManager)
-      if (upgraded !== config) {
-        this.sessionConfigs.set(sessionId, upgraded)
-        migratedCount++
-      }
-    }
-    console.info(`[migration] snapshot-session-config: migrated ${migratedCount} of ${total} sessionConfigs`)
-    if (migratedCount > 0) {
-      await this.saveData()
-    }
-  }
-
-  /**
    * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
@@ -4983,9 +4970,7 @@ export class AdminModule extends ModuleBase {
     const pendingArray = Array.from(this.pendingMessages.values())
     await this.atomicWriteFile(this.pendingMessagesFilePath, JSON.stringify(pendingArray, null, 2))
 
-    const sessionConfigsArray = Array.from(this.sessionConfigs.entries()).map(
-      ([session_id, config]) => ({ session_id, config })
-    )
+    const sessionConfigsArray = serializeGroupSessionConfigs(this.sessionConfigs)
     await this.atomicWriteFile(this.sessionConfigsFilePath, JSON.stringify(sessionConfigsArray, null, 2))
 
     const friendPermissionConfigsArray = Array.from(this.friendPermissionConfigs.entries()).map(
@@ -7874,6 +7859,7 @@ export class AdminModule extends ModuleBase {
       ...(credential.target_session.type === 'private' && credential.creator_friend_id
         ? { sender_friend_id: credential.creator_friend_id }
         : {}),
+      channel_id: credential.target_session.channel_id,
       session_id: credential.target_session.session_id,
       session_type: credential.target_session.type,
     })
@@ -9608,23 +9594,24 @@ export class AdminModule extends ModuleBase {
    * 语义（protocol-admin §3.2.7，2026-08-30 群聊权限群级统一）：
    * - 群聊：与发言人无关——只按 GroupSessionPermissionConfig（缺省 group_default）解析
    * - 私聊 master friend 短路：直接返回 master_private 模板的解析结果
-   * - 私聊非 master：friend ResolvedPermissions ∪ session ResolvedPermissions
+   * - 私聊非 master：Friend 当前权限；legacy session 配置不再参与授权
    * - 都缺：fallback 到 minimal 模板
    */
   private async resolvePrincipalPermissions(
     params: ResolvePrincipalPermissionsParams,
   ): Promise<ResolvePrincipalPermissionsResult> {
+    const target = await this.resolvePermissionTarget(params)
     const sources: ResolvePrincipalPermissionsResult['sources'] = {}
 
     // 群聊：群级统一，与发言人无关（2026-08-30 决策，protocol-admin §3.2.7 语义 1）——
     // 忽略 sender_friend_id，不做 friend 侧解析、不做 master 短路，只按该群的
     // GroupSessionPermissionConfig（缺省 group_default 基底）解析。模板缺失 → minimal 兜底。
     if (params.session_type === 'group') {
-      const sessionConfig = this.sessionConfigs.get(params.session_id) ?? null
+      const sessionConfig = this.sessionConfigs.get(groupSessionConfigKey(target.channel_id, target.session_id)) ?? null
       const sessionTemplateId = sessionConfig?.template_id ?? 'group_default'
       try {
         return {
-          resolved: this.permissionTemplateManager.resolvePermissions(sessionTemplateId, sessionConfig),
+          resolved: this.permissionTemplateManager.resolveGroupPermissions(sessionTemplateId, sessionConfig),
           sources: { session_template_id: sessionTemplateId },
         }
       } catch (err) {
@@ -9643,8 +9630,9 @@ export class AdminModule extends ModuleBase {
       // admin web 经 JWT 认证，对话者必然是 master 本人）：映射到真实 master friend；
       // 无 master friend 记录时直接按 master_private 模板解析。
       // 修复前 friends.get('master') 查不到 → 落 minimal → worker 工具全被滤光。
+      const isAdminMaster = params.sender_friend_id === 'master' && target.channel_id === 'admin-web'
       const friend = this.friends.get(params.sender_friend_id)
-        ?? (params.sender_friend_id === 'master' ? this.findMasterFriend() : undefined)
+        ?? (isAdminMaster ? this.findMasterFriend() : undefined)
       if (friend) {
         friendResolved = this.buildResolvedFriendPermissions(friend)
         sources.friend_template_id = friend.permission === 'master'
@@ -9655,7 +9643,7 @@ export class AdminModule extends ModuleBase {
         if (friend.permission === 'master' && friendResolved) {
           return { resolved: friendResolved, sources }
         }
-      } else if (params.sender_friend_id === 'master') {
+      } else if (isAdminMaster) {
         sources.friend_template_id = 'master_private'
         return {
           resolved: this.permissionTemplateManager.resolvePermissions('master_private', null),
@@ -9664,25 +9652,7 @@ export class AdminModule extends ModuleBase {
       }
     }
 
-    // 2. session 侧（私聊：仅当 sessionConfig 显式 template_id 时才解析；陌生人走 minimal 兜底。
-    // 群聊已在上方群级统一路径提前返回，不会走到这里）
-    let sessionResolved: ResolvedPermissions | null = null
-    const sessionConfig = this.sessionConfigs.get(params.session_id) ?? null
-    const sessionTemplateId = sessionConfig?.template_id ?? null
-    if (sessionTemplateId) {
-      try {
-        sessionResolved = this.permissionTemplateManager.resolvePermissions(
-          sessionTemplateId,
-          sessionConfig,
-        )
-        sources.session_template_id = sessionTemplateId
-      } catch (err) {
-        console.warn(`[Admin] resolvePrincipalPermissions: session template '${sessionTemplateId}' missing for session ${params.session_id}:`, err)
-      }
-    }
-
-    // 3. 都没有 → minimal 兜底（私聊路径）
-    if (!friendResolved && !sessionResolved) {
+    if (!friendResolved) {
       sources.fallback = 'minimal'
       return {
         resolved: this.permissionTemplateManager.resolvePermissions('minimal', null),
@@ -9690,17 +9660,7 @@ export class AdminModule extends ModuleBase {
       }
     }
 
-    // 4. 取并集
-    const merged = unionResolved(friendResolved, sessionResolved)
-    if (!merged) {
-      // 不可达：以上前提保证至少一方非 null，但兜底 minimal
-      sources.fallback = 'minimal'
-      return {
-        resolved: this.permissionTemplateManager.resolvePermissions('minimal', null),
-        sources,
-      }
-    }
-    return { resolved: merged, sources }
+    return { resolved: friendResolved, sources }
   }
 
   private async handleGetFriendPermission(friendId: FriendId): Promise<GetFriendPermissionResult> {
@@ -9748,48 +9708,101 @@ export class AdminModule extends ModuleBase {
   // Session 配置 RPC 方法
   // ============================================================================
 
-  private async handleGetSessionConfig(params: { session_id: string }): Promise<{ config: SessionPermissionConfig | null }> {
-    const config = this.sessionConfigs.get(params.session_id) ?? null
+  private resolvePermissionTarget(params: { channel_id?: string; session_id: string; session_type: 'private' | 'group' }): Promise<GetGroupSessionConfigParams> {
+    return resolvePermissionSessionTarget(params, {
+      channelIds: () => this.channelManager.listInstances({ page: 1, page_size: Number.MAX_SAFE_INTEGER }).items.map(channel => channel.id),
+      getSession: (channelId, sessionId) => this.resolveChannelSession(channelId, sessionId),
+    })
+  }
+
+  private async handleGetGroupSessionConfig(params: GetGroupSessionConfigParams): Promise<GetGroupSessionConfigResult> {
+    const target = await this.resolveGroupPermissionTarget(params)
+    const config = this.sessionConfigs.get(groupSessionConfigKey(target.channel_id, target.session_id)) ?? null
     return { config }
   }
 
-  private async handleUpdateSessionConfig(params: { session_id: string; config: SessionPermissionConfig }): Promise<{ config: SessionPermissionConfig }> {
-    const config: SessionPermissionConfig = {
-      ...params.config,
-      updated_at: generateTimestamp(),
-    }
-    this.sessionConfigs.set(params.session_id, config)
-    await this.saveData()
+  private async handleUpdateGroupSessionConfig(params: UpdateGroupSessionConfigParams): Promise<UpdateGroupSessionConfigResult> {
+    const target = await this.resolveGroupPermissionTarget(params)
+    const config = parseGroupSessionConfig(params.config)
+    if (!this.permissionTemplateManager.get(config.template_id ?? 'group_default')) throw new RpcError('INVALID_PARAMS', 'Permission template not found')
+    await this.persistGroupSessionConfig(target, config)
+    this.publishAdminEvent('admin.session_config_updated', { ...target, config })
     return { config }
   }
 
-  private async handleDeleteSessionConfig(params: { session_id: string }): Promise<{ deleted: boolean }> {
-    const existed = this.sessionConfigs.delete(params.session_id)
-    if (existed) {
-      await this.saveData()
+  private async handleDeleteGroupSessionConfig(params: DeleteGroupSessionConfigParams): Promise<DeleteGroupSessionConfigResult> {
+    const target = await this.resolveGroupPermissionTarget(params)
+    await this.persistGroupSessionConfig(target, null)
+    this.publishAdminEvent('admin.session_config_updated', { ...target, config: null })
+    return { deleted: true }
+  }
+
+  private async persistGroupSessionConfig(target: GetGroupSessionConfigParams, config: GroupSessionPermissionConfig | null): Promise<void> {
+    if (!this.dataLoaded) throw new RpcError('SERVICE_UNAVAILABLE', 'Permission store is not ready')
+    // Share the store lock with saveData; never expose a grant before its durable write succeeds.
+    while (this.saveDataLock) await this.saveDataLock.catch(() => {})
+    const key = groupSessionConfigKey(target.channel_id, target.session_id)
+    const next = new Map(this.sessionConfigs)
+    if (config) next.set(key, config)
+    else next.delete(key)
+    const promise = this.atomicWriteFile(this.sessionConfigsFilePath, JSON.stringify(serializeGroupSessionConfigs(next), null, 2))
+      .then(() => { this.sessionConfigs = next })
+    this.saveDataLock = promise
+    try {
+      await promise
+    } finally {
+      if (this.saveDataLock === promise) this.saveDataLock = null
     }
-    return { deleted: existed }
+  }
+
+  private async handleGetSessionConfig(params: { session_id: string }): Promise<GetGroupSessionConfigResult> {
+    const target = await this.resolvePermissionTarget({ session_id: params.session_id, session_type: 'group' })
+    return this.handleGetGroupSessionConfig(target)
+  }
+
+  private async handleUpdateSessionConfig(params: { session_id: string; config: GroupSessionPermissionConfig }): Promise<UpdateGroupSessionConfigResult> {
+    const target = await this.resolvePermissionTarget({ session_id: params.session_id, session_type: 'group' })
+    return this.handleUpdateGroupSessionConfig({ ...target, config: params.config })
+  }
+
+  private async handleDeleteSessionConfig(params: { session_id: string }): Promise<DeleteGroupSessionConfigResult> {
+    const target = await this.resolvePermissionTarget({ session_id: params.session_id, session_type: 'group' })
+    return this.handleDeleteGroupSessionConfig(target)
+  }
+
+  private resolveGroupPermissionTarget(params: GetGroupSessionConfigParams): Promise<GetGroupSessionConfigParams> {
+    if (!params?.channel_id) throw new RpcError('INVALID_PARAMS', 'channel_id is required')
+    return this.resolvePermissionTarget({ ...params, session_type: 'group' })
+  }
+
+  private async handlePermissionApi(res: ServerResponse, action: () => Promise<unknown>): Promise<void> {
+    try {
+      const result = await action()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      const code = error instanceof RpcError ? error.code : 'INTERNAL_ERROR'
+      const status = code === 'INVALID_PARAMS' ? 400 : code === 'NOT_FOUND' ? 404 : code === 'SERVICE_UNAVAILABLE' ? 503 : 500
+      res.writeHead(status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ code, error: status === 500 ? 'Internal server error' : (error as Error).message }))
+    }
   }
 
   // Session 配置 REST API
 
   private async handleGetSessionConfigApi(res: ServerResponse, sessionId: string): Promise<void> {
-    const result = await this.handleGetSessionConfig({ session_id: sessionId })
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify(result))
+    await this.handlePermissionApi(res, () => this.handleGetSessionConfig({ session_id: sessionId }))
   }
 
   private async handleUpdateSessionConfigApi(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
-    const body = await this.readJsonBody<{ config: SessionPermissionConfig }>(req)
-    const result = await this.handleUpdateSessionConfig({ session_id: sessionId, config: body.config })
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify(result))
+    await this.handlePermissionApi(res, async () => {
+      const body = await this.readJsonBody<{ config: GroupSessionPermissionConfig }>(req)
+      return this.handleUpdateSessionConfig({ session_id: sessionId, config: body.config })
+    })
   }
 
   private async handleDeleteSessionConfigApi(res: ServerResponse, sessionId: string): Promise<void> {
-    const result = await this.handleDeleteSessionConfig({ session_id: sessionId })
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify(result))
+    await this.handlePermissionApi(res, () => this.handleDeleteSessionConfig({ session_id: sessionId }))
   }
 
   private async handleGetFriendPermissionApi(res: ServerResponse, friendId: FriendId): Promise<void> {
@@ -11675,11 +11688,17 @@ export class AdminModule extends ModuleBase {
       upsertFriend: async (r) => this.upsertImportedRecord(this.friends as Map<string, { id: string }>, r as { id: string }, onConflict),
       upsertTask: async (r) => this.upsertImportedRecord(this.tasks as unknown as Map<string, { id: string }>, r as { id: string }, onConflict),
       upsertSessionConfig: async (r) => {
-        // session-configs 导出格式为 { session_id, config } 数组（见 saveDataImpl），按 session_id 归并。
-        const entry = r as { session_id: string; config: SessionPermissionConfig }
-        const exists = this.sessionConfigs.has(entry.session_id)
+        const entry = parseGroupSessionConfigRecord(r)
+        if (!entry) {
+          await quarantineGroupSessionConfigs(this.sessionConfigsFilePath, [r], 'import')
+          return 'skipped'
+        }
+        await this.resolvePermissionTarget({ ...entry, session_type: 'group' })
+        if (!this.permissionTemplateManager.get(entry.config.template_id ?? 'group_default')) throw new RpcError('INVALID_PARAMS', 'Permission template not found')
+        const key = groupSessionConfigKey(entry.channel_id, entry.session_id)
+        const exists = this.sessionConfigs.has(key)
         if (exists && onConflict === 'skip') return 'skipped'
-        this.sessionConfigs.set(entry.session_id, entry.config)
+        await this.persistGroupSessionConfig(entry, entry.config)
         return exists ? 'overwritten' : 'imported'
       },
       validateAgentPayload: (archivePath2) => this.validateAgentImportPayload(archivePath2),

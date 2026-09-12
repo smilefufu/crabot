@@ -3,7 +3,7 @@
  */
 
 import { api } from './api'
-import type { ToolAccessConfig, StoragePermission } from '../types'
+import type { ToolAccessConfig, CliAccessConfig, StoragePermission } from '../types'
 
 export interface ChannelSession {
   id: string
@@ -18,8 +18,9 @@ export interface ChannelSession {
   }>
 }
 
-export interface SessionPermissionConfig {
+export interface GroupSessionPermissionConfig {
   tool_access?: Partial<ToolAccessConfig>
+  cli_access?: Partial<CliAccessConfig>
   storage?: StoragePermission | null
   memory_scopes?: string[]
   template_id?: string
@@ -34,15 +35,15 @@ export const sessionService = {
     return api.get(`/channels/${encodeURIComponent(channelId)}/sessions${qs ? `?${qs}` : ''}`)
   },
 
-  async getConfig(sessionId: string): Promise<{ config: SessionPermissionConfig | null }> {
-    return api.get(`/sessions/${encodeURIComponent(sessionId)}/config`)
+  async getGroupConfig(channelId: string, sessionId: string): Promise<{ config: GroupSessionPermissionConfig | null }> {
+    return api.get(`/group-sessions/${encodeURIComponent(channelId)}/${encodeURIComponent(sessionId)}/config`)
   },
 
-  async updateConfig(sessionId: string, config: Omit<SessionPermissionConfig, 'updated_at'>): Promise<{ config: SessionPermissionConfig }> {
-    return api.put(`/sessions/${encodeURIComponent(sessionId)}/config`, { config })
+  async updateGroupConfig(channelId: string, sessionId: string, config: Omit<GroupSessionPermissionConfig, 'updated_at'>): Promise<{ config: GroupSessionPermissionConfig }> {
+    return api.put(`/group-sessions/${encodeURIComponent(channelId)}/${encodeURIComponent(sessionId)}/config`, { config })
   },
 
-  async deleteConfig(sessionId: string): Promise<{ deleted: boolean }> {
-    return api.delete(`/sessions/${encodeURIComponent(sessionId)}/config`)
+  async deleteGroupConfig(channelId: string, sessionId: string): Promise<{ deleted: true }> {
+    return api.delete(`/group-sessions/${encodeURIComponent(channelId)}/${encodeURIComponent(sessionId)}/config`)
   },
 }

@@ -2,7 +2,7 @@
  * Admin 模块 Web API 测试
  */
 
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest'
 import crypto from 'node:crypto'
 import http from 'node:http'
 import { WebSocket } from 'ws'
@@ -15,6 +15,7 @@ import { UnifiedAgent } from '../../crabot-agent/src/unified-agent.js'
 import type { ChannelMessageRef, DialogObjectApplication, Friend, FriendPermissionConfig, ListConversationUnitsResult, LoginResponse, Task } from './types.js'
 import { AdminErrorCode, createCliAccessConfig } from './types.js'
 import { newCredentialsFromPassword, writeCredentials } from './credentials.js'
+import { groupSessionConfigKey } from './group-session-config.js'
 
 const TEST_PROTOCOL_PORT = 19807
 const TEST_WEB_PORT = 13007
@@ -1453,6 +1454,14 @@ describe('Admin Web API', () => {
   })
 
   describe('resolve_principal_permissions REST', () => {
+    beforeEach(() => {
+      vi.spyOn(admin as any, 'resolveChannelSession').mockImplementation(async (...args: unknown[]) => ({
+        channel_id: args[0], id: args[1],
+        type: ['any-session', 'union-session-test', 'totally-unknown-session'].includes(args[1] as string) ? 'private' : 'group',
+      }))
+      vi.spyOn(admin['channelManager'], 'listInstances').mockReturnValue({ items: [{ id: 'channel-a' }], pagination: {} } as never)
+    })
+
     it('master friend → 全 write 短路（私聊；群聊已群级统一、不短路）', async () => {
       const token = await loginAndGetToken()
       const friendId = 'master-resolve-test'
@@ -1469,7 +1478,7 @@ describe('Admin Web API', () => {
         TEST_WEB_PORT,
         `/api/permissions/resolve-principal`,
         'POST',
-        { sender_friend_id: friendId, session_id: 'any-session', session_type: 'private' },
+        { sender_friend_id: friendId, channel_id: 'channel-a', session_id: 'any-session', session_type: 'private' },
         token,
       )
       expect(response.statusCode).toBe(200)
@@ -1481,7 +1490,7 @@ describe('Admin Web API', () => {
     it('无 friend，session 挂 group_scheduler → schedule=write', async () => {
       const token = await loginAndGetToken()
       const sessionId = 'group-scheduler-session-test'
-      admin['sessionConfigs'].set(sessionId, {
+      admin['sessionConfigs'].set(groupSessionConfigKey('channel-a', sessionId), {
         template_id: 'group_scheduler',
         updated_at: '2026-04-21T00:00:00.000Z',
       })
@@ -1490,7 +1499,7 @@ describe('Admin Web API', () => {
         TEST_WEB_PORT,
         `/api/permissions/resolve-principal`,
         'POST',
-        { session_id: sessionId, session_type: 'group' },
+        { channel_id: 'channel-a', session_id: sessionId, session_type: 'group' },
         token,
       )
       expect(response.statusCode).toBe(200)
@@ -1499,7 +1508,7 @@ describe('Admin Web API', () => {
       expect(response.body.sources.session_template_id).toBe('group_scheduler')
     })
 
-    it('（私聊）friend(standard) ∪ session(group_scheduler) → 并集中 schedule=write', async () => {
+    it('私聊只按 Friend 权限，不继承同名群配置的 Schedule 授权', async () => {
       const token = await loginAndGetToken()
       const friendId = 'normal-union-test'
       const sessionId = 'union-session-test'
@@ -1512,7 +1521,7 @@ describe('Admin Web API', () => {
         created_at: '2026-04-21T00:00:00.000Z',
         updated_at: '2026-04-21T00:00:00.000Z',
       })
-      admin['sessionConfigs'].set(sessionId, {
+      admin['sessionConfigs'].set(groupSessionConfigKey('channel-a', sessionId), {
         template_id: 'group_scheduler',
         updated_at: '2026-04-21T00:00:00.000Z',
       })
@@ -1521,15 +1530,15 @@ describe('Admin Web API', () => {
         TEST_WEB_PORT,
         `/api/permissions/resolve-principal`,
         'POST',
-        { sender_friend_id: friendId, session_id: sessionId, session_type: 'private' },
+        { sender_friend_id: friendId, channel_id: 'channel-a', session_id: sessionId, session_type: 'private' },
         token,
       )
       expect(response.statusCode).toBe(200)
-      expect(response.body.resolved.cli_access.schedule).toBe('write')
+      expect(response.body.resolved.cli_access.schedule).toBe('none')
       expect(response.body.resolved.tool_access.task).toBe(true)
       expect(response.body.resolved.cli_access.provider).toBe('none')
       expect(response.body.sources.friend_template_id).toBe('standard')
-      expect(response.body.sources.session_template_id).toBe('group_scheduler')
+      expect(response.body.sources.session_template_id).toBeUndefined()
     })
 
     it('无 friend 无 session_config → minimal 兜底', async () => {
@@ -1538,7 +1547,7 @@ describe('Admin Web API', () => {
         TEST_WEB_PORT,
         `/api/permissions/resolve-principal`,
         'POST',
-        { session_id: 'totally-unknown-session', session_type: 'private' },
+        { channel_id: 'channel-a', session_id: 'totally-unknown-session', session_type: 'private' },
         token,
       )
       expect(response.statusCode).toBe(200)
@@ -1554,24 +1563,24 @@ describe('Admin Web API', () => {
         TEST_WEB_PORT,
         `/api/permissions/resolve-principal`,
         'POST',
-        { session_id: 'group-stranger-no-config-session', session_type: 'group' },
+        { channel_id: 'channel-a', session_id: 'group-stranger-no-config-session', session_type: 'group' },
         token,
       )
       expect(response.statusCode).toBe(200)
-      // group_default：除 desktop 外全部 true
+      // group_default 仅开放 memory 和 messaging。
       expect(response.body.resolved.tool_access.messaging).toBe(true)
-      expect(response.body.resolved.tool_access.shell).toBe(true)
-      expect(response.body.resolved.tool_access.task).toBe(true)
+      expect(response.body.resolved.tool_access.shell).toBe(false)
+      expect(response.body.resolved.tool_access.task).toBe(false)
+      expect(response.body.resolved.tool_access.mcp_skill).toBe(false)
       expect(response.body.resolved.tool_access.desktop).toBe(false)
       expect(response.body.sources.session_template_id).toBe('group_default')
       expect(response.body.sources.fallback).toBeUndefined()
     })
 
-    it('群聊 无 friend，sessionConfig 缺 template_id 但带 tool_access 覆盖 → 快照式（脱离模板）', async () => {
+    it('群聊缺 template_id 时以 group_default 为基线，仅覆盖明确字段', async () => {
       const token = await loginAndGetToken()
       const sessionId = 'group-legacy-session-no-template'
-      // 快照式语义：sessionConfig.tool_access 存在即完全脱离模板，缺省字段默认 false
-      admin['sessionConfigs'].set(sessionId, {
+      admin['sessionConfigs'].set(groupSessionConfigKey('channel-a', sessionId), {
         tool_access: { shell: false } as Partial<{ shell: boolean }>,
         updated_at: '2026-04-21T00:00:00.000Z',
       } as never)
@@ -1580,15 +1589,43 @@ describe('Admin Web API', () => {
         TEST_WEB_PORT,
         `/api/permissions/resolve-principal`,
         'POST',
-        { session_id: sessionId, session_type: 'group' },
+        { channel_id: 'channel-a', session_id: sessionId, session_type: 'group' },
         token,
       )
       expect(response.statusCode).toBe(200)
       expect(response.body.resolved.tool_access.shell).toBe(false)         // session 显式设置
-      expect(response.body.resolved.tool_access.messaging).toBe(false)     // 快照式：不从模板继承
-      expect(response.body.resolved.tool_access.task).toBe(false)          // 快照式：不从模板继承
+      expect(response.body.resolved.tool_access.messaging).toBe(true)      // 未声明项继承模板
+      expect(response.body.resolved.tool_access.task).toBe(false)
       expect(response.body.resolved.tool_access.desktop).toBe(false)
       expect(response.body.sources.session_template_id).toBe('group_default')
+    })
+
+    it('group REST API uses the channel/session pair for write, read and delete; private targets are rejected', async () => {
+      const token = await loginAndGetToken()
+      const endpoint = '/api/group-sessions/channel-a/rest-group/config'
+      expect((await makeWebRequest(TEST_WEB_PORT, endpoint, 'GET')).statusCode).toBe(401)
+      const saved = await makeWebRequest<any>(TEST_WEB_PORT, endpoint, 'PUT', {
+        config: { template_id: 'group_scheduler', cli_access: { schedule: 'none', config: 'read' }, tool_access: { desktop: true } },
+      }, token)
+      expect(saved.statusCode).toBe(200)
+      expect(saved.body.config).toMatchObject({ cli_access: { schedule: 'none', config: 'read' }, tool_access: { desktop: false } })
+      expect((await makeWebRequest<any>(TEST_WEB_PORT, endpoint, 'GET', null, token)).body.config).toEqual(saved.body.config)
+      expect((await makeWebRequest<any>(TEST_WEB_PORT, endpoint.replace('channel-a', 'channel-b'), 'GET', null, token)).body.config).toBeNull()
+      const legacy = await makeWebRequest<any>(TEST_WEB_PORT, '/api/sessions/rest-group/config', 'GET', null, token)
+      expect(legacy.statusCode).toBe(200)
+      expect(legacy.body.config).toEqual(saved.body.config)
+      expect((await makeWebRequest(TEST_WEB_PORT, '/api/group-sessions/channel-a/any-session/config', 'PUT', { config: {} }, token)).statusCode).toBe(400)
+      expect((await makeWebRequest(TEST_WEB_PORT, endpoint, 'DELETE', null, token)).statusCode).toBe(200)
+      expect((await makeWebRequest<any>(TEST_WEB_PORT, endpoint, 'GET', null, token)).body.config).toBeNull()
+    })
+
+    it('permission REST rejects ambiguous legacy targets and reports unavailable channels without fallback grants', async () => {
+      const token = await loginAndGetToken()
+      vi.spyOn(admin['channelManager'], 'listInstances').mockReturnValue({ items: [{ id: 'channel-a' }, { id: 'channel-b' }], pagination: {} } as never)
+      const input = { session_id: 'ambiguous-group', session_type: 'group', sender_friend_id: 'master' }
+      expect((await makeWebRequest(TEST_WEB_PORT, '/api/permissions/resolve-principal', 'POST', input, token)).statusCode).toBe(400)
+      vi.spyOn(admin as any, 'resolveChannelSession').mockRejectedValue(new Error('offline'))
+      expect((await makeWebRequest(TEST_WEB_PORT, '/api/permissions/resolve-principal', 'POST', { ...input, channel_id: 'channel-a' }, token)).statusCode).toBe(503)
     })
   })
 

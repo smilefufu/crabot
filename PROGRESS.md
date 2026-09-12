@@ -5,12 +5,13 @@
 
 ## 当前状态
 
-### Manager 工具渐进加载：实现中，权限前置待确认
+### Manager 工具渐进加载：权限前置已验证，发布验收待收口
 
 - 已按确认 spec 实现自省精简、normal/daily/graph 固定核心、本地检索与 episode 内追加加载；同轮未加载调用被拒绝，重启保留完成结果但不继承 loaded set。
 - 跨 profile 的人类消息、回复关联和任务板通知隔离已补回归；MCP 目录、校验、超时和隐私守卫已接入，64 KiB Manager 预算不影响 Worker 目录。
-- Manager/Engine/MCP 1,324 项与 Agent 类型检查通过；包含检索故障降级后恢复加载仍不重排的回归。额外检查中的 4 个遗留失败均在未修改基线复现，详见 `2026-09-12-manager-progressive-tools-implementation.md`。只保存本地 WIP，未发 PR、未部署。
-- 权限解析 RPC 缺少 `channel_id`，补充公共接口及旧调用消歧规则待用户确认；Admin 群权限对齐、集成矩阵和发布控制仍待收口。默认 full，Manager MCP 发现/执行硬门禁保持关闭，线上缓存与总成本尚未验收。
+- 已按补充确认实现权限 RPC 的完整目标校验、群复合键与 CLI 增量覆盖；默认群仅开放 memory/messaging，legacy 快照先备份隔离。保存失败不发布授权，备份不能覆盖系统模板；Schedule creator/群目标、撤权及非人类唤醒的 MCP 生产接线矩阵通过。
+- Agent 扩大回归 1,354 项、Admin 1,252 项（排除已在干净基线复现的 v1-cleanup 失败）、Web 41 项与三套类型检查通过；桌面/手机群权限保存重开验证通过。其它已知基线失败及三种 adapter 的实际请求字节数见 `2026-09-12-manager-progressive-tools-implementation.md`。
+- 权限临时硬锁已解除，默认仍 full，Manager MCP 仍需显式开关且 full/shadow 不开放外部 MCP。代码只保存到本地功能分支阶段提交，未发 PR、未部署、未开启实验。发布控制、provider/model 分层成本报表和线上缓存/成本验收仍待完成。
 
 ### Manager 首次 LLM 响应 reaction：实现与定向验证完成，待 PR 审查
 

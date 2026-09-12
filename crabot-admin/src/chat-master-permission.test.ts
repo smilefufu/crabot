@@ -111,7 +111,8 @@ describe('resolvePrincipalPermissions: admin chat 合成 master 身份', () => {
   it('不存在的普通 friend id → 仍落 minimal 兜底（回归）', async () => {
     const result = await (admin as any).resolvePrincipalPermissions({
       sender_friend_id: 'no-such-friend',
-      session_id: 'some-session',
+      channel_id: 'admin-web',
+      session_id: 'admin-chat',
       session_type: 'private',
     })
     expect(result.sources.fallback).toBe('minimal')
