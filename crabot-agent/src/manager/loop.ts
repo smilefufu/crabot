@@ -1933,13 +1933,13 @@ export class ManagerLoop {
       ...(event.diagnostics ? { diagnostics: event.diagnostics } : {}),
     })
     const usage = event.usage
-    if (usage && !this.tracedUsageResponses.has(event.responseId)) {
-      this.currentUsage.input_tokens += usage.inputTokens ?? 0
-      this.currentUsage.output_tokens += usage.outputTokens ?? 0
+    if (!this.tracedUsageResponses.has(event.responseId)) {
+      this.currentUsage.input_tokens += usage?.inputTokens ?? 0
+      this.currentUsage.output_tokens += usage?.outputTokens ?? 0
       for (const [totalKey, usageKey] of [
         ['cache_creation_tokens', 'cacheCreationTokens'], ['cache_read_tokens', 'cacheReadTokens'],
       ] as const) {
-        const value = usage[usageKey]
+        const value = usage?.[usageKey]
         if (value !== undefined && (this.tracedUsageResponses.size === 0 || this.currentUsage[totalKey] !== undefined)) {
           this.currentUsage[totalKey] = (this.currentUsage[totalKey] ?? 0) + value
         } else {

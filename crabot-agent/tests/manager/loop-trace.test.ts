@@ -266,4 +266,15 @@ describe('ManagerLoop episode trace wiring', () => {
       .toMatchObject({ request_count: 2 })
     expect(episode.spans.filter(span => (span.details as any)?.kind === 'llm_request')).toHaveLength(0)
   })
+
+  it.each([0, 1])('第 %i 条响应缺少整份 usage 时，缓存汇总不能伪装完整的零命中', async missingIndex => {
+    let request = 0
+    const { adapter } = makeAdapter()
+    adapter.stream = async function* () {
+      const usage = request === missingIndex ? undefined : { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0 }
+      yield* chunksFromContent(request++ === 0 ? [{ type: 'text', text: 'reply' }] : [], 'end_turn', usage)
+    }
+    await new ManagerLoop(deps(adapter, traceWriter)).wakeUp(timed({ kind: 'human_messages', messages: [makeMessage('hello')] }))
+    expect(traceStore.listManagerEpisodes(KEY, {}).items[0].total_usage).not.toHaveProperty('cache_read_tokens')
+  })
 })
