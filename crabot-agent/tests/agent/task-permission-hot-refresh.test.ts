@@ -4,25 +4,13 @@
  * Spec: 2026-07-20-task-permission-hot-refresh-design.md
  *
  * 覆盖：
- * 1. AgentHandler：taskState 权限持有者初始化 / updateTaskPermissions 热替换 /
- *    getTaskPrincipal 原发起人身份 / per-task 隔离 / runEngine getResolvedPermissions 接线
+ * 1. AgentHandler：updateTaskPermissions 热替换、原发起人身份和任务权限隔离
  * 2. UnifiedAgent.refreshTaskPermissions（supplement 触发点）：原身份重新解析 + fail-soft
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { AgentHandler } from '../../src/agent/agent-handler.js'
-import type { ExecuteTriggerMessageParams } from '../../src/agent/agent-handler.js'
 import { UnifiedAgent } from '../../src/unified-agent.js'
-import type { Friend, FrontAgentContext, ResolvedPermissions } from '../../src/types.js'
-
-// Mock the engine so tests don't actually run the worker loop
-vi.mock('../../src/engine/index.js', async (importOriginal) => {
-  const actual = await importOriginal() as Record<string, unknown>
-  return {
-    ...actual,
-    runEngine: vi.fn(),
-  }
-})
-import { runEngine } from '../../src/engine/index.js'
+import type { Friend, ResolvedPermissions } from '../../src/types.js'
 
 const FULL_TOOL_ACCESS = {
   memory: true, messaging: true, task: true,
@@ -71,57 +59,15 @@ function makeSdkEnv() {
   }
 }
 
-function makeFrontContext(): FrontAgentContext {
-  return {
-    sender_friend: makeFriend('f1'),
-    recent_messages: [],
-    short_term_memories: [],
-    active_tasks: [],
-    available_tools: [],
-    time_windows: {
-      recent_messages_window_hours: 4,
-      short_term_memory_window_hours: 12,
-    },
-  } as unknown as FrontAgentContext
-}
-
-function makeParams(sessionId = 's1'): ExecuteTriggerMessageParams {
-  return {
-    messages: [{
-      platform_message_id: 'm-1',
-      session: { session_id: sessionId, channel_id: 'c1', type: 'private' },
-      sender: { friend_id: 'f1', platform_user_id: 'u1', platform_display_name: 'tester' },
-      content: { type: 'text', text: 'hello' },
-      features: { is_mention_crab: false },
-      platform_timestamp: '2026-07-20T00:00:00Z',
-    }],
-    activeTasks: [],
-    isGroup: false,
-    senderFriend: makeFriend('f1'),
-    triggerArrivedAtMs: Date.now(),
-    memoryPermissions: {
-      write_visibility: 'internal',
-      write_scopes: [sessionId],
-      read_min_visibility: 'internal',
-      read_accessible_scopes: [sessionId],
-    } as never,
-    resolvedPermissions: OLD_PERMS,
-    channelId: 'c1',
-    sessionId,
-    frontContext: makeFrontContext(),
-  }
-}
-
 function makeHandler(): AgentHandler {
   return new AgentHandler(
     makeSdkEnv(),
-    { systemPrompt: 'test agent' },
+    {},
     {
       deps: {
         rpcClient: { call: vi.fn().mockResolvedValue({}) } as never,
         moduleId: 'test-agent',
         resolveChannelPort: async () => 3003,
-        getMemoryPort: async () => 3002,
         getAdminPort: async () => 0,
       },
     },
@@ -139,45 +85,32 @@ function internalsOf(handler: AgentHandler): HandlerInternals {
   return handler as unknown as HandlerInternals
 }
 
-/** 启动一个 runEngine 永不返回的 in-flight worker loop，返回 taskId 与 engine options */
-async function startPendingLoop(handler: AgentHandler, sessionId = 's1') {
-  ;(runEngine as ReturnType<typeof vi.fn>).mockImplementation(
-    () => new Promise(() => { /* never resolves: keep task in-flight */ }),
-  )
-  const params = makeParams(sessionId)
-  const pre = await handler.registerTriggerAndActivate(params)
-  void handler.runTriggerWorkerLoop(params, pre).catch(() => {})
-  await vi.waitFor(() => {
-    expect(runEngine as ReturnType<typeof vi.fn>).toHaveBeenCalled()
-  })
-  const engineOptions = (runEngine as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0].options as {
-    getResolvedPermissions?: () => ResolvedPermissions | undefined
-  }
-  return { taskId: pre.taskId, engineOptions }
+/** 保留旧任务权限辅助接口的隔离验证，不再启动已退役的 Agent 循环。 */
+function seedTask(handler: AgentHandler, sessionId = 's1') {
+  const taskId = `task-${sessionId}`
+  internalsOf(handler).activeTasks.set(taskId, {
+    triggerType: 'message',
+    resolvedPermissions: OLD_PERMS,
+    resumeWorkerContext: {
+      resolved_permissions: OLD_PERMS,
+      sender_friend: makeFriend('f1'),
+      task_origin: { channel_id: 'c1', session_id: sessionId, session_type: 'private' },
+    },
+  } as never)
+  return { taskId }
 }
 
 describe('AgentHandler 任务权限持有者', () => {
-  const handler = makeHandler()
-
   afterEach(() => {
     vi.clearAllMocks()
   })
 
-  it('loop 启动后持有者初始化为 context 权限，engine 收到 getResolvedPermissions', async () => {
+  it('updateTaskPermissions 热替换持有者 + resumeWorkerContext 快照', async () => {
     const h = makeHandler()
-    const { engineOptions } = await startPendingLoop(h)
-    expect(engineOptions.getResolvedPermissions).toBeTypeOf('function')
-    expect(engineOptions.getResolvedPermissions!()).toEqual(OLD_PERMS)
-    h.dispose()
-  })
-
-  it('updateTaskPermissions 热替换持有者 + resumeWorkerContext 快照，engine getter 立即读到新值', async () => {
-    const h = makeHandler()
-    const { taskId, engineOptions } = await startPendingLoop(h)
+    const { taskId } = await seedTask(h)
 
     h.updateTaskPermissions(taskId, FRESH_PERMS)
 
-    expect(engineOptions.getResolvedPermissions!()).toEqual(FRESH_PERMS)
     const ts = internalsOf(h).activeTasks.get(taskId)
     expect(ts?.resolvedPermissions).toEqual(FRESH_PERMS)
     expect(ts?.resumeWorkerContext?.resolved_permissions).toEqual(FRESH_PERMS)
@@ -186,7 +119,7 @@ describe('AgentHandler 任务权限持有者', () => {
 
   it('getTaskPrincipal 返回任务原发起人身份（用于按原身份重新解析）', async () => {
     const h = makeHandler()
-    const { taskId } = await startPendingLoop(h)
+    const { taskId } = await seedTask(h)
 
     const principal = h.getTaskPrincipal(taskId)
     expect(principal).toEqual({
@@ -201,8 +134,8 @@ describe('AgentHandler 任务权限持有者', () => {
 
   it('per-task 隔离：刷新 A 任务不影响 B 任务', async () => {
     const h = makeHandler()
-    const a = await startPendingLoop(h, 'sa')
-    const b = await startPendingLoop(h, 'sb')
+    const a = await seedTask(h, 'sa')
+    const b = await seedTask(h, 'sb')
 
     h.updateTaskPermissions(a.taskId, FRESH_PERMS)
 

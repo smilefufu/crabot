@@ -9,15 +9,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { ModuleBase, RpcError, generateId, sha256CanonicalJson, type AgentCliExecutionRef, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
+import { ModuleBase, RpcError, generateId, sha256CanonicalJson, type AgentCliExecutionRef, type ModuleConfig, type Event, type ModuleId } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
 import type {
   UnifiedAgentConfig,
   OrchestrationConfig,
   AgentLayerConfig,
   ChannelMessage,
-  ExecuteTaskResult,
-  ExecuteTaskParams,
   DeliverHumanResponseResult,
   MemoryPermissions,
   ResolvedPermissions,
@@ -30,11 +28,7 @@ import type {
   LLMRoleRequirement,
   LLMConnectionInfo,
   TraceCallback,
-  BuiltinToolConfig,
   SkillConfig,
-  TaskOrigin,
-  WorkerAgentContext,
-  SubAgentConfig,
   CliDomain,
 } from './types.js'
 import { CLI_DOMAINS } from './types.js'
@@ -42,23 +36,20 @@ import { SessionManager } from './orchestration/session-manager.js'
 import { PermissionChecker } from './orchestration/permission-checker.js'
 import { WorkerSelector } from './orchestration/worker-selector.js'
 import { ContextAssembler } from './orchestration/context-assembler.js'
-import { AgentLoopSubstrate } from './orchestration/agent-loop-substrate.js'
-import { ScheduledTaskRunner } from './orchestration/scheduled-task-runner.js'
 import { MemoryWriter } from './orchestration/memory-writer.js'
 import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from './orchestration/attention-scheduler.js'
 import { SessionLaneRegistry } from './orchestration/session-lane.js'
-import { AgentHandler, type SdkEnvConfig, type ExecuteTriggerMessageParams, type ExecuteTriggerMessageResult, adapterFromSdkEnv } from './agent/agent-handler.js'
+import { AgentHandler, type SdkEnvConfig, adapterFromSdkEnv } from './agent/agent-handler.js'
 import { thinkingParam } from './engine/llm-adapter-types.js'
 import { recordEngineLlmResponse, recordEngineToolLifecycle, recordSubAgentTurn } from './engine/sub-agent-trace.js'
 import type { ToolPermissionConfig, ToolDefinition as EngineToolDefinition } from './engine/types.js'
 import { filterToolsByPermission } from './engine/index.js'
 import { getConfiguredBuiltinTools, filterMcpToolsByConfig } from './engine/tools/index.js'
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpConnector, filterMcpServersForWorker } from './agent/mcp-connector.js'
 import { createTmpPageTools } from './agent/tmp-page-tools.js'
 import { createWorkspaceGitTool } from './workers/workspace-git-capability.js'
 import { createDelegateTaskTool } from './agent/delegate-task-tool.js'
-import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
+import type { PathMapping } from './mcp/crab-messaging.js'
 import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
 import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
 import { retireWorkerSupervision } from './workers/harness/supervision-retirement-migration.js'
@@ -67,13 +58,10 @@ import { TraceStore } from './core/trace-store.js'
 import { BuiltinSubagentRunner } from './workers/builtin/subagent-runner.js'
 import { BgEntityRegistry } from './engine/bg-entities/registry.js'
 import { importV2LegacyTasks } from './workers/legacy-importer.js'
-import { PromptManager } from './prompt-manager.js'
+import { assembleBuiltinWorkerPrompt } from './prompts/builtin-worker.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
 import { redactSecrets } from './engine/redact-secrets.js'
-import { AGENT_VERSION } from './constants.js'
-import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-manager.js'
-import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
 import { ActivationRegistry } from './workers/activation-registry.js'
 import { selectWorkerImplementation } from './workers/implementation-selection.js'
@@ -491,9 +479,6 @@ function normalizeResumeTriggerType(triggerType: string | undefined): 'message' 
  * builtin worker 的 skill catalog（Tier 1 渐进式披露：name + description）。Skill 工具的
  * description 明写"当任务匹配 <available_skills> 里某个技能的描述时必须先调用本工具"，
  * 不给这段清单，装了 Skill 工具的 worker 也不知道有哪些技能可用。
- *
- * 与 `AgentHandler.buildSkillListingSnapshot` 是同一份格式，**刻意并存**：那一份属于现网
- * worker loop 的组装路径，本阶段对它零改动（PR J 收编 worker loop 时随它一并删除）。
  */
 function buildWorkerSkillListing(skills: ReadonlyArray<SkillConfig> | undefined): string | undefined {
   if (!skills || skills.length === 0) return undefined
@@ -506,31 +491,6 @@ function buildWorkerSkillListing(skills: ReadonlyArray<SkillConfig> | undefined)
     return `<skill>\n<name>${s.name}</name>\n<description>${desc}</description>\n</skill>`
   }).join('\n')
   return `${intro}\n\n<available_skills>\n${body}\n</available_skills>`
-}
-
-/**
- * v3 worker 契约尾巴（protocol-agent-v3 §5）。只讲干活需要知道的事：工作目录固定且是
- * 跨实现交接的唯一介质（§5.4）、卡住时怎么收场、`finish_task` 是终态信号
- * （§5.1 "finalize 即 exited"）。
- *
- * 刻意**不写** "你没有联系人类的工具"这类否定式说明：worker 的工具列表里本来就没有
- * crab-messaging / ask_human（§5.1），提它反而把这个念头塞进上下文；"判断与转述的责任
- * 在 manager 侧"同理——那是 manager 的规矩，对 worker 干活没有帮助。
- */
-function buildBuiltinWorkerContractPrompt(workspaceRoot: string): string {
-  return [
-    '## 你的工作方式',
-    '',
-    `- **你的工作目录固定为 \`${workspaceRoot}\`，并且没有切换工作目录的工具。**`
-    + '所有中间产物和最终产出都要落在这个目录里——它是交接的唯一介质：'
-    + '你被换成另一个实现接手时，接手方只能看到这里留下的东西。',
-    '- 缺少继续所需的信息、或者需要有人拍板时，把情况和你的判断写清楚，然后结束本轮。'
-    + '你会停下来等待下一条输入。',
-    '- 任务完成或确认失败时调用 `finish_task`（`outcome` 取 `completed` 或 `failed`，`summary` 一句话）。'
-    + '这是你唯一的终态信号——不调用它，你只是停下来等下一条输入。',
-    '- 还有后台命令或子 Agent 在运行时，任务没有结束——直接结束本轮等它们的完成通知，'
-    + '不要调用 `finish_task`；等全部结束后再收尾。',
-  ].join('\n')
 }
 
 /**
@@ -721,8 +681,6 @@ export class UnifiedAgent extends ModuleBase {
   private permissionChecker: PermissionChecker
   private workerSelector: WorkerSelector
   private contextAssembler: ContextAssembler
-  private agentLoopSubstrate: AgentLoopSubstrate
-  private scheduledTaskRunner: ScheduledTaskRunner
   private memoryWriter: MemoryWriter
   private attentionScheduler: AttentionScheduler
   // SessionLane 入口：per-(channel_id, session_id) 串行
@@ -860,7 +818,6 @@ export class UnifiedAgent extends ModuleBase {
   private lspManager: LSPManager
   private builtinSubagentRunner: BuiltinSubagentRunner
   private traceCleanupInterval?: ReturnType<typeof setInterval>
-  private promptManager: PromptManager
 
   // ── Event loop watchdog ───────────────────────────────────
   // 每秒 tick 一次记录与上次 tick 的时间差。理想 1000ms，多出的就是 event loop
@@ -922,7 +879,6 @@ export class UnifiedAgent extends ModuleBase {
       (text) => redactSecrets(text, [...this.knownSecrets]),
     )
 
-    this.promptManager = new PromptManager()
 
     this.orchestrationConfig = config.orchestration
     this.initialUnifiedConfig = config
@@ -952,14 +908,6 @@ export class UnifiedAgent extends ModuleBase {
       this.rpcClient,
       config.module_id,
       async () => await this.getMemoryPort()
-    )
-    this.agentLoopSubstrate = new AgentLoopSubstrate((params) => this.handleExecuteTask(params))
-    this.scheduledTaskRunner = new ScheduledTaskRunner(
-      this.rpcClient,
-      config.module_id,
-      this.memoryWriter,
-      async () => await this.getAdminPort(),
-      this.agentLoopSubstrate,
     )
 
     // 初始化群聊注意力调度（从 extra 读取配置，fallback 到协议默认值）
@@ -1024,24 +972,6 @@ export class UnifiedAgent extends ModuleBase {
       this.roles.add(role)
     }
 
-    // MCP connections managed by mcpConnector in onStart()
-
-    const { workerPersonality } = this.buildPromptParts(config.system_prompt)
-
-    // MCP config factory: creates fresh in-process McpServer instances per task
-    // External MCP servers are managed by this.mcpConnector (connected in onStart)
-    //
-    const createMcpConfigs = (taskCtx?: TaskContext): Record<string, McpServer> => ({
-      'crab-messaging': createCrabMessagingServer({
-        rpcClient: this.rpcClient,
-        moduleId: this.config.moduleId,
-        getAdminPort: () => this.getAdminPort(),
-        resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-        enableFeishuDocTool: this.feishuChannelAvailable,
-        ...(taskCtx ? { getTaskContext: () => taskCtx } : {}),
-      }, this.sandboxPathMappingsRef),
-    })
-
     // 解析 digest 模型配置（回退链：cost_effective → powerful；Phase 5 ModelRole 重整后用新 keys）
     const digestModelConfig = config.model_config?.cost_effective ?? config.model_config?.powerful
     if (digestModelConfig) {
@@ -1059,10 +989,7 @@ export class UnifiedAgent extends ModuleBase {
         void this.lspManager.start(getWorkspaceDir())
 
         this.agentHandler = this.createWorkerHandler(
-          this.sdkEnvWorker, workerPersonality,
-          createMcpConfigs, config.builtin_tool_config, config.skills)
-        this.agentLoopSubstrate.setWorkerHandler(this.agentHandler)
-        this.scheduledTaskRunner.setWorkerHandler(this.agentHandler)
+          this.sdkEnvWorker, config.skills)
         // 让 ContextAssembler 同进程同步读取 worker 实时快照（用于 Front 汇报进度）
         this.contextAssembler.setLiveSnapshotProvider(
           (taskId) => this.agentHandler?.getLiveSnapshot(taskId)
@@ -1179,19 +1106,14 @@ export class UnifiedAgent extends ModuleBase {
       // LLM 重试期间配置热切换的通知源与代数探针（spec 2026-08-30-llm-retry-config-hotreload）
       onRuntimeConfigApplied: (listener) => this.addRuntimeConfigAppliedListener(listener),
       runtimeConfigAppliedGeneration: () => this.getRuntimeConfigAppliedGeneration(),
-      // crab-messaging：与 `createMcpConfigs` 同款依赖，但不传 `getTaskContext`——manager 不是
-      // task，且 tool-face 已把 `send_message` 的 intent 去掉，ask_human 路径对 manager 不存在。
+      // Manager 消息工具不绑定旧 task context。
       messagingDeps: {
         rpcClient: this.rpcClient,
         moduleId: this.config.moduleId,
         getAdminPort: () => this.getAdminPort(),
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-        // channel 透传只读三件套（protocol-crab-messaging §2.10）"仅当存在飞书 channel 实例
-        // 时才注入"——取值来源与 worker 侧 `createMcpConfigs` 完全一致（同一个
-        // `feishuChannelAvailable`，由 `detectFeishuChannel()` 探测）。
-        // **必须是 getter**：本对象在构造函数里就建好了（`initializeManagerStack`），而探测跑在
-        // `onStart()` 里；写成定值就永远快照到探测前的 false。worker 侧没这个问题是因为
-        // `createMcpConfigs` 本身是每个 task 现调的工厂。
+        // 飞书只读工具仅在存在对应 Channel 实例时注入；探测在 onStart 执行，
+        // 必须使用 getter，避免构造时固定为 false。
         get enableFeishuDocTool(): boolean { return self.feishuChannelAvailable },
         // P6-A §11.5-9：Admin Chat 出站 delivery 事务钩子（只作用于 exact admin-web::admin-chat）。
         adminChatDelivery: {
@@ -1601,43 +1523,24 @@ export class UnifiedAgent extends ModuleBase {
     )
   }
 
-  /**
-   * builtin worker 的 system prompt = builtin profile 的 agent prompt + 一段 v3 worker
-   * 契约尾巴。两段都在每轮 turn 现拼，admin 改人格 / skills 后下一轮即生效。
-   */
+  /** Builtin owns its prompt and capabilities; Admin personality applies only to Manager. */
   private buildBuiltinWorkerSystemPrompt(ctx: BuiltinRuntimeContext): string {
     const skillListing = buildWorkerSkillListing(this.resolveMainlineWorkerSkills(ctx))
-    const base = this.promptManager.assembleAgentPrompt({
-      profile: 'builtin_worker',
-      // 决策 4：builtin worker 不装 goal 模式（既不给 goal 工具也不给 goal 缓冲），
-      // 需要目标驱动时由 manager 在派活 prompt 里用指令表达。
-      goalModeEnabled: false,
-      ...(this.agentConfig?.system_prompt ? { adminPersonality: this.agentConfig.system_prompt } : {}),
+    return assembleBuiltinWorkerPrompt({
+      workspaceRoot: ctx.workspace.root,
       ...(skillListing ? { skillListing } : {}),
-      imageCapability: { available: this.imageCapability.available },
-      memoryToolsAvailable: false,
+      imageAvailable: this.imageCapability.available,
       ...(this.agentConfig?.subagents?.length
         ? {
-            availableSubAgents: this.agentConfig.subagents.map((subagent) => ({
+            availableSubAgents: this.agentConfig.subagents.filter((subagent) => !subagent.system_only).map((subagent) => ({
               toolName: subagent.name,
               workerHint: subagent.when_to_use.split('\n')[0] || subagent.description || subagent.name,
             })),
           }
         : {}),
+      workspaceInstructions: ctx.workspace_instructions?.snapshot.source === 'agents_md'
+        ? ctx.workspace_instructions.text : undefined,
     })
-    const workspaceInstructions = ctx.workspace_instructions?.snapshot.source === 'agents_md'
-      && ctx.workspace_instructions.text !== undefined
-      ? [
-          'The following is an immutable, read-only snapshot of the workspace AGENTS.md for this incarnation.',
-          'Follow it for this workspace. Do not modify the snapshot itself.',
-          '<workspace-agents-md>',
-          ctx.workspace_instructions.text,
-          '</workspace-agents-md>',
-        ].join('\n')
-      : undefined
-    return [base, buildBuiltinWorkerContractPrompt(ctx.workspace.root), workspaceInstructions]
-      .filter((part): part is string => part !== undefined)
-      .join('\n\n')
   }
 
   /**
@@ -1663,64 +1566,21 @@ export class UnifiedAgent extends ModuleBase {
 
   private createWorkerHandler(
     workerSdkEnv: SdkEnvConfig,
-    workerPersonality: string | undefined,
-    createMcpConfigs: (taskCtx?: TaskContext) => Record<string, McpServer>,
-    builtinToolConfig?: BuiltinToolConfig,
     skills?: ReadonlyArray<SkillConfig>,
   ): AgentHandler {
-    const imageConnInfo = this.imageConnInfo
-    const imageCapability = this.imageCapability
     const subAgents = this.agentConfig?.subagents ?? []
-    // workerPersonality 仅承载 admin personality（system_prompt）；skill listing 走独立通道，
-    // 由 AgentHandler 内部 buildSkillListingSnapshot 实时从 this.skills 拼装，
-    // 保证 updateSkills 后下一轮 LLM 调用即时生效。
     const handler = new AgentHandler(workerSdkEnv, {
-      systemPrompt: workerPersonality ?? '',
       extra: this.extra,
-      getTimezone: () => resolveTimezone(this.agentConfig?.timezone),
-      ...(this.agentConfig?.tmp_page_base_url ? { tmpPageBaseUrl: this.agentConfig.tmp_page_base_url } : {}),
     }, {
-      mcpConfigFactory: createMcpConfigs,
-      // LLM 重试期间配置热切换的通知源与代数探针（spec 2026-08-30-llm-retry-config-hotreload）
-      runtimeConfigAppliedSource: (listener) => this.addRuntimeConfigAppliedListener(listener),
-      runtimeConfigAppliedGeneration: () => this.getRuntimeConfigAppliedGeneration(),
       deps: {
         rpcClient: this.rpcClient,
         moduleId: this.config.moduleId,
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-        getMemoryPort: () => this.getMemoryPort(),
         getAdminPort: () => this.getAdminPort(),
-        getPermissionConfig: (tools, resolvedPerms) => this.getToolPermissionConfig(tools, resolvedPerms),
-        issueAgentCliExecutionEnv: async (taskId, context) => {
-          const origin = context.task_origin
-          if (!origin?.channel_id || !origin.session_id || !origin.session_type || !origin.friend_id) return undefined
-          const credential = await this.issueAgentCliCredential({
-            execution: { kind: 'legacy_task', task_id: taskId },
-            manager_key: `${origin.channel_id}::${origin.session_id}` as ManagerKey,
-            target_session: {
-              channel_id: origin.channel_id,
-              session_id: origin.session_id,
-              type: origin.session_type,
-            },
-            creator_friend_id: origin.friend_id,
-          })
-          return { CRABOT_TOKEN: credential.token, CRABOT_ACTOR: 'agent' }
-        },
-        // 透传沙盒路径映射给 outbound flush 路径，让 buffered info 携带 file_path 时
-        // 能跟 immediate-send 一样做沙盒→主机路径转换，不再 silent drop。
-        // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5
-        sandboxPathMappingsRef: this.sandboxPathMappingsRef,
       },
-      builtinToolConfig,
-      mcpConnector: this.mcpConnector,
       digestSdkEnv: this.digestSdkEnv,
       subAgents,
       skills: skills ?? [],
-      lspManager: this.lspManager,
-      memoryWriter: this.memoryWriter,
-      promptManager: this.promptManager,
-      ...(imageConnInfo ? { imageConnInfo } : {}),
-      imageCapability,
       bgRegistry: this.builtinBgRegistry,
     })
     this.builtinSubagentRunner.setRegistry(handler.getBuiltinBgEntityRegistry())
@@ -1744,18 +1604,6 @@ export class UnifiedAgent extends ModuleBase {
         console.error(`[${this.config.moduleId}] failed to release late worker shell exits:`, error)
       })
     }
-  }
-
-  /**
-   * 构建 skill catalog XML（渐进式披露 Tier 1：name + description）
-   * 输出格式遵循 Agent Skills 开源标准的 <available_skills> XML 格式。
-   */
-  private buildPromptParts(
-    systemPrompt?: string
-  ): { workerPersonality?: string } {
-    // workerPersonality 仅承载 admin personality；skill listing 走独立通道，
-    // 由 AgentHandler 内部 buildSkillListingSnapshot 实时从 this.skills 拼装。
-    return { workerPersonality: systemPrompt || undefined }
   }
 
   /**
@@ -2006,9 +1854,7 @@ export class UnifiedAgent extends ModuleBase {
         void this.lspManager.start(getWorkspaceDir())
       }
 
-      // Construct a missing cold-start handler before the live connector/config mutation. The
-      // constructor captures the connector object's identity, which remains stable through
-      // replaceWith(); any construction failure therefore leaves all live state untouched.
+      // Construct missing background services before committing the live configuration.
       if (!this.agentHandler && nextWorkerSdk && this.roles.has('worker')) {
         const prior = {
           agentConfig: this.agentConfig,
@@ -2025,20 +1871,8 @@ export class UnifiedAgent extends ModuleBase {
         this.imageConnInfo = nextImageConn
         this.imageCapability = nextImageCapability
         try {
-          const { workerPersonality } = this.buildPromptParts(candidate.system_prompt)
-          const createMcpConfigs = (taskCtx?: TaskContext): Record<string, McpServer> => ({
-            'crab-messaging': createCrabMessagingServer({
-              rpcClient: this.rpcClient,
-              moduleId: this.config.moduleId,
-              getAdminPort: () => this.getAdminPort(),
-              resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-              enableFeishuDocTool: this.feishuChannelAvailable,
-              ...(taskCtx ? { getTaskContext: () => taskCtx } : {}),
-            }, this.sandboxPathMappingsRef),
-          })
           coldHandler = this.createWorkerHandler(
-            nextWorkerSdk, workerPersonality, createMcpConfigs,
-            candidate.builtin_tool_config, candidate.skills,
+            nextWorkerSdk, candidate.skills,
           )
         } finally {
           this.agentConfig = prior.agentConfig
@@ -2062,8 +1896,7 @@ export class UnifiedAgent extends ModuleBase {
     // （MCP prepare/校验/构造）失败时 registry 不动，避免「policy 已切、配置被拒」的分裂。
     // 无该字段（旧 Admin/测试 fixture）时按新部署安全初始配置兜底：builtin enabled、
     // CLI disabled——与 Admin store 的 revision-1 语义一致，保证 builtin gate 永远可判。
-    // Install the live connector identity first. AgentHandler captures this object at construction,
-    // so replacing the field would leave existing task/tool paths pointed at retired clients.
+    // Preserve the connector identity held by existing tool closures.
     const liveMcp = this.mcpConnector
     await liveMcp.replaceWith(nextMcp)
     this.mcpConnector = liveMcp
@@ -2085,17 +1918,12 @@ export class UnifiedAgent extends ModuleBase {
     }
 
     if (this.agentHandler && nextWorkerSdk) {
-      this.agentHandler.updateMcpConnector(liveMcp)
       this.agentHandler.updateSdkEnv(nextWorkerSdk, nextDigestSdk)
       // extra 是原子替换的一部分：必须同步给已运行的 handler（goal_mode_enabled 等开关
       // 从 handler 快照读取），否则配置已换、在跑 handler 仍按旧值判定。
       this.agentHandler.setExtra(next.extra ?? {})
-      this.agentHandler.updateSystemPrompt(candidate.system_prompt)
       this.agentHandler.updateSkills(candidate.skills ?? [])
       this.agentHandler.updateSubagents(candidate.subagents ?? [])
-      if (candidate.tmp_page_base_url !== undefined) this.agentHandler.updateTmpPageBaseUrl(candidate.tmp_page_base_url)
-      this.agentHandler.updateImageConfig(nextImageConn, nextImageCapability)
-      this.scheduledTaskRunner.setWorkerHandler(this.agentHandler)
       // 配置落地通知必须在 handler 的 sdkEnv 同步完成之后（review 风险 1）：worker 的
       // onConfigChanged 在 abort() 的同步栈里就读 this.sdkEnv 建新 adapter——通知早于
       // updateSdkEnv 会让重试换上的仍是旧 provider。
@@ -2105,8 +1933,6 @@ export class UnifiedAgent extends ModuleBase {
 
     if (coldHandler) {
       this.agentHandler = coldHandler
-      this.agentLoopSubstrate.setWorkerHandler(coldHandler)
-      this.scheduledTaskRunner.setWorkerHandler(coldHandler)
       this.contextAssembler.setLiveSnapshotProvider((taskId) => this.agentHandler?.getLiveSnapshot(taskId))
     }
     // 冷启动路径同点通知：live 字段 + handler 均已就位。
@@ -3048,80 +2874,6 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
-  private async handleExecuteTask(params: ExecuteTaskParams & {
-    parent_trace_id?: string
-    parent_span_id?: string
-    related_task_id?: string
-  }): Promise<ExecuteTaskResult & { trace_id?: string }> {
-    this.assertRuntimeExecutionAdmission()
-    if (!this.agentHandler) {
-      throw new Error('Worker handler not configured')
-    }
-
-    const { parent_trace_id, parent_span_id, related_task_id, ...taskParams } = params
-
-    // 更新 sandbox 路径映射（crab-messaging send_message 需要路径转换）
-    this.sandboxPathMappingsRef.current = taskParams.context.sandbox_path_mappings ?? []
-
-    // 创建 / 复用 Trace。
-    // resume 续写：若是 resume（resumeFrom 存在），复用重启/恢复前那条 trace（已连 spans 载入），
-    // 让一个 task 跨重启是**一条连续 trace**，而非每个 run 一条；新 run 的 span 追加到旧 trace 上。
-    // 非 resume，或复用失败（罕见边界），正常新建。
-    const reactivated = taskParams.resumeFrom
-      ? (
-          taskParams.resumeFrom.resumeTraceId
-            ? this.traceStore.reactivateTraceById(taskParams.resumeFrom.resumeTraceId)
-            : this.traceStore.reactivateResumableTrace(taskParams.task.task_id)
-        )
-      : null
-    const trace = reactivated ?? this.traceStore.startTrace({
-      module_id: this.config.moduleId,
-      trigger: {
-        type: 'task',
-        summary: taskParams.task.task_title.slice(0, 200),
-        source: taskParams.context.task_origin?.channel_id,
-        task_type: taskParams.task.task_type,
-      },
-      parent_trace_id,
-      parent_span_id,
-      related_task_id,
-    })
-
-    const traceCallback = this.buildTraceCallback(trace.trace_id)
-
-    // Add context_assembly span for worker context
-    const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
-      type: 'context_assembly',
-      details: {
-        context_type: 'worker',
-        channel_id: taskParams.context.task_origin?.channel_id,
-        session_id: taskParams.context.task_origin?.session_id,
-      },
-    })
-    this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
-
-    const traceContext: import('./agent/agent-handler').WorkerTraceContext = {
-      traceStore: this.traceStore,
-      traceId: trace.trace_id,
-      relatedTaskId: related_task_id,
-    }
-
-    try {
-      const result = await this.agentHandler.executeTask(taskParams, traceCallback, traceContext)
-      const status = result.outcome === 'completed' ? 'completed' : 'failed'
-      const summary = result.error ? result.error.slice(0, 200) : (status === 'completed' ? '任务已完成' : '任务失败')
-      this.traceStore.endTrace(trace.trace_id, status, {
-        summary,
-        error: status === 'failed' ? result.error : undefined,
-      })
-      return { ...result, trace_id: trace.trace_id }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
-      throw error
-    }
-  }
-
   private async handleDeliverHumanResponse(params: {
     task_id: TaskId
     messages: ChannelMessage[]
@@ -3205,23 +2957,8 @@ export class UnifiedAgent extends ModuleBase {
           this.agentHandler.updateSdkEnv(newWorkerSdkEnv, newDigestSdkEnv)
           console.log(`[${this.config.moduleId}] Worker Agent SDK env hot-updated (in-flight loops keep old config)`)
         } else {
-          // 首次：handler 还不存在（启动期 model 没配齐），现在配齐了创建 handler。
-          const { workerPersonality } = this.buildPromptParts(this.agentConfig?.system_prompt)
-          const createMcpConfigs = (taskCtx?: TaskContext): Record<string, McpServer> => ({
-            'crab-messaging': createCrabMessagingServer({
-              rpcClient: this.rpcClient,
-              moduleId: this.config.moduleId,
-              getAdminPort: () => this.getAdminPort(),
-              resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-              enableFeishuDocTool: this.feishuChannelAvailable,
-              ...(taskCtx ? { getTaskContext: () => taskCtx } : {}),
-            }, this.sandboxPathMappingsRef),
-          })
           this.agentHandler = this.createWorkerHandler(
-            newWorkerSdkEnv, workerPersonality,
-            createMcpConfigs, this.agentConfig?.builtin_tool_config, this.agentConfig?.skills)
-          this.agentLoopSubstrate.setWorkerHandler(this.agentHandler)
-          this.scheduledTaskRunner.setWorkerHandler(this.agentHandler)
+            newWorkerSdkEnv, this.agentConfig?.skills)
           console.log(`[${this.config.moduleId}] Worker Agent SDK env created from config push`)
         }
       }

@@ -1,20 +1,9 @@
-/**
- * PromptManager - 统一提示词管理
- *
- * 所有提示词在此文件中以常量维护，不再读写外部 .md 文件。
- * 唯一的外部输入是 Admin 配置中的 system_prompt（adminPersonality）。
- *
- * 组装顺序: adminPersonality（可选）+ 产品自我认知 + 角色规则 + 能力注入（可选）
- */
+/** Channel message and memory-entry formatting for runtime context. */
 
 import type { ChannelMessage } from './types.js'
 import type { SenderIdentity } from './utils/sender-identity.js'
 import { formatChannelMessageTime, formatRelativeTime } from './utils/time.js'
 import { formatMessageContent } from './agent/media-resolver.js'
-import {
-  assembleAgentPrompt as assembleAgentPromptImpl,
-  type AssembleAgentPromptOptions,
-} from './prompts/assemble-agent.js'
 
 function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -36,8 +25,7 @@ export interface FormatChannelMessageOpts {
    * `<quoted_message>` 子标签；未命中只输出 reply_to / quote 属性，agent 仍可用
    * `mcp__crab-messaging__get_message` 拉。
    *
-   * 调用方负责异步并发预拉（agent-handler 在 buildTriggerUserPrompt 前做），helper
-   * 本身无 I/O，保持同步。
+   * 调用方负责异步并发预拉；helper 本身无 I/O，保持同步。
    */
   readonly quotedMessages?: ReadonlyMap<string, QuotedMessageEntry>
   /** 嵌套深度（递归保护）。默认 1：当前消息可展开 1 层引用；嵌套消息再嵌套就只出属性。 */
@@ -167,16 +155,4 @@ export function formatShortTermMemoryLine(
   const fullText = entry.content
   const text = fullText.length > maxLen ? fullText.slice(0, maxLen) + '...[内容截断]' : fullText
   return `- ${stamp}${sourceTag}: ${text}`
-}
-
-export class PromptManager {
-  /**
-   * 组装统一 Agent system prompt。
-   * 装配顺序由 src/prompts/assemble-agent.ts 控制。
-   *
-   * Spec: crabot-docs/superpowers/specs/2026-05-15-agent-unified-loop-redesign-design.md
-   */
-  assembleAgentPrompt(opts: AssembleAgentPromptOptions): string {
-    return assembleAgentPromptImpl(opts)
-  }
 }

@@ -889,7 +889,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     }
   })
 
-  it.each([false, true])('systemPrompt 按 builtin 能力装配并保留人格、Skill 与 workspace 快照（subagents=%s）', (withSubagents) => {
+  it.each([false, true])('systemPrompt 不受管理员人格影响，保留 Skill 与 workspace 快照（subagents=%s）', (withSubagents) => {
     const { internals } = boot(makeConfig({
       systemPrompt: '你是测试人格',
       skills: [
@@ -916,14 +916,15 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     })!
     const prompt = resolvePrompt(builtin)
 
-    // 复用现网装配：admin 人格 + skill 清单都在。
-    expect(prompt).toContain('你是测试人格')
+    expect(prompt).not.toContain('你是测试人格')
+    ;(internals as any).agentConfig.system_prompt = '另一种人格，不应进入 Worker'
+    expect(resolvePrompt(builtin)).toBe(prompt)
     expect(prompt).toContain('<available_skills>')
     expect(prompt).toContain('demo-skill')
     expect(prompt).toContain(agents)
     expect(prompt).toContain('<workspace-agents-md>')
-    expect(prompt).toContain('## 你是 Crabot 的内置执行器')
-    expect(prompt).toContain('进展、结论、证据和问题，都要清晰地说明。')
+    expect(prompt).toContain('## 你的任务')
+    expect(prompt).toContain('规划 → 执行 → 验收')
     for (const unavailable of [
       'send_message', 'ask_human', 'todo', 'lookup_friend', 'list_groups', 'list_contacts',
       'list_sessions', 'get_subagent_output', 'list_active_subagents', 'find_task',
@@ -934,10 +935,10 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).not.toContain('主控')
     expect(prompt).not.toContain('Manager')
     expect(prompt).not.toContain('## 你和 Crabot 系统的对话边界')
-    expect(prompt.includes('## 子 Agent 委派')).toBe(withSubagents)
+    expect(prompt.includes('## 可用子 Agent')).toBe(withSubagents)
     if (withSubagents) {
       expect(prompt).toContain('reviewer：需要审查时使用')
-      expect(prompt).toContain('<sub_agent_notification>')
+      expect(prompt).toContain('完成通知')
     }
     expect(prompt).not.toContain('crabot-cli')
     expect(prompt).not.toContain('crabot mcp add')
@@ -947,25 +948,11 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     // 决策 4：goal 模式关闭（GOAL_MODE_DETAILS 段不注入）。
     expect(prompt).not.toContain('## 目标模式详解')
 
-    // v3 worker 契约尾巴接在最后，且交代了协议要求 worker 知道的两件事：
-    //   1. 它自己的 workspace 是哪（§5.4：workspace 是跨实现交接的唯一介质）；
-    //   2. `finish_task` 是它的终态信号（§5.1：finalize 即 exited）——同时也是本文件
-    //      mock LLM 的分流锚点，这里一并钉住。
-    // 刻意不断言尾巴的具体措辞（原先断 '## 你的角色：worker' / '没有任何直接联系人类的
-    // 工具'，措辞一改就整片挂掉，且断的是文案不是语义）。
-    const tailStart = prompt.indexOf(workspaceRoot)
-    expect(tailStart, '契约尾巴应点名这个 worker 的 workspace').toBeGreaterThan(-1)
-    const tail = prompt.slice(tailStart)
-    expect(tail).toContain(WORKER_PROMPT_MARKER)
-    expect(tail).toContain('等待下一条输入')
-    expect(tail).toContain('不要调用 `finish_task`')
-
-    // 尾巴不提"你没有联系人类的工具"这类否定式说明：worker 的工具集里本来就没有这些原语
-    // （上面"工具集逐项断言"那组用例钉的就是这一点），在 prompt 里点名它们反而把这个念头
-    // 塞进上下文。这条断言守的是这个设计决定，不是某句文案。
-    for (const forbidden of ['send_message', 'ask_human', 'crab-messaging', '人类']) {
-      expect(tail, `契约尾巴不该提 ${forbidden}`).not.toContain(forbidden)
-    }
+    expect(prompt).toContain(workspaceRoot)
+    expect(prompt).toContain(WORKER_PROMPT_MARKER)
+    expect(prompt).toContain('需要补充输入时只结束本轮等待')
+    expect(prompt).toContain('先等收口再 finish_task')
+    expect(prompt).toContain('不要求每个任务都创建文件')
   })
 
   // --- 缺配置时 fail-loud ---

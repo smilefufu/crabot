@@ -88,6 +88,27 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     await expect(runner.recoverAfterRestart()).rejects.toThrow('registry is unavailable')
   })
 
+  it.each(['code_planner', 'code_writer', 'task_reviewer'])('子任务按 %s 自身的模型连接派发', async (name) => {
+    spawnPersistentAgent.mockResolvedValue('agent-child')
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+    const adapter = { role: name }
+    createAdapter.mockReturnValue(adapter)
+    const model = {
+      endpoint: `https://${name.replaceAll('_', '-')}.example.test`,
+      apikey: 'test-key', model_id: `${name}-model`, format: 'openai' as const,
+    }
+
+    await runner.run(
+      testSubagent({ name, model }),
+      { task: '完成已明确的子任务' },
+      { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } },
+      [], executionContext(),
+    )
+
+    expect(createAdapter).toHaveBeenCalledWith({ endpoint: model.endpoint, apikey: model.apikey, format: model.format })
+    expect(spawnPersistentAgent.mock.calls[0][0]).toMatchObject({ model: model.model_id, adapter })
+  })
+
   it('异步 child 继承 Worker 权限和完整执行 hooks', async () => {
     spawnPersistentAgent.mockResolvedValue('agent-child')
     const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)

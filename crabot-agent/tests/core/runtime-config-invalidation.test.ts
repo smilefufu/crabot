@@ -113,18 +113,15 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(agent.agentConfig.max_iterations).toBe(2)
   })
 
-  it('rejects schedule, background maintenance, task execution, and new worker runtime resolution while stale', async () => {
+  it('rejects schedule, background maintenance, and new worker runtime resolution while stale', async () => {
     const agent = new UnifiedAgent(config()) as any
     agent.configAuthenticated = true
     agent.configStale = true
     const routeSchedule = vi.spyOn(agent.managerStack.registry, 'routeSchedule')
     const ledgerWrite = vi.spyOn(agent.managerStack.ledger, 'upsertWorker')
     const workerSpawn = vi.spyOn(agent.managerStack.harness, 'spawnWorker')
-    const execute = vi.fn()
-    agent.agentHandler = { executeTask: execute }
     await expect(agent.handleTriggerSchedule({ schedule_id: 's', title: 's' })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
     await expect(agent.handleTriggerSchedule({ schedule_id: 'maintenance', title: 'maintenance', task_type: 'memory_maintenance', is_builtin: true })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
-    await expect(agent.handleExecuteTask({ task: { task_id: 't', task_title: 't' }, context: {} })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
     await expect(agent.managerStack.harness.spawnWorker({
       managerKey: 'admin-web::admin-chat', title: 'new', prompt: 'new',
       origin: { trigger_type: 'human' }, report_to: { channel_id: 'admin-web', session_id: 'admin-chat' },
@@ -132,7 +129,6 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(routeSchedule).not.toHaveBeenCalled()
     expect(ledgerWrite).not.toHaveBeenCalled()
     expect(workerSpawn).toHaveBeenCalledOnce()
-    expect(execute).not.toHaveBeenCalled()
   })
 
   it('rejects media completion Manager wakes while runtime config is stale', async () => {

@@ -297,8 +297,8 @@ describe('ManagerRegistry', () => {
     await registry.routeSchedule(scheduleWake({ scheduleId: 'sc', title: 't', description: 'd' }))
     await registry.routeHumanMessages('wechat', 'sess-normal', [makeChannelMessage('hi')])
 
-    expect(calls[0].systemPrompt).toContain('系统线程纪律')
-    expect(calls[2].systemPrompt).not.toContain('系统线程纪律')
+    expect(calls[0].systemPrompt).toContain('## 系统线程')
+    expect(calls[2].systemPrompt).not.toContain('## 系统线程')
   })
 
   // --- routeHumanMessages ---
