@@ -16,7 +16,7 @@
  */
 
 import { defineTool } from '../../engine/index.js'
-import type { ToolDefinition } from '../../engine/index.js'
+import type { ToolCallContext, ToolDefinition } from '../../engine/index.js'
 import type { ResolvedPermissions } from '../../types.js'
 import type { MasterAuthorization } from '../principal.js'
 
@@ -338,38 +338,10 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
     return result.schedule
   }
 
-  // --- get_system_status ---
-  // 组合来源:admin RPC `get_task_stats`(任务积压快照) + `list_agent_instances` /
-  // `list_channel_instances` 的 pagination.total_items(实例数量)。admin 没有现成的
-  // "系统整体状态" RPC,这里只取数量级摘要;完整拓扑详情见 get_deployment_info。
-  const getSystemStatus = defineTool({
-    name: 'get_system_status',
-    description:
-      '查询 crabot 系统整体运行状态摘要:worker 任务积压情况(按 status/priority 计数)、' +
-      '已配置的 agent 实例数与 channel 实例数。用于回答"系统现在忙不忙/有多少任务在跑"一类问题。',
-    inputSchema: { type: 'object', properties: {} },
-    isReadOnly: true,
-    call: async () => {
-      try {
-        const [taskStats, agentInstances, channelInstances] = await Promise.all([
-          callAdmin<Record<string, never>, unknown>('get_task_stats', {}),
-          callAdmin<typeof FULL_PAGE, PaginatedResult<unknown>>('list_agent_instances', FULL_PAGE),
-          callAdmin<typeof FULL_PAGE, PaginatedResult<unknown>>('list_channel_instances', FULL_PAGE),
-        ])
-        return ok({
-          task_stats: taskStats,
-          agent_instance_count: agentInstances.pagination.total_items,
-          channel_instance_count: channelInstances.pagination.total_items,
-        })
-      } catch (error) {
-        return fail(error)
-      }
-    },
-  })
-
-  // --- get_deployment_info ---
+  // --- inspect_crabot views ---
   // P6-D：Agent 侧唯一是 exact core `crabot-agent`（静态身份，不再调 list_agent_instances）；
-  // channel 实例仍走 admin RPC。数量级摘要见 get_system_status。
+  // channel 实例仍走 admin RPC。三个旧入口共用一个带 view 的可调用工具，避免模型在同一
+  // 自省语义下重复选择工具；各 view 的数据源、脱敏和错误语义保持不变。
   interface AgentInstanceLite {
     readonly id: string
     readonly name: string
@@ -744,6 +716,32 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
     },
   })
 
+  const inspectCrabot = defineTool({
+    name: 'inspect_crabot',
+    description:
+      '查询 crabot 的只读自省信息。view=deployment 查看部署拓扑，view=config 查看已脱敏运行配置，' +
+      'view=capabilities 查看已安装的 Agent/Worker/Channel 能力清单。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        view: { type: 'string', enum: ['deployment', 'config', 'capabilities'] },
+      },
+      required: ['view'],
+    },
+    isReadOnly: true,
+    call: async (input, context: ToolCallContext) => {
+      const view = input.view
+      const target = view === 'deployment'
+        ? getDeploymentInfo
+        : view === 'config'
+          ? getConfigSummary
+          : view === 'capabilities' ? listCapabilities : undefined
+      if (!target) return fail(new Error('inspect_crabot.view 必须是 deployment、config 或 capabilities'))
+      return target.call({}, context)
+    },
+  })
+
   // --- get_friend_permissions ---
   // 直接对应 admin RPC `get_friend_permissions`(registerMethod 原样注册),参数/结果原样透传。
   const getFriendPermissions = defineTool({
@@ -776,15 +774,12 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
   })
 
   return [
-    getSystemStatus,
-    getDeploymentInfo,
+    inspectCrabot,
     ...(createSchedule && getSchedule ? [createSchedule, getSchedule] : []),
     listSchedules,
     ...(updateSchedule && deleteSchedule && triggerSchedule
       ? [updateSchedule, deleteSchedule, triggerSchedule]
       : []),
-    getConfigSummary,
-    listCapabilities,
     getFriendPermissions,
   ]
 }

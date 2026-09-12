@@ -5,6 +5,12 @@
 
 ## 当前状态
 
+### Manager 工具语义精简：独立 55 工具发布基线
+
+- 按已确认 `2026-09-03-manager-tool-surface-optimization-design.md` 的第一发布阶段，退役语义失真的 `get_system_status`，三项只读自省合并为 `inspect_crabot(view)`；数据源、脱敏和错误语义不变。
+- 普通 Manager 仍完整装配 55 项业务工具，含六项 Schedule 工具；保留 `send_private_message`。本版本不包含渐进加载、search_tools、外部 MCP 或权限迁移。
+- 本地验证后走独立 PR，不自行部署。部署后须观察至少 72 小时；后续加载器 full control 为 56 项，不能替代本基线。
+
 ### Manager 首次 LLM 响应 reaction：实现与定向验证完成，待 PR 审查
 
 - 按用户修订后的 `2026-09-10-manager-input-reaction-timing-design.md`，初始与追加输入在首次包含它的主处理 LLM 请求完整成功返回后自动确认，不等待工具或 episode 收尾；Channel 与 Admin Chat 同步。
