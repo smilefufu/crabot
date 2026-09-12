@@ -1,9 +1,16 @@
 # Crabot 项目进度
 
-> 最后整理：2026-09-10
+> 最后整理：2026-09-12
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
+
+### Manager 工具渐进加载：实现中，权限前置待确认
+
+- 已按确认 spec 实现自省精简、normal/daily/graph 固定核心、本地检索与 episode 内追加加载；同轮未加载调用被拒绝，重启保留完成结果但不继承 loaded set。
+- 跨 profile 的人类消息、回复关联和任务板通知隔离已补回归；MCP 目录、校验、超时和隐私守卫已接入，64 KiB Manager 预算不影响 Worker 目录。
+- Manager/Engine/MCP 1,324 项与 Agent 类型检查通过；包含检索故障降级后恢复加载仍不重排的回归。额外检查中的 4 个遗留失败均在未修改基线复现，详见 `2026-09-12-manager-progressive-tools-implementation.md`。只保存本地 WIP，未发 PR、未部署。
+- 权限解析 RPC 缺少 `channel_id`，补充公共接口及旧调用消歧规则待用户确认；Admin 群权限对齐、集成矩阵和发布控制仍待收口。默认 full，Manager MCP 发现/执行硬门禁保持关闭，线上缓存与总成本尚未验收。
 
 ### Manager 首次 LLM 响应 reaction：实现与定向验证完成，待 PR 审查
 

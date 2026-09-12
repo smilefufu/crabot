@@ -38,6 +38,22 @@ function requestBodies(fetchMock: ReturnType<typeof mockFetch>): Array<Record<st
 afterEach(() => vi.unstubAllGlobals())
 
 describe('OpenAI prompt cache key', () => {
+  it.each(formats)('%s 加载尾部、full 回退与旧工具历史均不改变 key 和核心前缀', async (format) => {
+    const fetchMock = mockFetch()
+    const adapter = createAdapter({ ...connection, format })
+    const core = { ...tool, cacheBreakpoint: true, traceMetadata: { connector_generation: 99 } }
+    const tail = { ...tool, name: 'tail_tool' }
+    const messages = [
+      createAssistantMessage([{ type: 'tool_use', id: 'closed-call', name: 'old_episode_tool', input: {} }], 'tool_use'),
+      createToolResultMessage('closed-call', 'closed result', false),
+    ]
+    for (const tools of [[core, tail], [core], [core, tail]]) await callNonStreaming(adapter, { ...params, messages, tools })
+    const bodies = requestBodies(fetchMock)
+    expect(new Set(bodies.map((body) => body.prompt_cache_key)).size).toBe(1)
+    expect((bodies[0].tools as unknown[])[0]).toEqual((bodies[1].tools as unknown[])[0])
+    expect(JSON.stringify(bodies[1])).toContain('old_episode_tool')
+    expect(JSON.stringify(bodies)).not.toMatch(/cacheBreakpoint|connector_generation|additional_tools|prompt_cache_options/)
+  })
   it('preserves an SSE error event instead of masking it as a missing finish reason', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
       `data: ${JSON.stringify({ error: { code: 'insufficient_quota', message: 'fixture quota exhausted' } })}\n\ndata: [DONE]\n\n`,

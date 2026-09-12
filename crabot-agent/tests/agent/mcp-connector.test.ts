@@ -47,28 +47,25 @@ describe('McpConnector.reconnect', () => {
     const client = live.getClient('B') as any
     client.callTool.mockResolvedValueOnce({ content: [{ type: 'text', text: 'from-candidate' }] })
     await expect(tool.call({ value: 'x' })).resolves.toMatchObject({ output: 'from-candidate' })
-    expect(client.callTool).toHaveBeenCalledWith({ name: 'echo', arguments: { value: 'x' } })
+    expect(client.callTool).toHaveBeenCalledWith(
+      { name: 'echo', arguments: { value: 'x' } },
+      undefined,
+      { signal: expect.any(AbortSignal), timeout: 120_000 },
+    )
   })
 
-  it('prepare tolerates a single server failure like startup connectAll (no all-or-nothing)', async () => {
-    // 与启动路径 connectAll 对齐：单台第三方 MCP server 连不上/探不出工具只降级该
-    // server，不得让 prepare reject —— 否则 pullRuntimeConfig 会把「MCP 挂了」升级成
-    // 「配置不可信」，configStale + 断开所有连接 + 全执行入口 fail closed。
+  it('prepare 只发布各 server 的完整目录，失败 server 不抑制其它连接', async () => {
     const { Client } = await import('@modelcontextprotocol/sdk/client/index.js') as any
     Client.mockImplementationOnce(() => ({
       connect: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined),
       listTools: vi.fn().mockRejectedValue(new Error('discovery failed')), callTool: vi.fn(),
     }))
     const candidate = await McpConnector.prepare([cfgA, cfgB])
-    // 并行连接中消耗失败 mock 的那台探不出工具（不进 cache），另一台照常；
-    // 两台都保持连接，prepare 不得 reject。
-    const cached = candidate.getAllTools().map((tool) => tool.name)
-      .filter((name) => name === 'mcp__A__echo' || name === 'mcp__B__echo')
-    expect(cached).toHaveLength(1)
+    expect(candidate.getAllTools().map((tool) => tool.name)).toEqual(['mcp__B__echo'])
     expect(candidate.count).toBe(2)
     await connector.replaceWith(candidate)
     expect(connector.count).toBe(2)
-    expect(connector.getAllTools().map((tool) => tool.name).filter((name) => name === 'mcp__A__echo' || name === 'mcp__B__echo')).toHaveLength(1)
+    expect(connector.getAllTools().map((tool) => tool.name)).toEqual(['mcp__B__echo'])
   })
 
   it('reconnect 成功路径：cachedTools 含新 server', async () => {
@@ -100,24 +97,40 @@ describe('McpConnector.reconnect', () => {
     expect(connector.getAllTools().some(t => t.name === 'mcp__C__echo')).toBe(true)
   })
 
-  it('reconnect 失败时回滚到旧状态（软原子）', async () => {
+  it('candidate prepare 失败时旧连接和旧工具仍可执行', async () => {
     await connector.connectAll([cfgA, cfgB])
     expect(connector.count).toBe(2)
     const oldToolNames = connector.getAllTools().map(t => t.name).sort()
 
-    // Spy on connectAll to throw on the next call (simulating refreshToolCache or
-    // dedup step blowing up — the only practical path into the catch block).
-    const spy = vi.spyOn(connector, 'connectAll').mockRejectedValueOnce(new Error('boom'))
+    const oldClient = connector.getClient('A')!
+    const spy = vi.spyOn(McpConnector, 'prepare').mockRejectedValueOnce(new Error('boom'))
 
     await expect(connector.reconnect([cfgC])).rejects.toThrow('boom')
 
-    // 字段引用已恢复（注意软原子：底层 transport 已断开，但 Map 内容是旧的）
     expect(connector.count).toBe(2)
     expect(connector.getAllTools().map(t => t.name).sort()).toEqual(oldToolNames)
     expect(connector.getClient('A')).toBeDefined()
     expect(connector.getClient('B')).toBeDefined()
+    expect(oldClient.close).not.toHaveBeenCalled()
+    vi.mocked(oldClient.callTool).mockResolvedValueOnce({ content: [{ type: 'text', text: 'still live' }] })
+    await expect(connector.getAllTools()[0].call({}, {})).resolves.toMatchObject({ output: 'still live', isError: false })
 
     spy.mockRestore()
+  })
+
+  it('同 schema 重连仍使旧定义失效，新定义使用 live generation', async () => {
+    await connector.connectAll([cfgA])
+    const original = connector.getAllTools()[0]
+    await connector.reconnect([cfgA])
+    const current = connector.getAllTools()[0]
+    const client = connector.getClient('A')!
+    vi.mocked(client.callTool).mockResolvedValue({ content: [{ type: 'text', text: 'current' }] })
+    await expect(original.call({}, {})).resolves.toMatchObject({ output: 'TOOL_CATALOG_CHANGED', isError: true })
+    expect(current.traceMetadata?.connector_generation).toBe(connector.generation)
+    await expect(current.call({}, {})).resolves.toMatchObject({ output: 'current', isError: false })
+    await connector.reconnect([cfgA])
+    await expect(current.call({}, {})).resolves.toMatchObject({ output: 'TOOL_CATALOG_CHANGED', isError: true })
+    expect(client.callTool).toHaveBeenCalledTimes(1)
   })
 })
 

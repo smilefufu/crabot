@@ -714,6 +714,7 @@ export interface LLMConnectionInfo {
 
 export interface MCPServerConfig {
   name: string
+  description?: string
   transport?: 'stdio' | 'streamable-http' | 'sse'
   // stdio fields
   command?: string

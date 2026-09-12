@@ -123,6 +123,8 @@ export type PermissionDecision =
 // --- Tool Definition ---
 
 export interface ToolCallContext {
+  /** Caller-owned missing-tool errors; this callback must never execute a hidden tool. */
+  readonly unavailableToolResult?: (name: string) => ToolCallResult
   readonly abortSignal?: AbortSignal
   readonly onProgress?: (message: string) => void
   /** IANA 时区名（如 "Asia/Shanghai"），用于 tool_result 时间戳渲染 */
@@ -144,6 +146,13 @@ export interface ToolCallResult {
   readonly output: string
   readonly images?: ReadonlyArray<{ readonly media_type: string; readonly data: string }>
   readonly isError: boolean
+  /** Local-only execution metadata; never serialized into the provider tool result. */
+  readonly traceMetadata?: ToolTraceMetadata
+}
+
+/** Non-provider metadata retained for local lifecycle tracing. */
+export interface ToolTraceMetadata {
+  readonly [key: string]: string | number | boolean | undefined
 }
 
 export interface ToolDefinition {
@@ -153,6 +162,16 @@ export interface ToolDefinition {
   readonly isReadOnly: boolean
   readonly permissionLevel?: ToolPermissionLevel
   readonly category?: ToolCategory
+  readonly traceMetadata?: ToolTraceMetadata
+  /** Adapter-local stable tool prefix boundary; not part of JSON Schema. */
+  readonly cacheBreakpoint?: boolean
+  /** Trusted local search fields, never instructions and never sent as tool schema. */
+  readonly searchMetadata?: {
+    readonly aliases?: readonly string[]
+    readonly tags?: readonly string[]
+    readonly namespace?: string
+    readonly namespaceDescription?: string
+  }
   /**
    * 仅 turn 0 可调用。在 turn ≥ 1 调用此工具时，引擎不真正执行 `call`，
    * 而是返回 error 类工具结果（"Tool 'X' is only callable on turn 0..."），
@@ -217,6 +236,7 @@ export interface EngineTurnEvent {
     readonly id: string
     readonly name: string
     readonly input: Record<string, unknown>
+    readonly traceMetadata?: ToolTraceMetadata
     readonly output: string
     readonly isError: boolean
     /** Per-tool wall-clock duration (ms) */
@@ -250,6 +270,7 @@ export type EngineToolLifecycleEvent =
       readonly toolUseId: string
       readonly name: string
       readonly input: Record<string, unknown>
+      readonly traceMetadata?: ToolTraceMetadata
       readonly startedAtMs: number
     }
   | {
@@ -260,6 +281,7 @@ export type EngineToolLifecycleEvent =
       readonly toolUseId: string
       readonly name: string
       readonly input: Record<string, unknown>
+      readonly traceMetadata?: ToolTraceMetadata
       readonly output: string
       readonly isError: boolean
       readonly startedAtMs: number
@@ -337,6 +359,7 @@ export type EndTurnGateResult =
   | null
 
 export interface EngineOptions {
+  readonly unavailableToolResult?: ToolCallContext['unavailableToolResult']
   readonly systemPrompt: Resolvable<string>
   readonly tools: Resolvable<ReadonlyArray<ToolDefinition>>
   readonly model: string
@@ -627,7 +650,10 @@ export function createBatchToolResultMessage(
   return {
     id: randomUUID(),
     role: 'user',
-    toolResults: results,
+    toolResults: results.map(({ tool_use_id, content, images, is_error }) => ({
+      tool_use_id, content, is_error,
+      ...(images !== undefined ? { images } : {}),
+    })),
     timestamp: Date.now(),
   }
 }

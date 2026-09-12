@@ -8,6 +8,7 @@ import {
 } from '../engine/types.js'
 import type { TimedWakeEnvelope } from './loop.js'
 import type { ManagerSessionState } from './types.js'
+import type { ManagerToolProfile } from './tools/tool-catalog.js'
 
 /** Private execution state; never returned by the Manager read model. */
 export interface ManagerResumeCheckpoint {
@@ -16,6 +17,8 @@ export interface ManagerResumeCheckpoint {
   readonly envelopes: ReadonlyArray<TimedWakeEnvelope>
   readonly wakeIndex: number
   readonly pending: ReadonlyArray<TimedWakeEnvelope>
+  /** Profile fixed at episode admission; older checkpoints infer it from wake envelopes. */
+  readonly toolProfile?: ManagerToolProfile
   readonly hasEngineMessages: boolean
   readonly turns: ReadonlyArray<EngineTurnEvent>
   readonly responses: ReadonlyArray<EngineLlmResponseEvent>

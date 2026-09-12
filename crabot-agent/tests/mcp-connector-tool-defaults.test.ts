@@ -72,7 +72,7 @@ describe('McpConnector tool_defaults', () => {
     expect(callToolSpy).toHaveBeenCalledWith({
       name: 'fetch',
       arguments: { real_chrome: true, url: 'https://example.com' },
-    })
+    }, undefined, { signal: expect.any(AbortSignal), timeout: 120_000 })
   })
 
   it('LLM explicit value takes priority over tool_defaults', async () => {
@@ -99,7 +99,7 @@ describe('McpConnector tool_defaults', () => {
     expect(callToolSpy).toHaveBeenCalledWith({
       name: 'fetch',
       arguments: { real_chrome: false, headless: true, url: 'https://example.com' },
-    })
+    }, undefined, { signal: expect.any(AbortSignal), timeout: 120_000 })
   })
 
   it('tools without matching defaults are unaffected', async () => {
@@ -126,7 +126,7 @@ describe('McpConnector tool_defaults', () => {
     expect(callToolSpy).toHaveBeenCalledWith({
       name: 'get',
       arguments: { url: 'https://example.com' },
-    })
+    }, undefined, { signal: expect.any(AbortSignal), timeout: 120_000 })
   })
 
   it('works without tool_defaults configured', async () => {
@@ -150,6 +150,6 @@ describe('McpConnector tool_defaults', () => {
     expect(callToolSpy).toHaveBeenCalledWith({
       name: 'fetch',
       arguments: { url: 'https://example.com' },
-    })
+    }, undefined, { signal: expect.any(AbortSignal), timeout: 120_000 })
   })
 })

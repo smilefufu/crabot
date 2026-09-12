@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { executeToolBatches } from '../../src/engine/tool-orchestration'
 import { defineTool } from '../../src/engine/tool-framework'
-import type { EngineToolLifecycleEvent, ToolCallResult, ToolDefinition, ToolUseBlock } from '../../src/engine/types'
+import { createBatchToolResultMessage, type EngineToolLifecycleEvent, type ToolCallResult, type ToolDefinition, type ToolUseBlock } from '../../src/engine/types'
 
 function makeBlock(name: string, id: string, input: Record<string, unknown> = {}): ToolUseBlock {
   return { type: 'tool_use', id, name, input }
@@ -18,6 +18,22 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => voi
 }
 
 describe('executeToolBatches', () => {
+  it('静态身份与本次调用 metadata 同时传播，但不进入工具结果消息', async () => {
+    const events: EngineToolLifecycleEvent[] = []
+    const metadata = { mcp_server: 'server', connector_generation: 2, mcp_timed_out: true }
+    const tool = defineTool({
+      name: 'mcp__server__tool', description: '', inputSchema: {},
+      traceMetadata: { mcp_server: 'server', connector_generation: 2 },
+      call: async () => ({ output: 'MCP_TIMEOUT', isError: true, traceMetadata: { mcp_timed_out: true } }),
+    })
+    const results = await executeToolBatches(
+      [{ parallel: false, blocks: [makeBlock(tool.name, 'id')] }], [tool], undefined, undefined, undefined,
+      { responseId: 'response', turnNumber: 1, callIds: new Map([['id', 'call']]), onToolLifecycle: (event) => events.push(event) },
+    )
+    expect(results[0].traceMetadata).toEqual(metadata)
+    expect(events[1].traceMetadata).toEqual(metadata)
+    expect(JSON.stringify(createBatchToolResultMessage(results))).not.toContain('traceMetadata')
+  })
   const slowReadTool = defineTool({
     name: 'slow_read',
     description: 'Slow read-only tool',

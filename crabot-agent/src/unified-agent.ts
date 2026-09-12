@@ -185,6 +185,8 @@ const BARRIER_TIMEOUT_MS = 8_000
 const CLI_SUBAGENT_HARVEST_DELAY_MS = 30_000
 const DEFAULT_TMP_PAGE_PORT = 19099
 const WORKBOARD_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000] as const
+// Keep the production gate closed until composite group authorization and legacy isolation pass.
+const MANAGER_MCP_AUTHORIZATION_READY = false
 
 type WorkboardAdminMutation =
   | { readonly action: 'create_objective'; readonly objective: WorkboardObjectiveDraft }
@@ -1208,6 +1210,27 @@ export class UnifiedAgent extends ModuleBase {
       callAdmin: async <P, R>(method: string, params: P): Promise<R> =>
         this.rpcClient.call<P, R>(await this.getAdminPort(), method, params, this.config.moduleId),
       getRuntimeConfigSummary: () => this.agentConfig,
+      managerMcpToolsFor: ({ permissions }) => {
+        if (!MANAGER_MCP_AUTHORIZATION_READY || process.env.CRABOT_MANAGER_MCP_ENABLED !== '1' || !permissions) return []
+        return this.mcpConnector.getAllTools().filter((tool) => {
+          const category = tool.category
+          return (category === 'desktop' || category === 'mcp_skill') && permissions.tool_access[category] === true
+        })
+      },
+      managerMcpToolAuthorization: async ({ targetSession, creatorFriendId, category }) => {
+        if (!MANAGER_MCP_AUTHORIZATION_READY || process.env.CRABOT_MANAGER_MCP_ENABLED !== '1' || !targetSession
+          || (targetSession.type === 'private' && !creatorFriendId)
+          || (category !== 'desktop' && category !== 'mcp_skill')) return false
+        const permissions = await this.resolvePrincipalPermissions(
+          targetSession.type === 'private' ? creatorFriendId : undefined,
+          targetSession.session_id,
+          targetSession.type,
+        )
+        if (!permissions) return false
+        return category === 'desktop'
+          ? permissions.tool_access.desktop
+          : permissions.tool_access.mcp_skill
+      },
       // 发起人身份的解析原料：全是**既有**入口，本处只做注入，不新造解析逻辑。
       principalResolver: {
         resolvePermissions: (p) =>
