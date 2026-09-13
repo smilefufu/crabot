@@ -147,6 +147,7 @@ function ActionList({ episode, runningWorkerIds }: { episode: ManagerEpisodeTrac
   if (!episode.actions?.length) return null
   return (
     <div className="manager-detail__actions">
+      <strong>本轮操作</strong>
       {episode.actions.map((action, index) => (
         <div key={`${index}-${action.kind}-${action.worker_id ?? ''}`} className="manager-detail__action">
           {action.worker_id ? (
@@ -321,12 +322,12 @@ function EpisodeEntry({ episode, progress, runningWorkerIds }: { episode: Manage
       <div className="manager-detail__event-body">
         <div className="manager-detail__event-header">
           <div className="manager-detail__event-labels">
-            <span>{TRIGGER_LABEL[episode.trigger.type]}</span>
+            <span>管理回合</span>
             <span className="manager-detail__episode-status">{episodeActivityStatusLabel(episode.status)}</span>
           </div>
           <TechnicalDetails episode={episode} />
         </div>
-        <div className="manager-detail__event-title">{triggerText(episode)}</div>
+        <div className="manager-detail__event-title"><span>本轮起因：</span><span>{triggerText(episode)}</span></div>
         <EpisodeActivity episode={episode} progress={progress} runningWorkerIds={runningWorkerIds} />
       </div>
     </article>
@@ -337,7 +338,7 @@ function EpisodeActivity({ episode, progress, runningWorkerIds }: { episode: Man
   const workerProgress = groupWorkerProgress(progress)
   return (
     <>
-      {episode.reply_excerpt && <div className="manager-detail__reply"><strong>管理会话回复</strong>：{episode.reply_excerpt}</div>}
+      {episode.reply_excerpt && <div className="manager-detail__reply"><strong>本轮回复</strong>：{episode.reply_excerpt}</div>}
       <ActionList episode={episode} runningWorkerIds={runningWorkerIds} />
       {episode.status === 'failed' && <div className="manager-detail__failure">失败原因：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
       {workerProgress.length > 0 && (
