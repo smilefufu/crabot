@@ -59,7 +59,23 @@ const FORCED_SUMMARY_PROMPT =
 // --- Core Loop ---
 
 export async function runEngine(params: RunEngineParams): Promise<EngineResult> {
-  const { prompt, adapter, options, initialMessages } = params
+  const { prompt, initialMessages } = params
+  let { adapter, options } = params
+  const reloadConfig = options.onConfigChanged
+  const onConfigChanged = reloadConfig ? async () => {
+    const update = await reloadConfig()
+    if (update) {
+      // 重试接纳的模型配置属于本次执行，后续工具轮次不能回到起点的旧快照。
+      if (update.adapter) adapter = update.adapter
+      options = {
+        ...options,
+        ...(update.model !== undefined ? { model: update.model } : {}),
+        ...('maxTokens' in update ? { maxTokens: update.maxTokens } : {}),
+        ...('thinking' in update ? { thinking: update.thinking } : {}),
+      }
+    }
+    return update
+  } : undefined
   const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS
   const abortSignal = options.abortSignal
 
@@ -203,7 +219,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         signal: abortSignal,
         configChangedSignal: options.configChangedSignal,
         configGeneration: options.configGeneration,
-        onConfigChanged: options.onConfigChanged,
+        onConfigChanged,
         onRetry: (event) => {
           if (options.onLiveProgress) {
             options.onLiveProgress({
