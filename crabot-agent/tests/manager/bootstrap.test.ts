@@ -961,7 +961,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
           if (requests.length === 1) {
             const byName = new Map(params.tools.map((tool) => [tool.name, tool]))
             expect([...byName.keys()]).toEqual(expect.arrayContaining([
-              'inspect_workboard', 'change_workboard', 'inspect_project_docs', 'manage_decision_doc',
+              'inspect_workboard', 'change_workboard', 'inspect_project_docs',
             ]))
             const objectiveCreated = JSON.parse((await byName.get('change_workboard')!.call({
               action: 'create_objective',

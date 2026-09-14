@@ -131,11 +131,10 @@ describe('project document tools', () => {
     return tools(wakeEvent, managerPrincipalPermissions).find((entry) => entry.name === name)!
   }
 
-  it('只暴露项目文档读取与决策写入两个工具，且没有 worker_id 参数', () => {
+  it('只暴露项目文档读取，且没有 worker_id 参数或写入入口', () => {
     const built = tools(humanWake(permissions()))
-    expect(built.map((entry) => entry.name)).toEqual(['inspect_project_docs', 'manage_decision_doc'])
+    expect(built.map((entry) => entry.name)).toEqual(['inspect_project_docs'])
     expect(built[0].isReadOnly).toBe(true)
-    expect(built[1].isReadOnly).toBe(false)
     expect(JSON.stringify(built.map((entry) => entry.inputSchema))).not.toContain('worker_id')
   })
 
@@ -209,19 +208,19 @@ describe('project document tools', () => {
     }
   })
 
-  it('storage 约束读取范围，read 档位不能写决策', async () => {
+  it('storage 约束读取范围，read 档位可以读取而不创建文档', async () => {
     const outside = humanWake(permissions({ storage: { workspace_path: sibling, access: 'readwrite' } }))
     expect((await tool(outside, 'inspect_project_docs').call({ project_root: project, operation: 'list' }, {} as never)).isError).toBe(true)
 
     const readOnly = humanWake(permissions({ storage: { workspace_path: project, access: 'read' } }))
-    const result = await tool(readOnly, 'manage_decision_doc').call({
+    const result = await tool(readOnly, 'inspect_project_docs').call({
       project_root: project,
-      action: 'create',
-      file_name: '2026-09-04-read-only.md',
-      content: '# 只读\n',
+      operation: 'read',
+      path: 'README.md',
     }, {} as never)
-    expect(result.isError).toBe(true)
-    await expect(fs.access(join(project, 'docs', 'decisions', '2026-09-04-read-only.md'))).rejects.toThrow()
+    expect(result.isError).toBe(false)
+    expect(JSON.parse(result.output).content).toBe('# 项目\n入口说明')
+    await expect(fs.access(join(project, 'docs', 'decisions'))).rejects.toThrow()
   })
 
   it('拒绝非规范化的 storage 与 Worker workspace 授权根', async () => {
@@ -292,36 +291,6 @@ describe('project document tools', () => {
       query: 'inside',
     }, {} as never)).isError).toBe(true)
   })
-
-  it('默认和自定义决策目录都拒绝目录软链接且不写文件', async () => {
-    const wake = humanWake(permissions({ storage: { workspace_path: root, access: 'readwrite' } }))
-    const manage = tool(wake, 'manage_decision_doc')
-    const linkedProject = join(root, 'linked-project')
-    await fs.mkdir(join(linkedProject, 'real-docs'), { recursive: true })
-    await fs.symlink('real-docs', join(linkedProject, 'docs'), 'dir')
-
-    const defaultFile = '2026-09-04-default-link.md'
-    expect((await manage.call({
-      project_root: linkedProject,
-      action: 'create',
-      file_name: defaultFile,
-      content: '# 默认目录软链接\n',
-    }, {} as never)).isError).toBe(true)
-    await expect(fs.access(join(linkedProject, 'real-docs', 'decisions', defaultFile))).rejects.toThrow()
-
-    await fs.mkdir(join(project, 'real-adr'))
-    await fs.symlink('real-adr', join(project, 'linked-adr'), 'dir')
-    const customFile = '2026-09-04-custom-link.md'
-    expect((await manage.call({
-      project_root: project,
-      action: 'create',
-      decision_dir: 'linked-adr',
-      file_name: customFile,
-      content: '# 自定义目录软链接\n',
-    }, {} as never)).isError).toBe(true)
-    await expect(fs.access(join(project, 'real-adr', customFile))).rejects.toThrow()
-  })
-
   it('read、list 和 search 的上限在工具边界生效', async () => {
     const wake = humanWake(permissions({ storage: { workspace_path: root, access: 'readwrite' } }))
     const inspect = tool(wake, 'inspect_project_docs')
@@ -331,72 +300,5 @@ describe('project document tools', () => {
 
     await fs.writeFile(join(project, 'too-large.md'), Buffer.alloc(1024 * 1024 + 1, 97))
     expect((await inspect.call({ project_root: project, operation: 'read', path: 'too-large.md' }, {} as never)).isError).toBe(true)
-  })
-
-  it('排他创建决策、基于 digest 更新，并拒绝并发覆盖', async () => {
-    const wake = humanWake(permissions({ storage: { workspace_path: root, access: 'readwrite' } }))
-    const manage = tool(wake, 'manage_decision_doc')
-    const inspect = tool(wake, 'inspect_project_docs')
-    const fileName = '2026-09-04-manager-context.md'
-
-    const created = await manage.call({
-      project_root: project,
-      action: 'create',
-      file_name: fileName,
-      content: '# 主控上下文\n\n## 决策\n使用任务板。\n',
-    }, {} as never)
-    expect(created.isError).toBe(false)
-    expect(JSON.parse(created.output)).toMatchObject({
-      action: 'created',
-      path: `docs/decisions/${fileName}`,
-      digest: expect.stringMatching(/^[a-f0-9]{64}$/),
-    })
-    expect((await manage.call({
-      project_root: project,
-      action: 'create',
-      file_name: fileName,
-      content: '# 重复\n',
-    }, {} as never)).isError).toBe(true)
-
-    const read = await inspect.call({ project_root: project, operation: 'read', path: `docs/decisions/${fileName}` }, {} as never)
-    const digest = JSON.parse(read.output).digest as string
-    expect((await manage.call({
-      project_root: project,
-      action: 'update',
-      file_name: fileName,
-      content: '# 主控上下文\n\n## 决策\n使用当前任务板。\n',
-      expected_digest: '0'.repeat(64),
-    }, {} as never)).isError).toBe(true)
-
-    const updated = await manage.call({
-      project_root: project,
-      action: 'update',
-      file_name: fileName,
-      content: '# 主控上下文\n\n## 决策\n使用当前任务板。\n',
-      expected_digest: digest,
-    }, {} as never)
-    expect(updated.isError).toBe(false)
-    expect(JSON.parse(updated.output).digest).not.toBe(digest)
-  })
-
-  it('拒绝非法日期议题名、非默认缺失目录和无一级标题正文', async () => {
-    const wake = humanWake(permissions({ storage: { workspace_path: root, access: 'readwrite' } }))
-    const manage = tool(wake, 'manage_decision_doc')
-    for (const fileName of ['2026-02-30-invalid.md', '2026-09-04-中文.md', '../2026-09-04-escape.md']) {
-      expect((await manage.call({ project_root: project, action: 'create', file_name: fileName, content: '# 决策\n' }, {} as never)).isError).toBe(true)
-    }
-    expect((await manage.call({
-      project_root: project,
-      action: 'create',
-      decision_dir: 'adr',
-      file_name: '2026-09-04-missing-dir.md',
-      content: '# 决策\n',
-    }, {} as never)).isError).toBe(true)
-    expect((await manage.call({
-      project_root: project,
-      action: 'create',
-      file_name: '2026-09-04-no-heading.md',
-      content: '没有一级标题',
-    }, {} as never)).isError).toBe(true)
   })
 })

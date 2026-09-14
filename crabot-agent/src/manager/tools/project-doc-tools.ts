@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { createReadStream, promises as fs } from 'node:fs'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
@@ -6,7 +6,6 @@ import { createInterface } from 'node:readline'
 import { defineTool } from '../../engine/index.js'
 import type { ToolCallResult, ToolDefinition } from '../../engine/index.js'
 import type { ResolvedPermissions } from '../../types.js'
-import { AsyncMutex } from '../../workers/async-mutex.js'
 import { BUILTIN_WORKER_PERMISSIONS, narrowWorkerPermissions } from '../../workers/builtin/runtime.js'
 import type { WorkerContext } from '../../workers/harness/context-store.js'
 import type { LedgerWorker, ManagerKey } from '../../workers/harness/ledger-types.js'
@@ -20,13 +19,9 @@ const DEFAULT_LIST_PAGE_SIZE = 50
 const MAX_SEARCH_MATCHES = 50
 const DEFAULT_SEARCH_MATCHES = 20
 const MAX_READ_FILE_BYTES = 1024 * 1024
-const MAX_DECISION_BYTES = 64 * 1024
-const DEFAULT_DECISION_DIR = 'docs/decisions'
 const EXCLUDED_DIRECTORIES = new Set([
   '.git', 'node_modules', '.pnpm-store', 'dist', 'build', 'coverage', '.next',
 ])
-const DECISION_FILE = /^(\d{4})-(\d{2})-(\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$/
-const decisionMutexes = new Map<string, AsyncMutex>()
 
 export interface ProjectDocToolDeps {
   readonly ledger: Pick<LedgerStore, 'listWorkers' | 'findWorker'>
@@ -340,110 +335,6 @@ async function searchMarkdown(root: string, scope: string, query: string, limit:
   return { operation: 'search' as const, matches, truncated }
 }
 
-function validateDecisionFileName(value: unknown): string {
-  if (typeof value !== 'string') throw new Error('file_name 必须是字符串')
-  const match = DECISION_FILE.exec(value)
-  if (!match) throw new Error('file_name 必须符合 YYYY-MM-DD-decision-abstract.md')
-  const year = Number(match[1])
-  const month = Number(match[2])
-  const day = Number(match[3])
-  const date = new Date(Date.UTC(year, month - 1, day))
-  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
-    throw new Error('file_name 中的日期无效')
-  }
-  return value
-}
-
-function validateDecisionContent(value: unknown): string {
-  if (typeof value !== 'string' || value.trim() === '') throw new Error('content 必须是非空 Markdown')
-  if (Buffer.byteLength(value, 'utf-8') > MAX_DECISION_BYTES) throw new Error('content 不得超过 64 KiB')
-  if (!/^#\s+\S/m.test(value)) throw new Error('content 至少包含一个一级标题')
-  return value
-}
-
-async function ensureDefaultDecisionDirectory(root: string): Promise<string> {
-  let current = root
-  for (const segment of DEFAULT_DECISION_DIR.split('/')) {
-    const next = path.join(current, segment)
-    let stat: Awaited<ReturnType<typeof fs.lstat>>
-    try {
-      stat = await fs.lstat(next)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      try {
-        await fs.mkdir(next)
-      } catch (mkdirError) {
-        if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError
-      }
-      stat = await fs.lstat(next)
-    }
-    if (stat.isSymbolicLink()) throw new Error('decision_dir 不能经过目录软链接')
-    if (!stat.isDirectory()) throw new Error('decision_dir 目标不是目录')
-    const real = await fs.realpath(next)
-    assertInside(root, real, 'decision_dir')
-    current = next
-  }
-  return fs.realpath(path.join(root, DEFAULT_DECISION_DIR))
-}
-
-async function decisionDirectory(root: string, raw: unknown, allowCreateDefault: boolean): Promise<{
-  readonly relative: string
-  readonly real: string
-}> {
-  const requested = raw === undefined ? DEFAULT_DECISION_DIR : normalizeRelativePath(raw, 'decision_dir')
-  const relative = protocolPath(requested)
-  if (allowCreateDefault && relative === DEFAULT_DECISION_DIR) {
-    return { relative, real: await ensureDefaultDecisionDirectory(root) }
-  }
-  const resolved = await resolveExisting(root, requested)
-  if (!resolved.stat.isDirectory()) throw new Error('decision_dir 目标不是目录')
-  if (resolved.kind === 'symlink') throw new Error('decision_dir 不能是目录软链接')
-  return { relative, real: resolved.realPath }
-}
-
-function decisionMutex(target: string): AsyncMutex {
-  let mutex = decisionMutexes.get(target)
-  if (!mutex) {
-    mutex = new AsyncMutex()
-    decisionMutexes.set(target, mutex)
-  }
-  return mutex
-}
-
-async function createDecision(target: string, content: string): Promise<void> {
-  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.tmp-${randomUUID()}`)
-  try {
-    await fs.writeFile(temporary, content, { encoding: 'utf-8', flag: 'wx', mode: 0o644 })
-    await fs.link(temporary, target)
-  } finally {
-    await fs.rm(temporary, { force: true }).catch(() => undefined)
-  }
-}
-
-async function updateDecision(target: string, content: string, expectedDigest: unknown): Promise<void> {
-  if (typeof expectedDigest !== 'string' || !/^[a-f0-9]{64}$/.test(expectedDigest)) {
-    throw new Error('update 必须提供合法 expected_digest')
-  }
-  let linkStat: Awaited<ReturnType<typeof fs.lstat>>
-  try {
-    linkStat = await fs.lstat(target)
-  } catch (error) {
-    throw new Error(`待更新决策文件不存在: ${(error as Error).message}`)
-  }
-  if (linkStat.isSymbolicLink() || !linkStat.isFile()) throw new Error('待更新决策必须是普通 Markdown 文件')
-  const previous = await fs.readFile(target)
-  if (sha256(previous) !== expectedDigest) throw new Error('expected_digest 不匹配，决策文件已被并发修改')
-
-  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.tmp-${randomUUID()}`)
-  try {
-    await fs.writeFile(temporary, content, { encoding: 'utf-8', flag: 'wx', mode: 0o644 })
-    await fs.rename(temporary, target)
-  } catch (error) {
-    await fs.rm(temporary, { force: true }).catch(() => undefined)
-    throw error
-  }
-}
-
 export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[] {
   const inspect = defineTool({
     name: 'inspect_project_docs',
@@ -510,51 +401,5 @@ export function buildProjectDocTools(deps: ProjectDocToolDeps): ToolDefinition[]
     },
   })
 
-  const manage = defineTool({
-    name: 'manage_decision_doc',
-    description: '在已授权项目的决策目录中创建或更新决策记录。人类提出项目/任务偏好时，由你直接使用本工具记录；创建采用排他写入，更新必须依据完整读取所得的内容摘要。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project_root: { type: 'string', description: '项目 workspace root 的规范化绝对路径' },
-        action: { type: 'string', enum: ['create', 'update'] },
-        decision_dir: { type: 'string', description: '默认 docs/decisions；其它目录必须已经存在' },
-        file_name: { type: 'string', pattern: DECISION_FILE.source, description: 'YYYY-MM-DD-decision-abstract.md' },
-        content: { type: 'string', maxLength: MAX_DECISION_BYTES, description: '完整 Markdown，最大 64 KiB' },
-        expected_digest: { type: 'string', pattern: '^[a-f0-9]{64}$', description: 'update 必填，来自 inspect_project_docs read' },
-      },
-      required: ['project_root', 'action', 'file_name', 'content'],
-      additionalProperties: false,
-    },
-    isReadOnly: false,
-    call: async (input): Promise<ToolCallResult> => {
-      try {
-        if (!hasOnlyKeys(input, ['project_root', 'action', 'decision_dir', 'file_name', 'content', 'expected_digest'])) {
-          throw new Error('包含未定义字段')
-        }
-        if (input.action !== 'create' && input.action !== 'update') throw new Error('action 必须是 create 或 update')
-        if (input.action === 'create' && input.expected_digest !== undefined) throw new Error('create 不接受 expected_digest')
-        const fileName = validateDecisionFileName(input.file_name)
-        const content = validateDecisionContent(input.content)
-        const root = await authorizeProjectRoot(deps, input.project_root, true)
-        const directory = await decisionDirectory(root, input.decision_dir, input.action === 'create')
-        const target = path.join(directory.real, fileName)
-        assertInside(root, target, '决策文件')
-
-        return await decisionMutex(target).run(async () => {
-          if (input.action === 'create') await createDecision(target, content)
-          else await updateDecision(target, content, input.expected_digest)
-          return ok({
-            action: input.action === 'create' ? 'created' : 'updated',
-            path: `${directory.relative}/${fileName}`,
-            digest: sha256(content),
-          })
-        })
-      } catch (error) {
-        return fail('manage_decision_doc', error)
-      }
-    },
-  })
-
-  return [inspect, manage]
+  return [inspect]
 }

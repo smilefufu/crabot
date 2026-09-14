@@ -20,7 +20,6 @@ export const NORMAL_MANAGER_CORE_NAMES = [
   'inspect_workboard',
   'change_workboard',
   'inspect_project_docs',
-  'manage_decision_doc',
 ] as const
 
 export const DAILY_REFLECTION_CORE_NAMES = [
@@ -112,7 +111,6 @@ const BUILTIN_ALIASES: Record<string, readonly string[]> = {
   inspect_workboard: ['workboard', '任务板', '工作板'],
   change_workboard: ['update workboard', '修改任务板', '更新工作板'],
   inspect_project_docs: ['project docs', '项目文档', '读取项目文档'],
-  manage_decision_doc: ['decision doc', '决策文档', '项目决策'],
   list_schedules: ['schedule list', '定时任务', '调度列表'],
   get_friend_permissions: ['friend permissions', '联系人权限', '权限查询'],
   send_private_message: ['private message', '发送私聊消息'],

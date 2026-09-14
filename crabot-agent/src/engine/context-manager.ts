@@ -161,6 +161,7 @@ const DEFAULT_COMPACT_SYSTEM_PROMPT = `你正在为一个长任务压缩上下�
 - 必须遵守的硬性要求、禁止事项、兼容性要求、风格要求、预算/时间限制、安全/隐私限制。
 - 对后续回复方式有影响的要求，例如必须先给证据、降低断言强度、不要展示某类内容。
 - 只记录对后续行为有实际影响的约束。
+- 保留约束的来源和适用范围，区分用户要求、项目有效规则、实际工具限制，以及执行者的建议或假设。临时方法和未验证判断不能成为硬约束；摘要不提升原始来源的权威，后续用户纠偏也不撤销真实系统或工具限制。
 
 定义与术语:
 - 本任务中特定名称、指标、文件、组件、策略、选项、编号或标签的含义。
@@ -195,9 +196,6 @@ const DEFAULT_COMPACT_SYSTEM_PROMPT = `你正在为一个长任务压缩上下�
 - 不要编造原对话中没有的信息；不确定就写成未解决问题或风险。
 - 保持简洁，但不能为了简洁丢掉会改变后续行为的信息。`
 
-const MANAGER_COMPACT_SYSTEM_PROMPT =
-  '你是对话历史压缩助手,负责把对话折叠成简洁但保留关键信息的摘要,供后续对话轮次续接上下文。'
-
 export const BUILTIN_SUMMARY_MESSAGE_PREFIX = '[Earlier conversation summary]\n'
 export const MANAGER_SUMMARY_MESSAGE_PREFIX =
   '[以下是本次对话更早历史的滚动摘要,不是用户刚发的话]\n\n'
@@ -229,7 +227,7 @@ export function createManagerCompactionProfile(
     kind: 'manager',
     preferredKeepRecent: options.preferredKeepRecent ?? 20,
     mainRequestFixedTokens: options.mainRequestFixedTokens ?? 0,
-    summarySystemPrompt: options.summarySystemPrompt ?? MANAGER_COMPACT_SYSTEM_PROMPT,
+    summarySystemPrompt: options.summarySystemPrompt ?? DEFAULT_COMPACT_SYSTEM_PROMPT,
     summaryMessagePrefix: MANAGER_SUMMARY_MESSAGE_PREFIX,
     ...(options.onBatchApplied ? { onBatchApplied: options.onBatchApplied } : {}),
   }

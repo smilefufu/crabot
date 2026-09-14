@@ -304,9 +304,9 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const spawnWorker = defineTool({
     name: 'spawn_worker',
     description:
-      '派发一个新的 worker 去执行一项任务。用于真正另起炉灶的新任务——是已有任务的延续/' +
-      '补充/返工时改用 send_to_worker 投给原 worker(它会自动复活已结束的会话),新 worker ' +
-      '拿不到旧 worker 积累的上下文。异步语义:本工具在 worker 化身创建完成后即返回' +
+      '派发一个新的 worker 去执行一项任务。已有 worker 的上下文仍有用且能有效推进时，延续/' +
+      '补充/返工用 send_to_worker；复用持续无效时，关闭旧 worker 后可新建，并在 prompt 中' +
+      '交代当前完整要求、必要事实和产物位置，新 worker 不自动继承旧上下文。异步语义:本工具在 worker 化身创建完成后即返回' +
       '(不等 worker 把任务做完),返回 worker_id;worker 每跑完一轮(转 idle)或结束时会作为' +
       '事件唤醒你,事件带状态和待处置回合；用 get_worker_activity 读取原生会话。impl 缺省按部署偏好选择;workspace 缺省新建。',
     inputSchema: {
@@ -600,7 +600,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const requestWorkerStop = defineTool({
     name: 'request_worker_stop',
-    description: '请求停止 worker 主线、已登记 fork 与 Harness 可核验的 worker-owned 执行。返回持久化 control operation；只有核验成功后任务才会转为 cancelled，无法证明完整停止时状态为 unknown。',
+    description: '请求停止 worker 主线、已登记 fork 与 Harness 可核验的 worker-owned 执行。返回持久化 control operation；受理不等于已停止，只有核验成功后任务才会转为 closed，无法证明完整停止时停止结果为 unknown。',
     inputSchema: {
       type: 'object',
       properties: { worker_id: { type: 'string', description: '目标 worker id' } },

@@ -13,7 +13,7 @@ import type { WorkerHarness } from '../../src/workers/harness/harness.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { ActivityContextAdmissionReceipt } from '../../src/workers/harness/worker-events.js'
 import { createUserMessage, defineTool } from '../../src/engine/index.js'
-import { ContextManager } from '../../src/engine/context-manager.js'
+import { ContextManager, createManagerCompactionProfile } from '../../src/engine/context-manager.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import type { ManagerEpisodeSpan, ManagerTraceWriter } from '../../src/manager/trace-types.js'
 import { MANAGER_PROJECT_WORKSPACE_CONTEXT, MANAGER_WORKBOARD_CONTEXT } from '../../src/manager/prompt.js'
@@ -31,6 +31,8 @@ const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
 任务板中至少有一项尚未收口的工作已经一小时没有更新。请查阅当前任务板和聊天历史，重新确认人类的最新意图。任务板只是可修订的管理摘要；如果它与人类已经表达的意图不一致，以人类的最新意图为准并更新任务板。
 
 查阅任务板时，要逐项复核尚未收口的事项，尤其不要把“已阻塞”直接等同于“继续等待”。重新判断阻塞是否仍然成立、能否由你或执行器解除；能够解除或前置条件已经满足的，立即恢复推进。只有确实依赖人类输入或明确外部事件时，才保持阻塞。
+
+对长期未完成或反复报告同一阻塞的事项，核对最近人类要求、阻塞的原始证据和最近实质进展。检查错误前提是否来自你自己的派发、旧摘要或过时文档；任务板和你上次的结论不是独立证据。发现判断错误时，纠正当前要求、任务板和后续安排，相关项目文档交执行器按项目规则修正。running 只说明执行状态，必要时查看活动和产物；确认具体偏离或无效重复后采取有针对性的纠偏、停止或替换，不因例行检查干扰正常工作。
 
 仍能推进的，就在本回合继续推进。正在等待已经安排的执行结果时，可以按需查看执行器的状态和活动，必要时通过独立侧问了解进度；不要反复查询，也不要仅因本次检查向仍在运行的执行器主线发送催促、补充或纠偏。正在等待明确的外部事件时，不要重复操作。目标或事项已经变化、取消或重复时，及时调整、合并或归档；确实需要人类介入时，清楚说明阻塞以及需要人类提供的帮助。
 
@@ -85,9 +87,8 @@ function makeActivityReceipt(through = 'opaque-through') {
   return { receipt, admit, reject }
 }
 
-/** Engine Manager profile 的 system prompt 常量特征串,用它区分"这是折叠 LLM 调用
- *  还是普通 engine turn 调用",不需要 vi.mock/vi.spyOn 侵入模块内部。 */
-const FOLD_SYSTEM_PROMPT_MARKER = '对话历史压缩助手'
+/** 用实际 profile 区分压缩与业务请求，避免摘要措辞变化让 mock 消耗错误的脚本回合。 */
+const FOLD_SYSTEM_PROMPT_MARKER = createManagerCompactionProfile().summarySystemPrompt
 
 function isAssistantTextEndTurnReminder(params: LLMStreamParams): boolean {
   const last = params.messages[params.messages.length - 1]

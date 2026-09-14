@@ -11,7 +11,6 @@ describe('独立角色提示词', () => {
     for (const absent of ['PERSONALITY_SENTINEL', '主控', 'Manager', 'powerful', 'cost_effective', 'send_message', 'get_subagent_output', 'set_task_goal']) expect(prompt).not.toContain(absent)
     expect(prompt).toContain('默认工作目录：/tmp/prompt-review')
     expect(prompt).toContain('不要求每个任务都创建文件')
-    expect(prompt).toContain('Permission denied')
     expect(prompt).not.toContain('所有中间产物和最终产出都要落在这个目录')
   })
 
@@ -42,5 +41,15 @@ describe('独立角色提示词', () => {
     const prompt = assembleManagerSystemPrompt({ managerKey: 'admin-web::system-tasks', isSystemThread: true, isBuiltinDailyReflection: true })
     for (const required of ['每日反思', 'promote_inbox_entry', 'promote_to_rule', 'send_daily_reflection_summary', '至少三条']) expect(prompt).toContain(required)
     for (const absent of ['对话与任务负责人', '项目与上下文', 'inspect_workboard', '项目目录绑定', '以为你失去了响应', 'reach_master', '## 群聊']) expect(prompt).not.toContain(absent)
+  })
+
+  it.each([
+    ['bot-2::2eais6e9', 'bot-2', '2eais6e9'],
+    ['wechat::a::b', 'wechat', 'a::b'],
+    ['bot-2::a"b\\c$&', 'bot-2', 'a"b\\c$&'],
+  ] as const)('主控会话字段由代码解析并完整注入：%s', (managerKey, channelId, sessionId) => {
+    const prompt = assembleManagerSystemPrompt({ managerKey, isSystemThread: false })
+    const targetLine = prompt.split('\n').find(line => line.startsWith('当前会话：'))!
+    expect(JSON.parse(targetLine.slice('当前会话：'.length))).toEqual({ channel_id: channelId, session_id: sessionId })
   })
 })

@@ -11,9 +11,25 @@ import {
   ContextManager,
   CompactionFailedError,
   createBuiltinCompactionProfile,
+  createManagerCompactionProfile,
   type CompactionState,
 } from '../../src/engine/context-manager'
 import type { LLMAdapter, LLMStreamParams } from '../../src/engine/llm-adapter'
+
+describe('shared continuity rules', () => {
+  it('shares summary requirements while preserving profile windows, prefixes and callbacks', () => {
+    const onBatchApplied = async () => {}
+    const builtin = createBuiltinCompactionProfile()
+    const manager = createManagerCompactionProfile({ onBatchApplied })
+    expect(manager.summarySystemPrompt).toBe(builtin.summarySystemPrompt)
+    expect(manager.summarySystemPrompt).toContain('来源和适用范围')
+    expect(manager.preferredKeepRecent).toBe(20)
+    expect(builtin.preferredKeepRecent).toBe(6)
+    expect(manager.summaryMessagePrefix).not.toBe(builtin.summaryMessagePrefix)
+    expect(manager.onBatchApplied).toBe(onBatchApplied)
+    expect(createManagerCompactionProfile({ summarySystemPrompt: 'custom' }).summarySystemPrompt).toBe('custom')
+  })
+})
 
 function mockAdapter(responseText: string): LLMAdapter {
   return {

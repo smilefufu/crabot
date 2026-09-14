@@ -18,7 +18,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, resolve } from 'path'
 
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import { ConfigLoader } from '../../src/core/config-loader.js'
@@ -259,6 +259,20 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   }
 
   // --- 验收 1 + 5：端到端拉起 + 工作目录就是 workspace ---
+
+  it('生产 Skill 工具读取当前共享文档规则正文，不依赖名称存在', async () => {
+    const skillDir = resolve(__dirname, '../../../crabot-admin/builtin-skills/workspace-context-maintenance')
+    const { internals } = boot(makeConfig({ skills: REQUIRED_MAINLINE_SKILLS.map(skill =>
+      skill.name === 'workspace-context-maintenance' ? { ...skill, skill_dir: skillDir } : skill,
+    ) }))
+    const runtime = internals.buildBuiltinWorkerRuntime({ worker_id: 'rule-read', workspace: { root: tmpRoot } })!
+    const tool = resolveTools(runtime).find(tool => tool.name === 'Skill')!
+    const result = await tool.call({ skill: 'workspace-context-maintenance' }, {} as never)
+    expect(result.isError).not.toBe(true)
+    const markdown = await fs.readFile(join(skillDir, 'SKILL.md'), 'utf8')
+    const body = markdown.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim()
+    expect(result.output).toContain(body)
+  })
 
   it('验收 1/5：manager 不传 builtin → 真的拉起 worker，worker 真的执行了一次工具调用，且 cwd = spec.workspace', async () => {
     const { internals } = boot()
@@ -924,7 +938,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).toContain(agents)
     expect(prompt).toContain('<workspace-agents-md>')
     expect(prompt).toContain('## 你的任务')
-    expect(prompt).toContain('规划 → 执行 → 验收')
+    expect(prompt).toContain('## 复杂任务的协作')
     for (const unavailable of [
       'send_message', 'ask_human', 'todo', 'lookup_friend', 'list_groups', 'list_contacts',
       'list_sessions', 'get_subagent_output', 'list_active_subagents', 'find_task',
@@ -950,8 +964,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     expect(prompt).toContain(workspaceRoot)
     expect(prompt).toContain(WORKER_PROMPT_MARKER)
-    expect(prompt).toContain('需要补充输入时只结束本轮等待')
-    expect(prompt).toContain('先等收口再 finish_task')
+    expect(prompt).toContain('不用 finish_task 把等待输入变成完成或失败')
+    expect(prompt).toContain('先等收口。结束回合不会终止后台工作')
     expect(prompt).toContain('不要求每个任务都创建文件')
   })
 

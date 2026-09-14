@@ -34,6 +34,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 import { FeishuChannel } from '../src/feishu-channel.js'
 import type { GetHistoryParams, GetMessageParams, HistoryMessage } from '../src/types.js'
+import type { MessageStore } from '../src/message-store.js'
 
 interface BackfillResult {
   session_id: string
@@ -45,6 +46,7 @@ interface BackfillResult {
 }
 
 interface ChannelInternals {
+  messageStore: MessageStore
   client: {
     listMessages: (...args: unknown[]) => Promise<{ items: Array<Record<string, unknown>>; page_token?: string; has_more: boolean }>
     getMessage?: (messageId: string) => Promise<Record<string, unknown> | null>
@@ -105,6 +107,63 @@ function makeFeishuFileMsg(id: string, fileKey: string, fileName: string, fileSi
     ...(rootId ? { root_id: rootId } : {}),
   }
 }
+
+describe('local history limit', () => {
+  let sessionId: string
+  let internals: ChannelInternals
+
+  beforeEach(async () => {
+    internals = channel as unknown as ChannelInternals
+    sessionId = internals.sessionManager.upsert({
+      platform_session_id: 'ou_history', type: 'private', title: 'History',
+      sender_id: 'ou_history', sender_name: 'History',
+    }).session.id
+    for (let i = 0; i < 30; i++) {
+      await internals.messageStore.append(sessionId, {
+        platform_message_id: `history-${i}`,
+        platform_timestamp: new Date(Date.UTC(2026, 8, 12, 0, i)).toISOString(),
+        sender: { platform_user_id: 'ou_history', platform_display_name: 'History' },
+        content: { type: 'text', text: `${i % 2 ? 'odd' : 'even'} ${i}` },
+        features: { is_mention_crab: false }, direction: 'inbound',
+      })
+    }
+  })
+
+  it('returns the latest messages through the handler, with the filtered total', async () => {
+    const result = await internals.handleGetHistory({ session_id: sessionId, limit: 3 })
+    expect(result.items.map(m => m.platform_message_id)).toEqual(['history-27', 'history-28', 'history-29'])
+    expect(result.pagination).toMatchObject({ page: 1, page_size: 3, total_items: 30 })
+  })
+
+  it('applies time and keyword filters before selecting the latest messages', async () => {
+    const result = await internals.handleGetHistory({
+      session_id: sessionId, limit: 2, keyword: 'even',
+      time_range: { after: '2026-09-12T00:10:00Z', before: '2026-09-12T00:24:00Z' },
+    })
+    expect(result.items.map(m => m.platform_message_id)).toEqual(['history-22', 'history-24'])
+    expect(result.pagination.total_items).toBe(8)
+  })
+
+  it('gives limit precedence over both pagination fields', async () => {
+    const result = await internals.handleGetHistory({
+      session_id: sessionId, limit: 3, pagination: { page: 2, page_size: 1 },
+    })
+    expect(result.items.map(m => m.platform_message_id)).toEqual(['history-27', 'history-28', 'history-29'])
+    expect(result.pagination).toMatchObject({ page: 1, page_size: 3 })
+  })
+
+  it('preserves default and explicit pagination when limit is absent', async () => {
+    const first = await internals.handleGetHistory({ session_id: sessionId })
+    expect(first.items).toHaveLength(20)
+    expect(first.items[0].platform_message_id).toBe('history-0')
+    const page = await internals.handleGetHistory({ session_id: sessionId, pagination: { page: 2, page_size: 3 } })
+    expect(page.items.map(m => m.platform_message_id)).toEqual(['history-3', 'history-4', 'history-5'])
+  })
+
+  it.each([0, -1, 1.5, NaN, Infinity])('rejects invalid limit %s', async (limit) => {
+    await expect(internals.handleGetHistory({ session_id: sessionId, limit })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+  })
+})
 
 describe('interactive history reads', () => {
   it('maps remote get/history/backfill consistently and uses the local cache after backfill', async () => {

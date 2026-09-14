@@ -213,6 +213,7 @@ export interface GetHistoryParams {
   session_id: SessionId
   time_range?: TimeRange
   keyword?: string
+  /** 筛选后最新 N 条，正整数；存在时优先于 pagination。 */
   limit?: number
   pagination?: PaginationParams
 }

@@ -1038,9 +1038,12 @@ export class FeishuChannel extends ModuleBase {
     const session = this.sessionManager.findById(params.session_id)
     if (!session) throwError('NOT_FOUND', 'Session not found')
 
-    const pageSize = params.pagination?.page_size ?? params.limit ?? 20
+    if (params.limit !== undefined && (!Number.isInteger(params.limit) || params.limit < 1)) {
+      throwError('INVALID_ARGUMENT', 'limit must be a positive integer')
+    }
+    const pageSize = params.limit ?? params.pagination?.page_size ?? 20
     // limit 语义 = 取最新 N 条；走 messageStore 的 slice(-limit) 分支需要 page=undefined
-    const page = params.limit ? undefined : (params.pagination?.page ?? 1)
+    const page = params.limit !== undefined ? undefined : (params.pagination?.page ?? 1)
 
     const local = await this.messageStore.query({
       sessionId: session.id,
@@ -1048,6 +1051,7 @@ export class FeishuChannel extends ModuleBase {
       keyword: params.keyword,
       page,
       pageSize,
+      limit: params.limit,
     })
 
     if (local.items.length > 0) {

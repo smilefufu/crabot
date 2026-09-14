@@ -421,7 +421,7 @@ const GET_HISTORY_SCHEMA = {
   channel_id: z.string().describe('Channel 模块实例 ID'),
   session_id: z.string().describe('Session ID'),
   keyword: z.string().optional().describe('关键词过滤'),
-  limit: z.number().optional().describe('返回条数上限，默认 20'),
+  limit: z.number().int().positive().optional().describe('筛选后最新消息的条数，正整数，默认 20'),
   before: z.string().optional().describe('查询此时间之前的消息（ISO 8601）'),
   after: z.string().optional().describe('查询此时间之后的消息（ISO 8601）'),
 }
