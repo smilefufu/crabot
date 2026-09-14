@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import { runEngine } from '../../src/engine/query-loop.js'
 import { defineTool } from '../../src/engine/tool-framework.js'
-import type { LLMAdapter } from '../../src/engine/llm-adapter.js'
+import type { LLMAdapter, LLMStreamParams } from '../../src/engine/llm-adapter.js'
+import type { LLMConfigSwap } from '../../src/engine/llm-adapter-types.js'
+import { StreamTimeoutError } from '../../src/engine/retry-utils.js'
 import type {
   StreamChunk,
   EngineLlmResponseEvent,
@@ -138,6 +140,86 @@ describe('runEngine', () => {
     expect(result.totalTurns).toBe(2)
     expect(result.usage.inputTokens).toBe(30) // 20 + 10
     expect(result.usage.outputTokens).toBe(15) // 10 + 5
+  })
+
+  it.each([
+    { name: 'replaced', update: { maxTokens: 2048, thinking: { level: 'low' as const } }, maxTokens: 2048, thinking: { level: 'low' } },
+    { name: 'cleared', update: { maxTokens: undefined, thinking: undefined }, maxTokens: undefined, thinking: undefined },
+    { name: 'omitted', update: {}, maxTokens: 8192, thinking: { level: 'high' } },
+  ])('keeps the retry-swapped model across tool turns with $name per-model settings', async ({ update, maxTokens, thinking }) => {
+    let generation = 1
+    const requests: Array<{ provider: string; params: LLMStreamParams }> = []
+    const read = vi.fn(async () => ({ output: 'verified result', isError: false }))
+    const readTool = defineTool({ name: 'Read', description: 'Read', inputSchema: {}, isReadOnly: true, call: read })
+    const oldAdapter: LLMAdapter = {
+      async *stream(params) {
+        requests.push({ provider: 'old', params })
+        if (requests.length > 1) throw new Error('old provider was reused after switching')
+        generation++
+        throw new StreamTimeoutError('ttfb', 90000)
+      },
+      updateConfig() {},
+    }
+    let newCalls = 0
+    const newAdapter: LLMAdapter = {
+      async *stream(params) {
+        // The engine appends tool results in place; preserve each actual request snapshot.
+        requests.push({ provider: 'new', params: { ...params, messages: [...params.messages] } })
+        yield* ++newCalls === 1 ? toolUseResponse('swapped-read', 'Read', {}) : textResponse('Done with new model')
+      },
+      updateConfig() {},
+    }
+    const onConfigChanged = vi.fn(async (): Promise<LLMConfigSwap> => ({ adapter: newAdapter, model: 'new-model', ...update }))
+    const options = baseOptions({
+      tools: [readTool], model: 'old-model', maxTokens: 8192, thinking: { level: 'high' },
+      configGeneration: () => generation, onConfigChanged,
+    })
+
+    const result = await runEngine({ prompt: 'Read and report', adapter: oldAdapter, options })
+
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('Done with new model')
+    expect(result.totalTurns).toBe(2)
+    expect(requests.map(({ provider, params }) => [provider, params.model]))
+      .toEqual([['old', 'old-model'], ['new', 'new-model'], ['new', 'new-model']])
+    for (const { params } of requests.slice(1)) {
+      expect(params.maxTokens).toBe(maxTokens)
+      expect(params.thinking).toEqual(thinking)
+      expect(params.systemPrompt).toBe(options.systemPrompt)
+    }
+    expect(requests[2].params.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolResults: [expect.objectContaining({ tool_use_id: 'swapped-read', content: expect.stringContaining('verified result'), is_error: false })] }),
+    ]))
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(onConfigChanged).toHaveBeenCalledTimes(1)
+    // A swap belongs to this execution; callers may reuse their original options.
+    expect(options).toMatchObject({ model: 'old-model', maxTokens: 8192, thinking: { level: 'high' } })
+  })
+
+  it('keeps the execution model snapshot when configuration changes without a retry', async () => {
+    let generation = 1
+    const models: string[] = []
+    const readTool = defineTool({
+      name: 'Read', description: 'Read', inputSchema: {}, isReadOnly: true,
+      call: async () => ({ output: 'ok', isError: false }),
+    })
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        models.push(params.model)
+        generation++
+        yield* models.length === 1 ? toolUseResponse('read', 'Read', {}) : textResponse('Done')
+      },
+      updateConfig() {},
+    }
+    const onConfigChanged = vi.fn(async () => ({ model: 'new-model' }))
+    const result = await runEngine({
+      prompt: 'Read and report', adapter,
+      options: baseOptions({ tools: [readTool], configGeneration: () => generation, onConfigChanged }),
+    })
+
+    expect(result.outcome).toBe('completed')
+    expect(models).toEqual(['test-model', 'test-model'])
+    expect(onConfigChanged).not.toHaveBeenCalled()
   })
 
   it('returns max_turns when loop is exhausted', async () => {

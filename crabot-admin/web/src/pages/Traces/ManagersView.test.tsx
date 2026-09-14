@@ -107,6 +107,33 @@ describe('ManagerDetail', () => {
     })
   })
 
+  it('历史回合将启动原因与本轮回复、操作分开，不把自省当成回复来源', async () => {
+    const episode = {
+      trace_id: 'ep-idle-review', manager_key: 'wechat::sess-1',
+      started_at: '2026-09-13T11:35:04.501Z', status: 'completed',
+      trigger: { type: 'system', summary: '任务板空闲自省' }, spans: [], spawned_worker_ids: [],
+      reply_excerpt: '收到。现在直接以 Q1 启动为唯一目标。',
+      actions: [{ kind: 'send_to_worker', label: '跟进：启动 Q1', worker_id: 'w-q1' }],
+    }
+    mocked.listManagerEpisodes = vi.fn().mockResolvedValue({
+      items: [episode], pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+    })
+    render(<MemoryRouter initialEntries={['/traces/managers/wechat%3A%3Asess-1']}><Routes>
+      <Route path="/traces/managers/:managerKey" element={<ManagerDetail />} />
+    </Routes></MemoryRouter>)
+
+    await waitFor(() => expect(screen.getByText('任务板空闲自省')).toBeInTheDocument())
+    expect(document.querySelector('.manager-detail__event-labels')).toHaveTextContent('管理回合')
+    expect(document.querySelector('.manager-detail__event-labels')).not.toHaveTextContent('系统提示')
+    expect(document.querySelector('.manager-detail__event-title')).toHaveTextContent('本轮起因：任务板空闲自省')
+    expect(document.querySelector('.manager-detail__reply')).toHaveTextContent('本轮回复：收到。现在直接以 Q1 启动为唯一目标。')
+    expect(screen.getByText('本轮操作')).toBeInTheDocument()
+    expect(screen.getAllByText('启动 Q1')).toHaveLength(1)
+    fireEvent.click(screen.getByText('查看技术详情'))
+    expect(screen.getByText(/运行标识：ep-idle-review/)).toBeInTheDocument()
+    expect(episode.trigger).toEqual({ type: 'system', summary: '任务板空闲自省' })
+  })
+
   it('排队、正在处理和已处理活动合并为一个最新在上的时间流，running episode 不重复', async () => {
     mocked.getManagerInboundStatus = vi.fn().mockResolvedValue({
       manager_key: 'wechat::sess-1',
