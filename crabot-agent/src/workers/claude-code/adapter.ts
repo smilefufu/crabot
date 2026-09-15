@@ -1182,6 +1182,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const instructionPrompt = QUERY_FORK_INSTRUCTION
       const args = [
         '-p', forkInput,
+        '--permission-mode', 'auto',
         '--resume', prev.session_ref,
         '--fork-session',
         '--output-format', 'stream-json',

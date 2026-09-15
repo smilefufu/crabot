@@ -1728,6 +1728,8 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       expect(forkArgv).toEqual([
         '-p',
         '这个函数为什么报错?',
+        '--permission-mode',
+        'auto',
         '--resume',
         meta1.session_id,
         '--fork-session',
