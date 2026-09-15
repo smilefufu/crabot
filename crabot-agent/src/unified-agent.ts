@@ -4579,6 +4579,7 @@ export class UnifiedAgent extends ModuleBase {
       finishIncarnationTrace: (traceId, patch) => {
         this.traceStore.endTrace(traceId, patch.status, { summary: redact(patch.summary) })
       },
+      stopWorkerSubagents: (workerId) => this.builtinSubagentRunner.stopWorker(workerId),
       stopBackgroundWork: async (workerId, incarnationId) => {
         await this.builtinSubagentRunner.stopWorker(workerId, incarnationId)
         await this.agentHandler?.stopBuiltinShells(workerId, incarnationId)

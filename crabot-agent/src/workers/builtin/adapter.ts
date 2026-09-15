@@ -299,6 +299,7 @@ export interface BuiltinTraceHooks {
    */
   appendManagerInput?(traceId: string, text: string): void
   finishIncarnationTrace(traceId: string, patch: { status: 'completed' | 'failed'; summary: string }): void
+  stopWorkerSubagents?(workerId: string): Promise<void> | void
   stopBackgroundWork?(workerId: string, incarnationId?: string): Promise<void> | void
   acquireTraceWriter?(traceId: string, workerId: string, incarnationId?: string): Promise<void>
   releaseTraceWriter?(traceId: string): void
@@ -1816,7 +1817,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     summary?: string,
   ): Promise<void> {
     if (ended_reason !== 'killed') {
-      try { await this.deps.traceHooks?.stopBackgroundWork?.(instance.worker_id, instance.query_id ? instance.incarnation_id : undefined) }
+      try {
+        if (instance.query_id) {
+          await this.deps.traceHooks?.stopBackgroundWork?.(instance.worker_id, instance.incarnation_id)
+        } else {
+          // 主线 Shell 保留 Worker 级续办；仅显式 kill 连带停止。
+          await this.deps.traceHooks?.stopWorkerSubagents?.(instance.worker_id)
+        }
+      }
       catch (error) { console.warn(`[builtin-adapter] child exit not confirmed for ${instance.worker_id}:`, error) }
     }
     const pending = [...instance.pendingImmediateInputs, ...instance.pendingInputs]

@@ -924,6 +924,7 @@ describe('BuiltinWorkerAdapter', () => {
 
   it('执行分支保留工具，切换新请求，且收尾只清理自身 child', async () => {
     const stopBackgroundWork = vi.fn()
+    const stopWorkerSubagents = vi.fn()
     const startIncarnationTrace = vi.fn(({ seq }: { seq: number }) => `trace-${seq}`)
     const traceEvents: Array<{ traceId: string; phase: string; responseId: string }> = []
     const forkReports: StateChangeReport[] = []
@@ -962,6 +963,7 @@ describe('BuiltinWorkerAdapter', () => {
         },
         finishIncarnationTrace: () => {},
         stopBackgroundWork,
+        stopWorkerSubagents,
       },
     })
     const s = spec({ adapter: llm, tools: [delegateTask, echoTool] })
@@ -997,7 +999,8 @@ describe('BuiltinWorkerAdapter', () => {
 
     await adapter.sendInput(h, '结束主线')
     await waitState(adapter, h, 'exited')
-    expect(stopBackgroundWork).toHaveBeenCalledWith(s.worker_id, undefined)
+    expect(stopWorkerSubagents).toHaveBeenCalledWith(s.worker_id)
+    expect(stopBackgroundWork).toHaveBeenCalledOnce()
   })
 
   it('主线第二次 LLM 调用进行中时，fork 继承最近完整 turn 的 tool-result 并让主线继续', async () => {
