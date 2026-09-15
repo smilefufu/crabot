@@ -76,6 +76,16 @@ describe('builtin background shell exit routing', () => {
     )
   })
 
+  it('分支后台等待不影响主线状态，整 Worker 停止仍检查所有分支', async () => {
+    const handler = makeHandler()
+    handler.bgRegistry.list.mockResolvedValue([{ entity_id: 'bg-branch', status: 'running',
+      owner: { worker_id: 'worker-1', incarnation_id: 'branch-1' } }])
+    expect(await handler.hasRunningBgForWorker('worker-1')).toBe(false)
+    expect(await handler.hasRunningBgForWorker('worker-1', 'branch-1')).toBe(true)
+    expect(await handler.hasRunningBgForWorker('worker-1', 'branch-2')).toBe(false)
+    expect(await handler.hasRunningBgForWorker('worker-1', undefined, 'all')).toBe(true)
+  })
+
   it('treats a terminal shell with a durable pending receipt as running background work', async () => {
     const handler = makeHandler()
     handler.bgRegistry.list.mockResolvedValueOnce([
@@ -231,7 +241,7 @@ describe('builtin background shell exit routing', () => {
     expect(handler.workerEntityExitSettlementTimers.has('bg-settlement')).toBe(false)
   })
 
-  it('marks pending synchronously, serializes same-worker delivery, and clears only after settlement', async () => {
+  it('reads durable owner, serializes mainline delivery, and clears only after settlement', async () => {
     const agent = Object.create(UnifiedAgent.prototype) as any
     agent.config = { moduleId: 'agent-test' }
     agent.builtinBgDeliveryTails = new Map()
@@ -262,13 +272,15 @@ describe('builtin background shell exit routing', () => {
       }),
     }
     agent.managerStack = { harness }
-    agent.agentHandler = { renderShellExitNotification: render }
+    agent.agentHandler = { getBuiltinBgEntityRegistry: () => ({ get: async () => ({ owner: { worker_id: 'worker-1' } }) }), renderShellExitNotification: render }
     const settlements: string[] = []
     const settle = async (value: { status: string }) => { settlements.push(value.status) }
 
     const first = agent.deliverBuiltinShellExit('worker-1', shellInfo('bg-1'), settle)
+    await Promise.resolve()
     expect(pending).toBe(1)
     const second = agent.deliverBuiltinShellExit('worker-1', shellInfo('bg-2'), settle)
+    await Promise.resolve()
     expect(pending).toBe(2)
 
     await new Promise<void>((resolve) => setImmediate(resolve))
@@ -290,7 +302,7 @@ describe('builtin background shell exit routing', () => {
     const agent = Object.create(UnifiedAgent.prototype) as any
     agent.config = { moduleId: 'agent-test' }
     agent.builtinBgDeliveryTails = new Map()
-    agent.agentHandler = { renderShellExitNotification: vi.fn().mockResolvedValue('exit:bg-held') }
+    agent.agentHandler = { getBuiltinBgEntityRegistry: () => ({ get: async () => ({ owner: { worker_id: 'worker-1' } }) }), renderShellExitNotification: vi.fn().mockResolvedValue('exit:bg-held') }
 
     let pending = 0
     let heldSettlement: ((value: 'delivered') => Promise<void>) | undefined
@@ -331,7 +343,7 @@ describe('builtin background shell exit routing', () => {
     const agent = Object.create(UnifiedAgent.prototype) as any
     agent.config = { moduleId: 'agent-test' }
     agent.builtinBgDeliveryTails = new Map()
-    agent.agentHandler = { renderShellExitNotification: vi.fn().mockResolvedValue('exit:bg-cancelled') }
+    agent.agentHandler = { getBuiltinBgEntityRegistry: () => ({ get: async () => ({ owner: { worker_id: 'worker-1' } }) }), renderShellExitNotification: vi.fn().mockResolvedValue('exit:bg-cancelled') }
     const complete = vi.fn()
     const harness = {
       beginBgNotification: () => complete,

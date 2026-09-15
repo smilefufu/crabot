@@ -144,7 +144,8 @@ import {
   type HandoffEvidenceInput,
   type HandoffPackage,
 } from './handoff-package'
-import { WorkerTurnStore, type WorkerTurn, type WorkerTurnResolution } from './worker-turn-store'
+import { extractWorkerCompletion } from './worker-turn-result.js'
+import { WorkerTurnStore, type WorkerTurn, type StoredWorkerTurn, type WorkerTurnResolution } from './worker-turn-store'
 import { NativeActivityStore, type PendingActivityNotification } from './native-activity-store'
 import {
   WorkerControlOperationStore,
@@ -746,7 +747,7 @@ export interface HarnessDeps {
     creator_friend_id?: string
   }) => Promise<{ token: string; expires_at: string }>
   /** True while this worker owns a running background entity. */
-  readonly hasRunningBg?: (workerId: string) => Promise<boolean>
+  readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
   /** Validates an opaque legacy continuation credential immediately before side effects. */
   readonly validateLegacyContinuationAuth?: (auth: LegacyContinuationAuth) => Promise<boolean>
   /** Stops background recovery delivery from creating new work during shutdown. */
@@ -3397,7 +3398,45 @@ export class WorkerHarness {
     return { valid: true, cli_access: permissions.cli_access[domain], shell: permissions.shell }
   }
 
-  async getWorkerTurn(workerId: string, turnId?: string): Promise<WorkerTurn | undefined> {
+  async sendToExecutionBranch(
+    workerId: string,
+    incarnationId: string,
+    text: string,
+    deliveryId: string,
+    onSettled: (settlement: { status: 'delivered' } | { status: 'dead_letter'; reason: string }) => Promise<void>,
+  ): Promise<void> {
+    await this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      const incarnation = found?.worker.incarnations.find((item) => item.incarnation_id === incarnationId)
+      if (!incarnation && (await this.queryReceiptStore.list(workerId)).some((receipt) => receipt.state === 'starting')) {
+        throw new Error('execution branch establishment is still pending')
+      }
+      if (!found || found.worker.task.status === 'closed' || !incarnation || !isExecutableIncarnation(incarnation) ||
+          incarnation.forked_from === undefined || incarnation.impl !== 'builtin' || incarnation.state === 'exited') {
+        await onSettled({ status: 'dead_letter', reason: 'original execution branch is unavailable' })
+        return
+      }
+      const receipt = incarnation.query_id ? await this.queryReceiptStore.get(workerId, incarnation.query_id) : undefined
+      if (!receipt || receipt.state !== 'running') {
+        if (receipt?.state === 'starting') throw new Error('execution branch establishment is still pending')
+        await onSettled({ status: 'dead_letter', reason: 'original execution branch receipt is terminal' })
+        return
+      }
+      const adapter = this.deps.adapters.get(incarnation.impl)
+      if (!adapter) throw new Error('execution branch adapter is unavailable')
+      try {
+        await adapter.sendInput({ ...handleForIncarnation(workerId, incarnation), query_id: receipt.query_id }, text, {
+          delivery_id: deliveryId,
+          onAccepted: () => onSettled({ status: 'delivered' }),
+        })
+      } catch (error) {
+        if (!(error instanceof WorkerExitedError)) throw error
+        await onSettled({ status: 'dead_letter', reason: 'original execution branch exited before delivery' })
+      }
+    })
+  }
+
+  async getWorkerTurn(workerId: string, turnId?: string): Promise<StoredWorkerTurn | undefined> {
     return this.turnStore.get(workerId, turnId)
   }
 
@@ -3532,16 +3571,16 @@ export class WorkerHarness {
     return { kind: 'text', text }
   }
 
-  async getWorkerTurnActivities(turn: WorkerTurn): Promise<WorkerTurnActivityRead> {
+  async getWorkerTurnActivities(turn: Pick<WorkerTurn, 'worker_id' | 'incarnation_id' | 'activity_from' | 'activity_through'>): Promise<WorkerTurnActivityRead> {
     const found = await this.deps.ledger.findWorker(turn.worker_id)
     const incarnation = found?.worker.incarnations.find(
       (candidate): candidate is ExecutableIncarnation =>
         isExecutableIncarnation(candidate) && candidate.incarnation_id === turn.incarnation_id,
     )
     if (!incarnation) return { events: [], unavailableReason: 'turn incarnation is unavailable' }
-    const from = Number.parseInt(turn.activity_from, 10)
-    const through = Number.parseInt(turn.activity_through, 10)
-    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(through) || from < 0 || through < from) {
+    const from = Number(turn.activity_from)
+    const through = Number(turn.activity_through)
+    if (!/^\d+$/.test(turn.activity_from) || !/^\d+$/.test(turn.activity_through) || !Number.isSafeInteger(from) || !Number.isSafeInteger(through) || from < 0 || through < from) {
       return { events: [], unavailableReason: 'turn activity range is unavailable' }
     }
 
@@ -3557,7 +3596,7 @@ export class WorkerHarness {
             source: 'native' as const,
             source_offset: activity.source_offset,
           }))
-        return events.length > 0 ? { events } : { events: [], unavailableReason: reason }
+        return { events, unavailableReason: events.length ? `${reason}; only persisted activity previews remain` : reason }
       } catch {
         return { events: [], unavailableReason: `${reason}; persisted activity is unavailable` }
       }
@@ -3574,10 +3613,24 @@ export class WorkerHarness {
         session_ref: incarnation.session_ref,
       }, { offset: from })
       if (trace.nextCursor.offset < through) return persistedFallback('native turn activity is unavailable')
-      return { events: trace.events.filter((event) => event.source_offset === undefined || event.source_offset < through) }
+      return { events: trace.events.filter((event) => event.source_offset !== undefined && event.source_offset >= from && event.source_offset < through)
+        .map((event) => this.redactTurnEvidence(event)) }
     } catch {
       return persistedFallback('native turn activity is unavailable')
     }
+  }
+
+  private redactTurnEvidence<T>(value: T): T {
+    const redact = this.deps.redactFailureReason ?? ((text: string) => text)
+    const walk = (item: unknown): unknown => {
+      if (typeof item === 'string') return redact(item)
+      if (Array.isArray(item)) return item.map(walk)
+      if (item && typeof item === 'object') {
+        return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, walk(child)]))
+      }
+      return item
+    }
+    return walk(value) as T
   }
 
   async resolveWorkerTurn(
@@ -3585,7 +3638,7 @@ export class WorkerHarness {
     turnId: string,
     resolution: WorkerTurnResolution,
     reason?: string,
-  ): Promise<WorkerTurn> {
+  ): Promise<StoredWorkerTurn> {
     return this.turnStore.resolve(workerId, turnId, resolution, this.deps.now(), reason)
   }
 
@@ -3658,7 +3711,23 @@ export class WorkerHarness {
       // not erase a completed worker turn from the Manager's view.
       console.error(`[WorkerHarness] failed to read activity cursor for completed turn ${handle.worker_id}#${handle.seq}:`, error)
     }
+    let completionActivity: WorkerTurnActivityRead | undefined
+    if (report.summary === undefined) {
+      try {
+        completionActivity = await this.getWorkerTurnActivities({
+          worker_id: handle.worker_id, incarnation_id: handle.incarnation_id,
+          activity_from: activityFrom, activity_through: activityThrough,
+        })
+      } catch {
+        // 正文读取失败不能撤销已经确认的完成回合。
+        completionActivity = { events: [], unavailableReason: 'turn completion evidence could not be read' }
+      }
+    }
+    const completionResult = this.redactTurnEvidence(extractWorkerCompletion(
+      completionActivity?.events ?? [], report.summary, completionActivity?.unavailableReason,
+    ))
     const turn = await this.turnStore.create({
+      completion_result: completionResult,
       worker_id: handle.worker_id,
       manager_key: managerKey,
       incarnation_id: handle.incarnation_id,
@@ -5271,7 +5340,7 @@ export class WorkerHarness {
         const forkState = await forkAdapter.state(handleForIncarnation(operation.worker_id, fork))
         if (forkState !== 'exited') return this.settleControlOperation(current, 'unknown', `registered fork ${fork.incarnation_id} remains ${forkState}`)
       }
-      if (await this.deps.hasRunningBg?.(operation.worker_id)) {
+      if (await this.deps.hasRunningBg?.(operation.worker_id, 'all')) {
         return this.settleControlOperation(current, 'unknown', 'worker-owned background execution remains active')
       }
       if (handoffSupersede) {
@@ -5377,7 +5446,7 @@ export class WorkerHarness {
       // 不假装已停止,也不宣称失败;operation_settled 事件(下方投递)会唤醒 manager 处置。
       try {
         // 名下仍有 running bg entity 时任务按 §5.2 映射保持 running(工作未停),不落 halted。
-        const bgRunning = (await this.deps.hasRunningBg?.(operation.worker_id)) ?? false
+        const bgRunning = (await this.deps.hasRunningBg?.(operation.worker_id, 'all')) ?? false
         if (!bgRunning) {
           const now = this.deps.now()
           const halt: TaskHaltEvidence = {

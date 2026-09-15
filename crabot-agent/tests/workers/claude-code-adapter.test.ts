@@ -1739,7 +1739,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
         '.mcp.json',
         '--strict-mcp-config',
         '--append-system-prompt',
-        expect.stringContaining('停止当前一切工作，然后回答下面问题。'),
+        expect.stringContaining('转向处理下面来自 Manager 的新请求'),
       ])
 
       await adapter.kill(h1)
@@ -1748,7 +1748,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
   )
 
   it(
-    'fork 将 query-only 指令放入 system prompt，同时保留 Manager 原问题原样',
+    'fork 将执行分支指令放入 system prompt，同时保留 Manager 原请求原样',
     async () => {
       const tmux = new CountingTmux()
       const argvFile = path.join(dataDir, 'fork-query-prompt-argv.jsonl')
@@ -1771,9 +1771,9 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       expect(forkArgv[forkArgv.indexOf('-p') + 1]).toBe(question)
       const promptIndex = forkArgv.indexOf('--append-system-prompt')
       expect(promptIndex).toBeGreaterThan(-1)
-      expect(forkArgv[promptIndex + 1]).toContain('停止当前一切工作，然后回答下面问题。')
-      expect(forkArgv[promptIndex + 1]).toContain('不加载或使用任何 Skill（包括 crabot-cli）')
-      expect(forkArgv[promptIndex + 1]).toContain('也不调用任何工具')
+      expect(forkArgv[promptIndex + 1]).toContain('转向处理下面来自 Manager 的新请求')
+      expect(forkArgv[promptIndex + 1]).toContain('使用既有授权内的工具和 Skill 完成任务')
+      expect(forkArgv[promptIndex + 1]).not.toContain('也不调用任何工具')
 
       await adapter.kill(h1)
     },

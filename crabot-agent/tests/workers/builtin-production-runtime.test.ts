@@ -258,6 +258,64 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     return { workerId: worker.worker_id, workspace: worker.incarnations[0].workspace }
   }
 
+  it.each(['main_completes', 'stop_worker'] as const)('生产分支后台 Shell 的完成与停止不会串线：%s', async (action) => {
+    const { internals } = boot()
+    const runtime = internals as any
+    await runtime.agentHandler.releaseRecoveredWorkerEntityExits()
+    const harness = internals.managerStack!.harness
+    llm.queue.push({ text: '主线待命', stopReason: 'end_turn' })
+    const { workerId, workspace } = await spawnBuiltin(internals, 'wechat::branch-shell' as ManagerKey)
+    await waitUntil(async () => (await harness.findWorker(workerId))?.worker.incarnations[0].state === 'idle')
+    llm.queue.push(
+      { toolCalls: [{ name: 'Bash', id: 'branch-bg', input: {
+        command: 'while [ ! -f release-branch ]; do sleep 0.05; done; printf 42 > branch-answer.txt',
+      } }], stopReason: 'tool_use' },
+      { text: '等待分支脚本完成', stopReason: 'end_turn' },
+    )
+    const query = await harness.queryWorker(workerId, '执行独立计算；完成后读取输出')
+    const branch = async () => (await harness.findWorker(workerId))!.worker.incarnations.find((item) => item.seq === query.fork_seq)!
+    const branchId = (await branch()).incarnation_id!
+    try {
+      await waitUntil(async () => (await branch()).state === 'idle', 18_000)
+      const registry = runtime.agentHandler.getBuiltinBgEntityRegistry()
+      const records = await registry.list({ type: 'shell' })
+      const shell = records.find((record: any) => record.owner.incarnation_id === branchId)!
+      expect(shell).toMatchObject({ status: 'running', owner: { worker_id: workerId, incarnation_id: branchId } })
+      if (action === 'stop_worker') {
+        await harness.requestWorkerStop(workerId)
+        await waitUntil(async () => (await registry.get(shell.entity_id)).status !== 'running' &&
+          (await harness.findWorker(workerId))!.worker.incarnations.every((item) => item.state === 'exited'))
+        await waitUntil(async () => !await runtime.agentHandler.hasRunningBgForWorker(workerId, undefined, 'all'))
+        expect(await (harness as any).queryReceiptStore.get(workerId, query.query_id)).toMatchObject({ state: 'failed' })
+        const verified = await harness.requestWorkerStop(workerId)
+        expect(verified.status).toBe('succeeded')
+        expect((await harness.findWorker(workerId))!.worker.task.status).toBe('closed')
+        return
+      }
+      llm.queue.push(FINISH)
+      await harness.sendToWorker(workerId, '主线可以结束')
+      await waitUntil(async () => (await harness.findWorker(workerId))?.worker.incarnations[0].state === 'exited')
+      expect((await registry.get(shell.entity_id)).status).toBe('running')
+      expect((await branch()).state).toBe('idle')
+      llm.queue.push(
+        { toolCalls: [{ name: 'Bash', id: 'branch-check', input: { command: 'cat branch-answer.txt' } }], stopReason: 'tool_use' },
+        { toolCalls: [{ name: 'finish_task', id: 'branch-finish', input: { outcome: 'completed', summary: '已核验真实分支结果 42' } }], stopReason: 'tool_use' },
+      )
+      await fs.writeFile(join(workspace, 'release-branch'), '')
+      await waitUntil(async () => (await branch()).state === 'exited')
+      expect(await fs.readFile(join(workspace, 'branch-answer.txt'), 'utf8')).toBe('42')
+      expect(await registry.get(shell.entity_id)).toMatchObject({ exit_notification: { status: 'delivered' } })
+      expect(await (harness as any).queryReceiptStore.get(workerId, query.query_id)).toMatchObject({ state: 'completed' })
+      expect((await harness.findWorker(workerId))!.worker.incarnations[0].state).toBe('exited')
+      const settled = vi.fn()
+      await harness.sendToExecutionBranch(workerId, branchId, '迟到的后台结果', 'late', settled)
+      expect(settled).toHaveBeenCalledWith(expect.objectContaining({ status: 'dead_letter' }))
+      expect((await harness.findWorker(workerId))!.worker.incarnations).toHaveLength(2)
+    } finally {
+      await fs.writeFile(join(workspace, 'release-branch'), '')
+    }
+  }, 35_000)
+
   // --- 验收 1 + 5：端到端拉起 + 工作目录就是 workspace ---
 
   it('生产 Skill 工具读取当前共享文档规则正文，不依赖名称存在', async () => {

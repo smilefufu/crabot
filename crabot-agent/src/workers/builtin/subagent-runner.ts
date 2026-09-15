@@ -137,7 +137,7 @@ export class BuiltinSubagentRunner {
         format: subagent.model.format,
         ...(subagent.model.account_id ? { accountId: subagent.model.account_id } : {}),
       }),
-      owner: { friend_id: WORKER_OWNER, worker_id: worker.worker_id },
+      owner: { friend_id: WORKER_OWNER, worker_id: worker.worker_id, ...(worker.incarnation_id ? { incarnation_id: worker.incarnation_id } : {}) },
       spawned_by_task_id: worker.worker_id,
       registry,
       abortControllers: this.abortControllers,
@@ -217,11 +217,11 @@ export class BuiltinSubagentRunner {
     return { events, nextCursor: { offset: trace.spans.length } }
   }
 
-  async stopWorker(workerId: string): Promise<void> {
+  async stopWorker(workerId: string, incarnationId?: string): Promise<void> {
     const registry = this.requireRegistry()
     const records = await registry.list({ type: 'agent', spawned_by_task_id: workerId })
     await Promise.all(records
-      .filter((record): record is BgAgentRegistryRecord => record.type === 'agent' && record.owner.worker_id === workerId && record.status === 'running')
+      .filter((record): record is BgAgentRegistryRecord => record.type === 'agent' && record.owner.worker_id === workerId && record.owner.incarnation_id === incarnationId && record.status === 'running')
       .map((record) => this.stopAgent(workerId, record.entity_id)))
     // Harness verifies the remaining running records; abort submission is not exit proof.
   }

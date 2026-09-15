@@ -166,6 +166,8 @@ export interface Workspace { readonly root: string }
 export interface TraceCursor { readonly offset: number }
 
 export interface SendInputOptions {
+  /** 内部定向通知：输入入队后、执行前结算；不接受模型传入。 */
+  readonly onAccepted?: () => Promise<void>
   readonly raw?: boolean
   /** Manager-requested direction change; Harness interrupts CLI workers before delivery. */
   readonly immediate_redirect?: boolean

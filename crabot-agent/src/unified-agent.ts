@@ -1209,7 +1209,7 @@ export class UnifiedAgent extends ModuleBase {
         })
       },
       issueAgentCliCredential: (context) => this.issueAgentCliCredential(context),
-      hasRunningBg: (workerId) => this.agentHandler?.hasRunningBgForWorker(workerId) ?? Promise.resolve(false),
+      hasRunningBg: (workerId, scope) => this.agentHandler?.hasRunningBgForWorker(workerId, undefined, scope) ?? Promise.resolve(false),
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
       // 翻译与去重在 manager/events.ts，这里只负责把口子接上。
       publishEvent,
@@ -1303,13 +1303,22 @@ export class UnifiedAgent extends ModuleBase {
     }, onSettled)
   }
 
-  private deliverBuiltinEntityExit(
+  private async deliverBuiltinEntityExit(
     workerId: string,
     dedupeKey: string,
     render: () => Promise<string>,
     onSettled: (settlement: { status: 'delivered' } | { status: 'dead_letter'; reason: string }) => Promise<void>,
     rejectStoppedParent = false,
   ): Promise<void> {
+    const entityId = dedupeKey.slice(dedupeKey.indexOf(':') + 1)
+    const record = await this.agentHandler?.getBuiltinBgEntityRegistry().get(entityId)
+    if (!record || record.owner.worker_id !== workerId) throw new Error('background execution owner is unavailable')
+    if (record.owner.incarnation_id) {
+      await this.requireManagerStack().harness.sendToExecutionBranch(
+        workerId, record.owner.incarnation_id, await render(), dedupeKey, onSettled,
+      )
+      return
+    }
     const complete = this.requireManagerStack().harness.beginBgNotification(workerId)
     let completed = false
     const completeOnce = (): void => {
@@ -1403,7 +1412,7 @@ export class UnifiedAgent extends ModuleBase {
     if (!handler) {
       throw new Error('[builtin-worker] AgentHandler is required to provide persistent background shell support')
     }
-    const bgOptions = handler.createBuiltinBgToolOptions(ctx.worker_id)
+    const bgOptions = handler.createBuiltinBgToolOptions(ctx.worker_id, ctx.incarnation_id)
     if (bgOptions) {
       bgOptions.bgToolDeps = {
         ...bgOptions.bgToolDeps,
@@ -4570,10 +4579,13 @@ export class UnifiedAgent extends ModuleBase {
       finishIncarnationTrace: (traceId, patch) => {
         this.traceStore.endTrace(traceId, patch.status, { summary: redact(patch.summary) })
       },
-      stopWorkerSubagents: (workerId) => this.builtinSubagentRunner.stopWorker(workerId),
+      stopBackgroundWork: async (workerId, incarnationId) => {
+        await this.builtinSubagentRunner.stopWorker(workerId, incarnationId)
+        await this.agentHandler?.stopBuiltinShells(workerId, incarnationId)
+      },
       // finish_task 终态守卫(拆分 spec 2026-08-28 修订)的查询口径与 harness deps 的
       // hasRunningBg 相同:bg-shell 与 subagent 都注册在 bg registry、按 owner.worker_id 归属。
-      hasRunningBgEntities: (workerId) => this.agentHandler?.hasRunningBgForWorker(workerId) ?? Promise.resolve(false),
+      hasRunningBgEntities: (workerId, incarnationId) => this.agentHandler?.hasRunningBgForWorker(workerId, incarnationId) ?? Promise.resolve(false),
     }
   }
 

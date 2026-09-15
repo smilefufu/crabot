@@ -83,6 +83,19 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     await fs.rm(dir, { recursive: true, force: true })
   })
 
+  it('执行分支派发子 Agent 时保留自身归属和同一权限守卫', async () => {
+    spawnPersistentAgent.mockResolvedValue('agent-branch')
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+    await runner.run(testSubagent(), { task: '分支任务' }, {
+      worker_subagent: { worker_id: 'worker-1', incarnation_id: 'branch-1', parent_trace_id: 'trace-branch' },
+    }, [fakeTool('Bash')], executionContext())
+    const options = spawnPersistentAgent.mock.calls[0][0]
+    expect(options.owner).toMatchObject({ worker_id: 'worker-1', incarnation_id: 'branch-1' })
+    expect(options.subTrace.parentTraceId).toBe('trace-branch')
+    expect(options.resolvedPermissions).toEqual(BUILTIN_WORKER_PERMISSIONS)
+    expect(options.tools.map((tool: ToolDefinition) => tool.name)).toContain('Bash')
+  })
+
   it('拒绝在 AgentHandler 注入共享 registry 前运行', async () => {
     const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager)
     await expect(runner.recoverAfterRestart()).rejects.toThrow('registry is unavailable')

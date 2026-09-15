@@ -17,6 +17,8 @@ export interface BgExitNotificationState {
 }
 
 export interface BgEntityOwner {
+  /** 执行分支的 exact 归属；缺省保留主线 Worker 续办语义。 */
+  readonly incarnation_id?: string
   readonly friend_id: string
   readonly session_id?: string
   readonly channel_id?: string

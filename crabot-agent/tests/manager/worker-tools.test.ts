@@ -1,3 +1,4 @@
+import { executeToolBatches } from '../../src/engine/tool-orchestration.js'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
@@ -343,6 +344,89 @@ describe('worker observation and turn closure', () => {
     }])
   })
 
+  it('get_worker_turn 的首屏在 400 KB 工具历史后仍返回真实收尾正文，并在重读时保留', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const incarnation = worker.incarnations[0]
+    const activityStore = (harness as unknown as { nativeActivityStore: NativeActivityStore }).nativeActivityStore
+    await activityStore.commitObservation({ worker_id: worker.worker_id,
+      cursor: { incarnation_id: incarnation.incarnation_id, impl: incarnation.impl, seq: incarnation.seq, offset: 2 } })
+    const conclusion = '真实收尾：结果为 42；没有遗失尾部结论。'
+    harness.handleStateChange({ worker_id: worker.worker_id, incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq, impl: incarnation.impl, session_ref: incarnation.session_ref,
+    }, 'idle', { completionSource: 'builtin_end_turn', summary: conclusion })
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id)) !== undefined)
+    Object.assign(fake, { readTrace: async () => ({ events: [
+      { ts: '2026-01-01T00:01:00Z', kind: 'tool_result', summary: '大型工具结果', detail: { output: '过程'.repeat(100_000) }, source_offset: 0 },
+      { ts: '2026-01-01T00:01:01Z', kind: 'message', role: 'assistant', summary: conclusion, detail: { content: conclusion }, source_offset: 1 },
+    ], nextCursor: { offset: 2 } }) })
+    const tool = buildWorkerTools({ harness, context: () => CTX }).find((t) => t.name === 'get_worker_turn')!
+    const first = await tool.call({ worker_id: worker.worker_id }, {})
+    expect(first.isError).toBe(false)
+    expect(Buffer.byteLength(first.output)).toBeLessThanOrEqual(64 * 1024)
+    expect(parseOutput(first.output)).toMatchObject({ view: 'result', content_source: 'completion_summary', content: conclusion, next_cursor: null })
+    const [engineResult] = await executeToolBatches([{ parallel: false, blocks: [{ type: 'tool_use', name: tool.name, id: 'turn-result', input: { worker_id: worker.worker_id } }] }], [tool])
+    expect(JSON.parse(engineResult.content.slice(engineResult.content.indexOf('\n') + 1)).content).toBe(conclusion)
+    Object.assign(fake, { readTrace: async () => { throw new Error('native source lost') } })
+    const reread = await tool.call({ worker_id: worker.worker_id }, {})
+    expect(parseOutput(reread.output).content).toBe(conclusion)
+    await Promise.all([...(harness as any).stateChangeTails.values()])
+  })
+
+  it('正文证据读取失败仍保存完成回合，收尾 summary 在写盘前脱敏', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = { worker_id: worker.worker_id, incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq, impl: incarnation.impl, session_ref: incarnation.session_ref }
+    ;(harness as any).getWorkerTurnActivities = async () => { throw new Error('source failed') }
+    harness.handleStateChange(handle, 'idle', { completionSource: 'builtin_end_turn' })
+    await waitUntil(async () => (await harness.getWorkerTurn(worker.worker_id)) !== undefined)
+    await Promise.all([...(harness as any).stateChangeTails.values()])
+    expect((await harness.getWorkerTurn(worker.worker_id))?.completion_result).toMatchObject({ source: 'unavailable' })
+    ;(harness as any).deps.redactFailureReason = (text: string) => text.replaceAll('SYNTHETIC_SECRET', '[REDACTED]')
+    harness.handleStateChange(handle, 'running')
+    await Promise.all([...(harness as any).stateChangeTails.values()])
+    harness.handleStateChange(handle, 'idle', { completionSource: 'builtin_end_turn', summary: '结果 SYNTHETIC_SECRET' })
+    await Promise.all([...(harness as any).stateChangeTails.values()])
+    expect((await harness.getWorkerTurn(worker.worker_id))?.completion_result).toMatchObject({ content: '结果 [REDACTED]' })
+  })
+
+  it('分页固定原回合、重新授权，过程严格使用冻结范围，正文不随新回合切换', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const incarnation = worker.incarnations[0]
+    const store = (harness as any).turnStore
+    const content = '完整结果😀\n'.repeat(20_000)
+    const fields = { worker_id: worker.worker_id, manager_key: CTX.managerKey, incarnation_id: incarnation.incarnation_id,
+      impl: incarnation.impl, seq: incarnation.seq, session_ref: incarnation.session_ref, activity_from: '1', activity_through: '3',
+      completed_at: '2026-09-15T01:00:00Z', completion_source: 'builtin_end_turn' }
+    const oldTurn = await store.create({ ...fields, completion_result: { source: 'assistant_text', content } })
+    const tool = buildWorkerTools({ harness, context: () => CTX }).find((t) => t.name === 'get_worker_turn')!
+    const first = parseOutput((await tool.call({ worker_id: worker.worker_id }, {})).output)
+    await store.create({ ...fields, activity_from: '3', activity_through: '4', completion_result: { source: 'assistant_text', content: '下一回合' } })
+    let combined = first.content as string
+    let cursor = first.next_cursor as string | null
+    while (cursor) {
+      const page = parseOutput((await tool.call({ worker_id: worker.worker_id, cursor }, {})).output)
+      expect(page.turn).toMatchObject({ turn_id: oldTurn.turn_id })
+      combined += page.content
+      cursor = page.next_cursor as string | null
+    }
+    expect(combined).toBe(content)
+    const denied = buildWorkerTools({ harness, context: () => ({ ...CTX, managerKey: 'wechat::other' }) }).find((t) => t.name === tool.name)!
+    expect((await denied.call({ worker_id: worker.worker_id, cursor: first.next_cursor }, {})).isError).toBe(true)
+    Object.assign(fake, { readTrace: async () => ({ events: [0, 1, 2, 3].map((offset) => ({
+      ts: '', kind: 'message', role: 'assistant', summary: `turn-${offset}`, source_offset: offset, detail: { content: `完整 ${offset}` },
+    })), nextCursor: { offset: 4 } }) })
+    const activity = parseOutput((await tool.call({ worker_id: worker.worker_id, turn_id: oldTurn.turn_id, view: 'activity' }, {})).output)
+    expect((activity.content as string).trim().split('\n').map((line) => JSON.parse(line).source_offset)).toEqual([1, 2])
+    // 旧记录没有 completion_result 时同样只从冻结范围取最后一条真实正文。
+    const legacy = await store.create(fields)
+    const legacyPage = parseOutput((await tool.call({ worker_id: worker.worker_id, turn_id: legacy.turn_id }, {})).output)
+    expect(legacyPage).toMatchObject({ content_source: 'assistant_text', content: '完整 2' })
+  })
+
   it('get_worker_turn 在原生 trace 空读时回落到本化身已持久化的活动', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(directSpawnParams())
@@ -377,12 +461,11 @@ describe('worker observation and turn closure', () => {
 
     expect(result.isError).toBe(false)
     expect(parseOutput(result.output)).toMatchObject({
-      activities: [{
-        kind: 'assistant_text',
-        text: '已持久化的回合结果',
-      }],
+      content_source: 'preview',
+      content: '已持久化的回合结果',
+      unavailable_reason: expect.any(String),
     })
-    expect(parseOutput(result.output)).not.toHaveProperty('unavailable_reason')
+    expect(parseOutput(result.output).unavailable_reason).toContain('preview')
   })
 
   it('get_worker_turn 无法取得原生或持久活动时显式标记 unavailable', async () => {
@@ -409,7 +492,7 @@ describe('worker observation and turn closure', () => {
 
     expect(result.isError).toBe(false)
     expect(parseOutput(result.output)).toMatchObject({
-      activities: [],
+      content_source: 'unavailable', content: '', next_cursor: null,
       unavailable_reason: 'worker adapter does not support structured trace reads',
     })
   })

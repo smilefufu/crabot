@@ -29,6 +29,8 @@ import type { LedgerWorker } from '../harness/ledger-types.js'
  * 构造 `SpawnSpec` 的契约套件与单测可能没有台账语境。工厂实现须自行决定缺省时的行为。
  */
 export interface BuiltinRuntimeContext {
+  /** 仅执行分支注入；后台归属，不参与授权或 Worker 身份快照。 */
+  readonly incarnation_id?: string
   readonly workspace_git?: WorkerWorkspaceGitContext
   readonly worker_id: string
   readonly workspace: Workspace

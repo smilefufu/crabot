@@ -30,6 +30,28 @@ describe('builtin child durable recovery and control', () => {
   })
   afterEach(async () => { vi.restoreAllMocks(); await fs.rm(dir, { recursive: true, force: true }) })
 
+  it('主线正常收尾与分支终止只停止各自子 Agent', async () => {
+    const owner = runner()
+    const mainController = new AbortController()
+    const branchController = new AbortController()
+    const otherController = new AbortController()
+    for (const [id, incarnation] of [['agent_branch', 'branch-1'], ['agent_other_branch', 'branch-2']]) {
+      const record = child(id)
+      await registry.register({ ...record, owner: { ...record.owner, incarnation_id: incarnation } })
+    }
+    const controllers = (owner as any).abortControllers as Map<string, AbortController>
+    controllers.set('agent_own', mainController)
+    controllers.set('agent_branch', branchController)
+    controllers.set('agent_other_branch', otherController)
+    await owner.stopWorker('worker-1')
+    expect(mainController.signal.aborted).toBe(true)
+    expect(branchController.signal.aborted).toBe(false)
+    await owner.stopWorker('worker-1', 'branch-1')
+    expect(branchController.signal.aborted).toBe(true)
+    expect(otherController.signal.aborted).toBe(false)
+    expect((await registry.get('agent_branch'))?.status).toBe('running')
+  })
+
   it.each([true, false])('recovery order registry-first=%s preserves one pending receipt across two restarts', async (registryFirst) => {
     if (registryFirst) await registry.recoverPersistent()
     await runner().recoverAfterRestart()

@@ -1720,7 +1720,7 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
     )
     expect(turnRequest?.params.input).toEqual([{
       type: 'text',
-      text: expect.stringContaining('停止当前一切工作，然后回答下面问题。'),
+      text: expect.stringContaining('转向处理下面来自 Manager 的新请求'),
     }])
     expect((turnRequest?.params.input as Array<{ text: string }>)[0].text).toContain('侧问问题')
   })

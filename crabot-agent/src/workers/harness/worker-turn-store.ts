@@ -1,3 +1,4 @@
+import type { WorkerCompletionResult } from './worker-turn-result.js'
 import { randomUUID } from 'crypto'
 import { promises as fs } from 'fs'
 import { dirname, join } from 'path'
@@ -25,9 +26,14 @@ export interface WorkerTurn {
     | { readonly status: 'resolved'; readonly resolution: WorkerTurnResolution; readonly resolved_at: string; readonly reason?: string }
 }
 
+/** 内部持久记录；全文只经 get_worker_turn 的正文分页返回。 */
+export interface StoredWorkerTurn extends WorkerTurn {
+  readonly completion_result?: WorkerCompletionResult
+}
+
 interface TurnFile {
   readonly version: 1
-  readonly turns: WorkerTurn[]
+  readonly turns: StoredWorkerTurn[]
 }
 
 async function writeAtomic(path: string, contents: string): Promise<void> {
@@ -51,16 +57,16 @@ export class WorkerTurnStore {
 
   constructor(private readonly workersDir: string) {}
 
-  async create(params: Omit<WorkerTurn, 'turn_id' | 'disposition'>): Promise<WorkerTurn> {
+  async create(params: Omit<StoredWorkerTurn, 'turn_id' | 'disposition'>): Promise<StoredWorkerTurn> {
     return this.mutex(params.worker_id).run(async () => {
       const file = await this.read(params.worker_id)
-      const turn: WorkerTurn = { ...params, turn_id: randomUUID(), disposition: { status: 'pending' } }
+      const turn: StoredWorkerTurn = { ...params, turn_id: randomUUID(), disposition: { status: 'pending' } }
       await this.write(params.worker_id, { version: 1, turns: [...file.turns, turn] })
       return turn
     })
   }
 
-  async get(workerId: string, turnId?: string): Promise<WorkerTurn | undefined> {
+  async get(workerId: string, turnId?: string): Promise<StoredWorkerTurn | undefined> {
     return this.mutex(workerId).run(async () => {
       const turns = (await this.read(workerId)).turns
       if (turnId !== undefined) return turns.find((turn) => turn.turn_id === turnId)
@@ -68,7 +74,7 @@ export class WorkerTurnStore {
     })
   }
 
-  async latestForIncarnation(workerId: string, incarnationId: IncarnationId): Promise<WorkerTurn | undefined> {
+  async latestForIncarnation(workerId: string, incarnationId: IncarnationId): Promise<StoredWorkerTurn | undefined> {
     return this.mutex(workerId).run(async () =>
       (await this.read(workerId)).turns.filter((turn) => turn.incarnation_id === incarnationId).at(-1),
     )
@@ -80,7 +86,7 @@ export class WorkerTurnStore {
     resolution: WorkerTurnResolution,
     resolvedAt: string,
     reason?: string,
-  ): Promise<WorkerTurn> {
+  ): Promise<StoredWorkerTurn> {
     return this.mutex(workerId).run(async () => {
       const file = await this.read(workerId)
       const index = file.turns.findIndex((turn) => turn.turn_id === turnId)
@@ -90,7 +96,7 @@ export class WorkerTurnStore {
         if (current.disposition.resolution === resolution && current.disposition.reason === reason) return current
         throw new Error(`worker turn ${turnId} is already resolved as ${current.disposition.resolution}`)
       }
-      const resolved: WorkerTurn = {
+      const resolved: StoredWorkerTurn = {
         ...current,
         disposition: {
           status: 'resolved',
@@ -123,7 +129,7 @@ export class WorkerTurnStore {
     try {
       const parsed = JSON.parse(await fs.readFile(this.path(workerId), 'utf8')) as Partial<TurnFile>
       if (parsed.version !== 1 || !Array.isArray(parsed.turns)) throw new Error('invalid worker turn file')
-      return { version: 1, turns: parsed.turns as WorkerTurn[] }
+      return { version: 1, turns: parsed.turns as StoredWorkerTurn[] }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, turns: [] }
       throw error

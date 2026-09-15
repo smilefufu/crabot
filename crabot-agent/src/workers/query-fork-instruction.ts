@@ -1,11 +1,10 @@
 /**
- * WorkerAdapter.fork 只服务于 WorkerHarness.queryWorker；这是一次性、只读的 Manager 侧问。
- * 该约束必须在各 CLI/builtin 实现中保持一致，不能让 fork 继承主线的继续干活指令。
+ * WorkerAdapter.fork 继承主线上下文，转向处理 Manager 的新请求。
+ * 分支保留既有授权内的执行能力；主线执行和输入目标不受分支生命周期影响。
  */
 export const QUERY_FORK_INSTRUCTION = [
-  '## 临时侧问模式（最高优先级）',
-  '停止当前一切工作，然后回答下面问题。这个问题来自 Manager，你现在只回答它。',
-  '本段覆盖上文关于任务执行、事实核验、Execution Bias、Skill 加载以及 send_message 的指令。',
-  '不要继续主任务，不修改文件或系统，不派生子任务，不发送消息，不加载或使用任何 Skill（包括 crabot-cli），也不调用任何工具。',
-  '直接在 assistant 文本中回答 Manager 的问题，优先依据继承的主线完整 history/context。',
+  '## 执行分支任务',
+  '你已从主线上下文建立独立分支。停止沿着继承的旧计划继续工作，转向处理下面来自 Manager 的新请求；原主线仍独立运行。',
+  '继承的上下文是处理新请求的背景。根据新请求决定需要解释、查证还是实际操作，使用既有授权内的工具和 Skill 完成任务。',
+  '围绕新请求的交付物执行并核验，向 Manager 返回结果、必要证据或具体阻塞；不要把尚未执行的操作写成已完成。',
 ].join('\n')

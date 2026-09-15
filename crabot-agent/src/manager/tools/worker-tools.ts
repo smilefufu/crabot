@@ -40,7 +40,7 @@ import { isDecisionVisibleWorker } from '../../workers/harness/task-status.js'
 import type { MasterAuthorization } from '../principal.js'
 import type { WorkerActivity, WorkerImplId } from '../../workers/types'
 import type { WorkerTurnResolution } from '../../workers/harness/worker-turn-store.js'
-import { projectWorkerActivity } from '../../workers/trace/activity-projection.js'
+import { extractWorkerCompletion, pageWorkerTurn, readTurnCursor, type GetWorkerTurnParams } from '../../workers/harness/worker-turn-result.js'
 import type { ResolvedPermissions } from '../../types'
 import type { LegacyContinuationAuth } from '../../workers/harness/legacy-continuation-auth.js'
 import { QueryEstablishmentError } from '../../workers/errors.js'
@@ -304,7 +304,8 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const spawnWorker = defineTool({
     name: 'spawn_worker',
     description:
-      '派发一个新的 worker 去执行一项任务。已有 worker 的上下文仍有用且能有效推进时，延续/' +
+      '按分工建立一个独立 worker，交付指定任务的结果。可连续调用，组织多个 worker 并行推进独立工作。每个 worker 有自己的上下文。' +
+      '接续同一项工作且已有 worker 的上下文仍有用、能有效推进时，延续/' +
       '补充/返工用 send_to_worker；复用持续无效时，关闭旧 worker 后可新建，并在 prompt 中' +
       '交代当前完整要求、必要事实和产物位置，新 worker 不自动继承旧上下文。异步语义:本工具在 worker 化身创建完成后即返回' +
       '(不等 worker 把任务做完),返回 worker_id;worker 每跑完一轮(转 idle)或结束时会作为' +
@@ -430,15 +431,15 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const queryWorker = defineTool({
     name: 'query_worker',
     description:
-      '对正在跑的 worker 建立一次独立侧问(fork 语义),不打扰主线执行。只有 fork 已创建、' +
-      '首问已接受且化身已落账后才返回 started + query_id + fork_seq；建立失败会在本次调用' +
-      '直接返回原因。答案生成仍异步，完成或失败后会可靠通知你；用 get_worker_terminal 传入' +
-      '返回的 fork_seq 可随时读取侧问文本。',
+      '从 worker 当前主线上下文建立独立执行分支，回答或执行新请求，主线继续运行。分支可使用既有授权内的工具。' +
+      '只有执行分支已创建、首个请求已接受且化身已落账后才返回 started + query_id + fork_incarnation_id；' +
+      '建立失败会在本次调用直接返回原因。分支执行仍异步，完成或失败后会通知你；' +
+      '需要过程证据时，用 get_worker_activity 传入返回的 fork_incarnation_id 作为 incarnation_id 读取。',
     inputSchema: {
       type: 'object',
       properties: {
         worker_id: { type: 'string', description: '目标 worker id' },
-        question: { type: 'string', description: '侧问的问题内容' },
+        question: { type: 'string', description: '交给执行分支回答或执行的新请求，包含目标、必要事实和交付要求' },
       },
       required: ['worker_id', 'question'],
     },
@@ -542,35 +543,37 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const getWorkerTurn = defineTool({
     name: 'get_worker_turn',
-    description: '读取 worker 最近一个待处置回合，或按 turn_id 精确读取。回合只表示 worker 已停在一个可处理边界，不等于已经向人类交付。',
+    description: '读取 worker 最近一个待处置回合，或按 turn_id 精确读取。默认返回收尾正文；需要过程证据时用 view=activity。next_cursor 非空时继续分页读取同一回合。回合只表示 worker 已停在一个可处理边界，不等于任务成功或已经向人类交付。',
     inputSchema: {
       type: 'object',
       properties: {
         worker_id: { type: 'string', description: '目标 worker id' },
         turn_id: { type: 'string', description: '可选的具体回合 id' },
+        view: { type: 'string', enum: ['result', 'activity'], description: '默认 result 读取收尾正文；activity 读取过程 JSONL' },
+        cursor: { type: 'string', description: '上一页返回的 next_cursor' },
       },
       required: ['worker_id'],
     },
     isReadOnly: true,
     call: async (input): Promise<ToolCallResult> => {
-      const { worker_id, turn_id } = input as { worker_id?: string; turn_id?: string }
+      const params = input as unknown as GetWorkerTurnParams
+      const { worker_id, turn_id, view, cursor } = params
       if (!worker_id || typeof worker_id !== 'string') return invalid('get_worker_turn: worker_id 必填且为字符串')
       if (turn_id !== undefined && typeof turn_id !== 'string') return invalid('get_worker_turn: turn_id 必须是字符串')
+      if (view !== undefined && view !== 'result' && view !== 'activity') return invalid('get_worker_turn: view 只能是 result 或 activity')
+      if (cursor !== undefined && typeof cursor !== 'string') return invalid('get_worker_turn: cursor 必须是字符串')
       try {
         await authorizeWorker(worker_id)
-        const turn = await harness.getWorkerTurn(worker_id, turn_id)
-        const activity = turn ? await harness.getWorkerTurnActivities(turn) : undefined
-        return ok({
-          worker_id,
-          turn: turn ?? null,
-          activities: turn && activity
-            ? projectWorkerActivity(activity.events, 'all', {
-                worker_id,
-                incarnation_id: turn.incarnation_id,
-              })
-            : [],
+        const pageCursor = readTurnCursor(params)
+        const turn = await harness.getWorkerTurn(worker_id, pageCursor?.turn_id ?? turn_id)
+        const activity = turn && (view === 'activity' || !turn.completion_result)
+          ? await harness.getWorkerTurnActivities(turn) : undefined
+        const body = view === 'activity' ? {
+          source: activity?.events.length ? 'activity' as const : 'unavailable' as const,
+          content: activity?.events.map((event) => JSON.stringify(event) + '\n').join('') ?? '',
           ...(activity?.unavailableReason ? { unavailable_reason: activity.unavailableReason } : {}),
-        })
+        } : turn?.completion_result ?? extractWorkerCompletion(activity?.events ?? [], undefined, activity?.unavailableReason)
+        return ok(pageWorkerTurn(params, turn, body))
       } catch (error) {
         return mapError(`get_worker_turn(${worker_id})`, error)
       }
@@ -688,7 +691,8 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
         if (resolution === 'suppressed' && !reason?.trim()) {
           throw new Error('suppressed 必须提供非空 reason')
         }
-        return ok({ worker_id, turn: await harness.resolveWorkerTurn(worker_id, turn_id, resolution, reason?.trim()) })
+        const { completion_result: _internal, ...turn } = await harness.resolveWorkerTurn(worker_id, turn_id, resolution, reason?.trim())
+        return ok({ worker_id, turn })
       } catch (error) {
         return mapError(`resolve_worker_turn(${worker_id})`, error)
       }
