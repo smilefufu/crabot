@@ -26,6 +26,7 @@ import * as agentHandlerModule from '../../src/agent/agent-handler.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import type { ManagerKey } from '../../src/workers/harness/ledger-types.js'
 import { reconcileManagerStack, type ManagerStack } from '../../src/manager/bootstrap.js'
+import { buildWorkerTools } from '../../src/manager/tools/worker-tools.js'
 import type { LLMAdapter, ToolDefinition } from '../../src/engine/index.js'
 import type {
   UnifiedAgentConfig,
@@ -257,6 +258,157 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     })
     return { workerId: worker.worker_id, workspace: worker.incarnations[0].workspace }
   }
+
+  it('query_worker 返回的化身 ID 可直接读取真实分支活动，不会读到主线', async () => {
+    const { internals } = boot()
+    const runtime = internals as any
+    const harness = internals.managerStack!.harness
+    const managerKey = 'wechat::branch-observation' as ManagerKey
+    llm.queue.push({ text: '主线独有的正文', stopReason: 'end_turn' })
+    const { workerId, workspace } = await spawnBuiltin(internals, managerKey)
+    await waitUntil(async () => (await harness.findWorker(workerId))?.worker.incarnations[0].state === 'idle')
+    const tools = buildWorkerTools({
+      harness,
+      context: () => ({ managerKey, episodeId: 'branch-observation', creatorFriendId: 'friend-f1',
+        reportTo: { channel_id: 'wechat', session_id: 'branch-observation' } }),
+      readWorkerActivity: (params) => runtime.readWorkerActivity(params),
+    })
+    llm.queue.push(
+      { toolCalls: [{ name: 'Bash', id: 'branch-observation-shell', input: {
+        command: 'printf 42 > branch-observation.txt',
+      } }], stopReason: 'tool_use' },
+      { text: '分支独有的计算结果：42', stopReason: 'end_turn' },
+    )
+    const result = await tools.find(tool => tool.name === 'query_worker')!.call({
+      worker_id: workerId, question: '执行独立计算并写出结果',
+    }, {})
+    expect(result.isError).toBe(false)
+    const query = JSON.parse(result.output)
+    expect(query.fork_incarnation_id).toEqual(expect.any(String))
+    await waitUntil(async () => (await harness.findWorker(workerId))!.worker.incarnations
+      .some(item => item.incarnation_id === query.fork_incarnation_id && item.state === 'exited'))
+    const activity = await tools.find(tool => tool.name === 'get_worker_activity')!.call({
+      worker_id: workerId, incarnation_id: query.fork_incarnation_id, view: 'all',
+    }, {})
+    expect(activity.isError).toBe(false)
+    expect(JSON.parse(activity.output).incarnation_id).toBe(query.fork_incarnation_id)
+    expect(activity.output).toContain('分支独有的计算结果：42')
+    expect(activity.output).toContain('branch-observation-shell')
+    expect(activity.output).not.toContain('主线独有的正文')
+    expect(await fs.readFile(join(workspace, 'branch-observation.txt'), 'utf8')).toBe('42')
+  })
+
+  it('主线 LLM 硬失败后后台 Shell 保活，真实结果通过新化身接续消费', async () => {
+    const { internals } = boot()
+    const runtime = internals as any
+    await runtime.agentHandler.releaseRecoveredWorkerEntityExits()
+    const harness = internals.managerStack!.harness
+    const stream = vi.mocked(llm.adapter.stream)
+    const originalStream = stream.getMockImplementation()!
+    let workerCalls = 0
+    stream.mockImplementation(async function* (params) {
+      if (params.tools?.some((tool) => tool.name === 'finish_task') && ++workerCalls === 2) {
+        throw Object.assign(new Error('synthetic permanent LLM failure'), { status: 401 })
+      }
+      yield* originalStream(params)
+    })
+    llm.queue.push({ toolCalls: [{ name: 'Bash', id: 'main-bg', input: {
+      command: 'while [ ! -f release-main ]; do sleep 0.05; done; printf 42 > main-answer.txt',
+    } }], stopReason: 'tool_use' })
+    const { workerId, workspace } = await spawnBuiltin(internals, 'wechat::main-shell-failure' as ManagerKey)
+    try {
+      await waitUntil(async () => (await harness.findWorker(workerId))?.worker.incarnations[0].state === 'exited', 18_000)
+      expect((await harness.findWorker(workerId))!.worker.incarnations[0].ended_reason).toBe('crashed')
+      const registry = runtime.agentHandler.getBuiltinBgEntityRegistry()
+      const shell = (await registry.list({ type: 'shell' })).find((record: any) => record.owner.worker_id === workerId)!
+      expect(shell.owner.incarnation_id).toBeUndefined()
+      expect(shell.status).toBe('running')
+      expect(() => process.kill(shell.pgid, 0)).not.toThrow()
+      llm.queue.push(
+        { toolCalls: [{ name: 'Bash', id: 'main-check', input: { command: 'cat main-answer.txt' } }], stopReason: 'tool_use' },
+        FINISH,
+      )
+      await fs.writeFile(join(workspace, 'release-main'), '')
+      await waitUntil(async () => (await registry.get(shell.entity_id))?.exit_notification?.status === 'delivered')
+      await waitUntil(async () => {
+        const worker = (await harness.findWorker(workerId))!.worker
+        return worker.incarnations.length === 2 && worker.incarnations[1].state === 'exited'
+      })
+      expect(await fs.readFile(join(workspace, 'main-answer.txt'), 'utf8')).toBe('42')
+      expect((await harness.findWorker(workerId))!.worker.incarnations[1].ended_reason).toBe('completed')
+      const session = await fs.readFile(join(internals.managerStack!.builtinDataDir, workerId, 'session.jsonl'), 'utf8')
+      expect(session).toContain('<bg-notification>')
+      expect(session).toContain(shell.entity_id)
+      expect(session).toContain('main-check')
+      const readResults = stream.mock.calls.flatMap(([params]) => params.messages.flatMap((message) =>
+        'toolResults' in message ? message.toolResults : [],
+      )).filter((block) => block.tool_use_id === 'main-check')
+      expect(readResults).toEqual(expect.arrayContaining([expect.objectContaining({
+        content: expect.stringContaining('42'), is_error: false,
+      })]))
+      await Promise.all([...(harness as any).stateChangeTails.values()])
+    } finally {
+      await fs.writeFile(join(workspace, 'release-main'), '')
+    }
+  }, 35_000)
+
+  it.each(['main_completes', 'stop_worker'] as const)('生产分支后台 Shell 的完成与停止不会串线：%s', async (action) => {
+    const { internals } = boot()
+    const runtime = internals as any
+    await runtime.agentHandler.releaseRecoveredWorkerEntityExits()
+    const harness = internals.managerStack!.harness
+    llm.queue.push({ text: '主线待命', stopReason: 'end_turn' })
+    const { workerId, workspace } = await spawnBuiltin(internals, 'wechat::branch-shell' as ManagerKey)
+    await waitUntil(async () => (await harness.findWorker(workerId))?.worker.incarnations[0].state === 'idle')
+    llm.queue.push(
+      { toolCalls: [{ name: 'Bash', id: 'branch-bg', input: {
+        command: 'while [ ! -f release-branch ]; do sleep 0.05; done; printf 42 > branch-answer.txt',
+      } }], stopReason: 'tool_use' },
+      { text: '等待分支脚本完成', stopReason: 'end_turn' },
+    )
+    const query = await harness.queryWorker(workerId, '执行独立计算；完成后读取输出')
+    const branch = async () => (await harness.findWorker(workerId))!.worker.incarnations.find((item) => item.seq === query.fork_seq)!
+    const branchId = (await branch()).incarnation_id!
+    try {
+      await waitUntil(async () => (await branch()).state === 'idle', 18_000)
+      const registry = runtime.agentHandler.getBuiltinBgEntityRegistry()
+      const records = await registry.list({ type: 'shell' })
+      const shell = records.find((record: any) => record.owner.incarnation_id === branchId)!
+      expect(shell).toMatchObject({ status: 'running', owner: { worker_id: workerId, incarnation_id: branchId } })
+      if (action === 'stop_worker') {
+        await harness.requestWorkerStop(workerId)
+        await waitUntil(async () => (await registry.get(shell.entity_id)).status !== 'running' &&
+          (await harness.findWorker(workerId))!.worker.incarnations.every((item) => item.state === 'exited'))
+        await waitUntil(async () => !await runtime.agentHandler.hasRunningBgForWorker(workerId, undefined, 'all'))
+        expect(await (harness as any).queryReceiptStore.get(workerId, query.query_id)).toMatchObject({ state: 'failed' })
+        const verified = await harness.requestWorkerStop(workerId)
+        expect(verified.status).toBe('succeeded')
+        expect((await harness.findWorker(workerId))!.worker.task.status).toBe('closed')
+        return
+      }
+      llm.queue.push(FINISH)
+      await harness.sendToWorker(workerId, '主线可以结束')
+      await waitUntil(async () => (await harness.findWorker(workerId))?.worker.incarnations[0].state === 'exited')
+      expect((await registry.get(shell.entity_id)).status).toBe('running')
+      expect((await branch()).state).toBe('idle')
+      llm.queue.push(
+        { toolCalls: [{ name: 'Bash', id: 'branch-check', input: { command: 'cat branch-answer.txt' } }], stopReason: 'tool_use' },
+        { toolCalls: [{ name: 'finish_task', id: 'branch-finish', input: { outcome: 'completed', summary: '已核验真实分支结果 42' } }], stopReason: 'tool_use' },
+      )
+      await fs.writeFile(join(workspace, 'release-branch'), '')
+      await waitUntil(async () => (await branch()).state === 'exited')
+      expect(await fs.readFile(join(workspace, 'branch-answer.txt'), 'utf8')).toBe('42')
+      expect(await registry.get(shell.entity_id)).toMatchObject({ exit_notification: { status: 'delivered' } })
+      expect(await (harness as any).queryReceiptStore.get(workerId, query.query_id)).toMatchObject({ state: 'completed' })
+      expect((await harness.findWorker(workerId))!.worker.incarnations[0].state).toBe('exited')
+      const settled = vi.fn()
+      await harness.sendToExecutionBranch(workerId, branchId, '迟到的后台结果', 'late', settled)
+      expect(settled).toHaveBeenCalledWith(expect.objectContaining({ status: 'dead_letter' }))
+      expect((await harness.findWorker(workerId))!.worker.incarnations).toHaveLength(2)
+    } finally {
+      await fs.writeFile(join(workspace, 'release-branch'), '')
+    }
+  }, 35_000)
 
   // --- 验收 1 + 5：端到端拉起 + 工作目录就是 workspace ---
 

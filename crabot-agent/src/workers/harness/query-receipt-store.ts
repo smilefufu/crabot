@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs'
 import { AsyncMutex } from '../async-mutex'
 import type { ManagerKey } from './ledger-types'
+import type { IncarnationId } from '../types'
 import { normalizeReceiptPreview, readReceiptFile, receiptFilePath, writeReceiptFile } from './receipt-store-io'
 
 export type QueryFailureCode =
@@ -41,6 +42,8 @@ export interface QueryWorkerStartedResult {
   status: 'started'
   query_id: string
   worker_id: string
+  fork_incarnation_id: IncarnationId
+  /** 兼容现有 get_worker_terminal(seq) 调用；活动读取使用 fork_incarnation_id。 */
   fork_seq: number
 }
 

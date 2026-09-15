@@ -389,6 +389,10 @@ export class AgentHandler {
         const aliveShells = alive.filter(
           (r): r is BgShellRegistryRecord => r.type === 'shell',
         )
+        // 分支在重启后按原 query receipt 失败收口，不能重新接管其后台任务继续执行。
+        for (const shell of aliveShells) {
+          if (shell.owner.incarnation_id) killShellTree(shell.pgid)
+        }
         this.readoptReaper.watch(aliveShells)
       })
       .catch((err) => {
@@ -652,8 +656,8 @@ export class AgentHandler {
     return this.bgRegistry
   }
 
-  createBuiltinBgToolOptions(workerId: string): { bgEntityCtx: BashBgContext; bgToolDeps: BgToolDeps } {
-    const owner: BgEntityOwner = { friend_id: `__system_${workerId}`, worker_id: workerId }
+  createBuiltinBgToolOptions(workerId: string, incarnationId?: string): { bgEntityCtx: BashBgContext; bgToolDeps: BgToolDeps } {
+    const owner: BgEntityOwner = { friend_id: `__system_${workerId}`, worker_id: workerId, ...(incarnationId ? { incarnation_id: incarnationId } : {}) }
     const onShellExit: BashBgContext['onShellExit'] = (info) => {
       void this.routeShellExit({
         ...info,
@@ -677,14 +681,23 @@ export class AgentHandler {
     }
   }
 
-  async hasRunningBgForWorker(workerId: string): Promise<boolean> {
+  async hasRunningBgForWorker(workerId: string, incarnationId?: string, scope?: 'all'): Promise<boolean> {
     const entities = await this.bgRegistry.list()
     return entities.some((entity) =>
-      entity.owner.worker_id === workerId && (
+      entity.owner.worker_id === workerId && (scope === 'all' || entity.owner.incarnation_id === incarnationId) && (
         entity.status === 'running' ||
         entity.exit_notification?.status === 'pending'
       ),
     )
+  }
+
+  async stopBuiltinShells(workerId: string, incarnationId?: string): Promise<void> {
+    for (const entity of await this.bgRegistry.list({ type: 'shell', status: ['running'] })) {
+      if (entity.type === 'shell' && entity.owner.worker_id === workerId && entity.owner.incarnation_id === incarnationId) {
+        // 发停止信号；真实 exit/reaper 更新状态，不能把请求停止当作已经退出。
+        killShellTree(entity.pgid)
+      }
+    }
   }
 
   /** Render the common shell exit payload for WorkerInbox system delivery. */

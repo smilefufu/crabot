@@ -27,9 +27,10 @@ describe('WorkerTurnStore', () => {
       activity_through: '3',
       completed_at: '2026-08-20T00:00:00.000Z',
       completion_source: 'builtin_end_turn',
+      completion_result: { source: 'completion_summary', content: '真实结果'.repeat(20_000) },
     })
 
-    expect(await store.get('worker-1')).toEqual(turn)
+    expect(await new WorkerTurnStore(workersDir).get('worker-1')).toEqual(turn)
 
     const resolved = await store.resolve('worker-1', turn.turn_id, 'reported', '2026-08-20T00:01:00.000Z')
     expect(resolved).toMatchObject({

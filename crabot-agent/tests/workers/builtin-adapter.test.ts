@@ -3,6 +3,9 @@ import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+import { buildChildEnv } from '../../src/core/runtime-env.js'
 import { BuiltinWorkerAdapter, WorkerExitedError } from '../../src/workers/builtin/adapter.js'
 import { SessionTree } from '../../src/workers/session-tree.js'
 import type { SpawnSpec, IncarnationHandle, IncarnationRef, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
@@ -234,8 +237,7 @@ interface TurnScript {
  * 会区分"worker 的 turn 调用"与"压缩摘要调用"的 mock。
  *
  * 判据是 `systemPrompt`：ContextManager.compactWithLLM 用自己的 DEFAULT_COMPACT_SYSTEM_PROMPT
- * 调 callNonStreaming，而测试里 worker 的 systemPrompt 恒为 ''。（不能用 `tools` 判——
- * runForkBurst 的工具集不含 finish_task，工具为空时与摘要调用无从区分。）
+ * 调 callNonStreaming；主线和执行分支均不使用该摘要提示词。
  * 摘要调用不消费 turn 脚本。
  */
 function isCompactionCall(params: { systemPrompt?: string }): boolean {
@@ -790,7 +792,138 @@ describe('BuiltinWorkerAdapter', () => {
     }
   })
 
-  it('fork 不暴露主线工具并追加侧问指令，且收尾不停止主线的 child', async () => {
+  it('执行分支在主线仍运行时实际执行 Shell，并使用自己的 execution token', async () => {
+    const mainGate = deferred<void>()
+    const branchFile = join(tmp, 'branch-result')
+    const tool = defineTool({
+      name: 'branch_shell', description: '运行本地合成验收脚本',
+      inputSchema: { type: 'object', properties: {} },
+      call: async () => {
+        const { stdout } = await promisify(execFile)('/bin/sh', ['-c',
+          'printf "%s:%s" "$CRABOT_TOKEN" "$((6 * 7))" > "$1"; cat "$1"', 'branch', branchFile,
+        ], { env: buildChildEnv() })
+        return { isError: false, output: stdout }
+      },
+    })
+    let calls = 0
+    const llm = {
+      stream: vi.fn(async function* () {
+        const call = calls++
+        if (call === 0) {
+          await mainGate.promise
+          yield* chunksFromContent([{ type: 'text', text: '主线结束本轮' }], 'end_turn')
+        } else if (call === 1) {
+          yield* chunksFromContent([{ type: 'tool_use', id: 'branch-shell', name: tool.name, input: {} }], 'tool_use')
+        } else {
+          yield* chunksFromContent([{ type: 'text', text: '分支核验完成' }], 'end_turn')
+        }
+      }), updateConfig: () => {},
+    } as unknown as LLMAdapter
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const main = await adapter.spawn({ ...spec({ adapter: llm, tools: [tool] }), execution_env: { CRABOT_TOKEN: 'main-synthetic' } })
+    try {
+      await vi.waitFor(() => expect(llm.stream).toHaveBeenCalledTimes(1))
+      const branch = await adapter.fork(main, '运行计算脚本', {
+        ...forkOptions(), incarnation_id: randomUUID(), execution_env: { CRABOT_TOKEN: 'branch-synthetic' },
+      })
+      await waitState(adapter, branch, 'exited')
+      expect(await adapter.state(main)).toBe('running')
+      expect(await fs.readFile(branchFile, 'utf8')).toBe('branch-synthetic:42')
+    } finally {
+      mainGate.resolve()
+      await adapter.dispose()
+    }
+  })
+
+  it('分支 finish_task 等待自身后台结果，结算失败重试不重复输入，也不污染主线', async () => {
+    const branchId = randomUUID()
+    let pending = true
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp, traceHooks: {
+      startIncarnationTrace: ({ seq }) => `trace-${seq}`, appendTurn: () => {}, finishIncarnationTrace: () => {},
+      hasRunningBgEntities: async (_worker, incarnation) => incarnation === branchId && pending,
+    } })
+    const llm = makeAdapter([
+      { text: '主线待命', stopReason: 'end_turn' },
+      { toolCalls: [{ name: 'finish_task', id: 'early', input: { outcome: 'completed', summary: '过早完成' } }], stopReason: 'tool_use' },
+      { text: '等待后台', stopReason: 'end_turn' },
+      { text: '已收到后台结果', stopReason: 'end_turn' },
+      { text: '已核验后台结果', stopReason: 'end_turn' },
+    ])
+    const main = await adapter.spawn(spec({ adapter: llm }))
+    await waitState(adapter, main, 'idle')
+    const branch = await adapter.fork(main, '处理分支任务', { ...forkOptions(), incarnation_id: branchId })
+    try {
+      await waitState(adapter, branch, 'idle')
+      const text = '<bg-notification>独立结果 42</bg-notification>'
+      await expect(adapter.sendInput(branch, text, { delivery_id: 'bg-1', onAccepted: async () => { throw new Error('settlement write failed') } })).rejects.toThrow('settlement write failed')
+      await waitState(adapter, branch, 'idle')
+      await adapter.sendInput(branch, text, { delivery_id: 'bg-1', onAccepted: async () => { pending = false } })
+      await waitState(adapter, branch, 'exited')
+      const meta = JSON.parse(await fs.readFile(join(tmp, main.worker_id, 'meta-2.json'), 'utf8'))
+      const tree = await SessionTree.load(join(tmp, main.worker_id, 'session.jsonl'))
+      const branchMessages = tree.pathTo(meta.tip_node_id)
+      expect(branchMessages.filter((message) => message.role === 'user' && message.content === text)).toHaveLength(1)
+      expect(JSON.stringify(branchMessages)).toContain('finish_task 未生效')
+      const mainMeta = JSON.parse(await fs.readFile(join(tmp, main.worker_id, 'meta-1.json'), 'utf8'))
+      expect(JSON.stringify(tree.pathTo(mainMeta.tip_node_id))).not.toContain('独立结果 42')
+      expect(await adapter.state(main)).toBe('idle')
+    } finally { await adapter.dispose() }
+  })
+
+  it('分支接受 kill 后晚到的 finish_task 不能覆盖终止结果', async () => {
+    const branchGate = deferred<void>()
+    let call = 0
+    const engine = vi.spyOn(engineModule, 'runEngine').mockImplementation(async (params) => {
+      const isBranch = ++call > 1
+      if (isBranch) await branchGate.promise
+      return { outcome: 'completed', finalText: '', totalTurns: 1, usage: { inputTokens: 0, outputTokens: 0 },
+        finalMessages: params.initialMessages ?? [], tool_call_count: 0, wrote_memory_or_scene: false,
+        ...(isBranch ? { exitToolCall: { name: 'finish_task', input: { outcome: 'completed', summary: '晚到的结果' } } } : {}),
+      }
+    })
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    try {
+      const main = await adapter.spawn(spec({ adapter: makeAdapter([{ text: '', stopReason: 'end_turn' }]) }))
+      await waitState(adapter, main, 'idle')
+      const branch = await adapter.fork(main, '执行请求', forkOptions())
+      await vi.waitFor(() => expect(call).toBe(2))
+      await adapter.kill(branch)
+      branchGate.resolve()
+      await waitState(adapter, branch, 'exited')
+      expect(JSON.parse(await fs.readFile(join(tmp, main.worker_id, 'meta-2.json'), 'utf8')).ended_reason).toBe('killed')
+      expect(await adapter.state(main)).toBe('idle')
+    } finally { branchGate.resolve(); await adapter.dispose(); engine.mockRestore() }
+  })
+
+  it('执行分支预算耗尽且没有结果时明确失败，不伪造完成', async () => {
+    const engine = vi.spyOn(engineModule, 'runEngine').mockImplementation(async (params) => ({
+      outcome: engine.mock.calls.length === 1 ? 'completed' : 'max_turns', finalText: '', totalTurns: 200,
+      usage: { inputTokens: 0, outputTokens: 0 }, finalMessages: params.initialMessages ?? [], tool_call_count: 0, wrote_memory_or_scene: false,
+    }))
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    try {
+      const main = await adapter.spawn(spec({ adapter: makeAdapter([{ text: '', stopReason: 'end_turn' }]), maxTurnsPerBurst: 2 }))
+      await waitState(adapter, main, 'idle')
+      const branch = await adapter.fork(main, '执行请求', forkOptions())
+      await waitState(adapter, branch, 'exited')
+      const meta = JSON.parse(await fs.readFile(join(tmp, main.worker_id, 'meta-2.json'), 'utf8'))
+      expect(meta).toMatchObject({ ended_reason: 'failed', outcome: 'failed' })
+      expect(engine.mock.calls[1][0].options).not.toHaveProperty('maxTurns')
+    } finally { await adapter.dispose(); engine.mockRestore() }
+  })
+
+  it('重启时等待后台的执行分支记为丢失，主线 idle 保持可恢复', async () => {
+    const workerDir = join(tmp, 'worker-restart')
+    await fs.mkdir(workerDir)
+    await fs.writeFile(join(workerDir, 'meta-1.json'), JSON.stringify({ seq: 1, state: 'idle', tip_node_id: 'main-tip' }))
+    await fs.writeFile(join(workerDir, 'meta-2.json'), JSON.stringify({ seq: 2, state: 'idle', query_id: 'query-1', tip_node_id: 'branch-tip' }))
+    expect(await BuiltinWorkerAdapter.scanOrphans(tmp)).toMatchObject([{ worker_id: 'worker-restart', seq: 2 }])
+    expect(JSON.parse(await fs.readFile(join(workerDir, 'meta-1.json'), 'utf8')).state).toBe('idle')
+    expect(JSON.parse(await fs.readFile(join(workerDir, 'meta-2.json'), 'utf8'))).toMatchObject({ state: 'exited', ended_reason: 'crashed' })
+  })
+
+  it('执行分支保留工具，切换新请求，且收尾只清理自身 child', async () => {
+    const stopBackgroundWork = vi.fn()
     const stopWorkerSubagents = vi.fn()
     const startIncarnationTrace = vi.fn(({ seq }: { seq: number }) => `trace-${seq}`)
     const traceEvents: Array<{ traceId: string; phase: string; responseId: string }> = []
@@ -829,6 +962,7 @@ describe('BuiltinWorkerAdapter', () => {
           traceEvents.push({ traceId, phase: event.type, responseId: event.responseId })
         },
         finishIncarnationTrace: () => {},
+        stopBackgroundWork,
         stopWorkerSubagents,
       },
     })
@@ -845,14 +979,14 @@ describe('BuiltinWorkerAdapter', () => {
     await waitState(adapter, forkHandle, 'exited')
 
     const forkCall = (llm.stream as unknown as { mock: { calls: Array<[{ tools: ReadonlyArray<ToolDefinition>; systemPrompt?: string }]> } }).mock.calls[1][0]
-    expect(forkCall.tools).toEqual([])
-    expect(echoCall).not.toHaveBeenCalled()
-    expect(forkCall.systemPrompt).toContain('停止当前一切工作，然后回答下面问题。')
-    expect(forkCall.systemPrompt).toContain('不加载或使用任何 Skill（包括 crabot-cli）')
-    expect(forkCall.systemPrompt).toContain('也不调用任何工具')
+    expect(forkCall.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(['echo', 'delegate_task', 'finish_task']))
+    expect(echoCall).toHaveBeenCalledOnce()
+    expect(forkCall.systemPrompt).toContain('转向处理下面来自 Manager 的新请求')
+    expect(forkCall.systemPrompt).toContain('使用既有授权内的工具和 Skill')
+    expect(forkCall.systemPrompt).not.toContain('也不调用任何工具')
     expect(forkCall.systemPrompt).not.toContain('只有问题明确询问 Crabot 系统自身的实时运行事实')
     expect(forkReports.at(-1)?.lastText).toBe('侧问结果')
-    expect(stopWorkerSubagents).not.toHaveBeenCalled()
+    expect(stopBackgroundWork).toHaveBeenCalledWith(s.worker_id, forkHandle.incarnation_id)
     const forkTraceEvents = traceEvents.filter((event) => event.traceId === `trace-${forkHandle.seq}`)
     expect(forkTraceEvents.map((event) => event.phase)).toEqual([
       'llm_response', 'tool_started', 'tool_finished', 'turn', 'llm_response', 'turn',
@@ -866,6 +1000,7 @@ describe('BuiltinWorkerAdapter', () => {
     await adapter.sendInput(h, '结束主线')
     await waitState(adapter, h, 'exited')
     expect(stopWorkerSubagents).toHaveBeenCalledWith(s.worker_id)
+    expect(stopBackgroundWork).toHaveBeenCalledOnce()
   })
 
   it('主线第二次 LLM 调用进行中时，fork 继承最近完整 turn 的 tool-result 并让主线继续', async () => {
@@ -1050,7 +1185,7 @@ describe('BuiltinWorkerAdapter', () => {
 
   it('finish_task 终态守卫:名下仍有 running bg entity → 打回续 burst,等待后 idle(拆分 spec 2026-08-28 修订)', async () => {
     const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
-    const stopWorkerSubagents = vi.fn()
+    const stopBackgroundWork = vi.fn()
     // 第一次查询(收尾段):subagent 还在跑 → 拒绝;之后返回 false(模拟 subagent 完成)。
     let bgRunning = true
     const adapter = new BuiltinWorkerAdapter({
@@ -1062,7 +1197,7 @@ describe('BuiltinWorkerAdapter', () => {
         startIncarnationTrace: () => 'trace-1',
         appendTurn: () => {},
         finishIncarnationTrace: () => {},
-        stopWorkerSubagents,
+        stopBackgroundWork,
         hasRunningBgEntities: async () => bgRunning,
       },
     })
@@ -1088,7 +1223,7 @@ describe('BuiltinWorkerAdapter', () => {
     expect(meta.ended_reason).toBeUndefined()
     // 从未 exited:没有终态上报,也没有连带杀 subagent。
     expect(seen.some((e) => e.state === 'exited')).toBe(false)
-    expect(stopWorkerSubagents).not.toHaveBeenCalled()
+    expect(stopBackgroundWork).not.toHaveBeenCalled()
     // 会话树里有打回提醒,worker 下一轮能看到。
     const treeRaw = await fs.readFile(join(tmp, s.worker_id, 'session.jsonl'), 'utf-8')
     expect(treeRaw).toContain('finish_task 未生效')
@@ -1662,14 +1797,14 @@ describe('BuiltinWorkerAdapter', () => {
       ? forkCallArgs.options.systemPrompt()
       : forkCallArgs?.options.systemPrompt
     expect(forkSystemPrompt).toContain('主线任务 prompt <available_skills> crabot-cli')
-    expect(forkSystemPrompt).toContain('停止当前一切工作，然后回答下面问题。')
-    expect(forkSystemPrompt).toContain('不加载或使用任何 Skill（包括 crabot-cli）')
-    expect(forkSystemPrompt).toContain('也不调用任何工具')
+    expect(forkSystemPrompt).toContain('转向处理下面来自 Manager 的新请求')
+    expect(forkSystemPrompt).toContain('使用既有授权内的工具和 Skill')
+    expect(forkSystemPrompt).not.toContain('也不调用任何工具')
     expect(forkSystemPrompt).not.toContain('只有问题明确询问 Crabot 系统自身的实时运行事实')
     const forkTools = typeof forkCallArgs?.options.tools === 'function'
       ? forkCallArgs.options.tools()
       : forkCallArgs?.options.tools
-    expect(forkTools).toEqual([])
+    expect(forkTools?.map((tool: ToolDefinition) => tool.name)).toContain('finish_task')
     const serialized = JSON.stringify(forkCallArgs?.initialMessages ?? [])
     expect(serialized).toContain('测试任务')
     expect(serialized).toContain('首轮回复')
@@ -1688,7 +1823,7 @@ describe('BuiltinWorkerAdapter', () => {
     expect(orphanToolResultIds(forkPath)).toEqual([])
   })
 
-  it('runForkBurst 没有 assistant text 时仍正常收尾，不触发 forced_summary 追问，也不多烧 LLM 轮次', async () => {
+  it('执行分支静默 end_turn 保留既有完成边界，不触发 forced_summary 追问，也不多烧 LLM 轮次', async () => {
     const llm = makeAdapter([
       { text: '首轮回复', stopReason: 'end_turn' }, // 主线 burst
       { stopReason: 'end_turn' }, // fork 的 burst:静默 end_turn(此后重复该条)
@@ -2486,7 +2621,7 @@ describe('BuiltinWorkerAdapter', () => {
     expect(JSON.stringify(third!.messages)).toContain('边界注入') // 会话历史延续
   })
 
-  it('fork 侧问不接输入源:主线 burst 的 engine options 带 drainExternalInputs,fork 的不带', async () => {
+  it('主线和执行分支各自装配独立的输入源', async () => {
     const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
     const gate = deferred<void>()
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
@@ -2511,8 +2646,9 @@ describe('BuiltinWorkerAdapter', () => {
     const forkOptions2 = runEngineSpy.mock.calls[1]?.[0].options
     expect(typeof mainOptions?.drainExternalInputs).toBe('function')
     expect(typeof mainOptions?.hasPendingExternalInputs).toBe('function')
-    expect(forkOptions2?.drainExternalInputs).toBeUndefined()
-    expect(forkOptions2?.hasPendingExternalInputs).toBeUndefined()
+    expect(typeof forkOptions2?.drainExternalInputs).toBe('function')
+    expect(forkOptions2?.drainExternalInputs).not.toBe(mainOptions?.drainExternalInputs)
+    expect(typeof forkOptions2?.hasPendingExternalInputs).toBe('function')
   })
 
   it('注入消息遇 burst 内压缩:在压缩保留段进入后续上下文,不因压缩丢失', async () => {
@@ -2697,7 +2833,7 @@ describe('BuiltinWorkerAdapter', () => {
     })
   })
 
-  // --- runBurst/runForkBurst: outputLog.append 失败不触发 unhandledRejection ---
+  // --- 主线/执行分支 runBurst: outputLog.append 失败不触发 unhandledRejection ---
 
   /** 临时挂一个 unhandledRejection 监听，收集 reason，测试结束时摘掉。 */
   function captureUnhandledRejections(): { reasons: unknown[]; restore: () => void } {
@@ -2787,7 +2923,7 @@ describe('BuiltinWorkerAdapter', () => {
     }
   })
 
-  it('runForkBurst: onTurn 里 outputLog.append reject 不触发 unhandledRejection，fork 化身按 crashed 收尾', async () => {
+  it('执行分支 runBurst: onTurn 里 outputLog.append reject 不触发 unhandledRejection，fork 化身按 crashed 收尾', async () => {
     const capture = captureUnhandledRejections()
     try {
       const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
@@ -3225,7 +3361,7 @@ describe('BuiltinWorkerAdapter', () => {
     expect(nodes.filter((n) => n.parent_id === null).length).toBe(1)
   })
 
-  it('runBurst / runForkBurst 都开压缩（disableCompaction: false）', async () => {
+  it('主线与执行分支都开压缩（disableCompaction: false）', async () => {
     const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({

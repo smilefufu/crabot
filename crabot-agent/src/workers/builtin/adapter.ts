@@ -35,11 +35,11 @@
  * running 态 kill 在互斥锁内先置 instance.killRequested = true，再 abort() 当前 burst——
  * 单纯 abort 不够：sendInput(idle→running) 转态后到续 burst 安装新 controller 之间、以及
  * runBurst 续 burst 路径锁释放到递归调用之间都有窗口，其间 instance.abortController 还
- * 指向旧 burst，abort 旧 controller 对即将起的新 burst 无效。runBurst/runForkBurst 因此
+ * 指向旧 burst，abort 旧 controller 对即将起的新 burst 无效。runBurst 因此
  * 在安装新 controller 时、以及收尾段判定是否续 burst/正常收尾前，各在锁内核对一次
  * killRequested：已置位则不启动/不续 burst，直接落 exited(killed)，与 kill() 的置位+abort
  * 共享同一把锁，消除上述窗口。burst 正常被 abort 命中时仍以 outcome='aborted' 收尾落
- * exited(killed)（见 runBurst/runForkBurst 收尾段）；idle 态（没有 burst 在跑）kill 直接
+ * exited(killed)（见 runBurst 收尾段）；idle 态（没有 burst 在跑）kill 直接
  * 在互斥锁内落 exited(killed)；已 exited 幂等返回，不覆盖原 ended_reason。
  *
  * scanOrphans：进程重启后，内存 instances 已丢失，只能凭磁盘 meta 文件识别"重启前还
@@ -178,6 +178,8 @@ const FINISH_TASK_REJECTED_NOTICE =
   '请继续等待它们的完成通知；若确认某个子任务不再需要，先用 Kill 结束它，再重新调用 finish_task。'
 
 interface WorkerInstance {
+  readonly query_id?: string
+  readonly acceptedInputIds?: Set<string>
   readonly worker_id: string
   readonly incarnation_id?: string
   readonly seq: number
@@ -200,8 +202,6 @@ interface WorkerInstance {
   readonly engineMessagesRef: EngineMessagesRef
   /** `engineMessagesRef.current` 对应的 SessionTree tip。 */
   engineMessagesTip: string
-  /** fork 建立时冻结的父历史 + Manager 问题；fork burst 不再从旧树重新取。 */
-  readonly forkInitialMessages?: ReadonlyArray<EngineMessage>
   /** fork 建立时父主线最近一次实际使用的 system prompt/tools。 */
   readonly forkSystemPrompt?: string
   /** 当前 burst 最后一段 assistant 文本，供意外异常的安全网继续回传给 Manager。 */
@@ -225,14 +225,14 @@ interface WorkerInstance {
   /** 是否已经被 resume 过一次。用于在 resume() 里检测"对同一 prev 的重复 resume"（先到先得，后来者报错）。 */
   resumed?: boolean
   /**
-   * 当前（或最近一次）burst 的 AbortController，在 runBurst/runForkBurst 每次调用 runEngine
+   * 当前（或最近一次）burst 的 AbortController，在 runBurst 每次调用 runEngine
    * 前创建，其 signal 传给 runEngine。kill() 在 running 态下 abort() 它——不直接改状态，
    * 状态迁移仍由 burst 自己收尾时的 outcome==='aborted' 分流完成。
    */
   abortController?: AbortController
   /**
    * kill() 在 running 态下于互斥锁内置位，一旦置位永不复位（化身终将落 exited）。
-   * runBurst/runForkBurst 在安装新 controller 时、以及收尾段判定是否续 burst/正常收尾前，
+   * runBurst 在安装新 controller 时、以及收尾段判定是否续 burst/正常收尾前，
    * 各在同一把锁内核对它——用于兜住 abortController 指向旧 burst 而 abort 落空的窗口
    * （见 kill() 顶部注释）。
    */
@@ -300,6 +300,7 @@ export interface BuiltinTraceHooks {
   appendManagerInput?(traceId: string, text: string): void
   finishIncarnationTrace(traceId: string, patch: { status: 'completed' | 'failed'; summary: string }): void
   stopWorkerSubagents?(workerId: string): Promise<void> | void
+  stopBackgroundWork?(workerId: string, incarnationId?: string): Promise<void> | void
   acquireTraceWriter?(traceId: string, workerId: string, incarnationId?: string): Promise<void>
   releaseTraceWriter?(traceId: string): void
   finishTraceRecovery?(): void
@@ -307,7 +308,7 @@ export interface BuiltinTraceHooks {
    * 该 worker 名下是否仍有 running 的 bg entity(bg-shell / subagent),供 finish_task
    * 终态守卫查询(拆分 spec 2026-08-28 修订)。缺省视为无,守卫静默关闭。
    */
-  hasRunningBgEntities?(workerId: string): Promise<boolean>
+  hasRunningBgEntities?(workerId: string, incarnationId?: string): Promise<boolean>
 }
 
 export interface BuiltinTraceReader {
@@ -580,7 +581,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     }
     assertEstablishmentActive()
     // 同 resume：fork 也是起一个新化身，运行配置现取。
-    const builtin = await this.runtimeFor(prev.worker_id, 'fork', opts.workspace_instructions, opts.workspace_git)
+    const incarnationId = opts.incarnation_id ?? randomUUID()
+    const builtin = await this.runtimeFor(prev.worker_id, 'fork', opts.workspace_instructions, opts.workspace_git, incarnationId)
 
     // fork 不要求 prev 处于任何特定状态——这就是侧问的意义：主线跑着的时候也能问。不像
     // resume 那样校验 assertExited。newSeq 用 nextSeq()，与 resume 共用同一分配逻辑、
@@ -612,8 +614,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       const forkInitialMessages = [...parentSnapshot.messages, forkMessage]
 
       const newInstance: WorkerInstance = {
+        query_id: opts.query_id,
+        acceptedInputIds: new Set(),
         worker_id: prev.worker_id,
-        incarnation_id: opts.incarnation_id,
+        incarnation_id: incarnationId,
         seq: newSeq,
         dir,
         sessionTree,
@@ -623,10 +627,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         engineMessagesRef: createEngineMessagesRef(
           forkInitialMessages,
           parentSnapshot.systemPrompt,
-          [],
+          resolve(this.combineTools(builtin.tools)),
         ),
         engineMessagesTip: forkId,
-        forkInitialMessages,
         ...(parentSnapshot.systemPrompt !== undefined ? { forkSystemPrompt: parentSnapshot.systemPrompt } : {}),
         activityAt: Date.now(),
         initialTraceInput: forkInput,
@@ -639,7 +642,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       const newHandle: IncarnationHandle = {
         worker_id: prev.worker_id,
-        incarnation_id: opts.incarnation_id,
+        incarnation_id: incarnationId,
         seq: newSeq,
         impl: 'builtin',
         session_ref: forkId,
@@ -652,8 +655,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return { instance: newInstance, handle: newHandle }
     })
 
-    // fire-and-forget：一次性 burst 在后台跑，fork 立刻以 running 态返回。
-    this.trackRun(this.runForkBurst(instance, handle, builtin), instance, handle, 'runForkBurst')
+    // 独立执行分支在后台运行，建立完成即返回。
+    this.trackRun(this.runBurst(instance, handle, builtin), instance, handle, 'runBurst')
 
     return handle
   }
@@ -663,16 +666,24 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 状态检查 + 相应动作（入队 / append+转running）整体在该 worker 的互斥锁内完成，消除
     // "两次背靠背 sendInput 都读到 idle、拿同一 tip"的 check-then-act 竞态（跨 await 边界）。
     const mutex = this.getMutex(h.worker_id)
+    let settlementError: unknown
     const startBurst = await mutex.run(async () => {
       let instance = this.instances.get(instanceKey(h.worker_id, h.seq))
       let rehydratedRuntime: NonNullable<SpawnSpec['builtin']> | undefined
       if (!instance) {
+        if (h.query_id) throw new WorkerExitedError(h.worker_id, h.seq, 'crashed')
         const rehydrated = await this.rehydrateIdleInstance(h)
         if (!rehydrated) {
           throw new Error(`BuiltinWorkerAdapter.sendInput: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
         }
         instance = rehydrated.instance
         rehydratedRuntime = rehydrated.runtime
+      }
+
+      const duplicate = !!opts?.delivery_id && instance.acceptedInputIds?.has(opts.delivery_id) === true
+      if (duplicate && instance.state !== 'idle') {
+        await opts?.onAccepted?.()
+        return undefined
       }
 
       if (instance.state === 'exited') {
@@ -682,9 +693,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       assertInputDeliveryActive(opts, 'not_delivered')
 
+      const settleAccepted = async () => {
+        if (opts?.delivery_id) instance.acceptedInputIds?.add(opts.delivery_id)
+        try { await opts?.onAccepted?.() } catch (error) { settlementError = error }
+      }
       if (instance.state === 'running') {
         if (opts?.immediate_redirect) instance.pendingImmediateInputs.push(text)
         else instance.pendingInputs.push(text)
+        await settleAccepted()
         instance.activityAt = Date.now()
         return undefined
       }
@@ -692,23 +708,30 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // idle → 追加新一轮用户消息，转 running。起 burst 留到锁外（见下）。
       // 运行配置现取：idle 态下没有 burst 在跑，重新解析一次不会干扰任何正在执行的东西，
       // 语义与"起化身现取"一致（正在跑的 burst 用旧配置，见 runBurst 续 burst 路径）。
-      const builtin = rehydratedRuntime ?? await this.runtimeFor(h.worker_id, 'sendInput', instance.workspaceInstructions, instance.workspaceGit)
+      const builtin = rehydratedRuntime ?? await this.runtimeFor(h.worker_id, 'sendInput', instance.workspaceInstructions, instance.workspaceGit, instance.query_id ? instance.incarnation_id : undefined)
       await this.ensureTraceId(instance, `worker ${instance.worker_id}#${instance.seq}`)
       const currentMessages = this.messagesAtTip(instance, instance.tip)
-      const inputMessage = createUserMessage(text)
-      instance.tip = await instance.sessionTree.append(instance.tip, inputMessage)
-      this.setEngineMessagesSnapshot(instance, [...currentMessages, inputMessage], instance.tip)
+      if (!duplicate) {
+        const inputMessage = createUserMessage(text)
+        instance.tip = await instance.sessionTree.append(instance.tip, inputMessage)
+        this.setEngineMessagesSnapshot(instance, [...currentMessages, inputMessage], instance.tip)
+      }
+      await settleAccepted()
       await this.transitionState(instance, h, 'running')
       instance.activityAt = Date.now()
       return builtin
     })
 
-    if (!startBurst) return
+    if (!startBurst) {
+      if (settlementError) throw settlementError
+      return
+    }
 
     // burst 的 runEngine 调用本身在锁外：否则并发 sendInput(running) 的入队会被这次
     // burst 的整个执行时长堵死。
     const instance = this.instances.get(instanceKey(h.worker_id, h.seq))!
     this.trackRun(this.runBurst(instance, h, startBurst), instance, h, 'runBurst (sendInput continuation)')
+    if (settlementError) throw settlementError
   }
 
   async readTerminal(h: IncarnationHandle): Promise<WorkerTerminalView> {
@@ -915,7 +938,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       }
 
       // running：先置位 killRequested，再 abort 当前 burst 的 signal。置位在 abort 之前，
-      // 确保 runBurst/runForkBurst 在同一把锁内做的 killRequested 核对不会漏判。burst 的
+      // 确保 runBurst 在同一把锁内做的 killRequested 核对不会漏判。burst 的
       // runEngine 调用本身在锁外跑（见 runBurst 注释），abort() 后由它自己以
       // outcome='aborted' 收尾时落 exited(killed)——这里不代为转态，避免和 burst 收尾段的
       // 互斥锁临界区打架；abortController 若恰好指向已经跑完的旧 burst（交接窗口内），
@@ -923,7 +946,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       instance.killRequested = true
       instance.abortController?.abort()
     })
-    if (h.query_id === undefined) await this.deps.traceHooks?.stopWorkerSubagents?.(h.worker_id)
+    const stopped = this.instances.get(instanceKey(h.worker_id, h.seq))
+    await this.deps.traceHooks?.stopBackgroundWork?.(h.worker_id, stopped?.query_id ? stopped.incarnation_id : undefined)
   }
 
   async interrupt(h: IncarnationHandle): Promise<void> {
@@ -992,7 +1016,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         } catch {
           continue
         }
-        if (meta.state !== 'running') continue
+        if (meta.state !== 'running' && !(meta.query_id && meta.state === 'idle')) continue
 
         const updated = { ...meta, state: 'exited', ended_reason: 'crashed' }
         const tmpPath = join(dir, `.meta-${seq}.json.tmp-${randomUUID()}`)
@@ -1035,7 +1059,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
   /**
    * fire-and-forget 起 burst（spawn/resume/fork/sendInput 四处）后统一 .catch 到这里。
-   * runBurst/runForkBurst 内部已经把 runEngine 的失败路径处理成 exited(crashed)，能落到
+   * runBurst 内部已经把 runEngine 的失败路径处理成 exited(crashed)，能落到
    * 这里的都是真正意外的同步/异步抛错（比如 pendingWrites 落盘失败后的兜底 throw）。
    * transitionExited 自己还要再摸一次磁盘（writeMeta，pendingInputs 非空时还有 dead-letter
    * append）——若它这次也抛错（ENOSPC/EIO 之类最容易撞上），这层 catch 回调本身就是一个
@@ -1087,6 +1111,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     await this.ensureTraceId(instance, `worker ${instance.worker_id}#${instance.seq}`)
     const tip = instance.tip
     const initialMessages = this.messagesAtTip(instance, tip)
+    const branch = instance.query_id !== undefined
+    instance.lastBurstAssistantText = ''
     const mutex = this.getMutex(instance.worker_id)
 
     // 每次进入 runBurst（含续 burst 的递归调用）都换一个新 AbortController，供 kill() abort。
@@ -1135,14 +1161,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       adapter: builtin.adapter,
       initialMessages,
       options: {
-        systemPrompt: builtin.systemPrompt,
+        systemPrompt: branch ? forkSystemPrompt(instance.forkSystemPrompt ?? builtin.systemPrompt) : builtin.systemPrompt,
         tools: this.combineTools(builtin.tools, instance),
         model: builtin.model,
-        ...(builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
+        ...(!branch && builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
         // turn 边界外部输入注入（spec 2026-08-29-worker-input-turn-boundary-delivery）：
-        // 主线 burst 把 inbox 排队输入（immediate 优先）接到 engine——工具执行完成后、
-        // 下一轮 LLM 调用前注入为 user message，manager 投递不再等 burst（end_turn）结束。
-        // fork 侧问（runForkBurst）不接，不被主线输入打断。
+        // 每条执行线只消费自己排队的输入，工具执行后、下一轮 LLM 调用前注入。
         drainExternalInputs: () => this.takeQueuedInputsAsExternal(instance),
         hasPendingExternalInputs: () =>
           instance.pendingImmediateInputs.length > 0 || instance.pendingInputs.length > 0,
@@ -1189,6 +1213,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           this.deps.onNativeActivity?.({ ...handle, session_ref: instance.tip })
           if (event.assistantText) {
             lastAssistantText = event.assistantText
+            instance.lastBurstAssistantText = event.assistantText
             pendingWrites.push(
               instance.outputLog.append(event.assistantText + '\n').catch((err) => {
                 writeErrors.push(err)
@@ -1216,15 +1241,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // subagent,其完成通知又被 killed 状态静默丢弃,worker 以 end_turn 等待结果的那条路
       // 就被这条终态出口整体绕过。判定必须在 writeBack 之前:打回时要先把 engine 为
       // exitsLoop 合成的成功 tool_result 改写成"失败 + 提醒"(协议 §5.1/§6.4),树和下一轮
-      // 上下文都从 finalMessages 落。fork 化身不装配 finish_task,查询条件与 transitionExited
-      // 的杀因条件(query_id === undefined)一致;aborted/failed 优先级更高,与下方分支顺序一致。
+      // 上下文都从 finalMessages 落。后台检查按执行线归属；aborted/failed 优先级更高。
       let finishTaskRejected = false
       if (
         result.outcome !== 'aborted' && result.outcome !== 'failed' &&
-        result.exitToolCall?.name === 'finish_task' && handle.query_id === undefined
+        result.exitToolCall?.name === 'finish_task'
       ) {
         finishTaskRejected =
-          (await this.deps.traceHooks?.hasRunningBgEntities?.(instance.worker_id)) === true
+          (await this.deps.traceHooks?.hasRunningBgEntities?.(instance.worker_id, branch ? instance.incarnation_id : undefined)) === true
         if (finishTaskRejected) result = this.markFinishTaskRejected(result)
       }
 
@@ -1245,6 +1269,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         const endReason = result.outcome === 'aborted' ? this.interruptionEndReason(instance) : 'crashed'
         await this.transitionExited(instance, handle, endReason, undefined, lastAssistantText)
+        return false
+      }
+
+      // 分支沿用原 fork 的停止优先级：晚到的正常结果不能覆盖已经接受的终止。
+      if (branch && (instance.killRequested || this.closing)) {
+        await this.transitionExited(instance, handle, this.interruptionEndReason(instance), undefined, lastAssistantText)
         return false
       }
 
@@ -1292,6 +1322,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         return false
       }
 
+      if (branch && result.outcome === 'max_turns') {
+        await this.transitionExited(instance, handle, 'failed', 'failed', lastAssistantText)
+        return false
+      }
+
       // end_turn（或 max_turns 耗尽）→ 若 sendInput 排了队，逐条 append 后原地续 burst
       // （不经过可见的 idle 态）；否则转 idle，等待下一次 resume/sendInput 唤醒。
       if (instance.pendingImmediateInputs.length > 0 || instance.pendingInputs.length > 0) {
@@ -1299,156 +1334,17 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         return true
       }
 
-      await this.transitionState(instance, handle, 'idle', lastAssistantText)
+      if (branch && !await this.deps.traceHooks?.hasRunningBgEntities?.(instance.worker_id, instance.incarnation_id)) {
+        await this.transitionExited(instance, handle, 'completed', 'completed', lastAssistantText)
+      } else {
+        await this.transitionState(instance, handle, 'idle', lastAssistantText, !branch)
+      }
       return false
     })
 
     if (continueBurst) {
       await this.runBurst(instance, handle, builtin)
     }
-  }
-
-  /**
-   * fork 专用的一次性 burst：保留主线历史和 Manager 侧问作为上下文，在主线 system prompt
-   * 后追加侧问指令，并沿用主线工具守卫。没有"提前退出"这回事——end_turn 或 maxTurns 收场都视为侧问正常收尾，直接
-   * exited(completed)，不经过 idle、不支持续 burst（没有 pendingInputs 排队逻辑）。engine
-   * 抛错/aborted 仍按对应的中断/崩溃语义收尾。收尾在该 worker 的互斥锁内完成，append 只作用
-   * 于 fork 自己的分支链路，不触碰主线 tip。
-   */
-  private async runForkBurst(
-    instance: WorkerInstance,
-    handle: IncarnationHandle,
-    builtin: NonNullable<SpawnSpec['builtin']>,
-  ): Promise<void> {
-    // fork 化身也有自己的结构化 trace（P6-A §8.4）：与主线 burst 同一 admission 纪律。
-    await this.ensureTraceId(instance, `worker ${instance.worker_id}#${instance.seq} (fork)`)
-    const tip = instance.tip
-    const initialMessages = instance.forkInitialMessages
-      ? [...instance.forkInitialMessages]
-      : this.messagesAtTip(instance, tip)
-    const mutex = this.getMutex(instance.worker_id)
-    const forkSystemPromptValue = instance.forkSystemPrompt ?? builtin.systemPrompt
-    instance.lastBurstAssistantText = ''
-
-    // fork 化身同样支持被 kill() abort——见 runBurst 里对应注释，同样的窗口①在 fork 的
-    // 一次性 burst 上也存在：fork() 把新化身以 running 态注册、锁外 fire-and-forget 起
-    // runForkBurst，安装 controller 前先在锁内核对 killRequested。
-    const abortController = await mutex.run(async () => {
-      if (instance.killRequested || this.closing) {
-        await this.transitionExited(instance, handle, this.interruptionEndReason(instance))
-        return undefined
-      }
-      const ac = new AbortController()
-      instance.abortController = ac
-      return ac
-    })
-    if (!abortController) return
-    instance.activityAt = Date.now()
-
-    // 同 runBurst：push 时立即挂 catch，避免 append 在长时间跑的 burst 期间 reject 却
-    // 没有 handler，触发 unhandledRejection 打崩进程。错误收集到 writeErrors，
-    // Promise.all 后统一抛出，走 fork() 处包给 this.runForkBurst(...) 的安全网 catch
-    // （crashed 收尾），与 runBurst 保持一致的错误语义。
-    const pendingWrites: Promise<void>[] = []
-    const writeErrors: unknown[] = []
-    // 见 runBurst 同名变量的注释。
-    let compactedThisBurst = false
-    const result: EngineResult = await withChildExecutionEnv(instance.executionEnv, () => runEngine({
-      prompt: '',
-      adapter: builtin.adapter,
-      initialMessages,
-      options: {
-        systemPrompt: forkSystemPrompt(forkSystemPromptValue),
-        // 侧问只是回答 Manager 的只读查询，不暴露主线的任何可执行工具。
-        tools: [],
-        model: builtin.model,
-        // 侧问不继承主线 burst 的预算；省略 maxTurns，交给 runEngine 使用既有默认值（200）。
-        // 主线的 maxTurnsPerBurst 只控制主线 burst，不能把侧问意外截短。
-        ...this.safetyOptions(builtin, []),
-        // fork 也必须开：从压缩点**之前**的老节点 fork 时，pathTo 回溯拿到的是完整未压缩
-        // 历史，本身就可能超窗口。不开压缩，老链 fork 必撞窗口。代价是轻量侧问也可能付一次
-        // 摘要成本——可接受（只在真的超阈值时才付）。
-        disableCompaction: false,
-        // 同 runBurst：v2 的 forced_summary 兜底对 v3 worker 不适用。fork 更甚——它是
-        // 只读的一次性问答，没有 finish_task 或消息投递工具；是否成功由 assistant text
-        // 决定，不能再注入“发给人类”的第二条任务指令。
-        suppressForcedSummary: () => true,
-        onCompactionEnd: (info) => {
-          if (info.batchesApplied > 0) compactedThisBurst = true
-        },
-        abortSignal: abortController.signal,
-        messagesRef: instance.engineMessagesRef,
-        onLiveProgress: () => {
-          instance.activityAt = Date.now()
-        },
-        onLlmResponse: (event) => {
-          instance.activityAt = Date.now()
-          if (instance.traceId) this.deps.traceHooks?.appendLlmResponse?.(instance.traceId, event)
-        },
-        onToolLifecycle: (event) => {
-          instance.activityAt = Date.now()
-          if (instance.traceId) this.deps.traceHooks?.appendToolLifecycle?.(instance.traceId, event)
-        },
-        onTurn: (event) => {
-          instance.activityAt = Date.now()
-          if (event.assistantText) instance.lastBurstAssistantText = event.assistantText
-          if (instance.traceId) this.deps.traceHooks?.appendTurn(instance.traceId, event)
-          this.deps.onNativeActivity?.({ ...handle, session_ref: instance.tip })
-          if (event.assistantText) {
-            pendingWrites.push(
-              instance.outputLog.append(event.assistantText + '\n').catch((err) => {
-                writeErrors.push(err)
-              }),
-            )
-          }
-        },
-      },
-    }))
-    await Promise.all(pendingWrites)
-    if (writeErrors.length > 0) {
-      throw new Error(
-        `[builtin-adapter] runForkBurst: ${writeErrors.length} outputLog.append write(s) failed for worker ${instance.worker_id}: ` +
-        writeErrors.map((e) => (e instanceof Error ? e.message : String(e))).join('; '),
-      )
-    }
-
-    await mutex.run(async () => {
-      await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
-
-      if (isExplicitContextOverflowFailure(result)) {
-        await instance.outputLog.append(`[builtin-worker] ${result.error} 本化身以 failed 收场。\n`)
-        await this.transitionExited(instance, handle, 'failed', 'failed', instance.lastBurstAssistantText)
-        return
-      }
-
-      if (result.outcome === 'failed' || result.outcome === 'aborted') {
-        const endReason = result.outcome === 'aborted' ? this.interruptionEndReason(instance) : 'crashed'
-        await this.transitionExited(instance, handle, endReason, undefined, instance.lastBurstAssistantText)
-        return
-      }
-
-      // outcome 是正常收尾但 killRequested 已置位：abort 打晚了，engine 已经决定收尾，
-      // 但用户明确要求过 kill，不该落 completed（P1 全分支终审 Important 收尾段检查点）。
-      if (instance.killRequested || this.closing) {
-        await this.transitionExited(
-          instance,
-          handle,
-          this.interruptionEndReason(instance),
-          undefined,
-          instance.lastBurstAssistantText,
-        )
-        return
-      }
-
-      // 侧问同样不能因为"上下文满了"就静默报 completed（见 isSilentContextOverflow）。
-      if (isSilentContextOverflow(result)) {
-        await instance.outputLog.append(CONTEXT_OVERFLOW_NOTICE)
-        await this.transitionExited(instance, handle, 'failed', 'failed', instance.lastBurstAssistantText)
-        return
-      }
-
-      await this.transitionExited(instance, handle, 'completed', 'completed', instance.lastBurstAssistantText)
-    })
   }
 
   /**
@@ -1714,6 +1610,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
               ...context,
               worker_subagent: {
                 worker_id: instance.worker_id,
+                ...(instance.query_id ? { incarnation_id: instance.incarnation_id } : {}),
                 ...(instance.traceId ? { parent_trace_id: instance.traceId } : {}),
               },
             }),
@@ -1815,6 +1712,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     op: string,
     workspaceInstructions?: WorkspaceInstructionPayload,
     workspaceGit?: WorkerWorkspaceGitContext,
+    incarnationId?: string,
   ): Promise<NonNullable<SpawnSpec['builtin']>> {
     if (this.deps.resolveRuntime) {
       const context = await this.loadContext(worker_id)
@@ -1828,6 +1726,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         ...context,
         ...(workspaceInstructions !== undefined ? { workspace_instructions: workspaceInstructions } : {}),
         workspace_git: workspaceGit,
+        ...(incarnationId ? { incarnation_id: incarnationId } : {}),
       })
       if (!builtin) {
         throw new Error(`BuiltinWorkerAdapter.${op}: resolveRuntime returned no runtime config for worker ${worker_id}`)
@@ -1917,8 +1816,15 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
      */
     summary?: string,
   ): Promise<void> {
-    if (handle.query_id === undefined && ended_reason !== 'killed') {
-      try { await this.deps.traceHooks?.stopWorkerSubagents?.(instance.worker_id) }
+    if (ended_reason !== 'killed') {
+      try {
+        if (instance.query_id) {
+          await this.deps.traceHooks?.stopBackgroundWork?.(instance.worker_id, instance.incarnation_id)
+        } else {
+          // 主线 Shell 保留 Worker 级续办；仅显式 kill 连带停止。
+          await this.deps.traceHooks?.stopWorkerSubagents?.(instance.worker_id)
+        }
+      }
       catch (error) { console.warn(`[builtin-adapter] child exit not confirmed for ${instance.worker_id}:`, error) }
     }
     const pending = [...instance.pendingImmediateInputs, ...instance.pendingInputs]
@@ -1969,6 +1875,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const outcome = overrides.outcome ?? instance.outcome
     const meta = {
       seq: instance.seq,
+      ...(instance.query_id ? { query_id: instance.query_id } : {}),
       state,
       tip_node_id: instance.tip,
       workspace_git: instance.workspaceGit,

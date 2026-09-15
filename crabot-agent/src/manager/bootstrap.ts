@@ -213,7 +213,7 @@ export interface BootstrapDeps {
   readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
   readonly issueAgentCliCredential?: HarnessDeps['issueAgentCliCredential']
   /** Shared bg registry ownership check for builtin end_turn state mapping. */
-  readonly hasRunningBg?: (workerId: string) => Promise<boolean>
+  readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
   /**
    * 对外事件发布口(§9.2 `agent.task_status_changed`),由 `makeAgentEventPublisher` 构造。
    * 可选:P5 阶段这套栈没有生产调用方,注入真实 rpcClient 是 P5 Task 6 的事;不注入则本栈

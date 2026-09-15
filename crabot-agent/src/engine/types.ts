@@ -132,6 +132,7 @@ export interface ToolCallContext {
   /** Injected only while a builtin Worker invokes delegate_task. */
   readonly worker_subagent?: {
     readonly worker_id: string
+    readonly incarnation_id?: string
     readonly parent_trace_id?: string
   }
   /**
