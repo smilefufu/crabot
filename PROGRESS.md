@@ -1,9 +1,14 @@
 # Crabot 项目进度
 
-> 最后整理：2026-09-14
+> 最后整理：2026-09-15
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
+
+### Worker 分支执行与回合结果读取：方案已确认，实施中
+
+- 用户指定优先恢复 fork 实际执行能力、修复 `get_worker_turn` 大结果截断，并要求从主控管理执行器的整体职责修订并行引导。已核对 8 月 28 日的明确要求和 9 月 7 日 execution line 同权决定。
+- 用户已确认[最小修订 spec](crabot-docs/superpowers/specs/2026-09-15-worker-fork-execution-and-turn-result-design.md)，包括分支后台结果归属、收尾正文保存与分页读取，以及整体管理职责提示词。中文称谓采用“分支执行/执行分支”，简单操作交给内置执行器；先更新协议，再隔离实现和验证。
 
 ### Worker 执行行为与项目文档维护：用户确认合入 main 上线观察
 
