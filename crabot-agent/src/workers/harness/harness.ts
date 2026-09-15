@@ -5807,6 +5807,7 @@ export class WorkerHarness {
       status: 'started',
       query_id: prep.receipt.query_id,
       worker_id: workerId,
+      fork_incarnation_id: forkIncarnationId,
       fork_seq: forkHandle.seq,
     }
   }

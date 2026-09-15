@@ -5,12 +5,13 @@
 
 ## 当前状态
 
-### Worker 分支执行与回合结果读取：实现与本地验证完成，待 PR 审查
+### Worker 分支执行与回合结果读取：PR #163 审查中
 
 - 用户指定优先恢复 fork 实际执行能力、修复 `get_worker_turn` 大结果截断，并要求从主控管理执行器的整体职责修订并行引导。已核对 8 月 28 日的明确要求和 9 月 7 日 execution line 同权决定。
 - 按[已确认 spec](crabot-docs/superpowers/specs/2026-09-15-worker-fork-execution-and-turn-result-design.md) 发布协议后，在隔离 worktree 恢复 builtin 分支工具、后台结果定向续跑和独立清理；真实本地 Shell 验证主线完成后分支继续、整体停止覆盖所有分支，迟到结果不复活执行线。
 - 完成回合原子保存脱敏收尾正文，默认读取结果，过程按冻结范围分页；每页不超过 64 KiB，游标固定回合并重新授权，旧记录和证据缺失明确降级。已应用整体管理职责提示词，中文采用“分支执行/执行分支”，简单操作直接交给内置执行器。
 - 关联 32 个测试文件各自最新结果共 657 通过、5 跳过，Agent 类型检查和 diff review 通过。CLI 首轮 194 通过、41 跳过、4 失败：3 项在未修改基线复现，1 项监听时序失败单独重跑通过。未调用真实模型、未部署；测试细节见[实施计划](crabot-docs/superpowers/plans/2026-09-15-worker-branch-execution-turn-result-implementation.md)。
+- 审查修复主线失败误杀后台 Shell，以及 `query_worker` 漏返稳定分支 ID；真实生产装配覆盖 Shell 保活后接续，以及创建分支后按返回 ID 读取分支证据。保留现有终端 seq 兼容。CLI 自动审批已用官方设置说明及本机 Codex 原生配置实验复核，网络配置继承差异和历史 receipt/事件字段漂移另记 follow-up，未擅自改变权限或迁移存储。
 
 ### Worker 执行行为与项目文档维护：用户确认合入 main 上线观察
 

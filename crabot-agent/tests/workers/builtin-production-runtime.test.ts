@@ -26,6 +26,7 @@ import * as agentHandlerModule from '../../src/agent/agent-handler.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import type { ManagerKey } from '../../src/workers/harness/ledger-types.js'
 import { reconcileManagerStack, type ManagerStack } from '../../src/manager/bootstrap.js'
+import { buildWorkerTools } from '../../src/manager/tools/worker-tools.js'
 import type { LLMAdapter, ToolDefinition } from '../../src/engine/index.js'
 import type {
   UnifiedAgentConfig,
@@ -257,6 +258,45 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     })
     return { workerId: worker.worker_id, workspace: worker.incarnations[0].workspace }
   }
+
+  it('query_worker 返回的化身 ID 可直接读取真实分支活动，不会读到主线', async () => {
+    const { internals } = boot()
+    const runtime = internals as any
+    const harness = internals.managerStack!.harness
+    const managerKey = 'wechat::branch-observation' as ManagerKey
+    llm.queue.push({ text: '主线独有的正文', stopReason: 'end_turn' })
+    const { workerId, workspace } = await spawnBuiltin(internals, managerKey)
+    await waitUntil(async () => (await harness.findWorker(workerId))?.worker.incarnations[0].state === 'idle')
+    const tools = buildWorkerTools({
+      harness,
+      context: () => ({ managerKey, episodeId: 'branch-observation', creatorFriendId: 'friend-f1',
+        reportTo: { channel_id: 'wechat', session_id: 'branch-observation' } }),
+      readWorkerActivity: (params) => runtime.readWorkerActivity(params),
+    })
+    llm.queue.push(
+      { toolCalls: [{ name: 'Bash', id: 'branch-observation-shell', input: {
+        command: 'printf 42 > branch-observation.txt',
+      } }], stopReason: 'tool_use' },
+      { text: '分支独有的计算结果：42', stopReason: 'end_turn' },
+    )
+    const result = await tools.find(tool => tool.name === 'query_worker')!.call({
+      worker_id: workerId, question: '执行独立计算并写出结果',
+    }, {})
+    expect(result.isError).toBe(false)
+    const query = JSON.parse(result.output)
+    expect(query.fork_incarnation_id).toEqual(expect.any(String))
+    await waitUntil(async () => (await harness.findWorker(workerId))!.worker.incarnations
+      .some(item => item.incarnation_id === query.fork_incarnation_id && item.state === 'exited'))
+    const activity = await tools.find(tool => tool.name === 'get_worker_activity')!.call({
+      worker_id: workerId, incarnation_id: query.fork_incarnation_id, view: 'all',
+    }, {})
+    expect(activity.isError).toBe(false)
+    expect(JSON.parse(activity.output).incarnation_id).toBe(query.fork_incarnation_id)
+    expect(activity.output).toContain('分支独有的计算结果：42')
+    expect(activity.output).toContain('branch-observation-shell')
+    expect(activity.output).not.toContain('主线独有的正文')
+    expect(await fs.readFile(join(workspace, 'branch-observation.txt'), 'utf8')).toBe('42')
+  })
 
   it('主线 LLM 硬失败后后台 Shell 保活，真实结果通过新化身接续消费', async () => {
     const { internals } = boot()

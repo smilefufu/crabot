@@ -718,7 +718,7 @@ describe('send_to_worker', () => {
 })
 
 describe('query_worker', () => {
-  it('等待 fork 建立后返回 started + query_id + fork_seq，但不等待回答完成', async () => {
+  it('等待 fork 建立后返回稳定化身 ID 并保留终端 seq，但不等待回答完成', async () => {
     let releaseFork!: () => void
     const forkGate = new Promise<void>((resolve) => {
       releaseFork = resolve
@@ -745,10 +745,12 @@ describe('query_worker', () => {
     expect(parseOutput(result.output)).toMatchObject({
       status: 'started',
       worker_id: worker.worker_id,
+      fork_incarnation_id: expect.any(String),
       fork_seq: 2,
       query_id: expect.any(String),
     })
     const [w] = await harness.listWorkers(CTX.managerKey)
+    expect(parseOutput(result.output).fork_incarnation_id).toBe(w.incarnations[1].incarnation_id)
     expect(w.incarnations[1]).toMatchObject({
       seq: 2,
       forked_from: w.incarnations[0].incarnation_id,
