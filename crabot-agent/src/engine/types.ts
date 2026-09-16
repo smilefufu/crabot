@@ -364,6 +364,9 @@ export type LiveProgressEvent =
   | {
       /** LLM 调用重试触发；用于 admin web 显示"正在重试"状态 */
       readonly type: 'llm_retry'
+      readonly retryMode?: 'bounded_retry' | 'connection_recovery'
+      readonly elapsedMs?: number
+      readonly delayMs?: number
       readonly turn: number          // 当前正在尝试的 turn 编号
       readonly attempt: number       // 第几次失败 (1-indexed)
       readonly maxAttempts: number   // 总配额

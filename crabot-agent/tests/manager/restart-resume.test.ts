@@ -63,19 +63,19 @@ describe('Manager restart continuation', () => {
     return checkpoint!
   }
 
-  it('resumes the same episode after a successful send without a new human wake or repeated send', async () => {
+  it.each(['send_message', 'send_private_message'])('resumes the same episode after %s without a new human wake or repeated send', async (toolName) => {
     const sent = vi.fn(async () => {
-      old.getOrCreate(KEY).recordSuccessfulSendMessage({ channel_id: 'feishu', session_id: 'restart-test' })
+      if (toolName === 'send_message') old.getOrCreate(KEY).recordSuccessfulSendMessage({ channel_id: 'feishu', session_id: 'restart-test' })
       old.getOrCreate(KEY).recordWorkerContinuation('continued-worker')
       old.getOrCreate(KEY).recordSpawnedWorker('spawned-worker')
       return { output: 'delivered', isError: false }
     })
-    const send = defineTool({ name: 'send_message', description: 'send', inputSchema: {}, isReadOnly: false, call: sent })
+    const send = defineTool({ name: toolName, description: 'send', inputSchema: {}, isReadOnly: false, call: sent })
     let calls = 0
     const old = registry({
       async *stream() {
         if (calls++ === 0) {
-          yield* chunksFromContent([{ type: 'tool_use', id: 'sent-once', name: 'send_message', input: { text: 'reply' } }], 'tool_use')
+          yield* chunksFromContent([{ type: 'tool_use', id: 'sent-once', name: toolName, input: { text: 'reply' } }], 'tool_use')
         } else {
           await new Promise(() => {})
         }
@@ -89,7 +89,7 @@ describe('Manager restart continuation', () => {
     const restored = registry({
       async *stream(params) {
         inputs.push({ ...params, messages: [...params.messages] })
-        expect(restored.getOrCreate(KEY).hasSuccessfulSendMessageTo({ channel_id: 'feishu', session_id: 'restart-test' })).toBe(true)
+        expect(restored.getOrCreate(KEY).hasSuccessfulSendMessageTo({ channel_id: 'feishu', session_id: 'restart-test' })).toBe(toolName === 'send_message')
         expect(restored.getOrCreate(KEY).hasContinuedWorker('continued-worker')).toBe(true)
         yield* chunksFromContent([], 'end_turn')
       }, updateConfig() {},
@@ -104,6 +104,7 @@ describe('Manager restart continuation', () => {
     expect(JSON.stringify(inputs[0].messages).match(/Continue the work/g)).toHaveLength(1)
     expect(sent).toHaveBeenCalledTimes(1)
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.outcome?.summary).toContain('replied=yes')
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.spawned_worker_ids).toEqual(['spawned-worker'])
     expect(trace.listManagerEpisodes(KEY).items).toHaveLength(1)
     expect(await store.loadCheckpoint(KEY)).toBeUndefined()

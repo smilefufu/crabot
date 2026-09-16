@@ -2856,6 +2856,26 @@ describe('ManagerLoop', () => {
 
   // --- EpisodeResult.repliedToHuman(P7 J Task 3.1:群聊注意力退避的 `replied` 信号) ---
 
+  it('episode trace 保留 Engine 返回的真实失败原因', async () => {
+    const adapter: LLMAdapter = {
+      updateConfig: () => {},
+      async *stream() { throw new Error('PROVIDER_QUOTA_EXHAUSTED: current window exhausted') },
+    }
+    const traceWriter: ManagerTraceWriter = {
+      startEpisode: vi.fn(), appendSpan: vi.fn(), finishSpan: vi.fn(),
+      finishEpisode: vi.fn(), addSpawnedWorker: vi.fn(),
+    }
+    const loop = new ManagerLoop(baseDeps({ store, adapter, traceWriter }))
+
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('查询')] }))
+
+    expect(result.outcome).toBe('failed')
+    expect(result.error).toContain('PROVIDER_QUOTA_EXHAUSTED')
+    expect(traceWriter.finishEpisode).toHaveBeenCalledWith(result.episodeId, expect.objectContaining({
+      status: 'failed', outcome: expect.objectContaining({ error: result.error }),
+    }))
+  })
+
   describe('EpisodeResult.repliedToHuman', () => {
     /** 让 engine 有真工具可执行,避免 tool_use 落到"工具不存在"的错误分支上。 */
     function replyToolFace(): ReadonlyArray<ToolDefinition> {
@@ -2868,6 +2888,66 @@ describe('ManagerLoop', () => {
         })
       )
     }
+
+    it.each(['completed', 'failed'] as const)('上一轮发送不能算作本轮 %s 的回复', async (outcome) => {
+      const { adapter, queue } = makeAdapter()
+      let fail = false
+      const currentAdapter: LLMAdapter = {
+        ...adapter,
+        async *stream(params) {
+          if (fail) throw new Error('PERMANENT_PROVIDER_REJECTION')
+          yield* adapter.stream(params)
+        },
+      }
+      const traceWriter: ManagerTraceWriter = {
+        startEpisode: vi.fn(), appendSpan: vi.fn(), finishSpan: vi.fn(),
+        finishEpisode: vi.fn(), addSpawnedWorker: vi.fn(),
+      }
+      const loop = new ManagerLoop(baseDeps({ store, adapter: currentAdapter, toolFace: replyToolFace, traceWriter }))
+      queue.push(
+        { toolCalls: [{ name: 'send_message', id: 'old-reply', input: {} }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+      )
+      expect((await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('上一轮')] }))).repliedToHuman).toBe(true)
+      fail = outcome === 'failed'
+      queue.push(
+        { toolCalls: [{ name: 'get_history', id: 'current-read', input: {} }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+      )
+
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('本轮只查历史')] }))
+
+      expect(result.outcome).toBe(outcome)
+      expect(result.repliedToHuman).toBe(false)
+      expect(traceWriter.finishEpisode).toHaveBeenLastCalledWith(result.episodeId, expect.objectContaining({
+        outcome: expect.objectContaining({ summary: expect.stringContaining('replied=no') }),
+      }))
+    })
+
+    it.each([false, true])('压缩重试只累计本 episode 的回复（首次尝试发送=%s）', async (sendInCurrentEpisode) => {
+      const { adapter, queue } = makeAdapter()
+      await store.save({ key: KEY, recent: [
+        compressibleHistoryMessage('旧消息1'), compressibleHistoryMessage('旧消息2'), compressibleHistoryMessage('旧消息3'),
+      ], foldedCount: 0 })
+      const loop = new ManagerLoop(baseDeps({
+        store, adapter, toolFace: replyToolFace,
+        policy: { keepRecent: 2, hardCapTokens: 1_000_000 },
+      }))
+      queue.push(
+        { toolCalls: [{ name: 'send_message', id: 'old-reply', input: {} }], stopReason: 'tool_use' },
+        { stopReason: 'end_turn' },
+      )
+      await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('上一轮')] }))
+      if (sendInCurrentEpisode) queue.push({
+        toolCalls: [{ name: 'send_private_message', id: 'current-reply', input: {} }], stopReason: 'tool_use',
+      })
+      queue.push({ stopReason: 'max_tokens' }, { stopReason: 'end_turn' })
+
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('本轮压缩重试')] }))
+
+      expect(result.outcome).toBe('completed')
+      expect(result.repliedToHuman).toBe(sendInCurrentEpisode)
+    })
 
     it('manager 沉默(一个字都没跟人说)→ repliedToHuman === false,即使 episode 正常完成', async () => {
       const { adapter, queue } = makeAdapter()

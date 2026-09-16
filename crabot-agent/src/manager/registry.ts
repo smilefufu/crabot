@@ -116,6 +116,7 @@ export interface ManagerRegistryDeps {
   /** 运行时配置已原子替换后的通知源与代数 getter(spec 2026-08-30-llm-retry-config-hotreload);原样下传 ManagerLoopDeps。 */
   readonly onRuntimeConfigApplied?: (listener: () => void) => () => void
   readonly runtimeConfigAppliedGeneration?: () => number
+  readonly onLlmRetry?: (key: ManagerKey, event: Parameters<NonNullable<ManagerLoopDeps['onLlmRetry']>>[0]) => void
   readonly maxTurns?: number
   /** manager 模型的上下文窗口(随 powerful slot,thunk 支持 hot-reload);undefined = engine 默认 200K */
   readonly contextWindowTokens?: () => number | undefined
@@ -393,6 +394,7 @@ export class ManagerRegistry {
       timezone: this.deps.timezone,
       markPendingReply: () => { this.pendingReplies.add(key) },
       hasPendingReply: () => this.pendingReplies.has(key),
+      onLlmRetry: (event) => this.deps.onLlmRetry?.(key, event),
       onEpisodeEnd: () => this.lastActiveAtMs.set(key, this.deps.now().getTime()),
       traceWriter: this.deps.traceWriter,
       onAdminChatWakeConsumed: this.deps.onAdminChatWakeConsumed

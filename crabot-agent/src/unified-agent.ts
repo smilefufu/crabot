@@ -773,6 +773,7 @@ export class UnifiedAgent extends ModuleBase {
 
   /** fail-loud 兜底回复的按 key 冷却台账：`channel::session` → 上一条兜底回复发出的时刻。 */
   private readonly failLoudSentAt: Map<string, number> = new Map()
+  private readonly llmRecoverySentAt = new Map<string, number>()
   /** F3 计数：`channel::session` → 连续"跑完但没跟人说话"的 episode 数（只用于 warn）。 */
   private readonly silentEpisodeStreak: Map<string, number> = new Map()
 
@@ -1102,6 +1103,7 @@ export class UnifiedAgent extends ModuleBase {
       // LLM 重试期间配置热切换的通知源与代数探针（spec 2026-08-30-llm-retry-config-hotreload）
       onRuntimeConfigApplied: (listener) => this.addRuntimeConfigAppliedListener(listener),
       runtimeConfigAppliedGeneration: () => this.getRuntimeConfigAppliedGeneration(),
+      onLlmRetry: (key, event) => { void this.sendManagerLlmRetry(key, event) },
       // Manager 消息工具不绑定旧 task context。
       messagingDeps: {
         rpcClient: this.rpcClient,
@@ -2017,6 +2019,7 @@ export class UnifiedAgent extends ModuleBase {
             void this.sendFailLoudReply(session.channel_id, session.session_id, {
               kind: 'outcome',
               outcome: settled.outcome,
+              error: settled.error,
             }).catch((err) => console.error(`[${this.config.moduleId}] processDirectBatch settle fail-loud failed:`, err))
           }
         },
@@ -2040,6 +2043,7 @@ export class UnifiedAgent extends ModuleBase {
       await this.sendFailLoudReply(session.channel_id, session.session_id, {
         kind: 'outcome',
         outcome: result.outcome,
+        error: result.error,
       })
       return
     }
@@ -2108,6 +2112,7 @@ export class UnifiedAgent extends ModuleBase {
             void this.sendFailLoudReply(session.channel_id, sessionId, {
               kind: 'outcome',
               outcome: settled.outcome,
+              error: settled.error,
             }).catch((err) => console.error(`[${this.config.moduleId}] processGroupLaneBatch settle fail-loud failed:`, err))
           }
         },
@@ -2121,6 +2126,7 @@ export class UnifiedAgent extends ModuleBase {
         await this.sendFailLoudReply(session.channel_id, sessionId, {
           kind: 'outcome',
           outcome: result.outcome,
+          error: result.error,
         })
       }
     } catch (err) {
@@ -2200,6 +2206,33 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
+  /** 连接恢复进度独立冷却；通知不占用人类回复或失败告知的结算责任。 */
+  private async sendManagerLlmRetry(
+    key: ManagerKey,
+    event: Extract<import('./engine/types.js').LiveProgressEvent, { type: 'llm_retry' }>,
+  ): Promise<void> {
+    if (event.retryMode !== 'connection_recovery') return
+    const now = Date.now()
+    const lastAt = this.llmRecoverySentAt.get(key)
+    if (lastAt !== undefined && now - lastAt < FAIL_LOUD_COOLDOWN_MS) return
+    this.llmRecoverySentAt.set(key, now)
+    try {
+      const { channelId, sessionId } = splitManagerKey(key)
+      const reason = redactSecrets(event.error, [...this.knownSecrets]).slice(0, FAIL_LOUD_ERROR_MAX_CHARS)
+      const text = `LLM 连接恢复中，已尝试 ${event.attempt} 次，已用 ${Math.floor((event.elapsedMs ?? 0) / 1000)} 秒。最近原因：${reason}。正在重试，你也可以在 Admin 切换模型。`
+      if (channelId === 'admin-web' && sessionId === 'admin-chat') {
+        // 进度只追加消息，不 claim 或结算当前人类请求。
+        await this.deliverAdminChatText(text, [])
+      } else {
+        await this.rpcClient.call(await this.getChannelPort(channelId), 'send_message', {
+          session_id: sessionId, content: { type: 'text', text },
+        }, this.config.moduleId)
+      }
+    } catch (error) {
+      console.warn(`[${this.config.moduleId}] LLM 恢复进度投递失败:`, error instanceof Error ? error.message : String(error))
+    }
+  }
+
   /**
    * fail-loud 兜底：manager episode 没能把话说出来时，**不经 manager、不经 LLM**
    * 直接告诉人类一声。
@@ -2247,7 +2280,11 @@ export class UnifiedAgent extends ModuleBase {
     this.failLoudSentAt.set(key, now)
 
     try {
-      const text = subject === undefined ? buildFailLoudText(failure) : buildBackgroundFailLoudText(subject, failure)
+      const redact = (text: string) => redactSecrets(text, [...(this.knownSecrets ?? [])])
+      const safeFailure: ManagerEpisodeFailure = failure.kind === 'outcome'
+        ? { ...failure, error: failure.error === undefined ? undefined : redact(failure.error) }
+        : { kind: 'threw', error: redact(failure.error instanceof Error ? failure.error.message : String(failure.error)) }
+      const text = subject === undefined ? buildFailLoudText(safeFailure) : buildBackgroundFailLoudText(subject, safeFailure)
       if (adminChatRequestId !== undefined) {
         // P6-A §11.11：fail-loud 直回同样走 admin-web send_message 入口（delivery 事务）。
         await this.deliverDirectAdminChatReply(adminChatRequestId, text)
@@ -4966,6 +5003,13 @@ export class UnifiedAgent extends ModuleBase {
     const store = this.adminChatCorrelationStore()
     const index = await store.readRequestIndex(key)
     const requestIds = index.get(requestId)?.status === 'pending' ? [requestId] : []
+    await this.deliverAdminChatText(text, requestIds)
+  }
+
+  /** 已确定关联的文字投递；空 requestIds 表示纯追加，不消费任何 pending。 */
+  private async deliverAdminChatText(text: string, requestIds: string[]): Promise<void> {
+    const key = 'admin-web::admin-chat' as ManagerKey
+    const store = this.adminChatCorrelationStore()
     const deliveryId = generateId()
     const content = { type: 'text', text }
     await store.prepareOutbound({

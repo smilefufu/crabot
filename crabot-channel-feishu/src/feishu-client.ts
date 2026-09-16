@@ -391,6 +391,7 @@ export class FeishuClient {
     const resp = await this.client.im.message.list({
       params: query,
     })
+    assertHistoryResponse(resp)
     return {
       items: (resp.data?.items ?? []) as Array<Record<string, unknown>>,
       page_token: resp.data?.page_token,
@@ -402,9 +403,21 @@ export class FeishuClient {
   async getMessage(messageId: string): Promise<Record<string, unknown> | null> {
     const params = { user_id_type: 'open_id' as const, card_msg_content_type: 'user_card_content' }
     const resp = await this.client.im.message.get({ path: { message_id: messageId }, params })
+    assertHistoryResponse(resp)
     const items = resp.data?.items ?? []
     return items.length > 0 ? (items[0] as Record<string, unknown>) : null
   }
+}
+
+function assertHistoryResponse(response: { code?: number; msg?: string }): void {
+  if (response.code === undefined || response.code === 0) return
+  mapFeishuPermissionError(response, 'im:message:readonly', '飞书应用缺少消息读取权限')
+  throw new FeishuClientError({
+    code: 'CHANNEL_HISTORY_UNAVAILABLE',
+    message: `Feishu history request failed (code=${response.code}): ${response.msg ?? 'unknown error'}`,
+    feishu_code: response.code,
+    feishu_message: response.msg,
+  })
 }
 
 async function streamToBuffer(stream: Readable): Promise<Buffer> {

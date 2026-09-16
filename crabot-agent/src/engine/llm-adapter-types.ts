@@ -32,6 +32,8 @@ import type {
 // --- Interfaces ---
 
 export interface LLMRetryEvent {
+  readonly retryMode: 'bounded_retry' | 'connection_recovery'
+  readonly elapsedMs: number
   readonly attempt: number      // 1-indexed (第 N 次失败正在准备 retry)
   readonly maxAttempts: number  // 总配额
   readonly delayMs: number      // 即将 sleep 多久后 retry
@@ -302,6 +304,8 @@ async function withStreamConsumptionRetry(
         )
         try {
           params.onRetry?.({
+            retryMode: 'connection_recovery',
+            elapsedMs: Date.now() - startedAt,
             attempt: attempt + 1,
             maxAttempts: Number.MAX_SAFE_INTEGER,
             delayMs: actualDelay,
@@ -346,6 +350,8 @@ async function withStreamConsumptionRetry(
       )
       try {
         params.onRetry?.({
+          retryMode: 'bounded_retry',
+          elapsedMs: Date.now() - startedAt,
           attempt: attempt + 1,
           maxAttempts: maxRetries + configSwitchBudget + 1,
           delayMs: actualDelay,

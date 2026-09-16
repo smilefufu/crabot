@@ -59,6 +59,20 @@ function makeClient() {
 }
 
 describe('FeishuClient raw card reads', () => {
+  it.each(['list', 'get'])('rejects nonzero business codes from message.%s instead of returning empty', async (method) => {
+    const c = makeClient()
+    const sdk = (c as any).client
+    sdk.im.message[method].mockResolvedValue({ code: 230001, msg: 'history access denied' })
+    const result = method === 'list' ? c.listMessages({ container_id_type: 'chat', container_id: 'oc_x' }) : c.getMessage('om_x')
+    await expect(result).rejects.toMatchObject({ code: 'CHANNEL_HISTORY_UNAVAILABLE', message: expect.stringContaining('history access denied') })
+  })
+
+  it('preserves missing-scope permission errors', async () => {
+    const c = makeClient()
+    ;(c as any).client.im.message.list.mockResolvedValue({ code: 99991672, msg: 'missing scope' })
+    await expect(c.listMessages({ container_id_type: 'chat', container_id: 'oc_x' })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' })
+  })
+
   it('requests original card JSON for get and list while retaining pagination', async () => {
     const c = makeClient()
     const sdk = (c as any).client

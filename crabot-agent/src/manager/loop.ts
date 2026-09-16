@@ -318,6 +318,7 @@ export interface ManagerLoopDeps {
   /** 当前会话是否仍欠人类一次标准 send_message 回复。 */
   readonly hasPendingReply: () => boolean
   readonly onEpisodeEnd?: (result: EpisodeResult) => void
+  readonly onLlmRetry?: (event: Extract<import('../engine/types.js').LiveProgressEvent, { type: 'llm_retry' }>) => void
   /**
    * Manager episode trace writer（P6-A §6）：窄接口，episode 边界调用。
    * root trace 持久化是 episode admission——startEpisode 抛错时本 loop 不得调用
@@ -1049,7 +1050,7 @@ export class ManagerLoop {
           status: failed ? 'failed' : 'completed',
           outcome: {
             summary: `outcome=${result.outcome}; turns=${result.turns}; replied=${result.repliedToHuman ? 'yes' : 'no'}`,
-            ...(failed ? { error: `manager episode ${result.outcome}` } : {}),
+            ...(failed ? { error: result.error ?? `manager episode ${result.outcome}` } : {}),
           },
           ...(this.currentUsage.input_tokens > 0 || this.currentUsage.output_tokens > 0 ? { total_usage: { ...this.currentUsage } } : {}),
         })
@@ -1233,7 +1234,9 @@ export class ManagerLoop {
     let usedForceHotRetry = false
     // 与 totalTurnsUsed 同一套累加纪律:兜底重试会整体丢弃首次尝试的 finalMessages,但首次
     // 尝试里已经发出去的话人类是真的收到了——只看重试那一份会把"说过话"错报成"没说过"。
-    let repliedToHuman = detectRepliedToHuman(attempt.result.finalMessages)
+    // protectedTail 在重启续跑时含本 episode 已执行的消息；普通唤醒时只有本次人类输入。
+    let repliedToHuman = detectRepliedToHuman(protectedTail)
+      || detectRepliedToHuman(attempt.result.finalMessages.slice(attempt.initialMessageCount))
     let successfulSendMessageTargets = successfulSendMessageTargetsOf(
       attempt.result.finalMessages.slice(attempt.initialMessageCount),
     )
@@ -1287,7 +1290,7 @@ export class ManagerLoop {
       })
       originalsById = retryInjected?.originals ?? new Map()
       totalTurnsUsed += retryAttempt.result.totalTurns
-      repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages)
+      repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages.slice(retryAttempt.initialMessageCount))
       successfulSendMessageTargets = [
         ...successfulSendMessageTargets,
         ...successfulSendMessageTargetsOf(retryAttempt.result.finalMessages.slice(retryAttempt.initialMessageCount)),
@@ -1327,7 +1330,7 @@ export class ManagerLoop {
       )
       totalTurnsUsed += continuation.result.totalTurns
       if (continuation.result.outcome === 'completed' || continuation.result.outcome === 'max_turns') {
-        repliedToHuman = repliedToHuman || detectRepliedToHuman(continuation.result.finalMessages)
+        repliedToHuman = repliedToHuman || detectRepliedToHuman(continuation.result.finalMessages.slice(continuation.initialMessageCount))
         successfulSendMessageTargets = [
           ...successfulSendMessageTargets,
           ...successfulSendMessageTargetsOf(continuation.result.finalMessages.slice(continuation.initialMessageCount)),
@@ -2260,6 +2263,16 @@ export class ManagerLoop {
           this.resumeCheckpoint = { ...this.resumeCheckpoint, tools: [...tools.values()], pendingToolCallIds: [...pendingToolCallIds] }
           this.flushObservedCheckpoint()
         }
+      },
+      onLiveProgress: (event) => {
+        if (event.type !== 'llm_retry') return
+        const now = this.deps.now().toISOString()
+        this.deps.traceWriter?.appendSpan(episodeId, {
+          span_id: `retry-${randomUUID()}`, parent_span_id: `root-${episodeId}`,
+          type: 'decision', status: 'completed', started_at: now, ended_at: now,
+          details: { kind: 'llm_retry', ...event },
+        })
+        this.deps.onLlmRetry?.(event)
       },
       // LLM 重试期间配置热切换（spec 2026-08-30-llm-retry-config-hotreload）：
       // onRuntimeConfigApplied 在 agentConfig 原子替换完成后触发 → abort signal →
