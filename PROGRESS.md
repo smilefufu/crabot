@@ -5,7 +5,7 @@
 
 ## 当前状态
 
-### 历史查询与 Manager 回复／错误／恢复进度：已实现，待审查上线
+### 历史查询与 Manager 回复／错误／恢复进度：已合入，待部署
 
 - 9 月 16 日用户确认先修四项：飞书历史查询、episode 回复统计、真实错误透传、连接恢复可见性。
 - 飞书查询按 9 月 16 日已确认的 `2026-09-16-feishu-history-query-completeness-design.md` 实现：远端查询、旧私聊只读解析 chat_id、跨页筛选和最新 N 条、20 页预算及明确错误；群聊进群回填保持独立。
@@ -567,6 +567,12 @@
 - PR #76～#89 完成 CLI worker 输入/活性/权限/ManagerKey、legacy loop 退役、bg-shell durable notification、worker-scoped MCP、Admin Chat assertion、会话隔离与 v2 只读导入；生产切换见里程碑归档（`git show 49b9cb4:PROGRESS.md` 有完整细节）。
 
 ## 当前 follow-up
+
+- **飞书其余 RPC 错误码**（PR #164 审查）：`get_message` 等旧路径仍通过 `throwError` 抛普通 Error，
+  经 `formatHandlerError` 后会变成 `INTERNAL_ERROR`。后续按方法补 RPC 边界回归并修正；本次已修的
+  `get_history` 路径使用 `RpcError`，不把其它 Channel 方法并入四项修复。
+- **历史查询入口复用**（PR #164 审查，当前不可达）：`ContextAssembler` 的 `assembleFrontContext` /
+  `assembleWorkerContext` 在生产代码中无调用方；若重新启用，需先处理远端历史查询失败被吞为空上下文的问题。
 
 - **Manager 注入批内去重**：`enqueueHumanWakeDuringActiveEpisode` 先整批 filter 再更新去重键，
   同一批内重复的 `platform_message_id` 会重复进入 LLM 文本；跨批重发去重正常。渠道初始化攒批
