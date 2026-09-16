@@ -6,7 +6,7 @@
  *
  * 主路径——connector 推送的 `message.type` 是 MessageType 枚举（参 BOT_INTEGRATION.md §消息类型）：
  *   0=TEXT, 1=IMAGE, 2=VOICE_2, 3=CARD_3, 4=TRANSFER, 5=RED_PACKET, 6=SYSTEM,
- *   9=FILE_9, 10=VIDEO_10, 11=LINK, 15=MINI_PROGRAM, 17=PAT_PAT, 18=QUOTE, 20=APP_MSG
+ *   9=FILE_9, 10=VIDEO_10, 11=LINK, 13=CHANNEL_VIDEO, 15=MINI_PROGRAM, 17=PAT_PAT, 18=QUOTE, 20=APP_MSG
  *
  * 兼容路径——历史上 puppet 上报时可能直接传微信原始 field_type，下面 case 里多出来的
  *   34=VOICE / 42=CARD / 43=VIDEO / 47=EMOJI / 1090519089=FILE / 10000/10002=SYSTEM
@@ -155,6 +155,34 @@ export function formatWechatContent(
       return textMsg(parts.join('\n\n'))
     }
 
+    // ── 视频号卡片 (13)：只呈现元信息，不将加密视频登记为可下载媒体 ──
+    case 13: {
+      const feed = raw.finderFeed
+      if (!isRecord(feed)) return textMsg('[视频号卡片]\n上游未提供媒体详情。')
+      const nickname = typeof feed.nickname === 'string' ? feed.nickname.trim() : ''
+      const description = typeof feed.desc === 'string' ? feed.desc.trim() : ''
+      const media = Array.isArray(feed.mediaList) ? feed.mediaList : []
+      const isVideo = media.some(item => isRecord(item) && item.mediaType === 4)
+      const parts = [isVideo ? '[视频号视频]' : '[视频号卡片]']
+      if (nickname) parts.push(`作者：${nickname}`)
+      if (description) parts.push(`描述：${description}`)
+      if (typeof feed.mediaCount === 'number' && Number.isSafeInteger(feed.mediaCount) && feed.mediaCount >= 0) {
+        parts.push(`媒体数量：${feed.mediaCount}`)
+      }
+      media.forEach((item, index) => {
+        if (!isRecord(item) || item.mediaType !== 4) return
+        const prefix = media.length > 1 ? `媒体 ${index + 1} ` : ''
+        if (isPositiveNumber(item.videoPlayDuration)) parts.push(`${prefix}时长：${item.videoPlayDuration} 秒`)
+        if (isPositiveNumber(item.width) && isPositiveNumber(item.height)) {
+          parts.push(`${prefix}尺寸：${item.width}×${item.height}`)
+        }
+      })
+      parts.push(parts.length > 1 || isVideo
+        ? '以上为卡片元信息；视频画面和音频尚未读取。'
+        : '上游未提供媒体详情。')
+      return textMsg(parts.join('\n'))
+    }
+
     // ── 小程序 (15) ──
     case 15: {
       const title = s('title') ?? '小程序'
@@ -260,4 +288,12 @@ function textMsg(text: string): FormattedMessage {
     content: { type: 'text' as MessageType, text },
     features: {},
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isPositiveNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
 }
