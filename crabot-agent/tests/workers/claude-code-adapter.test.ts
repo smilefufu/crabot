@@ -20,7 +20,7 @@ function detectTmux(): boolean {
   const socket = `crabot-vitest-${process.pid}`
   try {
     execFileSync('which', ['tmux'], { stdio: 'ignore' })
-    execFileSync('tmux', ['-L', socket, 'new-session', '-d', '-s', 'probe', 'exit 0'], { stdio: 'ignore' })
+    execFileSync('tmux', ['-L', socket, 'new-session', '-d', '-s', 'probe', 'sleep 10'], { stdio: 'ignore' })
     execFileSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' })
     return true
   } catch {
@@ -1741,7 +1741,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
         '.mcp.json',
         '--strict-mcp-config',
         '--append-system-prompt',
-        expect.stringContaining('转向处理下面来自 Manager 的新请求'),
+        expect.stringContaining('处理下面来自主控的新请求'),
       ])
 
       await adapter.kill(h1)
@@ -1773,8 +1773,8 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       expect(forkArgv[forkArgv.indexOf('-p') + 1]).toBe(question)
       const promptIndex = forkArgv.indexOf('--append-system-prompt')
       expect(promptIndex).toBeGreaterThan(-1)
-      expect(forkArgv[promptIndex + 1]).toContain('转向处理下面来自 Manager 的新请求')
-      expect(forkArgv[promptIndex + 1]).toContain('使用既有授权内的工具和 Skill 完成任务')
+      expect(forkArgv[promptIndex + 1]).toContain('处理下面来自主控的新请求')
+      expect(forkArgv[promptIndex + 1]).toContain('使用既有授权内的工具和 Skill')
       expect(forkArgv[promptIndex + 1]).not.toContain('也不调用任何工具')
 
       await adapter.kill(h1)

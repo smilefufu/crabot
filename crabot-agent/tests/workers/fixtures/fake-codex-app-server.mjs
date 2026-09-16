@@ -159,7 +159,7 @@ rl.on('line', (line) => {
           .map((item) => item.text)
           .join('\n')
         : ''
-      if (!inputText.includes('转向处理下面来自 Manager 的新请求')) {
+      if (!inputText.includes('处理下面来自主控的新请求')) {
         error(message.id, 'missing query fork instruction', -32602)
         return
       }

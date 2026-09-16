@@ -67,14 +67,14 @@ describe('assembleSubAgentPrompt', () => {
     expect(idxFlow).toBeLessThan(idxDeli)
   })
 
-  it('头部含通用守则关键词', () => {
+  it('头部明确执行器委托关系和产物保留责任', () => {
     const out = assembleSubAgentPrompt(baseEntry, { parentTaskId: 't', callerLabel: 'x' })
-    expect(out).toContain('Subagent 身份运行')
-    expect(out).toContain('不要轮询')
-    expect(out).toContain('不要持久化')
+    expect(out).toContain('由执行器委派的子 Agent')
+    expect(out).toContain('子任务结束后不再接续')
+    expect(out).toContain('需保留的产物按任务要求保存')
   })
 
-  it('只列出调用方已过滤的 direct child Skill，并要求先加载', () => {
+  it('保留调用方已过滤的 direct child Skill 清单，加载方法由工具说明提供', () => {
     const out = assembleSubAgentPrompt(baseEntry, {
       parentTaskId: 't',
       callerLabel: 'x',
@@ -88,6 +88,7 @@ describe('assembleSubAgentPrompt', () => {
 
     expect(out).toContain('<available_skills>')
     expect(out).toContain('<name>verification-before-completion</name>')
-    expect(out).toContain('必须先调用 Skill 工具')
+    expect(out).toContain('<description>完成前验证</description>')
+    expect(out).not.toContain('必须先调用 Skill 工具')
   })
 })

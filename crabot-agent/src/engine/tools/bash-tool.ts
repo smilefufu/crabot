@@ -257,9 +257,8 @@ export function createBashTool(
     name: 'Bash',
     category: 'shell',
     description:
-      'Executes a bash command and returns its output. ' +
-      `命令前台运行；若运行超过 ${Math.round(FOREGROUND_GRACE_PERIOD_MS / 1000)}s 仍未结束，自动转入后台并返回 entity_id（命令**继续运行、不中断**），` +
-      '随后可继续做别的；没有其他工作时自然结束当前回合，退出事件会唤醒 worker。同步等待使用 Output(entity_id, block=true, timeout_ms=600000)。',
+      '执行 Bash 命令并返回输出。' +
+      `运行超过 ${Math.round(FOREGROUND_GRACE_PERIOD_MS / 1000)}s 时自动转后台，命令继续运行并返回 entity_id；后续输出通过 Output 读取。`,
     inputSchema: {
       type: 'object',
       properties: {

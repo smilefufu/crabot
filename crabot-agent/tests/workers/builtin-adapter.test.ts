@@ -980,8 +980,9 @@ describe('BuiltinWorkerAdapter', () => {
 
     const forkCall = (llm.stream as unknown as { mock: { calls: Array<[{ tools: ReadonlyArray<ToolDefinition>; systemPrompt?: string }]> } }).mock.calls[1][0]
     expect(forkCall.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(['echo', 'delegate_task', 'finish_task']))
+    expect(forkCall.tools.find((tool) => tool.name === 'finish_task')!.description).toContain('说明缺口并结束本轮等待，不调用本工具')
     expect(echoCall).toHaveBeenCalledOnce()
-    expect(forkCall.systemPrompt).toContain('转向处理下面来自 Manager 的新请求')
+    expect(forkCall.systemPrompt).toContain('处理下面来自主控的新请求')
     expect(forkCall.systemPrompt).toContain('使用既有授权内的工具和 Skill')
     expect(forkCall.systemPrompt).not.toContain('也不调用任何工具')
     expect(forkCall.systemPrompt).not.toContain('只有问题明确询问 Crabot 系统自身的实时运行事实')
@@ -1797,7 +1798,7 @@ describe('BuiltinWorkerAdapter', () => {
       ? forkCallArgs.options.systemPrompt()
       : forkCallArgs?.options.systemPrompt
     expect(forkSystemPrompt).toContain('主线任务 prompt <available_skills> crabot-cli')
-    expect(forkSystemPrompt).toContain('转向处理下面来自 Manager 的新请求')
+    expect(forkSystemPrompt).toContain('处理下面来自主控的新请求')
     expect(forkSystemPrompt).toContain('使用既有授权内的工具和 Skill')
     expect(forkSystemPrompt).not.toContain('也不调用任何工具')
     expect(forkSystemPrompt).not.toContain('只有问题明确询问 Crabot 系统自身的实时运行事实')

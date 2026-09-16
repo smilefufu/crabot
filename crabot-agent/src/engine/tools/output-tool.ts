@@ -114,13 +114,9 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
     name: 'Output',
     category: 'shell',
     description:
-      'Read incremental output from a background shell (shell_xxx). ' +
-      '默认非阻塞 snapshot 读。' +
-      '若 shell 还在 running 且想等下一段输出，**强烈建议**用 `block=true` 阻塞等到有新输出 / 状态变 terminal / 超时——' +
-      '避免在 agent 主循环里反复短间隔 poll 污染上下文。' +
-      '主控 agent 可以自然结束当前回合，等待 <bg-notification> 唤醒；' +
-      'subagent 收不到该通知，需要结果时必须用 block=true 等待。' +
-      '读 subagent 结果请用 get_subagent_output(agent_id)，不是本工具。',
+      '读取后台 Shell 的增量输出；需要等待新输出或命令结束时使用 block=true。' +
+      '主执行器可结束回合等待后台通知；子 Agent 收不到通知，需要结果时须阻塞读取。' +
+      '本工具只读取 Shell，子 Agent 结果由完成通知返回调用方。',
     inputSchema: {
       type: 'object',
       properties: {

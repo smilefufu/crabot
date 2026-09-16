@@ -156,7 +156,7 @@ export { WorkerExitedError }
 const FINISH_TASK_TOOL: ToolDefinition = {
   ...defineTool({
     name: 'finish_task',
-    description: '本轮工作到此结束、交回调度方继续处置时调用；附自报结果（completed/failed）与一句话总结。自报只是你的判断，是否达成由调度方对照任务要求认定。',
+    description: '结束当前委托任务并返回一句话总结。仅在必需结果全部完成且已核验时用 completed；确认失败且不再继续时用 failed。缺少可补充的输入或决定时，说明缺口并结束本轮等待，不调用本工具；后台命令、子 Agent 和待送达通知须先收口。自报结果仍由调用方验收。',
     isReadOnly: true,
     inputSchema: {
       type: 'object',

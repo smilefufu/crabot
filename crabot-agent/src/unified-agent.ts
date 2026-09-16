@@ -482,15 +482,11 @@ function normalizeResumeTriggerType(triggerType: string | undefined): 'message' 
  */
 function buildWorkerSkillListing(skills: ReadonlyArray<SkillConfig> | undefined): string | undefined {
   if (!skills || skills.length === 0) return undefined
-  const intro =
-    '\n\n以下技能为特定任务提供专业指引。当任务匹配某个技能的描述时，'
-    + '必须先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。'
-    + '这是强制要求——先加载技能，再执行任务。'
   const body = skills.map((s) => {
     const desc = s.description || s.name
     return `<skill>\n<name>${s.name}</name>\n<description>${desc}</description>\n</skill>`
   }).join('\n')
-  return `${intro}\n\n<available_skills>\n${body}\n</available_skills>`
+  return `<available_skills>\n${body}\n</available_skills>`
 }
 
 /**
@@ -1539,14 +1535,6 @@ export class UnifiedAgent extends ModuleBase {
       workspaceRoot: ctx.workspace.root,
       ...(skillListing ? { skillListing } : {}),
       imageAvailable: this.imageCapability.available,
-      ...(this.agentConfig?.subagents?.length
-        ? {
-            availableSubAgents: this.agentConfig.subagents.filter((subagent) => !subagent.system_only).map((subagent) => ({
-              toolName: subagent.name,
-              workerHint: subagent.when_to_use.split('\n')[0] || subagent.description || subagent.name,
-            })),
-          }
-        : {}),
       workspaceInstructions: ctx.workspace_instructions?.snapshot.source === 'agents_md'
         ? ctx.workspace_instructions.text : undefined,
     })

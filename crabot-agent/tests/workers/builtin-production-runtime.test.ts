@@ -1089,7 +1089,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).toContain('demo-skill')
     expect(prompt).toContain(agents)
     expect(prompt).toContain('<workspace-agents-md>')
-    expect(prompt).toContain('## 你的任务')
+    expect(prompt).toContain('## 你的身份与任务')
     expect(prompt).toContain('## 复杂任务的协作')
     for (const unavailable of [
       'send_message', 'ask_human', 'todo', 'lookup_friend', 'list_groups', 'list_contacts',
@@ -1098,14 +1098,22 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     ]) {
       expect(prompt, `builtin prompt 不应引导调用 ${unavailable}`).not.toContain(unavailable)
     }
-    expect(prompt).not.toContain('主控')
+    expect(prompt).toContain('聊天与 Crabot 长期记忆由主控查询')
     expect(prompt).not.toContain('Manager')
     expect(prompt).not.toContain('## 你和 Crabot 系统的对话边界')
-    expect(prompt.includes('## 可用子 Agent')).toBe(withSubagents)
+    expect(prompt).not.toContain('## 可用子 Agent')
+    const tools = resolveTools(builtin)
+    const delegate = tools.find((tool) => tool.name === 'delegate_task')
+    expect(Boolean(delegate)).toBe(withSubagents)
     if (withSubagents) {
-      expect(prompt).toContain('reviewer：需要审查时使用')
+      expect(prompt).not.toContain('需要审查时使用')
+      expect(delegate!.description).toContain('reviewer')
+      expect(delegate!.description).toContain('需要审查时使用')
+      expect((delegate!.inputSchema.properties as Record<string, { enum?: string[] }>).subagent_type.enum).toEqual(['reviewer'])
       expect(prompt).toContain('完成通知')
     }
+    expect(tools.find((tool) => tool.name === 'Skill')!.description).toContain('BEFORE doing any work')
+    expect(tools.find((tool) => tool.name === 'Output')!.description).not.toContain('get_subagent_output')
     expect(prompt).not.toContain('crabot-cli')
     expect(prompt).not.toContain('crabot mcp add')
     expect(prompt).not.toContain('## 记忆存储指引')
@@ -1116,8 +1124,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     expect(prompt).toContain(workspaceRoot)
     expect(prompt).toContain(WORKER_PROMPT_MARKER)
-    expect(prompt).toContain('不用 finish_task 把等待输入变成完成或失败')
-    expect(prompt).toContain('先等收口。结束回合不会终止后台工作')
+    expect(prompt).toContain('没有则结束本轮等完成通知')
     expect(prompt).toContain('不要求每个任务都创建文件')
   })
 

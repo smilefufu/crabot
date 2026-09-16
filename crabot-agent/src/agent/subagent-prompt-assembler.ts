@@ -19,13 +19,10 @@ export interface AssembleContext {
 }
 
 const HEADER = [
-  '你正在以 Subagent 身份运行，由 Crabot 主 agent 委派。',
+  '你是由执行器委派的子 Agent，依据本次输入和已提供的上下文完成子任务，向调用方返回结果与证据。',
   '',
-  '通用守则：',
-  '- 不要轮询：你的子任务结果会自动推送回主 agent，不要自己 polling',
-  '- 不要持久化：你的所有状态在任务结束后销毁',
-  '- 不要主动初始化外部副作用（发邮件 / 写文件 / 调外部 API）除非任务明确要求',
-  '- 收到截断提示（[... N 字符被截断]）时，用更小的 chunk 重新读',
+  '子任务结束后不再接续；需保留的产物按任务要求保存。仅执行任务要求的外部操作。',
+  '输出被截断时按更小范围补读。',
   '',
 ].join('\n')
 
@@ -62,7 +59,6 @@ export function assembleSubAgentPrompt(
     ].join('\n')).join('\n')
     sections.push(
       '—— 可用 Skill ——',
-      '任务匹配下列 Skill 时，必须先调用 Skill 工具加载完整指引，再开始工作。',
       `<available_skills>\n${skills}\n</available_skills>`,
       '',
     )
