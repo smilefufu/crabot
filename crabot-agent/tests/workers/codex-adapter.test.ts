@@ -212,6 +212,18 @@ describe('CodexWorkerAdapter.provision', () => {
     await expect(fs.access(path.join(ws, 'CLAUDE.md'))).rejects.toThrow()
   })
 
+  it('Crabot 主线约定追加到原生配置，保留用户指令且重复 provision 不叠加', async () => {
+    await fs.writeFile(path.join(codexHomeSource, 'config.toml'), 'developer_instructions = "NATIVE_RULE_SENTINEL"\n')
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
+    const rendered = parseToml(await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')) as any
+    expect(rendered.developer_instructions).toContain('NATIVE_RULE_SENTINEL')
+    expect(rendered.developer_instructions.split('你是一个能使用工具完成任务的 AI 助手')).toHaveLength(2)
+    expect(rendered.developer_instructions).toContain('worker.diagnosis')
+    expect(await fs.readFile(path.join(codexHomeSource, 'config.toml'), 'utf-8')).toBe('developer_instructions = "NATIVE_RULE_SENTINEL"\n')
+  })
+
   it('把 task-scoped tmp-page bridge 的 argv、env 和 worker 绑定原样物化到 config.toml', async () => {
     const server = createTmpPageMcpServerConfig('worker-codex', {
       command: process.execPath,
@@ -1720,7 +1732,7 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
     )
     expect(turnRequest?.params.input).toEqual([{
       type: 'text',
-      text: expect.stringContaining('处理下面来自主控的新请求'),
+      text: expect.stringContaining('按本次新请求查证、解释或执行'),
     }])
     expect((turnRequest?.params.input as Array<{ text: string }>)[0].text).toContain('侧问问题')
   })

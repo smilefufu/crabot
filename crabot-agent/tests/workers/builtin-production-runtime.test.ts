@@ -68,12 +68,6 @@ const ORCHESTRATION: OrchestrationConfig = {
 
 const REQUIRED_MAINLINE_SKILLS: SkillConfig[] = [
   { id: 'tmp-page', name: 'tmp-page', description: '临时页面', skill_dir: '/tmp/skills/tmp-page' },
-  {
-    id: 'workspace-context-maintenance',
-    name: 'workspace-context-maintenance',
-    description: '工作区上下文维护',
-    skill_dir: '/tmp/skills/workspace-context-maintenance',
-  },
 ]
 
 /** 生产权威配置变更路径：invalidation 后的 authenticated pull（update_config 已退役）。 */
@@ -412,18 +406,34 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
   // --- 验收 1 + 5：端到端拉起 + 工作目录就是 workspace ---
 
-  it('生产 Skill 工具读取当前共享文档规则正文，不依赖名称存在', async () => {
-    const skillDir = resolve(__dirname, '../../../crabot-admin/builtin-skills/workspace-context-maintenance')
-    const { internals } = boot(makeConfig({ skills: REQUIRED_MAINLINE_SKILLS.map(skill =>
-      skill.name === 'workspace-context-maintenance' ? { ...skill, skill_dir: skillDir } : skill,
-    ) }))
+  it('桌面与 guidance 仅提供给已授权主线，子 Agent 保持原能力边界', async () => {
+    const { internals } = boot()
+    const desktop = { name: 'mcp__computer-use__get_state', category: 'desktop', description: 'fixture desktop', inputSchema: { type: 'object', properties: {} }, isReadOnly: true, call: vi.fn() }
+    vi.spyOn(internals.mcpConnector, 'getAllTools').mockReturnValue([desktop])
+    internals.agentConfig.subagents = [{ name: 'reviewer', description: 'review', when_to_use: 'review', role: 'review' }]
+    const run = vi.spyOn(internals.builtinSubagentRunner, 'run').mockResolvedValue({ output: 'accepted', isError: false })
+    const base = { worker_id: 'desktop-boundary', workspace: { root: tmpRoot } }
+    const unknownTools = resolveTools(internals.buildBuiltinWorkerRuntime(base)!)
+    expect(unknownTools.map(tool => tool.name)).not.toContain(desktop.name)
+    const tools = resolveTools(internals.buildBuiltinWorkerRuntime({ ...base, principal_permissions: BUILTIN_WORKER_PERMISSIONS })!)
+    expect(tools.map(tool => tool.name)).toContain(desktop.name)
+    expect(tools.map(tool => tool.name)).toContain('load_guidance')
+    await tools.find(tool => tool.name === 'delegate_task')!.call({ subagent_type: 'reviewer', task: 'Review the fixture' }, {} as never)
+    expect(run).toHaveBeenCalledOnce()
+    const [, , , childTools, execution] = run.mock.calls[0] as any[]
+    expect(childTools.map((tool: ToolDefinition) => tool.name)).not.toContain(desktop.name)
+    expect(childTools.map((tool: ToolDefinition) => tool.name)).not.toContain('load_guidance')
+    expect(execution.resolvedPermissions.tool_access.desktop).toBe(false)
+  })
+
+  it('生产主线独立加载项目 guidance，不依赖原装 Skill', async () => {
+    const { internals } = boot()
     const runtime = internals.buildBuiltinWorkerRuntime({ worker_id: 'rule-read', workspace: { root: tmpRoot } })!
-    const tool = resolveTools(runtime).find(tool => tool.name === 'Skill')!
-    const result = await tool.call({ skill: 'workspace-context-maintenance' }, {} as never)
-    expect(result.isError).not.toBe(true)
-    const markdown = await fs.readFile(join(skillDir, 'SKILL.md'), 'utf8')
-    const body = markdown.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim()
-    expect(result.output).toContain(body)
+    const tool = resolveTools(runtime).find(tool => tool.name === 'load_guidance')!
+    const result = await tool.call({ name: 'worker.project-context' }, {} as never)
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('同一工作区由主线提交')
+    expect(result.output).toContain('只读、问答和一次性文件处理不初始化项目')
   })
 
   it('验收 1/5：manager 不传 builtin → 真的拉起 worker，worker 真的执行了一次工具调用，且 cwd = spec.workspace', async () => {
@@ -1089,8 +1099,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).toContain('demo-skill')
     expect(prompt).toContain(agents)
     expect(prompt).toContain('<workspace-agents-md>')
-    expect(prompt).toContain('## 你的身份与任务')
-    expect(prompt).toContain('## 复杂任务的协作')
+    expect(prompt).toContain('你是一个能使用工具完成任务的 AI 助手')
+    expect(prompt).toContain('worker.coordination')
     for (const unavailable of [
       'send_message', 'ask_human', 'todo', 'lookup_friend', 'list_groups', 'list_contacts',
       'list_sessions', 'get_subagent_output', 'list_active_subagents', 'find_task',
@@ -1098,7 +1108,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     ]) {
       expect(prompt, `builtin prompt 不应引导调用 ${unavailable}`).not.toContain(unavailable)
     }
-    expect(prompt).toContain('聊天与 Crabot 长期记忆由主控查询')
+    expect(prompt).not.toContain('主控')
     expect(prompt).not.toContain('Manager')
     expect(prompt).not.toContain('## 你和 Crabot 系统的对话边界')
     expect(prompt).not.toContain('## 可用子 Agent')
@@ -1110,7 +1120,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       expect(delegate!.description).toContain('reviewer')
       expect(delegate!.description).toContain('需要审查时使用')
       expect((delegate!.inputSchema.properties as Record<string, { enum?: string[] }>).subagent_type.enum).toEqual(['reviewer'])
-      expect(prompt).toContain('完成通知')
+      expect(prompt).toContain('等待外部结果时结束本轮等通知')
     }
     expect(tools.find((tool) => tool.name === 'Skill')!.description).toContain('BEFORE doing any work')
     expect(tools.find((tool) => tool.name === 'Output')!.description).not.toContain('get_subagent_output')
@@ -1123,9 +1133,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).not.toContain('## 目标模式详解')
 
     expect(prompt).toContain(workspaceRoot)
-    expect(prompt).toContain(WORKER_PROMPT_MARKER)
-    expect(prompt).toContain('没有则结束本轮等完成通知')
-    expect(prompt).toContain('不要求每个任务都创建文件')
+    expect(prompt).toContain('验证结果，简洁报告成果')
+    expect(prompt).toContain('等待外部结果时结束本轮等通知')
   })
 
   // --- 缺配置时 fail-loud ---

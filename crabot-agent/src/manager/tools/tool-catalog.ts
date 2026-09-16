@@ -9,6 +9,8 @@ export const MANAGER_TOOL_CATALOG_REVISION = 'manager-tools-v1'
 
 export const NORMAL_MANAGER_CORE_NAMES = [
   'search_tools',
+  'load_guidance',
+  'get_execution_capabilities',
   'send_message',
   'get_worker_state',
   'get_worker_activity',

@@ -26,12 +26,6 @@ const servers: MCPServerConfig[] = [
 
 const mainlineSkills = [
   { id: 'tmp-page', name: 'tmp-page', description: 'tmp page', skill_dir: '/tmp/skills/tmp-page' },
-  {
-    id: 'workspace-context-maintenance',
-    name: 'workspace-context-maintenance',
-    description: 'workspace context',
-    skill_dir: '/tmp/skills/workspace-context-maintenance',
-  },
 ]
 
 function permissions(overrides: Partial<ResolvedPermissions['tool_access']>): ResolvedPermissions {
@@ -50,6 +44,8 @@ class RecordingAdapter implements WorkerAdapter {
   private readonly stoppedWorkers = new Set<string>()
 
   constructor(readonly implId: WorkerImplId) {}
+
+  async dispose(): Promise<void> {}
 
   async detect(): Promise<DetectResult> {
     return { installed: true, activated: true }
@@ -127,6 +123,8 @@ describe('UnifiedAgent worker capability production wiring', () => {
     }
 
     try {
+      // This fixture observes provision only; do not start unrelated Manager LLM episodes.
+      vi.spyOn(internals.managerStack.registry, 'routeWorkerEvent').mockResolvedValue({ outcome: 'completed', consumedEvents: true } as never)
       const builtin = new RecordingAdapter('builtin')
       const claude = new RecordingAdapter('claude-code')
       const codex = new RecordingAdapter('codex')
@@ -162,6 +160,7 @@ describe('UnifiedAgent worker capability production wiring', () => {
       })
       expect(claude.provisionCalls[0].caps.skills).toEqual(mainlineSkills)
       expect(claude.provisionCalls[0].caps.mcp_servers).toEqual([
+        servers[1],
         expect.objectContaining({
           name: TMP_PAGE_MCP_SERVER_NAME,
           transport: 'stdio',
@@ -170,6 +169,8 @@ describe('UnifiedAgent worker capability production wiring', () => {
             [TMP_PAGE_BRIDGE_ENV.baseUrl]: 'https://crabot.example',
           }),
         }),
+        expect.objectContaining({ name: 'crabot-guidance' }),
+        expect.objectContaining({ name: 'crabot-workspace-git' }),
       ])
 
       const allowedPrincipal = permissions({ mcp_skill: true, desktop: true })
@@ -179,7 +180,7 @@ describe('UnifiedAgent worker capability production wiring', () => {
         impl: 'builtin',
         principal_permissions: allowedPrincipal,
       })
-      expect(builtin.provisionCalls[0].caps).toEqual({ skills: mainlineSkills, mcp_servers: [servers[0]] })
+      expect(builtin.provisionCalls[0].caps).toEqual({ skills: mainlineSkills, mcp_servers: servers })
 
       const refreshedGit: MCPServerConfig = { name: 'git-v2', command: 'git-mcp-v2' }
       internals.agentConfig = { ...internals.agentConfig!, mcp_servers: [refreshedGit, servers[1]] }
@@ -187,12 +188,15 @@ describe('UnifiedAgent worker capability production wiring', () => {
 
       expect(codex.provisionCalls[0].caps.skills).toEqual(mainlineSkills)
       expect(codex.provisionCalls[0].caps.mcp_servers).toEqual([
-        refreshedGit,
+        refreshedGit, servers[1],
         expect.objectContaining({ name: TMP_PAGE_MCP_SERVER_NAME, transport: 'stdio' }),
+        expect.objectContaining({ name: 'crabot-guidance' }),
+        expect.objectContaining({ name: 'crabot-workspace-git' }),
       ])
       expect(codex.spawnCalls[0].principal_permissions).toEqual(allowedPrincipal)
     } finally {
       internals.attentionScheduler.stopAll()
+      await internals.managerStack.dispose()
       await dataDir.restore()
     }
   })

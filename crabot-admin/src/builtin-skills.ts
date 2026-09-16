@@ -21,7 +21,6 @@ export const BUILTIN_SKILL_IDS = {
   writingPlans: 'builtin-skill-writing-plans',
   systematicDebugging: 'builtin-skill-systematic-debugging',
   verificationBeforeCompletion: 'builtin-skill-verification-before-completion',
-  workspaceContextMaintenance: 'builtin-skill-workspace-context-maintenance',
 } as const
 
 export function getBuiltinSkills(): SkillRegistryEntry[] {
@@ -64,20 +63,6 @@ export function getBuiltinSkills(): SkillRegistryEntry[] {
       is_builtin: true,
       is_essential: false,
       can_disable: true,
-      enabled: true,
-      created_at: SEED_TIMESTAMP,
-      updated_at: SEED_TIMESTAMP,
-    },
-    {
-      id: BUILTIN_SKILL_IDS.workspaceContextMaintenance,
-      name: 'workspace-context-maintenance',
-      description: '按任务读取、更新和纠正项目文档，遵循已有约定；持续开发时补齐必要规则和版本基线，依据 Harness Git 检测保护、验证和提交本任务改动',
-      version: '4.0.0-crabot',
-      skill_dir: join(SKILL_ROOT, 'workspace-context-maintenance'),
-      source_type: 'builtin',
-      is_builtin: true,
-      is_essential: false,
-      can_disable: false,
       enabled: true,
       created_at: SEED_TIMESTAMP,
       updated_at: SEED_TIMESTAMP,

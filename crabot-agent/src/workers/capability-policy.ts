@@ -1,3 +1,4 @@
+import { createGuidanceMcpServerConfig, GUIDANCE_MCP_SERVER_NAME } from '../guidance/worker-bridge.js'
 import path from 'node:path'
 import type { MCPServerConfig, ResolvedPermissions, SkillConfig } from '../types.js'
 import { filterMcpServersForWorker } from '../agent/mcp-connector.js'
@@ -7,7 +8,6 @@ import { createWorkspaceGitMcpServerConfig, WORKSPACE_GIT_MCP_SERVER_NAME } from
 export const CRABOT_BUILTIN_SKILL_NAMES: ReadonlySet<string> = new Set([
   'tmp-page',
   'scrapling-official',
-  'workspace-context-maintenance',
   'writing-plans',
   'systematic-debugging',
   'verification-before-completion',
@@ -17,7 +17,6 @@ export const CRABOT_BUILTIN_SKILL_NAMES: ReadonlySet<string> = new Set([
 
 export const REQUIRED_MAINLINE_WORKER_SKILL_NAMES = [
   'tmp-page',
-  'workspace-context-maintenance',
 ] as const
 
 export const NON_AGENT_CRABOT_SKILL_NAMES: ReadonlySet<string> = new Set([
@@ -34,7 +33,7 @@ export function filterNonAgentCrabotSkills(
 
 export const MAINLINE_ONLY_CRABOT_SKILL_NAMES: ReadonlySet<string> = new Set([
   'tmp-page',
-  'workspace-context-maintenance',
+  'workspace-context-maintenance', // Preserve the existing child boundary, including historical catalogs.
 ])
 
 export const DIRECT_CHILD_BUILTIN_SKILL_NAMES: ReadonlySet<string> = new Set([
@@ -101,9 +100,9 @@ export function selectMainlineWorkerSkills(
     selectedBuiltinNames.add('scrapling-official')
   }
 
-  return skills.filter((skill) =>
-    selectedBuiltinNames.has(skill.name)
-    || (includeUserSkills && !CRABOT_BUILTIN_SKILL_NAMES.has(skill.name)))
+  return skills.filter((skill) => skill.id !== 'builtin-skill-workspace-context-maintenance'
+    && (selectedBuiltinNames.has(skill.name)
+      || (includeUserSkills && !CRABOT_BUILTIN_SKILL_NAMES.has(skill.name))))
 }
 
 export function createTmpPageMcpServerConfig(
@@ -147,7 +146,7 @@ export function createTmpPageMcpServerConfig(
 }
 
 export function buildWorkerCapabilityBundle(input: WorkerCapabilityPolicyInput): CapabilityBundle {
-  const reserved = input.mcpServers.find((server) => [TMP_PAGE_MCP_SERVER_NAME, WORKSPACE_GIT_MCP_SERVER_NAME].includes(server.name))
+  const reserved = input.mcpServers.find((server) => [TMP_PAGE_MCP_SERVER_NAME, WORKSPACE_GIT_MCP_SERVER_NAME, GUIDANCE_MCP_SERVER_NAME].includes(server.name))
   if (reserved) {
     throw new Error(`worker capability policy: MCP server name '${reserved.name}' is reserved`)
   }
@@ -164,7 +163,7 @@ export function buildWorkerCapabilityBundle(input: WorkerCapabilityPolicyInput):
   }
   return {
     skills,
-    mcp_servers: [...mcpServers, createTmpPageMcpServerConfig(input.workerId, input.tmpPageBridge),
+    mcp_servers: [...mcpServers, createTmpPageMcpServerConfig(input.workerId, input.tmpPageBridge), createGuidanceMcpServerConfig(),
       ...(input.permissions.tool_access.file_io ? [createWorkspaceGitMcpServerConfig()] : [])],
   }
 }

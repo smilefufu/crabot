@@ -33,7 +33,6 @@ const MAX_TOTAL_SIZE_BYTES = 5 * 1024 * 1024 // 5MB 总大小上限
 const SNAPSHOT_SKIPPED_NAMES = new Set(['SKILL.md', '.skill_dir', '.DS_Store'])
 const NON_DISABLEABLE_BUILTIN_SKILL_NAMES = new Set([
   'tmp-page',
-  'workspace-context-maintenance',
   'scrapling-official',
 ])
 
@@ -1605,12 +1604,19 @@ export class SkillManager {
   }
 
   /**
-   * 注入内置 Skill：插入缺失条目，修复必需状态及项目上下文 Skill 的版本简介。
+   * 注入内置 Skill：插入缺失条目，修复必需状态，并撤销迁入 guidance 的原装条目。
    */
   private async seedBuiltinSkillsUnlocked(entries: SkillRegistryEntry[]): Promise<void> {
     let changed = false
     const next = new Map(this.skills)
+    for (const [id, entry] of next) {
+      if (entry.is_builtin && entry.name === 'workspace-context-maintenance') {
+        next.delete(id)
+        changed = true
+      }
+    }
     for (const e of entries) {
+      if (e.is_builtin && e.name === 'workspace-context-maintenance') continue
       const isNonDisableable = NON_DISABLEABLE_BUILTIN_SKILL_NAMES.has(e.name)
       const existing = next.get(e.id)
       if (!existing) {
@@ -1620,14 +1626,11 @@ export class SkillManager {
       }
       const repairSkillDir = !existing.skill_dir && !!e.skill_dir
       const repairRequiredState = isNonDisableable && (!existing.enabled || existing.can_disable)
-      const repairWorkspaceContextMetadata = existing.is_builtin && existing.name === 'workspace-context-maintenance'
-        && e.name === existing.name && (existing.description !== e.description || existing.version !== e.version)
-      if (repairSkillDir || repairRequiredState || repairWorkspaceContextMetadata) {
+      if (repairSkillDir || repairRequiredState) {
         next.set(e.id, {
           ...existing,
           ...(repairSkillDir ? { skill_dir: e.skill_dir } : {}),
           ...(repairRequiredState ? { enabled: true, can_disable: false } : {}),
-          ...(repairWorkspaceContextMetadata ? { description: e.description, version: e.version } : {}),
           updated_at: new Date().toISOString(),
         })
         if (repairSkillDir) {
@@ -1662,9 +1665,16 @@ export class SkillManager {
     let changed = false
     let found = 0
     const activeBuiltinNames = new Set<string>()
+    for (const [id, entry] of next) {
+      if (entry.is_builtin && entry.name === 'workspace-context-maintenance') {
+        next.delete(id)
+        existingNames.delete(entry.name)
+        changed = true
+      }
+    }
 
     for (const dirent of dirEntries) {
-      if (!dirent.isDirectory()) continue
+      if (!dirent.isDirectory() || dirent.name === 'workspace-context-maintenance') continue
       const skillDir = path.join(builtinsDir, dirent.name)
       const skillMdPath = path.join(skillDir, 'SKILL.md')
 

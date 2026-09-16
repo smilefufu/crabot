@@ -49,7 +49,7 @@ export interface BuiltinRuntimeContext {
    * `BuiltinWorkerAdapter.runtimeFor`)。
    *
    * 缺省(系统派工 / 派活时身份未解析 / 本字段出现之前 spawn 的老 worker)= 无发起人档位,
-   * `narrowWorkerPermissions` 原样退回 worker 固定档位。
+   * `narrowWorkerPermissions` 沿用历史回退档位，桌面能力保持关闭。
    */
   readonly principal_permissions?: ResolvedPermissions
 }
@@ -85,7 +85,7 @@ const WORKER_TOOL_ACCESS: ToolAccessConfig = {
   task: false,
   // 需要身份背书的高危面:没有可信发起人身份之前一律关。
   remote_exec: false,
-  desktop: false,
+  desktop: true,
 }
 
 /**
@@ -95,7 +95,7 @@ const WORKER_TOOL_ACCESS: ToolAccessConfig = {
  * `master_private`——那条路径的发起人是系统自身,可信。v3 的 builtin worker 由 manager 代
  * 任意会话发起人派活,而 `LedgerWorker.origin.creator_friend_id` 现网恒空(遗漏项 N1),
  * 拿不到可信身份。因此这里**不照抄 master_private**:
- *   - tool_access 只开"干活必需"的面,`remote_exec`/`desktop` 这类需要身份背书的一律关;
+ *   - tool_access 只开"干活必需"的面,`remote_exec` 关闭；`desktop` 只有明确主体授权时开放;
  *   - cli_access 全 `none` —— 放开等于让任何人都能借 worker 改 crabot 自身配置;
  *   - storage 为 null(agent 侧当前无消费方),memory_scopes 为空。
  * **J 已接线**:manager 在派活那一刻按 `origin.creator_friend_id` 算好档位,随 spawn 下传
@@ -133,13 +133,13 @@ const CLI_PERM_RANK: Record<CliPerm, number> = { none: 0, read: 1, write: 2 }
  * - `memory_scopes`：保留发起人的身份快照字段，供统一权限结构兼容；Worker 的
  *   `tool_access.memory` 固定 false，保留 scopes 不会重新开放 Memory。
  *
- * `principal` 为 null（身份未解析）时原样返回 worker 固定档位，与 F 阶段行为逐字相同。
+ * `principal` 为 null 时沿用旧固定档位，包括 desktop=false；不得因新增桌面能力扩大历史回退权限。
  */
 export function narrowWorkerPermissions(
   base: ResolvedPermissions,
   principal: ResolvedPermissions | null,
 ): ResolvedPermissions {
-  if (!principal) return base
+  if (!principal) return { ...base, tool_access: { ...base.tool_access, desktop: false } }
 
   const tool_access = Object.fromEntries(
     (Object.keys(base.tool_access) as Array<keyof ToolAccessConfig>).map((k) => [

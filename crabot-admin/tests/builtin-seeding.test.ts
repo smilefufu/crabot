@@ -58,37 +58,30 @@ describe('SkillManager.seedBuiltinSkills', () => {
     expect(mgr2.get('builtin-c')?.name).toBe('c')
   })
 
-  it('真实 seed 路径修复存量已禁用的 workspace-context-maintenance', async () => {
-    const workspaceSkill = getBuiltinSkills().find(
-      (entry) => entry.id === BUILTIN_SKILL_IDS.workspaceContextMaintenance,
-    )!
-    writeFileSync(join(tmpDir, 'skills.json'), JSON.stringify([{
-      ...workspaceSkill,
-      enabled: false,
-      can_disable: true,
-    }]))
+  it('真实 seed 撤销原装项目维护 Skill，保留同名用户条目', async () => {
+    const name = 'workspace-context-maintenance'
+    const builtin = makeEntry('old-builtin', name)
+    const custom = { ...makeEntry('custom', name), is_builtin: false, source_type: 'scanned', skill_dir: '/custom/project-rule' }
+    writeFileSync(join(tmpDir, 'skills.json'), JSON.stringify([builtin, custom]))
     mgr = new SkillManager(tmpDir)
     await mgr.initialize()
-
     await mgr.seedBuiltinSkills(getBuiltinSkills())
-
-    const repaired = mgr.get(BUILTIN_SKILL_IDS.workspaceContextMaintenance)!
-    expect(repaired).toMatchObject({ enabled: true, can_disable: false })
-    await expect(mgr.update(repaired.id, { enabled: false })).rejects.toThrow(
-      'Skill "workspace-context-maintenance" cannot be disabled',
-    )
+    expect(mgr.get(builtin.id)).toBeUndefined()
+    expect(mgr.get(custom.id)).toMatchObject(custom)
+    const persisted = readFileSync(join(tmpDir, 'skills.json'), 'utf8')
+    await mgr.seedBuiltinSkills(getBuiltinSkills())
+    expect(readFileSync(join(tmpDir, 'skills.json'), 'utf8')).toBe(persisted)
   })
 })
 
 describe('getBuiltinSkills', () => {
-  it('返回 4 个 builtin skill', () => {
+  it('返回 3 个子 Agent builtin skill', () => {
     const list = getBuiltinSkills()
-    expect(list).toHaveLength(4)
+    expect(list).toHaveLength(3)
     expect(list.map((s) => s.id).sort()).toEqual([
       BUILTIN_SKILL_IDS.writingPlans,
       BUILTIN_SKILL_IDS.systematicDebugging,
       BUILTIN_SKILL_IDS.verificationBeforeCompletion,
-      BUILTIN_SKILL_IDS.workspaceContextMaintenance,
     ].sort())
   })
 
@@ -108,13 +101,12 @@ describe('getBuiltinSkills', () => {
     }
   })
 
-  it('workspace-context-maintenance 是 seed 路径中的必备且不可禁用 Skill', () => {
+  it('seed 只保留子 Agent 的独立 Skill', () => {
     const list = getBuiltinSkills()
     expect(Object.fromEntries(list.map((entry) => [entry.name, entry.can_disable]))).toEqual({
       'writing-plans': true,
       'systematic-debugging': true,
       'verification-before-completion': true,
-      'workspace-context-maintenance': false,
     })
   })
 
@@ -592,14 +584,12 @@ describe('getBuiltinSubAgents > goal_auditor', () => {
 })
 
 describe('启动序列收敛（fail-open 启动自检，protocol-admin 0.2.5 §3.19.8.1）', () => {
-  it('存量禁用必备 skill：首轮 seeding 记账落盘，二轮启动 revision 稳定', async () => {
+  it('原装项目 Skill 迁出：首轮 seeding 记账落盘，二轮启动 revision 稳定', async () => {
     const { CoreAgentConfigMutationCoordinator } = await import('../src/core-agent-config-revision-store.js')
     const tmpDir = mkdtempSync(join(tmpdir(), 'skill-fail-open-'))
     try {
       // 存量旧形态 registry：必备 skill 被禁用（PR #122 归一化前的持久状态）
-      const workspaceSkill = getBuiltinSkills().find(
-        (entry) => entry.id === BUILTIN_SKILL_IDS.workspaceContextMaintenance,
-      )!
+      const workspaceSkill = makeEntry('retired-workspace', 'workspace-context-maintenance')
       writeFileSync(join(tmpDir, 'skills.json'), JSON.stringify([{
         ...workspaceSkill,
         enabled: false,
@@ -634,7 +624,7 @@ describe('启动序列收敛（fail-open 启动自检，protocol-admin 0.2.5 §3
       })
       const secondRecord = await coordinator2.initialize()
       expect(secondRecord.revision).toBe(revisionAfterFirstBoot)
-      expect(manager2.get(BUILTIN_SKILL_IDS.workspaceContextMaintenance)).toMatchObject({ enabled: true, can_disable: false })
+      expect(manager2.get('retired-workspace')).toBeUndefined()
     } finally {
       rmSync(tmpDir, { recursive: true, force: true })
     }

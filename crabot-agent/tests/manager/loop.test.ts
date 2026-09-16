@@ -16,7 +16,7 @@ import { createUserMessage, defineTool } from '../../src/engine/index.js'
 import { ContextManager, createManagerCompactionProfile } from '../../src/engine/context-manager.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import type { ManagerEpisodeSpan, ManagerTraceWriter } from '../../src/manager/trace-types.js'
-import { MANAGER_PROJECT_WORKSPACE_CONTEXT, MANAGER_WORKBOARD_CONTEXT } from '../../src/manager/prompt.js'
+import { guidanceCatalog, renderGuidance } from '../../src/guidance/catalog.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // --- Fixtures / helpers ---
@@ -26,19 +26,7 @@ const FIXED_RECEIVED_AT = '2026-01-01T08:00:00+08:00'
 function timed(wake: WakeEvent): TimedWakeEnvelope { return { wake, received_at: FIXED_RECEIVED_AT, timezone: 'Asia/Shanghai' } }
 const DIALOG_OBJECT_ID = (`test::${'friend-loop'}` as ManagerKey)
 const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
-本提示用于提醒你跟进任务板中尚未收口的工作，做好进度管理。
-
-任务板中至少有一项尚未收口的工作已经一小时没有更新。请查阅当前任务板和聊天历史，重新确认人类的最新意图。任务板只是可修订的管理摘要；如果它与人类已经表达的意图不一致，以人类的最新意图为准并更新任务板。
-
-查阅任务板时，要逐项复核尚未收口的事项，尤其不要把“已阻塞”直接等同于“继续等待”。重新判断阻塞是否仍然成立、能否由你或执行器解除；能够解除或前置条件已经满足的，立即恢复推进。只有确实依赖人类输入或明确外部事件时，才保持阻塞。
-
-对长期未完成或反复报告同一阻塞的事项，核对最近人类要求、阻塞的原始证据和最近实质进展。检查错误前提是否来自你自己的派发、旧摘要或过时文档；任务板和你上次的结论不是独立证据。发现判断错误时，纠正当前要求、任务板和后续安排，相关项目文档交执行器按项目规则修正。running 只说明执行状态，必要时查看活动和产物；确认具体偏离或无效重复后采取有针对性的纠偏、停止或替换，不因例行检查干扰正常工作。
-
-仍能推进的，就在本回合继续推进。正在等待已经安排的执行结果时，可以按需查看执行器的状态和活动，必要时通过独立侧问了解进度；不要反复查询，也不要仅因本次检查向仍在运行的执行器主线发送催促、补充或纠偏。正在等待明确的外部事件时，不要重复操作。目标或事项已经变化、取消或重复时，及时调整、合并或归档；确实需要人类介入时，清楚说明阻塞以及需要人类提供的帮助。
-
-再次提醒人类前，检查你最近成功发送到本会话的三条消息。如果其中已经有一条整条消息都在专门提醒同一个阻塞，就不要重复提醒；如果此前只是夹在其他内容中提到该阻塞，不算单独提醒。当前上下文不足以确认时，先查询聊天历史；查询失败或结果仍不足时，不得再次发送阻塞提醒。
-
-任务板没有实质变化时，不要只为记录本次检查、等待状态或查询失败而修改任务板。`
+任务板中至少有一项尚未收口的工作已一小时没有更新。请按本次提供的任务板指南，查阅任务板与必要证据，逐项判断继续推进或等待。`
 
 function workerEventWake(workerId: string): TimedWakeEnvelope {
   return timed({
@@ -546,16 +534,10 @@ describe('ManagerLoop', () => {
     expect(calls).toHaveLength(3)
     for (const call of calls) {
       expect(call.systemPrompt).toBe(calls[0].systemPrompt)
-      expect(call.systemPrompt).toContain(MANAGER_WORKBOARD_CONTEXT)
+      expect(call.systemPrompt).toContain(guidanceCatalog('manager'))
       expect(call.systemPrompt).not.toContain('dynamic-note-before-sentinel')
       expect(call.systemPrompt).not.toContain('dynamic-note-after-sentinel')
     }
-    expect(MANAGER_WORKBOARD_CONTEXT).toContain('上下文不清时查板')
-    expect(MANAGER_WORKBOARD_CONTEXT).toContain('修改成功前不声称已更新')
-    expect(MANAGER_WORKBOARD_CONTEXT).toContain('一次性派发不必建项')
-    expect(MANAGER_PROJECT_WORKSPACE_CONTEXT).toContain('必须先确定真实项目目录')
-    expect(MANAGER_PROJECT_WORKSPACE_CONTEXT).toContain('不因没有执行器就新建空目录')
-    expect(MANAGER_PROJECT_WORKSPACE_CONTEXT).toContain('仍有歧义时再询问')
     expect(listWorkers).not.toHaveBeenCalled()
   })
 
@@ -1248,15 +1230,16 @@ describe('ManagerLoop', () => {
     await loop.wakeUp(timed({ kind: 'workboard_idle_review' } as WakeEvent))
 
     expect(calls[0].messages.at(-1)).toMatchObject({ role: 'user', content: WORKBOARD_IDLE_REVIEW_PROMPT })
-    expect(JSON.stringify((await store.load(KEY)).recent)).not.toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
+    expect(calls[0].systemPrompt).toContain(renderGuidance('manager', 'manager.workboard'))
+    expect(JSON.stringify((await store.load(KEY)).recent)).not.toContain('任务板中至少有一项尚未收口的工作已一小时没有更新')
     const files = await fs.readdir(dataDir, { recursive: true })
     const episodeLogs = files.filter((file) => file.includes('episodes/') && file.endsWith('.jsonl'))
     for (const file of episodeLogs) {
-      await expect(fs.readFile(join(dataDir, file), 'utf-8')).resolves.not.toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
+      await expect(fs.readFile(join(dataDir, file), 'utf-8')).resolves.not.toContain('任务板中至少有一项尚未收口的工作已一小时没有更新')
     }
 
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的真实输入')] }))
-    expect(JSON.stringify(calls[1].messages)).not.toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
+    expect(JSON.stringify(calls[1].messages)).not.toContain('任务板中至少有一项尚未收口的工作已一小时没有更新')
   })
 
   it('任务板空闲自省 episode 失败后丢弃提示，不随下一条真实输入重投', async () => {
@@ -1277,7 +1260,7 @@ describe('ManagerLoop', () => {
     expect(failed).toMatchObject({ outcome: 'failed', consumedEvents: false })
 
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('继续')] }))
-    expect(JSON.stringify(calls[1].messages)).not.toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
+    expect(JSON.stringify(calls[1].messages)).not.toContain('任务板中至少有一项尚未收口的工作已一小时没有更新')
   })
 
   it('episode 运行中到达的人类消息:先提交(store recent+去重键+回调)再注入,当前 episode 下一轮可见', async () => {

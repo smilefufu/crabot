@@ -6,6 +6,7 @@
  * @see crabot-docs/protocols/protocol-agent-v2.md
  */
 
+import { createGuidanceTool } from './guidance/catalog.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -1185,6 +1186,27 @@ export class UnifiedAgent extends ModuleBase {
       },
       assertExecutionAdmission: () => this.assertRuntimeExecutionAdmission(),
       isClosing: () => this.runtimeClosing,
+      describeExecutionTools: (impl, principal) => {
+        const permissions = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, principal ?? null)
+        const servers = filterMcpServersForWorker(this.agentConfig?.mcp_servers ?? [], permissions)
+        const skills = selectMainlineWorkerSkills(this.agentConfig?.skills ?? [], servers, permissions.tool_access.mcp_skill)
+        if (impl !== 'builtin') return {
+          observed_at: new Date().toISOString(), source: 'next_cli_provision', tools: [],
+          mcp_servers: servers.map(server => server.name),
+          limitations: ['CLI 原生文件、命令及连接状态由原生执行器决定，未在此核实；当前配置只代表下次装配条件。'],
+        }
+        // Constructors only: never invoke a tool, create background ownership or provision a Worker.
+        const builtin = getConfiguredBuiltinTools(() => '', this.agentConfig?.builtin_tool_config, { availableSkills: skills })
+        const candidates = filterMcpToolsByConfig([...builtin, ...this.mcpConnector.getAllTools()], this.agentConfig?.builtin_tool_config)
+        const permitted = new Set(filterToolsByPermission(candidates, this.getToolPermissionConfig(candidates, permissions)))
+        const names = candidates.filter(tool => permitted.has(tool) || builtin.some(item => item === tool && item.name === 'Skill')).map(tool => tool.name)
+        return {
+          observed_at: new Date().toISOString(), source: 'current_builtin_assembly',
+          tools: [...names, 'load_guidance'], mcp_servers: servers.map(server => server.name),
+          limitations: ['列出基础工具与当前已连接 MCP；后台实体、项目 Git、生图等附加工具依具体任务装配。',
+            ...(!names.includes('Skill') ? ['当前配置禁用了必需的 Skill 工具，builtin 启动会失败。'] : [])],
+        }
+      },
       capabilityBundle: async ({ worker_id, impl, principal_permissions }) => {
         const workerPermissions = narrowWorkerPermissions(
           BUILTIN_WORKER_PERMISSIONS,
@@ -1463,9 +1485,9 @@ export class UnifiedAgent extends ModuleBase {
       [skillTool, ...tmpPageTools, ...imageTools].filter((tool) => configuredTools.has(tool)),
     )
     const permittedTools = new Set(permitted)
-    const effectiveTools = configFiltered.filter((tool) =>
+    const effectiveTools = [...configFiltered.filter((tool) =>
       permittedTools.has(tool) || fixedProductTools.has(tool),
-    )
+    ), createGuidanceTool('worker')]
     const subagents = this.agentConfig?.subagents ?? []
     if (subagents.length === 0) return effectiveTools
     const childPermissionConfig = this.getToolPermissionConfig(effectiveTools, workerPerms)
@@ -1475,10 +1497,10 @@ export class UnifiedAgent extends ModuleBase {
         subagent,
         input,
         toolContext,
-        effectiveTools.filter((tool) => tool !== workspaceGitTool),
+        effectiveTools.filter((tool) => tool !== workspaceGitTool && tool.name !== 'load_guidance' && tool.category !== 'desktop'),
         {
           permissionConfig: childPermissionConfig,
-          resolvedPermissions: workerPerms,
+          resolvedPermissions: { ...workerPerms, tool_access: { ...workerPerms.tool_access, desktop: false } },
           availableSkills: this.agentConfig?.skills ?? [],
           getCwd: () => workspaceRoot,
         },
@@ -1508,7 +1530,7 @@ export class UnifiedAgent extends ModuleBase {
    *
    * **worker 侧不做任何身份解析**：它既不知道 friend 是谁，也不调 admin。取不到（系统派工 /
    * 派活时身份未解析 / 本字段出现之前 spawn 的老 worker）时返回 null，
-   * `narrowWorkerPermissions` 会原样退回 worker 固定档位。
+   * `narrowWorkerPermissions` 沿用历史回退档位，桌面能力保持关闭。
    */
   private resolveWorkerPrincipalPermissions(ctx: BuiltinRuntimeContext): ResolvedPermissions | null {
     return ctx.principal_permissions ?? null

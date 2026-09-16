@@ -6,6 +6,8 @@
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.3
  */
 
+import { createExecutionCapabilitiesTool, type DescribeExecutionTools } from './execution-capabilities.js'
+import { createGuidanceTool, renderGuidance } from '../../guidance/catalog.js'
 import { z } from 'zod/v4'
 import { defineTool } from '../../engine/index.js'
 import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
@@ -37,6 +39,8 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
+  readonly workboardGuidanceProvided?: boolean
+  readonly describeExecutionTools?: DescribeExecutionTools
   readonly harness: WorkerHarness
   /** P6-C §7：list_worker_implementations 的 registry snapshot getter。 */
   readonly workerImplSnapshot?: import('./worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
@@ -224,7 +228,7 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
 
   return defineTool({
     name: tool.name,
-    description: tool.description,
+    description: isSendMessage ? `${tool.description} 人类只能看到成功投递的消息；普通 assistant text 留作内部记录，不代表已经回复。` : tool.description,
     inputSchema,
     isReadOnly: MESSAGING_READ_ONLY.has(tool.name),
     ...(isSendMessage
@@ -475,10 +479,27 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
     ...(deps.schedule ? { schedule: deps.schedule } : {}),
   })
-  const workboardTools = buildWorkboardTools(deps.workboard)
+  const normalProfile = (deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')) === 'normal'
+  let workboardGuidanceProvided = deps.workboardGuidanceProvided === true
+  const guidanceTool = createGuidanceTool('manager', name => {
+    if (name === 'manager.workboard') workboardGuidanceProvided = true
+  })
+  const workboardTools = buildWorkboardTools(deps.workboard).map((tool): ToolDefinition => {
+    if (!normalProfile || tool.name !== 'change_workboard') return tool
+    return { ...tool, async call(input, context) {
+      if (workboardGuidanceProvided) return tool.call(input, context)
+      workboardGuidanceProvided = true
+      return { isError: false, output: JSON.stringify({
+        status: 'guidance_provided', applied: false,
+        guidance: renderGuidance('manager', 'manager.workboard'),
+        next: '本次尚未修改任务板。依据已提供的工作流核对后，如仍需更新，再调用 change_workboard。',
+      }) }
+    } }
+  })
   const projectDocTools = buildProjectDocTools(deps.projectDocs)
 
   const builtinTools = [
+    ...(normalProfile ? [guidanceTool, createExecutionCapabilitiesTool(deps)] : []),
     ...messagingTools,
     ...memoryTools,
     ...workerTools,

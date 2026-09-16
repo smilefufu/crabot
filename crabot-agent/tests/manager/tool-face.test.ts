@@ -60,6 +60,8 @@ const CRABOT_INFO_TOOLS = [
 ]
 
 const CONTEXT_TOOLS = [
+  'load_guidance',
+  'get_execution_capabilities',
   'inspect_workspace_git',
   'inspect_workboard',
   'change_workboard',
@@ -135,12 +137,39 @@ describe('buildManagerToolFace', () => {
     canCreate: true, resolvePermissions: async () => permissions,
   }
 
-  it('移除决策写入后为 54 项内置与 55 项 full，各模式核心字节一致', () => {
+  it('首次任务板变更先取得工作流，未修改状态；再次调用才应用', async () => {
+    const objective = { objective_id: 'fixture', title: 'fixture', completion_criteria: ['done'], work_items: [], updated_at: '2026-09-17T00:00:00Z' }
+    const store = { createObjective: vi.fn(async () => ({ value: objective, board: { objectives: [objective], archive: [] } })) }
+    const tools = buildManagerToolFace(makeDeps({ workboard: { managerKey: MANAGER_KEY, store: store as never } }))
+    const change = tools.find(tool => tool.name === 'change_workboard')!
+    const input = { action: 'create_objective', objective: { title: 'fixture', completion_criteria: ['done'] } }
+    const first = await change.call(input, {} as never)
+    expect(JSON.parse(first.output)).toMatchObject({ status: 'guidance_provided', applied: false })
+    expect(first.output).toContain('manager.workboard')
+    expect(store.createObjective).not.toHaveBeenCalled()
+    const second = await change.call(input, {} as never)
+    expect(second.isError).toBe(false)
+    expect(JSON.parse(second.output)).toMatchObject({ action: 'objective_created' })
+    expect(store.createObjective).toHaveBeenCalledOnce()
+    expect(store.createObjective).toHaveBeenCalledWith(MANAGER_KEY, input.objective)
+  })
+
+  it('每日反思和图谱场景不提供普通 guidance；缺 task 的普通会话仍能查询执行条件', () => {
+    for (const profile of ['daily_reflection', 'memory_graph_rebuild'] as const) {
+      const tools = buildManagerToolFace(makeDeps({ profile, isBuiltinDailyReflection: profile === 'daily_reflection', faceState: createManagerToolFaceState() }))
+      expect(tools.map(tool => tool.name)).not.toContain('load_guidance')
+      expect(tools.map(tool => tool.name)).not.toContain('get_execution_capabilities')
+    }
+    const tools = buildManagerToolFace(makeDeps({ candidatePermissions: { ...permissions, tool_access: { ...permissions.tool_access, task: false } }, faceState: createManagerToolFaceState() }))
+    expect(tools.map(tool => tool.name)).toContain('get_execution_capabilities')
+  })
+
+  it('移除决策写入后为 56 项内置与 57 项 full，各模式核心字节一致', () => {
     const deps = makeDeps({ schedule, candidatePermissions: permissions })
-    expect(buildManagerToolFace(deps)).toHaveLength(54)
+    expect(buildManagerToolFace(deps)).toHaveLength(56)
     const full = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
     const core = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() })
-    expect(full).toHaveLength(55)
+    expect(full).toHaveLength(57)
     expect(core.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
     const wire = (tools: ToolDefinition[]) => JSON.stringify(tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })))
     expect(wire(full.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(wire(core))
@@ -230,7 +259,7 @@ describe('buildManagerToolFace', () => {
       for (const tools of [full, core, expanded]) {
         await callNonStreaming(adapter, { model: 'fixture', systemPrompt: 'Stable Manager instructions', messages: [createUserMessage('fixture')], tools, maxTokens: 64 })
       }
-      expect(bodies.map(body => body.tools.length)).toEqual([55, 12, 13])
+      expect(bodies.map(body => body.tools.length)).toEqual([57, 14, 15])
       expect(JSON.stringify(bodies[0].tools.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(JSON.stringify(bodies[1].tools))
       expect(JSON.stringify(bodies[2].tools.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(JSON.stringify(bodies[1].tools))
       if (format === 'anthropic') {
@@ -395,12 +424,12 @@ describe('buildManagerToolFace', () => {
     for (const tool of external) expect(tool.call).not.toHaveBeenCalled()
   })
 
-  it('未启用渐进加载时提供完整 54 项，不装配 search_tools 或外部 MCP', () => {
+  it('未启用渐进加载时提供完整 56 项，不装配 search_tools 或外部 MCP', () => {
     const tools = buildManagerToolFace(makeDeps({ schedule: {
       targetSession: { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' },
       creatorFriendId: 'creator', canCreate: true, resolvePermissions: async () => null,
     } }))
-    expect(tools).toHaveLength(54)
+    expect(tools).toHaveLength(56)
     expect(tools.map(tool => tool.name).filter(name => name.startsWith('mcp__') && !name.startsWith('mcp__crab-memory__'))).toEqual([])
     for (const name of ['search_tools', 'get_system_status', 'get_deployment_info', 'get_config_summary', 'list_capabilities']) {
       expect(tools.map(tool => tool.name)).not.toContain(name)

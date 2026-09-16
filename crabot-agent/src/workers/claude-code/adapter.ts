@@ -24,6 +24,7 @@
  * states. ensureRuntime reconstructs a runtime from meta and deterministic tmux names after an
  * agent restart. Headless fork remains isolated from the main interaction event file.
  */
+import { WORKER_TASK_INSTRUCTIONS } from '../../guidance/worker-bridge.js'
 import { promises as fs } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
@@ -929,7 +930,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 不同 binary」的版本错配/command not found 由此杜绝。
     const spawnBin = await this.resolveBinForCommand()
     if (!spawnBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.spawn: no user-level claude installation`)
-    const command = `${spawnBin} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode auto`
+    const command = `${spawnBin} ${STRICT_MCP_CONFIG_ARGS} --append-system-prompt ${shQuote(WORKER_TASK_INSTRUCTIONS)} --session-id ${sessionId} --permission-mode auto`
     const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
     const eventWatchOffset = await eventChannel.endOffset()
     const stopBaseline = await this.initialStopBaseline(eventChannel)
@@ -1059,7 +1060,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
       const resumeBin = await this.resolveBinForCommand()
       if (!resumeBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.resume: no user-level claude installation`)
-      const command = `${resumeBin} ${STRICT_MCP_CONFIG_ARGS} --permission-mode auto --resume ${shQuote(prev.session_ref)}`
+      const command = `${resumeBin} ${STRICT_MCP_CONFIG_ARGS} --append-system-prompt ${shQuote(WORKER_TASK_INSTRUCTIONS)} --permission-mode auto --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
       const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
@@ -1179,7 +1180,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     let child: ChildProcess
     try {
-      const instructionPrompt = QUERY_FORK_INSTRUCTION
+      const instructionPrompt = `${WORKER_TASK_INSTRUCTIONS}\n\n${QUERY_FORK_INSTRUCTION}`
       const args = [
         '-p', forkInput,
         '--permission-mode', 'auto',

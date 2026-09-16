@@ -20,6 +20,7 @@
  * deterministic tmux names after an agent restart. Query forks use a separate headless app-server
  * process and never enter the interactive tmux session.
  */
+import { WORKER_TASK_INSTRUCTIONS } from '../../guidance/worker-bridge.js'
 import { promises as fs, type Dirent } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
@@ -847,6 +848,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
     if (Object.keys(renderedMcp).length > 0) config.mcp_servers = renderedMcp
     else delete config.mcp_servers
+
+    const nativeInstructions = typeof config.developer_instructions === 'string' ? config.developer_instructions : ''
+    config.developer_instructions = [nativeInstructions, WORKER_TASK_INSTRUCTIONS].filter(Boolean).join('\n\n')
 
     // TOML 要求根级 key 必须出现在第一个 table 之前,否则会被解析成前一个 table 的子字段。
     // 叠加了宿主配置之后靠字符串拼接已经保证不了这条(宿主自带 table),改由序列化器统一

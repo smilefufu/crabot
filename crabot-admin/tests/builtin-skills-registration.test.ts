@@ -149,7 +149,6 @@ describe('仓库 builtins/skills 载荷', () => {
       ].sort()).toEqual([
         'tmp-page',
         'scrapling-official',
-        'workspace-context-maintenance',
         'writing-plans',
         'systematic-debugging',
         'verification-before-completion',
