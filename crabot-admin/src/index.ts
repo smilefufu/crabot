@@ -7803,7 +7803,9 @@ export class AdminModule extends ModuleBase {
       throw new RpcError('FORBIDDEN', 'Private Agent execution has no trusted creator')
     }
     const isAdminChatMaster = isAdminChatMasterIdentity(credential.creator_friend_id, credential.target_session)
-    if (credential.creator_friend_id && !isAdminChatMaster && !this.friends.has(credential.creator_friend_id)) {
+    // 群聊按 target 的群权限授权，creator 只作审计，不要求其仍在好友表中。
+    if (credential.target_session.type === 'private'
+      && credential.creator_friend_id && !isAdminChatMaster && !this.friends.has(credential.creator_friend_id)) {
       throw new RpcError('FORBIDDEN', 'Credential principal is unavailable')
     }
 
