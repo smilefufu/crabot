@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { formatHandlerError } from 'crabot-shared/dist/module-base.js'
 
 vi.mock('@larksuiteoapi/node-sdk', () => {
   return {
@@ -108,7 +109,7 @@ function makeFeishuFileMsg(id: string, fileKey: string, fileName: string, fileSi
   }
 }
 
-describe('local history limit', () => {
+describe('remote history query', () => {
   let sessionId: string
   let internals: ChannelInternals
 
@@ -127,12 +128,21 @@ describe('local history limit', () => {
         features: { is_mention_crab: false }, direction: 'inbound',
       })
     }
+    internals.client = {
+      getMessage: vi.fn().mockResolvedValue({ chat_id: 'oc_history' }),
+      listMessages: vi.fn().mockResolvedValue({
+        items: Array.from({ length: 30 }, (_, i) => makeFeishuMsg(
+          `history-${29 - i}`, `${(29 - i) % 2 ? 'odd' : 'even'} ${29 - i}`, Date.UTC(2026, 8, 12, 0, 29 - i),
+        )), has_more: false,
+      }),
+    }
   })
 
-  it('returns the latest messages through the handler, with the filtered total', async () => {
+  it('returns the latest remote messages with capped result counts, even when local history exists', async () => {
     const result = await internals.handleGetHistory({ session_id: sessionId, limit: 3 })
     expect(result.items.map(m => m.platform_message_id)).toEqual(['history-27', 'history-28', 'history-29'])
-    expect(result.pagination).toMatchObject({ page: 1, page_size: 3, total_items: 30 })
+    expect(result.pagination).toEqual({ page: 1, page_size: 3, total_items: 3, total_pages: 1 })
+    expect(internals.client.listMessages).toHaveBeenCalledWith(expect.objectContaining({ container_id: 'oc_history' }))
   })
 
   it('applies time and keyword filters before selecting the latest messages', async () => {
@@ -141,7 +151,7 @@ describe('local history limit', () => {
       time_range: { after: '2026-09-12T00:10:00Z', before: '2026-09-12T00:24:00Z' },
     })
     expect(result.items.map(m => m.platform_message_id)).toEqual(['history-22', 'history-24'])
-    expect(result.pagination.total_items).toBe(8)
+    expect(result.pagination.total_items).toBe(2)
   })
 
   it('gives limit precedence over both pagination fields', async () => {
@@ -162,6 +172,157 @@ describe('local history limit', () => {
 
   it.each([0, -1, 1.5, NaN, Infinity])('rejects invalid limit %s', async (limit) => {
     await expect(internals.handleGetHistory({ session_id: sessionId, limit })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+  })
+
+  it('resolves old private sessions using recent distinct message IDs without changing identity or writing history', async () => {
+    const before = await internals.messageStore.query({ sessionId })
+    const getMessage = vi.fn().mockRejectedValueOnce(new Error('deleted')).mockResolvedValueOnce({ chat_id: 'oc_old' })
+    internals.client.getMessage = getMessage
+    internals.client.listMessages = vi.fn().mockResolvedValue({
+      items: [makeFeishuMsg('august', 'remote only', Date.UTC(2026, 7, 26))], has_more: false,
+    })
+    const result = await internals.handleGetHistory({ session_id: sessionId, time_range: { before: '2026-08-27T00:00:00Z' } })
+    expect(result.items.map(m => m.platform_message_id)).toEqual(['august'])
+    expect(getMessage.mock.calls).toEqual([['history-29'], ['history-28']])
+    expect(internals.client.listMessages).toHaveBeenCalledWith(expect.objectContaining({ container_id: 'oc_old' }))
+    expect(await internals.messageStore.query({ sessionId })).toEqual(before)
+    expect(internals.sessionManager.upsert({ platform_session_id: 'ou_history', type: 'private', title: 'History', sender_id: 'ou_history', sender_name: 'History' }).session.id).toBe(sessionId)
+    await internals.handleGetHistory({ session_id: sessionId, limit: 1 })
+    expect(getMessage).toHaveBeenCalledTimes(2)
+  })
+
+  it('tries at most three distinct candidates, and fails explicitly if chat_id cannot be resolved', async () => {
+    const newest = (await internals.messageStore.query({ sessionId, limit: 1 })).items[0]
+    await internals.messageStore.append(sessionId, newest)
+    const getMessage = vi.fn().mockResolvedValue({})
+    internals.client.getMessage = getMessage
+    await expect(internals.handleGetHistory({ session_id: sessionId })).rejects.toMatchObject({ code: 'CHANNEL_HISTORY_UNAVAILABLE' })
+    expect(getMessage.mock.calls).toEqual([['history-29'], ['history-28'], ['history-27']])
+    expect(internals.client.listMessages).not.toHaveBeenCalled()
+  })
+
+  it('does not silently serve the local fragment after a remote failure', async () => {
+    internals.client.listMessages = vi.fn().mockRejectedValue(new Error('rate limit exceeded'))
+    await expect(internals.handleGetHistory({ session_id: sessionId })).rejects.toThrow('rate limit exceeded')
+  })
+
+  it('uses the real inbound chat_id while keeping the private open_id identity', async () => {
+    const raw = channel as any
+    internals.client.getMessage = vi.fn().mockRejectedValue(new Error('must not resolve a cached chat'))
+    raw.client.getUser = vi.fn().mockResolvedValue({ name: 'History' })
+    vi.spyOn(raw.rpcClient, 'publishEvent').mockResolvedValue(undefined)
+    await raw.handleMessageReceive({
+      sender: { sender_id: { open_id: 'ou_history' }, sender_type: 'user' },
+      message: { message_id: 'inbound', chat_id: 'oc_actual', chat_type: 'p2p', message_type: 'text', content: JSON.stringify({ text: 'hi' }), create_time: String(Date.now()) },
+    })
+    await internals.handleGetHistory({ session_id: sessionId, limit: 1 })
+    expect(internals.client.getMessage).not.toHaveBeenCalled()
+    expect(internals.client.listMessages).toHaveBeenCalledWith(expect.objectContaining({ container_id: 'oc_actual' }))
+    expect(raw.sessionManager.findById(sessionId).platform_session_id).toBe('ou_history')
+  })
+
+  it('fails explicitly for a private session with no message IDs to resolve', async () => {
+    const empty = internals.sessionManager.upsert({ platform_session_id: 'ou_empty', type: 'private', title: 'Empty', sender_id: 'ou_empty', sender_name: 'Empty' }).session.id
+    await expect(internals.handleGetHistory({ session_id: empty })).rejects.toMatchObject({ code: 'CHANNEL_HISTORY_UNAVAILABLE', message: expect.stringContaining('no local message IDs') })
+    expect(internals.client.getMessage).not.toHaveBeenCalled()
+    expect(internals.client.listMessages).not.toHaveBeenCalled()
+  })
+})
+
+describe('history completeness and pagination', () => {
+  let internals: ChannelInternals
+  let sessionId: string
+  const base = Date.UTC(2026, 7, 26)
+
+  beforeEach(() => {
+    internals = channel as unknown as ChannelInternals
+    sessionId = internals.sessionManager.upsertGroupSessionFromSnapshot({ platform_session_id: 'oc_remote', title: 'Remote', participants: [] }).session.id
+  })
+
+  it('filters across pages, including filenames, deduplicates IDs and returns chronological results', async () => {
+    const listMessages = vi.fn()
+      .mockResolvedValueOnce({ items: [makeFeishuMsg('new', 'MATCH', base + 3_000), makeFeishuMsg('other', 'no', base + 2_000)], has_more: true, page_token: 'next' })
+      .mockResolvedValueOnce({ items: [makeFeishuMsg('new', 'MATCH', base + 3_000), makeFeishuFileMsg('file', 'fk', 'match.pdf', 10, base + 1_000)], has_more: true, page_token: 'last' })
+    internals.client = { listMessages }
+    const result = await internals.handleGetHistory({ session_id: sessionId, keyword: 'MaTcH', limit: 2 })
+    expect(result.items.map(m => m.platform_message_id)).toEqual(['file', 'new'])
+    expect(listMessages).toHaveBeenCalledTimes(2)
+    expect(listMessages.mock.calls[0][0]).toMatchObject({ container_id: 'oc_remote', page_size: 50, sort_type: 'ByCreateTimeDesc' })
+    expect(listMessages.mock.calls[1][0]).toMatchObject({ page_token: 'next', end_time: listMessages.mock.calls[0][0].end_time })
+    expect((await internals.messageStore.query({ sessionId })).items).toEqual([])
+  })
+
+  it('supports limits above 50 and equal timestamps without losing distinct messages', async () => {
+    const listMessages = vi.fn()
+      .mockResolvedValueOnce({ items: Array.from({ length: 50 }, (_, i) => makeFeishuMsg(`new-${i}`, 'text', base + 1_000)), has_more: true, page_token: 'next' })
+      .mockResolvedValueOnce({ items: Array.from({ length: 20 }, (_, i) => makeFeishuMsg(`old-${i}`, 'text', base)), has_more: false })
+    internals.client = { listMessages }
+    const result = await internals.handleGetHistory({ session_id: sessionId, limit: 60 })
+    expect(result.items).toHaveLength(60)
+    expect(new Set(result.items.map(m => m.platform_message_id)).size).toBe(60)
+    expect(result.items.slice(0, 10).every(m => m.platform_message_id.startsWith('old-'))).toBe(true)
+    expect(result.pagination).toEqual({ page: 1, page_size: 60, total_items: 60, total_pages: 1 })
+  })
+
+  it.each([0, 100])('rounds remote time bounds outward and filters inclusive boundaries (after %s ms)', async (afterMs) => {
+    const listMessages = vi.fn().mockResolvedValue({ items: [901, 900, afterMs, afterMs - 1].map(ms => makeFeishuMsg(`m-${ms}`, 'text', base + ms)), has_more: false })
+    internals.client = { listMessages }
+    const result = await internals.handleGetHistory({ session_id: sessionId, time_range: { after: new Date(base + afterMs).toISOString(), before: new Date(base + 900).toISOString() } })
+    expect(listMessages).toHaveBeenCalledWith(expect.objectContaining({ start_time: String(base / 1000 - (afterMs === 0 ? 1 : 0)), end_time: String(base / 1000 + 1) }))
+    expect(result.items.map(m => m.platform_message_id)).toEqual([`m-${afterMs}`, 'm-900'])
+  })
+
+  it('reads the entire range before applying legacy pagination and exact totals', async () => {
+    const listMessages = vi.fn()
+      .mockResolvedValueOnce({ items: [4, 3].map(i => makeFeishuMsg(`m-${i}`, 'text', base + i)), has_more: true, page_token: 'next' })
+      .mockResolvedValueOnce({ items: [2, 1].map(i => makeFeishuMsg(`m-${i}`, 'text', base + i)), has_more: false })
+    internals.client = { listMessages }
+    const result = await internals.handleGetHistory({ session_id: sessionId, pagination: { page: 2, page_size: 2 } })
+    expect(result.items.map(m => m.platform_message_id)).toEqual(['m-3', 'm-4'])
+    expect(result.pagination).toEqual({ page: 2, page_size: 2, total_items: 4, total_pages: 2 })
+  })
+
+  it('returns empty only after a complete remote query', async () => {
+    internals.client = { listMessages: vi.fn().mockResolvedValue({ items: [], has_more: false }) }
+    expect((await internals.handleGetHistory({ session_id: sessionId })).items).toEqual([])
+    expect(internals.client.listMessages).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([undefined, 'repeat'])('rejects missing or repeated cursors (%s)', async (token) => {
+    internals.client = { listMessages: vi.fn().mockResolvedValue({ items: [], has_more: true, page_token: token }) }
+    const response = await internals.handleGetHistory({ session_id: sessionId }).catch(error => formatHandlerError(error, 'history-query'))
+    expect(response).toMatchObject({ success: false, error: { code: 'CHANNEL_HISTORY_UNAVAILABLE' } })
+    expect(internals.client.listMessages).toHaveBeenCalledTimes(token ? 2 : 1)
+  })
+
+  it.each([undefined, 1])('fails at the page budget when the requested result is still incomplete (limit %s)', async (limit) => {
+    const listMessages = vi.fn().mockImplementation(async () => ({ items: [], has_more: true, page_token: String(listMessages.mock.calls.length) }))
+    internals.client = { listMessages }
+    await expect(internals.handleGetHistory({ session_id: sessionId, limit })).rejects.toMatchObject({ code: 'CHANNEL_HISTORY_UNAVAILABLE' })
+    expect(listMessages).toHaveBeenCalledTimes(20)
+  })
+
+  it.each([false, true])('allows completion at the page budget (limit reached: %s)', async (limitReached) => {
+    const listMessages = vi.fn().mockImplementation(async () => {
+      const last = listMessages.mock.calls.length === 20
+      return { items: last ? [makeFeishuMsg('last', 'match', base)] : [], has_more: !last || limitReached, page_token: String(listMessages.mock.calls.length) }
+    })
+    internals.client = { listMessages }
+    expect((await internals.handleGetHistory({ session_id: sessionId, limit: limitReached ? 1 : undefined })).items.map(m => m.platform_message_id)).toEqual(['last'])
+    expect(listMessages).toHaveBeenCalledTimes(20)
+  })
+
+  it('freezes the default cutoff and filters messages newer than that cutoff', async () => {
+    const now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    try {
+      const listMessages = vi.fn()
+        .mockImplementationOnce(async () => { clock.mockReturnValue(now + 5000); return { items: [makeFeishuMsg('future', 'text', now + 1000)], has_more: true, page_token: 'next' } })
+        .mockResolvedValueOnce({ items: [makeFeishuMsg('current', 'text', now)], has_more: false })
+      internals.client = { listMessages }
+      expect((await internals.handleGetHistory({ session_id: sessionId })).items.map(m => m.platform_message_id)).toEqual(['current'])
+      expect(listMessages.mock.calls.map(([params]) => params.end_time)).toEqual([String(Math.floor(now / 1000) + 1), String(Math.floor(now / 1000) + 1)])
+    } finally { clock.mockRestore() }
   })
 })
 

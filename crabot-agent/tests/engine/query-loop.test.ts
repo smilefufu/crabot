@@ -5,6 +5,7 @@ import type { LLMAdapter, LLMStreamParams } from '../../src/engine/llm-adapter.j
 import type { LLMConfigSwap } from '../../src/engine/llm-adapter-types.js'
 import { StreamTimeoutError } from '../../src/engine/retry-utils.js'
 import type {
+  LiveProgressEvent,
   StreamChunk,
   EngineLlmResponseEvent,
   EngineOptions,
@@ -140,6 +141,33 @@ describe('runEngine', () => {
     expect(result.totalTurns).toBe(2)
     expect(result.usage.inputTokens).toBe(30) // 20 + 10
     expect(result.usage.outputTokens).toBe(15) // 10 + 5
+  })
+
+  it('连接恢复进度包含独立模式和已用时间，并且恢复成功只提交一次结果', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    try {
+      const progress: LiveProgressEvent[] = []
+      let attempts = 0
+      const adapter: LLMAdapter = {
+        updateConfig() {},
+        async *stream() {
+          if (attempts++ === 0) throw new StreamTimeoutError('ttfb', 90_000)
+          yield* chunksFromContent([{ type: 'text', text: '恢复后的结果' }], 'end_turn')
+        },
+      }
+      const pending = runEngine({ prompt: 'test', adapter, options: baseOptions({ onLiveProgress: (event) => progress.push(event) }) })
+      await vi.advanceTimersByTimeAsync(5_000)
+      const result = await pending
+      expect(result.outcome).toBe('completed')
+      expect(result.totalTurns).toBe(1)
+      expect(progress.filter((event) => event.type === 'llm_retry')).toEqual([
+        expect.objectContaining({ retryMode: 'connection_recovery', attempt: 1, elapsedMs: 0, delayMs: 5_000 }),
+      ])
+    } finally {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    }
   })
 
   it.each([

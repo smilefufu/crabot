@@ -652,13 +652,14 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
   // ==========================================================================
 
   describe('fail-loud 兜底（plan §三）', () => {
-    function stubOutcome(outcome: 'failed' | 'aborted'): void {
+    function stubOutcome(outcome: 'failed' | 'aborted', error?: string): void {
       internals.managerStack.registry.routeAttentionFlush = async () => ({
         episodeId: 'ep-g1',
         outcome,
         turns: 1,
         consumedEvents: false,
         repliedToHuman: false,
+        error,
       })
     }
 
@@ -668,7 +669,7 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
 
     it('F1：outcome=failed（不抛错）时群里收到一条明确回复', async () => {
       boot({ attentionMinMs: 1000 })
-      stubOutcome('failed')
+      stubOutcome('failed', 'PROVIDER_QUOTA_EXHAUSTED')
 
       await runGroup([gmsg({ id: 'g-1', mention: true })])
 
@@ -677,6 +678,7 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       expect(sent[0].port).toBe(WECHAT_PORT)
       expect(sent[0].params.session_id).toBe(GROUP_SESSION)
       expect((sent[0].params.content as { text: string }).text).toContain('管理员')
+      expect((sent[0].params.content as { text: string }).text).toContain('PROVIDER_QUOTA_EXHAUSTED')
     })
 
     /**

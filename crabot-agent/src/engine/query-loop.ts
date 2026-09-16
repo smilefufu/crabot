@@ -224,11 +224,14 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           if (options.onLiveProgress) {
             options.onLiveProgress({
               type: 'llm_retry',
+              retryMode: event.retryMode,
+              elapsedMs: event.elapsedMs,
+              delayMs: event.delayMs,
               turn: totalTurns + 1,                  // 即将开始的这一轮
               attempt: event.attempt,
               maxAttempts: event.maxAttempts,
               source: event.source,
-              error: event.error.message,
+              error: formatError(event.error),
             })
           }
         },

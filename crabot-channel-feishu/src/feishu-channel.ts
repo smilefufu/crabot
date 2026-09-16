@@ -128,6 +128,7 @@ export class FeishuChannel extends ModuleBase {
   private readonly subscriber: WsSubscriber
   private readonly sessionManager: SessionManager
   private readonly messageStore: MessageStore
+  private readonly privateChatIds = new Map<string, string>()
   private readonly mediaHandleStore: MediaHandleStore
   private readonly mediaCleaner: MediaCleaner
   private readonly docReader: FeishuDocReader
@@ -313,6 +314,7 @@ export class FeishuChannel extends ModuleBase {
       sender_id: senderOpenId,
       sender_name: senderName || senderOpenId,
     })
+    if (!isGroup) this.privateChatIds.set(session.id, message.chat_id)
 
     // 文件惰性 handle 在 applyMediaContent（先于此处 session 解析）登记，此处补写 session_id 供慢档事件路由
     if (content.type === 'file' && content.handle) {
@@ -1035,49 +1037,91 @@ export class FeishuChannel extends ModuleBase {
   // ── history / message ─────────────────────────────────────────────────────
 
   private async handleGetHistory(params: GetHistoryParams) {
+    const queryStartedAt = Date.now()
     const session = this.sessionManager.findById(params.session_id)
-    if (!session) throwError('NOT_FOUND', 'Session not found')
+    if (!session) throw new RpcError('NOT_FOUND', 'Session not found')
 
     if (params.limit !== undefined && (!Number.isInteger(params.limit) || params.limit < 1)) {
-      throwError('INVALID_ARGUMENT', 'limit must be a positive integer')
+      throw new RpcError('INVALID_ARGUMENT', 'limit must be a positive integer')
     }
     const pageSize = params.limit ?? params.pagination?.page_size ?? 20
-    // limit 语义 = 取最新 N 条；走 messageStore 的 slice(-limit) 分支需要 page=undefined
-    const page = params.limit !== undefined ? undefined : (params.pagination?.page ?? 1)
-
-    const local = await this.messageStore.query({
-      sessionId: session.id,
-      timeRange: params.time_range,
-      keyword: params.keyword,
-      page,
-      pageSize,
-      limit: params.limit,
-    })
-
-    if (local.items.length > 0) {
-      return paginated(local.items.map(toHistoryMessage), page ?? 1, pageSize, local.total)
+    const page = params.limit !== undefined ? 1 : (params.pagination?.page ?? 1)
+    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(pageSize) || pageSize < 1
+      || (params.limit === undefined && pageSize > 100)) {
+      throw new RpcError('INVALID_ARGUMENT', 'pagination requires a positive page and page_size between 1 and 100')
     }
-
-    // fallback：飞书 im.v1.message.list（仅群聊支持 container_id_type='chat'）
-    if (session.type === 'group') {
+    const after = params.time_range?.after === undefined ? undefined : Date.parse(params.time_range.after)
+    const before = params.time_range?.before === undefined ? queryStartedAt : Date.parse(params.time_range.before)
+    if (!Number.isFinite(before) || (after !== undefined && (!Number.isFinite(after) || after > before))) {
+      throw new RpcError('INVALID_ARGUMENT', 'time_range must contain valid timestamps with after <= before')
+    }
+    const chatId = session.type === 'group' ? session.platform_session_id : await this.resolvePrivateHistoryChatId(session.id)
+    const keyword = params.keyword?.toLowerCase()
+    const items: HistoryMessage[] = []
+    const seenIds = new Set<string>()
+    const seenTokens = new Set<string>()
+    let pageToken: string | undefined
+    for (let fetchedPages = 0; fetchedPages < 20; fetchedPages++) {
+      let remote: Awaited<ReturnType<FeishuClient['listMessages']>>
       try {
-        const remote = await this.client.listMessages({
+        remote = await this.client.listMessages({
           container_id_type: 'chat',
-          container_id: session.platform_session_id,
-          start_time: msFromIso(params.time_range?.after),
-          end_time: msFromIso(params.time_range?.before),
-          page_size: pageSize,
+          container_id: chatId,
+          start_time: after === undefined ? undefined : String(Math.ceil(after / 1000) - 1),
+          // 飞书按秒筛选；向外取整后再按原始毫秒边界精确过滤。
+          end_time: String(Math.floor(before / 1000) + 1),
+          page_size: 50,
+          sort_type: 'ByCreateTimeDesc',
+          page_token: pageToken,
         })
-        const items: HistoryMessage[] = []
-        for (const m of remote.items) {
-          items.push(await this.historyMapper(m, session.id))
-        }
-        return paginated(items, 1, pageSize, items.length)
       } catch (err) {
-        console.warn('[FeishuChannel] history fallback failed:', err)
+        if (isPermissionDenied(err)) throw err
+        throw new RpcError('CHANNEL_HISTORY_UNAVAILABLE', `Feishu history query failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      for (const raw of remote.items) {
+        const message = await this.historyMapper(raw, session.id)
+        if (seenIds.has(message.platform_message_id)) continue
+        seenIds.add(message.platform_message_id)
+        const timestamp = Date.parse(message.platform_timestamp)
+        if (timestamp > before || (after !== undefined && timestamp < after)) continue
+        if (keyword && !`${message.content.text ?? ''} ${message.content.filename ?? ''}`.toLowerCase().includes(keyword)) continue
+        items.push(message)
+        if (params.limit !== undefined && items.length >= params.limit) break
+      }
+      if (!remote.has_more || (params.limit !== undefined && items.length >= params.limit)) {
+        items.sort((a, b) => Date.parse(a.platform_timestamp) - Date.parse(b.platform_timestamp))
+        const start = (page - 1) * pageSize
+        return paginated(items.slice(start, start + pageSize), page, pageSize, items.length)
+      }
+      if (!remote.page_token || seenTokens.has(remote.page_token)) {
+        throw new RpcError('CHANNEL_HISTORY_UNAVAILABLE', 'Feishu history pagination made no progress (missing or repeated cursor)')
+      }
+      pageToken = remote.page_token
+      seenTokens.add(pageToken)
+    }
+    throw new RpcError('CHANNEL_HISTORY_UNAVAILABLE', 'Feishu history query exceeded 20 pages; narrow time_range and retry')
+  }
+
+  private async resolvePrivateHistoryChatId(sessionId: string): Promise<string> {
+    const cached = this.privateChatIds.get(sessionId)
+    if (cached) return cached
+    const local = await this.messageStore.query({ sessionId })
+    local.items.sort((a, b) => Date.parse(b.platform_timestamp) - Date.parse(a.platform_timestamp))
+    const candidates = [...new Set(local.items.map(message => message.platform_message_id).filter(Boolean))].slice(0, 3)
+    let reason = 'no local message IDs available'
+    for (const messageId of candidates) {
+      try {
+        const message = await this.client.getMessage(messageId)
+        if (typeof message?.chat_id === 'string' && message.chat_id) {
+          this.privateChatIds.set(sessionId, message.chat_id)
+          return message.chat_id
+        }
+        reason = 'message details did not contain chat_id'
+      } catch (err) {
+        reason = err instanceof Error ? err.message : String(err)
       }
     }
-    return paginated<HistoryMessage>([], page ?? 1, pageSize, 0)
+    throw new RpcError('CHANNEL_HISTORY_UNAVAILABLE', `Cannot resolve private history chat_id: ${reason}`)
   }
 
   private async handleGetMessage(params: GetMessageParams): Promise<HistoryMessage> {
@@ -1693,12 +1737,6 @@ function isoFromMillis(ms: string | number | undefined): string | undefined {
   const n = typeof ms === 'string' ? parseInt(ms, 10) : ms
   if (!Number.isFinite(n) || n <= 0) return undefined
   return new Date(n).toISOString()
-}
-
-function msFromIso(iso: string | undefined): string | undefined {
-  if (!iso) return undefined
-  const t = new Date(iso).getTime()
-  return Number.isFinite(t) ? Math.floor(t / 1000).toString() : undefined
 }
 
 function paginated<T>(items: T[], page: number, pageSize: number, total: number) {

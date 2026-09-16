@@ -42,6 +42,7 @@ import type {
 } from '../../src/types.js'
 import { makeAgentConfig, makeMessage, useTmpDataDir, type DataDirGuard } from './harness.js'
 import { makeManagerScript, searchMemoryBlock, sendMessageBlock, type ManagerScript } from './manager-script.js'
+import { StreamTimeoutError } from '../../src/engine/retry-utils.js'
 
 const hoisted = vi.hoisted(() => ({ managerAdapter: undefined as unknown }))
 vi.mock('../../src/agent/agent-handler.js', async (importOriginal) => {
@@ -138,6 +139,7 @@ interface Internals {
   }
   /** fail-loud 的按 key 冷却台账（与私聊 / 群聊两条 lane 共用同一张表）。 */
   failLoudSentAt: Map<string, number>
+  traceStore: import('../../src/core/trace-store.js').TraceStore
   attentionScheduler: {
     stopAll(): void
     getCurrentIntervalMs(sessionId: string): number | undefined
@@ -295,6 +297,35 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
   function principal(): ResolvedPrincipalView | undefined {
     return internals.managerStack.principals.get(MANAGER_KEY)
   }
+
+  it('真实连接重试贯通到 Admin 进度，进度不提前消费正式回复的 request_ids', async () => {
+    boot({ turns: [[sendMessageBlock({ channelId: 'admin-web', sessionId: 'admin-chat', text: '正式结果' })]] })
+    const appendSpan = vi.spyOn(internals.traceStore, 'appendManagerSpan')
+    let attempts = 0
+    hoisted.managerAdapter = {
+      async *stream(params: unknown) {
+        if (attempts++ === 0) throw new StreamTimeoutError('ttfb', 90_000)
+        yield* script.adapter.stream(params as never)
+      }, updateConfig() {},
+    }
+    const pending = runAdminChat(amsg({ id: 'recovery-progress' }), 'req-recovery-progress')
+    await vi.waitFor(() => expect(directDeliveries()).toHaveLength(1))
+    const progress = directDeliveries()[0]
+    expect(progress.content?.text).toContain('连接恢复中')
+    expect(progress.request_ids).toEqual([])
+    expect(progress.delivery_id).toBeTruthy()
+    expect(appendSpan).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      type: 'decision', details: expect.objectContaining({ kind: 'llm_retry', retryMode: 'connection_recovery', elapsedMs: expect.any(Number), delayMs: expect.any(Number) }),
+    }))
+
+    await pending
+
+    const deliveries = directDeliveries()
+    expect(deliveries).toHaveLength(2)
+    expect(deliveries[1].content?.text).toBe('正式结果')
+    expect(deliveries[1].request_ids).toEqual(['req-recovery-progress'])
+    expect(deliveries[1].delivery_id).not.toBe(progress.delivery_id)
+  }, 15_000)
 
   function workerToolNames(): string[] {
     return internals

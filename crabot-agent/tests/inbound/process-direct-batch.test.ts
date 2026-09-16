@@ -125,6 +125,9 @@ interface Internals {
     harness: { spawnWorker: (p: Record<string, unknown>) => Promise<unknown> }
   }
   failLoudSentAt: Map<string, number>
+  llmRecoverySentAt: Map<string, number>
+  knownSecrets: Set<string>
+  sendManagerLlmRetry(key: string, event: Extract<import('../../src/engine/types.js').LiveProgressEvent, { type: 'llm_retry' }>): Promise<void>
   rpcClient: {
     call: (port: number, method: string, params: unknown, from?: string) => Promise<unknown>
     resolve: (filter: unknown, from?: string) => Promise<unknown[]>
@@ -389,6 +392,34 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
   // ==========================================================================
 
   describe('整批递给 manager（变异靶 M2）', () => {
+    it('连接恢复通知按当前会话投递、脱敏和冷却，投递失败不影响后续失败告知', async () => {
+      boot()
+      internals.knownSecrets.add('private-test-credential')
+      const event = {
+        type: 'llm_retry' as const, retryMode: 'connection_recovery' as const,
+        turn: 1, attempt: 2, maxAttempts: Number.MAX_SAFE_INTEGER, source: 'stream' as const,
+        elapsedMs: 185_000, error: 'stream ttfb timeout; private-test-credential',
+      }
+      await internals.sendManagerLlmRetry('wechat::sess-1', { ...event, retryMode: 'bounded_retry' })
+      expect(rpcCalls.filter((call) => call.method === 'send_message')).toHaveLength(0)
+      await internals.sendManagerLlmRetry('wechat::sess-1', event)
+      await internals.sendManagerLlmRetry('wechat::sess-1', { ...event, attempt: 3 })
+      let sends = rpcCalls.filter((call) => call.method === 'send_message')
+      expect(sends).toHaveLength(1)
+      expect(sends[0].params).toMatchObject({ session_id: 'sess-1', content: { text: expect.stringContaining('连接恢复中') } })
+      expect(JSON.stringify(sends)).toContain('185 秒')
+      expect(JSON.stringify(sends)).not.toContain('private-test-credential')
+      expect(JSON.stringify(sends)).not.toContain(String(Number.MAX_SAFE_INTEGER))
+      expect(internals.failLoudSentAt.size).toBe(0)
+      internals.llmRecoverySentAt.set('wechat::sess-1', Date.now() - 301_000)
+      await internals.sendManagerLlmRetry('wechat::sess-1', { ...event, attempt: 4 })
+      sends = rpcCalls.filter((call) => call.method === 'send_message')
+      expect(sends).toHaveLength(2)
+      internals.rpcClient.call = async () => { throw new Error('channel unavailable') }
+      await expect(internals.sendManagerLlmRetry('wechat::other-session', event)).resolves.toBeUndefined()
+      expect(internals.failLoudSentAt.size).toBe(0)
+    })
+
     it('批内每条消息都进 manager 的这一轮上下文，只跑一个 episode', async () => {
       boot()
       await internals.processDirectBatch(
@@ -757,6 +788,7 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       expect(sent!.port).toBe(WECHAT_PORT)
       expect(sent!.params.session_id).toBe('sess-1')
       expect(failLoudText()).toContain('管理员')
+      expect(failLoudText()).toContain('LLM boom')
     })
 
     /**
@@ -792,6 +824,18 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
       expect(failLoudText()).toContain('store IO boom')
+    })
+
+    it('失败通知先脱敏已知凭证，再截断错误正文', async () => {
+      boot()
+      const secret = 'credential-without-provider-prefix-0123456789'
+      internals.knownSecrets.add(secret)
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error(`AUTH_DENIED ${'x'.repeat(170)} ${secret}`)
+      }
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'secret-failure', type: 'private' })]))
+      expect(failLoudText()).toContain('AUTH_DENIED')
+      expect(failLoudText()).not.toContain('credential-without-provider')
     })
 
     /**

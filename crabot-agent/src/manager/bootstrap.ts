@@ -169,6 +169,7 @@ export interface BootstrapDeps {
   /** 已应用配置代数 getter(每次原子替换 +1,与 onRuntimeConfigApplied 同点递增);
    *  callNonStreaming 记账消费,用于消费「sleep 窗口之外落地的变更」。 */
   readonly runtimeConfigAppliedGeneration?: () => number
+  readonly onLlmRetry?: import('./registry.js').ManagerRegistryDeps['onLlmRetry']
   /** manager 的槽位思考强度(随 powerful slot),thunk 以支持热更;返回 undefined = 跟随默认 */
   readonly managerThinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
   /** manager 模型的上下文窗口(随 powerful slot),thunk 以支持热更;返回 undefined = engine 默认 200K */
@@ -523,6 +524,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     model: deps.managerModel,
     onRuntimeConfigApplied: deps.onRuntimeConfigApplied,
     runtimeConfigAppliedGeneration: deps.runtimeConfigAppliedGeneration,
+    onLlmRetry: deps.onLlmRetry,
     thinking: deps.managerThinking,
     contextWindowTokens: deps.managerContextWindowTokens,
     supportsVision: deps.managerSupportsVision,
