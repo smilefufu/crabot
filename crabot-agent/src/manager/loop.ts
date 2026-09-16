@@ -5,19 +5,9 @@
  * (ManagerSessionStore)。`wakeUp` 是唯一入口——被唤醒→跑一个 episode(一次完整的
  * runEngine 往返)→回睡,同一 loop 内串行(AsyncMutex),不同 loop 相互独立、可并行。
  *
- * ## 压缩调度自管(disableCompaction:true)
- *
- * manager 关闭 query-loop 的 turn 内自动调度，自己在唤醒边界检查完整请求容量；实际批次规划、
- * 摘要调用、缩批与安全切点统一委托给 Engine ContextManager。流程是
- * load → decideCompaction → 需要则调用共享压缩器并逐批落盘 → 把
- * [摘要块(如有)] + [尾巴] + [本次事件] 拼成 initialMessages 喂 runEngine。折叠只发生在
- * 唤醒边界,burst(同一 episode 内的多轮 turn)绝不压缩。
- *
- * disableCompaction 关掉的第二条路径是 engine 对 stop_reason==='max_tokens' 的强压重试——
- * 关掉后 engine 遇到静默 max_tokens 直接以 outcome='completed'、finalText='' 收场(见
- * query-loop.ts 该分支的 disableCompaction 短路,读代码确认,不是猜的)，本模块用
- * `isContextOverflow` 从 EngineResult 结构里识别这一情形(以及吞吐层真的抛出"上下文超限"
- * 错误的少数情形),命中后强制 force_hot 折叠一次并重试一次,仍不行就放弃 episode。
+ * ## 上下文压缩
+ * Engine 在每轮主请求前检查容量并执行共享自适应压缩；Manager 只装配保护尾部、摘要
+ * 和逐批持久化。超限恢复保留当前工具结果，不退回 episode 起点。
  *
  * ## episode 失败语义(protocol §4.1)
  *
@@ -45,7 +35,6 @@ import {
   type EngineToolLifecycleEvent,
   type ToolDefinition,
   type LLMAdapter,
-  type TextBlock,
   type ContentBlock,
 } from '../engine/index.js'
 import type { HumanMessageQueueLike, LLMRequestEvent } from '../engine/types.js'
@@ -1221,9 +1210,7 @@ export class ManagerLoop {
       ? await injectInboundImages(baseTailMessages, { supportsVision, imageRefs })
       : undefined
     const tailMessages: EngineMessage[] = injectedTail?.messages ?? baseTailMessages
-    // attempt 可能被 overflow 重试整体替换,重试路径的注入产生自己的 originals——
-    // 用 let + 收尾时读当前值。
-    let originalsById: ReadonlyMap<string, EngineMessage> = injectedTail?.originals ?? new Map()
+    const originalsById: ReadonlyMap<string, EngineMessage> = injectedTail?.originals ?? new Map()
 
     let attempt = await this.runAttempt(episodeId, state, tailMessages, adapter, model, {
       thinking,
@@ -1231,76 +1218,16 @@ export class ManagerLoop {
       contextEnvelopes: currentInputEnvelopes,
     })
     let totalTurnsUsed = attempt.result.totalTurns
-    let usedForceHotRetry = false
-    // 与 totalTurnsUsed 同一套累加纪律:兜底重试会整体丢弃首次尝试的 finalMessages,但首次
-    // 尝试里已经发出去的话人类是真的收到了——只看重试那一份会把"说过话"错报成"没说过"。
+    state = attempt.state
+    // 回复证据按本次执行消息 ID 保留，不依赖压缩前的数组长度。
     // protectedTail 在重启续跑时含本 episode 已执行的消息；普通唤醒时只有本次人类输入。
     let repliedToHuman = detectRepliedToHuman(protectedTail)
-      || detectRepliedToHuman(attempt.result.finalMessages.slice(attempt.initialMessageCount))
+      || detectRepliedToHuman(attempt.executedMessages)
     let successfulSendMessageTargets = successfulSendMessageTargetsOf(
-      attempt.result.finalMessages.slice(attempt.initialMessageCount),
+      attempt.executedMessages,
     )
 
-    // max_tokens 兜底(§4.2):disableCompaction 关掉了 engine 自己的强压重试路径,
-    // 这里识别到"上下文超限收场"时强制 force_hot 折叠一次并重试一次,仍失败就放弃。
-    //
-    // mid-episode 注入与这条重试路径的交互:
-    // 首次尝试期间通过 enqueueDuringEpisode 到达的内容，无论当时是否已被 engine
-    // drainPending() 消费，都由 currentEpisodeInjected 以原始 envelope 顺序记录。
-    // 首次尝试的 finalMessages 在重试时整体丢弃，因此这些 envelope 必须显式追加。
-    // mailbox.pending 里的未消费后缀先清空，避免与显式追加重复。
-    // 初始 wake 与 carried envelopes 同样属于本次 protected current tail；force-hot
-    // 只折叠 state.recent 中此前历史，不能把本次事件折进 rolling summary。
-    if (isContextOverflow(attempt.result)) {
-      // Only pre-existing history may be folded. The current initial wake, carried
-      // envelopes and mid-episode supplements are a protected tail (§14.4).
-      usedForceHotRetry = true
-      state = await this.applyFoldWithSpan({
-        episodeId,
-        state: historyState,
-        decision: { kind: 'force_hot' },
-        contextManager,
-        profile: compactionProfile,
-        target: { kind: 'fit_hard_cap', hardCapTokens: policy.hardCapTokens, force: true },
-        adapter,
-        model,
-        protectedTail,
-      })
-      historyState = withoutProtectedTail(state, protectedTail.length)
-      // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
-      this.mailbox.drainActiveProfileEnvelopes()
-      this.mailbox.clearContextAdmissions()
-      const retryCurrentEnvelopes = currentInputEnvelopes.filter((item) => this.shouldReplayInAttempt(item))
-      const retryInjectedEnvelopes = (this.currentEpisodeInjected ?? [])
-        .filter((item) => this.shouldReplayInAttempt(item))
-      const retryBaseMessages: EngineMessage[] = [
-        ...state.recent,
-        ...retryCurrentEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
-        ...retryInjectedEnvelopes.map((item) => createUserMessage(this.renderEnvelope(item))),
-      ]
-      // 重试重建了 current/injected 消息(新 id),注入 originals 必须换成这一份
-      const retryInjected = injectable
-        ? await injectInboundImages(retryBaseMessages, { supportsVision, imageRefs })
-        : undefined
-      const retryTailMessages: EngineMessage[] = retryInjected?.messages ?? retryBaseMessages
-      const retryAttempt = await this.runAttempt(episodeId, state, retryTailMessages, adapter, model, {
-        thinking,
-        contextWindowTokens,
-        contextEnvelopes: [...retryCurrentEnvelopes, ...retryInjectedEnvelopes],
-      })
-      originalsById = retryInjected?.originals ?? new Map()
-      totalTurnsUsed += retryAttempt.result.totalTurns
-      repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages.slice(retryAttempt.initialMessageCount))
-      successfulSendMessageTargets = [
-        ...successfulSendMessageTargets,
-        ...successfulSendMessageTargetsOf(retryAttempt.result.finalMessages.slice(retryAttempt.initialMessageCount)),
-      ]
-      attempt = retryAttempt
-    }
-
-    // end_turn / stop_sequence 会在 runEngine 内经 endTurnGate 得到复核；max_turns 及
-    // disableCompaction 下归并的 max_tokens 则会直接返回这里。后者只补一次受原有
-    // maxTurns 限制的 continuation，不能用上限绕过复核，也绝不形成循环。
+    // end_turn / stop_sequence 经 Engine gate 复核；预算收场最多补一次 continuation。
     if (
       this.needsSpawnRecheck
       && !this.spawnRecheckInjected
@@ -1330,12 +1257,13 @@ export class ManagerLoop {
       )
       totalTurnsUsed += continuation.result.totalTurns
       if (continuation.result.outcome === 'completed' || continuation.result.outcome === 'max_turns') {
-        repliedToHuman = repliedToHuman || detectRepliedToHuman(continuation.result.finalMessages.slice(continuation.initialMessageCount))
+        repliedToHuman = repliedToHuman || detectRepliedToHuman(continuation.executedMessages)
         successfulSendMessageTargets = [
           ...successfulSendMessageTargets,
-          ...successfulSendMessageTargetsOf(continuation.result.finalMessages.slice(continuation.initialMessageCount)),
+          ...successfulSendMessageTargetsOf(continuation.executedMessages),
         ]
-        attempt = continuation
+        state = continuation.state
+      attempt = continuation
         // 文本已随接管保留在 finalMessages,丢弃捕获记录即可。
         this.mailbox.takeDrainedForReplay()
       } else {
@@ -1368,13 +1296,13 @@ export class ManagerLoop {
       const prompt = transientSystemPromptForWake(item.wake)
       if (prompt) transientPromptCounts.set(prompt, (transientPromptCounts.get(prompt) ?? 0) + 1)
     }
-    const durablePrefixLength = state.recent.length + (attempt.hasSummaryMarker ? 1 : 0)
-    const persistedFinalMessages = attempt.result.finalMessages.flatMap((m, index) => {
+    const durableIds = new Set(initialState.recent.map((message) => message.id))
+    const persistedFinalMessages = attempt.result.finalMessages.flatMap((m) => {
       if (this.resumeCheckpoint?.transientMessageIds.includes(m.id)) return []
       // 系统提示只服务当前 LLM 请求。只在本次动态尾部之后按数量剔除，避免误删旧 history
       // 中恰好同文的人类消息；Worker/任务板正文从未进入这里。
       if (
-        index >= durablePrefixLength
+        !durableIds.has(m.id)
         && m.role === 'user'
         && 'content' in m
         && typeof m.content === 'string'
@@ -2122,12 +2050,15 @@ export class ManagerLoop {
   ): Promise<{
     readonly result: EngineResult
     readonly hasSummaryMarker: boolean
-    readonly initialMessageCount: number
+    readonly state: ManagerSessionState
+    readonly executedMessages: ReadonlyArray<EngineMessage>
     readonly admittedContextEnvelopes: ReadonlyArray<TimedWakeEnvelope>
   }> {
     this.attemptCounter += 1
     let assistantTextEndTurnReminderSent = false
-    const hasSummaryMarker = state.rollingSummary !== undefined
+    let compactionSpanId: string | undefined
+    let compactionStartedAt = 0
+    let hasSummaryMarker = state.rollingSummary !== undefined
     const initialMessages: EngineMessage[] = overrides?.initialMessages
       ? [...overrides.initialMessages]
       : hasSummaryMarker
@@ -2145,6 +2076,24 @@ export class ManagerLoop {
       this.currentToolFaceState,
     )
     const messagesRef = { current: initialMessages as ReadonlyArray<EngineMessage> }
+    const initialIds = new Set(initialMessages.map((message) => message.id))
+    const originalDurableIds = new Set(state.recent.map((message) => message.id))
+    const executedMessages = new Map<string, EngineMessage>()
+    const captureExecuted = (): void => {
+      for (const message of messagesRef.current) {
+        if (!initialIds.has(message.id)) executedMessages.set(message.id, message)
+      }
+    }
+    const durableMessage = (message: EngineMessage): EngineMessage => {
+      if (message.role === 'user' && 'content' in message && Array.isArray(message.content)) {
+        const original = state.recent.find((item) => item.id === message.id)
+        if (original) return original
+        const first = message.content[0]
+        if (first?.type === 'text') return { ...message, content: first.text }
+      }
+      return message
+    }
+
     const checkpoint = (): void => {
       if (this.checkpointError) throw this.checkpointError
       const originals = new Map(state.recent.map((message) => [message.id, message]))
@@ -2162,7 +2111,7 @@ export class ManagerLoop {
           const prompt = transientSystemPromptForWake(item.wake)
           if (prompt) remaining.set(prompt, (remaining.get(prompt) ?? 0) + 1)
         }
-        for (const message of recent.slice(state.recent.length)) {
+        for (const message of recent.filter((item) => !originalDurableIds.has(item.id))) {
           if (
             'content' in message
             && typeof message.content === 'string'
@@ -2190,7 +2139,54 @@ export class ManagerLoop {
       maxTurns: this.deps.maxTurns,
       ...(overrides?.contextWindowTokens !== undefined ? { contextWindowTokens: overrides.contextWindowTokens } : {}),
       ...(overrides?.thinking !== undefined ? { thinking: overrides.thinking } : {}),
-      disableCompaction: true,
+      onCompactionStart: () => {
+        compactionSpanId = `fold-${randomUUID()}`
+        compactionStartedAt = Date.now()
+      },
+      onCompactionEnd: (info) => {
+        this.deps.traceWriter?.appendSpan(episodeId, {
+          span_id: compactionSpanId!, parent_span_id: `root-${episodeId}`,
+          type: 'context_assembly', status: info.failedReason ? 'failed' : 'completed',
+          started_at: new Date(compactionStartedAt).toISOString(),
+          ended_at: new Date().toISOString(), duration_ms: Date.now() - compactionStartedAt,
+          details: { kind: 'turn_compaction', ...info },
+        })
+      },
+      disableCompaction: false,
+      prepareCompaction: (messages, fixedTokens, currentAdapter) => {
+        captureExecuted()
+        checkpoint()
+        const raw = messages.slice(hasSummaryMarker ? 1 : 0)
+        const protectedId = this.resumeCheckpoint?.protectedTailMessageId
+        let protectedStart = protectedId ? raw.findIndex((message) => message.id === protectedId) : -1
+        // 所有本轮新增输入及其后续工具组都留在尾部；不跨越当前输入重新排序。
+        const newInput = raw.findIndex((message) => !originalDurableIds.has(message.id) && message.role === 'user' && 'content' in message)
+        if (newInput >= 0) protectedStart = protectedStart < 0 ? newInput : Math.min(protectedStart, newInput)
+        if (protectedStart < 0) protectedStart = raw.length
+        return {
+          state: { protectedHead: [], previousSummary: state.rollingSummary,
+            history: raw.slice(0, protectedStart), protectedTail: raw.slice(protectedStart) },
+          adapter: this.observeAdapter(episodeId, currentAdapter, 'compaction'),
+          profile: createManagerCompactionProfile({
+            preferredKeepRecent: this.deps.policy.keepRecent,
+            mainRequestFixedTokens: fixedTokens,
+            onBatchApplied: async (batch) => {
+              const recent = [...batch.state.history, ...batch.state.protectedTail].map(durableMessage)
+              const next = { ...state,
+                committedHumanMessageIds: this.resumeCheckpoint?.state.committedHumanMessageIds ?? state.committedHumanMessageIds,
+                imageRefs: this.resumeCheckpoint?.state.imageRefs ?? state.imageRefs,
+                rollingSummary: batch.state.previousSummary, recent,
+                foldedCount: state.foldedCount + batch.consumedMessages }
+              await this.deps.store.save({ ...next, recent: recent.filter((message) =>
+                !this.resumeCheckpoint?.transientMessageIds.includes(message.id)) })
+              state = next
+              hasSummaryMarker = true
+              messagesRef.current = batch.messages
+              checkpoint()
+            },
+          }),
+        }
+      },
       humanMessageQueue: this.mailbox,
       messagesRef,
       onBeforeLlmCall: () => {
@@ -2247,6 +2243,7 @@ export class ManagerLoop {
         }
       },
       onTurn: (event) => {
+        captureExecuted()
         this.recordTurnSpans(episodeId, event)
         if (this.resumeCheckpoint) {
           this.resumeCheckpoint = { ...this.resumeCheckpoint, turns: [...this.resumeCheckpoint.turns, event], pendingToolCallIds: [] }
@@ -2296,7 +2293,9 @@ export class ManagerLoop {
         options,
         initialMessages,
       })
-      return { result, hasSummaryMarker, initialMessageCount: initialMessages.length, admittedContextEnvelopes }
+      captureExecuted()
+      return { result, state, executedMessages: [...executedMessages.values()], hasSummaryMarker,
+        admittedContextEnvelopes }
     } finally {
       offRuntimeConfigApplied()
     }
@@ -2857,42 +2856,4 @@ function renderWorkerEvent(event: HarnessEvent): string {
   if (typeof summary === 'string' && summary.length > 0) parts.push(`worker 的收尾结论:\n${summary}`)
   parts.push('</crabot-event>')
   return parts.join('\n')
-}
-
-/**
- * 识别"episode 因上下文超限收场"这一真实表征(读 query-loop.ts 确认,不是猜测):
- *
- * 1. disableCompaction=true 时,engine 遇到静默 max_tokens(text='' 且 stop_reason=
- *    'max_tokens')不会走强压重试,而是直接 finishTask() 收场——outcome 变成
- *    'completed'(不是 'failed'/'max_tokens'!),finalText=''，唯一留下的痕迹是
- *    finalMessages 最后一条 assistant 消息的 stopReason==='max_tokens'。这是结构化信号,
- *    比在 EngineResult.error 里找文案更可靠(这条路径下 error 根本不会被设置)。
- *    "静默"这个前提本身必须校验,不能只看 stopReason:LLM 输出被 max output tokens
- *    截断(有实际文字,只是没写完)时 stopReason 同样是 'max_tokens',但 query-loop.ts
- *    的 isSilentText(见 partitionResponseContent + `isSilentText = processed.text.trim()
- *    .length === 0`,query-loop.ts:614)判它为非静默,直接走"有文字的 end_turn"分支正常
- *    completed 收场——与上下文超限无关。这里必须对齐同一判定,只统计末条 assistant 消息里
- *    的 text 块(忽略 tool_use/raw_reasoning,与 partitionResponseContent 一致),trim 后
- *    为空才算静默。否则会把"回复被截断但已完成"误判为"超限",对已经跑完的 episode 强制
- *    折叠重试一遍——重复触发首次尝试里已执行的副作用(如 send_message 已发送、
- *    spawn_worker 已拉起 worker)。
- * 2. adapter.stream 真的抛出"上下文/超限"相关错误时(如 provider 直接拒绝过长请求),
- *    走的是 query-loop 顶层 try/catch → outcome='failed'、error=formatError(err)——
- *    这种情形只能靠错误文案关键字识别,兜底覆盖 max_tokens/context/token limit 等常见表述。
- */
-function isContextOverflow(result: EngineResult): boolean {
-  const last = result.finalMessages[result.finalMessages.length - 1]
-  if (last?.role === 'assistant' && last.stopReason === 'max_tokens') {
-    const text = last.content
-      .filter((b): b is TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('')
-    if (text.trim().length === 0) {
-      return true
-    }
-  }
-  if (result.outcome === 'failed' && result.error && /max_tokens|context[^a-z]{0,10}(length|window)|token[^a-z]{0,10}limit|too (long|large)/i.test(result.error)) {
-    return true
-  }
-  return false
 }

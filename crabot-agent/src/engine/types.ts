@@ -548,6 +548,13 @@ export interface EngineOptions {
    */
   readonly disableCompaction?: boolean
 
+  /** 调用方只装配状态、保护规则和批次持久化；触发与算法仍由 Engine 持有。 */
+  readonly prepareCompaction?: (messages: ReadonlyArray<EngineMessage>, fixedTokens: number, adapter: import('./llm-adapter').LLMAdapter) => {
+    readonly state: import('./context-manager').CompactionState
+    readonly profile: import('./context-manager').CompactionProfile
+    readonly adapter?: import('./llm-adapter').LLMAdapter
+  }
+
   /**
    * 当前模型的 context window（token 数），来自 provider 模型配置的 context_window。
    * 缺失时 engine 回退到内置默认 200000。用于 compaction 触发阈值、hard cap 和摘要

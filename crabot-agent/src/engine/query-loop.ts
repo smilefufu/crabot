@@ -1,3 +1,4 @@
+import { isContextWindowError } from './retry-utils.js'
 import type { LLMAdapter } from './llm-adapter'
 import { callNonStreaming } from './llm-adapter'
 import type {
@@ -89,6 +90,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   // usage 缺失 / compaction 后观测失效时回退估算路径（含 system prompt + tools）。
   let lastObservedContextTokens: number | undefined = undefined
   let messageCountAtObservation = 0
+  let overflowRecoveryPending = false
 
   // 外部 observer（progress digest 等）通过 messagesRef 只读访问当前 messages。
   // 每轮 onTurn 之前以及主循环开头各刷新一次 —— 足以让定时 flush（≥秒级间隔）
@@ -242,10 +244,29 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       if (abortSignal?.aborted) {
         return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
       }
+      const nonEmptyInput = currentSystemPrompt.trim().length > 0 || messages.some((message) =>
+        'content' in message && (typeof message.content === 'string' ? message.content.trim().length > 0 : message.content.length > 0))
+      if (!options.disableCompaction && !overflowRecoveryPending && isContextWindowError(error, nonEmptyInput)) {
+        overflowRecoveryPending = true
+        const compacted = await compactInPlace(messages, contextManager, adapter, options,
+          { systemPrompt: currentSystemPrompt, tools: currentTools, force: true }, abortSignal)
+        if (compacted.batchesApplied > 0) {
+          lastObservedContextTokens = undefined
+          refreshMessagesRef()
+        }
+        if (compacted.ok && compacted.batchesApplied > 0) {
+          turn-- // 重试尚未成功的模型请求，不重跑此前工具、不消耗新 turn。
+          continue
+        }
+        return buildResult(compacted.ok || !compacted.aborted ? 'failed' : 'aborted', finalText, totalTurns,
+          contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene,
+          `上下文压缩失败：${compacted.ok ? '未取得压缩进展' : compacted.failedReason}`)
+      }
       console.error('[query-loop] LLM call threw:', error)
       return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, formatError(error))
     }
 
+    overflowRecoveryPending = false
     const processed = partitionResponseContent(response.content)
     totalTurns++
     const hasRemainingTurn = turn + 1 < maxTurns
@@ -786,25 +807,33 @@ async function compactInPlace(
   let batchesApplied = 0
   let consumedMessages = 0
   try {
-    const result = await contextManager.compactBuiltinMessages({
-      messages,
-      adapter,
-      model: options.model,
-      target: {
-        kind: 'fit_hard_cap',
-        hardCapTokens: contextManager.getHardCapTokens(),
-        ...(request.force ? { force: true } : {}),
-      },
-      mainRequestFixedTokens: contextManager.estimateStaticPromptTokens(
-        request.systemPrompt,
-        request.tools,
-      ),
-      ...(abortSignal ? { signal: abortSignal } : {}),
-      onBatchApplied: (batch) => {
-        messages.length = 0
-        messages.push(...batch.messages)
-      },
-    })
+    const fixedTokens = contextManager.estimateStaticPromptTokens(request.systemPrompt, request.tools)
+    const assembly = options.prepareCompaction?.(messages, fixedTokens, adapter)
+    const target = {
+      kind: 'fit_hard_cap' as const,
+      hardCapTokens: contextManager.getHardCapTokens(),
+      ...(request.force ? { force: true } : {}),
+    }
+    const applyMessages = (batch: import('./context-manager').CompactionBatchApplication): void => {
+      messages.length = 0
+      messages.push(...batch.messages)
+    }
+    const result = assembly
+      ? await contextManager.compactIncrementally({
+        state: assembly.state,
+        profile: { ...assembly.profile, onBatchApplied: async (batch) => {
+          await assembly.profile.onBatchApplied?.(batch)
+          applyMessages(batch)
+        } },
+        target, adapter: assembly.adapter ?? adapter, model: options.model,
+        ...(abortSignal ? { signal: abortSignal } : {}),
+      })
+      : await contextManager.compactBuiltinMessages({
+        messages, adapter, model: options.model, target,
+        mainRequestFixedTokens: fixedTokens,
+        ...(abortSignal ? { signal: abortSignal } : {}),
+        onBatchApplied: applyMessages,
+      })
     batchesApplied = result.batchesApplied
     consumedMessages = result.consumedMessages
     if (result.aborted) {

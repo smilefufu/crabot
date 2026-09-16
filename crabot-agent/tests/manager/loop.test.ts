@@ -17,6 +17,7 @@ import { ContextManager, createManagerCompactionProfile } from '../../src/engine
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import type { ManagerEpisodeSpan, ManagerTraceWriter } from '../../src/manager/trace-types.js'
 import { MANAGER_PROJECT_WORKSPACE_CONTEXT, MANAGER_WORKBOARD_CONTEXT } from '../../src/manager/prompt.js'
+import { HttpResponseError } from '../../src/engine/retry-utils.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // --- Fixtures / helpers ---
@@ -200,6 +201,57 @@ describe('ManagerLoop', () => {
 
   afterEach(async () => {
     await fs.rm(dataDir, { recursive: true, force: true })
+  })
+
+  it.each(['usage', 'overflow', 'overflow_twice', 'failure_after_compaction'] as const)('compacts between turns from %s without replaying tools or losing current input', async (trigger) => {
+    const old = await store.load(KEY)
+    await store.save({ ...old, recent: Array.from({ length: 30 }, (_, i) => compressibleHistoryMessage(`old-${i}`, 400)) })
+    let inference = 0
+    let folds = 0
+    const snapshots: string[] = []
+    const adapter: LLMAdapter = {
+      updateConfig() {},
+      async *stream(params) {
+        if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
+          folds++
+          yield* chunksFromContent([{ type: 'text', text: 'old history summarized' }], 'end_turn')
+          return
+        }
+        snapshots.push(JSON.stringify(params.messages))
+        if (inference++ === 0) {
+          yield* chunksFromContent([{ type: 'tool_use', id: 'once', name: 'probe', input: {} }], 'tool_use', { inputTokens: trigger.startsWith('overflow') ? 100 : 90000, outputTokens: 5 })
+        } else if (trigger === 'failure_after_compaction') {
+          throw new Error('permanent test failure')
+        } else if ((trigger === 'overflow' && inference === 2) || trigger === 'overflow_twice') {
+          throw new HttpResponseError(400, 'data: {"error":{"code":"invalid_parameter_error","type":"invalid_request_error","message":"Range of input length should be [1, 983616]"}}\n\n', 'test')
+        } else {
+          yield* chunksFromContent([], 'end_turn', { inputTokens: 100, outputTokens: 5 })
+        }
+      },
+    }
+    let loop!: ManagerLoop
+    const execute = vi.fn(async () => {
+      await loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [makeChannelMessage('unique-supplement')] }))
+      return { output: 'tool completed', isError: false }
+    })
+    loop = new ManagerLoop(baseDeps({ store, adapter, contextWindowTokens: () => 100000,
+      toolFace: () => [defineTool({ name: 'probe', description: 'probe', inputSchema: { type: 'object' }, call: execute })],
+    }))
+    const outcome = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('keep-current-input')] }))
+    if (trigger === 'overflow_twice') {
+      expect(outcome.outcome).toBe('failed')
+      expect(inference).toBe(3)
+      expect(folds).toBe(1)
+    }
+    expect(folds).toBeGreaterThan(0)
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(snapshots[1]).toContain('keep-current-input')
+    expect(snapshots[1]).toContain('tool completed')
+    expect(snapshots.at(-1)).toContain('old history summarized')
+    const saved = await store.load(KEY)
+    expect(saved.rollingSummary).toBe('old history summarized')
+    expect(saved.foldedCount).toBeGreaterThan(0)
+    expect(JSON.stringify(saved.recent).split('unique-supplement')).toHaveLength(2)
   })
 
   it.each(['human_messages', 'attention_flush'] as const)('prefetches quoted content for %s before the LLM call', async (kind) => {
@@ -952,7 +1004,7 @@ describe('ManagerLoop', () => {
     expect(serialized).toContain('新的话')
   })
 
-  it('runEpisodeBody 直接 throw(不是内部按 outcome 判定的失败分支)时,已 drain 的邮箱内容不丢失,下次唤醒仍能拿到', async () => {
+  it('回合内压缩失败时,已 drain 的邮箱内容不丢失,下次唤醒仍能拿到', async () => {
     const { adapter, queue } = makeAdapter()
     // turn1:调用工具(期间 enqueueDuringEpisode 注入内容);turn2 触发 max_tokens(上下文超限)
     // → 触发 force_hot 强制折叠 → 折叠 LLM 调用直接抛出不可重试错误(模拟 callNonStreaming
@@ -1005,7 +1057,7 @@ describe('ManagerLoop', () => {
 
     await expect(
       loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发超限并在折叠时抛错')] }))
-    ).rejects.toThrow('boom: fold llm exhausted retries')
+    ).resolves.toMatchObject({ outcome: 'failed' })
 
     // 人类输入在可能抛错的折叠前已落盘；非人类 carried/injected 事件仍留待重投。
     const stateAfterThrow = await store.load(KEY)
@@ -1027,7 +1079,7 @@ describe('ManagerLoop', () => {
     expect(serialized).toContain('新的话') // 第二次唤醒的新事件
   })
 
-  it('runEpisodeBody 直接 throw 时,mid-episode 注入的人类消息由 catch 分支补提交进 recent,不丢不重复', async () => {
+  it('回合内压缩失败时,mid-episode 人类消息补提交进 recent,不丢不重复', async () => {
     const { adapter, queue } = makeAdapter()
     // 同上一用例的 throw 路径(force-hot 折叠抛错),但 mid-episode 注入的是**人类消息**——
     // 五审真实风险:catch 分支原来没有 commitPendingHumanInputs,注入消息不在 store、
@@ -1077,7 +1129,7 @@ describe('ManagerLoop', () => {
 
     await expect(
       loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发超限并在折叠时抛错')] }))
-    ).rejects.toThrow('boom: fold llm exhausted retries')
+    ).resolves.toMatchObject({ outcome: 'failed' })
 
     // catch 分支补提交:注入消息落 recent + 去重键(键与文本同进),mailbox 无残留
     const stateAfterThrow = await store.load(KEY)
@@ -2004,7 +2056,7 @@ describe('ManagerLoop', () => {
     expect(admit).toHaveBeenCalledOnce()
     expect(reject).not.toHaveBeenCalled()
     expect(JSON.stringify(managerCalls[0].messages)).toContain('activity_available')
-    expect(JSON.stringify(managerCalls[1].messages)).not.toContain('activity_available')
+    expect(JSON.stringify(managerCalls[1].messages).match(/activity_available/g)).toHaveLength(1)
   })
 
   it('max_tokens(上下文超限)收场时强制折叠一次并重试一次,成功后 outcome=completed', async () => {

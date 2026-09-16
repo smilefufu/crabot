@@ -1,3 +1,4 @@
+import { isContextWindowError } from './retry-utils.js'
 import {
   type EngineMessage,
   type EngineUserMessage,
@@ -243,11 +244,6 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError'
 }
 
-function isContextWindowError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return /(?:maximum\s+)?context.{0,24}(?:length|window|limit|too\s+(?:long|large)|exceed)|prompt.{0,24}too\s+(?:long|large)|too\s+many\s+tokens|token\s+limit.{0,16}(?:exceed|reach)/i.test(message)
-}
-
 export class ContextManager {
   private readonly maxContextTokens: number
   private readonly compactThreshold: number
@@ -463,7 +459,7 @@ export class ContextManager {
           if (signal?.aborted || isAbortError(error)) {
             return finish({ aborted: true, cause: error })
           }
-          if (!isContextWindowError(error)) {
+          if (!isContextWindowError(error, true)) {
             return finish({ failedReason: `摘要 LLM 调用失败: ${String(error)}`, cause: error })
           }
           retryReason = `摘要请求超过 Provider 上下文窗口: ${String(error)}`
