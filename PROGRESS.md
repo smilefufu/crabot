@@ -67,13 +67,13 @@
 - 固定样例下主控、builtin、每日反思正文分别缩短约 39%、47%、29%；这不是完整请求 token 降幅或模型行为改善的证明。已核对实际工具装配与用户确认稿一致，定向验证见本次提交说明；未做模型行为回放或部署。
 - 独立 follow-up：Claude Code/Codex 普通主线仍缺少统一 Crabot 身份说明注入口；聊天记录查询缺陷另行处理。本次只覆盖已确认的提示词及说明精简。
 
-### 主控与执行器内置 Guidance：候选实现已完成，行为比较与 CLI 边界待确认
+### 主控与执行器内置 Guidance：实现与固定案例比较完成，草稿 PR 待审阅
 
-- 用户已确认[内容方案](crabot-docs/superpowers/specs/2026-09-16-builtin-guidance-and-core-prompts-design.md)。普通主控/执行侧核心为 269/162 字，配套 4/3 份按场景读取的工作流；每日反思直接提供独立正文。已实现权限与工具条件查询、桌面明确授权过滤，以及旧产品 Skill 的迁移，同名用户 Skill 保留。
-- 内置子 Agent 不接收主线核心、guidance 或新增桌面能力。Claude Code/Codex 原生子 Agent 会继承部分父级配置，已请求用户确认是否也要求隔离；该边界未验收，不宣称三类子 Agent 均隔离。
-- Agent 定向集合 13 个文件首次 344 通过、44 跳过，1 个测试夹具缺少每日反思标记已修正；相关 6 文件复跑 67/67 通过。Admin 3 文件 79/79 通过，Agent 类型检查、构建和 diff review 通过。原生 CLI 部分依赖环境跳过；Claude 一个文件监听用例在未修改基线也失败，未扩围修复。
-- 6 组人工双版本预检产生 19 次请求；4 条轨迹因模拟工具缺口中断，候选仍有额外询问、重复读取指南等问题，不能宣称行为通过或效果改善。第二轮实际装配请求包已冻结，但自动审批拒绝向百炼发送内部提示词/工具说明，等待这次发送范围的明确授权。
-- 实现在独立分支保存，未发布 PR、未合并、未部署。详情见[实施计划](crabot-docs/superpowers/plans/2026-09-17-builtin-guidance-implementation.md)及 `crabot-agent/eval/guidance/README.md`。
+- 已按[确认方案](crabot-docs/superpowers/specs/2026-09-16-builtin-guidance-and-core-prompts-design.md)实现 269/162 字核心、主控 4 份/执行侧 3 份独立工作流、每日反思专用正文、执行条件查询及明确授权的主执行器桌面能力。旧产品项目维护 Skill 迁出，同名用户 Skill 保留。
+- 用户明确子 Agent 隔离仅限 Crabot 内置子 Agent；已验证其不接收主线核心、guidance 和新增桌面能力。Claude Code/Codex 原生子 Agent 沿用原生继承，不另加隔离机制。
+- 本地 Agent、Admin、正文装配与权限定向检查通过，CLI 环境跳过与基线已有的 Claude 监听失败单独记录。评测模拟器新增 3 项回归通过，生产核心及 7 份工作流沿用确认稿，未因模型表现追加措辞。
+- 用户授权后完成第二轮 6 组双版本、12 条轨迹、33 次请求。翻译、禁止派发、桌面委派方向正常，新版一条脚本修复完成模拟核验与收尾；3 条轨迹仍有模拟工具缺口，错误场景权限回执矛盾的两条不计安全结论。修复夹具不回写旧结果，不宣称整体改善或完整行为验收通过。
+- 以草稿 PR 交付，未合并、未部署。完整结果见 `crabot-agent/eval/guidance/RESULTS.md`，过程及既有测试记录见[实施计划](crabot-docs/superpowers/plans/2026-09-17-builtin-guidance-implementation.md)。
 
 ### 临时创建 Subagent：follow-up，待设计
 

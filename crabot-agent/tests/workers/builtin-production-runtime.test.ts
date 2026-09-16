@@ -126,9 +126,6 @@ interface Turn {
   readonly stopReason: 'end_turn' | 'tool_use'
 }
 
-/** Worker system prompt 的 finish_task 契约断言。 */
-const WORKER_PROMPT_MARKER = 'finish_task'
-
 const FINISH: Turn = {
   toolCalls: [{ name: 'finish_task', id: 'fin', input: { outcome: 'completed', summary: '完事' } }],
   stopReason: 'tool_use',

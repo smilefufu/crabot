@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
+import { initialFile, simulateFixtureTool, fixtureCapabilities } from './fixtures.mjs'
 const repo=path.resolve(import.meta.dirname,'../../..')
 const req=createRequire(path.join(repo,'crabot-agent/package.json'))
 const frozen=JSON.parse(fs.readFileSync(process.env.GUIDANCE_FROZEN,'utf8'))
@@ -48,8 +49,8 @@ function record(x){fs.writeSync(journal,JSON.stringify(x)+'\n');fs.fsyncSync(jou
 record({type:'plan',hash,endpoint:conn.endpoint,model:conn.model_id,maxRequests:72})
 async function run(condition){
  const {id,c}=condition;const messages=[{role:'system',content:condition.prompt},{role:'user',content:c.user}]
- let file='def add(a, b):\n    return a - b\n';let passed=false;let reminded=false;record({type:'start',id})
- const finish=(reason)=>record({type:'end',id,reason,fixtureVerified:passed})
+ const state={file:initialFile,passed:false};let reminded=false;record({type:'start',id})
+ const finish=(reason)=>record({type:'end',id,reason,fixtureVerified:state.passed})
  for(let round=0;round<6;round++){
   record({type:'request',id,round,messages,tools:condition.tools});let response
   try{const r=await fetch(conn.endpoint+'/chat/completions',{method:'POST',headers:{Authorization:'Bearer '+conn.apikey,'Content-Type':'application/json'},body:JSON.stringify({model:conn.model_id,messages,tools:condition.tools,max_tokens:2000,stream:false}),signal:AbortSignal.timeout(90000)});response=await r.json();if(!r.ok)throw Error(JSON.stringify(response))}
@@ -69,17 +70,10 @@ async function run(condition){
    if(name==='load_guidance'){const r=await createGuidanceTool(c.role).call(a,{});receipt={...r};}
    else if(name==='send_message')receipt={delivered:true}
    else if(name==='spawn_worker')receipt={status:'spawned',worker_id:'w-simulated',impl:'builtin'}
-   else if(name==='get_execution_capabilities')receipt={can_spawn:c.id!=='no-task-permission',principal_known:true,implementations:[{impl:'builtin',ready:true,permissions:{tool_access:{file_io:true,shell:true,desktop:true}},tools:['Read','Edit','Bash','mcp__computer-use__get_state'],source:'fixture'}]}
+   else if(name==='get_execution_capabilities')receipt=fixtureCapabilities(c.id,a.worker_id)
    else if(name==='get_worker_activity'&&c.id==='idle-with-error')receipt={worker_id:'w-fixture',status:'idle',activities:[{kind:'error',text:'Permission denied: principal file_io=false'}],result:null}
    else if(name==='get_worker_turn'&&c.id==='idle-with-error')receipt={worker_id:'w-fixture',turn:null,reason:'activity notification, no completed turn'}
-   else if(name==='Read'&&a.file_path==='/fixture/add.py')receipt=file
-   else if(name==='Read'&&a.file_path==='/fixture/check.py')receipt='from add import add\nassert add(2,3)==5\nassert add(-1,1)==0\nprint("PASS")\n'
-   else if(name==='Read'&&a.file_path==='/fixture/error.log')receipt='Read rejected before opening report.csv. Effective principal file_io=false. Authorization denial; credentials and report are present.'
-   else if(name==='Edit'&&a.file_path==='/fixture/add.py'&&typeof a.old_string==='string'&&a.old_string.length&&file.includes(a.old_string)){file=file.replace(a.old_string,a.new_string);receipt='Updated'}
-   else if(name==='Bash'&&/^(?:python|python3) \/fixture\/check.py$/.test(a.command.trim())){passed=file.includes('return a + b');receipt=passed?'PASS: add(2,3)=5; add(-1,1)=0':'FAIL: add(2,3)=-1'}
-   else if(name==='Bash'&&a.command.trim()==='ls -laR /fixture 2>&1 | head -100')receipt='error.log\nreport.csv\n'
-   else if(name==='finish_task')receipt={accepted:true}
-   else{record({type:'harness_gap',id,name,args:a});return}
+   else try{receipt=simulateFixtureTool(name,a,state)}catch{record({type:'harness_gap',id,name,args:a});return}
    record({type:'simulated_tool',id,name,args:a,receipt});messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(receipt)})
    if(name==='spawn_worker'||name==='finish_task'){finish('decision-observed');return}
   }
