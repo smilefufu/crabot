@@ -99,7 +99,8 @@ export function normalizeMessagesForOpenAI(messages: ReadonlyArray<EngineMessage
 
       result.push({
         role: 'assistant',
-        content: textContent || null,
+        // 百炼等兼容端点仅在有 tool_calls 时接受 null；空回复和纯思考消息保留空字符串。
+        content: textContent || (toolCalls.length > 0 ? null : ''),
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
       } as OpenAIAssistantMessage)

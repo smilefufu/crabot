@@ -517,6 +517,36 @@ describe('AnthropicAdapter', () => {
 // --- OpenAI Adapter Tests ---
 
 describe('normalizeMessagesForOpenAI', () => {
+  it.each<ContentBlock[]>([
+    [],
+    [{ type: 'text', text: '' }],
+    [{ type: 'raw_reasoning', data: { reasoning_content: 'thinking' } }],
+  ])('keeps empty assistant content as a string without tool calls: %j', (...content) => {
+    const msg = createAssistantMessage(content, 'end_turn')
+    const result = normalizeMessagesForOpenAI([msg])
+
+    expect(result).toEqual([{
+      role: 'assistant',
+      content: '',
+      ...(content.some((block) => block.type === 'raw_reasoning')
+        ? { reasoning_content: 'thinking' } : {}),
+    }])
+  })
+
+  it('preserves null content and paired tool results for tool-only assistant messages', () => {
+    const result = normalizeMessagesForOpenAI([
+      createAssistantMessage([{ type: 'tool_use', id: 'tc_1', name: 'search', input: {} }], 'tool_use'),
+      createToolResultMessage('tc_1', 'result', false),
+    ])
+
+    expect(result).toEqual([
+      { role: 'assistant', content: null, tool_calls: [
+        { id: 'tc_1', type: 'function', function: { name: 'search', arguments: '{}' } },
+      ] },
+      { role: 'tool', tool_call_id: 'tc_1', content: 'result' },
+    ])
+  })
+
   it('should convert a text user message', () => {
     const msg = createUserMessage('hello world')
     const result = normalizeMessagesForOpenAI([msg])
