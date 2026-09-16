@@ -1039,21 +1039,21 @@ export class FeishuChannel extends ModuleBase {
   private async handleGetHistory(params: GetHistoryParams) {
     const queryStartedAt = Date.now()
     const session = this.sessionManager.findById(params.session_id)
-    if (!session) throwError('NOT_FOUND', 'Session not found')
+    if (!session) throw new RpcError('NOT_FOUND', 'Session not found')
 
     if (params.limit !== undefined && (!Number.isInteger(params.limit) || params.limit < 1)) {
-      throwError('INVALID_ARGUMENT', 'limit must be a positive integer')
+      throw new RpcError('INVALID_ARGUMENT', 'limit must be a positive integer')
     }
     const pageSize = params.limit ?? params.pagination?.page_size ?? 20
     const page = params.limit !== undefined ? 1 : (params.pagination?.page ?? 1)
     if (!Number.isInteger(page) || page < 1 || !Number.isInteger(pageSize) || pageSize < 1
       || (params.limit === undefined && pageSize > 100)) {
-      throwError('INVALID_ARGUMENT', 'pagination requires a positive page and page_size between 1 and 100')
+      throw new RpcError('INVALID_ARGUMENT', 'pagination requires a positive page and page_size between 1 and 100')
     }
     const after = params.time_range?.after === undefined ? undefined : Date.parse(params.time_range.after)
     const before = params.time_range?.before === undefined ? queryStartedAt : Date.parse(params.time_range.before)
     if (!Number.isFinite(before) || (after !== undefined && (!Number.isFinite(after) || after > before))) {
-      throwError('INVALID_ARGUMENT', 'time_range must contain valid timestamps with after <= before')
+      throw new RpcError('INVALID_ARGUMENT', 'time_range must contain valid timestamps with after <= before')
     }
     const chatId = session.type === 'group' ? session.platform_session_id : await this.resolvePrivateHistoryChatId(session.id)
     const keyword = params.keyword?.toLowerCase()
@@ -1076,7 +1076,7 @@ export class FeishuChannel extends ModuleBase {
         })
       } catch (err) {
         if (isPermissionDenied(err)) throw err
-        throwError('CHANNEL_HISTORY_UNAVAILABLE', `Feishu history query failed: ${err instanceof Error ? err.message : String(err)}`)
+        throw new RpcError('CHANNEL_HISTORY_UNAVAILABLE', `Feishu history query failed: ${err instanceof Error ? err.message : String(err)}`)
       }
       for (const raw of remote.items) {
         const message = await this.historyMapper(raw, session.id)
@@ -1094,12 +1094,12 @@ export class FeishuChannel extends ModuleBase {
         return paginated(items.slice(start, start + pageSize), page, pageSize, items.length)
       }
       if (!remote.page_token || seenTokens.has(remote.page_token)) {
-        throwError('CHANNEL_HISTORY_UNAVAILABLE', 'Feishu history pagination made no progress (missing or repeated cursor)')
+        throw new RpcError('CHANNEL_HISTORY_UNAVAILABLE', 'Feishu history pagination made no progress (missing or repeated cursor)')
       }
       pageToken = remote.page_token
       seenTokens.add(pageToken)
     }
-    throwError('CHANNEL_HISTORY_UNAVAILABLE', 'Feishu history query exceeded 20 pages; narrow time_range and retry')
+    throw new RpcError('CHANNEL_HISTORY_UNAVAILABLE', 'Feishu history query exceeded 20 pages; narrow time_range and retry')
   }
 
   private async resolvePrivateHistoryChatId(sessionId: string): Promise<string> {
@@ -1121,7 +1121,7 @@ export class FeishuChannel extends ModuleBase {
         reason = err instanceof Error ? err.message : String(err)
       }
     }
-    throwError('CHANNEL_HISTORY_UNAVAILABLE', `Cannot resolve private history chat_id: ${reason}`)
+    throw new RpcError('CHANNEL_HISTORY_UNAVAILABLE', `Cannot resolve private history chat_id: ${reason}`)
   }
 
   private async handleGetMessage(params: GetMessageParams): Promise<HistoryMessage> {

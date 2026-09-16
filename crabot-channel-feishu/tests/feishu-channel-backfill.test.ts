@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { formatHandlerError } from 'crabot-shared/dist/module-base.js'
 
 vi.mock('@larksuiteoapi/node-sdk', () => {
   return {
@@ -289,7 +290,8 @@ describe('history completeness and pagination', () => {
 
   it.each([undefined, 'repeat'])('rejects missing or repeated cursors (%s)', async (token) => {
     internals.client = { listMessages: vi.fn().mockResolvedValue({ items: [], has_more: true, page_token: token }) }
-    await expect(internals.handleGetHistory({ session_id: sessionId })).rejects.toMatchObject({ code: 'CHANNEL_HISTORY_UNAVAILABLE' })
+    const response = await internals.handleGetHistory({ session_id: sessionId }).catch(error => formatHandlerError(error, 'history-query'))
+    expect(response).toMatchObject({ success: false, error: { code: 'CHANNEL_HISTORY_UNAVAILABLE' } })
     expect(internals.client.listMessages).toHaveBeenCalledTimes(token ? 2 : 1)
   })
 
