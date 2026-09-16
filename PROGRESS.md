@@ -56,6 +56,11 @@
 - 固定样例下主控、builtin、每日反思正文分别缩短约 39%、47%、29%；这不是完整请求 token 降幅或模型行为改善的证明。已核对实际工具装配与用户确认稿一致，定向验证见本次提交说明；未做模型行为回放或部署。
 - 独立 follow-up：Claude Code/Codex 普通主线仍缺少统一 Crabot 身份说明注入口；聊天记录查询缺陷另行处理。本次只覆盖已确认的提示词及说明精简。
 
+### 主控与执行器内置 Guidance：内容方案待确认
+
+- 已整理两份核心提示词、主控侧 5 份与执行器侧 3 份指南的完整候选，明确适用场景及与用户 Skill 的边界；子 Agent 的独立提示词、配置与专属 Skill 不在本次范围，也不共享两侧提示词或 guidance。
+- 仅新增[内容方案](crabot-docs/superpowers/specs/2026-09-16-builtin-guidance-and-core-prompts-design.md)，尚未确认、实施或部署；不修改现有生产提示词、用户 Skill 和正式协议。
+
 ### 临时创建 Subagent：follow-up，待设计
 
 - 用户希望按任务临时创建 subagent，无需先在 Admin 注册固定角色。当前 `delegate_task` 只能派发已注册、启用且对当前 Worker 可见的角色。
