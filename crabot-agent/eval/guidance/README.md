@@ -1,6 +1,8 @@
 # 内置 guidance 隔离比较
 
-**2026-09-17 当前状态：修复版已完成新一轮获授权的真实模型决策比较。** 候选 `ee4c5c6d`，40 条轨迹、57 次请求、234,844 tokens，无重试或补样。有限案例更支持新版主控，执行器判定相同且有共同问题；总 tokens 少 9.5%，未缓存输入多 17.6%。这不是完整任务质量或费用验收。逐例判定、用量拆账与冻结摘要见 [RESULTS.md](./RESULTS.md)，标准见 [ACCEPTANCE.md](./ACCEPTANCE.md)。旧缺陷批次保持撤回，不混入新统计。
+**2026-09-17 当前状态：修复版已补做真实 Docker 完整任务比较。** 候选仍为 `ee4c5c6d`，开始 29 条、完整收口 28 条；1 条预算中断、3 条未开始。可完整配对的 13 对均完成实际目标，旧版三条有实质汇报缺陷、新版未出现同类缺陷；新版诊断过程更重，配对总 tokens 多 12.7%。不能宣布整体质量或效率胜出。完整证据见 [COMPLETION-RESULTS.md](./COMPLETION-RESULTS.md)，此前短决策与撤回批次见 [RESULTS.md](./RESULTS.md)，标准见 [ACCEPTANCE.md](./ACCEPTANCE.md)。各批统计不混用。
+
+本轮入口为 `completion-compare.mjs`；`--prepare` 只冻结人工案例、基线、候选与编译产物摘要，不读凭据或调用模型。执行前先运行 `node --test crabot-agent/eval/guidance/docker-fixtures.test.mjs crabot-agent/eval/guidance/history-runtime.test.mjs crabot-agent/eval/guidance/completion-cases.test.mjs`。原始初批 200 万停止线保留在脚本；补充批次只运行原计划未开始条件，具体冻结与用量调整见结果记录，不覆盖初批目录或重抽中止轨迹。
 
 ## 后续分阶段验收
 

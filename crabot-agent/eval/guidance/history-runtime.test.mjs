@@ -6,6 +6,7 @@ import test from 'node:test'
 import { runHistory, scriptedChunks } from './history-runtime.mjs'
 import { historyCases } from './history-cases.mjs'
 import { FixtureContainer } from './docker-fixtures.mjs'
+import { BUILTIN_WORKER_PERMISSIONS } from '../../dist/workers/builtin/runtime.js'
 
 const image = 'crabot-guidance-tools:local'
 const call = (name, input) => ({ type: 'tool_use', id: `script-${Math.random()}`, name, input })
@@ -92,4 +93,48 @@ test('request ceiling rejects new work without aborting an already admitted resp
     assert.equal(rows.filter(r => r.type === 'response' && r.role === 'worker').length, 1)
     assert.equal(rows.filter(r => r.type === 'error').length, 0)
   } finally { releaseWorker(); fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Manager reads the real container document and persists a local memory candidate', { timeout: 45000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guidance-boundary-check-'))
+  let step = 0
+  const rows = await runHistory({ c: historyCases[1], variant: 'candidate', image, root, baseline: {}, maxRequests: 8, timeoutMs: 20000, record() {},
+    delegate: { stream(params) {
+      const blocks = [
+        call('search_tools', { query: 'inspect_project_docs' }),
+        call('inspect_project_docs', { project_root: '/fixture', operation: 'read', path: 'docs/input-policy.md' }),
+        call('search_tools', { query: 'store_memory' }),
+        call('mcp__crab-memory__store_memory', { content: '人工夹具记忆，用于验证本地边界。', type: 'fact' }),
+      ]
+      return scriptedChunks(step < blocks.length ? [blocks[step++]] : [])
+    } },
+  })
+  const read = rows.find(r => r.type === 'executed_tool' && r.name === 'inspect_project_docs')
+  assert.ok(read, 'project-doc execution must be recorded')
+  assert.equal(read.receipt.result.isError, false, read.receipt.result.output)
+  assert.match(read.receipt.result.output, /助手先前建议/)
+  const memory = JSON.parse(fs.readFileSync(path.join(root, 'memory-inbox.json'), 'utf8'))
+  assert.equal(memory.length, 1)
+  assert.equal(memory[0].status, 'inbox')
+  assert.equal(memory[0].body, '人工夹具记忆，用于验证本地边界。')
+})
+
+test('container document transport preserves source-worker file permission and root checks', async () => {
+  const box = new FixtureContainer(image)
+  const projectContext = {
+    managerKey: 'fixture::synthetic',
+    wakeEvent: { kind: 'worker_event', event: { worker_id: 'w-test', seq: 1 } },
+    workers: [{ worker_id: 'w-test', manager_key: 'fixture::synthetic', incarnations: [{ seq: 1, workspace: '/fixture' }] }],
+    contexts: { 'w-test': { principal_permissions: { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, file_io: false } } } },
+  }
+  try {
+    await box.start(historyCases[1])
+    const denied = await box.call('inspect_project_docs', { project_root: '/fixture', operation: 'list' }, { mode: 'bypass' }, projectContext)
+    assert.equal(denied.result.isError, true)
+    assert.match(denied.result.output, /file_io/)
+    projectContext.contexts['w-test'].principal_permissions.tool_access.file_io = true
+    const wrongRoot = await box.call('inspect_project_docs', { project_root: '/tmp', operation: 'list' }, { mode: 'bypass' }, projectContext)
+    assert.equal(wrongRoot.result.isError, true)
+    assert.match(wrongRoot.result.output, /workspace/)
+  } finally { await box.close() }
 })

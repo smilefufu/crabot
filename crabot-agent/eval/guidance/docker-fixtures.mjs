@@ -57,8 +57,8 @@ export class FixtureContainer {
       return await this.snapshot()
     } catch (error) { await this.close(); throw error }
   }
-  async call(name, input, permission = { mode: 'bypass' }) {
-    return JSON.parse(await docker(['exec', '-i', this.name, 'node', '/app/tool.cjs'], JSON.stringify({ name, input, permission })))
+  async call(name, input, permission = { mode: 'bypass' }, projectContext) {
+    return JSON.parse(await docker(['exec', '-i', this.name, 'node', '/app/tool.cjs'], JSON.stringify({ name, input, permission, projectContext })))
   }
   async snapshot() {
     return JSON.parse(await docker(['exec', this.name, 'node', '-e', `

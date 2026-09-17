@@ -3,6 +3,7 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { FixtureContainer } from './docker-fixtures.mjs'
+import { withDockerProjectDocs } from './docker-project-docs.mjs'
 
 const require = createRequire(path.resolve(import.meta.dirname, '../../package.json'))
 const { buildManagerStack } = require('./dist/manager/bootstrap.js')
@@ -84,8 +85,13 @@ export async function runHistory({ c, variant, image, root, baseline, delegate, 
         const response = processor.finalize()
         emit({ type: 'response', request, role, workerId, text: response.text, tools: response.toolUseBlocks, usage: response.usage, stopReason: response.stopReason })
       } catch (error) {
-        fatal ??= 'model-error'; stopped = true; abort.abort()
-        emit({ type: 'error', request, role, error: String(error) })
+        if (error.code === 'EVAL_BUDGET') {
+          fatal ??= 'request-budget'; stopped = true
+          emit({ type: 'request_rejected', request, role, reason: 'global-budget' })
+        } else {
+          fatal ??= 'model-error'; stopped = true; abort.abort()
+          emit({ type: 'error', request, role, error: String(error) })
+        }
         throw error
       } finally { activeCalls-- }
     },
@@ -112,9 +118,16 @@ export async function runHistory({ c, variant, image, root, baseline, delegate, 
     }
     if (method === 'get_history') return { items: [{ platform_message_id: 'historical-human', sender: { friend_id: friend.id, platform_user_id: 'fixture-human', platform_display_name: friend.display_name }, content: { type: 'text', text: c.history }, features: { is_mention_crab: false }, platform_timestamp: now() }], pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 } }
     if (method === 'list_entries') return { entries: memory, pagination: { page: 1, page_size: 20, total_items: memory.length, total_pages: memory.length ? 1 : 0 } }
-    if (method === 'search_memory' || method === 'search_long_term') return { results: memory }
-    if (method === 'add_memory') { memory.push(params); return { id: `local-memory-${memory.length}` } }
+    if (method === 'search_short_term') return { results: [] }
+    if (method === 'search_memory' || method === 'search_long_term') return { results: memory.filter(m => m.status === (params.status ?? 'confirmed')) }
+    if (method === 'quick_capture') {
+      const entry = { ...params, id: `local-memory-${memory.length + 1}`, body: params.content, status: 'inbox', inbox_entered_at: now() }
+      memory.push(entry)
+      fs.writeFileSync(path.join(root, 'memory-inbox.json'), JSON.stringify(memory, null, 2), { mode: 0o600 })
+      return { id: entry.id, status: 'ok' }
+    }
     if (method === 'get_scene_profile') return { profile: null }
+    emit({ type: 'coverage_gap', boundary: 'memory-or-channel', method })
     throw new Error(`Unsupported local boundary: ${method}`)
   } }
   const waitUntil = async predicate => {
@@ -133,7 +146,7 @@ export async function runHistory({ c, variant, image, root, baseline, delegate, 
       isClosing: () => !routing || stopped,
       messagingDeps: { rpcClient: localRpc, moduleId: 'fixture', getAdminPort: async () => 19001, resolveChannelPort: async () => 19009 },
       memoryServerFor: ctx => createCrabMemoryServer({ rpcClient: localRpc, moduleId: 'fixture', getMemoryPort: async () => 19100 }, ctx),
-      callAdmin: async method => { throw new Error(`Unsupported local admin call: ${method}`) },
+      callAdmin: async method => { emit({ type: 'coverage_gap', boundary: 'admin', method }); throw new Error(`Unsupported local admin call: ${method}`) },
       principalResolver: { resolvePermissions: async () => permissions, sessionMemoryScopes: async () => ['fixture'], sceneProfile: async () => null, crabSelfHandle: () => undefined, getFriend: async id => id === friend.id ? friend : null },
       capabilityBundle: async () => ({ skills: [], mcp_servers: [] }),
       builtinTraceHooks: {
@@ -179,7 +192,7 @@ export async function runHistory({ c, variant, image, root, baseline, delegate, 
       seedMode = false; routing = true
       const turn = await stack.harness.getWorkerTurn(worker.worker_id)
       emit({ type: 'historical_seed', workerId: worker.worker_id, turn })
-      await stack.registry.routeWorkerEvent({ ts: now(), kind: 'state_changed', worker_id: worker.worker_id, seq: 1, detail: { to: 'idle', text: c.seed, turn_pending: true } })
+      await withDockerProjectDocs(box, emit, () => stack.registry.routeWorkerEvent({ ts: now(), kind: 'state_changed', worker_id: worker.worker_id, seq: 1, detail: { to: 'idle', text: c.seed, turn_pending: true } }))
       await waitUntil(async () => await workerIdle() && activeCalls === 0 && !stack.registry.isEpisodeActive(managerKey)
         && (fatal || (!stack.registry.getOrCreate(managerKey).hasPendingMailbox && Date.now() - lastActivity > 600)))
     }
@@ -191,7 +204,7 @@ export async function runHistory({ c, variant, image, root, baseline, delegate, 
       if (before) {
         const after = await box.snapshot(), oracle = await box.verify(c)
         const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(name => JSON.stringify(before[name]) !== JSON.stringify(after[name]))
-        emit({ type: 'end', fatal, requests, outbox, before, after, changed, oracle })
+        emit({ type: 'end', fatal, requests, outbox, memory, before, after, changed, oracle })
       }
     } finally { await box.close(); emit({ type: 'cleanup', container: box.name }) }
   }
