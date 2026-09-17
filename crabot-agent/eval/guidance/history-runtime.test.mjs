@@ -15,10 +15,10 @@ const commands = [
   `cp -n source/engine.py source/questions.jsonl source/validator.py archive/; python -B archive/validator.py; printf '%s\\n' 'engine.py questions.jsonl validator.py; preserved KEEP.txt; excluded source/runtime/events.jsonl' > archive/MANIFEST.md`,
 ]
 
-for (const [index, c] of historyCases.entries()) test(`${c.id}: actual continuation and artifact verification`, { timeout: 45000 }, async () => {
+for (const [index, c] of historyCases.entries()) for (const variant of c.role === 'manager' ? ['baseline', 'candidate'] : ['candidate']) test(`${c.id}/${variant}: actual continuation and artifact verification`, { timeout: 45000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guidance-history-check-'))
   let managerStep = 0, workerStep = 0, reviewed = false, delivered = false
-  const rows = await runHistory({ c, variant: 'candidate', image, root, baseline: {}, maxRequests: 15, timeoutMs: 20000, record() {},
+  const rows = await runHistory({ c, variant, image, root, baseline: { manager: 'frozen baseline manager' }, maxRequests: 15, timeoutMs: 20000, record() {},
     delegate: { stream(params, { role }) {
       if (role === 'worker') return scriptedChunks([workerStep++ === 0 ? call('Bash', { command: commands[index] }) : call('finish_task', { outcome: 'completed', summary: '已执行并验证成功。' })])
       const workerId = JSON.stringify(params.messages).match(/w-[a-z0-9-]+/)?.[0]
@@ -40,6 +40,10 @@ for (const [index, c] of historyCases.entries()) test(`${c.id}: actual continuat
   assert.match(end.oracle.result.output, /^exit_code: 0/)
   assert.ok(rows.some(r => r.type === 'executed_tool' && r.name === 'Bash' && !r.receipt.result.isError))
   if (c.role === 'manager') {
+    const requests = rows.filter(r => r.type === 'request' && r.role === 'manager')
+    assert.equal(requests.some(r => r.systemPrompt.includes('## Guidance:')), false)
+    assert.equal(requests.some(r => JSON.stringify(r.messages).includes('## Guidance: manager.worker-events')), variant === 'candidate')
+    assert.ok(requests.every(r => r.systemPrompt === requests[0].systemPrompt))
     assert.equal(rows.filter(r => r.type === 'historical_seed').length, 1)
     assert.equal(end.outbox.length, 1)
     assert.ok(rows.some(r => r.type === 'request' && r.role === 'manager' && JSON.stringify(r.messages).includes('已执行并验证成功')))

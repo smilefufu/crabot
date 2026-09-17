@@ -1,7 +1,7 @@
 import type { ManagerKey } from './types.js'
 import { assembleDailyReflectionPrompt } from './daily-reflection-prompt.js'
 import { splitManagerKey } from './principal.js'
-import { guidanceCatalog, renderGuidance, type GuidanceName } from '../guidance/catalog.js'
+import { guidanceCatalog } from '../guidance/catalog.js'
 
 export interface PromptInputs {
   readonly managerKey: ManagerKey
@@ -10,7 +10,6 @@ export interface PromptInputs {
   readonly isBuiltinDailyReflection?: boolean
   readonly dialogProfile?: string
   readonly adminPersonality?: string
-  readonly guidance?: readonly GuidanceName[]
 }
 
 export const MANAGER_IDENTITY = `你是 Crabot 在当前会话中的主控，理解人类需求，对整体交付负责。
@@ -30,7 +29,6 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
     : [MANAGER_IDENTITY,
         `当前会话：${JSON.stringify({ channel_id: channelId, session_id: sessionId })}`,
         guidanceCatalog('manager'),
-        ...[...new Set(inputs.guidance ?? [])].map(name => renderGuidance('manager', name)),
       ]
   if (inputs.adminPersonality) parts.push('## AI 性格（管理员配置）\n\n' + inputs.adminPersonality)
   if (!inputs.isBuiltinDailyReflection) {

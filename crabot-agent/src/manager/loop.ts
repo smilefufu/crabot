@@ -23,7 +23,7 @@
  * 都放进 messages 数组,不进 system prompt(与 compaction.ts/prompt.ts 的既定分工一致)。
  */
 
-import { type GuidanceName } from '../guidance/catalog.js'
+import { renderGuidance, type GuidanceName } from '../guidance/catalog.js'
 import { randomUUID } from 'crypto'
 import type { ManagerEpisodeTrigger, ManagerEpisodeUsage, ManagerTraceWriter } from './trace-types.js'
 import {
@@ -341,7 +341,12 @@ export class ManagerLoop {
    * 在 episode 收口时按 `hasPendingMailbox` 自唤醒(`drainMailbox`)兜底,并由 `evictIdle`
    * 拒绝回收 mailbox 非空的实例保证它不会先被回收掉(P7 阻塞项 #5)。
    */
-  private readonly mailbox = new TimedWakeMailbox((envelope) => this.renderEnvelope(envelope))
+  private readonly mailbox = new TimedWakeMailbox(
+    (envelope) => this.renderEnvelope(envelope),
+    (envelopes) => this.provideAutomaticGuidance(envelopes),
+  )
+  /** 自动提供的正文只属于本 episode，沿用临时消息的检查点与清理机制。 */
+  private readonly automaticGuidance = new Set<GuidanceName>()
   /** Projection only: message references survive deduplication; nothing is added to wake checkpoints. */
   private readonly quotedByMessage = new WeakMap<ChannelMessage, ReadonlyMap<string, QuotedMessageEntry>>()
   /**
@@ -850,6 +855,7 @@ export class ManagerLoop {
     this.currentToolProfile = toolProfile
     this.mailbox.setActiveProfile(toolProfile)
     this.currentToolFaceState = createManagerToolFaceState(managerToolLoadingModeForKey(this.deps.key))
+    this.automaticGuidance.clear()
     this.needsSpawnRecheck = false
     this.spawnRecheckInjected = false
     this.spawnRecheckOutcomeRecorded = false
@@ -1093,6 +1099,7 @@ export class ManagerLoop {
       this.deps.store.clearCheckpoint(this.deps.key, episodeId)
       throw err
     } finally {
+      this.automaticGuidance.clear()
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
       this.currentToolProfile = undefined
@@ -1162,6 +1169,7 @@ export class ManagerLoop {
       this.resumeCheckpoint = { ...this.resumeCheckpoint, protectedTailMessageId: protectedTail[0].id }
     }
     const currentTailMessages: EngineMessage[] = [
+      ...this.provideAutomaticGuidance(this.currentEpisodeEnvelopes),
       ...carriedTexts,
       ...(eventText === undefined ? [] : [eventText]),
     ].filter((text) => {
@@ -1310,11 +1318,7 @@ export class ManagerLoop {
     // (query-loop createUserMessage 的随机 id 拿不到,按结构还原——数组 content 的
     // user message 取 text block 原文,drain 构造时文本标记原样保留,拍平后与渲染
     // 文本逐字一致)。
-    const transientPromptCounts = new Map<string, number>()
-    for (const item of [...currentInputEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
-      const prompt = transientSystemPromptForWake(item.wake)
-      if (prompt) transientPromptCounts.set(prompt, (transientPromptCounts.get(prompt) ?? 0) + 1)
-    }
+    const transientPromptCounts = this.transientPromptCounts()
     const durableIds = new Set(initialState.recent.map((message) => message.id))
     const persistedFinalMessages = attempt.result.finalMessages.flatMap((m) => {
       if (this.resumeCheckpoint?.transientMessageIds.includes(m.id)) return []
@@ -2040,15 +2044,7 @@ export class ManagerLoop {
 
   private managerSystemPrompt(effectiveWake: WakeEvent | undefined): string {
     const extra = this.deps.promptInputs()
-    const wakes = [effectiveWake, ...this.currentEpisodeEnvelopes.map(item => item.wake),
-      ...(this.currentEpisodeInjected ?? []).map(item => item.wake)]
-    const guidance = new Set<GuidanceName>()
-    for (const wake of wakes) {
-      if (wake?.kind === 'workboard_admin_update' || wake?.kind === 'workboard_idle_review') guidance.add('manager.workboard')
-      if (wake?.kind === 'worker_event' && needsWorkerEventGuidance(wake.event)) guidance.add('manager.worker-events')
-    }
     return assembleManagerSystemPrompt({
-      guidance: [...guidance],
       managerKey: this.deps.key,
       isSystemThread: this.deps.isSystemThread,
       isBuiltinDailyReflection: isBuiltinDailyReflectionWake(effectiveWake),
@@ -2056,6 +2052,30 @@ export class ManagerLoop {
       dialogProfile: extra.dialogProfile,
       adminPersonality: extra.adminPersonality,
     })
+  }
+
+  private provideAutomaticGuidance(envelopes: ReadonlyArray<TimedWakeEnvelope>): string[] {
+    if (this.currentToolProfile !== 'normal') return []
+    const texts: string[] = []
+    for (const { wake } of envelopes) {
+      const name = automaticGuidanceForWake(wake)
+      if (!name || this.automaticGuidance.has(name)) continue
+      this.automaticGuidance.add(name)
+      texts.push(renderGuidance('manager', name))
+      if (name === 'manager.workboard' && this.currentToolFaceState) {
+        this.currentToolFaceState.workboardGuidanceProvided = true
+      }
+    }
+    return texts
+  }
+
+  private transientPromptCounts(): Map<string, number> {
+    const counts = new Map([...this.automaticGuidance].map(name => [renderGuidance('manager', name), 1]))
+    for (const item of [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
+      const prompt = transientSystemPromptForWake(item.wake)
+      if (prompt) counts.set(prompt, (counts.get(prompt) ?? 0) + 1)
+    }
+    return counts
   }
 
   /** 跑一次 runEngine(可能是首次尝试,也可能是 max_tokens 兜底的重试)。
@@ -2133,11 +2153,7 @@ export class ManagerLoop {
       })
       if (this.resumeCheckpoint) {
         const transientIds = new Set(this.resumeCheckpoint.transientMessageIds)
-        const remaining = new Map<string, number>()
-        for (const item of [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
-          const prompt = transientSystemPromptForWake(item.wake)
-          if (prompt) remaining.set(prompt, (remaining.get(prompt) ?? 0) + 1)
-        }
+        const remaining = this.transientPromptCounts()
         for (const message of recent.filter((item) => !originalDurableIds.has(item.id))) {
           if (
             'content' in message
@@ -2181,6 +2197,8 @@ export class ManagerLoop {
       },
       disableCompaction: false,
       prepareCompaction: (messages, fixedTokens, currentAdapter) => {
+        // turn 间隙的邮箱注入先于下一次 messagesRef 刷新；按实际待压缩消息登记临时 ID。
+        messagesRef.current = messages
         captureExecuted()
         checkpoint()
         const raw = messages.slice(hasSummaryMarker ? 1 : 0)
@@ -2502,7 +2520,10 @@ function successfulSendMessageTargetsOf(
 
 /** Manager-only mailbox: envelopes remain authoritative; the engine receives deterministic text. */
 class TimedWakeMailbox implements HumanMessageQueueLike {
-  constructor(private readonly render: (envelope: TimedWakeEnvelope) => string) {}
+  constructor(
+    private readonly render: (envelope: TimedWakeEnvelope) => string,
+    private readonly guidance: (envelopes: ReadonlyArray<TimedWakeEnvelope>) => string[],
+  ) {}
 
   private pending: TimedWakeEnvelope[] = []
   private activeProfile: ManagerToolProfile | undefined
@@ -2640,7 +2661,7 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
     const drained = this.drainActiveProfileEnvelopes()
     this.contextAdmissionEnvelopes.push(...drained)
     this.drainCapture?.push(...drained)
-    return drained.map((envelope) => {
+    return [...this.guidance(drained), ...drained.map((envelope) => {
       const text = this.render(envelope)
       if (!this.visionEnabled || !isHumanWake(envelope.wake)) return text
       const images = envelope.wake.messages.flatMap(collectInboundImages)
@@ -2669,7 +2690,7 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
       }
       if (blocks.length === 0) return text
       return [{ type: 'text' as const, text }, ...blocks]
-    })
+    })]
   }
 
   takeContextAdmissionEnvelopes(): TimedWakeEnvelope[] {
@@ -2756,6 +2777,12 @@ function isHumanWake(wake: WakeEvent): wake is HumanWake {
 
 export function needsWorkerEventGuidance(event: HarnessEvent): boolean {
   return workerEventClass(event) !== 'info' || event.kind === 'query_failed' || event.detail?.turn_pending === true
+}
+
+export function automaticGuidanceForWake(wake: WakeEvent): GuidanceName | undefined {
+  if (wake.kind === 'workboard_admin_update' || wake.kind === 'workboard_idle_review') return 'manager.workboard'
+  if (wake.kind === 'worker_event' && needsWorkerEventGuidance(wake.event)) return 'manager.worker-events'
+  return undefined
 }
 
 function transientSystemPromptForWake(wake: WakeEvent): string | undefined {

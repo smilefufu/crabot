@@ -10,7 +10,8 @@ const { createCrabMemoryServer } = require('./dist/mcp/crab-memory.js')
 const { createUserMessage, StreamProcessor } = require('./dist/engine/index.js')
 const { CLI_DOMAINS } = require('./dist/types.js')
 const { assembleBuiltinWorkerPrompt } = require('./dist/prompts/builtin-worker.js')
-const { createGuidanceTool } = require('./dist/guidance/catalog.js')
+const { createGuidanceTool, renderGuidance } = require('./dist/guidance/catalog.js')
+const automaticGuidanceTexts = new Set(['manager.worker-events', 'manager.workboard'].map(name => renderGuidance('manager', name)))
 const { projectWorkerActivity } = require('./dist/workers/trace/activity-projection.js')
 const { TraceStore } = require('./dist/core/trace-store.js')
 const { recordEngineLlmResponse, recordEngineToolLifecycle, recordSubAgentTurn } = require('./dist/engine/sub-agent-trace.js')
@@ -70,7 +71,9 @@ export async function runHistory({ c, variant, image, root, baseline, delegate, 
       const oldManager = role === 'manager' && variant === 'baseline'
       const actual = { ...params, maxTokens: 2400,
         signal: AbortSignal.any([abort.signal, ...(params.signal ? [params.signal] : []), AbortSignal.timeout(90000)]),
-        ...(oldManager ? { systemPrompt: baseline.manager, tools: params.tools.filter(t => t.name !== 'load_guidance') } : {}),
+        ...(oldManager ? { systemPrompt: baseline.manager, tools: params.tools.filter(t => t.name !== 'load_guidance'),
+          messages: params.messages.filter(m => !(m.role === 'user' && automaticGuidanceTexts.has(m.content))),
+        } : {}),
       }
       const processor = new StreamProcessor()
       activeCalls++

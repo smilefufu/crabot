@@ -487,7 +487,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const workboardTools = buildWorkboardTools(deps.workboard).map((tool): ToolDefinition => {
     if (!normalProfile || tool.name !== 'change_workboard') return tool
     return { ...tool, async call(input, context) {
-      if (workboardGuidanceProvided) return tool.call(input, context)
+      if (workboardGuidanceProvided || deps.faceState?.workboardGuidanceProvided) return tool.call(input, context)
       workboardGuidanceProvided = true
       return { isError: false, output: JSON.stringify({
         status: 'guidance_provided', applied: false,

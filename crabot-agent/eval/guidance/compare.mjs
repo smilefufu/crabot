@@ -16,7 +16,7 @@ const {createCrabMemoryServer}=req('./dist/mcp/crab-memory.js')
 const {buildManagerToolFace}=req('./dist/manager/tools/tool-face.js')
 const {assembleManagerSystemPrompt}=req('./dist/manager/prompt.js')
 const {assembleBuiltinWorkerPrompt}=req('./dist/prompts/builtin-worker.js')
-const {createGuidanceTool}=req('./dist/guidance/catalog.js')
+const {createGuidanceTool,renderGuidance}=req('./dist/guidance/catalog.js')
 const transport={rpcClient:{call:never},moduleId:'fixture',getMemoryPort:never}
 const face=buildManagerToolFace({harness:{},workerContext:()=>({managerKey:'fixture::synthetic'}),messagingDeps:{...transport,getAdminPort:never,resolveChannelPort:never},memoryServer:createCrabMemoryServer(transport,{visibility:'private',scopes:[],isMasterPrivate:false}),callAdmin:never,isSystemThread:false,managerTarget:{channel_id:'fixture',session_id:'synthetic'},workboard:{store:{},managerKey:'fixture::synthetic'},projectDocs:{}})
 const subset=new Set(['send_message','spawn_worker','get_worker_activity','get_worker_turn','resolve_worker_turn','get_execution_capabilities','load_guidance'])
@@ -28,8 +28,9 @@ const defs={manager:face.filter(t=>subset.has(t.name)),worker}
 const cases=frozen.cases.map(c=>({...c,user:c.user.replace('请整理 /fixture/data.csv。','请按整行去重 /fixture/data.csv，另存 /fixture/dedup.csv，不改变行顺序。')}))
 function wire(t){return{type:'function',function:{name:t.name,description:t.description,parameters:t.inputSchema}}}
 const conditions=cases.flatMap(c=>['baseline','candidate'].map(variant=>{
- const prompt=variant==='baseline'?frozen.baseline[c.role] : c.role==='manager'?assembleManagerSystemPrompt({managerKey:'fixture::synthetic',isSystemThread:false,...(c.event?{guidance:['manager.worker-events']}:{})}):assembleBuiltinWorkerPrompt({workspaceRoot:'/fixture',imageAvailable:false})
- return{id:c.id+'/'+variant,c,variant,prompt,tools:defs[c.role].filter(t=>variant==='candidate'||t.name!=='load_guidance').map(wire)}
+ const prompt=variant==='baseline'?frozen.baseline[c.role] : c.role==='manager'?assembleManagerSystemPrompt({managerKey:'fixture::synthetic',isSystemThread:false}):assembleBuiltinWorkerPrompt({workspaceRoot:'/fixture',imageAvailable:false})
+ const guidance=variant==='candidate'&&c.role==='manager'&&c.event?[renderGuidance('manager','manager.worker-events')]:[]
+ return{id:c.id+'/'+variant,c,variant,prompt,guidance,tools:defs[c.role].filter(t=>variant==='candidate'||t.name!=='load_guidance').map(wire)}
 }))
 const frozenPlan={conditions,maxRounds:6,replicates:1,noBusinessTools:true,synthetic:true}
 const hash=createHash('sha256').update(JSON.stringify(frozenPlan)).digest('hex')
@@ -48,7 +49,7 @@ const journal=fs.openSync(path.join(out,'events.jsonl'),'ax',0o600)
 function record(x){fs.writeSync(journal,JSON.stringify(x)+'\n');fs.fsyncSync(journal)}
 record({type:'plan',hash,endpoint:conn.endpoint,model:conn.model_id,maxRequests:72})
 async function run(condition){
- const {id,c}=condition;const messages=[{role:'system',content:condition.prompt},{role:'user',content:c.user}]
+ const {id,c}=condition;const messages=[{role:'system',content:condition.prompt},...condition.guidance.map(content=>({role:'user',content})),{role:'user',content:c.user}]
  const state={file:initialFile,passed:false};let reminded=false;record({type:'start',id})
  const finish=(reason)=>record({type:'end',id,reason,fixtureVerified:state.passed})
  for(let round=0;round<6;round++){

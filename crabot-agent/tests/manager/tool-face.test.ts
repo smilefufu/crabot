@@ -154,6 +154,24 @@ describe('buildManagerToolFace', () => {
     expect(store.createObjective).toHaveBeenCalledWith(MANAGER_KEY, input.objective)
   })
 
+  it('宿主工具面缓存后才自动提供的任务板指南同样免去重复读取，下一 episode 重新判断', async () => {
+    const objective = { objective_id: 'fixture', title: 'fixture', completion_criteria: ['done'], work_items: [], updated_at: '2026-09-17T00:00:00Z' }
+    const store = { createObjective: vi.fn(async () => ({ value: objective, board: { objectives: [objective], archive: [] } })) }
+    const faceState = createManagerToolFaceState('full')
+    const deps = makeDeps({ faceState, workboard: { managerKey: MANAGER_KEY, store: store as never } })
+    const firstFace = buildManagerToolFace(deps)
+    faceState.workboardGuidanceProvided = true
+    const cachedFace = buildManagerToolFace(deps)
+    const input = { action: 'create_objective', objective: { title: 'fixture', completion_criteria: ['done'] } }
+    const change = cachedFace.find(tool => tool.name === 'change_workboard')!
+    expect(change).toBe(firstFace.find(tool => tool.name === 'change_workboard'))
+    expect(JSON.parse((await change.call(input, {} as never)).output)).toMatchObject({ action: 'objective_created' })
+    const nextFace = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
+    expect(JSON.parse((await nextFace.find(tool => tool.name === 'change_workboard')!.call(input, {} as never)).output))
+      .toMatchObject({ status: 'guidance_provided', applied: false })
+    expect(store.createObjective).toHaveBeenCalledOnce()
+  })
+
   it('每日反思和图谱场景不提供普通 guidance；缺 task 的普通会话仍能查询执行条件', () => {
     for (const profile of ['daily_reflection', 'memory_graph_rebuild'] as const) {
       const tools = buildManagerToolFace(makeDeps({ profile, isBuiltinDailyReflection: profile === 'daily_reflection', faceState: createManagerToolFaceState() }))

@@ -11,6 +11,8 @@ import type { ChannelMessage, Friend, ResolvedPermissions } from '../../src/type
 import type { ManagerResumeCheckpoint } from '../../src/manager/resume-checkpoint.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { ManagerToolCatalog, NORMAL_MANAGER_CORE_NAMES, type ManagerToolFaceState } from '../../src/manager/tools/tool-catalog.js'
+import { renderGuidance } from '../../src/guidance/catalog.js'
+import { buildPromptCacheKey } from '../../src/engine/prompt-cache-key.js'
 
 const KEY = 'feishu::restart-test'
 const message = (id: string, text: string): ChannelMessage => ({
@@ -573,20 +575,56 @@ describe('Manager restart continuation', () => {
     expect(accepted).not.toHaveBeenCalled()
   })
 
+  it('恢复运行中注入的 guidance，不丢失、不重复，且不修改普通 system 或持久历史', async () => {
+    const requests: LLMStreamParams[] = []
+    const inject = defineTool({ name: 'inject', description: 'fixture', inputSchema: {}, call: async () => {
+      const loop = old.getOrCreate(KEY)
+      const clock = { received_at: '2026-09-06T22:05:00+08:00', timezone: 'Asia/Shanghai' }
+      loop.enqueueDuringEpisode({ ...clock, wake: { kind: 'worker_event', event: {
+        kind: 'turn_completed', worker_id: 'resume-worker', ts: clock.received_at, seq: 1, detail: {},
+      } } })
+      loop.enqueueWorkboardAdminUpdate({ ...clock, wake: { kind: 'workboard_admin_update', noticeRevision: 8 } })
+      return { output: 'injected', isError: false }
+    } })
+    const old = registry({ async *stream(params) {
+      requests.push({ ...params, messages: [...params.messages] })
+      if (requests.length === 1) yield* chunksFromContent([{ type: 'tool_use', id: 'inject-once', name: 'inject', input: {} }], 'tool_use')
+      else await new Promise(() => {})
+    }, updateConfig() {} }, { toolFace: () => [inject] })
+    void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Continue')])
+    const checkpoint = await checkpointWhere(value => value.turns.length === 1 && requests.length === 2)
+    expect(checkpoint.transientMessageIds).toHaveLength(3)
+    const restored = registry({ async *stream(params) {
+      expect(params.systemPrompt).toBe(requests[0].systemPrompt)
+      expect(buildPromptCacheKey(params.model, params.systemPrompt)).toBe(buildPromptCacheKey(requests[0].model, requests[0].systemPrompt))
+      for (const name of ['manager.workboard', 'manager.worker-events'] as const) {
+        expect(params.messages.filter(m => 'content' in m && m.content === renderGuidance('manager', name))).toHaveLength(1)
+      }
+      yield* chunksFromContent([], 'end_turn')
+    }, updateConfig() {} })
+    restored.registerResumeCheckpoints([checkpoint])
+    trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
+    await restored.resumeInterruptedEpisodes()
+    expect(JSON.stringify(await store.load(KEY))).not.toContain('## Guidance:')
+    expect(await store.loadCheckpoint(KEY)).toBeUndefined()
+  })
+
   it('keeps restored workboard notices transient and acknowledges the original revision', async () => {
     const old = registry({ async *stream() { await new Promise(() => {}) }, updateConfig() {} })
     void old.routeWorkboardAdminUpdate({ key: KEY, noticeRevision: 17 })
     const checkpoint = await checkpointWhere((value) => value.hasEngineMessages)
-    expect(checkpoint.transientMessageIds).toHaveLength(1)
+    expect(checkpoint.transientMessageIds).toHaveLength(2)
     const consumed = vi.fn(async () => {})
     const restored = registry({ async *stream(params) {
       expect(JSON.stringify(params.messages).match(/管理员已更新任务板/g)).toHaveLength(1)
+      expect(params.messages.filter(m => 'content' in m && m.content === renderGuidance('manager', 'manager.workboard'))).toHaveLength(1)
       yield* chunksFromContent([], 'end_turn')
     }, updateConfig() {} }, { onWorkboardAdminUpdateConsumed: consumed })
     restored.registerResumeCheckpoints([checkpoint])
     trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
     await restored.resumeInterruptedEpisodes()
     expect(JSON.stringify(await store.load(KEY))).not.toContain('管理员已更新任务板')
+    expect(JSON.stringify(await store.load(KEY))).not.toContain('## Guidance:')
     expect(consumed).toHaveBeenCalledWith(KEY, [17])
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
   })
@@ -599,7 +637,7 @@ describe('Manager restart continuation', () => {
       timezone: 'Asia/Shanghai',
     })
     const checkpoint = await checkpointWhere((value) => value.hasEngineMessages)
-    expect(checkpoint.transientMessageIds).toHaveLength(1)
+    expect(checkpoint.transientMessageIds).toHaveLength(2)
 
     const restored = registry({
       async *stream(params) {

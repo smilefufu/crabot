@@ -27,6 +27,23 @@ test('permission probe uses product narrowing and does not convert readiness int
   }
 })
 
+test('automatic guidance changes only candidate tail messages, never the system or baseline arm', async () => {
+  const normal = decisionCondition(decisionCases[0], 'candidate', baseline)
+  const event = decisionCases.find(c => c.event)
+  const candidate = decisionCondition(event, 'candidate', baseline)
+  const old = decisionCondition(event, 'baseline', baseline)
+  assert.equal(candidate.prompt, normal.prompt)
+  assert.deepEqual(normal.guidance, [])
+  assert.deepEqual(old.guidance, [])
+  assert.equal(candidate.guidance.length, 1)
+  for (const condition of [candidate, old]) {
+    const { rows } = await run(event, [[]], { condition })
+    const request = rows.find(r => r.type === 'request')
+    assert.equal(request.messages.at(-1).content, event.user)
+    assert.equal(JSON.stringify(request.messages).includes('## Guidance:'), condition === candidate)
+  }
+})
+
 test('business choices, even combined with guidance, are recorded without executing a tool or inventing a receipt', async () => {
   const { result, rows } = await run(decisionCases[1], [[
     call('load_guidance', { name: 'manager.delegation' }), call('spawn_worker', { title: 'sample', prompt: 'sample' }),

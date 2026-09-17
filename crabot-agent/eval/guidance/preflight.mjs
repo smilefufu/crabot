@@ -58,8 +58,8 @@ record({type:'plan',hash,endpoint:conn.endpoint,model:conn.model_id,trajectories
 const slots=cases.flatMap(c=>['baseline','candidate'].map(variant=>({c,variant})))
 async function run({c,variant}) {
  const id=c.id+'/'+variant;let prompt=variant==='baseline'?snapshot.baseline[c.role]:cores[c.role]+'\n\n可按需使用 load_guidance：\n'+catalog(c.role)
- if(c.event&&variant==='candidate')prompt+='\n\n'+guides['manager.worker-events']
- const messages=[{role:'system',content:prompt},{role:'user',content:c.user}]
+ const guidance=c.event&&variant==='candidate'?[{role:'user',content:guides['manager.worker-events']}]:[]
+ const messages=[{role:'system',content:prompt},...guidance,{role:'user',content:c.user}]
  const tools=(c.role==='manager'?common:workerTools).filter(t=>variant==='candidate'||t.function.name!=='load_guidance')
  let file='def add(a, b):\n    return a - b\n';record({type:'start',id})
  for(let round=0;round<4;round++){

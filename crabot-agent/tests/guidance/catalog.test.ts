@@ -31,11 +31,11 @@ describe('product guidance boundaries', () => {
       expect((await tool.call(input, context)).isError).toBe(true)
     }
   })
-  it('directly supplies known scenes once and keeps daily reflection independent', () => {
-    const text = assembleManagerSystemPrompt({ ...base, guidance: ['manager.worker-events', 'manager.worker-events'] })
-    expect(text.split('## Guidance: manager.worker-events')).toHaveLength(2)
+  it('keeps workflow bodies out of the static core and daily reflection independent', () => {
+    const text = assembleManagerSystemPrompt(base)
+    expect(text).not.toContain('## Guidance: manager.worker-events')
     expect(text).not.toContain('## Guidance: manager.workboard')
-    const daily = assembleManagerSystemPrompt({ ...base, isBuiltinDailyReflection: true, guidance: ['manager.worker-events'] })
+    const daily = assembleManagerSystemPrompt({ ...base, isBuiltinDailyReflection: true })
     expect(daily).toContain('本轮是后台每日反思')
     expect(daily).not.toContain('guidance')
     expect(daily).not.toContain(MANAGER_IDENTITY)

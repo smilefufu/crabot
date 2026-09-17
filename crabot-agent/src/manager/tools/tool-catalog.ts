@@ -43,6 +43,7 @@ export const MEMORY_GRAPH_REBUILD_CORE_NAMES = [
 
 export interface ManagerToolFaceState {
   readonly loadedNames: Set<string>
+  workboardGuidanceProvided?: boolean
   readonly mode?: ManagerToolLoadingMode
   /** External MCP definitions are frozen at episode admission, including their connector snapshot. */
   externalMcpTools?: ReadonlyArray<ToolDefinition>

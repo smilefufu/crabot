@@ -4,7 +4,8 @@ import { createRequire } from 'node:module'
 const require = createRequire(path.resolve(import.meta.dirname, '../../package.json'))
 const { buildManagerToolFace } = require('./dist/manager/tools/tool-face.js')
 const { createCrabMemoryServer } = require('./dist/mcp/crab-memory.js')
-const { createGuidanceTool } = require('./dist/guidance/catalog.js')
+const { createGuidanceTool, renderGuidance } = require('./dist/guidance/catalog.js')
+const { automaticGuidanceForWake } = require('./dist/manager/loop.js')
 const { assembleManagerSystemPrompt } = require('./dist/manager/prompt.js')
 const { assembleBuiltinWorkerPrompt } = require('./dist/prompts/builtin-worker.js')
 const { createExecutionCapabilitiesTool } = require('./dist/manager/tools/execution-capabilities.js')
@@ -31,11 +32,14 @@ export const publicMessages = messages => messages.map(m => ({ ...m,
 }))
 
 export function decisionCondition(c, variant, baseline) {
+  const name = c.role === 'manager' && c.event ? automaticGuidanceForWake({ kind: 'worker_event',
+    event: { kind: 'turn_completed', worker_id: c.worker?.id ?? 'fixture', seq: 1, ts: '', detail: {} },
+  }) : undefined
   return {
     prompt: variant === 'baseline' ? baseline[c.role] : c.role === 'manager'
-      ? assembleManagerSystemPrompt({ managerKey: 'fixture::synthetic', isSystemThread: false,
-        ...(c.event ? { guidance: ['manager.worker-events'] } : {}) })
+      ? assembleManagerSystemPrompt({ managerKey: 'fixture::synthetic', isSystemThread: false })
       : assembleBuiltinWorkerPrompt({ workspaceRoot: '/fixture', imageAvailable: false }),
+    guidance: variant === 'candidate' && name ? [renderGuidance('manager', name)] : [],
     tools: definitions[c.role].filter(t => variant === 'candidate' || t.name !== 'load_guidance')
       .map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
   }
@@ -70,7 +74,7 @@ export async function decisionRead(c, name, input) {
 }
 
 export async function runDecision({ c, condition, delegate, model, maxRounds, maxTokens, record }) {
-  const messages = [createUserMessage(c.user)]
+  const messages = [...condition.guidance.map(text => createUserMessage(text)), createUserMessage(c.user)]
   const tools = condition.tools.map(t => ({ ...t, call: never }))
   const reads = new Set(['load_guidance', 'get_execution_capabilities', 'get_worker_state', 'get_worker_turn'])
   for (let round = 1; round <= maxRounds; round++) {
