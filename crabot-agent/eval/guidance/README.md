@@ -1,5 +1,26 @@
 # 内置 guidance 隔离比较
 
+## Docker 真实执行比较
+
+`docker-compare.mjs` 使用新旧提示词处理两个独立人工任务：修复加法脚本、只读定位报表路径错误。Read、Edit、Write、Bash 直接执行产品实现；文件和 Python 进程在专用 Docker 容器内运行，支持正常组合命令，不按命令文字匹配模拟回执。guidance 使用产品只读实现。
+
+每版每例一个新容器，无网络、无宿主目录挂载、无业务凭据，以普通用户运行，根文件系统只读，人工工作目录可写。只读案例仍保留写工具，用运行前后的文件内容和权限快照检查模型是否遵守要求。独立验算不信任模型的完成声明；`finish_task` 使用产品工具说明、仅记录收尾报告，不测试 Worker 台账生命周期。
+
+先构建 Agent，再按顺序执行：
+
+```sh
+node crabot-agent/eval/guidance/build-docker.mjs
+node --test crabot-agent/eval/guidance/docker-fixtures.test.mjs
+GUIDANCE_FROZEN="$BASELINE_INPUTS" GUIDANCE_OUTPUT="$NEW_OUTPUT_DIR" \
+  node crabot-agent/eval/guidance/docker-compare.mjs --prepare
+```
+
+镜像仅装入本次工具代码与公开运行依赖；不会把整个工作区作为构建上下文。离线检查覆盖真实失败→修复→独立验算、引擎拒绝 Edit 后文件不变、真实报错的只读诊断、`task=false` 时产品执行条件查询与派发拒绝一致。派发检查没有调用模型，也没有启动真实 Worker，不能据此声称主控行为已完成端到端验收。
+
+准备包冻结镜像 ID、评测脚本摘要、实际工具说明、基线正文及候选装配。4 条轨迹各最多 8 次请求，共最多 32 次；不重试或补样。外部模型使用下文相同的 Admin 解析方式与固定百炼端点；确认本轮发送范围后，设置 `REPLAY_RUNTIME_ROOT`、`REPLAY_DATA_DIR` 并移除 `--prepare` 运行。连接凭据只用于宿主请求，不进入 Docker。原始请求日志及文件快照留在本机，不提交。
+
+## 历史模拟比较
+
 比较主控、执行侧在 6 个人工案例中的决策。业务工具全部返回固定模拟结果；`compare.mjs` 仅实际调用无副作用的产品 guidance 读取。不会读取真实聊天、业务文件或启动执行器，不执行模型给出的 Shell 命令。
 
 这是有限的决策比较，不是生产任务验收。`response-ended` / `decision-observed` 只表示轨迹停止；必须检查输出、工具调用和证据，不能作为成功计数。`harness_gap`、请求失败和轮次上限分别保留，不自动重试或补样。案例只有每版一次，不能据此推断稳定性或泛化提升。
