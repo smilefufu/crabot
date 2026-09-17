@@ -41,7 +41,7 @@ export class FixtureContainer {
   async start(c) {
     await docker(['run', '-d', '--rm', '--pull=never', '--name', this.name,
       '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-      '--pids-limit', '64', '--memory', '256m', '--cpus', '1', '--user', '65534:65534',
+      '--pids-limit', '256', '--memory', '256m', '--cpus', '1', '--user', '65534:65534',
       '--tmpfs', '/fixture:rw,nosuid,nodev,noexec,size=64m,mode=0700,uid=65534,gid=65534',
       '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777', this.image])
     try {

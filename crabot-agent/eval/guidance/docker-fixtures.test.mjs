@@ -66,3 +66,20 @@ test('actual capability query and spawn guard agree on task=false; no harness sp
   assert.match(result.output, /没有任务派发权限/)
   assert.equal(attempts, 0)
 })
+
+test('six concurrent product reads complete without hitting the container pid limit', async () => {
+  const box = new FixtureContainer(image)
+  try {
+    await box.start(cases[0])
+    const before = await docker(['exec', box.name, 'cat', '/sys/fs/cgroup/pids.events'])
+    const reads = await Promise.allSettled(Array.from({ length: 6 }, () =>
+      box.call('Read', { file_path: 'add.py' })))
+    const after = await docker(['exec', box.name, 'cat', '/sys/fs/cgroup/pids.events'])
+    assert.equal(after, before, 'concurrent reads must not exhaust the fixture pid allowance')
+    for (const read of reads) {
+      assert.equal(read.status, 'fulfilled')
+      assert.equal(read.value.result.isError, false)
+      assert.match(read.value.result.output, /return a - b/)
+    }
+  } finally { await box.close() }
+})

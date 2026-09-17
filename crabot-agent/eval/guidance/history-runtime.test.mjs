@@ -55,3 +55,37 @@ test('independent archive check rejects the historical all-JSONL exclusion', asy
     assert.match((await box.verify(historyCases[2])).result.output, /^exit_code: 1/)
   } finally { await box.close() }
 })
+
+test('request ceiling rejects new work without aborting an already admitted response', { timeout: 30000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guidance-budget-check-'))
+  let managerStep = 0, workerFinished = false
+  let releaseWorker
+  const gate = new Promise(resolve => { releaseWorker = resolve })
+  try {
+    const rows = await runHistory({ c: historyCases[0], variant: 'candidate', image, root,
+      baseline: {}, maxRequests: 3, timeoutMs: 10000, record() {},
+      delegate: { async *stream(params, { role }) {
+        if (role === 'worker') {
+          await gate
+          await new Promise(resolve => setTimeout(resolve, 150))
+          if (params.signal.aborted) throw new Error('admitted response was cancelled by another request')
+          workerFinished = true
+          yield* scriptedChunks([{ type: 'text', text: '已准入的请求正常返回；测试尚未写配置。' }])
+          return
+        }
+        const workerId = JSON.stringify(params.messages).match(/w-[a-z0-9-]+/)?.[0]
+        if (managerStep++ === 0) {
+          yield* scriptedChunks([call('send_to_worker', { worker_id: workerId, text: '继续处理。' })])
+        } else {
+          releaseWorker()
+          yield* scriptedChunks([call('get_worker_state', { worker_id: workerId })])
+        }
+      } },
+    })
+    assert.equal(rows.find(r => r.type === 'end').fatal, 'request-budget')
+    assert.equal(rows.filter(r => r.type === 'request').length, 3)
+    assert.equal(workerFinished, true)
+    assert.equal(rows.filter(r => r.type === 'response' && r.role === 'worker').length, 1)
+    assert.equal(rows.filter(r => r.type === 'error').length, 0)
+  } finally { releaseWorker(); fs.rmSync(root, { recursive: true, force: true }) }
+})

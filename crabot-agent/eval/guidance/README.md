@@ -1,5 +1,15 @@
 # 内置 guidance 隔离比较
 
+## 后续分阶段验收
+
+新的验收标准、十项人工决策案例和用量边界见 [ACCEPTANCE.md](./ACCEPTANCE.md)。第零阶段修复评测器的并发请求取消及 Docker 进程数干扰；两个问题先复现失败，修复后相关 9 项通过。旧结果不修改、不补样。
+
+第一阶段 `decision-compare.mjs` 只观察下一步决策，不执行业务工具，不作为完整任务质量不退步的证明。先运行 `node --test crabot-agent/eval/guidance/decision-runtime.test.mjs`，再用 `GUIDANCE_FROZEN` 指定既有基线包、`GUIDANCE_OUTPUT` 指定新目录，执行 `node crabot-agent/eval/guidance/decision-compare.mjs --prepare`。准备过程不读取 Provider 配置、不联网；实际发送的提示词和工具描述、脚本摘要、案例、预算与判定标准冻结在 `inputs.json`。
+
+得到本轮具体发送范围的确认后，设置与原批次相同的 `REPLAY_RUNTIME_ROOT`、`REPLAY_DATA_DIR`，移除 `--prepare` 启动。只解析唯一匹配的原百炼 Qwen 配置；发生错误停整批，无自动恢复。审阅包和标签映射分别落盘；隐藏版本标签不等于独立盲评，原始输出不上传。
+
+第一阶段已完成 40 条短轨迹、55 次请求，分项审阅见 [RESULTS.md](./RESULTS.md)。旧新各有仅需文字时选择多余操作的反例；预告不等于已委托，没有正文也无法评价文档语义。不得把 `decision_observed` 的 40 条全部计作通过。决策测试器 8 项回归通过。
+
 ## 历史问题的完整续办比较
 
 `history-cases.mjs` 从可核实的旧记录重建三个失败机制：主控重复请求已有授权、主控继续传播已撤销限制、执行器归档时按扩展名排除必需题集。名称和数据均为人工内容，不向模型发送原始会话或业务文件。第三项是用户要求回看近三天问题时发现的具体执行错误，并非用户逐字点名该命令。历史发生过失败不代表改动前基线必然失败；其间已有修复，不能预设比较结果。

@@ -62,7 +62,9 @@ export async function runHistory({ c, variant, image, root, baseline, delegate, 
         yield* scriptedChunks([{ type: 'text', text: c.seed }]); return
       }
       if (stopped || requests >= maxRequests) {
-        fatal ??= 'request-budget'; abort.abort(); throw new Error('Fixture request budget exhausted')
+        fatal ??= 'request-budget'; stopped = true
+        emit({ type: 'request_rejected', role, workerId, reason: 'request-budget' })
+        throw new Error('Fixture request budget exhausted')
       }
       const request = ++requests
       const oldManager = role === 'manager' && variant === 'baseline'
@@ -175,8 +177,8 @@ export async function runHistory({ c, variant, image, root, baseline, delegate, 
       const turn = await stack.harness.getWorkerTurn(worker.worker_id)
       emit({ type: 'historical_seed', workerId: worker.worker_id, turn })
       await stack.registry.routeWorkerEvent({ ts: now(), kind: 'state_changed', worker_id: worker.worker_id, seq: 1, detail: { to: 'idle', text: c.seed, turn_pending: true } })
-      await waitUntil(async () => (fatal || (await workerIdle() && activeCalls === 0 && !stack.registry.isEpisodeActive(managerKey)
-        && !stack.registry.getOrCreate(managerKey).hasPendingMailbox && Date.now() - lastActivity > 600)))
+      await waitUntil(async () => await workerIdle() && activeCalls === 0 && !stack.registry.isEpisodeActive(managerKey)
+        && (fatal || (!stack.registry.getOrCreate(managerKey).hasPendingMailbox && Date.now() - lastActivity > 600)))
     }
   } catch (error) { fatal ??= 'runtime-error'; emit({ type: 'runtime_error', error: String(error) }) }
   finally {
