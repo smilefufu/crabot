@@ -1,3 +1,4 @@
+import { createManagerCompactionProfile } from '../../src/engine/context-manager.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { join } from 'path'
@@ -368,7 +369,7 @@ describe('Manager restart continuation', () => {
     }
   })
 
-  it('does not restore completed calls discarded by an overflow retry', async () => {
+  it('preserves completed calls through compaction and restart without replay', async () => {
     await store.save({ key: KEY, foldedCount: 0, recent: [
       createUserMessage('old history: ' + 'x'.repeat(3000)),
       createUserMessage('more old history: ' + 'x'.repeat(3000)),
@@ -377,7 +378,7 @@ describe('Manager restart continuation', () => {
     const send = defineTool({ name: 'send_message', description: '', inputSchema: {}, isReadOnly: false, call: sent })
     let calls = 0
     const old = registry({ async *stream(params) {
-      if (params.systemPrompt.includes('对话历史压缩助手')) {
+      if (params.systemPrompt.includes(createManagerCompactionProfile().summarySystemPrompt)) {
         yield* chunksFromContent([{ type: 'text', text: 'Old history summary' }], 'end_turn')
       } else if (calls++ === 0) {
         yield* chunksFromContent([{ type: 'tool_use', id: 'discarded-call', name: 'send_message', input: {} }], 'tool_use')
@@ -388,7 +389,7 @@ describe('Manager restart continuation', () => {
     void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Continue after overflow')])
     const checkpoint = await checkpointWhere((value) => value.state.foldedCount > 0 && calls === 3)
     expect(checkpoint.tools).toHaveLength(1)
-    expect(JSON.stringify(checkpoint.state.recent)).not.toContain('discarded-call')
+    expect(JSON.stringify(checkpoint.state.recent)).toContain('discarded-call')
     const inputs: string[] = []
     const restored = registry({ async *stream(params) {
       inputs.push(JSON.stringify(params.messages))
@@ -397,8 +398,8 @@ describe('Manager restart continuation', () => {
     restored.registerResumeCheckpoints([checkpoint])
     await restored.resumeInterruptedEpisodes()
     expect(inputs).toHaveLength(1)
-    expect(inputs[0]).not.toContain('discarded-call')
-    expect(JSON.stringify(await store.load(KEY))).not.toContain('discarded-call')
+    expect(inputs[0]).toContain('discarded-call')
+    expect(JSON.stringify(await store.load(KEY))).toContain('discarded-call')
     expect(sent).toHaveBeenCalledTimes(1)
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.spans.filter((span) => span.type === 'tool_call')).toHaveLength(1)
   })
@@ -428,7 +429,7 @@ describe('Manager restart continuation', () => {
     void firstRestart.resumeInterruptedEpisodes()
     const materialized = await checkpointWhere((value) => value.turns.length === 1 && resumedCalls === 2)
     const secondRestart = registry({ async *stream(params) {
-      if (params.systemPrompt.includes('对话历史压缩助手')) {
+      if (params.systemPrompt.includes(createManagerCompactionProfile().summarySystemPrompt)) {
         yield* chunksFromContent([{ type: 'text', text: 'Prior tools were settled after interruption' }], 'end_turn')
       } else await new Promise(() => {})
     }, updateConfig() {} }, { policy: { keepRecent: 0, hardCapTokens: 12000 } })
@@ -470,7 +471,7 @@ describe('Manager restart continuation', () => {
     const folds: string[] = []
     const inputs: string[] = []
     const restored = registry({ async *stream(params) {
-      if (params.systemPrompt.includes('对话历史压缩助手')) {
+      if (params.systemPrompt.includes(createManagerCompactionProfile().summarySystemPrompt)) {
         folds.push(JSON.stringify(params.messages))
         yield* chunksFromContent([{ type: 'text', text: 'Old history summary' }], 'end_turn')
       } else {
@@ -501,7 +502,7 @@ describe('Manager restart continuation', () => {
       call: async () => ({ output: 'retry result', isError: false }) })
     let calls = 0
     const old = registry({ async *stream(params) {
-      if (params.systemPrompt.includes('对话历史压缩助手')) {
+      if (params.systemPrompt.includes(createManagerCompactionProfile().summarySystemPrompt)) {
         yield* chunksFromContent([{ type: 'text', text: 'Old history summary' }], 'end_turn')
       } else if (calls++ === 0) {
         yield* chunksFromContent([{ type: 'tool_use', id: 'read-call', name: 'read', input: {} }], 'tool_use')
@@ -518,7 +519,7 @@ describe('Manager restart continuation', () => {
     const folds: string[] = []
     const inputs: string[] = []
     const restored = registry({ async *stream(params) {
-      if (params.systemPrompt.includes('对话历史压缩助手')) {
+      if (params.systemPrompt.includes(createManagerCompactionProfile().summarySystemPrompt)) {
         folds.push(JSON.stringify(params.messages))
         yield* chunksFromContent([{ type: 'text', text: 'Old history summary' }], 'end_turn')
       } else {

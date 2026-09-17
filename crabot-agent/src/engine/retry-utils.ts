@@ -42,6 +42,7 @@ const NON_RETRYABLE_BODY_CODES = new Set([
   'data_inspection_failed',   // 内容审查命中（阿里云百炼 / DashScope）
   'DataInspectionFailed',     // 同上，驼峰变体
   'invalid_prompt',           // prompt 结构不合法
+  'invalid_parameter_error',
   'invalid_request_error',    // 通用请求错（OpenAI 风格）
   'invalid_api_key',
   'invalid_authentication',
@@ -106,11 +107,17 @@ export class StreamProtocolError extends Error {
 // 仅少数上游用顶层 `code`。优先读嵌套，找不到再回退顶层，保证两种结构都能识别。
 function extractBodyCode(body: string): string | null {
   try {
-    const obj = JSON.parse(body) as unknown
+    const payload = body.trim().startsWith('data:')
+      ? body.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).find((line) => line.startsWith('{')) ?? body
+      : body
+    const obj = JSON.parse(payload) as unknown
     if (obj && typeof obj === 'object') {
       const err = (obj as { error?: unknown }).error
       if (err && typeof err === 'object') {
         const nestedCode = (err as { code?: unknown }).code
+        const nestedType = (err as { type?: unknown }).type
+        if (typeof nestedCode === 'string' && (NON_RETRYABLE_BODY_CODES.has(nestedCode) || OVERLOADED_BODY_CODES.has(nestedCode))) return nestedCode
+        if (typeof nestedType === 'string' && NON_RETRYABLE_BODY_CODES.has(nestedType)) return nestedType
         if (typeof nestedCode === 'string') return nestedCode
       }
       const topCode = (obj as { code?: unknown }).code
@@ -474,4 +481,11 @@ export async function* streamWithRetry<T>(
       })
     }
   }
+}
+
+/** 仅识别有明确容量含义的错误；百炼范围错误还需调用方证明请求非空。 */
+export function isContextWindowError(error: unknown, nonEmptyInput = false): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /(?:maximum\s+)?context.{0,24}(?:length|window|limit|too\s+(?:long|large)|exceed)|prompt.{0,24}too\s+(?:long|large)|too\s+many\s+tokens|token\s+limit.{0,16}(?:exceed|reach)/i.test(message)
+    || (nonEmptyInput && /Range of input length should be \[1,\s*\d+\]/i.test(message))
 }

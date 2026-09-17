@@ -1,3 +1,4 @@
+import { isContextWindowError } from '../../src/engine/retry-utils.js'
 import { describe, it, expect, vi } from 'vitest'
 import {
   BACKOFF_MAX_DELAY_MS,
@@ -378,4 +379,18 @@ describe('streamWithRetry', () => {
     expect(attempts).toBe(6)
     expect(delays).toEqual([20, 40, 80, 160, 320])
   })
+})
+
+
+describe('Bailian SSE permanent errors', () => {
+  it.each(['invalid_parameter_error', 'unknown_provider_code'])('does not retry %s when type is invalid_request_error', (code) => {
+    const error = new HttpResponseError(400, `data: ${JSON.stringify({ error: { code, type: 'invalid_request_error', message: 'Range of input length should be [1, 983616]' } })}\n\n`, 'test')
+    expect(isRetryableError(error)).toBe(false)
+  })
+})
+
+it('does not classify empty input range errors as context overflow', () => {
+  const error = new Error('Range of input length should be [1, 983616]')
+  expect(isContextWindowError(error)).toBe(false)
+  expect(isContextWindowError(error, true)).toBe(true)
 })
