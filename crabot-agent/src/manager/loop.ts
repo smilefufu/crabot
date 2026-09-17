@@ -534,6 +534,7 @@ export class ManagerLoop {
   private resumeCheckpoint?: ManagerResumeCheckpoint
   private checkpointError?: unknown
   private readonly restoredContextEnvelopes = new Set<TimedWakeEnvelope>()
+  private readonly persistedEventMessages = new WeakMap<TimedWakeEnvelope, string>()
 
   async resume(checkpoint: ManagerResumeCheckpoint): Promise<EpisodeResult> {
     if (checkpoint.state.key !== this.deps.key) throw new Error('Manager checkpoint owner mismatch')
@@ -1155,10 +1156,31 @@ export class ManagerLoop {
       ...carriedEnvelopes.filter((item) => !isHumanWake(item.wake) || isEmptyHumanWake(item.wake)),
       ...(envelope && (!isHumanWake(envelope.wake) || isEmptyHumanWake(envelope.wake)) ? [envelope] : []),
     ]
+    // 失败事件仍需再处理，但已保存的输入只复用一次，不重新追加或折入摘要。
+    const replyEvidence = protectedTail
+    const reusedTexts = new Map<string, number>()
+    let protectedStart = initialState.recent.length - protectedTail.length
+    for (const item of currentInputEnvelopes) {
+      const id = this.persistedEventMessages.get(item)
+      const index = id ? initialState.recent.findIndex((message) => message.id === id) : -1
+      if (index < 0) continue
+      protectedStart = Math.min(protectedStart, index)
+      const text = this.renderEnvelope(item)
+      reusedTexts.set(text, (reusedTexts.get(text) ?? 0) + 1)
+    }
+    protectedTail = initialState.recent.slice(protectedStart)
+    if (this.resumeCheckpoint && protectedTail.length > 0) {
+      this.resumeCheckpoint = { ...this.resumeCheckpoint, protectedTailMessageId: protectedTail[0].id }
+    }
     const currentTailMessages: EngineMessage[] = [
-      ...carriedTexts.map((text) => createUserMessage(text)),
-      ...(eventText === undefined ? [] : [createUserMessage(eventText)]),
-    ]
+      ...carriedTexts,
+      ...(eventText === undefined ? [] : [eventText]),
+    ].filter((text) => {
+      const count = reusedTexts.get(text) ?? 0
+      if (count === 0) return true
+      reusedTexts.set(text, count - 1)
+      return false
+    }).map((text) => createUserMessage(text))
     // 非人类 current inputs 在压缩前不进 Manager store；把它们计作主请求固定开销，
     // 既能正确判断 hardCap，又不会误放进可折叠 history。
     const compactionProfile = createManagerCompactionProfile({
@@ -1221,7 +1243,7 @@ export class ManagerLoop {
     state = attempt.state
     // 回复证据按本次执行消息 ID 保留，不依赖压缩前的数组长度。
     // protectedTail 在重启续跑时含本 episode 已执行的消息；普通唤醒时只有本次人类输入。
-    let repliedToHuman = detectRepliedToHuman(protectedTail)
+    let repliedToHuman = detectRepliedToHuman(replyEvidence)
       || detectRepliedToHuman(attempt.executedMessages)
     let successfulSendMessageTargets = successfulSendMessageTargetsOf(
       attempt.executedMessages,
@@ -1263,15 +1285,23 @@ export class ManagerLoop {
           ...successfulSendMessageTargetsOf(continuation.executedMessages),
         ]
         state = continuation.state
-      attempt = continuation
+        attempt = continuation
         // 文本已随接管保留在 finalMessages,丢弃捕获记录即可。
         this.mailbox.takeDrainedForReplay()
       } else {
         // The recheck is advisory. Its own failure must not replay an already
         // consumable episode.
         this.recordPostSendDecision('recheck_failed_open')
-        for (const drained of this.mailbox.takeDrainedForReplay()) {
-          if (isHumanWake(drained.wake)) this.mailbox.push(drained)
+        const drained = this.mailbox.takeDrainedForReplay()
+        if (continuation.state.foldedCount > state.foldedCount) {
+          // 已保存的压缩批次和尾部必须一起接管；保留原 attempt 的可消费结果。
+          state = continuation.state
+          attempt = { ...attempt, state, hasSummaryMarker: continuation.hasSummaryMarker,
+            result: { ...attempt.result, finalMessages: continuation.result.finalMessages } }
+        } else {
+          for (const item of drained) {
+            if (isHumanWake(item.wake)) this.mailbox.push(item)
+          }
         }
       }
     }
@@ -1343,8 +1373,8 @@ export class ManagerLoop {
       await this.commitPendingHumanInputs(true, persistedFinalMessages)
       await this.settleConsumedWorkboardUpdates(currentInputEnvelopes, attempt.admittedContextEnvelopes)
     } else {
-      // 放弃 episode:已落盘的折叠不回滚(见文件头)；本 episode current inputs 从未进入
-      // 可折叠 history，因此仍按原始 envelope 重投，不会与 rollingSummary 重复。
+      // 放弃 episode:已落盘的折叠不回滚；事件按原 envelope 保留待处理责任，
+      // 下一 episode 复用已保存的输入，未保存的输入才重新追加。
       // 把尚未提交的人类输入和非人类输入按原始到达顺序推回邮箱。已提交人类输入已在
       // `state.recent`，不能再以 wake 形式重放。
       // episode 期间经 enqueueDuringEpisode 注入的内容(currentEpisodeInjected,顺序即
@@ -2179,6 +2209,13 @@ export class ManagerLoop {
                 foldedCount: state.foldedCount + batch.consumedMessages }
               await this.deps.store.save({ ...next, recent: recent.filter((message) =>
                 !this.resumeCheckpoint?.transientMessageIds.includes(message.id)) })
+              for (const item of [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
+                if (isHumanWake(item.wake) || transientSystemPromptForWake(item.wake)) continue
+                const text = this.renderEnvelope(item)
+                const message = recent.find((candidate) => candidate.role === 'user'
+                  && 'content' in candidate && candidate.content === text)
+                if (message) this.persistedEventMessages.set(item, message.id)
+              }
               state = next
               hasSummaryMarker = true
               messagesRef.current = batch.messages

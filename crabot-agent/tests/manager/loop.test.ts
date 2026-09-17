@@ -254,6 +254,59 @@ describe('ManagerLoop', () => {
     expect(JSON.stringify(saved.recent).split('unique-supplement')).toHaveLength(2)
   })
 
+  it.each(['current', 'injected'] as const)('reuses persisted %s event after compaction failure', async (source) => {
+    const old = await store.load(KEY)
+    await store.save({ ...old, recent: Array.from({ length: 30 }, (_, i) => compressibleHistoryMessage(`old-${i}`, 400)) })
+    let recovering = false
+    let inference = 0
+    let folds = 0
+    const snapshots: string[] = []
+    const adapter: LLMAdapter = {
+      updateConfig() {},
+      async *stream(params) {
+        if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
+          folds++
+          yield* chunksFromContent([{ type: 'text', text: 'old history summarized' }], 'end_turn')
+          return
+        }
+        snapshots.push(JSON.stringify(params.messages))
+        if (recovering) {
+          yield* chunksFromContent([], 'end_turn')
+        } else if (inference++ === 0) {
+          yield* chunksFromContent([{ type: 'tool_use', id: 'once', name: 'probe', input: {} }], 'tool_use', { inputTokens: 90000, outputTokens: 5 })
+        } else {
+          throw new Error('permanent test failure')
+        }
+      },
+    }
+    let loop!: ManagerLoop
+    const event = timed({ kind: 'schedule', scheduleId: 'review-repro', title: 'review-event-marker', description: 'review reproduction' })
+    const execute = vi.fn(async () => {
+      if (source === 'injected') loop.enqueueDuringEpisode(event)
+      return { output: 'tool completed', isError: false }
+    })
+    loop = new ManagerLoop(baseDeps({ store, adapter, contextWindowTokens: () => 100000,
+      toolFace: () => [defineTool({ name: 'probe', description: 'probe', inputSchema: { type: 'object' }, call: execute })],
+    }))
+    const outcome = await loop.wakeUp(source === 'current' ? event : timed({ kind: 'human_messages', messages: [makeChannelMessage('keep-current-input')] }))
+    expect(folds).toBeGreaterThan(0)
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(snapshots[1]).toContain('tool completed')
+    expect(snapshots.at(-1)).toContain('old history summarized')
+    const saved = await store.load(KEY)
+    expect(saved.rollingSummary).toBe('old history summarized')
+    expect(saved.foldedCount).toBeGreaterThan(0)
+    expect(outcome.outcome).toBe('failed')
+    recovering = true
+    expect(loop.hasPendingMailbox).toBe(true)
+    await loop.drainMailbox()
+    expect(snapshots.at(-1)!.split('review-event-marker')).toHaveLength(2)
+    expect(execute).toHaveBeenCalledTimes(1)
+    // 同文的新事件仍是新输入，不能被文本去重吞掉。
+    await loop.wakeUp(timed(event.wake))
+    expect(snapshots.at(-1)!.split('review-event-marker')).toHaveLength(3)
+  })
+
   it.each(['human_messages', 'attention_flush'] as const)('prefetches quoted content for %s before the LLM call', async (kind) => {
     const { adapter, calls } = makeAdapter()
     const original = makeChannelMessage('Quoted body with final line')
@@ -2771,7 +2824,9 @@ describe('ManagerLoop', () => {
       expect(JSON.stringify(calls[2].messages).match(/已经确认入站的人类输入/g)).toHaveLength(1)
     })
 
-    it('复核 continuation（max_turns 外层）失败时，期间被 drain 的注入人类消息还原回 mailbox 不丢失', async () => {
+    it.each([false, true])('复核 continuation 失败保留插话与成功压缩批次（压缩=%s）', async (compact) => {
+      const old = await store.load(KEY)
+      await store.save({ ...old, recent: Array.from({ length: 30 }, (_, i) => compressibleHistoryMessage(`old-${i}`, 400)) })
       // 十审真实风险：外层复核 continuation 的 finalMessages 仅在接管时保留，失败分支
       // 丢弃——期间被 engine drain 掉的注入人类消息文本随之丢失。若收尾只按「已被消费」
       // 补去重键，渠道重投被键挡掉、mailbox 又空（不触发自唤醒）→ 键在文本无=静默永久丢失。
@@ -2783,7 +2838,11 @@ describe('ManagerLoop', () => {
         { ...makeChannelMessage('复核期间注入的指令'), platform_message_id: 'pm-injected-recheck' },
       ]
       const adapter: LLMAdapter = {
-        async *stream() {
+        async *stream(params) {
+          if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
+            yield* chunksFromContent([{ type: 'text', text: 'continuation summary' }], 'end_turn')
+            return
+          }
           streamCount++
           if (streamCount === 1) {
             // 第一次尝试 turn1：send（记复核标记）+ noop（tool 内注入）
@@ -2804,7 +2863,7 @@ describe('ManagerLoop', () => {
             // 复核 continuation turn1：noop tool 内注入——该注入在其 turn2 前被 drain 吃掉
             yield* chunksFromContent([
               { type: 'tool_use', id: 'noop-3', name: 'noop_tool', input: {} },
-            ], 'tool_use')
+            ], 'tool_use', { inputTokens: compact ? 90000 : 100, outputTokens: 5 })
             return
           }
           // 复核 continuation turn2：drain 已吃掉注入，此后 continuation 失败——
@@ -2817,6 +2876,7 @@ describe('ManagerLoop', () => {
         store,
         adapter,
         maxTurns: 2,
+        contextWindowTokens: () => 100000,
         traceWriter,
         toolFace: () => [
           defineTool({
@@ -2849,11 +2909,18 @@ describe('ManagerLoop', () => {
       expect(failed.outcome).toBe('max_turns')
       expect(failed.consumedEvents).toBe(true)
       expect(states).toEqual(['marked', 'recheck_injected', 'recheck_failed_open', 'unresolved_accepted'])
-      // 修复判据：注入消息未被消费——还原回 mailbox 触发自唤醒，store 无键无文本（同进同出）
-      expect(loop.hasPendingMailbox).toBe(true)
+      // 已压缩则保留批次与插话；否则沿用原有 mailbox 重投路径。
+      expect(loop.hasPendingMailbox).toBe(!compact)
       const state = await store.load(KEY)
-      expect(JSON.stringify(state.recent)).not.toContain('复核期间注入的指令')
-      expect(state.committedHumanMessageIds ?? []).not.toContain('pm-injected-recheck')
+      if (compact) {
+        expect(state.rollingSummary).toBe('continuation summary')
+        expect(state.foldedCount).toBeGreaterThan(0)
+        expect(JSON.stringify(state.recent).split('复核期间注入的指令')).toHaveLength(2)
+        expect(state.committedHumanMessageIds).toContain('pm-injected-recheck')
+      } else {
+        expect(JSON.stringify(state.recent)).not.toContain('复核期间注入的指令')
+        expect(state.committedHumanMessageIds ?? []).not.toContain('pm-injected-recheck')
+      }
 
       // 自唤醒补跑：注入消息正常提交+投喂
       await loop.drainMailbox()
