@@ -9,6 +9,8 @@ export const MANAGER_TOOL_CATALOG_REVISION = 'manager-tools-v1'
 
 export const NORMAL_MANAGER_CORE_NAMES = [
   'search_tools',
+  'load_guidance',
+  'get_execution_capabilities',
   'send_message',
   'get_worker_state',
   'get_worker_activity',
@@ -41,6 +43,7 @@ export const MEMORY_GRAPH_REBUILD_CORE_NAMES = [
 
 export interface ManagerToolFaceState {
   readonly loadedNames: Set<string>
+  workboardGuidanceProvided?: boolean
   readonly mode?: ManagerToolLoadingMode
   /** External MCP definitions are frozen at episode admission, including their connector snapshot. */
   externalMcpTools?: ReadonlyArray<ToolDefinition>

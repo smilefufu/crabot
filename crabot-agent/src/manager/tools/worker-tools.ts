@@ -304,7 +304,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const spawnWorker = defineTool({
     name: 'spawn_worker',
     description:
-      '按分工建立一个独立 worker，交付指定任务的结果。可连续调用，组织多个 worker 并行推进独立工作。每个 worker 有自己的上下文。' +
+      '派发前使用 get_execution_capabilities 核对本会话和目标实现的有效条件，已有有效查询结果可沿用。权限不足先请求必要调整。按分工建立一个独立 worker，交付指定任务的结果。可连续调用，组织多个 worker 并行推进独立工作。每个 worker 有自己的上下文。' +
       '接续同一项工作且已有 worker 的上下文仍有用、能有效推进时，延续/' +
       '补充/返工用 send_to_worker；复用持续无效时，关闭旧 worker 后可新建，并在 prompt 中' +
       '交代当前完整要求、必要事实和产物位置，新 worker 不自动继承旧上下文。异步语义:本工具在 worker 化身创建完成后即返回' +
@@ -341,6 +341,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       }
 
       const ctx = context()
+      if (ctx.principalPermissions?.tool_access.task === false) return invalid('当前会话没有任务派发权限，请先请求必要权限调整。')
       try {
         const worker: LedgerWorker = await harness.spawnWorker({
           managerKey: ctx.managerKey,

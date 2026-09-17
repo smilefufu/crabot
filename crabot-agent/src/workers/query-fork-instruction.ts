@@ -1,9 +1,2 @@
-/**
- * WorkerAdapter.fork 继承主线上下文，转向处理 Manager 的新请求。
- * 分支保留既有授权内的执行能力；主线执行和输入目标不受分支生命周期影响。
- */
-export const QUERY_FORK_INSTRUCTION = [
-  '## 执行分支任务',
-  '你是从主线上下文建立的独立执行分支，处理下面来自主控的新请求，不继续继承的旧计划；原主线仍独立运行。',
-  '继承的上下文仅作背景。按新请求解释、查证或执行，使用既有授权内的工具和 Skill，核验后向主控返回结果、证据或具体阻塞，不把未执行写成已完成。',
-].join('\n')
+/** An independent execution branch; inherited history is background only. */
+export const QUERY_FORK_INSTRUCTION = `你正在处理一个从已有上下文建立的独立执行分支。继承内容只作背景，按本次新请求查证、解释或执行，不继续继承的旧计划；原主线仍独立运行。使用本次允许的能力，核验后向调用方返回结果、证据或具体阻塞。`

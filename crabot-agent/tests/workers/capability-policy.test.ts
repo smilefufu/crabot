@@ -5,6 +5,7 @@ import {
   CRABOT_BUILTIN_SKILL_NAMES,
   TMP_PAGE_BRIDGE_ENV,
   TMP_PAGE_MCP_SERVER_NAME,
+  selectMainlineWorkerSkills,
 } from '../../src/workers/capability-policy.js'
 import type { WorkerImplId } from '../../src/workers/types.js'
 import { WORKSPACE_GIT_MCP_SERVER_NAME } from '../../src/workers/workspace-git-capability.js'
@@ -70,11 +71,10 @@ function bundle(impl: WorkerImplId, mcpSkill = true) {
 }
 
 describe('mainline Worker capability policy', () => {
-  it('策略清单精确覆盖 spec 中的八个 Crabot 内置 Skill', () => {
+  it('策略清单精确覆盖 spec 中的迁移后七个 Crabot 内置 Skill', () => {
     expect([...CRABOT_BUILTIN_SKILL_NAMES]).toEqual([
       'tmp-page',
       'scrapling-official',
-      'workspace-context-maintenance',
       'writing-plans',
       'systematic-debugging',
       'verification-before-completion',
@@ -93,19 +93,26 @@ describe('mainline Worker capability policy', () => {
     expect(namesByImpl[0]).toEqual([
       'tmp-page',
       'scrapling-official',
-      'workspace-context-maintenance',
       'user-skill',
     ])
   })
 
-  it('第三方 MCP/Skill 权限关闭时仍保留两个 Crabot 必需 Skill 和 CLI tmp-page bridge', () => {
+  it('第三方 MCP/Skill 权限关闭时仍保留必需 Skill 与独立的 CLI guidance bridge', () => {
     const result = bundle('codex', false)
 
     expect(result.skills.map((skill) => skill.name)).toEqual([
       'tmp-page',
-      'workspace-context-maintenance',
     ])
-    expect(result.mcp_servers.map((server) => server.name)).toEqual([TMP_PAGE_MCP_SERVER_NAME, WORKSPACE_GIT_MCP_SERVER_NAME])
+    expect(result.mcp_servers.map((server) => server.name)).toEqual([TMP_PAGE_MCP_SERVER_NAME, 'crabot-guidance', WORKSPACE_GIT_MCP_SERVER_NAME])
+  })
+
+  it('迁出原装旧 ID，但保留同名用户 Skill', () => {
+    const original = { id: 'builtin-skill-workspace-context-maintenance', name: 'workspace-context-maintenance', skill_dir: '/product' }
+    const custom = { ...original, id: 'user-owned', skill_dir: '/custom' }
+    const selected = selectMainlineWorkerSkills([...builtinSkills, original, custom], [], true)
+    expect(selected).not.toContain(original)
+    expect(selected).toContain(custom)
+    expect(selectMainlineWorkerSkills([...builtinSkills, custom], [], false)).not.toContain(custom)
   })
 
   it('缺少任一必需内置 Skill 时 fail-loud 并指出名称', () => {

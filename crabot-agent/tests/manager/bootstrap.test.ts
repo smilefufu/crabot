@@ -772,7 +772,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       const stack = buildManagerStack(makeDeps({
         managerAdapter: () => ({
           async *stream(params: LLMStreamParams) {
-            if (JSON.stringify(params.messages).includes('任务板中至少有一项尚未收口的工作已经一小时没有更新')) {
+            if (JSON.stringify(params.messages).includes('任务板中至少有一项尚未收口的工作已一小时没有更新')) {
               const byName = new Map(params.tools.map((tool) => [tool.name, tool]))
               inspected = await byName.get('inspect_project_docs')!.call({
                 project_root: projectRoot,
@@ -963,6 +963,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
             expect([...byName.keys()]).toEqual(expect.arrayContaining([
               'inspect_workboard', 'change_workboard', 'inspect_project_docs',
             ]))
+            await byName.get('load_guidance')!.call({ name: 'manager.workboard' }, {} as never)
             const objectiveCreated = JSON.parse((await byName.get('change_workboard')!.call({
               action: 'create_objective',
               objective: {

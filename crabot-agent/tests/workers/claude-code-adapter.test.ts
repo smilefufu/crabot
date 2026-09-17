@@ -449,7 +449,9 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
       })
 
       const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
-      expect(argv).not.toContain('--append-system-prompt')
+      const promptIndex = argv.indexOf('--append-system-prompt')
+      expect(promptIndex).toBeGreaterThan(-1)
+      expect(argv[promptIndex + 1]).toContain('在已有权限内自主完成工作')
       expect(argv).not.toContain(expect.stringContaining(agents))
 
       await adapter.kill(h)
@@ -1741,7 +1743,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
         '.mcp.json',
         '--strict-mcp-config',
         '--append-system-prompt',
-        expect.stringContaining('处理下面来自主控的新请求'),
+        expect.stringContaining('独立执行分支'),
       ])
 
       await adapter.kill(h1)
@@ -1773,8 +1775,8 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       expect(forkArgv[forkArgv.indexOf('-p') + 1]).toBe(question)
       const promptIndex = forkArgv.indexOf('--append-system-prompt')
       expect(promptIndex).toBeGreaterThan(-1)
-      expect(forkArgv[promptIndex + 1]).toContain('处理下面来自主控的新请求')
-      expect(forkArgv[promptIndex + 1]).toContain('使用既有授权内的工具和 Skill')
+      expect(forkArgv[promptIndex + 1]).toContain('独立执行分支')
+      expect(forkArgv[promptIndex + 1]).toContain('使用本次允许的能力')
       expect(forkArgv[promptIndex + 1]).not.toContain('也不调用任何工具')
 
       await adapter.kill(h1)

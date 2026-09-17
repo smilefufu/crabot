@@ -210,6 +210,8 @@ export interface BootstrapDeps {
   readonly assertExecutionAdmission?: () => void
   /** Worker event routing must close before adapter disposal begins. */
   readonly isClosing?: () => boolean
+  /** 只读观察当前配置，不装配或启动 Worker。 */
+  readonly describeExecutionTools?: import('./tools/execution-capabilities.js').DescribeExecutionTools
   /** 当前 worker capability；调用方必须按 harness 给出的固定权限快照过滤。 */
   readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
   readonly issueAgentCliCredential?: HarnessDeps['issueAgentCliCredential']
@@ -548,9 +550,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // 等价"):按**调度自己的身份**解析,不碰该会话的发起人缓存(既不读也不写)。
     //
     // - `is_builtin` 或 creator 为空 → master 等价。这里返回 null 而不是去解析一份 master 档位:
-    //   worker 的固定档位(`BUILTIN_WORKER_PERMISSIONS`)本就是 master 等价情形下的上限,
-    //   `narrowWorkerPermissions(base, null)` 原样返回它,与 admin 侧"空 creator → master_private"
-    //   的既有规则同解。
+    //   `narrowWorkerPermissions(base, null)` 沿用历史 worker 档位；新增桌面能力必须有明确
+    //   主体授权，不由此系统回退开放。
     // - 有 creator → 按该 friend 解析。`sessionType` 取该会话上一次解析出来的私/群(未知按
     //   'private'):这一项只影响 admin 侧解析路径。2026-08-30 群聊权限群级统一(PR #133)后,
     //   群聊会话猜成 'private' 是**更宽**而非更严(master creator 拿回 master_private、普通
@@ -661,6 +662,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         ...(managerPermissions ? { permissions: managerPermissions } : {}),
       }
       return buildManagerToolFace({
+        describeExecutionTools: deps.describeExecutionTools,
+        workboardGuidanceProvided: isWorkboardSystemInput,
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
         readWorkerActivity: deps.readWorkerActivity,
