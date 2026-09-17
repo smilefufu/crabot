@@ -303,8 +303,18 @@ describe('ManagerLoop', () => {
     expect(snapshots.at(-1)!.split('review-event-marker')).toHaveLength(2)
     expect(execute).toHaveBeenCalledTimes(1)
     // 同文的新事件仍是新输入，不能被文本去重吞掉。
-    await loop.wakeUp(timed(event.wake))
-    expect(snapshots.at(-1)!.split('review-event-marker')).toHaveLength(3)
+    if (source === 'current') {
+      recovering = false
+      inference = 0
+      const start = snapshots.length
+      expect((await loop.wakeUp(timed(event.wake))).outcome).toBe('failed')
+      expect(snapshots[start].split('review-event-marker')).toHaveLength(3)
+      recovering = true
+      await loop.drainMailbox()
+    } else {
+      await loop.wakeUp(timed(event.wake))
+    }
+    expect(snapshots.at(-1)!.split('review-event-marker')).toHaveLength(source === 'current' ? 2 : 3)
   })
 
   it.each(['human_messages', 'attention_flush'] as const)('prefetches quoted content for %s before the LLM call', async (kind) => {

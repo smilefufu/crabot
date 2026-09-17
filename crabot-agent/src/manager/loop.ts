@@ -2213,6 +2213,7 @@ export class ManagerLoop {
                 if (isHumanWake(item.wake) || transientSystemPromptForWake(item.wake)) continue
                 const text = this.renderEnvelope(item)
                 const message = recent.find((candidate) => candidate.role === 'user'
+                  && (!originalDurableIds.has(candidate.id) || candidate.id === this.persistedEventMessages.get(item))
                   && 'content' in candidate && candidate.content === text)
                 if (message) this.persistedEventMessages.set(item, message.id)
               }
