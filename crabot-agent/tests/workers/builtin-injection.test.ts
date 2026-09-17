@@ -628,7 +628,7 @@ describe('builtin worker 的安全项（hookRegistry / 权限档位）', () => {
       messaging: false,
       task: false,
       remote_exec: false,
-      desktop: false,
+      desktop: true,
       file_io: true,
       shell: true,
       memory: false,
@@ -678,7 +678,7 @@ describe('narrowWorkerPermissions —— worker 档位 ∩ 派活人档位', () 
     expect(out.tool_access.messaging).toBe(false)
     expect(out.tool_access.task).toBe(false)
     expect(out.tool_access.remote_exec).toBe(false)
-    expect(out.tool_access.desktop).toBe(false)
+    expect(out.tool_access.desktop).toBe(true)
   })
 
   it('cli_access 取更严的一档：派活人 write、worker 固定 none → 结果 none', () => {
@@ -692,8 +692,11 @@ describe('narrowWorkerPermissions —— worker 档位 ∩ 派活人档位', () 
     expect(out.tool_access.memory).toBe(false)
   })
 
-  it('身份未解析（null）→ 原样退回固定档位，与 F 阶段行为逐字相同', () => {
-    expect(narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, null)).toBe(BUILTIN_WORKER_PERMISSIONS)
+  it('身份未解析（null）→ 保留固定档位，但桌面权限保持关闭', () => {
+    expect(narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, null)).toEqual({
+      ...BUILTIN_WORKER_PERMISSIONS,
+      tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, desktop: false },
+    })
   })
 
   it('不改写入参：合并结果是新对象，固定档位常量不被污染', () => {

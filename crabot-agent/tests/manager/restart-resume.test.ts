@@ -603,7 +603,7 @@ describe('Manager restart continuation', () => {
 
     const restored = registry({
       async *stream(params) {
-        expect(JSON.stringify(params.messages).match(/任务板中至少有一项尚未收口的工作已经一小时没有更新/g)).toHaveLength(1)
+        expect(JSON.stringify(params.messages).match(/任务板中至少有一项尚未收口的工作已一小时没有更新/g)).toHaveLength(1)
         yield* chunksFromContent([], 'end_turn')
       },
       updateConfig() {},
@@ -612,7 +612,7 @@ describe('Manager restart continuation', () => {
     trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
     await restored.resumeInterruptedEpisodes()
 
-    expect(JSON.stringify(await store.load(KEY))).not.toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
+    expect(JSON.stringify(await store.load(KEY))).not.toContain('任务板中至少有一项尚未收口的工作已一小时没有更新')
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
   })
 

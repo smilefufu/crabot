@@ -297,8 +297,8 @@ describe('ManagerRegistry', () => {
     await registry.routeSchedule(scheduleWake({ scheduleId: 'sc', title: 't', description: 'd' }))
     await registry.routeHumanMessages('wechat', 'sess-normal', [makeChannelMessage('hi')])
 
-    expect(calls[0].systemPrompt).toContain('## 系统线程')
-    expect(calls[2].systemPrompt).not.toContain('## 系统线程')
+    expect(calls[0].systemPrompt).toContain('例行成功与进展留在本线程')
+    expect(calls[2].systemPrompt).not.toContain('例行成功与进展留在本线程')
   })
 
   // --- routeHumanMessages ---
@@ -1814,7 +1814,7 @@ describe('ManagerRegistry', () => {
 
       await vi.advanceTimersByTimeAsync(1)
       await waitForIdleReview('wechat::idle-review' as ManagerKey, calls, 2)
-      expect(calls[1].messages.at(-1)?.content).toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
+      expect(calls[1].messages.at(-1)?.content).toContain('任务板中至少有一项尚未收口的工作已一小时没有更新')
 
       await vi.advanceTimersByTimeAsync(HOUR_MS)
       await waitForIdleReview('wechat::idle-review' as ManagerKey, calls, 3)
@@ -1836,7 +1836,7 @@ describe('ManagerRegistry', () => {
 
       await vi.advanceTimersByTimeAsync(60_000)
       await waitForIdleReview('wechat::idle-reset' as ManagerKey, calls, 3)
-      expect(calls[2].messages.at(-1)?.content).toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
+      expect(calls[2].messages.at(-1)?.content).toContain('任务板中至少有一项尚未收口的工作已一小时没有更新')
     })
 
     it('任务板读取耗时不顺延对象自身期限', async () => {
@@ -1889,7 +1889,7 @@ describe('ManagerRegistry', () => {
       await vi.advanceTimersByTimeAsync(HOUR_MS)
       await waitForIdleReview(key, calls, 3)
       expect(registry.getOrCreate(key)).not.toBe(oldLoop)
-      expect(calls[2].messages.at(-1)?.content).toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
+      expect(calls[2].messages.at(-1)?.content).toContain('任务板中至少有一项尚未收口的工作已一小时没有更新')
     })
 
     it('失败 episode、系统任务线程和 builtin 每日反思均不登记自省', async () => {
@@ -2058,7 +2058,7 @@ describe('ManagerRegistry', () => {
       expect(calls).toHaveLength(callsBeforeIdleReview)
       await vi.advanceTimersByTimeAsync(1_000)
       await waitForIdleReview(key, calls, callsBeforeIdleReview + 1)
-      expect(calls.at(-1)?.messages.at(-1)?.content).toContain('任务板中至少有一项尚未收口的工作已经一小时没有更新')
+      expect(calls.at(-1)?.messages.at(-1)?.content).toContain('任务板中至少有一项尚未收口的工作已一小时没有更新')
     })
 
     it('到期时任务板已无目标则静默结束；dispose 后也不再触发', async () => {
@@ -2111,7 +2111,7 @@ describe('ManagerRegistry', () => {
 
       await vi.advanceTimersByTimeAsync(1)
       await waitForIdleReview('wechat::idle-race' as ManagerKey, calls, 3)
-      const idlePrompts = calls.filter((call) => JSON.stringify(call.messages).includes('任务板中至少有一项尚未收口的工作已经一小时没有更新'))
+      const idlePrompts = calls.filter((call) => JSON.stringify(call.messages).includes('任务板中至少有一项尚未收口的工作已一小时没有更新'))
       expect(idlePrompts).toHaveLength(1)
     })
   })

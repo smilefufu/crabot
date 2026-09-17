@@ -936,7 +936,8 @@ async function deterministicInterleavingScenario(
   const adapter = new RecordingAdapter('deterministic-interleaving', ({ step }) => {
     const turn = turns.get(step) ?? 0
     turns.set(step, turn + 1)
-    if (turn > 0) return textResponse()
+    if (turn === 0) return { blocks: [toolCall(`guide-${step}`, 'load_guidance', { name: 'manager.workboard' })] }
+    if (turn > 1) return textResponse()
     if (step === 'worker-a') {
       return { blocks: [
         toolCall('revise-a', 'change_workboard', {
@@ -1016,7 +1017,10 @@ async function deterministicRevisionScenario(
   const adapter = new RecordingAdapter('deterministic-revision', ({ step }) => {
     const turn = turns.get(step) ?? 0
     turns.set(step, turn + 1)
-    if (turn > 0) return textResponse()
+    if (step === 'human-revision' && turn === 0) {
+      return { blocks: [toolCall('guide-revision', 'load_guidance', { name: 'manager.workboard' })] }
+    }
+    if (turn > (step === 'human-revision' ? 1 : 0)) return textResponse()
     if (step === 'human-revision') {
       return { blocks: [
         toolCall('revise-current', 'change_workboard', {
@@ -1083,17 +1087,18 @@ async function deterministicWorkboardFailureRecoveryScenario(
     next_action: '更新任务板判断',
   }
   const adapter = new RecordingAdapter('deterministic-workboard-failure-recovery', ({ requestIndex }) => {
-    if (requestIndex === 0) {
+    if (requestIndex === 0) return { blocks: [toolCall('guide-recovery', 'load_guidance', { name: 'manager.workboard' })] }
+    if (requestIndex === 1) {
       return { blocks: [toolCall('fail-write', 'change_workboard', {
         action: 'revise_work_item',
         work_item_id: missingWorkItemId,
         work_item: { ...originalItem, current_judgement: recoveredJudgement },
       })] }
     }
-    if (requestIndex === 1) {
+    if (requestIndex === 2) {
       return { blocks: [toolCall('recover-inspect', 'inspect_workboard', { view: 'active' })] }
     }
-    if (requestIndex === 2) {
+    if (requestIndex === 3) {
       return { blocks: [toolCall('recover-write', 'change_workboard', {
         action: 'revise_work_item',
         work_item_id: workItemId,
@@ -1119,9 +1124,9 @@ async function deterministicWorkboardFailureRecoveryScenario(
   await env.routeHuman('请更新任务板中的失败闭环事项，并确认修改真正成功。')
 
   const board = await workboardStore(env).load(env.managerKey)
-  const calls = responseCalls(adapter.records)
+  const calls = responseCalls(adapter.records).filter((call) => call.name !== 'load_guidance')
   const callNames = calls.map((call) => call.name)
-  const failedResult = JSON.stringify(adapter.records[1]?.tool_results ?? [])
+  const failedResult = JSON.stringify(adapter.records[2]?.tool_results ?? [])
   const retriedItem = board.objectives[0]?.work_items[0]
   return {
     env,
