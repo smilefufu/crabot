@@ -1,8 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod/v4'
-import { sha256CanonicalJson } from 'crabot-shared'
 import { defineTool } from '../engine/tool-framework.js'
-import type { EngineMessage, ToolCallResult, ToolDefinition } from '../engine/types.js'
+import type { EngineMessage, ToolDefinition } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex.js'
 import type { ManagerKey } from './types.js'
 import type { ManagerSessionStore } from './session-store.js'
@@ -75,7 +74,7 @@ export class DailyReflection {
         }
         state = {
           ...admission, run_id: randomUUID(), episode_ids: [], analysis_worker_ids: [],
-          directory_complete: false, read_records: {}, cursors: {}, tool_failures: {},
+          directory_complete: false, read_records: {}, cursors: {},
           summary_delivered: false,
         }
       } else if (admission && admission.schedule_id !== state.schedule_id) {
@@ -181,17 +180,11 @@ export class DailyReflection {
     })
   }
 
-  /** Persist business-tool evidence immediately, before history compaction can discard it. */
-  async observe(name: string, input: Record<string, unknown>, result: ToolCallResult): Promise<void> {
-    if (!name.startsWith('mcp__crab-memory__') && name !== 'send_daily_reflection_summary') return
+  /** Persist the successful delivery receipt before history compaction can discard it. */
+  async recordSummaryDelivery(): Promise<void> {
     await this.mutex.run(async () => {
       const state = await this.state()
-      const identity = sha256CanonicalJson({ name, input })
-      if (result.isError) state.tool_failures[identity] = name
-      else {
-        delete state.tool_failures[identity]
-        if (name === 'send_daily_reflection_summary') state.summary_delivered = true
-      }
+      state.summary_delivered = true
       await this.save(state)
     })
   }
@@ -223,7 +216,6 @@ export class DailyReflection {
       if (Object.values(state.read_records).some(read => !read)) errors.push('record_not_fully_read')
       if (input.evidence_refs.some(ref => state.read_records[ref] !== true)) errors.push('unread_evidence_reference')
       if (workers.some(worker => worker.pending)) errors.push('analysis_worker_pending')
-      if (Object.keys(state.tool_failures).length) errors.push('unresolved_tool_failures')
       if (input.summary_delivered && !state.summary_delivered) errors.push('summary_delivery_unproven')
       if (input.outcome === 'completed' && input.pending_items.length) errors.push('pending_items_remain')
       const result: DailyReflectionResult = { ...input,

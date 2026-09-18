@@ -42,17 +42,37 @@ function completion(extra: Record<string, unknown> = {}, toolCount = 1) {
 
 async function ready(host: DailyReflection) {
   await host.list()
-  await host.observe('mcp__crab-memory__list_entries', { status: 'inbox' }, { isError: false, output: '{}' })
 }
 
 describe('DailyReflection host', () => {
-  it.each([
-    ['mcp__crab-memory__list_entries', {}],
-    ['mcp__crab-memory__search_long_term', { query: '*', filters: { status: 'inbox' } }],
-  ] as const)('does not require an exact inbox listing call after %s', async (name, input) => {
+  it('requires a new explicit completion after restarting with an obsolete failure ledger', async () => {
+    const { host, deps, store } = await setup()
+    await host.list()
+    await host.finish(completion({ outcome: 'partial', pending_items: ['correct the memory ID'] }))
+    await store.updateDailyReflection(key, state => ({ ...state!, tool_failures: { old: 'mcp__crab-memory__delete_memory' } }))
+    const restarted = new DailyReflection(deps)
+    await restarted.recover()
+    await restarted.admit(undefined, 'continued')
+    expect((await restarted.list() as any).previous_result.pending_items).toEqual(['correct the memory ID'])
+    expect(deps.confirm).not.toHaveBeenCalled()
+    expect((await restarted.finish(completion()))?.outcome).toBe('completed')
+    expect(deps.confirm).toHaveBeenCalledOnce()
+  })
+
+  it.each(['partial', 'completed'])('keeps declared unfinished work partial when the model submits %s', async outcome => {
+    const { host, deps, store } = await setup()
+    await host.list()
+    const result = await host.finish(completion({ outcome, pending_items: ['memory A is still unfinished'] }))
+    expect(result?.outcome).toBe('partial')
+    if (outcome === 'completed') expect(result?.validation_errors).toContain('pending_items_remain')
+    await new DailyReflection(deps).recover()
+    expect((await store.load(key)).dailyReflection?.result?.pending_items).toEqual(['memory A is still unfinished'])
+    expect(deps.confirm).not.toHaveBeenCalled()
+  })
+
+  it('does not impose a prescribed Memory call sequence on explicit completion', async () => {
     const { host, deps } = await setup()
     await host.list()
-    await host.observe(name, input, { isError: false, output: '[]' })
     const result = await host.finish(completion())
     expect(result?.validation_errors).toEqual([])
     expect(result?.outcome).toBe('completed')
@@ -162,12 +182,9 @@ describe('DailyReflection host', () => {
     expect(deps.confirm).not.toHaveBeenCalled()
   })
 
-  it('known evidence gaps and unresolved Memory failure remain partial until facts are resolved', async () => {
+  it('known evidence gaps remain partial until facts are resolved', async () => {
     const { host, deps } = await setup()
     await ready(host)
-    await host.observe('mcp__crab-memory__delete_memory', { id: 'entry' }, { isError: true, output: 'failed' })
-    expect((await host.finish(completion()))?.validation_errors).toContain('unresolved_tool_failures')
-    await host.observe('mcp__crab-memory__delete_memory', { id: 'entry' }, { isError: false, output: '{}' })
     vi.mocked(deps.read).mockRejectedValueOnce(new Error('source unavailable'))
     expect((await host.read('ref-0') as any).gaps).toContain('source unavailable')
     expect((await host.finish(completion()))?.validation_errors).toContain('known_evidence_gaps')

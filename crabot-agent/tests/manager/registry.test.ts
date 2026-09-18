@@ -34,6 +34,7 @@ import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
 import { QueryEstablishmentError } from '../../src/workers/errors.js'
 import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
+import { TraceStore } from '../../src/core/trace-store.js'
 
 // --- Fixtures / helpers（与 tests/manager/loop.test.ts 同一套约定） ---
 
@@ -193,6 +194,62 @@ describe('ManagerRegistry', () => {
     }
   }
 
+  it.each([false, true])('retains corrected Memory errors and requires actual summary delivery (retry=%s)', async retrySummary => {
+    const { adapter, queue, calls } = makeAdapter()
+    const key = SYSTEM_TASKS_MANAGER_KEY
+    const window = { window_start: '2025-12-30T00:00:00.000Z', window_end: '2025-12-31T00:00:00.000Z' }
+    const confirm = vi.fn(async () => ({ status: 'applied' as const, watermark: window.window_end }))
+    const host = new DailyReflection({ key, store, now: () => '2026-01-01T00:00:00.000Z',
+      capture: async () => ({ records: [], gaps: [] }), read: async () => ({ content: '', gaps: [] }),
+      analysisWorkers: async () => [], confirm })
+    const memoryCall = vi.fn(async (_port: number, _method: string, args: { id: string }) => {
+      if (args.id === 'wrong-id') throw new Error('memory entry not found')
+      return { deleted: true }
+    })
+    const memoryServer = createCrabMemoryServer({ rpcClient: { call: memoryCall } as never,
+      moduleId: 'test-agent', getMemoryPort: async () => 19100 },
+    { visibility: 'internal', scopes: [], isMasterPrivate: false })
+    const send = vi.fn().mockRejectedValueOnce(new Error('delivery unavailable'))
+      .mockResolvedValue({ platform_message_id: 'delivered', sent_at: '2026-01-01T00:00:00.000Z' })
+    const traces = new TraceStore(100, join(dataDir, 'traces'))
+    try {
+      const registry = new ManagerRegistry(baseRegistryDeps({ adapter, dailyReflectionFor: () => host,
+        traceWriter: traces.managerTraceWriter(text => text),
+        toolFace: (_key, _system, _identity, _human, _permissions, _hooks, _wake, faceState) => buildManagerToolFace({
+          dailyReflection: host, profile: 'daily_reflection', isBuiltinDailyReflection: true, isSystemThread: true,
+          harness: FAKE_HARNESS, workerContext: () => ({ managerKey: key, reportTo: { channel_id: 'admin-web', session_id: 'system-tasks' } }),
+          messagingDeps: { ...makeMessagingDeps(), rpcClient: { call: send } as never }, memoryServer, callAdmin: vi.fn(), faceState,
+          workboard: { store: new ManagerWorkboardStore(join(dataDir, 'workboard')), managerKey: key },
+          projectDocs: { ledger: fakeLedger({}), readWorkerContext: async () => undefined, managerKey: key },
+        }),
+      }))
+      queue.push(
+        { stopReason: 'tool_use', toolCalls: [{ name: 'list_reflection_records', id: 'list', input: {} }] },
+        { stopReason: 'tool_use', toolCalls: [{ name: 'mcp__crab-memory__delete_memory', id: 'wrong', input: { id: 'wrong-id' } }] },
+        { stopReason: 'tool_use', toolCalls: [{ name: 'mcp__crab-memory__delete_memory', id: 'corrected', input: { id: 'correct-id' } }] },
+        { stopReason: 'tool_use', toolCalls: [{ name: 'send_daily_reflection_summary', id: 'summary-first', input: { content: 'initial summary' } }] },
+        ...(retrySummary ? [{ stopReason: 'tool_use' as const, toolCalls: [{ name: 'send_daily_reflection_summary', id: 'summary-retry', input: { content: 'corrected summary' } }] }] : []),
+        { stopReason: 'tool_use', toolCalls: [{ name: 'finish_daily_reflection', id: 'finish', input: {
+          outcome: 'completed', summary: 'corrected the ID and deleted the duplicate', pending_items: [], evidence_refs: [], summary_delivered: true,
+        } }] },
+      )
+      const result = await registry.routeSchedule({ scheduleId: 'daily', triggerId: 'corrected-memory', scheduleName: 'daily',
+        title: 'daily', description: 'review', taskType: 'daily_reflection', isBuiltin: true, reflectionWindow: window,
+        targetSession: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' } })
+      const toolSpans = traces.getManagerEpisode(result.episodeId)!.spans.filter(span => span.type === 'tool_call')
+      expect(toolSpans.some(span => JSON.stringify(span).includes('memory entry not found'))).toBe(true)
+      expect(toolSpans.some(span => span.status === 'failed' && JSON.stringify(span).includes('delivery unavailable'))).toBe(true)
+      expect(toolSpans.some(span => span.status === 'completed' && JSON.stringify(span).includes('correct-id'))).toBe(true)
+      expect(JSON.stringify(calls.at(-1)?.messages)).toContain('memory entry not found')
+      expect(memoryCall).toHaveBeenCalledTimes(2)
+      expect(send).toHaveBeenCalledTimes(retrySummary ? 2 : 1)
+      expect((await store.load(key)).dailyReflection?.summary_delivered).toBe(retrySummary)
+      expect(result.dailyReflection?.outcome).toBe(retrySummary ? 'completed' : 'partial')
+      if (!retrySummary) expect(result.dailyReflection?.validation_errors).toContain('summary_delivery_unproven')
+      expect(confirm).toHaveBeenCalledTimes(retrySummary ? 1 : 0)
+    } finally { traces.stopFlushTimer() }
+  })
+
   it('daily end_turn preserves the window; only its analysis Worker resumes the daily profile', async () => {
     const { adapter, calls, queue } = makeAdapter()
     const target = { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' as const }
@@ -243,11 +300,7 @@ describe('ManagerRegistry', () => {
       const host = new DailyReflection({ key, store, now: () => '2026-01-01T00:00:00.000Z',
         capture: async () => ({ records: [], gaps: [] }), read: async () => ({ content: '', gaps: [] }),
         analysisWorkers: async () => [], confirm })
-      const memoryCall = vi.fn(async () => {
-        const result = { output: '{}', isError: false }
-        await host.observe('mcp__crab-memory__list_entries', { status: 'inbox' }, result)
-        return result
-      })
+      const memoryCall = vi.fn(async () => ({ output: '{}', isError: false }))
       const registry = new ManagerRegistry(baseRegistryDeps({ adapter, dailyReflectionFor: () => host,
         toolFace: () => [...buildDailyReflectionTools(host), defineTool({ name: 'inbox', description: 'fixture',
           inputSchema: { type: 'object' }, call: memoryCall })],

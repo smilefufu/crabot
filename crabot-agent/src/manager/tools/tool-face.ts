@@ -498,15 +498,10 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...projectDocTools,
     ...infoTools,
   ].map((tool): ToolDefinition => {
-    if (!dailyProfile || !deps.dailyReflection || tool.exitsLoop) return tool
+    if (!dailyProfile || !deps.dailyReflection || tool.name !== 'send_daily_reflection_summary') return tool
     return { ...tool, async call(input, context) {
-      let result: ToolCallResult
-      try { result = await tool.call(input, context) }
-      catch (error) {
-        await deps.dailyReflection!.observe(tool.name, input, { isError: true, output: String(error) })
-        throw error
-      }
-      await deps.dailyReflection!.observe(tool.name, input, result)
+      const result = await tool.call(input, context)
+      if (!result.isError) await deps.dailyReflection!.recordSummaryDelivery()
       return result
     } }
   })
