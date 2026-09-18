@@ -1093,3 +1093,21 @@ describe('TraceStore reactivateResumableTrace（resume 续写复用旧 trace）'
     }
   })
 })
+
+it('persists and redacts the daily product result through the production Manager writer', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-outcome-trace-'))
+  try {
+    const store = new TraceStore(10, dir)
+    const writer = store.managerTraceWriter(text => text.replaceAll('test-secret', '[REDACTED]'))
+    writer.startEpisode('daily-outcome', 'admin-web::system-tasks', { type: 'schedule', summary: 'daily' })
+    writer.finishEpisode('daily-outcome', { status: 'completed', outcome: { summary: 'episode ended', daily_reflection: {
+      outcome: 'partial', summary: 'test-secret pending', pending_items: ['test-secret'], evidence_refs: [],
+      run_id: 'run', window_start: '2026-09-16T00:00:00.000Z', window_end: '2026-09-17T00:00:00.000Z',
+      completed_at: '2026-09-17T01:00:00.000Z', validation_errors: ['known_evidence_gaps'],
+    } } })
+    const reloaded = new TraceStore(10, dir)
+    const outcome = reloaded.getManagerEpisode('daily-outcome')?.outcome?.daily_reflection
+    expect(outcome).toMatchObject({ outcome: 'partial', summary: '[REDACTED] pending', pending_items: ['[REDACTED]'] })
+    expect(JSON.stringify(outcome)).not.toContain('test-secret')
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})

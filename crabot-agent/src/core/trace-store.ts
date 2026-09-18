@@ -1526,6 +1526,13 @@ export class TraceStore {
           outcome: {
             summary: redact(patch.outcome.summary),
             ...(patch.outcome.error ? { error: redact(patch.outcome.error) } : {}),
+            ...(patch.outcome.daily_reflection ? { daily_reflection: {
+              ...patch.outcome.daily_reflection,
+              summary: redact(patch.outcome.daily_reflection.summary),
+              pending_items: patch.outcome.daily_reflection.pending_items.map(redact),
+              evidence_refs: patch.outcome.daily_reflection.evidence_refs.map(redact),
+              validation_errors: patch.outcome.daily_reflection.validation_errors.map(redact),
+            } } : {}),
           },
         } : {}),
       }),
