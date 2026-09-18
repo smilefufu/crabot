@@ -536,7 +536,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
             worker.manager_key === key && worker.origin.spawned_by_episode && episodeIds.includes(worker.origin.spawned_by_episode))
           return Promise.all(workers.map(async ({ worker }) => {
             const turns = await reflectionTurns.list(worker.worker_id)
-            return { worker_id: worker.worker_id, pending: worker.task.status === 'running' || turns.length === 0
+            return { worker_id: worker.worker_id, pending: worker.task.status === 'running' || (turns.length === 0 && worker.task.status !== 'closed')
               || turns.some(turn => turn.disposition.status === 'pending') }
           }))
         },
