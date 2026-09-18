@@ -74,6 +74,7 @@ import type { ImageBlock } from '../engine/index.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
 import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
+import { dailyReflectionResultForTrace } from './daily-reflection.js'
 import type { ManagerSessionState, ManagerKey } from './types.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { ActivityContextAdmissionReceipt, HarnessEvent } from '../workers/harness/worker-events'
@@ -129,10 +130,11 @@ export type WakeEvent =
        */
       readonly principalPermissions?: ResolvedPermissions
     }
-  | { readonly kind: 'worker_event'; readonly event: HarnessEvent }
+  | { readonly kind: 'worker_event'; readonly event: HarnessEvent; readonly dailyReflection?: { runId: string; scheduleId: string; targetSession: { channel_id: string; session_id: string; type: 'private' | 'group' } } }
   | { readonly kind: 'media_notification'; readonly text: string }
   | {
       readonly kind: 'schedule'
+      readonly reflectionWindow?: import('./daily-reflection-types.js').ReflectionWindow
       readonly scheduleId: string
       readonly triggerId: string
       readonly scheduleName: string
@@ -212,6 +214,7 @@ export interface TimedWakeEnvelope {
 }
 
 export interface EpisodeResult {
+  readonly dailyReflection?: import('./daily-reflection-types.js').DailyReflectionResult
   readonly episodeId: string
   readonly outcome: 'completed' | 'failed' | 'max_turns' | 'aborted'
   readonly turns: number
@@ -235,6 +238,7 @@ export interface EpisodeResult {
 }
 
 export interface ManagerLoopDeps {
+  readonly dailyReflection?: import('./daily-reflection.js').DailyReflection
   readonly key: ManagerKey
   readonly isSystemThread: boolean
   /** 台账渲染用(harness.listWorkers 的入参)。manager 会话粒度(ManagerKey)与台账聚合粒度
@@ -901,6 +905,20 @@ export class ManagerLoop {
         envelope,
       )
       state = committed.state
+      if (toolProfile !== 'daily_reflection' && state.dailyReflection?.confirmation_pending) {
+        await this.deps.dailyReflection?.recover()
+      }
+      let skipDailyModel = false
+      if (toolProfile === 'daily_reflection' && this.deps.dailyReflection) {
+        const wake = this.effectiveWakeForCurrentEpisode()
+        const admission = wake?.kind === 'schedule' && wake.reflectionWindow ? {
+          schedule_id: wake.scheduleId, trigger_id: wake.triggerId, ...wake.reflectionWindow, target_session: wake.targetSession,
+        } : undefined
+        const durable = (await this.deps.store.load(this.deps.key)).dailyReflection
+        const staleWorkerWake = wake?.kind === 'worker_event' && wake.dailyReflection?.runId !== durable?.run_id
+        skipDailyModel = staleWorkerWake || !await this.deps.dailyReflection.admit(admission, episodeId)
+        state = { ...state, dailyReflection: (await this.deps.store.load(this.deps.key)).dailyReflection }
+      }
       if (recovery) {
         await this.deps.store.save(state)
         if (recovery.hasEngineMessages) {
@@ -993,7 +1011,6 @@ export class ManagerLoop {
       const toolFaceDetails = initialTools
         ? {
             tool_loading_mode: this.currentToolFaceState?.mode ?? 'progressive',
-            capability_profile: toolProfile,
             catalog_revision: this.currentToolFaceState?.catalog?.catalogRevision ?? MANAGER_TOOL_CATALOG_REVISION,
             initial_tool_names: initialTools.map((tool) => tool.name),
             initial_visible_count: initialTools.length,
@@ -1009,6 +1026,7 @@ export class ManagerLoop {
         details: {
           request_observation_version: 1,
           merged_envelopes: episodeEnvelopes.length,
+          capability_profile: toolProfile,
           ...(toolFaceDetails ?? {}),
         },
       })
@@ -1018,7 +1036,10 @@ export class ManagerLoop {
         for (const event of recovery.tools) this.recordToolLifecycle(episodeId, event)
         for (const workerId of recovery.spawnedWorkerIds) this.deps.traceWriter?.addSpawnedWorker(episodeId, workerId)
       }
-      const result = await this.runEpisodeBody(
+      const result: EpisodeResult = skipDailyModel ? {
+        episodeId, outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false,
+        successfulSendMessageTargets: [], dailyReflection: dailyReflectionResultForTrace(state.dailyReflection),
+      } : await this.runEpisodeBody(
         episodeId,
         state,
         committed.humanMessages,
@@ -1035,6 +1056,7 @@ export class ManagerLoop {
           status: failed ? 'failed' : 'completed',
           outcome: {
             summary: `outcome=${result.outcome}; turns=${result.turns}; replied=${result.repliedToHuman ? 'yes' : 'no'}`,
+            ...(result.dailyReflection ? { daily_reflection: result.dailyReflection } : {}),
             ...(failed ? { error: result.error ?? `manager episode ${result.outcome}` } : {}),
           },
           ...(this.currentUsage.input_tokens > 0 || this.currentUsage.output_tokens > 0 ? { total_usage: { ...this.currentUsage } } : {}),
@@ -1390,7 +1412,12 @@ export class ManagerLoop {
       allSuccessfulSendMessageTargets.add(key)
     }
 
+    const dailyReflection = this.currentToolProfile === 'daily_reflection'
+      ? await this.deps.dailyReflection?.finish({ outcome: attempt.result.outcome,
+          exitToolCall: attempt.result.exitToolCall, messages: attempt.result.finalMessages })
+      : undefined
     const result: EpisodeResult = {
+      ...(dailyReflection ? { dailyReflection } : {}),
       episodeId,
       outcome: attempt.result.outcome,
       turns: totalTurnsUsed,
@@ -2366,6 +2393,7 @@ function summarizeManagerToolInput(name: string, input: Record<string, unknown>,
 }
 
 export function managerToolProfileForWake(wake: WakeEvent | undefined): ManagerToolProfile {
+  if (wake?.kind === 'worker_event' && wake.dailyReflection) return 'daily_reflection'
   return managerToolProfileForSchedule(wake?.kind === 'schedule' ? wake : undefined)
 }
 
@@ -2381,9 +2409,7 @@ export function managerToolLoadingModeForKey(key: string): ManagerToolLoadingMod
 }
 
 function isBuiltinDailyReflectionWake(wake: WakeEvent | undefined): boolean {
-  return wake?.kind === 'schedule'
-    && wake.isBuiltin === true
-    && wake.taskType === 'daily_reflection'
+  return managerToolProfileForWake(wake) === 'daily_reflection'
 }
 
 /** trigger 摘要截断（span 摘要见 span-summary.ts；完整脱敏由 writer 侧 redactSecrets 负责）。 */

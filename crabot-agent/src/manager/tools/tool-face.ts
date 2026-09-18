@@ -6,6 +6,7 @@
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.3
  */
 
+import { buildDailyReflectionTools, type DailyReflection } from '../daily-reflection.js'
 import { createExecutionCapabilitiesTool, type DescribeExecutionTools } from './execution-capabilities.js'
 import { createGuidanceTool } from '../../guidance/catalog.js'
 import { z } from 'zod/v4'
@@ -39,6 +40,7 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
+  readonly dailyReflection?: DailyReflection
   readonly describeExecutionTools?: DescribeExecutionTools
   readonly harness: WorkerHarness
   /** P6-C §7：list_worker_implementations 的 registry snapshot getter。 */
@@ -478,20 +480,31 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
     ...(deps.schedule ? { schedule: deps.schedule } : {}),
   })
-  const normalProfile = (deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')) === 'normal'
+  const selectedProfile = deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')
+  const normalProfile = selectedProfile === 'normal'
+  const dailyProfile = selectedProfile === 'daily_reflection' && deps.isBuiltinDailyReflection === true
   const guidanceTool = createGuidanceTool('manager')
   const workboardTools = buildWorkboardTools(deps.workboard)
   const projectDocTools = buildProjectDocTools(deps.projectDocs)
 
   const builtinTools = [
-    ...(normalProfile ? [guidanceTool, createExecutionCapabilitiesTool(deps)] : []),
+    ...(normalProfile ? [guidanceTool] : []),
+    ...(normalProfile || dailyProfile ? [createExecutionCapabilitiesTool(deps)] : []),
+    ...(dailyProfile ? buildDailyReflectionTools(deps.dailyReflection) : []),
     ...messagingTools,
     ...memoryTools,
     ...workerTools,
     ...workboardTools,
     ...projectDocTools,
     ...infoTools,
-  ]
+  ].map((tool): ToolDefinition => {
+    if (!dailyProfile || !deps.dailyReflection || tool.name !== 'send_daily_reflection_summary') return tool
+    return { ...tool, async call(input, context) {
+      const result = await tool.call(input, context)
+      if (!result.isError) await deps.dailyReflection!.recordSummaryDelivery()
+      return result
+    } }
+  })
   assertClosedToolFace(builtinTools)
   if (!deps.faceState) return builtinTools
 

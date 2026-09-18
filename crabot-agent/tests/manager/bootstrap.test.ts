@@ -178,6 +178,26 @@ describe('manager bootstrap（P5 Task 1）', () => {
     }
   }
 
+  it('reflection stops waiting for a zero-turn analysis only after existing Worker closure', async () => {
+    const stack = buildManagerStack(makeDeps())
+    const key = 'admin-web::system-tasks' as ManagerKey
+    const worker = makeLedgerWorker({ workerId: 'failed-analysis', impl: 'builtin', spawnedBySession: key })
+    worker.origin = { trigger_type: 'scheduled', spawned_by_episode: 'daily-episode' }
+    worker.task.status = 'halted'
+    worker.incarnations[0].state = 'exited'
+    worker.incarnations[0].ended_at = '2026-09-17T12:00:00.000Z'
+    worker.incarnations[0].ended_reason = 'crashed'
+    await stack.ledger.upsertWorker(key, worker.worker_id, () => worker)
+    const host = stack.dailyReflectionFor(key)
+    await host.admit({ schedule_id: 'daily', trigger_id: 'trigger', window_start: '2026-09-16T18:00:00.000Z', window_end: '2026-09-17T18:00:00.000Z',
+      target_session: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' } }, 'daily-episode')
+    expect((await host.finish({ outcome: 'completed', messages: [] }))?.pending_items).toEqual(['failed-analysis'])
+    await stack.ledger.upsertWorker(key, worker.worker_id, previous => ({ ...previous!, task: { ...previous!.task,
+      status: 'closed', closed: { at: '2026-09-17T13:00:00.000Z', by: 'manager_stop', note: '分析由主控接手' } } }))
+    expect((await host.finish({ outcome: 'completed', messages: [] }))?.pending_items).toEqual([])
+    await stack.dispose()
+  })
+
   // --- ① 无 I/O 副作用 ---
 
   it('buildManagerStack 不触发任何子进程探测 / 台账扫描 / 文件系统写读，盘上不留痕迹', async () => {

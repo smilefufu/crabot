@@ -26,6 +26,9 @@ export const NORMAL_MANAGER_CORE_NAMES = [
 
 export const DAILY_REFLECTION_CORE_NAMES = [
   'search_tools',
+  'list_reflection_records',
+  'read_reflection_record',
+  'finish_daily_reflection',
   'send_message',
   'send_daily_reflection_summary',
   'mcp__crab-memory__list_entries',
@@ -351,7 +354,9 @@ export class ManagerToolCatalog {
   isAllowed(name: string): boolean {
     if (this.profile === 'normal') return true
     if (this.profile === 'memory_graph_rebuild') return MEMORY_GRAPH_REBUILD_CORE_NAMES.includes(name as never)
-    return name === 'send_message'
+    return DAILY_REFLECTION_CORE_NAMES.includes(name as never)
+      || name === 'get_execution_capabilities'
+      || name === 'send_message'
       || name === 'send_daily_reflection_summary'
       || name.startsWith('mcp__crab-memory__')
       || name === 'spawn_worker'

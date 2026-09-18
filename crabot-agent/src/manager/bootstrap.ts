@@ -30,6 +30,9 @@
  * @see crabot-agent/src/workers/harness/harness.ts 文件头"onStateChange 接线契约"
  */
 
+import { DailyReflection } from './daily-reflection.js'
+import { DailyReflectionEvidence, type ReflectionEvidenceDeps } from './daily-reflection-evidence.js'
+import { WorkerTurnStore } from '../workers/harness/worker-turn-store.js'
 import { join, resolve } from 'path'
 import { RpcError } from 'crabot-shared'
 
@@ -110,6 +113,7 @@ export const DEFAULT_MANAGER_COMPACTION_POLICY: CompactionPolicy = {
 }
 
 export interface ManagerStack {
+  readonly dailyReflectionFor: (key: ManagerKey) => DailyReflection
   readonly ledger: LedgerStore
   /** Manager session 持久化（P6-A 读模型用：disk session keys 枚举）。 */
   readonly store: ManagerSessionStore
@@ -141,6 +145,8 @@ export interface ManagerStack {
 }
 
 export interface BootstrapDeps {
+  readonly reflectionEvidence?: Pick<ReflectionEvidenceDeps, 'traces' | 'captureWorkerTrace' | 'readWorkerTrace' | 'redact'>
+  readonly confirmDailyReflection?: import('./daily-reflection.js').DailyReflectionDeps['confirm']
   /** 存储根(= `getDataRootDir()`,即 `$DATA_DIR`);台账/事件流/manager 会话都按 §7 派生自它。 */
   readonly dataRoot: string
   /** ISO 时间注入(harness 用);registry 需要的 `() => Date` 由本模块从它派生,保持单一时间源。 */
@@ -514,7 +520,34 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const managersDir = join(agentDir, 'managers')
   const sessionStore = new ManagerSessionStore(managersDir)
   const workboardStore = new ManagerWorkboardStore(managersDir, deps.now, (key) => registry?.onWorkboardChanged(key))
+  const reflectionTurns = new WorkerTurnStore(workersDir)
+  const reflectionEvidence = deps.reflectionEvidence ? new DailyReflectionEvidence({
+    ...deps.reflectionEvidence, managersDir, store: sessionStore, ledger, harness, turns: reflectionTurns,
+  }) : undefined
+  const reflectionHosts = new Map<ManagerKey, DailyReflection>()
+  const dailyReflectionFor = (key: ManagerKey): DailyReflection => {
+    let host = reflectionHosts.get(key)
+    if (!host) {
+      host = new DailyReflection({ key, store: sessionStore, now: deps.now,
+        capture: state => reflectionEvidence ? reflectionEvidence.capture(state) : Promise.reject(new Error('Reflection evidence unavailable')),
+        read: (record, state) => reflectionEvidence ? reflectionEvidence.read(record, state) : Promise.reject(new Error('Reflection evidence unavailable')),
+        analysisWorkers: async episodeIds => {
+          const workers = (await ledger.listAllWorkers()).filter(({ worker }) =>
+            worker.manager_key === key && worker.origin.spawned_by_episode && episodeIds.includes(worker.origin.spawned_by_episode))
+          return Promise.all(workers.map(async ({ worker }) => {
+            const turns = await reflectionTurns.list(worker.worker_id)
+            return { worker_id: worker.worker_id, pending: worker.task.status === 'running' || (turns.length === 0 && worker.task.status !== 'closed')
+              || turns.some(turn => turn.disposition.status === 'pending') }
+          }))
+        },
+        confirm: params => deps.confirmDailyReflection ? deps.confirmDailyReflection(params) : Promise.reject(new Error('Reflection confirmation unavailable')),
+      })
+      reflectionHosts.set(key, host)
+    }
+    return host
+  }
   registry = new ManagerRegistry({
+    dailyReflectionFor,
     traceWriter: deps.traceWriter,
     onAdminChatWakeConsumed: deps.onAdminChatWakeConsumed,
     onWorkboardAdminUpdateConsumed: deps.onWorkboardAdminUpdateConsumed,
@@ -662,6 +695,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         ...(managerPermissions ? { permissions: managerPermissions } : {}),
       }
       return buildManagerToolFace({
+        dailyReflection: dailyReflectionFor(key),
         describeExecutionTools: deps.describeExecutionTools,
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
@@ -812,6 +846,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     principalBindings,
     builtinDataDir,
     store: sessionStore,
+    dailyReflectionFor,
     workboard: workboardStore,
     dispose,
   }

@@ -17,6 +17,9 @@ const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
   'resolve_worker_connection',
   'verify_core_agent_runtime',
   'complete_core_agent_cutover',
+  'complete_daily_reflection',
+  'consume_daily_reflection_trigger',
+  'trigger_schedule',
   'register_core_agent',
   'consume_admin_chat_assertion',
   'consume_workboard_admin_assertion',
@@ -44,12 +47,13 @@ test('authentication errors preserve RPC codes and map to HTTP 401/403', () => {
 
 test('sensitive RPC classifier requires no-trace transport', () => {
   for (const method of SENSITIVE_METHODS) {
-    const params = method === 'process_message' ? { source_type: 'admin_chat' } : {}
+    const params = method === 'process_message' ? { source_type: 'admin_chat' } : method === 'trigger_schedule' ? { reflection_proof: 'proof' } : {}
     assert.equal(isSensitiveRpcCall(method, params), true, method)
   }
 })
 
 test('ordinary Channel process_message remains non-sensitive', () => {
+  assert.equal(isSensitiveRpcCall('trigger_schedule', { is_builtin: true }), false)
   assert.equal(isSensitiveRpcCall('process_message', { source_type: 'channel' }), false)
   assert.equal(isSensitiveRpcCall('health', {}), false)
 })

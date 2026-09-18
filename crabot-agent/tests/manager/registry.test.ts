@@ -14,6 +14,7 @@ import {
   attentionFlushToWakeEvent,
   shouldWakeOnHarnessEvent,
 } from '../../src/manager/inbound-adapters.js'
+import { DailyReflection, buildDailyReflectionTools } from '../../src/manager/daily-reflection.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { EpisodeResult, WakeEvent } from '../../src/manager/loop.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
@@ -33,6 +34,7 @@ import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
 import { QueryEstablishmentError } from '../../src/workers/errors.js'
 import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
+import { TraceStore } from '../../src/core/trace-store.js'
 
 // --- Fixtures / helpers（与 tests/manager/loop.test.ts 同一套约定） ---
 
@@ -191,6 +193,131 @@ describe('ManagerRegistry', () => {
       ...rest,
     }
   }
+
+  it.each([false, true])('retains corrected Memory errors and requires actual summary delivery (retry=%s)', async retrySummary => {
+    const { adapter, queue, calls } = makeAdapter()
+    const key = SYSTEM_TASKS_MANAGER_KEY
+    const window = { window_start: '2025-12-30T00:00:00.000Z', window_end: '2025-12-31T00:00:00.000Z' }
+    const confirm = vi.fn(async () => ({ status: 'applied' as const, watermark: window.window_end }))
+    const host = new DailyReflection({ key, store, now: () => '2026-01-01T00:00:00.000Z',
+      capture: async () => ({ records: [], gaps: [] }), read: async () => ({ content: '', gaps: [] }),
+      analysisWorkers: async () => [], confirm })
+    const memoryCall = vi.fn(async (_port: number, _method: string, args: { id: string }) => {
+      if (args.id === 'wrong-id') throw new Error('memory entry not found')
+      return { deleted: true }
+    })
+    const memoryServer = createCrabMemoryServer({ rpcClient: { call: memoryCall } as never,
+      moduleId: 'test-agent', getMemoryPort: async () => 19100 },
+    { visibility: 'internal', scopes: [], isMasterPrivate: false })
+    const send = vi.fn().mockRejectedValueOnce(new Error('delivery unavailable'))
+      .mockResolvedValue({ platform_message_id: 'delivered', sent_at: '2026-01-01T00:00:00.000Z' })
+    const traces = new TraceStore(100, join(dataDir, 'traces'))
+    try {
+      const registry = new ManagerRegistry(baseRegistryDeps({ adapter, dailyReflectionFor: () => host,
+        traceWriter: traces.managerTraceWriter(text => text),
+        toolFace: (_key, _system, _identity, _human, _permissions, _hooks, _wake, faceState) => buildManagerToolFace({
+          dailyReflection: host, profile: 'daily_reflection', isBuiltinDailyReflection: true, isSystemThread: true,
+          harness: FAKE_HARNESS, workerContext: () => ({ managerKey: key, reportTo: { channel_id: 'admin-web', session_id: 'system-tasks' } }),
+          messagingDeps: { ...makeMessagingDeps(), rpcClient: { call: send } as never }, memoryServer, callAdmin: vi.fn(), faceState,
+          workboard: { store: new ManagerWorkboardStore(join(dataDir, 'workboard')), managerKey: key },
+          projectDocs: { ledger: fakeLedger({}), readWorkerContext: async () => undefined, managerKey: key },
+        }),
+      }))
+      queue.push(
+        { stopReason: 'tool_use', toolCalls: [{ name: 'list_reflection_records', id: 'list', input: {} }] },
+        { stopReason: 'tool_use', toolCalls: [{ name: 'mcp__crab-memory__delete_memory', id: 'wrong', input: { id: 'wrong-id' } }] },
+        { stopReason: 'tool_use', toolCalls: [{ name: 'mcp__crab-memory__delete_memory', id: 'corrected', input: { id: 'correct-id' } }] },
+        { stopReason: 'tool_use', toolCalls: [{ name: 'send_daily_reflection_summary', id: 'summary-first', input: { content: 'initial summary' } }] },
+        ...(retrySummary ? [{ stopReason: 'tool_use' as const, toolCalls: [{ name: 'send_daily_reflection_summary', id: 'summary-retry', input: { content: 'corrected summary' } }] }] : []),
+        { stopReason: 'tool_use', toolCalls: [{ name: 'finish_daily_reflection', id: 'finish', input: {
+          outcome: 'completed', summary: 'corrected the ID and deleted the duplicate', pending_items: [], evidence_refs: [], summary_delivered: true,
+        } }] },
+      )
+      const result = await registry.routeSchedule({ scheduleId: 'daily', triggerId: 'corrected-memory', scheduleName: 'daily',
+        title: 'daily', description: 'review', taskType: 'daily_reflection', isBuiltin: true, reflectionWindow: window,
+        targetSession: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' } })
+      const toolSpans = traces.getManagerEpisode(result.episodeId)!.spans.filter(span => span.type === 'tool_call')
+      expect(toolSpans.some(span => JSON.stringify(span).includes('memory entry not found'))).toBe(true)
+      expect(toolSpans.some(span => span.status === 'failed' && JSON.stringify(span).includes('delivery unavailable'))).toBe(true)
+      expect(toolSpans.some(span => span.status === 'completed' && JSON.stringify(span).includes('correct-id'))).toBe(true)
+      expect(JSON.stringify(calls.at(-1)?.messages)).toContain('memory entry not found')
+      expect(memoryCall).toHaveBeenCalledTimes(2)
+      expect(send).toHaveBeenCalledTimes(retrySummary ? 2 : 1)
+      expect((await store.load(key)).dailyReflection?.summary_delivered).toBe(retrySummary)
+      expect(result.dailyReflection?.outcome).toBe(retrySummary ? 'completed' : 'partial')
+      if (!retrySummary) expect(result.dailyReflection?.validation_errors).toContain('summary_delivery_unproven')
+      expect(confirm).toHaveBeenCalledTimes(retrySummary ? 1 : 0)
+    } finally { traces.stopFlushTimer() }
+  })
+
+  it('daily end_turn preserves the window; only its analysis Worker resumes the daily profile', async () => {
+    const { adapter, calls, queue } = makeAdapter()
+    const target = { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' as const }
+    const reflectionWindow = { window_start: '2025-12-30T00:00:00.000Z', window_end: '2025-12-31T00:00:00.000Z' }
+    const confirm = vi.fn(async () => ({ status: 'applied' as const, watermark: reflectionWindow.window_end }))
+    const host = new DailyReflection({ key: SYSTEM_TASKS_MANAGER_KEY, store, now: () => '2026-01-01T00:00:00.000Z',
+      capture: async () => ({ records: [], gaps: [] }), read: async () => ({ content: '', gaps: [] }),
+      analysisWorkers: async () => [], confirm })
+    const workers: Record<string, LedgerWorker> = {}
+    const identities: Array<{ profile: string; source?: string }> = []
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter, ledger: fakeLedger(workers), dailyReflectionFor: () => host,
+      toolFace: (_key, _system, identity, _human, _permissions, _hooks, wake) => {
+        identities.push({ profile: identity?.isBuiltin && identity.taskType === 'daily_reflection' ? 'daily' : 'normal', source: wake?.kind })
+        return identity?.isBuiltin && identity.taskType === 'daily_reflection' ? buildDailyReflectionTools(host) : []
+      },
+    }))
+    queue.push({ stopReason: 'end_turn' })
+    const initial = await registry.routeSchedule({ scheduleId: 'daily', triggerId: 'first', scheduleName: 'daily', title: 'daily',
+      description: 'review', taskType: 'daily_reflection', isBuiltin: true, targetSession: target, reflectionWindow })
+    expect(confirm).not.toHaveBeenCalled()
+    const before = (await store.load(SYSTEM_TASKS_MANAGER_KEY)).dailyReflection!
+    workers.analysis = { ...makeLedgerWorker('analysis', SYSTEM_TASKS_MANAGER_KEY), origin: { trigger_type: 'scheduled', spawned_by_episode: initial.episodeId } }
+    workers.unrelated = makeLedgerWorker('unrelated', SYSTEM_TASKS_MANAGER_KEY)
+    for (const id of ['unrelated', 'analysis']) {
+      identities.length = 0
+      queue.push({ stopReason: 'end_turn' })
+      await registry.routeWorkerEvent({ worker_id: id, seq: 1, kind: 'turn_completed', ts: '2026-01-01T00:00:00.000Z' })
+      expect(identities.every(item => item.profile === (id === 'analysis' ? 'daily' : 'normal'))).toBe(true)
+      expect(identities.every(item => item.source === 'worker_event')).toBe(true)
+    }
+    identities.length = 0
+    queue.push({ stopReason: 'end_turn' })
+    await registry.routeHumanMessages('admin-web', 'system-tasks', [makeChannelMessage('human')])
+    expect(identities.every(item => item.profile === 'normal')).toBe(true)
+    const after = (await store.load(SYSTEM_TASKS_MANAGER_KEY)).dailyReflection!
+    expect(after.run_id).toBe(before.run_id)
+    expect(after.window_end).toBe(reflectionWindow.window_end)
+    expect(after.episode_ids).toHaveLength(2)
+    expect(calls.length).toBeGreaterThanOrEqual(4)
+  })
+
+  it('real Engine exit is validated by the daily host; a mixed exit batch never confirms', async () => {
+    for (const mixed of [false, true]) {
+      const key = `admin-web::daily-${mixed}` as ManagerKey
+      const { adapter, queue } = makeAdapter()
+      const window = { window_start: '2025-12-30T00:00:00.000Z', window_end: '2025-12-31T00:00:00.000Z' }
+      const confirm = vi.fn(async () => ({ status: 'applied' as const, watermark: window.window_end }))
+      const host = new DailyReflection({ key, store, now: () => '2026-01-01T00:00:00.000Z',
+        capture: async () => ({ records: [], gaps: [] }), read: async () => ({ content: '', gaps: [] }),
+        analysisWorkers: async () => [], confirm })
+      const memoryCall = vi.fn(async () => ({ output: '{}', isError: false }))
+      const registry = new ManagerRegistry(baseRegistryDeps({ adapter, dailyReflectionFor: () => host,
+        toolFace: () => [...buildDailyReflectionTools(host), defineTool({ name: 'inbox', description: 'fixture',
+          inputSchema: { type: 'object' }, call: memoryCall })],
+      }))
+      queue.push({ stopReason: 'tool_use', toolCalls: [{ name: 'list_reflection_records', id: 'list', input: {} }] },
+        { stopReason: 'tool_use', toolCalls: [{ name: 'inbox', id: 'memory', input: {} }] },
+        { stopReason: 'tool_use', toolCalls: [{ name: 'finish_daily_reflection', id: 'finish', input: {
+          outcome: 'completed', summary: 'done', evidence_refs: [], pending_items: [],
+        } }, ...(mixed ? [{ name: 'inbox', id: 'skipped', input: {} }] : [])] })
+      const result = await registry.routeSchedule({ scheduleId: 'daily', triggerId: `trigger-${mixed}`, scheduleName: 'daily', title: 'daily',
+        description: 'review', taskType: 'daily_reflection', isBuiltin: true,
+        targetSession: { channel_id: 'admin-web', session_id: `daily-${mixed}`, type: 'private' }, reflectionWindow: window })
+      expect(result.dailyReflection?.outcome).toBe(mixed ? 'partial' : 'completed')
+      expect(confirm).toHaveBeenCalledTimes(mixed ? 0 : 1)
+      expect(memoryCall).toHaveBeenCalledOnce()
+    }
+  })
 
   it('prepares mid-episode quotes before synchronous mailbox insertion', async () => {
     const entered = deferred()

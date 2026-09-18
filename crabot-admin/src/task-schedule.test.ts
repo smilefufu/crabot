@@ -957,21 +957,24 @@ describe('AdminModule - Schedule Management', () => {
         (schedule) => schedule.is_builtin && schedule.task_template.type === 'daily_reflection',
       )!
 
+      const sensitive = vi.spyOn((admin as any).rpcClient, 'callSensitive').mockResolvedValue({ accepted: true })
       const response = await makeProtocolRequest<{
         accepted: true
         task_id?: string
       }>(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: dailyReflection.id })
 
-      const call = triggerCallSpy.mock.calls.findLast((item) => item[1] === 'trigger_schedule')!
+      const call = sensitive.mock.calls.findLast((item) => item[1] === 'trigger_schedule')!
       expect(call[2]).toMatchObject({
         schedule_id: dailyReflection.id,
         task_type: 'daily_reflection',
         priority: 'low',
-        input: undefined,
         tags: ['daily_reflection', 'builtin'],
         is_builtin: true,
+        reflection_proof: expect.any(String),
+        reflection_window: { window_start: dailyReflection.watermark ?? dailyReflection.created_at, window_end: expect.any(String) },
       })
       expect(response.data!.task_id).toBeUndefined()
+      sensitive.mockRestore()
     })
 
     it('user-created memory_maintenance type remains on the ordinary manager route', async () => {

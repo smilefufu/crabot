@@ -229,6 +229,21 @@ describe('buildManagerToolFace', () => {
     expect(deps.callAdmin).not.toHaveBeenCalled()
   })
 
+  it('daily has exactly 11 core tools and can discover execution capabilities, ordinary profile cannot load reflection tools', async () => {
+    const state = createManagerToolFaceState()
+    const deps = makeDeps({ faceState: state, profile: 'daily_reflection', isBuiltinDailyReflection: true })
+    const tools = buildManagerToolFace(deps)
+    expect(tools.map(tool => tool.name)).toEqual([...DAILY_REFLECTION_CORE_NAMES])
+    expect(tools).toHaveLength(11)
+    expect(state.catalog!.search(state, 'get_execution_capabilities', 1).loaded).toEqual(['get_execution_capabilities'])
+    const normal = createManagerToolFaceState()
+    buildManagerToolFace(makeDeps({ faceState: normal, candidatePermissions: permissions }))
+    for (const name of ['list_reflection_records', 'read_reflection_record', 'finish_daily_reflection']) {
+      expect(normal.catalog!.get(name)).toBeUndefined()
+      expect(normal.catalog!.search(normal, name, 1).loaded).not.toContain(name)
+    }
+  })
+
   it('episode 固定目录，搜索后下一轮追加；schema 变化只影响新 episode', async () => {
     const state = createManagerToolFaceState()
     const deps = makeDeps({ schedule, candidatePermissions: permissions, faceState: state })

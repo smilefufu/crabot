@@ -99,6 +99,7 @@ export interface ScheduleIdentity {
 }
 
 export interface ManagerRegistryDeps {
+  readonly dailyReflectionFor?: (key: ManagerKey) => import('./daily-reflection.js').DailyReflection
   readonly store: ManagerSessionStore
   readonly policy: CompactionPolicy
   readonly harness: WorkerHarness
@@ -347,6 +348,7 @@ export class ManagerRegistry {
       // 同步依赖注入形状，不从当前 principal 派生或改写会话归属。
       managerKey: () => this.deps.managerKeyFor(key),
       store: this.deps.store,
+      dailyReflection: this.deps.dailyReflectionFor?.(key),
       policy: this.deps.policy,
       adapter: this.deps.adapter,
       model: this.deps.model,
@@ -568,15 +570,9 @@ export class ManagerRegistry {
     activityReceipt?: ActivityContextAdmissionReceipt,
   ): Promise<HarnessEventDelivery> {
     if (event.kind === 'activity_available' && activityReceipt) {
-      const capture = this.captureIngress()
-      const envelope = this.makeEnvelope(
-        capture,
-        { kind: 'worker_event', event },
-        event.ts,
-        undefined,
-        undefined,
-        activityReceipt,
-      )
+      const prepared = await this.prepareWorkerEventRoute(event, key)
+      key = prepared.key
+      const envelope = { ...prepared.envelope, activity_context_receipt: activityReceipt }
       this.noteExternalInput(key, envelope.wake)
       if (this.isEpisodeActive(key)) {
         this.getOrCreate(key).enqueueDuringEpisode(envelope)
@@ -643,6 +639,7 @@ export class ManagerRegistry {
     scheduleId: string
     triggerId: string
     scheduleName: string
+    reflectionWindow?: import('./daily-reflection-types.js').ReflectionWindow
     title: string
     description: string
     priority?: TaskPriority
@@ -660,6 +657,7 @@ export class ManagerRegistry {
     scheduleId: string
     triggerId: string
     scheduleName: string
+    reflectionWindow?: import('./daily-reflection-types.js').ReflectionWindow
     title: string
     description: string
     priority?: TaskPriority
@@ -703,6 +701,7 @@ export class ManagerRegistry {
     scheduleId: string
     triggerId: string
     scheduleName: string
+    reflectionWindow?: import('./daily-reflection-types.js').ReflectionWindow
     title: string
     description: string
     priority?: TaskPriority
@@ -721,6 +720,7 @@ export class ManagerRegistry {
       scheduleId: p.scheduleId,
       triggerId: p.triggerId,
       scheduleName: p.scheduleName,
+      reflectionWindow: p.reflectionWindow,
       title: p.title,
       description: p.description,
       priority: p.priority,
@@ -883,11 +883,18 @@ export class ManagerRegistry {
           },
         }
       : event
+    const key = found?.worker.manager_key ?? fallbackKey ?? SYSTEM_TASKS_MANAGER_KEY
+    const reflection = (await this.deps.store.load(key)).dailyReflection
+    const belongsToReflection = reflection && (!reflection.result || reflection.result.outcome !== 'completed' || reflection.confirmation_pending)
+      && found && (reflection.analysis_worker_ids.includes(event.worker_id)
+        || (found.worker.origin.spawned_by_episode && reflection.episode_ids.includes(found.worker.origin.spawned_by_episode)))
     return {
-      key: found?.worker.manager_key ?? fallbackKey ?? SYSTEM_TASKS_MANAGER_KEY,
+      key,
       envelope: this.makeEnvelope(
         capture,
-        { kind: 'worker_event', event: eventWithOrigin },
+        { kind: 'worker_event', event: eventWithOrigin, ...(belongsToReflection ? { dailyReflection: {
+          runId: reflection.run_id, scheduleId: reflection.schedule_id, targetSession: reflection.target_session,
+        } } : {}) },
         typeof event.ts === 'string' ? event.ts : undefined,
       ),
     }
@@ -1259,6 +1266,10 @@ export class ManagerRegistry {
 
 /** 唤醒事件 → 随行的 scheduled 权限身份;非 schedule 唤醒没有身份(undefined)。 */
 function scheduleIdentityOf(wakeEvent: WakeEvent | undefined): ScheduleIdentity | undefined {
+  if (wakeEvent?.kind === 'worker_event' && wakeEvent.dailyReflection) return {
+    scheduleId: wakeEvent.dailyReflection.scheduleId, isBuiltin: true, taskType: 'daily_reflection',
+    targetSession: wakeEvent.dailyReflection.targetSession,
+  }
   if (wakeEvent?.kind !== 'schedule') return undefined
   return {
     scheduleId: wakeEvent.scheduleId,

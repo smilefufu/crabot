@@ -10,6 +10,8 @@ import { join } from 'path'
 
 import { ManagerLoop, type WakeEvent, type TimedWakeEnvelope, type ManagerLoopDeps } from '../../src/manager/loop.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
+import { DailyReflection } from '../../src/manager/daily-reflection.js'
+import type { CompleteDailyReflectionResult } from '../../src/manager/daily-reflection-types.js'
 import { TraceStore } from '../../src/core/trace-store.js'
 import type { ManagerTraceWriter } from '../../src/manager/trace-types.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
@@ -96,6 +98,39 @@ describe('ManagerLoop episode trace wiring', () => {
   afterEach(async () => {
     traceStore.stopFlushTimer()
     await fs.rm(dataDir, { recursive: true, force: true })
+  })
+
+  it('confirmation-only wakes expose unresolved watermark confirmation without replaying the model', async () => {
+    const { adapter, calls } = makeAdapter()
+    const window = { window_start: '2026-09-16T18:00:00.000Z', window_end: '2026-09-17T18:00:00.000Z' }
+    const target = { channel_id: 'wechat', session_id: 'sess-trace', type: 'private' as const }
+    const confirm = vi.fn(async (): Promise<CompleteDailyReflectionResult> => { throw new Error('CONFLICT: watermark changed') })
+    const host = new DailyReflection({ key: KEY, store, now: () => window.window_end,
+      capture: async () => ({ records: [], gaps: [] }), read: async () => ({ content: '', gaps: [] }),
+      analysisWorkers: async () => [], confirm })
+    await host.admit({ ...window, target_session: target, schedule_id: 'daily', trigger_id: 'original' }, 'original-episode')
+    await store.updateDailyReflection(KEY, current => ({ ...current!, confirmation_pending: true,
+      result: { ...window, run_id: current!.run_id, outcome: 'completed', summary: 'analysis done', pending_items: [],
+        evidence_refs: [], completed_at: window.window_end, validation_errors: [] } }))
+    const loop = new ManagerLoop({ ...deps(adapter, traceWriter), dailyReflection: host })
+    const wake = (triggerId: string) => timed({ kind: 'schedule', scheduleId: 'daily', triggerId, scheduleName: 'daily',
+      title: 'daily', description: 'daily', targetSession: target, taskType: 'daily_reflection', isBuiltin: true, reflectionWindow: window })
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      for (const trigger of ['retry-one', 'retry-two']) {
+        const result = await loop.wakeUp(wake(trigger))
+        const product = traceStore.getManagerEpisode(result.episodeId)?.outcome?.daily_reflection
+        expect(product?.outcome).toBe('partial')
+        expect(product?.validation_errors.join(' ')).toContain('CONFLICT: watermark changed')
+      }
+      expect(diagnostic).toHaveBeenCalledTimes(2)
+      expect((await store.load(KEY)).dailyReflection?.result?.outcome).toBe('completed')
+      confirm.mockResolvedValueOnce({ status: 'already_applied', watermark: window.window_end })
+      const recovered = await loop.wakeUp(wake('confirmation-recovered'))
+      expect(traceStore.getManagerEpisode(recovered.episodeId)?.outcome?.daily_reflection?.outcome).toBe('completed')
+      expect((await store.load(KEY)).dailyReflection?.confirmation_pending).toBe(false)
+      expect(calls).toHaveLength(0)
+    } finally { diagnostic.mockRestore() }
   })
 
   it('episode 先落最小 session identity + trace，再调用 LLM', async () => {

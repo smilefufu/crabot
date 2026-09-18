@@ -1386,7 +1386,7 @@ export class TraceStore {
    */
   finishManagerEpisode(
     traceId: string,
-    patch: { status: 'completed' | 'failed'; outcome?: { summary: string; error?: string }; total_usage?: ManagerEpisodeUsage },
+    patch: { status: 'completed' | 'failed'; outcome?: ManagerEpisodeTrace['outcome']; total_usage?: ManagerEpisodeUsage },
   ): void {
     const episode = this.managerEpisodes.get(traceId)
     if (!episode || episode.status !== 'running') return
@@ -1411,6 +1411,50 @@ export class TraceStore {
 
   getManagerEpisode(traceId: string): ManagerEpisodeTrace | undefined {
     return this.managerEpisodes.get(traceId)
+  }
+
+  /** Host evidence reads include disk archives without expanding the resident/UI window. */
+  private async readManagerArchive(date: string): Promise<Map<string, ManagerEpisodeTrace>> {
+    const episodes = new Map<string, ManagerEpisodeTrace>()
+    if (!this.persistDir) return episodes
+    const files = this.readableArchiveFilePrefixes.map(prefix => `${prefix}${date}.jsonl`).sort()
+    for (const file of files) {
+      let content: string
+      try { content = await fs.promises.readFile(path.join(this.persistDir, file), 'utf8') }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      for (const line of content.split('\n')) {
+        const record = parseTraceRecordLine(line)
+        if (record?.kind === 'manager_episode') episodes.set(record.trace.trace_id, record.trace)
+      }
+    }
+    return episodes
+  }
+
+  async readManagerEpisode(traceId: string): Promise<ManagerEpisodeTrace | undefined> {
+    const resident = this.managerEpisodes.get(traceId)
+    if (resident) return resident
+    const date = this.managerEpisodeDates.get(traceId)
+    return date ? (await this.readManagerArchive(date)).get(traceId) : undefined
+  }
+
+  async *readManagerEpisodes(): AsyncGenerator<ManagerEpisodeTrace> {
+    const dates = new Map<string, string[]>()
+    for (const [id, date] of this.managerEpisodeDates) {
+      const ids = dates.get(date) ?? []
+      ids.push(id)
+      dates.set(date, ids)
+    }
+    for (const [date, ids] of dates) {
+      const archived = ids.some(id => !this.managerEpisodes.has(id)) ? await this.readManagerArchive(date) : new Map<string, ManagerEpisodeTrace>()
+      for (const id of ids) {
+        const episode = this.managerEpisodes.get(id) ?? archived.get(id)
+        if (!episode) throw new Error(`manager_trace_unavailable:${id}`)
+        yield episode
+      }
+    }
   }
 
   listManagerEpisodes(managerKey: ManagerKey, pagination?: { page?: number; page_size?: number }): {
@@ -1526,6 +1570,13 @@ export class TraceStore {
           outcome: {
             summary: redact(patch.outcome.summary),
             ...(patch.outcome.error ? { error: redact(patch.outcome.error) } : {}),
+            ...(patch.outcome.daily_reflection ? { daily_reflection: {
+              ...patch.outcome.daily_reflection,
+              summary: redact(patch.outcome.daily_reflection.summary),
+              pending_items: patch.outcome.daily_reflection.pending_items.map(redact),
+              evidence_refs: patch.outcome.daily_reflection.evidence_refs.map(redact),
+              validation_errors: patch.outcome.daily_reflection.validation_errors.map(redact),
+            } } : {}),
           },
         } : {}),
       }),
