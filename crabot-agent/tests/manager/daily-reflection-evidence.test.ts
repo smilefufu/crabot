@@ -60,6 +60,7 @@ describe('daily reflection persisted evidence', () => {
     const manifest = await f.provider.capture(state)
     expect(manifest.records.map(record => record.source_id).sort()).toEqual(['first', 'old-worker', 'second'])
     const worker = manifest.records.find(record => record.source_id === 'old-worker')!
+    expect(worker.summary).toContain('failed [REDACTED]')
     expect((await f.provider.read(worker, state)).content).toContain('failed [REDACTED]')
     expect(JSON.stringify(manifest)).not.toContain('test-secret')
     const first = manifest.records.find(record => record.source_id === 'first')!

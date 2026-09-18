@@ -161,6 +161,10 @@ export class DailyReflectionEvidence {
       const events = await this.deps.harness.readWorkerEvents(worker.worker_id)
       const turns = await this.deps.turns.list(worker.worker_id)
       const traces: ReflectionWorkerTrace[] = []
+      const periodTurns = turns.filter(turn => inWindow(turn.completed_at, state))
+      const errors = new Set(events.filter(event => event.kind === 'error' && inWindow(event.ts, state))
+        .map(event => JSON.stringify(event.detail ?? {}).slice(0, 200)))
+      const llmCallsBySeq: string[] = []
       const times = [...events.filter(event => inWindow(event.ts, state)).map(event => event.ts),
         ...turns.filter(turn => inWindow(turn.completed_at, state)).map(turn => turn.completed_at)]
       const traceGaps: string[] = []
@@ -170,14 +174,21 @@ export class DailyReflectionEvidence {
         try {
           const captured = await this.deps.captureWorkerTrace(worker.worker_id, incarnation.seq)
           traces.push(captured.source)
-          times.push(...captured.result.events.filter(event => inWindow(event.ts, state)).map(event => event.ts))
+          const periodEvents = captured.result.events.filter(event => inWindow(event.ts, state))
+          times.push(...periodEvents.map(event => event.ts))
+          llmCallsBySeq.push(`${incarnation.seq}:${periodEvents.filter(event => event.kind === 'llm_call').length}`)
+          periodEvents.filter(event => event.kind === 'error').forEach(event => errors.add(event.summary.slice(0, 200)))
           if (captured.result.unavailable_reason) traceGaps.push(captured.result.unavailable_reason)
         } catch { traceGaps.push(`worker_trace_unavailable:${worker.worker_id}:${incarnation.seq}`) }
       }
       if (!times.length && !inWindow(worker.updated_at, state)) continue
       await add({ kind: 'worker', worker_id: worker.worker_id, traces,
-        turn_ids: turns.filter(turn => inWindow(turn.completed_at, state)).map(turn => turn.turn_id), event_count: events.length, gaps: traceGaps },
-      times.sort().at(-1) ?? worker.updated_at, `${worker.task.title}; turns=${turns.filter(turn => inWindow(turn.completed_at, state)).length}`)
+        turn_ids: periodTurns.map(turn => turn.turn_id), event_count: events.length, gaps: traceGaps },
+      times.sort().at(-1) ?? worker.updated_at, [
+        `${worker.task.title}; turns=${periodTurns.length}; recorded_llm_calls_by_seq=${llmCallsBySeq.join(',') || 'unknown'}`,
+        ...[...errors].slice(-3).map(error => `error: ${error}`),
+        ...periodTurns.slice(-2).map(turn => `result(${turn.completion_result?.source ?? 'unavailable'}): ${turn.completion_result?.content.slice(0, 200) ?? ''}`),
+      ].join('\n'))
     }
     records.sort((left, right) => left.activity_at.localeCompare(right.activity_at) || left.source_id.localeCompare(right.source_id))
     return { records, gaps }
