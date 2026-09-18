@@ -6,6 +6,9 @@ import { createBashTool } from '../../src/engine/tools/bash-tool'
 import { checkToolPermission } from '../../src/engine/permission-checker'
 import { buildProjectDocTools } from '../../src/manager/tools/project-doc-tools'
 import { createGuidanceTool } from '../../src/guidance/catalog'
+import { WorkspaceGitInspector } from '../../src/workers/harness/workspace-git-inspector'
+import { WorkspaceManager } from '../../src/workers/harness/workspace-manager'
+import { captureWorkspaceInstructions } from '../../src/workers/harness/workspace-instructions'
 
 const tools = [createReadTool, createEditTool, createWriteTool, createBashTool].map(make => make(() => '/fixture'))
 tools.push(createGuidanceTool('worker'))
@@ -13,6 +16,21 @@ async function main() {
   let input = ''
   for await (const chunk of process.stdin) input += chunk
   const request = JSON.parse(input)
+  if (request.workspaceInstructions) {
+    const result = await captureWorkspaceInstructions({ ...request.workspaceInstructions, workersDir: '/tmp/eval-workers', workspaceRoot: '/fixture' })
+    process.stdout.write(JSON.stringify(result))
+    return
+  }
+  if (request.workspaceResolve) {
+    const result = await new WorkspaceManager('/tmp/eval-workspaces').resolve(request.workspaceResolve.taskId, '/fixture')
+    process.stdout.write(JSON.stringify(result))
+    return
+  }
+  if (request.workspaceGit) {
+    const result = await new WorkspaceGitInspector().inspect('/fixture', request.workspaceGit.baseline)
+    process.stdout.write(JSON.stringify(result))
+    return
+  }
   if (request.projectContext) {
     const { workers, contexts, ...deps } = request.projectContext
     tools.push(...buildProjectDocTools({ ...deps,

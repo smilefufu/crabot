@@ -28,7 +28,7 @@ const FIXED_RECEIVED_AT = '2026-01-01T08:00:00+08:00'
 function timed(wake: WakeEvent): TimedWakeEnvelope { return { wake, received_at: FIXED_RECEIVED_AT, timezone: 'Asia/Shanghai' } }
 const DIALOG_OBJECT_ID = (`test::${'friend-loop'}` as ManagerKey)
 const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
-任务板中至少有一项尚未收口的工作已一小时没有更新。请按本次提供的任务板指南，查阅任务板与必要证据，逐项判断继续推进或等待。`
+任务板中至少有一项尚未收口的工作已一小时没有更新。请按本次提供的自省指南，查阅任务板与必要证据，逐项判断继续推进或等待。`
 
 function workerEventWake(workerId: string): TimedWakeEnvelope {
   return timed({
@@ -222,7 +222,7 @@ describe('ManagerLoop', () => {
     const execute = vi.fn(async () => {
       await loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [makeChannelMessage('unique-supplement')] }))
       loop.enqueueDuringEpisode(workerEventWake('compaction-worker'))
-      loop.enqueueWorkboardAdminUpdate(timed({ kind: 'workboard_admin_update', noticeRevision: 1 }))
+      loop.enqueueDuringEpisode(timed({ kind: 'workboard_idle_review' }))
       return { output: 'tool completed', isError: false }
     })
     loop = new ManagerLoop(baseDeps({ store, adapter, contextWindowTokens: () => 100000,
@@ -1286,7 +1286,7 @@ describe('ManagerLoop', () => {
 
   it.each([
     ['Worker 结果', workerEventWake('result-worker'), 'manager.worker-events'],
-    ['任务板更新', timed({ kind: 'workboard_admin_update', noticeRevision: 1 }), 'manager.workboard'],
+    ['任务板更新', timed({ kind: 'workboard_admin_update', noticeRevision: 1 }), undefined],
     ['任务板自省', timed({ kind: 'workboard_idle_review' }), 'manager.workboard'],
   ] as const)('%s 自动 guidance 只追加到当前上下文，保持 system、缓存键和已有历史不变', async (_name, wake, guideName) => {
     const { adapter, calls, queue } = makeAdapter()
@@ -1297,12 +1297,13 @@ describe('ManagerLoop', () => {
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('保留的历史')] }))
     const history = (await store.load(KEY)).recent
     await loop.wakeUp(wake)
-    const guide = renderGuidance('manager', guideName)
+    const guide = guideName ? renderGuidance('manager', guideName) : undefined
     expect(calls[1].systemPrompt).toBe(calls[0].systemPrompt)
     expect(buildPromptCacheKey(calls[1].model, calls[1].systemPrompt))
       .toBe(buildPromptCacheKey(calls[0].model, calls[0].systemPrompt))
     expect(calls[1].messages.slice(0, history.length)).toEqual(history)
-    expect(calls[1].messages.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
+    if (guide) expect(calls[1].messages.filter(m => 'content' in m && m.content === guide)).toHaveLength(1)
+    else expect(JSON.stringify(calls[1].messages)).not.toContain('## Guidance:')
     expect(JSON.stringify((await store.load(KEY)).recent)).not.toContain('## Guidance:')
     await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('下一次普通输入')] }))
     expect(calls[2].systemPrompt).toBe(calls[0].systemPrompt)
@@ -1336,9 +1337,8 @@ describe('ManagerLoop', () => {
       expect(buildPromptCacheKey(calls[i].model, calls[i].systemPrompt))
         .toBe(buildPromptCacheKey(calls[0].model, calls[0].systemPrompt))
       expect(calls[i].messages.slice(0, calls[i - 1].messages.length)).toEqual(calls[i - 1].messages)
-      for (const name of ['manager.worker-events', 'manager.workboard'] as const) {
-        expect(calls[i].messages.filter(m => 'content' in m && m.content === renderGuidance('manager', name))).toHaveLength(1)
-      }
+      expect(calls[i].messages.filter(m => 'content' in m && m.content === renderGuidance('manager', 'manager.worker-events'))).toHaveLength(1)
+      expect(JSON.stringify(calls[i].messages)).not.toContain('## Guidance: manager.workboard')
     }
     expect(JSON.stringify(calls[0].messages)).not.toContain('## Guidance:')
     expect(JSON.stringify((await store.load(KEY)).recent)).not.toContain('## Guidance:')

@@ -137,38 +137,39 @@ describe('buildManagerToolFace', () => {
     canCreate: true, resolvePermissions: async () => permissions,
   }
 
-  it('首次任务板变更先取得工作流，未修改状态；再次调用才应用', async () => {
+  it.each(['full', 'progressive'] as const)('%s 普通首次改板直接执行，不以自省指南作为前置条件', async (mode) => {
     const objective = { objective_id: 'fixture', title: 'fixture', completion_criteria: ['done'], work_items: [], updated_at: '2026-09-17T00:00:00Z' }
     const store = { createObjective: vi.fn(async () => ({ value: objective, board: { objectives: [objective], archive: [] } })) }
-    const tools = buildManagerToolFace(makeDeps({ workboard: { managerKey: MANAGER_KEY, store: store as never } }))
-    const change = tools.find(tool => tool.name === 'change_workboard')!
-    const input = { action: 'create_objective', objective: { title: 'fixture', completion_criteria: ['done'] } }
-    const first = await change.call(input, {} as never)
-    expect(JSON.parse(first.output)).toMatchObject({ status: 'guidance_provided', applied: false })
-    expect(first.output).toContain('manager.workboard')
-    expect(store.createObjective).not.toHaveBeenCalled()
-    const second = await change.call(input, {} as never)
-    expect(second.isError).toBe(false)
-    expect(JSON.parse(second.output)).toMatchObject({ action: 'objective_created' })
-    expect(store.createObjective).toHaveBeenCalledOnce()
-    expect(store.createObjective).toHaveBeenCalledWith(MANAGER_KEY, input.objective)
-  })
-
-  it('宿主工具面缓存后才自动提供的任务板指南同样免去重复读取，下一 episode 重新判断', async () => {
-    const objective = { objective_id: 'fixture', title: 'fixture', completion_criteria: ['done'], work_items: [], updated_at: '2026-09-17T00:00:00Z' }
-    const store = { createObjective: vi.fn(async () => ({ value: objective, board: { objectives: [objective], archive: [] } })) }
-    const faceState = createManagerToolFaceState('full')
+    const faceState = createManagerToolFaceState(mode)
+    faceState.loadedNames.add('change_workboard')
     const deps = makeDeps({ faceState, workboard: { managerKey: MANAGER_KEY, store: store as never } })
     const firstFace = buildManagerToolFace(deps)
-    faceState.workboardGuidanceProvided = true
     const cachedFace = buildManagerToolFace(deps)
-    const input = { action: 'create_objective', objective: { title: 'fixture', completion_criteria: ['done'] } }
     const change = cachedFace.find(tool => tool.name === 'change_workboard')!
     expect(change).toBe(firstFace.find(tool => tool.name === 'change_workboard'))
-    expect(JSON.parse((await change.call(input, {} as never)).output)).toMatchObject({ action: 'objective_created' })
-    const nextFace = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
+    const input = { action: 'create_objective', objective: { title: 'fixture', completion_criteria: ['done'] } }
+    const first = await change.call(input, {} as never)
+    expect(first.isError).toBe(false)
+    expect(JSON.parse(first.output)).toMatchObject({ action: 'objective_created' })
+    expect(first.output).not.toContain('guidance_provided')
+    expect(store.createObjective).toHaveBeenCalledOnce()
+    expect(store.createObjective).toHaveBeenCalledWith(MANAGER_KEY, input.objective)
+    const nextState = createManagerToolFaceState(mode)
+    nextState.loadedNames.add('change_workboard')
+    const nextFace = buildManagerToolFace({ ...deps, faceState: nextState })
     expect(JSON.parse((await nextFace.find(tool => tool.name === 'change_workboard')!.call(input, {} as never)).output))
-      .toMatchObject({ status: 'guidance_provided', applied: false })
+      .toMatchObject({ action: 'objective_created' })
+    expect(store.createObjective).toHaveBeenCalledTimes(2)
+  })
+
+  it('普通首次改板真实错误原样返回，不由指南回执掩盖', async () => {
+    const store = { createObjective: vi.fn(async () => { throw new Error('WORKBOARD_UNREAD_ADMIN_UPDATE') }) }
+    const tools = buildManagerToolFace(makeDeps({ workboard: { managerKey: MANAGER_KEY, store: store as never } }))
+    const result = await tools.find(tool => tool.name === 'change_workboard')!.call({
+      action: 'create_objective', objective: { title: 'fixture', completion_criteria: ['done'] },
+    }, {} as never)
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('WORKBOARD_UNREAD_ADMIN_UPDATE')
     expect(store.createObjective).toHaveBeenCalledOnce()
   })
 

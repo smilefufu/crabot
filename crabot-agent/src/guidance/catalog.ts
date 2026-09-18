@@ -20,7 +20,7 @@ export function renderGuidance(role: GuidanceRole, name: string): string {
   return `## Guidance: ${name}（${guide.title}）\n\n${guide.body}`
 }
 
-export function createGuidanceTool(role: GuidanceRole, onRead?: (name: GuidanceName) => void): ToolDefinition {
+export function createGuidanceTool(role: GuidanceRole): ToolDefinition {
   return defineTool({
     name: 'load_guidance',
     description: '按名称读取内置工作流。首次进入目录描述的场景时，在相关动作前读取；上下文已有完整有效正文则直接沿用。仅支持当前角色目录，与用户 Skill 独立。',
@@ -34,7 +34,6 @@ export function createGuidanceTool(role: GuidanceRole, onRead?: (name: GuidanceN
       const name = (input as { name: string }).name
       try {
         const output = renderGuidance(role, name)
-        onRead?.(name as GuidanceName)
         return { output, isError: false }
       } catch (error) { return { output: (error as Error).message, isError: true } }
     },

@@ -1,5 +1,26 @@
 # 内置 guidance 隔离比较
 
+## 2026-09-18 完整执行重验
+
+用户要求重做验证后，新增 `continuous-cases.mjs`、`continuous-runtime.mjs` 与 `continuous-compare.mjs`。事前判据见 [CONTINUOUS-ACCEPTANCE.md](./CONTINUOUS-ACCEPTANCE.md)。旧短决策批次保留为局部观察，不承担质量、性能不回退或线上故障已修复的证明。
+
+新入口按 `GUIDANCE_BASELINE_ROOT` 和当前仓库分别加载实际编译版本，保留两版已有 guidance，不复用旧历史比较器“基线无 guidance”的装配假设。真实业务工具不再被首次选择截断；文件/进程、目录、规则快照、Git 观察均在 Docker，消息只进本地收件箱。子审查使用独立的产品内置子 Agent 提示词。
+
+冻结前已通过 21 项脚本模型回归，包含两版自省在查板后继续到外发、同批指南和业务调用进入下一轮、真实权限、独立产物拒绝虚假完成、子审查反馈，以及主控派工至真实项目修复提交闭环。它们验证评测器可用，不是新旧模型成绩。
+
+`continuous-compare.mjs --prepare` 冻结 12 类案例、34 条轨迹、两个编译产物摘要和镜像 ID，最大 720 请求/200 万报告 tokens。真实运行需明确外发授权，使用相同输出目录与输入；已有 events 不覆盖，不重试补样。脚本生成的 assessment 始终为 pending-semantic-review，必须审查完整输出后另写结论。
+
+全局预算停止后的未启动项可用 `GUIDANCE_REMAINING_FROM` 指向原批次目录，另设新的 `GUIDANCE_OUTPUT` 准备接续包。脚本只选 `budget-not-started`，核对原案例与产品编译摘要不变；已完成和已中断轨迹不重跑。持续授权覆盖的同类验证不重复申请授权，发送范围或目的改变时再重新判断。
+
+完整等待还检查内置子 Agent 的运行和结果待投递状态，避免父任务等待期间提前拆除容器。新增慢速真实工具回归先复现失败，再修正通过。实测批次按各自冻结脚本解释，逐条核验审查回传及父任务消费，不能用后来的评测器修复倒推原记录完整。结果与环境缺口见 [CONTINUOUS-RESULTS.md](./CONTINUOUS-RESULTS.md)。
+
+## 2026-09-18 规范与工作流边界
+
+`boundary-cases.mjs` 定义 18 个人工边界案例与事先冻结的语义判据；`boundary-probe.mjs` 使用实际编译后的旧新正文、目录、自动加载选择和工具说明。只返回无副作用的冻结 guidance 内容，遇到首个业务工具选择即记录并停止，不伪造动作回执。仅观察下一步决策，不等同于完整任务验收。限制与本地结果见 [BOUNDARY-RESULTS.md](./BOUNDARY-RESULTS.md)。
+
+先运行 `node --test crabot-agent/eval/guidance/boundary-probe.test.mjs`。设置 `GUIDANCE_BASELINE_ROOT` 指向已编译的基线仓库，`GUIDANCE_OUTPUT` 指向新的本地目录，执行 `node crabot-agent/eval/guidance/boundary-probe.mjs --prepare` 冻结输入；该步骤不读取 Provider 配置或联网。实际运行须另获具体外发授权，沿用同一目录及输入，指定 `REPLAY_RUNTIME_ROOT` 与 `REPLAY_DATA_DIR` 后去掉 `--prepare`。已有输出不可覆盖，预算到顶不补样，不以仅结束响应判断成功。
+
+
 **2026-09-17 当前状态：两份重复取证指南的定向调整尚未证明有效。** 用户批准后冻结比较修改前 `cb33163f` 与本地候选，实际 89 次请求、1,424,398 tokens；5 条正常收口、1 条交付后内部收尾被预算截断、2 条未开始。两个正常完成配对 tokens 少 20.6%，但执行器业务调用从 18 增至 21。验收规则见 [EVIDENCE-ACCEPTANCE.md](./EVIDENCE-ACCEPTANCE.md)，具体质量、动作、用量及人工历史边界见 [EVIDENCE-RESULTS.md](./EVIDENCE-RESULTS.md)。入口为 `evidence-compare.mjs`；此批未改变核心、工具或缓存实现。用户随后确认提示词语义定稿，并授权正式 PR、auto review、自动合并后本地部署；该授权不改变比较结论，也不表示整体行为提升已获证明。
 
 此前修复版 `ee4c5c6d` 的完整任务比较：开始 29 条、完整收口 28 条，1 条预算中断、3 条未开始。可完整配对的 13 对均完成实际目标，旧版三条有实质汇报缺陷、新版未出现同类缺陷；新版诊断过程更重，配对总 tokens 多 12.7%。不能宣布整体质量或效率胜出。证据见 [COMPLETION-RESULTS.md](./COMPLETION-RESULTS.md)，更早短决策与撤回批次见 [RESULTS.md](./RESULTS.md)，标准见 [ACCEPTANCE.md](./ACCEPTANCE.md)。各批统计不混用。

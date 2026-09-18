@@ -429,7 +429,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const tool = resolveTools(runtime).find(tool => tool.name === 'load_guidance')!
     const result = await tool.call({ name: 'worker.project-context' }, {} as never)
     expect(result.isError).toBe(false)
-    expect(result.output).toContain('同一工作区由主线提交')
+    expect(result.output).toContain('由同一工作区的主线本地提交')
     expect(result.output).toContain('只读、问答和一次性文件处理不初始化项目')
   })
 
@@ -1130,7 +1130,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).not.toContain('## 目标模式详解')
 
     expect(prompt).toContain(workspaceRoot)
-    expect(prompt).toContain('验证结果，简洁报告成果')
+    expect(prompt).toContain('依据实际产物和必要检查验证结果')
     expect(prompt).toContain('等待外部结果时结束本轮等通知')
   })
 
