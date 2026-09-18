@@ -5,7 +5,7 @@ import { sha256CanonicalJson } from 'crabot-shared'
 export type ManagerToolProfile = 'normal' | 'daily_reflection' | 'memory_graph_rebuild'
 export type ManagerToolLoadingMode = 'full' | 'shadow' | 'progressive'
 
-export const MANAGER_TOOL_CATALOG_REVISION = 'manager-tools-v1'
+export const MANAGER_TOOL_CATALOG_REVISION = 'manager-tools-v2'
 
 export const NORMAL_MANAGER_CORE_NAMES = [
   'search_tools',
@@ -425,6 +425,12 @@ export class ManagerToolCatalog {
       throw new ToolSearchInputError('search_tools.limit 必须是 1..5 的整数')
     }
     const limit = rawLimit === undefined ? DEFAULT_RESULTS : rawLimit as number
+    const coreName = this.coreNames.find((name) => normalize(name) === query
+      && (name === 'search_tools' || this.byName.has(name)))
+    if (coreName) return {
+      status: 'already_visible', catalogRevision: this.catalogRevision,
+      loaded: [], alreadyVisible: [coreName], omittedDueToBudget: 0,
+    }
     const queryTokens = uniqueTokens(rawQuery)
     const ranked = this.documents
       .map((document) => {
@@ -438,18 +444,26 @@ export class ManagerToolCatalog {
       .filter((item) => item.tier > 0 || item.score > 0)
       .sort((a, b) => b.tier - a.tier || b.score - a.score || a.document.order - b.document.order)
 
+    const exactTier = ranked[0]?.tier ?? 0
+    const toolIdentifier = /^(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|mcp__[a-z0-9_.-]+)$/.test(query)
+    const matches = exactTier >= 2
+      ? ranked.filter((item) => item.tier === exactTier)
+      : toolIdentifier
+        ? ranked.filter((item) => normalize(item.document.namespaceExact) === query)
+        : ranked
+    // Visibility and byte budgets must not move a query's results into the long tail.
+    const selected = matches.slice(0, limit)
     const loaded: string[] = []
     const alreadyVisible: string[] = []
     let bytes = 0
     let omittedDueToBudget = 0
     let budgetReached = false
-    for (const item of ranked) {
+    for (const item of selected) {
       const name = item.document.tool.name
       if (state.mode === 'full' || state.mode === 'shadow' || state.loadedNames.has(name)) {
-        if (alreadyVisible.length < limit) alreadyVisible.push(name)
+        alreadyVisible.push(name)
         continue
       }
-      if (loaded.length >= limit) continue
       const size = serializedToolBytes(item.document.tool)
       if (budgetReached || (bytes + size > SEARCH_BUDGET_BYTES && loaded.length > 0)) {
         budgetReached = true
