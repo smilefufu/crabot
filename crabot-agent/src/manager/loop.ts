@@ -1011,7 +1011,6 @@ export class ManagerLoop {
       const toolFaceDetails = initialTools
         ? {
             tool_loading_mode: this.currentToolFaceState?.mode ?? 'progressive',
-            capability_profile: toolProfile,
             catalog_revision: this.currentToolFaceState?.catalog?.catalogRevision ?? MANAGER_TOOL_CATALOG_REVISION,
             initial_tool_names: initialTools.map((tool) => tool.name),
             initial_visible_count: initialTools.length,
@@ -1027,6 +1026,7 @@ export class ManagerLoop {
         details: {
           request_observation_version: 1,
           merged_envelopes: episodeEnvelopes.length,
+          capability_profile: toolProfile,
           ...(toolFaceDetails ?? {}),
         },
       })

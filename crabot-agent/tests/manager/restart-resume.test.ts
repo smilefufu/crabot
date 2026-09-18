@@ -13,6 +13,9 @@ import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { ManagerToolCatalog, NORMAL_MANAGER_CORE_NAMES, type ManagerToolFaceState } from '../../src/manager/tools/tool-catalog.js'
 import { renderGuidance } from '../../src/guidance/catalog.js'
 import { buildPromptCacheKey } from '../../src/engine/prompt-cache-key.js'
+import { DailyReflectionEvidence } from '../../src/manager/daily-reflection-evidence.js'
+import type { DailyReflectionState } from '../../src/manager/daily-reflection-types.js'
+import { WorkerTurnStore } from '../../src/workers/harness/worker-turn-store.js'
 
 const KEY = 'feishu::restart-test'
 const message = (id: string, text: string): ChannelMessage => ({
@@ -168,6 +171,43 @@ describe('Manager restart continuation', () => {
     expect([...states][1].loadedNames.size).toBe(0)
     expect(inspected).toHaveBeenCalledOnce()
     expect(await store.loadCheckpoint(KEY)).toBeUndefined()
+  })
+
+  it('excludes a restarted daily Worker continuation from the next reflection window', async () => {
+    const windowStart = new Date(Date.now() - 60_000).toISOString()
+    let requested = false
+    const old = registry({ async *stream() {
+      requested = true
+      await new Promise(() => {})
+    }, updateConfig() {} })
+    void old.getOrCreate(KEY).wakeUp({
+      received_at: windowStart, timezone: 'Asia/Shanghai',
+      wake: {
+        kind: 'worker_event',
+        event: { kind: 'turn_completed', worker_id: 'analysis-worker', ts: windowStart, seq: 1, detail: {} },
+        dailyReflection: { runId: 'previous-run', scheduleId: 'daily-reflection',
+          targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' } },
+      },
+    })
+    const checkpoint = await checkpointWhere(value => value.hasEngineMessages && requested)
+    expect(checkpoint.toolProfile).toBe('daily_reflection')
+    const restored = registry({ async *stream() { yield* chunksFromContent([], 'end_turn') }, updateConfig() {} })
+    restored.registerResumeCheckpoints([checkpoint])
+    trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
+    await restored.resumeInterruptedEpisodes()
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.trigger.type).toBe('worker_event')
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
+
+    const evidence = new DailyReflectionEvidence({
+      managersDir: join(dir, 'managers'), store, traces: trace,
+      ledger: { listAllWorkers: async () => [] } as unknown as ManagerRegistryDeps['ledger'],
+      harness: {} as ManagerRegistryDeps['harness'], turns: new WorkerTurnStore(join(dir, 'workers')),
+      captureWorkerTrace: vi.fn(), readWorkerTrace: vi.fn(), redact: text => text,
+    })
+    // The previous run has completed: its episode IDs are no longer available in daily state.
+    const nextRun = { window_start: windowStart, window_end: new Date(Date.now() + 60_000).toISOString(),
+      episode_ids: [], analysis_worker_ids: [] } as unknown as DailyReflectionState
+    expect(await evidence.capture(nextRun)).toEqual({ records: [], gaps: [] })
   })
 
   it('preserves an interrupted tool call as unknown instead of executing it again during recovery', async () => {
