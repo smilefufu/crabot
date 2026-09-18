@@ -64,12 +64,82 @@ describe('ManagerToolCatalog', () => {
     }
   })
 
-  it('同分按 canonical 输入顺序；已有命中不占新增工具配额', () => {
+  it('同分按 canonical 输入顺序；已可见 top-k 不由长尾补位', () => {
     const catalog = new ManagerToolCatalog([tool('z_lookup', 'needle'), tool('a_lookup', 'needle'), tool('b_lookup', 'needle')], 'normal')
     const state = createManagerToolFaceState()
     state.loadedNames.add('z_lookup')
-    expect(catalog.search(state, 'needle', 1)).toMatchObject({ status: 'loaded', loaded: ['a_lookup'], alreadyVisible: ['z_lookup'] })
-    expect(catalog.search(state, 'needle', 1).loaded).toEqual(['b_lookup'])
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      expect(catalog.search(state, 'needle', 1)).toMatchObject({ status: 'already_visible', loaded: [], alreadyVisible: ['z_lookup'] })
+    }
+    expect([...state.loadedNames]).toEqual(['z_lookup'])
+  })
+
+  it('重复宽查询保持固定集合，loaded 与 already_visible 共享 limit', () => {
+    const names = Array.from({ length: 8 }, (_, i) => `lookup_${i}`)
+    const catalog = new ManagerToolCatalog(names.map(name => tool(name, '任务 trace 执行记录')), 'normal')
+    const state = createManagerToolFaceState()
+    state.loadedNames.add(names[0])
+    const query = 'find_task get_task_progress 按时间查询任务和trace执行记录'
+    expect(catalog.search(state, query, 3)).toMatchObject({ loaded: names.slice(1, 3), alreadyVisible: names.slice(0, 1) })
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      expect(catalog.search(state, query, 3)).toMatchObject({ status: 'already_visible', loaded: [], alreadyVisible: names.slice(0, 3) })
+    }
+    expect([...state.loadedNames]).toEqual(names.slice(0, 3))
+  })
+
+  it('预算重试只补载原集合，不把已加载项替换成集合外工具', () => {
+    const catalog = new ManagerToolCatalog([
+      tool('budget_a', 'x'.repeat(17 * 1024)), tool('budget_b', 'x'), tool('budget_c', 'x'),
+    ], 'normal')
+    const state = createManagerToolFaceState()
+    expect(catalog.search(state, 'budget', 2)).toMatchObject({ loaded: ['budget_a'], omittedDueToBudget: 1 })
+    expect(catalog.search(state, 'budget', 2)).toMatchObject({ loaded: ['budget_b'], alreadyVisible: ['budget_a'], omittedDueToBudget: 0 })
+    expect(catalog.search(state, 'budget', 2)).toMatchObject({ status: 'already_visible', loaded: [], alreadyVisible: ['budget_a', 'budget_b'] })
+    expect(state.loadedNames.has('budget_c')).toBe(false)
+  })
+
+  it('精确名称与 alias 不附带仅名称碎片匹配的候选', () => {
+    const catalog = new ManagerToolCatalog([
+      tool('inspect_crabot', '配置摘要 config summary'), tool('config_summary_reader', '配置摘要 config summary'),
+    ], 'normal')
+    for (const query of ['inspect_crabot', 'get_config_summary', '配置摘要']) {
+      const state = createManagerToolFaceState()
+      expect(catalog.search(state, query, 3).loaded, query).toEqual(['inspect_crabot'])
+      expect(catalog.search(state, query, 3)).toMatchObject({ loaded: [], alreadyVisible: ['inspect_crabot'] })
+    }
+  })
+
+  it('不存在的规范名称不降级为碎片搜索，已知 namespace 仍可查询', () => {
+    const catalog = new ManagerToolCatalog([
+      tool('lookup_task', 'find task progress'), tool('mcp__archive__lookup', 'archive records'),
+    ], 'normal')
+    for (const query of ['find_task', 'get_task_progress', 'mcp__archive__missing']) {
+      expect(catalog.search(createManagerToolFaceState(), query, 3), query)
+        .toMatchObject({ status: 'no_match', loaded: [], alreadyVisible: [] })
+    }
+    expect(catalog.search(createManagerToolFaceState(), 'mcp__archive', 3).loaded).toEqual(['mcp__archive__lookup'])
+  })
+
+  it('核心精确名称只返回已可见定义，不改变 loaded set', () => {
+    const catalog = new ManagerToolCatalog([
+      ...coreTools(NORMAL_MANAGER_CORE_NAMES), tool('read_worker_state', 'get worker state'),
+    ], 'normal')
+    const state = createManagerToolFaceState()
+    expect(catalog.search(state, '  GET_WORKER_STATE  ', 3)).toMatchObject({
+      status: 'already_visible', loaded: [], alreadyVisible: ['get_worker_state'],
+    })
+    expect(state.loadedNames.size).toBe(0)
+  })
+
+  it('未授权规范名称与不存在名称一致，不从全局 byName 泄露定义', () => {
+    const available = tool('lookup_records', 'delete records')
+    const hidden = tool('delete_records')
+    const without = new ManagerToolCatalog([available], 'normal')
+    const withHidden = new ManagerToolCatalog([available, hidden], 'normal', undefined, undefined, item => item.name !== hidden.name)
+    const first = without.search(createManagerToolFaceState(), hidden.name, 3)
+    const second = withHidden.search(createManagerToolFaceState(), hidden.name, 3)
+    expect(second).toEqual(first)
+    expect(second.status).toBe('no_match')
   })
 
   it('first oversize 工具可单独加载，但不跳过预算后的候选去填小项', () => {
