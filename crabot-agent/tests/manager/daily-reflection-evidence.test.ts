@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { promises as fs } from 'node:fs'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import { DailyReflectionEvidence, type ReflectionEvidenceDeps } from '../../src/manager/daily-reflection-evidence.js'
 import { reflectionDigest } from '../../src/manager/daily-reflection.js'
 import { WorkerTurnStore } from '../../src/workers/harness/worker-turn-store.js'
+import { TraceStore } from '../../src/core/trace-store.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { DailyReflectionState } from '../../src/manager/daily-reflection-types.js'
 import type { ManagerEpisodeTrace } from '../../src/manager/trace-types.js'
@@ -30,9 +32,8 @@ async function fixture() {
     harness: { readWorkerEvents: async id => events.get(id) ?? [] } as any,
     traces: {
       listTraceManagerKeys: () => [...new Set([...traces.values()].map(trace => trace.manager_key))],
-      getManagerEpisode: id => traces.get(id),
-      listManagerEpisodes: key => ({ items: [...traces.values()].filter(trace => trace.manager_key === key),
-        pagination: { page: 1, page_size: 100, total_items: traces.size, total_pages: 1 } }),
+      readManagerEpisode: async id => traces.get(id),
+      readManagerEpisodes: async function* () { yield* traces.values() },
     },
     captureWorkerTrace: vi.fn(async () => ({ source: { seq: 1, incarnation_fingerprint: 'fingerprint', upper_bound: { native: 0, harness: 0, legacy: 0 } }, result: { events: [], next_cursor: 'next' } })),
     readWorkerTrace: vi.fn(async () => ({ events: [], next_cursor: 'next' })),
@@ -49,6 +50,54 @@ async function fixture() {
 }
 
 describe('daily reflection persisted evidence', () => {
+  it('reads evicted archived episodes, including episodes whose history is missing', async () => {
+    const f = await fixture()
+    const traces = new TraceStore(20, join(f.root, 'traces'))
+    try {
+      for (let i = 0; i < 1002; i++) {
+        traces.startManagerEpisode(`archived-${i}`, 'chat::one' as ManagerKey, { type: 'human_message', summary: 'archive fixture' })
+        traces.finishManagerEpisode(`archived-${i}`, { status: 'completed' })
+      }
+      const timestamp = Date.now()
+      await f.store.save({ key: 'chat::one' as ManagerKey, recent: [], foldedCount: 0 })
+      const archiveState = { ...state, window_start: new Date(timestamp - 60_000).toISOString(), window_end: new Date(timestamp + 60_000).toISOString() }
+      await f.store.appendEpisodeLog('chat::one' as ManagerKey, 'archived-0', [
+        { id: 'human', role: 'user', content: '[人类消息]\narchived input', timestamp },
+      ])
+      expect(traces.getManagerEpisode('archived-0')).toBeUndefined()
+      const provider = new DailyReflectionEvidence({ ...f.deps, traces })
+      const manifest = await provider.capture(archiveState)
+      const record = manifest.records.find(item => item.source_id === 'archived-0')!
+      expect(record.gaps).toEqual([])
+      expect((await provider.read(record, archiveState)).content).toContain('archived input')
+      expect(manifest.records.find(item => item.source_id === 'archived-1')?.gaps).toEqual(['manager_history_unavailable'])
+      expect(traces.getManagerEpisode('archived-0')).toBeUndefined()
+    } finally { traces.stopFlushTimer() }
+  })
+
+  it('retries detail I/O at frozen history bytes without including later messages', async () => {
+    const f = await fixture()
+    await f.addEpisode('first', 'chat::one', 'frozen history')
+    const actualOpen = fs.open
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      if (String(args[0]).endsWith('/episodes/first.jsonl')) throw new Error('temporary I/O')
+      return actualOpen(...args)
+    })
+    let manifest
+    try { manifest = await f.provider.capture(state) } finally { open.mockRestore() }
+    expect(manifest.gaps).toEqual([])
+    const record = manifest.records.find(item => item.source_id === 'first')!
+    expect(record.digest).toBe('')
+    expect(record.gaps).toEqual(['temporary I/O'])
+    await f.store.appendEpisodeLog('chat::one' as ManagerKey, 'first', [
+      { id: 'late', role: 'user', content: '[人类消息]\nlate append', timestamp: Date.parse(activity) },
+    ])
+    const recovered = await f.provider.read(record, state)
+    expect(recovered.gaps).toEqual([])
+    expect(recovered.content).toContain('frozen history')
+    expect(recovered.content).not.toContain('late append')
+  })
+
   it('includes two sessions and an old task that failed in this window, excludes reflection analysis', async () => {
     const f = await fixture()
     await f.addEpisode('first', 'chat::one', '这个结果错了 test-secret')

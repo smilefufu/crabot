@@ -121,7 +121,11 @@ export class DailyReflection {
     return this.mutex.run(async () => {
       const state = await this.state()
       const offset = this.offset(state, cursor)
-      state.manifest ??= await this.deps.capture(state)
+      if (!state.manifest) {
+        const manifest = await this.deps.capture(state)
+        if (manifest.gaps.length) throw new Error(`REFLECTION_INVENTORY_UNAVAILABLE: ${manifest.gaps.join(', ')}`)
+        state.manifest = manifest
+      }
       const records = state.manifest.records.slice(offset, offset + 20)
       const next = offset + records.length
       const nextCursor = next < state.manifest.records.length ? this.nextCursor(state, next) : undefined
@@ -144,7 +148,9 @@ export class DailyReflection {
       let evidence: ReflectionEvidence
       try {
         evidence = await this.deps.read(record, state)
-        if (reflectionDigest(evidence.content) !== record.digest) evidence.gaps.push('frozen_evidence_changed')
+        const digest = reflectionDigest(evidence.content)
+        if (record.digest && digest !== record.digest) evidence.gaps.push('frozen_evidence_changed')
+        else if (!record.digest && !evidence.gaps.length) record.digest = digest
       } catch (error) {
         evidence = { content: '', gaps: [error instanceof Error ? error.message : String(error)] }
       }

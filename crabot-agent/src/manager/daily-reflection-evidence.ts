@@ -8,6 +8,7 @@ import type { WorkerHarness } from '../workers/harness/harness.js'
 import type { WorkerTurnStore } from '../workers/harness/worker-turn-store.js'
 import type { CompositeTraceResult } from '../workers/trace/composite-reader.js'
 import type { ManagerSessionStore } from './session-store.js'
+import type { ManagerEpisodeTrace } from './trace-types.js'
 import type { ManagerKey } from './types.js'
 import type { DailyReflectionState, ReflectionEvidence, ReflectionManifest, ReflectionRecord, ReflectionSource, ReflectionWindow, ReflectionWorkerTrace } from './daily-reflection-types.js'
 import { reflectionDigest } from './daily-reflection.js'
@@ -18,7 +19,7 @@ export interface ReflectionEvidenceDeps {
   ledger: LedgerStore
   harness: WorkerHarness
   turns: WorkerTurnStore
-  traces: Pick<TraceStore, 'listTraceManagerKeys' | 'listManagerEpisodes' | 'getManagerEpisode'>
+  traces: Pick<TraceStore, 'listTraceManagerKeys' | 'readManagerEpisodes' | 'readManagerEpisode'>
   captureWorkerTrace: (workerId: string, seq: number) => Promise<{ source: ReflectionWorkerTrace; result: Pick<CompositeTraceResult, 'events' | 'unavailable_reason'> }>
   readWorkerTrace: (workerId: string, source: ReflectionWorkerTrace) => Promise<Pick<CompositeTraceResult, 'events' | 'unavailable_reason'>>
   redact: (text: string) => string
@@ -88,34 +89,20 @@ export class DailyReflectionEvidence {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') gaps.push('manager_inventory_unavailable')
     }
-    const add = async (source: ReflectionSource, activityAt: string, summary: string): Promise<void> => {
-      const evidence = await this.readSource(source, state)
+    const add = async (source: ReflectionSource, activityAt: string, summary: string, episode?: ManagerEpisodeTrace): Promise<void> => {
+      const evidence = await this.readSource(source, state, episode)
       records.push({ record_ref: randomUUID(), kind: source.kind, source_id: source.kind === 'worker' ? source.worker_id
         : source.kind === 'manager_episode' ? source.episode_id : source.manager_key,
-      activity_at: activityAt, summary: this.deps.redact(summary), gaps: evidence.gaps, source, digest: reflectionDigest(evidence.content) })
+      activity_at: activityAt, summary: this.deps.redact(summary), gaps: evidence.gaps, source,
+      digest: evidence.gaps.length ? '' : reflectionDigest(evidence.content) })
     }
 
-    // Establish every reflection episode before selecting Workers, including earlier runs.
+    const histories = new Map<ManagerKey, Set<string>>()
+    const anchored = new Map<ManagerKey, Set<string>>()
     for (const key of keys) {
       const persisted = await this.deps.store.load(key)
       persisted.dailyReflection?.episode_ids.forEach(id => reflectionEpisodes.add(id))
-      for (let page = 1; ; page++) {
-        const result = this.deps.traces.listManagerEpisodes(key, { page, page_size: 100 })
-        for (const episode of result.items) {
-          if ((episode.trigger.schedule?.is_builtin && episode.trigger.schedule.task_type === 'daily_reflection')
-            || episode.spans.some(span => span.type === 'agent_loop' && (span.details as { capability_profile?: string })?.capability_profile === 'daily_reflection')) reflectionEpisodes.add(episode.trace_id)
-        }
-        if (page >= result.pagination.total_pages) break
-      }
-    }
-
-    for (const key of keys) {
       const ids = new Set<string>()
-      for (let page = 1; ; page++) {
-        const result = this.deps.traces.listManagerEpisodes(key, { page, page_size: 100 })
-        result.items.forEach(episode => ids.add(episode.trace_id))
-        if (page >= result.pagination.total_pages) break
-      }
       try {
         for (const file of await fs.readdir(join(this.deps.managersDir, encodeSegment(key), 'episodes'))) {
           if (file.endsWith('.jsonl')) ids.add(file.slice(0, -6))
@@ -123,32 +110,47 @@ export class DailyReflectionEvidence {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') gaps.push(`manager_inventory_unavailable:${key}`)
       }
-      const anchored = new Set<string>()
-      for (const id of ids) {
-        if (reflectionEpisodes.has(id)) continue
-        const episode = this.deps.traces.getManagerEpisode(id)
-        if (episode && (Date.parse(episode.started_at) >= Date.parse(state.window_end)
-          || (episode.ended_at && Date.parse(episode.ended_at) < Date.parse(state.window_start)))) continue
-        let bytes = 0
-        try { bytes = (await fs.stat(this.episodePath(key, id))).size } catch { /* readSource exposes the missing history */ }
-        const source: ReflectionSource = { kind: 'manager_episode', manager_key: key, episode_id: id, log_bytes: bytes,
-          span_ids: episode?.spans.filter(span => ['tool_call', 'decision', 'memory_write', 'rpc_call'].includes(span.type)
-            && !!span.ended_at && inWindow(span.ended_at, state)).map(span => span.span_id) ?? [] }
-        let messages: EngineMessage[] = []
-        try { messages = await this.messages(source) } catch { gaps.push(`manager_history_unreadable:${id}`) }
-        const currentMessages = messages.filter(message => inWindow(message.timestamp, state))
-        currentMessages.forEach(message => anchored.add(message.id))
-        const times = [episode?.started_at, episode?.ended_at, ...episode?.spans.flatMap(span => [span.started_at, span.ended_at]) ?? [],
-          ...currentMessages.map(message => new Date(message.timestamp).toISOString())]
-          .filter((time): time is string => !!time && inWindow(time, state)).sort()
-        if (!times.length) continue
-        const userPreview = currentMessages.filter(message => isHumanInput(message))
-          .map(message => (message as { content: string }).content.slice(0, 200)).slice(-3).join('\n')
-        await add(source, times.at(-1)!, `${episode?.trigger.summary ?? 'persisted episode'}; status=${episode?.ended_at && inWindow(episode.ended_at, state) ? episode.status : 'in_progress'}; llm_turns=${episode?.spans.filter(span => span.type === 'llm_call' && inWindow(span.started_at, state)).length ?? 'unknown'}\n${userPreview}`)
+      histories.set(key, ids)
+      anchored.set(key, new Set())
+    }
+    const addEpisode = async (key: ManagerKey, id: string, episode?: ManagerEpisodeTrace): Promise<void> => {
+      if ((episode?.trigger.schedule?.is_builtin && episode.trigger.schedule.task_type === 'daily_reflection')
+        || episode?.spans.some(span => span.type === 'agent_loop' && (span.details as { capability_profile?: string })?.capability_profile === 'daily_reflection')) reflectionEpisodes.add(id)
+      if (reflectionEpisodes.has(id)) return
+      if (episode && (Date.parse(episode.started_at) >= Date.parse(state.window_end)
+        || (episode.ended_at && Date.parse(episode.ended_at) < Date.parse(state.window_start)))) return
+      let bytes = 0
+      try { bytes = (await fs.stat(this.episodePath(key, id))).size } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        // Missing history has no proven byte boundary; later arrivals cannot fill this snapshot.
       }
+      const source: ReflectionSource = { kind: 'manager_episode', manager_key: key, episode_id: id, log_bytes: bytes,
+        span_ids: episode?.spans.filter(span => ['tool_call', 'decision', 'memory_write', 'rpc_call'].includes(span.type)
+          && !!span.ended_at && inWindow(span.ended_at, state)).map(span => span.span_id) ?? [] }
+      let messages: EngineMessage[] = []
+      try { messages = await this.messages(source) } catch {
+        if (!episode) gaps.push(`manager_history_unreadable:${id}`)
+        // With a known episode, readSource reports the detail gap at the frozen byte boundary.
+      }
+      const currentMessages = messages.filter(message => inWindow(message.timestamp, state))
+      currentMessages.forEach(message => anchored.get(key)?.add(message.id))
+      const times = [episode?.started_at, episode?.ended_at, ...episode?.spans.flatMap(span => [span.started_at, span.ended_at]) ?? [],
+        ...currentMessages.map(message => new Date(message.timestamp).toISOString())]
+        .filter((time): time is string => !!time && inWindow(time, state)).sort()
+      if (!times.length) return
+      const userPreview = currentMessages.filter(message => isHumanInput(message))
+        .map(message => (message as { content: string }).content.slice(0, 200)).slice(-3).join('\n')
+      await add(source, times.at(-1)!, `${episode?.trigger.summary ?? 'persisted episode'}; status=${episode?.ended_at && inWindow(episode.ended_at, state) ? episode.status : 'in_progress'}; llm_turns=${episode?.spans.filter(span => span.type === 'llm_call' && inWindow(span.started_at, state)).length ?? 'unknown'}\n${userPreview}`, episode)
+    }
+    for await (const episode of this.deps.traces.readManagerEpisodes()) {
+      histories.get(episode.manager_key)?.delete(episode.trace_id)
+      await addEpisode(episode.manager_key, episode.trace_id, episode)
+    }
+    for (const key of keys) {
+      for (const id of histories.get(key) ?? []) await addEpisode(key, id)
       const session = await this.deps.store.load(key)
       const unanchored = session.recent.filter(message => isHumanInput(message)
-        && inWindow(message.timestamp, state) && !anchored.has(message.id))
+        && inWindow(message.timestamp, state) && !anchored.get(key)?.has(message.id))
       if (unanchored.length) {
         await add({ kind: 'human_input', manager_key: key, message_ids: unanchored.map(message => message.id) },
           new Date(unanchored.at(-1)!.timestamp).toISOString(), '尚未关联完整 episode 的持久入站内容')
@@ -198,12 +200,12 @@ export class DailyReflectionEvidence {
     return this.readSource(record.source, state)
   }
 
-  private async readSource(source: ReflectionSource, window: ReflectionWindow): Promise<ReflectionEvidence> {
+  private async readSource(source: ReflectionSource, window: ReflectionWindow, capturedEpisode?: ManagerEpisodeTrace): Promise<ReflectionEvidence> {
     const gaps: string[] = []
     const values: unknown[] = []
     try {
       if (source.kind === 'manager_episode') {
-        const episode = this.deps.traces.getManagerEpisode(source.episode_id)
+        const episode = capturedEpisode ?? await this.deps.traces.readManagerEpisode(source.episode_id)
         if (!episode) gaps.push('manager_trace_unavailable')
         for (const id of source.span_ids) {
           const span = episode?.spans.find(item => item.span_id === id)

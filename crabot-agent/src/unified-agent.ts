@@ -9,6 +9,7 @@
 import { createGuidanceTool } from './guidance/catalog.js'
 import fs from 'node:fs'
 import path from 'node:path'
+import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { ModuleBase, RpcError, generateId, sha256CanonicalJson, type AgentCliExecutionRef, type ModuleConfig, type Event, type ModuleId } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
@@ -4327,16 +4328,22 @@ export class UnifiedAgent extends ModuleBase {
     const fingerprint = incarnationFingerprint({ incarnation_id: incarnation.incarnation_id,
       impl: incarnation.impl as import('./workers/types.js').WorkerImplId, seq, started_at: incarnation.started_at })
     if (frozen && frozen.incarnation_fingerprint !== fingerprint) throw new Error('Reflection incarnation changed')
-    const cursors = this.traceCursorStore()
-    const cursor = await cursors.mintDurable(workerId, fingerprint, { harness: 0, native: 0, legacy: 0 })
-    if (frozen) {
-      const next = await cursors.mintDurable(workerId, fingerprint, frozen.upper_bound)
-      await cursors.captureWindow(cursor, { end: frozen.upper_bound, nextToken: next })
+    const dir = await fs.promises.mkdtemp(path.join(tmpdir(), 'crabot-reflection-cursors-'))
+    const cursors = new TraceCursorStore(dir)
+    try {
+      const cursor = await cursors.mintDurable(workerId, fingerprint, { harness: 0, native: 0, legacy: 0 })
+      if (frozen) {
+        const next = await cursors.mintDurable(workerId, fingerprint, frozen.upper_bound)
+        await cursors.captureWindow(cursor, { end: frozen.upper_bound, nextToken: next })
+      }
+      const result = await this.readWorkerTrace({ worker_id: workerId, seq, cursor }, cursors)
+      const record = await cursors.resolve(cursor, workerId, fingerprint)
+      if (!record.window) throw new Error('Reflection source boundary unavailable')
+      return { source: { seq, incarnation_fingerprint: fingerprint, upper_bound: record.window.end }, result }
+    } finally {
+      await cursors.flush()
+      await fs.promises.rm(dir, { recursive: true, force: true })
     }
-    const result = await this.handleGetWorkerTrace({ worker_id: workerId, seq, cursor })
-    const record = await cursors.resolve(cursor, workerId, fingerprint)
-    if (!record.window) throw new Error('Reflection source boundary unavailable')
-    return { source: { seq, incarnation_fingerprint: fingerprint, upper_bound: record.window.end }, result }
   }
 
   /**
@@ -4358,13 +4365,17 @@ export class UnifiedAgent extends ModuleBase {
    * 与 `harness.getWorkerTerminal` 同形状（共用 `findIncarnationBySeq`），让 admin 侧统一映射。
    */
   private async handleGetWorkerTrace(params: GetWorkerTraceParams): Promise<GetWorkerTraceResult> {
+    return this.readWorkerTrace(params, this.traceCursorStore())
+  }
+
+  private async readWorkerTrace(params: GetWorkerTraceParams, cursorStore: TraceCursorStore): Promise<GetWorkerTraceResult> {
     const stack = this.requireManagerStack()
     return readCompositeWorkerTrace(
       {
         ledger: stack.ledger,
         harness: stack.harness,
         adapters: stack.adapters,
-        cursorStore: this.traceCursorStore(),
+        cursorStore,
         nativeCopy: this.nativeTraceCopyStore(),
         redact: (text) => redactSecrets(text, [...(this.knownSecrets ?? [])]),
         legacyTraceDir: getAgentTraceDir(),

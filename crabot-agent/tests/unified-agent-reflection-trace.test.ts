@@ -1,5 +1,5 @@
-import { expect, it } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { expect, it, vi } from 'vitest'
+import { mkdtemp, rm, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { UnifiedAgent } from '../src/unified-agent.js'
@@ -15,7 +15,8 @@ it('reflection keeps source bounds after cursor eviction and rejects changed inc
     agent.traceCursorStore = () => cursors
     let currentLength = 2
     let fingerprint = ''
-    agent.handleGetWorkerTrace = async ({ cursor }: { cursor: string }) => {
+    agent.readWorkerTrace = async ({ cursor }: { cursor: string }, isolated = cursors) => {
+      const cursors = isolated
       const record = await cursors.resolve(cursor, 'worker', fingerprint)
       if (!record.window) {
         const end = { harness: currentLength, native: currentLength, legacy: 0 }
@@ -27,6 +28,9 @@ it('reflection keeps source bounds after cursor eviction and rejects changed inc
     }
     const { incarnationFingerprint } = await import('../src/workers/trace/cursor-store.js')
     fingerprint = incarnationFingerprint(incarnation as any)
+    const ordinary = await cursors.mintDurable('ordinary', 'ordinary-fingerprint', { harness: 0, native: 0, legacy: 0 })
+    for (let i = 0; i < 257; i++) await agent.readReflectionWorkerTrace('worker', 1)
+    await expect(cursors.resolve(ordinary, 'ordinary', 'ordinary-fingerprint')).resolves.toBeDefined()
     const first = await agent.readReflectionWorkerTrace('worker', 1)
     expect(first.result.events).toHaveLength(2)
     expect(first.source).not.toHaveProperty('cursor')
@@ -39,4 +43,21 @@ it('reflection keeps source bounds after cursor eviction and rejects changed inc
     await (cursors as any).writeTail
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+it('cleans isolated reflection cursors after a source read fails', async () => {
+  const agent = Object.create(UnifiedAgent.prototype) as any
+  agent.managerStack = { ledger: { findWorker: async () => ({ worker: { incarnations: [
+    { seq: 1, incarnation_id: 'incarnation', impl: 'builtin', started_at: '2026-09-17T00:00:00.000Z' },
+  ] } }) } }
+  agent.traceCursorStore = vi.fn(() => { throw new Error('ordinary cursors must not be used') })
+  let dir = ''
+  agent.readWorkerTrace = async (_params: unknown, cursors: any) => {
+    dir = cursors.dir
+    throw new Error('source failed')
+  }
+  await expect(agent.readReflectionWorkerTrace('worker', 1)).rejects.toThrow('source failed')
+  expect(dir).not.toBe('')
+  await expect(access(dir)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(agent.traceCursorStore).not.toHaveBeenCalled()
 })

@@ -46,6 +46,30 @@ async function ready(host: DailyReflection) {
 }
 
 describe('DailyReflection host', () => {
+  it('does not publish a failed inventory and retries without changing the admitted window', async () => {
+    const { host, deps, store } = await setup()
+    vi.mocked(deps.capture).mockResolvedValueOnce({ records: [], gaps: ['manager_inventory_unavailable'] })
+    await expect(host.list()).rejects.toThrow('manager_inventory_unavailable')
+    expect((await store.load(key)).dailyReflection?.manifest).toBeUndefined()
+    await host.admit({ ...admission, window_end: '2026-09-18T18:00:00.000Z' }, 'retry')
+    const page = await host.list() as any
+    expect(page.window_end).toBe(admission.window_end)
+    expect(page.records).toHaveLength(1)
+    await host.list()
+    expect(deps.capture).toHaveBeenCalledTimes(2)
+  })
+
+  it('recovers a failed initial detail read at the same source bounds and freezes its successful digest', async () => {
+    const { host, deps, records } = await setup()
+    vi.mocked(deps.capture).mockResolvedValueOnce({ records: [{ ...records[0], digest: '', gaps: ['temporary read failure'] }], gaps: [] })
+    await ready(host)
+    expect((await host.read('ref-0') as any).gaps).toEqual([])
+    expect((await host.finish(completion()))?.outcome).toBe('completed')
+    vi.mocked(deps.read).mockResolvedValueOnce({ content: 'changed evidence', gaps: [] })
+    expect((await host.read('ref-0') as any).gaps).toContain('frozen_evidence_changed')
+    expect(deps.read).toHaveBeenCalledWith(expect.objectContaining({ source: records[0].source }), expect.anything())
+  })
+
   it('freezes the directory, refuses forged cursors, and preserves progress across restart/history saves', async () => {
     const { host, deps, store } = await setup(21)
     const stale = await store.load(key)
