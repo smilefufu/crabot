@@ -20,7 +20,7 @@ try {
     })
   }
   fs.writeFileSync(path.join(context, 'Dockerfile'), `FROM node:20-alpine
-RUN apk add --no-cache bash python3
+RUN apk add --no-cache bash python3 git
 RUN npm install --prefix /app --omit=dev @vscode/ripgrep@1.18.0
 COPY tool.cjs /app/tool.cjs
 COPY tools /app/tools

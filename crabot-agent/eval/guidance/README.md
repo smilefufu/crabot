@@ -1,5 +1,15 @@
 # 内置 guidance 隔离比较
 
+## 2026-09-18 完整执行重验
+
+用户要求重做验证后，新增 `continuous-cases.mjs`、`continuous-runtime.mjs` 与 `continuous-compare.mjs`。事前判据见 [CONTINUOUS-ACCEPTANCE.md](./CONTINUOUS-ACCEPTANCE.md)。旧短决策批次保留为局部观察，不承担质量、性能不回退或线上故障已修复的证明。
+
+新入口按 `GUIDANCE_BASELINE_ROOT` 和当前仓库分别加载实际编译版本，保留两版已有 guidance，不复用旧历史比较器“基线无 guidance”的装配假设。真实业务工具不再被首次选择截断；文件/进程、目录、规则快照、Git 观察均在 Docker，消息只进本地收件箱。子审查使用独立的产品内置子 Agent 提示词。
+
+冻结前已通过 21 项脚本模型回归，包含两版自省在查板后继续到外发、同批指南和业务调用进入下一轮、真实权限、独立产物拒绝虚假完成、子审查反馈，以及主控派工至真实项目修复提交闭环。它们验证评测器可用，不是新旧模型成绩。
+
+`continuous-compare.mjs --prepare` 冻结 12 类案例、34 条轨迹、两个编译产物摘要和镜像 ID，最大 720 请求/200 万报告 tokens。真实运行需明确外发授权，使用相同输出目录与输入；已有 events 不覆盖，不重试补样。脚本生成的 assessment 始终为 pending-semantic-review，必须审查完整输出后另写结论。
+
 ## 2026-09-18 规范与工作流边界
 
 `boundary-cases.mjs` 定义 18 个人工边界案例与事先冻结的语义判据；`boundary-probe.mjs` 使用实际编译后的旧新正文、目录、自动加载选择和工具说明。只返回无副作用的冻结 guidance 内容，遇到首个业务工具选择即记录并停止，不伪造动作回执。仅观察下一步决策，不等同于完整任务验收。限制与本地结果见 [BOUNDARY-RESULTS.md](./BOUNDARY-RESULTS.md)。
