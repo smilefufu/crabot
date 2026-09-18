@@ -152,9 +152,40 @@ describe('仓库 builtins/skills 载荷', () => {
         'writing-plans',
         'systematic-debugging',
         'verification-before-completion',
-        'memory-graph-linking',
         'crabot-cli',
       ].sort())
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('升级移除旧内置建链 Skill，保留同名用户 Skill，并持久化清理结果', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'skill-builtins-retired-'))
+    const userSkillDir = join(dataDir, 'user-skills')
+    writeSkill(userSkillDir, 'memory-graph-linking')
+    const entry = {
+      name: 'memory-graph-linking', description: 'existing', version: '1.0.0',
+      is_essential: false, can_disable: true, enabled: true,
+      created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-01T00:00:00.000Z',
+    }
+    writeFileSync(join(dataDir, 'skills.json'), JSON.stringify([
+      { ...entry, id: 'old-builtin', source_type: 'builtin', is_builtin: true,
+        skill_dir: join(REPO_BUILTINS_DIR, 'memory-graph-linking') },
+      { ...entry, id: 'user-owned', source_type: 'imported', is_builtin: false,
+        skill_dir: join(userSkillDir, 'memory-graph-linking') },
+    ]))
+    try {
+      const mgr = new SkillManager(dataDir)
+      await mgr.initialize()
+      await mgr.registerBuiltins(REPO_BUILTINS_DIR)
+      expect(mgr.get('old-builtin')).toBeUndefined()
+      expect(mgr.get('user-owned')).toMatchObject({ name: 'memory-graph-linking', is_builtin: false })
+
+      const restarted = new SkillManager(dataDir)
+      await restarted.initialize()
+      expect(restarted.get('old-builtin')).toBeUndefined()
+      expect(restarted.get('user-owned')).toMatchObject({ name: 'memory-graph-linking', is_builtin: false })
+      expect(existsSync(join(userSkillDir, 'memory-graph-linking', 'SKILL.md'))).toBe(true)
     } finally {
       rmSync(dataDir, { recursive: true, force: true })
     }
