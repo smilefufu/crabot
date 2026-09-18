@@ -127,15 +127,16 @@ export interface SensitiveRpcTransportOptions {
   authorizationBearer?: string
 }
 
-export type SensitiveRpcMethod = 'get_agent_config' | 'resolve_worker_connection' | 'issue_agent_cli_credential' | 'verify_core_agent_runtime' | 'complete_core_agent_cutover' | 'register_core_agent' | 'consume_admin_chat_assertion' | 'consume_workboard_admin_assertion' | 'consume_worker_operation_assertion' | 'process_message' | 'change_workboard_admin' | 'install_worker_implementation' | 'verify_worker_implementation' | 'cancel_worker_implementation_operation'
+export type SensitiveRpcMethod = 'get_agent_config' | 'resolve_worker_connection' | 'issue_agent_cli_credential' | 'verify_core_agent_runtime' | 'complete_core_agent_cutover' | 'complete_daily_reflection' | 'consume_daily_reflection_trigger' | 'trigger_schedule' | 'register_core_agent' | 'consume_admin_chat_assertion' | 'consume_workboard_admin_assertion' | 'consume_worker_operation_assertion' | 'process_message' | 'change_workboard_admin' | 'install_worker_implementation' | 'verify_worker_implementation' | 'cancel_worker_implementation_operation'
 
 const SENSITIVE_RPC_METHODS = new Set<SensitiveRpcMethod>([
   'get_agent_config', 'resolve_worker_connection', 'issue_agent_cli_credential', 'verify_core_agent_runtime', 'complete_core_agent_cutover', 'register_core_agent',
   'consume_admin_chat_assertion', 'consume_workboard_admin_assertion', 'consume_worker_operation_assertion', 'change_workboard_admin', 'install_worker_implementation',
-  'verify_worker_implementation', 'cancel_worker_implementation_operation',
+  'verify_worker_implementation', 'cancel_worker_implementation_operation', 'complete_daily_reflection', 'consume_daily_reflection_trigger', 'trigger_schedule',
 ])
 
 export function isSensitiveRpcCall(method: string, params: unknown): boolean {
+  if (method === 'trigger_schedule') return !!params && typeof params === 'object' && (params as { reflection_proof?: unknown }).reflection_proof !== undefined
   if (method === 'process_message') return !!params && typeof params === 'object' && (params as { source_type?: unknown }).source_type === 'admin_chat'
   return SENSITIVE_RPC_METHODS.has(method as SensitiveRpcMethod)
 }

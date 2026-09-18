@@ -73,6 +73,8 @@ import { canonicalizeJson,
   GOAL_CLEAR_BARE,
 } from 'crabot-shared'
 import {
+  type CompleteDailyReflectionParams,
+  type CompleteDailyReflectionResult,
   type Friend,
   type PermissionTemplate,
   type ChannelIdentity,
@@ -748,6 +750,8 @@ export class AdminModule extends ModuleBase {
   // saveData 串行化锁：防止并发 saveData 在 atomicWriteFile 的 write(.tmp) + rename 上竞态
   // 典型场景：trigger_now 的 fire-and-forget saveData 与 admin.stop() 的 saveData 同时进行
   private saveDataLock: Promise<void> | null = null
+  private readonly dailyReflectionTriggers = new Map<string, string>()
+  private dailyReflectionCompletionLock?: Promise<unknown>
 
   // saveTasks 专项串行化锁：tasks 写盘频率比 saveData 高得多（每条 task mutation 都触发），
   // 必须跟 saveData 解耦——共用 saveDataLock 会让 task 写盘等其他 6 个文件依次写完，性能不可接受。
@@ -894,6 +898,8 @@ export class AdminModule extends ModuleBase {
     // spec 2026-06-09-task-trace-tool-unification.md §4.3 + §4.4
     this.registerMethod('cleanup_old_tasks_by_count', this.handleCleanupOldTasksByCount.bind(this))
     this.registerMethod('update_task_status', this.handleUpdateTaskStatus.bind(this))
+    this.registerMethod('consume_daily_reflection_trigger', this.handleConsumeDailyReflectionTrigger.bind(this))
+    this.registerMethod('complete_daily_reflection', this.handleCompleteDailyReflection.bind(this))
     this.registerMethod('update_task_outcome', this.handleUpdateTaskOutcome.bind(this))
     this.registerMethod('assign_worker', this.handleAssignWorker.bind(this))
     this.registerMethod('update_plan', this.handleUpdatePlan.bind(this))
@@ -6177,6 +6183,77 @@ export class AdminModule extends ModuleBase {
   // Schedule 触发回调
   // ============================================================================
 
+  private async handleConsumeDailyReflectionTrigger(
+    params: { proof: string; payload_sha256: string },
+    context?: RpcHandlerContext,
+  ): Promise<{ consumed: true }> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+    if (!params || typeof params.proof !== 'string' || typeof params.payload_sha256 !== 'string'
+      || this.dailyReflectionTriggers.get(params.proof) !== params.payload_sha256) {
+      throw new RpcError('FORBIDDEN', 'Invalid daily reflection trigger proof')
+    }
+    this.dailyReflectionTriggers.delete(params.proof)
+    return { consumed: true }
+  }
+
+  private async handleCompleteDailyReflection(
+    params: CompleteDailyReflectionParams,
+    context?: RpcHandlerContext,
+  ): Promise<CompleteDailyReflectionResult> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+    if (!this.dataLoaded) throw new RpcError('UNAVAILABLE', 'Schedule data is not loaded')
+    if (!params || typeof params.schedule_id !== 'string' || !params.schedule_id.trim()
+      || typeof params.trigger_id !== 'string' || !params.trigger_id.trim()
+      || typeof params.window_start !== 'string' || typeof params.window_end !== 'string'
+      || !Number.isFinite(Date.parse(params.window_start)) || !Number.isFinite(Date.parse(params.window_end))
+      || Date.parse(params.window_end) <= Date.parse(params.window_start) || Date.parse(params.window_end) > Date.now()) {
+      throw new RpcError('INVALID_PARAMS', 'Invalid daily reflection window')
+    }
+    const completion = (this.dailyReflectionCompletionLock ?? Promise.resolve()).catch(() => undefined).then(async () => {
+      const schedule = this.schedules.get(params.schedule_id as ScheduleId)
+      if (!schedule || !schedule.is_builtin || schedule.script || schedule.task_template?.type !== 'daily_reflection') {
+        throw new RpcError('FORBIDDEN', 'Schedule is not builtin daily reflection')
+      }
+      const watermark = schedule.watermark ?? schedule.created_at
+      if (watermark !== params.window_start && watermark !== params.window_end) {
+        throw new RpcError('CONFLICT', 'Daily reflection watermark changed')
+      }
+      const status = watermark === params.window_end ? 'already_applied' as const : 'applied' as const
+      const updated = { ...schedule, watermark: params.window_end, updated_at: generateTimestamp() }
+      this.schedules.set(schedule.id, updated)
+      try {
+        await this.saveData()
+      } catch (error) {
+        // Keep unrelated concurrent schedule edits; only undo this unconfirmed watermark.
+        const current = this.schedules.get(schedule.id)
+        if (current?.watermark === params.window_end) {
+          this.schedules.set(schedule.id, { ...current, watermark: schedule.watermark })
+        }
+        throw error
+      }
+      if (this.schedules.get(schedule.id)?.watermark !== params.window_end) {
+        throw new RpcError('CONFLICT', 'Daily reflection watermark changed during confirmation')
+      }
+      return { status, watermark: params.window_end }
+    })
+    this.dailyReflectionCompletionLock = completion
+    try {
+      return await completion
+    } finally {
+      if (this.dailyReflectionCompletionLock === completion) this.dailyReflectionCompletionLock = undefined
+    }
+  }
+
   /**
    * ScheduleEngine 到点时调用的回调
    * 替换模板变量 → RPC 调 Agent `trigger_schedule` → 更新 Schedule 状态
@@ -6243,61 +6320,58 @@ export class AdminModule extends ModuleBase {
       const builtinDailyReflection = schedule.is_builtin === true
         && template?.type === 'daily_reflection'
       const retiredMemoryCurate = template?.type === 'memory_curate'
-      const triggerResult = await this.rpcClient.call<
-        {
-          schedule_id: string
-          trigger_id: string
-          schedule_name: string
-          title?: string
-          description?: string
-          target_session: ScheduleTargetSession
-          creator_friend_id?: FriendId
-          is_builtin?: boolean
-          task_type?: string
-          priority?: TaskPriority
-          input?: Record<string, unknown>
-          tags?: string[]
-          script?: ScheduleScript
-        },
-        { accepted: true; task_id?: string }
-      >(
-        port,
-        'trigger_schedule',
-        {
-          schedule_id: schedule.id,
-          trigger_id: triggerId,
-          schedule_name: schedule.name,
-          ...(template ? {
-            title: replaceVars(template.title),
-            description: replaceVars(template.description ?? ''),
-          } : {}),
-          target_session: targetSession,
-          ...(schedule.creator_friend_id ? { creator_friend_id: schedule.creator_friend_id } : {}),
-          ...(schedule.is_builtin ? { is_builtin: schedule.is_builtin } : {}),
-          ...(directMaintenance || builtinDailyReflection || retiredMemoryCurate ? {
-            task_type: template!.type,
-          } : {}),
-          ...(directMaintenance ? {
-            priority: template!.priority,
-            input: renderTemplateValue(template!.input) as Record<string, unknown> | undefined,
-            tags: template!.tags,
-          } : {}),
-          ...(!directMaintenance && template ? {
-            priority: template.priority,
-            input: renderTemplateValue(template.input) as Record<string, unknown> | undefined,
-            tags: template.tags,
-          } : {}),
-          ...(schedule.script ? { script: { ...schedule.script } } : {}),
-        },
-        this.config.moduleId
-      )
+      const payload = {
+        schedule_id: schedule.id,
+        trigger_id: triggerId,
+        schedule_name: schedule.name,
+        ...(template ? {
+          title: replaceVars(template.title),
+          description: replaceVars(template.description ?? ''),
+        } : {}),
+        target_session: targetSession,
+        ...(schedule.creator_friend_id ? { creator_friend_id: schedule.creator_friend_id } : {}),
+        ...(schedule.is_builtin ? { is_builtin: schedule.is_builtin } : {}),
+        ...(directMaintenance || builtinDailyReflection || retiredMemoryCurate ? {
+          task_type: template!.type,
+        } : {}),
+        ...(builtinDailyReflection ? { reflection_window: {
+          window_start: schedule.watermark ?? schedule.created_at,
+          window_end: now.toISOString(),
+        } } : {}),
+        ...(directMaintenance ? {
+          priority: template!.priority,
+          input: renderTemplateValue(template!.input) as Record<string, unknown> | undefined,
+          tags: template!.tags,
+        } : {}),
+        ...(!directMaintenance && template ? {
+          priority: template.priority,
+          input: renderTemplateValue(template.input) as Record<string, unknown> | undefined,
+          tags: template.tags,
+        } : {}),
+        ...(schedule.script ? { script: { ...schedule.script } } : {}),
+      }
+      let triggerResult: { accepted: true; task_id?: string }
+      if (builtinDailyReflection) {
+        const proof = crypto.randomBytes(32).toString('hex')
+        const wirePayload = JSON.parse(JSON.stringify(payload)) as typeof payload
+        this.dailyReflectionTriggers.set(proof, sha256CanonicalJson(wirePayload))
+        try {
+          triggerResult = await this.rpcClient.callSensitive(port, 'trigger_schedule',
+            { ...wirePayload, reflection_proof: proof }, this.config.moduleId)
+        } finally {
+          this.dailyReflectionTriggers.delete(proof)
+        }
+      } else {
+        triggerResult = await this.rpcClient.call(port, 'trigger_schedule', payload, this.config.moduleId)
+      }
 
       // 更新 Schedule 状态（不可变模式）
       const nowIso = generateTimestamp()
+      const currentSchedule = this.schedules.get(schedule.id) ?? schedule
       const updated: Schedule = {
-        ...schedule,
+        ...currentSchedule,
         last_triggered_at: nowIso,
-        execution_count: schedule.execution_count + 1,
+        execution_count: currentSchedule.execution_count + 1,
         next_trigger_at: this.calculateNextTriggerTime(schedule.trigger),
         ...(triggerResult.task_id ? { last_task_id: triggerResult.task_id } : {}),
         updated_at: nowIso,

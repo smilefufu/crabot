@@ -74,6 +74,11 @@ export class WorkerTurnStore {
     })
   }
 
+  /** Host-only history read for the fixed daily evidence window. */
+  async list(workerId: string): Promise<StoredWorkerTurn[]> {
+    return this.mutex(workerId).run(async () => (await this.read(workerId)).turns)
+  }
+
   async latestForIncarnation(workerId: string, incarnationId: IncarnationId): Promise<StoredWorkerTurn | undefined> {
     return this.mutex(workerId).run(async () =>
       (await this.read(workerId)).turns.filter((turn) => turn.incarnation_id === incarnationId).at(-1),

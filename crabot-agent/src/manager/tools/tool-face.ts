@@ -6,6 +6,7 @@
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.3
  */
 
+import { buildDailyReflectionTools, type DailyReflection } from '../daily-reflection.js'
 import { createExecutionCapabilitiesTool, type DescribeExecutionTools } from './execution-capabilities.js'
 import { createGuidanceTool, renderGuidance } from '../../guidance/catalog.js'
 import { z } from 'zod/v4'
@@ -39,6 +40,7 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
+  readonly dailyReflection?: DailyReflection
   readonly workboardGuidanceProvided?: boolean
   readonly describeExecutionTools?: DescribeExecutionTools
   readonly harness: WorkerHarness
@@ -479,7 +481,9 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
     ...(deps.schedule ? { schedule: deps.schedule } : {}),
   })
-  const normalProfile = (deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')) === 'normal'
+  const selectedProfile = deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')
+  const normalProfile = selectedProfile === 'normal'
+  const dailyProfile = selectedProfile === 'daily_reflection' && deps.isBuiltinDailyReflection === true
   let workboardGuidanceProvided = deps.workboardGuidanceProvided === true
   const guidanceTool = createGuidanceTool('manager', name => {
     if (name === 'manager.workboard') workboardGuidanceProvided = true
@@ -499,14 +503,28 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const projectDocTools = buildProjectDocTools(deps.projectDocs)
 
   const builtinTools = [
-    ...(normalProfile ? [guidanceTool, createExecutionCapabilitiesTool(deps)] : []),
+    ...(normalProfile ? [guidanceTool] : []),
+    ...(normalProfile || dailyProfile ? [createExecutionCapabilitiesTool(deps)] : []),
+    ...(dailyProfile ? buildDailyReflectionTools(deps.dailyReflection) : []),
     ...messagingTools,
     ...memoryTools,
     ...workerTools,
     ...workboardTools,
     ...projectDocTools,
     ...infoTools,
-  ]
+  ].map((tool): ToolDefinition => {
+    if (!dailyProfile || !deps.dailyReflection || tool.exitsLoop) return tool
+    return { ...tool, async call(input, context) {
+      let result: ToolCallResult
+      try { result = await tool.call(input, context) }
+      catch (error) {
+        await deps.dailyReflection!.observe(tool.name, input, { isError: true, output: String(error) })
+        throw error
+      }
+      await deps.dailyReflection!.observe(tool.name, input, result)
+      return result
+    } }
+  })
   assertClosedToolFace(builtinTools)
   if (!deps.faceState) return builtinTools
 

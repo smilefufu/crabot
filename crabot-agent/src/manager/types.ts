@@ -16,6 +16,8 @@ export type { ManagerKey }
 /** Manager 会话状态(对话历史/摘要 loop 上下文),按 ManagerKey 持久化 */
 export interface ManagerSessionState {
   readonly key: ManagerKey
+  /** Host-owned daily workflow; history/compaction saves preserve the latest durable value. */
+  readonly dailyReflection?: import('./daily-reflection-types.js').DailyReflectionState
   /** 滚动摘要块(增量压缩产物);无历史时为 undefined */
   readonly rollingSummary?: string
   /** 最近 K 条原始消息(正序) */

@@ -517,6 +517,8 @@ export function resolveOverdueReminder(value: boolean | undefined): boolean {
 
 /** protocol-agent-v3 §8.2 trigger_schedule。 */
 export interface TriggerScheduleParams {
+  reflection_proof?: string
+  reflection_window?: import('./manager/daily-reflection-types.js').ReflectionWindow
   schedule_id: ScheduleId
   trigger_id: string
   schedule_name: string
@@ -1033,6 +1035,17 @@ export class UnifiedAgent extends ModuleBase {
 
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
+      reflectionEvidence: {
+        traces: this.traceStore,
+        redact: text => redactSecrets(text, [...this.knownSecrets]),
+        captureWorkerTrace: (workerId, seq) => this.readReflectionWorkerTrace(workerId, seq),
+        readWorkerTrace: async (workerId, source) => (await this.readReflectionWorkerTrace(workerId, source.seq, source)).result,
+      },
+      confirmDailyReflection: async params => {
+        if (!this.adminPort) throw new Error('Admin unavailable for daily reflection confirmation')
+        return this.rpcClient.callSensitive(this.adminPort, 'complete_daily_reflection', params,
+          this.config.moduleId, { authorizationBearer: ConfigLoader.getRuntimeBearer() })
+      },
       now: () => new Date().toISOString(),
       // Admin「AI 性格提示词」→ manager system prompt(§4.2);thunk 现读,配置热更下次 episode 生效
       managerPersonality: () => this.agentConfig?.system_prompt,
@@ -3336,6 +3349,14 @@ export class UnifiedAgent extends ModuleBase {
         reason: 'invalid trigger context',
       })
     }
+    const daily = params.is_builtin === true && params.task_type === 'daily_reflection'
+    if (daily && (!params.reflection_window
+      || !Number.isFinite(Date.parse(params.reflection_window.window_start))
+      || !Number.isFinite(Date.parse(params.reflection_window.window_end))
+      || Date.parse(params.reflection_window.window_end) <= Date.parse(params.reflection_window.window_start))) {
+      throw new RpcError('INVALID_PARAMS', 'Builtin daily reflection requires a trusted window')
+    }
+    if (!daily && (params.reflection_window || params.reflection_proof)) throw new RpcError('INVALID_PARAMS', 'Reflection window requires builtin daily identity')
     const hasInstruction = typeof params.title === 'string' && params.title.trim().length > 0
     const hasScript = params.script !== undefined
     if (hasInstruction === hasScript || (hasScript && (
@@ -3346,6 +3367,16 @@ export class UnifiedAgent extends ModuleBase {
         disable_schedule: false,
         reason: 'invalid schedule content',
       })
+    }
+    if (daily) {
+      if (params.script || !params.reflection_proof) throw new RpcError('FORBIDDEN', 'Daily reflection trigger proof required')
+      const { reflection_proof, ...bound } = params
+      const verified = await this.rpcClient.callSensitive<{ proof: string; payload_sha256: string }, { consumed: true }>(
+        await this.getAdminPort(), 'consume_daily_reflection_trigger',
+        { proof: reflection_proof, payload_sha256: sha256CanonicalJson(bound) }, this.config.moduleId,
+        { authorizationBearer: ConfigLoader.getRuntimeBearer() },
+      )
+      if (verified.consumed !== true) throw new RpcError('FORBIDDEN', 'Invalid daily reflection trigger proof')
     }
     if (params.script) {
       const hash = createHash('sha256').update(params.script.source, 'utf8').digest('hex')
@@ -3393,6 +3424,7 @@ export class UnifiedAgent extends ModuleBase {
       scheduleId: params.schedule_id,
       triggerId: params.trigger_id,
       scheduleName: params.schedule_name,
+      reflectionWindow: params.reflection_window,
       title: params.title!,
       description: params.description ?? '',
       priority: params.priority,
@@ -4282,6 +4314,29 @@ export class UnifiedAgent extends ModuleBase {
       params.worker_id,
       params.seq === undefined ? undefined : { seq: params.seq },
     )
+  }
+
+  private async readReflectionWorkerTrace(
+    workerId: string,
+    seq: number,
+    frozen?: import('./manager/daily-reflection-types.js').ReflectionWorkerTrace,
+  ): Promise<{ source: import('./manager/daily-reflection-types.js').ReflectionWorkerTrace; result: GetWorkerTraceResult }> {
+    const found = await this.requireManagerStack().ledger.findWorker(workerId)
+    const incarnation = found?.worker.incarnations.find(item => item.seq === seq)
+    if (!incarnation) throw new Error('Reflection incarnation unavailable')
+    const fingerprint = incarnationFingerprint({ incarnation_id: incarnation.incarnation_id,
+      impl: incarnation.impl as import('./workers/types.js').WorkerImplId, seq, started_at: incarnation.started_at })
+    if (frozen && frozen.incarnation_fingerprint !== fingerprint) throw new Error('Reflection incarnation changed')
+    const cursors = this.traceCursorStore()
+    const cursor = await cursors.mintDurable(workerId, fingerprint, { harness: 0, native: 0, legacy: 0 })
+    if (frozen) {
+      const next = await cursors.mintDurable(workerId, fingerprint, frozen.upper_bound)
+      await cursors.captureWindow(cursor, { end: frozen.upper_bound, nextToken: next })
+    }
+    const result = await this.handleGetWorkerTrace({ worker_id: workerId, seq, cursor })
+    const record = await cursors.resolve(cursor, workerId, fingerprint)
+    if (!record.window) throw new Error('Reflection source boundary unavailable')
+    return { source: { seq, incarnation_fingerprint: fingerprint, upper_bound: record.window.end }, result }
   }
 
   /**
@@ -5346,6 +5401,9 @@ export class UnifiedAgent extends ModuleBase {
   startManagerStackReconciliation(): void {
     const stack = this.managerStack
     if (!stack) return
+    void stack.store.listManagerKeys().then(async keys => {
+      for (const key of keys) await stack.dailyReflectionFor(key).recover()
+    }).catch(error => console.error(`[${this.config.moduleId}] Daily reflection confirmation recovery failed:`, error))
     void reconcileManagerStack(stack)
       .then((report) => {
         // 空台账（现网常态）不打日志，避免每次启动都刷一行没有信息量的 0/0/0。

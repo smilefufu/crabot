@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { ConfigLoader } from '../src/core/config-loader.js'
 
 import { UnifiedAgent, type TriggerScheduleParams, type TriggerScheduleResult } from '../src/unified-agent.js'
 import type { AgentEventPublisher } from '../src/manager/events.js'
@@ -222,6 +223,32 @@ describe('trigger_schedule memory_maintenance system task', () => {
       },
     )
     expect(fixture.admitSchedule).not.toHaveBeenCalled()
+    expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
+  })
+
+  it('requires a host window for builtin daily, rejects user lookalikes carrying one, and forwards the exact window', async () => {
+    const fixture = buildAgent(() => Promise.resolve())
+    const params = { ...TRIGGER_CONTEXT, schedule_id: 'daily', task_type: 'daily_reflection', title: 'daily', is_builtin: true }
+    const window = { window_start: '2026-09-16T18:00:00.000Z', window_end: '2026-09-17T18:00:00.000Z' }
+    await expect(fixture.agent.handleTriggerSchedule(params)).rejects.toThrow('trusted window')
+    await expect(fixture.agent.handleTriggerSchedule({ ...params, is_builtin: false, reflection_window: window })).rejects.toThrow('builtin daily identity')
+    await expect(fixture.agent.handleTriggerSchedule({ ...params, reflection_window: window })).rejects.toThrow('proof')
+    const agent = fixture.agent as any
+    agent.getAdminPort = async () => 9999
+    const bearer = vi.spyOn(ConfigLoader, 'getRuntimeBearer').mockReturnValue('runtime')
+    const callSensitive = vi.fn().mockResolvedValue({ consumed: true })
+    agent.rpcClient = { callSensitive }
+    const trigger = { ...params, reflection_window: window, reflection_proof: 'one-time-proof' }
+    await fixture.agent.handleTriggerSchedule(trigger)
+    const { sha256CanonicalJson } = await import('crabot-shared')
+    const { reflection_proof, ...bound } = trigger
+    expect(callSensitive).toHaveBeenCalledWith(9999, 'consume_daily_reflection_trigger',
+      { proof: reflection_proof, payload_sha256: sha256CanonicalJson(bound) }, 'test-agent', { authorizationBearer: 'runtime' })
+    callSensitive.mockRejectedValue(new Error('invalid trigger proof'))
+    await expect(fixture.agent.handleTriggerSchedule(trigger)).rejects.toThrow('invalid trigger proof')
+    expect(fixture.admitSchedule).toHaveBeenCalledTimes(1)
+    bearer.mockRestore()
+    expect(fixture.admitSchedule).toHaveBeenCalledWith(expect.objectContaining({ reflectionWindow: window }))
     expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
   })
 

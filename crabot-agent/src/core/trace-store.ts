@@ -1386,7 +1386,7 @@ export class TraceStore {
    */
   finishManagerEpisode(
     traceId: string,
-    patch: { status: 'completed' | 'failed'; outcome?: { summary: string; error?: string }; total_usage?: ManagerEpisodeUsage },
+    patch: { status: 'completed' | 'failed'; outcome?: ManagerEpisodeTrace['outcome']; total_usage?: ManagerEpisodeUsage },
   ): void {
     const episode = this.managerEpisodes.get(traceId)
     if (!episode || episode.status !== 'running') return

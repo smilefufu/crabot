@@ -868,6 +868,18 @@ export interface ScheduleTargetSession {
   type: 'private' | 'group'
 }
 
+export interface CompleteDailyReflectionParams {
+  schedule_id: string
+  trigger_id: string
+  window_start: string
+  window_end: string
+}
+
+export interface CompleteDailyReflectionResult {
+  status: 'applied' | 'already_applied'
+  watermark: string
+}
+
 /** 调度项 */
 export interface Schedule {
   /** 调度项 ID */

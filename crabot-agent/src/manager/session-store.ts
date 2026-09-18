@@ -126,7 +126,22 @@ export class ManagerSessionStore {
     const mutex = this.getMutex(state.key)
     await mutex.run(async () => {
       await fs.mkdir(this.dirFor(state.key), { recursive: true })
-      await writeJsonAtomic(this.statePathFor(state.key), state)
+      const current = await this.load(state.key)
+      await writeJsonAtomic(this.statePathFor(state.key), { ...state, dailyReflection: current.dailyReflection })
+    })
+  }
+
+  /** Update only the host-owned workflow under the same lock as history writes. */
+  async updateDailyReflection(
+    key: ManagerKey,
+    update: (current: ManagerSessionState['dailyReflection']) => ManagerSessionState['dailyReflection'],
+  ): Promise<ManagerSessionState['dailyReflection']> {
+    return this.getMutex(key).run(async () => {
+      const state = await this.load(key)
+      const dailyReflection = update(state.dailyReflection)
+      await fs.mkdir(this.dirFor(key), { recursive: true })
+      await writeJsonAtomic(this.statePathFor(key), { ...state, dailyReflection })
+      return dailyReflection
     })
   }
 
