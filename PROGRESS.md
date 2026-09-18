@@ -24,7 +24,7 @@
 - 按已确认 spec 增加 daily 目录/详情/显式完成工具，核心 8→11；固定周期跨 episode 续办，普通消息不获得跨会话读取。
 - Admin 单次触发凭据核销；完成结果先持久化、再经认证 CAS 更新窗口终点，响应丢失只重放确认。
 - 证据缺口、未读完详情、Memory 失败、未决分析、非法 exit batch 均保持 partial；不自动重设历史水位。
-- Agent 391 项、Admin 68 项和敏感 RPC 11 项定向验证通过，Agent/Admin 构建通过。提示词与 guidance 由指定任务负责；上线前核对完整装配，部署后以真实 daily trace 和水位对账验收。
+- 合入搜索修复后 Agent 412 项、Admin 68 项和敏感 RPC 11 项定向验证通过，Agent/Admin 构建通过。提示词与 guidance 由指定任务负责；上线前核对完整装配，部署后以真实 daily trace 和水位对账验收。
 
 ### 百炼空 assistant 消息 400：已修复并部署
 
