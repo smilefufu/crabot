@@ -165,6 +165,8 @@ export class DailyReflectionEvidence {
         ...turns.filter(turn => inWindow(turn.completed_at, state)).map(turn => turn.completed_at)]
       const traceGaps: string[] = []
       for (const incarnation of worker.incarnations) {
+        if (Date.parse(incarnation.started_at) >= Date.parse(state.window_end)
+          || (incarnation.state === 'exited' && incarnation.ended_at && Date.parse(incarnation.ended_at) < Date.parse(state.window_start))) continue
         try {
           const captured = await this.deps.captureWorkerTrace(worker.worker_id, incarnation.seq)
           traces.push(captured.source)

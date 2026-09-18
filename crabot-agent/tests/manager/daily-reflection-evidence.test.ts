@@ -103,6 +103,24 @@ describe('daily reflection persisted evidence', () => {
     expect((await f.provider.read(worker, state)).gaps).toContain('worker_trace_unavailable:worker:1')
   })
 
+  it('does not turn unavailable incarnations wholly outside the period into current evidence gaps', async () => {
+    const f = await fixture()
+    f.workers.push({ worker_id: 'continued', manager_key: 'chat::one', origin: {}, task: { title: 'continued task' }, updated_at: activity,
+      incarnations: [
+        { seq: 1, state: 'exited', started_at: '2026-08-01T00:00:00.000Z', ended_at: '2026-08-02T00:00:00.000Z' },
+        { seq: 2, state: 'running', started_at: activity },
+        { seq: 3, state: 'running', started_at: window.window_end },
+      ] })
+    vi.mocked(f.deps.captureWorkerTrace).mockImplementation(async (_id, seq) => {
+      if (seq !== 2) throw new Error('outside period trace unavailable')
+      return { source: { seq, incarnation_fingerprint: 'same', upper_bound: { harness: 0, native: 0, legacy: 0 } }, result: { events: [] } }
+    })
+    const manifest = await f.provider.capture(state)
+    expect(manifest.records).toHaveLength(1)
+    expect(manifest.records[0].gaps).toEqual([])
+    expect(vi.mocked(f.deps.captureWorkerTrace).mock.calls).toEqual([['continued', 2]])
+  })
+
   it('ordinary absence is an empty directory, while out-of-window evidence is excluded', async () => {
     const f = await fixture()
     expect(await f.provider.capture(state)).toEqual({ records: [], gaps: [] })
