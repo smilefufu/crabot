@@ -7,7 +7,7 @@
  */
 
 import { createExecutionCapabilitiesTool, type DescribeExecutionTools } from './execution-capabilities.js'
-import { createGuidanceTool, renderGuidance } from '../../guidance/catalog.js'
+import { createGuidanceTool } from '../../guidance/catalog.js'
 import { z } from 'zod/v4'
 import { defineTool } from '../../engine/index.js'
 import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
@@ -39,7 +39,6 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
-  readonly workboardGuidanceProvided?: boolean
   readonly describeExecutionTools?: DescribeExecutionTools
   readonly harness: WorkerHarness
   /** P6-C §7：list_worker_implementations 的 registry snapshot getter。 */
@@ -480,22 +479,8 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...(deps.schedule ? { schedule: deps.schedule } : {}),
   })
   const normalProfile = (deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')) === 'normal'
-  let workboardGuidanceProvided = deps.workboardGuidanceProvided === true
-  const guidanceTool = createGuidanceTool('manager', name => {
-    if (name === 'manager.workboard') workboardGuidanceProvided = true
-  })
-  const workboardTools = buildWorkboardTools(deps.workboard).map((tool): ToolDefinition => {
-    if (!normalProfile || tool.name !== 'change_workboard') return tool
-    return { ...tool, async call(input, context) {
-      if (workboardGuidanceProvided || deps.faceState?.workboardGuidanceProvided) return tool.call(input, context)
-      workboardGuidanceProvided = true
-      return { isError: false, output: JSON.stringify({
-        status: 'guidance_provided', applied: false,
-        guidance: renderGuidance('manager', 'manager.workboard'),
-        next: '本次尚未修改任务板。依据已提供的工作流核对后，如仍需更新，再调用 change_workboard。',
-      }) }
-    } }
-  })
+  const guidanceTool = createGuidanceTool('manager')
+  const workboardTools = buildWorkboardTools(deps.workboard)
   const projectDocTools = buildProjectDocTools(deps.projectDocs)
 
   const builtinTools = [

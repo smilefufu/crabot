@@ -23,12 +23,12 @@ describe('独立角色提示词', () => {
     expect(prompt).toContain('SKILL_SENTINEL')
     expect(prompt).not.toContain('## 可用子 Agent')
     expect(prompt).toContain('<workspace-agents-md>\nPROJECT_SENTINEL\n</workspace-agents-md>')
-    expect(prompt.split('验证结果，简洁报告')).toHaveLength(2)
+    expect(prompt.split('依据实际产物和必要检查验证结果')).toHaveLength(2)
   })
 
   it('主控保留职责与权限原则，工作流只提供目录', () => {
     const prompt = assembleManagerSystemPrompt({ managerKey: 'admin-web::admin-chat', isSystemThread: false, adminPersonality: 'PERSONALITY_SENTINEL' })
-    expect(prompt).toContain('委托前确认当前会话允许派发')
+    expect(prompt).toContain('派发前核实权限与能力')
     expect(prompt).toContain('manager.delegation')
     expect(prompt).not.toContain('处理：')
     expect(prompt).toContain('PERSONALITY_SENTINEL')

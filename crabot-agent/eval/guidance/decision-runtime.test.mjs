@@ -60,7 +60,7 @@ test('actual guidance result reaches the next request without sending reviewer c
   ])
   assert.equal(result.status, 'decision_observed')
   const requests = rows.filter(r => r.type === 'request')
-  assert.match(JSON.stringify(requests[1]), /项目规则与文档维护/)
+  assert.match(JSON.stringify(requests[1]), /项目接手、修改与交付/)
   assert.equal(JSON.stringify(requests).includes(c.rubric), false)
 })
 

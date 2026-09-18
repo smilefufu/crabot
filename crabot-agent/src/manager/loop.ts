@@ -98,7 +98,7 @@ const POST_SEND_ACTION_RECHECK_PROMPT = '[系统复核] 你刚才发出的消息
   + '不要因为这条系统提示重复向人类发送消息，也不要向人类提及系统复核。'
 const WORKBOARD_ADMIN_UPDATE_PROMPT = '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。'
 const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
-任务板中至少有一项尚未收口的工作已一小时没有更新。请按本次提供的任务板指南，查阅任务板与必要证据，逐项判断继续推进或等待。`
+任务板中至少有一项尚未收口的工作已一小时没有更新。请按本次提供的自省指南，查阅任务板与必要证据，逐项判断继续推进或等待。`
 
 /** 插话远程图预取超时:enqueue 与 drain 之间隔着工具执行,后台预取不阻塞任何人。 */
 const REMOTE_IMAGE_PREFETCH_TIMEOUT_MS = 8_000
@@ -2062,9 +2062,6 @@ export class ManagerLoop {
       if (!name || this.automaticGuidance.has(name)) continue
       this.automaticGuidance.add(name)
       texts.push(renderGuidance('manager', name))
-      if (name === 'manager.workboard' && this.currentToolFaceState) {
-        this.currentToolFaceState.workboardGuidanceProvided = true
-      }
     }
     return texts
   }
@@ -2780,7 +2777,7 @@ export function needsWorkerEventGuidance(event: HarnessEvent): boolean {
 }
 
 export function automaticGuidanceForWake(wake: WakeEvent): GuidanceName | undefined {
-  if (wake.kind === 'workboard_admin_update' || wake.kind === 'workboard_idle_review') return 'manager.workboard'
+  if (wake.kind === 'workboard_idle_review') return 'manager.workboard'
   if (wake.kind === 'worker_event' && needsWorkerEventGuidance(wake.event)) return 'manager.worker-events'
   return undefined
 }

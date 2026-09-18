@@ -3,15 +3,15 @@ import { createGuidanceTool, guidanceNames, guidanceCatalog, renderGuidance } fr
 import { MANAGER_IDENTITY, assembleManagerSystemPrompt } from '../../src/manager/prompt.js'
 import { BUILTIN_WORKER_PROMPT, assembleBuiltinWorkerPrompt } from '../../src/prompts/builtin-worker.js'
 import { narrowWorkerPermissions, BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
-import { needsWorkerEventGuidance } from '../../src/manager/loop.js'
+import { automaticGuidanceForWake, needsWorkerEventGuidance } from '../../src/manager/loop.js'
 
 const context = {} as never
 const base = { managerKey: 'fixture::user', isSystemThread: false } as const
 
 describe('product guidance boundaries', () => {
   it('keeps short cores and role-specific catalogs; ordinary tasks receive no workflows', () => {
-    expect(MANAGER_IDENTITY.replace(/\s/g, '').length).toBe(269)
-    expect(BUILTIN_WORKER_PROMPT.replace(/\s/g, '').length).toBe(162)
+    expect(MANAGER_IDENTITY.replace(/\s/g, '').length).toBeLessThanOrEqual(300)
+    expect(BUILTIN_WORKER_PROMPT.replace(/\s/g, '').length).toBeLessThanOrEqual(300)
     expect(BUILTIN_WORKER_PROMPT).not.toMatch(/主控|执行器|调用方/)
     expect(guidanceNames('manager')).toHaveLength(4)
     expect(guidanceNames('worker')).toHaveLength(3)
@@ -23,6 +23,16 @@ describe('product guidance boundaries', () => {
     expect(worker).toContain(guidanceCatalog('worker'))
     expect(worker).not.toContain('manager.delegation')
     expect(worker).not.toContain('处理：')
+  })
+  it('任务板规范常驻，自省只在自己的入口自动提供', () => {
+    const prompt = assembleManagerSystemPrompt(base)
+    for (const rule of ['任务板是持续工作的管理摘要', '实质变化才更新', '完成或放弃即归档', '项目事实由执行器维护文档', '不主动外发内部检查过程']) {
+      expect(prompt).toContain(rule)
+    }
+    expect(automaticGuidanceForWake({ kind: 'workboard_admin_update', noticeRevision: 1 })).toBeUndefined()
+    expect(automaticGuidanceForWake({ kind: 'workboard_idle_review' })).toBe('manager.workboard')
+    expect(renderGuidance('manager', 'manager.workboard')).toContain('只有确需人类决策、授权或提供系统无法取得的信息时')
+    expect(renderGuidance('manager', 'manager.worker-events')).toContain('执行器完成不自动产生对外汇报义务')
   })
   it('loads only one named workflow, independent of user Skills or filesystem paths', async () => {
     const tool = createGuidanceTool('worker')

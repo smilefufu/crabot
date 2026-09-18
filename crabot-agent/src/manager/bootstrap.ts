@@ -663,7 +663,6 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       }
       return buildManagerToolFace({
         describeExecutionTools: deps.describeExecutionTools,
-        workboardGuidanceProvided: isWorkboardSystemInput,
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
         readWorkerActivity: deps.readWorkerActivity,

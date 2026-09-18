@@ -1,5 +1,12 @@
 # 内置 guidance 隔离比较
 
+## 2026-09-18 规范与工作流边界
+
+`boundary-cases.mjs` 定义 18 个人工边界案例与事先冻结的语义判据；`boundary-probe.mjs` 使用实际编译后的旧新正文、目录、自动加载选择和工具说明。只返回无副作用的冻结 guidance 内容，遇到首个业务工具选择即记录并停止，不伪造动作回执。仅观察下一步决策，不等同于完整任务验收。限制与本地结果见 [BOUNDARY-RESULTS.md](./BOUNDARY-RESULTS.md)。
+
+先运行 `node --test crabot-agent/eval/guidance/boundary-probe.test.mjs`。设置 `GUIDANCE_BASELINE_ROOT` 指向已编译的基线仓库，`GUIDANCE_OUTPUT` 指向新的本地目录，执行 `node crabot-agent/eval/guidance/boundary-probe.mjs --prepare` 冻结输入；该步骤不读取 Provider 配置或联网。实际运行须另获具体外发授权，沿用同一目录及输入，指定 `REPLAY_RUNTIME_ROOT` 与 `REPLAY_DATA_DIR` 后去掉 `--prepare`。已有输出不可覆盖，预算到顶不补样，不以仅结束响应判断成功。
+
+
 **2026-09-17 当前状态：两份重复取证指南的定向调整尚未证明有效。** 用户批准后冻结比较修改前 `cb33163f` 与本地候选，实际 89 次请求、1,424,398 tokens；5 条正常收口、1 条交付后内部收尾被预算截断、2 条未开始。两个正常完成配对 tokens 少 20.6%，但执行器业务调用从 18 增至 21。验收规则见 [EVIDENCE-ACCEPTANCE.md](./EVIDENCE-ACCEPTANCE.md)，具体质量、动作、用量及人工历史边界见 [EVIDENCE-RESULTS.md](./EVIDENCE-RESULTS.md)。入口为 `evidence-compare.mjs`；此批未改变核心、工具或缓存实现。用户随后确认提示词语义定稿，并授权正式 PR、auto review、自动合并后本地部署；该授权不改变比较结论，也不表示整体行为提升已获证明。
 
 此前修复版 `ee4c5c6d` 的完整任务比较：开始 29 条、完整收口 28 条，1 条预算中断、3 条未开始。可完整配对的 13 对均完成实际目标，旧版三条有实质汇报缺陷、新版未出现同类缺陷；新版诊断过程更重，配对总 tokens 多 12.7%。不能宣布整体质量或效率胜出。证据见 [COMPLETION-RESULTS.md](./COMPLETION-RESULTS.md)，更早短决策与撤回批次见 [RESULTS.md](./RESULTS.md)，标准见 [ACCEPTANCE.md](./ACCEPTANCE.md)。各批统计不混用。

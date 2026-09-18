@@ -584,6 +584,7 @@ describe('Manager restart continuation', () => {
         kind: 'turn_completed', worker_id: 'resume-worker', ts: clock.received_at, seq: 1, detail: {},
       } } })
       loop.enqueueWorkboardAdminUpdate({ ...clock, wake: { kind: 'workboard_admin_update', noticeRevision: 8 } })
+      loop.enqueueDuringEpisode({ ...clock, wake: { kind: 'workboard_idle_review' } })
       return { output: 'injected', isError: false }
     } })
     const old = registry({ async *stream(params) {
@@ -593,7 +594,7 @@ describe('Manager restart continuation', () => {
     }, updateConfig() {} }, { toolFace: () => [inject] })
     void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Continue')])
     const checkpoint = await checkpointWhere(value => value.turns.length === 1 && requests.length === 2)
-    expect(checkpoint.transientMessageIds).toHaveLength(3)
+    expect(checkpoint.transientMessageIds).toHaveLength(4)
     const restored = registry({ async *stream(params) {
       expect(params.systemPrompt).toBe(requests[0].systemPrompt)
       expect(buildPromptCacheKey(params.model, params.systemPrompt)).toBe(buildPromptCacheKey(requests[0].model, requests[0].systemPrompt))
@@ -613,11 +614,11 @@ describe('Manager restart continuation', () => {
     const old = registry({ async *stream() { await new Promise(() => {}) }, updateConfig() {} })
     void old.routeWorkboardAdminUpdate({ key: KEY, noticeRevision: 17 })
     const checkpoint = await checkpointWhere((value) => value.hasEngineMessages)
-    expect(checkpoint.transientMessageIds).toHaveLength(2)
+    expect(checkpoint.transientMessageIds).toHaveLength(1)
     const consumed = vi.fn(async () => {})
     const restored = registry({ async *stream(params) {
       expect(JSON.stringify(params.messages).match(/管理员已更新任务板/g)).toHaveLength(1)
-      expect(params.messages.filter(m => 'content' in m && m.content === renderGuidance('manager', 'manager.workboard'))).toHaveLength(1)
+      expect(JSON.stringify(params.messages)).not.toContain('## Guidance: manager.workboard')
       yield* chunksFromContent([], 'end_turn')
     }, updateConfig() {} }, { onWorkboardAdminUpdateConsumed: consumed })
     restored.registerResumeCheckpoints([checkpoint])
