@@ -11,6 +11,7 @@ import { NativeActivityStore } from '../../src/workers/harness/native-activity-s
 import type { ManagerKey } from '../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../src/workers/harness/worker-events'
 import { WorkerExitedError } from '../../src/workers/errors'
+import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime'
 import type {
   WorkerAdapter,
   WorkerImplId,
@@ -537,6 +538,23 @@ describe('worker observation and turn closure', () => {
 // ---- spawn_worker ----
 
 describe('spawn_worker', () => {
+  it('派发权限关闭时拒绝调用，不创建台账或启动执行器', async () => {
+    const { harness, fake } = await makeHarness()
+    const context: WorkerToolsContext = {
+      ...CTX,
+      principalPermissions: {
+        ...BUILTIN_WORKER_PERMISSIONS,
+        tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, task: false, file_io: true, shell: true },
+      },
+    }
+    const tool = buildWorkerTools({ harness, context: () => context }).find((t) => t.name === 'spawn_worker')!
+    const result = await tool.call({ title: '整理目录', prompt: '移动文本文件', impl: 'builtin' }, {})
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('当前会话没有任务派发权限')
+    expect(fake.spawnCalls).toHaveLength(0)
+    expect(await harness.listWorkers(CTX.managerKey)).toHaveLength(0)
+  })
+
   it('title schema 要求任务主题与具体执行内容，并禁止对话指代', async () => {
     const { harness } = await makeHarness()
     const spawnWorker = buildWorkerTools({ harness, context: () => CTX }).find((t) => t.name === 'spawn_worker')!

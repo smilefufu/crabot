@@ -9,6 +9,37 @@ import { remainingConditions } from './continuous-compare.mjs'
 const sourceRoot = path.resolve(import.meta.dirname, '../../..')
 const image = 'crabot-guidance-tools:local'
 const call = (name, input) => ({ type: 'tool_use', id: crypto.randomUUID(), name, input })
+
+test('incident replay preserves progressive surface, historical delivery, clock and successive wakes', { timeout: 45000 }, async () => {
+  const previous = process.env.CRABOT_MANAGER_TOOL_LOADING_MODE
+  process.env.CRABOT_MANAGER_TOOL_LOADING_MODE = 'progressive'
+  try {
+    const c = structuredClone(continuousCases.find(c => c.id === 'idle-paused'))
+    c.replay = { managerKey: 'bot-replay::incident', model: 'incident-model', thinking: { custom: 'max' },
+      startedAt: '2026-09-17T22:46:14.051Z', cycles: 2,
+      sessionState: { rollingSummary: '历史摘要：任务已暂停。', recent: [{ id: 'prior-report', role: 'assistant',
+        content: [{ type: 'text', text: '上次内部检查报告' }], timestamp: 1789680000000 }], foldedCount: 0 } }
+    let step = 0
+    const rows = await run(c, params => {
+      assert.equal(params.tools.length, 14)
+      assert.equal(params.model, 'incident-model')
+      assert.deepEqual(params.thinking, { custom: 'max' })
+      assert.match(params.systemPrompt, /bot-replay/)
+      assert.match(JSON.stringify(params.messages), /历史摘要：任务已暂停/)
+      assert.match(JSON.stringify(params.messages), /上次内部检查报告/)
+      if (step++ === 0) return scriptedChunks([call('send_message', { channel_id: 'bot-replay', session_id: 'incident', content: '故意模拟无必要外发', post_send_action: 'none' })])
+      return scriptedChunks([])
+    })
+    assert.equal(rows.filter(r => r.type === 'wake').length, 2)
+    assert.match(JSON.stringify(rows.filter(r => r.type === 'request').at(-1).messages), /故意模拟无必要外发/)
+    assert.equal(rows.find(r => r.type === 'end').outbox.length, 1)
+    assert.equal(rows.find(r => r.type === 'end').outbox[0].sent_at, c.replay.startedAt)
+  } finally {
+    if (previous === undefined) delete process.env.CRABOT_MANAGER_TOOL_LOADING_MODE
+    else process.env.CRABOT_MANAGER_TOOL_LOADING_MODE = previous
+  }
+})
+
 async function run(c, stream, extra = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guidance-continuous-test-'))
   process.env.CRABOT_AGENT_DATA_DIR = path.join(root, 'agent')

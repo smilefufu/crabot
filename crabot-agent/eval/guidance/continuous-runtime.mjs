@@ -54,15 +54,19 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
     }
     return result
   }
-  const managerKey = 'fixture::synthetic'
-  const now = () => new Date().toISOString()
-  const friend = { id: 'fixture-human', display_name: '评测用户', permission: 'master', channel_identities: [], created_at: now(), updated_at: now() }
-  const permissions = {
+  const replay = c.replay
+  const managerKey = replay?.managerKey ?? 'fixture::synthetic'
+  let replayTime = replay?.startedAt
+  const now = () => replayTime ?? new Date().toISOString()
+  const model = replay?.model ?? 'qwen3.8-max'
+  const friend = replay?.friend ?? { id: 'fixture-human', display_name: '评测用户', permission: 'master', channel_identities: [], created_at: now(), updated_at: now() }
+  const permissions = replay?.permissions ?? {
     tool_access: { memory: true, messaging: true, task: true, mcp_skill: true, file_io: true, shell: true, browser: false, remote_exec: false, desktop: false, ...c.toolAccess },
     cli_access: Object.fromEntries(CLI_DOMAINS.map(d => [d, 'none'])),
     storage: { workspace_path: '/fixture', access: 'readwrite' }, memory_scopes: ['fixture'],
   }
-  const session = { channel_id: 'fixture', session_id: 'synthetic', type: 'private' }
+  const [channelId, sessionId] = managerKey.split('::')
+  const session = { channel_id: channelId, session_id: sessionId, type: 'private' }
   let stack, before, seedMode = c.role === 'manager' && Boolean(c.seed), routing = false, requests = 0, activeCalls = 0
   let stopped = false, fatal, lastActivity = Date.now()
   const abort = new AbortController()
@@ -83,14 +87,14 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
         throw new Error('Fixture request budget exhausted')
       }
       const request = ++requests
-      const actual = { ...params, maxTokens: 2400,
-        signal: AbortSignal.any([abort.signal, ...(params.signal ? [params.signal] : []), AbortSignal.timeout(90000)]),
+      const actual = { ...params, ...(!replay ? { maxTokens: 2400 } : {}),
+        signal: AbortSignal.any([abort.signal, ...(params.signal ? [params.signal] : []), AbortSignal.timeout(replay ? 180000 : 90000)]),
       }
       const processor = new StreamProcessor()
       const requestStarted = Date.now()
       let firstChunkMs
       activeCalls++
-      emit({ type: 'request', request, role, workerId, systemPrompt: actual.systemPrompt,
+      emit({ type: 'request', request, role, workerId, model: actual.model, thinking: actual.thinking, maxTokens: actual.maxTokens, systemPrompt: actual.systemPrompt,
         messages: publicMessages(actual.messages), tools: actual.tools.map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) })
       try {
         for await (const chunk of delegate.stream(actual, { role, request, workerId })) { firstChunkMs ??= Date.now() - requestStarted; processor.process(chunk); yield chunk }
@@ -159,6 +163,10 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
       fs.appendFileSync(path.join(root, 'outbox.jsonl'), JSON.stringify(item) + '\n', { mode: 0o600 })
       return { platform_message_id: item.platform_message_id, sent_at: item.sent_at }
     }
+    if (replay?.sessionState && method !== 'send_message' && !['get_sessions', 'resolve_friend'].includes(method)) {
+      emit({ type: 'coverage_gap', boundary: 'historical-rpc', method })
+      throw new Error(`Historical RPC snapshot unavailable: ${method}`)
+    }
     if (method === 'get_history') return { items: c.channelHistory ?? [{ platform_message_id: 'historical-human', sender: { friend_id: friend.id, platform_user_id: 'fixture-human', platform_display_name: friend.display_name }, content: { type: 'text', text: c.history }, features: { is_mention_crab: false }, platform_timestamp: now() }], pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 } }
     if (method === 'get_sessions') return page([{ id: session.session_id, channel_id: session.channel_id, type: session.type, name: '人工评测会话' }])
     if (method === 'resolve_friend') return { friend: params.platform_user_id === 'fixture-human' ? friend : null }
@@ -187,7 +195,10 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
     emit({ type: 'start', container: box.name, before })
     stack = buildManagerStack({
       dataRoot: root, now, timezone: () => 'Asia/Shanghai',
-      managerAdapter: () => adapterFor('manager'), managerModel: () => 'qwen3.8-max',
+      managerAdapter: () => adapterFor('manager'), managerModel: () => model,
+      managerThinking: () => replay?.thinking,
+      managerContextWindowTokens: () => replay?.contextWindow,
+      managerPersonality: () => replay?.personality,
       isClosing: () => !routing || stopped,
       messagingDeps: { rpcClient: localRpc, moduleId: 'fixture', getAdminPort: async () => 19001, resolveChannelPort: async () => 19009 },
       memoryServerFor: ctx => createCrabMemoryServer({ rpcClient: localRpc, moduleId: 'fixture', getMemoryPort: async () => 19100 }, ctx),
@@ -196,7 +207,7 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
         if (method === 'list_channel_instances') return page([{ id: 'fixture', name: '人工渠道', platform: 'fixture', module_registered: true }])
         emit({ type: 'coverage_gap', boundary: 'admin', method }); throw new Error(`Unsupported local admin call: ${method}`)
       },
-      principalResolver: { resolvePermissions: async () => permissions, sessionMemoryScopes: async () => ['fixture'], sceneProfile: async () => null, crabSelfHandle: () => undefined, getFriend: async id => id === friend.id ? friend : null },
+      principalResolver: { resolvePermissions: async () => permissions, sessionMemoryScopes: async () => permissions.memory_scopes, sceneProfile: async () => replay?.sceneProfile ?? null, crabSelfHandle: () => replay?.selfHandle, getFriend: async id => id === friend.id ? friend : null },
       capabilityBundle: async () => ({ skills: [], mcp_servers: [] }),
       hasRunningBg: runningChildren,
       builtinTraceHooks: {
@@ -211,7 +222,7 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
       builtinTraceReader: { readTrace: id => traces.getFullTrace(id), listSubagents: id => childRunner?.list(id) ?? [], getSubagent: (id, child) => childRunner?.get(id, child), readSubagentTrace: (id, child, cursor) => childRunner?.readTrace(id, child, cursor) },
       mintActivityCursor: async position => mintCursor(position),
       builtinSpawnDefaults: ctx => ({
-        adapter: adapterFor('worker', ctx.worker_id), model: 'qwen3.8-max', maxTokens: 2400, maxTurnsPerBurst: 12,
+        adapter: adapterFor('worker', ctx.worker_id), model, maxTokens: 2400, maxTurnsPerBurst: 12,
         systemPrompt: assembleBuiltinWorkerPrompt({ workspaceRoot: '/fixture', imageAvailable: false }),
         tools: toolsFor(ctx.worker_id),
       }),
@@ -242,8 +253,11 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
     await stack.ledger.init()
     await stack.principalBindings.init()
     await stack.principals.resolve(managerKey, { friend, sessionType: 'private' })
-    await stack.store.save({ key: managerKey, recent: c.trigger === 'human' ? [] : [createUserMessage('[历史中已收到的人类指令]\n' + (c.seedHistory ?? c.history))], foldedCount: 0 })
-    if (c.board) {
+    await stack.store.save(replay?.sessionState ? { ...replay.sessionState, key: managerKey }
+      : { key: managerKey, recent: c.trigger === 'human' ? [] : [createUserMessage('[历史中已收到的人类指令]\n' + (c.seedHistory ?? c.history))], foldedCount: 0 })
+    if (replay?.boardSnapshot) {
+      fs.writeFileSync(path.join(root, 'agent/managers', encodeURIComponent(managerKey), 'workboard.json'), JSON.stringify(replay.boardSnapshot), { mode: 0o600 })
+    } else if (c.board) {
       const objective = await stack.workboard.createObjective(managerKey, c.board.objective)
       for (const item of c.board.items) await stack.workboard.createWorkItem(managerKey, objective.value.objective_id, item)
     }
@@ -268,9 +282,13 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
       await withDockerProjectDocs(box, emit, async () => {
         if (c.trigger === 'idle') {
           // Invoke the scheduler's production wake boundary after fixture setup. The one-hour timer itself is not under test.
-          const envelope = stack.registry.makeEnvelope(stack.registry.captureIngress(), { kind: 'workboard_idle_review' })
-          emit({ type: 'wake', kind: envelope.wake.kind })
-          await stack.registry.runWake(managerKey, envelope)
+          for (let cycle = 0; cycle < (replay?.cycles ?? 1); cycle++) {
+            if (cycle && replayTime) replayTime = new Date(Date.parse(replayTime) + 3600000).toISOString()
+            const envelope = stack.registry.makeEnvelope(stack.registry.captureIngress(), { kind: 'workboard_idle_review' })
+            emit({ type: 'wake', kind: envelope.wake.kind, cycle: cycle + 1 })
+            await stack.registry.runWake(managerKey, envelope)
+            if (fatal) break
+          }
         } else if (c.trigger === 'human' || c.trigger === 'human_after_seed') {
           await stack.registry.routeHumanMessages(session.channel_id, session.session_id, [{
             id: 'fixture-current-message', session, sender: { friend_id: friend.id, platform_user_id: 'fixture-human', platform_display_name: friend.display_name },
