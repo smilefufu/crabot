@@ -30,6 +30,14 @@ export function reflectionDigest(content: string): string {
   return createHash('sha256').update(content).digest('hex')
 }
 
+/** Keep the durable completion receipt for retry, but do not report it as confirmed. */
+export function dailyReflectionResultForTrace(state?: DailyReflectionState): DailyReflectionResult | undefined {
+  if (!state?.result || !state.confirmation_pending) return state?.result
+  return { ...state.result, outcome: 'partial',
+    validation_errors: [...state.result.validation_errors,
+      state.confirmation_error ? `watermark_confirmation_failed: ${state.confirmation_error}` : 'watermark_confirmation_pending'] }
+}
+
 /** The existing Manager owns execution; this host only owns evidence and completion receipts. */
 export class DailyReflection {
   private readonly mutex = new AsyncMutex()
@@ -101,6 +109,7 @@ export class DailyReflection {
     } catch (error) {
       state.confirmation_error = error instanceof Error ? error.message : String(error)
       await this.save(state)
+      console.error(`[DailyReflection] watermark confirmation failed; run=${state.run_id}; pending result retained for reconciliation`)
     }
   }
 
@@ -227,7 +236,7 @@ export class DailyReflection {
       state.confirmation_pending = result.outcome === 'completed'
       await this.save(state)
       if (state.confirmation_pending) await this.confirm(state)
-      return result
+      return dailyReflectionResultForTrace(await this.state())
     })
   }
 }

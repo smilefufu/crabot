@@ -113,7 +113,7 @@ describe('DailyReflection host', () => {
       expect((await store.load(key)).dailyReflection?.result?.outcome).toBe('completed')
       throw new Error('response lost')
     })
-    expect((await host.finish(completion()))?.outcome).toBe('completed')
+    expect((await host.finish(completion()))?.outcome).toBe('partial')
     expect((await store.load(key)).dailyReflection?.confirmation_pending).toBe(true)
     const restarted = new DailyReflection(deps)
     await restarted.recover()

@@ -74,6 +74,7 @@ import type { ImageBlock } from '../engine/index.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
 import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
+import { dailyReflectionResultForTrace } from './daily-reflection.js'
 import type { ManagerSessionState, ManagerKey } from './types.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { ActivityContextAdmissionReceipt, HarnessEvent } from '../workers/harness/worker-events'
@@ -1037,7 +1038,7 @@ export class ManagerLoop {
       }
       const result: EpisodeResult = skipDailyModel ? {
         episodeId, outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false,
-        successfulSendMessageTargets: [], dailyReflection: state.dailyReflection?.result,
+        successfulSendMessageTargets: [], dailyReflection: dailyReflectionResultForTrace(state.dailyReflection),
       } : await this.runEpisodeBody(
         episodeId,
         state,
