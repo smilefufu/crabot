@@ -10,6 +10,10 @@
 
 `continuous-compare.mjs --prepare` 冻结 12 类案例、34 条轨迹、两个编译产物摘要和镜像 ID，最大 720 请求/200 万报告 tokens。真实运行需明确外发授权，使用相同输出目录与输入；已有 events 不覆盖，不重试补样。脚本生成的 assessment 始终为 pending-semantic-review，必须审查完整输出后另写结论。
 
+全局预算停止后的未启动项可用 `GUIDANCE_REMAINING_FROM` 指向原批次目录，另设新的 `GUIDANCE_OUTPUT` 准备接续包。脚本只选 `budget-not-started`，核对原案例与产品编译摘要不变；已完成和已中断轨迹不重跑。持续授权覆盖的同类验证不重复申请授权，发送范围或目的改变时再重新判断。
+
+完整等待还检查内置子 Agent 的运行和结果待投递状态，避免父任务等待期间提前拆除容器。新增慢速真实工具回归先复现失败，再修正通过。实测批次按各自冻结脚本解释，逐条核验审查回传及父任务消费，不能用后来的评测器修复倒推原记录完整。结果与环境缺口见 [CONTINUOUS-RESULTS.md](./CONTINUOUS-RESULTS.md)。
+
 ## 2026-09-18 规范与工作流边界
 
 `boundary-cases.mjs` 定义 18 个人工边界案例与事先冻结的语义判据；`boundary-probe.mjs` 使用实际编译后的旧新正文、目录、自动加载选择和工具说明。只返回无副作用的冻结 guidance 内容，遇到首个业务工具选择即记录并停止，不伪造动作回执。仅观察下一步决策，不等同于完整任务验收。限制与本地结果见 [BOUNDARY-RESULTS.md](./BOUNDARY-RESULTS.md)。

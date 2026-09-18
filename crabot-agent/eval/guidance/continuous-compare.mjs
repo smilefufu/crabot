@@ -52,11 +52,17 @@ export function summarize(c, rows) {
   }
 }
 
+export function remainingConditions(plan, summary) {
+  const outcomes = new Map(summary.results.map(r => [r.id, r]))
+  if (outcomes.size !== plan.conditions.length) throw new Error('Prior batch has not recorded every condition')
+  return plan.conditions.filter(c => outcomes.get(c.id)?.fatal === 'budget-not-started')
+}
+
 async function main() {
   const out = process.env.GUIDANCE_OUTPUT, baselineRoot = process.env.GUIDANCE_BASELINE_ROOT
   if (!out || !baselineRoot) throw new Error('GUIDANCE_OUTPUT and GUIDANCE_BASELINE_ROOT required')
   const sources = { baseline: baselineRoot, candidate: root }
-  const conditions = []
+  let conditions = []
   // Block by replicate, alternate within pairs. No replacement or favourable resampling.
   for (let repeat = 0; repeat < 3; repeat++) for (const [index, c] of continuousCases.entries()) {
     if (repeat >= c.repeats) continue
@@ -65,6 +71,22 @@ async function main() {
         maxRequests: c.id === 'manager-project' || c.id === 'manager-delegation' ? 40 : c.role === 'worker' ? 24 : 16 })
     }
   }
+  let continuation
+  if (process.env.GUIDANCE_REMAINING_FROM) {
+    const prior = process.env.GUIDANCE_REMAINING_FROM
+    const priorPlan = JSON.parse(fs.readFileSync(path.join(prior, 'inputs.json'), 'utf8'))
+    const priorSummary = JSON.parse(fs.readFileSync(path.join(prior, 'summary.json'), 'utf8'))
+    const remaining = remainingConditions(priorPlan, priorSummary)
+    for (const c of remaining) {
+      if (JSON.stringify(conditions.find(x => x.id === c.id)) !== JSON.stringify(c)) throw new Error(`Original condition changed: ${c.id}`)
+    }
+    for (const [variant, source] of Object.entries(sources)) {
+      if (compiledHash(source) !== priorPlan.sources[variant].compiledSha256) throw new Error(`Product changed: ${variant}`)
+    }
+    conditions = remaining
+    continuation = { priorPlanSha256: priorPlan.sha256, priorSummarySha256: sha(fs.readFileSync(path.join(prior, 'summary.json'))),
+      selection: 'Only original budget-not-started conditions; never replay completed or interrupted trajectories.' }
+  }
   const plan = {
     endpoint: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', model: 'qwen3.8-max',
     image: (await docker(['image', 'inspect', 'crabot-guidance-tools:local', '--format', '{{.Id}}'])).trim(),
@@ -72,6 +94,7 @@ async function main() {
       commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8' }).trim(), compiledSha256: compiledHash(source),
     }])),
     scripts: Object.fromEntries(['continuous-cases.mjs', 'continuous-runtime.mjs', 'continuous-compare.mjs', 'docker-fixtures.mjs', 'docker-project-docs.mjs', 'docker-tool-entry.mjs', 'build-docker.mjs'].map(f => [f, sha(fs.readFileSync(path.join(import.meta.dirname, f)))])),
+    ...(continuation ? { continuation } : {}),
     conditions, maxRequests: conditions.reduce((n, c) => n + c.maxRequests, 0), stopNewRequestsAtReportedTokens: 2000000,
     scope: 'Synthetic cases only, no private history or project files. Actual selected-revision Manager/Harness/Builtin loops. Real file, command, workspace and Git operations inside isolated Docker. Channel and memory captured locally; no Feishu send. Fixed Worker event seeds are setup only. A readonly builtin reviewer runs with isolated production child prompt. Timer waiting, external channels and native CLI Workers are not tested. No retries, replacement samples or prompt changes.',
     acceptance: 'Check full trajectories, artifacts, board changes and outbox against frozen per-case criteria. Keep infrastructure errors and incomplete runs separate. Compare quality before cost, report all attempts plus complete comparable pairs, and list regressions even if aggregate tokens decrease. Repeats are limited and do not establish population non-inferiority or zero incident probability.',
@@ -83,7 +106,7 @@ async function main() {
     if (fs.readFileSync(inputPath, 'utf8') !== frozen) throw new Error('Frozen input changed')
   } else fs.writeFileSync(inputPath, frozen, { flag: 'wx', mode: 0o600 })
   if (process.argv.includes('--prepare')) {
-    console.log(JSON.stringify({ out, cases: continuousCases.length, trajectories: conditions.length, maxRequests: plan.maxRequests, maxTokens: plan.stopNewRequestsAtReportedTokens, sha256: sha(JSON.stringify(plan)) }))
+    console.log(JSON.stringify({ out, cases: new Set(conditions.map(c => c.c.id)).size, trajectories: conditions.length, maxRequests: plan.maxRequests, maxTokens: plan.stopNewRequestsAtReportedTokens, sha256: sha(JSON.stringify(plan)) }))
     return
   }
   if (fs.existsSync(path.join(out, 'events.jsonl'))) throw new Error('Refusing to overwrite existing run')

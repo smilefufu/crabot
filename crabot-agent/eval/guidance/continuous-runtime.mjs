@@ -150,6 +150,7 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
     return wrapped
   }
   const memory = []
+  const page = items => ({ items, pagination: { page: 1, page_size: 20, total_items: items.length, total_pages: items.length ? 1 : 0 } })
   const localRpc = { async call(_port, method, params) {
     emit({ type: 'local_rpc', method, params })
     if (method === 'send_message') {
@@ -159,6 +160,8 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
       return { platform_message_id: item.platform_message_id, sent_at: item.sent_at }
     }
     if (method === 'get_history') return { items: c.channelHistory ?? [{ platform_message_id: 'historical-human', sender: { friend_id: friend.id, platform_user_id: 'fixture-human', platform_display_name: friend.display_name }, content: { type: 'text', text: c.history }, features: { is_mention_crab: false }, platform_timestamp: now() }], pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 } }
+    if (method === 'get_sessions') return page([{ id: session.session_id, channel_id: session.channel_id, type: session.type, name: '人工评测会话' }])
+    if (method === 'resolve_friend') return { friend: params.platform_user_id === 'fixture-human' ? friend : null }
     if (method === 'list_entries') return { entries: memory, pagination: { page: 1, page_size: 20, total_items: memory.length, total_pages: memory.length ? 1 : 0 } }
     if (method === 'search_short_term') return { results: [] }
     if (method === 'search_memory' || method === 'search_long_term') return { results: memory.filter(m => m.status === (params.status ?? 'confirmed')) }
@@ -188,7 +191,11 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
       isClosing: () => !routing || stopped,
       messagingDeps: { rpcClient: localRpc, moduleId: 'fixture', getAdminPort: async () => 19001, resolveChannelPort: async () => 19009 },
       memoryServerFor: ctx => createCrabMemoryServer({ rpcClient: localRpc, moduleId: 'fixture', getMemoryPort: async () => 19100 }, ctx),
-      callAdmin: async method => { emit({ type: 'coverage_gap', boundary: 'admin', method }); throw new Error(`Unsupported local admin call: ${method}`) },
+      callAdmin: async method => {
+        if (method === 'list_channel_implementations') return page([{ id: 'fixture', name: '人工渠道', type: 'fixture', platform: 'fixture', version: '1' }])
+        if (method === 'list_channel_instances') return page([{ id: 'fixture', name: '人工渠道', platform: 'fixture', module_registered: true }])
+        emit({ type: 'coverage_gap', boundary: 'admin', method }); throw new Error(`Unsupported local admin call: ${method}`)
+      },
       principalResolver: { resolvePermissions: async () => permissions, sessionMemoryScopes: async () => ['fixture'], sceneProfile: async () => null, crabSelfHandle: () => undefined, getFriend: async id => id === friend.id ? friend : null },
       capabilityBundle: async () => ({ skills: [], mcp_servers: [] }),
       hasRunningBg: runningChildren,
@@ -246,7 +253,15 @@ export async function runContinuous({ c, sourceRoot, image, root, delegate, reco
       origin: { manager_key: managerKey, creator_friend_id: friend.id, trigger_type: 'message' },
       report_to: session, target_session: session, principal_permissions: permissions, impl: 'builtin',
     }) : undefined
-    const workerIdle = async () => (await stack.harness.listWorkers(managerKey)).every(w => w.incarnations.every(i => i.state !== 'running'))
+    const workerIdle = async () => {
+      const workers = await stack.harness.listWorkers(managerKey)
+      if (workers.some(w => w.incarnations.some(i => i.state === 'running'))) return false
+      if (childRegistry && !stopped) {
+        const children = await childRegistry.list({ type: 'agent' })
+        if (children.some(c => c.status === 'running' || c.exit_notification?.status === 'pending')) return false
+      }
+      return true
+    }
     await waitUntil(async () => await workerIdle() && activeCalls === 0 && Date.now() - lastActivity > 300)
     if (c.role === 'manager') {
       seedMode = false; routing = true

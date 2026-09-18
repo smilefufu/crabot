@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { runContinuous, scriptedChunks } from './continuous-runtime.mjs'
 import { continuousCases } from './continuous-cases.mjs'
+import { remainingConditions } from './continuous-compare.mjs'
 const sourceRoot = path.resolve(import.meta.dirname, '../../..')
 const image = 'crabot-guidance-tools:local'
 const call = (name, input) => ({ type: 'tool_use', id: crypto.randomUUID(), name, input })
@@ -110,4 +111,45 @@ test('Manager can spawn in the container project and receive real verified compl
   const end = rows.find(r => r.type === 'end')
   assert.match(end.oracle.result.output, /^exit_code: 0/)
   assert.equal(end.outbox.length, 1)
+})
+
+test('continuation includes only not-started cases, preserving completed and interrupted results', () => {
+  const plan = { conditions: ['done', 'cut', 'pending'].map(id => ({ id })) }
+  const summary = { results: [{ id: 'done', fatal: null }, { id: 'cut', fatal: 'request-budget' }, { id: 'pending', fatal: 'budget-not-started' }] }
+  assert.deepEqual(remainingConditions(plan, summary), [{ id: 'pending' }])
+  assert.throws(() => remainingConditions(plan, { results: [] }), /not recorded every condition/)
+})
+
+test('synthetic read-only channel inventory and identity lookup return actual fixture state', { timeout: 45000 }, async () => {
+  let step = 0
+  const c = { ...continuousCases.find(c => c.id === 'idle-duplicate'), trigger: 'human' }
+  const rows = await run(c, params => {
+    if (step++ === 0) return scriptedChunks([
+      call('list_sessions', { channel_id: 'fixture' }),
+      call('get_history', { channel_id: 'fixture', session_id: 'synthetic' }),
+      call('inspect_crabot', { view: 'deployment' }),
+      call('inspect_crabot', { view: 'capabilities' }),
+    ])
+    assert.match(JSON.stringify(params.messages), /人工评测会话/)
+    assert.match(JSON.stringify(params.messages), /采购交付缺少交付日期/)
+    assert.doesNotMatch(JSON.stringify(params.messages), /Unsupported local/)
+    return scriptedChunks([])
+  })
+  assert.equal(rows.filter(r => r.type === 'coverage_gap').length, 0)
+})
+
+// The child can be between model calls while a real tool is still running.
+test('parent wait includes a child executing a slow tool between model responses', { timeout: 45000 }, async () => {
+  let parentStep = 0, childStep = 0
+  const rows = await run(continuousCases.find(c => c.reviewer), (params, { role }) => {
+    if (role === 'reviewer') {
+      if (childStep++ === 0) return scriptedChunks([call('Bash', { command: 'sleep 2; cat /fixture/normalize.py' })])
+      return scriptedChunks([{ type: 'text', text: '慢速独立审查已完成，代码仍有空白处理缺陷。' }])
+    }
+    if (parentStep++ === 0) return scriptedChunks([call('delegate_task', { subagent_type: 'reviewer', task: '只读检查 /fixture/normalize.py。' })])
+    if (!JSON.stringify(params.messages).includes('慢速独立审查已完成')) return scriptedChunks([])
+    return scriptedChunks([call('finish_task', { outcome: 'failed', summary: '已收到完整审查结果。' })])
+  })
+  assert.ok(rows.some(r => r.type === 'child_completion' && r.text.includes('慢速独立审查已完成')))
+  assert.ok(rows.some(r => r.type === 'response' && r.role === 'worker' && r.tools.some(t => t.name === 'finish_task')))
 })
