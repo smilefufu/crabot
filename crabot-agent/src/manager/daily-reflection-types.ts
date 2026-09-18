@@ -67,7 +67,6 @@ export interface DailyReflectionState extends ReflectionWindow {
   cursors: Record<string, { record_ref?: string; offset: number }>
   tool_failures: Record<string, string>
   summary_delivered: boolean
-  inbox_inspected: boolean
   result?: DailyReflectionResult
   confirmation_pending?: boolean
   confirmation_error?: string

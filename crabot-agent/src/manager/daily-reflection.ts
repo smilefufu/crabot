@@ -76,7 +76,7 @@ export class DailyReflection {
         state = {
           ...admission, run_id: randomUUID(), episode_ids: [], analysis_worker_ids: [],
           directory_complete: false, read_records: {}, cursors: {}, tool_failures: {},
-          summary_delivered: false, inbox_inspected: false,
+          summary_delivered: false,
         }
       } else if (admission && admission.schedule_id !== state.schedule_id) {
         throw new Error('DAILY_REFLECTION_SCHEDULE_CONFLICT')
@@ -191,7 +191,6 @@ export class DailyReflection {
       else {
         delete state.tool_failures[identity]
         if (name === 'send_daily_reflection_summary') state.summary_delivered = true
-        if (name === 'mcp__crab-memory__list_entries' && input.status === 'inbox') state.inbox_inspected = true
       }
       await this.save(state)
     })
@@ -220,7 +219,6 @@ export class DailyReflection {
       const lastAssistant = [...params.messages].reverse().find(message => message.role === 'assistant')
       if (lastAssistant?.role !== 'assistant' || lastAssistant.content.filter(block => block.type === 'tool_use').length !== 1) errors.push('finish_must_be_called_alone')
       if (!state.directory_complete) errors.push('directory_not_fully_read')
-      if (!state.inbox_inspected) errors.push('inbox_not_inspected')
       if (state.manifest?.gaps.length || state.manifest?.records.some(record => record.gaps.length)) errors.push('known_evidence_gaps')
       if (Object.values(state.read_records).some(read => !read)) errors.push('record_not_fully_read')
       if (input.evidence_refs.some(ref => state.read_records[ref] !== true)) errors.push('unread_evidence_reference')

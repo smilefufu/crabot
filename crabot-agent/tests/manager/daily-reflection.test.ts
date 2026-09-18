@@ -46,6 +46,19 @@ async function ready(host: DailyReflection) {
 }
 
 describe('DailyReflection host', () => {
+  it.each([
+    ['mcp__crab-memory__list_entries', {}],
+    ['mcp__crab-memory__search_long_term', { query: '*', filters: { status: 'inbox' } }],
+  ] as const)('does not require an exact inbox listing call after %s', async (name, input) => {
+    const { host, deps } = await setup()
+    await host.list()
+    await host.observe(name, input, { isError: false, output: '[]' })
+    const result = await host.finish(completion())
+    expect(result?.validation_errors).toEqual([])
+    expect(result?.outcome).toBe('completed')
+    expect(deps.confirm).toHaveBeenCalledOnce()
+  })
+
   it('does not publish a failed inventory and retries without changing the admitted window', async () => {
     const { host, deps, store } = await setup()
     vi.mocked(deps.capture).mockResolvedValueOnce({ records: [], gaps: ['manager_inventory_unavailable'] })
