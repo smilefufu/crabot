@@ -371,8 +371,8 @@ export function createCrabMemoryServer(
   server.registerTool(
         'search_memory',
         {
-          description: '搜索记忆。short_term=跨 session 事件流水账（每条自带 channel/session/task/trace 锚点）；long_term=认知知识库（事实/经验/概念）。' +
-            '【short_term 用途】未知 task_id/trace_id 时回溯历史事件的入口——任何需要回答"哪一次任务/事件 / 上一次怎么处理 / 之前为什么变成这样"的问题，先调本工具（level=short_term）拿锚点，再用 find_task / get_task_progress 取详情。',
+          description: '搜索当前权限范围内的记忆。short_term 返回历史事件线索及记录中已有的来源锚点；long_term 返回事实、经验和概念。' +
+            '回溯事件但尚无来源标识时，可先用 level=short_term 定位线索，再按实际可用工具和权限读取相关详情。来源锚点不授予访问权限，检索结果不等于指定周期的完整执行记录。',
           inputSchema: SEARCH_MEMORY_SCHEMA,
         },
         async (args) => {
@@ -542,7 +542,8 @@ export function createCrabMemoryServer(
   server.registerTool(
     'set_memory_links',
     {
-      description: '为某条记忆设置关联链接（relation ∈ related/refines/depends_on/part_of）。反思批量建链用。',
+      description: '替换某条记忆的完整 links 列表（relation ∈ related/refines/depends_on/part_of），不是追加。' +
+        '增量建链先读取已有 links，合并去重后写回；空列表会清空旧边，只在任务明确要求清空时使用。',
       inputSchema: SET_MEMORY_LINKS_SCHEMA,
     },
     async (args) => callRpc('update_long_term', {

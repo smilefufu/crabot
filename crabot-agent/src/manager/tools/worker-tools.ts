@@ -502,8 +502,8 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const getWorkerActivity = defineTool({
     name: 'get_worker_activity',
     description:
-      '读取 worker 原生会话解析出的增量活动。缺省 view=assistant，只返回 assistant text；' +
-      'view=all 同时返回 tool call/result 与脱敏 error evidence。after 是上次返回的 opaque cursor；切换 view 时不传旧 after。',
+      '读取原生增量活动。view=assistant（默认）仅文本；all 含工具及脱敏错误。after 为上次游标，换 view 时不传。' +
+      '游标变化不代表新活动，空结果不证明完成或无错误；读完所需证据且只剩等待就结束本轮等通知，不轮询。',
     inputSchema: {
       type: 'object',
       properties: {

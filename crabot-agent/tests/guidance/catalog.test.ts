@@ -26,7 +26,7 @@ describe('product guidance boundaries', () => {
   })
   it('任务板规范常驻，自省只在自己的入口自动提供', () => {
     const prompt = assembleManagerSystemPrompt(base)
-    for (const rule of ['任务板是持续工作的管理摘要', '实质变化才更新', '完成或放弃即归档', '项目事实由执行器维护文档', '不主动外发内部检查过程']) {
+    for (const rule of ['任务板是持续工作的管理摘要', '实质变化才更新', '完成或放弃即归档', '项目事实由执行器维护文档', '内部检查不主动外发']) {
       expect(prompt).toContain(rule)
     }
     expect(automaticGuidanceForWake({ kind: 'workboard_admin_update', noticeRevision: 1 })).toBeUndefined()

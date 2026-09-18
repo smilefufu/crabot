@@ -66,7 +66,7 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
     expect(dailyReflection!.is_builtin).toBe(true)
     expect(dailyReflection!.trigger.type).toBe('cron')
     expect(dailyReflection!.task_template.type).toBe('daily_reflection')
-    expect(dailyReflection!.task_template.description).toContain('Manager 直接执行')
+    expect(dailyReflection!.task_template.description).toContain('主控直接执行')
     expect(dailyReflection!.task_template.description).not.toContain('Skill("daily-reflection")')
     expect(dailyReflection!.task_template.description).toContain('send_daily_reflection_summary')
     expect(dailyReflection!.task_template.description).not.toContain('send_master_private')
@@ -152,7 +152,7 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
     const refreshed = schedulesMap.get(originalId)
     expect(refreshed, 'schedule should still exist with same id').toBeDefined()
     expect(refreshed!.task_template.description).not.toBe(staleDescription)
-    expect(refreshed!.task_template.description).toContain('Manager 直接执行')
+    expect(refreshed!.task_template.description).toContain('主控直接执行')
     expect(refreshed!.task_template.description).not.toContain('Skill("daily-reflection")')
     expect(refreshed!.created_at).toBe(originalCreatedAt) // user-facing fields preserved
     expect(refreshed!.execution_count).toBe(42) // runtime stats preserved

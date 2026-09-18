@@ -365,7 +365,8 @@ export function assertClosedToolFace(tools: readonly ToolDefinition[], allowExte
 function buildSearchToolsTool(catalog: ManagerToolCatalog, state: ManagerToolFaceState): ToolDefinition {
   return defineTool({
     name: 'search_tools',
-    description: '按动作和对象搜索当前 episode 可用的 Manager 工具。命中的具体工具从下一轮开始可见并可直接调用。',
+    description: '按动作和对象搜索工具；适用的可见项直接调用，命中项下轮可见。' +
+      '核对用途与权限，加载不代表可执行；无新线索不重复搜，预算省略不代表无匹配。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
