@@ -448,6 +448,55 @@ describe('Manager restart continuation', () => {
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.spans.filter((span) => span.type === 'tool_call')).toHaveLength(1)
   })
 
+  it.each(['human', 'schedule'] as const)('continues a compacted long %s episode from its saved progress across restart', async (source) => {
+    let inference = 0
+    let paused = false
+    const read = vi.fn(async () => ({ output: 'DIRECTORY_PAGE:' + 'x'.repeat(4000), isError: false }))
+    const page = defineTool({ name: 'page', description: 'read page', inputSchema: {}, call: read })
+    const old = registry({ async *stream(params) {
+      if (params.systemPrompt === createManagerCompactionProfile().summarySystemPrompt) {
+        yield* chunksFromContent([{ type: 'text', text: 'directory progress saved' }], 'end_turn')
+      } else if (inference++ < 24) {
+        yield* chunksFromContent([{ type: 'tool_use', id: `page-${inference}`, name: 'page', input: {} }], 'tool_use', {
+          inputTokens: inference === 24 ? 90000 : 100, outputTokens: 5,
+        })
+      } else {
+        paused = true
+        await new Promise(() => {})
+      }
+    }, updateConfig() {} }, { contextWindowTokens: () => 100000, toolFace: () => [page] })
+    if (source === 'human') void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Original long request')])
+    else void old.getOrCreate(KEY).wakeUp({ received_at: '2026-09-06T14:05:00Z', timezone: 'Asia/Shanghai',
+      wake: { kind: 'schedule', scheduleId: 'long-review', title: 'Original long request', description: 'read all pages' } })
+    const checkpoint = await checkpointWhere(value => paused && value.state.foldedCount > 0)
+    expect(checkpoint.state.rollingSummary).toBeUndefined()
+    expect(checkpoint.state.recent.some(item => item.id.startsWith('compaction:'))).toBe(true)
+    const original = checkpoint.state.recent.find(item => item.id === checkpoint.protectedTailMessageId)!
+    expect(JSON.stringify(original)).toContain('Original long request')
+    const inputs: LLMStreamParams[] = []
+    const summaries: string[] = []
+    const restored = registry({ async *stream(params) {
+      if (params.systemPrompt === createManagerCompactionProfile().summarySystemPrompt) {
+        summaries.push(JSON.stringify(params.messages))
+        yield* chunksFromContent([{ type: 'text', text: 'directory progress retained after restart' }], 'end_turn')
+      } else {
+        inputs.push({ ...params, messages: [...params.messages] })
+        yield* chunksFromContent([], 'end_turn')
+      }
+    }, updateConfig() {} }, { contextWindowTokens: () => 10000, toolFace: () => [page] })
+    restored.registerResumeCheckpoints([checkpoint])
+    trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
+    await restored.resumeInterruptedEpisodes()
+    expect(summaries.length).toBeGreaterThan(0)
+    expect(summaries.some(text => text.includes('Original long request'))).toBe(false)
+    expect(inputs).toHaveLength(1)
+    expect(inputs[0].messages).toContainEqual(original)
+    expect(JSON.stringify(inputs[0].messages)).toContain('directory progress retained after restart')
+    expect(read).toHaveBeenCalledTimes(24)
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.status).toBe('completed')
+    expect(await store.loadCheckpoint(KEY)).toBeUndefined()
+  })
+
   it('does not reconstruct settled interrupted calls after compaction and another restart', async () => {
     const read = defineTool({ name: 'read', description: '', inputSchema: {}, isReadOnly: true,
       call: async () => ({ output: 'old-tool-result:' + 'x'.repeat(160000), isError: false }) })
@@ -545,8 +594,10 @@ describe('Manager restart continuation', () => {
     const next = defineTool({ name: 'next', description: '', inputSchema: {}, isReadOnly: true,
       call: async () => ({ output: 'retry result', isError: false }) })
     let calls = 0
+    const folds: string[] = []
     const old = registry({ async *stream(params) {
       if (params.systemPrompt.includes(createManagerCompactionProfile().summarySystemPrompt)) {
+        folds.push(JSON.stringify(params.messages))
         yield* chunksFromContent([{ type: 'text', text: 'Old history summary' }], 'end_turn')
       } else if (calls++ === 0) {
         yield* chunksFromContent([{ type: 'tool_use', id: 'read-call', name: 'read', input: {} }], 'tool_use')
@@ -560,7 +611,6 @@ describe('Manager restart continuation', () => {
     void old.routeWorkboardAdminUpdate({ key: KEY, noticeRevision: 1 })
     const checkpoint = await checkpointWhere((value) => value.state.foldedCount > 0 && calls === 4)
     expect(accepted).toHaveBeenCalledTimes(1)
-    const folds: string[] = []
     const inputs: string[] = []
     const restored = registry({ async *stream(params) {
       if (params.systemPrompt.includes(createManagerCompactionProfile().summarySystemPrompt)) {

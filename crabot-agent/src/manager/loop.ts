@@ -2038,10 +2038,8 @@ export class ManagerLoop {
       state: toManagerCompactionState(args.state, args.protectedTail),
       profile: {
         ...args.profile,
+        protectedMessageIds: new Set(args.protectedTail.filter(isInputMessage).map((message) => message.id)),
         onBatchApplied: async (batch) => {
-          if (batch.state.previousSummary === undefined) {
-            throw new Error('压缩批次缺少 rollingSummary')
-          }
           const nextState: ManagerSessionState = {
             ...latestState,
             rollingSummary: batch.state.previousSummary,
@@ -2188,7 +2186,10 @@ export class ManagerLoop {
             remaining.set(message.content, remaining.get(message.content)! - 1)
           }
         }
-        this.resumeCheckpoint = { ...this.resumeCheckpoint, transientMessageIds: [...transientIds] }
+        const firstInput = recent.find((message) => isInputMessage(message)
+          && !originalDurableIds.has(message.id) && !transientIds.has(message.id))
+        this.resumeCheckpoint = { ...this.resumeCheckpoint, transientMessageIds: [...transientIds],
+          protectedTailMessageId: this.resumeCheckpoint.protectedTailMessageId ?? firstInput?.id }
       }
       this.flushCheckpoint({ ...state, recent })
     }
@@ -2227,18 +2228,19 @@ export class ManagerLoop {
         checkpoint()
         const raw = messages.slice(hasSummaryMarker ? 1 : 0)
         const protectedId = this.resumeCheckpoint?.protectedTailMessageId
-        let protectedStart = protectedId ? raw.findIndex((message) => message.id === protectedId) : -1
-        // 所有本轮新增输入及其后续工具组都留在尾部；不跨越当前输入重新排序。
-        const newInput = raw.findIndex((message) => !originalDurableIds.has(message.id) && message.role === 'user' && 'content' in message)
-        if (newInput >= 0) protectedStart = protectedStart < 0 ? newInput : Math.min(protectedStart, newInput)
-        if (protectedStart < 0) protectedStart = raw.length
+        const protectedStart = protectedId ? raw.findIndex((message) => message.id === protectedId) : -1
+        // 原文保护只作用于输入；输入之间和之后的完整工具组由共享 Engine 原位压缩。
+        const protectedMessageIds = new Set(raw.filter((message, index) => isInputMessage(message)
+          && ((protectedStart >= 0 && index >= protectedStart) || !originalDurableIds.has(message.id)))
+          .map((message) => message.id))
         return {
           state: { protectedHead: [], previousSummary: state.rollingSummary,
-            history: raw.slice(0, protectedStart), protectedTail: raw.slice(protectedStart) },
+            history: raw, protectedTail: [] },
           adapter: this.observeAdapter(episodeId, currentAdapter, 'compaction'),
           profile: createManagerCompactionProfile({
             preferredKeepRecent: this.deps.policy.keepRecent,
             mainRequestFixedTokens: fixedTokens,
+            protectedMessageIds,
             onBatchApplied: async (batch) => {
               const recent = [...batch.state.history, ...batch.state.protectedTail].map(durableMessage)
               const next = { ...state,
@@ -2257,7 +2259,7 @@ export class ManagerLoop {
                 if (message) this.persistedEventMessages.set(item, message.id)
               }
               state = next
-              hasSummaryMarker = true
+              hasSummaryMarker = state.rollingSummary !== undefined
               messagesRef.current = batch.messages
               checkpoint()
             },
@@ -2845,9 +2847,13 @@ function toManagerCompactionState(
   return {
     protectedHead: [],
     ...(state.rollingSummary !== undefined ? { previousSummary: state.rollingSummary } : {}),
-    history: state.recent,
-    protectedTail,
+    history: [...state.recent, ...protectedTail],
+    protectedTail: [],
   }
+}
+
+function isInputMessage(message: EngineMessage): boolean {
+  return message.role === 'user' && 'content' in message
 }
 
 function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope, quotedMessages?: ReadonlyMap<string, QuotedMessageEntry>): string {

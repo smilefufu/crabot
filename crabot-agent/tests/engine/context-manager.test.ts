@@ -782,6 +782,119 @@ describe('ContextManager.compactIncrementally', () => {
     )
   }
 
+  function toolGroup(id: string, chars = 2000): EngineMessage[] {
+    return [
+      createAssistantMessage([{ type: 'tool_use', id, name: 'read', input: {} }], 'tool_use'),
+      createToolResultMessage(id, `${id}:${'x'.repeat(chars)}`, false),
+    ]
+  }
+
+  it('keeps inputs in place and tries completed tools after a tiny region cannot shrink', async () => {
+    const cm = new ContextManager({ maxContextTokens: 20000 })
+    const inputA = createUserMessage('original input A')
+    const inputB = createUserMessage('original correction B')
+    const tiny = toolGroup('tiny-old', 0)
+    const latest = toolGroup('latest', 10)
+    const state: CompactionState = { protectedHead: [], protectedTail: [],
+      history: [...tiny, inputA, ...toolGroup('large-1'), ...toolGroup('large-2'), inputB, ...latest] }
+    const profile = createManagerCompactionProfile({ preferredKeepRecent: 2,
+      protectedMessageIds: new Set([inputA.id, inputB.id]), summarySystemPrompt: 'summarize' })
+    const { adapter, calls } = scriptedAdapter((params) => ({
+      text: promptText(params).includes('tiny-old') ? 'oversized'.repeat(100) : 'completed large-1 and large-2',
+    }))
+    const result = await cm.compactIncrementally({ state, profile, target: { kind: 'fit_hard_cap', hardCapTokens: 300 }, adapter, model: 'test' })
+    expect(result.failedReason).toBeUndefined()
+    expect(calls).toHaveLength(2)
+    expect(result.consumedMessages).toBe(4)
+    expect(result.messages.slice(0, 3)).toEqual([...tiny, inputA])
+    expect(result.messages.slice(-3)).toEqual([inputB, ...latest])
+    expect(JSON.stringify(result.messages[3])).toContain('completed large-1 and large-2')
+    expect(cm.estimateCompactionStateTokens(result.state, profile)).toBeLessThan(300)
+    expect(calls.some((call) => promptText(call).includes('original input'))).toBe(false)
+  })
+
+  it('rolls an in-place summary forward after serialization without recounting it as an original message', async () => {
+    const cm = new ContextManager({ maxContextTokens: 20000 })
+    const input = createUserMessage('[以下是本次对话更早历史的滚动摘要,不是用户刚发的话]\n\nThis is really a human input')
+    const profile = createManagerCompactionProfile({ preferredKeepRecent: 2,
+      protectedMessageIds: new Set([input.id]), summarySystemPrompt: 'summarize' })
+    const { adapter, calls } = scriptedAdapter((_params, index) => ({ text: `progress-${index}` }))
+    const first = await cm.compactIncrementally({ state: { protectedHead: [], protectedTail: [],
+      history: [input, ...toolGroup('one'), ...toolGroup('two'), ...toolGroup('three')] }, profile,
+      target: { kind: 'fit_hard_cap', hardCapTokens: 1000, force: true }, adapter, model: 'test' })
+    const restored = JSON.parse(JSON.stringify(first.state)) as CompactionState
+    const second = await cm.compactIncrementally({ state: { ...restored,
+      history: [...restored.history, ...toolGroup('four'), ...toolGroup('five')] }, profile,
+      target: { kind: 'fit_hard_cap', hardCapTokens: 1000, force: true }, adapter, model: 'test' })
+    expect(first.failedReason).toBeUndefined()
+    expect(second.failedReason).toBeUndefined()
+    expect(first.consumedMessages).toBe(4)
+    expect(second.consumedMessages).toBe(4)
+    expect(second.messages[0]).toEqual(input)
+    expect(second.messages.filter((message) => message.id.startsWith('compaction:'))).toHaveLength(1)
+    expect(promptText(calls[1])).toContain('progress-0')
+    expect(calls.some((call) => promptText(call).includes('really a human input'))).toBe(false)
+  })
+
+  it('does not split a tool group around an injected input or consume a pending call', async () => {
+    const cm = new ContextManager({ maxContextTokens: 20000 })
+    const input = createUserMessage('correction during tools')
+    const crossed = toolGroup('crossed', 10)
+    const pending = createAssistantMessage([{ type: 'tool_use', id: 'pending', name: 'write', input: {} }], 'tool_use')
+    const state: CompactionState = { protectedHead: [], protectedTail: [],
+      history: [crossed[0], input, crossed[1], ...toolGroup('finished-1'), ...toolGroup('finished-2'), pending] }
+    const { adapter, calls } = scriptedAdapter(() => ({ text: 'completed finished groups' }))
+    const result = await cm.compactIncrementally({ state,
+      profile: createManagerCompactionProfile({ preferredKeepRecent: 1,
+        protectedMessageIds: new Set([input.id]), summarySystemPrompt: 'summarize' }),
+      target: { kind: 'fit_hard_cap', hardCapTokens: 300 }, adapter, model: 'test' })
+    expect(result.failedReason).toBeUndefined()
+    expect(result.messages.slice(0, 3)).toEqual([crossed[0], input, crossed[1]])
+    expect(result.messages.at(-1)).toEqual(pending)
+    expect(calls.some((call) => /crossed|correction during|pending/.test(promptText(call)))).toBe(false)
+  })
+
+  it('fails finitely when protected input alone exceeds the cap and preserves applied regions', async () => {
+    const cm = new ContextManager({ maxContextTokens: 20000 })
+    const input = createUserMessage('original'.repeat(1000))
+    const { adapter, calls } = scriptedAdapter(() => ({ text: 'completed' }))
+    const applied: CompactionState[] = []
+    const result = await cm.compactIncrementally({ state: { protectedHead: [], protectedTail: [],
+      history: [input, ...toolGroup('one'), ...toolGroup('two'), ...toolGroup('three')] },
+      profile: createManagerCompactionProfile({ preferredKeepRecent: 2,
+        protectedMessageIds: new Set([input.id]), summarySystemPrompt: 'summarize',
+        onBatchApplied: (batch) => { applied.push(batch.state) } }),
+      target: { kind: 'fit_hard_cap', hardCapTokens: 100 }, adapter, model: 'test' })
+    expect(result.failedReason).toContain('hardCap')
+    expect(calls).toHaveLength(1)
+    expect(result.batchesApplied).toBe(1)
+    expect(result.state).toEqual(applied[0])
+    expect(result.messages[0]).toEqual(input)
+  })
+
+  it.each(['provider', 'save', 'abort'] as const)('keeps a committed in-place batch after a later %s failure', async (failure) => {
+    const cm = new ContextManager({ maxContextTokens: 1600 })
+    const input = createUserMessage('protected instruction')
+    const applied: CompactionState[] = []
+    const { adapter } = scriptedAdapter((_params, index) => {
+      if (index === 1 && failure === 'provider') return new Error('invalid api key')
+      if (index === 1 && failure === 'abort') return new DOMException('Aborted', 'AbortError')
+      return { text: 'completed prior groups' }
+    })
+    const result = await cm.compactIncrementally({ state: { protectedHead: [], protectedTail: [],
+      history: [input, ...Array.from({ length: 12 }, (_, index) => toolGroup(`group-${index}`, 1800)).flat()] },
+      profile: createManagerCompactionProfile({ preferredKeepRecent: 2, summarySystemPrompt: 'summarize',
+        protectedMessageIds: new Set([input.id]), onBatchApplied: (batch) => {
+          if (applied.length === 1 && failure === 'save') throw new Error('disk full')
+          applied.push(batch.state)
+        } }), target: { kind: 'fit_hard_cap', hardCapTokens: 700 }, adapter, model: 'test' })
+    expect(result.batchesApplied).toBe(1)
+    expect(result.state).toEqual(applied[0])
+    expect(result.messages[0]).toEqual(input)
+    if (failure === 'abort') expect(result.aborted).toBe(true)
+    else expect(result.failedReason).toContain(failure === 'provider' ? 'invalid api key' : 'disk full')
+  })
+
   it('strictly shrinks a max_tokens batch, then restores the full ceiling for the next batch', async () => {
     const cm = new ContextManager({ maxContextTokens: 1_500 })
     const state: CompactionState = {
