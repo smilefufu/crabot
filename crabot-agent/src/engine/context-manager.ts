@@ -7,6 +7,7 @@ import {
   type ContentBlock,
   type ToolDefinition,
   createUserMessage,
+  createAssistantMessage,
 } from './types'
 import { callNonStreaming, type LLMAdapter } from './llm-adapter'
 
@@ -38,6 +39,8 @@ export interface CompactionProfile {
   readonly mainRequestFixedTokens: number
   readonly summarySystemPrompt: string
   readonly summaryMessagePrefix: string
+  /** 原位保留这些输入；其后的已完成工具组仍可压缩。仅用于本次调用，不持久化。 */
+  readonly protectedMessageIds?: ReadonlySet<string>
   readonly onBatchApplied?: (batch: CompactionBatchApplication) => void | Promise<void>
 }
 
@@ -135,6 +138,13 @@ const SUMMARY_INPUT_BUDGET_RATIO = 0.8
 /** findSafeSplitIndex 的哨兵：整段没有任何合法切点（recent 段必然以孤儿 tool_result 打头）。 */
 const NO_SAFE_SPLIT = -1
 
+// Engine IDs 由宿主生成；正文中的同名标记不能把用户输入变成摘要。
+const INLINE_SUMMARY_ID_PREFIX = 'compaction:'
+
+function isInlineSummary(message: EngineMessage): message is EngineAssistantMessage {
+  return message.role === 'assistant' && message.id.startsWith(INLINE_SUMMARY_ID_PREFIX)
+}
+
 const DEFAULT_COMPACT_SYSTEM_PROMPT = `你正在为一个长任务压缩上下文。你的目标不是复述聊天记录，而是保留后续继续执行任务所必需的、当前有效的上下文状态。
 
 请输出结构化摘要，只输出摘要本身，不要写开场白或解释。摘要必须区分“当前仍有效的信息”和“已经被用户纠正、作废、替换的信息”。
@@ -205,6 +215,7 @@ interface CompactionProfileOptions {
   readonly preferredKeepRecent?: number
   readonly mainRequestFixedTokens?: number
   readonly summarySystemPrompt?: string
+  readonly protectedMessageIds?: ReadonlySet<string>
   readonly onBatchApplied?: CompactionProfile['onBatchApplied']
 }
 
@@ -217,6 +228,7 @@ export function createBuiltinCompactionProfile(
     mainRequestFixedTokens: options.mainRequestFixedTokens ?? 0,
     summarySystemPrompt: options.summarySystemPrompt ?? DEFAULT_COMPACT_SYSTEM_PROMPT,
     summaryMessagePrefix: BUILTIN_SUMMARY_MESSAGE_PREFIX,
+    ...(options.protectedMessageIds ? { protectedMessageIds: options.protectedMessageIds } : {}),
     ...(options.onBatchApplied ? { onBatchApplied: options.onBatchApplied } : {}),
   }
 }
@@ -230,6 +242,7 @@ export function createManagerCompactionProfile(
     mainRequestFixedTokens: options.mainRequestFixedTokens ?? 0,
     summarySystemPrompt: options.summarySystemPrompt ?? DEFAULT_COMPACT_SYSTEM_PROMPT,
     summaryMessagePrefix: MANAGER_SUMMARY_MESSAGE_PREFIX,
+    ...(options.protectedMessageIds ? { protectedMessageIds: options.protectedMessageIds } : {}),
     ...(options.onBatchApplied ? { onBatchApplied: options.onBatchApplied } : {}),
   }
 }
@@ -389,6 +402,8 @@ export class ContextManager {
     let batchesApplied = 0
     let consumedMessages = 0
     let forcedBatchPending = target.kind === 'fit_hard_cap' && target.force === true
+    const exhaustedRegions = new Set<string>()
+    let exhaustedReason: string | undefined
 
     const finish = (
       extra: Pick<IncrementalCompactionResult, 'failedReason' | 'aborted' | 'cause'> = {},
@@ -410,7 +425,29 @@ export class ContextManager {
         return finish()
       }
 
-      const maxBatchMessages = this.maxConsumablePrefix(state.history, profile.preferredKeepRecent)
+      const region = this.compactionRegions(state.history, profile.protectedMessageIds)
+        .find(({ start }) => !exhaustedRegions.has(state.history[start].id))
+      if (!region) {
+        const reason = target.kind === 'fit_hard_cap'
+          ? `主请求固定开销、受保护内容与最小安全消息组仍超过 hardCap ${target.hardCapTokens} token，历史压缩无法解决`
+          : '找不到合法的压缩切点'
+        return finish({ failedReason: exhaustedReason ?? reason })
+      }
+      const regionId = state.history[region.start].id
+      const first = state.history[region.start]
+      const inline = region.start > 0 && isInlineSummary(first) ? first : undefined
+      const offset = inline ? 1 : 0
+      let previousSummary: string | undefined
+      if (region.start === 0) previousSummary = state.previousSummary
+      else if (inline) previousSummary = this.extractText(inline).slice(profile.summaryMessagePrefix.length)
+      const batchState: CompactionState = {
+        protectedHead: [], protectedTail: [], previousSummary,
+        history: state.history.slice(region.start + offset, region.end),
+      }
+      const allowConsumeAll = region.end < state.history.length
+      const laterHistory = state.history.slice(region.end).filter((message) => !profile.protectedMessageIds?.has(message.id)).length
+      const keepRecent = Math.max(0, profile.preferredKeepRecent - laterHistory)
+      const maxBatchMessages = this.maxConsumablePrefix(batchState.history, keepRecent, allowConsumeAll)
       if (maxBatchMessages <= 0) {
         if (
           target.kind === 'preserve_recent'
@@ -419,12 +456,12 @@ export class ContextManager {
         ) {
           return finish()
         }
-        return finish({
-          failedReason: target.kind === 'fit_hard_cap'
-            && (state.history.length === 0 || !this.isToolResultMessage(state.history[0]))
-            ? `主请求固定开销、受保护内容与最小安全消息组仍超过 hardCap ${target.hardCapTokens} token，历史压缩无法解决`
-            : '找不到合法的压缩切点：必须保留至少一个安全消息组，且 remaining history 不能以孤儿 tool_result 开头',
-        })
+        exhaustedReason = target.kind === 'fit_hard_cap'
+          && (state.history.length === 0 || !this.isToolResultMessage(state.history[0]))
+          ? `主请求固定开销、受保护内容与最小安全消息组仍超过 hardCap ${target.hardCapTokens} token，历史压缩无法解决`
+          : '找不到合法的压缩切点：必须保留至少一个安全消息组，且 remaining history 不能以孤儿 tool_result 开头'
+        exhaustedRegions.add(regionId)
+        continue
       }
 
       let candidateLimit = Math.floor(this.maxContextTokens * SUMMARY_INPUT_BUDGET_RATIO)
@@ -433,17 +470,18 @@ export class ContextManager {
 
       while (true) {
         const candidate = this.selectLargestBatch(
-          state,
+          batchState,
           profile,
           candidateMaxMessages,
           candidateLimit,
+          allowConsumeAll,
         )
         if (!candidate) {
-          return finish({
-            failedReason: retryReason
-              ? `${retryReason}；缩至最小安全消息组后仍无法继续`
-              : `最小安全消息组的完整摘要请求仍超过输入上限 ${candidateLimit} token`,
-          })
+          exhaustedReason = retryReason
+            ? `${retryReason}；缩至最小安全消息组后仍无法继续`
+            : `最小安全消息组的完整摘要请求仍超过输入上限 ${candidateLimit} token`
+          exhaustedRegions.add(regionId)
+          break
         }
 
         let response
@@ -463,7 +501,7 @@ export class ContextManager {
             return finish({ failedReason: `摘要 LLM 调用失败: ${String(error)}`, cause: error })
           }
           retryReason = `摘要请求超过 Provider 上下文窗口: ${String(error)}`
-          const shrunk = this.shrinkCandidate(state, profile, candidate)
+          const shrunk = this.shrinkCandidate(batchState, profile, candidate)
           candidateLimit = shrunk.inputLimit
           candidateMaxMessages = shrunk.maxMessages
           continue
@@ -471,7 +509,7 @@ export class ContextManager {
 
         if (response.stopReason === 'max_tokens') {
           retryReason = '摘要 LLM 输出因 max_tokens 截断'
-          const shrunk = this.shrinkCandidate(state, profile, candidate)
+          const shrunk = this.shrinkCandidate(batchState, profile, candidate)
           candidateLimit = shrunk.inputLimit
           candidateMaxMessages = shrunk.maxMessages
           continue
@@ -485,30 +523,36 @@ export class ContextManager {
           return finish({ failedReason: '摘要 LLM 返回空摘要' })
         }
 
-        const nextState: CompactionState = {
-          protectedHead: state.protectedHead,
-          previousSummary: summary,
-          history: state.history.slice(candidate.messageCount),
-          protectedTail: state.protectedTail,
+        let nextState: CompactionState
+        if (region.start === 0) {
+          nextState = { ...state, previousSummary: summary, history: state.history.slice(candidate.messageCount) }
+        } else {
+          const summaryMessage = createAssistantMessage([{ type: 'text', text: profile.summaryMessagePrefix + summary }], 'end_turn')
+          nextState = { ...state, history: [
+              ...state.history.slice(0, region.start),
+              { ...summaryMessage, id: INLINE_SUMMARY_ID_PREFIX + summaryMessage.id },
+              ...state.history.slice(region.start + offset + candidate.messageCount),
+            ] }
         }
         const beforeTokens = this.estimateCompactionStateTokens(state, profile)
         const afterTokens = this.estimateCompactionStateTokens(nextState, profile)
         if (afterTokens >= beforeTokens) {
           retryReason = `压缩后 token 未下降（before=${beforeTokens}, after=${afterTokens}）`
-          const shrunk = this.shrinkCandidate(state, profile, candidate)
+          const shrunk = this.shrinkCandidate(batchState, profile, candidate)
           candidateLimit = shrunk.inputLimit
           candidateMaxMessages = shrunk.maxMessages
           continue
         }
 
         const nextMessages = this.materializeCompactionState(nextState, profile)
+        const consumed = batchState.history.slice(0, candidate.messageCount).filter((message) => !isInlineSummary(message)).length
         try {
           await profile.onBatchApplied?.({
             state: nextState,
             messages: nextMessages,
             batchNumber: batchesApplied + 1,
-            consumedMessages: candidate.messageCount,
-            totalConsumedMessages: consumedMessages + candidate.messageCount,
+            consumedMessages: consumed,
+            totalConsumedMessages: consumedMessages + consumed,
           })
         } catch (error) {
           if (signal?.aborted || isAbortError(error)) {
@@ -520,7 +564,7 @@ export class ContextManager {
         state = nextState
         messages = nextMessages
         batchesApplied++
-        consumedMessages += candidate.messageCount
+        consumedMessages += consumed
         forcedBatchPending = false
         break
       }
@@ -588,29 +632,58 @@ export class ContextManager {
   private maxConsumablePrefix(
     history: ReadonlyArray<EngineMessage>,
     preferredKeepRecent: number,
+    allowConsumeAll = false,
   ): number {
     const preferred = history.length - preferredKeepRecent
     if (preferred > 0) {
       for (let split = preferred; split > 0; split--) {
-        if (this.isSafeSplit(history, split)) return split
+        if (this.isSafeSplit(history, split, allowConsumeAll)) return split
       }
-      for (let split = preferred + 1; split < history.length; split++) {
-        if (this.isSafeSplit(history, split)) return split
+      for (let split = preferred + 1; split <= history.length; split++) {
+        if (this.isSafeSplit(history, split, allowConsumeAll)) return split
       }
       return NO_SAFE_SPLIT
     }
 
     // hardCap / Provider 强制恢复允许少保留于 preferred 数量，但至少留一个安全消息组。
-    for (let split = history.length - 1; split > 0; split--) {
-      if (this.isSafeSplit(history, split)) return split
+    for (let split = history.length; split > 0; split--) {
+      if (this.isSafeSplit(history, split, allowConsumeAll)) return split
     }
     return NO_SAFE_SPLIT
   }
 
-  private isSafeSplit(history: ReadonlyArray<EngineMessage>, split: number): boolean {
+  private isSafeSplit(history: ReadonlyArray<EngineMessage>, split: number, allowConsumeAll = false): boolean {
     return split > 0
-      && split < history.length
-      && !this.isToolResultMessage(history[split])
+      && (split === history.length ? allowConsumeAll : split < history.length && !this.isToolResultMessage(history[split]))
+  }
+
+  /** 只在工具组完整结束处划分；组内插话保护该组，不让调用与结果跨摘要分离。 */
+  private compactionRegions(history: ReadonlyArray<EngineMessage>, protectedIds?: ReadonlySet<string>): Array<{ start: number; end: number }> {
+    if (!protectedIds) return history.length > 0 ? [{ start: 0, end: history.length }] : []
+    const regions: Array<{ start: number; end: number }> = []
+    const pending = new Set<string>()
+    let start = 0
+    let protectedGroup = false
+    for (let index = 0; index < history.length; index++) {
+      const message = history[index]
+      protectedGroup ||= protectedIds.has(message.id)
+      if (message.role === 'assistant') {
+        for (const block of message.content) if (block.type === 'tool_use') pending.add(block.id)
+      } else if ('toolResults' in message) {
+        for (const result of message.toolResults) {
+          if (!pending.delete(result.tool_use_id)) protectedGroup = true
+        }
+      }
+      if (pending.size > 0 || (index + 1 < history.length && this.isToolResultMessage(history[index + 1]))) continue
+      if (!protectedGroup) {
+        const previous = regions.at(-1)
+        if (previous?.end === start) previous.end = index + 1
+        else regions.push({ start, end: index + 1 })
+      }
+      start = index + 1
+      protectedGroup = false
+    }
+    return regions
   }
 
   private selectLargestBatch(
@@ -618,10 +691,12 @@ export class ContextManager {
     profile: CompactionProfile,
     maxMessages: number,
     inputLimit: number,
+    allowConsumeAll = false,
   ): { readonly messageCount: number; readonly prompt: string; readonly inputTokens: number } | undefined {
     const safeCounts: number[] = []
     for (let count = 1; count <= maxMessages; count++) {
-      if (this.isSafeSplit(state.history, count)) safeCounts.push(count)
+      if (this.isSafeSplit(state.history, count, allowConsumeAll)
+        && state.history.slice(0, count).some((message) => !isInlineSummary(message))) safeCounts.push(count)
     }
     let low = 0
     let high = safeCounts.length - 1

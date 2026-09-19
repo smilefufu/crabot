@@ -192,6 +192,59 @@ describe('ManagerLoop', () => {
     await fs.rm(dataDir, { recursive: true, force: true })
   })
 
+  it.each(['human', 'schedule'] as const)('compacts completed tools in a long %s episode without any older history', async (source) => {
+    let inference = 0
+    const summaries: string[] = []
+    const snapshots: EngineMessage[][] = []
+    const adapter: LLMAdapter = {
+      updateConfig() {},
+      async *stream(params) {
+        if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
+          summaries.push(JSON.stringify(params.messages))
+          yield* chunksFromContent([{ type: 'text', text: `completed directory pages; next page ${inference}` }], 'end_turn')
+          return
+        }
+        snapshots.push([...params.messages])
+        if (inference++ < 92) {
+          yield* chunksFromContent([{ type: 'tool_use', id: `page-${inference}`, name: 'page', input: { page: inference } }], 'tool_use', {
+            inputTokens: inference % 24 === 0 ? 90000 : 100, outputTokens: 5,
+          })
+        } else yield* chunksFromContent([], 'end_turn')
+      },
+    }
+    let loop!: ManagerLoop
+    const execute = vi.fn(async (input: Record<string, unknown>) => {
+      if (input.page === 45 && source === 'human') {
+        await loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [makeChannelMessage('supplement-keep-original')] }))
+      }
+      return { output: `DIRECTORY_PAGE_${input.page}:${'x'.repeat(4000)}`, isError: false }
+    })
+    loop = new ManagerLoop(baseDeps({ store, adapter, maxTurns: 110, contextWindowTokens: () => 100000,
+      toolFace: () => [defineTool({ name: 'page', description: 'read page', inputSchema: { type: 'object' }, call: execute })],
+    }))
+    const outcome = await loop.wakeUp(timed(source === 'human'
+      ? { kind: 'human_messages', messages: [makeChannelMessage('original-input-keep-verbatim')] }
+      : { kind: 'schedule', scheduleId: 'long-review', title: 'original-input-keep-verbatim', description: 'read all pages' }))
+    expect(outcome.outcome).toBe('completed')
+    expect(execute).toHaveBeenCalledTimes(92)
+    expect(summaries.length).toBeGreaterThanOrEqual(3)
+    expect(summaries.some((text) => text.includes('DIRECTORY_PAGE_1:'))).toBe(true)
+    expect(summaries.join('\n')).not.toContain('original-input-keep-verbatim')
+    expect(summaries.join('\n')).not.toContain('supplement-keep-original')
+    const firstInput = snapshots[0].find((message) => JSON.stringify(message).includes('original-input-keep-verbatim'))!
+    expect(snapshots.at(-1)).toContainEqual(firstInput)
+    if (source === 'human') {
+      const final = snapshots.at(-1)!
+      const supplementIndex = final.findIndex((message) => JSON.stringify(message).includes('supplement-keep-original'))
+      expect(supplementIndex).toBeGreaterThan(final.findIndex((message) => message.id === firstInput.id))
+      expect(JSON.stringify(final).split('supplement-keep-original')).toHaveLength(2)
+    }
+    const saved = await store.load(KEY)
+    expect(saved.foldedCount).toBeGreaterThan(0)
+    expect(saved.recent).toContainEqual(firstInput)
+    expect(JSON.stringify(saved.recent)).toContain('completed directory pages')
+  })
+
   it.each(['usage', 'overflow', 'overflow_twice', 'failure_after_compaction'] as const)('compacts between turns from %s without replaying tools or losing current input', async (trigger) => {
     const old = await store.load(KEY)
     await store.save({ ...old, recent: Array.from({ length: 30 }, (_, i) => compressibleHistoryMessage(`old-${i}`, 400)) })
