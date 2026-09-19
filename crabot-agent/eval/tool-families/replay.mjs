@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { assembly, cases, simulatedResult } from './runtime.mjs'
+import { assembly, cases, simulatedResult, supportsFixture, restoreFixtureGap } from './runtime.mjs'
 
 const baseline = process.env.FAMILY_BASELINE
 const candidate = path.resolve(import.meta.dirname, '../../..')
@@ -61,15 +61,23 @@ const manager=new ModelProviderManager(path.join(process.env.FAMILY_DATA,'admin'
 const config=JSON.parse(fs.readFileSync(path.join(process.env.FAMILY_DATA,'admin/agent-configs/crabot-agent.json'),'utf8'))
 const ref=config.model_config.powerful;const conn=await manager.buildConnectionInfo(ref.provider_id,ref.model_id)
 if (conn.endpoint!==plan.endpoint || conn.model_id!==plan.model || conn.format!==plan.format) throw new Error('Configured model differs from frozen plan')
-const journal=fs.openSync(path.join(output,'events.jsonl'),'ax',0o600)
+const resumeFixtures=process.argv.includes('--resume-fixtures')
+const journalPath=path.join(output,'events.jsonl')
+const previousEvents=resumeFixtures?fs.readFileSync(journalPath,'utf8').trim().split('\n').map(line=>JSON.parse(line)):[]
+const journal=fs.openSync(journalPath,resumeFixtures?'a':'ax',0o600)
 const record=row=>fs.writeSync(journal,JSON.stringify(row).replaceAll(conn.apikey,'[REDACTED]')+'\n')
-let requests=0, reportedTokens=0
-const results=[]
-async function run(c,variant,root) {
+let requests=previousEvents.filter(e=>e.type==='request').length
+let reportedTokens=previousEvents.filter(e=>e.type==='response').reduce((total,e)=>{const u=e.response.usage;return total+(u?u.inputTokens+(u.cacheReadTokens??0)+u.outputTokens:0)},0)
+const results=[...new Map(previousEvents.filter(e=>e.type==='end').map(e=>[`${e.id}/${e.variant}`,e])).values()]
+if(resumeFixtures && results.length!==plan.trajectories)throw new Error('Complete the original run before resuming fixture gaps')
+async function run(c,variant,root,previous) {
  const face=assembly(root,c.external),{StreamProcessor,createUserMessage,createAssistantMessage,createToolResultMessage}=face.engine
- const adapter=face.adapter(conn), messages=[createUserMessage(c.user)], reached=new Set(), actions=[]
- let discovery=0, status='round_limit', usage={input:0,cached:0,output:0,missing:0}, round=0
- for(round=1;round<=plan.maxRounds;round++) {
+ const messages=previous?await restoreFixtureGap(face,previousEvents,previous):[createUserMessage(c.user)]
+ if(!messages)return
+ if(previous)record({type:'resume_fixture',id:c.id,variant,afterRound:previous.rounds,reason:'Supply synthetic Memory or workboard supporting results; earlier model requests are unchanged.'})
+ const adapter=face.adapter(conn), reached=new Set(previous?.reached??[]), actions=[...(previous?.actions??[])]
+ let discovery=previous?.discovery??0, status='round_limit', usage={...(previous?.usage??{input:0,cached:0,output:0,missing:0})}, round=0
+ for(round=(previous?.rounds??0)+1;round<=plan.maxRounds;round++) {
   if(requests>=plan.maxRequests || reportedTokens>=800000){status='budget_stop';break}
   const tools=face.tools(); const processor=new StreamProcessor();const start=Date.now()
   record({type:'request',id:c.id,variant,round,number:++requests,toolNames:tools.map(t=>t.name),schemaBytes:face.bytes(tools),messages})
@@ -88,7 +96,7 @@ async function run(c,variant,root) {
    if(!visible){result={output:face.state.catalog.missingToolOutput(call.name),isError:true}}
    else if(['search_tools','load_tool_family','load_guidance'].includes(call.name)){
     discovery+=call.name!=='load_guidance'?1:0;result=await visible.call(call.input,{})
-   } else if(c.targets.includes(call.name) || ['get_execution_capabilities','inspect_crabot'].includes(call.name)) {
+   } else if(c.targets.includes(call.name) || ['get_execution_capabilities','inspect_crabot'].includes(call.name) || supportsFixture(call.name,call.input)) {
     reached.add(call.name); result={output:JSON.stringify(simulatedResult(call.name,call.input)),isError:false}
    } else if(call.name==='send_message'){
     result={output:'Synthetic delivery recorded. No message was sent.',isError:false}
@@ -100,12 +108,18 @@ async function run(c,variant,root) {
   if(c.targets.every(t=>reached.has(t))){status='targets_reached';break}
  }
  const row={id:c.id,variant,status,rounds:Math.min(round,plan.maxRounds),discovery,actions,reached:[...reached],usage,promptTokens:usage.input+usage.cached}
- results.push(row);record({type:'end',...row}); console.log(JSON.stringify({id:c.id,variant,status,rounds:row.rounds,discovery,promptTokens:row.promptTokens,outputTokens:usage.output}))
+ const previousIndex=results.findIndex(r=>r.id===c.id&&r.variant===variant)
+ if(previousIndex<0)results.push(row);else results[previousIndex]=row
+ record({type:'end',...row}); console.log(JSON.stringify({id:c.id,variant,status,rounds:row.rounds,discovery,promptTokens:row.promptTokens,outputTokens:usage.output}))
 }
 try {
  for(const [i,c] of cases.entries()) {
   const arms=i%2?[['candidate',candidate],['baseline',baseline]]:[['baseline',baseline],['candidate',candidate]]
-  for(const [variant,root] of arms)await run(c,variant,root)
+  for(const [variant,root] of arms) {
+   const previous=results.find(r=>r.id===c.id&&r.variant===variant)
+   if(resumeFixtures && previous?.status!=='unsupported_business_action')continue
+   await run(c,variant,root,resumeFixtures?previous:undefined)
+  }
  }
  fs.writeFileSync(path.join(output,'live.json'),JSON.stringify({digest,requests,reportedTokens,results},null,2))
 } finally {fs.closeSync(journal)}
