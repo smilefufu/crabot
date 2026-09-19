@@ -43,6 +43,44 @@ describe('workboard tools', () => {
     return JSON.parse(result.output) as Record<string, unknown>
   }
 
+  it.each(['completed', 'abandoned'])('最后事项 %s 后提醒复核，目标仍保留且不自动完成', async (archivedAs) => {
+    const created = await change({ action: 'create_objective', objective: objective('待核实目标') })
+    expect(created).not.toHaveProperty('system_reminder')
+    const objectiveId = (created.objective as { objective_id: string }).objective_id
+    const first = await change({ action: 'create_work_item', objective_id: objectiveId, work_item: item('第一项') })
+    const last = await change({ action: 'create_work_item', objective_id: objectiveId, work_item: item('最后一项') })
+    const firstId = (first.work_item as { work_item_id: string }).work_item_id
+    const lastId = (last.work_item as { work_item_id: string }).work_item_id
+    expect(await change({ action: 'archive_work_item', work_item_id: firstId, archived_as: archivedAs }))
+      .not.toHaveProperty('system_reminder')
+    const result = await change({ action: 'archive_work_item', work_item_id: lastId, archived_as: archivedAs })
+    expect(result.system_reminder).toEqual({
+      objective_id: objectiveId,
+      title: '待核实目标',
+      message: expect.stringContaining('不要仅因事项清空就认定目标完成'),
+    })
+    expect(result.counts).toMatchObject({ current_objectives: 1, current_work_items: 0 })
+    const failed = await tool('change_workboard').call({ action: 'archive_work_item', work_item_id: lastId, archived_as: archivedAs }, {} as never)
+    expect(failed.isError).toBe(true)
+    expect(failed.output).not.toContain('system_reminder')
+    expect(await change({ action: 'archive_objective', objective_id: objectiveId, archived_as: archivedAs }))
+      .not.toHaveProperty('system_reminder')
+  })
+
+  it('原地修订不提醒，最后事项跨目标移动只提醒源目标', async () => {
+    const source = await change({ action: 'create_objective', objective: objective('源目标') })
+    const target = await change({ action: 'create_objective', objective: objective('新目标') })
+    const sourceId = (source.objective as { objective_id: string }).objective_id
+    const targetId = (target.objective as { objective_id: string }).objective_id
+    const created = await change({ action: 'create_work_item', objective_id: sourceId, work_item: item('事项') })
+    const workItemId = (created.work_item as { work_item_id: string }).work_item_id
+    expect(await change({ action: 'revise_work_item', work_item_id: workItemId, work_item: item('事项') }))
+      .not.toHaveProperty('system_reminder')
+    const moved = await change({ action: 'revise_work_item', work_item_id: workItemId, target_objective_id: targetId, work_item: item('事项') })
+    expect(moved.objective).toMatchObject({ objective_id: targetId })
+    expect(moved.system_reminder).toMatchObject({ objective_id: sourceId, title: '源目标' })
+  })
+
   it('只暴露两个工具和六种 action，写入按内部 ID 寻址且不带无关字段', () => {
     expect(tools.map((entry) => entry.name)).toEqual(['inspect_workboard', 'change_workboard'])
     expect(tool('inspect_workboard').isReadOnly).toBe(true)

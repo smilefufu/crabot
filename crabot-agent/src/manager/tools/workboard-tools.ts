@@ -59,6 +59,15 @@ function output(value: unknown): ToolCallResult {
   return { output: JSON.stringify(value), isError: false }
 }
 
+function emptyObjectiveReminder(objective: Pick<WorkboardObjective, 'objective_id' | 'title'> | undefined) {
+  return objective ? {
+    system_reminder: {
+      ...objective,
+      message: '该目标已无当前事项。请结合最新的人类要求和已有结果，核实目标是否达成：已达成或不再继续的，按实际结果归档；尚未达成的，根据当前情况决定下一步。需要持续管理的工作记录为事项，需要向人类汇报或讨论的则按需沟通。不要仅因事项清空就认定目标完成，也不要为了填补空目标而创建事项。',
+    },
+  } : {}
+}
+
 function failure(prefix: string, error: unknown): ToolCallResult {
   const message = error instanceof Error ? error.message : String(error)
   return { output: `${prefix} 失败: ${message}`, isError: true }
@@ -346,6 +355,7 @@ export function buildWorkboardTools(deps: {
           )
           return output({
             action: 'work_item_revised',
+            ...emptyObjectiveReminder(result.emptied_objective),
             objective: objectiveForItem(result.board.objectives, result.value.work_item_id),
             work_item: result.value,
             counts: workboardCounts(result.board),
@@ -361,7 +371,12 @@ export function buildWorkboardTools(deps: {
             input.work_item_id,
             input.archived_as as WorkboardArchiveOutcome,
           )
-          return output({ action: 'work_item_archived', work_item: result.value, counts: workboardCounts(result.board) })
+          return output({
+            action: 'work_item_archived',
+            work_item: result.value,
+            counts: workboardCounts(result.board),
+            ...emptyObjectiveReminder(result.emptied_objective),
+          })
         }
         throw new Error('action 必须是六种目标或事项操作之一')
       } catch (error) {

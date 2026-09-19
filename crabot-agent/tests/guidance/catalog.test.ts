@@ -32,6 +32,7 @@ describe('product guidance boundaries', () => {
     expect(automaticGuidanceForWake({ kind: 'workboard_admin_update', noticeRevision: 1 })).toBeUndefined()
     expect(automaticGuidanceForWake({ kind: 'workboard_idle_review' })).toBe('manager.workboard')
     expect(renderGuidance('manager', 'manager.workboard')).toContain('只有确需人类决策、授权或提供系统无法取得的信息时')
+    expect(renderGuidance('manager', 'manager.workboard')).toContain('对没有当前事项的目标，也要结合最新的人类要求和已有结果判断是否应收口')
     expect(renderGuidance('manager', 'manager.worker-events')).toContain('执行器完成不自动产生对外汇报义务')
   })
   it('loads only one named workflow, independent of user Skills or filesystem paths', async () => {

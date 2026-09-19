@@ -94,7 +94,7 @@ const DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚
 const POST_SEND_ACTION_RECHECK_PROMPT = '[系统复核] 你刚才发出的消息标记为“随后新建 Worker”，但系统尚未观察到成功的 spawn_worker。\n'
   + '请根据真实意图重新确认：若仍需新建 Worker，现在调用 spawn_worker；若刚才只是讨论、无需派发，或字段误填，直接结束即可。\n'
   + '不要因为这条系统提示重复向人类发送消息，也不要向人类提及系统复核。'
-const WORKBOARD_ADMIN_UPDATE_PROMPT = '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。'
+const WORKBOARD_ADMIN_UPDATE_PROMPT = '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。\n对没有当前事项的目标，也请核实是否已达成或需要安排下一步；按实际情况归档、推进或沟通，不为填补空目标而建项。'
 const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
 任务板中至少有一项尚未收口的工作已一小时没有更新。请按本次提供的自省指南，查阅任务板与必要证据，逐项判断继续推进或等待。`
 
