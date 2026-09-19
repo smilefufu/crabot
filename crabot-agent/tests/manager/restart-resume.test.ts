@@ -69,6 +69,45 @@ describe('Manager restart continuation', () => {
     return checkpoint!
   }
 
+  it('restores a group with many image references as one image without rewriting durable history', async () => {
+    const oldPath = join(dir, 'old.png')
+    const latestPath = join(dir, 'latest.png')
+    await fs.writeFile(oldPath, 'old-picture')
+    await fs.writeFile(latestPath, 'latest-picture')
+    const incoming: ChannelMessage = {
+      ...message('group-images', '最后一张'),
+      session: { channel_id: 'feishu', session_id: 'restart-test', type: 'group' },
+      content: { type: 'image', text: '最后一张', media: [
+        { media_url: oldPath, mime_type: 'image/png', filename: 'old.png' },
+        { media_url: latestPath, mime_type: 'image/png', filename: 'latest.png' },
+      ] },
+    }
+    const deps = { supportsVision: () => true, promptInputs: () => ({ isGroup: true }) }
+    let called = false
+    const old = registry({ async *stream() { called = true; await new Promise(() => {}) }, updateConfig() {} }, deps)
+    void old.routeHumanMessages('feishu', 'restart-test', [incoming])
+    const checkpoint = await checkpointWhere(() => called)
+    expect(JSON.stringify(checkpoint)).not.toContain('"source"')
+    expect(checkpoint.state.imageRefs?.[0].images).toHaveLength(2)
+    const inputs: LLMStreamParams[] = []
+    const restored = registry({
+      async *stream(params) { inputs.push(params); yield* chunksFromContent([], 'end_turn') }, updateConfig() {},
+    }, deps)
+    restored.registerResumeCheckpoints([checkpoint])
+    trace.reconcileInterruptedManagerEpisodes(new Set([checkpoint.episodeId]))
+    await restored.resumeInterruptedEpisodes()
+    expect(inputs).toHaveLength(1)
+    const blocks = inputs[0].messages.flatMap((m) => 'content' in m && Array.isArray(m.content) ? m.content : [])
+    expect(blocks.filter((block) => block.type === 'image')).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: Buffer.from('latest-picture').toString('base64') } },
+    ])
+    const state = await store.load(KEY)
+    expect(JSON.stringify(state.recent)).toContain('[图片: old.png]')
+    expect(JSON.stringify(state.recent)).not.toContain('图片内容未附带')
+    expect(JSON.stringify(state.recent)).not.toContain('"source"')
+    expect(await store.loadCheckpoint(KEY)).toBeUndefined()
+  })
+
   it.each(['send_message', 'send_private_message'])('resumes the same episode after %s without a new human wake or repeated send', async (toolName) => {
     const sent = vi.fn(async () => {
       if (toolName === 'send_message') old.getOrCreate(KEY).recordSuccessfulSendMessage({ channel_id: 'feishu', session_id: 'restart-test' })

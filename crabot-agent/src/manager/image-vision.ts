@@ -29,6 +29,9 @@ import type { EngineMessage, ImageBlock } from '../engine/index.js'
 import type { ChannelMessage } from '../types'
 import { inferMediaType, readImageFile, fetchRemoteImage, MAX_IMAGE_SIZE } from '../agent/media-resolver.js'
 
+/** 沿用插话图片预取的读取上限，失败后保留文本来源。 */
+export const REMOTE_IMAGE_PREFETCH_TIMEOUT_MS = 8_000
+
 /** 单张入站图片的引用：path 是本地路径或可 GET 的远程 URL，label 是 envelope 文本里的展示名。 */
 export interface InboundImageRef {
   /**
@@ -102,6 +105,54 @@ export interface InjectedInboundImages {
   readonly messages: EngineMessage[]
   /** id → 注入前的原始纯文本消息。finalMessages 里同 id 的消息用它还原。 */
   readonly originals: ReadonlyMap<string, EngineMessage>
+}
+
+/** 群聊只在请求投影里附带最后一张入站图；Engine 历史与检查点始终保留原文。 */
+export class GroupInboundImageProjection {
+  private selected?: {
+    messageId: string
+    index: number
+    path: string
+    block: Promise<ImageBlock | null>
+  }
+
+  constructor(private readonly supportsVision: boolean) {}
+
+  async project(messages: EngineMessage[], imageRefs: ReadonlyArray<ManagerImageRef>): Promise<EngineMessage[]> {
+    const refs = new Map(imageRefs.map((ref) => [ref.message_id, ref.images]))
+    const last = [...messages].reverse().find((message) => message.role === 'user'
+      && 'content' in message && typeof message.content === 'string' && refs.get(message.id)?.length)
+    const images = last ? refs.get(last.id)! : []
+    const index = images.length - 1
+    const image = images[index]
+    let block: ImageBlock | null = null
+    if (last && image && this.supportsVision) {
+      // 同一张图的后续回合/连接重试复用读取结果（包括失败），新图才重新读取。
+      if (this.selected?.messageId !== last.id || this.selected.index !== index || this.selected.path !== image.path) {
+        const read = image.path.startsWith('http://') || image.path.startsWith('https://')
+          ? fetchRemoteImage(image.path, REMOTE_IMAGE_PREFETCH_TIMEOUT_MS) : readImageFile(image.path)
+        this.selected = { messageId: last.id, index, path: image.path,
+          block: read.then((buffer) => buffer ? toImageBlock(image.path, buffer) : null) }
+      }
+      block = await this.selected.block
+    }
+    return messages.map((message) => {
+      if (message.role !== 'user' || !('content' in message) || typeof message.content !== 'string') return message
+      const refsForMessage = refs.get(message.id)
+      if (!refsForMessage?.length) return message
+      let text = message.content
+      for (const [i, ref] of refsForMessage.entries()) {
+        const attached = message.id === last?.id && i === index && block !== null
+        const source = /^https?:\/\//.test(ref.path) ? ref.path : ref.label
+        const placeholder = `[图片: ${source}（图片内容${attached ? '已附带' : '未附带'}）]`
+        // 每次只替换一个原始标记，重复 label/URL 的附件仍按各自位置处理。
+        text = text.replace(`[图片: ${ref.label}]`, () => placeholder)
+      }
+      return message.id === last?.id && block
+        ? { ...message, content: [{ type: 'text' as const, text }, block] }
+        : { ...message, content: text }
+    })
+  }
 }
 
 /**
