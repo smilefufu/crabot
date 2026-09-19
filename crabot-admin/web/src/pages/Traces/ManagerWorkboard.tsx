@@ -242,7 +242,7 @@ function ObjectiveSection({ objective, labels, onEdit, onArchive, onCreateItem, 
         <ul>{objective.completion_criteria.map((criterion, index) => <li key={`${index}-${criterion}`}>{criterion}</li>)}</ul>
       </div>
       {objective.work_items.length === 0 ? (
-        <div className="manager-workboard__objective-empty">这个目标还没有当前事项。</div>
+        <div className="manager-workboard__objective-empty">当前没有待办事项；目标是否达成需结合完成条件确认。</div>
       ) : (
         <div className="manager-workboard__columns">
           {(['ready', 'in_progress', 'blocked'] as const).map((status) => {

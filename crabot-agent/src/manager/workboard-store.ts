@@ -111,6 +111,7 @@ type WorkboardMutationValue = WorkboardObjective | WorkboardItem | WorkboardArch
 export interface WorkboardMutationResult<T extends WorkboardMutationValue> {
   readonly board: ManagerWorkboard
   readonly value: T
+  readonly emptied_objective?: Pick<WorkboardObjective, 'objective_id' | 'title'>
 }
 
 export interface AdminWorkboardMutationResult<T extends WorkboardMutationValue> {
@@ -1090,7 +1091,13 @@ export class ManagerWorkboardStore {
       const board: InternalBoard = { ...result.board, schema_version: 4, revision: before.revision + 1 }
       await this.writeUnlocked(key, board)
       this.onChanged?.(key)
-      return { board: managerProjection(board), value: result.value }
+      const emptied = board.objectives.find((objective) => objective.work_items.length === 0
+        && before.objectives.some((previous) => previous.objective_id === objective.objective_id && previous.work_items.length > 0))
+      return {
+        board: managerProjection(board),
+        value: result.value,
+        ...(emptied ? { emptied_objective: { objective_id: emptied.objective_id, title: emptied.title } } : {}),
+      }
     })
   }
 

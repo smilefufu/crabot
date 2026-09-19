@@ -50,7 +50,7 @@ describe('TimedWakeEnvelope rendering', () => {
       timezone: 'Asia/Shanghai',
     }
     const rendered = renderTimedWakeEnvelope(envelope)
-    expect(rendered).toBe('[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。')
+    expect(rendered).toBe('[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。\n对没有当前事项的目标，也请核实是否已达成或需要安排下一步；按实际情况归档、推进或沟通，不为填补空目标而建项。')
     expect(rendered).not.toContain('42')
     expect(rendered).not.toContain('received_at=')
   })

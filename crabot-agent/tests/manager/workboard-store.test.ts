@@ -232,6 +232,29 @@ describe('ManagerWorkboardStore', () => {
     ])
   })
 
+  it('并发归档只报告一次非空到空转换，提醒元数据不持久化也不进入 Admin 投影', async () => {
+    const target = await createObjective('待核实目标')
+    const first = await createWorkItem(target.objective_id, '第一项')
+    const last = await createWorkItem(target.objective_id, '最后一项')
+    const results = await Promise.all([
+      store.archiveWorkItem(KEY, first.work_item_id, 'completed'),
+      store.archiveWorkItem(KEY, last.work_item_id, 'abandoned'),
+    ])
+    expect(results.filter((result) => result.emptied_objective)).toHaveLength(1)
+    expect(results.find((result) => result.emptied_objective)?.emptied_objective)
+      .toEqual({ objective_id: target.objective_id, title: target.title })
+    expect(await store.loadAdmin(KEY)).not.toHaveProperty('emptied_objective')
+    const persisted = await fs.readFile(join(root, encodeSegment(KEY), 'workboard.json'), 'utf8')
+    expect(persisted).not.toContain('emptied_objective')
+    expect(persisted).not.toContain('system_reminder')
+    const revision = (await store.loadAdmin(KEY)).revision
+    const adminItem = await store.adminCreateWorkItem(KEY, revision, target.objective_id, item('人工事项'))
+    const archived = await store.adminArchiveWorkItem(KEY, adminItem.board.revision, adminItem.value.work_item_id, 'completed')
+    expect(archived).not.toHaveProperty('emptied_objective')
+    expect(archived).not.toHaveProperty('system_reminder')
+    expect(archived.notice.revision).toBe(archived.board.revision)
+  })
+
   it('校验两级标题、完成条件、状态字段、大小与项目根目录', async () => {
     const first = await createObjective('目标甲')
     const second = await createObjective('目标乙')
