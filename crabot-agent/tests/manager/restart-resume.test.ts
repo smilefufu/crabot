@@ -128,8 +128,10 @@ describe('Manager restart continuation', () => {
     const toolFace: ManagerRegistryDeps['toolFace'] = (_key, _system, _identity, _principal, _permissions, _hooks, _wake, state) => {
       if (!state) throw new Error('episode tool state missing')
       states.add(state)
-      state.catalog ??= new ManagerToolCatalog(tools, 'normal')
+      state.catalog ??= new ManagerToolCatalog(tools, 'normal', undefined, undefined, undefined, { crabot: ['inspect_crabot'] })
       const catalog = state.catalog
+      state.familyTool ??= defineTool({ name: 'load_tool_family', description: 'load family', inputSchema: { type: 'object' },
+        call: async input => ({ output: JSON.stringify(catalog.loadFamily(state, input.family)), isError: false }) })
       state.searchTool ??= defineTool({
         name: 'search_tools', description: 'search', inputSchema: { type: 'object' }, isReadOnly: false,
         call: async (input) => ({ output: JSON.stringify(catalog.search(state, input.query, 1)), isError: false }),
@@ -141,7 +143,7 @@ describe('Manager restart continuation', () => {
       async *stream(params) {
         calls += 1
         if (calls === 1) {
-          yield* chunksFromContent([{ type: 'tool_use', id: 'search', name: 'search_tools', input: { query: 'inspect_crabot' } }], 'tool_use')
+          yield* chunksFromContent([{ type: 'tool_use', id: 'search', name: 'load_tool_family', input: { family: 'crabot' } }], 'tool_use')
         } else if (calls === 2) {
           expect(params.tools.at(-1)?.name).toBe('inspect_crabot')
           yield* chunksFromContent([{ type: 'tool_use', id: 'inspect', name: 'inspect_crabot', input: {} }], 'tool_use')

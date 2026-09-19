@@ -1799,7 +1799,9 @@ export class ManagerLoop {
     if (!writer || this.currentTraceId !== episodeId || this.tracedLlmResponses.has(event.responseId)) return
     const state = this.currentToolFaceState
     const visible = state?.catalog?.project(state, state.searchTool)
-    const shadowCore = state?.mode === 'shadow' ? state.catalog?.project(createManagerToolFaceState(), state.searchTool) : undefined
+    const shadowCore = state?.mode === 'shadow'
+      ? state.catalog?.project({ ...createManagerToolFaceState(), familyTool: state.familyTool }, state.searchTool)
+      : undefined
     writer.appendSpan(episodeId, {
       span_id: this.llmSpanId(episodeId, event.responseId),
       parent_span_id: `root-${episodeId}`,
@@ -1821,6 +1823,7 @@ export class ManagerLoop {
           schema_bytes: serializedToolSetBytes(visible),
           loaded_schema_bytes: [...state.loadedNames].reduce((bytes, name) => bytes + serializedToolBytes(state.catalog!.get(name)!), 0),
           search_count: state.searches ?? 0,
+          family_load_count: state.familyLoads ?? 0,
           connector_generation: state.externalMcpTools?.[0]?.traceMetadata?.connector_generation,
           ...(shadowCore ? { shadow_core_count: shadowCore.length, shadow_core_schema_bytes: serializedToolSetBytes(shadowCore),
             shadow_candidate_count: state.catalog.candidateCount } : {}),
