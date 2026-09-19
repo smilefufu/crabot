@@ -5,10 +5,11 @@ import { sha256CanonicalJson } from 'crabot-shared'
 export type ManagerToolProfile = 'normal' | 'daily_reflection' | 'memory_graph_rebuild'
 export type ManagerToolLoadingMode = 'full' | 'shadow' | 'progressive'
 
-export const MANAGER_TOOL_CATALOG_REVISION = 'manager-tools-v2'
+export const MANAGER_TOOL_CATALOG_REVISION = 'manager-tools-v3-families'
 
 export const NORMAL_MANAGER_CORE_NAMES = [
   'search_tools',
+  'load_tool_family',
   'load_guidance',
   'get_execution_capabilities',
   'send_message',
@@ -25,7 +26,7 @@ export const NORMAL_MANAGER_CORE_NAMES = [
 ] as const
 
 export const DAILY_REFLECTION_CORE_NAMES = [
-  'search_tools',
+  'load_tool_family',
   'list_reflection_records',
   'read_reflection_record',
   'finish_daily_reflection',
@@ -52,11 +53,28 @@ export interface ManagerToolFaceState {
   externalMcpToolsCaptured?: boolean
   catalog?: ManagerToolCatalog
   searchTool?: ToolDefinition
+  familyTool?: ToolDefinition
+  familyLoads?: number
   searches?: number
 }
 
 export function createManagerToolFaceState(mode: ManagerToolLoadingMode = 'progressive'): ManagerToolFaceState {
   return { loadedNames: new Set(), mode, externalMcpToolsCaptured: false }
+}
+
+export interface LoadToolFamilyInput {
+  family: string
+}
+
+export interface LoadToolFamilyOutput {
+  status: 'loaded' | 'already_visible' | 'unavailable' | 'listed'
+  scope: 'current_episode'
+  catalog_revision: string
+  family: string
+  complete: boolean
+  loaded: string[]
+  already_visible: string[]
+  families?: Array<{ family: string; tool_count: number }>
 }
 
 export interface ToolSearchResult {
@@ -105,67 +123,6 @@ const SEARCH_FIELDS: ReadonlyArray<{ name: SearchFieldName; boost: number; lengt
   { name: 'argumentNames', boost: 2, lengthNorm: 0 },
   { name: 'argumentDescriptions', boost: 1, lengthNorm: 0.75 },
 ]
-
-const BUILTIN_ALIASES: Record<string, readonly string[]> = {
-  inspect_crabot: ['get_deployment_info', 'get_config_summary', 'list_capabilities', 'system status', '系统状态', '部署信息', '配置摘要', '能力清单'],
-  inspect_workspace_git: ['workspace git', '工作区 git', 'git 状态'],
-  get_worker_activity: ['worker output', 'worker error', '执行器输出', '执行器错误'],
-  get_worker_state: ['worker status', '执行器状态'],
-  get_worker_turn: ['worker result', '执行器回合', '执行器结果'],
-  send_to_worker: ['continue worker', '续办执行器', '给执行器发消息'],
-  inspect_workboard: ['workboard', '任务板', '工作板'],
-  change_workboard: ['update workboard', '修改任务板', '更新工作板'],
-  inspect_project_docs: ['project docs', '项目文档', '读取项目文档'],
-  list_schedules: ['schedule list', '定时任务', '调度列表'],
-  get_friend_permissions: ['friend permissions', '联系人权限', '权限查询'],
-  send_private_message: ['private message', '发送私聊消息'],
-  send_master_private: ['contact master', '联系主人'],
-  get_history: ['chat history', '聊天历史'],
-  get_message: ['message detail', '消息详情'],
-  lookup_friend: ['find contact', '查找联系人'],
-  list_sessions: ['list conversations', '会话列表'],
-  list_contacts: ['address book', '通讯录'],
-  list_groups: ['list groups', '群列表'],
-  list_group_members: ['group members', '群成员'],
-  fetch_media: ['download media', '下载媒体'],
-  read_feishu_document: ['read feishu document', '读取飞书文档'],
-  feishu_raw_get: ['feishu api read', '飞书接口查询'],
-  feishu_download_file: ['feishu file download', '飞书文件下载'],
-  query_worker: ['ask worker privately', '侧问执行器'],
-  resolve_worker_turn: ['settle worker turn', '处置执行器回合'],
-  get_worker_terminal: ['worker terminal', '执行器终端'],
-  spawn_worker: ['delegate work', '派发执行器'],
-  request_worker_interrupt: ['interrupt worker', '中断执行器'],
-  request_worker_stop: ['stop worker', '停止执行器'],
-  respond_to_worker_ui: ['respond worker dialog', '回应执行器界面'],
-  list_workers: ['list workers', '列出执行器'],
-  list_all_workers: ['all session workers', '跨会话执行器'],
-  get_worker_detail: ['worker details', '执行器详情'],
-  list_worker_implementations: ['worker implementations', '执行器实现'],
-  create_schedule: ['create schedule', '创建定时任务'],
-  get_schedule: ['schedule details', '定时任务详情'],
-  update_schedule: ['edit schedule', '修改定时任务'],
-  delete_schedule: ['delete schedule', '删除定时任务'],
-  trigger_schedule: ['run schedule now', '立即触发定时任务'],
-  'mcp__crab-memory__store_memory': ['store memory', '存储记忆'],
-  'mcp__crab-memory__search_memory': ['search memory', '搜索记忆'],
-  'mcp__crab-memory__get_memory_detail': ['memory details', '记忆详情'],
-  'mcp__crab-memory__set_scene_profile': ['set scene profile', '设置场景画像'],
-  'mcp__crab-memory__get_scene_profile': ['get scene profile', '读取场景画像'],
-  'mcp__crab-memory__delete_scene_profile': ['delete scene profile', '删除场景画像'],
-  'mcp__crab-memory__quick_capture': ['capture memory inbox', '记忆快速收集'],
-  'mcp__crab-memory__search_long_term': ['search knowledge', '搜索长期记忆'],
-  'mcp__crab-memory__update_long_term': ['update knowledge', '更新长期记忆'],
-  'mcp__crab-memory__delete_memory': ['delete memory', '删除记忆'],
-  'mcp__crab-memory__list_recent': ['recent memories', '最近记忆'],
-  'mcp__crab-memory__list_entries': ['list memory entries', '列出记忆条目'],
-  'mcp__crab-memory__set_memory_links': ['link memories', '设置记忆关联'],
-  'mcp__crab-memory__get_stats': ['memory statistics', '记忆统计'],
-  'mcp__crab-memory__get_evolution_mode': ['get evolution mode', '查看演化模式'],
-  'mcp__crab-memory__set_evolution_mode': ['set evolution mode', '设置演化模式'],
-  'mcp__crab-memory__promote_inbox_entry': ['promote inbox memory', '提升候选记忆'],
-  'mcp__crab-memory__promote_to_rule': ['promote memory rule', '提升记忆规则'],
-}
 
 function normalize(value: string): string {
   return value.normalize('NFKC').trim().toLowerCase()
@@ -269,6 +226,8 @@ function bm25fScore(document: SearchDocument, queryTokens: readonly string[], av
 
 export class ManagerToolCatalog {
   private readonly documents: readonly SearchDocument[]
+  private readonly families = new Map<string, readonly ToolDefinition[]>()
+  private readonly availableTools: readonly ToolDefinition[]
   private readonly byName: ReadonlyMap<string, ToolDefinition>
   private readonly averageLengths = new Map<SearchFieldName, number>()
   private readonly idf = new Map<string, number>()
@@ -280,9 +239,10 @@ export class ManagerToolCatalog {
   constructor(
     tools: readonly ToolDefinition[],
     profile: ManagerToolProfile,
-    aliasMap: Readonly<Record<string, readonly string[]>> = BUILTIN_ALIASES,
+    aliasMap: Readonly<Record<string, readonly string[]>> = {},
     catalogRevision = MANAGER_TOOL_CATALOG_REVISION,
     canSearch: (tool: ToolDefinition) => boolean = () => true,
+    builtinFamilies: Readonly<Record<string, readonly string[]>> = {},
   ) {
     this.profile = profile
     this.coreNames = profile === 'normal'
@@ -295,9 +255,20 @@ export class ManagerToolCatalog {
     }
     this.byName = byName
     const core = new Set(this.coreNames)
-    this.documents = tools
-      .filter((tool) => this.isAllowed(tool.name) && !core.has(tool.name) && tool.name !== 'search_tools' && canSearch(tool))
-      .filter((tool) => serializedToolBytes(tool) <= MAX_TOOL_DEFINITION_BYTES)
+    this.availableTools = tools.filter(tool => this.isAllowed(tool.name) && canSearch(tool)
+      && serializedToolBytes(tool) <= MAX_TOOL_DEFINITION_BYTES)
+    for (const [family, names] of Object.entries(builtinFamilies)) {
+      if (profile === 'memory_graph_rebuild' || (profile === 'daily_reflection' && family !== 'memory' && family !== 'worker')) continue
+      const members = this.availableTools.filter(tool => !isExternalMcpTool(tool) && names.includes(tool.name))
+      if (members.length) this.families.set(family, members)
+    }
+    for (const tool of this.availableTools.filter(isExternalMcpTool)) {
+      const server = tool.traceMetadata?.mcp_server
+      const family = typeof server === 'string' ? `mcp__${server}` : tool.name.split('__').slice(0, 2).join('__')
+      this.families.set(family, [...(this.families.get(family) ?? []), tool])
+    }
+    this.documents = this.availableTools
+      .filter(tool => isExternalMcpTool(tool) && !core.has(tool.name))
       .map((tool, order) => {
         const toolAliases = [...aliasesForTool(aliasMap, tool.name), ...(tool.searchMetadata?.aliases ?? [])]
         const name = tool.name.replace(/^mcp__/, '').replace(/__/g, ' ')
@@ -326,8 +297,11 @@ export class ManagerToolCatalog {
       for (const term of terms) frequencies.set(term, (frequencies.get(term) ?? 0) + 1)
     }
     for (const [term, count] of frequencies) this.idf.set(term, Math.log(1 + (this.documents.length - count + 0.5) / (count + 0.5)))
-    this.authorizedCatalogDigest = sha256CanonicalJson(this.documents.map(({ tool }) => ({
+    this.authorizedCatalogDigest = sha256CanonicalJson(this.availableTools.map(tool => ({
       name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
+      family: [...this.families].find(([, members]) => members.includes(tool))?.[0] ?? null,
+      searchMetadata: { aliases: tool.searchMetadata?.aliases ?? [], tags: tool.searchMetadata?.tags ?? [],
+        namespace: tool.searchMetadata?.namespace ?? '', namespaceDescription: tool.searchMetadata?.namespaceDescription ?? '' },
       ...(tool.traceMetadata?.definition_digest ? { definition_digest: tool.traceMetadata.definition_digest } : {}),
     })))
     this.catalogRevision = `${catalogRevision}:${this.authorizedCatalogDigest.slice(0, 16)}`
@@ -346,9 +320,37 @@ export class ManagerToolCatalog {
   }
 
   missingToolOutput(name: string): string {
-    return this.documents.some((document) => document.tool.name === name)
-      ? 'TOOL_NOT_LOADED: use search_tools; loaded tools are available on the next turn.'
-      : 'TOOL_UNAVAILABLE'
+    if (!this.availableTools.some(tool => tool.name === name)) return 'TOOL_UNAVAILABLE'
+    const family = [...this.families].find(([, members]) => members.some(tool => tool.name === name))?.[0]
+    const loader = family ? `load_tool_family({family:"${family}"})` : 'search_tools'
+    return `TOOL_NOT_LOADED: use ${loader}; loaded tools are available on the next turn.`
+  }
+
+  loadFamily(state: ManagerToolFaceState, rawFamily: unknown): LoadToolFamilyOutput {
+    if (typeof rawFamily !== 'string' || !rawFamily.trim() || [...rawFamily.trim()].length > 128) {
+      throw new Error('load_tool_family.family 必须是 1..128 个字符')
+    }
+    const family = rawFamily.trim()
+    const base = { scope: 'current_episode' as const, catalog_revision: this.catalogRevision, family }
+    if (family === 'mcp' && this.profile === 'normal') {
+      return { ...base, status: 'listed', complete: true, loaded: [], already_visible: [],
+        families: [...this.families].filter(([name]) => name.startsWith('mcp__'))
+          .map(([name, tools]) => ({ family: name, tool_count: tools.length })) }
+    }
+    const members = this.families.get(family)
+    if (!members) return { ...base, status: 'unavailable', complete: false, loaded: [], already_visible: [] }
+    const loaded: string[] = []
+    const already_visible: string[] = []
+    for (const tool of members) {
+      if (this.coreNames.includes(tool.name) || state.loadedNames.has(tool.name) || state.mode === 'full' || state.mode === 'shadow') {
+        already_visible.push(tool.name)
+      } else loaded.push(tool.name)
+    }
+    // Prepare the entire result before committing: no search top-k or byte truncation.
+    const result: LoadToolFamilyOutput = { ...base, status: loaded.length ? 'loaded' : 'already_visible',
+      complete: true, loaded, already_visible }
+    for (const name of loaded) state.loadedNames.add(name)
+    return result
   }
 
   isAllowed(name: string): boolean {
@@ -377,7 +379,7 @@ export class ManagerToolCatalog {
   }
 
   project(state: ManagerToolFaceState, searchTool?: ToolDefinition): ToolDefinition[] {
-    const names = this.coreNames.filter((name) => name !== 'search_tools')
+    const names = this.coreNames.filter((name) => name !== 'search_tools' && name !== 'load_tool_family')
     const missing = names.filter((name) => !this.byName.has(name))
     if (missing.length > 0) {
       throw new Error(`Manager 固定核心缺失: ${missing.join(',')}`)
@@ -387,7 +389,10 @@ export class ManagerToolCatalog {
         if (!searchTool) throw new Error('Manager 固定核心缺失: search_tools')
         return searchTool
       }
-      return this.byName.get(name)!
+      if (name === 'load_tool_family' && state.familyTool) return state.familyTool
+      const tool = this.byName.get(name)
+      if (!tool) throw new Error(`Manager 固定核心缺失: ${name}`)
+      return tool
     })
     const seen = new Set(visible.map((tool) => tool.name))
     // All modes mark the identical core boundary for adapters with explicit cache support.
@@ -411,16 +416,6 @@ export class ManagerToolCatalog {
     return visible
   }
 
-  loadBuiltinFallback(state: ManagerToolFaceState): void {
-    if (state.mode === 'full' || state.mode === 'shadow') return
-    // Record fallback tools in the same append order as explicit loads.
-    for (const tool of this.byName.values()) {
-      if (this.isAllowed(tool.name) && !isExternalMcpTool(tool) && !this.coreNames.includes(tool.name)) {
-        state.loadedNames.add(tool.name)
-      }
-    }
-  }
-
   search(state: ManagerToolFaceState, rawQuery: unknown, rawLimit: unknown): ToolSearchResult {
     if (typeof rawQuery !== 'string') throw new ToolSearchInputError('search_tools.query 必须是字符串')
     if (!rawQuery.trim() || [...rawQuery.trim()].length > MAX_QUERY_LENGTH) throw new ToolSearchInputError('search_tools.query 必须是 1..500 个字符')
@@ -429,12 +424,6 @@ export class ManagerToolCatalog {
       throw new ToolSearchInputError('search_tools.limit 必须是 1..5 的整数')
     }
     const limit = rawLimit === undefined ? DEFAULT_RESULTS : rawLimit as number
-    const coreName = this.coreNames.find((name) => normalize(name) === query
-      && (name === 'search_tools' || this.byName.has(name)))
-    if (coreName) return {
-      status: 'already_visible', catalogRevision: this.catalogRevision,
-      loaded: [], alreadyVisible: [coreName], omittedDueToBudget: 0,
-    }
     const queryTokens = uniqueTokens(rawQuery)
     const ranked = this.documents
       .map((document) => {

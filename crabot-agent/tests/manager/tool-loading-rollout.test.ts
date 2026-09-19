@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ManagerLoop, managerToolLoadingModeForKey, type ManagerLoopDeps } from '../../src/manager/loop.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
-import { type ManagerToolFaceState } from '../../src/manager/tools/tool-catalog.js'
+import { ManagerToolCatalog, NORMAL_MANAGER_CORE_NAMES, type ManagerToolFaceState } from '../../src/manager/tools/tool-catalog.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -69,4 +69,34 @@ describe('Manager rollout controls', () => {
       await rm(directory, { recursive: true, force: true })
     }
   })
+  it('shadow traces project the new fixed family loader without losing observation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'manager-family-shadow-'))
+    try {
+      vi.stubEnv('CRABOT_MANAGER_TOOL_LOADING_MODE', 'shadow')
+      vi.stubEnv('CRABOT_MANAGER_TOOL_LOADING_KEYS', '')
+      const tool = (name: string) => ({ name, description: name, inputSchema: { type: 'object' },
+        call: async () => ({ output: '', isError: false }) })
+      const appendSpan = vi.fn()
+      const loop = new ManagerLoop({
+        key: 'channel::session', managerKey: () => 'channel::session', isSystemThread: false,
+        store: new ManagerSessionStore(directory), policy: { keepRecent: 3, hardCapTokens: 1_000_000 },
+        toolFace: (_wake, state) => {
+          state!.catalog ??= new ManagerToolCatalog(NORMAL_MANAGER_CORE_NAMES
+            .filter(name => name !== 'search_tools' && name !== 'load_tool_family').map(tool), 'normal')
+          state!.searchTool ??= tool('search_tools')
+          state!.familyTool ??= tool('load_tool_family')
+          return state!.catalog.project(state!, state!.searchTool)
+        },
+        promptInputs: () => ({}), harness: { listWorkers: async () => [] } as never,
+        now: () => new Date(), markPendingReply() {}, hasPendingReply: () => false,
+        model: () => 'model', adapter: () => ({ updateConfig() {}, async *stream() { yield* chunksFromContent([], 'end_turn') } }),
+        traceWriter: { startEpisode: vi.fn(), appendSpan, finishSpan: vi.fn(), finishEpisode: vi.fn(), addSpawnedWorker: vi.fn() },
+      })
+      await loop.wakeUp({ wake: { kind: 'self_wake', reason: 'fixture' }, received_at: new Date().toISOString(), timezone: 'UTC' })
+      const llm = appendSpan.mock.calls.map(([, span]) => span).filter(span => span.type === 'llm_call')
+      expect(llm).toHaveLength(1)
+      expect(llm[0].details).toMatchObject({ visible_tool_count: 15, shadow_core_count: 15, family_load_count: 0 })
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
 })

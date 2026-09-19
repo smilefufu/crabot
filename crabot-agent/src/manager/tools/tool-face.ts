@@ -1,7 +1,7 @@
 /**
  * Manager 能力目录与 episode 工具投影 —— protocol-agent-v3.md §4.3。
  * 内置 messaging、memory、Worker、自省、任务板和项目文档仍按白名单构造；
- * 外部 MCP 另经授权和兼容过滤。profile 固定核心之后只追加当前 episode 搜索出的定义。
+ * 外部 MCP 另经授权和兼容过滤。profile 固定核心之后只追加当前 episode 按族加载或搜索出的定义。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.3
  */
@@ -365,8 +365,7 @@ export function assertClosedToolFace(tools: readonly ToolDefinition[], allowExte
 function buildSearchToolsTool(catalog: ManagerToolCatalog, state: ManagerToolFaceState): ToolDefinition {
   return defineTool({
     name: 'search_tools',
-    description: '按动作和对象搜索工具；适用的可见项直接调用，命中项下轮可见。' +
-      '核对用途与权限，加载不代表可执行；无新线索不重复搜，预算省略不代表无匹配。',
+    description: '仅搜索外部 MCP 工具，命中项下轮可用。内置工具用 load_tool_family；已知 MCP 服务也可按族完整加载。无新线索不重复搜；加载不授予权限，预算省略不代表无匹配。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -402,11 +401,10 @@ function buildSearchToolsTool(catalog: ManagerToolCatalog, state: ManagerToolFac
         }
       } catch (error) {
         if (!(error instanceof ToolSearchInputError)) {
-          catalog.loadBuiltinFallback(state)
           return {
             output: JSON.stringify({ status: 'degraded', scope: 'current_episode', catalog_revision: catalog.catalogRevision,
               loaded: [], already_visible: [], omitted_due_to_budget: 0 }),
-            isError: false,
+            isError: true,
             traceMetadata: { tool_search_status: 'degraded' },
           }
         }
@@ -414,6 +412,36 @@ function buildSearchToolsTool(catalog: ManagerToolCatalog, state: ManagerToolFac
           output: error instanceof Error ? error.message : String(error),
           isError: true,
         }
+      }
+    },
+  })
+}
+
+function buildLoadToolFamilyTool(catalog: ManagerToolCatalog, state: ManagerToolFaceState): ToolDefinition {
+  return defineTool({
+    name: 'load_tool_family',
+    description: '完整加载当前权限和场景可用的工具族，下轮可调用；已可见项直接调用。族加载成功且 complete=true 表示当前可用工具已看全；family=mcp 的 listed 仅列服务目录，具体工具按返回的服务族加载。加载不授予执行权限。',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { family: { type: 'string', minLength: 1, maxLength: 128,
+        description: catalog.profile === 'daily_reflection'
+          ? 'memory：记忆；worker：执行器管理与执行条件。'
+          : 'memory：记忆；messaging：消息/历史/联系人/媒体；worker：执行器管理与执行条件；schedule：定时任务；crabot：部署/配置/权限查询。mcp：只列可用外部服务；mcp__服务名：完整加载该服务。',
+      } },
+      required: ['family'],
+    },
+    isReadOnly: false,
+    call: async (input): Promise<ToolCallResult> => {
+      state.familyLoads = (state.familyLoads ?? 0) + 1
+      try {
+        const result = catalog.loadFamily(state, input.family)
+        return { output: JSON.stringify(result), isError: false, traceMetadata: {
+          tool_family: result.family, tool_family_status: result.status, tool_family_complete: result.complete,
+          loaded_names: result.loaded.join(','), already_visible: result.already_visible.join(','),
+          loaded_schema_bytes: result.loaded.reduce((bytes, name) => bytes + serializedToolBytes(catalog.get(name)!), 0),
+        } }
+      } catch (error) {
+        return { output: error instanceof Error ? error.message : String(error), isError: true }
       }
     },
   })
@@ -543,6 +571,13 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
       if (tool.name === 'get_friend_permissions') return permissions?.cli_access.permission === 'read' || permissions?.cli_access.permission === 'write'
       return true
     },
+    {
+      memory: memoryTools.map(tool => tool.name),
+      messaging: messagingTools.map(tool => tool.name),
+      worker: [...workerTools.map(tool => tool.name), 'get_execution_capabilities'],
+      schedule: infoTools.filter(tool => tool.name.endsWith('_schedule') || tool.name === 'list_schedules').map(tool => tool.name),
+      crabot: ['inspect_crabot', 'get_friend_permissions'],
+    },
   )
   deps.faceState.catalog = catalog
   if (profile === 'memory_graph_rebuild') {
@@ -550,7 +585,8 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     assertClosedToolFace(projected, true)
     return projected
   }
-  const searchTool = buildSearchToolsTool(catalog, deps.faceState)
+  deps.faceState.familyTool = buildLoadToolFamilyTool(catalog, deps.faceState)
+  const searchTool = profile === 'normal' ? buildSearchToolsTool(catalog, deps.faceState) : undefined
   deps.faceState.searchTool = searchTool
   const projected = catalog.project(deps.faceState, searchTool)
   assertClosedToolFace(projected, true)

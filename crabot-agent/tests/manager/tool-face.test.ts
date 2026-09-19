@@ -183,16 +183,16 @@ describe('buildManagerToolFace', () => {
     expect(tools.map(tool => tool.name)).toContain('get_execution_capabilities')
   })
 
-  it('移除决策写入后为 56 项内置与 57 项 full，各模式核心字节一致', () => {
+  it('移除决策写入后为 56 项内置与 58 项 full，各模式核心字节一致', () => {
     const deps = makeDeps({ schedule, candidatePermissions: permissions })
     expect(buildManagerToolFace(deps)).toHaveLength(56)
     const full = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
     const core = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() })
-    expect(full).toHaveLength(57)
+    expect(full).toHaveLength(58)
     expect(core.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
     const wire = (tools: ToolDefinition[]) => JSON.stringify(tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })))
     expect(wire(full.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(wire(core))
-    expect(Buffer.byteLength(wire(core))).toBeLessThanOrEqual(20 * 1024)
+    expect(Buffer.byteLength(wire(core))).toBeLessThanOrEqual(22 * 1024)
     const restricted = buildManagerToolFace({ ...deps, candidatePermissions: undefined, faceState: createManagerToolFaceState() })
     expect(wire(restricted)).toBe(wire(core))
   })
@@ -235,7 +235,7 @@ describe('buildManagerToolFace', () => {
     const tools = buildManagerToolFace(deps)
     expect(tools.map(tool => tool.name)).toEqual([...DAILY_REFLECTION_CORE_NAMES])
     expect(tools).toHaveLength(11)
-    expect(state.catalog!.search(state, 'get_execution_capabilities', 1).loaded).toEqual(['get_execution_capabilities'])
+    expect(state.catalog!.loadFamily(state, 'worker').loaded).toContain('get_execution_capabilities')
     const normal = createManagerToolFaceState()
     buildManagerToolFace(makeDeps({ faceState: normal, candidatePermissions: permissions }))
     for (const name of ['list_reflection_records', 'read_reflection_record', 'finish_daily_reflection']) {
@@ -248,10 +248,10 @@ describe('buildManagerToolFace', () => {
     const state = createManagerToolFaceState()
     const deps = makeDeps({ schedule, candidatePermissions: permissions, faceState: state })
     const core = buildManagerToolFace(deps)
-    const result = await core[0].call({ query: '创建定时任务', limit: 1 }, {})
+    const result = await core.find(tool => tool.name === 'load_tool_family')!.call({ family: 'schedule' }, {})
     expect(JSON.parse(result.output).loaded).toContain('create_schedule')
     const next = buildManagerToolFace({ ...deps, messagingDeps: makeMessagingDeps({ enableFeishuDocTool: true }) })
-    expect(next.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES, 'create_schedule'])
+    expect(next.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES, 'create_schedule', 'delete_schedule', 'get_schedule', 'list_schedules', 'trigger_schedule', 'update_schedule'])
     expect(state.catalog?.get('read_feishu_document')).toBeUndefined()
   })
 
@@ -285,7 +285,7 @@ describe('buildManagerToolFace', () => {
       const full = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
       const state = createManagerToolFaceState()
       const core = buildManagerToolFace({ ...deps, faceState: state })
-      await core[0].call({ query: 'create_schedule', limit: 1 }, {})
+      await core.find(tool => tool.name === 'load_tool_family')!.call({ family: 'schedule' }, {})
       const expanded = buildManagerToolFace({ ...deps, faceState: state })
       const adapter = createAdapter({ endpoint: 'https://example.test/v1', apikey: 'test-key', format })
       // This SDK version captures node-fetch at import time, not globalThis.fetch.
@@ -293,7 +293,7 @@ describe('buildManagerToolFace', () => {
       for (const tools of [full, core, expanded]) {
         await callNonStreaming(adapter, { model: 'fixture', systemPrompt: 'Stable Manager instructions', messages: [createUserMessage('fixture')], tools, maxTokens: 64 })
       }
-      expect(bodies.map(body => body.tools.length)).toEqual([57, 14, 15])
+      expect(bodies.map(body => body.tools.length)).toEqual([58, 15, 21])
       expect(JSON.stringify(bodies[0].tools.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(JSON.stringify(bodies[1].tools))
       expect(JSON.stringify(bodies[2].tools.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(JSON.stringify(bodies[1].tools))
       if (format === 'anthropic') {
@@ -312,7 +312,7 @@ describe('buildManagerToolFace', () => {
     }
   })
 
-  it('全部保留的尾部工具中英文 recall@3 至少 95%，精确工具名全部命中', () => {
+  it('每项实际内置尾部工具恰属一个完整族，搜索不再返回内置定义', () => {
     const state = createManagerToolFaceState()
     buildManagerToolFace(makeDeps({
       schedule, candidatePermissions: permissions, faceState: state, isSystemThread: true,
@@ -320,19 +320,15 @@ describe('buildManagerToolFace', () => {
       authorization: () => ({ kind: 'friend_master', manager_key: MANAGER_KEY, friend_id: 'master', generation: 1 }),
     }))
     const catalog = state.catalog!
-    const tailNames = catalog.tools.map((tool) => tool.name).filter((name) => !(NORMAL_MANAGER_CORE_NAMES as readonly string[]).includes(name))
+    const tailNames = catalog.tools.map(tool => tool.name).filter(name => !(NORMAL_MANAGER_CORE_NAMES as readonly string[]).includes(name))
     expect(TOOL_SEARCH_QUERIES.map(([name]) => name).sort()).toEqual(tailNames.sort())
-    const misses: string[] = []
+    const families = ['memory', 'messaging', 'worker', 'schedule', 'crabot'].map(family => catalog.loadFamily(createManagerToolFaceState(), family))
     for (const [name, ...queries] of TOOL_SEARCH_QUERIES) {
-      expect(catalog.search(createManagerToolFaceState(), name, 3).loaded, name).toContain(name)
-      for (const query of queries) {
-        if (!catalog.search(createManagerToolFaceState(), query, 3).loaded.includes(name)) misses.push(`${name}: ${query}`)
-      }
+      expect(families.filter(result => result.loaded.includes(name)), name).toHaveLength(1)
+      for (const query of [name, ...queries]) expect(catalog.search(createManagerToolFaceState(), query, 3).status).toBe('no_match')
     }
-    expect(misses, misses.join('\n')).toHaveLength(0)
-    for (const alias of ['get_deployment_info', 'get_config_summary', 'list_capabilities']) {
-      expect(catalog.search(createManagerToolFaceState(), alias, 3).loaded[0]).toBe('inspect_crabot')
-    }
+    expect(families[0].loaded).toHaveLength(18)
+    expect(families[3].loaded).toHaveLength(6)
   })
 
   it('MCP 已加载后撤权拒绝执行，未知 category 不进入目录', async () => {
@@ -350,7 +346,7 @@ describe('buildManagerToolFace', () => {
     expect(state.catalog?.missingToolOutput('mcp__remote__unknown')).toBe('TOOL_UNAVAILABLE')
   })
 
-  it('真实 Engine 同轮搜索不能调用新 MCP，下一轮才可执行，重新开始不继承 loaded set', async () => {
+  it.each(['search_tools', 'load_tool_family'])('真实 Engine 同轮 %s 不能调用新 MCP，下一轮才可执行，重新开始不继承 loaded set', async (loader) => {
     const call = vi.fn(async () => ({ output: 'external result', isError: false }))
     const external = { name: 'mcp__remote__lookup', description: 'lookup', category: 'mcp_skill' as const,
       inputSchema: { type: 'object' }, isReadOnly: false, call }
@@ -362,7 +358,7 @@ describe('buildManagerToolFace', () => {
       async *stream(params) {
         names.push(params.tools.map((tool) => tool.name))
         if (names.length === 1) yield* chunksFromContent([
-          { type: 'tool_use', id: 'search', name: 'search_tools', input: { query: external.name, limit: 1 } },
+          { type: 'tool_use', id: 'search', name: loader, input: loader === 'search_tools' ? { query: external.name, limit: 1 } : { family: 'mcp__remote' } },
           { type: 'tool_use', id: 'too-early', name: external.name, input: {} },
         ], 'tool_use')
         else if (names.length === 2) yield* chunksFromContent([{ type: 'tool_use', id: 'allowed', name: external.name, input: {} }], 'tool_use')
@@ -409,14 +405,16 @@ describe('buildManagerToolFace', () => {
     expect(restricted.catalog!.search(restricted, external.name, 3).loaded).not.toContain(external.name)
   })
 
-  it('检索异常只展开内置能力，无匹配不降级；专用 profile 不暴露外部 MCP', async () => {
+  it('检索异常不展开任何能力，无匹配不降级；专用 profile 不暴露外部 MCP', async () => {
     const state = createManagerToolFaceState()
     const deps = makeDeps({ faceState: state, candidatePermissions: permissions })
     const search = buildManagerToolFace(deps)[0]
     expect(JSON.parse((await search.call({ query: 'unmatchedtoken' }, {})).output).status).toBe('no_match')
     expect(buildManagerToolFace(deps)).toHaveLength(NORMAL_MANAGER_CORE_NAMES.length)
     const spy = vi.spyOn(state.catalog!, 'search').mockImplementationOnce(() => { throw new Error('index failed') })
-    expect(JSON.parse((await search.call({ query: 'anything' }, {})).output).status).toBe('degraded')
+    const failed = await search.call({ query: 'anything' }, {})
+    expect(failed.isError).toBe(true)
+    expect(JSON.parse(failed.output).status).toBe('degraded')
     expect(buildManagerToolFace(deps).every((tool) => !tool.name.startsWith('mcp__') || tool.name.startsWith('mcp__crab-memory__'))).toBe(true)
     spy.mockRestore()
     for (const [profile, names] of [['daily_reflection', DAILY_REFLECTION_CORE_NAMES], ['memory_graph_rebuild', MEMORY_GRAPH_REBUILD_CORE_NAMES]] as const) {
@@ -425,7 +423,7 @@ describe('buildManagerToolFace', () => {
     }
   })
 
-  it.each([false, true])('降级展开的内置尾部在检索恢复后仍只追加；已有 MCP: %s', async (preloadMcp) => {
+  it.each([false, true])('检索故障保留原工具面，恢复后仍只追加；已有 MCP: %s', async (preloadMcp) => {
     const state = createManagerToolFaceState()
     const external = ['before', 'after'].map((name) => ({
       name: `mcp__remote__${name}`, description: name, category: 'mcp_skill' as const,
@@ -439,11 +437,14 @@ describe('buildManagerToolFace', () => {
     const before = buildManagerToolFace(deps)
 
     const spy = vi.spyOn(state.catalog!, 'search').mockImplementationOnce(() => { throw new Error('index failed') })
-    expect(JSON.parse((await search.call({ query: 'anything' }, {})).output).status).toBe('degraded')
+    const failed = await search.call({ query: 'anything' }, {})
+    expect(failed.isError).toBe(true)
+    expect(JSON.parse(failed.output).status).toBe('degraded')
     spy.mockRestore()
     const fallback = buildManagerToolFace(deps)
     expect(fallback.slice(0, before.length)).toEqual(before)
-    expect(fallback.some((tool) => tool.name === 'inspect_crabot')).toBe(true)
+    expect(fallback).toEqual(before)
+    expect(fallback.some((tool) => tool.name === 'inspect_crabot')).toBe(false)
     expect(fallback.filter((tool) => tool.name.startsWith('mcp__remote__')).map((tool) => tool.name))
       .toEqual(preloadMcp ? [external[0].name] : [])
 
@@ -453,7 +454,7 @@ describe('buildManagerToolFace', () => {
     expect(recovered.slice(0, fallback.length)).toEqual(fallback)
     expect(recovered.at(-1)?.name).toBe(external[1].name)
     expect(JSON.parse((await search.call({ query: 'inspect_crabot', limit: 1 }, {})).output))
-      .toMatchObject({ status: 'already_visible', loaded: [], already_visible: ['inspect_crabot'] })
+      .toMatchObject({ status: 'no_match', loaded: [], already_visible: [] })
     expect(new Set(recovered.map((tool) => tool.name)).size).toBe(recovered.length)
     for (const tool of external) expect(tool.call).not.toHaveBeenCalled()
   })
