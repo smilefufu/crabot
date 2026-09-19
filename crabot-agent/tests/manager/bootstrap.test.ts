@@ -886,31 +886,92 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(all[0].managerKey).toBe('wechat::sess-boot')
   })
 
-  it('worker 事件唤醒的 episode 里没人在说话 → 不拿缓存里上一次的发言者冒充', async () => {
+  it.each([false, true])('私聊 Worker 事件新建执行器沿用 session 当前身份（重启=%s）', async (restart) => {
     let script: LLMAdapter = silentManager()
-    const stack = buildManagerStack(makeDeps({ managerAdapter: () => script }))
+    let allowTask = true
+    const permissions = (): ResolvedPermissions => ({
+      tool_access: {
+        memory: false, messaging: false, task: allowTask, mcp_skill: false, file_io: false,
+        browser: false, shell: false, remote_exec: false, desktop: false,
+      },
+      cli_access: Object.fromEntries(CLI_DOMAINS.map(domain => [domain, 'none'])) as never,
+      storage: null,
+      memory_scopes: ['session-scope'],
+    })
+    const issueCredential = vi.fn(async (context) => {
+      if (!context.creator_friend_id) throw new Error('Private Agent execution has no trusted creator')
+      return { token: 'test-worker-token', expires_at: '2099-01-01T00:00:00.000Z' }
+    })
+    const spawn = vi.spyOn(BuiltinWorkerAdapter.prototype, 'spawn').mockImplementation(async spec => ({
+      worker_id: spec.worker_id, incarnation_id: spec.incarnation_id, impl: 'builtin',
+      session_ref: 'test-session', seq: 1,
+    }))
+    const deps = makeDeps({
+      managerAdapter: () => script,
+      issueAgentCliCredential: issueCredential,
+      principalResolver: {
+        ...makePrincipalResolver(),
+        resolvePermissions: async () => permissions(),
+        getFriend: async () => FRIEND_A,
+      },
+    })
+    let stack = buildManagerStack(deps)
+    await stack.principals.init()
     const key = 'wechat::sess-boot' as ManagerKey
-
-    // ① f-a 先说一句（manager 沉默，不派活）——缓存里因此留着 f-a 的身份
-    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('只是聊聊')], FRIEND_A)
-    expect(await stack.ledger.listAllWorkers()).toHaveLength(0)
-
-    // ② 手工种一条 worker，模拟"更早派出去的活"
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('继续任务')], FRIEND_A)
     await stack.ledger.upsertWorker(key, 'w-seeded', () =>
       makeLedgerWorker({ workerId: 'w-seeded', impl: 'builtin', spawnedBySession: key }),
     )
+    if (restart) {
+      await stack.dispose()
+      stack = buildManagerStack(deps)
+      await stack.principals.init()
+    }
+    try {
+      script = spawnOnce()
+      await stack.registry.routeWorkerEvent({ ts: new Date().toISOString(), kind: 'state_changed', worker_id: 'w-seeded', seq: 1 })
+      await settle()
+      const spawned = (await stack.ledger.listAllWorkers()).filter(w => w.worker.worker_id !== 'w-seeded')
+      expect(spawned).toHaveLength(1)
+      expect(spawned[0].worker.origin.creator_friend_id).toBe(FRIEND_A.id)
+      expect(spawned[0].managerKey).toBe(key)
+      const context = JSON.parse(await fs.readFile(join(dataRoot, 'agent', 'workers', spawned[0].worker.worker_id, 'context.json'), 'utf8'))
+      expect(context).toMatchObject({ creator_friend_id: FRIEND_A.id, principal_permissions: permissions(),
+        target_session: { channel_id: 'wechat', session_id: 'sess-boot', type: 'private' } })
+      expect(issueCredential).toHaveBeenCalledWith(expect.objectContaining({ creator_friend_id: FRIEND_A.id, manager_key: key }))
+      expect(spawn).toHaveBeenCalledOnce()
+      expect(spawn.mock.calls[0][0].execution_env).toEqual({ CRABOT_TOKEN: 'test-worker-token', CRABOT_ACTOR: 'agent' })
 
-    // ③ 这条 worker 的事件唤醒同一个 manager，它在这一轮派了个新 worker
-    script = spawnOnce()
-    await stack.registry.routeWorkerEvent({ ts: '2026-01-01T00:00:00.000Z', kind: 'state_changed', worker_id: 'w-seeded', seq: 1 })
-    await settle()
+      // 同一 session 撤销派发权限后，下一次事件不得沿用旧权限创建执行器。
+      allowTask = false
+      script = spawnOnce()
+      await stack.registry.routeWorkerEvent({ ts: new Date().toISOString(), kind: 'state_changed', worker_id: 'w-seeded', seq: 1 })
+      await settle()
+      expect(issueCredential).toHaveBeenCalledOnce()
+      expect(spawn).toHaveBeenCalledOnce()
+    } finally {
+      await stack.dispose()
+    }
+  })
 
-    const spawnedByEvent = (await stack.ledger.listAllWorkers()).filter((w) => w.worker.worker_id !== 'w-seeded')
-    expect(spawnedByEvent).toHaveLength(1)
-    // 缓存里还留着 f-a，但这一轮不是 f-a 在说话——记成 f-a 就是把 worker 挂到错的人名下。
-    expect(spawnedByEvent[0].worker.origin.creator_friend_id).toBeUndefined()
-    // worker 事件继续归原会话；没有新的 human wake 时也不继承 f-a 的权限身份。
-    expect(spawnedByEvent[0].managerKey).toBe(key)
+  it('群聊 Worker 事件不把最近发言者当作私聊委托身份', async () => {
+    let script: LLMAdapter = silentManager()
+    const stack = buildManagerStack(makeDeps({ managerAdapter: () => script }))
+    const key = 'wechat::sess-boot' as ManagerKey
+    try {
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [groupMessage('群内消息')], FRIEND_A)
+      await stack.ledger.upsertWorker(key, 'w-seeded', () =>
+        makeLedgerWorker({ workerId: 'w-seeded', impl: 'builtin', spawnedBySession: key }),
+      )
+      script = spawnOnce()
+      await stack.registry.routeWorkerEvent({ ts: new Date().toISOString(), kind: 'state_changed', worker_id: 'w-seeded', seq: 1 })
+      await settle()
+      const spawned = (await stack.ledger.listAllWorkers()).filter(w => w.worker.worker_id !== 'w-seeded')
+      expect(spawned).toHaveLength(1)
+      expect(spawned[0].worker.origin.creator_friend_id).toBeUndefined()
+    } finally {
+      await stack.dispose()
+    }
   })
 
   it('场景画像与该渠道的 @handle 真的出现在 manager 的 system prompt 里（5b + 5d）', async () => {

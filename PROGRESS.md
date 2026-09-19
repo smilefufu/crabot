@@ -3,6 +3,11 @@
 > 最后整理：2026-09-16
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
+### 私聊自动续办 Worker 创建者传递修复：已验证，待部署
+
+- Worker 事件等非人类唤醒沿用已刷新 session 主体，将创建者与现有私聊权限一起传给新 Worker，修复权限允许却因 `Private Agent execution has no trusted creator` 无法创建的问题；无新配置、存储或接口字段。
+- 回归先复现正常运行和重启恢复两种失败，修复后检查 Worker origin/context、凭据签发输入及 adapter 启动，并验证撤销 task 权限后不再创建；群聊不继承最近发言者身份。相关主体、能力查询与装配测试通过，Agent 类型检查通过。
+
 ## 当前状态
 
 ### 任务板空目标复核：实现与定向验证完成，待 PR 审查

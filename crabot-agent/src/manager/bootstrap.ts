@@ -713,12 +713,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // admin 侧既有的 master 等价规则(protocol-admin §"is_builtin=true 或
           // creator_friend_id 为空 → master_private"),所以这里丢弃而不是改写成某个 id。
           //
-          // P7 J:人类消息唤醒时改记**本批消息的发言者**(§8.2)。取 `humanPrincipal`
-          // (随本 episode 的唤醒事件而来)而不是缓存里的"最近一次"——worker 事件唤醒的
-          // episode 里没有人在说话,拿上一次的发言者冒充会把 worker 记到错的人名下。
+          // 人类消息使用本批发言者；私聊非人类唤醒使用 beforeWake 刷新过的 session
+          // 主体。没有新发言不等于没有委托身份，creator 必须随同会话权限传给 Worker。
+          // 群聊仍不把最近发言者作为自动派发身份，Schedule 保持自己的主体。
           creatorFriendId: scheduleIdentity
             ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
-            : humanPrincipal?.friend?.id ?? workboardPrincipal?.friend?.id,
+            : humanPrincipal?.friend?.id ?? workboardPrincipal?.friend?.id
+              ?? (targetSessionType === 'private' ? principals.get(key)?.principal.friend?.id : undefined),
           // 人类/调度唤醒的身份档位随 wake 进入本轮；独立任务板通知则复用刚刷新过的既有
           // Manager 主体。两种情况下都在 spawn 时固定并落盘，后续不再从 Admin 或任务板取数。
           //
