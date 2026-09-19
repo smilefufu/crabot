@@ -124,7 +124,12 @@ describe('Manager MCP production authorization wiring', () => {
       return JSON.parse(result.output as string)
     }
     const expectHidden = async (name: string) => {
-      expect(JSON.stringify(await search(name))).not.toContain(name)
+      if (tools().some(tool => tool.name === 'search_tools')) expect(JSON.stringify(await search(name))).not.toContain(name)
+      const loader = tools().find(tool => tool.name === 'load_tool_family')
+      if (loader) {
+        const result = JSON.parse((await loader.call({ family: name.split('__').slice(0, 2).join('__') }, {})).output)
+        expect(result).toMatchObject({ status: 'unavailable', complete: false, loaded: [], already_visible: [] })
+      }
       expect(tools().some(tool => tool.name === name)).toBe(false)
       expect(state.catalog!.missingToolOutput(name)).toBe('TOOL_UNAVAILABLE')
     }
