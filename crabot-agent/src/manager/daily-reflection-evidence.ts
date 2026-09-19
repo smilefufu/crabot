@@ -30,6 +30,12 @@ function inWindow(value: number | string, window: ReflectionWindow): boolean {
   return time >= Date.parse(window.window_start) && time < Date.parse(window.window_end)
 }
 
+function isLegacyImportEvent(event: { kind: string; source?: string; summary?: string }): boolean {
+  // Composite traces project the same audit event as a harness lifecycle row.
+  return event.kind === 'legacy_imported'
+    || (event.source === 'harness' && event.kind === 'lifecycle' && event.summary === 'legacy_imported')
+}
+
 function isHumanInput(message: EngineMessage): boolean {
   return message.role === 'user' && 'content' in message && typeof message.content === 'string'
     && (message.content.startsWith('[人类消息]\n') || message.content.startsWith('[补齐:群聊注意力放行期间累积的人类消息]\n'))
@@ -161,29 +167,34 @@ export class DailyReflectionEvidence {
       if (worker.origin.spawned_by_episode && reflectionEpisodes.has(worker.origin.spawned_by_episode)) continue
       if (state.analysis_worker_ids.includes(worker.worker_id)) continue
       const events = await this.deps.harness.readWorkerEvents(worker.worker_id)
+      const importedAt = worker.legacy_source?.kind === 'v2_admin_task' ? worker.legacy_source.imported_at : undefined
       const turns = await this.deps.turns.list(worker.worker_id)
       const traces: ReflectionWorkerTrace[] = []
       const periodTurns = turns.filter(turn => inWindow(turn.completed_at, state))
       const errors = new Set(events.filter(event => event.kind === 'error' && inWindow(event.ts, state))
         .map(event => JSON.stringify(event.detail ?? {}).slice(0, 200)))
       const llmCallsBySeq: string[] = []
-      const times = [...events.filter(event => inWindow(event.ts, state)).map(event => event.ts),
+      const times = [...events.filter(event => !isLegacyImportEvent(event) && inWindow(event.ts, state)).map(event => event.ts),
         ...turns.filter(turn => inWindow(turn.completed_at, state)).map(turn => turn.completed_at)]
       const traceGaps: string[] = []
       for (const incarnation of worker.incarnations) {
         if (Date.parse(incarnation.started_at) >= Date.parse(state.window_end)
           || (incarnation.state === 'exited' && incarnation.ended_at && Date.parse(incarnation.ended_at) < Date.parse(state.window_start))) continue
+        // Preserve real legacy completion facts, including gaps, but not migration-time fallbacks.
+        if (incarnation.impl === 'legacy' && importedAt && incarnation.ended_at !== importedAt
+          && inWindow(incarnation.ended_at, state)) times.push(incarnation.ended_at)
         try {
           const captured = await this.deps.captureWorkerTrace(worker.worker_id, incarnation.seq)
           traces.push(captured.source)
-          const periodEvents = captured.result.events.filter(event => inWindow(event.ts, state))
+          const periodEvents = captured.result.events.filter(event => !isLegacyImportEvent(event) && inWindow(event.ts, state))
           times.push(...periodEvents.map(event => event.ts))
           llmCallsBySeq.push(`${incarnation.seq}:${periodEvents.filter(event => event.kind === 'llm_call').length}`)
           periodEvents.filter(event => event.kind === 'error').forEach(event => errors.add(event.summary.slice(0, 200)))
           if (captured.result.unavailable_reason) traceGaps.push(captured.result.unavailable_reason)
         } catch { traceGaps.push(`worker_trace_unavailable:${worker.worker_id}:${incarnation.seq}`) }
       }
-      if (!times.length && !inWindow(worker.updated_at, state)) continue
+      const migrationOnlyUpdate = worker.updated_at === importedAt
+      if (!times.length && (migrationOnlyUpdate || !inWindow(worker.updated_at, state))) continue
       await add({ kind: 'worker', worker_id: worker.worker_id, traces,
         turn_ids: periodTurns.map(turn => turn.turn_id), event_count: events.length, gaps: traceGaps },
       times.sort().at(-1) ?? worker.updated_at, [
@@ -225,11 +236,11 @@ export class DailyReflectionEvidence {
         gaps.push(...source.gaps)
         const events = await this.deps.harness.readWorkerEvents(source.worker_id)
         if (events.length < source.event_count) gaps.push('worker_events_truncated')
-        values.push(...events.slice(0, source.event_count).filter(event => inWindow(event.ts, window)))
+        values.push(...events.slice(0, source.event_count).filter(event => !isLegacyImportEvent(event) && inWindow(event.ts, window)))
         for (const trace of source.traces) {
           const result = await this.deps.readWorkerTrace(source.worker_id, trace)
           if (result.unavailable_reason) gaps.push(result.unavailable_reason)
-          values.push(...result.events.filter(event => event.kind !== 'thinking' && inWindow(event.ts, window)))
+          values.push(...result.events.filter(event => !isLegacyImportEvent(event) && event.kind !== 'thinking' && inWindow(event.ts, window)))
         }
         for (const id of source.turn_ids) {
           const turn = await this.deps.turns.get(source.worker_id, id)

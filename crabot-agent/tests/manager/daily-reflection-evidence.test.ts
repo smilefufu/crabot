@@ -6,6 +6,13 @@ import { promises as fs } from 'node:fs'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import { DailyReflectionEvidence, type ReflectionEvidenceDeps } from '../../src/manager/daily-reflection-evidence.js'
 import { reflectionDigest } from '../../src/manager/daily-reflection.js'
+import { importV2LegacyTasks } from '../../src/workers/legacy-importer.js'
+import { LedgerStore } from '../../src/workers/harness/ledger-store.js'
+import { WorkspaceManager } from '../../src/workers/harness/workspace-manager.js'
+import { WorkerEventLog } from '../../src/workers/harness/worker-events.js'
+import { readCompositeWorkerTrace } from '../../src/workers/trace/composite-reader.js'
+import { TraceCursorStore } from '../../src/workers/trace/cursor-store.js'
+import { NativeTraceCopyStore } from '../../src/workers/trace/native-copy.js'
 import { WorkerTurnStore } from '../../src/workers/harness/worker-turn-store.js'
 import { TraceStore } from '../../src/core/trace-store.js'
 import type { ManagerKey } from '../../src/manager/types.js'
@@ -47,6 +54,27 @@ async function fixture() {
       status: 'failed', trigger: { type: 'human_message', summary: content }, spawned_worker_ids: [], spans: [] })
   }
   return { root, store, workers, events, traces, deps, addEpisode, provider: new DailyReflectionEvidence(deps) }
+}
+
+async function importLegacyWorker(f: Awaited<ReturnType<typeof fixture>>, status = 'completed', completedAt = '2026-07-05T14:15:00.000Z') {
+  const adminDataDir = join(f.root, 'admin')
+  const agentDataDir = join(f.root, 'agent')
+  const traceDir = join(agentDataDir, 'traces')
+  await fs.mkdir(adminDataDir, { recursive: true })
+  await fs.mkdir(traceDir, { recursive: true })
+  await fs.writeFile(join(adminDataDir, 'tasks.json'), JSON.stringify([{
+    id: 'old-task', title: 'historical task', status, priority: 'normal',
+    created_at: '2026-07-05T14:00:00.000Z',
+    ...(status === 'completed' ? { completed_at: completedAt } : {}),
+    source: { channel_id: 'chat', session_id: 'one', trigger_type: 'message' },
+  }]))
+  const ledger = new LedgerStore(join(agentDataDir, 'worker-ledgers'))
+  await importV2LegacyTasks({ adminDataDir, agentDataDir, traceDir, ledger,
+    workspaces: new WorkspaceManager(join(f.root, 'workspaces')), now: () => activity })
+  const [{ worker }] = await ledger.listAllWorkers()
+  f.workers.push(worker)
+  f.events.set(worker.worker_id, await new WorkerEventLog(join(agentDataDir, 'workers', worker.worker_id)).readAll())
+  return worker
 }
 
 describe('daily reflection persisted evidence', () => {
@@ -114,6 +142,92 @@ describe('daily reflection persisted evidence', () => {
     expect(JSON.stringify(manifest)).not.toContain('test-secret')
     const first = manifest.records.find(record => record.source_id === 'first')!
     expect((await f.provider.read(first, state)).content).toContain('这个结果错了')
+  })
+
+  it('excludes a completed historical task whose only current activity is the real v2 migration', async () => {
+    const f = await fixture()
+    const worker = await importLegacyWorker(f)
+    expect(worker.updated_at).toBe(activity)
+    expect(f.events.get(worker.worker_id)).toMatchObject([{ kind: 'legacy_imported', ts: activity }])
+    expect(await f.provider.capture(state)).toEqual({ records: [], gaps: [] })
+    expect(f.deps.captureWorkerTrace).not.toHaveBeenCalled()
+  })
+
+  it('does not reintroduce migration-only activity through the composite harness trace', async () => {
+    const f = await fixture()
+    const worker = await importLegacyWorker(f, 'executing')
+    expect(worker.incarnations[0].ended_at).toBe(activity)
+    const cursorStore = new TraceCursorStore(join(f.root, 'cursors'))
+    let result
+    try {
+      result = await readCompositeWorkerTrace({
+        ledger: { findWorker: async () => ({ worker, managerKey: worker.manager_key }) } as LedgerStore,
+        harness: f.deps.harness, adapters: new Map(), cursorStore,
+        nativeCopy: new NativeTraceCopyStore(join(f.root, 'native-copy')),
+        redact: f.deps.redact, legacyTraceDir: join(f.root, 'agent', 'traces'),
+      }, { worker_id: worker.worker_id, seq: 1 })
+    } finally { await cursorStore.flush() }
+    expect(result.events).toMatchObject([{ ts: activity, kind: 'lifecycle', source: 'harness', summary: 'legacy_imported' }])
+    vi.mocked(f.deps.captureWorkerTrace).mockResolvedValueOnce({
+      source: { seq: 1, incarnation_fingerprint: 'legacy', upper_bound: { native: 0, harness: 1, legacy: 0 } }, result,
+    })
+    expect(await f.provider.capture(state)).toEqual({ records: [], gaps: [] })
+    expect(f.deps.captureWorkerTrace).toHaveBeenCalledWith(worker.worker_id, 1)
+  })
+
+  it('preserves real legacy execution in the window and uses its time instead of migration time', async () => {
+    const f = await fixture()
+    const worker = await importLegacyWorker(f, 'executing')
+    const executedAt = '2026-09-17T10:00:00.000Z'
+    const events = [
+      { ts: executedAt, kind: 'error' as const, source: 'legacy' as const, summary: 'historical execution failed' },
+      { ts: activity, kind: 'lifecycle' as const, source: 'harness' as const, summary: 'legacy_imported' },
+    ]
+    vi.mocked(f.deps.captureWorkerTrace).mockResolvedValueOnce({
+      source: { seq: 1, incarnation_fingerprint: 'legacy', upper_bound: { native: 0, harness: 1, legacy: 1 } }, result: { events },
+    })
+    vi.mocked(f.deps.readWorkerTrace).mockResolvedValue({ events })
+    const manifest = await f.provider.capture(state)
+    expect(manifest.records).toHaveLength(1)
+    const record = manifest.records[0]
+    expect(record).toMatchObject({ source_id: worker.worker_id, activity_at: executedAt, gaps: [] })
+    const evidence = await f.provider.read(record, state)
+    expect(evidence.content).toContain('historical execution failed')
+    expect(evidence.content).not.toContain('legacy_imported')
+    expect(record.digest).toBe(reflectionDigest(evidence.content))
+  })
+
+  it.each([window.window_start, '2026-09-17T10:00:00.000Z'])(
+    'preserves a real legacy completion at %s when execution details are unavailable', async completedAt => {
+      const f = await fixture()
+      const worker = await importLegacyWorker(f, 'completed', completedAt)
+      vi.mocked(f.deps.captureWorkerTrace).mockRejectedValueOnce(new Error('legacy trace unavailable'))
+      const manifest = await f.provider.capture(state)
+      expect(manifest.records).toHaveLength(1)
+      expect(manifest.records[0]).toMatchObject({ source_id: worker.worker_id, activity_at: completedAt,
+        gaps: [`worker_trace_unavailable:${worker.worker_id}:1`] })
+    },
+  )
+
+  it('preserves real input sent to an imported worker, including at the migration timestamp', async () => {
+    const f = await fixture()
+    const worker = await importLegacyWorker(f)
+    f.events.get(worker.worker_id)!.push({ kind: 'input_sent', ts: activity, detail: { delivery_id: 'new-input' } })
+    const manifest = await f.provider.capture(state)
+    expect(manifest.records).toHaveLength(1)
+    expect(manifest.records[0]).toMatchObject({ source_id: worker.worker_id, activity_at: activity })
+    const evidence = await f.provider.read(manifest.records[0], state)
+    expect(evidence.content).toContain('new-input')
+    expect(evidence.content).not.toContain('legacy_imported')
+  })
+
+  it('preserves the update fallback after a migrated worker has subsequently changed', async () => {
+    const f = await fixture()
+    const worker = await importLegacyWorker(f)
+    worker.updated_at = '2026-09-17T13:00:00.000Z'
+    const manifest = await f.provider.capture(state)
+    expect(manifest.records).toHaveLength(1)
+    expect(manifest.records[0]).toMatchObject({ source_id: worker.worker_id, activity_at: worker.updated_at })
   })
 
   it('frozen Manager history ignores appended messages and never emits raw reasoning', async () => {
