@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { withStreamTimeout } from '../../src/engine/stream-timeout'
 import { StreamTimeoutError, isRetryableError } from '../../src/engine/retry-utils'
 
@@ -69,5 +69,91 @@ describe('withStreamTimeout', () => {
   it('StreamTimeoutError 被判定为可重试', () => {
     expect(isRetryableError(new StreamTimeoutError('ttfb', 90_000))).toBe(true)
     expect(isRetryableError(new StreamTimeoutError('idle', 120_000))).toBe(true)
+  })
+})
+
+describe('default stream waiting budgets', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.stubEnv('CRABOT_STREAM_TTFB_MS', '')
+    vi.stubEnv('CRABOT_STREAM_IDLE_MS', '')
+    vi.resetModules()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllEnvs()
+  })
+
+  it('waits through 100s and 599s, then aborts the underlying request at 600s', async () => {
+    const { withStreamTimeout } = await import('../../src/engine/stream-timeout')
+    let signal!: AbortSignal
+    const result = drain(withStreamTimeout(async function* (s) {
+      signal = s
+      await delay(700_000, s)
+      yield 1
+    }, undefined)).catch(e => e)
+    await vi.advanceTimersByTimeAsync(100_000)
+    expect(signal.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(499_000)
+    expect(signal.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(signal.aborted).toBe(true)
+    expect(await result).toMatchObject({ name: 'StreamTimeoutError', phase: 'ttfb' })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('accepts a first chunk just before the ten-minute deadline and clears timers', async () => {
+    const { withStreamTimeout } = await import('../../src/engine/stream-timeout')
+    const out: number[] = []
+    const result = drain(withStreamTimeout(async function* (signal) {
+      await delay(599_000, signal)
+      yield 1
+    }, undefined), out).catch(e => e)
+    await vi.advanceTimersByTimeAsync(599_000)
+    expect(await result).toBeUndefined()
+    expect(out).toEqual([1])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('switches to the unchanged 120s idle budget after a late first chunk', async () => {
+    const { withStreamTimeout } = await import('../../src/engine/stream-timeout')
+    const out: number[] = []
+    const result = drain(withStreamTimeout(async function* (signal) {
+      await delay(100_000, signal)
+      yield 1
+      await delay(200_000, signal)
+      yield 2
+    }, undefined), out).catch(e => e)
+    await vi.advanceTimersByTimeAsync(219_999)
+    expect(out).toEqual([1])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await result).toMatchObject({ name: 'StreamTimeoutError', phase: 'idle' })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('preserves explicit 90s overrides', async () => {
+    const { withStreamTimeout } = await import('../../src/engine/stream-timeout')
+    const result = drain(withStreamTimeout(async function* (signal) {
+      await delay(100_000, signal)
+      yield 1
+    }, undefined, { ttfbMs: 90_000 })).catch(e => e)
+    await vi.advanceTimersByTimeAsync(90_000)
+    expect(await result).toMatchObject({ name: 'StreamTimeoutError', phase: 'ttfb' })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('honors cancellation while waiting and removes the task listener', async () => {
+    const { withStreamTimeout } = await import('../../src/engine/stream-timeout')
+    const ctrl = new AbortController()
+    const remove = vi.spyOn(ctrl.signal, 'removeEventListener')
+    const result = drain(withStreamTimeout(async function* (signal) {
+      await delay(700_000, signal)
+      yield 1
+    }, ctrl.signal)).catch(e => e)
+    await vi.advanceTimersByTimeAsync(100_000)
+    ctrl.abort()
+    expect(await result).toMatchObject({ name: 'AbortError' })
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function))
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
