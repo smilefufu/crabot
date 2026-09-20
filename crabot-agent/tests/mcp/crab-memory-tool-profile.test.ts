@@ -39,6 +39,27 @@ describe('crab-memory Manager 固定工具面', () => {
     expect(unprefixedNames()).not.toContain('run_maintenance')
   })
 
+  it('list_entries 对模型公开既有排序选项，并将最早优先透传给 Memory', async () => {
+    const rpcCall = vi.fn().mockResolvedValue({ items: [], total: 0 })
+    const tool = makeMemoryTools(rpcCall)
+      .find((candidate) => candidate.name === 'mcp__crab-memory__list_entries')!
+
+    expect(tool.inputSchema).toMatchObject({
+      properties: {
+        sort: { enum: ['ingestion_time_desc', 'ingestion_time_asc', 'event_time_desc'] },
+      },
+    })
+    const result = await tool.call(
+      { status: 'inbox', sort: 'ingestion_time_asc', limit: 20, offset: 0 },
+      {} as never,
+    )
+
+    expect(result.isError).toBe(false)
+    expect(rpcCall).toHaveBeenCalledWith(3002, 'list_entries', {
+      status: 'inbox', sort: 'ingestion_time_asc', limit: 20, offset: 0,
+    }, 'agent-test')
+  })
+
   it('quick_capture 仍按既有契约透传 Memory RPC', async () => {
     const rpcCall = vi.fn().mockResolvedValue({ id: 'mem_1', status: 'inbox' })
     const tool = makeMemoryTools(rpcCall)
