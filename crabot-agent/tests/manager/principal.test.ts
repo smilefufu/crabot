@@ -156,7 +156,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
     await store.resolve(GROUP_KEY, { friend: makeFriend('master', 'master'), sessionType: 'group' })
     await store.refreshForNonHumanWake(GROUP_KEY)
     expect(store.get(GROUP_KEY)?.permissions?.tool_access.mcp_skill).toBe(false)
-    expect(resolvePermissions).toHaveBeenLastCalledWith({ senderFriendId: 'master', ...splitManagerKey(GROUP_KEY), sessionType: 'group' })
+    expect(resolvePermissions).toHaveBeenLastCalledWith({ ...splitManagerKey(GROUP_KEY), sessionType: 'group' })
     await store.refreshForNonHumanWake(GROUP_KEY)
     expect(store.get(GROUP_KEY)?.permissions).toBeNull()
   })
@@ -176,17 +176,28 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
     expect(entry.memory.write_visibility).toBe('internal')
   })
 
-  it('换一个 friend 说话 → 档位整体换掉，不残留上一个人的 scopes', async () => {
-    const scopesByFriend: Record<string, string[]> = { 'f-a': ['team-a'], 'f-b': ['team-b'] }
-    const store = new ManagerPrincipalStore(
-      makeResolverDeps({ resolvePermissions: async (p) => makePerms(scopesByFriend[p.senderFriendId!]) })
-    )
+  it('更换群发言者不替换群权限和 Memory 主体', async () => {
+    const resolvePermissions = vi.fn(async () => makePerms(['group-scope']))
+    const store = new ManagerPrincipalStore(makeResolverDeps({ resolvePermissions }))
+    for (const id of ['f-a', 'f-b']) {
+      await store.resolve(GROUP_KEY, { friend: makeFriend(id), sessionType: 'group' })
+      expect(store.get(GROUP_KEY)!.memory.read_accessible_scopes).toEqual(['group-scope'])
+      expect(store.get(GROUP_KEY)!.principal).toEqual({ sessionType: 'group' })
+      expect(resolvePermissions).toHaveBeenLastCalledWith({ channelId: 'wechat', sessionId: 'group-1', sessionType: 'group' })
+    }
+    await store.invalidateFriend('f-b')
+    expect(store.get(GROUP_KEY)?.principal.sessionType).toBe('group')
+  })
 
-    await store.resolve(GROUP_KEY, { friend: makeFriend('f-a'), sessionType: 'group' })
-    expect(store.get(GROUP_KEY)!.memory.read_accessible_scopes).toEqual(['team-a'])
-
-    await store.resolve(GROUP_KEY, { friend: makeFriend('f-b'), sessionType: 'group' })
-    expect(store.get(GROUP_KEY)!.memory.read_accessible_scopes).toEqual(['team-b'])
+  it('旧群冷启动从精确 Channel 会话恢复，查询失败不猜身份', async () => {
+    const getSessionType = vi.fn(async () => 'group' as const)
+    const store = new ManagerPrincipalStore(makeResolverDeps({ getSessionType, resolvePermissions: async () => makePerms(['group-scope']) }))
+    await store.refreshForNonHumanWake(GROUP_KEY)
+    expect(getSessionType).toHaveBeenCalledWith('wechat', 'group-1')
+    expect(store.get(GROUP_KEY)?.principal).toEqual({ sessionType: 'group' })
+    const failed = new ManagerPrincipalStore(makeResolverDeps({ getSessionType: async () => { throw new Error('Channel unavailable') } }))
+    await expect(failed.refreshForNonHumanWake(GROUP_KEY)).rejects.toThrow('Channel unavailable')
+    expect(failed.get(GROUP_KEY)).toBeUndefined()
   })
 
   it('群聊 friend 没配 scopes → 收敛到本群，且**不去问 admin 要 session 配置**', async () => {
@@ -268,7 +279,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
 
     await store.resolve(GROUP_KEY, { friend: makeFriend('f-1'), sessionType: 'group' })
     expect(sceneProfile).toHaveBeenLastCalledWith({
-      channelId: 'wechat', sessionId: 'group-1', sessionType: 'group', friendId: 'f-1',
+      channelId: 'wechat', sessionId: 'group-1', sessionType: 'group',
     })
   })
 

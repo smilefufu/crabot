@@ -1,28 +1,7 @@
 /**
- * 人类消息发起人身份 —— 解析、按 key 缓存,以及由它派生的四样东西
- * (protocol-agent-v3.md §4.3 对话对象档案与记忆档位、§8.2 权限身份)。
- *
- * ## 为什么需要单独一层
- *
- * `ManagerRegistryDeps` 的 `toolFace` / `promptInputs` 全是**同步**
- * 签名——它们被 `ManagerLoop` 每轮 turn 同步调用(`EngineOptions.systemPrompt` 的 Resolvable
- * 必须同步)。而这几样东西的原料都是异步 RPC:admin 的 `resolve_principal_permissions`、
- * admin 的 `get_session_config`、memory 的 `get_scene_profile`。
- *
- * 解法**不是**把那些签名改成异步,而是"在唤醒边界解析一次、按 `ManagerKey` 缓存,同步
- * thunk 只读缓存"。这条路成立的前提是:**入站链路本来就知道"谁在说话"**——
- * `channel.message_authorized` 的 payload 自带完整 `friend` 对象,而入站点本来就在 async
- * 上下文里。缺的从来不是"能不能拿到 friend",只是"没有把它往下传"。
- *
- * ## 两个消费者
- *
- * 1. **记忆档位**(`ResolvedPrincipal.memory`):决定 manager 与它派出的 worker 写记忆时
- *    的 visibility / scopes。放着不管的现状是 `{visibility:'public', scopes:[]}`
- *    ——群 A 的对话会以 public 落记忆、群 B 读得到,是跨会话信息泄漏。
- * 2. **权限档位**(`ResolvedPrincipal.permissions`):manager 算好、随 spawn 下传给 worker
- *    (§8.2)。**worker 不需要知道 friend 是谁**,它只拿到一份算好的 `ResolvedPermissions`。
- *
- * @see crabot-docs/protocols/protocol-agent-v3.md §3、§4.3、§4.4、§8.2
+ * ManagerKey 绑定的会话主体：异步刷新当前权限、记忆和场景画像，供同步工具面读取。
+ * 人类入站提供可信会话身份；普通非人类唤醒恢复同一绑定，不以通知来源授权。
+ * 群聊不绑定最近发言者，权限快照不持久化。
  */
 
 import type { Friend, MemoryPermissions, ResolvedPermissions, RuntimeSceneProfile } from '../types.js'
@@ -167,15 +146,11 @@ export interface PrincipalResolverDeps {
   readonly crabSelfHandle: (channelId: string) => string | undefined
   /** Authoritative Admin record used for execution-time Master revalidation. */
   readonly getFriend?: (friendId: string) => Promise<Friend | null>
+  /** Cold recovery of pre-binding sessions, from the exact Channel target only. */
+  readonly getSessionType?: (channelId: string, sessionId: string) => Promise<'private' | 'group'>
 }
 
-/**
- * 按 `ManagerKey` 缓存"最近一次人类消息解析出来的身份档位"。
- *
- * **写在唤醒边界(async),读在同步 thunk 里** —— 这就是本模块存在的全部理由。
- * 缓存是"最近一次",不是"永久快照":群聊里 A 说完 B 说,下一次唤醒会整体覆盖,
- * 与 v2「每批消息按发言者重新解析一次权限」的语义一致。
- */
+/** 持久绑定保存身份，resolved 只保存最近刷新的有效权限与画像。 */
 export class ManagerPrincipalStore {
   private readonly resolved = new Map<ManagerKey, ResolvedPrincipal>()
   private readonly activeAuthorizations = new Map<ManagerKey, MasterAuthorization>()
@@ -201,6 +176,8 @@ export class ManagerPrincipalStore {
    */
   async resolve(key: ManagerKey, principal: HumanPrincipal): Promise<ResolvedPrincipal> {
     const { channelId, sessionId } = splitManagerKey(key)
+    // 群发言者是消息归因，不是群 Manager 的权限或 Memory 主体。
+    if (principal.sessionType === 'group') principal = { sessionType: 'group' }
 
     let permissions: ResolvedPermissions | null = null
     let memory: MemoryPermissions
@@ -257,6 +234,10 @@ export class ManagerPrincipalStore {
       ...(dialogProfile ? { dialogProfile } : {}),
     }
     this.resolved.set(key, entry)
+    if (principal.sessionType === 'group' && this.bindings?.isInitialized()) {
+      await this.bindings.set({ manager_key: key, kind: 'group' })
+      this.activeAuthorizations.delete(key)
+    }
     // Admin Chat's synthetic Friend is never an identity authority. Its opaque assertion
     // is the only source that may create or replace this binding.
     if (key !== 'admin-web::admin-chat' && principal.sessionType === 'private' && principal.friend && this.bindings?.isInitialized()) {
@@ -286,11 +267,19 @@ export class ManagerPrincipalStore {
 
   async refreshForNonHumanWake(key: ManagerKey): Promise<void> {
     const cached = this.resolved.get(key)
-    if (cached?.principal.sessionType === 'group') {
-      await this.resolve(key, cached.principal)
+    const binding = this.bindings?.get(key)
+    if (binding?.kind === 'group' || cached?.principal.sessionType === 'group') {
+      await this.resolve(key, { sessionType: 'group' })
       return
     }
-    const binding = this.bindings?.get(key)
+    if (!binding && !cached && key !== 'admin-web::system-tasks' && key !== 'admin-web::admin-chat' && this.deps.getSessionType) {
+      const { channelId, sessionId } = splitManagerKey(key)
+      // 旧群没有落盘绑定。查询失败向上传递，不能把未知身份默认为私聊继续请求。
+      if (await this.deps.getSessionType(channelId, sessionId) === 'group') {
+        await this.resolve(key, { sessionType: 'group' })
+      }
+      return
+    }
     if (binding?.kind !== 'friend' || !binding.friend_id) return
     try {
       const friend = await this.deps.getFriend?.(binding.friend_id)

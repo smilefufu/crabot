@@ -363,7 +363,7 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
           ledger,
           readWorkerContext: async () => undefined,
           managerKey: key,
-          wakeEvent,
+          managerPrincipalPermissions: wakeEvent && 'principalPermissions' in wakeEvent ? wakeEvent.principalPermissions : undefined,
         },
       })
       // 记录每次真实工具调用(名称+入参),供断言"工具调用序列符合预期" / "send_master_private

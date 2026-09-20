@@ -35,6 +35,7 @@ import { DailyReflectionEvidence, type ReflectionEvidenceDeps } from './daily-re
 import { WorkerTurnStore } from '../workers/harness/worker-turn-store.js'
 import { join, resolve } from 'path'
 import { RpcError } from 'crabot-shared'
+import { CLI_DOMAINS, type ResolvedPermissions } from '../types.js'
 
 import { WorkerHarness, type HarnessDeps, type ReconcileReport } from '../workers/harness/harness'
 import { LedgerStore } from '../workers/harness/ledger-store'
@@ -74,6 +75,14 @@ import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import type { McpServer } from '../mcp/mcp-helpers.js'
 import { WorkerContextStore } from '../workers/harness/context-store.js'
 import { managerToolProfileForSchedule, type ManagerToolProfile } from './tools/tool-catalog.js'
+
+const UNRESOLVED_MANAGER_PERMISSIONS: ResolvedPermissions = {
+  tool_access: { memory: false, messaging: false, task: false, mcp_skill: false, file_io: false,
+    browser: false, shell: false, remote_exec: false, desktop: false },
+  cli_access: Object.fromEntries(CLI_DOMAINS.map(domain => [domain, 'none'])) as ResolvedPermissions['cli_access'],
+  storage: null,
+  memory_scopes: [],
+}
 
 export interface ManagerMcpAccessContext {
   readonly managerKey: ManagerKey
@@ -305,13 +314,15 @@ function channelSessionFromManagerKey(key: ManagerKey): { channel_id: string; se
  * 落地过一遍,这里不另发明):`visibility`/`scopes` 取写入档位、`isMasterPrivate` 决定
  * `scene_profile` 工具要不要暴露 scene 参数。
  *
- * **身份未解析时退回现网那一档**(`public` / 空 scopes / `system`)——这是 manager 在
- * 没有人类会话身份时的既有行为(系统线程、纯 worker 事件唤醒),不做静默收紧。
+ * 会话主体不可用时只保留本会话的 internal 范围，不能因非人类唤醒退回 public。
+ * 独立 system-tasks 线程保留自身的系统契约。
  */
 function memoryContextFor(key: ManagerKey, resolved: ResolvedPrincipal | undefined): MemoryTaskContext {
   const { channelId, sessionId } = splitManagerKey(key)
   if (!resolved) {
-    return { channelId, sessionId, visibility: 'public', scopes: [], sourceType: 'system', isMasterPrivate: false }
+    return key === SYSTEM_TASKS_MANAGER_KEY
+      ? { channelId, sessionId, visibility: 'public', scopes: [], sourceType: 'system', isMasterPrivate: false }
+      : { channelId, sessionId, visibility: 'internal', scopes: [sessionId], sourceType: 'conversation', isMasterPrivate: false }
   }
   const { principal, memory } = resolved
   return {
@@ -664,28 +675,28 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
       const isWorkboardSystemInput = wakeEvent?.kind === 'workboard_admin_update'
         || wakeEvent?.kind === 'workboard_idle_review'
-      const workboardPrincipal = isWorkboardSystemInput ? principals.get(key)?.principal : undefined
+      const managerPrincipal = principals.get(key)
       const target = channelSessionFromManagerKey(key)
       const targetSessionType = scheduleIdentity?.targetSession?.type
         ?? humanPrincipal?.sessionType
-        ?? principals.get(key)?.principal.sessionType
+        ?? managerPrincipal?.principal.sessionType
       const scheduleTarget = scheduleIdentity?.targetSession
         ?? (targetSessionType ? { ...target, type: targetSessionType } : undefined)
       const schedulePrincipal = scheduleIdentity
         ? undefined
-        : humanPrincipal ?? (isWorkboardSystemInput ? workboardPrincipal : principals.get(key)?.principal)
+        : humanPrincipal ?? managerPrincipal?.principal
       const scheduleCreatorFriendId = scheduleIdentity
         ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
         : schedulePrincipal?.friend?.id
-      const scheduleMasterAuthorization = humanPrincipal?.sessionType === 'private'
+      const scheduleMasterAuthorization = !scheduleIdentity && managerPrincipal?.principal.sessionType === 'private'
         ? principals.currentMasterAuthorization(key)
         : undefined
       const profile = managerToolProfileForSchedule(scheduleIdentity)
       const managerPermissions = principalPermissions
-        ?? (scheduleIdentity ? undefined : principals.get(key)?.permissions)
+        ?? (scheduleIdentity ? undefined : managerPrincipal?.permissions ?? UNRESOLVED_MANAGER_PERMISSIONS)
       const mcpCreatorFriendId = scheduleIdentity
         ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
-        : humanPrincipal?.friend?.id ?? principals.get(key)?.principal.friend?.id
+        : managerPrincipal?.principal.friend?.id
       const mcpAccessContext: ManagerMcpAccessContext = {
         managerKey: key,
         targetSession: scheduleTarget,
@@ -718,17 +729,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // 群聊仍不把最近发言者作为自动派发身份，Schedule 保持自己的主体。
           creatorFriendId: scheduleIdentity
             ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
-            : humanPrincipal?.friend?.id ?? workboardPrincipal?.friend?.id
-              ?? (targetSessionType === 'private' ? principals.get(key)?.principal.friend?.id : undefined),
-          // 人类/调度唤醒的身份档位随 wake 进入本轮；独立任务板通知则复用刚刷新过的既有
-          // Manager 主体。两种情况下都在 spawn 时固定并落盘，后续不再从 Admin 或任务板取数。
-          //
-          // 没有身份的唤醒(worker 事件 / 自唤醒)落到 `principals.get(key)`:那类 episode 里
-          // 没人说话,但它仍发生在这个会话里,记忆可见范围是**会话属性**(与下面 memoryServer
-          // 同一条理由)。这里退回会话级档位,而不是让 worker 拿到空 scopes 把群里的内容以
-          // public 落进记忆。取数只发生在派活这一刻,取到之后就随 worker 固定下来。
-          principalPermissions:
-            principalPermissions ?? (scheduleIdentity ? undefined : principals.get(key)?.permissions ?? undefined),
+            : humanPrincipal?.friend?.id ?? managerPrincipal?.principal.friend?.id,
+          // 与主控其它工具共享有效权限；派发后固定为 Worker 快照。
+          principalPermissions: managerPermissions ?? undefined,
           legacyContinuationAuth: (targetManagerKey) => principals.bindLegacyContinuationAuth(
             legacyAuthTemplate,
             targetManagerKey,
@@ -797,10 +800,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           ledger,
           readWorkerContext: (workerId) => workerContextStore.read(workerId),
           managerKey: key,
-          wakeEvent,
-          ...(isWorkboardSystemInput
-            ? { managerPrincipalPermissions: principals.get(key)?.permissions ?? undefined }
-            : {}),
+          managerPrincipalPermissions: managerPermissions ?? undefined,
         },
       })
     },
