@@ -8,6 +8,7 @@ import {
   type ManagerAdminSummary,
   type ManagerEpisodeSpan,
   type ManagerEpisodeTrace,
+  type ManagerEpisodeHumanInput,
   type ManagerInboundMessageSnapshot,
 } from '../../services/agent-observability'
 import './ManagerDetail.css'
@@ -119,6 +120,7 @@ function TechnicalDetails({ episode }: { episode: ManagerEpisodeTrace }) {
           <div className="manager-detail__technical-meta">
             运行标识：{episode.trace_id} · 耗时：{episode.duration_ms === undefined ? '—' : `${episode.duration_ms} 毫秒`} · 状态：{episodeStatusLabel(episode.status)}
           </div>
+          <div>最初触发：{triggerText(episode)}</div>
           {episode.outcome && <div>处理结果：{episode.outcome.summary}{episode.outcome.error ? ` · ${episode.outcome.error}` : ''}</div>}
           {episode.total_usage && (
             <div>
@@ -147,9 +149,10 @@ function ActionList({ episode, runningWorkerIds }: { episode: ManagerEpisodeTrac
   if (!episode.actions?.length) return null
   return (
     <div className="manager-detail__actions">
-      <strong>本轮操作</strong>
+      <strong>所属回合的操作</strong>
       {episode.actions.map((action, index) => (
         <div key={`${index}-${action.kind}-${action.worker_id ?? ''}`} className="manager-detail__action">
+          {action.occurred_at && <time dateTime={action.occurred_at}>{displayTime(action.occurred_at)}</time>}
           {action.worker_id ? (
             <>
               <span className="manager-detail__action-kind">{ACTION_LABEL[action.kind] ?? action.label}</span>
@@ -279,7 +282,7 @@ function InboundEntry({
 }) {
   const processing = item.status === 'processing'
   let statusLabel = processing ? '正在处理' : '排队中'
-  if (processing && activity?.episode.reply_excerpt) statusLabel = '本轮已回复，继续处理'
+  if (processing && activity?.episode.latest_reply_excerpt) statusLabel = '本轮已回复，继续处理'
   const statusMeta = processing
     ? elapsedLabel(item.platform_timestamp, snapshotAt)
     : `第 ${queuePosition ?? 1} 位 · ${elapsedLabel(item.platform_timestamp, snapshotAt)}`
@@ -328,7 +331,35 @@ function EpisodeEntry({ episode, progress, runningWorkerIds }: { episode: Manage
           <TechnicalDetails episode={episode} />
         </div>
         <div className="manager-detail__event-title"><span>本轮起因：</span><span>{triggerText(episode)}</span></div>
+        {episode.human_inputs?.coverage === 'partial' && <div className="manager-detail__message-meta">消息记录不完整</div>}
+        {!episode.human_inputs && <div className="manager-detail__message-meta">历史消息明细未记录</div>}
         <EpisodeActivity episode={episode} progress={progress} runningWorkerIds={runningWorkerIds} />
+      </div>
+    </article>
+  )
+}
+
+function HumanHistoryEntry({ item, grouped, showActivity, runningWorkerIds }: {
+  item: ManagerEpisodeHumanInput
+  grouped: GroupedEpisode
+  showActivity: boolean
+  runningWorkerIds: ReadonlySet<string>
+}) {
+  const { episode, progress } = grouped
+  let status = episode.status === 'failed' ? '所属回合失败' : '所属回合已结束'
+  if (episode.status === 'running') status = episode.latest_reply_excerpt ? '本轮已回复，继续处理' : '正在处理'
+  return (
+    <article className={`manager-detail__event${episode.status === 'failed' ? ' is-failed' : ''}`}>
+      <time className="manager-detail__event-time" dateTime={item.platform_timestamp}>{displayTime(item.platform_timestamp)}</time>
+      <div className="manager-detail__event-body">
+        <div className="manager-detail__event-header">
+          <div className="manager-detail__event-labels"><span>{showActivity ? '最新消息' : '人类消息'}</span><span>{status}</span></div>
+          <TechnicalDetails episode={episode} />
+        </div>
+        <div className="manager-detail__event-title">{item.preview}</div>
+        <div className="manager-detail__message-meta"><span>{item.sender_display_name || '未知发送者'}</span><code>episode · {episode.trace_id.slice(0, 8)}</code></div>
+        {showActivity && episode.human_inputs?.coverage === 'partial' && <div>消息记录不完整</div>}
+        {showActivity && <EpisodeActivity episode={episode} progress={progress} runningWorkerIds={runningWorkerIds} />}
       </div>
     </article>
   )
@@ -338,7 +369,10 @@ function EpisodeActivity({ episode, progress, runningWorkerIds }: { episode: Man
   const workerProgress = groupWorkerProgress(progress)
   return (
     <>
-      {episode.reply_excerpt && <div className="manager-detail__reply"><strong>本轮回复</strong>：{episode.reply_excerpt}</div>}
+      {episode.latest_reply_excerpt && <div className="manager-detail__reply"><strong>最近已发送回复</strong>：{episode.latest_reply_excerpt}
+        {episode.latest_reply_at && <> · <time dateTime={episode.latest_reply_at}>{displayTime(episode.latest_reply_at)}</time></>}
+      </div>}
+      {!episode.latest_reply_excerpt && episode.reply_excerpt && !episode.human_inputs && <div className="manager-detail__reply"><strong>历史首条回复摘要（投递状态未核实）</strong>：{episode.reply_excerpt}</div>}
       <ActionList episode={episode} runningWorkerIds={runningWorkerIds} />
       {episode.status === 'failed' && <div className="manager-detail__failure">失败原因：{episode.outcome?.error ?? episode.outcome?.summary ?? '未知原因'}</div>}
       {workerProgress.length > 0 && (
@@ -401,6 +435,8 @@ function groupEpisodes(episodes: ManagerEpisodeTrace[]): GroupedEpisode[] {
       spans: [],
       spawned_worker_ids: episode.worker_ref ? [episode.worker_ref.worker_id] : [],
       ...(parent.outcome ? { outcome: parent.outcome } : {}),
+      ...(parent.human_inputs ? { human_inputs: parent.human_inputs } : {}),
+      ...(parent.latest_reply_excerpt ? { latest_reply_excerpt: parent.latest_reply_excerpt, latest_reply_at: parent.latest_reply_at } : {}),
       ...(parent.reply_excerpt ? { reply_excerpt: parent.reply_excerpt } : {}),
       ...(parent.actions ? { actions: parent.actions } : {}),
     })
@@ -447,67 +483,89 @@ function groupEpisodes(episodes: ManagerEpisodeTrace[]): GroupedEpisode[] {
 }
 
 function keepsOwnTimelinePosition(episode: ManagerEpisodeTrace): boolean {
-  return episode.trigger.type === 'worker_event' && (Boolean(episode.reply_excerpt) || Boolean(episode.actions?.length))
+  return Boolean(episode.human_inputs?.items.length) || episode.trigger.type === 'worker_event' && (Boolean(episode.reply_excerpt) || Boolean(episode.actions?.length))
 }
 
 type ConversationTimelineItem =
   | { kind: 'inbound'; id: string; timestamp: string; item: ManagerInboundMessageSnapshot; queuePosition?: number; activity?: GroupedEpisode }
+  | { kind: 'human'; id: string; timestamp: string; item: ManagerEpisodeHumanInput; grouped: GroupedEpisode; showActivity: boolean }
   | { kind: 'episode'; id: string; timestamp: string; grouped: GroupedEpisode }
 
 function currentInboundMessages(
   episodes: ReadonlyArray<ManagerEpisodeTrace>,
   inbound: ReadonlyArray<ManagerInboundMessageSnapshot>,
 ): ManagerInboundMessageSnapshot[] {
-  const endedEpisodeIds = new Set(
-    episodes.filter((episode) => episode.status !== 'running').map((episode) => episode.trace_id),
-  )
-  return inbound.filter((item) => (
-    item.status !== 'processing' || !item.episode_id || !endedEpisodeIds.has(item.episode_id)
-  ))
+  const ended = new Map(episodes.filter(episode => episode.status !== 'running').map(episode => [episode.trace_id, episode]))
+  return inbound.filter(item => {
+    const episode = item.episode_id ? ended.get(item.episode_id) : undefined
+    return item.status !== 'processing' || !episode || (episode.human_inputs !== undefined
+      && !episode.human_inputs.items.some(input => input.platform_message_id === item.platform_message_id))
+  })
 }
 
 function mergeConversationTimeline(
   groupedEpisodes: ReadonlyArray<GroupedEpisode>,
   inbound: ReadonlyArray<ManagerInboundMessageSnapshot>,
 ): ConversationTimelineItem[] {
-  const processingEpisodeIds = new Set(
-    inbound.flatMap((item) => item.status === 'processing' && item.episode_id ? [item.episode_id] : []),
-  )
-  const activities = new Map(groupedEpisodes.map((grouped) => [grouped.episode.trace_id, grouped]))
-  const attachedActivities = new Set<string>()
-  const queuePosition = new Map(
-    inbound
-      .filter((item) => item.status === 'queued')
-      .sort((a, b) => a.platform_timestamp.localeCompare(b.platform_timestamp)
-        || a.platform_message_id.localeCompare(b.platform_message_id))
-      .map((item, index) => [item.platform_message_id, index + 1]),
-  )
-
-  const items: ConversationTimelineItem[] = [
-    ...inbound.map((item): ConversationTimelineItem => {
-      const activity = item.status === 'processing' && item.episode_id && !attachedActivities.has(item.episode_id)
-        ? activities.get(item.episode_id)
-        : undefined
-      if (activity) attachedActivities.add(activity.episode.trace_id)
-      return {
-        kind: 'inbound',
-        id: `inbound:${item.platform_message_id}`,
-        timestamp: item.platform_timestamp,
-        item,
-        ...(activity ? { activity } : {}),
-        ...(item.status === 'queued' ? { queuePosition: queuePosition.get(item.platform_message_id) } : {}),
+  const items: ConversationTimelineItem[] = []
+  const consumed = new Set<string>()
+  const inboundKey = (item: ManagerInboundMessageSnapshot) => `${item.episode_id ?? ''}:${item.platform_message_id}`
+  for (const grouped of groupedEpisodes) {
+    const { episode } = grouped
+    const live = inbound.filter(item => item.status === 'processing' && item.episode_id === episode.trace_id)
+    if (episode.human_inputs) {
+      const messages = new Map(episode.human_inputs.items.map(item => [item.platform_message_id, item]))
+      for (const item of live) {
+        if (!messages.has(item.platform_message_id)) messages.set(item.platform_message_id, item)
+        consumed.add(inboundKey(item))
       }
-    }),
-    ...groupedEpisodes
-      .filter(({ episode }) => episode.status !== 'running' || !processingEpisodeIds.has(episode.trace_id))
-      .map((grouped): ConversationTimelineItem => ({
-        kind: 'episode',
-        id: `episode:${grouped.episode.trace_id}`,
-        timestamp: grouped.episode.started_at,
-        grouped,
-      })),
-  ]
+      const ordered = [...messages.values()].sort((a, b) => b.platform_timestamp.localeCompare(a.platform_timestamp)
+        || b.platform_message_id.localeCompare(a.platform_message_id))
+      ordered.forEach((item, index) => items.push({ kind: 'human', id: `${episode.trace_id}:${item.platform_message_id}`,
+        timestamp: item.platform_timestamp, item, grouped, showActivity: index === 0 }))
+      if (ordered.length > 0) continue
+    }
+    if (episode.status === 'running' && live.length > 0) {
+      const newest = [...live].sort((a, b) => b.platform_timestamp.localeCompare(a.platform_timestamp)
+        || b.platform_message_id.localeCompare(a.platform_message_id))[0]
+      for (const item of live) {
+        consumed.add(inboundKey(item))
+        items.push({ kind: 'inbound', id: inboundKey(item), timestamp: item.platform_timestamp, item,
+          ...(item === newest ? { activity: grouped } : {}) })
+      }
+    } else {
+      items.push({ kind: 'episode', id: `episode:${episode.trace_id}`, timestamp: episode.started_at, grouped })
+    }
+  }
+  const queued = inbound.filter(item => item.status === 'queued')
+    .sort((a, b) => a.platform_timestamp.localeCompare(b.platform_timestamp) || a.platform_message_id.localeCompare(b.platform_message_id))
+  for (const item of inbound) {
+    if (consumed.has(inboundKey(item))) continue
+    items.push({ kind: 'inbound', id: `inbound:${inboundKey(item)}`, timestamp: item.platform_timestamp, item,
+      ...(item.status === 'queued' ? { queuePosition: queued.indexOf(item) + 1 } : {}) })
+  }
+
   return items.sort((a, b) => b.timestamp.localeCompare(a.timestamp) || a.id.localeCompare(b.id))
+}
+
+/** 两个接口可能跨越回合收尾：已观察到的输入不能被较旧历史响应抹去。 */
+function retainObservedInputs(
+  episode: ManagerEpisodeTrace,
+  previous: ManagerEpisodeTrace | undefined,
+  inbound: ReadonlyArray<ManagerInboundMessageSnapshot>,
+): ManagerEpisodeTrace {
+  if (!episode.human_inputs) return episode
+  const recorded = episode.human_inputs.items
+  const observed = inbound.filter(item => item.status === 'processing' && item.episode_id === episode.trace_id)
+  const items = new Map([...(previous?.human_inputs?.items ?? []), ...observed, ...recorded]
+    .map(item => [item.platform_message_id, item]))
+  return {
+    ...episode,
+    human_inputs: {
+      coverage: items.size > recorded.length ? 'partial' : episode.human_inputs.coverage,
+      items: [...items.values()],
+    },
+  }
 }
 
 async function listRunningWorkers(managerKey: string): Promise<LedgerWorker[]> {
@@ -551,7 +609,7 @@ const ManagerDetailContent: React.FC = () => {
     ? currentInbound.filter((item) => item.status === 'queued').length
     : undefined
   const processingCount = inboundStatus.status === 'ready'
-    ? currentInbound.filter((item) => item.status === 'processing').length
+    ? currentInbound.filter((item) => item.status === 'processing' && !episodes.some(episode => episode.trace_id === item.episode_id && episode.status !== 'running')).length
     : undefined
   const runningWorkerIds = useMemo(
     () => new Set(runningWorkers.status === 'ready' ? runningWorkers.items.map((worker) => worker.worker_id) : []),
@@ -605,7 +663,13 @@ const ManagerDetailContent: React.FC = () => {
         }
 
         if (episodeResult.status === 'fulfilled' && episodeResult.value) {
-          setEpisodes(episodeResult.value.items)
+          const received = episodeResult.value.items
+          const live = inboundResult.status === 'fulfilled' ? inboundResult.value.items : []
+          setEpisodes(previous => received.map(episode => retainObservedInputs(
+            episode,
+            previous.find(item => item.manager_key === managerKey && item.trace_id === episode.trace_id),
+            live,
+          )))
           setTotalPages(Math.max(1, episodeResult.value.pagination.total_pages))
           setError(null)
         } else if (episodeResult.status === 'rejected') {
@@ -677,23 +741,27 @@ const ManagerDetailContent: React.FC = () => {
                 </div>
                 {error && <div className="manager-detail__history-error">历史活动暂不可用：{error}</div>}
                 <div className={`manager-detail__event-list${timeline.length === 0 ? ' is-empty' : ''}`} aria-live="polite">
-                  {timeline.map((timelineItem) => timelineItem.kind === 'inbound' ? (
-                    <InboundEntry
-                      key={timelineItem.id}
-                      item={timelineItem.item}
-                      queuePosition={timelineItem.queuePosition}
-                      snapshotAt={inboundStatus.status === 'ready' ? inboundStatus.snapshotAt : timelineItem.timestamp}
-                      activity={timelineItem.activity}
-                      runningWorkerIds={runningWorkerIds}
-                    />
-                  ) : (
-                    <EpisodeEntry
+                  {timeline.map((timelineItem) => {
+                    if (timelineItem.kind === 'human') {
+                      return <HumanHistoryEntry key={timelineItem.id} item={timelineItem.item} grouped={timelineItem.grouped} showActivity={timelineItem.showActivity} runningWorkerIds={runningWorkerIds} />
+                    }
+                    if (timelineItem.kind === 'inbound') {
+                      return <InboundEntry
+                        key={timelineItem.id}
+                        item={timelineItem.item}
+                        queuePosition={timelineItem.queuePosition}
+                        snapshotAt={inboundStatus.status === 'ready' ? inboundStatus.snapshotAt : timelineItem.timestamp}
+                        activity={timelineItem.activity}
+                        runningWorkerIds={runningWorkerIds}
+                      />
+                    }
+                    return <EpisodeEntry
                       key={timelineItem.id}
                       episode={timelineItem.grouped.episode}
                       progress={timelineItem.grouped.progress}
                       runningWorkerIds={runningWorkerIds}
                     />
-                  ))}
+                  })}
                   {timeline.length === 0 && (
                     <div className="manager-detail__empty">
                       {inboundStatus.status === 'unknown' ? '当前消息状态未知，且暂无可显示的历史活动。' : '该会话暂无动态。'}

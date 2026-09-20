@@ -284,6 +284,9 @@ describe('Manager restart continuation', () => {
     await checkpointWhere((value) => value.hasEngineMessages)
     await old.routeHumanMessages('feishu', 'restart-test', [message('queued', 'Queued correction')])
     const checkpoint = await checkpointWhere((value) => value.pending.length === 1)
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.human_inputs?.items.map(item => item.platform_message_id)).toEqual(['original'])
+    trace.flushRunningTraces()
+    trace = new TraceStore(100, join(dir, 'traces'), 'running.jsonl', 'traces-v3-')
     const inputs: string[] = []
     const restored = registry({
       async *stream(params) { inputs.push(JSON.stringify(params.messages)); yield* chunksFromContent([], 'end_turn') },
@@ -301,6 +304,8 @@ describe('Manager restart continuation', () => {
     expect(inputs[0]).not.toContain('New instruction')
     expect(inputs.at(-1)).toContain('New instruction')
     expect((await store.load(KEY)).committedHumanMessageIds).toEqual(expect.arrayContaining(['original', 'queued', 'new']))
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.human_inputs?.items.map(item => item.platform_message_id)).toEqual(['original', 'queued'])
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.human_inputs?.coverage).toBe('complete')
   })
 
   it('preserves committed quotes and prepares pending quotes after restart without extending checkpoints', async () => {

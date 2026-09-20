@@ -126,8 +126,8 @@ describe('ManagerDetail', () => {
     expect(document.querySelector('.manager-detail__event-labels')).toHaveTextContent('管理回合')
     expect(document.querySelector('.manager-detail__event-labels')).not.toHaveTextContent('系统提示')
     expect(document.querySelector('.manager-detail__event-title')).toHaveTextContent('本轮起因：任务板空闲自省')
-    expect(document.querySelector('.manager-detail__reply')).toHaveTextContent('本轮回复：收到。现在直接以 Q1 启动为唯一目标。')
-    expect(screen.getByText('本轮操作')).toBeInTheDocument()
+    expect(document.querySelector('.manager-detail__reply')).toHaveTextContent('历史首条回复摘要（投递状态未核实）：收到。现在直接以 Q1 启动为唯一目标。')
+    expect(screen.getByText('所属回合的操作')).toBeInTheDocument()
     expect(screen.getAllByText('启动 Q1')).toHaveLength(1)
     fireEvent.click(screen.getByText('查看技术详情'))
     expect(screen.getByText(/运行标识：ep-idle-review/)).toBeInTheDocument()
@@ -205,6 +205,8 @@ describe('ManagerDetail', () => {
         trace_id: 'ep-running', manager_key: 'wechat::sess-1', started_at: '2026-09-05T06:26:00.000Z', status: 'running',
         trigger: { type: 'human_message', summary: '人类消息 x1：换个执行器继续' }, spans: [], spawned_worker_ids: ['w-new'],
         reply_excerpt: '已经回复，接着交接测试工作。',
+        latest_reply_excerpt: '已经回复，接着交接测试工作。',
+        latest_reply_at: '2026-09-05T06:27:00.000Z',
         actions: [{ kind: 'spawn_worker', label: '派活：接手测试', worker_id: 'w-new' }],
       }],
       pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },

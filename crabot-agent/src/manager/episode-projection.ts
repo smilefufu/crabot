@@ -9,6 +9,7 @@ export interface EpisodeAction {
   kind: 'spawn_worker' | 'send_to_worker' | 'cancel_worker' | 'other'
   label: string
   worker_id?: string
+  occurred_at?: string
 }
 
 export interface WorkerProjectionRef {
@@ -23,11 +24,16 @@ export interface CausalParentProjection {
   status: ManagerEpisodeTrace['status']
   trigger: ManagerEpisodeTrace['trigger']
   outcome?: ManagerEpisodeTrace['outcome']
+  latest_reply_excerpt?: string
+  latest_reply_at?: string
+  human_inputs?: ManagerEpisodeTrace['human_inputs']
   reply_excerpt?: string
   actions?: EpisodeAction[]
 }
 
 export interface ManagerEpisodeProjection extends ManagerEpisodeTrace {
+  latest_reply_excerpt?: string
+  latest_reply_at?: string
   reply_excerpt?: string
   actions?: EpisodeAction[]
   worker_ref?: WorkerProjectionRef
@@ -54,6 +60,7 @@ export function projectManagerEpisode(
   workerFacts: ReadonlyMap<string, EpisodeWorkerFact>,
 ): ManagerEpisodeProjection {
   let replyExcerpt: string | undefined
+  let latestReply: { text: string; at: string } | undefined
   const actions: EpisodeAction[] = []
 
   for (const span of trace.spans ?? []) {
@@ -64,11 +71,19 @@ export function projectManagerEpisode(
       const content = extractStringField(inputSummary, 'content')
       if (content) replyExcerpt = truncate(content, 120)
     }
+    if (REPLY_TOOLS.has(name)) {
+      const at = deliveredAt(span, outputSummary)
+      const content = extractStringField(inputSummary, 'content')
+      if (at && content && (!latestReply || Date.parse(at) >= Date.parse(latestReply.at))) {
+        latestReply = { text: truncate(content, 120), at }
+      }
+    }
     if (name === 'spawn_worker') {
       const workerId = extractWorkerIdField(outputSummary)
       const title = extractStringField(inputSummary, 'title')
         ?? (workerId ? workerFacts.get(workerId)?.title : undefined)
       actions.push({
+        occurred_at: span.started_at,
         kind: 'spawn_worker',
         label: `派活：${title ?? workerId ?? '新 worker'}`,
         ...(workerId ? { worker_id: workerId } : {}),
@@ -77,6 +92,7 @@ export function projectManagerEpisode(
       const workerId = extractWorkerIdField(inputSummary) ?? extractWorkerIdField(outputSummary)
       const title = workerId ? workerFacts.get(workerId)?.title : undefined
       actions.push({
+        occurred_at: span.started_at,
         kind: 'send_to_worker',
         label: `跟进：${title ?? workerId ?? 'worker'}`,
         ...(workerId ? { worker_id: workerId } : {}),
@@ -85,6 +101,7 @@ export function projectManagerEpisode(
       const workerId = extractWorkerIdField(inputSummary) ?? extractWorkerIdField(outputSummary)
       const title = workerId ? workerFacts.get(workerId)?.title : undefined
       actions.push({
+        occurred_at: span.started_at,
         kind: 'cancel_worker',
         label: `取消：${title ?? workerId ?? 'worker'}`,
         ...(workerId ? { worker_id: workerId } : {}),
@@ -93,6 +110,7 @@ export function projectManagerEpisode(
       const workerId = extractWorkerIdField(inputSummary) ?? extractWorkerIdField(outputSummary)
       const title = workerId ? workerFacts.get(workerId)?.title : undefined
       actions.push({
+        occurred_at: span.started_at,
         kind: 'other',
         label: `请求中断：${title ?? workerId ?? 'worker'}`,
         ...(workerId ? { worker_id: workerId } : {}),
@@ -113,6 +131,7 @@ export function projectManagerEpisode(
   return {
     ...trace,
     ...(replyExcerpt ? { reply_excerpt: replyExcerpt } : {}),
+    ...(latestReply ? { latest_reply_excerpt: latestReply.text, latest_reply_at: latestReply.at } : {}),
     ...(actions.length > 0 ? { actions } : {}),
     ...(workerRef ? { worker_ref: workerRef } : {}),
   }
@@ -131,6 +150,8 @@ export function withCausalParent(
       status: parent.status,
       trigger: parent.trigger,
       ...(parent.outcome ? { outcome: parent.outcome } : {}),
+      ...(parent.human_inputs ? { human_inputs: parent.human_inputs } : {}),
+      ...(parent.latest_reply_excerpt ? { latest_reply_excerpt: parent.latest_reply_excerpt, latest_reply_at: parent.latest_reply_at } : {}),
       ...(parent.reply_excerpt ? { reply_excerpt: parent.reply_excerpt } : {}),
       ...(parent.actions ? { actions: parent.actions } : {}),
     },
@@ -159,6 +180,20 @@ function statusLabel(status: string | undefined): string | undefined {
     completed: '已完成', failed: '失败', cancelled: '已取消',
   }
   return labels[status] ?? status
+}
+
+function deliveredAt(span: ManagerEpisodeSpan, output: string): string | undefined {
+  if (span.status !== 'completed' || (span.details as Record<string, unknown>).is_error === true) return undefined
+  try {
+    const receipt = JSON.parse(output.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, ''))
+    if (!receipt || receipt.buffered === true || receipt.sent_at === null || receipt.error) return undefined
+    const at = typeof receipt.sent_at === 'string' ? receipt.sent_at
+      : typeof receipt.platform_message_id === 'string' && receipt.platform_message_id ? span.ended_at : undefined
+    return at && Number.isFinite(Date.parse(at)) ? at : undefined
+  } catch {
+    // 截断或不明回包只能保留旧摘要，不能推断投递成功。
+    return undefined
+  }
 }
 
 function toolDetail(span: ManagerEpisodeSpan): {

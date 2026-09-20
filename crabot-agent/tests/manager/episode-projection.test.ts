@@ -28,6 +28,24 @@ const facts = new Map<string, EpisodeWorkerFact>([
 ])
 
 describe('projectManagerEpisode', () => {
+  it('selects the latest confirmed delivery, excluding failed, buffered and unknown sends', () => {
+    const sent = (content: string, at: string) => ({ ...tool('send_message', JSON.stringify({ content }), JSON.stringify({ sent_at: at })), ended_at: at })
+    const result = projectManagerEpisode(trace({ spans: [
+      sent('first reply', '2026-09-20T13:12:46.000Z'),
+      sent('latest delivered', '2026-09-20T14:10:13.000Z'),
+      { ...sent('failed', '2026-09-20T14:11:13.000Z'), status: 'failed' },
+      tool('send_message', JSON.stringify({ content: 'buffered' }), '{"buffered":true}'),
+      tool('send_message', JSON.stringify({ content: 'unknown' })),
+    ] }), facts)
+    expect(result.reply_excerpt).toBe('first reply')
+    expect(result.latest_reply_excerpt).toBe('latest delivered')
+    expect(result.latest_reply_at).toBe('2026-09-20T14:10:13.000Z')
+    const parent = { ...result, human_inputs: { coverage: 'complete' as const, items: [{ platform_message_id: 'm1', platform_timestamp: '2026-09-20T14:05:00.000Z', preview: 'latest input' }] } }
+    const child = withCausalParent({ ...trace(), trigger: { type: 'worker_event', summary: 'worker' } }, parent)
+    expect(child.causal_parent?.human_inputs).toEqual(parent.human_inputs)
+    expect(child.causal_parent?.latest_reply_excerpt).toBe('latest delivered')
+  })
+
   it('提取回复、派活/跟进/取消/请求中断，并 join worker 标题', () => {
     const result = projectManagerEpisode(trace({ spans: [
       tool('send_message', JSON.stringify({ content: '已经开始部署，会在完成后汇报。' })),
@@ -38,10 +56,10 @@ describe('projectManagerEpisode', () => {
     ] }), facts)
     expect(result.reply_excerpt).toBe('已经开始部署，会在完成后汇报。')
     expect(result.actions).toEqual([
-      { kind: 'spawn_worker', label: '派活：部署 Minecraft', worker_id: 'w-1' },
-      { kind: 'send_to_worker', label: '跟进：部署 Minecraft', worker_id: 'w-1' },
-      { kind: 'cancel_worker', label: '取消：部署 Minecraft', worker_id: 'w-1' },
-      { kind: 'other', label: '请求中断：部署 Minecraft', worker_id: 'w-1' },
+      { occurred_at: '2026-08-17T00:00:00.000Z', kind: 'spawn_worker', label: '派活：部署 Minecraft', worker_id: 'w-1' },
+      { occurred_at: '2026-08-17T00:00:00.000Z', kind: 'send_to_worker', label: '跟进：部署 Minecraft', worker_id: 'w-1' },
+      { occurred_at: '2026-08-17T00:00:00.000Z', kind: 'cancel_worker', label: '取消：部署 Minecraft', worker_id: 'w-1' },
+      { occurred_at: '2026-08-17T00:00:00.000Z', kind: 'other', label: '请求中断：部署 Minecraft', worker_id: 'w-1' },
     ])
   })
 
@@ -128,7 +146,7 @@ describe('projectManagerEpisode', () => {
       tool('send_to_worker', truncatedWorkerInput, receiptWithFullId),
     ] }), factsWithFull)
     expect(result.actions).toEqual([
-      { kind: 'send_to_worker', label: '跟进：截图分析', worker_id: 'w-full' },
+      { occurred_at: '2026-08-17T00:00:00.000Z', kind: 'send_to_worker', label: '跟进：截图分析', worker_id: 'w-full' },
     ])
   })
 
@@ -136,14 +154,14 @@ describe('projectManagerEpisode', () => {
     const result = projectManagerEpisode(trace({ spans: [
       tool('send_to_worker', truncatedWorkerInput, '[18:30:54]\n{"status":"failed","error":"boom"}'),
     ] }), factsWithFull)
-    expect(result.actions).toEqual([{ kind: 'send_to_worker', label: '跟进：worker' }])
+    expect(result.actions).toEqual([{ occurred_at: '2026-08-17T00:00:00.000Z', kind: 'send_to_worker', label: '跟进：worker' }])
   })
 
   it('spawn_worker 回执被截断时不产出假 worker_id', () => {
     const result = projectManagerEpisode(trace({ spans: [
       tool('spawn_worker', '{"title":"部署 Minecraft","prompt":"很长任务"}', '[17:52:49]\n{"status":"spawned","worker_id":"w-trunc…'),
     ] }), facts)
-    expect(result.actions).toEqual([{ kind: 'spawn_worker', label: '派活：部署 Minecraft' }])
+    expect(result.actions).toEqual([{ occurred_at: '2026-08-17T00:00:00.000Z', kind: 'spawn_worker', label: '派活：部署 Minecraft' }])
   })
 
   it('kill_worker / request_worker_interrupt 的截断 ID 同样丢弃并从 output 兜底', () => {
@@ -152,8 +170,8 @@ describe('projectManagerEpisode', () => {
       tool('request_worker_interrupt', '{"worker_id":"w-d876c9fe-c44a-4…', '[17:32:03]\n{"operation":{"worker_id":"w-full","kind":"interrupt"}}'),
     ] }), factsWithFull)
     expect(result.actions).toEqual([
-      { kind: 'cancel_worker', label: '取消：截图分析', worker_id: 'w-full' },
-      { kind: 'other', label: '请求中断：截图分析', worker_id: 'w-full' },
+      { occurred_at: '2026-08-17T00:00:00.000Z', kind: 'cancel_worker', label: '取消：截图分析', worker_id: 'w-full' },
+      { occurred_at: '2026-08-17T00:00:00.000Z', kind: 'other', label: '请求中断：截图分析', worker_id: 'w-full' },
     ])
   })
 

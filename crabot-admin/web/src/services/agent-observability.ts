@@ -58,6 +58,18 @@ export interface ManagerEpisodeUsage {
   cache_read_tokens?: number
 }
 
+export interface ManagerEpisodeHumanInput {
+  platform_message_id: string
+  platform_timestamp: string
+  preview: string
+  sender_display_name?: string
+}
+
+export interface ManagerEpisodeHumanInputs {
+  coverage: 'complete' | 'partial'
+  items: ManagerEpisodeHumanInput[]
+}
+
 export interface ManagerEpisodeTrace {
   trace_id: string
   manager_key: string
@@ -70,11 +82,15 @@ export interface ManagerEpisodeTrace {
   spawned_worker_ids: string[]
   outcome?: { summary: string; error?: string }
   total_usage?: ManagerEpisodeUsage
+  latest_reply_excerpt?: string
+  latest_reply_at?: string
+  human_inputs?: ManagerEpisodeHumanInputs
   reply_excerpt?: string
   actions?: Array<{
     kind: 'spawn_worker' | 'send_to_worker' | 'cancel_worker' | 'other'
     label: string
     worker_id?: string
+    occurred_at?: string
   }>
   worker_ref?: { worker_id: string; title?: string; state_to?: string }
   causal_parent?: {
@@ -83,6 +99,9 @@ export interface ManagerEpisodeTrace {
     status: ManagerEpisodeTrace['status']
     trigger: ManagerEpisodeTrigger
     outcome?: ManagerEpisodeTrace['outcome']
+    latest_reply_excerpt?: string
+    latest_reply_at?: string
+    human_inputs?: ManagerEpisodeHumanInputs
     reply_excerpt?: string
     actions?: ManagerEpisodeTrace['actions']
   }

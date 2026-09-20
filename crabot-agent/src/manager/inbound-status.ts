@@ -31,7 +31,7 @@ export interface GetManagerInboundStatusAdminResult {
 
 const PREVIEW_MAX_CHARS = 180
 
-function messagePreview(message: ChannelMessage): string {
+export function messagePreview(message: ChannelMessage): string {
   const marker = message.content.type === 'image'
     ? '[图片]'
     : message.content.type === 'file'
@@ -46,7 +46,7 @@ function messagePreview(message: ChannelMessage): string {
     .trim() || '[空消息]'
 }
 
-function truncatePreview(text: string): string {
+export function truncatePreview(text: string): string {
   const chars = Array.from(text)
   return chars.length > PREVIEW_MAX_CHARS
     ? `${chars.slice(0, PREVIEW_MAX_CHARS).join('')}…`

@@ -12,11 +12,14 @@ import {
   isValidManagerEpisodeTrace,
   parseTraceRecordLine,
   wrapManagerEpisodeRecord,
+  type ManagerEpisodeHumanInput,
+  type ManagerEpisodeHumanInputs,
   type ManagerEpisodeSpan,
   type ManagerEpisodeTrace,
   type ManagerEpisodeTrigger,
   type ManagerEpisodeUsage,
 } from '../manager/trace-types.js'
+import { truncatePreview } from '../manager/inbound-status.js'
 import type { ManagerKey } from '../workers/harness/ledger-types.js'
 
 export interface SpanWithMeta {
@@ -1346,6 +1349,20 @@ export class TraceStore {
     this.addToManagerIndex(managerKey, traceId)
   }
 
+  recordManagerHumanInputs(traceId: string, items: readonly ManagerEpisodeHumanInput[], coverage: ManagerEpisodeHumanInputs['coverage']): void {
+    const episode = this.managerEpisodes.get(traceId)
+    if (!episode) return
+    const byId = new Map(episode.human_inputs?.items.map(item => [item.platform_message_id, item]))
+    for (const item of items) if (!byId.has(item.platform_message_id)) byId.set(item.platform_message_id, item)
+    episode.human_inputs = {
+      coverage: episode.human_inputs?.coverage ?? coverage,
+      items: [...byId.values()].sort((a, b) => a.platform_timestamp.localeCompare(b.platform_timestamp)
+        || a.platform_message_id.localeCompare(b.platform_message_id)),
+    }
+    // 与 span 一样随 running flush 和最终归档保存，不为每条插话复制整个 trace。
+    this.persistManagerEpisode(episode, false, true)
+  }
+
   appendManagerSpan(traceId: string, span: ManagerEpisodeSpan): void {
     const episode = this.managerEpisodes.get(traceId)
     if (!episode) return
@@ -1559,6 +1576,12 @@ export class TraceStore {
     })
     return {
       startEpisode: (traceId, managerKey, trigger, resume) => this.startManagerEpisode(traceId, managerKey, redactTrigger(trigger), resume),
+      recordHumanInputs: (traceId, items, coverage) => this.recordManagerHumanInputs(traceId, items.map(item => ({
+        platform_message_id: item.platform_message_id,
+        platform_timestamp: item.platform_timestamp,
+        preview: truncatePreview(redact(item.preview).replace(/\s+/g, ' ').trim()),
+        ...(item.sender_display_name ? { sender_display_name: truncatePreview(redact(item.sender_display_name)) } : {}),
+      })), coverage),
       appendSpan: (traceId, span) => this.appendManagerSpan(traceId, { ...span, details: redactDetails(span.details) }),
       finishSpan: (traceId, spanId, patch) => this.finishManagerSpan(traceId, spanId, {
         ...patch,

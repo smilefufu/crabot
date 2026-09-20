@@ -100,6 +100,62 @@ describe('ManagerLoop episode trace wiring', () => {
     await fs.rm(dataDir, { recursive: true, force: true })
   })
 
+  it.each([false, true])('persists mid-episode human inputs through reload (failure=%s)', async (fail) => {
+    const messages = ['继续', '现在修复吧', '我不是说了让你现在修复吗？！'].map((text, index) => ({ ...makeMessage(text), platform_timestamp: `2026-09-20T14:0${index}:00.000Z` }))
+    let loop: ManagerLoop
+    let first = true
+    const { adapter } = makeAdapter()
+    const original = adapter.stream.bind(adapter)
+    adapter.stream = async function* (params) {
+      if (first) {
+        first = false
+        loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: messages.slice(1) }))
+        expect(traceStore.listManagerEpisodes(KEY, { page: 1, page_size: 20 }).items[0].human_inputs?.items).toHaveLength(1)
+      } else if (fail) throw new Error('PERMANENT_PROVIDER_REJECTION')
+      yield* original(params)
+    }
+    loop = new ManagerLoop(deps(adapter, traceWriter))
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: messages.slice(0, 1) }))
+    const restored = new TraceStore(100, join(dataDir, 'traces'), 'traces-running.jsonl', 'traces-v3-')
+    const episode = restored.getManagerEpisode(result.episodeId)!
+    expect(episode.status).toBe(fail ? 'failed' : 'completed')
+    expect(episode.trigger.summary).toBe('人类消息 x1：继续')
+    expect(episode.human_inputs?.coverage).toBe('complete')
+    expect(episode.human_inputs?.items.map(item => item.preview)).toEqual(messages.map(item => item.content.text))
+    expect(episode.human_inputs?.items.map(item => item.platform_message_id)).toEqual(messages.map(item => item.platform_message_id))
+  })
+
+  it('does not record queued input as consumed when the model fails before drain', async () => {
+    let loop: ManagerLoop
+    const pending = makeMessage('still queued')
+    const { adapter } = makeAdapter({ fail: true })
+    const original = adapter.stream.bind(adapter)
+    adapter.stream = async function* (params) {
+      loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [pending] }))
+      yield* original(params)
+    }
+    loop = new ManagerLoop(deps(adapter, traceWriter))
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeMessage('original')] }))
+    const episode = traceStore.getManagerEpisode(result.episodeId)!
+    expect(episode.status).toBe('failed')
+    expect(episode.human_inputs?.items.map(item => item.preview)).toEqual(['original'])
+    expect((await store.load(KEY)).committedHumanMessageIds).toContain(pending.platform_message_id)
+  })
+
+  it('retries an observation failure at finalization without retrying business execution', async () => {
+    const { adapter, calls } = makeAdapter()
+    const record = vi.fn(traceWriter.recordHumanInputs).mockImplementationOnce(() => { throw new Error('observation unavailable') })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const loop = new ManagerLoop(deps(adapter, { ...traceWriter, recordHumanInputs: record }))
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeMessage('keep input')] }))
+      expect(result.outcome).toBe('completed')
+      expect(calls).toHaveLength(2)
+      expect(record).toHaveBeenCalledTimes(2)
+      expect(traceStore.getManagerEpisode(result.episodeId)?.human_inputs?.items.map(item => item.preview)).toEqual(['keep input'])
+    } finally { warn.mockRestore() }
+  })
+
   it('confirmation-only wakes expose unresolved watermark confirmation without replaying the model', async () => {
     const { adapter, calls } = makeAdapter()
     const window = { window_start: '2026-09-16T18:00:00.000Z', window_end: '2026-09-17T18:00:00.000Z' }

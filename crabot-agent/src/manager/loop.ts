@@ -80,7 +80,8 @@ import type { WorkerHarness } from '../workers/harness/harness'
 import type { ActivityContextAdmissionReceipt, HarnessEvent } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { SessionTarget } from '../mcp/crab-messaging.js'
-import type { ManagerInboundMessageFact } from './inbound-status.js'
+import { messagePreview, type ManagerInboundMessageFact } from './inbound-status.js'
+import type { ManagerEpisodeHumanInput } from './trace-types.js'
 import { resumeManagerMessages, settleInterruptedManagerTools, type ManagerResumeCheckpoint } from './resume-checkpoint.js'
 
 const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出了一段文字、没有调用 send_message，然后结束了回复。\n'
@@ -342,6 +343,7 @@ export class ManagerLoop {
   private readonly mailbox = new TimedWakeMailbox(
     (envelope) => this.renderEnvelope(envelope),
     (envelopes) => this.provideAutomaticGuidance(envelopes),
+    (envelopes) => this.recordHumanInputs(envelopes),
   )
   /** 自动提供的正文只属于本 episode，沿用临时消息的检查点与清理机制。 */
   private readonly automaticGuidance = new Set<GuidanceName>()
@@ -388,6 +390,8 @@ export class ManagerLoop {
   /** 工具渐进加载状态只属于当前 episode，绝不跨 episode 或重启继承。 */
   private currentToolFaceState: ManagerToolFaceState | undefined
   private readonly deferredSettleHooks = new Map<TimedWakeEnvelope, (result: EpisodeResult) => void>()
+  private readonly currentHumanInputs = new Map<string, ManagerEpisodeHumanInput>()
+  private humanInputCoverage: 'complete' | 'partial' = 'complete'
   /** daily reflection 可能在 failed episode 后作为 carried wake 与新 primary 一同消费。 */
   private currentEpisodeEnvelopes: ReadonlyArray<TimedWakeEnvelope> = []
   private readonly admittedActivityReceipts = new Set<string>()
@@ -634,6 +638,28 @@ export class ManagerLoop {
     return this.currentToolProfile !== undefined && managerToolProfileForWake(wake) === this.currentToolProfile
   }
 
+  private recordHumanInputs(envelopes: ReadonlyArray<TimedWakeEnvelope>): void {
+    for (const envelope of envelopes) {
+      if (!isHumanWake(envelope.wake)) continue
+      for (const message of envelope.wake.messages) {
+        if (this.currentHumanInputs.has(message.platform_message_id)) continue
+        this.currentHumanInputs.set(message.platform_message_id, {
+          platform_message_id: message.platform_message_id,
+          platform_timestamp: message.platform_timestamp,
+          preview: messagePreview(message),
+          sender_display_name: message.sender.platform_display_name,
+        })
+      }
+    }
+    if (!this.currentTraceId) return
+    try {
+      this.deps.traceWriter?.recordHumanInputs?.(this.currentTraceId, [...this.currentHumanInputs.values()], this.humanInputCoverage)
+    } catch {
+      // 观测失败不改变队列/业务执行；保留本轮输入，收尾再尝试写入。
+      console.warn('[ManagerLoop] human input observation failed; retained for episode finalization')
+    }
+  }
+
   /** 当前人类入站事实的同步只读投影；不 drain mailbox，也不修改 episode 上下文。 */
   snapshotHumanInbound(): ManagerInboundMessageFact[] {
     const facts: ManagerInboundMessageFact[] = []
@@ -821,6 +847,8 @@ export class ManagerLoop {
     onInitialInputCommitted?: () => void,
   ): Promise<EpisodeResult> {
     const episodeId = recovery?.episodeId ?? randomUUID()
+    this.currentHumanInputs.clear()
+    this.humanInputCoverage = recovery ? 'partial' : 'complete'
     if (recovery) envelope = recovery.envelopes[recovery.wakeIndex]
     this.mailbox.clearContextAdmissions()
     this.admittedActivityReceipts.clear()
@@ -889,6 +917,7 @@ export class ManagerLoop {
       const protectedTailStart = restoredRecent.findIndex((message) => message.id === recovery?.protectedTailMessageId)
       const committed = recovery ? {
         state: { ...recovery.state, recent: restoredRecent },
+        humanInputEnvelopes: episodeEnvelopes,
         messageCount: 0,
         humanMessages: protectedTailStart < 0 ? [] : restoredRecent.slice(protectedTailStart),
         hasNewDirectHumanMessages: false,
@@ -999,6 +1028,7 @@ export class ManagerLoop {
       )
       this.currentTraceId = episodeId
       traceStarted = true
+      this.recordHumanInputs(committed.humanInputEnvelopes)
       const initialTools = !recovery
         ? this.deps.toolFace(this.effectiveWakeForCurrentEpisode(), this.currentToolFaceState)
         : undefined
@@ -1045,6 +1075,7 @@ export class ManagerLoop {
       // completed/max_turns → completed；failed/aborted → failed（plan §5.5）。
       const failed = result.outcome === 'failed' || result.outcome === 'aborted'
       if (traceStarted) {
+        this.recordHumanInputs([])
         this.recordRequestCoverage(episodeId, recovery !== undefined)
         this.deps.traceWriter?.finishEpisode(episodeId, {
           status: failed ? 'failed' : 'completed',
@@ -1067,6 +1098,7 @@ export class ManagerLoop {
       // admission 与直接 throw 都在这里收口。人类提交一旦完成，仅重投非人类事件；否则保留
       // 原输入，下一次 wake 再试提交。
       if (traceStarted) {
+        this.recordHumanInputs([])
         this.recordRequestCoverage(episodeId, recovery !== undefined)
         this.deps.traceWriter?.finishEpisode(episodeId, {
           status: 'failed',
@@ -1123,6 +1155,7 @@ export class ManagerLoop {
       this.mailbox.clearActiveProfile()
       this.currentEpisodeEnvelopes = []
       this.currentTraceId = undefined
+      this.currentHumanInputs.clear()
       this.tracedLlmResponses.clear()
       this.tracedUsageResponses.clear()
       this.tracedToolStarts.clear()
@@ -1434,6 +1467,7 @@ export class ManagerLoop {
     currentEnvelope: TimedWakeEnvelope | undefined,
   ): Promise<{
     readonly state: ManagerSessionState
+    readonly humanInputEnvelopes: ReadonlyArray<TimedWakeEnvelope>
     readonly humanMessages: ReadonlyArray<EngineMessage>
     readonly messageCount: number
     readonly hasNewDirectHumanMessages: boolean
@@ -1441,6 +1475,7 @@ export class ManagerLoop {
   }> {
     const committedIds = new Set(state.committedHumanMessageIds ?? [])
     const committedMessages: EngineMessage[] = []
+    const humanInputEnvelopes: TimedWakeEnvelope[] = []
     const newImageRefs: ManagerImageRef[] = []
     let hasNewDirectHumanMessages = false
     let currentHumanEnvelope: TimedWakeEnvelope | undefined
@@ -1458,6 +1493,7 @@ export class ManagerLoop {
       const projected = projectHumanEnvelope(envelope, newEntries)
       const rendered = createUserMessage(this.renderEnvelope(projected))
       committedMessages.push(rendered)
+      humanInputEnvelopes.push(projected)
       // 记录本批消息的入站图片引用(轻量引用,见 image-vision.ts 文件头)
       const images = newEntries.flatMap(({ message }) => collectInboundImages(message))
       if (images.length > 0) newImageRefs.push({ message_id: rendered.id, images })
@@ -1467,7 +1503,7 @@ export class ManagerLoop {
     }
 
     if (committedMessages.length === 0) {
-      return { state, humanMessages: [], messageCount: 0, hasNewDirectHumanMessages: false }
+      return { state, humanInputEnvelopes: [], humanMessages: [], messageCount: 0, hasNewDirectHumanMessages: false }
     }
 
     const next: ManagerSessionState = {
@@ -1482,6 +1518,7 @@ export class ManagerLoop {
     return {
       state: next,
       humanMessages: committedMessages,
+      humanInputEnvelopes,
       messageCount: committedMessages.length,
       hasNewDirectHumanMessages,
       currentHumanEnvelope,
@@ -2564,6 +2601,7 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
   constructor(
     private readonly render: (envelope: TimedWakeEnvelope) => string,
     private readonly guidance: (envelopes: ReadonlyArray<TimedWakeEnvelope>) => string[],
+    private readonly onDrain: (envelopes: ReadonlyArray<TimedWakeEnvelope>) => void,
   ) {}
 
   private pending: TimedWakeEnvelope[] = []
@@ -2702,7 +2740,7 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
     const drained = this.drainActiveProfileEnvelopes()
     this.contextAdmissionEnvelopes.push(...drained)
     this.drainCapture?.push(...drained)
-    return [...this.guidance(drained), ...drained.map((envelope) => {
+    const contents = [...this.guidance(drained), ...drained.map((envelope) => {
       const text = this.render(envelope)
       if (!this.visionEnabled || !isHumanWake(envelope.wake)) return text
       const images = envelope.wake.messages.flatMap(collectInboundImages)
@@ -2732,6 +2770,8 @@ class TimedWakeMailbox implements HumanMessageQueueLike {
       if (blocks.length === 0) return text
       return [{ type: 'text' as const, text }, ...blocks]
     })]
+    if (drained.some(item => isHumanWake(item.wake))) this.onDrain(drained)
+    return contents
   }
 
   takeContextAdmissionEnvelopes(): TimedWakeEnvelope[] {
