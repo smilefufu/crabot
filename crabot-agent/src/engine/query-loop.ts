@@ -19,7 +19,7 @@ import {
 } from './types'
 import { ContextManager } from './context-manager'
 import { partitionToolCalls } from './tool-framework'
-import { executeToolBatches, type HookConfig } from './tool-orchestration'
+import { executeToolBatches, SendMessageGuard, type HookConfig } from './tool-orchestration'
 import { compressToolResultImages, pruneOldImages } from './image-utils'
 import { formatError } from './error-utils'
 import type { HookInput } from '../hooks/types'
@@ -77,6 +77,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     }
     return update
   } : undefined
+  const sendMessageGuard = new SendMessageGuard()
   const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS
   const abortSignal = options.abortSignal
 
@@ -350,6 +351,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       // 的微秒级窗口漏掉人类补充。补充消息自然取代 forced summary，继续下一轮响应。
       if (hasRemainingTurn && options.humanMessageQueue?.hasPending) {
         const supplements = options.humanMessageQueue.drainPending()
+        if (supplements.length > 0) sendMessageGuard.reset()
         for (const content of supplements) {
           messages.push(createUserMessage(content))
           options.onSystemInjection?.({
@@ -529,6 +531,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
         if (hasRemainingTurn) {
           const supplements = options.humanMessageQueue.drainPending()
+          if (supplements.length > 0) sendMessageGuard.reset()
           for (const content of supplements) {
             messages.push(createUserMessage(content))
             options.onSystemInjection?.({
@@ -653,7 +656,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       turnNumber: totalTurns,
       callIds: toolCallIds,
       onToolLifecycle: options.onToolLifecycle,
-    })
+    }, sendMessageGuard)
     // Live progress: tools finished
     if (options.onLiveProgress) {
       options.onLiveProgress({
@@ -726,6 +729,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // Inject any pending human supplement messages.
     if (hasRemainingTurn && options.humanMessageQueue) {
       const supplements = options.humanMessageQueue.drainPending()
+      if (supplements.length > 0) sendMessageGuard.reset()
       for (const content of supplements) {
         messages.push(createUserMessage(content))
         options.onSystemInjection?.({
@@ -751,6 +755,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         console.error(`[engine] drainExternalInputs failed (turn ${totalTurns}), inputs kept in source queue:`,
           error instanceof Error ? error.message : String(error))
       }
+      if (externalInputs.length > 0) sendMessageGuard.reset()
       for (const text of externalInputs) {
         messages.push(createUserMessage(text))
         options.onSystemInjection?.({

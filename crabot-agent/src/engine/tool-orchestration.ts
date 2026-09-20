@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import type { EngineToolLifecycleEvent, ToolDefinition, ToolCallContext, ToolPermissionConfig, ToolTraceMetadata } from './types'
 import { findTool, type ToolBatch } from './tool-framework'
 import { checkToolPermission } from './permission-checker'
@@ -27,6 +28,22 @@ export interface ToolLifecycleContext {
   readonly turnNumber: number
   readonly callIds: ReadonlyMap<string, string>
   readonly onToolLifecycle?: (event: EngineToolLifecycleEvent) => void
+}
+
+/** Per Engine execution; snapshot raw inputs before repair/hooks can mutate them. */
+export class SendMessageGuard {
+  private previousInput?: Record<string, unknown>
+
+  reset(): void {
+    this.previousInput = undefined
+  }
+
+  observe(name: string, input: Record<string, unknown>): boolean {
+    const duplicate = name === 'send_message' && this.previousInput !== undefined
+      && isDeepStrictEqual(this.previousInput, input)
+    this.previousInput = name === 'send_message' ? structuredClone(input) : undefined
+    return duplicate
+  }
 }
 
 const MAX_CONCURRENT = 10
@@ -66,7 +83,10 @@ async function executeSingleTool(
   permissionConfig?: ToolPermissionConfig,
   hooks?: HookConfig,
   lifecycle?: ToolLifecycleContext,
+  sendMessageGuard?: SendMessageGuard,
 ): Promise<ToolResultEntry> {
+  // Observe synchronously so parallel completion order cannot change adjacency.
+  const duplicateSend = sendMessageGuard?.observe(block.name, block.input) ?? false
   const startedAtMs = Date.now()
   const callId = lifecycle?.callIds.get(block.id)
   const tool = findTool(tools, block.name)
@@ -142,6 +162,14 @@ async function executeSingleTool(
   }
   if (!permission.allowed) {
     return finish({ tool_use_id: block.id, content: stamp(`Permission denied: ${permission.reason}`), is_error: true })
+  }
+
+  if (duplicateSend) {
+    return finish({
+      tool_use_id: block.id,
+      content: stamp('禁止重复发送消息。如无其他事，则立即结束本回合。'),
+      is_error: true,
+    })
   }
 
   // --- 确定性参数修复（spec 2026-09-03-tool-input-repair）---
@@ -229,6 +257,7 @@ async function executeParallelBatch(
   permissionConfig?: ToolPermissionConfig,
   hooks?: HookConfig,
   lifecycle?: ToolLifecycleContext,
+  sendMessageGuard?: SendMessageGuard,
 ): Promise<ReadonlyArray<ToolResultEntry>> {
   const blocks = batch.blocks
   const results: ToolResultEntry[] = new Array(blocks.length)
@@ -237,7 +266,7 @@ async function executeParallelBatch(
   for (let i = 0; i < blocks.length; i += MAX_CONCURRENT) {
     const chunk = blocks.slice(i, i + MAX_CONCURRENT)
     const chunkResults = await Promise.all(
-      chunk.map((block) => executeSingleTool(block, tools, context, permissionConfig, hooks, lifecycle))
+      chunk.map((block) => executeSingleTool(block, tools, context, permissionConfig, hooks, lifecycle, sendMessageGuard))
     )
     for (let j = 0; j < chunkResults.length; j++) {
       results[i + j] = chunkResults[j]
@@ -254,10 +283,11 @@ async function executeSerialBatch(
   permissionConfig?: ToolPermissionConfig,
   hooks?: HookConfig,
   lifecycle?: ToolLifecycleContext,
+  sendMessageGuard?: SendMessageGuard,
 ): Promise<ReadonlyArray<ToolResultEntry>> {
   const results: ToolResultEntry[] = []
   for (const block of batch.blocks) {
-    const result = await executeSingleTool(block, tools, context, permissionConfig, hooks, lifecycle)
+    const result = await executeSingleTool(block, tools, context, permissionConfig, hooks, lifecycle, sendMessageGuard)
     results.push(result)
   }
   return results
@@ -270,14 +300,15 @@ export async function executeToolBatches(
   permissionConfig?: ToolPermissionConfig,
   hooks?: HookConfig,
   lifecycle?: ToolLifecycleContext,
+  sendMessageGuard?: SendMessageGuard,
 ): Promise<ToolResultEntry[]> {
   const resolvedContext: ToolCallContext = context ?? {}
   const allResults: ToolResultEntry[] = []
 
   for (const batch of batches) {
     const batchResults = batch.parallel
-      ? await executeParallelBatch(batch, tools, resolvedContext, permissionConfig, hooks, lifecycle)
-      : await executeSerialBatch(batch, tools, resolvedContext, permissionConfig, hooks, lifecycle)
+      ? await executeParallelBatch(batch, tools, resolvedContext, permissionConfig, hooks, lifecycle, sendMessageGuard)
+      : await executeSerialBatch(batch, tools, resolvedContext, permissionConfig, hooks, lifecycle, sendMessageGuard)
 
     for (const result of batchResults) {
       allResults.push(result)
