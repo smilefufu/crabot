@@ -10,6 +10,12 @@
 
 ## 当前状态
 
+### 连续相同 send_message 保护：实现与定向验证完成，待 PR 审查
+
+- 按已确认 [spec](crabot-docs/superpowers/specs/2026-09-20-consecutive-send-message-guard-design.md)，共享 Engine 拒绝当前执行中连续同原始参数的 `send_message`，返回简短失败原因，实际 handler 不重复执行；前次失败及第三次重复同样拦截。
+- 保留权限优先、调用配对及失败 trace；新外部输入或其它工具打断连续性，内部提示和压缩不重置，状态不跨执行持久化。
+- 先复现 4 项失败，再验证 Engine、工具编排、Manager trace、常规循环与恢复共 263 项；Agent 类型检查通过。未执行真实发送、未部署，不能据此承诺模型一定停止重复请求。
+
 ### 主控身份统一修复与群聊图片投影：已验证，待 PR 审查
 
 - 按已确认 [spec](crabot-docs/superpowers/specs/2026-09-19-group-latest-image-design.md)，群聊每次主处理请求只附带最后一张入站图，其他图片保留实际链接或占位；在读取前选择，历史与检查点保留原文及轻量引用。
