@@ -6,6 +6,10 @@ import { INPUT_DELIVERY_TIMEOUT_MS, WorkerHarness, WorkerNotFoundError, TaskCanc
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import { NativeActivityStore } from '../../../src/workers/harness/native-activity-store'
+import { WorkerTurnStore } from '../../../src/workers/harness/worker-turn-store'
+import { DailyReflectionEvidence } from '../../../src/manager/daily-reflection-evidence'
+import { ManagerSessionStore } from '../../../src/manager/session-store'
+import type { DailyReflectionState } from '../../../src/manager/daily-reflection-types'
 import { } from '../../../src/workers/harness/ledger-types'
 import {
   WorkerEventLog,
@@ -522,8 +526,41 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(failed.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'failed' })
     expect(events.find((event) => event.kind === 'exited')?.detail).toMatchObject({
       reason: 'spawn_failed',
+      spawn_phase: 'pre_spawn',
       message: 'context disk error',
     })
+  })
+
+  it.each(['provision', 'executionEnv', 'returnedHandle'])('persists the actual spawn boundary for %s failure', async stage => {
+    const { harness, fake, ledger, workersDir } = await makeHarness()
+    if (stage === 'provision') vi.spyOn(fake, 'provision').mockRejectedValueOnce(new Error('provision failed'))
+    else if (stage === 'executionEnv') {
+      vi.spyOn(harness as any, 'executionEnv').mockRejectedValueOnce(new Error('credentials failed'))
+    } else {
+      vi.spyOn(fake, 'spawn').mockImplementationOnce(async spec => ({ worker_id: spec.worker_id, seq: 1,
+        impl: 'builtin', incarnation_id: 'wrong-incarnation', session_ref: 'started-session' }))
+    }
+    await expect(harness.spawnWorker(spawnParams())).rejects.toThrow()
+    const [failed] = await harness.listWorkers('test::friend-1' as ManagerKey)
+    const persisted = await new WorkerEventLog(join(dataDir, 'workers', failed.worker_id)).readAll()
+    expect(persisted).toMatchObject([{ kind: 'exited', seq: 1, detail: {
+      reason: 'spawn_failed', spawn_phase: stage === 'returnedHandle' ? 'spawn' : 'pre_spawn',
+    } }])
+    if (stage !== 'returnedHandle') expect(fake.spawnCalls).toEqual([])
+    const captureWorkerTrace = vi.fn(async () => { throw new Error('no native session') })
+    const provider = new DailyReflectionEvidence({
+      managersDir: join(dataDir, 'managers'), store: new ManagerSessionStore(join(dataDir, 'managers')),
+      ledger, harness, turns: new WorkerTurnStore(workersDir),
+      traces: { listTraceManagerKeys: () => [], readManagerEpisodes: async function* () {}, readManagerEpisode: async () => undefined },
+      captureWorkerTrace, readWorkerTrace: async () => ({ events: [] }), redact: text => text,
+    })
+    const reflection = { window_start: '2026-01-01T00:00:00.000Z', window_end: '2026-01-02T00:00:00.000Z',
+      run_id: 'test', episode_ids: [], analysis_worker_ids: [] } as unknown as DailyReflectionState
+    const { records } = await provider.capture(reflection)
+    expect(records).toHaveLength(1)
+    expect(records[0].gaps).toEqual(stage === 'returnedHandle' ? [`worker_trace_unavailable:${failed.worker_id}:1`] : [])
+    expect((await provider.read(records[0], reflection)).content).toContain('spawn_failed')
+    expect(captureWorkerTrace).toHaveBeenCalledTimes(stage === 'returnedHandle' ? 1 : 0)
   })
 
   it('CLI首投accepted后同步completed：task与化身按endReason落completed而非failed', async () => {
@@ -816,6 +853,7 @@ describe('WorkerHarness.spawnWorker', () => {
     const exitedEvents = events.filter((e) => e.kind === 'exited')
     expect(exitedEvents).toHaveLength(1)
     expect(exitedEvents[0].detail?.reason).toBe('spawn_failed')
+    expect(exitedEvents[0].detail?.spawn_phase).toBe('spawn')
   })
 })
 

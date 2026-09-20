@@ -190,14 +190,17 @@ describe('ManagerLoop episode trace wiring', () => {
         expect(output.progress.directory_read).toBe(40)
         input = { cursor: output.progress.resume_cursor }
       } else if (step === 2) {
+        expect(output.records[0].record_ref).toBe('ref-20')
+        input = { cursor: output.next_cursor }
+      } else if (step === 3) {
         expect(output.records[0].record_ref).toBe('ref-40')
         expect(output.progress.directory_complete).toBe(true)
         selectedRef = output.records[0].record_ref
         name = 'read_reflection_record'; input = { record_ref: selectedRef }
-      } else if (step === 3) {
+      } else if (step === 4) {
         expect(output.gaps).toEqual([])
         name = 'finish_daily_reflection'; input = { outcome: 'completed', summary: 'fixture reviewed', pending_items: [], evidence_refs: [selectedRef] }
-      } else if (step > 3) throw new Error('unexpected extra LLM request')
+      } else if (step > 4) throw new Error('unexpected extra LLM request')
       yield* chunksFromContent([{ type: 'tool_use', id: `call-${step}`, name, input }], 'tool_use')
     }
     const loop = new ManagerLoop({ ...deps(adapter, traceWriter), dailyReflection: host,
@@ -209,7 +212,7 @@ describe('ManagerLoop episode trace wiring', () => {
     expect(product?.window_end).toBe(window.window_end)
     expect(product?.outcome).toBe(gap ? 'partial' : 'completed')
     expect(product?.validation_errors).toEqual(gap ? ['known_evidence_gaps'] : [])
-    expect(request).toBe(4)
+    expect(request).toBe(5)
     expect(dailyDeps.capture).toHaveBeenCalledOnce()
     if (gap) expect(confirm).not.toHaveBeenCalled()
     else expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ trigger_id: 'original', ...window }))

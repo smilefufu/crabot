@@ -171,7 +171,8 @@ export class DailyReflectionEvidence {
       const turns = await this.deps.turns.list(worker.worker_id)
       const traces: ReflectionWorkerTrace[] = []
       const periodTurns = turns.filter(turn => inWindow(turn.completed_at, state))
-      const errors = new Set(events.filter(event => event.kind === 'error' && inWindow(event.ts, state))
+      const errors = new Set(events.filter(event => (event.kind === 'error'
+        || (event.kind === 'exited' && event.detail?.reason === 'spawn_failed')) && inWindow(event.ts, state))
         .map(event => JSON.stringify(event.detail ?? {}).slice(0, 200)))
       const llmCallsBySeq: string[] = []
       const times = [...events.filter(event => !isLegacyImportEvent(event) && inWindow(event.ts, state)).map(event => event.ts),
@@ -180,6 +181,12 @@ export class DailyReflectionEvidence {
       for (const incarnation of worker.incarnations) {
         if (Date.parse(incarnation.started_at) >= Date.parse(state.window_end)
           || (incarnation.state === 'exited' && incarnation.ended_at && Date.parse(incarnation.ended_at) < Date.parse(state.window_start))) continue
+        const incarnationEvents = events.filter(event => event.seq === incarnation.seq)
+        // Only explicit pre-spawn failures without execution facts can have no native trace.
+        if (incarnation.state === 'exited' && incarnation.ended_reason === 'failed' && !incarnation.session_ref
+          && incarnationEvents.length > 0 && incarnationEvents.every(event => event.kind === 'exited'
+            && event.detail?.reason === 'spawn_failed' && event.detail?.spawn_phase === 'pre_spawn')
+          && !turns.some(turn => turn.seq === incarnation.seq)) continue
         // Preserve real legacy completion facts, including gaps, but not migration-time fallbacks.
         if (incarnation.impl === 'legacy' && importedAt && incarnation.ended_at !== importedAt
           && inWindow(incarnation.ended_at, state)) times.push(incarnation.ended_at)

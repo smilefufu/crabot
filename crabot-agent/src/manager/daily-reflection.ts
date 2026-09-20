@@ -131,19 +131,20 @@ export class DailyReflection {
   private progress(state: DailyReflectionState): ReflectionProgress {
     const records = state.manifest!.records
     let directoryRead = 0
-    let resumeCursor: string | undefined
-    // Every directory cursor was issued only after delivering the preceding page.
-    for (const [token, position] of Object.entries(state.cursors)) {
+    for (const position of Object.values(state.cursors)) {
       if (position.record_ref === undefined && position.offset > directoryRead) {
         directoryRead = position.offset
-        resumeCursor = token
       }
     }
+    // The page save precedes the Engine result checkpoint. Replay its start after a restart.
+    const resumeOffset = state.directory_complete ? directoryRead : directoryRead - 20
+    const resumeCursor = Object.entries(state.cursors).find(([, position]) =>
+      position.record_ref === undefined && position.offset === resumeOffset)?.[0]
     const pending = Object.entries(state.read_records).filter(([, complete]) => !complete)
     return { directory_total: records.length,
       directory_read: state.directory_complete ? records.length : directoryRead,
       directory_complete: state.directory_complete,
-      ...(!state.directory_complete && resumeCursor ? { resume_cursor: resumeCursor } : {}),
+      ...(resumeCursor ? { resume_cursor: resumeCursor } : {}),
       pending_record_count: pending.length,
       pending_records: pending.slice(0, 20).map(([record_ref]) => ({ record_ref })),
       evidence_gap_count: records.filter(record => record.gaps.length > 0).length }
@@ -264,11 +265,11 @@ export function buildDailyReflectionTools(host?: Pick<DailyReflection, 'list' | 
       return { output: JSON.stringify(await call(parsed.data as Record<string, unknown>)), isError: false }
     } })
   return [
-    tool('list_reflection_records', '列出宿主固定反思周期内的执行与人类输入证据。首次不传 cursor，沿 next_cursor 翻完目录；恢复续办位置用返回的 progress.resume_cursor。progress 还列出未读完的详情引用（从首段重读）及证据缺口数量；已交付目录不等于语义复盘完成。gaps 表示已知证据缺口。',
+    tool('list_reflection_records', '列出宿主固定反思周期内的执行与人类输入证据。首次不传 cursor；恢复续办时用 progress.resume_cursor 保守重读最后一页（首页不返回该游标），之后沿当前页 next_cursor 前进，不反复跟随 progress.resume_cursor。目录翻完但周期未完成时也可重读末页。progress 还列出未读完的详情引用（从首段重读）及证据缺口数量；宿主已读取不证明模型已收到或完成复盘。gaps 表示已知证据缺口。',
       z.object({ cursor: z.string().optional() }).strict(), input => host ? host.list(input.cursor as string | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
     tool('read_reflection_record', '分页读取本次目录返回的 record_ref。沿该记录的 next_cursor 读完；不能使用其他会话 ID、路径或其他记录的游标。',
       z.object({ record_ref: z.string(), cursor: z.string().optional() }).strict(), input => host ? host.read(input.record_ref as string, input.cursor as string | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
-    { ...tool('finish_daily_reflection', '提交本周期反思结果并结束本轮，必须单独调用。证据或处理未完成时用 partial，并列出 pending_items；等待分析 Worker 时直接结束回合。completed 还需宿主验证与 Admin 确认。',
+    { ...tool('finish_daily_reflection', '当前可推进事项处理完后提交本周期结果并结束本轮，必须单独调用。满足全部完成条件才用 completed；仍有真实阻塞或取证缺口时用 partial，列明未完成事项及不能继续的依据。只剩等待分析 Worker 时直接结束回合。completed 还需宿主验证与 Admin 确认。',
       finishSchema, async () => { throw new Error('Host-only exit tool') }), isReadOnly: false, exitsLoop: true },
   ]
 }

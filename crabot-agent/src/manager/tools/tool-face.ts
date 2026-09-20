@@ -425,7 +425,7 @@ function buildLoadToolFamilyTool(catalog: ManagerToolCatalog, state: ManagerTool
       type: 'object', additionalProperties: false,
       properties: { family: { type: 'string', minLength: 1, maxLength: 128,
         description: catalog.profile === 'daily_reflection'
-          ? 'memory：记忆；worker：执行器管理与执行条件。'
+          ? 'memory：记忆正文与已有 links 读取、候选写入、更新和增量建链（含 get_memory_detail、quick_capture、set_memory_links）；worker：执行器管理与执行条件。'
           : 'memory：记忆；messaging：消息/历史/联系人/媒体；worker：执行器管理与执行条件；schedule：定时任务；crabot：部署/配置/权限查询。mcp：只列可用外部服务；mcp__服务名：完整加载该服务。',
       } },
       required: ['family'],
