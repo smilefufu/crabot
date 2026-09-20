@@ -78,6 +78,41 @@ async function importLegacyWorker(f: Awaited<ReturnType<typeof fixture>>, status
 }
 
 describe('daily reflection persisted evidence', () => {
+  it.each(['pre_spawn', 'spawn', 'legacy', 'started', 'session', 'turn', 'other_seq'])('keeps trace requirements grounded in persisted spawn facts: %s', async scenario => {
+    const f = await fixture()
+    const workerId = 'failed-worker'
+    f.workers.push({ worker_id: workerId, manager_key: 'chat::one', origin: {}, updated_at: activity,
+      task: { title: 'failed attempt' }, incarnations: [{ seq: 1, incarnation_id: 'inc-1', impl: 'builtin',
+        state: 'exited', ended_reason: 'failed', session_ref: scenario === 'session' ? 'native-session' : '',
+        started_at: activity, ended_at: activity }] })
+    const failure = { worker_id: workerId, seq: scenario === 'other_seq' ? 2 : 1, kind: 'exited', ts: activity,
+      detail: { reason: 'spawn_failed', message: 'credential preparation failed test-secret',
+        ...(scenario === 'legacy' ? {} : { spawn_phase: scenario === 'spawn' ? 'spawn' : 'pre_spawn' }) } }
+    f.events.set(workerId, [failure, ...(scenario === 'started'
+      ? [{ worker_id: workerId, seq: 1, kind: 'lifecycle_changed', ts: activity, detail: { change: 'spawned' } }] : [])])
+    if (scenario === 'turn') vi.spyOn(f.deps.turns, 'list').mockResolvedValueOnce([
+      { seq: 1, completed_at: activity, turn_id: 'turn-1' } as any,
+    ])
+    vi.mocked(f.deps.captureWorkerTrace).mockRejectedValue(new Error('no native session'))
+    const manifest = await f.provider.capture(state)
+    expect(manifest.records).toHaveLength(1)
+    const record = manifest.records[0]
+    if (scenario === 'pre_spawn') {
+      expect(f.deps.captureWorkerTrace).not.toHaveBeenCalled()
+      expect(record.gaps).toEqual([])
+      expect(record.summary).toContain('credential preparation failed [REDACTED]')
+      f.events.get(workerId)!.push({ ...failure, detail: { message: 'later event' } })
+      const detail = await f.provider.read(record, state)
+      expect(detail.gaps).toEqual([])
+      expect(detail.content).toContain('credential preparation failed [REDACTED]')
+      expect(detail.content).not.toContain('later event')
+      expect(reflectionDigest(detail.content)).toBe(record.digest)
+    } else {
+      expect(f.deps.captureWorkerTrace).toHaveBeenCalledWith(workerId, 1)
+      expect(record.gaps).toContain(`worker_trace_unavailable:${workerId}:1`)
+    }
+  })
+
   it('reads evicted archived episodes, including episodes whose history is missing', async () => {
     const f = await fixture()
     const traces = new TraceStore(20, join(f.root, 'traces'))

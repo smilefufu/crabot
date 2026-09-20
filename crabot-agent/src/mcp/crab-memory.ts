@@ -242,13 +242,13 @@ const LIST_ENTRIES_SCHEMA = {
   tags: z.array(z.string()).optional()
     .describe('按标签过滤'),
   ingestion_time_start: z.string().optional()
-    .describe('按入库时间过滤，包含起点；ISO8601。记忆整理按 schedule watermark 增量扫描时使用'),
+    .describe('按入库时间过滤，包含起点；ISO8601。仅在任务明确限定入库区间时提供，省略则不限制起点'),
   ingestion_time_end: z.string().optional()
-    .describe('按入库时间过滤，排除终点；ISO8601。记忆整理按 schedule 当前时间增量扫描时使用'),
+    .describe('按入库时间过滤，排除终点；ISO8601。仅在任务明确限定入库区间时提供，省略则不限制终点'),
   limit: z.number().int().min(1).max(200).optional()
     .describe('返回数量上限'),
   offset: z.number().int().min(0).optional()
-    .describe('分页偏移'),
+    .describe('当前过滤结果中的位置，不是累计已处理数；确认或删除 inbox 条目后队列会前移'),
   sort: z.enum(['ingestion_time_desc', 'ingestion_time_asc', 'event_time_desc']).optional()
     .describe('排序，默认 ingestion_time_desc；inbox 最早优先处理使用 ingestion_time_asc'),
 }
@@ -414,7 +414,7 @@ export function createCrabMemoryServer(
   server.registerTool(
         'get_memory_detail',
         {
-          description: '获取某条长期记忆的详细内容。先用 search_memory 找到记忆 ID，再用此工具查看详情。',
+          description: '按已取得的记忆 ID 读取详情；ID 可来自记忆列表或搜索。include=full 返回正文和 frontmatter（含已有 links），用于核验和增量建链前读取。',
           inputSchema: GET_MEMORY_DETAIL_SCHEMA,
         },
         async (args) => {
@@ -499,7 +499,7 @@ export function createCrabMemoryServer(
   server.registerTool(
     'search_long_term',
     {
-      description: '在长期记忆中按语义/关键词搜索，支持按 type、status、tags 等过滤。反思流程使用此工具按 status: "inbox" 拉候选。',
+      description: '按语义/关键词召回相关记忆，支持 type、status、tags 等过滤，默认 status=confirmed。用于候选比对、来源核查和建链对象查找；include=full 可取正文与 frontmatter。返回相关性候选，不保证全量或时间顺序；按最早优先遍历 inbox 使用 list_entries。',
       inputSchema: SEARCH_LONG_TERM_SCHEMA,
     },
     async (args) => callRpc('search_long_term', args as Record<string, unknown>),
@@ -535,7 +535,7 @@ export function createCrabMemoryServer(
   server.registerTool(
     'list_entries',
     {
-      description: '列出长期记忆条目（按 type/status/tags 过滤、分页）。全量重建 / 批量建链时遍历 confirmed 用。',
+      description: '按字段过滤、排序和分页列出记忆，返回 ID、brief 与 frontmatter，不含正文；核验需要正文时用 get_memory_detail。待审队列用 status=inbox、sort=ingestion_time_asc；confirmed 目录用于任务所需的建链范围。total 仅是本次返回条数，不是队列总量。先记录当前批次 ID，再逐项处理；出队后从队首重新核对，以 ID 区分未处理、已完成和仍阻塞项。只读跳过已检查的留队项再向后翻页，不反复处理受阻首页；再次出队后重新核对偏移，不沿用旧 offset 累加。',
       inputSchema: LIST_ENTRIES_SCHEMA,
     },
     async (args) => callRpc('list_entries', args as Record<string, unknown>),

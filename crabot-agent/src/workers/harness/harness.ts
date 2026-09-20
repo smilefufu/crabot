@@ -1142,6 +1142,7 @@ export class WorkerHarness {
       await this.deps.ledger.upsertWorker(p.managerKey, workerId, () => initial)
 
       let spawnedHandle: IncarnationHandle
+      let spawnPhase: 'pre_spawn' | 'spawn' = 'pre_spawn'
       try {
         // 跨实现身份快照必须先于 provision 落盘：CLI-first worker 与 builtin 一样需要它。
         const requestedContext: WorkerContext = {
@@ -1194,6 +1195,7 @@ export class WorkerHarness {
         // 失败归因只认 WorkerImplUnavailableError（能证明 impl 失效的 adapter 级错误）；
         // 调用方/状态/数据错误（already spawned、meta 缺失等）与 provision 错误都不置 degraded。
         try {
+          spawnPhase = 'spawn'
           const returnedHandle = await adapter.spawn(spec)
           if (returnedHandle.incarnation_id !== undefined && returnedHandle.incarnation_id !== incarnationId) {
             throw new Error(`WorkerHarness.spawnWorker: adapter returned mismatched incarnation_id for ${workerId}`)
@@ -1239,7 +1241,7 @@ export class WorkerHarness {
           workerId,
           1,
           'exited',
-          { reason: 'spawn_failed', message: err instanceof Error ? err.message : String(err) },
+          { reason: 'spawn_failed', spawn_phase: spawnPhase, message: err instanceof Error ? err.message : String(err) },
           failed?.task.status
         )
         throw err
