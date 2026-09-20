@@ -47,7 +47,7 @@ export interface ManagerScheduleToolsContext {
   readonly canCreate: boolean
   /** 每次工具调用都重新解析，不得传入 episode 权限快照。 */
   readonly resolvePermissions: () => Promise<ResolvedPermissions | null>
-  /** 只由当前人类 Master 私聊 episode 捕获；scheduled/system episode 不得提供。 */
+  /** 由当前有效 Master 私聊绑定捕获；普通非人类唤醒不改变授权，Schedule 保持独立身份。 */
   readonly masterAuthorization?: MasterAuthorization
   readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
 }

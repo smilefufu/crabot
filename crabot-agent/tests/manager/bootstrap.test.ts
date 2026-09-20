@@ -23,7 +23,7 @@ import { CodexWorkerAdapter } from '../../src/workers/codex/adapter.js'
 import { QueryEstablishmentError } from '../../src/workers/errors.js'
 import { type ManagerKey, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerAdapter, WorkerImplId, IncarnationHandle, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
-import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
+import { createUserMessage, type LLMAdapter, type LLMStreamParams } from '../../src/engine/index.js'
 import type { ChannelMessage, ResolvedPermissions } from '../../src/types.js'
 import { CLI_DOMAINS } from '../../src/types.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
@@ -41,10 +41,15 @@ function makeMemoryServer() {
   )
 }
 
-/** 身份解析原料的最小桩:一律"解析不出来",即 manager 退回未接线时的既有行为。 */
+/** 测试的显式会话权限，不用解析失败模拟默认允许。 */
 function makePrincipalResolver(): PrincipalResolverDeps {
   return {
-    resolvePermissions: async () => null,
+    resolvePermissions: async () => ({
+      tool_access: { memory: true, messaging: true, task: true, mcp_skill: true, file_io: true,
+        browser: true, shell: true, remote_exec: false, desktop: false },
+      cli_access: Object.fromEntries(CLI_DOMAINS.map(domain => [domain, 'read'])) as ResolvedPermissions['cli_access'],
+      storage: null, memory_scopes: ['session-scope'],
+    }),
     sessionMemoryScopes: async (sessionId) => [sessionId],
     sceneProfile: async () => null,
     crabSelfHandle: () => undefined,
@@ -620,11 +625,12 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(search!.params.accessible_scopes).toEqual(['sess-boot'])
   })
 
-  it('身份解析不出来时退回既有那一档（public / 无 scope 过滤），不静默收紧也不静默放宽', async () => {
+  it('权限解析失败时 Memory 仍隔离到当前会话', async () => {
     const memoryCalls: Array<{ method: string; params: Record<string, unknown> }> = []
     const stack = buildManagerStack(
       makeDeps({
         managerAdapter: () => searchMemoryScript(),
+        principalResolver: { ...makePrincipalResolver(), resolvePermissions: async () => null },
         memoryServerFor: (ctx) =>
           createCrabMemoryServer(
             {
@@ -642,7 +648,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       }),
     )
 
-    // 没有人类消息 → 身份从未解析过（worker 事件唤醒同理）
+    // 已知私聊类型但没有权限结果，仍不能退到 public。
     await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('hi')])
 
     const search = memoryCalls.find((c) => c.method === 'search_short_term')
@@ -952,6 +958,148 @@ describe('manager bootstrap（P5 Task 1）', () => {
     } finally {
       await stack.dispose()
     }
+  })
+
+  it('私聊非人类唤醒保留 Master 调度管理授权，降权后立即收窄', async () => {
+    let currentFriend = { ...FRIEND_A, permission: 'master' as 'master' | 'normal' }
+    let script = silentManager()
+    const foreign = { id: 'foreign-schedule', target_session: { channel_id: 'wechat', session_id: 'other', type: 'private' }, creator_friend_id: 'someone-else' }
+    const deps = makeDeps({ managerAdapter: () => script,
+      callAdmin: async () => ({ items: [foreign], pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 } }) as never,
+      principalResolver: { ...makePrincipalResolver(), getFriend: async () => currentFriend },
+    })
+    let stack = buildManagerStack(deps)
+    await stack.principals.init()
+    const key = 'wechat::sess-boot' as ManagerKey
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('管理调度')], currentFriend)
+    await stack.dispose()
+    stack = buildManagerStack(deps)
+    await stack.principals.init()
+    let output = ''
+    script = { async *stream(params) {
+      const list = params.tools.find(tool => tool.name === 'list_schedules')
+      if (list) output = (await list.call({}, {} as never)).output
+      yield* chunksFromContent(list ? [] : [{ type: 'tool_use', id: 'load-schedules', name: 'search_tools', input: { query: 'list_schedules' } }], list ? 'end_turn' : 'tool_use')
+    }, updateConfig() {} }
+    try {
+      await stack.registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'sess-boot', text: '后台任务完成' })
+      expect(output).toContain('foreign-schedule')
+      currentFriend = { ...currentFriend, permission: 'normal' }
+      await stack.registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'sess-boot', text: '后台任务完成' })
+      expect(output).not.toContain('foreign-schedule')
+    } finally { await stack.dispose() }
+  })
+
+  it.each(['permissions', 'friend'] as const)('非人类唤醒 %s 查询失败不以缺省能力派发或放宽 Memory', async (failure) => {
+    let script = silentManager()
+    const contexts: unknown[] = []
+    const deps = makeDeps({ managerAdapter: () => script,
+      memoryServerFor: context => { contexts.push(context); return makeMemoryServer() },
+      principalResolver: { ...makePrincipalResolver(), resolvePermissions: async () => null, getFriend: async () => failure === 'friend' ? null : FRIEND_A },
+    })
+    const stack = buildManagerStack(deps)
+    await stack.principals.init()
+    try {
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('建立绑定')], FRIEND_A)
+      script = spawnOnce()
+      await stack.registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'sess-boot', text: '后台任务完成' })
+      expect(await stack.ledger.listAllWorkers()).toHaveLength(0)
+      expect(contexts.at(-1)).toMatchObject({ visibility: 'internal', scopes: ['sess-boot'], isMasterPrivate: false })
+    } finally { await stack.dispose() }
+  })
+
+  it('旧会话身份查询失败时不进入模型请求', async () => {
+    const stream = vi.fn(async function* () { yield* chunksFromContent([], 'end_turn') })
+    const stack = buildManagerStack(makeDeps({ managerAdapter: () => ({ stream, updateConfig() {} }),
+      principalResolver: { ...makePrincipalResolver(), getSessionType: async () => { throw new Error('Channel unavailable') } },
+    }))
+    await stack.principals.init()
+    try {
+      await expect(stack.registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'sess-boot', text: '后台通知' })).rejects.toThrow('Channel unavailable')
+      expect(stream).not.toHaveBeenCalled()
+    } finally { await stack.dispose() }
+  })
+
+  it.each(['worker', 'workboard', 'media', 'resume', 'legacy'] as const)('群主控冷启动后 %s 唤醒保留身份、图片策略、Memory 和主控项目权限', async (wakeKind) => {
+    const projectRoot = join(tmpRoot, 'group-project')
+    await fs.mkdir(projectRoot, { recursive: true })
+    await fs.writeFile(join(projectRoot, 'README.md'), '# 群主控项目')
+    const latestPath = join(projectRoot, 'latest.png')
+    await fs.writeFile(latestPath, 'latest-picture')
+    let allowRead = true
+    const permissions = (): ResolvedPermissions => ({
+      tool_access: { memory: true, messaging: false, task: false, mcp_skill: false,
+        file_io: allowRead, browser: false, shell: false, remote_exec: false, desktop: false },
+      cli_access: Object.fromEntries(CLI_DOMAINS.map(domain => [domain, 'none'])) as never,
+      storage: { workspace_path: projectRoot, access: 'read' }, memory_scopes: ['group-scope'],
+    })
+    let script = silentManager()
+    const resolvePermissions = vi.fn(async () => permissions())
+    const memoryContexts: unknown[] = []
+    const deps = makeDeps({ managerAdapter: () => script, managerSupportsVision: () => true,
+      memoryServerFor: context => { memoryContexts.push(context); return makeMemoryServer() },
+      principalResolver: { ...makePrincipalResolver(), resolvePermissions,
+        getSessionType: async () => { if (wakeKind === 'legacy') return 'group'; throw new Error('durable group must not depend on Channel availability') } },
+    })
+    let stack = buildManagerStack(deps)
+    await stack.principals.init()
+    const key = 'wechat::sess-boot' as ManagerKey
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [groupMessage('群内消息')], FRIEND_A)
+    await stack.ledger.upsertWorker(key, 'w-seeded', () => makeLedgerWorker({ workerId: 'w-seeded', impl: 'builtin', spawnedBySession: key }))
+    const state = await stack.store.load(key)
+    const old = createUserMessage('[图片: old.png]')
+    const latest = createUserMessage('[图片: latest.png]')
+    await stack.store.save({ ...state, recent: [...state.recent, old, latest], imageRefs: [
+      { message_id: old.id, images: [{ path: '/missing/old.png', label: 'old.png' }] },
+      { message_id: latest.id, images: [{ path: latestPath, label: 'latest.png' }] },
+    ] })
+    await stack.dispose()
+    if (wakeKind === 'legacy') await fs.rm(join(dataRoot, 'agent', 'manager-principal-bindings.json'))
+    stack = buildManagerStack(deps)
+    await stack.principals.init()
+    let inspected: { isError: boolean; output: string } | undefined
+    const requests: LLMStreamParams[] = []
+    script = { async *stream(params) {
+      requests.push(params)
+      inspected = await params.tools.find(tool => tool.name === 'inspect_project_docs')!.call({ project_root: projectRoot, operation: 'read', path: 'README.md' }, {} as never)
+      yield* chunksFromContent([], 'end_turn')
+    }, updateConfig() {} }
+    const event = { ts: new Date().toISOString(), kind: 'state_changed' as const, worker_id: 'w-seeded', seq: 1 }
+    const wake = async () => {
+      if (wakeKind === 'workboard') await stack.registry.routeWorkboardAdminUpdate({ key, noticeRevision: 1 })
+      else if (wakeKind === 'media') await stack.registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'sess-boot', text: '媒体完成' })
+      else await stack.registry.routeWorkerEvent(event)
+    }
+    try {
+      if (wakeKind === 'resume') {
+        const regular = script
+        script = { async *stream() { await new Promise(() => {}) }, updateConfig() {} }
+        void stack.registry.routeWorkerEvent(event)
+        let checkpoint: Awaited<ReturnType<typeof stack.store.loadCheckpoint>>
+        await waitUntil(async () => { checkpoint = await stack.store.loadCheckpoint(key); return !!checkpoint })
+        await stack.dispose()
+        stack = buildManagerStack(deps)
+        await stack.principals.init()
+        script = regular
+        stack.registry.registerResumeCheckpoints([checkpoint!])
+        await stack.registry.resumeInterruptedEpisodes()
+      } else await wake()
+      expect(requests.length).toBeGreaterThan(0)
+      for (const request of requests) {
+        const images = request.messages.flatMap(m => 'content' in m && Array.isArray(m.content) ? m.content.filter(b => b.type === 'image') : [])
+        expect(images).toHaveLength(1)
+        expect(JSON.stringify(images)).toContain(Buffer.from('latest-picture').toString('base64'))
+        expect(JSON.stringify(request.messages)).toContain('old.png（图片内容未附带）')
+      }
+      expect(inspected).toMatchObject({ isError: false })
+      expect(stack.principals.get(key)?.principal).toEqual({ sessionType: 'group' })
+      expect(stack.principals.get(key)?.memory.read_accessible_scopes).toEqual(['group-scope'])
+      expect(resolvePermissions).toHaveBeenLastCalledWith({ channelId: 'wechat', sessionId: 'sess-boot', sessionType: 'group' })
+      expect(JSON.stringify(memoryContexts)).toContain('group-scope')
+      allowRead = false
+      await wake()
+      expect(inspected).toMatchObject({ isError: true })
+    } finally { await stack.dispose() }
   })
 
   it('群聊 Worker 事件不把最近发言者当作私聊委托身份', async () => {

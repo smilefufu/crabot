@@ -7,7 +7,7 @@ import type { ManagerKey } from '../workers/harness/ledger-types.js'
 export type PersistedPrincipalBinding = {
   manager_key: ManagerKey
   generation: number
-  kind: 'friend' | 'admin_chat_jwt'
+  kind: 'friend' | 'group' | 'admin_chat_jwt'
   friend_id?: string
   assertion_id?: string
   expires_at?: string
@@ -90,7 +90,11 @@ export class PrincipalBindingStore {
 
   private assertBinding(binding: PersistedPrincipalBinding): void {
     if (!binding || !isManagerKey(binding.manager_key) || !Number.isInteger(binding.generation) || binding.generation < 1 ||
-      (binding.kind !== 'friend' && binding.kind !== 'admin_chat_jwt')) throw new Error('invalid principal binding')
+      (binding.kind !== 'friend' && binding.kind !== 'group' && binding.kind !== 'admin_chat_jwt')) throw new Error('invalid principal binding')
+    if (binding.kind === 'group') {
+      if (binding.manager_key === ADMIN_CHAT_KEY || binding.friend_id !== undefined || binding.assertion_id !== undefined || binding.expires_at !== undefined) throw new Error('invalid group binding')
+      return
+    }
     if (binding.kind === 'friend') {
       if (!nonEmpty(binding.friend_id) || binding.assertion_id !== undefined || binding.expires_at !== undefined) throw new Error('invalid friend binding')
       return

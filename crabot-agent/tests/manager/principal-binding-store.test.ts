@@ -24,7 +24,7 @@ const permissions = {
 } as const
 
 describe('principal bindings', () => {
-  it('persists only private bindings, advances generation, and does not restore Admin Chat authority after restart', async () => {
+  it('persists identity bindings, advances generation, and does not restore Admin Chat authority after restart', async () => {
     const root = await fs.mkdtemp(join(tmpdir(), 'principal-bindings-'))
     try {
       const file = join(root, 'manager-principal-bindings.json')
@@ -43,7 +43,7 @@ describe('principal bindings', () => {
     } finally { await fs.rm(root, { recursive: true, force: true }) }
   })
 
-  it('group human resolution never writes a durable binding; friend invalidation makes old authorization fail', async () => {
+  it('group binding survives restart without a speaker; friend invalidation makes old authorization fail', async () => {
     const root = await fs.mkdtemp(join(tmpdir(), 'principal-bindings-'))
     try {
       const store = new PrincipalBindingStore(join(root, 'bindings.json')); await store.init()
@@ -51,7 +51,14 @@ describe('principal bindings', () => {
       const principal = new ManagerPrincipalStore({ resolvePermissions: async () => null, sessionMemoryScopes: async () => [], sceneProfile: async () => null, crabSelfHandle: () => undefined, getFriend: async () => current }, store)
       await principal.init()
       await principal.resolve('wechat::group' as never, { friend: friend('master'), sessionType: 'group' })
-      expect(store.get('wechat::group' as never)).toBeUndefined()
+      expect(store.get('wechat::group' as never)).toEqual({ manager_key: 'wechat::group', kind: 'group', generation: 1 })
+      const restoredBindings = new PrincipalBindingStore(join(root, 'bindings.json'))
+      const restored = new ManagerPrincipalStore({ resolvePermissions: async () => null, sessionMemoryScopes: async () => [], sceneProfile: async () => null, crabSelfHandle: () => undefined }, restoredBindings)
+      await restored.init()
+      await restored.refreshForNonHumanWake('wechat::group')
+      expect(restored.get('wechat::group')?.principal).toEqual({ sessionType: 'group' })
+      expect(restored.get('wechat::group')?.memory.read_accessible_scopes).toEqual(['group'])
+      expect(restored.currentMasterAuthorization('wechat::group')).toBeUndefined()
       await principal.resolve(key, { friend: friend('master'), sessionType: 'private' })
       const auth = principal.currentMasterAuthorization(key)!; expect(await principal.validateMasterAuthorization(auth)).toBe(true)
       current = friend('normal'); await principal.invalidateFriend('f-1')
@@ -70,6 +77,7 @@ describe('principal bindings', () => {
         [{ ...valid, assertion_id: 'forbidden' }],
         [{ manager_key: 'wechat::s', generation: 1, kind: 'admin_chat_jwt', assertion_id: 'a', expires_at: '2099-01-01T00:00:00.000Z' }],
         [{ ...valid, manager_key: 'bad' }],
+        [{ ...valid, kind: 'group' }],
       ]) {
         await fs.writeFile(file, JSON.stringify({ bindings }))
         await expect(new PrincipalBindingStore(file).init()).rejects.toThrow(/invalid|duplicate/)

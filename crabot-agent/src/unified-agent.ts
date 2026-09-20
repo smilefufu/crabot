@@ -1175,6 +1175,16 @@ export class UnifiedAgent extends ModuleBase {
       },
       // 发起人身份的解析原料：全是**既有**入口，本处只做注入，不新造解析逻辑。
       principalResolver: {
+        getSessionType: async (channelId, sessionId) => {
+          const result = await this.rpcClient.call<{ session_id: string }, {
+            session: { id: string; channel_id: string; type: 'private' | 'group' }
+          }>(await this.getChannelPort(channelId as ModuleId), 'get_session', { session_id: sessionId }, this.config.moduleId)
+          const session = result.session
+          if (session?.id !== sessionId || session.channel_id !== channelId || (session.type !== 'private' && session.type !== 'group')) {
+            throw new Error('Manager session identity does not match its Channel target')
+          }
+          return session.type
+        },
         resolvePermissions: (p) =>
           this.resolvePrincipalPermissions(p.senderFriendId, p.sessionId, p.sessionType, p.channelId),
         sessionMemoryScopes: (sessionId, channelId, sessionType) => this.getSessionMemoryScopes(sessionId, channelId, sessionType),

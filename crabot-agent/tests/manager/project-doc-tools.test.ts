@@ -122,8 +122,8 @@ describe('project document tools', () => {
       ledger,
       readWorkerContext: async (workerId) => contexts.get(workerId),
       managerKey: KEY,
-      wakeEvent,
-      ...(managerPrincipalPermissions ? { managerPrincipalPermissions } : {}),
+      managerPrincipalPermissions: managerPrincipalPermissions
+        ?? (wakeEvent && 'principalPermissions' in wakeEvent ? wakeEvent.principalPermissions : undefined),
     })
   }
 
@@ -253,15 +253,18 @@ describe('project document tools', () => {
     expect((await tool(wake, 'inspect_project_docs').call({ project_root: project, operation: 'list' }, {} as never)).isError).toBe(true)
   })
 
-  it('Worker 事件只继承来源 Worker 的权限与自身 workspace', async () => {
-    const wake = workerWake('w-project')
-    expect((await tool(wake, 'inspect_project_docs').call({ project_root: project, operation: 'list' }, {} as never)).isError).toBe(false)
-    expect((await tool(wake, 'inspect_project_docs').call({ project_root: sibling, operation: 'list' }, {} as never)).isError).toBe(true)
-
-    contexts.set('w-project', {
-      principal_permissions: permissions({ tool_access: { ...permissions().tool_access, file_io: false } }),
-    })
-    expect((await tool(wake, 'inspect_project_docs').call({ project_root: project, operation: 'list' }, {} as never)).isError).toBe(true)
+  it('普通非人类唤醒使用主控权限，Worker 权限不授予或降低主控权限', async () => {
+    const wakes: Array<WakeEvent | undefined> = [workerWake('w-project'),
+      { kind: 'media_notification', text: '通知' } as WakeEvent, undefined]
+    for (const wake of wakes) {
+      const manager = permissions({ storage: { workspace_path: root, access: 'readwrite' } })
+      contexts.set('w-project', { principal_permissions: permissions({ tool_access: { ...permissions().tool_access, file_io: false } }) })
+      expect((await tool(wake, 'inspect_project_docs', manager).call({ project_root: sibling, operation: 'list' }, {} as never)).isError).toBe(false)
+      const revoked = { ...manager, tool_access: { ...manager.tool_access, file_io: false } }
+      contexts.set('w-project', { principal_permissions: permissions() })
+      expect((await tool(wake, 'inspect_project_docs', revoked).call({ project_root: project, operation: 'list' }, {} as never)).isError).toBe(true)
+      expect((await tool(wake, 'inspect_project_docs').call({ project_root: project, operation: 'list' }, {} as never)).isError).toBe(true)
+    }
   })
 
   it('拒绝路径逃逸、非 Markdown、生成目录和越界软链接', async () => {

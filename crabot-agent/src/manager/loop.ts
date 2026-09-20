@@ -68,7 +68,7 @@ import {
   type IncrementalCompactionResult,
 } from '../engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../engine/query-loop.js'
-import { collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, toImageBlock, type ManagerImageRef } from './image-vision.js'
+import { REMOTE_IMAGE_PREFETCH_TIMEOUT_MS, GroupInboundImageProjection, collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, toImageBlock, type ManagerImageRef } from './image-vision.js'
 import { fetchRemoteImage } from '../agent/media-resolver.js'
 import type { ImageBlock } from '../engine/index.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
@@ -97,9 +97,6 @@ const POST_SEND_ACTION_RECHECK_PROMPT = '[系统复核] 你刚才发出的消息
 const WORKBOARD_ADMIN_UPDATE_PROMPT = '[系统提示]\n管理员已更新任务板。请查阅最新任务板，并核对后续安排。\n对没有当前事项的目标，也请核实是否已达成或需要安排下一步；按实际情况归档、推进或沟通，不为填补空目标而建项。'
 const WORKBOARD_IDLE_REVIEW_PROMPT = `[系统提示]
 任务板中至少有一项尚未收口的工作已一小时没有更新。请按本次提供的自省指南，查阅任务板与必要证据，逐项判断继续推进或等待。`
-
-/** 插话远程图预取超时:enqueue 与 drain 之间隔着工具执行,后台预取不阻塞任何人。 */
-const REMOTE_IMAGE_PREFETCH_TIMEOUT_MS = 8_000
 
 // --- Public Interface ---
 
@@ -1240,9 +1237,10 @@ export class ManagerLoop {
     // 否则 base64 会随 finalMessages 回写进 recent 与 episode log(codex review P1)。
     const supportsVision = this.deps.supportsVision?.() ?? false
     // 插话 drain 注入的开关:episode 内与 adapter/model 同点快照(§11 热更语义)
-    this.mailbox.setVisionEnabled(supportsVision)
+    const groupImages = this.deps.promptInputs().isGroup === true
+    this.mailbox.setVisionEnabled(supportsVision && !groupImages)
     const imageRefs = state.imageRefs ?? []
-    const injectable = supportsVision && imageRefs.length > 0
+    const injectable = supportsVision && !groupImages && imageRefs.length > 0
     const baseTailMessages: EngineMessage[] = [...state.recent, ...currentTailMessages]
     const injectedTail = injectable
       ? await injectInboundImages(baseTailMessages, { supportsVision, imageRefs })
@@ -2200,6 +2198,24 @@ export class ManagerLoop {
     const offRuntimeConfigApplied = this.deps.onRuntimeConfigApplied?.(() => configChanged.abort())
       ?? (() => undefined)
 
+    const groupImages = this.deps.promptInputs().isGroup === true
+      ? new GroupInboundImageProjection(this.deps.supportsVision?.() ?? false)
+      : undefined
+    const inferenceAdapter = (current: LLMAdapter): LLMAdapter => {
+      const observed = this.observeAdapter(episodeId, current, 'inference')
+      if (!groupImages) return observed
+      const imageRefs = () => this.resumeCheckpoint?.state.imageRefs ?? state.imageRefs ?? []
+      return {
+        traceIdentity: observed.traceIdentity,
+        onRequestLifecycle: observed.onRequestLifecycle?.bind(observed),
+        updateConfig: (config) => observed.updateConfig(config),
+        async *stream(params) {
+          const messages = await groupImages.project(params.messages, imageRefs())
+          yield* observed.stream({ ...params, messages })
+        },
+      }
+    }
+
     const options: EngineOptions = {
       systemPrompt,
       tools,
@@ -2358,7 +2374,7 @@ export class ManagerLoop {
       configChangedSignal: configChanged.signal,
       configGeneration: this.deps.runtimeConfigAppliedGeneration,
       onConfigChanged: async () => ({
-        adapter: this.observeAdapter(episodeId, this.deps.adapter(), 'inference'),
+        adapter: inferenceAdapter(this.deps.adapter()),
         model: this.deps.model(),
         // thinking 是 per-model 字段，随 model 一并替换；manager 不发 max_tokens。
         ...(this.deps.thinking ? { thinking: this.deps.thinking() } : {}),
@@ -2368,7 +2384,7 @@ export class ManagerLoop {
     try {
       const result = await runEngine({
         prompt: '', // 被忽略:initialMessages 非空时 runEngine 不使用 prompt(见 query-loop.ts)
-        adapter: this.observeAdapter(episodeId, adapter, 'inference'),
+        adapter: inferenceAdapter(adapter),
         options,
         initialMessages,
       })

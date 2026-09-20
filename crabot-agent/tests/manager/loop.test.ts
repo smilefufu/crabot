@@ -3732,4 +3732,79 @@ describe('ManagerLoop 入站图片视觉注入', () => {
     expect(stateAfter.imageRefs?.length).toBeGreaterThan(0)
     expect(JSON.stringify(stateAfter.recent)).toContain('[图片: cdn.jpg]')
   })
+  it.each([true, false])('群聊最后一张入站图跨历史和插话选择，vision=%s', async (vision) => {
+    const old = join(mediaDir, 'group-old.png')
+    const latest = join(mediaDir, 'group-latest.png')
+    await fs.writeFile(old, 'old-image')
+    await fs.writeFile(latest, 'latest-image')
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'group-call', input: {} }], stopReason: 'tool_use' })
+    queue.push({ stopReason: 'end_turn' })
+    let loop!: ManagerLoop
+    loop = new ManagerLoop(baseDeps({
+      store, adapter, supportsVision: () => vision, promptInputs: () => ({ isGroup: true }),
+      toolFace: () => [{
+        name: 'noop_tool', description: 'inject', inputSchema: { type: 'object', properties: {} }, isReadOnly: false,
+        call: async () => {
+          await loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [
+            imageMessage('group-old.png', old), imageMessage('group-latest.png', latest),
+          ] }))
+          return { output: 'ok', isError: false }
+        },
+      }],
+    }))
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [imageMessage('group-old.png', old)] }))
+    const images = (call: LLMStreamParams) => call.messages.flatMap((m) =>
+      'content' in m && Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image') : [])
+    expect(images(calls[0])).toHaveLength(vision ? 1 : 0)
+    expect(images(calls[1])).toHaveLength(vision ? 1 : 0)
+    if (vision) expect(JSON.stringify(images(calls[1]))).toContain(Buffer.from('latest-image').toString('base64'))
+    expect(JSON.stringify(calls[1].messages)).toContain('图片内容未附带')
+    const saved = await store.load(KEY)
+    expect(JSON.stringify(saved.recent)).not.toContain('图片内容未附带')
+    expect(JSON.stringify(saved.recent)).not.toContain('"source"')
+    expect(JSON.stringify(saved.recent)).toContain('[图片: group-latest.png]')
+    expect(saved.imageRefs?.flatMap((r) => r.images.map((image) => image.path))).toEqual(expect.arrayContaining([old, latest]))
+    calls.length = 0
+    await loop.wakeUp(workerEventWake('group-worker'))
+    expect(images(calls[0])).toHaveLength(vision ? 1 : 0)
+    if (vision) expect(JSON.stringify(images(calls[0]))).toContain(Buffer.from('latest-image').toString('base64'))
+  })
+
+  it('群聊远程多图插话只下载最后一张，不预取其他附件', async () => {
+    const fetch = vi.fn(async (_url: string, _options?: RequestInit) => ({ ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }))
+    vi.stubGlobal('fetch', fetch)
+    try {
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ toolCalls: [{ name: 'noop_tool', id: 'group-remote-call', input: {} }], stopReason: 'tool_use' })
+      queue.push({ stopReason: 'end_turn' })
+      let loop!: ManagerLoop
+      loop = new ManagerLoop(baseDeps({
+        store, adapter, supportsVision: () => true, promptInputs: () => ({ isGroup: true }),
+        toolFace: () => [{
+          name: 'noop_tool', description: 'inject remote', inputSchema: {}, isReadOnly: false,
+          call: async () => {
+            const remote = imageMessage('first.png', 'https://example.invalid/first.png')
+            await loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [{
+              ...remote, session: { ...remote.session, type: 'group' },
+              content: { ...remote.content, media: [
+                { filename: 'first.png', media_url: 'https://example.invalid/first.png', mime_type: 'image/png' },
+                { filename: 'last.png', media_url: 'https://example.invalid/last.png', mime_type: 'image/png' },
+              ] },
+            }] }))
+            expect(fetch).not.toHaveBeenCalled()
+            return { output: 'ok', isError: false }
+          },
+        }],
+      }))
+      await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('start')] }))
+      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(fetch.mock.calls[0][0]).toBe('https://example.invalid/last.png')
+      expect(JSON.stringify(calls[1].messages)).toContain('https://example.invalid/first.png（图片内容未附带）')
+      expect(JSON.stringify(await store.load(KEY))).not.toContain('"source"')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
 })

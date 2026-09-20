@@ -6,11 +6,9 @@ import { createInterface } from 'node:readline'
 import { defineTool } from '../../engine/index.js'
 import type { ToolCallResult, ToolDefinition } from '../../engine/index.js'
 import type { ResolvedPermissions } from '../../types.js'
-import { BUILTIN_WORKER_PERMISSIONS, narrowWorkerPermissions } from '../../workers/builtin/runtime.js'
 import type { WorkerContext } from '../../workers/harness/context-store.js'
-import type { LedgerWorker, ManagerKey } from '../../workers/harness/ledger-types.js'
+import type { ManagerKey } from '../../workers/harness/ledger-types.js'
 import type { LedgerStore } from '../../workers/harness/ledger-store.js'
-import type { WakeEvent } from '../loop.js'
 
 const MAX_READ_LINES = 400
 const DEFAULT_READ_LINES = 200
@@ -25,10 +23,10 @@ const EXCLUDED_DIRECTORIES = new Set([
 
 export interface ProjectDocToolDeps {
   readonly ledger: Pick<LedgerStore, 'listWorkers' | 'findWorker'>
+  /** Shared with execution-capabilities; project authorization never reads a Worker principal. */
   readonly readWorkerContext: (workerId: string) => Promise<WorkerContext | undefined>
   readonly managerKey: ManagerKey
-  readonly wakeEvent?: WakeEvent
-  /** Only for a standalone task-board notice, from the existing Manager binding. */
+  /** Current Manager authority; ordinary wake sources never supply their own permissions. */
   readonly managerPrincipalPermissions?: ResolvedPermissions
 }
 
@@ -122,60 +120,12 @@ async function realDirectory(value: string, label: string): Promise<string> {
   return resolved
 }
 
-function mainlineWorkspace(worker: LedgerWorker, seq?: number): string {
-  const incarnation = seq === undefined
-    ? worker.incarnations.filter((entry) => entry.forked_from === undefined).at(-1)
-    : worker.incarnations.find((entry) => entry.seq === seq)
-  if (!incarnation) throw new Error(`来源 Worker 缺少对应化身 workspace`)
-  return incarnation.workspace
-}
-
-function permissionsFromWake(
-  wakeEvent: WakeEvent | undefined,
-  managerPrincipalPermissions: ResolvedPermissions | undefined,
-): ResolvedPermissions | undefined {
-  if (
-    wakeEvent?.kind === 'human_messages' ||
-    wakeEvent?.kind === 'attention_flush' ||
-    wakeEvent?.kind === 'schedule'
-  ) {
-    return wakeEvent.principalPermissions
-  }
-  if (
-    wakeEvent?.kind === 'workboard_admin_update'
-    || wakeEvent?.kind === 'workboard_idle_review'
-  ) return managerPrincipalPermissions
-  return undefined
-}
-
 export async function authorizeProjectRoot(
   deps: ProjectDocToolDeps,
   rawProjectRoot: unknown,
   write: boolean,
 ): Promise<string> {
-  const wake = deps.wakeEvent
-  if (wake?.kind === 'worker_event') {
-    const found = await deps.ledger.findWorker(wake.event.worker_id)
-    if (!found || found.managerKey !== deps.managerKey || found.worker.manager_key !== deps.managerKey) {
-      throw new Error('来源 Worker 不属于当前会话，项目权限已拒绝')
-    }
-    const persisted = await deps.readWorkerContext(found.worker.worker_id)
-    const effective = narrowWorkerPermissions(
-      BUILTIN_WORKER_PERMISSIONS,
-      persisted?.principal_permissions ?? null,
-    )
-    if (!effective.tool_access.file_io) throw new Error('来源 Worker 没有 file_io 权限')
-
-    const requested = await realDirectory(normalizeProjectRoot(rawProjectRoot), 'project_root')
-    const workspace = await realDirectory(
-      normalizeAbsoluteDirectoryPath(mainlineWorkspace(found.worker, wake.event.seq), '来源 Worker workspace'),
-      '来源 Worker workspace',
-    )
-    if (requested !== workspace) throw new Error('Worker 事件只能访问来源 Worker 自己的 workspace')
-    return requested
-  }
-
-  const permissions = permissionsFromWake(wake, deps.managerPrincipalPermissions)
+  const permissions = deps.managerPrincipalPermissions
   if (!permissions) throw new Error('当前处理回合没有可用的主体权限快照')
   if (!permissions.tool_access.file_io) throw new Error('当前处理回合主体没有 file_io 权限')
   if (write && permissions.storage?.access !== 'readwrite' && permissions.storage !== null) {
