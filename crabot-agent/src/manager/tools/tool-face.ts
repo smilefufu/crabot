@@ -342,6 +342,36 @@ function buildManagerMemoryFace(memoryServer: McpServer): ToolDefinition[] {
   return MANAGER_MEMORY_TOOL_NAMES.map((name) => byName.get(name)!)
 }
 
+/** 历史 inbox 仅经 Admin 预览后人工迁移，daily 不能靠模型自律守住这条边界。 */
+function protectDailyReflectionMemory(tools: ToolDefinition[]): ToolDefinition[] {
+  const detail = tools.find(tool => tool.name === `${ALLOWED_MCP_PREFIX}get_memory_detail`)!
+  const writes = new Set(['promote_inbox_entry', 'delete_memory', 'update_long_term', 'set_memory_links']
+    .map(name => `${ALLOWED_MCP_PREFIX}${name}`))
+  return tools.map((tool): ToolDefinition => {
+    if (!writes.has(tool.name)) return tool
+    return { ...tool, async call(input, context) {
+      const unavailable = { output: '无法核实记忆当前状态，本次未执行修改。', isError: true }
+      if (typeof input.id !== 'string' || !input.id) return unavailable
+      try {
+        const result = await detail.call({ memory_id: input.id, include: 'full' }, context)
+        if (result.isError) return unavailable
+        const entry = JSON.parse(result.output)
+        if (!entry || entry.id !== input.id || !['inbox', 'confirmed', 'trash'].includes(entry.status)
+          || !entry.frontmatter || typeof entry.frontmatter !== 'object' || Array.isArray(entry.frontmatter)) {
+          return unavailable
+        }
+        if (entry.status === 'inbox'
+          && (typeof entry.frontmatter.inbox_entered_at !== 'string' || !entry.frontmatter.inbox_entered_at)) {
+          return { output: '历史 inbox 缺少 inbox_entered_at，本轮跳过此类候选；保留 Admin 预览及人工确认迁移流程，未执行修改。', isError: true }
+        }
+      } catch {
+        return unavailable
+      }
+      return tool.call(input, context)
+    } }
+  })
+}
+
 /**
  * 对装配结果做自检：不得包含通用文件系统/编排工具，也不得包含任何外装 MCP 工具
  * （即 `mcp__` 前缀里非 crab-memory 的）。命中即抛错——本函数独立导出，供测试直接
@@ -489,8 +519,12 @@ function hasUnsafeMetadata(value: unknown): boolean {
 /** 返回完整内置工具面；有 episode 状态时投影为稳定核心 + 已加载尾部。 */
 export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   if (deps.faceState?.catalog) return deps.faceState.catalog.project(deps.faceState, deps.faceState.searchTool)
+  const selectedProfile = deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')
+  const normalProfile = selectedProfile === 'normal'
+  const dailyProfile = selectedProfile === 'daily_reflection' && deps.isBuiltinDailyReflection === true
   const messagingTools = buildMessagingFace(deps)
-  const memoryTools = buildManagerMemoryFace(deps.memoryServer)
+  const memoryFace = buildManagerMemoryFace(deps.memoryServer)
+  const memoryTools = dailyProfile ? protectDailyReflectionMemory(memoryFace) : memoryFace
   const workerTools = buildWorkerTools({
     authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot(deps.projectDocs, workspaceRoot, false),
     harness: deps.harness,
@@ -509,9 +543,6 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
     ...(deps.schedule ? { schedule: deps.schedule } : {}),
   })
-  const selectedProfile = deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')
-  const normalProfile = selectedProfile === 'normal'
-  const dailyProfile = selectedProfile === 'daily_reflection' && deps.isBuiltinDailyReflection === true
   const guidanceTool = createGuidanceTool('manager')
   const workboardTools = buildWorkboardTools(deps.workboard)
   const projectDocTools = buildProjectDocTools(deps.projectDocs)

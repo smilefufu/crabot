@@ -10,6 +10,7 @@ import { HttpResponseError, StreamProtocolError, parseRetryAfterMs } from './ret
 const MAX_DIAGNOSTIC_EVENTS = 256
 const MAX_DIAGNOSTIC_BYTES = 256 * 1024
 import { withStreamTimeout } from './stream-timeout.js'
+import { fetchLlm } from './llm-fetch.js'
 import { buildPromptCacheKey } from './prompt-cache-key.js'
 
 // --- OpenAI Message Types ---
@@ -198,7 +199,7 @@ export class OpenAIAdapter implements LLMAdapter {
       body.tools = tools
     }
 
-    const response = await fetch(`${this.config.endpoint}/chat/completions`, {
+    const response = await fetchLlm(`${this.config.endpoint}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
