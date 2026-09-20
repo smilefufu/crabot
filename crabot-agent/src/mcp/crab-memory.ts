@@ -249,6 +249,8 @@ const LIST_ENTRIES_SCHEMA = {
     .describe('返回数量上限'),
   offset: z.number().int().min(0).optional()
     .describe('分页偏移'),
+  sort: z.enum(['ingestion_time_desc', 'ingestion_time_asc', 'event_time_desc']).optional()
+    .describe('排序，默认 ingestion_time_desc；inbox 最早优先处理使用 ingestion_time_asc'),
 }
 
 const SET_MEMORY_LINKS_SCHEMA = {
