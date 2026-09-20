@@ -13,8 +13,8 @@
 import { StreamTimeoutError } from './retry-utils.js'
 import type { StreamChunk } from './types.js'
 
-// 默认值偏保守，容得下慢 prefill 的大上下文请求；可用环境变量覆盖。
-export const STREAM_TTFB_MS = Number(process.env.CRABOT_STREAM_TTFB_MS) || 90_000
+// 首 chunk 默认与 Anthropic SDK 的 10 分钟一致；idle 独立计时，可用环境变量覆盖。
+export const STREAM_TTFB_MS = Number(process.env.CRABOT_STREAM_TTFB_MS) || 600_000
 export const STREAM_IDLE_MS = Number(process.env.CRABOT_STREAM_IDLE_MS) || 120_000
 
 export interface StreamTimeoutOptions {
