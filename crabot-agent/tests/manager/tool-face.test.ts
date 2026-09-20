@@ -126,6 +126,131 @@ function memoryToolNames(tools: ToolDefinition[]): string[] {
   return tools.map((t) => t.name).filter((n) => n.startsWith('mcp__crab-memory__'))
 }
 
+describe('每日反思保留历史 inbox 的人工迁移边界', () => {
+  const writes = [
+    ['promote_inbox_entry', { id: 'legacy' }, 'promote_inbox_entry'],
+    ['delete_memory', { id: 'legacy' }, 'delete_memory'],
+    ['update_long_term', { id: 'legacy', patch: { body: 'replacement' } }, 'update_long_term'],
+    ['set_memory_links', { id: 'legacy', links: [] }, 'update_long_term'],
+  ] as const
+
+  async function face(call: ReturnType<typeof vi.fn>, mode: 'full' | 'progressive', daily = true) {
+    const deps = makeDeps({
+      isBuiltinDailyReflection: daily,
+      faceState: createManagerToolFaceState(mode),
+      candidatePermissions: { tool_access: { memory: true }, cli_access: {} } as ResolvedPermissions,
+      memoryServer: createCrabMemoryServer({
+        rpcClient: { call } as never, moduleId: 'manager-test', getMemoryPort: async () => 19100,
+      }, { visibility: 'internal', scopes: [], isMasterPrivate: false }),
+    })
+    const initial = buildManagerToolFace(deps)
+    if (mode === 'progressive') {
+      await initial.find(t => t.name === 'load_tool_family')!.call({ family: 'memory' }, {} as never)
+    }
+    return buildManagerToolFace(deps)
+  }
+
+  for (const mode of ['full', 'progressive'] as const) {
+    it.each(writes)(`${mode}: %s 不得修改缺少生命周期字段的历史候选`, async (name, input) => {
+      const call = vi.fn(async (_port, method) => method === 'get_memory'
+        ? { id: 'legacy', status: 'inbox', frontmatter: {}, body: 'original' }
+        : { status: 'ok' })
+      const tools = await face(call, mode)
+      const result = await tools.find(t => t.name === `mcp__crab-memory__${name}`)!.call(input, {} as never)
+      expect(result.isError).toBe(true)
+      expect(result.output).toContain('历史 inbox')
+      expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory'])
+    })
+  }
+
+  it.each(writes)('%s 保留带生命周期字段的正常候选处理', async (name, input, method) => {
+    const call = vi.fn(async (_port, m) => m === 'get_memory'
+      ? { id: 'legacy', status: 'inbox', frontmatter: { inbox_entered_at: '2026-09-20T00:00:00Z' } }
+      : { status: 'ok' })
+    const tools = await face(call, 'progressive')
+    const result = await tools.find(t => t.name === `mcp__crab-memory__${name}`)!.call(input, {} as never)
+    expect(result.isError).toBe(false)
+    expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory', method])
+  })
+
+  it('普通主控的人工操作不套用每日反思限制', async () => {
+    const call = vi.fn(async () => ({ status: 'ok' }))
+    const tools = await face(call, 'progressive', false)
+    await tools.find(t => t.name === 'mcp__crab-memory__delete_memory')!.call({ id: 'legacy' }, {} as never)
+    expect(call.mock.calls.map(c => c[1])).toEqual(['delete_memory'])
+  })
+
+  it.each(['confirmed', 'trash'])('%s 缺少 inbox_entered_at 不被误当历史 inbox', async status => {
+    const call = vi.fn(async (_port, method) => method === 'get_memory'
+      ? { id: 'legacy', status, frontmatter: {} } : { status: 'ok' })
+    const tools = await face(call, 'progressive')
+    const result = await tools.find(t => t.name === 'mcp__crab-memory__delete_memory')!.call({ id: 'legacy' }, {} as never)
+    expect(result.isError).toBe(false)
+    expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory', 'delete_memory'])
+  })
+
+  it.each([
+    { error: 'unavailable' },
+    { id: 'other', status: 'inbox', frontmatter: { inbox_entered_at: '2026-09-20T00:00:00Z' } },
+    { id: 'legacy', status: 'inbox' },
+  ])('无法核实目标状态时不执行写入：%j', async detail => {
+    const call = vi.fn(async () => detail)
+    const tools = await face(call, 'progressive')
+    const result = await tools.find(t => t.name === 'mcp__crab-memory__delete_memory')!.call({ id: 'legacy' }, {} as never)
+    expect(result.isError).toBe(true)
+    expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory'])
+  })
+
+  it('每次写入核对当前状态，不缓存旧的准入结论', async () => {
+    let enteredAt: string | undefined = '2026-09-20T00:00:00Z'
+    const call = vi.fn(async (_port, method) => method === 'get_memory'
+      ? { id: 'legacy', status: 'inbox', frontmatter: { inbox_entered_at: enteredAt } } : { status: 'ok' })
+    const tools = await face(call, 'progressive')
+    const update = tools.find(t => t.name === 'mcp__crab-memory__update_long_term')!
+    expect((await update.call({ id: 'legacy', patch: { body: 'one' } }, {} as never)).isError).toBe(false)
+    enteredAt = undefined
+    expect((await update.call({ id: 'legacy', patch: { body: 'two' } }, {} as never)).isError).toBe(true)
+    expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory', 'update_long_term', 'get_memory'])
+  })
+
+  it('重放同批6次确认和14次删除：Engine保留失败回包，20个历史条目均不变', async () => {
+    const entries = new Map(Array.from({ length: 20 }, (_, i) => [`legacy-${i}`, {
+      id: `legacy-${i}`, status: 'inbox', frontmatter: {}, body: `original-${i}`,
+    }]))
+    const before = structuredClone([...entries])
+    const call = vi.fn(async (_port, method, input) => {
+      const entry = entries.get(input.id)!
+      if (method === 'get_memory') return entry
+      entry.status = method === 'delete_memory' ? 'trash' : 'confirmed'
+      return { status: 'ok' }
+    })
+    const tools = await face(call, 'progressive')
+    let requests = 0
+    const adapter: LLMAdapter = {
+      updateConfig() {},
+      async *stream() {
+        if (requests++ === 0) yield* chunksFromContent(Array.from({ length: 20 }, (_, i) => ({
+          type: 'tool_use' as const, id: `write-${i}`,
+          name: `mcp__crab-memory__${i < 6 ? 'promote_inbox_entry' : 'delete_memory'}`,
+          input: { id: `legacy-${i}` },
+        })), 'tool_use')
+        else yield* chunksFromContent([{ type: 'text', text: '历史候选留待人工迁移。' }], 'end_turn')
+      },
+    }
+    const turns: EngineTurnEvent[] = []
+    await runEngine({ prompt: '验收历史候选保护', adapter, options: {
+      model: 'fixture', systemPrompt: 'fixture', tools, maxTurns: 2,
+      suppressForcedSummary: () => true, onTurn: turn => { turns.push(turn) },
+    } })
+    expect(requests).toBe(2)
+    expect(turns.flatMap(turn => turn.toolCalls)).toHaveLength(20)
+    expect(turns.flatMap(turn => turn.toolCalls).every(call => call.isError)).toBe(true)
+    expect([...entries]).toEqual(before)
+    expect(call).toHaveBeenCalledTimes(20)
+    expect(call.mock.calls.every(c => c[1] === 'get_memory')).toBe(true)
+  })
+})
+
 describe('buildManagerToolFace', () => {
   const permissions: ResolvedPermissions = {
     tool_access: { memory: true, messaging: true, task: true, mcp_skill: true, file_io: true, browser: true, shell: true, remote_exec: true, desktop: true },
