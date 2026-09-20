@@ -12,7 +12,9 @@ import type {
 
 const finishSchema = z.object({
   outcome: z.enum(['completed', 'partial']), summary: z.string().trim().min(1),
-  pending_items: z.array(z.string()), evidence_refs: z.array(z.string()), summary_delivered: z.boolean().optional(),
+  pending_items: z.array(z.string()),
+  evidence_refs: z.array(z.string()).describe('仅填写本周期目录返回且已用 read_reflection_record 读完的 record_ref；不是 run_id、Memory ID 或 source_id。没有已读引用时填空数组。'),
+  summary_delivered: z.boolean().optional(),
 }).strict()
 
 export interface DailyReflectionDeps {
