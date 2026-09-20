@@ -1,5 +1,5 @@
 import { jsonrepair } from 'jsonrepair'
-import type { StreamChunk, ToolUseBlock, RawReasoningBlock, LLMTokenUsage } from './types'
+import type { StreamChunk, ToolUseBlock, RawReasoningBlock, LLMTokenUsage, ContentBlock } from './types'
 
 /**
  * 判断 chunk 是否对消费者可见。message_start 仅携带 messageId，
@@ -12,6 +12,7 @@ export function isMaterialChunk(chunk: StreamChunk): boolean {
 }
 
 export interface ProcessedResponse {
+  readonly orderedContent?: ReadonlyArray<ContentBlock>
   readonly text: string
   readonly toolUseBlocks: ReadonlyArray<ToolUseBlock>
   readonly reasoningBlocks: ReadonlyArray<RawReasoningBlock>
@@ -26,6 +27,7 @@ interface ToolUseBuffer {
 }
 
 export class StreamProcessor {
+  private orderedContent: ContentBlock[] | undefined
   private textParts: string[] = []
   private toolUseBlocks: ToolUseBlock[] = []
   private reasoningBlocks: RawReasoningBlock[] = []
@@ -35,6 +37,16 @@ export class StreamProcessor {
 
   process(chunk: StreamChunk): void {
     switch (chunk.type) {
+      case 'assistant_content':
+        this.orderedContent = chunk.blocks.map(block => {
+          if (block.type !== 'tool_use') return block
+          const tool = this.toolUseBlocks.find(tool => tool.id === block.id)
+          if (!tool) throw new Error(`Missing parsed tool input for ${block.id}`)
+          return tool
+        })
+        this.reasoningBlocks = this.orderedContent.filter((block): block is RawReasoningBlock => block.type === 'raw_reasoning')
+        break
+
       case 'text_delta':
         this.textParts.push(chunk.text)
         break
@@ -90,6 +102,7 @@ export class StreamProcessor {
 
   finalize(): ProcessedResponse {
     return {
+      ...(this.orderedContent ? { orderedContent: [...this.orderedContent] } : {}),
       text: this.textParts.join(''),
       toolUseBlocks: [...this.toolUseBlocks],
       reasoningBlocks: [...this.reasoningBlocks],
@@ -99,6 +112,7 @@ export class StreamProcessor {
   }
 
   reset(): void {
+    this.orderedContent = undefined
     this.textParts = []
     this.toolUseBlocks = []
     this.reasoningBlocks = []

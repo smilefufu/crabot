@@ -10,6 +10,7 @@ import type {
   TextBlockParam,
   ToolUseBlockParam,
   ToolResultBlockParam,
+  RawMessageStreamEvent,
 } from '@anthropic-ai/sdk/resources/messages'
 import { proxyManager } from 'crabot-shared'
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMThinkingConfig } from './llm-adapter-types.js'
@@ -22,7 +23,21 @@ import type {
   StreamChunk,
   LLMTokenUsage,
   ToolUseBlock,
+  AssistantContentPart,
 } from './types.js'
+
+// SDK 0.30 predates thinking blocks; keep the native wire fields intact.
+type ThinkingBlock = { type: 'thinking'; thinking: string; signature: string }
+type RedactedThinkingBlock = { type: 'redacted_thinking'; data: string }
+type NativeAssistantBlock = TextBlockParam | ToolUseBlockParam | ThinkingBlock | RedactedThinkingBlock
+type ThinkingStreamEvent = RawMessageStreamEvent
+  | { type: 'content_block_start'; index: number; content_block: ThinkingBlock | RedactedThinkingBlock }
+  | { type: 'content_block_delta'; index: number; delta: { type: 'thinking_delta'; thinking: string } | { type: 'signature_delta'; signature: string } }
+
+function isThinkingBlock(block: Record<string, unknown>): block is ThinkingBlock | RedactedThinkingBlock {
+  return (block.type === 'thinking' && typeof block.thinking === 'string' && typeof block.signature === 'string')
+    || (block.type === 'redacted_thinking' && typeof block.data === 'string')
+}
 
 // --- Default max_tokens by model family ---
 // Anthropic SDK 强制要求 max_tokens；当上游（admin provider config）没配时，
@@ -156,7 +171,7 @@ export function normalizeMessagesForAnthropic(
     if (msg.role === 'assistant') {
       return {
         role: 'assistant',
-        content: msg.content.flatMap((block): Array<TextBlockParam | ToolUseBlockParam> => {
+        content: msg.content.flatMap((block): NativeAssistantBlock[] => {
           switch (block.type) {
             case 'text':
               return [{ type: 'text' as const, text: block.text }]
@@ -170,13 +185,15 @@ export function normalizeMessagesForAnthropic(
                   input: block.input,
                 },
               ]
+            case 'raw_reasoning':
+              return block.source === 'anthropic' && isThinkingBlock(block.data) ? [{ ...block.data }] : []
             default:
-              // 不认识的 block（如 raw_reasoning）丢弃——原先映射成空 text block
+              // 不认识的 block 丢弃——原先映射成空 text block
               // 发给 API 是纯垃圾 token，且空 text block 本身会被 API 拒绝
               return []
           }
         }),
-      }
+      } as MessageParam
     }
 
     if (typeof msg.content === 'string') {
@@ -322,8 +339,10 @@ export class AnthropicAdapter implements LLMAdapter {
         }
       }
       if (msg.content.length === 0) return msg
+      const lastCacheable = msg.content.reduce((last, block, index) =>
+        block.type === 'text' || block.type === 'image' || block.type === 'tool_use' || block.type === 'tool_result' ? index : last, -1)
       const blocks = msg.content.map((block, j) =>
-        j === msg.content.length - 1 ? { ...block, cache_control: EPHEMERAL } : block,
+        j === lastCacheable ? { ...block, cache_control: EPHEMERAL } : block,
       )
       return { ...msg, content: blocks }
     })
@@ -348,50 +367,50 @@ export class AnthropicAdapter implements LLMAdapter {
     }
 
     try {
-      let currentToolId: string | null = null
-
-      for await (const event of stream) {
+      const blocks = new Map<number, AssistantContentPart>()
+      for await (const rawEvent of stream) {
+        const event = rawEvent as ThinkingStreamEvent
         switch (event.type) {
           case 'message_start':
             yield { type: 'message_start', messageId: event.message.id }
             break
-
-          case 'content_block_start':
-            if (event.content_block.type === 'tool_use') {
-              currentToolId = event.content_block.id
-              yield {
-                type: 'tool_use_start',
-                id: event.content_block.id,
-                name: event.content_block.name,
-              }
+          case 'content_block_start': {
+            const block = event.content_block
+            if (block.type === 'tool_use') {
+              blocks.set(event.index, { type: 'tool_use', id: block.id })
+              yield { type: 'tool_use_start', id: block.id, name: block.name }
+            } else if (block.type === 'text') {
+              blocks.set(event.index, { type: 'text', text: block.text })
+              if (block.text) yield { type: 'text_delta', text: block.text }
+            } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+              blocks.set(event.index, { type: 'raw_reasoning', source: 'anthropic', data: { ...block } })
             }
             break
-
-          case 'content_block_delta':
-            if (event.delta.type === 'text_delta') {
-              yield { type: 'text_delta', text: event.delta.text }
-            } else if (event.delta.type === 'input_json_delta') {
-              yield {
-                type: 'tool_use_delta',
-                id: currentToolId ?? '',
-                inputJson: event.delta.partial_json,
-              }
+          }
+          case 'content_block_delta': {
+            const block = blocks.get(event.index)
+            const delta = event.delta
+            if (delta.type === 'text_delta' && block?.type === 'text') {
+              blocks.set(event.index, { type: 'text', text: block.text + delta.text })
+              yield { type: 'text_delta', text: delta.text }
+            } else if (delta.type === 'input_json_delta' && block?.type === 'tool_use') {
+              yield { type: 'tool_use_delta', id: block.id, inputJson: delta.partial_json }
+            } else if (block?.type === 'raw_reasoning') {
+              if (delta.type === 'thinking_delta') block.data.thinking = String(block.data.thinking ?? '') + delta.thinking
+              if (delta.type === 'signature_delta') block.data.signature = String(block.data.signature ?? '') + delta.signature
             }
             break
-
-          case 'content_block_stop':
-            if (currentToolId !== null) {
-              yield { type: 'tool_use_end', id: currentToolId }
-              currentToolId = null
-            }
+          }
+          case 'content_block_stop': {
+            const block = blocks.get(event.index)
+            if (block?.type === 'tool_use') yield { type: 'tool_use_end', id: block.id }
             break
-
-          case 'message_delta':
-            break
+          }
         }
       }
 
       const finalMessage = await stream.finalMessage()
+      yield { type: 'assistant_content', blocks: [...blocks.entries()].sort(([a], [b]) => a - b).map(([, block]) => block) }
       yield {
         type: 'message_end',
         stopReason: finalMessage.stop_reason ?? null,

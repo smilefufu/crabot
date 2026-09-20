@@ -762,6 +762,9 @@ export class ContextManager {
         case 'tool_result':
           chars += block.content.length
           break
+        case 'raw_reasoning':
+          chars += JSON.stringify(block.data).length
+          break
       }
     }
     return chars

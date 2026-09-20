@@ -93,7 +93,7 @@ export function normalizeMessagesForOpenAI(messages: ReadonlyArray<EngineMessage
       // DeepSeek thinking mode 契约：tool-use loop 中 assistant 消息必须把 reasoning_content
       // 原样回传，否则 400。其它 OpenAI 兼容 endpoint 会把这个字段当 unknown 字段忽略。
       const reasoningContent = msg.content
-        .filter((b): b is { type: 'raw_reasoning'; data: Record<string, unknown> } => b.type === 'raw_reasoning')
+        .filter((b): b is { type: 'raw_reasoning'; data: Record<string, unknown> } => b.type === 'raw_reasoning' && b.source !== 'anthropic')
         .map((b) => (typeof b.data.reasoning_content === 'string' ? b.data.reasoning_content : ''))
         .join('')
 

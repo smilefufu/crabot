@@ -263,7 +263,7 @@ async function withStreamConsumptionRetry(
       } : undefined
       if (completed) observe(completed)
       return {
-        content: [
+        content: result.orderedContent ? [...result.orderedContent] : [
           // Reasoning items come first so they precede text/tool_use when replayed to Codex
           ...result.reasoningBlocks,
           ...(result.text ? [{ type: 'text' as const, text: result.text }] : []),

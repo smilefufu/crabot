@@ -294,8 +294,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       messageCountAtObservation = messages.length
     }
 
-    // Build assistant message content blocks (preserves reasoning ordering: reasoning → text → tool_use)
-    const contentBlocks = buildAssistantContent(processed.reasoningBlocks, processed.text, processed.toolUseBlocks)
+    // The adapter/processor already supplied the replay order.
+    const contentBlocks = [...response.content]
     const stopReason = normalizeStopReason(response.stopReason)
 
     const assistantMessage = createAssistantMessage(contentBlocks, stopReason, response.usage)
@@ -918,29 +918,6 @@ function buildResult(
     ...(exitToolCall !== undefined ? { exitToolCall } : {}),
     ...(error !== undefined ? { error } : {}),
   }
-}
-
-function buildAssistantContent(
-  reasoningBlocks: ReadonlyArray<RawReasoningBlock>,
-  text: string,
-  toolUseBlocks: ReadonlyArray<ToolUseBlock>
-): ContentBlock[] {
-  const blocks: ContentBlock[] = []
-
-  // Reasoning must precede text/tool_use so Codex replay keeps encrypted_content intact
-  for (const block of reasoningBlocks) {
-    blocks.push(block)
-  }
-
-  if (text.length > 0) {
-    blocks.push({ type: 'text', text })
-  }
-
-  for (const block of toolUseBlocks) {
-    blocks.push(block)
-  }
-
-  return blocks
 }
 
 function partitionResponseContent(content: ReadonlyArray<ContentBlock>): {

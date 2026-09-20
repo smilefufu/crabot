@@ -32,12 +32,12 @@ export interface ToolResultBlock {
 }
 
 /**
- * Raw reasoning block for OpenAI Responses API (Codex backend).
- * Stores the full reasoning item JSON so it can be replayed back in subsequent turns.
- * Other adapters ignore this block type.
+ * Provider-native reasoning retained for history replay, never user-facing text.
+ * Legacy blocks have no source; newly captured Anthropic blocks are explicit.
  */
 export interface RawReasoningBlock {
   readonly type: 'raw_reasoning'
+  readonly source?: 'anthropic'
   readonly data: Record<string, unknown>
 }
 
@@ -200,7 +200,11 @@ export interface ToolDefinition {
 
 // --- Stream Chunks ---
 
+/** Ordered native content; tool references resolve to the single parsed execution input. */
+export type AssistantContentPart = TextBlock | RawReasoningBlock | Pick<ToolUseBlock, 'type' | 'id'>
+
 export type StreamChunk =
+  | { readonly type: 'assistant_content'; readonly blocks: ReadonlyArray<AssistantContentPart> }
   | { readonly type: 'text_delta'; readonly text: string }
   | { readonly type: 'tool_use_start'; readonly id: string; readonly name: string }
   | { readonly type: 'tool_use_delta'; readonly id: string; readonly inputJson: string }

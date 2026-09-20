@@ -59,6 +59,7 @@ export function normalizeMessagesForResponses(messages: ReadonlyArray<EngineMess
           continue
         }
         if (block.type === 'raw_reasoning') {
+          if (block.source === 'anthropic') continue
           flushText()
           result.push(block.data as Record<string, unknown>)
           continue
