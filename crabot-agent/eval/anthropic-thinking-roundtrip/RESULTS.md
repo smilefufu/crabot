@@ -8,7 +8,7 @@
 
 覆盖：原始 SSE（包括已安装 SDK 的真实解析器）→ adapter → Engine → 下一请求；Manager session/checkpoint 保存恢复；builtin SessionTree 保存恢复；压缩尾部保持完整；空 thinking、分片签名和 redacted_thinking；跨格式过滤；无工具 fork 的推理及缓存标记；流失败不产生成功内容。
 
-Agent 构建通过；13个相关测试文件352项通过。命令使用 `vitest run ... --testTimeout=15000`，覆盖 anthropic-thinking-roundtrip、anthropic-adapter、llm-adapter、thinking-mapping、stream-processor、query-loop、context-manager、send-message-guard、stream-timeout、manager session-store/restart-resume、worker session-tree/builtin-adapter。
+同步最新 main 的首响应超时修复后，Agent 构建通过；14个相关测试文件360项通过。命令使用 `vitest run ... --testTimeout=15000`，覆盖 anthropic-thinking-roundtrip、anthropic-adapter、llm-adapter、thinking-mapping、stream-processor、query-loop、context-manager、send-message-guard、stream-timeout、llm-fetch、manager session-store/restart-resume、worker session-tree/builtin-adapter。
 
 ## 真实 K3 请求
 

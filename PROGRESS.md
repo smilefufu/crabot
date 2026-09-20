@@ -6,7 +6,7 @@
 ### Anthropic 推理历史往返：接口修复已验证，Kimi 行为验收未通过
 
 - 按已确认 spec 保存 thinking/signature/redacted_thinking 及内容顺序，覆盖历史恢复、跨格式过滤和容量估算；不改发送或结束语义。
-- 先复现4项失败，修复后13文件352测试及Agent构建通过；真实4次请求中旧历史两次均无 thinking，新上下文完整往返后仍产生空内容 send_message，不能宣称复读已根治。见 [验证报告](crabot-agent/eval/anthropic-thinking-roundtrip/RESULTS.md)。
+- 先复现4项失败，修复后同步最新 main 后14文件360测试及Agent构建通过；真实4次请求中旧历史两次均无 thinking，新上下文完整往返后仍产生空内容 send_message，不能宣称复读已根治。见 [验证报告](crabot-agent/eval/anthropic-thinking-roundtrip/RESULTS.md)。
 - 待审查、未部署；后续需区分模型结束输出与兼容服务映射，不能靠丢弃工具或读取 thinking 强制收口。
 
 
