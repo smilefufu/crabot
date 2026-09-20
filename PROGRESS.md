@@ -17,6 +17,12 @@
 
 ## 当前状态
 
+### LLM 首响应统一 10 分钟：实现与定向验证完成，待 PR 审查
+
+- 按已确认 [spec](crabot-docs/superpowers/specs/2026-09-20-kimi-first-response-budget-design.md)，共享首 chunk 默认预算由 90 秒改为 600 秒；idle 保持 120 秒，显式覆盖、取消与连接恢复分类不变。
+- OpenAI 两条 fetch 路径的本地响应头/响应体等待预算随之对齐，避免 Undici 默认 5 分钟提前截断；仅转发到当前全局 dispatcher，保留代理热更新，不创建连接池。运行时使用与 shared 相同的 Undici 7，保持安装器 Node 版本兼容。
+- 新回归先复现 4 项失败；修改后 timeout、transport、retry、适配器 116 项通过，Agent 构建通过。真实合成请求曾在 99.789 秒返回并成功结束；本次未新增在线模型请求、未修改生产配置或部署。
+
 ### 连续相同 send_message 保护：实现与定向验证完成，待 PR 审查
 
 - 按已确认 [spec](crabot-docs/superpowers/specs/2026-09-20-consecutive-send-message-guard-design.md)，共享 Engine 拒绝当前执行中连续同原始参数的 `send_message`，返回简短失败原因，实际 handler 不重复执行；前次失败及第三次重复同样拦截。

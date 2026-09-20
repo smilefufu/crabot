@@ -9,6 +9,7 @@ import { isToolResultMessage, extractText, buildImageUrl, readSSEEvents, capTool
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock, LLMTokenUsage } from './types.js'
 import { HttpResponseError, StreamProtocolError, parseRetryAfterMs } from './retry-utils.js'
 import { withStreamTimeout } from './stream-timeout.js'
+import { fetchLlm } from './llm-fetch.js'
 import { buildPromptCacheKey } from './prompt-cache-key.js'
 
 // --- Responses API Message Normalization ---
@@ -200,7 +201,7 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
       headers['ChatGPT-Account-Id'] = this.config.accountId
     }
 
-    const response = await fetch(`${this.config.endpoint}/responses`, {
+    const response = await fetchLlm(`${this.config.endpoint}/responses`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),

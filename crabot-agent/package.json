@@ -28,6 +28,7 @@
     "js-yaml": "^4.1.1",
     "jsonrepair": "^3.13.3",
     "smol-toml": "^1.7.1",
+    "undici": "^7.0.0",
     "vscode-jsonrpc": "^8.2.1",
     "vscode-languageserver-protocol": "^3.17.5",
     "zod": "^3.25.28"
@@ -42,7 +43,6 @@
     "openai": "^6.41.0",
     "ts-node": "^10.9.0",
     "typescript": "^5.0.0",
-    "undici": "^8.1.0",
     "vitest": "^1.0.0"
   }
 }
