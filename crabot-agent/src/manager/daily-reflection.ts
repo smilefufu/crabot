@@ -8,6 +8,7 @@ import type { ManagerSessionStore } from './session-store.js'
 import type {
   CompleteDailyReflectionParams, CompleteDailyReflectionResult, DailyReflectionAdmission,
   DailyReflectionResult, DailyReflectionState, ReflectionEvidence, ReflectionManifest, ReflectionRecord,
+  ListReflectionRecordsOutput, ReflectionProgress,
 } from './daily-reflection-types.js'
 
 const finishSchema = z.object({
@@ -127,7 +128,28 @@ export class DailyReflection {
     return position.offset
   }
 
-  async list(cursor?: string): Promise<unknown> {
+  private progress(state: DailyReflectionState): ReflectionProgress {
+    const records = state.manifest!.records
+    let directoryRead = 0
+    let resumeCursor: string | undefined
+    // Every directory cursor was issued only after delivering the preceding page.
+    for (const [token, position] of Object.entries(state.cursors)) {
+      if (position.record_ref === undefined && position.offset > directoryRead) {
+        directoryRead = position.offset
+        resumeCursor = token
+      }
+    }
+    const pending = Object.entries(state.read_records).filter(([, complete]) => !complete)
+    return { directory_total: records.length,
+      directory_read: state.directory_complete ? records.length : directoryRead,
+      directory_complete: state.directory_complete,
+      ...(!state.directory_complete && resumeCursor ? { resume_cursor: resumeCursor } : {}),
+      pending_record_count: pending.length,
+      pending_records: pending.slice(0, 20).map(([record_ref]) => ({ record_ref })),
+      evidence_gap_count: records.filter(record => record.gaps.length > 0).length }
+  }
+
+  async list(cursor?: string): Promise<ListReflectionRecordsOutput> {
     return this.mutex.run(async () => {
       const state = await this.state()
       const offset = this.offset(state, cursor)
@@ -144,7 +166,8 @@ export class DailyReflection {
       return { run_id: state.run_id, window_start: state.window_start, window_end: state.window_end,
         records: records.map(({ source: _source, digest: _digest, ...record }) => record),
         ...(nextCursor ? { next_cursor: nextCursor } : {}), gaps: state.manifest.gaps,
-        coverage: 'available_persisted_evidence', ...(state.result ? { previous_result: state.result } : {}) }
+        coverage: 'available_persisted_evidence', progress: this.progress(state),
+        ...(state.result ? { previous_result: state.result } : {}) }
     })
   }
 
@@ -241,7 +264,7 @@ export function buildDailyReflectionTools(host?: Pick<DailyReflection, 'list' | 
       return { output: JSON.stringify(await call(parsed.data as Record<string, unknown>)), isError: false }
     } })
   return [
-    tool('list_reflection_records', '列出宿主固定反思周期内的执行与人类输入证据。首次不传 cursor，沿 next_cursor 翻完目录；gaps 表示已知证据缺口。',
+    tool('list_reflection_records', '列出宿主固定反思周期内的执行与人类输入证据。首次不传 cursor，沿 next_cursor 翻完目录；恢复续办位置用返回的 progress.resume_cursor。progress 还列出未读完的详情引用（从首段重读）及证据缺口数量；已交付目录不等于语义复盘完成。gaps 表示已知证据缺口。',
       z.object({ cursor: z.string().optional() }).strict(), input => host ? host.list(input.cursor as string | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
     tool('read_reflection_record', '分页读取本次目录返回的 record_ref。沿该记录的 next_cursor 读完；不能使用其他会话 ID、路径或其他记录的游标。',
       z.object({ record_ref: z.string(), cursor: z.string().optional() }).strict(), input => host ? host.read(input.record_ref as string, input.cursor as string | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
