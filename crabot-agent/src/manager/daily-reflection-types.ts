@@ -20,6 +20,26 @@ export interface ReflectionRecordSummary {
   gaps: string[]
 }
 
+export interface ReflectionProgress {
+  directory_total: number
+  directory_read: number
+  directory_complete: boolean
+  resume_cursor?: string
+  pending_record_count: number
+  pending_records: Array<{ record_ref: string }>
+  evidence_gap_count: number
+}
+
+export interface ListReflectionRecordsOutput extends ReflectionWindow {
+  run_id: string
+  records: ReflectionRecordSummary[]
+  next_cursor?: string
+  gaps: string[]
+  coverage: 'available_persisted_evidence'
+  progress: ReflectionProgress
+  previous_result?: DailyReflectionResult
+}
+
 export interface ReflectionWorkerTrace {
   seq: number
   incarnation_fingerprint: string

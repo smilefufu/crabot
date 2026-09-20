@@ -29,7 +29,7 @@ async function setup(count = 1, content = 'evidence') {
   }
   const host = new DailyReflection(deps)
   await host.admit(admission, 'episode-first')
-  return { host, deps, store, records }
+  return { host, deps, store, records, dir }
 }
 
 function completion(extra: Record<string, unknown> = {}, toolCount = 1) {
@@ -129,6 +129,52 @@ describe('DailyReflection host', () => {
     expect((await host.finish(completion())).outcome).toBe('partial')
     while (page.next_cursor) page = await host.read('ref-0', page.next_cursor)
     expect((await store.load(key)).dailyReflection?.read_records['ref-0']).toBe(true)
+  })
+
+  it('rediscovers the persisted directory position after restart without the previous tool history', async () => {
+    const { host, deps, dir } = await setup(45)
+    const first = await host.list() as any
+    const second = await host.list(first.next_cursor) as any
+    const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
+    await restarted.admit({ ...admission, trigger_id: 'next', window_end: '2026-09-19T18:00:00.000Z' }, 'next-episode')
+    const rediscovered = await restarted.list() as any
+    expect(rediscovered.window_end).toBe(admission.window_end)
+    expect(rediscovered.records[0].record_ref).toBe('ref-0')
+    expect(rediscovered.progress).toEqual({ directory_total: 45, directory_read: 40, directory_complete: false,
+      resume_cursor: second.next_cursor, pending_record_count: 0, pending_records: [], evidence_gap_count: 0 })
+    expect((await restarted.list(rediscovered.next_cursor) as any).records[0].record_ref).toBe('ref-20')
+    expect((await restarted.finish(completion()))?.validation_errors).toContain('directory_not_fully_read')
+    const last = await restarted.list(rediscovered.progress.resume_cursor) as any
+    expect(last.records.map((record: any) => record.record_ref)).toEqual(['ref-40', 'ref-41', 'ref-42', 'ref-43', 'ref-44'])
+    expect(last.progress).toMatchObject({ directory_read: 45, directory_complete: true })
+    expect(last.progress.resume_cursor).toBeUndefined()
+    expect((await restarted.list() as any).progress.resume_cursor).toBeUndefined()
+    expect(deps.capture).toHaveBeenCalledOnce()
+    expect(deps.confirm).not.toHaveBeenCalled()
+    await restarted.read('ref-44')
+    expect((await restarted.finish(completion({ evidence_refs: ['ref-44'] })))?.outcome).toBe('completed')
+    expect(deps.confirm).toHaveBeenCalledWith(expect.objectContaining({ trigger_id: admission.trigger_id, window_end: admission.window_end }))
+  })
+
+  it('rediscovers bounded unfinished details and gaps without treating old detail cursors as successful coverage', async () => {
+    const { host, deps, dir } = await setup(21, 'x'.repeat(20_000))
+    const first = await host.list() as any
+    await host.list(first.next_cursor)
+    for (let i = 0; i < 21; i++) await host.read(`ref-${i}`)
+    vi.mocked(deps.read).mockRejectedValueOnce(new Error('source unavailable'))
+    await host.read('ref-0')
+    const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
+    let page = await restarted.list() as any
+    expect(page.progress).toMatchObject({ directory_total: 21, directory_read: 21, directory_complete: true,
+      pending_record_count: 21, evidence_gap_count: 1 })
+    expect(page.progress.pending_records).toEqual(Array.from({ length: 20 }, (_, i) => ({ record_ref: `ref-${i}` })))
+    expect((await restarted.finish(completion()))?.validation_errors).toEqual(expect.arrayContaining(['record_not_fully_read', 'known_evidence_gaps']))
+    const detail = await restarted.read(page.progress.pending_records[0].record_ref) as any
+    await restarted.read('ref-0', detail.next_cursor)
+    page = await restarted.list() as any
+    expect(page.progress).toMatchObject({ pending_record_count: 20, evidence_gap_count: 0 })
+    expect(page.progress.pending_records).toEqual(Array.from({ length: 20 }, (_, i) => ({ record_ref: `ref-${i + 1}` })))
+    expect(deps.confirm).not.toHaveBeenCalled()
   })
 
   it('natural end_turn, max turns, or missing finish never confirms the watermark', async () => {

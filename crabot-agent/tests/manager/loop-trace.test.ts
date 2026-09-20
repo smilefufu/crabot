@@ -10,8 +10,8 @@ import { join } from 'path'
 
 import { ManagerLoop, type WakeEvent, type TimedWakeEnvelope, type ManagerLoopDeps } from '../../src/manager/loop.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
-import { DailyReflection } from '../../src/manager/daily-reflection.js'
-import type { CompleteDailyReflectionResult } from '../../src/manager/daily-reflection-types.js'
+import { DailyReflection, buildDailyReflectionTools } from '../../src/manager/daily-reflection.js'
+import type { CompleteDailyReflectionResult, ReflectionRecord } from '../../src/manager/daily-reflection-types.js'
 import { TraceStore } from '../../src/core/trace-store.js'
 import type { ManagerTraceWriter } from '../../src/manager/trace-types.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
@@ -156,6 +156,63 @@ describe('ManagerLoop episode trace wiring', () => {
     expect(episodes.items[0].total_usage).toMatchObject({ input_tokens: 20, output_tokens: 10 })
     expect(episodes.items[0].total_usage).not.toHaveProperty('cache_read_tokens')
     expect(episodes.items[0].total_usage).not.toHaveProperty('cache_creation_tokens')
+  })
+
+  it.each([false, true])('continues through real Engine tools after losing directory history; known gap=%s', async gap => {
+    const window = { window_start: '2026-09-16T18:00:00.000Z', window_end: '2026-09-17T18:00:00.000Z' }
+    const target = { channel_id: 'wechat', session_id: 'sess-trace', type: 'private' as const }
+    const records: ReflectionRecord[] = Array.from({ length: 45 }, (_, i) => ({ record_ref: `ref-${i}`,
+      kind: 'manager_episode', source_id: `source-${i}`, activity_at: window.window_start, summary: 'fixture', digest: '',
+      gaps: gap && i === 0 ? ['source unavailable'] : [],
+      source: { kind: 'manager_episode', manager_key: KEY, episode_id: `source-${i}`, log_bytes: 1, span_ids: [] } }))
+    const confirm = vi.fn(async (): Promise<CompleteDailyReflectionResult> => ({ status: 'applied', watermark: window.window_end }))
+    const dailyDeps = { key: KEY, store, now: () => window.window_end,
+      capture: vi.fn(async () => ({ records, gaps: [] })), read: async () => ({ content: 'fixture evidence', gaps: [] }),
+      analysisWorkers: async () => [], confirm }
+    const original = new DailyReflection(dailyDeps)
+    await original.admit({ ...window, target_session: target, schedule_id: 'daily', trigger_id: 'original' }, 'original-episode')
+    const first = await original.list()
+    await original.list(first.next_cursor)
+    // The next Engine starts with no earlier tool results or cursor in its history.
+    const host = new DailyReflection({ ...dailyDeps, store: new ManagerSessionStore(join(dataDir, 'manager-sessions')) })
+    let request = 0
+    let selectedRef = ''
+    const { adapter } = makeAdapter()
+    adapter.stream = async function* (params) {
+      const last = params.messages.at(-1)
+      if (last && 'toolResults' in last) expect(last.toolResults[0].is_error, last.toolResults[0].content).toBe(false)
+      const content = last && 'toolResults' in last ? last.toolResults[0].content : undefined
+      const output = content ? JSON.parse(content.slice(content.indexOf('\n') + 1)) : undefined
+      const step = request++
+      let name = 'list_reflection_records'
+      let input: Record<string, unknown> = {}
+      if (step === 1) {
+        expect(output.progress.directory_read).toBe(40)
+        input = { cursor: output.progress.resume_cursor }
+      } else if (step === 2) {
+        expect(output.records[0].record_ref).toBe('ref-40')
+        expect(output.progress.directory_complete).toBe(true)
+        selectedRef = output.records[0].record_ref
+        name = 'read_reflection_record'; input = { record_ref: selectedRef }
+      } else if (step === 3) {
+        expect(output.gaps).toEqual([])
+        name = 'finish_daily_reflection'; input = { outcome: 'completed', summary: 'fixture reviewed', pending_items: [], evidence_refs: [selectedRef] }
+      } else if (step > 3) throw new Error('unexpected extra LLM request')
+      yield* chunksFromContent([{ type: 'tool_use', id: `call-${step}`, name, input }], 'tool_use')
+    }
+    const loop = new ManagerLoop({ ...deps(adapter, traceWriter), dailyReflection: host,
+      toolFace: () => buildDailyReflectionTools(host) })
+    const result = await loop.wakeUp(timed({ kind: 'schedule', scheduleId: 'daily', triggerId: 'new-trigger', scheduleName: 'daily',
+      title: 'daily', description: 'daily', targetSession: target, taskType: 'daily_reflection', isBuiltin: true,
+      reflectionWindow: { ...window, window_end: '2026-09-18T18:00:00.000Z' } }))
+    const product = traceStore.getManagerEpisode(result.episodeId)?.outcome?.daily_reflection
+    expect(product?.window_end).toBe(window.window_end)
+    expect(product?.outcome).toBe(gap ? 'partial' : 'completed')
+    expect(product?.validation_errors).toEqual(gap ? ['known_evidence_gaps'] : [])
+    expect(request).toBe(4)
+    expect(dailyDeps.capture).toHaveBeenCalledOnce()
+    if (gap) expect(confirm).not.toHaveBeenCalled()
+    else expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ trigger_id: 'original', ...window }))
   })
 
   it('trace start 失败：零 LLM 调用，但人类输入已提交且不重投', async () => {
