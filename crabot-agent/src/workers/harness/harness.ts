@@ -156,6 +156,7 @@ import {
 } from './worker-control-operation-store'
 import { WorkerUiSnapshotStore, type WorkerUiActionId, type WorkerUiSnapshot } from './worker-ui-snapshot-store'
 import { projectWorkerActivity } from '../trace/activity-projection'
+import { isWorkerRuntimeEvent } from '../builtin/runtime-observation.js'
 import { readLegacyTraces } from '../legacy-source-reader.js'
 import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
 import { applyStatusTransition, canTransition, isTerminalStatus } from './task-status'
@@ -3901,14 +3902,15 @@ export class WorkerHarness {
       return
     }
     if (trace.nextCursor.offset === offset) return
-    const projected = projectWorkerActivity(trace.events, 'all', {
+    const activityEvents = trace.events.filter((event) => !isWorkerRuntimeEvent(event.detail))
+    const projected = projectWorkerActivity(activityEvents, 'all', {
       worker_id: h.worker_id,
       incarnation_id: h.incarnation_id,
     })
     const notifying = projected.filter((activity) => activity.kind === 'assistant_text' || activity.kind === 'error')
     const hasError = notifying.some((activity) => activity.kind === 'error')
     const redact = this.deps.redactFailureReason ?? ((text: string) => text)
-    const persistedEvents = trace.events.map((event) => ({ ...event, summary: redact(event.summary) }))
+    const persistedEvents = activityEvents.map((event) => ({ ...event, summary: redact(event.summary) }))
     const preview = truncateWakeText(
       notifying.map((activity) => redact(activity.summary)).join('\n'),
       240,

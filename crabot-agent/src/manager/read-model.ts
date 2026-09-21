@@ -113,6 +113,7 @@ export interface GetWorkerTraceParams {
 }
 
 export interface GetWorkerTraceResult {
+  runtime?: import('../workers/types.js').WorkerRuntimeSnapshot
   events: NormalizedTraceEvent[]
   next_cursor?: string
   unavailable_reason?: string

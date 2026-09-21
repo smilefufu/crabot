@@ -1149,6 +1149,53 @@ describe('WorkerHarness.handleStateChange', () => {
     })
   })
 
+  it('runtime request diagnostics remain readable without creating Manager wake notifications', async () => {
+    const route = vi.fn(async () => ({ consumed: false }))
+    const { harness, workersDir } = await makeHarness({ nativeTrace: [{
+      ts: '2026-09-21T00:00:00Z', kind: 'error', summary: 'request failed 502',
+      detail: { kind: 'worker_runtime', version: 1, event: 'request_failed', runtime: {
+        incarnation_id: 'inc', as_of: '2026-09-21T00:00:00Z', phase: 'preparing', error: '502',
+      } },
+    }] }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    harness.handleNativeActivity({ ...incarnation, impl: 'builtin', worker_id: worker.worker_id, session_ref: incarnation.session_ref })
+    await waitUntil(async () => {
+      try { return JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')).cursors[0]?.offset === 1 }
+      catch { return false }
+    })
+    expect(route).not.toHaveBeenCalled()
+    expect(await harness.getLatestWorkerActivity(worker.worker_id, incarnation.incarnation_id!)).toBeUndefined()
+    expect(await harness.getPersistedNativeActivityTrace(worker.worker_id, incarnation.incarnation_id!, { offset: 0 }))
+      .toEqual({ events: [], nextCursor: { offset: 1 } })
+  })
+
+  it.each(['request_failed', 'idle'] as const)('runtime %s does not replace the latest effective Manager activity', async phase => {
+    const nativeTrace: NormalizedTraceEvent[] = [{
+      ts: '2026-09-21T00:00:00Z', kind: 'message', role: 'assistant', summary: 'verified result',
+    }]
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, workersDir } = await makeHarness({ nativeTrace }, { onOperationNotification: route })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = { ...incarnation, impl: 'builtin' as const, worker_id: worker.worker_id, session_ref: incarnation.session_ref }
+    harness.handleNativeActivity(handle)
+    await waitUntil(() => route.mock.calls.length === 1)
+    nativeTrace.push({ ts: '2026-09-21T00:00:01Z', kind: phase === 'idle' ? 'lifecycle' : 'error', summary: phase,
+      detail: { kind: 'worker_runtime', version: 1, event: phase, runtime: {
+        incarnation_id: incarnation.incarnation_id, as_of: '2026-09-21T00:00:01Z', phase: phase === 'idle' ? 'idle' : 'preparing',
+      } },
+    })
+    harness.handleNativeActivity(handle)
+    await waitUntil(async () => JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8')).cursors[0]?.offset === 2)
+    expect(await harness.getLatestWorkerActivity(worker.worker_id, incarnation.incarnation_id!))
+      .toMatchObject({ kind: 'assistant_text', summary: 'verified result' })
+    const persisted = await harness.getPersistedNativeActivityTrace(worker.worker_id, incarnation.incarnation_id!, { offset: 0 })
+    expect(persisted.events).toHaveLength(1)
+    expect(persisted.nextCursor.offset).toBe(2)
+    expect(route).toHaveBeenCalledTimes(1)
+  })
+
   it('投递旧 activity 时出现新片段，会继续投递新的 high-water 而不错误消费', async () => {
     const nativeTrace: NormalizedTraceEvent[] = [
       { ts: '2026-08-20T00:00:00.000Z', kind: 'message', role: 'assistant', summary: 'first activity' },

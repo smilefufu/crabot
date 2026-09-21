@@ -2,7 +2,7 @@
  * Worker 详情：以主线化身为默认视角，把已归一化的 trace 投影为人能理解的活动流。
  * 默认隐藏的协议事件仍可在「技术事件」模式查看，cursor 与读接口语义不变。
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Loading } from '../../components/Common/Loading'
 import { MainLayout } from '../../components/Layout/MainLayout'
@@ -13,8 +13,10 @@ import {
   type WorkerTerminalView,
   type WorkerTraceEvent,
   type WorkerSubagentSummary,
+  type WorkerRuntimeSnapshot,
 } from '../../services/agent-observability'
 import { describeWorkerTask, TONE_COLOR } from './worker-state'
+import { WorkerRuntime, runtimeEvent, runtimeEventText } from './WorkerRuntime'
 
 const IMPL_LABEL: Record<WorkerIncarnation['impl'], string> = {
   builtin: '内置',
@@ -166,9 +168,9 @@ function lifecycleActivity(event: WorkerTraceEvent): ActivityEntry | undefined {
       : undefined
     return {
       event,
-      label: '指令投递',
+      label: '执行器已接受',
       tone: 'status',
-      body: preview ?? '管理会话的补充指令已确认送达',
+      body: preview ?? '执行器已接受补充输入',
     }
   }
   if (event.summary.startsWith('input_delivery_failed')) {
@@ -184,11 +186,13 @@ function lifecycleActivity(event: WorkerTraceEvent): ActivityEntry | undefined {
 }
 
 function activityFor(event: WorkerTraceEvent, actorLabel: string, isSubagentTrace: boolean): ActivityEntry | undefined {
+  const runtimeText = runtimeEventText(event)
+  if (runtimeText) return { event, label: event.kind === 'error' ? '请求或执行错误' : '执行进度', tone: event.kind === 'error' ? 'failure' : 'status', body: runtimeText }
   if (event.source === 'legacy') {
     return { event, label: '历史记录', tone: 'status', body: event.summary }
   }
   if (event.kind === 'message' && event.role === 'user') {
-    return { event, label: !isSubagentTrace && event.source === 'native' ? '管理会话指令' : `${actorLabel} 指令`, tone: 'manager', body: messageText(event) }
+    return { event, label: !isSubagentTrace && event.source === 'native' ? '已加入上下文' : `${actorLabel} 指令`, tone: 'manager', body: messageText(event) }
   }
   if (event.kind === 'message' && event.role === 'assistant') {
     return { event, label: `${actorLabel} 文本`, tone: 'worker', body: messageText(event) }
@@ -210,6 +214,7 @@ function projectTimeline(events: WorkerTraceEvent[], actorLabel: string, isSubag
   const human: ActivityEntry[] = []
   const technical: WorkerTraceEvent[] = []
   const calls = new Map<string, ActivityEntry>()
+  const requests = new Map<string, ActivityEntry>()
   const uncorrelatedNativeCalls: ActivityEntry[] = []
 
   for (const event of events) {
@@ -217,6 +222,20 @@ function projectTimeline(events: WorkerTraceEvent[], actorLabel: string, isSubag
     if (!activity) {
       technical.push(event)
       continue
+    }
+    const requestEvent = runtimeEvent(event)
+    const requestId = requestEvent?.runtime.request?.request_id
+    if (requestId && ['request_started', 'first_response', 'request_completed', 'request_failed', 'interrupted'].includes(requestEvent!.event)) {
+      const previous = requests.get(requestId)
+      if (previous) {
+        previous.body = activity.body
+        previous.tone = activity.tone
+        previous.label = activity.label
+        previous.result = JSON.stringify(event.detail)
+        continue
+      }
+      activity.result = JSON.stringify(event.detail)
+      requests.set(requestId, activity)
     }
     if (event.kind === 'tool_result') {
       const id = callId(event)
@@ -315,7 +334,7 @@ function TimelineEvent({ entry, expanded, onToggle, workerId }: { entry: Activit
               <DetailText>{entry.body}</DetailText>
             </>
           ) : (
-            <DetailText>{entry.body}</DetailText>
+            <><DetailText>{entry.body}</DetailText>{runtimeEvent(entry.event) && <DetailText>{entry.result ?? JSON.stringify(entry.event.detail)}</DetailText>}</>
           )}
           {entry.subagentId && (
             <Link to={`/traces/workers/${encodeURIComponent(workerId)}/subagents/${encodeURIComponent(entry.subagentId)}`} style={{ display: 'inline-block', marginTop: 10, color: 'var(--primary)', fontSize: 12 }}>
@@ -379,9 +398,17 @@ export function Timeline({
   const [page, setPage] = useState(1)
   const [expandedEntry, setExpandedEntry] = useState<string | undefined>(undefined)
   const [refreshing, setRefreshing] = useState(false)
+  const [runtime, setRuntime] = useState<WorkerRuntimeSnapshot>()
+  const generation = useRef(0)
+  const inFlight = useRef<number | undefined>(undefined)
+  const cursorRef = useRef<string | undefined>(undefined)
+  const invalidRef = useRef(false)
   const projected = useMemo(() => projectTimeline(events, actorLabel, isSubagentTrace), [events, actorLabel, isSubagentTrace])
 
   const load = useCallback(async (cursor?: string) => {
+    const current = generation.current
+    if (inFlight.current === current) return
+    inFlight.current = current
     try {
       const result = loadTrace
         ? await loadTrace(cursor)
@@ -389,22 +416,34 @@ export function Timeline({
           ...(seq !== undefined ? { seq } : {}),
           ...(cursor !== undefined ? { cursor } : {}),
         })
+      if (generation.current !== current) return
+      setError(null)
+      setRuntime('runtime' in result ? result.runtime as WorkerRuntimeSnapshot | undefined : undefined)
       setUnavailableReason(result.unavailable_reason)
       if (cursor === undefined) setEvents(result.events)
       else setEvents((previous) => [...previous, ...result.events])
       setNextCursor(result.next_cursor)
+      cursorRef.current = result.next_cursor
     } catch (err) {
+      if (generation.current !== current) return
       const message = err instanceof Error ? err.message : String(err)
       if (message.includes('INVALID_PARAMS') || message.includes('cursor')) {
         // cursor 失效（Agent restart/GC/化身变化）：显式提示，不静默拼接重复数据。
         setCursorInvalid(true)
+        invalidRef.current = true
       } else {
         setError(message)
       }
+    } finally {
+      if (inFlight.current === current) inFlight.current = undefined
     }
   }, [workerId, seq, loadTrace])
 
   useEffect(() => {
+    generation.current++
+    cursorRef.current = undefined
+    invalidRef.current = false
+    setRuntime(undefined)
     setEvents([])
     setNextCursor(undefined)
     setUnavailableReason(undefined)
@@ -414,9 +453,17 @@ export function Timeline({
     setPage(1)
     setExpandedEntry(undefined)
     void load(undefined)
-  }, [load])
-
-  if (error) return <div style={{ color: 'var(--text-muted)', padding: 12 }}>活动记录暂不可用：{error}</div>
+    const refresh = () => {
+      if (!isSubagentTrace && document.visibilityState !== 'hidden' && !invalidRef.current) void load(cursorRef.current)
+    }
+    const timer = !isSubagentTrace ? setInterval(refresh, 5000) : undefined
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      generation.current++
+      if (timer) clearInterval(timer)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [load, isSubagentTrace])
 
   const visibleEvents = mode === 'human' ? projected.human : projected.technical
   const pageCount = Math.max(1, Math.ceil(visibleEvents.length / ACTIVITY_PAGE_SIZE))
@@ -436,6 +483,8 @@ export function Timeline({
   }
   return (
     <section style={{ maxWidth: 930 }} aria-label="任务活动">
+      {!isSubagentTrace && <WorkerRuntime runtime={runtime} stale={!!error || cursorInvalid} />}
+      {error && <div role="status" style={{ color: 'var(--error)', padding: '8px 0' }}>数据已过期，刷新失败：{error}</div>}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 11 }}>
         <h2 style={{ fontSize: 15, margin: 0 }}>{heading}</h2>
         <div style={{ display: 'inline-flex', gap: 2, padding: 2, border: '1px solid var(--border-highlight)', borderRadius: 6, background: 'var(--bg-primary)' }}>
@@ -465,7 +514,7 @@ export function Timeline({
         {cursorInvalid && (
           <div style={{ fontSize: 12, color: 'var(--color-warning, #d97706)', padding: '8px 0' }}>
             游标已失效。
-            <button type="button" onClick={() => { setCursorInvalid(false); setEvents([]); setPage(1); setExpandedEntry(undefined); void load(undefined) }} style={{ marginLeft: 8 }}>
+            <button type="button" onClick={() => { invalidRef.current = false; setCursorInvalid(false); setEvents([]); setPage(1); setExpandedEntry(undefined); void load(undefined) }} style={{ marginLeft: 8 }}>
               从头重新加载
             </button>
           </div>
@@ -476,6 +525,7 @@ export function Timeline({
             <div style={{ display: 'flex', gap: 8 }}>
               <button type="button" disabled={page === 1} onClick={() => { setPage((current) => current - 1); setExpandedEntry(undefined) }}>上一页</button>
               <button type="button" disabled={page === pageCount} onClick={() => { setPage((current) => current + 1); setExpandedEntry(undefined) }}>下一页</button>
+              {page < pageCount && <button type="button" onClick={() => setPage(pageCount)}>最新活动</button>}
               {nextCursor && <button type="button" disabled={refreshing} onClick={() => void checkNewActivity()}>{refreshing ? '读取中…' : '检查新活动'}</button>}
             </div>
           </div>
@@ -664,15 +714,21 @@ const WorkerDetailContent: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false
+    let inFlight = false
     setLoading(true)
+    setWorker(null)
     setManagerDisplayName(undefined)
     const managersRequest = agentObservabilityService.listManagers(1, 100).catch(() => undefined)
-    agentObservabilityService
+    const refresh = () => {
+      if (inFlight || document.visibilityState === 'hidden') return
+      inFlight = true
+      agentObservabilityService
       .getWorkerDetail(workerId)
       .then((result) => {
         if (cancelled) return
+        setError(null)
         setWorker(result.worker)
-        setSelectedSeq(mainlineIncarnation(result.worker.incarnations)?.seq)
+        setSelectedSeq((selected) => selected ?? mainlineIncarnation(result.worker.incarnations)?.seq)
         void managersRequest
           .then((managerResult) => {
             if (cancelled) return
@@ -683,12 +739,17 @@ const WorkerDetailContent: React.FC = () => {
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err))
       })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
+      .finally(() => { inFlight = false; if (!cancelled) setLoading(false) })
+    }
+    setSelectedSeq(undefined)
+    refresh()
+    const timer = setInterval(refresh, 5000)
+    document.addEventListener('visibilitychange', refresh)
+    return () => { cancelled = true; clearInterval(timer); document.removeEventListener('visibilitychange', refresh) }
   }, [workerId])
 
   if (loading) return <Loading />
-  if (error || !worker) return <div style={{ color: 'var(--text-muted)', padding: 24 }}>任务详情暂不可用：{error ?? '未找到'}</div>
+  if (!worker) return <div style={{ color: 'var(--text-muted)', padding: 24 }}>任务详情暂不可用：{error ?? '未找到'}</div>
 
   const statePhrase = describeWorkerTask(worker.task)
 
@@ -697,6 +758,7 @@ const WorkerDetailContent: React.FC = () => {
   const selectedIncarnation = worker.incarnations.find((incarnation) => incarnation.seq === selectedSeq) ?? mainline
   return (
     <div style={{ maxWidth: 980 }}>
+      {error && <div role="status" style={{ color: 'var(--error)', marginBottom: 12 }}>任务状态数据已过期：{error}</div>}
       <div style={{ marginBottom: 18 }}>
         <Link to="/traces" style={{ color: 'var(--text-muted)', fontSize: 12 }}>← 返回任务列表</Link>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginTop: 8, flexWrap: 'wrap' }}>

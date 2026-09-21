@@ -263,6 +263,7 @@ export class ContextManager {
   private readonly keepRecentMessages: number
   private readonly compactSystemPrompt: string
   private cumulativeUsage: CumulativeUsage
+  private tokenEstimateRatio = 1
 
   constructor(options: ContextManagerOptions) {
     this.maxContextTokens = options.maxContextTokens
@@ -301,6 +302,22 @@ export class ContextManager {
     )
   }
 
+  observeContextTokens(observedTokens: number, estimatedTokens: number): void {
+    if (!Number.isFinite(observedTokens) || observedTokens <= 0
+      || !Number.isFinite(estimatedTokens) || estimatedTokens <= 0) return
+    const ratio = observedTokens / estimatedTokens
+    // 保留本次执行已实测的低估偏差；压缩不能清掉它并重新提前收口。
+    if (Number.isFinite(ratio)) this.tokenEstimateRatio = Math.max(this.tokenEstimateRatio, ratio)
+  }
+
+  resetTokenEstimate(): void {
+    this.tokenEstimateRatio = 1
+  }
+
+  private calibrateTokenEstimate(tokens: number): number {
+    return Math.ceil(tokens * this.tokenEstimateRatio)
+  }
+
   shouldCompact(messages: ReadonlyArray<EngineMessage>, context?: ShouldCompactContext): boolean {
     const threshold = this.maxContextTokens * this.compactThreshold
     const observed = context?.lastObservedContextTokens
@@ -312,13 +329,13 @@ export class ContextManager {
     ) {
       // 真实 usage 路径：观测值已是当时的全量 prompt 大小（含 system prompt + tools +
       // 全部消息），只需补上其后新增消息的估算增量。
-      const delta = this.estimateTotalTokens(messages.slice(countAtObservation))
+      const delta = this.calibrateTokenEstimate(this.estimateTotalTokens(messages.slice(countAtObservation)))
       return observed + delta >= threshold
     }
     // 估算回退路径：usage 缺失，或观测已失效（compaction 后消息数回缩）。
     // 计入 system prompt 与 tools schema——此前漏算导致系统性低估。
     const staticTokens = this.estimateStaticPromptTokens(context?.systemPrompt, context?.tools)
-    return staticTokens + this.estimateTotalTokens(messages) >= threshold
+    return this.calibrateTokenEstimate(staticTokens + this.estimateTotalTokens(messages)) >= threshold
   }
 
   getHardCapTokens(): number {
@@ -368,19 +385,22 @@ export class ContextManager {
     readonly mainRequestFixedTokens?: number
     readonly signal?: AbortSignal
     readonly onBatchApplied?: CompactionProfile['onBatchApplied']
+    readonly protectedMessageIds?: ReadonlySet<string>
+    readonly onRequestLifecycle?: import('./llm-adapter-types.js').LLMStreamParams['onRequestLifecycle']
   }): Promise<IncrementalCompactionResult> {
     const state = this.projectBuiltinState(args.messages)
     const result = await this.compactIncrementally({
       state,
-      profile: createBuiltinCompactionProfile({
+      profile: { ...createBuiltinCompactionProfile({
         preferredKeepRecent: this.keepRecentMessages,
         mainRequestFixedTokens: args.mainRequestFixedTokens,
         summarySystemPrompt: this.compactSystemPrompt,
         onBatchApplied: args.onBatchApplied,
-      }),
+      }), protectedMessageIds: args.protectedMessageIds },
       target: args.target,
       adapter: args.adapter,
       model: args.model,
+      onRequestLifecycle: args.onRequestLifecycle,
       ...(args.signal ? { signal: args.signal } : {}),
     })
     return result.batchesApplied === 0
@@ -395,6 +415,7 @@ export class ContextManager {
     readonly adapter: LLMAdapter
     readonly model: string
     readonly signal?: AbortSignal
+    readonly onRequestLifecycle?: import('./llm-adapter-types.js').LLMStreamParams['onRequestLifecycle']
   }): Promise<IncrementalCompactionResult> {
     const { profile, target, adapter, model, signal } = args
     let state = this.copyState(args.state)
@@ -491,6 +512,7 @@ export class ContextManager {
             systemPrompt: profile.summarySystemPrompt,
             tools: [],
             model,
+            onRequestLifecycle: args.onRequestLifecycle,
             ...(signal ? { signal } : {}),
           })
         } catch (error) {
@@ -572,8 +594,8 @@ export class ContextManager {
   }
 
   estimateCompactionStateTokens(state: CompactionState, profile: CompactionProfile): number {
-    return profile.mainRequestFixedTokens
-      + this.estimateTotalTokens(this.materializeCompactionState(state, profile))
+    return this.calibrateTokenEstimate(profile.mainRequestFixedTokens
+      + this.estimateTotalTokens(this.materializeCompactionState(state, profile)))
   }
 
   updateFromUsage(usage: { readonly inputTokens: number; readonly outputTokens: number }): void {

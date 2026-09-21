@@ -432,6 +432,44 @@ describe('BuiltinWorkerAdapter', () => {
     }))
   })
 
+  it('运行快照在请求完成前可读，内部重试实际消费队列并保留追加记录', async () => {
+    const gate = deferred<void>()
+    const started = deferred<void>()
+    const retried = deferred<void>()
+    const records: import('../../src/workers/types.js').WorkerRuntimeEvent[] = []
+    const requests: string[] = []
+    const llm: LLMAdapter = { updateConfig() {}, async *stream(params) {
+      requests.push(JSON.stringify(params.messages))
+      if (requests.length === 1) {
+        started.resolve()
+        await gate.promise
+        throw Object.assign(new Error('upstream 502'), { status: 502 })
+      }
+      yield* chunksFromContent([{ type: 'text', text: 'done' }], 'end_turn')
+    } }
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp, traceHooks: {
+      startIncarnationTrace: () => 'runtime-trace', appendTurn() {}, finishIncarnationTrace() {},
+      appendRuntimeEvent: (_id, event) => { records.push(event); if (event.event === 'retry_wait') retried.resolve() },
+    } })
+    const h = await adapter.spawn(spec({ adapter: llm }))
+    await started.promise
+    expect(await adapter.readRuntime(h)).toMatchObject({ phase: 'llm_request', request: { attempt: 1 } })
+    await adapter.sendInput(h, 'normal-one')
+    await adapter.sendInput(h, 'normal-two')
+    await adapter.sendInput(h, 'priority-three', { immediate_redirect: true })
+    expect(await adapter.readRuntime(h)).toMatchObject({ pending_inputs: { normal: 2, priority: 1 } })
+    gate.resolve()
+    await retried.promise
+    expect(await adapter.readRuntime(h)).toMatchObject({ phase: 'retry_wait' })
+    await waitState(adapter, h, 'idle')
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toContain('normal-two')
+    expect(requests[1].indexOf('priority-three')).toBeLessThan(requests[1].indexOf('normal-one'))
+    expect(records.filter(event => event.event === 'request_started')).toHaveLength(2)
+    expect(records.filter(event => event.event === 'request_completed')).toHaveLength(1)
+    expect(await adapter.readRuntime(h)).toMatchObject({ phase: 'idle', pending_inputs: { normal: 0, priority: 0 } })
+  })
+
   it('工具生命周期只写 trace，不在完整 turn 前触发 native activity 通知', async () => {
     const gate = deferred<void>()
     const traceEvents: Array<{ phase: string; responseId: string }> = []
@@ -1357,6 +1395,7 @@ describe('BuiltinWorkerAdapter', () => {
     const meta = JSON.parse(metaRaw)
     expect(meta.state).toBe('exited')
     expect(meta.ended_reason).toBe('crashed')
+    expect(await adapter.readRuntime(h)).toMatchObject({ phase: 'ended', error: expect.any(String), request: { attempt: 1 } })
   })
 
   it('runBurst 传递 disableCompaction: false 到 runEngine', async () => {

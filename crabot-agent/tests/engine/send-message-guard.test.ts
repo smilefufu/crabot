@@ -71,11 +71,15 @@ describe('consecutive send_message protection', () => {
   })
   it.each(['human', 'external'])('new %s input allows resending', async source => {
     const queue = new HumanMessageQueue()
-    let drained = false
+    const externalInputs: string[] = []
     const f = fixture([[send('one')], [send('two')]], source === 'human'
       ? { humanMessageQueue: queue }
-      : { drainExternalInputs: async () => { if (drained) return []; drained = true; return ['请再发一次'] } })
-    if (source === 'human') f.call.mockImplementationOnce(async () => { queue.push('请再发一次'); return { output: 'sent', isError: false } })
+      : { drainExternalInputs: () => externalInputs.splice(0) })
+    f.call.mockImplementationOnce(async () => {
+      if (source === 'human') queue.push('请再发一次')
+      else externalInputs.push('请再发一次')
+      return { output: 'sent', isError: false }
+    })
     await f.run()
     expect(f.call).toHaveBeenCalledTimes(2)
   })

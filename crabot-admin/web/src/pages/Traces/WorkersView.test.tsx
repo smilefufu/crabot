@@ -201,7 +201,7 @@ describe('WorkerDetail', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /#2.*临时侧问/ })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: /#2.*临时侧问/ }))
 
-    expect(await screen.findByRole('button', { name: /管理会话指令：现在进展如何？/ })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /已加入上下文：现在进展如何？/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Worker 文本：已完成接口核对。/ })).toBeInTheDocument()
     expect(screen.getByText('侧问完成')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /侧问完成：临时侧问已完成/ })).toBeInTheDocument()
@@ -335,7 +335,7 @@ describe('WorkerDetail', () => {
     mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
     renderDetail()
 
-    const delivery = await screen.findByRole('button', { name: /指令投递：继续核对隔离候选，生产环境保持不动。.*展开详情/ })
+    const delivery = await screen.findByRole('button', { name: /执行器已接受：继续核对隔离候选，生产环境保持不动。.*展开详情/ })
     fireEvent.click(delivery)
     expect(screen.getAllByText('继续核对隔离候选，生产环境保持不动。')).toHaveLength(2)
   })
@@ -357,7 +357,7 @@ describe('WorkerDetail', () => {
 
     renderDetail()
 
-    await waitFor(() => expect(screen.getByText('管理会话指令')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('已加入上下文')).toBeInTheDocument())
     expect(screen.getByText('Worker 文本')).toBeInTheDocument()
     const toolRow = screen.getByRole('button', { name: /工具调用：调用 shell · 已返回结果.*展开详情/ })
     expect(toolRow).toHaveAttribute('aria-expanded', 'false')
@@ -512,7 +512,7 @@ describe('SubagentDetail', () => {
     expect(screen.getByText('research')).toBeInTheDocument()
     expect(screen.getByText('整理原生记录')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '子 Agent Trace', level: 2 })).toBeInTheDocument()
-    expect(screen.getByText('子 Agent 指令')).toBeInTheDocument()
+    expect(await screen.findByText('子 Agent 指令')).toBeInTheDocument()
     expect(screen.queryByText('管理会话指令')).not.toBeInTheDocument()
     expect(await screen.findAllByText('子 Agent 文本')).not.toHaveLength(0)
     expect(screen.getByText('第 1 / 2 页')).toBeInTheDocument()
