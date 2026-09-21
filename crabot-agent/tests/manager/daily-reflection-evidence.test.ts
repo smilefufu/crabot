@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { promises as fs } from 'node:fs'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import { DailyReflectionEvidence, type ReflectionEvidenceDeps } from '../../src/manager/daily-reflection-evidence.js'
-import { reflectionDigest } from '../../src/manager/daily-reflection.js'
+import { DailyReflection, reflectionDigest } from '../../src/manager/daily-reflection.js'
 import { importV2LegacyTasks } from '../../src/workers/legacy-importer.js'
 import { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager.js'
@@ -16,7 +16,7 @@ import { NativeTraceCopyStore } from '../../src/workers/trace/native-copy.js'
 import { WorkerTurnStore } from '../../src/workers/harness/worker-turn-store.js'
 import { TraceStore } from '../../src/core/trace-store.js'
 import type { ManagerKey } from '../../src/manager/types.js'
-import type { DailyReflectionState } from '../../src/manager/daily-reflection-types.js'
+import type { DailyReflectionState, ReflectionRecord } from '../../src/manager/daily-reflection-types.js'
 import type { ManagerEpisodeTrace } from '../../src/manager/trace-types.js'
 import type { EngineMessage } from '../../src/engine/types.js'
 
@@ -187,6 +187,77 @@ describe('daily reflection persisted evidence', () => {
     expect(await f.provider.capture(state)).toEqual({ records: [], gaps: [] })
     expect(f.deps.captureWorkerTrace).not.toHaveBeenCalled()
   })
+
+  it('labels an old frozen migration-only entry without changing its directory or marking it reviewed', async () => {
+    const f = await fixture()
+    const worker = await importLegacyWorker(f)
+    const original = JSON.stringify(f.events.get(worker.worker_id))
+    const record: ReflectionRecord = { record_ref: 'old-ref', kind: 'worker', source_id: worker.worker_id,
+      activity_at: activity, summary: 'historical task; turns=0; recorded_llm_calls_by_seq=unknown',
+      digest: reflectionDigest(original), gaps: ['frozen_evidence_changed'],
+      source: { kind: 'worker', worker_id: worker.worker_id, traces: [], turn_ids: [], event_count: 1, gaps: [] } }
+    const key = 'admin-web::system-tasks' as ManagerKey
+    const confirm = vi.fn()
+    const capture = vi.fn()
+    const host = new DailyReflection({ key, store: f.store, now: () => activity, capture,
+      read: (item, current) => f.provider.read(item, current), analysisWorkers: async () => [], confirm })
+    await host.admit({ ...window, schedule_id: 'daily', trigger_id: 'trigger',
+      target_session: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' } }, 'daily')
+    await f.store.updateDailyReflection(key, current => ({ ...current!, manifest: { records: [record], gaps: [] } }))
+    const before = (await f.store.load(key)).dailyReflection!
+    f.events.get(worker.worker_id)!.push({ kind: 'error', ts: activity, detail: { message: 'later appended event' } })
+
+    const page = await host.list()
+    expect(page.records[0].summary).toContain('仅有迁移审计')
+    expect(page.records[0].summary).not.toContain('historical task')
+    expect(page.records[0].record_ref).toBe(record.record_ref)
+    expect(page.progress.directory_total).toBe(1)
+    expect((await f.store.load(key)).dailyReflection?.read_records).toEqual({})
+    expect((await f.store.load(key)).dailyReflection?.manifest).toEqual(before.manifest)
+
+    const detail = await host.read(record.record_ref) as { content: string; gaps: string[] }
+    expect(detail).toMatchObject({ content: original, gaps: [] })
+    expect(detail.content).not.toContain('later appended event')
+    const after = (await f.store.load(key)).dailyReflection!
+    expect(after.run_id).toBe(before.run_id)
+    expect(after.window_start).toBe(before.window_start)
+    expect(after.window_end).toBe(before.window_end)
+    expect(after.manifest?.records[0]).toEqual({ ...record, gaps: [] })
+    expect(after.read_records[record.record_ref]).toBe(true)
+    expect(capture).not.toHaveBeenCalled()
+    expect(confirm).not.toHaveBeenCalled()
+  })
+
+  it.each(['unchanged', 'changed', 'no_digest', 'truncated', 'gap'])(
+    'checks the original digest when reading pre-filter raw and composite migration events: %s', async scenario => {
+      const f = await fixture()
+      const worker = await importLegacyWorker(f, 'executing')
+      const raw = f.events.get(worker.worker_id)![0]
+      const composite = { ts: activity, kind: 'lifecycle' as const, source: 'harness' as const, summary: 'legacy_imported' }
+      const execution = { ts: activity, kind: 'error' as const, source: 'legacy' as const, summary: 'failed test-secret' }
+      const original = f.deps.redact(JSON.stringify([raw, composite, execution]))
+      const record: ReflectionRecord = { record_ref: 'old-ref', kind: 'worker', source_id: worker.worker_id,
+        activity_at: activity, summary: 'legacy execution', gaps: [],
+        digest: scenario === 'no_digest' ? '' : reflectionDigest(original),
+        source: { kind: 'worker', worker_id: worker.worker_id, event_count: scenario === 'truncated' ? 2 : 1,
+          turn_ids: [], traces: [{ seq: 1, incarnation_fingerprint: 'legacy', upper_bound: { native: 0, harness: 1, legacy: 1 } }],
+          gaps: scenario === 'gap' ? ['source unavailable'] : [] } }
+      vi.mocked(f.deps.readWorkerTrace).mockResolvedValue({ events: [composite,
+        scenario === 'changed' ? { ...execution, summary: 'different execution' } : execution] })
+
+      const detail = await f.provider.read(record, state)
+      expect(detail.content).not.toContain('test-secret')
+      if (scenario === 'changed' || scenario === 'no_digest') {
+        expect(detail.content).not.toContain('legacy_imported')
+        expect(reflectionDigest(detail.content)).not.toBe(record.digest)
+      } else {
+        expect(detail.content).toBe(original)
+        expect(reflectionDigest(detail.content)).toBe(record.digest)
+      }
+      expect(detail.gaps).toEqual(scenario === 'truncated' ? ['worker_events_truncated']
+        : scenario === 'gap' ? ['source unavailable'] : [])
+    },
+  )
 
   it('does not reintroduce migration-only activity through the composite harness trace', async () => {
     const f = await fixture()

@@ -9,6 +9,7 @@ import type {
   CompleteDailyReflectionParams, CompleteDailyReflectionResult, DailyReflectionAdmission,
   DailyReflectionResult, DailyReflectionState, ReflectionEvidence, ReflectionManifest, ReflectionRecord,
   ListReflectionRecordsOutput, ReflectionProgress,
+  ReflectionRecordSummary,
 } from './daily-reflection-types.js'
 
 const finishSchema = z.object({
@@ -171,16 +172,34 @@ export class DailyReflection {
         state.manifest = manifest
       }
       const records = state.manifest.records.slice(offset, offset + 20)
+      const summaries = await Promise.all(records.map(record => this.recordSummary(record, state)))
       const next = offset + records.length
       const nextCursor = next < state.manifest.records.length ? this.nextCursor(state, next) : undefined
       if (!nextCursor) state.directory_complete = true
       await this.save(state)
       return { run_id: state.run_id, window_start: state.window_start, window_end: state.window_end,
-        records: records.map(({ source: _source, digest: _digest, ...record }) => record),
+        records: summaries,
         ...(nextCursor ? { next_cursor: nextCursor } : {}), gaps: state.manifest.gaps,
         coverage: 'available_persisted_evidence', progress: this.progress(state),
         ...(state.result ? { previous_result: state.result } : {}) }
     })
+  }
+
+  private async recordSummary(record: ReflectionRecord, state: DailyReflectionState): Promise<ReflectionRecordSummary> {
+    const { source, digest, ...summary } = record
+    if (source.kind !== 'worker' || source.traces.length || source.turn_ids.length || !source.event_count || !digest) return summary
+    try {
+      const evidence = await this.deps.read(record, state)
+      if (evidence.gaps.length || reflectionDigest(evidence.content) !== digest) return summary
+      const events: unknown = JSON.parse(evidence.content)
+      if (Array.isArray(events) && events.length > 0
+        && events.every(event => event?.kind === 'legacy_imported')) {
+        summary.summary = '仅有迁移审计记录；迁移时间不是业务执行时间，该冻结项不包含本周期业务执行证据。'
+      }
+    } catch {
+      // Keep the frozen summary when it cannot be verified; detail reads still report source failures.
+    }
+    return summary
   }
 
   async read(recordRef: string, cursor?: string): Promise<unknown> {

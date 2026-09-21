@@ -30,7 +30,9 @@ function inWindow(value: number | string, window: ReflectionWindow): boolean {
   return time >= Date.parse(window.window_start) && time < Date.parse(window.window_end)
 }
 
-function isLegacyImportEvent(event: { kind: string; source?: string; summary?: string }): boolean {
+function isLegacyImportEvent(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const event = value as { kind?: string; source?: string; summary?: string }
   // Composite traces project the same audit event as a harness lifecycle row.
   return event.kind === 'legacy_imported'
     || (event.source === 'harness' && event.kind === 'lifecycle' && event.summary === 'legacy_imported')
@@ -215,10 +217,10 @@ export class DailyReflectionEvidence {
   }
 
   async read(record: ReflectionRecord, state: DailyReflectionState): Promise<ReflectionEvidence> {
-    return this.readSource(record.source, state)
+    return this.readSource(record.source, state, undefined, record.digest)
   }
 
-  private async readSource(source: ReflectionSource, window: ReflectionWindow, capturedEpisode?: ManagerEpisodeTrace): Promise<ReflectionEvidence> {
+  private async readSource(source: ReflectionSource, window: ReflectionWindow, capturedEpisode?: ManagerEpisodeTrace, frozenDigest?: string): Promise<ReflectionEvidence> {
     const gaps: string[] = []
     const values: unknown[] = []
     try {
@@ -243,11 +245,11 @@ export class DailyReflectionEvidence {
         gaps.push(...source.gaps)
         const events = await this.deps.harness.readWorkerEvents(source.worker_id)
         if (events.length < source.event_count) gaps.push('worker_events_truncated')
-        values.push(...events.slice(0, source.event_count).filter(event => !isLegacyImportEvent(event) && inWindow(event.ts, window)))
+        values.push(...events.slice(0, source.event_count).filter(event => inWindow(event.ts, window)))
         for (const trace of source.traces) {
           const result = await this.deps.readWorkerTrace(source.worker_id, trace)
           if (result.unavailable_reason) gaps.push(result.unavailable_reason)
-          values.push(...result.events.filter(event => !isLegacyImportEvent(event) && event.kind !== 'thinking' && inWindow(event.ts, window)))
+          values.push(...result.events.filter(event => event.kind !== 'thinking' && inWindow(event.ts, window)))
         }
         for (const id of source.turn_ids) {
           const turn = await this.deps.turns.get(source.worker_id, id)
@@ -256,8 +258,15 @@ export class DailyReflectionEvidence {
         }
       }
     } catch (error) { gaps.push(error instanceof Error ? error.message : String(error)) }
-    const content = this.deps.redact(JSON.stringify(values, (name, value) =>
+    const serialize = (items: unknown[]): string => this.deps.redact(JSON.stringify(items, (name, value) =>
       /^(raw_reasoning|reasoning|thinking|authorization|apikey|api_key|access_token)$/i.test(name) ? undefined : value))
+    const filtered = source.kind === 'worker' ? values.filter(value => !isLegacyImportEvent(value)) : values
+    const content = serialize(filtered)
+    // Old manifests hashed migration audit rows too; preserve only an exact, still-redacted snapshot.
+    if (frozenDigest && filtered.length !== values.length && reflectionDigest(content) !== frozenDigest) {
+      const original = serialize(values)
+      if (reflectionDigest(original) === frozenDigest) return { content: original, gaps }
+    }
     return { content, gaps }
   }
 }

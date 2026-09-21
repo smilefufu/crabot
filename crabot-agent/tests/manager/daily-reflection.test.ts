@@ -48,6 +48,31 @@ async function ready(host: DailyReflection) {
 }
 
 describe('DailyReflection host', () => {
+  it.each(['execution', 'mismatch', 'gap', 'read_failure', 'no_digest', 'trace', 'turn'])(
+    'does not label an unproven frozen worker as migration-only: %s', async scenario => {
+      const original = JSON.stringify([{ kind: 'legacy_imported', ts: admission.window_start }])
+      const { host, deps, records, store } = await setup()
+      const record: ReflectionRecord = { ...records[0], kind: 'worker', source_id: 'old-worker',
+        digest: scenario === 'no_digest' ? '' : reflectionDigest(original),
+        source: { kind: 'worker', worker_id: 'old-worker', event_count: 1, gaps: [],
+          traces: scenario === 'trace' ? [{ seq: 1, incarnation_fingerprint: 'legacy', upper_bound: { native: 0, harness: 1, legacy: 1 } }] : [],
+          turn_ids: scenario === 'turn' ? ['turn'] : [] } }
+      const content = scenario === 'mismatch' ? `${original} `
+        : scenario === 'execution' ? JSON.stringify([{ kind: 'error', ts: admission.window_start }]) : original
+      if (scenario === 'execution') record.digest = reflectionDigest(content)
+      vi.mocked(deps.capture).mockResolvedValueOnce({ records: [record], gaps: [] })
+      vi.mocked(deps.read).mockResolvedValue({ content, gaps: scenario === 'gap' ? ['source unavailable'] : [] })
+      if (scenario === 'read_failure') vi.mocked(deps.read).mockRejectedValue(new Error('source unavailable'))
+
+      const page = await host.list()
+      expect(page.records[0].summary).toBe(record.summary)
+      const current = (await store.load(key)).dailyReflection!
+      expect(current.manifest?.records[0]).toEqual(record)
+      expect(current.read_records).toEqual({})
+      if (['no_digest', 'trace', 'turn'].includes(scenario)) expect(deps.read).not.toHaveBeenCalled()
+    },
+  )
+
   it.each(['completed', 'partial'])('validates %s references without persisting a result or requiring full coverage', async outcome => {
     const { host, deps, store } = await setup(21)
     await host.list()
