@@ -77,6 +77,9 @@ export function thinkingEffortValue(thinking: LLMThinkingConfig | undefined): st
 }
 
 export interface LLMStreamParams {
+  /** Runs outside provider retry handling; may update messages before each actual attempt. */
+  readonly beforeAttempt?: (adapter: LLMAdapter, model: string) => void | Promise<void>
+  readonly onRequestLifecycle?: (event: LLMRequestEvent) => void
   readonly messages: EngineMessage[]
   readonly systemPrompt: string
   readonly tools: ToolDefinition[]
@@ -223,10 +226,14 @@ async function withStreamConsumptionRetry(
   const callId = randomUUID()
   let requestAttempt = 0
   for (;;) {
+    if (params.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    const preparation = params.beforeAttempt?.(currentAdapter, currentRequestParams.model)
+    if (preparation) await preparation
+    if (params.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     const attemptStart = Date.now()
     requestAttempt++
     const observer = currentAdapter.onRequestLifecycle
-    const request: LLMRequestEvent | undefined = observer ? {
+    const request: LLMRequestEvent | undefined = observer || params.onRequestLifecycle ? {
       requestId: randomUUID(), callId, attempt: requestAttempt,
       providerId: currentAdapter.traceIdentity?.providerId,
       format: currentAdapter.traceIdentity?.format,
@@ -236,8 +243,18 @@ async function withStreamConsumptionRetry(
     } : undefined
     const observe = (event: LLMRequestEvent): void => {
       try {
-        observer?.({ ...event, ...(event.usage ? { usage: { ...event.usage } } : {}) })
+        // Existing adapter observers receive start/finish only (Manager upserts spans).
+        if (!event.phase) {
+          const { error: _error, ...safeEvent } = event
+          observer?.({ ...safeEvent, ...(event.usage ? { usage: { ...event.usage } } : {}) })
+        }
       } catch { /* observation must not affect requests or retries */ }
+      try { params.onRequestLifecycle?.({ ...event, ...(event.usage ? { usage: { ...event.usage } } : {}) }) }
+      catch { /* observation must not affect requests or retries */ }
+    }
+    const observeRetry = (error: unknown, retryMode: 'bounded_retry' | 'connection_recovery', delayMs: number, maxAttempts?: number): void => {
+      if (request) observe({ ...request, status: 'failed', phase: 'retry_wait', observedAtMs: Date.now(),
+        retryMode, delayMs, maxAttempts, error: error instanceof Error ? error.message : String(error) })
     }
     if (request) observe(request)
     let firstChunkMs: number | undefined
@@ -245,11 +262,14 @@ async function withStreamConsumptionRetry(
     try {
       const processor = new StreamProcessor()
       const { model: _pModel, maxTokens: _pMaxTokens, thinking: _pThinking, ...baseParams } = params
-      for await (const chunk of currentAdapter.stream({ ...baseParams, ...currentRequestParams } as LLMStreamParams)) {
+      for await (const chunk of currentAdapter.stream({ ...baseParams, ...currentRequestParams, messages: [...params.messages] } as LLMStreamParams)) {
         if (params.signal?.aborted) {
           throw new DOMException('Aborted', 'AbortError')
         }
-        if (firstChunkMs === undefined) firstChunkMs = Date.now() - attemptStart
+        if (firstChunkMs === undefined) {
+          firstChunkMs = Date.now() - attemptStart
+          if (request) observe({ ...request, phase: 'first_response', firstChunkMs, observedAtMs: Date.now() })
+        }
         chunkCount++
         if (chunk.type === 'error') {
           throw new Error(chunk.error)
@@ -282,6 +302,7 @@ async function withStreamConsumptionRetry(
       if (request) observe({
         ...request, status: 'failed', endedAtMs: Date.now(), firstChunkMs, chunkCount,
         failureKind: params.signal?.aborted ? 'aborted' : 'request_failed',
+        error: err instanceof Error ? err.message : String(err),
       })
       lastError = err
       if (params.signal?.aborted) throw err
@@ -298,6 +319,7 @@ async function withStreamConsumptionRetry(
       const connectionRecovery = isConnectionRecoveryError(err)
       if (connectionRecovery) {
         const actualDelay = computeConnectionRecoveryDelayMs(recoveryAttempt++)
+        observeRetry(err, 'connection_recovery', actualDelay)
         console.error(
           `[callNonStreaming] connection recovery attempt ${recoveryAttempt} failed, retrying in ${actualDelay}ms:`,
           err,
@@ -344,6 +366,7 @@ async function withStreamConsumptionRetry(
         throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
       }
       const actualDelay = computeRetryDelayMs(attempt, delayMs, true, retryAfterMs)
+      observeRetry(err, 'bounded_retry', actualDelay, maxRetries + configSwitchBudget + 1)
       console.error(
         `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + configSwitchBudget + 1} failed, retrying in ${actualDelay}ms (backoff):`,
         err,

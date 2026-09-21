@@ -385,19 +385,22 @@ export class ContextManager {
     readonly mainRequestFixedTokens?: number
     readonly signal?: AbortSignal
     readonly onBatchApplied?: CompactionProfile['onBatchApplied']
+    readonly protectedMessageIds?: ReadonlySet<string>
+    readonly onRequestLifecycle?: import('./llm-adapter-types.js').LLMStreamParams['onRequestLifecycle']
   }): Promise<IncrementalCompactionResult> {
     const state = this.projectBuiltinState(args.messages)
     const result = await this.compactIncrementally({
       state,
-      profile: createBuiltinCompactionProfile({
+      profile: { ...createBuiltinCompactionProfile({
         preferredKeepRecent: this.keepRecentMessages,
         mainRequestFixedTokens: args.mainRequestFixedTokens,
         summarySystemPrompt: this.compactSystemPrompt,
         onBatchApplied: args.onBatchApplied,
-      }),
+      }), protectedMessageIds: args.protectedMessageIds },
       target: args.target,
       adapter: args.adapter,
       model: args.model,
+      onRequestLifecycle: args.onRequestLifecycle,
       ...(args.signal ? { signal: args.signal } : {}),
     })
     return result.batchesApplied === 0
@@ -412,6 +415,7 @@ export class ContextManager {
     readonly adapter: LLMAdapter
     readonly model: string
     readonly signal?: AbortSignal
+    readonly onRequestLifecycle?: import('./llm-adapter-types.js').LLMStreamParams['onRequestLifecycle']
   }): Promise<IncrementalCompactionResult> {
     const { profile, target, adapter, model, signal } = args
     let state = this.copyState(args.state)
@@ -508,6 +512,7 @@ export class ContextManager {
             systemPrompt: profile.summarySystemPrompt,
             tools: [],
             model,
+            onRequestLifecycle: args.onRequestLifecycle,
             ...(signal ? { signal } : {}),
           })
         } catch (error) {

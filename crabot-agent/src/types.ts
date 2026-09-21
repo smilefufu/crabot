@@ -968,6 +968,8 @@ export interface TokenUsage {
 }
 
 export interface LlmCallDetails {
+  request_id?: string
+  call_id?: string
   /** Engine-owned stable identity shared with this response's tool lifecycle. */
   response_id?: string
   iteration?: number
@@ -1142,6 +1144,7 @@ export interface DispatchActionDetails {
 }
 
 export type AgentSpanDetails =
+  | import('./workers/types.js').WorkerRuntimeEvent
   | AgentLoopDetails
   | LlmCallDetails
   | ToolCallDetails

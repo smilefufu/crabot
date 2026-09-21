@@ -52,6 +52,7 @@ export interface CompositeTraceParams {
 }
 
 export interface CompositeTraceResult {
+  runtime?: import('../types.js').WorkerRuntimeSnapshot
   events: NormalizedTraceEvent[]
   /** 成功解析 worker/incarnation 后必填（即使 events 为空或 native unavailable）。 */
   next_cursor: string
@@ -386,7 +387,29 @@ export async function readCompositeWorkerTrace(
       ...(event.detail !== undefined ? { detail: redactDetail(event.detail, deps.redact) } : {}),
     }
   })
+  let runtime: import('../types.js').WorkerRuntimeSnapshot | undefined
+  if (!isLegacyIncarnation(incarnation)) {
+    try {
+      runtime = await deps.adapters.get(incarnation.impl)?.readRuntime?.({
+        worker_id: params.worker_id, seq: incarnation.seq, impl: incarnation.impl,
+        incarnation_id: incarnation.incarnation_id, session_ref: incarnationSessionRef(incarnation) ?? '',
+      })
+    } catch { unavailableReason ??= 'runtime observation unavailable' }
+  }
+  const state = incarnation.state
+  runtime = incarnation.incarnation_id ? {
+    ...runtime, incarnation_id: incarnation.incarnation_id,
+    as_of: new Date().toISOString(),
+    phase: state === 'exited' ? 'ended' : state === 'idle' ? 'idle' : runtime?.phase ?? 'unknown',
+    ...(state === 'exited' || state === 'idle' ? { tools: [], retry: undefined } : {}),
+    ...(state === 'exited' && incarnation.ended_at ? { phase_started_at: incarnation.ended_at } : {}),
+    ...(unavailableReason ? { unavailable_reason: unavailableReason } : {}),
+  } : undefined
+  runtime = redactDetail(runtime, deps.redact) as typeof runtime
+  if (runtime?.error) runtime.error = runtime.error.slice(0, 1000)
+  if (runtime?.retry) runtime.retry.error = runtime.retry.error.slice(0, 1000)
   return {
+    runtime,
     events: merged,
     next_cursor: nextToken,
     ...(unavailableReason ? { unavailable_reason: unavailableReason } : {}),
