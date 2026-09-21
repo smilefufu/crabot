@@ -157,27 +157,33 @@ export class DailyReflection {
     return position.offset
   }
 
+  private directoryPage(state: DailyReflectionState): { start: number; end: number } {
+    if (state.directory_page) return state.directory_page
+    let end = 0
+    for (const position of Object.values(state.cursors)) {
+      if (position.record_ref === undefined) end = Math.max(end, position.offset)
+    }
+    // Old states used fixed 20-record pages and did not persist the last page range.
+    return state.directory_complete ? { start: end, end: state.manifest!.records.length }
+      : { start: Math.max(0, end - 20), end }
+  }
+
   private progress(state: DailyReflectionState): ReflectionProgress {
     const records = state.manifest!.records
-    let directoryRead = 0
-    for (const position of Object.values(state.cursors)) {
-      if (position.record_ref === undefined && position.offset > directoryRead) {
-        directoryRead = position.offset
-      }
-    }
-    // The page save precedes the Engine result checkpoint. Replay its start after a restart.
-    const resumeOffset = state.directory_complete ? directoryRead : directoryRead - 20
+    const page = this.directoryPage(state)
     const resumeCursor = Object.entries(state.cursors).find(([, position]) =>
-      position.record_ref === undefined && position.offset === resumeOffset)?.[0]
+      position.record_ref === undefined && position.offset === page.start)?.[0]
     const skipped = new Set(records.filter(record => record.skipped).map(record => record.record_ref))
     const pending = Object.entries(state.read_records).filter(([ref, complete]) => !complete && !skipped.has(ref))
+    const gaps = records.filter(record => record.gaps.length > 0 && !record.skipped)
     return { directory_total: records.length,
-      directory_read: state.directory_complete ? records.length : directoryRead,
+      directory_read: page.end,
       directory_complete: state.directory_complete,
       ...(resumeCursor ? { resume_cursor: resumeCursor } : {}),
       pending_record_count: pending.length,
       pending_records: pending.slice(0, 20).map(([record_ref]) => ({ record_ref })),
-      evidence_gap_count: records.filter(record => record.gaps.length > 0 && !record.skipped).length,
+      evidence_gap_count: gaps.length,
+      evidence_gap_records: gaps.slice(0, 20).map(({ record_ref }) => ({ record_ref })),
       skipped_record_count: skipped.size }
   }
 
@@ -191,17 +197,39 @@ export class DailyReflection {
         state.manifest = manifest
       }
       for (const record of state.manifest.records) skipUnavailableDetail(record)
-      const records = state.manifest.records.slice(offset, offset + 20)
-      const summaries = await Promise.all(records.map(record => this.recordSummary(record, state)))
-      const next = offset + records.length
-      const nextCursor = next < state.manifest.records.length ? this.nextCursor(state, next) : undefined
-      if (!nextCursor) state.directory_complete = true
+      const previousPage = this.directoryPage(state)
+      const { resume_cursor, ...progress } = this.progress(state)
+      const nextCursor = randomUUID()
+      const pageStartCursor = Object.entries(state.cursors).find(([, position]) =>
+        position.record_ref === undefined && position.offset === offset)?.[0]
+      const outputFor = (records: ReflectionRecordSummary[]): ListReflectionRecordsOutput => {
+        const end = offset + records.length
+        const advanced = end > previousPage.end
+        const resume = advanced ? pageStartCursor : resume_cursor
+        return { run_id: state.run_id, window_start: state.window_start, window_end: state.window_end,
+          records, ...(end < state.manifest!.records.length ? { next_cursor: nextCursor } : {}),
+          gaps: state.manifest!.gaps, coverage: 'available_persisted_evidence',
+          progress: { ...progress, directory_read: Math.max(previousPage.end, end),
+            directory_complete: state.directory_complete || end === state.manifest!.records.length,
+            ...(resume ? { resume_cursor: resume } : {}) },
+          ...(state.result ? { previous_result: state.result } : {}) }
+      }
+      let output = outputFor([])
+      if (Buffer.byteLength(JSON.stringify(output)) > 80 * 1024) throw new Error('REFLECTION_DIRECTORY_PAGE_TOO_LARGE: metadata')
+      for (const record of state.manifest.records.slice(offset, offset + 100)) {
+        const candidate = outputFor([...output.records, await this.recordSummary(record, state)])
+        if (Buffer.byteLength(JSON.stringify(candidate)) > 80 * 1024) {
+          if (!output.records.length) throw new Error(`REFLECTION_DIRECTORY_PAGE_TOO_LARGE: ${record.record_ref}`)
+          break
+        }
+        output = candidate
+      }
+      const end = offset + output.records.length
+      state.directory_page = end > previousPage.end ? { start: offset, end } : previousPage
+      state.directory_complete = output.progress.directory_complete
+      if (output.next_cursor) state.cursors[nextCursor] = { offset: end }
       await this.save(state)
-      return { run_id: state.run_id, window_start: state.window_start, window_end: state.window_end,
-        records: summaries,
-        ...(nextCursor ? { next_cursor: nextCursor } : {}), gaps: state.manifest.gaps,
-        coverage: 'available_persisted_evidence', progress: this.progress(state),
-        ...(state.result ? { previous_result: state.result } : {}) }
+      return output
     })
   }
 
@@ -331,7 +359,7 @@ export function buildDailyReflectionTools(host?: Pick<DailyReflection, 'list' | 
       return { output: JSON.stringify(await call(parsed.data as Record<string, unknown>)), isError: false }
     } })
   return [
-    tool('list_reflection_records', '列出宿主固定反思周期内的执行与人类输入证据。首次不传 cursor；恢复续办时用 progress.resume_cursor 保守重读最后一页（首页不返回该游标），之后沿当前页 next_cursor 前进，不反复跟随 progress.resume_cursor。目录翻完但周期未完成时也可重读末页。progress 还列出未读完的详情引用（从首段重读）及证据缺口数量；宿主已读取不证明模型已收到或完成复盘。gaps 表示已知证据缺口。',
+    tool('list_reflection_records', '列出宿主固定反思周期内的执行与人类输入证据，每页最多 100 条，实际页长受完整回包字节预算限制。首次不传 cursor；恢复续办时用 progress.resume_cursor 保守重读最后一页（首页不返回该游标），之后沿当前页 next_cursor 前进，不反复跟随 progress.resume_cursor。目录翻完但周期未完成时也可重读末页。progress.pending_records 是未读完的详情，evidence_gap_records 是未跳过的缺口记录，可能位于此前目录页；两者都可从详情首段重读，成功后再次 list 取得剩余引用。宿主已读取不证明模型已收到或完成复盘。gaps 保留已知缺口；skipped 项已按来源缺失处置，不阻止完成且不能作为 evidence_refs。',
       z.object({ cursor: z.string().optional() }).strict(), input => host ? host.list(input.cursor as string | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
     tool('read_reflection_record', '分页读取本次目录返回的 record_ref。沿该记录的 next_cursor 读完；不能使用其他会话 ID、路径或其他记录的游标。',
       z.object({ record_ref: z.string(), cursor: z.string().optional() }).strict(), input => host ? host.read(input.record_ref as string, input.cursor as string | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
