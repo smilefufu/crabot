@@ -854,7 +854,7 @@ describe('ContextManager.compactIncrementally', () => {
     expect(calls.some((call) => /crossed|correction during|pending/.test(promptText(call)))).toBe(false)
   })
 
-  it('fails finitely when protected input alone exceeds the cap and preserves applied regions', async () => {
+  it('bounds oversized protected input after applying safe regions', async () => {
     const cm = new ContextManager({ maxContextTokens: 20000 })
     const input = createUserMessage('original'.repeat(1000))
     const { adapter, calls } = scriptedAdapter(() => ({ text: 'completed' }))
@@ -865,11 +865,12 @@ describe('ContextManager.compactIncrementally', () => {
         protectedMessageIds: new Set([input.id]), summarySystemPrompt: 'summarize',
         onBatchApplied: (batch) => { applied.push(batch.state) } }),
       target: { kind: 'fit_hard_cap', hardCapTokens: 100 }, adapter, model: 'test' })
-    expect(result.failedReason).toContain('hardCap')
-    expect(calls).toHaveLength(1)
-    expect(result.batchesApplied).toBe(1)
-    expect(result.state).toEqual(applied[0])
-    expect(result.messages[0]).toEqual(input)
+    expect(result.failedReason).toBeUndefined()
+    expect(calls.length).toBeLessThanOrEqual(4)
+    expect(result.batchesApplied).toBeGreaterThan(1)
+    expect(result.state).toEqual(applied.at(-1))
+    expect(result.messages[0]).toMatchObject({ id: input.id, role: input.role })
+    expect(JSON.stringify(result.messages[0])).toContain('内容已省略')
   })
 
   it.each(['provider', 'save', 'abort'] as const)('keeps a committed in-place batch after a later %s failure', async (failure) => {

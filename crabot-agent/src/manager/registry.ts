@@ -29,6 +29,7 @@
  */
 
 import { ManagerLoop, type WakeEvent, type TimedWakeEnvelope, type EpisodeResult, type ManagerLoopDeps } from './loop.js'
+import { CompactionFailedError } from '../engine/context-manager.js'
 import type { ManagerSessionStore } from './session-store.js'
 import type { CompactionPolicy } from './compaction.js'
 import type { ManagerKey } from './types.js'
@@ -282,10 +283,10 @@ export class ManagerRegistry {
   }
 
   private async ensureResumed(key: ManagerKey, restoreIdleReviewCycle = false): Promise<void> {
-    const checkpoint = this.pendingResumes.get(key)
-    if (!checkpoint) return
     const existing = this.resumeTasks.get(key)
     if (existing) return existing
+    const checkpoint = this.pendingResumes.get(key)
+    if (!checkpoint) return
     const task = this.resumeReady.then(async () => {
       if (restoreIdleReviewCycle) {
         for (const item of [...checkpoint.envelopes, ...checkpoint.pending]) {
@@ -299,10 +300,32 @@ export class ManagerRegistry {
           envelopes.push(await this.refreshResumeEnvelope(key, item))
         } else envelopes.push(item)
       }
-      await this.runWake(key, envelopes[checkpoint.wakeIndex], 0, undefined, undefined, { ...checkpoint, envelopes })
+      const result = await this.runWake(key, envelopes[checkpoint.wakeIndex], 0, undefined, undefined, { ...checkpoint, envelopes })
+      if (result.contextRecoveryRequired) throw new CompactionFailedError(result.error ?? '上下文压缩失败')
     }).finally(() => { this.resumeTasks.delete(key) })
     this.resumeTasks.set(key, task)
     return task
+  }
+
+  private async resumeBeforeWake(key: ManagerKey, envelope?: TimedWakeEnvelope): Promise<void> {
+    try {
+      await this.ensureResumed(key)
+    } catch (error) {
+      return this.retainWakeAfterRecoveryFailure(key, envelope, error)
+    }
+  }
+
+  private async retainWakeAfterRecoveryFailure(key: ManagerKey, envelope: TimedWakeEnvelope | undefined, error: unknown): Promise<never> {
+    if (error instanceof CompactionFailedError && envelope) {
+      const persisted = this.pendingResumes.get(key) ?? await this.deps.store.loadCheckpoint(key)
+      const checkpoint = this.pendingResumes.get(key) ?? persisted
+      if (checkpoint) {
+        const retained = { ...checkpoint, pending: [...checkpoint.pending, envelope] }
+        this.deps.store.saveCheckpoint(retained)
+        this.pendingResumes.set(key, retained)
+      }
+    }
+    throw error
   }
 
   private async refreshResumeEnvelope(key: ManagerKey, envelope: TimedWakeEnvelope): Promise<TimedWakeEnvelope> {
@@ -480,7 +503,6 @@ export class ManagerRegistry {
     onEpisodeSettled?: (result: EpisodeResult) => void,
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
-    if (this.pendingResumes.has(key)) await this.ensureResumed(key)
     // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
     // 与 `handleMessageReceived` 的默认分流一致。
     const sessionType = messages[0]?.session.type === 'group' ? 'group' : 'private'
@@ -510,6 +532,9 @@ export class ManagerRegistry {
         kind === 'human_messages'
           ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
           : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
+      if (this.pendingResumes.has(key) || this.resumeTasks.has(key)) {
+        await this.resumeBeforeWake(key, { ...envelope, wake: event })
+      }
       // P7 cutover 遗留接线补齐(2026-08-29):episode 运行中到达的人类消息进入当前
       // episode mailbox,turn 边界注入当前 episode 的下一轮 LLM——不再阻塞在 wakeUp 的
       // mutex 上等本 episode 跑完。注入检查点负责持久化，成功 LLM 响应负责外显确认。
@@ -714,7 +739,6 @@ export class ManagerRegistry {
   }): Promise<{ completion: Promise<EpisodeResult> }> {
     const capture = this.captureIngress()
     const key = `${p.targetSession.channel_id}::${p.targetSession.session_id}` as ManagerKey
-    if (this.pendingResumes.has(key)) await this.ensureResumed(key)
     const envelope = this.makeEnvelope(capture, {
       kind: 'schedule',
       scheduleId: p.scheduleId,
@@ -749,6 +773,7 @@ export class ManagerRegistry {
           ...(principalPermissions ? { principalPermissions } : {}),
         },
       }
+      if (this.pendingResumes.has(key) || this.resumeTasks.has(key)) await this.resumeBeforeWake(key, admittedEnvelope)
       const loop = this.getOrCreate(key)
       this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
       let result: EpisodeResult | undefined
@@ -765,17 +790,21 @@ export class ManagerRegistry {
           ...admittedEnvelope,
           wake: { ...admittedEnvelope.wake, principalPermissions: refreshed },
         }
-      }).then((value) => {
+      }).then(async (value) => {
         result = value
+        if (value.contextRecoveryRequired) {
+          const checkpoint = await this.deps.store.loadCheckpoint(key)
+          if (checkpoint) this.pendingResumes.set(key, checkpoint)
+        }
         return value
-      }).finally(() => {
+      }).catch(error => this.retainWakeAfterRecoveryFailure(key, admittedEnvelope, error)).finally(() => {
         const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
         if (remaining <= 0) this.activeEpisodes.delete(key)
         else this.activeEpisodes.set(key, remaining)
         if (remaining <= 0 && result?.consumedEvents !== true) {
           loop.rejectPendingActivityMailbox()
         }
-        this.maybeSelfWake(key, loop, result, 0)
+        if (!result?.contextRecoveryRequired) this.maybeSelfWake(key, loop, result, 0)
         this.maybeScheduleIdleReview(key, loop, result, false)
       })
       return { completion }
@@ -981,7 +1010,7 @@ export class ManagerRegistry {
     const finishPreparation = this.beginWakePreparation(key)
     let loop!: ManagerLoop
     try {
-      if (!recovery && this.pendingResumes.has(key)) await this.ensureResumed(key)
+      if (!recovery && (this.pendingResumes.has(key) || this.resumeTasks.has(key))) await this.resumeBeforeWake(key, envelope)
       this.assertWakeAdmission()
       if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
       this.assertWakeAdmission()
@@ -1005,7 +1034,14 @@ export class ManagerRegistry {
       } else {
         result = await loop.wakeUp(envelope)
       }
+      if (result.contextRecoveryRequired) {
+        const checkpoint = await this.deps.store.loadCheckpoint(key)
+        if (checkpoint) this.pendingResumes.set(key, checkpoint)
+      }
       return result
+    } catch (error) {
+      if (!recovery) return await this.retainWakeAfterRecoveryFailure(key, envelope, error)
+      throw error
     } finally {
       const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
       if (remaining <= 0) this.activeEpisodes.delete(key)
@@ -1016,7 +1052,7 @@ export class ManagerRegistry {
       // 必须与上面的引用计数递减处在**同一个同步块**里(中间不 await):否则会出现
       // "计数已归零、自唤醒尚未登记"的窗口,`evictIdle` 恰在此时跑就会把实例连同 mailbox
       // 一起回收掉。`maybeSelfWake` 内部的 `runWake` 在第一个 await 之前就完成了 +1。
-      this.maybeSelfWake(key, loop, result, selfWakeChain)
+      if (!result?.contextRecoveryRequired) this.maybeSelfWake(key, loop, result, selfWakeChain)
       this.maybeScheduleIdleReview(key, loop, result, envelope?.wake.kind === 'workboard_idle_review')
     }
   }

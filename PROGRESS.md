@@ -24,6 +24,12 @@
 
 ## 当前状态
 
+### 上下文容量恢复：已实现，待 PR 审查与部署
+
+- 按 9 月 21 日确认的精简方案允许压缩最后完整工具组；超大正文分段归约，空/截断/无进展摘要有限重试后有界裁剪并标记内容省略。不新增原文存储或检索工具，宿主控制规则不可裁剪。
+- 容量失败保留 Manager 原 episode 检查点及 builtin 原化身会话链；恢复不重放已完成工具，排队唤醒不得覆盖待恢复现场。原文被容量裁剪后不确认完整人类输入。
+- 边界回归先复现 9 项失败；Engine、Manager、builtin 定向验证及构建通过。扩展 registry 的两个 Memory 既有失败在未修改主仓同样复现。尚未部署；每日反思原周期仍在运行，未宣称完整验收。
+
 ### builtin Worker 请求边界投递与运行观测：已验证，待 PR 审查
 
 - 按 9 月 21 日确认 [spec](crabot-docs/superpowers/specs/2026-09-21-worker-request-boundary-and-runtime-observation-design.md)，每次实际主推理请求前消费所属队列，覆盖内部重试；首次发送前保护新增输入原文并检查容量，不重跑工具，不更改 receipt、重试策略或 Manager 唤醒。

@@ -1360,6 +1360,14 @@ export class TraceStore {
   startManagerEpisode(traceId: string, managerKey: ManagerKey, trigger: ManagerEpisodeTrigger, resume = false): void {
     const existing = this.managerEpisodes.get(traceId)
     if (resume && existing?.manager_key === managerKey && existing.status === 'running') return
+    if (resume && existing?.manager_key === managerKey && existing.status === 'failed'
+      && existing.outcome?.error?.startsWith('上下文压缩失败：')) {
+      const resumed: ManagerEpisodeTrace = { ...existing, status: 'running', ended_at: undefined, duration_ms: undefined, outcome: undefined }
+      this.persistManagerEpisode(resumed, true)
+      this.managerEpisodes.set(traceId, resumed)
+      this.runningManagerEpisodeIds.add(traceId)
+      return
+    }
     if (this.managerEpisodes.has(traceId)) throw new Error(`[TraceStore] duplicate manager episode ${traceId}`)
     const episode: ManagerEpisodeTrace = {
       trace_id: traceId,
