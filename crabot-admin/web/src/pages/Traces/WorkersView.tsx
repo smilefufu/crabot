@@ -40,7 +40,8 @@ export const WorkersView: React.FC = () => {
   const [items, setItems] = useState<LedgerWorker[]>([])
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
-  const [counts, setCounts] = useState({ active: 0, terminal: 0, legacy: 0 })
+  const [counts, setCounts] = useState({ running: 0, queued: 0, candidates: 0, attention: 0, terminal: 0, legacy: 0 })
+  const [views, setViews] = useState<Record<string, string>>({})
   // 历史数据/旧下拉项仍可能携带旧状态值,过滤选择器放宽为 string
   const [status, setStatus] = useState<string>('')
   const [managerKey, setManagerKey] = useState('')
@@ -68,7 +69,10 @@ export const WorkersView: React.FC = () => {
       if (cancelled) return
       setItems(result.items)
       setTotalPages(Math.max(1, result.pagination.total_pages))
-      setCounts({ active: result.total_active, terminal: result.total_terminal, legacy: result.total_legacy })
+      setCounts({ running: result.total_running ?? 0, queued: result.total_queued ?? 0,
+        candidates: result.total_candidates ?? 0, attention: result.total_attention ?? 0,
+        terminal: result.total_terminal, legacy: result.total_legacy })
+      setViews(result.worker_views ?? {})
     }).catch((err) => {
       if (cancelled) return
       setError(err instanceof Error ? err.message : String(err))
@@ -105,7 +109,7 @@ export const WorkersView: React.FC = () => {
         </label>
       </div>
       <div className="trace-list__summary">
-        正在执行 {counts.active} · 已结束 {counts.terminal} · 旧记录 {counts.legacy}
+        执行中 {counts.running} · 待执行 {counts.queued} · 续办候选 {counts.candidates} · 异常 {counts.attention} · 已关闭 {counts.terminal} · 旧记录 {counts.legacy}
       </div>
       {loading ? <Loading /> : error ? (
         <div className="trace-list__empty">执行器列表暂不可用：{error}</div>
@@ -134,6 +138,9 @@ export const WorkersView: React.FC = () => {
                 </td>
                 <td className="trace-table__status" style={{ color: TONE_COLOR[describeWorkerTask(worker.task).tone] }}>
                   {describeWorkerTask(worker.task).phrase}
+                  {views[worker.worker_id] === 'candidate' && <div className="trace-table__identifier">续办候选</div>}
+                  {views[worker.worker_id] === 'attention' && <div className="trace-table__identifier">待核实 / 关闭未确认</div>}
+                  {views[worker.worker_id] === 'retiring' && <div className="trace-table__identifier">待淘汰</div>}
                 </td>
                 <td className="trace-table__implementation">{implementationLabel(worker)}</td>
                 <td className="trace-table__manager">

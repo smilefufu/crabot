@@ -842,7 +842,10 @@ const ManagerDetailContent: React.FC = () => {
                     {processingCount !== undefined && <div><dt>回合内消息</dt><dd>{processingCount} 条</dd></div>}
                     {queuedCount !== undefined && <div><dt>排队中</dt><dd>{queuedCount} 条</dd></div>}
                     {inboundStatus.status === 'unknown' && <div><dt>消息状态</dt><dd className="is-unknown">未知</dd></div>}
-                    {manager && <div><dt>未结束</dt><dd>{manager.active_worker_count > 0 ? `${manager.active_worker_count} 个` : '—'}</dd></div>}
+                    {manager && <div><dt>执行中</dt><dd>{manager.running_worker_count ?? 0} 个</dd></div>}
+                    {manager && <div><dt>待执行</dt><dd>{manager.queued_worker_count ?? 0} 个</dd></div>}
+                    {manager && <div><dt>续办候选</dt><dd>{manager.continuation_candidate_count ? `${manager.continuation_candidate_count} 个` : '—'}</dd></div>}
+                    {manager?.worker_attention_count ? <div><dt>异常</dt><dd>{manager.worker_attention_count} 个</dd></div> : null}
                     <div><dt>本页记录</dt><dd>{episodes.length} 条</dd></div>
                     <div><dt>当前页</dt><dd>{page} / {totalPages}</dd></div>
                   </dl>

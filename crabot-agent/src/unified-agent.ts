@@ -95,6 +95,7 @@ const DEFAULT_SAFE_WORKER_IMPLS: import('./workers/types.js').WorkerImplementati
   connection_revisions: {},
 }
 import { buildManagerAdminSummaries } from './manager/read-model.js'
+import type { WorkerViewSelection } from './manager/worker-candidates.js'
 import { readCompositeWorkerTrace } from './workers/trace/composite-reader.js'
 import { projectWorkerActivity } from './workers/trace/activity-projection.js'
 import { AdminChatCorrelationStore, dispatchPayloadSha256 } from './manager/chat-correlation-store.js'
@@ -3555,8 +3556,19 @@ export class UnifiedAgent extends ModuleBase {
 
   /** §8.3 list_workers_admin：跨对话对象扁平查询（过滤/排序/分页语义见 manager/read-model.ts）。 */
   private async handleListWorkersAdmin(params: ListWorkersAdminParams): Promise<ListWorkersAdminResult> {
-    const all = await this.requireManagerStack().ledger.listAllWorkers()
-    return filterAndPageWorkers(all, params ?? {})
+    const stack = this.requireManagerStack()
+    const all = await stack.ledger.listAllWorkers()
+    const managerKeys = new Set(all.map((entry) => entry.managerKey))
+    const views = new Map<ManagerKey, WorkerViewSelection>()
+    await Promise.all([...managerKeys].map(async (managerKey) => {
+      try {
+        views.set(managerKey, await stack.harness.workerView(all.filter(entry => entry.managerKey === managerKey).map(entry => entry.worker), await stack.workboard.load(managerKey)))
+      } catch {
+        // The read model retains the old nonterminal view when the board cannot be read;
+        // it must not silently treat the failure as an empty project set.
+      }
+    }))
+    return filterAndPageWorkers(all, params ?? {}, views)
   }
 
   private async requireKnownManagerKey(raw: unknown): Promise<ManagerKey> {
@@ -3866,11 +3878,22 @@ export class UnifiedAgent extends ModuleBase {
     const traceKeys = this.traceStore.listTraceManagerKeys()
     const workers = await stack.ledger.listAllWorkers()
     const activeWorkerCounts = new Map<string, number>()
+    const continuationCandidateCounts = new Map<string, number>()
+    const runningWorkerCounts = new Map<string, number>()
+    const queuedWorkerCounts = new Map<string, number>()
+    const workerAttentionCounts = new Map<string, number>()
     const workerFacts = new Map<string, EpisodeWorkerFact>()
+    const workersByManager = new Map<ManagerKey, LedgerWorker[]>()
     for (const { managerKey, worker } of workers) {
+      const group = workersByManager.get(managerKey) ?? []
+      group.push(worker)
+      workersByManager.set(managerKey, group)
       workerFacts.set(worker.worker_id, { worker_id: worker.worker_id, title: worker.task.title, status: worker.task.status })
       if (!isDecisionVisibleWorker(worker.task.status)) continue
       activeWorkerCounts.set(managerKey, (activeWorkerCounts.get(managerKey) ?? 0) + 1)
+      if (worker.task.status === 'running') runningWorkerCounts.set(managerKey, (runningWorkerCounts.get(managerKey) ?? 0) + 1)
+      if (worker.task.status === 'queued') queuedWorkerCounts.set(managerKey, (queuedWorkerCounts.get(managerKey) ?? 0) + 1)
+      if (worker.task.status === 'halted') workerAttentionCounts.set(managerKey, (workerAttentionCounts.get(managerKey) ?? 0) + 1)
     }
     const running = new Map(stack.registry.listActiveManagers().map(({ key, lastActiveAtMs }) => [key, lastActiveAtMs] as const))
     const workboardSummaries = new Map<ManagerKey, import('./manager/read-model.js').ManagerWorkboardSummary | { status: 'unknown' }>()
@@ -3878,6 +3901,11 @@ export class UnifiedAgent extends ModuleBase {
     await Promise.all([...managerKeys].map(async (key) => {
       try {
         const board = await stack.workboard.loadAdmin(key)
+        const view = await stack.harness.workerView(workersByManager.get(key) ?? [], board)
+        runningWorkerCounts.set(key, view.executing.filter(worker => worker.task.status !== 'queued').length)
+        queuedWorkerCounts.set(key, view.executing.filter(worker => worker.task.status === 'queued').length)
+        continuationCandidateCounts.set(key, view.candidates.length)
+        workerAttentionCounts.set(key, view.attention.length)
         const counts = workboardCounts(board)
         workboardSummaries.set(key, {
           status: 'ready',
@@ -3901,6 +3929,10 @@ export class UnifiedAgent extends ModuleBase {
         }
       },
       activeWorkerCount: (key) => activeWorkerCounts.get(key) ?? 0,
+      continuationCandidateCount: (key) => continuationCandidateCounts.get(key) ?? 0,
+      runningWorkerCount: (key) => runningWorkerCounts.get(key) ?? 0,
+      queuedWorkerCount: (key) => queuedWorkerCounts.get(key) ?? 0,
+      workerAttentionCount: (key) => workerAttentionCounts.get(key) ?? 0,
       runningLastActiveAtMs: (key) => running.get(key),
       workboardSummary: (key) => workboardSummaries.get(key) ?? { status: 'unknown' },
     }, params?.pagination)
@@ -5425,8 +5457,10 @@ export class UnifiedAgent extends ModuleBase {
     void stack.store.listManagerKeys().then(async keys => {
       for (const key of keys) await stack.dailyReflectionFor(key).recover()
     }).catch(error => console.error(`[${this.config.moduleId}] Daily reflection confirmation recovery failed:`, error))
+    let continuationStartupReady = false
     void reconcileManagerStack(stack)
       .then((report) => {
+        continuationStartupReady = true
         // 空台账（现网常态）不打日志，避免每次启动都刷一行没有信息量的 0/0/0。
         if (report.revived.length === 0 && report.failed.length === 0) return
         console.log(
@@ -5450,6 +5484,9 @@ export class UnifiedAgent extends ModuleBase {
           console.error(`[${this.config.moduleId}] Manager startup resume failed:`, error)
         })
         await this.agentHandler?.releaseRecoveredWorkerEntityExits()
+        if (continuationStartupReady) await stack.startContinuationReconciliation().catch(error => {
+          console.error(`[${this.config.moduleId}] continuation reconciliation failed:`, error)
+        })
         // CLI child copy is a terminal artifact: retry only after the startup state reconciliation
         // has decided which parent incarnations are actually terminal.
         void this.recoverTerminalCliSubagentTraces().catch((error) => {

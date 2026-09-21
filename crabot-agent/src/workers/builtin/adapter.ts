@@ -925,7 +925,23 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     await mutex.run(async () => {
       const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
       if (!instance) {
-        throw new Error(`BuiltinWorkerAdapter.kill: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+        // A cold idle instance has no engine to abort. Close its persisted carrier without
+        // resolving runtime/model configuration or reviving the session.
+        const dir = join(this.deps.dataDir, h.worker_id)
+        const metaPath = join(dir, `meta-${h.seq}.json`)
+        const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8'))
+        if (meta.seq !== h.seq || !['idle', 'exited'].includes(meta.state)) {
+          throw new Error(`BuiltinWorkerAdapter.kill: incarnation ${h.worker_id}#${h.seq} needs startup reconciliation`)
+        }
+        if (meta.state === 'exited') return
+        const temporary = join(dir, `.meta-${h.seq}.json.tmp-${randomUUID()}`)
+        try {
+          await fs.writeFile(temporary, JSON.stringify({ ...meta, state: 'exited', ended_reason: 'killed' }), 'utf-8')
+          await fs.rename(temporary, metaPath)
+        } finally { await fs.rm(temporary, { force: true }) }
+        try { this.deps.onStateChange?.(h, 'exited', { endReason: 'killed' }) }
+        catch (error) { console.error(`[BuiltinWorkerAdapter] stop callback failed for ${h.worker_id}:`, error) }
+        return
       }
 
       // 已 exited：幂等返回，不覆盖原 ended_reason（kill 打晚了不该篡改真实终态原因）。
@@ -947,7 +963,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       instance.abortController?.abort()
     })
     const stopped = this.instances.get(instanceKey(h.worker_id, h.seq))
-    await this.deps.traceHooks?.stopBackgroundWork?.(h.worker_id, stopped?.query_id ? stopped.incarnation_id : undefined)
+    await this.deps.traceHooks?.stopBackgroundWork?.(h.worker_id, h.query_id || stopped?.query_id ? h.incarnation_id ?? stopped?.incarnation_id : undefined)
   }
 
   async interrupt(h: IncarnationHandle): Promise<void> {

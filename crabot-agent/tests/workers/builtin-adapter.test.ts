@@ -2433,6 +2433,24 @@ describe('BuiltinWorkerAdapter', () => {
     expect(meta.ended_reason).toBe('killed')
   })
 
+  it('重启后 stop 闲置化身不重新解析运行配置或启动模型', async () => {
+    const llm = makeAdapter([{ text: '首轮回复', stopReason: 'end_turn' }])
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({ adapter: llm })
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+    await adapter.dispose()
+    const resolveRuntime = vi.fn(() => { throw new Error('must not resolve runtime') })
+    const stopBackgroundWork = vi.fn(async () => {})
+    const restarted = new BuiltinWorkerAdapter({ dataDir: tmp, resolveRuntime, traceHooks: { stopBackgroundWork } as any })
+    await restarted.stop(h)
+    expect(await restarted.state(h)).toBe('exited')
+    expect(resolveRuntime).not.toHaveBeenCalled()
+    expect(stopBackgroundWork).toHaveBeenCalledWith(h.worker_id, undefined)
+    expect(llm.stream).toHaveBeenCalledTimes(1)
+    await restarted.dispose()
+  })
+
   it('kill 已 exited 的化身 → 幂等返回，不抛错、不覆盖原 ended_reason', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({

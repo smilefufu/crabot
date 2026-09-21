@@ -3310,6 +3310,109 @@ describe('WorkerHarness.killWorker', () => {
     expect(auditStopped[0].task_status).toBe('closed')
   })
 
+  it('续办候选淘汰使用 system 归因关闭资源', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'halted')
+    await expect(harness.retireWorkerForContinuation(worker.worker_id, { manager_key: worker.manager_key, objectives: [], archive: [] }))
+      .resolves.toMatchObject({ status: 'succeeded', actor: 'system', reason: 'continuation_candidate_evicted' })
+    const [closed] = await harness.listWorkers(`test::friend-1` as ManagerKey)
+    expect(closed.task).toMatchObject({
+      status: 'closed',
+      closed: { by: 'system', note: 'continuation candidate eviction' },
+    })
+  })
+
+  it('淘汰在生命周期锁内复核，不关闭已恢复执行的 Worker', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    await expect(harness.retireWorkerForContinuation(worker.worker_id, { manager_key: worker.manager_key, objectives: [], archive: [] })).resolves.toBeUndefined()
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('候选快照与停止之间发生续办时，过期淘汰被锁内复核拒绝', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: worker.incarnations[0].session_ref }
+    fake.emitStateChange(handle, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'halted')
+    const original = harness.workerView.bind(harness)
+    vi.spyOn(harness, 'workerView').mockImplementationOnce(async (...args) => {
+      const view = await original(...args)
+      expect(view.excludedIdle).toHaveLength(1)
+      fake.emitStateChange(handle, 'running')
+      await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'running')
+      return view
+    })
+    await harness.reconcileContinuationCandidates(worker.manager_key, { manager_key: worker.manager_key, objectives: [], archive: [] })
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('主线停止但原生子 Agent 运行或状态未知时，不淘汰', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'halted')
+    const board = { manager_key: worker.manager_key, objectives: [], archive: [] }
+    for (const status of ['running', 'unknown'] as const) {
+      Object.assign(fake, { listSubagents: async () => [{ worker_id: worker.worker_id, subagent_id: 'child', executor_impl: 'builtin', name: 'child', status }] })
+      await harness.reconcileContinuationCandidates(worker.manager_key, board)
+      expect(fake.killCalls).toHaveLength(0)
+      const view = await harness.workerView(await harness.listWorkers(worker.manager_key), board)
+      expect(status === 'running' ? view.executing : view.attention).toHaveLength(1)
+      expect((await harness.listWorkers(worker.manager_key))[0].task.status).toBe('running')
+    }
+  })
+
+  it('builtin 历史化身已 exited 时核验关闭，不要求驻留运行实例', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'exited')
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].incarnations[0].state === 'exited')
+    await harness.reconcileContinuationCandidates(worker.manager_key, { manager_key: worker.manager_key, objectives: [], archive: [] })
+    expect(fake.killCalls).toHaveLength(1)
+    expect((await harness.listWorkers(worker.manager_key))[0].task.closed?.by).toBe('system')
+  })
+
+  it('停止失败保持异常，重算和重启不会再次发送 stop', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'halted')
+    const kill = vi.spyOn(fake, 'kill').mockRejectedValue(new Error('stop failed'))
+    const board = { manager_key: worker.manager_key, objectives: [], archive: [] }
+    await harness.reconcileContinuationCandidates(worker.manager_key, board)
+    await harness.reconcileContinuationCandidates(worker.manager_key, board)
+    await harness.reconcileControlOperationsOnStartup()
+    expect(kill).toHaveBeenCalledTimes(1)
+    expect((await harness.workerView(await harness.listWorkers(worker.manager_key), board)).attention).toHaveLength(1)
+  })
+
+  it('主线闲置但 Worker-owned 后台执行仍活跃时不淘汰', async () => {
+    let background = false
+    const { harness, fake } = await makeHarness({}, { hasRunningBg: async () => background })
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'halted')
+    background = true
+    const board = { manager_key: worker.manager_key, objectives: [{
+      objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: new Date().toISOString(), work_items: [],
+    }], archive: [] }
+    await harness.reconcileContinuationCandidates(worker.manager_key, board)
+    expect(fake.killCalls).toHaveLength(0)
+    expect((await harness.workerView(await harness.listWorkers(worker.manager_key), board)).executing).toHaveLength(1)
+    expect((await harness.listWorkers(worker.manager_key))[0].task.status).toBe('running')
+    const finishNotification = harness.beginBgNotification(worker.worker_id)
+    background = false
+    await harness.reconcileContinuationCandidates(worker.manager_key, board)
+    expect((await harness.listWorkers(worker.manager_key))[0].task.status).toBe('running')
+    finishNotification()
+    await harness.reconcileContinuationCandidates(worker.manager_key, board)
+    expect((await harness.listWorkers(worker.manager_key))[0].task.status).toBe('halted')
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
   it('幂等:对已 cancelled 的 worker 再次 kill 不报错、不重复调用 adapter.kill、不重复发事件', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())

@@ -659,6 +659,11 @@ export class ManagerWorkboardStore {
     return this.mutexFor(key).run(async () => managerProjection(await this.readUnlocked(key)))
   }
 
+  async withCurrentBoard<T>(key: ManagerKey, use: (board: ManagerWorkboard) => Promise<T>): Promise<T> {
+    this.assertKey(key)
+    return this.mutexFor(key).run(async () => use(managerProjection(await this.readUnlocked(key))))
+  }
+
   async loadAdmin(key: ManagerKey): Promise<ManagerWorkboardAdminView> {
     this.assertKey(key)
     return this.mutexFor(key).run(async () => adminProjection(await this.readUnlocked(key)))

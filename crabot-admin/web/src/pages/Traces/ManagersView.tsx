@@ -81,9 +81,13 @@ export const ManagersView: React.FC = () => {
                   </div>
                 </td>
                 <td className="trace-table__count">
-                  <span className={item.active_worker_count > 0 ? 'trace-count is-active' : 'trace-count'}>
-                    {item.active_worker_count > 0 ? `${item.active_worker_count} 个` : '—'}
-                  </span>
+                  <div className={item.running_worker_count > 0 ? 'trace-count is-active' : 'trace-count'}>
+                    执行中 {item.running_worker_count ?? 0} 个 · 待执行 {item.queued_worker_count ?? 0} 个
+                  </div>
+                  <div className="trace-table__secondary-count">
+                    续办 {item.continuation_candidate_count ? `${item.continuation_candidate_count} 个` : '—'}
+                    {item.worker_attention_count ? ` · 异常 ${item.worker_attention_count}` : ''}
+                  </div>
                 </td>
                 <td className="trace-table__count">
                   <Link className="trace-table__workboard-link" to={`/traces/managers/${encodeURIComponent(item.manager_key)}/workboard`}>

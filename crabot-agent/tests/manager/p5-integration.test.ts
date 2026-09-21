@@ -659,6 +659,23 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
   // --- ⑥ onStart 的启动对账 ---
 
+  it('候选淘汰等启动启用，之后任务板变更自动重算；Admin 列表只读', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const key: ManagerKey = 'wechat::candidate-session'
+    await stack.ledger.upsertWorker(key, 'w-candidate', () => makeLedgerWorker({ workerId: 'w-candidate', managerKey: key }))
+    const reconcile = vi.spyOn(stack.harness, 'reconcileContinuationCandidates').mockResolvedValue(undefined)
+    await stack.workboard.createObjective(key, { title: '保留目标', completion_criteria: ['验收'] })
+    expect(reconcile).not.toHaveBeenCalled()
+    await stack.startContinuationReconciliation()
+    expect(reconcile).toHaveBeenCalledWith(key, expect.objectContaining({ objectives: expect.any(Array) }))
+    reconcile.mockClear()
+    await rpc('list_workers_admin', {})
+    expect(reconcile).not.toHaveBeenCalled()
+    await stack.workboard.createObjective(key, { title: '范围变化', completion_criteria: ['验收'] })
+    await waitUntil(() => reconcile.mock.calls.length > 0)
+  })
+
   it('启动只登记未完成 Manager 检查点，丢弃已完成 episode 的迟到检查点', async () => {
     boot()
     const stack = internals.managerStack!
@@ -697,6 +714,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     const release = vi.fn().mockResolvedValue(undefined)
     internals.agentHandler = { releaseRecoveredWorkerEntityExits: release } as any
     const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
+    const candidates = vi.spyOn(stack, 'startContinuationReconciliation')
     const resume = vi.spyOn(stack.registry, 'resumeInterruptedEpisodes').mockResolvedValue(undefined)
     vi.spyOn(console, 'warn').mockImplementation(() => {})
 
@@ -705,6 +723,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
     expect(sweep).toHaveBeenCalledOnce()
     expect(resume).toHaveBeenCalledOnce()
+    expect(candidates).not.toHaveBeenCalled()
   })
 
   it('Worker 对账完成后才恢复 Manager，Manager LLM 不阻塞后台恢复和巡检', async () => {

@@ -6,6 +6,7 @@ import type { IncarnationId, WorkerImplId } from '../types.js'
 import type { ManagerKey } from './ledger-types.js'
 
 export type WorkerControlOperationKind = 'ui_response' | 'interrupt' | 'stop'
+export type WorkerControlOperationActor = 'manager' | 'system'
 export type WorkerControlOperationStatus = 'accepted' | 'executing' | 'verifying' | 'succeeded' | 'failed' | 'unknown'
 
 export interface WorkerControlOperation {
@@ -16,6 +17,8 @@ export interface WorkerControlOperation {
   readonly impl: WorkerImplId
   readonly seq: number
   readonly kind: WorkerControlOperationKind
+  readonly actor: WorkerControlOperationActor
+  readonly reason?: 'continuation_candidate_evicted'
   readonly status: WorkerControlOperationStatus
   readonly created_at: string
   readonly settled_at?: string
@@ -92,6 +95,10 @@ export class WorkerControlOperationStore {
     return this.mutex(workerId).run(async () =>
       (await this.read(workerId)).operations.filter((item) => !isSettled(item.status)),
     )
+  }
+
+  async list(workerId: string): Promise<WorkerControlOperation[]> {
+    return this.mutex(workerId).run(async () => (await this.read(workerId)).operations)
   }
 
   async hasUnverifiedStop(workerId: string, incarnationId: IncarnationId): Promise<boolean> {
@@ -192,7 +199,7 @@ export class WorkerControlOperationStore {
       if (parsed.version !== 1 || !Array.isArray(parsed.operations)) throw new Error('invalid worker control operation file')
       return {
         version: 1,
-        operations: parsed.operations as WorkerControlOperation[],
+        operations: parsed.operations.map(operation => ({ ...operation, actor: operation.actor ?? 'manager' })),
         notifications: Array.isArray(parsed.notifications) ? parsed.notifications as ControlOperationNotification[] : [],
         handoff_supersede_operations: Array.isArray(parsed.handoff_supersede_operations)
           ? parsed.handoff_supersede_operations.filter((item): item is string => typeof item === 'string')

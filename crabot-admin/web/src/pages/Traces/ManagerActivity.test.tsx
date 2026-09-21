@@ -27,7 +27,7 @@ describe('Manager activity evidence', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-21T06:28:32Z'))
     vi.mocked(service.listManagers).mockResolvedValue({ items: [], pagination })
-    vi.mocked(service.listWorkers).mockResolvedValue({ items: [], pagination, total_active: 0, total_terminal: 0, total_legacy: 0 })
+    vi.mocked(service.listWorkers).mockResolvedValue({ items: [], pagination, total_active: 0, total_terminal: 0, total_legacy: 0, total_candidates: 0, total_attention: 0, total_running: 0, total_queued: 0, worker_views: {} })
     vi.mocked(service.getManagerInboundStatus).mockResolvedValue({ manager_key: 'test::session', snapshot_at: new Date().toISOString(), items: [] })
     vi.mocked(service.listManagerEpisodes).mockResolvedValue({ items: [episode], pagination })
   })

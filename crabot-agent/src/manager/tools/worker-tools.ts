@@ -44,6 +44,8 @@ import { extractWorkerCompletion, pageWorkerTurn, readTurnCursor, type GetWorker
 import type { ResolvedPermissions } from '../../types'
 import type { LegacyContinuationAuth } from '../../workers/harness/legacy-continuation-auth.js'
 import { QueryEstablishmentError } from '../../workers/errors.js'
+import type { ManagerWorkboard } from '../workboard-store.js'
+import { workerViewKinds } from '../worker-candidates.js'
 
 export interface WorkerToolsContext {
   /** Current manager session: worker owner and list_workers scope. */
@@ -82,6 +84,8 @@ export interface WorkerToolsContext {
 export interface WorkerToolsDeps {
   readonly authorizeProjectRead?: (workspaceRoot: string) => Promise<string>
   readonly harness: WorkerHarness
+  /** Current task board snapshot used for the shared continuation view. */
+  readonly readWorkboard?: (managerKey: ManagerKey) => Promise<ManagerWorkboard>
   /** Agent-owned structured session projection; manager never receives a native session path. */
   readonly readWorkerActivity?: (params: {
     worker_id: string
@@ -735,8 +739,8 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const listWorkers = defineTool({
     name: 'list_workers',
     description:
-      '列出当前会话可决策的 worker。默认只返回非终态(queued/running/halted)，' +
-      '需要查历史时显式 include_terminal=true 并分页；需要继续、返工或汇报进度时先查询。',
+      '列出当前会话可决策的 worker。默认返回真实执行中和按项目限额的续办候选；' +
+      '需要查看历史时显式 include_terminal=true 并分页，不提供搜索。需要继续、返工或汇报进度时先列出。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -749,16 +753,29 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     call: async (input): Promise<ToolCallResult> => {
       try {
         const params = input as { include_terminal?: boolean; page?: number; page_size?: number }
-        const all = await harness.listWorkers(context().managerKey)
-        const active = all.filter((worker) => isDecisionVisibleWorker(worker.task.status))
-        const terminal = all.filter((worker) => !isDecisionVisibleWorker(worker.task.status))
-        const selected = params.include_terminal ? [...active, ...terminal] : active
-        const sorted = sortSummaries(selected.map(summarizeWorker))
+        const managerKey = context().managerKey
+        const all = await harness.listWorkers(managerKey)
+        const board = deps.readWorkboard ? await deps.readWorkboard(managerKey) : {
+          manager_key: managerKey,
+          objectives: [],
+          archive: [],
+        }
+        const view = await harness.workerView(all, board)
+        const terminal = view.history
+        const selected = params.include_terminal
+          ? all
+          : [...new Map([...view.executing, ...view.candidates, ...view.attention].map(worker => [worker.worker_id, worker])).values()]
+        const kind = workerViewKinds(view)
+        const sorted = sortSummaries(selected.map(worker => ({ ...summarizeWorker(worker), view_kind: kind.get(worker.worker_id) ?? 'retiring' })))
         const pagination = normalizePagination(params.page, params.page_size)
         const offset = (pagination.page - 1) * pagination.page_size
         return ok({
           workers: sorted.slice(offset, offset + pagination.page_size),
-          total_active: active.length,
+          total_active: all.filter(worker => worker.task.status !== 'closed').length,
+          total_running: view.executing.filter(worker => worker.task.status !== 'queued').length,
+          total_queued: view.executing.filter(worker => worker.task.status === 'queued').length,
+          total_candidates: view.candidates.length,
+          total_attention: view.attention.length,
           total_terminal: terminal.length,
           pagination: {
             ...pagination,

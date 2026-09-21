@@ -151,6 +151,7 @@ import {
   WorkerControlOperationStore,
   type WorkerControlOperation,
   type WorkerControlOperationKind,
+  type WorkerControlOperationActor,
   type WorkerControlOperationStatus,
 } from './worker-control-operation-store'
 import { WorkerUiSnapshotStore, type WorkerUiActionId, type WorkerUiSnapshot } from './worker-ui-snapshot-store'
@@ -158,6 +159,8 @@ import { projectWorkerActivity } from '../trace/activity-projection'
 import { readLegacyTraces } from '../legacy-source-reader.js'
 import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
 import { applyStatusTransition, canTransition, isTerminalStatus } from './task-status'
+import { selectWorkerView, resolveWorkerProjects, type WorkerExecutionFact, type WorkerViewSelection } from '../../manager/worker-candidates.js'
+import type { ManagerWorkboard } from '../../manager/workboard-store.js'
 import { join, dirname } from 'path'
 import {
   InputDeliveryStore,
@@ -748,6 +751,7 @@ export interface HarnessDeps {
   }) => Promise<{ token: string; expires_at: string }>
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
+  readonly onContinuationSweep?: () => Promise<void>
   /** Validates an opaque legacy continuation credential immediately before side effects. */
   readonly validateLegacyContinuationAuth?: (auth: LegacyContinuationAuth) => Promise<boolean>
   /** Stops background recovery delivery from creating new work during shutdown. */
@@ -3514,6 +3518,7 @@ export class WorkerHarness {
         impl: mainline.impl,
         seq: mainline.seq,
         kind: 'ui_response',
+        actor: 'manager',
         created_at: acceptedAt,
       })
       const executing = await this.controlOperationStore.transition(
@@ -4137,6 +4142,88 @@ export class WorkerHarness {
 
   async listWorkers(managerKey: ManagerKey): Promise<LedgerWorker[]> {
     return this.deps.ledger.listWorkers(managerKey)
+  }
+
+  async workerView(workers: readonly LedgerWorker[], board: ManagerWorkboard): Promise<WorkerViewSelection> {
+    const execution = new Map<string, WorkerExecutionFact>()
+    const blocked = new Set<string>()
+    for (const worker of workers) {
+      if (worker.task.status === 'closed') continue
+      execution.set(worker.worker_id, await this.workerExecutionFact(worker))
+      const operations = await this.controlOperationStore.list(worker.worker_id)
+      const mainline = mainlineIncarnation(worker)
+      if (operations.some(operation => operation.kind === 'stop' && operation.status !== 'succeeded'
+        && operation.incarnation_id === mainline?.incarnation_id)) blocked.add(worker.worker_id)
+    }
+    return selectWorkerView(workers, board, { projects: await resolveWorkerProjects(workers, board), execution, blocked })
+  }
+
+  private async workerExecutionFact(worker: LedgerWorker): Promise<WorkerExecutionFact> {
+    if (worker.task.status === 'queued') return 'running'
+    if (this.hasPendingBgNotification(worker.worker_id)) return 'running'
+    let unknown = false
+    try {
+      const queries = await this.queryReceiptStore.list(worker.worker_id)
+      if (queries.some(receipt => receipt.state === 'starting' || receipt.state === 'running')) return 'running'
+      if (queries.some(receipt => receipt.failure?.certainty === 'unknown')) unknown = true
+      if ((await this.inputDeliveryStore.list(worker.worker_id)).some(receipt => receipt.state === 'pending')) unknown = true
+      if (await this.deps.hasRunningBg?.(worker.worker_id, 'all')) return 'running'
+      for (const incarnation of worker.incarnations) {
+        if (!isExecutableIncarnation(incarnation)) continue
+        const adapter = this.deps.adapters.get(incarnation.impl)
+        if (!adapter) { unknown = true; continue }
+        if (incarnation.state === 'running') return 'running'
+        if (incarnation.state !== 'exited' && await adapter.state(handleForIncarnation(worker.worker_id, incarnation)) === 'running') return 'running'
+        const children = await adapter.listSubagents?.(handleForIncarnation(worker.worker_id, incarnation)) ?? []
+        if (children.some(child => child.status === 'running')) return 'running'
+        if (children.some(child => child.status === 'unknown')) unknown = true
+      }
+    } catch { unknown = true }
+    return unknown ? 'unknown' : 'idle'
+  }
+
+  /** Caller holds the task-board mutex; each stop also rechecks under the Worker lifecycle lock. */
+  async reconcileContinuationCandidates(managerKey: ManagerKey, board: ManagerWorkboard): Promise<void> {
+    for (const { worker_id } of await this.deps.ledger.listWorkers(managerKey)) {
+      const changed = await this.withLock(worker_id, async () => {
+        const found = await this.deps.ledger.findWorker(worker_id)
+        const worker = found?.worker
+        if (!worker || worker.task.status === 'closed' || worker.task.status === 'queued') return
+        const mainline = mainlineIncarnation(worker)
+        if (!mainline || !isExecutableIncarnation(mainline)) return
+        const operations = await this.controlOperationStore.list(worker_id)
+        if (operations.some(operation => operation.kind === 'stop' && operation.status !== 'succeeded'
+          && operation.incarnation_id === mainline.incarnation_id)) return
+        const fact = await this.workerExecutionFact(worker)
+        if (fact === 'unknown') return
+        const status = fact === 'running' ? 'running' : 'halted'
+        if (status === worker.task.status) return
+        const now = this.deps.now()
+        const updated = await this.deps.ledger.upsertWorker(managerKey, worker_id, previous => previous && ({
+          ...previous,
+          task: applyStatusTransition(previous.task, status, { now, ...(status === 'halted' ? {
+            halt: { halted_at: now, halt_reason: mainline.ended_reason === 'crashed' ? 'crashed' : 'turn_end' },
+          } : {}) }),
+          updated_at: now,
+        }))
+        return updated ? { seq: mainline.seq, status: updated.task.status } : undefined
+      })
+      if (changed) {
+        const event = this.buildEvent(worker_id, changed.seq, 'state_changed', { source: 'execution_aggregate', to: changed.status }, changed.status)
+        await this.getEventLog(worker_id).append(event)
+        // This autonomous sweep holds the board lock and must not await a Manager episode.
+        void Promise.resolve(this.deps.onEvent?.(event)).catch(error => console.error('[WorkerHarness] aggregate notification failed:', error))
+      }
+    }
+    const workers = await this.deps.ledger.listWorkers(managerKey)
+    const view = await this.workerView(workers, board)
+    for (const worker of view.excludedIdle) {
+      try {
+        await this.retireWorkerForContinuation(worker.worker_id, board)
+      } catch (error) {
+        console.error(`[WorkerHarness] continuation eviction failed for ${worker.worker_id}:`, error)
+      }
+    }
   }
 
   /**
@@ -4806,6 +4893,7 @@ export class WorkerHarness {
       await this.reconcileQueryEstablishmentOperations()
       await this.deliverQueryOperationNotifications()
       await this.reconcileControlOperationsOnStartup()
+      await this.deps.onContinuationSweep?.()
       const allWorkers = await this.deps.ledger.listAllWorkers()
       for (const { worker } of allWorkers) {
         if (isTerminalStatus(worker.task.status)) continue
@@ -5141,6 +5229,19 @@ export class WorkerHarness {
     return this.requestWorkerControlOperation(workerId, 'stop')
   }
 
+  /** System-owned stop used when an idle continuation slot is evicted. */
+  async retireWorkerForContinuation(workerId: string, board: ManagerWorkboard): Promise<WorkerControlOperation | undefined> {
+    return this.withLock(workerId, async () => {
+      const workers = await this.deps.ledger.listWorkers(board.manager_key)
+      const view = await this.workerView(workers, board)
+      const worker = view.excludedIdle.find(item => item.worker_id === workerId)
+      if (!worker || this.deps.isClosing?.()) return
+      const incarnation = requireMainlineIncarnation(worker)
+      if (!isExecutableIncarnation(incarnation)) return
+      return this.executeControlOperationLocked(board.manager_key, worker, incarnation, 'stop', { actor: 'system' })
+    })
+  }
+
   private async requestWorkerControlOperation(
     workerId: string,
     kind: WorkerControlOperationKind,
@@ -5171,6 +5272,7 @@ export class WorkerHarness {
     options?: {
       readonly handoffSupersede?: boolean
       readonly inputDeadline?: { readonly deadlineAt: number; readonly deliveryId: string }
+      readonly actor?: WorkerControlOperationActor
     },
   ): Promise<WorkerControlOperation> {
     this.assertSynchronousInputDeadline(options?.inputDeadline?.deadlineAt, options?.inputDeadline?.deliveryId)
@@ -5184,6 +5286,8 @@ export class WorkerHarness {
       impl: incarnation.impl,
       seq: incarnation.seq,
       kind,
+      actor: options?.actor ?? 'manager',
+      ...(options?.actor === 'system' ? { reason: 'continuation_candidate_evicted' as const } : {}),
       created_at: this.deps.now(),
     }, options)
     const executing = await this.controlOperationStore.transition(
@@ -5348,11 +5452,15 @@ export class WorkerHarness {
       if (await this.deps.hasRunningBg?.(operation.worker_id, 'all')) {
         return this.settleControlOperation(current, 'unknown', 'worker-owned background execution remains active')
       }
+      const children = await this.listWorkerSubagents(operation.worker_id)
+      if (children.some(child => child.status === 'running' || child.status === 'unknown')) {
+        return this.settleControlOperation(current, 'unknown', 'worker child execution is not confirmed stopped')
+      }
       if (handoffSupersede) {
         await this.supersedeAfterVerifiedStop(found.managerKey, found.worker, incarnation)
         return this.settleControlOperation(current, 'succeeded', 'source and registered fork stop requests verified for handoff')
       }
-      await this.cancelAfterVerifiedStop(found.managerKey, found.worker, incarnation)
+      await this.cancelAfterVerifiedStop(found.managerKey, found.worker, incarnation, operation.actor)
       // A persisted successful stop must never precede the corresponding cancelled task. If the
       // process exits after cancellation, startup reconciliation completes the verifying op.
       return this.settleControlOperation(
@@ -5369,6 +5477,7 @@ export class WorkerHarness {
     managerKey: ManagerKey,
     worker: LedgerWorker,
     incarnation: ExecutableIncarnation,
+    actor: WorkerControlOperationActor = 'manager',
   ): Promise<void> {
     if (isTerminalStatus(worker.task.status)) return
     const now = this.deps.now()
@@ -5376,7 +5485,13 @@ export class WorkerHarness {
       if (!previous || isTerminalStatus(previous.task.status)) return previous
       const mainline = mainlineIncarnation(previous)
       if (!mainline || mainline.incarnation_id !== incarnation.incarnation_id) return previous
-      const task = applyStatusTransition(previous.task, 'closed', { now, closed: { by: 'manager_stop' } })
+      const task = applyStatusTransition(previous.task, 'closed', {
+        now,
+        closed: {
+          by: actor === 'system' ? 'system' : 'manager_stop',
+          ...(actor === 'system' ? { note: 'continuation candidate eviction' } : {}),
+        },
+      })
       const incarnations = previous.incarnations.map((item) => {
         if (item.forked_from !== undefined && isExecutableIncarnation(item) && item.state !== 'exited') {
           return { ...item, state: 'exited' as const, ended_at: now, ended_reason: 'killed' as const }
@@ -5446,7 +5561,7 @@ export class WorkerHarness {
       this.deps.now(),
       detail,
     )
-    if (operation.kind === 'stop' && status === 'unknown') {
+    if (operation.kind === 'stop' && (status === 'unknown' || (status === 'failed' && operation.actor === 'system'))) {
       // 协议 §5.2:停止核验失败(unknown)→ 任务落 halted 并注明停止未核验。
       // 不假装已停止,也不宣称失败;operation_settled 事件(下方投递)会唤醒 manager 处置。
       try {
@@ -5575,6 +5690,7 @@ export class WorkerHarness {
     const prep = await this.withLock(workerId, async (): Promise<QueryPrep> => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
+      if (found.worker.task.status === 'closed') throw new TaskCancelledError(workerId)
       const incarnation = requireExecutableIncarnation(requireMainlineIncarnation(found.worker))
       const queryId = randomUUID()
       const createdAt = this.deps.now()
@@ -6034,9 +6150,7 @@ export class WorkerHarness {
       const now = this.deps.now()
 
       if (target.forked_from !== undefined) {
-        // fork 化身(一次性侧问分支)自己的生命周期只更新它自己的化身条目,不影响主线
-        // task.status——protocol-agent-v3 §5.3"fork 不影响主线"在这里的具体体现:即使这是
-        // fork 化身的终态回调,也绝不能像"当前化身"那样去推进 task 状态机。
+        // Fork state does not change the mainline carrier, but contributes to Worker execution.
         if (target.state === 'exited') return // 已终态,迟到回调忽略
         await this.deps.ledger.upsertWorker(managerKey, h.worker_id, (prev) => {
           if (!prev) return undefined
@@ -6139,7 +6253,9 @@ export class WorkerHarness {
             ? 'running' // 占位:任务状态由化身链新成员决定(与既有语义一致)
             : state === 'exited' && endReason === 'killed'
               ? 'closed' // manager 发起的停止,事实成立即关闭
-              : state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
+              : (state === 'idle' || state === 'exited') && (this.hasPendingBgNotification(h.worker_id)
+                || worker.incarnations.some(item => item.forked_from !== undefined && item.state === 'running')
+                || await this.deps.hasRunningBg?.(h.worker_id, 'all'))
                 ? 'running'
                 : 'halted'
       // CLI 从 `waiting_action` 转回 `waiting_text` 时，公开协议层仍是 `idle`。

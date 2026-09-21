@@ -122,6 +122,7 @@ export const DEFAULT_MANAGER_COMPACTION_POLICY: CompactionPolicy = {
 }
 
 export interface ManagerStack {
+  startContinuationReconciliation(): Promise<void>
   readonly dailyReflectionFor: (key: ManagerKey) => DailyReflection
   readonly ledger: LedgerStore
   /** Manager session 持久化（P6-A 读模型用：disk session keys 枚举）。 */
@@ -402,6 +403,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 
   // --- 四步接线契约 step 1:先建空壳 Map ---
   const adapters = new Map<WorkerImplId, WorkerAdapter>()
+  let reconcileContinuationCandidatesForWorker: ((workerId: string) => void) | undefined
 
   const harnessDeps: HarnessDeps = {
     adapters,
@@ -441,6 +443,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       // 都与"task 状态有没有变"无关,拿它们当对外事件的门,等于把 §9.2 的正确性挂在别的模块
       // 的过滤规则上。对外事件自己的去重按 task.status 做,在 events.ts 里。
       publishTaskStatusChanged?.(event)
+      reconcileContinuationCandidatesForWorker?.(event.worker_id)
 
       if (deps.isClosing?.()) return { consumed: false }
       if (!registry || !shouldWakeOnHarnessEvent(event)) return { consumed: false }
@@ -471,6 +474,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       // 对外事件与 onEvent 通道同理:operation_settled 自带落账后 task_status 后,
       // 停止/核验的 closed·halted 推送只经这条通道到达(唤醒面的对应事件已降审计)。
       publishTaskStatusChanged?.(event)
+      reconcileContinuationCandidatesForWorker?.(event.worker_id)
       if (!registry) return { consumed: false }
       return registry.routeOperationNotification(managerKey, event, activityReceipt).catch((err) => {
         console.error(
@@ -487,6 +491,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     capabilityBundle: deps.capabilityBundle,
     issueAgentCliCredential: deps.issueAgentCliCredential,
     hasRunningBg: deps.hasRunningBg,
+    onContinuationSweep: async () => {
+      if (!candidatesReady || candidatesClosing) return
+      for (const { managerKey } of await ledger.listAllWorkers()) scheduleCandidates(managerKey)
+    },
     isClosing: deps.isClosing,
     validateLegacyContinuationAuth: (auth) => principals.validateLegacyContinuationAuth(auth),
   }
@@ -530,7 +538,35 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 
   const managersDir = join(agentDir, 'managers')
   const sessionStore = new ManagerSessionStore(managersDir)
-  const workboardStore = new ManagerWorkboardStore(managersDir, deps.now, (key) => registry?.onWorkboardChanged(key))
+  let candidatesReady = false
+  let candidatesClosing = false
+  const pendingCandidateManagers = new Set<ManagerKey>()
+  const candidateRuns = new Map<ManagerKey, Promise<void>>()
+  const scheduleCandidates = (key: ManagerKey): void => {
+    if (!candidatesReady || candidatesClosing || deps.isClosing?.()) return
+    pendingCandidateManagers.add(key)
+    if (candidateRuns.has(key)) return
+    const run = Promise.resolve().then(async () => {
+      while (pendingCandidateManagers.delete(key) && !candidatesClosing && !deps.isClosing?.()) {
+        await workboardStore.withCurrentBoard(key, board => harness.reconcileContinuationCandidates(key, board))
+      }
+    }).catch(error => console.error(`[manager-bootstrap] candidate reconciliation failed for ${key}:`, error))
+      .finally(() => candidateRuns.delete(key))
+    candidateRuns.set(key, run)
+  }
+  const workboardStore = new ManagerWorkboardStore(managersDir, deps.now, (key) => {
+    registry?.onWorkboardChanged(key)
+    scheduleCandidates(key)
+  })
+  reconcileContinuationCandidatesForWorker = (workerId) => {
+    void (async () => {
+      const found = await ledger.findWorker(workerId)
+      if (!found) return
+      scheduleCandidates(found.managerKey)
+    })().catch((error) => {
+      console.error(`[manager-bootstrap] continuation candidate reconciliation failed for ${workerId}:`, error)
+    })
+  }
   const reflectionTurns = new WorkerTurnStore(workersDir)
   const reflectionEvidence = deps.reflectionEvidence ? new DailyReflectionEvidence({
     ...deps.reflectionEvidence, managersDir, store: sessionStore, ledger, harness, turns: reflectionTurns,
@@ -823,6 +859,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const dispose = (): Promise<void> => {
     if (disposePromise) return disposePromise
     disposePromise = (async () => {
+      candidatesClosing = true
+      await Promise.all(candidateRuns.values())
       registry?.dispose()
       const results = await Promise.allSettled(
         [...adapters.values()].map((adapter) => Promise.resolve().then(() => adapter.dispose())),
@@ -838,6 +876,11 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   }
 
   return {
+    startContinuationReconciliation: async () => {
+      candidatesReady = true
+      for (const { managerKey } of await ledger.listAllWorkers()) scheduleCandidates(managerKey)
+      await Promise.all(candidateRuns.values())
+    },
     ledger,
     workspaces,
     harness,
