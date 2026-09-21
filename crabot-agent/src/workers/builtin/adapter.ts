@@ -1305,6 +1305,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
 
+      if (result.contextRecoveryRequired && !instance.killRequested && !this.closing && !branch) {
+        await instance.outputLog.append(`[builtin-worker] ${result.error} 执行现场已保存，可从当前会话接续。\n`)
+        await this.drainQueuedInputs(instance)
+        await this.transitionState(instance, handle, 'idle', result.error, false)
+        return false
+      }
+
       if (isExplicitContextOverflowFailure(result)) {
         await instance.outputLog.append(`[builtin-worker] ${result.error} 本化身以 failed 收场。\n`)
         await this.transitionExited(instance, handle, 'failed', 'failed', lastAssistantText)

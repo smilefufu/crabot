@@ -615,6 +615,8 @@ export interface EngineResult {
   readonly totalTurns: number
   readonly usage: LLMTokenUsage
   readonly error?: string
+  /** Capacity processing stopped; retain the current execution for continuation. */
+  readonly contextRecoveryRequired?: true
   readonly finalMessages: ReadonlyArray<EngineMessage>
   /**
    * 早退工具（`exitsLoop=true` 的工具）被调用时填入工具 name + 原始 input。

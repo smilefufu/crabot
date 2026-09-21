@@ -4,8 +4,46 @@ import { callNonStreaming, type LLMAdapter, type LLMStreamParams } from '../../s
 import { chunksFromContent } from './helpers/mock-stream.js'
 import { defineTool } from '../../src/engine/tool-framework.js'
 import { createUserMessage, createAssistantMessage, type LLMRequestEvent } from '../../src/engine/types.js'
+import { ContextManager } from '../../src/engine/context-manager.js'
 
 afterEach(() => vi.useRealTimers())
+
+it('retains recovery classification when newly admitted input cannot be compacted', async () => {
+  const pending = ['large input '.repeat(2000)]
+  const stream = vi.fn(async function* () { yield* chunksFromContent([{ type: 'text', text: 'done' }], 'end_turn') })
+  const compact = vi.spyOn(ContextManager.prototype, 'compactBuiltinMessages').mockImplementation(async args => ({
+    state: { protectedHead: [], protectedTail: [], history: [...args.messages] },
+    messages: [...args.messages], batchesApplied: 0, consumedMessages: 0,
+    failedReason: 'checkpoint write failed',
+  }))
+  try {
+    const result = await runEngine({ prompt: 'task', adapter: { stream, updateConfig() {} }, options: {
+      model: 'test', tools: [], systemPrompt: '', contextWindowTokens: 2000,
+      drainExternalInputs: () => pending.splice(0),
+    } })
+    expect(result).toMatchObject({ outcome: 'failed', contextRecoveryRequired: true,
+      error: expect.stringContaining('checkpoint write failed') })
+    expect(JSON.stringify(result.finalMessages)).toContain('large input ')
+    expect(stream).not.toHaveBeenCalled()
+  } finally { compact.mockRestore() }
+})
+
+it('observes bounded summary requests for an oversized completed group', async () => {
+  const events: LLMRequestEvent[] = []
+  let requests = 0
+  const manager = new ContextManager({ maxContextTokens: 2000 })
+  const result = await manager.compactBuiltinMessages({
+    messages: [createUserMessage('task'), createAssistantMessage([{ type: 'text', text: 'x'.repeat(30000) }], 'end_turn')],
+    adapter: { updateConfig() {}, async *stream() {
+      requests++
+      yield* chunksFromContent([{ type: 'text', text: 'summary' }], 'end_turn')
+    } }, model: 'test', target: { kind: 'fit_hard_cap', hardCapTokens: 1400 },
+    onRequestLifecycle: event => events.push(event),
+  })
+  expect(result.failedReason).toBeUndefined()
+  expect(requests).toBeGreaterThan(1)
+  expect(events.filter(event => event.status === 'completed')).toHaveLength(requests)
+})
 
 it('admits queued priority/FIFO input before an internal retry, without another successful turn', async () => {
   vi.useFakeTimers()

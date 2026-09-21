@@ -5375,7 +5375,8 @@ export class UnifiedAgent extends ModuleBase {
     const managerCheckpoints = await this.managerStack?.store.listCheckpoints() ?? []
     const resumableManagerCheckpoints = managerCheckpoints.filter((checkpoint) => {
       const episode = this.traceStore.getManagerEpisode(checkpoint.episodeId)
-      if (!episode || episode.status === 'running') return true
+      if (!episode || episode.status === 'running'
+        || (episode.status === 'failed' && episode.outcome?.error?.startsWith('上下文压缩失败：'))) return true
       this.managerStack!.store.clearCheckpoint(checkpoint.state.key, checkpoint.episodeId)
       return false
     })

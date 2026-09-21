@@ -3232,6 +3232,41 @@ describe('BuiltinWorkerAdapter', () => {
 
   // --- 上下文压缩（F2） ---
 
+  it('preserves a capacity failure in the same idle incarnation and continues without repeating its tool', async () => {
+    const written = vi.fn(async () => ({ output: 'saved '.repeat(15_000), isError: false }))
+    const tool = defineTool({ name: 'write', description: 'write', inputSchema: {}, isReadOnly: false, call: written })
+    let first = true
+    let failSummary = true
+    const llm: LLMAdapter = {
+      updateConfig() {},
+      async *stream(params) {
+        if (params.tools.length === 0) {
+          if (failSummary) throw new Error('invalid api key')
+          yield* chunksFromContent([{ type: 'text', text: 'The write completed.' }], 'end_turn')
+        } else if (first) {
+          first = false
+          yield* chunksFromContent([{ type: 'tool_use', id: 'write-once', name: 'write', input: {} }], 'tool_use')
+        } else yield* chunksFromContent([{ type: 'text', text: 'continued' }], 'end_turn')
+      },
+    }
+    const changes = vi.fn()
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp, onStateChange: changes })
+    const s = spec({ adapter: llm, tools: [tool], contextWindowTokens: 12_000 })
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+    expect(changes.mock.calls.at(-1)?.[2]).not.toHaveProperty('completionSource')
+    await expect(adapter.readTerminal(h)).resolves.toMatchObject({ text: expect.stringContaining('执行现场已保存') })
+    const before = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8'))
+    const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    expect(JSON.stringify(tree.pathTo(before.tip_node_id))).toContain('saved ')
+    failSummary = false
+    await adapter.sendInput(h, 'continue')
+    await waitState(adapter, h, 'idle')
+    expect(written).toHaveBeenCalledTimes(1)
+    expect(await fs.readdir(join(tmp, s.worker_id))).not.toContain('meta-2.json')
+    await expect(adapter.readTerminal(h)).resolves.toMatchObject({ text: expect.stringContaining('continued') })
+  })
+
   it.each(['failed', 'aborted'] as const)(
     '部分成功后 %s 收尾仍把最后成功状态写成新根链',
     async (outcome) => {
@@ -3439,23 +3474,23 @@ describe('BuiltinWorkerAdapter', () => {
     expect(runEngineSpy.mock.calls[1]?.[0]?.options?.disableCompaction).toBe(false)
   })
 
-  it('静默 max_tokens（engine 压缩配额耗尽）→ exited(failed)，不是 idle', async () => {
+  it('静默 max_tokens 后容量处理无法继续，保存现场并回到 idle', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     // 每轮都返回 text='' + stop_reason='max_tokens'：engine 压两次仍不行 → finishTask()
-    // 收场（outcome='completed'、finalText=''），adapter 必须把它落成真实终态。
+    // 容量处理无法推进时保存原化身，不伪造任务完成。
     const s = spec({ adapter: makeSilentMaxTokensAdapter() })
 
     const h = await adapter.spawn(s)
-    await waitState(adapter, h, 'exited')
+    await waitState(adapter, h, 'idle')
 
     const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as {
       state: string
       ended_reason: string
       outcome: string
     }
-    expect(meta.state).toBe('exited')
-    expect(meta.ended_reason).toBe('failed')
-    expect(meta.outcome).toBe('failed')
+    expect(meta.state).toBe('idle')
+    expect(meta.ended_reason).toBeUndefined()
+    expect(meta.outcome).toBeUndefined()
 
     // manager 侧看得见原因：文本视图有一条明确的错误信号，不再是"零输出零错误信号"。
     await expect(adapter.readTerminal(h)).resolves.toMatchObject({
@@ -3464,7 +3499,7 @@ describe('BuiltinWorkerAdapter', () => {
     })
   })
 
-  it('静默 max_tokens 命中时不再续 burst：pendingInputs 直接进 dead-letter', async () => {
+  it('容量处理失败时不自动续 burst，pendingInputs 落入原会话链', async () => {
     const gate = deferred<void>()
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({ adapter: makeSilentMaxTokensAdapter(gate.promise) })
@@ -3473,23 +3508,23 @@ describe('BuiltinWorkerAdapter', () => {
     expect(await adapter.state(h)).toBe('running')
     await adapter.sendInput(h, '再推一把')
     gate.resolve()
-    await waitState(adapter, h, 'exited')
+    await waitState(adapter, h, 'idle')
 
-    const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { ended_reason: string }
-    expect(meta.ended_reason).toBe('failed')
+    const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { ended_reason?: string; tip_node_id: string }
+    expect(meta.ended_reason).toBeUndefined()
     const terminal = await adapter.readTerminal(h)
     const text = terminal.kind === 'unavailable' ? '' : terminal.text
-    expect(text).toContain('[dead-letter]')
-    expect(text).toContain('再推一把')
+    expect(text).not.toContain('[dead-letter]')
+    const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    expect(JSON.stringify(tree.pathTo(meta.tip_node_id))).toContain('再推一把')
   })
 
   it('fork burst 静默 max_tokens → exited(failed)，不是 completed', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({ adapter: makeSilentMaxTokensAdapter() })
-    // 主线用普通 adapter 先跑出一个 tip，fork 再用静默 adapter —— 这里图省事：主线也会
-    // 落 exited(failed)，但 tip 已经落定，fork 仍可从它分叉。
+    // 主线保留 idle 会话；一次性侧问仍以真实失败结束。
     const h = await adapter.spawn(s)
-    await waitState(adapter, h, 'exited')
+    await waitState(adapter, h, 'idle')
     const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
 
     const forkH = await adapter.fork({ worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }, '侧问', forkOptions())
