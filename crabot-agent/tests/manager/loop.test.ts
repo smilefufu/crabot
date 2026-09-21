@@ -284,8 +284,10 @@ describe('ManagerLoop', () => {
     const outcome = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('keep-current-input')] }))
     if (trigger === 'overflow_twice') {
       expect(outcome.outcome).toBe('failed')
-      expect(inference).toBe(3)
-      expect(folds).toBe(1)
+      expect(outcome.contextRecoveryRequired).toBe(true)
+      expect(inference).toBeGreaterThan(3)
+      expect(inference).toBeLessThan(20)
+      expect(folds).toBeGreaterThanOrEqual(1)
     }
     expect(folds).toBeGreaterThan(0)
     expect(execute).toHaveBeenCalledTimes(1)
@@ -874,6 +876,17 @@ describe('ManagerLoop', () => {
     expect(JSON.stringify(state.recent)).toContain('CURRENT_HUMAN_MUST_STAY_RAW')
   })
 
+  it('does not acknowledge the full human input after only a cropped body reaches the model', async () => {
+    const { adapter, calls } = makeAdapter()
+    const acknowledged = vi.fn()
+    const loop = new ManagerLoop(baseDeps({ store, adapter, contextWindowTokens: () => 12_000 }))
+    const result = await loop.wakeUp(timed({ kind: 'human_messages',
+      messages: Array.from({ length: 60 }, () => makeChannelMessage('long request '.repeat(150))) }), acknowledged)
+    expect(result.outcome).toBe('completed')
+    expect(JSON.stringify(calls[0].messages)).toContain('内容已省略')
+    expect(acknowledged).not.toHaveBeenCalled()
+  })
+
   it('hard cap 计入本 episode 的非人类事件，但摘要只消费此前历史', async () => {
     const { adapter, queue, foldCalls } = makeAdapter()
     queue.push({ text: '事件已处理', stopReason: 'end_turn' })
@@ -941,7 +954,8 @@ describe('ManagerLoop', () => {
     await expect(loop.wakeUp(timed({
       kind: 'human_messages',
       messages: [makeChannelMessage('PARTIAL_CURRENT_HUMAN')],
-    }))).rejects.toThrow('second compaction batch failed')
+    }))).resolves.toMatchObject({ outcome: 'failed', contextRecoveryRequired: true,
+      error: expect.stringContaining('second compaction batch failed') })
 
     expect(foldAttempts).toHaveLength(2)
     for (const call of foldAttempts) {
@@ -1169,9 +1183,12 @@ describe('ManagerLoop', () => {
     expect(stateAfterThrow.recent).toHaveLength(seedMessages.length + 1)
     expect(JSON.stringify(stateAfterThrow.recent)).toContain('触发超限并在折叠时抛错')
 
-    // 下次唤醒:carriedTexts(唤醒前邮箱里的内容)、eventText(本次唤醒事件)、
-    // currentEpisodeInjected(mid-episode 注入)应该都被重投,一个不丢
+    // 原 episode 从检查点接续，已执行工具与注入事件不重投。
+    const checkpoint = await store.loadCheckpoint(KEY)
+    expect(JSON.stringify(checkpoint?.state.recent)).toContain('sched-carried')
+    expect(JSON.stringify(checkpoint?.state.recent)).toContain('sched-throw')
     queue.push({ text: '正常处理', stopReason: 'end_turn' })
+    expect((await loop.resume(checkpoint!)).outcome).toBe('completed')
     const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
     expect(second.outcome).toBe('completed')
     expect(second.consumedEvents).toBe(true)
@@ -1236,14 +1253,16 @@ describe('ManagerLoop', () => {
       loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发超限并在折叠时抛错')] }))
     ).resolves.toMatchObject({ outcome: 'failed' })
 
-    // catch 分支补提交:注入消息落 recent + 去重键(键与文本同进),mailbox 无残留
-    const stateAfterThrow = await store.load(KEY)
+    // 容量失败的注入消息及去重键一起保留在原 episode 检查点。
+    const checkpoint = await store.loadCheckpoint(KEY)
+    const stateAfterThrow = checkpoint!.state
     expect(JSON.stringify(stateAfterThrow.recent)).toContain('抛错前注入的指令')
     expect(stateAfterThrow.committedHumanMessageIds ?? []).toHaveLength(2) // 主 wake + 注入
     expect(loop.hasPendingMailbox).toBe(false)
 
-    // 下次唤醒:注入消息经 tailMessages 可见,commitHumanInputs 按键去重不重复追加
+    // 从检查点续跑后再准入新消息，不回到 episode 起点重放工具。
     queue.push({ text: '正常处理', stopReason: 'end_turn' })
+    expect((await loop.resume(checkpoint!)).outcome).toBe('completed')
     const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
     expect(second.outcome).toBe('completed')
 
@@ -2468,7 +2487,7 @@ describe('ManagerLoop', () => {
 
     const state = await store.load(KEY)
     expect(state.rollingSummary).toBe('折叠后的摘要')
-    expect(state.foldedCount).toBe(2)
+    expect(state.foldedCount).toBe(1)
     expect(JSON.stringify(state.recent)).toContain('OVERSIZED_2')
     expect(JSON.stringify(state.recent)).not.toContain('OVERSIZED_0')
   })

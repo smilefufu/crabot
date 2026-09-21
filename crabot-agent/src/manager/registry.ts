@@ -299,7 +299,8 @@ export class ManagerRegistry {
           envelopes.push(await this.refreshResumeEnvelope(key, item))
         } else envelopes.push(item)
       }
-      await this.runWake(key, envelopes[checkpoint.wakeIndex], 0, undefined, undefined, { ...checkpoint, envelopes })
+      const result = await this.runWake(key, envelopes[checkpoint.wakeIndex], 0, undefined, undefined, { ...checkpoint, envelopes })
+      if (result.contextRecoveryRequired) throw new Error(result.error)
     }).finally(() => { this.resumeTasks.delete(key) })
     this.resumeTasks.set(key, task)
     return task
@@ -765,8 +766,12 @@ export class ManagerRegistry {
           ...admittedEnvelope,
           wake: { ...admittedEnvelope.wake, principalPermissions: refreshed },
         }
-      }).then((value) => {
+      }).then(async (value) => {
         result = value
+        if (value.contextRecoveryRequired) {
+          const checkpoint = await this.deps.store.loadCheckpoint(key)
+          if (checkpoint) this.pendingResumes.set(key, checkpoint)
+        }
         return value
       }).finally(() => {
         const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
@@ -775,7 +780,7 @@ export class ManagerRegistry {
         if (remaining <= 0 && result?.consumedEvents !== true) {
           loop.rejectPendingActivityMailbox()
         }
-        this.maybeSelfWake(key, loop, result, 0)
+        if (!result?.contextRecoveryRequired) this.maybeSelfWake(key, loop, result, 0)
         this.maybeScheduleIdleReview(key, loop, result, false)
       })
       return { completion }
@@ -1005,6 +1010,10 @@ export class ManagerRegistry {
       } else {
         result = await loop.wakeUp(envelope)
       }
+      if (result.contextRecoveryRequired) {
+        const checkpoint = await this.deps.store.loadCheckpoint(key)
+        if (checkpoint) this.pendingResumes.set(key, checkpoint)
+      }
       return result
     } finally {
       const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
@@ -1016,7 +1025,7 @@ export class ManagerRegistry {
       // 必须与上面的引用计数递减处在**同一个同步块**里(中间不 await):否则会出现
       // "计数已归零、自唤醒尚未登记"的窗口,`evictIdle` 恰在此时跑就会把实例连同 mailbox
       // 一起回收掉。`maybeSelfWake` 内部的 `runWake` 在第一个 await 之前就完成了 +1。
-      this.maybeSelfWake(key, loop, result, selfWakeChain)
+      if (!result?.contextRecoveryRequired) this.maybeSelfWake(key, loop, result, selfWakeChain)
       this.maybeScheduleIdleReview(key, loop, result, envelope?.wake.kind === 'workboard_idle_review')
     }
   }

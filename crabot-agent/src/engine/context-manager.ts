@@ -1,4 +1,5 @@
 import { isContextWindowError } from './retry-utils.js'
+import { hasDanglingToolUse } from './tool-message-integrity.js'
 import {
   type EngineMessage,
   type EngineUserMessage,
@@ -39,8 +40,10 @@ export interface CompactionProfile {
   readonly mainRequestFixedTokens: number
   readonly summarySystemPrompt: string
   readonly summaryMessagePrefix: string
-  /** 原位保留这些输入；其后的已完成工具组仍可压缩。仅用于本次调用，不持久化。 */
+  /** 优先原位保留这些输入；容量兜底可裁剪正文。仅用于本次调用，不持久化。 */
   readonly protectedMessageIds?: ReadonlySet<string>
+  /** Host control instructions carried as messages must never be summarized or cropped. */
+  readonly immutableMessageIds?: ReadonlySet<string>
   readonly onBatchApplied?: (batch: CompactionBatchApplication) => void | Promise<void>
 }
 
@@ -89,11 +92,8 @@ interface CumulativeUsage {
 }
 
 /**
- * 上下文压缩失败（摘要 LLM 调用失败 / 摘要为空 / 找不到合法切点）。
- *
- * 压缩失败**不再**静默回退到纯文本折叠——那条回退对 tool_result 正文一字不减，
- * 等于"假压缩"：上层看到压缩成功、下一轮仍超阈值，于是每轮再烧一次注定失败的摘要调用。
- * 调用方（query-loop）据此走与"主 LLM 调用失败"同一条 failed 路径。
+ * 容量处理仍无法继续（服务错误、持久化失败或必需控制上下文超窗）。
+ * 有损兜底也必须严格缩小工作上下文，失败时宿主保留可恢复现场。
  *
  * 注意：abort 不包在这里——AbortError 原样穿透，让调用方以 aborted 收尾。
  */
@@ -134,6 +134,15 @@ const IMAGE_TOKENS = 1000
 const SUMMARY_TOOL_RESULT_MAX_CHARS = 2000
 
 const SUMMARY_INPUT_BUDGET_RATIO = 0.8
+const OMISSION_MARKER = '[内容已省略：上下文容量裁剪，不能视为完整证据]'
+
+function boundText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  const available = Math.max(0, maxChars - OMISSION_MARKER.length - 2)
+  const head = Math.ceil(available / 2)
+  const tail = available - head
+  return `${text.slice(0, head)}\n${OMISSION_MARKER}\n${tail > 0 ? text.slice(-tail) : ''}`
+}
 
 /** findSafeSplitIndex 的哨兵：整段没有任何合法切点（recent 段必然以孤儿 tool_result 打头）。 */
 const NO_SAFE_SPLIT = -1
@@ -216,6 +225,7 @@ interface CompactionProfileOptions {
   readonly mainRequestFixedTokens?: number
   readonly summarySystemPrompt?: string
   readonly protectedMessageIds?: ReadonlySet<string>
+  readonly immutableMessageIds?: ReadonlySet<string>
   readonly onBatchApplied?: CompactionProfile['onBatchApplied']
 }
 
@@ -229,6 +239,7 @@ export function createBuiltinCompactionProfile(
     summarySystemPrompt: options.summarySystemPrompt ?? DEFAULT_COMPACT_SYSTEM_PROMPT,
     summaryMessagePrefix: BUILTIN_SUMMARY_MESSAGE_PREFIX,
     ...(options.protectedMessageIds ? { protectedMessageIds: options.protectedMessageIds } : {}),
+    ...(options.immutableMessageIds ? { immutableMessageIds: options.immutableMessageIds } : {}),
     ...(options.onBatchApplied ? { onBatchApplied: options.onBatchApplied } : {}),
   }
 }
@@ -243,6 +254,7 @@ export function createManagerCompactionProfile(
     summarySystemPrompt: options.summarySystemPrompt ?? DEFAULT_COMPACT_SYSTEM_PROMPT,
     summaryMessagePrefix: MANAGER_SUMMARY_MESSAGE_PREFIX,
     ...(options.protectedMessageIds ? { protectedMessageIds: options.protectedMessageIds } : {}),
+    ...(options.immutableMessageIds ? { immutableMessageIds: options.immutableMessageIds } : {}),
     ...(options.onBatchApplied ? { onBatchApplied: options.onBatchApplied } : {}),
   }
 }
@@ -282,6 +294,7 @@ export class ContextManager {
       const toolMsg = msg as EngineToolResultMessage
       for (const result of toolMsg.toolResults) {
         charCount += result.content.length
+        charCount += (result.images?.length ?? 0) * IMAGE_TOKENS * CHARS_PER_TOKEN
       }
     } else {
       const userMsg = msg as EngineUserMessage
@@ -387,6 +400,7 @@ export class ContextManager {
     readonly onBatchApplied?: CompactionProfile['onBatchApplied']
   }): Promise<IncrementalCompactionResult> {
     const state = this.projectBuiltinState(args.messages)
+    const latestInput = [...state.history].reverse().find(message => message.role === 'user' && 'content' in message)
     const result = await this.compactIncrementally({
       state,
       profile: createBuiltinCompactionProfile({
@@ -394,6 +408,7 @@ export class ContextManager {
         mainRequestFixedTokens: args.mainRequestFixedTokens,
         summarySystemPrompt: this.compactSystemPrompt,
         onBatchApplied: args.onBatchApplied,
+        ...(args.target.kind === 'fit_hard_cap' && latestInput ? { protectedMessageIds: new Set([latestInput.id]) } : {}),
       }),
       target: args.target,
       adapter: args.adapter,
@@ -406,6 +421,29 @@ export class ContextManager {
   }
 
   async compactIncrementally(args: {
+    readonly state: CompactionState
+    readonly profile: CompactionProfile
+    readonly target: CompactionTarget
+    readonly adapter: LLMAdapter
+    readonly model: string
+    readonly signal?: AbortSignal
+  }): Promise<IncrementalCompactionResult> {
+    if (args.profile.immutableMessageIds) {
+      args = { ...args, profile: { ...args.profile, protectedMessageIds: new Set([
+        ...args.profile.protectedMessageIds ?? [], ...args.profile.immutableMessageIds,
+      ]) } }
+    }
+    if (args.target.kind === 'fit_hard_cap'
+      && this.calibrateTokenEstimate(args.profile.mainRequestFixedTokens) >= args.target.hardCapTokens) {
+      return { state: args.state, messages: this.materializeCompactionState(args.state, args.profile),
+        batchesApplied: 0, consumedMessages: 0, failedReason: '系统指令与工具固定开销超过上下文容量，请修正模型窗口配置' }
+    }
+    const result = await this.compactBatches(args)
+    if (args.target.kind !== 'fit_hard_cap' || !result.failedReason || result.aborted || result.cause) return result
+    return this.recoverCapacity(args, result)
+  }
+
+  private async compactBatches(args: {
     readonly state: CompactionState
     readonly profile: CompactionProfile
     readonly target: CompactionTarget
@@ -461,7 +499,7 @@ export class ContextManager {
         protectedHead: [], protectedTail: [], previousSummary,
         history: state.history.slice(region.start + offset, region.end),
       }
-      const allowConsumeAll = region.end < state.history.length
+      const allowConsumeAll = target.kind === 'fit_hard_cap' || region.end < state.history.length
       const laterHistory = state.history.slice(region.end).filter((message) => !profile.protectedMessageIds?.has(message.id)).length
       const keepRecent = Math.max(0, profile.preferredKeepRecent - laterHistory)
       const maxBatchMessages = this.maxConsumablePrefix(batchState.history, keepRecent, allowConsumeAll)
@@ -508,6 +546,7 @@ export class ContextManager {
             systemPrompt: profile.summarySystemPrompt,
             tools: [],
             model,
+            maxTokens: Math.max(1, Math.min(4096, Math.floor(this.maxContextTokens * 0.1))),
             ...(signal ? { signal } : {}),
           })
         } catch (error) {
@@ -593,6 +632,129 @@ export class ContextManager {
       + this.estimateTotalTokens(this.materializeCompactionState(state, profile)))
   }
 
+  /** Only entered after ordinary safe-group compaction cannot make progress. */
+  private async recoverCapacity(
+    args: Parameters<ContextManager['compactIncrementally']>[0],
+    previous: IncrementalCompactionResult,
+  ): Promise<IncrementalCompactionResult> {
+    const { profile, adapter, model, signal, target } = args
+    if (target.kind !== 'fit_hard_cap' || hasDanglingToolUse(previous.messages)) return previous
+    let result = previous
+    const apply = async (state: CompactionState, consumed: number): Promise<void> => {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      if (this.estimateCompactionStateTokens(state, profile) >= this.estimateCompactionStateTokens(result.state, profile)) return
+      const messages = this.materializeCompactionState(state, profile)
+      await profile.onBatchApplied?.({ state, messages, batchNumber: result.batchesApplied + 1,
+        consumedMessages: consumed, totalConsumedMessages: result.consumedMessages + consumed })
+      result = { state, messages, batchesApplied: result.batchesApplied + 1,
+        consumedMessages: result.consumedMessages + consumed }
+    }
+    try {
+      // Reverse application keeps earlier region indices valid and protected inputs in place.
+      const regions = this.compactionRegions(result.state.history, profile.protectedMessageIds)
+      for (const region of regions.reverse()) {
+        const state = result.state
+        const history = state.history.slice(region.start, region.end)
+        const source = this.buildSummaryPrompt(region.start === 0 ? state.previousSummary : undefined, history, profile)
+        const summary = await this.reduceOversizedText(source, profile, adapter, model, signal)
+        const summaryMessage = createAssistantMessage([{ type: 'text', text: profile.summaryMessagePrefix + summary }], 'end_turn')
+        const next: CompactionState = region.start === 0
+          ? { ...state, previousSummary: summary, history: state.history.slice(region.end) }
+          : { ...state, history: [...state.history.slice(0, region.start),
+              { ...summaryMessage, id: INLINE_SUMMARY_ID_PREFIX + summaryMessage.id }, ...state.history.slice(region.end)] }
+        await apply(next, history.filter(message => !isInlineSummary(message)).length)
+      }
+      if (result.state.previousSummary
+        && this.estimateCompactionStateTokens(result.state, profile) > target.hardCapTokens) {
+        await apply({ ...result.state, previousSummary: await this.reduceOversizedText(
+          result.state.previousSummary, profile, adapter, model, signal,
+        ) }, 0)
+      }
+      // Protected input stays in its original role and position. Only its working body is shortened.
+      if (this.estimateCompactionStateTokens(result.state, profile) > target.hardCapTokens
+        || (target.force && result.batchesApplied === 0)) {
+        const before = this.estimateCompactionStateTokens(result.state, profile)
+        const limit = Math.min(target.hardCapTokens, Math.floor(before * 0.75))
+        let low = OMISSION_MARKER.length + 2
+        let high = Math.max(low, Math.floor(target.hardCapTokens * CHARS_PER_TOKEN / this.tokenEstimateRatio))
+        let selected: CompactionState | undefined
+        while (low <= high) {
+          const middle = Math.floor((low + high) / 2)
+          const next = this.cropCompactionState(result.state, profile, middle)
+          if (this.estimateCompactionStateTokens(next, profile) <= limit) {
+            selected = next
+            low = middle + 1
+          } else high = middle - 1
+        }
+        if (selected) await apply(selected, 0)
+      }
+      if (this.estimateCompactionStateTokens(result.state, profile) > target.hardCapTokens
+        || (target.force && result.batchesApplied === 0)) {
+        return { ...result, failedReason: '必需控制上下文或未完成工具组无法容纳，已保留执行现场' }
+      }
+      return { ...result, failedReason: undefined }
+    } catch (cause) {
+      if (signal?.aborted || isAbortError(cause)) return { ...result, aborted: true, cause }
+      return { ...result, failedReason: `容量恢复失败: ${String(cause)}`, cause }
+    }
+  }
+
+  private cropCompactionState(state: CompactionState, profile: CompactionProfile, maxChars: number): CompactionState {
+    const project = (message: EngineMessage): EngineMessage => {
+      if (profile.immutableMessageIds?.has(message.id) || 'toolResults' in message) return message
+      if (message.role === 'assistant') {
+        if (!isInlineSummary(message)) return message
+        const summary = this.extractText(message).slice(profile.summaryMessagePrefix.length)
+        return { ...message, content: [{ type: 'text', text: profile.summaryMessagePrefix + boundText(summary, maxChars) }] }
+      }
+      const text = typeof message.content === 'string'
+        ? message.content : this.extractText(message) + '\n' + OMISSION_MARKER
+      return { ...message, content: boundText(text, maxChars) }
+    }
+    return {
+      protectedHead: state.protectedHead.map(project),
+      protectedTail: state.protectedTail.map(project),
+      history: state.history.map(project),
+      ...(state.previousSummary === undefined ? {} : { previousSummary: boundText(state.previousSummary, maxChars) }),
+    }
+  }
+
+  private async reduceOversizedText(
+    source: string, profile: CompactionProfile, adapter: LLMAdapter, model: string, signal?: AbortSignal,
+  ): Promise<string> {
+    const ceiling = Math.floor(this.maxContextTokens * SUMMARY_INPUT_BUDGET_RATIO / this.tokenEstimateRatio)
+    const outputTokens = Math.max(1, Math.min(2048, Math.floor(ceiling / 8)))
+    const outputChars = outputTokens * CHARS_PER_TOKEN
+    let summary = ''
+    for (let position = 0; position < source.length;) {
+      const render = (fragment: string) => this.buildSummaryPrompt(summary || undefined, [createUserMessage(fragment)], profile)
+      let length = Math.min(source.length - position,
+        Math.floor((ceiling - this.estimateSummaryRequestTokens(render(''), profile) - 16) * CHARS_PER_TOKEN))
+      let accepted = false
+      for (let attempt = 0; attempt < 3 && length > 0; attempt++, length = Math.floor(length / 2)) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+        const fragment = source.slice(position, position + length)
+        try {
+          const response = await callNonStreaming(adapter, { messages: [createUserMessage(render(fragment))],
+            systemPrompt: profile.summarySystemPrompt, tools: [], model, maxTokens: outputTokens,
+            ...(signal ? { signal } : {}) })
+          const text = response.content.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map(b => b.text).join('')
+          if (response.stopReason !== 'max_tokens' && text.trim().length > 0
+            && text.length <= outputChars && text.length < summary.length + fragment.length) {
+            summary = text
+            position += length
+            accepted = true
+            break
+          }
+        } catch (error) {
+          if (signal?.aborted || isAbortError(error) || !isContextWindowError(error, true)) throw error
+        }
+      }
+      if (!accepted) return boundText(source, Math.min(outputChars, Math.floor(source.length / 2)))
+    }
+    return summary
+  }
+
   updateFromUsage(usage: { readonly inputTokens: number; readonly outputTokens: number }): void {
     this.cumulativeUsage = {
       inputTokens: this.cumulativeUsage.inputTokens + usage.inputTokens,
@@ -662,8 +824,8 @@ export class ContextManager {
       return NO_SAFE_SPLIT
     }
 
-    // hardCap / Provider 强制恢复允许少保留于 preferred 数量，但至少留一个安全消息组。
-    for (let split = history.length; split > 0; split--) {
+    // 容量需要时逐个消费最旧安全组，最后一组也可折叠。
+    for (let split = 1; split <= history.length; split++) {
       if (this.isSafeSplit(history, split, allowConsumeAll)) return split
     }
     return NO_SAFE_SPLIT
@@ -672,23 +834,23 @@ export class ContextManager {
   private isSafeSplit(history: ReadonlyArray<EngineMessage>, split: number, allowConsumeAll = false): boolean {
     return split > 0
       && (split === history.length ? allowConsumeAll : split < history.length && !this.isToolResultMessage(history[split]))
+      && !hasDanglingToolUse(history.slice(0, split))
   }
 
   /** 只在工具组完整结束处划分；组内插话保护该组，不让调用与结果跨摘要分离。 */
   private compactionRegions(history: ReadonlyArray<EngineMessage>, protectedIds?: ReadonlySet<string>): Array<{ start: number; end: number }> {
-    if (!protectedIds) return history.length > 0 ? [{ start: 0, end: history.length }] : []
     const regions: Array<{ start: number; end: number }> = []
     const pending = new Set<string>()
     let start = 0
     let protectedGroup = false
     for (let index = 0; index < history.length; index++) {
       const message = history[index]
-      protectedGroup ||= protectedIds.has(message.id)
+      protectedGroup ||= protectedIds?.has(message.id) === true
       if (message.role === 'assistant') {
         for (const block of message.content) if (block.type === 'tool_use') pending.add(block.id)
       } else if ('toolResults' in message) {
         for (const result of message.toolResults) {
-          if (!pending.delete(result.tool_use_id)) protectedGroup = true
+          if (!pending.delete(result.tool_use_id) && protectedIds) protectedGroup = true
         }
       }
       if (pending.size > 0 || (index + 1 < history.length && this.isToolResultMessage(history[index + 1]))) continue
@@ -778,6 +940,9 @@ export class ContextManager {
           break
         case 'tool_result':
           chars += block.content.length
+          break
+        case 'raw_reasoning':
+          chars += JSON.stringify(block.data).length
           break
       }
     }

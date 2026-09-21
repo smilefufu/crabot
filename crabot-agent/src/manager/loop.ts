@@ -230,6 +230,7 @@ export interface EpisodeResult {
   /** Successful `send_message` deliveries, paired with their tool results by tool_use_id. */
   readonly successfulSendMessageTargets: ReadonlyArray<{ readonly channel_id: string; readonly session_id: string }>
   readonly error?: string
+  readonly contextRecoveryRequired?: true
 }
 
 export interface ManagerLoopDeps {
@@ -529,6 +530,7 @@ export class ManagerLoop {
 
   private resumeCheckpoint?: ManagerResumeCheckpoint
   private checkpointError?: unknown
+  private contextRecoveryPending = false
   private readonly restoredContextEnvelopes = new Set<TimedWakeEnvelope>()
   private readonly persistedEventMessages = new WeakMap<TimedWakeEnvelope, string>()
 
@@ -557,7 +559,7 @@ export class ManagerLoop {
     }
   }
 
-  private flushCheckpoint(state?: ManagerSessionState): void {
+  private flushCheckpoint(state?: ManagerSessionState, hasEngineMessages = state !== undefined || this.resumeCheckpoint?.hasEngineMessages === true): void {
     if (!this.resumeCheckpoint) return
     const pending = this.mailbox.snapshotPendingEnvelopes()
     const pendingSet = new Set(pending)
@@ -590,7 +592,7 @@ export class ManagerLoop {
       ...(this.currentToolProfile ? { toolProfile: this.currentToolProfile } : {}),
       pending,
       protectedTailMessageId,
-      hasEngineMessages: state !== undefined || this.resumeCheckpoint.hasEngineMessages,
+      hasEngineMessages,
       adminChatClaims: [...this.adminChatClaims],
       execution: this.checkpointExecution(),
     }
@@ -854,6 +856,8 @@ export class ManagerLoop {
     recovery?: ManagerResumeCheckpoint,
     onInitialInputCommitted?: () => void,
   ): Promise<EpisodeResult> {
+    if (this.contextRecoveryPending && !recovery) throw new CompactionFailedError('原执行等待上下文容量恢复')
+    this.contextRecoveryPending = false
     const episodeId = recovery?.episodeId ?? randomUUID()
     this.currentHumanInputs.clear()
     this.humanInputCoverage = recovery ? 'partial' : 'complete'
@@ -1101,9 +1105,19 @@ export class ManagerLoop {
       // confirm 结算；失败（consumedEvents=false）的整批重投不结算。
       if (result.consumedEvents) await this.settleUnclaimedAdminChatWakes()
       this.settleInjectedHooks(result)
-      this.deps.store.clearCheckpoint(this.deps.key, episodeId)
+      this.contextRecoveryPending = result.contextRecoveryRequired === true
+      if (!result.contextRecoveryRequired) this.deps.store.clearCheckpoint(this.deps.key, episodeId)
       return result
     } catch (err) {
+      if (err instanceof CompactionFailedError) {
+        this.contextRecoveryPending = true
+        const error = `上下文压缩失败：${err.message}`
+        this.deps.traceWriter?.finishEpisode(episodeId, { status: 'failed', outcome: { error, summary: error } })
+        const result: EpisodeResult = { episodeId, outcome: 'failed', turns: 0, consumedEvents: false,
+          repliedToHuman: false, successfulSendMessageTargets: [], error, contextRecoveryRequired: true }
+        this.settleInjectedHooks(result)
+        return result
+      }
       // admission 与直接 throw 都在这里收口。人类提交一旦完成，仅重投非人类事件；否则保留
       // 原输入，下一次 wake 再试提交。
       this.markFailedHumanInputGap()
@@ -1237,14 +1251,13 @@ export class ManagerLoop {
       reusedTexts.set(text, count - 1)
       return false
     }).map((text) => createUserMessage(text))
-    // 非人类 current inputs 在压缩前不进 Manager store；把它们计作主请求固定开销，
-    // 既能正确判断 hardCap，又不会误放进可折叠 history。
+    // 当前事件正文在 runAttempt 中参与完整容量检查；它不是不可压缩的系统固定开销。
     const compactionProfile = createManagerCompactionProfile({
       preferredKeepRecent: policy.keepRecent,
       mainRequestFixedTokens: contextManager.estimateStaticPromptTokens(
         this.managerSystemPrompt(effectiveWake),
         this.deps.toolFace(effectiveWake, this.currentToolFaceState),
-      ) + contextManager.estimateTotalTokens(currentTailMessages),
+      ),
     })
 
     let state = initialState
@@ -1425,6 +1438,8 @@ export class ManagerLoop {
       // 最新 state,未被 drain 消费的追加不会被后续 save 覆盖。
       await this.commitPendingHumanInputs(true, persistedFinalMessages)
       await this.settleConsumedWorkboardUpdates(currentInputEnvelopes, attempt.admittedContextEnvelopes)
+    } else if (attempt.result.contextRecoveryRequired) {
+      this.flushCheckpoint({ ...state, recent: persistedFinalMessages.slice(attempt.hasSummaryMarker ? 1 : 0) })
     } else {
       // 放弃 episode:已落盘的折叠不回滚；事件按原 envelope 保留待处理责任，
       // 下一 episode 复用已保存的输入，未保存的输入才重新追加。
@@ -1450,7 +1465,7 @@ export class ManagerLoop {
       allSuccessfulSendMessageTargets.add(key)
     }
 
-    const dailyReflection = this.currentToolProfile === 'daily_reflection'
+    const dailyReflection = this.currentToolProfile === 'daily_reflection' && !attempt.result.contextRecoveryRequired
       ? await this.deps.dailyReflection?.finish({ outcome: attempt.result.outcome,
           exitToolCall: attempt.result.exitToolCall, messages: attempt.result.finalMessages })
       : undefined
@@ -1465,7 +1480,10 @@ export class ManagerLoop {
         const [channelId, sessionId] = key.split('\u0000')
         return { channel_id: channelId, session_id: sessionId }
       }),
-      ...(attempt.result.error !== undefined ? { error: attempt.result.error } : {}),
+      ...(attempt.result.error !== undefined ? { error: attempt.result.contextRecoveryRequired
+        && !attempt.result.error.startsWith('上下文压缩失败：')
+        ? `上下文压缩失败：${attempt.result.error}` : attempt.result.error } : {}),
+      ...(attempt.result.contextRecoveryRequired ? { contextRecoveryRequired: true } : {}),
     }
     this.deps.onEpisodeEnd?.(result)
     return result
@@ -2093,6 +2111,7 @@ export class ManagerLoop {
           }
           await this.deps.store.save(nextState)
           latestState = nextState
+          this.flushCheckpoint(nextState, this.resumeCheckpoint?.hasEngineMessages ?? false)
         },
       },
       target: args.target,
@@ -2304,6 +2323,7 @@ export class ManagerLoop {
             preferredKeepRecent: this.deps.policy.keepRecent,
             mainRequestFixedTokens: fixedTokens,
             protectedMessageIds,
+            immutableMessageIds: new Set(this.resumeCheckpoint?.transientMessageIds),
             onBatchApplied: async (batch) => {
               const recent = [...batch.state.history, ...batch.state.protectedTail].map(durableMessage)
               const next = { ...state,

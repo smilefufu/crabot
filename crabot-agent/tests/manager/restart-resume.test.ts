@@ -69,6 +69,81 @@ describe('Manager restart continuation', () => {
     return checkpoint!
   }
 
+  it.each(['restart', 'next_wake'])('retains a compaction checkpoint across %s without repeating its tool', async recovery => {
+    const written = vi.fn(async () => ({ output: 'durable result '.repeat(6000), isError: false }))
+    const tool = defineTool({ name: 'write', description: 'write', inputSchema: {}, isReadOnly: false, call: written })
+    let failedSummary = true
+    let first = true
+    const adapter: LLMAdapter = {
+      updateConfig() {},
+      async *stream(params) {
+        if (params.tools.length === 0) {
+          if (failedSummary) throw new Error('invalid api key')
+          yield* chunksFromContent([{ type: 'text', text: 'The write completed. Continue.' }], 'end_turn')
+        } else if (first) {
+          first = false
+          yield* chunksFromContent([{ type: 'tool_use', id: 'write-once', name: 'write', input: {} }], 'tool_use')
+        } else yield* chunksFromContent([], 'end_turn')
+      },
+    }
+    const deps = { toolFace: () => [tool], contextWindowTokens: () => 12_000 }
+    const old = registry(adapter, deps)
+    const failed = await old.routeHumanMessages('feishu', 'restart-test', [message('large-result', 'Execute once')])
+    expect(failed.contextRecoveryRequired).toBe(true)
+    const checkpoint = await store.loadCheckpoint(KEY)
+    expect(checkpoint?.episodeId).toBe(failed.episodeId)
+    expect(JSON.stringify(checkpoint?.state.recent)).toContain('durable result')
+    await expect(old.getOrCreate(KEY).wakeUp({ received_at: '2026-09-21T12:00:00.000Z', timezone: 'Asia/Shanghai',
+      wake: { kind: 'human_messages', messages: [message('queued', 'must not overwrite')] } }))
+      .rejects.toThrow('原执行等待上下文容量恢复')
+    expect(await store.loadCheckpoint(KEY)).toEqual(checkpoint)
+    failedSummary = false
+    if (recovery === 'restart') {
+      const restored = registry(adapter, deps)
+      restored.registerResumeCheckpoints([checkpoint!])
+      await restored.resumeInterruptedEpisodes()
+    } else {
+      await old.routeHumanMessages('feishu', 'restart-test', [message('next', 'continue')])
+    }
+    expect(written).toHaveBeenCalledTimes(1)
+    expect(trace.getManagerEpisode(failed.episodeId)?.status).toBe('completed')
+    expect(await store.loadCheckpoint(KEY)).toBeUndefined()
+  })
+
+  it('keeps a not-yet-assembled schedule input when wake compaction fails after a saved batch', async () => {
+    await store.save({ key: KEY, foldedCount: 0,
+      recent: Array.from({ length: 8 }, () => createUserMessage('old '.repeat(20_000))) })
+    let summaries = 0
+    let failing = true
+    const inputs: LLMStreamParams[] = []
+    const adapter: LLMAdapter = {
+      updateConfig() {},
+      async *stream(params) {
+        if (params.systemPrompt === createManagerCompactionProfile().summarySystemPrompt) {
+          if (++summaries === 2 && failing) throw new Error('invalid api key')
+          yield* chunksFromContent([{ type: 'text', text: 'older work summarized' }], 'end_turn')
+        } else {
+          inputs.push(params)
+          yield* chunksFromContent([], 'end_turn')
+        }
+      },
+    }
+    const original = registry(adapter, { contextWindowTokens: () => 100_000 })
+    const loop = original.getOrCreate(KEY)
+    const failed = await loop.wakeUp({ received_at: '2026-09-21T12:00:00.000Z', timezone: 'Asia/Shanghai',
+      wake: { kind: 'schedule', scheduleId: 'original-schedule', title: 'schedule', description: 'UNASSEMBLED_INSTRUCTION' } })
+    expect(failed.contextRecoveryRequired).toBe(true)
+    const checkpoint = await store.loadCheckpoint(KEY)
+    expect(checkpoint?.hasEngineMessages).toBe(false)
+    expect(checkpoint?.state.foldedCount).toBeGreaterThan(0)
+    failing = false
+    const restored = registry(adapter, { contextWindowTokens: () => 100_000 })
+    restored.registerResumeCheckpoints([checkpoint!])
+    await restored.resumeInterruptedEpisodes()
+    expect(JSON.stringify(inputs[0].messages)).toContain('UNASSEMBLED_INSTRUCTION')
+    expect(trace.getManagerEpisode(failed.episodeId)?.status).toBe('completed')
+  })
+
   it('restores a group with many image references as one image without rewriting durable history', async () => {
     const oldPath = join(dir, 'old.png')
     const latestPath = join(dir, 'latest.png')

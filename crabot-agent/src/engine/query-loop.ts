@@ -96,7 +96,6 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   // usage 缺失 / compaction 后观测失效时回退估算路径（含 system prompt + tools）。
   let lastObservedContextTokens: number | undefined = undefined
   let messageCountAtObservation = 0
-  let overflowRecoveryPending = false
 
   // 外部 observer（progress digest 等）通过 messagesRef 只读访问当前 messages。
   // 每轮 onTurn 之前以及主循环开头各刷新一次 —— 足以让定时 flush（≥秒级间隔）
@@ -198,7 +197,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         if (compaction.aborted) {
           return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
         }
-        return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, `上下文压缩失败：${compaction.failedReason}`)
+        return { ...buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, `上下文压缩失败：${compaction.failedReason}`), contextRecoveryRequired: true }
       }
     }
 
@@ -254,8 +253,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       }
       const nonEmptyInput = currentSystemPrompt.trim().length > 0 || messages.some((message) =>
         'content' in message && (typeof message.content === 'string' ? message.content.trim().length > 0 : message.content.length > 0))
-      if (!options.disableCompaction && !overflowRecoveryPending && isContextWindowError(error, nonEmptyInput)) {
-        overflowRecoveryPending = true
+      if (!options.disableCompaction && isContextWindowError(error, nonEmptyInput)) {
         const compacted = await compactInPlace(messages, contextManager, adapter, options,
           { systemPrompt: currentSystemPrompt, tools: currentTools, force: true }, abortSignal)
         if (compacted.batchesApplied > 0) {
@@ -266,15 +264,16 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           turn-- // 重试尚未成功的模型请求，不重跑此前工具、不消耗新 turn。
           continue
         }
-        return buildResult(compacted.ok || !compacted.aborted ? 'failed' : 'aborted', finalText, totalTurns,
+        if (!compacted.ok && compacted.aborted) return buildResult('aborted', finalText, totalTurns,
+          contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+        return { ...buildResult('failed', finalText, totalTurns,
           contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene,
-          `上下文压缩失败：${compacted.ok ? '未取得压缩进展' : compacted.failedReason}`)
+          `上下文压缩失败：${compacted.ok ? '未取得压缩进展' : compacted.failedReason}`), contextRecoveryRequired: true }
       }
       console.error('[query-loop] LLM call threw:', error)
       return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, formatError(error))
     }
 
-    overflowRecoveryPending = false
     const processed = partitionResponseContent(response.content)
     totalTurns++
     const hasRemainingTurn = turn + 1 < maxTurns
@@ -425,7 +424,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
             if (compaction.aborted) {
               return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
             }
-            return buildResult(
+            return { ...buildResult(
               'failed',
               finalText,
               totalTurns,
@@ -435,7 +434,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
               toolCallCount,
               wroteMemoryOrScene,
               `上下文超限：上下文压缩失败：${compaction.failedReason}`,
-            )
+            ), contextRecoveryRequired: true }
           }
           continue
         }
