@@ -147,15 +147,22 @@ describe('Manager restart continuation', () => {
   it.each([
     ['human', false], ['human', true], ['schedule', false], ['schedule', true],
     ['daily-human', false], ['daily-human', true],
+    ['concurrent-schedule', true],
   ] as const)('persists a new %s wake across repeated recovery failure (restart=%s)', async (kind, restart) => {
     const write = vi.fn(async () => ({ output: 'saved '.repeat(15000), isError: false }))
     const tool = defineTool({ name: 'write', description: 'write', inputSchema: {}, isReadOnly: false, call: write })
     let first = true
     let failing = true
+    let failedSummaries = 0
+    let releaseResume!: () => void
+    const resumeGate = new Promise<void>(resolve => { releaseResume = resolve })
     const requests: string[] = []
     const adapter: LLMAdapter = { updateConfig() {}, async *stream(params) {
       if (params.tools.length === 0) {
-        if (failing) throw new Error('invalid api key')
+        if (failing) {
+          if (++failedSummaries === 2 && kind === 'concurrent-schedule') await resumeGate
+          throw new Error('invalid api key')
+        }
         yield* chunksFromContent([{ type: 'text', text: 'Write completed.' }], 'end_turn')
       } else if (first) {
         first = false
@@ -177,10 +184,20 @@ describe('Manager restart continuation', () => {
       : original.routeSchedule({ scheduleId: 'new-schedule', triggerId: 'new-trigger', scheduleName: 'new schedule',
           title: 'new schedule', description: 'PRESERVE_NEW_WAKE',
           targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' } })
-    await expect(incoming).rejects.toThrow('上下文压缩失败')
+    const rejected = expect(incoming).rejects.toThrow('上下文压缩失败')
+    if (kind === 'concurrent-schedule') {
+      await vi.waitFor(() => expect(failedSummaries).toBe(2))
+      const concurrent = original.routeSchedule({ scheduleId: 'concurrent', triggerId: 'concurrent-trigger',
+        scheduleName: 'concurrent', title: 'concurrent', description: 'CONCURRENT_NEW_WAKE',
+        targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' } })
+      const concurrentRejected = expect(concurrent).rejects.toThrow()
+      releaseResume()
+      await concurrentRejected
+    }
+    await rejected
     let checkpoint = await store.loadCheckpoint(KEY)
     expect(checkpoint?.episodeId).toBe(failed.episodeId)
-    expect(checkpoint?.pending).toHaveLength(1)
+    expect(checkpoint?.pending).toHaveLength(kind === 'concurrent-schedule' ? 2 : 1)
     expect(JSON.stringify(checkpoint?.pending)).toContain('PRESERVE_NEW_WAKE')
     await expect(original.routeHumanMessages('feishu', 'restart-test', [message('another', 'SECOND_NEW_WAKE')]))
       .rejects.toThrow('上下文压缩失败')
@@ -196,6 +213,7 @@ describe('Manager restart continuation', () => {
     await vi.waitFor(() => expect(requests.join('\n')).toContain('PRESERVE_NEW_WAKE'))
     expect(requests.find(text => text.includes('PRESERVE_NEW_WAKE'))?.match(/PRESERVE_NEW_WAKE/g)).toHaveLength(1)
     expect(requests.join('\n')).toContain('SECOND_NEW_WAKE')
+    if (kind === 'concurrent-schedule') expect(requests.join('\n')).toContain('CONCURRENT_NEW_WAKE')
     if (kind === 'daily-human') expect(requests[0]).not.toContain('PRESERVE_NEW_WAKE')
     expect(write).toHaveBeenCalledOnce()
     expect(await store.loadCheckpoint(KEY)).toBeUndefined()

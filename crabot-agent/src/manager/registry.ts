@@ -282,10 +282,10 @@ export class ManagerRegistry {
   }
 
   private async ensureResumed(key: ManagerKey, restoreIdleReviewCycle = false): Promise<void> {
-    const checkpoint = this.pendingResumes.get(key)
-    if (!checkpoint) return
     const existing = this.resumeTasks.get(key)
     if (existing) return existing
+    const checkpoint = this.pendingResumes.get(key)
+    if (!checkpoint) return
     const task = this.resumeReady.then(async () => {
       if (restoreIdleReviewCycle) {
         for (const item of [...checkpoint.envelopes, ...checkpoint.pending]) {
@@ -524,7 +524,9 @@ export class ManagerRegistry {
         kind === 'human_messages'
           ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
           : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
-      if (this.pendingResumes.has(key)) await this.resumeBeforeWake(key, { ...envelope, wake: event })
+      if (this.pendingResumes.has(key) || this.resumeTasks.has(key)) {
+        await this.resumeBeforeWake(key, { ...envelope, wake: event })
+      }
       // P7 cutover 遗留接线补齐(2026-08-29):episode 运行中到达的人类消息进入当前
       // episode mailbox,turn 边界注入当前 episode 的下一轮 LLM——不再阻塞在 wakeUp 的
       // mutex 上等本 episode 跑完。注入检查点负责持久化，成功 LLM 响应负责外显确认。
@@ -763,7 +765,7 @@ export class ManagerRegistry {
           ...(principalPermissions ? { principalPermissions } : {}),
         },
       }
-      if (this.pendingResumes.has(key)) await this.resumeBeforeWake(key, admittedEnvelope)
+      if (this.pendingResumes.has(key) || this.resumeTasks.has(key)) await this.resumeBeforeWake(key, admittedEnvelope)
       const loop = this.getOrCreate(key)
       this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
       let result: EpisodeResult | undefined
@@ -1000,7 +1002,7 @@ export class ManagerRegistry {
     const finishPreparation = this.beginWakePreparation(key)
     let loop!: ManagerLoop
     try {
-      if (!recovery && this.pendingResumes.has(key)) await this.resumeBeforeWake(key, envelope)
+      if (!recovery && (this.pendingResumes.has(key) || this.resumeTasks.has(key))) await this.resumeBeforeWake(key, envelope)
       this.assertWakeAdmission()
       if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
       this.assertWakeAdmission()
