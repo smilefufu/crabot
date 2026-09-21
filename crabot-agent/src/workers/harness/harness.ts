@@ -887,6 +887,7 @@ function continuationDelivery(
 export class WorkerHarness {
   private readonly pendingBgNotifications = new Map<string, number>()
   private readonly continuationObservations = new Map<string, { key: string; fact: WorkerExecutionFact }>()
+  private readonly continuationProjects = new Map<ManagerKey, { scope: string; projects: WorkerViewFacts['projects'] }>()
   private readonly contextStore: WorkerContextStore
   private readonly gitInspector = new WorkspaceGitInspector()
   private readonly inputDeliveryStore: InputDeliveryStore
@@ -4156,7 +4157,10 @@ export class WorkerHarness {
       if (operations.some(operation => operation.kind === 'stop' && operation.status !== 'succeeded'
         && operation.incarnation_id === mainline?.incarnation_id)) blocked.add(worker.worker_id)
     }
-    return selectWorkerView(workers, board, { projects: projects ?? await resolveWorkerProjects(workers, board), execution, blocked })
+    const snapshot = this.continuationProjects.get(board.manager_key)
+    // Lists never launch Git inspection; missing scope/workspace observations remain attention.
+    const observedProjects = snapshot?.scope === JSON.stringify(board.objectives) ? snapshot.projects : new Map()
+    return selectWorkerView(workers, board, { projects: projects ?? observedProjects, execution, blocked })
   }
 
   private continuationObservationKey(worker: LedgerWorker): string {
@@ -4248,6 +4252,7 @@ export class WorkerHarness {
     }
     const workers = await this.deps.ledger.listWorkers(managerKey)
     const projects = await resolveWorkerProjects(workers, board)
+    this.continuationProjects.set(managerKey, { scope: JSON.stringify(board.objectives), projects })
     const view = await this.workerView(workers, board, projects)
     for (const worker of view.excludedIdle) {
       try {

@@ -3296,6 +3296,32 @@ describe('WorkerHarness.killWorker', () => {
     expect(fake.killCalls).toHaveLength(0)
   })
 
+  it('列表复用对账项目快照，未观测或范围变化时保留待核实且不解析 Git', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'halted')
+    const board = { manager_key: worker.manager_key, objectives: [{
+      objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: now(), work_items: [{
+        work_item_id: 'project', title: 'project', status: 'in_progress' as const, project_root: dataDir, next_action: 'continue', updated_at: now(),
+      }],
+    }], archive: [] }
+    const identity = vi.spyOn(WorkspaceGitInspector.prototype, 'projectIdentity').mockImplementation(async directory => ({ directory, commonDirectory: dataDir }))
+    try {
+      const workers = await harness.listWorkers(worker.manager_key)
+      expect((await harness.workerView(workers, board)).attention).toHaveLength(1)
+      expect(identity).not.toHaveBeenCalled()
+      await harness.reconcileContinuationCandidates(worker.manager_key, board)
+      identity.mockClear()
+      for (let i = 0; i < 3; i++) expect((await harness.workerView(workers, board)).candidates).toHaveLength(1)
+      expect((await harness.workerView(workers, { ...board, objectives: [] })).attention).toHaveLength(1)
+      const moved = workers.map(item => ({ ...item, incarnations: item.incarnations.map(incarnation => ({ ...incarnation, workspace: join(dataDir, 'new-workspace') })) }))
+      expect((await harness.workerView(moved, board)).attention).toHaveLength(1)
+      expect(identity).not.toHaveBeenCalled()
+      expect(fake.killCalls).toHaveLength(0)
+    } finally { identity.mockRestore() }
+  })
+
   it('80 个 Worker 淘汰复核复用项目身份，原生探测保持线性上界', async () => {
     const { harness, fake } = await makeHarness()
     const workers = []
@@ -3319,6 +3345,13 @@ describe('WorkerHarness.killWorker', () => {
       expect((await harness.listWorkers(key)).filter(worker => worker.task.status === 'halted')).toHaveLength(3)
       expect(identity.mock.calls.length).toBeLessThanOrEqual(81)
       expect(state.mock.calls.length).toBeLessThanOrEqual(500)
+      identity.mockClear()
+      for (let i = 0; i < 3; i++) {
+        const view = await harness.workerView(await harness.listWorkers(key), board)
+        expect(view.candidates).toHaveLength(3)
+        expect(view.history).toHaveLength(77)
+      }
+      expect(identity).not.toHaveBeenCalled()
     } finally { identity.mockRestore() }
   }, 30000)
 
