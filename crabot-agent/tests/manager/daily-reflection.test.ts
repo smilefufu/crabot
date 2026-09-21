@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { DailyReflection, reflectionDigest, type DailyReflectionDeps } from '../../src/manager/daily-reflection.js'
+import { DailyReflection, buildDailyReflectionTools, reflectionDigest, type DailyReflectionDeps } from '../../src/manager/daily-reflection.js'
+import { runEngine } from '../../src/engine/query-loop.js'
+import type { LLMAdapter } from '../../src/engine/llm-adapter-types.js'
+import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ReflectionRecord } from '../../src/manager/daily-reflection-types.js'
@@ -45,6 +48,82 @@ async function ready(host: DailyReflection) {
 }
 
 describe('DailyReflection host', () => {
+  it.each(['completed', 'partial'])('validates %s references without persisting a result or requiring full coverage', async outcome => {
+    const { host, deps, store } = await setup(21)
+    await host.list()
+    await host.read('ref-0')
+    vi.mocked(deps.read).mockResolvedValueOnce({ content: 'evidence', gaps: ['trace_unavailable'] })
+    await host.read('ref-1')
+    const before = await store.load(key)
+    const finish = buildDailyReflectionTools(host).find(tool => tool.name === 'finish_daily_reflection')!
+    const input = completion({ outcome, evidence_refs: ['mem-l-candidate', 'ref-1', 'ref-2'] }).exitToolCall.input
+    const error = await finish.validateExit!(input, 1)
+    expect(error).toContain('mem-l-candidate')
+    expect(error).toContain('not_in_current_directory')
+    expect(error).toContain('ref-1')
+    expect(error).toContain('incomplete_or_gapped')
+    expect(error).toContain('ref-2')
+    expect(error).toContain('not_read')
+    expect(await finish.validateExit!({ ...input, evidence_refs: ['ref-0'] }, 1)).toBeUndefined()
+    expect(await finish.validateExit!({ ...input, evidence_refs: [] }, 1)).toBeUndefined()
+    expect(await store.load(key)).toEqual(before)
+    expect(deps.confirm).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed input and mixed calls before reading or writing host state', async () => {
+    const { host, store } = await setup()
+    const load = vi.spyOn(store, 'load')
+    const finish = buildDailyReflectionTools(host).find(tool => tool.name === 'finish_daily_reflection')!
+    expect(await finish.validateExit!({}, 1)).toContain('invalid_completion_input')
+    expect(await finish.validateExit!(completion().exitToolCall.input, 2)).toContain('finish_must_be_called_alone')
+    expect(load).not.toHaveBeenCalled()
+  })
+
+  it('uses the same current-directory rule before exit and in the final host check', async () => {
+    const { host, store } = await setup()
+    await host.list()
+    await store.updateDailyReflection(key, state => ({ ...state!, read_records: { forged: true } }))
+    const input = completion({ evidence_refs: ['forged'] })
+    const finish = buildDailyReflectionTools(host).find(tool => tool.name === 'finish_daily_reflection')!
+    expect(await finish.validateExit!(input.exitToolCall.input, 1)).toContain('not_in_current_directory')
+    expect((await host.finish(input))?.validation_errors).toContain('unread_evidence_reference')
+  })
+
+  it('lets the actual Engine correct rejected evidence in the same run before persisting partial', async () => {
+    const { host, deps, store } = await setup(21)
+    await host.list()
+    vi.mocked(deps.read).mockResolvedValue({ content: 'evidence', gaps: ['trace_unavailable'] })
+    await host.read('ref-0')
+    const before = await store.load(key)
+    const corrected = completion({ outcome: 'partial', pending_items: ['history evidence unavailable'] }).exitToolCall.input
+    let calls = 0
+    const adapter: LLMAdapter = {
+      updateConfig() {},
+      async *stream(params) {
+        if (calls++ === 1) {
+          expect(params.messages.at(-1)).toMatchObject({ toolResults: [
+            { is_error: true, content: expect.stringContaining('unread_evidence_reference') },
+          ] })
+          expect(await store.load(key)).toEqual(before)
+        }
+        yield* chunksFromContent([{ type: 'tool_use', id: `finish-${calls}`, name: 'finish_daily_reflection',
+          input: calls === 1 ? { ...corrected, evidence_refs: ['ref-0', 'ref-1', 'mem-l-candidate'] } : corrected,
+        }], 'tool_use', { inputTokens: 10, outputTokens: 10 })
+      },
+    }
+    const result = await runEngine({ prompt: 'continue daily reflection', adapter,
+      options: { systemPrompt: '', model: 'fixture', tools: buildDailyReflectionTools(host), maxTurns: 3 } })
+    expect(calls).toBe(2)
+    expect(result.exitToolCall?.input).toEqual(corrected)
+    expect(await store.load(key)).toEqual(before)
+    const finished = await host.finish({ outcome: result.outcome, exitToolCall: result.exitToolCall, messages: result.finalMessages })
+    expect(finished?.outcome).toBe('partial')
+    expect(finished?.validation_errors).not.toContain('unread_evidence_reference')
+    expect(finished?.validation_errors).toContain('known_evidence_gaps')
+    expect(deps.confirm).not.toHaveBeenCalled()
+    expect((await store.load(key)).dailyReflection?.run_id).toBe(before.dailyReflection?.run_id)
+  })
+
   it('requires a new explicit completion after restarting with an obsolete failure ledger', async () => {
     const { host, deps, store } = await setup()
     await host.list()

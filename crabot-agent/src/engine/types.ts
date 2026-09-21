@@ -182,13 +182,15 @@ export interface ToolDefinition {
    */
   readonly turnZeroOnly?: boolean
   /**
-   * 调用后引擎立刻退出 loop，把工具调用信息（name + input）写入 EngineResult.exitToolCall。
+   * 调用后通过可选 validateExit 校验才退出 loop，把工具调用信息写入 EngineResult.exitToolCall。
    * 引擎不调用 `call` 函数（exit 工具本身无需执行），但会为本轮所有 tool_use
    * push 合成 tool_result，确保 finalMessages / checkpoint 可被 LLM API 重放。
    *
    * 用于"调完就走"的早退工具（如 submit_audit_result）。
    */
   readonly exitsLoop?: boolean
+  /** 退出前只读校验；undefined 表示通过，错误文本或异常作为工具错误返回并继续原 loop。 */
+  readonly validateExit?: (input: Record<string, unknown>, toolCallCount: number) => Promise<string | undefined>
   /**
    * 确定性参数修复（spec 2026-09-03-tool-input-repair）：真实调用前按声明规则修正入参。
    * 只承载确定性规则——规则不适用时必须原样返回入参；引擎额外保证：本函数抛错或
