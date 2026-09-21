@@ -18,6 +18,7 @@ export interface ReflectionRecordSummary {
   activity_at: string
   summary: string
   gaps: string[]
+  skipped?: 'source_unavailable'
 }
 
 export interface ReflectionProgress {
@@ -28,6 +29,7 @@ export interface ReflectionProgress {
   pending_record_count: number
   pending_records: Array<{ record_ref: string }>
   evidence_gap_count: number
+  skipped_record_count: number
 }
 
 export interface ListReflectionRecordsOutput extends ReflectionWindow {
