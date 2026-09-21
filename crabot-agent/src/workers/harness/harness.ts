@@ -4172,7 +4172,10 @@ export class WorkerHarness {
       }
       await this.settlePendingInputFailure(receipt, failure)
     }
-    await this.deliverInputOperationNotifications()
+    // Manager checkpoint recovery is released only after startup reconciliation settles.
+    void this.deliverInputOperationNotifications().catch((error) => {
+      console.error('[WorkerHarness] startup input notification delivery failed:', error)
+    })
   }
 
   /** Restart recovery never re-runs a side query; every in-flight receipt becomes explicit unknown. */
@@ -4262,7 +4265,9 @@ export class WorkerHarness {
         }
       }
     }
-    await this.deliverQueryOperationNotifications()
+    void this.deliverQueryOperationNotifications().catch((error) => {
+      console.error('[WorkerHarness] startup query notification delivery failed:', error)
+    })
   }
 
   /** Replay durable wake obligations and establish a no-notification baseline for unobserved live sessions. */
@@ -4284,11 +4289,10 @@ export class WorkerHarness {
           console.error(`[WorkerHarness] native activity reconciliation failed for ${worker.worker_id}#${incarnation.seq}:`, error)
         }
       }
-      try {
-        await this.deliverNativeActivityNotifications(worker.worker_id)
-      } catch (error) {
+      // Delivery may await this Manager's resume gate; it must not hold that gate closed.
+      void this.deliverNativeActivityNotifications(worker.worker_id).catch((error) => {
         console.error(`[WorkerHarness] native activity notification reconciliation failed for ${worker.worker_id}:`, error)
-      }
+      })
     }
   }
 
@@ -4306,11 +4310,10 @@ export class WorkerHarness {
       } catch (error) {
         console.error(`[WorkerHarness] control operation reconciliation failed for ${worker.worker_id}:`, error)
       }
-      try {
-        await this.deliverControlOperationNotifications(worker.worker_id)
-      } catch (error) {
+      const delivery = this.deliverControlOperationNotifications(worker.worker_id).catch((error) => {
         console.error(`[WorkerHarness] control operation notification reconciliation failed for ${worker.worker_id}:`, error)
-      }
+      })
+      if (!this.deps.onOperationNotification) await delivery
     }
   }
 

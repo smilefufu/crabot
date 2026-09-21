@@ -1310,6 +1310,8 @@ describe('WorkerHarness.handleStateChange', () => {
     consume = true
     nowValue += 5 * 60_000
     await harness.reconcileNativeActivityOnStartup()
+    const activityStore = (harness as unknown as { nativeActivityStore: NativeActivityStore }).nativeActivityStore
+    await waitUntil(async () => (await activityStore.pending(worker.worker_id)).length === 0)
 
     expect(route.mock.calls.map((call) => call[1].kind)).toContain('activity_available')
     expect(route.mock.calls.map((call) => call[1].kind)).toContain('turn_completed')
@@ -1356,6 +1358,7 @@ describe('WorkerHarness.handleStateChange', () => {
 
     await harness.reconcileNativeActivityOnStartup()
 
+    await waitUntil(async () => (await activityStore.pending(worker.worker_id)).length === 0)
     expect(route).toHaveBeenCalledWith(
       `test::friend-1`,
       expect.objectContaining({
@@ -1411,6 +1414,7 @@ describe('WorkerHarness.handleStateChange', () => {
 
     await harness.reconcileNativeActivityOnStartup()
 
+    await waitUntil(() => logError.mock.calls.some(([message]) => String(message).includes('native activity notification failed')))
     expect(route).not.toHaveBeenCalled()
     const state = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'native-activity.json'), 'utf8'))
     expect(state.notifications[0]).toMatchObject({
