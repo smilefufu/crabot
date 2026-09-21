@@ -8,6 +8,17 @@ type BuiltinTraceHookFactory = {
 }
 
 describe('UnifiedAgent builtin trace hooks', () => {
+  it('persists runtime failure after redaction and caps the error', () => {
+    const traceStore = new TraceStore(10)
+    const trace = traceStore.startTrace({ module_id: 'test', trigger: { type: 'task', summary: 'test' } })
+    const hooks = (UnifiedAgent.prototype as unknown as BuiltinTraceHookFactory).builtinTraceHooks.call({ traceStore, knownSecrets: new Set(['secret-value']), config: { moduleId: 'test' } })
+    hooks.appendRuntimeEvent!(trace.trace_id, { kind: 'worker_runtime', version: 1, event: 'ended', runtime: {
+      incarnation_id: 'inc', as_of: new Date().toISOString(), phase: 'ended', error: 'secret-value '.repeat(200),
+    } })
+    const detail = traceStore.getTrace(trace.trace_id)!.spans[0].details as import('../../src/workers/types.js').WorkerRuntimeEvent
+    expect(JSON.stringify(detail)).not.toContain('secret-value')
+    expect(detail.runtime.error!.length).toBeLessThanOrEqual(1000)
+  })
   it('记录 fork 的 Manager 输入为脱敏后的 user message', () => {
     const traceStore = {
       startTrace: vi.fn(() => ({ trace_id: 'trace-fork' })),

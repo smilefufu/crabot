@@ -139,6 +139,43 @@ describe('readCompositeWorkerTrace', () => {
     await expect(readCompositeWorkerTrace(deps(), { worker_id: 'w-nope' })).rejects.toThrow('not found')
   })
 
+  it('runtime stays current when replaying a frozen cursor window and is redacted independently', async () => {
+    const dependencies = deps()
+    let attempt = 1
+    dependencies.adapters.get('claude-code')!.readRuntime = async () => ({
+      incarnation_id: INCARNATION_ID, as_of: new Date().toISOString(), phase: 'llm_request',
+      request: { request_id: `r-${attempt}`, call_id: 'c', attempt, purpose: 'inference', model_id: 'model', started_at: '2026-09-21T00:00:00Z' },
+      error: 'secret-value',
+    })
+    const safeDeps = { ...dependencies, redact: (value: string) => value.replaceAll('secret-value', '[REDACTED]') }
+    setNative([nativeEvent('first', '2026-09-21T00:00:00Z')])
+    const first = await readCompositeWorkerTrace(safeDeps, { worker_id: WORKER_ID })
+    const second = await readCompositeWorkerTrace(safeDeps, { worker_id: WORKER_ID, cursor: first.next_cursor })
+    attempt = 2
+    const replay = await readCompositeWorkerTrace(safeDeps, { worker_id: WORKER_ID, cursor: first.next_cursor })
+    expect(replay.events).toEqual(second.events)
+    expect(replay.runtime?.request?.attempt).toBe(2)
+    expect(replay.runtime?.error).toBe('[REDACTED]')
+  })
+
+  it('ended incarnation clears unfinished tools and retry without inventing a request finish', async () => {
+    const dependencies = deps()
+    const worker = makeWorker()
+    worker.incarnations[0].state = 'exited'
+    worker.incarnations[0].ended_at = '2026-09-21T01:00:00Z'
+    dependencies.ledger.findWorker = async () => ({ managerKey: worker.manager_key, worker })
+    dependencies.adapters.get('claude-code')!.readRuntime = async () => ({
+      incarnation_id: INCARNATION_ID, as_of: '2026-09-21T00:00:00Z', phase: 'tools',
+      tools: [{ call_id: 'tool', name: 'bash', started_at: '2026-09-21T00:00:00Z' }],
+      error: 'failure'.repeat(300),
+    })
+    const result = await readCompositeWorkerTrace(dependencies, { worker_id: WORKER_ID })
+    expect(result.runtime).toMatchObject({ phase: 'ended', phase_started_at: worker.incarnations[0].ended_at, tools: [] })
+    expect(result.runtime?.retry).toBeUndefined()
+    expect(result.runtime?.request).toBeUndefined()
+    expect(result.runtime?.error).toHaveLength(1000)
+  })
+
   it('harness+native 按 ts 合并、带 source、next_cursor 恒在', async () => {
     harnessEvents = [harnessEvent(1, 'spawned', '2026-08-01T00:00:01.000Z'), harnessEvent(1, 'exited', '2026-08-01T00:00:05.000Z')]
     setNative([nativeEvent('hi', '2026-08-01T00:00:02.000Z'), nativeEvent('working', '2026-08-01T00:00:03.000Z')])

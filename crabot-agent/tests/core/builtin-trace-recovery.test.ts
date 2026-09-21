@@ -67,6 +67,26 @@ describe('builtin writable trace snapshots', () => {
     await expect(make(dir).acquireBuiltinTraceWriter('missing')).rejects.toThrow('unavailable')
   })
 
+  it('appends one interrupted request after restart without rewriting the published prefix', async () => {
+    const first = make(dir)
+    const trace = first.startTrace({ module_id: 'crabot-agent', trigger: { type: 'task', summary: 'worker' } })
+    await first.acquireBuiltinTraceWriter(trace.trace_id)
+    first.startSpan(trace.trace_id, { type: 'decision', details: {
+      kind: 'worker_runtime', version: 1, event: 'request_started', runtime: {
+        incarnation_id: 'inc', as_of: '2026-09-21T00:00:00Z', phase: 'llm_request',
+        request: { request_id: 'req', call_id: 'call', attempt: 1, purpose: 'inference', model_id: 'test', started_at: '2026-09-21T00:00:00Z' },
+      },
+    } })
+    const prefix = structuredClone(trace.spans)
+    ;(first as unknown as { flushInFlightTraces(): void }).flushInFlightTraces()
+    const second = make(dir)
+    second.reconcileDeferredBuiltinTraces()
+    second.reconcileDeferredBuiltinTraces()
+    const restored = await second.getFullTrace(trace.trace_id)
+    expect(restored?.spans.slice(0, 1)).toEqual(prefix)
+    expect(restored?.spans.slice(1)).toEqual([expect.objectContaining({ details: expect.objectContaining({ event: 'interrupted', runtime: expect.objectContaining({ phase: 'ended' }) }) })])
+  })
+
   it('can finalize an idle trace already evicted from memory', async () => {
     const store = make(dir)
     const trace = store.startTrace({ module_id: 'crabot-agent', trigger: { type: 'task', summary: 'idle' } })

@@ -398,9 +398,13 @@ export class ContextManager {
     readonly mainRequestFixedTokens?: number
     readonly signal?: AbortSignal
     readonly onBatchApplied?: CompactionProfile['onBatchApplied']
+    readonly protectedMessageIds?: ReadonlySet<string>
+    readonly onRequestLifecycle?: import('./llm-adapter-types.js').LLMStreamParams['onRequestLifecycle']
   }): Promise<IncrementalCompactionResult> {
     const state = this.projectBuiltinState(args.messages)
     const latestInput = [...state.history].reverse().find(message => message.role === 'user' && 'content' in message)
+    const protectedMessageIds = new Set(args.protectedMessageIds)
+    if (args.target.kind === 'fit_hard_cap' && latestInput) protectedMessageIds.add(latestInput.id)
     const result = await this.compactIncrementally({
       state,
       profile: createBuiltinCompactionProfile({
@@ -408,11 +412,12 @@ export class ContextManager {
         mainRequestFixedTokens: args.mainRequestFixedTokens,
         summarySystemPrompt: this.compactSystemPrompt,
         onBatchApplied: args.onBatchApplied,
-        ...(args.target.kind === 'fit_hard_cap' && latestInput ? { protectedMessageIds: new Set([latestInput.id]) } : {}),
+        ...(protectedMessageIds.size > 0 ? { protectedMessageIds } : {}),
       }),
       target: args.target,
       adapter: args.adapter,
       model: args.model,
+      onRequestLifecycle: args.onRequestLifecycle,
       ...(args.signal ? { signal: args.signal } : {}),
     })
     return result.batchesApplied === 0
@@ -427,6 +432,7 @@ export class ContextManager {
     readonly adapter: LLMAdapter
     readonly model: string
     readonly signal?: AbortSignal
+    readonly onRequestLifecycle?: import('./llm-adapter-types.js').LLMStreamParams['onRequestLifecycle']
   }): Promise<IncrementalCompactionResult> {
     if (args.profile.immutableMessageIds) {
       args = { ...args, profile: { ...args.profile, protectedMessageIds: new Set([
@@ -450,6 +456,7 @@ export class ContextManager {
     readonly adapter: LLMAdapter
     readonly model: string
     readonly signal?: AbortSignal
+    readonly onRequestLifecycle?: import('./llm-adapter-types.js').LLMStreamParams['onRequestLifecycle']
   }): Promise<IncrementalCompactionResult> {
     const { profile, target, adapter, model, signal } = args
     let state = this.copyState(args.state)
@@ -547,6 +554,7 @@ export class ContextManager {
             tools: [],
             model,
             maxTokens: Math.max(1, Math.min(4096, Math.floor(this.maxContextTokens * 0.1))),
+            onRequestLifecycle: args.onRequestLifecycle,
             ...(signal ? { signal } : {}),
           })
         } catch (error) {
@@ -656,7 +664,7 @@ export class ContextManager {
         const state = result.state
         const history = state.history.slice(region.start, region.end)
         const source = this.buildSummaryPrompt(region.start === 0 ? state.previousSummary : undefined, history, profile)
-        const summary = await this.reduceOversizedText(source, profile, adapter, model, signal)
+        const summary = await this.reduceOversizedText(source, profile, adapter, model, signal, args.onRequestLifecycle)
         const summaryMessage = createAssistantMessage([{ type: 'text', text: profile.summaryMessagePrefix + summary }], 'end_turn')
         const next: CompactionState = region.start === 0
           ? { ...state, previousSummary: summary, history: state.history.slice(region.end) }
@@ -667,7 +675,7 @@ export class ContextManager {
       if (result.state.previousSummary
         && this.estimateCompactionStateTokens(result.state, profile) > target.hardCapTokens) {
         await apply({ ...result.state, previousSummary: await this.reduceOversizedText(
-          result.state.previousSummary, profile, adapter, model, signal,
+          result.state.previousSummary, profile, adapter, model, signal, args.onRequestLifecycle,
         ) }, 0)
       }
       // Protected input stays in its original role and position. Only its working body is shortened.
@@ -721,6 +729,7 @@ export class ContextManager {
 
   private async reduceOversizedText(
     source: string, profile: CompactionProfile, adapter: LLMAdapter, model: string, signal?: AbortSignal,
+    onRequestLifecycle?: import('./llm-adapter-types.js').LLMStreamParams['onRequestLifecycle'],
   ): Promise<string> {
     const ceiling = Math.floor(this.maxContextTokens * SUMMARY_INPUT_BUDGET_RATIO / this.tokenEstimateRatio)
     const outputTokens = Math.max(1, Math.min(2048, Math.floor(ceiling / 8)))
@@ -736,7 +745,7 @@ export class ContextManager {
         const fragment = source.slice(position, position + length)
         try {
           const response = await callNonStreaming(adapter, { messages: [createUserMessage(render(fragment))],
-            systemPrompt: profile.summarySystemPrompt, tools: [], model, maxTokens: outputTokens,
+            systemPrompt: profile.summarySystemPrompt, tools: [], model, maxTokens: outputTokens, onRequestLifecycle,
             ...(signal ? { signal } : {}) })
           const text = response.content.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map(b => b.text).join('')
           if (response.stopReason !== 'max_tokens' && text.trim().length > 0

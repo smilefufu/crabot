@@ -71,6 +71,7 @@ import {
 } from './runtime.js'
 import type { HookRegistry } from '../../hooks/hook-registry.js'
 import type { ToolPermissionConfig } from '../../engine/types.js'
+import { BuiltinRuntimeObservation, isWorkerRuntimeEvent } from './runtime-observation.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -178,6 +179,7 @@ const FINISH_TASK_REJECTED_NOTICE =
   '请继续等待它们的完成通知；若确认某个子任务不再需要，先用 Kill 结束它，再重新调用 finish_task。'
 
 interface WorkerInstance {
+  runtimeObservation?: BuiltinRuntimeObservation
   readonly query_id?: string
   readonly acceptedInputIds?: Set<string>
   readonly worker_id: string
@@ -283,6 +285,7 @@ async function fileExists(path: string): Promise<boolean> {
  * `trace_id` 字段——不按 task ID 猜、不靠内存）。
  */
 export interface BuiltinTraceHooks {
+  appendRuntimeEvent?(traceId: string, event: import('../types.js').WorkerRuntimeEvent): void
   startIncarnationTrace(params: {
     worker_id: string
     seq: number
@@ -700,6 +703,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       if (instance.state === 'running') {
         if (opts?.immediate_redirect) instance.pendingImmediateInputs.push(text)
         else instance.pendingInputs.push(text)
+        this.runtimeObservation(instance).inputs(instance.pendingInputs.length, instance.pendingImmediateInputs.length)
         await settleAccepted()
         instance.activityAt = Date.now()
         return undefined
@@ -869,6 +873,27 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return { events: [], nextCursor: cursor ?? { offset: 0 }, unavailableReason: 'builtin subagent trace unavailable' }
     }
     return this.deps.traceReader.readSubagentTrace(h.worker_id, subagentId, cursor)
+  }
+
+  async readRuntime(h: IncarnationHandle): Promise<import('../types.js').WorkerRuntimeSnapshot | undefined> {
+    const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
+    if (instance?.runtimeObservation) return instance.runtimeObservation.snapshot()
+    const window = await this.readTraceWindow(h)
+    for (let i = window.spans.length - 1; i >= 0; i--) {
+      const detail = window.spans[i].details
+      if (isWorkerRuntimeEvent(detail)) {
+        const { pending_inputs: _pending, ...runtime } = detail.runtime
+        return { ...runtime, as_of: new Date().toISOString() }
+      }
+    }
+    return undefined
+  }
+
+  private runtimeObservation(instance: WorkerInstance): BuiltinRuntimeObservation {
+    return instance.runtimeObservation ??= new BuiltinRuntimeObservation(instance.incarnation_id ?? '', (event) => {
+      if (!instance.traceId || !this.deps.traceHooks?.appendRuntimeEvent) throw new Error('runtime trace unavailable')
+      this.deps.traceHooks.appendRuntimeEvent(instance.traceId, event)
+    })
   }
 
   private async readTraceWindow(
@@ -1156,6 +1181,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 用 `result.finalText` 不行：finish_task 这类早退工具收场时它可能为空串，而那恰恰是
     // manager 最需要看到的一轮。
     let lastAssistantText = ''
+    const runtime = this.runtimeObservation(instance)
+    runtime.stage('preparing')
+    runtime.inputs(instance.pendingInputs.length, instance.pendingImmediateInputs.length)
     let result: EngineResult = await withChildExecutionEnv(instance.executionEnv, () => runEngine({
       prompt: '',
       adapter: builtin.adapter,
@@ -1165,12 +1193,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         tools: this.combineTools(builtin.tools, instance),
         model: builtin.model,
         ...(!branch && builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
-        // turn 边界外部输入注入（spec 2026-08-29-worker-input-turn-boundary-delivery）：
-        // 每条执行线只消费自己排队的输入，工具执行后、下一轮 LLM 调用前注入。
+        // 每次实际主推理请求前（包括内部重试），消费本执行线排队的输入。
         drainExternalInputs: () => this.takeQueuedInputsAsExternal(instance),
         hasPendingExternalInputs: () =>
           instance.pendingImmediateInputs.length > 0 || instance.pendingInputs.length > 0,
         onSystemInjection: (event) => {
+          if (event.type === 'external_input') {
+            runtime.inputs(instance.pendingInputs.length, instance.pendingImmediateInputs.length, true)
+          }
           // 系统通知（bg 退出 / subagent 完成）不落 manager 名义的 trace 事件
           if (event.type === 'external_input' && instance.traceId && !isSystemNotificationEnvelope(event.text)) {
             this.deps.traceHooks?.appendManagerInput?.(instance.traceId, event.text)
@@ -1193,7 +1223,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         suppressForcedSummary: () => true,
         onCompactionEnd: (info) => {
           if (info.batchesApplied > 0) compactedThisBurst = true
+          runtime.compaction(false, info.failedReason)
         },
+        onCompactionStart: () => runtime.compaction(true),
+        onRequestLifecycle: (event, purpose) => runtime.request(event, purpose),
         abortSignal: abortController.signal,
         messagesRef: instance.engineMessagesRef,
         onLiveProgress: () => {
@@ -1205,6 +1238,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         },
         onToolLifecycle: (event) => {
           instance.activityAt = Date.now()
+          runtime.tool(event)
           if (instance.traceId) this.deps.traceHooks?.appendToolLifecycle?.(instance.traceId, event)
         },
         onTurn: (event) => {
@@ -1223,6 +1257,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         },
       },
     }))
+    if (result.error) runtime.stage('preparing', result.error)
     await Promise.all(pendingWrites)
     if (writeErrors.length > 0) {
       throw new Error(
@@ -1497,6 +1532,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     }
     instance.tip = queueParent
     this.setEngineMessagesSnapshot(instance, queuedMessages, queueParent)
+    this.runtimeObservation(instance).inputs(instance.pendingInputs.length, instance.pendingImmediateInputs.length, true)
     return queued.length
   }
 
@@ -1788,6 +1824,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     lastText?: string,
     completionHint = true,
   ): Promise<void> {
+    if (state === 'idle') this.runtimeObservation(instance).stage('idle')
     if (state === 'idle' && instance.traceId) {
       try { this.deps.traceHooks?.releaseTraceWriter?.(instance.traceId) }
       catch (error) { console.warn(`[builtin-adapter] trace snapshot unavailable for ${instance.worker_id}:`, error) }
@@ -1839,6 +1876,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${pending.length} unsent message(s): ${pending.join(' | ')}\n`
       await instance.outputLog.append(deadLetterMsg)
     }
+    this.runtimeObservation(instance).stage('ended')
     if (instance.traceId) {
       // 化身终态收口 trace（§8.4）：终态后 live 读取走 TraceStore 持久记录。
       this.deps.traceHooks?.finishIncarnationTrace(instance.traceId, {
@@ -1901,6 +1939,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 function normalizeBuiltinSpan(span: import('../../types.js').AgentSpan): import('../types.js').NormalizedTraceEvent[] {
   const details = (span.details ?? {}) as Record<string, unknown>
   const base = { ts: span.started_at }
+  if (isWorkerRuntimeEvent(details)) return [{ ...base,
+    kind: details.event === 'request_failed' || details.event === 'interrupted' || (details.event === 'ended' && details.runtime.error) ? 'error' : 'lifecycle',
+    summary: details.runtime.error ?? details.event, detail: details,
+  }]
   switch (span.type) {
     case 'context_assembly': {
       const messageBatch = details.message_batch

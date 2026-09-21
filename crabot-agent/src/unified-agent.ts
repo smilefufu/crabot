@@ -4676,6 +4676,21 @@ export class UnifiedAgent extends ModuleBase {
       appendLlmResponse: (traceId, event) => {
         recordEngineLlmResponse(this.traceStore, traceId, event, redact)
       },
+      appendRuntimeEvent: (traceId, event) => {
+        const trace = this.traceStore.getTrace(traceId)
+        if (!trace) throw new Error('runtime trace writer unavailable')
+        const requestId = event.runtime.request?.request_id
+        if (requestId && ['request_started', 'first_response', 'request_completed', 'request_failed', 'retry_wait', 'interrupted'].includes(event.event)
+          && trace.spans.some(span => {
+            const detail = span.details as Partial<import('./workers/types.js').WorkerRuntimeEvent>
+            return detail.kind === 'worker_runtime' && detail.event === event.event && detail.runtime?.request?.request_id === requestId
+          })) return
+        const safe = JSON.parse(redact(JSON.stringify(event))) as import('./workers/types.js').WorkerRuntimeEvent
+        if (safe.runtime.error) safe.runtime.error = safe.runtime.error.slice(0, 1000)
+        if (safe.runtime.retry) safe.runtime.retry.error = safe.runtime.retry.error.slice(0, 1000)
+        const span = this.traceStore.startSpan(traceId, { type: 'decision', details: safe })
+        this.traceStore.endSpan(traceId, span.span_id, 'completed')
+      },
       appendTurn: (traceId, event) => {
         recordSubAgentTurn(this.traceStore, traceId, event, redact)
       },

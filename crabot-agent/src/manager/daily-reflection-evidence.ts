@@ -12,6 +12,7 @@ import type { ManagerEpisodeTrace } from './trace-types.js'
 import type { ManagerKey } from './types.js'
 import type { DailyReflectionState, ReflectionEvidence, ReflectionManifest, ReflectionRecord, ReflectionSource, ReflectionWindow, ReflectionWorkerTrace } from './daily-reflection-types.js'
 import { reflectionDigest } from './daily-reflection.js'
+import { isWorkerRuntimeEvent } from '../workers/builtin/runtime-observation.js'
 
 export interface ReflectionEvidenceDeps {
   managersDir: string
@@ -198,7 +199,8 @@ export class DailyReflectionEvidence {
           const periodEvents = captured.result.events.filter(event => !isLegacyImportEvent(event) && inWindow(event.ts, state))
           times.push(...periodEvents.map(event => event.ts))
           llmCallsBySeq.push(`${incarnation.seq}:${periodEvents.filter(event => event.kind === 'llm_call').length}`)
-          periodEvents.filter(event => event.kind === 'error').forEach(event => errors.add(event.summary.slice(0, 200)))
+          periodEvents.filter(event => event.kind === 'error' && !isWorkerRuntimeEvent(event.detail))
+            .forEach(event => errors.add(event.summary.slice(0, 200)))
           if (captured.result.unavailable_reason) traceGaps.push(captured.result.unavailable_reason)
         } catch { traceGaps.push(`worker_trace_unavailable:${worker.worker_id}:${incarnation.seq}`) }
       }

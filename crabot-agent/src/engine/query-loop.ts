@@ -17,7 +17,7 @@ import {
   createAssistantMessage,
   createBatchToolResultMessage,
 } from './types'
-import { ContextManager } from './context-manager'
+import { CompactionFailedError, ContextManager } from './context-manager'
 import { partitionToolCalls } from './tool-framework'
 import { executeToolBatches, SendMessageGuard, type HookConfig } from './tool-orchestration'
 import { compressToolResultImages, pruneOldImages } from './image-utils'
@@ -213,7 +213,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     const beforeLlmCall = options.onBeforeLlmCall?.()
     if (beforeLlmCall) await beforeLlmCall
     // 与返回 usage 配对，不能把随后追加的 assistant/tool 消息算进本次请求。
-    const requestEstimatedTokens = contextManager.estimateStaticPromptTokens(currentSystemPrompt, currentTools)
+    let requestEstimatedTokens = contextManager.estimateStaticPromptTokens(currentSystemPrompt, currentTools)
       + contextManager.estimateTotalTokens(messages)
     const llmStartedAtMs = Date.now()
     let llmCallMs = 0
@@ -229,6 +229,36 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         configChangedSignal: options.configChangedSignal,
         configGeneration: options.configGeneration,
         onConfigChanged,
+        onRequestLifecycle: options.onRequestLifecycle ? (event) => options.onRequestLifecycle!(event, 'inference') : undefined,
+        beforeAttempt: options.drainExternalInputs ? async (requestAdapter, requestModel) => {
+          const protectedIds = new Set<string>()
+          for (;;) {
+            const drained = options.drainExternalInputs!()
+            const inputs = Array.isArray(drained) ? drained : await drained
+            if (inputs.length > 0) sendMessageGuard.reset()
+            for (const text of inputs) {
+              const message = createUserMessage(text)
+              messages.push(message)
+              protectedIds.add(message.id)
+              try { options.onSystemInjection?.({ type: 'external_input', text, turnNumber: totalTurns, injectedAtMs: Date.now() }) }
+              catch { console.warn('[engine] external input observer failed') }
+            }
+            refreshMessagesRef()
+            if (options.disableCompaction || !contextManager.shouldCompact(messages, {
+              lastObservedContextTokens, messageCountAtObservation, systemPrompt: currentSystemPrompt, tools: currentTools,
+            })) break
+            const compacted = await compactInPlace(messages, contextManager, requestAdapter, { ...options, model: requestModel },
+              { systemPrompt: currentSystemPrompt, tools: currentTools, force: true, protectedMessageIds: protectedIds }, abortSignal)
+            if (compacted.batchesApplied > 0) lastObservedContextTokens = undefined
+            refreshMessagesRef()
+            if (!compacted.ok) {
+              if (compacted.aborted) throw new DOMException('Aborted', 'AbortError')
+              throw new CompactionFailedError(`上下文压缩失败：${compacted.failedReason}`)
+            }
+          }
+          requestEstimatedTokens = contextManager.estimateStaticPromptTokens(currentSystemPrompt, currentTools)
+            + contextManager.estimateTotalTokens(messages)
+        } : undefined,
         onRetry: (event) => {
           if (options.onLiveProgress) {
             options.onLiveProgress({
@@ -248,8 +278,12 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       })
       llmCallMs = Date.now() - llmStartedAtMs
     } catch (error) {
-      if (abortSignal?.aborted) {
+      if (abortSignal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
         return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+      }
+      if (error instanceof CompactionFailedError) {
+        return { ...buildResult('failed', finalText, totalTurns, contextManager, messages,
+          exitToolCall, toolCallCount, wroteMemoryOrScene, error.message), contextRecoveryRequired: true }
       }
       const nonEmptyInput = currentSystemPrompt.trim().length > 0 || messages.some((message) =>
         'content' in message && (typeof message.content === 'string' ? message.content.trim().length > 0 : message.content.length > 0))
@@ -770,32 +804,6 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       }
     }
 
-    // ── External input injection (turn boundary) ──
-    // worker inbox 等外部输入源在 turn 边界消费：工具执行完成后、下一轮 LLM 调用前，
-    // drain 回调返回的每条输入作为 user message 注入（取出即从源队列移除，FIFO/优先级/
-    // receipt 结算由 caller 负责）。仅在有剩余 turn 时 drain（最后一轮注入无人消费）。
-    // 回调抛错只跳过本轮（输入保留在源队列，下一轮重试），不影响 burst——与上方
-    // supplement 同序，先于下一轮 LLM 调用的 abort 响应。
-    if (hasRemainingTurn && options.drainExternalInputs) {
-      let externalInputs: ReadonlyArray<string> = []
-      try {
-        externalInputs = await options.drainExternalInputs()
-      } catch (error) {
-        console.error(`[engine] drainExternalInputs failed (turn ${totalTurns}), inputs kept in source queue:`,
-          error instanceof Error ? error.message : String(error))
-      }
-      if (externalInputs.length > 0) sendMessageGuard.reset()
-      for (const text of externalInputs) {
-        messages.push(createUserMessage(text))
-        options.onSystemInjection?.({
-          type: 'external_input',
-          text,
-          turnNumber: totalTurns,
-          injectedAtMs: Date.now(),
-        })
-      }
-    }
-
     // Prune old images — keep only the most recent N screenshots
     if (options.supportsVision) {
       pruneOldImages(messages)
@@ -831,6 +839,7 @@ async function compactInPlace(
     readonly systemPrompt: string
     readonly tools: ReadonlyArray<ToolDefinition>
     readonly force: boolean
+    readonly protectedMessageIds?: ReadonlySet<string>
   },
   abortSignal?: AbortSignal,
 ): Promise<CompactionOutcome> {
@@ -860,11 +869,14 @@ async function compactInPlace(
           applyMessages(batch)
         } },
         target, adapter: assembly.adapter ?? adapter, model: options.model,
+        onRequestLifecycle: options.onRequestLifecycle ? (event) => options.onRequestLifecycle!(event, 'compaction') : undefined,
         ...(abortSignal ? { signal: abortSignal } : {}),
       })
       : await contextManager.compactBuiltinMessages({
         messages, adapter, model: options.model, target,
         mainRequestFixedTokens: fixedTokens,
+        protectedMessageIds: request.protectedMessageIds,
+        onRequestLifecycle: options.onRequestLifecycle ? (event) => options.onRequestLifecycle!(event, 'compaction') : undefined,
         ...(abortSignal ? { signal: abortSignal } : {}),
         onBatchApplied: applyMessages,
       })
