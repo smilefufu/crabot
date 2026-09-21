@@ -10,6 +10,11 @@
 
 ## 当前状态
 
+### Manager send_message 说明对齐：局部修复已验证，Kimi 行为验收未通过
+
+- 移除 Manager 不支持的 intent/ask_human/waiting_human 及旧 loop 描述，使用独立工具说明保留真实投递边界，明确已发送内容不重复、无后续工作或等待回复时结束；不改共享消息工具、参数、handler 或核心提示词。
+- 两个复现测试先失败；修复后工具装配与 Manager loop 共 194 项通过，Agent 构建通过。真实 Kimi k3 合成验证共 2 条轨迹、4 次请求，业务工具仅模拟：一条发送一次后结束；另一条直接输出内部文本，补现有一次性交付提醒后仍未发送。未观察到重复调用，但不能宣称完整交付或重复发送问题已解决；未部署。
+
 ### LLM 首响应统一 10 分钟：实现与定向验证完成，待 PR 审查
 
 - 按已确认 [spec](crabot-docs/superpowers/specs/2026-09-20-kimi-first-response-budget-design.md)，共享首 chunk 默认预算由 90 秒改为 600 秒；idle 保持 120 秒，显式覆盖、取消与连接恢复分类不变。

@@ -229,7 +229,9 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
 
   return defineTool({
     name: tool.name,
-    description: isSendMessage ? `${tool.description} 人类只能看到成功投递的消息；普通 assistant text 留作内部记录，不代表已经回复。` : tool.description,
+    description: isSendMessage
+      ? '向指定会话发送文本、媒体 URL 或本地文件。人类只能看到成功投递的消息；普通 assistant text 留作内部记录，不代表已经回复。只发送人类需要知道的进展、结果或问题，不外发内部系统提醒。已成功投递的内容不重复发送；没有后续工作或需要等待人类回复时，结束本回合，无需再发送收尾消息。'
+      : tool.description,
     inputSchema,
     isReadOnly: MESSAGING_READ_ONLY.has(tool.name),
     ...(isSendMessage

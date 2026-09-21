@@ -754,6 +754,15 @@ describe('buildManagerToolFace', () => {
     }
   })
 
+  it.each(['full', 'progressive'] as const)('%s 的 send_message 说明与 Manager 无 intent 的接口一致', (mode) => {
+    const tools = buildManagerToolFace(makeDeps({ faceState: createManagerToolFaceState(mode) }))
+    const sendMessage = tools.find((tool) => tool.name === 'send_message')!
+    expect(sendMessage.description).not.toMatch(/intent|ask_human|waiting_human|forced.summary|audit|engine 不让我 end_turn/)
+    expect(sendMessage.description).toContain('普通 assistant text')
+    expect(sendMessage.description).toContain('结束本回合')
+    expect(sendMessage.description).toContain('不重复发送')
+  })
+
   it('send_message 的 inputSchema 不含 intent，成功 spawn_worker 声明触发回调且不透传字段', async () => {
     const onPostSendAction = vi.fn()
     const onSuccessfulSendMessage = vi.fn()
