@@ -125,7 +125,7 @@ describe('ManagerLoop episode trace wiring', () => {
     expect(episode.human_inputs?.items.map(item => item.platform_message_id)).toEqual(messages.map(item => item.platform_message_id))
   })
 
-  it('does not record queued input as consumed when the model fails before drain', async () => {
+  it.each([false, true])('marks undrained input history partial through reload (throw=%s)', async (throwAtFinalization) => {
     let loop: ManagerLoop
     const pending = makeMessage('still queued')
     const { adapter } = makeAdapter({ fail: true })
@@ -134,9 +134,15 @@ describe('ManagerLoop episode trace wiring', () => {
       loop.enqueueHumanWakeDuringActiveEpisode(timed({ kind: 'human_messages', messages: [pending] }))
       yield* original(params)
     }
+    if (throwAtFinalization) vi.spyOn(store, 'appendEpisodeLog').mockRejectedValueOnce(new Error('episode log unavailable'))
     loop = new ManagerLoop(deps(adapter, traceWriter))
-    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeMessage('original')] }))
-    const episode = traceStore.getManagerEpisode(result.episodeId)!
+    const result = loop.wakeUp(timed({ kind: 'human_messages', messages: [makeMessage('original')] }))
+    if (throwAtFinalization) await expect(result).rejects.toThrow('episode log unavailable')
+    else expect((await result).outcome).toBe('failed')
+    const restored = new TraceStore(100, join(dataDir, 'traces'), 'traces-running.jsonl', 'traces-v3-')
+    const episode = restored.listManagerEpisodes(KEY, { page: 1, page_size: 20 }).items[0]
+    expect(episode.human_inputs?.coverage).toBe('partial')
+    expect(loop.snapshotHumanInbound()).toEqual([])
     expect(episode.status).toBe('failed')
     expect(episode.human_inputs?.items.map(item => item.preview)).toEqual(['original'])
     expect((await store.load(KEY)).committedHumanMessageIds).toContain(pending.platform_message_id)

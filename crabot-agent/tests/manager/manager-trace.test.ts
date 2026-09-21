@@ -31,10 +31,11 @@ describe('TraceStore manager episode traces', () => {
     const input = { platform_message_id: 'm1', platform_timestamp: '2026-09-20T14:05:50.578Z', preview: 'secret-value ' + '文'.repeat(300), sender_display_name: 'secret-value' }
     writer.recordHumanInputs('inputs', [input], 'complete')
     writer.recordHumanInputs('inputs', [input], 'partial')
+    writer.recordHumanInputs('inputs', [input], 'complete')
     writer.finishEpisode('inputs', { status: 'completed' })
     const restored = new TraceStore(100, dir, 'traces-running.jsonl', 'traces-v3-')
     const record = restored.getManagerEpisode('inputs')!
-    expect(record.human_inputs?.coverage).toBe('complete')
+    expect(record.human_inputs?.coverage).toBe('partial')
     expect(record.human_inputs?.items).toHaveLength(1)
     expect(record.human_inputs?.items[0].preview).toHaveLength(181)
     expect(JSON.stringify(record)).not.toContain('secret-value')

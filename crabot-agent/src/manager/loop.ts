@@ -660,6 +660,14 @@ export class ManagerLoop {
     }
   }
 
+  private markFailedHumanInputGap(): void {
+    // 失败收尾会把未 drain 的插话保存到 recent；它不属于本轮上下文，但不能再宣称记录完整。
+    if (this.currentEpisodeInjected?.some(envelope => isHumanWake(envelope.wake)
+      && envelope.wake.messages.some(message => !this.currentHumanInputs.has(message.platform_message_id)))) {
+      this.humanInputCoverage = 'partial'
+    }
+  }
+
   /** 当前人类入站事实的同步只读投影；不 drain mailbox，也不修改 episode 上下文。 */
   snapshotHumanInbound(): ManagerInboundMessageFact[] {
     const facts: ManagerInboundMessageFact[] = []
@@ -1074,6 +1082,7 @@ export class ManagerLoop {
       )
       // completed/max_turns → completed；failed/aborted → failed（plan §5.5）。
       const failed = result.outcome === 'failed' || result.outcome === 'aborted'
+      if (failed) this.markFailedHumanInputGap()
       if (traceStarted) {
         this.recordHumanInputs([])
         this.recordRequestCoverage(episodeId, recovery !== undefined)
@@ -1097,6 +1106,7 @@ export class ManagerLoop {
     } catch (err) {
       // admission 与直接 throw 都在这里收口。人类提交一旦完成，仅重投非人类事件；否则保留
       // 原输入，下一次 wake 再试提交。
+      this.markFailedHumanInputGap()
       if (traceStarted) {
         this.recordHumanInputs([])
         this.recordRequestCoverage(episodeId, recovery !== undefined)

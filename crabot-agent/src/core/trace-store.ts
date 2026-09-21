@@ -1355,7 +1355,7 @@ export class TraceStore {
     const byId = new Map(episode.human_inputs?.items.map(item => [item.platform_message_id, item]))
     for (const item of items) if (!byId.has(item.platform_message_id)) byId.set(item.platform_message_id, item)
     episode.human_inputs = {
-      coverage: episode.human_inputs?.coverage ?? coverage,
+      coverage: episode.human_inputs?.coverage === 'partial' ? 'partial' : coverage,
       items: [...byId.values()].sort((a, b) => a.platform_timestamp.localeCompare(b.platform_timestamp)
         || a.platform_message_id.localeCompare(b.platform_message_id)),
     }

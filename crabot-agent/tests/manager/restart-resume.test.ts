@@ -305,7 +305,7 @@ describe('Manager restart continuation', () => {
     expect(inputs.at(-1)).toContain('New instruction')
     expect((await store.load(KEY)).committedHumanMessageIds).toEqual(expect.arrayContaining(['original', 'queued', 'new']))
     expect(trace.getManagerEpisode(checkpoint.episodeId)?.human_inputs?.items.map(item => item.platform_message_id)).toEqual(['original', 'queued'])
-    expect(trace.getManagerEpisode(checkpoint.episodeId)?.human_inputs?.coverage).toBe('complete')
+    expect(trace.getManagerEpisode(checkpoint.episodeId)?.human_inputs?.coverage).toBe('partial')
   })
 
   it('preserves committed quotes and prepares pending quotes after restart without extending checkpoints', async () => {
