@@ -510,6 +510,7 @@ class SqliteIndex:
         *,
         type_: str | None = None,
         status: str | None = None,
+        reviewable_only: bool = False,
         tags: list[str] | None = None,
         ingestion_time_start: str | None = None,
         ingestion_time_end: str | None = None,
@@ -523,8 +524,12 @@ class SqliteIndex:
         filtering must happen at the RPC layer after loading the entry's
         frontmatter.
         """
+        if not isinstance(reviewable_only, bool) or (reviewable_only and status != "inbox"):
+            raise ValueError("reviewable_only must be boolean and requires status=inbox when true")
         where: list[str] = []
         params: list = []
+        if reviewable_only:
+            where.append("inbox_entered_at IS NOT NULL AND inbox_entered_at != ''")
         if type_:
             where.append("type = ?")
             params.append(type_)

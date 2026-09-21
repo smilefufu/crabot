@@ -235,6 +235,8 @@ const LIST_RECENT_SCHEMA = {
 }
 
 const LIST_ENTRIES_SCHEMA = {
+  reviewable_only: z.boolean().optional()
+    .describe('仅列出带 inbox_entered_at 的正常候选；true 必须同时指定 status=inbox，默认 false'),
   type: z.enum(['fact', 'lesson', 'concept']).optional()
     .describe('按记忆类型过滤'),
   status: z.enum(['inbox', 'confirmed', 'trash']).optional()

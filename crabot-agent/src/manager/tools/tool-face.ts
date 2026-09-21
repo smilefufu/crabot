@@ -350,6 +350,18 @@ function protectDailyReflectionMemory(tools: ToolDefinition[]): ToolDefinition[]
   const writes = new Set(['promote_inbox_entry', 'delete_memory', 'update_long_term', 'set_memory_links']
     .map(name => `${ALLOWED_MCP_PREFIX}${name}`))
   return tools.map((tool): ToolDefinition => {
+    if (tool.name === `${ALLOWED_MCP_PREFIX}list_entries`) {
+      return { ...tool,
+        description: tool.description + ' 每日反思查询 status=inbox 时由宿主固定筛选正常候选，历史候选已排除；不得传 reviewable_only=false 或入库时间起止，执行窗口不限制待审队列。',
+        async call(input, context) {
+          if (input.status !== 'inbox') return tool.call(input, context)
+          if ((input.reviewable_only !== undefined && input.reviewable_only !== true)
+            || input.ingestion_time_start !== undefined || input.ingestion_time_end !== undefined) {
+            return { output: '每日反思 inbox 固定查询正常候选；reviewable_only 只允许省略或 true，请移除入库时间起止参数。执行窗口不限制待审队列，历史候选保留人工迁移流程。', isError: true }
+          }
+          return tool.call({ ...input, reviewable_only: true }, context)
+        } }
+    }
     if (!writes.has(tool.name)) return tool
     return { ...tool, async call(input, context) {
       const unavailable = { output: '无法核实记忆当前状态，本次未执行修改。', isError: true }

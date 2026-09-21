@@ -48,6 +48,97 @@ async function ready(host: DailyReflection) {
 }
 
 describe('DailyReflection host', () => {
+  it('continuation: traverses 15010 frozen records in bounded hundred-record pages without gaps or duplicates', async () => {
+    const { deps, store, records } = await setup(15010)
+    let session = await store.load(key)
+    vi.spyOn(store, 'load').mockImplementation(async () => structuredClone(session))
+    vi.spyOn(store, 'updateDailyReflection').mockImplementation(async (_key, update) => {
+      session = { ...session, dailyReflection: update(session.dailyReflection) }
+    })
+    const host = new DailyReflection(deps)
+    const refs: string[] = []
+    let page = await host.list()
+    expect(page.records).toHaveLength(100)
+    let pages = 0
+    do {
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(80 * 1024)
+      refs.push(...page.records.map(record => record.record_ref))
+      pages++
+      if (!page.next_cursor) break
+      page = await host.list(page.next_cursor)
+    } while (true)
+    expect(pages).toBe(151)
+    expect(refs).toEqual(records.map(record => record.record_ref))
+    expect(page.progress).toMatchObject({ directory_complete: true, directory_read: 15010 })
+    expect(session.dailyReflection?.manifest?.records).toEqual(records)
+    expect(session.dailyReflection?.read_records).toEqual({})
+  })
+
+  it('continuation: caps complete Unicode JSON pages and replays the actual variable-length page after restart', async () => {
+    const { host, records, deps, store, dir } = await setup(30)
+    records.forEach(record => { record.summary = '汉🙂\\'.repeat(3000) })
+    const first = await host.list()
+    expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(80 * 1024)
+    expect(first.records.length).toBeGreaterThan(0)
+    expect(first.records.length).toBeLessThan(30)
+    expect(first.records[0].summary).toBe(records[0].summary)
+    const second = await host.list(first.next_cursor)
+    expect(Buffer.byteLength(JSON.stringify(second))).toBeLessThanOrEqual(80 * 1024)
+    const saved = (await store.load(key)).dailyReflection!
+    const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
+    const discovered = await restarted.list()
+    expect(discovered.progress.directory_read).toBe(second.progress.directory_read)
+    const replayed = await restarted.list(discovered.progress.resume_cursor)
+    expect(replayed.records.map(r => r.record_ref)).toEqual(second.records.map(r => r.record_ref))
+    expect((await store.load(key)).dailyReflection?.directory_page).toEqual(saved.directory_page)
+  })
+
+  it.each(['record', 'metadata'])('continuation: refuses oversized %s without changing persisted progress', async oversized => {
+    const { host, records, store } = await setup()
+    if (oversized === 'record') records[0].summary = '汉'.repeat(30_000)
+    else await store.updateDailyReflection(key, state => ({ ...state!, result: {
+      ...completion().exitToolCall.input, outcome: 'partial', run_id: state!.run_id,
+      window_start: state!.window_start, window_end: state!.window_end, completed_at: admission.window_end,
+      validation_errors: [], summary: 'x'.repeat(90_000),
+    } as never }))
+    const before = await store.load(key)
+    await expect(host.list()).rejects.toThrow('REFLECTION_DIRECTORY_PAGE_TOO_LARGE')
+    expect(await store.load(key)).toEqual(before)
+  })
+
+  it.each([false, true])('continuation: keeps original twenty-record cursor positions when upgrading a completed=%s directory', async complete => {
+    const { host, store, records, deps } = await setup(complete ? 225 : 301)
+    await store.updateDailyReflection(key, state => ({ ...state!, manifest: { records, gaps: [] },
+      directory_complete: complete,
+      cursors: Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`old-${(i + 1) * 20}`, { offset: (i + 1) * 20 }])) }))
+    const discovered = await host.list()
+    expect(discovered.progress).toMatchObject({ directory_read: complete ? 225 : 220,
+      resume_cursor: complete ? 'old-220' : 'old-200' })
+    expect((await store.load(key)).dailyReflection?.directory_page).toEqual(complete
+      ? { start: 220, end: 225 } : { start: 200, end: 220 })
+    expect((await host.list('old-20')).records[0].record_ref).toBe('ref-20')
+    expect(deps.capture).not.toHaveBeenCalled()
+  })
+
+  it('continuation: exposes unstarted gaps behind the frontier and drains them without changing pending detail semantics', async () => {
+    const { host, store, records, deps } = await setup(301)
+    records.slice(0, 23).forEach(record => { record.gaps = ['old diagnostic'] })
+    records[23].gaps = ['manager_trace_unavailable']
+    await store.updateDailyReflection(key, state => ({ ...state!, manifest: { records, gaps: [] },
+      cursors: { old200: { offset: 200 }, old220: { offset: 220 } } }))
+    const first = await host.list('old220')
+    expect(first.progress).toMatchObject({ evidence_gap_count: 23, pending_record_count: 0, skipped_record_count: 1 })
+    expect(first.progress.evidence_gap_records).toEqual(records.slice(0, 20).map(({ record_ref }) => ({ record_ref })))
+    for (const record of first.progress.evidence_gap_records) await host.read(record.record_ref)
+    const restarted = new DailyReflection(deps)
+    const next = await restarted.list()
+    expect(next.progress.evidence_gap_records).toEqual(records.slice(20, 23).map(({ record_ref }) => ({ record_ref })))
+    expect(next.progress).toMatchObject({ evidence_gap_count: 3, pending_record_count: 0 })
+    vi.mocked(deps.read).mockRejectedValueOnce(new Error('EIO'))
+    await restarted.read('ref-20')
+    expect((await restarted.list()).progress).toMatchObject({ evidence_gap_count: 3, pending_record_count: 1 })
+  })
+
   it('counts missing frozen details as handled without inventing read evidence, including after restart', async () => {
     const { host, deps, records, store } = await setup()
     const record = { ...records[0], gaps: ['manager_trace_unavailable'] }
@@ -89,15 +180,15 @@ describe('DailyReflection host', () => {
   })
 
   it('handles a historical capture whose frozen trace bound is absent without treating a fresh read error as absence', async () => {
-    const { host, deps, records } = await setup(21)
+    const { host, deps, records } = await setup(101)
     const gap = 'worker_trace_unavailable:old-worker:1'
-    const record: ReflectionRecord = { ...records[20], kind: 'worker', gaps: [gap], digest: '',
+    const record: ReflectionRecord = { ...records[100], kind: 'worker', gaps: [gap], digest: '',
       source: { kind: 'worker', worker_id: 'old-worker', traces: [], turn_ids: [], event_count: 5, gaps: [gap] } }
-    vi.mocked(deps.capture).mockResolvedValueOnce({ records: [...records.slice(0, 20), record], gaps: [] })
+    vi.mocked(deps.capture).mockResolvedValueOnce({ records: [...records.slice(0, 100), record], gaps: [] })
     const page = await host.list()
     expect(page.progress).toMatchObject({ directory_complete: false, skipped_record_count: 1, evidence_gap_count: 0 })
     vi.mocked(deps.read).mockResolvedValue({ content: 'surviving events', gaps: [gap] })
-    expect(await host.read('ref-20')).toMatchObject({ skipped: 'source_unavailable', gaps: [gap] })
+    expect(await host.read('ref-100')).toMatchObject({ skipped: 'source_unavailable', gaps: [gap] })
     expect((await host.finish(completion()))?.validation_errors).toContain('directory_not_fully_read')
     await host.list(page.next_cursor)
     expect((await host.finish(completion()))?.outcome).toBe('completed')
@@ -145,7 +236,7 @@ describe('DailyReflection host', () => {
   })
 
   it('keeps directory and other read failures blocking even when a missing record was skipped', async () => {
-    const { host, deps } = await setup(21)
+    const { host, deps } = await setup(101)
     await host.list()
     vi.mocked(deps.read).mockResolvedValueOnce({ content: '', gaps: ['manager_trace_unavailable'] })
     await host.read('ref-0')
@@ -182,7 +273,7 @@ describe('DailyReflection host', () => {
   )
 
   it.each(['completed', 'partial'])('validates %s references without persisting a result or requiring full coverage', async outcome => {
-    const { host, deps, store } = await setup(21)
+    const { host, deps, store } = await setup(101)
     await host.list()
     await host.read('ref-0')
     vi.mocked(deps.read).mockResolvedValueOnce({ content: 'evidence', gaps: ['trace_unavailable'] })
@@ -316,10 +407,10 @@ describe('DailyReflection host', () => {
   })
 
   it('freezes the directory, refuses forged cursors, and preserves progress across restart/history saves', async () => {
-    const { host, deps, store } = await setup(21)
+    const { host, deps, store } = await setup(101)
     const stale = await store.load(key)
     const first = await host.list() as any
-    expect(first.records).toHaveLength(20)
+    expect(first.records).toHaveLength(100)
     expect(first.records[0]).not.toHaveProperty('source')
     await expect(host.list('forged')).rejects.toThrow('INVALID_REFLECTION_CURSOR')
     await store.save({ ...stale, recent: [], foldedCount: 9 })
@@ -344,7 +435,7 @@ describe('DailyReflection host', () => {
   })
 
   it('rediscovers the persisted directory position after restart without the previous tool history', async () => {
-    const { host, deps, dir } = await setup(45)
+    const { host, deps, dir } = await setup(205)
     const first = await host.list() as any
     const second = await host.list(first.next_cursor) as any
     const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
@@ -352,28 +443,28 @@ describe('DailyReflection host', () => {
     const rediscovered = await restarted.list() as any
     expect(rediscovered.window_end).toBe(admission.window_end)
     expect(rediscovered.records[0].record_ref).toBe('ref-0')
-    expect(rediscovered.progress).toEqual({ directory_total: 45, directory_read: 40, directory_complete: false,
-      resume_cursor: first.next_cursor, pending_record_count: 0, pending_records: [], evidence_gap_count: 0, skipped_record_count: 0 })
-    expect((await restarted.list(rediscovered.next_cursor) as any).records[0].record_ref).toBe('ref-20')
+    expect(rediscovered.progress).toEqual({ directory_total: 205, directory_read: 200, directory_complete: false,
+      resume_cursor: first.next_cursor, pending_record_count: 0, pending_records: [], evidence_gap_count: 0, evidence_gap_records: [], skipped_record_count: 0 })
+    expect((await restarted.list(rediscovered.next_cursor) as any).records[0].record_ref).toBe('ref-100')
     expect((await restarted.finish(completion()))?.validation_errors).toContain('directory_not_fully_read')
     const replayed = await restarted.list(rediscovered.progress.resume_cursor)
-    expect(replayed.records[0].record_ref).toBe('ref-20')
+    expect(replayed.records[0].record_ref).toBe('ref-100')
     const last = await restarted.list(replayed.next_cursor)
-    expect(last.records.map((record: any) => record.record_ref)).toEqual(['ref-40', 'ref-41', 'ref-42', 'ref-43', 'ref-44'])
-    expect(last.progress).toMatchObject({ directory_read: 45, directory_complete: true })
+    expect(last.records.map((record: any) => record.record_ref)).toEqual(['ref-200', 'ref-201', 'ref-202', 'ref-203', 'ref-204'])
+    expect(last.progress).toMatchObject({ directory_read: 205, directory_complete: true })
     expect(last.progress.resume_cursor).toBe(second.next_cursor)
     expect((await restarted.list()).progress.resume_cursor).toBe(second.next_cursor)
     expect(deps.capture).toHaveBeenCalledOnce()
     expect(deps.confirm).not.toHaveBeenCalled()
-    await restarted.read('ref-44')
-    expect((await restarted.finish(completion({ evidence_refs: ['ref-44'] })))?.outcome).toBe('completed')
+    await restarted.read('ref-204')
+    expect((await restarted.finish(completion({ evidence_refs: ['ref-204'] })))?.outcome).toBe('completed')
     expect(deps.confirm).toHaveBeenCalledWith(expect.objectContaining({ trigger_id: admission.trigger_id, window_end: admission.window_end }))
   })
 
-  it.each([20, 40])('replays page %s after its progress is persisted but its tool result is lost', async offset => {
-    const { host, deps, store, dir } = await setup(45)
+  it.each([100, 200])('replays page %s after its progress is persisted but its tool result is lost', async offset => {
+    const { host, deps, store, dir } = await setup(205)
     let page = await host.list()
-    if (offset === 40) page = await host.list(page.next_cursor)
+    if (offset === 200) page = await host.list(page.next_cursor)
     const lostCursor = page.next_cursor
     const save = store.updateDailyReflection.bind(store)
     vi.spyOn(store, 'updateDailyReflection').mockImplementationOnce(async (...args) => {
@@ -383,24 +474,24 @@ describe('DailyReflection host', () => {
     await expect(host.list(lostCursor)).rejects.toThrow('restart before tool result checkpoint')
     const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
     const discovered = await restarted.list()
-    expect(discovered.progress).toMatchObject({ directory_read: offset === 40 ? 45 : 40,
-      directory_complete: offset === 40, resume_cursor: lostCursor })
+    expect(discovered.progress).toMatchObject({ directory_read: offset === 200 ? 205 : 200,
+      directory_complete: offset === 200, resume_cursor: lostCursor })
     const replayed = await restarted.list(discovered.progress.resume_cursor)
     expect(replayed.records[0].record_ref).toBe(`ref-${offset}`)
-    if (offset === 20) expect((await restarted.list(replayed.next_cursor)).records[0].record_ref).toBe('ref-40')
+    if (offset === 100) expect((await restarted.list(replayed.next_cursor)).records[0].record_ref).toBe('ref-200')
     expect(deps.capture).toHaveBeenCalledOnce()
     expect(deps.confirm).not.toHaveBeenCalled()
   })
 
-  it.each([0, 1, 20, 40])('keeps the last page reachable for a directory of %s records', async count => {
+  it.each([0, 1, 100, 200])('keeps the last page reachable for a directory of %s records', async count => {
     const { host, deps, dir } = await setup(count)
     let page = await host.list()
     while (page.next_cursor) page = await host.list(page.next_cursor)
     const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
     const discovered = await restarted.list()
     expect(discovered.progress).toMatchObject({ directory_read: count, directory_complete: true })
-    if (count <= 20) expect(discovered.progress.resume_cursor).toBeUndefined()
-    else expect((await restarted.list(discovered.progress.resume_cursor)).records[0].record_ref).toBe('ref-20')
+    if (count <= 100) expect(discovered.progress.resume_cursor).toBeUndefined()
+    else expect((await restarted.list(discovered.progress.resume_cursor)).records[0].record_ref).toBe('ref-100')
   })
 
   it('rediscovers bounded unfinished details and gaps without treating old detail cursors as successful coverage', async () => {
@@ -466,7 +557,7 @@ describe('DailyReflection host', () => {
   })
 
   it('blocks incomplete directory, unknown evidence, skipped tools and unproven delivery', async () => {
-    const { host, deps } = await setup(21)
+    const { host, deps } = await setup(101)
     await ready(host)
     const result = await host.finish(completion({ evidence_refs: ['forged'], summary_delivered: true }, 2))
     expect(result?.validation_errors).toEqual(expect.arrayContaining([

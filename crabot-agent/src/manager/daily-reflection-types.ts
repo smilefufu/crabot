@@ -29,6 +29,7 @@ export interface ReflectionProgress {
   pending_record_count: number
   pending_records: Array<{ record_ref: string }>
   evidence_gap_count: number
+  evidence_gap_records: Array<{ record_ref: string }>
   skipped_record_count: number
 }
 
@@ -85,6 +86,7 @@ export interface DailyReflectionState extends ReflectionWindow {
   analysis_worker_ids: string[]
   manifest?: ReflectionManifest
   directory_complete: boolean
+  directory_page?: { start: number; end: number }
   read_records: Record<string, boolean>
   cursors: Record<string, { record_ref?: string; offset: number }>
   summary_delivered: boolean

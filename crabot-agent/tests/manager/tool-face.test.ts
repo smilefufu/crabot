@@ -151,6 +151,15 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
   }
 
   for (const mode of ['full', 'progressive'] as const) {
+    it(`${mode}: continuation query filters normal inbox before RPC pagination`, async () => {
+      const call = vi.fn(async () => ({ items: [], total: 0 }))
+      const tools = await face(call, mode)
+      const list = tools.find(t => t.name === 'mcp__crab-memory__list_entries')!
+      expect((await list.call({ status: 'inbox', sort: 'ingestion_time_asc', offset: 20 }, {} as never)).isError).toBe(false)
+      expect(call).toHaveBeenCalledWith(19100, 'list_entries',
+        expect.objectContaining({ status: 'inbox', reviewable_only: true, offset: 20 }), 'manager-test')
+    })
+
     it.each(writes)(`${mode}: %s 不得修改缺少生命周期字段的历史候选`, async (name, input) => {
       const call = vi.fn(async (_port, method) => method === 'get_memory'
         ? { id: 'legacy', status: 'inbox', frontmatter: {}, body: 'original' }
@@ -162,6 +171,24 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
       expect(call.mock.calls.map(c => c[1])).toEqual(['get_memory'])
     })
   }
+
+  it.each([{ reviewable_only: false }, { reviewable_only: null }, { reviewable_only: 'true' },
+    { ingestion_time_start: '2026-08-02' }, { ingestion_time_end: '2026-09-18' }])(
+    'continuation query rejects a daily inbox override without calling Memory: %j', async extra => {
+      const call = vi.fn()
+      const tools = await face(call, 'progressive')
+      const result = await tools.find(t => t.name === 'mcp__crab-memory__list_entries')!.call({ status: 'inbox', ...extra }, {} as never)
+      expect(result.isError).toBe(true)
+      expect(call).not.toHaveBeenCalled()
+    })
+
+  it.each([[false, 'inbox'], [true, 'confirmed'], [true, 'trash']] as const)(
+    'continuation query preserves other list scopes: daily=%s status=%s', async (daily, status) => {
+      const call = vi.fn(async () => ({ items: [], total: 0 }))
+      const tools = await face(call, 'progressive', daily)
+      await tools.find(t => t.name === 'mcp__crab-memory__list_entries')!.call({ status, ingestion_time_start: '2026-08-02' }, {} as never)
+      expect(call).toHaveBeenCalledWith(19100, 'list_entries', { status, ingestion_time_start: '2026-08-02' }, 'manager-test')
+    })
 
   it.each(writes)('%s 保留带生命周期字段的正常候选处理', async (name, input, method) => {
     const call = vi.fn(async (_port, m) => m === 'get_memory'

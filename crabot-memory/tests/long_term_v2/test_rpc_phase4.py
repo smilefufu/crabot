@@ -144,6 +144,49 @@ async def test_list_entries_pagination(rpc):
 
 
 @pytest.mark.asyncio
+async def test_reviewable_inbox_filters_legacy_before_pagination_and_keeps_old_normal_candidates(rpc):
+    for i in range(5377):
+        rpc.index.conn.execute(
+            "INSERT INTO memories (id,status,type,brief,body,event_time,ingestion_time,path) VALUES (?,?,?,?,?,?,?,?)",
+            (f"legacy-{i}", "inbox", "fact", "legacy", "original", "2026-01-01", "2026-01-01", "unused"),
+        )
+    rpc.index.conn.commit()
+    ids = []
+    for name in ["a", "b", "c"]:
+        entry = await rpc.write_long_term(_write_payload(brief=name))
+        ids.append(entry["id"])
+        rpc.index.conn.execute("UPDATE memories SET ingestion_time=? WHERE id=?", ("2026-01-01", entry["id"]))
+    rpc.index.conn.commit()
+    legacy_before = rpc.index.conn.execute("SELECT * FROM memories WHERE id LIKE 'legacy-%' ORDER BY id").fetchall()
+    query = {"status": "inbox", "sort": "ingestion_time_asc", "reviewable_only": True, "limit": 2}
+    first = await rpc.list_entries(query)
+    second = await rpc.list_entries({**query, "offset": 2})
+    assert [item["id"] for item in first["items"] + second["items"]] == sorted(ids)
+    assert first["total"] == 2 and second["total"] == 1
+    await rpc.delete_memory({"id": first["items"][0]["id"]})
+    assert [item["id"] for item in (await rpc.list_entries(query))["items"]] == sorted(ids)[1:]
+    assert rpc.index.conn.execute("SELECT * FROM memories WHERE id LIKE 'legacy-%' ORDER BY id").fetchall() == legacy_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [None, "confirmed", "trash"])
+async def test_reviewable_inbox_requires_explicit_inbox_status(rpc, status):
+    with pytest.raises(ValueError, match="reviewable_only"):
+        await rpc.list_entries({"status": status, "reviewable_only": True})
+
+
+@pytest.mark.asyncio
+async def test_reviewable_inbox_excludes_empty_field_but_default_keeps_legacy(rpc):
+    _seed_entry(rpc, "mem-l-old", "legacy", status="inbox", ingestion_time="2026-01-01")
+    normal = await rpc.write_long_term(_write_payload(brief="normal"))
+    rpc.index.conn.execute("UPDATE memories SET inbox_entered_at='' WHERE id=?", (normal["id"],))
+    rpc.index.conn.commit()
+    assert (await rpc.list_entries({"status": "inbox", "reviewable_only": True}))["items"] == []
+    for extra in [{}, {"reviewable_only": False}]:
+        assert (await rpc.list_entries({"status": "inbox", **extra}))["total"] == 2
+
+
+@pytest.mark.asyncio
 async def test_restore_memory_round_trip(rpc):
     w = await rpc.write_long_term(_write_payload(brief="to-restore"))
     mem_id = w["id"]

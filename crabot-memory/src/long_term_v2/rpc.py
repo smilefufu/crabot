@@ -684,6 +684,7 @@ class LongTermV2Rpc:
 
         rows = self.index.list_entries(
             type_=type_, status=status,
+            reviewable_only=params.get("reviewable_only", False),
             tags=tags,
             ingestion_time_start=ingestion_time_start,
             ingestion_time_end=ingestion_time_end,
