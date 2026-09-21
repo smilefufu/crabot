@@ -306,6 +306,20 @@ export class ManagerRegistry {
     return task
   }
 
+  private async resumeBeforeWake(key: ManagerKey, envelope?: TimedWakeEnvelope): Promise<void> {
+    try {
+      await this.ensureResumed(key)
+    } catch (error) {
+      const checkpoint = this.pendingResumes.get(key)
+      if (checkpoint && envelope) {
+        const retained = { ...checkpoint, pending: [...checkpoint.pending, envelope] }
+        this.deps.store.saveCheckpoint(retained)
+        this.pendingResumes.set(key, retained)
+      }
+      throw error
+    }
+  }
+
   private async refreshResumeEnvelope(key: ManagerKey, envelope: TimedWakeEnvelope): Promise<TimedWakeEnvelope> {
     const wake = envelope.wake
     let permissions: ResolvedPermissions | null | void
@@ -481,7 +495,6 @@ export class ManagerRegistry {
     onEpisodeSettled?: (result: EpisodeResult) => void,
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
-    if (this.pendingResumes.has(key)) await this.ensureResumed(key)
     // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
     // 与 `handleMessageReceived` 的默认分流一致。
     const sessionType = messages[0]?.session.type === 'group' ? 'group' : 'private'
@@ -511,6 +524,7 @@ export class ManagerRegistry {
         kind === 'human_messages'
           ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
           : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
+      if (this.pendingResumes.has(key)) await this.resumeBeforeWake(key, { ...envelope, wake: event })
       // P7 cutover 遗留接线补齐(2026-08-29):episode 运行中到达的人类消息进入当前
       // episode mailbox,turn 边界注入当前 episode 的下一轮 LLM——不再阻塞在 wakeUp 的
       // mutex 上等本 episode 跑完。注入检查点负责持久化，成功 LLM 响应负责外显确认。
@@ -715,7 +729,6 @@ export class ManagerRegistry {
   }): Promise<{ completion: Promise<EpisodeResult> }> {
     const capture = this.captureIngress()
     const key = `${p.targetSession.channel_id}::${p.targetSession.session_id}` as ManagerKey
-    if (this.pendingResumes.has(key)) await this.ensureResumed(key)
     const envelope = this.makeEnvelope(capture, {
       kind: 'schedule',
       scheduleId: p.scheduleId,
@@ -750,6 +763,7 @@ export class ManagerRegistry {
           ...(principalPermissions ? { principalPermissions } : {}),
         },
       }
+      if (this.pendingResumes.has(key)) await this.resumeBeforeWake(key, admittedEnvelope)
       const loop = this.getOrCreate(key)
       this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
       let result: EpisodeResult | undefined
@@ -986,7 +1000,7 @@ export class ManagerRegistry {
     const finishPreparation = this.beginWakePreparation(key)
     let loop!: ManagerLoop
     try {
-      if (!recovery && this.pendingResumes.has(key)) await this.ensureResumed(key)
+      if (!recovery && this.pendingResumes.has(key)) await this.resumeBeforeWake(key, envelope)
       this.assertWakeAdmission()
       if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
       this.assertWakeAdmission()

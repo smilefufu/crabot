@@ -144,6 +144,63 @@ describe('Manager restart continuation', () => {
     expect(trace.getManagerEpisode(failed.episodeId)?.status).toBe('completed')
   })
 
+  it.each([
+    ['human', false], ['human', true], ['schedule', false], ['schedule', true],
+    ['daily-human', false], ['daily-human', true],
+  ] as const)('persists a new %s wake across repeated recovery failure (restart=%s)', async (kind, restart) => {
+    const write = vi.fn(async () => ({ output: 'saved '.repeat(15000), isError: false }))
+    const tool = defineTool({ name: 'write', description: 'write', inputSchema: {}, isReadOnly: false, call: write })
+    let first = true
+    let failing = true
+    const requests: string[] = []
+    const adapter: LLMAdapter = { updateConfig() {}, async *stream(params) {
+      if (params.tools.length === 0) {
+        if (failing) throw new Error('invalid api key')
+        yield* chunksFromContent([{ type: 'text', text: 'Write completed.' }], 'end_turn')
+      } else if (first) {
+        first = false
+        yield* chunksFromContent([{ type: 'tool_use', id: 'write-once', name: 'write', input: {} }], 'tool_use')
+      } else {
+        requests.push(JSON.stringify(params.messages))
+        yield* chunksFromContent([], 'end_turn')
+      }
+    } }
+    const deps = { toolFace: () => [tool], contextWindowTokens: () => 12000 }
+    const original = registry(adapter, deps)
+    const failed = kind === 'daily-human'
+      ? await original.routeSchedule({ scheduleId: 'daily', triggerId: 'daily-trigger', scheduleName: 'daily',
+          title: 'daily', description: 'Execute once', isBuiltin: true, taskType: 'daily_reflection',
+          targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' } })
+      : await original.routeHumanMessages('feishu', 'restart-test', [message('original', 'Execute once')])
+    const incoming = kind !== 'schedule'
+      ? original.routeHumanMessages('feishu', 'restart-test', [message('new-message', 'PRESERVE_NEW_WAKE')])
+      : original.routeSchedule({ scheduleId: 'new-schedule', triggerId: 'new-trigger', scheduleName: 'new schedule',
+          title: 'new schedule', description: 'PRESERVE_NEW_WAKE',
+          targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' } })
+    await expect(incoming).rejects.toThrow('上下文压缩失败')
+    let checkpoint = await store.loadCheckpoint(KEY)
+    expect(checkpoint?.episodeId).toBe(failed.episodeId)
+    expect(checkpoint?.pending).toHaveLength(1)
+    expect(JSON.stringify(checkpoint?.pending)).toContain('PRESERVE_NEW_WAKE')
+    await expect(original.routeHumanMessages('feishu', 'restart-test', [message('another', 'SECOND_NEW_WAKE')]))
+      .rejects.toThrow('上下文压缩失败')
+    checkpoint = await store.loadCheckpoint(KEY)
+    failing = false
+    if (restart) {
+      const restored = registry(adapter, deps)
+      restored.registerResumeCheckpoints([checkpoint!])
+      await restored.resumeInterruptedEpisodes()
+    } else {
+      await original.routeHumanMessages('feishu', 'restart-test', [message('continue', 'continue')])
+    }
+    await vi.waitFor(() => expect(requests.join('\n')).toContain('PRESERVE_NEW_WAKE'))
+    expect(requests.find(text => text.includes('PRESERVE_NEW_WAKE'))?.match(/PRESERVE_NEW_WAKE/g)).toHaveLength(1)
+    expect(requests.join('\n')).toContain('SECOND_NEW_WAKE')
+    if (kind === 'daily-human') expect(requests[0]).not.toContain('PRESERVE_NEW_WAKE')
+    expect(write).toHaveBeenCalledOnce()
+    expect(await store.loadCheckpoint(KEY)).toBeUndefined()
+  })
+
   it('restores a group with many image references as one image without rewriting durable history', async () => {
     const oldPath = join(dir, 'old.png')
     const latestPath = join(dir, 'latest.png')

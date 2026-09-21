@@ -1015,7 +1015,8 @@ export class ManagerLoop {
       if (recovery) {
         for (const pending of recovery.pending) {
           await this.prepareHumanWake(pending)
-          if (isHumanWake(pending.wake)) this.enqueueHumanWakeDuringActiveEpisode(pending)
+          if (!this.acceptsWakeDuringEpisode(pending.wake)) this.mailbox.push(pending)
+          else if (isHumanWake(pending.wake)) this.enqueueHumanWakeDuringActiveEpisode(pending)
           else this.enqueueDuringEpisode(pending)
         }
       }
@@ -1106,11 +1107,16 @@ export class ManagerLoop {
       if (result.consumedEvents) await this.settleUnclaimedAdminChatWakes()
       this.settleInjectedHooks(result)
       this.contextRecoveryPending = result.contextRecoveryRequired === true
-      if (!result.contextRecoveryRequired) this.deps.store.clearCheckpoint(this.deps.key, episodeId)
+      if (result.contextRecoveryRequired) {
+        this.flushCheckpoint()
+        this.mailbox.drainEnvelopes()
+      } else this.deps.store.clearCheckpoint(this.deps.key, episodeId)
       return result
     } catch (err) {
       if (err instanceof CompactionFailedError) {
         this.contextRecoveryPending = true
+        this.flushCheckpoint()
+        this.mailbox.drainEnvelopes()
         const error = `上下文压缩失败：${err.message}`
         this.deps.traceWriter?.finishEpisode(episodeId, { status: 'failed', outcome: { error, summary: error } })
         const result: EpisodeResult = { episodeId, outcome: 'failed', turns: 0, consumedEvents: false,
