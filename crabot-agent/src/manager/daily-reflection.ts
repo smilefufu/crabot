@@ -14,7 +14,7 @@ import type {
 const finishSchema = z.object({
   outcome: z.enum(['completed', 'partial']), summary: z.string().trim().min(1),
   pending_items: z.array(z.string()),
-  evidence_refs: z.array(z.string()).describe('仅填写本周期目录返回且已用 read_reflection_record 读完的 record_ref；不是 run_id、Memory ID 或 source_id。没有已读引用时填空数组。'),
+  evidence_refs: z.array(z.string()).describe('completed 和 partial 都只填写本周期目录中的 record_ref，且 read_reflection_record 已沿 next_cursor 读至末页、gaps 为空。目录中仅看过摘要的引用、有缺口的引用、run_id、Memory ID 和 source_id 均不能填写。没有符合条件的引用时填 []；缺口及未完成事项写入 pending_items，Memory 核验和建链结果写入 summary。'),
   summary_delivered: z.boolean().optional(),
 }).strict()
 
