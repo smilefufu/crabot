@@ -113,7 +113,9 @@ export function selectWorkerView(workers: readonly LedgerWorker[], board: Manage
     const matches = [...projects].filter(([key, project]) => identity.commonDirectory
       ? key === identityKey(identity)
       : !project.commonDirectory && isWithin(project.directory, identity.directory))
-    if (matches.length > 1 || (matches.length === 0 && incomplete)) { attention.push(worker); continue }
+    const enclosingNonGitProject = identity.commonDirectory && [...projects.values()].some(project =>
+      !project.commonDirectory && isWithin(project.directory, identity.directory))
+    if (matches.length > 1 || (matches.length === 0 && (incomplete || enclosingNonGitProject))) { attention.push(worker); continue }
     if (matches.length === 0) { excludedIdle.push(worker); continue }
     const key = matches[0][0]
     projectByWorker.set(worker.worker_id, key)

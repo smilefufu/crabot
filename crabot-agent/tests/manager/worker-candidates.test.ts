@@ -136,6 +136,33 @@ describe('selectWorkerView', () => {
     expect(filterAndPageWorkers(entries, { include_terminal: true }, views).items).toHaveLength(4)
   })
 
+  it('protects a Git workspace inside a non-Git current project without guessing ownership', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'worker-mixed-projects-'))
+    try {
+      const repository = join(root, 'repository'), unrelated = join(root, 'unrelated')
+      await fs.mkdir(repository)
+      await fs.mkdir(unrelated)
+      execFileSync('git', ['-C', repository, 'init'], { stdio: 'pipe' })
+      const workers = [worker('nested-git', repository, '2026-09-21T00:01:00Z')]
+      const scopeFor = (...roots: string[]): ManagerWorkboard => ({
+        ...board,
+        objectives: [{ ...board.objectives[0], work_items: roots.map((project_root, i) => ({
+          ...board.objectives[0].work_items[0], work_item_id: `i-${i}`, project_root,
+        })) }],
+      })
+      const projects = await resolveWorkerProjects(workers, scopeFor(root, repository, unrelated))
+      expect(projects.get(root)).toEqual({ directory: await fs.realpath(root) })
+      expect(projects.get(repository)?.commonDirectory).toBeTruthy()
+      const ambiguous = selectWorkerView(workers, scopeFor(root), { projects })
+      expect(ambiguous.attention.map(item => item.worker_id)).toEqual(['nested-git'])
+      expect(ambiguous.candidates).toHaveLength(0)
+      expect(ambiguous.excludedIdle).toHaveLength(0)
+      expect(selectWorkerView(workers, scopeFor(root, repository), { projects }).candidates).toHaveLength(1)
+      expect(selectWorkerView(workers, scopeFor(unrelated), { projects }).excludedIdle).toHaveLength(1)
+      expect(selectWorkerView(workers, { ...board, objectives: [] }, { projects }).excludedIdle).toHaveLength(1)
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+
   it('resolves real Git worktrees, symlinks, and subdirectories to one project', async () => {
     const root = await fs.mkdtemp(join(tmpdir(), 'worker-projects-'))
     try {
