@@ -668,12 +668,33 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     await stack.workboard.createObjective(key, { title: '保留目标', completion_criteria: ['验收'] })
     expect(reconcile).not.toHaveBeenCalled()
     await stack.startContinuationReconciliation()
-    expect(reconcile).toHaveBeenCalledWith(key, expect.objectContaining({ objectives: expect.any(Array) }))
+    expect(reconcile).toHaveBeenCalledWith(key, expect.objectContaining({ objectives: expect.any(Array) }), expect.any(Function))
     reconcile.mockClear()
     await rpc('list_workers_admin', {})
     expect(reconcile).not.toHaveBeenCalled()
     await stack.workboard.createObjective(key, { title: '范围变化', completion_criteria: ['验收'] })
     await waitUntil(() => reconcile.mock.calls.length > 0)
+  })
+
+  it('候选探测未完成时仍可读取和修改任务板', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const key: ManagerKey = 'wechat::candidate-unblocked-board'
+    await stack.ledger.upsertWorker(key, 'w-unblocked', () => makeLedgerWorker({ workerId: 'w-unblocked', managerKey: key }))
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const reconcile = vi.spyOn(stack.harness, 'reconcileContinuationCandidates').mockImplementationOnce(() => pending).mockResolvedValue(undefined)
+    const startup = stack.startContinuationReconciliation()
+    await waitUntil(() => reconcile.mock.calls.length === 1)
+    try {
+      const access = stack.workboard.createObjective(key, { title: '探测时更新', completion_criteria: ['验收'] })
+        .then(() => stack.workboard.load(key))
+      const result = await Promise.race([access, new Promise<undefined>(resolve => setTimeout(resolve, 200))])
+      expect(result?.objectives[0].title).toBe('探测时更新')
+    } finally {
+      release()
+      await startup
+    }
   })
 
   it('启动只登记未完成 Manager 检查点，丢弃已完成 episode 的迟到检查点', async () => {

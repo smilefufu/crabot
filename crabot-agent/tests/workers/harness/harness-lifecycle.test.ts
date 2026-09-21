@@ -7,6 +7,7 @@ import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import { NativeActivityStore } from '../../../src/workers/harness/native-activity-store'
 import { WorkerTurnStore } from '../../../src/workers/harness/worker-turn-store'
+import { WorkspaceGitInspector } from '../../../src/workers/harness/workspace-git-inspector'
 import { DailyReflectionEvidence } from '../../../src/manager/daily-reflection-evidence'
 import { ManagerSessionStore } from '../../../src/manager/session-store'
 import type { DailyReflectionState } from '../../../src/manager/daily-reflection-types'
@@ -3279,6 +3280,48 @@ describe('WorkerHarness.sendToWorker', () => {
 })
 
 describe('WorkerHarness.killWorker', () => {
+  it('候选列表不调用可重建 runtime 的原生状态或子 Agent 入口', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'halted')
+    const state = vi.spyOn(fake, 'state')
+    const listSubagents = vi.fn(async () => [])
+    Object.assign(fake, { listSubagents })
+    const board = { manager_key: worker.manager_key, objectives: [], archive: [] }
+    const view = await harness.workerView(await harness.listWorkers(worker.manager_key), board)
+    expect(state).not.toHaveBeenCalled()
+    expect(listSubagents).not.toHaveBeenCalled()
+    expect(view.attention).toHaveLength(1)
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('80 个 Worker 淘汰复核复用项目身份，原生探测保持线性上界', async () => {
+    const { harness, fake } = await makeHarness()
+    const workers = []
+    for (let i = 0; i < 80; i++) {
+      const worker = await harness.spawnWorker(spawnParams())
+      workers.push(worker)
+      fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    }
+    const key = workers[0].manager_key
+    await waitUntil(async () => (await harness.listWorkers(key)).every(worker => worker.task.status === 'halted'))
+    const identity = vi.spyOn(WorkspaceGitInspector.prototype, 'projectIdentity').mockImplementation(async directory => ({ directory, commonDirectory: dataDir }))
+    const state = vi.spyOn(fake, 'state')
+    const board = { manager_key: key, objectives: [{
+      objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: now(), work_items: [{
+        work_item_id: 'project', title: 'project', status: 'in_progress' as const, project_root: dataDir, next_action: 'continue', updated_at: now(),
+      }],
+    }], archive: [] }
+    try {
+      await harness.reconcileContinuationCandidates(key, board)
+      expect(fake.killCalls).toHaveLength(77)
+      expect((await harness.listWorkers(key)).filter(worker => worker.task.status === 'halted')).toHaveLength(3)
+      expect(identity.mock.calls.length).toBeLessThanOrEqual(81)
+      expect(state.mock.calls.length).toBeLessThanOrEqual(500)
+    } finally { identity.mockRestore() }
+  }, 30000)
+
   it('adapter.kill 被调用,台账落 cancelled,化身 exited(killed),事件外发', async () => {
     const opEvents: HarnessEvent[] = []
     const { harness, fake } = await makeHarness({}, {
@@ -3329,6 +3372,44 @@ describe('WorkerHarness.killWorker', () => {
     const worker = await harness.spawnWorker(spawnParams())
     await expect(harness.retireWorkerForContinuation(worker.worker_id, { manager_key: worker.manager_key, objectives: [], archive: [] })).resolves.toBeUndefined()
     expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('项目范围在探测后变化时，不按旧任务板淘汰', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'halted')
+    const board = { manager_key: worker.manager_key, objectives: [], archive: [] }
+    const current = { ...board, objectives: [{ objective_id: 'new', title: '新范围', completion_criteria: ['done'], updated_at: now(), work_items: [] }] }
+    await harness.reconcileContinuationCandidates(worker.manager_key, board, use => use(current))
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('保留候选恢复执行后，旧候选重新取得名额，不按缓存淘汰', async () => {
+    const { harness, fake } = await makeHarness()
+    const workers = []
+    for (let i = 0; i < 4; i++) {
+      const worker = await harness.spawnWorker(spawnParams({ workspace: dataDir }))
+      workers.push(worker)
+      fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+      await waitUntil(async () => (await harness.listWorkers(worker.manager_key)).every(item => item.task.status === 'halted'))
+    }
+    const key = workers[0].manager_key
+    const board = { manager_key: key, objectives: [{
+      objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: now(), work_items: [{
+        work_item_id: 'project', title: 'project', status: 'in_progress' as const, project_root: dataDir, next_action: 'continue', updated_at: now(),
+      }],
+    }], archive: [] }
+    const original = harness.retireWorkerForContinuation.bind(harness)
+    vi.spyOn(harness, 'retireWorkerForContinuation').mockImplementationOnce(async (...args) => {
+      const peer = workers[3]
+      fake.emitStateChange({ worker_id: peer.worker_id, seq: 1, impl: 'builtin', session_ref: peer.incarnations[0].session_ref }, 'running')
+      await waitUntil(async () => (await harness.listWorkers(key)).find(item => item.worker_id === peer.worker_id)?.task.status === 'running')
+      return original(...args)
+    })
+    await harness.reconcileContinuationCandidates(key, board)
+    expect(fake.killCalls).toHaveLength(0)
+    expect((await harness.listWorkers(key)).find(item => item.worker_id === workers[0].worker_id)?.task.status).toBe('halted')
   })
 
   it('候选快照与停止之间发生续办时，过期淘汰被锁内复核拒绝', async () => {

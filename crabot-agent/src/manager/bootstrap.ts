@@ -443,7 +443,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       // 都与"task 状态有没有变"无关,拿它们当对外事件的门,等于把 §9.2 的正确性挂在别的模块
       // 的过滤规则上。对外事件自己的去重按 task.status 做,在 events.ts 里。
       publishTaskStatusChanged?.(event)
-      reconcileContinuationCandidatesForWorker?.(event.worker_id)
+      if (event.kind === 'state_changed' || event.kind === 'lifecycle_changed') {
+        reconcileContinuationCandidatesForWorker?.(event.worker_id)
+      }
 
       if (deps.isClosing?.()) return { consumed: false }
       if (!registry || !shouldWakeOnHarnessEvent(event)) return { consumed: false }
@@ -548,10 +550,14 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     if (candidateRuns.has(key)) return
     const run = Promise.resolve().then(async () => {
       while (pendingCandidateManagers.delete(key) && !candidatesClosing && !deps.isClosing?.()) {
-        await workboardStore.withCurrentBoard(key, board => harness.reconcileContinuationCandidates(key, board))
+        const board = await workboardStore.load(key)
+        await harness.reconcileContinuationCandidates(key, board, use => workboardStore.withCurrentBoard(key, use))
       }
     }).catch(error => console.error(`[manager-bootstrap] candidate reconciliation failed for ${key}:`, error))
-      .finally(() => candidateRuns.delete(key))
+      .finally(() => {
+        candidateRuns.delete(key)
+        if (pendingCandidateManagers.has(key)) scheduleCandidates(key)
+      })
     candidateRuns.set(key, run)
   }
   const workboardStore = new ManagerWorkboardStore(managersDir, deps.now, (key) => {

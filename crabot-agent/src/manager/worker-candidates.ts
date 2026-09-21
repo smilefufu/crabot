@@ -21,6 +21,7 @@ export interface WorkerViewSelection {
   readonly history: LedgerWorker[]
   readonly excludedIdle: LedgerWorker[]
   readonly projectKeys: string[]
+  readonly projectByWorker: ReadonlyMap<string, string>
 }
 
 export function workerViewKinds(view: WorkerViewSelection): Map<string, WorkerViewKind> {
@@ -94,6 +95,7 @@ export function selectWorkerView(workers: readonly LedgerWorker[], board: Manage
   const executing: LedgerWorker[] = [], attention: LedgerWorker[] = [], history: LedgerWorker[] = []
   const excludedIdle: LedgerWorker[] = [], candidates: LedgerWorker[] = []
   const byProject = new Map<string, LedgerWorker[]>()
+  const projectByWorker = new Map<string, string>()
   for (const worker of workers) {
     const execution = facts.execution.get(worker.worker_id) ?? 'unknown'
     if (worker.task.status === 'closed') { history.push(worker); continue }
@@ -114,6 +116,7 @@ export function selectWorkerView(workers: readonly LedgerWorker[], board: Manage
     if (matches.length > 1 || (matches.length === 0 && incomplete)) { attention.push(worker); continue }
     if (matches.length === 0) { excludedIdle.push(worker); continue }
     const key = matches[0][0]
+    projectByWorker.set(worker.worker_id, key)
     const items = byProject.get(key) ?? []
     items.push(worker)
     byProject.set(key, items)
@@ -125,5 +128,5 @@ export function selectWorkerView(workers: readonly LedgerWorker[], board: Manage
   }
   for (const items of [executing, candidates, attention, history]) items.sort(compareUpdated)
   excludedIdle.sort(compareHalted)
-  return { executing, candidates, attention, history, excludedIdle, projectKeys: [...projects.keys()].sort() }
+  return { executing, candidates, attention, history, excludedIdle, projectKeys: [...projects.keys()].sort(), projectByWorker }
 }
