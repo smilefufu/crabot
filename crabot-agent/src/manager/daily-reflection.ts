@@ -229,11 +229,6 @@ export class DailyReflection {
       const record = state.manifest?.records.find(item => item.record_ref === recordRef)
       if (!record) throw new Error('INVALID_REFLECTION_RECORD')
       const offset = this.offset(state, cursor, recordRef)
-      skipUnavailableDetail(record)
-      if (record.skipped) {
-        await this.save(state)
-        return { record_ref: recordRef, content: '', gaps: record.gaps, skipped: record.skipped }
-      }
       state.read_records[recordRef] = false
       let evidence: ReflectionEvidence
       try {
@@ -245,11 +240,8 @@ export class DailyReflection {
         evidence = { content: '', gaps: [error instanceof Error ? error.message : String(error)] }
       }
       record.gaps = [...new Set(evidence.gaps)]
+      delete record.skipped
       skipUnavailableDetail(record)
-      if (record.skipped) {
-        await this.save(state)
-        return { record_ref: recordRef, content: '', gaps: record.gaps, skipped: record.skipped }
-      }
       // Slice at Unicode character boundaries; no replacement characters across pages.
       let bytes = 0
       let content = ''
@@ -263,7 +255,8 @@ export class DailyReflection {
       const nextCursor = next < evidence.content.length ? this.nextCursor(state, next, recordRef) : undefined
       state.read_records[recordRef] = !nextCursor && record.gaps.length === 0
       await this.save(state)
-      return { record_ref: recordRef, content, ...(nextCursor ? { next_cursor: nextCursor } : {}), gaps: record.gaps }
+      return { record_ref: recordRef, content, ...(nextCursor ? { next_cursor: nextCursor } : {}), gaps: record.gaps,
+        ...(record.skipped ? { skipped: record.skipped } : {}) }
     })
   }
 

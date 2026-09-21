@@ -57,8 +57,10 @@ describe('DailyReflection host', () => {
     expect(page.records[0]).toMatchObject({ gaps: record.gaps, skipped: 'source_unavailable' })
     expect(page.progress).toMatchObject({ evidence_gap_count: 0, skipped_record_count: 1, pending_record_count: 0 })
     expect(deps.read).not.toHaveBeenCalled()
+    vi.mocked(deps.read).mockResolvedValue({ content: '[]', gaps: ['manager_trace_unavailable'] })
     const restarted = new DailyReflection(deps)
-    expect(await restarted.read('ref-0')).toEqual({ record_ref: 'ref-0', content: '', gaps: record.gaps, skipped: 'source_unavailable' })
+    expect(await restarted.read('ref-0')).toEqual({ record_ref: 'ref-0', content: '[]',
+      gaps: ['manager_trace_unavailable', 'frozen_evidence_changed'], skipped: 'source_unavailable' })
     expect((await store.load(key)).dailyReflection?.read_records['ref-0']).not.toBe(true)
     expect(await restarted.validateFinish(completion({ evidence_refs: ['ref-0'] }).exitToolCall.input, 1)).toContain('skipped_source_unavailable')
     const result = await restarted.finish(completion())
@@ -79,7 +81,7 @@ describe('DailyReflection host', () => {
     const { host, deps, store, records } = await setup()
     await host.list()
     vi.mocked(deps.read).mockResolvedValueOnce({ content: 'surviving subset', gaps: [gap] })
-    expect(await host.read('ref-0')).toMatchObject({ skipped: 'source_unavailable', content: '', gaps: [gap, 'frozen_evidence_changed'] })
+    expect(await host.read('ref-0')).toMatchObject({ skipped: 'source_unavailable', content: 'surviving subset', gaps: [gap, 'frozen_evidence_changed'] })
     const current = (await store.load(key)).dailyReflection!
     expect(current.manifest!.records[0].digest).toBe(records[0].digest)
     expect(current.read_records['ref-0']).not.toBe(true)
@@ -94,10 +96,41 @@ describe('DailyReflection host', () => {
     vi.mocked(deps.capture).mockResolvedValueOnce({ records: [...records.slice(0, 20), record], gaps: [] })
     const page = await host.list()
     expect(page.progress).toMatchObject({ directory_complete: false, skipped_record_count: 1, evidence_gap_count: 0 })
+    vi.mocked(deps.read).mockResolvedValue({ content: 'surviving events', gaps: [gap] })
     expect(await host.read('ref-20')).toMatchObject({ skipped: 'source_unavailable', gaps: [gap] })
     expect((await host.finish(completion()))?.validation_errors).toContain('directory_not_fully_read')
     await host.list(page.next_cursor)
     expect((await host.finish(completion()))?.outcome).toBe('completed')
+  })
+
+  it('keeps surviving content pageable when some sources were skipped, without making it complete evidence', async () => {
+    const { host, deps, records, store } = await setup()
+    const gap = 'native degraded (served from agent-owned copy): builtin trace source unavailable'
+    vi.mocked(deps.capture).mockResolvedValueOnce({ records: [{ ...records[0], gaps: [gap] }], gaps: [] })
+    const content = 'surviving activity '.repeat(2000)
+    vi.mocked(deps.read).mockResolvedValue({ content, gaps: [gap] })
+    await host.list()
+    let cursor: string | undefined
+    let actual = ''
+    do {
+      const page = await host.read('ref-0', cursor) as { content: string; next_cursor?: string; skipped?: string }
+      expect(page.skipped).toBe('source_unavailable')
+      actual += page.content
+      cursor = page.next_cursor
+    } while (cursor)
+    expect(actual).toBe(content)
+    expect((await store.load(key)).dailyReflection?.read_records['ref-0']).toBe(false)
+    expect(await host.validateFinish(completion({ evidence_refs: ['ref-0'] }).exitToolCall.input, 1)).toContain('skipped_source_unavailable')
+    expect((await host.finish(completion()))?.outcome).toBe('completed')
+  })
+
+  it('rechecks explicitly requested skipped details and restores normal validation when all evidence is available', async () => {
+    const { host, deps, records } = await setup()
+    vi.mocked(deps.capture).mockResolvedValueOnce({ records: [{ ...records[0], gaps: ['manager_trace_unavailable'] }], gaps: [] })
+    expect((await host.list()).progress.skipped_record_count).toBe(1)
+    expect(await host.read('ref-0')).toEqual({ record_ref: 'ref-0', content: 'evidence', gaps: [] })
+    expect(await host.validateFinish(completion({ evidence_refs: ['ref-0'] }).exitToolCall.input, 1)).toBeUndefined()
+    expect((await host.list()).progress.skipped_record_count).toBe(0)
   })
 
   it.each(['frozen_evidence_changed', 'invalid_episode_history', 'EACCES: permission denied',
