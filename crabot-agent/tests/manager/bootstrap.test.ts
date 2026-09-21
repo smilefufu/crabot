@@ -17,6 +17,10 @@ import { join } from 'path'
 import type { PrincipalResolverDeps } from '../../src/manager/principal.js'
 import { buildManagerStack, reconcileManagerStack, type BootstrapDeps } from '../../src/manager/bootstrap.js'
 import { LedgerStore } from '../../src/workers/harness/ledger-store.js'
+import { NativeActivityStore } from '../../src/workers/harness/native-activity-store.js'
+import { InputDeliveryStore } from '../../src/workers/harness/input-delivery-store.js'
+import { QueryReceiptStore } from '../../src/workers/harness/query-receipt-store.js'
+import { WorkerControlOperationStore } from '../../src/workers/harness/worker-control-operation-store.js'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
 import { ClaudeCodeAdapter } from '../../src/workers/claude-code/adapter.js'
 import { CodexWorkerAdapter } from '../../src/workers/codex/adapter.js'
@@ -1242,6 +1246,97 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(requests).toHaveLength(2)
     expect(requests[1].systemPrompt).not.toContain('验证主控上下文生产装配')
     expect(JSON.stringify(requests[1].messages)).not.toContain('验证主控上下文生产装配')
+  })
+
+  it.each(['turn', 'input', 'query', 'control'] as const)('startup %s notification does not block checkpoint recovery or later human input', async (kind) => {
+    const key = 'wechat::sess-boot' as ManagerKey
+    let oldRequestStarted = false
+    const old = buildManagerStack(makeDeps({ managerAdapter: () => ({
+      async *stream() { oldRequestStarted = true; await new Promise(() => {}) },
+      updateConfig() {},
+    }) }))
+    void old.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('original input')], FRIEND_A)
+    await waitUntil(async () => oldRequestStarted && Boolean(await old.store.loadCheckpoint(key)))
+    const checkpoint = (await old.store.loadCheckpoint(key))!
+    old.registry.dispose()
+
+    let reconciled = false
+    const requests: LLMStreamParams[] = []
+    const stack = buildManagerStack(makeDeps({ managerAdapter: () => ({
+      async *stream(params) {
+        expect(reconciled).toBe(true)
+        requests.push(params)
+        yield* chunksFromContent([], 'end_turn')
+      },
+      updateConfig() {},
+    }) }))
+    stack.registry.registerResumeCheckpoints([checkpoint])
+    const worker = makeLedgerWorker({ workerId: 'startup-notification', impl: 'builtin', spawnedBySession: key })
+    worker.task.status = 'halted'
+    worker.incarnations[0].state = 'exited'
+    worker.incarnations[0].ended_reason = 'completed'
+    worker.incarnations[0].incarnation_id = 'startup-incarnation'
+    await stack.ledger.upsertWorker(key, worker.worker_id, () => worker)
+    const workersDir = join(dataRoot, 'agent', 'workers')
+    const now = new Date().toISOString()
+    let pending: () => Promise<boolean>
+    if (kind === 'turn') {
+      const store = new NativeActivityStore(workersDir)
+      await store.record({
+        worker_id: worker.worker_id, manager_key: key, incarnation_id: 'startup-incarnation',
+        impl: 'builtin', seq: 1, activity_from: '0', activity_through: '1', preview: 'startup notification',
+        event: { ts: now, kind: 'turn_completed', worker_id: worker.worker_id, seq: 1,
+          detail: { turn_id: 'startup-turn', summary: 'startup notification' } },
+      })
+      pending = async () => (await store.pending(worker.worker_id)).length > 0
+    } else if (kind === 'input') {
+      const store = new InputDeliveryStore(workersDir)
+      await store.create({ delivery_id: 'startup-input', worker_id: worker.worker_id, manager_key: key,
+        text_preview: 'startup notification', created_at: now, updated_at: now,
+        deadline_at: new Date(Date.now() + 120_000).toISOString(),
+        state: 'pending', manager_notification: { status: 'not_required' } })
+      pending = async () => (await store.list(worker.worker_id))[0].manager_notification.status === 'pending'
+    } else if (kind === 'query') {
+      const store = new QueryReceiptStore(workersDir)
+      await store.create({ query_id: 'startup-query', worker_id: worker.worker_id, manager_key: key,
+        question_preview: 'startup notification', created_at: now, updated_at: now,
+        establishment_deadline_at: new Date(Date.now() + 30_000).toISOString(),
+        state: 'starting', manager_notification: { status: 'not_required' } })
+      pending = async () => (await store.get(worker.worker_id, 'startup-query'))?.manager_notification.status === 'pending'
+    } else {
+      const store = new WorkerControlOperationStore(workersDir)
+      const operation = await store.create({ worker_id: worker.worker_id, manager_key: key,
+        incarnation_id: 'startup-incarnation', impl: 'builtin', seq: 1, kind: 'interrupt', created_at: now })
+      await store.transition(worker.worker_id, operation.operation_id, 'succeeded', now, 'startup notification')
+      pending = async () => (await store.pendingNotifications(worker.worker_id)).length > 0
+    }
+    const route = vi.spyOn(stack.registry, 'routeOperationNotification')
+    let reconciliation: Promise<unknown> | undefined
+    try {
+      reconciliation = reconcileManagerStack(stack).then(() => { reconciled = true })
+      await waitUntil(() => route.mock.calls.length > 0)
+      await waitUntil(() => reconciled, 1000)
+      expect(requests).toHaveLength(0)
+      expect(await pending()).toBe(true)
+      expect((await stack.store.loadCheckpoint(key))?.episodeId).toBe(checkpoint.episodeId)
+
+      await stack.registry.resumeInterruptedEpisodes()
+      await waitUntil(async () => !await pending())
+      expect(requests.length).toBeGreaterThanOrEqual(2)
+      expect(await stack.store.loadCheckpoint(key)).toBeUndefined()
+      expect(JSON.stringify(requests[0].messages)).toContain('original input')
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('later human input')], FRIEND_A)
+      expect(JSON.stringify(requests.at(-1)?.messages)).toContain('later human input')
+      expect(route).toHaveBeenCalledTimes(1)
+    } finally {
+      // Release the real gate even on the pre-fix failure, so no recovery writes escape cleanup.
+      reconciled = true
+      await stack.registry.resumeInterruptedEpisodes()
+      await reconciliation
+      await waitUntil(async () => !await pending())
+      await stack.dispose()
+      await old.dispose()
+    }
   })
 
   it('reconcileManagerStack 对空台账快速返回空三桶，且不探测任何 adapter', async () => {
