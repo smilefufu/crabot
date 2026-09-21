@@ -766,6 +766,60 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(resume).toHaveBeenCalledOnce()
   })
 
+  it('候选淘汰等待对账后才启用，但未完成的 sweep 不阻塞恢复通知和活性巡检', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const key: ManagerKey = 'wechat::candidate-startup'
+    await stack.ledger.upsertWorker(key, 'w-startup', () => makeLedgerWorker({ workerId: 'w-startup', managerKey: key }))
+    let finishReconciliation!: () => void
+    const reconciliationGate = new Promise<void>(resolve => { finishReconciliation = resolve })
+    const reconciliation = vi.spyOn(stack.harness, 'reconcileOnStartup').mockImplementation(async () => {
+      await reconciliationGate
+      return { revived: [], failed: [], unchanged: [] }
+    })
+    let finishCandidates!: () => void
+    const candidateGate = new Promise<void>(resolve => { finishCandidates = resolve })
+    const candidates = vi.spyOn(stack.harness, 'reconcileContinuationCandidates').mockImplementation(() => candidateGate)
+    const startCandidates = vi.spyOn(stack, 'startContinuationReconciliation')
+    const releaseBg = vi.fn().mockResolvedValue(undefined)
+    internals.agentHandler = { releaseRecoveredWorkerEntityExits: releaseBg } as any
+    const notices = vi.spyOn(stack.harness, 'reconcileRecoveryNoticesOnStartup').mockResolvedValue(undefined)
+    const workboardNotices = vi.spyOn(agent as any, 'replayPendingWorkboardNotices').mockResolvedValue(undefined)
+    const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
+
+    agent.startManagerStackReconciliation()
+    try {
+      await waitUntil(() => reconciliation.mock.calls.length === 1)
+      expect(startCandidates).not.toHaveBeenCalled()
+      expect(sweep).not.toHaveBeenCalled()
+      finishReconciliation()
+      await waitUntil(() => candidates.mock.calls.length === 1)
+      expect(releaseBg).toHaveBeenCalledOnce()
+      await waitUntil(() => sweep.mock.calls.length === 1, 1000)
+      expect(notices).toHaveBeenCalledOnce()
+      expect(workboardNotices).toHaveBeenCalledOnce()
+    } finally {
+      finishReconciliation()
+      finishCandidates()
+      await waitUntil(() => sweep.mock.calls.length === 1)
+      await stack.dispose()
+    }
+  })
+
+  it('候选淘汰启动失败只记录错误，不阻塞巡检或形成未处理拒绝', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const failure = new Error('candidate ledger unavailable')
+    vi.spyOn(stack, 'startContinuationReconciliation').mockRejectedValue(failure)
+    const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    agent.startManagerStackReconciliation()
+    await waitUntil(() => sweep.mock.calls.length === 1)
+    await waitUntil(() => error.mock.calls.some(args => String(args[0]).includes('continuation reconciliation failed')))
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('continuation reconciliation failed'), failure)
+  })
+
   it('启动对账收尾在 bg-shell 结算后后台投递恢复提醒，不阻塞活性巡检', async () => {
     boot()
     const stack = internals.managerStack!

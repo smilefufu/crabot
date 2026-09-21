@@ -5499,7 +5499,8 @@ export class UnifiedAgent extends ModuleBase {
           console.error(`[${this.config.moduleId}] Manager startup resume failed:`, error)
         })
         await this.agentHandler?.releaseRecoveredWorkerEntityExits()
-        if (continuationStartupReady) await stack.startContinuationReconciliation().catch(error => {
+        // Candidate sweeps can keep requeuing; recovery and liveness must not wait for convergence.
+        if (continuationStartupReady) void stack.startContinuationReconciliation().catch(error => {
           console.error(`[${this.config.moduleId}] continuation reconciliation failed:`, error)
         })
         // CLI child copy is a terminal artifact: retry only after the startup state reconciliation
