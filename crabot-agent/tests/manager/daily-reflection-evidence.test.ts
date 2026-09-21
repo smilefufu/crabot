@@ -78,6 +78,48 @@ async function importLegacyWorker(f: Awaited<ReturnType<typeof fixture>>, status
 }
 
 describe('daily reflection persisted evidence', () => {
+  it.each(['recovered', 'current_gap', 'changed', 'no_digest', 'no_trace', 'other_gap', 'throw'])(
+    'revalidates stale global legacy diagnostics at the frozen bounds: %s', async scenario => {
+      const f = await fixture()
+      const events = [{ ts: activity, kind: 'lifecycle' as const, source: 'legacy' as const, summary: 'execution' }]
+      const diagnostic = '637 malformed or unreadable legacy trace record(s)'
+      const record: ReflectionRecord = { record_ref: 'legacy-ref', kind: 'worker', source_id: 'worker',
+        activity_at: activity, summary: 'legacy execution', digest: scenario === 'no_digest' ? '' : reflectionDigest(JSON.stringify(events)),
+        gaps: [diagnostic], source: { kind: 'worker', worker_id: 'worker', event_count: 0, turn_ids: [],
+          traces: scenario === 'no_trace' ? [] : [{ seq: 1, incarnation_fingerprint: 'legacy', upper_bound: { native: 0, harness: 0, legacy: 1 } }],
+          gaps: scenario === 'other_gap' ? [diagnostic, 'source unavailable'] : [diagnostic] } }
+      vi.mocked(f.deps.readWorkerTrace).mockResolvedValue({
+        events: scenario === 'changed' ? [{ ...events[0], summary: 'changed' }] : events,
+        ...(scenario === 'current_gap' ? { unavailable_reason: '1 malformed or unreadable legacy trace record(s)' } : {}),
+      })
+      if (scenario === 'throw') vi.mocked(f.deps.readWorkerTrace).mockRejectedValue(new Error('read failed'))
+      const detail = await f.provider.read(record, state)
+      if (scenario === 'recovered' || scenario === 'other_gap' || scenario === 'no_digest') {
+        expect(detail.gaps).toEqual(scenario === 'other_gap' ? ['source unavailable'] : [])
+        if (scenario !== 'no_digest') expect(reflectionDigest(detail.content)).toBe(record.digest)
+      } else {
+        expect(detail.gaps).toContain(diagnostic)
+        if (scenario === 'current_gap') expect(detail.gaps).toContain('1 malformed or unreadable legacy trace record(s)')
+        if (scenario === 'throw') expect(detail.gaps).toContain('read failed')
+      }
+      expect(record.source.kind === 'worker' && record.source.gaps).toContain(diagnostic)
+      if (scenario === 'no_digest') {
+        const key = 'chat::daily' as ManagerKey
+        const host = new DailyReflection({ key, store: f.store, now: () => activity,
+          capture: async () => ({ records: [record], gaps: [] }), read: (item, window) => f.provider.read(item, window),
+          analysisWorkers: vi.fn(), confirm: vi.fn() })
+        await host.admit({ ...window, schedule_id: 'daily', trigger_id: 'trigger',
+          target_session: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' } }, 'daily')
+        await host.list()
+        expect(await host.read(record.record_ref)).toMatchObject({ content: JSON.stringify(events), gaps: [] })
+        const saved = (await f.store.load(key)).dailyReflection!
+        expect(saved.manifest!.records[0].digest).toBe(reflectionDigest(JSON.stringify(events)))
+        expect(saved.manifest!.records[0].source).toEqual(record.source)
+        expect(saved.read_records[record.record_ref]).toBe(true)
+      }
+    },
+  )
+
   it.each(['pre_spawn', 'spawn', 'legacy', 'started', 'session', 'turn', 'other_seq'])('keeps trace requirements grounded in persisted spawn facts: %s', async scenario => {
     const f = await fixture()
     const workerId = 'failed-worker'

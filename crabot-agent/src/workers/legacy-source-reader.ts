@@ -37,9 +37,10 @@ export async function readLegacyTraceEvents(
   traceDir: string,
   traceIds: ReadonlyArray<string>,
 ): Promise<LegacyTraceReadResult> {
+  if (traceIds.length === 0) return { entries: [] }
   let scan: LegacyTraceScanResult
   try {
-    scan = await scanLegacyTraces(traceDir)
+    scan = await scanLegacyTraces(traceDir, new Set(traceIds))
   } catch (error) {
     return { entries: [], unavailable_reason: `legacy trace source unavailable: ${message(error)}` }
   }
@@ -91,7 +92,7 @@ export async function readLegacyTraces(traceDir: string): Promise<Map<string, Le
 }
 
 /** Pure, read-only scan of v2 TraceStore archives with bounded diagnostics. */
-export async function scanLegacyTraces(traceDir: string): Promise<LegacyTraceScanResult> {
+export async function scanLegacyTraces(traceDir: string, selectedTraceIds?: ReadonlySet<string>): Promise<LegacyTraceScanResult> {
   let files: string[]
   try {
     files = await fs.readdir(traceDir)
@@ -115,7 +116,8 @@ export async function scanLegacyTraces(traceDir: string): Promise<LegacyTraceSca
     }
     for (const line of text.split('\n')) {
       if (!line.trim()) continue
-      const trace = parseTrace(line, file)
+      const trace = parseTrace(line, file, selectedTraceIds)
+      if (trace === null) continue
       if (!trace) {
         diagnosticCount++
         continue
@@ -162,7 +164,7 @@ function compareTraceFile(left: string, right: string): number {
   return rank(left) - rank(right) || left.localeCompare(right)
 }
 
-function parseTrace(line: string, file: string): LegacyTrace | undefined {
+function parseTrace(line: string, file: string, selectedTraceIds?: ReadonlySet<string>): LegacyTrace | null | undefined {
   let raw: unknown
   try {
     raw = JSON.parse(line)
@@ -170,6 +172,8 @@ function parseTrace(line: string, file: string): LegacyTrace | undefined {
     console.warn(`[legacy-import] skipping malformed trace line in ${file}`)
     return undefined
   }
+  // Only a valid different ID proves irrelevance; unidentifiable corruption remains a gap.
+  if (selectedTraceIds && isRecord(raw) && validIdentifier(raw.trace_id) && !selectedTraceIds.has(raw.trace_id)) return null
   if (
     !isRecord(raw) ||
     !validIdentifier(raw.trace_id) ||

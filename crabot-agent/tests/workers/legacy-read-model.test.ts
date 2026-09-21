@@ -17,6 +17,40 @@ afterEach(async () => {
 })
 
 describe('legacy trace read model', () => {
+  it('does not attribute valid JSON for other trace IDs to the selected worker', async () => {
+    const directory = await traceDir()
+    await fs.writeFile(join(directory, 'traces-2026-01-01.jsonl'), [
+      JSON.stringify({ trace_id: 'selected', related_task_id: 'old' }),
+      JSON.stringify({ trace_id: 'unassociated' }),
+      JSON.stringify({ trace_id: 'other', related_task_id: 'task-a' }),
+      JSON.stringify({ trace_id: 'other', related_task_id: 'task-b' }),
+    ].join('\n'))
+    const result = await readLegacyTraceEvents(directory, ['selected'])
+    expect(result.entries.map(entry => entry.trace_id)).toEqual(['selected'])
+    expect(result.unavailable_reason).toBeUndefined()
+  })
+
+  it('does not scan unrelated archives when the worker has no imported trace references', async () => {
+    const directory = await traceDir()
+    await fs.writeFile(join(directory, 'traces-2026-01-01.jsonl'), 'broken-json')
+    expect(await readLegacyTraceEvents(directory, [])).toEqual({ entries: [] })
+  })
+
+  it.each(['missing association', 'unknown corruption', 'unreadable file'])(
+    'retains diagnostics that can affect the selected trace: %s', async scenario => {
+      const directory = await traceDir()
+      await fs.writeFile(join(directory, 'traces-2026-01-01.jsonl'), [
+        JSON.stringify({ trace_id: 'selected', related_task_id: 'old' }),
+        ...(scenario === 'missing association' ? [JSON.stringify({ trace_id: 'selected' })]
+          : scenario === 'unknown corruption' ? ['broken-json'] : []),
+      ].join('\n'))
+      if (scenario === 'unreadable file') await fs.mkdir(join(directory, 'traces-2026-01-02.jsonl'))
+      const result = await readLegacyTraceEvents(directory, ['selected'])
+      expect(result.entries.map(entry => entry.trace_id)).toEqual(['selected'])
+      expect(result.unavailable_reason).toBe('1 malformed or unreadable legacy trace record(s)')
+    },
+  )
+
   it('merges selected traces in stable time order and reports missing references without failing detail', async () => {
     const directory = await traceDir()
     await fs.writeFile(join(directory, 'traces-2026-01-01.jsonl'), [

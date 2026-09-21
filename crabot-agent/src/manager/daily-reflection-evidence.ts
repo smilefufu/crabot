@@ -222,6 +222,7 @@ export class DailyReflectionEvidence {
 
   private async readSource(source: ReflectionSource, window: ReflectionWindow, capturedEpisode?: ManagerEpisodeTrace, frozenDigest?: string): Promise<ReflectionEvidence> {
     const gaps: string[] = []
+    const sourceGaps = source.kind === 'worker' ? source.gaps : []
     const values: unknown[] = []
     try {
       if (source.kind === 'manager_episode') {
@@ -242,7 +243,6 @@ export class DailyReflectionEvidence {
           else gaps.push(`human_input_unavailable:${id}`)
         }
       } else {
-        gaps.push(...source.gaps)
         const events = await this.deps.harness.readWorkerEvents(source.worker_id)
         if (events.length < source.event_count) gaps.push('worker_events_truncated')
         values.push(...events.slice(0, source.event_count).filter(event => inWindow(event.ts, window)))
@@ -261,12 +261,18 @@ export class DailyReflectionEvidence {
     const serialize = (items: unknown[]): string => this.deps.redact(JSON.stringify(items, (name, value) =>
       /^(raw_reasoning|reasoning|thinking|authorization|apikey|api_key|access_token)$/i.test(name) ? undefined : value))
     const filtered = source.kind === 'worker' ? values.filter(value => !isLegacyImportEvent(value)) : values
-    const content = serialize(filtered)
+    let content = serialize(filtered)
     // Old manifests hashed migration audit rows too; preserve only an exact, still-redacted snapshot.
     if (frozenDigest && filtered.length !== values.length && reflectionDigest(content) !== frozenDigest) {
       const original = serialize(values)
-      if (reflectionDigest(original) === frozenDigest) return { content: original, gaps }
+      if (reflectionDigest(original) === frozenDigest) content = original
     }
-    return { content, gaps }
+    // Failed captures have no digest; retain the host's existing first-success hashing semantics.
+    const verified = source.kind === 'worker' && source.traces.length > 0 && gaps.length === 0
+      && frozenDigest !== undefined && (!frozenDigest || reflectionDigest(content) === frozenDigest)
+    return { content, gaps: [
+      ...sourceGaps.filter(gap => !verified || !/^\d+ malformed or unreadable legacy trace record\(s\)$/.test(gap)),
+      ...gaps,
+    ] }
   }
 }
