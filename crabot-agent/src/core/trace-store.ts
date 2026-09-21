@@ -21,6 +21,7 @@ import {
 } from '../manager/trace-types.js'
 import { truncatePreview } from '../manager/inbound-status.js'
 import type { ManagerKey } from '../workers/harness/ledger-types.js'
+import { isWorkerRuntimeEvent } from '../workers/builtin/runtime-observation.js'
 
 export interface SpanWithMeta {
   span_id: string
@@ -377,6 +378,34 @@ export class TraceStore {
    * 把这些 trace 标记为 failed（interrupted），写入日期文件，然后清空 running 文件。
    */
   private appendInterruptedToolResults(trace: AgentTrace, endedAt: string): void {
+    const requests = new Map<string, import('../workers/types.js').WorkerRuntimeEvent>()
+    for (const span of trace.spans) {
+      const detail = span.details
+      if (!isWorkerRuntimeEvent(detail) || !detail.runtime.request) continue
+      const id = detail.runtime.request.request_id
+      if (detail.event === 'request_started') requests.set(id, detail)
+      if (['request_completed', 'request_failed', 'interrupted'].includes(detail.event)) requests.delete(id)
+    }
+    for (const detail of requests.values()) {
+      trace.spans.push({ span_id: crypto.randomUUID(), trace_id: trace.trace_id, type: 'decision',
+        started_at: endedAt, ended_at: endedAt, duration_ms: 0, status: 'completed',
+        details: { ...detail, event: 'interrupted', runtime: {
+          ...detail.runtime, as_of: endedAt, last_observed_at: endedAt, phase: 'ended', phase_started_at: endedAt,
+          request: { ...detail.runtime.request!, ended_at: endedAt }, pending_inputs: undefined,
+          error: '[interrupted: agent restarted]',
+        } },
+      })
+    }
+    const latest = [...trace.spans].reverse().find(span => isWorkerRuntimeEvent(span.details))?.details
+    if (isWorkerRuntimeEvent(latest) && !['idle', 'ended'].includes(latest.runtime.phase)) {
+      trace.spans.push({ span_id: crypto.randomUUID(), trace_id: trace.trace_id, type: 'decision',
+        started_at: endedAt, ended_at: endedAt, duration_ms: 0, status: 'completed',
+        details: { ...latest, event: 'ended', runtime: { ...latest.runtime, phase: 'ended', as_of: endedAt,
+          last_observed_at: endedAt, phase_started_at: endedAt, retry: undefined, tools: [],
+          pending_inputs: undefined, error: '[interrupted: agent restarted]',
+        } },
+      })
+    }
     const resultCallIds = new Set(trace.spans.flatMap((span) => {
       if (span.type !== 'tool_result') return []
       const callId = (span.details as Record<string, unknown>).call_id

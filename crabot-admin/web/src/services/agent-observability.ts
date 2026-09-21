@@ -194,8 +194,43 @@ export interface WorkerTraceEvent {
 }
 
 export interface WorkerTraceResult {
+  runtime?: WorkerRuntimeSnapshot
   events: WorkerTraceEvent[]
   next_cursor?: string
+  unavailable_reason?: string
+}
+
+export interface WorkerRuntimeRequest {
+  request_id: string
+  call_id: string
+  attempt: number
+  purpose: 'inference' | 'compaction'
+  model_id: string
+  provider_id?: string
+  started_at: string
+  first_response_at?: string
+  ended_at?: string
+}
+export interface WorkerRuntimeRetry {
+  request_id: string
+  call_id: string
+  retry_mode: 'bounded_retry' | 'connection_recovery'
+  started_at: string
+  delay_ms: number
+  max_attempts?: number
+  error: string
+}
+export interface WorkerRuntimeSnapshot {
+  incarnation_id: string
+  as_of: string
+  last_observed_at?: string
+  phase: 'preparing' | 'llm_request' | 'retry_wait' | 'tools' | 'compacting' | 'idle' | 'ended' | 'unknown'
+  phase_started_at?: string
+  request?: WorkerRuntimeRequest
+  retry?: WorkerRuntimeRetry
+  tools?: Array<{ call_id: string; name: string; started_at: string }>
+  pending_inputs?: { normal: number; priority: number }
+  error?: string
   unavailable_reason?: string
 }
 

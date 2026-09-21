@@ -221,6 +221,28 @@ describe('daily reflection persisted evidence', () => {
     expect((await f.provider.read(first, state)).content).toContain('这个结果错了')
   })
 
+  it('runtime retry diagnostics remain in trace evidence without crowding out real error summaries', async () => {
+    const f = await fixture()
+    f.workers.push({ worker_id: 'worker', manager_key: 'chat::one', origin: {}, updated_at: activity,
+      task: { title: 'worker task' }, incarnations: [{ seq: 1, incarnation_id: 'inc', impl: 'builtin',
+        state: 'running', session_ref: 'session', started_at: activity }] })
+    const events = [{ ts: activity, kind: 'error' as const, summary: 'real tool failure' },
+      ...Array.from({ length: 4 }, (_, attempt) => ({ ts: activity, kind: 'error' as const,
+        summary: `transient retry ${attempt}`, detail: { kind: 'worker_runtime', version: 1, event: 'request_failed',
+          runtime: { incarnation_id: 'inc', as_of: activity, phase: 'preparing' } },
+      }))]
+    vi.mocked(f.deps.captureWorkerTrace).mockResolvedValue({
+      source: { seq: 1, incarnation_fingerprint: 'fingerprint', upper_bound: { native: 5, harness: 0, legacy: 0 } },
+      result: { events },
+    })
+    vi.mocked(f.deps.readWorkerTrace).mockResolvedValue({ events })
+    const manifest = await f.provider.capture(state)
+    expect(manifest.records).toHaveLength(1)
+    expect(manifest.records[0].summary).toContain('error: real tool failure')
+    expect(manifest.records[0].summary).not.toContain('transient retry')
+    expect((await f.provider.read(manifest.records[0], state)).content).toContain('transient retry 3')
+  })
+
   it('excludes a completed historical task whose only current activity is the real v2 migration', async () => {
     const f = await fixture()
     const worker = await importLegacyWorker(f)

@@ -59,6 +59,7 @@ function appendLlmResponseIfMissing(
       ...(event.forcedSummaryAttempt !== undefined ? { forced_summary_attempt: event.forcedSummaryAttempt } : {}),
       ...(event.usage ? { usage: llmUsageToTrace(event.usage) } : {}),
       ...(event.diagnostics ? {
+        ...(event.diagnostics.request ? { request_id: event.diagnostics.request.requestId, call_id: event.diagnostics.request.callId } : {}),
         stream_retries: event.diagnostics.retries,
         ...(event.diagnostics.firstChunkMs !== undefined ? { first_chunk_ms: event.diagnostics.firstChunkMs } : {}),
         chunk_count: event.diagnostics.chunkCount,

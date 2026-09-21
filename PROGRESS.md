@@ -24,6 +24,12 @@
 
 ## 当前状态
 
+### builtin Worker 请求边界投递与运行观测：已验证，待 PR 审查
+
+- 按 9 月 21 日确认 [spec](crabot-docs/superpowers/specs/2026-09-21-worker-request-boundary-and-runtime-observation-design.md)，每次实际主推理请求前消费所属队列，覆盖内部重试；首次发送前保护新增输入原文并检查容量，不重跑工具，不更改 receipt、重试策略或 Manager 唤醒。
+- 后台显示请求/首包/等待/工具/压缩、尝试次数、待注入输入及最终错误；追加式历史保持 cursor 可见，重启收口未完成请求。页面每 5 秒刷新，保留历史页与选择，失败标明过期。
+- Engine 660 项、适配器 66 项、Worker/Harness/trace 定向回归及 Web 23 项通过；Agent/Admin/Web 构建和桌面/390px 浏览器检查通过。扩展测试的旧重试假时钟及受限进程时间测试问题已对照基线复现，未宣称全量绿。未部署、未操作生产 Worker。
+
 ### Manager 活动显示真实性修复：已验证，待部署
 
 - 未结束回合直接展示已记录的未结束步骤、最后执行记录及各自时间；未知步骤不推断为正在执行，运行中的 Worker 触发回合不再折叠进已结束父回合。

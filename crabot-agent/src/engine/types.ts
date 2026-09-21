@@ -294,6 +294,12 @@ export type EngineToolLifecycleEvent =
 
 /** 内部请求事实；与成功响应/工具生命周期分开，不进入 Provider payload。 */
 export interface LLMRequestEvent {
+  readonly phase?: 'first_response' | 'retry_wait'
+  readonly error?: string
+  readonly retryMode?: 'bounded_retry' | 'connection_recovery'
+  readonly delayMs?: number
+  readonly maxAttempts?: number
+  readonly observedAtMs?: number
   readonly requestId: string
   readonly callId: string
   readonly attempt: number
@@ -385,6 +391,7 @@ export type EndTurnGateResult =
   | null
 
 export interface EngineOptions {
+  readonly onRequestLifecycle?: (event: LLMRequestEvent, purpose: 'inference' | 'compaction') => void
   readonly unavailableToolResult?: ToolCallContext['unavailableToolResult']
   readonly systemPrompt: Resolvable<string>
   readonly tools: Resolvable<ReadonlyArray<ToolDefinition>>
@@ -407,13 +414,13 @@ export interface EngineOptions {
   /**
    * turn 边界外部输入源（spec 2026-08-29-worker-input-turn-boundary-delivery）。
    *
-   * 每轮「工具执行完成后、下一轮 LLM 调用前」调用一次，返回待注入的外部输入文本；
+   * 每次实际主模型请求发送前调用（包含内部重试），返回待注入的外部输入文本；
    * 取出即从源队列移除（由 caller 负责其 FIFO / 优先级 / receipt 结算）。返回的每条
    * 文本作为 user message 注入当前 burst（worker inbox 的 manager 投递由此在 turn
    * 边界可见，不再等 burst 结束）。
    *
-   * 仅在仍有剩余 turn 时调用（最后一轮注入无人消费）；回调抛错时 engine 跳过本轮
-   * 注入（输入保留在源队列，下一轮重试），不影响 burst。不传时行为与现状一致。
+   * 只在准备发出请求时消费；准备错误不进入 Provider 重试。未发送的新输入参与容量
+   * 检查且受原文保护。不传时不增加请求准备步骤。
    */
   readonly drainExternalInputs?: () => ReadonlyArray<string> | Promise<ReadonlyArray<string>>
   /**
