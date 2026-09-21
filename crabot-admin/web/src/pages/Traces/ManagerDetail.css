@@ -1,5 +1,8 @@
 .manager-detail {
   max-width: 1180px;
+  min-width: 0;
+  width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .manager-detail__heading {
@@ -67,6 +70,8 @@
   font-size: 12px;
   justify-content: space-between;
   margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .manager-detail__stream-heading strong {
@@ -78,14 +83,7 @@
   align-items: center;
   display: inline-flex;
   gap: 6px;
-}
-
-.manager-detail__live-state > span {
-  background: var(--success);
-  border-radius: 50%;
-  box-shadow: 0 0 0 3px var(--success-glow);
-  height: 6px;
-  width: 6px;
+  flex-wrap: wrap;
 }
 
 .manager-detail__live-state.is-unknown,
@@ -176,6 +174,40 @@
   font-weight: 600;
   justify-content: space-between;
   min-height: 20px;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.manager-detail__event-header > .manager-detail__technical-details:has(.manager-detail__technical-body) {
+  flex-basis: 100%;
+}
+
+.manager-detail__execution {
+  border-left: 2px solid var(--warning);
+  color: var(--text-secondary);
+  display: grid;
+  font-size: 12px;
+  gap: 6px;
+  line-height: 1.6;
+  margin-top: 10px;
+  padding-left: 10px;
+}
+
+.manager-detail__execution strong {
+  color: var(--warning);
+  font-weight: 500;
+}
+
+.manager-detail__execution > div:first-child,
+.manager-detail__execution-time {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.manager-detail__execution-time {
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 .manager-detail__event-labels {

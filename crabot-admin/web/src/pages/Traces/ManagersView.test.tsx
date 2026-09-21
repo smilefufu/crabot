@@ -186,7 +186,7 @@ describe('ManagerDetail', () => {
     expect(screen.getAllByText('帮我排查消息链路')).toHaveLength(1)
     expect(screen.queryByText('你：「帮我排查消息链路」')).toBeNull()
     expect(Array.from(document.querySelectorAll('.manager-detail__event-status')).map((node) => node.textContent))
-      .toEqual(['排队中', '排队中', '正在处理'])
+      .toEqual(['排队中', '排队中', '回合未结束'])
     expect(screen.getByText('已处理')).toBeInTheDocument()
     expect(screen.getByText('会话动态')).toBeInTheDocument()
   })
@@ -215,7 +215,7 @@ describe('ManagerDetail', () => {
       <Route path="/traces/managers/:managerKey" element={<ManagerDetail />} />
     </Routes></MemoryRouter>)
 
-    await waitFor(() => expect(screen.getByText('本轮已回复，继续处理')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('本轮已回复，回合未结束')).toBeInTheDocument())
     expect(screen.getAllByText('已经回复，接着交接测试工作。', { exact: false })).toHaveLength(1)
     expect(screen.getAllByText('接手测试')).toHaveLength(1)
     expect(document.querySelectorAll('article.manager-detail__event')).toHaveLength(2)
@@ -248,7 +248,7 @@ describe('ManagerDetail', () => {
     await waitFor(() => expect(screen.getByText('你：「真实已处理消息」')).toBeInTheDocument())
     expect(screen.queryByText('不应出现的过时快照')).toBeNull()
     expect(document.querySelectorAll('article.manager-detail__event')).toHaveLength(1)
-    expect(screen.getByText('正在处理').parentElement).toHaveTextContent('正在处理0 条')
+    expect(screen.getByText('回合内消息').parentElement).toHaveTextContent('回合内消息0 条')
   })
 
   it('在途快照失败时保留历史，并明确显示状态暂不可用', async () => {
