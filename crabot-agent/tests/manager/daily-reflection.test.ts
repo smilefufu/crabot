@@ -48,6 +48,81 @@ async function ready(host: DailyReflection) {
 }
 
 describe('DailyReflection host', () => {
+  it('counts missing frozen details as handled without inventing read evidence, including after restart', async () => {
+    const { host, deps, records, store } = await setup()
+    const record = { ...records[0], gaps: ['manager_trace_unavailable'] }
+    vi.mocked(deps.capture).mockResolvedValueOnce({ records: [record], gaps: [] })
+    await store.updateDailyReflection(key, state => ({ ...state!, read_records: { 'ref-0': false } }))
+    const page = await host.list()
+    expect(page.records[0]).toMatchObject({ gaps: record.gaps, skipped: 'source_unavailable' })
+    expect(page.progress).toMatchObject({ evidence_gap_count: 0, skipped_record_count: 1, pending_record_count: 0 })
+    expect(deps.read).not.toHaveBeenCalled()
+    const restarted = new DailyReflection(deps)
+    expect(await restarted.read('ref-0')).toEqual({ record_ref: 'ref-0', content: '', gaps: record.gaps, skipped: 'source_unavailable' })
+    expect((await store.load(key)).dailyReflection?.read_records['ref-0']).not.toBe(true)
+    expect(await restarted.validateFinish(completion({ evidence_refs: ['ref-0'] }).exitToolCall.input, 1)).toContain('skipped_source_unavailable')
+    const result = await restarted.finish(completion())
+    expect(result?.outcome).toBe('completed')
+    expect(result?.validation_errors).toEqual([])
+    expect(deps.confirm).toHaveBeenCalledWith(expect.objectContaining({ window_start: admission.window_start, window_end: admission.window_end }))
+  })
+
+  it.each([
+    'manager_trace_unavailable', 'manager_history_unavailable', 'manager_span_unavailable:span',
+    'human_input_unavailable:message', 'worker_turn_unavailable:turn', 'worker_events_truncated',
+    'episode_history_truncated', 'ENOENT: no such file or directory, open /old/episode.jsonl',
+    'native unavailable: Codex native rollout is unavailable',
+    'native degraded (served from agent-owned copy): builtin trace source unavailable',
+    'native unavailable: CodexWorkerAdapter.readTrace: no such incarnation w-old#1 resident in this process',
+    '2 legacy trace reference(s) unavailable',
+  ])('handles a missing detail discovered on read while retaining its frozen digest: %s', async gap => {
+    const { host, deps, store, records } = await setup()
+    await host.list()
+    vi.mocked(deps.read).mockResolvedValueOnce({ content: 'surviving subset', gaps: [gap] })
+    expect(await host.read('ref-0')).toMatchObject({ skipped: 'source_unavailable', content: '', gaps: [gap, 'frozen_evidence_changed'] })
+    const current = (await store.load(key)).dailyReflection!
+    expect(current.manifest!.records[0].digest).toBe(records[0].digest)
+    expect(current.read_records['ref-0']).not.toBe(true)
+    expect((await host.finish(completion()))?.outcome).toBe('completed')
+  })
+
+  it('handles a historical capture whose frozen trace bound is absent without treating a fresh read error as absence', async () => {
+    const { host, deps, records } = await setup(21)
+    const gap = 'worker_trace_unavailable:old-worker:1'
+    const record: ReflectionRecord = { ...records[20], kind: 'worker', gaps: [gap], digest: '',
+      source: { kind: 'worker', worker_id: 'old-worker', traces: [], turn_ids: [], event_count: 5, gaps: [gap] } }
+    vi.mocked(deps.capture).mockResolvedValueOnce({ records: [...records.slice(0, 20), record], gaps: [] })
+    const page = await host.list()
+    expect(page.progress).toMatchObject({ directory_complete: false, skipped_record_count: 1, evidence_gap_count: 0 })
+    expect(await host.read('ref-20')).toMatchObject({ skipped: 'source_unavailable', gaps: [gap] })
+    expect((await host.finish(completion()))?.validation_errors).toContain('directory_not_fully_read')
+    await host.list(page.next_cursor)
+    expect((await host.finish(completion()))?.outcome).toBe('completed')
+  })
+
+  it.each(['frozen_evidence_changed', 'invalid_episode_history', 'EACCES: permission denied',
+    'native unavailable: EIO: read failed', '637 malformed or unreadable legacy trace record(s)',
+    'worker_trace_unavailable:old-worker:1'])('does not skip unproven source failures: %s', async gap => {
+    const { host, deps } = await setup()
+    await host.list()
+    vi.mocked(deps.read).mockResolvedValueOnce({ content: 'evidence', gaps: [gap] })
+    expect(await host.read('ref-0')).not.toHaveProperty('skipped')
+    expect((await host.finish(completion()))?.outcome).toBe('partial')
+    expect(deps.confirm).not.toHaveBeenCalled()
+  })
+
+  it('keeps directory and other read failures blocking even when a missing record was skipped', async () => {
+    const { host, deps } = await setup(21)
+    await host.list()
+    vi.mocked(deps.read).mockResolvedValueOnce({ content: '', gaps: ['manager_trace_unavailable'] })
+    await host.read('ref-0')
+    vi.mocked(deps.read).mockResolvedValueOnce({ content: '', gaps: ['manager_trace_unavailable', 'EACCES: permission denied'] })
+    expect(await host.read('ref-1')).not.toHaveProperty('skipped')
+    const result = await host.finish(completion())
+    expect(result?.validation_errors).toEqual(expect.arrayContaining(['directory_not_fully_read', 'known_evidence_gaps', 'record_not_fully_read']))
+    expect(deps.confirm).not.toHaveBeenCalled()
+  })
+
   it.each(['execution', 'mismatch', 'gap', 'read_failure', 'no_digest', 'trace', 'turn'])(
     'does not label an unproven frozen worker as migration-only: %s', async scenario => {
       const original = JSON.stringify([{ kind: 'legacy_imported', ts: admission.window_start }])
@@ -245,7 +320,7 @@ describe('DailyReflection host', () => {
     expect(rediscovered.window_end).toBe(admission.window_end)
     expect(rediscovered.records[0].record_ref).toBe('ref-0')
     expect(rediscovered.progress).toEqual({ directory_total: 45, directory_read: 40, directory_complete: false,
-      resume_cursor: first.next_cursor, pending_record_count: 0, pending_records: [], evidence_gap_count: 0 })
+      resume_cursor: first.next_cursor, pending_record_count: 0, pending_records: [], evidence_gap_count: 0, skipped_record_count: 0 })
     expect((await restarted.list(rediscovered.next_cursor) as any).records[0].record_ref).toBe('ref-20')
     expect((await restarted.finish(completion()))?.validation_errors).toContain('directory_not_fully_read')
     const replayed = await restarted.list(rediscovered.progress.resume_cursor)

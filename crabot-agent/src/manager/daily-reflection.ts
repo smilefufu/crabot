@@ -24,10 +24,27 @@ function invalidEvidenceRefs(state: DailyReflectionState, refs: string[]): Array
   return refs.flatMap(record_ref => {
     const record = records.get(record_ref)
     const reason = !record ? 'not_in_current_directory'
+      : record.skipped ? 'skipped_source_unavailable'
       : record.gaps.length || state.read_records[record_ref] === false ? 'incomplete_or_gapped'
         : state.read_records[record_ref] !== true ? 'not_read' : undefined
     return reason ? [{ record_ref, reason }] : []
   })
+}
+
+function skipUnavailableDetail(record: ReflectionRecord): void {
+  const source = record.source
+  const missing = record.gaps.filter(gap => gap !== 'frozen_evidence_changed')
+  if (missing.length && missing.every(gap =>
+    ['manager_trace_unavailable', 'manager_history_unavailable', 'episode_history_truncated', 'worker_events_truncated'].includes(gap)
+    || /^(manager_span_unavailable|human_input_unavailable|worker_turn_unavailable):[^\n]+$/.test(gap)
+    || /^ENOENT: no such file or directory, /.test(gap)
+    || /^\d+ legacy trace reference\(s\) unavailable$/.test(gap)
+    // A failed old capture with no trace bound cannot reproduce its original detail window.
+    || (source.kind === 'worker' && source.traces.length === 0 && source.gaps.includes(gap)
+      && gap.startsWith(`worker_trace_unavailable:${source.worker_id}:`))
+    || /^native (?:unavailable|degraded \(served from agent-owned copy(?: \+ harness persisted activity)?\)): (?:Claude Code native session is unavailable|Codex native rollout is unavailable|builtin trace source unavailable|(?:CodexWorkerAdapter|ClaudeCodeAdapter)\.readTrace: no such incarnation [\w-]+#\d+ resident in this process)$/.test(gap))) {
+    record.skipped = 'source_unavailable'
+  }
 }
 
 export interface DailyReflectionDeps {
@@ -152,14 +169,16 @@ export class DailyReflection {
     const resumeOffset = state.directory_complete ? directoryRead : directoryRead - 20
     const resumeCursor = Object.entries(state.cursors).find(([, position]) =>
       position.record_ref === undefined && position.offset === resumeOffset)?.[0]
-    const pending = Object.entries(state.read_records).filter(([, complete]) => !complete)
+    const skipped = new Set(records.filter(record => record.skipped).map(record => record.record_ref))
+    const pending = Object.entries(state.read_records).filter(([ref, complete]) => !complete && !skipped.has(ref))
     return { directory_total: records.length,
       directory_read: state.directory_complete ? records.length : directoryRead,
       directory_complete: state.directory_complete,
       ...(resumeCursor ? { resume_cursor: resumeCursor } : {}),
       pending_record_count: pending.length,
       pending_records: pending.slice(0, 20).map(([record_ref]) => ({ record_ref })),
-      evidence_gap_count: records.filter(record => record.gaps.length > 0).length }
+      evidence_gap_count: records.filter(record => record.gaps.length > 0 && !record.skipped).length,
+      skipped_record_count: skipped.size }
   }
 
   async list(cursor?: string): Promise<ListReflectionRecordsOutput> {
@@ -171,6 +190,7 @@ export class DailyReflection {
         if (manifest.gaps.length) throw new Error(`REFLECTION_INVENTORY_UNAVAILABLE: ${manifest.gaps.join(', ')}`)
         state.manifest = manifest
       }
+      for (const record of state.manifest.records) skipUnavailableDetail(record)
       const records = state.manifest.records.slice(offset, offset + 20)
       const summaries = await Promise.all(records.map(record => this.recordSummary(record, state)))
       const next = offset + records.length
@@ -187,6 +207,7 @@ export class DailyReflection {
 
   private async recordSummary(record: ReflectionRecord, state: DailyReflectionState): Promise<ReflectionRecordSummary> {
     const { source, digest, ...summary } = record
+    if (record.skipped) return summary
     if (source.kind !== 'worker' || source.traces.length || source.turn_ids.length || !source.event_count || !digest) return summary
     try {
       const evidence = await this.deps.read(record, state)
@@ -208,6 +229,11 @@ export class DailyReflection {
       const record = state.manifest?.records.find(item => item.record_ref === recordRef)
       if (!record) throw new Error('INVALID_REFLECTION_RECORD')
       const offset = this.offset(state, cursor, recordRef)
+      skipUnavailableDetail(record)
+      if (record.skipped) {
+        await this.save(state)
+        return { record_ref: recordRef, content: '', gaps: record.gaps, skipped: record.skipped }
+      }
       state.read_records[recordRef] = false
       let evidence: ReflectionEvidence
       try {
@@ -219,6 +245,11 @@ export class DailyReflection {
         evidence = { content: '', gaps: [error instanceof Error ? error.message : String(error)] }
       }
       record.gaps = [...new Set(evidence.gaps)]
+      skipUnavailableDetail(record)
+      if (record.skipped) {
+        await this.save(state)
+        return { record_ref: recordRef, content: '', gaps: record.gaps, skipped: record.skipped }
+      }
       // Slice at Unicode character boundaries; no replacement characters across pages.
       let bytes = 0
       let content = ''
@@ -279,8 +310,9 @@ export class DailyReflection {
       const lastAssistant = [...params.messages].reverse().find(message => message.role === 'assistant')
       if (lastAssistant?.role !== 'assistant' || lastAssistant.content.filter(block => block.type === 'tool_use').length !== 1) errors.push('finish_must_be_called_alone')
       if (!state.directory_complete) errors.push('directory_not_fully_read')
-      if (state.manifest?.gaps.length || state.manifest?.records.some(record => record.gaps.length)) errors.push('known_evidence_gaps')
-      if (Object.values(state.read_records).some(read => !read)) errors.push('record_not_fully_read')
+      if (state.manifest?.gaps.length || state.manifest?.records.some(record => record.gaps.length && !record.skipped)) errors.push('known_evidence_gaps')
+      const skipped = new Set(state.manifest?.records.filter(record => record.skipped).map(record => record.record_ref))
+      if (Object.entries(state.read_records).some(([ref, read]) => !read && !skipped.has(ref))) errors.push('record_not_fully_read')
       if (invalidEvidenceRefs(state, input.evidence_refs).length) errors.push('unread_evidence_reference')
       if (workers.some(worker => worker.pending)) errors.push('analysis_worker_pending')
       if (input.summary_delivered && !state.summary_delivered) errors.push('summary_delivery_unproven')
