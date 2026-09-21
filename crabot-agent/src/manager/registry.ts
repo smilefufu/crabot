@@ -29,6 +29,7 @@
  */
 
 import { ManagerLoop, type WakeEvent, type TimedWakeEnvelope, type EpisodeResult, type ManagerLoopDeps } from './loop.js'
+import { CompactionFailedError } from '../engine/context-manager.js'
 import type { ManagerSessionStore } from './session-store.js'
 import type { CompactionPolicy } from './compaction.js'
 import type { ManagerKey } from './types.js'
@@ -300,7 +301,7 @@ export class ManagerRegistry {
         } else envelopes.push(item)
       }
       const result = await this.runWake(key, envelopes[checkpoint.wakeIndex], 0, undefined, undefined, { ...checkpoint, envelopes })
-      if (result.contextRecoveryRequired) throw new Error(result.error)
+      if (result.contextRecoveryRequired) throw new CompactionFailedError(result.error ?? '上下文压缩失败')
     }).finally(() => { this.resumeTasks.delete(key) })
     this.resumeTasks.set(key, task)
     return task
@@ -310,14 +311,21 @@ export class ManagerRegistry {
     try {
       await this.ensureResumed(key)
     } catch (error) {
-      const checkpoint = this.pendingResumes.get(key)
-      if (checkpoint && envelope) {
+      return this.retainWakeAfterRecoveryFailure(key, envelope, error)
+    }
+  }
+
+  private async retainWakeAfterRecoveryFailure(key: ManagerKey, envelope: TimedWakeEnvelope | undefined, error: unknown): Promise<never> {
+    if (error instanceof CompactionFailedError && envelope) {
+      const persisted = this.pendingResumes.get(key) ?? await this.deps.store.loadCheckpoint(key)
+      const checkpoint = this.pendingResumes.get(key) ?? persisted
+      if (checkpoint) {
         const retained = { ...checkpoint, pending: [...checkpoint.pending, envelope] }
         this.deps.store.saveCheckpoint(retained)
         this.pendingResumes.set(key, retained)
       }
-      throw error
     }
+    throw error
   }
 
   private async refreshResumeEnvelope(key: ManagerKey, envelope: TimedWakeEnvelope): Promise<TimedWakeEnvelope> {
@@ -789,7 +797,7 @@ export class ManagerRegistry {
           if (checkpoint) this.pendingResumes.set(key, checkpoint)
         }
         return value
-      }).finally(() => {
+      }).catch(error => this.retainWakeAfterRecoveryFailure(key, admittedEnvelope, error)).finally(() => {
         const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
         if (remaining <= 0) this.activeEpisodes.delete(key)
         else this.activeEpisodes.set(key, remaining)
@@ -1031,6 +1039,9 @@ export class ManagerRegistry {
         if (checkpoint) this.pendingResumes.set(key, checkpoint)
       }
       return result
+    } catch (error) {
+      if (!recovery) return await this.retainWakeAfterRecoveryFailure(key, envelope, error)
+      throw error
     } finally {
       const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
       if (remaining <= 0) this.activeEpisodes.delete(key)

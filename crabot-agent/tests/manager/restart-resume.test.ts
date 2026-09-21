@@ -148,6 +148,7 @@ describe('Manager restart continuation', () => {
     ['human', false], ['human', true], ['schedule', false], ['schedule', true],
     ['daily-human', false], ['daily-human', true],
     ['concurrent-schedule', true],
+    ['queued-schedule', true],
   ] as const)('persists a new %s wake across repeated recovery failure (restart=%s)', async (kind, restart) => {
     const write = vi.fn(async () => ({ output: 'saved '.repeat(15000), isError: false }))
     const tool = defineTool({ name: 'write', description: 'write', inputSchema: {}, isReadOnly: false, call: write })
@@ -161,6 +162,7 @@ describe('Manager restart continuation', () => {
       if (params.tools.length === 0) {
         if (failing) {
           if (++failedSummaries === 2 && kind === 'concurrent-schedule') await resumeGate
+          if (failedSummaries === 1 && kind === 'queued-schedule') await resumeGate
           throw new Error('invalid api key')
         }
         yield* chunksFromContent([{ type: 'text', text: 'Write completed.' }], 'end_turn')
@@ -174,11 +176,22 @@ describe('Manager restart continuation', () => {
     } }
     const deps = { toolFace: () => [tool], contextWindowTokens: () => 12000 }
     const original = registry(adapter, deps)
-    const failed = kind === 'daily-human'
-      ? await original.routeSchedule({ scheduleId: 'daily', triggerId: 'daily-trigger', scheduleName: 'daily',
+    const initial = kind === 'daily-human'
+      ? original.routeSchedule({ scheduleId: 'daily', triggerId: 'daily-trigger', scheduleName: 'daily',
           title: 'daily', description: 'Execute once', isBuiltin: true, taskType: 'daily_reflection',
           targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' } })
-      : await original.routeHumanMessages('feishu', 'restart-test', [message('original', 'Execute once')])
+      : original.routeHumanMessages('feishu', 'restart-test', [message('original', 'Execute once')])
+    if (kind === 'queued-schedule') {
+      await vi.waitFor(() => expect(failedSummaries).toBe(1))
+      const queued = original.routeSchedule({ scheduleId: 'queued', triggerId: 'queued-trigger',
+        scheduleName: 'queued', title: 'queued', description: 'QUEUED_NEW_WAKE',
+        targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' } })
+      const queuedRejected = expect(queued).rejects.toThrow()
+      releaseResume()
+      await queuedRejected
+    }
+    const failed = await initial
+    if (kind === 'queued-schedule') expect(JSON.stringify(await store.loadCheckpoint(KEY))).toContain('QUEUED_NEW_WAKE')
     const incoming = kind !== 'schedule'
       ? original.routeHumanMessages('feishu', 'restart-test', [message('new-message', 'PRESERVE_NEW_WAKE')])
       : original.routeSchedule({ scheduleId: 'new-schedule', triggerId: 'new-trigger', scheduleName: 'new schedule',
@@ -197,7 +210,7 @@ describe('Manager restart continuation', () => {
     await rejected
     let checkpoint = await store.loadCheckpoint(KEY)
     expect(checkpoint?.episodeId).toBe(failed.episodeId)
-    expect(checkpoint?.pending).toHaveLength(kind === 'concurrent-schedule' ? 2 : 1)
+    if (kind !== 'queued-schedule') expect(checkpoint?.pending).toHaveLength(kind === 'concurrent-schedule' ? 2 : 1)
     expect(JSON.stringify(checkpoint?.pending)).toContain('PRESERVE_NEW_WAKE')
     await expect(original.routeHumanMessages('feishu', 'restart-test', [message('another', 'SECOND_NEW_WAKE')]))
       .rejects.toThrow('上下文压缩失败')
@@ -214,6 +227,7 @@ describe('Manager restart continuation', () => {
     expect(requests.find(text => text.includes('PRESERVE_NEW_WAKE'))?.match(/PRESERVE_NEW_WAKE/g)).toHaveLength(1)
     expect(requests.join('\n')).toContain('SECOND_NEW_WAKE')
     if (kind === 'concurrent-schedule') expect(requests.join('\n')).toContain('CONCURRENT_NEW_WAKE')
+    if (kind === 'queued-schedule') expect(requests.join('\n')).toContain('QUEUED_NEW_WAKE')
     if (kind === 'daily-human') expect(requests[0]).not.toContain('PRESERVE_NEW_WAKE')
     expect(write).toHaveBeenCalledOnce()
     expect(await store.loadCheckpoint(KEY)).toBeUndefined()
