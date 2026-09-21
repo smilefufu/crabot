@@ -200,16 +200,17 @@ describe('runEngine context compaction failure', () => {
   it('still completes normally when compaction succeeds', async () => {
     // 反向不变量：成功路径行为不变（压缩成功 → 摘要进上下文 → 继续跑到 completed）
     let phase = 0
+    let summaryCalls = 0
     const history = historyResponses()
     const adapter: LLMAdapter = {
-      async *stream() {
+      async *stream(params) {
+        if (params.tools.length === 0) {
+          summaryCalls++
+          yield* textResponse('对话摘要')
+          return
+        }
         const index = phase++
-        const chunks =
-          index < history.length
-            ? history[index]
-            : index === history.length
-              ? textResponse('对话摘要')
-              : textResponse('done')
+        const chunks = index < history.length ? history[index] : textResponse('done')
         for (const chunk of chunks) yield chunk
       },
       updateConfig() {},
@@ -234,7 +235,8 @@ describe('runEngine context compaction failure', () => {
     }
     expect(info.failedReason).toBeUndefined()
     expect(info.afterCount).toBeLessThan(info.beforeCount)
-    expect(info.batchesApplied).toBe(1)
+    expect(info.batchesApplied).toBe(summaryCalls)
+    expect(summaryCalls).toBeGreaterThan(0)
     expect(info.consumedMessages).toBeGreaterThan(0)
   })
 })

@@ -1469,25 +1469,30 @@ describe('runEngine compaction triggered by real usage', () => {
   }
 
   // 构造 5 轮 tool_use 历史（消息数 11 > keepRecentMessages=6，compaction 会真正执行），
-  // 前 4 轮小 usage、第 5 轮带指定 usage；之后接 compaction 摘要响应 + 主轮 end_turn 响应。
+  // 前 4 轮小 usage、第 5 轮带指定 usage；摘要与主请求分开响应，允许多批压缩。
   function historyThenDone(
     lastUsage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number },
-  ): ReadonlyArray<ReadonlyArray<StreamChunk>> {
+  ): LLMAdapter {
     const small = { inputTokens: 10, outputTokens: 10 }
-    return [
+    const main = mockAdapter([
       toolUseResponseWithUsage(small),
       toolUseResponseWithUsage(small),
       toolUseResponseWithUsage(small),
       toolUseResponseWithUsage(small),
       toolUseResponseWithUsage(lastUsage),
-      textResponse('S'),         // compaction 摘要 LLM 调用
       textResponse('done'),      // 主轮 6
-    ]
+    ])
+    return {
+      updateConfig() {},
+      async *stream(params) {
+        yield* params.tools.length === 0 ? textResponse('S') : main.stream(params)
+      },
+    }
   }
 
   it('triggers compaction when observed prompt tokens exceed threshold', async () => {
     // contextWindowTokens=10000 → 阈值 8000。第 5 轮 usage 观测 9000 → 第 6 轮前触发压缩。
-    const adapter = mockAdapter(historyThenDone({ inputTokens: 9_000, outputTokens: 10 }))
+    const adapter = historyThenDone({ inputTokens: 9_000, outputTokens: 10 })
     const onCompactionStart = vi.fn()
     const result = await runEngine({
       prompt: 'hi',
@@ -1512,7 +1517,7 @@ describe('runEngine compaction triggered by real usage', () => {
 
   it('counts cacheReadTokens and cacheCreationTokens into the observed prompt size', async () => {
     // inputTokens=1000 本身低于阈值 8000，但 1000+6000+2000=9000 → 触发
-    const adapter = mockAdapter(historyThenDone({ inputTokens: 1_000, outputTokens: 10, cacheReadTokens: 6_000, cacheCreationTokens: 2_000 }))
+    const adapter = historyThenDone({ inputTokens: 1_000, outputTokens: 10, cacheReadTokens: 6_000, cacheCreationTokens: 2_000 })
     const onCompactionStart = vi.fn()
     const result = await runEngine({
       prompt: 'hi',

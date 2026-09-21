@@ -66,6 +66,11 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   const onConfigChanged = reloadConfig ? async () => {
     const update = await reloadConfig()
     if (update) {
+      if ((update.adapter && update.adapter !== adapter)
+        || (update.model !== undefined && update.model !== options.model)) {
+        contextManager.resetTokenEstimate()
+        lastObservedContextTokens = undefined
+      }
       // 重试接纳的模型配置属于本次执行，后续工具轮次不能回到起点的旧快照。
       if (update.adapter) adapter = update.adapter
       options = {
@@ -179,8 +184,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         contextManager,
         adapter,
         options,
-        // shouldCompact 可能由 Provider usage 触发，而本地 chars/4 估算偏低；
-        // 触发信号已成立时至少应用一批，再用本地 hardCap 判断是否继续。
+        // 至少应用一批；后续 hardCap 判断沿用真实 usage 校准，不能退回偏低的裸估算。
         { systemPrompt: currentSystemPrompt, tools: currentTools, force: true },
         abortSignal,
       )
@@ -209,6 +213,9 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     refreshMessagesRef()
     const beforeLlmCall = options.onBeforeLlmCall?.()
     if (beforeLlmCall) await beforeLlmCall
+    // 与返回 usage 配对，不能把随后追加的 assistant/tool 消息算进本次请求。
+    const requestEstimatedTokens = contextManager.estimateStaticPromptTokens(currentSystemPrompt, currentTools)
+      + contextManager.estimateTotalTokens(messages)
     const llmStartedAtMs = Date.now()
     let llmCallMs = 0
     try {
@@ -287,11 +294,15 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       contextManager.updateFromUsage(response.usage)
       // 记录全量 prompt 大小供下一轮 shouldCompact 判定（spec 2026-07-21 改动 3）。
       // 此刻 messages 尚未 push 本轮 assistant 消息，长度正好是本次请求的 prompt 消息数。
-      lastObservedContextTokens =
+      const observedTokens =
         response.usage.inputTokens +
         (response.usage.cacheReadTokens ?? 0) +
         (response.usage.cacheCreationTokens ?? 0)
-      messageCountAtObservation = messages.length
+      if (Number.isFinite(observedTokens) && observedTokens > 0) {
+        contextManager.observeContextTokens(observedTokens, requestEstimatedTokens)
+        lastObservedContextTokens = observedTokens
+        messageCountAtObservation = messages.length
+      }
     }
 
     // Build assistant message content blocks (preserves reasoning ordering: reasoning → text → tool_use)
