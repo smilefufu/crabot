@@ -34,6 +34,12 @@ describe('独立角色提示词', () => {
     expect(prompt).toContain('PERSONALITY_SENTINEL')
   })
 
+  it('普通主控核心保留答复投递和回合收尾责任', () => {
+    const prompt = assembleManagerSystemPrompt({ managerKey: 'fixture::synthetic', isSystemThread: false })
+    expect(prompt).toContain('用工具投递答复，普通文本不外发')
+    expect(prompt).toContain('能推进就继续，否则结束，不轮询或重复发送')
+  })
+
   it('每日反思独立装配，不继承主控常规派工、项目和人类请求确认', () => {
     const prompt = assembleManagerSystemPrompt({ managerKey: 'admin-web::system-tasks', isSystemThread: true, isBuiltinDailyReflection: true })
     for (const required of ['每日反思', '至少有三条', '指定的摘要渠道', '不编造案例']) expect(prompt).toContain(required)
