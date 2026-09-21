@@ -594,19 +594,33 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       }
     }
 
-    // exitsLoop 检测：若任一 tool_use 是 exitsLoop 工具，直接退出 loop。
+    // exitsLoop 检测：先运行退出前只读校验，拒绝时保留本轮并继续原 loop。
     // 不调用 call，但仍 push 合成 tool_result，保证 finalMessages / checkpoint
     // 可被 LLM API 重放（assistant tool_use 不能悬空）。
-    const exitBlock = processed.toolUseBlocks.find(b => {
+    const exitBlocks = processed.toolUseBlocks.filter(b => {
       const def = currentTools.find(t => t.name === b.name)
       return def?.exitsLoop === true
     })
+    const exitBlock = exitBlocks[0]
     if (exitBlock) {
-      exitToolCall = {
-        name: exitBlock.name,
-        input: exitBlock.input as Record<string, unknown>,
+      const validationErrors = new Map<string, string>()
+      for (const block of exitBlocks) {
+        const validateExit = currentTools.find(t => t.name === block.name)?.validateExit
+        if (!validateExit) continue
+        try {
+          const error = await validateExit(block.input as Record<string, unknown>, processed.toolUseBlocks.length)
+          if (error !== undefined) validationErrors.set(block.id, error)
+        } catch (error) {
+          validationErrors.set(block.id, `Exit validation failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        if (abortSignal?.aborted) break
       }
-      const exitToolResultById = new Map(processed.toolUseBlocks.map(b => {
+      const validationAborted = abortSignal?.aborted === true
+      const exitToolResultById = new Map<string, { content: string; isError: boolean }>(processed.toolUseBlocks.map(b => {
+        if (validationAborted) return [b.id, { content: '[aborted: exit validation cancelled]', isError: true }] as const
+        if (validationErrors.size) return [b.id, {
+          content: validationErrors.get(b.id) ?? '[skipped: exit validation failed in same turn]', isError: true,
+        }] as const
         const def = currentTools.find(t => t.name === b.name)
         const content = def?.exitsLoop === true ? '[exit_tool]' : '[skipped: exitsLoop tool selected]'
         return [b.id, { content, isError: def?.exitsLoop !== true }] as const
@@ -631,6 +645,11 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
             isError: r?.isError ?? false,
           }
         })))
+      if (validationAborted) {
+        return buildResult('aborted', finalText, totalTurns, contextManager, messages, undefined, toolCallCount, wroteMemoryOrScene)
+      }
+      if (validationErrors.size) continue
+      exitToolCall = { name: exitBlock.name, input: exitBlock.input as Record<string, unknown> }
       return finishTask()
     }
 

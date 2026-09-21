@@ -18,6 +18,17 @@ const finishSchema = z.object({
   summary_delivered: z.boolean().optional(),
 }).strict()
 
+function invalidEvidenceRefs(state: DailyReflectionState, refs: string[]): Array<{ record_ref: string; reason: string }> {
+  const records = new Map(state.manifest?.records.map(record => [record.record_ref, record]))
+  return refs.flatMap(record_ref => {
+    const record = records.get(record_ref)
+    const reason = !record ? 'not_in_current_directory'
+      : record.gaps.length || state.read_records[record_ref] === false ? 'incomplete_or_gapped'
+        : state.read_records[record_ref] !== true ? 'not_read' : undefined
+    return reason ? [{ record_ref, reason }] : []
+  })
+}
+
 export interface DailyReflectionDeps {
   key: ManagerKey
   store: ManagerSessionStore
@@ -215,6 +226,17 @@ export class DailyReflection {
     })
   }
 
+  async validateFinish(input: Record<string, unknown>, toolCallCount: number): Promise<string | undefined> {
+    if (toolCallCount !== 1) return 'finish_must_be_called_alone: 本批次未执行任何工具，请单独调用 finish_daily_reflection。'
+    const parsed = finishSchema.safeParse(input)
+    if (!parsed.success) return `invalid_completion_input: ${parsed.error.message}`
+    return this.mutex.run(async () => {
+      const invalid = invalidEvidenceRefs(await this.state(), parsed.data.evidence_refs)
+      if (invalid.length) return `unread_evidence_reference: ${JSON.stringify(invalid)}。evidence_refs 仅接受本周期目录内已完整读取且无缺口的 record_ref。没有合格引用时填 []；缺口及未完成事项写入 pending_items，Memory 核验和建链结果写入 summary。`
+      return undefined
+    })
+  }
+
   async finish(params: { outcome: string; exitToolCall?: { name: string; input: Record<string, unknown> }; messages: readonly EngineMessage[] }): Promise<DailyReflectionResult | undefined> {
     return this.mutex.run(async () => {
       const state = await this.state()
@@ -240,7 +262,7 @@ export class DailyReflection {
       if (!state.directory_complete) errors.push('directory_not_fully_read')
       if (state.manifest?.gaps.length || state.manifest?.records.some(record => record.gaps.length)) errors.push('known_evidence_gaps')
       if (Object.values(state.read_records).some(read => !read)) errors.push('record_not_fully_read')
-      if (input.evidence_refs.some(ref => state.read_records[ref] !== true)) errors.push('unread_evidence_reference')
+      if (invalidEvidenceRefs(state, input.evidence_refs).length) errors.push('unread_evidence_reference')
       if (workers.some(worker => worker.pending)) errors.push('analysis_worker_pending')
       if (input.summary_delivered && !state.summary_delivered) errors.push('summary_delivery_unproven')
       if (input.outcome === 'completed' && input.pending_items.length) errors.push('pending_items_remain')
@@ -257,7 +279,7 @@ export class DailyReflection {
   }
 }
 
-export function buildDailyReflectionTools(host?: Pick<DailyReflection, 'list' | 'read'>): ToolDefinition[] {
+export function buildDailyReflectionTools(host?: Pick<DailyReflection, 'list' | 'read' | 'validateFinish'>): ToolDefinition[] {
   const tool = (name: string, description: string, schema: z.ZodType, call: (input: Record<string, unknown>) => Promise<unknown>) =>
     defineTool({ name, description, inputSchema: z.toJSONSchema(schema), isReadOnly: true, async call(input) {
       const parsed = schema.safeParse(input)
@@ -270,6 +292,7 @@ export function buildDailyReflectionTools(host?: Pick<DailyReflection, 'list' | 
     tool('read_reflection_record', '分页读取本次目录返回的 record_ref。沿该记录的 next_cursor 读完；不能使用其他会话 ID、路径或其他记录的游标。',
       z.object({ record_ref: z.string(), cursor: z.string().optional() }).strict(), input => host ? host.read(input.record_ref as string, input.cursor as string | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
     { ...tool('finish_daily_reflection', '当前可推进事项处理完后提交本周期结果并结束本轮，必须单独调用。满足全部完成条件才用 completed；仍有真实阻塞或取证缺口时用 partial，列明未完成事项及不能继续的依据。只剩等待分析 Worker 时直接结束回合。completed 还需宿主验证与 Admin 确认。',
-      finishSchema, async () => { throw new Error('Host-only exit tool') }), isReadOnly: false, exitsLoop: true },
+      finishSchema, async () => { throw new Error('Host-only exit tool') }), isReadOnly: false, exitsLoop: true,
+      validateExit: (input, count) => host ? host.validateFinish(input, count) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE')) },
   ]
 }

@@ -218,6 +218,44 @@ describe('ManagerLoop episode trace wiring', () => {
     else expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ trigger_id: 'original', ...window }))
   })
 
+  it('records a rejected finish and its corrected partial in one Manager episode', async () => {
+    const window = { window_start: '2026-09-16T18:00:00.000Z', window_end: '2026-09-17T18:00:00.000Z' }
+    const confirm = vi.fn()
+    const host = new DailyReflection({ key: KEY, store, now: () => window.window_end,
+      capture: async () => ({ records: [], gaps: [] }), read: async () => ({ content: '', gaps: [] }),
+      analysisWorkers: async () => [], confirm })
+    let requests = 0
+    const { adapter } = makeAdapter()
+    adapter.stream = async function* (params) {
+      if (requests++ === 1) {
+        expect((await store.load(KEY)).dailyReflection?.result).toBeUndefined()
+        expect(confirm).not.toHaveBeenCalled()
+        expect(params.messages.at(-1)).toMatchObject({ toolResults: [{ is_error: true,
+          content: expect.stringContaining('mem-invalid') }] })
+      }
+      if (requests > 2) throw new Error('unexpected extra LLM request')
+      yield* chunksFromContent([{ type: 'tool_use', id: `finish-${requests}`, name: 'finish_daily_reflection', input: {
+        outcome: 'partial', summary: 'execution evidence unavailable', pending_items: ['continue evidence review'],
+        evidence_refs: requests === 1 ? ['mem-invalid'] : [],
+      } }], 'tool_use')
+    }
+    const loop = new ManagerLoop({ ...deps(adapter, traceWriter), dailyReflection: host,
+      toolFace: () => buildDailyReflectionTools(host) })
+    const result = await loop.wakeUp(timed({ kind: 'schedule', scheduleId: 'daily', triggerId: 'trigger', scheduleName: 'daily',
+      title: 'daily', description: 'daily', taskType: 'daily_reflection', isBuiltin: true, reflectionWindow: window,
+      targetSession: { channel_id: 'wechat', session_id: 'sess-trace', type: 'private' } }))
+    const episode = traceStore.getManagerEpisode(result.episodeId)!
+    const tools = episode.spans.filter(span => span.type === 'tool_call')
+    expect(tools.map(span => span.status)).toEqual(['failed', 'completed'])
+    expect(JSON.stringify(tools[0])).toContain('unread_evidence_reference')
+    expect(episode.outcome?.daily_reflection).toMatchObject({ outcome: 'partial', evidence_refs: [],
+      validation_errors: ['directory_not_fully_read'] })
+    const state = await store.load(KEY)
+    expect(state.dailyReflection?.episode_ids).toEqual([result.episodeId])
+    expect(JSON.stringify(state.recent)).toContain('unread_evidence_reference')
+    expect(confirm).not.toHaveBeenCalled()
+  })
+
   it('trace start 失败：零 LLM 调用，但人类输入已提交且不重投', async () => {
     const failingWriter: ManagerTraceWriter = {
       ...traceWriter,

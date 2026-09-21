@@ -63,6 +63,57 @@ const sendMessageTool: ToolDefinition = {
 }
 
 describe('query-loop: exitsLoop 工具退出', () => {
+  it('keeps a mixed batch side-effect free when a guarded exit follows another exit', async () => {
+    const call = vi.fn(async () => ({ output: 'written', isError: false }))
+    const validateExit = vi.fn(async (_input, count) => count === 1 ? undefined : 'finish_must_be_called_alone')
+    const guarded: ToolDefinition = { ...dummyExitTool, name: 'guarded_exit', turnZeroOnly: false, validateExit, call }
+    const adapter = makeAdapter([
+      { toolCalls: [{ name: 'do_exit', id: 'old', input: {} }, { name: 'send_message', id: 'send', input: {} },
+          { name: 'guarded_exit', id: 'bad', input: {} }], stopReason: 'tool_use' },
+      { toolCalls: [{ name: 'guarded_exit', id: 'good', input: {} }], stopReason: 'tool_use' },
+    ])
+    const turns: Array<{ name: string; isError: boolean }> = []
+    const result = await runEngine({ prompt: 'test', adapter, options: { tools: [dummyExitTool, guarded, { ...sendMessageTool, call }],
+      systemPrompt: '', model: 'test', maxTurns: 3, onTurn: event => turns.push(...event.toolCalls) } })
+    expect(result.totalTurns).toBe(2)
+    expect(result.exitToolCall?.name).toBe('guarded_exit')
+    expect(call).not.toHaveBeenCalled()
+    expect(validateExit).toHaveBeenNthCalledWith(1, {}, 3)
+    expect(turns.slice(0, 3).every(tool => tool.isError)).toBe(true)
+    expect(result.finalMessages[2]).toMatchObject({ toolResults: [
+      { tool_use_id: 'old', is_error: true }, { tool_use_id: 'send', is_error: true },
+      { tool_use_id: 'bad', is_error: true, content: 'finish_must_be_called_alone' },
+    ] })
+  })
+
+  it.each(['rejection', 'exception'])('does not exit on validation %s or exceed the existing turn limit', async mode => {
+    const validateExit = vi.fn(async () => {
+      if (mode === 'exception') throw new Error('host state unavailable')
+      return 'invalid evidence'
+    })
+    const guarded: ToolDefinition = { ...dummyExitTool, turnZeroOnly: false, validateExit }
+    const adapter = makeAdapter([{ toolCalls: [{ name: 'do_exit', id: 'bad', input: {} }], stopReason: 'tool_use' }])
+    const result = await runEngine({ prompt: 'test', adapter,
+      options: { tools: [guarded], systemPrompt: '', model: 'test', maxTurns: 2 } })
+    expect(result.outcome).toBe('max_turns')
+    expect(result.exitToolCall).toBeUndefined()
+    expect(validateExit).toHaveBeenCalledTimes(2)
+    const replies = result.finalMessages.filter(message => 'toolResults' in message)
+    expect(replies).toHaveLength(2)
+    expect(replies.every(message => 'toolResults' in message && message.toolResults.every(reply => reply.is_error))).toBe(true)
+  })
+
+  it('preserves tool-result pairing and aborts if cancelled during exit validation', async () => {
+    const controller = new AbortController()
+    const guarded: ToolDefinition = { ...dummyExitTool, validateExit: async () => { controller.abort(); return undefined } }
+    const adapter = makeAdapter([{ toolCalls: [{ name: 'do_exit', id: 'cancelled', input: {} }], stopReason: 'tool_use' }])
+    const result = await runEngine({ prompt: 'test', adapter,
+      options: { tools: [guarded], systemPrompt: '', model: 'test', abortSignal: controller.signal } })
+    expect(result.outcome).toBe('aborted')
+    expect(result.exitToolCall).toBeUndefined()
+    expect(result.finalMessages.at(-1)).toMatchObject({ toolResults: [{ tool_use_id: 'cancelled', is_error: true }] })
+  })
+
   it('turn 0 调用 exitsLoop 工具 → engine 立刻退出，exitToolCall 暴露 name + input', async () => {
     const adapter = makeAdapter([
       {
