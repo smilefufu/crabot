@@ -2361,8 +2361,11 @@ export class ManagerLoop {
       },
       humanMessageQueue: this.mailbox,
       messagesRef,
-      onBeforeLlmCall: () => {
+      onBeforeLlmCall: async () => {
         checkpoint()
+        if (this.currentToolProfile === 'daily_reflection' && this.resumeCheckpoint) {
+          await this.deps.dailyReflection?.acknowledgePages(this.resumeCheckpoint.tools)
+        }
         // 捕获本次请求，响应期间进入 mailbox 的消息不能被旧请求确认。
         const recent = this.resumeCheckpoint?.state.recent ?? []
         responseHumanInputs = [...this.pendingHumanResponses]

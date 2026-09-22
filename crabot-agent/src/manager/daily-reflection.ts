@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod/v4'
 import { defineTool } from '../engine/tool-framework.js'
-import type { EngineMessage, ToolDefinition } from '../engine/types.js'
+import type { EngineMessage, EngineToolLifecycleEvent, ToolDefinition, ToolTraceMetadata } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex.js'
 import type { ManagerKey } from './types.js'
 import type { ManagerSessionStore } from './session-store.js'
@@ -10,12 +10,15 @@ import type {
   DailyReflectionResult, DailyReflectionState, ReflectionEvidence, ReflectionManifest, ReflectionRecord,
   ListReflectionRecordsOutput, ReflectionProgress,
   ReflectionRecordSummary,
+  ReadReflectionRecordOutput, ReflectionReadPosition,
 } from './daily-reflection-types.js'
+
+interface ReflectionPage<T> { output: T; traceMetadata?: ToolTraceMetadata }
 
 const finishSchema = z.object({
   outcome: z.enum(['completed', 'partial']), summary: z.string().trim().min(1),
   pending_items: z.array(z.string()),
-  evidence_refs: z.array(z.string()).describe('completed 和 partial 都只填写本周期目录中的 record_ref，且 read_reflection_record 已沿 next_cursor 读至末页、gaps 为空。目录中仅看过摘要的引用、有缺口的引用、run_id、Memory ID 和 source_id 均不能填写。没有符合条件的引用时填 []；缺口及未完成事项写入 pending_items，Memory 核验和建链结果写入 summary。'),
+  evidence_refs: z.array(z.string()).describe('completed 和 partial 都只填写本周期目录中的 record_ref，且 read_reflection_record 已完整读至 has_more=false、gaps 为空。目录中仅看过摘要的引用、有缺口的引用、run_id、Memory ID 和 source_id 均不能填写。没有符合条件的引用时填 []；缺口及未完成事项写入 pending_items，Memory 核验和建链结果写入 summary。'),
   summary_delivered: z.boolean().optional(),
 }).strict()
 
@@ -73,11 +76,13 @@ export function dailyReflectionResultForTrace(state?: DailyReflectionState): Dai
 export class DailyReflection {
   private readonly mutex = new AsyncMutex()
   private failedDirectoryRun?: string
+  private pagePersistenceError?: Error
   constructor(private readonly deps: DailyReflectionDeps) {}
 
   private async state(): Promise<DailyReflectionState> {
     const value = (await this.deps.store.load(this.deps.key)).dailyReflection
     if (!value) throw new Error('DAILY_REFLECTION_UNAVAILABLE')
+    if (value.manifest) this.reading(value)
     return value
   }
 
@@ -91,6 +96,7 @@ export class DailyReflection {
   /** Returns false when only a previously persisted confirmation was replayed. */
   async admit(admission: DailyReflectionAdmission | undefined, episodeId: string): Promise<boolean> {
     return this.mutex.run(async () => {
+      this.pagePersistenceError = undefined
       let state = (await this.deps.store.load(this.deps.key)).dailyReflection
       if (state?.confirmation_pending) { await this.confirm(state); return false }
       if (state?.result?.outcome === 'completed') {
@@ -145,20 +151,7 @@ export class DailyReflection {
     }
   }
 
-  private nextCursor(state: DailyReflectionState, offset: number, recordRef?: string): string {
-    const token = randomUUID()
-    state.cursors[token] = { offset, ...(recordRef ? { record_ref: recordRef } : {}) }
-    return token
-  }
-
-  private offset(state: DailyReflectionState, cursor: string | undefined, recordRef?: string): number {
-    if (cursor === undefined) return 0
-    const position = state.cursors[cursor]
-    if (!position || position.record_ref !== recordRef) throw new Error('INVALID_REFLECTION_CURSOR')
-    return position.offset
-  }
-
-  private directoryPage(state: DailyReflectionState): { start: number; end: number } {
+  private legacyDirectoryPage(state: DailyReflectionState): { start: number; end: number } {
     if (state.directory_page) return state.directory_page
     let end = 0
     for (const position of Object.values(state.cursors)) {
@@ -169,18 +162,70 @@ export class DailyReflection {
       : { start: Math.max(0, end - 20), end }
   }
 
+  private reading(state: DailyReflectionState): NonNullable<DailyReflectionState['reading']> {
+    if (state.reading) return state.reading
+    const records: Record<string, ReflectionReadPosition> = {}
+    for (const [ref, complete] of Object.entries(state.read_records)) {
+      const offsets = [...new Set(Object.values(state.cursors).filter(position => position.record_ref === ref)
+        .map(position => position.offset))].sort((a, b) => a - b)
+      const hasGaps = state.manifest?.records.find(record => record.record_ref === ref)?.gaps.length
+      records[ref] = { offset: complete || hasGaps ? 0 : offsets.at(-2) ?? 0, complete }
+    }
+    state.reading = { version: 1, directory: { offset: this.legacyDirectoryPage(state).start, complete: false }, records }
+    state.directory_complete = false
+    return state.reading
+  }
+
+  private page<T>(state: DailyReflectionState, position: ReflectionReadPosition, output: T): ReflectionPage<T> {
+    return { output, ...(position.pending ? { traceMetadata: {
+      reflection_run_id: state.run_id, reflection_page_receipt: position.pending.receipt,
+    } } : {}) }
+  }
+
+  /** Called only after Manager has durably checkpointed the real successful tool results. */
+  async acknowledgePages(events: readonly EngineToolLifecycleEvent[]): Promise<void> {
+    await this.mutex.run(async () => {
+      if (this.pagePersistenceError) throw this.pagePersistenceError
+      const state = await this.state()
+      if (!state.reading) return
+      let changed = false
+      for (const event of events) {
+        if (event.type !== 'tool_finished' || event.isError || event.traceMetadata?.reflection_run_id !== state.run_id) continue
+        const ref = event.name === 'read_reflection_record' && typeof event.input.record_ref === 'string' ? event.input.record_ref : undefined
+        const position = event.name === 'list_reflection_records' ? state.reading.directory
+          : ref ? state.reading.records[ref] : undefined
+        const pending = position?.pending
+        if (!position || !pending || event.traceMetadata?.reflection_page_receipt !== pending.receipt) continue
+        position.offset = pending.end
+        position.complete = !pending.has_more
+        delete position.pending
+        if (ref) {
+          const record = state.manifest?.records.find(record => record.record_ref === ref)
+          state.read_records[ref] = position.complete && !!record && !record.skipped && record.gaps.length === 0
+        } else state.directory_complete = position.complete
+        changed = true
+      }
+      if (changed) await this.save(state)
+    })
+  }
+
+  private async savePage(state: DailyReflectionState): Promise<void> {
+    try { await this.save(state) } catch (error) {
+      // Tool exceptions become ordinary error results; stop before the next model request.
+      this.pagePersistenceError = error instanceof Error ? error : new Error(String(error))
+      throw this.pagePersistenceError
+    }
+  }
+
   private progress(state: DailyReflectionState): ReflectionProgress {
     const records = state.manifest!.records
-    const page = this.directoryPage(state)
-    const resumeCursor = Object.entries(state.cursors).find(([, position]) =>
-      position.record_ref === undefined && position.offset === page.start)?.[0]
+    const directory = this.reading(state).directory
     const skipped = new Set(records.filter(record => record.skipped).map(record => record.record_ref))
     const pending = Object.entries(state.read_records).filter(([ref, complete]) => !complete && !skipped.has(ref))
     const gaps = records.filter(record => record.gaps.length > 0 && !record.skipped)
     return { directory_total: records.length,
-      directory_read: page.end,
+      directory_read: directory.offset,
       directory_complete: state.directory_complete,
-      ...(resumeCursor ? { resume_cursor: resumeCursor } : {}),
       pending_record_count: pending.length,
       pending_records: pending.slice(0, 20).map(([record_ref]) => ({ record_ref })),
       evidence_gap_count: gaps.length,
@@ -188,50 +233,49 @@ export class DailyReflection {
       skipped_record_count: skipped.size }
   }
 
-  async list(cursor?: string): Promise<ListReflectionRecordsOutput> {
+  async list(restart = false): Promise<ReflectionPage<ListReflectionRecordsOutput>> {
     return this.mutex.run(async () => {
       const state = await this.state()
-      const offset = this.offset(state, cursor)
-      let output: ListReflectionRecordsOutput
+      let output: ReflectionPage<ListReflectionRecordsOutput>
       try {
-        output = await this.listPage(state, offset)
+        output = await this.listPage(state, restart)
       } catch (error) {
         this.failedDirectoryRun = state.run_id
         throw error
       }
-      await this.save(state)
+      await this.savePage(state)
       this.failedDirectoryRun = undefined
       return output
     })
   }
 
-  private async listPage(state: DailyReflectionState, offset: number): Promise<ListReflectionRecordsOutput> {
+  private async listPage(state: DailyReflectionState, restart: boolean): Promise<ReflectionPage<ListReflectionRecordsOutput>> {
     if (!state.manifest) {
       const manifest = await this.deps.capture(state)
       if (manifest.gaps.length) throw new Error(`REFLECTION_INVENTORY_UNAVAILABLE: ${manifest.gaps.join(', ')}`)
       state.manifest = manifest
     }
     for (const record of state.manifest.records) skipUnavailableDetail(record)
-    const previousPage = this.directoryPage(state)
-    const { resume_cursor, ...progress } = this.progress(state)
-    const nextCursor = randomUUID()
-    const pageStartCursor = Object.entries(state.cursors).find(([, position]) =>
-      position.record_ref === undefined && position.offset === offset)?.[0]
+    const position = this.reading(state).directory
+    if (restart && !position.pending) {
+      position.offset = 0
+      position.complete = false
+      state.directory_complete = false
+    }
+    const offset = position.pending?.start ?? position.offset
+    const progress = this.progress(state)
     const outputFor = (records: ReflectionRecordSummary[]): ListReflectionRecordsOutput => {
       const end = offset + records.length
-      const advanced = end > previousPage.end
-      const resume = advanced ? pageStartCursor : resume_cursor
       return { run_id: state.run_id, window_start: state.window_start, window_end: state.window_end,
-        records, ...(end < state.manifest!.records.length ? { next_cursor: nextCursor } : {}),
+        records, has_more: !position.complete && end < state.manifest!.records.length,
         gaps: state.manifest!.gaps, coverage: 'available_persisted_evidence',
-        progress: { ...progress, directory_read: Math.max(previousPage.end, end),
-          directory_complete: state.directory_complete || end === state.manifest!.records.length,
-          ...(resume ? { resume_cursor: resume } : {}) },
+        progress,
         ...(state.result ? { previous_result: state.result } : {}) }
     }
     let output = outputFor([])
     if (Buffer.byteLength(JSON.stringify(output)) > 80 * 1024) throw new Error('REFLECTION_DIRECTORY_PAGE_TOO_LARGE: metadata')
-    for (const record of state.manifest.records.slice(offset, offset + 100)) {
+    if (position.complete) return { output }
+    for (const record of state.manifest.records.slice(offset, position.pending?.end ?? offset + 100)) {
       const candidate = outputFor([...output.records, await this.recordSummary(record, state)])
       if (Buffer.byteLength(JSON.stringify(candidate)) > 80 * 1024) {
         if (!output.records.length) throw new Error(`REFLECTION_DIRECTORY_PAGE_TOO_LARGE: ${record.record_ref}`)
@@ -240,10 +284,9 @@ export class DailyReflection {
       output = candidate
     }
     const end = offset + output.records.length
-    state.directory_page = end > previousPage.end ? { start: offset, end } : previousPage
-    state.directory_complete = output.progress.directory_complete
-    if (output.next_cursor) state.cursors[nextCursor] = { offset: end }
-    return output
+    if (position.pending && end !== position.pending.end) throw new Error('REFLECTION_DIRECTORY_PAGE_TOO_LARGE: pending page')
+    position.pending ??= { receipt: randomUUID(), start: offset, end, has_more: output.has_more }
+    return this.page(state, position, output)
   }
 
   private async recordSummary(record: ReflectionRecord, state: DailyReflectionState): Promise<ReflectionRecordSummary> {
@@ -264,12 +307,20 @@ export class DailyReflection {
     return summary
   }
 
-  async read(recordRef: string, cursor?: string): Promise<unknown> {
+  async read(recordRef: string, restart = false): Promise<ReflectionPage<ReadReflectionRecordOutput>> {
     return this.mutex.run(async () => {
       const state = await this.state()
       const record = state.manifest?.records.find(item => item.record_ref === recordRef)
       if (!record) throw new Error('INVALID_REFLECTION_RECORD')
-      const offset = this.offset(state, cursor, recordRef)
+      const reading = this.reading(state)
+      const position = reading.records[recordRef] ??= { offset: 0, complete: false }
+      if (restart && !position.pending) {
+        position.offset = 0
+        position.complete = false
+      }
+      if (position.complete) return { output: { record_ref: recordRef, content: '', has_more: false, gaps: record.gaps,
+        ...(record.skipped ? { skipped: record.skipped } : {}) } }
+      const offset = position.pending?.start ?? position.offset
       state.read_records[recordRef] = false
       let evidence: ReflectionEvidence
       try {
@@ -293,11 +344,13 @@ export class DailyReflection {
         bytes += size
       }
       const next = offset + content.length
-      const nextCursor = next < evidence.content.length ? this.nextCursor(state, next, recordRef) : undefined
-      state.read_records[recordRef] = !nextCursor && record.gaps.length === 0
-      await this.save(state)
-      return { record_ref: recordRef, content, ...(nextCursor ? { next_cursor: nextCursor } : {}), gaps: record.gaps,
-        ...(record.skipped ? { skipped: record.skipped } : {}) }
+      const hasMore = next < evidence.content.length
+      // Changed evidence must not acknowledge an older page range using the same receipt.
+      if (position.pending && (position.pending.end !== next || position.pending.has_more !== hasMore)) delete position.pending
+      position.pending ??= { receipt: randomUUID(), start: offset, end: next, has_more: hasMore }
+      await this.savePage(state)
+      return this.page(state, position, { record_ref: recordRef, content, has_more: hasMore, gaps: record.gaps,
+        ...(record.skipped ? { skipped: record.skipped } : {}) })
     })
   }
 
@@ -325,10 +378,9 @@ export class DailyReflection {
         const progress = state.manifest ? this.progress(state) : undefined
         return `actionable_evidence_remaining: ${JSON.stringify({
           directory_pending: directoryPending,
-          ...(progress ? { directory_read: progress.directory_read, directory_total: progress.directory_total,
-            ...(progress.resume_cursor ? { resume_cursor: progress.resume_cursor } : {}) } : {}),
+          ...(progress ? { directory_read: progress.directory_read, directory_total: progress.directory_total } : {}),
           pending_record_count: pending.length, pending_records: pending.slice(0, 20).map(({ record_ref }) => ({ record_ref })),
-        })}。尚有可继续读取的证据，本次退出未执行。目录从 resume_cursor 保守续读，没有时从首页开始，再沿 next_cursor 前进；未完详情优先沿该记录已有 next_cursor 续读，确无可用游标时才从首段重读。已知故障只暂停依赖它的判断，继续处理其他可读事项。`
+        })}。尚有可继续读取的证据，本次退出未执行。默认调用 list_reflection_records 继续目录，调用 read_reflection_record 并指定未完 record_ref 继续详情；宿主管理读取位置，按 has_more 读完。已知故障只暂停依赖它的判断，继续处理其他可读事项。`
       }
       return undefined
     })
@@ -378,17 +430,18 @@ export class DailyReflection {
 }
 
 export function buildDailyReflectionTools(host?: Pick<DailyReflection, 'list' | 'read' | 'validateFinish'>): ToolDefinition[] {
-  const tool = (name: string, description: string, schema: z.ZodType, call: (input: Record<string, unknown>) => Promise<unknown>) =>
+  const tool = (name: string, description: string, schema: z.ZodType, call: (input: Record<string, unknown>) => Promise<ReflectionPage<unknown>>) =>
     defineTool({ name, description, inputSchema: z.toJSONSchema(schema), isReadOnly: true, async call(input) {
       const parsed = schema.safeParse(input)
       if (!parsed.success) return { output: parsed.error.message, isError: true }
-      return { output: JSON.stringify(await call(parsed.data as Record<string, unknown>)), isError: false }
+      const result = await call(parsed.data as Record<string, unknown>)
+      return { output: JSON.stringify(result.output), isError: false, traceMetadata: result.traceMetadata }
     } })
   return [
-    tool('list_reflection_records', '列出宿主固定反思周期内的执行与人类输入证据，每页最多 100 条，实际页长受完整回包字节预算限制。首次不传 cursor；恢复续办时用 progress.resume_cursor 保守重读最后一页（首页不返回该游标），之后沿当前页 next_cursor 前进，不反复跟随 progress.resume_cursor。目录翻完但周期未完成时也可重读末页。progress.pending_records 是未读完的详情，evidence_gap_records 是未跳过的缺口记录，可能位于此前目录页；两者都可从详情首段重读，成功后再次 list 取得剩余引用。宿主已读取不证明模型已收到或完成复盘。gaps 保留已知缺口；skipped 项已按来源缺失处置，不阻止完成且不能作为 evidence_refs。',
-      z.object({ cursor: z.string().optional() }).strict(), input => host ? host.list(input.cursor as string | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
-    tool('read_reflection_record', '分页读取本次目录返回的 record_ref。沿该记录的 next_cursor 读完；不能使用其他会话 ID、路径或其他记录的游标。',
-      z.object({ record_ref: z.string(), cursor: z.string().optional() }).strict(), input => host ? host.read(input.record_ref as string, input.cursor as string | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
+    tool('list_reflection_records', '读取宿主固定反思周期的下一页目录，每页最多 100 条，完整回包受字节预算限制。默认从宿主保存的位置继续，has_more=true 时再次调用；读完后默认返回空目录及最新进度，不从头重开。只有确需从头重读目录时传 restart=true。progress 是已确认进度，可能尚未计入本页；pending_records 是待继续的详情，直接用其中的 record_ref 读取；evidence_gap_records 是未跳过的缺口记录，需要复核时对该详情传 restart=true。中断恢复可能重发尚未确认保存的一页。读取或回包已保存不证明完成语义复盘。gaps 保留已知缺口；skipped 项已按来源缺失处置，不阻止完成且不能作为 evidence_refs。',
+      z.object({ restart: z.boolean().optional() }).strict(), input => host ? host.list(input.restart as boolean | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
+    tool('read_reflection_record', '读取本周期 record_ref 的下一段详情，位置由宿主按记录分别保存。has_more=true 时用相同 record_ref 再次调用；读完后默认返回空正文和 has_more=false，不重新打开。只有确需从头复核该详情时传 restart=true，重读后须再次读完；尚未确认保存的回包会先重发。不能使用其他会话 ID 或路径。',
+      z.object({ record_ref: z.string(), restart: z.boolean().optional() }).strict(), input => host ? host.read(input.record_ref as string, input.restart as boolean | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
     { ...tool('finish_daily_reflection', '当前可推进事项处理完后提交本周期结果并结束本轮，必须单独调用。满足全部完成条件才用 completed；仍有真实阻塞或取证缺口时用 partial，列明未完成事项及不能继续的依据。只剩等待分析 Worker 时直接结束回合。completed 还需宿主验证与 Admin 确认。',
       finishSchema, async () => { throw new Error('Host-only exit tool') }), isReadOnly: false, exitsLoop: true,
       validateExit: (input, count) => host ? host.validateFinish(input, count) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE')) },
