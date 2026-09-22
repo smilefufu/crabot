@@ -11,7 +11,7 @@ import { WorkspaceGitInspector } from '../../../src/workers/harness/workspace-gi
 import { DailyReflectionEvidence } from '../../../src/manager/daily-reflection-evidence'
 import { ManagerSessionStore } from '../../../src/manager/session-store'
 import type { DailyReflectionState } from '../../../src/manager/daily-reflection-types'
-import { } from '../../../src/workers/harness/ledger-types'
+import type { LegacyIncarnation } from '../../../src/workers/harness/ledger-types'
 import {
   WorkerEventLog,
   type ActivityContextAdmissionReceipt,
@@ -343,6 +343,41 @@ afterEach(async () => {
 })
 
 describe('WorkerHarness.executionStatus', () => {
+  it('已停止的 legacy 导入不制造 unknown，续办后按现代化身的实际执行判断', async () => {
+    const { harness, ledger } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const endedAt = now()
+    const legacy: LegacyIncarnation = {
+      impl: 'legacy', seq: 1, state: 'exited', workspace: worker.incarnations[0].workspace,
+      started_at: endedAt, ended_at: endedAt, ended_reason: 'pre_migration',
+    }
+    const workerId = 'w-imported-execution-status'
+    await ledger.importLegacyWorker(worker.manager_key, {
+      ...worker, worker_id: workerId,
+      task: { ...worker.task, id: workerId, status: 'halted', halt: { halted_at: endedAt, halt_reason: 'pre_migration' } },
+      incarnations: [legacy],
+      legacy_source: { kind: 'v2_admin_task', admin_task_id: 'old-task', trace_ids: [], imported_at: endedAt },
+    })
+    const imported = (await ledger.findWorker(workerId))!.worker
+    expect(await harness.executionStatus([imported])).toBe('idle')
+    const modern = { ...worker.incarnations[0], seq: 2, state: 'idle' as const }
+    expect(await harness.executionStatus([{ ...imported, incarnations: [legacy, modern] }])).toBe('idle')
+    expect(await harness.executionStatus([{ ...imported, incarnations: [legacy, { ...modern, state: 'running' }] }])).toBe('running')
+  })
+
+  it('后台已经退出而通知仍 pending 时不显示执行中，缺失后台事实保留 unknown', async () => {
+    const hasRunningBg = vi.fn(async () => true)
+    const listWorkerBackground = vi.fn(async () => [{ entity_id: 'shell-1', status: 'completed' as const, ended_at: now() }])
+    const { harness } = await makeHarness({}, { hasRunningBg, listWorkerBackground })
+    const worker = await harness.spawnWorker(spawnParams())
+    const idle = { ...worker, incarnations: worker.incarnations.map(inc => ({ ...inc, state: 'idle' as const })) }
+    hasRunningBg.mockClear()
+    expect(await harness.executionStatus([idle])).toBe('idle')
+    expect(hasRunningBg).not.toHaveBeenCalled()
+    ;(harness as any).deps.listWorkerBackground = undefined
+    expect(await harness.executionStatus([idle])).toBe('unknown')
+  })
+
   it('已核实的切换停止事实不被旧 running 回调覆盖', async () => {
     const { harness, fake } = await makeHarness({ implId: 'claude-code' })
     const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
@@ -389,9 +424,10 @@ describe('WorkerHarness.executionStatus', () => {
 
   it('主线停止时已登记 fork 和后台执行仍计入，单条读取失败不掩盖另一条运行', async () => {
     let background = false
-    const { harness } = await makeHarness({}, { hasRunningBg: async id => {
+    let stalled = false
+    const { harness } = await makeHarness({}, { listWorkerBackground: async id => {
       if (id === 'unreadable') throw new Error('unavailable')
-      return background
+      return background || stalled ? [{ entity_id: 'shell-1', status: background ? 'running' : 'stalled', ended_at: null }] : []
     } })
     const worker = await harness.spawnWorker(spawnParams())
     const idle = { ...worker, incarnations: worker.incarnations.map(inc => ({ ...inc, state: 'idle' as const })) }
@@ -399,6 +435,9 @@ describe('WorkerHarness.executionStatus', () => {
     background = true
     expect(await harness.executionStatus([idle])).toBe('running')
     background = false
+    stalled = true
+    expect(await harness.executionStatus([idle])).toBe('unknown')
+    stalled = false
     const fork = { ...worker.incarnations[0], incarnation_id: 'fork', seq: 2, forked_from: worker.incarnations[0].incarnation_id }
     expect(await harness.executionStatus([{ ...idle, incarnations: [...idle.incarnations, fork] }])).toBe('running')
     expect(await harness.executionStatus([{ ...idle, worker_id: 'unreadable' }])).toBe('unknown')

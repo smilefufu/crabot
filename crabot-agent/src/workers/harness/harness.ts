@@ -4168,7 +4168,7 @@ export class WorkerHarness {
       let needsNativeObservation = false
       let changedCarrierState = false
       for (const incarnation of worker.incarnations) {
-        if (!isExecutableIncarnation(incarnation)) { unknown = true; continue }
+        if (!isExecutableIncarnation(incarnation)) continue
         const observed = this.executionStates.get(`${worker.worker_id}#${incarnation.impl}#${incarnation.seq}`)
         // A verified stop may be committed without a final adapter callback (for example handoff).
         const useObservation = observed?.sessionRef === incarnation.session_ref
@@ -4182,7 +4182,9 @@ export class WorkerHarness {
         if (!adapter || adapter.listSubagents) needsNativeObservation = true
       }
       try {
-        if (await this.deps.hasRunningBg?.(worker.worker_id, 'all')) return 'running'
+        const background = await this.deps.listWorkerBackground?.(worker.worker_id)
+        if (background?.some(entity => entity.status === 'running')) return 'running'
+        if (!background || background.some(entity => entity.status === 'stalled')) unknown = true
       } catch { unknown = true }
       if (worker.task.status === 'queued' || worker.incarnations.length === 0) { unknown = true; continue }
       if (!needsNativeObservation) continue
