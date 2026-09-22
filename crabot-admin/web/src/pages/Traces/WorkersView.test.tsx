@@ -201,7 +201,7 @@ describe('WorkerDetail', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /#2.*临时侧问/ })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: /#2.*临时侧问/ }))
 
-    expect(await screen.findByRole('button', { name: /已加入上下文：现在进展如何？/ })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /输入：现在进展如何？/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Worker 文本：已完成接口核对。/ })).toBeInTheDocument()
     expect(screen.getByText('侧问完成')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /侧问完成：临时侧问已完成/ })).toBeInTheDocument()
@@ -320,7 +320,7 @@ describe('WorkerDetail', () => {
     )
   })
 
-  it('指令投递显示 receipt 中已有的受限正文预览', async () => {
+  it('历史输入接受回执只在技术事件中显示并保留受限正文预览', async () => {
     mocked.getWorkerDetail = vi.fn().mockResolvedValue({ worker: workerFixture() })
     mocked.getWorkerTrace = vi.fn().mockResolvedValue({
       events: [{
@@ -335,9 +335,12 @@ describe('WorkerDetail', () => {
     mocked.getWorkerTerminal = vi.fn().mockResolvedValue({ kind: 'live_terminal', text: '', captured_at: '2026-08-01T00:00:00.000Z' })
     renderDetail()
 
-    const delivery = await screen.findByRole('button', { name: /执行器已接受：继续核对隔离候选，生产环境保持不动。.*展开详情/ })
-    fireEvent.click(delivery)
-    expect(screen.getAllByText('继续核对隔离候选，生产环境保持不动。')).toHaveLength(2)
+    await screen.findByRole('button', { name: '技术事件 1' })
+    expect(screen.queryByText('执行器已接受')).not.toBeInTheDocument()
+    expect(screen.queryByText('继续核对隔离候选，生产环境保持不动。')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '技术事件 1' }))
+    fireEvent.click(screen.getByRole('button', { name: /input_sent delivery_id=delivery-1.*展开详情/ }))
+    expect(screen.getByText(/"text_preview": "继续核对隔离候选，生产环境保持不动。"/)).toBeInTheDocument()
   })
 
   it('默认选择主线，并把消息、工具与技术事件分开显示', async () => {
@@ -357,7 +360,7 @@ describe('WorkerDetail', () => {
 
     renderDetail()
 
-    await waitFor(() => expect(screen.getByText('已加入上下文')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('输入')).toBeInTheDocument())
     expect(screen.getByText('Worker 文本')).toBeInTheDocument()
     const toolRow = screen.getByRole('button', { name: /工具调用：调用 shell · 已返回结果.*展开详情/ })
     expect(toolRow).toHaveAttribute('aria-expanded', 'false')
