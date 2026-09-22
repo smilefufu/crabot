@@ -162,17 +162,6 @@ function lifecycleActivity(event: WorkerTraceEvent): ActivityEntry | undefined {
     const fromSeq = typeof detail?.from_seq === 'number' ? `从化身 #${detail.from_seq} ` : ''
     return { event, label: '任务状态', tone: 'status', body: `已${fromSeq}恢复执行` }
   }
-  if (event.summary.startsWith('input_sent')) {
-    const preview = typeof detail?.text_preview === 'string' && detail.text_preview.trim()
-      ? detail.text_preview
-      : undefined
-    return {
-      event,
-      label: '执行器已接受',
-      tone: 'status',
-      body: preview ?? '执行器已接受补充输入',
-    }
-  }
   if (event.summary.startsWith('input_delivery_failed')) {
     return { event, label: '投递失败', tone: 'failure', body: failureReason(detail, event.summary) }
   }
@@ -186,13 +175,17 @@ function lifecycleActivity(event: WorkerTraceEvent): ActivityEntry | undefined {
 }
 
 function activityFor(event: WorkerTraceEvent, actorLabel: string, isSubagentTrace: boolean): ActivityEntry | undefined {
-  const runtimeText = runtimeEventText(event)
-  if (runtimeText) return { event, label: event.kind === 'error' ? '请求或执行错误' : '执行进度', tone: event.kind === 'error' ? 'failure' : 'status', body: runtimeText }
+  const progress = runtimeEvent(event)
+  if (progress) {
+    // 快照可能携带旧错误；只有错误事件或本次压缩失败进入历史活动。
+    const failed = event.kind === 'error' || (progress.event === 'compaction_finished' && !!progress.runtime.error)
+    return failed ? { event, label: '请求或执行错误', tone: 'failure', body: runtimeEventText(event)! } : undefined
+  }
   if (event.source === 'legacy') {
     return { event, label: '历史记录', tone: 'status', body: event.summary }
   }
   if (event.kind === 'message' && event.role === 'user') {
-    return { event, label: !isSubagentTrace && event.source === 'native' ? '已加入上下文' : `${actorLabel} 指令`, tone: 'manager', body: messageText(event) }
+    return { event, label: !isSubagentTrace && event.source === 'native' ? '输入' : `${actorLabel} 指令`, tone: 'manager', body: messageText(event) }
   }
   if (event.kind === 'message' && event.role === 'assistant') {
     return { event, label: `${actorLabel} 文本`, tone: 'worker', body: messageText(event) }
@@ -214,7 +207,6 @@ function projectTimeline(events: WorkerTraceEvent[], actorLabel: string, isSubag
   const human: ActivityEntry[] = []
   const technical: WorkerTraceEvent[] = []
   const calls = new Map<string, ActivityEntry>()
-  const requests = new Map<string, ActivityEntry>()
   const uncorrelatedNativeCalls: ActivityEntry[] = []
 
   for (const event of events) {
@@ -222,20 +214,6 @@ function projectTimeline(events: WorkerTraceEvent[], actorLabel: string, isSubag
     if (!activity) {
       technical.push(event)
       continue
-    }
-    const requestEvent = runtimeEvent(event)
-    const requestId = requestEvent?.runtime.request?.request_id
-    if (requestId && ['request_started', 'first_response', 'request_completed', 'request_failed', 'interrupted'].includes(requestEvent!.event)) {
-      const previous = requests.get(requestId)
-      if (previous) {
-        previous.body = activity.body
-        previous.tone = activity.tone
-        previous.label = activity.label
-        previous.result = JSON.stringify(event.detail)
-        continue
-      }
-      activity.result = JSON.stringify(event.detail)
-      requests.set(requestId, activity)
     }
     if (event.kind === 'tool_result') {
       const id = callId(event)
