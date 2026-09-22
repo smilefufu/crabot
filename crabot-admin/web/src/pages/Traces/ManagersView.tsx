@@ -27,31 +27,54 @@ export const ManagersView: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false
+    let inFlight = false
+    let generation = 0
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const isVisible = () => document.visibilityState !== 'hidden'
     setLoading(true)
     setError(null)
-    agentObservabilityService
-      .listManagers(page, 20)
-      .then((result) => {
-        if (cancelled) return
+    setItems([])
+    const refresh = async () => {
+      if (cancelled || inFlight || !isVisible()) return
+      inFlight = true
+      const requestedGeneration = generation
+      try {
+        const result = await agentObservabilityService.listManagers(page, 20)
+        if (cancelled || requestedGeneration !== generation) return
         setItems(result.items)
         setTotalPages(Math.max(1, result.pagination.total_pages))
-      })
-      .catch((err) => {
-        if (cancelled) return
+        setError(null)
+      } catch (err) {
+        if (cancelled || requestedGeneration !== generation) return
         setError(err instanceof Error ? err.message : String(err))
-        setItems([])
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
+        setItems(previous => previous.map(item => ({ ...item, execution_status: 'unknown' })))
+      } finally {
+        inFlight = false
+        if (!cancelled) {
+          if (requestedGeneration === generation) setLoading(false)
+          if (isVisible()) {
+            timer = setTimeout(() => { void refresh() }, requestedGeneration === generation ? 5_000 : 0)
+          }
+        }
+      }
+    }
+    const onVisibilityChange = () => {
+      clearTimeout(timer)
+      generation++
+      if (isVisible()) void refresh()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    void refresh()
     return () => {
       cancelled = true
+      clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [page])
 
   if (loading) return <Loading />
-  if (error) {
-    return <div className="trace-list__empty">会话列表暂不可用（unknown）：{error}</div>
+  if (error && items.length === 0) {
+    return <div className="trace-list__empty">会话列表暂不可用，请稍后重试。</div>
   }
   if (items.length === 0) {
     return <div className="trace-list__empty">暂无会话记录。</div>
@@ -59,12 +82,13 @@ export const ManagersView: React.FC = () => {
 
   return (
     <section className="trace-list" aria-label="会话列表">
+      {error && <div className="trace-list__summary" role="status">执行状态刷新失败</div>}
       <div className="trace-list__table-wrap">
         <table className="trace-table trace-table--managers">
           <thead>
             <tr>
               <th>会话</th>
-              <th>执行器</th>
+              <th>执行状态</th>
               <th>任务板</th>
               <th>最近动态</th>
             </tr>
@@ -81,20 +105,9 @@ export const ManagersView: React.FC = () => {
                   </div>
                 </td>
                 <td className="trace-table__count">
-                  <div className="trace-worker-counts">
-                    <span className={item.running_worker_count > 0 ? 'trace-worker-count is-running' : 'trace-worker-count is-zero'}>
-                      执行中 <strong>{item.running_worker_count ?? 0}</strong>
-                    </span>
-                    <span className={item.queued_worker_count > 0 ? 'trace-worker-count' : 'trace-worker-count is-zero'}>
-                      待执行 <strong>{item.queued_worker_count ?? 0}</strong>
-                    </span>
-                    <span className={item.continuation_candidate_count > 0 ? 'trace-worker-count' : 'trace-worker-count is-zero'}>
-                      续办 <strong>{item.continuation_candidate_count ?? 0}</strong>
-                    </span>
-                    <span className={item.worker_attention_count > 0 ? 'trace-worker-count is-attention' : 'trace-worker-count is-zero'} title="运行状态、项目归属或资源停止结果尚未核实，不等于任务失败">
-                      待核实 <strong>{item.worker_attention_count ?? 0}</strong>
-                    </span>
-                  </div>
+                  <span className={`trace-execution-status is-${item.execution_status ?? 'unknown'}`}>
+                    {item.execution_status === 'running' ? '执行中' : item.execution_status === 'idle' ? '当前无执行' : '暂不可用'}
+                  </span>
                 </td>
                 <td className="trace-table__count">
                   <Link className="trace-table__workboard-link" to={`/traces/managers/${encodeURIComponent(item.manager_key)}/workboard`}>

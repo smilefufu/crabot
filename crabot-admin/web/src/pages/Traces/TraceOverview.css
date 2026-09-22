@@ -117,7 +117,7 @@
 }
 
 .trace-table--managers th:nth-child(1) { width: 30%; }
-.trace-table--managers th:nth-child(2) { width: 196px; }
+.trace-table--managers th:nth-child(2) { width: 112px; }
 .trace-table--managers th:nth-child(3) { width: 170px; }
 .trace-table--workers th:nth-child(1) { width: 34%; }
 .trace-table--workers th:nth-child(2) { width: 100px; }
@@ -175,30 +175,14 @@
   color: var(--warning);
 }
 
-.trace-worker-counts {
-  display: grid;
-  gap: 5px 16px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.trace-worker-count {
-  align-items: baseline;
+.trace-execution-status {
   color: var(--text-secondary);
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
   line-height: 1.5;
   white-space: nowrap;
 }
 
-.trace-worker-count strong {
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-
-.trace-worker-count.is-zero { color: var(--text-muted); }
-.trace-worker-count.is-running { color: var(--success); }
-.trace-worker-count.is-attention { color: var(--warning); }
+.trace-execution-status.is-running { color: var(--success); }
+.trace-execution-status.is-unknown { color: var(--text-muted); }
 
 .trace-workboard-counts {
   display: flex;
@@ -345,10 +329,6 @@
   .trace-table--managers td:nth-child(3) {
     grid-column: 1;
     padding-top: 8px;
-  }
-
-  .trace-worker-counts {
-    grid-template-columns: repeat(2, minmax(0, 92px));
   }
 
   .trace-table--managers td:nth-child(4) {

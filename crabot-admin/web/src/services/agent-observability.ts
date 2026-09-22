@@ -20,8 +20,11 @@ export interface PaginatedResult<T> {
 
 // ── Manager（§8.4）──────────────────────────────────────────────
 
+export type ManagerExecutionStatus = 'running' | 'idle' | 'unknown'
+
 export interface ManagerAdminSummary {
   manager_key: string
+  execution_status: ManagerExecutionStatus
   display_name: string
   last_activity_at?: string
   recent_activity_summary?: string

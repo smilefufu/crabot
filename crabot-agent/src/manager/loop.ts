@@ -426,6 +426,10 @@ export class ManagerLoop {
     return this.currentTraceId
   }
 
+  get isExecuting(): boolean {
+    return this.currentEpisodeInjected !== null
+  }
+
   hasSuccessfulSendMessageTo(target: { channel_id: string; session_id: string }): boolean {
     return this.successfulSendMessageTargetsInCurrentEpisode.has(`${target.channel_id}\u0000${target.session_id}`)
   }

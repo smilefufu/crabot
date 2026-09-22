@@ -490,6 +490,7 @@ describe('buildManagerAdminSummaries（P6-A §7）', () => {
   it('disk/trace/running 三源去重 union，排序 last_activity_at desc、manager_key asc', async () => {
     const { buildManagerAdminSummaries } = await import('../../src/manager/read-model.js')
     const result = buildManagerAdminSummaries({
+      executionStatus: key => key === 'wechat::sess-a' ? 'running' : 'idle',
       diskSessionKeys: ['wechat::sess-a' as ManagerKey, 'wechat::sess-b' as ManagerKey],
       traceKeys: ['wechat::sess-b' as ManagerKey, 'wechat::sess-c' as ManagerKey],
       episodeStats: (key) => key === 'wechat::sess-b'
@@ -512,6 +513,8 @@ describe('buildManagerAdminSummaries（P6-A §7）', () => {
       workboard: { status: 'ready', current_objective_count: 1, current_work_item_count: 2, blocked_work_item_count: 1 },
     })
     expect(result.items[0]).not.toHaveProperty('episode_count')
+    expect(result.items[0].execution_status).toBe('running')
+    expect(result.items[1].execution_status).toBe('idle')
     expect(result.items[0]).not.toHaveProperty('worker_count')
     expect(result.pagination.total_items).toBe(3)
   })
@@ -519,6 +522,7 @@ describe('buildManagerAdminSummaries（P6-A §7）', () => {
   it('空三源 → 空列表；分页夹紧与缺省归一', async () => {
     const { buildManagerAdminSummaries } = await import('../../src/manager/read-model.js')
     const empty = buildManagerAdminSummaries({
+      executionStatus: () => 'unknown',
       diskSessionKeys: [], traceKeys: [],
       episodeStats: () => ({}),
       activeWorkerCount: () => 0,

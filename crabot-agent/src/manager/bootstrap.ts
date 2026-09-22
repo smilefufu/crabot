@@ -494,6 +494,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     capabilityBundle: deps.capabilityBundle,
     issueAgentCliCredential: deps.issueAgentCliCredential,
     hasRunningBg: deps.hasRunningBg,
+    isExecutionReady: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
     listWorkerBackground: deps.listWorkerBackground,
     onContinuationSweep: async () => {
       if (!candidatesReady || candidatesClosing) return
