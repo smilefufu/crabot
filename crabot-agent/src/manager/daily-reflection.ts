@@ -284,7 +284,7 @@ export class DailyReflection {
       output = candidate
     }
     const end = offset + output.records.length
-    if (position.pending && end !== position.pending.end) throw new Error('REFLECTION_DIRECTORY_PAGE_TOO_LARGE: pending page')
+    if (position.pending && end !== position.pending.end) delete position.pending
     position.pending ??= { receipt: randomUUID(), start: offset, end, has_more: output.has_more }
     return this.page(state, position, output)
   }

@@ -99,6 +99,34 @@ describe('host-owned daily reflection pagination', () => {
       .toMatchObject({ content: 'B'.repeat(16384) })
   })
 
+  it('rebuilds a pending directory page when metadata grows, rejecting the old receipt without skipping records', async () => {
+    const { host, store, records } = await setup(200)
+    records.forEach(record => { record.summary = 'x'.repeat(2000) })
+    await store.updateDailyReflection(key, state => ({ ...state!, manifest: { records, gaps: [] } }))
+    const first = await invoke(host, 'list_reflection_records')
+    expect(first.page.records.length).toBeLessThan(100)
+    await store.updateDailyReflection(key, state => ({ ...state!, result: {
+      outcome: 'partial', summary: 'changed progress '.repeat(1000), pending_items: [], evidence_refs: [],
+      run_id: state!.run_id, window_start: state!.window_start, window_end: state!.window_end,
+      completed_at: '2026-09-22T00:00:00.000Z', validation_errors: [],
+    } }))
+    const replayed = await invoke(host, 'list_reflection_records')
+    expect(replayed.page.records.length).toBeLessThan(first.page.records.length)
+    expect(replayed.page.records[0].record_ref).toBe('ref-0')
+    expect(Buffer.byteLength(replayed.result.output)).toBeLessThanOrEqual(80 * 1024)
+    expect(replayed.result.traceMetadata).not.toEqual(first.result.traceMetadata)
+    await host.acknowledgePages([first.event])
+    expect((await store.load(key)).dailyReflection?.reading?.directory.offset).toBe(0)
+    await host.acknowledgePages([replayed.event])
+    const actual = replayed.page.records.map((record: ReflectionRecord) => record.record_ref)
+    let page = replayed.page
+    while (page.has_more) {
+      page = await confirmed(host, 'list_reflection_records')
+      actual.push(...page.records.map((record: ReflectionRecord) => record.record_ref))
+    }
+    expect(actual).toEqual(records.map(record => record.record_ref))
+  })
+
   it('keeps interleaved detail progress separate and requires explicit restart after completion', async () => {
     const { host, store } = await setup()
     await confirmed(host, 'list_reflection_records')
