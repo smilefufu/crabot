@@ -280,11 +280,11 @@ describe('ManagerLoop episode trace wiring', () => {
     else expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ trigger_id: 'original', ...window }))
   })
 
-  it('records a rejected finish and its corrected partial in one Manager episode', async () => {
+  it('records rejected finishes and permits partial only after a real source failure in one Manager episode', async () => {
     const window = { window_start: '2026-09-16T18:00:00.000Z', window_end: '2026-09-17T18:00:00.000Z' }
     const confirm = vi.fn()
     const host = new DailyReflection({ key: KEY, store, now: () => window.window_end,
-      capture: async () => ({ records: [], gaps: [] }), read: async () => ({ content: '', gaps: [] }),
+      capture: async () => { throw new Error('inventory I/O failure') }, read: async () => ({ content: '', gaps: [] }),
       analysisWorkers: async () => [], confirm })
     let requests = 0
     const { adapter } = makeAdapter()
@@ -295,8 +295,14 @@ describe('ManagerLoop episode trace wiring', () => {
         expect(params.messages.at(-1)).toMatchObject({ toolResults: [{ is_error: true,
           content: expect.stringContaining('mem-invalid') }] })
       }
-      if (requests > 2) throw new Error('unexpected extra LLM request')
-      yield* chunksFromContent([{ type: 'tool_use', id: `finish-${requests}`, name: 'finish_daily_reflection', input: {
+      if (requests === 3) {
+        expect(params.messages.at(-1)).toMatchObject({ toolResults: [{ is_error: true,
+          content: expect.stringContaining('actionable_evidence_remaining') }] })
+        expect((await store.load(KEY)).dailyReflection?.result).toBeUndefined()
+      }
+      if (requests > 4) throw new Error('unexpected extra LLM request')
+      yield* chunksFromContent([{ type: 'tool_use', id: `call-${requests}`,
+        name: requests === 3 ? 'list_reflection_records' : 'finish_daily_reflection', input: requests === 3 ? {} : {
         outcome: 'partial', summary: 'execution evidence unavailable', pending_items: ['continue evidence review'],
         evidence_refs: requests === 1 ? ['mem-invalid'] : [],
       } }], 'tool_use')
@@ -308,8 +314,11 @@ describe('ManagerLoop episode trace wiring', () => {
       targetSession: { channel_id: 'wechat', session_id: 'sess-trace', type: 'private' } }))
     const episode = traceStore.getManagerEpisode(result.episodeId)!
     const tools = episode.spans.filter(span => span.type === 'tool_call')
-    expect(tools.map(span => span.status)).toEqual(['failed', 'completed'])
+    expect(requests).toBe(4)
+    expect(tools.map(span => span.status)).toEqual(['failed', 'failed', 'failed', 'completed'])
     expect(JSON.stringify(tools[0])).toContain('unread_evidence_reference')
+    expect(JSON.stringify(tools[1])).toContain('actionable_evidence_remaining')
+    expect(JSON.stringify(tools[2])).toContain('inventory I/O failure')
     expect(episode.outcome?.daily_reflection).toMatchObject({ outcome: 'partial', evidence_refs: [],
       validation_errors: ['directory_not_fully_read'] })
     const state = await store.load(KEY)
