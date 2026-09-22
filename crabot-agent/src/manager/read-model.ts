@@ -32,6 +32,8 @@
 import type { PaginationParams, PaginatedResult } from 'crabot-shared'
 import type { ManagerKey, LedgerWorker, TaskStatus } from '../workers/harness/ledger-types.js'
 import { isDecisionVisibleWorker } from '../workers/harness/task-status.js'
+import type { WorkerViewSelection, WorkerViewKind } from './worker-candidates.js'
+import { workerViewKinds } from './worker-candidates.js'
 import type { NormalizedTraceEvent, WorkerImplId, WorkerTerminalView, IncarnationId, WorkerSubagentSummary } from '../workers/types.js'
 
 /**
@@ -55,7 +57,7 @@ export interface ListWorkersAdminParams {
   impl?: WorkerImplId
   manager_key?: ManagerKey
   time_range?: TimeRange
-  /** 默认 false：只返回 Manager 决策视野（非终态）。 */
+  /** 默认 false：执行中、排队、按项目限额候选及异常；true 显式列出历史。 */
   include_terminal?: boolean
   /** 默认 false：legacy 导入历史需显式进入。 */
   include_legacy?: boolean
@@ -68,6 +70,11 @@ export interface ListWorkersAdminResult extends PaginatedResult<LedgerWorker> {
   total_active: number
   total_terminal: number
   total_legacy: number
+  total_candidates: number
+  total_attention: number
+  total_running: number
+  total_queued: number
+  worker_views: Record<string, WorkerViewKind | 'retiring'>
 }
 
 /** §8.3 get_worker_detail:单 worker 全量(台账条目 + 化身链) */
@@ -183,7 +190,8 @@ function normalizePositive(value: number | undefined, fallback: number): number 
  */
 export function filterAndPageWorkers(
   all: ReadonlyArray<LedgerWorkerEntry>,
-  params: ListWorkersAdminParams
+  params: ListWorkersAdminParams,
+  views?: ReadonlyMap<ManagerKey, WorkerViewSelection>
 ): ListWorkersAdminResult {
   const statuses =
     params.status === undefined
@@ -216,10 +224,30 @@ export function filterAndPageWorkers(
   const totalTerminal = scoped.length - totalActive
   const totalLegacy = scoped.filter((entry) => entry.worker.legacy_source !== undefined).length
 
+  const selectedDefault = new Set<string>()
+  const candidateIds = new Set<string>()
+  const attentionIds = new Set<string>()
+  const executingIds = new Set<string>()
+  const kinds = new Map<string, WorkerViewKind>()
+  for (const view of views?.values() ?? []) {
+    for (const [id, kind] of workerViewKinds(view)) kinds.set(id, kind)
+    for (const worker of [...view.executing, ...view.candidates, ...view.attention]) selectedDefault.add(worker.worker_id)
+    for (const worker of view.executing) executingIds.add(worker.worker_id)
+    for (const worker of view.candidates) candidateIds.add(worker.worker_id)
+    for (const worker of view.attention) attentionIds.add(worker.worker_id)
+  }
+  for (const { managerKey, worker } of all) {
+    if (views?.has(managerKey)) continue
+    kinds.set(worker.worker_id, worker.task.status === 'closed' ? 'history' : worker.task.status === 'halted' ? 'attention' : 'executing')
+    if (worker.task.status === 'halted') attentionIds.add(worker.worker_id)
+    if (worker.task.status === 'queued' || worker.task.status === 'running') executingIds.add(worker.worker_id)
+  }
+
   // filter 总是产出新数组,后面的 sort 不会污染入参
   const matched = scoped.filter((entry) => {
     const worker = entry.worker
     if (!params.include_terminal && !isDecisionVisibleWorker(worker.task.status)) return false
+    if (!params.include_terminal && views?.has(entry.managerKey) && !selectedDefault.has(worker.worker_id)) return false
     // active legacy 已通过 v3 continuation 成为真实可续跑 worker，必须与 Manager 决策视野一致。
     // include_legacy 只控制终态 legacy 历史。
     if (!params.include_legacy && worker.legacy_source !== undefined && !isDecisionVisibleWorker(worker.task.status)) return false
@@ -240,12 +268,18 @@ export function filterAndPageWorkers(
   )
   const totalItems = matched.length
   const offset = (page - 1) * pageSize
+  const items = matched.slice(offset, offset + pageSize).map(entry => entry.worker)
 
   return {
-    items: matched.slice(offset, offset + pageSize).map((entry) => entry.worker),
+    items,
+    worker_views: Object.fromEntries(items.map(worker => [worker.worker_id, kinds.get(worker.worker_id) ?? 'attention'])),
     total_active: totalActive,
     total_terminal: totalTerminal,
     total_legacy: totalLegacy,
+    total_candidates: scoped.filter((entry) => candidateIds.has(entry.worker.worker_id)).length,
+    total_attention: scoped.filter((entry) => attentionIds.has(entry.worker.worker_id)).length,
+    total_running: scoped.filter(({ worker }) => executingIds.has(worker.worker_id) && worker.task.status !== 'queued').length,
+    total_queued: scoped.filter(({ worker }) => executingIds.has(worker.worker_id) && worker.task.status === 'queued').length,
     pagination: {
       page,
       page_size: pageSize,
@@ -275,6 +309,10 @@ export interface ManagerAdminSummary {
   last_activity_at?: string
   recent_activity_summary?: string
   active_worker_count: number
+  continuation_candidate_count: number
+  worker_attention_count: number
+  running_worker_count: number
+  queued_worker_count: number
   workboard: ManagerWorkboardSummary | { status: 'unknown' }
 }
 
@@ -292,8 +330,12 @@ export interface ManagerSummarySources {
   readonly traceKeys: ReadonlyArray<ManagerKey>
   /** 每 key 最近 episode 的时间与人话 trigger summary。 */
   readonly episodeStats: (key: ManagerKey) => { latestStartedAt?: string; latestSummary?: string }
-  /** 与 list_workers 默认视野共用判据后的 active worker 数。 */
+  /** 全部非终态 Worker 数，保留兼容含义，不代表候选数。 */
   readonly activeWorkerCount: (key: ManagerKey) => number
+  readonly continuationCandidateCount: (key: ManagerKey) => number
+  readonly workerAttentionCount: (key: ManagerKey) => number
+  readonly runningWorkerCount: (key: ManagerKey) => number
+  readonly queuedWorkerCount: (key: ManagerKey) => number
   /** 内存 registry 当前 running manager 的最近活跃毫秒（补充尚未首次 save 的当前 manager）。 */
   readonly runningLastActiveAtMs: (key: ManagerKey) => number | undefined
   /** 任务板摘要由 Agent 内部同一 Store 读取；失败必须显式标记 unknown。 */
@@ -326,6 +368,10 @@ export function buildManagerAdminSummaries(
       ...(lastActivity ? { last_activity_at: lastActivity } : {}),
       ...(stats.latestSummary ? { recent_activity_summary: stats.latestSummary } : {}),
       active_worker_count: sources.activeWorkerCount(key),
+      continuation_candidate_count: sources.continuationCandidateCount(key),
+      worker_attention_count: sources.workerAttentionCount(key),
+      running_worker_count: sources.runningWorkerCount(key),
+      queued_worker_count: sources.queuedWorkerCount(key),
       workboard: sources.workboardSummary(key),
     }
   })

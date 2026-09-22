@@ -512,6 +512,19 @@ describe('AgentHandler bg-entities admin RPC', () => {
     expect(completedOnly.every(e => e.status === 'completed')).toBe(true)
   })
 
+  it('listWorkerBackground preserves actual stop times across mainline and fork ownership', async () => {
+    const endedAt = '2026-09-21T12:00:00.000Z'
+    vi.spyOn(wh.getBuiltinBgEntityRegistry(), 'list').mockResolvedValue([
+      makeShellRecord({ entity_id: 'mainline', owner: { friend_id: 'friend-1', worker_id: 'worker-1' }, status: 'completed', ended_at: endedAt }),
+      makeShellRecord({ entity_id: 'fork', owner: { friend_id: 'friend-1', worker_id: 'worker-1', incarnation_id: 'fork-1' } }),
+      makeShellRecord({ entity_id: 'other', owner: { friend_id: 'friend-1', worker_id: 'worker-2' } }),
+    ])
+    expect(await wh.listWorkerBackground('worker-1')).toEqual([
+      { entity_id: 'mainline', status: 'completed', ended_at: endedAt },
+      { entity_id: 'fork', status: 'running', ended_at: null },
+    ])
+  })
+
   it('killBgEntity returns ok:false for non-existent entity', async () => {
     const result = await wh.killBgEntity('shell_nonexistent')
     expect(result.ok).toBe(false)

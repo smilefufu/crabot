@@ -26,7 +26,7 @@ describe('Manager episode human message history', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     vi.mocked(agentObservabilityService.listManagers).mockResolvedValue({ items: [], pagination: page })
-    vi.mocked(agentObservabilityService.listWorkers).mockResolvedValue({ items: [], pagination: page, total_active: 0, total_terminal: 0, total_legacy: 0 })
+    vi.mocked(agentObservabilityService.listWorkers).mockResolvedValue({ items: [], pagination: page, total_active: 0, total_terminal: 0, total_legacy: 0, total_candidates: 0, total_attention: 0, total_running: 0, total_queued: 0, worker_views: {} })
     vi.mocked(agentObservabilityService.getManagerInboundStatus).mockResolvedValue({ manager_key: 'test::session', snapshot_at: '2026-09-20T14:11:00.000Z', items: [] })
     vi.mocked(agentObservabilityService.listManagerEpisodes).mockResolvedValue({ items: [episode], pagination: page })
   })

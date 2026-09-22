@@ -114,6 +114,7 @@ import {
   type LedgerWorker,
   type ManagerKey,
   type TaskHaltEvidence,
+  type IncarnationStopEvidence,
   type TaskHaltReason,
   type TaskStatus,
   type WorkerRecoveryNotice,
@@ -151,6 +152,7 @@ import {
   WorkerControlOperationStore,
   type WorkerControlOperation,
   type WorkerControlOperationKind,
+  type WorkerControlOperationActor,
   type WorkerControlOperationStatus,
 } from './worker-control-operation-store'
 import { WorkerUiSnapshotStore, type WorkerUiActionId, type WorkerUiSnapshot } from './worker-ui-snapshot-store'
@@ -159,6 +161,8 @@ import { isWorkerRuntimeEvent } from '../builtin/runtime-observation.js'
 import { readLegacyTraces } from '../legacy-source-reader.js'
 import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
 import { applyStatusTransition, canTransition, isTerminalStatus } from './task-status'
+import { selectWorkerView, resolveWorkerProjects, type WorkerExecutionFact, type WorkerViewSelection, type WorkerViewFacts } from '../../manager/worker-candidates.js'
+import type { ManagerWorkboard } from '../../manager/workboard-store.js'
 import { join, dirname } from 'path'
 import {
   InputDeliveryStore,
@@ -749,6 +753,12 @@ export interface HarnessDeps {
   }) => Promise<{ token: string; expires_at: string }>
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
+  readonly listWorkerBackground?: (workerId: string) => Promise<Array<{
+    entity_id: string
+    status: 'running' | 'completed' | 'failed' | 'killed' | 'stalled'
+    ended_at: string | null
+  }>>
+  readonly onContinuationSweep?: () => Promise<void>
   /** Validates an opaque legacy continuation credential immediately before side effects. */
   readonly validateLegacyContinuationAuth?: (auth: LegacyContinuationAuth) => Promise<boolean>
   /** Stops background recovery delivery from creating new work during shutdown. */
@@ -883,6 +893,8 @@ function continuationDelivery(
 
 export class WorkerHarness {
   private readonly pendingBgNotifications = new Map<string, number>()
+  private readonly continuationObservations = new Map<string, { key: string; fact: WorkerExecutionFact; stoppedAt?: string; stopUnverified?: boolean }>()
+  private readonly continuationProjects = new Map<ManagerKey, { scope: string; projects: WorkerViewFacts['projects'] }>()
   private readonly contextStore: WorkerContextStore
   private readonly gitInspector = new WorkspaceGitInspector()
   private readonly inputDeliveryStore: InputDeliveryStore
@@ -3515,6 +3527,7 @@ export class WorkerHarness {
         impl: mainline.impl,
         seq: mainline.seq,
         kind: 'ui_response',
+        actor: 'manager',
         created_at: acceptedAt,
       })
       const executing = await this.controlOperationStore.transition(
@@ -4139,6 +4152,219 @@ export class WorkerHarness {
 
   async listWorkers(managerKey: ManagerKey): Promise<LedgerWorker[]> {
     return this.deps.ledger.listWorkers(managerKey)
+  }
+
+  async workerView(workers: readonly LedgerWorker[], board: ManagerWorkboard, projects?: WorkerViewFacts['projects']): Promise<WorkerViewSelection> {
+    const execution = new Map<string, WorkerExecutionFact>()
+    const blocked = new Set<string>()
+    for (const worker of workers) {
+      if (worker.task.status === 'closed') continue
+      execution.set(worker.worker_id, await this.workerExecutionFact(worker))
+      const operations = await this.controlOperationStore.list(worker.worker_id)
+      const mainline = mainlineIncarnation(worker)
+      if (operations.some(operation => operation.kind === 'stop' && operation.status !== 'succeeded'
+        && operation.incarnation_id === mainline?.incarnation_id)) blocked.add(worker.worker_id)
+    }
+    const snapshot = this.continuationProjects.get(board.manager_key)
+    // Lists never launch Git inspection; missing scope/workspace observations remain attention.
+    const observedProjects = snapshot?.scope === JSON.stringify(board.objectives) ? snapshot.projects : new Map()
+    return selectWorkerView(workers, board, { projects: projects ?? observedProjects, execution, blocked })
+  }
+
+  private continuationObservationKey(worker: LedgerWorker): string {
+    return JSON.stringify([worker.incarnations, worker.incarnations.map(incarnation =>
+      this.stateChangeRevisions.get(`${worker.worker_id}#${incarnation.impl}#${incarnation.seq}`) ?? 0)])
+  }
+
+  /** Native reads can rebuild CLI runtimes; probe only while holding this Worker's lock. */
+  private async nativeContinuationFact(worker: LedgerWorker, probe: boolean): Promise<WorkerExecutionFact> {
+    const key = this.continuationObservationKey(worker)
+    if (!probe) {
+      const observation = this.continuationObservations.get(worker.worker_id)
+      if (observation?.key === key) return observation.fact
+      return worker.incarnations.some(incarnation => isExecutableIncarnation(incarnation)
+        && (!this.deps.adapters.has(incarnation.impl) || this.deps.adapters.get(incarnation.impl)?.listSubagents)) ? 'unknown' : 'idle'
+    }
+    let fact: WorkerExecutionFact = 'idle'
+    let stoppedAt: string | undefined
+    let stopUnverified = false
+    try {
+      for (const incarnation of worker.incarnations) {
+        if (!isExecutableIncarnation(incarnation)) continue
+        const adapter = this.deps.adapters.get(incarnation.impl)
+        if (!adapter) { fact = 'unknown'; continue }
+        if (incarnation.state === 'exited' && incarnation.impl !== 'builtin') continue
+        if (incarnation.state === 'running'
+          || (incarnation.state !== 'exited' && await adapter.state(handleForIncarnation(worker.worker_id, incarnation)) === 'running')) {
+          fact = 'running'; break
+        }
+        const children = await adapter.listSubagents?.(handleForIncarnation(worker.worker_id, incarnation)) ?? []
+        if (children.some(child => child.status === 'running')) { fact = 'running'; break }
+        if (children.some(child => child.status === 'unknown')) fact = 'unknown'
+        if (incarnation.impl !== 'builtin') {
+          for (const child of children) {
+            if (!child.ended_at || !Number.isFinite(Date.parse(child.ended_at))) stopUnverified = true
+            else if (!stoppedAt || Date.parse(child.ended_at) > Date.parse(stoppedAt)) stoppedAt = child.ended_at
+          }
+        }
+      }
+    } catch { fact = 'unknown' }
+    this.continuationObservations.set(worker.worker_id, { key, fact, stoppedAt, stopUnverified })
+    return fact
+  }
+
+  private async captureStopEvidence(workerId: string, halt: TaskHaltEvidence): Promise<IncarnationStopEvidence> {
+    try {
+      if (!this.deps.listWorkerBackground) {
+        return { halt, background: [], ...(this.deps.hasRunningBg ? { background_unverified: true } : {}) }
+      }
+      const background = (await this.deps.listWorkerBackground(workerId)).map(entity => ({
+        entity_id: entity.entity_id,
+        ...(entity.status !== 'running' && entity.status !== 'stalled' && entity.ended_at ? { ended_at: entity.ended_at } : {}),
+      }))
+      return { halt, background }
+    } catch {
+      return { halt, background: [], background_unverified: true }
+    }
+  }
+
+  /** Combine execution evidence, never the time at which a sweep happens to observe it. */
+  private async aggregateStopEvidence(worker: LedgerWorker): Promise<{ halt: TaskHaltEvidence; incarnations: Incarnation[] } | undefined> {
+    const mainline = mainlineIncarnation(worker)
+    if (!mainline || !isExecutableIncarnation(mainline)) return
+    const halt = mainline.stop_evidence?.halt ?? worker.task.halt
+    if (!halt || !Number.isFinite(Date.parse(halt.halted_at))) return
+    const observation = this.continuationObservations.get(worker.worker_id)
+    const native = observation?.key === this.continuationObservationKey(worker) ? observation : undefined
+    if (native?.stopUnverified) return
+    const times = [halt.halted_at]
+    if (mainline.stop_evidence?.execution_stopped_at) times.push(mainline.stop_evidence.execution_stopped_at)
+    if (native?.stoppedAt) times.push(native.stoppedAt)
+    const background = await this.deps.listWorkerBackground?.(worker.worker_id) ?? []
+    if (background.some(entity => entity.status === 'running' || entity.status === 'stalled')) return
+    const resolved = new Map<string, string>()
+    const currentBackground = new Map(background.map(entity => [entity.entity_id, entity.ended_at]))
+    for (const incarnation of worker.incarnations) {
+      if (!isExecutableIncarnation(incarnation)) continue
+      if (incarnation !== mainline && (incarnation.forked_from === undefined
+        || (incarnation.ended_at && Date.parse(incarnation.ended_at) < Date.parse(mainline.started_at)))) continue
+      const evidence = incarnation.stop_evidence
+      if (evidence?.background_unverified) return
+      if (incarnation.forked_from !== undefined) {
+        const endedAt = evidence?.halt.halted_at ?? incarnation.ended_at
+        if (!endedAt) return
+        times.push(endedAt)
+      }
+      for (const entity of evidence?.background ?? []) {
+        const endedAt = entity.ended_at ?? currentBackground.get(entity.entity_id)
+        if (!endedAt) return
+        resolved.set(entity.entity_id, endedAt)
+      }
+    }
+    for (const entity of background) {
+      if (!entity.ended_at) return
+      resolved.set(entity.entity_id, entity.ended_at)
+    }
+    times.push(...resolved.values())
+    if (times.some(time => !Number.isFinite(Date.parse(time)))) return
+    const haltedAt = times.reduce((latest, time) => Date.parse(time) > Date.parse(latest) ? time : latest)
+    const incarnations = worker.incarnations.map(incarnation => {
+      if (!isExecutableIncarnation(incarnation) || !incarnation.stop_evidence) return incarnation
+      const background = incarnation === mainline
+        ? [...resolved].map(([entity_id, ended_at]) => ({ entity_id, ended_at }))
+        : incarnation.stop_evidence.background.map(entity => ({ ...entity, ended_at: resolved.get(entity.entity_id) ?? entity.ended_at }))
+      return { ...incarnation, stop_evidence: { ...incarnation.stop_evidence, background,
+        ...(incarnation === mainline ? { execution_stopped_at: haltedAt } : {}),
+      } }
+    })
+    return { halt: { ...halt, halted_at: haltedAt }, incarnations }
+  }
+
+  private async workerExecutionFact(worker: LedgerWorker, probe = false): Promise<WorkerExecutionFact> {
+    if (worker.task.status === 'queued') return 'running'
+    if (this.hasPendingBgNotification(worker.worker_id)) return 'running'
+    let unknown = false
+    try {
+      const queries = await this.queryReceiptStore.list(worker.worker_id)
+      if (queries.some(receipt => receipt.state === 'starting' || receipt.state === 'running')) return 'running'
+      if (queries.some(receipt => receipt.failure?.certainty === 'unknown')) unknown = true
+      if ((await this.inputDeliveryStore.list(worker.worker_id)).some(receipt => receipt.state === 'pending')) unknown = true
+      if (await this.deps.hasRunningBg?.(worker.worker_id, 'all')) return 'running'
+      if (worker.incarnations.some(incarnation => incarnation.state === 'running')) return 'running'
+      const native = await this.nativeContinuationFact(worker, probe)
+      if (native === 'running') return 'running'
+      if (native === 'unknown' || this.continuationObservations.get(worker.worker_id)?.stopUnverified) unknown = true
+    } catch { unknown = true }
+    return unknown ? 'unknown' : 'idle'
+  }
+
+  async reconcileContinuationCandidates(
+    managerKey: ManagerKey,
+    board: ManagerWorkboard,
+    withCurrentBoard: (use: (current: ManagerWorkboard) => Promise<void>) => Promise<void> = use => use(board),
+  ): Promise<void> {
+    for (const { worker_id } of await this.deps.ledger.listWorkers(managerKey)) {
+      const changed = await this.withLock(worker_id, async () => {
+        const found = await this.deps.ledger.findWorker(worker_id)
+        const worker = found?.worker
+        if (!worker || worker.task.status === 'closed' || worker.task.status === 'queued') return
+        const mainline = mainlineIncarnation(worker)
+        if (!mainline || !isExecutableIncarnation(mainline)) return
+        const operations = await this.controlOperationStore.list(worker_id)
+        if (operations.some(operation => operation.kind === 'stop' && operation.status !== 'succeeded'
+          && operation.incarnation_id === mainline.incarnation_id)) return
+        const fact = await this.workerExecutionFact(worker, true)
+        if (fact === 'unknown') return
+        const status = fact === 'running' ? 'running' : 'halted'
+        if (status === worker.task.status && (status === 'running' || !mainline.stop_evidence)) return
+        let stop: Awaited<ReturnType<WorkerHarness['aggregateStopEvidence']>>
+        try { stop = status === 'halted' ? await this.aggregateStopEvidence(worker) : undefined }
+        catch { /* Unreadable execution evidence remains attention. */ }
+        if (status === 'halted' && !stop) {
+          this.continuationObservations.set(worker_id, { key: this.continuationObservationKey(worker), fact: 'unknown' })
+          return
+        }
+        if (status === worker.task.status && JSON.stringify(stop?.halt) === JSON.stringify(worker.task.halt)
+          && JSON.stringify(stop?.incarnations) === JSON.stringify(worker.incarnations)) return
+        const preserved = status === 'running' && !mainline.stop_evidence && worker.task.halt
+          ? await this.captureStopEvidence(worker_id, worker.task.halt) : undefined
+        const now = this.deps.now()
+        const updated = await this.deps.ledger.upsertWorker(managerKey, worker_id, previous => previous && ({
+          ...previous,
+          task: status === previous.task.status && stop ? { ...previous.task, halt: stop.halt }
+            : applyStatusTransition(previous.task, status, { now, ...(status === 'halted' ? {
+            halt: stop!.halt,
+          } : {}) }),
+          ...(stop ? { incarnations: stop.incarnations } : {}),
+          ...(preserved ? { incarnations: patchIncarnationBySeq(previous.incarnations, mainline.impl, mainline.seq, { stop_evidence: preserved }) } : {}),
+          updated_at: now,
+        }))
+        const observation = this.continuationObservations.get(worker_id)
+        if (updated && observation) observation.key = this.continuationObservationKey(updated)
+        return updated && status !== worker.task.status ? { seq: mainline.seq, status: updated.task.status } : undefined
+      })
+      if (changed) {
+        const event = this.buildEvent(worker_id, changed.seq, 'state_changed', { source: 'execution_aggregate', to: changed.status }, changed.status)
+        await this.getEventLog(worker_id).append(event)
+        // Autonomous reconciliation must not await the Manager episode it wakes.
+        void Promise.resolve(this.deps.onEvent?.(event)).catch(error => console.error('[WorkerHarness] aggregate notification failed:', error))
+      }
+    }
+    const workers = await this.deps.ledger.listWorkers(managerKey)
+    const projects = await resolveWorkerProjects(workers, board)
+    this.continuationProjects.set(managerKey, { scope: JSON.stringify(board.objectives), projects })
+    const view = await this.workerView(workers, board, projects)
+    for (const worker of view.excludedIdle) {
+      try {
+        await withCurrentBoard(async current => {
+          // A changed scope is handled by its queued sweep, never by this stale snapshot.
+          if (JSON.stringify(current) !== JSON.stringify(board)) return
+          await this.retireWorkerForContinuation(worker.worker_id, current, { view, projects })
+        })
+      } catch (error) {
+        console.error(`[WorkerHarness] continuation eviction failed for ${worker.worker_id}:`, error)
+      }
+    }
   }
 
   /**
@@ -4808,6 +5034,7 @@ export class WorkerHarness {
       await this.reconcileQueryEstablishmentOperations()
       await this.deliverQueryOperationNotifications()
       await this.reconcileControlOperationsOnStartup()
+      await this.deps.onContinuationSweep?.()
       const allWorkers = await this.deps.ledger.listAllWorkers()
       for (const { worker } of allWorkers) {
         if (isTerminalStatus(worker.task.status)) continue
@@ -4965,7 +5192,7 @@ export class WorkerHarness {
       // 完整一致的停止记录——无论是正常停(turn_end/worker_finalized,等 manager 处置)
       // 还是已记录的崩溃(crashed,recovery notice 已落),处置责任都在 manager,
       // 重启对账不得重复判定、重复打扰。
-      if (worker.task.status === 'halted' && mainline.state === 'exited') {
+      if (mainline.state === 'exited' && (worker.task.status === 'halted' || mainline.stop_evidence)) {
         return 'unchanged'
       }
 
@@ -5143,6 +5370,54 @@ export class WorkerHarness {
     return this.requestWorkerControlOperation(workerId, 'stop')
   }
 
+  private async probeContinuationCandidate(worker: LedgerWorker): Promise<void> {
+    if (await this.workerExecutionFact(worker, true) !== 'idle') return
+    const mainline = mainlineIncarnation(worker)
+    if (!mainline || !isExecutableIncarnation(mainline) || !mainline.stop_evidence) return
+    let stop: Awaited<ReturnType<WorkerHarness['aggregateStopEvidence']>>
+    try { stop = await this.aggregateStopEvidence(worker) } catch { /* Defer eviction until evidence can be read. */ }
+    if (!stop || JSON.stringify(stop.halt) !== JSON.stringify(worker.task.halt)) {
+      this.continuationObservations.set(worker.worker_id, { key: this.continuationObservationKey(worker), fact: 'unknown' })
+    }
+  }
+
+  /** System-owned stop used when an idle continuation slot is evicted. */
+  async retireWorkerForContinuation(
+    workerId: string,
+    board: ManagerWorkboard,
+    snapshot?: { view: WorkerViewSelection; projects: WorkerViewFacts['projects'] },
+  ): Promise<WorkerControlOperation | undefined> {
+    if (!snapshot) {
+      const workers = await this.deps.ledger.listWorkers(board.manager_key)
+      const projects = await resolveWorkerProjects(workers, board)
+      snapshot = { view: await this.workerView(workers, board, projects), projects }
+    }
+    if (!snapshot.view.excludedIdle.some(worker => worker.worker_id === workerId)) return
+    const project = snapshot.view.projectByWorker.get(workerId)
+    const peers = snapshot.view.candidates.filter(worker => project !== undefined && snapshot.view.projectByWorker.get(worker.worker_id) === project)
+    // At most three same-project witnesses justify eviction; probe no unrelated Workers.
+    for (const peer of peers) await this.withLock(peer.worker_id, async () => {
+      const current = await this.deps.ledger.findWorker(peer.worker_id)
+      if (current && current.worker.task.status !== 'closed') await this.probeContinuationCandidate(current.worker)
+    })
+    return this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found || found.worker.task.status !== 'halted' || this.deps.isClosing?.()) return
+      await this.probeContinuationCandidate(found.worker)
+      const workers = [found.worker]
+      for (const peer of peers) {
+        const current = await this.deps.ledger.findWorker(peer.worker_id)
+        if (current) workers.push(current.worker)
+      }
+      const view = await this.workerView(workers, board, snapshot.projects)
+      const worker = view.excludedIdle.find(item => item.worker_id === workerId)
+      if (!worker || this.deps.isClosing?.()) return
+      const incarnation = requireMainlineIncarnation(worker)
+      if (!isExecutableIncarnation(incarnation)) return
+      return this.executeControlOperationLocked(board.manager_key, worker, incarnation, 'stop', { actor: 'system' })
+    })
+  }
+
   private async requestWorkerControlOperation(
     workerId: string,
     kind: WorkerControlOperationKind,
@@ -5173,6 +5448,7 @@ export class WorkerHarness {
     options?: {
       readonly handoffSupersede?: boolean
       readonly inputDeadline?: { readonly deadlineAt: number; readonly deliveryId: string }
+      readonly actor?: WorkerControlOperationActor
     },
   ): Promise<WorkerControlOperation> {
     this.assertSynchronousInputDeadline(options?.inputDeadline?.deadlineAt, options?.inputDeadline?.deliveryId)
@@ -5186,6 +5462,8 @@ export class WorkerHarness {
       impl: incarnation.impl,
       seq: incarnation.seq,
       kind,
+      actor: options?.actor ?? 'manager',
+      ...(options?.actor === 'system' ? { reason: 'continuation_candidate_evicted' as const } : {}),
       created_at: this.deps.now(),
     }, options)
     const executing = await this.controlOperationStore.transition(
@@ -5350,11 +5628,24 @@ export class WorkerHarness {
       if (await this.deps.hasRunningBg?.(operation.worker_id, 'all')) {
         return this.settleControlOperation(current, 'unknown', 'worker-owned background execution remains active')
       }
+      const background = await this.deps.listWorkerBackground?.(operation.worker_id) ?? []
+      if (background.some(entity => entity.status === 'running' || entity.status === 'stalled')) {
+        return this.settleControlOperation(current, 'unknown', 'worker-owned background execution is not confirmed stopped')
+      }
+      for (const item of found.worker.incarnations) {
+        if (item.impl !== 'builtin') continue
+        const builtin = this.deps.adapters.get(item.impl)
+        if (!builtin) return this.settleControlOperation(current, 'unknown', 'builtin adapter unavailable')
+        const children = await builtin.listSubagents?.(handleForIncarnation(operation.worker_id, item)) ?? []
+        if (children.some(child => child.status === 'running' || child.status === 'unknown')) {
+          return this.settleControlOperation(current, 'unknown', 'worker child execution is not confirmed stopped')
+        }
+      }
       if (handoffSupersede) {
         await this.supersedeAfterVerifiedStop(found.managerKey, found.worker, incarnation)
         return this.settleControlOperation(current, 'succeeded', 'source and registered fork stop requests verified for handoff')
       }
-      await this.cancelAfterVerifiedStop(found.managerKey, found.worker, incarnation)
+      await this.cancelAfterVerifiedStop(found.managerKey, found.worker, incarnation, operation.actor)
       // A persisted successful stop must never precede the corresponding cancelled task. If the
       // process exits after cancellation, startup reconciliation completes the verifying op.
       return this.settleControlOperation(
@@ -5371,6 +5662,7 @@ export class WorkerHarness {
     managerKey: ManagerKey,
     worker: LedgerWorker,
     incarnation: ExecutableIncarnation,
+    actor: WorkerControlOperationActor = 'manager',
   ): Promise<void> {
     if (isTerminalStatus(worker.task.status)) return
     const now = this.deps.now()
@@ -5378,7 +5670,13 @@ export class WorkerHarness {
       if (!previous || isTerminalStatus(previous.task.status)) return previous
       const mainline = mainlineIncarnation(previous)
       if (!mainline || mainline.incarnation_id !== incarnation.incarnation_id) return previous
-      const task = applyStatusTransition(previous.task, 'closed', { now, closed: { by: 'manager_stop' } })
+      const task = applyStatusTransition(previous.task, 'closed', {
+        now,
+        closed: {
+          by: actor === 'system' ? 'system' : 'manager_stop',
+          ...(actor === 'system' ? { note: 'continuation candidate eviction' } : {}),
+        },
+      })
       const incarnations = previous.incarnations.map((item) => {
         if (item.forked_from !== undefined && isExecutableIncarnation(item) && item.state !== 'exited') {
           return { ...item, state: 'exited' as const, ended_at: now, ended_reason: 'killed' as const }
@@ -5448,7 +5746,7 @@ export class WorkerHarness {
       this.deps.now(),
       detail,
     )
-    if (operation.kind === 'stop' && status === 'unknown') {
+    if (operation.kind === 'stop' && (status === 'unknown' || (status === 'failed' && operation.actor === 'system'))) {
       // 协议 §5.2:停止核验失败(unknown)→ 任务落 halted 并注明停止未核验。
       // 不假装已停止,也不宣称失败;operation_settled 事件(下方投递)会唤醒 manager 处置。
       try {
@@ -5577,6 +5875,7 @@ export class WorkerHarness {
     const prep = await this.withLock(workerId, async (): Promise<QueryPrep> => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
+      if (found.worker.task.status === 'closed') throw new TaskCancelledError(workerId)
       const incarnation = requireExecutableIncarnation(requireMainlineIncarnation(found.worker))
       const queryId = randomUUID()
       const createdAt = this.deps.now()
@@ -5947,6 +6246,11 @@ export class WorkerHarness {
           }
         }
       }
+      let stopEvidence: IncarnationStopEvidence | undefined
+      if (halt) {
+        stopEvidence = target.stop_evidence && target.state === external && !report?.completionSource
+          ? target.stop_evidence : await this.captureStopEvidence(h.worker_id, halt)
+      }
       const committed = await this.deps.ledger.upsertWorker(managerKey, h.worker_id, (prev) => {
         if (!prev) return undefined
         let task: LedgerWorker['task']
@@ -5964,6 +6268,7 @@ export class WorkerHarness {
         }
         const incarnations = patchIncarnationBySeq(prev.incarnations, h.impl, h.seq, {
           state: external,
+          stop_evidence: stopEvidence,
           session_ref: h.session_ref || target.session_ref,
           ...(external === 'exited' ? { ended_at: now, ended_reason: report?.endReason ?? 'crashed' } : {}),
         })
@@ -6036,10 +6341,11 @@ export class WorkerHarness {
       const now = this.deps.now()
 
       if (target.forked_from !== undefined) {
-        // fork 化身(一次性侧问分支)自己的生命周期只更新它自己的化身条目,不影响主线
-        // task.status——protocol-agent-v3 §5.3"fork 不影响主线"在这里的具体体现:即使这是
-        // fork 化身的终态回调,也绝不能像"当前化身"那样去推进 task 状态机。
+        // Fork state does not change the mainline carrier, but contributes to Worker execution.
         if (target.state === 'exited') return // 已终态,迟到回调忽略
+        const stopEvidence = state === 'running' ? undefined : await this.captureStopEvidence(h.worker_id, {
+          halted_at: now, halt_reason: endReason === 'crashed' ? 'crashed' : 'turn_end',
+        })
         await this.deps.ledger.upsertWorker(managerKey, h.worker_id, (prev) => {
           if (!prev) return undefined
           // session_ref 现读现取(h.session_ref,不是构造 handle 时闭包住的旧值)——
@@ -6052,8 +6358,8 @@ export class WorkerHarness {
             h.impl,
             h.seq,
             state === 'exited'
-              ? { state, ended_at: now, ended_reason: endReason, session_ref: h.session_ref }
-              : { state, session_ref: h.session_ref }
+              ? { state, ended_at: now, ended_reason: endReason, session_ref: h.session_ref, stop_evidence: stopEvidence }
+              : { state, session_ref: h.session_ref, stop_evidence: stopEvidence }
           )
           return { ...prev, incarnations, updated_at: now }
         })
@@ -6133,7 +6439,7 @@ export class WorkerHarness {
               : endReason === undefined ? { detail: 'exited_without_end_reason' } : {}),
           }
           : undefined
-      const nextStatus: TaskStatus = preserveTaskForStop
+      let nextStatus: TaskStatus = preserveTaskForStop
         ? worker.task.status
         : state === 'running'
           ? 'running'
@@ -6141,9 +6447,26 @@ export class WorkerHarness {
             ? 'running' // 占位:任务状态由化身链新成员决定(与既有语义一致)
             : state === 'exited' && endReason === 'killed'
               ? 'closed' // manager 发起的停止,事实成立即关闭
-              : state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
+              : (state === 'idle' || state === 'exited') && (this.hasPendingBgNotification(h.worker_id)
+                || worker.incarnations.some(item => item.forked_from !== undefined && item.state === 'running')
+                || await this.deps.hasRunningBg?.(h.worker_id, 'all'))
                 ? 'running'
                 : 'halted'
+      let stopEvidence: IncarnationStopEvidence | undefined
+      if (halt) {
+        const unchanged = target.stop_evidence && target.state === state && !report?.completionSource
+          && haltSeverity(target.stop_evidence.halt.halt_reason) >= haltSeverity(halt.halt_reason)
+        stopEvidence = unchanged ? target.stop_evidence : await this.captureStopEvidence(h.worker_id, halt)
+      }
+      let aggregateStop: Awaited<ReturnType<WorkerHarness['aggregateStopEvidence']>>
+      if (nextStatus === 'halted') {
+        const projected = { ...worker, incarnations: patchIncarnationBySeq(worker.incarnations, h.impl, h.seq, {
+          state, stop_evidence: stopEvidence,
+          ...(state === 'exited' ? { ended_at: target.ended_at ?? now } : {}),
+        }) }
+        try { aggregateStop = await this.aggregateStopEvidence(projected) } catch { /* Keep unresolved execution visible. */ }
+        if (!aggregateStop && worker.task.status === 'running') nextStatus = 'running'
+      }
       // CLI 从 `waiting_action` 转回 `waiting_text` 时，公开协议层仍是 `idle`。
       // completionSource 才是回合边界的权威证据，不能因投影状态相同而过滤。
       const shouldCreateTurn = report?.completionSource !== undefined
@@ -6166,12 +6489,13 @@ export class WorkerHarness {
         // 同状态的 task 回调仍可能携带化身状态变化（例如 idle+owned bg
         // 应保持 task running）。只有两者都已经一致时才是无操作。
         const current = findIncarnation(prev, h.impl, h.seq)
-        if (nextStatus === prev.task.status && current?.state === state) return prev
+        if (nextStatus === prev.task.status && current?.state === state
+          && isExecutableIncarnation(current) && JSON.stringify(current.stop_evidence) === JSON.stringify(stopEvidence)) return prev
         let nextTask: LedgerWorker['task']
         if (nextStatus !== prev.task.status) {
           nextTask = applyStatusTransition(prev.task, nextStatus, {
             now,
-            ...(nextStatus === 'halted' && halt ? { halt } : {}),
+            ...(nextStatus === 'halted' && halt ? { halt: aggregateStop?.halt ?? halt } : {}),
             ...(nextStatus === 'closed' ? { closed: { by: 'manager_stop' as const } } : {}),
           })
         } else if (
@@ -6180,18 +6504,21 @@ export class WorkerHarness {
         ) {
           // 同为 halted 但停因升级(如 turn_end 后载体又 crashed):用更严重的新 evidence
           // 覆盖,不让台账停留在更良性的旧停因上;降级方向(良性覆盖严重)一律拒绝。
-          nextTask = { ...prev.task, halt }
+          nextTask = { ...prev.task, halt: aggregateStop?.halt ?? halt }
         } else {
           nextTask = prev.task
         }
         // session_ref 现读现取,同上面 fork 分支的注释。
+        const resolvedIncarnation = aggregateStop?.incarnations.find(item => item.incarnation_id === target.incarnation_id)
+        const resolvedEvidence = resolvedIncarnation && isExecutableIncarnation(resolvedIncarnation)
+          ? resolvedIncarnation.stop_evidence : stopEvidence
         const incarnations = patchIncarnationBySeq(
-          prev.incarnations,
+          aggregateStop?.incarnations ?? prev.incarnations,
           h.impl,
           h.seq,
           state === 'exited'
-            ? { state, ended_at: now, ended_reason: endReason, session_ref: h.session_ref }
-            : { state, session_ref: h.session_ref }
+            ? { state, ended_at: current?.ended_at ?? now, ended_reason: endReason, session_ref: h.session_ref, stop_evidence: resolvedEvidence }
+            : { state, session_ref: h.session_ref, stop_evidence: resolvedEvidence }
         )
         const recovery = state === 'exited' && endReason === 'crashed' && !preserveTaskForStop &&
           current?.forked_from === undefined && current?.state !== 'exited' && current?.incarnation_id

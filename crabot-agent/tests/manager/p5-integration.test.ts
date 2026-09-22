@@ -659,6 +659,44 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
   // --- ⑥ onStart 的启动对账 ---
 
+  it('候选淘汰等启动启用，之后任务板变更自动重算；Admin 列表只读', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const key: ManagerKey = 'wechat::candidate-session'
+    await stack.ledger.upsertWorker(key, 'w-candidate', () => makeLedgerWorker({ workerId: 'w-candidate', managerKey: key }))
+    const reconcile = vi.spyOn(stack.harness, 'reconcileContinuationCandidates').mockResolvedValue(undefined)
+    await stack.workboard.createObjective(key, { title: '保留目标', completion_criteria: ['验收'] })
+    expect(reconcile).not.toHaveBeenCalled()
+    await stack.startContinuationReconciliation()
+    expect(reconcile).toHaveBeenCalledWith(key, expect.objectContaining({ objectives: expect.any(Array) }), expect.any(Function))
+    reconcile.mockClear()
+    await rpc('list_workers_admin', {})
+    expect(reconcile).not.toHaveBeenCalled()
+    await stack.workboard.createObjective(key, { title: '范围变化', completion_criteria: ['验收'] })
+    await waitUntil(() => reconcile.mock.calls.length > 0)
+  })
+
+  it('候选探测未完成时仍可读取和修改任务板', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const key: ManagerKey = 'wechat::candidate-unblocked-board'
+    await stack.ledger.upsertWorker(key, 'w-unblocked', () => makeLedgerWorker({ workerId: 'w-unblocked', managerKey: key }))
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const reconcile = vi.spyOn(stack.harness, 'reconcileContinuationCandidates').mockImplementationOnce(() => pending).mockResolvedValue(undefined)
+    const startup = stack.startContinuationReconciliation()
+    await waitUntil(() => reconcile.mock.calls.length === 1)
+    try {
+      const access = stack.workboard.createObjective(key, { title: '探测时更新', completion_criteria: ['验收'] })
+        .then(() => stack.workboard.load(key))
+      const result = await Promise.race([access, new Promise<undefined>(resolve => setTimeout(resolve, 200))])
+      expect(result?.objectives[0].title).toBe('探测时更新')
+    } finally {
+      release()
+      await startup
+    }
+  })
+
   it('启动只登记未完成 Manager 检查点，丢弃已完成 episode 的迟到检查点', async () => {
     boot()
     const stack = internals.managerStack!
@@ -697,6 +735,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     const release = vi.fn().mockResolvedValue(undefined)
     internals.agentHandler = { releaseRecoveredWorkerEntityExits: release } as any
     const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
+    const candidates = vi.spyOn(stack, 'startContinuationReconciliation')
     const resume = vi.spyOn(stack.registry, 'resumeInterruptedEpisodes').mockResolvedValue(undefined)
     vi.spyOn(console, 'warn').mockImplementation(() => {})
 
@@ -705,6 +744,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
     expect(sweep).toHaveBeenCalledOnce()
     expect(resume).toHaveBeenCalledOnce()
+    expect(candidates).not.toHaveBeenCalled()
   })
 
   it('Worker 对账完成后才恢复 Manager，Manager LLM 不阻塞后台恢复和巡检', async () => {
@@ -724,6 +764,60 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     release()
     await waitUntil(() => sweep.mock.calls.length === 1)
     expect(resume).toHaveBeenCalledOnce()
+  })
+
+  it('候选淘汰等待对账后才启用，但未完成的 sweep 不阻塞恢复通知和活性巡检', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const key: ManagerKey = 'wechat::candidate-startup'
+    await stack.ledger.upsertWorker(key, 'w-startup', () => makeLedgerWorker({ workerId: 'w-startup', managerKey: key }))
+    let finishReconciliation!: () => void
+    const reconciliationGate = new Promise<void>(resolve => { finishReconciliation = resolve })
+    const reconciliation = vi.spyOn(stack.harness, 'reconcileOnStartup').mockImplementation(async () => {
+      await reconciliationGate
+      return { revived: [], failed: [], unchanged: [] }
+    })
+    let finishCandidates!: () => void
+    const candidateGate = new Promise<void>(resolve => { finishCandidates = resolve })
+    const candidates = vi.spyOn(stack.harness, 'reconcileContinuationCandidates').mockImplementation(() => candidateGate)
+    const startCandidates = vi.spyOn(stack, 'startContinuationReconciliation')
+    const releaseBg = vi.fn().mockResolvedValue(undefined)
+    internals.agentHandler = { releaseRecoveredWorkerEntityExits: releaseBg } as any
+    const notices = vi.spyOn(stack.harness, 'reconcileRecoveryNoticesOnStartup').mockResolvedValue(undefined)
+    const workboardNotices = vi.spyOn(agent as any, 'replayPendingWorkboardNotices').mockResolvedValue(undefined)
+    const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
+
+    agent.startManagerStackReconciliation()
+    try {
+      await waitUntil(() => reconciliation.mock.calls.length === 1)
+      expect(startCandidates).not.toHaveBeenCalled()
+      expect(sweep).not.toHaveBeenCalled()
+      finishReconciliation()
+      await waitUntil(() => candidates.mock.calls.length === 1)
+      expect(releaseBg).toHaveBeenCalledOnce()
+      await waitUntil(() => sweep.mock.calls.length === 1, 1000)
+      expect(notices).toHaveBeenCalledOnce()
+      expect(workboardNotices).toHaveBeenCalledOnce()
+    } finally {
+      finishReconciliation()
+      finishCandidates()
+      await waitUntil(() => sweep.mock.calls.length === 1)
+      await stack.dispose()
+    }
+  })
+
+  it('候选淘汰启动失败只记录错误，不阻塞巡检或形成未处理拒绝', async () => {
+    boot()
+    const stack = internals.managerStack!
+    const failure = new Error('candidate ledger unavailable')
+    vi.spyOn(stack, 'startContinuationReconciliation').mockRejectedValue(failure)
+    const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    agent.startManagerStackReconciliation()
+    await waitUntil(() => sweep.mock.calls.length === 1)
+    await waitUntil(() => error.mock.calls.some(args => String(args[0]).includes('continuation reconciliation failed')))
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('continuation reconciliation failed'), failure)
   })
 
   it('启动对账收尾在 bg-shell 结算后后台投递恢复提醒，不阻塞活性巡检', async () => {

@@ -53,10 +53,18 @@ interface IncarnationBase {
 }
 
 export interface ExecutableIncarnation extends IncarnationBase {
+  stop_evidence?: IncarnationStopEvidence
   workspace_git?: WorkspaceGitObservation
   impl: WorkerImplId
   session_ref: string
   tmux_session?: string
+}
+
+export interface IncarnationStopEvidence {
+  execution_stopped_at?: string
+  halt: TaskHaltEvidence
+  background: Array<{ entity_id: string; ended_at?: string }>
+  background_unverified?: boolean
 }
 
 export interface LegacyIncarnation extends IncarnationBase {

@@ -496,6 +496,10 @@ describe('buildManagerAdminSummaries（P6-A §7）', () => {
         ? { latestStartedAt: '2026-08-01T10:00:00.000Z', latestSummary: 'worker 进展：部署中' }
         : { latestStartedAt: key === 'wechat::sess-c' ? '2026-08-02T10:00:00.000Z' : undefined },
       activeWorkerCount: (key) => (key === 'wechat::sess-b' ? 2 : 0),
+      continuationCandidateCount: () => 0,
+      workerAttentionCount: () => 0,
+      runningWorkerCount: () => 0,
+      queuedWorkerCount: () => 0,
       runningLastActiveAtMs: (key) => (key === 'wechat::sess-a' ? Date.parse('2026-08-03T10:00:00.000Z') : undefined),
       workboardSummary: (key) => key === 'wechat::sess-b'
         ? { status: 'ready', current_objective_count: 1, current_work_item_count: 2, blocked_work_item_count: 1 }
@@ -518,6 +522,10 @@ describe('buildManagerAdminSummaries（P6-A §7）', () => {
       diskSessionKeys: [], traceKeys: [],
       episodeStats: () => ({}),
       activeWorkerCount: () => 0,
+      continuationCandidateCount: () => 0,
+      workerAttentionCount: () => 0,
+      runningWorkerCount: () => 0,
+      queuedWorkerCount: () => 0,
       runningLastActiveAtMs: () => undefined,
       workboardSummary: () => ({ status: 'unknown' }),
     }, { page: 0, page_size: 99999 })

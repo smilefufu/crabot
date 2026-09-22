@@ -60,6 +60,11 @@ function listResult() {
     total_active: 0,
     total_terminal: 1,
     total_legacy: 0,
+    total_running: 0,
+    total_queued: 0,
+    total_candidates: 1,
+    total_attention: 0,
+    worker_views: { 'w-1234567890ab': 'candidate' },
     pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
   }
 }
@@ -75,6 +80,8 @@ describe('WorkersView', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText('任务标题')).toBeInTheDocument())
+    expect(screen.getByText('续办候选')).toBeInTheDocument()
+    expect(screen.getByText(/执行中 0 · 待执行 0 · 续办候选 1 · 异常 0/)).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('状态过滤'), { target: { value: 'halted' } })
     await waitFor(() => expect(mocked.listWorkers).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'halted', page: 1 })))
   })

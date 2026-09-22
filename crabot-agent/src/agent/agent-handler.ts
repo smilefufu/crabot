@@ -691,6 +691,11 @@ export class AgentHandler {
     )
   }
 
+  async listWorkerBackground(workerId: string): Promise<Pick<BgEntityRecord, 'entity_id' | 'status' | 'ended_at'>[]> {
+    return (await this.bgRegistry.list()).filter(entity => entity.owner.worker_id === workerId)
+      .map(({ entity_id, status, ended_at }) => ({ entity_id, status, ended_at }))
+  }
+
   async stopBuiltinShells(workerId: string, incarnationId?: string): Promise<void> {
     for (const entity of await this.bgRegistry.list({ type: 'shell', status: ['running'] })) {
       if (entity.type === 'shell' && entity.owner.worker_id === workerId && entity.owner.incarnation_id === incarnationId) {

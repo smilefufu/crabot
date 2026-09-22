@@ -242,6 +242,22 @@ function parseStatus(text: string, prefix: string): Pick<RepositoryState, 'chang
 
 /** Harness-owned read-only implementation shared by automatic sampling and both tool transports. */
 export class WorkspaceGitInspector {
+  /** Read only directory/repository identity; no status scan or history comparison. */
+  async projectIdentity(workspaceRoot: string): Promise<{ directory: string; commonDirectory?: string }> {
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), TIMEOUT_MS)
+    try {
+      const directory = await fs.realpath(workspaceRoot)
+      if (!(await fs.stat(directory)).isDirectory()) throw new InspectionError('workspace_unavailable')
+      const operation = new GitInspection(directory, workspaceRoot, abort, Date.now() + TIMEOUT_MS)
+      const identity = await operation.identity()
+      return { directory, ...(identity ? { commonDirectory: identity.commonDir } : {}) }
+    } finally {
+      clearTimeout(timer)
+      abort.abort()
+    }
+  }
+
   async inspect(workspaceRoot: string, baseline?: WorkspaceGitObservation): Promise<WorkspaceGitCheck> {
     let operation: GitInspection | undefined
     let timer: ReturnType<typeof setTimeout> | undefined

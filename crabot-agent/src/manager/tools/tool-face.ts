@@ -542,6 +542,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const workerTools = buildWorkerTools({
     authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot(deps.projectDocs, workspaceRoot, false),
     harness: deps.harness,
+    readWorkboard: (managerKey) => deps.workboard.store.load(managerKey),
     context: deps.workerContext,
     authorization: deps.authorization,
     validateMasterAuthorization: deps.validateMasterAuthorization,

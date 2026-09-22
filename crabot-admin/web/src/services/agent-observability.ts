@@ -26,6 +26,10 @@ export interface ManagerAdminSummary {
   last_activity_at?: string
   recent_activity_summary?: string
   active_worker_count: number
+  continuation_candidate_count: number
+  worker_attention_count: number
+  running_worker_count: number
+  queued_worker_count: number
   workboard: {
     status: 'ready'
     current_objective_count: number
@@ -181,6 +185,11 @@ export interface WorkerListResult extends PaginatedResult<LedgerWorker> {
   total_active: number
   total_terminal: number
   total_legacy: number
+  total_candidates: number
+  total_attention: number
+  total_running: number
+  total_queued: number
+  worker_views: Record<string, 'executing' | 'candidate' | 'attention' | 'history' | 'retiring'>
 }
 
 export interface WorkerTraceEvent {

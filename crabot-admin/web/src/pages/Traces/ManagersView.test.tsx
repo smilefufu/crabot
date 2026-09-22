@@ -44,6 +44,10 @@ describe('ManagersView', () => {
         last_activity_at: '2026-08-01T10:00:00.000Z',
         recent_activity_summary: '你问：部署好了吗',
         active_worker_count: 2,
+        running_worker_count: 1,
+        queued_worker_count: 0,
+        continuation_candidate_count: 1,
+        worker_attention_count: 0,
         workboard: { status: 'ready', current_objective_count: 2, current_work_item_count: 3, blocked_work_item_count: 1 },
       }],
       pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
@@ -57,7 +61,8 @@ describe('ManagersView', () => {
     const link = screen.getByText('微信·棉花糖 · 产品群').closest('a')!
     expect(link.getAttribute('href')).toBe(`/traces/managers/${encodeURIComponent('wechat::sess-1')}`)
     expect(screen.getByText('wechat::sess-1')).toBeInTheDocument()
-    expect(screen.getByText('2 个')).toBeInTheDocument()
+    expect(screen.getByText('执行中 1 个 · 待执行 0 个')).toBeInTheDocument()
+    expect(screen.getByText('续办 1 个')).toBeInTheDocument()
     expect(screen.getByText('2 个目标 · 3 项 · 1 项阻塞')).toBeInTheDocument()
     expect(screen.getByText('你问：部署好了吗')).toBeInTheDocument()
     expect(screen.queryByText('Episodes')).toBeNull()
@@ -578,9 +583,9 @@ describe('ManagerDetail', () => {
     )
     await waitFor(() => expect(screen.getByText('你：「开始部署」')).toBeInTheDocument())
     expect(screen.getByText('已停止待处置')).toBeInTheDocument()
-    expect(screen.queryByText('执行中')).toBeNull()
+    expect(screen.queryByText('执行中', { selector: ':not(dt)' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '展开 2 次历史进展' }))
-    expect(screen.getByText('执行中')).toBeInTheDocument()
+    expect(screen.getByText('执行中', { selector: ':not(dt)' })).toBeInTheDocument()
     expect(screen.getByText('排队')).toBeInTheDocument()
   })
 
@@ -648,7 +653,7 @@ describe('ManagerDetail', () => {
     await waitFor(() => expect(screen.getByText('你：「开始长任务」')).toBeInTheDocument())
     expect(screen.getByText(/失败原因：真实父失败/)).toBeInTheDocument()
     expect(screen.getAllByText('长任务').length).toBeGreaterThan(0)
-    expect(screen.getByText('执行中')).toBeInTheDocument()
+    expect(screen.getByText('执行中', { selector: ':not(dt)' })).toBeInTheDocument()
   })
 
   it('worker_event 自己派新 worker 时归到同一根链，不重复顶层卡且保留失败状态', async () => {
@@ -693,7 +698,7 @@ describe('ManagerDetail', () => {
 
   it('当前执行者来自独立 running 快照，未结束不冒充正在执行', async () => {
     mocked.listManagers = vi.fn().mockResolvedValue({
-      items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 测试会话', active_worker_count: 11, workboard: { status: 'ready', current_objective_count: 0, current_work_item_count: 0, blocked_work_item_count: 0 } }],
+      items: [{ manager_key: 'wechat::sess-1', display_name: '微信 · 测试会话', active_worker_count: 11, running_worker_count: 1, queued_worker_count: 0, continuation_candidate_count: 3, worker_attention_count: 7, workboard: { status: 'ready', current_objective_count: 0, current_work_item_count: 0, blocked_work_item_count: 0 } }],
       pagination: { page: 1, page_size: 100, total_items: 1, total_pages: 1 },
     })
     mocked.listWorkers = vi.fn().mockResolvedValue({
@@ -715,7 +720,9 @@ describe('ManagerDetail', () => {
     )
     await waitFor(() => expect(screen.getAllByText('继续 r36 门禁')).toHaveLength(2))
     expect(mocked.listWorkers).toHaveBeenCalledWith({ manager_key: 'wechat::sess-1', status: 'running', page: 1, page_size: 100 })
-    expect(screen.getByText('未结束').parentElement).toHaveTextContent('11 个')
+    expect(screen.getByText('执行中', { selector: 'dt' }).parentElement).toHaveTextContent('1 个')
+    expect(screen.getByText('续办候选').parentElement).toHaveTextContent('3 个')
+    expect(screen.getByText('异常').parentElement).toHaveTextContent('7 个')
     expect(screen.queryByText('进行中')).toBeNull()
     expect(screen.getByText('正在执行')).toBeInTheDocument()
     expect(screen.getAllByText('继续 r36 门禁')).toHaveLength(2)
