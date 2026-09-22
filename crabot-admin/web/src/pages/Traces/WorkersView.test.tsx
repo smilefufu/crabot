@@ -81,7 +81,7 @@ describe('WorkersView', () => {
     )
     await waitFor(() => expect(screen.getByText('任务标题')).toBeInTheDocument())
     expect(screen.getByText('续办候选')).toBeInTheDocument()
-    expect(screen.getByText(/执行中 0 · 待执行 0 · 续办候选 1 · 异常 0/)).toBeInTheDocument()
+    expect(screen.getByText(/执行中 0 · 待执行 0 · 续办候选 1 · 待核实 0/)).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('状态过滤'), { target: { value: 'halted' } })
     await waitFor(() => expect(mocked.listWorkers).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'halted', page: 1 })))
   })

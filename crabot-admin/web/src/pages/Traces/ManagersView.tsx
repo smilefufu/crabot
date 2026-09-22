@@ -81,12 +81,19 @@ export const ManagersView: React.FC = () => {
                   </div>
                 </td>
                 <td className="trace-table__count">
-                  <div className={item.running_worker_count > 0 ? 'trace-count is-active' : 'trace-count'}>
-                    执行中 {item.running_worker_count ?? 0} 个 · 待执行 {item.queued_worker_count ?? 0} 个
-                  </div>
-                  <div className="trace-table__secondary-count">
-                    续办 {item.continuation_candidate_count ? `${item.continuation_candidate_count} 个` : '—'}
-                    {item.worker_attention_count ? ` · 异常 ${item.worker_attention_count}` : ''}
+                  <div className="trace-worker-counts">
+                    <span className={item.running_worker_count > 0 ? 'trace-worker-count is-running' : 'trace-worker-count is-zero'}>
+                      执行中 <strong>{item.running_worker_count ?? 0}</strong>
+                    </span>
+                    <span className={item.queued_worker_count > 0 ? 'trace-worker-count' : 'trace-worker-count is-zero'}>
+                      待执行 <strong>{item.queued_worker_count ?? 0}</strong>
+                    </span>
+                    <span className={item.continuation_candidate_count > 0 ? 'trace-worker-count' : 'trace-worker-count is-zero'}>
+                      续办 <strong>{item.continuation_candidate_count ?? 0}</strong>
+                    </span>
+                    <span className={item.worker_attention_count > 0 ? 'trace-worker-count is-attention' : 'trace-worker-count is-zero'} title="运行状态、项目归属或资源停止结果尚未核实，不等于任务失败">
+                      待核实 <strong>{item.worker_attention_count ?? 0}</strong>
+                    </span>
                   </div>
                 </td>
                 <td className="trace-table__count">
@@ -95,7 +102,11 @@ export const ManagersView: React.FC = () => {
                       ? '暂不可用'
                       : item.workboard.current_objective_count === 0
                         ? '空'
-                        : `${item.workboard.current_objective_count} 个目标 · ${item.workboard.current_work_item_count} 项${item.workboard.blocked_work_item_count > 0 ? ` · ${item.workboard.blocked_work_item_count} 项阻塞` : ''}`}
+                        : <span className="trace-workboard-counts">
+                            <span>{item.workboard.current_objective_count} 个目标</span>
+                            <span>{item.workboard.current_work_item_count} 项</span>
+                            {item.workboard.blocked_work_item_count > 0 && <span>{item.workboard.blocked_work_item_count} 项阻塞</span>}
+                          </span>}
                   </Link>
                 </td>
                 <td className="trace-table__activity-cell">

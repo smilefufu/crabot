@@ -109,7 +109,7 @@ export const WorkersView: React.FC = () => {
         </label>
       </div>
       <div className="trace-list__summary">
-        执行中 {counts.running} · 待执行 {counts.queued} · 续办候选 {counts.candidates} · 异常 {counts.attention} · 已关闭 {counts.terminal} · 旧记录 {counts.legacy}
+        执行中 {counts.running} · 待执行 {counts.queued} · 续办候选 {counts.candidates} · 待核实 {counts.attention} · 已关闭 {counts.terminal} · 旧记录 {counts.legacy}
       </div>
       {loading ? <Loading /> : error ? (
         <div className="trace-list__empty">执行器列表暂不可用：{error}</div>

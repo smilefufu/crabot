@@ -845,7 +845,7 @@ const ManagerDetailContent: React.FC = () => {
                     {manager && <div><dt>执行中</dt><dd>{manager.running_worker_count ?? 0} 个</dd></div>}
                     {manager && <div><dt>待执行</dt><dd>{manager.queued_worker_count ?? 0} 个</dd></div>}
                     {manager && <div><dt>续办候选</dt><dd>{manager.continuation_candidate_count ? `${manager.continuation_candidate_count} 个` : '—'}</dd></div>}
-                    {manager?.worker_attention_count ? <div><dt>异常</dt><dd>{manager.worker_attention_count} 个</dd></div> : null}
+                    {manager?.worker_attention_count ? <div><dt>待核实</dt><dd>{manager.worker_attention_count} 个</dd></div> : null}
                     <div><dt>本页记录</dt><dd>{episodes.length} 条</dd></div>
                     <div><dt>当前页</dt><dd>{page} / {totalPages}</dd></div>
                   </dl>
