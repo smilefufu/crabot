@@ -233,6 +233,7 @@ export interface BootstrapDeps {
   readonly issueAgentCliCredential?: HarnessDeps['issueAgentCliCredential']
   /** Shared bg registry ownership check for builtin end_turn state mapping. */
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
+  readonly listWorkerBackground?: HarnessDeps['listWorkerBackground']
   /**
    * 对外事件发布口(§9.2 `agent.task_status_changed`),由 `makeAgentEventPublisher` 构造。
    * 可选:P5 阶段这套栈没有生产调用方,注入真实 rpcClient 是 P5 Task 6 的事;不注入则本栈
@@ -493,6 +494,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     capabilityBundle: deps.capabilityBundle,
     issueAgentCliCredential: deps.issueAgentCliCredential,
     hasRunningBg: deps.hasRunningBg,
+    listWorkerBackground: deps.listWorkerBackground,
     onContinuationSweep: async () => {
       if (!candidatesReady || candidatesClosing) return
       for (const { managerKey } of await ledger.listAllWorkers()) scheduleCandidates(managerKey)

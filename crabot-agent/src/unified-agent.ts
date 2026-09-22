@@ -1255,6 +1255,10 @@ export class UnifiedAgent extends ModuleBase {
       },
       issueAgentCliCredential: (context) => this.issueAgentCliCredential(context),
       hasRunningBg: (workerId, scope) => this.agentHandler?.hasRunningBgForWorker(workerId, undefined, scope) ?? Promise.resolve(false),
+      listWorkerBackground: async workerId => {
+        if (!this.agentHandler) throw new Error('Worker background registry is not initialized')
+        return this.agentHandler.listWorkerBackground(workerId)
+      },
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
       // 翻译与去重在 manager/events.ts，这里只负责把口子接上。
       publishEvent,

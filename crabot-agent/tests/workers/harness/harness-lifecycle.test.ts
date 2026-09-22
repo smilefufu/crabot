@@ -276,7 +276,7 @@ async function makeHarness(
   fakeOpts: FakeAdapterOpts = {},
   depsOverrides: Partial<Pick<
     HarnessDeps,
-    'hasRunningBg' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
+    'hasRunningBg' | 'listWorkerBackground' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
   >> = {},
 ): Promise<{
   harness: WorkerHarness
@@ -304,6 +304,7 @@ async function makeHarness(
     workspaces,
     workersDir,
     now,
+    listWorkerBackground: async () => [],
     onEvent: (e) => events.push(e),
     // durable 通知通道默认给个"无人消费"的回执——没有回调时 deliver*Notifications 根本
     // 不走投递，turn_completed / operation_settled 也就不会落 events.jsonl；返回 undefined
@@ -3327,6 +3328,200 @@ describe('WorkerHarness.sendToWorker', () => {
 })
 
 describe('WorkerHarness.killWorker', () => {
+  it.each(['claude-code', 'codex'] as const)('PR185: %s 历史子 Agent 不应把已退出载体重新标成运行', async impl => {
+    const { harness, fake } = await makeHarness({ implId: impl })
+    const worker = await harness.spawnWorker(spawnParams({ impl }))
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl, session_ref: worker.incarnations[0].session_ref }, 'exited')
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].incarnations[0].state === 'exited')
+    const [before] = await harness.listWorkers(worker.manager_key)
+    Object.assign(fake, { listSubagents: async () => [{ worker_id: worker.worker_id, subagent_id: 'historical', executor_impl: impl, name: 'historical', status: 'running' }] })
+    await harness.reconcileContinuationCandidates(worker.manager_key, {
+      manager_key: worker.manager_key,
+      objectives: [{ objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: now(), work_items: [] }],
+      archive: [],
+    })
+    const [after] = await harness.listWorkers(worker.manager_key)
+    expect.soft(after.task.status).toBe('halted')
+    expect.soft(after.task.halt).toEqual(before.task.halt)
+    await harness.reconcileContinuationCandidates(worker.manager_key, { manager_key: worker.manager_key, objectives: [], archive: [] })
+    expect((await harness.listWorkers(worker.manager_key))[0].task.status).toBe('closed')
+  })
+
+  it.each(['claude-code', 'codex'] as const)('PR185: %s 停止已核验载体后不应被历史子 Agent 永久阻塞', async impl => {
+    const { harness, fake } = await makeHarness({ implId: impl })
+    const worker = await harness.spawnWorker(spawnParams({ impl }))
+    Object.assign(fake, { listSubagents: async () => [{ worker_id: worker.worker_id, subagent_id: 'historical', executor_impl: impl, name: 'historical', status: 'running' }] })
+    const operation = await harness.requestWorkerStop(worker.worker_id)
+    const [after] = await harness.listWorkers(worker.manager_key)
+    expect(fake.killCalls).toHaveLength(1)
+    expect.soft(operation.status).toBe('succeeded')
+    expect.soft(after.task.status).toBe('closed')
+  })
+
+  it('PR185: 聚合执行结束后保留主线总结且不以巡检时间补造停止时间', async () => {
+    let background = true
+    let backgroundStoppedAt: string | null = null
+    const { harness } = await makeHarness({}, {
+      hasRunningBg: async () => background,
+      listWorkerBackground: async () => [{ entity_id: 'owned-shell', status: background ? 'running' : 'completed', ended_at: backgroundStoppedAt }],
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    harness.handleStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref },
+      'exited', { endReason: 'completed', summary: 'mainline verified result' })
+    await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].incarnations[0].state === 'exited')
+    expect((await harness.listWorkers(worker.manager_key))[0].task.status).toBe('running')
+    background = false
+    backgroundStoppedAt = now()
+    nowValue += 3_600_000
+    await harness.reconcileContinuationCandidates(worker.manager_key, {
+      manager_key: worker.manager_key,
+      objectives: [{ objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: now(), work_items: [] }],
+      archive: [],
+    })
+    const [settled] = await harness.listWorkers(worker.manager_key)
+    expect.soft(settled.task.halt?.worker_self_report).toEqual({ outcome: 'completed', summary: 'mainline verified result' })
+    expect.soft(settled.task.halt?.halted_at).toBe(backgroundStoppedAt)
+  })
+
+  it('PR185: 主线结束证据跨重启保留，后台记录清理与通知等待不刷新停止时间', async () => {
+    let running = true
+    let endedAt: string | null = null
+    let collected = false
+    const deps = {
+      hasRunningBg: async () => running,
+      listWorkerBackground: async () => collected ? [] : [{ entity_id: 'child', status: running ? 'running' as const : 'completed' as const, ended_at: endedAt }],
+    }
+    const { harness, ledger } = await makeHarness({}, deps)
+    const worker = await harness.spawnWorker(spawnParams())
+    harness.handleStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref },
+      'exited', { endReason: 'completed', summary: 'durable result' })
+    await waitUntil(async () => (await ledger.findWorker(worker.worker_id))?.worker.incarnations[0].state === 'exited')
+    const restarted = (await makeHarness({}, deps)).harness
+    await restarted.reconcileOnStartup()
+    expect((await ledger.findWorker(worker.worker_id))?.worker.incarnations[0].ended_reason).toBe('completed')
+    running = false
+    endedAt = now()
+    nowValue += 3_600_000
+    const board = { manager_key: worker.manager_key, objectives: [{ objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: now(), work_items: [] }], archive: [] }
+    await restarted.reconcileContinuationCandidates(worker.manager_key, board)
+    const halt = (await ledger.findWorker(worker.worker_id))?.worker.task.halt
+    expect(halt).toMatchObject({ halted_at: endedAt, worker_self_report: { summary: 'durable result' } })
+    collected = true
+    const finish = restarted.beginBgNotification(worker.worker_id)
+    await restarted.reconcileContinuationCandidates(worker.manager_key, board)
+    expect((await ledger.findWorker(worker.worker_id))?.worker.task.status).toBe('running')
+    finish()
+    nowValue += 3_600_000
+    await restarted.reconcileContinuationCandidates(worker.manager_key, board)
+    expect((await ledger.findWorker(worker.worker_id))?.worker.task.halt).toEqual(halt)
+  })
+
+  it.each(['missing', 'timestamp', 'unavailable'] as const)('PR185: 后台结束取证 %s 时保留待核实而不补造时间', async failure => {
+    let running = true
+    const { harness, ledger } = await makeHarness({}, {
+      hasRunningBg: async () => running,
+      listWorkerBackground: async () => {
+        if (!running && failure === 'unavailable') throw new Error('registry unavailable')
+        return !running && failure === 'missing' ? [] : [{ entity_id: 'child', status: running ? 'running' : 'completed', ended_at: null }]
+      },
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    harness.handleStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref },
+      'exited', { endReason: 'completed', summary: 'preserve me' })
+    await waitUntil(async () => (await ledger.findWorker(worker.worker_id))?.worker.incarnations[0].state === 'exited')
+    running = false
+    nowValue += 3_600_000
+    const board = { manager_key: worker.manager_key, objectives: [], archive: [] }
+    await harness.reconcileContinuationCandidates(worker.manager_key, board)
+    const workers = await harness.listWorkers(worker.manager_key)
+    expect(workers[0].task.halt).toBeUndefined()
+    expect((await harness.workerView(workers, board)).attention.map(item => item.worker_id)).toEqual([worker.worker_id])
+  })
+
+  it('PR185: 主线退出后 builtin 独立子 Agent 仍阻止关闭', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    Object.assign(fake, { listSubagents: async () => [{ worker_id: worker.worker_id, subagent_id: 'live-child', executor_impl: 'builtin', name: 'live', status: 'running' }] })
+    const operation = await harness.requestWorkerStop(worker.worker_id)
+    expect(operation.status).toBe('unknown')
+    expect((await harness.listWorkers(worker.manager_key))[0].task.status).not.toBe('closed')
+  })
+
+  it('PR185: CLI 停止后仍有 stalled 后台资源时不能声称关闭成功', async () => {
+    const { harness } = await makeHarness({ implId: 'codex' }, {
+      hasRunningBg: async () => false,
+      listWorkerBackground: async () => [{ entity_id: 'uncertain-shell', status: 'stalled', ended_at: null }],
+    })
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'codex' }))
+    expect((await harness.requestWorkerStop(worker.worker_id)).status).toBe('unknown')
+    expect((await harness.listWorkers(worker.manager_key))[0].task.status).not.toBe('closed')
+  })
+
+  it('PR185: 最后分支退出时间决定聚合排序并保留主线总结', async () => {
+    const { harness, fake, ledger } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const query = await harness.queryWorker(worker.worker_id, 'independent work')
+    const main = worker.incarnations[0]
+    harness.handleStateChange({ worker_id: worker.worker_id, seq: main.seq, impl: 'builtin', session_ref: main.session_ref },
+      'exited', { endReason: 'completed', summary: 'main summary' })
+    await waitUntil(async () => (await ledger.findWorker(worker.worker_id))?.worker.incarnations[0].state === 'exited')
+    expect((await ledger.findWorker(worker.worker_id))?.worker.task.status).toBe('running')
+    const fork = (await ledger.findWorker(worker.worker_id))!.worker.incarnations.find(item => item.incarnation_id === query.fork_incarnation_id)!
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: fork.seq, impl: 'builtin', session_ref: fork.session_ref }, 'exited')
+    await waitUntil(async () => (await ledger.findWorker(worker.worker_id))?.worker.incarnations.find(item => item.incarnation_id === fork.incarnation_id)?.state === 'exited')
+    const endedAt = (await ledger.findWorker(worker.worker_id))!.worker.incarnations.find(item => item.incarnation_id === fork.incarnation_id)!.ended_at
+    nowValue += 3_600_000
+    await harness.reconcileContinuationCandidates(worker.manager_key, { manager_key: worker.manager_key,
+      objectives: [{ objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: now(), work_items: [] }], archive: [] })
+    expect((await ledger.findWorker(worker.worker_id))?.worker.task.halt).toMatchObject({
+      halted_at: endedAt, worker_self_report: { summary: 'main summary' },
+    })
+  })
+
+  it.each(['claude-code', 'codex'] as const)('PR185: %s 载体闲置时仍核验原生子 Agent，按子 Agent 真实退出时间排序', async impl => {
+    const { harness, fake, ledger } = await makeHarness({ implId: impl })
+    const worker = await harness.spawnWorker(spawnParams({ impl }))
+    let running = true
+    let endedAt: string | undefined
+    Object.assign(fake, { listSubagents: async () => [{ worker_id: worker.worker_id, subagent_id: 'child', executor_impl: impl, name: 'child', status: running ? 'running' : 'completed', ended_at: endedAt }] })
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl, session_ref: worker.incarnations[0].session_ref }, 'idle')
+    await waitUntil(async () => (await ledger.findWorker(worker.worker_id))?.worker.incarnations[0].state === 'idle')
+    const board = { manager_key: worker.manager_key, objectives: [{ objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: now(), work_items: [] }], archive: [] }
+    await harness.reconcileContinuationCandidates(worker.manager_key, board)
+    expect((await ledger.findWorker(worker.worker_id))?.worker.task.status).toBe('running')
+    running = false
+    endedAt = now()
+    nowValue += 3_600_000
+    await harness.reconcileContinuationCandidates(worker.manager_key, board)
+    expect((await ledger.findWorker(worker.worker_id))?.worker.task.halt?.halted_at).toBe(endedAt)
+  })
+
+  it('PR185: 四个候选按最后实际后台退出时间淘汰，遍历及巡检时间不决定名额', async () => {
+    const stopped = new Map<string, string>()
+    const { harness, fake, ledger } = await makeHarness({}, {
+      hasRunningBg: async workerId => !stopped.has(workerId),
+      listWorkerBackground: async workerId => [{ entity_id: `bg-${workerId}`, status: stopped.has(workerId) ? 'completed' : 'running', ended_at: stopped.get(workerId) ?? null }],
+    })
+    const workers = []
+    for (let i = 0; i < 4; i++) {
+      const worker = await harness.spawnWorker(spawnParams())
+      workers.push(worker)
+      fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    }
+    await waitUntil(async () => (await harness.listWorkers(workers[0].manager_key)).every(worker => worker.incarnations[0].state === 'idle'))
+    for (const worker of [...workers].reverse()) stopped.set(worker.worker_id, now())
+    nowValue += 3_600_000
+    const board = { manager_key: workers[0].manager_key, objectives: [{ objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: now(), work_items: [{
+      work_item_id: 'project', title: 'project', status: 'in_progress' as const, project_root: dataDir, next_action: 'continue', updated_at: now(),
+    }] }], archive: [] }
+    await harness.reconcileContinuationCandidates(workers[0].manager_key, board)
+    expect((await ledger.findWorker(workers[3].worker_id))?.worker.task.closed?.by).toBe('system')
+    for (const worker of workers.slice(0, 3)) {
+      expect((await ledger.findWorker(worker.worker_id))?.worker.task.halt?.halted_at).toBe(stopped.get(worker.worker_id))
+    }
+    expect(fake.killCalls.map(handle => handle.worker_id)).toEqual([workers[3].worker_id])
+  })
+
   it('候选列表不调用可重建 runtime 的原生状态或子 Agent 入口', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
