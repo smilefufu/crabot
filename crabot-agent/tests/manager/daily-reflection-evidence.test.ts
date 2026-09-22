@@ -19,6 +19,7 @@ import type { ManagerKey } from '../../src/manager/types.js'
 import type { DailyReflectionState, ReflectionRecord } from '../../src/manager/daily-reflection-types.js'
 import type { ManagerEpisodeTrace } from '../../src/manager/trace-types.js'
 import type { EngineMessage } from '../../src/engine/types.js'
+import { listPage, readPage } from './reflection-fixture.js'
 
 const window = { window_start: '2026-09-17T00:00:00.000Z', window_end: '2026-09-18T00:00:00.000Z' }
 const activity = '2026-09-17T12:00:00.000Z'
@@ -110,8 +111,8 @@ describe('daily reflection persisted evidence', () => {
           analysisWorkers: vi.fn(), confirm: vi.fn() })
         await host.admit({ ...window, schedule_id: 'daily', trigger_id: 'trigger',
           target_session: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' } }, 'daily')
-        await host.list()
-        expect(await host.read(record.record_ref)).toMatchObject({ content: JSON.stringify(events), gaps: [] })
+        await listPage(host)
+        expect(await readPage(host, record.record_ref)).toMatchObject({ content: JSON.stringify(events), gaps: [] })
         const saved = (await f.store.load(key)).dailyReflection!
         expect(saved.manifest!.records[0].digest).toBe(reflectionDigest(JSON.stringify(events)))
         expect(saved.manifest!.records[0].source).toEqual(record.source)
@@ -271,7 +272,7 @@ describe('daily reflection persisted evidence', () => {
     const before = (await f.store.load(key)).dailyReflection!
     f.events.get(worker.worker_id)!.push({ kind: 'error', ts: activity, detail: { message: 'later appended event' } })
 
-    const page = await host.list()
+    const page = await listPage(host)
     expect(page.records[0].summary).toContain('仅有迁移审计')
     expect(page.records[0].summary).not.toContain('historical task')
     expect(page.records[0].record_ref).toBe(record.record_ref)
@@ -279,7 +280,7 @@ describe('daily reflection persisted evidence', () => {
     expect((await f.store.load(key)).dailyReflection?.read_records).toEqual({})
     expect((await f.store.load(key)).dailyReflection?.manifest).toEqual(before.manifest)
 
-    const detail = await host.read(record.record_ref) as { content: string; gaps: string[] }
+    const detail = await readPage(host, record.record_ref) as { content: string; gaps: string[] }
     expect(detail).toMatchObject({ content: original, gaps: [] })
     expect(detail.content).not.toContain('later appended event')
     const after = (await f.store.load(key)).dailyReflection!

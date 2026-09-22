@@ -9,7 +9,8 @@ import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ReflectionRecord } from '../../src/manager/daily-reflection-types.js'
-import type { EngineMessage } from '../../src/engine/types.js'
+import type { EngineMessage, EngineToolLifecycleEvent } from '../../src/engine/types.js'
+import { listPage, readPage } from './reflection-fixture.js'
 
 const key = 'admin-web::system-tasks' as ManagerKey
 const admission = { target_session: { channel_id: 'admin-web', session_id: 'system-tasks', type: 'private' as const }, schedule_id: 'daily', trigger_id: 'trigger', window_start: '2026-09-16T18:00:00.000Z', window_end: '2026-09-17T18:00:00.000Z' }
@@ -44,7 +45,7 @@ function completion(extra: Record<string, unknown> = {}, toolCount = 1) {
 }
 
 async function ready(host: DailyReflection) {
-  await host.list()
+  await listPage(host)
 }
 
 describe('DailyReflection host', () => {
@@ -57,40 +58,39 @@ describe('DailyReflection host', () => {
     })
     const host = new DailyReflection(deps)
     const refs: string[] = []
-    let page = await host.list()
+    let page = await listPage(host)
     expect(page.records).toHaveLength(100)
     let pages = 0
     do {
       expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(80 * 1024)
       refs.push(...page.records.map(record => record.record_ref))
       pages++
-      if (!page.next_cursor) break
-      page = await host.list(page.next_cursor)
+      if (!page.has_more) break
+      page = await listPage(host)
     } while (true)
     expect(pages).toBe(151)
     expect(refs).toEqual(records.map(record => record.record_ref))
-    expect(page.progress).toMatchObject({ directory_complete: true, directory_read: 15010 })
+    expect((await listPage(host)).progress).toMatchObject({ directory_complete: true, directory_read: 15010 })
     expect(session.dailyReflection?.manifest?.records).toEqual(records)
     expect(session.dailyReflection?.read_records).toEqual({})
   })
 
-  it('continuation: caps complete Unicode JSON pages and replays the actual variable-length page after restart', async () => {
+  it('continuation: caps complete Unicode JSON pages and resumes a variable-length page after restart', async () => {
     const { host, records, deps, store, dir } = await setup(30)
     records.forEach(record => { record.summary = '汉🙂\\'.repeat(3000) })
-    const first = await host.list()
+    const first = await listPage(host)
     expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(80 * 1024)
     expect(first.records.length).toBeGreaterThan(0)
     expect(first.records.length).toBeLessThan(30)
     expect(first.records[0].summary).toBe(records[0].summary)
-    const second = await host.list(first.next_cursor)
-    expect(Buffer.byteLength(JSON.stringify(second))).toBeLessThanOrEqual(80 * 1024)
+    const second = await host.list()
+    expect(Buffer.byteLength(JSON.stringify(second.output))).toBeLessThanOrEqual(80 * 1024)
     const saved = (await store.load(key)).dailyReflection!
     const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
-    const discovered = await restarted.list()
-    expect(discovered.progress.directory_read).toBe(second.progress.directory_read)
-    const replayed = await restarted.list(discovered.progress.resume_cursor)
-    expect(replayed.records.map(r => r.record_ref)).toEqual(second.records.map(r => r.record_ref))
-    expect((await store.load(key)).dailyReflection?.directory_page).toEqual(saved.directory_page)
+    const discovered = await listPage(restarted)
+    expect(discovered.progress.directory_read).toBe(second.output.progress.directory_read)
+    expect(discovered.records.map(r => r.record_ref)).toEqual(second.output.records.map(r => r.record_ref))
+    expect((await store.load(key)).dailyReflection?.reading?.directory.offset).toBe(saved.reading!.directory.pending!.end)
   })
 
   it.each(['record', 'metadata'])('continuation: refuses oversized %s without changing persisted progress', async oversized => {
@@ -102,21 +102,20 @@ describe('DailyReflection host', () => {
       validation_errors: [], summary: 'x'.repeat(90_000),
     } as never }))
     const before = await store.load(key)
-    await expect(host.list()).rejects.toThrow('REFLECTION_DIRECTORY_PAGE_TOO_LARGE')
+    await expect(listPage(host)).rejects.toThrow('REFLECTION_DIRECTORY_PAGE_TOO_LARGE')
     expect(await store.load(key)).toEqual(before)
   })
 
-  it.each([false, true])('continuation: keeps original twenty-record cursor positions when upgrading a completed=%s directory', async complete => {
+  it.each([false, true])('continuation: conservatively resumes old twenty-record pages when upgrading completed=%s', async complete => {
     const { host, store, records, deps } = await setup(complete ? 225 : 301)
     await store.updateDailyReflection(key, state => ({ ...state!, manifest: { records, gaps: [] },
       directory_complete: complete,
       cursors: Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`old-${(i + 1) * 20}`, { offset: (i + 1) * 20 }])) }))
-    const discovered = await host.list()
-    expect(discovered.progress).toMatchObject({ directory_read: complete ? 225 : 220,
-      resume_cursor: complete ? 'old-220' : 'old-200' })
-    expect((await store.load(key)).dailyReflection?.directory_page).toEqual(complete
-      ? { start: 220, end: 225 } : { start: 200, end: 220 })
-    expect((await host.list('old-20')).records[0].record_ref).toBe('ref-20')
+    const discovered = await listPage(host)
+    expect(discovered.progress).toMatchObject({ directory_read: complete ? 220 : 200, directory_complete: false })
+    expect(discovered.records[0].record_ref).toBe(complete ? 'ref-220' : 'ref-200')
+    expect((await store.load(key)).dailyReflection?.reading?.directory.offset).toBe(complete ? 225 : 300)
+    expect((await listPage(host, true)).records[0].record_ref).toBe('ref-0')
     expect(deps.capture).not.toHaveBeenCalled()
   })
 
@@ -126,17 +125,17 @@ describe('DailyReflection host', () => {
     records[23].gaps = ['manager_trace_unavailable']
     await store.updateDailyReflection(key, state => ({ ...state!, manifest: { records, gaps: [] },
       cursors: { old200: { offset: 200 }, old220: { offset: 220 } } }))
-    const first = await host.list('old220')
+    const first = await listPage(host)
     expect(first.progress).toMatchObject({ evidence_gap_count: 23, pending_record_count: 0, skipped_record_count: 1 })
     expect(first.progress.evidence_gap_records).toEqual(records.slice(0, 20).map(({ record_ref }) => ({ record_ref })))
-    for (const record of first.progress.evidence_gap_records) await host.read(record.record_ref)
+    for (const record of first.progress.evidence_gap_records) await readPage(host, record.record_ref)
     const restarted = new DailyReflection(deps)
-    const next = await restarted.list()
+    const next = await listPage(restarted)
     expect(next.progress.evidence_gap_records).toEqual(records.slice(20, 23).map(({ record_ref }) => ({ record_ref })))
     expect(next.progress).toMatchObject({ evidence_gap_count: 3, pending_record_count: 0 })
     vi.mocked(deps.read).mockRejectedValueOnce(new Error('EIO'))
-    await restarted.read('ref-20')
-    expect((await restarted.list()).progress).toMatchObject({ evidence_gap_count: 3, pending_record_count: 1 })
+    await readPage(restarted, 'ref-20')
+    expect((await listPage(restarted)).progress).toMatchObject({ evidence_gap_count: 3, pending_record_count: 1 })
   })
 
   it('counts missing frozen details as handled without inventing read evidence, including after restart', async () => {
@@ -144,13 +143,13 @@ describe('DailyReflection host', () => {
     const record = { ...records[0], gaps: ['manager_trace_unavailable'] }
     vi.mocked(deps.capture).mockResolvedValueOnce({ records: [record], gaps: [] })
     await store.updateDailyReflection(key, state => ({ ...state!, read_records: { 'ref-0': false } }))
-    const page = await host.list()
+    const page = await listPage(host)
     expect(page.records[0]).toMatchObject({ gaps: record.gaps, skipped: 'source_unavailable' })
     expect(page.progress).toMatchObject({ evidence_gap_count: 0, skipped_record_count: 1, pending_record_count: 0 })
     expect(deps.read).not.toHaveBeenCalled()
     vi.mocked(deps.read).mockResolvedValue({ content: '[]', gaps: ['manager_trace_unavailable'] })
     const restarted = new DailyReflection(deps)
-    expect(await restarted.read('ref-0')).toEqual({ record_ref: 'ref-0', content: '[]',
+    expect(await readPage(restarted, 'ref-0')).toEqual({ record_ref: 'ref-0', content: '[]', has_more: false,
       gaps: ['manager_trace_unavailable', 'frozen_evidence_changed'], skipped: 'source_unavailable' })
     expect((await store.load(key)).dailyReflection?.read_records['ref-0']).not.toBe(true)
     expect(await restarted.validateFinish(completion({ evidence_refs: ['ref-0'] }).exitToolCall.input, 1)).toContain('skipped_source_unavailable')
@@ -170,9 +169,9 @@ describe('DailyReflection host', () => {
     '2 legacy trace reference(s) unavailable',
   ])('handles a missing detail discovered on read while retaining its frozen digest: %s', async gap => {
     const { host, deps, store, records } = await setup()
-    await host.list()
+    await listPage(host)
     vi.mocked(deps.read).mockResolvedValueOnce({ content: 'surviving subset', gaps: [gap] })
-    expect(await host.read('ref-0')).toMatchObject({ skipped: 'source_unavailable', content: 'surviving subset', gaps: [gap, 'frozen_evidence_changed'] })
+    expect(await readPage(host, 'ref-0')).toMatchObject({ skipped: 'source_unavailable', content: 'surviving subset', gaps: [gap, 'frozen_evidence_changed'] })
     const current = (await store.load(key)).dailyReflection!
     expect(current.manifest!.records[0].digest).toBe(records[0].digest)
     expect(current.read_records['ref-0']).not.toBe(true)
@@ -185,12 +184,12 @@ describe('DailyReflection host', () => {
     const record: ReflectionRecord = { ...records[100], kind: 'worker', gaps: [gap], digest: '',
       source: { kind: 'worker', worker_id: 'old-worker', traces: [], turn_ids: [], event_count: 5, gaps: [gap] } }
     vi.mocked(deps.capture).mockResolvedValueOnce({ records: [...records.slice(0, 100), record], gaps: [] })
-    const page = await host.list()
+    const page = await listPage(host)
     expect(page.progress).toMatchObject({ directory_complete: false, skipped_record_count: 1, evidence_gap_count: 0 })
     vi.mocked(deps.read).mockResolvedValue({ content: 'surviving events', gaps: [gap] })
-    expect(await host.read('ref-100')).toMatchObject({ skipped: 'source_unavailable', gaps: [gap] })
+    expect(await readPage(host, 'ref-100')).toMatchObject({ skipped: 'source_unavailable', gaps: [gap] })
     expect((await host.finish(completion()))?.validation_errors).toContain('directory_not_fully_read')
-    await host.list(page.next_cursor)
+    await listPage(host)
     expect((await host.finish(completion()))?.outcome).toBe('completed')
   })
 
@@ -200,15 +199,15 @@ describe('DailyReflection host', () => {
     vi.mocked(deps.capture).mockResolvedValueOnce({ records: [{ ...records[0], gaps: [gap] }], gaps: [] })
     const content = 'surviving activity '.repeat(2000)
     vi.mocked(deps.read).mockResolvedValue({ content, gaps: [gap] })
-    await host.list()
-    let cursor: string | undefined
+    await listPage(host)
+    let hasMore: boolean
     let actual = ''
     do {
-      const page = await host.read('ref-0', cursor) as { content: string; next_cursor?: string; skipped?: string }
+      const page = await readPage(host, 'ref-0')
       expect(page.skipped).toBe('source_unavailable')
       actual += page.content
-      cursor = page.next_cursor
-    } while (cursor)
+      hasMore = page.has_more
+    } while (hasMore)
     expect(actual).toBe(content)
     expect((await store.load(key)).dailyReflection?.read_records['ref-0']).toBe(false)
     expect(await host.validateFinish(completion({ evidence_refs: ['ref-0'] }).exitToolCall.input, 1)).toContain('skipped_source_unavailable')
@@ -218,30 +217,30 @@ describe('DailyReflection host', () => {
   it('rechecks explicitly requested skipped details and restores normal validation when all evidence is available', async () => {
     const { host, deps, records } = await setup()
     vi.mocked(deps.capture).mockResolvedValueOnce({ records: [{ ...records[0], gaps: ['manager_trace_unavailable'] }], gaps: [] })
-    expect((await host.list()).progress.skipped_record_count).toBe(1)
-    expect(await host.read('ref-0')).toEqual({ record_ref: 'ref-0', content: 'evidence', gaps: [] })
+    expect((await listPage(host)).progress.skipped_record_count).toBe(1)
+    expect(await readPage(host, 'ref-0')).toEqual({ record_ref: 'ref-0', content: 'evidence', has_more: false, gaps: [] })
     expect(await host.validateFinish(completion({ evidence_refs: ['ref-0'] }).exitToolCall.input, 1)).toBeUndefined()
-    expect((await host.list()).progress.skipped_record_count).toBe(0)
+    expect((await listPage(host)).progress.skipped_record_count).toBe(0)
   })
 
   it.each(['frozen_evidence_changed', 'invalid_episode_history', 'EACCES: permission denied',
     'native unavailable: EIO: read failed', '637 malformed or unreadable legacy trace record(s)',
     'worker_trace_unavailable:old-worker:1'])('does not skip unproven source failures: %s', async gap => {
     const { host, deps } = await setup()
-    await host.list()
+    await listPage(host)
     vi.mocked(deps.read).mockResolvedValueOnce({ content: 'evidence', gaps: [gap] })
-    expect(await host.read('ref-0')).not.toHaveProperty('skipped')
+    expect(await readPage(host, 'ref-0')).not.toHaveProperty('skipped')
     expect((await host.finish(completion()))?.outcome).toBe('partial')
     expect(deps.confirm).not.toHaveBeenCalled()
   })
 
   it('keeps directory and other read failures blocking even when a missing record was skipped', async () => {
     const { host, deps } = await setup(101)
-    await host.list()
+    await listPage(host)
     vi.mocked(deps.read).mockResolvedValueOnce({ content: '', gaps: ['manager_trace_unavailable'] })
-    await host.read('ref-0')
+    await readPage(host, 'ref-0')
     vi.mocked(deps.read).mockResolvedValueOnce({ content: '', gaps: ['manager_trace_unavailable', 'EACCES: permission denied'] })
-    expect(await host.read('ref-1')).not.toHaveProperty('skipped')
+    expect(await readPage(host, 'ref-1')).not.toHaveProperty('skipped')
     const result = await host.finish(completion())
     expect(result?.validation_errors).toEqual(expect.arrayContaining(['directory_not_fully_read', 'known_evidence_gaps', 'record_not_fully_read']))
     expect(deps.confirm).not.toHaveBeenCalled()
@@ -263,7 +262,7 @@ describe('DailyReflection host', () => {
       vi.mocked(deps.read).mockResolvedValue({ content, gaps: scenario === 'gap' ? ['source unavailable'] : [] })
       if (scenario === 'read_failure') vi.mocked(deps.read).mockRejectedValue(new Error('source unavailable'))
 
-      const page = await host.list()
+      const page = await listPage(host)
       expect(page.records[0].summary).toBe(record.summary)
       const current = (await store.load(key)).dailyReflection!
       expect(current.manifest?.records[0]).toEqual(record)
@@ -274,10 +273,10 @@ describe('DailyReflection host', () => {
 
   it.each(['completed', 'partial'])('validates %s references and rejects remaining actionable coverage without persisting a result', async outcome => {
     const { host, deps, store } = await setup(101)
-    await host.list()
-    await host.read('ref-0')
+    await listPage(host)
+    await readPage(host, 'ref-0')
     vi.mocked(deps.read).mockResolvedValueOnce({ content: 'evidence', gaps: ['trace_unavailable'] })
-    await host.read('ref-1')
+    await readPage(host, 'ref-1')
     const before = await store.load(key)
     const finish = buildDailyReflectionTools(host).find(tool => tool.name === 'finish_daily_reflection')!
     const input = completion({ outcome, evidence_refs: ['mem-l-candidate', 'ref-1', 'ref-2'] }).exitToolCall.input
@@ -305,7 +304,8 @@ describe('DailyReflection host', () => {
 
   it('rejects early partial and lets the same Engine finish the directory before exiting', async () => {
     const { host, deps, store } = await setup(101)
-    const page = await host.list()
+    await listPage(host)
+    const savedTools: EngineToolLifecycleEvent[] = []
     const input = completion({ outcome: 'partial', pending_items: ['memory review needs human input'] }).exitToolCall.input
     const before = await store.load(key)
     let calls = 0
@@ -321,12 +321,13 @@ describe('DailyReflection host', () => {
         }
         yield* chunksFromContent([{ type: 'tool_use', id: `call-${calls}`,
           name: calls === 2 ? 'list_reflection_records' : 'finish_daily_reflection',
-          input: calls === 2 ? { cursor: page.next_cursor } : input,
+          input: calls === 2 ? {} : input,
         }], 'tool_use', { inputTokens: 10, outputTokens: 10 })
       },
     }
     const result = await runEngine({ prompt: 'continue', adapter,
-      options: { systemPrompt: '', model: 'fixture', tools: buildDailyReflectionTools(host), maxTurns: 4 } })
+      options: { systemPrompt: '', model: 'fixture', tools: buildDailyReflectionTools(host), maxTurns: 4,
+        onToolLifecycle: event => { savedTools.push(event) }, onBeforeLlmCall: () => host.acknowledgePages(savedTools) } })
     expect(calls).toBe(3)
     expect(result.exitToolCall?.input).toEqual(input)
     expect((await store.load(key)).dailyReflection).toMatchObject({ run_id: before.dailyReflection!.run_id, directory_complete: true })
@@ -339,44 +340,43 @@ describe('DailyReflection host', () => {
 
   it('requires remaining readable details even after a genuine directory failure', async () => {
     const { host, deps, store } = await setup(101, 'x'.repeat(20000))
-    const page = await host.list()
-    const detail = await host.read('ref-0') as { next_cursor: string }
+    const page = await listPage(host)
+    await readPage(host, 'ref-0')
     await store.updateDailyReflection(key, state => ({ ...state!, result: {
       ...completion().exitToolCall.input, outcome: 'partial', run_id: state!.run_id,
       window_start: admission.window_start, window_end: admission.window_end,
       completed_at: deps.now(), validation_errors: [], summary: 'x'.repeat(90000),
     } as any }))
-    await expect(host.list(page.next_cursor)).rejects.toThrow('REFLECTION_DIRECTORY_PAGE_TOO_LARGE')
+    await expect(listPage(host)).rejects.toThrow('REFLECTION_DIRECTORY_PAGE_TOO_LARGE')
     const input = completion({ outcome: 'partial' }).exitToolCall.input
     expect(await host.validateFinish(input, 1)).toContain('ref-0')
-    await host.read('ref-0', detail.next_cursor)
+    await readPage(host, 'ref-0')
     expect(await host.validateFinish(input, 1)).toBeUndefined()
     expect(await new DailyReflection(deps).validateFinish(input, 1)).toContain('actionable_evidence_remaining')
     await store.updateDailyReflection(key, state => ({ ...state!, result: undefined }))
-    await host.list()
-    expect(await host.validateFinish(input, 1)).toContain('actionable_evidence_remaining')
-    await host.list(page.next_cursor)
+    await listPage(host)
     expect(await host.validateFinish(input, 1)).toBeUndefined()
   })
 
-  it('allows actual capture failure but clears it on success and never treats a forged cursor as a fault', async () => {
+  it('allows actual capture failure but clears it on success and never treats invalid input as a fault', async () => {
     const { host, deps } = await setup(101)
     const input = completion({ outcome: 'partial' }).exitToolCall.input
     expect(await host.validateFinish(input, 1)).toContain('actionable_evidence_remaining')
-    await expect(host.list('forged')).rejects.toThrow('INVALID_REFLECTION_CURSOR')
+    const list = buildDailyReflectionTools(host).find(tool => tool.name === 'list_reflection_records')!
+    expect((await list.call({ cursor: 'forged' }, {})).isError).toBe(true)
     expect(await host.validateFinish(input, 1)).toContain('actionable_evidence_remaining')
     vi.mocked(deps.capture).mockRejectedValueOnce(new Error('inventory I/O failure'))
-    await expect(host.list()).rejects.toThrow('inventory I/O failure')
+    await expect(listPage(host)).rejects.toThrow('inventory I/O failure')
     expect(await host.validateFinish(input, 1)).toBeUndefined()
-    await host.list()
-    await expect(host.list('forged')).rejects.toThrow('INVALID_REFLECTION_CURSOR')
+    await listPage(host)
+    expect((await list.call({ cursor: 'forged' }, {})).isError).toBe(true)
     expect(await host.validateFinish(input, 1)).toContain('actionable_evidence_remaining')
   })
 
   it('does not carry a directory failure into another run on the same host', async () => {
     const { host, deps, store } = await setup()
     vi.mocked(deps.capture).mockRejectedValueOnce(new Error('inventory I/O failure'))
-    await expect(host.list()).rejects.toThrow('inventory I/O failure')
+    await expect(listPage(host)).rejects.toThrow('inventory I/O failure')
     const input = completion({ outcome: 'partial' }).exitToolCall.input
     expect(await host.validateFinish(input, 1)).toBeUndefined()
     await store.updateDailyReflection(key, () => undefined)
@@ -386,20 +386,21 @@ describe('DailyReflection host', () => {
 
   it.each(['read denied', 'manager_trace_unavailable'])('requires a pending readable detail but permits a genuine gap or skip: %s', async failure => {
     const { host, deps } = await setup(1, 'x'.repeat(20000))
-    await host.list()
-    const detail = await host.read('ref-0') as { next_cursor: string }
+    await listPage(host)
+    await readPage(host, 'ref-0')
     const input = completion({ outcome: 'partial' }).exitToolCall.input
     expect(await host.validateFinish(input, 1)).toContain('ref-0')
-    await expect(host.read('ref-0', 'wrong')).rejects.toThrow('INVALID_REFLECTION_CURSOR')
+    const read = buildDailyReflectionTools(host).find(tool => tool.name === 'read_reflection_record')!
+    expect((await read.call({ record_ref: 'ref-0', cursor: 'wrong' }, {})).isError).toBe(true)
     expect(await host.validateFinish(input, 1)).toContain('ref-0')
     vi.mocked(deps.read).mockRejectedValueOnce(new Error(failure))
-    await host.read('ref-0', detail.next_cursor)
+    await readPage(host, 'ref-0')
     expect(await host.validateFinish(input, 1)).toBeUndefined()
   })
 
   it('uses the same current-directory rule before exit and in the final host check', async () => {
     const { host, store } = await setup()
-    await host.list()
+    await listPage(host)
     await store.updateDailyReflection(key, state => ({ ...state!, read_records: { forged: true } }))
     const input = completion({ evidence_refs: ['forged'] })
     const finish = buildDailyReflectionTools(host).find(tool => tool.name === 'finish_daily_reflection')!
@@ -409,9 +410,9 @@ describe('DailyReflection host', () => {
 
   it('lets the actual Engine correct rejected evidence in the same run before persisting partial', async () => {
     const { host, deps, store } = await setup(21)
-    await host.list()
+    await listPage(host)
     vi.mocked(deps.read).mockResolvedValue({ content: 'evidence', gaps: ['trace_unavailable'] })
-    await host.read('ref-0')
+    await readPage(host, 'ref-0')
     const before = await store.load(key)
     const corrected = completion({ outcome: 'partial', pending_items: ['history evidence unavailable'] }).exitToolCall.input
     let calls = 0
@@ -444,13 +445,13 @@ describe('DailyReflection host', () => {
 
   it('requires a new explicit completion after restarting with an obsolete failure ledger', async () => {
     const { host, deps, store } = await setup()
-    await host.list()
+    await listPage(host)
     await host.finish(completion({ outcome: 'partial', pending_items: ['correct the memory ID'] }))
     await store.updateDailyReflection(key, state => ({ ...state!, tool_failures: { old: 'mcp__crab-memory__delete_memory' } }))
     const restarted = new DailyReflection(deps)
     await restarted.recover()
     await restarted.admit(undefined, 'continued')
-    expect((await restarted.list() as any).previous_result.pending_items).toEqual(['correct the memory ID'])
+    expect((await listPage(restarted) as any).previous_result.pending_items).toEqual(['correct the memory ID'])
     expect(deps.confirm).not.toHaveBeenCalled()
     expect((await restarted.finish(completion()))?.outcome).toBe('completed')
     expect(deps.confirm).toHaveBeenCalledOnce()
@@ -458,7 +459,7 @@ describe('DailyReflection host', () => {
 
   it.each(['partial', 'completed'])('keeps declared unfinished work partial when the model submits %s', async outcome => {
     const { host, deps, store } = await setup()
-    await host.list()
+    await listPage(host)
     const result = await host.finish(completion({ outcome, pending_items: ['memory A is still unfinished'] }))
     expect(result?.outcome).toBe('partial')
     if (outcome === 'completed') expect(result?.validation_errors).toContain('pending_items_remain')
@@ -469,7 +470,7 @@ describe('DailyReflection host', () => {
 
   it('does not impose a prescribed Memory call sequence on explicit completion', async () => {
     const { host, deps } = await setup()
-    await host.list()
+    await listPage(host)
     const result = await host.finish(completion())
     expect(result?.validation_errors).toEqual([])
     expect(result?.outcome).toBe('completed')
@@ -479,13 +480,13 @@ describe('DailyReflection host', () => {
   it('does not publish a failed inventory and retries without changing the admitted window', async () => {
     const { host, deps, store } = await setup()
     vi.mocked(deps.capture).mockResolvedValueOnce({ records: [], gaps: ['manager_inventory_unavailable'] })
-    await expect(host.list()).rejects.toThrow('manager_inventory_unavailable')
+    await expect(listPage(host)).rejects.toThrow('manager_inventory_unavailable')
     expect((await store.load(key)).dailyReflection?.manifest).toBeUndefined()
     await host.admit({ ...admission, window_end: '2026-09-18T18:00:00.000Z' }, 'retry')
-    const page = await host.list() as any
+    const page = await listPage(host) as any
     expect(page.window_end).toBe(admission.window_end)
     expect(page.records).toHaveLength(1)
-    await host.list()
+    await listPage(host)
     expect(deps.capture).toHaveBeenCalledTimes(2)
   })
 
@@ -493,117 +494,111 @@ describe('DailyReflection host', () => {
     const { host, deps, records } = await setup()
     vi.mocked(deps.capture).mockResolvedValueOnce({ records: [{ ...records[0], digest: '', gaps: ['temporary read failure'] }], gaps: [] })
     await ready(host)
-    expect((await host.read('ref-0') as any).gaps).toEqual([])
+    expect((await readPage(host, 'ref-0') as any).gaps).toEqual([])
     expect((await host.finish(completion()))?.outcome).toBe('completed')
     vi.mocked(deps.read).mockResolvedValueOnce({ content: 'changed evidence', gaps: [] })
-    expect((await host.read('ref-0') as any).gaps).toContain('frozen_evidence_changed')
+    expect((await readPage(host, 'ref-0', true)).gaps).toContain('frozen_evidence_changed')
     expect(deps.read).toHaveBeenCalledWith(expect.objectContaining({ source: records[0].source }), expect.anything())
   })
 
-  it('freezes the directory, refuses forged cursors, and preserves progress across restart/history saves', async () => {
+  it('freezes the directory and preserves confirmed progress across restart/history saves', async () => {
     const { host, deps, store } = await setup(101)
     const stale = await store.load(key)
-    const first = await host.list() as any
+    const first = await listPage(host) as any
     expect(first.records).toHaveLength(100)
     expect(first.records[0]).not.toHaveProperty('source')
-    await expect(host.list('forged')).rejects.toThrow('INVALID_REFLECTION_CURSOR')
     await store.save({ ...stale, recent: [], foldedCount: 9 })
     const restarted = new DailyReflection(deps)
-    const last = await restarted.list(first.next_cursor) as any
+    const last = await listPage(restarted)
     expect(last.records).toHaveLength(1)
-    expect(last.next_cursor).toBeUndefined()
+    expect(last.has_more).toBe(false)
     expect(deps.capture).toHaveBeenCalledOnce()
     expect((await store.load(key)).dailyReflection?.directory_complete).toBe(true)
   })
 
-  it('reads Unicode through bounded pages and rejects a cursor for another record', async () => {
+  it('reads Unicode through bounded pages without exposing record positions', async () => {
     const { host, store } = await setup(2, '汉🙂'.repeat(5000))
     await ready(host)
-    let page = await host.read('ref-0') as any
+    let page = await readPage(host, 'ref-0') as any
     expect(Buffer.byteLength(page.content)).toBeLessThanOrEqual(16 * 1024)
     expect(page.content).not.toContain('\uFFFD')
-    await expect(host.read('ref-1', page.next_cursor)).rejects.toThrow('INVALID_REFLECTION_CURSOR')
+    expect(page).not.toHaveProperty('next_cursor')
     expect((await host.finish(completion())).outcome).toBe('partial')
-    while (page.next_cursor) page = await host.read('ref-0', page.next_cursor)
+    while (page.has_more) page = await readPage(host, 'ref-0')
     expect((await store.load(key)).dailyReflection?.read_records['ref-0']).toBe(true)
   })
 
   it('rediscovers the persisted directory position after restart without the previous tool history', async () => {
     const { host, deps, dir } = await setup(205)
-    const first = await host.list() as any
-    const second = await host.list(first.next_cursor) as any
+    await listPage(host)
+    await listPage(host)
     const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
     await restarted.admit({ ...admission, trigger_id: 'next', window_end: '2026-09-19T18:00:00.000Z' }, 'next-episode')
-    const rediscovered = await restarted.list() as any
+    const rediscovered = await listPage(restarted) as any
     expect(rediscovered.window_end).toBe(admission.window_end)
-    expect(rediscovered.records[0].record_ref).toBe('ref-0')
+    expect(rediscovered.records[0].record_ref).toBe('ref-200')
     expect(rediscovered.progress).toEqual({ directory_total: 205, directory_read: 200, directory_complete: false,
-      resume_cursor: first.next_cursor, pending_record_count: 0, pending_records: [], evidence_gap_count: 0, evidence_gap_records: [], skipped_record_count: 0 })
-    expect((await restarted.list(rediscovered.next_cursor) as any).records[0].record_ref).toBe('ref-100')
-    expect((await restarted.finish(completion()))?.validation_errors).toContain('directory_not_fully_read')
-    const replayed = await restarted.list(rediscovered.progress.resume_cursor)
-    expect(replayed.records[0].record_ref).toBe('ref-100')
-    const last = await restarted.list(replayed.next_cursor)
-    expect(last.records.map((record: any) => record.record_ref)).toEqual(['ref-200', 'ref-201', 'ref-202', 'ref-203', 'ref-204'])
+      pending_record_count: 0, pending_records: [], evidence_gap_count: 0, evidence_gap_records: [], skipped_record_count: 0 })
+    expect(rediscovered.records.map((record: any) => record.record_ref)).toEqual(['ref-200', 'ref-201', 'ref-202', 'ref-203', 'ref-204'])
+    const last = await listPage(restarted)
+    expect(last.records).toEqual([])
     expect(last.progress).toMatchObject({ directory_read: 205, directory_complete: true })
-    expect(last.progress.resume_cursor).toBe(second.next_cursor)
-    expect((await restarted.list()).progress.resume_cursor).toBe(second.next_cursor)
+    expect(last).not.toHaveProperty('next_cursor')
+    expect(last.progress).not.toHaveProperty('resume_cursor')
     expect(deps.capture).toHaveBeenCalledOnce()
     expect(deps.confirm).not.toHaveBeenCalled()
-    await restarted.read('ref-204')
+    await readPage(restarted, 'ref-204')
     expect((await restarted.finish(completion({ evidence_refs: ['ref-204'] })))?.outcome).toBe('completed')
     expect(deps.confirm).toHaveBeenCalledWith(expect.objectContaining({ trigger_id: admission.trigger_id, window_end: admission.window_end }))
   })
 
   it.each([100, 200])('replays page %s after its progress is persisted but its tool result is lost', async offset => {
     const { host, deps, store, dir } = await setup(205)
-    let page = await host.list()
-    if (offset === 200) page = await host.list(page.next_cursor)
-    const lostCursor = page.next_cursor
+    await listPage(host)
+    if (offset === 200) await listPage(host)
     const save = store.updateDailyReflection.bind(store)
     vi.spyOn(store, 'updateDailyReflection').mockImplementationOnce(async (...args) => {
       await save(...args)
       throw new Error('restart before tool result checkpoint')
     })
-    await expect(host.list(lostCursor)).rejects.toThrow('restart before tool result checkpoint')
+    await expect(listPage(host)).rejects.toThrow('restart before tool result checkpoint')
     const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
-    const discovered = await restarted.list()
-    expect(discovered.progress).toMatchObject({ directory_read: offset === 200 ? 205 : 200,
-      directory_complete: offset === 200, resume_cursor: lostCursor })
-    const replayed = await restarted.list(discovered.progress.resume_cursor)
-    expect(replayed.records[0].record_ref).toBe(`ref-${offset}`)
-    if (offset === 100) expect((await restarted.list(replayed.next_cursor)).records[0].record_ref).toBe('ref-200')
+    const discovered = await listPage(restarted)
+    expect(discovered.progress).toMatchObject({ directory_read: offset, directory_complete: false })
+    expect(discovered.records[0].record_ref).toBe(`ref-${offset}`)
+    if (offset === 100) expect((await listPage(restarted)).records[0].record_ref).toBe('ref-200')
     expect(deps.capture).toHaveBeenCalledOnce()
     expect(deps.confirm).not.toHaveBeenCalled()
   })
 
-  it.each([0, 1, 100, 200])('keeps the last page reachable for a directory of %s records', async count => {
+  it.each([0, 1, 100, 200])('keeps EOF stable and allows explicit restart for a directory of %s records', async count => {
     const { host, deps, dir } = await setup(count)
-    let page = await host.list()
-    while (page.next_cursor) page = await host.list(page.next_cursor)
+    let page = await listPage(host)
+    while (page.has_more) page = await listPage(host)
     const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
-    const discovered = await restarted.list()
+    const discovered = await listPage(restarted)
     expect(discovered.progress).toMatchObject({ directory_read: count, directory_complete: true })
-    if (count <= 100) expect(discovered.progress.resume_cursor).toBeUndefined()
-    else expect((await restarted.list(discovered.progress.resume_cursor)).records[0].record_ref).toBe('ref-100')
+    expect(discovered.records).toEqual([])
+    const replayed = await listPage(restarted, true)
+    expect(replayed.records).toHaveLength(Math.min(count, 100))
+    expect(replayed.records[0]?.record_ref).toBe(count ? 'ref-0' : undefined)
   })
 
   it('rediscovers bounded unfinished details and gaps without treating old detail cursors as successful coverage', async () => {
     const { host, deps, dir } = await setup(21, 'x'.repeat(20_000))
-    const first = await host.list() as any
-    await host.list(first.next_cursor)
-    for (let i = 0; i < 21; i++) await host.read(`ref-${i}`)
+    await listPage(host)
+    for (let i = 0; i < 21; i++) await readPage(host, `ref-${i}`)
     vi.mocked(deps.read).mockRejectedValueOnce(new Error('source unavailable'))
-    await host.read('ref-0')
+    await readPage(host, 'ref-0')
     const restarted = new DailyReflection({ ...deps, store: new ManagerSessionStore(dir) })
-    let page = await restarted.list() as any
+    let page = await listPage(restarted) as any
     expect(page.progress).toMatchObject({ directory_total: 21, directory_read: 21, directory_complete: true,
       pending_record_count: 21, evidence_gap_count: 1 })
     expect(page.progress.pending_records).toEqual(Array.from({ length: 20 }, (_, i) => ({ record_ref: `ref-${i}` })))
     expect((await restarted.finish(completion()))?.validation_errors).toEqual(expect.arrayContaining(['record_not_fully_read', 'known_evidence_gaps']))
-    const detail = await restarted.read(page.progress.pending_records[0].record_ref) as any
-    await restarted.read('ref-0', detail.next_cursor)
-    page = await restarted.list() as any
+    await readPage(restarted, page.progress.pending_records[0].record_ref, true)
+    await readPage(restarted, 'ref-0')
+    page = await listPage(restarted) as any
     expect(page.progress).toMatchObject({ pending_record_count: 20, evidence_gap_count: 0 })
     expect(page.progress.pending_records).toEqual(Array.from({ length: 20 }, (_, i) => ({ record_ref: `ref-${i + 1}` })))
     expect(deps.confirm).not.toHaveBeenCalled()
@@ -634,7 +629,8 @@ describe('DailyReflection host', () => {
     expect(deps.read).not.toHaveBeenCalled()
     expect(await restarted.admit({ ...admission, trigger_id: 'queued-before-confirmation' }, 'queued')).toBe(false)
     expect(await restarted.admit({ ...admission, trigger_id: 'next', window_start: admission.window_end, window_end: '2026-09-18T18:00:00.000Z' }, 'next')).toBe(true)
-    await expect(restarted.list('old-run-cursor')).rejects.toThrow('INVALID_REFLECTION_CURSOR')
+    const list = buildDailyReflectionTools(restarted).find(tool => tool.name === 'list_reflection_records')!
+    expect((await list.call({ cursor: 'old-run-cursor' }, {})).isError).toBe(true)
   })
 
   it('keeps the original window across waiting and next scheduled trigger', async () => {
@@ -664,9 +660,9 @@ describe('DailyReflection host', () => {
     const { host, deps } = await setup()
     await ready(host)
     vi.mocked(deps.read).mockRejectedValueOnce(new Error('source unavailable'))
-    expect((await host.read('ref-0') as any).gaps).toContain('source unavailable')
+    expect((await readPage(host, 'ref-0') as any).gaps).toContain('source unavailable')
     expect((await host.finish(completion()))?.validation_errors).toContain('known_evidence_gaps')
-    await host.read('ref-0')
+    await readPage(host, 'ref-0', true)
     expect((await host.finish(completion({ evidence_refs: ['ref-0'] })))?.outcome).toBe('completed')
     expect(deps.confirm).toHaveBeenCalledOnce()
   })

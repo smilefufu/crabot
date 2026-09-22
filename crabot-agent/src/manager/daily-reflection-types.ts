@@ -3,6 +3,9 @@ export interface ReflectionWindow {
   window_end: string
 }
 
+export interface ListReflectionRecordsInput { restart?: boolean }
+export interface ReadReflectionRecordInput { record_ref: string; restart?: boolean }
+
 export interface FinishDailyReflectionInput {
   outcome: 'completed' | 'partial'
   summary: string
@@ -25,7 +28,6 @@ export interface ReflectionProgress {
   directory_total: number
   directory_read: number
   directory_complete: boolean
-  resume_cursor?: string
   pending_record_count: number
   pending_records: Array<{ record_ref: string }>
   evidence_gap_count: number
@@ -36,11 +38,26 @@ export interface ReflectionProgress {
 export interface ListReflectionRecordsOutput extends ReflectionWindow {
   run_id: string
   records: ReflectionRecordSummary[]
-  next_cursor?: string
+  has_more: boolean
   gaps: string[]
   coverage: 'available_persisted_evidence'
   progress: ReflectionProgress
   previous_result?: DailyReflectionResult
+}
+
+export interface ReadReflectionRecordOutput {
+  record_ref: string
+  content: string
+  has_more: boolean
+  gaps: string[]
+  skipped?: 'source_unavailable'
+}
+
+/** Internal positions and receipts never enter the model's tool payload. */
+export interface ReflectionReadPosition {
+  offset: number
+  complete: boolean
+  pending?: { receipt: string; start: number; end: number; has_more: boolean }
 }
 
 export interface ReflectionWorkerTrace {
@@ -89,6 +106,7 @@ export interface DailyReflectionState extends ReflectionWindow {
   directory_page?: { start: number; end: number }
   read_records: Record<string, boolean>
   cursors: Record<string, { record_ref?: string; offset: number }>
+  reading?: { version: 1; directory: ReflectionReadPosition; records: Record<string, ReflectionReadPosition> }
   summary_delivered: boolean
   result?: DailyReflectionResult
   confirmation_pending?: boolean
