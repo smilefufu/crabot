@@ -72,6 +72,7 @@ export function dailyReflectionResultForTrace(state?: DailyReflectionState): Dai
 /** The existing Manager owns execution; this host only owns evidence and completion receipts. */
 export class DailyReflection {
   private readonly mutex = new AsyncMutex()
+  private failedDirectoryRun?: string
   constructor(private readonly deps: DailyReflectionDeps) {}
 
   private async state(): Promise<DailyReflectionState> {
@@ -191,46 +192,58 @@ export class DailyReflection {
     return this.mutex.run(async () => {
       const state = await this.state()
       const offset = this.offset(state, cursor)
-      if (!state.manifest) {
-        const manifest = await this.deps.capture(state)
-        if (manifest.gaps.length) throw new Error(`REFLECTION_INVENTORY_UNAVAILABLE: ${manifest.gaps.join(', ')}`)
-        state.manifest = manifest
+      let output: ListReflectionRecordsOutput
+      try {
+        output = await this.listPage(state, offset)
+      } catch (error) {
+        this.failedDirectoryRun = state.run_id
+        throw error
       }
-      for (const record of state.manifest.records) skipUnavailableDetail(record)
-      const previousPage = this.directoryPage(state)
-      const { resume_cursor, ...progress } = this.progress(state)
-      const nextCursor = randomUUID()
-      const pageStartCursor = Object.entries(state.cursors).find(([, position]) =>
-        position.record_ref === undefined && position.offset === offset)?.[0]
-      const outputFor = (records: ReflectionRecordSummary[]): ListReflectionRecordsOutput => {
-        const end = offset + records.length
-        const advanced = end > previousPage.end
-        const resume = advanced ? pageStartCursor : resume_cursor
-        return { run_id: state.run_id, window_start: state.window_start, window_end: state.window_end,
-          records, ...(end < state.manifest!.records.length ? { next_cursor: nextCursor } : {}),
-          gaps: state.manifest!.gaps, coverage: 'available_persisted_evidence',
-          progress: { ...progress, directory_read: Math.max(previousPage.end, end),
-            directory_complete: state.directory_complete || end === state.manifest!.records.length,
-            ...(resume ? { resume_cursor: resume } : {}) },
-          ...(state.result ? { previous_result: state.result } : {}) }
-      }
-      let output = outputFor([])
-      if (Buffer.byteLength(JSON.stringify(output)) > 80 * 1024) throw new Error('REFLECTION_DIRECTORY_PAGE_TOO_LARGE: metadata')
-      for (const record of state.manifest.records.slice(offset, offset + 100)) {
-        const candidate = outputFor([...output.records, await this.recordSummary(record, state)])
-        if (Buffer.byteLength(JSON.stringify(candidate)) > 80 * 1024) {
-          if (!output.records.length) throw new Error(`REFLECTION_DIRECTORY_PAGE_TOO_LARGE: ${record.record_ref}`)
-          break
-        }
-        output = candidate
-      }
-      const end = offset + output.records.length
-      state.directory_page = end > previousPage.end ? { start: offset, end } : previousPage
-      state.directory_complete = output.progress.directory_complete
-      if (output.next_cursor) state.cursors[nextCursor] = { offset: end }
       await this.save(state)
+      this.failedDirectoryRun = undefined
       return output
     })
+  }
+
+  private async listPage(state: DailyReflectionState, offset: number): Promise<ListReflectionRecordsOutput> {
+    if (!state.manifest) {
+      const manifest = await this.deps.capture(state)
+      if (manifest.gaps.length) throw new Error(`REFLECTION_INVENTORY_UNAVAILABLE: ${manifest.gaps.join(', ')}`)
+      state.manifest = manifest
+    }
+    for (const record of state.manifest.records) skipUnavailableDetail(record)
+    const previousPage = this.directoryPage(state)
+    const { resume_cursor, ...progress } = this.progress(state)
+    const nextCursor = randomUUID()
+    const pageStartCursor = Object.entries(state.cursors).find(([, position]) =>
+      position.record_ref === undefined && position.offset === offset)?.[0]
+    const outputFor = (records: ReflectionRecordSummary[]): ListReflectionRecordsOutput => {
+      const end = offset + records.length
+      const advanced = end > previousPage.end
+      const resume = advanced ? pageStartCursor : resume_cursor
+      return { run_id: state.run_id, window_start: state.window_start, window_end: state.window_end,
+        records, ...(end < state.manifest!.records.length ? { next_cursor: nextCursor } : {}),
+        gaps: state.manifest!.gaps, coverage: 'available_persisted_evidence',
+        progress: { ...progress, directory_read: Math.max(previousPage.end, end),
+          directory_complete: state.directory_complete || end === state.manifest!.records.length,
+          ...(resume ? { resume_cursor: resume } : {}) },
+        ...(state.result ? { previous_result: state.result } : {}) }
+    }
+    let output = outputFor([])
+    if (Buffer.byteLength(JSON.stringify(output)) > 80 * 1024) throw new Error('REFLECTION_DIRECTORY_PAGE_TOO_LARGE: metadata')
+    for (const record of state.manifest.records.slice(offset, offset + 100)) {
+      const candidate = outputFor([...output.records, await this.recordSummary(record, state)])
+      if (Buffer.byteLength(JSON.stringify(candidate)) > 80 * 1024) {
+        if (!output.records.length) throw new Error(`REFLECTION_DIRECTORY_PAGE_TOO_LARGE: ${record.record_ref}`)
+        break
+      }
+      output = candidate
+    }
+    const end = offset + output.records.length
+    state.directory_page = end > previousPage.end ? { start: offset, end } : previousPage
+    state.directory_complete = output.progress.directory_complete
+    if (output.next_cursor) state.cursors[nextCursor] = { offset: end }
+    return output
   }
 
   private async recordSummary(record: ReflectionRecord, state: DailyReflectionState): Promise<ReflectionRecordSummary> {
@@ -302,8 +315,21 @@ export class DailyReflection {
     const parsed = finishSchema.safeParse(input)
     if (!parsed.success) return `invalid_completion_input: ${parsed.error.message}`
     return this.mutex.run(async () => {
-      const invalid = invalidEvidenceRefs(await this.state(), parsed.data.evidence_refs)
+      const state = await this.state()
+      const invalid = invalidEvidenceRefs(state, parsed.data.evidence_refs)
       if (invalid.length) return `unread_evidence_reference: ${JSON.stringify(invalid)}。evidence_refs 仅接受本周期目录内已完整读取且无缺口的 record_ref。没有合格引用时填 []；缺口及未完成事项写入 pending_items，Memory 核验和建链结果写入 summary。`
+      const directoryPending = !state.directory_complete && this.failedDirectoryRun !== state.run_id
+      const pending = state.manifest?.records.filter(record =>
+        state.read_records[record.record_ref] === false && !record.skipped && record.gaps.length === 0) ?? []
+      if (directoryPending || pending.length) {
+        const progress = state.manifest ? this.progress(state) : undefined
+        return `actionable_evidence_remaining: ${JSON.stringify({
+          directory_pending: directoryPending,
+          ...(progress ? { directory_read: progress.directory_read, directory_total: progress.directory_total,
+            ...(progress.resume_cursor ? { resume_cursor: progress.resume_cursor } : {}) } : {}),
+          pending_record_count: pending.length, pending_records: pending.slice(0, 20).map(({ record_ref }) => ({ record_ref })),
+        })}。尚有可继续读取的证据，本次退出未执行。目录从 resume_cursor 保守续读，没有时从首页开始，再沿 next_cursor 前进；未完详情优先沿该记录已有 next_cursor 续读，确无可用游标时才从首段重读。已知故障只暂停依赖它的判断，继续处理其他可读事项。`
+      }
       return undefined
     })
   }

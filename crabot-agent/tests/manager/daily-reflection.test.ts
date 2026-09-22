@@ -272,7 +272,7 @@ describe('DailyReflection host', () => {
     },
   )
 
-  it.each(['completed', 'partial'])('validates %s references without persisting a result or requiring full coverage', async outcome => {
+  it.each(['completed', 'partial'])('validates %s references and rejects remaining actionable coverage without persisting a result', async outcome => {
     const { host, deps, store } = await setup(101)
     await host.list()
     await host.read('ref-0')
@@ -288,8 +288,8 @@ describe('DailyReflection host', () => {
     expect(error).toContain('incomplete_or_gapped')
     expect(error).toContain('ref-2')
     expect(error).toContain('not_read')
-    expect(await finish.validateExit!({ ...input, evidence_refs: ['ref-0'] }, 1)).toBeUndefined()
-    expect(await finish.validateExit!({ ...input, evidence_refs: [] }, 1)).toBeUndefined()
+    expect(await finish.validateExit!({ ...input, evidence_refs: ['ref-0'] }, 1)).toContain('actionable_evidence_remaining')
+    expect(await finish.validateExit!({ ...input, evidence_refs: [] }, 1)).toContain('actionable_evidence_remaining')
     expect(await store.load(key)).toEqual(before)
     expect(deps.confirm).not.toHaveBeenCalled()
   })
@@ -301,6 +301,100 @@ describe('DailyReflection host', () => {
     expect(await finish.validateExit!({}, 1)).toContain('invalid_completion_input')
     expect(await finish.validateExit!(completion().exitToolCall.input, 2)).toContain('finish_must_be_called_alone')
     expect(load).not.toHaveBeenCalled()
+  })
+
+  it('rejects early partial and lets the same Engine finish the directory before exiting', async () => {
+    const { host, deps, store } = await setup(101)
+    const page = await host.list()
+    const input = completion({ outcome: 'partial', pending_items: ['memory review needs human input'] }).exitToolCall.input
+    const before = await store.load(key)
+    let calls = 0
+    const adapter: LLMAdapter = {
+      updateConfig() {},
+      async *stream(params) {
+        calls++
+        if (calls === 2) {
+          expect(params.messages.at(-1)).toMatchObject({ toolResults: [
+            { is_error: true, content: expect.stringContaining('actionable_evidence_remaining') },
+          ] })
+          expect(await store.load(key)).toEqual(before)
+        }
+        yield* chunksFromContent([{ type: 'tool_use', id: `call-${calls}`,
+          name: calls === 2 ? 'list_reflection_records' : 'finish_daily_reflection',
+          input: calls === 2 ? { cursor: page.next_cursor } : input,
+        }], 'tool_use', { inputTokens: 10, outputTokens: 10 })
+      },
+    }
+    const result = await runEngine({ prompt: 'continue', adapter,
+      options: { systemPrompt: '', model: 'fixture', tools: buildDailyReflectionTools(host), maxTurns: 4 } })
+    expect(calls).toBe(3)
+    expect(result.exitToolCall?.input).toEqual(input)
+    expect((await store.load(key)).dailyReflection).toMatchObject({ run_id: before.dailyReflection!.run_id, directory_complete: true })
+    expect((await store.load(key)).dailyReflection?.result).toBeUndefined()
+    expect(deps.capture).toHaveBeenCalledOnce()
+    expect(deps.confirm).not.toHaveBeenCalled()
+    expect((await host.finish({ outcome: result.outcome, exitToolCall: result.exitToolCall, messages: result.finalMessages }))?.outcome).toBe('partial')
+    expect(deps.confirm).not.toHaveBeenCalled()
+  })
+
+  it('requires remaining readable details even after a genuine directory failure', async () => {
+    const { host, deps, store } = await setup(101, 'x'.repeat(20000))
+    const page = await host.list()
+    const detail = await host.read('ref-0') as { next_cursor: string }
+    await store.updateDailyReflection(key, state => ({ ...state!, result: {
+      ...completion().exitToolCall.input, outcome: 'partial', run_id: state!.run_id,
+      window_start: admission.window_start, window_end: admission.window_end,
+      completed_at: deps.now(), validation_errors: [], summary: 'x'.repeat(90000),
+    } as any }))
+    await expect(host.list(page.next_cursor)).rejects.toThrow('REFLECTION_DIRECTORY_PAGE_TOO_LARGE')
+    const input = completion({ outcome: 'partial' }).exitToolCall.input
+    expect(await host.validateFinish(input, 1)).toContain('ref-0')
+    await host.read('ref-0', detail.next_cursor)
+    expect(await host.validateFinish(input, 1)).toBeUndefined()
+    expect(await new DailyReflection(deps).validateFinish(input, 1)).toContain('actionable_evidence_remaining')
+    await store.updateDailyReflection(key, state => ({ ...state!, result: undefined }))
+    await host.list()
+    expect(await host.validateFinish(input, 1)).toContain('actionable_evidence_remaining')
+    await host.list(page.next_cursor)
+    expect(await host.validateFinish(input, 1)).toBeUndefined()
+  })
+
+  it('allows actual capture failure but clears it on success and never treats a forged cursor as a fault', async () => {
+    const { host, deps } = await setup(101)
+    const input = completion({ outcome: 'partial' }).exitToolCall.input
+    expect(await host.validateFinish(input, 1)).toContain('actionable_evidence_remaining')
+    await expect(host.list('forged')).rejects.toThrow('INVALID_REFLECTION_CURSOR')
+    expect(await host.validateFinish(input, 1)).toContain('actionable_evidence_remaining')
+    vi.mocked(deps.capture).mockRejectedValueOnce(new Error('inventory I/O failure'))
+    await expect(host.list()).rejects.toThrow('inventory I/O failure')
+    expect(await host.validateFinish(input, 1)).toBeUndefined()
+    await host.list()
+    await expect(host.list('forged')).rejects.toThrow('INVALID_REFLECTION_CURSOR')
+    expect(await host.validateFinish(input, 1)).toContain('actionable_evidence_remaining')
+  })
+
+  it('does not carry a directory failure into another run on the same host', async () => {
+    const { host, deps, store } = await setup()
+    vi.mocked(deps.capture).mockRejectedValueOnce(new Error('inventory I/O failure'))
+    await expect(host.list()).rejects.toThrow('inventory I/O failure')
+    const input = completion({ outcome: 'partial' }).exitToolCall.input
+    expect(await host.validateFinish(input, 1)).toBeUndefined()
+    await store.updateDailyReflection(key, () => undefined)
+    await host.admit({ ...admission, trigger_id: 'new-trigger' }, 'new-episode')
+    expect(await host.validateFinish(input, 1)).toContain('actionable_evidence_remaining')
+  })
+
+  it.each(['read denied', 'manager_trace_unavailable'])('requires a pending readable detail but permits a genuine gap or skip: %s', async failure => {
+    const { host, deps } = await setup(1, 'x'.repeat(20000))
+    await host.list()
+    const detail = await host.read('ref-0') as { next_cursor: string }
+    const input = completion({ outcome: 'partial' }).exitToolCall.input
+    expect(await host.validateFinish(input, 1)).toContain('ref-0')
+    await expect(host.read('ref-0', 'wrong')).rejects.toThrow('INVALID_REFLECTION_CURSOR')
+    expect(await host.validateFinish(input, 1)).toContain('ref-0')
+    vi.mocked(deps.read).mockRejectedValueOnce(new Error(failure))
+    await host.read('ref-0', detail.next_cursor)
+    expect(await host.validateFinish(input, 1)).toBeUndefined()
   })
 
   it('uses the same current-directory rule before exit and in the final host check', async () => {
