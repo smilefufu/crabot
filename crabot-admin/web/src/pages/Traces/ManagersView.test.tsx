@@ -1,7 +1,7 @@
 /**
  * P6-A §10 UI 测试：Manager/Worker 视图的路由编解码、分页、错误态与 cursor 恢复。
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { ManagersView } from './ManagersView'
@@ -35,11 +35,13 @@ const runningWorker = (workerId: string, title: string) => ({
 
 describe('ManagersView', () => {
   beforeEach(() => { vi.resetAllMocks() })
+  afterEach(() => { vi.useRealTimers() })
 
   it('列表渲染 + 链接按 encodeURIComponent 编码 ManagerKey', async () => {
     mocked.listManagers = vi.fn().mockResolvedValue({
       items: [{
         manager_key: 'wechat::sess-1',
+        execution_status: 'running',
         display_name: '微信·棉花糖 · 产品群',
         last_activity_at: '2026-08-01T10:00:00.000Z',
         recent_activity_summary: '你问：部署好了吗',
@@ -61,10 +63,10 @@ describe('ManagersView', () => {
     const link = screen.getByText('微信·棉花糖 · 产品群').closest('a')!
     expect(link.getAttribute('href')).toBe(`/traces/managers/${encodeURIComponent('wechat::sess-1')}`)
     expect(screen.getByText('wechat::sess-1')).toBeInTheDocument()
-    expect(screen.getByText('执行中')).toHaveTextContent('执行中 1')
-    expect(screen.getByText('待执行')).toHaveTextContent('待执行 0')
-    expect(screen.getByText('续办')).toHaveTextContent('续办 1')
-    expect(screen.getByText('待核实')).toHaveTextContent('待核实 0')
+    expect(screen.getByText('执行中')).toBeInTheDocument()
+    expect(screen.queryByText('待执行')).toBeNull()
+    expect(screen.queryByText('续办')).toBeNull()
+    expect(screen.queryByText('待核实')).toBeNull()
     expect(screen.getByText('2 个目标')).toBeInTheDocument()
     expect(screen.getByText('3 项')).toBeInTheDocument()
     expect(screen.getByText('1 项阻塞')).toBeInTheDocument()
@@ -72,14 +74,102 @@ describe('ManagersView', () => {
     expect(screen.queryByText('Episodes')).toBeNull()
   })
 
-  it('agent 不可达显示 unknown，不缓存旧数据', async () => {
+  it('agent 不可达显示暂不可用', async () => {
     mocked.listManagers = vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED'))
     render(
       <MemoryRouter>
         <ManagersView />
       </MemoryRouter>,
     )
-    await waitFor(() => expect(screen.getByText(/unknown/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/会话列表暂不可用/)).toBeInTheDocument())
+  })
+
+  const summaryPage = (execution_status?: 'running' | 'idle' | 'unknown', page = 1) => ({
+    items: [{ manager_key: `wechat::sess-${page}`, display_name: `会话 ${page}`, execution_status,
+      running_worker_count: 9, queued_worker_count: 2, continuation_candidate_count: 3, worker_attention_count: 7,
+      workboard: { status: 'ready', current_objective_count: 0, current_work_item_count: 0, blocked_work_item_count: 0 } }],
+    pagination: { page, page_size: 20, total_pages: 2, total_items: 21 },
+  })
+
+  it.each([['idle', '当前无执行'], ['unknown', '暂不可用'], [undefined, '暂不可用']] as const)(
+    '只显示服务端会话状态 %s，不回退内部计数', async (status, label) => {
+      mocked.listManagers = vi.fn().mockResolvedValue(summaryPage(status))
+      render(<MemoryRouter><ManagersView /></MemoryRouter>)
+      expect(await screen.findByText(label)).toBeInTheDocument()
+      expect(screen.queryByText('执行中')).toBeNull()
+      expect(screen.queryByText(/待执行|续办|待核实/)).toBeNull()
+    },
+  )
+
+  it('串行后台刷新，失败保留会话但使执行状态失效，随后恢复', async () => {
+    vi.useFakeTimers()
+    let finish!: (value: ReturnType<typeof summaryPage>) => void
+    mocked.listManagers = vi.fn()
+      .mockResolvedValueOnce(summaryPage('running'))
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(summaryPage('idle'))
+    render(<MemoryRouter><ManagersView /></MemoryRouter>)
+    await act(async () => {})
+    expect(screen.getByText('执行中')).toBeInTheDocument()
+    await act(() => vi.advanceTimersByTimeAsync(5_000))
+    await act(() => vi.advanceTimersByTimeAsync(20_000))
+    expect(mocked.listManagers).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('会话 1')).toBeInTheDocument()
+    expect(screen.getByText('执行中')).toBeInTheDocument()
+    await act(async () => { finish(summaryPage('idle')) })
+    expect(screen.getByText('当前无执行')).toBeInTheDocument()
+    await act(() => vi.advanceTimersByTimeAsync(5_000))
+    expect(screen.getByText('会话 1')).toBeInTheDocument()
+    expect(screen.getByText('暂不可用')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('执行状态刷新失败')
+    await act(() => vi.advanceTimersByTimeAsync(5_000))
+    expect(screen.getByText('当前无执行')).toBeInTheDocument()
+    expect(screen.queryByText('执行状态刷新失败')).toBeNull()
+  })
+
+  it('隐藏时停止刷新，重新可见时丢弃旧响应并刷新，卸载后不再请求', async () => {
+    vi.useFakeTimers()
+    let visibility: DocumentVisibilityState = 'visible'
+    const visibilitySpy = vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility)
+    let finish!: (value: ReturnType<typeof summaryPage>) => void
+    mocked.listManagers = vi.fn().mockResolvedValueOnce(summaryPage('idle'))
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      .mockResolvedValue(summaryPage('idle'))
+    const { unmount } = render(<MemoryRouter><ManagersView /></MemoryRouter>)
+    try {
+      await act(async () => {})
+      await act(() => vi.advanceTimersByTimeAsync(5_000))
+      act(() => { visibility = 'hidden'; document.dispatchEvent(new Event('visibilitychange')) })
+      await act(() => vi.advanceTimersByTimeAsync(20_000))
+      expect(mocked.listManagers).toHaveBeenCalledTimes(2)
+      act(() => { visibility = 'visible'; document.dispatchEvent(new Event('visibilitychange')) })
+      await act(async () => { finish(summaryPage('running')) })
+      expect(screen.queryByText('执行中')).toBeNull()
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      expect(mocked.listManagers).toHaveBeenCalledTimes(3)
+      expect(screen.getByText('当前无执行')).toBeInTheDocument()
+      unmount()
+      await act(() => vi.advanceTimersByTimeAsync(10_000))
+      expect(mocked.listManagers).toHaveBeenCalledTimes(3)
+    } finally { visibilitySpy.mockRestore() }
+  })
+
+  it('翻页后旧后台请求不能覆盖新页', async () => {
+    vi.useFakeTimers()
+    let finish!: (value: ReturnType<typeof summaryPage>) => void
+    mocked.listManagers = vi.fn().mockResolvedValueOnce(summaryPage('idle'))
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      .mockResolvedValue(summaryPage('running', 2))
+    render(<MemoryRouter><ManagersView /></MemoryRouter>)
+    await act(async () => {})
+    await act(() => vi.advanceTimersByTimeAsync(5_000))
+    await act(async () => { fireEvent.click(screen.getByText('下一页')) })
+    expect(screen.getByText('会话 2')).toBeInTheDocument()
+    await act(async () => { finish(summaryPage('idle')) })
+    expect(screen.getByText('会话 2')).toBeInTheDocument()
+    expect(screen.queryByText('会话 1')).toBeNull()
+    expect(screen.getByText('执行中')).toBeInTheDocument()
   })
 
   it('翻页触发带页码的重新拉取', async () => {

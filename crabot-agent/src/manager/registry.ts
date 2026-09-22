@@ -352,6 +352,10 @@ export class ManagerRegistry {
     return Array.from(this.loops.keys()).map((key) => ({ key, lastActiveAtMs: this.lastActiveAtMs.get(key) }))
   }
 
+  isExecuting(key: ManagerKey): boolean {
+    return this.loops.get(key)?.isExecuting ?? false
+  }
+
   /** 不创建 loop；只读取 exact ManagerKey 当前内存上下文与 mailbox。 */
   snapshotHumanInbound(key: ManagerKey): ManagerInboundMessageFact[] {
     return this.loops.get(key)?.snapshotHumanInbound() ?? []

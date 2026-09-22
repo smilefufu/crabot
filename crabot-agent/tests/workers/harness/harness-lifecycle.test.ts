@@ -342,6 +342,93 @@ afterEach(async () => {
   await fs.rm(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 })
 })
 
+describe('WorkerHarness.executionStatus', () => {
+  it('已核实的切换停止事实不被旧 running 回调覆盖', async () => {
+    const { harness, fake } = await makeHarness({ implId: 'claude-code' })
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'claude-code', session_ref: worker.incarnations[0].session_ref }, 'running')
+    await (harness as any).stateChangeTails.get(`${worker.worker_id}#claude-code#1`)
+    await (harness as any).supersedeAfterVerifiedStop(worker.manager_key, worker, worker.incarnations[0])
+    const [stopped] = await harness.listWorkers(worker.manager_key)
+    expect(await harness.executionStatus([stopped])).toBe('idle')
+  })
+
+  it('启动探测与回调事实优先于旧台账，读取不重新调用探测', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const probe = vi.spyOn(fake, 'state').mockResolvedValue('idle')
+    await harness.reconcileOnStartup()
+    probe.mockClear()
+    expect(await harness.executionStatus([worker])).toBe('idle')
+    expect(probe).not.toHaveBeenCalled()
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'running')
+    await (harness as any).stateChangeTails.get(`${worker.worker_id}#builtin#1`)
+    expect(await harness.executionStatus([worker])).toBe('running')
+  })
+
+  it('启动未就绪保持 unknown，已停止但 task running 或通知待处理不假报执行', async () => {
+    let ready = false
+    const { harness, fake } = await makeHarness({}, { isExecutionReady: () => ready })
+    const worker = await harness.spawnWorker(spawnParams())
+    expect(await harness.executionStatus([worker])).toBe('unknown')
+    ready = true
+    expect(await harness.executionStatus([worker])).toBe('running')
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    await (harness as any).stateChangeTails.get(`${worker.worker_id}#builtin#1`)
+    const [idle] = await harness.listWorkers(worker.manager_key)
+    const release = harness.beginBgNotification(worker.worker_id)
+    const state = vi.spyOn(fake, 'state')
+    const writes = vi.spyOn((harness as any).deps.ledger, 'upsertWorker')
+    try {
+      expect(await harness.executionStatus([{ ...idle, task: { ...idle.task, status: 'running' } }])).toBe('idle')
+      expect(await harness.executionStatus([{ ...idle, task: { ...idle.task, status: 'queued' } }])).toBe('unknown')
+      expect(state).not.toHaveBeenCalled()
+      expect(writes).not.toHaveBeenCalled()
+    } finally { release() }
+  })
+
+  it('主线停止时已登记 fork 和后台执行仍计入，单条读取失败不掩盖另一条运行', async () => {
+    let background = false
+    const { harness } = await makeHarness({}, { hasRunningBg: async id => {
+      if (id === 'unreadable') throw new Error('unavailable')
+      return background
+    } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const idle = { ...worker, incarnations: worker.incarnations.map(inc => ({ ...inc, state: 'idle' as const })) }
+    expect(await harness.executionStatus([idle])).toBe('idle')
+    background = true
+    expect(await harness.executionStatus([idle])).toBe('running')
+    background = false
+    const fork = { ...worker.incarnations[0], incarnation_id: 'fork', seq: 2, forked_from: worker.incarnations[0].incarnation_id }
+    expect(await harness.executionStatus([{ ...idle, incarnations: [...idle.incarnations, fork] }])).toBe('running')
+    expect(await harness.executionStatus([{ ...idle, worker_id: 'unreadable' }])).toBe('unknown')
+    expect(await harness.executionStatus([{ ...idle, worker_id: 'unreadable' }, worker])).toBe('running')
+  })
+
+  it('原生子 Agent 使用已核验快照，读接口不重建 runtime；缺少历史停止时间不冒充当前未知', async () => {
+    const { harness, fake } = await makeHarness({ implId: 'claude-code' })
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'claude-code', session_ref: worker.incarnations[0].session_ref }, 'idle')
+    await (harness as any).stateChangeTails.get(`${worker.worker_id}#claude-code#1`)
+    let childStatus = 'running'
+    const subagents = vi.fn(async () => [{ subagent_id: 'child', status: childStatus }])
+    ;(fake as any).listSubagents = subagents
+    let [idle] = await harness.listWorkers(worker.manager_key)
+    expect(await harness.executionStatus([idle])).toBe('unknown')
+    expect(subagents).not.toHaveBeenCalled()
+    await (harness as any).nativeContinuationFact(idle, true)
+    subagents.mockClear()
+    expect(await harness.executionStatus([idle])).toBe('running')
+    expect(subagents).not.toHaveBeenCalled()
+    childStatus = 'completed'
+    await (harness as any).nativeContinuationFact(idle, true)
+    subagents.mockClear()
+    expect(await harness.executionStatus([idle])).toBe('idle')
+    expect(subagents).not.toHaveBeenCalled()
+    expect((await harness.workerView([idle], { manager_key: worker.manager_key, objectives: [], archive: [] })).attention).toHaveLength(1)
+  })
+})
+
 describe('WorkerHarness.spawnWorker', () => {
   it('缺少可信 Worker context 时保持 Agent 标记，不回退 Admin token', async () => {
     const { harness, fake } = await makeHarness()

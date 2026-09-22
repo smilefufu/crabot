@@ -750,6 +750,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
   it('Worker 对账完成后才恢复 Manager，Manager LLM 不阻塞后台恢复和巡检', async () => {
     boot()
     const stack = internals.managerStack!
+    expect(await stack.harness.executionStatus([])).toBe('unknown')
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     vi.spyOn(stack.harness, 'reconcileOnStartup').mockImplementation(async () => {
@@ -764,6 +765,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     release()
     await waitUntil(() => sweep.mock.calls.length === 1)
     expect(resume).toHaveBeenCalledOnce()
+    expect(await stack.harness.executionStatus([])).toBe('idle')
   })
 
   it('候选淘汰等待对账后才启用，但未完成的 sweep 不阻塞恢复通知和活性巡检', async () => {

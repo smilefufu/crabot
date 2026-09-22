@@ -1533,6 +1533,8 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
     traceStore?: Partial<import('../../src/core/trace-store.js').TraceStore>
     stackStoreKeys?: string[]
     running?: Array<{ key: string; lastActiveAtMs?: number }>
+    executing?: string[]
+    workerExecution?: 'running' | 'idle' | 'unknown' | Error
     workers?: Array<{ managerKey: string; worker?: ReturnType<typeof makeLedgerWorker> }>
     noStack?: boolean
   }) {
@@ -1550,7 +1552,14 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
             .filter((w) => w.managerKey === key)
             .map((w) => w.worker ?? makeLedgerWorker({ workerId: 'w-mock' })),
         },
-        registry: { listActiveManagers: () => options.running ?? [] },
+        registry: {
+          listActiveManagers: () => options.running ?? [],
+          isExecuting: (key: string) => options.executing?.includes(key) ?? false,
+        },
+        harness: { executionStatus: async () => {
+          if (options.workerExecution instanceof Error) throw options.workerExecution
+          return options.workerExecution ?? 'idle'
+        } },
       }
     }
     agent.traceStore = options.traceStore ?? {
@@ -1587,6 +1596,24 @@ describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
     await expect(agent.handleListManagersAdmin({})).rejects.toThrow('Manager stack not initialized')
     await expect(agent.handleListManagerEpisodesAdmin({ manager_key: 'wechat::sess-a' })).rejects.toThrow('Manager stack not initialized')
     await expect(agent.handleGetManagerInboundStatusAdmin({ manager_key: 'wechat::sess-a' })).rejects.toThrow('Manager stack not initialized')
+  })
+
+  it.each([
+    [true, 'idle', 'running'],
+    [false, 'running', 'running'],
+    [true, 'unknown', 'running'],
+    [false, 'idle', 'idle'],
+    [false, 'unknown', 'unknown'],
+    [true, new Error('worker read failed'), 'running'],
+    [false, new Error('worker read failed'), 'unknown'],
+  ] as const)('会话聚合主控=%s Worker=%s → %s，不依赖驻留实例或旧 running 台账', async (executing, workerExecution, expected) => {
+    const key = 'wechat::sess-a'
+    const agent = buildAgentWithTraceStack({
+      stackStoreKeys: [key], running: [{ key }], executing: executing ? [key] : [], workerExecution,
+      workers: [{ managerKey: key, worker: makeLedgerWorker({ workerId: 'old-running', status: 'running' }) }],
+    })
+    const result = await agent.handleListManagersAdmin({}) as { items: Array<{ execution_status: string }> }
+    expect(result.items[0].execution_status).toBe(expected)
   })
 
   it('list_manager_episodes_admin 按 exact key 透传 TraceStore 分页', async () => {

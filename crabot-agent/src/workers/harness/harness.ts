@@ -753,6 +753,8 @@ export interface HarnessDeps {
   }) => Promise<{ token: string; expires_at: string }>
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
+  /** Read-only execution projection waits for startup carrier and background reconciliation. */
+  readonly isExecutionReady?: () => boolean
   readonly listWorkerBackground?: (workerId: string) => Promise<Array<{
     entity_id: string
     status: 'running' | 'completed' | 'failed' | 'killed' | 'stalled'
@@ -893,7 +895,7 @@ function continuationDelivery(
 
 export class WorkerHarness {
   private readonly pendingBgNotifications = new Map<string, number>()
-  private readonly continuationObservations = new Map<string, { key: string; fact: WorkerExecutionFact; stoppedAt?: string; stopUnverified?: boolean }>()
+  private readonly continuationObservations = new Map<string, { key: string; fact: WorkerExecutionFact; runtimeFact: WorkerExecutionFact; stoppedAt?: string; stopUnverified?: boolean }>()
   private readonly continuationProjects = new Map<ManagerKey, { scope: string; projects: WorkerViewFacts['projects'] }>()
   private readonly contextStore: WorkerContextStore
   private readonly gitInspector = new WorkspaceGitInspector()
@@ -938,6 +940,8 @@ export class WorkerHarness {
   private readonly stallReports = new Map<string, StallReportMark>()
   /** Adapter state callbacks observed per incarnation; used to order harness-owned CLI input settlement. */
   private readonly stateChangeRevisions = new Map<string, number>()
+  /** Carrier facts from existing startup probes/callbacks; observing them never probes an adapter. */
+  private readonly executionStates = new Map<string, { state: WorkerContractState | 'unknown'; sessionRef: string }>()
   /** Serializes state callbacks and lets synchronous input wait for its hook publication. */
   private readonly stateChangeTails = new Map<string, Promise<void>>()
   /** Manager-originated deliveries are allowed to await active-episode mailbox publication. */
@@ -1026,6 +1030,7 @@ export class WorkerHarness {
     }
     const revisionKey = `${h.worker_id}#${h.impl}#${h.seq}`
     this.stateChangeRevisions.set(revisionKey, (this.stateChangeRevisions.get(revisionKey) ?? 0) + 1)
+    this.executionStates.set(revisionKey, { state, sessionRef: h.session_ref })
     const prior = this.stateChangeTails.get(revisionKey)
     const processing = prior
       ? prior.then(() => this.processStateChange(h, state, report))
@@ -4154,6 +4159,42 @@ export class WorkerHarness {
     return this.deps.ledger.listWorkers(managerKey)
   }
 
+  /** Observe execution only; candidate/notification protection is not evidence of activity. */
+  async executionStatus(workers: readonly LedgerWorker[]): Promise<WorkerExecutionFact> {
+    if (this.deps.isExecutionReady?.() === false) return 'unknown'
+    let unknown = false
+    for (const worker of workers) {
+      if (worker.task.status === 'closed') continue
+      let needsNativeObservation = false
+      let changedCarrierState = false
+      for (const incarnation of worker.incarnations) {
+        if (!isExecutableIncarnation(incarnation)) { unknown = true; continue }
+        const observed = this.executionStates.get(`${worker.worker_id}#${incarnation.impl}#${incarnation.seq}`)
+        // A verified stop may be committed without a final adapter callback (for example handoff).
+        const useObservation = observed?.sessionRef === incarnation.session_ref
+          && (incarnation.state !== 'exited' || observed.state === 'unknown')
+        const state = useObservation ? observed.state : incarnation.state
+        if (state !== incarnation.state) changedCarrierState = true
+        if (state === 'running' && worker.task.status !== 'queued' && incarnation.session_ref) return 'running'
+        if (state === 'unknown') unknown = true
+        if (state === 'exited' && incarnation.impl !== 'builtin') continue
+        const adapter = this.deps.adapters.get(incarnation.impl)
+        if (!adapter || adapter.listSubagents) needsNativeObservation = true
+      }
+      try {
+        if (await this.deps.hasRunningBg?.(worker.worker_id, 'all')) return 'running'
+      } catch { unknown = true }
+      if (worker.task.status === 'queued' || worker.incarnations.length === 0) { unknown = true; continue }
+      if (!needsNativeObservation) continue
+      const observation = this.continuationObservations.get(worker.worker_id)
+      if (!changedCarrierState && observation?.key === this.continuationObservationKey(worker)) {
+        if (observation.runtimeFact === 'running') return 'running'
+        if (observation.runtimeFact === 'unknown') unknown = true
+      } else unknown = true
+    }
+    return unknown ? 'unknown' : 'idle'
+  }
+
   async workerView(workers: readonly LedgerWorker[], board: ManagerWorkboard, projects?: WorkerViewFacts['projects']): Promise<WorkerViewSelection> {
     const execution = new Map<string, WorkerExecutionFact>()
     const blocked = new Set<string>()
@@ -4209,7 +4250,7 @@ export class WorkerHarness {
         }
       }
     } catch { fact = 'unknown' }
-    this.continuationObservations.set(worker.worker_id, { key, fact, stoppedAt, stopUnverified })
+    this.continuationObservations.set(worker.worker_id, { key, fact, runtimeFact: fact, stoppedAt, stopUnverified })
     return fact
   }
 
@@ -4321,7 +4362,8 @@ export class WorkerHarness {
         try { stop = status === 'halted' ? await this.aggregateStopEvidence(worker) : undefined }
         catch { /* Unreadable execution evidence remains attention. */ }
         if (status === 'halted' && !stop) {
-          this.continuationObservations.set(worker_id, { key: this.continuationObservationKey(worker), fact: 'unknown' })
+          this.continuationObservations.set(worker_id, { key: this.continuationObservationKey(worker), fact: 'unknown',
+            runtimeFact: this.continuationObservations.get(worker_id)?.runtimeFact ?? 'unknown' })
           return
         }
         if (status === worker.task.status && JSON.stringify(stop?.halt) === JSON.stringify(worker.task.halt)
@@ -5205,9 +5247,17 @@ export class WorkerHarness {
       const handle = handleForIncarnation(worker.worker_id, mainline)
 
       let observed: WorkerContractState
+      const revisionKey = `${worker.worker_id}#${mainline.impl}#${mainline.seq}`
+      const revision = this.stateChangeRevisions.get(revisionKey) ?? 0
       try {
         observed = await adapter.state(handle)
+        if ((this.stateChangeRevisions.get(revisionKey) ?? 0) === revision) {
+          this.executionStates.set(revisionKey, { state: observed, sessionRef: handle.session_ref })
+        }
       } catch (err) {
+        if ((this.stateChangeRevisions.get(revisionKey) ?? 0) === revision) {
+          this.executionStates.set(revisionKey, { state: 'unknown', sessionRef: handle.session_ref })
+        }
         await this.markCrashed(
           managerKey,
           worker,
@@ -5377,7 +5427,8 @@ export class WorkerHarness {
     let stop: Awaited<ReturnType<WorkerHarness['aggregateStopEvidence']>>
     try { stop = await this.aggregateStopEvidence(worker) } catch { /* Defer eviction until evidence can be read. */ }
     if (!stop || JSON.stringify(stop.halt) !== JSON.stringify(worker.task.halt)) {
-      this.continuationObservations.set(worker.worker_id, { key: this.continuationObservationKey(worker), fact: 'unknown' })
+      this.continuationObservations.set(worker.worker_id, { key: this.continuationObservationKey(worker), fact: 'unknown',
+        runtimeFact: this.continuationObservations.get(worker.worker_id)?.runtimeFact ?? 'unknown' })
     }
   }
 

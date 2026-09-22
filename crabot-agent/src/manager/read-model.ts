@@ -304,8 +304,11 @@ export function buildWorkerDetail(found: LedgerWorkerEntry): GetWorkerDetailResu
 // P6-A 阶段 3：Manager 读模型（protocol-agent-v3 §8.4）
 // ============================================================================
 
+export type ManagerExecutionStatus = 'running' | 'idle' | 'unknown'
+
 export interface ManagerAdminSummary {
   manager_key: ManagerKey
+  execution_status: ManagerExecutionStatus
   last_activity_at?: string
   recent_activity_summary?: string
   active_worker_count: number
@@ -324,6 +327,7 @@ export interface ManagerWorkboardSummary {
 }
 
 export interface ManagerSummarySources {
+  readonly executionStatus: (key: ManagerKey) => ManagerExecutionStatus
   /** disk session keys（ManagerSessionStore.listManagerKeys 已做 dir/key 校验）。 */
   readonly diskSessionKeys: ReadonlyArray<ManagerKey>
   /** TraceStore 已验证 manager keys。 */
@@ -365,6 +369,7 @@ export function buildManagerAdminSummaries(
       .pop()
     return {
       manager_key: key,
+      execution_status: sources.executionStatus(key),
       ...(lastActivity ? { last_activity_at: lastActivity } : {}),
       ...(stats.latestSummary ? { recent_activity_summary: stats.latestSummary } : {}),
       active_worker_count: sources.activeWorkerCount(key),

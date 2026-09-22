@@ -169,6 +169,31 @@ describe('ManagerRegistry', () => {
     await fs.rm(dataDir, { recursive: true, force: true })
   })
 
+  it('会话执行事实跟随真实回合，不把驻留实例当作执行', async () => {
+    const entered = deferred()
+    const release = deferred()
+    const { adapter } = makeAdapter()
+    const stream = adapter.stream.bind(adapter)
+    adapter.stream = async function* (params) {
+      entered.resolve()
+      await release.promise
+      yield* stream(params)
+    }
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+    const key = SYSTEM_TASKS_MANAGER_KEY
+    expect(registry.isExecuting(key)).toBe(false)
+    expect(registry.listActiveManagers()).toEqual([])
+    registry.getOrCreate(key)
+    expect(registry.isExecuting(key)).toBe(false)
+    const running = registry.routeSchedule(scheduleWake({ scheduleId: 'execution-status', title: 't', description: 'test' }))
+    await entered.promise
+    try { expect(registry.isExecuting(key)).toBe(true) }
+    finally { release.resolve() }
+    await running
+    expect(registry.listActiveManagers().some(item => item.key === key)).toBe(true)
+    expect(registry.isExecuting(key)).toBe(false)
+  })
+
   /** adapter/model 的测试入参既接受字面量（绝大多数用例）也接受 thunk（专测热更语义的用例）。 */
   function baseRegistryDeps(
     overrides: Partial<Omit<ManagerRegistryDeps, 'adapter' | 'model'>> & {

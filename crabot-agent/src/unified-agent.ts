@@ -3886,6 +3886,7 @@ export class UnifiedAgent extends ModuleBase {
     const runningWorkerCounts = new Map<string, number>()
     const queuedWorkerCounts = new Map<string, number>()
     const workerAttentionCounts = new Map<string, number>()
+    const executionStatuses = new Map<ManagerKey, import('./manager/read-model.js').ManagerExecutionStatus>()
     const workerFacts = new Map<string, EpisodeWorkerFact>()
     const workersByManager = new Map<ManagerKey, LedgerWorker[]>()
     for (const { managerKey, worker } of workers) {
@@ -3903,6 +3904,11 @@ export class UnifiedAgent extends ModuleBase {
     const workboardSummaries = new Map<ManagerKey, import('./manager/read-model.js').ManagerWorkboardSummary | { status: 'unknown' }>()
     const managerKeys = new Set<ManagerKey>([...diskKeys, ...traceKeys, ...running.keys()])
     await Promise.all([...managerKeys].map(async (key) => {
+      try {
+        executionStatuses.set(key, await stack.harness.executionStatus(workersByManager.get(key) ?? []))
+      } catch {
+        executionStatuses.set(key, 'unknown')
+      }
       try {
         const board = await stack.workboard.loadAdmin(key)
         const view = await stack.harness.workerView(workersByManager.get(key) ?? [], board)
@@ -3922,6 +3928,7 @@ export class UnifiedAgent extends ModuleBase {
       }
     }))
     return buildManagerAdminSummaries({
+      executionStatus: key => stack.registry.isExecuting(key) ? 'running' : executionStatuses.get(key) ?? 'unknown',
       diskSessionKeys: diskKeys,
       traceKeys,
       episodeStats: (key) => {
