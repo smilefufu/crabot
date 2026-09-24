@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
-import { spawnPersistentShell, readProcStartTime, runShellWithGrace } from '../../../src/engine/bg-entities/bg-shell'
+import { spawnPersistentShell, readProcStartTime, runShellWithGrace, exitcodeFileForLog, killShellTree } from '../../../src/engine/bg-entities/bg-shell'
 import type { BgShellRegistryRecord } from '../../../src/engine/bg-entities/types'
 import * as resolveBashPathModule from '../../../src/utils/resolve-bash-path'
 
@@ -69,6 +69,28 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('spawnPersistentShell', () => {
+  it.each([
+    ['explicit success', 'exit 0', 0],
+    ['explicit failure', 'exit 7', 7],
+    ['errexit failure', 'set -e\nfalse\necho unreachable', 1],
+    ['exec failure', 'exec bash -c "exit 9"', 9],
+  ])('persists the actual exit code for %s', async (_name, command, exitCode) => {
+    const entityId = await spawnPersistentShell({
+      command,
+      owner: { friend_id: 'user-A' },
+      spawned_by_task_id: 'task-exit-sentinel',
+      cwd: tmpDir,
+      registry,
+    })
+
+    await vi.waitFor(async () => {
+      const record = await registry.get(entityId) as BgShellRegistryRecord
+      expect(record.status).toBe(exitCode === 0 ? 'completed' : 'failed')
+      expect(record.exit_code).toBe(exitCode)
+      expect(readFileSync(exitcodeFileForLog(record.log_file), 'utf8')).toBe(String(exitCode))
+    })
+  })
+
   it('returns entity_id immediately in shell_<hex> format', async () => {
     const entityId = await spawnPersistentShell({
       command: 'sleep 5',
@@ -227,6 +249,97 @@ describe('spawnPersistentShell', () => {
 })
 
 describe('runShellWithGrace', () => {
+  it.each([
+    ['errexit success', 'set -e\nprintf success'],
+    ['strict success', 'set -euo pipefail\nprintf success\nprintf warning >&2'],
+    ['errexit failure', 'set -e\nfalse\nprintf unreachable'],
+    ['pipeline failure', 'set -eo pipefail\nfalse | cat\nprintf unreachable'],
+    ['explicit exit', 'printf before-exit\nexit 7'],
+    ['exec', 'exec bash -c "printf executed; exit 9"'],
+    ['user exit trap', 'trap "printf cleanup" EXIT\nprintf result\nexit 7'],
+    ['user wait', 'sleep 0.1 &\nwait\nprintf waited'],
+  ])('preserves native Bash behavior for %s', async (_name, command) => {
+    const native = spawnSync(resolveBashPathModule.resolveBashPath()!, ['-c', command], {
+      cwd: tmpDir,
+      encoding: 'utf8',
+      timeout: 2_000,
+    })
+    expect(native.error).toBeUndefined()
+    const pidFile = path.join(tmpDir, 'shell.pid')
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 2_000)
+    try {
+      const result = await runShellWithGrace({
+        command: `printf '%s' "$$" > shell.pid\n${command}`,
+        cwd: tmpDir,
+        owner: { friend_id: 'user-A' },
+        spawned_by_task_id: 'task-native-exit',
+        registry,
+        gracePeriodMs: 3_000,
+        abortSignal: controller.signal,
+      })
+      expect(result).toEqual({
+        kind: 'inline',
+        exitCode: native.status,
+        status: native.status === 0 ? 'completed' : 'failed',
+        stdout: native.stdout,
+        stderr: native.stderr,
+      })
+    } finally {
+      clearTimeout(timeout)
+      if (existsSync(pidFile)) killShellTree(Number(readFileSync(pidFile, 'utf8')))
+    }
+  })
+
+  it('aborts the user subshell and its background children', async () => {
+    const pidFile = path.join(tmpDir, 'child.pid')
+    const controller = new AbortController()
+    const running = runShellWithGrace({
+      command: 'sleep 30 &\nprintf \'%s\' "$!" > child.pid\nwait',
+      cwd: tmpDir,
+      owner: { friend_id: 'user-A' },
+      spawned_by_task_id: 'task-aborted-subshell',
+      registry,
+      gracePeriodMs: 10_000,
+      abortSignal: controller.signal,
+    })
+    try {
+      await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true))
+    } finally {
+      controller.abort()
+      await expect(running).resolves.toEqual({ kind: 'aborted' })
+    }
+    const childPid = Number(readFileSync(pidFile, 'utf8'))
+    spawnedPids.push(childPid)
+    await vi.waitFor(() => expect(() => process.kill(childPid, 0)).toThrow())
+  })
+
+  it.each([0, 7])('preserves exit %i after background promotion', async (exitCode) => {
+    const onShellExit = vi.fn()
+    const result = await runShellWithGrace({
+      command: `set -eu\nsleep 0.2\nprintf finished\nexit ${exitCode}`,
+      cwd: tmpDir,
+      owner: { friend_id: 'user-A', worker_id: 'worker-A' },
+      spawned_by_task_id: 'task-promoted-exit',
+      registry,
+      gracePeriodMs: 20,
+      onShellExit,
+    })
+    expect(result.kind).toBe('background')
+    if (result.kind !== 'background') return
+    const record = await registry.get(result.entity_id) as BgShellRegistryRecord
+    spawnedPids.push(record.pid)
+    await vi.waitFor(() => expect(onShellExit).toHaveBeenCalledOnce(), { timeout: 3_000 })
+    expect(onShellExit).toHaveBeenCalledWith(expect.objectContaining({
+      entity_id: result.entity_id,
+      status: exitCode === 0 ? 'completed' : 'failed',
+      exit_code: exitCode,
+    }))
+    const ended = await registry.get(result.entity_id) as BgShellRegistryRecord
+    expect(ended.exit_notification?.status).toBe('pending')
+    expect(readFileSync(exitcodeFileForLog(ended.log_file), 'utf8')).toBe(String(exitCode))
+  })
+
   it('returns inline when a short command starts a background child that keeps stdout open', async () => {
     const startedAt = Date.now()
 

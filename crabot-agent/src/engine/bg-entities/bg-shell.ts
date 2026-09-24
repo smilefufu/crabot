@@ -59,7 +59,7 @@ function shSingleQuote(s: string): string {
  */
 export function wrapCommandWithExitSentinel(command: string, exitcodeFile: string): string {
   return (
-    `${command}\n` +
+    `(\n${command}\n)\n` +
     `__crabot_ec=$?\n` +
     `printf '%s' "$__crabot_ec" > ${shSingleQuote(exitcodeFile)} 2>/dev/null\n` +
     `exit $__crabot_ec`
@@ -118,8 +118,9 @@ function wrapCommandWithInlineStreamCapture(
     `  rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
     `}\n` +
     `trap cleanup EXIT\n` +
-    `{\n${command}\n` +
-    `} > ${shSingleQuote(stdoutFile)} 2> ${shSingleQuote(stderrFile)}\n` +
+    // Isolate user shell options, traps and jobs from the capture/exit-code wrapper.
+    `(\n${command}\n` +
+    `) > ${shSingleQuote(stdoutFile)} 2> ${shSingleQuote(stderrFile)}\n` +
     `__crabot_ec=$?\n` +
     `__crabot_drain_tails\n` +
     `trap - EXIT\n` +
