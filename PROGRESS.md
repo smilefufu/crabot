@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### OpenAI 思考文本误投影修复：已部署
+
+- 在 OpenAI adapter 边界把旧兼容端点返回的前导 `<thinking>` 内容归入 `raw_reasoning`，沿用结构化 `reasoning_content` 的既有分流；纯思考不写 assistant 文本、不产生活动唤醒，Harness 不解析思考标签。
+- OpenAI adapter 69 项、Harness 生命周期 191 项及相关定向回归已通过。9 月 24 日 19:11 重新构建 Agent 并执行 `crabot restart`，新 Agent PID 81253，7 个模块运行，MM/Admin 端点健康；生产业务 trace 的后续行为尚未复验。
+
 ### Shell 执行结果保真修复：已验证，待部署
 
 - 真实进程回归复现同一 Shell 封装的四类问题：`set -e` 成功命令误报失败、`exit`/`exec` 跳过退出码落盘、用户 EXIT trap 输出丢失、裸 `wait` 等待内部日志进程。两处封装改为在子 Shell 中执行用户命令，保留原始退出码与输出，隔离内部清理和日志任务。

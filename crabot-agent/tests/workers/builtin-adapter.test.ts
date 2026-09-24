@@ -32,6 +32,7 @@ function forkOptions() {
 function makeAdapter(
   responses: Array<{
     text?: string
+    reasoning?: string
     toolCalls?: Array<{ name: string; id: string; input: Record<string, unknown> }>
     stopReason: 'end_turn' | 'tool_use'
   }>,
@@ -41,6 +42,7 @@ function makeAdapter(
     stream: vi.fn(async function* () {
       const r = responses[i++] ?? responses[responses.length - 1]
       const content: unknown[] = []
+      if (r.reasoning) content.push({ type: 'raw_reasoning', data: { reasoning_content: r.reasoning } })
       if (r.text) content.push({ type: 'text', text: r.text })
       for (const tc of r.toolCalls ?? []) {
         content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
@@ -523,6 +525,29 @@ describe('BuiltinWorkerAdapter', () => {
     ])
     expect(traceEvents.slice(0, 4).every((event) => event.responseId === traceEvents[0].responseId)).toBe(true)
     expect(onNativeActivity).toHaveBeenCalled()
+  })
+
+  it('纯 raw_reasoning 回合不记录 assistant_text', async () => {
+    const appendLlmResponse = vi.fn()
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      traceHooks: {
+        startIncarnationTrace: () => 'trace-reasoning',
+        appendLlmResponse,
+        appendTurn: () => {},
+        finishIncarnationTrace: () => {},
+      },
+    })
+
+    const h = await adapter.spawn(spec({
+      adapter: makeAdapter([{ reasoning: 'internal plan', stopReason: 'end_turn' }]),
+    }))
+    await waitState(adapter, h, 'idle')
+
+    expect(appendLlmResponse).toHaveBeenCalledWith(
+      'trace-reasoning',
+      expect.objectContaining({ assistantText: '' }),
+    )
   })
 
   it('llm span 分开投影模型调用与 assistant 文本，且 cursor 按 span 推进一次', async () => {

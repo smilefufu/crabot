@@ -1015,6 +1015,60 @@ describe('OpenAIAdapter.stream', () => {
     expect(result.usage?.outputTokens).toBe(3)
   })
 
+  it('maps provider reasoning_content to raw reasoning instead of assistant text', async () => {
+    const streamChunks = [
+      { id: 'c', choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'step one' }, finish_reason: null }] },
+      { id: 'c', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeChatSSEResponse(streamChunks)) as unknown as typeof fetch
+
+    const adapter = new OpenAIAdapter({ endpoint: 'https://mirror.example.ai/v1', apikey: 'k' })
+    const chunks = await collectOpenAIChunks(adapter)
+    const processor = new StreamProcessor()
+    for (const c of chunks) processor.process(c)
+    const result = processor.finalize()
+
+    expect(result.text).toBe('')
+    expect(result.reasoningBlocks).toEqual([{ type: 'raw_reasoning', data: { reasoning_content: 'step one' } }])
+  })
+
+  it('streams visible content immediately after provider reasoning', async () => {
+    const streamChunks = [
+      { id: 'c', choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'step' }, finish_reason: null }] },
+      { id: 'c', choices: [{ index: 0, delta: { content: 'answer' }, finish_reason: null }] },
+      { id: 'c', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeChatSSEResponse(streamChunks)) as unknown as typeof fetch
+
+    const adapter = new OpenAIAdapter({ endpoint: 'https://mirror.example.ai/v1', apikey: 'k' })
+    const chunks = await collectOpenAIChunks(adapter)
+    const processor = new StreamProcessor()
+    for (const c of chunks) processor.process(c)
+    const result = processor.finalize()
+
+    expect(result.text).toBe('answer')
+    expect(result.reasoningBlocks).toEqual([{ type: 'raw_reasoning', data: { reasoning_content: 'step' } }])
+  })
+
+  it('normalizes a legacy tagged thinking prefix at the adapter boundary', async () => {
+    const streamChunks = [
+      { id: 'c', choices: [{ index: 0, delta: { role: 'assistant', content: '<thinking>step ' }, finish_reason: null }] },
+      { id: 'c', choices: [{ index: 0, delta: { content: 'one</thinking>' }, finish_reason: null }] },
+      { id: 'c', choices: [{ index: 0, delta: { content: 'answer' }, finish_reason: null }] },
+      { id: 'c', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeChatSSEResponse(streamChunks)) as unknown as typeof fetch
+
+    const adapter = new OpenAIAdapter({ endpoint: 'https://mirror.example.ai/v1', apikey: 'k' })
+    const chunks = await collectOpenAIChunks(adapter)
+    const processor = new StreamProcessor()
+    for (const c of chunks) processor.process(c)
+    const result = processor.finalize()
+
+    expect(result.text).toBe('answer')
+    expect(result.reasoningBlocks).toEqual([{ type: 'raw_reasoning', data: { reasoning_content: 'step one' } }])
+  })
+
   it('throws when a chat stream ends without finish_reason', async () => {
     const streamChunks = [
       { id: 'c', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hello' }, finish_reason: null }] },

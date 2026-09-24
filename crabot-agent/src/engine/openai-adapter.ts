@@ -153,6 +153,77 @@ function mapOpenAIFinishReason(raw: string | null | undefined): EngineStopReason
   }
 }
 
+type TaggedThinkingMode = 'pending' | 'reasoning' | 'visible'
+
+interface TaggedThinkingState {
+  mode: TaggedThinkingMode
+  pending: string
+  reasoning: string
+}
+
+interface TaggedThinkingOutput {
+  reasoning: string[]
+  text: string[]
+}
+
+const THINKING_OPEN = '<thinking>'
+const THINKING_CLOSE = '</thinking>'
+
+/**
+ * Compatibility normalization for gateways that put a thinking prefix in content instead of
+ * using OpenAI's reasoning_content field. Only an unambiguous prefix is treated as reasoning;
+ * ordinary content remains streaming and is never scanned for inline tags.
+ */
+function consumeTaggedThinking(state: TaggedThinkingState, content: string): TaggedThinkingOutput {
+  if (state.mode === 'visible') return { reasoning: [], text: [content] }
+
+  if (state.mode === 'pending') {
+    state.pending += content
+    const leading = state.pending.trimStart()
+    const lowerLeading = leading.toLowerCase()
+    if (THINKING_OPEN.startsWith(lowerLeading)) return { reasoning: [], text: [] }
+    if (lowerLeading.startsWith(THINKING_OPEN)) {
+      state.mode = 'reasoning'
+      state.reasoning = leading.slice(THINKING_OPEN.length)
+      state.pending = ''
+    } else {
+      state.mode = 'visible'
+      const text = state.pending
+      state.pending = ''
+      return { reasoning: [], text: [text] }
+    }
+  } else {
+    state.reasoning += content
+  }
+
+  const close = state.reasoning.toLowerCase().indexOf(THINKING_CLOSE)
+  if (close < 0) return { reasoning: [], text: [] }
+  const reasoning = state.reasoning.slice(0, close)
+  const text = state.reasoning.slice(close + THINKING_CLOSE.length)
+  state.mode = 'visible'
+  state.reasoning = ''
+  return {
+    reasoning: reasoning ? [reasoning] : [],
+    text: text ? [text] : [],
+  }
+}
+
+function flushTaggedThinking(state: TaggedThinkingState): TaggedThinkingOutput {
+  if (state.mode === 'visible') return { reasoning: [], text: [] }
+  if (state.mode === 'pending') {
+    const leading = state.pending.trimStart()
+    if (!leading.toLowerCase().startsWith(THINKING_OPEN)) {
+      return { reasoning: [], text: state.pending ? [state.pending] : [] }
+    }
+    state.mode = 'reasoning'
+    state.reasoning = leading.slice(THINKING_OPEN.length)
+    state.pending = ''
+  }
+  const reasoning = state.reasoning
+  state.reasoning = ''
+  return { reasoning: reasoning ? [reasoning] : [], text: [] }
+}
+
 // --- OpenAI Adapter ---
 
 export class OpenAIAdapter implements LLMAdapter {
@@ -229,6 +300,7 @@ export class OpenAIAdapter implements LLMAdapter {
     // 留下无 output 的 function_call，下一轮被后端拒为 "No tool output found for function call"。
     let finalStopReason: EngineStopReason = null
     let finalUsage: LLMTokenUsage | undefined = undefined
+    const taggedThinking: TaggedThinkingState = { mode: 'pending', pending: '', reasoning: '' }
     const rawEvents: string[] = []
     let rawBytes = 0
     let sawDone = false
@@ -304,7 +376,13 @@ export class OpenAIAdapter implements LLMAdapter {
           }
 
           if (delta.content) {
-            yield { type: 'text_delta', text: delta.content }
+            const normalized = consumeTaggedThinking(taggedThinking, delta.content)
+            for (const reasoning of normalized.reasoning) {
+              yield { type: 'raw_reasoning', data: { reasoning_content: reasoning } }
+            }
+            for (const text of normalized.text) {
+              yield { type: 'text_delta', text }
+            }
           }
 
           if (delta.tool_calls) {
@@ -359,6 +437,14 @@ export class OpenAIAdapter implements LLMAdapter {
         finishReason: finalStopReason,
         ...(diagnosticError ? { error: diagnosticError } : {}),
       })
+    }
+
+    const normalizedTail = flushTaggedThinking(taggedThinking)
+    for (const reasoning of normalizedTail.reasoning) {
+      yield { type: 'raw_reasoning', data: { reasoning_content: reasoning } }
+    }
+    for (const text of normalizedTail.text) {
+      yield { type: 'text_delta', text }
     }
 
     // 单次 message_end：流正常结束（[DONE] / 自然收尾）后发出。中途 throw 不会走到这里

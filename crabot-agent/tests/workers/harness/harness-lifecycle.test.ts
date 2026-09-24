@@ -1054,6 +1054,28 @@ describe('WorkerHarness.handleStateChange', () => {
     })
   })
 
+  it('纯 llm_call 技术事件不产生 activity_available', async () => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const collected = deferred()
+    const { harness } = await makeHarness({
+      nativeTrace: [{ ts: '2026-08-20T00:00:00.000Z', kind: 'llm_call', summary: 'llm end_turn' }],
+    }, { onOperationNotification: route, onNativeActivityCollected: () => collected.resolve() })
+    const worker = await harness.spawnWorker(spawnParams())
+    const incarnation = worker.incarnations[0]
+    const handle = {
+      worker_id: worker.worker_id,
+      incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq,
+      impl: 'builtin' as const,
+      session_ref: incarnation.session_ref,
+    }
+
+    harness.handleNativeActivity(handle)
+    await collected.promise
+
+    expect(route).not.toHaveBeenCalled()
+  })
+
   it('activity receipt 注册后保持 pending 且进程内去重，admit 回调才结算', async () => {
     let receipt: ActivityContextAdmissionReceipt | undefined
     const route = vi.fn(async (_managerKey, _event, incomingReceipt?: ActivityContextAdmissionReceipt) => {
