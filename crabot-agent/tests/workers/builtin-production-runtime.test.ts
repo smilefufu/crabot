@@ -1130,7 +1130,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).not.toContain('## 目标模式详解')
 
     expect(prompt).toContain(workspaceRoot)
-    expect(prompt).toContain('依据实际产物和必要检查验证结果')
+    expect(prompt).toContain('按人类明确的完成条件做必要验证')
+    expect(prompt).toContain('已有产物和直接证据足够时立即收口')
     expect(prompt).toContain('等待外部结果时结束本轮等通知')
   })
 

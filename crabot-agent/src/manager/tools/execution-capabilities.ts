@@ -16,7 +16,7 @@ export type DescribeExecutionTools = (impl: WorkerImplId, principal?: ResolvedPe
 export function createExecutionCapabilitiesTool(deps: ToolFaceDeps): ToolDefinition {
   return defineTool({
     name: 'get_execution_capabilities',
-    description: '委托前查询当前会话派发权限及目标执行条件。省略参数查询三种实现的新建条件；worker_id 查询当前会话已有执行器的固定权限。旧执行器不会随联系人改权而自动更新；工具未接入与权限拒绝分开判断。查询不执行任务、不授予权限；未知条件仍需核实。',
+    description: '仅在没有有效能力事实、能力或权限已变化，或要复用的执行器需要核对固定权限时查询一次。省略参数查询三种实现的新建条件；worker_id 查询当前会话已有执行器的固定权限。旧执行器不会随联系人改权而自动更新；工具未接入与权限拒绝分开判断。查询不执行任务、不授予权限；控制面返回的拒绝就是当前事实，不要用重复查询代替处置。',
     inputSchema: { type: 'object', properties: {
       worker_id: { type: 'string' }, impl: { type: 'string', enum: ['builtin', 'claude-code', 'codex'] },
     }, additionalProperties: false },

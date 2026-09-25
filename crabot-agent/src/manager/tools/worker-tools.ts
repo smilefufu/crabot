@@ -211,7 +211,7 @@ function normalizePagination(page: unknown, pageSize: unknown): { page: number; 
   return { page: valid(page, 1), page_size: Math.min(valid(pageSize, 20), 100) }
 }
 
-const ACCESS_DENIED = 'worker 不存在或当前会话无权访问'
+const ACCESS_DENIED = '执行器不存在或当前会话无权访问'
 
 class SendToWorkerDeadlineError extends Error {
   constructor() {
@@ -308,11 +308,11 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const spawnWorker = defineTool({
     name: 'spawn_worker',
     description:
-      '派发前使用 get_execution_capabilities 核对本会话和目标实现的有效条件，已有有效查询结果可沿用。权限不足先请求必要调整。按分工建立一个独立 worker，交付指定任务的结果。可连续调用，组织多个 worker 并行推进独立工作。每个 worker 有自己的上下文。' +
-      '接续同一项工作且已有 worker 的上下文仍有用、能有效推进时，延续/' +
-      '补充/返工用 send_to_worker；复用持续无效时，关闭旧 worker 后可新建，并在 prompt 中' +
-      '交代当前完整要求、必要事实和产物位置，新 worker 不自动继承旧上下文。异步语义:本工具在 worker 化身创建完成后即返回' +
-      '(不等 worker 把任务做完),返回 worker_id;worker 每跑完一轮(转 idle)或结束时会作为' +
+      '已有本回合或近期有效能力事实时直接派发；只有事实缺失、过期或实现/权限发生变化时才先查询一次。派发被控制面拒绝时，依据拒绝原因自行处置或向人类说明真实缺口，不重复尝试同一调用。按分工建立一个独立执行器，交付指定任务的结果。可连续调用，组织多个执行器并行推进独立工作。每个执行器有自己的上下文。' +
+      '接续同一项工作且已有执行器的上下文仍有用、能有效推进时，延续/' +
+      '补充/返工用 send_to_worker；复用持续无效时，关闭旧执行器后可新建，并在 prompt 中' +
+      '交代当前完整要求、必要事实和产物位置，新执行器不自动继承旧上下文。异步语义:本工具在执行器化身创建完成后即返回' +
+      '(不等执行器把任务做完),返回 worker_id;执行器每跑完一轮(转 idle)或结束时会作为' +
       '事件唤醒你,事件带状态和待处置回合；用 get_worker_activity 读取原生会话。impl 缺省按部署偏好选择;workspace 缺省新建。',
     inputSchema: {
       type: 'object',
@@ -323,9 +323,9 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
         },
         prompt: {
           type: 'string',
-          description: '交给 worker 的任务描述/初始输入。要它目标驱动就把目标写在这里',
+          description: '交给执行器的任务描述/初始输入。要它目标驱动就把目标写在这里',
         },
-        impl: { type: 'string', enum: WORKER_IMPL_IDS as unknown as string[], description: 'worker 实现,缺省按部署偏好' },
+        impl: { type: 'string', enum: WORKER_IMPL_IDS as unknown as string[], description: '执行器实现,缺省按部署偏好' },
         workspace: { type: 'string', description: '复用的 workspace 路径,缺省新建一个' },
       },
       required: ['title', 'prompt'],
@@ -380,23 +380,23 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const sendToWorker = defineTool({
     name: 'send_to_worker',
     description:
-      '向指定 worker 投递一条输入。返回 delivered 才表示 worker adapter 已确认接受；failed 会立即给出简要原因与送达确定性。' +
-      'worker 处于什么状态都能投:在跑/空闲的排进信箱,' +
+      '向指定执行器投递一条输入。返回 delivered 才表示执行器 adapter 已确认接受；failed 会立即给出简要原因与送达确定性。' +
+      '执行器处于什么状态都能投:在跑/空闲的排进信箱,' +
       '已结束(completed/failed)的会自动复活它原来的会话接着干、上下文完整保留——所以延续、' +
-      '补充、返工一个老任务都走这里,不必先判断它死活,也不必为此新开 worker。同步投递只等待一次有界尝试，' +
-      '不等 worker 处理完这条消息;worker 每跑完一轮或结束时' +
+      '补充、返工一个老任务都走这里,不必先判断它死活,也不必为此新开执行器。同步投递只等待一次有界尝试，' +
+      '不等执行器处理完这条消息;执行器每跑完一轮或结束时' +
       '会作为事件唤醒你,事件带状态和待处置回合；用 get_worker_activity 读取原生会话。命中已 cancelled 的任务会被拒绝。' +
       '未知交互界面必须使用 respond_to_worker_ui，普通输入不提供 raw 终端旁路。' +
-      '如果这条消息代表立即改变当前任务方向，设置 immediate_redirect=true；非 builtin worker 会先由 Harness 中断当前回合，' +
-      '确认中断完成后再投递；builtin worker 不 abort，投递会在它当前执行步骤结束后的下一步之前注入（无论其当前回合多长）。',
+      '如果这条消息代表立即改变当前任务方向，设置 immediate_redirect=true；非 builtin 执行器会先由 Harness 中断当前回合，' +
+      '确认中断完成后再投递；builtin 执行器不 abort，投递会在它当前执行步骤结束后的下一步之前注入（无论其当前回合多长）。',
     inputSchema: {
       type: 'object',
       properties: {
-        worker_id: { type: 'string', description: '目标 worker id' },
+        worker_id: { type: 'string', description: '目标执行器 id' },
         text: { type: 'string', description: '要投递的文本' },
         immediate_redirect: {
           type: 'boolean',
-          description: '是否立即改变当前任务方向；CLI worker 先中断并确认完成，再投递文本。',
+          description: '是否立即改变当前任务方向；CLI 执行器先中断并确认完成，再投递文本。',
         },
       },
       required: ['worker_id', 'text'],
@@ -436,14 +436,14 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const queryWorker = defineTool({
     name: 'query_worker',
     description:
-      '从 worker 当前主线上下文建立独立执行分支，回答或执行新请求，主线继续运行。分支可使用既有授权内的工具。' +
+      '从执行器当前主线上下文建立独立执行分支，回答或执行新请求，主线继续运行。分支可使用既有授权内的工具。' +
       '只有执行分支已创建、首个请求已接受且化身已落账后才返回 started + query_id + fork_incarnation_id；' +
       '建立失败会在本次调用直接返回原因。分支执行仍异步，完成或失败后会通知你；' +
       '需要过程证据时，用 get_worker_activity 传入返回的 fork_incarnation_id 作为 incarnation_id 读取。',
     inputSchema: {
       type: 'object',
       properties: {
-        worker_id: { type: 'string', description: '目标 worker id' },
+        worker_id: { type: 'string', description: '目标执行器 id' },
         question: { type: 'string', description: '交给执行分支回答或执行的新请求，包含目标、必要事实和交付要求' },
       },
       required: ['worker_id', 'question'],
@@ -468,7 +468,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const inspectWorkspaceGit = defineTool({
     name: 'inspect_workspace_git',
-    description: '按当前回合文件读取授权，实时核验 worker 主线工作区 Git 状态与化身启动基线；提交和干净状态不单独证明完成。',
+    description: '按当前回合文件读取授权，实时核验执行器主线工作区 Git 状态与化身启动基线；提交和干净状态不单独证明完成。',
     inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } }, required: ['worker_id'], additionalProperties: false },
     isReadOnly: true,
     async call(input) {
@@ -485,10 +485,10 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const getWorkerState = defineTool({
     name: 'get_worker_state',
-    description: '读取 worker 当前任务状态和主线化身状态。用于判断是否在运行、等待输入或已经结束，不读取终端。',
+    description: '读取执行器当前任务状态和主线化身状态。用于判断是否在运行、等待输入或已经结束，不读取终端。',
     inputSchema: {
       type: 'object',
-      properties: { worker_id: { type: 'string', description: '目标 worker id' } },
+      properties: { worker_id: { type: 'string', description: '目标执行器 id' } },
       required: ['worker_id'],
     },
     isReadOnly: true,
@@ -506,12 +506,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const getWorkerActivity = defineTool({
     name: 'get_worker_activity',
     description:
-      '读取原生增量活动。view=assistant（默认）仅文本；all 含工具及脱敏错误。after 为上次游标，换 view 时不传。' +
+      '读取执行器原生增量活动。view=assistant（默认）仅文本；all 含工具及脱敏错误。after 为上次游标，换 view 时不传。' +
       '游标变化不代表新活动，空结果不证明完成或无错误；读完所需证据且只剩等待就结束本轮等通知，不轮询。',
     inputSchema: {
       type: 'object',
       properties: {
-        worker_id: { type: 'string', description: '目标 worker id' },
+        worker_id: { type: 'string', description: '目标执行器 id' },
         incarnation_id: { type: 'string', description: '可选的稳定化身 id，缺省主线化身' },
         after: { type: 'string', description: '上次返回的 opaque cursor' },
         view: { type: 'string', enum: ['assistant', 'all'], description: 'assistant 为默认，all 含工具活动与错误证据' },
@@ -548,11 +548,11 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const getWorkerTurn = defineTool({
     name: 'get_worker_turn',
-    description: '读取 worker 最近一个待处置回合，或按 turn_id 精确读取。默认返回收尾正文；需要过程证据时用 view=activity。next_cursor 非空时继续分页读取同一回合。回合只表示 worker 已停在一个可处理边界，不等于任务成功或已经向人类交付。',
+    description: '读取执行器最近一个待处置回合，或按 turn_id 精确读取。默认返回收尾正文；需要过程证据时用 view=activity。next_cursor 非空时继续分页读取同一回合。回合只表示执行器已停在一个可处理边界，不等于任务成功或已经向人类交付。',
     inputSchema: {
       type: 'object',
       properties: {
-        worker_id: { type: 'string', description: '目标 worker id' },
+        worker_id: { type: 'string', description: '目标执行器 id' },
         turn_id: { type: 'string', description: '可选的具体回合 id' },
         view: { type: 'string', enum: ['result', 'activity'], description: '默认 result 读取收尾正文；activity 读取过程 JSONL' },
         cursor: { type: 'string', description: '上一页返回的 next_cursor' },
@@ -587,10 +587,10 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const requestWorkerInterrupt = defineTool({
     name: 'request_worker_interrupt',
-    description: '请求中断 worker 当前主线回合。返回持久化 control operation；请求被接受不等于已经中断，需以 operation status 和后续事件为准。',
+    description: '请求中断执行器当前主线回合。返回持久化 control operation；请求被接受不等于已经中断，需以 operation status 和后续事件为准。',
     inputSchema: {
       type: 'object',
-      properties: { worker_id: { type: 'string', description: '目标 worker id' } },
+      properties: { worker_id: { type: 'string', description: '目标执行器 id' } },
       required: ['worker_id'],
     },
     isReadOnly: false,
@@ -608,10 +608,10 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const requestWorkerStop = defineTool({
     name: 'request_worker_stop',
-    description: '请求停止 worker 主线、已登记 fork 与 Harness 可核验的 worker-owned 执行。返回持久化 control operation；受理不等于已停止，只有核验成功后任务才会转为 closed，无法证明完整停止时停止结果为 unknown。',
+    description: '请求停止执行器主线、已登记 fork 与 Harness 可核验的执行器自有执行。返回持久化 control operation；受理不等于已停止，只有核验成功后任务才会转为 closed，无法证明完整停止时停止结果为 unknown。',
     inputSchema: {
       type: 'object',
-      properties: { worker_id: { type: 'string', description: '目标 worker id' } },
+      properties: { worker_id: { type: 'string', description: '目标执行器 id' } },
       required: ['worker_id'],
     },
     isReadOnly: false,
@@ -629,11 +629,11 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const respondToWorkerUi = defineTool({
     name: 'respond_to_worker_ui',
-    description: '对未知 worker UI 的一次性快照作答。结合状态和原生会话判断；只有需要诊断未知界面时才读取终端。只能选择 interaction_required 事件中给出的 action_id；文本 action 才传 text。snapshot_id 过期、已使用或化身变化都会被拒绝。',
+    description: '对未知执行器 UI 的一次性快照作答。结合状态和原生会话判断；只有需要诊断未知界面时才读取终端。只能选择 interaction_required 事件中给出的 action_id；文本 action 才传 text。snapshot_id 过期、已使用或化身变化都会被拒绝。',
     inputSchema: {
       type: 'object',
       properties: {
-        worker_id: { type: 'string', description: '目标 worker id' },
+        worker_id: { type: 'string', description: '目标执行器 id' },
         snapshot_id: { type: 'string', description: 'interaction_required 事件返回的快照 id' },
         action_id: { type: 'string', description: 'interaction_required 的 actions 中一个 action_id' },
         text: { type: 'string', description: '仅 text action 需要的明确文本回答' },
@@ -659,12 +659,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const resolveWorkerTurn = defineTool({
     name: 'resolve_worker_turn',
     description:
-      '标记一个已检查的 worker 回合如何处置。reported 或 asked_human 必须已向该 worker 的 report_to 成功发送；' +
+      '标记一个已检查的执行器回合如何处置。reported 或 asked_human 必须已向该执行器的 report_to 成功发送；' +
       'continued 必须已实际续办；suppressed 必须写明原因。',
     inputSchema: {
       type: 'object',
       properties: {
-        worker_id: { type: 'string', description: '目标 worker id' },
+        worker_id: { type: 'string', description: '目标执行器 id' },
         turn_id: { type: 'string', description: 'get_worker_turn 返回的回合 id' },
         resolution: { type: 'string', enum: ['continued', 'reported', 'asked_human', 'suppressed'], description: '本回合的处置结果' },
         reason: { type: 'string', description: 'suppressed 时必填的审计原因' },
@@ -708,12 +708,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const getWorkerTerminal = defineTool({
     name: 'get_worker_terminal',
     description:
-      '同步读取 worker 化身当前完整终端画面、最终画面或 headless 纯文本。每次调用都是完整替换，' +
+      '同步读取执行器化身当前完整终端画面、最终画面或 headless 纯文本。每次调用都是完整替换，' +
       '没有 offset/增量；缺省读主线化身，侧问结果传 query_worker 返回的 fork_seq。',
     inputSchema: {
       type: 'object',
       properties: {
-        worker_id: { type: 'string', description: '目标 worker id' },
+        worker_id: { type: 'string', description: '目标执行器 id' },
         seq: { type: 'number', description: '读侧问分支的答案时传 query 事件里给出的 seq;缺省读主线化身' },
       },
       required: ['worker_id'],
@@ -739,7 +739,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const listWorkers = defineTool({
     name: 'list_workers',
     description:
-      '列出当前会话可决策的 worker。默认返回真实执行中和按项目限额的续办候选；' +
+      '列出当前会话可决策的执行器。默认返回真实执行中和按项目限额的续办候选；' +
       '需要查看历史时显式 include_terminal=true 并分页，不提供搜索。需要继续、返工或汇报进度时先列出。',
     inputSchema: {
       type: 'object',
@@ -790,7 +790,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const listWorkerImplementations = defineTool({
     name: 'list_worker_implementations',
     description:
-      '列出可用的 worker 实现（builtin/claude-code/codex）的当前状态：enabled/ready/' +
+      '列出可用的执行器实现（builtin/claude-code/codex）的当前状态：enabled/ready/' +
       'capabilities/preference/default 与脱敏原因。需要选择实现或回应用户偏好时先查；' +
       'preference 只是给你的自然语言软指导，不是硬规则。',
     inputSchema: { type: 'object', properties: {} },
@@ -824,7 +824,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const getWorkerDetail = defineTool({
     name: 'get_worker_detail',
-    description: '读取一个 worker 的完整详情。当前会话只能读取自己的 worker。',
+    description: '读取一个执行器的完整详情。当前会话只能读取自己的执行器。',
     inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } }, required: ['worker_id'] },
     isReadOnly: true,
     call: async (input): Promise<ToolCallResult> => {
@@ -837,7 +837,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const listAllWorkers = capturedAuthorization ? defineTool({
     name: 'list_all_workers',
-    description: '仅 Master 可用：跨会话列出 worker 精简摘要，支持 manager_key/status/分页过滤。',
+    description: '仅 Master 可用：跨会话列出执行器精简摘要，支持 manager_key/status/分页过滤。',
     inputSchema: {
       type: 'object', properties: {
         manager_key: { type: 'string' }, status: { oneOf: [{ type: 'string', enum: ['queued', 'running', 'halted', 'closed'] }, { type: 'array', items: { type: 'string', enum: ['queued', 'running', 'halted', 'closed'] } }] },

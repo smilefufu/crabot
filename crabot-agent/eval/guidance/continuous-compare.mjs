@@ -61,6 +61,10 @@ export function remainingConditions(plan, summary) {
 async function main() {
   const out = process.env.GUIDANCE_OUTPUT, baselineRoot = process.env.GUIDANCE_BASELINE_ROOT
   if (!out || !baselineRoot) throw new Error('GUIDANCE_OUTPUT and GUIDANCE_BASELINE_ROOT required')
+  const stopNewRequestsAtReportedTokens = Number(process.env.GUIDANCE_STOP_TOKENS ?? 2_000_000)
+  if (!Number.isSafeInteger(stopNewRequestsAtReportedTokens) || stopNewRequestsAtReportedTokens <= 0) {
+    throw new Error('GUIDANCE_STOP_TOKENS must be a positive safe integer')
+  }
   const sources = { baseline: baselineRoot, candidate: root }
   let conditions = []
   // Block by replicate, alternate within pairs. No replacement or favourable resampling.
@@ -95,7 +99,7 @@ async function main() {
     }])),
     scripts: Object.fromEntries(['continuous-cases.mjs', 'continuous-runtime.mjs', 'continuous-compare.mjs', 'docker-fixtures.mjs', 'docker-project-docs.mjs', 'docker-tool-entry.mjs', 'build-docker.mjs'].map(f => [f, sha(fs.readFileSync(path.join(import.meta.dirname, f)))])),
     ...(continuation ? { continuation } : {}),
-    conditions, maxRequests: conditions.reduce((n, c) => n + c.maxRequests, 0), stopNewRequestsAtReportedTokens: 2000000,
+    conditions, maxRequests: conditions.reduce((n, c) => n + c.maxRequests, 0), stopNewRequestsAtReportedTokens,
     scope: 'Synthetic cases only, no private history or project files. Actual selected-revision Manager/Harness/Builtin loops. Real file, command, workspace and Git operations inside isolated Docker. Channel and memory captured locally; no Feishu send. Fixed Worker event seeds are setup only. A readonly builtin reviewer runs with isolated production child prompt. Timer waiting, external channels and native CLI Workers are not tested. No retries, replacement samples or prompt changes.',
     acceptance: 'Check full trajectories, artifacts, board changes and outbox against frozen per-case criteria. Keep infrastructure errors and incomplete runs separate. Compare quality before cost, report all attempts plus complete comparable pairs, and list regressions even if aggregate tokens decrease. Repeats are limited and do not establish population non-inferiority or zero incident probability.',
   }
