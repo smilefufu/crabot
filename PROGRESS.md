@@ -5,7 +5,7 @@
 - 使用真实百炼 `qwen3.8-max`、ManagerLoop/Harness/builtin Worker、Docker 文件与命令工具完成 34 条冻结轨迹；候选和基线均通过全部可比文件/交付 oracle。候选在权限缺口、持续项目和事件交付中减少了无效能力查询或重复过程；reviewer 场景请求增加是因为实际执行并消费了独立审查，不能按请求数单独判优。
 - 主控新增“沿用有效能力事实、控制面拒绝后不重复尝试、只在缺少人类决定或真实权限缺口时求助”；执行器新增“普通技术失败自行修复、按明确完成条件验证、证据足够即收口、不为潜在风险追加检查”；`finish_task` 明确额外静态审查不是默认前置条件。
 - 聚焦历史机制 8 条轨迹和持续项目 4 条轨迹再次通过：候选未重复索取已给授权，未传播已撤销限制；新规则后候选持续项目均只发最终交付消息。实验输出保留在 `/private/tmp/crabot-final-real-20260925b`、`/private/tmp/crabot-focused-history-20260925b`、`/private/tmp/crabot-focused-continuous-20260925`；仅发送合成案例，不含私人 Feishu 内容，消息只写本地 outbox。
-- 结论边界：这是有限人工案例的行为证据，不代表生产流量的统计非劣；仍未覆盖真实 Feishu 投递、定时等待、原生 CLI Worker。代码和构建产物已在本地验证，提交 `f857fef8` 已推送 `main`，并已更新本地 Agent 部署。标准 `dev.sh build` 仍会被既有 `sync_shared_links` 对缺失 pnpm dist 链接的 `set -e` 路径阻塞，本次部署直接编译 Agent 绕过该路径；当前 MM/Agent healthy，Admin 因未配置 powerful 模型为 degraded。
+- 结论边界：这是有限人工案例的行为证据，不代表生产流量的统计非劣；仍未覆盖真实 Feishu 投递、定时等待、原生 CLI Worker。代码和构建产物已在本地验证，提交 `f857fef8` 已推送 `main`，并已更新本地 Agent 部署。`dev.sh build` 的 `sync_shared_links` 已支持 pnpm 虚拟目录和直接 workspace 链接，完整构建已通过；当前 MM/Agent healthy，Admin 因未配置 powerful 模型为 degraded。
 
 ### OpenAI 思考文本误投影修复：已部署
 

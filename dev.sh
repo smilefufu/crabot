@@ -176,7 +176,18 @@ sync_shared_links() {
   for mod in crabot-core crabot-admin crabot-agent crabot-channel-wechat crabot-channel-telegram crabot-channel-feishu crabot-channel-dingtalk; do
     [ -d "$SCRIPT_DIR/$mod" ] || continue
     local linked_dist
-    linked_dist=$(ls -d "$SCRIPT_DIR/$mod"/node_modules/.pnpm/crabot-shared@*/node_modules/crabot-shared/dist 2>/dev/null | head -1)
+    linked_dist=""
+    local candidate
+    for candidate in "$SCRIPT_DIR/$mod"/node_modules/.pnpm/crabot-shared@*/node_modules/crabot-shared/dist; do
+      if [ -d "$candidate" ]; then
+        linked_dist="$candidate"
+        break
+      fi
+    done
+    # pnpm may link a local file dependency directly to the workspace package.
+    if [ -z "$linked_dist" ] && [ -d "$SCRIPT_DIR/$mod/node_modules/crabot-shared/dist" ]; then
+      linked_dist="$SCRIPT_DIR/$mod/node_modules/crabot-shared/dist"
+    fi
     if [ -z "$linked_dist" ] || [ ! -d "$linked_dist" ]; then
       need_resync+=("$mod")
       continue
