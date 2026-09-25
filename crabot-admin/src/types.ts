@@ -1910,6 +1910,8 @@ export interface MediaItem {
 
 /** 消息内容（对齐 base-protocol §5.4 MessageContent，admin chat 双向共用） */
 export interface MessageContent {
+  /** 微信图片质量；存在时按需读取，不自动注入模型。 */
+  image_quality?: import('crabot-shared').ImageQuality
   type: 'text' | 'image' | 'file' | 'system_event'
   text?: string
   /** 遗留单媒体表达；media 存在时此字段为 media[0] 的镜像 */

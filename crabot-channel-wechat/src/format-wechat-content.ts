@@ -64,6 +64,7 @@ export function formatWechatContent(
           type: 'image',
           text: '',
           media_url: s('resource_url'),
+          image_quality: raw.image_origin === 1 ? 'hd' : raw.image_origin === 0 ? 'thumbnail' : 'unknown',
         },
         features: {},
       }

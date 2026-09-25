@@ -24,8 +24,11 @@ import {
   RpcError,
   type MediaHandleRecord,
   type FetchMediaResult,
+  type FetchImageParams,
+  type FetchImageResult,
 } from 'crabot-shared'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { WechatImageFetcher } from './image-fetch.js'
 import { WechatClient } from './wechat-client.js'
 import { formatWechatContent } from './format-wechat-content.js'
 import { SessionManager } from './session-manager.js'
@@ -74,6 +77,7 @@ export class WechatChannel extends ModuleBase {
   private readonly dataDir: string
   private readonly mediaHandleStore: MediaHandleStore
   private readonly mediaCleaner: MediaCleaner
+  private readonly imageFetch: WechatImageFetcher
   private readonly mediaFetch: MediaFetchManager
   /** Crabot 自己的 wxid（puppet 身份仅随事件携带，get_config 用；事件到来前 undefined） */
   private puppetWxid: string | undefined = undefined
@@ -114,6 +118,11 @@ export class WechatChannel extends ModuleBase {
       publishEvent: (event) => this.rpcClient.publishEvent(event, this.config.moduleId).then(() => undefined),
     })
 
+    this.imageFetch = new WechatImageFetcher({
+      dataDir: this.dataDir,
+      getMessage: (id) => this.client.getMessageById(id),
+      getTalker: (id) => this.sessionManager.findById(id)?.platform_session_id,
+    })
     this.registerMethods()
   }
 
@@ -484,6 +493,7 @@ export class WechatChannel extends ModuleBase {
     this.registerMethod('get_history', this.handleGetHistory.bind(this))
     this.registerMethod('get_message', this.handleGetMessage.bind(this))
     this.registerMethod('fetch_media', this.handleFetchMedia.bind(this))
+    this.registerMethod<FetchImageParams, FetchImageResult>('fetch_image', (params) => this.imageFetch.fetch(params))
     this.registerMethod('get_config', this.handleGetConfig.bind(this))
     this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
   }
@@ -657,6 +667,7 @@ export class WechatChannel extends ModuleBase {
       supports_list_groups: true,
       supports_list_group_members: true,
       supports_media_fetch: true,
+      supports_image_fetch: true,
     }
   }
 

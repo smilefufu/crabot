@@ -8,6 +8,7 @@ export const TOOL_SEARCH_QUERIES: ReadonlyArray<readonly [string, string, string
   ['list_contacts', '读取通讯录', 'list contacts in address book'],
   ['list_groups', '查看群列表', 'list groups'],
   ['list_group_members', '查看群成员', 'list group members'],
+  ['fetch_image', '微信高清图', 'fetch_image'],
   ['fetch_media', '下载消息中的媒体', 'download message media'],
   ['query_worker', '侧问执行器进度', 'ask worker privately'],
   ['inspect_workspace_git', '查看执行器工作区 git 状态', 'inspect workspace git changes'],

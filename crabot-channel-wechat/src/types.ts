@@ -64,6 +64,8 @@ export type SessionType = 'private' | 'group'
 export type ChannelFeature = 'mention' | 'quote' | 'reaction' | 'thread'
 
 export interface MessageContent {
+  /** 微信图片质量；存在时按需读取，不自动注入模型。 */
+  image_quality?: import('crabot-shared').ImageQuality
   type: MessageType
   text?: string
   media_url?: string
@@ -154,6 +156,8 @@ export interface ChannelCapabilities {
   supports_list_groups: boolean
   /** 是否支持 list_group_members */
   supports_list_group_members: boolean
+  /** 是否支持 fetch_image（按需读取图片） */
+  supports_image_fetch?: boolean
   /** 是否支持 fetch_media（按需拉取媒体文件） */
   supports_media_fetch?: boolean
 }

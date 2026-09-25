@@ -270,6 +270,8 @@ export interface ManagerLoopDeps {
   readonly contextWindowTokens?: () => number | undefined
   /** manager 的槽位思考强度(thunk,episode 内与 adapter/model 同点解析);undefined = 跟随默认 */
   readonly thinking?: () => import('../engine/llm-adapter-types.js').LLMThinkingConfig | undefined
+  /** 入站图片只提供文字引用，内容由 fetch_image 按需读取。 */
+  readonly imagesOnDemand?: () => boolean
   /** manager 模型的视觉能力(thunk,episode 内与 adapter/model 同点解析);false/undefined = 不注入入站图片 */
   readonly supportsVision?: () => boolean | undefined
   readonly quotedPrefetch?: PrefetchQuotedDeps
@@ -1301,7 +1303,7 @@ export class ManagerLoop {
     // "manager 提交 → LLM ↔ reaction"时序(变异靶锚定,见 process-direct-batch)。
     // 注入只作 LLM 请求投影:originalsById 保留注入前消息,收尾持久化前按 id 还原,
     // 否则 base64 会随 finalMessages 回写进 recent 与 episode log(codex review P1)。
-    const supportsVision = this.deps.supportsVision?.() ?? false
+    const supportsVision = !this.deps.imagesOnDemand?.() && (this.deps.supportsVision?.() ?? false)
     // 插话 drain 注入的开关:episode 内与 adapter/model 同点快照(§11 热更语义)
     const groupImages = this.deps.promptInputs().isGroup === true
     this.mailbox.setVisionEnabled(supportsVision && !groupImages)
@@ -2275,7 +2277,7 @@ export class ManagerLoop {
       ?? (() => undefined)
 
     const groupImages = this.deps.promptInputs().isGroup === true
-      ? new GroupInboundImageProjection(this.deps.supportsVision?.() ?? false)
+      ? new GroupInboundImageProjection(!this.deps.imagesOnDemand?.() && (this.deps.supportsVision?.() ?? false))
       : undefined
     const inferenceAdapter = (current: LLMAdapter): LLMAdapter => {
       const observed = this.observeAdapter(episodeId, current, 'inference')
@@ -2293,6 +2295,7 @@ export class ManagerLoop {
     }
 
     const options: EngineOptions = {
+      supportsVision: this.deps.supportsVision?.() ?? false,
       systemPrompt,
       tools,
       model,
@@ -2360,6 +2363,7 @@ export class ManagerLoop {
         }
       },
       humanMessageQueue: this.mailbox,
+      hasPendingExternalInputs: () => this.mailbox.hasPending,
       messagesRef,
       onBeforeLlmCall: async () => {
         checkpoint()

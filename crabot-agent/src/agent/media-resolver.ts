@@ -58,6 +58,7 @@ export async function fetchRemoteImage(url: string, timeoutMs?: number): Promise
 
 /** 从一条消息收集待注入 VLM 的图片引用（media[] 权威，回退遗留单 media_url / file_path） */
 function collectImageRefs(msg: ChannelMessage): Array<{ url: string; mime?: string }> {
+  if (msg.content.image_quality !== undefined) return []
   const items = msg.content.media
   if (items && items.length > 0) {
     return items
@@ -79,6 +80,11 @@ function collectImageRefs(msg: ChannelMessage): Array<{ url: string; mime?: stri
  * 渲染 filename 降低 LLM 误读）。遗留单 media_url 保持原样。
  */
 function formatMediaRef(msg: ChannelMessage): string {
+  if (msg.content.type === 'image' && msg.content.image_quality !== undefined) {
+    const quality = msg.content.image_quality === 'hd' ? '高清可获取'
+      : msg.content.image_quality === 'thumbnail' ? '当前为缩略图，高清尚未就绪' : '质量未知'
+    return `[图片: ${quality}；内容未附带。按需调用 fetch_image，channel_id=${msg.session.channel_id}，session_id=${msg.session.session_id}，platform_message_id=${msg.platform_message_id}]`
+  }
   const items = msg.content.media
   if (items && items.length > 0) {
     return items

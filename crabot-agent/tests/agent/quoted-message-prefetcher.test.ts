@@ -180,3 +180,17 @@ describe('prefetchQuotedMessages', () => {
     expect(rpcCall).not.toHaveBeenCalled()
   })
 })
+
+
+it('引用微信图片时保留质量与按需获取提示，不退化成无质量的旧媒体引用', async () => {
+  const { formatMessageContent } = await import('../../src/agent/media-resolver.js')
+  const original = makeMsg('picture', { content: { type: 'image', image_quality: 'thumbnail', media_url: 'https://cdn/thumb' } })
+  const result = await prefetchQuotedMessages(
+    [makeMsg('question', { features: { is_mention_crab: false, quote_message_id: 'picture' } })], [],
+    'ch-1', 's-1', 'private',
+    { rpcClient: { call: vi.fn().mockResolvedValue(original) } as never, moduleId: 'agent', resolveChannelPort: async () => 1 },
+    identityResolver,
+  )
+  expect(result.get('picture')?.msg.content.image_quality).toBe('thumbnail')
+  expect(formatMessageContent(result.get('picture')!.msg)).toContain('fetch_image')
+})

@@ -63,7 +63,7 @@ function makePrincipalResolver(): PrincipalResolverDeps {
 /** 最小 crab-messaging 依赖桩(照抄 tests/manager/registry.test.ts)。 */
 function makeMessagingDeps() {
   return {
-    rpcClient: { call: vi.fn() } as never,
+    rpcClient: { call: vi.fn(async () => ({})) } as never,
     moduleId: 'manager-bootstrap-test',
     getAdminPort: async () => 19001,
     resolveChannelPort: async () => 19009,
@@ -1009,6 +1009,80 @@ describe('manager bootstrap（P5 Task 1）', () => {
       await stack.registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'sess-boot', text: '后台任务完成' })
       expect(await stack.ledger.listAllWorkers()).toHaveLength(0)
       expect(contexts.at(-1)).toMatchObject({ visibility: 'internal', scopes: ['sess-boot'], isMasterPrivate: false })
+    } finally { await stack.dispose() }
+  })
+
+  it.each(['private', 'group'] as const)('微信 %s Manager 按需取图后，下一次模型请求包含原始高清图片', async (sessionType) => {
+    const sharp = (await import('sharp')).default
+    const bytes = await sharp({ create: { width: 1600, height: 2400, channels: 3, background: '#abcdef' } }).png().toBuffer()
+    const imagePath = join(tmpRoot, 'hd.png')
+    await fs.writeFile(imagePath, bytes)
+    const messagingDeps = makeMessagingDeps()
+    messagingDeps.rpcClient = { call: vi.fn(async (_port, method) => method === 'get_capabilities'
+      ? { supports_image_fetch: true }
+      : { status: 'ready', image_quality: 'hd', file_path: imagePath, mime_type: 'image/png', size: bytes.length }) } as never
+    const requests: LLMStreamParams[] = []
+    const stack = buildManagerStack(makeDeps({
+      messagingDeps, managerSupportsVision: () => true,
+      managerAdapter: () => ({ async *stream(params) {
+        requests.push({ ...params, messages: structuredClone(params.messages) })
+        const step = requests.length
+        yield* chunksFromContent(step === 1 ? [{ type: 'tool_use', id: 'load-image-tool', name: 'search_tools', input: { query: 'fetch_image' } }]
+          : step === 2 ? [{ type: 'tool_use', id: 'read-hd', name: 'fetch_image', input: {
+            channel_id: 'wechat', session_id: 'sess-boot', platform_message_id: 'picture',
+          } }] : [], step < 3 ? 'tool_use' : 'end_turn')
+      }, updateConfig() {} }),
+    }))
+    await stack.principals.init()
+    try {
+      const message = sessionType === 'group' ? groupMessage('看图识别账号') : makeChannelMessage('看图识别账号')
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [{ ...message, content: {
+        ...message.content, type: 'image', image_quality: 'thumbnail', media_url: 'https://cdn/thumb',
+      } }], FRIEND_A)
+      expect(requests).toHaveLength(3)
+      const result = requests[2].messages.flatMap(m => 'toolResults' in m ? m.toolResults : []).find(r => r.tool_use_id === 'read-hd')
+      expect(result?.images).toHaveLength(1)
+      expect(result!.images![0].media_type).toBe('image/png')
+      expect(Buffer.from(result!.images![0].data, 'base64').equals(bytes)).toBe(true)
+    } finally { await stack.dispose() }
+  })
+
+  it.each(['private', 'group'] as const)('微信 %s 历史引用查询失败、确认按需取图及新图到达都不加载旧缩略图', async (sessionType) => {
+    const requests: LLMStreamParams[] = []
+    const messagingDeps = makeMessagingDeps()
+    const rpc = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ supports_image_fetch: true })
+    messagingDeps.rpcClient = { call: rpc } as never
+    const stack = buildManagerStack(makeDeps({
+      managerSupportsVision: () => true,
+      managerAdapter: () => ({ async *stream(params) {
+        requests.push(params)
+        yield* chunksFromContent([], 'end_turn')
+      }, updateConfig() {} }),
+      messagingDeps,
+    }))
+    const imagePath = join(tmpRoot, 'old-thumb.png')
+    await fs.writeFile(imagePath, 'old-thumbnail-bytes')
+    await stack.principals.init()
+    try {
+      const message = sessionType === 'group' ? groupMessage('初始消息') : makeChannelMessage('初始消息')
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [message], FRIEND_A)
+      const key = 'wechat::sess-boot' as ManagerKey
+      const state = await stack.store.load(key)
+      const image = createUserMessage('[图片: old-thumb.png]')
+      await stack.store.save({ ...state, recent: [...state.recent, image], imageRefs: [
+        { message_id: image.id, images: [{ path: imagePath, label: 'old-thumb.png' }] },
+      ] })
+      requests.length = 0
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [{ ...message, platform_message_id: 'retry-1' }], FRIEND_A)
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [{ ...message, platform_message_id: 'retry-2' }], FRIEND_A)
+      expect(rpc).toHaveBeenCalledTimes(2)
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [{ ...message, platform_message_id: 'new-image', content: {
+        type: 'image', image_quality: 'thumbnail', media_url: imagePath,
+      } }], FRIEND_A)
+      for (const request of requests) {
+        expect(JSON.stringify(request.messages)).not.toContain(Buffer.from('old-thumbnail-bytes').toString('base64'))
+      }
+      expect(requests.length).toBeGreaterThan(0)
     } finally { await stack.dispose() }
   })
 

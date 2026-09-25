@@ -118,6 +118,7 @@ const MESSAGING_BASE_WHITELIST: readonly string[] = [
   'list_groups',
   'list_group_members',
   'fetch_media',
+  'fetch_image',
   'read_feishu_document',
   'feishu_raw_get',
   'feishu_download_file',
@@ -166,6 +167,7 @@ const MESSAGING_READ_ONLY = new Set([
   'list_groups',
   'list_group_members',
   'fetch_media',
+  'fetch_image',
   // channel 透传只读三件套：都不改飞书数据（`feishu_download_file` 只把 token 登记成
   // media handle，落盘要再走 fetch_media），可与其它读工具并行成批。
   'read_feishu_document',
@@ -241,14 +243,14 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
           repairInput: createSendMessageChannelRepair(deps.sessionChannelsFor, deps.managerTarget),
         }
       : {}),
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, context): Promise<ToolCallResult> => {
       const postSendAction = input.post_send_action
       if (isHumanDelivery && postSendAction !== 'none' && postSendAction !== 'spawn_worker') {
         return { output: 'post_send_action 必须是 none 或 spawn_worker', isError: true }
       }
       const args = Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'intent' && key !== 'post_send_action'))
       try {
-        const result = await tool.handler(args)
+        const result = await tool.handler(args, context)
         if (result.observedSessionTargets?.length) {
           try {
             deps.onObservedSessionTargets?.(result.observedSessionTargets)
@@ -265,7 +267,7 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
             deps.onSuccessfulSendMessage?.({ channel_id: channelId, session_id: sessionId })
           }
         }
-        return { output: text, isError: !!result.isError }
+        return { output: text, isError: !!result.isError, ...(result.images ? { images: result.images } : {}) }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         return { output: message, isError: true }

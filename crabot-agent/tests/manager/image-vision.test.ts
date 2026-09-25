@@ -43,6 +43,11 @@ function channelMsg(content: Partial<ChannelMessage['content']>): ChannelMessage
 }
 
 describe('collectInboundImages', () => {
+  it.each(['thumbnail', 'hd', 'unknown'] as const)('按需图片 %s 不加入自动注入或插话预取', (image_quality) => {
+    expect(collectInboundImages(channelMsg({ image_quality, media_url: 'https://cdn/image',
+      media: [{ media_url: 'https://cdn/image', mime_type: 'image/png' }] }))).toEqual([])
+  })
+
   it('media[] 形态（feishu 富文本多图）：收集 path + label', () => {
     const refs = collectInboundImages(channelMsg({
       media: [

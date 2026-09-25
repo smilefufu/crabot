@@ -322,6 +322,8 @@ export interface MediaItem {
 }
 
 export interface MessageContent {
+  /** 微信图片质量；存在时按需读取，不自动注入模型。 */
+  image_quality?: import('crabot-shared').ImageQuality
   type: MessageType
   text?: string
   media_url?: string

@@ -1618,3 +1618,23 @@ describe('runEngine compaction triggered by real usage', () => {
     expect(result.outcome).toBe('completed')
   })
 })
+
+
+describe('按需微信高清图保真', () => {
+  it('fetch_image 图片在下一次模型输入中保留 bytes 与 MIME', async () => {
+    const sharp = (await import('sharp')).default
+    const original = await sharp({ create: { width: 1600, height: 2400, channels: 3, background: '#abcdef' } }).png().toBuffer()
+    const source = { media_type: 'image/png', data: original.toString('base64') }
+    const adapter = mockAdapter([toolUseResponse('image-call', 'fetch_image', {}), textResponse('done')])
+    const requests: LLMStreamParams[] = []
+    const originalStream = adapter.stream.bind(adapter)
+    adapter.stream = (params) => { requests.push({ ...params, messages: structuredClone(params.messages) }); return originalStream(params) }
+    await runEngine({ prompt: '看高清图', adapter, options: baseOptions({
+      supportsVision: true,
+      tools: [defineTool({ name: 'fetch_image', description: '', inputSchema: {}, isReadOnly: true,
+        call: async () => ({ output: 'ready', images: [source], isError: false }) })],
+    }) })
+    const result = requests[1].messages.flatMap(m => 'toolResults' in m ? m.toolResults : []).find(r => r.tool_use_id === 'image-call')
+    expect(result?.images).toEqual([source])
+  })
+})

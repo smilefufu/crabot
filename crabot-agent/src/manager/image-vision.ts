@@ -71,6 +71,7 @@ export function normalizeImageRefs(raw: ReadonlyArray<ManagerImageRef> | undefin
 
 /** 从一条 ChannelMessage 收集入站图片引用（media[] 权威，回退遗留单图形态）。 */
 export function collectInboundImages(msg: ChannelMessage): InboundImageRef[] {
+  if (msg.content.image_quality !== undefined) return []
   const items = msg.content.media
   if (items && items.length > 0) {
     return items

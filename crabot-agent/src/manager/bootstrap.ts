@@ -602,6 +602,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     }
     return host
   }
+  const imagePolicies = new Map<string, boolean | undefined>()
   registry = new ManagerRegistry({
     dailyReflectionFor,
     traceWriter: deps.traceWriter,
@@ -619,6 +620,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     thinking: deps.managerThinking,
     contextWindowTokens: deps.managerContextWindowTokens,
     supportsVision: deps.managerSupportsVision,
+    imagesOnDemand: (key) => {
+      const channelId = splitManagerKey(key).channelId
+      return imagePolicies.has(channelId) && imagePolicies.get(channelId) !== false
+    },
     quotedPrefetch: deps.messagingDeps,
     now: () => new Date(deps.now()),
     isClosing: deps.isClosing,
@@ -630,6 +635,22 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
     onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
     beforeWake: async (key, envelope) => {
+      const { channelId } = splitManagerKey(key)
+      const wake = envelope?.wake
+      if ((wake?.kind === 'human_messages' || wake?.kind === 'attention_flush')
+        && wake.messages.some(message => message.content.image_quality !== undefined)) imagePolicies.set(channelId, true)
+      if (key !== SYSTEM_TASKS_MANAGER_KEY && imagePolicies.get(channelId) === undefined
+        && (await sessionStore.load(key)).imageRefs?.length) {
+        try {
+          const port = await deps.messagingDeps.resolveChannelPort(channelId)
+          const caps = await deps.messagingDeps.rpcClient.call<{}, { supports_image_fetch?: boolean }>(
+            port, 'get_capabilities', {}, deps.messagingDeps.moduleId)
+          imagePolicies.set(channelId, caps.supports_image_fetch === true)
+        } catch {
+          // 历史引用质量不明且能力不可查询时，先只保留文字，下次唤醒重查。
+          imagePolicies.set(channelId, undefined)
+        }
+      }
       if (
         envelope?.wake.kind !== 'human_messages'
         && envelope?.wake.kind !== 'attention_flush'
