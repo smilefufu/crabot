@@ -46,6 +46,7 @@ const MESSAGING_NORMAL = [
   'list_groups',
   'list_group_members',
   'fetch_media',
+  'fetch_image',
 ]
 
 /** protocol-crab-messaging.md §2.10 的 channel 透传只读三件套（仅当存在飞书 channel 实例）。 */
@@ -335,12 +336,12 @@ describe('buildManagerToolFace', () => {
     expect(tools.map(tool => tool.name)).toContain('get_execution_capabilities')
   })
 
-  it('移除决策写入后为 56 项内置与 58 项 full，各模式核心字节一致', () => {
+  it('移除决策写入后为 57 项内置与 59 项 full，各模式核心字节一致', () => {
     const deps = makeDeps({ schedule, candidatePermissions: permissions })
-    expect(buildManagerToolFace(deps)).toHaveLength(56)
+    expect(buildManagerToolFace(deps)).toHaveLength(57)
     const full = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
     const core = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() })
-    expect(full).toHaveLength(58)
+    expect(full).toHaveLength(59)
     expect(core.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
     const wire = (tools: ToolDefinition[]) => JSON.stringify(tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })))
     expect(wire(full.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(wire(core))
@@ -445,7 +446,7 @@ describe('buildManagerToolFace', () => {
       for (const tools of [full, core, expanded]) {
         await callNonStreaming(adapter, { model: 'fixture', systemPrompt: 'Stable Manager instructions', messages: [createUserMessage('fixture')], tools, maxTokens: 64 })
       }
-      expect(bodies.map(body => body.tools.length)).toEqual([58, 15, 21])
+      expect(bodies.map(body => body.tools.length)).toEqual([59, 15, 21])
       expect(JSON.stringify(bodies[0].tools.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(JSON.stringify(bodies[1].tools))
       expect(JSON.stringify(bodies[2].tools.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(JSON.stringify(bodies[1].tools))
       if (format === 'anthropic') {
@@ -611,12 +612,12 @@ describe('buildManagerToolFace', () => {
     for (const tool of external) expect(tool.call).not.toHaveBeenCalled()
   })
 
-  it('未启用渐进加载时提供完整 56 项，不装配 search_tools 或外部 MCP', () => {
+  it('未启用渐进加载时提供完整 57 项，不装配 search_tools 或外部 MCP', () => {
     const tools = buildManagerToolFace(makeDeps({ schedule: {
       targetSession: { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' },
       creatorFriendId: 'creator', canCreate: true, resolvePermissions: async () => null,
     } }))
-    expect(tools).toHaveLength(56)
+    expect(tools).toHaveLength(57)
     expect(tools.map(tool => tool.name).filter(name => name.startsWith('mcp__') && !name.startsWith('mcp__crab-memory__'))).toEqual([])
     for (const name of ['search_tools', 'get_system_status', 'get_deployment_info', 'get_config_summary', 'list_capabilities']) {
       expect(tools.map(tool => tool.name)).not.toContain(name)
@@ -1076,5 +1077,30 @@ describe('buildManagerToolFace', () => {
       expect(JSON.parse(result.output)).toMatchObject({ error: expect.stringContaining('channel down') })
       expect(onObservedSessionTargets).not.toHaveBeenCalled()
     })
+  })
+})
+
+
+describe('按需图片工具的真实装配', () => {
+  it('向引擎交付图片字节，并将取消信号传给等待器', async () => {
+    const fs = await import('node:fs/promises')
+    const dir = await fs.mkdtemp(join(tmpdir(), 'manager-image-'))
+    const file = join(dir, 'image.png')
+    await fs.writeFile(file, 'hd-image')
+    const call = vi.fn(async (_port, method) => method === 'get_capabilities'
+      ? { supports_image_fetch: true }
+      : { status: 'ready', image_quality: 'hd', file_path: file, mime_type: 'image/png', size: 8 })
+    const tools = buildManagerToolFace(makeDeps({ messagingDeps: makeMessagingDeps({ rpcClient: { call } as never }) }))
+    const tool = tools.find(tool => tool.name === 'fetch_image')!
+    const args = { channel_id: 'wechat', session_id: 's', platform_message_id: 'picture' }
+    try {
+      const result = await tool.call(args, {})
+      expect(result.images).toEqual([{ media_type: 'image/png', data: Buffer.from('hd-image').toString('base64') }])
+      const controller = new AbortController()
+      call.mockImplementation(() => new Promise(() => {}))
+      const waiting = tool.call(args, { abortSignal: controller.signal })
+      controller.abort()
+      expect(JSON.parse((await waiting).output).status).toBe('cancelled')
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 })

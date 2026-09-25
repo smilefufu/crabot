@@ -7,6 +7,8 @@
  * @see crabot-docs/protocols/protocol-crab-messaging.md
  */
 
+import { createImageReader } from './fetch-image.js'
+import type { ToolCallContext } from '../engine/types.js'
 import { resolvePath } from '../engine/tools/utils.js'
 import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
@@ -175,6 +177,7 @@ export interface SessionTarget {
 }
 
 export interface MessagingToolResult {
+  images?: ReadonlyArray<{ media_type: string; data: string }>
   content: Array<{ type: 'text'; text: string }>
   isError?: boolean
   /** Manager 内部消费的可信结构化观察；不得暴露到 MCP/LLM 输出。 */
@@ -185,7 +188,7 @@ export interface MessagingTool {
   name: string
   description: string
   schema: Record<string, z.ZodTypeAny>
-  handler: (args: Record<string, unknown>) => Promise<MessagingToolResult>
+  handler: (args: Record<string, unknown>, context?: ToolCallContext) => Promise<MessagingToolResult>
 }
 
 // ============================================================================
@@ -277,6 +280,7 @@ export const ALL_MESSAGING_TOOL_NAMES: readonly string[] = [
   'get_history',
   'get_message',
   'fetch_media',
+  'fetch_image',
   'read_feishu_document',
   'feishu_raw_get',
   'feishu_download_file',
@@ -308,9 +312,9 @@ const DAILY_REFLECTION_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'feishu_download_file',
 ])
 
-/** scheduled 任务（非 daily_reflection）：完整工具集；无同步应答方，禁 ask_human。 */
+/** scheduled 任务：沿用既有工具集；fetch_image 只交给 Manager，无同步应答方，禁 ask_human。 */
 const SCHEDULED_TOOL_SET: MessagingToolSet = {
-  tools: new Set(ALL_MESSAGING_TOOL_NAMES),
+  tools: new Set(ALL_MESSAGING_TOOL_NAMES.filter(name => name !== 'fetch_image')),
   allowAskHuman: false,
 }
 
@@ -323,7 +327,7 @@ const DAILY_REFLECTION_TOOL_SET: MessagingToolSet = {
 /** message 触发的任务 / front：不给 scheduled 专属的两个私聊捷径；有人类在对面，可 ask_human。 */
 const HUMAN_MESSAGE_TOOL_SET: MessagingToolSet = {
   tools: new Set(ALL_MESSAGING_TOOL_NAMES.filter(
-    name => name !== 'send_private_message' && name !== 'send_master_private',
+    name => name !== 'send_private_message' && name !== 'send_master_private' && name !== 'fetch_image',
   )),
   allowAskHuman: true,
 }
@@ -356,6 +360,14 @@ export function workerMessagingToolSet(
 // 写入 globalRegistry（强引用 Map，永不清除）。inline 构建 = 每轮净增整棵
 // schema 树 → 2026-06-11 OOM 事故根因。回归测试：tests/mcp/zod-registry-leak.test.ts
 // ============================================================================
+
+const FETCH_IMAGE_SCHEMA = {
+  channel_id: z.string(),
+  session_id: z.string(),
+  platform_message_id: z.string(),
+  quality: z.enum(['hd', 'thumbnail']).optional(),
+  include_image: z.boolean().optional(),
+}
 
 const LOOKUP_FRIEND_SCHEMA = {
   name: z.string().optional().describe('按名称模糊搜索'),
@@ -1255,6 +1267,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
             sender_friend_id: msg.sender.friend_id ?? friendMap.get(msg.sender.platform_user_id),
             content: msg.content.text ?? '',
             content_type: msg.content.type,
+            ...(msg.content.image_quality ? { image_quality: msg.content.image_quality, image_note: '图片内容未附带，可用 fetch_image 按需读取高清版本' } : {}),
             timestamp: msg.platform_timestamp,
             quote_message_id: msg.features.quote_message_id,
           }))
@@ -1335,6 +1348,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
               ...(result.content?.file_path ? { file_path: result.content.file_path } : {}),
               ...(result.content?.handle ? { handle: result.content.handle } : {}),
               ...(result.content?.status ? { status: result.content.status } : {}),
+              ...(result.content?.image_quality ? { image_quality: result.content.image_quality } : {}),
               timestamp: result.platform_timestamp,
               quote_message_id: result.features?.quote_message_id,
             }),
@@ -1346,6 +1360,15 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
         }
       },
     },
+    {
+      name: 'fetch_image',
+      description: '按需读取微信图片，默认等待高清版本，最多 120 秒；系统负责等待，无需轮询或让人类重发。' +
+        '需要识别账号、小字时用 hd；只有粗略识别才显式选 thumbnail。' +
+        'include_image=false 只取文件路径供交付 Worker，避免主控先看图重复消耗 token。新输入或取消会结束等待。',
+      schema: FETCH_IMAGE_SCHEMA,
+      handler: createImageReader(deps),
+    },
+
     // ================================================================
     // 8. fetch_media — 按需下载消息附件（非图片），返回本地路径供 Read 工具读取
     // ================================================================

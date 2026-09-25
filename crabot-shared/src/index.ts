@@ -112,3 +112,5 @@ export {
 export * from './media-fetch/index.js'
 
 export { INSTANCE_ID_REGEX, validateInstanceId, type InstanceIdResult } from './instance-id.js'
+
+export type { ImageQuality, FetchImageParams, FetchImageResult } from './image-fetch.js'

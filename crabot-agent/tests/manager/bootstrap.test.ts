@@ -63,7 +63,7 @@ function makePrincipalResolver(): PrincipalResolverDeps {
 /** 最小 crab-messaging 依赖桩(照抄 tests/manager/registry.test.ts)。 */
 function makeMessagingDeps() {
   return {
-    rpcClient: { call: vi.fn() } as never,
+    rpcClient: { call: vi.fn(async () => ({})) } as never,
     moduleId: 'manager-bootstrap-test',
     getAdminPort: async () => 19001,
     resolveChannelPort: async () => 19009,
@@ -1009,6 +1009,45 @@ describe('manager bootstrap（P5 Task 1）', () => {
       await stack.registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'sess-boot', text: '后台任务完成' })
       expect(await stack.ledger.listAllWorkers()).toHaveLength(0)
       expect(contexts.at(-1)).toMatchObject({ visibility: 'internal', scopes: ['sess-boot'], isMasterPrivate: false })
+    } finally { await stack.dispose() }
+  })
+
+  it.each(['private', 'group'] as const)('微信 %s 历史引用查询失败、确认按需取图及新图到达都不加载旧缩略图', async (sessionType) => {
+    const requests: LLMStreamParams[] = []
+    const messagingDeps = makeMessagingDeps()
+    const rpc = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ supports_image_fetch: true })
+    messagingDeps.rpcClient = { call: rpc } as never
+    const stack = buildManagerStack(makeDeps({
+      managerSupportsVision: () => true,
+      managerAdapter: () => ({ async *stream(params) {
+        requests.push(params)
+        yield* chunksFromContent([], 'end_turn')
+      }, updateConfig() {} }),
+      messagingDeps,
+    }))
+    const imagePath = join(tmpRoot, 'old-thumb.png')
+    await fs.writeFile(imagePath, 'old-thumbnail-bytes')
+    await stack.principals.init()
+    try {
+      const message = sessionType === 'group' ? groupMessage('初始消息') : makeChannelMessage('初始消息')
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [message], FRIEND_A)
+      const key = 'wechat::sess-boot' as ManagerKey
+      const state = await stack.store.load(key)
+      const image = createUserMessage('[图片: old-thumb.png]')
+      await stack.store.save({ ...state, recent: [...state.recent, image], imageRefs: [
+        { message_id: image.id, images: [{ path: imagePath, label: 'old-thumb.png' }] },
+      ] })
+      requests.length = 0
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [{ ...message, platform_message_id: 'retry-1' }], FRIEND_A)
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [{ ...message, platform_message_id: 'retry-2' }], FRIEND_A)
+      expect(rpc).toHaveBeenCalledTimes(2)
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [{ ...message, platform_message_id: 'new-image', content: {
+        type: 'image', image_quality: 'thumbnail', media_url: imagePath,
+      } }], FRIEND_A)
+      for (const request of requests) {
+        expect(JSON.stringify(request.messages)).not.toContain(Buffer.from('old-thumbnail-bytes').toString('base64'))
+      }
+      expect(requests.length).toBeGreaterThan(0)
     } finally { await stack.dispose() }
   })
 
