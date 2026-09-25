@@ -160,9 +160,9 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
           return readShellOutput(entityId, explicitOffset, deps)
         }
         if (entityId.startsWith('agent_')) {
-          // Output 只读 shell；subagent 结果走专门的 get_subagent_output（读 result_file）。
+          // Output 只读 shell；subagent 结果通过完成通知返回父执行器。
           return {
-            output: `Output 只读 shell；读 subagent 结果请用 get_subagent_output("${entityId}")。`,
+            output: 'Output 仅支持读取后台 Shell，不支持读取子 Agent。子 Agent 完成或失败后会自动通知并返回结果；没有其他可推进工作时，请结束本轮等待通知，不要重复查询。',
             isError: true,
             isRunning: false,
           }

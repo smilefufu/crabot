@@ -233,12 +233,15 @@ describe('Output tool', () => {
     expect(result.output).toContain('Invalid entity_id format')
   })
 
-  it('agent_xxx 被拒：Output 只读 shell，指向 get_subagent_output', async () => {
+  it.each([false, true])('agent_xxx 被拒并引导等待完成通知（block=%s）', async (block) => {
     const tool = createOutputTool(deps)
-    const result = await tool.call({ entity_id: 'agent_aabbccdd1122' }, {})
+    const result = await tool.call({ entity_id: 'agent_aabbccdd1122', block, timeout_ms: 1000 }, {})
 
     expect(result.isError).toBe(true)
-    expect(result.output).toContain('get_subagent_output')
+    expect(result.output).not.toContain('get_subagent_output')
+    expect(result.output).toContain('完成或失败后会自动通知并返回结果')
+    expect(result.output).toContain('结束本轮等待通知')
+    expect(result.output).toContain('不要重复查询')
   })
 
   it('two tasks reading the same persistent shell do not share cursors', async () => {
