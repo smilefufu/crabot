@@ -2295,6 +2295,7 @@ export class ManagerLoop {
     }
 
     const options: EngineOptions = {
+      supportsVision: this.deps.supportsVision?.() ?? false,
       systemPrompt,
       tools,
       model,

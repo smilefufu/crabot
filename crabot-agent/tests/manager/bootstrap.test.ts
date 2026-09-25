@@ -1012,6 +1012,41 @@ describe('manager bootstrap（P5 Task 1）', () => {
     } finally { await stack.dispose() }
   })
 
+  it.each(['private', 'group'] as const)('微信 %s Manager 按需取图后，下一次模型请求包含原始高清图片', async (sessionType) => {
+    const sharp = (await import('sharp')).default
+    const bytes = await sharp({ create: { width: 1600, height: 2400, channels: 3, background: '#abcdef' } }).png().toBuffer()
+    const imagePath = join(tmpRoot, 'hd.png')
+    await fs.writeFile(imagePath, bytes)
+    const messagingDeps = makeMessagingDeps()
+    messagingDeps.rpcClient = { call: vi.fn(async (_port, method) => method === 'get_capabilities'
+      ? { supports_image_fetch: true }
+      : { status: 'ready', image_quality: 'hd', file_path: imagePath, mime_type: 'image/png', size: bytes.length }) } as never
+    const requests: LLMStreamParams[] = []
+    const stack = buildManagerStack(makeDeps({
+      messagingDeps, managerSupportsVision: () => true,
+      managerAdapter: () => ({ async *stream(params) {
+        requests.push({ ...params, messages: structuredClone(params.messages) })
+        const step = requests.length
+        yield* chunksFromContent(step === 1 ? [{ type: 'tool_use', id: 'load-image-tool', name: 'search_tools', input: { query: 'fetch_image' } }]
+          : step === 2 ? [{ type: 'tool_use', id: 'read-hd', name: 'fetch_image', input: {
+            channel_id: 'wechat', session_id: 'sess-boot', platform_message_id: 'picture',
+          } }] : [], step < 3 ? 'tool_use' : 'end_turn')
+      }, updateConfig() {} }),
+    }))
+    await stack.principals.init()
+    try {
+      const message = sessionType === 'group' ? groupMessage('看图识别账号') : makeChannelMessage('看图识别账号')
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [{ ...message, content: {
+        ...message.content, type: 'image', image_quality: 'thumbnail', media_url: 'https://cdn/thumb',
+      } }], FRIEND_A)
+      expect(requests).toHaveLength(3)
+      const result = requests[2].messages.flatMap(m => 'toolResults' in m ? m.toolResults : []).find(r => r.tool_use_id === 'read-hd')
+      expect(result?.images).toHaveLength(1)
+      expect(result!.images![0].media_type).toBe('image/png')
+      expect(Buffer.from(result!.images![0].data, 'base64').equals(bytes)).toBe(true)
+    } finally { await stack.dispose() }
+  })
+
   it.each(['private', 'group'] as const)('微信 %s 历史引用查询失败、确认按需取图及新图到达都不加载旧缩略图', async (sessionType) => {
     const requests: LLMStreamParams[] = []
     const messagingDeps = makeMessagingDeps()
