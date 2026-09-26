@@ -115,7 +115,7 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
     category: 'shell',
     description:
       '读取后台 Shell 的增量输出；需要等待新输出或命令结束时使用 block=true。' +
-      '主执行器可结束回合等待后台通知；子 Agent 收不到通知，需要结果时须阻塞读取。' +
+      '主执行器无其他可推进工作时可直接结束本轮，系统在后台命令完成后自动恢复其执行；子 Agent 不接收后台 Shell 完成通知，需要命令结果时须阻塞读取。' +
       '本工具只读取 Shell，子 Agent 结果由完成通知返回调用方。',
     inputSchema: {
       type: 'object',
@@ -162,7 +162,7 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
         if (entityId.startsWith('agent_')) {
           // Output 只读 shell；subagent 结果通过完成通知返回父执行器。
           return {
-            output: 'Output 仅支持读取后台 Shell，不支持读取子 Agent。子 Agent 完成或失败后会自动通知并返回结果；没有其他可推进工作时，请结束本轮等待通知，不要重复查询。',
+            output: 'Output 仅支持读取后台 Shell，不支持读取子 Agent。子 Agent 完成或失败后会自动通知并返回结果；没有其他可推进工作时，请直接结束本轮，不再调用工具；系统会在结果到达后自动恢复你的执行。',
             isError: true,
             isRunning: false,
           }

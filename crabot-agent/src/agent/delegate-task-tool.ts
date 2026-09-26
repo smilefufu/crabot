@@ -84,7 +84,7 @@ export function buildDelegateTaskDescription(subAgents: ReadonlyArray<SubAgentCo
     '',
     'Usage notes:',
     '- 异步派发后立即返回 {agent_id, status:"launched"}，表示任务已启动，尚未完成。子 Agent 完成或失败后，系统通过 <sub_agent_notification> 自动送回结果或错误，无需另行读取。',
-    '- 派发后可继续其他工作；没有其他可推进工作时，结束本轮（end_turn）等待通知。结束本轮不会终止子 Agent，通知到达后会恢复执行，由你处理结果并继续完成父任务。',
+    '- 派发后可继续其他工作；没有其他可推进工作时，直接结束本轮（end_turn），不再调用工具。结束本轮不会终止子 Agent；系统会在结果到达后自动恢复你的执行，届时处理结果并继续完成父任务。',
     '- 单条 message 内可 batch 调多次 delegate_task 并发派出多个 subagent',
     '- subagent 在隔离上下文执行，不继承父对话历史；prompt 要写完整任务描述',
     '- 子 agent 返回 final output 后退出，无法续会话',

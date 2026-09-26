@@ -240,8 +240,8 @@ describe('Output tool', () => {
     expect(result.isError).toBe(true)
     expect(result.output).not.toContain('get_subagent_output')
     expect(result.output).toContain('完成或失败后会自动通知并返回结果')
-    expect(result.output).toContain('结束本轮等待通知')
-    expect(result.output).toContain('不要重复查询')
+    expect(result.output).toContain('直接结束本轮，不再调用工具')
+    expect(result.output).toContain('系统会在结果到达后自动恢复你的执行')
   })
 
   it('two tasks reading the same persistent shell do not share cursors', async () => {

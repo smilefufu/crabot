@@ -442,7 +442,7 @@ export function buildDailyReflectionTools(host?: Pick<DailyReflection, 'list' | 
       z.object({ restart: z.boolean().optional() }).strict(), input => host ? host.list(input.restart as boolean | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
     tool('read_reflection_record', '读取本周期 record_ref 的下一段详情，位置由宿主按记录分别保存。has_more=true 时用相同 record_ref 再次调用；读完后默认返回空正文和 has_more=false，不重新打开。只有确需从头复核该详情时传 restart=true，重读后须再次读完；尚未确认保存的回包会先重发。不能使用其他会话 ID 或路径。',
       z.object({ record_ref: z.string(), restart: z.boolean().optional() }).strict(), input => host ? host.read(input.record_ref as string, input.restart as boolean | undefined) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE'))),
-    { ...tool('finish_daily_reflection', '当前可推进事项处理完后提交本周期结果并结束本轮，必须单独调用。满足全部完成条件才用 completed；仍有真实阻塞或取证缺口时用 partial，列明未完成事项及不能继续的依据。只剩等待分析 Worker 时直接结束回合。completed 还需宿主验证与 Admin 确认。',
+    { ...tool('finish_daily_reflection', '当前可推进事项处理完后提交本周期结果并结束本轮，必须单独调用。满足全部完成条件才用 completed；仍有真实阻塞或取证缺口时用 partial，列明未完成事项及不能继续的依据。没有其他可推进事项、只缺分析 Worker 结果时直接结束本轮，不再调用工具；系统在结果到达后自动恢复执行。completed 还需宿主验证与 Admin 确认。',
       finishSchema, async () => { throw new Error('Host-only exit tool') }), isReadOnly: false, exitsLoop: true,
       validateExit: (input, count) => host ? host.validateFinish(input, count) : Promise.reject(new Error('DAILY_REFLECTION_UNAVAILABLE')) },
   ]

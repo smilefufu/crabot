@@ -1119,7 +1119,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       expect(delegate!.description).toContain('自动送回结果或错误，无需另行读取')
       expect(delegate!.description).toContain('结束本轮不会终止子 Agent')
       expect((delegate!.inputSchema.properties as Record<string, { enum?: string[] }>).subagent_type.enum).toEqual(['reviewer'])
-      expect(prompt).toContain('等待外部结果时结束本轮等通知')
+      expect(prompt).toContain('没有其他可推进工作、只缺异步结果时，直接结束本轮，不再调用工具')
     }
     expect(tools.find((tool) => tool.name === 'Skill')!.description).toContain('BEFORE doing any work')
     expect(tools.find((tool) => tool.name === 'Output')!.description).not.toContain('get_subagent_output')
@@ -1134,7 +1134,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).toContain(workspaceRoot)
     expect(prompt).toContain('按人类明确的完成条件做必要验证')
     expect(prompt).toContain('已有产物和直接证据足够时立即收口')
-    expect(prompt).toContain('等待外部结果时结束本轮等通知')
+    expect(prompt).toContain('没有其他可推进工作、只缺异步结果时，直接结束本轮，不再调用工具')
   })
 
   // --- 缺配置时 fail-loud ---

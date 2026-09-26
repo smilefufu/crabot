@@ -13,6 +13,21 @@ describe('独立角色提示词', () => {
     expect(prompt).not.toContain('所有中间产物和最终产出都要落在这个目录')
   })
 
+  it('保留原目标并将异步恢复交给系统，不暗示模型调用等待工具', () => {
+    const manager = assembleManagerSystemPrompt({ managerKey: 'fixture::synthetic', isSystemThread: false })
+    expect(manager).toContain('局部成果不等于整体完成')
+    expect(manager).toContain('不等待人类重新提出原要求')
+    expect(manager).toContain('先说明整体目标是否完成、当前是否在执行')
+    const worker = assembleBuiltinWorkerPrompt({ workspaceRoot: '/fixture', imageAvailable: true })
+    expect(worker).toContain('不在条件未变时重复已明确无效的尝试')
+    expect(worker).toContain('直接结束本轮，不再调用工具')
+    expect(worker).toContain('系统会在结果到达后自动恢复你的执行')
+    const daily = assembleManagerSystemPrompt({ managerKey: 'fixture::synthetic', isSystemThread: true, isBuiltinDailyReflection: true })
+    expect(daily).toContain('直接结束本轮，不再调用工具')
+    expect(daily).toContain('系统会在结果到达后自动恢复执行')
+    for (const prompt of [manager, worker, daily]) expect(prompt).not.toMatch(/等通知|等待通知|结束本轮等待/)
+  })
+
   it('builtin 动态能力与项目快照完整且不重复装配', () => {
     const prompt = assembleBuiltinWorkerPrompt({
       workspaceRoot: '/tmp/prompt-review', imageAvailable: true,

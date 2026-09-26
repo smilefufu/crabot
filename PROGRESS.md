@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### 目标续办与异步恢复提示词修复
+
+- 按 9 月 26 日确认文案，主控按整体目标继续安排、如实说明执行状态；正常子任务执行不因父级 idle 催办。执行器依据错误修正做法，保留有效成果，不重复已明确无效的尝试。
+- 统一主控、builtin Worker、guidance、委派/Output/finish 工具、每日反思及恢复消息中的异步等待措辞为“直接结束本轮，系统在结果到达后恢复执行”；保留子 Agent 读取后台 Shell 的既有阻塞语义，不新增批量认证或重试特例。Worker 核心采用已确认文字后为 344 字，对应测试上限为 350 字；Manager 核心仍不超过 300 字。
+- 447 项定向检查及 Agent TypeScript 检查通过；worker-tools 的 1 项旧文案断言在未改 main 上同样失败。只改模型可见文案及检查，不改状态机、权限或投递逻辑；未部署。
+- Harness/主控 child 可观测性另见 `crabot-docs/superpowers/specs/2026-09-26-manager-worker-execution-observation-design.md`，待书面 spec 确认后更新正式协议并实施。
+
 ### Admin Web 输入与登录体验修复
 
 - 发送模式切换为 Enter / Alt+Enter（Mac 为 Cmd+Enter），提示与触发一致；组合输入及上屏 Enter 不再误发消息。

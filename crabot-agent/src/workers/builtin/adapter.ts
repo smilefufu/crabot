@@ -157,7 +157,7 @@ export { WorkerExitedError }
 const FINISH_TASK_TOOL: ToolDefinition = {
   ...defineTool({
     name: 'finish_task',
-    description: '结束当前委托任务并返回一句话总结。仅在当前任务的明确完成条件已满足且有对应证据时用 completed；确认失败且不再继续时用 failed。缺少可补充的输入或决定时，说明缺口并结束本轮等待，不调用本工具；后台命令、子 Agent 和待送达通知须先收口。额外静态审查或潜在风险复核不是默认前置条件，也不应因收尾而扩大任务范围。自报结果仍由调用方验收。',
+    description: '结束当前委托任务并返回一句话总结。仅在当前任务的明确完成条件已满足且有对应证据时用 completed；确认失败且不再继续时用 failed。缺少可补充的输入或决定时，说明缺口并直接结束本轮，不调用本工具；新输入到达后由系统恢复执行；后台命令、子 Agent 和待送达通知须先收口。额外静态审查或潜在风险复核不是默认前置条件，也不应因收尾而扩大任务范围。自报结果仍由调用方验收。',
     isReadOnly: true,
     inputSchema: {
       type: 'object',
@@ -176,7 +176,7 @@ const FINISH_TASK_TOOL: ToolDefinition = {
 /** finish_task 被终态守卫打回时,作为失败 tool_result 内容回给 worker 的提醒(拆分 spec 2026-08-28 修订)。 */
 const FINISH_TASK_REJECTED_NOTICE =
   '[finish_task 未生效] 仍有正在运行的后台命令或子 Agent，任务此刻不能结束。' +
-  '请继续等待它们的完成通知；若确认某个子任务不再需要，先用 Kill 结束它，再重新调用 finish_task。'
+  '没有其他可推进工作时，直接结束本轮，不再调用工具；系统会在结果到达后自动恢复执行。若确认某个子任务不再需要，先用 Kill 结束它，再重新调用 finish_task。'
 
 interface WorkerInstance {
   runtimeObservation?: BuiltinRuntimeObservation

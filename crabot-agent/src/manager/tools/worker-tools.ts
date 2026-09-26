@@ -507,7 +507,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     name: 'get_worker_activity',
     description:
       '读取执行器原生增量活动。view=assistant（默认）仅文本；all 含工具及脱敏错误。after 为上次游标，换 view 时不传。' +
-      '游标变化不代表新活动，空结果不证明完成或无错误；读完所需证据且只剩等待就结束本轮等通知，不轮询。',
+      '游标变化不代表新活动，空结果不证明完成或无错误；读完所需证据、没有其他可推进工作且只缺异步结果时，直接结束本轮，不再调用工具；系统会在结果到达后自动恢复执行。',
     inputSchema: {
       type: 'object',
       properties: {

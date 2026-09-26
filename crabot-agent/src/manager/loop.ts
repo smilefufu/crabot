@@ -91,7 +91,7 @@ const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出�
   + '- 如果它只是内部总结，或与你已经发送的内容重复 → 不需要任何操作，直接结束即可，不要重复发送。'
 
 const DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出的文字只留在系统内部；需要人类看到的新摘要通过 send_daily_reflection_summary 发送到 Admin Web 系统任务线程。内部总结或已成功发送的摘要不再发送。\n'
-  + '摘要投递不代表周期完成。有可推进事项就继续；只剩等待已派分析结果时结束本轮等通知。周期处理结束时单独调用 finish_daily_reflection，按真实结果申报 completed 或 partial，列明未完成事项。'
+  + '摘要投递不代表周期完成。有可推进事项就继续；没有其他可推进事项、只缺已派分析结果时，直接结束本轮，不再调用工具；系统会在结果到达后自动恢复执行。周期处理结束时单独调用 finish_daily_reflection，按真实结果申报 completed 或 partial，列明未完成事项。'
 const POST_SEND_ACTION_RECHECK_PROMPT = '[系统复核] 你刚才发出的消息标记为“随后新建 Worker”，但系统尚未观察到成功的 spawn_worker。\n'
   + '请根据真实意图重新确认：若仍需新建 Worker，现在调用 spawn_worker；若刚才只是讨论、无需派发，或字段误填，直接结束即可。\n'
   + '不要因为这条系统提示重复向人类发送消息，也不要向人类提及系统复核。'

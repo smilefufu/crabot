@@ -11,7 +11,7 @@ const base = { managerKey: 'fixture::user', isSystemThread: false } as const
 describe('product guidance boundaries', () => {
   it('keeps short cores and role-specific catalogs; ordinary tasks receive no workflows', () => {
     expect(MANAGER_IDENTITY.replace(/\s/g, '').length).toBeLessThanOrEqual(300)
-    expect(BUILTIN_WORKER_PROMPT.replace(/\s/g, '').length).toBeLessThanOrEqual(300)
+    expect(BUILTIN_WORKER_PROMPT.replace(/\s/g, '').length).toBeLessThanOrEqual(350)
     expect(BUILTIN_WORKER_PROMPT).not.toMatch(/主控|执行器|调用方/)
     expect(guidanceNames('manager')).toHaveLength(4)
     expect(guidanceNames('worker')).toHaveLength(3)
@@ -35,6 +35,15 @@ describe('product guidance boundaries', () => {
     expect(renderGuidance('manager', 'manager.workboard')).toContain('对没有当前事项的目标，也要结合最新的人类要求和已有结果判断是否应收口')
     expect(renderGuidance('manager', 'manager.worker-events')).toContain('执行器完成不自动产生对外汇报义务')
   })
+  it('正常子任务执行不催办，缺少工作时继续安排而非只补证据', () => {
+    const events = renderGuidance('manager', 'manager.worker-events')
+    expect(events).toContain('不因父执行器结束本轮或处于 idle 而催办')
+    expect(events).toContain('仍有未完成要求：继续安排剩余工作')
+    for (const name of guidanceNames('manager')) {
+      expect(renderGuidance('manager', name)).not.toMatch(/等通知|等待通知/)
+    }
+  })
+
   it('loads only one named workflow, independent of user Skills or filesystem paths', async () => {
     const tool = createGuidanceTool('worker')
     expect(await tool.call({ name: 'worker.diagnosis' }, context)).toEqual({ isError: false, output: renderGuidance('worker', 'worker.diagnosis') })

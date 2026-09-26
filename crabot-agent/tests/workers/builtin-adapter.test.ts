@@ -1043,7 +1043,7 @@ describe('BuiltinWorkerAdapter', () => {
 
     const forkCall = (llm.stream as unknown as { mock: { calls: Array<[{ tools: ReadonlyArray<ToolDefinition>; systemPrompt?: string }]> } }).mock.calls[1][0]
     expect(forkCall.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(['echo', 'delegate_task', 'finish_task']))
-    expect(forkCall.tools.find((tool) => tool.name === 'finish_task')!.description).toContain('说明缺口并结束本轮等待，不调用本工具')
+    expect(forkCall.tools.find((tool) => tool.name === 'finish_task')!.description).toContain('说明缺口并直接结束本轮，不调用本工具')
     expect(echoCall).toHaveBeenCalledOnce()
     expect(forkCall.systemPrompt).toContain('按本次新请求查证、解释或执行，不继续继承的旧计划')
     expect(forkCall.systemPrompt).toContain('使用本次允许的能力')
