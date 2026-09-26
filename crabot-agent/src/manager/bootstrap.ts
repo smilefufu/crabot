@@ -233,6 +233,7 @@ export interface BootstrapDeps {
   readonly issueAgentCliCredential?: HarnessDeps['issueAgentCliCredential']
   /** Shared bg registry ownership check for builtin end_turn state mapping. */
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
+  readonly hasPendingWorkerNotification?: HarnessDeps['hasPendingWorkerNotification']
   readonly listWorkerBackground?: HarnessDeps['listWorkerBackground']
   /**
    * 对外事件发布口(§9.2 `agent.task_status_changed`),由 `makeAgentEventPublisher` 构造。
@@ -257,6 +258,9 @@ export interface BootstrapDeps {
   readonly workerImplSnapshot?: import('./tools/worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
   /** Agent-owned structured session projection used by get_worker_activity. */
   readonly readWorkerActivity?: import('./tools/worker-tools.js').WorkerToolsDeps['readWorkerActivity']
+  readonly readWorkerSubagents?: import('./tools/worker-tools.js').WorkerToolsDeps['readWorkerSubagents']
+  readonly readWorkerSubagentDetail?: import('./tools/worker-tools.js').WorkerToolsDeps['readWorkerSubagentDetail']
+  readonly readWorkerSubagentTrace?: import('./tools/worker-tools.js').WorkerToolsDeps['readWorkerSubagentTrace']
   /** Mints opaque activity cursors from Harness-internal native positions. */
   readonly mintActivityCursor?: HarnessDeps['mintActivityCursor']
   /** P6-B §6.5：operation-time connection admission（unified-agent 注入）。 */
@@ -496,6 +500,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     hasRunningBg: deps.hasRunningBg,
     isExecutionReady: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
     listWorkerBackground: deps.listWorkerBackground,
+    hasPendingWorkerNotification: deps.hasPendingWorkerNotification,
     onContinuationSweep: async () => {
       if (!candidatesReady || candidatesClosing) return
       for (const { managerKey } of await ledger.listAllWorkers()) scheduleCandidates(managerKey)
@@ -777,6 +782,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
         readWorkerActivity: deps.readWorkerActivity,
+        readWorkerSubagents: deps.readWorkerSubagents,
+        readWorkerSubagentDetail: deps.readWorkerSubagentDetail,
+        readWorkerSubagentTrace: deps.readWorkerSubagentTrace,
         workerContext: () => ({
           managerKey: key,
           // P6-A §6.6：当前 episode trace id 由 registry 桥惰性读取（tool call 发生时才取），

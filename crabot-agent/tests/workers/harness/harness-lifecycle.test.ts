@@ -704,6 +704,7 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(worker.task.status).toBe('halted')
     expect(worker.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
     expect(events.find((event) => event.kind === 'state_changed')?.detail).toEqual({
+      execution: expect.objectContaining({ state: 'unknown', notification_pending: null }),
       to: 'exited',
       kind: 'initial_input_settled',
       reason: 'completed',
@@ -2351,7 +2352,7 @@ describe('WorkerHarness.handleStateChange', () => {
     events.length = 0
     fake.emitStateChange(h, 'running', '   \n  ')
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
-    expect(events.filter((e) => e.kind === 'state_changed')[0].detail).toEqual({ to: 'running' })
+    expect(events.filter((e) => e.kind === 'state_changed')[0].detail).toEqual({ to: 'running', execution: expect.objectContaining({ state: 'running', reasons: ['mainline_running'] }) })
   })
 
   it('已终态 worker 的迟到状态回调被忽略,不覆盖已有终局', async () => {
@@ -4880,7 +4881,7 @@ describe('WorkerHarness.handleStateChange — 同状态重复回调', () => {
 
     const stateEvents = events.filter((e) => e.kind === 'state_changed')
     expect(stateEvents).toHaveLength(1) // 事件仍然被记录,没有跟着错误一起被吞掉
-    expect(stateEvents[0].detail).toEqual({ to: 'running' })
+    expect(stateEvents[0].detail).toEqual({ to: 'running', execution: expect.objectContaining({ state: 'running', reasons: ['mainline_running'] }) })
   })
 })
 

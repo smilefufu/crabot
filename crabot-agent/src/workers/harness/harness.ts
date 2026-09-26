@@ -68,6 +68,7 @@ import { promises as fs } from 'fs'
 import type { AgentCliExecutionRef } from 'crabot-shared'
 import type {
   WorkerAdapter,
+  WorkerExecutionObservation,
   WorkerImplId,
   WorkerContractState,
   IncarnationHandle,
@@ -751,6 +752,8 @@ export interface HarnessDeps {
     target_session: { channel_id: string; session_id: string; type: 'private' | 'group' }
     creator_friend_id?: string
   }) => Promise<{ token: string; expires_at: string }>
+  /** Read durable child/background completion receipts without consuming them. */
+  readonly hasPendingWorkerNotification?: (workerId: string) => Promise<boolean>
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
   /** Read-only execution projection waits for startup carrier and background reconciliation. */
@@ -3340,6 +3343,87 @@ export class WorkerHarness {
     return adapter.readTerminal(handle)
   }
 
+  /** Read-only: no reconciliation, health probe, delivery or lifecycle mutation. */
+  async getWorkerExecutionObservation(workerId: string): Promise<WorkerExecutionObservation> {
+    const observation: WorkerExecutionObservation = {
+      observed_at: this.deps.now(), state: 'unknown', reasons: [], active_subagents: [],
+      active_background: [], notification_pending: null, unavailable_reasons: [],
+    }
+    let worker: LedgerWorker
+    try {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) throw new WorkerNotFoundError(workerId)
+      worker = found.worker
+    } catch {
+      observation.unavailable_reasons.push('worker_state_unavailable')
+      return observation
+    }
+    try {
+      if (this.deps.isExecutionReady?.() === false) observation.unavailable_reasons.push('startup_reconciliation_pending')
+    } catch { observation.unavailable_reasons.push('execution_readiness_unavailable') }
+    const reasons = new Set<WorkerExecutionObservation['reasons'][number]>()
+    if (worker.task.status === 'queued') reasons.add('queued')
+    const children = new Map<string, WorkerSubagentSummary>()
+    const childIds = new Set<string>()
+    for (const incarnation of worker.incarnations) {
+      if (isLegacyIncarnation(incarnation)) {
+        observation.unavailable_reasons.push('legacy_execution_unavailable')
+        continue
+      }
+      const observed = this.executionStates.get(`${workerId}#${incarnation.impl}#${incarnation.seq}`)
+      const state = observed?.sessionRef === incarnation.session_ref
+        && (incarnation.state !== 'exited' || observed.state === 'unknown') ? observed.state : incarnation.state
+      if (state === 'running') reasons.add(incarnation.forked_from === undefined ? 'mainline_running' : 'fork_running')
+      if (state === 'unknown') observation.unavailable_reasons.push('incarnation_state_unknown')
+      const adapter = this.deps.adapters.get(incarnation.impl)
+      if (!adapter) { observation.unavailable_reasons.push('adapter_unavailable'); continue }
+      try {
+        if (!adapter.listSubagents) {
+          if (adapter.capabilities().subagent) observation.unavailable_reasons.push('subagents_unavailable')
+          continue
+        }
+        for (const child of await adapter.listSubagents(handleForIncarnation(workerId, incarnation))) {
+          if (child.worker_id !== workerId) { observation.unavailable_reasons.push('child_owner_mismatch'); continue }
+          childIds.add(child.subagent_id)
+          if (child.status === 'running' || child.status === 'unknown') {
+            const redact = this.deps.redactFailureReason ?? ((text: string) => text)
+            const safe = { ...child, name: redact(child.name),
+              ...(child.task === undefined ? {} : { task: redact(child.task) }),
+              ...(child.unavailable_reason === undefined ? {} : { unavailable_reason: redact(child.unavailable_reason) }) }
+            if (children.get(child.subagent_id)?.status !== 'running') children.set(child.subagent_id, safe)
+            if (child.status === 'running') reasons.add('subagent_running')
+            else observation.unavailable_reasons.push('subagent_state_unknown')
+          }
+        }
+      } catch { observation.unavailable_reasons.push('subagents_unavailable') }
+    }
+    observation.active_subagents = [...children.values()]
+    try {
+      if (!this.deps.listWorkerBackground) throw new Error('unavailable')
+      for (const entity of await this.deps.listWorkerBackground(workerId)) {
+        if (entity.status !== 'running' && entity.status !== 'stalled') continue
+        // agent_ is the registry identity format; failed child reads must not turn it into a Shell.
+        if (childIds.has(entity.entity_id) || entity.entity_id.startsWith('agent_')) {
+          if (!children.has(entity.entity_id)) observation.unavailable_reasons.push('background_child_unavailable')
+          reasons.add('subagent_running')
+        } else {
+          observation.active_background.push({ entity_id: entity.entity_id, status: entity.status })
+          reasons.add('background_running')
+        }
+      }
+    } catch { observation.unavailable_reasons.push('background_unavailable') }
+    try {
+      if (!this.deps.hasPendingWorkerNotification) throw new Error('unavailable')
+      observation.notification_pending = await this.deps.hasPendingWorkerNotification(workerId)
+    } catch { observation.unavailable_reasons.push('notification_state_unavailable') }
+    if (this.hasPendingBgNotification(workerId)) observation.notification_pending = true
+    if (observation.notification_pending) reasons.add('notification_pending')
+    observation.reasons = [...reasons]
+    observation.unavailable_reasons = [...new Set(observation.unavailable_reasons)]
+    observation.state = executionState(reasons.size > 0, observation.unavailable_reasons.length > 0)
+    return observation
+  }
+
   /** Read the direct children reported by the selected Worker incarnation(s). */
   async listWorkerSubagents(workerId: string, incarnationId?: IncarnationId): Promise<WorkerSubagentSummary[]> {
     const found = await this.deps.ledger.findWorker(workerId)
@@ -3971,6 +4055,7 @@ export class WorkerHarness {
     // 化身落点 to、worker 最后发言 text、收尾结论 summary，事件级携带落账后 task_status；
     // 同拍不再另发 state_changed 唤醒。
     const event = this.buildEvent(turn.worker_id, turn.seq, 'turn_completed', {
+      execution: await this.getWorkerExecutionObservation(turn.worker_id),
       turn_id: turn.turn_id,
       incarnation_id: turn.incarnation_id,
       activity_from: turn.activity_from,
@@ -4338,7 +4423,7 @@ export class WorkerHarness {
       if (native === 'running') return 'running'
       if (native === 'unknown' || this.continuationObservations.get(worker.worker_id)?.stopUnverified) unknown = true
     } catch { unknown = true }
-    return unknown ? 'unknown' : 'idle'
+    return executionState(false, unknown)
   }
 
   async reconcileContinuationCandidates(
@@ -4388,7 +4473,7 @@ export class WorkerHarness {
         return updated && status !== worker.task.status ? { seq: mainline.seq, status: updated.task.status } : undefined
       })
       if (changed) {
-        const event = this.buildEvent(worker_id, changed.seq, 'state_changed', { source: 'execution_aggregate', to: changed.status }, changed.status)
+        const event = this.buildEvent(worker_id, changed.seq, 'state_changed', { source: 'execution_aggregate', to: changed.status, execution: await this.getWorkerExecutionObservation(worker_id) }, changed.status)
         await this.getEventLog(worker_id).append(event)
         // Autonomous reconciliation must not await the Manager episode it wakes.
         void Promise.resolve(this.deps.onEvent?.(event)).catch(error => console.error('[WorkerHarness] aggregate notification failed:', error))
@@ -6741,7 +6826,8 @@ export class WorkerHarness {
     detail?: Record<string, unknown>,
     taskStatus?: TaskStatus
   ): Promise<void> {
-    const event = this.buildEvent(workerId, seq, kind, detail, taskStatus)
+    const event = this.buildEvent(workerId, seq, kind, kind === 'state_changed'
+      ? { ...detail, execution: await this.getWorkerExecutionObservation(workerId) } : detail, taskStatus)
     await this.getEventLog(workerId).append(event)
     const delivery = this.deps.onEvent?.(event)
     if ((this.synchronousDeliveryWorkers.get(workerId) ?? 0) > 0) await delivery
@@ -6781,7 +6867,8 @@ export class WorkerHarness {
     taskStatus?: TaskStatus
   ): Promise<void> {
     try {
-      await this.getEventLog(workerId).append(this.buildEvent(workerId, seq, kind, detail, taskStatus))
+      await this.getEventLog(workerId).append(this.buildEvent(workerId, seq, kind, kind === 'state_changed'
+        ? { ...detail, execution: await this.getWorkerExecutionObservation(workerId) } : detail, taskStatus))
     } catch (error) {
       console.error(
         `[WorkerHarness] failed to append operation audit event ` +
@@ -7086,3 +7173,7 @@ function transitionTaskTo(
 // re-export for callers that only import from harness.ts
 export type { HarnessEvent, HarnessEventKind } from './worker-events'
 export type { InboxItem } from './inbox'
+
+function executionState(running: boolean, unknown: boolean): 'running' | 'idle' | 'unknown' {
+  return running ? 'running' : unknown ? 'unknown' : 'idle'
+}

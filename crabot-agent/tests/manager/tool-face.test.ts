@@ -52,7 +52,7 @@ const MESSAGING_NORMAL = [
 /** protocol-crab-messaging.md §2.10 的 channel 透传只读三件套（仅当存在飞书 channel 实例）。 */
 const FEISHU_READ_ONLY_TOOLS = ['read_feishu_document', 'feishu_raw_get', 'feishu_download_file']
 
-const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'get_worker_state', 'get_worker_activity', 'get_worker_turn', 'resolve_worker_turn', 'get_worker_terminal', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'list_workers', 'get_worker_detail', 'list_worker_implementations']
+const WORKER_TOOLS = ['list_worker_subagents', 'get_worker_subagent_detail', 'get_worker_subagent_trace', 'spawn_worker', 'send_to_worker', 'query_worker', 'get_worker_state', 'get_worker_activity', 'get_worker_turn', 'resolve_worker_turn', 'get_worker_terminal', 'request_worker_interrupt', 'request_worker_stop', 'respond_to_worker_ui', 'list_workers', 'get_worker_detail', 'list_worker_implementations']
 
 const CRABOT_INFO_TOOLS = [
   'inspect_crabot',
@@ -336,12 +336,12 @@ describe('buildManagerToolFace', () => {
     expect(tools.map(tool => tool.name)).toContain('get_execution_capabilities')
   })
 
-  it('移除决策写入后为 57 项内置与 59 项 full，各模式核心字节一致', () => {
+  it('移除决策写入后为 60 项内置与 62 项 full，各模式核心字节一致', () => {
     const deps = makeDeps({ schedule, candidatePermissions: permissions })
-    expect(buildManagerToolFace(deps)).toHaveLength(57)
+    expect(buildManagerToolFace(deps)).toHaveLength(60)
     const full = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState('full') })
     const core = buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() })
-    expect(full).toHaveLength(59)
+    expect(full).toHaveLength(62)
     expect(core.map((tool) => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
     const wire = (tools: ToolDefinition[]) => JSON.stringify(tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })))
     expect(wire(full.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(wire(core))
@@ -446,7 +446,7 @@ describe('buildManagerToolFace', () => {
       for (const tools of [full, core, expanded]) {
         await callNonStreaming(adapter, { model: 'fixture', systemPrompt: 'Stable Manager instructions', messages: [createUserMessage('fixture')], tools, maxTokens: 64 })
       }
-      expect(bodies.map(body => body.tools.length)).toEqual([59, 15, 21])
+      expect(bodies.map(body => body.tools.length)).toEqual([62, 15, 21])
       expect(JSON.stringify(bodies[0].tools.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(JSON.stringify(bodies[1].tools))
       expect(JSON.stringify(bodies[2].tools.slice(0, NORMAL_MANAGER_CORE_NAMES.length))).toBe(JSON.stringify(bodies[1].tools))
       if (format === 'anthropic') {
@@ -612,12 +612,12 @@ describe('buildManagerToolFace', () => {
     for (const tool of external) expect(tool.call).not.toHaveBeenCalled()
   })
 
-  it('未启用渐进加载时提供完整 57 项，不装配 search_tools 或外部 MCP', () => {
+  it('未启用渐进加载时提供完整 60 项，不装配 search_tools 或外部 MCP', () => {
     const tools = buildManagerToolFace(makeDeps({ schedule: {
       targetSession: { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' },
       creatorFriendId: 'creator', canCreate: true, resolvePermissions: async () => null,
     } }))
-    expect(tools).toHaveLength(57)
+    expect(tools).toHaveLength(60)
     expect(tools.map(tool => tool.name).filter(name => name.startsWith('mcp__') && !name.startsWith('mcp__crab-memory__'))).toEqual([])
     for (const name of ['search_tools', 'get_system_status', 'get_deployment_info', 'get_config_summary', 'list_capabilities']) {
       expect(tools.map(tool => tool.name)).not.toContain(name)

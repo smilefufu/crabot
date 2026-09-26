@@ -1,3 +1,4 @@
+import { ManagerToolCatalog, createManagerToolFaceState, NORMAL_MANAGER_CORE_NAMES, DAILY_REFLECTION_CORE_NAMES } from '../../src/manager/tools/tool-catalog.js'
 import { executeToolBatches } from '../../src/engine/tool-orchestration.js'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
@@ -132,7 +133,8 @@ function now(): string {
 }
 
 async function makeHarness(
-  fakeOpts: FakeAdapterOpts = {}
+  fakeOpts: FakeAdapterOpts = {},
+  extraDeps: Partial<HarnessDeps> = {},
 ): Promise<{ harness: WorkerHarness; fake: FakeAdapter; adaptersMap: Map<WorkerImplId, WorkerAdapter> }> {
   const ledgersDir = join(dataDir, 'ledgers')
   const workspacesRoot = join(dataDir, 'workspaces')
@@ -151,6 +153,7 @@ async function makeHarness(
     workersDir,
     now,
     onEvent: (e) => events.push(e),
+    ...extraDeps,
   }
   const harness = new WorkerHarness(deps)
   const fake = new FakeAdapter({ ...fakeOpts, onStateChange: harness.handleStateChange })
@@ -205,7 +208,7 @@ afterEach(async () => {
 // ---- 工具面形状 ----
 
 describe('buildWorkerTools — 工具面形状', () => {
-  it('普通 Manager 有十五项 worker 工具；状态、活动、Git 与回合查询均为只读', async () => {
+  it('普通 Manager 有十八项 worker 工具；状态、活动、Git 与回合查询均为只读', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
 
@@ -214,6 +217,9 @@ describe('buildWorkerTools — 工具面形状', () => {
         'get_worker_activity',
         'get_worker_detail',
         'get_worker_state',
+        'get_worker_subagent_detail',
+        'get_worker_subagent_trace',
+        'list_worker_subagents',
         'get_worker_turn',
         'inspect_workspace_git',
         'list_worker_implementations',
@@ -234,10 +240,13 @@ describe('buildWorkerTools — 工具面形状', () => {
       'get_worker_activity',
       'get_worker_detail',
       'get_worker_state',
+      'get_worker_subagent_detail',
+      'get_worker_subagent_trace',
       'get_worker_terminal',
       'get_worker_turn',
       'inspect_workspace_git',
       'list_worker_implementations',
+      'list_worker_subagents',
       'list_workers',
     ])
   })
@@ -984,5 +993,147 @@ describe('worker control operations', () => {
     const result = await stopWorker.call({ worker_id: 'w-nope' }, {})
     expect(result.isError).toBe(true)
     expect(result.output).toContain('不存在或当前会话无权访问')
+  })
+})
+
+
+describe('主控整体执行观察', () => {
+  it('父级 idle 不掩盖运行中的 child；查询与事件同源且不发送输入', async () => {
+    const { harness, fake } = await makeHarness({}, {
+      listWorkerBackground: async () => [],
+      hasPendingWorkerNotification: async () => false,
+      hasRunningBg: async () => true,
+    })
+    const worker = await harness.spawnWorker(directSpawnParams())
+    Object.assign(fake, { listSubagents: async () => [{ subagent_id: 'agent_a', worker_id: worker.worker_id,
+      executor_impl: 'builtin', name: 'research', task: '查证', status: 'running' }] })
+    const tools = buildWorkerTools({ harness, context: () => CTX })
+    harness.handleStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: 'test' }, 'idle')
+    await waitUntil(async () => Boolean((await harness.findWorker(worker.worker_id))?.worker.incarnations[0].state === 'idle'))
+    const result = await tools.find(t => t.name === 'get_worker_state')!.call({ worker_id: worker.worker_id }, {})
+    const state = parseOutput(result.output)
+    expect(state).toMatchObject({ mainline: { state: 'idle' }, execution: {
+      state: 'running', reasons: ['subagent_running'], active_subagents: [{ subagent_id: 'agent_a' }], notification_pending: false,
+    } })
+    expect(state).toHaveProperty('task.status', 'running')
+    expect(fake.sendInputCalls).toHaveLength(0)
+    await waitUntil(async () => events.some(e => e.kind === 'state_changed'))
+    const notice = [...events].reverse().find(e => e.kind === 'state_changed')
+    expect(notice?.detail).toHaveProperty('execution.state', 'running')
+  })
+
+  it('多化身分别读取 child，保留仍活动的旧 child，过滤终态并脱敏', async () => {
+    const { harness, fake } = await makeHarness({}, {
+      listWorkerBackground: async () => [{ entity_id: 'agent_live', status: 'running', ended_at: null }, { entity_id: 'shell_live', status: 'stalled', ended_at: null }],
+      hasPendingWorkerNotification: async () => false,
+      redactFailureReason: text => text.replaceAll('secret', '[redacted]'),
+    })
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const ledger = new LedgerStore(join(dataDir, 'ledgers'))
+    const mainline = worker.incarnations[0]
+    await ledger.upsertWorker(CTX.managerKey, worker.worker_id, current => ({ ...current!, incarnations: [
+      { ...mainline, state: 'idle' },
+      { ...mainline, incarnation_id: 'inc-fork', seq: 2, forked_from: 1, state: 'running' },
+    ] }))
+    Object.assign(fake, { listSubagents: async (handle: IncarnationHandle) => handle.seq === 1 ? [
+      { subagent_id: 'agent_done', worker_id: worker.worker_id, executor_impl: 'builtin', name: 'done', status: 'completed' },
+      { subagent_id: 'agent_live', worker_id: worker.worker_id, executor_impl: 'builtin', name: 'secret', task: 'secret task', status: 'running' },
+    ] : [{ subagent_id: 'agent_unknown', worker_id: worker.worker_id, executor_impl: 'builtin', name: 'unknown', status: 'unknown' }] })
+    const observation = await harness.getWorkerExecutionObservation(worker.worker_id)
+    expect(observation).toMatchObject({ state: 'running', active_subagents: [
+      { subagent_id: 'agent_live', name: '[redacted]', task: '[redacted] task' }, { subagent_id: 'agent_unknown', status: 'unknown' },
+    ], active_background: [{ entity_id: 'shell_live', status: 'stalled' }], unavailable_reasons: ['subagent_state_unknown'] })
+    expect(observation.reasons).toEqual(expect.arrayContaining(['fork_running', 'subagent_running', 'background_running']))
+    expect(fake.sendInputCalls).toHaveLength(0)
+  })
+
+  it('持久 pending 通知在内存交付计数为零时仍保持运行；失败降级不泄漏错误', async () => {
+    let pending = true
+    const { harness, fake } = await makeHarness({}, {
+      listWorkerBackground: async () => [],
+      hasPendingWorkerNotification: async () => pending,
+    })
+    const worker = await harness.spawnWorker(directSpawnParams())
+    Object.assign(fake, { listSubagents: async () => [] })
+    await harness.handleStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: 'test' }, 'idle')
+    await waitUntil(async () => (await harness.findWorker(worker.worker_id))?.worker.incarnations[0].state === 'idle')
+    expect(harness.hasPendingBgNotification(worker.worker_id)).toBe(false)
+    expect(await harness.getWorkerExecutionObservation(worker.worker_id)).toMatchObject({ state: 'running', notification_pending: true })
+    pending = false
+    expect(await harness.getWorkerExecutionObservation(worker.worker_id)).toMatchObject({ state: 'idle', notification_pending: false })
+    Object.assign(fake, { listSubagents: async () => { throw new Error('secret token') } })
+    const unknown = await harness.getWorkerExecutionObservation(worker.worker_id)
+    expect(unknown.state).toBe('unknown')
+    expect(unknown.unavailable_reasons.length).toBeGreaterThan(0)
+    expect(JSON.stringify(unknown)).not.toContain('secret token')
+    expect(fake.sendInputCalls).toHaveLength(0)
+  })
+})
+
+
+describe('Manager direct child tools', () => {
+  it('loaded on demand through worker family, excluded from daily reflection, and enforces worker/child ownership before trace access', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const child = { worker_id: worker.worker_id, subagent_id: 'agent_1', executor_impl: 'builtin' as const, name: 'research', status: 'running' as const }
+    const readWorkerSubagents = vi.fn(async () => ({ subagents: [child] }))
+    const readWorkerSubagentDetail = vi.fn(async () => ({ subagent: child }))
+    const readWorkerSubagentTrace = vi.fn(async () => ({ events: [], next_cursor: 'opaque-next' }))
+    const readers = { readWorkerSubagents, readWorkerSubagentDetail, readWorkerSubagentTrace }
+    const tools = buildWorkerTools({ harness, context: () => CTX, ...readers })
+    const names = ['list_worker_subagents', 'get_worker_subagent_detail', 'get_worker_subagent_trace']
+    const allTools = [...tools, ...[...new Set([...NORMAL_MANAGER_CORE_NAMES, ...DAILY_REFLECTION_CORE_NAMES])].filter(name => !tools.some(t => t.name === name)).map(name => ({ name, description: name, inputSchema: { type: 'object' as const }, call: async () => ({ output: '', isError: false }) }))]
+    const catalog = new ManagerToolCatalog(allTools, 'normal', {}, undefined, undefined, { worker: names })
+    const state = createManagerToolFaceState()
+    for (const name of names) expect(catalog.project(state, allTools.find(t => t.name === 'search_tools')).map(t => t.name)).not.toContain(name)
+    expect(catalog.loadFamily(state, 'worker').loaded).toEqual(names)
+    for (const name of names) {
+      expect(catalog.project(state, allTools.find(t => t.name === 'search_tools')).map(t => t.name)).toContain(name)
+      const restricted = new ManagerToolCatalog(allTools, 'daily_reflection', {}, undefined, undefined, { worker: names })
+      expect(restricted.loadFamily(createManagerToolFaceState(), 'worker').loaded).not.toContain(name)
+    }
+    const trace = tools.find(t => t.name === names[2])!
+    expect((await trace.call({ worker_id: worker.worker_id, subagent_id: 'agent_1', cursor: 'opaque-page' }, {})).isError).toBe(false)
+    expect(readWorkerSubagentTrace).toHaveBeenLastCalledWith({ worker_id: worker.worker_id, subagent_id: 'agent_1', cursor: 'opaque-page' })
+    readWorkerSubagentTrace.mockClear()
+    expect((await trace.call({ worker_id: worker.worker_id, subagent_id: 'other-child' }, {})).isError).toBe(true)
+    expect(readWorkerSubagentTrace).not.toHaveBeenCalled()
+    readWorkerSubagentDetail.mockClear()
+    const foreign = buildWorkerTools({ harness, context: () => ({ ...CTX, managerKey: 'wechat::other' }), ...readers })
+    for (const name of names) {
+      expect((await foreign.find(t => t.name === name)!.call({ worker_id: worker.worker_id, ...(name === names[0] ? {} : { subagent_id: 'agent_1' }) }, {})).isError).toBe(true)
+    }
+    expect(readWorkerSubagentDetail).not.toHaveBeenCalled()
+    expect(readWorkerSubagents).not.toHaveBeenCalled()
+    readWorkerSubagents.mockResolvedValueOnce({ subagents: [{ ...child, worker_id: 'other-worker' }] })
+    expect((await tools.find(t => t.name === names[0])!.call({ worker_id: worker.worker_id }, {})).isError).toBe(true)
+  })
+
+  it('failed observation sources retain positive activity and never prevent turn delivery', async () => {
+    let active = true
+    const { harness, fake } = await makeHarness({}, {
+      onOperationNotification: async (_key, event) => { events.push(event) },
+      isExecutionReady: () => false,
+      listWorkerBackground: async () => { throw new Error('secret registry failure') },
+      hasPendingWorkerNotification: async () => { throw new Error('secret receipt failure') },
+      hasRunningBg: async () => active,
+    })
+    const worker = await harness.spawnWorker(directSpawnParams())
+    Object.assign(fake, { listSubagents: async () => active ? ['agent_a', 'agent_b'].map(subagent_id => ({
+      subagent_id, worker_id: worker.worker_id, executor_impl: 'builtin', name: subagent_id, status: 'running',
+    })) : [] })
+    harness.handleStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: 'test' }, 'idle', { completionSource: 'builtin_end_turn', lastText: 'child dispatched' })
+    await waitUntil(async () => events.some(e => e.kind === 'turn_completed'))
+    const turns = events.filter(e => e.kind === 'turn_completed')
+    expect(turns).toHaveLength(1)
+    expect(turns[0].detail).toMatchObject({ execution: { state: 'running', notification_pending: null,
+      active_subagents: [{ subagent_id: 'agent_a' }, { subagent_id: 'agent_b' }],
+      unavailable_reasons: ['startup_reconciliation_pending', 'background_unavailable', 'notification_state_unavailable'],
+    } })
+    active = false
+    expect(await harness.getWorkerExecutionObservation(worker.worker_id)).toMatchObject({ state: 'unknown', active_subagents: [] })
+    expect(fake.sendInputCalls).toHaveLength(0)
+    expect(events.filter(e => e.kind === 'turn_completed')).toHaveLength(1)
+    expect(JSON.stringify(turns)).not.toContain('secret')
   })
 })
