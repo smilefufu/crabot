@@ -69,7 +69,12 @@ describe('buildDelegateTaskDescription', () => {
 
   it('只声明异步派发，不向模型暴露同步模式', () => {
     const desc = buildDelegateTaskDescription([fakeSubAgent('x')])
-    expect(desc).toContain('只会异步')
+    expect(desc).toContain('异步派发后立即返回')
+    expect(desc).toContain('尚未完成')
+    expect(desc).toContain('自动送回结果或错误，无需另行读取')
+    expect(desc).toContain('结束本轮（end_turn）等待通知')
+    expect(desc).toContain('结束本轮不会终止子 Agent')
+    expect(desc).toContain('通知到达后会恢复执行')
     expect(desc).not.toContain('sync')
     expect(desc).not.toContain('同 turn 立即')
   })

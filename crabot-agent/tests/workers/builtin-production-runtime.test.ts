@@ -1116,6 +1116,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       expect(prompt).not.toContain('需要审查时使用')
       expect(delegate!.description).toContain('reviewer')
       expect(delegate!.description).toContain('需要审查时使用')
+      expect(delegate!.description).toContain('自动送回结果或错误，无需另行读取')
+      expect(delegate!.description).toContain('结束本轮不会终止子 Agent')
       expect((delegate!.inputSchema.properties as Record<string, { enum?: string[] }>).subagent_type.enum).toEqual(['reviewer'])
       expect(prompt).toContain('等待外部结果时结束本轮等通知')
     }
