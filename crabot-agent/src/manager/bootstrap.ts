@@ -552,21 +552,24 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   let candidatesClosing = false
   const pendingCandidateManagers = new Set<ManagerKey>()
   const candidateRuns = new Map<ManagerKey, Promise<void>>()
+  let candidateTail = Promise.resolve()
   const scheduleCandidates = (key: ManagerKey): void => {
     if (!candidatesReady || candidatesClosing || deps.isClosing?.()) return
     pendingCandidateManagers.add(key)
     if (candidateRuns.has(key)) return
-    const run = Promise.resolve().then(async () => {
-      while (pendingCandidateManagers.delete(key) && !candidatesClosing && !deps.isClosing?.()) {
-        const board = await workboardStore.load(key)
-        await harness.reconcileContinuationCandidates(key, board, use => workboardStore.withCurrentBoard(key, use))
-      }
+    const run = candidateTail.then(async () => {
+      // Recovery callers can proceed before this lower-priority work starts.
+      await new Promise<void>(resolve => setImmediate(resolve))
+      if (!pendingCandidateManagers.delete(key) || candidatesClosing || deps.isClosing?.()) return
+      const board = await workboardStore.load(key)
+      await harness.reconcileContinuationCandidates(key, board, use => workboardStore.withCurrentBoard(key, use))
     }).catch(error => console.error(`[manager-bootstrap] candidate reconciliation failed for ${key}:`, error))
       .finally(() => {
         candidateRuns.delete(key)
         if (pendingCandidateManagers.has(key)) scheduleCandidates(key)
       })
     candidateRuns.set(key, run)
+    candidateTail = run
   }
   const workboardStore = new ManagerWorkboardStore(managersDir, deps.now, (key) => {
     registry?.onWorkboardChanged(key)

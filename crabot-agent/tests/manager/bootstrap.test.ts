@@ -1436,4 +1436,38 @@ describe('manager bootstrap（P5 Task 1）', () => {
     for (const spy of detectSpies) expect(spy).not.toHaveBeenCalled()
     for (const spy of stateSpies) expect(spy).not.toHaveBeenCalled()
   })
+
+  describe('candidate reconciliation scheduling', () => {
+    it('serializes Managers, coalesces triggers, and requeues a busy Manager after its peers', async () => {
+      const stack = buildManagerStack(makeDeps())
+      const keys = ['test::a', 'test::b'] as ManagerKey[]
+      vi.spyOn(stack.ledger, 'listAllWorkers').mockResolvedValue(keys.flatMap(managerKey =>
+        Array.from({ length: 10 }, () => ({ managerKey, worker: {} as LedgerWorker }))))
+      vi.spyOn(stack.workboard, 'load').mockImplementation(async manager_key => ({ manager_key, objectives: [], archive: [] }))
+      let release!: () => void
+      const gate = new Promise<void>(resolve => { release = resolve })
+      const calls: ManagerKey[] = []
+      let active = 0
+      let maximum = 0
+      vi.spyOn(stack.harness, 'reconcileContinuationCandidates').mockImplementation(async key => {
+        calls.push(key); active++; maximum = Math.max(maximum, active)
+        if (calls.length === 1) await gate
+        active--
+      })
+      const first = stack.startContinuationReconciliation()
+      let second: Promise<void> | undefined
+      try {
+        await waitUntil(() => calls.length > 0)
+        expect(calls).toEqual([keys[0]])
+        second = stack.startContinuationReconciliation()
+        await new Promise<void>(resolve => setImmediate(resolve))
+        release()
+        await Promise.all([first, second])
+        await waitUntil(() => calls.length >= 3)
+        expect(calls).toEqual([keys[0], keys[1], keys[0]])
+        expect(maximum).toBe(1)
+      } finally { release(); await first; await second; await stack.dispose() }
+    })
+  })
+
 })
