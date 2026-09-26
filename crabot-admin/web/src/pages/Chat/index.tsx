@@ -60,7 +60,10 @@ export const Chat: React.FC = () => {
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  // 发送键模式：'enter' = Enter 发送/Shift+Enter 换行；'mod-enter' = Enter 换行/Ctrl(Alt)+Enter 发送
+  const isComposingRef = useRef(false)
+  const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform)
+  const modifiedSendKey = isMac ? 'Cmd+Enter' : 'Alt+Enter'
+  // 发送键模式：Enter 发送/Shift+Enter 换行，或 Enter 换行/平台组合键发送
   const [sendMode, setSendMode] = useState<'enter' | 'mod-enter'>(
     () => (localStorage.getItem('chat_send_mode') === 'mod-enter' ? 'mod-enter' : 'enter')
   )
@@ -565,6 +568,7 @@ export const Chat: React.FC = () => {
 
   // 处理键盘事件（两种发送模式，见 sendMode）
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (isComposingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return
     if (e.key === 'Escape') {
       setQuote(null)
       return
@@ -572,12 +576,12 @@ export const Chat: React.FC = () => {
     if (e.key !== 'Enter') return
     const wantSend = sendMode === 'enter'
       ? !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey  // 模式1：Enter 发送，Shift+Enter 换行
-      : e.ctrlKey || e.altKey                                  // 模式2：Enter 换行，Ctrl/Alt+Enter 发送
+      : !e.shiftKey && !e.ctrlKey && (isMac ? e.metaKey && !e.altKey : e.altKey && !e.metaKey)
     if (wantSend) {
       e.preventDefault()
       handleSend()
     }
-    // 不发送时放行，textarea 原生插入换行（模式2 的 Ctrl/Alt+Enter 原生不换行，无需处理）
+    // 不发送时放行，保留 textarea 原生输入行为。
   }
 
   const toggleSendMode = () => {
@@ -1008,6 +1012,9 @@ export const Chat: React.FC = () => {
               e.target.style.height = 'auto'
               e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`
             }}
+            onCompositionStart={() => { isComposingRef.current = true }}
+            onCompositionEnd={() => { isComposingRef.current = false }}
+            onBlur={() => { isComposingRef.current = false }}
             onKeyDown={handleKeyDown}
             placeholder={connectionStatus === 'connected' ? '输入消息，可粘贴或拖拽附件...' : '等待连接...'}
             disabled={connectionStatus !== 'connected'}
@@ -1027,13 +1034,13 @@ export const Chat: React.FC = () => {
               onClick={toggleSendMode}
               title={sendMode === 'enter'
                 ? '当前：Enter 发送，Shift+Enter 换行（点击切换）'
-                : '当前：Enter 换行，Ctrl/Alt+Enter 发送（点击切换）'}
+                : `当前：Enter 换行，${modifiedSendKey} 发送（点击切换）`}
               style={{
                 background: 'transparent', border: 'none', cursor: 'pointer',
                 fontSize: '0.7rem', color: 'var(--text-secondary)', padding: 0, whiteSpace: 'nowrap',
               }}
             >
-              {sendMode === 'enter' ? 'Enter 发送 ⇄' : 'Ctrl+Enter 发送 ⇄'}
+              {sendMode === 'enter' ? 'Enter 发送 ⇄' : `${modifiedSendKey} 发送 ⇄`}
             </button>
           </div>
         </div>

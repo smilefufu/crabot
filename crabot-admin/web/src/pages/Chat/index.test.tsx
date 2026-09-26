@@ -211,3 +211,60 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     expect(user.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })
+
+describe('聊天发送快捷键', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    loadHistory.mockResolvedValue([])
+    getTaskSnapshot.mockResolvedValue(null)
+    sendMessage.mockReturnValue('keyboard-request')
+  })
+
+  async function composer(platform = 'Win32', modified = false) {
+    vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue(platform)
+    render(<MemoryRouter><Chat /></MemoryRouter>)
+    await waitFor(() => expect(loadHistory).toHaveBeenCalled())
+    if (modified) fireEvent.click(screen.getByText('Enter 发送 ⇄'))
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'hello' } })
+    return input
+  }
+
+  it.each([
+    ['Win32', { altKey: true }, 'Alt'],
+    ['MacIntel', { metaKey: true }, 'Cmd'],
+  ])('%s 的组合发送键与提示一致', async (platform, modifiers, label) => {
+    const input = await composer(platform, true)
+    expect(screen.getByText(`${label}+Enter 发送 ⇄`)).toBeInTheDocument()
+    fireEvent.keyDown(input, { key: 'Enter' })
+    fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })
+    expect(sendMessage).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter', ...modifiers })
+    expect(sendMessage).toHaveBeenCalledOnce()
+    expect(localStorage.getItem('chat_send_mode')).toBe('mod-enter')
+  })
+
+  it('Enter 模式允许 Shift+Enter 换行，普通 Enter 发送', async () => {
+    const input = await composer()
+    expect(fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })).toBe(true)
+    expect(sendMessage).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(sendMessage).toHaveBeenCalledOnce()
+  })
+
+  it.each([false, true])('组合输入中不能发送（组合发送模式=%s）', async (modified) => {
+    const input = await composer('MacIntel', modified)
+    fireEvent.compositionStart(input)
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: modified })
+    expect(sendMessage).not.toHaveBeenCalled()
+    fireEvent.compositionEnd(input)
+    // Safari 上屏 Enter 可能已结束 composition，但仍带 keyCode 229。
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229, metaKey: modified })
+    expect(sendMessage).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true, metaKey: modified })
+    expect(sendMessage).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: modified })
+    expect(sendMessage).toHaveBeenCalledOnce()
+  })
+})

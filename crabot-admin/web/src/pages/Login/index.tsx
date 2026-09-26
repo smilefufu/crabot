@@ -1,5 +1,7 @@
 import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { providerService } from '../../services/provider'
+import { agentService } from '../../services/agent'
 import { useAuth } from '../../contexts/AuthContext'
 import { Input } from '../../components/Common/Input'
 import { Button } from '../../components/Common/Button'
@@ -18,7 +20,20 @@ export const Login: React.FC = () => {
 
     try {
       await login(password)
-      navigate('/providers')
+      let destination = '/chat'
+      try {
+        const [globalConfig, agentConfig] = await Promise.all([
+          providerService.getGlobalConfig(),
+          agentService.getConfig(),
+        ])
+        const defaultModel = agentConfig.model_config?.default
+        const hasModel = (defaultModel?.provider_id && defaultModel.model_id)
+          || (globalConfig.default_llm_provider_id && globalConfig.default_llm_model_id)
+        if (!hasModel) destination = '/providers'
+      } catch {
+        // 配置查询暂时不可用不影响已成功的登录，默认进入聊天。
+      }
+      navigate(destination, { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败')
     } finally {
