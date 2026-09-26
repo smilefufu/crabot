@@ -47,6 +47,9 @@ export interface ToolFaceDeps {
   readonly workerImplSnapshot?: import('./worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
   /** Agent-owned structured session projection for manager worker activity reads. */
   readonly readWorkerActivity?: import('./worker-tools.js').WorkerToolsDeps['readWorkerActivity']
+  readonly readWorkerSubagents?: import('./worker-tools.js').WorkerToolsDeps['readWorkerSubagents']
+  readonly readWorkerSubagentDetail?: import('./worker-tools.js').WorkerToolsDeps['readWorkerSubagentDetail']
+  readonly readWorkerSubagentTrace?: import('./worker-tools.js').WorkerToolsDeps['readWorkerSubagentTrace']
   readonly workerContext: Parameters<typeof buildWorkerTools>[0]['context']
   /** 复用现有类型 —— crab-messaging 的依赖注入接口。 */
   readonly messagingDeps: CrabMessagingDeps
@@ -550,6 +553,9 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     validateMasterAuthorization: deps.validateMasterAuthorization,
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
     ...(deps.readWorkerActivity ? { readWorkerActivity: deps.readWorkerActivity } : {}),
+    readWorkerSubagents: deps.readWorkerSubagents,
+    readWorkerSubagentDetail: deps.readWorkerSubagentDetail,
+    readWorkerSubagentTrace: deps.readWorkerSubagentTrace,
     ...(deps.hasSuccessfulSendMessageTo ? { hasSuccessfulSendMessageTo: deps.hasSuccessfulSendMessageTo } : {}),
     ...(deps.hasContinuedWorker ? { hasContinuedWorker: deps.hasContinuedWorker } : {}),
     ...(deps.onWorkerContinuation ? { onWorkerContinuation: deps.onWorkerContinuation } : {}),

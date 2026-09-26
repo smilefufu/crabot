@@ -276,6 +276,22 @@ export interface WorkerSubagentSummary {
   readonly unavailable_reason?: string
 }
 
+export interface WorkerExecutionObservation {
+  observed_at: string
+  state: 'running' | 'idle' | 'unknown'
+  reasons: Array<
+    'queued' | 'mainline_running' | 'fork_running' |
+    'subagent_running' | 'background_running' | 'notification_pending'
+  >
+  active_subagents: WorkerSubagentSummary[]
+  active_background: Array<{
+    entity_id: string
+    status: 'running' | 'stalled'
+  }>
+  notification_pending: boolean | null
+  unavailable_reasons: string[]
+}
+
 export type WorkerActivityKind = 'assistant_text' | 'tool_call' | 'tool_result' | 'error'
 export type WorkerActivityView = 'assistant' | 'all'
 export type WorkerActivityCursor = string

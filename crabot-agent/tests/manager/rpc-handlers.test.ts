@@ -1172,6 +1172,18 @@ describe('worker 直接 subagent 读模型（§10.3）', () => {
     }
   })
 
+  it('拒绝伪造或属于另一个 child 的 cursor，不读取原生内容', async () => {
+    const { agent, traceCalls, cleanup } = await agentWithChild()
+    try {
+      const store = (agent as unknown as { traceCursorStoreInstance: import('../../src/workers/trace/cursor-store.js').TraceCursorStore }).traceCursorStoreInstance
+      const foreign = await store.mint('subagent:w-1:other-child', subagentFingerprint(child), { harness: 0, native: 0, legacy: 0 })
+      for (const cursor of ['invalid-cursor', foreign]) {
+        await expect(agent.handleGetWorkerSubagentTrace({ worker_id: 'w-1', subagent_id: 'child-1', cursor })).rejects.toThrow()
+      }
+      expect(traceCalls).toEqual([])
+    } finally { await cleanup() }
+  })
+
   it('opaque cursor 重放固定同一 child trace 窗口，后续追加不混进旧页', async () => {
     const { agent, traceEvents, traceCalls, cleanup } = await agentWithChild()
     try {

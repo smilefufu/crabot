@@ -111,6 +111,17 @@ describe('builtin background shell exit routing', () => {
     expect(await handler.hasRunningBgForWorker('worker-1')).toBe(false)
   })
 
+  it('observes durable pending notifications across incarnations without settling them', async () => {
+    const handler = makeHandler()
+    handler.bgRegistry.list.mockResolvedValue([{ entity_id: 'agent_pending', status: 'completed',
+      owner: { worker_id: 'worker-1', incarnation_id: 'branch-1' }, exit_notification: { status: 'pending' } }])
+    expect(await handler.hasPendingWorkerNotification('worker-1')).toBe(true)
+    expect(await handler.hasPendingWorkerNotification('worker-other')).toBe(false)
+    expect(handler.bgRegistry.settleExitNotification).not.toHaveBeenCalled()
+    handler.bgRegistry.list.mockResolvedValue([{ owner: { worker_id: 'worker-1' }, exit_notification: { status: 'delivered' } }])
+    expect(await handler.hasPendingWorkerNotification('worker-1')).toBe(false)
+  })
+
   it('holds recovered worker exits until reconciliation release, then dispatches without unrelated input', async () => {
     const handler = makeHandler()
     handler.workerEntityExitRoutingReady = false

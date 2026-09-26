@@ -1082,6 +1082,9 @@ export class UnifiedAgent extends ModuleBase {
       }),
       builtinTraceReader: this.builtinTraceReader(),
       readWorkerActivity: (params) => this.readWorkerActivity(params),
+      readWorkerSubagents: (params) => this.readWorkerSubagents(params),
+      readWorkerSubagentDetail: (params) => this.readWorkerSubagentDetail(params),
+      readWorkerSubagentTrace: (params) => this.readWorkerSubagentTracePage(params),
       mintActivityCursor: (position) => this.mintWorkerActivityCursor(position),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
       onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
@@ -1255,6 +1258,10 @@ export class UnifiedAgent extends ModuleBase {
       },
       issueAgentCliCredential: (context) => this.issueAgentCliCredential(context),
       hasRunningBg: (workerId, scope) => this.agentHandler?.hasRunningBgForWorker(workerId, undefined, scope) ?? Promise.resolve(false),
+      hasPendingWorkerNotification: async workerId => {
+        if (!this.agentHandler) throw new Error('Worker background registry is not initialized')
+        return this.agentHandler.hasPendingWorkerNotification(workerId)
+      },
       listWorkerBackground: async workerId => {
         if (!this.agentHandler) throw new Error('Worker background registry is not initialized')
         return this.agentHandler.listWorkerBackground(workerId)
@@ -4438,23 +4445,38 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private async handleListWorkerSubagents(params: ListWorkerSubagentsParams): Promise<ListWorkerSubagentsResult> {
+    return this.readWorkerSubagents(params)
+  }
+
+  /** Shared read service; the caller owns Admin or Manager authorization. */
+  private async readWorkerSubagents(params: ListWorkerSubagentsParams): Promise<ListWorkerSubagentsResult> {
     if (!params || typeof params.worker_id !== 'string' || params.worker_id.length === 0) {
       throw new Error('worker_id is required')
     }
     const stack = this.requireManagerStack()
-    return { subagents: await this.listWorkerSubagentSummaries(stack, params.worker_id, params.incarnation_id) }
+    return { subagents: (await this.listWorkerSubagentSummaries(stack, params.worker_id, params.incarnation_id)).map(child => this.redactWorkerSubagent(child)) }
   }
 
   private async handleGetWorkerSubagentDetail(params: GetWorkerSubagentDetailParams): Promise<GetWorkerSubagentDetailResult> {
+    return this.readWorkerSubagentDetail(params)
+  }
+
+  /** Shared read service; the caller owns Admin or Manager authorization. */
+  private async readWorkerSubagentDetail(params: GetWorkerSubagentDetailParams): Promise<GetWorkerSubagentDetailResult> {
     if (!params || typeof params.worker_id !== 'string' || typeof params.subagent_id !== 'string' || !params.worker_id || !params.subagent_id) {
       throw new Error('worker_id and subagent_id are required')
     }
     const subagent = await this.findWorkerSubagent(this.requireManagerStack(), params.worker_id, params.subagent_id)
     if (!subagent) throw new Error(`Worker subagent not found: ${params.subagent_id}`)
-    return { subagent }
+    return { subagent: this.redactWorkerSubagent(subagent) }
   }
 
   private async handleGetWorkerSubagentTrace(params: GetWorkerSubagentTraceParams): Promise<GetWorkerSubagentTraceResult> {
+    return this.readWorkerSubagentTracePage(params)
+  }
+
+  /** Shared read service; the caller owns Admin or Manager authorization. */
+  private async readWorkerSubagentTracePage(params: GetWorkerSubagentTraceParams): Promise<GetWorkerSubagentTraceResult> {
     if (!params || typeof params.worker_id !== 'string' || typeof params.subagent_id !== 'string' || !params.worker_id || !params.subagent_id) {
       throw new Error('worker_id and subagent_id are required')
     }
@@ -4505,6 +4527,13 @@ export class UnifiedAgent extends ModuleBase {
       next_cursor: nextToken,
       ...(trace.unavailableReason ? { unavailable_reason: trace.unavailableReason } : {}),
     }
+  }
+
+  private redactWorkerSubagent(child: WorkerSubagentSummary): WorkerSubagentSummary {
+    const redact = (text: string) => redactSecrets(text, [...this.knownSecrets])
+    return { ...child, name: redact(child.name),
+      ...(child.task === undefined ? {} : { task: redact(child.task) }),
+      ...(child.unavailable_reason === undefined ? {} : { unavailable_reason: redact(child.unavailable_reason) }) }
   }
 
   /** Native records are primary. Retained CLI child summaries only fill holes after host rotation. */

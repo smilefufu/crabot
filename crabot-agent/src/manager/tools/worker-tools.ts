@@ -32,6 +32,7 @@
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.1、§4.3、§5.5
  */
 
+import type { ListWorkerSubagentsParams, ListWorkerSubagentsResult, GetWorkerSubagentDetailParams, GetWorkerSubagentDetailResult, GetWorkerSubagentTraceParams, GetWorkerSubagentTraceResult } from '../read-model.js'
 import { defineTool } from '../../engine/index.js'
 import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
 import { INPUT_DELIVERY_TIMEOUT_MS, type WorkerHarness } from '../../workers/harness/harness'
@@ -82,6 +83,9 @@ export interface WorkerToolsContext {
 }
 
 export interface WorkerToolsDeps {
+  readonly readWorkerSubagents?: (params: ListWorkerSubagentsParams) => Promise<ListWorkerSubagentsResult>
+  readonly readWorkerSubagentDetail?: (params: GetWorkerSubagentDetailParams) => Promise<GetWorkerSubagentDetailResult>
+  readonly readWorkerSubagentTrace?: (params: GetWorkerSubagentTraceParams) => Promise<GetWorkerSubagentTraceResult>
   readonly authorizeProjectRead?: (workspaceRoot: string) => Promise<string>
   readonly harness: WorkerHarness
   /** Current task board snapshot used for the shared continuation view. */
@@ -240,15 +244,18 @@ async function awaitWithinSendToWorkerDeadline<T>(
 
 async function workerState(harness: WorkerHarness, worker: LedgerWorker) {
   const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined).at(-1)
-  const [latestTurn, latestActivity, activeOperations] = await Promise.all([
+  const [latestTurn, latestActivity, activeOperations, execution] = await Promise.all([
     harness.getWorkerTurn(worker.worker_id),
     mainline?.incarnation_id
       ? harness.getLatestWorkerActivity(worker.worker_id, mainline.incarnation_id)
       : undefined,
     harness.getWorkerControlOperations(worker.worker_id),
+    harness.getWorkerExecutionObservation(worker.worker_id),
   ])
   return {
     worker_id: worker.worker_id,
+    task: { status: worker.task.status },
+    execution,
     ...(mainline?.incarnation_id
       ? {
           mainline: {
@@ -485,7 +492,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
   const getWorkerState = defineTool({
     name: 'get_worker_state',
-    description: '读取执行器当前任务状态和主线化身状态。用于判断是否在运行、等待输入或已经结束，不读取终端。',
+    description: '读取整体任务状态、父执行器状态、活动子任务与待交付通知。父级 idle 不代表整体停止；来源不可用时明确 unknown，不读取终端。',
     inputSchema: {
       type: 'object',
       properties: { worker_id: { type: 'string', description: '目标执行器 id' } },
@@ -830,9 +837,59 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     call: async (input): Promise<ToolCallResult> => {
       const workerId = (input as { worker_id?: string }).worker_id
       if (!workerId) return invalid('get_worker_detail: worker_id 必填且为字符串')
-      try { return ok({ worker: await authorizeWorker(workerId) }) }
+      try {
+        const worker = await authorizeWorker(workerId)
+        return ok({ worker, execution: await harness.getWorkerExecutionObservation(workerId) })
+      }
       catch (error) { return mapError(`get_worker_detail(${workerId})`, error) }
     },
+  })
+
+  const childTools = [
+    { name: 'list_worker_subagents', description: '列出当前会话执行器的直接子 Agent：任务、状态和起止时间；不递归。可用 incarnation_id 限定化身。', extra: 'incarnation_id' },
+    { name: 'get_worker_subagent_detail', description: '读取当前会话执行器一个直接子 Agent 的任务与状态；仅观察，不发送消息或控制子任务。' },
+    { name: 'get_worker_subagent_trace', description: '按需读取直接子 Agent 的独立脱敏执行记录：已记录的委派上下文、工具、错误与结果。cursor 为上次 opaque 游标；不可用不代表没有执行。', extra: 'cursor' },
+  ].map(({ name, description, extra }) => {
+    const isList = name === 'list_worker_subagents'
+    const required = isList ? ['worker_id'] : ['worker_id', 'subagent_id']
+    const allowed = [...required, ...(extra ? [extra] : [])]
+    return defineTool({
+      name, description, isReadOnly: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          worker_id: { type: 'string' },
+          ...(isList ? {} : { subagent_id: { type: 'string' } }),
+          ...(extra ? { [extra]: { type: 'string' } } : {}),
+        },
+        required,
+        additionalProperties: false,
+      },
+      async call(input) {
+        const params = input as { worker_id?: string; subagent_id?: string; incarnation_id?: string; cursor?: string }
+        if (!params || typeof params !== 'object' || Array.isArray(params)
+          || Object.keys(params).some(key => !allowed.includes(key))
+          || typeof params.worker_id !== 'string' || !params.worker_id
+          || (!isList && (typeof params.subagent_id !== 'string' || !params.subagent_id))
+          || (extra && params[extra as 'cursor' | 'incarnation_id'] !== undefined && typeof params[extra as 'cursor' | 'incarnation_id'] !== 'string')) return invalid(`${name}: invalid parameters`)
+        try {
+          await authorizeWorker(params.worker_id)
+          if (isList) {
+            if (!deps.readWorkerSubagents) throw new Error('child reader unavailable')
+            const result = await deps.readWorkerSubagents(params as ListWorkerSubagentsParams)
+            if (result.subagents.some(child => child.worker_id !== params.worker_id)) throw new Error(ACCESS_DENIED)
+            return ok(result)
+          }
+          if (!deps.readWorkerSubagentDetail) throw new Error('child reader unavailable')
+          // Validate direct membership before trace/cursor reads, independently of Admin RPC access.
+          const detail = await deps.readWorkerSubagentDetail(params as GetWorkerSubagentDetailParams)
+          if (detail.subagent.worker_id !== params.worker_id || detail.subagent.subagent_id !== params.subagent_id) throw new Error(ACCESS_DENIED)
+          if (name === 'get_worker_subagent_detail') return ok(detail)
+          if (!deps.readWorkerSubagentTrace) throw new Error('child trace reader unavailable')
+          return ok(await deps.readWorkerSubagentTrace(params as GetWorkerSubagentTraceParams))
+        } catch (error) { return mapError(name, error) }
+      },
+    })
   })
 
   const listAllWorkers = capturedAuthorization ? defineTool({
@@ -867,6 +924,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     spawnWorker,
     sendToWorker,
     queryWorker,
+    ...childTools,
     getWorkerState,
     inspectWorkspaceGit,
     getWorkerActivity,

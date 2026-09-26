@@ -26,6 +26,8 @@ import * as agentHandlerModule from '../../src/agent/agent-handler.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import type { ManagerKey } from '../../src/workers/harness/ledger-types.js'
 import { reconcileManagerStack, type ManagerStack } from '../../src/manager/bootstrap.js'
+import type { ManagerRegistryDeps } from '../../src/manager/registry.js'
+import { createManagerToolFaceState } from '../../src/manager/tools/tool-catalog.js'
 import { buildWorkerTools } from '../../src/manager/tools/worker-tools.js'
 import type { LLMAdapter, ToolDefinition } from '../../src/engine/index.js'
 import type {
@@ -975,6 +977,45 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   })
 
   // --- systemPrompt：v3 worker 契约尾巴 ---
+
+  it('真实主控装配可按需加载 child 工具，并读取 idle 父级下的 registry 子任务与通知', async () => {
+    const { internals } = boot()
+    const key = 'test::child-observation' as ManagerKey
+    llm.queue.push({ text: '本轮结束', stopReason: 'end_turn' })
+    const { workerId } = await spawnBuiltin(internals, key)
+    const stack = internals.managerStack!
+    await waitUntil(async () => (await stack.harness.listWorkers(key))[0].incarnations[0].state === 'idle')
+    const registry = (internals as any).agentHandler.getBuiltinBgEntityRegistry()
+    const now = new Date().toISOString()
+    await registry.register({ entity_id: 'agent_observed', type: 'agent', status: 'running',
+      owner: { friend_id: '__builtin_worker__', worker_id: workerId }, spawned_by_task_id: workerId,
+      spawned_at: now, last_activity_at: now, ended_at: null, exit_code: null,
+      task_description: '核对来源', messages_log_file: join(tmpRoot, 'child.jsonl'), result_file: null })
+    const deps = (stack.registry as unknown as { deps: ManagerRegistryDeps }).deps
+    const faceState = createManagerToolFaceState()
+    const face = () => deps.toolFace(key, false, undefined, undefined, { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, task: true } }, undefined, undefined, faceState)
+    const call = async (name: string, params: Record<string, unknown>) => {
+      const loader = face().find(t => t.name === 'load_tool_family')!
+      await loader.call({ family: 'worker' }, {})
+      const result = await face().find(t => t.name === name)!.call(params, {})
+      expect(result.isError).toBe(false)
+      return JSON.parse(result.output)
+    }
+    expect(await call('get_worker_state', { worker_id: workerId })).toMatchObject({ mainline: { state: 'idle' },
+      execution: { state: 'running', active_subagents: [{ subagent_id: 'agent_observed', task: '核对来源' }] } })
+    expect(await call('list_worker_subagents', { worker_id: workerId })).toMatchObject({ subagents: [{ subagent_id: 'agent_observed' }] })
+    expect(await call('get_worker_subagent_detail', { worker_id: workerId, subagent_id: 'agent_observed' })).toMatchObject({ subagent: { status: 'running' } })
+    const trace = await call('get_worker_subagent_trace', { worker_id: workerId, subagent_id: 'agent_observed' })
+    expect(trace.events).toEqual([])
+    expect(trace.unavailable_reason).toBeTruthy()
+    llm.queue.push({ text: '子任务仍在执行，本轮已结束', stopReason: 'end_turn' })
+    await stack.harness.sendToWorker(workerId, '推进独立事项')
+    await waitUntil(async () => (await stack.harness.readWorkerEvents(workerId)).filter(e => e.kind === 'turn_completed').length === 2)
+    const turns = (await stack.harness.readWorkerEvents(workerId)).filter(e => e.kind === 'turn_completed')
+    expect(turns.at(-1)?.detail).toMatchObject({ execution: { state: 'running', active_subagents: [{ subagent_id: 'agent_observed' }] } })
+    await registry.update('agent_observed', { status: 'completed', ended_at: new Date().toISOString() })
+    expect(await call('get_worker_detail', { worker_id: workerId })).toMatchObject({ execution: { state: 'running', notification_pending: true, active_subagents: [] } })
+  })
 
   it('整体停止不能因主线退出就掩盖仍未确认退出的 child', async () => {
     const { internals } = boot()
