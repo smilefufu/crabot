@@ -3365,6 +3365,7 @@ export class WorkerHarness {
     if (worker.task.status === 'queued') reasons.add('queued')
     const children = new Map<string, WorkerSubagentSummary>()
     const childIds = new Set<string>()
+    let builtinChildrenRead = false
     for (const incarnation of worker.incarnations) {
       if (isLegacyIncarnation(incarnation)) {
         observation.unavailable_reasons.push('legacy_execution_unavailable')
@@ -3378,10 +3379,19 @@ export class WorkerHarness {
       const adapter = this.deps.adapters.get(incarnation.impl)
       if (!adapter) { observation.unavailable_reasons.push('adapter_unavailable'); continue }
       try {
+        // CLI child readers may recover runtimes or spawn app-server processes.
+        // Keep the shared snapshot local; explicit child tools own those reads.
+        if (incarnation.impl !== 'builtin') {
+          if (adapter.capabilities().subagent) observation.unavailable_reasons.push('subagents_require_explicit_read')
+          continue
+        }
         if (!adapter.listSubagents) {
           if (adapter.capabilities().subagent) observation.unavailable_reasons.push('subagents_unavailable')
           continue
         }
+        // Builtin registry children are Worker-scoped, including children of forks.
+        if (builtinChildrenRead) continue
+        builtinChildrenRead = true
         for (const child of await adapter.listSubagents(handleForIncarnation(workerId, incarnation))) {
           if (child.worker_id !== workerId) { observation.unavailable_reasons.push('child_owner_mismatch'); continue }
           childIds.add(child.subagent_id)

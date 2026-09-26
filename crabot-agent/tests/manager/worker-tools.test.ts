@@ -1022,7 +1022,7 @@ describe('主控整体执行观察', () => {
     expect(notice?.detail).toHaveProperty('execution.state', 'running')
   })
 
-  it('多化身分别读取 child，保留仍活动的旧 child，过滤终态并脱敏', async () => {
+  it('多化身共享 Worker 级 builtin child 列表，保留活动 child，过滤终态并脱敏', async () => {
     const { harness, fake } = await makeHarness({}, {
       listWorkerBackground: async () => [{ entity_id: 'agent_live', status: 'running', ended_at: null }, { entity_id: 'shell_live', status: 'stalled', ended_at: null }],
       hasPendingWorkerNotification: async () => false,
@@ -1035,15 +1035,40 @@ describe('主控整体执行观察', () => {
       { ...mainline, state: 'idle' },
       { ...mainline, incarnation_id: 'inc-fork', seq: 2, forked_from: 1, state: 'running' },
     ] }))
-    Object.assign(fake, { listSubagents: async (handle: IncarnationHandle) => handle.seq === 1 ? [
+    const listSubagents = vi.fn(async () => [
       { subagent_id: 'agent_done', worker_id: worker.worker_id, executor_impl: 'builtin', name: 'done', status: 'completed' },
       { subagent_id: 'agent_live', worker_id: worker.worker_id, executor_impl: 'builtin', name: 'secret', task: 'secret task', status: 'running' },
-    ] : [{ subagent_id: 'agent_unknown', worker_id: worker.worker_id, executor_impl: 'builtin', name: 'unknown', status: 'unknown' }] })
+      { subagent_id: 'agent_unknown', worker_id: worker.worker_id, executor_impl: 'builtin', name: 'unknown', status: 'unknown' },
+    ])
+    Object.assign(fake, { listSubagents })
     const observation = await harness.getWorkerExecutionObservation(worker.worker_id)
     expect(observation).toMatchObject({ state: 'running', active_subagents: [
       { subagent_id: 'agent_live', name: '[redacted]', task: '[redacted] task' }, { subagent_id: 'agent_unknown', status: 'unknown' },
     ], active_background: [{ entity_id: 'shell_live', status: 'stalled' }], unavailable_reasons: ['subagent_state_unknown'] })
     expect(observation.reasons).toEqual(expect.arrayContaining(['fork_running', 'subagent_running', 'background_running']))
+    expect(listSubagents).toHaveBeenCalledTimes(1)
+    expect(fake.sendInputCalls).toHaveLength(0)
+  })
+
+  it.each(['codex', 'claude-code'] as const)('自动快照不调用 %s 的慢 child 查询，回合事件仍正常投递', async (impl) => {
+    const { harness, fake } = await makeHarness({ implId: impl, caps: { subagent: true } }, {
+      listWorkerBackground: async () => [],
+      hasPendingWorkerNotification: async () => false,
+      onOperationNotification: async (_key, event) => { events.push(event) },
+    })
+    const worker = await harness.spawnWorker(directSpawnParams({ impl }))
+    const listSubagents = vi.fn(() => new Promise<never>(() => {}))
+    Object.assign(fake, { listSubagents })
+    harness.handleStateChange({ worker_id: worker.worker_id, seq: 1, impl, session_ref: `ref-${worker.worker_id}#1` }, 'idle', {
+      completionSource: impl === 'codex' ? 'codex_turn_complete' : 'claude_stop', lastText: 'done',
+    })
+    await waitUntil(async () => events.some(e => e.kind === 'turn_completed'))
+    expect(listSubagents).not.toHaveBeenCalled()
+    expect(events.find(e => e.kind === 'turn_completed')?.detail).toMatchObject({ execution: {
+      state: 'unknown', active_subagents: [], unavailable_reasons: ['subagents_require_explicit_read'],
+    } })
+    expect(await harness.getWorkerExecutionObservation(worker.worker_id)).toMatchObject({ state: 'unknown' })
+    expect(listSubagents).not.toHaveBeenCalled()
     expect(fake.sendInputCalls).toHaveLength(0)
   })
 
