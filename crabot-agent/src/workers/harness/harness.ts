@@ -514,9 +514,10 @@ export const LIVENESS_STALL_MS = 30 * 60_000
 export const LIVENESS_SWEEP_INTERVAL_MS = 5 * 60_000
 const RECOVERY_NOTICE_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000] as const
 
-// findWorker() reloads and validates the worker's whole owning ledger. A manager can own thousands
-// of workers, so a harness sweep must not start an unbounded number of those reads at once.
+// Cache misses reload and validate the whole owning ledger. Bound startup probes as well as reads
+// when a Manager owns thousands of Workers; this limits each batch, never the recovery target set.
 const WORKER_SWEEP_CONCURRENCY = 8
+const CANDIDATE_BATCH_SIZE = 32
 
 /**
  * 巡检发现停摆时,随唤醒事件交给 manager 的结构化事实。终端是 caller-driven 的诊断视图，
@@ -4441,7 +4442,15 @@ export class WorkerHarness {
     board: ManagerWorkboard,
     withCurrentBoard: (use: (current: ManagerWorkboard) => Promise<void>) => Promise<void> = use => use(board),
   ): Promise<void> {
-    for (const { worker_id } of await this.deps.ledger.listWorkers(managerKey)) {
+    let processed = 0
+    for (const snapshot of await this.deps.ledger.listWorkers(managerKey)) {
+      // closed is irreversible; pending receipts have separate recovery paths.
+      if (snapshot.task.status === 'closed') continue
+      if (processed > 0 && processed % CANDIDATE_BATCH_SIZE === 0) {
+        await new Promise<void>(resolve => setImmediate(resolve))
+      }
+      processed++
+      const { worker_id } = snapshot
       const changed = await this.withLock(worker_id, async () => {
         const found = await this.deps.ledger.findWorker(worker_id)
         const worker = found?.worker

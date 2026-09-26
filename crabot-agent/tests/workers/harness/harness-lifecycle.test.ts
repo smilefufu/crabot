@@ -5023,3 +5023,71 @@ async function waitUntil(cond: () => Promise<boolean>, timeoutMs = 2000, interva
   }
   throw new Error('waitUntil timed out')
 }
+
+describe('historical ledger startup and candidate budgets', () => {
+  it.each([100, 500, 1000])('keeps all live workers after %i closed records without rechecking history', async (count) => {
+    const { harness } = await makeHarness({ implId: 'codex' })
+    const template = await harness.spawnWorker(spawnParams({ impl: 'codex' }))
+    const history = Array.from({ length: count }, (_, i) => ({ ...template, worker_id: `closed-${i}`,
+      task: { ...template.task, status: 'closed' as const },
+      incarnations: template.incarnations.map(inc => ({ ...inc, state: 'exited' as const })),
+    }))
+    const live = Array.from({ length: 40 }, (_, i) => ({ ...template, worker_id: `live-${i}` }))
+    const { managerKeyToFilename } = await import('../../../src/workers/harness/ledger-store')
+    await fs.writeFile(join(dataDir, 'ledgers', managerKeyToFilename(template.manager_key)),
+      JSON.stringify({ manager_key: template.manager_key, workers: [...history, ...live] }))
+    const restarted = await makeHarness({ implId: 'codex' })
+    const state = vi.spyOn(restarted.fake, 'state').mockResolvedValue('running')
+    const report = await restarted.harness.reconcileOnStartup()
+    expect(report.revived.sort()).toEqual(live.map(w => w.worker_id).sort())
+    expect(report.unchanged).toHaveLength(count)
+    expect(report.failed).toEqual([])
+    expect(state).toHaveBeenCalledTimes(40)
+    expect(restarted.fake.spawnCalls).toHaveLength(0)
+    expect(restarted.fake.killCalls).toHaveLength(0)
+    const find = vi.spyOn(restarted.ledger, 'findWorker')
+    const validate = vi.spyOn(restarted.ledger as any, 'assertLedger')
+    const yieldTurn = vi.spyOn(globalThis, 'setImmediate')
+    try {
+      await restarted.harness.reconcileContinuationCandidates(template.manager_key, {
+        manager_key: template.manager_key, objectives: [], archive: [],
+      })
+      expect(yieldTurn).toHaveBeenCalledTimes(1)
+    } finally { yieldTurn.mockRestore() }
+    expect(find.mock.calls.map(([id]) => id).filter(id => id.startsWith('closed-'))).toEqual([])
+    expect(new Set(find.mock.calls.map(([id]) => id).filter(id => id.startsWith('live-'))).size).toBe(40)
+    expect(validate.mock.calls.length).toBeLessThanOrEqual(1)
+    expect(restarted.fake.killCalls).toHaveLength(0)
+  })
+  it('rechecks current state after waiting for the Worker lock', async () => {
+    const { harness, ledger, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    await ledger.upsertWorker(worker.manager_key, worker.worker_id, previous => ({ ...previous!,
+      task: { ...previous!.task, status: 'halted', halt: { halted_at: now(), halt_reason: 'turn_end' } },
+    }))
+    const locked = deferred()
+    const release = deferred()
+    const owner = (harness as any).withLock(worker.worker_id, async () => {
+      locked.resolve(); await release.promise
+      await ledger.upsertWorker(worker.manager_key, worker.worker_id, previous => ({ ...previous!,
+        task: { ...previous!.task, status: 'running' },
+      }))
+    })
+    await locked.promise
+    const listed = deferred()
+    const list = ledger.listWorkers.bind(ledger)
+    vi.spyOn(ledger, 'listWorkers').mockImplementationOnce(async key => {
+      const workers = await list(key); listed.resolve(); return workers
+    })
+    const observe = vi.spyOn(harness as any, 'workerExecutionFact')
+    const sweep = harness.reconcileContinuationCandidates(worker.manager_key, {
+      manager_key: worker.manager_key, objectives: [], archive: [],
+    })
+    try { await listed.promise } finally { release.resolve() }
+    await owner; await sweep
+    expect(observe.mock.calls[0][0].task.status).toBe('running')
+    expect((await ledger.findWorker(worker.worker_id))?.worker.task.status).toBe('running')
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+})

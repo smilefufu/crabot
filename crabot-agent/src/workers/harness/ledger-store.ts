@@ -1,4 +1,4 @@
-import { promises as fs } from 'fs'
+import { promises as fs, type BigIntStats } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
 import { canonicalizeJson } from 'crabot-shared'
@@ -6,6 +6,17 @@ import { AsyncMutex } from '../async-mutex'
 import type { Incarnation, LedgerWorker, LegacyArchivedIncarnation, ManagerKey, WorkerLedger } from './ledger-types'
 
 const FILE_SUFFIX = '.json'
+const LEDGER_CACHE_BYTES = 64 * 1024 * 1024
+interface CachedLedger {
+  version: string
+  bytes: number
+  ledger: WorkerLedger
+  workers: Map<string, LedgerWorker>
+}
+
+function fileVersion(stat: BigIntStats): string {
+  return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
+}
 export const ATOMIC_TEMP_FILE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i
 
 export function encodeSegment(s: string): string {
@@ -51,6 +62,8 @@ export class LedgerStore {
   /** Serializes same-worker upserts across ledgers before either file can be written. */
   private readonly workerMutexes = new Map<string, AsyncMutex>()
   private workerIndex = new Map<string, ManagerKey>()
+  private readonly readCache = new Map<ManagerKey, CachedLedger>()
+  private cacheBytes = 0
   private initPromise: Promise<void> | undefined
 
   constructor(ledgersDir: string) { this.ledgersDir = ledgersDir }
@@ -62,7 +75,7 @@ export class LedgerStore {
 
   async getLedger(key: ManagerKey): Promise<WorkerLedger> {
     await this.init()
-    return this.getMutex(key).run(() => this.readLedgerFileStrict(key))
+    return this.getMutex(key).run(async () => structuredClone((await this.readCachedLedger(key)).ledger))
   }
 
   async listWorkers(key: ManagerKey): Promise<LedgerWorker[]> {
@@ -84,10 +97,11 @@ export class LedgerStore {
     await this.init()
     const key = this.workerIndex.get(workerId)
     if (!key) return undefined
-    const ledger = await this.getMutex(key).run(() => this.readLedgerFileStrict(key))
-    const worker = ledger.workers.find(w => w.worker_id === workerId)
-    if (!worker) throw new Error(`[LedgerStore] worker index inconsistent for ${workerId}`)
-    return { managerKey: key, worker }
+    return this.getMutex(key).run(async () => {
+      const worker = (await this.readCachedLedger(key)).workers.get(workerId)
+      if (!worker) throw new Error(`[LedgerStore] worker index inconsistent for ${workerId}`)
+      return { managerKey: key, worker: structuredClone(worker) }
+    })
   }
 
   async importLegacyWorker(key: ManagerKey, worker: LedgerWorker): Promise<LedgerWorker> {
@@ -113,6 +127,7 @@ export class LedgerStore {
   ): Promise<LedgerWorker | undefined> {
     await this.init()
     return this.getWorkerMutex(workerId).run(async () => this.getMutex(key).run(async () => {
+      this.invalidateCache(key)
       const ledger = await this.readLedgerFileStrict(key)
       const index = ledger.workers.findIndex(w => w.worker_id === workerId)
       const prev = index >= 0 ? ledger.workers[index] : undefined
@@ -157,7 +172,7 @@ export class LedgerStore {
     const keys = new Set(this.workerIndex.values())
     const result: Array<{ managerKey: ManagerKey; worker: LedgerWorker }> = []
     for (const key of keys) {
-      const ledger = await this.getMutex(key).run(() => this.readLedgerFileStrict(key))
+      const ledger = await this.getLedger(key)
       for (const worker of ledger.workers) result.push({ managerKey: key, worker })
     }
     return result
@@ -211,6 +226,62 @@ export class LedgerStore {
     return { ledger: { ...ledger, workers }, archivedAmbiguousLegacy: archivedAmbiguousLegacy || legacyStatusMigrated }
   }
 
+  private invalidateCache(key: ManagerKey): void {
+    const previous = this.readCache.get(key)
+    if (previous) this.cacheBytes -= previous.bytes
+    this.readCache.delete(key)
+  }
+
+  /** Called under the Manager lock; cached objects never escape this store. */
+  private async readCachedLedger(key: ManagerKey): Promise<CachedLedger> {
+    const filePath = this.pathFor(key)
+    try {
+      const version = fileVersion(await fs.stat(filePath, { bigint: true }))
+      const cached = this.readCache.get(key)
+      if (cached?.version === version) {
+        this.readCache.delete(key)
+        this.readCache.set(key, cached)
+        return cached
+      }
+      this.invalidateCache(key)
+      const file = await fs.open(filePath, 'r')
+      let raw: string
+      let before: string
+      let after: string
+      try {
+        before = fileVersion(await file.stat({ bigint: true }))
+        raw = await file.readFile('utf-8')
+        after = fileVersion(await file.stat({ bigint: true }))
+      } finally { await file.close() }
+      const current = fileVersion(await fs.stat(filePath, { bigint: true }))
+      const normalized = await this.parseLedgerFile(key, raw)
+      const workers = new Map<string, LedgerWorker>()
+      // Keep the original find() result for repeated IDs in an old file.
+      for (const worker of normalized.ledger.workers) {
+        if (!workers.has(worker.worker_id)) workers.set(worker.worker_id, worker)
+      }
+      const result: CachedLedger = {
+        version: after, bytes: Buffer.byteLength(raw), ledger: normalized.ledger,
+        workers,
+      }
+      // Never bind a raced read or a migration write to metadata from another file version.
+      if (before === after && after === current && !normalized.archivedAmbiguousLegacy && result.bytes <= LEDGER_CACHE_BYTES) {
+        while (this.cacheBytes + result.bytes > LEDGER_CACHE_BYTES) {
+          this.invalidateCache(this.readCache.keys().next().value!)
+        }
+        this.readCache.set(key, result)
+        this.cacheBytes += result.bytes
+      }
+      return result
+    } catch (err) {
+      this.invalidateCache(key)
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { version: '', bytes: 0, ledger: { manager_key: key, workers: [] }, workers: new Map() }
+      }
+      throw err
+    }
+  }
+
   private async readLedgerFileStrict(key: ManagerKey): Promise<WorkerLedger> {
     const filePath = this.pathFor(key)
     let raw: string
@@ -219,12 +290,16 @@ export class LedgerStore {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { manager_key: key, workers: [] }
       throw err
     }
+    return (await this.parseLedgerFile(key, raw)).ledger
+  }
+
+  private async parseLedgerFile(key: ManagerKey, raw: string): Promise<ReturnType<LedgerStore['assertLedger']>> {
+    const filePath = this.pathFor(key)
     try {
       const normalized = this.assertLedger(key, JSON.parse(raw) as WorkerLedger)
       if (normalized.archivedAmbiguousLegacy) await writeJsonAtomic(filePath, normalized.ledger)
-      return normalized.ledger
-    }
-    catch (err) {
+      return normalized
+    } catch (err) {
       throw new Error(`[LedgerStore] invalid ledger ${filePath}: ${(err as Error).message}`)
     }
   }
