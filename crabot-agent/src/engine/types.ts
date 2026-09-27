@@ -137,7 +137,7 @@ export interface ToolCallContext {
   }
   /**
    * 外部输入 pending 探针（spec 2026-08-29-worker-input-turn-boundary-delivery）：
-   * 长等待工具（Output block=true 的 poll loop）每次睡醒后查询——源队列有排队输入时
+   * 长等待工具（Output 的统一等待循环）每次睡醒后查询——源队列有排队输入时
    * 提前返回，让输入在紧接着的 turn 边界被注入。非消费性查询。未接线时为 undefined。
    */
   readonly hasPendingExternalInput?: () => boolean
@@ -425,7 +425,7 @@ export interface EngineOptions {
   readonly drainExternalInputs?: () => ReadonlyArray<string> | Promise<ReadonlyArray<string>>
   /**
    * 外部输入 pending 探针（与 drainExternalInputs 同源，非消费性）：engine 经
-   * ToolCallContext.hasPendingExternalInput 透传给长等待工具（Output block），让它在
+   * ToolCallContext.hasPendingExternalInput 透传给长等待工具（Output），让它在
    * 源队列有排队输入时提前返回。不传时工具行为与现状一致。
    */
   readonly hasPendingExternalInputs?: () => boolean

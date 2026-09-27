@@ -22,8 +22,8 @@ function shellRegistry(logFile: string): BgEntityRegistry {
       process_started_at: new Date().toISOString(),
       spawned_at: new Date().toISOString(),
       last_activity_at: new Date().toISOString(),
-      owner_friend_id: '__system_w1',
-      worker_id: 'w1',
+      owner: { friend_id: '__system_w1', worker_id: 'w1' },
+      spawned_by_task_id: 'w1',
     }),
     update: async () => {},
   } as unknown as BgEntityRegistry

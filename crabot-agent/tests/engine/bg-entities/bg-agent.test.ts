@@ -394,3 +394,49 @@ describe('spawnPersistentAgent', () => {
     }
   })
 })
+
+it('resumes the same child after its own real Shell finishes, without repeating tools', async () => {
+  const { ChildShellSession } = await import('../../../src/workers/builtin/child-shell-session.js')
+  const { runShellWithGrace } = await import('../../../src/engine/bg-entities/bg-shell.js')
+  let session: InstanceType<typeof ChildShellSession>
+  let shellId = ''; let requests = 0; let launches = 0
+  const histories: unknown[] = []
+  const adapter: LLMAdapter = {
+    async *stream(messages) {
+      histories.push(structuredClone(messages.messages)); requests++
+      if (requests === 1) {
+        yield { type: 'message_start', messageId: 'first' } as const
+        yield { type: 'tool_use_start', id: 'call-1', name: 'start_shell' } as const
+        yield { type: 'tool_use_delta', id: 'call-1', inputJson: '{}' } as const
+        yield { type: 'tool_use_end', id: 'call-1' } as const
+        yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 5 } } as const
+      } else for (const chunk of textResponse(requests === 2 ? '后台工作尚未完成' : '实际结果已处理')) yield chunk
+    }, updateConfig() {},
+  }
+  const id = await spawnPersistentAgent({ ...baseOpts(adapter),
+    owner: { friend_id: '__builtin_worker__', worker_id: 'w' }, spawned_by_task_id: 'w', permissionConfig: { mode: 'bypass' },
+    createExecution: (child, signal) => {
+      session = new ChildShellSession(registry, child, signal)
+      return {
+        tools: [{ name: 'start_shell', description: 'test', inputSchema: { type: 'object', properties: {} }, isReadOnly: false,
+          call: async () => {
+            launches++
+            const out = await runShellWithGrace({ command: 'sleep 0.2; printf done', cwd: tmpDir, gracePeriodMs: 1,
+              owner: { friend_id: '__builtin_worker__', worker_id: 'w', subagent_id: child }, spawned_by_task_id: 'w', registry,
+              onShellExit: () => session.notify() })
+            if (out.kind !== 'background') throw new Error('expected background')
+            shellId = out.entity_id; return { output: shellId, isError: false }
+          } }],
+        drainExternalInputs: session.drain, hasPendingExternalInputs: session.hasPending, onSystemInjection: session.onInjection,
+        continueAfterTurn: () => session.continueAfterTurn(), close: () => session.close(),
+      }
+    },
+  })
+  await waitFor(() => requests >= 2)
+  expect((await registry.get(id))?.status).toBe('running')
+  await waitFor(async () => (await registry.get(id))?.status === 'completed', 5000)
+  expect(launches).toBe(1); expect(requests).toBe(3)
+  expect(JSON.stringify(histories[2])).toContain('后台工作尚未完成')
+  expect(JSON.stringify(histories[2])).toContain('<bg-notification>')
+  expect((await registry.get(shellId))?.exit_notification?.status).toBe('delivered')
+})

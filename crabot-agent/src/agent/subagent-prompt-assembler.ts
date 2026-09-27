@@ -10,6 +10,7 @@
 import type { SkillConfig, SubAgentConfig } from '../types.js'
 
 export interface AssembleContext {
+  readonly asyncShellContinuation?: boolean
   /** 父任务 id（运行时注入到 Session Context 段） */
   readonly parentTaskId: string
   /** 调用方标签（运行时注入到 Session Context 段，如 'main worker'） */
@@ -31,7 +32,10 @@ export function assembleSubAgentPrompt(
   ctx: AssembleContext,
 ): string {
   const sections: string[] = [
-    HEADER,
+    ctx.asyncShellContinuation ? HEADER.replace(
+      '子任务结束后不再接续；',
+      '没有其他可推进工作、只缺异步结果时，可以直接结束本轮。系统会在结果到达后自动恢复你的执行，届时处理结果并继续完成子任务。结束本轮不代表子任务完成，不必通过反复调用工具维持回合。\n子任务完成并返回最终结果后不再接续；',
+    ) : HEADER,
     '—— 你的角色 ——',
     config.role,
     '',

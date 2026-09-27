@@ -6,7 +6,7 @@
 
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
-import type { BgToolDeps } from './output-tool'
+import { ownsBgEntity, type BgToolDeps } from './output-tool'
 import { killShellTree } from '../bg-entities/bg-shell.js'
 
 // ---------------------------------------------------------------------------
@@ -104,6 +104,9 @@ export function createKillTool(deps: BgToolDeps): ToolDefinition {
     permissionLevel: 'dangerous',
     call: async (input) => {
       const entityId = input.entity_id as string
+      if (typeof entityId !== 'string' || !/^(shell|agent)_/.test(entityId)) return { output: 'Invalid entity_id', isError: true }
+      const record = await deps.registry.get(entityId)
+      if (!record || !ownsBgEntity(record, deps)) return { output: 'Entity not found or not accessible', isError: true }
 
       if (entityId.startsWith('shell_')) {
         return killShell(entityId, deps)

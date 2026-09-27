@@ -120,7 +120,7 @@ describe('Output tool', () => {
 
     // Second read after ~500ms total — should get "second" only
     await sleep(400)
-    const result2 = await tool.call({ entity_id: entityId }, {})
+    const result2 = await tool.call({ entity_id: entityId, timeout_ms: 0 }, {})
     expect(result2.isError).toBe(false)
     expect(result2.output).toContain('second')
     expect(result2.output).not.toContain('first')
@@ -144,7 +144,7 @@ describe('Output tool', () => {
     const result1 = await tool.call({ entity_id: entityId }, {})
     expect(result1.output).toContain('once')
 
-    const result2 = await tool.call({ entity_id: entityId }, {})
+    const result2 = await tool.call({ entity_id: entityId, timeout_ms: 0 }, {})
     expect(result2.isError).toBe(false)
     expect(result2.output).toContain('(no new output)')
     expect(result2.output).toContain('[status: running')
@@ -177,12 +177,14 @@ describe('Output tool', () => {
     expect(elapsed).toBeGreaterThan(2_000)
   }, 15_000)
 
-  it('block=true documents the 600s maximum used by timeout clamping', () => {
+  it('documents per-target defaults without a block switch', () => {
     const tool = createOutputTool(deps)
     const properties = (tool.inputSchema as {
       properties: Record<string, { description?: string }>
     }).properties
-    expect(properties.timeout_ms?.description).toContain('600000')
+    expect(properties.timeout_ms?.description).toContain('900000')
+    expect(properties.timeout_ms?.description).toContain('120000')
+    expect(properties.block).toBeUndefined()
   })
 
   it('runShellWithGrace promoted shell still feeds combined log output into Output', async () => {
@@ -230,18 +232,16 @@ describe('Output tool', () => {
     const result = await tool.call({ entity_id: 'proc_12345' }, {})
 
     expect(result.isError).toBe(true)
-    expect(result.output).toContain('Invalid entity_id format')
+    expect(result.output).toContain('Invalid entity_id')
   })
 
-  it.each([false, true])('agent_xxx 被拒并引导等待完成通知（block=%s）', async (block) => {
+  it.each([false, true])('unknown agent is not accessible regardless of legacy block=%s', async (block) => {
     const tool = createOutputTool(deps)
     const result = await tool.call({ entity_id: 'agent_aabbccdd1122', block, timeout_ms: 1000 }, {})
 
     expect(result.isError).toBe(true)
     expect(result.output).not.toContain('get_subagent_output')
-    expect(result.output).toContain('完成或失败后会自动通知并返回结果')
-    expect(result.output).toContain('直接结束本轮，不再调用工具')
-    expect(result.output).toContain('系统会在结果到达后自动恢复你的执行')
+    expect(result.output).toContain('Entity not found or not accessible')
   })
 
   it('two tasks reading the same persistent shell do not share cursors', async () => {
@@ -273,8 +273,8 @@ describe('Output tool', () => {
     expect(result2.output).toContain('shared_data')
 
     // Cursors are stored separately per task
-    const key1 = `${TASK_ID}:${entityId}`
-    const key2 = `task-other-999:${entityId}`
+    const key1 = `${TASK_ID}:::${entityId}`
+    const key2 = `task-other-999:::${entityId}`
     expect(cursorMap.has(key1)).toBe(true)
     expect(cursorMap2.has(key2)).toBe(true)
     expect(cursorMap.has(key2)).toBe(false)
@@ -493,7 +493,7 @@ function makeAgentRecord(
 }
 
 describe('agent type branch', () => {
-  // Output 不再支持 agent_xxx（与 get_subagent_output 重复，已移除）；这里只测 Kill / ListEntities 的 agent 分支。
+  // Agent control and listing retain their ownership semantics.
 
   it('Kill running agent — aborts controller and marks registry status=killed', async () => {
     const messagesLog = path.join(tmpDir, 'agent_kill.jsonl')

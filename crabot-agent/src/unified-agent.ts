@@ -1472,6 +1472,7 @@ export class UnifiedAgent extends ModuleBase {
     if (bgOptions) {
       bgOptions.bgToolDeps = {
         ...bgOptions.bgToolDeps,
+        redactText: text => redactSecrets(text, [...this.knownSecrets]),
         stopWorkerAgent: (entityId) => this.builtinSubagentRunner.stopAgent(ctx.worker_id, entityId),
       }
     }
@@ -1646,13 +1647,15 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private attachBuiltinShellExitDispatcher(handler: AgentHandler): void {
+    this.builtinSubagentRunner.setShellExitNotifier(entityId => handler.routeBuiltinShellExit(entityId))
     handler.setBuiltinChildExitDispatcher((workerId, entityId, onSettled) =>
       this.deliverBuiltinEntityExit(workerId, `bg-agent:${entityId}`,
         () => this.builtinSubagentRunner.renderCompletion(workerId, entityId), onSettled, true),
     )
-    handler.setBuiltinShellExitDispatcher((workerId, info, onSettled) =>
-      this.deliverBuiltinShellExit(workerId, info, onSettled),
-    )
+    handler.setBuiltinShellExitDispatcher(async (workerId, info, onSettled) => {
+      if (await this.builtinSubagentRunner.routeShellExit(info.entity_id)) return
+      await this.deliverBuiltinShellExit(workerId, info, onSettled)
+    })
     // Startup may have completed before a late config push creates the first
     // handler. Open that handler's routing gate immediately instead of waiting
     // for a process restart that may never happen.

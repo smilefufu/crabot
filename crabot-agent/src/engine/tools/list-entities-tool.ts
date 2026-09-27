@@ -8,7 +8,7 @@ import { defineTool } from '../tool-framework'
 import { formatRuntimeMs } from '../../utils/time.js'
 import type { ToolDefinition } from '../types'
 import type { BgEntityStatus } from '../bg-entities/types'
-import type { BgToolDeps } from './output-tool'
+import { ownsBgEntity, type BgToolDeps } from './output-tool'
 import type { BgEntityRecord } from '../bg-entities/types'
 
 // ---------------------------------------------------------------------------
@@ -127,7 +127,7 @@ export function createListEntitiesTool(deps: BgToolDeps): ToolDefinition {
       })
 
       const allRows: RowData[] = persistentRecords
-        .filter((rec) => !deps.ownerWorkerId || rec.owner.worker_id === deps.ownerWorkerId)
+        .filter((rec) => ownsBgEntity(rec, deps))
         .map((rec: BgEntityRecord) => ({
           type: rec.type,
           entityId: rec.entity_id,

@@ -20,7 +20,7 @@ describe('独立角色提示词', () => {
     expect(manager).toContain('先说明整体目标是否完成、当前是否在执行')
     const worker = assembleBuiltinWorkerPrompt({ workspaceRoot: '/fixture', imageAvailable: true })
     expect(worker).toContain('不在条件未变时重复已明确无效的尝试')
-    expect(worker).toContain('直接结束本轮，不再调用工具')
+    expect(worker).toContain('可以直接结束本轮，不必通过反复调用工具维持回合')
     expect(worker).toContain('系统会在结果到达后自动恢复你的执行')
     const daily = assembleManagerSystemPrompt({ managerKey: 'fixture::synthetic', isSystemThread: true, isBuiltinDailyReflection: true })
     expect(daily).toContain('直接结束本轮，不再调用工具')

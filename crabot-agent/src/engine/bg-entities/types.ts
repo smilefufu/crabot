@@ -17,6 +17,8 @@ export interface BgExitNotificationState {
 }
 
 export interface BgEntityOwner {
+  /** Shell created by this exact builtin direct child. */
+  readonly subagent_id?: string
   /** 执行分支的 exact 归属；缺省保留主线 Worker 续办语义。 */
   readonly incarnation_id?: string
   readonly friend_id: string
@@ -52,6 +54,8 @@ export interface BgShellRegistryRecord extends BgEntityBase {
 
 export interface BgAgentRegistryRecord extends BgEntityBase {
   readonly type: 'agent'
+  /** Append-only redacted assistant text, with stable UTF-8 byte offsets. */
+  readonly output_file?: string
   exit_notification?: BgExitNotificationState
   stop_requested_at?: string
   /** Present when this persistent agent was started through delegate_task. */
@@ -63,7 +67,7 @@ export interface BgAgentRegistryRecord extends BgEntityBase {
   result_file: string | null
   /** 每次 LLM 流 attempt 的有界原始 SSE 诊断文件。 */
   diagnostics_file?: string
-  /** 失败原因（status='failed' 时填）。供 get_subagent_output 把失败原因回传给父 agent。 */
+  /** 失败原因（status='failed' 时填）。供 Output 与完成通知把失败原因回传给父 agent。 */
   error?: string | null
 }
 
