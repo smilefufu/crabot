@@ -134,7 +134,7 @@ export class BuiltinSubagentRunner {
       createExecution: (entityId, signal) => {
         const session = new ChildShellSession(registry, entityId, signal)
         this.shellSessions.set(entityId, session)
-        const owner = { friend_id: WORKER_OWNER, worker_id: worker.worker_id,
+        const owner = { friend_id: `__system_${worker.worker_id}`, worker_id: worker.worker_id,
           ...(worker.incarnation_id ? { incarnation_id: worker.incarnation_id } : {}), subagent_id: entityId }
         const deps = { registry, cursorMap: new Map<string, number>(), taskId: entityId,
           ownerWorkerId: worker.worker_id, ownerIncarnationId: worker.incarnation_id, ownerSubagentId: entityId, redactText: this.redactText }
