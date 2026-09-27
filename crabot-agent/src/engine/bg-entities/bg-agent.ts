@@ -13,7 +13,7 @@ import { randomBytes } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { LLMAdapter } from '../llm-adapter.js'
-import type { ToolDefinition, ToolPermissionConfig } from '../types.js'
+import type { ToolDefinition, ToolPermissionConfig, EngineOptions, EngineResult, EngineMessage } from '../types.js'
 import { runEngine } from '../query-loop.js'
 import { getErrorMessage } from '../tools/utils.js'
 import { getBgEntitiesLogsDir } from '../../core/data-paths.js'
@@ -29,6 +29,16 @@ import { recordEngineLlmResponse, recordEngineToolLifecycle, recordSubAgentTurn 
 // ---------------------------------------------------------------------------
 
 export interface SpawnPersistentAgentOpts {
+  /** Only builtin direct children enable multi-burst execution and child-bound tools. */
+  readonly createExecution?: (entityId: string, signal: AbortSignal) => {
+    tools: ReadonlyArray<ToolDefinition>
+    drainExternalInputs: NonNullable<EngineOptions['drainExternalInputs']>
+    hasPendingExternalInputs: NonNullable<EngineOptions['hasPendingExternalInputs']>
+    onSystemInjection: NonNullable<EngineOptions['onSystemInjection']>
+    continueAfterTurn: () => Promise<boolean>
+    close: () => Promise<void>
+  }
+
   /**
    * 子 agent 的完整输入 prompt——原样作为首条 user message 喂给 runEngine。
    * 与 task_description 严格分离：曾有 caller 把截断后的展示标签当 prompt 传，
@@ -136,6 +146,8 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
 
   const messagesLog = path.join(logsDir, `${entity_id}.jsonl`)
   const diagnosticsFile = path.join(logsDir, `${entity_id}.diagnostics.jsonl`)
+  const outputFile = path.join(logsDir, `${entity_id}.output.txt`)
+  await fs.promises.writeFile(outputFile, '', 'utf8')
   let diagnosticsWritten = false
 
   const abortController = new AbortController()
@@ -169,6 +181,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
     status: 'running',
     task_description: opts.task_description,
     messages_log_file: messagesLog,
+    output_file: outputFile,
     result_file: null,
     owner: opts.owner,
     spawned_by_task_id: opts.spawned_by_task_id,
@@ -179,6 +192,17 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
   }
   await opts.registry.register(record)
 
+  let execution: ReturnType<NonNullable<SpawnPersistentAgentOpts['createExecution']>> | undefined
+  let outputWrite = Promise.resolve()
+  let outputError: unknown
+  let lastText = ''
+  const redact = opts.subTrace?.redactText ?? ((text: string) => text)
+  const appendText = (text: string): void => {
+    if (!text) return
+    lastText = text
+    outputWrite = outputWrite.then(() => fs.promises.appendFile(outputFile, `${redact(text)}\n`, 'utf8'))
+      .catch(error => { outputError = error })
+  }
   const agentSpawnedAtMs = Date.now()
   const commitExit = async (patch: Partial<BgAgentRegistryRecord>): Promise<void> => {
     let attempt = 0
@@ -198,72 +222,91 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
   // fire-and-forget — intentionally not awaited by caller
   void (async () => {
     try {
-      const result = await runEngine({
-        prompt: opts.prompt,
-        adapter: opts.adapter,
-        options: {
-          systemPrompt: opts.systemPrompt,
-          tools: [...opts.tools],
-          model: opts.model,
-          ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
-          ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
-          ...(opts.permissionConfig ? { permissionConfig: opts.permissionConfig } : {}),
-          hookRegistry: opts.hookRegistry,
-          lspManager: opts.lspManager,
-          senderIsMaster: opts.senderIsMaster,
-          resolvedPermissions: opts.resolvedPermissions,
-          abortSignal: abortController.signal,
-          // 同 forkEngine：bg-agent 也是 subagent 派发路径，禁用 compaction。
-          // 详见 EngineOptions.disableCompaction 注释。
-          disableCompaction: true,
-          ...(subTrace && subTraceStore
-            ? {
-                onLlmResponse: (event) =>
-                  recordEngineLlmResponse(subTraceStore, subTrace.trace_id, event, opts.subTrace?.redactText),
-                onTurn: (event) =>
-                  recordSubAgentTurn(subTraceStore, subTrace.trace_id, event, opts.subTrace?.redactText),
-                onToolLifecycle: (event) =>
-                  recordEngineToolLifecycle(subTraceStore, subTrace.trace_id, event, opts.subTrace?.redactText),
-              }
-            : {}),
-          onLiveProgress: (event) => {
-            // Append event as a JSONL line; errors are silently swallowed so
-            // logging failures never crash the agent loop.
-            void fs.promises
-              .appendFile(messagesLog, JSON.stringify(event) + '\n')
-              .catch(() => {})
-            // Bump last_activity_at on every progress event.
-            void opts.registry
-              .update(entity_id, {
-                last_activity_at: new Date().toISOString(),
-              } as Partial<BgAgentRegistryRecord>)
-              .catch(() => {})
+      execution = opts.createExecution?.(entity_id, abortController.signal)
+      let result: EngineResult
+      let initialMessages: EngineMessage[] | undefined
+      do {
+        result = await runEngine({
+          initialMessages,
+          prompt: opts.prompt,
+          adapter: opts.adapter,
+          options: {
+            systemPrompt: opts.systemPrompt,
+            tools: [...(execution?.tools ?? opts.tools)],
+            ...(execution ? {
+              drainExternalInputs: execution.drainExternalInputs,
+              hasPendingExternalInputs: execution.hasPendingExternalInputs,
+              onSystemInjection: execution.onSystemInjection,
+            } : {}),
+            model: opts.model,
+            ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
+            ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
+            ...(opts.permissionConfig ? { permissionConfig: opts.permissionConfig } : {}),
+            hookRegistry: opts.hookRegistry,
+            lspManager: opts.lspManager,
+            senderIsMaster: opts.senderIsMaster,
+            resolvedPermissions: opts.resolvedPermissions,
+            abortSignal: abortController.signal,
+            // 同 forkEngine：bg-agent 也是 subagent 派发路径，禁用 compaction。
+            // 详见 EngineOptions.disableCompaction 注释。
+            disableCompaction: true,
+            ...(subTrace && subTraceStore
+              ? {
+                  onLlmResponse: (event) =>
+                    recordEngineLlmResponse(subTraceStore, subTrace.trace_id, event, opts.subTrace?.redactText),
+                  onTurn: (event) =>
+                    recordSubAgentTurn(subTraceStore, subTrace.trace_id, event, opts.subTrace?.redactText),
+                  onToolLifecycle: (event) =>
+                    recordEngineToolLifecycle(subTraceStore, subTrace.trace_id, event, opts.subTrace?.redactText),
+                }
+              : {}),
+            onLiveProgress: (event) => {
+              if (event.type === 'turn_assistant') appendText(event.text)
+              // Append event as a JSONL line; errors are silently swallowed so
+              // logging failures never crash the agent loop.
+              void fs.promises
+                .appendFile(messagesLog, JSON.stringify(event) + '\n')
+                .catch(() => {})
+              // Bump last_activity_at on every progress event.
+              void opts.registry
+                .update(entity_id, {
+                  last_activity_at: new Date().toISOString(),
+                } as Partial<BgAgentRegistryRecord>)
+                .catch(() => {})
+            },
+            onStreamDiagnostic: (event) => {
+              // Raw SSE is bounded by the adapter; diagnostics are append-only and
+              // best-effort so persistence cannot terminate the worker.
+              if (event.status !== 'failed') return
+              diagnosticsWritten = true
+              void fs.promises
+                .appendFile(diagnosticsFile, JSON.stringify({
+                  recorded_at: new Date().toISOString(),
+                  ...event,
+                }) + '\n', 'utf-8')
+                .catch(() => {})
+            },
           },
-          onStreamDiagnostic: (event) => {
-            // Raw SSE is bounded by the adapter; diagnostics are append-only and
-            // best-effort so persistence cannot terminate the worker.
-            if (event.status !== 'failed') return
-            diagnosticsWritten = true
-            void fs.promises
-              .appendFile(diagnosticsFile, JSON.stringify({
-                recorded_at: new Date().toISOString(),
-                ...event,
-              }) + '\n', 'utf-8')
-              .catch(() => {})
-          },
-        },
-      })
+        })
 
+        await outputWrite
+        if (outputError) throw outputError
+        initialMessages = [...result.finalMessages]
+      } while (result.outcome === 'completed' && execution && await execution.continueAfterTurn())
+      if (abortController.signal.aborted) throw new Error('sub-agent aborted')
+      if (result.finalText && result.finalText !== lastText) appendText(result.finalText)
+      await outputWrite
+      if (outputError) throw outputError
       // Write result file and update registry on successful completion.
       const resultFile = path.join(logsDir, `${entity_id}.result.txt`)
-      await fs.promises.writeFile(resultFile, result.finalText ?? '', 'utf-8')
+      await fs.promises.writeFile(resultFile, redact(result.finalText ?? ''), 'utf-8')
 
       const endedStatus =
         result.outcome === 'completed' ? ('completed' as const) : ('failed' as const)
       const exitCode = result.outcome === 'completed' ? 0 : 1
       const runtimeMs = Date.now() - agentSpawnedAtMs
       // 失败原因：一路透传给 trace / registry / onExit，让父 agent 能拿到失败原因。
-      const failureError = endedStatus === 'failed' && result.error ? result.error : undefined
+      const failureError = endedStatus === 'failed' && result.error ? redact(result.error) : undefined
       if (opts.traceContext) {
         emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
           entity_id,
@@ -312,7 +355,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
       // Handles both abort and unexpected errors.
       // registry.update's status-guard prevents overwriting an already-killed entry.
       const runtimeMs = Date.now() - agentSpawnedAtMs
-      const errMsg = getErrorMessage(err) || 'sub-agent aborted or errored'
+      const errMsg = redact(getErrorMessage(err) || 'sub-agent aborted or errored')
       if (opts.traceContext) {
         emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
           entity_id,
@@ -354,7 +397,8 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
         }
       }
     } finally {
-      opts.abortControllers.delete(entity_id)
+      try { await execution?.close() }
+      finally { opts.abortControllers.delete(entity_id) }
     }
   })().catch((error) => {
     console.error(`[bg-agent] failed to persist exit for ${entity_id}:`, error)

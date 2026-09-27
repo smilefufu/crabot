@@ -1,3 +1,8 @@
+import { ChildShellSession } from './child-shell-session.js'
+import { createBashTool } from '../../engine/tools/bash-tool.js'
+import { createOutputTool } from '../../engine/tools/output-tool.js'
+import { createKillTool } from '../../engine/tools/kill-tool.js'
+import { createListEntitiesTool } from '../../engine/tools/list-entities-tool.js'
 import { createAdapter } from '../../engine/llm-adapter.js'
 import { readFile } from 'node:fs/promises'
 import { thinkingParam } from '../../engine/llm-adapter-types.js'
@@ -57,6 +62,8 @@ function summaryOf(workerId: string, record: BgAgentRegistryRecord): WorkerSubag
  */
 export class BuiltinSubagentRunner {
   private readonly abortControllers = new Map<string, AbortController>()
+  private readonly shellSessions = new Map<string, ChildShellSession>()
+  private shellExitNotifier?: (entityId: string) => Promise<void>
   private registry?: BgEntityRegistry
   private readonly redactText: (text: string) => string
 
@@ -70,6 +77,8 @@ export class BuiltinSubagentRunner {
     this.registry = registry
     this.redactText = redactText
   }
+
+  setShellExitNotifier(notify: (entityId: string) => Promise<void>): void { this.shellExitNotifier = notify }
 
   setRegistry(registry: BgEntityRegistry): void {
     this.registry = registry
@@ -118,9 +127,36 @@ export class BuiltinSubagentRunner {
       parentTaskId: worker.worker_id,
       callerLabel: 'builtin worker (async)',
       availableSkills: childCapabilities.skills,
+      asyncShellContinuation: true,
     })
 
     const entityId = await spawnPersistentAgent({
+      createExecution: (entityId, signal) => {
+        const session = new ChildShellSession(registry, entityId, signal)
+        this.shellSessions.set(entityId, session)
+        const owner = { friend_id: WORKER_OWNER, worker_id: worker.worker_id,
+          ...(worker.incarnation_id ? { incarnation_id: worker.incarnation_id } : {}), subagent_id: entityId }
+        const deps = { registry, cursorMap: new Map<string, number>(), taskId: entityId,
+          ownerWorkerId: worker.worker_id, ownerIncarnationId: worker.incarnation_id, ownerSubagentId: entityId, redactText: this.redactText }
+        const rebound = [
+          createBashTool(execution.getCwd, undefined, { registry, owner, taskId: worker.worker_id,
+            onShellExit: info => {
+              session.notify()
+              void this.shellExitNotifier?.(info.entity_id).catch(error => console.error('[builtin-child] shell notification pending:', error))
+            } }),
+          createOutputTool(deps), createKillTool(deps), createListEntitiesTool(deps),
+        ]
+        return {
+          tools: childCapabilities.tools.map(tool => rebound.find(bound => bound.name === tool.name) ?? tool),
+          drainExternalInputs: session.drain, hasPendingExternalInputs: session.hasPending,
+          onSystemInjection: session.onInjection,
+          continueAfterTurn: () => session.continueAfterTurn(),
+          close: async () => {
+            this.shellSessions.delete(entityId)
+            await session.close()
+          },
+        }
+      },
       prompt: buildDelegatedTaskPrompt(input),
       task_description: input.task,
       subagent_type: subagent.name,
@@ -167,6 +203,16 @@ export class BuiltinSubagentRunner {
         ...(record?.type === 'agent' && record.trace_id ? { child_trace_id: record.trace_id } : {}),
       }),
     }
+  }
+
+  /** Registry is the durable source; never redirect a child's Shell to the parent inbox. */
+  async routeShellExit(entityId: string): Promise<boolean> {
+    const record = await this.requireRegistry().get(entityId)
+    if (!record?.owner.subagent_id) return false
+    const session = this.shellSessions.get(record.owner.subagent_id)
+    if (session) session.notify()
+    else await this.requireRegistry().settleExitNotification(entityId, 'dead_letter', 'subagent_execution_unavailable')
+    return true
   }
 
   async list(workerId: string): Promise<WorkerSubagentSummary[]> {

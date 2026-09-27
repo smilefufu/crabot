@@ -1,15 +1,10 @@
-/**
- * Output tool — read incremental output from a background entity.
- *
- * Plan 2 Tasks 7–9: crabot-docs/superpowers/plans/2026-05-01-long-running-agent-plan-2.md
- */
-
+/** Unified incremental output for background shells and direct subagents. */
 import fs from 'node:fs/promises'
 import { defineTool } from '../tool-framework'
 import { sleep } from '../retry-utils'
 import type { ToolDefinition } from '../types'
 import type { BgEntityRegistry } from '../bg-entities/registry'
-import { BG_OUTPUT_MAX_BYTES } from '../bg-entities/types'
+import { BG_OUTPUT_MAX_BYTES, type BgEntityRecord } from '../bg-entities/types'
 
 export interface BgToolDeps {
   readonly registry: BgEntityRegistry
@@ -17,182 +12,106 @@ export interface BgToolDeps {
   readonly taskId: string
   readonly ownerFriendId?: string
   readonly ownerWorkerId?: string
+  readonly ownerIncarnationId?: string
+  readonly ownerSubagentId?: string
+  readonly redactText?: (text: string) => string
   readonly stopWorkerAgent?: (entityId: string) => Promise<{ output: string; isError: boolean }>
-  /** Sub-agent abortControllers map (key=entity_id); used to abort a running bg agent on Kill */
   readonly agentAbortControllers?: Map<string, AbortController>
 }
 
-// block 模式参数（参 Claude Code BashOutput）
-const BLOCK_DEFAULT_TIMEOUT_MS = 30_000
-const BLOCK_MAX_TIMEOUT_MS = 600_000
-const BLOCK_POLL_INTERVAL_MS = 2_000
-const NO_NEW_OUTPUT_MARKER = '(no new output)'
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-function cursorKey(taskId: string, entityId: string): string {
-  return `${taskId}:${entityId}`
+/** Check before reading or controlling any entity, including sibling children. */
+export function ownsBgEntity(record: BgEntityRecord, deps: BgToolDeps): boolean {
+  if (deps.ownerWorkerId) {
+    return record.owner?.worker_id === deps.ownerWorkerId
+      && record.owner.incarnation_id === deps.ownerIncarnationId
+      && record.owner.subagent_id === deps.ownerSubagentId
+  }
+  return deps.ownerFriendId ? record.owner?.friend_id === deps.ownerFriendId
+    : record.spawned_by_task_id === deps.taskId
 }
 
-
-interface ReadResult {
-  output: string
-  isError: boolean
-  /** 用于 block 模式判断是否值得继续 poll；终态（completed/failed/killed/stalled/error）下为 false */
-  isRunning: boolean
-}
-
-async function readShellOutput(
-  entityId: string,
-  explicitOffset: number | undefined,
-  deps: BgToolDeps,
-): Promise<ReadResult> {
-  // Persistent registry (disk log file with per-task cursor)
-  const record = await deps.registry.get(entityId)
-  if (!record) {
-    return { output: `Entity not found: ${entityId}`, isError: true, isRunning: false }
+async function readChunk(file: string, offset: number, redact?: (text: string) => string): Promise<{ text: string; next: number; more: boolean }> {
+  if (redact) {
+    const bytes = Buffer.from(redact(await fs.readFile(file, 'utf8')))
+    if (offset > bytes.length) throw new Error('from_offset exceeds output size')
+    let end = Math.min(offset + BG_OUTPUT_MAX_BYTES, bytes.length)
+    while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--
+    return { text: bytes.subarray(offset, end).toString('utf8'), next: end, more: end < bytes.length }
   }
-
-  if (record.type !== 'shell') {
-    return { output: `Entity ${entityId} is not a shell entity`, isError: true, isRunning: false }
-  }
-
-  const key = cursorKey(deps.taskId, entityId)
-  const currentOffset = explicitOffset ?? deps.cursorMap.get(key) ?? 0
-  const isRunning = record.status === 'running'
-
-  let fileStats: { size: number }
+  const handle = await fs.open(file, 'r')
   try {
-    fileStats = await fs.stat(record.log_file)
-  } catch {
-    return { output: `Log file not accessible for ${entityId}`, isError: true, isRunning }
-  }
-
-  const fileSize = fileStats.size
-  if (fileSize <= currentOffset) {
-    const header = `[status: ${record.status}, exit_code: ${record.exit_code ?? 'null'}]`
-    return { output: `${header}\n(no new output)`, isError: false, isRunning }
-  }
-
-  const bytesToRead = Math.min(BG_OUTPUT_MAX_BYTES, fileSize - currentOffset)
-  const remaining = fileSize - currentOffset - bytesToRead
-
-  let chunk: Buffer
-  const fh = await fs.open(record.log_file, 'r')
-  try {
-    const buf = Buffer.allocUnsafe(bytesToRead)
-    const { bytesRead } = await fh.read(buf, 0, bytesToRead, currentOffset)
-    chunk = buf.subarray(0, bytesRead)
-  } finally {
-    await fh.close()
-  }
-
-  const newOffset = currentOffset + chunk.length
-  deps.cursorMap.set(key, newOffset)
-
-  // Update last_activity_at on the registry record
-  await deps.registry.update(entityId, { last_activity_at: new Date().toISOString() })
-
-  const header = `[status: ${record.status}, exit_code: ${record.exit_code ?? 'null'}]`
-  let output = `${header}\n${chunk.toString('utf8')}`
-
-  if (remaining > 0) {
-    output += `\n[truncated, more available with from_offset=${newOffset}]`
-  }
-
-  return { output, isError: false, isRunning }
+    const size = (await handle.stat()).size
+    if (offset > size) throw new Error('from_offset exceeds output size')
+    const buffer = Buffer.alloc(Math.min(BG_OUTPUT_MAX_BYTES, size - offset))
+    let { bytesRead } = await handle.read(buffer, 0, buffer.length, offset)
+    // Do not split a UTF-8 codepoint at the page boundary.
+    if (offset + bytesRead < size) {
+      let start = bytesRead - 1
+      while (start >= 0 && (buffer[start] & 0xc0) === 0x80) start--
+      if (start >= 0) {
+        const lead = buffer[start]
+        const width = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4
+        if (start + width > bytesRead) bytesRead = start
+      }
+    }
+    return { text: buffer.subarray(0, bytesRead).toString('utf8'), next: offset + bytesRead, more: offset + bytesRead < size }
+  } finally { await handle.close() }
 }
-
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
 
 export function createOutputTool(deps: BgToolDeps): ToolDefinition {
   return defineTool({
-    name: 'Output',
-    category: 'shell',
-    description:
-      '读取后台 Shell 的增量输出；需要等待新输出或命令结束时使用 block=true。' +
-      '主执行器无其他可推进工作时可直接结束本轮，系统在后台命令完成后自动恢复其执行；子 Agent 不接收后台 Shell 完成通知，需要命令结果时须阻塞读取。' +
-      '本工具只读取 Shell，子 Agent 结果由完成通知返回调用方。',
+    name: 'Output', category: 'shell', isReadOnly: true, permissionLevel: 'safe',
+    description: '读取后台 Shell 或子 Agent 的增量输出。已有新输出时立即返回，否则在有新输出、目标结束、读取超时或调用方收到新输入时返回。子 Agent 运行中的 text 是中间输出，不代表任务完成。读取超时不会终止目标。',
     inputSchema: {
-      type: 'object',
-      properties: {
-        entity_id: {
-          type: 'string',
-          description: 'shell_xxx',
-        },
-        from_offset: {
-          type: 'integer',
-          description: 'Optional: explicit byte offset; default uses per-task cursor',
-        },
-        block: {
-          type: 'boolean',
-          description:
-            '为 true 时，若 entity 仍在 running 且当前无新输出，工具内部 poll 等到有新输出 / 状态结束 / 超时再返回。' +
-            '默认 false（snapshot 读，立即返回）。',
-        },
-        timeout_ms: {
-          type: 'integer',
-          description: `block=true 时的最长等待时间（默认 ${BLOCK_DEFAULT_TIMEOUT_MS}，最大 ${BLOCK_MAX_TIMEOUT_MS}）。`,
-        },
+      type: 'object', required: ['entity_id'], properties: {
+        entity_id: { type: 'string', description: 'shell_xxx 或 agent_xxx' },
+        from_offset: { type: 'integer', minimum: 0, description: '可选的输出字节偏移；默认从当前调用者上次读取的位置继续，可指定偏移重读。' },
+        timeout_ms: { type: 'integer', minimum: 0, description: '本次读取最多等待的毫秒数；省略时，子 Agent 默认 900000（15 分钟），其他目标默认 120000（2 分钟）。读取子 Agent 输出建议省略此参数，或设置较长时间；新输出、目标结束或调用方新输入均会提前返回。' },
       },
-      required: ['entity_id'],
     },
-    isReadOnly: true,
-    permissionLevel: 'safe',
     call: async (input, context) => {
-      const entityId = input.entity_id as string
-      const explicitOffset = input.from_offset as number | undefined
-      const block = input.block === true
-      const requestedTimeout = typeof input.timeout_ms === 'number' ? input.timeout_ms : BLOCK_DEFAULT_TIMEOUT_MS
-      const timeoutMs = Math.min(Math.max(0, requestedTimeout), BLOCK_MAX_TIMEOUT_MS)
-      const abortSignal = context.abortSignal
-      // 外部输入 pending 探针（spec 2026-08-29-worker-input-turn-boundary-delivery）：
-      // block 等待期间 worker inbox 有排队输入时立即返回让位——本工具返回后就是 turn
-      // 边界，输入在下一轮 LLM 调用前注入。engine 从 options 透传，未接线的调用方为 undefined。
-      const hasPendingExternalInput = context.hasPendingExternalInput
-
-      const readOnce = async (): Promise<ReadResult> => {
-        if (entityId.startsWith('shell_')) {
-          return readShellOutput(entityId, explicitOffset, deps)
+      const id = input.entity_id
+      if (typeof id !== 'string' || !/^(shell|agent)_/.test(id)) return { output: 'Invalid entity_id', isError: true }
+      for (const key of ['from_offset', 'timeout_ms']) {
+        if (input[key] !== undefined && (!Number.isSafeInteger(input[key]) || (input[key] as number) < 0)) {
+          return { output: `Invalid ${key}: expected a non-negative safe integer`, isError: true }
         }
-        if (entityId.startsWith('agent_')) {
-          // Output 只读 shell；subagent 结果通过完成通知返回父执行器。
-          return {
-            output: 'Output 仅支持读取后台 Shell，不支持读取子 Agent。子 Agent 完成或失败后会自动通知并返回结果；没有其他可推进工作时，请直接结束本轮，不再调用工具；系统会在结果到达后自动恢复你的执行。',
-            isError: true,
-            isRunning: false,
-          }
-        }
-        return { output: `Invalid entity_id format: ${entityId}`, isError: true, isRunning: false }
       }
-
-      const toResult = (r: ReadResult) => ({ output: r.output, isError: r.isError })
-
-      const first = await readOnce()
-      if (!block || first.isError || !first.isRunning || !first.output.includes(NO_NEW_OUTPUT_MARKER)) {
-        return toResult(first)
-      }
-
-      // 进入 poll loop：每 2s 重读，等到有新内容 / 状态变化 / 超时 / abort / 外部输入 pending
-      const startMs = Date.now()
-      let last = first
-      while (Date.now() - startMs < timeoutMs) {
+      const initial = await deps.registry.get(id)
+      if (!initial || !ownsBgEntity(initial, deps)) return { output: 'Entity not found or not accessible', isError: true }
+      const timeout = (input.timeout_ms as number | undefined) ?? (initial.type === 'agent' ? 900_000 : 120_000)
+      const started = Date.now()
+      const key = `${deps.taskId}:${deps.ownerIncarnationId ?? ''}:${deps.ownerSubagentId ?? ''}:${id}`
+      for (;;) {
+        const record = await deps.registry.get(id)
+        if (!record || !ownsBgEntity(record, deps)) return { output: 'Entity not found or not accessible', isError: true }
+        const header = `[status: ${record.status}, exit_code: ${record.exit_code ?? 'null'}]\n[entity_id: ${id}, type: ${record.type}]`
+        const reply = (reason: string, text = '(no new output)') => ({ output: `${header}\n[reason: ${reason}]\n${text}`, isError: false })
+        if (context.abortSignal?.aborted) return reply('aborted')
+        if (context.hasPendingExternalInput?.()) return reply('external_input')
+        const terminal = record.status !== 'running'
+        const file = record.type === 'shell' ? record.log_file : record.output_file ?? (terminal ? record.result_file : null)
+        if (!file && !terminal) return reply('unavailable', 'Intermediate output unavailable for this legacy child.')
+        let chunk = { text: '', next: 0, more: false }
         try {
-          await sleep(BLOCK_POLL_INTERVAL_MS, abortSignal)
-        } catch {
-          break  // abort
+          if (file) chunk = await readChunk(file, (input.from_offset as number | undefined) ?? deps.cursorMap.get(key) ?? 0, record.type === 'agent' && !record.output_file ? deps.redactText : undefined)
+        } catch (error) {
+          return { output: `${header}\nOutput unavailable: ${error instanceof Error ? error.message : String(error)}`, isError: true }
         }
-        // 外部输入（如 manager 投递）已排队：立即返回让位——本工具返回后就是 turn 边界，
-        // 输入会在下一轮 LLM 调用前注入，LLM 优先处理新输入。
-        if (hasPendingExternalInput?.()) break
-        last = await readOnce()
-        if (last.isError || !last.isRunning || !last.output.includes(NO_NEW_OUTPUT_MARKER)) break
+        // Do not consume a page if input arrived during file I/O.
+        if (context.hasPendingExternalInput?.()) return reply('external_input')
+        if (chunk.text || terminal) {
+          await deps.registry.update(id, { last_activity_at: new Date().toISOString() })
+          if (file) deps.cursorMap.set(key, chunk.next)
+          const error = record.type === 'agent' && record.error ? `\nerror: ${(deps.redactText?.(record.error) ?? record.error).slice(0, 3000)}` : ''
+          return reply(terminal ? 'terminal' : 'new_output',
+            `${record.type === 'agent' && !terminal ? '[progress]\n' : ''}${chunk.text || '(no new output)'}${error}\n[next_offset: ${chunk.next}${chunk.more ? ', truncated; more available' : ''}]`)
+        }
+        const remaining = timeout - (Date.now() - started)
+        if (remaining <= 0) return reply('timeout')
+        try { await sleep(Math.min(2_000, remaining), context.abortSignal) }
+        catch { return reply('aborted') }
       }
-      return toResult(last)
     },
   })
 }

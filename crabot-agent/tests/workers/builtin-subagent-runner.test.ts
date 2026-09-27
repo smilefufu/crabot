@@ -96,6 +96,37 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     expect(options.tools.map((tool: ToolDefinition) => tool.name)).toContain('Bash')
   })
 
+  it('child binds its own Shell tools and restart notifications cannot reach the parent', async () => {
+    spawnPersistentAgent.mockResolvedValue('agent_child')
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+    const parentTools = ['Bash', 'Output', 'Kill', 'ListEntities'].map(fakeTool)
+    await runner.run(testSubagent(), { task: 'test' }, {
+      worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' },
+    }, parentTools, { ...executionContext(), getCwd: () => dir })
+    const opts = spawnPersistentAgent.mock.calls[0][0]
+    const runtime = opts.createExecution('agent_child', new AbortController().signal)
+    expect(runtime.tools.every((tool: ToolDefinition) => !parentTools.includes(tool))).toBe(true)
+    expect(opts.systemPrompt).toContain('系统会在结果到达后自动恢复你的执行')
+    const now = new Date().toISOString()
+    await registry.register({ entity_id: 'shell_child', type: 'shell', status: 'completed', exit_code: 0,
+      owner: { friend_id: '__builtin_worker__', worker_id: 'worker-1', subagent_id: 'agent_child' },
+      spawned_by_task_id: 'worker-1', spawned_at: now, last_activity_at: now, ended_at: now,
+      command: 'test', log_file: join(dir, 'shell.log'), pid: 1, pgid: 1, process_started_at: now,
+      exit_notification: { status: 'pending', updated_at: now, attempts: 0 } })
+    expect(await runner.routeShellExit('shell_child')).toBe(true)
+    expect((await registry.get('shell_child'))?.exit_notification?.status).toBe('pending')
+    const inputs = await runtime.drainExternalInputs()
+    expect(inputs).toHaveLength(1)
+    runtime.onSystemInjection({ type: 'external_input', text: inputs[0], turnNumber: 1, injectedAtMs: 0 })
+    expect(await runtime.continueAfterTurn()).toBe(false)
+    await runtime.close()
+    const restarted = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+    await registry.register({ ...(await registry.get('shell_child'))!, entity_id: 'shell_late',
+      exit_notification: { status: 'pending', updated_at: now, attempts: 0 } })
+    expect(await restarted.routeShellExit('shell_late')).toBe(true)
+    expect((await registry.get('shell_late'))?.exit_notification?.status).toBe('dead_letter')
+  })
+
   it('拒绝在 AgentHandler 注入共享 registry 前运行', async () => {
     const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager)
     await expect(runner.recoverAfterRestart()).rejects.toThrow('registry is unavailable')

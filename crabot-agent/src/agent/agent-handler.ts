@@ -522,6 +522,15 @@ export class AgentHandler {
     }
   }
 
+  async routeBuiltinShellExit(entityId: string): Promise<void> {
+    const record = await this.bgRegistry.get(entityId)
+    if (record?.type !== 'shell' || record.status === 'running') return
+    await this.routeShellExit({ entity_id: entityId, command: record.command,
+      status: record.status === 'completed' ? 'completed' : record.status === 'killed' ? 'killed' : 'failed',
+      exit_code: record.exit_code ?? -1, spawned_by_task_id: record.spawned_by_task_id,
+      owner_friend_id: record.owner.friend_id, worker_id: record.owner.worker_id })
+  }
+
   private async routeShellExit(info: ShellExitInfo): Promise<void> {
     if (info.worker_id && !this.workerEntityExitRoutingReady) {
       this.queuedWorkerEntityExits.push(info)
@@ -676,6 +685,7 @@ export class AgentHandler {
         taskId: workerId,
         ownerFriendId: owner.friend_id,
         ownerWorkerId: workerId,
+        ownerIncarnationId: incarnationId,
         agentAbortControllers: this.agentAbortControllers,
       },
     }
