@@ -22,8 +22,8 @@ describe('unified Output', () => {
       await writeFile(f.file, '处理中\n')
       const first = await f.tool.call({ entity_id: 'agent_test' }, {})
       expect(first.isError).toBe(false); expect(first.output).toContain('处理中')
-      const second = await f.tool.call({ entity_id: 'agent_test', timeout_ms: 0 }, {})
-      expect(second.output).not.toContain('处理中'); expect(second.output).toContain('timeout')
+      const second = await f.tool.call({ entity_id: 'agent_test' }, { hasPendingExternalInput: () => true })
+      expect(second.output).not.toContain('处理中'); expect(second.output).toContain('external_input')
       f.record.status = 'completed'
       expect((await f.tool.call({ entity_id: 'agent_test' }, {})).output).toContain('terminal')
     } finally { await f.close() }

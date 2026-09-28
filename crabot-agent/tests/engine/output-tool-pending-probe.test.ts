@@ -1,10 +1,20 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createOutputTool } from '../../src/engine/tools/output-tool.js'
 import type { BgEntityRegistry } from '../../src/engine/bg-entities/registry.js'
 import type { ToolCallContext } from '../../src/engine/types.js'
+
+const clock = vi.hoisted(() => ({ now: 0, virtual: false }))
+vi.mock('../../src/engine/retry-utils.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../../src/engine/retry-utils.js')>()
+  return { ...original, sleep: async (ms: number, signal?: AbortSignal) => {
+    if (clock.virtual) { clock.now += ms; return }
+    return original.sleep(ms, signal)
+  } }
+})
+afterEach(() => { clock.virtual = false; vi.restoreAllMocks() })
 
 /** 事故复现（spec 2026-08-29 §7.3/§7.7）：worker 卡在 Output(block=true) 的 poll loop 里
  * 时 manager 投递到达——探针让 Output 提前返回，不等满 timeout。 */
@@ -66,11 +76,13 @@ describe('Output block=true 的外部输入 pending 探针', () => {
       taskId: 'w1',
     })
 
+    clock.now = 0; clock.virtual = true
+    vi.spyOn(Date, 'now').mockImplementation(() => clock.now)
     const start = Date.now()
     await tool.call({ entity_id: 'shell_test', block: true, timeout_ms: 5_000 }, makeContext(() => false))
     const elapsed = Date.now() - start
 
-    expect(elapsed).toBeGreaterThanOrEqual(4_500) // 等满 timeout
+    expect(elapsed).toBe(120_000) // 旧短超时不改变系统等待上限
     await fs.rm(dir, { recursive: true, force: true })
   })
 
@@ -85,11 +97,13 @@ describe('Output block=true 的外部输入 pending 探针', () => {
       taskId: 'w1',
     })
 
+    clock.now = 0; clock.virtual = true
+    vi.spyOn(Date, 'now').mockImplementation(() => clock.now)
     const start = Date.now()
     await tool.call({ entity_id: 'shell_test', block: true, timeout_ms: 3_000 }, {})
     const elapsed = Date.now() - start
 
-    expect(elapsed).toBeGreaterThanOrEqual(2_500)
+    expect(elapsed).toBe(120_000)
     await fs.rm(dir, { recursive: true, force: true })
   })
 
