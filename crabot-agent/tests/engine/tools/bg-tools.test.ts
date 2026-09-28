@@ -144,8 +144,9 @@ describe('Output tool', () => {
     const result1 = await tool.call({ entity_id: entityId }, {})
     expect(result1.output).toContain('once')
 
-    const result2 = await tool.call({ entity_id: entityId, timeout_ms: 0 }, {})
+    const result2 = await tool.call({ entity_id: entityId }, { hasPendingExternalInput: () => true })
     expect(result2.isError).toBe(false)
+    expect(result2.output).toContain('external_input')
     expect(result2.output).toContain('(no new output)')
     expect(result2.output).toContain('[status: running')
   })
@@ -182,8 +183,9 @@ describe('Output tool', () => {
     const properties = (tool.inputSchema as {
       properties: Record<string, { description?: string }>
     }).properties
-    expect(properties.timeout_ms?.description).toContain('900000')
-    expect(properties.timeout_ms?.description).toContain('120000')
+    expect(properties.timeout_ms).toBeUndefined()
+    expect(tool.description).toContain('15 分钟')
+    expect(tool.description).toContain('2 分钟')
     expect(properties.block).toBeUndefined()
   })
 

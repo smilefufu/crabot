@@ -61,25 +61,22 @@ async function readChunk(file: string, offset: number, redact?: (text: string) =
 export function createOutputTool(deps: BgToolDeps): ToolDefinition {
   return defineTool({
     name: 'Output', category: 'shell', isReadOnly: true, permissionLevel: 'safe',
-    description: '读取后台 Shell 或子 Agent 的增量输出。已有新输出时立即返回，否则在有新输出、目标结束、读取超时或调用方收到新输入时返回。子 Agent 运行中的 text 是中间输出，不代表任务完成。读取超时不会终止目标。',
+    description: '读取后台 Shell 或子 Agent 的增量输出。已有新输出时立即返回；否则最多等待子 Agent 15 分钟、Shell 2 分钟。期间出现新输出、目标结束或调用方收到新输入时会提前返回；调用方取消也会解除等待。读取超时不会终止目标。子 Agent 的中间文本不代表任务完成。等待时长由系统管理，无需指定。',
     inputSchema: {
       type: 'object', required: ['entity_id'], properties: {
         entity_id: { type: 'string', description: 'shell_xxx 或 agent_xxx' },
         from_offset: { type: 'integer', minimum: 0, description: '可选的输出字节偏移；默认从当前调用者上次读取的位置继续，可指定偏移重读。' },
-        timeout_ms: { type: 'integer', minimum: 0, description: '本次读取最多等待的毫秒数；省略时，子 Agent 默认 900000（15 分钟），其他目标默认 120000（2 分钟）。读取子 Agent 输出建议省略此参数，或设置较长时间；新输出、目标结束或调用方新输入均会提前返回。' },
       },
     },
     call: async (input, context) => {
       const id = input.entity_id
       if (typeof id !== 'string' || !/^(shell|agent)_/.test(id)) return { output: 'Invalid entity_id', isError: true }
-      for (const key of ['from_offset', 'timeout_ms']) {
-        if (input[key] !== undefined && (!Number.isSafeInteger(input[key]) || (input[key] as number) < 0)) {
-          return { output: `Invalid ${key}: expected a non-negative safe integer`, isError: true }
-        }
+      if (input.from_offset !== undefined && (!Number.isSafeInteger(input.from_offset) || (input.from_offset as number) < 0)) {
+        return { output: 'Invalid from_offset: expected a non-negative safe integer', isError: true }
       }
       const initial = await deps.registry.get(id)
       if (!initial || !ownsBgEntity(initial, deps)) return { output: 'Entity not found or not accessible', isError: true }
-      const timeout = (input.timeout_ms as number | undefined) ?? (initial.type === 'agent' ? 900_000 : 120_000)
+      const timeout = initial.type === 'agent' ? 900_000 : 120_000
       const started = Date.now()
       const key = `${deps.taskId}:${deps.ownerIncarnationId ?? ''}:${deps.ownerSubagentId ?? ''}:${id}`
       for (;;) {
