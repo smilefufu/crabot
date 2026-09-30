@@ -36,6 +36,7 @@ export interface SpawnPersistentAgentOpts {
     hasPendingExternalInputs: NonNullable<EngineOptions['hasPendingExternalInputs']>
     onSystemInjection: NonNullable<EngineOptions['onSystemInjection']>
     continueAfterTurn: () => Promise<boolean>
+    stopAcceptingInput?: () => void
     close: () => Promise<void>
   }
 
@@ -236,7 +237,19 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
             ...(execution ? {
               drainExternalInputs: execution.drainExternalInputs,
               hasPendingExternalInputs: execution.hasPendingExternalInputs,
-              onSystemInjection: execution.onSystemInjection,
+              onSystemInjection: (event) => {
+                execution!.onSystemInjection(event)
+                if (event.type === 'external_input' && subTrace && subTraceStore) {
+                  const span = subTraceStore.startSpan(subTrace.trace_id, {
+                    type: 'context_assembly',
+                    details: { context_type: 'worker', message_batch: [{
+                      sender: event.text.startsWith('[parent input]\n') ? 'parent' : 'system',
+                      text: redact(event.text), is_mention_crab: false,
+                    }] },
+                  })
+                  subTraceStore.endSpan(subTrace.trace_id, span.span_id, 'completed')
+                }
+              },
             } : {}),
             model: opts.model,
             ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
@@ -289,6 +302,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
           },
         })
 
+        if (result.outcome !== 'completed') execution?.stopAcceptingInput?.()
         await outputWrite
         if (outputError) throw outputError
         initialMessages = [...result.finalMessages]
@@ -352,6 +366,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
         }
       }
     } catch (err) {
+      execution?.stopAcceptingInput?.()
       // Handles both abort and unexpected errors.
       // registry.update's status-guard prevents overwriting an already-killed entry.
       const runtimeMs = Date.now() - agentSpawnedAtMs

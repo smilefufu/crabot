@@ -54,12 +54,14 @@ export class ChildShellSession {
     }
   }
 
-  /** No model polling: only resume once a durable input is available. */
-  async continueAfterTurn(): Promise<boolean> {
+  /** No model polling: resume for parent input or an unconsumed Shell notification. */
+  async continueAfterTurn(hasParentInput: () => boolean = () => false): Promise<boolean> {
     while (!this.signal.aborted) {
+      if (hasParentInput()) return true
       try {
         await this.settleConsumed()
         const shells = await this.shells()
+        if (hasParentInput()) return true
         if (shells.some(s => s.exit_notification?.status === 'pending' && !this.consumed.has(s.entity_id))) return true
         if (!shells.some(s => s.status === 'running' || s.exit_notification?.status === 'pending')) return false
       } catch (error) {

@@ -386,6 +386,43 @@ describe('BuiltinWorkerAdapter', () => {
     await fs.rm(tmp, { recursive: true, force: true })
   })
 
+  it('rebinds child caller identity and preserves Output state across bursts only within one incarnation', async () => {
+    const contexts: import('../../src/engine/types.js').ToolCallContext[] = []
+    const childContexts: import('../../src/engine/types.js').ToolCallContext[] = []
+    const calls = ['Output', 'send_to_subagent', 'delegate_task'].map((name, i) => ({ name, id: `context-${i}`, input: {} }))
+    const llm = makeAdapter([
+      { toolCalls: calls, stopReason: 'tool_use' }, { text: 'burst one', stopReason: 'end_turn' },
+      { toolCalls: calls, stopReason: 'tool_use' }, { text: 'burst two', stopReason: 'end_turn' },
+      { toolCalls: calls, stopReason: 'tool_use' }, { text: 'new incarnation', stopReason: 'end_turn' },
+    ])
+    const base = spec({ adapter: llm })
+    const tools = () => calls.map(({ name }) => defineTool({
+      name, description: name, inputSchema: { type: 'object' },
+      call: async (_input, context) => {
+        if (name === 'Output') contexts.push(context)
+        else childContexts.push(context)
+        return { output: 'ok', isError: false }
+      },
+    }))
+    const s = { ...base, builtin: { ...base.builtin!, tools } }
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp, resolveRuntime: () => s.builtin! })
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+    contexts[0].outputWaitState!.set('target', { waitMs: 1800000, readOffset: 0 })
+    await adapter.sendInput(h, 'continue')
+    await waitState(adapter, h, 'idle')
+    expect(contexts[1].outputWaitState).toBe(contexts[0].outputWaitState)
+    expect(contexts[1].outputWaitState!.get('target')?.waitMs).toBe(1800000)
+    expect(childContexts.slice(0, 4).map(c => c.worker_subagent?.caller_instance_id)).toEqual(Array(4).fill(`${h.worker_id}#1`))
+    await adapter.kill(h)
+    expect(contexts[0].outputWaitState!.size).toBe(0)
+    const next = await adapter.resume({ ...h }, 'resume')
+    await waitState(adapter, next, 'idle')
+    expect(contexts[2].outputWaitState).not.toBe(contexts[0].outputWaitState)
+    expect(childContexts[4].worker_subagent?.caller_instance_id).toBe(`${h.worker_id}#2`)
+    expect(childContexts[5].worker_subagent?.caller_instance_id).toBe(`${h.worker_id}#2`)
+  })
+
   it('spawn → burst end_turn → idle，纯文本终端视图可读', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({

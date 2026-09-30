@@ -1,7 +1,7 @@
 /**
  * delegate_task 工具
  *
- * worker 工具表里唯一的 subagent 入口。
+ * worker 工具表里创建 subagent 的入口。
  * - description 含 <available_subagents> 段 + 每个 subagent 的 when_to_use（截断到 300 字符）
  * - inputSchema.subagent_type.enum 限制为已 enabled 的 subagent name
  * - call: 按 subagent_type 查表 → 调 runSubAgent（caller 提供）
@@ -84,6 +84,7 @@ export function buildDelegateTaskDescription(subAgents: ReadonlyArray<SubAgentCo
     '',
     'Usage notes:',
     '- 异步派发后立即返回 {agent_id, status:"launched"}，表示任务已启动，尚未完成。子 Agent 完成或失败后，系统通过 <sub_agent_notification> 自动送回结果或错误；需要查看进展或读取通知中未展开的结果时，可使用 Output。',
+    '- 每次调用都会创建新的子 Agent。向尚未结束的已有子 Agent 补充要求或纠偏时，使用 send_to_subagent，传入原 agent_id。',
     '- 派发后可继续其他工作；没有其他可推进工作时，可以直接结束本轮（end_turn），不必通过反复调用工具维持回合。结束本轮不会终止子 Agent；系统会在结果到达后自动恢复你的执行，届时处理结果并继续完成父任务。',
     '- 单条 message 内可 batch 调多次 delegate_task 并发派出多个 subagent',
     '- subagent 在隔离上下文执行，不继承父对话历史；prompt 要写完整任务描述',

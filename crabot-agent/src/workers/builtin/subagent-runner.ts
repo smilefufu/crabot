@@ -1,4 +1,4 @@
-import { ChildShellSession } from './child-shell-session.js'
+import { ChildExecutionSession } from './child-execution-session.js'
 import { createBashTool } from '../../engine/tools/bash-tool.js'
 import { createOutputTool } from '../../engine/tools/output-tool.js'
 import { createKillTool } from '../../engine/tools/kill-tool.js'
@@ -62,7 +62,7 @@ function summaryOf(workerId: string, record: BgAgentRegistryRecord): WorkerSubag
  */
 export class BuiltinSubagentRunner {
   private readonly abortControllers = new Map<string, AbortController>()
-  private readonly shellSessions = new Map<string, ChildShellSession>()
+  private readonly executions = new Map<string, { session: ChildExecutionSession; callerInstanceId?: string }>()
   private shellExitNotifier?: (entityId: string) => Promise<void>
   private registry?: BgEntityRegistry
   private readonly redactText: (text: string) => string
@@ -132,8 +132,8 @@ export class BuiltinSubagentRunner {
 
     const entityId = await spawnPersistentAgent({
       createExecution: (entityId, signal) => {
-        const session = new ChildShellSession(registry, entityId, signal)
-        this.shellSessions.set(entityId, session)
+        const session = new ChildExecutionSession(registry, entityId, signal)
+        this.executions.set(entityId, { session, callerInstanceId: worker.caller_instance_id })
         const owner = { friend_id: `__system_${worker.worker_id}`, worker_id: worker.worker_id,
           ...(worker.incarnation_id ? { incarnation_id: worker.incarnation_id } : {}), subagent_id: entityId }
         const deps = { registry, cursorMap: new Map<string, number>(), taskId: entityId,
@@ -141,7 +141,7 @@ export class BuiltinSubagentRunner {
         const rebound = [
           createBashTool(execution.getCwd, undefined, { registry, owner, taskId: worker.worker_id,
             onShellExit: info => {
-              session.notify()
+              session.notifyShell()
               void this.shellExitNotifier?.(info.entity_id).catch(error => console.error('[builtin-child] shell notification pending:', error))
             } }),
           createOutputTool(deps), createKillTool(deps), createListEntitiesTool(deps),
@@ -151,8 +151,9 @@ export class BuiltinSubagentRunner {
           drainExternalInputs: session.drain, hasPendingExternalInputs: session.hasPending,
           onSystemInjection: session.onInjection,
           continueAfterTurn: () => session.continueAfterTurn(),
+          stopAcceptingInput: session.stopAcceptingInput,
           close: async () => {
-            this.shellSessions.delete(entityId)
+            this.executions.delete(entityId)
             await session.close()
           },
         }
@@ -205,12 +206,31 @@ export class BuiltinSubagentRunner {
     }
   }
 
+  async sendInput(entityId: string, text: string, context: ToolCallContext): Promise<ToolCallResult> {
+    const worker = context.worker_subagent
+    const record = await this.requireRegistry().get(entityId)
+    if (!worker?.caller_instance_id || record?.type !== 'agent'
+      || record.owner.worker_id !== worker.worker_id || record.spawned_by_task_id !== worker.worker_id
+      || record.owner.incarnation_id !== worker.incarnation_id || record.owner.subagent_id !== undefined) {
+      return { output: 'Entity not found or not accessible', isError: true }
+    }
+    const execution = this.executions.get(entityId)
+    if (execution && execution.callerInstanceId !== worker.caller_instance_id) {
+      return { output: 'Entity not found or not accessible', isError: true }
+    }
+    if (record.status !== 'running' || record.stop_requested_at || context.abortSignal?.aborted
+      || !execution?.session.enqueue(text)) {
+      return { output: 'Child is ended, closing, cancelled or its execution is unavailable; input not queued.', isError: true }
+    }
+    return { output: JSON.stringify({ agent_id: entityId, status: 'queued' }), isError: false }
+  }
+
   /** Registry is the durable source; never redirect a child's Shell to the parent inbox. */
   async routeShellExit(entityId: string): Promise<boolean> {
     const record = await this.requireRegistry().get(entityId)
     if (!record?.owner.subagent_id) return false
-    const session = this.shellSessions.get(record.owner.subagent_id)
-    if (session) session.notify()
+    const execution = this.executions.get(record.owner.subagent_id)
+    if (execution) execution.session.notifyShell()
     else await this.requireRegistry().settleExitNotification(entityId, 'dead_letter', 'subagent_execution_unavailable')
     return true
   }
@@ -319,6 +339,13 @@ export class BuiltinSubagentRunner {
 
 function normalizeTraceSpan(span: import('../../types.js').AgentSpan): NormalizedTraceEvent[] {
   const details = (span.details ?? {}) as Record<string, unknown>
+  if (span.type === 'context_assembly' && Array.isArray(details.message_batch)) {
+    return details.message_batch.flatMap((message) => typeof message?.text !== 'string' ? [] : [{
+      ts: span.started_at, kind: 'message' as const, role: 'user' as const,
+      summary: message.text.replace(/\s+/g, ' ').trim().slice(0, 200),
+      detail: { content: message.text, sender: message.sender, injection_reason: 'external_input' },
+    }])
+  }
   if (span.type === 'llm_call') {
     const { assistant_text: recordedAssistantText, ...technicalDetails } = details
     const assistantText = typeof recordedAssistantText === 'string'

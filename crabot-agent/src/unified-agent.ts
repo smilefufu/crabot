@@ -51,6 +51,7 @@ import { McpConnector, filterMcpServersForWorker } from './agent/mcp-connector.j
 import { createTmpPageTools } from './agent/tmp-page-tools.js'
 import { createWorkspaceGitTool } from './workers/workspace-git-capability.js'
 import { createDelegateTaskTool } from './agent/delegate-task-tool.js'
+import { createSendToSubagentTool } from './agent/send-to-subagent-tool.js'
 import type { PathMapping } from './mcp/crab-messaging.js'
 import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
 import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
@@ -1542,7 +1543,7 @@ export class UnifiedAgent extends ModuleBase {
           getCwd: () => workspaceRoot,
         },
       ),
-    })]
+    }), createSendToSubagentTool((id, text, context) => this.builtinSubagentRunner.sendInput(id, text, context))]
   }
 
   /**

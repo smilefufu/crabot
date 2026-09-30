@@ -2,7 +2,7 @@
 import fs from 'node:fs/promises'
 import { defineTool } from '../tool-framework'
 import { sleep } from '../retry-utils'
-import type { ToolDefinition } from '../types'
+import type { OutputWaitEntry, ToolDefinition } from '../types'
 import type { BgEntityRegistry } from '../bg-entities/registry'
 import { BG_OUTPUT_MAX_BYTES, type BgEntityRecord } from '../bg-entities/types'
 
@@ -59,9 +59,10 @@ async function readChunk(file: string, offset: number, redact?: (text: string) =
 }
 
 export function createOutputTool(deps: BgToolDeps): ToolDefinition {
+  const localWaitState = new Map<string, OutputWaitEntry>()
   return defineTool({
     name: 'Output', category: 'shell', isReadOnly: true, permissionLevel: 'safe',
-    description: '读取后台 Shell 或子 Agent 的增量输出。已有新输出时立即返回；否则最多等待子 Agent 15 分钟、Shell 2 分钟。期间出现新输出、目标结束或调用方收到新输入时会提前返回；调用方取消也会解除等待。读取超时不会终止目标。子 Agent 的中间文本不代表任务完成。等待时长由系统管理，无需指定。',
+    description: '读取后台 Shell 或子 Agent 的增量输出。已有新输出时立即返回；否则初始最多等待子 Agent 15 分钟、Shell 2 分钟。同一目标连续无输出超时后，系统将下次等待上限翻倍，最高 2 小时；读到新输出后恢复初始上限。期间出现新输出、目标结束或调用方收到新输入时会提前返回；调用方取消也会解除等待。读取超时不会终止目标。子 Agent 的中间文本不代表任务完成。等待时长由系统管理，无需指定。',
     inputSchema: {
       type: 'object', required: ['entity_id'], properties: {
         entity_id: { type: 'string', description: 'shell_xxx 或 agent_xxx' },
@@ -76,9 +77,12 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
       }
       const initial = await deps.registry.get(id)
       if (!initial || !ownsBgEntity(initial, deps)) return { output: 'Entity not found or not accessible', isError: true }
-      const timeout = initial.type === 'agent' ? 900_000 : 120_000
+      const initialWait = initial.type === 'agent' ? 900_000 : 120_000
       const started = Date.now()
       const key = `${deps.taskId}:${deps.ownerIncarnationId ?? ''}:${deps.ownerSubagentId ?? ''}:${id}`
+      const waitState = context.outputWaitState ?? localWaitState
+      const startedState = waitState.get(key) ?? { waitMs: initialWait, readOffset: deps.cursorMap.get(key) ?? 0 }
+      waitState.set(key, startedState)
       for (;;) {
         const record = await deps.registry.get(id)
         if (!record || !ownsBgEntity(record, deps)) return { output: 'Entity not found or not accessible', isError: true }
@@ -99,13 +103,24 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
         if (context.hasPendingExternalInput?.()) return reply('external_input')
         if (chunk.text || terminal) {
           await deps.registry.update(id, { last_activity_at: new Date().toISOString() })
+          if (context.hasPendingExternalInput?.()) return reply('external_input')
           if (file) deps.cursorMap.set(key, chunk.next)
+          if (terminal) waitState.delete(key)
+          else if (chunk.next > (waitState.get(key)?.readOffset ?? 0)) {
+            waitState.set(key, { waitMs: initialWait, readOffset: chunk.next })
+          }
           const error = record.type === 'agent' && record.error ? `\nerror: ${(deps.redactText?.(record.error) ?? record.error).slice(0, 3000)}` : ''
           return reply(terminal ? 'terminal' : 'new_output',
             `${record.type === 'agent' && !terminal ? '[progress]\n' : ''}${chunk.text || '(no new output)'}${error}\n[next_offset: ${chunk.next}${chunk.more ? ', truncated; more available' : ''}]`)
         }
-        const remaining = timeout - (Date.now() - started)
-        if (remaining <= 0) return reply('timeout')
+        const remaining = startedState.waitMs - (Date.now() - started)
+        if (remaining <= 0) {
+          // Compare the snapshot: parallel timeouts advance once, and cannot undo newer progress.
+          if (waitState.get(key) === startedState) {
+            waitState.set(key, { ...startedState, waitMs: Math.min(7_200_000, startedState.waitMs * 2) })
+          }
+          return reply('timeout')
+        }
         try { await sleep(Math.min(2_000, remaining), context.abortSignal) }
         catch { return reply('aborted') }
       }

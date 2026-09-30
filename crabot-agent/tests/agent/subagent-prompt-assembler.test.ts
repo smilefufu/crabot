@@ -72,6 +72,9 @@ describe('assembleSubAgentPrompt', () => {
     expect(out).toContain('由执行器委派的子 Agent')
     expect(out).toContain('子任务结束后不再接续')
     expect(out).toContain('需保留的产物按任务要求保存')
+    expect(out).not.toContain('执行中收到调用方的追加要求')
+    const builtin = assembleSubAgentPrompt(baseEntry, { parentTaskId: 't', callerLabel: 'builtin', asyncShellContinuation: true })
+    expect(builtin).toContain('执行中收到调用方的追加要求或纠偏时，结合原任务和已有成果调整后续工作，继续使用当前上下文')
   })
 
   it('保留调用方已过滤的 direct child Skill 清单，加载方法由工具说明提供', () => {
