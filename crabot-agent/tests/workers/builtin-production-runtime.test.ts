@@ -422,6 +422,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const [, , , childTools, execution] = run.mock.calls[0] as any[]
     expect(childTools.map((tool: ToolDefinition) => tool.name)).not.toContain(desktop.name)
     expect(childTools.map((tool: ToolDefinition) => tool.name)).not.toContain('load_guidance')
+    expect(childTools.map((tool: ToolDefinition) => tool.name)).not.toContain('send_to_subagent')
     expect(execution.resolvedPermissions.tool_access.desktop).toBe(false)
   })
 
@@ -1153,12 +1154,14 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const tools = resolveTools(builtin)
     const delegate = tools.find((tool) => tool.name === 'delegate_task')
     expect(Boolean(delegate)).toBe(withSubagents)
+    expect(tools.some(tool => tool.name === 'send_to_subagent')).toBe(withSubagents)
     if (withSubagents) {
       expect(prompt).not.toContain('需要审查时使用')
       expect(delegate!.description).toContain('reviewer')
       expect(delegate!.description).toContain('需要审查时使用')
       expect(delegate!.description).toContain('自动送回结果或错误；需要查看进展或读取通知中未展开的结果时，可使用 Output')
       expect(delegate!.description).toContain('结束本轮不会终止子 Agent')
+      expect(delegate!.description).toContain('使用 send_to_subagent，传入原 agent_id')
       expect((delegate!.inputSchema.properties as Record<string, { enum?: string[] }>).subagent_type.enum).toEqual(['reviewer'])
       expect(prompt).toContain('没有其他可推进工作、只缺异步结果时，可以直接结束本轮，不必通过反复调用工具维持回合')
     }

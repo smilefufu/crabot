@@ -55,7 +55,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { runEngine, defineTool, createUserMessage } from '../../engine/index.js'
 import { withChildExecutionEnv } from '../../core/runtime-env.js'
 import type { EngineMessage, EngineMessagesRef, EngineResult, EngineToolResultMessage, ToolDefinition } from '../../engine/index.js'
-import type { Resolvable } from '../../engine/types.js'
+import type { OutputWaitEntry, Resolvable, ToolCallContext } from '../../engine/types.js'
 import type { LLMThinkingConfig } from '../../engine/llm-adapter-types.js'
 import { SessionTree } from '../session-tree.js'
 import { OutputLog } from '../output-log.js'
@@ -179,6 +179,7 @@ const FINISH_TASK_REJECTED_NOTICE =
   '没有其他可推进工作时，直接结束本轮，不再调用工具；系统会在结果到达后自动恢复执行。若确认某个子任务不再需要，先用 Kill 结束它，再重新调用 finish_task。'
 
 interface WorkerInstance {
+  outputWaitState?: Map<string, OutputWaitEntry>
   runtimeObservation?: BuiltinRuntimeObservation
   readonly query_id?: string
   readonly acceptedInputIds?: Set<string>
@@ -1661,19 +1662,30 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   ): Resolvable<ReadonlyArray<ToolDefinition>> {
     const guarded = this.guardTools(tools)
     return () => [
-      ...resolve(guarded).map((tool) => tool.name !== 'delegate_task' || !instance
-        ? tool
-        : {
+      ...resolve(guarded).map((tool) => {
+        if (!instance) return tool
+        if (tool.name === 'Output') {
+          const outputWaitState = instance.outputWaitState ??= new Map()
+          return {
             ...tool,
-            call: (input: Record<string, unknown>, context: import('../../engine/types.js').ToolCallContext) => tool.call(input, {
-              ...context,
-              worker_subagent: {
-                worker_id: instance.worker_id,
-                ...(instance.query_id ? { incarnation_id: instance.incarnation_id } : {}),
-                ...(instance.traceId ? { parent_trace_id: instance.traceId } : {}),
-              },
-            }),
+            call: (input: Record<string, unknown>, context: ToolCallContext) =>
+              tool.call(input, { ...context, outputWaitState }),
+          }
+        }
+        if (tool.name !== 'delegate_task' && tool.name !== 'send_to_subagent') return tool
+        return {
+          ...tool,
+          call: (input: Record<string, unknown>, context: ToolCallContext) => tool.call(input, {
+            ...context,
+            worker_subagent: {
+              worker_id: instance.worker_id,
+              caller_instance_id: instanceKey(instance.worker_id, instance.seq),
+              ...(instance.query_id ? { incarnation_id: instance.incarnation_id } : {}),
+              ...(instance.traceId ? { parent_trace_id: instance.traceId } : {}),
+            },
           }),
+        }
+      }),
       FINISH_TASK_TOOL,
     ]
   }
@@ -1902,6 +1914,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     }
     await this.writeMeta(instance, { state: 'exited', ended_reason, outcome })
     instance.state = 'exited'
+    instance.outputWaitState?.clear()
     instance.ended_reason = ended_reason
     if (outcome !== undefined) instance.outcome = outcome
     // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获

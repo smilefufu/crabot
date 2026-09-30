@@ -132,6 +132,35 @@ describe('BuiltinSubagentRunner execution boundary', () => {
     await expect(runner.recoverAfterRestart()).rejects.toThrow('registry is unavailable')
   })
 
+  it('queues only to a live child of the same caller incarnation', async () => {
+    const caller = { worker_id: 'worker-1', caller_instance_id: 'worker-1#1', parent_trace_id: 'trace-parent' }
+    const now = new Date().toISOString()
+    let runtime: any
+    const controller = new AbortController()
+    spawnPersistentAgent.mockImplementationOnce(async opts => {
+      await registry.register({ entity_id: 'agent_child', type: 'agent', status: 'running', owner: opts.owner,
+        spawned_by_task_id: 'worker-1', spawned_at: now, last_activity_at: now, ended_at: null, exit_code: null,
+        task_description: 'test', messages_log_file: '', result_file: null })
+      runtime = opts.createExecution('agent_child', controller.signal)
+      return 'agent_child'
+    })
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+    await runner.run(testSubagent(), { task: 'test' }, { worker_subagent: caller }, [], executionContext())
+    for (const wrong of [
+      { ...caller, worker_id: 'other' }, { ...caller, incarnation_id: 'fork' },
+      { ...caller, caller_instance_id: 'worker-1#2' },
+    ]) expect((await runner.sendInput('agent_child', 'wrong', { worker_subagent: wrong })).isError).toBe(true)
+    expect(await runner.sendInput('agent_child', 'continue', { worker_subagent: caller })).toEqual({
+      isError: false, output: JSON.stringify({ agent_id: 'agent_child', status: 'queued' }),
+    })
+    expect(await runtime.continueAfterTurn()).toBe(true)
+    expect(await runtime.drainExternalInputs()).toEqual(['[parent input]\ncontinue'])
+    expect(await runtime.continueAfterTurn()).toBe(false)
+    expect((await runner.sendInput('agent_child', 'late', { worker_subagent: caller })).isError).toBe(true)
+    await runtime.close()
+    expect((await runner.sendInput('agent_child', 'unavailable', { worker_subagent: caller })).isError).toBe(true)
+  })
+
   it.each(['code_planner', 'code_writer', 'task_reviewer'])('子任务按 %s 自身的模型连接派发', async (name) => {
     spawnPersistentAgent.mockResolvedValue('agent-child')
     const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)

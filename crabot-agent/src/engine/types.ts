@@ -122,6 +122,11 @@ export type PermissionDecision =
 
 // --- Tool Definition ---
 
+export interface OutputWaitEntry {
+  readonly waitMs: number
+  readonly readOffset: number
+}
+
 export interface ToolCallContext {
   /** Caller-owned missing-tool errors; this callback must never execute a hidden tool. */
   readonly unavailableToolResult?: (name: string) => ToolCallResult
@@ -129,10 +134,14 @@ export interface ToolCallContext {
   readonly onProgress?: (message: string) => void
   /** IANA 时区名（如 "Asia/Shanghai"），用于 tool_result 时间戳渲染 */
   readonly timezone?: string
-  /** Injected only while a builtin Worker invokes delegate_task. */
+  /** Per-incarnation state survives burst/tool rebuilding; never sent to the model. */
+  readonly outputWaitState?: Map<string, OutputWaitEntry>
+  /** Injected only while a builtin Worker invokes its child tools. */
   readonly worker_subagent?: {
     readonly worker_id: string
     readonly incarnation_id?: string
+    /** Includes mainline incarnations without changing their persisted bg owner. */
+    readonly caller_instance_id?: string
     readonly parent_trace_id?: string
   }
   /**
