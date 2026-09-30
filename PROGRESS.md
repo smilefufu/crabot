@@ -1,11 +1,12 @@
 # Crabot 项目进度
 
-### Worker 异步等待与 child 追加：已实现，待 review
+### Worker 异步等待与 child 追加：已部署，持续观察
 
 - 对齐 2026-09-30 已确认 spec：Output 连续无输出超时才翻倍等待，child 从 15 分钟、Shell 从 2 分钟起，最高 2 小时；新字节重置，纠偏/终态/取消仍及时返回，跨 burst 保留但不跨化身继承。
 - builtin 父 Worker 新增 `send_to_subagent`：仅向本化身既有 child 追加，在下一实际 LLM 请求前注入；保留工具结果及原上下文，追加与完成竞争不丢消息，queued 不冒充已执行。Shell 回执和 child 完成通知保持原归属；重启不重放。
 - Manager 常驻提示词补充同目标换 Worker 的成果与经验交接；delegate/child/Output 说明同步更新。252 项定向测试、6 项生产装配检查及 Agent 类型检查通过；真实 Engine 验证并行工具边界、Output 让位、end_turn 接续和通知归属。
-- 本次验证使用 stub 模型与临时目录，未发送生产 trace、调用生产业务工具或重启部署；尚不据此宣称线上模型行为已改善。
+- 实现验证使用 stub 模型与临时目录，未发送生产 trace 或调用生产业务工具；尚不据此宣称线上模型行为已改善。
+- 2026-09-30 10:57（Asia/Shanghai）以 main `52256be1` 完成模块、Web、CLI、MCP 构建及本地重启。新 Agent PID 61496，七模块与主要端点健康；已核实编译产物中的自适应 Output、child 追加入口和 Manager 交接句。从 10:57:28 起每两小时只读观察新增 trace，区分重启恢复、工具契约和业务效果。
 
 ### Output 等待时长由系统管理
 
