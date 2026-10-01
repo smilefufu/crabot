@@ -83,46 +83,56 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
       const waitState = context.outputWaitState ?? localWaitState
       const startedState = waitState.get(key) ?? { waitMs: initialWait, readOffset: deps.cursorMap.get(key) ?? 0 }
       waitState.set(key, startedState)
-      for (;;) {
-        const record = await deps.registry.get(id)
-        if (!record || !ownsBgEntity(record, deps)) return { output: 'Entity not found or not accessible', isError: true }
-        const header = `[status: ${record.status}, exit_code: ${record.exit_code ?? 'null'}]\n[entity_id: ${id}, type: ${record.type}]`
-        const reply = (reason: string, text = '(no new output)') => ({ output: `${header}\n[reason: ${reason}]\n${text}`, isError: false })
-        if (context.abortSignal?.aborted) return reply('aborted')
-        if (context.hasPendingExternalInput?.()) return reply('external_input')
-        const terminal = record.status !== 'running'
-        const file = record.type === 'shell' ? record.log_file : record.output_file ?? (terminal ? record.result_file : null)
-        if (!file && !terminal) return reply('unavailable', 'Intermediate output unavailable for this legacy child.')
-        let chunk = { text: '', next: 0, more: false }
-        try {
-          if (file) chunk = await readChunk(file, (input.from_offset as number | undefined) ?? deps.cursorMap.get(key) ?? 0, record.type === 'agent' && !record.output_file ? deps.redactText : undefined)
-        } catch (error) {
-          return { output: `${header}\nOutput unavailable: ${error instanceof Error ? error.message : String(error)}`, isError: true }
-        }
-        // Do not consume a page if input arrived during file I/O.
-        if (context.hasPendingExternalInput?.()) return reply('external_input')
-        if (chunk.text || terminal) {
-          await deps.registry.update(id, { last_activity_at: new Date().toISOString() })
+      const deadline = started + startedState.waitMs
+      let waiting = false
+      try {
+        for (;;) {
+          const record = await deps.registry.get(id)
+          if (!record || !ownsBgEntity(record, deps)) return { output: 'Entity not found or not accessible', isError: true }
+          const header = `[status: ${record.status}, exit_code: ${record.exit_code ?? 'null'}]\n[entity_id: ${id}, type: ${record.type}]`
+          const reply = (reason: string, text = '(no new output)') => ({ output: `${header}\n[reason: ${reason}]\n${text}`, isError: false })
+          if (context.abortSignal?.aborted) return reply('aborted')
           if (context.hasPendingExternalInput?.()) return reply('external_input')
-          if (file) deps.cursorMap.set(key, chunk.next)
-          if (terminal) waitState.delete(key)
-          else if (chunk.next > (waitState.get(key)?.readOffset ?? 0)) {
-            waitState.set(key, { waitMs: initialWait, readOffset: chunk.next })
+          const terminal = record.status !== 'running'
+          const file = record.type === 'shell' ? record.log_file : record.output_file ?? (terminal ? record.result_file : null)
+          if (!file && !terminal) return reply('unavailable', 'Intermediate output unavailable for this legacy child.')
+          let chunk = { text: '', next: 0, more: false }
+          try {
+            if (file) chunk = await readChunk(file, (input.from_offset as number | undefined) ?? deps.cursorMap.get(key) ?? 0, record.type === 'agent' && !record.output_file ? deps.redactText : undefined)
+          } catch (error) {
+            return { output: `${header}\nOutput unavailable: ${error instanceof Error ? error.message : String(error)}`, isError: true }
           }
-          const error = record.type === 'agent' && record.error ? `\nerror: ${(deps.redactText?.(record.error) ?? record.error).slice(0, 3000)}` : ''
-          return reply(terminal ? 'terminal' : 'new_output',
-            `${record.type === 'agent' && !terminal ? '[progress]\n' : ''}${chunk.text || '(no new output)'}${error}\n[next_offset: ${chunk.next}${chunk.more ? ', truncated; more available' : ''}]`)
-        }
-        const remaining = startedState.waitMs - (Date.now() - started)
-        if (remaining <= 0) {
-          // Compare the snapshot: parallel timeouts advance once, and cannot undo newer progress.
-          if (waitState.get(key) === startedState) {
-            waitState.set(key, { ...startedState, waitMs: Math.min(7_200_000, startedState.waitMs * 2) })
+          // Do not consume a page if input arrived during file I/O.
+          if (context.hasPendingExternalInput?.()) return reply('external_input')
+          if (chunk.text || terminal) {
+            await deps.registry.update(id, { last_activity_at: new Date().toISOString() })
+            if (context.hasPendingExternalInput?.()) return reply('external_input')
+            if (file) deps.cursorMap.set(key, chunk.next)
+            if (terminal) waitState.delete(key)
+            else if (chunk.next > (waitState.get(key)?.readOffset ?? 0)) {
+              waitState.set(key, { waitMs: initialWait, readOffset: chunk.next })
+            }
+            const error = record.type === 'agent' && record.error ? `\nerror: ${(deps.redactText?.(record.error) ?? record.error).slice(0, 3000)}` : ''
+            return reply(terminal ? 'terminal' : 'new_output',
+              `${record.type === 'agent' && !terminal ? '[progress]\n' : ''}${chunk.text || '(no new output)'}${error}\n[next_offset: ${chunk.next}${chunk.more ? ', truncated; more available' : ''}]`)
           }
-          return reply('timeout')
+          const remaining = deadline - Date.now()
+          if (remaining <= 0) {
+            // Compare the snapshot: parallel timeouts advance once, and cannot undo newer progress.
+            if (waitState.get(key) === startedState) {
+              waitState.set(key, { ...startedState, waitMs: Math.min(7_200_000, startedState.waitMs * 2) })
+            }
+            return reply('timeout')
+          }
+          if (!waiting) {
+            waiting = true
+            context.onOutputWait?.(deadline)
+          }
+          try { await sleep(Math.min(2_000, remaining), context.abortSignal) }
+          catch { return reply('aborted') }
         }
-        try { await sleep(Math.min(2_000, remaining), context.abortSignal) }
-        catch { return reply('aborted') }
+      } finally {
+        if (waiting) context.onOutputWait?.(undefined)
       }
     },
   })
