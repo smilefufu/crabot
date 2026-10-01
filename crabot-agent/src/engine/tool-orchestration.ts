@@ -211,7 +211,7 @@ async function executeSingleTool(
   }
 
   try {
-    const result = await tool.call(effectiveInput, context)
+    const result = await tool.call(effectiveInput, { ...context, toolCallId: callId })
 
     // --- PostToolUse hook ---
     let finalContent = result.output

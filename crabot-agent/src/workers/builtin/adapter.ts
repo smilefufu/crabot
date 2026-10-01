@@ -180,6 +180,8 @@ const FINISH_TASK_REJECTED_NOTICE =
 
 interface WorkerInstance {
   outputWaitState?: Map<string, OutputWaitEntry>
+  /** Execution-owned facts, separate from the observational runtime/trace projection. */
+  activeTools?: Map<string, { name: string; outputWaitUntil?: number }>
   runtimeObservation?: BuiltinRuntimeObservation
   readonly query_id?: string
   readonly acceptedInputIds?: Set<string>
@@ -752,6 +754,19 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return latestModifiedMs([join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)], `${h.worker_id}#${h.seq}`)
   }
 
+  async livenessWaitUntil(h: IncarnationHandle): Promise<number | undefined> {
+    const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
+    if (!instance || this.closing || instance.state !== 'running' || instance.abortController?.signal.aborted
+      || instance.pendingInputs.length || instance.pendingImmediateInputs.length || !instance.activeTools?.size
+      || (h.incarnation_id !== undefined && h.incarnation_id !== instance.incarnation_id)) return undefined
+    let earliest = Infinity
+    for (const tool of instance.activeTools.values()) {
+      if (tool.name !== 'Output' || tool.outputWaitUntil === undefined || !Number.isFinite(tool.outputWaitUntil)) return undefined
+      earliest = Math.min(earliest, tool.outputWaitUntil)
+    }
+    return earliest
+  }
+
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
     const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
     if (instance) return instance.state
@@ -1201,6 +1216,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const runtime = this.runtimeObservation(instance)
     runtime.stage('preparing')
     runtime.inputs(instance.pendingInputs.length, instance.pendingImmediateInputs.length)
+    const activeTools: NonNullable<WorkerInstance['activeTools']> = new Map()
+    instance.activeTools = activeTools
+    const clearActiveTools = () => activeTools.clear()
+    abortController.signal.addEventListener('abort', clearActiveTools, { once: true })
     let result: EngineResult = await withChildExecutionEnv(instance.executionEnv, () => runEngine({
       prompt: '',
       adapter: builtin.adapter,
@@ -1255,6 +1274,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         },
         onToolLifecycle: (event) => {
           instance.activityAt = Date.now()
+          if (event.type === 'tool_started') activeTools.set(event.callId, { name: event.name })
+          else activeTools.delete(event.callId)
           runtime.tool(event)
           if (instance.traceId) this.deps.traceHooks?.appendToolLifecycle?.(instance.traceId, event)
         },
@@ -1273,7 +1294,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           }
         },
       },
-    }))
+    })).finally(() => {
+      abortController.signal.removeEventListener('abort', clearActiveTools)
+      activeTools.clear()
+      if (instance.activeTools === activeTools) instance.activeTools = undefined
+    })
     if (result.error) runtime.stage('preparing', result.error)
     await Promise.all(pendingWrites)
     if (writeErrors.length > 0) {
@@ -1668,8 +1693,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           const outputWaitState = instance.outputWaitState ??= new Map()
           return {
             ...tool,
-            call: (input: Record<string, unknown>, context: ToolCallContext) =>
-              tool.call(input, { ...context, outputWaitState }),
+            call: (input: Record<string, unknown>, context: ToolCallContext) => {
+              const active = context.toolCallId ? instance.activeTools?.get(context.toolCallId) : undefined
+              return tool.call(input, { ...context, outputWaitState, onOutputWait: (deadline) => {
+                if (active) active.outputWaitUntil = deadline
+              } })
+            },
           }
         }
         if (tool.name !== 'delegate_task' && tool.name !== 'send_to_subagent') return tool

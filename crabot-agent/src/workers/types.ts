@@ -563,6 +563,9 @@ export interface WorkerAdapter {
    * builtin 以真实 engine 进展更新、无常驻实例时以 meta 兜底。
    */
   lastActivityAt?(h: IncarnationHandle): Promise<number | undefined>
+  /** 当前化身所有在途工作均为受管理的 Output 等待时，返回最早截止时间(epoch ms)。
+   *  无登记、混合工具、信息不足或已要求提前让位时返回 undefined；不代表任务健康。 */
+  livenessWaitUntil?(h: IncarnationHandle): Promise<number | undefined>
   readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<{
     events: NormalizedTraceEvent[]
     nextCursor: TraceCursor

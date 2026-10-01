@@ -136,6 +136,10 @@ export interface ToolCallContext {
   readonly timezone?: string
   /** Per-incarnation state survives burst/tool rebuilding; never sent to the model. */
   readonly outputWaitState?: Map<string, OutputWaitEntry>
+  /** Trusted lifecycle identity; never taken from model input. */
+  readonly toolCallId?: string
+  /** Actual Output wait only; undefined clears this invocation's registration. */
+  readonly onOutputWait?: (deadlineMs: number | undefined) => void
   /** Injected only while a builtin Worker invokes its child tools. */
   readonly worker_subagent?: {
     readonly worker_id: string

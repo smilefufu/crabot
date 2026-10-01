@@ -8,7 +8,7 @@
  * **cc/codex 双实现对称覆盖**:整个 describe 用 `it.each` 跑两遍(不是只给 cc 写用例),
  * 否则删掉 codex 一侧的 `lastActivityAt` 实现能全绿。
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -427,5 +427,53 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
 
     expect(wakeEvents(workerId)).toHaveLength(0)
     expect(adapter.lastActivityAtCalls).not.toContain(`${workerId}#1`)
+  })
+})
+
+describe('finite Output wait contract', () => {
+  async function staleWorker(probe: () => Promise<number | undefined>) {
+    const adapter = new CliLikeAdapter('builtin')
+    Object.assign(adapter, { livenessWaitUntil: probe })
+    const { harness } = await makeHarness(adapter)
+    const worker = await harness.spawnWorker(spawnParams())
+    adapter.activity.set(`${worker.worker_id}#1`, clockMs)
+    events = []
+    clockMs += 32 * MINUTE
+    return { adapter, harness, workerId: worker.worker_id }
+  }
+
+  it.each([undefined, NaN, Infinity, -Infinity, 'throw'])(
+    'missing or invalid wait %s preserves the original stall detection', async value => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const { harness, workerId } = await staleWorker(async () => {
+          if (value === 'throw') throw new Error('wait unavailable')
+          return value
+        })
+        await harness.sweepLiveness()
+        expect(wakeEvents(workerId)).toHaveLength(1)
+        if (value !== undefined) expect(warn).toHaveBeenCalled()
+      } finally { warn.mockRestore() }
+    },
+  )
+
+  it('applies only the two-second return grace without consuming alert delivery', async () => {
+    const deadline = clockMs + 64 * MINUTE
+    const { harness, workerId } = await staleWorker(async () => deadline)
+    clockMs = deadline + 2000
+    await harness.sweepLiveness()
+    expect(wakeEvents(workerId)).toHaveLength(0)
+    clockMs++
+    await harness.sweepLiveness()
+    expect(wakeEvents(workerId)).toHaveLength(1)
+  })
+
+  it('does not report a stale activity snapshot when a tool returns during the wait probe', async () => {
+    const f = await staleWorker(async () => {
+      f.adapter.activity.set(`${f.workerId}#1`, clockMs)
+      return undefined
+    })
+    await f.harness.sweepLiveness()
+    expect(wakeEvents(f.workerId)).toHaveLength(0)
   })
 })

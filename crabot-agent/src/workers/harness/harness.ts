@@ -5238,6 +5238,29 @@ export class WorkerHarness {
           continue
         }
 
+        // A real Output wait has a fixed deadline; it is not task progress or an unbounded heartbeat.
+        try {
+          const waitUntil = await adapter.livenessWaitUntil?.(h)
+          if (waitUntil !== undefined) {
+            if (!Number.isFinite(waitUntil)) console.warn(`[WorkerHarness] invalid liveness wait deadline for ${key}`)
+            else if (Date.parse(this.deps.now()) <= waitUntil + 2_000) continue
+          }
+        } catch (err) {
+          console.warn(`[WorkerHarness] sweepLiveness: livenessWaitUntil failed for ${key}:`, err)
+        }
+        // A tool may have returned while we checked the wait. Do not report the stale snapshot.
+        try {
+          const latestAt = await adapter.lastActivityAt(h)
+          if (latestAt === undefined) continue
+          if (latestAt !== lastAt) {
+            this.stallReports.delete(key)
+            continue
+          }
+        } catch (err) {
+          console.warn(`[WorkerHarness] sweepLiveness: activity recheck failed for ${key}:`, err)
+          continue
+        }
+
         // 去重、重试与退避,见方法注释第 4 条。`activityAt` 变了就是新的一次停摆,走首报。
         const prev = this.stallReports.get(key)
         const sameStall = prev !== undefined && prev.activityAt === lastAt

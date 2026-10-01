@@ -26,8 +26,10 @@ describe('Output waiting contract', () => {
     try {
       for (const minute of minutes) {
         const start = clock.now
-        expect((await f.tool.call({ entity_id: f.record.entity_id }, {})).output).toContain('reason: timeout')
+        const onOutputWait = vi.fn()
+        expect((await f.tool.call({ entity_id: f.record.entity_id }, { onOutputWait })).output).toContain('reason: timeout')
         expect(clock.now - start).toBe(minute * 60_000)
+        expect(onOutputWait.mock.calls).toEqual([[start + minute * 60_000], [undefined]])
       }
     } finally { await f.close() }
   })
@@ -50,8 +52,10 @@ describe('Output waiting contract', () => {
       await appendFile(f.file, 'one')
       await f.tool.call({ entity_id: 'agent_id' }, {})
       let start = clock.now
-      await f.tool.call({ entity_id: 'agent_id' }, {})
+      const onOutputWait = vi.fn()
+      await f.tool.call({ entity_id: 'agent_id' }, { onOutputWait })
       expect(clock.now - start).toBe(15 * 60_000)
+      expect(onOutputWait.mock.calls).toEqual([[start + 15 * 60_000], [undefined]])
       await f.tool.call({ entity_id: 'agent_id', from_offset: 0 }, {})
       start = clock.now
       await f.tool.call({ entity_id: 'agent_id' }, {})
@@ -114,7 +118,9 @@ describe('Output waiting contract', () => {
         if (reason === 'terminal') f.record.status = 'completed'
         if (reason === 'aborted') controller.abort()
       }
-      const result = await f.tool.call({ entity_id: 'agent_id' }, { abortSignal: controller.signal, hasPendingExternalInput: () => pending })
+      const onOutputWait = vi.fn()
+      const result = await f.tool.call({ entity_id: 'agent_id' }, { abortSignal: controller.signal, hasPendingExternalInput: () => pending, onOutputWait })
+      expect(onOutputWait.mock.calls).toEqual([[start + 120 * 60_000], [undefined]])
       expect(result.output).toContain(`reason: ${reason}`)
       expect(clock.now - start).toBe(2000)
       if (reason === 'external_input') {
@@ -138,6 +144,37 @@ describe('Output waiting contract', () => {
       expect(clock.now).toBe(900000)
       expect(f.record.status).toBe('running')
     } finally { await f.close() }
+  })
+  it.each(['wrong_owner', 'missing', 'legacy', 'read_error', 'terminal', 'new_output', 'external_input'])(
+    'does not register a wait for initial %s', async reason => {
+      const f = await setup('agent'); const onOutputWait = vi.fn()
+      try {
+        if (reason === 'wrong_owner') f.record.owner.worker_id = 'other'
+        if (reason === 'missing') vi.spyOn(f.deps.registry, 'get').mockResolvedValue(undefined)
+        if (reason === 'legacy') f.record.output_file = ''
+        if (reason === 'terminal') f.record.status = 'completed'
+        if (reason === 'new_output') await appendFile(f.file, 'ready')
+        await f.tool.call({ entity_id: 'agent_id', ...(reason === 'read_error' ? { from_offset: 99 } : {}) },
+          { onOutputWait, hasPendingExternalInput: () => reason === 'external_input' })
+        expect(onOutputWait).not.toHaveBeenCalled()
+      } finally { await f.close() }
+    },
+  )
+  it.each(['read_error', 'registry_error'])('clears a registered wait after %s', async reason => {
+    const f = await setup('agent'); const onOutputWait = vi.fn()
+    try {
+      clock.tick = async () => {
+        if (reason === 'read_error') f.record.output_file = await mkdtemp(join(tmpdir(), 'output-error-'))
+        else vi.spyOn(f.deps.registry, 'get').mockRejectedValue(new Error('registry unavailable'))
+      }
+      const result = f.tool.call({ entity_id: 'agent_id' }, { onOutputWait })
+      if (reason === 'registry_error') await expect(result).rejects.toThrow('registry unavailable')
+      else expect((await result).isError).toBe(true)
+      expect(onOutputWait.mock.calls).toEqual([[900000], [undefined]])
+    } finally {
+      if (f.record.output_file !== f.file) await rm(f.record.output_file, { recursive: true, force: true })
+      await f.close()
+    }
   })
   it('keeps offset validation', async () => {
     const f = await setup('agent')
