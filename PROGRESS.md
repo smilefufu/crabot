@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### Manager MCP 当前 episode 热加载恢复：已实现，待部署
+
+- `git blame` 确认旧 Engine/builtin Worker callback 保留；Manager 在 PR #162 引入的 episode 目录冻结阻断新 MCP。按 2026-10-05 已确认 spec 改为后续 turn 消费当前连接快照，无须重开会话。
+- 保留固定核心、主体、权限和加载顺序；同名工具更新连接/定义，禁用或失效后移出当前工具面；每个请求固定执行快照，旧引用拒绝且不重放外部副作用。
+- 先复现搜索、服务族加载和 schema 更新三项失败，再修复；169 项相关检查与 Agent TypeScript 检查通过，覆盖真实 Engine/connector、生产 Manager 接线、builtin 同 burst 热加载、撤权与在途调用。未改 Scrapling 默认启停或线上开关，未部署。
+
 ### 主控表达与临时页面能力说明：已部署，待行为验证
 
 - 按用户确认 diff 调整主控表达原则，并常驻介绍由主线执行器制作、主控投递的临时页面能力；技能说明统一中文概念，工具名、参数与 `tmp-page` 标识保持原样。
