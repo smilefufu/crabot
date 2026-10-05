@@ -158,6 +158,22 @@ describe('Manager MCP production authorization wiring', () => {
     }, 'manager-mcp-test')
   })
 
+  it('生产 Manager 在同一 episode 消费新连接目录，沿用原可信主体执行', async () => {
+    grantPrivate()
+    const getTools = vi.mocked(agent.mcpConnector.getAllTools)
+    const connected = getTools()
+    getTools.mockReturnValue([])
+    const episode = await scheduled({ targetSession: target, creatorFriendId: 'creator' })
+    expect(await episode.search(mcpName)).toMatchObject({ status: 'no_match' })
+    getTools.mockReturnValue(connected)
+    expect(await episode.search(mcpName)).toMatchObject({ status: 'loaded', loaded: [mcpName] })
+    expect(await episode.tools().find(tool => tool.name === mcpName)!.call({}, {})).toMatchObject({ isError: false })
+    expect(execute).toHaveBeenCalledOnce()
+    expect(rpc).toHaveBeenLastCalledWith(1, 'resolve_principal_permissions', {
+      sender_friend_id: 'creator', channel_id: target.channel_id, session_id: target.session_id, session_type: 'private',
+    }, 'manager-mcp-test')
+  })
+
   it.each(['revoke', 'delete', 'offline'])('loaded private MCP fails closed after %s without repeating a side effect', async (change) => {
     grantPrivate()
     const identity = { targetSession: target, creatorFriendId: 'creator' }
@@ -258,6 +274,7 @@ describe('Manager MCP production authorization wiring', () => {
     const loaded = episode.tools().find(tool => tool.name === mcpName)!
     vi.stubEnv('CRABOT_MANAGER_MCP_ENABLED', '0')
     expect(await loaded.call({}, {} as never)).toMatchObject({ isError: true })
+    await episode.expectHidden(mcpName)
     await (await scheduled(identity)).expectHidden(mcpName)
     expect(execute).not.toHaveBeenCalled()
   })
@@ -277,6 +294,7 @@ describe('Manager MCP production authorization wiring', () => {
     await entered
     vi.stubEnv('CRABOT_MANAGER_MCP_ENABLED', '0')
     vi.stubEnv('CRABOT_MANAGER_TOOL_LOADING_MODE', 'full')
+    await episode.expectHidden(mcpName)
     finish()
     expect(await result).toMatchObject({ output: 'once', isError: false })
     expect(await tool.call({}, {} as never)).toMatchObject({ isError: true })

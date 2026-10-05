@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { McpConnector } from '../../src/agent/mcp-connector.js'
-import type { MCPServerConfig } from '../../src/types.js'
+import type { MCPServerConfig, ResolvedPermissions } from '../../src/types.js'
+import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
+import { createManagerToolFaceState } from '../../src/manager/tools/tool-catalog.js'
+import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
+import { runEngine } from '../../src/engine/query-loop.js'
+import type { EngineTurnEvent, LLMAdapter } from '../../src/engine/index.js'
+import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // Stub MCP Client to avoid actual server processes
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
@@ -111,6 +117,55 @@ describe('McpConnector.reconnect', () => {
     await expect(connector.getAllTools()[0].call({}, {})).resolves.toMatchObject({ output: 'still live', isError: false })
 
     spy.mockRestore()
+  })
+
+  it('Manager 同一 Engine episode 消费同 schema 重连，旧响应拒绝执行，新轮使用新连接', async () => {
+    await connector.connectAll([cfgA])
+    const oldClient = connector.getClient('A')!
+    const state = createManagerToolFaceState()
+    const key = 'test::mcp-hot-reload' as never
+    const tools = () => buildManagerToolFace({
+      faceState: state, externalMcpTools: connector.getAllTools(), authorizeExternalMcpTool: async () => true,
+      candidatePermissions: { tool_access: { mcp_skill: true }, cli_access: {} } as ResolvedPermissions,
+      harness: {} as never, workerContext: () => ({ managerKey: key, reportTo: { channel_id: 'test', session_id: 'mcp-hot-reload' } }),
+      messagingDeps: { rpcClient: { call: vi.fn() } as never, moduleId: 'test', getAdminPort: async () => 1, resolveChannelPort: async () => 2 },
+      memoryServer: createCrabMemoryServer({ rpcClient: { call: vi.fn() } as never, moduleId: 'test', getMemoryPort: async () => 3 }, { visibility: 'internal', scopes: [] }),
+      callAdmin: vi.fn() as never, isSystemThread: false,
+      workboard: { store: {} as never, managerKey: key },
+      projectDocs: { ledger: {} as never, readWorkerContext: async () => undefined, managerKey: key },
+    })
+    let requests = 0
+    let revision: string | undefined
+    const turns: EngineTurnEvent[] = []
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        requests++
+        if (requests === 1) {
+          revision = state.catalog!.catalogRevision
+          yield* chunksFromContent([{ type: 'tool_use', id: 'load', name: 'load_tool_family', input: { family: 'mcp__A' } }], 'tool_use')
+        } else if (requests === 2) {
+          expect(params.tools.some(tool => tool.name === 'mcp__A__echo')).toBe(true)
+          await connector.reconnect([cfgA])
+          vi.mocked(connector.getClient('A')!.callTool).mockResolvedValue({ content: [{ type: 'text', text: 'current connection' }] })
+          yield* chunksFromContent([{ type: 'tool_use', id: 'stale-response', name: 'mcp__A__echo', input: {} }], 'tool_use')
+        } else if (requests === 3) {
+          expect(state.catalog!.catalogRevision).toBe(revision)
+          expect(params.tools.find(tool => tool.name === 'mcp__A__echo')!.traceMetadata?.connector_generation).toBe(connector.generation)
+          yield* chunksFromContent([{ type: 'tool_use', id: 'current-response', name: 'mcp__A__echo', input: {} }], 'tool_use')
+        } else yield* chunksFromContent([{ type: 'text', text: 'done' }], 'end_turn')
+      },
+      updateConfig() {},
+    }
+    const result = await runEngine({ prompt: 'echo', adapter, options: {
+      model: 'test', systemPrompt: 'test', maxTurns: 4, tools, onTurn: turn => { turns.push(turn) },
+    } })
+    expect(result.outcome).toBe('completed')
+    expect(turns[1].toolCalls[0]).toMatchObject({ output: expect.stringContaining('TOOL_CATALOG_CHANGED'), isError: true })
+    expect(turns[2].toolCalls[0]).toMatchObject({ output: expect.stringContaining('current connection'), isError: false })
+    expect(oldClient.callTool).not.toHaveBeenCalled()
+    expect(connector.getClient('A')!.callTool).toHaveBeenCalledOnce()
+    expect([...state.loadedNames]).toEqual(['mcp__A__echo'])
+    await connector.disconnectAll()
   })
 
   it('同 schema 重连仍使旧定义失效，新定义使用 live generation', async () => {
