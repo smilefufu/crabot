@@ -303,6 +303,24 @@ jobs:
           Compress-Archive -Path $TempDir -DestinationPath "$DirName.zip"
           (Get-FileHash "$DirName.zip" -Algorithm SHA256).Hash | Out-File "$DirName.zip.sha256"
 
+      - name: Verify system upgrade and ordinary users (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          git fetch origin tag v2026.9.23 --depth=1
+          git archive v2026.9.23 cli.mjs package.json scripts > /tmp/crabot-system-baseline.tar
+          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-linux-x64.tar.gz' -print -quit)
+          sudo env "PATH=$PATH" bash .github/scripts/audit-scrapling-system.sh \
+            "$GITHUB_WORKSPACE" "$ARCHIVE" "$GITHUB_WORKSPACE/scrapling-system-audit" /tmp/crabot-system-baseline.tar
+
+      - name: Save system audit evidence
+        if: always() && matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrapling-system-audit
+          path: scrapling-system-audit/
+          if-no-files-found: ignore
+
       - name: Upload Release Assets
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
