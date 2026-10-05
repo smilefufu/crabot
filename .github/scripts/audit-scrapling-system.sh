@@ -9,6 +9,7 @@ baseline=$4
 mkdir -p "$output"
 fixture=$(mktemp -d /tmp/crabot-system-audit-XXXXXX)
 chmod 0755 "$fixture"  # 普通用户需要穿过安装根的父目录。
+cp "$workspace/.github/scripts/smoke-scrapling.mjs" "$workspace/.github/scripts/scrapling-exit-probe.py" "$fixture/"
 root=$fixture/install-custom
 persons=(crabot-audit-a crabot-audit-b)
 cleanup() {
@@ -51,15 +52,15 @@ chmod -R a-w "$root"
 for person in "${persons[@]}"; do
   for run in cold warm; do
     log=$output/$person-$run.log
-    su -s /bin/bash -c "PATH='$PATH' CRABOT_KEEP_SMOKE_ARTIFACTS=1 node '$workspace/.github/scripts/smoke-scrapling.mjs' '$root'" "$person" > "$log" 2>&1 || { cat "$log"; exit 1; }
+    su -s /bin/bash -c "PATH='$PATH' CRABOT_KEEP_SMOKE_ARTIFACTS=1 node '$fixture/smoke-scrapling.mjs' '$root'" "$person" > "$log" 2>&1 || { cat "$log"; exit 1; }
     artifact=$(node -e 'const fs=require("fs"); const line=fs.readFileSync(process.argv[1],"utf8").trim().split("\n").findLast(l=>l.startsWith("{\"result\"")); console.log(JSON.parse(line).screenshots)' "$log")
     cp "$artifact/dynamic.png" "$output/$person-$run-dynamic.png"
     cp "$artifact/stealthy.png" "$output/$person-$run-stealthy.png"
     rm -rf "$artifact"
   done
-  su -s /bin/bash -c "DATA_DIR=/home/$person/.crabot/exit-data '$root/$runtime/python-launcher' '$workspace/.github/scripts/scrapling-exit-probe.py' '$root/$runtime'" "$person" | tee "$output/$person-exit.log"
+  su -s /bin/bash -c "DATA_DIR=/home/$person/.crabot/exit-data '$root/$runtime/python-launcher' '$fixture/scrapling-exit-probe.py' '$root/$runtime'" "$person" | tee "$output/$person-exit.log"
   cp /home/$person/.crabot/exit-data/exit-result.json "$output/$person-exit.json"
-  su -s /bin/bash -c "PATH='$PATH' node '$root/scripts/prepare-scrapling.mjs' --check; test ! -w '$root/$runtime/server.py'" "$person"
+  su -s /bin/bash -c "PATH='$PATH' node '$root/scripts/prepare-scrapling.mjs' --check && test ! -w '$root/$runtime/server.py'" "$person"
 done
 sha256sum -c "$output/preserved.sha256"
 printf 'ONE_OLD_UPGRADE_REAL_MEMORY_TWO_USERS_AND_HEADLESS_PASSED\n'

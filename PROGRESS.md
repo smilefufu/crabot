@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### Scrapling system/headless 与升级兼容：已实现，发行回归验收中
+
+- 按已确认 spec：新实例默认启用，已有关闭状态和自定义启动参数保持；锁定 Scrapling 0.4.15 / Python MCP 2.3.0，公共只读产品资源与 Agent 任务 venv 分离。新 system release 默认 `/opt/crabot`，已有安装根不搬迁；普通 headless 独立于 BrowserManager。
+- release 随包交付完整 Python、浏览器、Linux 动态模块和字体；install/upgrade/dev/start 接入共同准备与本地校验。旧 release 原有一次 upgrade 已在 Linux CI 完成真实 Memory 同步，OFFSET、启停/自定义 registry 和旧环境 sentinel 的 checksum 保持；剩余普通 UID 与 Windows 载荷检查继续进行。
+- 安装/准备失败与进程清理 7 项、升级器 32 项、Admin 48 项、三类 Worker provision 32 项及 Admin/Agent TypeScript 检查通过；Manager/MCP 相关检查通过。3 项 builtin 生产测试失败在未修改 main 副本复现，另行记录，不纳入此项修复。
+- 早期 release 空实例迁移缺陷按用户决定暂不解决；未部署或重启本机 Crabot。文档协议与实施计划已独立发布，本任务在隔离 worktree/PR 中交付。
+
 ### Manager MCP 当前 episode 热加载恢复：已实现，待部署
 
 - `git blame` 确认旧 Engine/builtin Worker callback 保留；Manager 在 PR #162 引入的 episode 目录冻结阻断新 MCP。按 2026-10-05 已确认 spec 改为后续 turn 消费当前连接快照，无须重开会话。

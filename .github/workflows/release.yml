@@ -17,6 +17,7 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: ${{ github.event_name != 'pull_request' }}
       matrix:
         include:
           - os: ubuntu-22.04
@@ -250,10 +251,10 @@ jobs:
             if (Test-Path $mod) {
               $dest = Join-Path $TempDir $mod
               New-Item -ItemType Directory -Force -Path $dest | Out-Null
-            # 构建留下的无效检查链接不是运行时文件，不能让它中断载荷复制。
-            Get-ChildItem -LiteralPath $mod -Force |
-              Where-Object { $_.Name -ne 'node_modules_link_check' } |
-              Copy-Item -Destination $dest -Recurse
+              # 构建留下的无效检查链接不是运行时文件，不能让它中断载荷复制。
+              Get-ChildItem -LiteralPath $mod -Force |
+                Where-Object { $_.Name -ne 'node_modules_link_check' } |
+                Copy-Item -Destination $dest -Recurse
               Remove-Item -Recurse -Force "$dest\src" -ErrorAction SilentlyContinue
               Remove-Item -Recurse -Force "$dest\test*" -ErrorAction SilentlyContinue
               Remove-Item -Recurse -Force "$dest\.venv" -ErrorAction SilentlyContinue
