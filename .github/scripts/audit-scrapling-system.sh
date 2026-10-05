@@ -8,6 +8,7 @@ output=$3
 baseline=$4
 mkdir -p "$output"
 fixture=$(mktemp -d /tmp/crabot-system-audit-XXXXXX)
+chmod 0755 "$fixture"  # 普通用户需要穿过安装根的父目录。
 root=$fixture/install-custom
 persons=(crabot-audit-a crabot-audit-b)
 cleanup() {
