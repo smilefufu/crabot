@@ -1,0 +1,930 @@
+{
+  "arm64": [
+    {
+      "package": "fonts-dejavu-core",
+      "version": "2.37-2build1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/f/fonts-dejavu/fonts-dejavu-core_2.37-2build1_all.deb",
+      "sha256": "c33fe8bf33b50d99d6448804a090123b1bbba37d7a8703c630695676d110a47d"
+    },
+    {
+      "package": "fonts-liberation",
+      "version": "1:1.07.4-11",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/f/fonts-liberation/fonts-liberation_1.07.4-11_all.deb",
+      "sha256": "d359cba9c3ac8a40fb57773881e20827845e9fab1b2d6fd25cde4b7bade7d57f"
+    },
+    {
+      "package": "libasound2",
+      "version": "1.2.6.1-1ubuntu1.2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/a/alsa-lib/libasound2_1.2.6.1-1ubuntu1.2_arm64.deb",
+      "sha256": "d9c6a79794e3cb8c46c2a87734a367eeb7f216cca7b58a533e836c33f3020eea"
+    },
+    {
+      "package": "libatk-bridge2.0-0",
+      "version": "2.38.0-3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/a/at-spi2-atk/libatk-bridge2.0-0_2.38.0-3_arm64.deb",
+      "sha256": "85a170ffcc68a3bc16acb7e520de3e6a8eeaedc3e98e7c32254b502fee03ffbf"
+    },
+    {
+      "package": "libatk1.0-0",
+      "version": "2.36.0-3build1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/a/atk1.0/libatk1.0-0_2.36.0-3build1_arm64.deb",
+      "sha256": "c666ec66a5ef79274d14528332aaac5be4aeb5e543d8d0f31b9ad86e64db6dad"
+    },
+    {
+      "package": "libatspi2.0-0",
+      "version": "2.44.0-3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/a/at-spi2-core/libatspi2.0-0_2.44.0-3_arm64.deb",
+      "sha256": "aa0a5a64d6afde3b22053d80a4c450121d18bb2b0b94a41af3584d81081c51f2"
+    },
+    {
+      "package": "libavahi-client3",
+      "version": "0.8-5ubuntu5.5",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/a/avahi/libavahi-client3_0.8-5ubuntu5.5_arm64.deb",
+      "sha256": "f6ec39b922749f0d73cd54ca1ee711b091981e1f338e25ccd16a6ba13651347e"
+    },
+    {
+      "package": "libavahi-common3",
+      "version": "0.8-5ubuntu5.5",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/a/avahi/libavahi-common3_0.8-5ubuntu5.5_arm64.deb",
+      "sha256": "34b536627f060e193cb46c853f0aca0baf5cbb0a585f02d7a2f54c4a0157860b"
+    },
+    {
+      "package": "libblkid1",
+      "version": "2.37.2-4ubuntu3.6",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/u/util-linux/libblkid1_2.37.2-4ubuntu3.6_arm64.deb",
+      "sha256": "2682e7f03f3d0a991e06bd2cb69a69c4cc80b3cdfc12a9a64b6f343b1cc056a3"
+    },
+    {
+      "package": "libbrotli1",
+      "version": "1.0.9-2build6",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/b/brotli/libbrotli1_1.0.9-2build6_arm64.deb",
+      "sha256": "6ce71a1452d7ec3ed2404db11a4d0aea1326b8fa9bb904493b49ff873b70d6a5"
+    },
+    {
+      "package": "libbsd0",
+      "version": "0.11.5-1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libb/libbsd/libbsd0_0.11.5-1_arm64.deb",
+      "sha256": "19703bfe6fde9a161e42f5107451a46cc182a62dd0621a55d06aec7dc372991d"
+    },
+    {
+      "package": "libcairo2",
+      "version": "1.16.0-5ubuntu2.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/c/cairo/libcairo2_1.16.0-5ubuntu2.1_arm64.deb",
+      "sha256": "e4e808280c412ca16324893bc14e411eee29077cdb80a78b1192d376c6bb9707"
+    },
+    {
+      "package": "libcap2",
+      "version": "1:2.44-1ubuntu0.22.04.3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libc/libcap2/libcap2_2.44-1ubuntu0.22.04.3_arm64.deb",
+      "sha256": "7a8eb6549355a16f327ede574f12e6ebed983b52ab38ce4a618e6e9274b9d4f5"
+    },
+    {
+      "package": "libcom-err2",
+      "version": "1.46.5-2ubuntu1.2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/e/e2fsprogs/libcom-err2_1.46.5-2ubuntu1.2_arm64.deb",
+      "sha256": "3a7b6a2b34c2171b7c8f9ddae58c93b6e416fcd9ac4fa8eb5a15a1a8f3f99afa"
+    },
+    {
+      "package": "libcups2",
+      "version": "2.4.1op1-1ubuntu4.21",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/c/cups/libcups2_2.4.1op1-1ubuntu4.21_arm64.deb",
+      "sha256": "bc8c1814eae210ac1e3e805b738a78996a59d0e4deff1af47540afdc46d48933"
+    },
+    {
+      "package": "libdatrie1",
+      "version": "0.2.13-2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libd/libdatrie/libdatrie1_0.2.13-2_arm64.deb",
+      "sha256": "e39534ea64ed96a814aaac778341e06aeaa8a4096afc5e19544f6c3c59d18003"
+    },
+    {
+      "package": "libdbus-1-3",
+      "version": "1.12.20-2ubuntu4.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/d/dbus/libdbus-1-3_1.12.20-2ubuntu4.1_arm64.deb",
+      "sha256": "2a0c67f581bca221f63db6a6ecfb19da78cd2581f78d7690e6758ca7ca9a656e"
+    },
+    {
+      "package": "libdrm2",
+      "version": "2.4.113-2~ubuntu0.22.04.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libd/libdrm/libdrm2_2.4.113-2%7eubuntu0.22.04.1_arm64.deb",
+      "sha256": "d61b3eb23638adaed392ae6f48cf9f6ec997d089baecc357663b196c578777b8"
+    },
+    {
+      "package": "libexpat1",
+      "version": "2.4.7-1ubuntu0.9",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/e/expat/libexpat1_2.4.7-1ubuntu0.9_arm64.deb",
+      "sha256": "b61d2bdf82134f6db0ba5c73d9cfe88805a64cbadbd0d0dffff8410958aab005"
+    },
+    {
+      "package": "libffi8",
+      "version": "3.4.2-4",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libf/libffi/libffi8_3.4.2-4_arm64.deb",
+      "sha256": "a0cdf938e8da19bd2252c681f80268609a32d06496a1f8d0ebe1fa41debec697"
+    },
+    {
+      "package": "libfontconfig1",
+      "version": "2.13.1-4.2ubuntu5",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/f/fontconfig/libfontconfig1_2.13.1-4.2ubuntu5_arm64.deb",
+      "sha256": "4acdc48678549bfd1b7b0cc3b976d754fc08dea0643ca6806ffc913fb0e9ade4"
+    },
+    {
+      "package": "libfreetype6",
+      "version": "2.11.1+dfsg-1ubuntu0.3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/f/freetype/libfreetype6_2.11.1%2bdfsg-1ubuntu0.3_arm64.deb",
+      "sha256": "2dfec0077df5cef76c6247610ed4d164ec6ce27fb2982313275ead0832ac745d"
+    },
+    {
+      "package": "libfribidi0",
+      "version": "1.0.8-2ubuntu3.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/f/fribidi/libfribidi0_1.0.8-2ubuntu3.1_arm64.deb",
+      "sha256": "4a907f0dce32ca68434762906fba65affad120a3710a553192e0ed8eca6f6553"
+    },
+    {
+      "package": "libgbm1",
+      "version": "23.2.1-1ubuntu3.1~22.04.4",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/m/mesa/libgbm1_23.2.1-1ubuntu3.1%7e22.04.4_arm64.deb",
+      "sha256": "3cba5492a75b87677b4a81fe2cee27d35ec9795b43edfd9e2b842c7247392df0"
+    },
+    {
+      "package": "libgcrypt20",
+      "version": "1.9.4-3ubuntu3.3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libg/libgcrypt20/libgcrypt20_1.9.4-3ubuntu3.3_arm64.deb",
+      "sha256": "bd98a709641e7e61c8798bb84030886a96fd56424b053a6e9996a8391ce20597"
+    },
+    {
+      "package": "libglib2.0-0",
+      "version": "2.72.4-0ubuntu2.10",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-0_2.72.4-0ubuntu2.10_arm64.deb",
+      "sha256": "b3827c964c46d94d1e7d07e53c9117889c630a7c0b8d0d8cd5788d4f71a87918"
+    },
+    {
+      "package": "libgmp10",
+      "version": "2:6.2.1+dfsg-3ubuntu1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/g/gmp/libgmp10_6.2.1%2bdfsg-3ubuntu1_arm64.deb",
+      "sha256": "32233a3bf7c8b19e86ef3629334f0bece716bb163605d12e0d3a443d57a401d7"
+    },
+    {
+      "package": "libgnutls30",
+      "version": "3.7.3-4ubuntu1.9",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/g/gnutls28/libgnutls30_3.7.3-4ubuntu1.9_arm64.deb",
+      "sha256": "cce4bf33fa79446ddee42a992e569f12a57c1a6f8916a2e8349249be0f7ad655"
+    },
+    {
+      "package": "libgpg-error0",
+      "version": "1.43-3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libg/libgpg-error/libgpg-error0_1.43-3_arm64.deb",
+      "sha256": "ffa9029cdeb2786e0db1f614f3d2205f75f466a66b25e22aa89ecdf814491875"
+    },
+    {
+      "package": "libgraphite2-3",
+      "version": "1.3.14-1ubuntu0.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/g/graphite2/libgraphite2-3_1.3.14-1ubuntu0.1_arm64.deb",
+      "sha256": "14184a218add1289c15be63ac6cb505cbb71db5ccd1ddff35ecc8114413228d8"
+    },
+    {
+      "package": "libgssapi-krb5-2",
+      "version": "1.19.2-2ubuntu0.10",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/k/krb5/libgssapi-krb5-2_1.19.2-2ubuntu0.10_arm64.deb",
+      "sha256": "e1001bffd91dd306498ec1824a8330014399a0e0889a562069003726348d7f55"
+    },
+    {
+      "package": "libharfbuzz0b",
+      "version": "2.7.4-1ubuntu3.2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/h/harfbuzz/libharfbuzz0b_2.7.4-1ubuntu3.2_arm64.deb",
+      "sha256": "7f4117fe9697ec1f8010c72aed15c5afa6e9e8e29504f0a73bc0eb7d7df4366a"
+    },
+    {
+      "package": "libhogweed6",
+      "version": "3.7.3-1build2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/n/nettle/libhogweed6_3.7.3-1build2_arm64.deb",
+      "sha256": "844e5d093dd3982a85c134d47a9e22b129123fb817eb3eea96e936805b0f5170"
+    },
+    {
+      "package": "libidn2-0",
+      "version": "2.3.2-2build1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libi/libidn2/libidn2-0_2.3.2-2build1_arm64.deb",
+      "sha256": "aeb29cc8deedc0710a97e44088ef0271dfe1197e77c0a0fc0c5602e14aeb938f"
+    },
+    {
+      "package": "libk5crypto3",
+      "version": "1.19.2-2ubuntu0.10",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/k/krb5/libk5crypto3_1.19.2-2ubuntu0.10_arm64.deb",
+      "sha256": "e51d72b346813b57f26c09827f96eb856adb9b553814fbc61a5e8c8a25d292a3"
+    },
+    {
+      "package": "libkeyutils1",
+      "version": "1.6.1-2ubuntu3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/k/keyutils/libkeyutils1_1.6.1-2ubuntu3_arm64.deb",
+      "sha256": "fc26b34c487ea5187585ee0f2c67c738b97e8bae434cca4b546d86743b9e6c80"
+    },
+    {
+      "package": "libkrb5-3",
+      "version": "1.19.2-2ubuntu0.10",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/k/krb5/libkrb5-3_1.19.2-2ubuntu0.10_arm64.deb",
+      "sha256": "8de066e35be457bf0c53c995f8baa270ad61566dcd892d0a7cc3c0438ff513b7"
+    },
+    {
+      "package": "libkrb5support0",
+      "version": "1.19.2-2ubuntu0.10",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/k/krb5/libkrb5support0_1.19.2-2ubuntu0.10_arm64.deb",
+      "sha256": "c535d5ccf5ea99fb63d86b33082c5ed553a6aa8c7cbf3fed1ef0dac1d7b7dcd6"
+    },
+    {
+      "package": "liblz4-1",
+      "version": "1.9.3-2build2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/l/lz4/liblz4-1_1.9.3-2build2_arm64.deb",
+      "sha256": "3e2274893e0963c758f0d18ba80d033736909373247a7deb211e9ff590a09133"
+    },
+    {
+      "package": "liblzma5",
+      "version": "5.2.5-2ubuntu1.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/x/xz-utils/liblzma5_5.2.5-2ubuntu1.1_arm64.deb",
+      "sha256": "97f4c7e360aa229d3bf0a5b56b204652ce4f1704536dc0256c0e2537b356f397"
+    },
+    {
+      "package": "libmd0",
+      "version": "1.0.4-1build1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libm/libmd/libmd0_1.0.4-1build1_arm64.deb",
+      "sha256": "6f87f19f71411a94ae370f7f9bcf4c7dfb5d4393f11de99634ac3137448ad678"
+    },
+    {
+      "package": "libmount1",
+      "version": "2.37.2-4ubuntu3.6",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/u/util-linux/libmount1_2.37.2-4ubuntu3.6_arm64.deb",
+      "sha256": "a0a733b6fe171af62dc034eebe439ba680a108ae23e518c637e7adfe42236c01"
+    },
+    {
+      "package": "libnettle8",
+      "version": "3.7.3-1build2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/n/nettle/libnettle8_3.7.3-1build2_arm64.deb",
+      "sha256": "bcd667d9a51c2474f7ffc52807ab4a24f8b877b6da1a6f5b75e50e48ec4d634a"
+    },
+    {
+      "package": "libnspr4",
+      "version": "2:4.35-0ubuntu0.22.04.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/n/nspr/libnspr4_4.35-0ubuntu0.22.04.1_arm64.deb",
+      "sha256": "0a256ba7ad57f2ff418fca9c7a004ecc5e1fd277bbbafc66cdb712d19019e58e"
+    },
+    {
+      "package": "libnss3",
+      "version": "2:3.98-0ubuntu0.22.04.4",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/n/nss/libnss3_3.98-0ubuntu0.22.04.4_arm64.deb",
+      "sha256": "570de4d8e9b98c3dbd6c113fcc752d5420a64851b2d1f40c5796124f051cda0f"
+    },
+    {
+      "package": "libp11-kit0",
+      "version": "0.24.0-6ubuntu0.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/p/p11-kit/libp11-kit0_0.24.0-6ubuntu0.1_arm64.deb",
+      "sha256": "0cfad0790be90ccb56de67e6c58a67d73e4769028eb19a2c0d799fa19478c2ff"
+    },
+    {
+      "package": "libpango-1.0-0",
+      "version": "1.50.6+ds-2ubuntu1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/p/pango1.0/libpango-1.0-0_1.50.6%2bds-2ubuntu1_arm64.deb",
+      "sha256": "84ef47ba445bd2680be589c8c8d725477a01034dc74f1c37c26e5488bb033407"
+    },
+    {
+      "package": "libpcre2-8-0",
+      "version": "10.39-3ubuntu0.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/p/pcre2/libpcre2-8-0_10.39-3ubuntu0.1_arm64.deb",
+      "sha256": "b85beefd54108f1c34a89cb26688eb1b2eeaa099e4995091295a1d39f9c67a91"
+    },
+    {
+      "package": "libpcre3",
+      "version": "2:8.39-13ubuntu0.22.04.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/p/pcre3/libpcre3_8.39-13ubuntu0.22.04.1_arm64.deb",
+      "sha256": "ff6766bf08ccdb87b684339cceeb64a35bb34412b4978d7d0798a9bca6b71a22"
+    },
+    {
+      "package": "libpixman-1-0",
+      "version": "0.40.0-1ubuntu0.22.04.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/p/pixman/libpixman-1-0_0.40.0-1ubuntu0.22.04.1_arm64.deb",
+      "sha256": "37947fe112a097a2611b55a33a97ac0737a4051c1f98a962f149fcc397f60c45"
+    },
+    {
+      "package": "libpng16-16",
+      "version": "1.6.37-3ubuntu0.6",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libp/libpng1.6/libpng16-16_1.6.37-3ubuntu0.6_arm64.deb",
+      "sha256": "d3e87c9de2166c39e42830881c155f749d1bc26dbdba9bbb2e20286af51fa3c7"
+    },
+    {
+      "package": "libselinux1",
+      "version": "3.3-1build2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libs/libselinux/libselinux1_3.3-1build2_arm64.deb",
+      "sha256": "3a0726b2174a40fa28e74712867aa6e40d3d725543e8f668af9e9e59a28c817c"
+    },
+    {
+      "package": "libsqlite3-0",
+      "version": "3.37.2-2ubuntu0.8",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/s/sqlite3/libsqlite3-0_3.37.2-2ubuntu0.8_arm64.deb",
+      "sha256": "0bb81a51a7a56aa66a6bf981e6a4dc4040b1873dc2fc29e8834c977585068e9c"
+    },
+    {
+      "package": "libsystemd0",
+      "version": "249.11-0ubuntu3.22",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/s/systemd/libsystemd0_249.11-0ubuntu3.22_arm64.deb",
+      "sha256": "9805c8c136fd41d9bff355297fdf6f811529960908711f647e38e1fd39a198ec"
+    },
+    {
+      "package": "libtasn1-6",
+      "version": "4.18.0-4ubuntu0.2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libt/libtasn1-6/libtasn1-6_4.18.0-4ubuntu0.2_arm64.deb",
+      "sha256": "d9f0ed3ca0cb86f6116bb59388aea92b021c05797b4fba7451a2fed594cb1e1e"
+    },
+    {
+      "package": "libthai0",
+      "version": "0.1.29-1build1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libt/libthai/libthai0_0.1.29-1build1_arm64.deb",
+      "sha256": "f09af6bd95835f053dfbc21f16efaf4ae6236165bc984e7fde46534eb4066988"
+    },
+    {
+      "package": "libudev1",
+      "version": "249.11-0ubuntu3.22",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/s/systemd/libudev1_249.11-0ubuntu3.22_arm64.deb",
+      "sha256": "ec814eee0c7a398e031ece85d07c0108c16f609fb033d7b77700e9106ce86130"
+    },
+    {
+      "package": "libunistring2",
+      "version": "1.0-1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libu/libunistring/libunistring2_1.0-1_arm64.deb",
+      "sha256": "59e4af5c1fac70d1fbc19f3c732331ace8449f1f7112887e7b56b8370bd8942b"
+    },
+    {
+      "package": "libuuid1",
+      "version": "2.37.2-4ubuntu3.6",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/u/util-linux/libuuid1_2.37.2-4ubuntu3.6_arm64.deb",
+      "sha256": "2478ccd8df956d8e5cf087bff1471bcd9991838be9c7999e5737d092034c492d"
+    },
+    {
+      "package": "libwayland-server0",
+      "version": "1.20.0-1ubuntu0.1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/w/wayland/libwayland-server0_1.20.0-1ubuntu0.1_arm64.deb",
+      "sha256": "fb81c068a3b98ca012a21a71c1b031e5d16c5a8423cb112ac86aec8eef556d49"
+    },
+    {
+      "package": "libx11-6",
+      "version": "2:1.7.5-1ubuntu0.3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libx11/libx11-6_1.7.5-1ubuntu0.3_arm64.deb",
+      "sha256": "3cabb679c6f3a72c8ad7e26a4382e012df35abe1f5b521a7e4d91090bc35a2bd"
+    },
+    {
+      "package": "libxau6",
+      "version": "1:1.0.9-1build5",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxau/libxau6_1.0.9-1build5_arm64.deb",
+      "sha256": "077ac2db5df32b02e68e3d4de0b4cc11e0114bf2ee8a94866a437757d1722d92"
+    },
+    {
+      "package": "libxcb-randr0",
+      "version": "1.14-3ubuntu3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxcb/libxcb-randr0_1.14-3ubuntu3_arm64.deb",
+      "sha256": "93096f58069737b07101b00310aea8c0b82c1321053b052475a868d2b059a54e"
+    },
+    {
+      "package": "libxcb-render0",
+      "version": "1.14-3ubuntu3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxcb/libxcb-render0_1.14-3ubuntu3_arm64.deb",
+      "sha256": "3d2bea3a894696841d0c6fdd2d55e99d3d2e58c3bd803629f63cf9ea01e477bf"
+    },
+    {
+      "package": "libxcb-shm0",
+      "version": "1.14-3ubuntu3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxcb/libxcb-shm0_1.14-3ubuntu3_arm64.deb",
+      "sha256": "53129da6a73a040b970305e81fb63ca1ed71b14a556e5847d41086136d5331ad"
+    },
+    {
+      "package": "libxcb1",
+      "version": "1.14-3ubuntu3",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxcb/libxcb1_1.14-3ubuntu3_arm64.deb",
+      "sha256": "0774d9a96623001eb0bb2d6931b773655deb86de43d4c0840ec5f1dfa85c6810"
+    },
+    {
+      "package": "libxcomposite1",
+      "version": "1:0.4.5-1build2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxcomposite/libxcomposite1_0.4.5-1build2_arm64.deb",
+      "sha256": "35b036c97fee61df4981d9e3e08a26e3110a41b30992bd5e11b0cf04c1e16b47"
+    },
+    {
+      "package": "libxdamage1",
+      "version": "1:1.1.5-2build2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxdamage/libxdamage1_1.1.5-2build2_arm64.deb",
+      "sha256": "8075485c8a60869c7490834beb3a40ee2f448b94cab00b1dca08e8103d5c5514"
+    },
+    {
+      "package": "libxdmcp6",
+      "version": "1:1.1.3-0ubuntu5",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu5_arm64.deb",
+      "sha256": "aa2a89a256c30844db3831e0b027d31c0d3a9f0e3108aa7dd1310a80fa21b453"
+    },
+    {
+      "package": "libxext6",
+      "version": "2:1.3.4-1build1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxext/libxext6_1.3.4-1build1_arm64.deb",
+      "sha256": "8abb17f19b47e22e0e85b85e7c59ed0cba5faea335e18eccbe499242608e984f"
+    },
+    {
+      "package": "libxfixes3",
+      "version": "1:6.0.0-1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxfixes/libxfixes3_6.0.0-1_arm64.deb",
+      "sha256": "6de064af315c0aa15d299e390583fce689d58e3e463b57c0fd35804c86c52d4a"
+    },
+    {
+      "package": "libxi6",
+      "version": "2:1.8-1build1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxi/libxi6_1.8-1build1_arm64.deb",
+      "sha256": "c39433b0046ed2a7151eb772b3fb4c6588ecd454328a40b3688574d0d52c9512"
+    },
+    {
+      "package": "libxkbcommon0",
+      "version": "1.4.0-1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxkbcommon/libxkbcommon0_1.4.0-1_arm64.deb",
+      "sha256": "451be798e301077cde9d34afe00886e6c77699b1734985c2191a7a4ba783911d"
+    },
+    {
+      "package": "libxrandr2",
+      "version": "2:1.5.2-1build1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxrandr/libxrandr2_1.5.2-1build1_arm64.deb",
+      "sha256": "6edc5451bbdfad37714c33eab557bbace9e0f796ed817b37d56c0b9d091da516"
+    },
+    {
+      "package": "libxrender1",
+      "version": "1:0.9.10-1build4",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxrender/libxrender1_0.9.10-1build4_arm64.deb",
+      "sha256": "e9a67645ce73ac119f5ebbf95ea42de5a39dddc03f57bfbacb28d82419d3e6b1"
+    },
+    {
+      "package": "libzstd1",
+      "version": "1.4.8+dfsg-3build1",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libz/libzstd/libzstd1_1.4.8%2bdfsg-3build1_arm64.deb",
+      "sha256": "0102eb80384c2432c4be819663341a1c4e511d05f13ec1467643696531ec6491"
+    },
+    {
+      "package": "zlib1g",
+      "version": "1:1.2.11.dfsg-2ubuntu9.2",
+      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu9.2_arm64.deb",
+      "sha256": "cfd99d1ca41e710fdd3f68bfdc4d36dd24e14377656764f00b215b89cf6976e8"
+    }
+  ],
+  "x64": [
+    {
+      "package": "fonts-dejavu-core",
+      "version": "2.37-2build1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/f/fonts-dejavu/fonts-dejavu-core_2.37-2build1_all.deb",
+      "sha256": "c33fe8bf33b50d99d6448804a090123b1bbba37d7a8703c630695676d110a47d"
+    },
+    {
+      "package": "fonts-liberation",
+      "version": "1:1.07.4-11",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/f/fonts-liberation/fonts-liberation_1.07.4-11_all.deb",
+      "sha256": "d359cba9c3ac8a40fb57773881e20827845e9fab1b2d6fd25cde4b7bade7d57f"
+    },
+    {
+      "package": "libasound2",
+      "version": "1.2.6.1-1ubuntu1.2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/a/alsa-lib/libasound2_1.2.6.1-1ubuntu1.2_amd64.deb",
+      "sha256": "dce4ce1043cde35f4bc375a4b1bd84badd5dec7e656ea2a8849edf9215bc8c33"
+    },
+    {
+      "package": "libatk-bridge2.0-0",
+      "version": "2.38.0-3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/a/at-spi2-atk/libatk-bridge2.0-0_2.38.0-3_amd64.deb",
+      "sha256": "98924a5b376da9c075663ea61721fb0d91a55be3473c4643286491247f229b48"
+    },
+    {
+      "package": "libatk1.0-0",
+      "version": "2.36.0-3build1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/a/atk1.0/libatk1.0-0_2.36.0-3build1_amd64.deb",
+      "sha256": "598b522b64a20c9a3ea44fa816b539976c39d41bf2bccd104fed49954638f0f9"
+    },
+    {
+      "package": "libatspi2.0-0",
+      "version": "2.44.0-3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/a/at-spi2-core/libatspi2.0-0_2.44.0-3_amd64.deb",
+      "sha256": "93b243e9d8fb3de9ba78251cf3dec2c6b66836ea7329ae4026981ce8dda62de4"
+    },
+    {
+      "package": "libavahi-client3",
+      "version": "0.8-5ubuntu5.5",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/a/avahi/libavahi-client3_0.8-5ubuntu5.5_amd64.deb",
+      "sha256": "4c4a1aba2bb173f2b238f34d236664a1f695ffccb56aef3abba797393f52ccac"
+    },
+    {
+      "package": "libavahi-common3",
+      "version": "0.8-5ubuntu5.5",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/a/avahi/libavahi-common3_0.8-5ubuntu5.5_amd64.deb",
+      "sha256": "4a1c7c6aa1c1832e7aa703dce1c4f9b6970d7df47243d8f5352fd22b2fb2fac6"
+    },
+    {
+      "package": "libblkid1",
+      "version": "2.37.2-4ubuntu3.6",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/u/util-linux/libblkid1_2.37.2-4ubuntu3.6_amd64.deb",
+      "sha256": "bf9ab18457e0a10879951b01c87156bdf503bdeb0f87ae0f0f81ec62cb000279"
+    },
+    {
+      "package": "libbrotli1",
+      "version": "1.0.9-2build6",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/b/brotli/libbrotli1_1.0.9-2build6_amd64.deb",
+      "sha256": "8e6aa2dfd44df287b9fb227862f3b6062ec074dd39a247874edfe12e1dcc3841"
+    },
+    {
+      "package": "libbsd0",
+      "version": "0.11.5-1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libb/libbsd/libbsd0_0.11.5-1_amd64.deb",
+      "sha256": "09367acdf59f28ffb71ba7bc36c516cff03b2765930cf9be7bb7ea7273e4c312"
+    },
+    {
+      "package": "libcairo2",
+      "version": "1.16.0-5ubuntu2.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/c/cairo/libcairo2_1.16.0-5ubuntu2.1_amd64.deb",
+      "sha256": "096c5309b8fb37aeb32636f13c58309005ef4aa73aaa4c4299c2e824c1fbd359"
+    },
+    {
+      "package": "libcap2",
+      "version": "1:2.44-1ubuntu0.22.04.3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libc/libcap2/libcap2_2.44-1ubuntu0.22.04.3_amd64.deb",
+      "sha256": "c497efb7fa3cd19a7ff297d95c7c5d678063c80c9fc230c9d034a8ee02ca8446"
+    },
+    {
+      "package": "libcom-err2",
+      "version": "1.46.5-2ubuntu1.2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/e/e2fsprogs/libcom-err2_1.46.5-2ubuntu1.2_amd64.deb",
+      "sha256": "552bc8169451cfdcf174a8da845b13ced0a55777149af5cf47491193161ed791"
+    },
+    {
+      "package": "libcups2",
+      "version": "2.4.1op1-1ubuntu4.21",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/c/cups/libcups2_2.4.1op1-1ubuntu4.21_amd64.deb",
+      "sha256": "563f1355772c47290633c0283e6c53f6ba109d4961dee3397c9ed96359722630"
+    },
+    {
+      "package": "libdatrie1",
+      "version": "0.2.13-2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libd/libdatrie/libdatrie1_0.2.13-2_amd64.deb",
+      "sha256": "7203107da01abcaf8f88db41e4ccc949285e20326edacdfe59ebb321a16026a0"
+    },
+    {
+      "package": "libdbus-1-3",
+      "version": "1.12.20-2ubuntu4.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/d/dbus/libdbus-1-3_1.12.20-2ubuntu4.1_amd64.deb",
+      "sha256": "6a5171696c3b05aca273d637d9c0501c8033fda64a971e09fd545bc1ab72ca1e"
+    },
+    {
+      "package": "libdrm2",
+      "version": "2.4.113-2~ubuntu0.22.04.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libd/libdrm/libdrm2_2.4.113-2%7eubuntu0.22.04.1_amd64.deb",
+      "sha256": "555925f1caedfd98d89bae3bc11b4fe3401c2c4817dbbafcab25e1144582e946"
+    },
+    {
+      "package": "libexpat1",
+      "version": "2.4.7-1ubuntu0.9",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/e/expat/libexpat1_2.4.7-1ubuntu0.9_amd64.deb",
+      "sha256": "0ee31596316d2275ab351d11290c63e7547fff0ecd7f431e56855cb7c5f18588"
+    },
+    {
+      "package": "libffi8",
+      "version": "3.4.2-4",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libf/libffi/libffi8_3.4.2-4_amd64.deb",
+      "sha256": "b4f88c91fa6f4c942097be6abfc365fb133c5e147640168cbb7704fd855eac10"
+    },
+    {
+      "package": "libfontconfig1",
+      "version": "2.13.1-4.2ubuntu5",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/f/fontconfig/libfontconfig1_2.13.1-4.2ubuntu5_amd64.deb",
+      "sha256": "6be0c141aed23d9eb801658d248fd667bea2b8a9ccab4db7b596a69ffe3393fd"
+    },
+    {
+      "package": "libfreetype6",
+      "version": "2.11.1+dfsg-1ubuntu0.3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/f/freetype/libfreetype6_2.11.1%2bdfsg-1ubuntu0.3_amd64.deb",
+      "sha256": "729f5a3a72069ddcef6a54f6825178667477625574925504594769665897afbc"
+    },
+    {
+      "package": "libfribidi0",
+      "version": "1.0.8-2ubuntu3.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/f/fribidi/libfribidi0_1.0.8-2ubuntu3.1_amd64.deb",
+      "sha256": "75d7d833d35a0eef11501c542bd31c0b52fc937be0fcc08384674455439223a1"
+    },
+    {
+      "package": "libgbm1",
+      "version": "23.2.1-1ubuntu3.1~22.04.4",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/m/mesa/libgbm1_23.2.1-1ubuntu3.1%7e22.04.4_amd64.deb",
+      "sha256": "10d37ffd63f8f98fc9a1ad5b32abc7a9da760f4ed85c806d98f10a61c17f8ef5"
+    },
+    {
+      "package": "libgcrypt20",
+      "version": "1.9.4-3ubuntu3.3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libg/libgcrypt20/libgcrypt20_1.9.4-3ubuntu3.3_amd64.deb",
+      "sha256": "8f16329a0aabf4900271a3687890721bbef307e60983acae5b92eeff12e799b3"
+    },
+    {
+      "package": "libglib2.0-0",
+      "version": "2.72.4-0ubuntu2.10",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/g/glib2.0/libglib2.0-0_2.72.4-0ubuntu2.10_amd64.deb",
+      "sha256": "b82973c5d9698e48297000e74d2dc7431e726db8f0f948ea56be7f9e4c9e66fb"
+    },
+    {
+      "package": "libgmp10",
+      "version": "2:6.2.1+dfsg-3ubuntu1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gmp/libgmp10_6.2.1%2bdfsg-3ubuntu1_amd64.deb",
+      "sha256": "d199a77e11701d4d620dd4f62e05740e3072dce893856ea3bbaa6ae9fa19fef1"
+    },
+    {
+      "package": "libgnutls30",
+      "version": "3.7.3-4ubuntu1.9",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gnutls28/libgnutls30_3.7.3-4ubuntu1.9_amd64.deb",
+      "sha256": "65e08f0b5d1e620cc5cc9478cd1035f83ea752a6fae23141afd2d111a8f6c555"
+    },
+    {
+      "package": "libgpg-error0",
+      "version": "1.43-3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libg/libgpg-error/libgpg-error0_1.43-3_amd64.deb",
+      "sha256": "1fbacdf9bd1e431cee874a697b339f6f925182bc79bba5a112b53669b33265c5"
+    },
+    {
+      "package": "libgraphite2-3",
+      "version": "1.3.14-1ubuntu0.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/g/graphite2/libgraphite2-3_1.3.14-1ubuntu0.1_amd64.deb",
+      "sha256": "fefc2bc510b80a7a2a8570352be4f0bf9e2d36d122d2c8316cfa008103a2a7e5"
+    },
+    {
+      "package": "libgssapi-krb5-2",
+      "version": "1.19.2-2ubuntu0.10",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/k/krb5/libgssapi-krb5-2_1.19.2-2ubuntu0.10_amd64.deb",
+      "sha256": "08e98a3dc74361cdb13c0d68bc73e0352552490546c1ad3ce5bff5426f6a2dfe"
+    },
+    {
+      "package": "libharfbuzz0b",
+      "version": "2.7.4-1ubuntu3.2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/h/harfbuzz/libharfbuzz0b_2.7.4-1ubuntu3.2_amd64.deb",
+      "sha256": "e895a3c842c60296549d09c2ffafb4098b853e501e28dc8de710b90357007616"
+    },
+    {
+      "package": "libhogweed6",
+      "version": "3.7.3-1build2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/n/nettle/libhogweed6_3.7.3-1build2_amd64.deb",
+      "sha256": "2402ac51ebc760799b01f3fd4933126c5eb446e5b043832601fb589f5e50c363"
+    },
+    {
+      "package": "libidn2-0",
+      "version": "2.3.2-2build1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libi/libidn2/libidn2-0_2.3.2-2build1_amd64.deb",
+      "sha256": "bc935e1871aa4a75d3f4ff549af32b7316aecfbea2200d85055878767b8398c8"
+    },
+    {
+      "package": "libk5crypto3",
+      "version": "1.19.2-2ubuntu0.10",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/k/krb5/libk5crypto3_1.19.2-2ubuntu0.10_amd64.deb",
+      "sha256": "40429c0099678fbc35045f0c63a10bc3490251d80cf1006095eaa0272c8d5e27"
+    },
+    {
+      "package": "libkeyutils1",
+      "version": "1.6.1-2ubuntu3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/k/keyutils/libkeyutils1_1.6.1-2ubuntu3_amd64.deb",
+      "sha256": "940daf78ee0229549b4eabc92ffd79dd038ed96a44e2e912305a23540cf22a0a"
+    },
+    {
+      "package": "libkrb5-3",
+      "version": "1.19.2-2ubuntu0.10",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/k/krb5/libkrb5-3_1.19.2-2ubuntu0.10_amd64.deb",
+      "sha256": "0da3e0df7d6314615160a42f65ff345986783be02cd65a6ce797cfbacc7bcb0d"
+    },
+    {
+      "package": "libkrb5support0",
+      "version": "1.19.2-2ubuntu0.10",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/k/krb5/libkrb5support0_1.19.2-2ubuntu0.10_amd64.deb",
+      "sha256": "0406052ac2d267f05088ada6d36df61aaa338cbe8d5e13fb1d7f79da560817ed"
+    },
+    {
+      "package": "liblz4-1",
+      "version": "1.9.3-2build2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/l/lz4/liblz4-1_1.9.3-2build2_amd64.deb",
+      "sha256": "ac9b54d0feb840345060c74fb687675c5e1eb2b195effafae38c5f9991041e98"
+    },
+    {
+      "package": "liblzma5",
+      "version": "5.2.5-2ubuntu1.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xz-utils/liblzma5_5.2.5-2ubuntu1.1_amd64.deb",
+      "sha256": "af77f099e7fa95a31267023535832804382fa66572a6b38002187be6e15116cb"
+    },
+    {
+      "package": "libmd0",
+      "version": "1.0.4-1build1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libm/libmd/libmd0_1.0.4-1build1_amd64.deb",
+      "sha256": "bcdad5e400aeb660f0337a1c5c1a77e3effa91d0803e64ce2d000e9006f67cdb"
+    },
+    {
+      "package": "libmount1",
+      "version": "2.37.2-4ubuntu3.6",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/u/util-linux/libmount1_2.37.2-4ubuntu3.6_amd64.deb",
+      "sha256": "9f69b37420731477105d94c6bf2139437be04bef7c46ba7ffcaf3741e301bdba"
+    },
+    {
+      "package": "libnettle8",
+      "version": "3.7.3-1build2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/n/nettle/libnettle8_3.7.3-1build2_amd64.deb",
+      "sha256": "6da09e685e5587f8873f662b007de45f75424fb33d2c4a51837380e683d33c7e"
+    },
+    {
+      "package": "libnspr4",
+      "version": "2:4.35-0ubuntu0.22.04.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/n/nspr/libnspr4_4.35-0ubuntu0.22.04.1_amd64.deb",
+      "sha256": "b3c96e4a61675c87f8d9655109346748847d859abc95f20493159d06b5aa30ef"
+    },
+    {
+      "package": "libnss3",
+      "version": "2:3.98-0ubuntu0.22.04.4",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/n/nss/libnss3_3.98-0ubuntu0.22.04.4_amd64.deb",
+      "sha256": "caf60f375adbbdafef74930c5dd91411de0ac5c9499bf699185110dc77d82611"
+    },
+    {
+      "package": "libp11-kit0",
+      "version": "0.24.0-6ubuntu0.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/p/p11-kit/libp11-kit0_0.24.0-6ubuntu0.1_amd64.deb",
+      "sha256": "9d949950970a062a81051a78ec4075b8dba608f063afaa5c8752a612d139a9b5"
+    },
+    {
+      "package": "libpango-1.0-0",
+      "version": "1.50.6+ds-2ubuntu1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/p/pango1.0/libpango-1.0-0_1.50.6%2bds-2ubuntu1_amd64.deb",
+      "sha256": "cbc98b6f1676ea97454639c573f81ac7578224b7733dc80b377eca82d1eb0c86"
+    },
+    {
+      "package": "libpcre2-8-0",
+      "version": "10.39-3ubuntu0.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/p/pcre2/libpcre2-8-0_10.39-3ubuntu0.1_amd64.deb",
+      "sha256": "01a5a74f3d305cad32fffffdc200c2a92fd8e5a01bff97de76ac598fb444d53e"
+    },
+    {
+      "package": "libpcre3",
+      "version": "2:8.39-13ubuntu0.22.04.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/p/pcre3/libpcre3_8.39-13ubuntu0.22.04.1_amd64.deb",
+      "sha256": "0d1eb051047eb0c637c893f618f45e1d419863bfa3bc821897ee05ad418ba22e"
+    },
+    {
+      "package": "libpixman-1-0",
+      "version": "0.40.0-1ubuntu0.22.04.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/p/pixman/libpixman-1-0_0.40.0-1ubuntu0.22.04.1_amd64.deb",
+      "sha256": "ebcd65ac9bff8412e07d9d54f754d832169de71f1744bdb2ca10744bb5554e73"
+    },
+    {
+      "package": "libpng16-16",
+      "version": "1.6.37-3ubuntu0.6",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libp/libpng1.6/libpng16-16_1.6.37-3ubuntu0.6_amd64.deb",
+      "sha256": "c50e4291d15bbe3489245f773ad1d2cdb63b1753a1382a393ad34ce1b8d70358"
+    },
+    {
+      "package": "libselinux1",
+      "version": "3.3-1build2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libs/libselinux/libselinux1_3.3-1build2_amd64.deb",
+      "sha256": "b96c6b40ee2388bd51341cb11c0f1d5bcca29b9180b6e3a77a06b881f2913f7e"
+    },
+    {
+      "package": "libsqlite3-0",
+      "version": "3.37.2-2ubuntu0.8",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/s/sqlite3/libsqlite3-0_3.37.2-2ubuntu0.8_amd64.deb",
+      "sha256": "6e22b1e8d375fed6a1d52cad5887e762b6cdeaba137595e726c95486968dfab5"
+    },
+    {
+      "package": "libsystemd0",
+      "version": "249.11-0ubuntu3.22",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/s/systemd/libsystemd0_249.11-0ubuntu3.22_amd64.deb",
+      "sha256": "4fae4644bcfd86f891faae12cedbf30aca280cf76a034768aec3a03fe42ddc25"
+    },
+    {
+      "package": "libtasn1-6",
+      "version": "4.18.0-4ubuntu0.2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libt/libtasn1-6/libtasn1-6_4.18.0-4ubuntu0.2_amd64.deb",
+      "sha256": "a0903b4fae3ac2548a22d8822382e6d23586e42196d83ff67e82df36cd39fc6c"
+    },
+    {
+      "package": "libthai0",
+      "version": "0.1.29-1build1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libt/libthai/libthai0_0.1.29-1build1_amd64.deb",
+      "sha256": "cf035ace18e725828442635a90109a05958a2f0941eaddeac863cd0145e47f73"
+    },
+    {
+      "package": "libudev1",
+      "version": "249.11-0ubuntu3.22",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/s/systemd/libudev1_249.11-0ubuntu3.22_amd64.deb",
+      "sha256": "48e47354d8d421b59bc2aac1437bc6b22ba04526963e4a73f9313b0dd518556b"
+    },
+    {
+      "package": "libunistring2",
+      "version": "1.0-1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libu/libunistring/libunistring2_1.0-1_amd64.deb",
+      "sha256": "988fb59de6a0a313844277e8a6e45d3dc16f5ea75a603a46b16b936426f0ac65"
+    },
+    {
+      "package": "libuuid1",
+      "version": "2.37.2-4ubuntu3.6",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/u/util-linux/libuuid1_2.37.2-4ubuntu3.6_amd64.deb",
+      "sha256": "97eaa1090c2e7ddaad55d58f9d0d7907d64b70f89228405d68a7ce7d56a89d67"
+    },
+    {
+      "package": "libwayland-server0",
+      "version": "1.20.0-1ubuntu0.1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-server0_1.20.0-1ubuntu0.1_amd64.deb",
+      "sha256": "b5d514dc17edac6b93ba2476d90806337ca4afcc914952a7e78af2e5cd0c4a7b"
+    },
+    {
+      "package": "libx11-6",
+      "version": "2:1.7.5-1ubuntu0.3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libx11/libx11-6_1.7.5-1ubuntu0.3_amd64.deb",
+      "sha256": "d382a3064ecd7576f24661a6d234adc737b854a9a0ec1d9f42cb4d007e77d547"
+    },
+    {
+      "package": "libxau6",
+      "version": "1:1.0.9-1build5",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxau/libxau6_1.0.9-1build5_amd64.deb",
+      "sha256": "551fa4101394af894f5f401285eeca9756da94bb31ecb08ed36a549ec580cd10"
+    },
+    {
+      "package": "libxcb-randr0",
+      "version": "1.14-3ubuntu3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-randr0_1.14-3ubuntu3_amd64.deb",
+      "sha256": "39dc0f73fa3bd43f3f7755cb7d12bfd1cd59dd8966f747d66fba47dfc8652f62"
+    },
+    {
+      "package": "libxcb-render0",
+      "version": "1.14-3ubuntu3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-render0_1.14-3ubuntu3_amd64.deb",
+      "sha256": "26d331ed6e1219485dbd6a35b7c9cf552e1470f41bf2158b44a1331405f05250"
+    },
+    {
+      "package": "libxcb-shm0",
+      "version": "1.14-3ubuntu3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-shm0_1.14-3ubuntu3_amd64.deb",
+      "sha256": "6d86c9ea2666276c862e64e8a1daa6cb1dd3e4da5ad9165eeb2507311c8a09bd"
+    },
+    {
+      "package": "libxcb1",
+      "version": "1.14-3ubuntu3",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb1_1.14-3ubuntu3_amd64.deb",
+      "sha256": "9258f04136434e7a0ccd76041505421934284209693373cfa9c24acb3a641ec5"
+    },
+    {
+      "package": "libxcomposite1",
+      "version": "1:0.4.5-1build2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcomposite/libxcomposite1_0.4.5-1build2_amd64.deb",
+      "sha256": "1e3d7e7b53149f6fff92e1fbf4203b61301ca4e251b2949a34bf788dd999621f"
+    },
+    {
+      "package": "libxdamage1",
+      "version": "1:1.1.5-2build2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxdamage/libxdamage1_1.1.5-2build2_amd64.deb",
+      "sha256": "a705af86334b9c219e5f50e21e5bc51bfbf8b8189ca88d4fcafff734de81a503"
+    },
+    {
+      "package": "libxdmcp6",
+      "version": "1:1.1.3-0ubuntu5",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu5_amd64.deb",
+      "sha256": "6f6c869dcfc072fa77d24b72ba127bdf15d606bdffbeba4314fb39f4f324363d"
+    },
+    {
+      "package": "libxext6",
+      "version": "2:1.3.4-1build1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxext/libxext6_1.3.4-1build1_amd64.deb",
+      "sha256": "875ec849749511dff61c8cc5a775f6f93427b9c3f392fdcec6925f14428e89cd"
+    },
+    {
+      "package": "libxfixes3",
+      "version": "1:6.0.0-1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxfixes/libxfixes3_6.0.0-1_amd64.deb",
+      "sha256": "f627555440060edf19801d77d369c99547cf47123fe4e30c5bdb8b664f0b4467"
+    },
+    {
+      "package": "libxi6",
+      "version": "2:1.8-1build1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxi/libxi6_1.8-1build1_amd64.deb",
+      "sha256": "47662736cca4be456fd42a5f0a9d3bed8a5cfad4ee08b809a95dde6004daf275"
+    },
+    {
+      "package": "libxkbcommon0",
+      "version": "1.4.0-1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxkbcommon/libxkbcommon0_1.4.0-1_amd64.deb",
+      "sha256": "a0470edb237d52b71ad41f755c043164abed01423585ed5ea19525b3baaf84f7"
+    },
+    {
+      "package": "libxrandr2",
+      "version": "2:1.5.2-1build1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxrandr/libxrandr2_1.5.2-1build1_amd64.deb",
+      "sha256": "5fbce1f1ec150c715fd83eeef5626363580218db09cedc8ac888b172476b0c82"
+    },
+    {
+      "package": "libxrender1",
+      "version": "1:0.9.10-1build4",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxrender/libxrender1_0.9.10-1build4_amd64.deb",
+      "sha256": "a68f6db4320b5963dd499b83b6cc8c7b5cd39b05e84862d5945da9244e4c96d6"
+    },
+    {
+      "package": "libzstd1",
+      "version": "1.4.8+dfsg-3build1",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libz/libzstd/libzstd1_1.4.8%2bdfsg-3build1_amd64.deb",
+      "sha256": "ae7db00ce8b093e50c994518b90203544e063b4bc574836a048bb142b950b2c9"
+    },
+    {
+      "package": "zlib1g",
+      "version": "1:1.2.11.dfsg-2ubuntu9.2",
+      "url": "http://archive.ubuntu.com/ubuntu/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb",
+      "sha256": "9dc17e51a1be2d9ed63b7b84ef0e4e29c5abe6f1bc62cb03e7181483cce8a2f2"
+    }
+  ]
+}

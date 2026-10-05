@@ -12,6 +12,7 @@ import { resolveCliDataDir } from './lib/instance.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { runMigrations } from './upgrade-lib/migrate.mjs'
 import { runSourceUpgrade, syncPythonDeps } from './upgrade-lib/source.mjs'
+import { runBounded } from './lib/scrapling-prepare.mjs'
 import {
   getCurrentVersion,
   getLatestVersion,
@@ -121,6 +122,7 @@ async function main() {
       await extractRelease({ ...releaseArtifact, crabotHome: CRABOT_HOME, logger })
       console.log('[ui-upgrade] (switch) sync python deps')
       await syncPythonDeps(CRABOT_HOME, logger)
+      await runBounded(process.execPath, [join(CRABOT_HOME, 'scripts/prepare-scrapling.mjs'), '--check'])
     }
 
     console.log('[ui-upgrade] (switch) run migrations')

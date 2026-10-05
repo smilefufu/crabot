@@ -1,0 +1,8 @@
+{
+  "python": "3.12.12",
+  "scrapling": "0.4.15",
+  "mcp": "2.3.0",
+  "playwright": "1.63.0",
+  "patchright": "1.63.0",
+  "linux_abi": "Ubuntu 22.04"
+}

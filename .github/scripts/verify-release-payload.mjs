@@ -12,6 +12,7 @@
  */
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
+import runtime from '../../scripts/lib/scrapling-runtime.cjs'
 
 const stagingDir = process.argv[2]
 if (!stagingDir) {
@@ -46,6 +47,10 @@ const required = [
   'install.sh',
   'LICENSE',
   'scripts/start.mjs',
+  'scripts/prepare-scrapling.mjs',
+  'scripts/lib/scrapling-runtime.cjs',
+  'scripts/lib/scrapling-prepare.mjs',
+  'scrapling-runtime.json',
   'scripts/lib/registry.mjs',
   'crabot-agent/crabot-module.yaml',
   'crabot-memory/schema_version',
@@ -60,5 +65,7 @@ if (missing.length > 0) {
   for (const m of missing) console.error(`  - ${m}`)
   process.exit(1)
 }
+
+runtime.loadRuntime(stagingDir, { full: true })
 
 console.log(`[verify-release-payload] OK：${expected.length} 个运行时文件齐全（其中 skill 载荷 ${skillPayload.length} 个）`)

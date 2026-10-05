@@ -107,6 +107,8 @@ export async function runSourceUpgrade(crabotHome, logger) {
   if (existsSync(memoryDir)) {
     await runCmd(findUv(), ['sync'], memoryDir, logger)
   }
+  // 使用磁盘上的新准备入口，避免 UI git pull 后仍复用旧模块函数。
+  await runCmd(process.execPath, [join(crabotHome, 'scripts', 'prepare-scrapling.mjs')], crabotHome, logger)
 }
 
 export async function syncPythonDeps(crabotHome, logger) {

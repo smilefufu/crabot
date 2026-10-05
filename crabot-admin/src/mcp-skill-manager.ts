@@ -470,7 +470,7 @@ export class MCPServerManager {
           transport: 'stdio',
           command: 'scrapling',
           args: ['mcp'],
-          enabled: false,
+          enabled: true,
         },
       ]
 
@@ -479,7 +479,7 @@ export class MCPServerManager {
         if (existingNames.has(builtin.name)) {
           // 已注册：更新路径（项目目录可能变更）
           for (const [id, existing] of next) {
-            if (existing.name === builtin.name && existing.is_builtin) {
+            if (existing.name === builtin.name && existing.is_builtin && builtin.name !== 'scrapling') {
               const argsChanged = JSON.stringify(existing.args) !== JSON.stringify(builtin.args)
               if (argsChanged) {
                 next.set(id, { ...existing, args: builtin.args, updated_at: generateTimestamp() })
@@ -506,7 +506,7 @@ export class MCPServerManager {
       }
 
       if (changed) {
-        // 变化只落在停用条目（args 更新）或新增默认停用 builtin 时投影不变：允许 noop。
+        // 只更新停用条目的路径时投影不变：允许 noop。
         await this.commit(next, true)
       }
     })

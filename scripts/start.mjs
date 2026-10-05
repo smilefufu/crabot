@@ -19,6 +19,8 @@ import { runScript } from './upgrade-lib/runner.mjs'
 import { hasInstance, resolveCliDataDir } from './lib/instance.mjs'
 import { probeMmHealthy } from './lib/mm-probe.mjs'
 import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
+import scraplingRuntime from './lib/scrapling-runtime.cjs'
+import { runBounded } from './lib/scrapling-prepare.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -69,6 +71,15 @@ process.env.DATA_DIR = DATA_DIR
 
 // admin/.env 已废弃（密码改存 credentials.json）；保留 ROOT/.env 兜底
 loadEnvFile(resolve(ROOT, '.env'))
+
+if (scraplingRuntime.runtimeRequired(DATA_DIR)) {
+  try {
+    await runBounded(process.execPath, [resolve(ROOT, 'scripts/prepare-scrapling.mjs')])
+  } catch (err) {
+    console.error('[crabot] Cannot start enabled Scrapling:', err.message)
+    process.exit(1)
+  }
+}
 
 if (!process.env.CRABOT_JWT_SECRET) {
   process.env.CRABOT_JWT_SECRET = randomBytes(32).toString('hex')

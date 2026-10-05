@@ -187,6 +187,8 @@ if ($FromSource) {
     Set-Location crabot-memory
     uv sync
     Set-Location ..
+    node scripts/prepare-scrapling.mjs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } else {
     Write-Info "Release install..."
     if ($Version -eq "latest") {
@@ -312,6 +314,9 @@ if ($FromSource) {
         } finally {
             Pop-Location
         }
+
+        node (Join-Path $InstallDir "scripts/prepare-scrapling.mjs") --check
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
         Set-Content -Path (Join-Path $InstallDir 'VERSION') -Value $Version -Encoding ASCII
     } finally {

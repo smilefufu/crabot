@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths:
+      - 'scripts/scrapling/**'
+      - 'scripts/*scrapling*.mjs'
+      - 'scripts/lib/scrapling-*'
+      - '.github/scripts/*scrapling*'
+      - '.github/workflows/release.yml'
 
 permissions:
   contents: write
@@ -12,7 +19,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             platform: linux
             arch: x64
           - os: macos-14
@@ -76,6 +83,18 @@ jobs:
           # admin: 后端 build → 前端 build:web（顺序执行，build:web 会进入 web/ 子项目自己 install）
           (cd crabot-admin && pnpm run build && pnpm run build:web)
 
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.10.1'
+
+      - name: Prepare portable Scrapling runtime
+        shell: bash
+        run: node scripts/prepare-scrapling.mjs --release="$GITHUB_REF_NAME"
+
+      - name: Verify real Scrapling MCP and browser calls
+        shell: bash
+        run: node .github/scripts/smoke-scrapling.mjs "$GITHUB_WORKSPACE"
+
       - name: Prune to production-only dependencies
         shell: bash
         run: |
@@ -107,6 +126,7 @@ jobs:
         if: matrix.platform != 'windows'
         run: |
           VERSION=${GITHUB_REF_NAME}
+          if [ "${{ github.event_name }}" = "pull_request" ]; then VERSION="pr-${{ github.event.number }}"; fi
           DIRNAME="crabot-${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}"
           mkdir -p "/tmp/${DIRNAME}"
 
@@ -189,12 +209,18 @@ jobs:
                   "crabot-memory/" "/tmp/${DIRNAME}/crabot-memory/"
           fi
 
+          # 独立顶层版本目录：旧 release 解包不会删除其它正在使用的环境。
+          RUNTIME_DIR=$(node -p "require('./scrapling-runtime.json').directory")
+          cp -R "$RUNTIME_DIR" "/tmp/${DIRNAME}/"
+          cp scrapling-runtime.json "/tmp/${DIRNAME}/"
+
           # 打包前校验运行时载荷齐全（防止 exclude 规则漏掉 skill 等运行时文件）
           node .github/scripts/verify-release-payload.mjs "/tmp/${DIRNAME}"
+          node .github/scripts/smoke-scrapling.mjs "/tmp/${DIRNAME}"
 
           # 打包（tar 默认保留 staging 目录内的 hardlink）
+          python3 .github/scripts/package-release.py "/tmp/${DIRNAME}"
           cd /tmp
-          tar -czf "${DIRNAME}.tar.gz" "${DIRNAME}"
           shasum -a 256 "${DIRNAME}.tar.gz" > "${DIRNAME}.tar.gz.sha256"
 
           # 移回 workspace
@@ -205,6 +231,7 @@ jobs:
         shell: pwsh
         run: |
           $Version = $env:GITHUB_REF_NAME
+          if ("${{ github.event_name }}" -eq "pull_request") { $Version = "pr-${{ github.event.number }}" }
           $DirName = "crabot-${Version}-windows-x64"
           $TempDir = "$env:TEMP\$DirName"
           New-Item -ItemType Directory -Force -Path $TempDir
@@ -264,13 +291,20 @@ jobs:
             Remove-Item -Force -ErrorAction SilentlyContinue
 
           # 打包前校验运行时载荷齐全（防止清理规则漏掉 skill 等运行时文件）
+          $Runtime = (Get-Content scrapling-runtime.json -Raw | ConvertFrom-Json).directory
+          Copy-Item -Recurse $Runtime $TempDir
+          Copy-Item scrapling-runtime.json $TempDir
+
           node .github/scripts/verify-release-payload.mjs "$TempDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node .github/scripts/smoke-scrapling.mjs "$TempDir"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           Compress-Archive -Path $TempDir -DestinationPath "$DirName.zip"
           (Get-FileHash "$DirName.zip" -Algorithm SHA256).Hash | Out-File "$DirName.zip.sha256"
 
       - name: Upload Release Assets
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
