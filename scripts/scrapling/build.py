@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import site
 import ssl
 import subprocess
 import sys
@@ -87,6 +88,8 @@ if sys.platform == "linux":
 
 # 校验导入与版本；BrowserForge 指纹数据已作为包资源随依赖安装，不现场下载。
 import importlib.metadata
+if sys.platform == "win32":
+    site.addsitedir(str(runtime / "packages"))
 from scrapling.core.ai import ScraplingMCPServer
 versions = json.loads((inputs / "runtime.json").read_text())
 for package in ("scrapling", "mcp", "playwright", "patchright"):

@@ -6,11 +6,14 @@ import json
 import os
 from pathlib import Path
 import signal
+import site
 import sys
 import tempfile
 
 RUNTIME = Path(__file__).resolve().parent
 sys.path.insert(0, str(RUNTIME / "packages"))
+if sys.platform == "win32":
+    site.addsitedir(str(RUNTIME / "packages"))  # 加载锁定 pywin32 的相对路径与 DLL bootstrap。
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(RUNTIME / "browsers")
 
