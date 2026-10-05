@@ -30,6 +30,7 @@ import type { ManagerRegistryDeps } from '../../src/manager/registry.js'
 import { createManagerToolFaceState } from '../../src/manager/tools/tool-catalog.js'
 import { buildWorkerTools } from '../../src/manager/tools/worker-tools.js'
 import type { LLMAdapter, ToolDefinition } from '../../src/engine/index.js'
+import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import type {
   UnifiedAgentConfig,
   OrchestrationConfig,
@@ -404,6 +405,39 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   }, 35_000)
 
   // --- 验收 1 + 5：端到端拉起 + 工作目录就是 workspace ---
+
+  it('builtin 生产 callback 在同一 Engine burst 下一轮消费新增 MCP，权限仍固定', async () => {
+    const { internals } = boot()
+    const external: ToolDefinition = { name: 'mcp__scrapling__get', category: 'mcp_skill', description: 'Fetch article',
+      inputSchema: { type: 'object' }, isReadOnly: false, call: vi.fn(async () => ({ output: 'fetched', isError: false })) }
+    let connected = false
+    vi.spyOn((internals as any).mcpConnector, 'getAllTools').mockImplementation(() => connected ? [external] : [])
+    const context = { worker_id: 'mcp-dynamic', workspace: { root: tmpRoot }, principal_permissions: BUILTIN_WORKER_PERMISSIONS }
+    const builtin = internals.buildBuiltinWorkerRuntime(context)!
+    const requests: string[][] = []
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        requests.push(params.tools.map(tool => tool.name))
+        if (requests.length === 1) {
+          connected = true
+          yield* chunksFromContent([{ type: 'tool_use', id: 'too-early', name: external.name, input: {} }], 'tool_use')
+        } else if (requests.length === 2) yield* chunksFromContent([{ type: 'tool_use', id: 'fetch', name: external.name, input: {} }], 'tool_use')
+        else yield* chunksFromContent([{ type: 'text', text: 'done' }], 'end_turn')
+      },
+      updateConfig() {},
+    }
+    const result = await engineModule.runEngine({ prompt: 'Fetch article', adapter, options: {
+      model: builtin.model, systemPrompt: builtin.systemPrompt, tools: builtin.tools, maxTurns: 3,
+    } })
+    expect(result.outcome).toBe('completed')
+    expect(requests[0]).not.toContain(external.name)
+    expect(requests[1]).toContain(external.name)
+    expect(external.call).toHaveBeenCalledOnce()
+    const restricted = internals.buildBuiltinWorkerRuntime({ ...context, principal_permissions: {
+      ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, mcp_skill: false },
+    } })!
+    expect(resolveTools(restricted).map(tool => tool.name)).not.toContain(external.name)
+  })
 
   it('桌面与 guidance 仅提供给已授权主线，子 Agent 保持原能力边界', async () => {
     const { internals } = boot()

@@ -1,7 +1,7 @@
 /**
  * Manager 能力目录与 episode 工具投影 —— protocol-agent-v3.md §4.3。
  * 内置 messaging、memory、Worker、自省、任务板和项目文档仍按白名单构造；
- * 外部 MCP 另经授权和兼容过滤。profile 固定核心之后只追加当前 episode 按族加载或搜索出的定义。
+ * 外部 MCP 另经授权和兼容过滤；固定核心后的定义按 episode 加载顺序投影，MCP 快照在后续 turn 刷新。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.3
  */
@@ -90,7 +90,7 @@ export interface ToolFaceDeps {
   /** 当前 episode 的渐进加载状态；缺省表示返回兼容的完整内置工具面。 */
   readonly faceState?: ManagerToolFaceState
   readonly candidatePermissions?: import('../../types.js').ResolvedPermissions
-  /** 当前 episode 已通过权限过滤的外部 MCP 工具目录。 */
+  /** 本轮从当前 connector 获取、已通过 episode 权限过滤的外部 MCP 工具目录。 */
   readonly externalMcpTools?: ReadonlyArray<ToolDefinition>
   /** 外部 MCP 每次实际调用前的当前主体/目标权限复核。 */
   readonly authorizeExternalMcpTool?: (tool: Pick<ToolDefinition, 'name' | 'category'>) => Promise<boolean>
@@ -537,8 +537,23 @@ function hasUnsafeMetadata(value: unknown): boolean {
 
 /** 返回完整内置工具面；有 episode 状态时投影为稳定核心 + 已加载尾部。 */
 export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
-  if (deps.faceState?.catalog) return deps.faceState.catalog.project(deps.faceState, deps.faceState.searchTool)
-  const selectedProfile = deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')
+  const selectedProfile = deps.faceState?.catalog?.profile ?? deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')
+  const externalMcpTools = deps.faceState && (deps.faceState.mode ?? 'progressive') === 'progressive' && selectedProfile === 'normal'
+    ? deps.externalMcpTools ?? [] : []
+  if (deps.faceState?.catalog) {
+    const state = deps.faceState
+    const previous = state.externalMcpTools ?? []
+    if (previous.length !== externalMcpTools.length || previous.some((tool, index) => tool !== externalMcpTools[index])) {
+      // Refresh only between Engine turns. Requests already issued retain their own tool references.
+      const catalog = state.catalog!.withExternalMcpTools(externalMcpTools
+        .map(tool => wrapExternalMcpTool(tool, deps.authorizeExternalMcpTool))
+        .filter((tool): tool is ToolDefinition => tool !== undefined))
+      const searchTool = buildSearchToolsTool(catalog, state)
+      const familyTool = buildLoadToolFamilyTool(catalog, state)
+      Object.assign(state, { catalog, searchTool, familyTool, externalMcpTools: [...externalMcpTools] })
+    }
+    return state.catalog!.project(state, state.searchTool)
+  }
   const normalProfile = selectedProfile === 'normal'
   const dailyProfile = selectedProfile === 'daily_reflection' && deps.isBuiltinDailyReflection === true
   const messagingTools = buildMessagingFace(deps)
@@ -591,20 +606,12 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   assertClosedToolFace(builtinTools)
   if (!deps.faceState) return builtinTools
 
-  const profile = deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')
-  const mode = deps.faceState.mode ?? 'progressive'
-  let externalMcpTools: ReadonlyArray<ToolDefinition> = []
-  if (mode === 'progressive' && profile === 'normal') {
-    if (!deps.faceState.externalMcpToolsCaptured) {
-      deps.faceState.externalMcpTools = (deps.externalMcpTools ?? [])
-        .map((tool) => wrapExternalMcpTool(tool, deps.authorizeExternalMcpTool))
-        .filter((tool): tool is ToolDefinition => tool !== undefined)
-      deps.faceState.externalMcpToolsCaptured = true
-    }
-    externalMcpTools = deps.faceState.externalMcpTools ?? []
-  }
+  const profile = selectedProfile
+  const wrappedMcpTools = externalMcpTools
+    .map(tool => wrapExternalMcpTool(tool, deps.authorizeExternalMcpTool))
+    .filter((tool): tool is ToolDefinition => tool !== undefined)
   const catalog = new ManagerToolCatalog(
-    [...builtinTools.sort((a, b) => Number(CONDITIONAL_TOOLS.has(a.name)) - Number(CONDITIONAL_TOOLS.has(b.name)) || a.name.localeCompare(b.name)), ...externalMcpTools],
+    [...builtinTools.sort((a, b) => Number(CONDITIONAL_TOOLS.has(a.name)) - Number(CONDITIONAL_TOOLS.has(b.name)) || a.name.localeCompare(b.name)), ...wrappedMcpTools],
     profile,
     undefined,
     undefined,
@@ -634,6 +641,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     },
   )
   deps.faceState.catalog = catalog
+  deps.faceState.externalMcpTools = [...externalMcpTools]
   if (profile === 'memory_graph_rebuild') {
     const projected = catalog.project(deps.faceState)
     assertClosedToolFace(projected, true)

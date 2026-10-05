@@ -48,9 +48,8 @@ export const MEMORY_GRAPH_REBUILD_CORE_NAMES = [
 export interface ManagerToolFaceState {
   readonly loadedNames: Set<string>
   readonly mode?: ManagerToolLoadingMode
-  /** External MCP definitions are frozen at episode admission, including their connector snapshot. */
+  /** Raw connector definitions consumed at the last turn boundary; stable references identify an unchanged snapshot. */
   externalMcpTools?: ReadonlyArray<ToolDefinition>
-  externalMcpToolsCaptured?: boolean
   catalog?: ManagerToolCatalog
   searchTool?: ToolDefinition
   familyTool?: ToolDefinition
@@ -59,7 +58,7 @@ export interface ManagerToolFaceState {
 }
 
 export function createManagerToolFaceState(mode: ManagerToolLoadingMode = 'progressive'): ManagerToolFaceState {
-  return { loadedNames: new Set(), mode, externalMcpToolsCaptured: false }
+  return { loadedNames: new Set(), mode }
 }
 
 export interface LoadToolFamilyInput {
@@ -239,10 +238,10 @@ export class ManagerToolCatalog {
   constructor(
     tools: readonly ToolDefinition[],
     profile: ManagerToolProfile,
-    aliasMap: Readonly<Record<string, readonly string[]>> = {},
-    catalogRevision = MANAGER_TOOL_CATALOG_REVISION,
-    canSearch: (tool: ToolDefinition) => boolean = () => true,
-    builtinFamilies: Readonly<Record<string, readonly string[]>> = {},
+    private readonly aliasMap: Readonly<Record<string, readonly string[]>> = {},
+    private readonly baseRevision = MANAGER_TOOL_CATALOG_REVISION,
+    private readonly canSearch: (tool: ToolDefinition) => boolean = () => true,
+    private readonly builtinFamilies: Readonly<Record<string, readonly string[]>> = {},
   ) {
     this.profile = profile
     this.coreNames = profile === 'normal'
@@ -304,7 +303,14 @@ export class ManagerToolCatalog {
         namespace: tool.searchMetadata?.namespace ?? '', namespaceDescription: tool.searchMetadata?.namespaceDescription ?? '' },
       ...(tool.traceMetadata?.definition_digest ? { definition_digest: tool.traceMetadata.definition_digest } : {}),
     })))
-    this.catalogRevision = `${catalogRevision}:${this.authorizedCatalogDigest.slice(0, 16)}`
+    this.catalogRevision = `${baseRevision}:${this.authorizedCatalogDigest.slice(0, 16)}`
+  }
+
+  withExternalMcpTools(tools: readonly ToolDefinition[]): ManagerToolCatalog {
+    return new ManagerToolCatalog(
+      [...this.tools.filter(tool => !isExternalMcpTool(tool)), ...tools],
+      this.profile, this.aliasMap, this.baseRevision, this.canSearch, this.builtinFamilies,
+    )
   }
 
   get tools(): readonly ToolDefinition[] {

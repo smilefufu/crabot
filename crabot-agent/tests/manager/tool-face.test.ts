@@ -536,6 +536,87 @@ describe('buildManagerToolFace', () => {
     expect(buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() }).map((tool) => tool.name)).toEqual(names[0])
   })
 
+  it.each(['search_tools', 'load_tool_family'])('同一 episode 中途启用 MCP 后，真实 Engine 用 %s 加载并在下一轮调用', async (loader) => {
+    const call = vi.fn(async () => ({ output: 'scrapling result', isError: false }))
+    const external: ToolDefinition = { name: 'mcp__scrapling__get', description: 'Fetch article', category: 'mcp_skill',
+      inputSchema: { type: 'object' }, isReadOnly: false, call }
+    let enabled = false
+    const state = createManagerToolFaceState()
+    const deps = makeDeps({ faceState: state, candidatePermissions: permissions,
+      getRuntimeConfigSummary: () => ({ mcp_servers: enabled ? [{ name: 'scrapling', transport: 'stdio' }] : [] }),
+      authorizeExternalMcpTool: async () => true })
+    const names: string[][] = []
+    const turns: EngineTurnEvent[] = []
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        names.push(params.tools.map(tool => tool.name))
+        if (names.length === 1) {
+          enabled = true
+          yield* chunksFromContent([{ type: 'tool_use', id: 'config-family', name: 'load_tool_family', input: { family: 'crabot' } }], 'tool_use')
+        } else if (names.length === 2) yield* chunksFromContent([
+          { type: 'tool_use', id: 'config', name: 'inspect_crabot', input: { view: 'config' } },
+          { type: 'tool_use', id: 'load', name: loader, input: loader === 'search_tools' ? { query: external.name } : { family: 'mcp__scrapling' } },
+          { type: 'tool_use', id: 'too-early', name: external.name, input: {} },
+        ], 'tool_use')
+        else if (names.length === 3) yield* chunksFromContent([{ type: 'tool_use', id: 'fetch', name: external.name, input: {} }], 'tool_use')
+        else yield* chunksFromContent([{ type: 'text', text: 'done' }], 'end_turn')
+      },
+      updateConfig() {},
+    }
+    const result = await runEngine({ prompt: 'Fetch article', adapter, options: {
+      model: 'test', systemPrompt: 'test', maxTurns: 4,
+      tools: () => buildManagerToolFace({ ...deps, externalMcpTools: enabled ? [external] : [] }),
+      onTurn: turn => { turns.push(turn) },
+      unavailableToolResult: name => ({ output: state.catalog!.missingToolOutput(name), isError: true }),
+    } })
+    expect(result.outcome).toBe('completed')
+    expect(names[0]).toEqual([...NORMAL_MANAGER_CORE_NAMES])
+    expect(turns[1].toolCalls[0].output).toContain('scrapling')
+    expect(turns[1].toolCalls[1].output).toContain('"status":"loaded"')
+    expect(turns[1].toolCalls[1].output).toContain(external.name)
+    expect(turns[1].toolCalls[2]).toMatchObject({ output: expect.stringContaining('TOOL_NOT_LOADED'), isError: true })
+    expect(names[2]).toContain(external.name)
+    expect(call).toHaveBeenCalledOnce()
+    expect(state.searches).toBe(loader === 'search_tools' ? 1 : undefined)
+    expect(state.familyLoads).toBe(loader === 'load_tool_family' ? 2 : 1)
+  })
+
+  it('MCP 快照更新保留内置工具与加载顺序，同名定义替换、移除和恢复在下轮生效', async () => {
+    const call = vi.fn(async () => ({ output: 'old', isError: false }))
+    const external: ToolDefinition = { name: 'mcp__remote__lookup', description: 'lookup', category: 'mcp_skill',
+      inputSchema: { type: 'object' }, isReadOnly: false, call }
+    const state = createManagerToolFaceState()
+    const deps = makeDeps({ faceState: state, candidatePermissions: permissions, externalMcpTools: [external], authorizeExternalMcpTool: async () => true })
+    const initial = buildManagerToolFace(deps)
+    await initial[1].call({ family: 'crabot' }, {})
+    await initial[0].call({ query: external.name }, {})
+    const loaded = buildManagerToolFace(deps)
+    const beforeRevision = state.catalog!.catalogRevision
+    const loadedNames = [...state.loadedNames]
+    const current: ToolDefinition = { ...external, description: 'updated lookup',
+      inputSchema: { type: 'object', required: ['url'], properties: { url: { type: 'string' } } },
+      call: vi.fn(async () => ({ output: 'new', isError: false })) }
+    const updated = buildManagerToolFace({ ...deps, externalMcpTools: [current] })
+    expect(updated.map(tool => tool.name)).toEqual(loaded.map(tool => tool.name))
+    expect(updated.find(tool => tool.name === 'inspect_crabot')).toBe(loaded.find(tool => tool.name === 'inspect_crabot'))
+    expect(updated.find(tool => tool.name === current.name)?.inputSchema).toEqual(current.inputSchema)
+    expect(await updated.find(tool => tool.name === current.name)!.call({ url: 'article' }, {})).toMatchObject({ output: 'new' })
+    expect(state.catalog!.catalogRevision).not.toBe(beforeRevision)
+    expect(state.searches).toBe(1)
+    expect(state.familyLoads).toBe(1)
+    expect(JSON.parse((await updated[1].call({ family: 'mcp' }, {})).output).families).toEqual([{ family: 'mcp__remote', tool_count: 1 }])
+    const removed = buildManagerToolFace({ ...deps, externalMcpTools: [] })
+    expect(removed.map(tool => tool.name)).not.toContain(current.name)
+    expect(JSON.parse((await removed[0].call({ query: current.name }, {})).output).status).toBe('no_match')
+    expect(JSON.parse((await removed[1].call({ family: 'mcp__remote' }, {})).output).status).toBe('unavailable')
+    const restored = buildManagerToolFace({ ...deps, externalMcpTools: [current] })
+    expect(restored.map(tool => tool.name)).toEqual(updated.map(tool => tool.name))
+    expect([...state.loadedNames]).toEqual(loadedNames)
+    expect(current.call).toHaveBeenCalledOnce()
+    expect(call).not.toHaveBeenCalled()
+    expect(buildManagerToolFace({ ...deps, externalMcpTools: [current] })).toEqual(restored)
+  })
+
   it('外部 MCP 先按最低类别权限过滤，拒绝不安全 metadata，忽略只读 annotation', async () => {
     const external = { name: 'mcp__remote__lookup', description: 'remote', category: 'mcp_skill' as const,
       inputSchema: { type: 'object' }, isReadOnly: true, call: vi.fn(async () => ({ output: 'ok', isError: false })) }
