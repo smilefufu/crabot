@@ -35,6 +35,27 @@ def enforce_headless(method):
     return guarded
 
 
+async def run_stdio(server):
+    if sys.platform == "win32":
+        await server.run_stdio_async()
+        return
+    from mcp.server.stdio import stdio_server
+    # SDK 的文件读取线程会一直等 stdin，即使已收到 SIGTERM；POSIX 用可取消的 pipe。
+    reader = asyncio.StreamReader()
+    with os.fdopen(os.dup(0), "rb", buffering=0) as incoming:
+        transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader), incoming,
+        )
+        try:
+            with open(os.devnull, "rb") as null:
+                os.dup2(null.fileno(), 0)  # 子进程不能读取 MCP wire。
+            async with stdio_server(stdin=reader) as (read_stream, write_stream):
+                lowlevel = server._lowlevel_server
+                await lowlevel.run(read_stream, write_stream, lowlevel.create_initialization_options())
+        finally:
+            transport.close()
+
+
 async def serve():
     from scrapling.core.ai import ScraplingMCPServer
     from anyio import move_on_after
@@ -53,7 +74,7 @@ async def serve():
     running = asyncio.current_task()
     previous = signal.signal(signal.SIGTERM, lambda *_: running.cancel())
     try:
-        await server.run_stdio_async()
+        await run_stdio(server)
     finally:
         # shield 防止取消截断清理；只关闭本进程创建的 session。
         with move_on_after(10, shield=True):

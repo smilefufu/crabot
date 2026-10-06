@@ -46,6 +46,7 @@ async def run():
                 assert browsers(),'no browser running before exit'
                 if mode=='stdin-eof': proc.stdin.close()
                 else: proc.send_signal(signal.SIGTERM)
+                print(json.dumps({'uid':uid,'checkingExit':mode}),flush=True)
                 await asyncio.wait_for(proc.wait(),10)
                 for _ in range(40):
                     remaining=browsers()
