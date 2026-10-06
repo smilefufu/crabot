@@ -50,6 +50,10 @@ sha256sum -c "$output/preserved.sha256"
 runtime=$(node -p "require('$root/scrapling-runtime.json').directory")
 chmod -R a-w "$root"
 for person in "${persons[@]}"; do
+  # 仅记录路径变量，避免输出 runner 环境中的凭据。
+  su -s /bin/bash -c 'for key in HOME XDG_CONFIG_HOME CHROME_CONFIG_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR; do printf "%s=%s\n" "$key" "${!key-}"; done' "$person" | tee "$output/$person-paths.log"
+  # 未经入口修正的 Chromium 对照，保留普通 UID 的原始启动错误。
+  su -s /bin/bash -c "timeout 20 '$root/$runtime/chromium-launcher' --headless --no-sandbox --dump-dom --user-data-dir='/home/$person/chrome-probe' 'data:text/html,<p>probe</p>'" "$person" > "$output/$person-native-browser.log" 2>&1 || true
   for run in cold warm; do
     log=$output/$person-$run.log
     su -s /bin/bash -c "PATH='$PATH' CRABOT_KEEP_SMOKE_ARTIFACTS=1 node '$fixture/smoke-scrapling.mjs' '$root'" "$person" > "$log" 2>&1 || { cat "$log"; exit 1; }

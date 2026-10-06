@@ -77,6 +77,10 @@ def main():
         os.environ["TEMP"] = temporary
         os.environ["TMP"] = temporary
         os.environ["XDG_CACHE_HOME"] = str(private / "cache")
+        if sys.platform == "linux":
+            # Chromium crashpad 忽略 --user-data-dir，仍按默认配置目录创建数据库。
+            os.environ["XDG_CONFIG_HOME"] = str(private / "config")
+            os.environ["CHROME_CONFIG_HOME"] = str(private / "config")
         tempfile.tempdir = temporary
         try:
             asyncio.run(serve())
