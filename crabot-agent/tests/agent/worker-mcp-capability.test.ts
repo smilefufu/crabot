@@ -201,3 +201,43 @@ describe('UnifiedAgent worker capability production wiring', () => {
     }
   })
 })
+
+
+describe('Scrapling product config provisioning', () => {
+  it('三种 Worker 共用完整启动配置，低权限主体没有 MCP 或条件 Skill', async () => {
+    const dataDir = await useTmpDataDir('scrapling-provision-')
+    const agent = new UnifiedAgent(makeAgentConfig({ configured: true, moduleId: 'scrapling-provision', port: 19993 }))
+    const internals = agent as unknown as { agentConfig?: AgentLayerConfig; managerStack: ManagerStack; attentionScheduler: { stopAll(): void } }
+    const scrapling: MCPServerConfig = {
+      name: 'scrapling', command: '/product/.scrapling-runtime-fixture/python-launcher',
+      args: ['-I', '-B', '/product/.scrapling-runtime-fixture/server.py'],
+      env: { CRABOT_SCRAPLING_DATA_DIR: '/instance/data', CRABOT_SCRAPLING_SYSTEM: '1', PLAYWRIGHT_BROWSERS_PATH: '/product/.scrapling-runtime-fixture/browsers' },
+    }
+    const skill = { id: 'scrapling', name: 'scrapling-official', description: 'scrape', skill_dir: '/tmp/skills/scrapling' }
+    try {
+      vi.spyOn(internals.managerStack.registry, 'routeWorkerEvent').mockResolvedValue({ outcome: 'completed', consumedEvents: true } as never)
+      internals.agentConfig = { ...internals.agentConfig!, mcp_servers: [scrapling], skills: [...mainlineSkills, skill], tmp_page_base_url: 'https://crabot.example' }
+      const deps = internals.managerStack.harness.deps as { assertWorkerImplReady?: unknown; selectWorkerImpl?: unknown; acquireWorkerFence?: unknown }
+      deps.assertWorkerImplReady = deps.selectWorkerImpl = deps.acquireWorkerFence = undefined
+      for (const impl of ['builtin', 'claude-code', 'codex'] as const) {
+        const adapter = new RecordingAdapter(impl)
+        internals.managerStack.adapters.set(impl, adapter)
+        for (const allowed of [false, true]) {
+          await internals.managerStack.harness.spawnWorker({
+            title: 'Scrapling config', prompt: 'work', managerKey: (`test::scrapling-${impl}-${allowed}` as ManagerKey), impl,
+            origin: { spawned_by_episode: 'test::scrapling', trigger_type: 'message' },
+            report_to: { channel_id: 'wechat', session_id: 'scrapling-test' },
+            principal_permissions: permissions({ mcp_skill: allowed }),
+          })
+          const caps = adapter.provisionCalls.at(-1)!.caps
+          expect(caps.mcp_servers?.filter(server => server.name === 'scrapling')).toEqual(allowed ? [scrapling] : [])
+          expect(caps.skills.some(item => item.name === 'scrapling-official')).toBe(allowed)
+        }
+      }
+    } finally {
+      internals.attentionScheduler.stopAll()
+      await internals.managerStack.dispose()
+      await vi.waitFor(() => dataDir.restore())
+    }
+  })
+})

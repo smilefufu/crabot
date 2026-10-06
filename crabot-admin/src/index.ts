@@ -7773,16 +7773,17 @@ export class AdminModule extends ModuleBase {
     // 不再区分 builtin / user-installed，不再读 config.mcp_server_ids（已 @deprecated）
     const enabledMcpServers = this.mcpServerManager.list().filter((s) => s.enabled)
 
-    // 将 MCP server 配置转换为 Agent 格式，并为 scrapling 注入 CDP URL 环境变量
-    const mcpServerConfigs = enabledMcpServers.map((s) => {
-      const agentConfig = this.mcpServerManager.toAgentConfig(s)
-      if (s.name === 'scrapling') {
-        return {
-          ...agentConfig,
-          env: { ...agentConfig.env, BROWSER_CDP_URL: this.browserManager.cdpUrl },
-        }
+    // 标准内置 Scrapling 使用产品运行环境；所有 Worker 消费同一份解析结果。
+    const { resolveScraplingConfig } = require(path.join(CRABOT_HOME, 'scripts/lib/scrapling-runtime.cjs'))
+    const mcpServerConfigs = enabledMcpServers.flatMap((s) => {
+      try {
+        return [resolveScraplingConfig(
+          CRABOT_HOME, getDataRootDir(), s, this.mcpServerManager.toAgentConfig(s),
+        ) as ReturnType<MCPServerManager['toAgentConfig']>]
+      } catch (error) {
+        console.warn(`[Admin] MCP server "${s.name}" unavailable:`, error instanceof Error ? error.message : String(error))
+        return []
       }
-      return agentConfig
     })
 
     // subagents：startup pull 时就带上，避免 Agent 启动期 subagents 空窗。

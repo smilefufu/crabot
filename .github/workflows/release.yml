@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths:
+      - 'scripts/scrapling/**'
+      - 'scripts/*scrapling*.mjs'
+      - 'scripts/lib/scrapling-*'
+      - '.github/scripts/*scrapling*'
+      - '.github/workflows/release.yml'
 
 permissions:
   contents: write
@@ -10,9 +17,10 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: ${{ github.event_name != 'pull_request' }}
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             platform: linux
             arch: x64
           - os: macos-14
@@ -76,29 +84,45 @@ jobs:
           # admin: 后端 build → 前端 build:web（顺序执行，build:web 会进入 web/ 子项目自己 install）
           (cd crabot-admin && pnpm run build && pnpm run build:web)
 
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.10.1'
+
+      - name: Prepare portable Scrapling runtime
+        shell: bash
+        run: node scripts/prepare-scrapling.mjs --release="$GITHUB_REF_NAME"
+
+      - name: Verify real Scrapling MCP and browser calls
+        shell: bash
+        run: node .github/scripts/smoke-scrapling.mjs "$GITHUB_WORKSPACE"
+
       - name: Prune to production-only dependencies
         shell: bash
         run: |
+          # Windows Copy-Item/zip 不保留 pnpm 链接语义，发行依赖使用实体 hoisted 布局。
+          prod_flags=(--prod --prefer-offline)
+          if [ "${{ matrix.platform }}" = windows ]; then prod_flags+=(--node-linker=hoisted); fi
+
           # build 已完成，dist 产物保留。重装去 devDeps（typescript / vitest / tsx 等）。
           # native 模块 (better-sqlite3) 用 prebuild 二进制，不需现场编译。
           # crabot-shared 必须先 prune：其他模块 file: 引用，install 时基于其当时状态做快照。
-          (cd crabot-shared && rm -rf node_modules && pnpm install --prod --prefer-offline)
+          (cd crabot-shared && rm -rf node_modules && pnpm install "${prod_flags[@]}")
 
           # 其他模块和 root 并行 prune
           pids=()
-          (rm -rf node_modules && pnpm install --prod --prefer-offline) &
+          (rm -rf node_modules && pnpm install "${prod_flags[@]}") &
           pids+=($!)
           for mod in crabot-core crabot-agent \
                      crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk \
                      crabot-mcp-tools crabot-admin; do
             if [ -d "$mod" ]; then
-              (cd "$mod" && rm -rf node_modules && pnpm install --prod --prefer-offline) &
+              (cd "$mod" && rm -rf node_modules && pnpm install "${prod_flags[@]}") &
               pids+=($!)
             fi
           done
           # scripts/lib 是独立 package（依赖 proper-lockfile 等），不属于 root workspace
           if [ -d "scripts/lib" ]; then
-            (cd scripts/lib && rm -rf node_modules && pnpm install --prod --prefer-offline) &
+            (cd scripts/lib && rm -rf node_modules && pnpm install "${prod_flags[@]}") &
             pids+=($!)
           fi
           for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
@@ -107,6 +131,7 @@ jobs:
         if: matrix.platform != 'windows'
         run: |
           VERSION=${GITHUB_REF_NAME}
+          if [ "${{ github.event_name }}" = "pull_request" ]; then VERSION="pr-${{ github.event.number }}"; fi
           DIRNAME="crabot-${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}"
           mkdir -p "/tmp/${DIRNAME}"
 
@@ -189,12 +214,18 @@ jobs:
                   "crabot-memory/" "/tmp/${DIRNAME}/crabot-memory/"
           fi
 
+          # 独立顶层版本目录：旧 release 解包不会删除其它正在使用的环境。
+          RUNTIME_DIR=$(node -p "require('./scrapling-runtime.json').directory")
+          cp -R "$RUNTIME_DIR" "/tmp/${DIRNAME}/"
+          cp scrapling-runtime.json "/tmp/${DIRNAME}/"
+
           # 打包前校验运行时载荷齐全（防止 exclude 规则漏掉 skill 等运行时文件）
           node .github/scripts/verify-release-payload.mjs "/tmp/${DIRNAME}"
+          node .github/scripts/smoke-scrapling.mjs "/tmp/${DIRNAME}"
 
           # 打包（tar 默认保留 staging 目录内的 hardlink）
+          python3 .github/scripts/package-release.py "/tmp/${DIRNAME}"
           cd /tmp
-          tar -czf "${DIRNAME}.tar.gz" "${DIRNAME}"
           shasum -a 256 "${DIRNAME}.tar.gz" > "${DIRNAME}.tar.gz.sha256"
 
           # 移回 workspace
@@ -205,6 +236,7 @@ jobs:
         shell: pwsh
         run: |
           $Version = $env:GITHUB_REF_NAME
+          if ("${{ github.event_name }}" -eq "pull_request") { $Version = "pr-${{ github.event.number }}" }
           $DirName = "crabot-${Version}-windows-x64"
           $TempDir = "$env:TEMP\$DirName"
           New-Item -ItemType Directory -Force -Path $TempDir
@@ -222,7 +254,11 @@ jobs:
           foreach ($mod in $tsModules) {
             if (Test-Path $mod) {
               $dest = Join-Path $TempDir $mod
-              Copy-Item -Recurse $mod $dest
+              New-Item -ItemType Directory -Force -Path $dest | Out-Null
+              # 构建留下的无效检查链接不是运行时文件，不能让它中断载荷复制。
+              Get-ChildItem -LiteralPath $mod -Force |
+                Where-Object { $_.Name -ne 'node_modules_link_check' } |
+                Copy-Item -Destination $dest -Recurse
               Remove-Item -Recurse -Force "$dest\src" -ErrorAction SilentlyContinue
               Remove-Item -Recurse -Force "$dest\test*" -ErrorAction SilentlyContinue
               Remove-Item -Recurse -Force "$dest\.venv" -ErrorAction SilentlyContinue
@@ -264,13 +300,44 @@ jobs:
             Remove-Item -Force -ErrorAction SilentlyContinue
 
           # 打包前校验运行时载荷齐全（防止清理规则漏掉 skill 等运行时文件）
+          $Runtime = (Get-Content scrapling-runtime.json -Raw | ConvertFrom-Json).directory
+          Copy-Item -Recurse $Runtime $TempDir
+          Copy-Item scrapling-runtime.json $TempDir
+
           node .github/scripts/verify-release-payload.mjs "$TempDir"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
           Compress-Archive -Path $TempDir -DestinationPath "$DirName.zip"
           (Get-FileHash "$DirName.zip" -Algorithm SHA256).Hash | Out-File "$DirName.zip.sha256"
 
+          # 用最终 zip 的真实解压结果验收，覆盖链接/隐藏文件的封装损失。
+          $Expanded = "$env:TEMP\$DirName-unpacked"
+          Expand-Archive -Path "$DirName.zip" -DestinationPath $Expanded
+          $Unpacked = Join-Path $Expanded $DirName
+          node .github/scripts/verify-release-payload.mjs "$Unpacked"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node .github/scripts/smoke-scrapling.mjs "$Unpacked"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify system upgrade and ordinary users (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          git fetch origin tag v2026.9.23 --depth=1
+          git archive v2026.9.23 cli.mjs package.json scripts > /tmp/crabot-system-baseline.tar
+          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-linux-x64.tar.gz' -print -quit)
+          sudo env "PATH=$PATH" bash .github/scripts/audit-scrapling-system.sh \
+            "$GITHUB_WORKSPACE" "$ARCHIVE" "$GITHUB_WORKSPACE/scrapling-system-audit" /tmp/crabot-system-baseline.tar
+
+      - name: Save system audit evidence
+        if: always() && matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrapling-system-audit
+          path: scrapling-system-audit/
+          if-no-files-found: ignore
+
       - name: Upload Release Assets
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |

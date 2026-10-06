@@ -18,6 +18,7 @@ import {
   writeVersionFile,
 } from './upgrade-lib/release.mjs'
 import { runSourceUpgrade, syncPythonDeps } from './upgrade-lib/source.mjs'
+import { runBounded } from './lib/scrapling-prepare.mjs'
 import { detectMode as detectInstallScope } from './lib/mode.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { homedir } from 'node:os'
@@ -121,6 +122,7 @@ async function runReleaseMode() {
 
   console.log('Syncing Python deps ...')
   await syncPythonDeps(CRABOT_HOME, logger)
+  await runBounded(process.execPath, [join(CRABOT_HOME, 'scripts/prepare-scrapling.mjs'), '--check'])
 
   console.log('Running data migrations ...')
   const result = await runMigrations(CRABOT_HOME, DATA_DIR, runScript, logger)

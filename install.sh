@@ -7,7 +7,7 @@ set -e
 #   源码安装: ./install.sh --from-source
 
 CRABOT_VERSION="${CRABOT_VERSION:-latest}"
-INSTALL_DIR="${CRABOT_INSTALL_DIR:-$HOME/.crabot}"
+INSTALL_DIR="${CRABOT_INSTALL_DIR:-}"
 REQUIRED_NODE_VERSION="22.14.0"
 FROM_SOURCE=false
 # 标记 ensure_node 是否通过 nvm 切换了 node；末尾给用户提示当前 shell 仍是旧 node
@@ -46,6 +46,7 @@ if [ "$SYSTEM_MODE" = "true" ]; then
   fi
   INSTALL_DIR="${INSTALL_DIR:-/opt/crabot}"
 fi
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.crabot}"
 
 # --- OS 检测 ---
 detect_platform() {
@@ -223,6 +224,7 @@ main() {
     corepack pnpm run build:cli
     info "Setting up Python environment..."
     (cd crabot-memory && uv sync)
+    node scripts/prepare-scrapling.mjs
     info "Source install complete."
   else
     section "Release Install"
@@ -247,6 +249,10 @@ main() {
     local url="https://github.com/smilefufu/crabot/releases/download/${version}/${filename}"
     info "Downloading $filename..."
     mkdir -p "$INSTALL_DIR"
+    if [ "$SYSTEM_MODE" = "true" ]; then
+      chown root:root "$INSTALL_DIR"
+      chmod 0755 "$INSTALL_DIR"
+    fi
     curl -fsSL "$url" -o "/tmp/$filename"
 
     # Checksum 校验
@@ -269,6 +275,7 @@ main() {
     # Python 依赖
     info "Setting up Python environment..."
     (cd "$INSTALL_DIR/crabot-memory" && uv sync)
+    node "$INSTALL_DIR/scripts/prepare-scrapling.mjs" --check
   fi
 
   if [ "$SYSTEM_MODE" = "true" ]; then

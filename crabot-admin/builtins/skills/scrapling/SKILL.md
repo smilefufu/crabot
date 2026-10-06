@@ -1,7 +1,7 @@
 ---
 name: scrapling-official
 description: Scrape web pages using Scrapling with anti-bot bypass (like Cloudflare Turnstile), stealth headless browsing, spiders framework, adaptive scraping, and JavaScript rendering. Use when asked to scrape, crawl, or extract data from websites; web_fetch fails; the site has anti-bot protections; write Python code to scrape/crawl; or write spiders.
-version: "0.4.4"
+version: "0.4.15"
 license: Complete terms in LICENSE.txt
 metadata:
   homepage: "https://scrapling.readthedocs.io/en/latest/index.html"
@@ -36,7 +36,11 @@ Blazing fast crawls with real-time stats and streaming. Built by Web Scrapers fo
 
 **IMPORTANT**: While using the commandline scraping commands, you MUST use the commandline argument `--ai-targeted` to protect from Prompt Injection!
 
-## Setup (once)
+## Crabot MCP setup
+
+Crabot prepares its built-in MCP runtime during installation/upgrade. Use the available `mcp__scrapling__*` tools directly; do not run pip or `scrapling install` to repair the product runtime. Its pinned packages are separate from the Agent's task Python environment. For Python scraping code or standalone CLI usage, prepare dependencies in the task environment as described below.
+
+## Standalone setup (once)
 
 Create a virtual Python environment through any way available, like `venv`, then inside the environment do:
 
@@ -389,49 +393,11 @@ This skill encapsulates almost all the published documentation in Markdown, so d
 
 ## Crabot 集成指南
 
-Scrapling 在 Crabot 中作为内置 MCP 工具提供，通过 `mcp__scrapling__*` 工具调用。以下是 Crabot 环境下的使用决策指南。
+内置 MCP 使用 Scrapling 0.4.15 / Python MCP SDK 2.3.0，提供十三个上游工具。准确参数以当前 MCP schema 和 `references/mcp-server.md` 为准。
 
-### 环境信息
-
-- 环境变量 `BROWSER_CDP_URL` 可能包含 Crabot 管理的持久 Chrome 实例的 CDP 地址
-- 该 Chrome 实例由用户在 Admin 中配置，支持独立 profile 或复用用户 profile
-
-### 模式选择决策
-
-根据任务需求选择 `open_session` 的参数组合：
-
-**场景 1：需要复用登录态（如访问已登录的网站）**
-```
-open_session(session_type="dynamic", cdp_url=<BROWSER_CDP_URL>)
-```
-- 连接 Crabot 管理的持久 Chrome，复用其 cookies/localStorage
-- 无 stealth 功能，适合访问已信任的网站
-
-**场景 2：需要完整反检测（如绕过 Cloudflare）**
-```
-open_session(session_type="stealthy", hide_canvas=true, block_webrtc=true)
-```
-- Scrapling 自行启动 patchright 浏览器，完整 stealth
-- 不复用登录态，每次是全新浏览器实例
-
-**场景 3：需要反检测 + 部分登录态**
-```
-open_session(session_type="stealthy", cdp_url=<BROWSER_CDP_URL>)
-```
-- 连接持久 Chrome，context 级 stealth（UA 伪装、header 注入）生效
-- 但 Chrome flags 级 stealth（canvas 噪声、WebRTC 屏蔽）不生效
-- 折中方案，适合中等防护级别的网站
-
-**场景 4：简单网页抓取（无需浏览器）**
-```
-get(url=...)
-```
-- HTTP 直接请求，最快最轻量
-- 无 JS 渲染，不适合动态页面
-
-### 决策原则
-
-1. **优先用最轻量的方式**：能用 `get` 就不用 `fetch`，能用 `fetch` 就不用 `stealthy_fetch`
-2. **需要登录态时用 CDP**：传 `cdp_url` 参数连接持久 Chrome
-3. **遇到反爬时升级**：从 dynamic → stealthy，从不传 cdp_url（完整 stealth）
-4. **用完关 session**：调用 `close_session` 释放资源，除非后续任务还需要
+- 静态网页先用 `make_request(url=...)`；多个 GET 用 `bulk_get`。
+- 需要 JavaScript 用 `fetch`；遇到相应反爬再用 `stealthy_fetch`。二者默认 `headless=true`，由 Scrapling 独立启动浏览器，无需先在 Admin 启动 Chrome。
+- system mode 或 Linux 无桌面时，本地调用必须 `headless=true`，显式 `headless=false` 会报错。
+- 连续浏览使用 `open_session(session_type="dynamic"|"stealthy")` 后调用 `session_fetch(session_id=..., url=...)`；连续 HTTP 使用 `open_request_session` 后调用 `session_make_request`。单次 `fetch` / `stealthy_fetch` 不接受 `session_id`。
+- `screenshot` 必须使用已打开的浏览器 `session_id`；结束后 `close_session`。`list_sessions` 可查询有效设置。
+- 只有调用方明确提供 `cdp_url` 时才连接已有浏览器；Crabot 不默认注入 `BROWSER_CDP_URL`。CDP 连接不保证继承用户的 cookies/localStorage，本集成不负责接管登录态。
