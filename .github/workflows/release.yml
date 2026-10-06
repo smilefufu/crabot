@@ -306,11 +306,17 @@ jobs:
 
           node .github/scripts/verify-release-payload.mjs "$TempDir"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node .github/scripts/smoke-scrapling.mjs "$TempDir"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
           Compress-Archive -Path $TempDir -DestinationPath "$DirName.zip"
           (Get-FileHash "$DirName.zip" -Algorithm SHA256).Hash | Out-File "$DirName.zip.sha256"
+
+          # 用最终 zip 的真实解压结果验收，覆盖链接/隐藏文件的封装损失。
+          $Expanded = "$env:TEMP\$DirName-unpacked"
+          Expand-Archive -Path "$DirName.zip" -DestinationPath $Expanded
+          $Unpacked = Join-Path $Expanded $DirName
+          node .github/scripts/verify-release-payload.mjs "$Unpacked"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node .github/scripts/smoke-scrapling.mjs "$Unpacked"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify system upgrade and ordinary users (Linux)
         if: matrix.platform == 'linux'

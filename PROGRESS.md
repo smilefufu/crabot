@@ -1,9 +1,9 @@
 # Crabot 项目进度
 
-### Scrapling system/headless 与升级兼容：已实现，发行回归验收中
+### Scrapling system/headless 与升级兼容：已实现，未部署
 
 - 按已确认 spec：新实例默认启用，已有关闭状态和自定义启动参数保持；锁定 Scrapling 0.4.15 / Python MCP 2.3.0，公共只读产品资源与 Agent 任务 venv 分离。新 system release 默认 `/opt/crabot`，已有安装根不搬迁；普通 headless 独立于 BrowserManager。
-- release 随包交付完整 Python、浏览器、Linux 动态模块和字体；install/upgrade/dev/start 接入共同准备与本地校验。旧 release 原有一次 upgrade 已在 Linux CI 完成真实 Memory 同步，OFFSET、启停/自定义 registry 和旧环境 sentinel 的 checksum 保持；普通 UID 冷/热调用与实际 PNG 已验证，最终双 UID 退出检查及 Windows 载荷由发行 CI 验收。
+- release 随包交付完整 Python、浏览器、Linux 动态模块和字体；install/upgrade/dev/start 接入共同准备与本地校验。旧 release 原有一次 upgrade 已在 Linux CI 完成真实 Memory 同步，OFFSET、启停/自定义 registry 和旧环境 sentinel 的 checksum 保持；两个普通 UID 的冷/热 HTTP/HTTPS、JS、stealth、Cookie/session、实际 PNG 及 EOF/SIGTERM 无残留检查已通过；Windows 验收改为使用最终 zip 的真实解压结果。
 - 安装/准备失败与进程清理 7 项、升级器 32 项、Admin 49 项、三类 Worker provision 32 项及 Admin/Agent TypeScript 检查通过；Manager/MCP 相关检查通过。3 项 builtin 生产测试失败在未修改 main 副本复现，另行记录，不纳入此项修复。
 - 修复缺资源导致整份 Agent 配置失败、Linux 继承其它用户 XDG 配置导致 Crashpad 失败，以及 POSIX SIGTERM 被 SDK 阻塞输入卡住；真实 EOF/SIGTERM 本地回归均返回 0。Windows 封装使用实体依赖布局，避免普通复制丢失 MCP SDK 的传递依赖。
 - 早期 release 空实例迁移缺陷按用户决定暂不解决；未部署或重启本机 Crabot。文档协议与实施计划已独立发布，本任务在隔离 worktree/PR 中交付。
