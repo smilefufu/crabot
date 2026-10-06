@@ -76,5 +76,5 @@ try {
 } finally {
   await client.close()
   site.close()
-  if (!process.env.CRABOT_KEEP_SMOKE_ARTIFACTS) await rm(privateDir, { recursive: true, force: true })
+  if (!process.env.CRABOT_KEEP_SMOKE_ARTIFACTS) await rm(privateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
 }
