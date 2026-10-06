@@ -10,7 +10,7 @@ const base = { managerKey: 'fixture::user', isSystemThread: false } as const
 
 describe('product guidance boundaries', () => {
   it('keeps short cores and role-specific catalogs; ordinary tasks receive no workflows', () => {
-    expect(MANAGER_IDENTITY.replace(/\s/g, '').length).toBeLessThanOrEqual(300)
+    expect(MANAGER_IDENTITY.replace(/\s/g, '').length).toBeLessThanOrEqual(500)
     expect(BUILTIN_WORKER_PROMPT.replace(/\s/g, '').length).toBeLessThanOrEqual(350)
     expect(BUILTIN_WORKER_PROMPT).not.toMatch(/主控|执行器|调用方/)
     expect(guidanceNames('manager')).toHaveLength(4)

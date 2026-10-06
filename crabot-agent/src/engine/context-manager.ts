@@ -995,11 +995,17 @@ export class ContextManager {
 
   private renderManagerMessage(message: EngineMessage): string {
     if (message.role === 'assistant') {
-      return `assistant: ${this.extractText(message)}`
+      return `assistant: ${message.content.flatMap((block) => {
+        if (block.type === 'text') return [block.text]
+        if (block.type === 'tool_use') {
+          return [`tool_use(${block.id}, ${block.name}): ${JSON.stringify(block.input)}`]
+        }
+        return []
+      }).join('\n')}`
     }
     if ('toolResults' in message) {
       return message.toolResults
-        .map((result) => `tool_result(${result.tool_use_id}): ${result.content}`)
+        .map((result) => `tool_result(${result.tool_use_id}, is_error=${result.is_error}): ${result.content}`)
         .join('\n')
     }
     return `user: ${this.extractText(message)}`

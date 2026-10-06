@@ -12,7 +12,7 @@ import type { ChannelMessage, Friend } from '../../src/types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { ActivityContextAdmissionReceipt } from '../../src/workers/harness/worker-events.js'
-import { createUserMessage, defineTool } from '../../src/engine/index.js'
+import { createUserMessage, createAssistantMessage, createToolResultMessage, defineTool } from '../../src/engine/index.js'
 import { ContextManager, createManagerCompactionProfile } from '../../src/engine/context-manager.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import type { ManagerEpisodeSpan, ManagerTraceWriter } from '../../src/manager/trace-types.js'
@@ -190,6 +190,44 @@ describe('ManagerLoop', () => {
 
   afterEach(async () => {
     await fs.rm(dataDir, { recursive: true, force: true })
+  })
+
+  it('folds persisted delivery bodies and receipts without replaying them or folding the latest human input', async () => {
+    const { adapter, queue, foldCalls, calls } = makeAdapter()
+    queue.push({ stopReason: 'end_turn' })
+    const correction = { worker_id: 'fixture-worker', text: '保留已有成果。' + '背景。'.repeat(5000) + '人类已撤销此前约定，直接继续。' }
+    const reply = { content: '已按最新确认更新委托。' }
+    await store.save({ key: KEY, foldedCount: 0, recent: [
+      createUserMessage('此前只读约定已撤销。'),
+      createAssistantMessage([{ type: 'tool_use', id: 'correction', name: 'send_to_worker', input: correction }], 'tool_use'),
+      createToolResultMessage('correction', '{"delivered":true}', false),
+      createAssistantMessage([{ type: 'tool_use', id: 'reply', name: 'send_message', input: reply }], 'tool_use'),
+      createToolResultMessage('reply', '{"delivered":true}', false),
+      ...Array.from({ length: 3 }, (_, index) => createUserMessage(`已保留阶段成果 ${index}`)),
+    ] })
+    const execute = vi.fn(async () => ({ output: '{"delivered":true}', isError: false }))
+    const loop = new ManagerLoop(baseDeps({ store, adapter,
+      policy: { keepRecent: 3, hardCapTokens: 2500 },
+      toolFace: () => ['send_to_worker', 'send_message'].map(name => defineTool({
+        name, description: 'deliver', inputSchema: { type: 'object' }, call: execute,
+      })),
+    }))
+    const outcome = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('最新确认：继续按本次修改要求验收。')] }))
+    expect(outcome.outcome).toBe('completed')
+    expect(foldCalls).toHaveLength(1)
+    const foldInput = (foldCalls[0].messages[0] as { content: string }).content
+    expect(foldInput).toContain(JSON.stringify(correction))
+    expect(foldInput).toContain('tool_use(correction, send_to_worker)')
+    expect(foldInput).toContain('tool_result(correction, is_error=false): {"delivered":true}')
+    expect(foldInput).toContain(JSON.stringify(reply))
+    expect(foldInput).not.toContain('最新确认：')
+    const request = calls.find(call => !call.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))!
+    expect(request.systemPrompt).toContain('以人类最新提出或确认的要求为准')
+    expect(JSON.stringify(request.messages)).toContain('最新确认：继续按本次修改要求验收。')
+    expect(execute).not.toHaveBeenCalled()
+    const saved = await store.load(KEY)
+    expect(saved.foldedCount).toBeGreaterThanOrEqual(5)
+    expect(JSON.stringify(saved.recent)).toContain('最新确认：继续按本次修改要求验收。')
   })
 
   it.each(['human', 'schedule'] as const)('compacts completed tools in a long %s episode without any older history', async (source) => {

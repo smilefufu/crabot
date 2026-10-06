@@ -789,6 +789,145 @@ describe('ContextManager.compactIncrementally', () => {
     ]
   }
 
+  it('preserves Manager reply, correction and workboard inputs with ordered calls and result status', async () => {
+    const cm = new ContextManager({ maxContextTokens: 20000 })
+    const reply = { channel_id: 'fixture', session_id: 'human', content: '已接受最新要求，旧约定可以修改。' }
+    const correction = { worker_id: 'fixture-worker', text: '保留已有成果。' + '背景。'.repeat(1500) + '人类已明确撤销旧约束，按本次确认继续。' }
+    const update = { item_id: 'fixture-item', current_judgement: '旧阻塞已撤销，继续剩余工作。' }
+    const history: EngineMessage[] = [
+      createAssistantMessage([
+        { type: 'raw_reasoning', data: { private: 'REASONING_SENTINEL' } },
+        { type: 'text', text: '按人类当前要求调整委托。' },
+        { type: 'tool_use', id: 'reply', name: 'send_message', input: reply },
+        { type: 'text', text: '随后追加到原执行器。' },
+        { type: 'tool_use', id: 'correction', name: 'send_to_worker', input: correction },
+        { type: 'tool_use', id: 'update', name: 'change_workboard', input: update },
+      ], 'tool_use'),
+      // Deliberately put results in a different order; the IDs carry the association.
+      { ...createToolResultMessage('reply', '', false), toolResults: [
+        { tool_use_id: 'update', content: 'revision conflict', is_error: true },
+        { tool_use_id: 'correction', content: '{"delivered":true}', is_error: false },
+        { tool_use_id: 'reply', content: '{"delivered":true}', is_error: false },
+      ] },
+      createUserMessage('继续核实任务板更新。'),
+    ]
+    const { adapter, calls } = scriptedAdapter(() => ({ text: '纠偏已投递；任务板写入冲突，尚未更新。' }))
+    const result = await cm.compactIncrementally({
+      state: { protectedHead: [], history, protectedTail: [] },
+      profile: createManagerCompactionProfile({ preferredKeepRecent: 1 }),
+      target: { kind: 'preserve_recent' }, adapter, model: 'test',
+    })
+    expect(result.failedReason).toBeUndefined()
+    expect(result.consumedMessages).toBe(2)
+    expect(calls).toHaveLength(1)
+    const prompt = promptText(calls[0])
+    const ordered = ['按人类当前要求调整委托。', 'tool_use(reply, send_message)', JSON.stringify(reply),
+      '随后追加到原执行器。', 'tool_use(correction, send_to_worker)', JSON.stringify(correction),
+      'tool_use(update, change_workboard)', JSON.stringify(update)]
+    const positions = ordered.map(text => prompt.indexOf(text))
+    expect(positions.every(position => position >= 0)).toBe(true)
+    expect(positions).toEqual([...positions].sort((a, b) => a - b))
+    expect(prompt).toContain('tool_result(update, is_error=true): revision conflict')
+    expect(prompt).toContain('tool_result(correction, is_error=false): {"delivered":true}')
+    expect(prompt).toContain('tool_result(reply, is_error=false): {"delivered":true}')
+    expect(prompt).not.toContain('REASONING_SENTINEL')
+    expect(result.state.history).toEqual(history.slice(-1))
+  })
+
+  it('carries delivered changes into the next summary request after state serialization', async () => {
+    const cm = new ContextManager({ maxContextTokens: 20000 })
+    const oldInput = { worker_id: 'fixture-worker', text: '此前人类要求只读。' + '背景。'.repeat(300) }
+    const newInput = { worker_id: 'fixture-worker', text: '人类已明确撤销只读约定；保留产物，直接完成本次修改。' + '背景。'.repeat(300) }
+    const latest = createUserMessage('本次确认不需要再次询问，继续完成。')
+    const profile = createManagerCompactionProfile({ preferredKeepRecent: 1 })
+    const { adapter, calls } = scriptedAdapter((_params, index) => ({
+      text: index === 0 ? '此前人类约定只读，委托已送达。' : '本次确认覆盖此前只读约定，纠偏已送达。',
+    }))
+    const first = await cm.compactIncrementally({
+      state: { protectedHead: [], protectedTail: [], history: [
+        createUserMessage('这次只读检查。'),
+        createAssistantMessage([{ type: 'tool_use', id: 'old', name: 'send_to_worker', input: oldInput }], 'tool_use'),
+        createToolResultMessage('old', '{"delivered":true}', false),
+        createAssistantMessage([{ type: 'text', text: '阶段检查完成。' }], 'end_turn'),
+      ] },
+      profile, target: { kind: 'preserve_recent' }, adapter, model: 'test',
+    })
+    const restored = JSON.parse(JSON.stringify(first.state)) as CompactionState
+    const second = await cm.compactIncrementally({
+      state: { ...restored, protectedTail: [latest], history: [...restored.history,
+        createUserMessage('我撤销之前只读的约定，现在直接修改。'),
+        createAssistantMessage([{ type: 'tool_use', id: 'new', name: 'send_to_worker', input: newInput }], 'tool_use'),
+        createToolResultMessage('new', '{"delivered":true}', false),
+        createAssistantMessage([{ type: 'text', text: '正在验收剩余工作。' }], 'end_turn'),
+      ] },
+      profile, target: { kind: 'preserve_recent' }, adapter, model: 'test',
+    })
+    expect(first.failedReason).toBeUndefined()
+    expect(second.failedReason).toBeUndefined()
+    expect(calls).toHaveLength(2)
+    expect(promptText(calls[0])).toContain(JSON.stringify(oldInput))
+    const prompt = promptText(calls[1])
+    expect(prompt).toContain('此前摘要:\n此前人类约定只读，委托已送达。')
+    expect(prompt).toContain('user: 我撤销之前只读的约定，现在直接修改。')
+    expect(prompt).toContain(JSON.stringify(newInput))
+    expect(prompt).toContain('tool_result(new, is_error=false): {"delivered":true}')
+    expect(prompt).not.toContain(JSON.stringify(oldInput))
+    expect(prompt).not.toContain('本次确认不需要再次询问')
+    expect(second.messages.at(-1)).toBe(latest)
+  })
+
+  it('budgets full Manager tool inputs across safe batches without truncating their tails', async () => {
+    const cm = new ContextManager({ maxContextTokens: 1200 })
+    const history = Array.from({ length: 4 }, (_, index) => {
+      const id = `change-${index}`
+      return [
+        createAssistantMessage([{ type: 'tool_use', id, name: 'send_to_worker',
+          input: { worker_id: 'fixture-worker', text: '背景。'.repeat(450) + `决定-${index}-已撤销旧约束` } }], 'tool_use'),
+        createToolResultMessage(id, 'delivered', false),
+      ]
+    }).flat()
+    history.push(createUserMessage('保留当前原文。'))
+    const { adapter, calls } = scriptedAdapter((_params, index) => ({ text: `summary-${index}` }))
+    const result = await cm.compactIncrementally({
+      state: { protectedHead: [], history, protectedTail: [] },
+      profile: createManagerCompactionProfile({ preferredKeepRecent: 1, summarySystemPrompt: 'summarize' }),
+      target: { kind: 'preserve_recent' }, adapter, model: 'test',
+    })
+    expect(result.failedReason).toBeUndefined()
+    expect(result.consumedMessages).toBe(8)
+    expect(calls.length).toBeGreaterThan(1)
+    const prompts = calls.map(promptText)
+    for (let index = 0; index < 4; index++) {
+      expect(prompts.filter(prompt => prompt.includes(`决定-${index}-已撤销旧约束`))).toHaveLength(1)
+      expect(prompts.filter(prompt => prompt.includes(`tool_use(change-${index}, send_to_worker)`))).toHaveLength(1)
+      expect(prompts.filter(prompt => prompt.includes(`tool_result(change-${index}, is_error=false)`))).toHaveLength(1)
+    }
+    for (const call of calls) {
+      expect(cm.estimateStaticPromptTokens(call.systemPrompt, []) + cm.estimateTotalTokens(call.messages)).toBeLessThanOrEqual(960)
+    }
+    expect(result.state.history).toEqual(history.slice(-1))
+  })
+
+  it('keeps an oversized Manager tool group intact when its complete summary input cannot fit', async () => {
+    const cm = new ContextManager({ maxContextTokens: 1200 })
+    const history: EngineMessage[] = [
+      createAssistantMessage([{ type: 'tool_use', id: 'large', name: 'send_to_worker',
+        input: { text: '背景。'.repeat(3000) + '本次确认覆盖此前约定。' } }], 'tool_use'),
+      createToolResultMessage('large', 'delivered', false),
+      createUserMessage('继续'),
+    ]
+    const { adapter, calls } = scriptedAdapter(() => ({ text: 'should not be called' }))
+    const result = await cm.compactIncrementally({
+      state: { protectedHead: [], history, protectedTail: [] },
+      profile: createManagerCompactionProfile({ preferredKeepRecent: 1, summarySystemPrompt: 'summarize' }),
+      target: { kind: 'preserve_recent' }, adapter, model: 'test',
+    })
+    expect(result.failedReason).toContain('最小安全消息组的完整摘要请求仍超过输入上限')
+    expect(result.batchesApplied).toBe(0)
+    expect(result.state.history).toEqual(history)
+    expect(calls).toHaveLength(0)
+  })
+
   it('keeps inputs in place and tries completed tools after a tiny region cannot shrink', async () => {
     const cm = new ContextManager({ maxContextTokens: 20000 })
     const inputA = createUserMessage('original input A')
