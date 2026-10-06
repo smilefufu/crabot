@@ -1,24 +1,26 @@
 # Crabot 项目进度
 
-### 人类最新要求与 Manager 摘要投影修复：已实现，待审核
+### 人类最新要求与 Manager 摘要投影修复：已部署，待行为验证
 
 - 修复摘要只保留工具收据、丢失回复/委托/纠偏正文的问题：按原顺序保留调用 ID、工具名和完整参数，并标明关联回包的 `is_error`，避免把失败的任务板写入当作成功。
 - 主控采用已确认文案：最新人类要求覆盖已明确修改的历史约定，歧义时列冲突确认，不重复确认已明确决定；更新任务板和委托，真实系统、权限及工具限制继续按实际来源判断。
 - 四项回归先复现失败再通过；另覆盖真实 ManagerLoop 的持久历史压缩、当前人类输入保留及不重放投递。8 个相关文件 234 项与 Agent 类型检查通过；执行器核心 354/350 字旧断言在未修改 main 同样失败。后续摘要输入完整不代表已修复历史旧摘要或证明模型行为稳定改善，部署后仍需真实 trace 验证。
 
-### Scrapling system/headless 与升级兼容：已实现，未部署
+- 2026-10-06 14:19:52（Asia/Shanghai）以 main `b8fbf08b` 完成全部模块、Web、CLI、MCP 构建和本地正常重启，同步部署 #199、#200、#201。Scrapling 产品资源完整校验通过；新 Agent PID 93907 使用本仓 dist，七模块及主要端点健康，启动对账 revived=20、failed=0、unchanged=3898。新提示词与摘要正文/错误标记已核实，行为改善仍待真实 trace。
+
+### Scrapling system/headless 与升级兼容：已部署，待本地行为验证
 
 - 按已确认 spec：新实例默认启用，已有关闭状态和自定义启动参数保持；锁定 Scrapling 0.4.15 / Python MCP 2.3.0，公共只读产品资源与 Agent 任务 venv 分离。新 system release 默认 `/opt/crabot`，已有安装根不搬迁；普通 headless 独立于 BrowserManager。
 - release 随包交付完整 Python、浏览器、Linux 动态模块和字体；install/upgrade/dev/start 接入共同准备与本地校验。旧 release 原有一次 upgrade 已在 Linux CI 完成真实 Memory 同步，OFFSET、启停/自定义 registry 和旧环境 sentinel 的 checksum 保持；两个普通 UID 的冷/热 HTTP/HTTPS、JS、stealth、Cookie/session、实际 PNG 及 EOF/SIGTERM 无残留检查已通过；Windows 验收改为使用最终 zip 的真实解压结果。
 - 安装/准备失败与进程清理 7 项、升级器 32 项、Admin 49 项、三类 Worker provision 32 项及 Admin/Agent TypeScript 检查通过；Manager/MCP 相关检查通过。3 项 builtin 生产测试失败在未修改 main 副本复现，另行记录，不纳入此项修复。
 - 修复缺资源导致整份 Agent 配置失败、Linux 继承其它用户 XDG 配置导致 Crashpad 失败，以及 POSIX SIGTERM 被 SDK 阻塞输入卡住；真实 EOF/SIGTERM 本地回归均返回 0。Windows 封装使用实体依赖布局，避免普通复制丢失 MCP SDK 的传递依赖。
-- 早期 release 空实例迁移缺陷按用户决定暂不解决；未部署或重启本机 Crabot。文档协议与实施计划已独立发布，本任务在隔离 worktree/PR 中交付。
+- 早期 release 空实例迁移缺陷按用户决定暂不解决；文档协议与实施计划已独立发布，本任务在隔离 worktree/PR 中交付。
 
-### Manager MCP 当前 episode 热加载恢复：已实现，待部署
+### Manager MCP 当前 episode 热加载恢复：已部署，待行为验证
 
 - `git blame` 确认旧 Engine/builtin Worker callback 保留；Manager 在 PR #162 引入的 episode 目录冻结阻断新 MCP。按 2026-10-05 已确认 spec 改为后续 turn 消费当前连接快照，无须重开会话。
 - 保留固定核心、主体、权限和加载顺序；同名工具更新连接/定义，禁用或失效后移出当前工具面；每个请求固定执行快照，旧引用拒绝且不重放外部副作用。
-- 先复现搜索、服务族加载和 schema 更新三项失败，再修复；169 项相关检查与 Agent TypeScript 检查通过，覆盖真实 Engine/connector、生产 Manager 接线、builtin 同 burst 热加载、撤权与在途调用。未改 Scrapling 默认启停或线上开关，未部署。
+- 先复现搜索、服务族加载和 schema 更新三项失败，再修复；169 项相关检查与 Agent TypeScript 检查通过，覆盖真实 Engine/connector、生产 Manager 接线、builtin 同 burst 热加载、撤权与在途调用。未改 Scrapling 默认启停或线上开关。
 
 ### 主控表达与临时页面能力说明：已部署，待行为验证
 
