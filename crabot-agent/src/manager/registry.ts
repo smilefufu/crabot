@@ -30,6 +30,8 @@
 
 import { ManagerLoop, type WakeEvent, type TimedWakeEnvelope, type EpisodeResult, type ManagerLoopDeps } from './loop.js'
 import { CompactionFailedError } from '../engine/context-manager.js'
+import { IdleReviewRead, boardReviewFingerprint } from './idle-review.js'
+import type { IdleReviewFacts } from '../workers/harness/idle-review-facts.js'
 import type { ManagerSessionStore } from './session-store.js'
 import type { CompactionPolicy } from './compaction.js'
 import type { ManagerKey } from './types.js'
@@ -65,6 +67,18 @@ export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
  */
 export const MAX_SELF_WAKE_CHAIN = 3
 const WORKBOARD_IDLE_REVIEW_DELAY_MS = 60 * 60 * 1000
+const IDLE_REVIEW_MAX_AGE_MS = 8 * WORKBOARD_IDLE_REVIEW_DELAY_MS
+
+interface IdleReviewSnapshot {
+  readonly generation: number
+  readonly configGeneration: number
+  readonly boardFingerprint: string
+  readonly facts: IdleReviewFacts
+}
+
+interface IdleReviewBaseline extends IdleReviewSnapshot {
+  readonly completedAt: number
+}
 
 interface IdleReviewTimer {
   readonly generation: number
@@ -258,6 +272,8 @@ export class ManagerRegistry {
   private readonly completedIdleReviewCycles = new Map<ManagerKey, number>()
   private readonly idleReviewTimers = new Map<ManagerKey, IdleReviewTimer>()
   private readonly lastIdleReviewCompletedAtMs = new Map<ManagerKey, number>()
+  private readonly idleReviewBaselines = new Map<ManagerKey, IdleReviewBaseline>()
+  private readonly idleReviewReads = new Map<ManagerKey, IdleReviewRead>()
   /** 已接收直接人类消息、但尚未成功回复当前会话的 ManagerKey。Loop 回收不清除。 */
   private readonly pendingReplies = new Set<ManagerKey>()
   private readonly scheduleAdmissions = new Map<string, Promise<{ completion: Promise<EpisodeResult> }>>()
@@ -428,6 +444,7 @@ export class ManagerRegistry {
       hasPendingReply: () => this.pendingReplies.has(key),
       onLlmRetry: (event) => this.deps.onLlmRetry?.(key, event),
       onEpisodeEnd: () => this.lastActiveAtMs.set(key, this.deps.now().getTime()),
+      onToolFinished: (event, readOnly) => this.idleReviewReads.get(key)?.record(event, readOnly),
       traceWriter: this.deps.traceWriter,
       onAdminChatWakeConsumed: this.deps.onAdminChatWakeConsumed
         ? (ids) => this.deps.onAdminChatWakeConsumed!(key, ids)
@@ -892,6 +909,8 @@ export class ManagerRegistry {
     this.pendingIdleReviewCycles.clear()
     this.completedIdleReviewCycles.clear()
     this.lastIdleReviewCompletedAtMs.clear()
+    this.idleReviewBaselines.clear()
+    this.idleReviewReads.clear()
     this.pendingReplies.clear()
   }
 
@@ -1089,6 +1108,7 @@ export class ManagerRegistry {
   }
 
   private resetIdleReviewCycle(key: ManagerKey): number {
+    this.idleReviewBaselines.delete(key)
     const generation = (this.idleReviewGenerations.get(key) ?? 0) + 1
     this.idleReviewGenerations.set(key, generation)
     const timer = this.idleReviewTimers.get(key)
@@ -1134,8 +1154,8 @@ export class ManagerRegistry {
     })
   }
 
-  private async readIdleReviewDueAt(key: ManagerKey): Promise<number | undefined> {
-    const board = await this.deps.readCurrentWorkboard(key)
+  private async readIdleReviewDueAt(key: ManagerKey, board?: ManagerWorkboard): Promise<number | undefined> {
+    board ??= await this.deps.readCurrentWorkboard(key)
     let earliest = Infinity
     for (const objective of board.objectives) {
       const candidates = objective.work_items.length > 0 ? objective.work_items : [objective]
@@ -1163,6 +1183,7 @@ export class ManagerRegistry {
 
     if (!this.canArmIdleReview(key, generation)) return
     if (dueAtMs === undefined) {
+      this.idleReviewBaselines.delete(key)
       this.pendingIdleReviewCycles.delete(key)
       this.completedIdleReviewCycles.delete(key)
       return
@@ -1206,8 +1227,10 @@ export class ManagerRegistry {
     if (!this.canAdmitIdleReview(key, generation)) return
 
     let dueAtMs: number | undefined
+    let board: ManagerWorkboard
     try {
-      dueAtMs = await this.readIdleReviewDueAt(key)
+      board = await this.deps.readCurrentWorkboard(key)
+      dueAtMs = await this.readIdleReviewDueAt(key, board)
     } catch (error) {
       if (this.completedIdleReviewCycles.get(key) === generation) this.completedIdleReviewCycles.delete(key)
       console.warn(`[ManagerRegistry] manager '${key}' 的任务板读取失败，跳过本次空闲自省:`, error)
@@ -1215,6 +1238,7 @@ export class ManagerRegistry {
     }
     if (!this.canAdmitIdleReview(key, generation)) return
     if (dueAtMs === undefined) {
+      this.idleReviewBaselines.delete(key)
       this.pendingIdleReviewCycles.delete(key)
       this.completedIdleReviewCycles.delete(key)
       return
@@ -1225,10 +1249,30 @@ export class ManagerRegistry {
       return
     }
 
+    const snapshot = await this.readIdleReviewSnapshot(key, generation, board)
+    if (!this.canAdmitIdleReview(key, generation)) return
+    const baseline = this.idleReviewBaselines.get(key)
+    const same = snapshot && baseline && this.sameIdleReviewSnapshot(snapshot, baseline)
+    const now = this.deps.now().getTime()
+    if (same && now < baseline.completedAt + IDLE_REVIEW_MAX_AGE_MS) {
+      this.completedIdleReviewCycles.delete(key)
+      this.armIdleReviewTimer(key, generation, Math.min(now + WORKBOARD_IDLE_REVIEW_DELAY_MS,
+        baseline.completedAt + IDLE_REVIEW_MAX_AGE_MS))
+      console.info(`[ManagerRegistry] idle_review manager='${key}' decision=skip reason=unchanged`)
+      return
+    }
+    this.idleReviewBaselines.delete(key)
+    let reason = 'changed'
+    if (!snapshot?.facts.canSkip) reason = 'unavailable_or_pending'
+    else if (!baseline) reason = 'no_baseline'
+    else if (same) reason = 'expired'
+    console.info(`[ManagerRegistry] idle_review manager='${key}' decision=review reason=${reason}`)
+    const read = new IdleReviewRead(board)
+    this.idleReviewReads.set(key, read)
     try {
       this.completedIdleReviewCycles.delete(key)
       const envelope = this.makeEnvelope(this.captureIngress(), { kind: 'workboard_idle_review' })
-      await this.runWake(
+      const result = await this.runWake(
         key,
         envelope,
         0,
@@ -1237,12 +1281,41 @@ export class ManagerRegistry {
         undefined,
         () => this.canAdmitIdleReview(key, generation, true),
       )
+      if (result?.outcome === 'completed' && result.consumedEvents && read.complete && snapshot?.facts.canSkip) {
+        try {
+          const afterBoard = await this.deps.readCurrentWorkboard(key)
+          const after = await this.readIdleReviewSnapshot(key, generation, afterBoard)
+          if (after && this.canAdmitIdleReview(key, generation) && this.sameIdleReviewSnapshot(snapshot, after)) {
+            this.idleReviewBaselines.set(key, { ...after, completedAt: this.lastIdleReviewCompletedAtMs.get(key)! })
+          }
+        } catch { console.warn(`[ManagerRegistry] idle_review manager='${key}' baseline=unavailable`) }
+      }
     } catch (error) {
       if (this.completedIdleReviewCycles.get(key) === generation) this.completedIdleReviewCycles.delete(key)
       if (!this.disposed && !this.deps.isClosing?.()) {
         console.error(`[ManagerRegistry] manager '${key}' 的任务板空闲自省失败:`, error)
       }
+    } finally {
+      if (this.idleReviewReads.get(key) === read) this.idleReviewReads.delete(key)
     }
+  }
+
+  private async readIdleReviewSnapshot(key: ManagerKey, generation: number, board: ManagerWorkboard): Promise<IdleReviewSnapshot | undefined> {
+    const configGeneration = this.deps.runtimeConfigAppliedGeneration?.() ?? 0
+    try {
+      const facts = await this.deps.harness.readManagerReviewFacts(key)
+      if (generation !== this.idleReviewGenerations.get(key)
+        || configGeneration !== (this.deps.runtimeConfigAppliedGeneration?.() ?? 0)) return undefined
+      return { generation, configGeneration, boardFingerprint: boardReviewFingerprint(board), facts }
+    } catch {
+      console.warn(`[ManagerRegistry] idle_review manager='${key}' facts=unavailable`)
+      return undefined
+    }
+  }
+
+  private sameIdleReviewSnapshot(a: IdleReviewSnapshot, b: IdleReviewSnapshot): boolean {
+    return a.facts.canSkip && b.facts.canSkip && a.generation === b.generation && a.configGeneration === b.configGeneration
+      && a.boardFingerprint === b.boardFingerprint && a.facts.fingerprint === b.facts.fingerprint
   }
 
   /**

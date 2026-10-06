@@ -234,6 +234,7 @@ export interface BootstrapDeps {
   /** Shared bg registry ownership check for builtin end_turn state mapping. */
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
   readonly hasPendingWorkerNotification?: HarnessDeps['hasPendingWorkerNotification']
+  readonly readReviewBackgrounds?: HarnessDeps['readReviewBackgrounds']
   readonly listWorkerBackground?: HarnessDeps['listWorkerBackground']
   /**
    * 对外事件发布口(§9.2 `agent.task_status_changed`),由 `makeAgentEventPublisher` 构造。
@@ -501,6 +502,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     isExecutionReady: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
     listWorkerBackground: deps.listWorkerBackground,
     hasPendingWorkerNotification: deps.hasPendingWorkerNotification,
+    readReviewBackgrounds: deps.readReviewBackgrounds,
     onContinuationSweep: async () => {
       if (!candidatesReady || candidatesClosing) return
       for (const { managerKey } of await ledger.listAllWorkers()) scheduleCandidates(managerKey)

@@ -159,6 +159,7 @@ import {
 import { WorkerUiSnapshotStore, type WorkerUiActionId, type WorkerUiSnapshot } from './worker-ui-snapshot-store'
 import { projectWorkerActivity } from '../trace/activity-projection'
 import { isWorkerRuntimeEvent } from '../builtin/runtime-observation.js'
+import { reviewFingerprint, type IdleReviewFacts, type ReviewBackgroundFacts } from './idle-review-facts.js'
 import { readLegacyTraces } from '../legacy-source-reader.js'
 import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
 import { applyStatusTransition, canTransition, isTerminalStatus } from './task-status'
@@ -755,6 +756,7 @@ export interface HarnessDeps {
   }) => Promise<{ token: string; expires_at: string }>
   /** Read durable child/background completion receipts without consuming them. */
   readonly hasPendingWorkerNotification?: (workerId: string) => Promise<boolean>
+  readonly readReviewBackgrounds?: (workerIds: readonly string[]) => Promise<Record<string, ReviewBackgroundFacts>>
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
   /** Read-only execution projection waits for startup carrier and background reconciliation. */
@@ -3342,6 +3344,58 @@ export class WorkerHarness {
       ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
     }
     return adapter.readTerminal(handle)
+  }
+
+  /** Read-only: no reconciliation, health probe, delivery or lifecycle mutation. */
+  async readManagerReviewFacts(managerKey: ManagerKey): Promise<IdleReviewFacts> {
+    const workers = (await this.deps.ledger.listWorkers(managerKey)).sort((a, b) => a.worker_id.localeCompare(b.worker_id))
+    let canSkip = this.deps.isExecutionReady?.() !== false
+    if (workers.length && !this.deps.readReviewBackgrounds) return { fingerprint: '', canSkip: false }
+    const backgrounds = await this.deps.readReviewBackgrounds?.(workers.map(worker => worker.worker_id)) ?? {}
+    const facts: unknown[] = []
+    for (const worker of workers) {
+      const background = backgrounds[worker.worker_id]
+      if (!background) canSkip = false
+      const [pending, controls, controlNotifications, queries] = await Promise.all([
+        this.nativeActivityStore.pending(worker.worker_id), this.getWorkerControlOperations(worker.worker_id),
+        this.controlOperationStore.pendingNotifications(worker.worker_id), this.queryReceiptStore.list(worker.worker_id),
+      ])
+      const recoveryPending = worker.recovery_notices?.some(notice => notice.status === 'pending') === true
+      const unsettled = pending.length > 0 || controls.length > 0 || controlNotifications.length > 0
+        || queries.some(query => query.manager_notification.status === 'pending') || recoveryPending
+        || this.hasPendingBgNotification(worker.worker_id)
+      if (unsettled) canSkip = false
+      const ledger = {
+        id: worker.worker_id, task: worker.task,
+        incarnations: worker.incarnations.map(item => ({ id: item.incarnation_id, seq: item.seq, impl: item.impl,
+          state: item.state, session_ref: item.session_ref, forked_from: item.forked_from,
+          started_at: item.started_at, ended_at: item.ended_at, ended_reason: item.ended_reason })),
+        recovery: worker.recovery_notices?.map(notice => ({ id: notice.notice_id, status: notice.status })),
+        background: background?.fingerprint,
+      }
+      // Fully closed historical carriers have no native read/probe/recovery responsibility.
+      if (worker.task.status === 'closed' && worker.incarnations.every(item => item.state === 'exited')
+        && background && !background.active && !unsettled) {
+        facts.push(ledger)
+        continue
+      }
+      canSkip &&= background?.canSkip === true
+      const observation = await this.getWorkerExecutionObservation(worker.worker_id)
+      if (observation.state === 'unknown' || observation.unavailable_reasons.length
+        || observation.notification_pending !== false) canSkip = false
+      const { observed_at: _time, ...execution } = observation
+      const activities = []
+      for (const incarnation of worker.incarnations) {
+        if (isLegacyIncarnation(incarnation)) continue
+        const records = await this.nativeActivityStore.activities(worker.worker_id, incarnation.incarnation_id!)
+        activities.push(records.filter(item => item.kind === 'message' || item.kind === 'tool_call'
+          || item.kind === 'tool_result' || item.kind === 'error')
+          .map(item => ({ incarnation_id: item.incarnation_id, ts: item.ts, source_offset: item.source_offset,
+            kind: item.kind, role: item.role, summary: item.summary })))
+      }
+      facts.push({ ...ledger, execution, activities })
+    }
+    return { fingerprint: reviewFingerprint(facts), canSkip }
   }
 
   /** Read-only: no reconciliation, health probe, delivery or lifecycle mutation. */

@@ -58,6 +58,7 @@ import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, ge
 import { retireWorkerSupervision } from './workers/harness/supervision-retirement-migration.js'
 import { ConfigLoader } from './core/config-loader.js'
 import { TraceStore } from './core/trace-store.js'
+import { readReviewBackgrounds } from './engine/bg-entities/review-facts.js'
 import { BuiltinSubagentRunner } from './workers/builtin/subagent-runner.js'
 import { BgEntityRegistry } from './engine/bg-entities/registry.js'
 import { importV2LegacyTasks } from './workers/legacy-importer.js'
@@ -1267,6 +1268,7 @@ export class UnifiedAgent extends ModuleBase {
         if (!this.agentHandler) throw new Error('Worker background registry is not initialized')
         return this.agentHandler.listWorkerBackground(workerId)
       },
+      readReviewBackgrounds: workerIds => readReviewBackgrounds(this.builtinBgRegistry, this.traceStore, workerIds),
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
       // 翻译与去重在 manager/events.ts，这里只负责把口子接上。
       publishEvent,
