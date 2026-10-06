@@ -234,6 +234,7 @@ export interface EpisodeResult {
 }
 
 export interface ManagerLoopDeps {
+  readonly onToolFinished?: (event: Extract<import('../engine/types.js').EngineToolLifecycleEvent, { type: 'tool_finished' }>, readOnly: boolean) => void
   readonly dailyReflection?: import('./daily-reflection.js').DailyReflection
   readonly key: ManagerKey
   readonly isSystemThread: boolean
@@ -2216,10 +2217,12 @@ export class ManagerLoop {
     const effectiveWake = this.effectiveWakeForCurrentEpisode()
     const isBuiltinDailyReflection = isBuiltinDailyReflectionWake(effectiveWake)
     const systemPrompt = (): string => this.managerSystemPrompt(this.effectiveWakeForCurrentEpisode())
-    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(
-      this.effectiveWakeForCurrentEpisode(),
-      this.currentToolFaceState,
-    )
+    const readOnlyTools = new Map<string, boolean>()
+    const tools = (): ReadonlyArray<ToolDefinition> => {
+      const face = this.deps.toolFace(this.effectiveWakeForCurrentEpisode(), this.currentToolFaceState)
+      for (const tool of face) readOnlyTools.set(tool.name, tool.isReadOnly)
+      return face
+    }
     const messagesRef = { current: initialMessages as ReadonlyArray<EngineMessage> }
     const initialIds = new Set(initialMessages.map((message) => message.id))
     const originalDurableIds = new Set(state.recent.map((message) => message.id))
@@ -2431,6 +2434,9 @@ export class ManagerLoop {
       },
       onToolLifecycle: (event) => {
         this.recordToolLifecycle(episodeId, event)
+        if (event.type === 'tool_finished') {
+          this.deps.onToolFinished?.(event, readOnlyTools.get(event.name) === true)
+        }
         if (this.resumeCheckpoint) {
           const tools = new Map(this.resumeCheckpoint.tools.map((item) => [item.callId, item]))
           tools.set(event.callId, event)

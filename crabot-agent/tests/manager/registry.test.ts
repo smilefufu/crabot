@@ -35,6 +35,7 @@ import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
 import { QueryEstablishmentError } from '../../src/workers/errors.js'
 import { ManagerWorkboardStore } from '../../src/manager/workboard-store.js'
 import { TraceStore } from '../../src/core/trace-store.js'
+import { buildWorkboardTools } from '../../src/manager/tools/workboard-tools.js'
 
 // --- Fixtures / helpers（与 tests/manager/loop.test.ts 同一套约定） ---
 
@@ -1764,6 +1765,152 @@ describe('ManagerRegistry', () => {
       await vi.waitFor(() => expect(calls).toHaveLength(expectedCalls))
       await vi.waitFor(async () => expect(await store.loadCheckpoint(key)).toBeUndefined())
     }
+
+    it('两个阻塞项及无新输出的running Shell不再每小时重复调用模型，八小时复核', async () => {
+      const key = 'wechat::unchanged-running' as ManagerKey
+      const board = new ManagerWorkboardStore(join(dataDir, 'workboards'))
+      const objective = await board.createObjective(key, { title: '部署', completion_criteria: ['完成'] })
+      for (const title of ['等待决定', '等待文件']) await board.createWorkItem(key, objective.value.objective_id,
+        { title, status: 'blocked', current_judgement: '确实需要人类提供', blocker: title, next_action: '收到人类输入后继续' })
+      const { adapter, calls, queue } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' })
+      for (let i = 0; i < 2; i++) queue.push(
+        { stopReason: 'tool_use', toolCalls: [{ name: 'inspect_workboard', id: `board-${i}`, input: {} }] },
+        { stopReason: 'end_turn' })
+      const facts = vi.fn(async () => ({ fingerprint: 'same-running-shell', canSkip: true }))
+      const appendLog = vi.spyOn(store, 'appendEpisodeLog')
+      const registry = new ManagerRegistry(baseRegistryDeps({ adapter, now: () => new Date(),
+        harness: { readManagerReviewFacts: facts } as unknown as WorkerHarness,
+        readCurrentWorkboard: () => board.load(key), toolFace: () => buildWorkboardTools({ store: board, managerKey: key }),
+      }))
+      await registry.routeHumanMessages('wechat', 'unchanged-running', [makeChannelMessage('继续')])
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview(key, calls, 3)
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+      const state = await store.load(key)
+      const writes = appendLog.mock.calls.length
+      for (let i = 0; i < 7; i++) {
+        await vi.advanceTimersByTimeAsync(HOUR_MS)
+        await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+      }
+      expect(calls).toHaveLength(3)
+      expect(await store.load(key)).toEqual(state)
+      expect(appendLog).toHaveBeenCalledTimes(writes)
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview(key, calls, 5)
+      registry.dispose()
+    })
+
+    async function reviewFixture() {
+      const key = 'wechat::review-changes' as ManagerKey
+      const board = new ManagerWorkboardStore(join(dataDir, 'workboards'))
+      const objective = await board.createObjective(key, { title: '原目标', completion_criteria: ['交付'] })
+      await board.createWorkItem(key, objective.value.objective_id, { title: 'A', status: 'ready', next_action: '继续' })
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' })
+      for (let i = 0; i < 4; i++) queue.push(
+        { stopReason: 'tool_use', toolCalls: [{ name: 'inspect_workboard', id: `read-${i}`, input: {} }] },
+        { stopReason: 'end_turn' })
+      const state = { fingerprint: 'original', canSkip: true, config: 0, fail: false }
+      const facts = vi.fn(async () => {
+        if (state.fail) throw new Error('local facts unavailable')
+        return { fingerprint: state.fingerprint, canSkip: state.canSkip }
+      })
+      const registry = new ManagerRegistry(baseRegistryDeps({ adapter, now: () => new Date(),
+        runtimeConfigAppliedGeneration: () => state.config,
+        harness: { readManagerReviewFacts: facts } as unknown as WorkerHarness,
+        readCurrentWorkboard: () => board.load(key), toolFace: () => buildWorkboardTools({ store: board, managerKey: key }),
+      }))
+      await registry.routeHumanMessages('wechat', 'review-changes', [makeChannelMessage('继续')])
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview(key, calls, 3)
+      await vi.waitFor(() => expect(facts).toHaveBeenCalledTimes(2))
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+      return { key, board, objective, state, facts, registry, calls }
+    }
+
+    it.each(['activity', 'pending', 'config', 'board', 'read-error'] as const)('%s变化后不复用旧基线', async change => {
+      const f = await reviewFixture()
+      if (change === 'activity') f.state.fingerprint = 'child-new-text'
+      if (change === 'pending') f.state.canSkip = false
+      if (change === 'config') f.state.config++
+      if (change === 'board') await f.board.reviseObjective(f.key, f.objective.value.objective_id,
+        { title: '新目标', completion_criteria: ['交付'] })
+      if (change === 'read-error') f.state.fail = true
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview(f.key, f.calls, 5)
+      f.registry.dispose()
+    })
+
+    it('Loop回收保留基线，但新消息立即处理并失效旧基线', async () => {
+      const f = await reviewFixture()
+      const before = f.registry.getOrCreate(f.key)
+      expect(f.registry.evictIdle(0, Date.now() + 1)).toBe(1)
+      expect(f.registry.getOrCreate(f.key)).not.toBe(before)
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+      expect(f.calls).toHaveLength(3)
+      await f.registry.routeHumanMessages('wechat', 'review-changes', [makeChannelMessage('改变要求')])
+      expect(JSON.stringify(f.calls.at(-1)?.messages)).toContain('改变要求')
+      expect(f.calls.length).toBeGreaterThan(3)
+      f.registry.dispose()
+    })
+
+    it('基线采集失败不改变成功回合或其下一次计时', async () => {
+      const f = await reviewFixture()
+      f.state.fingerprint = 'new-progress'
+      let failed = false
+      f.facts.mockImplementation(async () => {
+        if (failed) throw new Error('post-review read failed')
+        failed = true
+        return { fingerprint: f.state.fingerprint, canSkip: true }
+      })
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview(f.key, f.calls, 5)
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview(f.key, f.calls, 7)
+      f.registry.dispose()
+    })
+
+    it('复核期间出现的新执行事实不能登记成已经检查过的基线', async () => {
+      const f = await reviewFixture()
+      f.state.fingerprint = 'before-review'
+      f.facts.mockImplementationOnce(async () => ({ fingerprint: 'before-review', canSkip: true }))
+        .mockImplementationOnce(async () => {
+          f.state.fingerprint = 'during-review'
+          return { fingerprint: 'during-review', canSkip: true }
+        })
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview(f.key, f.calls, 5)
+      await vi.waitFor(() => expect(f.facts).toHaveBeenCalledTimes(4))
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+      await vi.advanceTimersByTimeAsync(HOUR_MS)
+      await waitForIdleReview(f.key, f.calls, 7)
+      f.registry.dispose()
+    })
+
+    it('比较期间的新输入使旧检查作废，不取消新周期', async () => {
+      const f = await reviewFixture()
+      const entered = deferred()
+      const release = deferred()
+      f.facts.mockImplementationOnce(async () => {
+        entered.resolve()
+        await release.promise
+        return { fingerprint: 'original', canSkip: true }
+      })
+      const due = vi.advanceTimersByTimeAsync(HOUR_MS)
+      await entered.promise
+      await f.registry.routeHumanMessages('wechat', 'review-changes', [makeChannelMessage('纠偏')])
+      release.resolve()
+      await due
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+      expect(JSON.stringify(f.calls.at(-1)?.messages)).toContain('纠偏')
+      expect(await store.loadCheckpoint(f.key)).toBeUndefined()
+      f.registry.dispose()
+    })
 
     it.each([true, false])('任务 A 更新不遮蔽停滞任务 B（同目标=%s）', async (sameObjective) => {
       const key = 'wechat::independent-items' as ManagerKey

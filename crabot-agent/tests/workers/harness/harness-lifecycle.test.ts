@@ -18,6 +18,7 @@ import {
   type HarnessEvent,
 } from '../../../src/workers/harness/worker-events'
 import { QueryReceiptStore } from '../../../src/workers/harness/query-receipt-store'
+import { WorkerControlOperationStore } from '../../../src/workers/harness/worker-control-operation-store'
 import { CliInputStallError, QueryEstablishmentError } from '../../../src/workers/errors'
 import type {
   WorkerAdapter,
@@ -276,7 +277,7 @@ async function makeHarness(
   fakeOpts: FakeAdapterOpts = {},
   depsOverrides: Partial<Pick<
     HarnessDeps,
-    'hasRunningBg' | 'listWorkerBackground' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
+    'hasRunningBg' | 'listWorkerBackground' | 'readReviewBackgrounds' | 'hasPendingWorkerNotification' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
   >> = {},
 ): Promise<{
   harness: WorkerHarness
@@ -343,6 +344,83 @@ afterEach(async () => {
 })
 
 describe('WorkerHarness.executionStatus', () => {
+  it('已结束控制操作的持久回执尚未消费时仍不得跳过', async () => {
+    const { harness, workersDir } = await makeHarness({}, {
+      hasPendingWorkerNotification: async () => false,
+      readReviewBackgrounds: async ids => Object.fromEntries(ids.map(id => [id, { fingerprint: 'same', canSkip: true, active: false }])),
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    const operations = new WorkerControlOperationStore(workersDir)
+    const operation = await operations.create({ worker_id: worker.worker_id, manager_key: worker.manager_key,
+      incarnation_id: worker.incarnations[0].incarnation_id!, seq: 1, impl: 'builtin', kind: 'interrupt', actor: 'manager', created_at: now() })
+    await operations.transition(worker.worker_id, operation.operation_id, 'succeeded', now())
+    expect(await operations.active(worker.worker_id)).toEqual([])
+    expect((await harness.readManagerReviewFacts(worker.manager_key)).canSkip).toBe(false)
+    expect(await operations.pendingNotifications(worker.worker_id)).toHaveLength(1)
+    await operations.markNotificationConsumed(worker.worker_id, operation.operation_id, now())
+    expect((await harness.readManagerReviewFacts(worker.manager_key)).canSkip).toBe(true)
+  })
+
+  it('CLI child观测未知不能因为父级已停止而跳过', async () => {
+    const { harness } = await makeHarness({ implId: 'claude-code', caps: { subagent: true } }, {
+      hasPendingWorkerNotification: async () => false,
+      readReviewBackgrounds: async ids => Object.fromEntries(ids.map(id => [id, { fingerprint: 'same', canSkip: true, active: false }])),
+    })
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    expect((await harness.getWorkerExecutionObservation(worker.worker_id)).unavailable_reasons).toContain('subagents_require_explicit_read')
+    expect((await harness.readManagerReviewFacts(worker.manager_key)).canSkip).toBe(false)
+  })
+
+  it('自省事实包含持续running及新背景事实，观察时间不制造变化，也不执行控制', async () => {
+    const background = { fingerprint: 'same-shell', canSkip: true, active: true }
+    const { harness, fake } = await makeHarness({}, {
+      hasPendingWorkerNotification: async () => false,
+      readReviewBackgrounds: async ids => Object.fromEntries(ids.map(id => [id, { ...background }])),
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    const before = await harness.readManagerReviewFacts(worker.manager_key)
+    expect(before.canSkip).toBe(true)
+    expect(await harness.readManagerReviewFacts(worker.manager_key)).toEqual(before)
+    background.fingerprint = 'new-shell-output'
+    expect((await harness.readManagerReviewFacts(worker.manager_key)).fingerprint).not.toBe(before.fingerprint)
+    background.canSkip = false
+    expect((await harness.readManagerReviewFacts(worker.manager_key)).canSkip).toBe(false)
+    expect(fake.killCalls).toEqual([])
+    expect(fake.interruptCalls).toEqual([])
+    expect(fake.sendInputCalls).toEqual([])
+  })
+
+  it('关闭且退出的CLI历史不探测；closed但仍有背景责任不能漏掉', async () => {
+    const background = { fingerprint: 'historical', canSkip: false, active: false }
+    const { harness, ledger } = await makeHarness({ implId: 'claude-code' }, {
+      hasPendingWorkerNotification: async () => false,
+      readReviewBackgrounds: async ids => Object.fromEntries(ids.map(id => [id, { ...background }])),
+    })
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const found = await ledger.findWorker(worker.worker_id)
+    found!.worker.task.status = 'closed'
+    for (const item of found!.worker.incarnations) item.state = 'exited'
+    await ledger.upsertWorker(worker.manager_key, worker.worker_id, () => found!.worker)
+    const observe = vi.spyOn(harness, 'getWorkerExecutionObservation')
+    expect((await harness.readManagerReviewFacts(worker.manager_key)).canSkip).toBe(true)
+    expect(observe).not.toHaveBeenCalled()
+    background.active = true
+    expect((await harness.readManagerReviewFacts(worker.manager_key)).canSkip).toBe(false)
+    expect(observe).toHaveBeenCalled()
+  })
+
+  it('持久通知禁止跳过且只读检查不消费', async () => {
+    const pending = vi.fn(async () => true)
+    const { harness } = await makeHarness({}, {
+      hasPendingWorkerNotification: pending,
+      readReviewBackgrounds: async ids => Object.fromEntries(ids.map(id => [id, { fingerprint: 'same', canSkip: true, active: true }])),
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    expect((await harness.readManagerReviewFacts(worker.manager_key)).canSkip).toBe(false)
+    expect((await harness.readManagerReviewFacts(worker.manager_key)).canSkip).toBe(false)
+    expect(pending).toHaveBeenCalledTimes(2)
+  })
+
   it('已停止的 legacy 导入不制造 unknown，续办后按现代化身的实际执行判断', async () => {
     const { harness, ledger } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())

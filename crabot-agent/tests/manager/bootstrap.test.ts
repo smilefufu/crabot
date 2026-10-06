@@ -187,6 +187,21 @@ describe('manager bootstrap（P5 Task 1）', () => {
     }
   }
 
+  it('自省后台事实来源实际装配到Harness，构造时不读取后台注册表', async () => {
+    const read = vi.fn(async (ids: readonly string[]) => Object.fromEntries(ids.map(id =>
+      [id, { fingerprint: 'local', canSkip: true, active: false }])))
+    const stack = buildManagerStack(makeDeps({ readReviewBackgrounds: read }))
+    expect(read).not.toHaveBeenCalled()
+    const key = 'wechat::review-owner' as ManagerKey
+    const worker = makeLedgerWorker({ workerId: 'review-worker', impl: 'builtin', spawnedBySession: key })
+    worker.task.status = 'closed'
+    for (const item of worker.incarnations) item.state = 'exited'
+    await stack.ledger.upsertWorker(key, worker.worker_id, () => worker)
+    await stack.harness.readManagerReviewFacts(key)
+    expect(read).toHaveBeenCalledWith(['review-worker'])
+    await stack.dispose()
+  })
+
   it('reflection stops waiting for a zero-turn analysis only after existing Worker closure', async () => {
     const stack = buildManagerStack(makeDeps())
     const key = 'admin-web::system-tasks' as ManagerKey
