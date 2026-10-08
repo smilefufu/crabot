@@ -39,7 +39,7 @@ import type {
   ToolAccessConfig,
   ToolCategory,
 } from '../../types'
-import { createCliAccessConfig, TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../types'
+import { createCliAccessConfig, VISIBLE_TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../types'
 
 type QueueTarget = { id: string; channel_id: string; title: string }
 type QueueTargetKind = 'privatePool' | 'application'
@@ -1010,7 +1010,7 @@ export const DialogObjectsPage: React.FC = () => {
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
                   <div style={{ fontWeight: 600 }}>工具权限</div>
                   <div className="session-permission-switch-list">
-                    {TOOL_CATEGORIES.filter(category => category !== 'desktop').map((category) => (
+                    {VISIBLE_TOOL_CATEGORIES.filter(category => category !== 'desktop').map((category) => (
                       <PermissionSwitchRow
                         key={category}
                         label={TOOL_CATEGORY_LABELS[category]}

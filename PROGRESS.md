@@ -1,9 +1,10 @@
 # Crabot 项目进度
 
-### 自我认知隐藏未实装远程执行类别
+### 未实装远程执行类别隐藏
 
 - `get_execution_capabilities` 与 `get_friend_permissions` 的模型可见权限结果省略 `remote_exec`，避免把未实装类别描述成 SSH 禁令；仅修改结果序列化，原始授权、Worker 快照与实际工具权限保持不变。
 - 已先复现 8 项失败；修复后 56 项能力查询、联系人权限和 Worker 权限回归及 Agent 类型检查通过。尚未部署到用户反馈问题的 system mode 实例。
+- Admin Web 的联系人、群、模板编辑及模板列表也隐藏此项，完整类别仍用于保存存量值；8 项 UI 回归先失败后通过，44 项定向测试、Web 类型检查与生产构建通过。[协议说明](crabot-docs/protocols/base-protocol.md)明确该权限有设计但未实装，保留字段仅为兼容。
 
 ### 人类最新要求与 Manager 摘要投影修复：已部署，待行为验证
 

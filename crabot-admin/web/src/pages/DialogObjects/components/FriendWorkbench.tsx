@@ -16,7 +16,7 @@ import type {
   ToolAccessConfig,
   ToolCategory,
 } from '../../../types'
-import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../../types'
+import { VISIBLE_TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../../types'
 
 const workbenchLinkStyle: React.CSSProperties = {
   display: 'inline-flex',
@@ -220,7 +220,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
               <div className="session-modal-section">
                 <div style={{ fontWeight: 600 }}>工具权限</div>
                 <div className="session-permission-switch-list">
-                  {TOOL_CATEGORIES.filter((category) => category !== 'desktop').map((category) => (
+                  {VISIBLE_TOOL_CATEGORIES.filter((category) => category !== 'desktop').map((category) => (
                     <PermissionSwitchRow
                       key={category}
                       label={TOOL_CATEGORY_LABELS[category]}

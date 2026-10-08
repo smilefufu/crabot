@@ -4,7 +4,7 @@ import { Tooltip } from '../../components/Common/Tooltip'
 import { useToast } from '../../contexts/ToastContext'
 import { permissionTemplateService } from '../../services/permission-template'
 import type { PermissionTemplate, ToolCategory, ToolAccessConfig, CliDomain, CliPerm, CliAccessConfig, StoragePermission } from '../../types'
-import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, CLI_DOMAINS, CLI_DOMAIN_LABELS, createCliAccessConfig, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../types'
+import { VISIBLE_TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, CLI_DOMAINS, CLI_DOMAIN_LABELS, createCliAccessConfig, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../types'
 
 interface PermissionTemplateFormProps {
   template?: PermissionTemplate
@@ -202,7 +202,7 @@ export const PermissionTemplateForm: React.FC<PermissionTemplateFormProps> = ({
           gap: '0.5rem',
           marginTop: '0.25rem',
         }}>
-          {TOOL_CATEGORIES.map(cat => {
+          {VISIBLE_TOOL_CATEGORIES.map(cat => {
             // desktop 仅 master_private 模板可启用，其他模板（系统或自定义）一律禁用
             const isDesktop = cat === 'desktop'
             const isMasterPrivate = template?.id === 'master_private'

@@ -8,7 +8,7 @@ import { useToast } from '../../contexts/ToastContext'
 import { permissionTemplateService } from '../../services/permission-template'
 import { PermissionTemplateForm } from './PermissionTemplateForm'
 import type { PermissionTemplate } from '../../types'
-import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS } from '../../types'
+import { VISIBLE_TOOL_CATEGORIES, TOOL_CATEGORY_LABELS } from '../../types'
 
 export const PermissionTemplateList: React.FC = () => {
   const toast = useToast()
@@ -76,7 +76,7 @@ export const PermissionTemplateList: React.FC = () => {
 
   const getEnabledCategories = (t: PermissionTemplate): string[] => {
     if (!t.tool_access) return []
-    return TOOL_CATEGORIES
+    return VISIBLE_TOOL_CATEGORIES
       .filter(cat => t.tool_access[cat])
       .map(cat => TOOL_CATEGORY_LABELS[cat])
   }

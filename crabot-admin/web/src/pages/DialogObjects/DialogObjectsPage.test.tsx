@@ -463,6 +463,34 @@ describe('DialogObjectsPage', () => {
     })
   })
 
+  it.each([true, false])('hides friend remote execution and preserves its stored value %s on save', async (remoteExec) => {
+    const existing = await getFriendPermissions()
+    existing.resolved.tool_access.remote_exec = remoteExec
+    render(<DialogObjectsPage />)
+    await screen.findByLabelText('本地命令')
+    expect(screen.queryByText('远程执行')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('本地命令'))
+    fireEvent.click(screen.getByRole('button', { name: '保存权限' }))
+    await waitFor(() => expect(updateFriendPermissions).toHaveBeenCalledWith('friend-1', expect.objectContaining({
+      tool_access: expect.objectContaining({ shell: true, remote_exec: remoteExec }),
+    })))
+  })
+
+  it.each([true, false])('hides group remote execution and preserves its explicit override %s on save', async (remoteExec) => {
+    const existing = await getSessionConfig()
+    existing.config.tool_access.remote_exec = remoteExec
+    render(<DialogObjectsPage />)
+    fireEvent.click(await screen.findByRole('tab', { name: /群聊/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '编辑群权限' }))
+    await screen.findByLabelText('本地命令')
+    expect(screen.queryByText('远程执行')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('本地命令'))
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+    await waitFor(() => expect(updateSessionConfig).toHaveBeenCalledWith('wechat-main', 'group-1', expect.objectContaining({
+      tool_access: expect.objectContaining({ shell: true, remote_exec: remoteExec }),
+    })))
+  })
+
   it('keeps friend permissions read-only when loading the resolved payload fails', async () => {
     getFriendPermissions.mockRejectedValueOnce(new Error('friend permissions down'))
 
