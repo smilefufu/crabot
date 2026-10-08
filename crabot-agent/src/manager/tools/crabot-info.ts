@@ -19,6 +19,7 @@ import { defineTool } from '../../engine/index.js'
 import type { ToolCallContext, ToolDefinition } from '../../engine/index.js'
 import type { ResolvedPermissions } from '../../types.js'
 import type { MasterAuthorization } from '../principal.js'
+import { stringifyPermissionAwareness } from './permission-awareness.js'
 
 interface ManagerScheduleTarget {
   readonly channel_id: string
@@ -743,7 +744,7 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
   })
 
   // --- get_friend_permissions ---
-  // 直接对应 admin RPC `get_friend_permissions`(registerMethod 原样注册),参数/结果原样透传。
+  // 直接对应 admin RPC `get_friend_permissions`，只在模型可见结果中省略未实装权限类别。
   const getFriendPermissions = defineTool({
     name: 'get_friend_permissions',
     description:
@@ -766,7 +767,7 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
         const result = await callAdmin<{ friend_id: string }, unknown>('get_friend_permissions', {
           friend_id: friendId,
         })
-        return ok(result)
+        return { output: stringifyPermissionAwareness(result), isError: false }
       } catch (error) {
         return fail(error)
       }

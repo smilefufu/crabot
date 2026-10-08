@@ -3,6 +3,7 @@ import type { ResolvedPermissions } from '../../types.js'
 import type { WorkerImplId } from '../../workers/types.js'
 import type { ToolFaceDeps } from './tool-face.js'
 import { BUILTIN_WORKER_PERMISSIONS, narrowWorkerPermissions, workerCliExecutionPermissions } from '../../workers/builtin/runtime.js'
+import { stringifyPermissionAwareness } from './permission-awareness.js'
 
 export interface ExecutionToolObservation {
   readonly observed_at: string
@@ -43,7 +44,7 @@ export function createExecutionCapabilitiesTool(deps: ToolFaceDeps): ToolDefinit
           principal = (await deps.projectDocs.readWorkerContext(args.worker_id))?.principal_permissions
         }
         const registry = deps.workerImplSnapshot?.()
-        return { isError: false, output: JSON.stringify({
+        return { isError: false, output: stringifyPermissionAwareness({
           can_spawn: current.principalPermissions?.tool_access.task ?? null,
           permission_source: args.worker_id ? 'persisted_worker_principal' : 'current_delegation_principal',
           principal_known: principal !== undefined,

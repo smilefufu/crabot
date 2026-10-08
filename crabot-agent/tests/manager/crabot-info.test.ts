@@ -622,6 +622,35 @@ describe('buildCrabotInfoTools', () => {
   })
 
   describe('get_friend_permissions', () => {
+    it.each([true, false])('omits remote_exec=%s from config and resolved awareness without modifying Admin results', async (remoteExec) => {
+      const resolved = schedulePermissions('read', false)
+      resolved.tool_access.remote_exec = remoteExec
+      const response = {
+        config: { ...resolved, updated_at: '2026-10-08' },
+        resolved,
+      }
+      const before = structuredClone(response)
+      const callAdmin = makeCallAdmin({ get_friend_permissions: () => response })
+      const tool = buildCrabotInfoTools({ callAdmin }).find((item) => item.name === 'get_friend_permissions')!
+      const result = await tool.call({ friend_id: 'friend-123' }, {})
+
+      expect(result.isError).toBe(false)
+      const expected = JSON.parse(JSON.stringify(before))
+      delete expected.config.tool_access.remote_exec
+      delete expected.resolved.tool_access.remote_exec
+      expect(JSON.parse(result.output)).toEqual(expected)
+      expect(response).toEqual(before)
+    })
+
+    it('preserves absent friend permission config and resolution', async () => {
+      const callAdmin = makeCallAdmin({ get_friend_permissions: () => ({ config: null, resolved: null }) })
+      const tool = buildCrabotInfoTools({ callAdmin }).find((item) => item.name === 'get_friend_permissions')!
+      const result = await tool.call({ friend_id: 'friend-123' }, {})
+
+      expect(result.isError).toBe(false)
+      expect(JSON.parse(result.output)).toEqual({ config: null, resolved: null })
+    })
+
     it('透传 friend_id 并返回 config/resolved', async () => {
       const callAdmin = makeCallAdmin({
         get_friend_permissions: (params) => {

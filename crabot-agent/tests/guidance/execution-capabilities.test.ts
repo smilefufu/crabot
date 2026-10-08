@@ -22,6 +22,37 @@ async function query(tool: ReturnType<typeof createExecutionCapabilitiesTool>, i
   return JSON.parse(result.output)
 }
 describe('execution capability evidence', () => {
+  it.each([true, false])('omits the unimplemented category from new-worker awareness when remote_exec=%s', async (remoteExec) => {
+    const { current, tool } = setup()
+    current.tool_access.remote_exec = remoteExec
+    const before = structuredClone(current)
+    const result = await query(tool, {})
+
+    expect(result.implementations.map((item: { impl: string }) => item.impl)).toEqual(['builtin', 'claude-code', 'codex'])
+    for (const implementation of result.implementations) {
+      expect(implementation.permissions.tool_access).toEqual({
+        memory: false, messaging: false, task: false, mcp_skill: true,
+        file_io: true, browser: true, shell: true, desktop: true,
+      })
+    }
+    expect(current).toEqual(before)
+    expect(BUILTIN_WORKER_PERMISSIONS.tool_access.remote_exec).toBe(false)
+  })
+
+  it.each(['builtin', 'claude-code', 'codex'])('omits the unimplemented category from existing %s worker awareness without changing its snapshot', async (impl) => {
+    const { deps, old, tool } = setup()
+    old.tool_access.remote_exec = true
+    const before = structuredClone(old)
+    deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'm::s', worker: { incarnations: [{ impl, workspace: '/fixture' }] } })
+    const result = await query(tool, { worker_id: 'old-worker' })
+
+    expect(result.permission_source).toBe('persisted_worker_principal')
+    expect(result.implementations[0].permissions.tool_access).not.toHaveProperty('remote_exec')
+    expect(result.implementations[0].permissions.tool_access).toMatchObject({ shell: false, desktop: false })
+    expect(old).toEqual(before)
+    expect(deps.describeExecutionTools).toHaveBeenCalledWith(impl, old)
+  })
+
   it('separates dispatch permission from ready/worker capability', async () => {
     const { current, tool } = setup(); current.tool_access.task = false
     const result = await query(tool, { impl: 'builtin' })
@@ -48,6 +79,7 @@ describe('execution capability evidence', () => {
     deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'm::s', worker: { incarnations: [{ impl: 'codex', workspace: '/fixture' }] } })
     const result = await query(tool, { worker_id: 'old' })
     expect(result.principal_known).toBe(false)
+    expect(result.implementations[0].permissions.tool_access).not.toHaveProperty('remote_exec')
     expect(result.implementations[0].permissions.tool_access.desktop).toBe(false)
     expect(result.implementations[0].current_incarnation_tools).toBe('unknown')
   })
