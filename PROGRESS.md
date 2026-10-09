@@ -1,5 +1,13 @@
 # Crabot 项目进度
 
+### 安卓语音终端与家庭 Channel：公开样本端侧实验完成，待真实多人验证
+
+- 用户确定先用安卓手机、不采购硬件；一期在手机/桌宠端完成声纹提取与比对，Crabot负责成员映射及权限；一期至少处理无明显静音的连续换人场景B。按用户要求先落实技术点，暂缓细化/确认spec，未改正式协议、产品代码或重启Crabot。[替代草案](crabot-docs/superpowers/specs/2026-10-09-android-voice-terminal-design.md)仍未确认。
+- [模型与服务API研究](crabot-docs/superpowers/research/2026-10-09-voice-models-and-service-apis.md)已区分自建/云ASR、TTS、端侧声纹与流式能力；建议独立语音服务接入、Admin保存服务/模型引用，音频配置只在voice Channel实例页。system mode终端配对与实例隔离仍需验收。桌宠ARM主板250–450元、1–2GB内存仅为验证起点估算，未证明可承担新增分段；暂不采购。
+- 2026-10-09 OnePlus 7 Pro（Android10/API29、ARM64、约8GB）官方sherpa-onnx 1.13.8中文CAM++ APK初测：FuFu三段登记成功，独立录音正确匹配，阈值0.50；用户另报告unknown，来源未确认，不统计准确率。约7.02秒录音的单次warm compute约194ms，停止回调约299ms（排除下一帧及ASR/LLM/TTS）；ART采样已停止，非冷启动/P95。空闲PSS初次约116MiB、多次测试后约235MiB，非推理峰值。AC/USB供电保持唤醒已按用户要求设为3，原值0。
+- 2026-10-09 已在隔离实验环境构造6组官方中文公开样本，登记/测试音频独立；整段单次匹配均返回A。Android有限文件实验在手机完成FP32/INT8分段和逐段CAM++名字匹配：FP32的12.48/12.46秒A→B/A→B→A分别1438/1421ms，短样本144–268ms，排除加载/登记/文件读取/ASR/LLM/TTS，单次值不作P95。短/长录音分别走单窗口/多窗口路径，不能线性外推。FP32边界附近仍有混淆，INT8跨人片段及短B误归A，场景B未判验收通过。
+- [可复现实验与现场步骤](crabot-docs/superpowers/research/voice-scenario-b-poc/README.md)已保存源码、14份手机原始日志、JSON及来源/hash；手机文件工具已就绪，不开启麦克风或改动原App的FuFu登记。家人到场后两人各留独立登记录音，先只登记FuFu测另一人unknown，再加入另一人测新内容；不用等第三个人。AAC→16kHz单声道PCM16转换已用公开样本验证，真实录音导出、客厅换人/逐字归因、在线等待/电耗和完整语音链路仍待验证；单人可先测短句/停顿/音量/距离。
+
 ### 未实装远程执行类别隐藏：已本地部署
 
 - `get_execution_capabilities` 与 `get_friend_permissions` 的模型可见权限结果省略 `remote_exec`，避免把未实装类别描述成 SSH 禁令；仅修改结果序列化，原始授权、Worker 快照与实际工具权限保持不变。
