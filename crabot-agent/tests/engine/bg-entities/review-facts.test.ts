@@ -25,6 +25,55 @@ describe('后台自省事实只读快照', () => {
   })
   afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }) })
   const read = () => readReviewBackgrounds(registry, traces, ['worker'])
+  function child(patch: Partial<BgAgentRegistryRecord> = {}): BgAgentRegistryRecord {
+    return { ...shell, type: 'agent', entity_id: 'agent_history', owner: { worker_id: 'worker', friend_id: 'f' },
+      status: 'stalled', ended_at: '2026-10-01T01:00:00Z', output_file: join(dir, 'child.txt'),
+      task_description: '已中断的工作', messages_log_file: 'unused', result_file: null, trace_id: 'child-trace',
+      exit_notification: { status: 'delivered', attempts: 1, updated_at: '2026-10-01T01:00:01Z' }, ...patch }
+  }
+  it.each(['stalled', 'completed', 'failed', 'killed'] as const)('已结束的%s child及保留的停止意图不阻挡稳定历史', async status => {
+    await registry.register({ ...shell, status: 'completed' })
+    await registry.register(child({ status, stop_requested_at: '2026-10-01T00:59:59Z' }))
+    const file = await fs.readFile(join(dir, 'registry.json'), 'utf8')
+    const before = await read()
+    expect(before.worker).toMatchObject({ canSkip: true, active: false })
+    expect(await read()).toEqual(before)
+    expect(await fs.readFile(join(dir, 'registry.json'), 'utf8')).toBe(file)
+  })
+  it.each([null, '', 'invalid'])('中断child缺少可解析的结束时间(%s)仍禁止跳过', async ended_at => {
+    await registry.register(child({ ended_at }))
+    expect((await read()).worker).toMatchObject({ canSkip: false, active: true })
+  })
+  it.each(['dead_letter', undefined] as const)('历史终态的%s通知状态不制造新的投递责任', async status => {
+    await registry.register({ ...shell, status: 'completed' })
+    await registry.register(child({ exit_notification: status ? { status, attempts: 1, updated_at: 'then' } : undefined }))
+    const file = await fs.readFile(join(dir, 'registry.json'), 'utf8')
+    expect((await read()).worker).toMatchObject({ canSkip: true, active: false })
+    expect(await fs.readFile(join(dir, 'registry.json'), 'utf8')).toBe(file)
+  })
+  it('终态pending仍有责任，结算后结束时间变化仍进入比较', async () => {
+    const record = child({ exit_notification: { status: 'pending', attempts: 0, updated_at: 'now' } })
+    await registry.register(record)
+    expect((await read()).worker).toMatchObject({ canSkip: false, active: true })
+    await registry.settleExitNotification(record.entity_id, 'delivered')
+    const settled = await read()
+    expect(settled.worker.canSkip).toBe(true)
+    await registry.update(record.entity_id, { ended_at: '2026-10-01T02:00:00Z' })
+    expect((await read()).worker.fingerprint).not.toBe(settled.worker.fingerprint)
+  })
+  it('running child停止尚未结算时禁止跳过', async () => {
+    const record = child({ status: 'running', ended_at: null, stop_requested_at: 'now', exit_notification: undefined })
+    await fs.writeFile(record.output_file!, '')
+    await registry.register(record)
+    expect((await read()).worker).toMatchObject({ canSkip: false, active: true })
+  })
+  it('中断child没有隐藏其仍运行的Shell及新输出', async () => {
+    await registry.register(child({ entity_id: 'agent_1' }))
+    const before = await read()
+    expect(before.worker).toMatchObject({ canSkip: true, active: true })
+    await fs.appendFile(shell.log_file, 'child的Shell新输出')
+    expect((await read()).worker.fingerprint).not.toBe(before.worker.fingerprint)
+  })
   it('running且输出稳定可以复用；读取及last_activity_at不消费输出或制造变化', async () => {
     const before = await read()
     expect(before.worker).toMatchObject({ canSkip: true, active: true })

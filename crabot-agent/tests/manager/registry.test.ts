@@ -20,9 +20,13 @@ import type { EpisodeResult, WakeEvent } from '../../src/manager/loop.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage, Friend } from '../../src/types.js'
-import type { LedgerStore } from '../../src/workers/harness/ledger-store.js'
+import { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
-import type { WorkerHarness } from '../../src/workers/harness/harness.js'
+import { WorkerHarness } from '../../src/workers/harness/harness.js'
+import { WorkspaceManager } from '../../src/workers/harness/workspace-manager.js'
+import type { WorkerAdapter } from '../../src/workers/types.js'
+import { BgEntityRegistry } from '../../src/engine/bg-entities/registry.js'
+import { readReviewBackgrounds } from '../../src/engine/bg-entities/review-facts.js'
 import type {
   ActivityContextAdmissionReceipt,
   HarnessEvent,
@@ -1800,6 +1804,66 @@ describe('ManagerRegistry', () => {
       await vi.advanceTimersByTimeAsync(HOUR_MS)
       await waitForIdleReview(key, calls, 5)
       registry.dispose()
+    })
+
+    it('真实后台和Harness中的历史中断child允许七次小时跳过，未closed父级和新pending仍正确处理', async () => {
+      const key = 'wechat::terminal-review' as ManagerKey
+      const board = new ManagerWorkboardStore(join(dataDir, 'workboards'))
+      const objective = await board.createObjective(key, { title: '等待材料', completion_criteria: ['交付'] })
+      await board.createWorkItem(key, objective.value.objective_id,
+        { title: '人类提供材料', status: 'blocked', current_judgement: '等待人类提供材料', blocker: '材料未到', next_action: '收到后继续' })
+      const ledger = new LedgerStore(join(dataDir, 'worker-ledgers'))
+      const worker = makeLedgerWorker('worker-history', key)
+      worker.incarnations = [{ incarnation_id: 'inc-history', seq: 1, impl: 'builtin', state: 'idle',
+        workspace: join(dataDir, 'workspace'), session_ref: 'test', started_at: '2026-09-01T00:00:00Z' }]
+      await ledger.upsertWorker(key, worker.worker_id, () => worker)
+      const backgrounds = new BgEntityRegistry(join(dataDir, 'backgrounds.json'))
+      await backgrounds.register({ type: 'agent', entity_id: 'agent_history', status: 'stalled',
+        owner: { worker_id: worker.worker_id, friend_id: '__builtin_worker__' }, spawned_by_task_id: worker.worker_id,
+        spawned_at: '2026-09-01T00:00:00Z', last_activity_at: '2026-09-01T01:00:00Z',
+        ended_at: '2026-09-01T01:00:00Z', exit_code: null, task_description: '旧工作已中断',
+        messages_log_file: 'unused', result_file: null,
+        exit_notification: { status: 'delivered', attempts: 1, updated_at: '2026-09-01T01:00:01Z' } })
+      const childAdapter = { capabilities: () => ({ subagent: true }), listSubagents: async () => [{
+        worker_id: worker.worker_id, subagent_id: 'agent_history', executor_impl: 'builtin', name: 'history', status: 'interrupted',
+      }] } as unknown as WorkerAdapter
+      const backgroundFile = await fs.readFile(join(dataDir, 'backgrounds.json'), 'utf8')
+      const harness = new WorkerHarness({ ledger, adapters: new Map([['builtin', childAdapter]]), defaultImpl: 'builtin',
+        workspaces: new WorkspaceManager(join(dataDir, 'workspaces')), workersDir: join(dataDir, 'workers'), now: () => new Date().toISOString(),
+        listWorkerBackground: async () => (await backgrounds.list()).map(({ entity_id, status, ended_at }) => ({ entity_id, status, ended_at })),
+        hasPendingWorkerNotification: async () => (await backgrounds.list()).some(record => record.exit_notification?.status === 'pending'),
+        readReviewBackgrounds: ids => readReviewBackgrounds(backgrounds, new TraceStore(), ids),
+      })
+      const { adapter, calls, queue } = makeAdapter()
+      queue.push({ stopReason: 'end_turn' })
+      for (let i = 0; i < 3; i++) queue.push(
+        { stopReason: 'tool_use', toolCalls: [{ name: 'inspect_workboard', id: `terminal-board-${i}`, input: {} }] },
+        { stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(baseRegistryDeps({ adapter, harness, ledger, now: () => new Date(),
+        readCurrentWorkboard: () => board.load(key), toolFace: () => buildWorkboardTools({ store: board, managerKey: key }) }))
+      try {
+        await registry.routeHumanMessages('wechat', 'terminal-review', [makeChannelMessage('继续')])
+        await vi.advanceTimersByTimeAsync(HOUR_MS)
+        await waitForIdleReview(key, calls, 3)
+        await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+        const state = await store.load(key)
+        for (let i = 0; i < 7; i++) {
+          await vi.advanceTimersByTimeAsync(HOUR_MS)
+          await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+          expect(calls).toHaveLength(3)
+        }
+        expect(await store.load(key)).toEqual(state)
+        expect(await fs.readFile(join(dataDir, 'backgrounds.json'), 'utf8')).toBe(backgroundFile)
+        expect((await ledger.findWorker(worker.worker_id))?.worker.task.status).toBe('running')
+        await vi.advanceTimersByTimeAsync(HOUR_MS)
+        await waitForIdleReview(key, calls, 5)
+        await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+        await backgrounds.register({ ...(await backgrounds.get('agent_history'))!,
+          exit_notification: { status: 'pending', attempts: 0, updated_at: new Date().toISOString() } })
+        await vi.advanceTimersByTimeAsync(HOUR_MS)
+        await waitForIdleReview(key, calls, 7)
+        expect((await backgrounds.get('agent_history'))?.exit_notification?.status).toBe('pending')
+      } finally { registry.dispose() }
     })
 
     async function reviewFixture() {
