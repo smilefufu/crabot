@@ -3419,7 +3419,7 @@ export class WorkerHarness {
     const reasons = new Set<WorkerExecutionObservation['reasons'][number]>()
     if (worker.task.status === 'queued') reasons.add('queued')
     const children = new Map<string, WorkerSubagentSummary>()
-    const childIds = new Set<string>()
+    const reportedChildren = new Map<string, WorkerSubagentSummary>()
     let builtinChildrenRead = false
     for (const incarnation of worker.incarnations) {
       if (isLegacyIncarnation(incarnation)) {
@@ -3449,7 +3449,7 @@ export class WorkerHarness {
         builtinChildrenRead = true
         for (const child of await adapter.listSubagents(handleForIncarnation(workerId, incarnation))) {
           if (child.worker_id !== workerId) { observation.unavailable_reasons.push('child_owner_mismatch'); continue }
-          childIds.add(child.subagent_id)
+          reportedChildren.set(child.subagent_id, child)
           if (child.status === 'running' || child.status === 'unknown') {
             const redact = this.deps.redactFailureReason ?? ((text: string) => text)
             const safe = { ...child, name: redact(child.name),
@@ -3466,9 +3466,18 @@ export class WorkerHarness {
     try {
       if (!this.deps.listWorkerBackground) throw new Error('unavailable')
       for (const entity of await this.deps.listWorkerBackground(workerId)) {
+        const child = reportedChildren.get(entity.entity_id)
+        const childStatus = entity.status === 'stalled' ? 'interrupted' : entity.status === 'killed' ? 'stopped' : entity.status
+        if (child && child.status !== 'unknown' && child.status !== childStatus) {
+          observation.unavailable_reasons.push('background_child_unavailable')
+        }
+        // Restart-interrupted children are terminal; keep uncertain Shells and conflicting reads conservative.
+        if (child?.status === 'interrupted' && entity.status === 'stalled'
+          && entity.ended_at && Number.isFinite(Date.parse(entity.ended_at))
+          && (!child.ended_at || Date.parse(child.ended_at) === Date.parse(entity.ended_at))) continue
         if (entity.status !== 'running' && entity.status !== 'stalled') continue
         // agent_ is the registry identity format; failed child reads must not turn it into a Shell.
-        if (childIds.has(entity.entity_id) || entity.entity_id.startsWith('agent_')) {
+        if (reportedChildren.has(entity.entity_id) || entity.entity_id.startsWith('agent_')) {
           if (!children.has(entity.entity_id)) observation.unavailable_reasons.push('background_child_unavailable')
           reasons.add('subagent_running')
         } else {
