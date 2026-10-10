@@ -1,11 +1,13 @@
 # Crabot 项目进度
 
-### 权限系统闭环：已实现，待 PR 验收
+### 权限系统闭环：已本机部署，真实行为待观察
 
 - 按 2026-10-10 已确认方案分开主体授权、角色职责和具体化身执行事实。有效入口只保留 memory/messaging/file_io/shell/mcp_skill/desktop；task/browser/remote_exec 退役，旧值兼容保存。
 - Manager、builtin、child 与退出工具执行宿主守卫；Worker 固定主体范围，内置文件与本地上传检查真实路径及读写级别。原生 CLI 准入覆盖新建及接续，受限或缺主体不借宽权限 fallback。
 - 能力查询与生产装配共用纯计划，最终请求快照原子保存；Worker/child 页面按具体化身展示，旧缺记录 unknown。UI 解释私聊全量/群增量、作用范围和生效时点；Memory 数据级权限仍由独立任务负责。
-- 定向 Agent 183 项、Admin 65 项（含群退役兼容）、Web 51 项通过；最新 main 集成的扩大回归 2297 项通过、15 项基线失败、65 项跳过。Web 全量 324 项通过、17 项 localStorage 环境失败在未修改 main 复现；Agent 全量两边都未收敛，不计作通过。Shared/Agent/Admin/CLI 和 Web 生产构建通过；未重启本地实例或部署目标 Ubuntu。
+- 定向 Agent 183 项、Admin 65 项（含群退役兼容）、Web 51 项通过；最新 main 集成的扩大回归 2297 项通过、15 项基线失败、65 项跳过。Web 全量 324 项通过、17 项 localStorage 环境失败在未修改 main 复现；Agent 全量两边都未收敛，不计作通过。Shared/Agent/Admin/CLI 和 Web 生产构建通过；目标 Ubuntu 未部署。
+- 2026-10-10 17:18:31（Asia/Shanghai）以已合并代码 `7ebf64ed` 完成全模块、Web、CLI、MCP 构建及本机 user mode 正常重启，七模块及端点健康。新 Agent 使用本仓 dist；实际 Admin JS 与构建逐字节一致，生产 `get_worker_detail` 已返回新版执行事实结构，旧化身为 `legacy_unknown`。编译查询 fixture 确认旧值 `task=false` 不阻止主控派发、仅显示六个有效入口；未为验收触发新任务或模型请求，真实行为继续按后续 trace 观察。
+- 启动对账 revived=21、failed=0、unchanged=3944；9 条 `builtin trace writer unavailable` 的 Worker/trace 标识均在部署前出现，无新标识或新增 fatal 日志。保留为独立历史恢复告警，不据此改写任务或权限数据；Memory 后端修复仍独立处理。
 
 ### 安卓语音终端与家庭 Channel：端侧分段及ASR归属对照完成，待真实验收
 
