@@ -1,12 +1,17 @@
 # Crabot 项目进度
 
-### Memory 可见性一致性：已实现，待 PR review
+### Memory 可见性一致性：已本机部署，真实行为待观察
 
 - 按用户确认的 [spec](crabot-docs/superpowers/specs/2026-10-10-memory-access-consistency-design.md) 修复 private/internal 粗隔离。internal 仍跨场景/项目共享；保留既有 memory_scopes 显式查询，压缩按 visibility 分组、scopes 取并集，未新增细粒度归属 ACL 或人工分类。
 - 长期标记落盘，候选截断/模型输入前过滤 private；ID、版本、引用、画像来源、更新和 Case→Rule 保持隔离。Agent 用当前 episode/新权限和 MasterAuthorization，memory=false 不加载旧画像；Admin 人类 JWT 和 exact core Agent bearer 经敏感传输及验证桥认证。
-- 短期压缩事务替换；v4→v5 有只读 dry-run、完整备份校验和失败恢复，保留历史版本、统计、task usage、水位和画像。旧长期缺标记兼容 internal，非法已有标记拒绝读取；未执行真实迁移、服务重启或 Ubuntu 部署。
+- 短期压缩事务替换；v4→v5 有只读 dry-run、完整备份校验和失败恢复，保留历史版本、统计、task usage、水位和画像。旧长期缺标记兼容 internal，非法已有标记拒绝读取；本机迁移与重启已完成，Ubuntu 未部署。
 - PR review 指出的 OpenClaw Memory 导入漏接已补真实归档/handler 回归并修复：当前人类 JWT、Admin context 和写入标记走同一 sensitive 入口，拒绝 internal/agent-cli。保留既有按类别汇总错误与暂存归档清理；逐文件可见性核验/认证开销、未用旧入口和 eval fixture 升级另记 follow-up。
 - Memory 全量 430、Agent 定向 198、Admin 含 OpenClaw 串行 207、Shared 全量 112、Core 配置 7 项通过；相关构建通过。扩大 Agent 388 项通过，2 条 trace 旧断言在未修改 7ebf64ed 同样失败；Admin 全量有端口/超时与旧文档断言失败，Agent 全量未收敛，不计作通过。仅 review 本次 diff，按 code-simplifier 去掉新 SQL 过滤后的重复后过滤并重验。
+
+- 2026-10-10 19:04（Asia/Shanghai）验证已合并产品代码 `c5592354` 的本机 user mode 部署：全模块/Web/CLI/MCP 构建通过，正常停机升级并后台启动，七模块与主要端点健康，Memory 实际注册 0.4.0、数据 marker 为 v5。部署工作区仅保留既有文档 WIP，产品代码与远端逐文件一致。
+- 迁移前只读 dry-run：6207 份长期及历史文件缺 visibility/scopes，非法标记与短期 scopes 均为 0。完整备份逐文件哈希校验后迁移；备份比对确认正文与原元数据、5902 条长期索引、2171 条短期记录、1677 条 task usage 及索引/水位等原值保持，两库 integrity_check=ok。已校验备份：`~/.crabot/data/memory.v4.backup-318fd8061ff349138d4245d2bfdd5530`，框架备份 `memory.backup-20261010-105939` 也保留。
+- 首次框架 runner 的非冻结依赖解析被阿里云镜像 404 中止，逐文件证明数据未变且 marker 仍 v4；改用既有 lock 的 `uv run --frozen` 后升级成功。Shared 新文件已重链后再完成编译，未改产品代码或 lock。
+- 线上缺上下文/缺 bearer/伪 Admin/伪 Master 请求分别 401/401/401/403，Admin 未登录 Memory 接口 401；实际提供的 `index-C-e2O_8N.js` 与构建逐字节相同。启动对账 revived=21、failed=0、unchanged=3947；9 条已有 trace writer 告警的 Worker/trace 标识没有新增，fatal.log 大小未变，启动阶段无 Memory 认证失败。验收未读取真实记忆正文或触发新模型任务；真实召回与模型行为仍按后续 trace 观察。
 
 ### 权限系统闭环：已本机部署，真实行为待观察
 
