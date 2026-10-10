@@ -1,0 +1,11 @@
+.voice-config { line-height: 1.65; }
+.voice-config h4 { margin: 1.5rem 0 .5rem; }
+.voice-config p { color: var(--text-secondary); font-size: .85rem; overflow-wrap: anywhere; }
+.voice-config [role="alert"] { color: var(--danger, #b42318); }
+.voice-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; margin: .8rem 0; }
+.voice-fields label { display: grid; gap: .35rem; font-size: .85rem; }
+.voice-actions { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+.voice-service-row { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.voice-editor, .voice-model, .voice-pairing { border: 1px solid var(--border); border-radius: .5rem; padding: 1rem; margin: 1rem 0; min-width: 0; }
+.voice-pairing img { display: block; max-width: 100%; }
+@media (max-width: 680px) { .voice-fields { grid-template-columns: 1fr; } .voice-service-row { align-items: flex-start; flex-direction: column; } }

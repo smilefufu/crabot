@@ -115,6 +115,7 @@ export type WakeEvent =
        * `identity="master|friend|stranger"`,friend 对象本身不进正文。)
        */
       readonly friend?: Friend
+      readonly senderFriends?: ReadonlyArray<Friend>
       /**
        * 上面那个发言者**算好的权限档位**(§8.2),与 friend 同源同刻,由唤醒边界的异步解析
        * (`ManagerRegistryDeps.onHumanWake`)产出。
@@ -184,6 +185,7 @@ export type WakeEvent =
        * ——权限档位 / 记忆 scopes 全部退回未解析那一档。
        */
       readonly friend?: Friend
+      readonly senderFriends?: ReadonlyArray<Friend>
       /** 与 `human_messages` 的同名字段逐字同义(见上)。 */
       readonly principalPermissions?: ResolvedPermissions
     }
@@ -198,12 +200,15 @@ export interface ManagerWakeCorrelation {
 }
 
 export interface TimedWakeEnvelope {
+  /** Durable voice ingress responsibility; present even when its playback opportunity has expired. */
+  readonly voice_turn_id?: string
   readonly wake: WakeEvent
   readonly received_at: string
   readonly timezone: string
   readonly occurred_at?: string
   readonly human_occurred_at?: ReadonlyArray<{ readonly message_id?: string; readonly occurred_at?: string }>
   readonly correlation?: ManagerWakeCorrelation
+  readonly voice_reply_context?: import('crabot-shared').VoiceReplyContext
   /** Process-local activity delivery receipt; never rendered or persisted. */
   readonly activity_context_receipt?: ActivityContextAdmissionReceipt
 }
@@ -408,6 +413,10 @@ export class ManagerLoop {
    * episode 由 mutex 串行，不存在交叠。
    */
   private currentTraceId: string | undefined = undefined
+  private currentVoiceReplyContext?: import('crabot-shared').VoiceReplyContext
+  get voiceReplyContext(): import('crabot-shared').VoiceReplyContext | undefined {
+    return this.currentVoiceReplyContext && Date.parse(this.currentVoiceReplyContext.expires_at) > Date.now() ? this.currentVoiceReplyContext : undefined
+  }
   private readonly tracedLlmResponses = new Set<string>()
   private readonly tracedUsageResponses = new Set<string>()
   private readonly tracedToolStarts = new Set<string>()
@@ -612,9 +621,10 @@ export class ManagerLoop {
     envelope: TimedWakeEnvelope,
     onHumanInputResponse?: (lastRespondedMessageId: string) => Promise<void>,
     onInitialInputCommitted?: () => void,
+    onDurableQueued?: () => void,
   ): Promise<EpisodeResult> {
     assertTimedWakeEnvelope(envelope)
-    return this.mutex.run(() => this.runEpisode(envelope, onHumanInputResponse, undefined, onInitialInputCommitted))
+    return this.mutex.run(() => this.runEpisode(envelope, onHumanInputResponse, undefined, onInitialInputCommitted, onDurableQueued))
   }
 
   /** Queue now, then refresh authorization at the exact episode boundary. */
@@ -815,7 +825,7 @@ export class ManagerLoop {
   /** Prepare before registry's synchronous active-check/enqueue, or before initial history commit. */
   async prepareHumanWake(envelope: TimedWakeEnvelope): Promise<void> {
     if (!this.deps.quotedPrefetch || !isHumanWake(envelope.wake)) return
-    const { messages, friend } = envelope.wake
+    const { messages, friend, senderFriends } = envelope.wake
     if (messages.length === 0 || messages.every((message) => this.quotedByMessage.has(message))) return
     const { channelId, sessionId } = splitManagerKey(this.deps.key)
     let quoted: ReadonlyMap<string, QuotedMessageEntry> = new Map()
@@ -824,7 +834,7 @@ export class ManagerLoop {
         messages, [], channelId, sessionId,
         messages[0].session.type === 'group' ? 'group' : 'private',
         this.deps.quotedPrefetch,
-        (msg) => resolveSenderIdentity({ msg, ...(friend ? { senderFriend: friend } : {}) }),
+        (msg) => resolveSenderIdentity({ msg, senderFriend: senderFriends?.find(f => f.id === msg.sender.friend_id) ?? friend }),
       )
     } catch {
       // A malformed Channel response must not prevent admission of the human message.
@@ -863,6 +873,7 @@ export class ManagerLoop {
     onHumanInputResponse?: (lastRespondedMessageId: string) => Promise<void>,
     recovery?: ManagerResumeCheckpoint,
     onInitialInputCommitted?: () => void,
+    onDurableQueued?: () => void,
   ): Promise<EpisodeResult> {
     if (this.contextRecoveryPending && !recovery) throw new CompactionFailedError('原执行等待上下文容量恢复')
     this.contextRecoveryPending = false
@@ -897,6 +908,8 @@ export class ManagerLoop {
     this.pendingHumanCommit = []
     this.knownCommittedHumanIds = new Set()
     this.currentWakeEvent = envelope ?? null
+    if (recovery) this.currentVoiceReplyContext = undefined
+    else if (envelope && isHumanWake(envelope.wake)) this.currentVoiceReplyContext = envelope.voice_reply_context
     this.currentEpisodeEnvelopes = episodeEnvelopes
     this.currentToolProfile = toolProfile
     this.mailbox.setActiveProfile(toolProfile)
@@ -979,7 +992,7 @@ export class ManagerLoop {
       }
       committedHumanMessages = committed.messageCount
       humanInputsCommitted = true
-      if (committed.hasNewDirectHumanMessages) this.deps.markPendingReply()
+      if (committed.hasNewDirectHumanMessages || envelope?.voice_turn_id) this.deps.markPendingReply()
       // 已提交人类消息 id 的内存镜像:mid-episode 注入的投影判定用它(同步、无 store I/O)
       this.knownCommittedHumanIds = new Set(state.committedHumanMessageIds ?? [])
       if (committed.currentHumanEnvelope) {
@@ -1008,7 +1021,7 @@ export class ManagerLoop {
         && (!isHumanWake(envelope.wake) || isEmptyHumanWake(envelope.wake))
         ? this.renderEnvelope(envelope)
         : undefined
-      if (!recovery && committedHumanMessages === 0 && carriedTexts.length === 0 && eventText === undefined) {
+      if (!recovery && !envelope?.voice_turn_id && committedHumanMessages === 0 && carriedTexts.length === 0 && eventText === undefined) {
         await this.settleUnclaimedAdminChatWakes()
         return {
           episodeId,
@@ -1039,6 +1052,7 @@ export class ManagerLoop {
             execution: this.checkpointExecution(),
           }
       this.flushCheckpoint()
+      onDurableQueued?.()
 
       // 人类提交成功后，trace admission 的失败也不得倒回已提交输入。
       this.deps.traceWriter?.startEpisode(
@@ -1533,6 +1547,7 @@ export class ManagerLoop {
       if (envelope.wake.kind === 'human_messages') hasNewDirectHumanMessages = true
       for (const { message } of newEntries) committedIds.add(message.platform_message_id)
       const projected = projectHumanEnvelope(envelope, newEntries)
+      if (projected.voice_reply_context) this.currentVoiceReplyContext = projected.voice_reply_context
       const rendered = createUserMessage(this.renderEnvelope(projected))
       committedMessages.push(rendered)
       humanInputEnvelopes.push(projected)
@@ -3013,7 +3028,7 @@ function renderChannelMessages(
     return prefix + formatChannelMessageLine(message, {
       timezone: envelope.timezone,
       now: new Date(envelope.received_at),
-      identity: resolveSenderIdentity({ msg: message, ...(friend ? { senderFriend: friend } : {}) }),
+      identity: resolveSenderIdentity({ msg: message, senderFriend: isHumanWake(envelope.wake) ? envelope.wake.senderFriends?.find(f => f.id === message.sender.friend_id) ?? friend : friend }),
       quotedMessages,
     })
   })

@@ -1,0 +1,18 @@
+module_id: channel-voice
+name: 家庭语音
+version: 0.1.0
+module_type: channel
+description: 配对 Android 手机或桌宠，前台有限语音轮次与家庭群聊
+protocol_version: "0.2.0"
+runtime:
+  type: nodejs
+  version: ">=20.0.0"
+install: npm install
+build: npm run build
+entry: dist/main.js
+config_schema:
+  type: object
+  properties: {}
+author: Crabot Team
+license: Apache-2.0
+keywords: [voice, channel, android]

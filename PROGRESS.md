@@ -28,11 +28,11 @@
 - 2026-10-10 17:18:31（Asia/Shanghai）以已合并代码 `7ebf64ed` 完成全模块、Web、CLI、MCP 构建及本机 user mode 正常重启，七模块及端点健康。新 Agent 使用本仓 dist；实际 Admin JS 与构建逐字节一致，生产 `get_worker_detail` 已返回新版执行事实结构，旧化身为 `legacy_unknown`。编译查询 fixture 确认旧值 `task=false` 不阻止主控派发、仅显示六个有效入口；未为验收触发新任务或模型请求，真实行为继续按后续 trace 观察。
 - 启动对账 revived=21、failed=0、unchanged=3944；9 条 `builtin trace writer unavailable` 的 Worker/trace 标识均在部署前出现，无新标识或新增 fatal 日志。保留为独立历史恢复告警，不据此改写任务或权限数据；Memory 后端修复仍独立处理。
 
-### 安卓语音终端与家庭 Channel：两端 spec 待确认
+### 安卓语音终端与家庭 Channel：两端 spec 已确认，实施中
 
-- 已按用户要求创建 public 仓库 [crabot-voice-android](https://github.com/smilefufu/crabot-voice-android)，初始化 README 并克隆到主仓根目录；主仓 `.gitignore` 忽略该独立仓库。此次仅建立开发目录，未开始安卓产品实现。
-- 用户确定安卓手机起步、不采购硬件，一期端侧分段/声纹，至少支持无明显静音的连续换人B；按用户要求将整合稿拆为安卓仓的[客户端spec](crabot-voice-android/docs/superpowers/specs/2026-10-10-android-voice-terminal-v1-design.md)与文档仓的[后端spec](crabot-docs/superpowers/specs/2026-10-10-voice-channel-v1-design.md)，原入口保留跳转。安卓仓 README/AGENTS.md 固定后续安卓 spec 与计划的归属，跨端正式协议仍在 crabot-docs；两稿行为与验收条件保持不变，待用户书面确认。未改正式协议/产品代码或重启Crabot。
-- 推荐独立ASR/TTS服务、Admin保存引用且只在voice实例页配置、家庭group权限；新稿明确同轮多消息整体准入，避免前半句先执行。前台/锁屏、未知整轮拒绝、8秒接话与AEC未通过时按钮打断均是待确认建议，不能当成已批准。system mode、云接口与完整链路待验收。
+- 2026-10-10 用户书面确认安卓仓客户端 spec 与文档仓后端 spec；正式 `protocol-voice.md` 及两份实施计划已发布。隔离分支分别为主仓 `feat/voice-channel-android-v1` 和安卓仓 `feat/android-voice-v1`，设计型代码通过 PR 交付。
+- 已落实一期前台有限采音、端侧 FP32 分段/CAM++声纹、未知或争议整轮拒绝、8秒接话、AEC未通过时按钮打断、独立ASR/TTS引用与真实家庭group权限。正在实现认证/整轮持久接纳与后台原生配置，不改当前运行实例。
+- Shared/MM/Admin 已接入语音契约、实例独立认证、音频模型引用与完整轮次存档；Manager 以真实家庭群及各片段 Friend 接纳整组，formal send_message 单次发送并等待实际播放回执。真实 WSS 的 A→B→A/unknown 整轮门控、打断不重播和后台配置交互测试通过；恢复测试暴露的历史去重窗口已补责任标记。Manager 全套存在 2 项未修改基线同样失败的 Memory trace 测试，未扩大修复范围。产品 APK、真人换人/响应速度/AEC/功耗仍未验收。
 - OnePlus 7 Pro官方CAM++完成FuFu三段登记与新录音匹配；用户报告unknown，样本来源未核实，不报准确率。USB/AC保持唤醒按用户要求设3（原0）。[手机公开文件实验](crabot-docs/superpowers/research/voice-scenario-b-poc/README.md)完成6组FP32/INT8分段比对；约12.5秒FP32分段+匹配单次约1.4秒，边界重叠与INT8错归仍存在，保守门控会拒识，B可用率未证明。
 - [Whisper归属对照](crabot-docs/superpowers/research/voice-scenario-b-poc/ASR-ATTRIBUTION.md)与[中文ASR/短词门控](crabot-docs/superpowers/research/voice-scenario-b-poc/CHINESE-ASR.md)已保存版本/hash/原始结果：SenseVoice成为中文有限片段主候选，VAD需保留短接话；没有真人逐字gold，不把继承片段身份或ASR时间点当成归因验收。
 - 10月10日[独立服务接口实验](crabot-docs/superpowers/research/voice-scenario-b-poc/SERVICE-APIS.md)实际连接sherpa SenseVoice WS与MLX-Audio 0.5.8/Kokoro v1.0中文TTS HTTP；本机回环ASR两文件3次中位199.9/192.5ms（CPU/8），TTS短答首body中位107.3ms（MLX/Metal GPU），都排除手机/结束等待/Manager/播放。HTTP200后断流、多个WAV块与断开后新请求已记录；不声称远端推理立即取消。服务已停止，本轮ADB无手机，未做录放音。

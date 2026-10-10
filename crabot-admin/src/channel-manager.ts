@@ -32,6 +32,7 @@ const BUILTIN_MODULE_PATHS: readonly string[] = [
   '../crabot-channel-telegram',
   '../crabot-channel-feishu',
   '../crabot-channel-dingtalk',
+  '../crabot-channel-voice',
 ]
 
 /**
@@ -312,6 +313,7 @@ export class ChannelManager {
       }
     }
 
+    env.CRABOT_CHANNEL_IMPLEMENTATION_ID = instance.implementation_id
     return env
   }
 

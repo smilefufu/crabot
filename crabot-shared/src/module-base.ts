@@ -8,6 +8,7 @@ import { isMemoryDataRpcCall, type MemoryDataRpcMethod } from "./memory-access.j
  */
 
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
+import type { Server as NetServer } from 'node:net'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
@@ -126,11 +127,13 @@ export interface RpcHandlerContext {
 
 export interface SensitiveRpcTransportOptions {
   authorizationBearer?: string
+  timeoutMs?: number
 }
 
-export type SensitiveRpcMethod = MemoryDataRpcMethod | 'verify_memory_access' | 'get_agent_config' | 'resolve_worker_connection' | 'issue_agent_cli_credential' | 'verify_core_agent_runtime' | 'complete_core_agent_cutover' | 'complete_daily_reflection' | 'consume_daily_reflection_trigger' | 'trigger_schedule' | 'register_core_agent' | 'consume_admin_chat_assertion' | 'consume_workboard_admin_assertion' | 'consume_worker_operation_assertion' | 'process_message' | 'change_workboard_admin' | 'install_worker_implementation' | 'verify_worker_implementation' | 'cancel_worker_implementation_operation'
+export type SensitiveRpcMethod = 'sync_voice_terminal' | 'get_voice_config' | 'submit_voice_turn' | 'get_voice_turn_status' | 'confirm_voice_turn' | 'verify_voice_runtime' | 'register_voice_runtime' | 'voice_admin_action' | 'verify_voice_admin' | MemoryDataRpcMethod | 'verify_memory_access' | 'get_agent_config' | 'resolve_worker_connection' | 'issue_agent_cli_credential' | 'verify_core_agent_runtime' | 'complete_core_agent_cutover' | 'complete_daily_reflection' | 'consume_daily_reflection_trigger' | 'trigger_schedule' | 'register_core_agent' | 'consume_admin_chat_assertion' | 'consume_workboard_admin_assertion' | 'consume_worker_operation_assertion' | 'process_message' | 'change_workboard_admin' | 'install_worker_implementation' | 'verify_worker_implementation' | 'cancel_worker_implementation_operation'
 
 const SENSITIVE_RPC_METHODS = new Set<SensitiveRpcMethod>([
+  'sync_voice_terminal', 'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'confirm_voice_turn', 'verify_voice_runtime', 'register_voice_runtime', 'voice_admin_action', 'verify_voice_admin',
   'verify_memory_access', 'get_agent_config', 'resolve_worker_connection', 'issue_agent_cli_credential', 'verify_core_agent_runtime', 'complete_core_agent_cutover', 'register_core_agent',
   'consume_admin_chat_assertion', 'consume_workboard_admin_assertion', 'consume_worker_operation_assertion', 'change_workboard_admin', 'install_worker_implementation',
   'verify_worker_implementation', 'cancel_worker_implementation_operation', 'complete_daily_reflection', 'consume_daily_reflection_trigger', 'trigger_schedule',
@@ -211,12 +214,13 @@ export class RpcClient {
     method: string,
     params: P,
     source: ModuleId,
-    traceCtx?: RpcTraceContext
+    traceCtx?: RpcTraceContext,
+    options: { timeoutMs?: number } = {}
   ): Promise<R> {
     if (isSensitiveRpcCall(method, params)) {
       throw new RpcError('SENSITIVE_RPC_REQUIRES_NO_TRACE_TRANSPORT', `Sensitive RPC "${method}" must use callSensitive()`)
     }
-    return this.callInternal(targetPort, method, params, source, traceCtx)
+    return this.callInternal(targetPort, method, params, source, traceCtx, options)
   }
 
   get moduleManagerTargetPort(): number { return this.moduleManagerPort }
@@ -265,6 +269,7 @@ export class RpcClient {
       : null
 
     return new Promise((resolve, reject) => {
+      let finished = false
       const req = http.request(
         {
           hostname: 'localhost',
@@ -278,11 +283,16 @@ export class RpcClient {
           },
         },
         (res) => {
+          res.on('aborted', () => transportError(new Error('RPC response was interrupted')))
+          res.on('error', transportError)
           let data = ''
           res.on('data', (chunk) => {
             data += chunk
           })
           res.on('end', () => {
+            if (finished) return
+            finished = true
+            if (timer) clearTimeout(timer)
             try {
               const response = JSON.parse(data) as Response<R>
               if (response.success) {
@@ -332,7 +342,15 @@ export class RpcClient {
         }
       )
 
-      req.on('error', (err) => {
+      const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => {
+        transportError(new Error(`RPC timed out after ${options.timeoutMs}ms`))
+      }, options.timeoutMs)
+
+      const transportError = (err: Error): void => {
+        if (finished) return
+        finished = true
+        if (timer) clearTimeout(timer)
+        req.destroy()
         if (span && traceCtx) {
           traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'failed', {
             target_module: `port:${targetPort}`,
@@ -343,7 +361,8 @@ export class RpcClient {
           })
         }
         reject(err)
-      })
+      }
+      req.on('error', transportError)
       req.write(body)
       req.end()
     })
@@ -484,7 +503,7 @@ export abstract class ModuleBase {
   protected readonly methodHandlers: Map<string, MethodHandler> = new Map()
   protected readonly callbackHandlers: Map<string, CallbackHandler> = new Map()
 
-  private server: http.Server | null = null
+  private server: NetServer | null = null
   private isShuttingDown = false
   private stopPromise: Promise<void> | null = null
 
@@ -517,7 +536,7 @@ export abstract class ModuleBase {
   async start(): Promise<void> {
     await this.onStart()
 
-    this.server = http.createServer((req, res) => {
+    this.server = this.createServer((req, res) => {
       this.handleRequest(req, res).catch((error) => {
         console.error('Unhandled error in request handler:', error)
         res.writeHead(500)
@@ -533,6 +552,11 @@ export abstract class ModuleBase {
 
       this.server!.on('error', reject)
     })
+  }
+
+  /** Default HTTP transport; a Channel can isolate its terminal TLS surface on the same assigned port. */
+  protected createServer(handler: (req: IncomingMessage, res: ServerResponse) => void): NetServer {
+    return http.createServer(handler)
   }
 
   /**
@@ -579,6 +603,9 @@ export abstract class ModuleBase {
         this.config.moduleId,
         { authorizationBearer },
       )
+    } else if (this.config.moduleType === 'channel' && process.env.CRABOT_CHANNEL_IMPLEMENTATION_ID === 'channel-voice') {
+      if (!authorizationBearer) throw new RpcError('UNAUTHORIZED', 'Voice registration requires its runtime credential')
+      await this.rpcClient.callSensitive(this.rpcClient.moduleManagerTargetPort, 'register_voice_runtime', params, this.config.moduleId, { authorizationBearer })
     } else {
       await this.rpcClient.callModuleManager('register', params, this.config.moduleId)
     }

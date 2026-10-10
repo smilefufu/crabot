@@ -1,3 +1,5 @@
+import { VoiceAdmin } from './voice-admin.js'
+import { VOICE_MODEL_VERSIONS, testAudioService, type GetVoiceConfigParams } from 'crabot-shared'
 import { normalizeToolAccessUpdate } from './permission-entries.js'
 /**
  * Admin 模块 - Crabot 管理后台
@@ -682,6 +684,7 @@ export class AdminModule extends ModuleBase {
 
   // Channel 管理器
   private channelManager: ChannelManager
+  private voiceAdmin: VoiceAdmin
 
   // 模块安装器
   private moduleInstaller: ModuleInstaller
@@ -807,6 +810,41 @@ export class AdminModule extends ModuleBase {
     )
     this.agentManager = new AgentManager(this.adminConfig.data_dir)
     this.channelManager = new ChannelManager(this.adminConfig.data_dir, this.rpcClient)
+    this.voiceAdmin = new VoiceAdmin(this.adminConfig.data_dir, {
+      isVoice: id => this.channelManager.getInstance(id)?.implementation_id === 'channel-voice',
+      admissionReady: () => this.cutoverActivated,
+      verifyRuntime: async (id, bearer) => { await this.rpcClient.callModuleManagerSensitive('verify_voice_runtime', { expected_module_id: id }, this.config.moduleId, { authorizationBearer: bearer }) },
+      verifyCore: async bearer => { await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer }) },
+      verifyHuman: async bearer => {
+        const payload = bearer ? await verifyJwtWithEpoch(bearer, this.jwtSecret, this.adminConfig.data_dir) : null
+        if (!payload) throw new RpcError('UNAUTHORIZED', 'Human Admin credential required')
+        if (payload.sub !== 'admin' || payload.agent_cli) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
+      },
+      resolveFriend: (channelId, registrationId) => this.resolveFriendByChannelIdentity(channelId, registrationId) ?? undefined,
+      getFriend: id => this.friends.get(id),
+      bindRegistration: async (channelId, registration) => { await this.handleLinkChannelIdentity({ friend_id: registration.friend_id, channel_identity: { channel_id: channelId, platform_user_id: registration.registration_id, platform_display_name: registration.display_name } }) },
+      channelAction: async (id, command, bearer) => {
+        const modules = await this.rpcClient.resolve({ module_id: id }, this.config.moduleId)
+        if (!modules[0]) throw new RpcError('SERVICE_UNAVAILABLE', 'Voice Channel is not running')
+        return this.rpcClient.callSensitive(modules[0].port, 'voice_admin_action', { channel_id: id, command }, this.config.moduleId, { authorizationBearer: bearer })
+      },
+      publish: async payload => { await this.rpcClient.publishEvent({ id: generateId(), type: 'channel.voice_turn_authorized', source: this.config.moduleId, payload, timestamp: generateTimestamp() }, this.config.moduleId) },
+      configurationChanged: async () => {
+        for (const instance of this.channelManager.listInstances().items.filter(i => i.implementation_id === 'channel-voice')) {
+          this.voiceAdmin.turns.disconnect(instance.id)
+          try {
+            const modules = await this.rpcClient.resolve({ module_id: instance.id }, this.config.moduleId)
+            if (modules[0]) await this.rpcClient.call(modules[0].port, 'update_config', { config: this.voiceAdmin.audio.getConfig(instance.id) }, this.config.moduleId)
+          } catch { console.warn(`[Admin] Voice config changed; ${instance.id} must reconnect before admitting a new turn`) }
+        }
+      },
+      testAudio: async (id, capability) => {
+        const connection = this.voiceAdmin.audio.resolve(this.voiceAdmin.audio.getConfig(id)[capability], capability)
+        if (!connection) throw new RpcError('INVALID_PARAMS', `请先配置 ${capability.toUpperCase()} 服务`)
+        return testAudioService(connection, capability)
+      },
+      enrollmentModelId: VOICE_MODEL_VERSIONS.embedding,
+    })
     this.moduleInstaller = new ModuleInstaller(this.adminConfig.data_dir)
     this.mcpServerManager = new MCPServerManager(this.adminConfig.data_dir)
     this.skillManager = new SkillManager(this.adminConfig.data_dir)
@@ -953,6 +991,13 @@ export class AdminModule extends ModuleBase {
 
     // Channel 配置管理
     this.registerMethod('get_channel_config', this.handleGetChannelConfig.bind(this))
+    this.registerMethod('get_voice_config', (params: GetVoiceConfigParams, context?: RpcHandlerContext) => this.voiceAdmin.getConfig(params, context?.authorizationBearer))
+    this.registerMethod('submit_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.submit(params, context?.authorizationBearer))
+    this.registerMethod('get_voice_turn_status', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.status(params, context?.authorizationBearer))
+    this.registerMethod('confirm_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.confirm(params, context?.authorizationBearer))
+    this.registerMethod('sync_voice_terminal', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.sync(params, context?.authorizationBearer))
+    this.registerMethod('verify_voice_admin', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyHuman(params, context?.authorizationBearer))
+
     this.registerMethod('update_channel_config', this.handleUpdateChannelConfig.bind(this))
 
     // 模块安装管理
@@ -1022,6 +1067,8 @@ export class AdminModule extends ModuleBase {
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
+    await this.voiceAdmin.load()
+    this.voiceAdmin.start()
     // Source managers must load before coordinator recovery so its semantic HMAC observes
     // persisted data rather than empty in-memory maps.
 
@@ -1249,6 +1296,7 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    this.voiceAdmin.stop()
     if (this.configDrainRetryTimer) {
       clearTimeout(this.configDrainRetryTimer)
       this.configDrainRetryTimer = undefined
@@ -1326,6 +1374,7 @@ export class AdminModule extends ModuleBase {
           if (typeof port === 'number' && port > 0) {
             this.agentPort = port
           }
+          this.voiceAdmin.replayPending().catch(() => console.warn('[Admin] Voice pending batches remain durable; replay will retry'))
           console.log(`[Admin] Core Agent started (port=${port}), publishing invalidation hint...`)
           this.publishAgentConfigInvalidation().catch((err: Error) => {
             console.warn(`[Admin] Failed to publish config invalidation for ${module_id}: ${err.message}`)
@@ -1340,6 +1389,7 @@ export class AdminModule extends ModuleBase {
       case 'module_manager.module_stopped': {
         const { module_id, module_type } = event.payload as { module_id: string; module_type: string }
         this.invalidatePortCache(module_id, module_type)
+        this.voiceAdmin.turns.disconnect(module_id)
         break
       }
       case 'module_manager.module_health_changed': {
@@ -1523,6 +1573,7 @@ export class AdminModule extends ModuleBase {
 
     // 路由处理
     try {
+      if (await this.voiceAdmin.handleWeb(req, res, pathname, () => this.readJsonBody(req))) return
       if (pathname === '/api/auth/login' && req.method === 'POST') {
         await this.handleLogin(req, res)
         return
@@ -9289,6 +9340,7 @@ export class AdminModule extends ModuleBase {
    * 运行」的模块，两者无缝衔接、消除竞态。端口经 MM resolve 自解析，无运行模块时安全 no-op。
    */
   async reconcileRunningModuleConfigs(): Promise<void> {
+    await this.voiceAdmin.replayPending()
     await this.configMutationCoordinator.drainPendingInvalidation()
     await this.publishAgentConfigInvalidation()
     await this.syncGlobalConfigToMemoryModules().catch((err: Error) => {

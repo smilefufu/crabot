@@ -359,6 +359,7 @@ export interface ChannelMessage {
   content: MessageContent
   features: {
     is_mention_crab: boolean
+    voice?: import('crabot-shared').VoiceMessageFeatures
     mentions?: Array<{ user_id: string; display_name?: string }>
     quote_message_id?: string
     reply_to_message_id?: string

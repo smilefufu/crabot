@@ -849,7 +849,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // (查不到监护 session 的 worker 事件)记 'system';人类消息记 'message'。
           triggerType: scheduleIdentity ? 'scheduled' : isWorkboardSystemInput || isSystemThread ? 'system' : 'message',
         }),
-        messagingDeps: deps.messagingDeps,
+        messagingDeps: { ...deps.messagingDeps, voiceReplyContext: traceHooks?.voiceReplyContext },
         // send_message 省略 channel_id 时使用的 manager 归属目标与结构化 Session 观察索引
         // （spec 2026-09-03-tool-input-repair）。两条桥都在工具调用时动态读取当前 Loop。
         managerTarget: target,
