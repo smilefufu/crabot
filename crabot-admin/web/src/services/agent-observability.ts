@@ -249,6 +249,7 @@ export interface WorkerRuntimeSnapshot {
 export type WorkerSubagentStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'interrupted' | 'unknown'
 
 export interface WorkerSubagentSummary {
+  readonly execution_observation?: import('crabot-shared/dist/execution-observation.js').ExecutionObservation
   subagent_id: string
   worker_id: string
   executor_impl: 'builtin' | 'claude-code' | 'codex'
@@ -444,7 +445,7 @@ export const agentObservabilityService = {
     return api.get(`/agent/workers?${search.toString()}`)
   },
 
-  getWorkerDetail(workerId: string): Promise<{ worker: LedgerWorker }> {
+  getWorkerDetail(workerId: string): Promise<{ worker: LedgerWorker; execution_observations?: import('crabot-shared/dist/execution-observation.js').ExecutionObservation[] }> {
     return api.get(`/agent/workers/${encodeURIComponent(workerId)}`)
   },
 

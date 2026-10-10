@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { executionObservation, persistObservation, observationFile, readObservation } from '../../permissions/execution-observation.js'
 /**
  * WorkerHarness —— 生命周期编排(protocol-agent-v3 §5.2/§5.5,plans/2026-07-29-mw-p3-ledger-harness.md Task 7)。
  *
@@ -727,6 +729,7 @@ export interface HarnessDeps {
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
   /** Rejects new spawn/resume/handoff while runtime config is stale; running incarnations remain untouched. */
   readonly assertExecutionAdmission?: () => void
+  readonly assertExecutionPolicy?: (impl: WorkerImplId, principal?: ResolvedPermissions, newWorker?: boolean) => void
   /**
    * P6-B §6.5：显式/接续目标 impl 的 activation registry gate（唯一 ready 判定点）。
    * spawn 显式 impl、resume 终态化身、handoff 目标 impl 前必须调用；
@@ -736,7 +739,7 @@ export interface HarnessDeps {
   /** P6-B 失败导向：adapter 级执行失败/成功上报（degraded 置位/清除）。 */
   readonly reportWorkerOutcome?: (impl: WorkerImplId, failure: string | null) => void | Promise<void>
   /** P6-C §2/§5：纯选择器（显式只查自己；省略 default→固定顺序；结构化错误）。 */
-  readonly selectWorkerImpl?: (requestedImpl: WorkerImplId | undefined, excludedImpls?: ReadonlySet<WorkerImplId>) => WorkerImplId
+  readonly selectWorkerImpl?: (requestedImpl: WorkerImplId | undefined, excludedImpls?: ReadonlySet<WorkerImplId>, principal?: ResolvedPermissions) => WorkerImplId
   /** P6-C §5.9：operation-scoped activation fence（副作用线性化点）。 */
   readonly acquireWorkerFence?: (impl: WorkerImplId, kind: 'spawn' | 'resume' | 'handoff') => Promise<{ release(): void }>
   /**
@@ -1077,6 +1080,27 @@ export class WorkerHarness {
       .catch((error) => console.error(`[WorkerHarness] native activity collection failed for ${h.worker_id}#${h.seq}:`, error))
   }
 
+  private async recordCliProvision(workerId: string, incarnationId: string, impl: WorkerImplId, caps: CapabilityBundle): Promise<void> {
+    if (impl === 'builtin' || !this.deps.assertExecutionPolicy) return
+    const facts = { skills: caps.skills.map(skill => skill.name), mcp_servers: caps.mcp_servers.map(server => server.name) }
+    const observation = executionObservation({ role: 'worker', impl, source: 'cli_provision', state: 'assembled',
+      worker_id: workerId, incarnation_id: incarnationId, observed_at: this.deps.now(), tools: null, ...facts,
+      revision: createHash('sha256').update(JSON.stringify({ policy_version: 1, impl, ...facts })).digest('hex'),
+      constraints: ['仅记录 Crabot provision 的 MCP/Skill；原生工具、实际服务连接及宿主状态未知。'] })
+    await persistObservation(observationFile(this.deps.workersDir, workerId, incarnationId), observation)
+  }
+
+  private async inheritCliObservation(workerId: string, previousId: string | undefined, incarnationId: string, impl: WorkerImplId): Promise<void> {
+    if (impl === 'builtin' || !this.deps.assertExecutionPolicy || !previousId) return
+    const fallback = executionObservation({ role: 'worker', impl, source: 'legacy', state: 'legacy_unknown', worker_id: workerId, incarnation_id: previousId })
+    const previous = await readObservation(observationFile(this.deps.workersDir, workerId, previousId), fallback)
+    if (previous.state !== 'assembled') return
+    await persistObservation(observationFile(this.deps.workersDir, workerId, incarnationId), {
+      ...previous, incarnation_id: incarnationId, observed_at: this.deps.now(),
+      constraints: [...previous.constraints, '接续复用已记录的注入配置，未重建当前配置。'],
+    })
+  }
+
   async spawnWorker(p: SpawnWorkerParams): Promise<LedgerWorker> {
     this.deps.assertExecutionAdmission?.()
     const workerId = `w-${randomUUID()}`
@@ -1084,8 +1108,9 @@ export class WorkerHarness {
     // P6-C §2：显式/省略统一走纯选择器（显式只查自己不 fallback；省略 default→固定顺序）。
     // 选择器抛 WORKER_IMPLEMENTATION_NOT_READY（含 ready list/reasons），无任何副作用。
     const impl = this.deps.selectWorkerImpl
-      ? this.deps.selectWorkerImpl(p.impl)
+      ? this.deps.selectWorkerImpl(p.impl, undefined, p.principal_permissions)
       : (p.impl ?? this.deps.defaultImpl)
+    this.deps.assertExecutionPolicy?.(impl, p.principal_permissions, true)
     // 选择器未注入的旧测试路径保留显式 gate。
     if (!this.deps.selectWorkerImpl && p.impl !== undefined) await this.deps.assertWorkerImplReady?.(p.impl)
     // P6-B §6.5：operation admission——当前调用内实时解析连接。
@@ -1184,6 +1209,7 @@ export class WorkerHarness {
             })
           : EMPTY_CAPABILITY_BUNDLE
         await adapter.provision(workspace, caps)
+        await this.recordCliProvision(workerId, incarnationId, impl, caps)
         // builtin 注入:调用方显式传了就用它;没传(manager 的 spawn_worker 工具就不可能传——
         // LLMAdapter / tools 是运行时对象,不可能来自 LLM 入参)则回退到装配层注入的工厂,
         // 与 handoffIncarnation 走同一个工厂。目标实现不是 builtin 时不调工厂:CLI adapter
@@ -1940,6 +1966,7 @@ export class WorkerHarness {
     const stateChangeRevision = this.stateChangeRevisions.get(revisionKey) ?? 0
     const inputOwnershipRevision = this.inputOwnershipRevision(handle.worker_id)
     try {
+      this.deps.assertExecutionPolicy?.(handle.impl, (await this.contextStore.read(handle.worker_id))?.principal_permissions)
       await adapter.sendInput(handle, text, { raw, ...delivery })
     } catch (error) {
       if (error instanceof WorkerExitedError) {
@@ -2199,8 +2226,9 @@ export class WorkerHarness {
       // 路径保留 pickUnusedImpl。
       const usedImpls = new Set(worker.incarnations.map((inc) => inc.impl).filter((impl): impl is WorkerImplId => impl !== 'legacy'))
       const targetImpl = this.deps.selectWorkerImpl
-        ? this.deps.selectWorkerImpl(undefined, usedImpls)
+        ? this.deps.selectWorkerImpl(undefined, usedImpls, auth.principal_permissions)
         : pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
+      this.deps.assertExecutionPolicy?.(targetImpl, auth.principal_permissions)
       // P6-B §6.5：legacy 接续的 spawn 同样过 registry gate + connection admission——
       // 不得绕过 ready 校验，admin_provider 形态不得回落宿主凭证。
       await this.deps.assertWorkerImplReady?.(targetImpl)
@@ -2329,6 +2357,7 @@ export class WorkerHarness {
       let handle
       try {
         await targetAdapter.provision(workspace, caps)
+        await this.recordCliProvision(worker.worker_id, incarnationId, targetImpl, caps)
         const expiredAfterProvision = this.expiredInboxDelivery(item, legacy.seq)
         if (expiredAfterProvision) {
           if (admission) void admission.dispose().catch(() => {})
@@ -2776,7 +2805,7 @@ export class WorkerHarness {
           // 实现(如 legacy)保留。
           const usedImpls2 = new Set(worker.incarnations.map((inc) => inc.impl).filter((impl): impl is WorkerImplId => impl !== 'legacy'))
           const targetImpl = this.deps.selectWorkerImpl
-            ? this.deps.selectWorkerImpl(undefined, usedImpls2)
+            ? this.deps.selectWorkerImpl(undefined, usedImpls2, (await this.contextStore.read(worker.worker_id))?.principal_permissions)
             : pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
           const expiredBeforeHandoff = this.expiredInboxDelivery(item, mainline.seq)
           if (expiredBeforeHandoff) return expiredBeforeHandoff
@@ -2843,6 +2872,7 @@ export class WorkerHarness {
     if (expiredAfterReady) return expiredAfterReady
     const incarnationId = randomUUID()
     const workerContext = await this.contextStore.read(worker.worker_id)
+    this.deps.assertExecutionPolicy?.(mainline.impl, workerContext?.principal_permissions)
     const gitPermissions = workerContext?.principal_permissions
     const workspaceGit = (await this.checkWorkspaceGit(mainline.workspace, gitPermissions)).current
     const gitContext: WorkerWorkspaceGitContext = {
@@ -2881,6 +2911,7 @@ export class WorkerHarness {
     }
     let newHandle
     try {
+      await this.inheritCliObservation(worker.worker_id, mainline.incarnation_id, incarnationId, mainline.impl)
       const returnedHandle = await adapter.resume(prevRef, appendWorkspaceGitObservation(text, workspaceGit), {
         workspace_git: gitContext,
         ...(admission ? { connection_env: admission.env } : {}),
@@ -3012,6 +3043,7 @@ export class WorkerHarness {
       session_ref: source.session_ref,
     }
 
+    this.deps.assertExecutionPolicy?.(targetImpl, (await this.contextStore.read(worker.worker_id))?.principal_permissions)
     // 0. Pre-flight(三轮 review 修复):目标 impl 若在这个 worker 名下已经有过任何化身
     // (含已终态、含 fork 分支,见 ImplAlreadyUsedError 类注释)——即"切到该 worker 曾经用过
     // 的实现"(含切回原实现、同实现切换)——必然会在下面 step 3 的 newAdapter.spawn 里抛错:
@@ -3196,6 +3228,7 @@ export class WorkerHarness {
     let newHandle
     try {
       await newAdapter.provision(workspace, caps)
+      await this.recordCliProvision(worker.worker_id, targetIncarnationId, targetImpl, caps)
       const expiredBeforeSpawn = this.expiredInboxDelivery(deadlineItem, source.seq)
       if (expiredBeforeSpawn) {
         if (admission) void admission.dispose().catch(() => {})
@@ -3594,6 +3627,7 @@ export class WorkerHarness {
       const adapter = this.deps.adapters.get(incarnation.impl)
       if (!adapter) throw new Error('execution branch adapter is unavailable')
       try {
+        this.deps.assertExecutionPolicy?.(incarnation.impl, (await this.contextStore.read(workerId))?.principal_permissions)
         await adapter.sendInput({ ...handleForIncarnation(workerId, incarnation), query_id: receipt.query_id }, text, {
           delivery_id: deliveryId,
           onAccepted: () => onSettled({ status: 'delivered' }),
@@ -6111,6 +6145,7 @@ export class WorkerHarness {
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'closed') throw new TaskCancelledError(workerId)
       const incarnation = requireExecutableIncarnation(requireMainlineIncarnation(found.worker))
+      this.deps.assertExecutionPolicy?.(incarnation.impl, (await this.contextStore.read(workerId))?.principal_permissions)
       const queryId = randomUUID()
       const createdAt = this.deps.now()
       let receipt: WorkerQueryReceipt
@@ -6180,6 +6215,8 @@ export class WorkerHarness {
     try {
       const workerContext = await this.contextStore.read(workerId)
       const permissions = workerContext?.principal_permissions
+      this.deps.assertExecutionPolicy?.(prep.implId, permissions)
+      await this.inheritCliObservation(workerId, prep.ref.incarnation_id, forkIncarnationId, prep.implId)
       forkGit = (await this.checkWorkspaceGit(prep.workspace, permissions)).current
       forkInstructions = await captureWorkspaceInstructions({
         workersDir: this.deps.workersDir,

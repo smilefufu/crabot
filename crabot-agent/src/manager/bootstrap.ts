@@ -1,3 +1,4 @@
+import { requestObservation, persistObservation, executionObservation, readObservation, observationFile } from '../permissions/execution-observation.js'
 /**
  * manager 栈装配 —— protocol-agent-v3.md §4/§5/§6/§7(P5 Task 1)。
  *
@@ -75,14 +76,6 @@ import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import type { McpServer } from '../mcp/mcp-helpers.js'
 import { WorkerContextStore } from '../workers/harness/context-store.js'
 import { managerToolProfileForSchedule, type ManagerToolProfile } from './tools/tool-catalog.js'
-
-const UNRESOLVED_MANAGER_PERMISSIONS: ResolvedPermissions = {
-  tool_access: { memory: false, messaging: false, task: false, mcp_skill: false, file_io: false,
-    browser: false, shell: false, remote_exec: false, desktop: false },
-  cli_access: Object.fromEntries(CLI_DOMAINS.map(domain => [domain, 'none'])) as ResolvedPermissions['cli_access'],
-  storage: null,
-  memory_scopes: [],
-}
 
 export interface ManagerMcpAccessContext {
   readonly managerKey: ManagerKey
@@ -224,6 +217,7 @@ export interface BootstrapDeps {
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
   /** Reject new worker incarnations while runtime config is stale. */
   readonly assertExecutionAdmission?: () => void
+  readonly assertExecutionPolicy?: import('../workers/harness/harness.js').HarnessDeps['assertExecutionPolicy']
   /** Worker event routing must close before adapter disposal begins. */
   readonly isClosing?: () => boolean
   /** 只读观察当前配置，不装配或启动 Worker。 */
@@ -250,7 +244,7 @@ export interface BootstrapDeps {
   readonly builtinTraceHooks?: import('../workers/builtin/adapter.js').BuiltinTraceHooks
   /** P6-B §6：activation registry gate（unified-agent 注入）。 */
   readonly assertWorkerImplReady?: (impl: import('../workers/types.js').WorkerImplId) => void | Promise<void>
-  readonly selectWorkerImpl?: (requestedImpl: import('../workers/types.js').WorkerImplId | undefined, excludedImpls?: ReadonlySet<import('../workers/types.js').WorkerImplId>) => import('../workers/types.js').WorkerImplId
+  readonly selectWorkerImpl?: (requestedImpl: import('../workers/types.js').WorkerImplId | undefined, excludedImpls?: ReadonlySet<import('../workers/types.js').WorkerImplId>, principal?: import('../types.js').ResolvedPermissions) => import('../workers/types.js').WorkerImplId
   readonly acquireWorkerFence?: (impl: import('../workers/types.js').WorkerImplId, kind: 'spawn' | 'resume' | 'handoff') => Promise<{ release(): void }>
   readonly reportWorkerOutcome?: (impl: import('../workers/types.js').WorkerImplId, failure: string | null) => void | Promise<void>
   /** 用户级 CLI binary 解析（v1 无 managed；全局安装忽略并提示）。 */
@@ -496,6 +490,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     redactFailureReason: deps.redactFailureReason,
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
     assertExecutionAdmission: deps.assertExecutionAdmission,
+    assertExecutionPolicy: deps.assertExecutionPolicy,
     capabilityBundle: deps.capabilityBundle,
     issueAgentCliCredential: deps.issueAgentCliCredential,
     hasRunningBg: deps.hasRunningBg,
@@ -624,6 +619,11 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     ledger,
     adapter: deps.managerAdapter,
     model: deps.managerModel,
+    observeTools: async (key, episodeId, tools) => {
+      const owner = encodeURIComponent(key)
+      await persistObservation(join(managersDir, owner, 'execution-observation.json'),
+        requestObservation(tools, { role: 'manager', impl: 'manager', source: 'manager_request', constraints: [`episode=${episodeId}`] }))
+    },
     onRuntimeConfigApplied: deps.onRuntimeConfigApplied,
     runtimeConfigAppliedGeneration: deps.runtimeConfigAppliedGeneration,
     onLlmRetry: deps.onLlmRetry,
@@ -769,7 +769,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         : undefined
       const profile = managerToolProfileForSchedule(scheduleIdentity)
       const managerPermissions = principalPermissions
-        ?? (scheduleIdentity ? undefined : managerPrincipal?.permissions ?? UNRESOLVED_MANAGER_PERMISSIONS)
+        ?? (scheduleIdentity ? undefined : managerPrincipal?.permissions ?? undefined)
       const mcpCreatorFriendId = scheduleIdentity
         ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
         : managerPrincipal?.principal.friend?.id
@@ -784,6 +784,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       return buildManagerToolFace({
         dailyReflection: dailyReflectionFor(key),
         describeExecutionTools: deps.describeExecutionTools,
+        readExecutionObservation: (workerId, incarnationId, impl) => readObservation(observationFile(workersDir, workerId, incarnationId),
+          executionObservation({ role: 'worker', impl, source: 'legacy', state: 'legacy_unknown', worker_id: workerId, incarnation_id: incarnationId,
+            constraints: ['无该化身记录，历史工具未知。'] })),
         harness,
         workerImplSnapshot: deps.workerImplSnapshot,
         readWorkerActivity: deps.readWorkerActivity,

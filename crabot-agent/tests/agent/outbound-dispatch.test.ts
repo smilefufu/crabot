@@ -26,12 +26,25 @@ function makeEntry(overrides: Partial<OutboundMessage> = {}): OutboundMessage {
 }
 
 describe('dispatchOutboundMessage', () => {
+  it.each([undefined, async () => { throw new Error('PERMISSION_DENIED: fixture') }])('没有成功的宿主授权时不 staging 或投递绝对路径文件', async authorizeFile => {
+    const rpc = vi.fn()
+    const prepare = vi.fn()
+    const deps: OutboundDispatchDeps = {
+      authorizeFile, rpcClient: { call: rpc } as never, moduleId: 'fixture',
+      resolveChannelPort: async () => 1, getAdminPort: async () => 2,
+      adminChatDelivery: { prepare, confirm: vi.fn(), fail: vi.fn() },
+    }
+    await expect(dispatchOutboundMessage(makeEntry({ channel_id: 'admin-web', file_path: '/tmp/unauthorized-file' }), deps)).rejects.toThrow(/CAPABILITY_UNKNOWN|PERMISSION_DENIED/)
+    expect(prepare).not.toHaveBeenCalled()
+    expect(rpc).not.toHaveBeenCalled()
+  })
   it('file_path + sandbox mapping → 主机路径再发（不再 silent drop）', async () => {
     const captured: Array<{ method: string; payload: unknown }> = []
     const mappings: PathMapping[] = [
       { sandbox_path: '/sandbox/work', host_path: '/host/work', read_only: false },
     ]
     const deps: OutboundDispatchDeps = {
+      authorizeFile: async () => {},
       rpcClient: {
         call: vi.fn(async (_port: number, method: string, payload: unknown) => {
           captured.push({ method, payload })
@@ -67,6 +80,7 @@ describe('dispatchOutboundMessage', () => {
   it('admin-chat delivery：wire payload 与 prepare 落盘的 staged payload 同源（§11.7）', async () => {
     const captured: Array<{ method: string; payload: unknown }> = []
     const deps: OutboundDispatchDeps = {
+      authorizeFile: async () => {},
       rpcClient: {
         call: vi.fn(async (_port: number, method: string, payload: unknown) => {
           captured.push({ method, payload })
@@ -109,9 +123,10 @@ describe('dispatchOutboundMessage', () => {
     expect(sendPayload.content.file_path).toBe('/agent-data/staging/d1/attachment.abc123')
   })
 
-  it('file_path 无 mapping 且绝对路径 → 直接用（本地 unified agent 路径）', async () => {
+  it('file_path 解析为绝对路径，仍通过宿主授权后投递', async () => {
     const captured: Array<{ method: string; payload: unknown }> = []
     const deps: OutboundDispatchDeps = {
+      authorizeFile: async () => {},
       rpcClient: {
         call: vi.fn(async (_port: number, method: string, payload: unknown) => {
           captured.push({ method, payload })
@@ -134,6 +149,7 @@ describe('dispatchOutboundMessage', () => {
 
   it('file_path 无 mapping 且相对路径 → 抛错（与 immediate-send 等价行为）', async () => {
     const deps: OutboundDispatchDeps = {
+      authorizeFile: async () => {},
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'm',
       resolveChannelPort: async () => 19009,
@@ -147,6 +163,7 @@ describe('dispatchOutboundMessage', () => {
   it('mention 通过 friend_id 反查 admin get_friend → platform_user_id（不再 silent drop）', async () => {
     const captured: Array<{ method: string; payload: unknown }> = []
     const deps: OutboundDispatchDeps = {
+      authorizeFile: async () => {},
       rpcClient: {
         call: vi.fn(async (_port: number, method: string, payload: unknown) => {
           captured.push({ method, payload })
@@ -194,6 +211,7 @@ describe('dispatchOutboundMessage', () => {
   it('mention friend_id 在当前 channel 无 identity → 跳过该 mention（不挂全 entry）', async () => {
     const captured: Array<{ method: string; payload: unknown }> = []
     const deps: OutboundDispatchDeps = {
+      authorizeFile: async () => {},
       rpcClient: {
         call: vi.fn(async (_port: number, method: string, payload: unknown) => {
           captured.push({ method, payload })
@@ -233,6 +251,7 @@ describe('dispatchOutboundMessage', () => {
   it('quote_message_id → features.quote_message_id', async () => {
     const captured: Array<{ method: string; payload: unknown }> = []
     const deps: OutboundDispatchDeps = {
+      authorizeFile: async () => {},
       rpcClient: {
         call: vi.fn(async (_port: number, method: string, payload: unknown) => {
           captured.push({ method, payload })
@@ -253,6 +272,7 @@ describe('dispatchOutboundMessage', () => {
 
   it('resolveChannelPort 失败 → 抛错', async () => {
     const deps: OutboundDispatchDeps = {
+      authorizeFile: async () => {},
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'm',
       resolveChannelPort: async () => {
@@ -299,6 +319,7 @@ describe('dispatchOutboundMessage onDispatched hook', () => {
   it('dispatch 抛错（channel rpc 抛错）不触发钩子', async () => {
     const hook = vi.fn()
     const deps: OutboundDispatchDeps = {
+      authorizeFile: async () => {},
       rpcClient: {
         call: vi.fn(async (_port: number, method: string) => {
           if (method === 'send_message') throw new Error('channel down')
@@ -318,6 +339,7 @@ describe('dispatchOutboundMessage onDispatched hook', () => {
   it('resolveChannelPort 抛错也不触发钩子', async () => {
     const hook = vi.fn()
     const deps: OutboundDispatchDeps = {
+      authorizeFile: async () => {},
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'm',
       resolveChannelPort: async () => { throw new Error('channel not found') },

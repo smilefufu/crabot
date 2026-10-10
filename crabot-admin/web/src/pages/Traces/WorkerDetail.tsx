@@ -1,3 +1,4 @@
+import type { ExecutionObservation } from 'crabot-shared/dist/execution-observation.js'
 /**
  * Worker 详情：以主线化身为默认视角，把已归一化的 trace 投影为人能理解的活动流。
  * 默认隐藏的协议事件仍可在「技术事件」模式查看，cursor 与读接口语义不变。
@@ -17,6 +18,7 @@ import {
 } from '../../services/agent-observability'
 import { describeWorkerTask, TONE_COLOR } from './worker-state'
 import { WorkerRuntime, runtimeEvent, runtimeEventText } from './WorkerRuntime'
+import { ExecutionFacts } from './ExecutionFacts'
 
 const IMPL_LABEL: Record<WorkerIncarnation['impl'], string> = {
   builtin: '内置',
@@ -685,6 +687,7 @@ function IncarnationRow({ incarnation, mainline, onSelect, selected }: {
 const WorkerDetailContent: React.FC = () => {
   const { workerId = '' } = useParams()
   const [worker, setWorker] = useState<LedgerWorker | null>(null)
+  const [observations, setObservations] = useState<ExecutionObservation[]>([])
   const [selectedSeq, setSelectedSeq] = useState<number | undefined>(undefined)
   const [managerDisplayName, setManagerDisplayName] = useState<string | null | undefined>(undefined)
   const [loading, setLoading] = useState(true)
@@ -706,6 +709,7 @@ const WorkerDetailContent: React.FC = () => {
         if (cancelled) return
         setError(null)
         setWorker(result.worker)
+        setObservations(result.execution_observations ?? [])
         setSelectedSeq((selected) => selected ?? mainlineIncarnation(result.worker.incarnations)?.seq)
         void managersRequest
           .then((managerResult) => {
@@ -787,6 +791,8 @@ const WorkerDetailContent: React.FC = () => {
           ))}
         </div>
       </section>
+
+      <ExecutionFacts observation={observations.find(item => item.incarnation_id === selectedIncarnation?.incarnation_id)} />
 
       <div style={{ marginTop: 30 }}>
         <Timeline workerId={worker.worker_id} seq={selectedSeq} />

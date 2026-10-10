@@ -748,7 +748,7 @@ export function buildCrabotInfoTools(deps: CrabotInfoToolsDeps): ToolDefinition[
   const getFriendPermissions = defineTool({
     name: 'get_friend_permissions',
     description:
-      '查询某个 friend 的权限配置(模板 + session 覆盖合并后的最终生效权限:工具访问/CLI 访问/' +
+      '查询某个 friend 的权限配置(私聊完整独立配置或当前模板解析的主体权限:有效工具入口/CLI 访问/' +
       '存储/记忆作用域)。用于回答"某人权限如何/能不能做 X"一类问题。',
     inputSchema: {
       type: 'object',

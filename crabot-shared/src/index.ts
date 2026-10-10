@@ -1,4 +1,5 @@
 // crabot-shared/src/index.ts
+export type { ExecutionObservation } from './execution-observation.js'
 export {
   // Types
   type ModuleId,
@@ -41,6 +42,8 @@ export {
 } from './base-protocol.js'
 
 export { canonicalizeJson, sha256CanonicalJson } from './canonical-json.js'
+export { EFFECTIVE_TOOL_CATEGORIES, RETIRED_TOOL_CATEGORIES, TOOL_ENTRY_EXPLANATIONS, effectiveToolAccess, normalizeToolAccessUpdate,
+  type EffectiveToolCategory, type RetiredToolCategory, type EffectiveToolAccessConfig, type ToolAccessUpdate } from './permission-entries.js'
 
 export {
   ModuleBase,

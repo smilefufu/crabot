@@ -264,6 +264,7 @@ export type WorkerSubagentStatus =
 
 /** A directly-started child reported by a Worker implementation. */
 export interface WorkerSubagentSummary {
+  readonly execution_observation?: import('crabot-shared').ExecutionObservation
   readonly subagent_id: string
   readonly worker_id: string
   readonly executor_impl: WorkerImplId
@@ -355,6 +356,8 @@ export interface SpawnSpec {
   readonly principal_permissions?: ResolvedPermissions
   /** builtin 专用注入(外部 CLI adapter 忽略) */
   readonly builtin?: {
+    readonly resolvedPermissions?: ResolvedPermissions
+    readonly observeTools?: import('../engine/types.js').EngineOptions['onBeforeLlmCall']
     readonly adapter: LLMAdapter
     readonly model: string
     readonly systemPrompt: Resolvable<string>

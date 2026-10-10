@@ -4,6 +4,7 @@ import { Loading } from '../../components/Common/Loading'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { agentObservabilityService, type WorkerSubagentSummary } from '../../services/agent-observability'
 import { Timeline } from './WorkerDetail'
+import { ExecutionFacts } from './ExecutionFacts'
 
 const IMPL_LABEL: Record<WorkerSubagentSummary['executor_impl'], string> = {
   builtin: '内置 Worker',
@@ -63,6 +64,7 @@ export const SubagentDetail: React.FC = () => {
 
         {subagent.task && <section style={{ marginBottom: 28 }}><div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 5 }}>任务</div><div style={{ padding: '10px 12px', background: 'var(--bg-muted)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13 }}>{subagent.task}</div></section>}
         {subagent.unavailable_reason && <div style={{ color: 'var(--color-warning, #d97706)', fontSize: 12, marginBottom: 16 }}>部分数据不可用：{subagent.unavailable_reason}</div>}
+        <ExecutionFacts observation={subagent.execution_observation} />
         <Timeline workerId={workerId} heading="子 Agent Trace" actorLabel="子 Agent" isSubagentTrace loadTrace={loadTrace} />
       </div>
     </MainLayout>

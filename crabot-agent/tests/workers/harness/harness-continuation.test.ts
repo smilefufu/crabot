@@ -729,7 +729,10 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     const target = new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange })
     adaptersMap.set('claude-code', target)
 
-    const worker = await harness.spawnWorker(spawnParams())
+    const worker = await harness.spawnWorker(spawnParams({ principal_permissions: {
+      tool_access: { file_io: true, shell: true, task: false, browser: false, remote_exec: false, desktop: false, memory: false, messaging: false, mcp_skill: false },
+      cli_access: {} as never, storage: { workspace_path: dataDir, access: 'readwrite' }, memory_scopes: [],
+    } }))
     const workspaceRoot = worker.incarnations[0].workspace
     const latestRules = '# Handoff 前更新的规则\n'
     await fs.writeFile(join(workspaceRoot, 'AGENTS.md'), latestRules)

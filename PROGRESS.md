@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### 权限系统闭环：已实现，待 PR 验收
+
+- 按 2026-10-10 已确认方案分开主体授权、角色职责和具体化身执行事实。有效入口只保留 memory/messaging/file_io/shell/mcp_skill/desktop；task/browser/remote_exec 退役，旧值兼容保存。
+- Manager、builtin、child 与退出工具执行宿主守卫；Worker 固定主体范围，内置文件与本地上传检查真实路径及读写级别。原生 CLI 准入覆盖新建及接续，受限或缺主体不借宽权限 fallback。
+- 能力查询与生产装配共用纯计划，最终请求快照原子保存；Worker/child 页面按具体化身展示，旧缺记录 unknown。UI 解释私聊全量/群增量、作用范围和生效时点；Memory 数据级权限仍由独立任务负责。
+- 定向 Agent 183 项、Admin 65 项（含群退役兼容）、Web 51 项通过；扩大回归 2347 项通过，15 项失败在独立未修改基线同样复现。Shared/Agent/Admin/CLI 和 Web 生产构建通过；未重启本地实例或部署目标 Ubuntu。
+
 ### 未实装远程执行类别隐藏：已本地部署
 
 - `get_execution_capabilities` 与 `get_friend_permissions` 的模型可见权限结果省略 `remote_exec`，避免把未实装类别描述成 SSH 禁令；仅修改结果序列化，原始授权、Worker 快照与实际工具权限保持不变。

@@ -1,3 +1,5 @@
+import { EFFECTIVE_TOOL_CATEGORIES, TOOL_ENTRY_EXPLANATIONS } from 'crabot-shared/dist/permission-entries.js'
+export { TOOL_ENTRY_EXPLANATIONS }
 /**
  * Admin Web UI 类型定义
  * 与 crabot-admin/src/types.ts 保持一致
@@ -515,8 +517,8 @@ export const TOOL_CATEGORIES: readonly ToolCategory[] = [
   'memory', 'messaging', 'task', 'mcp_skill', 'file_io', 'browser', 'shell', 'remote_exec', 'desktop',
 ] as const
 
-/** remote_exec 为未实装的预留设计；只隐藏 UI，完整类别仍用于保存存量配置。 */
-export const VISIBLE_TOOL_CATEGORIES = TOOL_CATEGORIES.filter(category => category !== 'remote_exec')
+/** task/browser/remote_exec 仅保留历史存储值，不属于有效用户授权。 */
+export const VISIBLE_TOOL_CATEGORIES = EFFECTIVE_TOOL_CATEGORIES
 
 // ============================================================================
 // Friend（熟人）管理类型

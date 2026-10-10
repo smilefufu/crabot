@@ -1,3 +1,4 @@
+import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
 /**
  * manager 封闭工具面装配测试 —— protocol-agent-v3.md §4.3。
  *
@@ -102,6 +103,7 @@ function makeDeps(overrides: Partial<ToolFaceDeps> = {}): ToolFaceDeps {
     workerContext: () => ({
       managerKey: MANAGER_KEY,
       reportTo: { channel_id: 'ch-1', session_id: 'sess-1' },
+      principalPermissions: overrides.candidatePermissions ?? { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, memory: true, messaging: true } },
     }),
     messagingDeps: makeMessagingDeps(),
     memoryServer: makeMemoryServer(),
@@ -126,6 +128,47 @@ function makeDeps(overrides: Partial<ToolFaceDeps> = {}): ToolFaceDeps {
 function memoryToolNames(tools: ToolDefinition[]): string[] {
   return tools.map((t) => t.name).filter((n) => n.startsWith('mcp__crab-memory__'))
 }
+
+describe('主体授权与角色能力分开执行', () => {
+  it.each(['full', 'shadow', 'progressive'] as const)('messaging=false 在 %s 工具面只允许当前可信对话回复，不能通过同名 session 或文件附件扩大授权', async mode => {
+    const rpc = vi.fn(async () => ({ platform_message_id: 'fixture', sent_at: '2026-10-10' }))
+    const principal = { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, messaging: false, file_io: false } }
+    const deps = makeDeps({ faceState: createManagerToolFaceState(mode), candidatePermissions: principal,
+      managerTarget: { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' },
+      messagingDeps: makeMessagingDeps({ rpcClient: { call: rpc } as never }),
+    })
+    const send = buildManagerToolFace(deps).find(tool => tool.name === 'send_message')!
+    const reply = { channel_id: 'ch-1', session_id: 'sess-1', content: 'fixture', post_send_action: 'none' }
+    expect((await send.call(reply, {})).isError).toBe(false)
+    expect(rpc).toHaveBeenCalledOnce()
+    for (const input of [{ ...reply, channel_id: 'ch-2' }, { ...reply, session_id: 'other' }, { ...reply, file_path: '/tmp/secret' }]) {
+      expect((await send.call(input, {})).output).toContain('PERMISSION_DENIED')
+    }
+    expect(rpc).toHaveBeenCalledOnce()
+  })
+  it('loaded Memory and permission introspection use current host authorization, including direct calls after a new turn', async () => {
+    const memoryRpc = vi.fn(async () => ({ results: [] }))
+    const callAdmin = vi.fn(async () => ({ config: null, resolved: null }))
+    const target = { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' as const }
+    let principal = { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, memory: true } }
+    const state = createManagerToolFaceState('full')
+    const deps = () => makeDeps({ faceState: state, callAdmin, workerContext: () => ({ managerKey: MANAGER_KEY,
+      reportTo: target, targetSession: target, creatorFriendId: 'self', principalPermissions: principal }),
+      memoryServer: createCrabMemoryServer({ moduleId: 'fixture', getMemoryPort: async () => 1,
+        rpcClient: { call: memoryRpc } as never }, { visibility: 'internal', scopes: [], isMasterPrivate: false }),
+    })
+    const tools = buildManagerToolFace(deps())
+    const get = tools.find(tool => tool.name === 'get_friend_permissions')!
+    expect((await get.call({ friend_id: 'self' }, {})).isError).toBe(false)
+    expect((await get.call({ friend_id: 'other' }, {})).isError).toBe(true)
+    expect(callAdmin).toHaveBeenCalledOnce()
+    const memory = tools.find(tool => tool.name === 'mcp__crab-memory__search_memory')!
+    principal = { ...principal, tool_access: { ...principal.tool_access, memory: false } }
+    buildManagerToolFace(deps())
+    expect((await memory.call({ query: 'fixture' }, {})).output).toContain('PERMISSION_DENIED')
+    expect(memoryRpc).not.toHaveBeenCalled()
+  })
+})
 
 describe('每日反思保留历史 inbox 的人工迁移边界', () => {
   const writes = [
@@ -494,7 +537,7 @@ describe('buildManagerToolFace', () => {
     await buildManagerToolFace(deps)[0].call({ query: external.name }, {})
     const loaded = buildManagerToolFace(deps).find((tool) => tool.name === external.name)!
     authorized = false
-    expect(await loaded.call({}, {})).toMatchObject({ output: 'TOOL_CATALOG_CHANGED', isError: true })
+    expect(await loaded.call({}, {})).toMatchObject({ output: expect.stringContaining('PERMISSION_DENIED'), isError: true })
     expect(call).not.toHaveBeenCalled()
     expect(state.catalog?.missingToolOutput('mcp__remote__unknown')).toBe('TOOL_UNAVAILABLE')
   })

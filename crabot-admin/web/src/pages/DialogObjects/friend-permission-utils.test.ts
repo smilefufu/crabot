@@ -10,7 +10,7 @@ import { createCliAccessConfig } from '../../types'
 
 describe('friend-permission-utils', () => {
   it('summarizes storage permissions', () => {
-    expect(summarizeFriendStorage(null)).toBe('未开启')
+    expect(summarizeFriendStorage(null)).toBe('未授权内置文件范围')
     expect(
       summarizeFriendStorage({ workspace_path: '/workspace', access: 'readwrite' })
     ).toBe('/workspace · 读写')

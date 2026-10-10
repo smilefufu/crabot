@@ -85,6 +85,10 @@ async function applyConfigViaPull(internals: any, modelConfig: Record<string, LL
   await internals.pullRuntimeConfig()
 }
 
+function testPrincipal(): ResolvedPermissions {
+  return { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, desktop: true }, storage: { workspace_path: '/', access: 'readwrite' } }
+}
+
 function connInfo(modelId: string): LLMConnectionInfo {
   return { endpoint: 'https://example.invalid', apikey: 'k', model_id: modelId, format: 'anthropic' }
 }
@@ -163,7 +167,7 @@ function makeScriptedLLM(): { adapter: LLMAdapter; queue: Turn[] } {
 /** builtin worker 那一轮 burst 的 runEngine 调用（manager loop 的调用不带固定权限档位）。 */
 function workerBurstModels(spy: { mock: { calls: Array<[{ options: { model: string; resolvedPermissions?: unknown } }]> } }): string[] {
   return spy.mock.calls
-    .filter((c) => c[0].options.resolvedPermissions === BUILTIN_WORKER_PERMISSIONS)
+    .filter((c) => c[0].options.resolvedPermissions !== undefined)
     .map((c) => c[0].options.model)
 }
 
@@ -249,6 +253,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       origin: { spawned_by_episode: 'wechat::sess-1', trigger_type: 'message', creator_friend_id: 'friend-f1' },
       report_to: { channel_id: 'wechat' as ModuleId, session_id: 'sess-1' },
       impl: 'builtin',
+      principal_permissions: testPrincipal(),
     })
     return { workerId: worker.worker_id, workspace: worker.incarnations[0].workspace }
   }
@@ -462,7 +467,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
   it('生产主线独立加载项目 guidance，不依赖原装 Skill', async () => {
     const { internals } = boot()
-    const runtime = internals.buildBuiltinWorkerRuntime({ worker_id: 'rule-read', workspace: { root: tmpRoot } })!
+    const runtime = internals.buildBuiltinWorkerRuntime({ principal_permissions: testPrincipal(), worker_id: 'rule-read', workspace: { root: tmpRoot } })!
     const tool = resolveTools(runtime).find(tool => tool.name === 'load_guidance')!
     const result = await tool.call({ name: 'worker.project-context' }, {} as never)
     expect(result.isError).toBe(false)
@@ -550,7 +555,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
                 ...toolAccess,
               },
               cli_access: Object.fromEntries(CLI_DOMAINS.map((d) => [d, 'write'])),
-              storage: null,
+              storage: { workspace_path: '/', access: 'readwrite' },
               memory_scopes: memoryScopes,
             },
             sources: {},
@@ -575,7 +580,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     /** 唤醒边界解析（= `routeHumanMessages` 内部做的事），返回 manager 算好的那份档位。 */
     async function speak(internals: AgentInternals, friend: Friend): Promise<ResolvedPermissions | null> {
-      const entry = await internals.managerStack!.principals.resolve(MANAGER_KEY, { friend, sessionType: 'group' })
+      const entry = await internals.managerStack!.principals.resolve(MANAGER_KEY, { friend, sessionType: 'private' })
       return entry.permissions
     }
 
@@ -620,7 +625,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       expect(names).not.toContain('send_message')
     })
 
-    it('该会话从未解析过身份（系统派工）→ 退回固定档位，行为与 F 阶段逐字相同', () => {
+    it('未解析主体的历史/系统 Worker 仅保留产品职责，不回退资源授权', () => {
       const { internals } = boot()
       const builtin = internals.buildBuiltinWorkerRuntime({
         worker_id: 'w-sys',
@@ -629,8 +634,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       })!
       const names = resolveTools(builtin).map((t) => t.name)
       // BUILTIN_WORKER_PERMISSIONS 开着 shell/file_io
-      expect(names).toContain('Bash')
-      expect(names).toContain('Read')
+      expect(names).not.toContain('Bash')
+      expect(names).not.toContain('Read')
     })
 
     // --- PR #59 review 第一条（安全）：权限是身份属性，spawn 时固定，不随会话里谁说话漂移 ---
@@ -672,7 +677,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
                 file_io: true, browser: true, shell: isMaster, remote_exec: isMaster, desktop: isMaster,
               },
               cli_access: Object.fromEntries(CLI_DOMAINS.map((d) => [d, isMaster ? 'write' : 'none'])),
-              storage: null,
+              storage: { workspace_path: '/', access: 'readwrite' },
               memory_scopes: ['group-g'],
             },
             sources: {},
@@ -683,7 +688,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       }) as never
     }
 
-    it('越权复现：低权限成员派出 worker 后 master 在同群发言 → W 的下一轮 / 续 burst / revive 都不得跟着升权', async () => {
+    it('越权复现：低权限主体派出 worker 后主控切换为 Master 私聊主体 → W 的下一轮 / 续 burst / revive 都不得跟着升权', async () => {
       const { internals } = boot()
       stubAdminPerSpeaker(internals)
 
@@ -721,7 +726,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       await settle(internals, managerKey)
     })
 
-    it('反方向同样成立：master 派出的 worker 不会因为低权限成员随后发言而被降权', async () => {
+    it('反方向同样成立：Master 私聊派出的 Worker 不会随主控当前主体被降权', async () => {
       const { internals } = boot()
       stubAdminPerSpeaker(internals)
 
@@ -812,7 +817,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     ]
 
     function toolNames(internals: AgentInternals, workspaceRoot: string): string[] {
-      const builtin = internals.buildBuiltinWorkerRuntime({
+      const builtin = internals.buildBuiltinWorkerRuntime({ principal_permissions: testPrincipal(),
         worker_id: 'w-tools',
         workspace: { root: workspaceRoot },
         origin: { spawned_by_episode: 'wechat::s', trigger_type: 'message' },
@@ -883,7 +888,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     it('builtin tools always include persistent bg shell support and bind ownership to the worker', () => {
       const { internals } = boot()
-      const builtin = internals.buildBuiltinWorkerRuntime({
+      const builtin = internals.buildBuiltinWorkerRuntime({ principal_permissions: testPrincipal(),
         worker_id: 'w-bg-owner',
         workspace: { root: tmpRoot },
         origin: { spawned_by_episode: 'wechat::s', trigger_type: 'message' },
@@ -900,7 +905,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     it('missing AgentHandler fails loudly instead of silently falling back to synchronous Bash', () => {
       const { internals } = boot()
       internals.agentHandler = undefined
-      const runtime = internals.buildBuiltinWorkerRuntime({
+      const runtime = internals.buildBuiltinWorkerRuntime({ principal_permissions: testPrincipal(),
         worker_id: 'w-no-handler', workspace: { root: tmpRoot },
         origin: { spawned_by_episode: 'wechat::s', trigger_type: 'message' },
       })!
@@ -942,7 +947,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       await fs.mkdir(wsB, { recursive: true })
 
       for (const ws of [wsA, wsB]) {
-        const builtin = internals.buildBuiltinWorkerRuntime({ worker_id: 'w-cwd', workspace: { root: ws } })!
+        const builtin = internals.buildBuiltinWorkerRuntime({ principal_permissions: testPrincipal(), worker_id: 'w-cwd', workspace: { root: ws } })!
         const bash = resolveTools(builtin).find((t) => t.name === 'Bash')!
         const res = await bash.call({ command: 'pwd' }, { signal: new AbortController().signal })
         expect(String(res.output).trim()).toContain(await fs.realpath(ws))
@@ -1155,7 +1160,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     }))
     const workspaceRoot = join(tmpRoot, 'ws-prompt')
     const agents = '# Workspace rules\nInspect the current implementation before editing.\n'
-    const builtin = internals.buildBuiltinWorkerRuntime({
+    const builtin = internals.buildBuiltinWorkerRuntime({ principal_permissions: testPrincipal(),
       worker_id: 'w-prompt',
       workspace: { root: workspaceRoot },
       workspace_instructions: {
@@ -1249,15 +1254,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
     expect(w.task.status).toBe('halted')
     expect(w.incarnations[0].ended_reason).toBe('failed')
-    // P6-A：episode admission 会在 wake 起点就建 manager 目录/最小 identity，
-    // 失败路径也有异步 wake 在飞——等它落定，避免与 afterEach 的目录清理竞争。
-    await waitUntil(async () => {
-      const dir = join(process.env.DATA_DIR!, 'agent', 'managers', encodeURIComponent(managerKey))
-      try {
-        return (await fs.readdir(dir)).includes('state.json')
-      } catch {
-        return false
-      }
-    })
+    // Failure preserves the Worker evidence even when the follow-up Manager has no resolved identity.
+    const activity = await internals.managerStack!.harness.getWorkerTerminal(w.worker_id)
+    expect(activity.kind).toBeDefined()
   })
 })

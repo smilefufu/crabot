@@ -32,6 +32,7 @@ export interface SpawnPersistentAgentOpts {
   /** Only builtin direct children enable multi-burst execution and child-bound tools. */
   readonly createExecution?: (entityId: string, signal: AbortSignal) => {
     tools: ReadonlyArray<ToolDefinition>
+    observeTools?: EngineOptions['onBeforeLlmCall']
     drainExternalInputs: NonNullable<EngineOptions['drainExternalInputs']>
     hasPendingExternalInputs: NonNullable<EngineOptions['hasPendingExternalInputs']>
     onSystemInjection: NonNullable<EngineOptions['onSystemInjection']>
@@ -252,6 +253,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
               },
             } : {}),
             model: opts.model,
+            onBeforeLlmCall: execution?.observeTools,
             ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
             ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
             ...(opts.permissionConfig ? { permissionConfig: opts.permissionConfig } : {}),

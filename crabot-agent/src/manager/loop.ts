@@ -257,6 +257,7 @@ export interface ManagerLoopDeps {
    * promptInputs "每轮重算"的更细粒度热更不同(那两个是 per-turn,这两个是 per-episode)。
    */
   readonly adapter: () => LLMAdapter
+  readonly observeTools?: (key: ManagerKey, episodeId: string, tools: ReadonlyArray<ToolDefinition>) => Promise<void>
   readonly model: () => string
   /**
    * 运行时配置已原子替换后的通知源与代数 getter(spec 2026-08-30-llm-retry-config-hotreload):
@@ -2368,7 +2369,8 @@ export class ManagerLoop {
       humanMessageQueue: this.mailbox,
       hasPendingExternalInputs: () => this.mailbox.hasPending,
       messagesRef,
-      onBeforeLlmCall: async () => {
+      onBeforeLlmCall: async tools => {
+        await this.deps.observeTools?.(this.deps.key, episodeId, tools)
         checkpoint()
         if (this.currentToolProfile === 'daily_reflection' && this.resumeCheckpoint) {
           await this.deps.dailyReflection?.acknowledgePages(this.resumeCheckpoint.tools)

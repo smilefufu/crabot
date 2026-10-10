@@ -1,3 +1,4 @@
+import { authorizeTool, roleAuthorization, entryAuthorization, checkFileAccess, allowed, denied } from '../../permissions/tool-authorization.js'
 /**
  * Manager 能力目录与 episode 工具投影 —— protocol-agent-v3.md §4.3。
  * 内置 messaging、memory、Worker、自省、任务板和项目文档仍按白名单构造；
@@ -42,6 +43,7 @@ import {
 export interface ToolFaceDeps {
   readonly dailyReflection?: DailyReflection
   readonly describeExecutionTools?: DescribeExecutionTools
+  readonly readExecutionObservation?: (workerId: string, incarnationId: string, impl: import('../../workers/types.js').WorkerImplId) => Promise<import('crabot-shared').ExecutionObservation>
   readonly harness: WorkerHarness
   /** P6-C §7：list_worker_implementations 的 registry snapshot getter。 */
   readonly workerImplSnapshot?: import('./worker-tools.js').WorkerToolsDeps['workerImplSnapshot']
@@ -280,6 +282,11 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
 }
 
 function buildMessagingFace(deps: ToolFaceDeps): ToolDefinition[] {
+  const original = deps
+  deps = { ...deps, messagingDeps: { ...deps.messagingDeps, authorizeFile: async hostPath => {
+    const decision = await checkFileAccess((original.faceState?.authorizationContext ?? original).workerContext().principalPermissions, hostPath, process.cwd(), false)
+    if (!decision.allowed) throw new Error(decision.reason)
+  } } }
   if (deps.isBuiltinDailyReflection) return buildDailyReflectionMessagingFace(deps)
   const toolSet = managerMessagingToolSet(deps.isSystemThread)
   return buildMessagingTools(deps.messagingDeps, () => toolSet).map((tool) => messagingToolToDefinition(tool, deps))
@@ -507,7 +514,7 @@ function wrapExternalMcpTool(
     || (tool.category !== 'desktop' && tool.category !== 'mcp_skill')
     || hasUnsafeMetadata(tool.description) || hasUnsafeMetadata(tool.inputSchema)
     || serializedToolBytes(tool) > 64 * 1024) return undefined
-  return {
+  return authorizeTool({
     ...tool,
     isReadOnly: false,
     call: async (input, context) => {
@@ -523,7 +530,8 @@ function wrapExternalMcpTool(
       }
       return tool.call(input, context)
     },
-  }
+  }, { role: 'manager', entry: tool.category as 'desktop' | 'mcp_skill', available: () => true, check: async () =>
+    await authorize(tool) ? allowed : denied('PERMISSION_DENIED', '外部 MCP 当前未获授权') })
 }
 
 function hasUnsafeMetadata(value: unknown): boolean {
@@ -537,6 +545,10 @@ function hasUnsafeMetadata(value: unknown): boolean {
 
 /** 返回完整内置工具面；有 episode 状态时投影为稳定核心 + 已加载尾部。 */
 export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
+  if (deps.faceState) deps.faceState.authorizationContext = deps
+  const currentDeps = () => deps.faceState?.authorizationContext ?? deps
+  const currentPrincipal = () => currentDeps().workerContext().principalPermissions
+  const authorizeExternal: ToolFaceDeps['authorizeExternalMcpTool'] = tool => currentDeps().authorizeExternalMcpTool?.(tool) ?? Promise.resolve(false)
   const selectedProfile = deps.faceState?.catalog?.profile ?? deps.profile ?? (deps.isBuiltinDailyReflection ? 'daily_reflection' : 'normal')
   const externalMcpTools = deps.faceState && (deps.faceState.mode ?? 'progressive') === 'progressive' && selectedProfile === 'normal'
     ? deps.externalMcpTools ?? [] : []
@@ -546,10 +558,10 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     if (previous.length !== externalMcpTools.length || previous.some((tool, index) => tool !== externalMcpTools[index])) {
       // Refresh only between Engine turns. Requests already issued retain their own tool references.
       const catalog = state.catalog!.withExternalMcpTools(externalMcpTools
-        .map(tool => wrapExternalMcpTool(tool, deps.authorizeExternalMcpTool))
+        .map(tool => wrapExternalMcpTool(tool, authorizeExternal))
         .filter((tool): tool is ToolDefinition => tool !== undefined))
-      const searchTool = buildSearchToolsTool(catalog, state)
-      const familyTool = buildLoadToolFamilyTool(catalog, state)
+      const searchTool = authorizeTool(buildSearchToolsTool(catalog, state), roleAuthorization('manager'))
+      const familyTool = authorizeTool(buildLoadToolFamilyTool(catalog, state), roleAuthorization('manager'))
       Object.assign(state, { catalog, searchTool, familyTool, externalMcpTools: [...externalMcpTools] })
     }
     return state.catalog!.project(state, state.searchTool)
@@ -560,10 +572,10 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const memoryFace = buildManagerMemoryFace(deps.memoryServer)
   const memoryTools = dailyProfile ? protectDailyReflectionMemory(memoryFace) : memoryFace
   const workerTools = buildWorkerTools({
-    authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot(deps.projectDocs, workspaceRoot, false),
+    authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot({ ...deps.projectDocs, managerPrincipalPermissions: currentPrincipal() }, workspaceRoot, false),
     harness: deps.harness,
     readWorkboard: (managerKey) => deps.workboard.store.load(managerKey),
-    context: deps.workerContext,
+    context: () => currentDeps().workerContext(),
     authorization: deps.authorization,
     validateMasterAuthorization: deps.validateMasterAuthorization,
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
@@ -583,11 +595,11 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   })
   const guidanceTool = createGuidanceTool('manager')
   const workboardTools = buildWorkboardTools(deps.workboard)
-  const projectDocTools = buildProjectDocTools(deps.projectDocs)
+  const projectDocTools = buildProjectDocTools({ ...deps.projectDocs, get managerPrincipalPermissions() { return currentPrincipal() } })
 
   const builtinTools = [
     ...(normalProfile ? [guidanceTool] : []),
-    ...(normalProfile || dailyProfile ? [createExecutionCapabilitiesTool(deps)] : []),
+    ...(normalProfile || dailyProfile ? [createExecutionCapabilitiesTool({ ...deps, workerContext: () => currentDeps().workerContext() })] : []),
     ...(dailyProfile ? buildDailyReflectionTools(deps.dailyReflection) : []),
     ...messagingTools,
     ...memoryTools,
@@ -595,7 +607,35 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...workboardTools,
     ...projectDocTools,
     ...infoTools,
-  ].map((tool): ToolDefinition => {
+  ].map((original): ToolDefinition => {
+    const principal = currentPrincipal
+    let policy = roleAuthorization('manager')
+    if (memoryTools.includes(original)) policy = entryAuthorization('manager', 'memory', principal)
+    else if (projectDocTools.includes(original) || original.name === 'inspect_workspace_git') policy = entryAuthorization('manager', 'file_io', principal)
+    else if (messagingTools.includes(original)) {
+      const entry = entryAuthorization('manager', 'messaging', principal)
+      policy = { ...entry, available: () => original.name === 'send_message' || entry.available(), async check(input) {
+        const target = currentDeps().managerTarget
+        const currentReply = original.name === 'send_message' && target !== undefined
+          && (input.channel_id === undefined || input.channel_id === target.channel_id) && input.session_id === target.session_id
+        const decision = currentReply ? allowed : await entry.check(input)
+        if (!decision.allowed) return decision
+        if (input.file_path !== undefined) {
+          if (typeof input.file_path !== 'string') return denied('PERMISSION_DENIED', 'file_path 必须为字符串')
+          return checkFileAccess(principal(), input.file_path, process.cwd(), false)
+        }
+        if (typeof input.media_url === 'string' && !/^https?:\/\//i.test(input.media_url)) return denied('PERMISSION_DENIED', '媒体地址不允许借用本地文件路径')
+        return allowed
+      } }
+    } else if (original.name === 'get_friend_permissions') {
+      policy = { ...policy, async check(input) {
+        const context = currentDeps().workerContext()
+        if (context.targetSession?.type === 'private' && context.creatorFriendId && input.friend_id === context.creatorFriendId) return allowed
+        const access = principal()?.cli_access.permission
+        return access === 'read' || access === 'write' ? allowed : denied('PERMISSION_DENIED', '查询其他主体需要 permission 域读取授权')
+      } }
+    }
+    const tool = authorizeTool(original, policy)
     if (!dailyProfile || !deps.dailyReflection || tool.name !== 'send_daily_reflection_summary') return tool
     return { ...tool, async call(input, context) {
       const result = await tool.call(input, context)
@@ -608,7 +648,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
 
   const profile = selectedProfile
   const wrappedMcpTools = externalMcpTools
-    .map(tool => wrapExternalMcpTool(tool, deps.authorizeExternalMcpTool))
+    .map(tool => wrapExternalMcpTool(tool, authorizeExternal))
     .filter((tool): tool is ToolDefinition => tool !== undefined)
   const catalog = new ManagerToolCatalog(
     [...builtinTools.sort((a, b) => Number(CONDITIONAL_TOOLS.has(a.name)) - Number(CONDITIONAL_TOOLS.has(b.name)) || a.name.localeCompare(b.name)), ...wrappedMcpTools],
@@ -617,19 +657,19 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     undefined,
     (tool) => {
       if (profile !== 'normal') return true
-      const permissions = deps.candidatePermissions
+      const permissions = currentDeps().candidatePermissions ?? currentPrincipal()
       if (tool.name.startsWith('mcp__') && !tool.name.startsWith('mcp__crab-memory__')) {
         return (tool.category === 'mcp_skill' || tool.category === 'desktop') && permissions?.tool_access[tool.category] === true
       }
       if (tool.name.startsWith('mcp__crab-memory__')) return permissions?.tool_access.memory === true
       if (messagingTools.some((item) => item.name === tool.name)) return permissions?.tool_access.messaging === true
       if (tool.name === 'inspect_workspace_git') return permissions?.tool_access.file_io === true
-      if (workerTools.some((item) => item.name === tool.name)) return permissions?.tool_access.task === true
+      if (workerTools.some((item) => item.name === tool.name)) return true
       if (tool.name.endsWith('_schedule') || tool.name === 'list_schedules') {
         const access = permissions?.cli_access.schedule
         return access === 'write' || (access === 'read' && (tool.name === 'get_schedule' || tool.name === 'list_schedules'))
       }
-      if (tool.name === 'get_friend_permissions') return permissions?.cli_access.permission === 'read' || permissions?.cli_access.permission === 'write'
+      if (tool.name === 'get_friend_permissions') return true
       return true
     },
     {
@@ -647,8 +687,8 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     assertClosedToolFace(projected, true)
     return projected
   }
-  deps.faceState.familyTool = buildLoadToolFamilyTool(catalog, deps.faceState)
-  const searchTool = profile === 'normal' ? buildSearchToolsTool(catalog, deps.faceState) : undefined
+  deps.faceState.familyTool = authorizeTool(buildLoadToolFamilyTool(catalog, deps.faceState), roleAuthorization('manager'))
+  const searchTool = profile === 'normal' ? authorizeTool(buildSearchToolsTool(catalog, deps.faceState), roleAuthorization('manager')) : undefined
   deps.faceState.searchTool = searchTool
   const projected = catalog.project(deps.faceState, searchTool)
   assertClosedToolFace(projected, true)

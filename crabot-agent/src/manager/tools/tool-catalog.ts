@@ -46,6 +46,7 @@ export const MEMORY_GRAPH_REBUILD_CORE_NAMES = [
 ] as const
 
 export interface ManagerToolFaceState {
+  authorizationContext?: import('./tool-face.js').ToolFaceDeps
   readonly loadedNames: Set<string>
   readonly mode?: ManagerToolLoadingMode
   /** Raw connector definitions consumed at the last turn boundary; stable references identify an unchanged snapshot. */

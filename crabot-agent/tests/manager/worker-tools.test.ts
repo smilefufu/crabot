@@ -168,6 +168,7 @@ const CTX: WorkerToolsContext = {
   episodeId: 'episode-42',
   creatorFriendId: 'friend-1',
   reportTo: { channel_id: 'wechat', session_id: 'sess-1' },
+  principalPermissions: BUILTIN_WORKER_PERMISSIONS,
 }
 
 function directSpawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerParams {
@@ -547,7 +548,7 @@ describe('worker observation and turn closure', () => {
 // ---- spawn_worker ----
 
 describe('spawn_worker', () => {
-  it('派发权限关闭时拒绝调用，不创建台账或启动执行器', async () => {
+  it('task=false 不影响当前会话派发；缺主体才拒绝新建执行器', async () => {
     const { harness, fake } = await makeHarness()
     const context: WorkerToolsContext = {
       ...CTX,
@@ -558,10 +559,13 @@ describe('spawn_worker', () => {
     }
     const tool = buildWorkerTools({ harness, context: () => context }).find((t) => t.name === 'spawn_worker')!
     const result = await tool.call({ title: '整理目录', prompt: '移动文本文件', impl: 'builtin' }, {})
-    expect(result.isError).toBe(true)
-    expect(result.output).toContain('当前会话没有任务派发权限')
-    expect(fake.spawnCalls).toHaveLength(0)
-    expect(await harness.listWorkers(CTX.managerKey)).toHaveLength(0)
+    expect(result.isError).toBe(false)
+    expect(fake.spawnCalls).toHaveLength(1)
+    const unknown = buildWorkerTools({ harness, context: () => ({ ...CTX, principalPermissions: undefined }) }).find((t) => t.name === 'spawn_worker')!
+    const blocked = await unknown.call({ title: 'fixture', prompt: 'fixture' }, {})
+    expect(blocked.output).toContain('CAPABILITY_UNKNOWN')
+    expect(fake.spawnCalls).toHaveLength(1)
+    expect(await harness.listWorkers(CTX.managerKey)).toHaveLength(1)
   })
 
   it('title schema 要求任务主题与具体执行内容，并禁止对话指代', async () => {

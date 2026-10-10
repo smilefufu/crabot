@@ -1,3 +1,6 @@
+import { executionObservation, requestObservation, persistObservation, observationFile, readObservation } from './permissions/execution-observation.js'
+import { assertExecutionPolicy, executionAdmission } from './workers/execution-policy.js'
+import { authorizeTool, roleAuthorization, entryAuthorization, fileAuthorization, assertAuthorizedTools } from './permissions/tool-authorization.js'
 /**
  * UnifiedAgent - 合并 Flow + Agent 的统一智能体模块
  *
@@ -115,6 +118,7 @@ import {
 import {
   BUILTIN_WORKER_PERMISSIONS,
   narrowWorkerPermissions,
+  workerCliExecutionPermissions,
   type BuiltinRuntimeContext,
 } from './workers/builtin/runtime.js'
 import {
@@ -466,8 +470,8 @@ function toToolPermissionConfig(
 ): ToolPermissionConfig {
   const deniedTools = tools
     .filter(t => {
-      const category = t.category ?? 'mcp_skill'
-      return !toolAccess[category]
+      if (t.authorization) return !t.authorization.available()
+      return t.category === undefined || !toolAccess[t.category]
     })
     .map(t => t.name)
 
@@ -881,6 +885,7 @@ export class UnifiedAgent extends ModuleBase {
       },
       this.builtinBgRegistry,
       (text) => redactSecrets(text, [...this.knownSecrets]),
+      path.join(getAgentDataDir(), 'workers'),
     )
 
 
@@ -1060,13 +1065,19 @@ export class UnifiedAgent extends ModuleBase {
       builtinTraceHooks: this.builtinTraceHooks(),
       // P6-B §6：显式 impl spawn/resume/handoff 的 registry gate。
       assertWorkerImplReady: (impl) => this.activationRegistry.assertReady(impl),
-      selectWorkerImpl: (requested, excluded) => {
+      assertExecutionPolicy,
+      selectWorkerImpl: (requested, excluded, principal) => {
+        if (requested) assertExecutionPolicy(requested, principal)
+        const excludedByPolicy = new Set(excluded)
+        if (!requested) for (const impl of ['claude-code', 'codex'] as const) {
+          if (executionAdmission(impl, principal).status !== 'allowed') excludedByPolicy.add(impl)
+        }
         const snapshot = this.activationRegistry.getSnapshot()
         return selectWorkerImplementation({
           requestedImpl: requested,
           config: snapshot.config,
           statuses: snapshot.statuses,
-          ...(excluded ? { excludedImpls: excluded } : {}),
+          excludedImpls: excludedByPolicy,
         })
       },
       acquireWorkerFence: (impl, kind) => this.activationRegistry.acquireFence(impl, kind),
@@ -1220,22 +1231,14 @@ export class UnifiedAgent extends ModuleBase {
         const permissions = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, principal ?? null)
         const servers = filterMcpServersForWorker(this.agentConfig?.mcp_servers ?? [], permissions)
         const skills = selectMainlineWorkerSkills(this.agentConfig?.skills ?? [], servers, permissions.tool_access.mcp_skill)
-        if (impl !== 'builtin') return {
-          observed_at: new Date().toISOString(), source: 'next_cli_provision', tools: [],
-          mcp_servers: servers.map(server => server.name),
-          limitations: ['CLI 原生文件、命令及连接状态由原生执行器决定，未在此核实；当前配置只代表下次装配条件。'],
-        }
-        // Constructors only: never invoke a tool, create background ownership or provision a Worker.
-        const builtin = getConfiguredBuiltinTools(() => '', this.agentConfig?.builtin_tool_config, { availableSkills: skills })
-        const candidates = filterMcpToolsByConfig([...builtin, ...this.mcpConnector.getAllTools()], this.agentConfig?.builtin_tool_config)
-        const permitted = new Set(filterToolsByPermission(candidates, this.getToolPermissionConfig(candidates, permissions)))
-        const names = candidates.filter(tool => permitted.has(tool) || builtin.some(item => item === tool && item.name === 'Skill')).map(tool => tool.name)
-        return {
-          observed_at: new Date().toISOString(), source: 'current_builtin_assembly',
-          tools: [...names, 'load_guidance'], mcp_servers: servers.map(server => server.name),
-          limitations: ['列出基础工具与当前已连接 MCP；后台实体、项目 Git、生图等附加工具依具体任务装配。',
-            ...(!names.includes('Skill') ? ['当前配置禁用了必需的 Skill 工具，builtin 启动会失败。'] : [])],
-        }
+        const tools = impl === 'builtin' ? this.assembleBuiltinWorkerTools({ worker_id: 'execution-plan', workspace: { root: '' }, principal_permissions: principal }) : []
+        return executionObservation({ role: 'worker', impl, source: 'execution_plan',
+          tools: impl === 'builtin' ? [...tools.map(tool => tool.name), 'finish_task'] : null,
+          child_profiles: impl === 'builtin' && tools.some(tool => tool.name === 'delegate_task') ? (this.agentConfig?.subagents ?? []).map(profile => profile.name) : [],
+          skills: skills.map(skill => skill.name), mcp_servers: servers.map(server => server.name),
+          constraints: ['计划未创建后台归属或执行器；后台实体及项目 Git 工具按任务条件装配。',
+            ...(impl !== 'builtin' ? ['CLI 原生工具与连接状态未知；Crabot MCP/Skill 表示下次 provision 的计划。'] : [])],
+        })
       },
       capabilityBundle: async ({ worker_id, impl, principal_permissions }) => {
         const workerPermissions = narrowWorkerPermissions(
@@ -1336,6 +1339,17 @@ export class UnifiedAgent extends ModuleBase {
       // buildSystemPromptDynamic / buildToolsDynamic 同款语义）。
       systemPrompt: () => this.buildBuiltinWorkerSystemPrompt(ctx),
       tools: () => this.buildBuiltinWorkerTools(ctx),
+      observeTools: async tools => {
+        const id = ctx.incarnation_id ?? ctx.workspace_git?.incarnation_id
+        if (!id) throw new Error('CAPABILITY_UNKNOWN: 缺少执行化身身份')
+        await persistObservation(observationFile(path.join(getAgentDataDir(), 'workers'), ctx.worker_id, id),
+          requestObservation(tools, { role: 'worker', impl: 'builtin', source: 'builtin_request', worker_id: ctx.worker_id, incarnation_id: id,
+            child_profiles: tools.some(tool => tool.name === 'delegate_task') ? (this.agentConfig?.subagents ?? []).map(profile => profile.name) : [],
+            skills: this.resolveMainlineWorkerSkills(ctx).map(skill => skill.name),
+            constraints: ['主体授权为派发时快照；Worker 不提供记忆、人类投递、换工作目录或 goal 管理；主体开启标志不增加角色职责。'],
+          }))
+      },
+      resolvedPermissions: { ...narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, ctx.principal_permissions ?? null), cli_access: workerCliExecutionPermissions(ctx.principal_permissions).cli_access },
       timezone: resolveTimezone(this.agentConfig?.timezone),
       ...(sdkEnv.supportsVision !== undefined ? { supportsVision: sdkEnv.supportsVision } : {}),
       ...(sdkEnv.maxTokens !== undefined ? { maxTokens: sdkEnv.maxTokens } : {}),
@@ -1457,13 +1471,6 @@ export class UnifiedAgent extends ModuleBase {
    * subagent coordinator / `request_restart`。它们不是被过滤掉的，而是根本不组装进来。
    */
   private buildBuiltinWorkerTools(ctx: BuiltinRuntimeContext): ReadonlyArray<EngineToolDefinition> {
-    const tools: EngineToolDefinition[] = []
-    const workspaceRoot = ctx.workspace.root
-    // 派活那一刻 manager 已经按发起人身份算好、随 spawn 落盘的档位（§8.2）。worker 不认识
-    // friend，也不去问 admin，更不去查"这个会话最近谁在说话"——只读它自己那份快照。
-    const principalPerms = this.resolveWorkerPrincipalPermissions(ctx)
-    const workerPerms = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, principalPerms)
-
     // Shared registry is owned by AgentHandler; bg exit goes through the
     // harness inbox so idle and terminal incarnations retain their normal
     // wake/continuation semantics.
@@ -1479,6 +1486,14 @@ export class UnifiedAgent extends ModuleBase {
         stopWorkerAgent: (entityId) => this.builtinSubagentRunner.stopAgent(ctx.worker_id, entityId),
       }
     }
+    return this.assembleBuiltinWorkerTools(ctx, bgOptions)
+  }
+
+  private assembleBuiltinWorkerTools(ctx: BuiltinRuntimeContext, bgOptions?: ReturnType<AgentHandler['createBuiltinBgToolOptions']>): ReadonlyArray<EngineToolDefinition> {
+    const tools: EngineToolDefinition[] = []
+    const workspaceRoot = ctx.workspace.root
+    const principalPerms = this.resolveWorkerPrincipalPermissions(ctx)
+    const workerPerms = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, principalPerms)
     const workerSkills = this.resolveMainlineWorkerSkills(ctx)
     const builtinTools = getConfiguredBuiltinTools(
       () => workspaceRoot,
@@ -1492,7 +1507,8 @@ export class UnifiedAgent extends ModuleBase {
     }
 
     // 外部 MCP（admin 托管，McpConnector 在 onStart 连接）。
-    tools.push(...this.mcpConnector.getAllTools())
+    const externalTools = this.mcpConnector.getAllTools()
+    tools.push(...externalTools)
 
     // 临时页面：`taskId` 用 worker_id（页面 meta.owner_task_id 与台账里的 worker 对得上）。
     const tmpPageTools = createTmpPageTools({
@@ -1517,21 +1533,30 @@ export class UnifiedAgent extends ModuleBase {
     // 权限档位过滤：adapter 的 `checkPermission` 是执行期的闸，这里守的是
     // "没权限的工具不进 prompt"——外部 MCP 里可能混进 `desktop` 类工具（computer-use）。
     // 档位 = worker 固定档位 ∩ 派活人档位（见 `narrowWorkerPermissions`）。
-    const permitted = filterToolsByPermission(configFiltered, this.getToolPermissionConfig(configFiltered, workerPerms))
-    // Skill/tmp-page/生图是 §6.2 固定的 Crabot 产品能力，不属于第三方 `mcp_skill` 类别。
-    // 只恢复仍在 configFiltered 中的原始工具对象，避免绕过 disabled_tools 或误放行同名外部 MCP。
-    const configuredTools = new Set(configFiltered)
-    const fixedProductTools = new Set(
-      [skillTool, ...tmpPageTools, ...imageTools].filter((tool) => configuredTools.has(tool)),
-    )
-    const permittedTools = new Set(permitted)
-    const effectiveTools = [...configFiltered.filter((tool) =>
-      permittedTools.has(tool) || fixedProductTools.has(tool),
-    ), createGuidanceTool('worker')]
+    const fileSpecs: Record<string, [string, boolean]> = { Read: ['file_path', false], Write: ['file_path', true], Edit: ['file_path', true], Glob: ['path', false], Grep: ['path', false] }
+    const internalNames = new Set(['Skill', 'Output', 'Kill', 'ListEntities'])
+    const external = new Set(externalTools)
+    const fixedProduct = new Set([...tmpPageTools, ...imageTools])
+    const effectiveTools = configFiltered.map(tool => {
+      let authorization
+      if (builtinTools.includes(tool)) {
+        const file = fileSpecs[tool.name]
+        if (file) authorization = fileAuthorization('worker', () => principalPerms, () => workspaceRoot, file[0], file[1])
+        else if (tool.name === 'Bash') authorization = entryAuthorization('worker', 'shell', () => principalPerms)
+        else if (internalNames.has(tool.name)) authorization = roleAuthorization('worker')
+      } else if (external.has(tool) && (tool.category === 'desktop' || tool.category === 'mcp_skill')) {
+        authorization = entryAuthorization('worker', tool.category, () => principalPerms)
+      } else if (fixedProduct.has(tool)) authorization = roleAuthorization('worker')
+      else if (tool === workspaceGitTool) authorization = fileAuthorization('worker', () => principalPerms, () => workspaceRoot, 'workspace_root', false)
+      if (!authorization) throw new Error(`CAPABILITY_UNAVAILABLE: 未声明的 Worker 工具 ${tool.name}`)
+      return authorizeTool(tool, authorization)
+    }).filter(tool => tool.authorization!.available())
+    effectiveTools.push(authorizeTool(createGuidanceTool('worker'), roleAuthorization('worker')))
+    assertAuthorizedTools(effectiveTools)
     const subagents = this.agentConfig?.subagents ?? []
     if (subagents.length === 0) return effectiveTools
     const childPermissionConfig = this.getToolPermissionConfig(effectiveTools, workerPerms)
-    return [...effectiveTools, createDelegateTaskTool({
+    return [...effectiveTools, authorizeTool(createDelegateTaskTool({
       subAgents: subagents,
       runSubAgent: (subagent, input, toolContext) => this.builtinSubagentRunner.run(
         subagent,
@@ -1545,7 +1570,7 @@ export class UnifiedAgent extends ModuleBase {
           getCwd: () => workspaceRoot,
         },
       ),
-    }), createSendToSubagentTool((id, text, context) => this.builtinSubagentRunner.sendInput(id, text, context))]
+    }), roleAuthorization('worker')), authorizeTool(createSendToSubagentTool((id, text, context) => this.builtinSubagentRunner.sendInput(id, text, context)), roleAuthorization('worker'))]
   }
 
   /**
@@ -1570,7 +1595,7 @@ export class UnifiedAgent extends ModuleBase {
    *
    * **worker 侧不做任何身份解析**：它既不知道 friend 是谁，也不调 admin。取不到（系统派工 /
    * 派活时身份未解析 / 本字段出现之前 spawn 的老 worker）时返回 null，
-   * `narrowWorkerPermissions` 沿用历史回退档位，桌面能力保持关闭。
+   * 资源操作关闭，仅保留产品内闭环职责。
    */
   private resolveWorkerPrincipalPermissions(ctx: BuiltinRuntimeContext): ResolvedPermissions | null {
     return ctx.principal_permissions ?? null
@@ -4372,7 +4397,14 @@ export class UnifiedAgent extends ModuleBase {
     if (!found) {
       throw new Error(`Worker not found: ${params.worker_id}`)
     }
-    return buildWorkerDetail(found)
+    const observations = await Promise.all(found.worker.incarnations.map(async incarnation => {
+      if (incarnation.impl === 'legacy') return undefined
+      const fallback = executionObservation({ role: 'worker', impl: incarnation.impl, source: 'legacy', state: 'legacy_unknown',
+        worker_id: found.worker.worker_id, incarnation_id: incarnation.incarnation_id,
+        constraints: ['无该化身执行事实记录；不从当前配置补推历史工具。'] })
+      return incarnation.incarnation_id ? readObservation(observationFile(path.join(getAgentDataDir(), 'workers'), found.worker.worker_id, incarnation.incarnation_id), fallback) : fallback
+    }))
+    return { ...buildWorkerDetail(found), execution_observations: observations.filter((item): item is NonNullable<typeof item> => !!item) }
   }
 
   /** §8.3 get_worker_terminal：返回一次完整的 live/final/headless/unavailable 观察。 */

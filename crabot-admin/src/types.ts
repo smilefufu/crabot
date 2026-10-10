@@ -1,3 +1,4 @@
+import type { ToolAccessUpdate } from 'crabot-shared'
 /**
  * Admin 模块类型定义
  *
@@ -228,7 +229,7 @@ export interface GetFriendPermissionResult {
 }
 
 export interface UpdateFriendPermissionBody {
-  config: Omit<FriendPermissionConfig, 'updated_at'>
+  config: Omit<FriendPermissionConfig, 'updated_at' | 'tool_access'> & { tool_access: ToolAccessUpdate }
 }
 
 // ============================================================================
@@ -542,7 +543,7 @@ export interface GetPermissionTemplateResult {
 export interface CreatePermissionTemplateParams {
   name: string
   description?: string
-  tool_access: ToolAccessConfig
+  tool_access: ToolAccessUpdate
   cli_access?: CliAccessConfig
   storage?: StoragePermission | null
   memory_scopes?: string[]
@@ -556,7 +557,7 @@ export interface UpdatePermissionTemplateParams {
   template_id: string
   name?: string
   description?: string
-  tool_access?: ToolAccessConfig
+  tool_access?: ToolAccessUpdate
   cli_access?: CliAccessConfig
   storage?: StoragePermission | null
   memory_scopes?: string[]

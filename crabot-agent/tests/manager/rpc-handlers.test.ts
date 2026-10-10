@@ -622,7 +622,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     await Promise.allSettled(admissions.map((admission) => admission.completion))
   })
 
-  it('is_builtin=true → 不以任何 friend 身份执行(creator_friend_id 留空,按 §4.4「master 等价」的既有空值规则)', async () => {
+  it('is_builtin=true 的封闭系统线程不借 friend 身份或缺省权限派发普通 Worker', async () => {
     const stack = makeStack(spawnScript())
     const spawnSpy = vi
       .spyOn(stack.harness, 'spawnWorker')
@@ -638,11 +638,9 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
       creator_friend_id: 'friend-should-be-ignored',
     }))
 
-    await waitUntil(() => spawnSpy.mock.calls.length > 0)
-    expect(spawnSpy.mock.calls[0][0].origin.creator_friend_id).toBeUndefined()
-
     const admissions = await Promise.all(routeSpy.mock.results.map((r) => r.value))
     await Promise.allSettled(admissions.map((admission) => admission.completion))
+    expect(spawnSpy).not.toHaveBeenCalled()
   })
 
   it('非 schedule 唤醒(人类消息)不受影响:trigger_type 仍是 message,不带 creator_friend_id', async () => {
@@ -746,13 +744,15 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     expect(params.principal_permissions?.memory_scopes).toEqual(['scope-of-friend-7'])
   })
 
-  it('is_builtin 的 scheduled：不以任何 friend 名义执行，档位留空（master 等价，worker 退回固定档位）', async () => {
+  it('is_builtin 的 scheduled 不借最近发言人的权限派发普通 Worker', async () => {
     const { deps, calls } = permsByFriend()
     const stack = makeStackWith(spawnScript(), deps)
     const spawnSpy = vi
       .spyOn(stack.harness, 'spawnWorker')
       .mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned' }))
     const agent = buildAgent(stack)
+
+    const routeSpy = vi.spyOn(stack.registry, 'admitSchedule')
 
     await stack.principals.resolve('wechat::sess-1' as ManagerKey, {
       friend: {
@@ -774,10 +774,9 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
       is_builtin: true,
     }))
 
-    await waitUntil(() => spawnSpy.mock.calls.length > 0)
-    const params = spawnSpy.mock.calls[0][0]
-    expect(params.origin.creator_friend_id).toBeUndefined()
-    expect(params.principal_permissions).toBeUndefined()
+    const admissions = await Promise.all(routeSpy.mock.results.map((r) => r.value))
+    await Promise.allSettled(admissions.map((admission) => admission.completion))
+    expect(spawnSpy).not.toHaveBeenCalled()
     // 内置调度不触发第二次解析（只有那条人类消息那次）
     expect(calls).toHaveLength(1)
   })
@@ -825,7 +824,9 @@ describe('get_worker_detail(§8.3)', () => {
     const agent = buildAgent({
       ledger: { findWorker: async () => ({ managerKey: `test::f1` as ManagerKey, worker }) },
     })
-    await expect(agent.handleGetWorkerDetail({ worker_id: 'w-1' })).resolves.toEqual({ worker })
+    await expect(agent.handleGetWorkerDetail({ worker_id: 'w-1' })).resolves.toMatchObject({
+      worker, execution_observations: [],
+    })
   })
 
   it('不存在 → 抛带 worker_id 的明确错误', async () => {

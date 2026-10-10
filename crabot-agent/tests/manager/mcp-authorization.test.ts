@@ -183,7 +183,7 @@ describe('Manager MCP production authorization wiring', () => {
     if (change === 'revoke') grantPrivate(false)
     if (change === 'delete') admin.friends.delete('creator')
     if (change === 'offline') admin.resolveChannelSession.mockRejectedValue(new Error('offline'))
-    expect(await tool.call({}, {} as never)).toMatchObject({ isError: true, output: 'TOOL_CATALOG_CHANGED' })
+    expect(await tool.call({}, {} as never)).toMatchObject({ isError: true, output: expect.stringContaining('PERMISSION_DENIED') })
     expect(execute).not.toHaveBeenCalled()
     if (change === 'revoke') await (await scheduled(identity)).expectHidden(mcpName)
     if (change === 'delete') await expect(scheduled(identity)).rejects.toMatchObject({ code: 'AGENT_SCHEDULE_AUTH_REVOKED' })
@@ -239,7 +239,7 @@ describe('Manager MCP production authorization wiring', () => {
     admin.friends.set('master-friend', friend('master-friend'))
     await deps.beforeWake!(key, undefined)
     await face().expectHidden(desktopName)
-    expect(await tool.call({}, {} as never)).toMatchObject({ isError: true, output: 'TOOL_CATALOG_CHANGED' })
+    expect(await tool.call({}, {} as never)).toMatchObject({ isError: true, output: expect.stringContaining('PERMISSION_DENIED') })
     expect(execute).toHaveBeenCalledOnce()
   })
 

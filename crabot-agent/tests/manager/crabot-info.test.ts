@@ -10,6 +10,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { buildCrabotInfoTools, type ManagerScheduleToolsContext } from '../../src/manager/tools/crabot-info'
 import type { ResolvedPermissions } from '../../src/types'
+import { effectiveToolAccess } from 'crabot-shared'
 
 function makeCallAdmin(handlers: Record<string, (params: unknown) => unknown>) {
   const callAdmin = vi.fn(async (method: string, params: unknown) => {
@@ -622,7 +623,7 @@ describe('buildCrabotInfoTools', () => {
   })
 
   describe('get_friend_permissions', () => {
-    it.each([true, false])('omits remote_exec=%s from config and resolved awareness without modifying Admin results', async (remoteExec) => {
+    it.each([true, false])('omits retired permissions from awareness without modifying Admin results (remote_exec=%s)', async (remoteExec) => {
       const resolved = schedulePermissions('read', false)
       resolved.tool_access.remote_exec = remoteExec
       const response = {
@@ -636,8 +637,8 @@ describe('buildCrabotInfoTools', () => {
 
       expect(result.isError).toBe(false)
       const expected = JSON.parse(JSON.stringify(before))
-      delete expected.config.tool_access.remote_exec
-      delete expected.resolved.tool_access.remote_exec
+      expected.config.tool_access = effectiveToolAccess(expected.config.tool_access)
+      expected.resolved.tool_access = effectiveToolAccess(expected.resolved.tool_access)
       expect(JSON.parse(result.output)).toEqual(expected)
       expect(response).toEqual(before)
     })
@@ -666,7 +667,7 @@ describe('buildCrabotInfoTools', () => {
       const result = await tool.call({ friend_id: 'friend-123' }, {})
       expect(result.isError).toBe(false)
       const parsed = JSON.parse(result.output)
-      expect(parsed.resolved).toEqual({ tool_access: {}, cli_access: {}, storage: null, memory_scopes: [] })
+      expect(parsed.resolved).toEqual({ tool_access: effectiveToolAccess({}), cli_access: {}, storage: null, memory_scopes: [] })
     })
 
     it('缺少 friend_id 时报错且不调用 admin', async () => {
