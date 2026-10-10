@@ -8,6 +8,9 @@ data/
 # crabot-docs is a separate repo, cloned here for dev convenience
 crabot-docs/
 
+# crabot-voice-android is a separate repo, cloned here for dev convenience
+crabot-voice-android/
+
 # Node.js
 node_modules/
 dist/

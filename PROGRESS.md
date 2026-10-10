@@ -24,6 +24,7 @@
 
 ### 安卓语音终端与家庭 Channel：一期整合 spec 待确认
 
+- 已按用户要求创建 public 仓库 [crabot-voice-android](https://github.com/smilefufu/crabot-voice-android)，初始化 README 并克隆到主仓根目录；主仓 `.gitignore` 忽略该独立仓库。此次仅建立开发目录，未开始安卓产品实现。
 - 用户确定安卓手机起步、不采购硬件，一期端侧分段/声纹，至少支持无明显静音的连续换人B；已完成[一期整合spec](crabot-docs/superpowers/specs/2026-10-10-voice-channel-android-v1-design.md)，取代两份旧草案，待用户书面确认。未改正式协议/产品代码或重启Crabot。
 - 推荐独立ASR/TTS服务、Admin保存引用且只在voice实例页配置、家庭group权限；新稿明确同轮多消息整体准入，避免前半句先执行。前台/锁屏、未知整轮拒绝、8秒接话与AEC未通过时按钮打断均是待确认建议，不能当成已批准。system mode、云接口与完整链路待验收。
 - OnePlus 7 Pro官方CAM++完成FuFu三段登记与新录音匹配；用户报告unknown，样本来源未核实，不报准确率。USB/AC保持唤醒按用户要求设3（原0）。[手机公开文件实验](crabot-docs/superpowers/research/voice-scenario-b-poc/README.md)完成6组FP32/INT8分段比对；约12.5秒FP32分段+匹配单次约1.4秒，边界重叠与INT8错归仍存在，保守门控会拒识，B可用率未证明。
