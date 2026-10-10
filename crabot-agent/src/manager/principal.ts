@@ -4,6 +4,7 @@
  * 群聊不绑定最近发言者，权限快照不持久化。
  */
 
+import type { MemoryAccessContext } from 'crabot-shared'
 import type { Friend, MemoryPermissions, ResolvedPermissions, RuntimeSceneProfile } from '../types.js'
 import type { ManagerKey } from './types.js'
 import { PrincipalBindingStore } from './principal-binding-store.js'
@@ -141,6 +142,7 @@ export interface PrincipalResolverDeps {
     sessionId: string
     sessionType: 'private' | 'group'
     friendId?: string
+    accessContext: MemoryAccessContext
   }) => Promise<RuntimeSceneProfile | null>
   /** crab 在该 channel 的 @handle(入站事件已缓存,同步读)。 */
   readonly crabSelfHandle: (channelId: string) => string | undefined
@@ -212,10 +214,16 @@ export class ManagerPrincipalStore {
 
     let sceneProfile: RuntimeSceneProfile | null = null
     try {
-      sceneProfile = await this.deps.sceneProfile({
+      if (permissions?.tool_access.memory) sceneProfile = await this.deps.sceneProfile({
         channelId,
         sessionId,
         sessionType: principal.sessionType,
+        accessContext: {
+          actor_kind: 'conversation', memory_enabled: true,
+          ...(principal.sessionType === 'group'
+            ? { scene: { type: 'group_session', channel_id: channelId, session_id: sessionId } as const }
+            : principal.friend ? { scene: { type: 'friend', friend_id: principal.friend.id } as const } : {}),
+        },
         ...(principal.friend ? { friendId: principal.friend.id } : {}),
       })
     } catch (err) {

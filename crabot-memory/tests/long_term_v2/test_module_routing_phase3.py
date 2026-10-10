@@ -13,7 +13,7 @@ def _module(tmp_path) -> MemoryModule:
 @pytest.mark.asyncio
 async def test_dispatch_quick_capture(tmp_path):
     mod = _module(tmp_path)
-    out = await mod._dispatch("quick_capture", {
+    out = await mod._dispatch("quick_capture", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "visibility": "internal", "scopes": [],
         "type": "fact", "brief": "x", "content": "y",
         "source_ref": {"type": "manual"}, "entities": [], "tags": [],
         "importance_factors": {"proximity": 0.5, "surprisal": 0.5,
@@ -25,19 +25,19 @@ async def test_dispatch_quick_capture(tmp_path):
 @pytest.mark.asyncio
 async def test_dispatch_run_maintenance(tmp_path):
     mod = _module(tmp_path)
-    out = await mod._dispatch("run_maintenance", {"scope": "all"})
+    out = await mod._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"})
     assert "report" in out
 
 
 @pytest.mark.asyncio
 async def test_dispatch_evolution(tmp_path):
     mod = _module(tmp_path)
-    out = await mod._dispatch("get_evolution_mode", {})
+    out = await mod._dispatch("get_evolution_mode", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, })
     assert out["mode"] == "balanced"
 
 
 @pytest.mark.asyncio
 async def test_dispatch_snapshot(tmp_path):
     mod = _module(tmp_path)
-    out = await mod._dispatch("get_confirmed_snapshot", {})
+    out = await mod._dispatch("get_confirmed_snapshot", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, })
     assert "snapshot_id" in out

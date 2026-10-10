@@ -3,8 +3,10 @@ import { ContextAssembler } from '../../src/orchestration/context-assembler.js'
 import type { OrchestrationConfig, MemoryPermissions } from '../../src/types.js'
 
 function createMockRpcClient() {
+  const call = vi.fn()
   return {
-    call: vi.fn(),
+    call,
+    callSensitive: call,
     resolve: vi.fn(),
     publishEvent: vi.fn().mockResolvedValue(0),
     registerModuleDefinition: vi.fn().mockResolvedValue({}),
@@ -396,6 +398,7 @@ describe('ContextAssembler', () => {
       if (method === 'get_scene_profile') {
         expect(args).toEqual({
           scene: { type: 'group_session', channel_id: 'admin-web', session_id: 'session-1' },
+          access_context: { actor_kind: 'conversation', memory_enabled: true, scene: { type: 'group_session', channel_id: 'admin-web', session_id: 'session-1' } },
         })
         return Promise.resolve({ profile: groupProfile })
       }
@@ -453,6 +456,7 @@ describe('ContextAssembler', () => {
       if (method === 'get_scene_profile') {
         expect(args).toEqual({
           scene: { type: 'friend', friend_id: 'friend-1' },
+          access_context: { actor_kind: 'conversation', memory_enabled: true, scene: { type: 'friend', friend_id: 'friend-1' } },
         })
         return Promise.resolve({ profile: friendProfile })
       }

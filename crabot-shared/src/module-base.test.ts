@@ -11,8 +11,10 @@ import {
   type SensitiveRpcMethod,
   type TraceStoreInterface,
 } from './module-base.js'
+import { MEMORY_DATA_RPC_METHODS } from './memory-access.js'
 
 const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
+  'verify_memory_access',
   'get_agent_config',
   'resolve_worker_connection',
   'verify_core_agent_runtime',
@@ -30,6 +32,17 @@ const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
   'verify_worker_implementation',
   'cancel_worker_implementation_operation',
 ]
+
+test('Memory data closure requires sensitive transport only with host context', async () => {
+  const client = new RpcClient()
+  for (const method of MEMORY_DATA_RPC_METHODS) {
+    const params = { access_context: { actor_kind: 'conversation', memory_enabled: true } }
+    assert.equal(isSensitiveRpcCall(method, params), true)
+    assert.equal(isSensitiveRpcCall(method, {}), false)
+    await assert.rejects(client.call(1, method, params, 'test'),
+      (error: unknown) => (error as { code?: string }).code === 'SENSITIVE_RPC_REQUIRES_NO_TRACE_TRANSPORT')
+  }
+})
 
 test('authentication errors preserve RPC codes and map to HTTP 401/403', () => {
   for (const ErrorType of [RpcError, RpcCallError]) {

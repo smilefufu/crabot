@@ -9,12 +9,14 @@ class AgenticTools:
         self.index = index
 
     def grep_memory(
-        self, pattern: str, type_: Optional[str] = None, limit: int = 20,
+        self, pattern: str, type_: Optional[str] = None, limit: int = 20, reader=None,
     ) -> List[Dict[str, Any]]:
         """Substring scan over `body` and `brief`. Cheap; no regex by design."""
         needle = pattern.lower()
         out: List[Dict[str, Any]] = []
         for mid, status, t, brief, body, ev, ing, path in self.index.iter_all_with_meta():
+            if reader is not None and not reader.read(mid):
+                continue
             if type_ and t != type_:
                 continue
             if needle in (body or "").lower() or needle in (brief or "").lower():
@@ -24,12 +26,14 @@ class AgenticTools:
         return out
 
     def list_recent(
-        self, window_days: int, type_: Optional[str] = None, limit: int = 20,
+        self, window_days: int, type_: Optional[str] = None, limit: int = 20, reader=None,
     ) -> List[Dict[str, Any]]:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)) \
             .isoformat().replace("+00:00", "Z")
         rows = []
         for mid, status, t, brief, body, ev, ing, path in self.index.iter_all_with_meta():
+            if reader is not None and not reader.read(mid):
+                continue
             if type_ and t != type_:
                 continue
             if ev >= cutoff:
@@ -37,19 +41,21 @@ class AgenticTools:
         rows.sort(key=lambda x: x[0], reverse=True)
         return [r for _, r in rows[:limit]]
 
-    def find_by_entity_brief(self, entity_id: str) -> List[Dict[str, Any]]:
+    def find_by_entity_brief(self, entity_id: str, reader=None) -> List[Dict[str, Any]]:
         ids = self.index.find_by_entity(entity_id)
-        return self._briefs_for(ids)
+        return self._briefs_for(ids, reader=reader)
 
-    def find_by_tag_brief(self, tag: str) -> List[Dict[str, Any]]:
+    def find_by_tag_brief(self, tag: str, reader=None) -> List[Dict[str, Any]]:
         ids = self.index.find_by_tag(tag)
-        return self._briefs_for(ids)
+        return self._briefs_for(ids, reader=reader)
 
-    def get_cases_about(self, scenario: str) -> List[Dict[str, Any]]:
+    def get_cases_about(self, scenario: str, reader=None) -> List[Dict[str, Any]]:
         """Substring search lesson cases (single-occurrence lessons) over brief and body."""
         needle = scenario.lower()
         out = []
         for mid, status, t, brief, body, ev, ing, path in self.index.iter_all_with_meta():
+            if reader is not None and not reader.read(mid):
+                continue
             if t != "lesson":
                 continue
             entry = self.store.read(status, t, mid)
@@ -59,9 +65,11 @@ class AgenticTools:
                 out.append({"id": mid, "type": t, "status": status, "brief": brief})
         return out
 
-    def _briefs_for(self, ids: List[str]) -> List[Dict[str, Any]]:
+    def _briefs_for(self, ids: List[str], reader=None) -> List[Dict[str, Any]]:
         out = []
         for mid in ids:
+            if reader is not None and not reader.read(mid):
+                continue
             loc = self.index.locate(mid)
             if not loc:
                 continue

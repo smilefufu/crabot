@@ -2,6 +2,8 @@
 短期记忆核心逻辑
 """
 import logging
+import json
+
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -68,7 +70,7 @@ class ShortTermMemory:
         results = await self.short_term_store.search_short_term(
             query=params.query,
             limit=params.limit,
-            min_visibility=params.min_visibility or "public",
+            min_visibility=params.min_visibility or "internal",
             accessible_scopes=params.accessible_scopes,
             filter_refs=f.refs if f else None,
             time_range=params.time_range.model_dump() if params.time_range else None,
@@ -96,6 +98,12 @@ class ShortTermMemory:
 
             for i in range(0, len(old_entries), window_size):
                 batch = old_entries[i:i + window_size]
+                for row in batch:
+                    for field in ["persons", "entities", "scopes"]:
+                        raw = row.get(field) or []
+                        row[field] = json.loads(raw) if isinstance(raw, str) else raw
+                        if not isinstance(row[field], list) or any(not isinstance(v, str) for v in row[field]):
+                            raise ValueError("Invalid compression source metadata")
                 batch_data = [
                     {"content": r["content"], "event_time": r["event_time"],
                      "persons": list(r.get("persons") or []),
@@ -111,19 +119,21 @@ class ShortTermMemory:
                     all_scopes.update(r.get("scopes") or [])
 
                 old_ids = [r["id"] for r in batch]
-                await self.short_term_store.delete_short_term_by_ids(old_ids)
-
+                entries = []
                 for fact in compressed_facts:
+                    if not isinstance(fact, str) or not fact.strip():
+                        raise ValueError("Invalid compressed fact")
                     entry = ShortTermMemoryEntry(
                         content=fact,
                         event_time=batch[0]["event_time"],
                         source=MemorySource(type="system"),
                         compressed=True,
                         visibility=vis,
-                        scopes=list(all_scopes),
+                        scopes=sorted(all_scopes),
                     )
-                    await self.short_term_store.add_short_term(entry)
-                    compressed_count += 1
+                    entries.append(entry)
+                await self.short_term_store.replace_compressed(old_ids, entries)
+                compressed_count += len(entries)
 
         return {"compressed_count": compressed_count}
 

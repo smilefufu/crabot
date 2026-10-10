@@ -115,8 +115,8 @@ async function waitUntil(cond: () => Promise<boolean> | boolean, timeoutMs = 400
 
 function makeMemoryServer() {
   return createCrabMemoryServer(
-    { rpcClient: { call: vi.fn() } as never, moduleId: 'manager-events-test', getMemoryPort: async () => 19100 },
-    { visibility: 'internal', scopes: [], isMasterPrivate: false },
+    { rpcClient: { callSensitive: vi.fn(), call: vi.fn() } as never, moduleId: 'manager-events-test', getMemoryPort: async () => 19100 },
+    { accessContext: { actor_kind: 'conversation', memory_enabled: true }, visibility: 'internal', scopes: [], isMasterPrivate: false },
   )
 }
 

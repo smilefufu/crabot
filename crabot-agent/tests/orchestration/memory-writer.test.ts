@@ -42,22 +42,22 @@ describe('MemoryWriter phase 3 helpers', () => {
 
   it('runMaintenance posts to memory run_maintenance RPC with scope=all by default', async () => {
     const rpcCall = vi.fn().mockResolvedValue({ data: { report: {} } })
-    const writer = new MemoryWriter({ call: rpcCall } as any, 'agent-1', () => 18000)
+    const writer = new MemoryWriter({ callSensitive: rpcCall } as any, 'agent-1', () => 18000)
     await writer.runMaintenance()
-    expect(rpcCall).toHaveBeenCalledWith(18000, 'run_maintenance', { scope: 'all' }, 'agent-1')
+    expect(rpcCall).toHaveBeenCalledWith(18000, 'run_maintenance', { scope: 'all', access_context: { actor_kind: 'mechanical', memory_enabled: true } }, 'agent-1', expect.any(Object))
   })
 
   it('runMaintenance accepts custom scope', async () => {
     const rpcCall = vi.fn().mockResolvedValue({ data: { report: {} } })
-    const writer = new MemoryWriter({ call: rpcCall } as any, 'agent-1', () => 18000)
+    const writer = new MemoryWriter({ callSensitive: rpcCall } as any, 'agent-1', () => 18000)
     await writer.runMaintenance('observation_check')
-    expect(rpcCall).toHaveBeenCalledWith(18000, 'run_maintenance', { scope: 'observation_check' }, 'agent-1')
+    expect(rpcCall).toHaveBeenCalledWith(18000, 'run_maintenance', { scope: 'observation_check', access_context: { actor_kind: 'mechanical', memory_enabled: true } }, 'agent-1', expect.any(Object))
   })
 
   it('runMaintenance logs and rethrows RPC failure', async () => {
     const error = new Error('maintenance RPC failed')
     const rpcCall = vi.fn().mockRejectedValue(error)
-    const writer = new MemoryWriter({ call: rpcCall } as any, 'agent-1', () => 18000)
+    const writer = new MemoryWriter({ callSensitive: rpcCall } as any, 'agent-1', () => 18000)
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     await expect(writer.runMaintenance()).rejects.toBe(error)

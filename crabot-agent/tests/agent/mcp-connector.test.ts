@@ -129,7 +129,7 @@ describe('McpConnector.reconnect', () => {
       candidatePermissions: { tool_access: { mcp_skill: true }, cli_access: {} } as ResolvedPermissions,
       harness: {} as never, workerContext: () => ({ managerKey: key, reportTo: { channel_id: 'test', session_id: 'mcp-hot-reload' } }),
       messagingDeps: { rpcClient: { call: vi.fn() } as never, moduleId: 'test', getAdminPort: async () => 1, resolveChannelPort: async () => 2 },
-      memoryServer: createCrabMemoryServer({ rpcClient: { call: vi.fn() } as never, moduleId: 'test', getMemoryPort: async () => 3 }, { visibility: 'internal', scopes: [] }),
+      memoryServer: createCrabMemoryServer({ rpcClient: { callSensitive: vi.fn(), call: vi.fn() } as never, moduleId: 'test', getMemoryPort: async () => 3 }, { accessContext: { actor_kind: 'conversation', memory_enabled: true }, visibility: 'internal', scopes: [] }),
       callAdmin: vi.fn() as never, isSystemThread: false,
       workboard: { store: {} as never, managerKey: key },
       projectDocs: { ledger: {} as never, readWorkerContext: async () => undefined, managerKey: key },

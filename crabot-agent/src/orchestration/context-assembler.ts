@@ -1,3 +1,5 @@
+import type { MemoryAccessContext } from 'crabot-shared'
+import { ConfigLoader } from '../core/config-loader.js'
 /**
  * Context Assembler - 上下文组装器
  *
@@ -729,6 +731,7 @@ export class ContextAssembler {
     sessionId: SessionId,
     sessionType: 'private' | 'group',
     friendId: string | undefined,
+    accessContext?: MemoryAccessContext,
   ): Promise<RuntimeSceneProfile | null> {
     try {
       const memoryPort = await this.getMemoryPort()
@@ -741,10 +744,12 @@ export class ContextAssembler {
       }
       if (!scene) return null
 
-      const resp = await this.rpcClient.call<
-        { scene: SceneIdentity },
+      const context = accessContext ?? { actor_kind: 'conversation', memory_enabled: true, scene }
+      if (!context.memory_enabled) return null
+      const resp = await this.rpcClient.callSensitive<
+        { scene: SceneIdentity; access_context: MemoryAccessContext },
         { profile: SceneProfile | null }
-      >(memoryPort, 'get_scene_profile', { scene }, this.moduleId)
+      >(memoryPort, 'get_scene_profile', { scene, access_context: context }, this.moduleId, { authorizationBearer: ConfigLoader.getRuntimeBearer() })
 
       return buildRuntimeSceneProfile(resp?.profile ?? null)
     } catch (err) {

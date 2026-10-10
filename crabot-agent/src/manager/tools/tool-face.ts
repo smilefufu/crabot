@@ -11,6 +11,7 @@ import { buildDailyReflectionTools, type DailyReflection } from '../daily-reflec
 import { createExecutionCapabilitiesTool, type DescribeExecutionTools } from './execution-capabilities.js'
 import { createGuidanceTool } from '../../guidance/catalog.js'
 import { z } from 'zod/v4'
+import { RpcError } from 'crabot-shared'
 import { defineTool } from '../../engine/index.js'
 import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
 import type { McpServer } from '../../mcp/mcp-helpers.js'
@@ -353,7 +354,16 @@ function buildManagerMemoryFace(memoryServer: McpServer): ToolDefinition[] {
       `buildManagerToolFace: crab-memory 工具面与协议不一致 (missing=${missing.join(',') || 'none'}; unexpected=${unexpected.join(',') || 'none'})`,
     )
   }
-  return MANAGER_MEMORY_TOOL_NAMES.map((name) => byName.get(name)!)
+  return MANAGER_MEMORY_TOOL_NAMES.map((name) => {
+    const tool = byName.get(name)!
+    return { ...tool, async call(input, context) {
+      const args = input as Record<string, unknown>
+      if (['access_context', 'actor_kind', 'memory_enabled', 'visibility', 'scopes'].some(field => Object.prototype.hasOwnProperty.call(args, field))) {
+        throw new RpcError('INVALID_PARAMS', 'Memory identity and write markers are host-only')
+      }
+      return tool.call(input, context)
+    } }
+  })
 }
 
 /** 历史 inbox 仅经 Admin 预览后人工迁移，daily 不能靠模型自律守住这条边界。 */

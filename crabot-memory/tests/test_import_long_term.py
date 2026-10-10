@@ -51,7 +51,7 @@ async def memory_module():
 
 async def _seed_and_get_markdown(memory_module):
     """用 write_long_term 种一条记忆，返回 (id, markdown)。"""
-    res = await memory_module._dispatch("write_long_term", {
+    res = await memory_module._dispatch("write_long_term", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "visibility": "internal", "scopes": [],
         "type": "fact",
         "brief": "测试事实",
         "content": "用于导入测试的长期记忆内容。",
@@ -73,7 +73,7 @@ async def _seed_and_get_markdown(memory_module):
 async def test_import_long_term_imported(memory_module):
     seed_id, md = await _seed_and_get_markdown(memory_module)
     md_new = md.replace(seed_id, "mem-l-imported-x")  # 换成新 id
-    res = await memory_module._dispatch("import_long_term", {
+    res = await memory_module._dispatch("import_long_term", {"access_context": {"actor_kind": "admin", "memory_enabled": True},
         "entries": [{"status": "confirmed", "markdown": md_new}], "mode": "merge",
     })
     assert res["imported"] == 1
@@ -86,7 +86,7 @@ async def test_import_long_term_imported(memory_module):
 async def test_import_long_term_merge_skips_existing(memory_module):
     seed_id, md = await _seed_and_get_markdown(memory_module)
     # seed_id 已存在（inbox），merge 模式应 skip
-    res = await memory_module._dispatch("import_long_term", {
+    res = await memory_module._dispatch("import_long_term", {"access_context": {"actor_kind": "admin", "memory_enabled": True},
         "entries": [{"status": "confirmed", "markdown": md}], "mode": "merge",
     })
     assert res["skipped"] == 1
@@ -96,7 +96,7 @@ async def test_import_long_term_merge_skips_existing(memory_module):
 @pytest.mark.asyncio
 async def test_import_long_term_replace_overwrites(memory_module):
     seed_id, md = await _seed_and_get_markdown(memory_module)
-    res = await memory_module._dispatch("import_long_term", {
+    res = await memory_module._dispatch("import_long_term", {"access_context": {"actor_kind": "admin", "memory_enabled": True},
         "entries": [{"status": "confirmed", "markdown": md}], "mode": "replace",
     })
     assert res["overwritten"] == 1

@@ -49,6 +49,8 @@ CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_id);
 """
 
 _PHASE3_ADDITIVE_COLUMNS = [
+    ("visibility", "TEXT NOT NULL DEFAULT 'internal'"),
+    ("scopes", "TEXT NOT NULL DEFAULT '[]'"),
     ("inbox_entered_at", "TEXT"),
     ("trashed_at", "TEXT"),
     ("observation_started_at", "TEXT"),
@@ -124,14 +126,15 @@ class SqliteIndex:
             INSERT OR REPLACE INTO memories
               (id, status, type, brief, body, event_time, ingestion_time, inbox_entered_at, trashed_at, path,
                observation_started_at, observation_window_days, observation_outcome,
-               use_count, last_validated_at, stale_check_count, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               use_count, last_validated_at, stale_check_count, last_seen_at, visibility, scopes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 fm.id, status, fm.type, fm.brief, entry.body,
                 fm.event_time, fm.ingestion_time, fm.inbox_entered_at, fm.trashed_at, path,
                 observation_started_at, observation_window_days, observation_outcome,
                 use_count, last_validated_at, stale_check_count, last_seen_at,
+                fm.visibility, json.dumps(fm.scopes, ensure_ascii=False),
             ),
         )
         for ent in fm.entities:
@@ -255,7 +258,7 @@ class SqliteIndex:
         return row if row else None
 
     def find_by_time_range(
-        self, field: str, start: str, end: str, limit: int = 50, *, status: str | None = None,
+        self, field: str, start: str, end: str, limit: int = 50, *, status: str | None = None, allowed_ids: set[str] | None = None,
     ) -> list[str]:
         """Return memory_ids whose `event_time` or `ingestion_time` ∈ [start, end).
         """
@@ -267,6 +270,9 @@ class SqliteIndex:
             f"iso_to_epoch_us({field}) < iso_to_epoch_us(?)",
         ]
         params: list = [start, end]
+        if allowed_ids is not None:
+            clauses.append("id IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(sorted(allowed_ids)))
         if status is not None:
             clauses.append("status = ?")
             params.append(status)
@@ -517,6 +523,7 @@ class SqliteIndex:
         limit: int = 100,
         offset: int = 0,
         sort: str = "ingestion_time_desc",
+        allowed_ids: set[str] | None = None,
     ) -> list[dict]:
         """按 type/status/tags/ingestion_time 过滤，按 sort 排序，分页返回。
 
@@ -528,6 +535,9 @@ class SqliteIndex:
             raise ValueError("reviewable_only must be boolean and requires status=inbox when true")
         where: list[str] = []
         params: list = []
+        if allowed_ids is not None:
+            where.append("id IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(sorted(allowed_ids)))
         if reviewable_only:
             where.append("inbox_entered_at IS NOT NULL AND inbox_entered_at != ''")
         if type_:
@@ -574,11 +584,15 @@ class SqliteIndex:
         type_: str | None = None,
         status: str | None = "confirmed",
         limit: int = 50,
+        allowed_ids: set[str] | None = None,
     ) -> list[dict]:
         """LIKE search on brief + body; returns rows with id/type/status/brief/body/ingestion_time."""
         clauses = ["(brief LIKE ? OR body LIKE ?)"]
         pattern = f"%{query}%"
         args: list = [pattern, pattern]
+        if allowed_ids is not None:
+            clauses.append("id IN (SELECT value FROM json_each(?))")
+            args.append(json.dumps(sorted(allowed_ids)))
         if type_:
             clauses.append("type = ?")
             args.append(type_)

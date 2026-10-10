@@ -23,6 +23,7 @@ from .utils.llm_client import LLMClient
 from .long_term_v2.store import MemoryStore as LongTermV2Store
 from .long_term_v2.sqlite_index import SqliteIndex as LongTermV2Index
 from .long_term_v2.rpc import LongTermV2Rpc, run_maintenance_sync
+from .access import MEMORY_DATA_METHODS, MemoryAccessError, authorize_method, MemoryReader
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -165,13 +166,29 @@ class MemoryModule:
         async def handle_request(method: str, request: Request):
             try:
                 body = await request.json()
+                if method in MEMORY_DATA_METHODS:
+                    context = authorize_method(method, body.get("params", {}))
+                    authorization = request.headers.get("Authorization", "")
+                    if not authorization.startswith("Bearer ") or not authorization[7:].strip():
+                        raise MemoryAccessError("UNAUTHORIZED", "Missing Memory credential")
+                    await self._verify_caller(context, authorization[7:])
                 result = await self._dispatch(method, body.get("params", {}))
+                if isinstance(result, dict) and result.get("error") in {"not found", "version not found"}:
+                    raise MemoryAccessError("NOT_FOUND", "Memory not found")
                 return JSONResponse({
                     "id": body.get("id"),
                     "success": True,
                     "data": result,
                     "timestamp": datetime.utcnow().isoformat() + "Z",
                 })
+            except MemoryAccessError as e:
+                status = {"UNAUTHORIZED": 401, "FORBIDDEN": 403, "NOT_FOUND": 404, "INVALID_PARAMS": 400, "CONFLICT": 409, "SERVICE_UNAVAILABLE": 503}.get(e.code, 400)
+                return JSONResponse({
+                    "id": body.get("id") if "body" in locals() else None,
+                    "success": False,
+                    "error": {"code": e.code, "message": str(e), "details": {"retryable": e.retryable}},
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }, status_code=status)
             except MemoryServiceUnavailableError as e:
                 return JSONResponse({
                     "id": body.get("id") if "body" in locals() else None,
@@ -194,6 +211,30 @@ class MemoryModule:
                     },
                     "timestamp": datetime.utcnow().isoformat() + "Z",
                 }, status_code=500)
+
+    async def _verify_caller(self, context, bearer: str) -> None:
+        import httpx
+        if not self.config.admin_endpoint:
+            raise MemoryAccessError("SERVICE_UNAVAILABLE", "Memory verifier unavailable", retryable=True)
+        payload = {
+            "id": "verify-memory-access", "source": self.config.module_id, "method": "verify_memory_access",
+            "params": {"caller_kind": "admin_web" if context.actor_kind == "admin" else "core_agent"},
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=10.0) as client:
+                response = await client.post(f"{self.config.admin_endpoint}/verify_memory_access", json=payload, headers={"Authorization": f"Bearer {bearer}"})
+                result = response.json()
+                if not isinstance(result, dict) or not isinstance(result.get("data", {}), dict) or not isinstance(result.get("error", {}), dict):
+                    raise ValueError("Invalid verifier response")
+        except Exception:
+            raise MemoryAccessError("SERVICE_UNAVAILABLE", "Memory verifier unavailable", retryable=True) from None
+        if response.is_success and result.get("success") is True and result.get("data", {}).get("verified") is True:
+            return
+        code = result.get("error", {}).get("code")
+        if code in {"UNAUTHORIZED", "FORBIDDEN"}:
+            raise MemoryAccessError(code, "Invalid Memory credential")
+        raise MemoryAccessError("SERVICE_UNAVAILABLE", "Memory verifier unavailable", retryable=True)
 
     async def _dispatch(self, method: str, params: Dict[str, Any]) -> Any:
         """分发请求到对应的处理方法"""
@@ -258,6 +299,9 @@ class MemoryModule:
         handler = handlers.get(method)
         if not handler:
             raise ValueError(f"Method not found: {method}")
+
+        if method in MEMORY_DATA_METHODS:
+            authorize_method(method, params)
 
         if method in _MAINTENANCE_ALLOW_LIST or method == "run_maintenance":
             return await handler(params)
@@ -375,7 +419,10 @@ class MemoryModule:
 
     async def _search_short_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """检索短期记忆"""
-        search_params = SearchShortTermParams(**params)
+        reader = MemoryReader(self._lt_v2_store, self._lt_v2_index, params)
+        search_params = SearchShortTermParams(**{
+            **params, "min_visibility": params.get("min_visibility") or ("private" if reader.private else "internal"),
+        })
         results = await self.short_term.search(search_params)
         return {"results": [m.model_dump() for m in results]}
 
@@ -407,12 +454,12 @@ class MemoryModule:
 
     async def _batch_write_short_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """批量写入短期记忆"""
-        batch_params = BatchWriteShortTermParams(**params)
+        batch_params = BatchWriteShortTermParams(**{**params, "entries": [{**entry, "access_context": params["access_context"]} for entry in params["entries"]]})
         memories = []
         failures = []
         for i, entry_params in enumerate(batch_params.entries):
             try:
-                result = await self._write_short_term(entry_params.model_dump())
+                result = await self._write_short_term({**entry_params.model_dump(), "access_context": params["access_context"]})
                 memories.append(result["memory"])
             except Exception as e:
                 failures.append({"index": i, "error": {"code": "MEMORY_WRITE_FAILED", "message": str(e)}})
@@ -535,6 +582,9 @@ class MemoryModule:
         payload.pop("abstract", None)
         payload.pop("overview", None)
         profile = SceneProfile(**payload)
+        existing = self.scene_profile_store.get(profile.scene)
+        if not self._profile_visible(profile, params) or (existing and not self._profile_visible(existing, params)):
+            raise MemoryAccessError("NOT_FOUND", "Scene profile source not found")
         out = self.scene_profile_store.upsert(profile)
         return {"profile": out.model_dump()}
 
@@ -543,7 +593,15 @@ class MemoryModule:
         scene = self._parse_scene(params["scene"])
         only_public = bool(params.get("only_public", False))
         out = self.scene_profile_store.get(scene, only_public=only_public)
+        if out and not self._profile_visible(out, params):
+            out = None
         return {"profile": out.model_dump() if out else None}
+
+    def _profile_visible(self, profile: SceneProfile, params: Dict[str, Any]) -> bool:
+        reader = MemoryReader(self._lt_v2_store, self._lt_v2_index, params)
+        if reader.private:
+            return True
+        return all(reader.read(mid) is not None for mid in profile.source_memory_ids or [])
 
     async def _list_scene_profiles(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """列出场景画像"""
@@ -563,6 +621,9 @@ class MemoryModule:
     async def _delete_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """删除场景画像"""
         scene = self._parse_scene(params["scene"])
+        existing = self.scene_profile_store.get(scene)
+        if existing and not self._profile_visible(existing, params):
+            raise MemoryAccessError("NOT_FOUND", "Scene profile not found")
         deleted = self.scene_profile_store.delete(scene)
         return {"deleted": deleted}
 

@@ -75,7 +75,7 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
       module_id: 'memory-default',
       module_type: 'memory',
       version: '0.1.0',
-      protocol_version: '0.1.0',
+      protocol_version: '0.4.0',
       entry: 'uv run --frozen python -m src.main',
       cwd: o.memoryDir,
       data_dir: path.join(o.dataDir, 'memory'),

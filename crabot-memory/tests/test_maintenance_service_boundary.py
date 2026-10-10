@@ -7,6 +7,7 @@ import threading
 
 import pytest
 import httpx
+from unittest.mock import AsyncMock
 
 import src.module as module_impl
 from src.config import load_config
@@ -62,7 +63,7 @@ async def test_blocked_maintenance_keeps_allow_list_responsive(memory_module, mo
         return {"report": {"completed_at": "2026-08-04T00:00:00Z"}}
 
     monkeypatch.setattr(memory_module, "_run_maintenance_worker", blocking_worker)
-    maintenance = asyncio.create_task(memory_module._dispatch("run_maintenance", {"scope": "all"}))
+    maintenance = asyncio.create_task(memory_module._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"}))
     await _wait_for_thread(started)
 
     heartbeat = asyncio.create_task(asyncio.sleep(0, result="alive"))
@@ -78,19 +79,19 @@ async def test_blocked_maintenance_keeps_allow_list_responsive(memory_module, mo
     write = await asyncio.wait_for(
         memory_module._dispatch(
             "write_short_term",
-            {"content": "maintenance-safe", "source": {"type": "system"}},
+            {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "visibility": "internal", "scopes": [], "content": "maintenance-safe", "source": {"type": "system"}},
         ),
         timeout=0.5,
     )
     assert write["memory"]["content"] == "maintenance-safe"
     assert (await asyncio.wait_for(
-        memory_module._dispatch("search_short_term", {"query": "maintenance-safe", "limit": 5}),
+        memory_module._dispatch("search_short_term", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "query": "maintenance-safe", "limit": 5}),
         timeout=0.5,
     ))["results"]
     assert (await asyncio.wait_for(
         memory_module._dispatch(
             "batch_write_short_term",
-            {"entries": [{"content": "batch-safe", "source": {"type": "system"}}]},
+            {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "entries": [{"visibility": "internal", "scopes": [], "content": "batch-safe", "source": {"type": "system"}}]},
         ),
         timeout=0.5,
     ))["success_count"] == 1
@@ -124,11 +125,11 @@ async def test_maintenance_gate_rejects_every_non_allow_list_rpc(memory_module, 
         return {"report": {"completed_at": "2026-08-04T00:00:00Z"}}
 
     monkeypatch.setattr(memory_module, "_run_maintenance_worker", blocking_worker)
-    maintenance = asyncio.create_task(memory_module._dispatch("run_maintenance", {"scope": "all"}))
+    maintenance = asyncio.create_task(memory_module._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"}))
     await _wait_for_thread(started)
 
     with pytest.raises(MaintenanceInProgressError) as exc:
-        await asyncio.wait_for(memory_module._dispatch(method, {}), timeout=0.5)
+        await asyncio.wait_for(memory_module._dispatch(method, {"access_context": {"actor_kind": "admin", "memory_enabled": True}, }), timeout=0.5)
     assert exc.value.code == "MEMORY_MAINTENANCE_IN_PROGRESS"
     assert exc.value.retryable is True
 
@@ -147,7 +148,7 @@ async def test_cancelling_waiter_does_not_release_gate(memory_module, monkeypatc
         return {"report": {"completed_at": "2026-08-04T00:00:00Z"}}
 
     monkeypatch.setattr(memory_module, "_run_maintenance_worker", blocking_worker)
-    waiter = asyncio.create_task(memory_module._dispatch("run_maintenance", {"scope": "all"}))
+    waiter = asyncio.create_task(memory_module._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"}))
     await _wait_for_thread(started)
 
     waiter.cancel()
@@ -156,7 +157,7 @@ async def test_cancelling_waiter_does_not_release_gate(memory_module, monkeypatc
 
     assert memory_module._maintenance_running is True
     with pytest.raises(MaintenanceInProgressError):
-        await memory_module._dispatch("run_maintenance", {"scope": "all"})
+        await memory_module._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"})
 
     release.set()
     assert memory_module._maintenance_task is not None
@@ -169,7 +170,7 @@ async def test_cancelling_waiter_does_not_release_gate(memory_module, monkeypatc
         "_run_maintenance_worker",
         lambda _params: {"report": {"completed_at": "2026-08-04T00:00:01Z"}},
     )
-    result = await memory_module._dispatch("run_maintenance", {"scope": "all"})
+    result = await memory_module._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"})
     assert result["report"]["completed_at"] == "2026-08-04T00:00:01Z"
 
 
@@ -207,9 +208,9 @@ async def test_worker_owns_and_closes_its_store_and_index(memory_module, monkeyp
 
     if should_fail:
         with pytest.raises(RuntimeError, match="maintenance failed"):
-            await memory_module._dispatch("run_maintenance", {"scope": "all"})
+            await memory_module._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"})
     else:
-        await memory_module._dispatch("run_maintenance", {"scope": "all"})
+        await memory_module._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"})
 
     assert created["index"].closed is True
     assert memory_module._maintenance_running is False
@@ -235,15 +236,15 @@ async def test_pre_admitted_long_term_rpc_drains_before_worker_starts(memory_mod
     monkeypatch.setattr(memory_module._lt_v2_rpc, "search_long_term", slow_long_term)
     monkeypatch.setattr(memory_module, "_run_maintenance_worker", worker)
 
-    admitted = asyncio.create_task(memory_module._dispatch("search_long_term", {"query": "q"}))
+    admitted = asyncio.create_task(memory_module._dispatch("search_long_term", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "query": "q"}))
     await asyncio.wait_for(rpc_admitted.wait(), timeout=0.5)
-    maintenance = asyncio.create_task(memory_module._dispatch("run_maintenance", {"scope": "all"}))
+    maintenance = asyncio.create_task(memory_module._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"}))
     await asyncio.sleep(0.05)
 
     assert memory_module._maintenance_running is True
     assert worker_started.is_set() is False
     with pytest.raises(MaintenanceInProgressError):
-        await memory_module._dispatch("get_stats", {})
+        await memory_module._dispatch("get_stats", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, })
 
     release_rpc.set()
     await admitted
@@ -263,12 +264,12 @@ async def test_shutdown_rejects_new_maintenance_and_waits_current_worker(memory_
         return {"report": {"completed_at": "2026-08-04T00:00:00Z"}}
 
     monkeypatch.setattr(memory_module, "_run_maintenance_worker", worker)
-    maintenance = asyncio.create_task(memory_module._dispatch("run_maintenance", {"scope": "all"}))
+    maintenance = asyncio.create_task(memory_module._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"}))
     await _wait_for_thread(started)
     assert await memory_module._dispatch("shutdown", {}) == {}
 
     with pytest.raises(MemoryShuttingDownError):
-        await memory_module._dispatch("run_maintenance", {"scope": "all"})
+        await memory_module._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"})
 
     release.set()
     await maintenance
@@ -279,13 +280,15 @@ async def test_shutdown_rejects_new_maintenance_and_waits_current_worker(memory_
 
 @pytest.mark.asyncio
 async def test_http_maintenance_conflict_uses_standard_error_details(memory_module):
+    memory_module._verify_caller = AsyncMock()
     memory_module._maintenance_running = True
     transport = httpx.ASGITransport(app=memory_module.app)
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://memory") as client:
             response = await client.post(
                 "/get_stats",
-                json={"id": "req-1", "params": {}},
+                headers={"Authorization": "Bearer fixture"},
+                json={"id": "req-1", "params": {"access_context": {"actor_kind": "admin", "memory_enabled": True}}},
             )
     finally:
         memory_module._maintenance_running = False

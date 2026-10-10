@@ -143,11 +143,11 @@ function fakeLedger(workers: Record<string, LedgerWorker>): LedgerStore {
 function makeMemoryServer() {
   return createCrabMemoryServer(
     {
-      rpcClient: { call: vi.fn() } as never,
+      rpcClient: { callSensitive: vi.fn(), call: vi.fn() } as never,
       moduleId: 'manager-registry-test',
       getMemoryPort: async () => 19100,
     },
-    { visibility: 'internal', scopes: [], isMasterPrivate: false },
+    { accessContext: { actor_kind: 'conversation', memory_enabled: true }, visibility: 'internal', scopes: [], isMasterPrivate: false },
   )
 }
 
@@ -236,9 +236,9 @@ describe('ManagerRegistry', () => {
       if (args.id === 'wrong-id') throw new Error('memory entry not found')
       return { deleted: true }
     })
-    const memoryServer = createCrabMemoryServer({ rpcClient: { call: memoryCall } as never,
+    const memoryServer = createCrabMemoryServer({ rpcClient: { callSensitive: memoryCall, call: memoryCall } as never,
       moduleId: 'test-agent', getMemoryPort: async () => 19100 },
-    { visibility: 'internal', scopes: [], isMasterPrivate: false })
+    { accessContext: { actor_kind: 'conversation', memory_enabled: true }, visibility: 'internal', scopes: [], isMasterPrivate: false })
     const send = vi.fn().mockRejectedValueOnce(new Error('delivery unavailable'))
       .mockResolvedValue({ platform_message_id: 'delivered', sent_at: '2026-01-01T00:00:00.000Z' })
     const traces = new TraceStore(100, join(dataDir, 'traces'))

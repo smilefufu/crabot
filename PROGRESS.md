@@ -1,5 +1,13 @@
 # Crabot 项目进度
 
+### Memory 可见性一致性：已实现，待 PR review
+
+- 按用户确认的 [spec](crabot-docs/superpowers/specs/2026-10-10-memory-access-consistency-design.md) 修复 private/internal 粗隔离。internal 仍跨场景/项目共享；保留既有 memory_scopes 显式查询，压缩按 visibility 分组、scopes 取并集，未新增细粒度归属 ACL 或人工分类。
+- 长期标记落盘，候选截断/模型输入前过滤 private；ID、版本、引用、画像来源、更新和 Case→Rule 保持隔离。Agent 用当前 episode/新权限和 MasterAuthorization，memory=false 不加载旧画像；Admin 人类 JWT 和 exact core Agent bearer 经敏感传输及验证桥认证。
+- 短期压缩事务替换；v4→v5 有只读 dry-run、完整备份校验和失败恢复，保留历史版本、统计、task usage、水位和画像。旧长期缺标记兼容 internal，非法已有标记拒绝读取；未执行真实迁移、服务重启或 Ubuntu 部署。
+- PR review 指出的 OpenClaw Memory 导入漏接已补真实归档/handler 回归并修复：当前人类 JWT、Admin context 和写入标记走同一 sensitive 入口，拒绝 internal/agent-cli。保留既有按类别汇总错误与暂存归档清理；逐文件可见性核验/认证开销、未用旧入口和 eval fixture 升级另记 follow-up。
+- Memory 全量 430、Agent 定向 198、Admin 含 OpenClaw 串行 207、Shared 全量 112、Core 配置 7 项通过；相关构建通过。扩大 Agent 388 项通过，2 条 trace 旧断言在未修改 7ebf64ed 同样失败；Admin 全量有端口/超时与旧文档断言失败，Agent 全量未收敛，不计作通过。仅 review 本次 diff，按 code-simplifier 去掉新 SQL 过滤后的重复后过滤并重验。
+
 ### 权限系统闭环：已本机部署，真实行为待观察
 
 - 按 2026-10-10 已确认方案分开主体授权、角色职责和具体化身执行事实。有效入口只保留 memory/messaging/file_io/shell/mcp_skill/desktop；task/browser/remote_exec 退役，旧值兼容保存。
