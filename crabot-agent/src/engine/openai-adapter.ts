@@ -75,6 +75,14 @@ export function normalizeMessagesForOpenAI(messages: ReadonlyArray<EngineMessage
       for (const tr of msg.toolResults) {
         result.push({ role: 'tool', tool_call_id: tr.tool_use_id, content: capToolResultForLLM(tr.content) })
       }
+      // Chat Completions tool messages accept text only. Keep batch outputs contiguous,
+      // then attach their pixels as user content without changing the Engine history.
+      const images: OpenAIContentPart[] = msg.toolResults.flatMap((tr) => tr.images?.length ? [
+        { type: 'text' as const, text: `Images from tool result ${tr.tool_use_id}:` },
+        ...tr.images.map((image) => ({ type: 'image_url' as const,
+          image_url: { url: buildImageUrl({ type: 'base64', ...image }) } })),
+      ] : [])
+      if (images.length > 0) result.push({ role: 'user', content: images })
       continue
     }
 

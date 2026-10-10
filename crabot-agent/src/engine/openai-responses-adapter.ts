@@ -40,6 +40,14 @@ export function normalizeMessagesForResponses(messages: ReadonlyArray<EngineMess
           output: tr.is_error ? `Error: ${capped}` : capped,
         })
       }
+      // Retain the string function outputs used by both Responses backends;
+      // project tool images into a following multimodal input message.
+      const images = msg.toolResults.flatMap((tr) => tr.images?.length ? [
+        { type: 'input_text', text: `Images from tool result ${tr.tool_use_id}:` },
+        ...tr.images.map((image) => ({ type: 'input_image',
+          image_url: buildImageUrl({ type: 'base64', ...image }) })),
+      ] : [])
+      if (images.length > 0) result.push({ type: 'message', role: 'user', content: images })
       continue
     }
 

@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### 工具图片进入模型请求：已修复，system mode 待验证
+
+- system mode 事故摘录已证明 `Read` 返回图片 bytes，Engine 工具回包保留 `images`；OpenAI Chat Completions / Responses 的请求转换遗漏该字段。修复为同批工具回包全部写出后附加多模态图片输入，保留调用 ID、错误文本和原始 Engine 历史。
+- main 已包含另一项微信修复交付的 builtin child `image_paths` / `supports_vision`，本次保留该实现，只补两个 adapter。八项图片回归先复现六项失败；合入最新 main 后 12 个相关文件 313 项及 Agent 类型检查通过，完成本次 diff review。尚未部署到目标 Linux 实例或验证真实 GUI 识图效果。
+- 孤儿 tool-use 的 400 另行核验：此前导出仅为 Worker session 摘录，可见调用均配对，无法证明截图所指 Manager 历史。当前检查点恢复已有中断结果且不重执行工具；仍需目标部署版本、清理前备份及当前历史确认事故来源，未按截图建议静默删除工具调用或改写恢复语义。
+
 ### Memory 可见性一致性：已本机部署，真实行为待观察
 
 - 按用户确认的 [spec](crabot-docs/superpowers/specs/2026-10-10-memory-access-consistency-design.md) 修复 private/internal 粗隔离。internal 仍跨场景/项目共享；保留既有 memory_scopes 显式查询，压缩按 visibility 分组、scopes 取并集，未新增细粒度归属 ACL 或人工分类。
