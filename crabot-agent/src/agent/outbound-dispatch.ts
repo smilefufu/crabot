@@ -62,7 +62,7 @@ export type OnDispatchedHook = (entry: OutboundMessage, sendResult: OutboundSend
  * - resolveChannelPort: channelId → 端口
  * - getAdminPort: 解析 friend_id 时调 admin
  * - sandboxPathMappingsRef: file_path → host_path 转换；本地 unified agent 路径下 mappings 可能为空,
- *   此时 dispatchOutboundMessage 会按"无映射且 file_path 是绝对路径"直接放行（与 immediate-send 一致）。
+ *   绝对路径仅用于解析；真实读取前必须通过宿主 authorizeFile，不构成授权。
  * - onDispatched: invoked after a successful channel send; caller omits it when no bookkeeping is needed.
  *
  * sendResult 返回与 channel 'send_message' RPC 返回一致；调用方按需消费。
@@ -87,6 +87,7 @@ export interface OutboundDispatchDeps {
   readonly resolveChannelPort: (channelId: string) => Promise<number>
   readonly getAdminPort: () => Promise<number>
   readonly sandboxPathMappingsRef?: { current: PathMapping[] }
+  readonly authorizeFile?: (hostPath: string) => Promise<void>
   readonly onDispatched?: OnDispatchedHook
   readonly adminChatDelivery?: AdminChatDeliveryHooks
 }
@@ -105,11 +106,11 @@ function mapSandboxPathToHost(sandboxPath: string, mappings: ReadonlyArray<PathM
   const normalizedPath = path.normalize(sandboxPath)
   for (const mapping of mappings) {
     const normalizedSandbox = path.normalize(mapping.sandbox_path)
-    if (normalizedPath.startsWith(normalizedSandbox)) {
+    if (normalizedPath === normalizedSandbox || normalizedPath.startsWith(normalizedSandbox + path.sep)) {
       const relativePart = normalizedPath.slice(normalizedSandbox.length)
       const hostPath = path.join(mapping.host_path, relativePart)
       const normalizedHost = path.normalize(hostPath)
-      if (!normalizedHost.startsWith(path.normalize(mapping.host_path))) {
+      if (path.relative(path.normalize(mapping.host_path), normalizedHost).split(path.sep)[0] === '..') {
         throw new Error('Resolved path escapes allowed directory')
       }
       return normalizedHost
@@ -149,7 +150,7 @@ function buildMessageContent(
       // 远程 worker：沙盒路径 → 主机路径（mapSandboxPathToHost 内含二次验证防穿越）
       hostPath = mapSandboxPathToHost(entry.file_path, sandboxMappings)
     } else if (path.isAbsolute(entry.file_path)) {
-      // 本地 unified agent：绝对路径直接用
+      // 本地路径解析；调用者仍须通过 authorizeFile。
       hostPath = entry.file_path
     } else {
       throw new Error('相对路径需要路径映射配置，请使用绝对路径')
@@ -243,6 +244,10 @@ export async function dispatchOutboundMessage(
 
   const sandboxMappings = deps.sandboxPathMappingsRef?.current ?? []
   const messageContent = buildMessageContent(entry, sandboxMappings)
+  if (messageContent.file_path) {
+    if (!deps.authorizeFile) throw new Error('CAPABILITY_UNKNOWN: 本地文件投递缺少宿主文件授权')
+    await deps.authorizeFile(messageContent.file_path)
+  }
   const platformMentions = await resolvePlatformMentions(entry, deps)
 
   const hasFeatures =

@@ -1,3 +1,4 @@
+import { authorizeTool, roleAuthorization } from '../../permissions/tool-authorization.js'
 /**
  * BuiltinWorkerAdapter — worker 契约的 builtin 实现（P1：spawn + burst 状态机 + sendInput/resume）。
  *
@@ -64,6 +65,7 @@ import { latestModifiedMs } from '../meta-store.js'
 import { WorkerExitedError, ForkEstablishmentError } from '../errors.js'
 import {
   BUILTIN_WORKER_PERMISSIONS,
+  narrowWorkerPermissions,
   FORBIDDEN_WORKER_TOOLS,
   createBuiltinWorkerHookRegistry,
   type BuiltinRuntimeContext,
@@ -1228,6 +1230,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         systemPrompt: branch ? forkSystemPrompt(instance.forkSystemPrompt ?? builtin.systemPrompt) : builtin.systemPrompt,
         tools: this.combineTools(builtin.tools, instance),
         model: builtin.model,
+        onBeforeLlmCall: builtin.observeTools,
         ...(!branch && builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
         // 每次实际主推理请求前（包括内部重试），消费本执行线排队的输入。
         drainExternalInputs: () => this.takeQueuedInputsAsExternal(instance),
@@ -1708,6 +1711,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
             ...context,
             worker_subagent: {
               worker_id: instance.worker_id,
+              parent_incarnation_id: instance.incarnation_id,
               caller_instance_id: instanceKey(instance.worker_id, instance.seq),
               ...(instance.query_id ? { incarnation_id: instance.incarnation_id } : {}),
               ...(instance.traceId ? { parent_trace_id: instance.traceId } : {}),
@@ -1715,7 +1719,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           }),
         }
       }),
-      FINISH_TASK_TOOL,
+      authorizeTool(FINISH_TASK_TOOL, roleAuthorization('worker')),
     ]
   }
 
@@ -1753,7 +1757,6 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
    */
   private safetyOptions(
     builtin: NonNullable<SpawnSpec['builtin']>,
-    permissionTools: Resolvable<ReadonlyArray<ToolDefinition>> = builtin.tools,
   ): {
     permissionConfig: ToolPermissionConfig
     hookRegistry: HookRegistry
@@ -1766,9 +1769,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     timezone?: string
   } {
     return {
-      permissionConfig: this.workerPermissionConfig(permissionTools),
+      permissionConfig: { mode: 'bypass' },
       hookRegistry: this.hookRegistry,
-      resolvedPermissions: BUILTIN_WORKER_PERMISSIONS,
+      resolvedPermissions: builtin.resolvedPermissions ?? narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, null),
       // worker 不是任何人：F 阶段没有可信发起人身份（origin.creator_friend_id 现网恒空），
       // 不能走 CLI 闸的 master 短路。J 接线真实身份后由 origin 解析（见 runtime.ts 注释）。
       senderIsMaster: false,
@@ -1777,28 +1780,6 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       ...(builtin.supportsVision !== undefined ? { supportsVision: builtin.supportsVision } : {}),
       ...(builtin.thinking !== undefined ? { thinking: builtin.thinking } : {}),
       ...(builtin.timezone !== undefined ? { timezone: builtin.timezone } : {}),
-    }
-  }
-
-  /**
-   * 按固定权限档位（BUILTIN_WORKER_PERMISSIONS.tool_access）过滤工具，映射方式与现网
-   * worker loop 一致：工具的 `category` 落在被关掉的面上即拒。`finish_task` 是契约的终态
-   * 信号（不是能力面），恒放行。
-   */
-  private workerPermissionConfig(tools: Resolvable<ReadonlyArray<ToolDefinition>>): ToolPermissionConfig {
-    const toolAccess = BUILTIN_WORKER_PERMISSIONS.tool_access
-    return {
-      // checkPermission 存在时覆盖一切静态判定（engine/permission-checker.ts），
-      // mode/toolNames 在这条路径上不参与决策。
-      mode: 'denyList',
-      toolNames: [],
-      checkPermission: async (toolName: string) => {
-        if (toolName === FINISH_TASK_TOOL.name) return { allowed: true }
-        const tool = resolve(tools).find((t) => t.name === toolName)
-        const category = tool?.category ?? 'mcp_skill'
-        if (toolAccess[category]) return { allowed: true }
-        return { allowed: false, reason: `builtin worker 权限档位未开放 ${category} 类工具（tool=${toolName}）` }
-      },
     }
   }
 

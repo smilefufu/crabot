@@ -1,3 +1,5 @@
+import { authorizeTool, roleAuthorization } from '../../src/permissions/tool-authorization.js'
+import { checkToolPermission } from '../../src/engine/permission-checker.js'
 /**
  * builtin worker 注入管道 + adapter 侧运行语义（PR F 第 1 步）。
  *
@@ -571,7 +573,7 @@ describe('builtin worker 的安全项（hookRegistry / 权限档位）', () => {
       ]),
       model: 'm',
       systemPrompt: '',
-      tools: [messagingTool, makeProbeTool(() => {})],
+      tools: [authorizeTool(messagingTool, { ...roleAuthorization('worker'), check: async () => ({ allowed: false, reason: 'ROLE_FORBIDDEN: Worker 不提供 messaging' }) }), authorizeTool(makeProbeTool(() => {}), roleAuthorization('worker'))],
     })
     const adapter = new BuiltinWorkerAdapter({ dataDir, resolveRuntime: factory })
     const h = await spawnWith(adapter, factory, { worker_id: workerId, prompt: '干活', workspace: { root: dataDir } })
@@ -579,14 +581,14 @@ describe('builtin worker 的安全项（hookRegistry / 权限档位）', () => {
 
     // 语义不变量：worker 想说话 → 被权限档位挡下，会话里留下拒绝理由。
     const session = await fs.readFile(join(dataDir, workerId, 'session.jsonl'), 'utf-8')
-    expect(session).toContain('Permission denied')
+    expect(session).toContain('ROLE_FORBIDDEN')
 
     const permissionConfig = runEngineSpy.mock.calls[0][0].options.permissionConfig
     expect(permissionConfig).toBeDefined()
-    const check = permissionConfig!.checkPermission!
-    expect((await check('send_message', {})).allowed).toBe(false)
-    expect((await check('probe', {})).allowed).toBe(true)
-    expect((await check('finish_task', {})).allowed).toBe(true)
+    const actual = (runEngineSpy.mock.calls[0][0].options.tools as () => any[])()
+    expect((await checkToolPermission('send_message', {}, actual.find(tool => tool.name === 'send_message'), permissionConfig)).allowed).toBe(false)
+    expect((await checkToolPermission('probe', {}, actual.find(tool => tool.name === 'probe'), permissionConfig)).allowed).toBe(true)
+    expect((await checkToolPermission('finish_task', {}, actual.find(tool => tool.name === 'finish_task'), permissionConfig)).allowed).toBe(true)
   })
 
   it('runEngine 每次都带上 hookRegistry / 固定权限档位 / 模型参数（fork 的一次性 burst 也一样）', async () => {
@@ -612,7 +614,7 @@ describe('builtin worker 的安全项（hookRegistry / 权限档位）', () => {
     for (const call of runEngineSpy.mock.calls) {
       const options = call[0].options
       expect(options.hookRegistry?.isEmpty()).toBe(false)
-      expect(options.resolvedPermissions).toBe(BUILTIN_WORKER_PERMISSIONS)
+      expect(Object.values(options.resolvedPermissions!.tool_access).every(value => value === false)).toBe(true)
       // F 阶段没有可信发起人身份，不能走 CLI 闸的 master 短路。
       expect(options.senderIsMaster).toBe(false)
       expect(options.maxTokens).toBe(4096)
@@ -692,10 +694,10 @@ describe('narrowWorkerPermissions —— worker 档位 ∩ 派活人档位', () 
     expect(out.tool_access.memory).toBe(false)
   })
 
-  it('身份未解析（null）→ 保留固定档位，但桌面权限保持关闭', () => {
+  it('身份未解析（null）→ 全部资源权限关闭', () => {
     expect(narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, null)).toEqual({
       ...BUILTIN_WORKER_PERMISSIONS,
-      tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, desktop: false },
+      tool_access: Object.fromEntries(Object.keys(BUILTIN_WORKER_PERMISSIONS.tool_access).map(key => [key, false])),
     })
   })
 

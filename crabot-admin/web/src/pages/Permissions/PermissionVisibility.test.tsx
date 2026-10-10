@@ -36,14 +36,18 @@ describe('permission category visibility', () => {
     vi.clearAllMocks()
   })
 
-  it('hides remote execution on creation and keeps its default value in the payload', async () => {
+  it('shows six effective entries and scope limits while preserving retired defaults', async () => {
     render(<PermissionTemplateForm onSave={vi.fn()} onCancel={vi.fn()} />)
     expect(screen.queryByText('远程执行')).not.toBeInTheDocument()
+    expect(screen.queryByText('任务管理')).not.toBeInTheDocument()
+    expect(screen.queryByText('浏览器')).not.toBeInTheDocument()
+    expect(screen.getByText('未授权内置文件范围')).toBeInTheDocument()
+    expect(screen.getByText(/后端数据过滤尚未核实/)).toBeInTheDocument()
     fireEvent.change(screen.getByPlaceholderText('例如：高级用户'), { target: { value: 'New' } })
     fireEvent.click(screen.getByLabelText('本地命令'))
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({
-      tool_access: expect.objectContaining({ shell: true, remote_exec: false }),
+      tool_access: expect.objectContaining({ shell: true, task: false, browser: false, remote_exec: false }),
     })))
   })
 

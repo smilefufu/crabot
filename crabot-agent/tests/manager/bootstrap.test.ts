@@ -644,7 +644,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(search!.params.accessible_scopes).toEqual(['sess-boot'])
   })
 
-  it('权限解析失败时 Memory 仍隔离到当前会话', async () => {
+  it('权限解析失败时不能调用 Memory 入口', async () => {
     const memoryCalls: Array<{ method: string; params: Record<string, unknown> }> = []
     const stack = buildManagerStack(
       makeDeps({
@@ -670,11 +670,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     // 已知私聊类型但没有权限结果，仍不能退到 public。
     await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('hi')])
 
-    const search = memoryCalls.find((c) => c.method === 'search_short_term')
-    // 解析不出 friend 时会退到 session 级 scopes（[sessionId]），仍然是 internal，
-    // 不会退回 public——"未接线"与"解析失败"的兜底档在这里是同一档。
-    expect(search!.params.min_visibility).toBe('internal')
-    expect(search!.params.accessible_scopes).toEqual(['sess-boot'])
+    expect(memoryCalls).toEqual([])
   })
 
   it('独立任务板系统更新复用已有 Manager 的 Memory scope', async () => {
@@ -967,13 +963,13 @@ describe('manager bootstrap（P5 Task 1）', () => {
       expect(spawn).toHaveBeenCalledOnce()
       expect(spawn.mock.calls[0][0].execution_env).toEqual({ CRABOT_TOKEN: 'test-worker-token', CRABOT_ACTOR: 'agent' })
 
-      // 同一 session 撤销派发权限后，下一次事件不得沿用旧权限创建执行器。
+      // task 兼容值变化不再改变当前主体的角色派发能力。
       allowTask = false
       script = spawnOnce()
       await stack.registry.routeWorkerEvent({ ts: new Date().toISOString(), kind: 'state_changed', worker_id: 'w-seeded', seq: 1 })
       await settle()
-      expect(issueCredential).toHaveBeenCalledOnce()
-      expect(spawn).toHaveBeenCalledOnce()
+      expect(issueCredential).toHaveBeenCalledTimes(2)
+      expect(spawn).toHaveBeenCalledTimes(2)
     } finally {
       await stack.dispose()
     }

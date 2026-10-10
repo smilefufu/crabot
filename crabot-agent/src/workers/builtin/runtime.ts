@@ -49,7 +49,7 @@ export interface BuiltinRuntimeContext {
    * `BuiltinWorkerAdapter.runtimeFor`)。
    *
    * 缺省(系统派工 / 派活时身份未解析 / 本字段出现之前 spawn 的老 worker)= 无发起人档位,
-   * `narrowWorkerPermissions` 沿用历史回退档位，桌面能力保持关闭。
+   * 资源授权关闭，仅保留产品职责。
    */
   readonly principal_permissions?: ResolvedPermissions
 }
@@ -97,7 +97,7 @@ const WORKER_TOOL_ACCESS: ToolAccessConfig = {
  * 拿不到可信身份。因此这里**不照抄 master_private**:
  *   - tool_access 只开"干活必需"的面,`remote_exec` 关闭；`desktop` 只有明确主体授权时开放;
  *   - cli_access 全 `none` —— 放开等于让任何人都能借 worker 改 crabot 自身配置;
- *   - storage 为 null(agent 侧当前无消费方),memory_scopes 为空。
+ *   - storage 由主体快照提供，memory_scopes 不授予 Worker 记忆角色。
  * **J 已接线**:manager 在派活那一刻按 `origin.creator_friend_id` 算好档位,随 spawn 下传
  * 并落盘(`principal_permissions`),worker 的实际档位 = 本档位 ∩ 那一份
  * (`narrowWorkerPermissions`)。注意**不是"实时解析"**:实时解析等于让权限随"该会话最近
@@ -129,17 +129,18 @@ const CLI_PERM_RANK: Record<CliPerm, number> = { none: 0, read: 1, write: 2 }
  * 逐项规则：
  * - `tool_access`：按类目**与**（两边都允许才允许）；
  * - `cli_access`：按域取**更严**的那一档（none < read < write）；
- * - `storage`：保留 worker 侧（null）——worker 的落盘边界是 workspace，不随发起人变；
+ * - `storage`：保留主体的固定范围；workspace 本身不产生授权；
  * - `memory_scopes`：保留发起人的身份快照字段，供统一权限结构兼容；Worker 的
  *   `tool_access.memory` 固定 false，保留 scopes 不会重新开放 Memory。
  *
- * `principal` 为 null 时沿用旧固定档位，包括 desktop=false；不得因新增桌面能力扩大历史回退权限。
+ * `principal` 为 null 时关闭全部资源授权；产品职责由工具装配单独声明。
  */
 export function narrowWorkerPermissions(
   base: ResolvedPermissions,
   principal: ResolvedPermissions | null,
 ): ResolvedPermissions {
-  if (!principal) return { ...base, tool_access: { ...base.tool_access, desktop: false } }
+  if (!principal) return { ...base, tool_access: Object.fromEntries(Object.keys(base.tool_access).map(key => [key, false])) as unknown as ToolAccessConfig,
+    cli_access: cliAccess('none'), storage: null, memory_scopes: [] }
 
   const tool_access = Object.fromEntries(
     (Object.keys(base.tool_access) as Array<keyof ToolAccessConfig>).map((k) => [
@@ -157,7 +158,7 @@ export function narrowWorkerPermissions(
     ]),
   ) as CliAccessConfig
 
-  return { tool_access, cli_access, storage: base.storage, memory_scopes: [...principal.memory_scopes] }
+  return { tool_access, cli_access, storage: principal.storage ? { ...principal.storage } : null, memory_scopes: [...principal.memory_scopes] }
 }
 
 /** Agent CLI is inherited only by workers with a trusted principal snapshot. */

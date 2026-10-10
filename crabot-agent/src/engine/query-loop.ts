@@ -19,6 +19,7 @@ import {
 } from './types'
 import { CompactionFailedError, ContextManager } from './context-manager'
 import { partitionToolCalls } from './tool-framework'
+import { checkToolPermission } from './permission-checker'
 import { executeToolBatches, SendMessageGuard, type HookConfig } from './tool-orchestration'
 import { compressToolResultImages, pruneOldImages } from './image-utils'
 import { formatError } from './error-utils'
@@ -210,7 +211,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       messagesRef.tools = currentTools
     }
     refreshMessagesRef()
-    const beforeLlmCall = options.onBeforeLlmCall?.()
+    const beforeLlmCall = options.onBeforeLlmCall?.(currentTools)
     if (beforeLlmCall) await beforeLlmCall
     // 与返回 usage 配对，不能把随后追加的 assistant/tool 消息算进本次请求。
     let requestEstimatedTokens = contextManager.estimateStaticPromptTokens(currentSystemPrompt, currentTools)
@@ -649,7 +650,13 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     if (exitBlock) {
       const validationErrors = new Map<string, string>()
       for (const block of exitBlocks) {
-        const validateExit = currentTools.find(t => t.name === block.name)?.validateExit
+        const definition = currentTools.find(t => t.name === block.name)!
+        const decision = await checkToolPermission(block.name, block.input as Record<string, unknown>, definition, options.permissionConfig)
+        if (!decision.allowed) {
+          validationErrors.set(block.id, decision.reason)
+          continue
+        }
+        const validateExit = definition.validateExit
         if (!validateExit) continue
         try {
           const error = await validateExit(block.input as Record<string, unknown>, processed.toolUseBlocks.length)

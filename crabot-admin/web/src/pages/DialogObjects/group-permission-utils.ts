@@ -1,5 +1,5 @@
 import type { GroupSessionPermissionConfig } from '../../services/session'
-import { CLI_DOMAINS, TOOL_CATEGORIES, type CliAccessConfig, type PermissionTemplate, type StoragePermission, type ToolAccessConfig } from '../../types'
+import { CLI_DOMAINS, VISIBLE_TOOL_CATEGORIES, type CliAccessConfig, type PermissionTemplate, type StoragePermission, type ToolAccessConfig } from '../../types'
 
 interface GroupPermissions {
   tool_access: ToolAccessConfig
@@ -27,11 +27,14 @@ export function buildGroupPermissionOverrides(
   const base = resolveGroupPermissions(sessionId, template, null)
   const tool_access: Partial<ToolAccessConfig> = {}
   const cli_access: Partial<CliAccessConfig> = {}
-  for (const category of TOOL_CATEGORIES) {
+  for (const category of VISIBLE_TOOL_CATEGORIES) {
     if (category === 'desktop') continue
     if (previous?.tool_access?.[category] !== undefined || current.tool_access[category] !== base.tool_access[category]) {
       tool_access[category] = current.tool_access[category]
     }
+  }
+  for (const category of ['task', 'browser', 'remote_exec'] as const) {
+    if (previous?.tool_access?.[category] !== undefined) tool_access[category] = previous.tool_access[category]
   }
   for (const domain of CLI_DOMAINS) {
     if (previous?.cli_access?.[domain] !== undefined || current.cli_access[domain] !== base.cli_access[domain]) {

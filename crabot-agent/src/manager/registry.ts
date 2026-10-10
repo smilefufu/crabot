@@ -128,6 +128,7 @@ export interface ManagerRegistryDeps {
    * 自己按 episode 边界调用,本 registry 不缓存解析结果。
    */
   readonly adapter: () => LLMAdapter
+  readonly observeTools?: (key: ManagerKey, episodeId: string, tools: ReadonlyArray<ToolDefinition>) => Promise<void>
   readonly model: () => string
   /** 运行时配置已原子替换后的通知源与代数 getter(spec 2026-08-30-llm-retry-config-hotreload);原样下传 ManagerLoopDeps。 */
   readonly onRuntimeConfigApplied?: (listener: () => void) => () => void
@@ -397,6 +398,7 @@ export class ManagerRegistry {
       policy: this.deps.policy,
       adapter: this.deps.adapter,
       model: this.deps.model,
+      observeTools: this.deps.observeTools,
       onRuntimeConfigApplied: this.deps.onRuntimeConfigApplied,
       runtimeConfigAppliedGeneration: this.deps.runtimeConfigAppliedGeneration,
       maxTurns: this.deps.maxTurns,

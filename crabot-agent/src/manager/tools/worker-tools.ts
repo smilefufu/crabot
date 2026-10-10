@@ -352,7 +352,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       }
 
       const ctx = context()
-      if (ctx.principalPermissions?.tool_access.task === false) return invalid('当前会话没有任务派发权限，请先请求必要权限调整。')
+      if (!ctx.principalPermissions) return invalid('CAPABILITY_UNKNOWN: 缺少可信主体授权，无法新建执行器。')
       try {
         const worker: LedgerWorker = await harness.spawnWorker({
           managerKey: ctx.managerKey,

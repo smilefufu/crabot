@@ -1,23 +1,39 @@
 import { defineTool, type ToolDefinition } from '../../engine/index.js'
-import type { ResolvedPermissions } from '../../types.js'
+import type { ResolvedPermissions, CliAccessConfig, StoragePermission } from '../../types.js'
 import type { WorkerImplId } from '../../workers/types.js'
 import type { ToolFaceDeps } from './tool-face.js'
-import { BUILTIN_WORKER_PERMISSIONS, narrowWorkerPermissions, workerCliExecutionPermissions } from '../../workers/builtin/runtime.js'
-import { stringifyPermissionAwareness } from './permission-awareness.js'
+import { effectiveToolAccess, TOOL_ENTRY_EXPLANATIONS, type EffectiveToolAccessConfig, type EffectiveToolCategory, type ExecutionObservation } from 'crabot-shared'
+import { executionAdmission } from '../../workers/execution-policy.js'
+import { executionObservation } from '../../permissions/execution-observation.js'
 
-export interface ExecutionToolObservation {
-  readonly observed_at: string
-  readonly tools: readonly string[]
-  readonly source: 'current_builtin_assembly' | 'next_cli_provision'
-  readonly mcp_servers: readonly string[]
-  readonly limitations: readonly string[]
+export type DescribeExecutionTools = (impl: WorkerImplId, principal?: ResolvedPermissions) => ExecutionObservation
+export interface ExecutionImplementation {
+  impl: WorkerImplId
+  ready: boolean | null
+  admission: { status: 'allowed' | 'blocked' | 'conditional' | 'unknown'; reasons: string[] }
+  observation: ExecutionObservation
 }
-export type DescribeExecutionTools = (impl: WorkerImplId, principal?: ResolvedPermissions) => ExecutionToolObservation
+export interface ExecutionCapabilities {
+  schema_version: 1
+  orchestration: { can_spawn: boolean; scope: 'current_manager'; reasons: string[] }
+  authorization: {
+    known: boolean
+    source: 'current_principal' | 'worker_snapshot' | 'missing'
+    tool_access: EffectiveToolAccessConfig | null
+    cli_access: CliAccessConfig | null
+    storage: StoragePermission | null
+    memory_scopes: string[] | null
+    explanations: Record<EffectiveToolCategory, string>
+    memory_enforcement: 'unverified'
+  }
+  role_capabilities: { role: 'manager'; child_profiles: string[] }
+  execution: { implementations: ExecutionImplementation[] }
+}
 
 export function createExecutionCapabilitiesTool(deps: ToolFaceDeps): ToolDefinition {
   return defineTool({
     name: 'get_execution_capabilities',
-    description: '仅在没有有效能力事实、能力或权限已变化，或要复用的执行器需要核对固定权限时查询一次。省略参数查询三种实现的新建条件；worker_id 查询当前会话已有执行器的固定权限。旧执行器不会随联系人改权而自动更新；工具未接入与权限拒绝分开判断。查询不执行任务、不授予权限；控制面返回的拒绝就是当前事实，不要用重复查询代替处置。',
+    description: '核对主体授权、角色职责和执行事实。省略参数返回当前主体的新建计划；worker_id 返回当前会话 Worker 的固定主体和最新主线化身记录，impl 仅筛选新建计划。planned 不代表实际收到工具；legacy_unknown 不代表权限被关闭。工具调用明确拒绝前，不将缺记录或角色限制当成需要用户开权。查询不派发、不授予权限。',
     inputSchema: { type: 'object', properties: {
       worker_id: { type: 'string' }, impl: { type: 'string', enum: ['builtin', 'claude-code', 'codex'] },
     }, additionalProperties: false },
@@ -33,34 +49,38 @@ export function createExecutionCapabilitiesTool(deps: ToolFaceDeps): ToolDefinit
         const current = deps.workerContext()
         let principal = current.principalPermissions
         let implementations: WorkerImplId[] = args.impl ? [args.impl] : ['builtin', 'claude-code', 'codex']
-        let workspace: string | undefined
+        let recorded: ExecutionObservation | undefined
         if (args.worker_id) {
           const found = await deps.projectDocs.ledger.findWorker(args.worker_id)
           if (!found || found.managerKey !== current.managerKey) throw new Error('执行器不存在或不属于当前会话')
           const incarnation = found.worker.incarnations.filter(item => item.forked_from === undefined).at(-1)
-          if (!incarnation || incarnation.impl === 'legacy') throw new Error('该执行器没有可核实的现代执行化身')
+          if (!incarnation || incarnation.impl === 'legacy') throw new Error('该执行器没有现代主线化身')
           implementations = [incarnation.impl]
-          workspace = incarnation.workspace
           principal = (await deps.projectDocs.readWorkerContext(args.worker_id))?.principal_permissions
+          recorded = incarnation.incarnation_id && deps.readExecutionObservation
+            ? await deps.readExecutionObservation(args.worker_id, incarnation.incarnation_id, incarnation.impl)
+            : executionObservation({ role: 'worker', impl: incarnation.impl, state: 'legacy_unknown', source: 'legacy',
+                worker_id: args.worker_id, incarnation_id: incarnation.incarnation_id, constraints: ['该化身没有可核实记录；不从当前配置补推。'] })
         }
         const registry = deps.workerImplSnapshot?.()
-        return { isError: false, output: stringifyPermissionAwareness({
-          can_spawn: current.principalPermissions?.tool_access.task ?? null,
-          permission_source: args.worker_id ? 'persisted_worker_principal' : 'current_delegation_principal',
-          principal_known: principal !== undefined,
-          ...(args.worker_id ? { worker_id: args.worker_id, workspace } : {}),
-          implementations: implementations.map(impl => ({
-            impl,
-            ready: registry?.statuses.find(item => item.impl === impl)?.ready ?? null,
-            permissions: narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, principal ?? null),
-            cli_access: workerCliExecutionPermissions(principal).cli_access,
-            ...(deps.describeExecutionTools?.(impl, principal) ?? {
-              tools: null, mcp_servers: null, limitations: ['工具装配信息当前不可核实。'],
-            }),
-            ...(args.worker_id && impl !== 'builtin' ? { current_incarnation_tools: 'unknown',
-              current_incarnation_note: '所列 MCP 为当前配置下下次 provision 的条件，不代表运行中 CLI 的连接或原生工具状态。' } : {}),
-          })),
-        }) }
+        const entries = implementations.map(impl => ({ impl,
+          ready: registry?.statuses.find(item => item.impl === impl)?.ready ?? null,
+          admission: executionAdmission(impl, principal),
+          observation: recorded ?? deps.describeExecutionTools?.(impl, principal)
+            ?? executionObservation({ role: 'worker', impl, source: 'execution_plan', constraints: ['当前装配计划不可核实。'] }),
+        }))
+        const result: ExecutionCapabilities = {
+          schema_version: 1,
+          orchestration: { can_spawn: !!current.principalPermissions, scope: 'current_manager',
+            reasons: current.principalPermissions ? [] : ['CAPABILITY_UNKNOWN: 新建执行器需要可信主体授权'] },
+          authorization: { known: !!principal, source: principal ? args.worker_id ? 'worker_snapshot' : 'current_principal' : 'missing',
+            tool_access: principal ? effectiveToolAccess(principal.tool_access) : null,
+            cli_access: principal?.cli_access ?? null, storage: principal?.storage ?? null,
+            memory_scopes: principal?.memory_scopes ?? null, explanations: TOOL_ENTRY_EXPLANATIONS, memory_enforcement: 'unverified' },
+          role_capabilities: { role: 'manager', child_profiles: [...new Set(entries.flatMap(entry => entry.observation.child_profiles))] },
+          execution: { implementations: entries },
+        }
+        return { isError: false, output: JSON.stringify(result) }
       } catch (error) { return { isError: true, output: `执行条件查询失败：${(error as Error).message}` } }
     },
   })

@@ -1,3 +1,4 @@
+import { executionObservation } from '../../src/permissions/execution-observation.js'
 import { describe, it, expect, vi } from 'vitest'
 import { createExecutionCapabilitiesTool } from '../../src/manager/tools/execution-capabilities.js'
 import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
@@ -12,7 +13,7 @@ function setup() {
       ledger: { findWorker: vi.fn(async () => ({ managerKey: 'm::s', worker: { incarnations: [{ impl: 'builtin', workspace: '/fixture' }] } })) },
       readWorkerContext: vi.fn(async () => ({ principal_permissions: old })),
     },
-    describeExecutionTools: vi.fn(() => ({ tools: ['Read'], mcp_servers: [], source: 'current_builtin_assembly', limitations: [], observed_at: 'now' })),
+    describeExecutionTools: vi.fn((impl) => executionObservation({ role: 'worker', impl, source: 'execution_plan', tools: ['Read'] })),
   }
   return { current, old, deps, tool: createExecutionCapabilitiesTool(deps as never) }
 }
@@ -28,13 +29,8 @@ describe('execution capability evidence', () => {
     const before = structuredClone(current)
     const result = await query(tool, {})
 
-    expect(result.implementations.map((item: { impl: string }) => item.impl)).toEqual(['builtin', 'claude-code', 'codex'])
-    for (const implementation of result.implementations) {
-      expect(implementation.permissions.tool_access).toEqual({
-        memory: false, messaging: false, task: false, mcp_skill: true,
-        file_io: true, browser: true, shell: true, desktop: true,
-      })
-    }
+    expect(result.execution.implementations.map((item: { impl: string }) => item.impl)).toEqual(['builtin', 'claude-code', 'codex'])
+    expect(result.authorization.tool_access).toEqual({ memory: false, messaging: false, mcp_skill: true, file_io: true, shell: true, desktop: true })
     expect(current).toEqual(before)
     expect(BUILTIN_WORKER_PERMISSIONS.tool_access.remote_exec).toBe(false)
   })
@@ -46,25 +42,25 @@ describe('execution capability evidence', () => {
     deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'm::s', worker: { incarnations: [{ impl, workspace: '/fixture' }] } })
     const result = await query(tool, { worker_id: 'old-worker' })
 
-    expect(result.permission_source).toBe('persisted_worker_principal')
-    expect(result.implementations[0].permissions.tool_access).not.toHaveProperty('remote_exec')
-    expect(result.implementations[0].permissions.tool_access).toMatchObject({ shell: false, desktop: false })
+    expect(result.authorization.source).toBe('worker_snapshot')
+    expect(result.authorization.tool_access).not.toHaveProperty('remote_exec')
+    expect(result.authorization.tool_access).toMatchObject({ shell: false, desktop: false })
     expect(old).toEqual(before)
-    expect(deps.describeExecutionTools).toHaveBeenCalledWith(impl, old)
+    expect(deps.describeExecutionTools).not.toHaveBeenCalled()
   })
 
   it('separates dispatch permission from ready/worker capability', async () => {
     const { current, tool } = setup(); current.tool_access.task = false
     const result = await query(tool, { impl: 'builtin' })
-    expect(result.can_spawn).toBe(false)
-    expect(result.implementations[0]).toMatchObject({ ready: true, permissions: { tool_access: { file_io: true, desktop: true } } })
+    expect(result.orchestration.can_spawn).toBe(true)
+    expect(result.execution.implementations[0]).toMatchObject({ ready: true, admission: { status: 'allowed' } })
   })
   it('uses the existing worker snapshot after a new principal has more permission', async () => {
     const { deps, old, tool } = setup()
     const result = await query(tool, { worker_id: 'old-worker' })
-    expect(result.permission_source).toBe('persisted_worker_principal')
-    expect(result.implementations[0].permissions.tool_access).toMatchObject({ shell: false, desktop: false })
-    expect(deps.describeExecutionTools).toHaveBeenCalledWith('builtin', old)
+    expect(result.authorization.source).toBe('worker_snapshot')
+    expect(result.authorization.tool_access).toMatchObject({ shell: false, desktop: false })
+    expect(deps.describeExecutionTools).not.toHaveBeenCalled()
   })
   it('does not consult worker context or assembly before checking ownership', async () => {
     const { deps, tool } = setup()
@@ -78,9 +74,8 @@ describe('execution capability evidence', () => {
     deps.projectDocs.readWorkerContext.mockResolvedValue(undefined as never)
     deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'm::s', worker: { incarnations: [{ impl: 'codex', workspace: '/fixture' }] } })
     const result = await query(tool, { worker_id: 'old' })
-    expect(result.principal_known).toBe(false)
-    expect(result.implementations[0].permissions.tool_access).not.toHaveProperty('remote_exec')
-    expect(result.implementations[0].permissions.tool_access.desktop).toBe(false)
-    expect(result.implementations[0].current_incarnation_tools).toBe('unknown')
+    expect(result.authorization.known).toBe(false)
+    expect(result.authorization.tool_access).toBeNull()
+    expect(result.execution.implementations[0].observation.state).toBe('legacy_unknown')
   })
 })

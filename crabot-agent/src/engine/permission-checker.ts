@@ -36,6 +36,10 @@ export async function checkToolPermission(
   tool: ToolDefinition,
   config?: ToolPermissionConfig,
 ): Promise<PermissionDecision> {
+  if (tool.authorization) {
+    const decision = await tool.authorization.check(input)
+    if (!decision.allowed) return decision
+  }
   // If callback exists, it overrides all static checks
   if (config?.checkPermission !== undefined) {
     return config.checkPermission(toolName, input)

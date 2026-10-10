@@ -39,7 +39,7 @@ import type {
   ToolAccessConfig,
   ToolCategory,
 } from '../../types'
-import { createCliAccessConfig, VISIBLE_TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../types'
+import { createCliAccessConfig, VISIBLE_TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, TOOL_ENTRY_EXPLANATIONS } from '../../types'
 
 type QueueTarget = { id: string; channel_id: string; title: string }
 type QueueTargetKind = 'privatePool' | 'application'
@@ -68,7 +68,7 @@ const PermissionSwitchRow: React.FC<{
   onChange: (cat: ToolCategory, checked: boolean) => void
 }> = ({ label, category, checked, onChange }) => {
   return (
-    <label className="session-permission-switch-row" title={category === 'mcp_skill' ? MCP_SKILL_PERMISSION_DESCRIPTION : undefined}>
+    <label className="session-permission-switch-row" title={category in TOOL_ENTRY_EXPLANATIONS ? TOOL_ENTRY_EXPLANATIONS[category as keyof typeof TOOL_ENTRY_EXPLANATIONS] : undefined}>
       <span className="session-permission-switch-value">
         <span>{label}</span>
         <span>{checked ? '开启' : '关闭'}</span>
@@ -122,6 +122,7 @@ export const DialogObjectsPage: React.FC = () => {
   const [editPerm, setEditPerm] = useState<FriendPermission>('normal')
   const [savingFriendMetadata, setSavingFriendMetadata] = useState(false)
   const [friendPermissionLoading, setFriendPermissionLoading] = useState(false)
+  const [friendPermissionSource, setFriendPermissionSource] = useState<'independent' | 'template' | 'unknown'>('unknown')
   const [friendPermissionState, setFriendPermissionState] = useState<FriendPermissionState>('idle')
   const [friendPermissionUnavailableMessage, setFriendPermissionUnavailableMessage] = useState<string | null>(null)
   const [savingFriendPermissions, setSavingFriendPermissions] = useState(false)
@@ -370,6 +371,7 @@ export const DialogObjectsPage: React.FC = () => {
           notifyError('好友权限未返回可编辑配置')
           return
         }
+        setFriendPermissionSource(result.config ? 'independent' : 'template')
         const resolved = result.resolved
         setFriendToolAccess(resolved.tool_access)
         setFriendCliAccess(resolved.cli_access ?? createCliAccessConfig('none'))
@@ -563,6 +565,7 @@ export const DialogObjectsPage: React.FC = () => {
           : null,
         memory_scopes: memoryScopes,
       }))
+      setFriendPermissionSource('independent')
       success('好友权限已保存')
       triggerRefresh()
     } catch (caughtError) {
@@ -789,6 +792,7 @@ export const DialogObjectsPage: React.FC = () => {
               savingMetadata={savingFriendMetadata}
               friendPermissionLoading={friendPermissionLoading}
               friendPermissionState={friendPermissionState}
+              friendPermissionSource={friendPermissionSource}
               friendPermissionUnavailableMessage={friendPermissionUnavailableMessage}
               savingPermissions={savingFriendPermissions}
               friendToolAccess={friendToolAccess}
@@ -1043,7 +1047,7 @@ export const DialogObjectsPage: React.FC = () => {
                               workspace_path: groupStoragePath.trim() || DEFAULT_STORAGE_PATH,
                               access: groupStorageAccess,
                             })
-                          : '未开启'}
+                          : '未授权内置文件范围'}
                       </span>
                     </span>
                     <span className="toggle-switch">
@@ -1089,6 +1093,7 @@ export const DialogObjectsPage: React.FC = () => {
 
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
                   <div style={{ fontWeight: 600 }}>记忆范围</div>
+                  <small>配置范围；后端数据过滤尚未核实。</small>
                   <div className="session-segmented-control" role="radiogroup" aria-label="记忆范围模式">
                     <label className={`session-segmented-option ${groupMemoryMode === 'session' ? 'session-segmented-option--active' : ''}`}>
                       <input

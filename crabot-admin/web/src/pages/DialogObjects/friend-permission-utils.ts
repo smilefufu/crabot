@@ -14,7 +14,7 @@ function cloneCliAccess(cliAccess: CliAccessConfig): CliAccessConfig {
 }
 
 export function summarizeFriendStorage(storage: StoragePermission | null): string {
-  if (!storage) return '未开启'
+  if (!storage) return '未授权内置文件范围'
   return `${storage.workspace_path} · ${storage.access === 'read' ? '只读' : '读写'}`
 }
 

@@ -29,6 +29,7 @@ import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { randomUUID } from 'node:crypto'
+import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime'
 
 import { WorkerHarness, type HarnessDeps } from '../../src/workers/harness/harness'
 import { LedgerStore, encodeSegment } from '../../src/workers/harness/ledger-store'
@@ -350,6 +351,7 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
           managerKey: key,
           reportTo: channelSessionFromKey(key),
           triggerType: isSystemThread ? 'system' : 'message',
+          principalPermissions: { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, memory: true, messaging: true } },
         }),
         messagingDeps,
         memoryServer,

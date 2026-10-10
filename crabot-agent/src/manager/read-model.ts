@@ -83,6 +83,7 @@ export interface GetWorkerDetailParams {
 }
 
 export interface GetWorkerDetailResult {
+  execution_observations?: import('crabot-shared').ExecutionObservation[]
   worker: LedgerWorker
 }
 

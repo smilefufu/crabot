@@ -34,6 +34,19 @@ describe('group permission authorization boundary', () => {
     expect(result.sources.friend_template_id).toBeUndefined()
   })
 
+  it('preserves stored retired fields on omission, rejects a changed value with INVALID_PARAMS and never persists the rejection', async () => {
+    const { groupSessionConfigKey } = await import('./group-session-config.js')
+    admin.sessionConfigs.set(groupSessionConfigKey(target.channel_id, target.session_id), { tool_access: { task: true, browser: false } })
+    const updated = await admin.handleUpdateGroupSessionConfig({ ...target, config: { tool_access: { shell: true } } })
+    expect(updated.config.tool_access).toMatchObject({ task: true, browser: false, shell: true })
+    admin.atomicWriteFile.mockClear()
+    let error: unknown
+    try { await admin.handleUpdateGroupSessionConfig({ ...target, config: { tool_access: { task: false } } }) } catch (caught) { error = caught }
+    const { formatHandlerError } = await import('crabot-shared/dist/module-base.js')
+    expect(formatHandlerError(error, 'fixture').error?.code).toBe('INVALID_PARAMS')
+    expect(admin.atomicWriteFile).not.toHaveBeenCalled()
+  })
+
   it('keeps equal session IDs in different channels separate and inherits undeclared fields', async () => {
     await admin.handleUpdateGroupSessionConfig({ ...target, config: {
       template_id: 'group_scheduler', tool_access: { mcp_skill: true, desktop: true }, cli_access: { schedule: 'none', config: 'read' },

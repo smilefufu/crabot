@@ -128,32 +128,18 @@ export async function authorizeProjectRoot(
   const permissions = deps.managerPrincipalPermissions
   if (!permissions) throw new Error('当前处理回合没有可用的主体权限快照')
   if (!permissions.tool_access.file_io) throw new Error('当前处理回合主体没有 file_io 权限')
-  if (write && permissions.storage?.access !== 'readwrite' && permissions.storage !== null) {
+  if (!permissions.storage) throw new Error('PERMISSION_DENIED: 未授权内置文件范围')
+  if (write && permissions.storage.access !== 'readwrite') {
     throw new Error('当前处理回合主体的 storage 不是 readwrite')
   }
 
   const requested = await realDirectory(normalizeProjectRoot(rawProjectRoot), 'project_root')
-  if (permissions.storage) {
-    const storageRoot = await realDirectory(
-      normalizeAbsoluteDirectoryPath(permissions.storage.workspace_path, 'storage.workspace_path'),
-      'storage.workspace_path',
-    )
-    assertInside(storageRoot, requested, 'project_root')
-    return requested
-  }
-
-  const workers = await deps.ledger.listWorkers(deps.managerKey)
-  for (const worker of workers) {
-    for (const incarnation of worker.incarnations) {
-      try {
-        const workspace = normalizeAbsoluteDirectoryPath(incarnation.workspace, 'Worker workspace')
-        if (await realDirectory(workspace, 'Worker workspace') === requested) return requested
-      } catch {
-        // 已删除的历史 workspace 不产生授权，也不阻断其它真实匹配项。
-      }
-    }
-  }
-  throw new Error('storage 未配置，project_root 未精确匹配当前会话已有 Worker workspace')
+  const storageRoot = await realDirectory(
+    normalizeAbsoluteDirectoryPath(permissions.storage.workspace_path, 'storage.workspace_path'),
+    'storage.workspace_path',
+  )
+  assertInside(storageRoot, requested, 'project_root')
+  return requested
 }
 
 async function resolveExisting(root: string, relativePath: string): Promise<{

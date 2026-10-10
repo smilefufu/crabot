@@ -1,3 +1,5 @@
+import { observationFile, persistObservation, requestObservation, readObservation, executionObservation } from '../../permissions/execution-observation.js'
+import { authorizeTool, roleAuthorization } from '../../permissions/tool-authorization.js'
 import { ChildExecutionSession } from './child-execution-session.js'
 import { createBashTool } from '../../engine/tools/bash-tool.js'
 import { createOutputTool } from '../../engine/tools/output-tool.js'
@@ -73,6 +75,7 @@ export class BuiltinSubagentRunner {
     private readonly deliverCompletion?: (workerId: string, entityId: string) => Promise<void>,
     registry?: BgEntityRegistry,
     redactText: (text: string) => string = (text) => text,
+    private readonly observationsDir?: string,
   ) {
     this.registry = registry
     this.redactText = redactText
@@ -147,7 +150,20 @@ export class BuiltinSubagentRunner {
           createOutputTool(deps), createKillTool(deps), createListEntitiesTool(deps),
         ]
         return {
-          tools: childCapabilities.tools.map(tool => rebound.find(bound => bound.name === tool.name) ?? tool),
+          tools: childCapabilities.tools.map(tool => {
+            const bound = rebound.find(bound => bound.name === tool.name)
+            if (tool.authorization) return authorizeTool(bound ?? tool, { ...tool.authorization, role: 'child' })
+            if (tool.name === 'Skill') return authorizeTool(tool, roleAuthorization('child'))
+            return bound ?? tool
+          }),
+          observeTools: this.observationsDir ? async tools => {
+            const parentId = worker.parent_incarnation_id ?? worker.incarnation_id
+            if (!parentId) throw new Error('CAPABILITY_UNKNOWN: 缺少父化身身份')
+            await persistObservation(observationFile(this.observationsDir!, worker.worker_id, parentId, entityId),
+              requestObservation(tools, { role: 'child', impl: 'builtin', source: 'builtin_request', worker_id: worker.worker_id,
+                incarnation_id: parentId, subagent_id: entityId, skills: childCapabilities.skills.map(skill => skill.name),
+                constraints: ['子 Agent 角色不含人类投递、桌面控制和继续派发。'] }))
+          } : undefined,
           drainExternalInputs: session.drain, hasPendingExternalInputs: session.hasPending,
           onSystemInjection: session.onInjection,
           continueAfterTurn: () => session.continueAfterTurn(),
@@ -258,7 +274,10 @@ export class BuiltinSubagentRunner {
   async get(workerId: string, subagentId: string): Promise<WorkerSubagentSummary | undefined> {
     const record = await this.requireRegistry().get(subagentId)
     if (record?.type !== 'agent' || record.owner.worker_id !== workerId || record.spawned_by_task_id !== workerId) return undefined
-    return summaryOf(workerId, record)
+    const summary = summaryOf(workerId, record)
+    if (!this.observationsDir) return summary
+    const fallback = executionObservation({ role: 'child', impl: 'builtin', source: 'legacy', state: 'legacy_unknown', worker_id: workerId, subagent_id: subagentId })
+    return { ...summary, execution_observation: await readObservation(observationFile(this.observationsDir, workerId, 'unknown', subagentId), fallback) }
   }
 
   async readTrace(workerId: string, subagentId: string, cursor?: TraceCursor): Promise<{

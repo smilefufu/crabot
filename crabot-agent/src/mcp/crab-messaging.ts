@@ -38,6 +38,7 @@ export interface CrabMessagingDeps {
    * P6-A §11.5-9：Admin Chat 出站 delivery 事务钩子（仅 exact admin-web::admin-chat
    * 目标生效；其它目标的调用不携带 delivery metadata——不注入即剥离）。
    */
+  readonly authorizeFile?: import('../agent/outbound-dispatch.js').OutboundDispatchDeps['authorizeFile']
   readonly adminChatDelivery?: import('../agent/outbound-dispatch.js').AdminChatDeliveryHooks
   /**
    * 可选：返回当前调用 mcp 工具的 task 上下文。
@@ -1071,6 +1072,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           moduleId,
           resolveChannelPort,
           getAdminPort,
+          authorizeFile: deps.authorizeFile,
           ...(deps.adminChatDelivery ? { adminChatDelivery: deps.adminChatDelivery } : {}),
           ...(sandboxPathMappingsRef ? { sandboxPathMappingsRef } : {}),
           ...((() => {

@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### 权限系统闭环：已实现，待 PR 验收
+
+- 按 2026-10-10 已确认方案分开主体授权、角色职责和具体化身执行事实。有效入口只保留 memory/messaging/file_io/shell/mcp_skill/desktop；task/browser/remote_exec 退役，旧值兼容保存。
+- Manager、builtin、child 与退出工具执行宿主守卫；Worker 固定主体范围，内置文件与本地上传检查真实路径及读写级别。原生 CLI 准入覆盖新建及接续，受限或缺主体不借宽权限 fallback。
+- 能力查询与生产装配共用纯计划，最终请求快照原子保存；Worker/child 页面按具体化身展示，旧缺记录 unknown。UI 解释私聊全量/群增量、作用范围和生效时点；Memory 数据级权限仍由独立任务负责。
+- 定向 Agent 183 项、Admin 65 项（含群退役兼容）、Web 51 项通过；最新 main 集成的扩大回归 2297 项通过、15 项基线失败、65 项跳过。Web 全量 324 项通过、17 项 localStorage 环境失败在未修改 main 复现；Agent 全量两边都未收敛，不计作通过。Shared/Agent/Admin/CLI 和 Web 生产构建通过；未重启本地实例或部署目标 Ubuntu。
+
 ### 安卓语音终端与家庭 Channel：端侧分段及ASR归属对照完成，待真实验收
 
 - 用户确定先用安卓手机、不采购硬件；一期端侧完成声纹提取/比对，Crabot负责成员映射及群权限，至少处理无明显静音的连续换人B。先落实技术点，暂缓spec；[替代草案](crabot-docs/superpowers/specs/2026-10-09-android-voice-terminal-design.md)未确认。未改正式协议/产品代码，未重启Crabot。

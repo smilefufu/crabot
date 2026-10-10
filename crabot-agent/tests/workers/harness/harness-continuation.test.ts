@@ -17,6 +17,8 @@ import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { WorkerEventLog } from '../../../src/workers/harness/worker-events'
 import { CliInputStallError, WorkerExitedError } from '../../../src/workers/errors'
 import { BuiltinWorkerAdapter } from '../../../src/workers/builtin/adapter'
+import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime'
+import { assertExecutionPolicy } from '../../../src/workers/execution-policy'
 import type { BuiltinRuntimeContext } from '../../../src/workers/builtin/runtime'
 import type { LLMAdapter } from '../../../src/engine/llm-adapter-types.js'
 import { chunksFromContent } from '../../engine/helpers/mock-stream'
@@ -202,7 +204,7 @@ function now(): string {
 }
 
 async function makeHarness(
-  depsOverrides: Partial<Pick<HarnessDeps, 'capabilityBundle' | 'builtinSpawnDefaults' | 'validateLegacyContinuationAuth'>> = {},
+  depsOverrides: Partial<Pick<HarnessDeps, 'capabilityBundle' | 'builtinSpawnDefaults' | 'validateLegacyContinuationAuth' | 'assertExecutionPolicy'>> = {},
 ): Promise<{
   harness: WorkerHarness
   ledger: LedgerStore
@@ -287,6 +289,34 @@ async function readAuditLog(workersDir: string, workerId: string): Promise<Harne
 }
 
 describe('WorkerHarness — 透明接续：revive (capabilities().revive === true)', () => {
+  it('CLI 接续保留已记录的注入事实，约束变化更新 revision，重复接续不重复说明', async () => {
+    const { harness, adaptersMap, workersDir } = await makeHarness({ assertExecutionPolicy })
+    const fake = new FakeAdapter({ implId: 'codex', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('codex', fake)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'codex', principal_permissions: {
+      ...BUILTIN_WORKER_PERMISSIONS, storage: { workspace_path: '/', access: 'readwrite' },
+    } }))
+    const read = async (id: string) => JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'observations', `${id}.json`), 'utf8'))
+    const first = await read(worker.incarnations[0].incarnation_id!)
+    let previous = worker.incarnations[0]
+    const observations = []
+    for (let turn = 0; turn < 2; turn++) {
+      fake.emitStateChange({ worker_id: worker.worker_id, seq: previous.seq, impl: 'codex', session_ref: previous.session_ref }, 'exited')
+      await waitUntil(async () => (await harness.listWorkers('test::friend-1'))[0].incarnations.at(-1)?.state === 'exited')
+      await harness.sendToWorker(worker.worker_id, '继续执行')
+      const [revived] = await harness.listWorkers('test::friend-1')
+      previous = revived.incarnations.at(-1)!
+      observations.push(await read(previous.incarnation_id!))
+    }
+    expect(observations[0].revision).not.toBe(first.revision)
+    expect(observations[1].revision).toBe(observations[0].revision)
+    expect(observations[1].constraints).toHaveLength(first.constraints.length + 1)
+    expect(observations[1].mcp_servers).toEqual(first.mcp_servers)
+    expect(observations[1].skills).toEqual(first.skills)
+    expect(observations[1].native_tools).toBeNull()
+    expect(fake.provisionCalls).toHaveLength(1)
+  })
+
   it('台账主线化身已 exited → adapter.resume 被调用（prevRef 用主线化身的 handle）→ 新化身入主线链 → sendToWorker 无感返回 → 事件 resumed', async () => {
     const { harness, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter({ caps: { revive: true }, onStateChange: harness.handleStateChange })
@@ -729,7 +759,10 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     const target = new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange })
     adaptersMap.set('claude-code', target)
 
-    const worker = await harness.spawnWorker(spawnParams())
+    const worker = await harness.spawnWorker(spawnParams({ principal_permissions: {
+      tool_access: { file_io: true, shell: true, task: false, browser: false, remote_exec: false, desktop: false, memory: false, messaging: false, mcp_skill: false },
+      cli_access: {} as never, storage: { workspace_path: dataDir, access: 'readwrite' }, memory_scopes: [],
+    } }))
     const workspaceRoot = worker.incarnations[0].workspace
     const latestRules = '# Handoff 前更新的规则\n'
     await fs.writeFile(join(workspaceRoot, 'AGENTS.md'), latestRules)

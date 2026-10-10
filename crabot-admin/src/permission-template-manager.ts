@@ -13,6 +13,7 @@ import type {
 } from './types.js'
 import { createToolAccessConfig, createCliAccessConfig, CLI_DOMAINS } from './types.js'
 import { generateId, generateTimestamp } from 'crabot-shared'
+import { normalizeToolAccessUpdate } from './permission-entries.js'
 import type { OnConflict } from './backup/import/import-types.js'
 
 export class PermissionTemplateManager {
@@ -153,7 +154,7 @@ export class PermissionTemplateManager {
       name: params.name,
       description: params.description,
       is_system: false,
-      tool_access: this.enforceDesktopPolicy(id, params.tool_access),
+      tool_access: this.enforceDesktopPolicy(id, normalizeToolAccessUpdate(params.tool_access)),
       cli_access: params.cli_access ?? createCliAccessConfig('none'),
       storage: params.storage ?? null,
       memory_scopes: params.memory_scopes ?? [],
@@ -176,7 +177,7 @@ export class PermissionTemplateManager {
       ...existing,
       ...(params.name !== undefined ? { name: params.name } : {}),
       ...(params.description !== undefined ? { description: params.description } : {}),
-      ...(params.tool_access !== undefined ? { tool_access: this.enforceDesktopPolicy(existing.id, params.tool_access) } : {}),
+      ...(params.tool_access !== undefined ? { tool_access: this.enforceDesktopPolicy(existing.id, normalizeToolAccessUpdate(params.tool_access, existing.tool_access)) } : {}),
       ...(params.cli_access !== undefined ? { cli_access: params.cli_access } : {}),
       ...(params.storage !== undefined ? { storage: params.storage } : {}),
       ...(params.memory_scopes !== undefined ? { memory_scopes: params.memory_scopes } : {}),

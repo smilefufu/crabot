@@ -1,3 +1,4 @@
+import { normalizeToolAccessUpdate } from './permission-entries.js'
 /**
  * Admin 模块 - Crabot 管理后台
  *
@@ -9769,7 +9770,7 @@ export class AdminModule extends ModuleBase {
     // 但旧 client 可能未升级；在此做运行时兜底，避免破坏 forward-compat。
     const incomingCli = (config as { cli_access?: CliAccessConfig }).cli_access
     const nextConfig = this.normalizeFriendPermissionConfig(friend, {
-      tool_access: { ...config.tool_access, desktop: false },
+      tool_access: { ...normalizeToolAccessUpdate(config.tool_access, this.buildResolvedFriendPermissions(friend)?.tool_access), desktop: false },
       cli_access: incomingCli ? { ...incomingCli } : createCliAccessConfig('none'),
       storage: config.storage ? { ...config.storage } : null,
       memory_scopes: [...config.memory_scopes],
@@ -9800,7 +9801,9 @@ export class AdminModule extends ModuleBase {
 
   private async handleUpdateGroupSessionConfig(params: UpdateGroupSessionConfigParams): Promise<UpdateGroupSessionConfigResult> {
     const target = await this.resolveGroupPermissionTarget(params)
-    const config = parseGroupSessionConfig(params.config)
+    const previous = this.sessionConfigs.get(groupSessionConfigKey(target.channel_id, target.session_id))
+    const parsed = parseGroupSessionConfig(params.config)
+    const config = { ...parsed, tool_access: normalizeToolAccessUpdate(parsed.tool_access ?? {}, previous?.tool_access, true) }
     if (!this.permissionTemplateManager.get(config.template_id ?? 'group_default')) throw new RpcError('INVALID_PARAMS', 'Permission template not found')
     await this.persistGroupSessionConfig(target, config)
     this.publishAdminEvent('admin.session_config_updated', { ...target, config })
@@ -9908,6 +9911,11 @@ export class AdminModule extends ModuleBase {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ config: result.config }))
     } catch (error) {
+      if ((error as { code?: string }).code === 'INVALID_PARAMS') {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ code: 'INVALID_PARAMS', error: (error as Error).message }))
+        return
+      }
       if (error instanceof Error && error.message === 'Cannot update master friend permissions') {
         res.writeHead(400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Cannot update master friend permissions' }))

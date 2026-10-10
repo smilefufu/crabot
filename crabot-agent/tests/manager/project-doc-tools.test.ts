@@ -244,9 +244,9 @@ describe('project document tools', () => {
     }, {} as never)).isError).toBe(true)
   })
 
-  it('storage 为空时仅允许精确匹配当前 ManagerKey 已有 Worker workspace', async () => {
+  it('storage 为空时不借用已有 Worker workspace 授权', async () => {
     const wake = humanWake(permissions({ storage: null }))
-    expect((await tool(wake, 'inspect_project_docs').call({ project_root: project, operation: 'list' }, {} as never)).isError).toBe(false)
+    expect((await tool(wake, 'inspect_project_docs').call({ project_root: project, operation: 'list' }, {} as never)).isError).toBe(true)
     expect((await tool(wake, 'inspect_project_docs').call({ project_root: join(project, 'docs'), operation: 'list' }, {} as never)).isError).toBe(true)
 
     workers = [worker('w-other', OTHER_KEY, sibling)]

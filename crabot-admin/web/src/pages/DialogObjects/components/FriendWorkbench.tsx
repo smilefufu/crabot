@@ -16,7 +16,7 @@ import type {
   ToolAccessConfig,
   ToolCategory,
 } from '../../../types'
-import { VISIBLE_TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, MCP_SKILL_PERMISSION_DESCRIPTION } from '../../../types'
+import { VISIBLE_TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, TOOL_ENTRY_EXPLANATIONS } from '../../../types'
 
 const workbenchLinkStyle: React.CSSProperties = {
   display: 'inline-flex',
@@ -40,6 +40,7 @@ interface FriendWorkbenchProps {
   editPerm: FriendPermission
   savingMetadata: boolean
   friendPermissionLoading: boolean
+  friendPermissionSource?: 'independent' | 'template' | 'unknown'
   friendPermissionState: 'idle' | 'loading' | 'ready' | 'unavailable'
   friendPermissionUnavailableMessage: string | null
   savingPermissions: boolean
@@ -80,7 +81,7 @@ const PermissionSwitchRow: React.FC<{
   onChange: (cat: ToolCategory, checked: boolean) => void
 }> = ({ label, category, checked, onChange }) => {
   return (
-    <label className="session-permission-switch-row" title={category === 'mcp_skill' ? MCP_SKILL_PERMISSION_DESCRIPTION : undefined}>
+    <label className="session-permission-switch-row" title={category in TOOL_ENTRY_EXPLANATIONS ? TOOL_ENTRY_EXPLANATIONS[category as keyof typeof TOOL_ENTRY_EXPLANATIONS] : undefined}>
       <span className="session-permission-switch-value">
         <span>{label}</span>
         <span>{checked ? '开启' : '关闭'}</span>
@@ -105,6 +106,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
   savingMetadata,
   friendPermissionLoading,
   friendPermissionState,
+  friendPermissionSource,
   friendPermissionUnavailableMessage,
   savingPermissions,
   friendToolAccess,
@@ -194,7 +196,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
           <div style={{ display: 'grid', gap: '0.35rem' }}>
             <strong>好友权限</strong>
             <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-              直接编辑当前生效权限，保存后写入该好友的显式私聊权限配置。
+              {friendPermissionSource === 'independent' ? '当前使用完整独立配置，不随模板变化。' : friendPermissionSource === 'template' ? '当前继承模板；保存后成为完整独立配置。' : '权限来源加载中。'}既有 Worker 保留派发时快照。
             </div>
           </div>
 
@@ -251,7 +253,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
                             workspace_path: friendStoragePath.trim() || DEFAULT_STORAGE_PATH,
                             access: friendStorageAccess,
                           })
-                        : '未开启'}
+                        : '未授权内置文件范围'}
                     </span>
                   </span>
                   <span className="toggle-switch">
@@ -291,6 +293,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
 
               <div className="session-modal-section">
                 <div style={{ fontWeight: 600 }}>记忆范围</div>
+                <small>配置范围；后端数据过滤尚未核实。</small>
                 <div className="session-segmented-control" role="radiogroup" aria-label="记忆范围模式">
                   <label className={`session-segmented-option ${friendMemoryMode === 'empty' ? 'session-segmented-option--active' : ''}`}>
                     <input
