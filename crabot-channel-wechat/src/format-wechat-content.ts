@@ -222,12 +222,20 @@ export function formatWechatContent(
         ? { quote_message_id: quotedSvrId }
         : {}
 
+      if (quotedMsgType === 1) {
+        return {
+          content: { type: 'image', text: composedText, image_quality: 'unknown',
+            ...(quotedResourceUrl ? { media_url: quotedResourceUrl } : {}) },
+          features,
+        }
+      }
+
       // 当被引用消息携带 resource URL 时，把 content 升级为对应媒体类型，
       // 使 Agent 端的 media-resolver 能下载并喂给 LLM（仅 image 会真正进 ImageBlock，
       // file 至少把 URL 透传给 Agent，便于工具下载）。
       // quoted_msg_type 是微信原始 type：1=图片、47=表情、3/42=名片缩略、10/43=视频。
       if (quotedResourceUrl && quotedMsgType !== undefined) {
-        if (quotedMsgType === 1 || quotedMsgType === 47 || quotedMsgType === 3 || quotedMsgType === 42) {
+        if (quotedMsgType === 47 || quotedMsgType === 3 || quotedMsgType === 42) {
           return {
             content: { type: 'image', text: composedText, media_url: quotedResourceUrl },
             features,

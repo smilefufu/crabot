@@ -928,7 +928,7 @@ export class WechatChannel extends ModuleBase {
     if (!session) throw new Error('Session not found')
 
     const msg = await this.client.getMessageById(params.platform_message_id)
-    if (!msg) throw new Error('Message not found')
+    if (!msg || msg.fieldTalker !== session.platform_session_id) throw new Error('Message not found')
 
     return connectorMsgToProtocolItem(msg, session.platform_session_id)
   }

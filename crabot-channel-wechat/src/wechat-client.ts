@@ -12,6 +12,8 @@ import path from 'node:path'
 import type { ApiResponse } from './types.js'
 import { proxyManager } from 'crabot-shared'
 
+class NotFoundError extends Error {}
+
 /** 标记为可重试的瞬态错误（网络层、5xx、timeout）。业务错误不应使用。 */
 class TransientError extends Error {
   readonly transient = true as const
@@ -313,8 +315,9 @@ export class WechatClient {
   async getMessageById(id: string): Promise<Record<string, unknown> | null> {
     try {
       return await this.get(`/api/v1/bot/messages/${encodeURIComponent(id)}`)
-    } catch {
-      return null
+    } catch (error) {
+      if (error instanceof NotFoundError) return null
+      throw error
     }
   }
 
@@ -421,6 +424,10 @@ export class WechatClient {
           let data = ''
           res.on('data', (chunk: string) => { data += chunk })
           res.on('end', () => {
+            if (res.statusCode === 404) {
+              reject(new NotFoundError('消息不存在'))
+              return
+            }
             if (res.statusCode !== undefined && res.statusCode >= 500) {
               reject(new TransientError(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`))
               return

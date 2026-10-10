@@ -440,3 +440,27 @@ it('resumes the same child after its own real Shell finishes, without repeating 
   expect(JSON.stringify(histories[2])).toContain('<bg-notification>')
   expect((await registry.get(shellId))?.exit_notification?.status).toBe('delivered')
 })
+
+
+it('图像初始输入与后续工具图片都到达实际 adapter 请求', async () => {
+  const image = { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/jpeg' as const, data: '/9j/4AAA' } }
+  const requests: any[] = []
+  const adapter: LLMAdapter = { async *stream(params) {
+    requests.push(structuredClone(params.messages))
+    if (requests.length === 1) {
+      yield { type: 'message_start', messageId: 'first' }
+      yield { type: 'tool_use_start', id: 'read-image', name: 'Image' }
+      yield { type: 'tool_use_delta', id: 'read-image', inputJson: '{}' }
+      yield { type: 'tool_use_end', id: 'read-image' }
+      yield { type: 'message_end', stopReason: 'tool_use' }
+    } else { for (const chunk of textResponse('done')) yield chunk }
+  }, updateConfig() {} }
+  const id = await spawnPersistentAgent({ ...baseOpts(adapter), supportsVision: true,
+    prompt: [{ type: 'text', text: '识别高清截图' }, image],
+    tools: [{ name: 'Image', description: 'Image', inputSchema: { type: 'object' }, isReadOnly: true,
+      call: async () => ({ output: 'ready', isError: false, images: [{ media_type: 'image/jpeg', data: '/9j/4AAA' }] }) }],
+  })
+  await waitFor(async () => (await registry.get(id))?.status === 'completed')
+  expect(requests[0][0].content).toContainEqual(image)
+  expect(requests[1].some((m: any) => m.toolResults?.some((r: any) => r.images?.length === 1))).toBe(true)
+})

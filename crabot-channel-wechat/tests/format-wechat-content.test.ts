@@ -153,3 +153,11 @@ describe('formatWechatContent file (type=9 / 1090519089)', () => {
     expect(content.size).toBeUndefined()
   })
 })
+
+
+it('图片引用按需读取，不凭引用快照宣称高清或自动注入图像', () => {
+  for (const url of [undefined, 'https://cdn/old-thumb']) {
+    expect(formatWechatContent(18, { text: '识图', quoted_svr_id: '514607585156521130',
+      quoted_msg_type: 1, quoted_resource_url: url }).content).toMatchObject({ type: 'image', image_quality: 'unknown' })
+  }
+})

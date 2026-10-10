@@ -28,10 +28,16 @@ export class WechatImageFetcher {
       if (params.quality !== 'hd' && params.quality !== 'thumbnail') throw new Error('图片质量参数无效')
       const talker = this.deps.getTalker(params.session_id)
       if (!talker) throw new Error('会话不存在')
-      const message = await this.deps.getMessage(params.platform_message_id)
+      let message = await this.deps.getMessage(params.platform_message_id)
       if (!message) throw new Error('无法查询图片消息：消息不存在或渠道暂不可用')
       if (message.fieldTalker !== talker) throw new Error('图片不属于指定会话')
-      const content = message.content as Record<string, unknown> | undefined
+      let content = message.content as Record<string, unknown> | undefined
+      if ((message.fieldType ?? content?.type) === 18 && typeof content?.quoted_svr_id === 'string') {
+        message = await this.deps.getMessage(content.quoted_svr_id)
+        if (!message) return { status: 'not_ready', image_quality: 'unknown' }
+        if (message.fieldTalker !== talker) throw new Error('图片不属于指定会话')
+        content = message.content as Record<string, unknown> | undefined
+      }
       if (!content || (message.fieldType ?? content.type) !== 1) throw new Error('该消息不是图片')
       const image_quality = content.image_origin === 1 ? 'hd' : content.image_origin === 0 ? 'thumbnail' : 'unknown'
       if (params.quality === 'hd' && image_quality !== 'hd') return { status: 'not_ready', image_quality }

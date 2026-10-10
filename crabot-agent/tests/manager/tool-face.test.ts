@@ -1240,3 +1240,42 @@ describe('按需图片工具的真实装配', () => {
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 })
+
+
+it.each(['ready', 'late'])('微信引用原图 %s：真实主控工具将最新高清 bytes 交给 adapter，storage=null 不扩大权限', async (arrival) => {
+  const { promises: fs } = await import('node:fs')
+  const { WechatImageFetcher } = await import('../../../crabot-channel-wechat/src/image-fetch.js')
+  const dir = await fs.mkdtemp(join(tmpdir(), 'wechat-manager-image-'))
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64')
+  const original = { fieldTalker: 'group', fieldType: 1,
+    content: { type: 1, image_origin: 1, resource_url: 'https://cdn/latest-hd' } }
+  let available = arrival === 'ready'
+  const timer = setTimeout(() => { available = true }, 100)
+  const download = vi.fn(async () => new Response(bytes))
+  vi.stubGlobal('fetch', download)
+  try {
+    const channel = new WechatImageFetcher({ dataDir: dir, getTalker: () => 'group',
+      getMessage: async id => id === 'quote' ? { fieldTalker: 'group', fieldType: 18,
+        content: { quoted_svr_id: '514607585156521130', quoted_resource_url: 'https://cdn/old-thumbnail' } }
+        : available ? original : null,
+    })
+    const rpc = vi.fn(async (_port, method, args) => method === 'get_capabilities'
+      ? { supports_image_fetch: true } : channel.fetch(args))
+    const tools = buildManagerToolFace(makeDeps({ messagingDeps: makeMessagingDeps({ rpcClient: { call: rpc } as never }) }))
+    const requests: any[] = []
+    const adapter: LLMAdapter = { async *stream(params) {
+      requests.push(structuredClone(params.messages))
+      yield* chunksFromContent(requests.length === 1 ? [{ type: 'tool_use', id: 'fetch-hd', name: 'fetch_image',
+        input: { channel_id: 'wechat', session_id: 's', platform_message_id: 'quote' } }]
+        : [{ type: 'text', text: '收到高清图像输入' }], requests.length === 1 ? 'tool_use' : 'end_turn')
+    }, updateConfig() {} }
+    await runEngine({ prompt: '识别引用图片', adapter,
+      options: { model: 'vision', supportsVision: true, tools, suppressForcedSummary: true, maxTurns: 3 } })
+    expect(requests).toHaveLength(2)
+    const result = requests[1].flatMap((message: any) => message.toolResults ?? []).find((r: any) => r.tool_use_id === 'fetch-hd')
+    expect(result.images).toEqual([{ media_type: 'image/png', data: bytes.toString('base64') }])
+    expect(JSON.parse(result.content.slice(result.content.indexOf('\n') + 1))).toMatchObject({ status: 'ready', image_quality: 'hd' })
+    expect(download).toHaveBeenCalledTimes(1)
+    expect(download).toHaveBeenCalledWith('https://cdn/latest-hd', expect.anything())
+  } finally { clearTimeout(timer); vi.unstubAllGlobals(); await fs.rm(dir, { recursive: true, force: true }) }
+})

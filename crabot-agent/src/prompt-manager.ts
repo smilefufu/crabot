@@ -95,7 +95,7 @@ function renderMessageTag(
   if (msg.content.type !== 'text' && msg.content.type !== 'system_event') {
     attrs.push(`media="${msg.content.type}"`)
   }
-  if (msg.content.media_url) attrs.push(`media_url="${escapeAttr(msg.content.media_url)}"`)
+  if (msg.content.media_url && msg.content.image_quality === undefined) attrs.push(`media_url="${escapeAttr(msg.content.media_url)}"`)
   if (msg.content.filename) attrs.push(`filename="${escapeAttr(msg.content.filename)}"`)
   // system_event 单独用 event 属性标记，给 LLM 一眼可识别"这是事件，不是人发的消息"
   if (msg.content.type === 'system_event' && msg.content.event_type) {

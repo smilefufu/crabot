@@ -111,3 +111,18 @@ describe('get_message 媒体字段透出', () => {
     expect(result.status).toBeUndefined()
   })
 })
+
+
+it('微信 get_message 只提供按需取图定位信息，不交付旧缩略图 URL', async () => {
+  const call = vi.fn().mockResolvedValueOnce({
+    platform_message_id: 'original', sender: { platform_user_id: 'u', platform_display_name: 'user' },
+    content: { type: 'image', media_url: 'https://cdn/old-thumbnail', image_quality: 'thumbnail' },
+    features: {}, platform_timestamp: '2026-10-10T12:31:47Z',
+  }).mockResolvedValue({ friend: null })
+  const out = await findTool(buildWorkerMessagingTools(makeDeps(call)), 'get_message').handler({
+    channel_id: 'feishu-1', session_id: 's1', platform_message_id: 'original',
+  })
+  expect(parse(out)).toMatchObject({ platform_message_id: 'original', image_quality: 'thumbnail' })
+  expect(parse(out).image_note).toContain('fetch_image')
+  expect(parse(out).media_url).toBeUndefined()
+})

@@ -20,3 +20,22 @@ describe('微信只呈现图片引用', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 })
+
+
+it('微信入站和嵌套引用的模型投影不暴露旧版本 URL', async () => {
+  const { formatChannelMessageLine } = await import('../../src/prompt-manager.js')
+  const image = {
+    platform_message_id: 'original', session: { channel_id: 'wechat', session_id: 's', type: 'group' },
+    sender: { platform_user_id: 'u', platform_display_name: 'user' },
+    features: { is_mention_crab: false }, platform_timestamp: '2026-10-10T12:31:47Z',
+    content: { type: 'image', media_url: 'https://cdn/old-thumbnail', image_quality: 'thumbnail' },
+  } as ChannelMessage
+  const reply = { ...image, platform_message_id: 'reply', content: { type: 'text', text: '识别引用图片' },
+    features: { is_mention_crab: true, quote_message_id: 'original' } } as ChannelMessage
+  for (const msg of [image, reply]) {
+    const text = formatChannelMessageLine(msg, { timezone: 'UTC', identity: 'friend',
+      quotedMessages: new Map([['original', { msg: image, identity: 'friend' }]]) })
+    expect(text).toContain('fetch_image')
+    expect(text).not.toContain('https://cdn/old-thumbnail')
+  }
+})

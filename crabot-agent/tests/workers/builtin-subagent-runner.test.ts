@@ -9,6 +9,7 @@ import type { LSPManager } from '../../src/lsp/lsp-manager.js'
 import type { SkillConfig, SubAgentConfig } from '../../src/types.js'
 import type { ToolDefinition } from '../../src/engine/types.js'
 import { checkToolPermission } from '../../src/engine/permission-checker.js'
+import { authorizeTool, fileAuthorization } from '../../src/permissions/tool-authorization.js'
 import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
 
 const { createAdapter, spawnPersistentAgent } = vi.hoisted(() => ({
@@ -81,6 +82,33 @@ describe('BuiltinSubagentRunner execution boundary', () => {
   afterEach(async () => {
     delete process.env.DATA_DIR
     await fs.rm(dir, { recursive: true, force: true })
+  })
+
+  it('把授权图片 bytes 与 vision 配置交给子 Agent，保留 task/context', async () => {
+    const bytes = Buffer.from([255, 216, 255, 224, 0, 0])
+    const file = join(dir, 'image.image')
+    await fs.writeFile(file, bytes)
+    const permissions = { ...BUILTIN_WORKER_PERMISSIONS, storage: { workspace_path: dir, access: 'read' as const } }
+    const read = authorizeTool(fakeTool('Read'), fileAuthorization('worker', () => permissions, () => dir, 'file_path', false))
+    spawnPersistentAgent.mockResolvedValue('agent-image')
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+    await runner.run(testSubagent({ model: { ...testSubagent().model, supports_vision: true } }),
+      { task: '识别图片', context: '引用原图', image_paths: [file] },
+      { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } }, [read],
+      { ...executionContext(), resolvedPermissions: permissions, getCwd: () => dir })
+    expect(spawnPersistentAgent.mock.calls[0][0]).toMatchObject({ supportsVision: true, prompt: [
+      { type: 'text', text: '## Parent Context\n引用原图\n\n## Your Task\n识别图片' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: bytes.toString('base64') } },
+    ] })
+  })
+
+  it('图片路径不绕过父 Worker 的文件授权，拒绝时不启动 child', async () => {
+    const runner = new BuiltinSubagentRunner({} as TraceStore, lspManager, undefined, registry)
+    const result = await runner.run(testSubagent({ model: { ...testSubagent().model, supports_vision: true } }),
+      { task: '识别图片', image_paths: ['/unauthorized.jpg'] },
+      { worker_subagent: { worker_id: 'worker-1', parent_trace_id: 'trace-parent' } }, [], executionContext())
+    expect(result).toMatchObject({ isError: true, output: expect.stringContaining('PERMISSION_DENIED') })
+    expect(spawnPersistentAgent).not.toHaveBeenCalled()
   })
 
   it('执行分支派发子 Agent 时保留自身归属和同一权限守卫', async () => {

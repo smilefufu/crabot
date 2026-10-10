@@ -95,3 +95,16 @@ describe('resolveImageFromPaths', () => {
     expect(blocks[1].source.media_type).toBe('image/png')
   })
 })
+
+
+it('委托图片以 bytes 判定 MIME，不把 .image 的 JPEG 冒充 PNG', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'image-path-mime-'))
+  try {
+    const file = path.join(dir, 'download.image')
+    const bytes = Buffer.from([255, 216, 255, 224, 0, 0])
+    await fs.writeFile(file, bytes)
+    expect(await resolveImageFromPaths([file])).toEqual([{ type: 'image', source: {
+      type: 'base64', media_type: 'image/jpeg', data: bytes.toString('base64'),
+    } }])
+  } finally { await fs.rm(dir, { recursive: true, force: true }) }
+})

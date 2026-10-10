@@ -7,6 +7,8 @@ import { createKillTool } from '../../engine/tools/kill-tool.js'
 import { createListEntitiesTool } from '../../engine/tools/list-entities-tool.js'
 import { createAdapter } from '../../engine/llm-adapter.js'
 import { readFile } from 'node:fs/promises'
+import path from 'node:path'
+import { resolveImageFromPaths } from '../../agent/media-resolver.js'
 import { thinkingParam } from '../../engine/llm-adapter-types.js'
 import { spawnPersistentAgent } from '../../engine/bg-entities/bg-agent.js'
 import type { BgEntityRegistry } from '../../engine/bg-entities/registry.js'
@@ -20,7 +22,7 @@ import {
   buildCapabilitiesForSubAgent,
   permissionConfigForSubAgent,
 } from '../../agent/subagent-tool-filter.js'
-import { buildDelegatedTaskPrompt } from '../../agent/delegate-task-tool.js'
+import { buildDelegatedTaskPrompt, type RunSubAgentInput } from '../../agent/delegate-task-tool.js'
 import { assembleSubAgentPrompt } from '../../agent/subagent-prompt-assembler.js'
 import { createBuiltinWorkerHookRegistry } from './runtime.js'
 
@@ -108,7 +110,7 @@ export class BuiltinSubagentRunner {
 
   async run(
     subagent: SubAgentConfig,
-    input: { task: string; context?: string },
+    input: Pick<RunSubAgentInput, 'task' | 'context' | 'image_paths'>,
     context: ToolCallContext,
     parentTools: ReadonlyArray<ToolDefinition>,
     execution: BuiltinSubagentExecutionContext,
@@ -117,6 +119,19 @@ export class BuiltinSubagentRunner {
     const worker = context.worker_subagent
     if (!worker?.parent_trace_id) {
       return { isError: true, output: 'builtin worker subagent trace is unavailable for this incarnation' }
+    }
+    let prompt: string | import('../../engine/types.js').ContentBlock[] = buildDelegatedTaskPrompt(input)
+    if (subagent.model.supports_vision && input.image_paths?.length) {
+      const read = parentTools.find(tool => tool.name === 'Read')?.authorization
+      if (!read?.available()) return { isError: true, output: 'PERMISSION_DENIED: 未授权图片文件读取；由主控通过 fetch_image 直接识别。' }
+      const paths = input.image_paths.map(file => path.resolve(execution.getCwd(), file))
+      for (const file_path of paths) {
+        const decision = await read.check({ file_path })
+        if (!decision.allowed) return { isError: true, output: decision.reason }
+      }
+      const images = await resolveImageFromPaths(paths)
+      if (images.length !== paths.length) return { isError: true, output: '图片文件不可读取或超过大小上限，未启动子 Agent。' }
+      prompt = [{ type: 'text', text: prompt }, ...images]
     }
     const childCapabilities = this.capabilitiesFor(subagent, parentTools, execution)
     const childExecution = {
@@ -174,12 +189,13 @@ export class BuiltinSubagentRunner {
           },
         }
       },
-      prompt: buildDelegatedTaskPrompt(input),
+      prompt,
       task_description: input.task,
       subagent_type: subagent.name,
       tools: childCapabilities.tools,
       systemPrompt: childPrompt,
       model: subagent.model.model_id,
+      supportsVision: subagent.model.supports_vision,
       ...(subagent.model.max_tokens !== undefined ? { maxTokens: subagent.model.max_tokens } : {}),
       ...(thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) !== undefined
         ? { thinking: thinkingParam(subagent.model.thinking_level, subagent.model.thinking_custom) }

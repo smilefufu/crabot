@@ -17,9 +17,15 @@ const SUPPORTED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'i
 export const EMPTY_MESSAGE_PLACEHOLDER = '[非文本消息]'
 type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
 
-export function inferMediaType(mimeType?: string, filePath?: string): ImageMediaType {
+export function inferMediaType(mimeType?: string, filePath?: string, bytes?: Buffer): ImageMediaType {
   if (mimeType && SUPPORTED_MIME_TYPES.has(mimeType)) {
     return mimeType as ImageMediaType
+  }
+  if (bytes) {
+    if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg'
+    if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'image/png'
+    if (/^GIF8[79]a$/.test(bytes.subarray(0, 6).toString())) return 'image/gif'
+    if (bytes.subarray(0, 4).toString() === 'RIFF' && bytes.subarray(8, 12).toString() === 'WEBP') return 'image/webp'
   }
   if (filePath) {
     const ext = filePath.split('.').pop()?.toLowerCase()
@@ -186,7 +192,7 @@ export async function resolveImageFromPaths(
       const buffer = await readImageFile(filePath)
       if (!buffer) return null
 
-      const mediaType = inferMediaType(undefined, filePath)
+      const mediaType = inferMediaType(undefined, filePath, buffer)
       return {
         type: 'image',
         source: {

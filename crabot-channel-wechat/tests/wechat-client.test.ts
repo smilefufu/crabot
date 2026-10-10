@@ -173,3 +173,16 @@ describe('WechatClient.listContacts', () => {
     }
   })
 })
+
+
+it('单条消息只把 404 视为不存在，查询服务故障必须保留为错误', async () => {
+  const { server } = createFakeServer(req => req.url.endsWith('/missing')
+    ? { status: 404, body: { code: -1, message: '消息不存在' } }
+    : { status: 503, body: { code: -1, message: 'unavailable' } })
+  const base = await listen(server)
+  try {
+    const client = new WechatClient(base, 'wct_test')
+    expect(await client.getMessageById('missing')).toBeNull()
+    await expect(client.getMessageById('unavailable')).rejects.toThrow('HTTP 503')
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())) }
+})

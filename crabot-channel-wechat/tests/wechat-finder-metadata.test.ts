@@ -89,7 +89,7 @@ describe('视频号入站与查询', () => {
     internals.rpcClient = { publishEvent }
     const register = vi.spyOn(internals.mediaHandleStore, 'put')
     const stored = {
-      id: 'message-1', fieldType: 13, fieldIsSend: 0,
+      id: 'message-1', fieldType: 13, fieldIsSend: 0, fieldTalker: session.platform_session_id,
       fieldCreateTime: '1789518640000', content: raw,
     }
     internals.client = {

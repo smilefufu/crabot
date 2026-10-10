@@ -46,12 +46,13 @@ export interface SpawnPersistentAgentOpts {
    * 与 task_description 严格分离：曾有 caller 把截断后的展示标签当 prompt 传，
    * 导致 auditor 看不到完整验收标准（2026-06-10 goal audit 死循环事故）。
    */
-  readonly prompt: string
+  readonly prompt: string | import('../types.js').ContentBlock[]
   /** 展示标签——只用于 registry / list_entities / exit notification，不进 LLM 输入。 */
   readonly task_description: string
   readonly tools: ReadonlyArray<ToolDefinition>
   readonly systemPrompt: string
   readonly model: string
+  readonly supportsVision?: boolean
   /** Per-call max output tokens；缺省时让 adapter 走默认行为 */
   readonly maxTokens?: number
   /** 槽位思考强度；缺省 = 跟随模型默认 */
@@ -253,6 +254,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
               },
             } : {}),
             model: opts.model,
+            supportsVision: opts.supportsVision,
             onBeforeLlmCall: execution?.observeTools,
             ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
             ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),

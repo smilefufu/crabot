@@ -1345,12 +1345,12 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
               content_type: result.content?.type ?? 'text',
               // 媒体信息按存在性透出：已下载图片带本地路径（media_url/file_path），未下载文件带
               // handle（配 fetch_media）。只透 text/type 会让 LLM 丢失路径线索、瞎猜 handle。
-              ...(result.content?.media?.length ? { media: result.content.media } : {}),
-              ...(result.content?.media_url ? { media_url: result.content.media_url } : {}),
-              ...(result.content?.file_path ? { file_path: result.content.file_path } : {}),
+              ...(result.content?.image_quality === undefined && result.content?.media?.length ? { media: result.content.media } : {}),
+              ...(result.content?.image_quality === undefined && result.content?.media_url ? { media_url: result.content.media_url } : {}),
+              ...(result.content?.image_quality === undefined && result.content?.file_path ? { file_path: result.content.file_path } : {}),
               ...(result.content?.handle ? { handle: result.content.handle } : {}),
               ...(result.content?.status ? { status: result.content.status } : {}),
-              ...(result.content?.image_quality ? { image_quality: result.content.image_quality } : {}),
+              ...(result.content?.image_quality ? { image_quality: result.content.image_quality, image_note: '图片内容未附带，可用 fetch_image 按需读取高清版本' } : {}),
               timestamp: result.platform_timestamp,
               quote_message_id: result.features?.quote_message_id,
             }),
@@ -1366,7 +1366,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
       name: 'fetch_image',
       description: '按需读取微信图片，默认等待高清版本，最多 120 秒；系统负责等待，无需轮询或让人类重发。' +
         '需要识别账号、小字时用 hd；只有粗略识别才显式选 thumbnail。' +
-        'include_image=false 只取文件路径供交付 Worker，避免主控先看图重复消耗 token。新输入或取消会结束等待。',
+        'include_image=false 仅用于交付已有该文件读取授权的 Worker；Worker 无读取授权时用 include_image=true 由主控直接识别，不扩大权限。新输入或取消会结束等待。',
       schema: FETCH_IMAGE_SCHEMA,
       handler: createImageReader(deps),
     },
