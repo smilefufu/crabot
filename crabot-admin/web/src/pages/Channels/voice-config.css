@@ -1,7 +1,7 @@
 .voice-config { line-height: 1.65; }
 .voice-config h4 { margin: 1.5rem 0 .5rem; }
 .voice-config p { color: var(--text-secondary); font-size: .85rem; overflow-wrap: anywhere; }
-.voice-config [role="alert"] { color: var(--danger, #b42318); }
+.voice-config [role="alert"] { color: var(--error); }
 .voice-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; margin: .8rem 0; }
 .voice-fields label { display: grid; gap: .35rem; font-size: .85rem; }
 .voice-actions { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
