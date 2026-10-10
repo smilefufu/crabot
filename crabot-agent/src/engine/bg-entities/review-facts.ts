@@ -19,13 +19,15 @@ export async function readReviewBackgrounds(
     const facts: unknown[] = []
     for (const record of records.filter(record => record.owner.worker_id === workerId)) {
       const pending = record.exit_notification?.status === 'pending'
-      active ||= record.status === 'running' || record.status === 'stalled' || pending
-      canSkip &&= !pending && record.status !== 'stalled'
+      const uncertain = record.status === 'stalled' && (record.type !== 'agent'
+        || !record.ended_at || !Number.isFinite(Date.parse(record.ended_at)))
+      active ||= record.status === 'running' || uncertain || pending
+      canSkip &&= !pending && !uncertain
       const fact: Record<string, unknown> = {
         id: record.entity_id, owner: record.owner, status: record.status, exit_code: record.exit_code,
-        notification: record.exit_notification?.status,
+        ended_at: record.ended_at, notification: record.exit_notification?.status,
       }
-      if (record.type === 'agent' && record.stop_requested_at) canSkip = false
+      if (record.type === 'agent' && record.status === 'running' && record.stop_requested_at) canSkip = false
       if (record.status === 'running') {
         const file = record.type === 'shell' ? record.log_file : record.output_file
         try {

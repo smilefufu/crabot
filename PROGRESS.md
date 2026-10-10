@@ -7,6 +7,16 @@
 - 能力查询与生产装配共用纯计划，最终请求快照原子保存；Worker/child 页面按具体化身展示，旧缺记录 unknown。UI 解释私聊全量/群增量、作用范围和生效时点；Memory 数据级权限仍由独立任务负责。
 - 定向 Agent 183 项、Admin 65 项（含群退役兼容）、Web 51 项通过；扩大回归 2347 项通过，15 项失败在独立未修改基线同样复现。Shared/Agent/Admin/CLI 和 Web 生产构建通过；未重启本地实例或部署目标 Ubuntu。
 
+### 安卓语音终端与家庭 Channel：端侧分段及ASR归属对照完成，待真实验收
+
+- 用户确定先用安卓手机、不采购硬件；一期端侧完成声纹提取/比对，Crabot负责成员映射及群权限，至少处理无明显静音的连续换人B。先落实技术点，暂缓spec；[替代草案](crabot-docs/superpowers/specs/2026-10-09-android-voice-terminal-design.md)未确认。未改正式协议/产品代码，未重启Crabot。
+- [模型/API研究](crabot-docs/superpowers/research/2026-10-09-voice-models-and-service-apis.md)建议独立ASR/TTS服务，Admin保存引用，音频配置只在voice实例页；服务端点、system mode配对/隔离仍待验证。桌宠ARM主板250–450元、1–2GB仅验证起点估算，未证明承担新增分段。
+- 10月9日OnePlus 7 Pro（Android10/ARM64、约8GB）官方sherpa-onnx 1.13.8 CAM++ APK完成FuFu三段登记；独立录音匹配，用户另报告unknown，来源未确认，不统计准确率。约7.02秒录音单次warm compute约194ms、停止回调299ms，排除下一帧及ASR/LLM/TTS，非P95；ART采样已停。空闲PSS约116→235MiB，非峰值。AC/USB保持唤醒按用户要求设3，原值0。
+- 6组公开样本的手机FP32分段+逐段身份匹配完成：12.48/12.46秒A→B/A→B→A分别1438/1421ms，短样本144–268ms，排除加载/登记/读取/ASR等，单次值不作P95。FP32仍有边界混淆；INT8跨人片段/短B误归A，B未验收。短/长输入路径不同，不能线性外推。
+- 10月10日[Whisper归属基线](crabot-docs/superpowers/research/voice-scenario-b-poc/ASR-ATTRIBUTION.md)54次对照证实整段遗漏不能由时间匹配补回，按片段恢复后继内容但计算约3.71/4.07秒；等长交集无歧义拒识，原生批处理在重叠段触发断言。原始证据保留，边界错误不因继承身份而消失。
+- 同日[中文ASR/短词门控](crabot-docs/superpowers/research/voice-scenario-b-poc/CHINESE-ASR.md)完成90次计算、2次按真实节奏输入、42次有效合成短词/静音及14次VAD对照。SenseVoice片段路线在本机CPU/8线程的12.5秒文件中位158/173ms，保留后继及unknown，成为中文整句主候选；Paraformer首次增量约748/741ms，但无字词时间戳且短词有遗漏/误识。直接SenseVoice对静音产生文字，VAD可过滤；最短语音0.25秒漏“对”、0.10秒保留本组短词，阈值非产品默认。排除手机、真实结束等待、网络、LLM/TTS等，无真人gold，不报准确率/P95；未最终选型。
+- [现场步骤与工具](crabot-docs/superpowers/research/voice-scenario-b-poc/README.md)已就绪；家人到场先只登记FuFu测另一人unknown，再加入另一人测新内容，无需第三人。未开麦或改原App登记；AAC格式转换已用公开样本验证。真人短接话、真实录音导出/客厅逐字归因、多个unknown区分、端侧增量身份与真实结束等待、电耗和完整语音链路仍待验收；单人可测短句、停顿、音量、距离。
+
 ### 未实装远程执行类别隐藏：已本地部署
 
 - `get_execution_capabilities` 与 `get_friend_permissions` 的模型可见权限结果省略 `remote_exec`，避免把未实装类别描述成 SSH 禁令；仅修改结果序列化，原始授权、Worker 快照与实际工具权限保持不变。
@@ -48,12 +58,14 @@
 - 仅调整指南第 4、5 条和完成条件；151/152 定向检查通过，Agent 类型检查与完整 diff review 通过。唯一失败为执行器核心 354 字超过旧 350 字阈值，在原 main 同样复现，未扩大修改范围。
 - 2026-10-02 23:27（Asia/Shanghai）以 main `a324ea65` 完成模块、Web、CLI、MCP 构建及本地重启；新 Agent PID 79586 使用本仓 dist，七模块及端点健康，启动对账 revived=19、failed=0、unchanged=3841。已核实新指南及自省入口装配；真实提醒效果待后续 trace 验证。
 
-### 任务板自省无变化跳过：已部署，待线上行为验证
+### 任务板自省无变化跳过：历史终态缺口已修复，待 review
 
 - 按已确认[设计](crabot-docs/superpowers/specs/2026-10-02-workboard-idle-review-change-gate-design.md)保留首次一小时自省；成功完整查板、没有业务动作或工具错误且执行事实可确定时建立进程内基线。后续无变化只做本地检查，最长八小时重新复核，不追加 episode 或历史，不消费通知、fence 或 Output 游标。
-- 正常 running 的父执行线、child 和 Shell 不再单独阻止跳过；实际文本、业务工具活动、输出文件、状态或配置变化使基线失效。未结算通知、控制回执、stalled、CLI unknown、启动未完成和读取失败仍保留原复核；真实输入照常立即处理，不调整 prompt、Memory 或持久格式。
+- 正常 running 的父执行线、child 和 Shell 不再单独阻止跳过；实际文本、业务工具活动、输出文件、状态或配置变化使基线失效。未结算通知、控制回执、状态未确定的后台实体、CLI unknown、启动未完成和读取失败仍保留原复核；真实输入照常立即处理，不调整 prompt、Memory 或持久格式。
 - 已先复现旧版连续七小时增加 14 次模型请求，修复后同一确定性场景增加 0 次，第八小时恢复自省；覆盖通知不消费、closed 历史不探测、分页资格及比较中输入/活动变化。相关 487 项回归和 Agent 类型检查通过；两个每日反思失败在未修改 main 同样复现，未并入修改。
 - 2026-10-06 17:28:44（Asia/Shanghai）以 main `647e92ef` 构建 Agent 并正常重启本地实例；新 Agent PID 48176 使用本仓 dist，七模块健康，启动对账 revived=20、failed=0、unchanged=3898。已核实八小时准入和后台事实装配的编译产物；首次自省仍需成功建立基线，实际节省与异常及时处理效果留待自然触发后的 trace 验证。
+- 10 月 8 日核实部署后 71 轮自省未发生跳过：历史 `stalled` child 与终态停止标记永久阻挡基线；整体 execution 又把已知中断 child 重标为运行。按已确认[修订](crabot-docs/superpowers/specs/2026-10-08-idle-review-terminal-background-design.md)以结束证据和未结算责任分类，保留 pending、停止中的 child、stalled Shell、CLI unknown 和读取冲突的保守边界，不清理历史记录。
+- 新增 26 项定向回归；原实现复现后台分类、execution 误判及真实组合的重复调用，修复后全部通过。实际 registry/Harness/ManagerRegistry 组合在未 closed 的父 Worker 下，连续七次小时检查零新增 LLM，第八小时复核，新 pending 恢复检查且不消费。8 文件 402 项通过，4 项已有失败在未修改 main 复现；Agent 类型检查通过。代码待 PR review，未部署；线上节省尚未验收，child 流式超时独立处理。
 
 ### Output 等待与活性巡检对齐：已部署，待线上验证
 

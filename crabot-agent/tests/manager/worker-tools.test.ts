@@ -1054,6 +1054,61 @@ describe('主控整体执行观察', () => {
     expect(fake.sendInputCalls).toHaveLength(0)
   })
 
+  it.each([false, true])('已中断child不被后台fallback重新标成运行，pending=%s独立判断', async pending => {
+    const { harness, fake } = await makeHarness({}, {
+      listWorkerBackground: async () => [{ entity_id: 'agent_history', status: 'stalled', ended_at: '2026-09-25T01:00:00Z' }],
+      hasPendingWorkerNotification: async () => pending,
+    })
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const ledger = new LedgerStore(join(dataDir, 'ledgers'))
+    await ledger.upsertWorker(CTX.managerKey, worker.worker_id, current => ({ ...current!,
+      incarnations: current!.incarnations.map(item => ({ ...item, state: 'idle' })) }))
+    Object.assign(fake, { listSubagents: async () => [{ subagent_id: 'agent_history', worker_id: worker.worker_id,
+      executor_impl: 'builtin', name: 'history', status: 'interrupted' }] })
+    expect(await harness.getWorkerExecutionObservation(worker.worker_id)).toMatchObject({
+      state: pending ? 'running' : 'idle', reasons: pending ? ['notification_pending'] : [],
+      active_subagents: [], active_background: [], notification_pending: pending, unavailable_reasons: [],
+    })
+    expect(fake.sendInputCalls).toHaveLength(0)
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it.each(['missing-end', 'invalid-end', 'missing-child', 'read-error', 'owner-mismatch', 'status-conflict', 'end-conflict', 'running-background', 'running-child-stalled', 'running-child-completed'] as const)(
+    '中断child的%s不被当作可信终态', async mode => {
+      const { harness, fake } = await makeHarness({}, {
+        listWorkerBackground: async () => [{ entity_id: 'agent_history', status: mode === 'running-background' ? 'running' : mode === 'running-child-completed' ? 'completed' : 'stalled',
+          ended_at: mode === 'missing-end' ? null : mode === 'invalid-end' ? 'invalid' : '2026-09-25T01:00:00Z' }],
+        hasPendingWorkerNotification: async () => false,
+      })
+      const worker = await harness.spawnWorker(directSpawnParams())
+      Object.assign(fake, { listSubagents: async () => {
+        if (mode === 'read-error') throw new Error('unavailable')
+        if (mode === 'missing-child') return []
+        return [{ subagent_id: 'agent_history', worker_id: mode === 'owner-mismatch' ? 'other' : worker.worker_id,
+          executor_impl: 'builtin', name: 'history', status: mode === 'status-conflict' ? 'completed' : mode.startsWith('running-child') ? 'running' : 'interrupted',
+          ...(mode === 'end-conflict' ? { ended_at: '2026-09-25T02:00:00Z' } : {}) }]
+      } })
+      expect((await harness.getWorkerExecutionObservation(worker.worker_id)).unavailable_reasons)
+        .toContain('background_child_unavailable')
+    })
+
+  it('中断child的Shell仍独立显示在整体执行中', async () => {
+    const { harness, fake } = await makeHarness({}, {
+      listWorkerBackground: async () => [
+        { entity_id: 'agent_history', status: 'stalled', ended_at: '2026-09-25T01:00:00Z' },
+        { entity_id: 'shell_live', status: 'running', ended_at: null },
+      ], hasPendingWorkerNotification: async () => false,
+    })
+    const worker = await harness.spawnWorker(directSpawnParams())
+    Object.assign(fake, { listSubagents: async () => [{ subagent_id: 'agent_history', worker_id: worker.worker_id,
+      executor_impl: 'builtin', name: 'history', status: 'interrupted' }] })
+    const observation = await harness.getWorkerExecutionObservation(worker.worker_id)
+    expect(observation.active_background).toEqual([{ entity_id: 'shell_live', status: 'running' }])
+    expect(observation.reasons).toContain('background_running')
+    expect(observation.reasons).not.toContain('subagent_running')
+    expect(observation.unavailable_reasons).toEqual([])
+  })
+
   it.each(['codex', 'claude-code'] as const)('自动快照不调用 %s 的慢 child 查询，回合事件仍正常投递', async (impl) => {
     const { harness, fake } = await makeHarness({ implId: impl, caps: { subagent: true } }, {
       listWorkerBackground: async () => [],
