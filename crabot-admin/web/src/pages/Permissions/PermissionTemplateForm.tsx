@@ -299,6 +299,7 @@ export const PermissionTemplateForm: React.FC<PermissionTemplateFormProps> = ({
           />
           启用文件访问
         </label>
+        {!form.storage_enabled && <div style={hintStyle}>未授权内置文件范围</div>}
         {form.storage_enabled && (
           <div style={{ display: 'grid', gap: '0.5rem', marginTop: '0.5rem', paddingLeft: '1.5rem' }}>
             <div>
@@ -334,10 +335,10 @@ export const PermissionTemplateForm: React.FC<PermissionTemplateFormProps> = ({
           className="input"
           value={form.memory_scopes_text}
           onChange={e => updateField('memory_scopes_text', e.target.value)}
-          placeholder="留空表示无限制"
+          placeholder="未设置范围"
           disabled={isSystem}
         />
-        <div style={hintStyle}>留空表示无限制，多个 scope 用逗号分隔</div>
+        <div style={hintStyle}>多个 scope 用逗号分隔；这是配置范围，后端数据过滤尚未核实。</div>
       </div>
 
       {/* Actions */}

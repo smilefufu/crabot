@@ -253,7 +253,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
                             workspace_path: friendStoragePath.trim() || DEFAULT_STORAGE_PATH,
                             access: friendStorageAccess,
                           })
-                        : '未开启'}
+                        : '未授权内置文件范围'}
                     </span>
                   </span>
                   <span className="toggle-switch">

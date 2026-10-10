@@ -1082,11 +1082,11 @@ export class WorkerHarness {
 
   private async recordCliProvision(workerId: string, incarnationId: string, impl: WorkerImplId, caps: CapabilityBundle): Promise<void> {
     if (impl === 'builtin' || !this.deps.assertExecutionPolicy) return
-    const facts = { skills: caps.skills.map(skill => skill.name), mcp_servers: caps.mcp_servers.map(server => server.name) }
+    const facts = { skills: caps.skills.map(skill => skill.name), mcp_servers: caps.mcp_servers.map(server => server.name),
+      constraints: ['仅记录 Crabot provision 的 MCP/Skill；原生工具、实际服务连接及宿主状态未知。'] }
     const observation = executionObservation({ role: 'worker', impl, source: 'cli_provision', state: 'assembled',
       worker_id: workerId, incarnation_id: incarnationId, observed_at: this.deps.now(), tools: null, ...facts,
-      revision: createHash('sha256').update(JSON.stringify({ policy_version: 1, impl, ...facts })).digest('hex'),
-      constraints: ['仅记录 Crabot provision 的 MCP/Skill；原生工具、实际服务连接及宿主状态未知。'] })
+      revision: createHash('sha256').update(JSON.stringify({ policy_version: 1, impl, ...facts })).digest('hex') })
     await persistObservation(observationFile(this.deps.workersDir, workerId, incarnationId), observation)
   }
 
@@ -1095,9 +1095,11 @@ export class WorkerHarness {
     const fallback = executionObservation({ role: 'worker', impl, source: 'legacy', state: 'legacy_unknown', worker_id: workerId, incarnation_id: previousId })
     const previous = await readObservation(observationFile(this.deps.workersDir, workerId, previousId), fallback)
     if (previous.state !== 'assembled') return
+    const facts = { skills: previous.skills, mcp_servers: previous.mcp_servers,
+      constraints: [...new Set([...previous.constraints, '接续复用已记录的注入配置，未重建当前配置。'])] }
     await persistObservation(observationFile(this.deps.workersDir, workerId, incarnationId), {
-      ...previous, incarnation_id: incarnationId, observed_at: this.deps.now(),
-      constraints: [...previous.constraints, '接续复用已记录的注入配置，未重建当前配置。'],
+      ...previous, incarnation_id: incarnationId, observed_at: this.deps.now(), ...facts,
+      revision: createHash('sha256').update(JSON.stringify({ policy_version: 1, impl, ...facts })).digest('hex'),
     })
   }
 

@@ -1047,7 +1047,7 @@ export const DialogObjectsPage: React.FC = () => {
                               workspace_path: groupStoragePath.trim() || DEFAULT_STORAGE_PATH,
                               access: groupStorageAccess,
                             })
-                          : '未开启'}
+                          : '未授权内置文件范围'}
                       </span>
                     </span>
                     <span className="toggle-switch">
