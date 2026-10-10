@@ -1211,6 +1211,7 @@ export class UnifiedAgent extends ModuleBase {
             p.sessionId,
             p.sessionType,
             p.friendId,
+            p.accessContext,
           ),
         crabSelfHandle: (channelId) => this.crabSelfHandles.get(channelId),
         getFriend: async (friendId) => {

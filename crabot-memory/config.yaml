@@ -3,7 +3,7 @@
 module_id: memory-default
 module_type: memory
 version: 0.1.0
-protocol_version: 0.1.0
+protocol_version: 0.4.0
 port: 19002
 module_manager_url: http://localhost:19000
 

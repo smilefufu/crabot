@@ -18,7 +18,7 @@ async def test_full_self_learning_flow_skeleton(tmp_path):
     # 1. quick_capture 一批 fact + lesson 到 inbox
     captured_ids = []
     for i in range(3):
-        out = await mod._dispatch("quick_capture", {
+        out = await mod._dispatch("quick_capture", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "visibility": "internal", "scopes": [],
             "type": "fact", "brief": f"事实 {i}", "content": f"内容 {i}",
             "source_ref": {"type": "conversation", "task_id": f"t{i}"},
             "entities": [], "tags": [],
@@ -29,7 +29,7 @@ async def test_full_self_learning_flow_skeleton(tmp_path):
         captured_ids.append(out["id"])
 
     # 2. 用受控状态迁移确认第一条候选。
-    promoted = await mod._dispatch("promote_inbox_entry", {"id": captured_ids[0]})
+    promoted = await mod._dispatch("promote_inbox_entry", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "id": captured_ids[0]})
     assert promoted == {"id": captured_ids[0], "status": "ok"}
 
     # 3. 写入一条直接进入 confirmed 状态的 fact（bypassing inbox），
@@ -52,16 +52,16 @@ async def test_full_self_learning_flow_skeleton(tmp_path):
     confirmed_id = confirmed_out["id"]
 
     # 4. snapshot 应包含至少 1 条 confirmed status 的 fact
-    snap = await mod._dispatch("get_confirmed_snapshot", {})
+    snap = await mod._dispatch("get_confirmed_snapshot", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, })
     assert "snapshot_id" in snap
     fact_briefs = snap["by_type"]["fact"]
     assert any(b["id"] == confirmed_id for b in fact_briefs)
 
     # 5. 跑 run_maintenance（不应出错）
-    rep = await mod._dispatch("run_maintenance", {"scope": "all"})
+    rep = await mod._dispatch("run_maintenance", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "scope": "all"})
     assert "report" in rep
 
     # 6. 设置 evolution mode 后取出
-    await mod._dispatch("set_evolution_mode", {"mode": "harden", "reason": "test"})
-    info = await mod._dispatch("get_evolution_mode", {})
+    await mod._dispatch("set_evolution_mode", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "mode": "harden", "reason": "test"})
+    info = await mod._dispatch("get_evolution_mode", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, })
     assert info["mode"] == "harden"

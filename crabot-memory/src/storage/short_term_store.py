@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -23,9 +24,6 @@ logger = logging.getLogger(__name__)
 def _run_sync(fn):
     """同步函数包装到 executor，避免阻塞事件循环。"""
     return asyncio.get_running_loop().run_in_executor(None, fn)
-
-
-_VIS_ORDER = {"private": 3, "internal": 2, "public": 1}
 
 
 # Python `\w` 在 re.UNICODE 下已覆盖字母/数字/下划线 + CJK Unified Ideographs +
@@ -52,13 +50,12 @@ def _escape_fts_query(query: str) -> str:
     return " OR ".join(f'"{t}"' for t in tokens)
 
 
-def _visibility_filter_sql(min_visibility: Visibility) -> Optional[str]:
-    level = _VIS_ORDER.get(min_visibility, 1)
-    if level >= 2:
-        return "visibility IN ('private', 'internal')"
-    if level >= 1:
-        return "visibility IN ('private', 'internal', 'public')"
-    return None
+def _visibility_filter_sql(min_visibility: Visibility) -> str:
+    return {
+        "private": "m.visibility IN ('private', 'internal', 'public')",
+        "internal": "m.visibility IN ('internal', 'public')",
+        "public": "m.visibility = 'public'",
+    }[min_visibility]
 
 
 class ShortTermStore:
@@ -66,6 +63,7 @@ class ShortTermStore:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._lock = threading.RLock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False：所有 DB 操作通过 _run_sync 进 executor，可能跨线程
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -144,6 +142,12 @@ class ShortTermStore:
         )
         self._conn.commit()
 
+    async def _run(self, fn):
+        def locked():
+            with self._lock:
+                return fn()
+        return await _run_sync(locked)
+
     # ---- 写入 ----
 
     async def add_short_term(self, entry: ShortTermMemoryEntry, vector: Optional[List[float]] = None) -> None:
@@ -153,34 +157,47 @@ class ShortTermStore:
         """
         del vector  # silence unused
         def _do():
-            self._conn.execute(
-                """
-                INSERT OR REPLACE INTO short_term_memory (
-                    id, content, keywords, event_time, persons, entities, topic,
-                    source_type, source_json, refs_json, compressed, visibility,
-                    scopes, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    entry.id,
-                    entry.content,
-                    json.dumps(entry.keywords or [], ensure_ascii=False),
-                    entry.event_time,
-                    json.dumps(entry.persons or [], ensure_ascii=False),
-                    json.dumps(entry.entities or [], ensure_ascii=False),
-                    entry.topic or "",
-                    entry.source.type,
-                    entry.source.model_dump_json(),
-                    json.dumps(entry.refs or {}, ensure_ascii=False),
-                    1 if entry.compressed else 0,
-                    entry.visibility,
-                    json.dumps(entry.scopes or [], ensure_ascii=False),
-                    entry.created_at,
-                ),
-            )
-            self._conn.commit()
+            with self._conn:
+                self._insert_entry(entry)
+        await self._run(_do)
 
-        await _run_sync(_do)
+    def _insert_entry(self, entry: ShortTermMemoryEntry) -> None:
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO short_term_memory (
+                id, content, keywords, event_time, persons, entities, topic,
+                source_type, source_json, refs_json, compressed, visibility,
+                scopes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry.id,
+                entry.content,
+                json.dumps(entry.keywords or [], ensure_ascii=False),
+                entry.event_time,
+                json.dumps(entry.persons or [], ensure_ascii=False),
+                json.dumps(entry.entities or [], ensure_ascii=False),
+                entry.topic or "",
+                entry.source.type,
+                entry.source.model_dump_json(),
+                json.dumps(entry.refs or {}, ensure_ascii=False),
+                1 if entry.compressed else 0,
+                entry.visibility,
+                json.dumps(entry.scopes or [], ensure_ascii=False),
+                entry.created_at,
+            ),
+        )
+
+    async def replace_compressed(self, old_ids: List[str], entries: List[ShortTermMemoryEntry]) -> None:
+        if not entries:
+            raise ValueError("Compression must retain at least one fact")
+
+        def _do():
+            with self._conn:
+                for entry in entries:
+                    self._insert_entry(entry)
+                self._conn.executemany("DELETE FROM short_term_memory WHERE id = ?", [(mid,) for mid in old_ids])
+        await self._run(_do)
 
     # ---- 检索 ----
 
@@ -188,7 +205,7 @@ class ShortTermStore:
         self,
         query: Optional[str] = None,
         limit: int = 20,
-        min_visibility: Visibility = "public",
+        min_visibility: Visibility = "internal",
         accessible_scopes: Optional[List[str]] = None,
         filter_refs: Optional[Dict[str, str]] = None,
         time_range: Optional[Dict[str, Optional[str]]] = None,
@@ -237,6 +254,16 @@ class ShortTermStore:
             clauses.append("topic = ?")
             params.append(filter_topic)
 
+        if accessible_scopes:
+            clauses.append("EXISTS (SELECT 1 FROM json_each(m.scopes) s JOIN json_each(?) a ON s.value = a.value)")
+            params.append(json.dumps(accessible_scopes))
+        for key, value in (filter_refs or {}).items():
+            clauses.append("EXISTS (SELECT 1 FROM json_each(COALESCE(m.refs_json, '{}')) r WHERE r.key = ? AND r.value = ?)")
+            params.extend([key, value])
+        for field, values in [("persons", filter_persons), ("entities", filter_entities)]:
+            if values:
+                clauses.append(f"EXISTS (SELECT 1 FROM json_each(m.{field}) r JOIN json_each(?) f ON r.value = f.value)")
+                params.append(json.dumps(values))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
         if fts_join:
@@ -247,39 +274,22 @@ class ShortTermStore:
         else:
             order = "ORDER BY event_time DESC" if sort_by == "event_time" else ""
 
-        # 用 limit*2 取一波再后过滤，避免后过滤截断不足
+        # All explicit filters run before candidate truncation.
         sql = f"SELECT m.* FROM short_term_memory m {fts_join} {where} {order} LIMIT ?"
-        params.append(limit * 2)
+        params.append(limit)
 
         def _do():
             return list(self._conn.execute(sql, params).fetchall())
 
-        rows = await _run_sync(_do)
+        rows = await self._run(_do)
 
         results: List[ShortTermMemoryEntry] = []
         for row in rows:
             try:
-                # 后过滤：scopes / refs / persons / entities
                 scopes = json.loads(row["scopes"] or "[]")
-                if accessible_scopes is not None and accessible_scopes:
-                    if not any(s in scopes for s in accessible_scopes):
-                        continue
-
                 refs = json.loads(row["refs_json"] or "{}") or None
-                if filter_refs and refs:
-                    if not all(refs.get(k) == v for k, v in filter_refs.items()):
-                        continue
-
                 persons = json.loads(row["persons"] or "[]")
-                if filter_persons:
-                    if not any(p in persons for p in filter_persons):
-                        continue
-
                 entities = json.loads(row["entities"] or "[]")
-                if filter_entities:
-                    if not any(e in entities for e in filter_entities):
-                        continue
-
                 source_data = json.loads(row["source_json"])
                 entry = ShortTermMemoryEntry(
                     id=row["id"],
@@ -300,7 +310,7 @@ class ShortTermStore:
                 if len(results) >= limit:
                     break
             except Exception as e:  # noqa: BLE001
-                logger.warning("Failed to parse short term row: %s", e)
+                logger.warning("Invalid short term metadata; row omitted")
 
         return results
 
@@ -314,7 +324,7 @@ class ShortTermStore:
                 return None
             return {"type": "short", "row": dict(row)}
 
-        return await _run_sync(_do)
+        return await self._run(_do)
 
     async def delete_by_id(self, memory_id: str) -> bool:
         def _do():
@@ -322,7 +332,7 @@ class ShortTermStore:
             self._conn.commit()
             return cur.rowcount > 0
 
-        return await _run_sync(_do)
+        return await self._run(_do)
 
     async def query_old_short_term(
         self,
@@ -344,7 +354,7 @@ class ShortTermStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
-        return await _run_sync(_do)
+        return await self._run(_do)
 
     async def delete_short_term_by_ids(self, ids: List[str]) -> None:
         if not ids:
@@ -356,7 +366,7 @@ class ShortTermStore:
             )
             self._conn.commit()
 
-        await _run_sync(_do)
+        await self._run(_do)
 
     async def rotate_short_term(self, before_time: str) -> None:
         def _do():
@@ -365,7 +375,7 @@ class ShortTermStore:
             )
             self._conn.commit()
 
-        await _run_sync(_do)
+        await self._run(_do)
 
     async def get_all_short_term_rows(self) -> List[Dict[str, Any]]:
         """导出所有短期记忆行。"""
@@ -373,19 +383,20 @@ class ShortTermStore:
             rows = self._conn.execute("SELECT * FROM short_term_memory").fetchall()
             return [dict(r) for r in rows]
 
-        return await _run_sync(_do)
+        return await self._run(_do)
 
     async def clear_all(self) -> None:
         def _do():
             self._conn.execute("DELETE FROM short_term_memory")
             self._conn.commit()
 
-        await _run_sync(_do)
+        await self._run(_do)
 
     def get_short_term_count(self) -> int:
-        return self._conn.execute(
-            "SELECT COUNT(*) FROM short_term_memory"
-        ).fetchone()[0]
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM short_term_memory"
+            ).fetchone()[0]
 
     def close(self) -> None:
         try:

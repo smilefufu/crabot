@@ -87,10 +87,16 @@ def synthesize_rule(
     source_entries, source_scenario, source_outcome = _load_confirmed_source_cases(
         store, index, source_cases,
     )
+    visibility = {entry.frontmatter.visibility for entry in source_entries}
+    if len(visibility) != 1:
+        raise ValueError("case→rule sources must have the same visibility")
+    scopes = sorted({scope for entry in source_entries for scope in entry.frontmatter.scopes})
     now_iso = utc_now_iso_z()
     rule_id = new_memory_id()
     fm = MemoryFrontmatter(
         id=rule_id,
+        visibility=visibility.pop(),
+        scopes=scopes,
         type="lesson",
         maturity="rule",
         brief=brief,

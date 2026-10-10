@@ -59,7 +59,7 @@ async def memory_module():
 @pytest.mark.asyncio
 async def test_write_short_term(memory_module):
     """测试写入短期记忆"""
-    params = WriteShortTermParams(
+    params = WriteShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True}, visibility="public", scopes=[],
         content="测试事件：用户张三请求部署 v1.0.0",
         source=MemorySource(
             type="conversation",
@@ -81,7 +81,7 @@ async def test_write_short_term(memory_module):
 async def test_search_short_term(memory_module):
     """测试检索短期记忆"""
     # 先写入一条记忆
-    write_params = WriteShortTermParams(
+    write_params = WriteShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True}, visibility="public", scopes=[],
         content="测试事件：用户李四请求查看日志",
         source=MemorySource(type="conversation"),
         persons=["李四"],
@@ -90,7 +90,7 @@ async def test_search_short_term(memory_module):
     await memory_module._write_short_term(write_params.model_dump())
 
     # 检索
-    search_params = SearchShortTermParams(
+    search_params = SearchShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True},
         query="日志",
         limit=10,
     )
@@ -125,7 +125,7 @@ async def test_write_long_term(memory_module):
     """测试写入长期记忆 (v2 RPC)"""
     # Long-term v2 lives entirely in _lt_v2_rpc; route via dispatch to mirror
     # the JSON-RPC contract callers actually use.
-    result = await memory_module._dispatch("write_long_term", {
+    result = await memory_module._dispatch("write_long_term", {"access_context": {"actor_kind": "admin", "memory_enabled": True}, "visibility": "internal", "scopes": [],
         "type": "fact",
         "brief": "张三偏好 TypeScript",
         "content": "用户张三偏好使用 TypeScript 进行开发，认为类型安全很重要。",
@@ -185,7 +185,7 @@ async def test_reflection_watermark(memory_module):
 
     # 更新水位
     timestamp = datetime.utcnow().isoformat() + "Z"
-    update_result = await memory_module._update_reflection_watermark({
+    update_result = await memory_module._update_reflection_watermark({"access_context": {"actor_kind": "admin", "memory_enabled": True},
         "last_reflected_at": timestamp
     })
     assert update_result["last_reflected_at"] == timestamp
@@ -209,21 +209,21 @@ async def test_get_stats(memory_module):
 @pytest.mark.asyncio
 async def test_scopes_filtering(memory_module):
     """测试 scopes 权限过滤"""
-    await memory_module._write_short_term(WriteShortTermParams(
+    await memory_module._write_short_term(WriteShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True},
         content="scope-a 的私有信息",
         source=MemorySource(type="conversation"),
         visibility="internal",
         scopes=["scope-a"],
     ).model_dump())
 
-    await memory_module._write_short_term(WriteShortTermParams(
+    await memory_module._write_short_term(WriteShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True},
         content="scope-b 的私有信息",
         source=MemorySource(type="conversation"),
         visibility="internal",
         scopes=["scope-b"],
     ).model_dump())
 
-    result = await memory_module._search_short_term(SearchShortTermParams(
+    result = await memory_module._search_short_term(SearchShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True},
         query="私有信息",
         min_visibility="internal",
         accessible_scopes=["scope-a"],
@@ -238,18 +238,18 @@ async def test_scopes_filtering(memory_module):
 @pytest.mark.asyncio
 async def test_time_range_filter(memory_module):
     """测试时间范围过滤"""
-    await memory_module._write_short_term(WriteShortTermParams(
+    await memory_module._write_short_term(WriteShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True}, visibility="public", scopes=[],
         content="早期事件",
         source=MemorySource(type="conversation"),
         event_time="2026-01-01T00:00:00Z",
     ).model_dump())
-    await memory_module._write_short_term(WriteShortTermParams(
+    await memory_module._write_short_term(WriteShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True}, visibility="public", scopes=[],
         content="近期事件",
         source=MemorySource(type="conversation"),
         event_time="2026-04-01T00:00:00Z",
     ).model_dump())
 
-    result = await memory_module._search_short_term(SearchShortTermParams(
+    result = await memory_module._search_short_term(SearchShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True},
         limit=10,
         time_range={"start": "2026-03-01T00:00:00Z"},
     ).model_dump())
@@ -262,11 +262,11 @@ async def test_time_range_filter(memory_module):
 @pytest.mark.asyncio
 async def test_batch_write_short_term(memory_module):
     """测试批量写入短期记忆"""
-    result = await memory_module._batch_write_short_term({
+    result = await memory_module._batch_write_short_term({"access_context": {"actor_kind": "admin", "memory_enabled": True},
         "entries": [
-            {"content": "批量事件1", "source": {"type": "conversation"}},
-            {"content": "批量事件2", "source": {"type": "conversation"}},
-            {"content": "批量事件3", "source": {"type": "conversation"}},
+            {"visibility": "internal", "scopes": [], "content": "批量事件1", "source": {"type": "conversation"}},
+            {"visibility": "internal", "scopes": [], "content": "批量事件2", "source": {"type": "conversation"}},
+            {"visibility": "internal", "scopes": [], "content": "批量事件3", "source": {"type": "conversation"}},
         ]
     })
     assert result["success_count"] == 3
@@ -282,7 +282,7 @@ async def test_short_term_compression(memory_module):
     memory_module.config.compression.window_size = 5
 
     for i in range(5):
-        await memory_module._write_short_term(WriteShortTermParams(
+        await memory_module._write_short_term(WriteShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True}, visibility="public", scopes=[],
             content=f"事件 {i}: 用户请求操作 {i}",
             source=MemorySource(type="conversation"),
             event_time=f"2026-01-0{i+1}T00:00:00Z",
@@ -301,7 +301,7 @@ async def test_short_term_compression(memory_module):
 @pytest.mark.asyncio
 async def test_export_import_roundtrip(memory_module):
     """测试导出后导入还原 (short_term only; long-term v2 backed up via filesystem)"""
-    await memory_module._write_short_term(WriteShortTermParams(
+    await memory_module._write_short_term(WriteShortTermParams(access_context={"actor_kind": "admin", "memory_enabled": True}, visibility="public", scopes=[],
         content="导出测试短期记忆",
         source=MemorySource(type="conversation"),
     ).model_dump())
@@ -312,7 +312,7 @@ async def test_export_import_roundtrip(memory_module):
     assert "long_term" not in export_result
     assert "revisions" not in export_result
 
-    import_result = await memory_module._import_memories({
+    import_result = await memory_module._import_memories({"access_context": {"actor_kind": "admin", "memory_enabled": True},
         "mode": "replace",
         "data": export_result,
     })
@@ -347,7 +347,7 @@ async def test_get_scene_profile_none(memory_module):
 async def test_upsert_scene_profile_drops_legacy_abstract_overview(memory_module):
     """旧调用方仍可能传 abstract/overview；服务端应静默丢弃且不报错。"""
     result = await memory_module._upsert_scene_profile({
-        "scene": {"type": "global"},
+        "scene": {"type": "friend", "friend_id": "fixture"},
         "label": "global",
         "content": "只有正文",
         "abstract": "旧字段",

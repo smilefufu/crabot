@@ -9,7 +9,8 @@
 
 import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
-import type { RpcClient } from 'crabot-shared'
+import { RpcError, type RpcClient, type MemoryAccessContext, type MemoryDataRpcMethod } from 'crabot-shared'
+import { ConfigLoader } from '../core/config-loader.js'
 
 // ============================================================================
 // 依赖注入接口
@@ -23,6 +24,8 @@ export interface CrabMemoryDeps {
 
 /** 每次任务创建时传入的上下文，用于自动填充 source/visibility/scopes */
 export interface MemoryTaskContext {
+  accessContext: MemoryAccessContext
+  resolveContext?: () => Promise<MemoryTaskContext>
   /** Manager workflow 有关联 task 时传入；普通对话可省。 */
   taskId?: string
   channelId?: string
@@ -75,15 +78,17 @@ export async function resolveSceneAnchorLabel(params: {
   memoryPort: number
   moduleId: string
   scene: { type: 'group_session'; channel_id: string; session_id: string } | { type: 'friend'; friend_id: string }
+  accessContext: MemoryAccessContext
 }): Promise<string> {
-  const result = await params.rpcClient.call<
-    { scene: typeof params.scene },
+  const result = await params.rpcClient.callSensitive<
+    { scene: typeof params.scene; access_context: MemoryAccessContext },
     { profile: { label?: string | null } | null }
   >(
     params.memoryPort,
     'get_scene_profile',
-    { scene: params.scene },
+    { scene: params.scene, access_context: params.accessContext },
     params.moduleId,
+    { authorizationBearer: ConfigLoader.getRuntimeBearer() },
   )
 
   const existingLabel = result?.profile?.label?.trim()
@@ -312,6 +317,23 @@ export function createCrabMemoryServer(
 ): McpServer {
   const { rpcClient, moduleId, getMemoryPort } = deps
 
+  const currentContext = async () => ctx.resolveContext ? ctx.resolveContext() : ctx
+  const callMemory = async <P, R>(port: number, method: MemoryDataRpcMethod, params: P, source: string, configuredScopeFilter = false): Promise<R> => {
+    const current = await currentContext()
+    if (!current.accessContext.memory_enabled) throw new RpcError('FORBIDDEN', 'Memory is disabled')
+    const payload = params as Record<string, unknown>
+    if (['access_context', 'actor_kind', 'memory_enabled'].some(field => Object.prototype.hasOwnProperty.call(payload, field))) {
+      throw new RpcError('INVALID_PARAMS', 'Memory identity fields are host-only')
+    }
+    const writes = method === 'write_long_term' || method === 'quick_capture' || method === 'write_short_term'
+    return rpcClient.callSensitive(port, method, {
+      ...payload,
+      ...(configuredScopeFilter && current.scopes.length > 0 ? { accessible_scopes: current.scopes } : {}),
+      ...(writes ? { visibility: current.visibility, scopes: current.scopes } : {}),
+      access_context: current.accessContext,
+    }, source, { authorizationBearer: ConfigLoader.getRuntimeBearer() })
+  }
+
   const server = createMcpServer({ name: 'crab-memory', version: '1.0.0' })
 
   server.registerTool(
@@ -325,7 +347,7 @@ export function createCrabMemoryServer(
             const memoryPort = await getMemoryPort()
             const brief = args.brief?.trim() || deriveBriefFromContent(args.content)
             const type = args.type ?? 'fact'
-            const result = await rpcClient.call(
+            const result = await callMemory(
               memoryPort,
               'quick_capture',
               {
@@ -383,26 +405,22 @@ export function createCrabMemoryServer(
           try {
             const memoryPort = await getMemoryPort()
             if (args.level === 'short_term') {
-              const result = await rpcClient.call(
+              const result = await callMemory(
                 memoryPort, 'search_short_term',
                 {
                   query: args.query, limit: args.limit,
-                  min_visibility: ctx.visibility,
-                  ...(ctx.scopes.length > 0 ? { accessible_scopes: ctx.scopes } : {}),
                 },
-                moduleId
+                moduleId, true
               ) as { results: Array<{ id: string; content: string; event_time: string; topic?: string }> }
               return { content: [{ type: 'text' as const, text: JSON.stringify({ results: result.results }) }] }
             }
-            const result = await rpcClient.call(
+            const result = await callMemory(
               memoryPort, 'search_long_term',
               {
                 query: args.query, k: args.limit, include: 'brief',
-                min_visibility: ctx.visibility,
-                ...(ctx.scopes.length > 0 ? { accessible_scopes: ctx.scopes } : {}),
                 ...(ctx.taskId ? { task_id: ctx.taskId } : {}),
               },
-              moduleId
+              moduleId, true
             ) as { results: Array<{ id: string; type: string; status: string; brief: string; tags?: string[]; maturity?: string; invalidated?: boolean }> }
             return {
               content: [{ type: 'text' as const, text: JSON.stringify({ results: result.results }) }],
@@ -422,7 +440,7 @@ export function createCrabMemoryServer(
         async (args) => {
           try {
             const memoryPort = await getMemoryPort()
-            const result = await rpcClient.call(
+            const result = await callMemory(
               memoryPort, 'get_memory',
               { id: args.memory_id, include: args.include },
               moduleId
@@ -444,12 +462,12 @@ export function createCrabMemoryServer(
 
   // 透传 helper：统一错误返回格式
   const callRpc = async (
-    method: string,
+    method: MemoryDataRpcMethod,
     params: Record<string, unknown>,
   ): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
     try {
       const memoryPort = await getMemoryPort()
-      const result = await rpcClient.call(memoryPort, method, params, moduleId)
+      const result = await callMemory(memoryPort, method, params, moduleId)
       return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -599,10 +617,10 @@ export function createCrabMemoryServer(
     const memoryPort = await getMemoryPort()
     let label = explicitLabel
     if (!label) {
-      label = await resolveSceneAnchorLabel({ rpcClient, memoryPort, moduleId, scene })
+      label = await resolveSceneAnchorLabel({ rpcClient, memoryPort, moduleId, scene, accessContext: (await currentContext()).accessContext })
     }
     const now = new Date().toISOString()
-    const result = await rpcClient.call<
+    const result = await callMemory<
       Record<string, unknown>,
       { profile: unknown }
     >(

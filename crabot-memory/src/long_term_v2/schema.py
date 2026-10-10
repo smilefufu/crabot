@@ -97,6 +97,9 @@ class MemoryLink(BaseModel):
 
 
 class MemoryFrontmatter(BaseModel):
+    # Missing legacy fields retain the existing shared knowledge behavior.
+    visibility: Literal["private", "internal", "public"] = "internal"
+    scopes: List[str] = Field(default_factory=list)
     id: str
     type: MemType
     maturity: Maturity

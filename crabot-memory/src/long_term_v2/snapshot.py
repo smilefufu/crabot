@@ -8,11 +8,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_confirmed_snapshot(store: MemoryStore, index: SqliteIndex) -> dict:
+def build_confirmed_snapshot(store: MemoryStore, index: SqliteIndex, reader=None) -> dict:
     """返回 {snapshot_id, generated_at, by_type: {fact: [...], lesson: [...], concept: [...]}}。"""
     rows = list(index.iter_all_confirmed_briefs())
     by_type: dict[str, list[dict]] = {"fact": [], "lesson": [], "concept": []}
     for r in rows:
+        if reader is not None and not reader.read(r["id"]):
+            continue
         type_ = r["type"]
         if type_ not in by_type:
             continue

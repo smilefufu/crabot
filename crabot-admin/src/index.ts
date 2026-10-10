@@ -59,6 +59,7 @@ import { canonicalizeJson,
   ProxyManager,
   type ProxyConfig,
   type RpcHandlerContext,
+  type MemoryDataRpcMethod,
   RpcError,
   RpcCallError,
   sha256CanonicalJson,
@@ -930,6 +931,7 @@ export class AdminModule extends ModuleBase {
     // Agent 配置管理
     this.registerMethod('get_agent_config', this.handleGetAgentConfig.bind(this))
     this.registerMethod('resolve_worker_connection', this.handleResolveWorkerConnection.bind(this))
+    this.registerMethod('verify_memory_access', this.handleVerifyMemoryAccess.bind(this))
     this.registerMethod('issue_agent_cli_credential', this.handleIssueAgentCliCredential.bind(this))
     this.registerMethod('consume_workboard_admin_assertion', this.handleConsumeWorkboardAdminAssertion.bind(this))
     this.registerMethod('consume_worker_operation_assertion', this.handleConsumeWorkerOperationAssertion.bind(this))
@@ -2741,6 +2743,10 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      if (pathname.startsWith('/api/memory/') || pathname.startsWith('/api/scene-profiles')) {
+        await this.requireHumanMemoryBearer(req)
+      }
+
       // Memory v2 图谱重建：触发一次性 worker 任务全量重建记忆关联链接。
       // 必须在通用 memoryV2Router dispatch 之前——该 router 只持有 memory 模块 RPC，
       // 不能创建 admin 侧 task；重建语义是建一条 pending worker 任务。
@@ -2757,7 +2763,7 @@ export class AdminModule extends ModuleBase {
         const bodyText = req.method && ['POST', 'PATCH', 'PUT'].includes(req.method)
           ? JSON.stringify(await this.readJsonBody<unknown>(req).catch(() => ({})))
           : undefined
-        const r = await this.memoryV2Router.dispatch(req.method ?? 'GET', req.url ?? '', bodyText)
+        const r = await this.memoryV2Router.dispatch(req.method ?? 'GET', req.url ?? '', bodyText, await this.requireHumanMemoryBearer(req))
         res.writeHead(r.status, { 'Content-Type': 'application/json' })
         if (r.status !== 204) res.end(JSON.stringify(r.body))
         else res.end()
@@ -2887,6 +2893,11 @@ export class AdminModule extends ModuleBase {
       res.writeHead(404)
       res.end(JSON.stringify({ error: 'Not found' }))
     } catch (error) {
+      if (error instanceof RpcError && ['UNAUTHORIZED', 'FORBIDDEN'].includes(error.code)) {
+        res.writeHead(error.code === 'UNAUTHORIZED' ? 401 : 403)
+        res.end(JSON.stringify({ error: error.code }))
+        return
+      }
       console.error('[Admin] API error:', error)
       res.writeHead(500)
       res.end(JSON.stringify({ error: 'Internal server error' }))
@@ -10304,6 +10315,44 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  private async handleVerifyMemoryAccess(
+    params: { caller_kind?: unknown },
+    context?: RpcHandlerContext,
+  ): Promise<{ verified: true }> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing Memory credential')
+    if (params.caller_kind === 'admin_web') {
+      const payload = await verifyJwtWithEpoch(bearer, this.jwtSecret, this.adminConfig.data_dir)
+      if (!payload) throw new RpcError('UNAUTHORIZED', 'Invalid Admin credential')
+      if (payload.sub !== 'admin' || payload.agent_cli) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
+    } else if (params.caller_kind === 'core_agent') {
+      try {
+        await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime',
+          { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer })
+      } catch (error) {
+        const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+        if (code === 'UNAUTHORIZED' || code === 'FORBIDDEN') throw new RpcError(code, 'Invalid core Agent credential')
+        throw new RpcError('SERVICE_UNAVAILABLE', 'Memory verifier unavailable', { retryable: true })
+      }
+    } else {
+      throw new RpcError('INVALID_PARAMS', 'Invalid Memory caller kind')
+    }
+    return { verified: true }
+  }
+
+  private async requireHumanMemoryBearer(req: IncomingMessage): Promise<string> {
+    const authorization = req.headers.authorization
+    const bearer = typeof authorization === 'string' && authorization.startsWith('Bearer ') ? authorization.slice(7) : undefined
+    await this.handleVerifyMemoryAccess({ caller_kind: 'admin_web' }, { authorizationBearer: bearer })
+    return bearer!
+  }
+
+  private async callMemoryAsAdmin<P, R>(req: IncomingMessage, port: number, method: MemoryDataRpcMethod, params: P): Promise<R> {
+    const bearer = await this.requireHumanMemoryBearer(req)
+    return this.rpcClient.callSensitive(port, method, { ...params, access_context: { actor_kind: 'admin', memory_enabled: true } },
+      this.config.moduleId, { authorizationBearer: bearer })
+  }
+
   /**
    * §6.5/§3.19.12 resolve_worker_connection：Agent-only、operation-time 实时解析。
    * - runtime bearer 先经 MM verify_core_agent_runtime 验证 exact core Agent；
@@ -11449,61 +11498,59 @@ export class AdminModule extends ModuleBase {
     res.end(JSON.stringify({ items: this.memoryModules }))
   }
 
-  private async handleGetMemoryStatsApi(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  private async handleGetMemoryStatsApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<Record<string, never>, unknown>(
-      port, 'get_stats', {}, this.config.moduleId
+    const result = await this.callMemoryAsAdmin<Record<string, never>, unknown>(
+      req, port, 'get_stats', {}
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
   }
 
-  private async handleSearchShortTermApi(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  private async handleSearchShortTermApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const q = url.searchParams.get('q') ?? undefined
     const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
     const friendId = url.searchParams.get('friend_id') ?? undefined
     const accessibleScopes = this.parseAccessibleScopes(url)
     const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{
+    const result = await this.callMemoryAsAdmin<{
       query?: string
       limit: number
       filter?: { refs?: Record<string, string> }
       accessible_scopes?: string[]
     }, unknown>(
-      port,
+      req, port,
       'search_short_term',
       {
         query: q,
         limit,
         ...(friendId ? { filter: { refs: { friend_id: friendId } } } : {}),
         ...(accessibleScopes ? { accessible_scopes: accessibleScopes } : {}),
-      },
-      this.config.moduleId
+      }
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
   }
 
-  private async handleGetMemoryApi(_req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {
+  private async handleGetMemoryApi(req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{ memory_id: string }, unknown>(
-      port, 'get_memory', { memory_id: memoryId }, this.config.moduleId
+    const result = await this.callMemoryAsAdmin<{ id: string }, unknown>(
+      req, port, 'get_memory', { id: memoryId }
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
   }
 
-  private async handleListSceneProfilesByMemoryApi(_req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {
+  private async handleListSceneProfilesByMemoryApi(req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{ memory_id: string }, unknown>(
-      port,
+    const result = await this.callMemoryAsAdmin<{ memory_id: string }, unknown>(
+      req, port,
       'list_scene_profiles_by_memory',
       { memory_id: memoryId },
-      this.config.moduleId,
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
@@ -11532,17 +11579,17 @@ export class AdminModule extends ModuleBase {
     return scopes
   }
 
-  private async handleDeleteMemoryApi(_req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {
+  private async handleDeleteMemoryApi(req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{ memory_id: string }, unknown>(
-      port, 'delete_memory', { memory_id: memoryId }, this.config.moduleId
+    const result = await this.callMemoryAsAdmin<{ id: string }, unknown>(
+      req, port, 'delete_memory', { id: memoryId }
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
   }
 
-  private async handleListSceneProfilesApi(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  private async handleListSceneProfilesApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const sceneType = url.searchParams.get('scene_type') ?? undefined
     const limit = parseInt(url.searchParams.get('limit') ?? '100', 10)
@@ -11550,19 +11597,19 @@ export class AdminModule extends ModuleBase {
     const port = await this.getMemoryPort(moduleId)
     const params: { scene_type?: string; limit: number; offset: number } = { limit, offset }
     if (sceneType) params.scene_type = sceneType
-    const result = await this.rpcClient.call<typeof params, unknown>(
-      port, 'list_scene_profiles', params, this.config.moduleId
+    const result = await this.callMemoryAsAdmin<typeof params, unknown>(
+      req, port, 'list_scene_profiles', params
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
   }
 
-  private async handleGetSceneProfileApi(_req: IncomingMessage, res: ServerResponse, url: URL, key: string): Promise<void> {
+  private async handleGetSceneProfileApi(req: IncomingMessage, res: ServerResponse, url: URL, key: string): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const scene = parseSceneKey(key)
     const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{ scene: SceneIdentity }, unknown>(
-      port, 'get_scene_profile', { scene }, this.config.moduleId
+    const result = await this.callMemoryAsAdmin<{ scene: SceneIdentity }, unknown>(
+      req, port, 'get_scene_profile', { scene }
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
@@ -11580,10 +11627,10 @@ export class AdminModule extends ModuleBase {
     const port = await this.getMemoryPort(moduleId)
 
     // 先取现有画像
-    const getResult = await this.rpcClient.call<
+    const getResult = await this.callMemoryAsAdmin<
       { scene: SceneIdentity },
       { profile: { scene: SceneIdentity; label: string; content: string; created_at: string; updated_at: string; last_declared_at?: string | null; source_memory_ids?: string[] | null } | null }
-    >(port, 'get_scene_profile', { scene }, this.config.moduleId)
+    >(req, port, 'get_scene_profile', { scene })
 
     const now = new Date().toISOString()
     const existing = getResult.profile
@@ -11611,19 +11658,19 @@ export class AdminModule extends ModuleBase {
       last_declared_at: existing?.last_declared_at ?? null,
     }
 
-    const result = await this.rpcClient.call<typeof upsertParams, unknown>(
-      port, 'upsert_scene_profile', upsertParams, this.config.moduleId
+    const result = await this.callMemoryAsAdmin<typeof upsertParams, unknown>(
+      req, port, 'upsert_scene_profile', upsertParams
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
   }
 
-  private async handleDeleteSceneProfileApi(_req: IncomingMessage, res: ServerResponse, url: URL, key: string): Promise<void> {
+  private async handleDeleteSceneProfileApi(req: IncomingMessage, res: ServerResponse, url: URL, key: string): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const scene = parseSceneKey(key)
     const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{ scene: SceneIdentity }, unknown>(
-      port, 'delete_scene_profile', { scene }, this.config.moduleId
+    const result = await this.callMemoryAsAdmin<{ scene: SceneIdentity }, unknown>(
+      req, port, 'delete_scene_profile', { scene }
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
@@ -11737,7 +11784,8 @@ export class AdminModule extends ModuleBase {
       const categories = (body.categories ?? []).filter((c): c is BackupCategory =>
         (BACKUP_CATEGORIES as readonly string[]).includes(c))
 
-      const deps = this.buildCrabotImportDeps(archivePath, onConflict)
+      if (categories.includes('memory')) await this.requireHumanMemoryBearer(req)
+      const deps = this.buildCrabotImportDeps(archivePath, onConflict, req)
       const summary = await runCrabotImport({ archivePath, categories, onConflict, deps })
 
       res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -11755,7 +11803,7 @@ export class AdminModule extends ModuleBase {
    * provider/mcp/subagent/template/channel 走各 manager 的 upsertById（Phase B）；
    * friend/task/sessionConfig/schedule 直接对 this.<Map> 单条 upsert（finalize 时 saveData 落盘）。
    */
-  private buildCrabotImportDeps(archivePath: string, onConflict: OnConflict): ImportDeps {
+  private buildCrabotImportDeps(archivePath: string, onConflict: OnConflict, req: IncomingMessage): ImportDeps {
     return {
       upsertProvider: async (r) => this.modelProviderManager.upsertById(r as ModelProvider, onConflict),
       upsertMcp: async (r) => this.mcpServerManager.upsertById(r as MCPServerRegistryEntry, onConflict),
@@ -11801,7 +11849,7 @@ export class AdminModule extends ModuleBase {
         return exists ? 'overwritten' : 'imported'
       },
       importSkills: async (archivePath2, oc) => this.importSkillsFromArchive(archivePath2, oc),
-      importMemory: async (archivePath2, oc) => this.importMemoryFromArchive(archivePath2, oc),
+      importMemory: async (archivePath2, oc) => this.importMemoryFromArchive(req, archivePath2, oc),
       finalize: async () => {
         await this.saveData()
         await this.saveTasks()
@@ -11968,9 +12016,11 @@ export class AdminModule extends ModuleBase {
    * onConflict='overwrite' → mode='replace'；否则 mode='merge'。
    */
   private async importMemoryFromArchive(
+    req: IncomingMessage,
     archivePath: string,
     onConflict: OnConflict,
   ): Promise<ImportItemResult[]> {
+    await this.requireHumanMemoryBearer(req)
     const results: ImportItemResult[] = []
     const mode = onConflict === 'overwrite' ? 'replace' : 'merge'
     const memoryPort = await this.getMemoryPort()
@@ -11991,10 +12041,10 @@ export class AdminModule extends ModuleBase {
     }
     if (ltEntries.length > 0) {
       try {
-        const res = await this.rpcClient.call<
+        const res = await this.callMemoryAsAdmin<
           { entries: Array<{ status: string; markdown: string }>; mode: string },
           { imported: number; skipped: number; overwritten: number }
-        >(memoryPort, 'import_long_term', { entries: ltEntries, mode }, this.config.moduleId)
+        >(req, memoryPort, 'import_long_term', { entries: ltEntries, mode })
         results.push({ kind: 'memory', id: 'long_term', status: 'imported',
           reason: `imported=${res.imported} skipped=${res.skipped} overwritten=${res.overwritten}` })
       } catch (err) {
@@ -12007,8 +12057,8 @@ export class AdminModule extends ModuleBase {
     if (shortText !== null) {
       try {
         const data = JSON.parse(shortText)
-        await this.rpcClient.call<{ data: unknown; mode: string }, unknown>(
-          memoryPort, 'import_memories', { data, mode }, this.config.moduleId,
+        await this.callMemoryAsAdmin<{ data: unknown; mode: string }, unknown>(
+          req, memoryPort, 'import_memories', { data, mode },
         )
         results.push({ kind: 'memory', id: 'short_term', status: 'imported' })
       } catch (err) {
@@ -12019,7 +12069,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleBackupExportApi(
-    _req: IncomingMessage,
+    req: IncomingMessage,
     res: ServerResponse,
     url: URL,
   ): Promise<void> {
@@ -12034,6 +12084,8 @@ export class AdminModule extends ModuleBase {
       return
     }
 
+    if (categories.includes('memory')) await this.requireHumanMemoryBearer(req)
+
     const ts = new Date().toISOString().replace(/[:.]/g, '-')
     const outPath = path.join(os.tmpdir(), `crabot-backup-${ts}.tar.gz`)
     const stagingRoot = path.join(os.tmpdir(), `crabot-backup-staging-${ts}`)
@@ -12043,7 +12095,7 @@ export class AdminModule extends ModuleBase {
       if (categories.includes('memory')) {
         exportShortTermMemory = async () => {
           const memoryPort = await this.getMemoryPort()
-          return this.rpcClient.call(memoryPort, 'export_memories', {}, this.config.moduleId)
+          return this.callMemoryAsAdmin(req, memoryPort, 'export_memories', {})
         }
       }
       await exportArchive({

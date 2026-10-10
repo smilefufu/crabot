@@ -40,8 +40,8 @@ import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 /** 最小 crab-memory server(照抄 tests/manager/registry.test.ts)。 */
 function makeMemoryServer() {
   return createCrabMemoryServer(
-    { rpcClient: { call: vi.fn() } as never, moduleId: 'manager-bootstrap-test', getMemoryPort: async () => 19100 },
-    { visibility: 'internal', scopes: [], isMasterPrivate: false },
+    { rpcClient: { callSensitive: vi.fn(), call: vi.fn() } as never, moduleId: 'manager-bootstrap-test', getMemoryPort: async () => 19100 },
+    { accessContext: { actor_kind: 'conversation', memory_enabled: true }, visibility: 'internal', scopes: [], isMasterPrivate: false },
   )
 }
 
@@ -594,12 +594,13 @@ describe('manager bootstrap（P5 Task 1）', () => {
         managerAdapter: () => searchMemoryScript(),
         principalResolver: {
           ...makePrincipalResolver(),
+          getFriend: async id => ({ ...FRIEND_A, id }),
           resolvePermissions: async () => ({
             tool_access: {
               memory: true, messaging: true, task: true, mcp_skill: true,
               file_io: true, browser: true, shell: true, remote_exec: false, desktop: false,
             },
-            cli_access: Object.fromEntries(CLI_DOMAINS.map((d) => [d, 'none'])) as never,
+            cli_access: Object.fromEntries(CLI_DOMAINS.map((d) => [d, d === 'schedule' ? 'write' : 'none'])) as never,
             storage: null,
             memory_scopes: p.memoryScopes,
           }),
@@ -608,7 +609,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
           createCrabMemoryServer(
             {
               rpcClient: {
-                call: async (_port: number, method: string, params: Record<string, unknown>) => {
+                callSensitive: async (_port: number, method: string, params: Record<string, unknown>) => {
                   memoryCalls.push({ method, params })
                   return { results: [] }
                 },
@@ -632,7 +633,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(search, '真实工具面上的 search_memory 应当打到 memory 模块').toBeDefined()
     // 可见范围就是这个 friend 的 scopes，不是"全公开"
     expect(search!.params.accessible_scopes).toEqual(['team-x'])
-    expect(search!.params.min_visibility).toBe('internal')
+    expect(search!.params.access_context).toMatchObject({ actor_kind: 'conversation', memory_enabled: true })
   })
 
   it('群聊里 friend 没配 scopes → 可见范围收敛到本群，读不到别的群的内容', async () => {
@@ -642,6 +643,19 @@ describe('manager bootstrap（P5 Task 1）', () => {
 
     const search = memoryCalls.find((c) => c.method === 'search_short_term')
     expect(search!.params.accessible_scopes).toEqual(['sess-boot'])
+  })
+  it('scheduled Memory uses the current creator, independent of a cached human principal at the same target', async () => {
+    const { stack, memoryCalls } = makeStackWithPrincipal({ memoryScopes: ['team-x'], sessionType: 'private' })
+    try {
+      await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('建立缓存')], FRIEND_A)
+      memoryCalls.length = 0
+      await stack.registry.routeSchedule({ scheduleId: 'memory-schedule', triggerId: 'memory-trigger', scheduleName: 'memory',
+        title: 'memory', description: '查记忆', creatorFriendId: 'scheduled-friend',
+        targetSession: { channel_id: 'wechat', session_id: 'sess-boot', type: 'private' } })
+      const search = memoryCalls.find(call => call.method === 'search_short_term')!
+      expect(search.params.access_context).toEqual({ actor_kind: 'conversation', memory_enabled: true,
+        scene: { type: 'friend', friend_id: 'scheduled-friend' } })
+    } finally { await stack.dispose() }
   })
 
   it('权限解析失败时不能调用 Memory 入口', async () => {
@@ -654,7 +668,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
           createCrabMemoryServer(
             {
               rpcClient: {
-                call: async (_p: number, method: string, params: Record<string, unknown>) => {
+                callSensitive: async (_p: number, method: string, params: Record<string, unknown>) => {
                   memoryCalls.push({ method, params })
                   return { results: [] }
                 },
@@ -700,7 +714,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       memoryServerFor: (ctx) => createCrabMemoryServer(
         {
           rpcClient: {
-            call: async (_port: number, method: string, params: Record<string, unknown>) => {
+            callSensitive: async (_port: number, method: string, params: Record<string, unknown>) => {
               memoryCalls.push({ method, params })
               return { results: [] }
             },
@@ -719,7 +733,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     })
 
     const search = memoryCalls.find((call) => call.method === 'search_short_term')
-    expect(search!.params.min_visibility).toBe('internal')
+    expect(search!.params.access_context).toMatchObject({ actor_kind: 'conversation', memory_enabled: true })
     expect(search!.params.accessible_scopes).toEqual(['human-private-scope'])
   })
 
@@ -1019,7 +1033,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       script = spawnOnce()
       await stack.registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'sess-boot', text: '后台任务完成' })
       expect(await stack.ledger.listAllWorkers()).toHaveLength(0)
-      expect(contexts.at(-1)).toMatchObject({ visibility: 'internal', scopes: ['sess-boot'], isMasterPrivate: false })
+      expect(contexts.at(-1)).toMatchObject({ visibility: 'internal', scopes: [], isMasterPrivate: false, accessContext: { memory_enabled: false } })
     } finally { await stack.dispose() }
   })
 

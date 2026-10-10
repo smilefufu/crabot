@@ -315,26 +315,24 @@ function channelSessionFromManagerKey(key: ManagerKey): { channel_id: string; se
  * 落地过一遍,这里不另发明):`visibility`/`scopes` 取写入档位、`isMasterPrivate` 决定
  * `scene_profile` 工具要不要暴露 scene 参数。
  *
- * 会话主体不可用时只保留本会话的 internal 范围，不能因非人类唤醒退回 public。
- * 独立 system-tasks 线程保留自身的系统契约。
+ * 会话主体不可用时禁用 Memory；内置角色由当前 episode 单独组装。
  */
 function memoryContextFor(key: ManagerKey, resolved: ResolvedPrincipal | undefined): MemoryTaskContext {
   const { channelId, sessionId } = splitManagerKey(key)
-  if (!resolved) {
-    return key === SYSTEM_TASKS_MANAGER_KEY
-      ? { channelId, sessionId, visibility: 'public', scopes: [], sourceType: 'system', isMasterPrivate: false }
-      : { channelId, sessionId, visibility: 'internal', scopes: [sessionId], sourceType: 'conversation', isMasterPrivate: false }
-  }
-  const { principal, memory } = resolved
+  const memory = resolved?.memory
+  const principal = resolved?.principal
+  const scene = principal?.sessionType === 'group'
+    ? { type: 'group_session' as const, channel_id: channelId, session_id: sessionId }
+    : principal?.friend ? { type: 'friend' as const, friend_id: principal.friend.id } : undefined
   return {
-    channelId,
-    sessionId,
-    visibility: memory.write_visibility,
-    scopes: [...memory.write_scopes],
+    channelId, sessionId,
+    visibility: memory?.write_visibility ?? 'internal',
+    scopes: [...(memory?.write_scopes ?? [])],
     sourceType: 'conversation',
-    sessionType: principal.sessionType,
-    ...(principal.friend ? { senderFriendId: principal.friend.id } : {}),
-    isMasterPrivate: principal.friend?.permission === 'master' && principal.sessionType === 'private',
+    sessionType: principal?.sessionType,
+    ...(principal?.friend ? { senderFriendId: principal.friend.id } : {}),
+    isMasterPrivate: false,
+    accessContext: { actor_kind: 'conversation', memory_enabled: resolved?.permissions?.tool_access.memory === true, ...(scene ? { scene } : {}) },
   }
 }
 
@@ -781,6 +779,35 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         ...(scheduleIdentity?.isBuiltin !== undefined ? { isBuiltin: scheduleIdentity.isBuiltin } : {}),
         ...(managerPermissions ? { permissions: managerPermissions } : {}),
       }
+      const builtinActor = profile === 'daily_reflection' ? 'builtin_reflection'
+        : profile === 'memory_graph_rebuild' ? 'builtin_graph_rebuild' : undefined
+      const memoryPrincipal = scheduleIdentity ? undefined : managerPrincipal
+      const baseMemory = memoryContextFor(key, memoryPrincipal)
+      const memoryScene = targetSessionType === 'group'
+        ? { type: 'group_session' as const, channel_id: scheduleTarget!.channel_id, session_id: scheduleTarget!.session_id }
+        : scheduleCreatorFriendId ? { type: 'friend' as const, friend_id: scheduleCreatorFriendId } : baseMemory.accessContext.scene
+      const makeMemoryContext = (permissions: ResolvedPermissions | undefined, master: boolean): MemoryTaskContext => ({
+        ...baseMemory,
+        sessionType: targetSessionType,
+        senderFriendId: scheduleCreatorFriendId,
+        scopes: [...(permissions?.memory_scopes ?? [])],
+        isMasterPrivate: master,
+        sourceType: builtinActor ? 'reflection' : 'conversation',
+        accessContext: { actor_kind: builtinActor ?? (master ? 'master_private' : 'conversation'),
+          memory_enabled: builtinActor !== undefined || permissions?.tool_access.memory === true,
+          ...(memoryScene ? { scene: memoryScene } : {}) },
+      })
+      const memoryContext = makeMemoryContext(managerPermissions, !!scheduleMasterAuthorization)
+      memoryContext.resolveContext = async () => {
+        if (builtinActor) return makeMemoryContext(managerPermissions, false)
+        if (!scheduleTarget) return makeMemoryContext(undefined, false)
+        const fresh = await deps.principalResolver.resolvePermissions({
+          ...(scheduleTarget.type === 'private' && scheduleCreatorFriendId ? { senderFriendId: scheduleCreatorFriendId } : {}),
+          channelId: scheduleTarget.channel_id, sessionId: scheduleTarget.session_id, sessionType: scheduleTarget.type,
+        })
+        const master = !!scheduleMasterAuthorization && await principals.validateMasterAuthorization(scheduleMasterAuthorization)
+        return makeMemoryContext(applyGroupScopeFallback(fresh, scheduleTarget.type, scheduleTarget.session_id) ?? undefined, master)
+      }
       return buildManagerToolFace({
         dailyReflection: dailyReflectionFor(key),
         describeExecutionTools: deps.describeExecutionTools,
@@ -829,10 +856,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         sessionChannelsFor: traceHooks?.sessionChannelsFor,
         onObservedSessionTargets: traceHooks?.onObservedSessionTargets,
         onPostSendAction: traceHooks?.onPostSendAction,
-        // 记忆档位按**这个会话最近一次解析出来的发起人身份**现建。这里刻意不用
-        // `humanPrincipal`:worker 事件唤醒的 episode 里没人说话,但该会话的记忆可见范围
-        // 并不因此改变——它是会话属性,不是本轮属性。
-        memoryServer: deps.memoryServerFor(memoryContextFor(key, principals.get(key))),
+        // 当前 episode 的目标/角色；每次 Memory 调用重新校验权限和 MasterAuthorization。
+        memoryServer: deps.memoryServerFor(memoryContext),
         callAdmin: deps.callAdmin,
         getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
         profile,

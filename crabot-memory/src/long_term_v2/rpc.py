@@ -1,5 +1,6 @@
 """Long-term v2 RPC handlers."""
 import logging
+import yaml
 from datetime import datetime, timezone
 
 from src.long_term_v2.maintenance import run_maintenance as _run_maintenance, MaintenanceConfig
@@ -25,6 +26,7 @@ from src.long_term_v2.recall_pipeline import RecallPipeline
 from src.long_term_v2.agentic_tools import AgenticTools
 from src.long_term_v2.lifecycle import move_entry
 from src.types import ImportLongTermParams
+from src.access import MemoryReader, MemoryAccessError, validate_scopes, access_context
 
 
 logger = logging.getLogger(__name__)
@@ -59,8 +61,18 @@ class LongTermV2Rpc:
         )
         self.tools = AgenticTools(store=store, index=index)
 
+    def _reader(self, params: dict) -> MemoryReader:
+        return MemoryReader(self.store, self.index, params)
+
     async def write_long_term(self, params: dict) -> dict:
+        context = access_context(params)
+        if params.get("visibility") == "private" and context.actor_kind == "conversation":
+            raise MemoryAccessError("FORBIDDEN", "Private write requires trusted identity")
         mem_id = params.get("id") or new_memory_id()
+        if self.index.get_row(mem_id) is not None:
+            if self._reader(params).read(mem_id) is None:
+                return {"error": "not found"}
+            raise MemoryAccessError("CONFLICT", "Existing memory requires update_long_term")
         status = params.get("status", "inbox")
         now_iso = utc_now_iso_z()
         entities = [EntityRef(**e) for e in params.get("entities", [])]
@@ -68,6 +80,8 @@ class LongTermV2Rpc:
         lesson_meta = LessonMeta(**lesson_meta_raw) if lesson_meta_raw else None
         fm = MemoryFrontmatter(
             id=mem_id,
+            visibility=params.get("visibility", "internal"),
+            scopes=validate_scopes(params.get("scopes", [])),
             type=params["type"],
             maturity=params.get("maturity") or default_maturity_fresh(params["type"]),
             brief=params["brief"],
@@ -102,10 +116,12 @@ class LongTermV2Rpc:
         recent_entities = params.get("recent_entities") or []
         task_id = params.get("task_id")  # NEW: 召回所属 task，反馈链路用
 
+        reader = self._reader(params)
         results = await self.pipeline.recall(
             query=query, k=k, filters=filters, recent_entities=recent_entities,
             include_outdated=include_outdated,
             enable_graph_expansion=enable_graph_expansion,
+            reader=reader,
         )
 
         # Phase 3 T18: bump use_count for lesson hits only.
@@ -126,14 +142,18 @@ class LongTermV2Rpc:
             for r in results:
                 entry = self.store.read(r["status"], r["type"], r["id"])
                 r["body"] = entry.body
-                r["frontmatter"] = entry.frontmatter.model_dump(exclude_none=True, mode="json")
+                r["frontmatter"] = reader.project(entry)
 
+        for r in results:
+            if r.get("invalidated_by") and not reader.read(r["invalidated_by"]):
+                del r["invalidated_by"]
         return {"results": results}
 
     async def get_memory(self, params: dict) -> dict:
         mem_id = params["id"]
         include = params.get("include", "brief")
-        loc = self.index.locate(mem_id)
+        reader = self._reader(params)
+        loc = reader.read(mem_id)
         if not loc:
             return {"error": "not found"}
         status, type_, _ = loc
@@ -146,12 +166,13 @@ class LongTermV2Rpc:
         }
         if include == "full":
             out["body"] = entry.body
-            out["frontmatter"] = entry.frontmatter.model_dump(exclude_none=True, mode="json")
+            out["frontmatter"] = reader.project(entry)
         return out
 
     async def delete_memory(self, params: dict) -> dict:
         mem_id = params["id"]
-        loc = self.index.locate(mem_id)
+        reader = self._reader(params)
+        loc = reader.read(mem_id)
         if not loc:
             return {"error": "not found"}
         status, type_, _ = loc
@@ -167,7 +188,8 @@ class LongTermV2Rpc:
     async def update_long_term(self, params: dict) -> dict:
         mem_id = params["id"]
         patch = params.get("patch") or {}
-        loc = self.index.locate(mem_id)
+        reader = self._reader(params)
+        loc = reader.read(mem_id)
         if not loc:
             return {"error": "not found"}
         status, type_, _ = loc
@@ -188,6 +210,18 @@ class LongTermV2Rpc:
             )
 
         fm_updates: dict = {}
+        if "visibility" in patch or "scopes" in patch:
+            if reader.context.actor_kind != "admin":
+                raise MemoryAccessError("FORBIDDEN", "Only Admin can change visibility markers")
+            for field in ["visibility", "scopes"]:
+                if field in patch:
+                    fm_updates[field] = validate_scopes(patch[field]) if field == "scopes" else patch[field]
+        targets = [link["target"] for link in patch.get("links", [])]
+        targets += (patch.get("lesson_meta") or {}).get("source_cases", [])
+        if patch.get("invalidated_by"):
+            targets.append(patch["invalidated_by"])
+        if any(self.index.get_row(mid) is not None and reader.read(mid) is None for mid in targets):
+            raise MemoryAccessError("NOT_FOUND", "Referenced memory not found")
 
         # ---- 既有字段（Phase 1 逻辑） ----
         for k in _UPDATABLE_FIELDS:
@@ -249,19 +283,22 @@ class LongTermV2Rpc:
         """
         mem_id = params["id"]
         version = int(params["version"])
-        loc = self.index.locate(mem_id)
+        reader = self._reader(params)
+        loc = reader.read(mem_id)
         if not loc:
             return {"error": "not found"}
         status, type_, _ = loc
         try:
             entry = self.store.read_version(status, type_, mem_id, version)
-        except FileNotFoundError:
+        except (FileNotFoundError, ValueError, TypeError, yaml.YAMLError):
             return {"error": "version not found"}
+        if not reader.permits(entry.frontmatter.visibility, entry.frontmatter.scopes):
+            return {"error": "not found"}
         return {
             "id": mem_id,
             "version": version,
             "body": entry.body,
-            "frontmatter": entry.frontmatter.model_dump(exclude_none=True, mode="json"),
+            "frontmatter": reader.project(entry),
         }
 
     async def grep_memory(self, params: dict) -> dict:
@@ -269,6 +306,7 @@ class LongTermV2Rpc:
             pattern=params["pattern"],
             type_=params.get("type"),
             limit=int(params.get("limit", 20)),
+            reader=self._reader(params),
         )
         return {"results": results}
 
@@ -277,19 +315,20 @@ class LongTermV2Rpc:
             window_days=int(params.get("window_days", 7)),
             type_=params.get("type"),
             limit=int(params.get("limit", 20)),
+            reader=self._reader(params),
         )
         return {"results": results}
 
     async def find_by_entity(self, params: dict) -> dict:
-        results = self.tools.find_by_entity_brief(params["entity_id"])
+        results = self.tools.find_by_entity_brief(params["entity_id"], reader=self._reader(params))
         return {"results": results}
 
     async def find_by_tag(self, params: dict) -> dict:
-        results = self.tools.find_by_tag_brief(params["tag"])
+        results = self.tools.find_by_tag_brief(params["tag"], reader=self._reader(params))
         return {"results": results}
 
     async def get_cases_about(self, params: dict) -> dict:
-        results = self.tools.get_cases_about(params["scenario"])
+        results = self.tools.get_cases_about(params["scenario"], reader=self._reader(params))
         return {"results": results}
 
     async def quick_capture(self, params: dict) -> dict:
@@ -349,7 +388,8 @@ class LongTermV2Rpc:
     async def promote_inbox_entry(self, params: dict) -> dict:
         """Perform the only normal inbox -> confirmed lifecycle transition."""
         mem_id = params["id"]
-        loc = self.index.locate(mem_id)
+        reader = self._reader(params)
+        loc = reader.read(mem_id)
         if not loc:
             return {"error": "not found"}
         status, type_, _ = loc
@@ -478,7 +518,8 @@ class LongTermV2Rpc:
     async def get_memory_graph(self, params: dict) -> dict:
         """聚合长期记忆图：节点（条目 + 实体）+ 边（link/membership/source_case/invalidated/version）。"""
         status = params.get("status", "confirmed")
-        rows = self.index.list_entries(status=status, limit=10000, offset=0)
+        reader = self._reader(params)
+        rows = self.index.list_entries(status=status, limit=10000, offset=0, allowed_ids=reader.ids())
         nodes, edges = [], []
         entity_seen = {}
         for r in rows:
@@ -507,6 +548,8 @@ class LongTermV2Rpc:
                 edges.append({"source": fm.id, "target": fm.invalidated_by, "edge_type": "invalidated"})
             for pv in fm.prev_version_ids:
                 edges.append({"source": fm.id, "target": pv.split("#")[0], "edge_type": "version"})
+        visible_nodes = {n["id"] for n in nodes} | set(entity_seen)
+        edges = [e for e in edges if e["target"] in visible_nodes]
         nodes.extend(entity_seen.values())
         return {"nodes": nodes, "edges": edges,
                 "stats": {"node_count": len(nodes), "edge_count": len(edges)}}
@@ -542,6 +585,9 @@ class LongTermV2Rpc:
 
         returns: { id: str, status: "ok" }
         """
+        reader = self._reader(params)
+        if any(reader.read(mid) is None for mid in params["source_cases"]):
+            raise MemoryAccessError("NOT_FOUND", "Source case not found")
         rule_id = _synthesize_rule(
             store=self.store,
             index=self.index,
@@ -566,7 +612,8 @@ class LongTermV2Rpc:
          observation_outcome, observation_pass_count, observation_fail_count}。
         UI 也会读 promoted_at 作为兼容字段名（同义于 observation_started_at）。
         """
-        rows = self.index.list_active_observation()
+        reader = self._reader(params)
+        rows = [r for r in self.index.list_active_observation() if reader.read(r["id"])]
         items = [
             {
                 "id": r["id"],
@@ -588,6 +635,8 @@ class LongTermV2Rpc:
 
     async def mark_observation_pass(self, params: dict) -> dict:
         mem_id = params["id"]
+        if not self._reader(params).read(mem_id):
+            return {"error": "not found"}
         row = self.index.get_row(mem_id)
         if row is None:
             raise ValueError(f"Entry not found: {mem_id}")
@@ -606,6 +655,8 @@ class LongTermV2Rpc:
         days = int(params.get("days", 7))
         if days <= 0:
             raise ValueError("days must be positive")
+        if not self._reader(params).read(mem_id):
+            return {"error": "not found"}
         row = self.index.get_row(mem_id)
         if row is None:
             raise ValueError(f"Entry not found: {mem_id}")
@@ -624,10 +675,11 @@ class LongTermV2Rpc:
         return {"id": mem_id, "new_window_days": new_total}
 
     async def get_confirmed_snapshot(self, params: dict) -> dict:
-        return build_confirmed_snapshot(self.store, self.index)
+        return build_confirmed_snapshot(self.store, self.index, reader=self._reader(params))
 
     async def bump_lesson_use(self, params: dict) -> dict:
         return await self.update_long_term({
+            "access_context": params.get("access_context", {"actor_kind": "conversation", "memory_enabled": True}),
             "id": params["id"],
             "patch": {
                 "use_count_increment": 1,
@@ -656,7 +708,8 @@ class LongTermV2Rpc:
         is_pass = attitude.endswith("pass")
         column = "observation_pass_count" if is_pass else "observation_fail_count"
 
-        lesson_ids = self.index.find_lessons_used_in_task(task_id)
+        reader = self._reader(params)
+        lesson_ids = [mid for mid in self.index.find_lessons_used_in_task(task_id) if reader.read(mid)]
         for lid in lesson_ids:
             self.index.bump_observation_counter(lid, column=column, delta=weight)
 
@@ -682,7 +735,9 @@ class LongTermV2Rpc:
         offset = int(params.get("offset", 0))
         sort = params.get("sort", "ingestion_time_desc")
 
+        reader = self._reader(params)
         rows = self.index.list_entries(
+            allowed_ids=reader.ids(),
             type_=type_, status=status,
             reviewable_only=params.get("reviewable_only", False),
             tags=tags,
@@ -692,12 +747,12 @@ class LongTermV2Rpc:
         )
         items = [
             item for r in rows
-            if (item := self._hydrate_entry_item(r)) is not None
+            if (item := self._hydrate_entry_item(r, reader)) is not None
             and (not author or item["frontmatter"].get("author") == author)
         ]
         return {"items": items, "total": len(items)}
 
-    def _hydrate_entry_item(self, row: dict) -> dict | None:
+    def _hydrate_entry_item(self, row: dict, reader: MemoryReader) -> dict | None:
         """把 index row 读盘 hydrate 成带 frontmatter 的可渲染 item（entry 文件缺失返回 None）。
 
         list_entries / keyword_search 共用，确保返回 shape 不漂移——Admin 表格直接渲染需要 frontmatter。
@@ -711,7 +766,7 @@ class LongTermV2Rpc:
             "type": row["type"],
             "status": row["status"],
             "brief": entry.frontmatter.brief,
-            "frontmatter": entry.frontmatter.model_dump(exclude_none=True, mode="json"),
+            "frontmatter": reader.project(entry),
         }
 
     async def keyword_search(self, params: dict) -> dict:
@@ -723,18 +778,19 @@ class LongTermV2Rpc:
         if status == "all":
             status = None
         limit = int(params.get("limit", 50))
-        rows = self.index.keyword_search(query, type_=type_, status=status, limit=limit)
-        items = [item for r in rows if (item := self._hydrate_entry_item(r)) is not None]
+        reader = self._reader(params)
+        rows = self.index.keyword_search(query, type_=type_, status=status, limit=limit, allowed_ids=reader.ids())
+        items = [item for r in rows if (item := self._hydrate_entry_item(r, reader)) is not None]
         return {"items": items}
 
     async def restore_memory(self, params: dict) -> dict:
         """Admin 明确恢复：从 trash 直接确认到 confirmed。"""
         mem_id = params["id"]
-        loc = self.index.locate(mem_id)
+        reader = self._reader(params)
+        loc = reader.read(mem_id)
         if not loc:
             return {"error": "not found"}
-        status = loc["status"] if hasattr(loc, "keys") else loc[0]
-        type_ = loc["type"] if hasattr(loc, "keys") else loc[1]
+        status, type_, _ = loc
         if status != "trash":
             return {"error": "INVALID_STATE"}
         entry = self.store.read("trash", type_, mem_id)
@@ -749,7 +805,7 @@ class LongTermV2Rpc:
         """导入长期记忆条目（wire 格式 {status, markdown}）：load_entry → store.write → index.upsert。
         mode=merge 跳过已存在 id；mode=replace 覆盖。dedup 跨 status 按 frontmatter.id。
         """
-        p = ImportLongTermParams(**params)
+        p = ImportLongTermParams(**{**params, "access_context": params.get("access_context", {"actor_kind": "conversation", "memory_enabled": True})})
         existing = {row[2] for row in self.store.list_all()}
         imported = 0
         skipped = 0

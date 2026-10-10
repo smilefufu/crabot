@@ -530,7 +530,7 @@ describe('Admin Web API', () => {
         },
       ] as any)
 
-      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockResolvedValue({ results: [] } as any)
+      const callSpy = vi.spyOn(admin['rpcClient'], 'callSensitive').mockResolvedValue({ results: [] } as any)
 
       const response = await makeWebRequest<{ results: unknown[] }>(
         TEST_WEB_PORT,
@@ -546,12 +546,14 @@ describe('Admin Web API', () => {
         19001,
         'search_short_term',
         {
+          access_context: { actor_kind: 'admin', memory_enabled: true },
           query: 'hello',
           limit: 5,
           filter: { refs: { friend_id: 'friend-1' } },
           accessible_scopes: ['session-a', 'session-b'],
         },
-        'admin-web-test'
+        'admin-web-test',
+        { authorizationBearer: token }
       )
     })
 
@@ -567,7 +569,7 @@ describe('Admin Web API', () => {
         },
       ] as any)
 
-      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockResolvedValue({
+      const callSpy = vi.spyOn(admin['rpcClient'], 'callSensitive').mockResolvedValue({
         profiles: [
           {
             label: 'Alice',
@@ -600,8 +602,8 @@ describe('Admin Web API', () => {
       expect(callSpy).toHaveBeenCalledWith(
         19001,
         'list_scene_profiles_by_memory',
-        { memory_id: 'mem-1' },
-        'admin-web-test',
+        { memory_id: 'mem-1', access_context: { actor_kind: 'admin', memory_enabled: true } },
+        'admin-web-test', { authorizationBearer: token },
       )
     })
   })
@@ -687,7 +689,7 @@ describe('Admin Web API', () => {
         { module_id: 'memory-test', module_type: 'memory', version: '0.1.0', port: 19001 },
       ] as any)
       const fakeGraph = { nodes: [{ id: 'mem-l-a', kind: 'memory' }], edges: [], stats: { node_count: 1, edge_count: 0 } }
-      vi.spyOn(admin['rpcClient'], 'call').mockImplementation(async (_port, method) => {
+      vi.spyOn(admin['rpcClient'], 'callSensitive').mockImplementation(async (_port, method) => {
         if (method === 'get_memory_graph') return fakeGraph as any
         return {} as any
       })
@@ -711,9 +713,9 @@ describe('Admin Web API', () => {
         },
       ] as any)
 
-      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockImplementation(async (_port, method, params) => {
+      const callSpy = vi.spyOn(admin['rpcClient'], 'callSensitive').mockImplementation(async (_port, method, params) => {
         if (method === 'get_scene_profile') {
-          expect(params).toEqual({ scene: { type: 'friend', friend_id: 'friend-1' } })
+          expect(params).toEqual({ access_context: { actor_kind: 'admin', memory_enabled: true }, scene: { type: 'friend', friend_id: 'friend-1' } })
           return {
             profile: {
               scene: { type: 'friend', friend_id: 'friend-1' },
@@ -765,9 +767,9 @@ describe('Admin Web API', () => {
         },
       ] as any)
 
-      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockImplementation(async (_port, method, params) => {
+      const callSpy = vi.spyOn(admin['rpcClient'], 'callSensitive').mockImplementation(async (_port, method, params) => {
         if (method === 'get_scene_profile') {
-          expect(params).toEqual({ scene: { type: 'friend', friend_id: 'friend-empty' } })
+          expect(params).toEqual({ access_context: { actor_kind: 'admin', memory_enabled: true }, scene: { type: 'friend', friend_id: 'friend-empty' } })
           return { profile: null } as any
         }
         throw new Error(`Unexpected RPC method: ${String(method)}`)
@@ -801,9 +803,9 @@ describe('Admin Web API', () => {
         },
       ] as any)
 
-      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockImplementation(async (_port, method, params) => {
+      const callSpy = vi.spyOn(admin['rpcClient'], 'callSensitive').mockImplementation(async (_port, method, params) => {
         if (method === 'get_scene_profile') {
-          expect(params).toEqual({ scene: { type: 'friend', friend_id: 'friend-2' } })
+          expect(params).toEqual({ access_context: { actor_kind: 'admin', memory_enabled: true }, scene: { type: 'friend', friend_id: 'friend-2' } })
           return {
             profile: {
               scene: { type: 'friend', friend_id: 'friend-2' },

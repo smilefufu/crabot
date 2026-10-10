@@ -1,3 +1,4 @@
+import { ConfigLoader } from '../core/config-loader.js'
 /**
  * Memory Writer - 短期记忆写入器
  *
@@ -148,11 +149,12 @@ export class MemoryWriter {
   async runMaintenance(scope: 'all' | 'observation_check' | 'stale_aging' | 'trash_cleanup' = 'all'): Promise<void> {
     try {
       const memoryPort = await this.getMemoryPort()
-      await this.rpcClient.call(
+      await this.rpcClient.callSensitive(
         memoryPort,
         'run_maintenance',
-        { scope },
-        this.moduleId
+        { scope, access_context: { actor_kind: 'mechanical', memory_enabled: true } },
+        this.moduleId,
+        { authorizationBearer: ConfigLoader.getRuntimeBearer() }
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

@@ -5,15 +5,16 @@ from src.long_term_v2.sqlite_index import SqliteIndex
 from src.long_term_v2.rpc import LongTermV2Rpc
 
 
-def _seed_lesson(idx, mem_id):
-    idx.conn.execute(
-        "INSERT INTO memories (id, status, type, brief, body, event_time, ingestion_time, path, "
-        "observation_pass_count, observation_fail_count) "
-        "VALUES (?, 'confirmed', 'lesson', 'b', 'body', '2026-04-25T00:00:00Z', "
-        "'2026-04-25T00:00:00Z', '/tmp/x.md', 0, 0)",
-        (mem_id,),
-    )
-    idx.conn.commit()
+def _seed_lesson(store, idx, mem_id):
+    from src.long_term_v2.schema import MemoryFrontmatter, MemoryEntry
+    from src.long_term_v2.paths import entry_path
+    fm = MemoryFrontmatter(id=mem_id, type="lesson", maturity="case", brief="b", author="system",
+        source_ref={"type": "manual"}, source_trust=5, content_confidence=5,
+        importance_factors=dict.fromkeys(["proximity", "surprisal", "entity_priority", "unambiguity"], 0.5),
+        event_time="2026-04-25T00:00:00Z", ingestion_time="2026-04-25T00:00:00Z")
+    entry = MemoryEntry(frontmatter=fm, body="body")
+    store.write(entry, "confirmed")
+    idx.upsert(entry, entry_path(store.data_root, "confirmed", "lesson", mem_id), "confirmed")
 
 
 @pytest.mark.asyncio
@@ -21,7 +22,7 @@ async def test_report_task_feedback_pass_increments_pass_count(tmp_path):
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
     rpc = LongTermV2Rpc(store=store, index=idx)
-    _seed_lesson(idx, "mem_l_1")
+    _seed_lesson(store, idx, "mem_l_1")
     idx.record_lesson_task_usage("task_a", "mem_l_1", now_iso="2026-04-25T10:00:00Z")
 
     result = await rpc.report_task_feedback({
@@ -45,7 +46,7 @@ async def test_report_task_feedback_strong_pass_weighted_2(tmp_path):
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
     rpc = LongTermV2Rpc(store=store, index=idx)
-    _seed_lesson(idx, "mem_l_1")
+    _seed_lesson(store, idx, "mem_l_1")
     idx.record_lesson_task_usage("task_a", "mem_l_1", now_iso="2026-04-25T10:00:00Z")
 
     result = await rpc.report_task_feedback({
@@ -65,7 +66,7 @@ async def test_report_task_feedback_strong_fail_weighted_2(tmp_path):
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
     rpc = LongTermV2Rpc(store=store, index=idx)
-    _seed_lesson(idx, "mem_l_1")
+    _seed_lesson(store, idx, "mem_l_1")
     idx.record_lesson_task_usage("task_a", "mem_l_1", now_iso="2026-04-25T10:00:00Z")
 
     result = await rpc.report_task_feedback({
@@ -98,8 +99,8 @@ async def test_report_task_feedback_multiple_lessons(tmp_path):
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
     rpc = LongTermV2Rpc(store=store, index=idx)
-    _seed_lesson(idx, "mem_l_1")
-    _seed_lesson(idx, "mem_l_2")
+    _seed_lesson(store, idx, "mem_l_1")
+    _seed_lesson(store, idx, "mem_l_2")
     idx.record_lesson_task_usage("task_a", "mem_l_1", now_iso="2026-04-25T10:00:00Z")
     idx.record_lesson_task_usage("task_a", "mem_l_2", now_iso="2026-04-25T10:01:00Z")
 

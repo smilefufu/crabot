@@ -75,11 +75,11 @@ const MANAGER_KEY = 'ch-1::sess-1' as ManagerKey
 function makeMemoryServer() {
   return createCrabMemoryServer(
     {
-      rpcClient: { call: vi.fn() } as never,
+      rpcClient: { callSensitive: vi.fn(), call: vi.fn() } as never,
       moduleId: 'manager-test',
       getMemoryPort: async () => 19100,
     },
-    {
+    { accessContext: { actor_kind: 'conversation', memory_enabled: true },
       visibility: 'internal',
       scopes: [],
       isMasterPrivate: false,
@@ -155,7 +155,7 @@ describe('主体授权与角色能力分开执行', () => {
     const deps = () => makeDeps({ faceState: state, callAdmin, workerContext: () => ({ managerKey: MANAGER_KEY,
       reportTo: target, targetSession: target, creatorFriendId: 'self', principalPermissions: principal }),
       memoryServer: createCrabMemoryServer({ moduleId: 'fixture', getMemoryPort: async () => 1,
-        rpcClient: { call: memoryRpc } as never }, { visibility: 'internal', scopes: [], isMasterPrivate: false }),
+        rpcClient: { callSensitive: memoryRpc, call: memoryRpc } as never }, { accessContext: { actor_kind: 'conversation', memory_enabled: true }, visibility: 'internal', scopes: [], isMasterPrivate: false }),
     })
     const tools = buildManagerToolFace(deps())
     const get = tools.find(tool => tool.name === 'get_friend_permissions')!
@@ -167,6 +167,18 @@ describe('主体授权与角色能力分开执行', () => {
     buildManagerToolFace(deps())
     expect((await memory.call({ query: 'fixture' }, {})).output).toContain('PERMISSION_DENIED')
     expect(memoryRpc).not.toHaveBeenCalled()
+  })
+  it('rejects model-supplied Memory identity and markers before SDK argument parsing or RPC', async () => {
+    const rpc = vi.fn()
+    const memoryServer = createCrabMemoryServer({ rpcClient: { callSensitive: rpc } as never,
+      moduleId: 'test', getMemoryPort: async () => 1 }, { accessContext: { actor_kind: 'conversation', memory_enabled: true },
+      visibility: 'internal', scopes: [], isMasterPrivate: false })
+    const tools = buildManagerToolFace(makeDeps({ memoryServer }))
+    const search = tools.find(tool => tool.name === 'mcp__crab-memory__search_memory')!
+    for (const field of ['access_context', 'actor_kind', 'memory_enabled', 'visibility', 'scopes']) {
+      await expect(search.call({ query: 'x', [field]: 'forged' }, {})).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+    }
+    expect(rpc).not.toHaveBeenCalled()
   })
 })
 
@@ -184,8 +196,8 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
       faceState: createManagerToolFaceState(mode),
       candidatePermissions: { tool_access: { memory: true }, cli_access: {} } as ResolvedPermissions,
       memoryServer: createCrabMemoryServer({
-        rpcClient: { call } as never, moduleId: 'manager-test', getMemoryPort: async () => 19100,
-      }, { visibility: 'internal', scopes: [], isMasterPrivate: false }),
+        rpcClient: { callSensitive: call, call } as never, moduleId: 'manager-test', getMemoryPort: async () => 19100,
+      }, { accessContext: { actor_kind: 'conversation', memory_enabled: true }, visibility: 'internal', scopes: [], isMasterPrivate: false }),
     })
     const initial = buildManagerToolFace(deps)
     if (mode === 'progressive') {
@@ -201,7 +213,7 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
       const list = tools.find(t => t.name === 'mcp__crab-memory__list_entries')!
       expect((await list.call({ status: 'inbox', sort: 'ingestion_time_asc', offset: 20 }, {} as never)).isError).toBe(false)
       expect(call).toHaveBeenCalledWith(19100, 'list_entries',
-        expect.objectContaining({ status: 'inbox', reviewable_only: true, offset: 20 }), 'manager-test')
+        expect.objectContaining({ status: 'inbox', reviewable_only: true, offset: 20 }), 'manager-test', expect.any(Object))
     })
 
     it.each(writes)(`${mode}: %s 不得修改缺少生命周期字段的历史候选`, async (name, input) => {
@@ -231,7 +243,7 @@ describe('每日反思保留历史 inbox 的人工迁移边界', () => {
       const call = vi.fn(async () => ({ items: [], total: 0 }))
       const tools = await face(call, 'progressive', daily)
       await tools.find(t => t.name === 'mcp__crab-memory__list_entries')!.call({ status, ingestion_time_start: '2026-08-02' }, {} as never)
-      expect(call).toHaveBeenCalledWith(19100, 'list_entries', { status, ingestion_time_start: '2026-08-02' }, 'manager-test')
+      expect(call).toHaveBeenCalledWith(19100, 'list_entries', { access_context: { actor_kind: 'conversation', memory_enabled: true }, status, ingestion_time_start: '2026-08-02' }, 'manager-test', expect.any(Object))
     })
 
   it.each(writes)('%s 保留带生命周期字段的正常候选处理', async (name, input, method) => {

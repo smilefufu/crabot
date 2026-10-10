@@ -1,5 +1,7 @@
+import type { MemoryDataRpcMethod, RpcClient } from 'crabot-shared'
+
 export interface MemoryV2RestRouterDeps {
-  rpcClient: { call: <P, R>(port: number, method: string, params: P, originModuleId: string) => Promise<R> }
+  rpcClient: Pick<RpcClient, 'callSensitive'>
   moduleId: string
   getMemoryPort: (moduleId?: string) => Promise<number>
 }
@@ -21,7 +23,16 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
     return { pathname: u.pathname, query: u.searchParams }
   }
 
-  async function dispatch(method: string, rawUrl: string, body?: string): Promise<RestResponse> {
+  async function dispatch(method: string, rawUrl: string, body?: string, authorizationBearer?: string): Promise<RestResponse> {
+    if (!authorizationBearer) return { status: 401, body: { error: 'Missing human Admin credential' } }
+    const callMemory = <P, R>(port: number, rpcMethod: MemoryDataRpcMethod, params: P, source: string): Promise<R> => {
+      const payload = params as Record<string, unknown>
+      return rpcClient.callSensitive(port, rpcMethod, {
+        ...payload,
+        ...(rpcMethod === 'write_long_term' ? { visibility: payload.visibility ?? 'internal', scopes: payload.scopes ?? [] } : {}),
+        access_context: { actor_kind: 'admin', memory_enabled: true },
+      }, source, { authorizationBearer })
+    }
     const { pathname, query } = parseUrl(rawUrl)
     const port = await getMemoryPort(query.get('module_id') ?? undefined)
 
@@ -70,14 +81,14 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
       }
       const sort = query.get('sort')
       if (sort) params.sort = sort
-      const result = await rpcClient.call(port, 'list_entries', params, moduleId)
+      const result = await callMemory(port, 'list_entries', params, moduleId)
       return { status: 200, body: result }
     }
 
     // GET /api/memory/v2/historical-inbox/preview — legacy inbox cleanup preview
     if (method === 'GET' && pathname === '/api/memory/v2/historical-inbox/preview') {
       const cutoff = query.get('cutoff') ?? undefined
-      const result = await rpcClient.call(
+      const result = await callMemory(
         port, 'preview_historical_inbox', cutoff ? { cutoff } : {}, moduleId,
       )
       return { status: 200, body: result }
@@ -91,7 +102,7 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
       }
       const params: { confirmed: true; cutoff?: string } = { confirmed: true }
       if (typeof parsed.cutoff === 'string') params.cutoff = parsed.cutoff
-      const result = await rpcClient.call(port, 'migrate_historical_inbox_batch', params, moduleId)
+      const result = await callMemory(port, 'migrate_historical_inbox_batch', params, moduleId)
       return { status: 200, body: result }
     }
 
@@ -99,7 +110,7 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
     const restoreMatch = pathname.match(/^\/api\/memory\/v2\/entries\/([^/]+)\/restore$/)
     if (method === 'POST' && restoreMatch) {
       const id = restoreMatch[1]
-      const result = await rpcClient.call(port, 'restore_memory', { id }, moduleId)
+      const result = await callMemory(port, 'restore_memory', { id }, moduleId)
       return { status: 200, body: result }
     }
 
@@ -107,7 +118,7 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
     const markPassMatch = pathname.match(/^\/api\/memory\/v2\/entries\/([^/]+)\/mark-observation-pass$/)
     if (method === 'POST' && markPassMatch) {
       const id = markPassMatch[1]
-      const result = await rpcClient.call(port, 'mark_observation_pass', { id }, moduleId)
+      const result = await callMemory(port, 'mark_observation_pass', { id }, moduleId)
       return { status: 200, body: result }
     }
 
@@ -119,14 +130,14 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
       const days = typeof parsed.days === 'number' ? parsed.days : undefined
       const params: { id: string; days?: number } = { id }
       if (days !== undefined) params.days = days
-      const result = await rpcClient.call(port, 'extend_observation_window', params, moduleId)
+      const result = await callMemory(port, 'extend_observation_window', params, moduleId)
       return { status: 200, body: result }
     }
 
     // POST /api/memory/v2/entries/search-keyword — must be before idMatch
     if (method === 'POST' && pathname === '/api/memory/v2/entries/search-keyword') {
       const parsed = body ? JSON.parse(body) : {}
-      const result = await rpcClient.call(port, 'keyword_search', parsed, moduleId)
+      const result = await callMemory(port, 'keyword_search', parsed, moduleId)
       return { status: 200, body: result }
     }
 
@@ -135,7 +146,7 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
     if (method === 'GET' && versionMatch) {
       const id = versionMatch[1]
       const version = parseInt(versionMatch[2], 10)
-      const result = await rpcClient.call(port, 'get_entry_version', { id, version }, moduleId)
+      const result = await callMemory(port, 'get_entry_version', { id, version }, moduleId)
       return { status: 200, body: result }
     }
 
@@ -145,7 +156,7 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
     if (method === 'GET' && idMatch) {
       const id = idMatch[1]
       const include = query.get('include') ?? 'brief'
-      const result = await rpcClient.call(port, 'get_memory', { id, include }, moduleId)
+      const result = await callMemory(port, 'get_memory', { id, include }, moduleId)
       return { status: 200, body: result }
     }
 
@@ -154,7 +165,7 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
       if (!body) return { status: 400, body: { error: 'body required' } }
       const parsed = JSON.parse(body)
       const params = { ...parsed, author: 'user', status: 'confirmed' }
-      const result = await rpcClient.call(port, 'write_long_term', params, moduleId)
+      const result = await callMemory(port, 'write_long_term', params, moduleId)
       return { status: 201, body: result }
     }
 
@@ -163,20 +174,20 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
       const id = idMatch[1]
       if (!body) return { status: 400, body: { error: 'body required' } }
       const parsed = JSON.parse(body)
-      const result = await rpcClient.call(port, 'update_long_term', { id, ...parsed }, moduleId)
+      const result = await callMemory(port, 'update_long_term', { id, ...parsed }, moduleId)
       return { status: 200, body: result }
     }
 
     // DELETE /api/memory/v2/entries/:id — soft delete
     if (method === 'DELETE' && idMatch) {
       const id = idMatch[1]
-      await rpcClient.call(port, 'delete_memory', { id }, moduleId)
+      await callMemory(port, 'delete_memory', { id }, moduleId)
       return { status: 204 }
     }
 
     // GET /api/memory/v2/evolution-mode
     if (method === 'GET' && pathname === '/api/memory/v2/evolution-mode') {
-      const result = await rpcClient.call(port, 'get_evolution_mode', {}, moduleId)
+      const result = await callMemory(port, 'get_evolution_mode', {}, moduleId)
       return { status: 200, body: result }
     }
 
@@ -184,13 +195,13 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
     if (method === 'PUT' && pathname === '/api/memory/v2/evolution-mode') {
       if (!body) return { status: 400, body: { error: 'body required' } }
       const parsed = JSON.parse(body)
-      const result = await rpcClient.call(port, 'set_evolution_mode', parsed, moduleId)
+      const result = await callMemory(port, 'set_evolution_mode', parsed, moduleId)
       return { status: 200, body: result }
     }
 
     // GET /api/memory/v2/observation-pending
     if (method === 'GET' && pathname === '/api/memory/v2/observation-pending') {
-      const result = await rpcClient.call(port, 'get_observation_pending', {}, moduleId)
+      const result = await callMemory(port, 'get_observation_pending', {}, moduleId)
       return { status: 200, body: result }
     }
 
@@ -198,7 +209,7 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
     if (method === 'POST' && pathname === '/api/memory/v2/maintenance/run') {
       const parsed = body ? JSON.parse(body) : {}
       const scope = parsed.scope ?? 'all'
-      const result = await rpcClient.call<{ scope: string }, { report: Record<string, unknown> }>(
+      const result = await callMemory<{ scope: string }, { report: Record<string, unknown> }>(
         port, 'run_maintenance', { scope }, moduleId,
       )
       const report = (result?.report ?? {}) as Record<string, unknown>
@@ -209,7 +220,7 @@ export function createMemoryV2RestRouter(deps: MemoryV2RestRouterDeps) {
     // POST /api/memory/v2/graph/data — 透传 get_memory_graph 返回图谱 nodes+edges
     if (method === 'POST' && pathname === '/api/memory/v2/graph/data') {
       const parsed = body ? JSON.parse(body) : {}
-      const result = await rpcClient.call(port, 'get_memory_graph', parsed, moduleId)
+      const result = await callMemory(port, 'get_memory_graph', parsed, moduleId)
       return { status: 200, body: result }
     }
 

@@ -3,7 +3,7 @@ Memory 模块数据类型定义
 对齐 protocol-memory.md 和 base-protocol.md
 """
 from typing import Optional, List, Dict, Any, Literal, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, StrictBool
 from datetime import datetime
 import uuid
 
@@ -67,7 +67,11 @@ class ShortTermMemoryEntry(BaseModel):
 # 请求/响应参数（短期）
 # ============================================================================
 
-class WriteShortTermParams(BaseModel):
+class MemoryRequestParams(BaseModel):
+    access_context: "MemoryAccessContext"
+
+
+class WriteShortTermParams(MemoryRequestParams):
     """写入短期记忆参数"""
     content: str
     source: MemorySource
@@ -77,8 +81,8 @@ class WriteShortTermParams(BaseModel):
     persons: Optional[List[str]] = None
     entities: Optional[List[str]] = None
     topic: Optional[str] = None
-    visibility: Optional[Visibility] = "public"
-    scopes: Optional[List[str]] = None
+    visibility: Visibility
+    scopes: List[str]
 
 
 class TimeRange(BaseModel):
@@ -95,18 +99,18 @@ class SearchShortTermFilter(BaseModel):
     refs: Optional[Dict[str, str]] = None
 
 
-class SearchShortTermParams(BaseModel):
+class SearchShortTermParams(MemoryRequestParams):
     """检索短期记忆参数"""
     query: Optional[str] = None
     time_range: Optional[TimeRange] = None
     filter: Optional[SearchShortTermFilter] = None
     sort_by: Literal["event_time", "relevance"] = "event_time"
     limit: int = 20
-    min_visibility: Optional[Visibility] = "public"
+    min_visibility: Optional[Visibility] = None
     accessible_scopes: Optional[List[str]] = None
 
 
-class UpdateReflectionWatermarkParams(BaseModel):
+class UpdateReflectionWatermarkParams(MemoryRequestParams):
     """更新反思水位参数"""
     last_reflected_at: str
 
@@ -115,7 +119,7 @@ class UpdateReflectionWatermarkParams(BaseModel):
 # 批量操作（短期）
 # ============================================================================
 
-class BatchWriteShortTermParams(BaseModel):
+class BatchWriteShortTermParams(MemoryRequestParams):
     """批量写入短期记忆参数"""
     entries: List[WriteShortTermParams]
 
@@ -124,13 +128,13 @@ class BatchWriteShortTermParams(BaseModel):
 # 导入/导出
 # ============================================================================
 
-class ImportMemoriesParams(BaseModel):
+class ImportMemoriesParams(MemoryRequestParams):
     """导入参数"""
     mode: Literal["replace", "merge"]
     data: Dict[str, Any]
 
 
-class ImportLongTermParams(BaseModel):
+class ImportLongTermParams(MemoryRequestParams):
     """导入长期记忆参数"""
     entries: list[dict]
     mode: Literal["merge", "replace"] = "merge"  # "merge" 跳过已存在 id；"replace" 覆盖
@@ -167,6 +171,13 @@ class SceneIdentityGroup(BaseModel):
 SceneIdentity = Union[SceneIdentityFriend, SceneIdentityGroup]
 
 
+class MemoryAccessContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    actor_kind: Literal["conversation", "master_private", "admin", "builtin_reflection", "builtin_graph_rebuild", "mechanical"]
+    memory_enabled: StrictBool
+    scene: Optional[SceneIdentity] = None
+
+
 class SceneProfile(BaseModel):
     """场景画像（按场景身份聚合的稳定规则与信息）"""
     scene: SceneIdentity
@@ -176,3 +187,7 @@ class SceneProfile(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     last_declared_at: Optional[str] = None
+
+
+for _params_type in [MemoryRequestParams, WriteShortTermParams, SearchShortTermParams, UpdateReflectionWatermarkParams, BatchWriteShortTermParams, ImportMemoriesParams, ImportLongTermParams]:
+    _params_type.model_rebuild()

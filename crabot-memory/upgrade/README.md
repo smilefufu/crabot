@@ -1,5 +1,11 @@
 # crabot-memory 升级说明
 
+## v4 → v5（2026-10-10）
+
+长期文件及历史版本缺少 `visibility`/`scopes` 时补为 `internal`/`[]`，已有标记保持原值。索引只增加标记列并更新对应值，保留使用统计、task usage、观察期状态、水位和画像；不调用 LLM。非法已有标记保持损坏状态，读取拒绝，不猜测归属或降级 private。
+
+停止 MM 后，可先在 Memory 项目目录运行 `uv run python upgrade/from_v4_to_v5.py --data-dir=<DATA_DIR>/memory --dry-run`。dry-run 只读统计，不创建数据库或输出正文。正式升级由既有框架执行：脚本先复制并校验整个 Memory 目录到同级 `memory.v4.backup-*`，备份失败不修改数据，中途失败恢复匹配的完整备份；框架仅在脚本成功后推进 `SCHEMA_VERSION`。回滚必须同时恢复匹配的数据与代码，另行保存升级后的新写入。
+
 ## v2 → v3（2026-04-30）
 
 **主题**：移除 embedding 子系统。

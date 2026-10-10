@@ -65,6 +65,18 @@ const GROUP_KEY = 'wechat::group-1' as ManagerKey
 // ============================================================================
 
 describe('splitManagerKey', () => {
+  it('memory=false prevents profile reads and clears a previously loaded profile', async () => {
+    let enabled = true
+    const sceneProfile = vi.fn(async () => ({ label: 'profile', content: 'old body', source: { scene: { type: 'friend' as const, friend_id: 'f-1' } } }))
+    const store = new ManagerPrincipalStore(makeResolverDeps({ sceneProfile,
+      resolvePermissions: async () => ({ ...makePerms([]), tool_access: { ...makePerms([]).tool_access, memory: enabled } }) }))
+    await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
+    expect(store.get(PRIVATE_KEY)?.dialogProfile).toContain('old body')
+    enabled = false
+    await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
+    expect(sceneProfile).toHaveBeenCalledTimes(1)
+    expect(store.get(PRIVATE_KEY)?.dialogProfile ?? '').not.toContain('old body')
+  })
   it('按第一个 :: 切，session_id 里再含 :: 也不被截断', () => {
     expect(splitManagerKey('wechat::a::b' as ManagerKey)).toEqual({ channelId: 'wechat', sessionId: 'a::b' })
   })
@@ -270,22 +282,23 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
 
   it('场景画像按会话类型去要：私聊带 friend_id，群聊只带 channel+session', async () => {
     const sceneProfile = vi.fn(async () => null)
-    const store = new ManagerPrincipalStore(makeResolverDeps({ sceneProfile }))
+    const store = new ManagerPrincipalStore(makeResolverDeps({ sceneProfile, resolvePermissions: async () => makePerms([]) }))
 
     await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
     expect(sceneProfile).toHaveBeenLastCalledWith({
-      channelId: 'wechat', sessionId: 'sess-1', sessionType: 'private', friendId: 'f-1',
+      channelId: 'wechat', sessionId: 'sess-1', sessionType: 'private', friendId: 'f-1', accessContext: { actor_kind: 'conversation', memory_enabled: true, scene: { type: 'friend', friend_id: 'f-1' } },
     })
 
     await store.resolve(GROUP_KEY, { friend: makeFriend('f-1'), sessionType: 'group' })
     expect(sceneProfile).toHaveBeenLastCalledWith({
-      channelId: 'wechat', sessionId: 'group-1', sessionType: 'group',
+      channelId: 'wechat', sessionId: 'group-1', sessionType: 'group', accessContext: { actor_kind: 'conversation', memory_enabled: true, scene: { type: 'group_session', channel_id: 'wechat', session_id: 'group-1' } },
     })
   })
 
   it('对话对象档案把场景画像与该渠道的 @handle 一起装进去（5b + 5d）', async () => {
     const store = new ManagerPrincipalStore(
       makeResolverDeps({
+        resolvePermissions: async () => makePerms([]),
         sceneProfile: async () => ({ label: 'friend:f-1', content: '喜欢简短回答', source: { scene: { type: 'friend', friend_id: 'f-1' } } }),
         crabSelfHandle: (channelId) => (channelId === 'wechat' ? '@crabot_wx' : undefined),
       })
