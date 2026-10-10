@@ -8420,12 +8420,9 @@ export class AdminModule extends ModuleBase {
         listSkillNames: () => this.skillManager.list().map((s) => s.name),
         importSkillDir: (dir) => this.skillManager.importFromLocalPath(dir),
         writeLongTerm: (params) =>
-          this.rpcClient.call(
-            memoryPort,
-            'write_long_term',
-            { ...params, author: 'user', status: 'confirmed' },
-            this.config.moduleId,
-          ),
+          this.callMemoryAsAdmin(req, memoryPort, 'write_long_term', {
+            ...params, author: 'user', status: 'confirmed', visibility: 'internal', scopes: [],
+          }),
         workspaceDir: this.workspaceDir,
       })
 
