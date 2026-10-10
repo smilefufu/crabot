@@ -6,8 +6,9 @@
 - [模型/API研究](crabot-docs/superpowers/research/2026-10-09-voice-models-and-service-apis.md)建议独立ASR/TTS服务，Admin保存引用，音频配置只在voice实例页；服务端点、system mode配对/隔离仍待验证。桌宠ARM主板250–450元、1–2GB仅验证起点估算，未证明承担新增分段。
 - 10月9日OnePlus 7 Pro（Android10/ARM64、约8GB）官方sherpa-onnx 1.13.8 CAM++ APK完成FuFu三段登记；独立录音匹配，用户另报告unknown，来源未确认，不统计准确率。约7.02秒录音单次warm compute约194ms、停止回调299ms，排除下一帧及ASR/LLM/TTS，非P95；ART采样已停。空闲PSS约116→235MiB，非峰值。AC/USB保持唤醒按用户要求设3，原值0。
 - 6组公开样本的手机FP32分段+逐段身份匹配完成：12.48/12.46秒A→B/A→B→A分别1438/1421ms，短样本144–268ms，排除加载/登记/读取/ASR等，单次值不作P95。FP32仍有边界混淆；INT8跨人片段/短B误归A，B未验收。短/长输入路径不同，不能线性外推。
-- 10月10日[ASR与文字归属对照](crabot-docs/superpowers/research/voice-scenario-b-poc/ASR-ATTRIBUTION.md)完成3路线×6文件×3轮，直接复用WhisperX/faster-whisper。整段及强制对齐遗漏后继B/C；按手机片段ASR恢复A/B/A及unknown内容，但CPU/8线程两组12.5秒录音中位约3.71/4.07秒，排除手机、轮次等待、网络及LLM/TTS。等长交集无歧义拒识；原生批处理在手机重叠段触发断言，部分输出不作验收。保留原始结果、失败日志、版本/hash；无人工文字/时间gold，不报准确率。
-- [现场步骤与工具](crabot-docs/superpowers/research/voice-scenario-b-poc/README.md)已就绪；家人到场先只登记FuFu测另一人unknown，再加入另一人测新内容，无需第三人。未开麦或改原App登记；AAC格式转换已用公开样本验证。完整短接话、真实录音导出/客厅逐字归因、多个unknown区分、在线延迟/电耗和完整语音链路仍待验收；单人可测短句、停顿、音量、距离。
+- 10月10日[Whisper归属基线](crabot-docs/superpowers/research/voice-scenario-b-poc/ASR-ATTRIBUTION.md)54次对照证实整段遗漏不能由时间匹配补回，按片段恢复后继内容但计算约3.71/4.07秒；等长交集无歧义拒识，原生批处理在重叠段触发断言。原始证据保留，边界错误不因继承身份而消失。
+- 同日[中文ASR/短词门控](crabot-docs/superpowers/research/voice-scenario-b-poc/CHINESE-ASR.md)完成90次计算、2次按真实节奏输入、42次有效合成短词/静音及14次VAD对照。SenseVoice片段路线在本机CPU/8线程的12.5秒文件中位158/173ms，保留后继及unknown，成为中文整句主候选；Paraformer首次增量约748/741ms，但无字词时间戳且短词有遗漏/误识。直接SenseVoice对静音产生文字，VAD可过滤；最短语音0.25秒漏“对”、0.10秒保留本组短词，阈值非产品默认。排除手机、真实结束等待、网络、LLM/TTS等，无真人gold，不报准确率/P95；未最终选型。
+- [现场步骤与工具](crabot-docs/superpowers/research/voice-scenario-b-poc/README.md)已就绪；家人到场先只登记FuFu测另一人unknown，再加入另一人测新内容，无需第三人。未开麦或改原App登记；AAC格式转换已用公开样本验证。真人短接话、真实录音导出/客厅逐字归因、多个unknown区分、端侧增量身份与真实结束等待、电耗和完整语音链路仍待验收；单人可测短句、停顿、音量、距离。
 
 ### 未实装远程执行类别隐藏：已本地部署
 
