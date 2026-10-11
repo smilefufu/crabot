@@ -251,6 +251,22 @@ describe('executeToolBatches', () => {
     }
   })
 
+  it('preserves a known tool output and image when PostToolUse matching throws', async () => {
+    const call = vi.fn(async () => ({ output: 'known side effect result', isError: false,
+      images: [{ media_type: 'image/png', data: 'pixels' }] }))
+    const results = await executeToolBatches([{ parallel: false, blocks: [makeBlock('write_file', 'post-error')] }],
+      [defineTool({ name: 'write_file', description: '', inputSchema: {}, call })], undefined, undefined,
+      { registry: { getMatching: (event: string) => {
+        if (event === 'PostToolUse') throw new Error('post hook unavailable')
+        return []
+      } }, context: { workingDirectory: '/tmp' } } as never)
+    expect(call).toHaveBeenCalledOnce()
+    expect(results[0]).toMatchObject({ tool_use_id: 'post-error', is_error: true,
+      images: [{ media_type: 'image/png', data: 'pixels' }] })
+    expect(results[0].content).toContain('known side effect result')
+    expect(results[0].content).toContain('post hook unavailable')
+  })
+
   it('parallel read-only tools execute concurrently (verified by timing)', async () => {
     const batches = [
       {

@@ -20,7 +20,7 @@ import {
 import { CompactionFailedError, ContextManager } from './context-manager'
 import { partitionToolCalls } from './tool-framework'
 import { checkToolPermission } from './permission-checker'
-import { executeToolBatches, SendMessageGuard, type HookConfig } from './tool-orchestration'
+import { executeToolBatches, SendMessageGuard, type HookConfig, type ToolResultEntry } from './tool-orchestration'
 import { compressToolResultImages, pruneOldImages } from './image-utils'
 import { formatError } from './error-utils'
 import type { HookInput } from '../hooks/types'
@@ -28,6 +28,7 @@ import { executeHooks } from '../hooks/hook-executor'
 import * as fs from 'fs'
 import { randomUUID } from 'crypto'
 import { getWorkspaceDir } from '../core/data-paths.js'
+import { assertToolMessageIntegrity, completeToolUseMessages } from './tool-message-integrity.js'
 
 // --- Public Interface ---
 
@@ -88,6 +89,20 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   const abortSignal = options.abortSignal
 
   const messages: EngineMessage[] = initialMessages ? [...initialMessages] : [createUserMessage(prompt)]
+  assertToolMessageIntegrity(messages)
+  const completedTools = new Map<string, ToolResultEntry>()
+  const startedTools = new Set<string>()
+  const closeToolCalls = (): void => {
+    const completed = completeToolUseMessages(messages, block => completedTools.get(block.id) ?? {
+      tool_use_id: block.id, is_error: true,
+      content: startedTools.has(block.id)
+        ? '[interrupted/unknown: tool execution started but no result is available; side effects are unknown. Do not automatically replay this call.]'
+        : '[cancelled: tool was not executed.]',
+    })
+    messages.splice(0, messages.length, ...completed)
+    completedTools.clear()
+    startedTools.clear()
+  }
   const contextManager = new ContextManager({
     maxContextTokens: options.contextWindowTokens ?? DEFAULT_MAX_CONTEXT_TOKENS,
   })
@@ -108,6 +123,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     }
   }
   const fireOnTurn = (event: EngineTurnEvent): void => {
+    closeToolCalls()
     refreshMessagesRef()
     options.onTurn?.(event)
   }
@@ -136,11 +152,12 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   // 早退工具：调用后 engine 立刻退出 loop
   let exitToolCall: { name: string; input: Record<string, unknown> } | undefined = undefined
 
-  const finishTask = (): EngineResult =>
-    buildResult(
-      'completed',
-      finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene,
-    )
+  const finishResult = (outcome: EngineResult['outcome'], error?: string): EngineResult => {
+    closeToolCalls()
+    refreshMessagesRef()
+    return buildResult(outcome, finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, error)
+  }
+  const finishTask = (): EngineResult => finishResult('completed')
 
   const workingDirectory = getWorkspaceDir()
   const hooks: HookConfig | undefined = options.hookRegistry ? {
@@ -158,330 +175,362 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     },
   } : undefined
 
-  for (let turn = 0; turn < maxTurns; turn++) {
-    // Check abort before starting a turn
-    if (abortSignal?.aborted) {
-      return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
-    }
-
-    // Check if context compaction is needed
-    // disableCompaction=true 时整体 bypass（subagent 路径）；详见 EngineOptions 注释。
-    // systemPrompt/tools 在 shouldCompact 之前解析——usage 缺失的估算路径要计入两者。
-    const currentSystemPrompt = typeof options.systemPrompt === 'function'
-      ? (options.systemPrompt as () => string)()
-      : options.systemPrompt
-    const currentTools = typeof options.tools === 'function'
-      ? (options.tools as () => ReadonlyArray<import('./types').ToolDefinition>)()
-      : options.tools
-    if (!options.disableCompaction && contextManager.shouldCompact(messages, {
-      lastObservedContextTokens,
-      messageCountAtObservation,
-      systemPrompt: currentSystemPrompt,
-      tools: currentTools,
-    })) {
-      const compaction = await compactInPlace(
-        messages,
-        contextManager,
-        adapter,
-        options,
-        // 至少应用一批；后续 hardCap 判断沿用真实 usage 校准，不能退回偏低的裸估算。
-        { systemPrompt: currentSystemPrompt, tools: currentTools, force: true },
-        abortSignal,
-      )
-      if (compaction.batchesApplied > 0) {
-        lastObservedContextTokens = undefined
-        refreshMessagesRef()
+  try {
+    for (let turn = 0; turn < maxTurns; turn++) {
+      assertToolMessageIntegrity(messages)
+      // Check abort before starting a turn
+      if (abortSignal?.aborted) {
+        return finishResult('aborted')
       }
-      if (!compaction.ok) {
-        // 压缩是唯一的下压手段（engine 无 provider 溢出恢复路径）。压不下去还继续跑，
-        // 只会每轮再烧一次注定失败的摘要调用、最终撞窗口——直接以可诊断的原因收尾。
-        if (compaction.aborted) {
-          return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
-        }
-        return { ...buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, `上下文压缩失败：${compaction.failedReason}`), contextRecoveryRequired: true }
-      }
-    }
 
-    // Call LLM (non-streaming by default; streaming infra preserved for rollback
-    // via adapters that opt out of `complete()`).
-    let response: import('./llm-adapter').LLMCallResponse
-    // 快照本轮实际使用的 systemPrompt/tools 给 fork observer（见 EngineMessagesRef 注释）
-    if (messagesRef) {
-      messagesRef.systemPrompt = currentSystemPrompt
-      messagesRef.tools = currentTools
-    }
-    refreshMessagesRef()
-    const beforeLlmCall = options.onBeforeLlmCall?.(currentTools)
-    if (beforeLlmCall) await beforeLlmCall
-    // 与返回 usage 配对，不能把随后追加的 assistant/tool 消息算进本次请求。
-    let requestEstimatedTokens = contextManager.estimateStaticPromptTokens(currentSystemPrompt, currentTools)
-      + contextManager.estimateTotalTokens(messages)
-    const llmStartedAtMs = Date.now()
-    let llmCallMs = 0
-    try {
-      response = await callNonStreaming(adapter, {
-        messages,
+      // Check if context compaction is needed
+      // disableCompaction=true 时整体 bypass（subagent 路径）；详见 EngineOptions 注释。
+      // systemPrompt/tools 在 shouldCompact 之前解析——usage 缺失的估算路径要计入两者。
+      const currentSystemPrompt = typeof options.systemPrompt === 'function'
+        ? (options.systemPrompt as () => string)()
+        : options.systemPrompt
+      const currentTools = typeof options.tools === 'function'
+        ? (options.tools as () => ReadonlyArray<import('./types').ToolDefinition>)()
+        : options.tools
+      if (!options.disableCompaction && contextManager.shouldCompact(messages, {
+        lastObservedContextTokens,
+        messageCountAtObservation,
         systemPrompt: currentSystemPrompt,
-        tools: [...currentTools],
-        model: options.model,
-        maxTokens: options.maxTokens,
-        thinking: options.thinking,
-        signal: abortSignal,
-        configChangedSignal: options.configChangedSignal,
-        configGeneration: options.configGeneration,
-        onConfigChanged,
-        onRequestLifecycle: options.onRequestLifecycle ? (event) => options.onRequestLifecycle!(event, 'inference') : undefined,
-        beforeAttempt: options.drainExternalInputs ? async (requestAdapter, requestModel) => {
-          const protectedIds = new Set<string>()
-          for (;;) {
-            const drained = options.drainExternalInputs!()
-            const inputs = Array.isArray(drained) ? drained : await drained
-            if (inputs.length > 0) sendMessageGuard.reset()
-            for (const text of inputs) {
-              const message = createUserMessage(text)
-              messages.push(message)
-              protectedIds.add(message.id)
-              try { options.onSystemInjection?.({ type: 'external_input', text, turnNumber: totalTurns, injectedAtMs: Date.now() }) }
-              catch { console.warn('[engine] external input observer failed') }
-            }
-            refreshMessagesRef()
-            if (options.disableCompaction || !contextManager.shouldCompact(messages, {
-              lastObservedContextTokens, messageCountAtObservation, systemPrompt: currentSystemPrompt, tools: currentTools,
-            })) break
-            const compacted = await compactInPlace(messages, contextManager, requestAdapter, { ...options, model: requestModel },
-              { systemPrompt: currentSystemPrompt, tools: currentTools, force: true, protectedMessageIds: protectedIds }, abortSignal)
-            if (compacted.batchesApplied > 0) lastObservedContextTokens = undefined
-            refreshMessagesRef()
-            if (!compacted.ok) {
-              if (compacted.aborted) throw new DOMException('Aborted', 'AbortError')
-              throw new CompactionFailedError(`上下文压缩失败：${compacted.failedReason}`)
-            }
-          }
-          requestEstimatedTokens = contextManager.estimateStaticPromptTokens(currentSystemPrompt, currentTools)
-            + contextManager.estimateTotalTokens(messages)
-        } : undefined,
-        onRetry: (event) => {
-          if (options.onLiveProgress) {
-            options.onLiveProgress({
-              type: 'llm_retry',
-              retryMode: event.retryMode,
-              elapsedMs: event.elapsedMs,
-              delayMs: event.delayMs,
-              turn: totalTurns + 1,                  // 即将开始的这一轮
-              attempt: event.attempt,
-              maxAttempts: event.maxAttempts,
-              source: event.source,
-              error: formatError(event.error),
-            })
-          }
-        },
-        onStreamDiagnostic: options.onStreamDiagnostic,
-      })
-      llmCallMs = Date.now() - llmStartedAtMs
-    } catch (error) {
-      if (abortSignal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
-        return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
-      }
-      if (error instanceof CompactionFailedError) {
-        return { ...buildResult('failed', finalText, totalTurns, contextManager, messages,
-          exitToolCall, toolCallCount, wroteMemoryOrScene, error.message), contextRecoveryRequired: true }
-      }
-      const nonEmptyInput = currentSystemPrompt.trim().length > 0 || messages.some((message) =>
-        'content' in message && (typeof message.content === 'string' ? message.content.trim().length > 0 : message.content.length > 0))
-      if (!options.disableCompaction && isContextWindowError(error, nonEmptyInput)) {
-        const compacted = await compactInPlace(messages, contextManager, adapter, options,
-          { systemPrompt: currentSystemPrompt, tools: currentTools, force: true }, abortSignal)
-        if (compacted.batchesApplied > 0) {
+        tools: currentTools,
+      })) {
+        const compaction = await compactInPlace(
+          messages,
+          contextManager,
+          adapter,
+          options,
+          // 至少应用一批；后续 hardCap 判断沿用真实 usage 校准，不能退回偏低的裸估算。
+          { systemPrompt: currentSystemPrompt, tools: currentTools, force: true },
+          abortSignal,
+        )
+        if (compaction.batchesApplied > 0) {
           lastObservedContextTokens = undefined
           refreshMessagesRef()
         }
-        if (compacted.ok && compacted.batchesApplied > 0) {
-          turn-- // 重试尚未成功的模型请求，不重跑此前工具、不消耗新 turn。
-          continue
-        }
-        if (!compacted.ok && compacted.aborted) return buildResult('aborted', finalText, totalTurns,
-          contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
-        return { ...buildResult('failed', finalText, totalTurns,
-          contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene,
-          `上下文压缩失败：${compacted.ok ? '未取得压缩进展' : compacted.failedReason}`), contextRecoveryRequired: true }
-      }
-      console.error('[query-loop] LLM call threw:', error)
-      return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, formatError(error))
-    }
-
-    const processed = partitionResponseContent(response.content)
-    totalTurns++
-    const hasRemainingTurn = turn + 1 < maxTurns
-
-    // Live progress: assistant text arrived (fires before tool execution).
-    // 注意：emit 在 totalTurns++ 之后，turn 数与 onTurn.turnNumber 对齐。
-    if (options.onLiveProgress && processed.text.length > 0) {
-      options.onLiveProgress({
-        type: 'turn_assistant',
-        turn: totalTurns,
-        text: processed.text,
-      })
-    }
-
-    // Update usage tracking
-    if (response.usage) {
-      contextManager.updateFromUsage(response.usage)
-      // 记录全量 prompt 大小供下一轮 shouldCompact 判定（spec 2026-07-21 改动 3）。
-      // 此刻 messages 尚未 push 本轮 assistant 消息，长度正好是本次请求的 prompt 消息数。
-      const observedTokens =
-        response.usage.inputTokens +
-        (response.usage.cacheReadTokens ?? 0) +
-        (response.usage.cacheCreationTokens ?? 0)
-      if (Number.isFinite(observedTokens) && observedTokens > 0) {
-        contextManager.observeContextTokens(observedTokens, requestEstimatedTokens)
-        lastObservedContextTokens = observedTokens
-        messageCountAtObservation = messages.length
-      }
-    }
-
-    // Build assistant message content blocks (preserves reasoning ordering: reasoning → text → tool_use)
-    const contentBlocks = buildAssistantContent(processed.reasoningBlocks, processed.text, processed.toolUseBlocks)
-    const stopReason = normalizeStopReason(response.stopReason)
-
-    const assistantMessage = createAssistantMessage(contentBlocks, stopReason, response.usage)
-    messages.push(assistantMessage)
-
-    // skipReflection 信号累加（spec 2026-06-03 §7.2.1）
-    toolCallCount += processed.toolUseBlocks.length
-    if (!wroteMemoryOrScene) {
-      for (const block of processed.toolUseBlocks) {
-        if (REFLECTION_TRIGGER_TOOLS.has(block.name)) {
-          wroteMemoryOrScene = true
-          break
-        }
-      }
-    }
-
-    const forcedSummaryAttempt = pendingForcedSummaryAttempt
-    pendingForcedSummaryAttempt = undefined
-
-    finalText = processed.text
-
-    const llmResponseEvent: EngineLlmResponseEvent = {
-      responseId: randomUUID(),
-      turnNumber: totalTurns,
-      assistantText: processed.text,
-      stopReason,
-      toolCallsCount: processed.toolUseBlocks.length,
-      llmCallMs,
-      llmStartedAtMs,
-      ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
-      ...(response.usage ? { usage: response.usage } : {}),
-      ...(response.diagnostics ? { diagnostics: response.diagnostics } : {}),
-    }
-    fireOnLlmResponse(llmResponseEvent)
-
-    if (stopReason === null) {
-      fireOnTurn(buildTurnEvent(llmResponseEvent, []))
-      return buildResult(
-        'failed',
-        finalText,
-        totalTurns,
-        contextManager,
-        messages,
-        exitToolCall,
-        toolCallCount,
-        wroteMemoryOrScene,
-        'LLM stream missing terminal stopReason; task was not completed.',
-      )
-    }
-
-    if (stopReason !== 'tool_use') {
-      // end_turn 收口前最后一次 supplement check：防止 LLM end_turn 与 finalize 落盘之间
-      // 的微秒级窗口漏掉人类补充。补充消息自然取代 forced summary，继续下一轮响应。
-      if (hasRemainingTurn && options.humanMessageQueue?.hasPending) {
-        const supplements = options.humanMessageQueue.drainPending()
-        if (supplements.length > 0) sendMessageGuard.reset()
-        for (const content of supplements) {
-          messages.push(createUserMessage(content))
-          options.onSystemInjection?.({
-            type: 'supplement',
-            text: typeof content === 'string' ? content : '[ContentBlock[] supplement]',
-            turnNumber: totalTurns,
-            injectedAtMs: Date.now(),
-          })
-        }
-        continue
-      }
-
-      // --- Stop hook ---
-      if (hooks) {
-        const stopInput: HookInput = { event: 'Stop', workingDirectory }
-        const matching = hooks.registry.getMatching('Stop', stopInput)
-        if (matching.length > 0) {
-          const stopResult = await executeHooks(matching, stopInput, hooks.context)
-          if (stopResult.action === 'block' && stopResult.message) {
-            messages.push(createUserMessage(stopResult.message))
-            options.onSystemInjection?.({
-              type: 'stop_hook',
-              text: stopResult.message,
-              turnNumber: totalTurns,
-              injectedAtMs: Date.now(),
-            })
-            continue
+        if (!compaction.ok) {
+          // 压缩是唯一的下压手段（engine 无 provider 溢出恢复路径）。压不下去还继续跑，
+          // 只会每轮再烧一次注定失败的摘要调用、最终撞窗口——直接以可诊断的原因收尾。
+          if (compaction.aborted) {
+            return finishResult('aborted')
           }
+          return { ...finishResult('failed', `上下文压缩失败：${compaction.failedReason}`), contextRecoveryRequired: true }
         }
       }
 
-      const isSilentText = processed.text.trim().length === 0
-
-      // max_tokens + text='' 单独走 compact-retry 路径。单纯加 FORCED_SUMMARY_PROMPT
-      // 反而让 input 更大；正确做法是丢掉空回复 + 压缩 + 重跑。
-      // 压缩无视 shouldCompact 阈值——max_tokens 已是 context 打满的硬信号，
-      // 保留这条无视阈值的兜底路径（spec 2026-07-21 改动 3 语义不变量）。
-      if (isSilentText && stopReason === 'max_tokens') {
-        // disableCompaction（subagent）路径：没有 compact 这条退路，直接以空 finalText 收尾。
-        // 父 agent 通过 outcome + totalTurns + 空 output 判断要不要拆任务 / 上调 budget。
-        if (!options.disableCompaction && maxTokensCompactRetryCount < MAX_MAX_TOKENS_COMPACT_RETRIES) {
-          maxTokensCompactRetryCount++
-          fireOnTurn(buildTurnEvent(llmResponseEvent, []))
-          messages.pop()
-          const compaction = await compactInPlace(
-            messages,
-            contextManager,
-            adapter,
-            options,
-            { systemPrompt: currentSystemPrompt, tools: currentTools, force: true },
-            abortSignal,
-          )
-          if (compaction.batchesApplied > 0) {
+      // Call LLM (non-streaming by default; streaming infra preserved for rollback
+      // via adapters that opt out of `complete()`).
+      let response: import('./llm-adapter').LLMCallResponse
+      // 快照本轮实际使用的 systemPrompt/tools 给 fork observer（见 EngineMessagesRef 注释）
+      if (messagesRef) {
+        messagesRef.systemPrompt = currentSystemPrompt
+        messagesRef.tools = currentTools
+      }
+      refreshMessagesRef()
+      const beforeLlmCall = options.onBeforeLlmCall?.(currentTools)
+      if (beforeLlmCall) await beforeLlmCall
+      // 与返回 usage 配对，不能把随后追加的 assistant/tool 消息算进本次请求。
+      let requestEstimatedTokens = contextManager.estimateStaticPromptTokens(currentSystemPrompt, currentTools)
+        + contextManager.estimateTotalTokens(messages)
+      const llmStartedAtMs = Date.now()
+      let llmCallMs = 0
+      try {
+        assertToolMessageIntegrity(messages)
+        response = await callNonStreaming(adapter, {
+          messages,
+          systemPrompt: currentSystemPrompt,
+          tools: [...currentTools],
+          model: options.model,
+          maxTokens: options.maxTokens,
+          thinking: options.thinking,
+          signal: abortSignal,
+          configChangedSignal: options.configChangedSignal,
+          configGeneration: options.configGeneration,
+          onConfigChanged,
+          onRequestLifecycle: options.onRequestLifecycle ? (event) => options.onRequestLifecycle!(event, 'inference') : undefined,
+          beforeAttempt: async (requestAdapter, requestModel) => {
+            assertToolMessageIntegrity(messages)
+            if (!options.drainExternalInputs) return
+            const protectedIds = new Set<string>()
+            for (;;) {
+              const drained = options.drainExternalInputs!()
+              const inputs = Array.isArray(drained) ? drained : await drained
+              if (inputs.length > 0) sendMessageGuard.reset()
+              for (const text of inputs) {
+                const message = createUserMessage(text)
+                messages.push(message)
+                protectedIds.add(message.id)
+                try { options.onSystemInjection?.({ type: 'external_input', text, turnNumber: totalTurns, injectedAtMs: Date.now() }) }
+                catch { console.warn('[engine] external input observer failed') }
+              }
+              refreshMessagesRef()
+              if (options.disableCompaction || !contextManager.shouldCompact(messages, {
+                lastObservedContextTokens, messageCountAtObservation, systemPrompt: currentSystemPrompt, tools: currentTools,
+              })) break
+              const compacted = await compactInPlace(messages, contextManager, requestAdapter, { ...options, model: requestModel },
+                { systemPrompt: currentSystemPrompt, tools: currentTools, force: true, protectedMessageIds: protectedIds }, abortSignal)
+              if (compacted.batchesApplied > 0) lastObservedContextTokens = undefined
+              refreshMessagesRef()
+              if (!compacted.ok) {
+                if (compacted.aborted) throw new DOMException('Aborted', 'AbortError')
+                throw new CompactionFailedError(`上下文压缩失败：${compacted.failedReason}`)
+              }
+            }
+            requestEstimatedTokens = contextManager.estimateStaticPromptTokens(currentSystemPrompt, currentTools)
+              + contextManager.estimateTotalTokens(messages)
+            assertToolMessageIntegrity(messages)
+          },
+          onRetry: (event) => {
+            if (options.onLiveProgress) {
+              options.onLiveProgress({
+                type: 'llm_retry',
+                retryMode: event.retryMode,
+                elapsedMs: event.elapsedMs,
+                delayMs: event.delayMs,
+                turn: totalTurns + 1,                  // 即将开始的这一轮
+                attempt: event.attempt,
+                maxAttempts: event.maxAttempts,
+                source: event.source,
+                error: formatError(event.error),
+              })
+            }
+          },
+          onStreamDiagnostic: options.onStreamDiagnostic,
+        })
+        llmCallMs = Date.now() - llmStartedAtMs
+      } catch (error) {
+        if (abortSignal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
+          return finishResult('aborted')
+        }
+        if (error instanceof CompactionFailedError) {
+          return { ...finishResult('failed', error.message), contextRecoveryRequired: true }
+        }
+        const nonEmptyInput = currentSystemPrompt.trim().length > 0 || messages.some((message) =>
+          'content' in message && (typeof message.content === 'string' ? message.content.trim().length > 0 : message.content.length > 0))
+        if (!options.disableCompaction && isContextWindowError(error, nonEmptyInput)) {
+          const compacted = await compactInPlace(messages, contextManager, adapter, options,
+            { systemPrompt: currentSystemPrompt, tools: currentTools, force: true }, abortSignal)
+          if (compacted.batchesApplied > 0) {
             lastObservedContextTokens = undefined
             refreshMessagesRef()
           }
-          if (!compaction.ok) {
-            // max_tokens 已是 context 打满的硬信号，压缩又没压成 —— 再 continue 只是
-            // 拿同样超大的 input 重跑一次。诚实收尾，不把"没压成"当成配额耗尽。
-            if (compaction.aborted) {
-              return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
-            }
-            return { ...buildResult(
-              'failed',
-              finalText,
-              totalTurns,
-              contextManager,
-              messages,
-              exitToolCall,
-              toolCallCount,
-              wroteMemoryOrScene,
-              `上下文超限：上下文压缩失败：${compaction.failedReason}`,
-            ), contextRecoveryRequired: true }
+          if (compacted.ok && compacted.batchesApplied > 0) {
+            turn-- // 重试尚未成功的模型请求，不重跑此前工具、不消耗新 turn。
+            continue
+          }
+          if (!compacted.ok && compacted.aborted) return finishResult('aborted')
+          return { ...finishResult('failed',
+            `上下文压缩失败：${compacted.ok ? '未取得压缩进展' : compacted.failedReason}`), contextRecoveryRequired: true }
+        }
+        console.error('[query-loop] LLM call threw:', error)
+        return finishResult('failed', formatError(error))
+      }
+
+      const processed = partitionResponseContent(response.content)
+      totalTurns++
+      const hasRemainingTurn = turn + 1 < maxTurns
+
+      // Update usage tracking
+      if (response.usage) {
+        contextManager.updateFromUsage(response.usage)
+        // 记录全量 prompt 大小供下一轮 shouldCompact 判定（spec 2026-07-21 改动 3）。
+        // 此刻 messages 尚未 push 本轮 assistant 消息，长度正好是本次请求的 prompt 消息数。
+        const observedTokens =
+          response.usage.inputTokens +
+          (response.usage.cacheReadTokens ?? 0) +
+          (response.usage.cacheCreationTokens ?? 0)
+        if (Number.isFinite(observedTokens) && observedTokens > 0) {
+          contextManager.observeContextTokens(observedTokens, requestEstimatedTokens)
+          lastObservedContextTokens = observedTokens
+          messageCountAtObservation = messages.length
+        }
+      }
+
+      // Build assistant message content blocks (preserves reasoning ordering: reasoning → text → tool_use)
+      const contentBlocks = buildAssistantContent(processed.reasoningBlocks, processed.text, processed.toolUseBlocks)
+      const stopReason = normalizeStopReason(response.stopReason)
+
+      const assistantMessage = createAssistantMessage(contentBlocks, stopReason, response.usage)
+      messages.push(assistantMessage)
+
+      // skipReflection 信号累加（spec 2026-06-03 §7.2.1）
+      toolCallCount += processed.toolUseBlocks.length
+      if (!wroteMemoryOrScene) {
+        for (const block of processed.toolUseBlocks) {
+          if (REFLECTION_TRIGGER_TOOLS.has(block.name)) {
+            wroteMemoryOrScene = true
+            break
+          }
+        }
+      }
+
+      const forcedSummaryAttempt = pendingForcedSummaryAttempt
+      pendingForcedSummaryAttempt = undefined
+
+      finalText = processed.text
+
+      const llmResponseEvent: EngineLlmResponseEvent = {
+        responseId: randomUUID(),
+        turnNumber: totalTurns,
+        assistantText: processed.text,
+        stopReason,
+        toolCallsCount: processed.toolUseBlocks.length,
+        llmCallMs,
+        llmStartedAtMs,
+        ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
+        ...(response.usage ? { usage: response.usage } : {}),
+        ...(response.diagnostics ? { diagnostics: response.diagnostics } : {}),
+      }
+      fireOnLlmResponse(llmResponseEvent)
+      // Validate IDs and existing order before executing any newly emitted call.
+      completeToolUseMessages(messages)
+
+      // Live progress: assistant text arrived (fires before tool execution).
+      // 注意：emit 在 totalTurns++ 之后，turn 数与 onTurn.turnNumber 对齐。
+      if (options.onLiveProgress && processed.text.length > 0) {
+        options.onLiveProgress({
+          type: 'turn_assistant',
+          turn: totalTurns,
+          text: processed.text,
+        })
+      }
+
+      const toolCallIds = new Map(processed.toolUseBlocks.map(block => [block.id, randomUUID()]))
+      const fireUnexecutedTurn = (): void => fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map(block => ({
+        callId: toolCallIds.get(block.id)!, id: block.id, name: block.name, input: block.input,
+        output: '[cancelled: tool was not executed.]', isError: true,
+      }))))
+      if (processed.toolUseBlocks.length > 0 && stopReason !== 'tool_use') {
+        fireUnexecutedTurn()
+        return finishResult('failed', `LLM returned tool calls with incompatible stopReason: ${stopReason}`)
+      }
+
+      if (stopReason === null) {
+        fireOnTurn(buildTurnEvent(llmResponseEvent, []))
+        return finishResult('failed',
+          'LLM stream missing terminal stopReason; task was not completed.')
+      }
+
+      if (stopReason !== 'tool_use') {
+        // end_turn 收口前最后一次 supplement check：防止 LLM end_turn 与 finalize 落盘之间
+        // 的微秒级窗口漏掉人类补充。补充消息自然取代 forced summary，继续下一轮响应。
+        if (hasRemainingTurn && options.humanMessageQueue?.hasPending) {
+          const supplements = options.humanMessageQueue.drainPending()
+          if (supplements.length > 0) sendMessageGuard.reset()
+          for (const content of supplements) {
+            messages.push(createUserMessage(content))
+            options.onSystemInjection?.({
+              type: 'supplement',
+              text: typeof content === 'string' ? content : '[ContentBlock[] supplement]',
+              turnNumber: totalTurns,
+              injectedAtMs: Date.now(),
+            })
           }
           continue
         }
-        // 配额耗尽（或 subagent 禁用了 compact）：input 已被压过两次仍 max_tokens，
-        // 再走 forced-summary 会让 input 更大；此时只能诚实返回空 finalText。
-        return finishTask()
-      }
 
-      // 真静默 end_turn：早 return 路径不 fire onTurn，这里先补 fire 让 trace 看到这一轮。
-      // 但 caller 可通过 suppressForcedSummary 回调表达"silent end_turn 是正常完成态"——
-      // 用于新 unified loop（交付走 send_message 工具、不写 finalText）。
-      if (isSilentText && options.suppressForcedSummary?.() === true) {
+        // --- Stop hook ---
+        if (hooks) {
+          const stopInput: HookInput = { event: 'Stop', workingDirectory }
+          const matching = hooks.registry.getMatching('Stop', stopInput)
+          if (matching.length > 0) {
+            const stopResult = await executeHooks(matching, stopInput, hooks.context)
+            if (stopResult.action === 'block' && stopResult.message) {
+              messages.push(createUserMessage(stopResult.message))
+              options.onSystemInjection?.({
+                type: 'stop_hook',
+                text: stopResult.message,
+                turnNumber: totalTurns,
+                injectedAtMs: Date.now(),
+              })
+              continue
+            }
+          }
+        }
+
+        const isSilentText = processed.text.trim().length === 0
+
+        // max_tokens + text='' 单独走 compact-retry 路径。单纯加 FORCED_SUMMARY_PROMPT
+        // 反而让 input 更大；正确做法是丢掉空回复 + 压缩 + 重跑。
+        // 压缩无视 shouldCompact 阈值——max_tokens 已是 context 打满的硬信号，
+        // 保留这条无视阈值的兜底路径（spec 2026-07-21 改动 3 语义不变量）。
+        if (isSilentText && stopReason === 'max_tokens') {
+          // disableCompaction（subagent）路径：没有 compact 这条退路，直接以空 finalText 收尾。
+          // 父 agent 通过 outcome + totalTurns + 空 output 判断要不要拆任务 / 上调 budget。
+          if (!options.disableCompaction && maxTokensCompactRetryCount < MAX_MAX_TOKENS_COMPACT_RETRIES) {
+            maxTokensCompactRetryCount++
+            fireOnTurn(buildTurnEvent(llmResponseEvent, []))
+            messages.pop()
+            const compaction = await compactInPlace(
+              messages,
+              contextManager,
+              adapter,
+              options,
+              { systemPrompt: currentSystemPrompt, tools: currentTools, force: true },
+              abortSignal,
+            )
+            if (compaction.batchesApplied > 0) {
+              lastObservedContextTokens = undefined
+              refreshMessagesRef()
+            }
+            if (!compaction.ok) {
+              // max_tokens 已是 context 打满的硬信号，压缩又没压成 —— 再 continue 只是
+              // 拿同样超大的 input 重跑一次。诚实收尾，不把"没压成"当成配额耗尽。
+              if (compaction.aborted) {
+                return finishResult('aborted')
+              }
+              return { ...finishResult('failed',
+                `上下文超限：上下文压缩失败：${compaction.failedReason}`), contextRecoveryRequired: true }
+            }
+            continue
+          }
+          // 配额耗尽（或 subagent 禁用了 compact）：input 已被压过两次仍 max_tokens，
+          // 再走 forced-summary 会让 input 更大；此时只能诚实返回空 finalText。
+          return finishTask()
+        }
+
+        // 真静默 end_turn：早 return 路径不 fire onTurn，这里先补 fire 让 trace 看到这一轮。
+        // 但 caller 可通过 suppressForcedSummary 回调表达"silent end_turn 是正常完成态"——
+        // 用于新 unified loop（交付走 send_message 工具、不写 finalText）。
+        if (isSilentText && options.suppressForcedSummary?.() === true) {
+          fireOnTurn(buildTurnEvent(llmResponseEvent, []))
+          if (options.endTurnGate) {
+            const gateResult = await options.endTurnGate()
+            if (typeof gateResult === 'string') {
+              messages.push(createUserMessage(gateResult))
+              options.onSystemInjection?.({
+                type: 'forced_summary',
+                text: gateResult,
+                turnNumber: totalTurns,
+                injectedAtMs: Date.now(),
+              })
+              continue
+            }
+            if (gateResult?.kind === 'fail') {
+              return finishResult('failed', gateResult.reason)
+            }
+          }
+          return finishTask()
+        }
+        if (isSilentText && silentEndTurnCount < MAX_SILENT_END_TURN_RETRIES) {
+          silentEndTurnCount++
+          fireOnTurn(buildTurnEvent(llmResponseEvent, []))
+          messages.push(createUserMessage(FORCED_SUMMARY_PROMPT))
+          options.onSystemInjection?.({
+            type: 'forced_summary',
+            text: FORCED_SUMMARY_PROMPT,
+            turnNumber: totalTurns,
+            injectedAtMs: Date.now(),
+          })
+          pendingForcedSummaryAttempt = silentEndTurnCount
+          continue
+        }
+
+        // 有文字的 end_turn / forced_summary 次数耗尽的静默 end_turn：同样属于"早 return 路径"，
+        // 补 fire 让 trace 看到这一轮（同 suppressForcedSummary 路径的处理逻辑）。
         fireOnTurn(buildTurnEvent(llmResponseEvent, []))
         if (options.endTurnGate) {
           const gateResult = await options.endTurnGate()
@@ -496,331 +545,304 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
             continue
           }
           if (gateResult?.kind === 'fail') {
-            return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, gateResult.reason)
+            return finishResult('failed', gateResult.reason)
           }
         }
-        return finishTask()
-      }
-      if (isSilentText && silentEndTurnCount < MAX_SILENT_END_TURN_RETRIES) {
-        silentEndTurnCount++
-        fireOnTurn(buildTurnEvent(llmResponseEvent, []))
-        messages.push(createUserMessage(FORCED_SUMMARY_PROMPT))
-        options.onSystemInjection?.({
-          type: 'forced_summary',
-          text: FORCED_SUMMARY_PROMPT,
-          turnNumber: totalTurns,
-          injectedAtMs: Date.now(),
-        })
-        pendingForcedSummaryAttempt = silentEndTurnCount
-        continue
-      }
-
-      // 有文字的 end_turn / forced_summary 次数耗尽的静默 end_turn：同样属于"早 return 路径"，
-      // 补 fire 让 trace 看到这一轮（同 suppressForcedSummary 路径的处理逻辑）。
-      fireOnTurn(buildTurnEvent(llmResponseEvent, []))
-      if (options.endTurnGate) {
-        const gateResult = await options.endTurnGate()
-        if (typeof gateResult === 'string') {
-          messages.push(createUserMessage(gateResult))
-          options.onSystemInjection?.({
-            type: 'forced_summary',
-            text: gateResult,
+        if (!isSilentText && stopReason === 'end_turn' && options.assistantTextEndTurnHandler) {
+          const assistantTextResult = await options.assistantTextEndTurnHandler({
+            assistantText: processed.text,
             turnNumber: totalTurns,
-            injectedAtMs: Date.now(),
           })
-          continue
-        }
-        if (gateResult?.kind === 'fail') {
-          return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, gateResult.reason)
-        }
-      }
-      if (!isSilentText && stopReason === 'end_turn' && options.assistantTextEndTurnHandler) {
-        const assistantTextResult = await options.assistantTextEndTurnHandler({
-          assistantText: processed.text,
-          turnNumber: totalTurns,
-        })
-        if (assistantTextResult.kind === 'inject') {
-          messages.push(createUserMessage(assistantTextResult.text))
-          options.onSystemInjection?.({
-            type: 'assistant_text_end_turn',
-            text: assistantTextResult.text,
-            turnNumber: totalTurns,
-            injectedAtMs: Date.now(),
-          })
-          continue
-        }
-        return finishTask()
-      }
-      return finishTask()
-    }
-
-    const toolCallIds = new Map(processed.toolUseBlocks.map((block) => [block.id, randomUUID()]))
-
-    // ── Barrier check: wait for potential supplement before executing tools ──
-    if (options.humanMessageQueue?.hasBarrier) {
-      await options.humanMessageQueue.waitBarrier(abortSignal)
-
-      // Check abort after waiting
-      if (abortSignal?.aborted) {
-        return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
-      }
-
-      // If supplement arrived during wait, cancel tools and inject
-      if (options.humanMessageQueue.hasPending) {
-        const cancelledResults = processed.toolUseBlocks.map(block => ({
-          tool_use_id: block.id,
-          content: '[操作已取消：收到用户实时纠偏，请根据新指示重新决策]',
-          is_error: false,
-        }))
-        messages.push(createBatchToolResultMessage(cancelledResults))
-
-        if (hasRemainingTurn) {
-          const supplements = options.humanMessageQueue.drainPending()
-          if (supplements.length > 0) sendMessageGuard.reset()
-          for (const content of supplements) {
-            messages.push(createUserMessage(content))
+          if (assistantTextResult.kind === 'inject') {
+            messages.push(createUserMessage(assistantTextResult.text))
             options.onSystemInjection?.({
-              type: 'supplement',
-              text: typeof content === 'string' ? content : '[ContentBlock[] supplement]',
+              type: 'assistant_text_end_turn',
+              text: assistantTextResult.text,
               turnNumber: totalTurns,
               injectedAtMs: Date.now(),
             })
+            continue
           }
+          return finishTask()
+        }
+        return finishTask()
+      }
+
+      // ── Barrier check: wait for potential supplement before executing tools ──
+      if (options.humanMessageQueue?.hasBarrier) {
+        await options.humanMessageQueue.waitBarrier(abortSignal)
+
+        // Check abort after waiting
+        if (abortSignal?.aborted) {
+          fireUnexecutedTurn()
+          return finishResult('aborted')
         }
 
-        // Fire onTurn with cancelled tools for trace recording.
-        // Cancelled tools never executed → omit per-tool timing entirely.
-        fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map(b => ({
-            callId: toolCallIds.get(b.id)!,
-            id: b.id,
-            name: b.name,
-            input: b.input,
-            output: '[cancelled by supplement]',
-            isError: false,
-          }))))
+        // If supplement arrived during wait, cancel tools and inject
+        if (options.humanMessageQueue.hasPending) {
+          const cancelledResults = processed.toolUseBlocks.map(block => ({
+            tool_use_id: block.id,
+            content: '[操作已取消：收到用户实时纠偏，请根据新指示重新决策]',
+            is_error: false,
+          }))
+          messages.push(createBatchToolResultMessage(cancelledResults))
 
-        continue  // Skip tool execution, go to next LLM turn
+          if (hasRemainingTurn) {
+            const supplements = options.humanMessageQueue.drainPending()
+            if (supplements.length > 0) sendMessageGuard.reset()
+            for (const content of supplements) {
+              messages.push(createUserMessage(content))
+              options.onSystemInjection?.({
+                type: 'supplement',
+                text: typeof content === 'string' ? content : '[ContentBlock[] supplement]',
+                turnNumber: totalTurns,
+                injectedAtMs: Date.now(),
+              })
+            }
+          }
+
+          // Fire onTurn with cancelled tools for trace recording.
+          // Cancelled tools never executed → omit per-tool timing entirely.
+          fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map(b => ({
+              callId: toolCallIds.get(b.id)!,
+              id: b.id,
+              name: b.name,
+              input: b.input,
+              output: '[cancelled by supplement]',
+              isError: false,
+            }))))
+
+          continue  // Skip tool execution, go to next LLM turn
+        }
+        // else: barrier cleared without supplement → proceed normally
       }
-      // else: barrier cleared without supplement → proceed normally
-    }
 
-    // turnZeroOnly 强制：在 turn 0 之后的轮次，turnZeroOnly 工具调用被拒绝
-    const isAfterTurnZero = totalTurns > 1  // totalTurns=1 表示刚处理完 turn 0 响应
-    if (isAfterTurnZero) {
-      const violatingBlocks = processed.toolUseBlocks
-        .filter(b => currentTools.find(t => t.name === b.name)?.turnZeroOnly === true)
-      const violatingIds = new Set(violatingBlocks.map(b => b.id))
-      const turnZeroViolationMessage = (name: string) =>
-        `[Tool '${name}' is only callable on turn 0; the trigger message has already been processed. If you need to early-exit, you cannot do so anymore—proceed with the task normally.]`
+      // turnZeroOnly 强制：在 turn 0 之后的轮次，turnZeroOnly 工具调用被拒绝
+      const isAfterTurnZero = totalTurns > 1  // totalTurns=1 表示刚处理完 turn 0 响应
+      if (isAfterTurnZero) {
+        const violatingBlocks = processed.toolUseBlocks
+          .filter(b => currentTools.find(t => t.name === b.name)?.turnZeroOnly === true)
+        const violatingIds = new Set(violatingBlocks.map(b => b.id))
+        const turnZeroViolationMessage = (name: string) =>
+          `[Tool '${name}' is only callable on turn 0; the trigger message has already been processed. If you need to early-exit, you cannot do so anymore—proceed with the task normally.]`
 
-      if (violatingBlocks.length > 0) {
-        const violatingResults = processed.toolUseBlocks
-        .map(b => ({
-          tool_use_id: b.id,
-          content: violatingIds.has(b.id)
-            ? turnZeroViolationMessage(b.name)
-            : '[skipped: turnZeroOnly violation in same turn]',
-          is_error: violatingIds.has(b.id),
-        }))
+        if (violatingBlocks.length > 0) {
+          const violatingResults = processed.toolUseBlocks
+          .map(b => ({
+            tool_use_id: b.id,
+            content: violatingIds.has(b.id)
+              ? turnZeroViolationMessage(b.name)
+              : '[skipped: turnZeroOnly violation in same turn]',
+            is_error: violatingIds.has(b.id),
+          }))
 
-        // 本轮只要有 turnZeroOnly 违规，就跳过实际工具执行；但必须为所有
-        // tool_use 补齐 tool_result，否则下一轮重放会触发 LLM API 400。
-        messages.push(createBatchToolResultMessage(violatingResults))
-        // fire onTurn for trace recording
-        fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map(b => ({
-            callId: toolCallIds.get(b.id)!,
-            id: b.id,
-            name: b.name,
-            input: b.input,
-            output: violatingResults.find(r => r.tool_use_id === b.id)?.content ?? '',
-            isError: violatingResults.find(r => r.tool_use_id === b.id)?.is_error ?? false,
-          }))))
-        continue
-      }
-    }
-
-    // exitsLoop 检测：先运行退出前只读校验，拒绝时保留本轮并继续原 loop。
-    // 不调用 call，但仍 push 合成 tool_result，保证 finalMessages / checkpoint
-    // 可被 LLM API 重放（assistant tool_use 不能悬空）。
-    const exitBlocks = processed.toolUseBlocks.filter(b => {
-      const def = currentTools.find(t => t.name === b.name)
-      return def?.exitsLoop === true
-    })
-    const exitBlock = exitBlocks[0]
-    if (exitBlock) {
-      const validationErrors = new Map<string, string>()
-      for (const block of exitBlocks) {
-        const definition = currentTools.find(t => t.name === block.name)!
-        const decision = await checkToolPermission(block.name, block.input as Record<string, unknown>, definition, options.permissionConfig)
-        if (!decision.allowed) {
-          validationErrors.set(block.id, decision.reason)
+          // 本轮只要有 turnZeroOnly 违规，就跳过实际工具执行；但必须为所有
+          // tool_use 补齐 tool_result，否则下一轮重放会触发 LLM API 400。
+          messages.push(createBatchToolResultMessage(violatingResults))
+          // fire onTurn for trace recording
+          fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map(b => ({
+              callId: toolCallIds.get(b.id)!,
+              id: b.id,
+              name: b.name,
+              input: b.input,
+              output: violatingResults.find(r => r.tool_use_id === b.id)?.content ?? '',
+              isError: violatingResults.find(r => r.tool_use_id === b.id)?.is_error ?? false,
+            }))))
           continue
         }
-        const validateExit = definition.validateExit
-        if (!validateExit) continue
-        try {
-          const error = await validateExit(block.input as Record<string, unknown>, processed.toolUseBlocks.length)
-          if (error !== undefined) validationErrors.set(block.id, error)
-        } catch (error) {
-          validationErrors.set(block.id, `Exit validation failed: ${error instanceof Error ? error.message : String(error)}`)
-        }
-        if (abortSignal?.aborted) break
       }
-      const validationAborted = abortSignal?.aborted === true
-      const exitToolResultById = new Map<string, { content: string; isError: boolean }>(processed.toolUseBlocks.map(b => {
-        if (validationAborted) return [b.id, { content: '[aborted: exit validation cancelled]', isError: true }] as const
-        if (validationErrors.size) return [b.id, {
-          content: validationErrors.get(b.id) ?? '[skipped: exit validation failed in same turn]', isError: true,
-        }] as const
+
+      // exitsLoop 检测：先运行退出前只读校验，拒绝时保留本轮并继续原 loop。
+      // 不调用 call，但仍 push 合成 tool_result，保证 finalMessages / checkpoint
+      // 可被 LLM API 重放（assistant tool_use 不能悬空）。
+      const exitBlocks = processed.toolUseBlocks.filter(b => {
         const def = currentTools.find(t => t.name === b.name)
-        const content = def?.exitsLoop === true ? '[exit_tool]' : '[skipped: exitsLoop tool selected]'
-        return [b.id, { content, isError: def?.exitsLoop !== true }] as const
-      }))
-      messages.push(createBatchToolResultMessage(processed.toolUseBlocks.map(b => {
-        const r = exitToolResultById.get(b.id)
-        return {
-          tool_use_id: b.id,
-          content: r?.content ?? '[skipped: exitsLoop tool selected]',
-          is_error: r?.isError ?? false,
+        return def?.exitsLoop === true
+      })
+      const exitBlock = exitBlocks[0]
+      if (exitBlock) {
+        const validationErrors = new Map<string, string>()
+        for (const block of exitBlocks) {
+          const definition = currentTools.find(t => t.name === block.name)!
+          const decision = await checkToolPermission(block.name, block.input as Record<string, unknown>, definition, options.permissionConfig)
+          if (!decision.allowed) {
+            validationErrors.set(block.id, decision.reason)
+            continue
+          }
+          const validateExit = definition.validateExit
+          if (!validateExit) continue
+          try {
+            const error = await validateExit(block.input as Record<string, unknown>, processed.toolUseBlocks.length)
+            if (error !== undefined) validationErrors.set(block.id, error)
+          } catch (error) {
+            validationErrors.set(block.id, `Exit validation failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+          if (abortSignal?.aborted) break
         }
-      })))
-      // Fire onTurn for trace recording after all same-turn tool_use blocks have results.
-      fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map(b => {
+        const validationAborted = abortSignal?.aborted === true
+        const exitToolResultById = new Map<string, { content: string; isError: boolean }>(processed.toolUseBlocks.map(b => {
+          if (validationAborted) return [b.id, { content: '[aborted: exit validation cancelled]', isError: true }] as const
+          if (validationErrors.size) return [b.id, {
+            content: validationErrors.get(b.id) ?? '[skipped: exit validation failed in same turn]', isError: true,
+          }] as const
+          const def = currentTools.find(t => t.name === b.name)
+          const content = def?.exitsLoop === true ? '[exit_tool]' : '[skipped: exitsLoop tool selected]'
+          return [b.id, { content, isError: def?.exitsLoop !== true }] as const
+        }))
+        messages.push(createBatchToolResultMessage(processed.toolUseBlocks.map(b => {
           const r = exitToolResultById.get(b.id)
           return {
+            tool_use_id: b.id,
+            content: r?.content ?? '[skipped: exitsLoop tool selected]',
+            is_error: r?.isError ?? false,
+          }
+        })))
+        // Fire onTurn for trace recording after all same-turn tool_use blocks have results.
+        fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map(b => {
+            const r = exitToolResultById.get(b.id)
+            return {
+              callId: toolCallIds.get(b.id)!,
+              id: b.id,
+              name: b.name,
+              input: b.input,
+              output: r?.content ?? '[skipped: exitsLoop tool selected]',
+              isError: r?.isError ?? false,
+            }
+          })))
+        if (validationAborted) {
+          return finishResult('aborted')
+        }
+        if (validationErrors.size) continue
+        exitToolCall = { name: exitBlock.name, input: exitBlock.input as Record<string, unknown> }
+        return finishTask()
+      }
+
+      // Execute tools
+      const batches = partitionToolCalls(processed.toolUseBlocks, currentTools)
+      // Live progress: tools about to start
+      if (options.onLiveProgress) {
+        options.onLiveProgress({
+          type: 'tools_start',
+          tools: processed.toolUseBlocks.map(b => ({
+            name: b.name,
+            input_summary: summarizeToolInput(b.input),
+          })),
+        })
+      }
+      const toolResults = await executeToolBatches(batches, currentTools, {
+        abortSignal,
+        unavailableToolResult: options.unavailableToolResult,
+        ...(options.timezone ? { timezone: options.timezone } : {}),
+        ...(options.hasPendingExternalInputs ? { hasPendingExternalInput: options.hasPendingExternalInputs } : {}),
+      }, options.permissionConfig, hooks, {
+        responseId: llmResponseEvent.responseId,
+        turnNumber: totalTurns,
+        callIds: toolCallIds,
+        onToolResult: result => completedTools.set(result.tool_use_id, result),
+        onToolLifecycle: event => {
+          if (event.type === 'tool_started') startedTools.add(event.toolUseId)
+          options.onToolLifecycle?.(event)
+        },
+      }, sendMessageGuard)
+      // Live progress: tools finished
+      if (options.onLiveProgress) {
+        options.onLiveProgress({
+          type: 'tools_end',
+          results: processed.toolUseBlocks.map((b, i) => ({
+            name: b.name,
+            input_summary: summarizeToolInput(b.input),
+            is_error: toolResults[i]?.is_error ?? false,
+          })),
+        })
+      }
+
+      // Process images based on model capability
+      let processedResults: typeof toolResults
+      if (options.supportsVision) {
+        // VLM: compress images (resize + JPEG) then pass through
+        const imageReads = new Set(processed.toolUseBlocks.filter(block => block.name === 'fetch_image').map(block => block.id))
+        processedResults = await Promise.all(toolResults.map(async result => imageReads.has(result.tool_use_id)
+          ? result : (await compressToolResultImages([result]))[0]))
+      } else {
+        // LLM: save images to temp files, replace with text description
+        processedResults = toolResults.map((r) => {
+          if (!r.images?.length) return r
+
+          const descriptions: string[] = [r.content]
+          for (let i = 0; i < r.images.length; i++) {
+            const img = r.images[i]
+            const filename = `screenshot-${Date.now()}-${i}.png`
+            const filePath = `/tmp/${filename}`
+            fs.writeFileSync(filePath, Buffer.from(img.data, 'base64'))
+            descriptions.push(`[Image saved to ${filePath}] Use Bash tool to analyze with OCR if needed.`)
+          }
+          return { ...r, content: descriptions.join('\n'), images: undefined }
+        })
+      }
+
+      // Add tool results as a single batched message
+      messages.push(createBatchToolResultMessage(processedResults))
+
+      // Fire onTurn only after tool_result is in messages. Checkpoint/resume and
+      // progress observers treat onTurn as the clean turn boundary, so every
+      // assistant tool_use must already have matching toolResults here.
+      fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map((b, i) => {
+          const r = toolResults[i]
+          const tc: EngineTurnEvent['toolCalls'][number] = {
             callId: toolCallIds.get(b.id)!,
             id: b.id,
             name: b.name,
             input: b.input,
-            output: r?.content ?? '[skipped: exitsLoop tool selected]',
-            isError: r?.isError ?? false,
+            ...(r?.traceMetadata !== undefined ? { traceMetadata: r.traceMetadata } : {}),
+            output: r?.content ?? '',
+            isError: r?.is_error ?? false,
+            ...(r?.duration_ms !== undefined ? { durationMs: r.duration_ms } : {}),
+            ...(r?.started_at_ms !== undefined ? { startedAtMs: r.started_at_ms } : {}),
           }
+          return tc
         })))
-      if (validationAborted) {
-        return buildResult('aborted', finalText, totalTurns, contextManager, messages, undefined, toolCallCount, wroteMemoryOrScene)
+
+      // ── Post-tool barrier check ──
+      // 工具可能在执行中 setBarrier（如 send_message(intent='ask_human')）。
+      // 若 barrier 已设，等待人类回复后再进入下一轮 LLM；
+      // pending push 会自动 clearBarrier；wait 结束后 drain pending 注入为新 user message。
+      //
+      // 注意：这里不做 abort check——先让下方 drainPending 把 supplement 注入 messages，
+      // 再由下一轮 LLM call（callNonStreaming）响应 abortSignal。
+      // 这样即使 abort 和 supplement 同时到达，supplement 也不会被 abort 路径吞掉。
+      // （pre-tool barrier check 因为需要取消工具执行，必须先 check abort；这里无此需要。）
+      if (options.humanMessageQueue?.hasBarrier) {
+        await options.humanMessageQueue.waitBarrier(abortSignal)
       }
-      if (validationErrors.size) continue
-      exitToolCall = { name: exitBlock.name, input: exitBlock.input as Record<string, unknown> }
-      return finishTask()
-    }
 
-    // Execute tools
-    const batches = partitionToolCalls(processed.toolUseBlocks, currentTools)
-    // Live progress: tools about to start
-    if (options.onLiveProgress) {
-      options.onLiveProgress({
-        type: 'tools_start',
-        tools: processed.toolUseBlocks.map(b => ({
-          name: b.name,
-          input_summary: summarizeToolInput(b.input),
-        })),
-      })
-    }
-    const toolResults = await executeToolBatches(batches, currentTools, {
-      abortSignal,
-      unavailableToolResult: options.unavailableToolResult,
-      ...(options.timezone ? { timezone: options.timezone } : {}),
-      ...(options.hasPendingExternalInputs ? { hasPendingExternalInput: options.hasPendingExternalInputs } : {}),
-    }, options.permissionConfig, hooks, {
-      responseId: llmResponseEvent.responseId,
-      turnNumber: totalTurns,
-      callIds: toolCallIds,
-      onToolLifecycle: options.onToolLifecycle,
-    }, sendMessageGuard)
-    // Live progress: tools finished
-    if (options.onLiveProgress) {
-      options.onLiveProgress({
-        type: 'tools_end',
-        results: processed.toolUseBlocks.map((b, i) => ({
-          name: b.name,
-          input_summary: summarizeToolInput(b.input),
-          is_error: toolResults[i]?.is_error ?? false,
-        })),
-      })
-    }
-
-    // Process images based on model capability
-    let processedResults: typeof toolResults
-    if (options.supportsVision) {
-      // VLM: compress images (resize + JPEG) then pass through
-      const imageReads = new Set(processed.toolUseBlocks.filter(block => block.name === 'fetch_image').map(block => block.id))
-      processedResults = await Promise.all(toolResults.map(async result => imageReads.has(result.tool_use_id)
-        ? result : (await compressToolResultImages([result]))[0]))
-    } else {
-      // LLM: save images to temp files, replace with text description
-      processedResults = toolResults.map((r) => {
-        if (!r.images?.length) return r
-
-        const descriptions: string[] = [r.content]
-        for (let i = 0; i < r.images.length; i++) {
-          const img = r.images[i]
-          const filename = `screenshot-${Date.now()}-${i}.png`
-          const filePath = `/tmp/${filename}`
-          fs.writeFileSync(filePath, Buffer.from(img.data, 'base64'))
-          descriptions.push(`[Image saved to ${filePath}] Use Bash tool to analyze with OCR if needed.`)
+      // Inject any pending human supplement messages.
+      if (hasRemainingTurn && options.humanMessageQueue) {
+        const supplements = options.humanMessageQueue.drainPending()
+        if (supplements.length > 0) sendMessageGuard.reset()
+        for (const content of supplements) {
+          messages.push(createUserMessage(content))
+          options.onSystemInjection?.({
+            type: 'supplement',
+            text: typeof content === 'string' ? content : '[ContentBlock[] supplement]',
+            turnNumber: totalTurns,
+            injectedAtMs: Date.now(),
+          })
         }
-        return { ...r, content: descriptions.join('\n'), images: undefined }
-      })
-    }
+      }
 
-    // Add tool results as a single batched message
-    messages.push(createBatchToolResultMessage(processedResults))
-
-    // Fire onTurn only after tool_result is in messages. Checkpoint/resume and
-    // progress observers treat onTurn as the clean turn boundary, so every
-    // assistant tool_use must already have matching toolResults here.
-    fireOnTurn(buildTurnEvent(llmResponseEvent, processed.toolUseBlocks.map((b, i) => {
-        const r = toolResults[i]
-        const tc: EngineTurnEvent['toolCalls'][number] = {
-          callId: toolCallIds.get(b.id)!,
-          id: b.id,
-          name: b.name,
-          input: b.input,
-          ...(r?.traceMetadata !== undefined ? { traceMetadata: r.traceMetadata } : {}),
-          output: r?.content ?? '',
-          isError: r?.is_error ?? false,
-          ...(r?.duration_ms !== undefined ? { durationMs: r.duration_ms } : {}),
-          ...(r?.started_at_ms !== undefined ? { startedAtMs: r.started_at_ms } : {}),
-        }
-        return tc
-      })))
-
-    // ── Post-tool barrier check ──
-    // 工具可能在执行中 setBarrier（如 send_message(intent='ask_human')）。
-    // 若 barrier 已设，等待人类回复后再进入下一轮 LLM；
-    // pending push 会自动 clearBarrier；wait 结束后 drain pending 注入为新 user message。
-    //
-    // 注意：这里不做 abort check——先让下方 drainPending 把 supplement 注入 messages，
-    // 再由下一轮 LLM call（callNonStreaming）响应 abortSignal。
-    // 这样即使 abort 和 supplement 同时到达，supplement 也不会被 abort 路径吞掉。
-    // （pre-tool barrier check 因为需要取消工具执行，必须先 check abort；这里无此需要。）
-    if (options.humanMessageQueue?.hasBarrier) {
-      await options.humanMessageQueue.waitBarrier(abortSignal)
-    }
-
-    // Inject any pending human supplement messages.
-    if (hasRemainingTurn && options.humanMessageQueue) {
-      const supplements = options.humanMessageQueue.drainPending()
-      if (supplements.length > 0) sendMessageGuard.reset()
-      for (const content of supplements) {
-        messages.push(createUserMessage(content))
-        options.onSystemInjection?.({
-          type: 'supplement',
-          text: typeof content === 'string' ? content : '[ContentBlock[] supplement]',
-          turnNumber: totalTurns,
-          injectedAtMs: Date.now(),
-        })
+      // Prune old images — keep only the most recent N screenshots
+      if (options.supportsVision) {
+        pruneOldImages(messages)
       }
     }
 
-    // Prune old images — keep only the most recent N screenshots
-    if (options.supportsVision) {
-      pruneOldImages(messages)
-    }
+    // Loop exhausted
+    return finishResult('max_turns')
+  } finally {
+    // Also close on thrown host/checkpoint errors, preserving their recovery path.
+    closeToolCalls()
+    refreshMessagesRef()
   }
-
-  // Loop exhausted
-  return buildResult('max_turns', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
 }
 
 // --- Helpers ---

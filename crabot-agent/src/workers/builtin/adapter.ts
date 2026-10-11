@@ -1,3 +1,4 @@
+import { assertToolMessageIntegrity } from '../../engine/tool-message-integrity.js'
 import { authorizeTool, roleAuthorization } from '../../permissions/tool-authorization.js'
 /**
  * BuiltinWorkerAdapter — worker 契约的 builtin 实现（P1：spawn + burst 状态机 + sendInput/resume）。
@@ -1460,6 +1461,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     initialCount: number,
     compacted: boolean,
   ): Promise<void> {
+    assertToolMessageIntegrity(result.finalMessages)
     if (compacted) {
       let parent: string | null = null
       for (const msg of result.finalMessages as EngineMessage[]) {

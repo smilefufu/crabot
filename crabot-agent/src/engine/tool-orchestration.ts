@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
-import type { EngineToolLifecycleEvent, ToolDefinition, ToolCallContext, ToolPermissionConfig, ToolTraceMetadata } from './types'
+import type { EngineToolLifecycleEvent, ToolDefinition, ToolCallContext, ToolPermissionConfig, ToolTraceMetadata, ToolCallResult } from './types'
 import { findTool, type ToolBatch } from './tool-framework'
 import { checkToolPermission } from './permission-checker'
 import type { HookExecutorContext } from '../hooks/types'
@@ -28,6 +28,8 @@ export interface ToolLifecycleContext {
   readonly turnNumber: number
   readonly callIds: ReadonlyMap<string, string>
   readonly onToolLifecycle?: (event: EngineToolLifecycleEvent) => void
+  /** Internal result receipt, before fallible post-processing or turn callbacks. */
+  readonly onToolResult?: (result: ToolResultEntry) => void
 }
 
 /** Per Engine execution; snapshot raw inputs before repair/hooks can mutate them. */
@@ -85,6 +87,11 @@ async function executeSingleTool(
   lifecycle?: ToolLifecycleContext,
   sendMessageGuard?: SendMessageGuard,
 ): Promise<ToolResultEntry> {
+  if (context.abortSignal?.aborted) {
+    const cancelled = { tool_use_id: block.id, content: stampToolResult('[cancelled: tool was not executed.]', context.timezone ?? resolveTimezone(undefined)), is_error: true }
+    lifecycle?.onToolResult?.(cancelled)
+    return cancelled
+  }
   // Observe synchronously so parallel completion order cannot change adjacency.
   const duplicateSend = sendMessageGuard?.observe(block.name, block.input) ?? false
   const startedAtMs = Date.now()
@@ -121,6 +128,7 @@ async function executeSingleTool(
       started_at_ms: startedAtMs,
       duration_ms: endedAtMs - startedAtMs,
     }
+    lifecycle?.onToolResult?.(stamped)
     if (callId !== undefined && lifecycle !== undefined) {
       observe({
         type: 'tool_finished',
@@ -210,8 +218,13 @@ async function executeSingleTool(
     throw error
   }
 
+  let returned: ToolCallResult | undefined
   try {
+    if (context.abortSignal?.aborted) {
+      return finish({ tool_use_id: block.id, content: stamp('[cancelled: tool was not executed.]'), is_error: true })
+    }
     const result = await tool.call(effectiveInput, { ...context, toolCallId: callId })
+    returned = result
 
     // --- PostToolUse hook ---
     let finalContent = result.output
@@ -246,7 +259,15 @@ async function executeSingleTool(
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return finish({ tool_use_id: block.id, content: stamp(`Tool execution error: ${message}`), is_error: true })
+    if (returned) {
+      return finish({ tool_use_id: block.id,
+        content: stamp(capToolOutput(`${returned.output}\n\n[PostToolUse failed after tool returned: ${message}. Do not automatically replay this call.]`)),
+        images: returned.images, traceMetadata: returned.traceMetadata, is_error: true })
+    }
+    const failure = context.abortSignal?.aborted
+      ? `[interrupted/unknown: tool execution was cancelled; side effects are unknown. Do not automatically replay this call.] ${message}`
+      : `Tool execution error: ${message}`
+    return finish({ tool_use_id: block.id, content: stamp(failure), is_error: true })
   }
 }
 
@@ -265,11 +286,15 @@ async function executeParallelBatch(
   // Process in chunks of MAX_CONCURRENT
   for (let i = 0; i < blocks.length; i += MAX_CONCURRENT) {
     const chunk = blocks.slice(i, i + MAX_CONCURRENT)
-    const chunkResults = await Promise.all(
+    const chunkResults = await Promise.allSettled(
       chunk.map((block) => executeSingleTool(block, tools, context, permissionConfig, hooks, lifecycle, sendMessageGuard))
     )
+    // Wait for already-started peers before failing the batch; their outputs are authoritative.
+    const failed = chunkResults.find(result => result.status === 'rejected')
+    if (failed?.status === 'rejected') throw failed.reason
     for (let j = 0; j < chunkResults.length; j++) {
-      results[i + j] = chunkResults[j]
+      const result = chunkResults[j]
+      if (result.status === 'fulfilled') results[i + j] = result.value
     }
   }
 
