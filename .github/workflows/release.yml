@@ -55,7 +55,7 @@ jobs:
           # 其他模块并行 install（pnpm store 缓存共享，并发安全）
           pids=()
           for mod in crabot-core crabot-agent \
-                     crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk \
+                     crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-voice \
                      crabot-mcp-tools crabot-admin; do
             if [ -d "$mod" ]; then
               (cd "$mod" && pnpm install) &
@@ -69,7 +69,7 @@ jobs:
         run: |
           pids=()
           for mod in crabot-core crabot-agent \
-                     crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk \
+                     crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-voice \
                      crabot-mcp-tools; do
             if [ -d "$mod" ]; then
               (cd "$mod" && pnpm run build) &
@@ -113,7 +113,7 @@ jobs:
           (rm -rf node_modules && pnpm install "${prod_flags[@]}") &
           pids+=($!)
           for mod in crabot-core crabot-agent \
-                     crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk \
+                     crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-voice \
                      crabot-mcp-tools crabot-admin; do
             if [ -d "$mod" ]; then
               (cd "$mod" && rm -rf node_modules && pnpm install "${prod_flags[@]}") &
@@ -177,7 +177,7 @@ jobs:
 
           # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
           for mod in crabot-shared crabot-core crabot-agent \
-                     crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk \
+                     crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-voice \
                      crabot-mcp-tools; do
             if [ -d "$mod" ]; then
               rsync -aH "${COMMON_EXCLUDES[@]}" \
@@ -249,7 +249,7 @@ jobs:
 
           # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
           $tsModules = @('crabot-shared','crabot-admin','crabot-core','crabot-agent',
-                         'crabot-channel-telegram','crabot-channel-wechat','crabot-channel-feishu','crabot-channel-dingtalk',
+                         'crabot-channel-telegram','crabot-channel-wechat','crabot-channel-feishu','crabot-channel-dingtalk','crabot-channel-voice',
                          'crabot-mcp-tools')
           foreach ($mod in $tsModules) {
             if (Test-Path $mod) {

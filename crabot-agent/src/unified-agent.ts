@@ -1,3 +1,5 @@
+import { VoiceInbox } from './manager/voice-inbox.js'
+import type { VoiceTurnAuthorizedPayload, VoiceTurnResult } from 'crabot-shared'
 import { executionObservation, requestObservation, persistObservation, observationFile, readObservation } from './permissions/execution-observation.js'
 import { assertExecutionPolicy, executionAdmission } from './workers/execution-policy.js'
 import { authorizeTool, roleAuthorization, entryAuthorization, fileAuthorization, assertAuthorizedTools } from './permissions/tool-authorization.js'
@@ -795,6 +797,9 @@ export class UnifiedAgent extends ModuleBase {
    * 未装配时读端点 fail-fast 报错，不返回空结果——空结果会被 admin 误读成"没有 worker"。
    */
   private managerStack?: ManagerStack
+  private readonly voiceInbox = new VoiceInbox(path.join(getAgentDataDir(), 'voice-inbox'))
+  private readonly voiceDrains = new Map<string, Promise<void>>()
+  private voiceRetryTimer?: ReturnType<typeof setInterval>
   private activationRegistry!: ActivationRegistry
   private workerOperationStore!: WorkerOperationStore
   private userLevelInstaller!: UserLevelInstaller
@@ -1762,6 +1767,10 @@ export class UnifiedAgent extends ModuleBase {
         this.scheduleRuntimeConfigPull()
         break
 
+      case 'channel.voice_turn_authorized':
+        await this.handleVoiceTurn(event.payload as VoiceTurnAuthorizedPayload)
+        break
+
       case 'channel.message_authorized':
         await this.handleMessageReceived(event.payload as { message: ChannelMessage; friend: Friend; crab_display_name?: string; crab_self_handle?: string })
         break
@@ -2035,6 +2044,68 @@ export class UnifiedAgent extends ModuleBase {
    * 群聊消息走注意力调度，其余直接处理。
    * @see protocol-agent-v2.md §5.1 SwitchMap, §5.2 Attention Scheduler
    */
+  private async confirmVoiceInbox(record: import('./manager/voice-inbox.js').VoiceInboxRecord): Promise<void> {
+    if (record.confirmed) return
+    const port = await this.getAdminPort()
+    const result = await this.rpcClient.callSensitive<unknown, VoiceTurnResult>(port, 'confirm_voice_turn', {
+      channel_id: record.channel_id, turn_id: record.turn_id, payload_sha256: record.payload_sha256,
+    }, this.config.moduleId, { authorizationBearer: ConfigLoader.getRuntimeBearer() })
+    if (result.status !== 'accepted') throw new Error('Admin did not confirm the durable voice batch')
+    this.voiceInbox.confirm(record)
+  }
+
+  private async handleVoiceTurn(payload: VoiceTurnAuthorizedPayload): Promise<void> {
+    this.assertRuntimeExecutionAdmission()
+    const record = this.voiceInbox.accept(payload)
+    // The core acknowledgement proves Admin owns this full digest; publishing alone cannot execute it.
+    await this.confirmVoiceInbox(record)
+    void this.drainVoiceInbox().catch(() => console.warn('[Agent] Voice batch remains durable; Manager admission will retry'))
+  }
+
+  private async reconcileVoiceHandoffs(): Promise<void> {
+    for (const record of this.voiceInbox.pending()) {
+      if (record.phase !== 'accepted' || !record.payload) continue
+      const payload = record.payload
+      const checkpoint = await this.requireManagerStack().store.loadCheckpoint(`${payload.channel_id}::${payload.session_id}` as import('./manager/types.js').ManagerKey)
+      const ids = new Set(checkpoint ? [...checkpoint.envelopes, ...checkpoint.pending].flatMap(e => e.wake.kind === 'human_messages' || e.wake.kind === 'attention_flush' ? e.wake.messages.map(m => m.platform_message_id) : []) : [])
+      if (payload.messages.every(m => ids.has(m.message.platform_message_id))) this.voiceInbox.managed(record)
+    }
+  }
+
+  private async drainVoiceInbox(): Promise<void> {
+    this.assertRuntimeExecutionAdmission()
+    const channels = new Set(this.voiceInbox.pending().map(record => record.channel_id))
+    for (const channelId of channels) {
+      if (this.voiceDrains.has(channelId)) continue
+      const drain = Promise.resolve().then(async () => {
+        await this.reconcileVoiceHandoffs()
+        for (const record of this.voiceInbox.pending().filter(r => r.channel_id === channelId)) {
+          await this.confirmVoiceInbox(record)
+          if (record.phase === 'managed' || !record.payload) continue
+          const payload = record.payload
+          const context = this.voiceInbox.context(record)
+          let queued!: () => void
+          const handedOff = new Promise<void>(resolve => { queued = resolve })
+          const outcome = this.requireManagerStack().registry.routeHumanMessages(
+            payload.channel_id, payload.session_id,
+            payload.messages.map(m => m.message as unknown as ChannelMessage),
+            payload.messages.at(-1)?.friend,
+            undefined,
+            { onDurableQueued: () => { this.voiceInbox.managed(record); queued() } },
+            undefined,
+            { turnId: payload.turn_id, senderFriends: payload.messages.map(m => m.friend), ...(context ? { replyContext: context } : {}) },
+          )
+          // Release ingress after the durable mailbox/history checkpoint, before the LLM finishes.
+          await Promise.race([handedOff, outcome.then(() => { if (record.phase !== 'managed') throw new Error('Manager did not durably admit the voice batch') })])
+          void outcome.catch(() => console.warn('[Agent] Voice Manager episode failed after durable handoff; its normal recovery owns the text'))
+        }
+      })
+      this.voiceDrains.set(channelId, drain)
+      void drain.finally(() => this.voiceDrains.delete(channelId)).catch(() => {})
+    }
+    await Promise.all(this.voiceDrains.values())
+  }
+
   private async handleMessageReceived(payload: { message: ChannelMessage; friend: Friend; crab_display_name?: string; crab_self_handle?: string }): Promise<void> {
     // Runtime admission happens before any message metadata is cached or any downstream
     // routing/reply side effect is attempted.
@@ -5440,6 +5511,8 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   protected override async onStart(): Promise<void> {
+    this.voiceInbox.load()
+    await this.reconcileVoiceHandoffs()
     await retireWorkerSupervision(getAgentDataDir())
     await this.scheduleScriptRunner.recover()
     try {
@@ -5556,6 +5629,11 @@ export class UnifiedAgent extends ModuleBase {
     void reconcileManagerStack(stack)
       .then((report) => {
         continuationStartupReady = true
+        if (this.runtimeClosing) return
+        void this.drainVoiceInbox().catch(() => console.warn('[Agent] Durable voice inbox awaits runtime admission'))
+        if (!this.voiceRetryTimer) this.voiceRetryTimer = setInterval(() => {
+          if (this.voiceInbox.pending().length) void this.drainVoiceInbox().catch(() => {})
+        }, 5000)
         // 空台账（现网常态）不打日志，避免每次启动都刷一行没有信息量的 0/0/0。
         if (report.revived.length === 0 && report.failed.length === 0) return
         console.log(
@@ -5603,6 +5681,8 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    if (this.voiceRetryTimer) clearInterval(this.voiceRetryTimer)
+    this.voiceRetryTimer = undefined
     this.runtimeClosing = true
     await this.scheduleScriptRunner.stop()
     this.stopCliSubagentHarvestScheduler()

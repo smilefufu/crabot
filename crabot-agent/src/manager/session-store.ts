@@ -149,7 +149,7 @@ export class ManagerSessionStore {
   saveCheckpoint(checkpoint: ManagerResumeCheckpoint): void {
     const target = join(this.dirFor(checkpoint.state.key), CHECKPOINT_FILE)
     const temporary = `${target}.${randomUUID()}.tmp`
-    const durableEnvelope = ({ activity_context_receipt: _receipt, ...envelope }: TimedWakeEnvelope): TimedWakeEnvelope => envelope
+    const durableEnvelope = ({ activity_context_receipt: _receipt, voice_reply_context: _voice, ...envelope }: TimedWakeEnvelope): TimedWakeEnvelope => envelope
     try {
       writeFileSync(temporary, JSON.stringify({
         ...checkpoint,

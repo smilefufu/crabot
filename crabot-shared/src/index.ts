@@ -118,3 +118,11 @@ export * from './media-fetch/index.js'
 export { INSTANCE_ID_REGEX, validateInstanceId, type InstanceIdResult } from './instance-id.js'
 
 export type { ImageQuality, FetchImageParams, FetchImageResult } from './image-fetch.js'
+
+export * from './voice.js'
+export * from './channel-protocol.js'
+export { VOICE_MAX_SAMPLES, assertVoiceUuid, validateVoiceSegments, parseVoiceClientControl, validateSubmitVoiceTurn, encodeVoiceFrame, VoiceInputBuffer } from './voice-wire.js'
+export { pcm16Wave, speechWaveToPcm, transcribeAudio, synthesizeAudio } from './audio-client.js'
+export { voiceSessionId } from './voice-wire.js'
+export { VOICE_MODEL_VERSIONS } from './voice-models.js'
+export { testAudioService } from './audio-client.js'

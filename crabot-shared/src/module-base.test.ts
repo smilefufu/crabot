@@ -14,6 +14,8 @@ import {
 import { MEMORY_DATA_RPC_METHODS } from './memory-access.js'
 
 const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
+  'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'confirm_voice_turn',
+  'verify_voice_runtime', 'register_voice_runtime', 'voice_admin_action', 'verify_voice_admin', 'sync_voice_terminal',
   'verify_memory_access',
   'get_agent_config',
   'resolve_worker_connection',
@@ -32,6 +34,34 @@ const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
   'verify_worker_implementation',
   'cancel_worker_implementation_operation',
 ]
+
+test('RPC wall deadline destroys a stalled partial response instead of leaving playback pending', async () => {
+  let closed = false
+  const server = http.createServer((req, res) => {
+    req.resume()
+    res.on('close', () => { closed = true })
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{"success":')
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const port = (server.address() as { port: number }).port
+    await assert.rejects(new RpcClient().call(port, 'send_message', {}, 'voice-probe', undefined, { timeoutMs: 80 }), /timed out/)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.equal(closed, true)
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
+})
+
+test('interrupted RPC bodies fail promptly even without an explicit call deadline', async () => {
+  const server = http.createServer((req, res) => {
+    req.resume(); res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{"success":')
+    setTimeout(() => res.destroy(), 20)
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const port = (server.address() as { port: number }).port
+    await assert.rejects(new RpcClient().call(port, 'send_message', {}, 'voice-probe'), /interrupted|aborted|reset/i)
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
+})
 
 test('Memory data closure requires sensitive transport only with host context', async () => {
   const client = new RpcClient()

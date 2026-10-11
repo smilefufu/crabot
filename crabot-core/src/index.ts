@@ -142,6 +142,8 @@ export class ModuleManager {
     this.registerMethod('register', this.handleRegisterUnauthenticated.bind(this))
     this.registerMethod('register_core_agent', this.handleRegisterCoreAgent.bind(this))
     this.registerMethod('verify_core_agent_runtime', this.handleVerifyCoreAgentRuntime.bind(this))
+    this.registerMethod('verify_voice_runtime', this.handleVerifyVoiceRuntime.bind(this))
+    this.registerMethod('register_voice_runtime', this.handleRegisterVoiceRuntime.bind(this))
     this.registerMethod('complete_core_agent_cutover', this.handleCompleteCoreAgentCutover.bind(this))
     this.registerMethod('get_core_agent_cutover_record', this.handleGetCoreAgentCutoverRecord.bind(this))
 
@@ -444,6 +446,38 @@ export class ModuleManager {
     return { verified: true }
   }
 
+  private isVoiceModule(moduleId: ModuleId): boolean {
+    const runtime = this.modules.get(moduleId)
+    return runtime?.module_type === 'channel' && runtime.env?.CRABOT_CHANNEL_IMPLEMENTATION_ID === 'channel-voice'
+  }
+
+  private handleVerifyVoiceRuntime(
+    params: { expected_module_id: ModuleId },
+    context?: RpcHandlerContext,
+  ): { verified: true } {
+    const moduleId = params?.expected_module_id
+    if (typeof moduleId !== 'string' || !this.isVoiceModule(moduleId) || !context?.authorizationBearer) {
+      throw Object.assign(new Error('Missing voice runtime credential'), { code: 'UNAUTHORIZED' })
+    }
+    const record = this.runtimeBearers.get(moduleId)
+    if (!record || record.revoked || record.child.exitCode !== null) {
+      throw Object.assign(new Error('Voice runtime credential revoked'), { code: 'FORBIDDEN' })
+    }
+    const a = Buffer.from(record.token); const b = Buffer.from(context.authorizationBearer)
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      throw Object.assign(new Error('Invalid voice runtime credential'), { code: 'FORBIDDEN' })
+    }
+    return { verified: true }
+  }
+
+  private async handleRegisterVoiceRuntime(params: RegisterParams, context?: RpcHandlerContext): Promise<{ registered: true }> {
+    this.handleVerifyVoiceRuntime({ expected_module_id: params.module_id }, context)
+    if (!this.processes.has(params.module_id)) {
+      throw Object.assign(new Error('Voice registration requires the exact spawned child'), { code: 'FORBIDDEN' })
+    }
+    return this.handleRegister(params, false, true)
+  }
+
   private handleGetCoreAgentCutoverRecord(): { record: NonNullable<ModuleManager['cutoverRecord']> } {
     if (!this.cutoverRecord) {
       throw Object.assign(new Error('Core Agent cutover record not found'), { code: 'NOT_FOUND' })
@@ -554,9 +588,12 @@ export class ModuleManager {
     return this.handleRegister(params, true)
   }
 
-  private async handleRegister(params: RegisterParams, coreAuthenticated = false): Promise<{ registered: true }> {
+  private async handleRegister(params: RegisterParams, coreAuthenticated = false, voiceAuthenticated = false): Promise<{ registered: true }> {
     this.assertManagementOnlyAllowed(params.module_id)
     const runtime = this.modules.get(params.module_id)
+    if (this.isVoiceModule(params.module_id) && !voiceAuthenticated) {
+      throw Object.assign(new Error('Voice registration requires runtime authentication'), { code: 'UNAUTHORIZED' })
+    }
 
     if (runtime?.module_type === 'agent' && params.module_id !== 'crabot-agent') {
       throw Object.assign(new Error('Only builtin crabot-agent may register'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
@@ -1170,11 +1207,13 @@ export class ModuleManager {
       ...(adminRpcPort && moduleId !== 'admin-web' ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` } : {}),
       ...(moduleId === 'admin-web' ? { CRABOT_ADMIN_STARTUP_MODE: 'core-agent-cutover', CRABOT_ADMIN_CUTOVER_BEARER: (() => { const token = crypto.randomBytes(32).toString('base64url'); (runtime as ModuleRuntime & { _pendingCutover?: { token: string; child: ChildProcess; revoked: boolean } })._pendingCutover = { token, child: undefined as unknown as ChildProcess, revoked: false }; return token })() } : {}),
     }
-    // Only the exact core Agent receives a per-child runtime credential.
-    if (moduleId === 'crabot-agent') {
+    delete childEnv.CRABOT_VOICE_RUNTIME_BEARER
+    // Runtime credentials bind only the exact core Agent or voice child.
+    if (moduleId === 'crabot-agent' || this.isVoiceModule(moduleId)) {
       const token = crypto.randomBytes(32).toString('base64url')
       const bearer = { token, child: undefined as unknown as ChildProcess, revoked: false }
-      childEnv.CRABOT_CORE_AGENT_RUNTIME_BEARER = token
+      delete childEnv.CRABOT_CORE_AGENT_RUNTIME_BEARER
+      childEnv[moduleId === 'crabot-agent' ? 'CRABOT_CORE_AGENT_RUNTIME_BEARER' : 'CRABOT_VOICE_RUNTIME_BEARER'] = token
       // bound to the exact child immediately after spawn below
       ;(runtime as ModuleRuntime & { _pendingBearer?: typeof bearer })._pendingBearer = bearer
     } else {

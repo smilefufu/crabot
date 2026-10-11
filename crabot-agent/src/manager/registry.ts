@@ -85,8 +85,15 @@ interface IdleReviewTimer {
   readonly handle: ReturnType<typeof setTimeout>
 }
 
+export interface VoiceHumanWakeContext {
+  readonly turnId: string
+  readonly senderFriends: ReadonlyArray<Friend>
+  readonly replyContext?: import('crabot-shared').VoiceReplyContext
+}
+
 export interface HumanInputCallbacks {
   readonly onInitialInputCommitted?: () => void
+  readonly onDurableQueued?: () => void
   readonly onLlmResponse?: (lastMessageId: string) => Promise<void>
 }
 
@@ -224,6 +231,7 @@ export interface ManagerRegistryDeps {
     /** 当前 episode 的 trace、发送后复核与交付证据桥（registry 惰性桥接到 loops 实例）。 */
     traceHooks?: {
       currentTraceId: () => string | undefined
+      voiceReplyContext?: () => import('crabot-shared').VoiceReplyContext | undefined
       onWorkerSpawned: (workerId: string) => void
       onPostSendAction: () => void
       hasSuccessfulSendMessageTo: (target: { channel_id: string; session_id: string }) => boolean
@@ -420,6 +428,7 @@ export class ManagerRegistry {
           principalPermissionsOf(wakeEvent),
           {
             currentTraceId: () => this.loops.get(key)?.currentEpisodeTraceId,
+            voiceReplyContext: () => this.loops.get(key)?.voiceReplyContext,
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
             onPostSendAction: () => this.loops.get(key)?.recordPostSendAction(),
             hasSuccessfulSendMessageTo: (target) => this.loops.get(key)?.hasSuccessfulSendMessageTo(target) ?? false,
@@ -484,9 +493,10 @@ export class ManagerRegistry {
     /** 消息被注入在跑 episode 时(PR #131),处理结果的结算委托给该 episode 的真实
      * 收尾 result——调用方以此补跑 fail-loud,不用注入分支立即返回的占位值。 */
     onEpisodeSettled?: (result: EpisodeResult) => void,
+    voiceContext?: VoiceHumanWakeContext,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation, humanInputCallbacks, onEpisodeSettled)
+    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation, humanInputCallbacks, onEpisodeSettled, voiceContext)
   }
 
   /**
@@ -527,20 +537,22 @@ export class ManagerRegistry {
     correlation?: import('./loop.js').ManagerWakeCorrelation,
     humanInputCallbacks?: HumanInputCallbacks,
     onEpisodeSettled?: (result: EpisodeResult) => void,
+    voiceContext?: VoiceHumanWakeContext,
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
     // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
     // 与 `handleMessageReceived` 的默认分流一致。
     const sessionType = messages[0]?.session.type === 'group' ? 'group' : 'private'
     const principal: HumanPrincipal = { ...(friend ? { friend } : {}), sessionType }
+    const withSenderFriends = voiceContext ? { senderFriends: voiceContext.senderFriends } : {}
     const initialWake: WakeEvent = kind === 'human_messages'
-      ? { kind: 'human_messages', messages, ...(friend ? { friend } : {}) }
-      : { kind: 'attention_flush', messages, ...(friend ? { friend } : {}) }
+      ? { kind: 'human_messages', messages, ...(friend ? { friend } : {}), ...withSenderFriends }
+      : { kind: 'attention_flush', messages, ...(friend ? { friend } : {}), ...withSenderFriends }
     this.noteExternalInput(key, initialWake)
     const finishPreparation = this.beginWakePreparation(key)
     try {
       // Capture before principal lookup so queueing cannot rewrite ingress time.
-      const envelope = this.makeEnvelope(capture, initialWake, undefined, messages, correlation)
+      const envelope = { ...this.makeEnvelope(capture, initialWake, undefined, messages, correlation), ...(voiceContext ? { voice_turn_id: voiceContext.turnId } : {}), ...(voiceContext?.replyContext ? { voice_reply_context: voiceContext.replyContext } : {}) }
       // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
       let principalPermissions: ResolvedPermissions | undefined
       if (this.deps.onHumanWake) {
@@ -556,8 +568,8 @@ export class ManagerRegistry {
       const withPerms = principalPermissions ? { principalPermissions } : {}
       const event: WakeEvent =
         kind === 'human_messages'
-          ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
-          : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
+          ? { kind: 'human_messages', messages, ...withFriend, ...withPerms, ...withSenderFriends }
+          : { kind: 'attention_flush', messages, ...withFriend, ...withPerms, ...withSenderFriends }
       if (this.pendingResumes.has(key) || this.resumeTasks.has(key)) {
         await this.resumeBeforeWake(key, { ...envelope, wake: event })
       }
@@ -572,6 +584,7 @@ export class ManagerRegistry {
         // 同步入队(check 与 push 之间无 await,与 routeWorkerEvent 同构原子):
         // 提交延后到当前 episode 收尾临界区,由 settle hook 拿真实处理结果。
         loop.enqueueHumanWakeDuringActiveEpisode({ ...envelope, wake: event }, humanInputCallbacks?.onLlmResponse, onEpisodeSettled)
+        humanInputCallbacks?.onDurableQueued?.()
         return {
           episodeId: '',
           outcome: 'completed',
@@ -1058,7 +1071,7 @@ export class ManagerRegistry {
       } else if (envelope === undefined) {
         result = await loop.drainMailbox()
       } else if (humanInputCallbacks) {
-        result = await loop.wakeUp(envelope, humanInputCallbacks.onLlmResponse, humanInputCallbacks.onInitialInputCommitted)
+        result = await loop.wakeUp(envelope, humanInputCallbacks.onLlmResponse, humanInputCallbacks.onInitialInputCommitted, humanInputCallbacks.onDurableQueued)
       } else {
         result = await loop.wakeUp(envelope)
       }

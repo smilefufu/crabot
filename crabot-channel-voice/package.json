@@ -1,0 +1,11 @@
+{
+  "name": "crabot-channel-voice",
+  "version": "0.1.0",
+  "description": "Crabot paired foreground voice terminals",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": { "build": "tsc", "start": "node dist/main.js", "test": "vitest run" },
+  "license": "Apache-2.0",
+  "dependencies": { "@peculiar/x509": "1.14.2", "crabot-shared": "file:../crabot-shared", "reflect-metadata": "0.2.2", "ws": "8.18.3" },
+  "devDependencies": { "@types/node": "^22.0.0", "@types/ws": "8.18.1", "typescript": "~5.8.0", "vitest": "1.6.1" }
+}

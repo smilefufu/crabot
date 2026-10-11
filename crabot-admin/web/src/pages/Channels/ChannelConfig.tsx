@@ -12,6 +12,7 @@ import type {
   JsonSchemaProperty,
 } from '../../types'
 import { useToast } from '../../contexts/ToastContext'
+import { VoiceConfigCard } from './VoiceConfigCard'
 
 const CHANNEL_ONBOARDING_STORAGE_KEY = 'crabot:channel-onboarding-dismissed:v1'
 
@@ -579,7 +580,7 @@ export const ChannelConfig: React.FC = () => {
         {error && <div className="error-message">{error}</div>}
 
         <ChannelOnboardingCallout
-          visible={!onboardingDismissed && instances.length > 0}
+          visible={!onboardingDismissed && instances.some(instance => instance.implementation_id !== 'channel-voice')}
           onDismiss={dismissOnboarding}
         />
 
@@ -719,7 +720,9 @@ export const ChannelConfig: React.FC = () => {
                   {/* Config Panel */}
                   {isSelected && (
                     <div className="channel-config-panel">
-                      {configLoading ? (
+                      {instance.implementation_id === 'channel-voice' ? (
+                        <VoiceConfigCard key={instance.id} channelId={instance.id} running={isRunning} />
+                      ) : configLoading ? (
                         <Loading />
                       ) : isRunning && editingConfig ? (
                         <>
